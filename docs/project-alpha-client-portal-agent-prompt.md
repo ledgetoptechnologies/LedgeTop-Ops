@@ -46,14 +46,16 @@ contract details. If that exact commit or those exact fixture bytes are
 unavailable, stop and request them rather than reading another worktree or
 inventing a divergent contract.
 
-Project Alpha remains authoritative for organizations, departments, clients,
-projects, portal authorization intent, the Service Library, pricing policy,
-quotes/contracts/invoices/tax/payment, and all financial communication. LTDS
-remains authoritative for verified Cloudflare identities, portal enrollment,
-local guest membership, service-request drafts/submissions, Mapbox geometry,
-request attachments, delivery folder bindings/files/shares, notifications, and
-LTDS authorization audit. Do not add a Project Alpha client-facing login or
-reuse PA public project links/entity links as LTDS authorization.
+This handoff's earlier PA-owned directory proposal is superseded by the approved
+API-first architecture in `docs/operations/api-first-decisions-2026-09-10.md`
+and `docs/client-portal-v2-architecture.md`. Operations owns shared customer
+records, project mappings, portal membership, and access decisions. Project
+Alpha remains generic and owns its financial records, Service Library/pricing
+policy, and issued public financial links. PA counterparts are explicitly
+mapped by stable IDs and synchronized with version/idempotency checks; do not
+infer identity by matching names or email. Do not add a PA client-facing login,
+use a PA public link as Operations authorization, or change an existing public
+link through synchronization.
 
 Implement this as additive, default-off, independently gated capabilities:
 

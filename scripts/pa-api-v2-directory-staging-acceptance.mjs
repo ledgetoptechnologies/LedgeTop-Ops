@@ -18,6 +18,13 @@ const MAX_MIN_REQUEST_INTERVAL_MS = 60_000;
 const MAX_RATE_LIMIT_RETRIES = 4;
 const MAX_RETRY_AFTER_MS = 30_000;
 const RETRY_BACKOFF_MS = 1000;
+const CAPABILITY_NAME = /^[a-z][a-z0-9._-]{1,95}$/;
+const ENDPOINT_PATH = /^\/api\/v2\/[A-Za-z0-9/_.{}-]+$/;
+const ENDPOINT_FIELDS = new Set([
+  "method", "path", "requiredCapability", "requiresSourceInstanceId", "requiresApplicationId",
+  "requiresUpdatePublicId", "requiresHistoryEpoch", "requiresExpectedPublicId",
+  "requiresExpectedRevision", "requiresExpectedProfileSha256",
+]);
 
 export class DirectoryAcceptanceError extends Error {
   constructor(code) { super(code); this.code = code; }
@@ -58,14 +65,20 @@ function phpEmail(value) {
     && labels.at(-1).length > 0 && labels.at(-1).length <= 63 && finalDomainLabel.test(labels.at(-1));
 }
 
-const route = (method, path, requiredCapability) => Object.freeze({ method, path, requiredCapability, requiresSourceInstanceId: true, requiresApplicationId: true, requiresHistoryEpoch: true });
+const route = (method, path, requiredCapability, additionalRequirements = {}) => Object.freeze({
+  method, path, requiredCapability,
+  requiresSourceInstanceId: true,
+  requiresApplicationId: true,
+  requiresHistoryEpoch: true,
+  ...additionalRequirements,
+});
 export const DIRECTORY_ROUTES = Object.freeze([
   route("GET", "/api/v2/directory/clients/{publicId}", "directory.clients.read"),
   route("GET", "/api/v2/directory/organizations/{publicId}", "directory.organizations.read"),
   route("GET", "/api/v2/bindings/client/status/{base64urlExternalId}", "directory.clients.binding_status.read"),
   route("GET", "/api/v2/bindings/organization/status/{base64urlExternalId}", "directory.organizations.binding_status.read"),
-  route("POST", "/api/v2/directory/clients/bindings/commands", "directory.clients.bind"),
-  route("POST", "/api/v2/directory/organizations/bindings/commands", "directory.organizations.bind"),
+  route("POST", "/api/v2/directory/clients/bindings/commands", "directory.clients.bind", { requiresExpectedPublicId: true, requiresExpectedRevision: true }),
+  route("POST", "/api/v2/directory/organizations/bindings/commands", "directory.organizations.bind", { requiresExpectedPublicId: true, requiresExpectedRevision: true }),
   route("POST", "/api/v2/directory/clients/bindings/revisions/commands", "directory.clients.binding.revision.refresh"),
   route("POST", "/api/v2/directory/organizations/bindings/revisions/commands", "directory.organizations.binding.revision.refresh"),
   route("POST", "/api/v2/directory/organizations/{publicId}/profile/commands", "directory.organizations.write"),
@@ -187,7 +200,7 @@ function commandBody(path, body) {
   if (path.includes("/profile/")) keys = ["commandId", "expectedRevision", "expectedAuthorizationGeneration", "profile"];
   else if (path.includes("/bindings/revisions/")) keys = ["commandId", "externalId", "expectedPriorRevision", "expectedLiveRevision", "expectedAuthorizationGeneration"];
   else if (path.includes("/bindings/revoke/")) keys = ["commandId", "externalId", "expectedPublicId", "expectedRevision", "expectedAuthorizationGeneration"];
-  else if (path.includes("/bindings/commands")) keys = ["commandId", "externalId", "expectedPublicId", "expectedRevision"];
+  else if (path.includes("/bindings/commands")) keys = ["commandId", "externalId", "expectedPublicId", "expectedRevision", "expectedAuthorizationGeneration"];
   else if (path.includes("/organization/") && path.includes("/commands")) keys = ["commandId", "expectedClientRevision", "expectedAuthorizationGeneration", "expectedCurrentOrganizationPublicId", "organization"];
   else if (path.includes("/archive/") || path.includes("/restore/")) keys = ["commandId", "expectedRevision", "expectedAuthorizationGeneration"];
   else if (path.endsWith("/organizations/commands")) keys = ["commandId", "externalId", "expectedAuthorizationGeneration", "profile"];
@@ -278,11 +291,43 @@ function identity(payload, config, versioned = false) {
   if (!object(payload) || payload.sourceInstanceId !== config.identity.sourceInstanceId || payload.applicationId !== config.identity.applicationId || payload.historyEpoch !== config.identity.historyEpoch || !UUID.test(payload.requestId || "") || (versioned && payload.apiVersion !== "2")) fail("identity_contract_mismatch");
 }
 const summary = (result) => ({ status: result.status, requestId: result.requestId });
+function validEndpointDescriptor(endpoint) {
+  return object(endpoint) && Object.keys(endpoint).every((key) => ENDPOINT_FIELDS.has(key))
+    && ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD"].includes(endpoint.method)
+    && typeof endpoint.path === "string" && endpoint.path.length <= 256 && ENDPOINT_PATH.test(endpoint.path)
+    && !endpoint.path.split("/").some((segment) => segment === "." || segment === "..")
+    && typeof endpoint.requiredCapability === "string" && CAPABILITY_NAME.test(endpoint.requiredCapability)
+    && Object.entries(endpoint).every(([key, value]) => !key.startsWith("requires") || typeof value === "boolean");
+}
 function capabilityContract(payload, config) {
   identity(payload, config, true);
-  const scopes = ["api.capabilities.read", ...DIRECTORY_ROUTES.map((value) => value.requiredCapability)];
-  const endpoints = [{ method: "GET", path: "/api/v2/capabilities", requiredCapability: "api.capabilities.read" }, ...DIRECTORY_ROUTES];
-  if (!ordered(payload, ["apiVersion", "sourceInstanceId", "applicationId", "historyEpoch", "requestId", "grantedCapabilities", "implementedEndpoints"]) || !equal(payload.grantedCapabilities, scopes.map((name) => ({ name }))) || !equal(payload.implementedEndpoints, endpoints)) fail("directory_capabilities_contract_mismatch");
+  if (!ordered(payload, ["apiVersion", "sourceInstanceId", "applicationId", "historyEpoch", "requestId", "grantedCapabilities", "implementedEndpoints"])
+    || !Array.isArray(payload.grantedCapabilities) || !Array.isArray(payload.implementedEndpoints))
+    fail("directory_capabilities_contract_mismatch");
+  const scopeNames = payload.grantedCapabilities.map((capability) => capability?.name);
+  const endpointKeys = payload.implementedEndpoints.map((endpoint) => `${endpoint?.method} ${endpoint?.path}`);
+  if (new Set(scopeNames).size !== scopeNames.length || new Set(endpointKeys).size !== endpointKeys.length
+    || payload.grantedCapabilities.some((capability) => !ordered(capability, ["name"]) || !CAPABILITY_NAME.test(capability.name))
+    || payload.implementedEndpoints.some((endpoint) => !validEndpointDescriptor(endpoint)))
+    fail("directory_capabilities_contract_mismatch");
+  const scopes = new Set(scopeNames), endpoints = new Map(payload.implementedEndpoints.map((endpoint) => [`${endpoint.method} ${endpoint.path}`, endpoint]));
+  const capabilitiesEndpoint = endpoints.get("GET /api/v2/capabilities");
+  if (!capabilitiesEndpoint || !equal(capabilitiesEndpoint,
+    { method: "GET", path: "/api/v2/capabilities", requiredCapability: "api.capabilities.read" })
+    || !scopes.has("api.capabilities.read")
+    || payload.implementedEndpoints.some((endpoint) => !scopes.has(endpoint.requiredCapability))
+    || [...scopes].some((scope) => !payload.implementedEndpoints.some((endpoint) => endpoint.requiredCapability === scope)))
+    fail("directory_capabilities_contract_mismatch");
+  const requiredKeys = new Set(DIRECTORY_ROUTES.map((endpoint) => `${endpoint.method} ${endpoint.path}`));
+  const requiredScopes = new Set(DIRECTORY_ROUTES.map((endpoint) => endpoint.requiredCapability));
+  if (payload.implementedEndpoints.some((endpoint) => (endpoint.path.startsWith("/api/v2/directory/")
+      || endpoint.path.startsWith("/api/v2/bindings/")) && !requiredKeys.has(`${endpoint.method} ${endpoint.path}`))
+    || [...scopes].some((scope) => scope.startsWith("directory.") && !requiredScopes.has(scope)))
+    fail("directory_capabilities_contract_mismatch");
+  for (const requiredRoute of DIRECTORY_ROUTES) {
+    if (!equal(endpoints.get(`${requiredRoute.method} ${requiredRoute.path}`), requiredRoute)
+      || !scopes.has(requiredRoute.requiredCapability)) fail("directory_capabilities_contract_mismatch");
+  }
 }
 function mutate(command, kind) {
   const altered = clone(command);
@@ -313,8 +358,8 @@ function receipt(payload, config, type, kind, command, meta) {
     return { revision: result.resource.revision, generation: result.authorizationGeneration, replayed: payload.replayed };
   }
   if (kind === "bind") {
-    if (!ordered(result, ["resource", "binding"]) || !ordered(result.resource, ["type", "id", "revision"]) || !ordered(result.binding, ["publicId"]) || result.resource.type !== type || result.resource.id !== command.externalId || result.resource.revision !== command.expectedRevision || result.binding.publicId !== command.expectedPublicId) fail("binding_receipt_contract_mismatch");
-    return { replayed: payload.replayed };
+    if (!ordered(result, ["resource", "binding", "authorizationGeneration"]) || !ordered(result.resource, ["type", "id", "revision"]) || !ordered(result.binding, ["publicId"]) || result.resource.type !== type || result.resource.id !== command.externalId || result.resource.revision !== command.expectedRevision || result.binding.publicId !== command.expectedPublicId || !authorizationGeneration(result.authorizationGeneration) || result.authorizationGeneration !== plusOne(meta.priorGeneration)) fail("binding_receipt_contract_mismatch");
+    return { generation: result.authorizationGeneration, replayed: payload.replayed };
   }
   if (kind === "refresh") {
     if (!ordered(result, ["resource", "binding"]) || !ordered(result.resource, ["type", "id", "revision"]) || !ordered(result.binding, ["publicId", "previousRevision", "authorizationGeneration"]) || result.resource.type !== type || result.resource.id !== command.externalId || result.resource.revision !== command.expectedLiveRevision || result.binding.publicId !== meta.publicId || result.binding.previousRevision !== command.expectedPriorRevision || !authorizationGeneration(result.binding.authorizationGeneration) || command.expectedLiveRevision !== plusOne(meta.priorRevision) || result.binding.authorizationGeneration !== plusOne(meta.priorGeneration)) fail("refresh_receipt_contract_mismatch");
@@ -454,7 +499,7 @@ export async function runDirectoryAcceptance(config, { fetcher = fetch, uuid = r
   const noAutoRebind = await status(fetcher, config, "client", client, 410); report.stages.lifecycleBinding = { tombstone, noAutoRebind };
   await read(fetcher, config, "client", client, clientProfile, null, report, "clientReadAfterRestore"); generation = client.generation;
   const rebindPriorGeneration = generation;
-  await replay(fetcher, config, "/api/v2/directory/clients/bindings/commands", "client", "bind", { commandId: commandId(), externalId: client.externalId, expectedPublicId: client.publicId, expectedRevision: client.revision }, report, { stage: "clientBindingRebind", priorGeneration: rebindPriorGeneration }); report.stages.clientBindingRebound = await status(fetcher, config, "client", client, 200, { revision: client.revision, generation: plusOne(rebindPriorGeneration) }); generation = client.generation;
+  outcome = await replay(fetcher, config, "/api/v2/directory/clients/bindings/commands", "client", "bind", { commandId: commandId(), externalId: client.externalId, expectedPublicId: client.publicId, expectedRevision: client.revision, expectedAuthorizationGeneration: rebindPriorGeneration }, report, { stage: "clientBindingRebind", priorGeneration: rebindPriorGeneration }); report.stages.clientBindingRebound = await status(fetcher, config, "client", client, 200, { revision: client.revision, generation: outcome.generation }); generation = client.generation;
   await inventory(fetcher, config, [organization, moveOrganization, client], report);
   recordRateLimitEvidence(config, report);
   return report;

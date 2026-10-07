@@ -108,7 +108,7 @@ async function candidate(db: D1Database, settlementId: string): Promise<Candidat
     FROM project_alpha_project_v2_canonical_settlement_receipts settlement
     JOIN project_alpha_project_v2_canonical_intents intent ON intent.command_id=settlement.command_id
     JOIN project_alpha_project_outbox outbox ON outbox.command_id=settlement.command_id
-    LEFT JOIN native_project_live_command_proofs proof ON proof.command_id=settlement.command_id
+    LEFT JOIN project_alpha_project_v2_live_settlement_proofs proof ON proof.command_id=settlement.command_id
       AND proof.external_project_id=settlement.external_project_id
       AND proof.grant_generation=intent.expected_grant_generation
       AND proof.verified_until>strftime('%Y-%m-%dT%H:%M:%fZ','now')

@@ -428,13 +428,14 @@ test("the deployed Client Worker keeps reviewed resources, hosts, and portal ass
 
 test("the deployed Operations Worker keeps catalog and inactive binding transport private and default-off", () => {
   // Newly mounted PA adoption and binding-refresh routes remain disabled in production by default.
-  assert.equal(normalizedSha256("apps/operations/wrangler.jsonc"), "5536e6da990b08fb35a7b209abc64ee2a74fc6fe02b0177644953b8c7fedd93d");
+  assert.equal(normalizedSha256("apps/operations/wrangler.jsonc"), "73fd37281d388f709bbe9014a413ebebfa1f7961de952a5f9a69f49deb113b16");
   const config = readJson("apps/operations/wrangler.jsonc");
-  for (const flag of ["PROJECT_ALPHA_API_V2_SYNC_ENABLED", "PROJECT_ALPHA_DIRECTORY_EXACT_ADOPTION_ENABLED"]) {
+  for (const flag of ["PROJECT_ALPHA_API_V2_SYNC_ENABLED", "PROJECT_ALPHA_DIRECTORY_EXACT_ADOPTION_ENABLED", "PROJECT_ALPHA_PROJECT_V2_RECOVERY_ENABLED"]) {
     assert.equal([...read("apps/operations/wrangler.jsonc").matchAll(new RegExp(`"${flag}"\\s*:`, "g"))].length, 1);
   }
   assert.equal(config.vars.PROJECT_ALPHA_API_V2_SYNC_ENABLED, "false");
   assert.equal(config.vars.PROJECT_ALPHA_DIRECTORY_EXACT_ADOPTION_ENABLED, "false");
+  assert.equal(config.vars.PROJECT_ALPHA_PROJECT_V2_RECOVERY_ENABLED, "false");
   assert.equal(config.vars.CLIENT_PORTAL_NATIVE_RECIPIENT_SERVICE_HOME_ENABLED, "false");
   assert.equal(config.services?.find(service => service.binding === "OPERATIONS_PORTAL_NATIVE_DELIVERY_AUTHORITY"), undefined);
   assert.equal(config.vars.VERIFIED_RECIPIENT_DELIVERY_AUTHORITY_DISPATCH_ENABLED, "false");

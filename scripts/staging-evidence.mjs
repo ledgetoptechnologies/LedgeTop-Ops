@@ -17,7 +17,7 @@ const apps = ["delivery", "operations", "ops-sync"];
 const CURRENT_FRESH_BOOTSTRAP_SCHEMA_VERSION = 2;
 const CURRENT_FRESH_BOOTSTRAP_APPLICATIONS = Object.freeze({
   delivery: Object.freeze({ source: "client", databaseName: BOOTSTRAP_APPS.delivery.databaseName, configPath: "apps/client/wrangler.staging.bootstrap.json", manifestPath: "apps/client/.staging-bootstrap/manifest.json", seed: "0002_seed_initial_staff.sql", ledgerCount: BOOTSTRAP_APPS.delivery.migrationCount, finalMigration: "0228_operations_portal_native_content_start_audit.sql" }),
-  operations: Object.freeze({ source: "operations", databaseName: BOOTSTRAP_APPS.operations.databaseName, configPath: "apps/operations/wrangler.staging.bootstrap.json", manifestPath: "apps/operations/.staging-bootstrap/manifest.json", seed: "0002_seed_acl.sql", ledgerCount: BOOTSTRAP_APPS.operations.migrationCount, finalMigration: "0171_project_alpha_active_directory_update_guard.sql" }),
+  operations: Object.freeze({ source: "operations", databaseName: BOOTSTRAP_APPS.operations.databaseName, configPath: "apps/operations/wrangler.staging.bootstrap.json", manifestPath: "apps/operations/.staging-bootstrap/manifest.json", seed: "0002_seed_acl.sql", ledgerCount: BOOTSTRAP_APPS.operations.migrationCount, finalMigration: "0180_project_alpha_project_v2_recovery_authorization.sql" }),
 });
 const DISPOSABLE_RUN_ID = /^[a-z0-9](?:[a-z0-9-]{1,18}[a-z0-9])$/;
 const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
@@ -205,6 +205,113 @@ export function validateEvidence(evidence, options = {}) {
   if (projectAlpha.releaseCommit !== PROJECT_ALPHA_STAGING.releaseCommit || projectAlpha.sourceCommitVerified !== true || !populated(projectAlpha.remoteRef)) errors.push("Project Alpha deployment must pin and verify the reviewed source commit");
   if (!sha256Digest(projectAlpha.webImageDigest) || !sha256Digest(projectAlpha.cronImageDigest) || projectAlpha.imagesShareSourceCommit !== true) errors.push("Project Alpha web and cron images must have immutable digests from the reviewed commit");
   if (!recentDate(projectAlpha.deployedAt, now) || !populated(projectAlpha.deploymentEvidenceRef)) errors.push("Project Alpha deployment evidence must be current and referenced");
+  const joinedAcceptance = projectAlpha.joinedOpsProjectV2Acceptance ?? {};
+  const firstProjectRun = joinedAcceptance.exactReplay?.first, replayProjectRun = joinedAcceptance.exactReplay?.replay;
+  const firstProjectOutcome = firstProjectRun?.outcome, replayProjectOutcome = replayProjectRun?.outcome;
+  const publicBefore = joinedAcceptance.publicLink?.before, publicAfter = joinedAcceptance.publicLink?.after;
+  const projectAcceptancePassed = joinedAcceptance.status === "passed" && joinedAcceptance.schemaVersion === 1
+    && joinedAcceptance.inputBinding?.schemaVersion === 1 && sha256Hex(joinedAcceptance.inputBinding?.sha256)
+    && joinedAcceptance.inputBinding?.valuesExcluded === true && joinedAcceptance.mutationsPerformed === true
+    && joinedAcceptance.command?.operation === "create" && populated(joinedAcceptance.command?.commandId)
+    && populated(joinedAcceptance.command?.externalProjectId)
+    && firstProjectRun?.stage === "activate" && firstProjectOutcome?.status === "activated"
+    && firstProjectOutcome?.replayed === false && firstProjectOutcome?.commandId === joinedAcceptance.command.commandId
+    && firstProjectOutcome?.externalProjectId === joinedAcceptance.command.externalProjectId
+    && populated(firstProjectOutcome?.activationId) && populated(firstProjectOutcome?.settlementId)
+    && replayProjectRun?.stage === "activate" && replayProjectOutcome?.status === "activated"
+    && replayProjectOutcome?.replayed === true && replayProjectOutcome?.commandId === firstProjectOutcome.commandId
+    && replayProjectOutcome?.externalProjectId === firstProjectOutcome.externalProjectId
+    && replayProjectOutcome?.activationId === firstProjectOutcome.activationId
+    && replayProjectOutcome?.settlementId === firstProjectOutcome.settlementId
+    && replayProjectOutcome?.version === firstProjectOutcome.version
+    && joinedAcceptance.changedBodyConflict?.stage === "plan"
+    && joinedAcceptance.changedBodyConflict?.outcome?.status === "conflict"
+    && joinedAcceptance.changedBodyConflict?.outcome?.reason === "command_id"
+    && joinedAcceptance.readSettlement?.status === "evidence_present"
+    && joinedAcceptance.readSettlement?.settlementId === firstProjectOutcome.settlementId
+    && joinedAcceptance.canonicalActivation?.status === "evidence_present"
+    && joinedAcceptance.canonicalActivation?.activationId === firstProjectOutcome.activationId
+    && joinedAcceptance.canonicalActivation?.version === firstProjectOutcome.version
+    && publicBefore?.status === 200 && publicAfter?.status === publicBefore.status
+    && sha256Hex(publicBefore?.bodySha256) && publicAfter?.bodySha256 === publicBefore.bodySha256
+    && publicAfter?.contentType === publicBefore.contentType
+    && joinedAcceptance.credentials?.valuesExcluded === true && joinedAcceptance.credentials?.sessionPresent === true
+    && recentDate(joinedAcceptance.observedAt, now) && populated(joinedAcceptance.evidenceRef);
+  if (!projectAcceptancePassed)
+    errors.push("Project Alpha joined Ops Project-v2 acceptance must bind a current sanitized input digest to referenced passing evidence");
+
+  const directoryAcceptance = projectAlpha.joinedOpsDirectoryV2Acceptance ?? {};
+  const directorySynthetic = directoryAcceptance.synthetic ?? {};
+  const directoryAdmission = directoryAcceptance.admission ?? {};
+  const directoryCreate = directoryAcceptance.create ?? {};
+  const directoryCreateFirst = directoryCreate.first ?? {};
+  const directoryCreateAck = directoryCreate.acknowledgement?.outcome ?? {};
+  const directoryCreateRead = directoryCreate.exactRead ?? {};
+  const directoryUpdate = directoryAcceptance.update ?? {};
+  const directoryUpdateFirst = directoryUpdate.first ?? {};
+  const directoryUpdateAck = directoryUpdate.acknowledgement?.outcome ?? {};
+  const directoryUpdateRead = directoryUpdate.exactRead ?? {};
+  const directoryReadback = directoryAcceptance.destinationReadback ?? {};
+  const directoryPublicBefore = directoryAcceptance.publicLink?.before;
+  const directoryPublicAfter = directoryAcceptance.publicLink?.after;
+  const directoryRecordId = directorySynthetic.recordId;
+  const directoryAcceptancePassed = directoryAcceptance.status === "passed"
+    && directoryAcceptance.schemaVersion === 1 && directoryAcceptance.environment === "staging"
+    && directoryAcceptance.inputBinding?.schemaVersion === 1
+    && sha256Hex(directoryAcceptance.inputBinding?.sha256)
+    && directoryAcceptance.inputBinding?.valuesExcluded === true
+    && directoryAcceptance.mutationsPerformed === true
+    && UUID_V4.test(directoryRecordId ?? "")
+    && directorySynthetic.createMutationId === directoryRecordId
+    && UUID_V4.test(directorySynthetic.updateMutationId ?? "")
+    && directorySynthetic.updateMutationId !== directoryRecordId
+    && directoryAdmission.first?.status === "prepared" && directoryAdmission.replay?.status === "prepared"
+    && directoryAdmission.changedBodyConflict?.status === "conflict"
+    && directoryAdmission.changedBodyConflict?.reason === "idempotency_body_conflict"
+    && ["written", "pending"].includes(directoryCreateFirst.status)
+    && directoryCreateFirst.recordId === directoryRecordId && directoryCreateFirst.kind === "client"
+    && directoryCreateFirst.version === 1 && directoryCreateFirst.replayed === false
+    && Array.isArray(directoryCreateFirst.destinationStates) && directoryCreateFirst.destinationStates.length === 1
+    && ["pending", "acknowledged"].includes(directoryCreateFirst.destinationStates[0])
+    && directoryCreateAck.status === "written" && directoryCreateAck.recordId === directoryRecordId
+    && directoryCreateAck.kind === "client" && directoryCreateAck.version === 1 && directoryCreateAck.replayed === true
+    && sameSequence(directoryCreateAck.destinationStates, ["acknowledged"])
+    && directoryCreate.changedBodyConflict?.status === "conflict"
+    && directoryCreate.changedBodyConflict?.reason === "idempotency_body_conflict"
+    && directoryCreateRead.status === "verified" && directoryCreateRead.recordId === directoryRecordId
+    && directoryCreateRead.version === 1 && directoryCreateRead.linkage === "standalone"
+    && sha256Hex(directoryCreateRead.profileSha256) && sha256Hex(directoryCreateRead.scopesSha256)
+    && ["written", "pending"].includes(directoryUpdateFirst.status)
+    && directoryUpdateFirst.recordId === directoryRecordId && directoryUpdateFirst.kind === "client"
+    && directoryUpdateFirst.version === 2 && directoryUpdateFirst.replayed === false
+    && Array.isArray(directoryUpdateFirst.destinationStates) && directoryUpdateFirst.destinationStates.length === 1
+    && ["pending", "acknowledged"].includes(directoryUpdateFirst.destinationStates[0])
+    && directoryUpdateAck.status === "written" && directoryUpdateAck.recordId === directoryRecordId
+    && directoryUpdateAck.kind === "client" && directoryUpdateAck.version === 2 && directoryUpdateAck.replayed === true
+    && sameSequence(directoryUpdateAck.destinationStates, ["acknowledged"])
+    && directoryUpdate.changedBodyConflict?.status === "conflict"
+    && directoryUpdate.changedBodyConflict?.reason === "idempotency_body_conflict"
+    && directoryUpdate.staleVersionConflict?.status === "conflict"
+    && directoryUpdate.staleVersionConflict?.reason === "stale_local_version"
+    && directoryUpdateRead.status === "verified" && directoryUpdateRead.recordId === directoryRecordId
+    && directoryUpdateRead.version === 2 && directoryUpdateRead.linkage === "standalone"
+    && sha256Hex(directoryUpdateRead.profileSha256) && sha256Hex(directoryUpdateRead.scopesSha256)
+    && directoryUpdateRead.profileSha256 !== directoryCreateRead.profileSha256
+    && directoryUpdateRead.scopesSha256 === directoryCreateRead.scopesSha256
+    && directoryReadback.status === "verified" && sha256Hex(directoryReadback.recordIdSha256)
+    && sha256Hex(directoryReadback.publicIdSha256) && directoryReadback.mappingCount === 1
+    && directoryReadback.collisionCount === 0
+    && directoryReadback.bindingRevision === String(directoryUpdateRead.version)
+    && directoryPublicBefore?.status === 200 && directoryPublicAfter?.status === directoryPublicBefore.status
+    && sha256Hex(directoryPublicBefore?.bodySha256)
+    && directoryPublicAfter?.bodySha256 === directoryPublicBefore.bodySha256
+    && populated(directoryPublicBefore?.contentType)
+    && directoryPublicAfter?.contentType === directoryPublicBefore.contentType
+    && directoryAcceptance.credentials?.valuesExcluded === true
+    && directoryAcceptance.credentials?.sessionPresent === true
+    && recentDate(directoryAcceptance.observedAt, now) && populated(directoryAcceptance.evidenceRef);
+  if (!directoryAcceptancePassed)
+    errors.push("Project Alpha joined Ops Directory-v2 acceptance must bind current sanitized create, update, replay, conflict, readback, and public-link evidence");
 
   const projectAlphaMigrations = projectAlpha.migrations ?? {};
   if (!sameSet(projectAlphaMigrations.expected, Object.keys(PROJECT_ALPHA_STAGING.migrations))) errors.push("Project Alpha migration set must exactly match the release contract");

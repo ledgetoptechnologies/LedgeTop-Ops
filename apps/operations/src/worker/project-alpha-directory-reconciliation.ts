@@ -106,11 +106,11 @@ async function localResources(db: D1Database, sourceId: string,
     LEFT JOIN project_alpha_existing_directory_binding_activation_receipts acquired
       ON mapping.mapping_kind='acquired' AND acquired.activation_id=mapping.provenance_id
     LEFT JOIN operations_directory_client_organizations relation
-      ON mapping.resource_type='client' AND relation.client_record_id=mapping.external_id
+      ON mapping.resource_type='client' AND relation.client_record_id=mapping.record_id
     LEFT JOIN project_alpha_active_directory_mappings parent
       ON parent.source_id=mapping.source_id AND parent.source_instance_id=mapping.source_instance_id
       AND parent.application_id=mapping.application_id AND parent.history_epoch_id=mapping.history_epoch_id
-      AND parent.resource_type='organization' AND parent.external_id=relation.organization_record_id
+      AND parent.resource_type='organization' AND parent.record_id=relation.organization_record_id
     WHERE mapping.source_id=? AND mapping.source_instance_id=? AND mapping.application_id=?
       AND mapping.history_epoch_id=?
     ORDER BY mapping.resource_type,mapping.project_alpha_public_id LIMIT ?`)
@@ -353,7 +353,7 @@ export async function reconcileProjectAlphaDirectorySource(env: ReconciliationEn
       return setUncertain(env.OPS_DB, sourceId, runId, "fence_changed", pages, ordinal, null, now(), previous);
     }
     const relationship = local.resourceType === "client" ? profile.observation.profile.organizationPublicId ?? null : null;
-    if (local.resourceType === "client" && local.relationshipKnown === 1 && relationship !== local.relationshipPublicId) addFinding(findings, {
+    if (local.resourceType === "client" && relationship !== local.relationshipPublicId) addFinding(findings, {
       classification: "relationship_mismatch", resourceType: local.resourceType, localExternalId: local.externalId,
       localPublicId: local.publicId, remotePublicId: found.publicId,
       details: { expectedOrganizationPublicId: local.relationshipPublicId, observedOrganizationPublicId: relationship } });

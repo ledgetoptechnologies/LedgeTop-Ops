@@ -148,7 +148,8 @@ function outcomeJson(status: string, reason: string, failure?: ProjectAlphaProje
 async function finishFailure(db: D1Database, row: Outbox, failure: ProjectAlphaProjectFailure): Promise<void> {
   await db.batch([
     db.prepare(`INSERT INTO project_alpha_project_v2_events(command_id,state_version,transition_id,request_sha256,state)
-      VALUES(?,2,?,?,?)`).bind(row.command_id, crypto.randomUUID(), row.request_sha256, eventState(failure.status)),
+      SELECT ?,COALESCE(MAX(state_version),0)+1,?,?,? FROM project_alpha_project_v2_events WHERE command_id=?`)
+      .bind(row.command_id, crypto.randomUUID(), row.request_sha256, eventState(failure.status), row.command_id),
     db.prepare(`UPDATE project_alpha_project_outbox SET state='terminal',lease_token=NULL,lease_expires_at=NULL,outcome_json=?,
       updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE command_id=? AND state='leased'`)
       .bind(outcomeJson(failure.status, failure.reason, failure), row.command_id),
@@ -249,12 +250,14 @@ async function dispatchEnabledProjectAlphaProjectV2PendingCommand(
     const response = evidence.response, resource = response.result.resource, acknowledgementId = crypto.randomUUID(), receiptId = crypto.randomUUID();
     await env.OPS_DB.batch([
       env.OPS_DB.prepare(`INSERT INTO project_alpha_project_v2_events(command_id,state_version,transition_id,request_sha256,state)
-        VALUES(?,2,?,?,'acknowledged')`).bind(current!.command_id, crypto.randomUUID(), current!.request_sha256),
+        SELECT ?,COALESCE(MAX(state_version),0)+1,?,?,'acknowledged' FROM project_alpha_project_v2_events WHERE command_id=?`)
+        .bind(current!.command_id, crypto.randomUUID(), current!.request_sha256, current!.command_id),
       env.OPS_DB.prepare(`INSERT INTO project_alpha_project_v2_validated_acknowledgements(acknowledgement_id,command_id,acknowledged_state_version,request_sha256,source_instance_id,application_id,history_epoch_id,destination_origin,project_alpha_public_id,project_alpha_revision,projection_sha256,authorization_generation,pa_request_id,pa_replayed,response_sha256)
-        VALUES(?,?,2,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(acknowledgementId, current!.command_id, current!.request_sha256,
+        SELECT ?,?,MAX(state_version),?,?,?,?,?,?,?,?,?,?,?,? FROM project_alpha_project_v2_events WHERE command_id=? AND state='acknowledged'`)
+        .bind(acknowledgementId, current!.command_id, current!.request_sha256,
         response.sourceInstanceId, response.applicationId, response.historyEpoch, evidence.destinationOrigin, resource.publicId,
         resource.revision, resource.projectionSha256, response.result.authorizationGeneration, response.requestId,
-        response.replayed ? 1 : 0, evidence.responseSha256),
+        response.replayed ? 1 : 0, evidence.responseSha256, current!.command_id),
       env.OPS_DB.prepare(`INSERT INTO project_alpha_project_v2_success_receipts(receipt_id,acknowledgement_id,command_id,request_sha256,source_instance_id,application_id,history_epoch_id,destination_origin,project_alpha_public_id,project_alpha_revision,projection_sha256,authorization_generation,pa_request_id,pa_replayed,response_sha256)
         VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(receiptId, acknowledgementId, current!.command_id, current!.request_sha256,
         response.sourceInstanceId, response.applicationId, response.historyEpoch, evidence.destinationOrigin, resource.publicId,

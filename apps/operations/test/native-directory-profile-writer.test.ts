@@ -101,6 +101,14 @@ async function acknowledgeCreate(input: NativeDirectoryProfileWrite, outcome: Na
   return id;
 }
 async function count(table: string): Promise<number> { return await db.prepare(`SELECT count(*) count FROM ${table}`).first<number>("count") ?? -1; }
+async function seedSyntheticActiveMapping(recordId: string, kind: "organization" | "client", externalId: string,
+  projectAlphaPublicId: string, activationId = uuid()) {
+  await db.prepare(`INSERT INTO writer_test_active_mapping_rows(source_id,resource_type,record_id,external_id,
+    project_alpha_public_id,source_instance_id,application_id,history_epoch_id,provenance_id,mapping_kind)
+    VALUES(?,?,?,?,?,?,?,?,?,'acquired')`).bind(sourceId,kind,recordId,externalId,projectAlphaPublicId,
+      sourceInstanceUUID,applicationUUID,historyEpoch,activationId).run();
+  return activationId;
+}
 async function submittedOnboarding(actor: Awaited<ReturnType<typeof seedActor>>, target: string | null,
   scopes: readonly { businessAreaId: string; divisionId: string | null }[]) {
   const invitationId=uuid(),submissionId=uuid(),commandId=uuid(),fieldsSha256="a".repeat(64);
@@ -122,8 +130,24 @@ beforeAll(async () => {
   runtime = new Miniflare({ modules: true, compatibilityDate: "2026-08-06", script: "export default {fetch(){return new Response('ok')}}", d1Databases: ["OPS_DB"] });
   db = await runtime.getD1Database("OPS_DB") as D1Database;
   const directory = new URL("../migrations/", import.meta.url);
-  const migrations = readdirSync(directory).filter(name => /^\d{4}_.+\.sql$/.test(name) && name.slice(0, 4) <= "0141").sort();
+  const migrations = readdirSync(directory).filter(name => /^\d{4}_.+\.sql$/.test(name) && name.slice(0, 4) <= "0176").sort();
   for (const migration of migrations) await db.batch(splitD1MigrationStatements(readFileSync(new URL(migration, directory), "utf8")).map(sql => db.prepare(sql)));
+  await db.exec(`CREATE TABLE writer_test_active_mapping_rows(source_id TEXT,resource_type TEXT,record_id TEXT,external_id TEXT,
+    project_alpha_public_id TEXT,source_instance_id TEXT,application_id TEXT,history_epoch_id TEXT,provenance_id TEXT,
+    mapping_kind TEXT,created_at TEXT DEFAULT(strftime('%Y-%m-%dT%H:%M:%fZ','now')));
+    DROP VIEW project_alpha_active_directory_mappings;
+    CREATE VIEW project_alpha_active_directory_mappings AS
+      SELECT source_id,resource_type,external_id AS record_id,external_id,project_alpha_public_id,source_instance_id,
+        application_id,history_epoch_id,command_id AS provenance_id,'legacy' AS mapping_kind,created_at
+      FROM project_alpha_directory_mappings
+      UNION ALL
+      SELECT source_id,resource_type,record_id,external_id,project_alpha_public_id,source_instance_id,
+        application_id,history_epoch_id,activation_id AS provenance_id,'acquired' AS mapping_kind,activated_at AS created_at
+      FROM project_alpha_existing_directory_binding_activation_receipts
+      UNION ALL
+      SELECT source_id,resource_type,record_id,external_id,project_alpha_public_id,source_instance_id,
+        application_id,history_epoch_id,provenance_id,mapping_kind,created_at FROM writer_test_active_mapping_rows;`
+    .replace(/\s*\n\s*/g, " "));
   await db.batch([
     db.prepare(`INSERT INTO staff_users(id,email,display_name,access_subject,status) VALUES('owner','owner@example.test','Owner','access|owner','active')`),
     db.prepare(`INSERT INTO native_business_areas(id,name,active) VALUES('area','Area',1)`),
@@ -331,6 +355,68 @@ describe("canonical native Directory profile writer", () => {
     }
   });
 
+  it("keeps create IDs pinned but targets the exact active Ops-to-PA pair for updates", async () => {
+    const seeded = await create("organization", undefined, `ops/profile-split-${sequence++}`), created = written(seeded.outcome);
+    const paExternalId = `pa/profile-split-${sequence++}`, activePublicId = publicId();
+    const activationId = await seedSyntheticActiveMapping(seeded.input.recordId, "organization", paExternalId, activePublicId);
+    const enrollmentBefore = await db.prepare("SELECT destinations_json FROM native_directory_enrollments WHERE record_id=?")
+      .bind(seeded.input.recordId).first<string>("destinations_json");
+    expect(await db.prepare("SELECT external_id FROM project_alpha_directory_outbox WHERE command_id=?")
+      .bind(created.commandIds[0]).first("external_id")).toBe(seeded.input.recordId);
+    const activation = (row: Record<string, unknown>) => ({ bind() { return this; }, async first() { return row; } }) as D1PreparedStatement;
+    let batchError: unknown;
+    const acquired = new Proxy(db, { get(target, property) {
+      if (property === "prepare") return (sql: string) => sql.includes("SELECT project_alpha_revision revision FROM project_alpha_existing_directory_binding_activation_receipts")
+        ? activation({ revision: "7" }) : target.prepare(sql);
+      if (property === "batch") return async (statements: D1PreparedStatement[]) => {
+        try { return await target.batch(statements); } catch (error) { batchError = error; throw error; }
+      };
+      const member = target[property as keyof D1Database]; return typeof member === "function" ? member.bind(target) : member;
+    } }) as D1Database;
+    const mutationId = uuid(), outcome = await writeNativeDirectoryProfile(acquired, { operation: "update", mutationId,
+      recordId: seeded.input.recordId, expectedLocalVersion: 1, kind: "organization",
+      profile: { ...organizationProfile, name: "Split identity update" },
+      destinations: [{ ...destination(seeded.input.recordId, "9"), externalCanonicalId: paExternalId }],
+      actor: seeded.actor });
+    if (outcome.status !== "written") throw new Error(`${JSON.stringify(outcome)} ${String(batchError)}`);
+    expect(outcome).toMatchObject({ status: "written", replayed: false });
+    const result = written(outcome);
+    expect(await db.prepare(`SELECT record_id,external_canonical_id FROM operations_directory_intents WHERE mutation_id=?`)
+      .bind(mutationId).first()).toEqual({ record_id: seeded.input.recordId, external_canonical_id: paExternalId });
+    const reserved = await db.prepare(`SELECT external_id,command_json FROM project_alpha_directory_outbox WHERE command_id=?`)
+      .bind(result.commandIds[0]).first<{ external_id: string; command_json: string }>();
+    expect(reserved?.external_id).toBe(paExternalId);
+    expect(JSON.parse(reserved!.command_json)).toMatchObject({ operation: "update", externalId: paExternalId,
+      expectedProjectAlphaPublicId: activePublicId, expectedRevision: "7" });
+    expect(await db.prepare("SELECT current_version FROM operations_directory_records WHERE record_id=?")
+      .bind(seeded.input.recordId).first("current_version")).toBe(2);
+    expect(await db.prepare("SELECT destinations_json FROM native_directory_enrollments WHERE record_id=?")
+      .bind(seeded.input.recordId).first("destinations_json")).toBe(enrollmentBefore);
+    expect(activationId).toBeTruthy();
+  });
+
+  it("rejects swapped active IDs and mapping-to-receipt pair mismatches", async () => {
+    const swapped = await create("organization", undefined, `ops/profile-swapped-${sequence++}`), swappedMutation = uuid();
+    const swappedPaId = `pa/profile-swapped-${sequence++}`;
+    await seedSyntheticActiveMapping(swappedPaId, "organization", swapped.input.recordId, publicId());
+    await expect(writeNativeDirectoryProfile(db, { operation: "update", mutationId: swappedMutation,
+      recordId: swapped.input.recordId, expectedLocalVersion: 1, kind: "organization", profile: organizationProfile,
+      destinations: [{ ...destination(swapped.input.recordId, "1"), externalCanonicalId: swappedPaId }], actor: swapped.actor }))
+      .resolves.toEqual({ status: "blocked", reason: "mapping_or_delivery_state" });
+
+    const mismatched = await create("organization", undefined, `ops/profile-mismatch-${sequence++}`), mismatchMutation = uuid();
+    const wrongExternalId = `pa/wrong-${sequence++}`;
+    await seedSyntheticActiveMapping(mismatched.input.recordId, "organization", wrongExternalId, publicId());
+    await expect(writeNativeDirectoryProfile(db, { operation: "update", mutationId: mismatchMutation,
+      recordId: mismatched.input.recordId, expectedLocalVersion: 1, kind: "organization", profile: organizationProfile,
+      destinations: [{ ...destination(mismatched.input.recordId, "1"), externalCanonicalId: wrongExternalId }], actor: mismatched.actor }))
+      .resolves.toEqual({ status: "blocked", reason: "mapping_or_delivery_state" });
+    for (const mutationId of [swappedMutation,mismatchMutation]) {
+      expect(await db.prepare("SELECT 1 FROM operations_directory_intents WHERE mutation_id=?").bind(mutationId).first()).toBeNull();
+      expect(await db.prepare("SELECT 1 FROM operations_directory_audit WHERE mutation_id=?").bind(mutationId).first()).toBeNull();
+    }
+  });
+
   it("fails closed instead of silently unlinking a linked client during profile update", async () => {
     const actor = await seedActor(), organization = await create("organization", actor, uuid()), client = await create("client", actor);
     written(organization.outcome); written(client.outcome);
@@ -357,11 +443,15 @@ describe("canonical native Directory profile writer", () => {
   it("resolves acquired active mappings from activation or same-local-version refresh evidence", async () => {
     for (const refreshed of [false, true]) {
       const seeded = await create("organization"), activePublicId = publicId(), expectedGeneration = refreshed ? "8" : "7";
-      const fake = (row: Record<string, unknown> | null) => ({ bind() { return this; }, async first() { return row; } }) as D1PreparedStatement;
+      const paExternalId = `pa/profile-${sequence++}`;
+      await seedSyntheticActiveMapping(seeded.input.recordId, "organization", paExternalId, activePublicId);
+      const fake = (row: Record<string, unknown> | null) => ({ bind() { return this; }, async first() { return row; },
+        async all() { return { results: row ? [row] : [], success: true, meta: {} }; } }) as unknown as D1PreparedStatement;
       const acquired = new Proxy(db, { get(target, property) {
         if (property === "prepare") return (sql: string) => {
           if (sql.includes("state<>'acknowledged' LIMIT 1")) return fake(null);
-          if (sql.includes("FROM project_alpha_active_directory_mappings")) return fake({ projectAlphaPublicId: activePublicId, mappingKind: "acquired", provenanceId: "activation-fixture" });
+          if (sql.includes("FROM project_alpha_active_directory_mappings")) return fake({ externalId: paExternalId,
+            projectAlphaPublicId: activePublicId, mappingKind: "acquired", provenanceId: "activation-fixture" });
           if (sql.includes("FROM project_alpha_existing_directory_binding_revision_refresh_receipts"))
             return fake(refreshed ? { revision: "4", authorizationGeneration: "8" } : null);
           if (sql.includes("FROM project_alpha_existing_directory_binding_activation_receipts")) return fake({ revision: "3" });
@@ -371,7 +461,10 @@ describe("canonical native Directory profile writer", () => {
       } }) as D1Database;
       const result = written(await writeNativeDirectoryProfile(acquired, { operation: "update", mutationId: uuid(), recordId: seeded.input.recordId,
         expectedLocalVersion: 1, kind: "organization", profile: { ...organizationProfile, name: refreshed ? "Refreshed" : "Activated" },
-        destinations: [destination(seeded.input.recordId, expectedGeneration)], actor: seeded.actor }));
+        destinations: [{ ...destination(seeded.input.recordId, expectedGeneration), externalCanonicalId: paExternalId }], actor: seeded.actor }));
+      expect(JSON.parse(await db.prepare("SELECT destinations_json FROM native_directory_enrollments WHERE record_id=?")
+        .bind(seeded.input.recordId).first<string>("destinations_json") ?? "[]")[0].externalCanonicalId)
+        .toBe(seeded.input.recordId);
       const command = JSON.parse((await db.prepare(`SELECT command_json FROM project_alpha_directory_outbox WHERE command_id=?`)
         .bind(result.commandIds[0]).first<string>("command_json"))!);
       expect(command).toMatchObject({ expectedProjectAlphaPublicId: activePublicId, expectedRevision: refreshed ? "4" : "3",

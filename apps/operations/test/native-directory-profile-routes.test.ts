@@ -3,14 +3,24 @@ import { readFileSync } from "node:fs";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Env, StaffPrincipal } from "../src/worker/types";
 
-const mocks = vi.hoisted(() => ({ authenticate: vi.fn(), connection: vi.fn(), writer: vi.fn(), relationshipWriter: vi.fn(),
-  organizationChoices: vi.fn() }));
+const mocks = vi.hoisted(() => ({ authenticate: vi.fn(), connection: vi.fn(), sourceIds: vi.fn(), writer: vi.fn(), relationshipWriter: vi.fn(),
+  organizationChoices: vi.fn(), inventory: vi.fn(), persistInventory: vi.fn(), bindingStatus: vi.fn(), remoteHead: vi.fn() }));
 vi.mock("../src/worker/native-staff-auth", () => ({ authenticateNativeStaffWithAdmissionVersion: mocks.authenticate }));
-vi.mock("../src/worker/project-alpha-api-v2-connections", () => ({ resolveProjectAlphaApiV2Connection: mocks.connection }));
+vi.mock("../src/worker/project-alpha-api-v2-connections", () => ({ resolveProjectAlphaApiV2Connection: mocks.connection,
+  listEnabledProjectAlphaApiV2SourceIds: mocks.sourceIds }));
 vi.mock("../src/worker/native-directory-profile-writer", async importOriginal => {
   const actual = await importOriginal<typeof import("../src/worker/native-directory-profile-writer")>();
-  return { ...actual, writeNativeDirectoryProfile: mocks.writer };
+  return { ...actual, writeNativeDirectoryProfile: mocks.writer, readNativeDirectoryDurableRemoteHead: mocks.remoteHead };
 });
+vi.mock("../src/worker/project-alpha-directory-inventory-api-v2", () => ({
+  readConfiguredProjectAlphaDirectoryInventory: mocks.inventory,
+}));
+vi.mock("../src/worker/project-alpha-v2-sync", () => ({
+  persistProjectAlphaDirectoryInventoryPage: mocks.persistInventory,
+}));
+vi.mock("../src/worker/project-alpha-directory-read-api-v2", () => ({
+  readConfiguredProjectAlphaDirectoryBindingStatus: mocks.bindingStatus,
+}));
 vi.mock("../src/worker/native-directory-relationship-writer", async importOriginal => {
   const actual = await importOriginal<typeof import("../src/worker/native-directory-relationship-writer")>();
   return { ...actual, writeNativeDirectoryRelationship: mocks.relationshipWriter };
@@ -36,7 +46,7 @@ const client = { name: "Example Client", email: "client@example.test", phone: ""
 
 type Row = Record<string, unknown>;
 function database(options: { enrollment?: unknown; outboxState?: string; deny?: string; missingGeneration?: boolean;
-  admission?: false; connectorActive?: false; replay?: "exact" | "conflict" | "client"; linked?: boolean;
+  admission?: false; replay?: "exact" | "conflict" | "client"; linked?: boolean;
   insertRace?: "exact" | "conflict"; profile?: "organization" | "client"; inactiveDivision?: boolean;
   relationshipReplay?: { organization: { recordId: string; expectedRecordVersion: number } | null;
     supersedeTerminalCommandIds?: string[] };
@@ -62,7 +72,6 @@ function database(options: { enrollment?: unknown; outboxState?: string; deny?: 
         if (sql.includes("FROM native_directory_grants")) return { results: [...values.slice(1).map(permission => ({ permission,
           effect: "allow", scope_kind: "global", businessAreaId: null, divisionId: null })),
           ...(options.deny ? [{ permission: options.deny, effect: "deny", scope_kind: "global", businessAreaId: null, divisionId: null }] : [])] as T[] };
-        if (sql.includes("FROM pa_connectors")) return { results: [{ sourceId, displayName: "Primary Project Alpha" }] as T[] };
         if (sql.includes("effect='allow'")) {
           const permission = String(values[1]);
           return { results: [{ id: permission === "directory.identity.link" ? "identity-grant" : "edit-grant",
@@ -100,7 +109,6 @@ function database(options: { enrollment?: unknown; outboxState?: string; deny?: 
           : preparedAdmission ? { id: preparedAdmission.id, destinations_json: preparedAdmission.destinations_json }
           : { id: "create-admission", destinations_json: JSON.stringify([{ sourceId, sourceInstanceUUID: ids.instance,
               applicationUUID: ids.application, historyEpoch: ids.epoch, origin, externalCanonicalId: String(values[2]) }]) };
-        else if (sql.includes("FROM pa_connectors")) value = options.connectorActive === false ? null : { ok: 1 };
         else if (sql.includes("operations_directory_client_organizations")) value = sql.includes("client.current_version") ? {
           organization_record_id: options.linked ? acquiredOrganizationId : null, relationship_version: 2,
           client_version: 4, organization_version: options.linked ? 3 : null,
@@ -162,12 +170,25 @@ describe("native Directory profile routes", () => {
         email: principal.email, displayName: principal.displayName, profileVersion: 4 } });
     mocks.connection.mockReturnValue({ sourceId, enabled: true, connection: { baseUrl: origin,
       expectedSourceInstanceId: ids.instance, expectedApplicationId: ids.application, expectedHistoryEpoch: ids.epoch } });
+    mocks.sourceIds.mockReturnValue([sourceId]);
     mocks.writer.mockResolvedValue({ status: "written", replayed: false, mutationId: ids.mutation,
       recordId: ids.mutation, kind: "organization", version: 1, commandIds: [ids.command] });
     mocks.relationshipWriter.mockResolvedValue({ status: "written", replayed: false, mutationId: ids.mutation,
       relationshipVersion: 3, reservations: [{ commandId: ids.command, sourceId, action: "assign", command: {} }] });
     mocks.organizationChoices.mockResolvedValue([{ recordId: acquiredOrganizationId, expectedVersion: 3,
       name: "Acquired Organization", sourceIds: [sourceId, "project-alpha:secondary"] }]);
+    mocks.inventory.mockResolvedValue({ status: "observed", inventory: { authoritative: false, sourceId,
+      sourceInstanceId: ids.instance, applicationId: ids.application, historyEpoch: ids.epoch,
+      requestId: "77777777-7777-4777-8777-777777777777", authorizationGeneration: "7", resources: [], nextCursor: null } });
+    mocks.persistInventory.mockResolvedValue({ status: "persisted", itemCount: 0, conflictCount: 0, nextCursor: null,
+      continuationIdentity: { sourceInstanceId: ids.instance, applicationId: ids.application,
+        historyEpoch: ids.epoch, authorizationGeneration: "7" } });
+    mocks.remoteHead.mockResolvedValue({ projectAlphaPublicId: "a".repeat(32), externalCanonicalId: ids.client, revision: "4" });
+    mocks.bindingStatus.mockResolvedValue({ status: "observed", observation: { authoritative: false, sourceId,
+      sourceInstanceId: ids.instance, applicationId: ids.application, historyEpoch: ids.epoch,
+      requestId: "88888888-8888-4888-8888-888888888888", authorizationGeneration: "7",
+      binding: { type: "client", externalId: ids.client, publicId: "a".repeat(32), createdAt: "2026-10-06T00:00:00.000Z" },
+      resource: { revision: "4", present: true } } });
   });
 
   it("mounts default-off camouflage before shared /api authentication", () => {
@@ -190,20 +211,21 @@ describe("native Directory profile routes", () => {
   it("offers only server-derived source and effective scope choices for the create editor", async () => {
     const response = await fixture().send(`${NATIVE_DIRECTORY_PROFILE_ROUTE}/create-options?kind=client`, null, "GET");
     expect(response.status).toBe(200);
-    await expect(response.json()).resolves.toEqual({ kind: "client", sources: [{ id: sourceId, name: "Primary Project Alpha" }],
+    await expect(response.json()).resolves.toEqual({ kind: "client", sources: [{ id: sourceId, name: "Project Alpha (primary)" }],
       scopes: [{ id: "drone", name: "Drone operations", divisions: [{ id: "survey", name: "Survey" }] }],
       organizations: [{ recordId: acquiredOrganizationId, expectedVersion: 3, name: "Acquired Organization",
         sourceIds: [sourceId, "project-alpha:secondary"] }] });
   });
 
-  it("does not offer choices when a required create permission is denied, a division is inactive, or a connector is unavailable", async () => {
+  it("does not offer choices when a required create permission is denied, a division is inactive, or the API-v2 source is disabled", async () => {
     const denied = await fixture({ db: database({ deny: "directory.identity.link" }) }).send(`${NATIVE_DIRECTORY_PROFILE_ROUTE}/create-options?kind=client`, null, "GET");
-    await expect(denied.json()).resolves.toEqual({ kind: "client", sources: [{ id: sourceId, name: "Primary Project Alpha" }], scopes: [], organizations: [] });
+    await expect(denied.json()).resolves.toEqual({ kind: "client", sources: [{ id: sourceId, name: "Project Alpha (primary)" }], scopes: [], organizations: [] });
     const inactiveDivision = await fixture({ db: database({ inactiveDivision: true }) }).send(`${NATIVE_DIRECTORY_PROFILE_ROUTE}/create-options`, null, "GET");
-    await expect(inactiveDivision.json()).resolves.toEqual({ kind: "organization", sources: [{ id: sourceId, name: "Primary Project Alpha" }],
+    await expect(inactiveDivision.json()).resolves.toEqual({ kind: "organization", sources: [{ id: sourceId, name: "Project Alpha (primary)" }],
       scopes: [{ id: "drone", name: "Drone operations", divisions: [] }], organizations: [] });
-    const connectorUnavailable = await fixture({ db: database({ connectorActive: false }) }).send(`${NATIVE_DIRECTORY_PROFILE_ROUTE}/create-options`, null, "GET");
-    await expect(connectorUnavailable.json()).resolves.toEqual({ kind: "organization", sources: [],
+    mocks.sourceIds.mockReturnValueOnce([]);
+    const sourceDisabled = await fixture().send(`${NATIVE_DIRECTORY_PROFILE_ROUTE}/create-options`, null, "GET");
+    await expect(sourceDisabled.json()).resolves.toEqual({ kind: "organization", sources: [],
       scopes: [{ id: "drone", name: "Drone operations", divisions: [{ id: "survey", name: "Survey" }] }], organizations: [] });
   });
 
@@ -295,10 +317,11 @@ describe("native Directory profile routes", () => {
     expect(mocks.connection).not.toHaveBeenCalled();
   });
 
-  it("rejects inactive connectors and never accepts caller-supplied PA authority tuples", async () => {
+  it("rejects disabled API-v2 sources and never accepts caller-supplied PA authority tuples", async () => {
     const path = `${NATIVE_DIRECTORY_PROFILE_ROUTE}/create-admissions`;
     const intent = { kind: "organization" as const, mutationId: ids.mutation, sourceIds: [sourceId], scopes, profile: organization };
-    const inactive = await fixture({ db: database({ connectorActive: false }) }).send(path, intent);
+    mocks.sourceIds.mockReturnValueOnce([]);
+    const inactive = await fixture().send(path, intent);
     expect(inactive.status).toBe(409);
     await expect(inactive.json()).resolves.toEqual({ status: "conflict", reason: "source_authority_unavailable" });
     expect((await fixture().send(path, { ...intent, destination: { sourceInstanceUUID: ids.instance,
@@ -352,6 +375,40 @@ describe("native Directory profile routes", () => {
     });
   });
 
+  it("uses a fresh persisted PA generation for first create and rejects conflicted evidence before writing", async () => {
+    mocks.inventory.mockResolvedValueOnce({ status: "observed", inventory: { authoritative: false, sourceId,
+      sourceInstanceId: ids.instance, applicationId: ids.application, historyEpoch: ids.epoch,
+      requestId: "99999999-9999-4999-8999-999999999999", authorizationGeneration: "19", resources: [], nextCursor: null } });
+    mocks.persistInventory.mockResolvedValueOnce({ status: "persisted", itemCount: 0, conflictCount: 0, nextCursor: null,
+      continuationIdentity: { sourceInstanceId: ids.instance, applicationId: ids.application,
+        historyEpoch: ids.epoch, authorizationGeneration: "19" } });
+    const accepted = await fixture().send(`${NATIVE_DIRECTORY_PROFILE_ROUTE}/organizations`, {
+      mutationId: ids.mutation, sourceIds: [sourceId], scopes, profile: organization,
+    });
+    expect(accepted.status).toBe(202);
+    expect(mocks.writer).toHaveBeenLastCalledWith(expect.anything(), expect.objectContaining({ destinations: [
+      expect.objectContaining({ sourceId, expectedAuthorizationGeneration: "19" }),
+    ] }));
+
+    vi.clearAllMocks();
+    mocks.authenticate.mockResolvedValue({ admissionVersion: 3, verifiedUntil: "2099-01-01T00:00:00.000Z",
+      identity: { kind: "native", staffId: principal.id, verifiedAccessSubject: principal.accessSubject,
+        email: principal.email, displayName: principal.displayName, profileVersion: 4 } });
+    mocks.connection.mockReturnValue({ sourceId, enabled: true, connection: { baseUrl: origin,
+      expectedSourceInstanceId: ids.instance, expectedApplicationId: ids.application, expectedHistoryEpoch: ids.epoch } });
+    mocks.inventory.mockResolvedValue({ status: "observed", inventory: { authoritative: false, sourceId,
+      sourceInstanceId: ids.instance, applicationId: ids.application, historyEpoch: ids.epoch,
+      requestId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", authorizationGeneration: "6", resources: [], nextCursor: null } });
+    mocks.persistInventory.mockResolvedValue({ status: "conflicted", itemCount: 0, conflictCount: 1, nextCursor: null,
+      continuationIdentity: { sourceInstanceId: ids.instance, applicationId: ids.application,
+        historyEpoch: ids.epoch, authorizationGeneration: "6" } });
+    const rejected = await fixture().send(`${NATIVE_DIRECTORY_PROFILE_ROUTE}/organizations`, {
+      mutationId: ids.mutation, sourceIds: [sourceId], scopes, profile: organization,
+    });
+    expect(rejected.status).toBe(409);
+    expect(mocks.writer).not.toHaveBeenCalled();
+  });
+
   it("creates a standalone client only with a current identity-link grant and no caller authority fields", async () => {
     mocks.writer.mockResolvedValueOnce({ status: "written", replayed: false, mutationId: ids.mutation,
       recordId: ids.mutation, kind: "client", version: 1, commandIds: [ids.command] });
@@ -369,6 +426,17 @@ describe("native Directory profile routes", () => {
       actor: { staffId: "attacker" }, expectedAuthorizationGeneration: "999",
     });
     expect(forged.status).toBe(400);
+  });
+
+  it("reports a terminal PA profile command as a destination conflict", async () => {
+    const response = await fixture({ db: database({ outboxState: "terminal" }) }).send(
+      `${NATIVE_DIRECTORY_PROFILE_ROUTE}/organizations`, {
+        mutationId: ids.mutation, sourceIds: [sourceId], scopes, profile: organization,
+      });
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toEqual({ status: "conflict", reason: "destination_conflict",
+      recordId: ids.mutation, kind: "organization", version: 1,
+      destinations: [{ sourceId, state: "conflict" }] });
   });
 
   it("atomically binds linked-client admission to a non-UUID organization version and allows a destination subset", async () => {
@@ -424,6 +492,51 @@ describe("native Directory profile routes", () => {
     const pending = await fixture({ db: database({ enrollment, linked: true, relationshipPending: true }) }).send(route, value, "PATCH");
     expect(pending.status).toBe(409);
     await expect(pending.json()).resolves.toEqual({ status: "conflict", reason: "relationship_delivery_pending" });
+  });
+
+  it("requires a live binding at the persisted generation and exact durable revision before update", async () => {
+    const enrollment = [{ sourceId, sourceInstanceUUID: ids.instance, applicationUUID: ids.application,
+      historyEpoch: ids.epoch, origin, externalCanonicalId: ids.client }];
+    const value = { mutationId: ids.mutation, expectedLocalVersion: 1,
+      profile: { name: client.name, email: client.email, phone: client.phone, addressLine1: "", addressLine2: "",
+        city: "", state: "WI", postalCode: "", country: "" } };
+    const route = `${NATIVE_DIRECTORY_PROFILE_ROUTE}/standalone-clients/${ids.client}`;
+
+    const acquiredExternalId = "pa/client/acquired-existing";
+    mocks.remoteHead.mockResolvedValueOnce({ projectAlphaPublicId: "a".repeat(32),
+      externalCanonicalId: acquiredExternalId, revision: "4" });
+    mocks.bindingStatus.mockResolvedValueOnce({ status: "observed", observation: { authoritative: false, sourceId,
+      sourceInstanceId: ids.instance, applicationId: ids.application, historyEpoch: ids.epoch,
+      requestId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaab", authorizationGeneration: "7",
+      binding: { type: "client", externalId: acquiredExternalId, publicId: "a".repeat(32), createdAt: "2026-10-06T00:00:00.000Z" },
+      resource: { revision: "4", present: true } } });
+    const acquired = await fixture({ db: database({ enrollment }) }).send(route, value, "PATCH");
+    expect(acquired.status).toBe(202);
+    expect(mocks.bindingStatus).toHaveBeenLastCalledWith(expect.anything(), sourceId, "client",
+      acquiredExternalId, "a".repeat(32));
+    expect(mocks.writer).toHaveBeenLastCalledWith(expect.anything(), expect.objectContaining({ operation: "update",
+      recordId: ids.client, destinations: [{ ...enrollment[0], externalCanonicalId: acquiredExternalId,
+        expectedAuthorizationGeneration: "7" }] }));
+
+    mocks.writer.mockClear();
+
+    mocks.bindingStatus.mockResolvedValueOnce({ status: "observed", observation: { authoritative: false, sourceId,
+      sourceInstanceId: ids.instance, applicationId: ids.application, historyEpoch: ids.epoch,
+      requestId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", authorizationGeneration: "8",
+      binding: { type: "client", externalId: ids.client, publicId: "a".repeat(32), createdAt: "2026-10-06T00:00:00.000Z" },
+      resource: { revision: "4", present: true } } });
+    const generationMismatch = await fixture({ db: database({ enrollment }) }).send(route, value, "PATCH");
+    expect(generationMismatch.status).toBe(409);
+    expect(mocks.writer).not.toHaveBeenCalled();
+
+    mocks.bindingStatus.mockResolvedValueOnce({ status: "observed", observation: { authoritative: false, sourceId,
+      sourceInstanceId: ids.instance, applicationId: ids.application, historyEpoch: ids.epoch,
+      requestId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc", authorizationGeneration: "7",
+      binding: { type: "client", externalId: ids.client, publicId: "a".repeat(32), createdAt: "2026-10-06T00:00:00.000Z" },
+      resource: { revision: "5", present: true } } });
+    const revisionMismatch = await fixture({ db: database({ enrollment }) }).send(route, value, "PATCH");
+    expect(revisionMismatch.status).toBe(409);
+    expect(mocks.writer).not.toHaveBeenCalled();
   });
 
   it.each([
@@ -526,19 +639,20 @@ describe("native Directory profile routes", () => {
     })).status).toBe(409);
   });
 
-  it("requires an exact pre-issued admission, active connector and enrollment-management authority", async () => {
+  it("requires an exact pre-issued admission, enabled API-v2 source and enrollment-management authority", async () => {
     const path = `${NATIVE_DIRECTORY_PROFILE_ROUTE}/organizations`, value = {
       mutationId: ids.mutation, sourceIds: [sourceId], scopes, profile: organization,
     };
     expect((await fixture({ db: database({ admission: false }) }).send(path, value)).status).toBe(409);
-    expect((await fixture({ db: database({ connectorActive: false }) }).send(path, value)).status).toBe(409);
+    mocks.sourceIds.mockReturnValueOnce([]);
+    expect((await fixture().send(path, value)).status).toBe(409);
     expect((await fixture({ db: database({ deny: "directory.enrollment.manage" }) }).send(path, value)).status).toBe(403);
     expect(mocks.writer).not.toHaveBeenCalled();
   });
 
   it("returns a committed exact replay before mutable grants, admission or connection selection", async () => {
     mocks.connection.mockImplementation(() => { throw new Error("rotated"); });
-    const response = await fixture({ db: database({ admission: false, connectorActive: false,
+    const response = await fixture({ db: database({ admission: false,
       deny: "directory.profile.edit", replay: "exact" }) }).send(`${NATIVE_DIRECTORY_PROFILE_ROUTE}/organizations`, {
       mutationId: ids.mutation, sourceIds: [sourceId], scopes, profile: organization,
     });
@@ -568,6 +682,7 @@ describe("native Directory profile routes", () => {
     expect((await fixture({ db: database({ deny: "directory.identity.link" }) }).send(`${NATIVE_DIRECTORY_PROFILE_ROUTE}/standalone-clients`, {
       mutationId: ids.mutation, sourceIds: [sourceId], scopes, profile: client,
       relationship: { organizationRecordId: null, expectedOrganizationVersion: null } })).status).toBe(403);
+    mocks.inventory.mockResolvedValueOnce({ status: "blocked", reason: "preflight" });
     expect((await fixture({ db: database({ missingGeneration: true }) }).send(`${NATIVE_DIRECTORY_PROFILE_ROUTE}/organizations`, {
       mutationId: ids.mutation, sourceIds: [sourceId], scopes, profile: organization })).status).toBe(409);
     mocks.writer.mockResolvedValueOnce({ status: "conflict", reason: "stale_local_version" });

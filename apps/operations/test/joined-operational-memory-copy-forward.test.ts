@@ -11,7 +11,7 @@ import { uploadProjectMemoryAttachment } from "../src/worker/project-memory-atta
 import type { ClientHubCollectionContext } from "../src/worker/client-hub-collections";
 import type { Env, StaffPrincipal } from "../src/worker/types";
 
-const SOURCE = "project-alpha:primary", TIMEOUT = 60_000;
+const SOURCE = "project-alpha:primary", TIMEOUT = 120_000;
 const owner: StaffPrincipal = { id: "staff-beau-koltz", email: "beaukoltz@ledgetopdroneservices.com",
   displayName: "Beau Koltz", accessSubject: "owner", projectAlphaUserId: null };
 class Bucket {

@@ -22,20 +22,20 @@ const issuedAt = new Date(Date.now() - 5 * 60 * 1000).toISOString();
 const expiresAt = new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString();
 const acquisitionRecord = Object.freeze({ id: "staging-directory-acquisition-record", kind: "organization", version: 1 });
 const activationId = "10000000-0000-4000-8000-000000000001";
-const REVIEWED_OPERATIONS_171 = Object.freeze({ count: 171,
-  finalMigration: "0171_project_alpha_active_directory_update_guard.sql",
-  namesSha256: "bc4590b90cccd1842b2496906986355cfde7522e970ac3ec95039cace437f61d",
-  chainSha256: "e3feca1f403a06f15495017fd843ac48173e39be2478f8d6b5060c262c0b1f5c" });
+const REVIEWED_OPERATIONS_180 = Object.freeze({ count: 180,
+  finalMigration: "0180_project_alpha_project_v2_recovery_authorization.sql",
+  namesSha256: "8d7fdaaa7b453b32dd5e67d1a670554bc1c03aedf41c8ecadaddbbccf632e266",
+  chainSha256: "6603a620f33f7d6cd88e23189203ddcb8a753b16167cd5e8ae427a31cf51b4b3" });
 const sha256 = value => createHash("sha256").update(value).digest("hex");
 function reviewedOperationsMigrations() {
   const directory = path.join(repositoryRoot, "apps", "operations", "migrations");
   const names = fs.readdirSync(directory).filter(name => name.endsWith(".sql")).sort()
-    .slice(0, REVIEWED_OPERATIONS_171.count);
-  assert.equal(names.length, REVIEWED_OPERATIONS_171.count);
-  assert.equal(names.at(-1), REVIEWED_OPERATIONS_171.finalMigration);
-  assert.equal(sha256(names.join("\n")), REVIEWED_OPERATIONS_171.namesSha256);
+    .slice(0, REVIEWED_OPERATIONS_180.count);
+  assert.equal(names.length, REVIEWED_OPERATIONS_180.count);
+  assert.equal(names.at(-1), REVIEWED_OPERATIONS_180.finalMigration);
+  assert.equal(sha256(names.join("\n")), REVIEWED_OPERATIONS_180.namesSha256);
   assert.equal(sha256(names.map(name => `${name}\0${sha256(fs.readFileSync(path.join(directory, name), "utf8"))}`).join("\n")),
-    REVIEWED_OPERATIONS_171.chainSha256);
+    REVIEWED_OPERATIONS_180.chainSha256);
   return { directory, names };
 }
 
@@ -831,9 +831,9 @@ test("builds separate one-migration configs with a dedicated ledger and sanitize
   assert.match(artifact.provision.sql, /scope_kind='global'|,'global'/);
   assert.match(artifact.provision.sql, /SELECT count\(\*\) FROM d1_migrations/);
   assert.deepEqual(artifact.provision.manifest.canonicalOperationsLedger, {
-    count: REVIEWED_OPERATIONS_171.count,
-    finalMigration: REVIEWED_OPERATIONS_171.finalMigration,
-    chainSha256: REVIEWED_OPERATIONS_171.chainSha256,
+    count: REVIEWED_OPERATIONS_180.count,
+    finalMigration: REVIEWED_OPERATIONS_180.finalMigration,
+    chainSha256: REVIEWED_OPERATIONS_180.chainSha256,
   });
   assert.deepEqual(artifact.provision.manifest.directoryGrant, {
     id: `staging-directory-profile-edit:${owner.operationsStaffId}`,
@@ -874,10 +874,10 @@ test("fails closed for wrong staging identity and canonical migration drift", ()
   assert.throws(() => buildAuthorityArtifacts(drift, input(), "provision"), /contents changed/);
 });
 
-test("reviewed authority packets reject an unreviewed migration after the exact 0171 chain", () => {
+test("reviewed authority packets reject an unreviewed migration after the exact 0180 chain", () => {
   const base = fixture();
   fs.writeFileSync(path.join(base, "apps", "operations", "migrations", "0170_unreviewed_staging_test.sql"), "SELECT 1;\n");
-  assert.throws(() => buildAuthorityArtifacts(base, input(), "provision"), /exact reviewed 171-file Operations chain/);
+  assert.throws(() => buildAuthorityArtifacts(base, input(), "provision"), /exact reviewed 180-file Operations chain/);
 });
 
 test("full canonical schema provisions, revokes, and reactivates exact native authority", () => {
@@ -965,6 +965,68 @@ test("revoke fails atomically while an actor command is pending", () => {
   assert.deepEqual(queryOne(db, "SELECT active,version FROM native_staff_admissions WHERE staff_id=?", owner.operationsStaffId), { active: 1, version: 1 });
   assert.deepEqual(queryOne(db, "SELECT active,version FROM native_project_grants WHERE staff_id=?", owner.operationsStaffId), { active: 1, version: 1 });
   assert.deepEqual(queryOne(db, "SELECT active FROM native_directory_grants WHERE staff_id=?", owner.operationsStaffId), { active: 1 });
+  assert.equal(queryOne(db, `SELECT count(*) count FROM ${AUTHORITY_MIGRATIONS_TABLE}`).count, 1);
+  assert.equal(queryOne(db, "SELECT count(*) count FROM native_staff_bootstrap_receipts").count, 1);
+  db.close();
+});
+
+test("revoke fails atomically while an actor has a live Project-v2 recovery authorization", () => {
+  const db = canonicalDatabase(), artifact = buildAuthorityArtifacts(fixture(), input(), "revoke");
+  applyMigration(db, artifact.provision.sql, artifact.provision.name, AUTHORITY_MIGRATIONS_TABLE);
+  const externalProjectId = "staging-project-recovery", commandId = "10000000-0000-4000-8000-000000000010";
+  const authorizationId = "20000000-0000-4000-8000-000000000020";
+  const sourceId = "project-alpha:staging", applicationId = "30000000-0000-4000-8000-000000000030";
+  const sourceInstanceId = "40000000-0000-4000-8000-000000000040";
+  const historyEpochId = "50000000-0000-4000-8000-000000000050";
+  const destination = "https://pa-staging.example.test", requestSha256 = "a".repeat(64);
+  const commandJson = JSON.stringify({ commandId, externalId: externalProjectId });
+  db.prepare(`INSERT INTO project_alpha_project_destinations(external_project_id,source_id,application_id,destination_base_url,
+    expected_source_instance_id,expected_history_epoch_id) VALUES(?,?,?,?,?,?)`)
+    .run(externalProjectId, sourceId, applicationId, destination, sourceInstanceId, historyEpochId);
+  db.prepare(`INSERT INTO native_project_command_proofs(command_id,external_project_id,actor_staff_id,actor_access_subject,
+    actor_admission_version,actor_profile_version,actor_email,verified_until,grant_generation,scopes_json)
+    VALUES(?,?,?,?,?,?,?,?,?,?)`).run(commandId, externalProjectId, owner.operationsStaffId, subject,
+      1, 1, owner.email, expiresAt, 1, "[]");
+  db.prepare(`INSERT INTO project_alpha_project_outbox(command_id,external_project_id,operation,command_json,source_id,application_id,
+    destination_base_url,expected_source_instance_id,origin_snapshot_json,state,attempts,next_attempt_at,expected_history_epoch_id)
+    VALUES(?,?,'create',?,?,?,?,?,?,'pending',0,0,?)`)
+    .run(commandId, externalProjectId, commandJson, sourceId, applicationId, destination, sourceInstanceId,
+      JSON.stringify({ actorId: owner.operationsStaffId }), historyEpochId);
+  db.prepare("INSERT INTO native_project_command_reservations(command_id) VALUES(?)").run(commandId);
+  db.prepare("INSERT INTO project_alpha_project_v2_request_fingerprints(command_id,request_sha256) VALUES(?,?)")
+    .run(commandId, requestSha256);
+  db.prepare(`INSERT INTO project_alpha_project_v2_canonical_intents(command_id,request_sha256,operation,
+    external_project_id,expected_local_version,expected_local_projection_sha256,expected_grant_generation,
+    expected_mapping_state,expected_project_alpha_public_id,source_id,source_instance_id,application_id,history_epoch_id)
+    VALUES(?,?,'create',?,0,NULL,1,'absent',NULL,?,?,?,?)`)
+    .run(commandId, requestSha256, externalProjectId, sourceId, sourceInstanceId, applicationId, historyEpochId);
+  db.prepare(`INSERT INTO project_alpha_project_v2_events(command_id,state_version,transition_id,request_sha256,state)
+    VALUES(?,1,'60000000-0000-4000-8000-000000000060',?,'pending')`).run(commandId, requestSha256);
+  db.prepare(`INSERT INTO project_alpha_project_v2_events(command_id,state_version,transition_id,request_sha256,state)
+    VALUES(?,2,'70000000-0000-4000-8000-000000000070',?,'uncertain')`).run(commandId, requestSha256);
+  db.prepare(`UPDATE project_alpha_project_outbox SET state='terminal',attempts=1,outcome_json='{}',
+    updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE command_id=?`).run(commandId);
+  db.prepare(`INSERT INTO project_alpha_project_v2_recovery_authorizations(
+    authorization_id,command_id,original_event_state_version,eligibility_state,original_outbox_state,
+    original_attempts,original_lease_token,original_lease_expires_at,original_outcome_json,request_sha256,operation,
+    external_project_id,source_id,source_instance_id,application_id,history_epoch_id,destination_origin,
+    expected_local_version,expected_local_projection_sha256,expected_mapping_state,expected_project_alpha_public_id,
+    actor_staff_id,actor_access_subject,actor_email,actor_admission_version,actor_profile_version,
+    actor_project_grant_generation,actor_scopes_json,reason,expires_at)
+    VALUES(?,?,2,'terminal_uncertain','terminal',1,NULL,NULL,'{}',?,'create',?,?,?,?,?,?,0,NULL,'absent',NULL,
+      ?,?,?,1,1,1,'[]','Guarded staging recovery',strftime('%Y-%m-%dT%H:%M:%fZ','now','+10 minutes'))`)
+    .run(authorizationId, commandId, requestSha256, externalProjectId, sourceId, sourceInstanceId, applicationId,
+      historyEpochId, destination, owner.operationsStaffId, subject, owner.email);
+  assert.equal(queryOne(db, `SELECT count(*) count FROM project_alpha_project_v2_live_recovery_authorizations
+    WHERE actor_staff_id=?`, owner.operationsStaffId).count, 1);
+
+  assert.throws(() => applyMigration(db, artifact.revoke.sql, artifact.revoke.name, AUTHORITY_MIGRATIONS_TABLE));
+  assert.deepEqual(queryOne(db, "SELECT active,version FROM native_staff_admissions WHERE staff_id=?",
+    owner.operationsStaffId), { active: 1, version: 1 });
+  assert.deepEqual(queryOne(db, "SELECT active,version FROM native_project_grants WHERE staff_id=?",
+    owner.operationsStaffId), { active: 1, version: 1 });
+  assert.deepEqual(queryOne(db, "SELECT active FROM native_directory_grants WHERE staff_id=?",
+    owner.operationsStaffId), { active: 1 });
   assert.equal(queryOne(db, `SELECT count(*) count FROM ${AUTHORITY_MIGRATIONS_TABLE}`).count, 1);
   assert.equal(queryOne(db, "SELECT count(*) count FROM native_staff_bootstrap_receipts").count, 1);
   db.close();

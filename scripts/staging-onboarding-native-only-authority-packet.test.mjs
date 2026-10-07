@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import {createRequire} from 'node:module';
-import {STAGING_TARGET,nativeOnlyGrantIds,compileNativeOnlyAuthorityPacket,applyNativeOnlyAuthorityPacket} from './staging-onboarding-native-only-authority-packet.mjs';
+import {STAGING_TARGET,nativeOnlyGrantIds,nativeClientCreationGrantIds,compileNativeOnlyAuthorityPacket,applyNativeOnlyAuthorityPacket} from './staging-onboarding-native-only-authority-packet.mjs';
 
 const root=path.resolve(import.meta.dirname,'..');
 const requireOperations=createRequire(path.join(root,'apps/operations/package.json'));
@@ -15,7 +15,7 @@ const all=async(db,sql,...args)=>(await db.prepare(sql).bind(...args).all()).res
 const first=(db,sql,...args)=>db.prepare(sql).bind(...args).first();
 const apply=(db,packet)=>applyNativeOnlyAuthorityPacket(db,packet,{target:STAGING_TARGET});
 let counter=0;
-async function fixture(db){
+async function fixture(db,{clientCreation=false}={}){
   const n=++counter,staff=`staging-packet-operator-${n}`,area=`staging-native-only-test-${n}`,subject=`native|test-${n}`;
   await db.prepare('INSERT INTO staff_users(id,email,display_name,access_subject) VALUES(?,?,?,?)').bind(staff,`${staff}@example.test`,'Synthetic Operator',subject).run();
   await db.prepare('INSERT INTO native_staff_admissions(staff_id,bound_access_subject,active,admitted_by) VALUES(?,?,1,?)').bind(staff,subject,staff).run();
@@ -25,7 +25,7 @@ async function fixture(db){
     VALUES(?,?,'directory.profile.view','allow','global',1,?)`).bind(`existing-view-${n}`,staff,staff).run();
   const now=await first(db,"SELECT strftime('%Y-%m-%dT%H:%M:%fZ','now') stamp");
   const executedAt=now.stamp;
-  const values={schemaVersion:2,staging:{...STAGING_TARGET},phase:'provision',
+  const values={schemaVersion:clientCreation?3:2,staging:{...STAGING_TARGET},phase:'provision',
     admission:await first(db,'SELECT * FROM native_staff_admissions WHERE staff_id=?',staff),
     profile:await first(db,'SELECT * FROM native_staff_profiles WHERE staff_id=?',staff),
     generation:await first(db,'SELECT * FROM native_directory_grant_generations WHERE staff_id=?',staff),
@@ -35,7 +35,7 @@ async function fixture(db){
     approval:{approvalId:id(n*10+1),commandId:id(n*10+2),revokeApprovalId:id(n*10+3),revokeCommandId:id(n*10+4),
       issuedByStaffId:staff,issuedByAccessSubject:subject,issuedAt:new Date(Date.parse(executedAt)-60_000).toISOString(),
       expiresAt:new Date(Date.parse(executedAt)+3600_000).toISOString(),executedAt,
-      grantIds:nativeOnlyGrantIds(staff,area,id(n*10+1))},priorProvision:null};
+      grantIds:(clientCreation?nativeClientCreationGrantIds:nativeOnlyGrantIds)(staff,area,id(n*10+1))},priorProvision:null};
   return values;
 }
 async function snapshot(db,values){
@@ -97,12 +97,13 @@ async function seedDirectoryOutbox(db,values,state){
   return commandId;
 }
 
-test('guarded native-only packet against the complete current 171-migration schema',async t=>{
-  const mf=new Miniflare({modules:true,script:"export default {fetch(){return new Response('ok')}}",d1Databases:{DB:id(900)}});
+test('guarded native-only packet against the complete current 180-migration schema',async t=>{
+  const mf=new Miniflare({modules:true,script:"export default {fetch(){return new Response('ok')}}",
+    d1Databases:{DB:`${id(900)}-${crypto.randomUUID()}`},d1Persist:"./.tmp-checks/staging-native-only-authority"});
   try {
     const db=await mf.getD1Database('DB');
     const files=fs.readdirSync(path.join(root,'apps/operations/migrations')).filter(name=>/^\d{4}_.+\.sql$/.test(name)).sort();
-    assert.equal(files.length,171);
+    assert.equal(files.length,180);
     await db.prepare('CREATE TABLE d1_migrations(id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT UNIQUE NOT NULL,applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)').run();
     for(const name of files){
       const sql=fs.readFileSync(path.join(root,'apps/operations/migrations',name),'utf8').replace(/\r\n/g,'\n');
@@ -128,6 +129,80 @@ test('guarded native-only packet against the complete current 171-migration sche
       assert.equal(revoked.generation.generation,before.generation.generation+4);
       assert.deepEqual(await apply(db,packet),{replayed:true});
       assert.deepEqual(await snapshot(db,values),revoked,'provision replay cannot restore revoked authority');
+    });
+    await t.test('v3 client-creation packet provisions exactly three grants, replays, and revokes as one pair',async()=>{
+      const values=await fixture(db,{clientCreation:true}),before=await snapshot(db,values);
+      const packet=compileNativeOnlyAuthorityPacket(values);
+      assert.equal(packet.schemaVersion,3);
+      assert.deepEqual(await apply(db,packet),{replayed:false});
+      assert.deepEqual(await apply(db,packet),{replayed:true});
+      const after=await snapshot(db,values);
+      assert.deepEqual(after.admission,before.admission); assert.deepEqual(after.profile,before.profile);
+      assert.equal(after.generation.generation,before.generation.generation+3);
+      assert.equal(after.grants.length,before.grants.length+3);
+      assert.deepEqual(after.grants.filter(row=>values.approval.grantIds.includes(row.id)).map(row=>row.permission).sort(),[
+        'directory.enrollment.manage','directory.identity.link','directory.profile.edit']);
+      assert.deepEqual(after.grants.filter(row=>!values.approval.grantIds.includes(row.id)),before.grants);
+      assert.deepEqual(after.history.filter(row=>row.grant_generation<=before.generation.generation),before.history);
+      assert.deepEqual(after.receipts,[packet.receipt]);
+      const revoke=compileNativeOnlyAuthorityPacket(await revokeValues(db,values));
+      assert.equal(revoke.schemaVersion,3);
+      assert.deepEqual(await apply(db,revoke),{replayed:false});
+      assert.deepEqual(await apply(db,revoke),{replayed:true});
+      const revoked=await snapshot(db,values);
+      assert.deepEqual(revoked.admission,before.admission); assert.deepEqual(revoked.profile,before.profile);
+      assert.deepEqual(revoked.grants.filter(row=>!values.approval.grantIds.includes(row.id)),before.grants);
+      assert.ok(revoked.grants.filter(row=>values.approval.grantIds.includes(row.id)).every(row=>row.active===0));
+      assert.equal(revoked.generation.generation,before.generation.generation+6);
+      assert.deepEqual(await apply(db,packet),{replayed:true});
+      assert.deepEqual(await snapshot(db,values),revoked,'v3 provision replay cannot restore revoked authority');
+    });
+    await t.test('v3 rejects missing, extra, reordered, and v2 grant IDs before mutation',async()=>{
+      const values=await fixture(db,{clientCreation:true}),before=await snapshot(db,values);
+      for (const mutate of [
+        copy=>copy.approval.grantIds.pop(),
+        copy=>copy.approval.grantIds.push(id(999991)),
+        copy=>copy.approval.grantIds.reverse(),
+        copy=>{copy.approval.grantIds=nativeOnlyGrantIds(copy.admission.staff_id,copy.businessArea.id,copy.approval.approvalId);},
+      ]) {
+        const copy=structuredClone(values); mutate(copy);
+        assert.throws(()=>compileNativeOnlyAuthorityPacket(copy),/grant ids|permission-bound/);
+      }
+      assert.deepEqual(await snapshot(db,values),before);
+    });
+    for (const permission of ['directory.profile.edit','directory.identity.link','directory.enrollment.manage']) {
+      await t.test(`v3 rejects active ${permission} deny with exact rollback`,async()=>{
+        const values=await fixture(db,{clientCreation:true}),staff=values.admission.staff_id;
+        await db.prepare(`INSERT INTO native_directory_grants(id,staff_id,permission,effect,scope_kind,business_area_id,active,granted_by)
+          VALUES(?,?,?,'deny','business_area',?,1,?)`).bind(`deny-v3-${++counter}`,staff,permission,values.businessArea.id,staff).run();
+        const actual=await snapshot(db,values);
+        Object.assign(values,{grants:actual.grants,history:actual.history,generation:actual.generation});
+        const packet=compileNativeOnlyAuthorityPacket(values),before=await snapshot(db,values);
+        await assert.rejects(apply(db,packet));
+        assert.deepEqual(await snapshot(db,values),before);
+      });
+    }
+    await t.test('v3 revoke rejects target grant/history drift and leaves the drift untouched',async()=>{
+      const values=await fixture(db,{clientCreation:true}),packet=compileNativeOnlyAuthorityPacket(values);
+      await apply(db,packet);
+      await db.prepare('UPDATE native_directory_grants SET active=0 WHERE id=?').bind(values.approval.grantIds[2]).run();
+      const drifted=await snapshot(db,values);
+      const attempted={...structuredClone(values),phase:'revoke',admission:drifted.admission,profile:drifted.profile,
+        generation:drifted.generation,grants:drifted.grants,history:drifted.history,
+        priorProvision:{approval:await first(db,'SELECT * FROM native_staff_bootstrap_approvals WHERE approval_id=?',values.approval.approvalId),
+          receipt:await first(db,'SELECT * FROM native_staff_bootstrap_receipts WHERE command_id=?',values.approval.commandId)}};
+      assert.throws(()=>compileNativeOnlyAuthorityPacket(attempted),/exact active packet grants|required|modified since provision/);
+      assert.deepEqual(await snapshot(db,values),drifted);
+    });
+    await t.test('v3 failure after two grant inserts rolls back approval, grants, history and generation',async()=>{
+      const values=await fixture(db,{clientCreation:true}),packet=compileNativeOnlyAuthorityPacket(values);
+      const thirdId=values.approval.grantIds[2],trigger=`test_packet_v3_rollback_${++counter}`;
+      await db.prepare(`CREATE TRIGGER ${trigger} BEFORE INSERT ON native_directory_grants WHEN NEW.id='${thirdId}' BEGIN
+        SELECT RAISE(ABORT,'injected before third v3 grant');
+      END`).run();
+      const before=await snapshot(db,values);
+      try {await assert.rejects(apply(db,packet)); assert.deepEqual(await snapshot(db,values),before);}
+      finally {await db.prepare(`DROP TRIGGER ${trigger}`).run();}
     });
     for(const kind of ['generation','admission-timestamp','profile-timestamp','history-timestamp','missing-grant','extra-grant','stale-subject','expired','deny-fresh-readback','active-work','migration-ledger']){
       await t.test(`rejects ${kind} with exact full rollback`,async()=>{

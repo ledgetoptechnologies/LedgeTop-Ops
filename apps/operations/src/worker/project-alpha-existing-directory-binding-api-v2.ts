@@ -1,5 +1,5 @@
 import {
-  boundedJsonWithBytes, canonicalConnection, decimal, endpoint, exact, externalId, generation, isFailure,
+  boundedJsonOrEmpty, boundedJsonWithBytes, canonicalConnection, decimal, endpoint, exact, externalId, generation, isFailure,
   nextGeneration, plain, post, publicId, runPreflight, uuid,
   type ProjectAlphaProjectFailure,
 } from "./project-alpha-project-transport";
@@ -117,10 +117,14 @@ async function sendDirect(kind: ProjectAlphaExistingDirectoryBindingKind, inputC
   const response = await post(connection, route(kind), canonical.body, fetcher, [200, 409]);
   if (isFailure(response)) return response;
   try {
-    const decoded = await boundedJsonWithBytes(response), requestId = response.headers.get("X-Request-ID");
-    if (response.status === 409) return conflict(decoded.value, requestId)
-      ? { status: "conflict", reason: "http_status", httpStatus: 409, ...(requestId ? { requestId } : {}) }
-      : { status: "uncertain", reason: "invalid_contract", httpStatus: 409 };
+    const requestId = response.headers.get("X-Request-ID");
+    if (response.status === 409) {
+      const decoded = await boundedJsonOrEmpty(response);
+      return decoded.empty || conflict(decoded.value, requestId)
+        ? { status: "conflict", reason: "http_status", httpStatus: 409, ...(requestId ? { requestId } : {}) }
+        : { status: "uncertain", reason: "invalid_contract", httpStatus: 409 };
+    }
+    const decoded = await boundedJsonWithBytes(response);
     if (!success(decoded.value, kind, canonical.command, connection, requestId))
       return { status: "uncertain", reason: "invalid_contract", httpStatus: 200 };
     const outcome: ProjectAlphaExistingDirectoryBindingOutcome = {

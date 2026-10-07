@@ -26,10 +26,10 @@ const AREA_ID = /^staging-native-only-[a-z0-9-]+$/;
 const AREA_KEYS = Object.freeze(["id", "name", "active"]);
 const RESERVED_D1_TABLES = Object.freeze(new Set(["_cf_KV"]));
 const CHAIN = Object.freeze({
-  count: 171,
-  final: "0171_project_alpha_active_directory_update_guard.sql",
-  names: "bc4590b90cccd1842b2496906986355cfde7522e970ac3ec95039cace437f61d",
-  contents: "e3feca1f403a06f15495017fd843ac48173e39be2478f8d6b5060c262c0b1f5c",
+  count: 180,
+  final: "0180_project_alpha_project_v2_recovery_authorization.sql",
+  names: "8d7fdaaa7b453b32dd5e67d1a670554bc1c03aedf41c8ecadaddbbccf632e266",
+  contents: "6603a620f33f7d6cd88e23189203ddcb8a753b16167cd5e8ae427a31cf51b4b3",
 });
 
 const all = async (db, sql, ...args) => (await db.prepare(sql).bind(...args).all()).results;
@@ -514,9 +514,10 @@ export async function closeStagingNativeAuthorityWindow(configPath, provisionPat
 function parseArguments(argv) {
   const values = [...argv];
   const action = values.shift();
-  if (action === "prepare" && values.length === 6 && values[0] === "--config"
+  if (action === "prepare" && values.length === 7 && values[0] === "--config"
     && values[2] === "--area-id" && values[4] === "--area-name"
-    && values[1] && values[3] && values[5]) {
+    && values[1] && values[3] && values[5]
+    && values[6] === "--confirm-staging-synthetic-area-create") {
     return {
       action,
       configPath: values[1],
@@ -538,7 +539,7 @@ function parseArguments(argv) {
     && values[0] === "--config" && values[2] === "--recover" && values[1] && values[3]) {
     return { action: "close", configPath: values[1], provisionPath: values[3] };
   }
-  fail("usage: prepare --config <exact-staging-binding.json> --area-id <fresh-synthetic-area-id> --area-name <exact-area-name> | open --config <exact-staging-binding.json> --area-id <same-area-id> --area-name <same-area-name> [--window-minutes <1-240>] | close --config <exact-staging-binding.json> --recover <private-provision.json>");
+  fail("usage: prepare --config <exact-staging-binding.json> --area-id <fresh-synthetic-area-id> --area-name <exact-area-name> --confirm-staging-synthetic-area-create | open --config <exact-staging-binding.json> --area-id <same-area-id> --area-name <same-area-name> [--window-minutes <1-240>] | close --config <exact-staging-binding.json> --recover <private-provision.json>");
 }
 
 export async function main(argv = process.argv.slice(2), dependencies = {}) {

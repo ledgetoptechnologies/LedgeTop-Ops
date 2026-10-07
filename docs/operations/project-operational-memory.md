@@ -2,6 +2,16 @@
 
 Status: backend contract and staff project-workspace integration implemented locally; publication and live acceptance remain pending.
 
+**Authority note (2026-10-06):** this document describes an earlier Client Hub
+implementation backed by Project Alpha projections. It remains useful for the
+staff-only overlay schema and safety controls, but its assumption that PA is
+the authority for shared customer/project identity is superseded by the owner's
+approved API-first design. Operations now owns the shared client/project
+identity and portal membership; PA retains its own mapped financial records.
+Before extending this feature, reconcile its lookup, assignment, and lifecycle
+paths with the current one-to-one Ops↔PA mapping rather than treating a PA
+projection as canonical.
+
 ## Authority boundary
 
 Project Alpha remains authoritative for client and organization records, projects, project lifecycle, billing, portal access, account roles, recipients, and notifications. Operations stores only two staff-facing overlays on an exact projected project:

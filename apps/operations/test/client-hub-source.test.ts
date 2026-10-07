@@ -2,7 +2,8 @@ import { Miniflare } from "miniflare";
 import { readFileSync } from "node:fs";
 import { afterEach, describe, expect, it } from "vitest";
 import { clientHubAlphaInternalId, hasClientHubActiveDirectoryMappings, isAlphaPublicId, readClientHubSourcePublicId,
-  resolveClientHubSourceRoot, resolveClientHubSourceRootByAlphaIdentity, sourcePublicIdExpression } from "../src/worker/client-hub-source";
+  resolveClientHubSourceRoot, resolveClientHubSourceRootByAlphaIdentity, resolveClientHubSourceRootByAlphaPublicId,
+  sourcePublicIdExpression } from "../src/worker/client-hub-source";
 import { applyConnectorSchema, registerVisibleTestSource } from "./helpers/project-alpha-connectors";
 
 let runtime: Miniflare | undefined;
@@ -84,7 +85,9 @@ describe("explicit Alpha source public IDs", () => {
       projection_source_id TEXT NOT NULL DEFAULT 'project-alpha:primary');
       CREATE TABLE pa_clients(id TEXT PRIMARY KEY,name TEXT,organization_id TEXT,active INTEGER,payload_json TEXT,
       projection_source_id TEXT NOT NULL DEFAULT 'project-alpha:primary');
-      CREATE TABLE operations_directory_records(record_id TEXT PRIMARY KEY,record_kind TEXT);
+      CREATE TABLE operations_directory_records(record_id TEXT PRIMARY KEY,record_kind TEXT,current_version INTEGER);
+      CREATE TABLE operations_directory_revisions(record_id TEXT,version INTEGER,profile_json TEXT,PRIMARY KEY(record_id,version));
+      CREATE TABLE operations_directory_client_organizations(client_record_id TEXT PRIMARY KEY,organization_record_id TEXT);
       CREATE TABLE active_mapping_rows(source_id TEXT,resource_type TEXT,record_id TEXT,external_id TEXT,
         project_alpha_public_id TEXT,source_instance_id TEXT,application_id TEXT,history_epoch_id TEXT,active INTEGER);
       CREATE VIEW project_alpha_active_directory_mappings AS SELECT source_id,resource_type,record_id,external_id,
@@ -93,9 +96,10 @@ describe("explicit Alpha source public IDs", () => {
     expect(await db.prepare("SELECT type FROM sqlite_master WHERE name='project_alpha_active_directory_mappings'").first("type")).toBe("view");
     expect(await hasClientHubActiveDirectoryMappings(db)).toBe(true);
     await db.batch([
-      db.prepare("INSERT INTO operations_directory_records VALUES('ops-org','organization'),('ops-duplicate','organization'),('ops-inactive','organization')"),
-      db.prepare("INSERT INTO pa_organizations VALUES('pa-v2-org','Acquired business',1,?,'project-alpha:primary')")
-        .bind(JSON.stringify({ public_id: publicId })),
+      db.prepare("INSERT INTO operations_directory_records VALUES('ops-org','organization',2),('ops-duplicate','organization',1),('ops-inactive','organization',1)"),
+      db.prepare(`INSERT INTO operations_directory_revisions VALUES
+        ('ops-org',1,'{"name":"Old name"}'),('ops-org',2,'{"name":"Canonical business"}'),
+        ('ops-duplicate',1,'{"name":"Duplicate"}'),('ops-inactive',1,'{"name":"Inactive"}')`),
       db.prepare(`INSERT INTO active_mapping_rows VALUES
         ('project-alpha:primary','organization','ops-org','pa-v2-org',?,?,?,?,1),
         ('project-alpha:primary','organization','ops-org','pa-v2-org',?,?,?,?,1),
@@ -106,9 +110,13 @@ describe("explicit Alpha source public IDs", () => {
     ]);
     const env = configuredEnv(db);
     expect(await resolveClientHubSourceRoot(env, "organization", "ops-org"))
-      .toMatchObject({ id: "ops-org", pa_internal_id: "pa-v2-org", display_name: "Acquired business", pa_public_id: publicId, mapping_status: "mapped" });
+      .toMatchObject({ id: "ops-org", pa_internal_id: "pa-v2-org", display_name: "Canonical business", pa_public_id: publicId, mapping_status: "mapped" });
     expect(await resolveClientHubSourceRootByAlphaIdentity(env, "organization", "pa-v2-org", "project-alpha:primary", publicId))
       .toMatchObject({ id: "ops-org", pa_internal_id: "pa-v2-org", pa_public_id: publicId });
+    expect(await resolveClientHubSourceRootByAlphaPublicId(env, "organization", "project-alpha:primary", publicId))
+      .toMatchObject({ id: "ops-org", pa_internal_id: "pa-v2-org", pa_public_id: publicId, display_name: "Canonical business" });
+    expect(await resolveClientHubSourceRootByAlphaPublicId(env, "organization", "project-alpha:primary", "1".repeat(32)))
+      .toBeNull();
     expect(await resolveClientHubSourceRootByAlphaIdentity(env, "organization", "pa-v2-org", "project-alpha:primary", "1".repeat(32)))
       .toBeNull();
     expect(await resolveClientHubSourceRoot(env, "organization", "pa-v2-org")).toBeNull();

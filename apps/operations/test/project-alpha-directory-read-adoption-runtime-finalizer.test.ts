@@ -63,7 +63,9 @@ describe("Project Alpha Directory sealed-review runtime finalizer", () => {
       request_sha256: await sha({ fieldReviewReceiptId: receiptId, actor }), field_review_receipt_id: receiptId,
       source_id: "project-alpha:test", source_instance_id: "80000000-0000-4000-8000-000000000008",
       application_id: "90000000-0000-4000-8000-000000000009", history_epoch_id: "a0000000-0000-4000-8000-00000000000a",
-      resource_type: "client", record_id: "ops-1", project_alpha_public_id: publicId, project_alpha_revision: "5",
+      resource_type: "client", record_id: "ops-1", reviewed_external_id: "pa-client-77", target_external_id: "ops-1",
+      acquisition_external_id: "pa-client-77", acquisition_identity_mode: "preserve_reviewed",
+      project_alpha_public_id: publicId, project_alpha_revision: "5",
       authorization_generation: "9", local_record_version: 7, local_profile_sha256: "b".repeat(64),
       project_alpha_profile_sha256: await sha(remoteProfile), reviewer_staff_id: actor.staffId,
       reviewer_access_subject: actor.accessSubject, reviewer_admission_version: actor.admissionVersion,
@@ -107,7 +109,8 @@ describe("Project Alpha Directory sealed-review runtime finalizer", () => {
     expect(deps.applyLocalProfile).toHaveBeenCalledTimes(1);
     expect(deps.acquire).toHaveBeenCalledTimes(2);
     expect((deps.acquire.mock.calls as unknown[][])[1]![1]).toEqual(firstCommand);
-    expect(firstCommand).toMatchObject({ commandId, reviewId, expectedAuthorizationGeneration: "9", localRecordVersion: 8 });
+    expect(firstCommand).toMatchObject({ commandId, reviewId, recordId: "ops-1", externalId: "pa-client-77",
+      expectedAuthorizationGeneration: "9", localRecordVersion: 8 });
   });
 
   it("resumes activation after PA bind succeeds without a second local apply or a new command", async () => {

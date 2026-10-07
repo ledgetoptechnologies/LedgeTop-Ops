@@ -209,13 +209,13 @@ function authorized(rows: readonly Grant[], externalProjectId: string, scopes: r
 }
 async function oneMapping(db: D1Database, connection: Configured, kind: "organization" | "client", publicId: string | null): Promise<string | null | undefined> {
   if (publicId === null) return null;
-  const result = await db.prepare(`SELECT mapping.external_id FROM project_alpha_active_directory_mappings mapping
-    JOIN operations_directory_records record ON record.record_id=mapping.external_id AND record.record_kind=?
+  const result = await db.prepare(`SELECT mapping.record_id FROM project_alpha_active_directory_mappings mapping
+    JOIN operations_directory_records record ON record.record_id=mapping.record_id AND record.record_kind=?
     WHERE mapping.source_id=? AND mapping.source_instance_id=? AND mapping.application_id=? AND mapping.history_epoch_id=?
-      AND mapping.resource_type=? AND mapping.project_alpha_public_id=? ORDER BY mapping.external_id`)
+      AND mapping.resource_type=? AND mapping.project_alpha_public_id=? ORDER BY mapping.record_id`)
     .bind(kind, connection.sourceId, connection.sourceInstanceId, connection.applicationId,
-      connection.historyEpochId, kind, publicId).all<{ external_id: string }>();
-  return result.results.length === 1 ? result.results[0]!.external_id : undefined;
+      connection.historyEpochId, kind, publicId).all<{ record_id: string }>();
+  return result.results.length === 1 ? result.results[0]!.record_id : undefined;
 }
 async function directoryIdentity(db: D1Database, connection: Configured,
   organizationPublicId: string | null, clientPublicId: string | null): Promise<DirectoryIdentity | null | "relationship"> {

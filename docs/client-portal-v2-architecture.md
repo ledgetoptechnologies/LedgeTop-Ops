@@ -1,4 +1,4 @@
-# Client portal v2: locked Project Alpha compatibility contract
+# Client portal v2: locked Operations / Project Alpha compatibility contract
 
 Status: **approved target architecture; not the current production contract**.
 
@@ -10,28 +10,58 @@ or Project Alpha data change.
 
 ## Ownership and trust boundaries
 
-Project Alpha (PA) is the source of truth for:
+This section supersedes the earlier PA-owned directory proposal. The approved
+target makes Operations the normal system of record for shared customer and
+operational data while keeping Project Alpha generic and fully usable on its
+own. This is the target contract, not a claim that production or staging has
+completed the cutover.
 
-- organizations, departments, clients, projects, and their stable public IDs;
-- portal role and entitlement intent;
-- the Service Library, service availability, and client-facing pricing policy;
-- quotes, contracts, invoices, tax, totals, currency, approval, signing, payment,
-  and every financial communication.
+Operations is the source of truth for:
 
-LTDS is the source of truth for:
+- shared organizations, customer units, clients, stable Operations record IDs,
+  service enrollment, and portal workspace membership;
+- staff identity, roles, scoped grants, invitations, and client-access lifecycle;
+- projects, service requests, work status, client-visible operational history,
+  delivery folder bindings, file authorization, and the canonical Operations
+  authorization audit;
+- verified portal identities, local guest grants, discussions, request
+  attachments, and operational review.
 
-- verified portal identities, invitations, effective workspace membership, and
-  local guest grants;
-- service-request drafts, immutable submitted revisions, Mapbox work geometry,
-  request attachments, discussions, and operational review;
-- delivery folder bindings, file authorization, public-share capabilities,
-  notification inboxes, and the canonical LTDS authorization audit;
-- an explicitly labeled, non-binding price hint observed from PA.
+Project Alpha (PA) remains the financial system of record for:
 
-Operations is the staff collaboration and execution interface. It may ask PA to
-create a draft quote through the command described below, but it does not
-calculate a binding price, write quote lines directly, approve or send a quote,
-or become a second financial system of record.
+- quotes, contracts, invoices, tax, totals, currency, approval, signing,
+  payment, issued-document snapshots, and financial communications;
+- service catalog and pricing policy, where configured by that PA instance.
+
+Shared client information has one normal editor: Operations. PA offers an
+optional, generic externally-managed/read-only directory mode only when a
+configured API-v2 application has the relevant client-write capability. That
+mode is separate from API-key permissions and is enforced server-side; it does
+not alter PA behavior for standalone users. Operations must continue to work
+when PA is unavailable. A PA outage queues or blocks only PA-dependent sync or
+financial actions; ten minutes is the owner-notification threshold, not an Ops
+shutdown timer.
+
+Projects may be created and edited from either Operations or PA. A durable,
+explicit one-to-one mapping connects one Operations project to one project in
+one chosen PA instance. Both systems show the linked project with one shared
+name; changes use source versions, idempotent delivery, and conflict review
+rather than name matching or silent last-write-wins. A project in PA is not
+automatically duplicated into a second PA instance. Project linkage alone does
+not grant client visibility: the Operations-managed client membership and
+service authorization determine whether it appears in the portal. If no client
+is linked/enrolled, it remains staff-only.
+
+PA-origin edits enter through the private Operations reconciliation/review
+workflow. Its explicit feature flag remains false in production until the
+staging acceptance and owner production checkpoint are complete; enabling it
+does not bypass administrator, current-scope, evidence, or conflict checks.
+Deployment environment labels are not treated as authorization.
+
+Operations does not calculate binding prices, write quote lines directly,
+approve or send quotes, or become a second financial system of record. It may
+request an explicitly supported PA financial action, and presents returned
+financial state with its source and freshness.
 
 The browser never calls a PA integration endpoint. Dedicated server-to-server
 routes use a separate integration principal and narrowly scoped credentials.
@@ -41,26 +71,28 @@ credential is accepted as PA integration authority.
 
 ### Portal hierarchy and effective authorization
 
-- A workspace represents exactly one PA organization or one standalone PA
-  client. Departments, clients, and projects remain scoped children.
-- PA publishes portal authorization intent. LTDS mirrors that intent but makes
-  the final decision from the active source entity, active entitlement, verified
+- A workspace represents exactly one Operations customer organization or one
+  standalone client, as explicitly modeled in Operations. Customer units,
+  billing entities, clients, and projects remain distinct scoped records; a
+  unit label alone never merges separate billing entities.
+- Operations owns portal authorization intent and makes the final access
+  decision from the active Operations customer/service relationship, verified
   identity, workspace membership, scoped capability, folder binding, and any
-  explicit deny. A synchronized contact or primary-contact flag grants nothing.
+  explicit deny. PA contact data, a matching email, or a primary-contact flag
+  grants nothing.
 - One global verified identity may hold independent memberships in several
   workspaces. Their dashboards, searches, notifications, and data never merge.
-- PA supports multiple organization administrators, department heads scoped to
-  one department, and project managers scoped to one project. PA staff appoint
-  and replace those PA-backed managers through the audited PA authority screen.
-  A portal manager may invite ordinary LTDS-local guests only inside a scope
-  where the manager already holds `member.manage`; invitations never grant
-  `member.manage` or create another PA-backed manager.
-- Client-invited members and subcontractors may remain LTDS-local guests. They
-  are not silently added to PA's CRM. Promotion to a management role requires
-  an explicit PA portal principal/entitlement.
+- Operations staff assign organization, unit, client, project, and service
+  access through audited Operations grants. Any delegated manager is constrained
+  to the scopes and actions explicitly granted in Operations; an employee's
+  Operations account does not create or elevate a separate PA staff account.
+- Client-invited members may be local portal guests when the authorized
+  Operations policy permits it. They are not silently added as PA CRM contacts.
+  Invitations and synchronized contact records do not grant staff or management
+  permissions.
 - Project scope is the invitation default. Organization-wide access requires an
-  organization administrator and a prominent warning. The default project
-  expiry is 30 days after PA marks the project complete.
+  authorized manager and a prominent warning. The default project expiry is 30
+  days after Operations records project completion.
 - Removing an individual administrator removes that person's authority without
   deleting workspace-owned memberships or links. Removing the final
   administrator locks management until Operations appoints a replacement.
@@ -90,7 +122,7 @@ credential is accepted as PA integration authority.
   context. Staff delivery cookies are not accepted, and the delegated
   DeliveryApp namespace never calls the staff `/api/public` surface.
 - Client APIs carry only opaque staff-provisioned folder target IDs. Every
-  public request rechecks live identity, membership, PA hierarchy and deny
+  public request rechecks live identity, membership, Operations hierarchy and deny
   precedence, the exact entitlement/delegation versions, binding version,
   strict descendant containment, expiry and revocation. Exact-root selection
   is denied unless staff explicitly approved it.
@@ -98,48 +130,63 @@ credential is accepted as PA integration authority.
   binding returns an auditable receipt. `DELIVERY_TOKEN_SECRET` must never be
   copied into the client Worker.
 
-### Versioned portal directory projection
+### Versioned bidirectional customer and project synchronization
 
-PA supplies a separately gated portal-v2 complete snapshot and incremental
-event profile. It includes organizations, departments, clients, department
-contacts, projects with department relationship, portal principals, and scoped
-portal entitlements. Every resource uses a stable public ID, source version,
-active state, and tombstone/removal signal. Project Alpha writes a source
-mutation and its outbox event transactionally.
+The supported shared boundary is the generic, permission-scoped Project Alpha
+API—not a special PA custom integration or a second client-portal authority.
+Operations stores canonical client, organization/unit, project, service, and
+portal-membership state. Each PA instance retains its own stable local IDs and
+financial records; an explicit one-to-one mapping relates a shared Operations
+record to the matching PA record in that instance. A customer can be present in
+one or both PA instances without merging their separate billing entities or
+financial ledgers.
 
-LTDS applies complete generations to shadow tables before authorization cutover.
-It advances a consumer checkpoint only after every required LTDS projection is
-committed. Interrupted, partial, out-of-order, duplicated, or split-destination
-delivery retains the last-known-good authorization state and remains retryable.
-The existing v1 projection remains unchanged until portal-v2 parity is recorded.
+Operations-originated changes are committed locally with a durable,
+idempotent per-PA outbox command. PA-originated supported edits are accepted as
+versioned events/changes and reconciled back to the same Operations identity.
+Every command and event is bound to the selected PA application, instance,
+history epoch, resource ID, expected version, and idempotency identity. Lost
+responses are recovered by reading the original command/result; retries do not
+create duplicates. Out-of-order, duplicate, partial, and split-destination
+delivery remains replayable without advancing a checkpoint prematurely. A
+conflicting edit is held for review rather than resolved by name matching or
+silent last-write-wins.
 
-Project Alpha publishes every portal delivery as the strict outer integration
-event `event_type: "portal.projection"` through its one External Operations
-connection at Ops Sync. Ops Sync authenticates and records the source event,
-then privately invokes the Client Worker's named portal-projection entrypoint.
-Project Alpha does not call the Client Worker, an internal HTTP route, or a
-`portal.*` hostname directly. The internal receiver
-is behind the independent exact flag `PROJECT_ALPHA_PORTAL_SYNC_ENABLED=false`
-and additive migration 0125. Receiver enablement does not enable
-`CLIENT_PORTAL_HIERARCHY_V2_ENABLED`. The former direct portal-v2 HTTP routes
-are not mounted, and `PROJECT_ALPHA_PORTAL_DIRECT_HTTP_ENABLED` remains exactly
-`false` as defense in depth. PA principal
-rows are authorization intent only: an LTDS-controlled, provider-verified
-identity binding is required before any projected membership or entitlement is
-effective. Email hints and primary-contact flags never bind or grant access.
-The Project Alpha event envelope and the distinct Operations-internal delivery
-envelope are documented in [the Project Alpha integration guide](project-alpha.md).
+PA's optional directory-managed/read-only policy is distinct from token scopes
+and is enabled only when an administrator explicitly selects it and a bound
+API application actually has client-write capability. All related PA mutation
+paths enforce the policy server-side. When that mode is off, Project Alpha
+continues to operate as a standalone application with its normal local client
+management. Neither a PA contact row nor a PA portal-role/entitlement record
+grants Operations client access. Operations issues portal invitations and
+evaluates verified identity, active customer/service membership, scoped
+capability, folder binding, deny state, expiry, and revocation itself.
 
-Cross-repository compatibility is executable, not prose-only. The shared
-corpus contains strict positive and negative specimens for portal projection
-and activation (`packages/shared/fixtures/project-alpha-portal-v2.json`), the
-independently gated relation/lifecycle projection
-(`project-alpha-portal-relations-v3.json`), the catalog
-(`project-alpha-catalog-v2.json`), pricing authorization
-(`project-alpha-pricing-hint-v1.json`), and the private draft-quote command
-(`project-alpha-draft-quote-v1.json`). LTDS consumer tests and Project Alpha
-producer/receiver tests must consume equivalent byte-for-byte copies before any
-independent feature flag is enabled.
+If PA is unavailable, Operations still accepts authorized local work and keeps
+PA-dependent changes pending per instance. Financial or PA-only actions remain
+unavailable until the relevant PA responds; stale financial data is labeled
+with its source and observation time. The owner is alerted after ten minutes
+of continuous outage, but Operations does not shut down. Existing PA public
+links are read from PA and are never rewritten, invalidated, or replaced by
+directory synchronization.
+
+Cross-repository compatibility is executable, not prose-only. Shared fixtures
+and repository tests pin API envelopes, strict field allowlists,
+source/application/history identity, stable IDs, versions, idempotency, and
+negative authorization cases. Existing `portal.projection` fixtures and
+receivers are compatibility artifacts only; they do not override the
+Operations-owned source-of-truth and membership decisions above. Project Alpha
+must keep generic labels, API scopes, and documentation suitable for
+open-source users who do not run Operations.
+
+### Historical PA-owned relation and entitlement design (reference only)
+
+The design notes in this subsection and the detailed portal-v2 receiver,
+PA-backed manager, and portal-entitlement material that follows were written
+for the superseded PA-owned directory proposal. They are retained only as
+technical history and must not be implemented as the current portal authority
+model. Current authority boundaries and sync rules are defined above; the
+checklist below has been narrowed to PA API compatibility.
 
 ### Relation-compatible authorization foundation
 
@@ -490,24 +537,28 @@ so the write path can be disabled without breaking request intake.
   idempotency replay/conflict counts, draft command outcomes, and audit
   correlation across both systems.
 
-## Exact Project Alpha compatibility checklist
+## Exact Project Alpha API compatibility checklist
 
 The Project Alpha implementation is compatible only when every item below is
 demonstrated with tests and recorded evidence:
 
-- [ ] Every organization, department, client, project, Service Library entry,
-  portal principal, and portal entitlement used by LTDS has an immutable opaque
-  public ID; database IDs never cross the contract.
-- [ ] The portal-v2 snapshot/events cover organization, department, client,
-  department contact, project relationship, portal principal, and scoped
-  entitlement with source versions and tombstones.
-- [ ] PA can represent multiple organization administrators, department heads,
-  and project managers without treating a primary contact as authorization.
-- [ ] Source removal/reparenting emits enough authoritative state for LTDS to
-  suspend the exact scope and descendants; replay/out-of-order delivery cannot
-  restore stale access.
-- [ ] PA remains authoritative for hierarchy, Service Library data, pricing
-  policy, quotes, contracts, invoices, tax, payments, and financial messages.
+- [ ] Every PA organization, department/unit, client, project, and Service
+  Library resource exchanged with Operations has a stable opaque API ID;
+  database IDs never cross the contract. Operations IDs remain canonical for
+  shared customer and portal membership records.
+- [ ] API-v2 inventory, create/update, relationship, and lifecycle events carry
+  source/application/history identity, stable IDs, source versions, and
+  tombstone/removal state. They do not project PA portal principals or make PA
+  the authority for Operations client access.
+- [ ] Operations remains authoritative for shared customer hierarchy, service
+  enrollment, verified portal membership, and access decisions. PA may hold
+  explicit mapped customer/project counterparts for its financial workflows.
+- [ ] Mapping, update, and removal receipts are exact-instance and
+  version-bound; replay/out-of-order delivery cannot overwrite a newer source
+  version or silently broaden client access.
+- [ ] PA remains authoritative for its Service Library and pricing policy,
+  quotes, contracts, invoices, tax, payments, issued financial documents, and
+  financial communications.
 - [ ] A versioned, paginated, complete-generation catalog endpoint returns only
   active, explicitly requestable, sanitized service fields.
 - [ ] Every service and catalog generation has an opaque change version and PA

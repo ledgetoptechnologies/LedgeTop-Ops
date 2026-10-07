@@ -431,9 +431,9 @@ test("requires every portal-v2 and Operations capability to be explicitly false"
 });
 
 test("pins the native portal, the complete Operations chain, both 0199 files, and the 0200-0228 release contract", () => {
-  assert.equal(REQUIRED_STAGING_MIGRATIONS.operations.length, 158);
+  assert.equal(REQUIRED_STAGING_MIGRATIONS.operations.length, 167);
   assert.equal(REQUIRED_STAGING_MIGRATIONS.operations[0], "0014_staff_acl_controls.sql");
-  assert.equal(REQUIRED_STAGING_MIGRATIONS.operations.at(-1), "0171_project_alpha_active_directory_update_guard.sql");
+  assert.equal(REQUIRED_STAGING_MIGRATIONS.operations.at(-1), "0180_project_alpha_project_v2_recovery_authorization.sql");
   assert.deepEqual(REQUIRED_STAGING_MIGRATIONS.delivery.slice(-46), [
     "0184_native_client_feedback.sql",
     "0185_native_service_request_ownership.sql",
@@ -532,6 +532,15 @@ test("pins the native portal, the complete Operations chain, both 0199 files, an
     "0169_project_alpha_existing_directory_binding_generation_evidence.sql",
     "0170_project_alpha_active_directory_project_guard.sql",
     "0171_project_alpha_active_directory_update_guard.sql",
+    "0172_project_alpha_active_directory_consumer_guards.sql",
+    "0173_operations_directory_intent_acquired_destination_transition.sql",
+    "0174_project_alpha_directory_preserved_external_identity.sql",
+    "0175_operations_directory_acquired_parent_enrollment_identity.sql",
+    "0176_operations_directory_acquired_intent_authority.sql",
+    "0177_operations_directory_acquired_intent_update_authority.sql",
+    "0178_project_alpha_project_inbound_reconciliation.sql",
+    "0179_project_alpha_acquired_native_identity_collision.sql",
+    "0180_project_alpha_project_v2_recovery_authorization.sql",
   ]);
   const nativeDirectoryStart = REQUIRED_STAGING_MIGRATIONS.operations.indexOf("0054_project_alpha_directory_outbox.sql");
   assert.deepEqual(REQUIRED_STAGING_MIGRATIONS.operations.slice(nativeDirectoryStart, nativeDirectoryStart + 3), [
@@ -550,6 +559,17 @@ test("pins the native portal, the complete Operations chain, both 0199 files, an
     assert(STAGING_ALLOWED_VAR_NAMES.operations.includes(flag), flag);
     assert.equal(STAGING_STATIC_VARS.operations[flag], "false", flag);
   }
+  assert(REQUIRED_DISABLED_FEATURE_FLAGS.operations.includes("PROJECT_ALPHA_PROJECT_V2_RECOVERY_ENABLED"));
+  assert(STAGING_ALLOWED_VAR_NAMES.operations.includes("PROJECT_ALPHA_PROJECT_V2_RECOVERY_ENABLED"));
+  assert.equal(STAGING_STATIC_VARS.operations.PROJECT_ALPHA_PROJECT_V2_RECOVERY_ENABLED, "false");
+  for (const flag of ["NATIVE_DIRECTORY_PROFILE_WRITES_ENABLED", "NATIVE_DIRECTORY_OUTBOX_DRAIN_ENABLED"]) {
+    assert(REQUIRED_DISABLED_FEATURE_FLAGS.operations.includes(flag), flag);
+    assert(STAGING_ALLOWED_VAR_NAMES.operations.includes(flag), flag);
+    assert.equal(STAGING_STATIC_VARS.operations[flag], "false", flag);
+  }
+  assert(REQUIRED_DISABLED_FEATURE_FLAGS.operations.includes("PROJECT_ALPHA_PROJECT_INBOUND_RECONCILIATION_ENABLED"));
+  assert(STAGING_ALLOWED_VAR_NAMES.operations.includes("PROJECT_ALPHA_PROJECT_INBOUND_RECONCILIATION_ENABLED"));
+  assert.equal(STAGING_STATIC_VARS.operations.PROJECT_ALPHA_PROJECT_INBOUND_RECONCILIATION_ENABLED, "false");
   assert.equal(STAGING_STATIC_VARS.delivery.PROJECT_ALPHA_PORTAL_SYNC_ENABLED, "true");
   assert.equal(STAGING_STATIC_VARS.delivery.PROJECT_ALPHA_PORTAL_DIRECT_HTTP_ENABLED, "false");
   assert.equal(STAGING_STATIC_VARS.delivery.PROJECT_ALPHA_PORTAL_APPLICATION_KEY, STAGING_STATIC_VARS["ops-sync"].APPLICATION_KEY);

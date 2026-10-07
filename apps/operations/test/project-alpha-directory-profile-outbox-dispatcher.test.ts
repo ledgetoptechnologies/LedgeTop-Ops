@@ -29,7 +29,8 @@ function capabilities() {
     grantedCapabilities: ["api.capabilities.read", "directory.organizations.create", "directory.organizations.write", "directory.clients.create", "directory.clients.write"].map(name => ({ name })),
     implementedEndpoints: [{ method: "GET", path: "/api/v2/capabilities", requiredCapability: "api.capabilities.read" }, ...endpoints] };
 }
-function transport(publicId: string, generation: string, posts: unknown[], failure?: number, expire?: () => Promise<void>) {
+function transport(publicId: string, generation: string, posts: unknown[], failure?: number, expire?: () => Promise<void>,
+  responseRevision = "2", replayed = false) {
   return vi.fn<typeof fetch>(async (url, init) => {
     const path = new URL(String(url)).pathname;
     const kind = path.includes("/clients") ? "client" : "organization";
@@ -37,8 +38,8 @@ function transport(publicId: string, generation: string, posts: unknown[], failu
     if (path.endsWith("/capabilities")) return json(capabilities());
     const body = JSON.parse(String(init?.body)); posts.push(body); if (expire) await expire();
     if (failure) return json({}, failure);
-    return json({ sourceInstanceId: source, applicationId: application, historyEpoch: epoch, requestId, replayed: false,
-      result: { resource: update ? { type: kind, publicId, revision: "2" }
+    return json({ sourceInstanceId: source, applicationId: application, historyEpoch: epoch, requestId, replayed,
+      result: { resource: update ? { type: kind, publicId, revision: responseRevision }
         : { type: kind, id: body.externalId, publicId, revision: "1" }, authorizationGeneration: generation } }, update ? 200 : 201);
   });
 }
@@ -110,7 +111,7 @@ beforeAll(async () => {
   runtime = new Miniflare({ modules: true, compatibilityDate: "2026-08-06", script: "export default {fetch(){return new Response('ok')}}", d1Databases: ["OPS_DB"] });
   db = await runtime.getD1Database("OPS_DB") as D1Database;
   const directory = new URL("../migrations/", import.meta.url);
-  for (const migration of readdirSync(directory).filter(name => /^\d{4}_.+\.sql$/.test(name) && name.slice(0, 4) <= "0135").sort())
+  for (const migration of readdirSync(directory).filter(name => /^\d{4}_.+\.sql$/.test(name) && name.slice(0, 4) <= "0175").sort())
     await db.batch(splitD1MigrationStatements(readFileSync(new URL(migration, directory), "utf8")).map(sql => db.prepare(sql)));
   await db.batch([
     db.prepare("INSERT INTO staff_users(id,email,display_name,access_subject,status) VALUES('owner','owner@example.test','Owner','access|owner','active')"),
@@ -157,16 +158,35 @@ describe("native Directory profile outbox dispatcher", () => {
         externalCanonicalId: organization.input.recordId, expectedAuthorizationGeneration: "1" }], actor: organization.staff } as NativeDirectoryProfileWrite);
     if (parentUpdate.status !== "written") throw new Error(parentUpdate.reason);
     await expect(dispatchProjectAlphaDirectoryProfileOutboxCommand(env(), sourceId, parentUpdate.commandIds[0]!,
-      transport(parentPublicId, "2", []))).resolves.toMatchObject({ status: "acknowledged", revision: "2" });
+      transport(parentPublicId, "1", []))).resolves.toMatchObject({ status: "acknowledged", revision: "2" });
 
     const client = await create("client", organization.input.recordId), posts: unknown[] = [];
     await expect(dispatchProjectAlphaDirectoryProfileOutboxCommand(env(), sourceId, client.commandId,
-      transport("8".repeat(32), "3", posts))).resolves.toMatchObject({ status: "acknowledged", revision: "1" });
+      transport("8".repeat(32), "1", posts))).resolves.toMatchObject({ status: "acknowledged", revision: "1" });
     expect(posts).toEqual([{ commandId: client.commandId, externalId: client.input.recordId,
       expectedAuthorizationGeneration: "0", profile: clientProfile,
       organization: { externalId: organization.input.recordId, expectedRevision: "2" } }]);
     expect(await db.prepare(`SELECT evidence_kind,parent_public_id FROM operations_directory_intent_relationship_dependencies
       WHERE client_record_id=?`).bind(client.input.recordId).first()).toEqual({ evidence_kind: "existing_mapping", parent_public_id: parentPublicId });
+
+    const negativeClient = await create("client", organization.input.recordId), noSend = vi.fn<typeof fetch>();
+    const corruptedAck = new Proxy(db, { get(target, property) {
+      if (property === "prepare") return (sql: string) => {
+        const statement = target.prepare(sql);
+        if (!sql.includes("FROM operations_directory_intent_relationship_dependencies dependency")) return statement;
+        return { bind(...values: unknown[]) {
+          const bound = statement.bind(...values);
+          return { async all() {
+            const result = await bound.all<Record<string, unknown>>();
+            return { ...result, results: result.results.map(row => ({ ...row, parent_ack_revision: "99" })) };
+          } };
+        } } as unknown as D1PreparedStatement;
+      };
+      const member = target[property as keyof D1Database]; return typeof member === "function" ? member.bind(target) : member;
+    } }) as D1Database;
+    await expect(dispatchProjectAlphaDirectoryProfileOutboxCommand({ ...env(), OPS_DB: corruptedAck }, sourceId,
+      negativeClient.commandId, noSend)).resolves.toEqual({ status: "conflict", reason: "command" });
+    expect(noSend).not.toHaveBeenCalled();
   });
 
   it("retries an uncertain request with the same command and safely terminalizes a trusted conflict", async () => {
@@ -206,7 +226,7 @@ describe("native Directory profile outbox dispatcher", () => {
         ...(kind === "client" ? { relationship: { organizationRecordId: null, expectedRelationshipVersion: 1 } } : {}) } as NativeDirectoryProfileWrite);
       if (result.status !== "written") throw new Error(result.reason);
       const posts: unknown[] = [];
-      await expect(dispatchProjectAlphaDirectoryProfileOutboxCommand(env(), sourceId, result.commandIds[0]!, transport(publicId, "2", posts)))
+      await expect(dispatchProjectAlphaDirectoryProfileOutboxCommand(env(), sourceId, result.commandIds[0]!, transport(publicId, "1", posts)))
         .resolves.toMatchObject({ status: "acknowledged", publicId, revision: "2" });
       expect(posts).toEqual([{ commandId: result.commandIds[0], expectedRevision: "1", expectedAuthorizationGeneration: "1", profile }]);
       expect(await db.prepare("SELECT * FROM project_alpha_directory_mappings WHERE command_id=?").bind(value.commandId).first()).toEqual(beforeMapping);
@@ -215,44 +235,45 @@ describe("native Directory profile outbox dispatcher", () => {
     }
   });
 
-  it("updates an acquired active mapping without synthesizing legacy state and uses its acknowledgement for the next edit", async () => {
-    const value = await create("organization"), publicId = "d".repeat(32);
-    const acknowledgedCreate = JSON.stringify({ status: "acknowledged", response: { sourceInstanceId: source, applicationId: application,
-      historyEpoch: epoch, result: { resource: { type: "organization", id: value.input.recordId, publicId, revision: "1" }, authorizationGeneration: "1" } } });
-    await db.batch([
-      db.prepare("UPDATE project_alpha_directory_outbox SET state='leased',lease_token='fixture',lease_expires_at=9999999999999 WHERE command_id=?").bind(value.commandId),
-      db.prepare("UPDATE project_alpha_directory_outbox SET state='acknowledged',outcome_json=?,lease_token=NULL,lease_expires_at=NULL WHERE command_id=?").bind(acknowledgedCreate, value.commandId),
-      db.prepare("UPDATE operations_directory_intents SET state='acknowledged' WHERE mutation_id=?").bind(value.input.mutationId),
-    ]);
-    const fake = (result: Record<string, unknown> | null) => ({ bind() { return this; }, async first() { return result; } }) as D1PreparedStatement;
-    const acquired = new Proxy(db, { get(target, property) {
-      if (property === "prepare") return (sql: string) => {
-        if (sql.includes("FROM project_alpha_active_directory_mappings")) return fake({ project_alpha_public_id: publicId,
-          projectAlphaPublicId: publicId, mapping_kind: "acquired", mappingKind: "acquired", provenanceId: "activation" });
-        if (sql.includes("FROM project_alpha_existing_directory_binding_revision_refresh_receipts")) return fake(null);
-        if (sql.includes("FROM project_alpha_existing_directory_binding_activation_receipts")) return fake({ revision: "1" });
-        return target.prepare(sql);
-      };
-      const member = target[property as keyof D1Database]; return typeof member === "function" ? member.bind(target) : member;
-    } }) as D1Database;
-    const firstProfile = { ...organizationProfile, city: "Dallas" }, firstMutation = uuid();
-    const first = await writeNativeDirectoryProfile(acquired, { operation: "update", mutationId: firstMutation, recordId: value.input.recordId,
-      expectedLocalVersion: 1, kind: "organization", profile: firstProfile,
-      destinations: [{ sourceId, sourceInstanceUUID: source, applicationUUID: application, historyEpoch: epoch, origin: baseUrl,
-        externalCanonicalId: value.input.recordId, expectedAuthorizationGeneration: "1" }], actor: value.staff } as NativeDirectoryProfileWrite);
-    if (first.status !== "written") throw new Error(first.reason);
-    await expect(dispatchProjectAlphaDirectoryProfileOutboxCommand({ ...env(), OPS_DB: acquired }, sourceId, first.commandIds[0]!, transport(publicId, "2", [])))
-      .resolves.toMatchObject({ status: "acknowledged", revision: "2" });
-    expect(await db.prepare("SELECT count(*) n FROM project_alpha_directory_mappings WHERE external_id=?").bind(value.input.recordId).first("n")).toBe(0);
+  it("accepts only the exact successor revision for update acknowledgements, including PA replay responses", async () => {
+    for (const response of [
+      { revision: "1", replayed: false },
+      { revision: "3", replayed: false },
+      { revision: "1", replayed: true },
+      { revision: "3", replayed: true },
+    ]) {
+      const value = await create("organization"), publicId = (sequence++).toString(16).padStart(32, "0");
+      await expect(dispatchProjectAlphaDirectoryProfileOutboxCommand(env(), sourceId, value.commandId,
+        transport(publicId, "1", []))).resolves.toMatchObject({ status: "acknowledged", revision: "1" });
+      const update = await writeNativeDirectoryProfile(db, { operation: "update", mutationId: uuid(),
+        recordId: value.input.recordId, expectedLocalVersion: 1, kind: "organization",
+        profile: { ...organizationProfile, name: `Revision ${response.revision}` },
+        destinations: [{ sourceId, sourceInstanceUUID: source, applicationUUID: application, historyEpoch: epoch, origin: baseUrl,
+          externalCanonicalId: value.input.recordId, expectedAuthorizationGeneration: "1" }], actor: value.staff } as NativeDirectoryProfileWrite);
+      if (update.status !== "written") throw new Error(update.reason);
+      const commandId = update.commandIds[0]!;
+      await expect(dispatchProjectAlphaDirectoryProfileOutboxCommand(env(), sourceId, commandId,
+        transport(publicId, "1", [], undefined, undefined, response.revision, response.replayed)))
+        .resolves.toMatchObject({ status: "uncertain" });
+      expect(await db.prepare("SELECT state FROM project_alpha_directory_outbox WHERE command_id=?").bind(commandId).first("state"))
+        .toBe("pending");
+    }
 
-    const second = await writeNativeDirectoryProfile(acquired, { operation: "update", mutationId: uuid(), recordId: value.input.recordId,
-      expectedLocalVersion: 2, kind: "organization", profile: { ...firstProfile, city: "Houston" },
+    const accepted = await create("organization"), publicId = (sequence++).toString(16).padStart(32, "0");
+    await dispatchProjectAlphaDirectoryProfileOutboxCommand(env(), sourceId, accepted.commandId, transport(publicId, "1", []));
+    const update = await writeNativeDirectoryProfile(db, { operation: "update", mutationId: uuid(), recordId: accepted.input.recordId,
+      expectedLocalVersion: 1, kind: "organization", profile: { ...organizationProfile, name: "Exact successor" },
       destinations: [{ sourceId, sourceInstanceUUID: source, applicationUUID: application, historyEpoch: epoch, origin: baseUrl,
-        externalCanonicalId: value.input.recordId, expectedAuthorizationGeneration: "2" }], actor: value.staff } as NativeDirectoryProfileWrite);
-    if (second.status !== "written") throw new Error(second.reason);
-    expect(JSON.parse((await db.prepare("SELECT command_json FROM project_alpha_directory_outbox WHERE command_id=?")
-      .bind(second.commandIds[0]).first<string>("command_json"))!)).toMatchObject({ expectedProjectAlphaPublicId: publicId,
-        expectedRevision: "2", expectedAuthorizationGeneration: "2" });
+        externalCanonicalId: accepted.input.recordId, expectedAuthorizationGeneration: "1" }], actor: accepted.staff } as NativeDirectoryProfileWrite);
+    if (update.status !== "written") throw new Error(update.reason);
+    await expect(dispatchProjectAlphaDirectoryProfileOutboxCommand(env(), sourceId, update.commandIds[0]!,
+      transport(publicId, "1", [], undefined, undefined, "2", true)))
+      .resolves.toMatchObject({ status: "acknowledged", revision: "2", replayed: true });
+
+    await db.prepare(`UPDATE project_alpha_directory_outbox SET outcome_json=json_set(outcome_json,
+      '$.response.result.resource.revision','3') WHERE command_id=?`).bind(update.commandIds[0]!).run();
+    await expect(dispatchProjectAlphaDirectoryProfileOutboxCommand(env(), sourceId, update.commandIds[0]!, vi.fn<typeof fetch>()))
+      .resolves.toEqual({ status: "uncertain", reason: "evidence" });
   });
 
   it("rechecks identity and current authority, and an expired settlement lease makes no partial acknowledgement", async () => {

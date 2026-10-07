@@ -92,6 +92,17 @@ this repository, a Wrangler config, or `staging-config-values.json`):
 }
 ```
 
+The API-v2 command, sync, and health-monitor paths use the same strict parser
+for this deployment envelope. Keep `sourceId` unique and do not configure the
+same PA `sourceInstanceId` + `applicationId` under multiple Operations source
+IDs. Separate PA instances may share a gateway origin or repeat UUID values
+across installations; every request is still pinned to that entry's source
+instance, application, and history epoch and fails closed on a capability
+identity mismatch. The historical monitor-only `connections` array form is
+normalized through the same validator; an omitted `enabled` is interpreted as
+active only for that compatibility form. Prefer the `instances` map above,
+where omitted `enabled` remains disabled.
+
 The separately authorized, disposable Project Alpha Directory API-v2
 rehearsal is documented in
 [pa-api-v2-directory-acceptance.md](pa-api-v2-directory-acceptance.md). It

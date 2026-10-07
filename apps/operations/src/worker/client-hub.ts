@@ -6,7 +6,8 @@ import { sqlScope } from "./acl";
 import { clientHubDetailPath, clientHubRouteKind, findClientHubRoot, listClientHubRoots,
   isClientHubRootNamespace, isClientHubSource, type ClientHubKind, type ClientHubReviewAuthority, type ClientHubRoot } from "./client-hub-directory";
 import { isAlphaPublicId, isBusinessProjectionSource, resolveClientHubSourceRoot,
-  resolveClientHubSourceRootByAlphaIdentity, validatedUniquePublicIdExpression } from "./client-hub-source";
+  resolveClientHubSourceRootByAlphaIdentity, resolveClientHubSourceRootByAlphaPublicId,
+  validatedUniquePublicIdExpression } from "./client-hub-source";
 import { resolveClientHubWorkspace, type ClientHubWorkspace } from "./client-hub-workspace";
 import { CLIENT_HUB_COLLECTIONS, createClientHubCollectionContext, isClientHubCollection, listClientHubCollection,
   type ClientHubCollectionContext, type ClientHubPermissions } from "./client-hub-collections";
@@ -115,6 +116,9 @@ async function businessAlias(env: Env, root: WorkspaceRow, portal: ClientHubWork
   const candidates = new Map<string, { internalId: string; expectedPublicId: string | null }>();
   const publicId = portal.root_type === "organization" ? portal.pa_organization_public_id : portal.pa_client_public_id;
   if (isAlphaPublicId(publicId)) {
+    const mappedSource = await resolveClientHubSourceRootByAlphaPublicId(env, root.kind, "project-alpha:primary", publicId);
+    if (mappedSource?.active && (root.kind !== "standalone_client" || mappedSource.organization_id === null))
+      candidates.set(JSON.stringify([mappedSource.pa_internal_id, publicId]), { internalId: mappedSource.pa_internal_id, expectedPublicId: publicId });
     const table = portal.root_type === "organization" ? "pa_organizations" : "pa_clients";
     const rows = await env.OPS_DB.withSession("first-primary").prepare(`SELECT source.id FROM ${table} source
       WHERE source.active=1 AND source.projection_source_id='project-alpha:primary' ${portal.root_type === "standalone_client" ? "AND source.organization_id IS NULL" : ""}

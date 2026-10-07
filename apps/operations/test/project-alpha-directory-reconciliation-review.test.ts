@@ -1,6 +1,7 @@
-import { readFileSync } from "node:fs";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Miniflare } from "miniflare";
+import { readFileSync } from "node:fs";
+import { splitD1MigrationStatements } from "../../client/test/helpers/d1-migrations";
 import { acquireProjectAlphaDirectoryReconciliationFinding,
   listProjectAlphaDirectoryReconciliationFindings,
   listProjectAlphaDirectoryReconciliationRecords,
@@ -124,6 +125,10 @@ beforeEach(async () => {
   `);
   await apply(readFileSync(new URL("../migrations/0136_project_alpha_directory_reconciliation.sql", import.meta.url), "utf8"));
   await apply(readFileSync(new URL("../migrations/0138_project_alpha_directory_reconciliation_review.sql", import.meta.url), "utf8"));
+  await apply("CREATE TABLE project_alpha_directory_read_adoption_finalizations(reviewed_external_id TEXT);");
+  await db.batch(splitD1MigrationStatements(readFileSync(new URL(
+    "../migrations/0174_project_alpha_directory_preserved_external_identity.sql", import.meta.url), "utf8"))
+    .map(statement => db.prepare(statement)));
 });
 afterEach(async () => runtime.dispose());
 

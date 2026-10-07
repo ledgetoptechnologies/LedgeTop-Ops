@@ -1,5 +1,21 @@
 # Staging release gate and command packet
 
+## Candidate migrations 0174–0180: partial-apply recovery rule
+
+- Treat migrations 0174 through 0180 as an ordered, forward-only sequence, not
+  one atomic batch. A failure after any migration leaves that migration and all
+  earlier successful migrations applied.
+- Keep API-v2 write gates and client-access activation disabled throughout the
+  sequence. Do not reopen writers between individual migration applications.
+- After an interruption, read the Ops migration ledger and verify each applied
+  migration against the repository's pinned checksum before proceeding. Repair
+  the failed migration forward, then continue with the next unapplied migration;
+  do not delete ledger rows, replay applied SQL, or claim rollback restored the
+  pre-migration schema.
+- Re-run the release checker and postflight schema/readback checks against the
+  exact staging database before any joined acceptance mutation. Keep production
+  unchanged until the separate owner checkpoint.
+
 ## October 4, 2026 local project-list checkpoint
 
 - The broader local integration run passed 47/47 tests across acquisition,
@@ -43,6 +59,55 @@
 - Production PA update, production client access, existing public links, and
   production cutover remain unchanged and unproven. Joined staging sync and
   recipient/file-access acceptance are still required before the owner checkpoint.
+
+## October 7, 2026 — Operations 0174-0180 coordinated cutover gate
+
+- Operations migrations `0174` through `0180` are not rolling-compatible with
+  the currently deployed Worker. Migration `0174` makes the preserved
+  acquisition identity mandatory for new finalizations, while the candidate
+  Worker also reads schema introduced by `0178` and `0180`. Use this exact
+  staged cutover order: (1) build and review one candidate Worker with every
+  new Directory/Project mutation route and acceptance flag default-off; (2)
+  deploy that compatibility Worker while the current schema is still at
+  `0173`, verify health and legacy read paths, and confirm the new mutation
+  routes remain unavailable; (3) quiesce legacy and API-v2 Directory/Project
+  writers and drain in-flight work; (4) take and verify a restorable D1
+  snapshot and run the populated preflights below against `0173`; (5) apply
+  `0174`–`0180` sequentially in ledger order while keeping every writer
+  quiesced; (6) deploy the exact same reviewed
+  Worker artifact/configuration again, verify health/schema compatibility and
+  default-off mutation gates, then reopen only the separately approved
+  staging acceptance window. D1 does not make this multi-migration suffix
+  atomic: if any migration fails, keep all writers quiesced, record the exact
+  applied ledger head, and use a reviewed fix-forward plan before continuing.
+  Never apply the suffix while an old Worker can write, and never resume
+  writers or acceptance while D1 is at an intermediate suffix revision.
+- Before applying the suffix, run populated staging preflights against the
+  actual `0173` state. Migration `0174` must find no existing adoption
+  finalization and no unresolved reconciliation action; migration `0179` must
+  find no legacy/acquired external-ID or public-ID collision. An empty-schema
+  migration replay is insufficient evidence for either gate. Preserve the
+  readback and prove that a rejected preflight leaves no partial DDL.
+- Local D1 tests cover exact post-ack replay after a one-time authorization is
+  consumed, without repeating the Project Alpha POST; a narrower expiry-after-
+  activation regression was added but could not be run on this Windows host
+  because Workerd terminated before assertions. Linux CI must verify that
+  case. The new 0179 Node/SQLite suite passes 121 cases: 24 legacy↔acquired
+  preflight intersections, 36 acquired↔acquired preflight intersections, the
+  same-receipt identity-mismatch preflight, 24 legacy↔acquired insertion
+  directions, and 36 acquired insertion intersections. Each preflight case
+  asserts failure and preservation of the prior guards in a transaction. This
+  is local SQLite evidence, not a populated staging D1 rehearsal. Do not close
+  either release gate until Linux CI verifies the recovery-expiry case and a
+  populated staging preflight succeeds against the live D1 migration runner.
+  Workerd CI and populated staging migration/runtime acceptance remain
+  mandatory before release.
+- This cutover changes durable authorization, reconciliation, settlement, and
+  activation state. A Worker-only rollback is unsafe after the suffix accepts
+  writes. Before the window, take and verify a restorable D1 backup. If the
+  cutover fails before writes resume, restore that database with the matching
+  prior Worker; after new-schema writes resume, retain the compatible schema
+  and use a reviewed forward fix rather than deploying the old Worker alone.
 
 This packet prepares commands; it does not authorize running them. Keep the
 client portal, Dropbox, Google, permanent purge, and incoming uploads disabled.
@@ -258,7 +323,16 @@ status/hash evidence without recording the URL or session cookie.
 The route also requires `ENVIRONMENT="staging"` in code and stays hidden in
 production even if its mutable flag drifts.
 `PROJECT_ALPHA_PROJECT_V2_ACTIVATION_ENABLED` is required to be `false` in the
-release-preparation configuration. A separately approved staging-only window
+release-preparation configuration. `PROJECT_ALPHA_PROJECT_INBOUND_RECONCILIATION_ENABLED`
+must also remain explicitly `false` in the baseline; it is a separate
+reviewed project workflow and cannot be activated by the joined project-v2
+profile. The route is gated by this explicit flag in every environment and
+also requires its authenticated administrator, current grants, and durable
+review evidence; production remains false until a separate owner-approved
+post-staging rollout. `PROJECT_ALPHA_PROJECT_V2_RECOVERY_ENABLED` must likewise remain
+explicitly `false` in release-preparation and production configuration;
+migration `0180` adds recovery authorization storage but does not activate the
+operator-only recovery route. A separately approved staging-only window
 may set it to `true` only after Operations migrations `0119`–`0122` are applied
 and verified, the disposable PA source/application entry is explicitly enabled,
 and the same administrator has current global `integrations.manage` plus a
@@ -518,7 +592,7 @@ secret. The earlier snapshot retained `PENDING_OPERATIONS_COMMIT`; do not turn
 that placeholder or a dirty worktree HEAD into evidence. The later
 contract-only commit pins its executable SHA without making the release-packet
 HEAD self-referential. The current candidate inventory extends through Client
-`0228` and Operations `0171`, including both distinct Client `0199` filenames.
+`0228` and Operations `0180`, including both distinct Client `0199` filenames.
 The
 Operations runtime candidate remains `PENDING_OPERATIONS_COMMIT` until the
 combined portal and API-v2 sync/read-adoption candidate is committed, pushed,
@@ -687,7 +761,7 @@ partially migrated database must never use the bootstrap configs. Attach both
 generated manifests and complete `migrations.freshBootstrap`; the current
 schema-version-2 proof requires a new truthful empty-D1 rehearsal with the
 current `BOOTSTRAP_APPS` ledger counts, both Client `0199` filenames exactly
-once, final `0228`/`0171`, canonical-human absence, the one synthetic owner and
+once, final `0228`/`0180`, canonical-human absence, the one synthetic owner and
 its role, the retained Operations ACL catalog, no pending reapply, and an empty
 foreign-key check.
 
@@ -781,7 +855,7 @@ apply time and is the explicit exception to this packet's normal
 migration-first order. Confirm every predecessor is already applied; otherwise
 resolve those predecessors in a separately reviewed release.
 
-For Operations, preserve the full ordered `0054` through `0171` suffix in the
+For Operations, preserve the full ordered `0054` through `0180` suffix in the
 remote Wrangler ledger. Attach the list output that proves every filename is in
 the exact checked-in order, with no duplicate, renamed, skipped, or unexpected
 row. A local migration-chain run, a directory listing, or a successful raw SQL
@@ -794,7 +868,11 @@ The local preflight additionally locks the newly reviewed suffix bytes:
 `0162`=`4bd97d25bd96a0a872bd3106ab936ab3fe1806b7456aec6cf02c92195715d1b0`,
 `0163`=`ef4abf5411e8fd4e10d4daeb94dd4ca3469ae7d179d2b135a9d04ca4a0cf12aa`,
 `0170`=`68c1680a8def3ce75049323c6fc492436e5faa3ba80506a9a42eee4f24ca9c39`,
-and `0171`=`313b2b91eb422792a0c758d5525ee173b44b488e0d7797363acb8ce4d53ba8d8`.
+`0171`=`313b2b91eb422792a0c758d5525ee173b44b488e0d7797363acb8ce4d53ba8d8`,
+`0172`=`8bff055cd1c2100e4c9bc0d86f471223e9a9f393e3b3396c3e3e2ded78159677`,
+`0178`=`eb92d93138a75329003eb18c06d714a6fb8365fcc383982a58939a9ab6969e60`,
+`0179`=`58a00c5c0c9ddf5892062d17b3e1e7bccd47705c97777454f042cb28cdb922f7`,
+and `0180`=`deb385a1f97f2e82c7b4e634e19ae7fd406efe6368e89ac0085aed440a2a3528`.
 Any content change requires an explicit contract/checksum review; never edit an
 already-applied migration to make a later rollout pass.
 
@@ -804,7 +882,7 @@ all are terminal or deliberately cancelled, then close mutation ingress and
 drain HTTP requests, queue consumers, leases, schedulers, and reconciliation
 batches. The evidence must prove this quiescent state and name the compatible
 Operations writer version already handling all traffic. Do not apply the
-`0054`-through-`0171` suffix while an old writer, an in-flight fence,
+`0054`-through-`0180` suffix while an old writer, an in-flight fence,
 or a scheduled/retry worker can
 commit a pre-migration assumption. Keep the compatible writer in place through
 the final ledger readback; use a compatible fix forward, never a pre-suffix
@@ -869,6 +947,11 @@ hoc, edit the migration ledger, or execute these files as raw SQL.
    applications with every user-facing portal capability still default-off,
    receiver sync true, direct portal HTTP false, and the private Ops Sync to
    Client binding verified.
+   **Current-plan hold:** this historical sequence stops at Client `0195`,
+   while the canonical current migration set continues through Client `0228`.
+   Do not treat the steps above as a complete current Client migration plan or
+   apply the remaining files until their per-migration compatible-writer,
+   preflight, feature-flag, and rollback barriers are documented and reviewed.
 5. Record `serviceAssignmentV2ExpandApplied`, the compatible writer version,
    `serviceAssignmentOldWritersDrained`,
    `serviceAssignmentContractMigrationsApplied`, and the barrier evidence
@@ -888,12 +971,17 @@ intentionally reserved), apply `0172_project_access_authority_history.sql`
 only at its writer-first barrier, then `0173`-`0179` with `0179` as the final
 expand step. Apply `0180`-`0183` only after the compatible-writer drain above,
 then apply `0184`-`0195` migration-first before the paired final applications.
+This sequence is incomplete for the current inventory: Client migrations
+`0196`-`0228` are also required by the canonical manifest. Stop at `0195`
+until their exact barriers and paired deployment order are documented; do not
+claim current migration completion or run an all-pending apply from this older
+sequence.
 Confirm Operations
 `0014_staff_acl_controls.sql` through
 `0052_project_operational_reassignment_recovery.sql` and
 `0053_project_internal_notes.sql`, then Operations `0054` through
 `0139_native_directory_staging_empty_enrollment_fixture_guard.sql` through
-`0171_project_alpha_active_directory_update_guard.sql` in
+`0180_project_alpha_project_v2_recovery_authorization.sql` in
 that exact ledger order. Migration `0100` removes
 `share_version` from the delivery-grant parent key so existing share
 rotation/revocation updates cannot be blocked by a portal grant; the grant

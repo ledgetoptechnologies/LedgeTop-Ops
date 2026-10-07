@@ -86,7 +86,7 @@ async function receipt(db: D1Database, receiptId: string): Promise<Receipt | nul
       outbox.expected_history_epoch_id outbox_history_epoch_id,proof.grant_generation
     FROM project_alpha_project_v2_success_receipts receipt
     JOIN project_alpha_project_outbox outbox ON outbox.command_id=receipt.command_id
-    LEFT JOIN native_project_live_command_proofs proof ON proof.command_id=outbox.command_id
+    LEFT JOIN project_alpha_project_v2_live_settlement_proofs proof ON proof.command_id=outbox.command_id
       AND proof.external_project_id=outbox.external_project_id
       AND proof.verified_until>strftime('%Y-%m-%dT%H:%M:%fZ','now')
     WHERE receipt.receipt_id=? AND outbox.operation IN ('create','update','bind')`).bind(receiptId).first<Receipt>();
@@ -112,7 +112,7 @@ function sameMapping(value: Mapping | null, expected: Intent): boolean {
     && value.project_alpha_public_id === expected.expected_project_alpha_public_id;
 }
 async function current(db: D1Database, value: Intent): Promise<"ok" | "authority" | "stale"> {
-  const proof = await db.prepare(`SELECT 1 present FROM native_project_live_command_proofs proof
+  const proof = await db.prepare(`SELECT 1 present FROM project_alpha_project_v2_live_settlement_proofs proof
     WHERE proof.command_id=? AND proof.external_project_id=? AND proof.grant_generation=?
       AND proof.verified_until>strftime('%Y-%m-%dT%H:%M:%fZ','now')`)
     .bind(value.command_id, value.external_project_id, value.expected_grant_generation).first("present");

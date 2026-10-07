@@ -19,6 +19,11 @@ const profileActor={staffId:actor.staffId,accessSubject:actor.accessSubject,admi
   loginEmail:actor.loginEmail,profileVersion:1,selectedIdentityGrantId:actor.selectedIdentityGrantId};
 function uuid(){return`00000000-0000-4000-8000-${String(sequence++).padStart(12,"0")}`;}
 function publicId(){return(sequence++).toString(16).padStart(32,"0");}
+async function seedSyntheticActiveMapping(recordId:string,kind:"organization"|"client",externalId:string,projectAlphaPublicId:string){
+  await db.prepare(`INSERT INTO writer_test_active_mapping_rows(source_id,resource_type,record_id,external_id,
+    project_alpha_public_id,source_instance_id,application_id,history_epoch_id,provenance_id,mapping_kind)
+    VALUES(?,?,?,?,?,?,?,?,?,'acquired')`).bind(sourceId,kind,recordId,externalId,projectAlphaPublicId,source,application,epoch,uuid()).run();
+}
 function destination(recordId:string,second=false,originOverride=baseUrl){return{sourceId:second?"project-alpha:secondary":sourceId,
   sourceInstanceUUID:second?"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa":source,applicationUUID:second?"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb":application,
   historyEpoch:second?"cccccccc-cccc-4ccc-8ccc-cccccccccccc":epoch,origin:second?"https://pa-secondary.example.test":originOverride,
@@ -77,10 +82,27 @@ function transport(action:"assign"|"move"|"remove",clientId:string,organizationI
     result:{action,client:{publicId:clientId,revision},organizationPublicId:organizationId,authorizationGeneration:generation}});});}
 
 beforeAll(async()=>{runtime=new Miniflare({modules:true,compatibilityDate:"2026-08-06",script:"export default {fetch(){return new Response('ok')}}",d1Databases:["OPS_DB"]});db=await runtime.getD1Database("OPS_DB") as D1Database;
-  const directory=new URL("../migrations/",import.meta.url);for(const migration of readdirSync(directory).filter(name=>/^\d{4}_.+\.sql$/.test(name)&&name.slice(0,4)<="0135").sort())
+  const directory=new URL("../migrations/",import.meta.url);for(const migration of readdirSync(directory).filter(name=>/^\d{4}_.+\.sql$/.test(name)&&name.slice(0,4)<="0173").sort())
     try{await db.batch(splitD1MigrationStatements(readFileSync(new URL(migration,directory),"utf8")).map(sql=>db.prepare(sql)));}catch(error){throw new Error(`migration ${migration}: ${String(error)}`);}
+  await db.exec(`CREATE TABLE writer_test_active_mapping_rows(source_id TEXT,resource_type TEXT,record_id TEXT,external_id TEXT,
+    project_alpha_public_id TEXT,source_instance_id TEXT,application_id TEXT,history_epoch_id TEXT,provenance_id TEXT,
+    mapping_kind TEXT,created_at TEXT DEFAULT(strftime('%Y-%m-%dT%H:%M:%fZ','now')));
+    DROP VIEW project_alpha_active_directory_mappings;
+    CREATE VIEW project_alpha_active_directory_mappings AS
+      SELECT source_id,resource_type,external_id AS record_id,external_id,project_alpha_public_id,source_instance_id,
+        application_id,history_epoch_id,command_id AS provenance_id,'legacy' AS mapping_kind,created_at
+      FROM project_alpha_directory_mappings
+      UNION ALL
+      SELECT source_id,resource_type,record_id,external_id,project_alpha_public_id,source_instance_id,
+        application_id,history_epoch_id,activation_id AS provenance_id,'acquired' AS mapping_kind,activated_at AS created_at
+      FROM project_alpha_existing_directory_binding_activation_receipts
+      UNION ALL
+      SELECT source_id,resource_type,record_id,external_id,project_alpha_public_id,source_instance_id,
+        application_id,history_epoch_id,provenance_id,mapping_kind,created_at FROM writer_test_active_mapping_rows;`
+    .replace(/\s*\n\s*/g," "));
   await db.batch([db.prepare("INSERT INTO staff_users(id,email,display_name,access_subject,status) VALUES('owner','owner@example.test','Owner','access|owner','active')"),
     db.prepare("INSERT INTO staff_users(id,email,display_name,access_subject,status) VALUES(?,?,?,?, 'active')").bind(actor.staffId,actor.email,"Relationship Actor",actor.accessSubject),
+    db.prepare("INSERT INTO staff_role_assignments(id,staff_id,role_id,scope,scope_key) VALUES(?,?,'role-owner','global','global')").bind(`owner-${actor.staffId}`,actor.staffId),
     db.prepare("INSERT INTO native_staff_admissions(staff_id,bound_access_subject,active,admitted_by) VALUES(?,?,1,'owner')").bind(actor.staffId,actor.accessSubject),
     db.prepare("INSERT INTO native_staff_profiles(staff_id,login_email,display_name) VALUES(?,?,?)").bind(actor.staffId,actor.email,"Relationship Actor"),
     db.prepare("INSERT INTO native_directory_grants(id,staff_id,permission,effect,scope_kind,granted_by) VALUES(?,?,'directory.profile.edit','allow','global','owner')").bind(actor.selectedGrantId,actor.staffId),
@@ -91,6 +113,28 @@ beforeAll(async()=>{runtime=new Miniflare({modules:true,compatibilityDate:"2026-
 afterAll(async()=>runtime.dispose());
 
 describe("native Directory relationship writer and outbox",()=>{
+  it("rejects swapped or unproved Ops-to-PA mapping pairs without mutating the relationship",async()=>{
+    const organization=await create("organization",false,`ops/org/split-${sequence++}`),
+      client=await create("client",false,`ops/client/split-${sequence++}`),organizationExternalId=`pa/org/split-${sequence++}`,
+      clientExternalId=`pa/client/split-${sequence++}`;
+    const originalOrganizationEnrollment = await db.prepare("SELECT destinations_json FROM native_directory_enrollments WHERE record_id=?")
+      .bind(organization.recordId).first("destinations_json");
+    const originalClientEnrollment = await db.prepare("SELECT destinations_json FROM native_directory_enrollments WHERE record_id=?")
+      .bind(client.recordId).first("destinations_json");
+    await seedSyntheticActiveMapping(client.recordId,"client",clientExternalId,publicId());
+    await seedSyntheticActiveMapping(organizationExternalId,"organization",organization.recordId,publicId());
+    await expect(writeNativeDirectoryRelationship(db,writeInput(client.recordId,1,null,
+      {recordId:organization.recordId,expectedRecordVersion:1}))).resolves.toEqual({status:"blocked",reason:"mapping_evidence"});
+    expect(await db.prepare("SELECT organization_record_id,relationship_version FROM operations_directory_client_organizations WHERE client_record_id=?")
+      .bind(client.recordId).first()).toEqual({organization_record_id:null,relationship_version:1});
+    expect(await db.prepare("SELECT count(*) n FROM project_alpha_directory_relationship_outbox WHERE client_record_id=?")
+      .bind(client.recordId).first("n")).toBe(0);
+    expect(await db.prepare("SELECT destinations_json FROM native_directory_enrollments WHERE record_id=?")
+      .bind(organization.recordId).first("destinations_json")).toBe(originalOrganizationEnrollment);
+    expect(await db.prepare("SELECT destinations_json FROM native_directory_enrollments WHERE record_id=?")
+      .bind(client.recordId).first("destinations_json")).toBe(originalClientEnrollment);
+  });
+
   it("assigns, moves, and removes with explicit versions, exact replay, and no public-link mutation",async()=>{const first=await create("organization"),second=await create("organization"),client=await create("client");
     const firstPublic=await acknowledge(first,"organization","1"),secondPublic=await acknowledge(second,"organization","2"),clientPublic=await acknowledge(client,"client","3");
     const before=await db.prepare("SELECT url,hex(payload) payload FROM delivery_public_links").first(),beforeDelivery=await db.prepare("SELECT hex(payload) payload FROM delivery_rows").first();

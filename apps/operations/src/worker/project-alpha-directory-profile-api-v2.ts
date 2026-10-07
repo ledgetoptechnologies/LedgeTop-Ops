@@ -129,6 +129,10 @@ function revision(value: unknown, zero = false): value is string {
     && (value.length < MAX_INTEGER.length || value <= MAX_INTEGER);
 }
 function advances(next: string, prior: string): boolean { try { return BigInt(next) >= BigInt(prior); } catch { return false; } }
+function increment(value: string): string | null {
+  if (!revision(value, true) || value === MAX_INTEGER) return null;
+  try { return (BigInt(value) + 1n).toString(); } catch { return null; }
+}
 function externalId(value: unknown): value is string {
   if (typeof value !== "string" || value.length === 0 || Array.from(value).length > 191 || /\p{C}/u.test(value)) return false;
   try {
@@ -157,7 +161,8 @@ function updateCommand(kind: ProjectAlphaDirectoryProfileKind, value: unknown): 
 }
 function createCommand(kind: ProjectAlphaDirectoryProfileKind, value: unknown): value is ProjectAlphaDirectoryCreateCommand {
   const fields = kind === "client" ? ["commandId", "externalId", "expectedAuthorizationGeneration", "profile", "organization"] : ["commandId", "externalId", "expectedAuthorizationGeneration", "profile"];
-  if (!plain(value) || !exact(value, fields) || !uuid(value.commandId) || !externalId(value.externalId) || !revision(value.expectedAuthorizationGeneration, true) || !nonEmptyProfile(value.profile, kind, true)) return false;
+  if (!plain(value) || !exact(value, fields) || !uuid(value.commandId) || !externalId(value.externalId)
+    || increment(value.expectedAuthorizationGeneration as string) === null || !nonEmptyProfile(value.profile, kind, true)) return false;
   if (kind === "organization") return true;
   if (value.organization === null) return true;
   return plain(value.organization) && exact(value.organization, ["externalId", "expectedRevision"])
@@ -214,12 +219,15 @@ function statusFailure(response: Response, expectedStatus: number | readonly num
 }
 function profileSuccess(value: unknown, kind: ProjectAlphaDirectoryProfileKind, publicIdValue: string, command: ProjectAlphaDirectoryProfileUpdateCommand, connection: ProjectAlphaApiV2Connection, requestId: string | undefined): value is ProjectAlphaDirectoryProfileSuccess {
   if (!plain(value) || !exact(value, ["sourceInstanceId", "applicationId", "historyEpoch", "requestId", "replayed", "result"]) || value.sourceInstanceId !== connection.expectedSourceInstanceId || value.applicationId !== connection.expectedApplicationId || value.historyEpoch !== connection.expectedHistoryEpoch || !uuid(value.requestId) || value.requestId !== requestId || typeof value.replayed !== "boolean" || !plain(value.result) || !exact(value.result, ["resource", "authorizationGeneration"]) || !revision(value.result.authorizationGeneration, true) || !plain(value.result.resource) || !exact(value.result.resource, ["type", "publicId", "revision"])) return false;
-  return value.result.resource.type === kind && value.result.resource.publicId === publicIdValue && revision(value.result.resource.revision) && advances(value.result.resource.revision, command.expectedRevision);
+  return value.result.resource.type === kind && value.result.resource.publicId === publicIdValue
+    && revision(value.result.resource.revision) && advances(value.result.resource.revision, command.expectedRevision)
+    && value.result.authorizationGeneration === command.expectedAuthorizationGeneration;
 }
 function createSuccess(value: unknown, kind: ProjectAlphaDirectoryProfileKind, command: ProjectAlphaDirectoryCreateCommand, connection: ProjectAlphaApiV2Connection, requestId: string | undefined, httpStatus: number): value is ProjectAlphaDirectoryCreateSuccess {
   if (!plain(value) || !exact(value, ["sourceInstanceId", "applicationId", "historyEpoch", "requestId", "replayed", "result"]) || value.sourceInstanceId !== connection.expectedSourceInstanceId || value.applicationId !== connection.expectedApplicationId || value.historyEpoch !== connection.expectedHistoryEpoch || !uuid(value.requestId) || value.requestId !== requestId || typeof value.replayed !== "boolean" || !plain(value.result) || !exact(value.result, ["resource", "authorizationGeneration"]) || !revision(value.result.authorizationGeneration) || !plain(value.result.resource) || !exact(value.result.resource, ["type", "id", "publicId", "revision"])) return false;
   return value.result.resource.type === kind && value.result.resource.id === command.externalId && publicId(value.result.resource.publicId)
-    && value.result.resource.revision === "1" && (httpStatus === 201 ? value.replayed === false : value.replayed === true);
+    && value.result.resource.revision === "1" && value.result.authorizationGeneration === increment(command.expectedAuthorizationGeneration)
+    && (httpStatus === 201 ? value.replayed === false : value.replayed === true);
 }
 async function post(connection: ProjectAlphaApiV2Connection, path: string, body: string, expectedStatus: number | readonly number[], send: typeof fetch): Promise<Response | ProjectAlphaDirectoryProfileTransportFailure> {
   const controller = new AbortController(); const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);

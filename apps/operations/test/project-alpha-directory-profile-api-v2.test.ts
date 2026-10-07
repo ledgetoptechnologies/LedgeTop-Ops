@@ -40,8 +40,8 @@ function json(value: unknown, status = 200, headers: Record<string, string> = {}
 function updateReceipt(kind: "client" | "organization", publicId: string, revision = "2", generation = "7") {
   return { sourceInstanceId: source, applicationId: application, historyEpoch: epoch, requestId, replayed: false, result: { resource: { type: kind, publicId, revision }, authorizationGeneration: generation } };
 }
-function createReceipt(kind: "client" | "organization", externalId: string, publicId: string, replayed = false) {
-  return { sourceInstanceId: source, applicationId: application, historyEpoch: epoch, requestId, replayed, result: { resource: { type: kind, id: externalId, publicId, revision: "1" }, authorizationGeneration: "1" } };
+function createReceipt(kind: "client" | "organization", externalId: string, publicId: string, replayed = false, generation = "1") {
+  return { sourceInstanceId: source, applicationId: application, historyEpoch: epoch, requestId, replayed, result: { resource: { type: kind, id: externalId, publicId, revision: "1" }, authorizationGeneration: generation } };
 }
 
 describe("Project Alpha API-v2 Directory profile transport", () => {
@@ -120,11 +120,28 @@ describe("Project Alpha API-v2 Directory profile transport", () => {
     await expect(sendProjectAlphaDirectoryProfileUpdate(connection, "organization", organizationId, command, send)).resolves.toMatchObject({ status: "uncertain", reason: "invalid_contract" });
   });
 
+  it("fails closed when PA reports a different authorization generation for an update", async () => {
+    const command: ProjectAlphaDirectoryProfileUpdateCommand = { commandId, expectedRevision: "1", expectedAuthorizationGeneration: "7", profile: organizationProfile };
+    const send = vi.fn<typeof fetch>(async url => String(url).endsWith("/capabilities")
+      ? json(capabilities(endpoint("organization", "update")))
+      : json(updateReceipt("organization", organizationId, "2", "8")));
+    await expect(sendProjectAlphaDirectoryProfileUpdate(connection, "organization", organizationId, command, send)).resolves.toMatchObject({ status: "uncertain", reason: "invalid_contract" });
+  });
+
+  it("fails closed when PA reports anything other than expected generation plus one for a create", async () => {
+    const command: ProjectAlphaDirectoryClientCreateCommand = { commandId, externalId: "ops/client/generation-mismatch", expectedAuthorizationGeneration: "7", profile: clientProfile, organization: null };
+    const send = vi.fn<typeof fetch>(async url => String(url).endsWith("/capabilities")
+      ? json(capabilities(endpoint("client", "create")))
+      : json(createReceipt("client", command.externalId, clientId, false, "9"), 201));
+    await expect(sendProjectAlphaDirectoryCreate(connection, "client", command, send)).resolves.toMatchObject({ status: "uncertain", reason: "invalid_contract" });
+  });
+
   it("rejects stale, malformed, overlong, and mismatched idempotency commands before fetch", async () => {
     const send = vi.fn<typeof fetch>();
     await expect(sendProjectAlphaDirectoryProfileUpdate(connection, "organization", organizationId, { commandId: "bad", expectedRevision: "1", expectedAuthorizationGeneration: "7", profile: organizationProfile }, send)).resolves.toEqual({ status: "rejected", reason: "invalid_command" });
     await expect(sendProjectAlphaDirectoryProfileUpdate(connection, "organization", organizationId, { commandId, expectedRevision: "0", expectedAuthorizationGeneration: "7", profile: organizationProfile }, send)).resolves.toEqual({ status: "rejected", reason: "invalid_command" });
     await expect(sendProjectAlphaDirectoryCreate(connection, "client", { commandId, externalId: "", expectedAuthorizationGeneration: "0", profile: clientProfile, organization: null }, send)).resolves.toEqual({ status: "rejected", reason: "invalid_command" });
+    await expect(sendProjectAlphaDirectoryCreate(connection, "client", { commandId, externalId: "ops/client/max-generation", expectedAuthorizationGeneration: "9223372036854775807", profile: clientProfile, organization: null }, send)).resolves.toEqual({ status: "rejected", reason: "invalid_command" });
     const overlong = { ...organizationProfile, name: "x".repeat(151) };
     await expect(sendProjectAlphaDirectoryProfileUpdate(connection, "organization", organizationId, { commandId, expectedRevision: "1", expectedAuthorizationGeneration: "7", profile: overlong }, send)).resolves.toEqual({ status: "rejected", reason: "invalid_command" });
     const invalidClientState = { ...clientUpdateProfile, state: "TEX" };

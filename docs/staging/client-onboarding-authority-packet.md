@@ -47,11 +47,17 @@ npm.cmd run staging:onboarding-authority:revoke:generate
 npm.cmd run staging:onboarding-authority:check
 npm.cmd run staging:onboarding-authority:revoke:check
 npm.cmd run staging:onboarding-authority:test
+npm.cmd run staging:client-onboarding:check
 ```
 
 The generator pins the exact staging account, `ltds-ops-staging` D1 binding,
-and current 147-file canonical Operations migration chain. Generated SQL,
-manifests, and Wrangler configs are ignored and must remain operator-private.
+and the reviewed 180-file canonical Operations migration chain through
+`0180`. The final command verifies the exact native onboarding activation
+profile required for acceptance; it is a separate gate from the authority
+provision/revoke pair. Generated SQL, manifests, and Wrangler configs are
+ignored and must remain operator-private. Do not apply either packet until
+both independent artifacts are reviewed and the full D1 backup and rollback
+checks are complete.
 Apply only the generated one-file provision configuration. Immediately after
 the acceptance, disable the acceptance routes and apply only the generated
 one-file revoke configuration. A failed exact-state guard is a stop condition;

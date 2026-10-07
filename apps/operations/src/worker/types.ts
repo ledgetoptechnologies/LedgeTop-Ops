@@ -16,8 +16,10 @@ export type Env = Omit<
   | "PROJECT_ALPHA_DIRECTORY_EXACT_ADOPTION_ENABLED"
   | "PROJECT_ALPHA_DIRECTORY_LOCAL_PROFILE_ADOPTION_ENABLED"
   | "PROJECT_ALPHA_PROJECT_ADOPTION_REVIEW_ENABLED"
+  | "PROJECT_ALPHA_PROJECT_INBOUND_RECONCILIATION_ENABLED"
   | "PROJECT_ALPHA_PROJECT_BINDING_REVISION_REFRESH_ENABLED"
   | "PROJECT_ALPHA_PROJECT_V2_ACTIVATION_ENABLED"
+  | "PROJECT_ALPHA_PROJECT_V2_RECOVERY_ENABLED"
   | "PROJECT_ALPHA_PRIVATE_ADMIN_TRANSPORT_ENABLED"
   | "PROJECT_ALPHA_DIRECTORY_V2_BOOTSTRAP_ACCEPTANCE_ENABLED"
   | "PROJECT_ALPHA_DIRECTORY_V2_BOOTSTRAP_SOURCE_ID"
@@ -121,10 +123,14 @@ export type Env = Omit<
   PROJECT_ALPHA_DIRECTORY_LOCAL_PROFILE_ADOPTION_ENABLED?: string;
   /** Staging-only, default-off PA-origin project adoption review evidence entry route. */
   PROJECT_ALPHA_PROJECT_ADOPTION_REVIEW_ENABLED?: string;
+  /** Default-off reviewed PA-origin edits for already-mapped projects. */
+  PROJECT_ALPHA_PROJECT_INBOUND_RECONCILIATION_ENABLED?: string;
   /** Staging-only administrator endpoint for refreshing an already-authorized stale Project binding. */
   PROJECT_ALPHA_PROJECT_BINDING_REVISION_REFRESH_ENABLED?: string;
   /** Default-off, manually invoked administrator-only Project-v2 staging acceptance. */
   PROJECT_ALPHA_PROJECT_V2_ACTIVATION_ENABLED?: string;
+  /** Default-off, staging-only exact replay recovery for uncertain Project-v2 commands. */
+  PROJECT_ALPHA_PROJECT_V2_RECOVERY_ENABLED?: string;
   /** Default-off administrator transport for private PA Directory and Project consumers. */
   PROJECT_ALPHA_PRIVATE_ADMIN_TRANSPORT_ENABLED?: string;
   /** Staging-only, manually invoked Directory bootstrap acceptance fixture. */

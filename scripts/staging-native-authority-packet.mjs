@@ -7,14 +7,14 @@ import { STAGING_ACCOUNT_ID, STAGING_INVENTORY } from "./staging-requirements.mj
 import { boundedGuardInsert } from "./staging-bounded-guards.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-// Existing authority packet schemas were reviewed against this exact 171-file
+// Existing authority packet schemas were reviewed against this exact 180-file
 // staging chain. Keep the complete-ledger equality check below; any later
 // migration requires an explicit contract update and full-chain review.
 const REVIEWED_AUTHORITY_OPERATIONS_CHAIN = Object.freeze({
-  count: 171,
-  finalMigration: "0171_project_alpha_active_directory_update_guard.sql",
-  namesSha256: "bc4590b90cccd1842b2496906986355cfde7522e970ac3ec95039cace437f61d",
-  contentsSha256: "e3feca1f403a06f15495017fd843ac48173e39be2478f8d6b5060c262c0b1f5c",
+  count: 180,
+  finalMigration: "0180_project_alpha_project_v2_recovery_authorization.sql",
+  namesSha256: "8d7fdaaa7b453b32dd5e67d1a670554bc1c03aedf41c8ecadaddbbccf632e266",
+  contentsSha256: "6603a620f33f7d6cd88e23189203ddcb8a753b16167cd5e8ae427a31cf51b4b3",
 });
 export const PACKET_SCHEMA_VERSION = 3;
 export const ACQUISITION_PACKET_SCHEMA_VERSION = 4;
@@ -620,6 +620,8 @@ function revokeSql(packet, ids, versions, provision, names, migrationNames) {
     AND NOT EXISTS(SELECT 1 FROM operations_directory_write_fences WHERE actor_id=${staff})
     AND NOT EXISTS(SELECT 1 FROM project_alpha_project_outbox outbox JOIN native_project_command_proofs proof ON proof.command_id=outbox.command_id
       WHERE proof.actor_staff_id=${staff} AND outbox.state IN ('pending','leased'))
+    AND NOT EXISTS(SELECT 1 FROM project_alpha_project_v2_live_recovery_authorizations
+      WHERE actor_staff_id=${staff})
     AND NOT EXISTS(SELECT 1 FROM project_alpha_directory_outbox
       WHERE json_extract(origin_snapshot_json,'$.actorId')=${staff} AND state IN ('pending','leased'))`;
   const final = `EXISTS(SELECT 1 FROM native_staff_admissions WHERE staff_id=${staff} AND bound_access_subject=${sqlString(packet.accessSubject)}
@@ -804,6 +806,8 @@ function revokeSqlV4(packet, ids, versions, provision, names, migrationNames) {
     AND NOT EXISTS(SELECT 1 FROM operations_directory_write_fences WHERE actor_id=${staff})
     AND NOT EXISTS(SELECT 1 FROM project_alpha_project_outbox outbox JOIN native_project_command_proofs proof ON proof.command_id=outbox.command_id
       WHERE proof.actor_staff_id=${staff} AND outbox.state IN ('pending','leased'))
+    AND NOT EXISTS(SELECT 1 FROM project_alpha_project_v2_live_recovery_authorizations
+      WHERE actor_staff_id=${staff})
     AND NOT EXISTS(SELECT 1 FROM project_alpha_directory_outbox
       WHERE json_extract(origin_snapshot_json,'$.actorId')=${staff} AND state IN ('pending','leased'))`;
   const final = `EXISTS(SELECT 1 FROM native_staff_admissions WHERE staff_id=${staff} AND bound_access_subject=${sqlString(packet.accessSubject)}
@@ -892,6 +896,7 @@ function revokeSqlV5Fixture(packet, ids, versions, provision, names, migrationNa
     AND NOT EXISTS(SELECT 1 FROM native_staff_bootstrap_receipts WHERE command_id=${sqlString(ids.revokeCommand)})
     AND NOT EXISTS(SELECT 1 FROM operations_directory_write_fences WHERE actor_id=${staff})
     AND NOT EXISTS(SELECT 1 FROM project_alpha_project_outbox outbox JOIN native_project_command_proofs proof ON proof.command_id=outbox.command_id WHERE proof.actor_staff_id=${staff} AND outbox.state IN ('pending','leased'))
+    AND NOT EXISTS(SELECT 1 FROM project_alpha_project_v2_live_recovery_authorizations WHERE actor_staff_id=${staff})
     AND NOT EXISTS(SELECT 1 FROM project_alpha_directory_outbox WHERE json_extract(origin_snapshot_json,'$.actorId')=${staff} AND state IN ('pending','leased'))`;
   const result = { schemaVersion: FIXTURE_PACKET_SCHEMA_VERSION, action: "revoke", packetId: packet.packetId,
     staffId: packet.staffId, grantId: ids.grant, directoryGrantIds: [ids.directoryGrant, ids.enrollmentGrant],
@@ -1012,6 +1017,8 @@ function recipientEnrollmentNoPendingWork(packet) {
   return `NOT EXISTS(SELECT 1 FROM operations_directory_write_fences WHERE actor_id=${staff})
     AND NOT EXISTS(SELECT 1 FROM project_alpha_project_outbox outbox JOIN native_project_command_proofs proof
       ON proof.command_id=outbox.command_id WHERE proof.actor_staff_id=${staff} AND outbox.state IN ('pending','leased'))
+    AND NOT EXISTS(SELECT 1 FROM project_alpha_project_v2_live_recovery_authorizations
+      WHERE actor_staff_id=${staff})
     AND NOT EXISTS(SELECT 1 FROM project_alpha_directory_outbox
       WHERE json_extract(origin_snapshot_json,'$.actorId')=${staff} AND state IN ('pending','leased'))
     AND NOT EXISTS(SELECT 1 FROM client_portal_workspace_binding_outbox

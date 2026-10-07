@@ -80,9 +80,9 @@ async function seedMapping(sourceId: string, type: "client" | "organization", ex
       fence.historyEpoch, type, externalId,
       JSON.stringify({ response: { result: { resource: { revision: expectedRevision } } } })).run();
   await db.prepare(`INSERT INTO project_alpha_active_directory_mappings(source_id,resource_type,external_id,
-    project_alpha_public_id,source_instance_id,application_id,history_epoch_id,provenance_id,mapping_kind)
-    VALUES(?,?,?,?,?,?,?,?,?)`).bind(sourceId, type, externalId, id, fence.sourceInstanceId, fence.applicationId,
-      fence.historyEpoch, commandId, "legacy").run();
+    record_id,project_alpha_public_id,source_instance_id,application_id,history_epoch_id,provenance_id,mapping_kind)
+    VALUES(?,?,?,?,?,?,?,?,?,?)`).bind(sourceId, type, externalId, externalId, id, fence.sourceInstanceId,
+      fence.applicationId, fence.historyEpoch, commandId, "legacy").run();
   if (type === "client") await db.prepare(`INSERT INTO operations_directory_client_organizations(client_record_id,
     organization_record_id) VALUES(?,?)`).bind(externalId, relationshipOrganization).run();
 }
@@ -114,7 +114,7 @@ beforeEach(async () => {
       expected_source_instance_id TEXT,application_id TEXT,expected_history_epoch_id TEXT,resource_type TEXT,
       external_id TEXT,state TEXT,outcome_json TEXT);
     CREATE TABLE project_alpha_existing_directory_binding_activation_receipts(activation_id TEXT PRIMARY KEY,project_alpha_revision TEXT);
-    CREATE TABLE project_alpha_active_directory_mappings(source_id TEXT,resource_type TEXT,external_id TEXT,
+    CREATE TABLE project_alpha_active_directory_mappings(source_id TEXT,resource_type TEXT,external_id TEXT,record_id TEXT,
       project_alpha_public_id TEXT,source_instance_id TEXT,application_id TEXT,history_epoch_id TEXT,
       provenance_id TEXT,mapping_kind TEXT,PRIMARY KEY(source_id,resource_type,external_id));
     CREATE TABLE operations_directory_client_organizations(client_record_id TEXT PRIMARY KEY,organization_record_id TEXT);
@@ -238,11 +238,36 @@ describe("bounded read-only Project Alpha directory reconciliation", () => {
       VALUES(?,?,?,?,?,'organization','historical','acknowledged',?)`).bind(oldCommand, sourceA, old, old, old,
         JSON.stringify({ response: { result: { resource: { revision: "1" } } } })).run();
     await db.prepare(`INSERT INTO project_alpha_active_directory_mappings(source_id,resource_type,external_id,
-      project_alpha_public_id,source_instance_id,application_id,history_epoch_id,provenance_id,mapping_kind)
-      VALUES(?,'organization','historical',?,?,?,?,?,'legacy')`).bind(sourceA, publicId("6"), old, old, old, oldCommand).run();
+      record_id,project_alpha_public_id,source_instance_id,application_id,history_epoch_id,provenance_id,mapping_kind)
+      VALUES(?,'organization','historical','historical',?,?,?,?,?,'legacy')`)
+      .bind(sourceA, publicId("6"), old, old, old, oldCommand).run();
     const result = await reconcileProjectAlphaDirectorySource({ OPS_DB: db }, sourceA,
       options(readers(() => inventory(sourceA, [], null))));
     expect(result).toMatchObject({ status: "complete", findings: 0 });
+  });
+
+  it("reports a PA parent when the local client has no relationship row", async () => {
+    const clientId = publicId("6"), parentId = publicId("7");
+    await seedMapping(sourceA, "client", "client-without-parent-row", clientId);
+    await db.prepare("DELETE FROM operations_directory_client_organizations WHERE client_record_id=?")
+      .bind("client-without-parent-row").run();
+    const base = readers(() => inventory(sourceA, [resource("client", clientId, "client-without-parent-row")], null));
+    const relationshipReaders: NonNullable<ProjectAlphaDirectoryReconciliationOptions["readers"]> = {
+      ...base,
+      profile: async (_env, sourceId, kind, id) => ({ status: "observed", observation: {
+        authoritative: false, sourceId, ...identity, requestId: uuid(), resource: { type: kind, id, revision: "1" },
+        profile: { publicId: id, name: "redacted", email: null, phone: null,
+          address: { line1: null, line2: null, city: null, state: null, postalCode: null, country: null },
+          ...(kind === "client" ? { clientType: "business" as const, organizationPublicId: parentId } : {}) },
+      } }),
+    };
+    const result = await reconcileProjectAlphaDirectorySource({ OPS_DB: db }, sourceA, options(relationshipReaders));
+    expect(result).toMatchObject({ status: "complete", findings: 1 });
+    expect(await db.prepare(`SELECT classification,details_json FROM project_alpha_directory_reconciliation_findings
+      WHERE run_id=?`).bind(result.runId).first()).toEqual({
+      classification: "relationship_mismatch",
+      details_json: JSON.stringify({ expectedOrganizationPublicId: null, observedOrganizationPublicId: parentId }),
+    });
   });
 
   it.each(["insert", "update"] as const)("rejects stale observation %s after checkpoint ownership changes", async phase => {

@@ -49,12 +49,16 @@ test("builds only the exact migration suffixes and strips every deployment field
   assert.deepEqual(profiles.client.files.map(({ name }) => name),
     [...NATIVE_MIGRATION_PROFILES.client.expectedAppliedMigrations]);
   assert.equal(profiles.operations.manifest.requiredRemoteBaseline,
-    "0165_project_alpha_inventory_generation_surface_scope.sql");
+    "0173_operations_directory_intent_acquired_destination_transition.sql");
   assert.equal(profiles.client.manifest.requiredRemoteBaseline,
     "0228_operations_portal_native_content_start_audit.sql");
-  assert.equal(profiles.operations.expectedRemoteAppliedMigrations.length, 165);
+  assert.equal(profiles.operations.expectedRemoteAppliedMigrations.length, 173);
   assert.equal(profiles.client.expectedRemoteAppliedMigrations.length, 147);
-  assert.equal(profiles.operations.manifest.reviewedFinalChain.count, 171);
+  assert.equal(profiles.operations.manifest.reviewedFinalChain.count, 180);
+  assert.equal(profiles.operations.manifest.reviewedFinalChain.finalMigration,
+    "0180_project_alpha_project_v2_recovery_authorization.sql");
+  assert.equal(profiles.operations.manifest.reviewedFinalChain.namesSha256,
+    "8d7fdaaa7b453b32dd5e67d1a670554bc1c03aedf41c8ecadaddbbccf632e266");
   assert.equal(profiles.client.manifest.reviewedFinalChain.count, 147);
   for (const profile of Object.values(profiles)) {
     assert.deepEqual(Object.keys(profile.config).sort(), ["$schema", "account_id", "d1_databases", "name"]);
@@ -81,8 +85,8 @@ test("rejects an extra SQL file and a changed native migration", () => {
 
   const changed = fixture();
   fs.appendFileSync(path.join(changed, "apps", "operations", "migrations",
-    "0168_project_alpha_directory_read_adoption_local_profiles.sql"), " ");
-  assert.throws(() => buildProfiles(changed), /native candidate changed: 0168_/);
+    "0174_project_alpha_directory_preserved_external_identity.sql"), " ");
+  assert.throws(() => buildProfiles(changed), /native candidate changed: 0174_/);
 });
 
 test("rejects a missing or changed pinned base migration", () => {

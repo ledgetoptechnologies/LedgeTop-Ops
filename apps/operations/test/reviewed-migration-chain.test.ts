@@ -30,11 +30,20 @@ describe("reviewed release migration fixtures", () => {
   it("selects the immutable release inventories including the promoted native portal migrations", () => {
     const operations = reviewedOperationsMigrationNames(new URL("../migrations/", import.meta.url));
     const client = reviewedClientMigrationNames(new URL("../../client/migrations/", import.meta.url));
-    expect(operations).toHaveLength(171);
-    expect(operations.at(-1)).toBe("0171_project_alpha_active_directory_update_guard.sql");
-    expect(operations.slice(-2)).toEqual([
+    expect(operations).toHaveLength(180);
+    expect(operations.at(-1)).toBe("0180_project_alpha_project_v2_recovery_authorization.sql");
+    expect(operations.slice(-11)).toEqual([
       "0170_project_alpha_active_directory_project_guard.sql",
       "0171_project_alpha_active_directory_update_guard.sql",
+      "0172_project_alpha_active_directory_consumer_guards.sql",
+      "0173_operations_directory_intent_acquired_destination_transition.sql",
+      "0174_project_alpha_directory_preserved_external_identity.sql",
+      "0175_operations_directory_acquired_parent_enrollment_identity.sql",
+      "0176_operations_directory_acquired_intent_authority.sql",
+      "0177_operations_directory_acquired_intent_update_authority.sql",
+      "0178_project_alpha_project_inbound_reconciliation.sql",
+      "0179_project_alpha_acquired_native_identity_collision.sql",
+      "0180_project_alpha_project_v2_recovery_authorization.sql",
     ]);
     expect(operations).toContain("0154_operations_portal_native_recipient_authority.sql");
     expect(operations).toContain("0158_operations_portal_native_delivery_authority.sql");

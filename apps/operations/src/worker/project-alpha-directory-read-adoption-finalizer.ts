@@ -272,14 +272,15 @@ export async function prepareProjectAlphaDirectoryReadAdoptionFinalization(
       env.OPS_DB.prepare(`INSERT INTO project_alpha_directory_read_adoption_finalizations(
         finalization_id,idempotency_key,request_sha256,field_review_receipt_id,review_id,claim_id,
         source_id,source_instance_id,application_id,history_epoch_id,resource_type,record_id,reviewed_external_id,
-        target_external_id,project_alpha_public_id,project_alpha_revision,authorization_generation,local_record_version,
+        target_external_id,acquisition_external_id,acquisition_identity_mode,project_alpha_public_id,project_alpha_revision,authorization_generation,local_record_version,
         local_profile_sha256,project_alpha_profile_sha256,reviewer_staff_id,reviewer_access_subject,
         reviewer_admission_version,reviewer_profile_version,reviewer_grant_generation,adopted_field_count,rebind_required,
         acquisition_review_id,acquisition_command_id,activation_idempotency_key,state,prepared_at)
-        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'prepared',?)`).bind(
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'prepared',?)`).bind(
         ids.finalization, input.idempotencyKey, requestSha256, selected.receipt_id, selected.review_id, selected.claim_id,
         selected.source_id, selected.source_instance_id, selected.application_id, selected.history_epoch_id,
         selected.resource_type, selected.record_id, selected.external_id, selected.record_id,
+        selected.external_id, "preserve_reviewed",
         selected.project_alpha_public_id, selected.project_alpha_revision, selected.authorization_generation,
         selected.local_record_version, selected.local_profile_sha256, selected.project_alpha_profile_sha256,
         input.actor.staffId, input.actor.accessSubject, input.actor.admissionVersion, input.actor.profileVersion,

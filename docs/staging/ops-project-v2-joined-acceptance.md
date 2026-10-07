@@ -168,6 +168,10 @@ $env:OPS_ACCEPTANCE_ORGANIZATION_RECORD_ID = "<existing mapped organization reco
 $env:OPS_ACCEPTANCE_ORGANIZATION_PUBLIC_ID = "<reviewed PA organization public ID>"
 $env:OPS_ACCEPTANCE_ORGANIZATION_REVISION = "<reviewed revision>"
 $env:OPS_ACCEPTANCE_ORGANIZATION_PROJECTION_SHA256 = "<reviewed projection hash>"
+$env:OPS_ACCEPTANCE_CLIENT_RECORD_ID = "<existing mapped client record>"
+$env:OPS_ACCEPTANCE_CLIENT_PUBLIC_ID = "<reviewed PA client public ID>"
+$env:OPS_ACCEPTANCE_CLIENT_REVISION = "<reviewed client revision>"
+$env:OPS_ACCEPTANCE_CLIENT_PROJECTION_SHA256 = "<reviewed client projection hash>"
 $env:OPS_ACCEPTANCE_PUBLIC_LINK_URL = "<existing reviewed staging public link>"
 ```
 
@@ -181,11 +185,12 @@ harness does not require an operator to extract or copy that assertion. For a
 controlled non-edge test only, an assertion may be supplied via
 `OPS_CF_ACCESS_JWT_ASSERTION`; it is validated in memory and never emitted.
 
-If a client relation is part of the reviewed staging fixture, supply the
-matching `OPS_ACCEPTANCE_CLIENT_RECORD_ID`,
-`OPS_ACCEPTANCE_CLIENT_PUBLIC_ID`, `OPS_ACCEPTANCE_CLIENT_REVISION`, and
-`OPS_ACCEPTANCE_CLIENT_PROJECTION_SHA256` values together. The harness refuses
-partial relation proofs.
+This release/portal acceptance requires the matching
+`OPS_ACCEPTANCE_CLIENT_RECORD_ID`, `OPS_ACCEPTANCE_CLIENT_PUBLIC_ID`,
+`OPS_ACCEPTANCE_CLIENT_REVISION`, and
+`OPS_ACCEPTANCE_CLIENT_PROJECTION_SHA256`. The harness refuses to arm without
+the complete exact client proof; an organization-only Project create is not
+release evidence.
 
 To prove public-link preservation, supply the reviewed existing staging URL in
 `OPS_ACCEPTANCE_PUBLIC_LINK_URL`. It is used only for two GET probes and is
@@ -209,11 +214,90 @@ canonical-activation evidence; the exact replay must report `replayed: true`.
 The route itself performs the PA dispatch, read settlement, and local canonical
 activation inside the reviewed staging authority window.
 
+The one-to-one invariant is enforced by durable uniqueness constraints, not by
+attempting a second mutating request: `operations_shared_projects` has a
+primary key on `external_project_id` and a unique key on
+`(source_instance_id, project_alpha_public_id, history_epoch_id)`;
+`project_alpha_project_mappings` has a primary key on `external_project_id`
+and a unique key on `(source_instance_id, project_alpha_public_id)`. The
+staging schema's live PRAGMA readback confirmed the Operations constraints.
+After a successful synthetic create, perform the exact read-only mapping
+postflight below using the generated `externalProjectId` from the sanitized
+acceptance report. Never send a second create or bind to manufacture evidence;
+it can reserve command-ledger state and dispatch to PA before conflict is
+known.
+
+Preferred: run the fail-closed postflight helper with a Cloudflare API token
+that has D1 read access only. Supply the token through a secure local secret
+source as `CLOUDFLARE_API_TOKEN`; do not put it in a command argument, file in
+the repository, or acceptance report. Set `OPS_STAGING_D1_ENVIRONMENT=staging`,
+`CLOUDFLARE_ACCOUNT_ID`, `OPS_STAGING_D1_DATABASE_ID`,
+`OPS_STAGING_D1_DATABASE_NAME`, and `OPS_STAGING_D1_BINDING=OPS_DB` to the
+reviewed staging target. The helper constructs its URL on the Cloudflare API
+host; it rejects production and custom endpoints. Set the expected source and
+application from the verified staging acceptance profile, then pass the
+generated ID:
+
+```powershell
+$env:OPS_PROJECT_ALPHA_SOURCE_ID = "project-alpha:staging"
+$env:OPS_PROJECT_ALPHA_APPLICATION_ID = "<verified staging application UUID>"
+node scripts/staging-ops-project-v2-postflight-readback.mjs `
+  --execute-readback `
+  --external-project-id "<generated synthetic externalProjectId>"
+```
+
+The helper requires a database name ending in `-staging`, only issues
+parameterized `SELECT` statements, requires explicit opt-in, verifies D1's
+no-change metadata, checks exact one-to-one identities and uniqueness indexes,
+and emits hashes/counts only. It does not create or modify anything. If a
+read-only token is not available, use the SQL-console query below and verify
+the live schema's unique indexes separately.
+
+In the Ops staging D1 SQL console, substitute only the generated synthetic
+external project ID (the `ops-joined-acceptance-…:project:<uuid>` value) into
+the literal below; it contains only a-z, digits, hyphens, colon, and UUID
+characters. The query is read-only and must return exactly one row, with
+`operations_rows=1`, `pa_mapping_rows=1`, and identical source, instance,
+application, PA public ID, and history-epoch IDs on both sides. Both staging
+tables currently expose the history epoch; fail if either is missing or differs:
+
+```sql
+SELECT sp.external_project_id,
+       (SELECT COUNT(*) FROM operations_shared_projects WHERE external_project_id=sp.external_project_id) AS operations_rows,
+       (SELECT COUNT(*) FROM project_alpha_project_mappings WHERE external_project_id=sp.external_project_id) AS pa_mapping_rows,
+       sp.source_id AS operations_source_id, pm.source_id AS mapping_source_id,
+       sp.source_instance_id AS operations_instance_id, pm.source_instance_id AS mapping_instance_id,
+       sp.application_id AS operations_application_id, pm.application_id AS mapping_application_id,
+       sp.history_epoch_id AS operations_history_epoch_id,
+       sp.project_alpha_public_id AS operations_pa_public_id, pm.project_alpha_public_id AS mapping_pa_public_id
+FROM operations_shared_projects sp
+JOIN project_alpha_project_mappings pm ON pm.external_project_id=sp.external_project_id
+WHERE sp.external_project_id='<generated synthetic external project ID>';
+```
+
+This postflight proves that the accepted synthetic command produced exactly
+one canonical Operations record and one matching PA mapping under the live
+uniqueness constraints. It does not prove two-source reconciliation, update
+CAS, inbound adoption, or conflict-review behavior; those remain separate
+acceptance requirements. Record the sanitized row-count and equality result,
+not client data or credentials.
+
 The bounded report contains only statuses, generated command/external IDs,
 request/response hashes, sanitized receipt IDs, activation version, and public
 link status/body hashes. It excludes cookies, API keys, Access assertions,
 private URLs, request bodies, and customer data. Do not paste the report into a
 ticket if an operator has modified the script to log raw responses.
+
+The report also contains `inputBinding`, a SHA-256 digest over a canonical
+representation of the PA source/application IDs, authorization generation,
+sorted scopes, and the exact organization/client proof tuple used for the run.
+Only the digest and `valuesExcluded: true` are emitted; the selected record IDs,
+public IDs, revisions, and projection hashes are not copied into the report.
+Use that digest, the report's `observedAt`, and a restricted evidence reference
+to populate `projectAlpha.joinedOpsProjectV2Acceptance` in the release-evidence
+file. The release checker requires this current passing proof so acceptance
+cannot be detached from the identity, scopes, and directory versions that were
+actually exercised.
 
 ## Required staging window and cleanup
 
@@ -325,9 +409,12 @@ These commands are local-only. The generated, ignored output is
 Its sole allowed change from the validated default-off staging baseline is
 `PROJECT_ALPHA_PROJECT_V2_ACTIVATION_ENABLED=false` to `true`. Production must
 remain explicitly default-off. Any other flag, resource, route, or binding
-drift is rejected; stale existing output is not overwritten. Do not combine
-this profile with the five-gate sync/adoption/refresh profile or a portal
-acceptance window.
+drift is rejected; stale existing output is not overwritten. The profile also
+requires `PROJECT_ALPHA_PROJECT_INBOUND_RECONCILIATION_ENABLED=false` in the
+default staging source and production, and preserves it as `false` in the
+candidate; inbound reconciliation is a distinct separately reviewed window.
+Do not combine this profile with the five-gate sync/adoption/refresh profile or
+a portal acceptance window.
 
 Generating the candidate neither enables a connection nor grants authority.
 Before any reviewed live use, re-read the exact deployed revisions, scoped
@@ -365,3 +452,31 @@ revoked or stale evidence must remain unresolved or explicitly rejected;
 receipt recovery must not create another project or broaden client access.
 The exact lookup protocol and any subsequent dispatch policy are not finalized
 or enabled by this profile.
+
+## October 7, 2026 — recovery and mapping-integrity follow-up
+
+The isolated candidate now contains migration `0180` and a staging-only,
+default-off post-ack resume route. Its immutable authority is bound to the exact
+PA success receipt/acknowledgement, response and request hashes, command,
+source/application/history, destination, Ops head/mapping, original actor, and
+current grant generation. Its proof is visible to private settlement and
+canonical activation only; it cannot lease or dispatch a command or authorize
+another PA write. Focused Ops recovery and settlement tests passed **41/41**;
+Operations TypeScript passed. This is local evidence, not a live staging result.
+
+The one-to-one project mapping invariant does not require a duplicate mutation:
+`operations_shared_projects.external_project_id` is the primary key, while
+`(source_instance_id, project_alpha_public_id, history_epoch_id)` is unique.
+Read-only inspection of the current Ops staging D1 schema confirmed these
+constraints. After the joined synthetic create runs, acceptance must still
+read back exactly one row for its Ops external ID and verify the corresponding
+unique index remains present. The harness does not yet perform this direct D1
+postflight automatically; record it as a required evidence step. Do not test
+the invariant by issuing a second create/bind.
+
+The current staging ledgers remain Ops `0173` and Client `0228`; therefore the
+new Ops suffix through `0180` is not deployed or applied. The Cloudflare account
+MCP connector can read D1, but the separate Wrangler OAuth flow expired at the
+Cloudflare sign-in page. Complete a fresh, correctly paired Wrangler login
+before any staging migration or deployment. Do not reuse the previously pasted
+callback, which belongs to the other Cloudflare OAuth issuer.

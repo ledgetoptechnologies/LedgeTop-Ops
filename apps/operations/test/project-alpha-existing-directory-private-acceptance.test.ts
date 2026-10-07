@@ -76,7 +76,7 @@ function remote(state: Remote): typeof fetch {
       return reply({ apiVersion: "2", sourceInstanceId,
       applicationId, historyEpoch: historyEpochId, authorizationGeneration: state.bindingGeneration,
       binding: { type: "organization", externalId: recordId, publicId, createdAt: "2026-09-22T12:00:00.000Z" },
-      resource: { revision: state.revision, present: state.bound },
+      resource: { revision: state.revision, present: true },
       });
     }
     if (path === "/api/v2/directory/organizations/bindings/commands") {
@@ -154,6 +154,19 @@ describe("private existing Directory acquisition-to-activation acceptance harnes
       await db.batch(splitD1MigrationStatements(readFileSync(new URL(`../migrations/${migration}`, import.meta.url), "utf8"))
         .map(sql => db.prepare(sql)));
     }
+    // Match the current post-0170 view contract: an acquired Operations record
+    // ID is distinct from Project Alpha's external ID.
+    await db.batch([
+      db.prepare("DROP VIEW project_alpha_active_directory_mappings"),
+      db.prepare(`CREATE VIEW project_alpha_active_directory_mappings AS
+        SELECT source_id,resource_type,external_id AS record_id,external_id,project_alpha_public_id,
+          source_instance_id,application_id,history_epoch_id,command_id AS provenance_id,
+          'legacy' AS mapping_kind,created_at FROM project_alpha_directory_mappings
+        UNION ALL
+        SELECT source_id,resource_type,record_id,external_id,project_alpha_public_id,source_instance_id,
+          application_id,history_epoch_id,activation_id AS provenance_id,'acquired' AS mapping_kind,
+          activated_at AS created_at FROM project_alpha_existing_directory_binding_activation_receipts`),
+    ]);
     await db.prepare("INSERT INTO operations_directory_records VALUES(?,'organization',1)").bind(recordId).run();
     await db.prepare("INSERT INTO native_directory_resource_scopes VALUES(?,'business_area','area',NULL,1)").bind(recordId).run();
   });
@@ -161,7 +174,7 @@ describe("private existing Directory acquisition-to-activation acceptance harnes
 
   async function acquire(fetcher: typeof fetch, generation = 1) {
     return acquireProjectAlphaExistingDirectoryBinding({ OPS_DB: db, PROJECT_ALPHA_API_V2_CONNECTIONS: connections }, {
-      reviewId, commandId, sourceId, recordId, resourceType: "organization", projectAlphaPublicId: publicId,
+      reviewId, commandId, sourceId, recordId, externalId: recordId, resourceType: "organization", projectAlphaPublicId: publicId,
       expectedProjectAlphaRevision: "7", expectedAuthorizationGeneration: "8", localRecordVersion: 1,
       reviewer: { ...reviewer, admissionVersion: 1, profileVersion: 1, grantGeneration: generation },
     }, fetcher);
@@ -188,7 +201,8 @@ describe("private existing Directory acquisition-to-activation acceptance harnes
   it("acquires, activates, and exactly replays without changing Delivery or public-link bytes", async () => {
     const state: Remote = { revision: "7", profileGeneration: "8", bindingGeneration: "8", bound: false };
     const fetcher = remote(state), before = await deliveryBytes();
-    await expect(acquire(fetcher)).resolves.toMatchObject({ status: "acquired", replayed: false });
+    const result = await acquire(fetcher);
+    expect(result).toMatchObject({ status: "acquired", replayed: false });
     const first = await activate(fetcher);
     expect(first).toMatchObject({ status: "activated", replayed: false, recordId });
     await expect(acquire(fetcher)).resolves.toMatchObject({ status: "acquired", replayed: true });

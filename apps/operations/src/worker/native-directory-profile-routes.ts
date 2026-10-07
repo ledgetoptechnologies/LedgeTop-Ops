@@ -5,6 +5,7 @@ import { readBoundedJson } from "./bounded-json";
 import { authenticateNativeStaffWithAdmissionVersion } from "./native-staff-auth";
 import {
   writeNativeDirectoryProfile,
+  readNativeDirectoryDurableRemoteHead,
   type NativeDirectoryClientCreateProfile,
   type NativeDirectoryClientUpdateProfile,
   type NativeDirectoryDestinationAuthority,
@@ -15,7 +16,10 @@ import {
   type NativeDirectoryScope,
   type NativeDirectoryWriterActor,
 } from "./native-directory-profile-writer";
-import { resolveProjectAlphaApiV2Connection } from "./project-alpha-api-v2-connections";
+import { readConfiguredProjectAlphaDirectoryInventory } from "./project-alpha-directory-inventory-api-v2";
+import { readConfiguredProjectAlphaDirectoryBindingStatus } from "./project-alpha-directory-read-api-v2";
+import { persistProjectAlphaDirectoryInventoryPage } from "./project-alpha-v2-sync";
+import { listEnabledProjectAlphaApiV2SourceIds, resolveProjectAlphaApiV2Connection } from "./project-alpha-api-v2-connections";
 import { nativeDirectoryOrganizationChoices, type NativeDirectoryOrganizationChoice } from "./native-directory-profile-editor-record";
 import { writeNativeDirectoryRelationship, type NativeDirectoryRelationshipWrite } from "./native-directory-relationship-writer";
 import type { Env, StaffPrincipal } from "./types";
@@ -149,10 +153,9 @@ async function selectGrant(db: D1Database, staffId: string,
 
 async function configuredDestination(env: Env, sourceId: string, externalCanonicalId: string): Promise<StoredDestination | null> {
   try {
-    if (!await env.OPS_DB.withSession("first-primary").prepare(`SELECT 1 ok FROM pa_connectors
-      WHERE source_id=? AND state='active' AND read_visible=1`).bind(sourceId).first()) return null;
     const configured = resolveProjectAlphaApiV2Connection(env, sourceId);
-    if (!configured.enabled || !configured.connection.expectedHistoryEpoch
+    if (!configured.enabled || !listEnabledProjectAlphaApiV2SourceIds(env).includes(sourceId)
+      || !configured.connection.expectedHistoryEpoch
       || !UUID.test(configured.connection.expectedHistoryEpoch)) return null;
     return { sourceId, sourceInstanceUUID: configured.connection.expectedSourceInstanceId,
       applicationUUID: configured.connection.expectedApplicationId, historyEpoch: configured.connection.expectedHistoryEpoch,
@@ -160,7 +163,7 @@ async function configuredDestination(env: Env, sourceId: string, externalCanonic
   } catch { return null; }
 }
 
-function storedDestination(value: unknown, expectedRecordId: string): StoredDestination | null {
+function storedDestination(value: unknown, expectedExternalId: string | null): StoredDestination | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const row = value as Record<string, unknown>;
   const fields = ["sourceId", "sourceInstanceUUID", "applicationUUID", "historyEpoch", "origin", "externalCanonicalId"];
@@ -169,36 +172,24 @@ function storedDestination(value: unknown, expectedRecordId: string): StoredDest
     || typeof row.sourceInstanceUUID !== "string" || !UUID.test(row.sourceInstanceUUID)
     || typeof row.applicationUUID !== "string" || !UUID.test(row.applicationUUID)
     || typeof row.historyEpoch !== "string" || !UUID.test(row.historyEpoch)
-    || typeof row.origin !== "string" || row.externalCanonicalId !== expectedRecordId) return null;
+    || typeof row.origin !== "string" || typeof row.externalCanonicalId !== "string"
+    || row.externalCanonicalId.length < 1 || row.externalCanonicalId.length > 191
+    || (expectedExternalId !== null && row.externalCanonicalId !== expectedExternalId)) return null;
   try { if (new URL(row.origin).origin !== row.origin || !row.origin.startsWith("https://")) return null; }
   catch { return null; }
   return row as StoredDestination;
 }
 
-async function currentGeneration(db: D1Database, destination: StoredDestination, record: string | null): Promise<string | null> {
-  const primary = db.withSession("first-primary");
-  const exact = record ? await primary.prepare(`SELECT generation FROM (
-      SELECT json_extract(outcome_json,'$.response.result.authorizationGeneration') generation,created_at observed_at
-      FROM project_alpha_directory_outbox WHERE source_id=? AND expected_source_instance_id=? AND application_id=?
-        AND expected_history_epoch_id=? AND destination_base_url=? AND external_id=? AND state='acknowledged'
-      UNION ALL SELECT authorization_generation generation,received_at observed_at
-      FROM project_alpha_existing_directory_binding_revision_refresh_receipts WHERE source_id=? AND source_instance_id=?
-        AND application_id=? AND history_epoch_id=? AND destination_origin=? AND record_id=?)
-    WHERE generation IS NOT NULL ORDER BY observed_at DESC LIMIT 1`).bind(destination.sourceId, destination.sourceInstanceUUID,
-      destination.applicationUUID, destination.historyEpoch, destination.origin, record, destination.sourceId,
-      destination.sourceInstanceUUID, destination.applicationUUID, destination.historyEpoch, destination.origin, record).first<string>("generation") : null;
-  if (exact && REVISION.test(exact)) return exact;
-  const source = await primary.prepare(`SELECT generation FROM (
-      SELECT json_extract(outcome_json,'$.response.result.authorizationGeneration') generation,created_at observed_at
-      FROM project_alpha_directory_outbox WHERE source_id=? AND expected_source_instance_id=? AND application_id=?
-        AND expected_history_epoch_id=? AND destination_base_url=? AND state='acknowledged'
-      UNION ALL SELECT authorization_generation generation,received_at observed_at
-      FROM project_alpha_existing_directory_binding_revision_refresh_receipts WHERE source_id=? AND source_instance_id=?
-        AND application_id=? AND history_epoch_id=? AND destination_origin=?)
-    WHERE generation IS NOT NULL ORDER BY length(generation) DESC,generation DESC,observed_at DESC LIMIT 1`).bind(destination.sourceId,
-      destination.sourceInstanceUUID, destination.applicationUUID, destination.historyEpoch, destination.origin, destination.sourceId,
-      destination.sourceInstanceUUID, destination.applicationUUID, destination.historyEpoch, destination.origin).first<string>("generation");
-  return source && REVISION.test(source) ? source : null;
+async function liveGeneration(env: Env, destination: StoredDestination): Promise<string | null> {
+  const outcome = await readConfiguredProjectAlphaDirectoryInventory(env, destination.sourceId,
+    { type: "all", limit: 1 });
+  if (outcome.status !== "observed" || outcome.inventory.sourceInstanceId !== destination.sourceInstanceUUID
+    || outcome.inventory.applicationId !== destination.applicationUUID
+    || outcome.inventory.historyEpoch !== destination.historyEpoch
+    || !REVISION.test(outcome.inventory.authorizationGeneration)) return null;
+  const persisted = await persistProjectAlphaDirectoryInventoryPage(env.OPS_DB, outcome.inventory, null);
+  return persisted.status === "persisted" && persisted.continuationIdentity.authorizationGeneration === outcome.inventory.authorizationGeneration
+    ? outcome.inventory.authorizationGeneration : null;
 }
 
 async function admittedCreate(env: Env, actor: Omit<NativeDirectoryWriterActor, "selectedGrantId" | "selectedIdentityGrantId">,
@@ -223,7 +214,7 @@ async function admittedCreate(env: Env, actor: Omit<NativeDirectoryWriterActor, 
   for (const selected of admitted.sort((left, right) => left.sourceId.localeCompare(right.sourceId))) {
     const configured = await configuredDestination(env, selected.sourceId, record);
     if (!configured || JSON.stringify(configured) !== JSON.stringify(selected)) return null;
-    const expectedAuthorizationGeneration = await currentGeneration(env.OPS_DB, selected, null);
+    const expectedAuthorizationGeneration = await liveGeneration(env, selected);
     if (!expectedAuthorizationGeneration) return null;
     destinations.push({ ...selected, expectedAuthorizationGeneration });
   }
@@ -284,7 +275,8 @@ async function requestedCreateDestinations(env: Env, selectedSources: readonly s
   return destinations;
 }
 
-async function updateDestinations(env: Env, record: string): Promise<NativeDirectoryDestinationAuthority[] | null> {
+async function updateDestinations(env: Env, kind: NativeDirectoryProfileKind, record: string,
+  expectedLocalVersion: number): Promise<NativeDirectoryDestinationAuthority[] | null> {
   const enrollment = await env.OPS_DB.withSession("first-primary").prepare(`SELECT destinations_json FROM native_directory_enrollments WHERE record_id=?`)
     .bind(record).first<{ destinations_json: string }>();
   let values: unknown;
@@ -296,9 +288,16 @@ async function updateDestinations(env: Env, record: string): Promise<NativeDirec
     if (!enrolled) return null;
     const configured = await configuredDestination(env, enrolled.sourceId, record);
     if (!configured || JSON.stringify(configured) !== JSON.stringify(enrolled)) return null;
-    const expectedAuthorizationGeneration = await currentGeneration(env.OPS_DB, enrolled, record);
+    const expectedAuthorizationGeneration = await liveGeneration(env, enrolled);
     if (!expectedAuthorizationGeneration) return null;
-    destinations.push({ ...enrolled, expectedAuthorizationGeneration });
+    const durable = await readNativeDirectoryDurableRemoteHead(env.OPS_DB, kind, record, expectedLocalVersion, enrolled);
+    if (!durable) return null;
+    const binding = await readConfiguredProjectAlphaDirectoryBindingStatus(env, enrolled.sourceId, kind,
+      durable.externalCanonicalId, durable.projectAlphaPublicId);
+    if (binding.status !== "observed"
+      || binding.observation.authorizationGeneration !== expectedAuthorizationGeneration
+      || binding.observation.resource.revision !== durable.revision) return null;
+    destinations.push({ ...enrolled, externalCanonicalId: durable.externalCanonicalId, expectedAuthorizationGeneration });
   }
   return destinations;
 }
@@ -384,7 +383,7 @@ async function publicResult(c: AppContext, outcome: Awaited<ReturnType<typeof wr
       .bind(commandId).first<{ source_id: string; state: string }>();
     if (!row) return c.json({ status: "conflict", reason: "destination_state_unavailable" }, 409);
     destinations.push({ sourceId: row.source_id, state: row.state === "acknowledged" ? "acknowledged"
-      : row.state === "dead_letter" ? "conflict" : "pending" });
+      : row.state === "terminal" || row.state === "dead_letter" ? "conflict" : "pending" });
   }
   if (destinations.some(value => value.state === "conflict"))
     return c.json({ status: "conflict", reason: "destination_conflict", recordId: outcome.recordId,
@@ -702,7 +701,7 @@ async function update(c: AppContext, kind: NativeDirectoryProfileKind) {
   if (kind === "client" && (!enrolledSources || !await relationshipDeliverySettled(c.env.OPS_DB, localRecordId,
     currentRelationship!.relationship_version, enrolledSources.length)))
     return c.json({ status: "conflict", reason: "relationship_delivery_pending" }, 409);
-  const destinations = await updateDestinations(c.env, localRecordId);
+  const destinations = await updateDestinations(c.env, kind, localRecordId, input.expectedLocalVersion);
   if (!destinations) return c.json({ status: "conflict", reason: "source_authority_unavailable" }, 409);
   const common = { operation: "update" as const, mutationId: input.mutationId, recordId: localRecordId,
     expectedLocalVersion: input.expectedLocalVersion, destinations, actor };
@@ -719,13 +718,12 @@ async function createOptions(c: AppContext) {
   const actor = await nativeActor(c), permissions = kind === "client"
     ? ["directory.profile.edit", "directory.enrollment.manage", "directory.identity.link"] as const
     : ["directory.profile.edit", "directory.enrollment.manage"] as const;
-  const [areas, divisions, grants, connectors] = await Promise.all([
+  const [areas, divisions, grants] = await Promise.all([
     c.env.OPS_DB.withSession("first-primary").prepare("SELECT id,name FROM native_business_areas WHERE active=1 ORDER BY name,id").all<{ id: string; name: string }>(),
     c.env.OPS_DB.withSession("first-primary").prepare("SELECT id,business_area_id businessAreaId,name FROM native_business_divisions WHERE active=1 ORDER BY name,id").all<{ id: string; businessAreaId: string; name: string }>(),
     c.env.OPS_DB.withSession("first-primary").prepare(`SELECT permission,effect,scope_kind,business_area_id businessAreaId,division_id divisionId
       FROM native_directory_grants WHERE staff_id=? AND active=1 AND permission IN (${permissions.map(() => "?").join(",")})`)
       .bind(actor.staffId, ...permissions).all<{ permission: string; effect: "allow" | "deny"; scope_kind: string; businessAreaId: string | null; divisionId: string | null }>(),
-    c.env.OPS_DB.withSession("first-primary").prepare("SELECT source_id sourceId,display_name displayName FROM pa_connectors WHERE state='active' AND read_visible=1 ORDER BY display_name,source_id").all<{ sourceId: string; displayName: string }>(),
   ]);
   const effective = (permission: string, businessAreaId: string, divisionId: string | null) => {
     const matches = (grant: { scope_kind: string; businessAreaId: string | null; divisionId: string | null }) => grant.scope_kind === "global"
@@ -741,9 +739,9 @@ async function createOptions(c: AppContext) {
     return allowed(area.id, null) || divisionsForArea.length ? [{ id: area.id, name: area.name, divisions: divisionsForArea }] : [];
   });
   const sources: Array<{ id: string; name: string }> = [];
-  for (const source of connectors.results)
-    if (SOURCE_ID.test(source.sourceId) && typeof source.displayName === "string" && await configuredDestination(c.env, source.sourceId, "create-options"))
-      sources.push({ id: source.sourceId, name: source.displayName });
+  for (const sourceId of listEnabledProjectAlphaApiV2SourceIds(c.env))
+    if (SOURCE_ID.test(sourceId) && await configuredDestination(c.env, sourceId, "create-options"))
+      sources.push({ id: sourceId, name: `Project Alpha (${sourceId.slice("project-alpha:".length)})` });
   const organizations = kind === "client" ? (await organizationChoicesForActor(c, actor))
     .map(choice => ({ recordId: choice.recordId, expectedVersion: choice.expectedVersion, name: choice.name,
       sourceIds: choice.sourceIds })) : [];

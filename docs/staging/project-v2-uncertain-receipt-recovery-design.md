@@ -18,8 +18,18 @@ immutable-ledger transition described below.
   canonical request SHA-256 and external ID before returning a stored result.
   Its current public route inventory exposes command POSTs, project reads,
   inventory and binding status, not a command-receipt read endpoint.
+- A focused source review of PA worktree
+  `codex/api-v2-binding-generation-fence` at
+  `08b21f34c8415f8923b32ed7e66e16660fbccf66` confirms exact command POST replay
+  is idempotent: PA locks the current application identity and authorization
+  generation, then scopes receipt lookup by application, history epoch and
+  command ID. It returns the prior immutable result only when command type,
+  typed request hash and external ID match; changed input conflicts. Receipt,
+  resource mutation and generation advancement commit in the same transaction.
 - These are source observations, not proof that the same revision is deployed
-  or that a real uncertain command exists in staging.
+  or that a real uncertain command exists in staging. PA integration tests
+  cover replay and rollback, but could not be rerun in this environment because
+  `tests/bootstrap.php` was unreadable.
 - The hashes are not interchangeable: Ops currently fingerprints the UTF-8
   canonical command JSON body; PA stores SHA-256 of its parsed command wrapped
   as `{type, command}` using its defined JSON encoding. Receipt lookup must
@@ -29,41 +39,43 @@ immutable-ledger transition described below.
   canonicalization fixtures, including Unicode/escaping and PA profile parsing,
   are required before choosing the receipt DTO/hash contract.
 
-## Proposed generic PA read contract
+## Preferred recovery contract: exact idempotent command replay
 
-- Add a separately default-off, scoped receipt-read capability. Use generic
-  labels and documentation; no Ledge Top names or hard-coded instance IDs.
-- A bounded GET such as `/api/v2/projects/commands/{commandId}/receipt` accepts
-  the existing source/application/history fences plus expected command type,
-  canonical request hash and external ID through a reviewed bounded contract.
-  Final header/query names are not decided here.
-- Require a currently valid, bound, scoped key and current application
-  identity. Receipt-read authority must not implicitly grant command writes,
-  billing, user management or client data access. Review whether the matching
-  command scope is also required; do not silently reuse broad `full` access.
-- Derive the application primary key from the authenticated, non-revoked key
-  binding and the current epoch/source from the history singleton. Supplied
-  identity headers are exact-match fences, never caller-selected lookup
-  coordinates. Query only `(derived application_pk, current history_epoch,
-  command_id)`. A replacement key can recover only within that same application
-  and current epoch; it cannot cross applications or read an old epoch after
-  history rotation.
-- Read only the receipt belonging to that application and history epoch;
-  validate the exact UUID, type, hash and external ID. Do not expose another
-  application's receipt or permit lookup by name/email.
-- Return a strict, bounded, `no-store` DTO containing command identity/hash,
-  original committed result revision/projection hash/authorization generation,
-  source/application/history identity and a fresh request correlation ID.
-  Do not return tokens, asset URLs, unrelated documents or private profiles.
-- A stored receipt is historical evidence of a committed command, not current
-  permission or current project state. Revoked credentials/authority still
-  deny access. Recovery must separately verify current authorization and read
-  the live resource before local activation.
-- Missing receipt, timeout, identity mismatch or ambiguous state remains
-  unresolved. In particular, a `404` does not prove that a concurrent or delayed
-  original POST cannot commit and must never authorize an automatic resend.
+- Do not add a PA receipt-read endpoint for initial recovery. Replay the exact
+  original command POST with the same durable command ID and byte-identical
+  canonical JSON body. PA serializes the original request and replay so an
+  exact duplicate returns the same immutable receipt; if the first request
+  never committed, the replay executes the command once.
+- This requires Operations to have durably stored the exact accepted wire body
+  before sending and to prove its hash, command type, UUID, source, application,
+  source instance, history epoch and destination are unchanged. Never rebuild
+  from current profile fields, create a new ID, change destination, or retry
+  under a different project mapping.
+- Exact replay may return a historical authorization generation. That result
+  proves only that the command committed, not current authority or resource
+  state. Before local activation, recheck current actor/route authority, live
+  command proof, source/history fences, expected local version/hash and mapping;
+  then read PA's current project and binding and require exact ID/revision/hash
+  agreement. Changed or stale state stays unresolved for explicit review.
+- The original native command proof is immutable and expires. If it is no
+  longer live, recovery must stop; never revive or extend it implicitly. A
+  future operator-initiated recovery authorization would need a distinct,
+  immutable, short-lived ledger bound to the original command/body/destination,
+  current actor/permission, source/application/history identity and current
+  local version/mapping, with deny-aware revocation and single-use CAS. That
+  ledger and its predicates require a separate security review before allowing
+  recovery after proof expiry.
+- A command-receipt GET may be considered later for diagnostics, but is not
+  needed for safe retry and must be separately scoped/default-off if added.
+  A timeout or missing receipt response never authorizes a different mutation.
 
 ## Proposed Operations recovery composition
+
+### Implemented safety boundary
+
+The candidate recovery path permits redispatch only for the same authenticated actor whose immutable command proof authorized the original request. A different manager is rejected before the outbox is reopened or any external Project Alpha request is sent. The current post-ack authorization is bound to that original proof, so manager-through-receipt recovery would require a separately reviewed forward-only ledger migration; this candidate deliberately fails closed instead.
+
+An exact retry after activation first reads the durable recovery authorization and the complete command, success-receipt, acknowledgement, settlement, and activation chain. It returns the stored `activated` result with `replayed: true` only when the request fields, expected recovery event version, authenticated actor, and current authority still match. Changed input or actor conflicts; missing chain evidence is stale; revoked or drifted authority is rejected.
 
 - Default-off and staging-only initially; manually invoked by an authenticated
   authorized operator. Preserve existing administrator, deny-aware scoped
@@ -74,8 +86,10 @@ immutable-ledger transition described below.
   canonical body/hash, UUID, type, source/application/history, destination,
   expected local version/hash and mapping state. No inferred matching, new
   command ID, changed body or different PA destination.
-- Fetch and validate only the matching trusted PA receipt. Do not call a
-  mutation POST during recovery.
+- Revalidate current authorization and every original request fence, then
+  replay the exact original mutation POST. This is the same idempotent command,
+  not a new mutation. Validate its acknowledgement against the durable request
+  and current PA project/binding reads before settling.
 - Preserve the original uncertain/terminal event. Add an audited, idempotent,
   CAS-fenced recovery event and validated receipt through a separately reviewed
   atomic D1 transition; do not rewrite history or relax existing triggers.
@@ -99,13 +113,16 @@ immutable-ledger transition described below.
 
 ## Required proof before release
 
-- Positive CREATE, UPDATE and BIND recovery, with the original PA command
-  committed but its response deliberately unavailable to Ops.
-- Exactly one PA mutation per command; recovery performs receipt/resource
-  reads only. Stable command UUID/body hash and no second canonical activation.
+- Positive CREATE, UPDATE and BIND recovery in both timing cases: PA committed
+  but its response was unavailable to Ops, and the original request did not
+  commit. Each must converge to one PA resource and one immutable receipt.
+- Stable command UUID and byte-identical body across attempts; exact current
+  application/history/destination/scope fences; no alternate command and no
+  second canonical activation.
 - Unknown receipt, wrong hash/type/application/history/destination, stale local
   version, revoked/denied actor, and changed PA resource all fail closed.
-- Replacement keys cannot cross application bindings or history epochs.
+- Replacement keys cannot cross application bindings or history epochs, and
+  replay is denied if the active key lacks the matching command scope.
 - PHP/JS hash fixtures cover strict field order, parser trimming/null versus
   empty-description normalization, BMP/astral Unicode, U+2028/U+2029, quotes,
   backslashes, slashes, controls and invalid Unicode rejection. Verify the PA

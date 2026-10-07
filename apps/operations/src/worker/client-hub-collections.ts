@@ -5,10 +5,11 @@ import { eligibilityBlockManagementEnabled, portalOperationsManagementEnabled } 
 import { portalDenyPolicyManagementEnabled } from "./client-portal-deny-policies";
 import { readClientHubBusinessProjectPolicy } from "./client-hub-project-policy";
 import { businessContactChannels, businessContactChannelsSql } from "./client-business-contact";
-import { clientHubAlphaInternalId, resolveClientHubSourceRoot } from "./client-hub-source";
+import { clientHubActiveDirectoryIdentities, clientHubActiveDirectoryIdentitySql, clientHubAlphaInternalId,
+  hasClientHubActiveDirectoryMappings, resolveClientHubSourceRoot } from "./client-hub-source";
 import type { ClientHubRoot } from "./client-hub-directory";
 import type { Env, StaffPrincipal } from "./types";
-import { requireProjectAlphaReadVisibility } from "./project-alpha-read-visibility";
+import { projectAlphaReadVisibleSql, requireProjectAlphaReadVisibility } from "./project-alpha-read-visibility";
 
 export const CLIENT_HUB_COLLECTIONS = ["businessContacts", "accounts", "projects", "requests", "deliveryGrants",
   "authenticatedDeliveryGrants", "viewerGrants"] as const;
@@ -157,11 +158,70 @@ function availability(context: ClientHubCollectionContext, collection: ClientHub
     && context.root.source_id !== "project-alpha:primary") return "not_applicable";
   return null;
 }
-function collectionQuery(context: ClientHubCollectionContext, collection: ClientHubCollection): Query {
+function uniqueActiveDirectoryTuple(alias: string): string {
+  if (!/^[a-z_]+$/.test(alias)) throw new Error("client-hub-invalid-mapping-alias");
+  return `(SELECT count(*) FROM project_alpha_active_directory_mappings candidate
+    WHERE candidate.source_id=${alias}.source_id AND candidate.source_instance_id=${alias}.source_instance_id
+      AND candidate.application_id=${alias}.application_id AND candidate.history_epoch_id=${alias}.history_epoch_id
+      AND candidate.resource_type=${alias}.resource_type
+      AND (candidate.record_id=${alias}.record_id OR candidate.external_id=${alias}.external_id
+        OR candidate.project_alpha_public_id=${alias}.project_alpha_public_id))=1`;
+}
+
+async function canonicalBusinessContactsQuery(env: Env, context: ClientHubCollectionContext): Promise<Query> {
+  const root = context.root;
+  const identities = await clientHubActiveDirectoryIdentities(env);
+  const currentContact = clientHubActiveDirectoryIdentitySql("contact_mapping", identities ?? []);
+  const currentRoot = clientHubActiveDirectoryIdentitySql("root_mapping", identities ?? []);
+  const rootEvidence = root.kind === "organization" ? `relationship.organization_record_id=? AND EXISTS (
+      SELECT 1 FROM project_alpha_active_directory_mappings root_mapping
+      JOIN operations_directory_records root_record
+        ON root_record.record_id=root_mapping.record_id AND root_record.record_kind='organization'
+      JOIN operations_directory_revisions root_revision
+        ON root_revision.record_id=root_record.record_id AND root_revision.version=root_record.current_version
+      WHERE root_mapping.source_id=contact_mapping.source_id
+        AND root_mapping.source_instance_id=contact_mapping.source_instance_id
+        AND root_mapping.application_id=contact_mapping.application_id
+        AND root_mapping.history_epoch_id=contact_mapping.history_epoch_id
+        AND root_mapping.resource_type='organization' AND root_mapping.record_id=?
+        AND ${currentRoot} AND ${uniqueActiveDirectoryTuple("root_mapping")}
+        AND json_valid(root_revision.profile_json) AND json_type(root_revision.profile_json,'$.name')='text'
+        AND length(trim(json_extract(root_revision.profile_json,'$.name'))) BETWEEN 1 AND 150
+        AND length(root_mapping.project_alpha_public_id)=32
+        AND root_mapping.project_alpha_public_id NOT GLOB '*[^0-9a-f]*')`
+    : `contact_mapping.record_id=? AND relationship.organization_record_id IS NULL`;
+  return {
+    select: `id public_id,organization_id,name display_name,${businessContactChannelsSql()}`,
+    from: `(SELECT contact_mapping.record_id id,relationship.organization_record_id organization_id,
+        trim(json_extract(revision.profile_json,'$.name')) name,revision.profile_json payload_json
+      FROM project_alpha_active_directory_mappings contact_mapping
+      JOIN operations_directory_records record
+        ON record.record_id=contact_mapping.record_id AND record.record_kind='client'
+      JOIN operations_directory_revisions revision
+        ON revision.record_id=record.record_id AND revision.version=record.current_version
+      JOIN operations_directory_client_organizations relationship
+        ON relationship.client_record_id=record.record_id
+      WHERE contact_mapping.source_id=? AND contact_mapping.resource_type='client'
+        AND ${currentContact} AND ${projectAlphaReadVisibleSql("contact_mapping.source_id")}
+        AND ${uniqueActiveDirectoryTuple("contact_mapping")}
+        AND json_valid(revision.profile_json) AND json_type(revision.profile_json,'$.name')='text'
+        AND length(trim(json_extract(revision.profile_json,'$.name'))) BETWEEN 1 AND 150
+        AND length(contact_mapping.project_alpha_public_id)=32
+        AND contact_mapping.project_alpha_public_id NOT GLOB '*[^0-9a-f]*'
+        AND ${rootEvidence}) canonical_contact`,
+    where: "1=1", values: root.kind === "organization"
+      ? [root.source_id, root.public_id, root.public_id] : [root.source_id, root.public_id],
+    order: ["id"], descending: false, keys: ["public_id"], business: true,
+  };
+}
+
+async function collectionQuery(env: Env, context: ClientHubCollectionContext, collection: ClientHubCollection): Promise<Query> {
   const root = context.root, scope = accountScope(root, context.paRootId);
   const common = { where: scope.where, values: scope.values, descending: true };
   switch (collection) {
-    case "businessContacts": return { select: `id public_id,organization_id,name display_name,${businessContactChannelsSql()}`, from: "pa_clients",
+    case "businessContacts": return await hasClientHubActiveDirectoryMappings(env.OPS_DB)
+      ? canonicalBusinessContactsQuery(env, context)
+      : { select: `id public_id,organization_id,name display_name,${businessContactChannelsSql()}`, from: "pa_clients",
       where: `active=1 AND projection_source_id=? AND ${root.kind === "organization" ? "organization_id=?" : "id=? AND organization_id IS NULL"}`,
       values: [root.source_id, clientHubAlphaInternalId(root, context.paRootId)], order: ["id"], descending: false, keys: ["public_id"], business: true };
     case "accounts": return { ...common,
@@ -211,7 +271,7 @@ export async function listClientHubCollection(env: Env, context: ClientHubCollec
   if (cursor && cursor.context !== context.contextVersion)
     throw new HTTPException(409, { message: "Client mapping or permissions changed. Refresh the client workspace to continue" });
   if (reason) return response;
-  const query = collectionQuery(context, collection);
+  const query = await collectionQuery(env, context, collection);
   if (cursor && cursor.after.length !== query.order.length)
     throw new HTTPException(400, { message: "Client collection cursor is invalid" });
   const after = cursor ? ` AND (${query.order.join(",")}) ${query.descending ? "<" : ">"} (${query.order.map(() => "?").join(",")})` : "";

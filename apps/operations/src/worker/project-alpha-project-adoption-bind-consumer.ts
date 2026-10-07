@@ -157,17 +157,17 @@ async function currentReplay(db: Database, receipt: Receipt, caller: ProjectAlph
           AND owner_assignment.role_id=reservation.reviewer_owner_role_id AND owner_assignment.scope='global')
       AND (reservation.organization_record_id IS NULL OR (SELECT count(*)
         FROM project_alpha_active_directory_mappings mapping
-        JOIN operations_directory_records record ON record.record_id=mapping.external_id AND record.record_kind='organization'
+        JOIN operations_directory_records record ON record.record_id=mapping.record_id AND record.record_kind='organization'
         WHERE mapping.source_id=reservation.source_id AND mapping.source_instance_id=reservation.source_instance_id
           AND mapping.application_id=reservation.application_id AND mapping.history_epoch_id=reservation.history_epoch_id
-          AND mapping.resource_type='organization' AND mapping.external_id=reservation.organization_record_id
+          AND mapping.resource_type='organization' AND mapping.record_id=reservation.organization_record_id
           AND mapping.project_alpha_public_id=reservation.organization_project_alpha_public_id)=1)
       AND (reservation.client_record_id IS NULL OR (SELECT count(*)
         FROM project_alpha_active_directory_mappings mapping
-        JOIN operations_directory_records record ON record.record_id=mapping.external_id AND record.record_kind='client'
+        JOIN operations_directory_records record ON record.record_id=mapping.record_id AND record.record_kind='client'
         WHERE mapping.source_id=reservation.source_id AND mapping.source_instance_id=reservation.source_instance_id
           AND mapping.application_id=reservation.application_id AND mapping.history_epoch_id=reservation.history_epoch_id
-          AND mapping.resource_type='client' AND mapping.external_id=reservation.client_record_id
+          AND mapping.resource_type='client' AND mapping.record_id=reservation.client_record_id
           AND mapping.project_alpha_public_id=reservation.client_project_alpha_public_id)=1)
       AND (reservation.organization_record_id IS NULL OR reservation.client_record_id IS NULL OR EXISTS (
         SELECT 1 FROM operations_directory_client_organizations relationship

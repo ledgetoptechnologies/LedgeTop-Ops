@@ -249,17 +249,23 @@ const activeBusinessExternalId = (currentMapping: string) => `(SELECT mapping.ex
 const activeLiveBusinessRoot = (currentMapping: string) => `(root.root_namespace<>'business' OR EXISTS (
   SELECT 1 FROM project_alpha_active_directory_mappings mapping
   JOIN operations_directory_records record ON record.record_id=mapping.record_id AND record.record_kind=mapping.resource_type
-  JOIN pa_organizations organization ON root.kind='organization' AND organization.id=mapping.external_id
-    AND organization.projection_source_id=mapping.source_id AND organization.active=1
-    AND mapping.project_alpha_public_id=${sourcePublicIdExpression("organization")}
+  JOIN operations_directory_revisions revision ON revision.record_id=record.record_id AND revision.version=record.current_version
   WHERE mapping.record_id=root.public_id AND mapping.source_id=root.source_id AND mapping.resource_type='organization'
-    AND ${currentMapping} AND ${activeTupleUnique("mapping")}) OR (root.root_namespace='business' AND root.kind='standalone_client' AND EXISTS (
+    AND root.kind='organization' AND ${currentMapping} AND ${activeTupleUnique("mapping")}
+    AND json_valid(revision.profile_json) AND json_type(revision.profile_json,'$.name')='text'
+    AND length(trim(json_extract(revision.profile_json,'$.name'))) BETWEEN 1 AND 150
+    AND length(mapping.project_alpha_public_id)=32 AND mapping.project_alpha_public_id NOT GLOB '*[^0-9a-f]*')
+  OR (root.root_namespace='business' AND root.kind='standalone_client' AND EXISTS (
   SELECT 1 FROM project_alpha_active_directory_mappings mapping
   JOIN operations_directory_records record ON record.record_id=mapping.record_id AND record.record_kind=mapping.resource_type
-  JOIN pa_clients client ON client.id=mapping.external_id AND client.projection_source_id=mapping.source_id
-    AND client.active=1 AND client.organization_id IS NULL AND mapping.project_alpha_public_id=${sourcePublicIdExpression("client")}
+  JOIN operations_directory_revisions revision ON revision.record_id=record.record_id AND revision.version=record.current_version
+  JOIN operations_directory_client_organizations relationship
+    ON relationship.client_record_id=record.record_id AND relationship.organization_record_id IS NULL
   WHERE mapping.record_id=root.public_id AND mapping.source_id=root.source_id AND mapping.resource_type='client'
-    AND ${currentMapping} AND ${activeTupleUnique("mapping")})))`;
+    AND ${currentMapping} AND ${activeTupleUnique("mapping")}
+    AND json_valid(revision.profile_json) AND json_type(revision.profile_json,'$.name')='text'
+    AND length(trim(json_extract(revision.profile_json,'$.name'))) BETWEEN 1 AND 150
+    AND length(mapping.project_alpha_public_id)=32 AND mapping.project_alpha_public_id NOT GLOB '*[^0-9a-f]*')))`;
 function unavailable(): never {
   throw new HTTPException(503, { message: "The client directory is being prepared; please retry shortly" });
 }
@@ -486,6 +492,25 @@ export async function listClientHubRoots(env: Env, principal: StaffPrincipal, op
             SELECT 1 FROM pa_clients contact WHERE contact.id=search.record_id AND contact.projection_source_id=root.source_id AND contact.active=1 AND
               ((root.kind='organization' AND contact.organization_id=${currentExternalId}) OR
                (root.kind='standalone_client' AND contact.id=${currentExternalId} AND contact.organization_id IS NULL))))
+          ${activeMappings ? `OR (search.record_type='operations_directory_client' AND search.project_id IS NULL AND EXISTS (
+            SELECT 1 FROM operations_directory_records contact_record
+            JOIN operations_directory_revisions contact_revision
+              ON contact_revision.record_id=contact_record.record_id AND contact_revision.version=contact_record.current_version
+            JOIN project_alpha_active_directory_mappings mapped_contact
+              ON mapped_contact.record_id=contact_record.record_id AND mapped_contact.source_id=root.source_id
+              AND mapped_contact.resource_type='client'
+              AND ${clientHubActiveDirectoryIdentitySql("mapped_contact", activeIdentities ?? [])}
+            JOIN operations_directory_client_organizations contact_relationship
+              ON contact_relationship.client_record_id=contact_record.record_id
+            WHERE contact_record.record_id=search.record_id AND contact_record.record_kind='client'
+              AND json_valid(contact_revision.profile_json) AND json_type(contact_revision.profile_json,'$.name')='text'
+              AND length(trim(json_extract(contact_revision.profile_json,'$.name'))) BETWEEN 1 AND 150
+              AND length(mapped_contact.project_alpha_public_id)=32
+              AND mapped_contact.project_alpha_public_id NOT GLOB '*[^0-9a-f]*'
+              AND ${activeTupleUnique("mapped_contact")}
+              AND ((root.kind='organization' AND contact_relationship.organization_record_id=root.public_id)
+                OR (root.kind='standalone_client' AND contact_relationship.organization_record_id IS NULL
+                  AND contact_record.record_id=root.public_id))))` : ""}
           OR (search.record_type='pa_project' AND search.record_id=search.project_id AND EXISTS (
             SELECT 1 FROM pa_projects p LEFT JOIN pa_clients owner ON owner.id=p.client_id AND owner.projection_source_id=p.projection_source_id AND owner.active=1
             WHERE p.id=search.project_id AND p.projection_source_id=root.source_id AND ${filter.sql} AND

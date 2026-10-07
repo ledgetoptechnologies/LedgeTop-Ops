@@ -4,6 +4,15 @@ Status: durable planning checkpoint. This document reconciles the two supplied
 handoffs with the current Operations repository. It is an audit and sequencing
 plan, not a claim that every local change is deployed or live-verified.
 
+**Historical architecture note (2026-10-06):** this audit predates the owner's
+approved API-first authority decision. Its statements that Project Alpha owns
+the shared client/project directory and portal access, and its small-slice
+sequence, are superseded by
+[`api-first-decisions-2026-09-10.md`](api-first-decisions-2026-09-10.md) and
+[`../client-portal-v2-architecture.md`](../client-portal-v2-architecture.md).
+Keep the dated findings as history; do not use the superseded authority model
+to plan current work.
+
 The handoffs are product inputs, not literal code instructions. Existing
 authority, migrations, compatibility contracts, and security boundaries win
 when a handoff proposes a duplicate model or a broader write path.

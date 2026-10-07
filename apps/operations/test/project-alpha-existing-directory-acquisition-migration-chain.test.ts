@@ -118,17 +118,17 @@ describe("existing PA directory acquisition migration chain", () => {
       'project_alpha_project_adoption_review_producer_receipts_exact',
       'project_alpha_project_adoption_review_producer_receipts_no_update',
       'project_alpha_project_adoption_review_producer_receipts_no_delete')`).first("count(*)")).toBe(3);
-  });
+  }, 180_000);
 
-  it("applies through 0132 without changing populated canonical history or activating acquired mappings", async () => {
+  it("applies through 0179 without changing populated history and rejects cross-ID aliases", async () => {
     const runtime = new Miniflare({ modules: true, compatibilityDate: "2026-08-06",
       script: "export default {fetch(){return new Response('ok')}}", d1Databases: ["OPS_DB"] });
     runtimes.push(runtime);
     const database = await runtime.getD1Database("OPS_DB") as D1Database;
     const directory = new URL("../migrations/", import.meta.url);
     const migrations = readdirSync(directory)
-      .filter(name => /^\d{4}_.+\.sql$/.test(name) && name.slice(0, 4) <= "0132").sort();
-    expect(migrations.at(-1)).toBe("0132_operations_directory_acquired_relationship_dependencies.sql");
+      .filter(name => /^\d{4}_.+\.sql$/.test(name) && name.slice(0, 4) <= "0179").sort();
+    expect(migrations.at(-1)).toBe("0179_project_alpha_acquired_native_identity_collision.sql");
     const recordId = "11111111-1111-4111-8111-111111111111";
     const profile = JSON.stringify({ name: "Synthetic Existing", email: "existing@example.test", phone: null,
       address: { line1: null, line2: null, city: null, state: null, postalCode: null, country: null }, clientType: "business" });
@@ -146,11 +146,11 @@ describe("existing PA directory acquisition migration chain", () => {
         await database.prepare(`INSERT INTO project_alpha_directory_outbox(command_id,source_id,application_id,resource_type,
           external_id,command_json,destination_base_url,expected_source_instance_id,origin_snapshot_json,next_attempt_at)
           VALUES('legacy-command','project-alpha:primary','44444444-4444-4444-8444-444444444444','client',
-            'legacy-external','{}','https://pa.example.test','33333333-3333-4333-8333-333333333333','{}',0)`).run();
+            ?,'{}','https://pa.example.test','33333333-3333-4333-8333-333333333333','{}',0)`).bind(recordId).run();
         await database.prepare(`INSERT INTO project_alpha_directory_mappings(source_id,resource_type,external_id,
           project_alpha_public_id,source_instance_id,application_id,command_id)
-          VALUES('project-alpha:primary','client','legacy-external',?,'33333333-3333-4333-8333-333333333333',
-            '44444444-4444-4444-8444-444444444444','legacy-command')`).bind("f".repeat(32)).run();
+          VALUES('project-alpha:primary','client',?,?,'33333333-3333-4333-8333-333333333333',
+            '44444444-4444-4444-8444-444444444444','legacy-command')`).bind(recordId,"f".repeat(32)).run();
       }
       if (migration.startsWith("0055_")) {
         await database.batch([
@@ -207,14 +207,14 @@ describe("existing PA directory acquisition migration chain", () => {
         '33333333-3333-4333-8333-333333333333','44444444-4444-4444-8444-444444444444',
         '55555555-5555-4555-8555-555555555555','client','legacy-external',?,'1',
         '88888888-8888-4888-8888-888888888888',?,'fixture-reviewer','access|fixture-reviewer',1,1,
-        '2026-09-14T12:35:56.789Z',1)`).bind("a".repeat(64),recordId,"f".repeat(32),"c".repeat(64)).run();
+        '2026-09-14T12:35:56.789Z',1)`).bind("a".repeat(64),recordId,"e".repeat(32),"c".repeat(64)).run();
     await database.prepare(`INSERT INTO project_alpha_existing_directory_binding_acquisition_commands(
       command_id,request_sha256,record_id,source_id,source_instance_id,application_id,history_epoch_id,
       resource_type,external_id,project_alpha_public_id,project_alpha_revision,review_receipt_id)
       VALUES('99999999-9999-4999-8999-999999999999',?,?,'project-alpha:primary',
         '33333333-3333-4333-8333-333333333333','44444444-4444-4444-8444-444444444444',
         '55555555-5555-4555-8555-555555555555','client','legacy-external',?,'1',
-        '77777777-7777-4777-8777-777777777777')`).bind("a".repeat(64),recordId,"f".repeat(32)).run();
+        '77777777-7777-4777-8777-777777777777')`).bind("a".repeat(64),recordId,"e".repeat(32)).run();
     for (const [version,state,id] of [[1,"pending","aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"],
       [2,"acknowledged","bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"]] as const) {
       await database.prepare(`INSERT INTO project_alpha_existing_directory_binding_acquisition_events(
@@ -224,11 +224,12 @@ describe("existing PA directory acquisition migration chain", () => {
     }
     await database.prepare(`INSERT INTO project_alpha_existing_directory_binding_acquisition_response_receipts(
       command_id,source_instance_id,application_id,history_epoch_id,resource_type,external_id,
-      project_alpha_public_id,project_alpha_revision,destination_origin,pa_request_id,pa_replayed,response_sha256)
+      project_alpha_public_id,project_alpha_revision,destination_origin,pa_request_id,pa_replayed,response_sha256,
+      expected_authorization_generation,result_authorization_generation)
       VALUES('99999999-9999-4999-8999-999999999999','33333333-3333-4333-8333-333333333333',
         '44444444-4444-4444-8444-444444444444','55555555-5555-4555-8555-555555555555',
         'client','legacy-external',?,'1','https://pa.example.test',
-        'cccccccc-cccc-4ccc-8ccc-cccccccccccc',0,?)`).bind("f".repeat(32),"d".repeat(64)).run();
+        'cccccccc-cccc-4ccc-8ccc-cccccccccccc',0,?,'4','5')`).bind("e".repeat(32),"d".repeat(64)).run();
     await database.prepare(`INSERT INTO project_alpha_existing_directory_binding_acquired_mapping_receipts(
       receipt_id,request_sha256,command_id,record_id,source_id,source_instance_id,application_id,
       history_epoch_id,resource_type,external_id,project_alpha_public_id,project_alpha_revision,
@@ -237,27 +238,28 @@ describe("existing PA directory acquisition migration chain", () => {
         '99999999-9999-4999-8999-999999999999',?,'project-alpha:primary',
         '33333333-3333-4333-8333-333333333333','44444444-4444-4444-8444-444444444444',
         '55555555-5555-4555-8555-555555555555','client','legacy-external',?,'1',?,?,?)`)
-      .bind("a".repeat(64),recordId,"f".repeat(32),"b".repeat(64),"c".repeat(64),"d".repeat(64)).run();
+      .bind("a".repeat(64),recordId,"e".repeat(32),"b".repeat(64),"c".repeat(64),"d".repeat(64)).run();
     await expect(database.prepare(`INSERT INTO project_alpha_acquired_canonical_mappings(
       receipt_id,record_id,source_id,source_instance_id,application_id,history_epoch_id,
       resource_type,external_id,project_alpha_public_id)
       VALUES('dddddddd-dddd-4ddd-8ddd-dddddddddddd',?,'project-alpha:primary',
         '33333333-3333-4333-8333-333333333333','44444444-4444-4444-8444-444444444444',
         '55555555-5555-4555-8555-555555555555','client','legacy-external',?)`)
-      .bind(recordId,"f".repeat(32)).run()).rejects.toThrow(/collides with legacy mapping/);
+      .bind(recordId,"e".repeat(32)).run()).rejects.toThrow(/collides with legacy mapping/);
     expect(await database.prepare("SELECT count(*) FROM sqlite_master WHERE type='trigger' AND name='project_alpha_existing_directory_binding_acquired_mapping_receipts_response_required'").first("count(*)")).toBe(1);
     expect(await database.prepare("SELECT count(*) FROM sqlite_master WHERE type='trigger' AND name='project_alpha_existing_directory_binding_review_evidence_local_record_version_current'").first("count(*)")).toBe(1);
     expect(await database.prepare("SELECT count(*) FROM sqlite_master WHERE type='trigger' AND name='project_alpha_existing_directory_binding_acquired_mapping_receipts_review_local_revision_current'").first("count(*)")).toBe(1);
-  });
+  }, 180_000);
 
-  it("preserves canonical history while a non-colliding acquired chain remains inactive through 0118", async () => {
+  it("preserves canonical history and rejects a legacy alias inserted after an acquired mapping", async () => {
     const runtime = new Miniflare({ modules: true, compatibilityDate: "2026-08-06",
       script: "export default {fetch(){return new Response('ok')}}", d1Databases: ["OPS_DB"] });
     runtimes.push(runtime);
     const database = await runtime.getD1Database("OPS_DB") as D1Database;
     const directory = new URL("../migrations/", import.meta.url);
     const migrations = readdirSync(directory)
-      .filter(name => /^\d{4}_.+\.sql$/.test(name) && name.slice(0, 4) <= "0118").sort();
+      .filter(name => /^\d{4}_.+\.sql$/.test(name) && name.slice(0, 4) <= "0179").sort();
+    expect(migrations.at(-1)).toBe("0179_project_alpha_acquired_native_identity_collision.sql");
     const recordId = "12121212-1212-4121-8121-121212121212";
     const profile = JSON.stringify({ name: "Synthetic Acquired", email: "acquired@example.test", phone: null,
       address: { line1: null, line2: null, city: null, state: null, postalCode: null, country: null }, clientType: "business" });
@@ -329,10 +331,11 @@ describe("existing PA directory acquisition migration chain", () => {
     }
     await database.prepare(`INSERT INTO project_alpha_existing_directory_binding_acquisition_response_receipts(
       command_id,source_instance_id,application_id,history_epoch_id,resource_type,external_id,
-      project_alpha_public_id,project_alpha_revision,destination_origin,pa_request_id,pa_replayed,response_sha256)
+      project_alpha_public_id,project_alpha_revision,destination_origin,pa_request_id,pa_replayed,response_sha256,
+      expected_authorization_generation,result_authorization_generation)
       VALUES(?,'33333333-3333-4333-8333-333333333333','44444444-4444-4444-8444-444444444444',
         '55555555-5555-4555-8555-555555555555','client',?,?,'1','https://pa.example.test',
-        'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbc',0,?)`).bind(ids.command, externalId, publicId, "c".repeat(64)).run();
+        'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbc',0,?,'4','5')`).bind(ids.command, externalId, publicId, "c".repeat(64)).run();
     await database.prepare(`INSERT INTO project_alpha_existing_directory_binding_acquired_mapping_receipts(
       receipt_id,request_sha256,command_id,record_id,source_id,source_instance_id,application_id,
       history_epoch_id,resource_type,external_id,project_alpha_public_id,project_alpha_revision,
@@ -354,6 +357,20 @@ describe("existing PA directory acquisition migration chain", () => {
         '44444444-4444-4444-8444-444444444444','55555555-5555-4555-8555-555555555555',
         'client',?,?,1,'fixture-owner',?)`).bind(ids.claim, ids.receipt, ids.nativeEpoch, recordId, externalId, publicId, requestHash).run();
     await database.prepare("INSERT INTO project_alpha_acquired_mapping_activation(receipt_id) VALUES(?)").bind(ids.receipt).run();
+
+    const reverseAliasCommand = "legacy-cross-id-alias";
+    await database.prepare(`INSERT INTO project_alpha_directory_outbox(command_id,source_id,application_id,resource_type,
+      external_id,command_json,destination_base_url,expected_source_instance_id,expected_history_epoch_id,origin_snapshot_json,next_attempt_at)
+      VALUES(?,'project-alpha:primary','44444444-4444-4444-8444-444444444444','client',
+        ?,'{}','https://pa.example.test','33333333-3333-4333-8333-333333333333',
+        '55555555-5555-4555-8555-555555555555','{}',0)`)
+      .bind(reverseAliasCommand,recordId).run();
+    await expect(database.prepare(`INSERT INTO project_alpha_directory_mappings(source_id,resource_type,external_id,
+      project_alpha_public_id,source_instance_id,application_id,history_epoch_id,command_id)
+      VALUES('project-alpha:primary','client',?,?,'33333333-3333-4333-8333-333333333333',
+        '44444444-4444-4444-8444-444444444444','55555555-5555-4555-8555-555555555555',?)`)
+      .bind(recordId,"a".repeat(32),reverseAliasCommand).run())
+      .rejects.toThrow(/collides with acquired reservation/);
 
     expect(await history()).toEqual(before);
     expect(await database.prepare("SELECT activation_state, native_owner_epoch_id FROM project_alpha_acquired_canonical_mappings WHERE receipt_id=?").bind(ids.receipt).first())
@@ -377,7 +394,7 @@ describe("existing PA directory acquisition migration chain", () => {
         'dddddddd-dddd-4ddd-8ddd-ddddddddddde',?,'fixture-reviewer','access|fixture-reviewer',1,1,
         '2026-09-14T12:35:56.789Z',2)`).bind(requestHash, recordId, "d".repeat(32), "b".repeat(64)).run())
       .rejects.toThrow(/local record version is stale/);
-  });
+  }, 180_000);
 
   it("upgrades populated 0125 activation state through 0132 without changing protected rows", async () => {
     const runtime = new Miniflare({ modules: true, compatibilityDate: "2026-08-06",

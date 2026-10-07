@@ -735,13 +735,24 @@ describe("Client Hub bounded detail collections", () => {
 
   it("retains legacy portal aliases across unequal Ops, PA-internal, and PA-public IDs without exposing the internal ID", async () => {
     const { app, env, ops } = await fixture();
-    await applySql(ops, `CREATE TABLE operations_directory_records(record_id TEXT PRIMARY KEY,record_kind TEXT);
+    await applySql(ops, `CREATE TABLE operations_directory_records(record_id TEXT PRIMARY KEY,record_kind TEXT,current_version INTEGER);
+      CREATE TABLE operations_directory_revisions(record_id TEXT,version INTEGER,profile_json TEXT,PRIMARY KEY(record_id,version));
+      CREATE TABLE operations_directory_client_organizations(client_record_id TEXT PRIMARY KEY,organization_record_id TEXT);
       CREATE TABLE active_mapping_rows(source_id TEXT,resource_type TEXT,record_id TEXT,external_id TEXT,project_alpha_public_id TEXT,
         source_instance_id TEXT,application_id TEXT,history_epoch_id TEXT);
       CREATE VIEW project_alpha_active_directory_mappings AS SELECT source_id,resource_type,record_id,external_id,
         project_alpha_public_id,source_instance_id,application_id,history_epoch_id FROM active_mapping_rows;
-      INSERT INTO operations_directory_records VALUES('ops-org','organization');
+      INSERT INTO operations_directory_records VALUES('ops-org','organization',1),('ops-login','client',1),('ops-no-login','client',1);
+      INSERT INTO operations_directory_revisions VALUES
+        ('ops-org',1,'{"name":"Organization One"}'),
+        ('ops-login',1,'{"name":"Login Contact"}'),
+        ('ops-no-login',1,'{"name":"No Login Contact"}');
+      INSERT INTO operations_directory_client_organizations VALUES('ops-login','ops-org'),('ops-no-login','ops-org');
       INSERT INTO active_mapping_rows VALUES('project-alpha:primary','organization','ops-org','pa-org','${organizationUuid}',
+        '00000000-0000-4000-8000-000000000001','00000000-0000-4000-8000-000000000002','00000000-0000-4000-8000-000000000003');
+      INSERT INTO active_mapping_rows VALUES('project-alpha:primary','client','ops-login','pa-child-login','${"d".repeat(32)}',
+        '00000000-0000-4000-8000-000000000001','00000000-0000-4000-8000-000000000002','00000000-0000-4000-8000-000000000003');
+      INSERT INTO active_mapping_rows VALUES('project-alpha:primary','client','ops-no-login','pa-child-no-login','${"e".repeat(32)}',
         '00000000-0000-4000-8000-000000000001','00000000-0000-4000-8000-000000000002','00000000-0000-4000-8000-000000000003');`);
     const response = await app.request("http://local/api/client-hub/sources/project-alpha%3Aprimary/portal/organizations/workspace-org", {}, env);
     expect(response.status).toBe(200);
@@ -753,6 +764,55 @@ describe("Client Hub bounded detail collections", () => {
     // acquired mappings are active, it must not resolve as an Ops route ID.
     const staleInternalRoute = await app.request("http://local/api/client-hub/sources/project-alpha%3Aprimary/business/organizations/pa-org", {}, env);
     expect(staleInternalRoute.status, await staleInternalRoute.text()).toBe(404);
+  }, 30_000);
+
+  it("serves current canonical Operations contacts without legacy PA organization or client rows", async () => {
+    const { app, env, ops } = await fixture();
+    const sourceInstance = "00000000-0000-4000-8000-000000000001";
+    const application = "00000000-0000-4000-8000-000000000002";
+    const history = "00000000-0000-4000-8000-000000000003";
+    await applySql(ops, `CREATE TABLE operations_directory_records(record_id TEXT PRIMARY KEY,record_kind TEXT,current_version INTEGER);
+      CREATE TABLE operations_directory_revisions(record_id TEXT,version INTEGER,profile_json TEXT,PRIMARY KEY(record_id,version));
+      CREATE TABLE operations_directory_client_organizations(client_record_id TEXT PRIMARY KEY,organization_record_id TEXT);
+      CREATE TABLE active_mapping_rows(source_id TEXT,resource_type TEXT,record_id TEXT,external_id TEXT,project_alpha_public_id TEXT,
+        source_instance_id TEXT,application_id TEXT,history_epoch_id TEXT);
+      CREATE VIEW project_alpha_active_directory_mappings AS SELECT source_id,resource_type,record_id,external_id,
+        project_alpha_public_id,source_instance_id,application_id,history_epoch_id FROM active_mapping_rows;
+      INSERT INTO operations_directory_records VALUES
+        ('ops-org','organization',2),('ops-current','client',2),('ops-stale','client',1),
+        ('ops-ambiguous-a','client',1),('ops-ambiguous-b','client',1),('ops-malformed','client',1);
+      INSERT INTO operations_directory_revisions VALUES
+        ('ops-org',1,'{"name":"Old organization"}'),('ops-org',2,'{"name":"Canonical organization"}'),
+        ('ops-current',1,'{"name":"Old contact","email":"old@example.test"}'),
+        ('ops-current',2,'{"name":"Current contact","email":"current@example.test","phone":"+1 (920) 555-0123"}'),
+        ('ops-stale',1,'{"name":"Stale contact","email":"stale@example.test"}'),
+        ('ops-ambiguous-a',1,'{"name":"Ambiguous A","email":"ambiguous-a@example.test"}'),
+        ('ops-ambiguous-b',1,'{"name":"Ambiguous B","email":"ambiguous-b@example.test"}'),
+        ('ops-malformed',1,'{"name":"Malformed","email":"malformed@example.test"}');
+      INSERT INTO operations_directory_client_organizations VALUES
+        ('ops-current','ops-org'),('ops-stale','ops-org'),('ops-ambiguous-a','ops-org'),
+        ('ops-ambiguous-b','ops-org'),('ops-malformed','ops-org');
+      INSERT INTO active_mapping_rows VALUES
+        ('project-alpha:primary','organization','ops-org','pa-org','${organizationUuid}','${sourceInstance}','${application}','${history}'),
+        ('project-alpha:primary','client','ops-current','pa-current','${"1".repeat(32)}','${sourceInstance}','${application}','${history}'),
+        ('project-alpha:primary','client','ops-stale','pa-stale','${"2".repeat(32)}','${sourceInstance}','${application}','00000000-0000-4000-8000-000000000099'),
+        ('project-alpha:primary','client','ops-ambiguous-a','pa-ambiguous','${"3".repeat(32)}','${sourceInstance}','${application}','${history}'),
+        ('project-alpha:primary','client','ops-ambiguous-b','pa-ambiguous','${"3".repeat(32)}','${sourceInstance}','${application}','${history}'),
+        ('project-alpha:primary','client','ops-malformed','pa-malformed','NOT-A-PUBLIC-ID','${sourceInstance}','${application}','${history}');
+      DELETE FROM pa_clients;
+      DELETE FROM pa_organizations;`);
+    const path = "http://local/api/client-hub/sources/project-alpha%3Aprimary/business/organizations/ops-org";
+    const response = await app.request(path + "/collections/businessContacts", {}, env);
+    expect(response.status, await response.clone().text()).toBe(200);
+    const collection = await response.json() as { items: Array<Record<string, unknown>>; page: Page };
+    expect(collection.items).toEqual([expect.objectContaining({
+      public_id: "ops-current", organization_id: "ops-org", display_name: "Current contact",
+      email: "current@example.test", phone: "+1 (920) 555-0123", record_type: "business_contact",
+      contact_key: "business:project-alpha:primary:ops-current",
+    })]);
+    expect(collection.page).toMatchObject({ available: true, returned: 1, hasMore: false });
+    expect(await ops.prepare("SELECT count(*) count FROM pa_clients").first("count")).toBe(0);
+    expect(await ops.prepare("SELECT count(*) count FROM pa_organizations").first("count")).toBe(0);
   }, 30_000);
 
   it("does not bypass canonical ID validation through live-source fallback", async () => {
@@ -941,6 +1001,30 @@ describe("Client Hub", () => {
       pa_public_id: organizationUuid, detail_path: "/clients/sources/project-alpha%3Aprimary/business/organizations/pa-org" },
       accounts: [{ id: "account-org" }] });
   });
+
+  it("resolves a v2-only portal workspace to its current Ops root without legacy PA rows or account aliases", async () => {
+    const { app, env, ops, delivery } = await fixture();
+    await applySql(ops, `DELETE FROM pa_organizations; DELETE FROM pa_clients;`);
+    await delivery.prepare("DELETE FROM client_accounts").run();
+    await delivery.prepare("UPDATE portal_v2_workspaces SET legacy_account_id=NULL WHERE id='workspace-org'").run();
+    await applySql(ops, `CREATE TABLE operations_directory_records(record_id TEXT PRIMARY KEY,record_kind TEXT,current_version INTEGER);
+      CREATE TABLE operations_directory_revisions(record_id TEXT,version INTEGER,profile_json TEXT,PRIMARY KEY(record_id,version));
+      CREATE TABLE operations_directory_client_organizations(client_record_id TEXT PRIMARY KEY,organization_record_id TEXT);
+      CREATE TABLE active_mapping_rows(source_id TEXT,resource_type TEXT,record_id TEXT,external_id TEXT,project_alpha_public_id TEXT,
+        source_instance_id TEXT,application_id TEXT,history_epoch_id TEXT);
+      CREATE VIEW project_alpha_active_directory_mappings AS SELECT source_id,resource_type,record_id,external_id,
+        project_alpha_public_id,source_instance_id,application_id,history_epoch_id FROM active_mapping_rows;
+      INSERT INTO operations_directory_records VALUES('ops-org','organization',2);
+      INSERT INTO operations_directory_revisions VALUES('ops-org',2,'{"name":"Current API v2 business"}');
+      INSERT INTO active_mapping_rows VALUES('project-alpha:primary','organization','ops-org','pa-internal-org','${organizationUuid}',
+        '00000000-0000-4000-8000-000000000001','00000000-0000-4000-8000-000000000002','00000000-0000-4000-8000-000000000003');`);
+    const response = await app.request("http://local/api/client-hub/sources/project-alpha%3Aprimary/portal/organizations/workspace-org", {}, env);
+    expect(response.status, await response.clone().text()).toBe(200);
+    const detail = await response.json() as { client: Record<string, unknown> };
+    expect(detail.client).toMatchObject({ root_namespace: "business", public_id: "ops-org", pa_public_id: organizationUuid,
+      workspace_id: "workspace-org" });
+    expect(detail.client).not.toHaveProperty("pa_internal_id");
+  }, 30_000);
 
   it("keeps the contact-role API default-off, source-qualified and read-only when explicitly enabled", async () => {
     const { app, env, ops, delivery } = await fixture();

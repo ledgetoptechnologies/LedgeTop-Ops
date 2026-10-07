@@ -1,12 +1,15 @@
 import { readFileSync } from "node:fs";
+import { createLocalJWKSet, exportJWK, generateKeyPair, SignJWT, type JWTVerifyGetKey } from "jose";
 import { Miniflare } from "miniflare";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
 vi.mock("cloudflare:workers", () => ({ WorkerEntrypoint: class {} }));
 import { splitD1MigrationStatements } from "../../client/test/helpers/d1-migrations";
+import { resolveCloudflareClientPrincipal, resolveCloudflareRecipientEnrollmentProof } from
+  "../../client/src/worker/client-portal/access-identity";
+import { createOperationsHomeRouter } from "../../client/src/worker/client-portal/operations-home-routes";
 import { handleOperationsNativeRecipientEnrollmentHttp } from
   "../../client/src/worker/client-portal/operations-native-recipient-enrollment-http";
-import { readOperationsServiceHome } from "../../client/src/worker/client-portal/operations-service-home";
 import { applyOperationsPortalNativeRecipientAuthority, readOperationsPortalNativeRecipientAuthorityStatus } from
   "../../client/src/worker/operations-portal-native-recipient-authority";
 import { publishOperationsPortalWorkspaceRpc, getOperationsPortalWorkspacePublicationStatusRpc } from
@@ -38,6 +41,7 @@ let sequence = 1;
 const id = () => `a0000000-0000-4000-8000-${String(sequence++).padStart(12, "0")}`;
 const rootId = "ops/organization/joined-recipient", clientId = "ops/client/joined-recipient";
 const issuer = "https://joined-recipient.cloudflareaccess.com", subject = "access|joined-recipient";
+const audience = "joined-recipient-client-portal";
 const clientOrigin = "https://client-staging.ledgetopdroneservices.com";
 const future = (hours = 1) => new Date(Date.now() + hours * 3_600_000).toISOString();
 function owner(): AuthenticatedNativeStaffWithAdmissionVersion {
@@ -142,19 +146,37 @@ async function acknowledgeCreate(database: D1Database, seed: Awaited<ReturnType<
 
 describe("Ops-native recipient joined local acceptance", () => {
   let runtime: Miniflare, operations: D1Database, client: D1Database;
+  let accessPrivateKey: CryptoKey, accessJwks: JWTVerifyGetKey;
   let targetId: string, authorityId: string, workspaceId: string;
+
+  async function accessToken(tokenSubject = subject, tokenIssuer = issuer) {
+    return new SignJWT({ type: "app", sub: tokenSubject, email: "joined-recipient@example.test" })
+      .setProtectedHeader({ alg: "RS256", kid: "joined-recipient-access", typ: "JWT" })
+      .setIssuer(tokenIssuer).setAudience(audience).setExpirationTime(Math.floor(Date.now() / 1000) + 600)
+      .sign(accessPrivateKey);
+  }
 
   beforeAll(async () => {
     runtime = new Miniflare({ modules: true, compatibilityDate: "2026-08-06", script: "export default {}",
       d1Databases: { OPS_DB: crypto.randomUUID(), DELIVERY_DB: crypto.randomUUID() } });
     operations = await runtime.getD1Database("OPS_DB") as unknown as D1Database;
     client = await runtime.getD1Database("DELIVERY_DB") as unknown as D1Database;
+    const accessKeys = await generateKeyPair("RS256", { extractable: true });
+    const accessPublicJwk = await exportJWK(accessKeys.publicKey);
+    accessPublicJwk.alg = "RS256"; accessPublicJwk.kid = "joined-recipient-access"; accessPublicJwk.use = "sig";
+    accessPrivateKey = accessKeys.privateKey;
+    accessJwks = createLocalJWKSet({ keys: [accessPublicJwk] });
     expect(await applyCanonicalChain(operations, "operations",
       "0153_operations_portal_workspace_publication_outbox.sql", true)).toHaveLength(153);
     for (const name of ["0154_operations_portal_native_recipient_authority.sql",
       "0156_operations_portal_workspace_publication_invocations.sql",
       "0157_operations_portal_native_workspace_cleanup.sql", "0160_operations_portal_native_recipient_labels.sql"])
       await applyDraft(operations, "operations", name);
+    // Current directory consumers require the explicit Operations-record ID
+    // projection introduced by 0170; this historical acceptance fixture stops
+    // its canonical chain at 0153 and therefore applies that view migration
+    // explicitly rather than exercising an obsolete mapping shape.
+    await applyDraft(operations, "operations", "0170_project_alpha_active_directory_project_guard.sql");
     expect(await applyCanonicalChain(client, "client", "0223_operations_portal_workspace_publications.sql"))
       .toHaveLength(142);
     await applyDraft(client, "client", "0224_operations_portal_native_recipient_authority.sql");
@@ -202,15 +224,18 @@ describe("Ops-native recipient joined local acceptance", () => {
     const issued = await issueOperationsPortalNativeRecipientIntent(operations, { operationId: id(), targetId,
       targetClientRecordId: clientId, expiresAt: future(), owner: owner() });
     if (!issued.opaqueToken) throw new Error("expected one-time enrollment token");
+    const recipientAccessToken = await accessToken();
+    const clientAccessEnv = { CLIENT_ACCESS_TEAM_DOMAIN: issuer, CLIENT_ACCESS_AUD: audience } as ClientEnv;
     const enrollmentEnv = { OPS_DB: operations, ENVIRONMENT: "staging", EXPECTED_HOST: "ops-staging.example.test",
       TEAM_DOMAIN: issuer, CLIENT_PORTAL_NATIVE_RECIPIENT_ENROLLMENT_ENABLED: "true" } as const;
-    const proof = { principal: { issuer, subject, email: "joined-recipient@example.test" }, verifiedUntil: future() };
-    const dependencies = { env: {} as ClientEnv, enabled: true, environment: "staging", origin: clientOrigin,
-      csrfSecret: "joined-native-recipient-csrf-secret-long-enough", resolveProof: async () => proof, binding: {
+    const dependencies = { env: clientAccessEnv, enabled: true, environment: "staging", origin: clientOrigin,
+      csrfSecret: "joined-native-recipient-csrf-secret-long-enough", binding: {
         inspectNativeEnrollment: (input: unknown) => inspectOperationsPortalNativeRecipientEnrollmentRpc(enrollmentEnv, input),
         redeemNativeEnrollment: (input: unknown) => redeemOperationsPortalNativeRecipientEnrollmentRpc(enrollmentEnv, input),
-      } };
-    const headers = { Origin: clientOrigin, "Sec-Fetch-Site": "same-origin", "X-Operations-Enrollment-Request": "1" };
+      }, resolveProof: (request: Request, env: ClientEnv) =>
+        resolveCloudflareRecipientEnrollmentProof(request, env, accessJwks) };
+    const headers = { Origin: clientOrigin, "Sec-Fetch-Site": "same-origin", "X-Operations-Enrollment-Request": "1",
+      "Cf-Access-Jwt-Assertion": recipientAccessToken };
     const session = await handleOperationsNativeRecipientEnrollmentHttp(new Request(
       `${clientOrigin}/api/client/operations/recipient-enrollment/session`, { headers }), dependencies);
     expect(session.status).toBe(200);
@@ -255,28 +280,38 @@ describe("Ops-native recipient joined local acceptance", () => {
     expect(await operations.prepare("SELECT count(*) count FROM operations_portal_native_authority_receipts")
       .first<number>("count")).toBe(1);
 
-    const homeEnv = { DELIVERY_DB: client, CLIENT_PORTAL_OPERATIONS_SERVICE_HOME_ENABLED: "true",
+    const homeEnv = { DELIVERY_DB: client, CLIENT_PORTAL_ENABLED: "true",
+      CLIENT_PORTAL_OPERATIONS_SERVICE_HOME_ENABLED: "true", CLIENT_PORTAL_ORIGIN: clientOrigin,
+      CLIENT_ACCESS_TEAM_DOMAIN: issuer, CLIENT_ACCESS_AUD: audience,
       CLIENT_PORTAL_NATIVE_RECIPIENT_SERVICE_HOME_ENABLED: "true", CLIENT_PORTAL_SERVICE_METADATA_READER: {
         readServiceMetadata: async (input: unknown) => JSON.stringify(await readClientPortalServiceMetadataRpc({
           OPS_DB: operations, CLIENT_PORTAL_SERVICE_METADATA_RPC_ENABLED: "true",
           CLIENT_PORTAL_NATIVE_RECIPIENT_SERVICE_HOME_ENABLED: "true" }, input)),
-      } };
-    await expect(readOperationsServiceHome(homeEnv, { issuer, subject }, authorityId)).resolves.toMatchObject({ ok: true,
-      authorityId, workspaceId, ownershipEpoch: 1, grantRevision: 1,
+      } } as unknown as ClientEnv;
+    const homeRouter = createOperationsHomeRouter({ resolvePrincipal: (request, env) =>
+      resolveCloudflareClientPrincipal(request, env, accessJwks) });
+    const homeRequest = (token: string) => new Request(`${clientOrigin}/home/${authorityId}`, {
+      headers: { "Cf-Access-Jwt-Assertion": token },
+    });
+    const home = await homeRouter.fetch(homeRequest(recipientAccessToken), homeEnv);
+    expect(home.status).toBe(200);
+    expect(await home.json()).toMatchObject({ resourceMode: "operations_home", authorityId, workspaceId,
+      ownershipEpoch: 1, grantRevision: 1,
       services: [{ serviceId: "web", providerId: "operations", displayLabel: "Website services", revision: 1 }] });
+    expect((await homeRouter.fetch(homeRequest(await accessToken(subject, "https://wrong.cloudflareaccess.com")), homeEnv)).status)
+      .toBe(401);
+    expect((await homeRouter.fetch(homeRequest(await accessToken("access|wrong-recipient")), homeEnv)).status).toBe(403);
 
     const revokeOperationId = id();
     await revokeOperationsPortalNativeRecipient(operations, { operationId: revokeOperationId,
       intentId: issued.review.intentId, expectedRevision: 4, owner: owner() });
-    await expect(readOperationsServiceHome(homeEnv, { issuer, subject }, authorityId))
-      .resolves.toEqual({ ok: false, code: "denied" });
+    expect((await homeRouter.fetch(homeRequest(recipientAccessToken), homeEnv)).status).toBe(403);
     await materializeOperationsPortalNativeRecipientAuthority(operations, revokeOperationId);
     await expect(dispatchOperationsPortalNativeRecipientAuthority(dispatchEnv, revokeOperationId))
       .resolves.toMatchObject({ status: "acknowledged" });
     await expect(readOperationsPortalNativeRecipientIntent(operations, issued.review.intentId))
       .resolves.toMatchObject({ state: "revoked", revision: 6 });
-    await expect(readOperationsServiceHome(homeEnv, { issuer, subject }, authorityId))
-      .resolves.toEqual({ ok: false, code: "denied" });
+    expect((await homeRouter.fetch(homeRequest(recipientAccessToken), homeEnv)).status).toBe(403);
     expect(await operations.prepare("SELECT count(*) count FROM operations_portal_native_authority_receipts")
       .first<number>("count")).toBe(2);
     expect(await client.prepare("SELECT state FROM operations_portal_native_recipient_authority_heads")

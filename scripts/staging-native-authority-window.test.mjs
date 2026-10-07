@@ -241,11 +241,11 @@ function preparationHarness(options = {}) {
     root: "C:\\private-root",
     withBinding: async (_config, callback) => callback({ db: {}, target: STAGING_TARGET }),
     reviewedMigrations: () => options.expectedMigrations
-      ?? ["0169_project_alpha_existing_directory_binding_generation_evidence.sql", "0170_project_alpha_active_directory_project_guard.sql", "0171_project_alpha_active_directory_update_guard.sql"],
+      ?? ["0176_operations_directory_acquired_intent_authority.sql", "0177_operations_directory_acquired_intent_update_authority.sql", "0178_project_alpha_project_inbound_reconciliation.sql", "0179_project_alpha_acquired_native_identity_collision.sql", "0180_project_alpha_project_v2_recovery_authorization.sql"],
     readMigrations: async () => {
       if (options.ledgerReadFails) throw new Error("private transport detail");
       return options.actualMigrations
-        ?? ["0169_project_alpha_existing_directory_binding_generation_evidence.sql", "0170_project_alpha_active_directory_project_guard.sql", "0171_project_alpha_active_directory_update_guard.sql"];
+        ?? ["0176_operations_directory_acquired_intent_authority.sql", "0177_operations_directory_acquired_intent_update_authority.sql", "0178_project_alpha_project_inbound_reconciliation.sql", "0179_project_alpha_acquired_native_identity_collision.sql", "0180_project_alpha_project_v2_recovery_authorization.sql"];
     },
     referenceTables: async () => ["native_directory_grants", "native_directory_grant_history"],
     referenceCounts: async () => [
@@ -564,4 +564,10 @@ test("CLI output contains summary only for open and supports close alias", async
     "close", "--config", "binding.json", "--recover", "private/provision.json",
   ], closeDependencies), 0);
   assert.equal(JSON.parse(logged).cleanupVerified, true);
+});
+
+test("CLI refuses remote synthetic-area preparation without its explicit mutation confirmation", async () => {
+  await assert.rejects(main([
+    "prepare", "--config", "binding.json", "--area-id", AREA.id, "--area-name", AREA.name,
+  ], {}), /usage: prepare/);
 });

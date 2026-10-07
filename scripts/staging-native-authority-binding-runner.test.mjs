@@ -33,7 +33,7 @@ function configFile(t, value = reviewedConfig()) {
   return filename;
 }
 
-function fakeDb({ row = { migration_count: 171, final_migration: "0171_project_alpha_active_directory_update_guard.sql" } } = {}) {
+function fakeDb({ row = { migration_count: 180, final_migration: "0180_project_alpha_project_v2_recovery_authorization.sql" } } = {}) {
   const state = { prepared: [], batches: 0 };
   return {
     state,
@@ -125,7 +125,7 @@ test("status uses exact proxy options, one read-only aggregate, sanitized output
     workerName: STAGING_TARGET.workerName,
     binding: STAGING_TARGET.binding,
     databaseName: STAGING_TARGET.databaseName,
-    migrations: { count: 171, final: "0171_project_alpha_active_directory_update_guard.sql" },
+    migrations: { count: 180, final: "0180_project_alpha_project_v2_recovery_authorization.sql" },
     mutationsPerformed: false,
   });
   assert.doesNotMatch(logs[0], /staff|grant|admission|access_subject/i);
@@ -196,38 +196,58 @@ test("query and apply failures still dispose the platform proxy", async t => {
   });
 });
 
-test("module-only apply derives target and delegates the reviewed packet atomically once", async t => {
-  const filename = configFile(t);
-  const db = fakeDb();
-  const state = { starts: 0, options: [], disposals: 0 };
-  const packet = { schemaVersion: 2, statements: [{ sql: "guard" }, { sql: "write" }] };
-  const calls = [];
-  const result = await applyReviewedNativeOnlyAuthorityPacket(filename, packet, {
-    getPlatformProxy: proxyFactory(db, state),
-    applyPacket: async (actualDb, actualPacket, options) => {
-      calls.push({ actualDb, actualPacket, options });
-      await actualDb.batch(actualPacket.statements);
-      return { replayed: false };
-    },
-  });
-  assert.deepEqual(result, { replayed: false });
-  assert.equal(calls.length, 1);
-  assert.equal(calls[0].actualDb, db);
-  assert.equal(calls[0].actualPacket, packet);
-  assert.deepEqual(calls[0].options, { target: STAGING_TARGET });
-  assert.equal(db.state.batches, 1);
-  assert.equal(db.state.prepared.length, 0, "runner does not sequence individual write statements");
-  assert.equal(state.disposals, 1);
+test("module-only apply accepts exactly compiled packet versions 2 and 3 and delegates atomically once", async t => {
+  for (const schemaVersion of [2, 3]) {
+    await t.test(`schema version ${schemaVersion}`, async t => {
+      const filename = configFile(t);
+      const db = fakeDb();
+      const state = { starts: 0, options: [], disposals: 0 };
+      const packet = { schemaVersion, statements: [{ sql: "guard" }, { sql: "write" }] };
+      const calls = [];
+      const result = await applyReviewedNativeOnlyAuthorityPacket(filename, packet, {
+        getPlatformProxy: proxyFactory(db, state),
+        applyPacket: async (actualDb, actualPacket, options) => {
+          calls.push({ actualDb, actualPacket, options });
+          await actualDb.batch(actualPacket.statements);
+          return { replayed: false };
+        },
+      });
+      assert.deepEqual(result, { replayed: false });
+      assert.equal(calls.length, 1);
+      assert.equal(calls[0].actualDb, db);
+      assert.equal(calls[0].actualPacket, packet);
+      assert.deepEqual(calls[0].options, { target: STAGING_TARGET });
+      assert.equal(db.state.batches, 1);
+      assert.equal(db.state.prepared.length, 0, "runner does not sequence individual write statements");
+      assert.equal(state.disposals, 1);
+    });
+  }
 });
 
-test("raw values are refused before proxy startup", async t => {
+test("raw version 2 and 3 values are refused before proxy startup", async t => {
   const filename = configFile(t);
-  let starts = 0;
-  await assert.rejects(applyReviewedNativeOnlyAuthorityPacket(filename, {
-    schemaVersion: 2,
-    staging: STAGING_TARGET,
-  }, {
-    getPlatformProxy: async () => { starts += 1; },
-  }), /reviewed compiled packet required/);
-  assert.equal(starts, 0);
+  for (const schemaVersion of [2, 3]) {
+    let starts = 0;
+    await assert.rejects(applyReviewedNativeOnlyAuthorityPacket(filename, {
+      schemaVersion,
+      staging: STAGING_TARGET,
+    }, {
+      getPlatformProxy: async () => { starts += 1; },
+    }), /reviewed compiled packet required/);
+    assert.equal(starts, 0);
+  }
+});
+
+test("unreviewed compiled packet versions are refused before proxy startup", async t => {
+  const filename = configFile(t);
+  for (const schemaVersion of [1, 4]) {
+    let starts = 0;
+    await assert.rejects(applyReviewedNativeOnlyAuthorityPacket(filename, {
+      schemaVersion,
+      statements: [],
+    }, {
+      getPlatformProxy: async () => { starts += 1; },
+    }), /reviewed compiled packet required/);
+    assert.equal(starts, 0);
+  }
 });

@@ -12,6 +12,8 @@ export const OPS_PROJECT_V2_JOINED_ACCEPTANCE_PROFILE_NAME =
   "ops-project-v2-joined-acceptance";
 export const OPS_PROJECT_V2_JOINED_ACCEPTANCE_FLAG =
   "PROJECT_ALPHA_PROJECT_V2_ACTIVATION_ENABLED";
+export const OPS_PROJECT_INBOUND_RECONCILIATION_FLAG =
+  "PROJECT_ALPHA_PROJECT_INBOUND_RECONCILIATION_ENABLED";
 export const OPS_PROJECT_V2_JOINED_ACCEPTANCE_CONFIG = Object.freeze({
   source: "apps/operations/wrangler.staging.json",
   production: "apps/operations/wrangler.jsonc",
@@ -42,6 +44,14 @@ function sourceErrors(source, production) {
   if (isObject(production)
     && production.vars?.[OPS_PROJECT_V2_JOINED_ACCEPTANCE_FLAG] !== "false") {
     errors.push(`Operations production config must keep ${OPS_PROJECT_V2_JOINED_ACCEPTANCE_FLAG}=false`);
+  }
+  if (isObject(source)
+    && source.vars?.[OPS_PROJECT_INBOUND_RECONCILIATION_FLAG] !== "false") {
+    errors.push(`Operations default staging config must set ${OPS_PROJECT_INBOUND_RECONCILIATION_FLAG}=false`);
+  }
+  if (isObject(production)
+    && production.vars?.[OPS_PROJECT_INBOUND_RECONCILIATION_FLAG] !== "false") {
+    errors.push(`Operations production config must keep ${OPS_PROJECT_INBOUND_RECONCILIATION_FLAG}=false`);
   }
   return errors;
 }

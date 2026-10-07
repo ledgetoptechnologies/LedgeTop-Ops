@@ -52,7 +52,7 @@ type Action = Readonly<{
   actionId: string; idempotencyKey: string; findingId: string; runId: string; sourceId: string;
   sourceInstanceId: string; applicationId: string; historyEpoch: string; authorizationGeneration: string;
   classification: string; resourceType: "client" | "organization"; remotePublicId: string;
-  remoteRevision: string; recordId: string; expectedRecordVersion: number; reviewId: string; commandId: string;
+  remoteRevision: string; externalId: string | null; recordId: string; expectedRecordVersion: number; reviewId: string; commandId: string;
   reviewerStaffId: string; reviewerAccessSubject: string; reviewerAdmissionVersion: number;
   reviewerProfileVersion: number; reviewerGrantGeneration: number;
 }>;
@@ -248,7 +248,7 @@ async function actionBySelection(db: D1Database, idempotencyKey: string, finding
   const rows = await db.prepare(`SELECT action_id actionId,idempotency_key idempotencyKey,finding_id findingId,
       run_id runId,source_id sourceId,source_instance_id sourceInstanceId,application_id applicationId,
       history_epoch_id historyEpoch,authorization_generation authorizationGeneration,classification,
-      resource_type resourceType,remote_public_id remotePublicId,remote_revision remoteRevision,record_id recordId,
+      resource_type resourceType,remote_public_id remotePublicId,remote_revision remoteRevision,external_id externalId,record_id recordId,
       expected_record_version expectedRecordVersion,review_id reviewId,command_id commandId,
       reviewer_staff_id reviewerStaffId,reviewer_access_subject reviewerAccessSubject,
       reviewer_admission_version reviewerAdmissionVersion,reviewer_profile_version reviewerProfileVersion,
@@ -283,6 +283,7 @@ async function currentAction(db: D1Database, actionId: string): Promise<Action |
       action.application_id applicationId,action.history_epoch_id historyEpoch,
       action.authorization_generation authorizationGeneration,action.classification,
       action.resource_type resourceType,action.remote_public_id remotePublicId,action.remote_revision remoteRevision,
+      action.external_id externalId,
       action.record_id recordId,action.expected_record_version expectedRecordVersion,action.review_id reviewId,
       action.command_id commandId,action.reviewer_staff_id reviewerStaffId,
       action.reviewer_access_subject reviewerAccessSubject,action.reviewer_admission_version reviewerAdmissionVersion,
@@ -340,12 +341,12 @@ export async function acquireProjectAlphaDirectoryReconciliationFinding(
     try {
       const inserted = await env.OPS_DB.prepare(`INSERT INTO project_alpha_directory_reconciliation_actions(
         action_id,idempotency_key,finding_id,run_id,source_id,source_instance_id,application_id,history_epoch_id,
-        authorization_generation,classification,resource_type,remote_public_id,remote_revision,record_id,
+        authorization_generation,classification,resource_type,remote_public_id,remote_revision,external_id,record_id,
         expected_record_version,review_id,command_id,reviewer_staff_id,reviewer_access_subject,
         reviewer_admission_version,reviewer_profile_version,reviewer_grant_generation,created_at)
         SELECT ?,?,finding.finding_id,finding.run_id,finding.source_id,run.source_instance_id,run.application_id,
           run.history_epoch_id,run.authorization_generation,finding.classification,finding.resource_type,
-          finding.remote_public_id,observation.revision,record.record_id,record.current_version,?,?,?,?,?,?,?,?
+          finding.remote_public_id,observation.revision,observation.binding_external_id,record.record_id,record.current_version,?,?,?,?,?,?,?,?
         FROM project_alpha_directory_reconciliation_findings finding
         JOIN project_alpha_directory_reconciliation_checkpoints checkpoint
           ON checkpoint.source_id=finding.source_id AND checkpoint.complete_run_id=finding.run_id
@@ -378,7 +379,7 @@ export async function acquireProjectAlphaDirectoryReconciliationFinding(
   let current: Action | null;
   try { current = await currentAction(env.OPS_DB, action.actionId); }
   catch { return { status: "uncertain", reason: "database" }; }
-  if (!current || !ADOPTABLE.has(current.classification)) return { status: "blocked", reason: "stale_snapshot" };
+  if (!current || !current.externalId || !ADOPTABLE.has(current.classification)) return { status: "blocked", reason: "stale_snapshot" };
   const readProfile = options.readProfile ?? readConfiguredProjectAlphaDirectoryProfile;
   let remote: Awaited<ReturnType<typeof readConfiguredProjectAlphaDirectoryProfile>>;
   try { remote = await readProfile(env, current.sourceId, current.resourceType, current.remotePublicId, fetch); }
@@ -395,7 +396,7 @@ export async function acquireProjectAlphaDirectoryReconciliationFinding(
   let result: ProjectAlphaExistingDirectoryAcquisitionOutcome;
   try {
     result = await acquire(env, { reviewId: current.reviewId, commandId: current.commandId,
-      sourceId: current.sourceId, recordId: current.recordId, resourceType: current.resourceType,
+      sourceId: current.sourceId, recordId: current.recordId, externalId: current.externalId, resourceType: current.resourceType,
       projectAlphaPublicId: current.remotePublicId, expectedProjectAlphaRevision: current.remoteRevision,
       expectedAuthorizationGeneration: current.authorizationGeneration, localRecordVersion: current.expectedRecordVersion,
       reviewer: { staffId: current.reviewerStaffId, accessSubject: current.reviewerAccessSubject,

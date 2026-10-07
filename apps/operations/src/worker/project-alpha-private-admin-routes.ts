@@ -17,10 +17,27 @@ import {
 import {
   sendConfiguredProjectAlphaProjectBindingRevisionRefreshCommand,
 } from "./project-alpha-project-binding-revision-refresh-api-v2";
+import { authenticateNativeStaffWithAdmissionVersion } from "./native-staff-auth";
+import { withEnabledConfiguredProjectAlphaApiV2Connection } from "./project-alpha-api-v2-connections";
+import { activateProjectAlphaProjectV2Canonical } from "./project-alpha-project-canonical-activation-adapter";
+import { settleProjectAlphaProjectV2Read } from "./project-alpha-project-read-settlement-adapter";
+import { dispatchProjectAlphaProjectV2PendingCommand } from "./project-alpha-project-v2-pending-dispatcher";
+import {
+  prepareProjectAlphaProjectV2Recovery,
+  type ProjectAlphaProjectV2RecoveryActor,
+} from "./project-alpha-project-v2-recovery";
+import { prepareProjectAlphaProjectV2PostAckResume } from "./project-alpha-project-v2-post-ack-resume";
 import {
   produceProjectAlphaProjectAdoptionReview,
   type ProjectAlphaProjectAdoptionReviewProducerOutcome,
 } from "./project-alpha-project-adoption-review-producer";
+import {
+  proposeProjectAlphaInboundProjectEdit,
+  readProjectAlphaInboundProjectProposal,
+  resolveProjectAlphaInboundProjectEdit,
+  type InboundProjectProposalOutcome,
+  type InboundProjectResolutionOutcome,
+} from "./project-alpha-project-inbound-reconciliation";
 import { auditStatement } from "./request-security";
 import type { Env, StaffPrincipal } from "./types";
 
@@ -41,6 +58,7 @@ const acquireSchema = z.object({
   commandId: UUID,
   sourceId: SOURCE_ID,
   recordId: RECORD_ID,
+  externalId: RECORD_ID,
   resourceType: z.enum(["client", "organization"]),
   projectAlphaPublicId: PUBLIC_ID,
   expectedProjectAlphaRevision: z.string().regex(/^[1-9][0-9]{0,18}$/),
@@ -59,6 +77,29 @@ const projectBindingRefreshSchema = z.object({
   sourceId: SOURCE_ID,
   externalProjectId: RECORD_ID,
 }).strict();
+const inboundProposalSchema = z.object({
+  sourceId: SOURCE_ID,
+  externalProjectId: RECORD_ID,
+}).strict();
+const inboundResolutionSchema = z.object({
+  proposalId: UUID,
+  decision: z.enum(["accept_project_alpha", "keep_operations", "requires_follow_up"]),
+}).strict();
+const projectV2RecoverySchema = z.object({
+  authorizationId: UUID,
+  commandId: UUID,
+  sourceId: SOURCE_ID,
+  expectedApplicationId: UUID,
+  expectedEventVersion: positiveInteger,
+  reason: z.string().trim().min(1).max(500).refine(value => !value.includes("\0")),
+}).strict();
+const projectV2PostAckSchema = z.object({
+  authorizationId: UUID,
+  commandId: UUID,
+  sourceId: SOURCE_ID,
+  expectedApplicationId: UUID,
+  reason: z.string().trim().min(1).max(500).refine(value => !value.includes("\0")),
+}).strict();
 const reconciliationAdoptionSchema = z.object({
   findingId: UUID,
   recordId: RECORD_ID,
@@ -76,6 +117,16 @@ function projectAdoptionReviewEnabled(env: Pick<Env, "ENVIRONMENT" | "PROJECT_AL
 
 function projectBindingRefreshEnabled(env: Pick<Env, "ENVIRONMENT" | "PROJECT_ALPHA_PROJECT_BINDING_REVISION_REFRESH_ENABLED">): boolean {
   return env.ENVIRONMENT === "staging" && env.PROJECT_ALPHA_PROJECT_BINDING_REVISION_REFRESH_ENABLED === "true";
+}
+
+function projectInboundReconciliationEnabled(env: Pick<Env, "PROJECT_ALPHA_PROJECT_INBOUND_RECONCILIATION_ENABLED">): boolean {
+  // This is a generic, explicitly reviewed feature gate. Keep it default-off in
+  // every deployment; environment labels are not an authorization boundary.
+  return env.PROJECT_ALPHA_PROJECT_INBOUND_RECONCILIATION_ENABLED === "true";
+}
+
+function projectV2RecoveryEnabled(env: Pick<Env, "ENVIRONMENT" | "PROJECT_ALPHA_PROJECT_V2_RECOVERY_ENABLED">): boolean {
+  return env.ENVIRONMENT === "staging" && env.PROJECT_ALPHA_PROJECT_V2_RECOVERY_ENABLED === "true";
 }
 
 function sanitizedProjectAdoptionReviewOutcome(outcome: ProjectAlphaProjectAdoptionReviewProducerOutcome):
@@ -136,6 +187,75 @@ async function requireGlobalDirectoryProfileView(env: Env, staffId: string): Pro
 
 function principalActor(principal: StaffPrincipal): { staffId: string; accessSubject: string } {
   return { staffId: principal.id, accessSubject: principal.accessSubject };
+}
+
+async function currentNativeProjectActor(c: AppContext): Promise<ProjectAlphaProjectV2RecoveryActor> {
+  let authenticated: Awaited<ReturnType<typeof authenticateNativeStaffWithAdmissionVersion>>;
+  try {
+    authenticated = await authenticateNativeStaffWithAdmissionVersion(c.req.raw, c.env.OPS_DB, {
+      enabled: true, issuer: c.env.TEAM_DOMAIN ?? "", staffAudience: c.env.OPERATIONS_AUD,
+    });
+  } catch { throw new HTTPException(403, { message: "Current native staff authority is required" }); }
+  const principal = c.get("principal"), identity = authenticated.identity;
+  if (identity.staffId !== principal.id || identity.verifiedAccessSubject !== principal.accessSubject
+    || identity.email !== principal.email)
+    throw new HTTPException(403, { message: "Operations and native staff identities do not match" });
+  return { staffId: identity.staffId, accessSubject: identity.verifiedAccessSubject, email: identity.email,
+    admissionVersion: authenticated.admissionVersion, profileVersion: identity.profileVersion,
+    verifiedUntil: authenticated.verifiedUntil };
+}
+
+function publicProjectV2RecoveryOutcome(value: unknown): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return { status: "uncertain", reason: "invalid_outcome" };
+  const raw = value as Record<string, unknown>;
+  const safe: Record<string, unknown> = { status: typeof raw.status === "string" ? raw.status : "uncertain" };
+  for (const key of ["reason", "authorizationId", "commandId", "receiptId", "settlementId", "activationId", "externalProjectId"])
+    if (typeof raw[key] === "string") safe[key] = raw[key];
+  for (const key of ["replayed"])
+    if (typeof raw[key] === "boolean") safe[key] = raw[key];
+  for (const key of ["uncertainEventVersion", "version"])
+    if (typeof raw[key] === "number" && Number.isSafeInteger(raw[key])) safe[key] = raw[key];
+  return safe;
+}
+
+async function auditProjectV2Recovery(c: AppContext, input: z.infer<typeof projectV2RecoverySchema>,
+  stage: string, raw: unknown): Promise<Record<string, unknown>> {
+  const outcome = publicProjectV2RecoveryOutcome(raw);
+  await c.env.OPS_DB.batch([await auditStatement(c.env, c.req.raw, c.get("principal"),
+    "integration.project_v2_recovery_completed", "project_alpha_project_v2_recovery",
+    input.authorizationId, null, { commandId: input.commandId, sourceId: input.sourceId,
+      expectedApplicationId: input.expectedApplicationId, expectedEventVersion: input.expectedEventVersion,
+      stage, status: outcome.status, ...(outcome.reason ? { reason: outcome.reason } : {}),
+      ...(typeof outcome.replayed === "boolean" ? { replayed: outcome.replayed } : {}) })]);
+  return outcome;
+}
+
+async function auditProjectV2PostAck(c: AppContext, input: z.infer<typeof projectV2PostAckSchema>,
+  stage: string, raw: unknown): Promise<Record<string, unknown>> {
+  const outcome = publicProjectV2RecoveryOutcome(raw);
+  await c.env.OPS_DB.batch([await auditStatement(c.env, c.req.raw, c.get("principal"),
+    "integration.project_v2_post_ack_resume_completed", "project_alpha_project_v2_post_ack_resume",
+    input.authorizationId, null, { commandId: input.commandId, sourceId: input.sourceId,
+      expectedApplicationId: input.expectedApplicationId, stage, status: outcome.status,
+      ...(outcome.reason ? { reason: outcome.reason } : {}),
+      ...(typeof outcome.replayed === "boolean" ? { replayed: outcome.replayed } : {}) })]);
+  return outcome;
+}
+
+function inboundProposalAuditDetails(outcome: InboundProjectProposalOutcome): Record<string, unknown> {
+  switch (outcome.status) {
+    case "proposed": return { status: outcome.status, replayed: outcome.replayed };
+    case "unchanged": return { status: outcome.status };
+    default: return { status: outcome.status, reason: outcome.reason };
+  }
+}
+
+function inboundResolutionAuditDetails(outcome: InboundProjectResolutionOutcome): Record<string, unknown> {
+  switch (outcome.status) {
+    case "resolved": return { status: outcome.status, decision: outcome.decision,
+      syncStatus: outcome.syncStatus, resultingVersion: outcome.resultingVersion, replayed: outcome.replayed };
+    default: return { status: outcome.status, reason: outcome.reason };
+  }
 }
 
 async function guard(c: AppContext, next: () => Promise<void>): Promise<void> {
@@ -265,6 +385,64 @@ export function registerProjectAlphaPrivateAdminRoutes(app: App): void {
     return c.json({ outcome });
   });
 
+  app.post(`${PROJECT_ALPHA_PRIVATE_ADMIN_ROUTE}/projects/inbound/propose`, async c => {
+    if (!projectInboundReconciliationEnabled(c.env)) throw new HTTPException(404, { message: "Not found" });
+    const input = await json(c.req.raw, inboundProposalSchema, "Project inbound proposal");
+    const idempotencyKey = c.req.header("Idempotency-Key");
+    if (!idempotencyKey || !IDEMPOTENCY.safeParse(idempotencyKey).success)
+      throw new HTTPException(400, { message: "A UUID Idempotency-Key is required" });
+    await currentReviewer(c.env, c.get("principal"));
+    const outcome = await proposeProjectAlphaInboundProjectEdit(c.env,
+      principalActor(c.get("principal")), { ...input, idempotencyKey }, fetch);
+    await c.env.OPS_DB.batch([await auditStatement(
+      c.env,
+      c.req.raw,
+      c.get("principal"),
+      "integration.project_alpha_project_inbound_proposal_completed",
+      "project_alpha_project_inbound_proposal",
+      outcome.status === "proposed" ? outcome.proposalId : idempotencyKey,
+      null,
+      inboundProposalAuditDetails(outcome),
+    )]);
+    return c.json({ outcome });
+  });
+
+  app.get(`${PROJECT_ALPHA_PRIVATE_ADMIN_ROUTE}/projects/inbound/proposals/:proposalId`, async c => {
+    if (!projectInboundReconciliationEnabled(c.env)) throw new HTTPException(404, { message: "Not found" });
+    const proposalId = c.req.param("proposalId");
+    if (!UUID.safeParse(proposalId).success) throw new HTTPException(404, { message: "Project inbound proposal not found" });
+    await currentReviewer(c.env, c.get("principal"));
+    const outcome = await readProjectAlphaInboundProjectProposal(c.env, principalActor(c.get("principal")), proposalId);
+    if (outcome.status === "available") return c.json({ proposal: outcome.proposal });
+    if (outcome.reason === "not_found" || outcome.reason === "authority")
+      throw new HTTPException(404, { message: "Project inbound proposal not found" });
+    if (outcome.reason === "database")
+      throw new HTTPException(503, { message: "Project inbound proposal is unavailable" });
+    throw new HTTPException(409, { message: "Project inbound proposal evidence is unavailable" });
+  });
+
+  app.post(`${PROJECT_ALPHA_PRIVATE_ADMIN_ROUTE}/projects/inbound/resolve`, async c => {
+    if (!projectInboundReconciliationEnabled(c.env)) throw new HTTPException(404, { message: "Not found" });
+    const input = await json(c.req.raw, inboundResolutionSchema, "Project inbound resolution");
+    const idempotencyKey = c.req.header("Idempotency-Key");
+    if (!idempotencyKey || !IDEMPOTENCY.safeParse(idempotencyKey).success)
+      throw new HTTPException(400, { message: "A UUID Idempotency-Key is required" });
+    await currentReviewer(c.env, c.get("principal"));
+    const outcome = await resolveProjectAlphaInboundProjectEdit(c.env,
+      principalActor(c.get("principal")), { ...input, idempotencyKey }, fetch);
+    await c.env.OPS_DB.batch([await auditStatement(
+      c.env,
+      c.req.raw,
+      c.get("principal"),
+      "integration.project_alpha_project_inbound_resolution_completed",
+      "project_alpha_project_inbound_proposal",
+      input.proposalId,
+      null,
+      inboundResolutionAuditDetails(outcome),
+    )]);
+    return c.json({ outcome });
+  });
+
   app.post(`${PROJECT_ALPHA_PRIVATE_ADMIN_ROUTE}/projects/bindings/refresh`, async c => {
     if (!projectBindingRefreshEnabled(c.env)) throw new HTTPException(404, { message: "Not found" });
     const input = await json(c.req.raw, projectBindingRefreshSchema, "Project binding revision refresh");
@@ -310,6 +488,86 @@ export function registerProjectAlphaPrivateAdminRoutes(app: App): void {
       sanitized,
     )]);
     return c.json({ outcome: sanitized });
+  });
+
+  app.post(`${PROJECT_ALPHA_PRIVATE_ADMIN_ROUTE}/projects/v2/recover`, async c => {
+    if (!projectV2RecoveryEnabled(c.env)) throw new HTTPException(404, { message: "Not found" });
+    const input = await json(c.req.raw, projectV2RecoverySchema, "Project-v2 recovery");
+    requireIdempotency(c.req.raw, input.authorizationId);
+    const actor = await currentNativeProjectActor(c);
+    const postAckInput = { authorizationId: input.authorizationId, commandId: input.commandId,
+      sourceId: input.sourceId, expectedApplicationId: input.expectedApplicationId, reason: input.reason,
+      expectedRecoveryEventVersion: input.expectedEventVersion };
+    // A prior acknowledgement/settlement/activation for this exact recovery
+    // request wins before the dispatcher is considered. This is both the
+    // durable same-request replay path and the fence against a second PA POST.
+    let postAck = await prepareProjectAlphaProjectV2PostAckResume(c.env, postAckInput, actor);
+    if (postAck.status === "activated")
+      return c.json({ stage: "activate",
+        outcome: await auditProjectV2Recovery(c, input, "activate", postAck) });
+    if (postAck.status !== "prepared" && !(postAck.status === "blocked" && postAck.reason === "stale"))
+      return c.json({ stage: "authorize_settlement",
+        outcome: await auditProjectV2Recovery(c, input, "authorize_settlement", postAck) });
+
+    if (postAck.status !== "prepared") {
+      const prepared = await prepareProjectAlphaProjectV2Recovery(c.env, input, actor);
+      if (prepared.status !== "prepared")
+        return c.json({ stage: "authorize", outcome: await auditProjectV2Recovery(c, input, "authorize", prepared) });
+
+      const dispatched = await dispatchProjectAlphaProjectV2PendingCommand(c.env, input.sourceId, input.commandId, fetch);
+      if (dispatched.status !== "acknowledged")
+        return c.json({ stage: "dispatch", outcome: await auditProjectV2Recovery(c, input, "dispatch", dispatched) });
+
+      postAck = await prepareProjectAlphaProjectV2PostAckResume(c.env, postAckInput, actor);
+      if (postAck.status === "activated")
+        return c.json({ stage: "activate",
+          outcome: await auditProjectV2Recovery(c, input, "activate", postAck) });
+      if (postAck.status !== "prepared")
+        return c.json({ stage: "authorize_settlement",
+          outcome: await auditProjectV2Recovery(c, input, "authorize_settlement", postAck) });
+    }
+
+    let settlementId = postAck.settlementId;
+    if (settlementId === null) {
+      const settledSelection = await withEnabledConfiguredProjectAlphaApiV2Connection(c.env, input.sourceId,
+        connection => settleProjectAlphaProjectV2Read(c.env, postAck.successReceiptId, connection, fetch));
+      const settled = settledSelection.status === "enabled" ? settledSelection.value
+        : { status: "blocked" as const, reason: "configuration" as const };
+      if (settled.status !== "settled")
+        return c.json({ stage: "settle", outcome: await auditProjectV2Recovery(c, input, "settle", settled) });
+      settlementId = settled.settlementId;
+    }
+
+    const activated = await activateProjectAlphaProjectV2Canonical(c.env, settlementId);
+    return c.json({ stage: "activate", outcome: await auditProjectV2Recovery(c, input, "activate", activated) });
+  });
+
+  app.post(`${PROJECT_ALPHA_PRIVATE_ADMIN_ROUTE}/projects/v2/resume`, async c => {
+    if (!projectV2RecoveryEnabled(c.env)) throw new HTTPException(404, { message: "Not found" });
+    const input = await json(c.req.raw, projectV2PostAckSchema, "Project-v2 post-ack resume");
+    requireIdempotency(c.req.raw, input.authorizationId);
+    const actor = await currentNativeProjectActor(c);
+    const prepared = await prepareProjectAlphaProjectV2PostAckResume(c.env, input, actor);
+    if (prepared.status === "activated")
+      return c.json({ stage: "activate",
+        outcome: await auditProjectV2PostAck(c, input, "activate", prepared) });
+    if (prepared.status !== "prepared")
+      return c.json({ stage: "authorize_settlement",
+        outcome: await auditProjectV2PostAck(c, input, "authorize_settlement", prepared) });
+
+    let settlementId = prepared.settlementId;
+    if (settlementId === null) {
+      const selected = await withEnabledConfiguredProjectAlphaApiV2Connection(c.env, input.sourceId,
+        connection => settleProjectAlphaProjectV2Read(c.env, prepared.successReceiptId, connection, fetch));
+      const settled = selected.status === "enabled" ? selected.value
+        : { status: "blocked" as const, reason: "configuration" as const };
+      if (settled.status !== "settled")
+        return c.json({ stage: "settle", outcome: await auditProjectV2PostAck(c, input, "settle", settled) });
+      settlementId = settled.settlementId;
+    }
+
+    const activated = await activateProjectAlphaProjectV2Canonical(c.env, settlementId);
+    return c.json({ stage: "activate", outcome: await auditProjectV2PostAck(c, input, "activate", activated) });
   });
 
   app.post(`${PROJECT_ALPHA_PRIVATE_ADMIN_ROUTE}/projects/adoption/bind`, async c => {

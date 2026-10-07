@@ -19,6 +19,7 @@ export type ProjectAlphaExistingDirectoryAcquisitionInput = Readonly<{
   commandId: string;
   sourceId: string;
   recordId: string;
+  externalId: string;
   resourceType: ProjectAlphaDirectoryReadKind;
   projectAlphaPublicId: string;
   expectedProjectAlphaRevision: string;
@@ -52,7 +53,12 @@ type Reservation = Readonly<{
   reviewed_at: string; command_id: string; command_request_sha256: string;
 }>;
 type Authority = Readonly<{ authority_current: number; relationship_current: number; record_current: number; unexpired: number }>;
-type ExistingAcquired = Readonly<{ receipt_id: string; command_id: string; review_receipt_id: string }>;
+type ExistingAcquired = Readonly<{ receipt_id: string; command_id: string; review_receipt_id: string;
+  record_id: string; source_id: string; source_instance_id: string; application_id: string; history_epoch_id: string;
+  resource_type: ProjectAlphaDirectoryReadKind; external_id: string; project_alpha_public_id: string;
+  project_alpha_revision: string; reviewed_local_record_version: number; reviewer_staff_id: string;
+  reviewer_access_subject: string; reviewer_admission_version: number; reviewer_profile_version: number;
+  expected_authorization_generation: string | null }>;
 
 function plain(value: unknown): value is Record<string, unknown> {
   try {
@@ -73,10 +79,10 @@ function safeText(value: unknown): value is string {
 }
 function positiveSafe(value: unknown): value is number { return Number.isSafeInteger(value) && (value as number) >= 1; }
 function input(value: unknown): value is ProjectAlphaExistingDirectoryAcquisitionInput {
-  return plain(value) && exact(value, ["reviewId", "commandId", "sourceId", "recordId", "resourceType", "projectAlphaPublicId",
+  return plain(value) && exact(value, ["reviewId", "commandId", "sourceId", "recordId", "externalId", "resourceType", "projectAlphaPublicId",
     "expectedProjectAlphaRevision", "expectedAuthorizationGeneration", "localRecordVersion", "reviewer"])
     && UUID.test(value.reviewId as string) && UUID.test(value.commandId as string) && value.reviewId !== value.commandId
-    && typeof value.sourceId === "string" && SOURCE_ID.test(value.sourceId) && safeText(value.recordId)
+    && typeof value.sourceId === "string" && SOURCE_ID.test(value.sourceId) && safeText(value.recordId) && safeText(value.externalId)
     && (value.resourceType === "client" || value.resourceType === "organization")
     && typeof value.projectAlphaPublicId === "string" && PUBLIC_ID.test(value.projectAlphaPublicId)
     && typeof value.expectedProjectAlphaRevision === "string" && /^[1-9][0-9]{0,18}$/.test(value.expectedProjectAlphaRevision)
@@ -119,10 +125,23 @@ const APPLICABLE_FINAL = `(grant_row.scope_kind='global'
   OR (grant_row.scope_kind='division' AND EXISTS(SELECT 1 FROM native_directory_resource_scopes scope
     WHERE scope.record_id=record.record_id AND scope.active=1 AND scope.division_id=grant_row.division_id)))`;
 
+/** Resolve the migration-era view contract without guessing identities. Before
+ * the acquired-identity migration, the view exposes only external_id and the
+ * legacy identity invariant makes that value equal to record_id. New schemas
+ * must use the explicit record_id column for acquired mappings. */
+async function activeDirectoryRecordIdColumn(db: D1Database): Promise<"record_id" | "external_id"> {
+  const columns = await db.prepare("PRAGMA table_info('project_alpha_active_directory_mappings')").all<{ name: string }>();
+  const names = new Set(columns.results.map(column => column.name));
+  if (names.has("record_id")) return "record_id";
+  if (names.has("external_id") && names.has("mapping_kind") && names.has("provenance_id")) return "external_id";
+  throw new Error("active-directory-mapping-schema-invalid");
+}
+
 async function authority(db: D1Database, selected: ProjectAlphaExistingDirectoryAcquisitionInput,
   identity: Readonly<{ sourceInstanceId: string; applicationId: string; historyEpoch: string }>,
   organizationPublicId: string | null, reviewedAt?: string): Promise<Authority | null> {
   const staff = selected.reviewer.staffId;
+  const mappingRecordId = await activeDirectoryRecordIdColumn(db);
   return db.prepare(`SELECT record.current_version=? record_current,
       ${reviewedAt === undefined ? "1" : "(?<=strftime('%Y-%m-%dT%H:%M:%fZ','now') AND ?>strftime('%Y-%m-%dT%H:%M:%fZ','now','-4 hours'))"} unexpired,
       (EXISTS(SELECT 1 FROM native_staff_admissions admission JOIN native_staff_profiles profile ON profile.staff_id=admission.staff_id
@@ -138,11 +157,11 @@ async function authority(db: D1Database, selected: ProjectAlphaExistingDirectory
         OR (? IS NULL AND NOT EXISTS(SELECT 1 FROM operations_directory_client_organizations relationship
           WHERE relationship.client_record_id=record.record_id))
         OR (? IS NOT NULL AND 1=(SELECT COUNT(*) FROM operations_directory_client_organizations relationship
-          JOIN project_alpha_active_directory_mappings parent ON parent.external_id=relationship.organization_record_id
-            JOIN operations_directory_records parent_record ON parent_record.record_id=parent.external_id
+          JOIN project_alpha_active_directory_mappings parent ON parent.${mappingRecordId}=relationship.organization_record_id
+            JOIN operations_directory_records parent_record ON parent_record.record_id=parent.${mappingRecordId}
               AND parent_record.record_kind='organization'
             WHERE relationship.client_record_id=record.record_id AND parent.source_id=? AND parent.source_instance_id=? AND parent.application_id=? AND parent.history_epoch_id=?
-              AND parent.resource_type='organization' AND parent.external_id=relationship.organization_record_id
+              AND parent.resource_type='organization' AND parent.${mappingRecordId}=relationship.organization_record_id
               AND parent.project_alpha_public_id=?))) relationship_current
     FROM operations_directory_records record WHERE record.record_id=? AND record.record_kind=?`)
     .bind(selected.localRecordVersion, ...(reviewedAt === undefined ? [] : [reviewedAt, reviewedAt]),
@@ -172,7 +191,7 @@ function exactReservation(row: Reservation, value: ProjectAlphaExistingDirectory
   return row.review_id === value.reviewId && row.command_id === value.commandId && row.record_id === value.recordId
     && row.source_id === value.sourceId && row.source_instance_id === identity.sourceInstanceId
     && row.application_id === identity.applicationId && row.history_epoch_id === identity.historyEpoch
-    && row.resource_type === value.resourceType && row.external_id === value.recordId
+    && row.resource_type === value.resourceType && row.external_id === value.externalId
     && row.project_alpha_public_id === value.projectAlphaPublicId && row.project_alpha_revision === command.expectedRevision
     && row.reviewer_staff_id === value.reviewer.staffId && row.reviewer_access_subject === value.reviewer.accessSubject
     && row.reviewer_admission_version === value.reviewer.admissionVersion
@@ -182,14 +201,34 @@ function exactReservation(row: Reservation, value: ProjectAlphaExistingDirectory
 }
 
 async function acquired(db: D1Database, commandId: string): Promise<ExistingAcquired | null> {
-  return db.prepare(`SELECT acquired.receipt_id,acquired.command_id,command.review_receipt_id
+  return db.prepare(`SELECT acquired.receipt_id,acquired.command_id,command.review_receipt_id,
+      review.record_id,review.source_id,review.source_instance_id,review.application_id,review.history_epoch_id,
+      review.resource_type,review.external_id,review.project_alpha_public_id,review.project_alpha_revision,
+      review.reviewed_local_record_version,review.reviewer_staff_id,review.reviewer_access_subject,
+      review.reviewer_admission_version,review.reviewer_profile_version,response.expected_authorization_generation
     FROM project_alpha_existing_directory_binding_acquired_mapping_receipts acquired
     JOIN project_alpha_existing_directory_binding_acquisition_commands command ON command.command_id=acquired.command_id
+    JOIN project_alpha_existing_directory_binding_review_evidence review ON review.receipt_id=command.review_receipt_id
+    JOIN project_alpha_existing_directory_binding_acquisition_response_receipts response ON response.command_id=command.command_id
     JOIN project_alpha_acquired_canonical_mappings mapping ON mapping.receipt_id=acquired.receipt_id
     JOIN project_alpha_acquired_native_owner_claims claim ON claim.receipt_id=acquired.receipt_id
     JOIN project_alpha_acquired_mapping_activation activation ON activation.receipt_id=acquired.receipt_id
     WHERE acquired.command_id=? AND mapping.activation_state='inactive' AND activation.state='inactive'`)
     .bind(commandId).first<ExistingAcquired>();
+}
+
+function exactAcquired(row: ExistingAcquired, value: ProjectAlphaExistingDirectoryAcquisitionInput,
+  identity: Readonly<{ sourceInstanceId: string; applicationId: string; historyEpoch: string }>): boolean {
+  return row.record_id === value.recordId && row.source_id === value.sourceId
+    && row.source_instance_id === identity.sourceInstanceId && row.application_id === identity.applicationId
+    && row.history_epoch_id === identity.historyEpoch && row.resource_type === value.resourceType
+    && row.external_id === value.externalId && row.project_alpha_public_id === value.projectAlphaPublicId
+    && row.project_alpha_revision === value.expectedProjectAlphaRevision
+    && row.reviewed_local_record_version === value.localRecordVersion
+    && row.reviewer_staff_id === value.reviewer.staffId && row.reviewer_access_subject === value.reviewer.accessSubject
+    && row.reviewer_admission_version === value.reviewer.admissionVersion
+    && row.reviewer_profile_version === value.reviewer.profileVersion
+    && row.expected_authorization_generation === value.expectedAuthorizationGeneration;
 }
 
 async function latestState(db: D1Database, commandId: string): Promise<Readonly<{ state_version: number; state: string }> | null> {
@@ -208,16 +247,35 @@ async function mappingCollision(db: D1Database, selected: ProjectAlphaExistingDi
   const row = await db.prepare(`SELECT 1 collision WHERE EXISTS(
       SELECT 1 FROM project_alpha_directory_mappings legacy
       WHERE legacy.source_id=? AND legacy.source_instance_id=? AND legacy.application_id=?
-        AND legacy.resource_type=? AND (legacy.external_id=? OR legacy.project_alpha_public_id=?)
+        AND legacy.resource_type=?
+        AND (legacy.external_id IN (?, ?, ?)
+          OR legacy.project_alpha_public_id IN (?, ?, ?))
     ) OR EXISTS(
       SELECT 1 FROM project_alpha_acquired_canonical_mappings acquired
       WHERE acquired.source_id=? AND acquired.source_instance_id=? AND acquired.application_id=?
-        AND acquired.resource_type=? AND (acquired.record_id=? OR acquired.external_id=? OR acquired.project_alpha_public_id=?)
+        AND acquired.resource_type=?
+        AND (acquired.record_id IN (?, ?, ?)
+          OR acquired.external_id IN (?, ?, ?)
+          OR acquired.project_alpha_public_id IN (?, ?, ?))
+    ) OR EXISTS(
+      SELECT 1 FROM project_alpha_acquired_native_owner_claims claim
+      WHERE claim.source_id=? AND claim.source_instance_id=? AND claim.application_id=?
+        AND claim.resource_type=?
+        AND (claim.record_id IN (?, ?, ?)
+          OR claim.external_id IN (?, ?, ?)
+          OR claim.project_alpha_public_id IN (?, ?, ?))
     ) LIMIT 1`)
     .bind(selected.sourceId, identity.sourceInstanceId, identity.applicationId, selected.resourceType,
-      selected.recordId, selected.projectAlphaPublicId,
+      selected.recordId, selected.externalId, selected.projectAlphaPublicId,
+      selected.recordId, selected.externalId, selected.projectAlphaPublicId,
       selected.sourceId, identity.sourceInstanceId, identity.applicationId, selected.resourceType,
-      selected.recordId, selected.recordId, selected.projectAlphaPublicId)
+      selected.recordId, selected.externalId, selected.projectAlphaPublicId,
+      selected.recordId, selected.externalId, selected.projectAlphaPublicId,
+      selected.recordId, selected.externalId, selected.projectAlphaPublicId,
+      selected.sourceId, identity.sourceInstanceId, identity.applicationId, selected.resourceType,
+      selected.recordId, selected.externalId, selected.projectAlphaPublicId,
+      selected.recordId, selected.externalId, selected.projectAlphaPublicId,
+      selected.recordId, selected.externalId, selected.projectAlphaPublicId)
     .first<{ collision: number }>();
   return row?.collision === 1;
 }
@@ -253,8 +311,10 @@ export async function acquireProjectAlphaExistingDirectoryBinding(
 
   try {
     const prior = await acquired(env.OPS_DB, selected.commandId);
-    if (prior) return { status: "acquired", reviewReceiptId: prior.review_receipt_id, commandId: prior.command_id,
-      acquiredReceiptId: prior.receipt_id, replayed: true };
+    if (prior) return exactAcquired(prior, selected, identity)
+      ? { status: "acquired", reviewReceiptId: prior.review_receipt_id, commandId: prior.command_id,
+        acquiredReceiptId: prior.receipt_id, replayed: true }
+      : { status: "conflict", reason: "reservation" };
   } catch { return { status: "uncertain", reason: "database" }; }
 
   let reservedBefore: Reservation[];
@@ -262,17 +322,29 @@ export async function acquireProjectAlphaExistingDirectoryBinding(
   catch { return { status: "uncertain", reason: "database" }; }
   if (reservedBefore.length > 1) return { status: "conflict", reason: "reservation" };
 
-  const preRead = await readConfiguredProjectAlphaDirectoryProfile(env, selected.sourceId, selected.resourceType,
-    selected.projectAlphaPublicId, send);
-  if (preRead.status !== "observed") return preRead.status === "uncertain"
+  const [preRead, preBindingRead] = await Promise.all([
+    readConfiguredProjectAlphaDirectoryProfile(env, selected.sourceId, selected.resourceType,
+      selected.projectAlphaPublicId, send),
+    readConfiguredProjectAlphaDirectoryBindingStatus(env, selected.sourceId, selected.resourceType,
+      selected.externalId, selected.projectAlphaPublicId, send),
+  ]);
+  if (preRead.status !== "observed" || preBindingRead.status !== "observed") return preRead.status === "uncertain"
+    || preBindingRead.status === "uncertain"
     ? { status: "uncertain", reason: "transport" } : { status: "blocked", reason: "remote" };
-  const pre = preRead.observation;
+  const pre = preRead.observation, preBinding = preBindingRead.observation;
   if (pre.resource.revision !== selected.expectedProjectAlphaRevision
+    || preBinding.binding.externalId !== selected.externalId
+    || preBinding.binding.publicId !== selected.projectAlphaPublicId
+    || preBinding.binding.type !== selected.resourceType
+    || preBinding.resource.revision !== selected.expectedProjectAlphaRevision
+    || (preBinding.authorizationGeneration !== selected.expectedAuthorizationGeneration
+      && (reservedBefore.length === 0
+        || preBinding.authorizationGeneration !== nextGeneration(selected.expectedAuthorizationGeneration)))
     || (reservedBefore.length === 0 && pre.authorizationGeneration !== selected.expectedAuthorizationGeneration))
     return { status: "blocked", reason: "remote" };
   const parent = selected.resourceType === "client" ? pre.profile.organizationPublicId ?? null : null;
   const command: ProjectAlphaExistingDirectoryBindingCommand = Object.freeze({ commandId: selected.commandId,
-    externalId: selected.recordId, expectedPublicId: selected.projectAlphaPublicId,
+    externalId: selected.externalId, expectedPublicId: selected.projectAlphaPublicId,
     expectedRevision: selected.expectedProjectAlphaRevision,
     expectedAuthorizationGeneration: selected.expectedAuthorizationGeneration });
   const commandCanonical = canonicalProjectAlphaExistingDirectoryBindingCommand(command);
@@ -313,7 +385,7 @@ export async function acquireProjectAlphaExistingDirectoryBinding(
           SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,record.current_version FROM operations_directory_records record
           WHERE record.record_id=? AND record.record_kind=? AND record.current_version=?`)
           .bind(receiptId, requestSha256, selected.recordId, selected.sourceId, identity.sourceInstanceId,
-            identity.applicationId, identity.historyEpoch, selected.resourceType, selected.recordId,
+            identity.applicationId, identity.historyEpoch, selected.resourceType, selected.externalId,
             selected.projectAlphaPublicId, command.expectedRevision, selected.reviewId, reviewHash,
             selected.reviewer.staffId, selected.reviewer.accessSubject, selected.reviewer.admissionVersion,
             selected.reviewer.profileVersion, reviewedAt, selected.recordId, selected.resourceType, selected.localRecordVersion),
@@ -322,7 +394,7 @@ export async function acquireProjectAlphaExistingDirectoryBinding(
           resource_type,external_id,project_alpha_public_id,project_alpha_revision,review_receipt_id)
           VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`).bind(selected.commandId, requestSha256, selected.recordId, selected.sourceId,
             identity.sourceInstanceId, identity.applicationId, identity.historyEpoch, selected.resourceType,
-            selected.recordId, selected.projectAlphaPublicId, command.expectedRevision, receiptId),
+            selected.externalId, selected.projectAlphaPublicId, command.expectedRevision, receiptId),
         env.OPS_DB.prepare(`INSERT INTO project_alpha_existing_directory_binding_acquisition_events(
           command_id,state_version,transition_id,request_sha256,state,occurred_at) VALUES(?,1,?,?,'pending',?)`)
           .bind(selected.commandId, crypto.randomUUID(), requestSha256, reviewedAt),
@@ -369,7 +441,7 @@ export async function acquireProjectAlphaExistingDirectoryBinding(
           project_alpha_public_id,project_alpha_revision,destination_origin,pa_request_id,pa_replayed,response_sha256,
           expected_authorization_generation,result_authorization_generation)
           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(selected.commandId, identity.sourceInstanceId, identity.applicationId,
-            identity.historyEpoch, selected.resourceType, selected.recordId, selected.projectAlphaPublicId,
+            identity.historyEpoch, selected.resourceType, selected.externalId, selected.projectAlphaPublicId,
             command.expectedRevision, evidence.destinationOrigin, evidence.response.requestId,
             evidence.response.replayed ? 1 : 0, evidence.responseSha256,
             command.expectedAuthorizationGeneration, evidence.response.result.authorizationGeneration),
@@ -396,11 +468,14 @@ export async function acquireProjectAlphaExistingDirectoryBinding(
 
   const [profileAfter, bindingAfter] = await Promise.all([
     readConfiguredProjectAlphaDirectoryProfile(env, selected.sourceId, selected.resourceType, selected.projectAlphaPublicId, send),
-    readConfiguredProjectAlphaDirectoryBindingStatus(env, selected.sourceId, selected.resourceType, selected.recordId,
+    readConfiguredProjectAlphaDirectoryBindingStatus(env, selected.sourceId, selected.resourceType, selected.externalId,
       selected.projectAlphaPublicId, send),
   ]);
   if (profileAfter.status !== "observed" || bindingAfter.status !== "observed") return { status: "uncertain", reason: "post_read" };
   if (!sameProfile(pre, profileAfter.observation)
+    || bindingAfter.observation.binding.externalId !== selected.externalId
+    || bindingAfter.observation.binding.publicId !== selected.projectAlphaPublicId
+    || bindingAfter.observation.binding.type !== selected.resourceType
     || bindingAfter.observation.resource.revision !== command.expectedRevision
     || profileAfter.observation.authorizationGeneration !== bindingAfter.observation.authorizationGeneration
     || (acknowledgedAuthorizationGeneration !== null
@@ -417,6 +492,7 @@ export async function acquireProjectAlphaExistingDirectoryBinding(
 
   const acquiredReceiptId = crypto.randomUUID(), claimId = crypto.randomUUID(), nativeOwnerEpochId = crypto.randomUUID();
   const profileHash = await digest(profileAfter.observation), bindingHash = await digest(bindingAfter.observation);
+  const mappingRecordId = await activeDirectoryRecordIdColumn(env.OPS_DB);
   try {
     await env.OPS_DB.batch([
       env.OPS_DB.prepare(`INSERT INTO project_alpha_existing_directory_binding_acquired_mapping_receipts(
@@ -441,35 +517,35 @@ export async function acquireProjectAlphaExistingDirectoryBinding(
             OR (? IS NULL AND NOT EXISTS(SELECT 1 FROM operations_directory_client_organizations relationship
               WHERE relationship.client_record_id=review.record_id))
             OR (? IS NOT NULL AND 1=(SELECT COUNT(*) FROM operations_directory_client_organizations relationship
-              JOIN project_alpha_active_directory_mappings parent ON parent.external_id=relationship.organization_record_id
-                JOIN operations_directory_records parent_record ON parent_record.record_id=parent.external_id
+              JOIN project_alpha_active_directory_mappings parent ON parent.${mappingRecordId}=relationship.organization_record_id
+                JOIN operations_directory_records parent_record ON parent_record.record_id=parent.${mappingRecordId}
                   AND parent_record.record_kind='organization'
                 WHERE relationship.client_record_id=review.record_id AND parent.source_id=review.source_id AND parent.source_instance_id=review.source_instance_id
                   AND parent.application_id=review.application_id AND parent.history_epoch_id=review.history_epoch_id
-                  AND parent.resource_type='organization' AND parent.external_id=relationship.organization_record_id
+                  AND parent.resource_type='organization' AND parent.${mappingRecordId}=relationship.organization_record_id
                   AND parent.project_alpha_public_id=?)))`)
         .bind(acquiredReceiptId, requestSha256, selected.commandId, selected.recordId, selected.sourceId,
-          identity.sourceInstanceId, identity.applicationId, identity.historyEpoch, selected.resourceType, selected.recordId,
+          identity.sourceInstanceId, identity.applicationId, identity.historyEpoch, selected.resourceType, selected.externalId,
           selected.projectAlphaPublicId, command.expectedRevision, acquisitionEvidence!.response_sha256, profileHash, bindingHash,
           now(), selected.reviewer.grantGeneration, reservation.receipt_id, postParent, postParent, postParent),
       env.OPS_DB.prepare(`INSERT INTO project_alpha_acquired_canonical_mappings(receipt_id,record_id,source_id,
         source_instance_id,application_id,history_epoch_id,resource_type,external_id,project_alpha_public_id,
         native_owner_epoch_id,activation_state) VALUES(?,?,?,?,?,?,?,?,?,NULL,'inactive')`)
         .bind(acquiredReceiptId, selected.recordId, selected.sourceId, identity.sourceInstanceId, identity.applicationId,
-          identity.historyEpoch, selected.resourceType, selected.recordId, selected.projectAlphaPublicId),
+          identity.historyEpoch, selected.resourceType, selected.externalId, selected.projectAlphaPublicId),
       env.OPS_DB.prepare(`INSERT INTO project_alpha_acquired_native_owner_claims(claim_id,receipt_id,native_owner_epoch_id,
         record_id,source_id,source_instance_id,application_id,history_epoch_id,resource_type,external_id,
         project_alpha_public_id,expected_local_record_version,actor_id,request_sha256) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
         .bind(claimId, acquiredReceiptId, nativeOwnerEpochId, selected.recordId, selected.sourceId, identity.sourceInstanceId,
-          identity.applicationId, identity.historyEpoch, selected.resourceType, selected.recordId,
+          identity.applicationId, identity.historyEpoch, selected.resourceType, selected.externalId,
           selected.projectAlphaPublicId, selected.localRecordVersion, selected.reviewer.staffId, requestSha256),
       env.OPS_DB.prepare(`INSERT INTO project_alpha_acquired_mapping_activation(receipt_id,state) VALUES(?,'inactive')`)
         .bind(acquiredReceiptId),
     ]);
   } catch {
     const saved = await acquired(env.OPS_DB, selected.commandId).catch(() => null);
-    if (saved) return { status: "acquired", reviewReceiptId: saved.review_receipt_id, commandId: saved.command_id,
-      acquiredReceiptId: saved.receipt_id, replayed: true };
+    if (saved && exactAcquired(saved, selected, identity)) return { status: "acquired", reviewReceiptId: saved.review_receipt_id,
+      commandId: saved.command_id, acquiredReceiptId: saved.receipt_id, replayed: true };
     return { status: "conflict", reason: "collision" };
   }
   return { status: "acquired", reviewReceiptId: reservation.receipt_id, commandId: selected.commandId,

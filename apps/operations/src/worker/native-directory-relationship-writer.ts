@@ -37,7 +37,7 @@ type NativeDirectoryRelationshipWritePlan = Readonly<{ status: "planned";
 type NativeDirectoryRelationshipWritePlanningResult = NativeDirectoryRelationshipWriteOutcome | NativeDirectoryRelationshipWritePlan;
 
 type Destination = Readonly<{ sourceId: string; sourceInstanceUUID: string; applicationUUID: string; historyEpoch: string; origin: string; externalCanonicalId: string }>;
-type Head = Readonly<{ publicId: string; revision: string }>;
+type Head = Readonly<{ externalId: string; publicId: string; revision: string }>;
 type DirectoryWriteD1 = Pick<D1Database, "prepare" | "batch">;
 
 function integer(value: unknown): value is number { return Number.isSafeInteger(value) && Number(value) >= 1; }
@@ -81,7 +81,7 @@ function requestJson(input: NativeDirectoryRelationshipWrite): string {
     supersedeTerminalCommandIds: input.supersedeTerminalCommandIds ? [...input.supersedeTerminalCommandIds].sort() : [], actor: input.actor });
 }
 function plain(value: unknown): value is Record<string, unknown> { return !!value && typeof value === "object" && !Array.isArray(value); }
-function destinations(value: unknown, recordId: string): Destination[] | null {
+function destinations(value: unknown, _recordId: string): Destination[] | null {
   let parsed: unknown; try { parsed = typeof value === "string" ? JSON.parse(value) : value; } catch { return null; }
   if (!Array.isArray(parsed) || parsed.length === 0) return null;
   const result: Destination[] = [], seen = new Set<string>();
@@ -90,7 +90,7 @@ function destinations(value: unknown, recordId: string): Destination[] | null {
       || !candidate.sourceId.startsWith("project-alpha:") || typeof candidate.sourceInstanceUUID !== "string" || !UUID.test(candidate.sourceInstanceUUID)
       || typeof candidate.applicationUUID !== "string" || !UUID.test(candidate.applicationUUID)
       || typeof candidate.historyEpoch !== "string" || !UUID.test(candidate.historyEpoch)
-      || typeof candidate.origin !== "string" || typeof candidate.externalCanonicalId !== "string" || candidate.externalCanonicalId !== recordId) return null;
+      || typeof candidate.origin !== "string" || !canonicalId(candidate.externalCanonicalId)) return null;
     try { if (new URL(candidate.origin).origin !== candidate.origin) return null; } catch { return null; }
     const item = candidate as Destination, key = destinationKey(item); if (seen.has(key)) return null; seen.add(key); result.push(item);
   }
@@ -123,11 +123,14 @@ async function activeHead(db: DirectoryWriteD1, recordId: string, kind: "client"
   const record = await db.prepare("SELECT record_kind kind,current_version version FROM operations_directory_records WHERE record_id=?")
     .bind(recordId).first<{ kind: string; version: number }>();
   if (!record || record.kind !== kind || record.version !== localVersion) return null;
-  const mappings = (await db.prepare(`SELECT project_alpha_public_id publicId FROM project_alpha_active_directory_mappings
-    WHERE source_id=? AND source_instance_id=? AND application_id=? AND history_epoch_id=? AND resource_type=? AND external_id=?`)
-    .bind(destination.sourceId,destination.sourceInstanceUUID,destination.applicationUUID,destination.historyEpoch,kind,recordId)
-    .all<{ publicId: string }>()).results;
-  if (mappings.length !== 1 || !/^[0-9a-f]{32}$/.test(mappings[0]!.publicId)) return null;
+  const mappings = (await db.prepare(`SELECT external_id externalId,project_alpha_public_id publicId
+    FROM project_alpha_active_directory_mappings
+    WHERE source_id=? AND source_instance_id=? AND application_id=? AND history_epoch_id=? AND resource_type=?
+      AND record_id=? AND external_id=?`)
+    .bind(destination.sourceId,destination.sourceInstanceUUID,destination.applicationUUID,destination.historyEpoch,kind,recordId,
+      destination.externalCanonicalId)
+    .all<{ externalId: string; publicId: string }>()).results;
+  if (mappings.length !== 1 || !canonicalId(mappings[0]!.externalId) || !/^[0-9a-f]{32}$/.test(mappings[0]!.publicId)) return null;
   const mapping = mappings[0]!;
   const evidence: { publicId: unknown; revision: unknown; assertedPublicId?: unknown; coherent?: unknown }[] = [];
   if (kind === "client") {
@@ -165,7 +168,7 @@ async function activeHead(db: DirectoryWriteD1, recordId: string, kind: "client"
       AND outbox.application_id=intent.application_uuid AND outbox.expected_history_epoch_id=intent.expected_history_epoch_id
       AND outbox.destination_base_url=intent.destination_origin AND outbox.resource_type=? AND outbox.external_id=intent.external_canonical_id`)
     .bind(recordId,localVersion,destination.sourceId,destination.sourceInstanceUUID,destination.applicationUUID,
-      destination.historyEpoch,destination.origin,recordId,kind).all()).results as { publicId: unknown; revision: unknown; coherent: unknown }[]);
+      destination.historyEpoch,destination.origin,mapping.externalId,kind).all()).results as { publicId: unknown; revision: unknown; coherent: unknown }[]);
   evidence.push(...(await db.prepare(`SELECT refresh.project_alpha_public_id publicId,refresh.live_revision revision
     FROM project_alpha_existing_directory_binding_revision_refresh_receipts refresh
     JOIN project_alpha_acquired_native_owner_claims claim ON claim.claim_id=refresh.native_owner_claim_id
@@ -173,7 +176,8 @@ async function activeHead(db: DirectoryWriteD1, recordId: string, kind: "client"
     JOIN project_alpha_existing_directory_binding_acquisition_response_receipts response ON response.command_id=acquired.command_id
     WHERE refresh.record_id=? AND refresh.source_id=? AND refresh.source_instance_id=? AND refresh.application_id=? AND refresh.history_epoch_id=?
       AND refresh.resource_type=? AND refresh.external_id=? AND refresh.local_record_version=? AND response.destination_origin=?`)
-    .bind(recordId,destination.sourceId,destination.sourceInstanceUUID,destination.applicationUUID,destination.historyEpoch,kind,recordId,localVersion,destination.origin)
+    .bind(recordId,destination.sourceId,destination.sourceInstanceUUID,destination.applicationUUID,destination.historyEpoch,kind,
+      mapping.externalId,localVersion,destination.origin)
     .all()).results as { publicId: unknown; revision: unknown }[]);
   evidence.push(...(await db.prepare(`SELECT activation.project_alpha_public_id publicId,activation.project_alpha_revision revision
     FROM project_alpha_existing_directory_binding_activation_receipts activation
@@ -181,12 +185,13 @@ async function activeHead(db: DirectoryWriteD1, recordId: string, kind: "client"
     JOIN project_alpha_existing_directory_binding_acquisition_response_receipts response ON response.command_id=acquired.command_id
     WHERE activation.record_id=? AND activation.source_id=? AND activation.source_instance_id=? AND activation.application_id=? AND activation.history_epoch_id=?
       AND activation.resource_type=? AND activation.external_id=? AND activation.local_record_version=? AND response.destination_origin=?`)
-    .bind(recordId,destination.sourceId,destination.sourceInstanceUUID,destination.applicationUUID,destination.historyEpoch,kind,recordId,localVersion,destination.origin)
+    .bind(recordId,destination.sourceId,destination.sourceInstanceUUID,destination.applicationUUID,destination.historyEpoch,kind,
+      mapping.externalId,localVersion,destination.origin)
     .all()).results as { publicId: unknown; revision: unknown }[]);
   if (!evidence.length || evidence.some(value => (value.coherent !== undefined && value.coherent !== 1) || value.publicId !== mapping.publicId
     || (value.assertedPublicId !== undefined && value.assertedPublicId !== mapping.publicId))) return null;
   const head=maximumDirectoryRevisionEvidence(evidence.map(value => value.revision));if(head===null)return null;
-  return { publicId: mapping.publicId, revision: head };
+  return { externalId: mapping.externalId, publicId: mapping.publicId, revision: head };
 }
 async function currentGeneration(db: DirectoryWriteD1, destination: Destination): Promise<string | null> {
   const rows = (await db.prepare(`SELECT generation FROM (
@@ -260,9 +265,11 @@ async function planNativeDirectoryRelationshipWriteInternal(db: DirectoryWriteD1
       return { status: "conflict", reason: "stale_record" };
   }
   const enrolled = await loadEnrollment(db, write.clientRecordId); if (!enrolled) return { status: "blocked", reason: "destination_mismatch" };
+  const endpointEnrollments = new Map<string, Destination[]>();
   for (const value of [write.previousOrganization,write.organization]) if (value) {
     const organizationDestinations = await loadEnrollment(db,value.recordId);
     if (!organizationDestinations || !representsDestinations(enrolled,organizationDestinations)) return { status: "blocked", reason: "destination_mismatch" };
+    endpointEnrollments.set(value.recordId,organizationDestinations);
   }
   const nextVersion = write.expectedRelationshipVersion+1;
   const requestedSupersessions = new Set(write.supersedeTerminalCommandIds ?? []), usedSupersessions = new Set<string>();
@@ -270,10 +277,12 @@ async function planNativeDirectoryRelationshipWriteInternal(db: DirectoryWriteD1
     supersededTerminalCommandId: string | null }[] = [];
   for (const destination of enrolled) {
     const client = await activeHead(db,write.clientRecordId,"client",write.expectedClientRecordVersion,destination);
+    const endpointDestination = (value: NativeDirectoryRelationshipEndpoint) => endpointEnrollments.get(value.recordId)!
+      .find(candidate => destinationKey(candidate) === destinationKey(destination))!;
     const previous = write.previousOrganization ? await activeHead(db,write.previousOrganization.recordId,"organization",
-      write.previousOrganization.expectedRecordVersion,destination) : null;
+      write.previousOrganization.expectedRecordVersion,endpointDestination(write.previousOrganization)) : null;
     const organization = write.organization ? await activeHead(db,write.organization.recordId,"organization",
-      write.organization.expectedRecordVersion,destination) : null;
+      write.organization.expectedRecordVersion,endpointDestination(write.organization)) : null;
     const generation = await currentGeneration(db,destination);
     if (!client || (write.previousOrganization && !previous) || (write.organization && !organization) || generation === null)
       return { status: "blocked", reason: "mapping_evidence" };
@@ -290,7 +299,7 @@ async function planNativeDirectoryRelationshipWriteInternal(db: DirectoryWriteD1
     const commandId = await deterministicCommandId(write.mutationId,destination);
     const command: ProjectAlphaDirectoryRelationshipCommand = { commandId, expectedClientRevision: client.revision,
       expectedAuthorizationGeneration: generation, expectedCurrentOrganizationPublicId: previous?.publicId ?? null,
-      organization: organization ? { externalId: write.organization!.recordId, publicId: organization.publicId, expectedRevision: organization.revision } : null };
+      organization: organization ? { externalId: organization.externalId, publicId: organization.publicId, expectedRevision: organization.revision } : null };
     prepared.push({ destination, clientPublicId: client.publicId, supersededTerminalCommandId: predecessor?.state === "terminal" ? predecessor.commandId : null,
       reservation: { commandId, sourceId: destination.sourceId, action: relationshipAction, command } });
   }

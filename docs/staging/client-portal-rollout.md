@@ -82,8 +82,14 @@ and warns that Bypass disables Access enforcement in
    filename sets in `REQUIRED_STAGING_MIGRATIONS`, including
    `0177_domain_neutral_delivery_notifications.sql` and
    `0178_domain_neutral_delivery_notification_contract.sql`, plus the later
-   `0179`-`0186` assignment/notification/native-portal sequence, and the complete
-   ordered Operations suffix through the current rebaselined final migration.
+   assignment/notification/native-portal sequence, and the complete ordered
+   Operations suffix through the current rebaselined final migration. The
+   current candidate manifest ends at Client `0228` and Operations `0180`;
+   the live Operations ledger is still at `0173`, so `0174`–`0180` remain
+   unapplied. Migration `0195` is not the current Client endpoint. Compare complete
+   ordered filename sets with `scripts/staging-requirements.mjs` and the live
+   migration ledgers. Do not treat older ranges in this document as a complete
+   current migration plan.
    The earlier `0054`-`0131` and `0054`-`0139` suffixes remain historical
    checkpoints, not current completion criteria. Client migration `0113` is
    intentionally reserved and absent. The
@@ -116,8 +122,15 @@ and warns that Bypass disables Access enforcement in
    drain every old draft/submission writer. Record the immutable version and
    drain proof. Only then apply `0180`-`0183` from the final input. Keep native
     capabilities unavailable while applying Client `0184`-`0195`, satisfying
-    the separate `0187` content-audit and `0189` primary-binding barriers, then
-    apply the rebaselined Operations suffix only after the remote-ledger, open-fence,
+    the separate `0187` content-audit and `0189` primary-binding barriers. Stop
+    before any additional Client migration until its compatible-writer,
+    data-preflight, feature-flag, and rollback barriers are explicitly reviewed
+    and recorded. The canonical Client chain continues from `0196` through
+    `0228`; its per-migration barriers are detailed in
+    `client-portal-migration-barriers-0196-0228.md`. Those barriers still need
+    to be checked against the live schema/code state before any future apply,
+    so `0195` alone must not be represented as full current staging
+    completion. Apply the rebaselined Operations suffix only after the remote-ledger, open-fence,
     quiescence, populated-export/time-travel-recovery, and compatible-writer
     ordering evidence is recorded. The combined candidate is not an expand-only input; do not
    run one all-pending apply or execute raw migration SQL.

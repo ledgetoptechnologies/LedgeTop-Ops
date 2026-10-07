@@ -133,21 +133,19 @@ export async function resolveClientHubSourceRoot(
     const identities = await clientHubActiveDirectoryIdentities(env);
     const currentMapping = clientHubActiveDirectoryIdentitySql("mapping", identities ?? []);
     const resourceType = kind === "organization" ? "organization" : "client";
-    return env.OPS_DB.withSession("first-primary").prepare(`SELECT mapping.record_id id,mapping.external_id pa_internal_id,source.name display_name,
-      ${kind === "organization" ? "NULL" : "CASE WHEN source.organization_id IS NULL THEN NULL ELSE COALESCE(parent.record_id,source.organization_id) END"} organization_id,
-      source.active,mapping.project_alpha_public_id pa_public_id,'mapped' mapping_status
-      FROM ${table} source JOIN project_alpha_active_directory_mappings mapping
-        ON mapping.source_id=source.projection_source_id AND mapping.resource_type='${resourceType}'
-        AND mapping.external_id=source.id AND mapping.project_alpha_public_id=${sourcePublicIdExpression("source")}
-        AND ${currentMapping}
+    return env.OPS_DB.withSession("first-primary").prepare(`SELECT mapping.record_id id,mapping.external_id pa_internal_id,
+      json_extract(revision.profile_json,'$.name') display_name,NULL organization_id,1 active,
+      mapping.project_alpha_public_id pa_public_id,'mapped' mapping_status
+      FROM project_alpha_active_directory_mappings mapping
       JOIN operations_directory_records record ON record.record_id=mapping.record_id AND record.record_kind=mapping.resource_type
-      ${kind === "organization" ? "" : `LEFT JOIN project_alpha_active_directory_mappings parent
-        ON parent.source_id=source.projection_source_id AND parent.resource_type='organization'
-        AND parent.external_id=source.organization_id
-        AND parent.source_instance_id=mapping.source_instance_id AND parent.application_id=mapping.application_id
-        AND parent.history_epoch_id=mapping.history_epoch_id`}
-      WHERE mapping.record_id=? AND source.projection_source_id=?
-        AND ${projectAlphaReadVisibleSql("source.projection_source_id")}
+      JOIN operations_directory_revisions revision ON revision.record_id=record.record_id AND revision.version=record.current_version
+      ${kind === "organization" ? "" : `JOIN operations_directory_client_organizations relationship
+        ON relationship.client_record_id=record.record_id AND relationship.organization_record_id IS NULL`}
+      WHERE mapping.record_id=? AND mapping.source_id=? AND mapping.resource_type='${resourceType}'
+        AND ${currentMapping} AND ${projectAlphaReadVisibleSql("mapping.source_id")}
+        AND json_valid(revision.profile_json) AND json_type(revision.profile_json,'$.name')='text'
+        AND length(trim(json_extract(revision.profile_json,'$.name'))) BETWEEN 1 AND 150
+        AND length(mapping.project_alpha_public_id)=32 AND mapping.project_alpha_public_id NOT GLOB '*[^0-9a-f]*'
         AND (SELECT count(*) FROM project_alpha_active_directory_mappings candidate
           WHERE candidate.source_id=mapping.source_id AND candidate.source_instance_id=mapping.source_instance_id
             AND candidate.application_id=mapping.application_id AND candidate.history_epoch_id=mapping.history_epoch_id
@@ -199,4 +197,49 @@ export async function resolveClientHubSourceRootByAlphaIdentity(
   if (mappings.results.length !== 1) return null;
   const root = await resolveClientHubSourceRoot(env, kind, mappings.results[0]!.record_id, sourceId);
   return root?.pa_internal_id === paInternalId && (!paPublicId || root.pa_public_id === paPublicId) ? root : null;
+}
+
+/** Resolve a current Project Alpha public identity to its Operations root.
+ * Native API-v2 enrollments may have no legacy `pa_organizations`/`pa_clients`
+ * mirror, so the active mapping relation is authoritative whenever installed.
+ * Ambiguous, stale, disabled, malformed, or wrong-type mappings fail closed. */
+export async function resolveClientHubSourceRootByAlphaPublicId(
+  env: Pick<Env, "OPS_DB" | "PROJECT_ALPHA_API_V2_CONNECTIONS">, kind: ClientHubSourceKind,
+  sourceId: string, paPublicId: string,
+): Promise<ClientHubSourceRoot | null> {
+  if (!isAlphaPublicId(paPublicId) || !isBusinessProjectionSource(sourceId)) return null;
+  if (!(await hasClientHubActiveDirectoryMappings(env.OPS_DB))) {
+    const table = kind === "organization" ? "pa_organizations" : "pa_clients";
+    const rows = await env.OPS_DB.withSession("first-primary").prepare(`SELECT source.id
+      FROM ${table} source WHERE source.active=1 AND source.projection_source_id=?
+        ${kind === "standalone_client" ? "AND source.organization_id IS NULL" : ""}
+        AND ${validatedUniquePublicIdExpression(table, "source")}=? LIMIT 2`).bind(sourceId, paPublicId).all<{ id: string }>();
+    if (rows.results.length !== 1) return null;
+    return resolveClientHubSourceRootByAlphaIdentity(env, kind, rows.results[0]!.id, sourceId, paPublicId);
+  }
+
+  const identities = await clientHubActiveDirectoryIdentities(env);
+  const currentMapping = clientHubActiveDirectoryIdentitySql("mapping", identities ?? []);
+  const resourceType = kind === "organization" ? "organization" : "client";
+  const rows = await env.OPS_DB.withSession("first-primary").prepare(`SELECT mapping.external_id
+    FROM project_alpha_active_directory_mappings mapping
+    JOIN operations_directory_records record ON record.record_id=mapping.record_id AND record.record_kind=mapping.resource_type
+    JOIN operations_directory_revisions revision ON revision.record_id=record.record_id AND revision.version=record.current_version
+    ${kind === "standalone_client" ? `JOIN operations_directory_client_organizations relationship
+      ON relationship.client_record_id=record.record_id AND relationship.organization_record_id IS NULL` : ""}
+    WHERE mapping.source_id=? AND mapping.resource_type=? AND ${currentMapping}
+      AND mapping.project_alpha_public_id=? AND length(mapping.external_id)>0
+      AND length(mapping.project_alpha_public_id)=32 AND mapping.project_alpha_public_id NOT GLOB '*[^0-9a-f]*'
+      AND json_valid(revision.profile_json) AND json_type(revision.profile_json,'$.name')='text'
+      AND length(trim(json_extract(revision.profile_json,'$.name'))) BETWEEN 1 AND 150
+      AND ${projectAlphaReadVisibleSql("mapping.source_id")}
+      AND (SELECT count(*) FROM project_alpha_active_directory_mappings candidate
+        WHERE candidate.source_id=mapping.source_id AND candidate.source_instance_id=mapping.source_instance_id
+          AND candidate.application_id=mapping.application_id AND candidate.history_epoch_id=mapping.history_epoch_id
+          AND candidate.resource_type=mapping.resource_type
+          AND (candidate.record_id=mapping.record_id OR candidate.external_id=mapping.external_id
+            OR candidate.project_alpha_public_id=mapping.project_alpha_public_id))=1
+    LIMIT 2`).bind(sourceId, resourceType, paPublicId).all<{ external_id: string }>();
+  if (rows.results.length !== 1) return null;
+  return resolveClientHubSourceRootByAlphaIdentity(env, kind, rows.results[0]!.external_id, sourceId, paPublicId);
 }

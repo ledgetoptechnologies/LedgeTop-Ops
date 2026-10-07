@@ -42,7 +42,7 @@ function commandKeys(path) {
   if (path.includes("/profile/")) return ["commandId", "expectedRevision", "expectedAuthorizationGeneration", "profile"];
   if (path.includes("/bindings/revisions/")) return ["commandId", "externalId", "expectedPriorRevision", "expectedLiveRevision", "expectedAuthorizationGeneration"];
   if (path.includes("/bindings/revoke/")) return ["commandId", "externalId", "expectedPublicId", "expectedRevision", "expectedAuthorizationGeneration"];
-  if (path.includes("/bindings/commands")) return ["commandId", "externalId", "expectedPublicId", "expectedRevision"];
+  if (path.includes("/bindings/commands")) return ["commandId", "externalId", "expectedPublicId", "expectedRevision", "expectedAuthorizationGeneration"];
   if (path.includes("/organization/") && path.includes("/commands")) return ["commandId", "expectedClientRevision", "expectedAuthorizationGeneration", "expectedCurrentOrganizationPublicId", "organization"];
   if (path.includes("/archive/") || path.includes("/restore/")) return ["commandId", "expectedRevision", "expectedAuthorizationGeneration"];
   if (path.endsWith("/organizations/commands")) return ["commandId", "externalId", "expectedAuthorizationGeneration", "profile"];
@@ -71,6 +71,7 @@ function happyFetcher(options = {}) {
       else if (kind === "inventory") delete value.resources;
       else delete value.result;
     }
+    if (options.omitBindAuthorizationGeneration && kind === "bind") delete value.result.authorizationGeneration;
     if (options.invalidSigned64 === kind) {
       if (kind === "inventory") value.authorizationGeneration = "9223372036854775808";
       else if (kind === "create") value.result.resource.revision = "9223372036854775808";
@@ -106,6 +107,21 @@ function happyFetcher(options = {}) {
     if (parsed.pathname === "/api/v2/capabilities") {
       if (!init.headers.authorization) return error(401);
       const payload = { apiVersion: "2", ...identity(), grantedCapabilities: ["api.capabilities.read", ...DIRECTORY_ROUTES.map((route) => route.requiredCapability)].map((name) => ({ name })), implementedEndpoints: [{ method: "GET", path: "/api/v2/capabilities", requiredCapability: "api.capabilities.read" }, ...DIRECTORY_ROUTES] };
+      if (options.additiveGenericCapabilities) {
+        payload.grantedCapabilities.push({ name: "projects.read" });
+        payload.implementedEndpoints.push({ method: "GET", path: "/api/v2/projects/{publicId}",
+          requiredCapability: "projects.read", requiresSourceInstanceId: true,
+          requiresApplicationId: true, requiresHistoryEpoch: true });
+      }
+      if (options.unexpectedDirectoryCapability) {
+        payload.grantedCapabilities.push({ name: "directory.clients.export" });
+        payload.implementedEndpoints.push({ method: "GET", path: "/api/v2/directory/clients/export",
+          requiredCapability: "directory.clients.export", requiresSourceInstanceId: true,
+          requiresApplicationId: true, requiresHistoryEpoch: true });
+      }
+      if (options.duplicateCapability) payload.grantedCapabilities.push(copy(payload.grantedCapabilities.at(-1)));
+      if (options.duplicateEndpoint) payload.implementedEndpoints.push(copy(payload.implementedEndpoints.at(-1)));
+      if (options.directoryTupleDrift) payload.implementedEndpoints[1] = { ...payload.implementedEndpoints[1], requiresHistoryEpoch: false };
       return send("capabilities", payload);
     }
     assert.equal(init.headers["x-pa-source-instance-id"], sourceInstanceId);
@@ -169,9 +185,9 @@ function happyFetcher(options = {}) {
         return { kind: "refresh", status: 200, payload: { ...identity(), replayed: false, result: { resource: { type, id: item.externalId, revision: item.revision }, binding: { publicId, previousRevision: command.expectedPriorRevision, authorizationGeneration: generation } } } };
       }
       if (parsed.pathname.includes("/bindings/commands")) {
-        assert.equal(command.externalId, item.externalId); assert.equal(command.expectedRevision, item.revision); assert.equal(item.bindingStatus, "tombstoned");
+        assert.equal(command.externalId, item.externalId); assert.equal(command.expectedRevision, item.revision); assert.equal(command.expectedAuthorizationGeneration, generation); assert.equal(item.bindingStatus, "tombstoned");
         item.bindingStatus = "active"; item.bindingRevision = item.revision; generation = increment(generation); rebindSucceeded = true;
-        return { kind: "bind", status: 200, payload: { ...identity(), replayed: false, result: { resource: { type, id: item.externalId, revision: item.revision }, binding: { publicId } } } };
+        return { kind: "bind", status: 200, payload: { ...identity(), replayed: false, result: { resource: { type, id: item.externalId, revision: item.revision }, binding: { publicId }, authorizationGeneration: generation } } };
       }
       if (parsed.pathname.includes("/organization/") && parsed.pathname.includes("/commands")) {
         const action = parsed.pathname.match(/organization\/(assign|move|remove)\/commands/)?.[1]; assert(action);
@@ -206,6 +222,32 @@ test("runs the complete dynamic directory sequence with canonical request bodies
   assert.equal(report.stages.inventory.pages, 2);
   assert.deepEqual(report.stages.inventory.targetProjectionSha256, ["a".repeat(64), "a".repeat(64), "a".repeat(64)]);
   const evidence = JSON.stringify(report); assert.equal(evidence.includes("directory-test-secret"), false); assert.equal(evidence.includes(prefix), false); assert.equal(evidence.includes("Acceptance Client"), false);
+});
+
+test("accepts well-formed additive non-directory capabilities while pinning every Directory tuple", async () => {
+  const report = await runDirectoryAcceptance(parseDirectoryAcceptanceConfig(environment()), {
+    fetcher: happyFetcher({ additiveGenericCapabilities: true }), uuid: predictableUuid(),
+  });
+  assert.equal(report.status, "passed");
+});
+
+test("rejects unexpected Directory capabilities, duplicate advertisements, and Directory tuple drift", async (context) => {
+  for (const option of ["unexpectedDirectoryCapability", "duplicateCapability", "duplicateEndpoint", "directoryTupleDrift"]) {
+    await context.test(option, async () => {
+      await assert.rejects(runDirectoryAcceptance(parseDirectoryAcceptanceConfig(environment()), {
+        fetcher: happyFetcher({ [option]: true }), uuid: predictableUuid(),
+      }), { code: "directory_capabilities_contract_mismatch" });
+    });
+  }
+});
+
+test("requires bind receipt authorization generation before accepting its exact status generation", async () => {
+  await assert.rejects(runDirectoryAcceptance(parseDirectoryAcceptanceConfig(environment()), {
+    fetcher: happyFetcher({ omitBindAuthorizationGeneration: true }), uuid: predictableUuid(),
+  }), { code: "binding_receipt_contract_mismatch" });
+  await assert.rejects(runDirectoryAcceptance(parseDirectoryAcceptanceConfig(environment()), {
+    fetcher: happyFetcher({ wrongTransition: "bind" }), uuid: predictableUuid(),
+  }), { code: "binding_status_transition_mismatch" });
 });
 
 test("gives every created organization a run-unique name, including the move organization", async () => {
@@ -361,4 +403,36 @@ test("accepts maximum safe base organization names before a run begins", async (
 
 test("the contract has no hard-delete endpoint", () => {
   assert.equal(DIRECTORY_ROUTES.some((route) => /delete/i.test(route.path)), false);
+});
+
+test("directory binding routes match PA's generation-fenced capability descriptors", () => {
+  // Independent wire-contract fixture captured from PA's API-v2 capabilities
+  // descriptor. Do not derive this from DIRECTORY_ROUTES: that would let the
+  // Ops mock and validator drift together without detecting the mismatch.
+  const paBindingEndpoints = [
+    {
+      method: "POST",
+      path: "/api/v2/directory/clients/bindings/commands",
+      requiredCapability: "directory.clients.bind",
+      requiresSourceInstanceId: true,
+      requiresApplicationId: true,
+      requiresHistoryEpoch: true,
+      requiresExpectedPublicId: true,
+      requiresExpectedRevision: true,
+    },
+    {
+      method: "POST",
+      path: "/api/v2/directory/organizations/bindings/commands",
+      requiredCapability: "directory.organizations.bind",
+      requiresSourceInstanceId: true,
+      requiresApplicationId: true,
+      requiresHistoryEpoch: true,
+      requiresExpectedPublicId: true,
+      requiresExpectedRevision: true,
+    },
+  ];
+  assert.deepEqual(
+    DIRECTORY_ROUTES.filter((endpoint) => endpoint.requiredCapability.endsWith(".bind")),
+    paBindingEndpoints,
+  );
 });

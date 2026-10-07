@@ -71,11 +71,14 @@ function transport(action: Extract<ProjectAlphaProjectV2CommandProducerAction, {
   const sourceInstanceId = action.sourceId === "project-alpha:one" ? sourceOne : sourceTwo;
   const applicationId = action.sourceId === "project-alpha:one" ? appOne : appTwo;
   const historyEpoch = action.sourceId === "project-alpha:one" ? epochOne : epochTwo;
+  let commandCommitted = false;
   return vi.fn<typeof fetch>(async (_url, init) => {
     if (init?.method !== "POST") return response({ apiVersion: "2", sourceInstanceId, applicationId, historyEpoch,
       requestId: "11111111-1111-4111-8111-111111111111", grantedCapabilities: [{ name: "api.capabilities.read" }, { name: "projects.create" }],
       implementedEndpoints: [{ method: "GET", path: "/api/v2/capabilities", requiredCapability: "api.capabilities.read" }, { method: "POST", path: "/api/v2/projects/commands", requiredCapability: "projects.create", requiresSourceInstanceId: true, requiresApplicationId: true, requiresHistoryEpoch: true }] });
-    return response({ apiVersion: "2", sourceInstanceId, applicationId, historyEpoch, requestId: "11111111-1111-4111-8111-111111111111", replayed: false,
+    const replayed = commandCommitted;
+    commandCommitted = true;
+    return response({ apiVersion: "2", sourceInstanceId, applicationId, historyEpoch, requestId: "11111111-1111-4111-8111-111111111111", replayed,
       result: { resource: { type: "project", id: action.command.externalId, publicId: "d".repeat(32), revision: "1", projectionSha256: sha }, authorizationGeneration: "1", presentation: { portalPublished: false, publicLinkEnabled: false } } }, 201);
   });
 }
@@ -106,6 +109,7 @@ beforeAll(async () => {
   await db.exec("CREATE TABLE native_staff_admissions(staff_id TEXT PRIMARY KEY,active INTEGER,bound_access_subject TEXT,version INTEGER); CREATE TABLE native_staff_profiles(staff_id TEXT PRIMARY KEY,login_email TEXT,version INTEGER); CREATE TABLE native_business_areas(id TEXT PRIMARY KEY,active INTEGER); CREATE TABLE native_business_divisions(id TEXT PRIMARY KEY,business_area_id TEXT,active INTEGER,UNIQUE(business_area_id,id)); CREATE TABLE operations_directory_records(record_id TEXT PRIMARY KEY,record_kind TEXT); CREATE TABLE project_alpha_directory_mappings(source_id TEXT,source_instance_id TEXT,application_id TEXT,history_epoch_id TEXT,resource_type TEXT,external_id TEXT,project_alpha_public_id TEXT,command_id TEXT,created_at TEXT DEFAULT(strftime('%Y-%m-%dT%H:%M:%fZ','now'))); CREATE TABLE project_alpha_existing_directory_binding_activation_receipts(activation_id TEXT PRIMARY KEY,source_id TEXT,resource_type TEXT,external_id TEXT,project_alpha_public_id TEXT,source_instance_id TEXT,application_id TEXT,history_epoch_id TEXT,activated_at TEXT); CREATE VIEW project_alpha_active_directory_mappings AS SELECT source_id,resource_type,external_id,project_alpha_public_id,source_instance_id,application_id,history_epoch_id,command_id AS provenance_id,'legacy' AS mapping_kind,created_at FROM project_alpha_directory_mappings UNION ALL SELECT source_id,resource_type,external_id,project_alpha_public_id,source_instance_id,application_id,history_epoch_id,activation_id AS provenance_id,'acquired' AS mapping_kind,activated_at AS created_at FROM project_alpha_existing_directory_binding_activation_receipts; CREATE TABLE operations_directory_client_organizations(client_record_id TEXT,organization_record_id TEXT); CREATE TABLE delivery_public_shares(id TEXT PRIMARY KEY,url TEXT,payload BLOB); CREATE TABLE delivery_records(id TEXT PRIMARY KEY,payload BLOB); INSERT INTO delivery_public_shares VALUES('share','https://public.example.test/s/keep',x'00ff80'); INSERT INTO delivery_records VALUES('delivery',x'ff0001');");
   await db.exec("ALTER TABLE project_alpha_existing_directory_binding_activation_receipts ADD COLUMN record_id TEXT");
   await migrate("0086_native_shared_projects.sql"); await migrate("0119_project_alpha_project_v2_persistence_ledger.sql"); await migrate("0120_project_alpha_project_v2_canonical_settlement.sql"); await migrate("0121_project_alpha_project_v2_settlement_proof_expiry.sql"); await migrate("0122_project_alpha_project_v2_canonical_activation.sql"); await migrate("0170_project_alpha_active_directory_project_guard.sql"); await migrate("0171_project_alpha_active_directory_update_guard.sql");
+  await db.exec("CREATE VIEW project_alpha_project_v2_live_settlement_proofs AS SELECT * FROM native_project_live_command_proofs");
 });
 afterAll(async () => runtime.dispose());
 
@@ -359,6 +363,44 @@ describe("unmounted project-v2 command producer", () => {
     const replay = vi.fn<typeof fetch>();
     await expect(dispatchProjectAlphaProjectV2PendingCommand(env(true), action.sourceId, action.command.commandId, replay)).resolves.toEqual(first);
     expect(replay).not.toHaveBeenCalled();
+  });
+
+  it("acknowledges a recovered exact command at the next immutable event version", async () => {
+    const action = await createAction(), remote = transport(action), failAfterCommit = vi.fn<typeof fetch>(async (url, init) => {
+      const original = await remote(url, init);
+      if (init?.method === "POST") return response({ error: "acknowledgement lost" }, 500);
+      return original;
+    });
+    await planProjectAlphaProjectV2Command(env(), action);
+    await expect(dispatchProjectAlphaProjectV2PendingCommand(env(true), action.sourceId,
+      action.command.commandId, failAfterCommit)).resolves.toMatchObject({ status: "uncertain" });
+
+    // This fixture models the separate guarded recovery transaction: it keeps
+    // the original uncertainty event and appends a fresh pending event. The
+    // production route must obtain the matching immutable authorization first.
+    const fingerprint = await db.prepare("SELECT request_sha256 FROM project_alpha_project_v2_request_fingerprints WHERE command_id=?")
+      .bind(action.command.commandId).first<string>("request_sha256");
+    await db.batch([
+      db.prepare(`INSERT INTO project_alpha_project_v2_events(command_id,state_version,transition_id,request_sha256,state)
+        VALUES(?,3,?,?,'pending')`).bind(action.command.commandId, uuid(), fingerprint),
+      db.prepare("UPDATE project_alpha_project_outbox SET state='pending',outcome_json=NULL WHERE command_id=? AND state='terminal'")
+        .bind(action.command.commandId),
+    ]);
+
+    // Reuse the same simulated PA endpoint so its first committed request is
+    // still present when Ops retries the exact command after the lost ack.
+    const replay = remote;
+    const recovered = await dispatchProjectAlphaProjectV2PendingCommand(env(true), action.sourceId,
+      action.command.commandId, replay);
+    expect(recovered).toMatchObject({ status: "acknowledged", replayed: true });
+    expect(replay.mock.calls.some(([, init]) => init?.method === "POST")).toBe(true);
+    expect(await db.prepare("SELECT state_version,state FROM project_alpha_project_v2_events WHERE command_id=? ORDER BY state_version")
+      .bind(action.command.commandId).all()).toMatchObject({ results: [
+        { state_version: 1, state: "pending" }, { state_version: 2, state: "uncertain" },
+        { state_version: 3, state: "pending" }, { state_version: 4, state: "acknowledged" },
+      ] });
+    expect(await db.prepare("SELECT acknowledged_state_version FROM project_alpha_project_v2_validated_acknowledgements WHERE command_id=?")
+      .bind(action.command.commandId).first("acknowledged_state_version")).toBe(4);
   });
 
   it("releases a preflight-only lease back to pending without appending terminal evidence", async () => {

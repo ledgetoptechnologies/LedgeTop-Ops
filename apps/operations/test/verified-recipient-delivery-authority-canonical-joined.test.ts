@@ -120,7 +120,7 @@ describe("verified recipient authority canonical joined prerequisite",()=>{
     expect(await ops.prepare("SELECT count(*) count FROM d1_migrations").first("count")).toBe(169);
     const fetcher=projectAlphaRemote(),reviewId="40000000-0000-4000-8000-000000000001",commandId="40000000-0000-4000-8000-000000000002";
     const acquired=await acquireProjectAlphaExistingDirectoryBinding({OPS_DB:ops,PROJECT_ALPHA_API_V2_CONNECTIONS:connections},{reviewId,commandId,
-      sourceId:acquiredSource.sourceId,recordId:canonicalUuidOrganization.recordId,resourceType:"organization",
+      sourceId:acquiredSource.sourceId,recordId:canonicalUuidOrganization.recordId,externalId:canonicalUuidOrganization.recordId,resourceType:"organization",
       projectAlphaPublicId:canonicalUuidOrganization.publicId,expectedProjectAlphaRevision:"7",expectedAuthorizationGeneration:"8",
       localRecordVersion:1,reviewer:authority.reviewer},fetcher);
     expect(acquired).toMatchObject({status:"acquired",replayed:false});
@@ -183,7 +183,7 @@ describe("verified recipient authority canonical joined prerequisite",()=>{
       await applyCanonicalMigrationSchema(database,"0169_project_alpha_existing_directory_binding_generation_evidence.sql");
       const acquired=await acquireProjectAlphaExistingDirectoryBinding({OPS_DB:database,PROJECT_ALPHA_API_V2_CONNECTIONS:connections},{
         reviewId:"70000000-0000-4000-8000-000000000001",commandId:"70000000-0000-4000-8000-000000000002",
-        sourceId:acquiredSource.sourceId,recordId:canonicalUuidOrganization.recordId,resourceType:"organization",
+        sourceId:acquiredSource.sourceId,recordId:canonicalUuidOrganization.recordId,externalId:canonicalUuidOrganization.recordId,resourceType:"organization",
         projectAlphaPublicId:canonicalUuidOrganization.publicId,expectedProjectAlphaRevision:"7",expectedAuthorizationGeneration:"8",
         localRecordVersion:1,reviewer},fetcher);
       expect(acquired).toMatchObject({status:"acquired",replayed:false});if(acquired.status!=="acquired")throw Error(JSON.stringify(acquired));
@@ -267,7 +267,7 @@ describe("verified recipient authority canonical joined prerequisite",()=>{
 
       const fetcher=projectAlphaRemote(),request={reviewId:"80000000-0000-4000-8000-000000000001",
         commandId:"80000000-0000-4000-8000-000000000002",sourceId:acquiredSource.sourceId,
-        recordId:canonicalUuidOrganization.recordId,resourceType:"organization" as const,
+        recordId:canonicalUuidOrganization.recordId,externalId:canonicalUuidOrganization.recordId,resourceType:"organization" as const,
         projectAlphaPublicId:canonicalUuidOrganization.publicId,expectedProjectAlphaRevision:"7",expectedAuthorizationGeneration:"8",
         localRecordVersion:1,reviewer:authority.reviewer};
       const acquired=await acquireProjectAlphaExistingDirectoryBinding({OPS_DB:database,PROJECT_ALPHA_API_V2_CONNECTIONS:connections},request,fetcher);

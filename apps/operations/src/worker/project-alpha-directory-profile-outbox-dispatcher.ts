@@ -11,6 +11,7 @@ import {
 } from "./project-alpha-directory-profile-api-v2";
 import { withEnabledConfiguredProjectAlphaApiV2Connection, type ProjectAlphaApiV2ConnectionEnvironment } from "./project-alpha-api-v2-connections";
 import type { ProjectAlphaApiV2Connection } from "./project-alpha-api-v2";
+import { nextGeneration } from "./project-alpha-project-transport";
 
 const LEASE_MS = 5 * 60_000;
 const MAX_RETRY_MS = 60 * 60_000;
@@ -35,6 +36,8 @@ type RelationshipDependency = Readonly<{
   evidence_kind: "unlinked" | "parent_intent" | "existing_mapping" | "acquired_mapping";
   organization_record_id: string | null; organization_record_version: number | null;
   parent_external_canonical_id: string | null; resolved_parent_public_id: string | null;
+  parent_mapping_command_id: string | null; parent_activation_id: string | null; parent_ack_revision: string | null;
+  parent_ack_command_json: string | null; parent_ack_outcome_json: string | null;
 }>;
 
 export type ProjectAlphaDirectoryProfileOutboxDispatcherOutcome =
@@ -53,6 +56,11 @@ function exact(value: Record<string, unknown>, keys: readonly string[]): boolean
 }
 function origin(value: unknown): string | null { try { return typeof value === "string" ? new URL(value).origin : null; } catch { return null; } }
 function parse(value: string): Record<string, unknown> | null { try { const result = JSON.parse(value); return plain(result) ? result : null; } catch { return null; } }
+function exactUpdateRevision(command: unknown, revision: unknown): boolean {
+  if (!plain(command) || typeof command.expectedRevision !== "string"
+    || typeof revision !== "string") return false;
+  return nextGeneration(command.expectedRevision) === revision;
+}
 function actor(value: unknown): Actor | null {
   if (!plain(value) || !exact(value, ["staffId", "accessSubject", "admissionVersion", "selectedGrantId", "loginEmail", "profileVersion", "selectedIdentityGrantId"])
     || typeof value.staffId !== "string" || typeof value.accessSubject !== "string" || typeof value.selectedGrantId !== "string"
@@ -106,15 +114,103 @@ async function onboardingEnrollmentPermitted(db: D1Database, row: Row, value: Ac
   return grants.some(grant => grant.effect === "allow" && applies(grant,row.record_id,scopes,assigned))
     && !grants.some(grant => grant.effect === "deny" && applies(grant,row.record_id,scopes,assigned));
 }
-async function activeMapping(db: D1Database, row: Row): Promise<{ project_alpha_public_id: string; mapping_kind: string } | null> {
-  return db.prepare(`SELECT project_alpha_public_id,mapping_kind FROM project_alpha_active_directory_mappings
-    WHERE source_id=? AND source_instance_id=? AND application_id=? AND history_epoch_id=? AND resource_type=? AND external_id=?`)
-    .bind(row.source_id, row.expected_source_instance_id, row.application_id, row.expected_history_epoch_id, row.resource_type, row.external_id)
-    .first<{ project_alpha_public_id: string; mapping_kind: string }>();
+type ActiveMapping = Readonly<{ record_id: string; external_id: string; project_alpha_public_id: string;
+  mapping_kind: string; provenance_id: string }>;
+async function activeMapping(db: D1Database, row: Row): Promise<ActiveMapping | null> {
+  const columns = await db.prepare("PRAGMA table_info('project_alpha_active_directory_mappings')").all<{ name: string }>();
+  const hasNativeRecordId = columns.results.some(column => column.name === "record_id");
+  if (hasNativeRecordId) {
+    return db.prepare(`SELECT record_id,external_id,project_alpha_public_id,mapping_kind,provenance_id
+      FROM project_alpha_active_directory_mappings
+      WHERE source_id=? AND source_instance_id=? AND application_id=? AND history_epoch_id=? AND resource_type=? AND external_id=?`)
+      .bind(row.source_id, row.expected_source_instance_id, row.application_id, row.expected_history_epoch_id,
+        row.resource_type, row.external_id).first<ActiveMapping>();
+  }
+  // Before the acquired-identity migration, the mapping view has no separate
+  // Ops record_id: the legacy contract used external_id for both identities.
+  // Keep that exact-ID behavior during the migration window; never infer a
+  // differing acquired identity from this older schema.
+  const legacy = await db.prepare(`SELECT external_id,project_alpha_public_id,mapping_kind,provenance_id
+      FROM project_alpha_active_directory_mappings
+      WHERE source_id=? AND source_instance_id=? AND application_id=? AND history_epoch_id=? AND resource_type=? AND external_id=?`)
+    .bind(row.source_id, row.expected_source_instance_id, row.application_id, row.expected_history_epoch_id,
+      row.resource_type, row.external_id).first<Omit<ActiveMapping, "record_id">>();
+  return legacy ? { ...legacy, record_id: legacy.external_id } : null;
+}
+type AcquiredUpdateContext = Readonly<{ record_id: string; external_id: string; source_id: string;
+  expected_source_instance_id: string; application_id: string; expected_history_epoch_id: string;
+  resource_type: ProjectAlphaDirectoryProfileKind; destination_base_url: string; record_version: number }>;
+async function acquiredMappingRevisionMatches(db: D1Database, row: AcquiredUpdateContext, mapping: ActiveMapping, command: Record<string, unknown>): Promise<boolean> {
+  if (mapping.mapping_kind !== "acquired" || mapping.record_id !== row.record_id || mapping.external_id !== row.external_id
+    || typeof mapping.provenance_id !== "string" || typeof command.expectedRevision !== "string"
+    || typeof command.expectedAuthorizationGeneration !== "string"
+    || command.expectedProjectAlphaPublicId !== mapping.project_alpha_public_id) return false;
+  const versions = (await db.prepare(`SELECT revision,authorization_generation FROM (
+      SELECT activation.project_alpha_revision revision,? authorization_generation
+      FROM project_alpha_existing_directory_binding_activation_receipts activation
+      WHERE activation.activation_id=? AND activation.record_id=? AND activation.local_record_version=?
+        AND activation.source_id=? AND activation.source_instance_id=? AND activation.application_id=?
+        AND activation.history_epoch_id=? AND activation.resource_type=? AND activation.external_id=?
+        AND activation.project_alpha_public_id=?
+      UNION ALL
+      SELECT refresh.live_revision revision,refresh.authorization_generation
+      FROM project_alpha_existing_directory_binding_revision_refresh_receipts refresh
+      WHERE refresh.record_id=? AND refresh.local_record_version=? AND refresh.source_id=?
+        AND refresh.source_instance_id=? AND refresh.application_id=? AND refresh.history_epoch_id=?
+        AND refresh.resource_type=? AND refresh.external_id=? AND refresh.project_alpha_public_id=?
+      UNION ALL
+      SELECT json_extract(outbox.outcome_json,'$.response.result.resource.revision') revision,
+        json_extract(outbox.outcome_json,'$.response.result.authorizationGeneration') authorization_generation
+      FROM operations_directory_intents intent
+      JOIN operations_directory_records record ON record.record_id=intent.record_id
+      JOIN operations_directory_materializations materialization ON materialization.intent_id=intent.intent_id
+        AND materialization.history_epoch_id=intent.expected_history_epoch_id
+      JOIN project_alpha_directory_outbox outbox ON outbox.command_id=materialization.command_id
+        AND outbox.state='acknowledged' AND outbox.command_json=materialization.command_json
+        AND outbox.source_id=intent.source_id AND outbox.expected_source_instance_id=intent.source_instance_uuid
+        AND outbox.application_id=intent.application_uuid AND outbox.expected_history_epoch_id=intent.expected_history_epoch_id
+        AND outbox.destination_base_url=intent.destination_origin AND outbox.resource_type=record.record_kind
+        AND outbox.external_id=intent.external_canonical_id
+      WHERE intent.record_id=? AND intent.record_version=? AND intent.state='acknowledged'
+        AND intent.source_id=? AND intent.source_instance_uuid=? AND intent.application_uuid=?
+        AND intent.expected_history_epoch_id=? AND intent.destination_origin=? AND intent.external_canonical_id=?
+        AND json_extract(materialization.command_json,'$.operation')='update'
+        AND json_extract(materialization.command_json,'$.expectedProjectAlphaPublicId')=?
+        AND json_extract(outbox.outcome_json,'$.status')='acknowledged'
+        AND json_extract(outbox.outcome_json,'$.response.sourceInstanceId')=intent.source_instance_uuid
+        AND json_extract(outbox.outcome_json,'$.response.applicationId')=intent.application_uuid
+        AND json_extract(outbox.outcome_json,'$.response.historyEpoch')=intent.expected_history_epoch_id
+        AND json_extract(outbox.outcome_json,'$.response.result.resource.type')=record.record_kind
+        AND json_extract(outbox.outcome_json,'$.response.result.resource.publicId')=?
+    ) WHERE revision IS NOT NULL AND authorization_generation IS NOT NULL LIMIT 2`)
+    .bind(command.expectedAuthorizationGeneration, mapping.provenance_id, row.record_id, row.record_version - 1,
+      row.source_id, row.expected_source_instance_id, row.application_id, row.expected_history_epoch_id,
+      row.resource_type, row.external_id, mapping.project_alpha_public_id,
+      row.record_id, row.record_version - 1, row.source_id, row.expected_source_instance_id, row.application_id,
+      row.expected_history_epoch_id, row.resource_type, row.external_id, mapping.project_alpha_public_id,
+      row.record_id, row.record_version - 1, row.source_id, row.expected_source_instance_id, row.application_id,
+      row.expected_history_epoch_id, row.destination_base_url, row.external_id, mapping.project_alpha_public_id,
+      mapping.project_alpha_public_id).all<{ revision: string; authorization_generation: string }>()).results;
+  return versions.length === 1 && versions[0]!.revision === command.expectedRevision
+    && versions[0]!.authorization_generation === command.expectedAuthorizationGeneration;
+}
+/** Verifies the prior PA state for one acquired mapping before an update is sent. */
+export async function acquiredDirectoryMappingUpdateEvidence(db: D1Database, context: AcquiredUpdateContext,
+  expectedRevision: string, expectedAuthorizationGeneration: string, expectedPublicId: string): Promise<boolean> {
+  const mappings = (await db.prepare(`SELECT record_id,external_id,project_alpha_public_id,mapping_kind,provenance_id
+    FROM project_alpha_active_directory_mappings WHERE source_id=? AND source_instance_id=? AND application_id=?
+      AND history_epoch_id=? AND resource_type=? AND external_id=?`)
+    .bind(context.source_id, context.expected_source_instance_id, context.application_id,
+      context.expected_history_epoch_id, context.resource_type, context.external_id).all<ActiveMapping>()).results;
+  if (mappings.length !== 1) return false;
+  return acquiredMappingRevisionMatches(db, context, mappings[0]!, { expectedRevision,
+    expectedAuthorizationGeneration, expectedProjectAlphaPublicId: expectedPublicId });
 }
 async function relationshipDependency(db: D1Database, row: Row): Promise<RelationshipDependency | null> {
   const dependencies = (await db.prepare(`SELECT dependency.evidence_kind,dependency.organization_record_id,
-      dependency.organization_record_version,dependency.parent_external_canonical_id,resolved.resolved_parent_public_id
+      dependency.organization_record_version,dependency.parent_external_canonical_id,resolved.resolved_parent_public_id,
+      dependency.parent_mapping_command_id,dependency.parent_activation_id,dependency.parent_ack_revision,
+      dependency.parent_ack_command_json,dependency.parent_ack_outcome_json
     FROM operations_directory_intent_relationship_dependencies dependency
     JOIN operations_directory_intent_relationship_resolved resolved ON resolved.intent_id=dependency.intent_id
     WHERE dependency.intent_id=? AND dependency.client_record_id=? AND dependency.client_record_version=?
@@ -126,17 +222,123 @@ async function relationshipDependency(db: D1Database, row: Row): Promise<Relatio
   const dependency = dependencies[0]!;
   if (dependency.evidence_kind === "unlinked") return dependency.parent_external_canonical_id === null
     && dependency.organization_record_id === null && dependency.organization_record_version === null
-    && dependency.resolved_parent_public_id === null ? dependency : null;
-  return typeof dependency.parent_external_canonical_id === "string" && dependency.parent_external_canonical_id.length > 0
-    && dependency.organization_record_id === dependency.parent_external_canonical_id
-    && typeof dependency.organization_record_version === "number" && Number.isSafeInteger(dependency.organization_record_version)
-    && dependency.organization_record_version >= 1
-    && typeof dependency.resolved_parent_public_id === "string" && /^[0-9a-f]{32}$/.test(dependency.resolved_parent_public_id)
-    ? dependency : null;
+    && dependency.resolved_parent_public_id === null && dependency.parent_mapping_command_id === null
+    && dependency.parent_activation_id === null && dependency.parent_ack_revision === null
+    && dependency.parent_ack_command_json === null && dependency.parent_ack_outcome_json === null ? dependency : null;
+  if (typeof dependency.parent_external_canonical_id !== "string" || !dependency.parent_external_canonical_id
+    || typeof dependency.organization_record_id !== "string"
+    || typeof dependency.organization_record_version !== "number" || !Number.isSafeInteger(dependency.organization_record_version)
+    || dependency.organization_record_version < 1 || typeof dependency.resolved_parent_public_id !== "string"
+    || !/^[0-9a-f]{32}$/.test(dependency.resolved_parent_public_id)) return null;
+  if (dependency.evidence_kind === "parent_intent")
+    return dependency.organization_record_id === dependency.parent_external_canonical_id
+      && dependency.parent_mapping_command_id === null && dependency.parent_activation_id === null
+      && dependency.parent_ack_revision === null && dependency.parent_ack_command_json === null
+      && dependency.parent_ack_outcome_json === null ? dependency : null;
+  if (dependency.evidence_kind === "existing_mapping") {
+    if (dependency.organization_record_id !== dependency.parent_external_canonical_id
+      || typeof dependency.parent_mapping_command_id !== "string" || typeof dependency.parent_ack_revision !== "string"
+      || !/^[1-9][0-9]{0,18}$/.test(dependency.parent_ack_revision) || dependency.parent_activation_id !== null
+      || typeof dependency.parent_ack_command_json !== "string" || typeof dependency.parent_ack_outcome_json !== "string") return null;
+    const exact = await db.prepare(`SELECT 1 present
+      FROM project_alpha_directory_mappings mapping
+      JOIN project_alpha_directory_outbox outbox ON outbox.command_id=mapping.command_id
+      WHERE mapping.command_id=? AND mapping.source_id=? AND mapping.source_instance_id=?
+        AND mapping.application_id=? AND mapping.history_epoch_id=? AND mapping.resource_type='organization'
+        AND mapping.external_id=? AND mapping.project_alpha_public_id=?
+        AND outbox.state='acknowledged' AND outbox.command_json IS ? AND outbox.outcome_json IS ?
+        AND outbox.source_id=? AND outbox.expected_source_instance_id=? AND outbox.application_id=?
+        AND outbox.expected_history_epoch_id=? AND outbox.destination_base_url=?
+        AND outbox.resource_type='organization' AND outbox.external_id=?
+        AND json_extract(outbox.outcome_json,'$.status')='acknowledged'
+        AND json_extract(outbox.outcome_json,'$.response.historyEpoch')=?
+        AND json_extract(outbox.outcome_json,'$.response.sourceInstanceId')=?
+        AND json_extract(outbox.outcome_json,'$.response.applicationId')=?
+        AND json_extract(outbox.outcome_json,'$.response.result.resource.type')='organization'
+        AND json_extract(outbox.outcome_json,'$.response.result.resource.id')=?
+        AND json_extract(outbox.outcome_json,'$.response.result.resource.revision')=?
+        AND json_extract(outbox.outcome_json,'$.response.result.data.publicId')=?`)
+      .bind(dependency.parent_mapping_command_id, row.source_id, row.expected_source_instance_id, row.application_id,
+        row.expected_history_epoch_id, dependency.parent_external_canonical_id, dependency.resolved_parent_public_id,
+        dependency.parent_ack_command_json, dependency.parent_ack_outcome_json, row.source_id, row.expected_source_instance_id,
+        row.application_id, row.expected_history_epoch_id, row.destination_base_url, dependency.parent_external_canonical_id,
+        row.expected_history_epoch_id, row.expected_source_instance_id, row.application_id, dependency.parent_external_canonical_id,
+        dependency.parent_ack_revision, dependency.resolved_parent_public_id).first();
+    return exact ? dependency : null;
+  }
+  if (dependency.evidence_kind !== "acquired_mapping") return null;
+  if (typeof dependency.parent_activation_id !== "string" || typeof dependency.parent_ack_revision !== "string"
+    || !/^[1-9][0-9]{0,18}$/.test(dependency.parent_ack_revision)) return null;
+  const active = await db.prepare(`SELECT 1 present
+    FROM project_alpha_active_directory_mappings mapping
+    JOIN project_alpha_existing_directory_binding_activation_receipts activation
+      ON activation.activation_id=mapping.provenance_id AND mapping.mapping_kind='acquired'
+      AND activation.activation_id=? AND activation.record_id=mapping.record_id
+      AND activation.source_id=mapping.source_id AND activation.source_instance_id=mapping.source_instance_id
+      AND activation.application_id=mapping.application_id AND activation.history_epoch_id=mapping.history_epoch_id
+      AND activation.resource_type=mapping.resource_type AND activation.external_id=mapping.external_id
+      AND activation.project_alpha_public_id=mapping.project_alpha_public_id
+    WHERE mapping.record_id=? AND mapping.resource_type='organization' AND mapping.source_id=?
+      AND mapping.source_instance_id=? AND mapping.application_id=? AND mapping.history_epoch_id=?
+      AND mapping.external_id=? AND mapping.project_alpha_public_id=?
+      AND activation.record_id=? AND activation.source_id=? AND activation.source_instance_id=?
+      AND activation.application_id=? AND activation.history_epoch_id=? AND activation.resource_type='organization'
+      AND activation.external_id=? AND activation.project_alpha_public_id=? AND activation.project_alpha_revision=?`)
+    .bind(dependency.parent_activation_id, dependency.organization_record_id, row.source_id, row.expected_source_instance_id,
+      row.application_id, row.expected_history_epoch_id, dependency.parent_external_canonical_id,
+      dependency.resolved_parent_public_id, dependency.organization_record_id, row.source_id,
+      row.expected_source_instance_id, row.application_id, row.expected_history_epoch_id,
+      dependency.parent_external_canonical_id, dependency.resolved_parent_public_id, dependency.parent_ack_revision).first();
+  return active ? dependency : null;
 }
 async function currentParentRevision(db: D1Database, row: Row, dependency: RelationshipDependency): Promise<string | null> {
   if (dependency.organization_record_id === null || dependency.organization_record_version === null
     || dependency.resolved_parent_public_id === null) return null;
+  if (dependency.evidence_kind === "acquired_mapping") {
+    const candidates = (await db.prepare(`SELECT revision FROM (
+        SELECT activation.project_alpha_revision revision
+        FROM project_alpha_existing_directory_binding_activation_receipts activation
+        WHERE activation.activation_id=? AND activation.record_id=? AND activation.local_record_version=?
+          AND activation.source_id=? AND activation.source_instance_id=? AND activation.application_id=?
+          AND activation.history_epoch_id=? AND activation.resource_type='organization'
+          AND activation.external_id=? AND activation.project_alpha_public_id=?
+        UNION ALL
+        SELECT json_extract(outbox.outcome_json,'$.response.result.resource.revision') revision
+        FROM operations_directory_intents intent
+        JOIN operations_directory_materializations materialization ON materialization.intent_id=intent.intent_id
+          AND materialization.history_epoch_id=intent.expected_history_epoch_id
+        JOIN project_alpha_directory_outbox outbox ON outbox.command_id=materialization.command_id
+          AND outbox.state='acknowledged' AND outbox.command_json=materialization.command_json
+          AND outbox.source_id=intent.source_id AND outbox.expected_source_instance_id=intent.source_instance_uuid
+          AND outbox.application_id=intent.application_uuid AND outbox.expected_history_epoch_id=intent.expected_history_epoch_id
+          AND outbox.destination_base_url=intent.destination_origin AND outbox.resource_type='organization'
+          AND outbox.external_id=intent.external_canonical_id
+        JOIN operations_directory_audit audit ON audit.mutation_id=intent.mutation_id
+          AND audit.record_id=intent.record_id AND audit.record_version=intent.record_version
+          AND audit.actor_type='staff' AND json_extract(audit.command_json,'$.operation')='update'
+        WHERE intent.record_id=? AND intent.record_version=? AND intent.state='acknowledged'
+          AND intent.source_id=? AND intent.source_instance_uuid=? AND intent.application_uuid=?
+          AND intent.expected_history_epoch_id=? AND intent.destination_origin=?
+          AND intent.external_canonical_id=? AND json_extract(outbox.command_json,'$.operation')='update'
+          AND json_extract(outbox.command_json,'$.resourceType')='organization'
+          AND json_extract(outbox.command_json,'$.externalId')=intent.external_canonical_id
+          AND json_extract(outbox.command_json,'$.expectedProjectAlphaPublicId')=?
+          AND json_extract(outbox.outcome_json,'$.status')='acknowledged'
+          AND json_extract(outbox.outcome_json,'$.response.sourceInstanceId')=intent.source_instance_uuid
+          AND json_extract(outbox.outcome_json,'$.response.applicationId')=intent.application_uuid
+          AND json_extract(outbox.outcome_json,'$.response.historyEpoch')=intent.expected_history_epoch_id
+          AND json_extract(outbox.outcome_json,'$.response.result.resource.type')='organization'
+          AND json_extract(outbox.outcome_json,'$.response.result.resource.publicId')=?
+          AND json_extract(outbox.outcome_json,'$.response.result.resource.revision') IS NOT NULL
+      ) WHERE revision IS NOT NULL LIMIT 2`).bind(dependency.parent_activation_id, dependency.organization_record_id,
+      dependency.organization_record_version, row.source_id, row.expected_source_instance_id, row.application_id,
+      row.expected_history_epoch_id, dependency.parent_external_canonical_id, dependency.resolved_parent_public_id,
+      dependency.organization_record_id, dependency.organization_record_version, row.source_id,
+      row.expected_source_instance_id, row.application_id, row.expected_history_epoch_id,
+      row.destination_base_url, dependency.parent_external_canonical_id, dependency.resolved_parent_public_id,
+      dependency.resolved_parent_public_id).all<{ revision: string }>()).results;
+    return candidates.length === 1 && /^[1-9][0-9]{0,18}$/.test(candidates[0]!.revision) ? candidates[0]!.revision : null;
+  }
   const candidates = (await db.prepare(`SELECT DISTINCT revision FROM (
       SELECT json_extract(outbox.outcome_json,'$.response.result.resource.revision') revision
       FROM operations_directory_intents intent
@@ -179,8 +381,8 @@ async function currentParentRevision(db: D1Database, row: Row, dependency: Relat
 }
 async function exactReservation(db: D1Database, row: Row, connection: ProjectAlphaApiV2Connection): Promise<Internal | "destination" | "command" | "authority"> {
   if (!sameDestination(row, connection)) return "destination";
-  if (row.intent_state !== "materialized" || row.command_json !== row.materialization_command_json || row.record_id !== row.external_id
-    || row.record_id !== row.external_canonical_id || row.record_kind !== row.resource_type || row.current_version !== row.record_version
+  if (row.intent_state !== "materialized" || row.command_json !== row.materialization_command_json
+    || row.external_id !== row.external_canonical_id || row.record_kind !== row.resource_type || row.current_version !== row.record_version
     || row.intent_source_id !== row.source_id || row.source_instance_uuid !== row.expected_source_instance_id
     || row.application_uuid !== row.application_id || row.destination_origin !== row.destination_base_url
     || row.intent_history_epoch_id !== row.expected_history_epoch_id || row.materialization_history_epoch_id !== row.expected_history_epoch_id
@@ -208,7 +410,8 @@ async function exactReservation(db: D1Database, row: Row, connection: ProjectAlp
       && !await onboardingEnrollmentPermitted(db,row,originalActor,audit.createAdmissionId))) return "authority";
   const mapping = await activeMapping(db, row);
   if (command.operation === "create") {
-    if (mapping || disposition.kind !== "authorized_create" || command.commandId !== row.command_id || command.resourceType !== row.resource_type
+    if (row.record_id !== row.external_id || row.record_id !== row.external_canonical_id || mapping
+      || disposition.kind !== "authorized_create" || command.commandId !== row.command_id || command.resourceType !== row.resource_type
       || command.externalId !== row.external_id || command.expectedRevision !== "0" || command.fields === undefined) return "command";
     if (row.resource_type === "organization") {
       const transport = { commandId: row.command_id, externalId: row.external_id,
@@ -232,8 +435,12 @@ async function exactReservation(db: D1Database, row: Row, connection: ProjectAlp
   }
   if (command.operation !== "update" || disposition.kind !== "existing" || !mapping || command.commandId !== row.command_id
     || command.resourceType !== row.resource_type || command.externalId !== row.external_id
+    || mapping.record_id !== row.record_id || mapping.external_id !== row.external_id
+    || (mapping.mapping_kind === "legacy" && row.record_id !== row.external_id)
+    || (mapping.mapping_kind !== "legacy" && mapping.mapping_kind !== "acquired")
     || command.expectedProjectAlphaPublicId !== mapping.project_alpha_public_id || disposition.projectAlphaPublicId !== mapping.project_alpha_public_id
     || command.expectedRevision !== disposition.projectAlphaRevision || command.fields === undefined) return "command";
+  if (mapping.mapping_kind === "acquired" && !await acquiredMappingRevisionMatches(db, row, mapping, command)) return "command";
   if (!plain(command.fields)) return "command";
   const fields = { ...command.fields };
   if (row.resource_type === "client") {
@@ -271,7 +478,9 @@ function replay(value: Row): ProjectAlphaDirectoryProfileOutboxDispatcherOutcome
     ...(typeof outcome?.requestId === "string" ? { requestId: outcome.requestId } : {}) };
   const response = outcome && plain(outcome.response) && plain(outcome.response.result) && plain(outcome.response.result.resource)
     ? outcome.response.result.resource : null;
+  const command = parse(value.command_json);
   return response && typeof response.publicId === "string" && typeof response.revision === "string"
+    && (command?.operation !== "update" || exactUpdateRevision(command, response.revision))
     ? { status: "acknowledged", commandId: value.command_id, replayed: true, publicId: response.publicId, revision: response.revision } : { status: "uncertain", reason: "evidence" };
 }
 async function release(db: D1Database, value: Row, token: string, now: number, reason: string): Promise<void> {
@@ -341,6 +550,10 @@ export async function dispatchProjectAlphaDirectoryProfileOutboxCommand(env: Env
       return { phase: "invalid" as const, reason: after };
     }
     const response = evidence.response, resource = response.result.resource;
+    if (current.operation === "update" && !exactUpdateRevision(evidence.command, resource.revision)) {
+      await release(env.OPS_DB, leased, token, Date.now(), "revision");
+      return { phase: "uncertain" as const, reason: "evidence" };
+    }
     // Relationship evidence predates the profile transport and resolves the
     // canonical ID from result.data.publicId. Preserve the validated wire
     // response while adding that durable compatibility projection locally.

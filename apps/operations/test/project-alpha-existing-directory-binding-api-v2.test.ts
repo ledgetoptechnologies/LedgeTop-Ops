@@ -81,4 +81,24 @@ describe("existing Directory binding API-v2 transport", () => {
     await expect(sendConfiguredProjectAlphaExistingDirectoryBinding(env, sourceId, "organization", command, send))
       .resolves.toMatchObject({ status: "uncertain", reason: "invalid_contract" });
   });
+
+  it("accepts PA's correlated bare 409 as a binding conflict", async () => {
+    const send = vi.fn<typeof fetch>(async url => String(url).endsWith("/capabilities") ? response(metadata())
+      : new Response(null, { status: 409, headers: { "Content-Type": "application/json; charset=UTF-8",
+        "Cache-Control": "no-store", "X-Request-ID": requestId } }));
+    const outcome = await sendConfiguredProjectAlphaExistingDirectoryBinding(env, sourceId, "organization", command, send);
+    expect(outcome).toEqual({ status: "conflict", reason: "http_status", httpStatus: 409, requestId });
+    expect(validatedProjectAlphaExistingDirectoryBindingEvidence(outcome)).toBeNull();
+  });
+
+  it.each([
+    ["missing request ID", { "Content-Type": "application/json; charset=UTF-8", "Cache-Control": "no-store" }, null],
+    ["malformed request ID", { "Content-Type": "application/json; charset=UTF-8", "Cache-Control": "no-store", "X-Request-ID": "not-a-uuid" }, null],
+    ["non-empty malformed body", { "Content-Type": "application/json; charset=UTF-8", "Cache-Control": "no-store", "X-Request-ID": requestId }, " "],
+  ])("fails closed for a bare-conflict-shaped response with %s", async (_variant, headers, body) => {
+    const send = vi.fn<typeof fetch>(async url => String(url).endsWith("/capabilities") ? response(metadata())
+      : new Response(body, { status: 409, headers }));
+    await expect(sendConfiguredProjectAlphaExistingDirectoryBinding(env, sourceId, "organization", command, send))
+      .resolves.toMatchObject({ status: "uncertain", reason: "invalid_contract", httpStatus: 409 });
+  });
 });

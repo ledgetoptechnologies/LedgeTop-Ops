@@ -12,6 +12,7 @@ import {
   OPS_PROJECT_V2_JOINED_ACCEPTANCE_CONFIG,
   OPS_PROJECT_V2_JOINED_ACCEPTANCE_FLAG,
   OPS_PROJECT_V2_JOINED_ACCEPTANCE_PROFILE_NAME,
+  OPS_PROJECT_INBOUND_RECONCILIATION_FLAG,
   run,
   validateOpsProjectV2JoinedAcceptanceConfig,
 } from "./staging-ops-project-v2-joined-acceptance-profile.mjs";
@@ -68,7 +69,10 @@ test("builds only the isolated joined Project-v2 activation gate", () => {
   });
   assert.equal(source.vars[OPS_PROJECT_V2_JOINED_ACCEPTANCE_FLAG], "false");
   assert.equal(production.vars[OPS_PROJECT_V2_JOINED_ACCEPTANCE_FLAG], "false");
+  assert.equal(source.vars[OPS_PROJECT_INBOUND_RECONCILIATION_FLAG], "false");
+  assert.equal(production.vars[OPS_PROJECT_INBOUND_RECONCILIATION_FLAG], "false");
   assert.equal(candidate.vars[OPS_PROJECT_V2_JOINED_ACCEPTANCE_FLAG], "true");
+  assert.equal(candidate.vars[OPS_PROJECT_INBOUND_RECONCILIATION_FLAG], "false");
   assert.deepEqual(validateOpsProjectV2JoinedAcceptanceConfig(
     source, candidate, production,
   ), []);
@@ -121,6 +125,29 @@ test("rejects absent or default-on staging and production activation flags", () 
       state.source, state.production,
     ), /PROJECT_ALPHA_PROJECT_V2_ACTIVATION_ENABLED=false/);
   }
+});
+
+test("keeps inbound-project reconciliation default-off in source, candidate, and production", () => {
+  const mutations = [
+    state => { delete state.source.vars[OPS_PROJECT_INBOUND_RECONCILIATION_FLAG]; },
+    state => { state.source.vars[OPS_PROJECT_INBOUND_RECONCILIATION_FLAG] = "true"; },
+    state => { delete state.production.vars[OPS_PROJECT_INBOUND_RECONCILIATION_FLAG]; },
+    state => { state.production.vars[OPS_PROJECT_INBOUND_RECONCILIATION_FLAG] = "true"; },
+  ];
+  for (const mutate of mutations) {
+    const state = pair();
+    mutate(state);
+    assert.throws(() => buildOpsProjectV2JoinedAcceptanceConfig(
+      state.source, state.production,
+    ), /PROJECT_ALPHA_PROJECT_INBOUND_RECONCILIATION_ENABLED=false/);
+  }
+
+  const { source, production } = pair();
+  const candidate = buildOpsProjectV2JoinedAcceptanceConfig(source, production);
+  candidate.vars[OPS_PROJECT_INBOUND_RECONCILIATION_FLAG] = "true";
+  const errors = validateOpsProjectV2JoinedAcceptanceConfig(source, candidate, production);
+  assert(errors.some(error => error.includes("outside the isolated one-gate staging window")),
+    errors.join(" | "));
 });
 
 test("rejects another gate, resource drift, or a disabled joined candidate", () => {

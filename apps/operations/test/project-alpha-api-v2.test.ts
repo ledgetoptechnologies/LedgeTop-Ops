@@ -13,8 +13,8 @@ function response(capabilities: readonly [string, string], endpointCapabilities:
     grantedCapabilities: ["api.capabilities.read", ...capabilities].map(name => ({ name })),
     implementedEndpoints: [
       { method: "GET", path: "/api/v2/capabilities", requiredCapability: "api.capabilities.read" },
-      { method: "POST", path: "/api/v2/directory/organizations/commands", requiredCapability: endpointCapabilities[0], requiresSourceInstanceId: true, requiresApplicationId: true, requiresUpdatePublicId: true, requiresHistoryEpoch: true },
-      { method: "POST", path: "/api/v2/directory/clients/commands", requiredCapability: endpointCapabilities[1], requiresSourceInstanceId: true, requiresApplicationId: true, requiresUpdatePublicId: true, requiresHistoryEpoch: true },
+      { method: "POST", path: "/api/v2/directory/organizations/commands", requiredCapability: endpointCapabilities[0], requiresSourceInstanceId: true, requiresApplicationId: true, requiresHistoryEpoch: true },
+      { method: "POST", path: "/api/v2/directory/clients/commands", requiredCapability: endpointCapabilities[1], requiresSourceInstanceId: true, requiresApplicationId: true, requiresHistoryEpoch: true },
     ],
   }), { headers: { "Content-Type": "application/json", "Cache-Control": "no-store", "X-Request-ID": requestId } });
 }

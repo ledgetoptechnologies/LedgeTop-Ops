@@ -8,10 +8,11 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 export const STAGING_TARGET = Object.freeze({accountId:"846c924bf17bf4f3dd15c97a4c5d1d51",workerName:"ledgetop-ops-staging",
   hostname:"ops-staging.ledgetopdroneservices.com",databaseId:"78b34173-b168-4e3d-9832-bb9d245cc6b8",
   databaseName:"ltds-ops-staging",binding:"OPS_DB",environment:"staging"});
-const CHAIN = Object.freeze({count:171,final:"0171_project_alpha_active_directory_update_guard.sql",
-  names:"bc4590b90cccd1842b2496906986355cfde7522e970ac3ec95039cace437f61d",
-  contents:"e3feca1f403a06f15495017fd843ac48173e39be2478f8d6b5060c262c0b1f5c"});
-const PERMISSIONS = ["directory.profile.edit","directory.identity.link"];
+const CHAIN = Object.freeze({count:180,final:"0180_project_alpha_project_v2_recovery_authorization.sql",
+  names:"8d7fdaaa7b453b32dd5e67d1a670554bc1c03aedf41c8ecadaddbbccf632e266",
+  contents:"6603a620f33f7d6cd88e23189203ddcb8a753b16167cd5e8ae427a31cf51b4b3"});
+const PERMISSIONS_V2 = Object.freeze(["directory.profile.edit","directory.identity.link"]);
+const PERMISSIONS_V3 = Object.freeze([...PERMISSIONS_V2,"directory.enrollment.manage"]);
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const TS = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 const GRANT = ["id","staff_id","permission","effect","scope_kind","business_area_id","division_id","resource_id","active","granted_by","created_at"];
@@ -29,13 +30,24 @@ function canonical(value) {
   return value;
 }
 const json = value=>JSON.stringify(canonical(value));
-export function nativeOnlyGrantIds(staffId,businessAreaId,approvalId) {
-  return PERMISSIONS.map(permission=>{
+function permissionsForVersion(schemaVersion) {
+  if (schemaVersion===2) return PERMISSIONS_V2;
+  if (schemaVersion===3) return PERMISSIONS_V3;
+  fail('version/phase');
+}
+function grantIdsForPermissions(staffId,businessAreaId,approvalId,permissions) {
+  return permissions.map(permission=>{
     const bytes=crypto.createHash('sha256').update(json({staffId,businessAreaId,approvalId,permission})).digest().subarray(0,16);
     bytes[6]=(bytes[6]&15)|64; bytes[8]=(bytes[8]&63)|128;
     const hex=bytes.toString('hex');
     return `${hex.slice(0,8)}-${hex.slice(8,12)}-${hex.slice(12,16)}-${hex.slice(16,20)}-${hex.slice(20)}`;
   });
+}
+export function nativeOnlyGrantIds(staffId,businessAreaId,approvalId) {
+  return grantIdsForPermissions(staffId,businessAreaId,approvalId,PERMISSIONS_V2);
+}
+export function nativeClientCreationGrantIds(staffId,businessAreaId,approvalId) {
+  return grantIdsForPermissions(staffId,businessAreaId,approvalId,PERMISSIONS_V3);
 }
 function exact(value,keys,label) {
   if (!value || typeof value!=="object" || Array.isArray(value) || Object.getPrototypeOf(value)!==Object.prototype
@@ -83,7 +95,8 @@ function reviewedMigrations(root) {
 function validate(raw) {
   const input=structuredClone(raw);
   exact(input,['schemaVersion','staging','phase','admission','profile','businessArea','grants','history','generation','approval','priorProvision'],'input');
-  if (input.schemaVersion!==2 || !['provision','revoke'].includes(input.phase)) fail('version/phase');
+  if (![2,3].includes(input.schemaVersion) || !['provision','revoke'].includes(input.phase)) fail('version/phase');
+  const permissions=permissionsForVersion(input.schemaVersion);
   if (!same(input.staging,STAGING_TARGET)) fail('staging identity');
   exact(input.admission,ADMISSION,'admission'); exact(input.profile,PROFILE,'profile');
   exact(input.generation,GENERATION,'generation'); exact(input.businessArea,['id','name','active'],'business area');
@@ -105,10 +118,10 @@ function validate(raw) {
   }
   const approval=input.approval;
   exact(approval,['approvalId','commandId','revokeApprovalId','revokeCommandId','issuedByStaffId','issuedByAccessSubject','issuedAt','expiresAt','executedAt','grantIds'],'approval');
-  if (!Array.isArray(approval.grantIds) || approval.grantIds.length!==2) fail('two grant ids');
+  if (!Array.isArray(approval.grantIds) || approval.grantIds.length!==permissions.length) fail(`${permissions.length} grant ids`);
   const ids=[approval.approvalId,approval.commandId,approval.revokeApprovalId,approval.revokeCommandId,...approval.grantIds];
   if (!ids.every(id=>typeof id==='string' && UUID.test(id)) || new Set(ids).size!==ids.length) fail('unique approval UUIDs');
-  if (!same(approval.grantIds,nativeOnlyGrantIds(a.staff_id,input.businessArea.id,approval.approvalId))) fail('deterministic permission-bound grant IDs required');
+  if (!same(approval.grantIds,grantIdsForPermissions(a.staff_id,input.businessArea.id,approval.approvalId,permissions))) fail('deterministic permission-bound grant IDs required');
   if (approval.issuedByStaffId!==a.staff_id || approval.issuedByAccessSubject!==a.bound_access_subject) fail('reviewed issuer identity');
   for (const key of ['issuedAt','expiresAt','executedAt']) timestamp(approval[key],key);
   const duration=Date.parse(approval.expiresAt)-Date.parse(approval.issuedAt);
@@ -153,8 +166,9 @@ function noWork(staff) {
 }
 function metadata(input,planJson) {
   const p=input.approval,a=input.admission,provision=input.phase==='provision';
+  const grantCount=permissionsForVersion(input.schemaVersion).length;
   const verificationJson=json({staging:input.staging,admission:input.admission,profile:input.profile,businessArea:input.businessArea,migrations:CHAIN});
-  const resultJson=json({phase:input.phase,staffId:a.staff_id,businessAreaId:input.businessArea.id,grantIds:p.grantIds,generation:input.generation.generation+2});
+  const resultJson=json({phase:input.phase,staffId:a.staff_id,businessAreaId:input.businessArea.id,grantIds:p.grantIds,generation:input.generation.generation+grantCount});
   const approval={approval_id:provision?p.approvalId:p.revokeApprovalId,canonical_plan_json:planJson,canonical_plan_sha256:sha(planJson),
     approved_operator_staff_id:a.staff_id,approved_operator_access_subject:a.bound_access_subject,
     independent_binding_verification_json:verificationJson,independent_binding_verification_sha256:sha(verificationJson),
@@ -171,6 +185,7 @@ function insert(table,columns,row) {
 
 export function compileNativeOnlyAuthorityPacket(raw,{root=ROOT}={}) {
   const input=validate(raw),migrations=reviewedMigrations(root),a=input.admission,p=input.approval,staff=a.staff_id;
+  const permissions=permissionsForVersion(input.schemaVersion);
   const planJson=json(input),meta=metadata(input,planJson);
   const statements=[rowsGuard('d1_migrations',['name'],migrations.map(name=>({name})),'1',[],'migration-ledger'),...unchanged(input),
     rowsGuard('native_directory_grant_generations',GENERATION,[input.generation],'staff_id=?',[staff],'generation'),
@@ -180,11 +195,11 @@ export function compileNativeOnlyAuthorityPacket(raw,{root=ROOT}={}) {
       AND julianday(?)<=julianday('now') AND julianday(?)>=julianday('now','-5 minutes')`,[p.issuedAt,p.expiresAt,p.executedAt,p.executedAt],'expiry'),
     // Reject every active deny for these permissions, including narrower scopes.
     guard(`NOT EXISTS(SELECT 1 FROM native_directory_grants WHERE staff_id=? AND active=1 AND effect='deny'
-      AND permission IN ('directory.profile.edit','directory.identity.link'))`,[staff],'deny')];
+      AND permission IN (${permissions.map(()=>'?').join(',')}))`,[staff,...permissions],'deny')];
   let priorInput=null;
   if (input.phase==='provision') {
     if (input.grants.some(row=>p.grantIds.includes(row.id) || (row.scope_kind==='business_area' && row.business_area_id===input.businessArea.id
-      && PERMISSIONS.includes(row.permission) && row.effect==='allow'))) fail('existing targeted grant conflict');
+      && permissions.includes(row.permission) && row.effect==='allow'))) fail('existing targeted grant conflict');
     statements.push(guard(`NOT EXISTS(SELECT 1 FROM native_staff_bootstrap_approvals WHERE approval_id IN (?,?))
       AND NOT EXISTS(SELECT 1 FROM native_staff_bootstrap_receipts WHERE command_id IN (?,?))`,[p.approvalId,p.revokeApprovalId,p.commandId,p.revokeCommandId],'unused-packet'));
   } else {
@@ -202,7 +217,7 @@ export function compileNativeOnlyAuthorityPacket(raw,{root=ROOT}={}) {
       guard(`NOT EXISTS(SELECT 1 FROM native_staff_bootstrap_approvals WHERE approval_id=?)
         AND NOT EXISTS(SELECT 1 FROM native_staff_bootstrap_receipts WHERE command_id=?)`,[p.revokeApprovalId,p.revokeCommandId],'unused-revoke'));
   }
-  const targetRows=PERMISSIONS.map((permission,index)=>({id:p.grantIds[index],staff_id:staff,permission,effect:'allow',scope_kind:'business_area',
+  const targetRows=permissions.map((permission,index)=>({id:p.grantIds[index],staff_id:staff,permission,effect:'allow',scope_kind:'business_area',
     business_area_id:input.businessArea.id,division_id:null,resource_id:null,active:1,granted_by:p.issuedByStaffId,created_at:priorInput?.approval.executedAt??p.executedAt}));
   if (input.phase==='revoke') {
     if (!targetRows.every(target=>input.grants.some(row=>same(row,target)))) fail('exact active packet grants required');
@@ -221,9 +236,10 @@ export function compileNativeOnlyAuthorityPacket(raw,{root=ROOT}={}) {
     guard('changes()=1',[],'approval-cas'),rowsGuard('native_staff_bootstrap_approvals',APPROVAL,[{...input.priorProvision.approval,revoked_at:p.executedAt}],'approval_id=?',[p.approvalId],'revoked-approval'));
   const postGrants=input.phase==='provision'?[...input.grants,...targetRows]:input.grants.map(row=>p.grantIds.includes(row.id)?{...row,active:0}:row);
   statements.push(...unchanged(input),noWork(staff),rowsGuard('native_directory_grants',GRANT,postGrants,'staff_id=?',[staff],'grant-poststate'),
-    // Preserve the ENTIRE prior history prefix; only old+1 and old+2 append.
+    // Preserve the ENTIRE prior history prefix; append exactly one entry per
+    // permission in this explicitly versioned packet contract.
     rowsGuard('native_directory_grant_history',HISTORY,input.history,'staff_id=? AND grant_generation<=?',[staff,input.generation.generation],'history-prefix'),
-    guard('(SELECT count(*) FROM native_directory_grant_history WHERE staff_id=? AND grant_generation>?)=2',[staff,input.generation.generation],'history-suffix-count'));
+    guard('(SELECT count(*) FROM native_directory_grant_history WHERE staff_id=? AND grant_generation>?)=?',[staff,input.generation.generation,permissions.length],'history-suffix-count'));
   targetRows.forEach((target,index)=>{
     const row={grant_id:target.id,grant_version:input.phase==='provision'?1:2,staff_id:staff,permission:target.permission,effect:'allow',scope_kind:'business_area',
       business_area_id:input.businessArea.id,division_id:null,resource_id:null,active:input.phase==='provision'?1:0,grant_generation:input.generation.generation+index+1};
@@ -233,11 +249,11 @@ export function compileNativeOnlyAuthorityPacket(raw,{root=ROOT}={}) {
         AND strftime('%Y-%m-%dT%H:%M:%fZ',recorded_at) IS recorded_at)`,[staff,row.grant_generation,p.executedAt],'history-suffix-time'));
   });
   statements.push(guard(`EXISTS(SELECT 1 FROM native_directory_grant_generations g JOIN native_directory_grant_history h
-      ON h.staff_id=g.staff_id AND h.grant_generation=g.generation WHERE g.staff_id=? AND g.generation=? AND g.updated_at=h.recorded_at)`,[staff,input.generation.generation+2],'generation-poststate'),
+      ON h.staff_id=g.staff_id AND h.grant_generation=g.generation WHERE g.staff_id=? AND g.generation=? AND g.updated_at=h.recorded_at)`,[staff,input.generation.generation+permissions.length],'generation-poststate'),
     rowsGuard('native_staff_bootstrap_approvals',APPROVAL,[meta.approval],'approval_id=?',[meta.approval.approval_id],'approval-poststate'),
     guard("julianday(?)>julianday('now')",[p.expiresAt],'expiry-poststate'),
     insert('native_staff_bootstrap_receipts',RECEIPT,meta.receipt),rowsGuard('native_staff_bootstrap_receipts',RECEIPT,[meta.receipt],'command_id=?',[meta.receipt.command_id],'receipt-poststate'));
-  return {schemaVersion:2,input,planHash:sha(planJson),approval:meta.approval,receipt:meta.receipt,statements};
+  return {schemaVersion:input.schemaVersion,input,planHash:sha(planJson),approval:meta.approval,receipt:meta.receipt,statements};
 }
 
 /** A trusted out-of-band runner supplies the configured staging binding

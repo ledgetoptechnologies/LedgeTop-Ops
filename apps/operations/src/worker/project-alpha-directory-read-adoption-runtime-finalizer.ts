@@ -24,6 +24,8 @@ type Finalization = Readonly<{
   finalization_id: string; idempotency_key: string; request_sha256: string; field_review_receipt_id: string;
   source_id: string; source_instance_id: string; application_id: string; history_epoch_id: string;
   resource_type: ProjectAlphaDirectoryReadKind; record_id: string; project_alpha_public_id: string;
+  reviewed_external_id: string; target_external_id: string; acquisition_external_id: string | null;
+  acquisition_identity_mode: string | null;
   project_alpha_revision: string; authorization_generation: string; local_record_version: number;
   local_profile_sha256: string; project_alpha_profile_sha256: string; reviewer_staff_id: string;
   reviewer_access_subject: string; reviewer_admission_version: number; reviewer_profile_version: number;
@@ -58,7 +60,8 @@ async function sha(value: unknown): Promise<string> {
 }
 async function loadFinalization(db: D1Database, key: string, receipt: string): Promise<Finalization[]> {
   return (await db.prepare(`SELECT finalization_id,idempotency_key,request_sha256,field_review_receipt_id,
-      source_id,source_instance_id,application_id,history_epoch_id,resource_type,record_id,project_alpha_public_id,
+      source_id,source_instance_id,application_id,history_epoch_id,resource_type,record_id,reviewed_external_id,target_external_id,
+      acquisition_external_id,acquisition_identity_mode,project_alpha_public_id,
       project_alpha_revision,authorization_generation,local_record_version,local_profile_sha256,project_alpha_profile_sha256,
       reviewer_staff_id,reviewer_access_subject,reviewer_admission_version,reviewer_profile_version,reviewer_grant_generation,
       adopted_field_count,acquisition_review_id,acquisition_command_id,activation_idempotency_key
@@ -152,6 +155,9 @@ export async function finalizeProjectAlphaDirectoryReadAdoption(env: RuntimeEnv,
   }
   if (rows.length !== 1) return { status: "blocked", stage: "prepare", reason: "storage" };
   const row = rows[0]!;
+  if (row.acquisition_identity_mode !== "preserve_reviewed"
+    || row.acquisition_external_id !== row.reviewed_external_id)
+    return { status: "blocked", stage: "prepare", reason: "sealed_review" };
   if (row.reviewer_staff_id !== input.actor.staffId || row.reviewer_access_subject !== input.actor.accessSubject
     || row.reviewer_admission_version !== input.actor.admissionVersion || row.reviewer_profile_version !== input.actor.profileVersion
     || row.reviewer_grant_generation !== input.actor.grantGeneration)
@@ -207,7 +213,7 @@ export async function finalizeProjectAlphaDirectoryReadAdoption(env: RuntimeEnv,
   } else if (local) return { status: "conflict", stage: "local_profile", reason: "unexpected_receipt" };
 
   const acquired = await use.acquire(env, { reviewId: row.acquisition_review_id, commandId: row.acquisition_command_id,
-    sourceId: row.source_id, recordId: row.record_id, resourceType: row.resource_type,
+    sourceId: row.source_id, recordId: row.record_id, externalId: row.acquisition_external_id, resourceType: row.resource_type,
     projectAlphaPublicId: row.project_alpha_public_id, expectedProjectAlphaRevision: row.project_alpha_revision,
     expectedAuthorizationGeneration: row.authorization_generation, localRecordVersion: recordVersion, reviewer: input.actor });
   if (acquired.status !== "acquired") return { status: acquired.status, stage: "acquire", reason: acquired.reason };

@@ -120,19 +120,23 @@ async function setupSchema() {
   await db.batch(splitD1MigrationStatements(`
     CREATE TABLE project_alpha_existing_directory_binding_activation_receipts(
       activation_id TEXT PRIMARY KEY,source_id TEXT,source_instance_id TEXT,application_id TEXT,history_epoch_id TEXT,
-      resource_type TEXT,external_id TEXT,project_alpha_public_id TEXT,activated_at TEXT
+      resource_type TEXT,record_id TEXT,external_id TEXT,project_alpha_public_id TEXT,activated_at TEXT
     );
     CREATE VIEW project_alpha_active_directory_mappings AS
-      SELECT source_id,resource_type,external_id,project_alpha_public_id,source_instance_id,application_id,history_epoch_id,
+      SELECT source_id,resource_type,external_id AS record_id,external_id,project_alpha_public_id,source_instance_id,application_id,history_epoch_id,
         NULL AS provenance_id,'legacy' AS mapping_kind,NULL AS created_at FROM project_alpha_directory_mappings
       UNION ALL
-      SELECT source_id,resource_type,external_id,project_alpha_public_id,source_instance_id,application_id,history_epoch_id,
+      SELECT source_id,resource_type,record_id,external_id,project_alpha_public_id,source_instance_id,application_id,history_epoch_id,
         activation_id AS provenance_id,'acquired' AS mapping_kind,activated_at AS created_at
         FROM project_alpha_existing_directory_binding_activation_receipts;
   `).map(statement => db.prepare(statement)));
   await migrate("0126_project_alpha_project_active_directory_mapping_bridge.sql");
   await migrate("0128_project_alpha_project_adoption_bind_bridge.sql");
   await migrate("0130_project_alpha_project_adoption_review_producer.sql");
+  const consumerGuardMigration = readFileSync(new URL("../migrations/0172_project_alpha_active_directory_consumer_guards.sql", import.meta.url), "utf8");
+  const [projectAdoptionGuards] = consumerGuardMigration.split("DROP TRIGGER operations_shared_project_revisions_bound_guard;");
+  if (!projectAdoptionGuards) throw new Error("project adoption guard migration prefix is missing");
+  await db.batch(splitD1MigrationStatements(projectAdoptionGuards).map(statement => db.prepare(statement)));
 }
 
 function detailJson(clientId: string | null = null) {
@@ -165,7 +169,7 @@ async function seedAuthority(externalProjectId = "server-generated-project", map
         .bind(sourceInstanceId, applicationId, historyEpochId, "organization", organizationPublicId,
           sourceInstanceId, applicationId, historyEpochId, organizationPublicId)
       : db.prepare(`INSERT INTO project_alpha_existing_directory_binding_activation_receipts
-          VALUES('61000000-0000-4000-8000-000000000006','project-alpha:primary',?,?,?,'organization','organization-record',?,strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+          VALUES('61000000-0000-4000-8000-000000000006','project-alpha:primary',?,?,?,'organization','organization-record','pa-organization-record',?,strftime('%Y-%m-%dT%H:%M:%fZ','now'))
           ON CONFLICT(activation_id) DO NOTHING`)
         .bind(sourceInstanceId, applicationId, historyEpochId, organizationPublicId),
   ]);
@@ -175,7 +179,7 @@ async function seedActivatedClient(withRelationship = true) {
   await db.batch([
     db.prepare("INSERT INTO operations_directory_records VALUES('client-record','client')"),
     db.prepare(`INSERT INTO project_alpha_existing_directory_binding_activation_receipts
-      VALUES('62000000-0000-4000-8000-000000000006','project-alpha:primary',?,?,?,'client','client-record',?,strftime('%Y-%m-%dT%H:%M:%fZ','now'))`)
+      VALUES('62000000-0000-4000-8000-000000000006','project-alpha:primary',?,?,?,'client','client-record','pa-client-record',?,strftime('%Y-%m-%dT%H:%M:%fZ','now'))`)
       .bind(sourceInstanceId, applicationId, historyEpochId, clientPublicId),
     ...(withRelationship ? [db.prepare("INSERT INTO operations_directory_client_organizations VALUES('client-record','organization-record')")] : []),
   ]);
@@ -495,7 +499,7 @@ describe("private project adoption review producer", () => {
       VALUES('project-alpha:primary',?,?,?,'organization','organization-record',?)`)
       .bind(sourceInstanceId, applicationId, historyEpochId, organizationPublicId).run();
     await db.prepare(`INSERT INTO project_alpha_existing_directory_binding_activation_receipts
-      VALUES('63000000-0000-4000-8000-000000000006','project-alpha:primary',?,?,?,'organization','organization-record',?,strftime('%Y-%m-%dT%H:%M:%fZ','now'))`)
+      VALUES('63000000-0000-4000-8000-000000000006','project-alpha:primary',?,?,?,'organization','organization-record','pa-organization-record',?,strftime('%Y-%m-%dT%H:%M:%fZ','now'))`)
       .bind(sourceInstanceId, applicationId, historyEpochId, organizationPublicId).run();
     await expect(produceReview()).resolves.toEqual({ status: "blocked", reason: "directory" });
     expect(await db.prepare("SELECT count(*) count FROM project_alpha_project_adoption_review_producer_receipts").first("count")).toBe(0);
@@ -766,6 +770,38 @@ describe("project adoption bind bridge consumer", () => {
     expect((await db.prepare("SELECT * FROM delivery_public_shares ORDER BY id").all()).results).toEqual(publicBefore.results);
   });
 
+  it("carries the canonical Ops record ID through acquired mappings whose PA external ID differs", async () => {
+    await seedAuthority("server-generated-project", "acquired");
+    expect(await db.prepare(`SELECT record_id,external_id,mapping_kind FROM project_alpha_active_directory_mappings
+      WHERE resource_type='organization'`).first()).toEqual({
+      record_id: "organization-record", external_id: "pa-organization-record", mapping_kind: "acquired",
+    });
+
+    const produced = await produceReview();
+    expect(produced).toMatchObject({ status: "reviewed", replayed: false });
+    if (produced.status !== "reviewed") throw new Error("acquired mapping review setup failed");
+    await expect(produceReview()).resolves.toEqual({ ...produced, replayed: true });
+    expect(await db.prepare("SELECT organization_record_id FROM project_alpha_project_adoption_review_evidence").first())
+      .toEqual({ organization_record_id: "organization-record" });
+
+    const reserved = await reserveReview({ reviewItemId: produced.reviewItemId, idempotencyKey });
+    expect(reserved).toMatchObject({ status: "reserved", replayed: false });
+    if (reserved.status !== "reserved") throw new Error("acquired mapping reservation setup failed");
+    await expect(reserveReview({ reviewItemId: produced.reviewItemId, idempotencyKey }))
+      .resolves.toEqual({ ...reserved, replayed: true });
+
+    const planned = await planAdoption({ reservationId: reserved.reservationId });
+    expect(planned).toMatchObject({ status: "planned", replayed: false });
+    if (planned.status !== "planned") throw new Error("acquired mapping bind setup failed");
+    await expect(planAdoption({ reservationId: reserved.reservationId }))
+      .resolves.toEqual({ ...planned, replayed: true });
+    expect(await db.prepare(`SELECT organization_record_id FROM operations_shared_projects
+      WHERE external_project_id='server-generated-project'`).first())
+      .toEqual({ organization_record_id: "organization-record" });
+    expect(await db.prepare("SELECT count(*) count FROM operations_directory_records WHERE record_id='pa-organization-record'").first("count"))
+      .toBe(0);
+  });
+
   it("pins observed PA revision and projection so a persistence race is rejected by the pending bind", async () => {
     await seedAuthority();
     const publicBefore = await db.prepare("SELECT * FROM delivery_public_shares ORDER BY id").all();
@@ -887,7 +923,7 @@ describe("project adoption bind bridge consumer", () => {
       VALUES('project-alpha:primary',?,?,?,'organization','organization-record',?)`)
       .bind(sourceInstanceId, applicationId, historyEpochId, organizationPublicId).run();
     await db.prepare(`INSERT INTO project_alpha_existing_directory_binding_activation_receipts
-      VALUES('63000000-0000-4000-8000-000000000006','project-alpha:primary',?,?,?,'organization','organization-record',?,strftime('%Y-%m-%dT%H:%M:%fZ','now'))`)
+      VALUES('63000000-0000-4000-8000-000000000006','project-alpha:primary',?,?,?,'organization','organization-record','pa-organization-record',?,strftime('%Y-%m-%dT%H:%M:%fZ','now'))`)
       .bind(sourceInstanceId, applicationId, historyEpochId, organizationPublicId).run();
     await expect(planAdoption({ reservationId: savedReservationId }))
       .resolves.toEqual({ status: "blocked", reason: "current_state" });

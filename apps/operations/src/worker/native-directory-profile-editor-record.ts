@@ -76,11 +76,11 @@ export async function nativeDirectoryOrganizationChoices(env: Env): Promise<Nati
           || configured.connection.expectedHistoryEpoch !== destination.historyEpoch
           || configured.connection.baseUrl !== destination.origin
           || !await env.OPS_DB.withSession("first-primary").prepare(`SELECT 1 present
-            FROM pa_connectors connector JOIN project_alpha_active_directory_mappings mapping
-              ON mapping.source_id=connector.source_id
-            WHERE connector.source_id=? AND connector.state='active' AND connector.read_visible=1
-              AND mapping.source_instance_id=? AND mapping.application_id=? AND mapping.history_epoch_id=?
-              AND mapping.resource_type='organization' AND mapping.external_id=?`).bind(destination.sourceId,
+            FROM project_alpha_active_directory_mappings mapping
+            WHERE mapping.source_id=? AND mapping.source_instance_id=? AND mapping.application_id=? AND mapping.history_epoch_id=?
+              AND mapping.resource_type='organization' AND mapping.record_id=?
+            GROUP BY mapping.source_id,mapping.source_instance_id,mapping.application_id,mapping.history_epoch_id,
+              mapping.resource_type,mapping.record_id HAVING count(*)=1 LIMIT 1`).bind(destination.sourceId,
               destination.sourceInstanceUUID, destination.applicationUUID, destination.historyEpoch, row.recordId).first()) {
           valid = false; break;
         }
@@ -101,9 +101,9 @@ export async function nativeDirectoryProfileEditorRecord(env: Env, root: { sourc
   try {
     const configured = resolveProjectAlphaApiV2Connection(env, root.source_id);
     if (!configured.enabled || !configured.connection.expectedHistoryEpoch) return null;
-    const rows = (await env.OPS_DB.withSession("first-primary").prepare(`SELECT mapping.external_id recordId
+    const rows = (await env.OPS_DB.withSession("first-primary").prepare(`SELECT mapping.record_id recordId
       FROM project_alpha_active_directory_mappings mapping JOIN operations_directory_records record
-        ON record.record_id=mapping.external_id AND record.record_kind=mapping.resource_type
+        ON record.record_id=mapping.record_id AND record.record_kind=mapping.resource_type
       WHERE mapping.source_id=? AND mapping.source_instance_id=? AND mapping.application_id=? AND mapping.history_epoch_id=?
         AND mapping.resource_type=? AND mapping.project_alpha_public_id=?
         AND record.record_kind=? LIMIT 2`).bind(root.source_id, configured.connection.expectedSourceInstanceId,
@@ -122,18 +122,27 @@ export async function nativeDirectoryLinkedClientEditorRecords(env: Env, root: {
   try {
     const configured = resolveProjectAlphaApiV2Connection(env, root.source_id);
     if (!configured.enabled || !configured.connection.expectedHistoryEpoch) return [];
-    const rows = (await env.OPS_DB.withSession("first-primary").prepare(`SELECT client.external_id recordId,
+    const rows = (await env.OPS_DB.withSession("first-primary").prepare(`SELECT client.record_id recordId,
         json_extract(revision.profile_json,'$.name') name
       FROM project_alpha_active_directory_mappings parent
-      JOIN operations_directory_client_organizations relationship ON relationship.organization_record_id=parent.external_id
-      JOIN project_alpha_active_directory_mappings client ON client.external_id=relationship.client_record_id
+      JOIN operations_directory_records parent_record ON parent_record.record_id=parent.record_id AND parent_record.record_kind='organization'
+      JOIN operations_directory_client_organizations relationship ON relationship.organization_record_id=parent.record_id
+      JOIN project_alpha_active_directory_mappings client ON client.record_id=relationship.client_record_id
         AND client.source_id=parent.source_id AND client.source_instance_id=parent.source_instance_id
         AND client.application_id=parent.application_id AND client.history_epoch_id=parent.history_epoch_id
         AND client.resource_type='client'
-      JOIN operations_directory_records record ON record.record_id=client.external_id AND record.record_kind='client'
+      JOIN operations_directory_records record ON record.record_id=client.record_id AND record.record_kind='client'
       JOIN operations_directory_revisions revision ON revision.record_id=record.record_id AND revision.version=record.current_version
       WHERE parent.source_id=? AND parent.source_instance_id=? AND parent.application_id=? AND parent.history_epoch_id=?
         AND parent.resource_type='organization' AND parent.project_alpha_public_id=?
+        AND (SELECT count(*) FROM project_alpha_active_directory_mappings exact_parent
+          WHERE exact_parent.source_id=parent.source_id AND exact_parent.source_instance_id=parent.source_instance_id
+            AND exact_parent.application_id=parent.application_id AND exact_parent.history_epoch_id=parent.history_epoch_id
+            AND exact_parent.resource_type='organization' AND exact_parent.project_alpha_public_id=parent.project_alpha_public_id)=1
+        AND (SELECT count(*) FROM project_alpha_active_directory_mappings exact_client
+          WHERE exact_client.source_id=client.source_id AND exact_client.source_instance_id=client.source_instance_id
+            AND exact_client.application_id=client.application_id AND exact_client.history_epoch_id=client.history_epoch_id
+            AND exact_client.resource_type='client' AND exact_client.record_id=client.record_id)=1
         AND EXISTS(SELECT 1 FROM native_directory_grants allowed
           WHERE allowed.staff_id=? AND allowed.permission='directory.profile.view'
             AND allowed.effect='allow' AND allowed.active=1 AND (allowed.scope_kind='global'
@@ -154,7 +163,7 @@ export async function nativeDirectoryLinkedClientEditorRecords(env: Env, root: {
                 WHERE scope.record_id=record.record_id AND scope.active=1 AND scope.business_area_id=denied.business_area_id))
               OR (denied.scope_kind='division' AND EXISTS(SELECT 1 FROM native_directory_resource_scopes scope
                 WHERE scope.record_id=record.record_id AND scope.active=1 AND scope.division_id=denied.division_id))))
-      ORDER BY client.external_id LIMIT 101`).bind(root.source_id, configured.connection.expectedSourceInstanceId,
+      ORDER BY client.record_id LIMIT 101`).bind(root.source_id, configured.connection.expectedSourceInstanceId,
         configured.connection.expectedApplicationId, configured.connection.expectedHistoryEpoch, root.public_id, staffId, staffId)
       .all<{ recordId: string; name: unknown }>()).results;
     if (rows.length > 100) return [];

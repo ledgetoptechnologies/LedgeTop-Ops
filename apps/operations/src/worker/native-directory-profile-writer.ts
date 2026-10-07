@@ -118,11 +118,12 @@ function canonicalOrigin(value: unknown): value is string {
   try { const parsed = new URL(value); return parsed.protocol === "https:" && parsed.origin === value; }
   catch { return false; }
 }
-function destination(value: unknown, recordId: string): value is NativeDirectoryDestinationAuthority {
+function destination(value: unknown, recordId: string, operation: "create" | "update"): value is NativeDirectoryDestinationAuthority {
   return plain(value) && exact(value, ["sourceId", "sourceInstanceUUID", "applicationUUID", "historyEpoch", "origin", "externalCanonicalId", "expectedAuthorizationGeneration"])
     && typeof value.sourceId === "string" && SOURCE_ID.test(value.sourceId) && typeof value.sourceInstanceUUID === "string" && UUID.test(value.sourceInstanceUUID)
     && typeof value.applicationUUID === "string" && UUID.test(value.applicationUUID) && typeof value.historyEpoch === "string" && UUID.test(value.historyEpoch)
-    && canonicalOrigin(value.origin) && value.externalCanonicalId === recordId && revision(value.expectedAuthorizationGeneration);
+    && canonicalOrigin(value.origin) && externalId(value.externalCanonicalId)
+    && (operation === "update" || value.externalCanonicalId === recordId) && revision(value.expectedAuthorizationGeneration);
 }
 function normalize(input: NativeDirectoryProfileWrite, allowEmptyDestinations = false): NormalizedWrite | null {
   const normalizedProfile = plain(input.profile) ? Object.fromEntries(Object.entries(input.profile).map(([field, value]) => {
@@ -145,7 +146,7 @@ function normalize(input: NativeDirectoryProfileWrite, allowEmptyDestinations = 
       || (input.operation === "create" ? input.relationship.expectedRelationshipVersion !== 0 : input.relationship.expectedRelationshipVersion < 1)))
     || !profile(normalizedProfile, input.kind, input.operation) || !Array.isArray(input.destinations)
     || input.destinations.length < (allowEmptyDestinations ? 0 : 1) || input.destinations.length > MAX_DESTINATIONS
-    || !input.destinations.every(value => destination(value, input.recordId))) return null;
+    || !input.destinations.every(value => destination(value, input.recordId, input.operation))) return null;
   const scopes = input.operation === "create" ? input.scopes : [];
   if (!Array.isArray(scopes) || scopes.length < (input.operation === "create" ? 1 : 0) || scopes.length > MAX_SCOPES
     || !scopes.every(value => plain(value) && exact(value, ["businessAreaId", "divisionId"])
@@ -206,13 +207,18 @@ function auditCommand(write: NormalizedWrite): string {
     scopes: write.operation === "create" ? write.scopes : null, destinations: write.destinations,
     createAdmissionId: write.createAdmissionId, relationship: write.kind === "client" ? write.relationship : null });
 }
-type RemoteState = Readonly<{ projectAlphaPublicId: string; revision: string; authorizationGeneration: string }>;
+type RemoteState = Readonly<{ externalId: string; projectAlphaPublicId: string; revision: string;
+  authorizationGeneration: string; mappingKind: "legacy" | "acquired" }>;
+export type NativeDirectoryDurableRemoteHead = Readonly<{
+  projectAlphaPublicId: string; externalCanonicalId: string; revision: string;
+}>;
 type RelationshipState = Readonly<{
   organizationRecordId: string | null; organizationRecordVersion: number | null;
   relationshipVersion: number; relationshipMutationId: string;
 }>;
 type RelationshipEvidence = Readonly<{
   evidenceKind: "unlinked" | "parent_intent" | "existing_mapping" | "acquired_mapping";
+  parentExternalCanonicalId: string | null;
   parentPublicId: string | null; parentIntentId: string | null; parentMappingCommandId: string | null;
   parentActivationId: string | null; parentAckRevision: string | null; parentAckCommandJson: string | null;
   parentAckOutcomeJson: string | null;
@@ -224,7 +230,7 @@ async function linkedRelationshipEvidence(db: DirectoryWriteD1, relationship: Re
   destinationValue: NativeDirectoryDestinationAuthority,
   stagedOrganization: StagedOrganization | null = null): Promise<RelationshipEvidence | null> {
   if (relationship.organizationRecordId === null || relationship.organizationRecordVersion === null) return {
-    evidenceKind: "unlinked", parentPublicId: null, parentIntentId: null, parentMappingCommandId: null,
+    evidenceKind: "unlinked", parentExternalCanonicalId: null, parentPublicId: null, parentIntentId: null, parentMappingCommandId: null,
     parentActivationId: null, parentAckRevision: null, parentAckCommandJson: null, parentAckOutcomeJson: null,
   };
   const parentId = relationship.organizationRecordId, parentVersion = relationship.organizationRecordVersion;
@@ -234,42 +240,46 @@ async function linkedRelationshipEvidence(db: DirectoryWriteD1, relationship: Re
       && value.externalCanonicalId === parentId
       && value.expectedAuthorizationGeneration === destinationValue.expectedAuthorizationGeneration);
     return index < 0 ? null : {
-      evidenceKind: "parent_intent", parentPublicId: null,
+      evidenceKind: "parent_intent", parentExternalCanonicalId: parentId, parentPublicId: null,
       parentIntentId: `${stagedOrganization.mutationId}:intent:${index}`, parentMappingCommandId: null,
       parentActivationId: null, parentAckRevision: null, parentAckCommandJson: null, parentAckOutcomeJson: null,
     };
   }
-  const activeRows = (await db.prepare(`SELECT mapping.project_alpha_public_id parentPublicId,mapping.mapping_kind mappingKind,
-      mapping.provenance_id provenanceId
+  const activeRows = (await db.prepare(`SELECT mapping.external_id parentExternalCanonicalId,
+      mapping.project_alpha_public_id parentPublicId,mapping.mapping_kind mappingKind,mapping.provenance_id provenanceId
     FROM project_alpha_active_directory_mappings mapping
-    JOIN operations_directory_records parent ON parent.record_id=mapping.external_id AND parent.record_kind='organization'
+    JOIN operations_directory_records parent ON parent.record_id=mapping.record_id AND parent.record_kind='organization'
       AND parent.current_version=?
     JOIN operations_directory_revisions revision ON revision.record_id=parent.record_id AND revision.version=parent.current_version
     JOIN native_directory_enrollments enrollment ON enrollment.record_id=parent.record_id
     WHERE mapping.source_id=? AND mapping.source_instance_id=? AND mapping.application_id=? AND mapping.history_epoch_id=?
-      AND mapping.resource_type='organization' AND mapping.external_id=?
+      AND mapping.resource_type='organization' AND mapping.record_id=?
       AND EXISTS(SELECT 1 FROM json_each(enrollment.destinations_json) enrolled
         WHERE json_extract(enrolled.value,'$.sourceId')=mapping.source_id
           AND json_extract(enrolled.value,'$.sourceInstanceUUID')=mapping.source_instance_id
           AND json_extract(enrolled.value,'$.applicationUUID')=mapping.application_id
           AND json_extract(enrolled.value,'$.historyEpoch')=mapping.history_epoch_id
           AND json_extract(enrolled.value,'$.origin')=?
-          AND json_extract(enrolled.value,'$.externalCanonicalId')=mapping.external_id)
+          AND (json_extract(enrolled.value,'$.externalCanonicalId')=mapping.external_id
+            OR (mapping.mapping_kind='acquired'
+              AND json_extract(enrolled.value,'$.externalCanonicalId')=mapping.record_id)))
     LIMIT 2`).bind(parentVersion, destinationValue.sourceId, destinationValue.sourceInstanceUUID,
       destinationValue.applicationUUID, destinationValue.historyEpoch, parentId, destinationValue.origin)
-    .all<{ parentPublicId: string; mappingKind: string; provenanceId: string }>()).results;
-  if (activeRows.length !== 1 || !/^[0-9a-f]{32}$/.test(activeRows[0]!.parentPublicId)) return null;
+    .all<{ parentExternalCanonicalId: string; parentPublicId: string; mappingKind: string; provenanceId: string }>()).results;
+  if (activeRows.length !== 1 || !externalId(activeRows[0]!.parentExternalCanonicalId)
+    || !/^[0-9a-f]{32}$/.test(activeRows[0]!.parentPublicId)) return null;
   const active = activeRows[0]!;
   if (active.mappingKind === "acquired") {
     const activation = await db.prepare(`SELECT activation_id parentActivationId,project_alpha_revision parentAckRevision
       FROM project_alpha_existing_directory_binding_activation_receipts
-      WHERE activation_id=? AND source_id=? AND source_instance_id=? AND application_id=? AND history_epoch_id=?
+      WHERE activation_id=? AND record_id=? AND source_id=? AND source_instance_id=? AND application_id=? AND history_epoch_id=?
         AND resource_type='organization' AND external_id=? AND project_alpha_public_id=?`)
-      .bind(active.provenanceId, destinationValue.sourceId, destinationValue.sourceInstanceUUID,
-        destinationValue.applicationUUID, destinationValue.historyEpoch, parentId, active.parentPublicId)
+      .bind(active.provenanceId, parentId, destinationValue.sourceId, destinationValue.sourceInstanceUUID,
+        destinationValue.applicationUUID, destinationValue.historyEpoch, active.parentExternalCanonicalId, active.parentPublicId)
       .first<{ parentActivationId: string; parentAckRevision: string }>();
     return activation && revision(activation.parentAckRevision) ? {
-      evidenceKind: "acquired_mapping", parentPublicId: active.parentPublicId, parentIntentId: null,
+      evidenceKind: "acquired_mapping", parentExternalCanonicalId: active.parentExternalCanonicalId,
+      parentPublicId: active.parentPublicId, parentIntentId: null,
       parentMappingCommandId: null, parentActivationId: activation.parentActivationId,
       parentAckRevision: activation.parentAckRevision, parentAckCommandJson: null, parentAckOutcomeJson: null,
     } : null;
@@ -300,10 +310,12 @@ async function linkedRelationshipEvidence(db: DirectoryWriteD1, relationship: Re
       AND json_extract(outbox.outcome_json,'$.response.result.resource.type')='organization'
       AND json_extract(outbox.outcome_json,'$.response.result.resource.id')=intent.external_canonical_id
     LIMIT 2`).bind(parentId, parentVersion, destinationValue.sourceId, destinationValue.sourceInstanceUUID,
-      destinationValue.applicationUUID, destinationValue.historyEpoch, destinationValue.origin, parentId, active.parentPublicId)
+      destinationValue.applicationUUID, destinationValue.historyEpoch, destinationValue.origin,
+      active.parentExternalCanonicalId, active.parentPublicId)
     .all<{ parentIntentId: string; parentPublicId: string }>()).results;
   if (parentIntents.length === 1) return {
-    evidenceKind: "parent_intent", parentPublicId: parentIntents[0]!.parentPublicId,
+    evidenceKind: "parent_intent", parentExternalCanonicalId: active.parentExternalCanonicalId,
+    parentPublicId: parentIntents[0]!.parentPublicId,
     parentIntentId: parentIntents[0]!.parentIntentId, parentMappingCommandId: null, parentActivationId: null,
     parentAckRevision: null, parentAckCommandJson: null, parentAckOutcomeJson: null,
   };
@@ -326,26 +338,42 @@ async function linkedRelationshipEvidence(db: DirectoryWriteD1, relationship: Re
       AND json_extract(outbox.outcome_json,'$.response.result.resource.id')=mapping.external_id
       AND json_extract(outbox.outcome_json,'$.response.result.data.publicId')=mapping.project_alpha_public_id`)
     .bind(destinationValue.sourceId, destinationValue.sourceInstanceUUID, destinationValue.applicationUUID,
-      destinationValue.historyEpoch, parentId, active.parentPublicId, destinationValue.origin)
+      destinationValue.historyEpoch, active.parentExternalCanonicalId, active.parentPublicId, destinationValue.origin)
     .first<{ parentMappingCommandId: string; parentPublicId: string; parentAckRevision: string;
       parentAckCommandJson: string; parentAckOutcomeJson: string }>();
   return legacy && revision(legacy.parentAckRevision) ? {
-    evidenceKind: "existing_mapping", parentPublicId: legacy.parentPublicId, parentIntentId: null,
+    evidenceKind: "existing_mapping", parentExternalCanonicalId: active.parentExternalCanonicalId,
+    parentPublicId: legacy.parentPublicId, parentIntentId: null,
     parentMappingCommandId: legacy.parentMappingCommandId, parentActivationId: null,
     parentAckRevision: legacy.parentAckRevision, parentAckCommandJson: legacy.parentAckCommandJson,
     parentAckOutcomeJson: legacy.parentAckOutcomeJson,
   } : null;
 }
-async function updateRemoteState(db: DirectoryWriteD1, write: NormalizedWrite, destinationValue: NativeDirectoryDestinationAuthority): Promise<RemoteState | null> {
+async function updateRemoteState(db: DirectoryWriteD1,
+  write: Pick<NormalizedWrite, "kind" | "recordId" | "expectedLocalVersion">,
+  destinationValue: DestinationIdentity & Readonly<{ expectedAuthorizationGeneration?: string }>,
+  allowAcquiredEnrollmentCoordinate = false,
+): Promise<RemoteState | null> {
+  const activeRows = (await db.prepare(`SELECT external_id externalId,project_alpha_public_id projectAlphaPublicId,
+      mapping_kind mappingKind,provenance_id provenanceId
+    FROM project_alpha_active_directory_mappings WHERE source_id=? AND source_instance_id=? AND application_id=? AND history_epoch_id=?
+      AND resource_type=? AND record_id=?`).bind(destinationValue.sourceId, destinationValue.sourceInstanceUUID,
+      destinationValue.applicationUUID, destinationValue.historyEpoch, write.kind, write.recordId)
+    .all<Record<string, unknown>>()).results;
+  if (activeRows.length !== 1) return null;
+  const active = activeRows[0]!;
+  if (!externalId(active.externalId) || typeof active.projectAlphaPublicId !== "string"
+    || !/^[0-9a-f]{32}$/.test(active.projectAlphaPublicId)
+    || (active.mappingKind !== "legacy" && active.mappingKind !== "acquired")) return null;
+  const exactExternalCoordinate = destinationValue.externalCanonicalId === active.externalId;
+  const acquiredEnrollmentCoordinate = allowAcquiredEnrollmentCoordinate && active.mappingKind === "acquired"
+    && destinationValue.externalCanonicalId === write.recordId;
+  if (!exactExternalCoordinate && !acquiredEnrollmentCoordinate) return null;
   const pending = await db.prepare(`SELECT 1 present FROM project_alpha_directory_outbox WHERE source_id=? AND expected_source_instance_id=?
     AND application_id=? AND expected_history_epoch_id=? AND resource_type=? AND external_id=? AND state<>'acknowledged' LIMIT 1`)
-    .bind(destinationValue.sourceId, destinationValue.sourceInstanceUUID, destinationValue.applicationUUID, destinationValue.historyEpoch, write.kind, write.recordId).first();
+    .bind(destinationValue.sourceId, destinationValue.sourceInstanceUUID, destinationValue.applicationUUID,
+      destinationValue.historyEpoch, write.kind, active.externalId).first();
   if (pending) return null;
-  const active = await db.prepare(`SELECT project_alpha_public_id projectAlphaPublicId,mapping_kind mappingKind,provenance_id provenanceId
-    FROM project_alpha_active_directory_mappings WHERE source_id=? AND source_instance_id=? AND application_id=? AND history_epoch_id=?
-      AND resource_type=? AND external_id=?`).bind(destinationValue.sourceId, destinationValue.sourceInstanceUUID,
-      destinationValue.applicationUUID, destinationValue.historyEpoch, write.kind, write.recordId).first<Record<string, unknown>>();
-  if (!active || typeof active.projectAlphaPublicId !== "string" || !/^[0-9a-f]{32}$/.test(active.projectAlphaPublicId)) return null;
   if (active.mappingKind === "acquired") {
     // An acquired mapping is never copied into the legacy mapping table. After
     // its first native profile update, the exact acknowledged writer intent is
@@ -373,24 +401,35 @@ async function updateRemoteState(db: DirectoryWriteD1, write: NormalizedWrite, d
         AND json_extract(outbox.outcome_json,'$.response.result.resource.publicId')=?
       ORDER BY outbox.created_at DESC,outbox.command_id DESC LIMIT 1`).bind(write.recordId, write.expectedLocalVersion,
         destinationValue.sourceId, destinationValue.sourceInstanceUUID, destinationValue.applicationUUID, destinationValue.historyEpoch,
-        destinationValue.origin, write.recordId, write.kind, active.projectAlphaPublicId, write.kind, active.projectAlphaPublicId)
+        destinationValue.origin, active.externalId, write.kind, active.projectAlphaPublicId, write.kind, active.projectAlphaPublicId)
       .first<Record<string, unknown>>();
     if (delivered) return revision(delivered.revision) && revision(delivered.authorizationGeneration)
-      && delivered.authorizationGeneration === destinationValue.expectedAuthorizationGeneration
-      ? { projectAlphaPublicId: active.projectAlphaPublicId, revision: delivered.revision, authorizationGeneration: delivered.authorizationGeneration } : null;
+      && (destinationValue.expectedAuthorizationGeneration === undefined
+        || delivered.authorizationGeneration === destinationValue.expectedAuthorizationGeneration)
+      ? { externalId: active.externalId, projectAlphaPublicId: active.projectAlphaPublicId,
+          revision: delivered.revision, authorizationGeneration: delivered.authorizationGeneration, mappingKind: "acquired" } : null;
     const refreshed = await db.prepare(`SELECT live_revision revision,authorization_generation authorizationGeneration
       FROM project_alpha_existing_directory_binding_revision_refresh_receipts WHERE record_id=? AND source_id=?
         AND source_instance_id=? AND application_id=? AND history_epoch_id=? AND resource_type=? AND external_id=?
         AND project_alpha_public_id=? AND local_record_version=? ORDER BY received_at DESC,receipt_id DESC LIMIT 1`).bind(write.recordId, destinationValue.sourceId,
-        destinationValue.sourceInstanceUUID, destinationValue.applicationUUID, destinationValue.historyEpoch, write.kind, write.recordId,
+        destinationValue.sourceInstanceUUID, destinationValue.applicationUUID, destinationValue.historyEpoch, write.kind, active.externalId,
         active.projectAlphaPublicId, write.expectedLocalVersion).first<Record<string, unknown>>();
-    if (refreshed) return revision(refreshed.revision) && refreshed.authorizationGeneration === destinationValue.expectedAuthorizationGeneration
-      ? { projectAlphaPublicId: active.projectAlphaPublicId, revision: refreshed.revision, authorizationGeneration: destinationValue.expectedAuthorizationGeneration } : null;
+    if (refreshed) return revision(refreshed.revision) && revision(refreshed.authorizationGeneration)
+      && (destinationValue.expectedAuthorizationGeneration === undefined
+        || refreshed.authorizationGeneration === destinationValue.expectedAuthorizationGeneration)
+      ? { externalId: active.externalId, projectAlphaPublicId: active.projectAlphaPublicId,
+          revision: refreshed.revision, authorizationGeneration: refreshed.authorizationGeneration, mappingKind: "acquired" } : null;
     const activated = await db.prepare(`SELECT project_alpha_revision revision FROM project_alpha_existing_directory_binding_activation_receipts
-      WHERE activation_id=? AND record_id=? AND local_record_version=?`).bind(active.provenanceId, write.recordId, write.expectedLocalVersion)
+      WHERE activation_id=? AND record_id=? AND source_id=? AND source_instance_id=? AND application_id=? AND history_epoch_id=?
+        AND resource_type=? AND external_id=? AND project_alpha_public_id=? AND local_record_version=?`)
+      .bind(active.provenanceId, write.recordId, destinationValue.sourceId, destinationValue.sourceInstanceUUID,
+        destinationValue.applicationUUID, destinationValue.historyEpoch, write.kind, active.externalId,
+        active.projectAlphaPublicId, write.expectedLocalVersion)
       .first<Record<string, unknown>>();
     return activated && revision(activated.revision)
-      ? { projectAlphaPublicId: active.projectAlphaPublicId, revision: activated.revision, authorizationGeneration: destinationValue.expectedAuthorizationGeneration } : null;
+      ? { externalId: active.externalId, projectAlphaPublicId: active.projectAlphaPublicId,
+          revision: activated.revision, authorizationGeneration: destinationValue.expectedAuthorizationGeneration ?? "",
+          mappingKind: "acquired" } : null;
   }
   const row = await db.prepare(`SELECT mapping.project_alpha_public_id projectAlphaPublicId,
       json_extract(outbox.outcome_json,'$.response.result.resource.revision') revision,
@@ -402,10 +441,13 @@ async function updateRemoteState(db: DirectoryWriteD1, write: NormalizedWrite, d
     WHERE mapping.source_id=? AND mapping.source_instance_id=? AND mapping.application_id=? AND mapping.history_epoch_id=?
       AND mapping.resource_type=? AND mapping.external_id=? AND outbox.state='acknowledged'
     ORDER BY outbox.created_at DESC,outbox.command_id DESC LIMIT 1`).bind(destinationValue.sourceId, destinationValue.sourceInstanceUUID,
-      destinationValue.applicationUUID, destinationValue.historyEpoch, write.kind, write.recordId).first<Record<string, unknown>>();
+      destinationValue.applicationUUID, destinationValue.historyEpoch, write.kind, active.externalId).first<Record<string, unknown>>();
   if (row && row.projectAlphaPublicId === active.projectAlphaPublicId
-    && revision(row.revision) && revision(row.authorizationGeneration) && row.authorizationGeneration === destinationValue.expectedAuthorizationGeneration
-    ) return { projectAlphaPublicId: row.projectAlphaPublicId, revision: row.revision, authorizationGeneration: row.authorizationGeneration };
+    && revision(row.revision) && revision(row.authorizationGeneration)
+    && (destinationValue.expectedAuthorizationGeneration === undefined
+      || row.authorizationGeneration === destinationValue.expectedAuthorizationGeneration)
+    ) return { externalId: active.externalId, projectAlphaPublicId: row.projectAlphaPublicId,
+      revision: row.revision, authorizationGeneration: row.authorizationGeneration, mappingKind: "legacy" };
   if (write.kind !== "client") return null;
   const relationship = await db.prepare(`SELECT
       json_extract(outbox.outcome_json,'$.response.result.client.publicId') projectAlphaPublicId,
@@ -429,9 +471,22 @@ async function updateRemoteState(db: DirectoryWriteD1, write: NormalizedWrite, d
       destinationValue.applicationUUID,destinationValue.historyEpoch,destinationValue.origin).first<Record<string, unknown>>();
   return relationship && relationship.projectAlphaPublicId === active.projectAlphaPublicId
     && revision(relationship.revision) && revision(relationship.authorizationGeneration)
-    && relationship.authorizationGeneration === destinationValue.expectedAuthorizationGeneration
-    ? { projectAlphaPublicId: relationship.projectAlphaPublicId, revision: relationship.revision,
-      authorizationGeneration: relationship.authorizationGeneration } : null;
+    && (destinationValue.expectedAuthorizationGeneration === undefined
+      || relationship.authorizationGeneration === destinationValue.expectedAuthorizationGeneration)
+    ? { externalId: active.externalId, projectAlphaPublicId: relationship.projectAlphaPublicId, revision: relationship.revision,
+      authorizationGeneration: relationship.authorizationGeneration, mappingKind: "legacy" } : null;
+}
+
+/** Resolves only durable/local acknowledgement evidence for an existing PA
+ * record. HTTP routes independently bind the returned revision to a fresh,
+ * authenticated PA read before issuing an update. */
+export async function readNativeDirectoryDurableRemoteHead(db: DirectoryWriteD1,
+  kind: NativeDirectoryProfileKind, recordId: string, expectedLocalVersion: number,
+  destinationValue: DestinationIdentity,
+): Promise<NativeDirectoryDurableRemoteHead | null> {
+  const state = await updateRemoteState(db, { kind, recordId, expectedLocalVersion }, destinationValue, true);
+  return state ? { projectAlphaPublicId: state.projectAlphaPublicId,
+    externalCanonicalId: state.externalId, revision: state.revision } : null;
 }
 
 /**
@@ -531,9 +586,24 @@ async function planNativeDirectoryProfileWriteInternal(db: DirectoryWriteD1, inp
   if (write.operation === "update") {
     const enrollment = await db.prepare(`SELECT destinations_json FROM native_directory_enrollments WHERE record_id=?`).bind(write.recordId).first<{ destinations_json: string }>();
     try { enrolled = enrollment ? JSON.parse(enrollment.destinations_json) as DestinationIdentity[] : []; } catch { enrolled = []; }
-    const requested = write.destinations.map(identity);
-    if (JSON.stringify(enrolled) !== JSON.stringify(requested)) return { status: "blocked", reason: "enrollment_drift" };
-    for (const value of write.destinations) { const state = await updateRemoteState(db, write, value); if (!state) return { status: "blocked", reason: "mapping_or_delivery_state" }; remote.set(destinationKey(value), state); }
+    const decisionScopedLocalUpdate = stagedOnboardingDecisionId !== null && write.destinations.length === 0;
+    if (!Array.isArray(enrolled) || enrolled.length !== write.destinations.length
+      || (enrolled.length < 1 && !decisionScopedLocalUpdate) || enrolled.length > 16)
+      return { status: "blocked", reason: "enrollment_drift" };
+    for (const value of write.destinations) {
+      const snapshot = enrolled.find(item => destinationKey(item) === destinationKey(value));
+      if (!snapshot || snapshot.historyEpoch !== value.historyEpoch || snapshot.origin !== value.origin)
+        return { status: "blocked", reason: "enrollment_drift" };
+      const state = await updateRemoteState(db, write, value);
+      if (!state) return { status: "blocked", reason: "mapping_or_delivery_state" };
+      // The immutable enrollment keeps the original Ops identity. Only a
+      // currently active acquired mapping may resolve that snapshot to a
+      // distinct PA external ID; legacy mappings still require exact equality.
+      if (snapshot.externalCanonicalId !== value.externalCanonicalId
+        && !(state.mappingKind === "acquired" && snapshot.externalCanonicalId === write.recordId))
+        return { status: "blocked", reason: "enrollment_drift" };
+      remote.set(destinationKey(value), state);
+    }
   }
   const relationshipEvidence = new Map<string, RelationshipEvidence>();
   if (relationshipState) {
@@ -563,19 +633,20 @@ async function planNativeDirectoryProfileWriteInternal(db: DirectoryWriteD1, inp
   write.destinations.forEach((value, index) => {
     const intentId = `${write.mutationId}:intent:${index}`, state = remote.get(destinationKey(value));
     const evidence = relationshipEvidence.get(destinationKey(value));
+    const externalCanonicalId = state?.externalId ?? value.externalCanonicalId;
     const fields = write.kind === "client" ? { ...write.profile, organizationPublicId: evidence?.parentPublicId ?? null } : write.profile;
     const materialized = write.operation === "create"
       ? { operation: "create", commandId: commandIds[index], resourceType: write.kind, externalId: write.recordId, expectedRevision: "0",
           expectedAuthorizationGeneration: value.expectedAuthorizationGeneration, fields, scopes: write.scopes }
-      : { operation: "update", commandId: commandIds[index], resourceType: write.kind, externalId: write.recordId,
+      : { operation: "update", commandId: commandIds[index], resourceType: write.kind, externalId: state!.externalId,
           expectedProjectAlphaPublicId: state!.projectAlphaPublicId, expectedRevision: state!.revision,
           expectedAuthorizationGeneration: state!.authorizationGeneration, fields };
-    const disposition = { kind: write.operation === "create" ? "authorized_create" : "existing", ...identity(value),
+    const disposition = { kind: write.operation === "create" ? "authorized_create" : "existing", ...identity(value), externalCanonicalId,
       ...(state ? { projectAlphaPublicId: state.projectAlphaPublicId, projectAlphaRevision: state.revision } : {}) };
     statements.push(db.prepare(`INSERT INTO operations_directory_intents(intent_id,mutation_id,record_id,record_version,source_id,source_instance_uuid,
       application_uuid,destination_origin,external_canonical_id,desired_payload_json,expected_history_epoch_id,state)
       VALUES(?,?,?,?,?,?,?,?,?,?,?,'waiting')`).bind(intentId, write.mutationId, write.recordId, nextVersion, value.sourceId,
-      value.sourceInstanceUUID, value.applicationUUID, value.origin, value.externalCanonicalId, profileJson, value.historyEpoch));
+      value.sourceInstanceUUID, value.applicationUUID, value.origin, externalCanonicalId, profileJson, value.historyEpoch));
     if (evidence?.evidenceKind !== "parent_intent" || evidence.parentPublicId !== null) {
       materializations.push(db.prepare(`UPDATE operations_directory_intents SET state='ready' WHERE intent_id=? AND state='waiting'`).bind(intentId));
       materializations.push(db.prepare(`INSERT INTO operations_directory_materializations(intent_id,command_id,command_json,origin_snapshot_json,disposition_json,next_attempt_at,history_epoch_id)
@@ -608,7 +679,7 @@ async function planNativeDirectoryProfileWriteInternal(db: DirectoryWriteD1, inp
         .bind(`${write.mutationId}:intent:${index}`, write.recordId, nextVersion, relationshipState!.relationshipVersion,
           relationshipState!.relationshipMutationId, relationshipState!.organizationRecordId, relationshipState!.organizationRecordVersion,
           value.sourceId, value.sourceInstanceUUID, value.applicationUUID, value.historyEpoch, value.origin,
-          relationshipState!.organizationRecordId, evidence.evidenceKind, evidence.parentIntentId, evidence.parentMappingCommandId,
+          evidence.parentExternalCanonicalId, evidence.evidenceKind, evidence.parentIntentId, evidence.parentMappingCommandId,
           evidence.parentActivationId, evidence.evidenceKind === "parent_intent" ? null : evidence.parentPublicId, evidence.parentAckRevision,
           evidence.parentAckCommandJson, evidence.parentAckOutcomeJson));
     });

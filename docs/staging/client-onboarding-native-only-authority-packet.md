@@ -2,8 +2,8 @@
 
 Status: **local validation and live synthetic provision/revoke rehearsal passed**.
 The replaced initial draft failed its seven tests. The schema-version-2
-replacement's current fixture is pinned to the complete 171-migration schema
-ending at `0171_project_alpha_active_directory_update_guard.sql`. Its 26-case
+replacement's current fixture is pinned to the complete 180-migration schema
+ending at `0180_project_alpha_project_v2_recovery_authorization.sql`. Its 26-case
 suite includes failures after a real grant write and trigger-generated history.
 The live rehearsal temporarily issued and then revoked exactly the two approved
 synthetic-area grants. This is not evidence of full live portal acceptance.
@@ -22,8 +22,8 @@ IDs are derived with `nativeOnlyGrantIds(staffId, businessAreaId, approvalId)`.
 `priorProvision` is null for provision and contains the exact original immutable
 approval and receipt for revoke.
 
-The compiler pins all 171 migration names and source-content hashes through
-`0171_project_alpha_active_directory_update_guard.sql`. The
+The compiler pins all 180 migration names and source-content hashes through
+`0180_project_alpha_project_v2_recovery_authorization.sql`. The
 transaction verifies exact applied-migration name equality, full native
 admission/profile/generation rows, and complete per-staff grant/history sets in
 both directions. Prior grant rows and the entire history prefix are unchanged.
@@ -81,8 +81,8 @@ trigger-injected post-write active-work fence with complete rollback.
 Before the live rehearsal, read-only staging inspection on 2026-10-02 confirmed
 the complete then-current applied ledger and zero `staging-native-only-`
 business areas. The current compiler has since been refreshed and now requires
-the exact 171-migration ledger through
-`0171_project_alpha_active_directory_update_guard.sql`. The dedicated binding configuration
+the exact 180-migration ledger through
+`0180_project_alpha_project_v2_recovery_authorization.sql`. The dedicated binding configuration
 contains only the pinned staging account, Worker name, and `OPS_DB` database;
 no production resources or application secrets. A synthetic area had to be
 explicitly selected and created before provision. No staging grant was issued
@@ -90,8 +90,8 @@ by this inspection.
 
 The runner passed 19 local tests and its historical live read-only status check
 returned the expected staging database with its complete then-current ledger.
-Before any new use, status must return the compiler's exact 171 migrations ending
-at `0171_project_alpha_active_directory_update_guard.sql`. Its CLI is
+Before any new use, status must return the compiler's exact 180 migrations ending
+at `0180_project_alpha_project_v2_recovery_authorization.sql`. Its CLI is
 read-only; writes are available only through the reviewed module helper. It
 validates the complete minimal regular JSON configuration before and after
 opening Wrangler's remote binding, refuses extra/production resources, suppresses
@@ -150,8 +150,8 @@ two scoped grants while exercising onboarding, without changing the compiler or
 its authority predicates. Twenty-five focused tests passed independently, including
 real local D1 evaluated guards, insert CAS and post-insert rollback.
 
-- `prepare` requires the exact staging binding and reviewed 171-migration ledger
-  ending at `0171_project_alpha_active_directory_update_guard.sql`.
+- `prepare` requires the exact staging binding and reviewed 180-migration ledger
+  ending at `0180_project_alpha_project_v2_recovery_authorization.sql`.
   It creates only an explicitly selected `staging-native-only-` area, in a guarded
   atomic batch, and rejects existing references or differing area state.
   Discovery excludes only D1's documented reserved `_cf_KV` table, not an
@@ -170,7 +170,7 @@ real local D1 evaluated guards, insert CAS and post-insert rollback.
   durable audit history; never delete them to make another provision pass.
 
 ```text
-node scripts/staging-native-authority-window.mjs prepare --config apps/operations/wrangler.staging.native-authority-binding.json --area-id staging-native-only-portal-acceptance-20261002-window-2 --area-name "Synthetic portal acceptance — 2026-10-02 window 2"
+node scripts/staging-native-authority-window.mjs prepare --config apps/operations/wrangler.staging.native-authority-binding.json --area-id staging-native-only-portal-acceptance-20261002-window-2 --area-name "Synthetic portal acceptance — 2026-10-02 window 2" --confirm-staging-synthetic-area-create
 node scripts/staging-native-authority-window.mjs open --config apps/operations/wrangler.staging.native-authority-binding.json --area-id staging-native-only-portal-acceptance-20261002-window-2 --area-name "Synthetic portal acceptance — 2026-10-02 window 2" --window-minutes 60
 node scripts/staging-native-authority-window.mjs close --config apps/operations/wrangler.staging.native-authority-binding.json --recover .backups/staging-native-authority/<approval-id>/provision.json
 ```
@@ -192,8 +192,8 @@ claimed by the local test result or these example commands.
 - Focused owner HTTP and workspace/folder retry regressions passed 26/26, and
   client API regressions passed 5/5. The six real-D1 folder service cases passed
   against the complete canonical chain current at the time. That historical run
-  is not evidence for the present 171-migration chain through
-  `0171_project_alpha_active_directory_update_guard.sql`. The Operations
+  is not evidence for the present 180-migration chain through
+  `0180_project_alpha_project_v2_recovery_authorization.sql`. The Operations
   TypeScript check and local build passed. Independent review found no remaining
   code blocker after old-division authority, monotonic confirmation and retry
   selection fixes. The build reported its existing large-client-chunk warning.

@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 import { Miniflare } from "miniflare";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { SqlScope } from "../src/worker/acl";
@@ -35,7 +36,8 @@ function table(migration: string, name: string): string {
 }
 async function fixture() {
   const mf = new Miniflare({ compatibilityDate: "2026-08-06", modules: true,
-    script: "export default { fetch(){return new Response('ok')} }", d1Databases: { OPS_DB: "business-project-detail" } });
+    script: "export default { fetch(){return new Response('ok')} }",
+    d1Databases: { OPS_DB: `business-project-detail-${randomUUID()}` }, d1Persist: "./.tmp-checks/portal-d1" });
   active.push(mf);
   const db = await mf.getD1Database("OPS_DB") as unknown as D1Database;
   await applyConnectorSchema(db);
@@ -74,6 +76,7 @@ describe("read-only source-qualified business project detail", () => {
   it("lists and opens an activated canonical project by its Ops ID when every PA identity differs", async () => {
     const { db, env } = await fixture();
     const opsRoot = "ops-org-9", paInternalRoot = "org-a", paPublicRoot = "1".repeat(32);
+    const opsClient = "ops-client-9", paPublicClient = "6".repeat(32);
     const opsProject = "ops-project-77", paPublicProject = "2".repeat(32), revision = "7", projection = "a".repeat(64);
     await sql(db, `CREATE TABLE operations_directory_records(record_id TEXT PRIMARY KEY,record_kind TEXT);
       CREATE TABLE active_mapping_rows(source_id TEXT,resource_type TEXT,record_id TEXT,external_id TEXT,project_alpha_public_id TEXT,
@@ -88,7 +91,9 @@ describe("read-only source-qualified business project detail", () => {
         planned_start TEXT,planned_end TEXT,organization_record_id TEXT,client_record_id TEXT,scopes_json TEXT,description TEXT,
         completed_at TEXT,archived INTEGER,archived_at TEXT,canonical_projection_sha256 TEXT,overdue_warning INTEGER,created_at TEXT);
       CREATE TABLE operations_shared_project_revisions(external_project_id TEXT,version INTEGER,pa_revision TEXT,read_json TEXT,
-        refresh_command_id TEXT,v2_settlement_id TEXT);
+        refresh_command_id TEXT,v2_settlement_id TEXT,inbound_resolution_id TEXT);
+      CREATE TABLE project_alpha_project_inbound_resolution_receipts(resolution_id TEXT,decision TEXT,
+        prior_local_version INTEGER,resulting_local_version INTEGER);
       CREATE TABLE project_alpha_api_v2_inventory_conflicts(source_id TEXT,source_instance_id TEXT,application_id TEXT,
         history_epoch_id TEXT,inventory_kind TEXT,project_alpha_public_id TEXT,external_id TEXT);
       CREATE TABLE project_alpha_api_v2_project_observations_current(source_id TEXT,source_instance_id TEXT,application_id TEXT,
@@ -99,20 +104,25 @@ describe("read-only source-qualified business project detail", () => {
       application_id: "00000000-0000-4000-8000-000000000002", history_epoch_id: "00000000-0000-4000-8000-000000000003" };
     await db.batch([
       db.prepare("INSERT INTO operations_directory_records VALUES(?, 'organization')").bind(opsRoot),
+      db.prepare("INSERT INTO operations_directory_records VALUES(?, 'client')").bind(opsClient),
+      db.prepare("INSERT INTO operations_directory_client_organizations VALUES(?,?)").bind(opsClient, opsRoot),
       db.prepare("UPDATE pa_organizations SET payload_json=? WHERE id=?").bind(JSON.stringify({ public_id: paPublicRoot }), paInternalRoot),
+      db.prepare("UPDATE pa_clients SET payload_json=? WHERE id='client-a'").bind(JSON.stringify({ public_id: paPublicClient })),
       db.prepare(`INSERT INTO active_mapping_rows VALUES(?,?,?,?,?,?,?,?)`).bind(identity.source_id, "organization",
         opsRoot, paInternalRoot, paPublicRoot, identity.source_instance_id, identity.application_id, identity.history_epoch_id),
+      db.prepare(`INSERT INTO active_mapping_rows VALUES(?,?,?,?,?,?,?,?)`).bind(identity.source_id, "client",
+        opsClient, "client-a", paPublicClient, identity.source_instance_id, identity.application_id, identity.history_epoch_id),
       db.prepare(`INSERT INTO project_alpha_project_mappings VALUES(?,?,?,?,?,?)`).bind(opsProject, ...Object.values(identity), paPublicProject),
       db.prepare(`INSERT INTO project_alpha_project_v2_canonical_activation_receipts VALUES(?,?,?,?)`)
-        .bind(opsProject, 1, opsRoot, null),
+        .bind(opsProject, 1, opsRoot, opsClient),
       db.prepare(`INSERT INTO operations_shared_projects VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(
         opsProject, ...Object.values(identity), paPublicProject, revision, 1, "Shared project", "active", "2026-04-01", null,
-        opsRoot, null, "[]", "Canonical description", null, 0, null, projection, 0, "2026-04-01T00:00:00.000Z"),
-      db.prepare(`INSERT INTO operations_shared_project_revisions VALUES(?,?,NULL,?,NULL,?)`).bind(opsProject, 1,
+        opsRoot, opsClient, "[]", "Canonical description", null, 0, null, projection, 0, "2026-04-01T00:00:00.000Z"),
+      db.prepare(`INSERT INTO operations_shared_project_revisions VALUES(?,?,NULL,?,NULL,?,NULL)`).bind(opsProject, 1,
         JSON.stringify({ apiVersion: "2", sourceInstanceId: identity.source_instance_id, applicationId: identity.application_id,
           historyEpoch: identity.history_epoch_id, resource: { type: "project", id: paPublicProject, revision,
             projectionSha256: projection }, data: { name: "Shared project", description: "Canonical description", status: "active",
-            archived: false, overdueWarning: false, estimatedStart: "2026-04-01", estimatedEnd: null, clientPublicId: null,
+            archived: false, overdueWarning: false, estimatedStart: "2026-04-01", estimatedEnd: null, clientPublicId: paPublicClient,
             organizationPublicId: paPublicRoot } }), "settlement-a"),
     ]);
     const mapped = context("organization", opsRoot);
@@ -178,6 +188,44 @@ describe("read-only source-qualified business project detail", () => {
     expect(await recheckCanonicalClientHubProjects(env, mapped, currentPolicy, [opsProject], "completed")).toBe(false);
     expect(await recheckCanonicalClientHubProjects(env, mapped, currentPolicy, [opsProject], "cancelled")).toBe(false);
 
+    // Rebinding the same Ops owner record to another PA public ID must not
+    // move the old accepted project into the newly mapped organization root.
+    const reboundOrgPublic = "7".repeat(32), reboundClientPublic = "8".repeat(32);
+    await db.batch([
+      db.prepare("UPDATE pa_organizations SET payload_json=? WHERE id=?").bind(JSON.stringify({ public_id: reboundOrgPublic }), paInternalRoot),
+      db.prepare(`UPDATE active_mapping_rows SET project_alpha_public_id=? WHERE resource_type='organization' AND record_id=?`)
+        .bind(reboundOrgPublic, opsRoot),
+    ]);
+    const reboundOrganization = context("organization", opsRoot);
+    reboundOrganization.root.pa_internal_id = paInternalRoot;
+    reboundOrganization.root.pa_public_id = reboundOrgPublic;
+    reboundOrganization.root.mapping_status = "mapped";
+    expect((await listClientHubBusinessProjects(env, staff, reboundOrganization)).items
+      .some(item => item.id === opsProject && item.origin === "canonical")).toBe(false);
+    expect(await recheckCanonicalClientHubProjects(env, reboundOrganization, currentPolicy, [opsProject], "all")).toBe(false);
+    await expect(readClientHubBusinessProjectDetail(env, staff, reboundOrganization, opsProject, { origin: "canonical" }))
+      .rejects.toMatchObject({ status: 404 });
+    await db.batch([
+      db.prepare("UPDATE pa_organizations SET payload_json=? WHERE id=?").bind(JSON.stringify({ public_id: paPublicRoot }), paInternalRoot),
+      db.prepare(`UPDATE active_mapping_rows SET project_alpha_public_id=? WHERE resource_type='organization' AND record_id=?`)
+        .bind(paPublicRoot, opsRoot),
+      db.prepare("UPDATE pa_clients SET payload_json=? WHERE id='client-a'").bind(JSON.stringify({ public_id: reboundClientPublic })),
+      db.prepare(`UPDATE active_mapping_rows SET project_alpha_public_id=? WHERE resource_type='client' AND record_id=?`)
+        .bind(reboundClientPublic, opsClient),
+    ]);
+    expect((await listClientHubBusinessProjects(env, staff, mapped)).items
+      .some(item => item.id === opsProject && item.origin === "canonical")).toBe(false);
+    expect(await recheckCanonicalClientHubProjects(env, mapped, currentPolicy, [opsProject], "all")).toBe(false);
+    await expect(readClientHubBusinessProjectDetail(env, staff, mapped, opsProject, { origin: "canonical" }))
+      .rejects.toMatchObject({ status: 404 });
+    await db.batch([
+      db.prepare("UPDATE pa_clients SET payload_json=? WHERE id='client-a'").bind(JSON.stringify({ public_id: paPublicClient })),
+      db.prepare(`UPDATE active_mapping_rows SET project_alpha_public_id=? WHERE resource_type='client' AND record_id=?`)
+        .bind(paPublicClient, opsClient),
+    ]);
+    expect((await listClientHubBusinessProjects(env, staff, mapped)).items
+      .some(item => item.id === opsProject && item.origin === "canonical")).toBe(true);
+
     // A self-consistent canonical head from a retired producer identity must
     // not be released through a root whose active mapping belongs to the
     // currently configured producer identity.
@@ -192,7 +240,7 @@ describe("read-only source-qualified business project detail", () => {
         JSON.stringify({ apiVersion: "2", sourceInstanceId: retired.source_instance_id, applicationId: retired.application_id,
           historyEpoch: retired.history_epoch_id, resource: { type: "project", id: paPublicProject, revision,
             projectionSha256: projection }, data: { name: "Shared project", description: "Canonical description", status: "active",
-            archived: false, overdueWarning: false, estimatedStart: "2026-04-01", estimatedEnd: null, clientPublicId: null,
+            archived: false, overdueWarning: false, estimatedStart: "2026-04-01", estimatedEnd: null, clientPublicId: paPublicClient,
             organizationPublicId: paPublicRoot } }), opsProject),
     ]);
     expect((await listClientHubBusinessProjects(env, staff, mapped)).items.some(item => item.id === opsProject && item.origin === "canonical")).toBe(false);
@@ -206,7 +254,7 @@ describe("read-only source-qualified business project detail", () => {
         JSON.stringify({ apiVersion: "2", sourceInstanceId: identity.source_instance_id, applicationId: identity.application_id,
           historyEpoch: identity.history_epoch_id, resource: { type: "project", id: paPublicProject, revision,
             projectionSha256: projection }, data: { name: "Shared project", description: "Canonical description", status: "active",
-            archived: false, overdueWarning: false, estimatedStart: "2026-04-01", estimatedEnd: null, clientPublicId: null,
+            archived: false, overdueWarning: false, estimatedStart: "2026-04-01", estimatedEnd: null, clientPublicId: paPublicClient,
             organizationPublicId: paPublicRoot } }), opsProject),
     ]);
     expect((await listClientHubBusinessProjects(env, staff, mapped)).items.some(item => item.id === opsProject && item.origin === "canonical")).toBe(true);
@@ -221,6 +269,65 @@ describe("read-only source-qualified business project detail", () => {
     await expect(readClientHubBusinessProjectDetail(env, staff, mapped, opsProject, { origin: "canonical" })).rejects.toMatchObject({ status: 404 });
     env.PROJECT_ALPHA_API_V2_CONNECTIONS = enabledConnections;
     expect((await readClientHubBusinessProjectDetail(env, staff, mapped, opsProject, { origin: "canonical" })).project.id).toBe(opsProject);
+
+    // An accepted inbound PA edit may carry forward an earlier activation
+    // when the ownership identity is unchanged.
+    const retainedOwnerResolution = "inbound-resolution-same-owner";
+    await db.batch([
+      db.prepare("UPDATE operations_shared_projects SET current_version=2 WHERE external_project_id=?").bind(opsProject),
+      db.prepare(`INSERT INTO operations_shared_project_revisions VALUES(?,2,NULL,?,NULL,NULL,?)`)
+        .bind(opsProject, JSON.stringify({ apiVersion: "2", sourceInstanceId: identity.source_instance_id, applicationId: identity.application_id,
+          historyEpoch: identity.history_epoch_id, resource: { type: "project", id: paPublicProject, revision,
+            projectionSha256: projection }, data: { name: "Shared project", description: "Canonical description", status: "active",
+            archived: false, overdueWarning: false, estimatedStart: "2026-04-01", estimatedEnd: null, clientPublicId: paPublicClient,
+            organizationPublicId: paPublicRoot } }), retainedOwnerResolution),
+      db.prepare(`INSERT INTO project_alpha_project_inbound_resolution_receipts VALUES(?,'accept_project_alpha',1,2)`)
+        .bind(retainedOwnerResolution),
+    ]);
+    expect((await listClientHubBusinessProjects(env, staff, mapped)).items
+      .some(item => item.id === opsProject && item.origin === "canonical")).toBe(true);
+    await db.batch([
+      db.prepare("DELETE FROM project_alpha_project_inbound_resolution_receipts WHERE resolution_id=?").bind(retainedOwnerResolution),
+      db.prepare("DELETE FROM operations_shared_project_revisions WHERE external_project_id=? AND version=2").bind(opsProject),
+      db.prepare("UPDATE operations_shared_projects SET current_version=1 WHERE external_project_id=?").bind(opsProject),
+    ]);
+
+    // A changed owner needs a new exact activation before Client Hub can
+    // release the project under that root.
+    const opsRootB = "ops-org-10", paPublicRootB = "5".repeat(32), inboundResolution = "inbound-resolution-changed-owner";
+    await db.batch([
+      db.prepare("INSERT INTO operations_directory_records VALUES(?, 'organization')").bind(opsRootB),
+      db.prepare("UPDATE pa_organizations SET payload_json=? WHERE id='org-b'").bind(JSON.stringify({ public_id: paPublicRootB })),
+      db.prepare(`INSERT INTO active_mapping_rows VALUES(?,?,?,?,?,?,?,?)`).bind(identity.source_id, "organization",
+        opsRootB, "org-b", paPublicRootB, identity.source_instance_id, identity.application_id, identity.history_epoch_id),
+      db.prepare("UPDATE pa_projects SET organization_id='org-b',client_id=NULL WHERE id='pa-mirror'"),
+      db.prepare(`UPDATE operations_shared_projects SET current_version=2,organization_record_id=?,client_record_id=NULL
+        WHERE external_project_id=?`).bind(opsRootB, opsProject),
+      db.prepare(`INSERT INTO operations_shared_project_revisions VALUES(?,2,NULL,?,NULL,NULL,?)`)
+        .bind(opsProject, JSON.stringify({ apiVersion: "2", sourceInstanceId: identity.source_instance_id, applicationId: identity.application_id,
+          historyEpoch: identity.history_epoch_id, resource: { type: "project", id: paPublicProject, revision,
+            projectionSha256: projection }, data: { name: "Shared project", description: "Canonical description", status: "active",
+            archived: false, overdueWarning: false, estimatedStart: "2026-04-01", estimatedEnd: null, clientPublicId: null,
+            organizationPublicId: paPublicRootB } }), inboundResolution),
+      db.prepare(`INSERT INTO project_alpha_project_inbound_resolution_receipts VALUES(?,'accept_project_alpha',1,2)`)
+        .bind(inboundResolution),
+    ]);
+    const mappedB = context("organization", opsRootB);
+    mappedB.root.pa_internal_id = "org-b"; mappedB.root.pa_public_id = paPublicRootB; mappedB.root.mapping_status = "mapped";
+    expect((await listClientHubBusinessProjects(env, staff, mappedB)).items
+      .some(item => item.id === opsProject && item.origin === "canonical")).toBe(false);
+    await db.prepare(`INSERT INTO project_alpha_project_v2_canonical_activation_receipts VALUES(?,?,?,NULL)`)
+      .bind(opsProject, 2, opsRootB).run();
+    expect((await listClientHubBusinessProjects(env, staff, mappedB)).items
+      .some(item => item.id === opsProject && item.origin === "canonical")).toBe(true);
+    await db.batch([
+      db.prepare("DELETE FROM project_alpha_project_v2_canonical_activation_receipts WHERE resulting_local_version=2"),
+      db.prepare("DELETE FROM project_alpha_project_inbound_resolution_receipts WHERE resolution_id=?").bind(inboundResolution),
+      db.prepare("DELETE FROM operations_shared_project_revisions WHERE external_project_id=? AND version=2").bind(opsProject),
+      db.prepare(`UPDATE operations_shared_projects SET current_version=1,organization_record_id=?,client_record_id=?
+        WHERE external_project_id=?`).bind(opsRoot, opsClient, opsProject),
+      db.prepare("UPDATE pa_projects SET organization_id=NULL,client_id='client-a' WHERE id='pa-mirror'"),
+    ]);
 
     await db.prepare("DELETE FROM pa_projects WHERE id IN ('leading-mirror-1','leading-mirror-2','leading-mirror-3','leading-mirror-4','pa-after-mirrors')").run();
     acl.isAdministrator.mockResolvedValue(false);
@@ -247,6 +354,24 @@ describe("read-only source-qualified business project detail", () => {
         "project", paPublicProject, opsProject).run();
     expect((await listClientHubBusinessProjects(env, staff, mapped)).items.some(item => item.id === opsProject && item.origin === "canonical")).toBe(false);
     await expect(readClientHubBusinessProjectDetail(env, staff, mapped, opsProject, { origin: "canonical" })).rejects.toMatchObject({ status: 404 });
+
+    // A release must not make projects disappear while 0178 is pending on
+    // staging: treat the inbound receipt table/column as a paired capability.
+    await db.prepare("DELETE FROM project_alpha_api_v2_inventory_conflicts").run();
+    await db.prepare("DROP TABLE project_alpha_project_inbound_resolution_receipts").run();
+    expect((await listClientHubBusinessProjects(env, staff, mapped)).items
+      .some(item => item.id === opsProject && item.origin === "canonical")).toBe(false);
+    await expect(readClientHubBusinessProjectDetail(env, staff, mapped, opsProject, { origin: "canonical" })).rejects.toMatchObject({ status: 404 });
+    await db.prepare(`CREATE TABLE project_alpha_project_inbound_resolution_receipts(
+      resolution_id TEXT, decision TEXT, prior_local_version INTEGER, resulting_local_version INTEGER)`).run();
+    await db.prepare("ALTER TABLE operations_shared_project_revisions DROP COLUMN inbound_resolution_id").run();
+    expect((await listClientHubBusinessProjects(env, staff, mapped)).items
+      .some(item => item.id === opsProject && item.origin === "canonical")).toBe(false);
+    await expect(readClientHubBusinessProjectDetail(env, staff, mapped, opsProject, { origin: "canonical" })).rejects.toMatchObject({ status: 404 });
+    await db.prepare("DROP TABLE project_alpha_project_inbound_resolution_receipts").run();
+    expect((await listClientHubBusinessProjects(env, staff, mapped)).items
+      .some(item => item.id === opsProject && item.origin === "canonical")).toBe(true);
+    expect((await readClientHubBusinessProjectDetail(env, staff, mapped, opsProject, { origin: "canonical" })).project.id).toBe(opsProject);
   // This joined D1 scenario checks pagination, identity retirement, disabled
   // sources and authorization using many round trips; keep a bounded allowance.
   }, 60_000);

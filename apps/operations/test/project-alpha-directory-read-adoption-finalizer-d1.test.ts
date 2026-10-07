@@ -55,10 +55,13 @@ async function schema(): Promise<void> {
     CREATE TABLE client_portal_accounts(id TEXT PRIMARY KEY,payload TEXT);
     CREATE TABLE delivery_records(id TEXT PRIMARY KEY,payload TEXT);
     CREATE TABLE delivery_public_shares(id TEXT PRIMARY KEY,url TEXT);
+    CREATE TABLE project_alpha_directory_reconciliation_actions(action_id TEXT PRIMARY KEY);
   `;
   await db.batch(splitD1MigrationStatements(prerequisites).map(statement => db.prepare(statement)));
   const migration = readFileSync(new URL("../migrations/0167_project_alpha_directory_read_adoption_finalizations.sql", import.meta.url), "utf8");
   await db.batch(splitD1MigrationStatements(migration).map(statement => db.prepare(statement)));
+  const preservedIdentity = readFileSync(new URL("../migrations/0174_project_alpha_directory_preserved_external_identity.sql", import.meta.url), "utf8");
+  await db.batch(splitD1MigrationStatements(preservedIdentity).map(statement => db.prepare(statement)));
 }
 
 async function seed(decision: "retain_local" | "adopt_project_alpha" | "requires_follow_up" = "retain_local"): Promise<void> {
@@ -140,7 +143,9 @@ describe("Project Alpha Directory read-adoption finalization preparation",()=>{
     expect(await count("project_alpha_directory_read_adoption_finalization_events")).toBe(1);
     expect(await count("project_alpha_directory_mappings")).toBe(0);
     expect(await count("project_alpha_acquired_canonical_mappings")).toBe(0);
-    expect(await db.prepare("SELECT target_external_id FROM project_alpha_directory_read_adoption_finalizations").first("target_external_id")).toBe(recordId);
+    expect(await db.prepare(`SELECT target_external_id,acquisition_external_id,acquisition_identity_mode
+      FROM project_alpha_directory_read_adoption_finalizations`).first()).toEqual({ target_external_id: recordId,
+      acquisition_external_id: externalId, acquisition_identity_mode: "preserve_reviewed" });
     expect(await db.prepare("SELECT payload FROM client_portal_accounts").first("payload")).toBe("keep");
     expect(await db.prepare("SELECT payload FROM delivery_records").first("payload")).toBe("keep");
     expect(await db.prepare("SELECT url FROM delivery_public_shares").first("url")).toBe("https://public.example.test/keep");

@@ -37,13 +37,49 @@ export async function canonicalBusinessProjectPredicate(env: Env, context: Clien
   const relations = await env.OPS_DB.prepare(`SELECT name,type FROM sqlite_master WHERE name IN (
     'operations_shared_projects','operations_shared_project_revisions','project_alpha_project_mappings',
     'project_alpha_project_v2_canonical_activation_receipts','project_alpha_api_v2_inventory_conflicts',
-    'project_alpha_api_v2_project_observations_current')`).all<{ name: string; type: string }>();
-  if (relations.results.length !== 6) return null;
+    'project_alpha_api_v2_project_observations_current','project_alpha_project_inbound_resolution_receipts')`).all<{ name: string; type: string }>();
+  const requiredRelations = ["operations_shared_projects", "operations_shared_project_revisions", "project_alpha_project_mappings",
+    "project_alpha_project_v2_canonical_activation_receipts", "project_alpha_api_v2_inventory_conflicts",
+    "project_alpha_api_v2_project_observations_current"];
+  const hasInboundResolutionEvidence = relations.results.some(relation => relation.name === "project_alpha_project_inbound_resolution_receipts");
+  if (relations.results.length !== requiredRelations.length + Number(hasInboundResolutionEvidence)
+    || requiredRelations.some(name => !relations.results.some(relation => relation.name === name))) return null;
+  const revisionColumns = await env.OPS_DB.prepare("PRAGMA table_info(operations_shared_project_revisions)").all<{ name: string }>();
+  const hasInboundResolutionColumn = revisionColumns.results.some(column => column.name === "inbound_resolution_id");
+  if (hasInboundResolutionEvidence !== hasInboundResolutionColumn) return null;
   const root = context.root;
   if (!root.pa_internal_id || !root.pa_public_id || !root.public_id) return null;
   const activeIdentities = await clientHubActiveDirectoryIdentities(env);
   const currentRootIdentity = clientHubActiveDirectoryIdentitySql("current_root_mapping", activeIdentities ?? []);
   const owner = clientHubBusinessProjectOwnership(context);
+  const ownerMappingProof = (alias: string, resourceType: "organization" | "client", recordId: string,
+    publicId: string): string => {
+    const uniqueAlias = `unique_${alias}`;
+    const tuple = (mappingAlias: string) => `${clientHubActiveDirectoryIdentitySql(mappingAlias, activeIdentities ?? [])}
+      AND ${mappingAlias}.source_id=s.source_id AND ${mappingAlias}.source_instance_id=s.source_instance_id
+      AND ${mappingAlias}.application_id=s.application_id AND ${mappingAlias}.history_epoch_id=s.history_epoch_id
+      AND ${mappingAlias}.resource_type='${resourceType}'`;
+    return `EXISTS (SELECT 1 FROM project_alpha_active_directory_mappings ${alias}
+      WHERE ${tuple(alias)} AND ${alias}.record_id=${recordId}
+        AND ${alias}.project_alpha_public_id IS ${publicId}
+        AND (SELECT count(*) FROM project_alpha_active_directory_mappings ${uniqueAlias}
+          WHERE ${tuple(uniqueAlias)} AND (${uniqueAlias}.record_id=${recordId}
+            OR ${uniqueAlias}.project_alpha_public_id=${publicId}))=1)`;
+  };
+  const organizationOwnerProof = `(s.organization_record_id IS NOT NULL AND
+      ${ownerMappingProof("project_organization_owner", "organization", "s.organization_record_id",
+        "json_extract(revision.read_json,'$.data.organizationPublicId')")})`;
+  const inheritedOrganizationOwnerProof = root.kind === "organization" && root.pa_public_id
+    ? `(s.organization_record_id IS NULL AND s.client_record_id IS NOT NULL AND
+        ${ownerMappingProof("project_parent_organization_owner", "organization", "?",
+          "json_extract(revision.read_json,'$.data.organizationPublicId')")})`
+    : "(s.organization_record_id IS NULL AND json_extract(revision.read_json,'$.data.organizationPublicId') IS NULL)";
+  const clientOwnerProof = `(s.client_record_id IS NOT NULL AND
+      ${ownerMappingProof("project_client_owner", "client", "s.client_record_id",
+        "json_extract(revision.read_json,'$.data.clientPublicId')")})`;
+  const unownedClientProof = `(s.client_record_id IS NULL AND json_extract(revision.read_json,'$.data.clientPublicId') IS NULL)`;
+  const ownerMappingValues = root.kind === "organization" && root.pa_public_id
+    ? [root.public_id, root.public_id] : [];
   const rootOwner = root.kind === "organization"
     ? `(s.organization_record_id=? OR (s.organization_record_id IS NULL AND s.client_record_id IS NOT NULL AND EXISTS (
         SELECT 1 FROM operations_directory_client_organizations relation
@@ -72,10 +108,41 @@ export async function canonicalBusinessProjectPredicate(env: Env, context: Clien
     AND json_extract(revision.read_json,'$.data.archived')=(s.archived=1)
     AND json_extract(revision.read_json,'$.data.completedAt') IS s.completed_at
     AND json_extract(revision.read_json,'$.data.archivedAt') IS s.archived_at
+    AND ((${organizationOwnerProof}) OR (${inheritedOrganizationOwnerProof}))
+    AND ((${clientOwnerProof}) OR (${unownedClientProof}))
     AND (s.organization_record_id IS NULL OR s.client_record_id IS NULL OR EXISTS (
       SELECT 1 FROM operations_directory_client_organizations project_relationship
       WHERE project_relationship.client_record_id=s.client_record_id
         AND project_relationship.organization_record_id=s.organization_record_id))`;
+  const settledRevisionProof = hasInboundResolutionEvidence
+    ? `(revision.v2_settlement_id IS NOT NULL OR revision.inbound_resolution_id IS NOT NULL
+        AND EXISTS (SELECT 1 FROM project_alpha_project_inbound_resolution_receipts inbound
+          WHERE inbound.resolution_id=revision.inbound_resolution_id
+            AND inbound.decision='accept_project_alpha'
+            AND inbound.resulting_local_version=revision.version))`
+    : "revision.v2_settlement_id IS NOT NULL";
+  const activationProof = hasInboundResolutionEvidence
+    ? `(EXISTS (SELECT 1 FROM project_alpha_project_v2_canonical_activation_receipts activation
+        WHERE activation.external_project_id=s.external_project_id
+          AND activation.resulting_local_version=s.current_version
+          AND activation.organization_record_id IS s.organization_record_id
+          AND activation.client_record_id IS s.client_record_id)
+      OR EXISTS (SELECT 1 FROM operations_shared_project_revisions inbound_revision
+        JOIN project_alpha_project_inbound_resolution_receipts inbound
+          ON inbound.resolution_id=inbound_revision.inbound_resolution_id
+        WHERE inbound_revision.external_project_id=s.external_project_id
+          AND inbound_revision.version=s.current_version AND inbound.decision='accept_project_alpha'
+          AND inbound.resulting_local_version=s.current_version
+          AND EXISTS (SELECT 1 FROM project_alpha_project_v2_canonical_activation_receipts activation
+            WHERE activation.external_project_id=s.external_project_id
+              AND activation.resulting_local_version<=inbound.prior_local_version
+              AND activation.organization_record_id IS s.organization_record_id
+              AND activation.client_record_id IS s.client_record_id)))`
+    : `EXISTS (SELECT 1 FROM project_alpha_project_v2_canonical_activation_receipts activation
+        WHERE activation.external_project_id=s.external_project_id
+          AND activation.resulting_local_version=s.current_version
+          AND activation.organization_record_id IS s.organization_record_id
+          AND activation.client_record_id IS s.client_record_id)`;
   const noConflicts = `NOT EXISTS (SELECT 1 FROM project_alpha_api_v2_inventory_conflicts conflict
     WHERE conflict.source_id=s.source_id AND conflict.source_instance_id=s.source_instance_id
       AND conflict.application_id=s.application_id AND conflict.history_epoch_id=s.history_epoch_id
@@ -126,18 +193,14 @@ export async function canonicalBusinessProjectPredicate(env: Env, context: Clien
             OR unique_project_mapping.project_alpha_public_id=s.project_alpha_public_id))=1
       AND EXISTS (SELECT 1 FROM operations_shared_project_revisions revision
         WHERE revision.external_project_id=s.external_project_id AND revision.version=s.current_version
-          AND revision.v2_settlement_id IS NOT NULL AND revision.pa_revision IS NULL
-          AND revision.refresh_command_id IS NULL AND ${exactRevision})
-      AND EXISTS (SELECT 1 FROM project_alpha_project_v2_canonical_activation_receipts activation
-        WHERE activation.external_project_id=s.external_project_id
-          AND activation.resulting_local_version=s.current_version
-          AND activation.organization_record_id IS s.organization_record_id
-          AND activation.client_record_id IS s.client_record_id)
+          AND revision.pa_revision IS NULL AND revision.refresh_command_id IS NULL AND ${exactRevision}
+          AND ${settledRevisionProof})
+      AND ${activationProof}
       AND ${noConflicts} AND ${observations}
       AND ${rootOwner}
       AND ${projectAlphaReadVisibleSql("s.source_id")} AND (${paVisibility})`,
     values: [context.root.source_id, root.kind === "organization" ? "organization" : "client",
-      root.public_id, root.pa_internal_id, root.pa_public_id, ...rootValues,
+      root.public_id, root.pa_internal_id, root.pa_public_id, ...rootValues, ...ownerMappingValues,
       ...(policy.canViewUnprojectedCanonical ? [] : [...owner.values, ...policy.filter.values])],
   };
 }

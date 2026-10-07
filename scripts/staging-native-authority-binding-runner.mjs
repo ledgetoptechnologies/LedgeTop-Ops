@@ -161,7 +161,7 @@ export async function readOnlyStagingAuthorityStatus(configPath, dependencies = 
  * reviewed packet and submits its complete write set in one D1.batch. */
 export async function applyReviewedNativeOnlyAuthorityPacket(configPath, packet, dependencies = {}) {
   if (!packet || typeof packet !== "object" || Array.isArray(packet)
-    || packet.schemaVersion !== 2 || !Array.isArray(packet.statements)) {
+    || ![2, 3].includes(packet.schemaVersion) || !Array.isArray(packet.statements)) {
     fail("reviewed compiled packet required");
   }
   const applyPacket = dependencies.applyPacket ?? applyNativeOnlyAuthorityPacket;
