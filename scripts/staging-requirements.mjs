@@ -13,10 +13,11 @@ export const RELEASE_CONTRACT_FINALIZED = false;
 export const RELEASE_CANDIDATES = Object.freeze({
   // The API-v2 sync/read-adoption Worker and migrations are pinned to the
   // reviewed, committed staging candidate; release evidence separately proves
-  // that this immutable commit was pushed before staging deployment.
-  operations: "9d260ee83c97f2bb25c16e2cf7fdce93a05c5bf0",
+  // that this immutable commit was pushed before staging deployment. The PA
+  // pin includes the typed conflict and stale-binding contracts Ops requires.
+  operations: "1988d4229ef23315cf772548e9c73c52b99ed477",
   viewer: "32cece808289a942ce902797535ccff6e24763e3",
-  projectAlpha: "31deb85b87b95de27dc9e90a5591e036ae96709e",
+  projectAlpha: "3b43e1275e3b248979876ace56ca38e6e383f52c",
 });
 
 export const STAGING_VIEWER = Object.freeze({

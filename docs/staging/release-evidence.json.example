@@ -5,7 +5,7 @@
     "remoteRef": "<REMOTE_REF_CONTAINING_RELEASE_COMMIT>",
     "verifiedAt": "<ISO_8601_TIMESTAMP>",
     "evidenceRef": "<EVIDENCE_REFERENCE>",
-    "runtimeCandidateCommit": "9d260ee83c97f2bb25c16e2cf7fdce93a05c5bf0",
+    "runtimeCandidateCommit": "1988d4229ef23315cf772548e9c73c52b99ed477",
     "runtimeCandidatePushed": false,
     "runtimeEvidenceRef": "<EVIDENCE_REFERENCE>"
   },
@@ -53,7 +53,7 @@
     "ed25519Ready": false,
     "paymentBillingContractReady": false,
     "authorizationBypassUsed": false,
-    "releaseCommit": "31deb85b87b95de27dc9e90a5591e036ae96709e",
+    "releaseCommit": "3b43e1275e3b248979876ace56ca38e6e383f52c",
     "sourceCommitVerified": false,
     "remoteRef": "<PROJECT_ALPHA_REMOTE_REF>",
     "webImageDigest": "sha256:<64_HEX_DIGEST>",
@@ -1105,7 +1105,7 @@
       "CLOUD_TRANSFER_GOOGLE_ENABLED",
       "CLOUD_TRANSFER_GOOGLE_PICKER_CLIENT_ENABLED"
     ], "evidenceRef": "<EVIDENCE_REFERENCE>" },
-    "operations": { "versionId": "<IMMUTABLE_STAGING_VERSION_ID>", "releaseCommit": "9d260ee83c97f2bb25c16e2cf7fdce93a05c5bf0", "configSha256": "<SHA256>", "deployedAt": "<ISO_8601_TIMESTAMP>", "bindingsVerified": false, "healthCheckPassed": false, "hostAdmissionDenied": false, "disabledFeatureFlags": [
+    "operations": { "versionId": "<IMMUTABLE_STAGING_VERSION_ID>", "releaseCommit": "1988d4229ef23315cf772548e9c73c52b99ed477", "configSha256": "<SHA256>", "deployedAt": "<ISO_8601_TIMESTAMP>", "bindingsVerified": false, "healthCheckPassed": false, "hostAdmissionDenied": false, "disabledFeatureFlags": [
       "NATIVE_INTEGRATION_CONTROL_ENABLED",
       "PROJECT_ALPHA_DRAFT_QUOTES_ENABLED",
       "PROJECT_ALPHA_API_V2_SYNC_ENABLED",
@@ -1160,7 +1160,7 @@
       "DROPBOX_IMPORT_ENABLED",
       "R2_PURGE_ENABLED"
     ], "evidenceRef": "<EVIDENCE_REFERENCE>" },
-    "ops-sync": { "versionId": "<IMMUTABLE_STAGING_VERSION_ID>", "releaseCommit": "9d260ee83c97f2bb25c16e2cf7fdce93a05c5bf0", "configSha256": "<SHA256>", "deployedAt": "<ISO_8601_TIMESTAMP>", "bindingsVerified": false, "healthCheckPassed": false, "hostAdmissionDenied": false, "disabledFeatureFlags": [], "evidenceRef": "<EVIDENCE_REFERENCE>" }
+    "ops-sync": { "versionId": "<IMMUTABLE_STAGING_VERSION_ID>", "releaseCommit": "1988d4229ef23315cf772548e9c73c52b99ed477", "configSha256": "<SHA256>", "deployedAt": "<ISO_8601_TIMESTAMP>", "bindingsVerified": false, "healthCheckPassed": false, "hostAdmissionDenied": false, "disabledFeatureFlags": [], "evidenceRef": "<EVIDENCE_REFERENCE>" }
   },
   "infrastructure": {
     "remoteInventoryVerified": false,

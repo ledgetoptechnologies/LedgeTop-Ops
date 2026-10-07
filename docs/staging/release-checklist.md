@@ -594,13 +594,19 @@ contract-only commit pins its executable SHA without making the release-packet
 HEAD self-referential. The current candidate inventory extends through Client
 `0228` and Operations `0180`, including both distinct Client `0199` filenames.
 The combined portal and API-v2 sync/read-adoption candidate is pinned to
-`9d260ee83c97f2bb25c16e2cf7fdce93a05c5bf0`. It is committed locally but not
+`1988d4229ef23315cf772548e9c73c52b99ed477`. This local commit includes the
+grant-only organization-assignment preflight for PA Client creation. It is not
 yet pushed or independently reviewed; do not treat the pin alone as proof of
 publication or deployment. The example evidence records the candidate SHA,
 while `runtimeCandidatePushed` remains false until remote verification.
 Project Alpha is pinned
-independently at PR184 head `31deb85b87b95de27dc9e90a5591e036ae96709e`.
-Keep `RELEASE_CONTRACT_FINALIZED=false` until independent cross-repository,
+independently at the reviewed PR184 head
+`3b43e1275e3b248979876ace56ca38e6e383f52c`, which carries the typed Project
+conflict envelopes, authenticated stale-binding recovery, and nullable API
+schedule actor required by Operations. The live staging instance is still
+reported below at `v31deb85`; it must be updated and read back before this
+candidate can be accepted. Keep `RELEASE_CONTRACT_FINALIZED=false` until
+independent cross-repository,
 image, migration, and live staging evidence is complete. Any runtime change
 requires a newly reviewed non-circular boundary and coordinated evidence refresh.
 

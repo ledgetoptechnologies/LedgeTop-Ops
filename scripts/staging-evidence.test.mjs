@@ -506,8 +506,8 @@ test("requires origin-restriction proof and public token shape for verified Mapb
 
 test("pins the reviewed Ops runtime candidate without finalizing the cross-repository release", () => {
   assert.equal(RELEASE_CONTRACT_FINALIZED, false);
-  assert.equal(RELEASE_CANDIDATES.operations, "9d260ee83c97f2bb25c16e2cf7fdce93a05c5bf0");
-  assert.equal(RELEASE_CANDIDATES.projectAlpha, "31deb85b87b95de27dc9e90a5591e036ae96709e");
+  assert.equal(RELEASE_CANDIDATES.operations, "1988d4229ef23315cf772548e9c73c52b99ed477");
+  assert.equal(RELEASE_CANDIDATES.projectAlpha, "3b43e1275e3b248979876ace56ca38e6e383f52c");
   assert.equal(PROJECT_ALPHA_STAGING.migrations["0066_generic_portal_v2_integration.sql"], "12cfd32e4854bddf763a5fe80653fe7494ab5f9e82b592bf0da05eed78f3e886");
   assert.equal(PROJECT_ALPHA_STAGING.migrations["0102_api_v2_project_synchronization.sql"], "63e2010529678ce866adaa38ea7a54084b1384adcc56e02727cfbbc3584959a0");
   assert.equal(Object.keys(PROJECT_ALPHA_STAGING.migrations).length, 37);
