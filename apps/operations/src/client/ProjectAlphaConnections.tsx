@@ -9,6 +9,8 @@ const API_V2_SYNC_ENDPOINT = "/api/admin/integrations/project-alpha/api-v2/sync-
 const DIRECTORY_READ_ADOPTION_ENDPOINT = "/api/admin/integrations/project-alpha/api-v2/directory/read-adoptions";
 const DIRECTORY_READ_ADOPTION_CANDIDATES_ENDPOINT = `${DIRECTORY_READ_ADOPTION_ENDPOINT}/candidates`;
 const PROJECT_BINDING_REFRESH_ENDPOINT = "/api/admin/project-alpha/private/projects/bindings/refresh";
+const PROJECT_ADOPTION_CANDIDATES_ENDPOINT = "/api/admin/project-alpha/private/projects/adoption/candidates";
+const PROJECT_ADOPTION_REVIEW_ENDPOINT = "/api/admin/project-alpha/private/projects/adoption/review";
 const PRIMARY = "project-alpha:primary";
 const STAGING = "project-alpha:staging";
 type Connector = {
@@ -53,6 +55,9 @@ type DirectoryCandidatePage = { items: DirectoryCandidate[]; nextCursor: string 
 type FieldComparison = { status: "compared"; reviewId: string; resourceType: DirectoryResourceType; fields: Array<{
   field: DirectoryField; localValue: string | null; projectAlphaValue: string | null; equal: boolean;
 }> };
+type ProjectAdoptionCandidate = { publicId: string; revision: string; projectionSha256: string; name: string;
+  status: string; archived: false; organizationPublicId: string | null; clientPublicId: string | null;
+  organizationRecordId: string | null; clientRecordId: string | null };
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const PA_PUBLIC_ID = /^[0-9a-f]{32}$/;
@@ -596,6 +601,151 @@ function PortalPurpose({ connector, status, primaryActive, disabled, onAction }:
   </div>;
 }
 
+function ProjectAdoptionPanel({ connectors, disabled }: { connectors: readonly Connector[]; disabled: boolean }) {
+  const sources = connectors.filter(row => row.state === "active");
+  const [sourceId, setSourceId] = useState(STAGING), [projects, setProjects] = useState<readonly ProjectAdoptionCandidate[]>([]);
+  const [nextCursor, setNextCursor] = useState<string | null>(null);
+  const [selected, setSelected] = useState(""), [externalId, setExternalId] = useState("");
+  const [reviewKey, setReviewKey] = useState(""), [reviewItemId, setReviewItemId] = useState("");
+  const [reviewRequest, setReviewRequest] = useState<{
+    idempotencyKey: string; sourceId: string; externalProjectId: string; projectAlphaPublicId: string;
+  } | null>(null);
+  const [reserveKey, setReserveKey] = useState(""), [reservationId, setReservationId] = useState("");
+  const [commandId, setCommandId] = useState("");
+  const [busy, setBusy] = useState(false), [message, setMessage] = useState(""), [error, setError] = useState("");
+  const frozen = Boolean(reviewRequest || reviewKey || reviewItemId || reserveKey || reservationId || commandId);
+  useEffect(() => {
+    if (!frozen && sources.length && !sources.some(source => source.sourceId === sourceId)) setSourceId(sources[0]!.sourceId);
+  }, [frozen, sources, sourceId]);
+  const discover = async (cursor?: string) => {
+    if (busy || disabled || frozen) return;
+    const requestedSource = sourceId;
+    setBusy(true); setError(""); setMessage("");
+    if (!cursor) { setProjects([]); setSelected(""); setNextCursor(null); }
+    try {
+      const response = await api<{ outcome?: { status?: string; projects?: ProjectAdoptionCandidate[]; nextCursor?: string | null } }>(
+        `${PROJECT_ADOPTION_CANDIDATES_ENDPOINT}?sourceId=${encodeURIComponent(requestedSource)}&limit=50${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`);
+      if (response.outcome?.status !== "observed" || !Array.isArray(response.outcome.projects))
+        throw new Error("Candidate discovery was not authorized or could not be verified.");
+      if (sourceId !== requestedSource) return;
+      setProjects(current => cursor ? [...current, ...response.outcome!.projects!] : response.outcome!.projects!);
+      setNextCursor(response.outcome.nextCursor ?? null);
+      setMessage(response.outcome.projects.length ? "Select one Project for deliberate review." : "No authorized unbound Projects were found.");
+    } catch (caught) { setError(operatorError(caught, "Project adoption discovery is unavailable.")); }
+    finally { setBusy(false); }
+  };
+  const review = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const exact = externalId.trim();
+    if (!PA_PUBLIC_ID.test(selected) || !exact || exact !== externalId || exact.length > 191 || /\p{C}/u.test(exact)) {
+      setError("Select a candidate and enter a new, unused Operations Project ID."); return;
+    }
+    if (!reviewKey && !window.confirm("Create short-lived review evidence for this exact PA Project and Operations destination? This does not bind, grant access, or publish a portal.")) return;
+    const request = reviewRequest ?? { idempotencyKey: crypto.randomUUID(), sourceId,
+      externalProjectId: exact, projectAlphaPublicId: selected };
+    const idempotencyKey = request.idempotencyKey;
+    if (!reviewRequest) { setReviewRequest(request); setReviewKey(idempotencyKey); }
+    setBusy(true); setError(""); setMessage("");
+    try {
+      const response = await api<{ outcome?: { status?: string; reviewItemId?: string } }>(PROJECT_ADOPTION_REVIEW_ENDPOINT, {
+        method: "POST", headers: { "Idempotency-Key": idempotencyKey },
+        body: JSON.stringify({ sourceId: request.sourceId, externalProjectId: request.externalProjectId,
+          projectAlphaPublicId: request.projectAlphaPublicId }),
+      });
+      if (response.outcome?.status !== "reviewed" || !response.outcome.reviewItemId) {
+        setError(response.outcome?.status === "uncertain"
+          ? "Project adoption review outcome is uncertain. The same frozen request key is retained; retry only after operator review."
+          : `Project adoption review was not completed (${response.outcome?.status ?? "invalid response"}). Reset only after reviewing server state.`);
+        return;
+      }
+      setReviewItemId(response.outcome.reviewItemId);
+      setMessage(`Review evidence created: ${response.outcome.reviewItemId}. Reservation remains a separate action.`);
+    } catch (caught) { setError(`${operatorError(caught, "Project adoption review outcome is uncertain.")} The same frozen request key is retained; retry only after operator review.`); }
+    finally { setBusy(false); }
+  };
+  const reserve = async () => {
+    if (!reviewItemId || busy || reservationId) return;
+    if (!reserveKey && !window.confirm("Reserve this exact reviewed adoption intent? This still does not bind, grant client access, or publish a portal.")) return;
+    const idempotencyKey = reserveKey || crypto.randomUUID();
+    if (!reserveKey) setReserveKey(idempotencyKey);
+    setBusy(true); setError(""); setMessage("");
+    try {
+      const response = await api<{ status?: string; reservationId?: string }>(
+        "/api/admin/project-alpha/private/projects/adoption/reserve", {
+          method: "POST", headers: { "Idempotency-Key": idempotencyKey },
+          body: JSON.stringify({ reviewItemId, idempotencyKey }),
+        });
+      if (response.status !== "reserved" || !response.reservationId) {
+        setError(response.status === "uncertain"
+          ? "Project adoption reservation outcome is uncertain. The review ID and frozen reservation key are retained; retry only after operator review."
+          : `Project adoption reservation was not completed (${response.status ?? "invalid response"}). Reset only after reviewing server state.`);
+        return;
+      }
+      setReservationId(response.reservationId);
+      setMessage(`Reservation created: ${response.reservationId}. Binding remains a separate action.`);
+    } catch (caught) { setError(`${operatorError(caught, "Project adoption reservation outcome is uncertain.")} The review ID and frozen reservation key are retained; retry only after operator review.`); }
+    finally { setBusy(false); }
+  };
+  const bind = async () => {
+    if (!reservationId || busy || commandId) return;
+    if (!window.confirm("Create the native Operations Project and enqueue the exact PA binding command? This does not acknowledge remote completion, grant client access, or publish a portal.")) return;
+    setBusy(true); setError(""); setMessage("");
+    try {
+      const response = await api<{ status?: string; commandId?: string; replayed?: boolean }>(
+        "/api/admin/project-alpha/private/projects/adoption/bind", {
+          method: "POST", headers: { "Idempotency-Key": reservationId }, body: JSON.stringify({ reservationId }),
+        });
+      if (response.status !== "planned" || !response.commandId) {
+        setError(response.status === "uncertain"
+          ? "Project adoption bind outcome is uncertain. The reservation ID is retained; retry only after checking local command state."
+          : `Project adoption bind was not planned (${response.status ?? "invalid response"}). Reset only after reviewing server state.`);
+        return;
+      }
+      setCommandId(response.commandId);
+      setMessage(`Bind command queued locally: ${response.commandId}. Project Alpha acknowledgement is not yet confirmed.`);
+    } catch (caught) { setError(`${operatorError(caught, "Project adoption bind outcome is uncertain.")} The reservation ID is retained; retry only after checking local command state.`); }
+    finally { setBusy(false); }
+  };
+  const reset = () => {
+    if (busy || !window.confirm("Clear this local operator flow? Server-side review, reservation, or queued command records are retained.")) return;
+    setProjects([]); setNextCursor(null); setSelected(""); setExternalId(""); setReviewRequest(null); setReviewKey(""); setReviewItemId("");
+    setReserveKey(""); setReservationId(""); setCommandId(""); setMessage(""); setError("");
+  };
+  return <section className="alpha-connection" aria-label="PA-created Project adoption review">
+    <h3>Review an unbound Project</h3>
+    <p>Discovery is read-only and authority-filtered. Review does not bind the Project, grant client access, or publish it to a portal.</p>
+    <label htmlFor="project-adoption-source">Project Alpha source</label>
+    <select id="project-adoption-source" value={sourceId} disabled={busy || disabled || frozen}
+      onChange={event => { setSourceId(event.target.value); setProjects([]); setSelected(""); setNextCursor(null); setMessage(""); setError(""); }}>
+      {sources.map(source => <option key={source.sourceId} value={source.sourceId}>{source.displayName}</option>)}
+    </select>
+    <button type="button" className="button-ghost button-small" disabled={busy || disabled || frozen || !sources.length}
+      onClick={() => void discover()}>{busy ? "Checking…" : "Find authorized unbound Projects"}</button>
+    {nextCursor && <button type="button" className="button-ghost button-small" disabled={busy || disabled || frozen}
+      onClick={() => void discover(nextCursor)}>{busy ? "Loading…" : "Load next 50 Projects"}</button>}
+    {projects.length > 0 && <form onSubmit={review} aria-busy={busy}>
+      <fieldset><legend>Select one exact PA Project</legend>{projects.map(project => <label key={project.publicId}>
+        <input type="radio" name="project-adoption-candidate" value={project.publicId} checked={selected === project.publicId}
+          disabled={busy || disabled || frozen} onChange={() => { setSelected(project.publicId); setMessage(""); setError(""); }} />
+        {project.name} · revision {project.revision} · {project.publicId}
+      </label>)}</fieldset>
+      <label htmlFor="project-adoption-external-id">New, unused Operations Project ID</label>
+      <input id="project-adoption-external-id" value={externalId} maxLength={191} disabled={busy || disabled || frozen}
+        autoCapitalize="none" autoCorrect="off" spellCheck={false}
+        onChange={event => { setExternalId(event.target.value); setMessage(""); setError(""); }} />
+      <button type="submit" disabled={busy || disabled || !selected || Boolean(reviewItemId)}>{reviewKey && !reviewItemId ? "Retry frozen review request" : "Create review evidence only"}</button>
+    </form>}
+    {reviewItemId && !reservationId && <button type="button" disabled={busy || disabled}
+      onClick={() => void reserve()}>{reserveKey ? "Retry frozen reservation request" : "Reserve reviewed intent"}</button>}
+    {reservationId && !commandId && <button type="button" disabled={busy || disabled}
+      onClick={() => void bind()}>Create local bind plan and queue command</button>}
+    {frozen && <button type="button" className="button-ghost button-small" disabled={busy}
+      onClick={reset}>Reset local flow</button>}
+    <p><small>No step in this panel grants client access or publishes the Project to a portal. A planned bind is only a locally queued command, not a Project Alpha acknowledgement.</small></p>
+    {message && <p role="status" className="notice">{message}</p>}{error && <p role="alert" className="notice">{error}</p>}
+  </section>;
+}
+
 /** The connector registry is deployment-owned. This is a status/sync surface,
  * never a browser form for source authority or credentials. */
 export function ProjectAlphaConnections() {
@@ -669,6 +819,7 @@ export function ProjectAlphaConnections() {
       </section>;
     })}
     <ApiV2OperatorPanel disabled={loading || Boolean(syncing)} />
+    {data && <ProjectAdoptionPanel connectors={data.connectors} disabled={loading || Boolean(syncing)} />}
     {data?.portal?.recovery && <div className="notice" role="status"><p>A prior portal coordination operation is unfinished. Recovery cancels that uncertain update and pauses affected client portals; it never registers a source or retries activation.</p><button type="button" disabled={loading || Boolean(syncing)} onClick={() => void recoverPortalUpdate()}>Recover unfinished portal update</button></div>}
   </div></Card>;
 }

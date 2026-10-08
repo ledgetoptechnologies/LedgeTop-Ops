@@ -5,7 +5,7 @@ import type { Env, StaffPrincipal } from "../src/worker/types";
 
 const mocks = vi.hoisted(() => ({
   scope: vi.fn(), acquire: vi.fn(), activate: vi.fn(), reserve: vi.fn(), bind: vi.fn(), first: vi.fn(),
-  produce: vi.fn(),
+  produce: vi.fn(), candidates: vi.fn(),
   bindingStatus: vi.fn(), bindingRefresh: vi.fn(),
   reconciliationList: vi.fn(), reconciliationAcquire: vi.fn(),
   reconciliationRecords: vi.fn(),
@@ -35,6 +35,9 @@ vi.mock("../src/worker/project-alpha-project-adoption-bind-consumer", () => ({
 }));
 vi.mock("../src/worker/project-alpha-project-adoption-review-producer", () => ({
   produceProjectAlphaProjectAdoptionReview: mocks.produce,
+}));
+vi.mock("../src/worker/project-alpha-project-adoption-candidates-consumer", () => ({
+  listAuthorizedProjectAlphaProjectAdoptionCandidates: mocks.candidates,
 }));
 vi.mock("../src/worker/project-alpha-project-inbound-reconciliation", () => ({
   proposeProjectAlphaInboundProjectEdit: mocks.inboundPropose,
@@ -139,6 +142,7 @@ describe("private Project Alpha administrator transport", () => {
     mocks.reserve.mockResolvedValue({ status: "reserved", reservationId, reviewItemId: reviewId, idempotencyKey: key, replayed: false });
     mocks.bind.mockResolvedValue({ status: "planned", bridgeId: key, reservationId, commandId, requestSha256: "b".repeat(64), replayed: false });
     mocks.produce.mockResolvedValue({ status: "reviewed", reviewItemId: reviewId, requestSha256: "c".repeat(64), replayed: false });
+    mocks.candidates.mockResolvedValue({ status: "observed", authorizationGeneration: "7", projects: [], nextCursor: null });
     mocks.inboundPropose.mockResolvedValue({ status: "proposed", proposalId: reviewId, replayed: false });
     mocks.inboundRead.mockResolvedValue({ status: "available", proposal: {
       proposalId: reviewId, sourceId: "project-alpha:primary", externalProjectId: "ops-project-1",
@@ -479,6 +483,24 @@ describe("private Project Alpha administrator transport", () => {
     (enabled.env as unknown as { ENVIRONMENT: string }).ENVIRONMENT = "production";
     expect((await enabled.send("/projects/adoption/review", body, key)).status).toBe(404);
     expect(mocks.produce).not.toHaveBeenCalled();
+  });
+
+  it("keeps candidate discovery behind the adoption gate and accepts only one strict bounded query", async () => {
+    expect((await fixture().get("/projects/adoption/candidates?sourceId=project-alpha%3Aprimary")).status).toBe(404);
+    const { get } = fixture({ adoptionReviewEnabled: true });
+    const response = await get(`/projects/adoption/candidates?sourceId=project-alpha%3Aprimary&limit=25&cursor=${publicId}`);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ outcome: {
+      status: "observed", authorizationGeneration: "7", projects: [], nextCursor: null,
+    } });
+    expect(mocks.candidates).toHaveBeenCalledWith(expect.anything(),
+      { staffId: principal.id, accessSubject: principal.accessSubject },
+      { sourceId: "project-alpha:primary", cursor: publicId, limit: 25 }, fetch);
+    for (const query of ["sourceId=project-alpha%3Aprimary&sourceId=project-alpha%3Aother",
+      "sourceId=project-alpha%3Aprimary&limit=1&limit=2", "sourceId=project-alpha%3Aprimary&limit%5B%5D=1",
+      "sourceId=project-alpha%3Aprimary&limit=201", "sourceId=project-alpha%3Aprimary&extra=1"]) {
+      expect((await get(`/projects/adoption/candidates?${query}`)).status).toBe(400);
+    }
   });
 
   it("requires a strict PA project selection and header idempotency key, then records only a sanitized outcome", async () => {

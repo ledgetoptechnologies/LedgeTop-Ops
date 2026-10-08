@@ -11,6 +11,7 @@ import { acquireProjectAlphaDirectoryReconciliationFinding,
   readProjectAlphaDirectoryReconciliationFindingContext } from "./project-alpha-directory-reconciliation-review";
 import { reserveProjectAlphaProjectAdoptionReview } from "./project-alpha-project-adoption-review-consumer";
 import { planProjectAlphaProjectAdoptionBind } from "./project-alpha-project-adoption-bind-consumer";
+import { listAuthorizedProjectAlphaProjectAdoptionCandidates } from "./project-alpha-project-adoption-candidates-consumer";
 import {
   readConfiguredProjectAlphaProjectBindingStatus,
 } from "./project-alpha-project-binding-status-api-v2";
@@ -576,5 +577,21 @@ export function registerProjectAlphaPrivateAdminRoutes(app: App): void {
     await currentReviewer(c.env, c.get("principal"));
     return c.json(await planProjectAlphaProjectAdoptionBind(c.env,
       principalActor(c.get("principal")), input));
+  });
+  app.get(`${PROJECT_ALPHA_PRIVATE_ADMIN_ROUTE}/projects/adoption/candidates`, async c => {
+    if (!projectAdoptionReviewEnabled(c.env)) throw new HTTPException(404, { message: "Not found" });
+    const params = new URL(c.req.url).searchParams;
+    if ([...params.keys()].some(key => key !== "sourceId" && key !== "cursor" && key !== "limit")
+      || params.getAll("sourceId").length !== 1 || params.getAll("cursor").length > 1
+      || params.getAll("limit").length > 1)
+      throw new HTTPException(400, { message: "Project adoption candidate query is invalid" });
+    const sourceId = params.get("sourceId") ?? "";
+    const cursor = params.has("cursor") ? params.get("cursor") : undefined;
+    const rawLimit = params.get("limit");
+    if (rawLimit !== null && !/^(?:[1-9]|[1-9][0-9]|1[0-9]{2}|200)$/.test(rawLimit))
+      throw new HTTPException(400, { message: "Project adoption candidate query is invalid" });
+    const outcome = await listAuthorizedProjectAlphaProjectAdoptionCandidates(c.env,
+      principalActor(c.get("principal")), { sourceId, cursor, limit: rawLimit === null ? undefined : Number(rawLimit) }, fetch);
+    return c.json({ outcome });
   });
 }

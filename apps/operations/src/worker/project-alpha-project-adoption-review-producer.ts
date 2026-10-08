@@ -1,8 +1,9 @@
 /**
- * Private, unmounted producer for one short-lived 0124 Project adoption review.
+ * Private producer for one short-lived 0124 Project adoption review.
  * The caller supplies an authenticated actor and a deliberate server selection;
  * deployment configuration, native authority, Directory identity, and every PA
- * observation are loaded here. No route, queue, or scheduler imports this file.
+ * observation are loaded here. The default-off private administrator route is
+ * its only runtime entry point; no queue or scheduler invokes it.
  */
 import {
   resolveProjectAlphaApiV2Connection,
@@ -15,6 +16,10 @@ import {
 } from "./project-alpha-project-read-api-v2";
 import { readConfiguredProjectAlphaProjectBindingStatus } from "./project-alpha-project-binding-status-api-v2";
 import { readConfiguredProjectAlphaProjectInventory, type ProjectAlphaProjectInventory } from "./project-alpha-project-inventory-api-v2";
+import {
+  readConfiguredProjectAlphaProjectAdoptionCandidates,
+  type ProjectAlphaProjectAdoptionCandidates,
+} from "./project-alpha-project-adoption-candidates-api-v2";
 
 export type ProjectAlphaProjectAdoptionReviewProducerEnvironment =
   ProjectAlphaApiV2ConnectionEnvironment & Readonly<{ OPS_DB: D1Database }>;
@@ -78,13 +83,22 @@ type Receipt = Readonly<{
   normalized_scopes_json: string;
   expires_at: string;
 }>;
-type RemoteEvidence = Readonly<{
+type BoundRemoteEvidence = Readonly<{
+  kind: "bound";
   detail: ValidatedProjectAlphaProjectRead;
   binding: Extract<Awaited<ReturnType<typeof readConfiguredProjectAlphaProjectBindingStatus>>, { status: "observed" }>;
   inventory: readonly ProjectAlphaProjectInventory[];
   authorizationGeneration: string;
   independentEvidenceSha256: string;
 }>;
+type CandidateRemoteEvidence = Readonly<{
+  kind: "candidate";
+  detail: ValidatedProjectAlphaProjectRead;
+  candidates: readonly ProjectAlphaProjectAdoptionCandidates[];
+  authorizationGeneration: string;
+  independentEvidenceSha256: string;
+}>;
+type RemoteEvidence = BoundRemoteEvidence | CandidateRemoteEvidence;
 
 function ownData(value: unknown, fields: readonly string[]): value is Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)
@@ -258,10 +272,43 @@ async function remoteEvidence(env: ProjectAlphaProjectAdoptionReviewProducerEnvi
     readConfiguredProjectAlphaProjectBindingStatus(env, input.sourceId, input.externalProjectId, send),
   ]);
   if (detailOutcome.status !== "read") return remoteOutcome(detailOutcome);
-  if (binding.status !== "observed") return remoteOutcome(binding);
   const detail = validatedProjectAlphaProjectRead(detailOutcome);
   if (!detail) return { status: "uncertain", reason: "remote" };
   const resource = detail.response.resource, data = detail.response.data;
+  if (binding.status === "not_found") {
+    const candidates: ProjectAlphaProjectAdoptionCandidates[] = [];
+    let cursor: string | null = null, previous: string | null = null, matches = 0;
+    let authorizationGeneration: string | null = null;
+    for (let page = 0; page < MAX_INVENTORY_PAGES; page += 1) {
+      const outcome = await readConfiguredProjectAlphaProjectAdoptionCandidates(
+        env, input.sourceId, { cursor, limit: 200 }, send);
+      if (outcome.status !== "observed") return remoteOutcome(outcome);
+      if (authorizationGeneration !== null
+        && outcome.response.authorizationGeneration !== authorizationGeneration)
+        return { status: "blocked", reason: "remote" };
+      authorizationGeneration ??= outcome.response.authorizationGeneration;
+      for (const item of outcome.response.projects) {
+        if (previous !== null && item.publicId <= previous) return { status: "blocked", reason: "remote" };
+        previous = item.publicId;
+        if (item.publicId !== input.projectAlphaPublicId) continue;
+        matches += 1;
+        if (item.revision !== resource.revision || item.projectionSha256 !== resource.projectionSha256
+          || item.name !== data.name || item.status !== data.status || item.archived !== false
+          || data.archived !== false || item.organizationPublicId !== data.organizationPublicId
+          || item.clientPublicId !== data.clientPublicId) return { status: "blocked", reason: "remote" };
+      }
+      candidates.push(outcome.response);
+      if (outcome.response.nextCursor === null) break;
+      cursor = outcome.response.nextCursor;
+      if (page === MAX_INVENTORY_PAGES - 1) return { status: "blocked", reason: "remote" };
+    }
+    if (matches !== 1 || authorizationGeneration === null) return { status: "blocked", reason: "remote" };
+    const independentEvidenceSha256 = await sha256(canonical({ version: 2,
+      candidatePages: candidates.map(page => ({ authorizationGeneration: page.authorizationGeneration,
+        projects: page.projects, nextCursor: page.nextCursor })) }));
+    return { kind: "candidate", detail, candidates, authorizationGeneration, independentEvidenceSha256 };
+  }
+  if (binding.status !== "observed") return remoteOutcome(binding);
   if (binding.response.binding.publicId !== input.projectAlphaPublicId
     || binding.response.resource.revision !== resource.revision
     || binding.response.resource.projectionSha256 !== resource.projectionSha256
@@ -297,7 +344,8 @@ async function remoteEvidence(env: ProjectAlphaProjectAdoptionReviewProducerEnvi
       binding: binding.response.binding, resource: binding.response.resource },
     inventory: inventory.map(page => ({ authorizationGeneration: page.authorizationGeneration,
       projects: page.projects, nextCursor: page.nextCursor })) }));
-  return { detail, binding, inventory, authorizationGeneration: binding.response.authorizationGeneration, independentEvidenceSha256 };
+  return { kind: "bound", detail, binding, inventory,
+    authorizationGeneration: binding.response.authorizationGeneration, independentEvidenceSha256 };
 }
 async function prior(db: D1Database, idempotencyKey: string, requestSha256: string): Promise<Receipt | null> {
   return db.prepare(`SELECT receipt.idempotency_key,receipt.request_sha256,receipt.canonical_request_json,

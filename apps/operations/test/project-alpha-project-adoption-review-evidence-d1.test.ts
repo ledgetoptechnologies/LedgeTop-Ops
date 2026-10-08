@@ -5,6 +5,7 @@ import { splitD1MigrationStatements } from "../../client/test/helpers/d1-migrati
 import { reserveProjectAlphaProjectAdoptionReview } from "../src/worker/project-alpha-project-adoption-review-consumer";
 import { planProjectAlphaProjectAdoptionBind } from "../src/worker/project-alpha-project-adoption-bind-consumer";
 import { produceProjectAlphaProjectAdoptionReview } from "../src/worker/project-alpha-project-adoption-review-producer";
+import { listAuthorizedProjectAlphaProjectAdoptionCandidates } from "../src/worker/project-alpha-project-adoption-candidates-consumer";
 import { dispatchProjectAlphaProjectV2PendingCommand } from "../src/worker/project-alpha-project-v2-pending-dispatcher";
 
 let runtime: Miniflare;
@@ -44,7 +45,7 @@ function producerJson(value: unknown, raw?: string, requestId = producerRequestI
 function producerCapabilities(requestId = producerRequestId) {
   return { apiVersion: "2", sourceInstanceId, applicationId, historyEpoch: historyEpochId,
     requestId, grantedCapabilities: ["api.capabilities.read", "projects.v2.read",
-      "projects.binding_status.read", "projects.inventory.read"].map(name => ({ name })), implementedEndpoints: [
+      "projects.binding_status.read", "projects.inventory.read", "projects.adoption_candidates.read"].map(name => ({ name })), implementedEndpoints: [
       { method: "GET", path: "/api/v2/capabilities", requiredCapability: "api.capabilities.read" },
       { method: "GET", path: "/api/v2/projects/{publicId}", requiredCapability: "projects.v2.read",
         requiresSourceInstanceId: true, requiresApplicationId: true, requiresHistoryEpoch: true },
@@ -53,6 +54,8 @@ function producerCapabilities(requestId = producerRequestId) {
         requiresApplicationId: true, requiresHistoryEpoch: true },
       { method: "GET", path: "/api/v2/projects/inventory", requiredCapability: "projects.inventory.read",
         requiresSourceInstanceId: true, requiresApplicationId: true, requiresHistoryEpoch: true },
+      { method: "GET", path: "/api/v2/projects/adoption-candidates", requiredCapability: "projects.adoption_candidates.read",
+        requiresSourceInstanceId: true, requiresApplicationId: true, requiresHistoryEpoch: true },
     ] };
 }
 type ProducerRemote = {
@@ -60,7 +63,9 @@ type ProducerRemote = {
   detail?: unknown;
   detailRaw?: string;
   binding?: Record<string, unknown>;
+  bindingNotFound?: boolean;
   inventory?: Record<string, unknown>;
+  candidates?: Record<string, unknown>;
 };
 function producerSend(overrides: ProducerRemote = {}) {
   const requestId = overrides.requestId ?? producerRequestId;
@@ -73,11 +78,17 @@ function producerSend(overrides: ProducerRemote = {}) {
     historyEpoch: historyEpochId, requestId, authorizationGeneration: "0",
     projects: [{ externalId: "server-generated-project", publicId, revision: "7", projectionSha256: hash,
       status: "active", archived: false }], nextCursor: null };
+  const candidates = overrides.candidates ?? { apiVersion: "2", sourceInstanceId, applicationId,
+    historyEpoch: historyEpochId, requestId, authorizationGeneration: "0",
+    projects: [{ publicId, revision: "7", projectionSha256: hash, name: "Reviewed Project",
+      status: "active", archived: false, organizationPublicId, clientPublicId: null }], nextCursor: null };
   return vi.fn<typeof fetch>(async url => {
     const value = String(url);
     if (value.endsWith("/api/v2/capabilities")) return producerJson(producerCapabilities(requestId), undefined, requestId);
-    if (value.includes("/api/v2/projects/bindings/status/")) return producerJson(binding, undefined, requestId);
+    if (value.includes("/api/v2/projects/bindings/status/")) return overrides.bindingNotFound
+      ? producerJson(null, "", requestId, 404) : producerJson(binding, undefined, requestId);
     if (value.includes("/api/v2/projects/inventory?")) return producerJson(inventory, undefined, requestId);
+    if (value.includes("/api/v2/projects/adoption-candidates?")) return producerJson(candidates, undefined, requestId);
     if (value.endsWith(`/api/v2/projects/${publicId}`)) return producerJson(detail, overrides.detailRaw, requestId);
     return new Response(null, { status: 404 });
   });
@@ -387,6 +398,98 @@ describe("0124 project adoption review evidence", () => {
   });
 });
 
+describe("authorized unbound project discovery", () => {
+  it("returns only relationship-mapped candidates under current non-project-specific sync authority without writes", async () => {
+    await seedAuthority();
+    await db.prepare(`INSERT INTO native_project_grants(id,staff_id,capability,effect,scope_kind,granted_by)
+      VALUES('global-discovery','staff','project.shared.sync','allow','global','staff')`).run();
+    const before = await db.prepare("SELECT count(*) count FROM project_alpha_project_adoption_review_evidence").first("count");
+    const outcome = await listAuthorizedProjectAlphaProjectAdoptionCandidates(producerEnv(), reviewerActor,
+      { sourceId: "project-alpha:primary", limit: 200 }, producerSend({ bindingNotFound: true }));
+    expect(outcome).toEqual({ status: "observed", authorizationGeneration: "0", projects: [{
+      publicId, revision: "7", projectionSha256: hash, name: "Reviewed Project", status: "active",
+      archived: false, organizationPublicId, clientPublicId: null,
+      organizationRecordId: "organization-record", clientRecordId: null,
+    }], nextCursor: null });
+    expect(await db.prepare("SELECT count(*) count FROM project_alpha_project_adoption_review_evidence").first("count")).toBe(before);
+    expect(await db.prepare("SELECT count(*) count FROM project_alpha_project_outbox").first("count")).toBe(0);
+  });
+
+  it("does not treat an exact-project grant as authority to discover an unbound PA project", async () => {
+    await seedAuthority();
+    await expect(listAuthorizedProjectAlphaProjectAdoptionCandidates(producerEnv(), reviewerActor,
+      { sourceId: "project-alpha:primary" }, producerSend({ bindingNotFound: true })))
+      .resolves.toMatchObject({ status: "observed", projects: [] });
+  });
+
+  it("fails closed for stale native actor state and invalid bounded input", async () => {
+    await seedAuthority();
+    await db.prepare("UPDATE native_staff_profiles SET version=2 WHERE staff_id='staff'").run();
+    await expect(listAuthorizedProjectAlphaProjectAdoptionCandidates(producerEnv(),
+      { staffId: "staff", accessSubject: "wrong" }, { sourceId: "project-alpha:primary" }, producerSend()))
+      .resolves.toEqual({ status: "blocked", reason: "authority" });
+    await expect(listAuthorizedProjectAlphaProjectAdoptionCandidates(producerEnv(), reviewerActor,
+      { sourceId: "project-alpha:primary", limit: 201 }, producerSend()))
+      .resolves.toEqual({ status: "rejected", reason: "invalid_query" });
+  });
+
+  it.each([
+    ["scope deactivation", "UPDATE native_business_areas SET active=0 WHERE id='area'"],
+    ["relationship removal", "DELETE FROM operations_directory_client_organizations"],
+    ["mapping replacement", "DELETE FROM project_alpha_directory_mappings WHERE external_id='organization-record'"],
+  ])("fails closed on concurrent %s during final candidate authorization", async (_label, mutation) => {
+    await seedAuthority();
+    await db.batch([
+      db.prepare(`INSERT INTO native_project_grants(id,staff_id,capability,effect,scope_kind,granted_by)
+        VALUES('global-discovery','staff','project.shared.sync','allow','global','staff')`),
+      db.prepare("INSERT INTO native_business_areas VALUES('area',1)"),
+      db.prepare("INSERT INTO native_directory_resource_scopes VALUES('organization-record','business_area','area',NULL,1)"),
+    ]);
+    const original = db;
+    let grantReads = 0;
+    const racing = new Proxy(original, { get(target, property) {
+      if (property !== "prepare") {
+        const value = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      }
+      return (sql: string) => {
+        const prepared = target.prepare(sql);
+        if (!sql.includes("FROM native_project_grants")) return prepared;
+        return new Proxy(prepared, { get(statement, member) {
+          if (member !== "bind") {
+            const value = Reflect.get(statement, member, statement);
+            return typeof value === "function" ? value.bind(statement) : value;
+          }
+          return (...binds: unknown[]) => {
+            const bound = statement.bind(...binds);
+            return new Proxy(bound, { get(boundStatement, boundMember) {
+              if (boundMember !== "all") {
+                const value = Reflect.get(boundStatement, boundMember, boundStatement);
+                return typeof value === "function" ? value.bind(boundStatement) : value;
+              }
+              return async <T>() => {
+                grantReads += 1;
+                if (grantReads === 2) await target.prepare(mutation).run();
+                return boundStatement.all<T>();
+              };
+            } });
+          };
+        } });
+      };
+    } }) as D1Database;
+    const client = _label === "relationship removal";
+    if (client) await seedActivatedClient(true);
+    const detail = client ? JSON.parse(detailJson(clientPublicId)) : undefined;
+    const candidates = client ? { apiVersion: "2", sourceInstanceId, applicationId, historyEpoch: historyEpochId,
+      requestId: producerRequestId, authorizationGeneration: "0", projects: [{ publicId, revision: "7",
+        projectionSha256: hash, name: "Reviewed Project", status: "active", archived: false,
+        organizationPublicId, clientPublicId }], nextCursor: null } : undefined;
+    await expect(listAuthorizedProjectAlphaProjectAdoptionCandidates(producerEnv(racing), reviewerActor,
+      { sourceId: "project-alpha:primary" }, producerSend({ bindingNotFound: true, detail, candidates })))
+      .resolves.toEqual({ status: "blocked", reason: "authority" });
+  });
+});
+
 describe("private project adoption review producer", () => {
   it("creates and exactly replays one short-lived review without public-state mutation", async () => {
     await seedAuthority();
@@ -408,6 +511,39 @@ describe("private project adoption review producer", () => {
     expect((await db.prepare("SELECT * FROM delivery_public_shares ORDER BY id").all()).results).toEqual(publicBefore.results);
     expect(await db.prepare("SELECT count(*) count FROM operations_shared_projects").first("count")).toBe(0);
     expect(await db.prepare("SELECT count(*) count FROM project_alpha_project_outbox").first("count")).toBe(0);
+  });
+
+  it("creates review evidence for an exact unbound adoption candidate only after a genuine binding 404", async () => {
+    await seedAuthority();
+    const send = producerSend({ bindingNotFound: true });
+    const result = await produceReview(send);
+    expect(result).toMatchObject({ status: "reviewed", replayed: false });
+    expect(send.mock.calls.some(([url]) => String(url).includes("/projects/adoption-candidates?"))).toBe(true);
+    expect(send.mock.calls.some(([url]) => String(url).includes("/projects/inventory?"))).toBe(false);
+    expect(await db.prepare("SELECT count(*) count FROM operations_shared_projects").first("count")).toBe(0);
+    expect(await db.prepare("SELECT count(*) count FROM project_alpha_project_outbox").first("count")).toBe(0);
+  });
+
+  it("rejects candidate drift and never falls back for a non-404 binding failure", async () => {
+    await seedAuthority();
+    await expect(produceReview(producerSend({ bindingNotFound: true, candidates: {
+      apiVersion: "2", sourceInstanceId, applicationId, historyEpoch: historyEpochId,
+      requestId: producerRequestId, authorizationGeneration: "0", projects: [{
+        publicId, revision: "7", projectionSha256: hash, name: "Different Project", status: "active",
+        archived: false, organizationPublicId, clientPublicId: null,
+      }], nextCursor: null,
+    } }))).resolves.toEqual({ status: "blocked", reason: "remote" });
+    const forbidden = producerSend();
+    forbidden.mockImplementation(async url => {
+      const value = String(url);
+      if (value.endsWith("/api/v2/capabilities")) return producerJson(producerCapabilities());
+      if (value.includes("/api/v2/projects/bindings/status/"))
+        return producerJson(null, "", producerRequestId, 403);
+      if (value.endsWith(`/api/v2/projects/${publicId}`)) return producerJson(JSON.parse(detailJson()));
+      throw new Error("candidate fallback must not run");
+    });
+    await expect(produceReview(forbidden)).resolves.toEqual({ status: "blocked", reason: "remote" });
+    expect(forbidden.mock.calls.some(([url]) => String(url).includes("/projects/adoption-candidates?"))).toBe(false);
   });
 
   it("replays stable semantic evidence across fresh PA request IDs without replacing byte-exact evidence", async () => {
