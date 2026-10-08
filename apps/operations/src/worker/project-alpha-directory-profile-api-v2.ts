@@ -103,6 +103,7 @@ export type ProjectAlphaDirectoryProfileTransportFailure = Readonly<{
   reason: "invalid_command" | "request_limit" | "preflight" | "http_status" | "timeout" | "transport" | "response_limit" | "invalid_contract";
   httpStatus?: number;
   requestId?: string;
+  errorCode?: "authorization_generation_conflict";
   preflight?: ProjectAlphaApiV2Probe;
 }>;
 export type ProjectAlphaDirectoryProfileOutcome =
@@ -229,13 +230,50 @@ function createSuccess(value: unknown, kind: ProjectAlphaDirectoryProfileKind, c
     && value.result.resource.revision === "1" && value.result.authorizationGeneration === increment(command.expectedAuthorizationGeneration)
     && (httpStatus === 201 ? value.replayed === false : value.replayed === true);
 }
-async function post(connection: ProjectAlphaApiV2Connection, path: string, body: string, expectedStatus: number | readonly number[], send: typeof fetch): Promise<Response | ProjectAlphaDirectoryProfileTransportFailure> {
+type GenerationConflictEvidence = Readonly<{ commandJson: string; destinationOrigin: string; requestId: string;
+  sourceInstanceId: string; applicationId: string; historyEpoch: string }>;
+const generationConflicts = new WeakMap<object, GenerationConflictEvidence>();
+/** Proof exists only for an exact create response validated by this transport.
+ * A caller-supplied errorCode or historical generic 409 is not evidence. */
+export function validatedProjectAlphaDirectoryCreateGenerationConflict(outcome: unknown): GenerationConflictEvidence | null {
+  return outcome && typeof outcome === "object" ? generationConflicts.get(outcome) ?? null : null;
+}
+function generationConflict(value: unknown, connection: ProjectAlphaApiV2Connection, requestId: string | undefined): boolean {
+  return plain(value) && exact(value, ["apiVersion", "sourceInstanceId", "applicationId", "historyEpoch", "requestId", "error"])
+    && value.apiVersion === "2" && value.sourceInstanceId === connection.expectedSourceInstanceId
+    && value.applicationId === connection.expectedApplicationId && value.historyEpoch === connection.expectedHistoryEpoch
+    && uuid(value.requestId) && value.requestId === requestId && plain(value.error)
+    && exact(value.error, ["code"]) && value.error.code === "authorization_generation_conflict";
+}
+async function post(connection: ProjectAlphaApiV2Connection, path: string, body: string, expectedStatus: number | readonly number[], send: typeof fetch,
+  inspectCreateConflict = false): Promise<Response | ProjectAlphaDirectoryProfileTransportFailure> {
   const controller = new AbortController(); const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
   try {
     const response = await send(new URL(path, connection.baseUrl), { method: "POST", headers: headers(connection), body, redirect: "manual", credentials: "omit", cache: "no-store", signal: controller.signal });
     if (response.redirected || (response.status >= 300 && response.status < 400)) { await response.body?.cancel(); return { status: "uncertain", reason: "invalid_contract", ...diagnostic(response) }; }
     const accepted = Array.isArray(expectedStatus) ? expectedStatus.includes(response.status) : response.status === expectedStatus;
-    if (!accepted) { const failure = statusFailure(response, expectedStatus); await response.body?.cancel(); return failure; }
+    if (!accepted) {
+      const failure = statusFailure(response, expectedStatus);
+      if (inspectCreateConflict && failure.status === "conflict" && response.status === 409) {
+        try {
+          const parsed = await boundedJson(response);
+          if (generationConflict(parsed, connection, failure.requestId)) {
+            const outcome = { ...failure, errorCode: "authorization_generation_conflict" as const };
+            generationConflicts.set(outcome, Object.freeze({ commandJson: body, destinationOrigin: new URL(connection.baseUrl).origin,
+              requestId: failure.requestId!, sourceInstanceId: connection.expectedSourceInstanceId,
+              applicationId: connection.expectedApplicationId, historyEpoch: connection.expectedHistoryEpoch! }));
+            return outcome;
+          }
+        } catch (error) {
+          if (error instanceof Error && (error.message === "response_limit" || error.message === "transport"))
+            return { status: "uncertain", reason: error.message, ...diagnostic(response) };
+          // Empty, malformed, duplicate-key and unknown envelopes preserve the
+          // legacy generic conflict; none supplies recovery authority.
+        }
+        return failure;
+      }
+      await response.body?.cancel(); return failure;
+    }
     if (!trusted(response)) { await response.body?.cancel(); return { status: "uncertain", reason: "invalid_contract", ...diagnostic(response) }; }
     return response;
   } catch { return { status: "uncertain", reason: controller.signal.aborted ? "timeout" : "transport" }; }
@@ -283,7 +321,7 @@ export async function sendProjectAlphaDirectoryCreate(connectionInput: ProjectAl
       ? ["directory.clients.organization.assign"] : [];
     const preflight = await probeProjectAlphaApiV2(connection, [], send, [required], requiredGrantedCapabilities);
     if (preflight.status !== "verified") return preflightFailure(preflight);
-    const posted = await post(connection, required.path, body, [200, 201], send); if (!(posted instanceof Response)) return posted;
+    const posted = await post(connection, required.path, body, [200, 201], send, true); if (!(posted instanceof Response)) return posted;
     const info = diagnostic(posted);
     try { const parsed = await boundedJson(posted); if (!createSuccess(parsed, kind, inputCommand, connection, info.requestId, posted.status)) return { status: "uncertain", reason: "invalid_contract", ...info }; const outcome = { status: "acknowledged" as const, httpStatus: posted.status as 200 | 201, response: parsed }; acknowledgements.set(outcome, { commandJson: body, responseJson: JSON.stringify(parsed), destinationOrigin: new URL(connection.baseUrl).origin }); return outcome; }
     catch (error) { return { status: "uncertain", reason: error instanceof Error && error.message === "response_limit" ? "response_limit" : error instanceof Error && error.message === "transport" ? "transport" : "invalid_contract", ...info }; }

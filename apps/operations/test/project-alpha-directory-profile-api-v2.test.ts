@@ -3,6 +3,7 @@ import {
   sendConfiguredProjectAlphaDirectoryCreate,
   sendProjectAlphaDirectoryCreate,
   sendProjectAlphaDirectoryProfileUpdate,
+  validatedProjectAlphaDirectoryCreateGenerationConflict,
   type ProjectAlphaDirectoryClientCreateCommand,
   type ProjectAlphaDirectoryClientCreateProfile,
   type ProjectAlphaDirectoryClientUpdateProfile,
@@ -47,6 +48,61 @@ function createReceipt(kind: "client" | "organization", externalId: string, publ
 }
 
 describe("Project Alpha API-v2 Directory profile transport", () => {
+  const staleEnvelope = () => ({ apiVersion: "2", sourceInstanceId: source, applicationId: application,
+    historyEpoch: epoch, requestId, error: { code: "authorization_generation_conflict" } });
+  const staleCommand: ProjectAlphaDirectoryClientCreateCommand = { commandId, externalId: "ops/client/stale",
+    expectedAuthorizationGeneration: "7", profile: clientProfile, organization: null };
+  function staleTransport(make: () => Response): typeof fetch {
+    return vi.fn<typeof fetch>(async url => String(url).endsWith("/capabilities")
+      ? json(capabilities(endpoint("client", "create"))) : make());
+  }
+  it("retains only an exact, trusted create-generation discriminator with unforgeable transport evidence", async () => {
+    const outcome = await sendProjectAlphaDirectoryCreate(connection, "client", staleCommand,
+      staleTransport(() => json(staleEnvelope(), 409)));
+    expect(outcome).toEqual({ status: "conflict", reason: "http_status", httpStatus: 409, requestId,
+      errorCode: "authorization_generation_conflict" });
+    expect(validatedProjectAlphaDirectoryCreateGenerationConflict(outcome)).toEqual({ commandJson: JSON.stringify(staleCommand),
+      destinationOrigin: connection.baseUrl, requestId, sourceInstanceId: source, applicationId: application, historyEpoch: epoch });
+    expect(validatedProjectAlphaDirectoryCreateGenerationConflict({ ...outcome })).toBeNull();
+    expect(validatedProjectAlphaDirectoryCreateGenerationConflict(null)).toBeNull();
+  });
+  it.each([
+    ["empty", () => new Response("", { status: 409, headers: json(null).headers })],
+    ["malformed", () => new Response("{", { status: 409, headers: json(null).headers })],
+    ["duplicate key", () => new Response(JSON.stringify(staleEnvelope()).replace('"apiVersion":"2"', '"apiVersion":"2","apiVersion":"2"'), { status: 409, headers: json(null).headers })],
+    ["unknown code", () => json({ ...staleEnvelope(), error: { code: "external_id_conflict" } }, 409)],
+    ["extra key", () => json({ ...staleEnvelope(), detail: "untrusted upstream text" }, 409)],
+    ["extra error key", () => json({ ...staleEnvelope(), error: { code: "authorization_generation_conflict", detail: "private" } }, 409)],
+    ["wrong version", () => json({ ...staleEnvelope(), apiVersion: "3" }, 409)],
+    ["wrong source", () => json({ ...staleEnvelope(), sourceInstanceId: commandId }, 409)],
+    ["wrong application", () => json({ ...staleEnvelope(), applicationId: commandId }, 409)],
+    ["wrong epoch", () => json({ ...staleEnvelope(), historyEpoch: commandId }, 409)],
+    ["wrong request", () => json({ ...staleEnvelope(), requestId: commandId }, 409)],
+  ])("does not authorize recovery from %s conflicts", async (_name, make) => {
+    const outcome = await sendProjectAlphaDirectoryCreate(connection, "client", staleCommand, staleTransport(make));
+    expect(outcome).toEqual({ status: "conflict", reason: "http_status", httpStatus: 409, requestId });
+    expect(validatedProjectAlphaDirectoryCreateGenerationConflict(outcome)).toBeNull();
+  });
+  it.each([
+    ["cookie", { "Set-Cookie": "forbidden" }],
+    ["redirect", { Location: "https://elsewhere.example.test" }],
+    ["cache", { "Cache-Control": "public" }],
+    ["content type", { "Content-Type": "text/html" }],
+  ])("rejects an otherwise valid discriminator with untrusted %s headers", async (_name, headers) => {
+    const outcome = await sendProjectAlphaDirectoryCreate(connection, "client", staleCommand,
+      staleTransport(() => json(staleEnvelope(), 409, headers)));
+    expect(outcome).toMatchObject({ status: "uncertain", reason: "invalid_contract" });
+    expect(validatedProjectAlphaDirectoryCreateGenerationConflict(outcome)).toBeNull();
+  });
+  it("bounds declared and streamed conflict bodies", async () => {
+    for (const make of [() => json(staleEnvelope(), 409, { "Content-Length": "65537" }),
+      () => new Response("x".repeat(65537), { status: 409, headers: json(null).headers })]) {
+      const outcome = await sendProjectAlphaDirectoryCreate(connection, "client", staleCommand, staleTransport(make));
+      expect(outcome).toMatchObject({ status: "uncertain", reason: "response_limit" });
+      expect(validatedProjectAlphaDirectoryCreateGenerationConflict(outcome)).toBeNull();
+    }
+  });
+
   it("sends the exact PA organization profile update contract and identity fences", async () => {
     const command: ProjectAlphaDirectoryProfileUpdateCommand = { commandId, expectedRevision: "1", expectedAuthorizationGeneration: "7", profile: organizationProfile };
     const send = vi.fn<typeof fetch>(async (url, init) => {
