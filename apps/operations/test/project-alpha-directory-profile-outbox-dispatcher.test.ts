@@ -20,22 +20,27 @@ function uuid() { return `00000000-0000-4000-8000-${String(sequence++).padStart(
 function json(value: unknown, status = 200) { return new Response(JSON.stringify(value), { status, headers: {
   "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store", "X-Request-ID": requestId,
 } }); }
-function capabilities() {
+function capabilities(extraGrantedCapabilities: string[] = []) {
   const endpoints = (["organizations", "clients"] as const).flatMap(plural => [
     { method: "POST", path: `/api/v2/directory/${plural}/commands`, requiredCapability: `directory.${plural}.create`, requiresSourceInstanceId: true, requiresApplicationId: true, requiresHistoryEpoch: true },
     { method: "POST", path: `/api/v2/directory/${plural}/{publicId}/profile/commands`, requiredCapability: `directory.${plural}.write`, requiresSourceInstanceId: true, requiresApplicationId: true, requiresHistoryEpoch: true },
   ]);
+  if (extraGrantedCapabilities.includes("directory.clients.organization.assign")) endpoints.push({
+    method: "POST", path: "/api/v2/directory/clients/{publicId}/organization/assign/commands",
+    requiredCapability: "directory.clients.organization.assign", requiresSourceInstanceId: true,
+    requiresApplicationId: true, requiresHistoryEpoch: true,
+  });
   return { apiVersion: "2", sourceInstanceId: source, applicationId: application, historyEpoch: epoch, requestId,
-    grantedCapabilities: ["api.capabilities.read", "directory.organizations.create", "directory.organizations.write", "directory.clients.create", "directory.clients.write"].map(name => ({ name })),
+    grantedCapabilities: [...new Set(["api.capabilities.read", "directory.organizations.create", "directory.organizations.write", "directory.clients.create", "directory.clients.write", ...extraGrantedCapabilities])].map(name => ({ name })),
     implementedEndpoints: [{ method: "GET", path: "/api/v2/capabilities", requiredCapability: "api.capabilities.read" }, ...endpoints] };
 }
 function transport(publicId: string, generation: string, posts: unknown[], failure?: number, expire?: () => Promise<void>,
-  responseRevision = "2", replayed = false) {
+  responseRevision = "2", replayed = false, extraGrantedCapabilities: string[] = []) {
   return vi.fn<typeof fetch>(async (url, init) => {
     const path = new URL(String(url)).pathname;
     const kind = path.includes("/clients") ? "client" : "organization";
     const update = path.includes("/profile/commands");
-    if (path.endsWith("/capabilities")) return json(capabilities());
+    if (path.endsWith("/capabilities")) return json(capabilities(extraGrantedCapabilities));
     const body = JSON.parse(String(init?.body)); posts.push(body); if (expire) await expire();
     if (failure) return json({}, failure);
     return json({ sourceInstanceId: source, applicationId: application, historyEpoch: epoch, requestId, replayed,
@@ -162,7 +167,8 @@ describe("native Directory profile outbox dispatcher", () => {
 
     const client = await create("client", organization.input.recordId), posts: unknown[] = [];
     await expect(dispatchProjectAlphaDirectoryProfileOutboxCommand(env(), sourceId, client.commandId,
-      transport("8".repeat(32), "1", posts))).resolves.toMatchObject({ status: "acknowledged", revision: "1" });
+      transport("8".repeat(32), "1", posts, undefined, undefined, "2", false, ["directory.clients.organization.assign"])))
+      .resolves.toMatchObject({ status: "acknowledged", revision: "1" });
     expect(posts).toEqual([{ commandId: client.commandId, externalId: client.input.recordId,
       expectedAuthorizationGeneration: "0", profile: clientProfile,
       organization: { externalId: organization.input.recordId, expectedRevision: "2" } }]);
