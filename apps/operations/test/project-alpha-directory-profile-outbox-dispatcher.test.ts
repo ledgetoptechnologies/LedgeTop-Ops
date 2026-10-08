@@ -4,6 +4,7 @@ import { Miniflare } from "miniflare";
 import { splitD1MigrationStatements } from "../../client/test/helpers/d1-migrations";
 import { writeNativeDirectoryProfile, type NativeDirectoryCreateWrite, type NativeDirectoryProfileWrite } from "../src/worker/native-directory-profile-writer";
 import { dispatchProjectAlphaDirectoryProfileOutboxCommand } from "../src/worker/project-alpha-directory-profile-outbox-dispatcher";
+import { drainNativeDirectoryOutboxes } from "../src/worker/native-directory-outbox-scheduler";
 
 let runtime: Miniflare, db: D1Database, sequence = 1;
 const sourceId = "project-alpha:primary", source = "11111111-1111-4111-8111-111111111111";
@@ -13,6 +14,8 @@ const organizationProfile = { name: "Organization", generalEmail: "org@example.t
   addressLine1: "1 Main", addressLine2: "", city: "Austin", state: "Texas", postalCode: "78701", country: "US" } as const;
 const clientProfile = { name: "Client", email: "client@example.test", phone: "512-555-0101", clientType: "business" as const,
   addressLine1: "2 Main", addressLine2: "", city: "Austin", state: "TX", postalCode: "78702", country: "US" } as const;
+const nameOnlyClientProfile = { name: "Synthetic Portal Acceptance", email: "", phone: "", clientType: "unknown" as const,
+  addressLine1: "", addressLine2: "", city: "", state: "", postalCode: "", country: "" } as const;
 const env = (overrides: Record<string, unknown> = {}) => ({ OPS_DB: db, PROJECT_ALPHA_API_V2_CONNECTIONS: JSON.stringify({ version: 1, instances: {
   [sourceId]: { sourceId, enabled: true, baseUrl, apiKey: "secret", sourceInstanceId: source, applicationId: application, historyEpoch: epoch },
 } }), ...overrides });
@@ -48,22 +51,26 @@ function transport(publicId: string, generation: string, posts: unknown[], failu
         : { type: kind, id: body.externalId, publicId, revision: "1" }, authorizationGeneration: generation } }, update ? 200 : 201);
   });
 }
-async function actor() {
+async function actor(scope: "global" | "business_area" = "global") {
   const staffId = `staff-${sequence++}`, accessSubject = `access|${staffId}`, loginEmail = `${staffId}@example.test`;
   await db.batch([
     db.prepare("INSERT INTO staff_users(id,email,display_name,access_subject,status) VALUES(?,?,?,?, 'active')").bind(staffId, loginEmail, staffId, accessSubject),
     db.prepare("INSERT INTO native_staff_admissions(staff_id,bound_access_subject,active,admitted_by) VALUES(?,?,1,'owner')").bind(staffId, accessSubject),
     db.prepare("INSERT INTO native_staff_profiles(staff_id,login_email,display_name) VALUES(?,?,?)").bind(staffId, loginEmail, staffId),
-    db.prepare("INSERT INTO native_directory_grants(id,staff_id,permission,effect,scope_kind,granted_by) VALUES(?,?,'directory.profile.edit','allow','global','owner')").bind(`edit-${staffId}`, staffId),
-    db.prepare("INSERT INTO native_directory_grants(id,staff_id,permission,effect,scope_kind,granted_by) VALUES(?,?,'directory.identity.link','allow','global','owner')").bind(`identity-${staffId}`, staffId),
+    db.prepare("INSERT INTO native_directory_grants(id,staff_id,permission,effect,scope_kind,business_area_id,granted_by) VALUES(?,?,'directory.profile.edit','allow',?,?,'owner')")
+      .bind(`edit-${staffId}`, staffId, scope, scope === "business_area" ? "area" : null),
+    db.prepare("INSERT INTO native_directory_grants(id,staff_id,permission,effect,scope_kind,business_area_id,granted_by) VALUES(?,?,'directory.identity.link','allow',?,?,'owner')")
+      .bind(`identity-${staffId}`, staffId, scope, scope === "business_area" ? "area" : null),
   ]);
   return { staffId, accessSubject, admissionVersion: 1, selectedGrantId: `edit-${staffId}`, loginEmail, profileVersion: 1, selectedIdentityGrantId: `identity-${staffId}` };
 }
-async function create(kind: "organization" | "client", organizationRecordId: string | null = null, requestedRecordId?: string) {
-  const staff = await actor(), recordId = requestedRecordId ?? (kind === "client" ? uuid() : `ops/org/${sequence++}`), mutationId = uuid();
+async function create(kind: "organization" | "client", organizationRecordId: string | null = null, requestedRecordId?: string,
+  requestedClientProfile: typeof clientProfile | typeof nameOnlyClientProfile = clientProfile,
+  grantScope: "global" | "business_area" = "global") {
+  const staff = await actor(grantScope), recordId = requestedRecordId ?? (kind === "client" ? uuid() : `ops/org/${sequence++}`), mutationId = uuid();
   const createAdmissionId = `admission-${mutationId}`;
   const input = { operation: "create", mutationId, createAdmissionId, recordId, expectedLocalVersion: 0, kind,
-    profile: kind === "client" ? clientProfile : organizationProfile, scopes: [{ businessAreaId: "area", divisionId: "division" }],
+    profile: kind === "client" ? requestedClientProfile : organizationProfile, scopes: [{ businessAreaId: "area", divisionId: "division" }],
     destinations: [{ sourceId, sourceInstanceUUID: source, applicationUUID: application, historyEpoch: epoch, origin: baseUrl,
       externalCanonicalId: recordId, expectedAuthorizationGeneration: "0" }], actor: staff,
     ...(kind === "client" ? { relationship: { organizationRecordId, expectedRelationshipVersion: 0 } } : {}) } as NativeDirectoryCreateWrite;
@@ -116,7 +123,7 @@ beforeAll(async () => {
   runtime = new Miniflare({ modules: true, compatibilityDate: "2026-08-06", script: "export default {fetch(){return new Response('ok')}}", d1Databases: ["OPS_DB"] });
   db = await runtime.getD1Database("OPS_DB") as D1Database;
   const directory = new URL("../migrations/", import.meta.url);
-  for (const migration of readdirSync(directory).filter(name => /^\d{4}_.+\.sql$/.test(name) && name.slice(0, 4) <= "0175").sort())
+  for (const migration of readdirSync(directory).filter(name => /^\d{4}_.+\.sql$/.test(name) && name.slice(0, 4) <= "0180").sort())
     await db.batch(splitD1MigrationStatements(readFileSync(new URL(migration, directory), "utf8")).map(sql => db.prepare(sql)));
   await db.batch([
     db.prepare("INSERT INTO staff_users(id,email,display_name,access_subject,status) VALUES('owner','owner@example.test','Owner','access|owner','active')"),
@@ -129,6 +136,55 @@ beforeAll(async () => {
 afterAll(async () => runtime.dispose());
 
 describe("native Directory profile outbox dispatcher", () => {
+  it("drains a native standalone-client create through the real durable scheduler and profile dispatcher", async () => {
+    const value = await create("client", null, undefined, nameOnlyClientProfile, "business_area"), posts: unknown[] = [],
+      publicId = (sequence++).toString(16).padStart(32, "0");
+    expect(await db.prepare(`SELECT intent.state intentState,outbox.state outboxState,outbox.attempts
+      FROM operations_directory_intents intent
+      JOIN operations_directory_materializations materialization ON materialization.intent_id=intent.intent_id
+      JOIN project_alpha_directory_outbox outbox ON outbox.command_id=materialization.command_id
+      WHERE outbox.command_id=?`).bind(value.commandId).first()).toEqual({
+      intentState: "materialized", outboxState: "pending", attempts: 0,
+    });
+
+    await expect(drainNativeDirectoryOutboxes({ ...env(), NATIVE_DIRECTORY_OUTBOX_DRAIN_ENABLED: "true" }, {
+      rotationTime: 0, send: transport(publicId, "1", posts),
+    })).resolves.toMatchObject({ status: "drained", attempted: 1, acknowledged: 1, failed: 0 });
+
+    expect(posts).toEqual([{ commandId: value.commandId, externalId: value.input.recordId,
+      expectedAuthorizationGeneration: "0", profile: nameOnlyClientProfile, organization: null }]);
+    expect(await db.prepare(`SELECT intent.state intentState,outbox.state outboxState,outbox.attempts
+      FROM operations_directory_intents intent
+      JOIN operations_directory_materializations materialization ON materialization.intent_id=intent.intent_id
+      JOIN project_alpha_directory_outbox outbox ON outbox.command_id=materialization.command_id
+      WHERE outbox.command_id=?`).bind(value.commandId).first()).toEqual({
+      intentState: "acknowledged", outboxState: "acknowledged", attempts: 1,
+    });
+  });
+
+  it("leaves a durable native create unleased when its scoped authority is revoked before the scheduler tick", async () => {
+    const value = await create("client", null, undefined, nameOnlyClientProfile, "business_area"),
+      send = vi.fn<typeof fetch>(), publicId = (sequence++).toString(16).padStart(32, "0");
+    await db.prepare("UPDATE native_directory_grants SET active=0 WHERE id=?").bind(value.staff.selectedGrantId).run();
+
+    await expect(drainNativeDirectoryOutboxes({ ...env(), NATIVE_DIRECTORY_OUTBOX_DRAIN_ENABLED: "true" }, {
+      rotationTime: 0, send,
+    })).resolves.toMatchObject({ status: "drained", attempted: 1, acknowledged: 0, blocked: 1, failed: 0 });
+
+    expect(send).not.toHaveBeenCalled();
+    expect(await db.prepare("SELECT state,attempts FROM project_alpha_directory_outbox WHERE command_id=?")
+      .bind(value.commandId).first()).toEqual({ state: "pending", attempts: 0 });
+    expect(await db.prepare("SELECT state FROM operations_directory_intents WHERE mutation_id=?")
+      .bind(value.input.mutationId).first("state")).toBe("materialized");
+
+    // Restore the same authority and settle the durable row so this test does
+    // not leave eligible scheduler work behind for later cases.
+    await db.prepare("UPDATE native_directory_grants SET active=1 WHERE id=?").bind(value.staff.selectedGrantId).run();
+    await expect(drainNativeDirectoryOutboxes({ ...env(), NATIVE_DIRECTORY_OUTBOX_DRAIN_ENABLED: "true" }, {
+      rotationTime: 0, send: transport(publicId, "1", []),
+    })).resolves.toMatchObject({ attempted: 1, acknowledged: 1, blocked: 0 });
+  });
+
   it("creates organizations and standalone clients with exact API-v2 bodies, atomically settles, and replays", async () => {
     for (const kind of ["organization", "client"] as const) {
       const value = await create(kind), posts: unknown[] = [], publicId = (sequence++).toString(16).padStart(32, "0");
