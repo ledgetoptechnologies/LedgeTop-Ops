@@ -5,9 +5,13 @@ import { splitD1MigrationStatements } from "../../client/test/helpers/d1-migrati
 import { writeNativeDirectoryProfile, type NativeDirectoryCreateWrite, type NativeDirectoryProfileWrite } from "../src/worker/native-directory-profile-writer";
 import { dispatchProjectAlphaDirectoryProfileOutboxCommand } from "../src/worker/project-alpha-directory-profile-outbox-dispatcher";
 import { drainNativeDirectoryOutboxes } from "../src/worker/native-directory-outbox-scheduler";
+import { stagingDirectoryDestinationProof } from "../src/worker/staging-directory-destination-readback";
+import { evaluateStagingDirectoryDestinationReadback, expectedStagingDirectoryDestinationProfile }
+  from "../src/worker/staging-directory-destination-readback";
+import { readNativeDirectoryClientProfileSnapshot } from "../src/worker/native-directory-profile-routes";
 
 let runtime: Miniflare, db: D1Database, sequence = 1;
-const sourceId = "project-alpha:primary", source = "11111111-1111-4111-8111-111111111111";
+const sourceId = "project-alpha:primary", stagingSourceId = "project-alpha:staging", source = "11111111-1111-4111-8111-111111111111";
 const application = "22222222-2222-4222-8222-222222222222", epoch = "33333333-3333-4333-8333-333333333333";
 const baseUrl = "https://pa.example.test", requestId = "44444444-4444-4444-8444-444444444444";
 const organizationProfile = { name: "Organization", generalEmail: "org@example.test", generalPhone: "512-555-0100",
@@ -16,9 +20,11 @@ const clientProfile = { name: "Client", email: "client@example.test", phone: "51
   addressLine1: "2 Main", addressLine2: "", city: "Austin", state: "TX", postalCode: "78702", country: "US" } as const;
 const nameOnlyClientProfile = { name: "Synthetic Portal Acceptance", email: "", phone: "", clientType: "unknown" as const,
   addressLine1: "", addressLine2: "", city: "", state: "", postalCode: "", country: "" } as const;
-const env = (overrides: Record<string, unknown> = {}) => ({ OPS_DB: db, PROJECT_ALPHA_API_V2_CONNECTIONS: JSON.stringify({ version: 1, instances: {
-  [sourceId]: { sourceId, enabled: true, baseUrl, apiKey: "secret", sourceInstanceId: source, applicationId: application, historyEpoch: epoch },
-} }), ...overrides });
+const env = (overrides: Record<string, unknown> = {}, configuredSourceId = sourceId) => ({ OPS_DB: db,
+  PROJECT_ALPHA_API_V2_CONNECTIONS: JSON.stringify({ version: 1, instances: {
+    [configuredSourceId]: { sourceId: configuredSourceId, enabled: true, baseUrl, apiKey: "secret", sourceInstanceId: source,
+      applicationId: application, historyEpoch: epoch },
+  } }), ...overrides });
 function uuid() { return `00000000-0000-4000-8000-${String(sequence++).padStart(12, "0")}`; }
 function json(value: unknown, status = 200) { return new Response(JSON.stringify(value), { status, headers: {
   "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store", "X-Request-ID": requestId,
@@ -51,27 +57,29 @@ function transport(publicId: string, generation: string, posts: unknown[], failu
         : { type: kind, id: body.externalId, publicId, revision: "1" }, authorizationGeneration: generation } }, update ? 200 : 201);
   });
 }
-async function actor(scope: "global" | "business_area" = "global") {
+async function actor(scope: "global" | "business_area" = "global", businessAreaId = "area") {
   const staffId = `staff-${sequence++}`, accessSubject = `access|${staffId}`, loginEmail = `${staffId}@example.test`;
   await db.batch([
     db.prepare("INSERT INTO staff_users(id,email,display_name,access_subject,status) VALUES(?,?,?,?, 'active')").bind(staffId, loginEmail, staffId, accessSubject),
     db.prepare("INSERT INTO native_staff_admissions(staff_id,bound_access_subject,active,admitted_by) VALUES(?,?,1,'owner')").bind(staffId, accessSubject),
     db.prepare("INSERT INTO native_staff_profiles(staff_id,login_email,display_name) VALUES(?,?,?)").bind(staffId, loginEmail, staffId),
     db.prepare("INSERT INTO native_directory_grants(id,staff_id,permission,effect,scope_kind,business_area_id,granted_by) VALUES(?,?,'directory.profile.edit','allow',?,?,'owner')")
-      .bind(`edit-${staffId}`, staffId, scope, scope === "business_area" ? "area" : null),
+      .bind(`edit-${staffId}`, staffId, scope, scope === "business_area" ? businessAreaId : null),
     db.prepare("INSERT INTO native_directory_grants(id,staff_id,permission,effect,scope_kind,business_area_id,granted_by) VALUES(?,?,'directory.identity.link','allow',?,?,'owner')")
-      .bind(`identity-${staffId}`, staffId, scope, scope === "business_area" ? "area" : null),
+      .bind(`identity-${staffId}`, staffId, scope, scope === "business_area" ? businessAreaId : null),
   ]);
   return { staffId, accessSubject, admissionVersion: 1, selectedGrantId: `edit-${staffId}`, loginEmail, profileVersion: 1, selectedIdentityGrantId: `identity-${staffId}` };
 }
 async function create(kind: "organization" | "client", organizationRecordId: string | null = null, requestedRecordId?: string,
   requestedClientProfile: typeof clientProfile | typeof nameOnlyClientProfile = clientProfile,
-  grantScope: "global" | "business_area" = "global") {
-  const staff = await actor(grantScope), recordId = requestedRecordId ?? (kind === "client" ? uuid() : `ops/org/${sequence++}`), mutationId = uuid();
+  grantScope: "global" | "business_area" = "global",
+  requestedScopes: readonly { businessAreaId: string; divisionId: string | null }[] = [{ businessAreaId: "area", divisionId: "division" }],
+  destinationSourceId = sourceId) {
+  const staff = await actor(grantScope, requestedScopes[0]?.businessAreaId ?? "area"), recordId = requestedRecordId ?? (kind === "client" ? uuid() : `ops/org/${sequence++}`), mutationId = uuid();
   const createAdmissionId = `admission-${mutationId}`;
   const input = { operation: "create", mutationId, createAdmissionId, recordId, expectedLocalVersion: 0, kind,
-    profile: kind === "client" ? requestedClientProfile : organizationProfile, scopes: [{ businessAreaId: "area", divisionId: "division" }],
-    destinations: [{ sourceId, sourceInstanceUUID: source, applicationUUID: application, historyEpoch: epoch, origin: baseUrl,
+    profile: kind === "client" ? requestedClientProfile : organizationProfile, scopes: requestedScopes,
+    destinations: [{ sourceId: destinationSourceId, sourceInstanceUUID: source, applicationUUID: application, historyEpoch: epoch, origin: baseUrl,
       externalCanonicalId: recordId, expectedAuthorizationGeneration: "0" }], actor: staff,
     ...(kind === "client" ? { relationship: { organizationRecordId, expectedRelationshipVersion: 0 } } : {}) } as NativeDirectoryCreateWrite;
   await db.prepare(`INSERT INTO native_directory_create_admissions
@@ -123,8 +131,15 @@ beforeAll(async () => {
   runtime = new Miniflare({ modules: true, compatibilityDate: "2026-08-06", script: "export default {fetch(){return new Response('ok')}}", d1Databases: ["OPS_DB"] });
   db = await runtime.getD1Database("OPS_DB") as D1Database;
   const directory = new URL("../migrations/", import.meta.url);
-  for (const migration of readdirSync(directory).filter(name => /^\d{4}_.+\.sql$/.test(name) && name.slice(0, 4) <= "0180").sort())
-    await db.batch(splitD1MigrationStatements(readFileSync(new URL(migration, directory), "utf8")).map(sql => db.prepare(sql)));
+  const migrations = readdirSync(directory).filter(name => /^\d{4}_.+\.sql$/.test(name) && name.slice(0, 4) <= "0180").sort();
+  await db.prepare("CREATE TABLE d1_migrations(id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT NOT NULL UNIQUE)").run();
+  for (const migration of migrations) await db.batch([
+    ...splitD1MigrationStatements(readFileSync(new URL(migration, directory), "utf8")).map(sql => db.prepare(sql)),
+    db.prepare("INSERT INTO d1_migrations(name) VALUES(?)").bind(migration),
+  ]);
+  expect((await db.prepare("SELECT name FROM d1_migrations ORDER BY id").all<{ name: string }>()).results.map(row => row.name))
+    .toEqual(migrations);
+  expect((await db.prepare("PRAGMA foreign_key_check").all()).results).toEqual([]);
   await db.batch([
     db.prepare("INSERT INTO staff_users(id,email,display_name,access_subject,status) VALUES('owner','owner@example.test','Owner','access|owner','active')"),
     db.prepare("INSERT INTO native_business_areas(id,name,active) VALUES('area','Area',1)"),
@@ -136,6 +151,54 @@ beforeAll(async () => {
 afterAll(async () => runtime.dispose());
 
 describe("native Directory profile outbox dispatcher", () => {
+  it("derives the fixed destination proof from the current 0180 schema and only an exact acknowledged update", async () => {
+    const recordId = "614ed50f-8800-4ab3-aa69-009d8e5cefa9";
+    const areaId = "staging-native-only-portal-acceptance-20261008-window-1";
+    await db.prepare("INSERT INTO native_business_areas(id,name,active) VALUES(?,?,1)").bind(areaId, "Acceptance area").run();
+    const created = await create("client", null, recordId, nameOnlyClientProfile, "business_area",
+      [{ businessAreaId: areaId, divisionId: null }], stagingSourceId);
+    const publicId = "f".repeat(32);
+    await expect(dispatchProjectAlphaDirectoryProfileOutboxCommand(env({}, stagingSourceId), stagingSourceId, created.commandId,
+      transport(publicId, "1", []))).resolves.toMatchObject({ status: "acknowledged", revision: "1" });
+    expect(await stagingDirectoryDestinationProof(db, 1)).toBeNull();
+
+    const { clientType: _clientType, ...clientUpdateProfile } = nameOnlyClientProfile;
+    const updatedProfile = { ...clientUpdateProfile, name: "Synthetic Portal Acceptance [staging replay acceptance]" };
+    const updated = await writeNativeDirectoryProfile(db, { operation: "update", mutationId: uuid(), recordId,
+      expectedLocalVersion: 1, kind: "client", profile: updatedProfile,
+      destinations: [{ sourceId: stagingSourceId, sourceInstanceUUID: source, applicationUUID: application, historyEpoch: epoch,
+        origin: baseUrl, externalCanonicalId: recordId, expectedAuthorizationGeneration: "1" }], actor: created.staff,
+      relationship: { organizationRecordId: null, expectedRelationshipVersion: 1 } } as NativeDirectoryProfileWrite);
+    if (updated.status !== "written") throw new Error(updated.reason);
+    expect(await stagingDirectoryDestinationProof(db, 2)).toBeNull();
+    await expect(dispatchProjectAlphaDirectoryProfileOutboxCommand(env({}, stagingSourceId), stagingSourceId, updated.commandIds[0]!,
+      transport(publicId, "1", [], undefined, undefined, "2"))).resolves.toMatchObject({ status: "acknowledged", revision: "2" });
+    const proof = await stagingDirectoryDestinationProof(db, 2);
+    expect(proof).toMatchObject({ sourceInstanceId: source,
+      applicationId: application, historyEpoch: epoch, projectAlphaPublicId: publicId,
+      projectAlphaRevision: "2", authorizationGeneration: "1" });
+    const snapshot = await readNativeDirectoryClientProfileSnapshot(db, recordId);
+    expect(snapshot).toEqual({ version: 2, profile: { ...updatedProfile, clientType: "unknown" } });
+    const expectedProfile = expectedStagingDirectoryDestinationProfile(snapshot!.profile);
+    expect(expectedProfile).not.toBeNull();
+    expect(evaluateStagingDirectoryDestinationReadback(proof!, expectedProfile!, {
+      authoritative: false, requestId, sourceId: stagingSourceId, sourceInstanceId: source, applicationId: application, historyEpoch: epoch,
+      authorizationGeneration: "1", resource: { type: "client", id: publicId, revision: "2" },
+      profile: { publicId, name: updatedProfile.name, email: null, phone: null, clientType: "unknown",
+        organizationPublicId: null, address: { line1: null, line2: null, city: null, state: null, postalCode: null, country: null } } }))
+      .toEqual({ exactIdentity: true, exactVersion: true, exactGeneration: true, exactProfile: true });
+    expect(await stagingDirectoryDestinationProof(db, 1)).toBeNull();
+
+    const pending = await writeNativeDirectoryProfile(db, { operation: "update", mutationId: uuid(), recordId,
+      expectedLocalVersion: 2, kind: "client", profile: { ...updatedProfile, name: "Pending change" },
+      destinations: [{ sourceId: stagingSourceId, sourceInstanceUUID: source, applicationUUID: application, historyEpoch: epoch,
+        origin: baseUrl, externalCanonicalId: recordId, expectedAuthorizationGeneration: "1" }], actor: created.staff,
+      relationship: { organizationRecordId: null, expectedRelationshipVersion: 1 } } as NativeDirectoryProfileWrite);
+    expect(pending.status).toBe("written");
+    expect(await stagingDirectoryDestinationProof(db, 2)).toBeNull();
+    expect(await stagingDirectoryDestinationProof(db, 3)).toBeNull();
+  });
+
   it("drains a native standalone-client create through the real durable scheduler and profile dispatcher", async () => {
     const value = await create("client", null, undefined, nameOnlyClientProfile, "business_area"), posts: unknown[] = [],
       publicId = (sequence++).toString(16).padStart(32, "0");

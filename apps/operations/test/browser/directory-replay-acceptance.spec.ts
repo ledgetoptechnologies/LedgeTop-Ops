@@ -3,7 +3,7 @@ import { fileURLToPath } from "node:url";
 import { expect, test, type Page } from "@playwright/test";
 import { isDirectoryReplayAcceptanceLocation } from "../../src/client/DirectoryReplayAcceptanceRoute";
 
-type Mode = "normal" | "pending" | "denied" | "wrong-record" | "lost-write" | "lost-restore" | "wrong-source";
+type Mode = "normal" | "pending" | "denied" | "wrong-record" | "lost-write" | "lost-restore" | "wrong-source" | "readback-mismatch" | "readback-unavailable";
 type Call = { path: string; method: string; key: string | null; body: string | null };
 const fixture = new URL("./directory-replay-acceptance-fixture.tsx", import.meta.url);
 const bundle = buildSync({ entryPoints: [fileURLToPath(fixture)], bundle: true, format: "iife", platform: "browser", write: false,
@@ -27,7 +27,8 @@ test("uses only the retained standalone-client route and freezes replay/conflict
   await page.getByRole("button", { name: "Retry same frozen step" }).click();
   await expect(page.getByText(/not independent Project Alpha readback proof/)).toBeVisible();
   const observed = await calls(page), patches = observed.filter(call => call.method === "PATCH");
-  expect(observed.every(call => call.path === "/api/client-hub/directory/standalone-clients/614ed50f-8800-4ab3-aa69-009d8e5cefa9")).toBe(true);
+  expect(observed.filter(call => call.path !== "/api/admin/staging/directory/replay-destination-readback")
+    .every(call => call.path === "/api/client-hub/directory/standalone-clients/614ed50f-8800-4ab3-aa69-009d8e5cefa9")).toBe(true);
   expect(observed.some(call => /create-admissions|relationship/.test(call.path))).toBe(false);
   expect(patches).toHaveLength(3); expect(patches[1]).toEqual(patches[0]);
   expect(patches[2]!.key).toBe(patches[0]!.key); expect(patches[2]!.body).not.toBe(patches[0]!.body);
@@ -80,10 +81,27 @@ test("restore survives a lost committed response with the same fresh key and exa
   await page.getByLabel("Confirm current name").fill("Synthetic Portal Acceptance 2026-10-08");
   for (const name of ["Start reviewed acceptance", "Retry same frozen step", "Retry same frozen step", "Retry same frozen step"])
     await page.getByRole("button", { name }).click();
+  await page.getByRole("button", { name: "Verify independent Project Alpha destination" }).click();
   await page.getByRole("button", { name: "Prepare explicit fresh-key restore" }).click();
   for (let index = 0; index < 4; index += 1) await page.getByRole("button", { name: "Continue same frozen restore" }).click();
   await expect(page.getByText(/Original profile restored/)).toBeVisible();
+  await page.getByRole("button", { name: "Verify independent Project Alpha destination" }).click();
+  await expect(page.getByText(/destination readback verified for local version 6/)).toBeVisible();
   const patches = (await calls(page)).filter(call => call.method === "PATCH");
   expect(patches[3]!.key).not.toBe(patches[0]!.key);
   expect(patches.slice(3, 6).every(call => call.key === patches[3]!.key && call.body === patches[3]!.body)).toBe(true);
+});
+
+for (const mode of ["readback-mismatch", "readback-unavailable"] as const) test(`${mode} keeps restore gated`, async ({ page }) => {
+  await render(page, mode); await page.getByRole("button", { name: "Load retained synthetic client" }).click();
+  await page.getByLabel("Confirm exact record ID").fill("614ed50f-8800-4ab3-aa69-009d8e5cefa9");
+  await page.getByLabel("Confirm current name").fill("Synthetic Portal Acceptance 2026-10-08");
+  for (const name of ["Start reviewed acceptance", "Retry same frozen step", "Retry same frozen step", "Retry same frozen step"])
+    await page.getByRole("button", { name }).click();
+  const restore = page.getByRole("button", { name: "Prepare explicit fresh-key restore" });
+  await expect(restore).toBeDisabled();
+  await page.getByRole("button", { name: "Verify independent Project Alpha destination" }).click();
+  await expect(page.getByRole("alert")).toContainText("destination readback did not match");
+  await expect(restore).toBeDisabled();
+  expect((await calls(page)).filter(call => call.method === "PATCH")).toHaveLength(3);
 });

@@ -97,6 +97,48 @@ function normalizeProfile(value: Record<string, string>): Record<string, string>
   }));
 }
 
+export type NativeDirectoryClientProfileSnapshot = Readonly<{
+  version: number;
+  profile: NativeDirectoryClientCreateProfile;
+}>;
+
+/** Reconstructs the complete client editor snapshot from the current immutable
+ * revision and the creation revision that owns the immutable client type. */
+export async function readNativeDirectoryClientProfileSnapshot(
+  db: D1Database,
+  clientRecordId: string,
+): Promise<NativeDirectoryClientProfileSnapshot | null> {
+  const rows = (await db.withSession("first-primary").prepare(`SELECT record.current_version version,
+      current.profile_json currentProfileJson,created.profile_json creationProfileJson
+    FROM operations_directory_records record
+    JOIN operations_directory_revisions current ON current.record_id=record.record_id
+      AND current.version=record.current_version
+    JOIN operations_directory_revisions created ON created.record_id=record.record_id AND created.version=1
+    WHERE record.record_id=? AND record.record_kind='client'
+    LIMIT 2`).bind(clientRecordId).all<{
+      version: number; currentProfileJson: string; creationProfileJson: string;
+    }>()).results;
+  if (rows.length !== 1 || !Number.isSafeInteger(rows[0]!.version) || rows[0]!.version < 1) return null;
+  const row = rows[0]!;
+  let currentValue: unknown, creationValue: unknown;
+  try {
+    currentValue = JSON.parse(row.currentProfileJson);
+    creationValue = JSON.parse(row.creationProfileJson);
+  } catch { return null; }
+  const creation = clientCreateProfile.safeParse(creationValue);
+  const currentCreate = clientCreateProfile.safeParse(currentValue);
+  const currentUpdate = clientUpdateProfile.safeParse(currentValue);
+  const current = row.version === 1 ? currentCreate : currentUpdate.success ? currentUpdate : currentCreate;
+  if (!creation.success || !current.success) return null;
+  const canonicalCreation = normalizeProfile(creation.data);
+  const canonicalCurrent = normalizeProfile(current.data);
+  if (Object.keys(creation.data).some(field => creation.data[field as keyof typeof creation.data] !== canonicalCreation[field])
+    || Object.keys(current.data).some(field => current.data[field as keyof typeof current.data] !== canonicalCurrent[field])) return null;
+  if (row.version === 1 && JSON.stringify(current.data) !== JSON.stringify(creation.data)) return null;
+  if ("clientType" in current.data && current.data.clientType !== creation.data.clientType) return null;
+  return { version: row.version, profile: { ...current.data, clientType: creation.data.clientType } };
+}
+
 function normalizeScopes(values: readonly NativeDirectoryScope[]): NativeDirectoryScope[] {
   return values.map(value => ({ ...value })).sort((left, right) =>
     `${left.businessAreaId}\0${left.divisionId ?? ""}`.localeCompare(`${right.businessAreaId}\0${right.divisionId ?? ""}`));
@@ -117,7 +159,7 @@ async function nativeActor(c: AppContext): Promise<Omit<NativeDirectoryWriterAct
     admissionVersion: authenticated.admissionVersion, loginEmail: identity.email, profileVersion: identity.profileVersion };
 }
 
-async function selectGrant(db: D1Database, staffId: string,
+export async function selectGrant(db: D1Database, staffId: string,
   permission: "directory.profile.view" | "directory.profile.edit" | "directory.identity.link" | "directory.enrollment.manage",
   record: string, requestedScopes: readonly NativeDirectoryScope[], creating: boolean): Promise<string | null> {
   const primary = db.withSession("first-primary"), scopeJson = JSON.stringify(requestedScopes);
@@ -758,23 +800,30 @@ async function profile(c: AppContext, kind: NativeDirectoryProfileKind) {
   const actor = await nativeActor(c);
   if (!await selectGrant(c.env.OPS_DB, actor.staffId, "directory.profile.view", record, [], false))
     throw new HTTPException(403, { message: "Directory profile view permission required" });
-  const current = await c.env.OPS_DB.withSession("first-primary").prepare(`SELECT record.current_version version,revision.profile_json
-    FROM operations_directory_records record JOIN operations_directory_revisions revision
-      ON revision.record_id=record.record_id AND revision.version=record.current_version
-    WHERE record.record_id=? AND record.record_kind=?`).bind(record, kind).first<{ version: number; profile_json: string }>();
-  if (!current || !Number.isSafeInteger(current.version) || current.version < 1) throw new HTTPException(404, { message: "Directory record not found" });
-  let parsedProfile: unknown;
-  try { parsedProfile = JSON.parse(current.profile_json); } catch { throw new HTTPException(409, { message: "Directory profile is unavailable" }); }
-  const profileSchema = kind === "organization" ? organizationProfile : clientCreateProfile;
-  const checkedProfile = profileSchema.safeParse(parsedProfile);
-  if (!checkedProfile.success) throw new HTTPException(409, { message: "Directory profile is unavailable" });
+  let current: { version: number; profile: Record<string, string> };
+  if (kind === "client") {
+    const snapshot = await readNativeDirectoryClientProfileSnapshot(c.env.OPS_DB, record);
+    if (!snapshot) throw new HTTPException(409, { message: "Directory profile is unavailable" });
+    current = snapshot;
+  } else {
+    const stored = await c.env.OPS_DB.withSession("first-primary").prepare(`SELECT record.current_version version,revision.profile_json
+      FROM operations_directory_records record JOIN operations_directory_revisions revision
+        ON revision.record_id=record.record_id AND revision.version=record.current_version
+      WHERE record.record_id=? AND record.record_kind=?`).bind(record, kind).first<{ version: number; profile_json: string }>();
+    if (!stored || !Number.isSafeInteger(stored.version) || stored.version < 1) throw new HTTPException(404, { message: "Directory record not found" });
+    let parsedProfile: unknown;
+    try { parsedProfile = JSON.parse(stored.profile_json); } catch { throw new HTTPException(409, { message: "Directory profile is unavailable" }); }
+    const checkedProfile = organizationProfile.safeParse(parsedProfile);
+    if (!checkedProfile.success) throw new HTTPException(409, { message: "Directory profile is unavailable" });
+    current = { version: stored.version, profile: checkedProfile.data };
+  }
   const scopeRows = (await c.env.OPS_DB.withSession("first-primary").prepare(`SELECT business_area_id businessAreaId,division_id divisionId
     FROM native_directory_resource_scopes WHERE record_id=? AND active=1
     ORDER BY business_area_id,coalesce(division_id,'')`).bind(record).all<{ businessAreaId: string; divisionId: string | null }>()).results;
   const currentScopes = scopes.safeParse(scopeRows);
   if (!currentScopes.success) throw new HTTPException(409, { message: "Directory profile is unavailable" });
   if (kind === "organization") return c.json({ recordId: record, kind, version: current.version,
-    profile: normalizeProfile(checkedProfile.data), scopes: currentScopes.data, editing: { available: true, reason: null } });
+    profile: normalizeProfile(current.profile), scopes: currentScopes.data, editing: { available: true, reason: null } });
   const relationship = await currentClientRelationship(c.env.OPS_DB, record), sourceIds = await enrollmentSourceIds(c.env, record);
   const representable = relationship && sourceIds ? (await nativeDirectoryOrganizationChoices(c.env))
     .filter(choice => sameSources(choice, sourceIds)) : [];
@@ -784,7 +833,7 @@ async function profile(c: AppContext, kind: NativeDirectoryProfileKind) {
   const settled = relationship && sourceIds ? await relationshipDeliverySettled(c.env.OPS_DB, record,
     relationship.relationship_version, sourceIds.length) : false;
   const available = !!relationship && !!sourceIds && settled && (relationship.organization_record_id === null || !!selected);
-  return c.json({ recordId: record, kind, version: current.version, profile: normalizeProfile(checkedProfile.data),
+  return c.json({ recordId: record, kind, version: current.version, profile: normalizeProfile(current.profile),
     scopes: currentScopes.data, linkage: relationship?.organization_record_id ? "linked" : relationship ? "standalone" : "unavailable",
     relationship: relationship ? { version: relationship.relationship_version,
       organization: selected ? { recordId: selected.recordId, expectedVersion: selected.expectedVersion, name: selected.name } : null,

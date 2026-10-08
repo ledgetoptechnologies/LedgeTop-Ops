@@ -58,6 +58,9 @@ function database(options: { enrollment?: unknown; outboxState?: string; missing
     const statement = {
       bind(...next: unknown[]) { values = next; return statement; },
       async all<T>() {
+        if (sql.includes("current.profile_json currentProfileJson")) return { results: options.profile === "client" ? [{
+          version: 4, currentProfileJson: JSON.stringify(client), creationProfileJson: JSON.stringify(client),
+        }] as T[] : [] as T[] };
         if (sql.includes("FROM project_alpha_directory_relationship_outbox") && sql.includes("request_json")) return { results: (options.relationshipReplay ? [{
           request_json: JSON.stringify({ mutationId: ids.mutation, clientRecordId: "acquired:client:one",
             expectedRelationshipVersion: 2, expectedClientRecordVersion: 4, previousOrganization: null,

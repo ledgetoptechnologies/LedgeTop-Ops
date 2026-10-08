@@ -6,6 +6,7 @@ import { RETAINED_SYNTHETIC_CLIENT_ID } from "./DirectoryReplayAcceptanceRoute";
 
 const DETAIL = `/api/client-hub/directory/standalone-clients/${RETAINED_SYNTHETIC_CLIENT_ID}`;
 const RETAINED_AREA = "staging-native-only-portal-acceptance-20261008-window-1";
+const DESTINATION_READBACK = "/api/admin/staging/directory/replay-destination-readback";
 
 type Snapshot = { recordId: string; kind: "client"; version: number; profile: ProfileForm;
   scopes: Array<{ businessAreaId: string; divisionId: string | null }>; linkage: "standalone";
@@ -57,6 +58,7 @@ export function DirectoryReplayAcceptance({ request = api }: { request?: Directo
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null), [proposedName, setProposedName] = useState("");
   const [attempt, setAttempt] = useState<Frozen | null>(null), [restore, setRestore] = useState<Frozen | null>(null);
   const [restored, setRestored] = useState(false);
+  const [destinationVerifiedVersion, setDestinationVerifiedVersion] = useState<number | null>(null);
   const [busy, setBusy] = useState(false), [error, setError] = useState(""), [result, setResult] = useState("");
 
   const load = async () => {
@@ -67,6 +69,19 @@ export function DirectoryReplayAcceptance({ request = api }: { request?: Directo
       if (!value.editing.available) throw new Error(`The retained synthetic client is pending or unavailable (${value.editing.reason ?? "unknown"}).`);
       setSnapshot(value); setProposedName(changedName(value.profile.name));
     } catch (caught) { setSnapshot(null); setError(caught instanceof Error ? caught.message : "The retained synthetic client could not be loaded."); }
+    finally { setBusy(false); }
+  };
+
+  const verifyDestination = async () => {
+    const expectedLocalVersion = restored ? snapshot!.version + 2 : snapshot!.version + 1;
+    setBusy(true); setError("");
+    try {
+      const value = await request<{ status?: unknown; exactIdentity?: unknown; exactVersion?: unknown; exactGeneration?: unknown; exactProfile?: unknown }>(DESTINATION_READBACK,
+        { method: "POST", body: JSON.stringify({ expectedLocalVersion }) });
+      if (value.status !== "verified" || value.exactIdentity !== true || value.exactVersion !== true
+        || value.exactGeneration !== true || value.exactProfile !== true) throw new Error("Independent Project Alpha destination readback did not match.");
+      setDestinationVerifiedVersion(expectedLocalVersion); setResult(`Independent Project Alpha destination readback verified for local version ${expectedLocalVersion}.`);
+    } catch (caught) { setError(caught instanceof Error ? caught.message : "Independent destination readback failed."); }
     finally { setBusy(false); }
   };
 
@@ -154,6 +169,8 @@ export function DirectoryReplayAcceptance({ request = api }: { request?: Directo
         {error && <p role="alert">{error}</p>}{result && <p role="status">{result}</p>}
         {!result && <button disabled={busy}>{busy ? "Running fixed step…" : attempt ? "Retry same frozen step" : "Start reviewed acceptance"}</button>}
       </form>}
-    {result && !restored && <button onClick={() => void runRestore()} disabled={busy}>{restore ? "Continue same frozen restore" : "Prepare explicit fresh-key restore"}</button>}
+    {result && !restored && <button onClick={() => void runRestore()} disabled={busy || destinationVerifiedVersion !== snapshot!.version + 1}>{restore ? "Continue same frozen restore" : "Prepare explicit fresh-key restore"}</button>}
+    {result && destinationVerifiedVersion !== (restored ? snapshot!.version + 2 : snapshot!.version + 1)
+      && <button onClick={() => void verifyDestination()} disabled={busy}>Verify independent Project Alpha destination</button>}
   </Card></main>;
 }

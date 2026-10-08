@@ -11,8 +11,8 @@ import {
 } from "./project-alpha-api-v2";
 
 /**
- * Dormant, non-authoritative Project Alpha directory reads. Nothing imports
- * this module from a route, scheduler, connector, or legacy event flow.
+ * Non-authoritative Project Alpha directory reads. Callers must independently
+ * bind observations to their own immutable local identity and revision proof.
  * Observations are intentionally detached from local mappings and links.
  */
 const RESPONSE_LIMIT = 64 * 1024;
