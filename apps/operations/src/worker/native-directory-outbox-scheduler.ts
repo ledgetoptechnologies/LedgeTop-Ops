@@ -17,6 +17,7 @@ const SOURCE_ID = /^project-alpha:[a-z0-9][a-z0-9_-]{0,63}$/;
 type Environment = ProjectAlphaApiV2ConnectionEnvironment & Readonly<{
   OPS_DB: D1Database;
   NATIVE_DIRECTORY_OUTBOX_DRAIN_ENABLED?: string;
+  PROJECT_ALPHA_DIRECTORY_CREATE_GENERATION_RECOVERY_ENABLED?: string;
 }>;
 type QueueKind = "profile" | "relationship";
 type Candidate = Readonly<{
@@ -168,6 +169,7 @@ export async function drainNativeDirectoryOutboxes(env: Environment,
   // Pin the deployment-owned envelope before the first await. Dispatchers see
   // the same configuration that was used to choose eligible sources.
   const connections = env.PROJECT_ALPHA_API_V2_CONNECTIONS;
+  const createGenerationRecovery = env.PROJECT_ALPHA_DIRECTORY_CREATE_GENERATION_RECOVERY_ENABLED;
   const sourceIds = configuredSourceIds(connections);
   if (!sourceIds) return empty("unavailable");
   const maxCommands = boundedInteger(options.maxCommands, MAX_COMMANDS, MAX_COMMANDS);
@@ -183,7 +185,8 @@ export async function drainNativeDirectoryOutboxes(env: Environment,
   const candidates = await eligibleCandidates(env.OPS_DB, sourceIds, startedAt, maxCommands);
   const selected = fairOrder(candidates, sourceIds, rotationTime, maxCommands);
   const send = deadlineFetch(options.send ?? fetch, deadline, now);
-  const dispatchEnvironment = { OPS_DB: env.OPS_DB, PROJECT_ALPHA_API_V2_CONNECTIONS: connections };
+  const dispatchEnvironment = { OPS_DB: env.OPS_DB, PROJECT_ALPHA_API_V2_CONNECTIONS: connections,
+    PROJECT_ALPHA_DIRECTORY_CREATE_GENERATION_RECOVERY_ENABLED: createGenerationRecovery };
   const result = { ...empty("drained") };
   for (const candidate of selected) {
     if (result.attempted >= maxCommands || now() >= deadline) break;

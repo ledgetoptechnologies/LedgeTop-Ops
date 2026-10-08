@@ -67,6 +67,19 @@ beforeEach(async () => {
 afterAll(async () => runtime.dispose());
 
 describe("native Directory scheduled outbox drain", () => {
+  it.each([undefined, "false", "true"])("pins and forwards the default-off create recovery flag (%s)", async flag => {
+    await command("profile", uuid(1), "project-alpha:staging");
+    const env = { ...environment(["project-alpha:staging"]),
+      PROJECT_ALPHA_DIRECTORY_CREATE_GENERATION_RECOVERY_ENABLED: flag };
+    materializeClients.mockImplementationOnce(async () => {
+      env.PROJECT_ALPHA_DIRECTORY_CREATE_GENERATION_RECOVERY_ENABLED = "changed-after-await";
+      return { examined: 0, materialized: 0, blocked: 0 };
+    });
+    await drainNativeDirectoryOutboxes(env, { now: () => dueAt });
+    expect(profileDispatch).toHaveBeenCalledTimes(1);
+    expect(profileDispatch.mock.calls[0]![0].PROJECT_ALPHA_DIRECTORY_CREATE_GENERATION_RECOVERY_ENABLED).toBe(flag);
+  });
+
   it("is default-off and returns before touching database or connection configuration", async () => {
     const config = readFileSync(new URL("../wrangler.jsonc", import.meta.url), "utf8");
     const entrypoint = readFileSync(new URL("../src/worker/index.ts", import.meta.url), "utf8");
