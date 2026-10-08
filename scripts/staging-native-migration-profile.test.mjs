@@ -45,14 +45,14 @@ test.afterEach(() => {
 test("builds only the exact migration suffixes and strips every deployment field", () => {
   const profiles = buildProfiles(fixture());
   assert.deepEqual(profiles.operations.files.map(({ name }) => name),
-    [...NATIVE_MIGRATION_PROFILES.operations.expectedAppliedMigrations]);
+    ["0181_project_alpha_directory_create_generation_recovery.sql"]);
   assert.deepEqual(profiles.client.files.map(({ name }) => name),
-    [...NATIVE_MIGRATION_PROFILES.client.expectedAppliedMigrations]);
+    []);
   assert.equal(profiles.operations.manifest.requiredRemoteBaseline,
-    "0173_operations_directory_intent_acquired_destination_transition.sql");
+    "0180_project_alpha_project_v2_recovery_authorization.sql");
   assert.equal(profiles.client.manifest.requiredRemoteBaseline,
     "0228_operations_portal_native_content_start_audit.sql");
-  assert.equal(profiles.operations.expectedRemoteAppliedMigrations.length, 173);
+  assert.equal(profiles.operations.expectedRemoteAppliedMigrations.length, 180);
   assert.equal(profiles.client.expectedRemoteAppliedMigrations.length, 147);
   assert.equal(profiles.operations.manifest.reviewedFinalChain.count, 181);
   assert.equal(profiles.operations.manifest.reviewedFinalChain.finalMigration,
