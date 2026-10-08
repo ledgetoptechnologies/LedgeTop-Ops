@@ -507,6 +507,7 @@ function withoutMiniflareOnlyMetadata(db) {
     prepare: sql => db.prepare(sql.includes("FROM sqlite_schema")
       ? sql.replace(" ORDER BY name", " AND name<>'_cf_METADATA' ORDER BY name")
       : sql),
+    batch: statements => db.batch(statements),
   };
 }
 
@@ -516,6 +517,12 @@ test("real Miniflare schema discovery finds application business-area references
       "SELECT name FROM sqlite_schema WHERE type='table' ORDER BY name",
     ).all()).results.map(row => row.name);
     assert.ok(schema.includes("_cf_METADATA"), "Miniflare exposes its emulator-only metadata table");
+    const pragmaBatch = await db.batch([
+      db.prepare('PRAGMA table_info("native_business_areas")'),
+      db.prepare('PRAGMA table_info("native_directory_grants")'),
+    ]);
+    assert.equal(pragmaBatch.length, 2);
+    assert.equal(pragmaBatch.every(result => result.success && Array.isArray(result.results)), true);
     const references = await businessAreaReferenceTables(withoutMiniflareOnlyMetadata(db));
     assert.equal(references.includes("_cf_KV"), false);
     assert.ok(references.includes("native_directory_grants"));
@@ -532,18 +539,78 @@ test("discovery never introspects D1's exact reserved _cf_KV table", async () =>
       prepared.push(sql);
       return {
         bind() { return this; },
-        async all() {
-          if (sql.includes("FROM sqlite_schema")) {
-            return { results: [{ name: "_cf_KV" }, { name: "application_table" }] };
-          }
-          return { results: [{ name: "id" }, { name: "business_area_id" }] };
-        },
+        async all() { return { results: [{ name: "_cf_KV" }, { name: "application_table" }] }; },
       };
     },
+    batch: async statements => statements.map(() => ({
+      success: true,
+      results: [{ name: "id" }, { name: "business_area_id" }],
+    })),
   };
   assert.deepEqual(await businessAreaReferenceTables(fake), ["application_table"]);
   assert.equal(prepared.some(sql => sql.includes("table_info(\"_cf_KV\")")), false);
   assert.match(prepared[0], /name<>'_cf_KV'/);
+});
+
+test("schema discovery batches every validated table in ordered groups of at most 25", async () => {
+  const names = Array.from({ length: 57 }, (_, index) => `application_table_${String(index).padStart(2, "0")}`);
+  const batches = [];
+  const fake = {
+    prepare: sql => ({
+      sql,
+      bind() { return this; },
+      async all() { return { results: names.map(name => ({ name })) }; },
+    }),
+    batch: async statements => {
+      batches.push(statements.map(statement => statement.sql));
+      return statements.map(statement => ({
+        success: true,
+        results: [{ name: "id" }, ...(statement.sql.includes('table_26"') ? [{ name: "business_area_id" }] : [])],
+      }));
+    },
+  };
+  assert.deepEqual(await businessAreaReferenceTables(fake), ["application_table_26"]);
+  assert.deepEqual(batches.map(batch => batch.length), [25, 25, 7]);
+  assert.deepEqual(batches.flat(), names.map(name => `PRAGMA table_info("${name}")`));
+});
+
+test("schema discovery rejects missing, extra, and unsuccessful metadata results", async () => {
+  const candidate = resultFactory => ({
+    prepare: sql => ({
+      bind() { return this; },
+      async all() { return { results: [{ name: "application_table" }] }; },
+      sql,
+    }),
+    batch: async statements => resultFactory(statements),
+  });
+  for (const results of [
+    [],
+    [{ success: true, results: [] }, { success: true, results: [] }],
+  ]) await assert.rejects(businessAreaReferenceTables(candidate(() => results)), error => {
+    assert.equal(error.prepareStageCode, "table-metadata-invalid");
+    return true;
+  });
+  await assert.rejects(businessAreaReferenceTables(candidate(() => [{ success: false, results: [] }])), error => {
+    assert.equal(error.prepareStageCode, "table-info-read-failed");
+    return true;
+  });
+});
+
+test("schema discovery validates the complete table list before issuing metadata batches", async () => {
+  for (const rows of [
+    [{ name: "valid_table" }, { name: "invalid-table" }],
+    [{ name: "duplicate" }, { name: "duplicate" }],
+  ]) {
+    let batches = 0;
+    await assert.rejects(businessAreaReferenceTables({
+      prepare: () => ({ bind() { return this; }, async all() { return { results: rows }; } }),
+      batch: async () => { batches += 1; return []; },
+    }), error => {
+      assert.equal(error.prepareStageCode, "table-metadata-invalid");
+      return true;
+    });
+    assert.equal(batches, 0);
+  }
 });
 
 test("schema discovery reports separate privacy-safe schema and table-info stages", async () => {
@@ -557,19 +624,14 @@ test("schema discovery reports separate privacy-safe schema and table-info stage
 
   let calls = 0;
   await assert.rejects(businessAreaReferenceTables({
-    prepare: () => ({
-      bind() { return this; },
-      all: async () => {
-        calls += 1;
-        if (calls === 1) return { results: [{ name: "application_table" }] };
-        throw new Error("private pragma detail");
-      },
-    }),
+    prepare: () => ({ bind() { return this; }, all: async () => ({ results: [{ name: "application_table" }] }) }),
+    batch: async () => { calls += 1; throw new Error("private pragma detail"); },
   }), error => {
     assert.equal(error.prepareStageCode, "table-info-read-failed");
     assert.match(cliFailureMessage("prepare", error), /\[table-info-read-failed\]/);
     return true;
   });
+  assert.equal(calls, 1);
 });
 
 test("real Miniflare rejects invalid table metadata and classifies reference-count disappearance", async () => {

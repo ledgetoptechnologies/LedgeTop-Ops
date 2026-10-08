@@ -26,6 +26,7 @@ const MAX_WINDOW_MINUTES = 240;
 const AREA_ID = /^staging-native-only-[a-z0-9-]+$/;
 const AREA_KEYS = Object.freeze(["id", "name", "active"]);
 const RESERVED_D1_TABLES = Object.freeze(new Set(["_cf_KV"]));
+const TABLE_INFO_BATCH_SIZE = 25;
 const CHAIN = Object.freeze({
   count: 180,
   final: "0180_project_alpha_project_v2_recovery_authorization.sql",
@@ -116,8 +117,8 @@ export async function businessAreaReferenceTables(db) {
   if (!Array.isArray(tables)) {
     prepareStageFail("table-metadata-invalid", "database schema table list is invalid");
   }
-  const references = [];
   const seen = new Set();
+  const names = [];
   for (const row of tables) {
     if (!row || typeof row !== "object" || Array.isArray(row)
       || typeof row.name !== "string" || seen.has(row.name)) {
@@ -128,18 +129,37 @@ export async function businessAreaReferenceTables(db) {
     quotedIdentifier(name);
     // Cloudflare D1 owns this internal storage table. It is not application
     // schema and cannot contain an application business_area_id reference.
-    if (RESERVED_D1_TABLES.has(name)) continue;
-    let columns;
+    if (!RESERVED_D1_TABLES.has(name)) names.push(name);
+  }
+  const references = [];
+  let inspected = 0;
+  for (let offset = 0; offset < names.length; offset += TABLE_INFO_BATCH_SIZE) {
+    const chunk = names.slice(offset, offset + TABLE_INFO_BATCH_SIZE);
+    let results;
     try {
-      columns = (await db.prepare(`PRAGMA table_info(${quotedIdentifier(name)})`).all()).results;
+      results = await db.batch(chunk.map(name => db.prepare(`PRAGMA table_info(${quotedIdentifier(name)})`)));
     } catch (error) {
       prepareStageFail("table-info-read-failed", "schema table columns could not be read", error);
     }
-    if (!Array.isArray(columns)
-      || columns.some(column => !column || typeof column !== "object" || typeof column.name !== "string")) {
-      prepareStageFail("table-metadata-invalid", "schema table column metadata is invalid");
+    if (!Array.isArray(results) || results.length !== chunk.length) {
+      prepareStageFail("table-metadata-invalid", "schema table metadata result count is invalid");
     }
-    if (columns.some(column => column.name === "business_area_id")) references.push(name);
+    for (let index = 0; index < chunk.length; index += 1) {
+      const result = results[index];
+      if (!result || typeof result !== "object" || result.success !== true) {
+        prepareStageFail("table-info-read-failed", "schema table columns could not be read");
+      }
+      const columns = result.results;
+      if (!Array.isArray(columns)
+        || columns.some(column => !column || typeof column !== "object" || typeof column.name !== "string")) {
+        prepareStageFail("table-metadata-invalid", "schema table column metadata is invalid");
+      }
+      inspected += 1;
+      if (columns.some(column => column.name === "business_area_id")) references.push(chunk[index]);
+    }
+  }
+  if (inspected !== names.length) {
+    prepareStageFail("table-metadata-invalid", "schema table metadata coverage is incomplete");
   }
   return references;
 }
