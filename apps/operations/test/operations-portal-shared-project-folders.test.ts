@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { Miniflare } from "miniflare";
-import { applyCanonicalChain } from "./helpers/verified-recipient-canonical-lineage";
+import { applyReviewedOperationsMigrationChain } from "./helpers/apply-reviewed-operations-migration-chain";
 import { writeNativeDirectoryProfile, type NativeDirectoryCreateWrite } from "../src/worker/native-directory-profile-writer";
 import { reserveOperationsPortalFolder, reserveOperationsPortalWorkspace } from "../src/worker/operations-portal-workspace-reservations";
 import { confirmOperationsPortalSharedProjectFolder, lookupOperationsPortalSharedProjectFolder,
@@ -90,7 +90,12 @@ beforeAll(async () => {
   runtime = new Miniflare({ modules: true, compatibilityDate: "2026-08-06", script: "export default {}",
     d1Databases: { OPS_DB: crypto.randomUUID() } });
   db = await runtime.getD1Database("OPS_DB");
-  await applyCanonicalChain(db, "operations", "0165_project_alpha_inventory_generation_surface_scope.sql", true);
+  const migrationNames = await applyReviewedOperationsMigrationChain(db);
+  expect(migrationNames).toHaveLength(180);
+  expect(migrationNames.at(-1)).toBe("0180_project_alpha_project_v2_recovery_authorization.sql");
+  const migrationLedger = await db.prepare("SELECT name FROM d1_migrations ORDER BY name").all<{ name: string }>();
+  expect(migrationLedger.results.map(row => row.name)).toEqual(migrationNames);
+  expect((await db.prepare("PRAGMA foreign_key_check").all()).results).toEqual([]);
   await db.batch([
     db.prepare("INSERT INTO divisions(id,name,code,active) VALUES(?,'Native folder A','NFA',1)").bind(divisionA),
     db.prepare("INSERT INTO divisions(id,name,code,active) VALUES(?,'Native folder B','NFB',1)").bind(divisionB),

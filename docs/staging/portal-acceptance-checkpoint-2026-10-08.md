@@ -1,7 +1,7 @@
 # Portal acceptance checkpoint — 2026-10-08
 
 - Priority remains PA–Operations synchronization, then authenticated client access to explicitly shared data. Workforce and Viewer expansion are not release prerequisites for this checkpoint.
-- This isolated patch starts from reviewed candidate `41eb94aa84222067fb8c3aa875a3e15644786db4`. It is local and uncommitted; it has not been deployed or merged.
+- This isolated patch starts from reviewed candidate `41eb94aa84222067fb8c3aa875a3e15644786db4`. The enrollment/transport tooling is saved locally at `0183b45257eb8ff7ae23ed245cc90e2e668b5399`; it has not been pushed, deployed, or merged.
 - The staff permissions screen manages legacy overrides, not native enrollment grants. Asking an operator to use that screen to issue `directory.enrollment.manage` does not solve the acceptance prerequisite.
 - The existing audited staging authority packet already supports three client-creation permissions. The window/recovery tooling now exposes that mode explicitly with `--client-creation`; default two-permission behavior remains unchanged.
 - Recovery uses the exact synthetic business area recorded in the saved provision artifact. Whole-artifact recompilation, immutable receipts, atomic grant changes, and paired revocation remain enforced.
@@ -14,6 +14,10 @@
 - Directory and Project joined-acceptance runner suites: **23 passed, 0 failed**.
 - Independent read-only patch review found no correctness blocker. Whitespace validation passed.
 - Windows local database runtime tests required narrowly elevated execution. They passed on rerun; the sandbox startup failure was not a failed database assertion.
+- Current-schema compatibility plus historical folder/recipient baseline: **8 passed, 0 failed** across three suites. Only the schema-compatibility test in that baseline applies both exact current inventories; do not describe its historical behavioral fixtures as current-chain acceptance.
+- Upgraded shared-folder behavioral suite: **6 passed, 0 failed** on the exact byte-reviewed Operations 180-migration inventory, with exact ledger and foreign-key checks. All six original behavior/negative cases are retained; no runtime guards were changed.
+- Operations TypeScript validation passed after connecting the isolated worktree to the existing locked Operations and Client dependencies. No packages were installed or upgraded.
+- Native-recipient end-to-end current-chain behavioral coverage remains under investigation. Schema compatibility and current-chain folder behavior do not alone prove the complete recipient flow.
 
 ## Remaining live acceptance gate
 
