@@ -62,10 +62,10 @@ test("mounted form rejects blank selection without calls and freezes exact revie
   await expect(page.getByRole("alert")).toBeVisible(); expect(await calls(page)).toHaveLength(0);
   await fillSelection(page); await page.getByRole("button",{name:"Freeze reviewed synthetic selection"}).click();
   expect(await calls(page)).toHaveLength(0); await page.getByRole("button",{name:"Load create preparation"}).click();
+  await expect(page.getByRole("button",{name:"Start reviewed create"})).toBeVisible();
   const observed=await calls(page); expect(observed.map(call=>call.path)).toEqual(["/api/session","/api/admin/staging/projects/v2/preparation"]);
   expect(observed.some(call=>call.path===PROJECT_COMMANDS_PATH)).toBe(false);
   expect(JSON.parse(observed[1]!.body!).scopes).toEqual([{scopeKind:"business_area",businessAreaId:"staging-native-only-portal-acceptance-20261008-window-1",divisionId:null}]);
-  await expect(page.getByRole("button",{name:"Start reviewed create"})).toBeVisible();
   await expect(page.getByRole("alert")).toHaveCount(0);
 });
 test("wrong returned scopes, non-admin sessions, and missing CSRF stop before Project commands",async({page})=>{
