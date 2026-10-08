@@ -17,7 +17,8 @@
 - Current-schema compatibility plus historical folder/recipient baseline: **8 passed, 0 failed** across three suites. Only the schema-compatibility test in that baseline applies both exact current inventories; do not describe its historical behavioral fixtures as current-chain acceptance.
 - Upgraded shared-folder behavioral suite: **6 passed, 0 failed** on the exact byte-reviewed Operations 180-migration inventory, with exact ledger and foreign-key checks. All six original behavior/negative cases are retained; no runtime guards were changed.
 - Operations TypeScript validation passed after connecting the isolated worktree to the existing locked Operations and Client dependencies. No packages were installed or upgraded.
-- Native-recipient end-to-end current-chain behavioral coverage remains under investigation. Schema compatibility and current-chain folder behavior do not alone prove the complete recipient flow.
+- Native-recipient joined behavioral acceptance now passes both variants: **2 passed, 0 failed**, retaining the historical fixture and adding the exact reviewed candidate Operations 180 / Client 147 inventories. The shared assertions cover owner issue, verified recipient consent, durable receipt, service-home access, revocation and reconciliation. Exact migration ledgers and foreign-key checks are asserted for the current-inventory variant. Operations TypeScript validation also passes with this addition.
+- These results apply to the candidate lineage identified above, not every other local branch or any deployed Worker. Reconcile differences with other unpublished integration branches before release; do not overwrite their unique runtime or migration changes.
 
 ## Remaining live acceptance gate
 

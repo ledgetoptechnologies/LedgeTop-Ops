@@ -16,6 +16,11 @@ import { publishOperationsPortalWorkspaceRpc, getOperationsPortalWorkspacePublic
   "../../client/src/worker/operations-portal-workspace-publication-entrypoint";
 import type { Env as ClientEnv } from "../../client/src/worker/types";
 import { applyCanonicalChain } from "./helpers/verified-recipient-canonical-lineage";
+import { reviewedClientMigrationNames, reviewedOperationsMigrationNames } from
+  "./helpers/reviewed-operations-migration-chain";
+// Reviewed test-artifact generator has no declarations.
+// @ts-expect-error test-only JavaScript artifact module
+import { transformSeed } from "../../../scripts/staging-bootstrap.mjs";
 import { writeNativeDirectoryProfile, type NativeDirectoryCreateWrite } from
   "../src/worker/native-directory-profile-writer";
 import { reserveOperationsPortalWorkspace } from "../src/worker/operations-portal-workspace-reservations";
@@ -55,6 +60,28 @@ async function applyDraft(database: D1Database, application: "operations" | "cli
     : new URL(`../../client/migrations/${name}`, import.meta.url);
   await database.batch(splitD1MigrationStatements(readFileSync(url, "utf8"))
     .map(statement => database.prepare(statement)));
+}
+
+async function applyReviewedChain(database: D1Database, application: "operations" | "client") {
+  const directory = application === "operations" ? new URL("../migrations/", import.meta.url)
+    : new URL("../../client/migrations/", import.meta.url);
+  const names = application === "operations" ? reviewedOperationsMigrationNames(directory)
+    : reviewedClientMigrationNames(directory);
+  await database.prepare(`CREATE TABLE d1_migrations(
+    id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT UNIQUE NOT NULL,
+    applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)`).run();
+  for (const name of names) {
+    const raw = readFileSync(new URL(name, directory), "utf8");
+    const source = application === "operations" && name === "0002_seed_acl.sql"
+      ? transformSeed("operations", raw, { email: "owner@staging.example.test", displayName: "Synthetic Staging Owner",
+        clientStaffId: "staging-client-owner", operationsStaffId: "staging-operations-owner" }) as string
+      : raw;
+    await database.batch([
+      ...splitD1MigrationStatements(source).map(statement => database.prepare(statement)),
+      database.prepare("INSERT INTO d1_migrations(name) VALUES(?)").bind(name),
+    ]);
+  }
+  return names;
 }
 
 async function seedOwner(database: D1Database) {
@@ -144,7 +171,8 @@ async function acknowledgeCreate(database: D1Database, seed: Awaited<ReturnType<
     WHERE mutation_id=? AND state='materialized'`).bind(seed.write.mutationId).run();
 }
 
-describe("Ops-native recipient joined local acceptance", () => {
+for (const chain of ["historical", "current-reviewed"] as const) describe(
+  `Ops-native recipient joined local acceptance (${chain})`, () => {
   let runtime: Miniflare, operations: D1Database, client: D1Database;
   let accessPrivateKey: CryptoKey, accessJwks: JWTVerifyGetKey;
   let targetId: string, authorityId: string, workspaceId: string;
@@ -166,20 +194,34 @@ describe("Ops-native recipient joined local acceptance", () => {
     accessPublicJwk.alg = "RS256"; accessPublicJwk.kid = "joined-recipient-access"; accessPublicJwk.use = "sig";
     accessPrivateKey = accessKeys.privateKey;
     accessJwks = createLocalJWKSet({ keys: [accessPublicJwk] });
-    expect(await applyCanonicalChain(operations, "operations",
-      "0153_operations_portal_workspace_publication_outbox.sql", true)).toHaveLength(153);
-    for (const name of ["0154_operations_portal_native_recipient_authority.sql",
-      "0156_operations_portal_workspace_publication_invocations.sql",
-      "0157_operations_portal_native_workspace_cleanup.sql", "0160_operations_portal_native_recipient_labels.sql"])
-      await applyDraft(operations, "operations", name);
-    // Current directory consumers require the explicit Operations-record ID
-    // projection introduced by 0170; this historical acceptance fixture stops
-    // its canonical chain at 0153 and therefore applies that view migration
-    // explicitly rather than exercising an obsolete mapping shape.
-    await applyDraft(operations, "operations", "0170_project_alpha_active_directory_project_guard.sql");
-    expect(await applyCanonicalChain(client, "client", "0223_operations_portal_workspace_publications.sql"))
-      .toHaveLength(142);
-    await applyDraft(client, "client", "0224_operations_portal_native_recipient_authority.sql");
+    if (chain === "historical") {
+      expect(await applyCanonicalChain(operations, "operations",
+        "0153_operations_portal_workspace_publication_outbox.sql", true)).toHaveLength(153);
+      for (const name of ["0154_operations_portal_native_recipient_authority.sql",
+        "0156_operations_portal_workspace_publication_invocations.sql",
+        "0157_operations_portal_native_workspace_cleanup.sql", "0160_operations_portal_native_recipient_labels.sql"])
+        await applyDraft(operations, "operations", name);
+      // Current directory consumers require the explicit Operations-record ID
+      // projection introduced by 0170; this historical acceptance fixture stops
+      // its canonical chain at 0153 and therefore applies that view migration
+      // explicitly rather than exercising an obsolete mapping shape.
+      await applyDraft(operations, "operations", "0170_project_alpha_active_directory_project_guard.sql");
+      expect(await applyCanonicalChain(client, "client", "0223_operations_portal_workspace_publications.sql"))
+        .toHaveLength(142);
+      await applyDraft(client, "client", "0224_operations_portal_native_recipient_authority.sql");
+    } else {
+      const operationsNames = await applyReviewedChain(operations, "operations");
+      expect(operationsNames).toHaveLength(180);
+      expect(operationsNames.at(-1)).toBe("0180_project_alpha_project_v2_recovery_authorization.sql");
+      const clientNames = await applyReviewedChain(client, "client");
+      expect(clientNames).toHaveLength(147);
+      expect(clientNames.at(-1)).toBe("0228_operations_portal_native_content_start_audit.sql");
+      for (const [database, names] of [[operations, operationsNames], [client, clientNames]] as const) {
+        const ledger = await database.prepare("SELECT name FROM d1_migrations ORDER BY id").all<{ name: string }>();
+        expect(ledger.results.map(row => row.name)).toEqual(names);
+        expect((await database.prepare("PRAGMA foreign_key_check").all()).results).toEqual([]);
+      }
+    }
     await seedOwner(operations);
     await operations.batch([
       operations.prepare("INSERT INTO native_business_areas(id,name,active) VALUES('joined-recipient-area','Joined Area',1)"),
@@ -216,7 +258,7 @@ describe("Ops-native recipient joined local acceptance", () => {
     await expect(dispatchOperationsPortalWorkspacePublication({ db: operations, binding,
       operationId: publication.operationId, invocationId, action: "publish" }))
       .resolves.toMatchObject({ status: "acknowledged" });
-  }, 240_000);
+  }, 300_000);
 
   afterAll(async () => runtime.dispose());
 
