@@ -45,7 +45,7 @@ const client = { name: "Example Client", email: "client@example.test", phone: ""
   addressLine1: "", addressLine2: "", city: "", state: "WI", postalCode: "", country: "" };
 
 type Row = Record<string, unknown>;
-function database(options: { enrollment?: unknown; outboxState?: string; deny?: string; missingGeneration?: boolean;
+function database(options: { enrollment?: unknown; outboxState?: string; missingProfileOutbox?: boolean; deny?: string; missingGeneration?: boolean;
   admission?: false; replay?: "exact" | "conflict" | "client"; linked?: boolean;
   insertRace?: "exact" | "conflict"; profile?: "organization" | "client"; inactiveDivision?: boolean;
   relationshipReplay?: { organization: { recordId: string; expectedRecordVersion: number } | null;
@@ -124,7 +124,7 @@ function database(options: { enrollment?: unknown; outboxState?: string; deny?: 
           value = options.terminalPredecessor === undefined ? null : options.terminalPredecessor;
         else if (sql.includes("project_alpha_directory_relationship_outbox WHERE command_id")) value = options.outboxState ?? "pending";
         else if (sql.includes("project_alpha_directory_outbox WHERE command_id"))
-          value = { source_id: sourceId, state: options.outboxState ?? "pending" };
+          value = options.missingProfileOutbox ? null : { source_id: sourceId, state: options.outboxState ?? "pending" };
         if (column && value && typeof value === "object") return ((value as Row)[column] ?? null) as T | null;
         return value as T | null;
       },
@@ -437,6 +437,25 @@ describe("native Directory profile routes", () => {
     await expect(response.json()).resolves.toEqual({ status: "conflict", reason: "destination_conflict",
       recordId: ids.mutation, kind: "organization", version: 1,
       destinations: [{ sourceId, state: "conflict" }] });
+  });
+
+  it("can return a destination-status conflict after the writer reports a committed local create", async () => {
+    const body = { mutationId: ids.mutation, sourceIds: [sourceId], scopes, profile: organization };
+    const response = await fixture({ db: database({ missingProfileOutbox: true }) }).send(
+      `${NATIVE_DIRECTORY_PROFILE_ROUTE}/organizations`, body);
+    expect(mocks.writer).toHaveBeenCalledTimes(1);
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toEqual({ status: "conflict", reason: "destination_state_unavailable" });
+
+    // A 409 is not permission to mint another create UUID. Replaying the exact
+    // committed operation must bypass a second writer invocation once visible.
+    mocks.writer.mockClear();
+    const replay = await fixture({ db: database({ replay: "exact" }) }).send(
+      `${NATIVE_DIRECTORY_PROFILE_ROUTE}/organizations`, body);
+    expect(replay.status).toBe(202);
+    await expect(replay.json()).resolves.toMatchObject({ status: "pending", recordId: ids.mutation,
+      kind: "organization", version: 1, replayed: true });
+    expect(mocks.writer).not.toHaveBeenCalled();
   });
 
   it("atomically binds linked-client admission to a non-UUID organization version and allows a destination subset", async () => {
