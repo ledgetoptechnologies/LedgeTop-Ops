@@ -33,6 +33,32 @@ async function actor() {
   ]);
   return { staffId, accessSubject, email, admissionVersion: 1, profileVersion: 1 };
 }
+async function businessAreaActor(businessAreaId: string) {
+  const staffId = `staff-${++sequence}`, accessSubject = `subject-${sequence}`, email = `${staffId}@example.test`;
+  await db.batch([
+    db.prepare("INSERT OR IGNORE INTO native_business_areas(id,active) VALUES(?,1)").bind(businessAreaId),
+    db.prepare("INSERT INTO native_staff_admissions VALUES(?,1,?,1)").bind(staffId, accessSubject),
+    db.prepare("INSERT INTO native_staff_profiles VALUES(?,?,1)").bind(staffId, email),
+    db.prepare(`INSERT INTO native_project_grants(id,staff_id,capability,effect,scope_kind,business_area_id,granted_by)
+      VALUES(?,?,'project.shared.sync','allow','business_area',?,?)`)
+      .bind(`grant-business-area-${staffId}`, staffId, businessAreaId, staffId),
+  ]);
+  return { staffId, accessSubject, email, admissionVersion: 1, profileVersion: 1 };
+}
+async function expectNoCommandRows(commandId: string, externalProjectId: string) {
+  const checks = [
+    ["native_project_command_proofs", "command_id", commandId],
+    ["project_alpha_project_outbox", "command_id", commandId],
+    ["native_project_command_reservations", "command_id", commandId],
+    ["project_alpha_project_v2_request_fingerprints", "command_id", commandId],
+    ["project_alpha_project_v2_events", "command_id", commandId],
+    ["project_alpha_project_v2_canonical_intents", "command_id", commandId],
+    ["project_alpha_project_destinations", "external_project_id", externalProjectId],
+  ] as const;
+  for (const [table, column, value] of checks) {
+    expect(await db.prepare(`SELECT count(*) n FROM ${table} WHERE ${column}=?`).bind(value).first("n"), table).toBe(0);
+  }
+}
 async function directory(sourceId: string, sourceInstanceId: string, applicationId: string, historyEpochId: string, mappingKind: "legacy" | "acquired" = "legacy") {
   const organizationRecordId = uuid(), clientRecordId = uuid(), organizationPublicId = crypto.randomUUID().replaceAll("-", ""), clientPublicId = crypto.randomUUID().replaceAll("-", "");
   const organizationExternalId = mappingKind === "acquired" ? `pa-org-${sequence}` : organizationRecordId;
@@ -116,6 +142,44 @@ beforeAll(async () => {
 afterAll(async () => runtime.dispose());
 
 describe("unmounted project-v2 command producer", () => {
+  it("enforces a single business-area grant across nonempty, mixed, and empty project scopes atomically", async () => {
+    const allowedArea = `area-allowed-${++sequence}`, allowedDivision = `division-allowed-${sequence}`, otherArea = `area-other-${sequence}`;
+    const allowed = await createAction();
+    const staff = await businessAreaActor(allowedArea);
+    await db.batch([
+      db.prepare("INSERT INTO native_business_areas(id,active) VALUES(?,1)").bind(otherArea),
+      db.prepare("INSERT INTO native_business_divisions(id,business_area_id,active) VALUES(?,?,1)").bind(allowedDivision, allowedArea),
+    ]);
+
+    const withScopes = (action: Awaited<ReturnType<typeof createAction>>, scopes: ProjectAlphaProjectV2CommandProducerAction["actor"]["scopes"]): ProjectAlphaProjectV2CommandProducerAction => ({
+      ...action,
+      actor: { ...staff, verifiedUntil: until, scopes },
+    });
+    await expect(planProjectAlphaProjectV2Command(env(), withScopes(allowed, [
+      { scopeKind: "business_area", businessAreaId: allowedArea, divisionId: null },
+      { scopeKind: "division", businessAreaId: allowedArea, divisionId: allowedDivision },
+    ]))).resolves.toMatchObject({ status: "queued", replayed: false });
+    expect(await db.prepare("SELECT scopes_json FROM native_project_command_proofs WHERE command_id=?")
+      .bind(allowed.command.commandId).first("scopes_json")).toBe(JSON.stringify([
+        { scopeKind: "business_area", businessAreaId: allowedArea, divisionId: null },
+        { scopeKind: "division", businessAreaId: allowedArea, divisionId: allowedDivision },
+      ]));
+
+    for (const scopes of [
+      [{ scopeKind: "business_area", businessAreaId: otherArea, divisionId: null }],
+      [
+        { scopeKind: "business_area", businessAreaId: allowedArea, divisionId: null },
+        { scopeKind: "business_area", businessAreaId: otherArea, divisionId: null },
+      ],
+      [],
+    ] as const) {
+      const rejected = await createAction();
+      const action = withScopes(rejected, scopes);
+      await expect(planProjectAlphaProjectV2Command(env(), action)).resolves.toEqual({ status: "uncertain", reason: "database" });
+      await expectNoCommandRows(rejected.command.commandId, rejected.command.externalId);
+    }
+  });
+
   it("pins each deliberately selected source, canonicalizes once, and inserts only pending local evidence", async () => {
     const one = await createAction("project-alpha:one"), two = await createAction("project-alpha:two");
     const publicBefore = await db.prepare("SELECT id,url,hex(payload) payload FROM delivery_public_shares").all();

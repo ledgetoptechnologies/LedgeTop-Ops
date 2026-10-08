@@ -157,10 +157,31 @@ async function activateProjectAlphaProject() {
     command: { commandId, externalId: externalProject, expectedAuthorizationGeneration: "9",
       project: { name: "Selected Deliverables", description: "Project-v2 portal provenance acceptance",
         estimatedStart: null, estimatedEnd: null },
-      organization: { externalId: organization, expectedPublicId: organizationPublicId,
+      organization: { externalId: organizationExternalId, expectedPublicId: organizationPublicId,
         expectedRevision: "7", expectedProjectionSha256: projectProjectionSha256 }, client: null },
   };
   const environment = { OPS_DB: operations, PROJECT_ALPHA_API_V2_CONNECTIONS: projectAlphaConnections };
+  const mismatchedCommandId = id();
+  const mismatchedAction = { ...action, command: { ...action.command, commandId: mismatchedCommandId,
+    organization: { ...action.command.organization, externalId: organization } } };
+  await expect(planProjectAlphaProjectV2Command(environment, mismatchedAction))
+    .resolves.toEqual({ status: "blocked", reason: "directory" });
+  await expect(Promise.all([
+    operations.prepare("SELECT count(*) AS count FROM project_alpha_project_outbox WHERE command_id=?")
+      .bind(mismatchedCommandId).first("count"),
+    operations.prepare("SELECT count(*) AS count FROM native_project_command_reservations WHERE command_id=?")
+      .bind(mismatchedCommandId).first("count"),
+    operations.prepare("SELECT count(*) AS count FROM native_project_command_proofs WHERE command_id=?")
+      .bind(mismatchedCommandId).first("count"),
+    operations.prepare("SELECT count(*) AS count FROM project_alpha_project_v2_request_fingerprints WHERE command_id=?")
+      .bind(mismatchedCommandId).first("count"),
+    operations.prepare("SELECT count(*) AS count FROM project_alpha_project_v2_events WHERE command_id=?")
+      .bind(mismatchedCommandId).first("count"),
+    operations.prepare("SELECT count(*) AS count FROM project_alpha_project_v2_canonical_intents WHERE command_id=?")
+      .bind(mismatchedCommandId).first("count"),
+    operations.prepare("SELECT count(*) AS count FROM project_alpha_project_destinations WHERE external_project_id=?")
+      .bind(externalProject).first("count"),
+  ])).resolves.toEqual([0, 0, 0, 0, 0, 0, 0]);
   await expect(planProjectAlphaProjectV2Command(environment, action)).resolves.toMatchObject({ status: "queued", replayed: false });
   const commandTransport = vi.fn<typeof fetch>(async (_input, init) => init?.method !== "POST"
     ? projectResponse(projectCapabilities("projects.create"))
