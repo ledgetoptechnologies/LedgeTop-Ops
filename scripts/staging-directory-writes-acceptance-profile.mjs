@@ -18,6 +18,9 @@ export const DIRECTORY_WRITES_ACCEPTANCE_VALUES = Object.freeze({
   NATIVE_DIRECTORY_PROFILE_WRITES_ENABLED: "true",
   NATIVE_DIRECTORY_OUTBOX_DRAIN_ENABLED: "true",
 });
+export const DIRECTORY_PROFILE_WRITE_ACCEPTANCE_VALUES = Object.freeze({
+  NATIVE_DIRECTORY_PROFILE_WRITES_ENABLED: "true",
+});
 
 const readJson = file => JSON.parse(fs.readFileSync(file, "utf8"));
 
@@ -39,6 +42,16 @@ export function buildDirectoryWritesAcceptanceConfig(source, production) {
   if (errors.length) throw new Error(errors.join("\n"));
   const candidate = structuredClone(source);
   Object.assign(candidate.vars, DIRECTORY_WRITES_ACCEPTANCE_VALUES);
+  return candidate;
+}
+
+// Interactive phase only. The scheduler drain remains default-off until the
+// exact newly-created command and global queue/materializer state are reviewed.
+export function buildDirectoryProfileWriteAcceptanceConfig(source, production) {
+  const errors = sourceErrors(source, production);
+  if (errors.length) throw new Error(errors.join("\n"));
+  const candidate = structuredClone(source);
+  Object.assign(candidate.vars, DIRECTORY_PROFILE_WRITE_ACCEPTANCE_VALUES);
   return candidate;
 }
 

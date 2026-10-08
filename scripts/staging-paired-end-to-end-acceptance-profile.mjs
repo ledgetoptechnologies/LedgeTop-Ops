@@ -1,5 +1,9 @@
 import { isDeepStrictEqual } from "node:util";
 import {
+  buildDirectoryProfileWriteAcceptanceConfig,
+  DIRECTORY_PROFILE_WRITE_ACCEPTANCE_VALUES,
+} from "./staging-directory-writes-acceptance-profile.mjs";
+import {
   buildDirectoryAdoptionAcceptanceConfig,
   DIRECTORY_ADOPTION_ACCEPTANCE_VALUES,
 } from "./staging-project-alpha-directory-adoption-acceptance-profile.mjs";
@@ -40,6 +44,7 @@ export function buildPairedEndToEndAcceptanceConfigs(sources, production, secret
   const directoryOperations = buildDirectoryAdoptionAcceptanceConfig(
     sources?.operations, production?.operations, secretNames,
   );
+  const directoryWrites = buildDirectoryProfileWriteAcceptanceConfig(sources?.operations, production?.operations);
   const workspace = buildNativeWorkspaceAcceptanceConfigs(sources, production);
   const portal = buildNativePortalAcceptanceConfigs(sources, production);
 
@@ -50,6 +55,8 @@ export function buildPairedEndToEndAcceptanceConfigs(sources, production, secret
     DIRECTORY_ADOPTION_ACCEPTANCE_VALUES);
   if (!isDeepStrictEqual(directoryOperations, expectedFromSource(sources.operations, directoryDelta)))
     throw new Error("Directory constituent drifted outside its exported API, Viewer, and adoption deltas");
+  if (!isDeepStrictEqual(directoryWrites, expectedFromSource(sources.operations, DIRECTORY_PROFILE_WRITE_ACCEPTANCE_VALUES)))
+    throw new Error("Directory profile writes constituent drifted outside its exported UI-only delta");
   for (const app of PAIRED_END_TO_END_ACCEPTANCE_APPS) {
     if (!isDeepStrictEqual(workspace[app], expectedFromSource(sources[app], WORKSPACE_ACCEPTANCE_ACTIVATION_VALUES[app])))
       throw new Error(`workspace ${app} constituent drifted outside its exported delta`);
@@ -65,6 +72,7 @@ export function buildPairedEndToEndAcceptanceConfigs(sources, production, secret
     VIEWER_ACCEPTANCE_VALUES,
     VIEWER_ACCEPTANCE_IDENTITY,
     DIRECTORY_ADOPTION_ACCEPTANCE_VALUES,
+    DIRECTORY_PROFILE_WRITE_ACCEPTANCE_VALUES,
     WORKSPACE_ACCEPTANCE_ACTIVATION_VALUES.operations,
     NATIVE_PORTAL_ACCEPTANCE_ACTIVATION_VALUES.operations);
 

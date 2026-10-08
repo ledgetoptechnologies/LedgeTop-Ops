@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import test from "node:test";
 import { renderConfigs } from "./staging-config-scaffold.mjs";
+import { DIRECTORY_PROFILE_WRITE_ACCEPTANCE_VALUES } from "./staging-directory-writes-acceptance-profile.mjs";
 import { DIRECTORY_ADOPTION_ACCEPTANCE_VALUES } from "./staging-project-alpha-directory-adoption-acceptance-profile.mjs";
 import { PROJECT_ALPHA_API_V2_ACCEPTANCE_VALUES } from "./staging-project-alpha-api-v2-acceptance-profile.mjs";
 import { VIEWER_ACCEPTANCE_SECRET_NAMES, VIEWER_ACCEPTANCE_VALUES } from "./staging-project-alpha-api-v2-viewer-acceptance-profile.mjs";
@@ -28,6 +29,7 @@ const deltas = (app) => ({
   ...(app === "operations" ? PROJECT_ALPHA_API_V2_ACCEPTANCE_VALUES : {}),
   ...(app === "operations" ? VIEWER_ACCEPTANCE_VALUES : {}),
   ...(app === "operations" ? DIRECTORY_ADOPTION_ACCEPTANCE_VALUES : {}),
+  ...(app === "operations" ? DIRECTORY_PROFILE_WRITE_ACCEPTANCE_VALUES : {}),
   ...WORKSPACE_ACCEPTANCE_ACTIVATION_VALUES[app],
   ...NATIVE_PORTAL_ACCEPTANCE_ACTIVATION_VALUES[app],
 });
@@ -41,6 +43,7 @@ test("builds the exact paired end-to-end window from one validated default-off b
     for (const [flag, value] of Object.entries(deltas(app))) assert.equal(candidates[app].vars[flag], value, `${app}.${flag}`);
   assert.equal(candidates.operations.vars.VIEWER_SERVICE_KEY_ID, "staging-v1");
   assert.equal(candidates.operations.vars.VIEWER_PUBLIC_SHARES_ENABLED, "false");
+  assert.equal(candidates.operations.vars.NATIVE_DIRECTORY_OUTBOX_DRAIN_ENABLED, "false");
 });
 
 test("rejects every omitted composed gate", () => {
@@ -59,6 +62,7 @@ test("rejects partial pairs, Viewer drift, extra resources, and unrelated flags"
     pair => { pair.operations.vars.VIEWER_SERVICE_KEY_ID = "other"; },
     pair => { pair.operations.d1_databases[0].database_id = "production-db"; },
     pair => { pair.delivery.vars.UNRELATED_AUTHORITY_ENABLED = "true"; },
+    pair => { pair.operations.vars.NATIVE_DIRECTORY_OUTBOX_DRAIN_ENABLED = "true"; },
   ]) {
     const current = state(), candidates = build(current.sources, current.production, current.secretNames); mutate(candidates);
     assert(validate(current.sources, candidates, current.production, current.secretNames).length > 0);
@@ -71,6 +75,10 @@ test("rejects missing native prerequisites and production-enabled constituent ga
     current => { current.sources.operations.services.find(value => value.binding === "OPERATIONS_PORTAL_WORKSPACE_PUBLICATION").service = "wrong"; },
     current => { current.production.delivery.vars.CLIENT_PORTAL_OPERATIONS_SERVICE_HOME_ENABLED = "true"; },
     current => { current.production.operations.vars.PROJECT_ALPHA_DIRECTORY_EXACT_ADOPTION_ENABLED = "true"; },
+    current => { current.production.operations.vars.NATIVE_DIRECTORY_PROFILE_WRITES_ENABLED = "true"; },
+    current => { current.production.operations.vars.NATIVE_DIRECTORY_OUTBOX_DRAIN_ENABLED = "true"; },
+    current => { current.sources.operations.vars.NATIVE_DIRECTORY_PROFILE_WRITES_ENABLED = "true"; },
+    current => { current.sources.operations.vars.NATIVE_DIRECTORY_OUTBOX_DRAIN_ENABLED = "true"; },
   ]) {
     const current = state(); mutate(current);
     assert.throws(() => build(current.sources, current.production, current.secretNames));

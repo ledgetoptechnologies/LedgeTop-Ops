@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 import { renderConfigs } from "./staging-config-scaffold.mjs";
 import {
   buildDirectoryWritesAcceptanceConfig,
+  buildDirectoryProfileWriteAcceptanceConfig,
   DIRECTORY_WRITES_ACCEPTANCE_CONFIG,
   DIRECTORY_WRITES_ACCEPTANCE_VALUES,
   run,
@@ -49,6 +50,24 @@ function fixture(t) {
   fs.writeFileSync(productionPath, `${JSON.stringify(production, null, 2)}\n`);
   return { base, source, production };
 }
+
+test("interactive profile writes leave the global drain off and preserve both baselines", () => {
+  const { source, production } = pair();
+  const before = structuredClone({ source, production });
+  const candidate = buildDirectoryProfileWriteAcceptanceConfig(source, production);
+  const expected = structuredClone(source);
+  expected.vars.NATIVE_DIRECTORY_PROFILE_WRITES_ENABLED = "true";
+  assert.deepEqual(candidate, expected);
+  assert.equal(candidate.vars.NATIVE_DIRECTORY_OUTBOX_DRAIN_ENABLED, "false");
+  assert.deepEqual({ source, production }, before);
+  for (const owner of ["source", "production"]) {
+    for (const flag of Object.keys(DIRECTORY_WRITES_ACCEPTANCE_VALUES)) {
+      const unsafe = pair();
+      unsafe[owner].vars[flag] = "true";
+      assert.throws(() => buildDirectoryProfileWriteAcceptanceConfig(unsafe.source, unsafe.production), /false|omit/);
+    }
+  }
+});
 
 test("enables only the two exact native directory write/outbox gates on validated staging clone", () => {
   const { source, production } = pair();

@@ -32,7 +32,7 @@ unrelated configuration/binding comparison remains required before deployment.
 ## Default-off baseline composition
 
 This pure profile composes the reviewed Operations API-v2, live Viewer, and
-Directory-adoption window with the paired native-workspace and native
+Directory-adoption and UI-only native Directory-write windows with the paired native-workspace and native
 service-home profiles. Every constituent builder validates the same untouched
 default-off Client and Operations sources; the composer merges only their
 exported flag deltas and then requires full-object equality for both candidates.
@@ -43,6 +43,15 @@ dedicated local CLI can materialize or verify one ignored, indivisible pair:
 node scripts/staging-paired-end-to-end-acceptance-cli.mjs --write
 node scripts/staging-paired-end-to-end-acceptance-cli.mjs --check
 ```
+
+The Directory-write constituent is required for the normal `/clients` create
+and update UI. It enables only `NATIVE_DIRECTORY_PROFILE_WRITES_ENABLED`;
+`NATIVE_DIRECTORY_OUTBOX_DRAIN_ENABLED` remains false and grants are not issued
+by configuration. After the exact synthetic command is created, review global
+profile/relationship outboxes and waiting client intents before a separately
+bounded drain window. The drain is not actor-scoped and could process older
+work. Save paired authority recovery evidence and restore drain=false after
+sync testing. Both gates remain default-off in source and production baselines.
 
 The CLI reads the validated default-off staging and production configurations
 plus the names-only `.backups/operations-staging-secret-names.json` inventory.
