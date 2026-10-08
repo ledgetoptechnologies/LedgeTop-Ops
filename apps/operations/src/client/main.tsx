@@ -11,6 +11,8 @@ import { ClientPortalRecipientEnrollment } from "./ClientPortalRecipientEnrollme
 import { OperationsNativeRecipientEnrollment } from "./OperationsNativeRecipientEnrollment";
 import { OperationsNativeDeliveryAuthority } from "./OperationsNativeDeliveryAuthority";
 import { OperationsPortalWorkspaceOwner } from "./OperationsPortalWorkspaceOwner";
+import { DirectoryReplayAcceptance } from "./DirectoryReplayAcceptance";
+import { isDirectoryReplayAcceptanceLocation } from "./DirectoryReplayAcceptanceRoute";
 
 const nativeOwnerHost = window.location.protocol === "https:"
   && window.location.hostname === "ops-staging.ledgetopdroneservices.com"
@@ -24,7 +26,10 @@ const operationsDeliveryAuthorityRoute = nativeOwnerHost
   && window.location.pathname === "/administration/client-portal/operations-delivery-authority";
 const operationsWorkspaceRoute = nativeOwnerHost
   && window.location.pathname === "/administration/client-portal/operations-workspaces";
-createRoot(document.getElementById("root")!).render(<StrictMode>{operationsWorkspaceRoute
+const directoryReplayAcceptanceRoute = isDirectoryReplayAcceptanceLocation(window.location);
+createRoot(document.getElementById("root")!).render(<StrictMode>{directoryReplayAcceptanceRoute
+  ? <DirectoryReplayAcceptance />
+  : operationsWorkspaceRoute
   ? <OperationsPortalWorkspaceOwner />
   : operationsDeliveryAuthorityRoute
   ? <OperationsNativeDeliveryAuthority />
