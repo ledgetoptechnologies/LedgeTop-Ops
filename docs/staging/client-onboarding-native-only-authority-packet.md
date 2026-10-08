@@ -160,25 +160,40 @@ real local D1 evaluated guards, insert CAS and post-insert rollback.
 - `open` requires that exact fresh area, reads current authority and database
   time, saves the private provision artifact before mutation, and verifies the
   immutable receipt, complete grant/history readback and direct area references.
+- `open` defaults to the original two-permission profile-edit/identity-link
+  packet. Client creation is a separate explicit mode: add `--client-creation`
+  to compile the schema-3 packet with exactly those two permissions plus
+  `directory.enrollment.manage`. Omitting the flag cannot grant enrollment
+  management.
 - Preparation and opening are separate transactions. Run them in a controlled
   staging sequence without concurrent fixture writers; do not claim a global
   cross-action isolation guarantee. The unchanged compiler still guards the
   actual authority transaction.
 - The default 60-minute `closeBy` is an operator cleanup deadline, not automatic
   grant expiration. `close` or `recover` must use the exact saved provision file
-  and the existing paired revocation workflow. Preserve the synthetic area and
+  and the existing paired revocation workflow. Recovery selects and verifies the
+  exact synthetic area recorded in that provision artifact; it does not accept a
+  replacement area identity from the caller. Preserve the synthetic area and
   durable audit history; never delete them to make another provision pass.
 
 ```text
 node scripts/staging-native-authority-window.mjs prepare --config apps/operations/wrangler.staging.native-authority-binding.json --area-id staging-native-only-portal-acceptance-20261002-window-2 --area-name "Synthetic portal acceptance — 2026-10-02 window 2" --confirm-staging-synthetic-area-create
 node scripts/staging-native-authority-window.mjs open --config apps/operations/wrangler.staging.native-authority-binding.json --area-id staging-native-only-portal-acceptance-20261002-window-2 --area-name "Synthetic portal acceptance — 2026-10-02 window 2" --window-minutes 60
+node scripts/staging-native-authority-window.mjs open --config apps/operations/wrangler.staging.native-authority-binding.json --area-id staging-native-only-portal-acceptance-20261002-window-2 --area-name "Synthetic portal acceptance — 2026-10-02 window 2" --window-minutes 60 --client-creation
 node scripts/staging-native-authority-window.mjs close --config apps/operations/wrangler.staging.native-authority-binding.json --recover .backups/staging-native-authority/<approval-id>/provision.json
 ```
 
-These commands prepare only onboarding edit/link authority. They do not grant
+Choose exactly one `open` example for a prepared area; do not run both in
+sequence. The first grants only onboarding edit/link authority. The explicitly
+flagged alternative also grants enrollment management for client creation.
+Even after paired revocation, retained grant/history rows make that area
+ineligible for a new provision; prepare a fresh synthetic area for another run.
+Neither example grants
 portal, financial, project-management or file access. Review and exercise those
 independent workflows after the customer fixture exists. No live outcome is
-claimed by the local test result or these example commands.
+claimed by the local test result or these example commands. Do not open either
+live window until the supported browser transport is available for the actual UI
+acceptance flow; local compilation and tests do not justify issuing live grants.
 
 ## Native folder acceptance follow-up
 

@@ -10,6 +10,7 @@ import {
   STAGING_TARGET,
   applyNativeOnlyAuthorityPacket,
   compileNativeOnlyAuthorityPacket,
+  nativeClientCreationGrantIds,
   nativeOnlyGrantIds,
 } from "./staging-onboarding-native-only-authority-packet.mjs";
 import {
@@ -235,6 +236,7 @@ function operations(dependencies) {
     compile: dependencies.compilePacket ?? compileNativeOnlyAuthorityPacket,
     apply: dependencies.applyPacket ?? applyNativeOnlyAuthorityPacket,
     grantIds: dependencies.grantIds ?? nativeOnlyGrantIds,
+    clientCreationGrantIds: dependencies.clientCreationGrantIds ?? nativeClientCreationGrantIds,
     randomUUID: dependencies.randomUUID ?? crypto.randomUUID,
     createEvidence: dependencies.createEvidence ?? createPrivateEvidenceDirectory,
     writeEvidence: dependencies.writeEvidence ?? writePrivateEvidence,
@@ -252,8 +254,16 @@ function recoveryMessage(provisionPath, message) {
   return `${message}; close this exact authority window with --recover ${provisionPath}`;
 }
 
+function permissionsForInput(input) {
+  if (input.schemaVersion === 2) return ["directory.profile.edit", "directory.identity.link"];
+  if (input.schemaVersion === 3) {
+    return ["directory.profile.edit", "directory.identity.link", "directory.enrollment.manage"];
+  }
+  fail("unsupported authority input schema version");
+}
+
 function targetGrantRows(input) {
-  return ["directory.profile.edit", "directory.identity.link"].map((permission, index) => ({
+  return permissionsForInput(input).map((permission, index) => ({
     id: input.approval.grantIds[index],
     staff_id: input.admission.staff_id,
     permission,
@@ -271,6 +281,7 @@ function targetGrantRows(input) {
 function verifyGranted(after, provision) {
   const before = provision.input;
   const ids = before.approval.grantIds;
+  const permissions = permissionsForInput(before);
   assert.deepEqual(after.admission, before.admission, "admission drift after provision");
   assert.deepEqual(after.profile, before.profile, "profile drift after provision");
   assert.deepEqual(after.businessArea, before.businessArea, "business area drift after provision");
@@ -279,13 +290,13 @@ function verifyGranted(after, provision) {
   const targets = ids.map(id => after.grants.find(row => row.id === id));
   assert.deepEqual(targets, targetGrantRows(before),
     "exact packet grants not active");
-  assert.equal(after.generation.generation, before.generation.generation + 2,
+  assert.equal(after.generation.generation, before.generation.generation + permissions.length,
     "unexpected generation after provision");
   assert.deepEqual(after.history.filter(row => row.grant_generation <= before.generation.generation),
     before.history, "prior grant history changed after provision");
   const suffix = after.history.filter(row => row.grant_generation > before.generation.generation);
-  assert.equal(suffix.length, 2, "unexpected provision history suffix");
-  for (const [index, permission] of ["directory.profile.edit", "directory.identity.link"].entries()) {
+  assert.equal(suffix.length, permissions.length, "unexpected provision history suffix");
+  for (const [index, permission] of permissions.entries()) {
     const row = suffix.find(item => item.grant_id === ids[index]);
     assert.deepEqual(Object.fromEntries(Object.entries(row ?? {}).filter(([key]) => key !== "recorded_at")), {
       grant_id: ids[index],
@@ -303,10 +314,11 @@ function verifyGranted(after, provision) {
   }
 }
 
-function buildProvisionInput(before, target, issuedAt, ops) {
+function buildProvisionInput(before, target, issuedAt, ops, clientCreation) {
   const approvalId = ops.randomUUID();
+  const schemaVersion = clientCreation ? 3 : 2;
   return {
-    schemaVersion: 2,
+    schemaVersion,
     staging: target,
     phase: "provision",
     ...before,
@@ -320,16 +332,17 @@ function buildProvisionInput(before, target, issuedAt, ops) {
       issuedAt,
       expiresAt: new Date(Date.parse(issuedAt) + ops.windowMinutes * 60_000).toISOString(),
       executedAt: issuedAt,
-      grantIds: ops.grantIds(STAFF, before.businessArea.id, approvalId),
+      grantIds: (clientCreation ? ops.clientCreationGrantIds : ops.grantIds)(
+        STAFF, before.businessArea.id, approvalId),
     },
     priorProvision: null,
   };
 }
 
-function verifyIsolatedArea(counts, phase) {
+function verifyIsolatedArea(counts, phase, grantCount) {
   for (const { table, count } of counts) {
     const expected = phase === "before" ? 0
-      : table === "native_directory_grants" || table === "native_directory_grant_history" ? 2 : 0;
+      : table === "native_directory_grants" || table === "native_directory_grant_history" ? grantCount : 0;
     if (count !== expected) fail(`synthetic business area is not isolated at ${phase} readback`);
   }
 }
@@ -427,15 +440,20 @@ export async function prepareStagingNativeAuthorityArea(configPath, requestedAre
 
 export async function openStagingNativeAuthorityWindow(configPath, requestedArea, dependencies = {}) {
   const requested = areaSpec(requestedArea);
+  if (dependencies.clientCreation !== undefined && typeof dependencies.clientCreation !== "boolean") {
+    fail("client-creation mode must be an explicit boolean");
+  }
+  const clientCreation = dependencies.clientCreation === true;
+  const grantCount = clientCreation ? 3 : 2;
   const ops = operations(dependencies);
   return ops.withBinding(configPath, async ({ db, target }) => {
     assert.deepEqual(target, STAGING_TARGET, "trusted staging target mismatch");
     const areaReferenceTables = await ops.referenceTables(db);
-    verifyIsolatedArea(await ops.referenceCounts(db, areaReferenceTables, requested.id), "before");
+    verifyIsolatedArea(await ops.referenceCounts(db, areaReferenceTables, requested.id), "before", grantCount);
     const before = await ops.snapshot(db, requested.id);
     assert.deepEqual(before.businessArea, requested, "reviewed synthetic business area differs or is absent");
     const issuedAt = await ops.clock(db);
-    const provision = ops.compile(buildProvisionInput(before, target, issuedAt, ops), { root: ops.root });
+    const provision = ops.compile(buildProvisionInput(before, target, issuedAt, ops, clientCreation), { root: ops.root });
     const evidence = ops.createEvidence(ops.root, provision.input.approval.approvalId);
 
     // Durable, private recovery evidence must exist before the only mutation.
@@ -478,7 +496,7 @@ export async function openStagingNativeAuthorityWindow(configPath, requestedArea
     try {
       granted = await ops.snapshot(db, requested.id);
       verifyGranted(granted, provision);
-      verifyIsolatedArea(await ops.referenceCounts(db, areaReferenceTables, requested.id), "after");
+      verifyIsolatedArea(await ops.referenceCounts(db, areaReferenceTables, requested.id), "after", grantCount);
     } catch (error) {
       throw new AggregateError([...(transportError ? [transportError] : []), error],
         recoveryMessage(evidence.provisionPath, "provision committed but granted state was not verified"));
@@ -494,7 +512,7 @@ export async function openStagingNativeAuthorityWindow(configPath, requestedArea
       status: transportError ? "opened-after-response-recovery" : "opened",
       environment: target.environment,
       businessAreaId: requested.id,
-      provisionedPermissions: 2,
+      provisionedPermissions: grantCount,
       grantedReadbackVerified: true,
       closeBy: provision.input.approval.expiresAt,
       closeByKind: "operator-deadline-no-auto-revocation",
@@ -524,22 +542,27 @@ function parseArguments(argv) {
       area: { id: values[3], name: values[5], active: 1 },
     };
   }
-  if (action === "open" && (values.length === 6 || values.length === 8) && values[0] === "--config"
+  if (action === "open" && [6, 7, 8, 9].includes(values.length) && values[0] === "--config"
     && values[2] === "--area-id" && values[4] === "--area-name"
     && values[1] && values[3] && values[5]
-    && (values.length === 6 || (values[6] === "--window-minutes" && /^\d+$/.test(values[7])))) {
+    && (values.length === 6
+      || (values.length === 7 && values[6] === "--client-creation")
+      || (values.length === 8 && values[6] === "--window-minutes" && /^\d+$/.test(values[7]))
+      || (values.length === 9 && values[6] === "--window-minutes" && /^\d+$/.test(values[7])
+        && values[8] === "--client-creation"))) {
     return {
       action,
       configPath: values[1],
       area: { id: values[3], name: values[5], active: 1 },
-      windowMinutes: values.length === 8 ? Number(values[7]) : DEFAULT_WINDOW_MINUTES,
+      windowMinutes: values[6] === "--window-minutes" ? Number(values[7]) : DEFAULT_WINDOW_MINUTES,
+      clientCreation: values.at(-1) === "--client-creation",
     };
   }
   if ((action === "close" || action === "recover") && values.length === 4
     && values[0] === "--config" && values[2] === "--recover" && values[1] && values[3]) {
     return { action: "close", configPath: values[1], provisionPath: values[3] };
   }
-  fail("usage: prepare --config <exact-staging-binding.json> --area-id <fresh-synthetic-area-id> --area-name <exact-area-name> --confirm-staging-synthetic-area-create | open --config <exact-staging-binding.json> --area-id <same-area-id> --area-name <same-area-name> [--window-minutes <1-240>] | close --config <exact-staging-binding.json> --recover <private-provision.json>");
+  fail("usage: prepare --config <exact-staging-binding.json> --area-id <fresh-synthetic-area-id> --area-name <exact-area-name> --confirm-staging-synthetic-area-create | open --config <exact-staging-binding.json> --area-id <same-area-id> --area-name <same-area-name> [--window-minutes <1-240>] [--client-creation] | close --config <exact-staging-binding.json> --recover <private-provision.json>");
 }
 
 export async function main(argv = process.argv.slice(2), dependencies = {}) {
@@ -548,7 +571,7 @@ export async function main(argv = process.argv.slice(2), dependencies = {}) {
     ? await prepareStagingNativeAuthorityArea(args.configPath, args.area, dependencies)
     : args.action === "open"
       ? await openStagingNativeAuthorityWindow(args.configPath, args.area,
-        { ...dependencies, windowMinutes: args.windowMinutes })
+        { ...dependencies, windowMinutes: args.windowMinutes, clientCreation: args.clientCreation })
       : await closeStagingNativeAuthorityWindow(args.configPath, args.provisionPath, dependencies);
   (dependencies.log ?? console.log)(JSON.stringify(result));
   return 0;

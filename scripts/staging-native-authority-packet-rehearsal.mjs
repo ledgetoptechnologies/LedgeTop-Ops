@@ -26,12 +26,12 @@ const REVOKE_FILE = /^revoke(?:-recovery-[0-9TZ.-]+)?\.json$/;
 const all = async (db, sql, ...args) => (await db.prepare(sql).bind(...args).all()).results;
 const first = (db, sql, ...args) => db.prepare(sql).bind(...args).first();
 
-async function snapshot(db) {
+async function snapshot(db, areaId = AREA.id) {
   return {
     admission: await first(db, "SELECT * FROM native_staff_admissions WHERE staff_id=?", STAFF),
     profile: await first(db, "SELECT * FROM native_staff_profiles WHERE staff_id=?", STAFF),
     generation: await first(db, "SELECT * FROM native_directory_grant_generations WHERE staff_id=?", STAFF),
-    businessArea: await first(db, "SELECT * FROM native_business_areas WHERE id=?", AREA.id),
+    businessArea: await first(db, "SELECT * FROM native_business_areas WHERE id=?", areaId),
     grants: await all(db, "SELECT * FROM native_directory_grants WHERE staff_id=? ORDER BY id", STAFF),
     history: await all(db, "SELECT * FROM native_directory_grant_history WHERE staff_id=? ORDER BY grant_id,grant_version", STAFF),
   };
@@ -132,7 +132,8 @@ function operations(dependencies) {
 }
 
 function compileExactProvision(raw, ops) {
-  if (!raw || raw.schemaVersion !== 2 || raw.input?.phase !== "provision") {
+  if (!raw || ![2, 3].includes(raw.schemaVersion) || ![2, 3].includes(raw.input?.schemaVersion)
+    || raw.input?.phase !== "provision") {
     throw new Error("exact compiled provision artifact required");
   }
   const expected = ops.compile(raw.input, { root: ops.root });
@@ -163,11 +164,13 @@ function verifyRevoked(after, provision) {
   assert.deepEqual(after.businessArea, before.businessArea, "synthetic area drift blocks verified cleanup");
   assert.deepEqual(after.grants.filter(row => !ids.includes(row.id)), before.grants, "prior grants changed");
   const targets = after.grants.filter(row => ids.includes(row.id));
-  assert.equal(targets.length, 2, "paired grants missing after revoke");
+  const grantCount = ids.length;
+  assert.equal(targets.length, grantCount, "paired grants missing after revoke");
   assert.ok(targets.every(row => row.active === 0), "paired grants remain active");
   assert.deepEqual(after.history.filter(row => row.grant_generation <= before.generation.generation),
     before.history, "prior grant history changed");
-  assert.equal(after.generation.generation, before.generation.generation + 4, "unexpected final generation");
+  assert.equal(after.generation.generation, before.generation.generation + grantCount * 2,
+    "unexpected final generation");
 }
 
 function verifiedPacketFromReceipt(receipt, ops) {
@@ -188,7 +191,8 @@ function savedPacketForReceipt(evidenceDir, receipt, ops) {
   const names = ops.fs.readdirSync(evidenceDir).filter(name => REVOKE_FILE.test(name)).sort();
   for (const name of names) {
     const raw = readPrivateJson(ops.root, path.join(evidenceDir, name), { fs: ops.fs });
-    if (!raw || raw.schemaVersion !== 2 || raw.input?.phase !== "revoke") {
+    if (!raw || ![2, 3].includes(raw.schemaVersion) || ![2, 3].includes(raw.input?.schemaVersion)
+      || raw.input?.phase !== "revoke") {
       throw new Error("saved revoke artifact is invalid");
     }
     const expected = ops.compile(raw.input, { root: ops.root });
@@ -237,7 +241,7 @@ async function applyRevokeAndVerify(db, target, provision, revoke, ops) {
     throw new AggregateError(transportError ? [transportError] : [], "paired revoke has no immutable receipt");
   }
   assert.deepEqual(receipt, revoke.receipt, "paired revoke receipt mismatch");
-  const after = await ops.snapshot(db);
+  const after = await ops.snapshot(db, provision.input.businessArea.id);
   verifyRevoked(after, provision);
   return { after, lostResponseRecovered: Boolean(transportError), transportError };
 }
@@ -248,6 +252,7 @@ function recoveryEvidenceName(executedAt) {
 
 async function recoverWithBinding(db, target, loaded, ops) {
   const { provision, provisionPath, evidenceDir } = loaded;
+  const areaId = provision.input.businessArea.id;
   let ledger;
   try {
     ledger = await receipts(db, provision, ops);
@@ -255,7 +260,7 @@ async function recoverWithBinding(db, target, loaded, ops) {
     throw new AggregateError([error], recoveryMessage(provisionPath, "could not read paired receipts"));
   }
   if (!ledger.provision) {
-    const current = await ops.snapshot(db);
+    const current = await ops.snapshot(db, areaId);
     if (current.grants.some(row => provision.input.approval.grantIds.includes(row.id))) {
       throw new Error(recoveryMessage(provisionPath, "packet grant exists without its atomic provision receipt"));
     }
@@ -271,11 +276,11 @@ async function recoverWithBinding(db, target, loaded, ops) {
       throw new Error("committed revoke is not paired to this provision");
     }
     await ops.apply(db, committed, { target, root: ops.root });
-    verifyRevoked(await ops.snapshot(db), provision);
+    verifyRevoked(await ops.snapshot(db, areaId), provision);
     return { status: "already-revoked", cleanupVerified: true, evidencePath: evidenceDir };
   }
 
-  const current = await ops.snapshot(db);
+  const current = await ops.snapshot(db, areaId);
   const executedAt = await ops.clock(db);
   const priorApproval = await ops.first(db,
     "SELECT * FROM native_staff_bootstrap_approvals WHERE approval_id=?", provision.input.approval.approvalId);

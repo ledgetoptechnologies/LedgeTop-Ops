@@ -85,10 +85,16 @@ function accessAssertion(env) {
   return value;
 }
 
-export async function parseDirectoryJoinedAcceptanceConfig(env = process.env) {
+function browserContextCredentialsPresent(env) {
+  return ["OPS_SESSION_COOKIE", "OPS_STORAGE_STATE", "OPS_CF_ACCESS_JWT_ASSERTION", "CLOUDFLARE_API_TOKEN"]
+    .some(name => typeof env[name] === "string" && env[name].trim());
+}
+
+async function parseDirectoryJoinedAcceptanceConfigForTransport(env, browserContext) {
   const origin = parseOrigin(env.OPS_BASE_URL || STAGING_ORIGIN);
   const mutate = env.OPS_DIRECTORY_ACCEPTANCE_ALLOW_MUTATIONS === "allow";
-  if (!mutate) return Object.freeze({ origin, mutate: false });
+  if (browserContext && browserContextCredentialsPresent(env)) fail("browser_context_credentials_forbidden");
+  if (!mutate) return Object.freeze({ origin, mutate: false, ...(browserContext ? { browserContext: true } : {}) });
   const prefix = required(env, "OPS_DIRECTORY_ACCEPTANCE_PREFIX");
   const sourceId = required(env, "OPS_DIRECTORY_ACCEPTANCE_SOURCE_ID");
   const businessAreaId = required(env, "OPS_DIRECTORY_ACCEPTANCE_BUSINESS_AREA_ID");
@@ -103,12 +109,22 @@ export async function parseDirectoryJoinedAcceptanceConfig(env = process.env) {
   if (!Number.isSafeInteger(pollIntervalMs) || pollIntervalMs < 100 || pollIntervalMs > 60_000
     || !Number.isSafeInteger(timeoutMs) || timeoutMs < pollIntervalMs || timeoutMs > 20 * 60_000)
     fail("invalid_poll_window");
-  const cookie = await sessionCookie(env, origin);
   const publicLinkUrl = parsePublicLink(required(env, "OPS_DIRECTORY_ACCEPTANCE_PUBLIC_LINK_URL"));
+  if (browserContext) return Object.freeze({ origin, mutate: true, browserContext: true, prefix, sourceId, businessAreaId,
+    divisionId, pollIntervalMs, timeoutMs, publicLinkUrl });
+  const cookie = await sessionCookie(env, origin);
   const d1Token = required(env, "CLOUDFLARE_API_TOKEN");
   const d1Target = parseStagingCloudflareD1Target(env, "OPS_DB");
   return Object.freeze({ origin, mutate: true, prefix, sourceId, businessAreaId, divisionId, pollIntervalMs, timeoutMs,
     cookie, accessAssertion: accessAssertion(env), publicLinkUrl, d1Token, d1Target });
+}
+
+export async function parseDirectoryJoinedAcceptanceConfig(env = process.env) {
+  return parseDirectoryJoinedAcceptanceConfigForTransport(env, false);
+}
+
+export async function parseBrowserContextDirectoryJoinedAcceptanceConfig(env = process.env) {
+  return parseDirectoryJoinedAcceptanceConfigForTransport(env, true);
 }
 
 async function boundedJson(response) {
@@ -234,8 +250,8 @@ function safeOutcome(payload) {
 
 async function acquireSession(config, fetcher) {
   const response = await fetcher(`${config.origin}/api/session`, { method: "GET", redirect: "manual", cache: "no-store",
-    headers: { Accept: "application/json", "Cache-Control": "no-store", Origin: config.origin, Cookie: config.cookie,
-      ...(config.accessAssertion ? { "Cf-Access-Jwt-Assertion": config.accessAssertion } : {}) } });
+    headers: { Accept: "application/json", "Cache-Control": "no-store", ...(config.browserContext ? {} : { Origin: config.origin,
+      Cookie: config.cookie, ...(config.accessAssertion ? { "Cf-Access-Jwt-Assertion": config.accessAssertion } : {}) }) } });
   if (response.status !== 200) fail(`operations_session_http_${response.status}`);
   const payload = await boundedJson(response);
   if (!object(payload) || typeof payload.csrfToken !== "string" || payload.csrfToken.length < 16 || payload.csrfToken.length > 512
@@ -244,8 +260,9 @@ async function acquireSession(config, fetcher) {
 }
 
 async function request(config, fetcher, path, method, csrfToken, body, expectedStatuses) {
-  const headers = { Accept: "application/json", "Cache-Control": "no-store", Origin: config.origin, Cookie: config.cookie,
-    ...(config.accessAssertion ? { "Cf-Access-Jwt-Assertion": config.accessAssertion } : {}) };
+  const headers = { Accept: "application/json", "Cache-Control": "no-store", ...(config.browserContext ? {} : {
+    Origin: config.origin, Cookie: config.cookie,
+    ...(config.accessAssertion ? { "Cf-Access-Jwt-Assertion": config.accessAssertion } : {}) }) };
   if (body !== undefined) Object.assign(headers, { "Content-Type": "application/json", "X-CSRF-Token": csrfToken,
     "Idempotency-Key": body.mutationId });
   const response = await fetcher(`${config.origin}${path}`, { method, redirect: "manual", cache: "no-store", headers,
@@ -383,6 +400,55 @@ export async function runDirectoryJoinedAcceptance(config, dependencies = {}) {
     publicLink: { before: beforePublicLink, after: afterPublicLink },
     credentials: { valuesExcluded: true, sessionPresent: true },
   });
+}
+
+function requireBrowserContextConfig(config) {
+  if (!config?.mutate) fail("mutation_allow_required");
+  if (!config?.browserContext) fail("browser_context_config_required");
+  parseOrigin(config.origin);
+  if (typeof config.publicLinkUrl !== "string" || parsePublicLink(config.publicLinkUrl) !== config.publicLinkUrl)
+    fail("invalid_public_link_url");
+  for (const name of ["cookie", "accessAssertion", "d1Token", "d1Target"])
+    if (Object.hasOwn(config, name)) fail("browser_context_credentials_forbidden");
+}
+
+function browserSafeInit(init, credentials) {
+  const headers = new Headers(init?.headers);
+  if (headers.has("cookie") || headers.has("cf-access-jwt-assertion") || headers.has("authorization"))
+    fail("browser_context_credentials_forbidden");
+  if (headers.has("origin")) fail("browser_context_origin_header_forbidden");
+  return { ...init, headers: Object.fromEntries(headers), credentials };
+}
+
+function approvedBrowserDirectoryRoute(url) {
+  if (url.pathname === "/api/session" && !url.search) return true;
+  if (url.pathname === `${ROOT}/create-options` && url.search === "?kind=client") return true;
+  if ((url.pathname === `${ROOT}/create-admissions` || url.pathname === `${ROOT}/standalone-clients`) && !url.search) return true;
+  const detailPrefix = `${ROOT}/standalone-clients/`;
+  return url.pathname.startsWith(detailPrefix) && UUID_V4.test(url.pathname.slice(detailPrefix.length)) && !url.search;
+}
+
+/** Runs Directory acceptance through an already-authenticated same-origin browser without exporting its credentials. */
+export async function runDirectoryJoinedAcceptanceWithBrowserContext(config, dependencies = {}) {
+  requireBrowserContextConfig(config);
+  const browserContextFetcher = dependencies.browserContextFetcher;
+  const publicFetcher = dependencies.publicFetcher ?? fetch;
+  const trustedDestinationReadback = dependencies.destinationReadback;
+  if (typeof browserContextFetcher !== "function") fail("browser_context_fetcher_required");
+  if (typeof publicFetcher !== "function") fail("public_fetcher_required");
+  if (typeof trustedDestinationReadback !== "function") fail("destination_readback_required");
+  const routedFetcher = async (input, init = {}) => {
+    let url;
+    try { url = new URL(input); } catch { fail("browser_context_fetch_destination_denied"); }
+    if (url.origin === config.origin) {
+      if (!approvedBrowserDirectoryRoute(url)) fail("browser_context_fetch_destination_denied");
+      return browserContextFetcher(url.toString(), browserSafeInit(init, "same-origin"));
+    }
+    if (url.toString() !== config.publicLinkUrl) fail("browser_context_fetch_destination_denied");
+    return publicFetcher(url.toString(), browserSafeInit(init, "omit"));
+  };
+  return runDirectoryJoinedAcceptance(config, { ...dependencies, fetcher: routedFetcher,
+    destinationReadback: trustedDestinationReadback });
 }
 
 async function atomicWriteJson(path, value) {

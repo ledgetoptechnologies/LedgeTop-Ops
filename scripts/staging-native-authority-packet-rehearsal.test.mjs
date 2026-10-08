@@ -22,6 +22,7 @@ const IDS = {
   revokeCommandId: "00000000-0000-4000-8000-000000000004",
 };
 const GRANT_IDS = ["grant-profile", "grant-identity"];
+const CLIENT_CREATION_GRANT_IDS = [...GRANT_IDS, "grant-enrollment"];
 const clone = value => structuredClone(value);
 
 function beforeState() {
@@ -36,10 +37,11 @@ function beforeState() {
 }
 
 function targetRows(input, active) {
+  const permissions = ["directory.profile.edit", "directory.identity.link", "directory.enrollment.manage"];
   return input.approval.grantIds.map((id, index) => ({
     id,
     staff_id: input.admission.staff_id,
-    permission: index ? "directory.identity.link" : "directory.profile.edit",
+    permission: permissions[index],
     effect: "allow",
     scope_kind: "business_area",
     business_area_id: input.businessArea.id,
@@ -53,10 +55,11 @@ function targetRows(input, active) {
 
 function stateAfter(input, active) {
   const target = targetRows(input, active);
+  const grantCount = input.approval.grantIds.length;
   return {
     admission: clone(input.admission),
     profile: clone(input.profile),
-    generation: { ...clone(input.generation), generation: input.generation.generation + (active ? 2 : 4) },
+    generation: { ...clone(input.generation), generation: input.generation.generation + (active ? grantCount : grantCount * 2) },
     businessArea: clone(input.businessArea),
     grants: [...clone(input.grants), ...target],
     history: [...clone(input.history), ...target.map((row, index) => ({
@@ -70,7 +73,7 @@ function stateAfter(input, active) {
       division_id: null,
       resource_id: null,
       active,
-      grant_generation: input.generation.generation + (active ? index + 1 : index + 3),
+      grant_generation: input.generation.generation + (active ? index + 1 : grantCount + index + 1),
       recorded_at: input.approval.executedAt,
     }))],
   };
@@ -83,7 +86,9 @@ function packetCompiler(input) {
     if (!same(value.admission, original.admission) || !same(value.profile, original.profile)
       || !same(value.businessArea, original.businessArea)) throw new Error("paired prior provision mismatch");
     const targets = value.grants.filter(row => original.approval.grantIds.includes(row.id));
-    if (targets.length !== 2 || targets.some(row => row.active !== 1)) throw new Error("exact active packet grants required");
+    if (targets.length !== original.approval.grantIds.length || targets.some(row => row.active !== 1)) {
+      throw new Error("exact active packet grants required");
+    }
   }
   const canonical_plan_json = JSON.stringify(value);
   const provision = value.phase === "provision";
@@ -304,6 +309,45 @@ test("durable recovery verifies a lost revoke response and leaves authority inac
   assert.ok(model.state.current.grants.filter(row => GRANT_IDS.includes(row.id)).every(row => row.active === 0));
 });
 
+test("schema 3 recovery preserves three permission-bound IDs and verifies lost revoke response", async t => {
+  const input = provisionInput({
+    schemaVersion: 3,
+    approval: { ...provisionInput().approval, grantIds: [...CLIENT_CREATION_GRANT_IDS] },
+  });
+  const saved = saveProvision(t, packetCompiler(input));
+  const model = engine({ provisionPacket: saved.packet, loseRevokeResponse: true });
+  const result = await recoverStagingNativeAuthority("config.json", saved.evidence.provisionPath,
+    model.dependencies({ root: saved.root }));
+  assert.equal(result.status, "revoke-response-recovered");
+  assert.deepEqual(model.state.lastRevoke.input.approval.grantIds, CLIENT_CREATION_GRANT_IDS);
+  assert.equal(model.state.lastRevoke.input.schemaVersion, 3);
+  assert.equal(model.state.current.generation.generation, beforeState().generation.generation + 6);
+  assert.ok(model.state.current.grants.filter(row => CLIENT_CREATION_GRANT_IDS.includes(row.id))
+    .every(row => row.active === 0));
+  const replay = await recoverStagingNativeAuthority("config.json", saved.evidence.provisionPath,
+    model.dependencies({ root: saved.root }));
+  assert.equal(replay.status, "already-revoked");
+  assert.equal(model.state.current.generation.generation, beforeState().generation.generation + 6);
+});
+
+test("recovery snapshots the exact area recorded by provision evidence", async t => {
+  const recordedArea = { id: "staging-native-only-recorded-area", name: "Recorded area", active: 1 };
+  const input = provisionInput({ businessArea: recordedArea });
+  const saved = saveProvision(t, packetCompiler(input));
+  const model = engine({ provisionPacket: saved.packet });
+  const selected = [];
+  const dependencies = model.dependencies({ root: saved.root });
+  dependencies.snapshot = async (_db, areaId) => {
+    selected.push(areaId);
+    const value = clone(model.state.current);
+    value.businessArea = clone(recordedArea);
+    return value;
+  };
+  await recoverStagingNativeAuthority("config.json", saved.evidence.provisionPath, dependencies);
+  assert.ok(selected.length >= 2);
+  assert.ok(selected.every(areaId => areaId === recordedArea.id));
+});
+
 test("recovery uses an exact saved revoke plus immutable receipt when already revoked", async t => {
   const saved = saveProvision(t);
   const active = stateAfter(saved.packet.input, 1);
@@ -368,6 +412,21 @@ test("recovery rejects a symlinked final provision artifact before reading it", 
     fs: fakeFs,
     compilePacket: packetCompiler,
   }), /non-symlink regular file/);
+});
+
+test("recovery rejects missing or arbitrary outer artifact schemas before binding", t => {
+  for (const schemaVersion of [undefined, 99]) {
+    const packet = packetCompiler(provisionInput({ schemaVersion: 3,
+      approval: { ...provisionInput().approval, grantIds: [...CLIENT_CREATION_GRANT_IDS] } }));
+    if (schemaVersion === undefined) delete packet.schemaVersion;
+    else packet.schemaVersion = schemaVersion;
+    const root = tempRoot(t);
+    const evidence = createPrivateEvidenceDirectory(root, packet.input.approval.approvalId);
+    writePrivateEvidence(root, evidence.evidenceDir, "provision.json", packet);
+    assert.throws(() => loadPrivateProvisionArtifact(evidence.provisionPath, {
+      root, compilePacket: packetCompiler,
+    }), /exact compiled provision artifact required/);
+  }
 });
 
 test("stale admission/profile authority fails closed without attempting revoke", async t => {

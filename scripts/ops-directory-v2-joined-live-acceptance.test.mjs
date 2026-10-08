@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { DirectoryJoinedAcceptanceError, parseDirectoryJoinedAcceptanceConfig,
-  runDirectoryJoinedAcceptance } from "./ops-directory-v2-joined-live-acceptance.mjs";
+import { DirectoryJoinedAcceptanceError, parseBrowserContextDirectoryJoinedAcceptanceConfig, parseDirectoryJoinedAcceptanceConfig,
+  runDirectoryJoinedAcceptance, runDirectoryJoinedAcceptanceWithBrowserContext } from "./ops-directory-v2-joined-live-acceptance.mjs";
 import { STAGING_ACCOUNT_ID, STAGING_INVENTORY } from "./staging-requirements.mjs";
 
 const opsDatabase = STAGING_INVENTORY.operations.d1_databases.find(database => database.binding === "OPS_DB");
@@ -50,8 +50,16 @@ function acceptanceFetcher(options = {}) {
       return json(200, { success: true, result: [{ success: true, results: [{ ...base, ...(options.readback ?? {}) }],
         meta: { changed_db: false, changes: 0 } }] });
     }
-    assert.equal(init.headers.Cookie, env.OPS_SESSION_COOKIE);
-    assert.equal(init.headers.Origin, env.OPS_BASE_URL);
+    if (options.browserContext) {
+      assert.equal(init.credentials, "same-origin");
+      assert.equal(init.headers.Cookie, undefined);
+      assert.equal(init.headers.Origin, undefined);
+      assert.equal(init.headers.Authorization, undefined);
+      assert.equal(init.headers["Cf-Access-Jwt-Assertion"], undefined);
+    } else {
+      assert.equal(init.headers.Cookie, env.OPS_SESSION_COOKIE);
+      assert.equal(init.headers.Origin, env.OPS_BASE_URL);
+    }
     if (path === "/api/session") return json(200, { csrfToken: "csrf-test-token-1234", user: { isAdministrator: true } });
     if (path === "/api/client-hub/directory/create-options") return json(200, { kind: "client", sources: [{ id: env.OPS_DIRECTORY_ACCEPTANCE_SOURCE_ID }],
       scopes: [{ id: env.OPS_DIRECTORY_ACCEPTANCE_BUSINESS_AREA_ID, divisions: [] }] });
@@ -61,8 +69,9 @@ function acceptanceFetcher(options = {}) {
       return json(200, { recordId, kind: "client", version: updated ? 2 : 1, profile, scopes: created.scopes,
         linkage: "standalone", relationship: { version: 1, organization: null, organizations: [] }, editing: { available: true, reason: null } });
     }
-    assert.equal(init.headers["X-CSRF-Token"], "csrf-test-token-1234");
-    const body = JSON.parse(init.body); assert.equal(init.headers["Idempotency-Key"], body.mutationId);
+    const requestHeaders = new Headers(init.headers);
+    assert.equal(requestHeaders.get("X-CSRF-Token"), "csrf-test-token-1234");
+    const body = JSON.parse(init.body); assert.equal(requestHeaders.get("Idempotency-Key"), body.mutationId);
     if (path.endsWith("/create-admissions")) {
       const original = bodies.get("admission");
       if (!original) { bodies.set("admission", body); return json(200, { status: "prepared" }); }
@@ -109,6 +118,81 @@ test("config is staging-only and requires explicit source, business area, divisi
   const config = await parseDirectoryJoinedAcceptanceConfig(env);
   assert.equal(config.sourceId, "project-alpha:staging"); assert.equal(config.businessAreaId, "drone"); assert.equal(config.divisionId, null);
   assert.equal(config.d1Target.databaseName, opsDatabase.database_name);
+});
+
+test("browser-context runner uses same-origin auth and trusted readback without exporting credentials", async () => {
+  const { OPS_SESSION_COOKIE: _cookie, CLOUDFLARE_API_TOKEN: _token, ...browserEnv } = env;
+  const config = await parseBrowserContextDirectoryJoinedAcceptanceConfig(browserEnv);
+  assert.equal(config.browserContext, true);
+  assert.equal(Object.hasOwn(config, "cookie"), false);
+  assert.equal(Object.hasOwn(config, "d1Token"), false);
+  const { fetcher: browserContextFetcher, calls } = acceptanceFetcher({ browserContext: true });
+  const publicCalls = []; let readbacks = 0, now = 0;
+  const report = await runDirectoryJoinedAcceptanceWithBrowserContext(config, {
+    browserContextFetcher,
+    publicFetcher: async (url, init = {}) => {
+      publicCalls.push({ url, init });
+      assert.equal(url, env.OPS_DIRECTORY_ACCEPTANCE_PUBLIC_LINK_URL);
+      assert.equal(init.credentials, "omit");
+      assert.equal(init.headers.Cookie, undefined);
+      assert.equal(init.headers.Authorization, undefined);
+      return new Response("stable-public-link", { status: 200, headers: { "content-type": "text/html" } });
+    },
+    destinationReadback: async (_config, recordId) => {
+      readbacks += 1;
+      return { record_count: 1, mapping_count: 1, exact_mapping_count: 1, collision_count: 0,
+        record_id: recordId, external_id: recordId, project_alpha_public_id: "a".repeat(32), mapping_kind: "legacy",
+        update_receipt_count: 1, binding_public_id: "a".repeat(32), binding_revision: "2" };
+    },
+    now: () => now, sleep: async ms => { now += ms; },
+  });
+  assert.equal(report.status, "passed");
+  assert.equal(report.create.acknowledgement.outcome.status, "written");
+  assert.equal(report.update.changedBodyConflict.reason, "idempotency_body_conflict");
+  assert.equal(report.update.staleVersionConflict.reason, "stale_local_version");
+  assert.equal(readbacks, 1);
+  assert.equal(publicCalls.length, 2);
+  assert.equal(calls.some(call => call.path.startsWith("/client/v4/")), false);
+  assert.equal(calls.every(call => call.path === "/api/session"
+    || call.path === "/api/client-hub/directory/create-options"
+    || call.path === "/api/client-hub/directory/create-admissions"
+    || call.path === "/api/client-hub/directory/standalone-clients"
+    || /^\/api\/client-hub\/directory\/standalone-clients\/[0-9a-f-]{36}$/.test(call.path)), true);
+});
+
+test("browser-context mode rejects exported credentials, requires readback, and stays default-off", async () => {
+  const { OPS_SESSION_COOKIE: _cookie, CLOUDFLARE_API_TOKEN: _token, ...browserEnv } = env;
+  const readonly = await parseBrowserContextDirectoryJoinedAcceptanceConfig({ ...browserEnv,
+    OPS_DIRECTORY_ACCEPTANCE_ALLOW_MUTATIONS: "" });
+  assert.deepEqual(readonly, { origin: env.OPS_BASE_URL, mutate: false, browserContext: true });
+  for (const forbidden of [
+    { OPS_SESSION_COOKIE: env.OPS_SESSION_COOKIE }, { OPS_STORAGE_STATE: "state.json" },
+    { OPS_CF_ACCESS_JWT_ASSERTION: "header.payload.signature" }, { CLOUDFLARE_API_TOKEN: env.CLOUDFLARE_API_TOKEN },
+  ]) await assert.rejects(() => parseBrowserContextDirectoryJoinedAcceptanceConfig({ ...browserEnv, ...forbidden }),
+    { code: "browser_context_credentials_forbidden" });
+  const config = await parseBrowserContextDirectoryJoinedAcceptanceConfig(browserEnv);
+  await assert.rejects(() => runDirectoryJoinedAcceptanceWithBrowserContext(config, {
+    browserContextFetcher: async () => { throw new Error("must not fetch"); },
+  }), { code: "destination_readback_required" });
+  await assert.rejects(() => runDirectoryJoinedAcceptanceWithBrowserContext({ ...config, d1Token: "secret" }, {
+    browserContextFetcher: async () => { throw new Error("must not fetch"); }, destinationReadback: async () => ({}),
+  }), { code: "browser_context_credentials_forbidden" });
+});
+
+test("browser-context runner fails closed before unapproved origins or paths", async () => {
+  const { OPS_SESSION_COOKIE: _cookie, CLOUDFLARE_API_TOKEN: _token, ...browserEnv } = env;
+  const config = await parseBrowserContextDirectoryJoinedAcceptanceConfig(browserEnv);
+  let called = false;
+  await assert.rejects(() => runDirectoryJoinedAcceptanceWithBrowserContext({ ...config,
+    origin: "https://ops.ledgetopdroneservices.com" }, {
+    browserContextFetcher: async () => { called = true; }, destinationReadback: async () => ({}),
+  }), { code: "production_or_noncanonical_operations_origin" });
+  assert.equal(called, false);
+  await assert.rejects(() => runDirectoryJoinedAcceptanceWithBrowserContext({ ...config,
+    publicLinkUrl: `${env.OPS_BASE_URL}/api/not-approved` }, {
+    browserContextFetcher: async () => { called = true; }, destinationReadback: async () => ({}),
+  }), { code: "production_or_nonstaging_public_link" });
+  assert.equal(called, false);
 });
 
 test("joined Directory runner proves admission/create/update replay, body conflict, cron acknowledgement, exact read, and stale version", async () => {

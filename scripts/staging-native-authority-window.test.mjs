@@ -29,7 +29,12 @@ const CLOCK = "2026-10-02T20:00:00.000Z";
 const IDS = [
   "10000000-0000-4000-8000-000000000001",
   "10000000-0000-4000-8000-000000000002",
+  "10000000-0000-4000-8000-000000000003",
 ];
+
+const permissions = input => input.schemaVersion === 3
+  ? ["directory.profile.edit", "directory.identity.link", "directory.enrollment.manage"]
+  : ["directory.profile.edit", "directory.identity.link"];
 
 function before() {
   const grant = {
@@ -84,7 +89,8 @@ function before() {
 }
 
 function granted(input) {
-  const target = ["directory.profile.edit", "directory.identity.link"].map((permission, index) => ({
+  const selectedPermissions = permissions(input);
+  const target = selectedPermissions.map((permission, index) => ({
     id: IDS[index],
     staff_id: STAFF,
     permission,
@@ -113,7 +119,7 @@ function granted(input) {
   }));
   return {
     ...input,
-    generation: { ...input.generation, generation: input.generation.generation + 2, updated_at: CLOCK },
+    generation: { ...input.generation, generation: input.generation.generation + selectedPermissions.length, updated_at: CLOCK },
     grants: [...input.grants, ...target],
     history: [...input.history, ...suffix],
   };
@@ -136,9 +142,10 @@ function harness(options = {}) {
     referenceCounts: async () => {
       referenceReadCount += 1;
       const after = referenceReadCount > 1;
+      const count = options.clientCreation ? 3 : 2;
       return [
-        { table: "native_directory_grants", count: after ? 2 : 0 },
-        { table: "native_directory_grant_history", count: after ? 2 : 0 },
+        { table: "native_directory_grants", count: after ? count : 0 },
+        { table: "native_directory_grant_history", count: after ? count : 0 },
       ];
     },
     clock: async () => CLOCK,
@@ -151,7 +158,8 @@ function harness(options = {}) {
       ];
       return () => values.shift();
     })(),
-    grantIds: () => IDS,
+    grantIds: () => IDS.slice(0, 2),
+    clientCreationGrantIds: () => IDS,
     compilePacket: input => {
       packet = { schemaVersion: 2, input, receipt, statements: [] };
       return packet;
@@ -193,6 +201,42 @@ test("open reconciles a lost apply response from the immutable receipt and readb
   const { dependencies } = harness({ transportFails: true });
   const result = await openStagingNativeAuthorityWindow("binding.json", AREA, dependencies);
   assert.equal(result.status, "opened-after-response-recovery");
+});
+
+test("explicit client-creation open compiles schema 3, verifies three grants, and preserves bounded output", async () => {
+  const { dependencies } = harness({ clientCreation: true });
+  let compiledInput;
+  const originalCompile = dependencies.compilePacket;
+  dependencies.compilePacket = input => {
+    compiledInput = structuredClone(input);
+    return originalCompile(input);
+  };
+  const result = await openStagingNativeAuthorityWindow("binding.json", AREA,
+    { ...dependencies, clientCreation: true });
+  assert.equal(compiledInput.schemaVersion, 3);
+  assert.deepEqual(compiledInput.approval.grantIds, IDS);
+  assert.equal(result.provisionedPermissions, 3);
+  assert.equal(result.grantedReadbackVerified, true);
+});
+
+test("client-creation open rejects a two-grant readback and non-boolean opt-in", async () => {
+  let reads = 0;
+  const selected = harness({ clientCreation: true });
+  selected.dependencies.referenceCounts = async () => {
+    reads += 1;
+    return [
+      { table: "native_directory_grants", count: reads === 1 ? 0 : 2 },
+      { table: "native_directory_grant_history", count: reads === 1 ? 0 : 2 },
+    ];
+  };
+  await assert.rejects(openStagingNativeAuthorityWindow("binding.json", AREA,
+    { ...selected.dependencies, clientCreation: true }), error => {
+    assert.match(error.message, /provision committed but granted state was not verified/);
+    assert.match(error.errors[0].message, /not isolated at after readback/);
+    return true;
+  });
+  await assert.rejects(openStagingNativeAuthorityWindow("binding.json", AREA,
+    { ...selected.dependencies, clientCreation: "yes" }), /explicit boolean/);
 });
 
 test("open rejects an immutable receipt mismatch and requires exact close recovery", async () => {
@@ -564,6 +608,21 @@ test("CLI output contains summary only for open and supports close alias", async
     "close", "--config", "binding.json", "--recover", "private/provision.json",
   ], closeDependencies), 0);
   assert.equal(JSON.parse(logged).cleanupVerified, true);
+});
+
+test("CLI client-creation flag is explicit and selects schema 3", async () => {
+  const { dependencies } = harness({ clientCreation: true });
+  let logged;
+  let schemaVersion;
+  const compile = dependencies.compilePacket;
+  dependencies.compilePacket = input => { schemaVersion = input.schemaVersion; return compile(input); };
+  dependencies.log = value => { logged = value; };
+  assert.equal(await main([
+    "open", "--config", "binding.json", "--area-id", AREA.id, "--area-name", AREA.name,
+    "--window-minutes", "60", "--client-creation",
+  ], dependencies), 0);
+  assert.equal(schemaVersion, 3);
+  assert.equal(JSON.parse(logged).provisionedPermissions, 3);
 });
 
 test("CLI refuses remote synthetic-area preparation without its explicit mutation confirmation", async () => {
