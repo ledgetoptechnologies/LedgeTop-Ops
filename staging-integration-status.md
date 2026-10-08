@@ -1,5 +1,13 @@
 # Ledge Top Ops + Project Alpha staging status
 
+## Current evidence supersedes historical narrative (2026-10-08)
+
+- Use `docs/staging/portal-acceptance-checkpoint-2026-10-08.md` for the current release and acceptance checkpoint. The dated entries below are history, not proof of current remote state.
+- Fresh authenticated, read-only Cloudflare API checks confirmed Ops staging version `cf924df0-7089-4529-96c2-9dc7d685c949` and Client staging version `4a9f7ae7-b653-40d3-a7e3-975702d5a7de`, each at 100%.
+- The actual Ops staging migration ledger's latest entries are `0180_project_alpha_project_v2_recovery_authorization.sql`, `0179_project_alpha_acquired_native_identity_collision.sql`, and `0178_project_alpha_project_inbound_reconciliation.sql`. The ledger query wrote zero rows. Earlier claims that 0174–0180 are pending are obsolete; ledger presence alone does not prove full runtime acceptance.
+- The inspected active Ops version enables API-v2 sync and the native recipient, delivery owner/dispatch/reader and workspace owner/publication flags. Client native recipient enrollment/service-home flags are enabled. Project activation and Directory outbox draining remain disabled. Do not infer live settings from the normal checked-in staging defaults.
+- Cloudflare token access and the current Ops/PA staging browser sessions work. This does not grant the missing PA client/project write scopes, supply the missing scoped Project sync authority, settle the retained pending command, activate a recipient, or prove client file access. Those live acceptance and paired cleanup gates remain open. Production and existing public links are unchanged.
+
 Updated: 2026-10-07 (local candidate reassessment; no remote deployment)
 
 ## Local continuation (2026-10-07, after owner deferred Wrangler)
