@@ -22,6 +22,7 @@
 
 ## Remaining live acceptance gate
 
+- Successor `d3bbc098` CI run `37785586900` exposed one release-evidence example mismatch: its disabled-flag list omitted the newly modeled Directory reconciliation flag. The example was corrected without enabling that flag or changing runtime code. The exact six-suite CI release-gate command then passed locally: **141 passed, 0 failed, 4 skipped** (Windows symlink policy). The corrected successor must still receive its own exact-revision CI result; the older green run does not cover it.
 - Follow-up commits `e52d06c7` and `57d6f79a` are not included in the green `b81d1f3b` run; check the exact successor PR head and its CI separately.
 - The active Operations staging version's two D1 database bindings and all nine configured service-binding targets exactly match the reviewed private staging baseline. This checks their database/service targets only, not all other resource settings, upstream endpoint health or authorization behavior.
 - Remote read-only migration-ledger summaries reconfirmed Operations **180** applied migrations with latest `0180_project_alpha_project_v2_recovery_authorization.sql`, and Client **147** with latest `0228_operations_portal_native_content_start_audit.sql`. These count/latest checks are not a complete ledger-name/hash attestation and are not live synchronization evidence. Both queries reported zero rows written and no database change.
