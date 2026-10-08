@@ -2,7 +2,7 @@ import { useState } from "react";
 import { createRoot } from "react-dom/client";
 import { NativeDirectoryProfileCreate, NativeDirectoryProfileEdit } from "../../src/client/NativeDirectoryProfileEditor";
 
-type Scenario = "create-lost-response" | "record-switch" | "reload-failure";
+type Scenario = "create-lost-response" | "admission-400" | "write-400" | "record-switch" | "reload-failure";
 type Call = { path: string; method: string; mutationId: string | null; body: string | null };
 const fixtureWindow = window as Window & { nativeDirectoryScenario?: Scenario; nativeDirectoryCalls?: Call[] };
 const scenario = fixtureWindow.nativeDirectoryScenario ?? "create-lost-response", calls: Call[] = [];
@@ -29,11 +29,16 @@ window.fetch = async (input, init) => {
     sources: [{ id: sourceId, name: "Primary" }], scopes: [{ id: "area:one", name: "Area One", divisions: [] }], organizations: [] });
   if (path.endsWith("/create-admissions")) {
     createAdmissionCalls += 1;
+    if (scenario === "admission-400" && createAdmissionCalls === 1)
+      return new Response(JSON.stringify({ error: "Invalid create admission" }), { status: 400 });
     return Response.json({ status: "prepared" });
   }
   if (path.endsWith("/organizations") && method === "POST") {
     createWriteCalls += 1;
-    if (createWriteCalls === 1) return new Response(JSON.stringify({ error: "Response lost after commit" }), { status: 503 });
+    if (scenario === "create-lost-response" && createWriteCalls === 1)
+      return new Response(JSON.stringify({ error: "Response lost after commit" }), { status: 503 });
+    if (scenario === "write-400" && createWriteCalls === 1)
+      return new Response(JSON.stringify({ error: "Write response could not be accepted" }), { status: 400 });
     const parsed = JSON.parse(body!);
     return Response.json({ status: "pending", recordId: parsed.mutationId, kind: "organization", version: 1, replayed: true,
       destinations: [{ sourceId, state: "pending" }] });
@@ -59,7 +64,7 @@ window.fetch = async (input, init) => {
 
 function Fixture() {
   const [recordId, setRecordId] = useState("record-one");
-  if (scenario === "create-lost-response") return <NativeDirectoryProfileCreate />;
+  if (["create-lost-response", "admission-400", "write-400"].includes(scenario)) return <NativeDirectoryProfileCreate />;
   return <><button type="button" onClick={() => setRecordId("record-two")}>Switch to record two</button>
     <NativeDirectoryProfileEdit kind="organization" recordId={recordId} /></>;
 }
