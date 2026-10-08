@@ -101,6 +101,14 @@ test("accepts the exact approved isolated staging inventory", () => {
     assert.deepEqual(validateApp(app, staging, productionFrom(staging)), []);
   }
 });
+test("keeps Project Alpha Directory reconciliation modeled and default-off", () => {
+  const staging = stagingConfig("operations"), production = productionFrom(staging);
+  assert.equal(staging.vars.PROJECT_ALPHA_DIRECTORY_RECONCILIATION_ENABLED, "false");
+  assert.deepEqual(validateApp("operations", staging, production), []);
+  staging.vars.PROJECT_ALPHA_DIRECTORY_RECONCILIATION_ENABLED = "true";
+  const errors = validateApp("operations", staging, production);
+  assert(errors.some(error => error.includes("PROJECT_ALPHA_DIRECTORY_RECONCILIATION_ENABLED")), errors.join(" | "));
+});
 test("pins the inactive workspace binding to staging and keeps its release flags off", () => {
   const base = stagingConfig("operations");
   const production = productionFrom(base);
@@ -570,6 +578,9 @@ test("pins the native portal, the complete Operations chain, both 0199 files, an
   assert(REQUIRED_DISABLED_FEATURE_FLAGS.operations.includes("PROJECT_ALPHA_PROJECT_INBOUND_RECONCILIATION_ENABLED"));
   assert(STAGING_ALLOWED_VAR_NAMES.operations.includes("PROJECT_ALPHA_PROJECT_INBOUND_RECONCILIATION_ENABLED"));
   assert.equal(STAGING_STATIC_VARS.operations.PROJECT_ALPHA_PROJECT_INBOUND_RECONCILIATION_ENABLED, "false");
+  assert(REQUIRED_DISABLED_FEATURE_FLAGS.operations.includes("PROJECT_ALPHA_DIRECTORY_RECONCILIATION_ENABLED"));
+  assert(STAGING_ALLOWED_VAR_NAMES.operations.includes("PROJECT_ALPHA_DIRECTORY_RECONCILIATION_ENABLED"));
+  assert.equal(STAGING_STATIC_VARS.operations.PROJECT_ALPHA_DIRECTORY_RECONCILIATION_ENABLED, "false");
   assert.equal(STAGING_STATIC_VARS.delivery.PROJECT_ALPHA_PORTAL_SYNC_ENABLED, "true");
   assert.equal(STAGING_STATIC_VARS.delivery.PROJECT_ALPHA_PORTAL_DIRECT_HTTP_ENABLED, "false");
   assert.equal(STAGING_STATIC_VARS.delivery.PROJECT_ALPHA_PORTAL_APPLICATION_KEY, STAGING_STATIC_VARS["ops-sync"].APPLICATION_KEY);
