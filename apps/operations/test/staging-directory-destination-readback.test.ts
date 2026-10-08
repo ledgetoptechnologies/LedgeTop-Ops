@@ -29,7 +29,8 @@ function fixture(options: { mappings?: unknown[]; receipts?: unknown[]; owner?: 
   }];
   const receipts = options.receipts ?? [{ projectAlphaRevision: "7", authorizationGeneration: "9", destinationOrigin: "https://pa.example.test" }];
   let mappingReads = 0, receiptReads = 0;
-  const session = { prepare: vi.fn((sql: string) => ({ bind: vi.fn(() => ({
+  const session = { prepare: vi.fn((sql: string) => ({
+    first: vi.fn(async () => null), bind: vi.fn(() => ({
     first: vi.fn(async () => sql.includes("staff_role_assignments") ? (options.owner === false ? null : { ok: 1 }) : null),
     all: vi.fn(async () => {
       if (sql.includes("project_alpha_active_directory_mappings"))

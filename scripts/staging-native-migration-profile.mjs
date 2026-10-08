@@ -32,7 +32,7 @@ export const NATIVE_MIGRATION_PROFILES = Object.freeze({
     baseNamesSha256: "46d20b48362be8052f5b2fd35ec4ccefee2c267476a2a076af87a955c4cfca3a",
     baseContentsSha256: "cd35de12e87325fb6de854f4ecba47e5172e115f75830af9f4a908710d10a450",
     remoteBaseline: "0173_operations_directory_intent_acquired_destination_transition.sql",
-    finalMigration: "0180_project_alpha_project_v2_recovery_authorization.sql",
+    finalMigration: "0181_project_alpha_directory_create_generation_recovery.sql",
     candidates: Object.freeze({
       "0174_project_alpha_directory_preserved_external_identity.sql": "9e794a73b75e025edc04967888631b9336931eb16113f42d855bea3fcb30a158",
       "0175_operations_directory_acquired_parent_enrollment_identity.sql": "de022736243342f203fcf9a1cb22993e49c50bbb18c7b3b2fc95d8fb3fa48ed0",
@@ -41,6 +41,7 @@ export const NATIVE_MIGRATION_PROFILES = Object.freeze({
       "0178_project_alpha_project_inbound_reconciliation.sql": "eb92d93138a75329003eb18c06d714a6fb8365fcc383982a58939a9ab6969e60",
       "0179_project_alpha_acquired_native_identity_collision.sql": "58a00c5c0c9ddf5892062d17b3e1e7bccd47705c97777454f042cb28cdb922f7",
       "0180_project_alpha_project_v2_recovery_authorization.sql": "deb385a1f97f2e82c7b4e634e19ae7fd406efe6368e89ac0085aed440a2a3528",
+      "0181_project_alpha_directory_create_generation_recovery.sql": "214260d9aaa25883d33c7a4d3d33ed4c55212b2cbe090ca0c927ebaead10a1be",
     }),
     expectedAppliedMigrations: Object.freeze([
       "0174_project_alpha_directory_preserved_external_identity.sql",
@@ -50,6 +51,7 @@ export const NATIVE_MIGRATION_PROFILES = Object.freeze({
       "0178_project_alpha_project_inbound_reconciliation.sql",
       "0179_project_alpha_acquired_native_identity_collision.sql",
       "0180_project_alpha_project_v2_recovery_authorization.sql",
+      "0181_project_alpha_directory_create_generation_recovery.sql",
     ]),
   }),
 });

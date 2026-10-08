@@ -1,3 +1,5 @@
+import { directoryMaterializationReadSource, projectAlphaDirectoryUnsettledReadSource }
+  from "./project-alpha-directory-materialization-read-source";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const REVISION = /^(?:0|[1-9][0-9]{0,18})$/;
@@ -285,9 +287,10 @@ async function linkedRelationshipEvidence(db: DirectoryWriteD1, relationship: Re
     } : null;
   }
   if (active.mappingKind !== "legacy") return null;
+  const materializationReadSource = await directoryMaterializationReadSource(db as D1Database);
   const parentIntents = (await db.prepare(`SELECT intent.intent_id parentIntentId,mapping.project_alpha_public_id parentPublicId
     FROM operations_directory_intents intent
-    JOIN operations_directory_materializations materialization ON materialization.intent_id=intent.intent_id
+    JOIN ${materializationReadSource} materialization ON materialization.intent_id=intent.intent_id
       AND materialization.history_epoch_id=intent.expected_history_epoch_id
     JOIN project_alpha_directory_outbox outbox ON outbox.command_id=materialization.command_id
       AND outbox.state='acknowledged' AND outbox.source_id=intent.source_id
@@ -369,7 +372,8 @@ async function updateRemoteState(db: DirectoryWriteD1,
   const acquiredEnrollmentCoordinate = allowAcquiredEnrollmentCoordinate && active.mappingKind === "acquired"
     && destinationValue.externalCanonicalId === write.recordId;
   if (!exactExternalCoordinate && !acquiredEnrollmentCoordinate) return null;
-  const pending = await db.prepare(`SELECT 1 present FROM project_alpha_directory_outbox WHERE source_id=? AND expected_source_instance_id=?
+  const unsettledReadSource = await projectAlphaDirectoryUnsettledReadSource(db as D1Database);
+  const pending = await db.prepare(`SELECT 1 present FROM ${unsettledReadSource} WHERE source_id=? AND expected_source_instance_id=?
     AND application_id=? AND expected_history_epoch_id=? AND resource_type=? AND external_id=? AND state<>'acknowledged' LIMIT 1`)
     .bind(destinationValue.sourceId, destinationValue.sourceInstanceUUID, destinationValue.applicationUUID,
       destinationValue.historyEpoch, write.kind, active.externalId).first();
@@ -378,11 +382,12 @@ async function updateRemoteState(db: DirectoryWriteD1,
     // An acquired mapping is never copied into the legacy mapping table. After
     // its first native profile update, the exact acknowledged writer intent is
     // the newest revision/generation proof for the next update.
+    const materializationReadSource = await directoryMaterializationReadSource(db as D1Database);
     const delivered = await db.prepare(`SELECT
         json_extract(outbox.outcome_json,'$.response.result.resource.revision') revision,
         json_extract(outbox.outcome_json,'$.response.result.authorizationGeneration') authorizationGeneration
       FROM operations_directory_intents intent
-      JOIN operations_directory_materializations materialization ON materialization.intent_id=intent.intent_id
+      JOIN ${materializationReadSource} materialization ON materialization.intent_id=intent.intent_id
       JOIN project_alpha_directory_outbox outbox ON outbox.command_id=materialization.command_id
       WHERE intent.record_id=? AND intent.record_version=? AND intent.state='acknowledged'
         AND intent.source_id=? AND intent.source_instance_uuid=? AND intent.application_uuid=?

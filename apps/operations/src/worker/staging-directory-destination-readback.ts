@@ -9,6 +9,7 @@ import { projectAlphaApiV2ReadAcceptanceEnabled } from "./project-alpha-api-v2-r
 import { readNativeDirectoryClientProfileSnapshot, selectGrant } from "./native-directory-profile-routes";
 import { authenticateNativeStaffWithAdmissionVersion } from "./native-staff-auth";
 import { resolveProjectAlphaApiV2Connection } from "./project-alpha-api-v2-connections";
+import { directoryMaterializationReadSource } from "./project-alpha-directory-materialization-read-source";
 import type { Env, StaffPrincipal } from "./types";
 
 type App = Hono<{ Bindings: Env; Variables: { principal: StaffPrincipal; administrator: boolean } }>;
@@ -54,7 +55,9 @@ export function evaluateStagingDirectoryDestinationReadback(expected: Proof,
 }
 
 export async function stagingDirectoryDestinationProof(db: D1Database, expectedLocalVersion: number): Promise<Proof | null> {
-  const mappings = await db.withSession("first-primary").prepare(`SELECT mapping.source_instance_id sourceInstanceId,
+  const primary = db.withSession("first-primary");
+  const materializationReadSource = await directoryMaterializationReadSource(primary as unknown as D1Database);
+  const mappings = await primary.prepare(`SELECT mapping.source_instance_id sourceInstanceId,
       mapping.application_id applicationId,mapping.history_epoch_id historyEpoch,
       mapping.project_alpha_public_id projectAlphaPublicId
     FROM project_alpha_active_directory_mappings mapping
@@ -73,12 +76,12 @@ export async function stagingDirectoryDestinationProof(db: D1Database, expectedL
   if (mappings.results.length !== 1) return null;
   const mapping = mappings.results[0]!;
   if (!publicId(mapping.projectAlphaPublicId)) return null;
-  const receipts = await db.withSession("first-primary").prepare(`SELECT
+  const receipts = await primary.prepare(`SELECT
       json_extract(outbox.outcome_json,'$.response.result.resource.revision') projectAlphaRevision,
       json_extract(outbox.outcome_json,'$.response.result.authorizationGeneration') authorizationGeneration,
       intent.destination_origin destinationOrigin
     FROM operations_directory_intents intent
-    JOIN operations_directory_materializations materialization ON materialization.intent_id=intent.intent_id
+    JOIN ${materializationReadSource} materialization ON materialization.intent_id=intent.intent_id
     JOIN project_alpha_directory_outbox outbox ON outbox.command_id=materialization.command_id
     WHERE intent.record_id=? AND intent.record_version=? AND intent.state='acknowledged'
       AND intent.source_id=? AND intent.source_instance_uuid=? AND intent.application_uuid=?

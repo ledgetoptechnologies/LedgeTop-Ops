@@ -3,6 +3,8 @@ import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
 import { readBoundedJson } from "./bounded-json";
 import { authenticateNativeStaffWithAdmissionVersion } from "./native-staff-auth";
+import { directoryMaterializationReadSource } from "./project-alpha-directory-materialization-read-source";
+import { prepareDirectoryCreateGenerationRecovery } from "./project-alpha-directory-create-generation-recovery";
 import {
   writeNativeDirectoryProfile,
   readNativeDirectoryDurableRemoteHead,
@@ -618,7 +620,8 @@ async function committedReplay(env: Env, actor: Omit<NativeDirectoryWriterActor,
     || JSON.stringify(command.fields) !== JSON.stringify(input.profile) || !exactScopes || !exactSources || !exactRelationship
     || typeof row.version !== "number" || !Number.isSafeInteger(row.version))
     return { status: "conflict", reason: "idempotency_body_conflict" };
-  const materializations = await primary.prepare(`SELECT materialization.command_id FROM operations_directory_materializations materialization
+  const materializationSource = await directoryMaterializationReadSource(env.OPS_DB);
+  const materializations = await primary.prepare(`SELECT materialization.command_id FROM ${materializationSource} materialization
     JOIN operations_directory_intents intent ON intent.intent_id=materialization.intent_id
     WHERE intent.mutation_id=? ORDER BY intent.intent_id LIMIT 17`).bind(input.mutationId).all<{ command_id: string }>();
   if (materializations.results.length < 1 || materializations.results.length > 16)
@@ -842,9 +845,38 @@ async function profile(c: AppContext, kind: NativeDirectoryProfileKind) {
       reason: relationship && !settled ? "relationship_delivery_pending" : "relationship_state_unavailable" } });
 }
 
+async function recoverCreateGeneration(c: AppContext) {
+  const enabled = c.env as Env & { PROJECT_ALPHA_DIRECTORY_CREATE_GENERATION_RECOVERY_ENABLED?: string };
+  if (enabled.PROJECT_ALPHA_DIRECTORY_CREATE_GENERATION_RECOVERY_ENABLED !== "true")
+    throw new HTTPException(404, { message: "Not found" });
+  if (!c.get("administrator")) throw new HTTPException(403, { message: "Administrator authority required" });
+  const input = await parsed(c.req.raw, z.object({ authorizationId: z.string().regex(UUID),
+    predecessorCommandId: z.string().regex(UUID), successorCommandId: z.string().regex(UUID),
+    sourceId: z.string().regex(SOURCE_ID), reason: z.string().trim().min(1).max(500) }).strict());
+  if (c.req.header("Idempotency-Key") !== input.authorizationId)
+    throw new HTTPException(400, { message: "Idempotency-Key must match authorizationId" });
+  const actor = await nativeActor(c);
+  let authenticated: Awaited<ReturnType<typeof authenticateNativeStaffWithAdmissionVersion>>;
+  try {
+    authenticated = await authenticateNativeStaffWithAdmissionVersion(c.req.raw, c.env.OPS_DB,
+      { enabled: true, issuer: c.env.TEAM_DOMAIN ?? "", staffAudience: c.env.OPERATIONS_AUD });
+  } catch { throw new HTTPException(403, { message: "Current native staff authority is required" }); }
+  if (authenticated.identity.staffId !== actor.staffId
+    || authenticated.identity.verifiedAccessSubject !== actor.accessSubject
+    || authenticated.admissionVersion !== actor.admissionVersion)
+    throw new HTTPException(403, { message: "Native staff authority changed" });
+  const result = await prepareDirectoryCreateGenerationRecovery(enabled, input,
+    { staffId: actor.staffId, accessSubject: actor.accessSubject, email: actor.loginEmail,
+      admissionVersion: actor.admissionVersion, profileVersion: actor.profileVersion,
+      verifiedUntil: authenticated.verifiedUntil });
+  return c.json(result, result.status === "prepared" ? 200 : result.status === "conflict" ? 409
+    : result.status === "uncertain" ? 503 : 403);
+}
+
 /** Mounted under the shared authenticated /api mutation middleware, which
  * supplies staff authentication plus same-origin and CSRF enforcement. This
- * route only derives native Directory and PA authority and never sends HTTP. */
+ * profile routes derive native Directory and PA authority. Explicit recovery
+ * reads fresh PA inventory but never sends a resource mutation directly. */
 export function registerNativeDirectoryProfileRoutes(app: App): void {
   app.use(`${NATIVE_DIRECTORY_PROFILE_ROUTE}/*`, async (c, next) => {
     if (!nativeDirectoryProfileWritesEnabled(c.env)) throw new HTTPException(404, { message: "Not found" });
@@ -852,6 +884,7 @@ export function registerNativeDirectoryProfileRoutes(app: App): void {
     await next();
   });
   app.post(`${NATIVE_DIRECTORY_PROFILE_ROUTE}/create-admissions`, prepareCreateAdmission);
+  app.post(`${NATIVE_DIRECTORY_PROFILE_ROUTE}/create-generation-recovery`, recoverCreateGeneration);
   app.post(`${NATIVE_DIRECTORY_PROFILE_ROUTE}/organizations`, c => create(c, "organization"));
   app.post(`${NATIVE_DIRECTORY_PROFILE_ROUTE}/standalone-clients`, c => create(c, "client"));
   app.get(`${NATIVE_DIRECTORY_PROFILE_ROUTE}/create-options`, createOptions);

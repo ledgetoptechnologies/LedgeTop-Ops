@@ -54,11 +54,11 @@ test("builds only the exact migration suffixes and strips every deployment field
     "0228_operations_portal_native_content_start_audit.sql");
   assert.equal(profiles.operations.expectedRemoteAppliedMigrations.length, 173);
   assert.equal(profiles.client.expectedRemoteAppliedMigrations.length, 147);
-  assert.equal(profiles.operations.manifest.reviewedFinalChain.count, 180);
+  assert.equal(profiles.operations.manifest.reviewedFinalChain.count, 181);
   assert.equal(profiles.operations.manifest.reviewedFinalChain.finalMigration,
-    "0180_project_alpha_project_v2_recovery_authorization.sql");
+    "0181_project_alpha_directory_create_generation_recovery.sql");
   assert.equal(profiles.operations.manifest.reviewedFinalChain.namesSha256,
-    "8d7fdaaa7b453b32dd5e67d1a670554bc1c03aedf41c8ecadaddbbccf632e266");
+    "42090dbacb9d23e4cc92371743c15e7ebc31c0e6d33f6bf7e48faf7f92cd96db");
   assert.equal(profiles.client.manifest.reviewedFinalChain.count, 147);
   for (const profile of Object.values(profiles)) {
     assert.deepEqual(Object.keys(profile.config).sort(), ["$schema", "account_id", "d1_databases", "name"]);

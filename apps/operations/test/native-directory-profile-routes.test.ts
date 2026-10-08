@@ -4,7 +4,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Env, StaffPrincipal } from "../src/worker/types";
 
 const mocks = vi.hoisted(() => ({ authenticate: vi.fn(), connection: vi.fn(), sourceIds: vi.fn(), writer: vi.fn(), relationshipWriter: vi.fn(),
-  organizationChoices: vi.fn(), inventory: vi.fn(), persistInventory: vi.fn(), bindingStatus: vi.fn(), remoteHead: vi.fn() }));
+  organizationChoices: vi.fn(), inventory: vi.fn(), persistInventory: vi.fn(), bindingStatus: vi.fn(), remoteHead: vi.fn(),
+  createGenerationRecovery: vi.fn() }));
 vi.mock("../src/worker/native-staff-auth", () => ({ authenticateNativeStaffWithAdmissionVersion: mocks.authenticate }));
 vi.mock("../src/worker/project-alpha-api-v2-connections", () => ({ resolveProjectAlphaApiV2Connection: mocks.connection,
   listEnabledProjectAlphaApiV2SourceIds: mocks.sourceIds }));
@@ -20,6 +21,9 @@ vi.mock("../src/worker/project-alpha-v2-sync", () => ({
 }));
 vi.mock("../src/worker/project-alpha-directory-read-api-v2", () => ({
   readConfiguredProjectAlphaDirectoryBindingStatus: mocks.bindingStatus,
+}));
+vi.mock("../src/worker/project-alpha-directory-create-generation-recovery", () => ({
+  prepareDirectoryCreateGenerationRecovery: mocks.createGenerationRecovery,
 }));
 vi.mock("../src/worker/native-directory-relationship-writer", async importOriginal => {
   const actual = await importOriginal<typeof import("../src/worker/native-directory-relationship-writer")>();
@@ -151,12 +155,13 @@ function database(options: { enrollment?: unknown; outboxState?: string; missing
   return db as unknown as D1Database & { preparedAdmission(): Row | null; preparedRelationship(): Row | null };
 }
 
-function fixture(options: { enabled?: boolean; db?: D1Database; administrator?: boolean } = {}) {
+function fixture(options: { enabled?: boolean; db?: D1Database; administrator?: boolean; createGenerationRecovery?: boolean } = {}) {
   const app = new Hono<{ Bindings: Env; Variables: { principal: StaffPrincipal; administrator: boolean } }>();
   app.use("*", async (c, next) => { c.set("principal", principal); c.set("administrator", options.administrator ?? false); await next(); });
   registerNativeDirectoryProfileRoutes(app);
   const env = { NATIVE_DIRECTORY_PROFILE_WRITES_ENABLED: options.enabled === false ? "false" : "true",
     TEAM_DOMAIN: "https://team.example.test", OPERATIONS_AUD: "operations-audience-1234",
+    ...(options.createGenerationRecovery ? { PROJECT_ALPHA_DIRECTORY_CREATE_GENERATION_RECOVERY_ENABLED: "true" } : {}),
     PROJECT_ALPHA_API_V2_CONNECTIONS: "server-owned", OPS_DB: options.db ?? database() } as unknown as Env;
   const send = (path: string, body: unknown, method = "POST", key = ids.mutation) => app.request(`https://ops.example${path}`, {
     method, headers: { "Content-Type": "application/json", "Idempotency-Key": key },
@@ -178,6 +183,8 @@ describe("native Directory profile routes", () => {
       recordId: ids.mutation, kind: "organization", version: 1, commandIds: [ids.command] });
     mocks.relationshipWriter.mockResolvedValue({ status: "written", replayed: false, mutationId: ids.mutation,
       relationshipVersion: 3, reservations: [{ commandId: ids.command, sourceId, action: "assign", command: {} }] });
+    mocks.createGenerationRecovery.mockResolvedValue({ status: "prepared", successorCommandId: ids.command,
+      generation: "53", replayed: false });
     mocks.organizationChoices.mockResolvedValue([{ recordId: acquiredOrganizationId, expectedVersion: 3,
       name: "Acquired Organization", sourceIds: [sourceId, "project-alpha:secondary"] }]);
     mocks.inventory.mockResolvedValue({ status: "observed", inventory: { authoritative: false, sourceId,
@@ -209,6 +216,38 @@ describe("native Directory profile routes", () => {
     expect(response.status).toBe(404);
     expect(mocks.authenticate).not.toHaveBeenCalled();
     expect(mocks.writer).not.toHaveBeenCalled();
+  });
+
+  it("keeps create-generation recovery independently default-off before authentication", async () => {
+    const response = await fixture({ administrator: true }).send(`${NATIVE_DIRECTORY_PROFILE_ROUTE}/create-generation-recovery`, "not-json");
+    expect(response.status).toBe(404);
+    expect(mocks.authenticate).not.toHaveBeenCalled();
+    expect(mocks.createGenerationRecovery).not.toHaveBeenCalled();
+  });
+
+  it("requires shared mutation security, administrator authority, and an exact idempotency key for create-generation recovery", async () => {
+    const source = readFileSync(new URL("../src/worker/index.ts", import.meta.url), "utf8");
+    const shared = source.indexOf('app.use("/api/*"'), registration = source.indexOf("registerNativeDirectoryProfileRoutes(app)");
+    expect(source.slice(shared, registration)).toContain("requireMutationSecurity(c.req.raw, c.env, principal)");
+    const authorizationId = "77777777-7777-4777-8777-777777777777", successorCommandId = "88888888-8888-4888-8888-888888888888";
+    const body = { authorizationId, predecessorCommandId: ids.command, successorCommandId, sourceId, reason: "Reviewed generation recovery" };
+    expect((await fixture({ createGenerationRecovery: true }).send(`${NATIVE_DIRECTORY_PROFILE_ROUTE}/create-generation-recovery`, body, "POST", authorizationId)).status).toBe(403);
+    expect(mocks.createGenerationRecovery).not.toHaveBeenCalled();
+    expect((await fixture({ createGenerationRecovery: true, administrator: true }).send(`${NATIVE_DIRECTORY_PROFILE_ROUTE}/create-generation-recovery`, body, "POST", ids.mutation)).status).toBe(400);
+    expect(mocks.createGenerationRecovery).not.toHaveBeenCalled();
+    mocks.authenticate.mockResolvedValueOnce({ admissionVersion: 4, verifiedUntil: "2099-01-01T00:00:00.000Z",
+      identity: { kind: "native", staffId: principal.id, verifiedAccessSubject: principal.accessSubject,
+        email: principal.email, displayName: principal.displayName, profileVersion: 4 } });
+    expect((await fixture({ createGenerationRecovery: true, administrator: true })
+      .send(`${NATIVE_DIRECTORY_PROFILE_ROUTE}/create-generation-recovery`, body, "POST", authorizationId)).status).toBe(403);
+    expect(mocks.createGenerationRecovery).not.toHaveBeenCalled();
+    const response = await fixture({ createGenerationRecovery: true, administrator: true })
+      .send(`${NATIVE_DIRECTORY_PROFILE_ROUTE}/create-generation-recovery`, body, "POST", authorizationId);
+    expect(response.status).toBe(200);
+    expect(mocks.createGenerationRecovery).toHaveBeenCalledWith(expect.objectContaining({
+      PROJECT_ALPHA_DIRECTORY_CREATE_GENERATION_RECOVERY_ENABLED: "true",
+    }), body, { staffId: principal.id, accessSubject: principal.accessSubject, email: principal.email,
+      admissionVersion: 3, profileVersion: 4, verifiedUntil: "2099-01-01T00:00:00.000Z" });
   });
 
   it("offers only server-derived source and effective scope choices for the create editor", async () => {

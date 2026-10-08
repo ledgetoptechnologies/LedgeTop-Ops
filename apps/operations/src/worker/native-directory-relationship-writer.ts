@@ -1,4 +1,5 @@
 import type { ProjectAlphaDirectoryRelationshipAction, ProjectAlphaDirectoryRelationshipCommand } from "./project-alpha-directory-relationship-api-v2";
+import { directoryMaterializationReadSource } from "./project-alpha-directory-materialization-read-source";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const MAX_REVISION = "9223372036854775807";
@@ -149,6 +150,7 @@ async function activeHead(db: DirectoryWriteD1, recordId: string, kind: "client"
       .bind(recordId,localVersion,destination.sourceId,destination.sourceInstanceUUID,destination.applicationUUID,
         destination.historyEpoch,destination.origin).all()).results as { publicId: unknown; revision: unknown; assertedPublicId: unknown; coherent: unknown }[]);
   }
+  const materializationReadSource = await directoryMaterializationReadSource(db as D1Database);
   evidence.push(...(await db.prepare(`SELECT json_extract(outbox.outcome_json,'$.response.result.resource.publicId') publicId,
       json_extract(outbox.outcome_json,'$.response.result.resource.revision') revision,
       CASE WHEN json_extract(outbox.outcome_json,'$.response.sourceInstanceId')=intent.source_instance_uuid
@@ -159,7 +161,7 @@ async function activeHead(db: DirectoryWriteD1, recordId: string, kind: "client"
         AND json_extract(outbox.outcome_json,'$.response.result.data.publicId')=
           json_extract(outbox.outcome_json,'$.response.result.resource.publicId') THEN 1 ELSE 0 END coherent
     FROM operations_directory_intents intent
-    JOIN operations_directory_materializations materialization ON materialization.intent_id=intent.intent_id
+    JOIN ${materializationReadSource} materialization ON materialization.intent_id=intent.intent_id
     JOIN project_alpha_directory_outbox outbox ON outbox.command_id=materialization.command_id
     WHERE intent.record_id=? AND intent.record_version=? AND intent.source_id=? AND intent.source_instance_uuid=?
       AND intent.application_uuid=? AND intent.expected_history_epoch_id=? AND intent.destination_origin=?

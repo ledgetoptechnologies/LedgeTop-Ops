@@ -6,14 +6,14 @@ import { fileURLToPath } from "node:url";
 import { STAGING_ACCOUNT_ID, STAGING_INVENTORY } from "./staging-requirements.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-// Existing authority packet schemas were reviewed against this exact 180-file
+// Existing authority packet schemas were reviewed against this exact 181-file
 // staging chain. Keep the complete-ledger equality check below; any later
 // migration requires an explicit contract update and full-chain review.
 const REVIEWED_AUTHORITY_OPERATIONS_CHAIN = Object.freeze({
-  count: 180,
-  finalMigration: "0180_project_alpha_project_v2_recovery_authorization.sql",
-  namesSha256: "8d7fdaaa7b453b32dd5e67d1a670554bc1c03aedf41c8ecadaddbbccf632e266",
-  contentsSha256: "f69e09bebe37802ed39d9f6f40cb7643f1a0207c80f1653abc10154746ffdbb7",
+  count: 181,
+  finalMigration: "0181_project_alpha_directory_create_generation_recovery.sql",
+  namesSha256: "42090dbacb9d23e4cc92371743c15e7ebc31c0e6d33f6bf7e48faf7f92cd96db",
+  contentsSha256: "3dc7a2a740192ce1deb81dd20d047805066e479ae1d991df1c3ea852ca2dd64f",
 });
 export const ONBOARDING_AUTHORITY_SCHEMA_VERSION = 1;
 export const ONBOARDING_AUTHORITY_MIGRATIONS_TABLE = "staging_native_authority_migrations";

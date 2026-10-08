@@ -475,6 +475,7 @@ export const REQUIRED_STAGING_MIGRATIONS = Object.freeze({
     "0178_project_alpha_project_inbound_reconciliation.sql",
     "0179_project_alpha_acquired_native_identity_collision.sql",
     "0180_project_alpha_project_v2_recovery_authorization.sql",
+    "0181_project_alpha_directory_create_generation_recovery.sql",
   ]),
 });
 
@@ -502,6 +503,7 @@ export const REQUIRED_STAGING_MIGRATION_SHA256 = Object.freeze({
     "0178_project_alpha_project_inbound_reconciliation.sql": "eb92d93138a75329003eb18c06d714a6fb8365fcc383982a58939a9ab6969e60",
     "0179_project_alpha_acquired_native_identity_collision.sql": "58a00c5c0c9ddf5892062d17b3e1e7bccd47705c97777454f042cb28cdb922f7",
     "0180_project_alpha_project_v2_recovery_authorization.sql": "deb385a1f97f2e82c7b4e634e19ae7fd406efe6368e89ac0085aed440a2a3528",
+    "0181_project_alpha_directory_create_generation_recovery.sql": "214260d9aaa25883d33c7a4d3d33ed4c55212b2cbe090ca0c927ebaead10a1be",
   }),
 });
 
@@ -570,6 +572,7 @@ export const REQUIRED_DISABLED_FEATURE_FLAGS = Object.freeze({
     "PROJECT_ALPHA_DIRECTORY_LOCAL_PROFILE_ADOPTION_ENABLED",
     "PROJECT_ALPHA_PROJECT_V2_ACTIVATION_ENABLED",
     "PROJECT_ALPHA_PROJECT_V2_RECOVERY_ENABLED",
+    "PROJECT_ALPHA_DIRECTORY_CREATE_GENERATION_RECOVERY_ENABLED",
     "PROJECT_ALPHA_DELIVERY_INTENTS_ENABLED",
     "PROJECT_ALPHA_DELIVERY_GUEST_ENABLED",
     "CLIENT_DELEGATED_SHARE_SIGNER_ENABLED",
@@ -801,6 +804,7 @@ export const FEATURE_FLAG_ACTIVATION_POLICIES = Object.freeze({
     PROJECT_ALPHA_DIRECTORY_LOCAL_PROFILE_ADOPTION_ENABLED: Object.freeze({ prohibitedReason: "Applying sealed Project Alpha scalar profile dispositions is a separate staging-only window after exact review and pre-change snapshots" }),
     PROJECT_ALPHA_PROJECT_V2_ACTIVATION_ENABLED: Object.freeze({ prohibitedReason: "Project-v2 activation is limited to a separately approved, manually invoked joined staging window with remote migration 0122, native project authority, rollback, and public-link preservation evidence" }),
     PROJECT_ALPHA_PROJECT_V2_RECOVERY_ENABLED: Object.freeze({ prohibitedReason: "Project-v2 uncertain recovery is limited to a separately approved staging-only operator window with migration 0180, current same-actor native project authority, and exact replay evidence" }),
+    PROJECT_ALPHA_DIRECTORY_CREATE_GENERATION_RECOVERY_ENABLED: Object.freeze({ prohibitedReason: "Directory create-generation recovery remains default-off and requires migration 0181 plus a separately approved staging-only exact-owner recovery window" }),
     PROJECT_ALPHA_DELIVERY_INTENTS_ENABLED: Object.freeze({ prohibitedReason: "Project Alpha managed delivery requires migration 0069/0147/0031 and an independently approved end-to-end intent, notification, and revocation activation window" }),
     PROJECT_ALPHA_DELIVERY_GUEST_ENABLED: Object.freeze({ prohibitedReason: "Guest delivery remains explicit-only and requires a separate public-bearer notification and revocation approval after the portal intent path is proven" }),
     CLIENT_DELEGATED_SHARE_SIGNER_ENABLED: Object.freeze({ gates: Object.freeze(["delegatedShareSignerBinding", "delegatedSharePublicAuthorization"]) }),
@@ -1009,6 +1013,7 @@ export const STAGING_STATIC_VARS = Object.freeze({
     PROJECT_ALPHA_DIRECTORY_LOCAL_PROFILE_ADOPTION_ENABLED: "false",
     PROJECT_ALPHA_PROJECT_V2_ACTIVATION_ENABLED: "false",
     PROJECT_ALPHA_PROJECT_V2_RECOVERY_ENABLED: "false",
+    PROJECT_ALPHA_DIRECTORY_CREATE_GENERATION_RECOVERY_ENABLED: "false",
     PROJECT_ALPHA_DIRECTORY_V2_BOOTSTRAP_ACCEPTANCE_ENABLED: "false",
     STAGING_DIRECTORY_PROFILE_VIEW_GRANT_ENABLED: "false",
     PROJECT_ALPHA_DELIVERY_INTENTS_ENABLED: "false",
@@ -1126,7 +1131,7 @@ export const STAGING_ALLOWED_VAR_NAMES = Object.freeze({
     "NATIVE_INTEGRATION_CONTROL_ENABLED", "NATIVE_INTEGRATION_CONTROL_ORIGIN",
     "NATIVE_DIRECTORY_PROFILE_WRITES_ENABLED", "NATIVE_DIRECTORY_OUTBOX_DRAIN_ENABLED",
     "DELIVERY_BASE_URL", "CLIENT_PORTAL_ORIGINS", "PUBLIC_SHARE_ORIGIN",
-    "PROJECT_ALPHA_BASE_URL", "PROJECT_ALPHA_DRAFT_QUOTES_ENABLED", "PROJECT_ALPHA_CATALOG_STAGING_COORDINATOR_ENABLED", "PROJECT_ALPHA_CATALOG_PROMOTION_COORDINATOR_ENABLED", "PROJECT_ALPHA_API_V2_SYNC_ENABLED", "PROJECT_ALPHA_API_V2_READ_ACCEPTANCE_ENABLED", "PROJECT_ALPHA_PRIVATE_ADMIN_TRANSPORT_ENABLED", "PROJECT_ALPHA_PROJECT_ADOPTION_REVIEW_ENABLED", "PROJECT_ALPHA_PROJECT_BINDING_REVISION_REFRESH_ENABLED", "PROJECT_ALPHA_PROJECT_INBOUND_RECONCILIATION_ENABLED", "PROJECT_ALPHA_DIRECTORY_RECONCILIATION_ENABLED", "PROJECT_ALPHA_DIRECTORY_EXACT_ADOPTION_ENABLED", "PROJECT_ALPHA_DIRECTORY_LOCAL_PROFILE_ADOPTION_ENABLED", "PROJECT_ALPHA_PROJECT_V2_ACTIVATION_ENABLED", "PROJECT_ALPHA_PROJECT_V2_RECOVERY_ENABLED",
+    "PROJECT_ALPHA_BASE_URL", "PROJECT_ALPHA_DRAFT_QUOTES_ENABLED", "PROJECT_ALPHA_CATALOG_STAGING_COORDINATOR_ENABLED", "PROJECT_ALPHA_CATALOG_PROMOTION_COORDINATOR_ENABLED", "PROJECT_ALPHA_API_V2_SYNC_ENABLED", "PROJECT_ALPHA_API_V2_READ_ACCEPTANCE_ENABLED", "PROJECT_ALPHA_PRIVATE_ADMIN_TRANSPORT_ENABLED", "PROJECT_ALPHA_PROJECT_ADOPTION_REVIEW_ENABLED", "PROJECT_ALPHA_PROJECT_BINDING_REVISION_REFRESH_ENABLED", "PROJECT_ALPHA_PROJECT_INBOUND_RECONCILIATION_ENABLED", "PROJECT_ALPHA_DIRECTORY_RECONCILIATION_ENABLED", "PROJECT_ALPHA_DIRECTORY_EXACT_ADOPTION_ENABLED", "PROJECT_ALPHA_DIRECTORY_LOCAL_PROFILE_ADOPTION_ENABLED", "PROJECT_ALPHA_PROJECT_V2_ACTIVATION_ENABLED", "PROJECT_ALPHA_PROJECT_V2_RECOVERY_ENABLED", "PROJECT_ALPHA_DIRECTORY_CREATE_GENERATION_RECOVERY_ENABLED",
     "PROJECT_ALPHA_DIRECTORY_V2_BOOTSTRAP_ACCEPTANCE_ENABLED", "PROJECT_ALPHA_DIRECTORY_V2_BOOTSTRAP_SOURCE_ID", "PROJECT_ALPHA_DIRECTORY_V2_BOOTSTRAP_ORIGIN",
     "STAGING_DIRECTORY_PROFILE_VIEW_GRANT_ENABLED",
     "PROJECT_ALPHA_DELIVERY_INTENTS_ENABLED", "PROJECT_ALPHA_DELIVERY_GUEST_ENABLED",

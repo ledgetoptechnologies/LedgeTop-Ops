@@ -12,10 +12,13 @@ import {
 import { withEnabledConfiguredProjectAlphaApiV2Connection, type ProjectAlphaApiV2ConnectionEnvironment } from "./project-alpha-api-v2-connections";
 import type { ProjectAlphaApiV2Connection } from "./project-alpha-api-v2";
 import { nextGeneration } from "./project-alpha-project-transport";
+import { directoryMaterializationReadSource } from "./project-alpha-directory-materialization-read-source";
+import { validateDirectoryCreateRecoveryReservation } from "./project-alpha-directory-create-generation-recovery";
 
 const LEASE_MS = 5 * 60_000;
 const MAX_RETRY_MS = 60 * 60_000;
-type Environment = ProjectAlphaApiV2ConnectionEnvironment & Readonly<{ OPS_DB: D1Database }>;
+type Environment = ProjectAlphaApiV2ConnectionEnvironment & Readonly<{ OPS_DB: D1Database;
+  PROJECT_ALPHA_DIRECTORY_CREATE_GENERATION_RECOVERY_ENABLED?: string }>;
 type Row = Readonly<Record<string, unknown> & {
   command_id: string; source_id: string; application_id: string; resource_type: ProjectAlphaDirectoryProfileKind;
   external_id: string; command_json: string; destination_base_url: string; expected_source_instance_id: string;
@@ -25,7 +28,7 @@ type Row = Readonly<Record<string, unknown> & {
   intent_history_epoch_id: string; intent_state: string; materialization_command_json: string; origin_snapshot_json: string;
   disposition_json: string; materialization_history_epoch_id: string; audit_actor_id: string; audit_actor_type: string;
   original_verified_access_subject: string; audit_command_json: string; record_kind: string; current_version: number;
-  revision_profile_json: string;
+  revision_profile_json: string; root_command_id: string; root_command_json: string; recovery_authorization_id: string | null;
 }>;
 type Actor = Readonly<{ staffId: string; accessSubject: string; admissionVersion: number; selectedGrantId: string;
   loginEmail: string; profileVersion: number; selectedIdentityGrantId: string }>;
@@ -141,6 +144,7 @@ type AcquiredUpdateContext = Readonly<{ record_id: string; external_id: string; 
   expected_source_instance_id: string; application_id: string; expected_history_epoch_id: string;
   resource_type: ProjectAlphaDirectoryProfileKind; destination_base_url: string; record_version: number }>;
 async function acquiredMappingRevisionMatches(db: D1Database, row: AcquiredUpdateContext, mapping: ActiveMapping, command: Record<string, unknown>): Promise<boolean> {
+  const materializationSource = await directoryMaterializationReadSource(db);
   if (mapping.mapping_kind !== "acquired" || mapping.record_id !== row.record_id || mapping.external_id !== row.external_id
     || typeof mapping.provenance_id !== "string" || typeof command.expectedRevision !== "string"
     || typeof command.expectedAuthorizationGeneration !== "string"
@@ -163,7 +167,7 @@ async function acquiredMappingRevisionMatches(db: D1Database, row: AcquiredUpdat
         json_extract(outbox.outcome_json,'$.response.result.authorizationGeneration') authorization_generation
       FROM operations_directory_intents intent
       JOIN operations_directory_records record ON record.record_id=intent.record_id
-      JOIN operations_directory_materializations materialization ON materialization.intent_id=intent.intent_id
+      JOIN ${materializationSource} materialization ON materialization.intent_id=intent.intent_id
         AND materialization.history_epoch_id=intent.expected_history_epoch_id
       JOIN project_alpha_directory_outbox outbox ON outbox.command_id=materialization.command_id
         AND outbox.state='acknowledged' AND outbox.command_json=materialization.command_json
@@ -292,6 +296,7 @@ async function relationshipDependency(db: D1Database, row: Row): Promise<Relatio
   return active ? dependency : null;
 }
 async function currentParentRevision(db: D1Database, row: Row, dependency: RelationshipDependency): Promise<string | null> {
+  const materializationSource = await directoryMaterializationReadSource(db);
   if (dependency.organization_record_id === null || dependency.organization_record_version === null
     || dependency.resolved_parent_public_id === null) return null;
   if (dependency.evidence_kind === "acquired_mapping") {
@@ -305,7 +310,7 @@ async function currentParentRevision(db: D1Database, row: Row, dependency: Relat
         UNION ALL
         SELECT json_extract(outbox.outcome_json,'$.response.result.resource.revision') revision
         FROM operations_directory_intents intent
-        JOIN operations_directory_materializations materialization ON materialization.intent_id=intent.intent_id
+        JOIN ${materializationSource} materialization ON materialization.intent_id=intent.intent_id
           AND materialization.history_epoch_id=intent.expected_history_epoch_id
         JOIN project_alpha_directory_outbox outbox ON outbox.command_id=materialization.command_id
           AND outbox.state='acknowledged' AND outbox.command_json=materialization.command_json
@@ -342,7 +347,7 @@ async function currentParentRevision(db: D1Database, row: Row, dependency: Relat
   const candidates = (await db.prepare(`SELECT DISTINCT revision FROM (
       SELECT json_extract(outbox.outcome_json,'$.response.result.resource.revision') revision
       FROM operations_directory_intents intent
-      JOIN operations_directory_materializations materialization ON materialization.intent_id=intent.intent_id
+      JOIN ${materializationSource} materialization ON materialization.intent_id=intent.intent_id
         AND materialization.history_epoch_id=intent.expected_history_epoch_id
       JOIN project_alpha_directory_outbox outbox ON outbox.command_id=materialization.command_id
         AND outbox.state='acknowledged' AND outbox.source_id=intent.source_id
@@ -390,6 +395,13 @@ async function exactReservation(db: D1Database, row: Row, connection: ProjectAlp
   const command = parse(row.command_json), audit = parse(row.audit_command_json), snapshot = parse(row.origin_snapshot_json), disposition = parse(row.disposition_json);
   if (!command || !audit || !snapshot || !disposition || typeof audit.actor === "undefined") return "command";
   const originalActor = actor(audit.actor); if (!originalActor) return "command";
+  const recovery = row.recovery_authorization_id === null ? null : await validateDirectoryCreateRecoveryReservation(db,
+    row.command_id, { staffId: originalActor.staffId, accessSubject: originalActor.accessSubject,
+      email: originalActor.loginEmail, admissionVersion: originalActor.admissionVersion, profileVersion: originalActor.profileVersion });
+  if (row.recovery_authorization_id !== null && (!recovery || recovery.authorizationId !== row.recovery_authorization_id
+    || recovery.rootCommandId !== row.root_command_id || recovery.rootCommandJson !== row.root_command_json)) return "authority";
+  const rootCommand = recovery ? parse(recovery.rootCommandJson) : command;
+  if (!rootCommand) return "command";
   if (row.audit_actor_id !== originalActor.staffId || row.original_verified_access_subject !== originalActor.accessSubject
     || snapshot.actorId !== originalActor.staffId || snapshot.actorSubject !== originalActor.accessSubject
     || snapshot.authorityRevision !== String(row.record_version) || audit.mutationId !== row.mutation_id || audit.recordId !== row.record_id
@@ -402,9 +414,9 @@ async function exactReservation(db: D1Database, row: Row, connection: ProjectAlp
     && value.sourceId === row.source_id && value.sourceInstanceUUID === row.expected_source_instance_id
     && value.applicationUUID === row.application_id && value.historyEpoch === row.expected_history_epoch_id
     && value.origin === row.destination_base_url && value.externalCanonicalId === row.external_id
-    && value.expectedAuthorizationGeneration === command.expectedAuthorizationGeneration)) return "command";
-  if (!await permitted(db, row, originalActor, "directory.profile.edit", originalActor.selectedGrantId)
-    || (row.resource_type === "client" && !await permitted(db, row, originalActor, "directory.identity.link", originalActor.selectedIdentityGrantId))
+    && value.expectedAuthorizationGeneration === rootCommand.expectedAuthorizationGeneration)) return "command";
+  if (!await permitted(db, row, originalActor, "directory.profile.edit", recovery?.profileGrantId ?? originalActor.selectedGrantId)
+    || (row.resource_type === "client" && !await permitted(db, row, originalActor, "directory.identity.link", recovery?.identityGrantId ?? originalActor.selectedIdentityGrantId))
     || (audit.operation === "create" && typeof audit.createAdmissionId === "string"
       && audit.createAdmissionId.startsWith("client-onboarding:")
       && !await onboardingEnrollmentPermitted(db,row,originalActor,audit.createAdmissionId))) return "authority";
@@ -456,19 +468,32 @@ async function exactReservation(db: D1Database, row: Row, connection: ProjectAlp
     ? { operation: "update", transport, publicId: mapping.project_alpha_public_id, actor: originalActor } : "command";
 }
 async function row(db: D1Database, commandId: string): Promise<Row | null> {
+  const materializationSource = await directoryMaterializationReadSource(db);
+  const current = await materializationRow(db, commandId, materializationSource, false);
+  if (current || materializationSource === "operations_directory_materializations") return current;
+  // Recovery changes the effective command, not the immutable outcome of its
+  // predecessor. Historical replay may read settled original rows only; it
+  // must never make a superseded pending/leased command dispatchable again.
+  return materializationRow(db, commandId, "operations_directory_materializations", true);
+}
+async function materializationRow(db: D1Database, commandId: string,
+  materializationSource: Awaited<ReturnType<typeof directoryMaterializationReadSource>>, settledOnly: boolean): Promise<Row | null> {
+  const rootColumns = materializationSource === "operations_directory_effective_materializations"
+    ? "materialization.root_command_id,materialization.root_command_json,materialization.recovery_authorization_id"
+    : "materialization.command_id root_command_id,materialization.command_json root_command_json,NULL recovery_authorization_id";
   return db.prepare(`SELECT outbox.*,intent.intent_id,intent.mutation_id,intent.record_id,intent.record_version,intent.source_id intent_source_id,intent.source_instance_uuid,
       intent.application_uuid,intent.destination_origin,intent.external_canonical_id,intent.desired_payload_json,
       intent.expected_history_epoch_id intent_history_epoch_id,intent.state intent_state,
       materialization.command_json materialization_command_json,materialization.origin_snapshot_json,
       materialization.disposition_json,materialization.history_epoch_id materialization_history_epoch_id,
       audit.actor_id audit_actor_id,audit.actor_type audit_actor_type,audit.original_verified_access_subject,
-      audit.command_json audit_command_json,record.record_kind,record.current_version,revision.profile_json revision_profile_json
-    FROM project_alpha_directory_outbox outbox JOIN operations_directory_materializations materialization ON materialization.command_id=outbox.command_id
+      audit.command_json audit_command_json,record.record_kind,record.current_version,revision.profile_json revision_profile_json,${rootColumns}
+    FROM project_alpha_directory_outbox outbox JOIN ${materializationSource} materialization ON materialization.command_id=outbox.command_id
     JOIN operations_directory_intents intent ON intent.intent_id=materialization.intent_id
     JOIN operations_directory_audit audit ON audit.mutation_id=intent.mutation_id AND audit.record_id=intent.record_id AND audit.record_version=intent.record_version
     JOIN operations_directory_records record ON record.record_id=intent.record_id
     JOIN operations_directory_revisions revision ON revision.record_id=intent.record_id AND revision.version=intent.record_version AND revision.mutation_id=intent.mutation_id
-    WHERE outbox.command_id=?`).bind(commandId).first<Row>();
+    WHERE outbox.command_id=?${settledOnly ? " AND outbox.state IN ('terminal','acknowledged')" : ""}`).bind(commandId).first<Row>();
 }
 function replay(value: Row): ProjectAlphaDirectoryProfileOutboxDispatcherOutcome | null {
   if (value.state !== "acknowledged" && value.state !== "terminal") return null;
@@ -494,14 +519,16 @@ function diagnostic(failure: ProjectAlphaDirectoryProfileTransportFailure): { ht
   return { ...(failure.httpStatus ? { httpStatus: failure.httpStatus } : {}), ...(failure.requestId ? { requestId: failure.requestId } : {}) };
 }
 
-/** Dispatches at most one already-materialized writer command. No route, queue,
- * scheduler, or default drain imports this function. */
+/** Dispatches at most one already-materialized writer command. The bounded
+ * native Directory scheduler invokes this only through its guarded drain. */
 export async function dispatchProjectAlphaDirectoryProfileOutboxCommand(env: Environment, sourceId: string, commandId: string,
   send: typeof fetch = fetch): Promise<ProjectAlphaDirectoryProfileOutboxDispatcherOutcome> {
   const initial = await row(env.OPS_DB, commandId);
   if (!initial) return { status: "blocked", reason: "in_progress" };
   if (initial.source_id !== sourceId) return { status: "conflict", reason: "source" };
   const done = replay(initial); if (done) return done;
+  if (initial.recovery_authorization_id !== null && env.PROJECT_ALPHA_DIRECTORY_CREATE_GENERATION_RECOVERY_ENABLED !== "true")
+    return { status: "blocked", reason: "authority" };
   const selected = await withEnabledConfiguredProjectAlphaApiV2Connection(env, sourceId, async connection => {
     const checked = await exactReservation(env.OPS_DB, initial, connection);
     if (typeof checked === "string") return { phase: "invalid" as const, reason: checked };

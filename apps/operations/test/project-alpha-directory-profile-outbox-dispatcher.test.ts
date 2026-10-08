@@ -151,6 +151,16 @@ beforeAll(async () => {
 afterAll(async () => runtime.dispose());
 
 describe("native Directory profile outbox dispatcher", () => {
+  it("keeps recovery dispatch behind exact reservation, root-command, and fresh-grant checks", () => {
+    const source = readFileSync(new URL("../src/worker/project-alpha-directory-profile-outbox-dispatcher.ts", import.meta.url), "utf8");
+    expect(source).toContain("validateDirectoryCreateRecoveryReservation(db,");
+    expect(source).toContain("recovery.authorizationId !== row.recovery_authorization_id");
+    expect(source).toContain("recovery.rootCommandId !== row.root_command_id");
+    expect(source).toContain("recovery.rootCommandJson !== row.root_command_json");
+    expect(source).toContain("recovery?.profileGrantId ?? originalActor.selectedGrantId");
+    expect(source).toContain("recovery?.identityGrantId ?? originalActor.selectedIdentityGrantId");
+    expect(source).toContain("const rootCommand = recovery ? parse(recovery.rootCommandJson) : command");
+  });
   it("derives the fixed destination proof from the current 0180 schema and only an exact acknowledged update", async () => {
     const recordId = "614ed50f-8800-4ab3-aa69-009d8e5cefa9";
     const areaId = "staging-native-only-portal-acceptance-20261008-window-1";
