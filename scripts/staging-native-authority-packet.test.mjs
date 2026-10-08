@@ -25,7 +25,7 @@ const activationId = "10000000-0000-4000-8000-000000000001";
 const REVIEWED_OPERATIONS_180 = Object.freeze({ count: 181,
   finalMigration: "0181_project_alpha_directory_create_generation_recovery.sql",
   namesSha256: "42090dbacb9d23e4cc92371743c15e7ebc31c0e6d33f6bf7e48faf7f92cd96db",
-  chainSha256: "3dc7a2a740192ce1deb81dd20d047805066e479ae1d991df1c3ea852ca2dd64f" });
+  chainSha256: "7b165451ebea6bdc680ef8b54600924064a3871b09a227abeb38d6218b7fed2e" });
 const sha256 = value => createHash("sha256").update(value).digest("hex");
 function reviewedOperationsMigrations() {
   const directory = path.join(repositoryRoot, "apps", "operations", "migrations");

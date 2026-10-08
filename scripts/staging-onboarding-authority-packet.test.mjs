@@ -16,7 +16,7 @@ const issuedAt = new Date(Date.now() - 60_000).toISOString(), expiresAt = new Da
 const REVIEWED_OPERATIONS_180 = Object.freeze({ count: 181,
   finalMigration: "0181_project_alpha_directory_create_generation_recovery.sql",
   namesSha256: "42090dbacb9d23e4cc92371743c15e7ebc31c0e6d33f6bf7e48faf7f92cd96db",
-  chainSha256: "3dc7a2a740192ce1deb81dd20d047805066e479ae1d991df1c3ea852ca2dd64f" });
+  chainSha256: "7b165451ebea6bdc680ef8b54600924064a3871b09a227abeb38d6218b7fed2e" });
 const sha256 = value => createHash("sha256").update(value).digest("hex");
 function reviewedOperationsMigrations() { const directory=path.join(repositoryRoot,"apps","operations","migrations"), names=fs.readdirSync(directory).filter(name=>name.endsWith(".sql")).sort().slice(0,REVIEWED_OPERATIONS_180.count); assert.equal(names.length,REVIEWED_OPERATIONS_180.count); assert.equal(names.at(-1),REVIEWED_OPERATIONS_180.finalMigration); assert.equal(sha256(names.join("\n")),REVIEWED_OPERATIONS_180.namesSha256); assert.equal(sha256(names.map(name=>`${name}\0${sha256(fs.readFileSync(path.join(directory,name),"utf8"))}`).join("\n")),REVIEWED_OPERATIONS_180.chainSha256); return {directory,names}; }
 

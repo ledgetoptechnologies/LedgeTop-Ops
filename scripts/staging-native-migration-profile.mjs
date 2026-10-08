@@ -41,7 +41,7 @@ export const NATIVE_MIGRATION_PROFILES = Object.freeze({
       "0178_project_alpha_project_inbound_reconciliation.sql": "eb92d93138a75329003eb18c06d714a6fb8365fcc383982a58939a9ab6969e60",
       "0179_project_alpha_acquired_native_identity_collision.sql": "58a00c5c0c9ddf5892062d17b3e1e7bccd47705c97777454f042cb28cdb922f7",
       "0180_project_alpha_project_v2_recovery_authorization.sql": "deb385a1f97f2e82c7b4e634e19ae7fd406efe6368e89ac0085aed440a2a3528",
-      "0181_project_alpha_directory_create_generation_recovery.sql": "214260d9aaa25883d33c7a4d3d33ed4c55212b2cbe090ca0c927ebaead10a1be",
+      "0181_project_alpha_directory_create_generation_recovery.sql": "8b0be2c23cb8a45dd1dd46e78067e00bfd8d5dbf2cc2294219e85d1e26915bd6",
     }),
     expectedAppliedMigrations: Object.freeze([
       "0181_project_alpha_directory_create_generation_recovery.sql",
@@ -117,7 +117,9 @@ function validateSourceMigrations(base, application, contract) {
   for (const [name, expected] of Object.entries(contract.candidates)) {
     const file = path.join(directory, name);
     requireRegularFile(file, `${application} native candidate ${name}`);
-    if (sha256(fs.readFileSync(file)) !== expected) throw new Error(`${application} native candidate changed: ${name}`);
+    const contents = fs.readFileSync(file);
+    if (contents.includes(13)) throw new Error(`${application} native candidate must use LF-only line endings: ${name}`);
+    if (sha256(contents) !== expected) throw new Error(`${application} native candidate changed: ${name}`);
   }
   if (names.length !== baseNames.length + candidateNames.length) {
     throw new Error(`${application} migration directory contains an unreviewed SQL file`);
@@ -282,7 +284,9 @@ export function validateGenerated(base, profiles = buildProfiles(base)) {
     for (const file of profile.files) {
       const generated = path.join(profile.migrationsDirectory, file.name);
       requireRegularFile(generated, `${profile.application} generated migration ${file.name}`);
-      if (sha256(fs.readFileSync(generated)) !== file.sha256) throw new Error(`${profile.application} generated migration changed: ${file.name}`);
+      const contents = fs.readFileSync(generated);
+      if (contents.includes(13)) throw new Error(`${profile.application} generated migration must use LF-only line endings: ${file.name}`);
+      if (sha256(contents) !== file.sha256) throw new Error(`${profile.application} generated migration changed: ${file.name}`);
     }
   }
   return true;

@@ -10,7 +10,7 @@ export const STAGING_TARGET = Object.freeze({accountId:"846c924bf17bf4f3dd15c97a
   databaseName:"ltds-ops-staging",binding:"OPS_DB",environment:"staging"});
 const CHAIN = Object.freeze({count:181,final:"0181_project_alpha_directory_create_generation_recovery.sql",
   names:"42090dbacb9d23e4cc92371743c15e7ebc31c0e6d33f6bf7e48faf7f92cd96db",
-  contents:"3dc7a2a740192ce1deb81dd20d047805066e479ae1d991df1c3ea852ca2dd64f"});
+  contents:"7b165451ebea6bdc680ef8b54600924064a3871b09a227abeb38d6218b7fed2e"});
 const PERMISSIONS_V2 = Object.freeze(["directory.profile.edit","directory.identity.link"]);
 const PERMISSIONS_V3 = Object.freeze([...PERMISSIONS_V2,"directory.enrollment.manage"]);
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;

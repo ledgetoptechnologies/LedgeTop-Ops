@@ -110,6 +110,14 @@ test("writes deterministic ignored outputs and detects stale or extra output", (
   assert.equal(config.main, undefined);
   assert.equal(config.d1_databases[0].database_id, NATIVE_MIGRATION_PROFILES.client.databaseId);
 
+  const generated0181 = path.join(profiles.operations.migrationsDirectory,
+    "0181_project_alpha_directory_create_generation_recovery.sql");
+  const lfOnly = fs.readFileSync(generated0181, "utf8");
+  assert.equal(lfOnly.includes("\r"), false);
+  fs.writeFileSync(generated0181, lfOnly.replace("\n", "\r\n"));
+  assert.throws(() => validateGenerated(base), /generated migration must use LF-only line endings: 0181_/);
+  writeProfiles(base);
+
   fs.appendFileSync(path.join(profiles.operations.migrationsDirectory,
     NATIVE_MIGRATION_PROFILES.operations.expectedAppliedMigrations[0]), " ");
   assert.throws(() => validateGenerated(base), /generated migration changed/);
