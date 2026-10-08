@@ -322,7 +322,7 @@ test("single-file upload sends source bytes only to signed R2 URLs and exposes b
 
   await expect(page.getByText("1/1 files resolved", { exact: true })).toBeVisible();
   await expect(page.getByLabel("site-photo.jpg upload progress")).toHaveAttribute("value", "6");
-  await expect(page.getByText("6 B of 6 B")).toBeVisible();
+  await expect(page.getByText("6 B of 6 B", { exact: true })).toBeVisible();
   await expect(page.getByText("Uploaded 1 item", { exact: true })).toBeVisible();
 
   const mutations = apiMutations(requests);
