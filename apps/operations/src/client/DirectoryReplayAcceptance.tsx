@@ -1,6 +1,6 @@
 import { useState, type FormEvent } from "react";
 import { Card } from "@ltds/ui";
-import { api, ApiError } from "./api";
+import { api, ApiError, setCsrf } from "./api";
 import { serializeNativeDirectoryProfile, type ProfileForm } from "./NativeDirectoryProfileEditor";
 import { RETAINED_SYNTHETIC_CLIENT_ID } from "./DirectoryReplayAcceptanceRoute";
 
@@ -64,6 +64,12 @@ export function DirectoryReplayAcceptance({ request = api }: { request?: Directo
   const load = async () => {
     setBusy(true); setError(""); setResult(""); setAttempt(null); setRestore(null); setRestored(false);
     try {
+      setCsrf("");
+      const session = await request<{ csrfToken?: unknown; user?: { id?: unknown; isAdministrator?: unknown } }>("/api/session");
+      if (session?.user?.id !== "staff-beau-koltz" || session.user.isAdministrator !== true
+        || typeof session.csrfToken !== "string" || session.csrfToken.length === 0 || session.csrfToken.length > 4096)
+        throw new Error("A current protected-owner session is required for staging acceptance.");
+      setCsrf(session.csrfToken);
       const value = await request<unknown>(DETAIL);
       if (!validSnapshot(value)) throw new Error("The retained synthetic client response could not be verified.");
       if (!value.editing.available) throw new Error(`The retained synthetic client is pending or unavailable (${value.editing.reason ?? "unknown"}).`);

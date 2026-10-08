@@ -3,8 +3,8 @@ import { fileURLToPath } from "node:url";
 import { expect, test, type Page } from "@playwright/test";
 import { isDirectoryReplayAcceptanceLocation } from "../../src/client/DirectoryReplayAcceptanceRoute";
 
-type Mode = "normal" | "pending" | "denied" | "wrong-record" | "lost-write" | "lost-restore" | "wrong-source" | "readback-mismatch" | "readback-unavailable";
-type Call = { path: string; method: string; key: string | null; body: string | null };
+type Mode = "normal" | "pending" | "denied" | "wrong-record" | "lost-write" | "lost-restore" | "wrong-source" | "readback-mismatch" | "readback-unavailable" | "no-csrf" | "not-owner";
+type Call = { path: string; method: string; key: string | null; body: string | null; csrf: string | null; contentType: string | null; credentials: RequestCredentials | undefined };
 const fixture = new URL("./directory-replay-acceptance-fixture.tsx", import.meta.url);
 const bundle = buildSync({ entryPoints: [fileURLToPath(fixture)], bundle: true, format: "iife", platform: "browser", write: false,
   outdir: "out", jsx: "automatic", nodePaths: [fileURLToPath(new URL("../../node_modules", import.meta.url))] });
@@ -27,7 +27,10 @@ test("uses only the retained standalone-client route and freezes replay/conflict
   await page.getByRole("button", { name: "Retry same frozen step" }).click();
   await expect(page.getByText(/not independent Project Alpha readback proof/)).toBeVisible();
   const observed = await calls(page), patches = observed.filter(call => call.method === "PATCH");
-  expect(observed.filter(call => call.path !== "/api/admin/staging/directory/replay-destination-readback")
+  expect(observed[0]?.path).toBe("/api/session");
+  expect(observed.every(call => call.credentials === "same-origin")).toBe(true);
+  expect(patches.every(call => call.csrf === "fixture-only-csrf" && call.contentType === "application/json")).toBe(true);
+  expect(observed.filter(call => call.path !== "/api/admin/staging/directory/replay-destination-readback" && call.path !== "/api/session")
     .every(call => call.path === "/api/client-hub/directory/standalone-clients/614ed50f-8800-4ab3-aa69-009d8e5cefa9")).toBe(true);
   expect(observed.some(call => /create-admissions|relationship/.test(call.path))).toBe(false);
   expect(patches).toHaveLength(3); expect(patches[1]).toEqual(patches[0]);
@@ -35,10 +38,11 @@ test("uses only the retained standalone-client route and freezes replay/conflict
 });
 
 test("refuses pending and denied records without a write", async ({ page }) => {
-  for (const mode of ["pending", "denied", "wrong-record"] as const) {
+  for (const mode of ["pending", "denied", "wrong-record", "no-csrf", "not-owner"] as const) {
     await render(page, mode); await page.getByRole("button", { name: "Load retained synthetic client" }).click();
     await expect(page.getByRole("alert")).toBeVisible();
     expect((await calls(page)).filter(call => call.method === "PATCH")).toHaveLength(0);
+    if (mode === "no-csrf" || mode === "not-owner") expect((await calls(page)).map(call => call.path)).toEqual(["/api/session"]);
     await page.reload({ waitUntil: "domcontentloaded" }).catch(() => undefined);
   }
 });
@@ -87,7 +91,11 @@ test("restore survives a lost committed response with the same fresh key and exa
   await expect(page.getByText(/Original profile restored/)).toBeVisible();
   await page.getByRole("button", { name: "Verify independent Project Alpha destination" }).click();
   await expect(page.getByText(/destination readback verified for local version 6/)).toBeVisible();
-  const patches = (await calls(page)).filter(call => call.method === "PATCH");
+  const observed = await calls(page), patches = observed.filter(call => call.method === "PATCH");
+  const readbacks = observed.filter(call => call.path === "/api/admin/staging/directory/replay-destination-readback");
+  expect(readbacks).toHaveLength(2);
+  expect(readbacks.every(call => call.method === "POST" && call.csrf === "fixture-only-csrf"
+    && call.credentials === "same-origin" && call.contentType === "application/json")).toBe(true);
   expect(patches[3]!.key).not.toBe(patches[0]!.key);
   expect(patches.slice(3, 6).every(call => call.key === patches[3]!.key && call.body === patches[3]!.body)).toBe(true);
 });

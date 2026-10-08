@@ -3,8 +3,8 @@ import { DirectoryReplayAcceptance } from "../../src/client/DirectoryReplayAccep
 import { RETAINED_SYNTHETIC_CLIENT_ID } from "../../src/client/DirectoryReplayAcceptanceRoute";
 import { ApiError } from "../../src/client/api";
 
-type Call = { path: string; method: string; key: string | null; body: string | null };
-declare global { interface Window { directoryReplayCalls?: Call[]; directoryReplayMode?: "normal" | "pending" | "denied" | "wrong-record" | "lost-write" | "lost-restore" | "wrong-source" | "readback-mismatch" | "readback-unavailable" } }
+type Call = { path: string; method: string; key: string | null; body: string | null; csrf: string | null; contentType: string | null; credentials: RequestCredentials | undefined };
+declare global { interface Window { directoryReplayCalls?: Call[]; directoryReplayMode?: "normal" | "pending" | "denied" | "wrong-record" | "lost-write" | "lost-restore" | "wrong-source" | "readback-mismatch" | "readback-unavailable" | "no-csrf" | "not-owner" } }
 const calls = window.directoryReplayCalls = [];
 let uuidSequence = 0;
 Object.defineProperty(window.crypto, "randomUUID", { configurable: true,
@@ -15,7 +15,10 @@ const seen = new Map<string, string>();
 let lost = false;
 const request = async <T,>(path: string, init: RequestInit = {}): Promise<T> => {
   const headers = new Headers(init.headers), body = typeof init.body === "string" ? init.body : null;
-  calls.push({ path, method: init.method ?? "GET", key: headers.get("Idempotency-Key"), body });
+  calls.push({ path, method: init.method ?? "GET", key: headers.get("Idempotency-Key"), body,
+    csrf: headers.get("X-CSRF-Token"), contentType: headers.get("Content-Type"), credentials: init.credentials });
+  if (path === "/api/session") return { csrfToken: window.directoryReplayMode === "no-csrf" ? "" : "fixture-only-csrf",
+    user: { id: window.directoryReplayMode === "not-owner" ? "staff-readonly" : "staff-beau-koltz", isAdministrator: true } } as T;
   if (path === "/api/admin/staging/directory/replay-destination-readback") return (window.directoryReplayMode === "readback-mismatch"
     ? { status: "mismatch", exactIdentity: true, exactVersion: false, exactGeneration: true, exactProfile: true }
     : window.directoryReplayMode === "readback-unavailable"
@@ -36,4 +39,13 @@ const request = async <T,>(path: string, init: RequestInit = {}): Promise<T> => 
     replayed, destinations: [{ sourceId: window.directoryReplayMode === "wrong-source" ? "project-alpha:other" : "project-alpha:staging",
       state: replayed ? "acknowledged" : "pending" }] } as T;
 };
-createRoot(document.getElementById("root")!).render(<DirectoryReplayAcceptance request={request} />);
+// Exercise the actual same-origin api.ts transport, including session bootstrap
+// and CSRF headers; only the HTTP server is replaced by this browser fixture.
+window.fetch = async (input, init) => {
+  try { return Response.json(await request(String(input), init)); }
+  catch (caught) {
+    if (caught instanceof ApiError) return Response.json({ error: caught.message, ...caught.payload }, { status: caught.status });
+    throw caught;
+  }
+};
+createRoot(document.getElementById("root")!).render(<DirectoryReplayAcceptance />);
