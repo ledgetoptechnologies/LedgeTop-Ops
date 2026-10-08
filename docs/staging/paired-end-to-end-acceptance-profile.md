@@ -1,5 +1,36 @@
 # Paired end-to-end staging acceptance composition
 
+## Live staging preservation gate — 2026-10-08
+
+Do not deploy the baseline pair directly over the current live staging
+configuration. Read-only Wrangler inspection of the active Operations version
+`5f0ad270-0092-4f51-9534-34efc6ee2957` confirmed
+`VIEWER_PUBLIC_SHARES_ENABLED`, `CLIENT_VIEWER_SESSION_ISSUER_ENABLED`, and
+`CLIENT_VIEWER_SHARES_ENABLED` are all `"true"`. The default-off baseline below
+would reset those existing settings. The active Client version
+`8bf70f8c-c3c5-494d-8c4b-474427f86350` has `CLIENT_VIEWER_ENABLED` and
+`CLIENT_VIEWER_SHARES_ENABLED` both `"false"`; preserve those values too, rather
+than treating a historical approval as proof of current deployment state.
+
+These are observations, not immutable deployment locks. Recheck the active
+versions and selected settings immediately before staging deployment, compare
+all unrelated bindings/settings as well, and reject stale snapshots or
+unreviewed differences. Do not infer an invented `VIEWER_CLIENT_ACCESS_ENABLED`
+setting: the canonical runtime names are the explicit flags above. No production
+configuration or existing public link is part of this preservation task.
+
+The pure `scripts/staging-paired-live-settings-preservation.mjs` overlay validates
+the original pair internally and accepts only the reviewed staging Worker names,
+versions and five selected boolean values. Its independently supplied active
+version preflight must agree with that snapshot; the resulting configuration
+must equal the validated baseline plus exactly those preservation values. It
+performs no remote reads, writes or deployment. The caller must obtain the
+preflight from current authoritative deployment metadata, not reuse the saved
+snapshot as its own freshness proof. This checks only five variables: full
+unrelated configuration/binding comparison remains required before deployment.
+
+## Default-off baseline composition
+
 This pure profile composes the reviewed Operations API-v2, live Viewer, and
 Directory-adoption window with the paired native-workspace and native
 service-home profiles. Every constituent builder validates the same untouched
