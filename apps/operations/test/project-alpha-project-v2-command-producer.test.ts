@@ -35,23 +35,25 @@ async function actor() {
 }
 async function directory(sourceId: string, sourceInstanceId: string, applicationId: string, historyEpochId: string, mappingKind: "legacy" | "acquired" = "legacy") {
   const organizationRecordId = uuid(), clientRecordId = uuid(), organizationPublicId = crypto.randomUUID().replaceAll("-", ""), clientPublicId = crypto.randomUUID().replaceAll("-", "");
+  const organizationExternalId = mappingKind === "acquired" ? `pa-org-${sequence}` : organizationRecordId;
+  const clientExternalId = mappingKind === "acquired" ? `pa-client-${sequence}` : clientRecordId;
   const mappingTable = mappingKind === "legacy" ? "project_alpha_directory_mappings" : "project_alpha_existing_directory_binding_activation_receipts";
   const mappingColumns = mappingKind === "legacy"
     ? "source_id,source_instance_id,application_id,history_epoch_id,resource_type,external_id,project_alpha_public_id"
     : "source_id,source_instance_id,application_id,history_epoch_id,resource_type,external_id,project_alpha_public_id,record_id";
   const mappingValues = mappingKind === "legacy" ? "?,?,?,?,?,?,?" : "?,?,?,?,?,?,?,?";
-  const mapping = (resourceType: "organization" | "client", recordId: string, publicId: string) =>
+  const mapping = (resourceType: "organization" | "client", recordId: string, externalId: string, publicId: string) =>
     db.prepare(`INSERT INTO ${mappingTable}(${mappingColumns}) VALUES(${mappingValues})`)
-      .bind(sourceId, sourceInstanceId, applicationId, historyEpochId, resourceType, recordId, publicId,
+      .bind(sourceId, sourceInstanceId, applicationId, historyEpochId, resourceType, externalId, publicId,
         ...(mappingKind === "acquired" ? [recordId] : []));
   await db.batch([
     db.prepare("INSERT INTO operations_directory_records(record_id,record_kind) VALUES(?,'organization')").bind(organizationRecordId),
     db.prepare("INSERT INTO operations_directory_records(record_id,record_kind) VALUES(?,'client')").bind(clientRecordId),
-    mapping("organization", organizationRecordId, organizationPublicId),
-    mapping("client", clientRecordId, clientPublicId),
+    mapping("organization", organizationRecordId, organizationExternalId, organizationPublicId),
+    mapping("client", clientRecordId, clientExternalId, clientPublicId),
     db.prepare("INSERT INTO operations_directory_client_organizations(client_record_id,organization_record_id) VALUES(?,?)").bind(clientRecordId, organizationRecordId),
   ]);
-  return { organizationRecordId, clientRecordId, organizationPublicId, clientPublicId };
+  return { organizationRecordId, clientRecordId, organizationExternalId, clientExternalId, organizationPublicId, clientPublicId };
 }
 async function createAction(sourceId = "project-alpha:one", mappingKind: "legacy" | "acquired" = "legacy"): Promise<Extract<ProjectAlphaProjectV2CommandProducerAction, { operation: "create" }>> {
   const sourceInstanceId = sourceId === "project-alpha:one" ? sourceOne : sourceTwo;
@@ -62,8 +64,8 @@ async function createAction(sourceId = "project-alpha:one", mappingKind: "legacy
     directory: { organizationRecordId: records.organizationRecordId, clientRecordId: records.clientRecordId },
     command: { commandId: uuid(), externalId: `ops/project-${sequence}`, expectedAuthorizationGeneration: "0",
       project: { name: "Survey", description: null, estimatedStart: null, estimatedEnd: null },
-      organization: { externalId: records.organizationRecordId, expectedPublicId: records.organizationPublicId, expectedRevision: "1", expectedProjectionSha256: sha },
-      client: { externalId: records.clientRecordId, expectedPublicId: records.clientPublicId, expectedRevision: "1", expectedProjectionSha256: sha } },
+      organization: { externalId: records.organizationExternalId, expectedPublicId: records.organizationPublicId, expectedRevision: "1", expectedProjectionSha256: sha },
+      client: { externalId: records.clientExternalId, expectedPublicId: records.clientPublicId, expectedRevision: "1", expectedProjectionSha256: sha } },
   };
 }
 function response(value: unknown, status = 200) { return new Response(JSON.stringify(value), { status, headers: { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store", "X-Request-ID": "11111111-1111-4111-8111-111111111111" } }); }
@@ -136,7 +138,7 @@ describe("unmounted project-v2 command producer", () => {
     const publicBefore = await db.prepare("SELECT id,url,hex(payload) payload FROM delivery_public_shares ORDER BY id").all();
     await expect(planProjectAlphaProjectV2Command(env(), activated)).resolves.toMatchObject({ status: "queued", replayed: false });
     expect(await db.prepare("SELECT count(*) n FROM project_alpha_directory_mappings WHERE external_id IN (?,?)")
-      .bind(activated.directory.organizationRecordId, activated.directory.clientRecordId).first("n")).toBe(0);
+      .bind(activated.command.organization.externalId, activated.command.client!.externalId).first("n")).toBe(0);
     const guards = await db.prepare(`SELECT name,sql FROM sqlite_master WHERE type='trigger'
       AND name IN ('operations_shared_projects_bound_refresh_guard','operations_shared_projects_no_update') ORDER BY name`).all<{ name: string; sql: string }>();
     expect(guards.results).toHaveLength(2);
@@ -223,33 +225,72 @@ describe("unmounted project-v2 command producer", () => {
     const different = await createAction();
     const wrong = { ...different, command: { ...different.command, organization: { ...different.command.organization, expectedPublicId: "f".repeat(32) } } } as ProjectAlphaProjectV2CommandProducerAction;
     await expect(planProjectAlphaProjectV2Command(env(), wrong)).resolves.toEqual({ status: "blocked", reason: "directory" });
+    const wrongExternal = { ...different, command: { ...different.command,
+      organization: { ...different.command.organization, externalId: "wrong-pa-binding" } } } as ProjectAlphaProjectV2CommandProducerAction;
+    await expect(planProjectAlphaProjectV2Command(env(), wrongExternal)).resolves.toEqual({ status: "blocked", reason: "directory" });
     const mismatchedId = { ...different, directory: { ...different.directory, organizationRecordId: uuid() } };
-    await expect(planProjectAlphaProjectV2Command(env(), mismatchedId)).resolves.toEqual({ status: "blocked", reason: "invalid_action" });
+    await expect(planProjectAlphaProjectV2Command(env(), mismatchedId)).resolves.toEqual({ status: "blocked", reason: "directory" });
     const mismatchedClient = { ...different, directory: { ...different.directory, clientRecordId: uuid() } };
-    await expect(planProjectAlphaProjectV2Command(env(), mismatchedClient)).resolves.toEqual({ status: "blocked", reason: "invalid_action" });
+    await expect(planProjectAlphaProjectV2Command(env(), mismatchedClient)).resolves.toEqual({ status: "blocked", reason: "directory" });
     const mismatchedNullClient = { ...different, directory: { ...different.directory, clientRecordId: null } };
     await expect(planProjectAlphaProjectV2Command(env(), mismatchedNullClient)).resolves.toEqual({ status: "blocked", reason: "invalid_action" });
+
+  });
+
+  it("rejects wrong client binding external and public IDs", async () => {
+    const action = await createAction("project-alpha:one", "acquired");
+    const wrongExternal = { ...action, command: { ...action.command,
+      client: { ...action.command.client!, externalId: "wrong-pa-client-binding" } } } as ProjectAlphaProjectV2CommandProducerAction;
+    await expect(planProjectAlphaProjectV2Command(env(), wrongExternal)).resolves.toEqual({ status: "blocked", reason: "directory" });
+    const wrongPublic = { ...action, command: { ...action.command,
+      client: { ...action.command.client!, expectedPublicId: "e".repeat(32) } } } as ProjectAlphaProjectV2CommandProducerAction;
+    await expect(planProjectAlphaProjectV2Command(env(), wrongPublic)).resolves.toEqual({ status: "blocked", reason: "directory" });
+  });
+
+  it("rejects a selected active mapping from the wrong connection tuple", async () => {
+    const action = await createAction("project-alpha:one", "acquired");
+    await db.prepare(`UPDATE project_alpha_existing_directory_binding_activation_receipts SET application_id=?
+      WHERE record_id=?`).bind(appTwo, action.directory.organizationRecordId).run();
+    await expect(planProjectAlphaProjectV2Command(env(), action)).resolves.toEqual({ status: "blocked", reason: "directory" });
+  });
+
+  it("rolls back the complete reservation when a competing active mapping appears after the read check", async () => {
+    const action = await createAction("project-alpha:one", "acquired"), base = env();
+    let raced = false;
+    const racingDb = {
+      prepare: (query: string) => db.prepare(query),
+      batch: async (statements: D1PreparedStatement[]) => {
+        if (!raced) {
+          raced = true;
+          await db.prepare(`INSERT INTO project_alpha_existing_directory_binding_activation_receipts(
+            activation_id,source_id,resource_type,record_id,external_id,project_alpha_public_id,source_instance_id,application_id,history_epoch_id,activated_at)
+            VALUES(?,?,?,?,?,?,?,?,?,?)`).bind(`race-${action.command.commandId}`, action.sourceId, "organization",
+            action.directory.organizationRecordId, "competing-pa-organization", action.command.organization.expectedPublicId,
+            sourceOne, appOne, epochOne, "2026-10-08T00:00:00.000Z").run();
+        }
+        return db.batch(statements);
+      },
+    } as D1Database;
+    await expect(planProjectAlphaProjectV2Command({ ...base, OPS_DB: racingDb }, action))
+      .resolves.toEqual({ status: "uncertain", reason: "database" });
+    for (const table of ["native_project_command_proofs", "project_alpha_project_outbox", "project_alpha_project_destinations",
+      "project_alpha_project_v2_request_fingerprints", "project_alpha_project_v2_canonical_intents",
+      "project_alpha_project_v2_events", "native_project_command_reservations"]) {
+      const column = table === "project_alpha_project_destinations" ? "external_project_id" : "command_id";
+      const value = table === "project_alpha_project_destinations" ? action.command.externalId : action.command.commandId;
+      expect(await db.prepare(`SELECT count(*) n FROM ${table} WHERE ${column}=?`).bind(value).first("n"), table).toBe(0);
+    }
   });
 
   it("accepts explicitly activated acquired directory mappings through the active-mapping view", async () => {
-    const action = await createAction();
-    await db.prepare("DELETE FROM project_alpha_directory_mappings WHERE external_id IN (?,?)")
-      .bind(action.directory.organizationRecordId, action.directory.clientRecordId).run();
-    await db.batch([
-      db.prepare(`INSERT INTO project_alpha_existing_directory_binding_activation_receipts(
-        activation_id,source_id,resource_type,record_id,external_id,project_alpha_public_id,source_instance_id,application_id,history_epoch_id,activated_at)
-        VALUES(?,?,?,?,?,?,?,?,?,?)`).bind("activation-organization", action.sourceId, "organization",
-        action.directory.organizationRecordId, "pa-org-internal-42", action.command.organization.expectedPublicId, sourceOne, appOne, epochOne, "2026-10-01T00:00:00.000Z"),
-      db.prepare(`INSERT INTO project_alpha_existing_directory_binding_activation_receipts(
-        activation_id,source_id,resource_type,record_id,external_id,project_alpha_public_id,source_instance_id,application_id,history_epoch_id,activated_at)
-        VALUES(?,?,?,?,?,?,?,?,?,?)`).bind("activation-client", action.sourceId, "client",
-        action.directory.clientRecordId, "pa-client-internal-57", action.command.client!.expectedPublicId, sourceOne, appOne, epochOne, "2026-10-01T00:00:00.000Z"),
-    ]);
+    const action = await createAction("project-alpha:one", "acquired");
+    expect(action.command.organization.externalId).not.toBe(action.directory.organizationRecordId);
+    expect(action.command.client!.externalId).not.toBe(action.directory.clientRecordId);
     expect(await db.prepare(`SELECT mapping_kind,record_id,external_id FROM project_alpha_active_directory_mappings
       WHERE record_id IN (?,?) ORDER BY external_id`).bind(action.directory.organizationRecordId, action.directory.clientRecordId).all())
       .toMatchObject({ results: [
-        { mapping_kind: "acquired", record_id: action.directory.clientRecordId, external_id: "pa-client-internal-57" },
-        { mapping_kind: "acquired", record_id: action.directory.organizationRecordId, external_id: "pa-org-internal-42" },
+        { mapping_kind: "acquired", record_id: action.directory.clientRecordId, external_id: action.command.client!.externalId },
+        { mapping_kind: "acquired", record_id: action.directory.organizationRecordId, external_id: action.command.organization.externalId },
       ] });
     await expect(planProjectAlphaProjectV2Command(env(), action)).resolves.toMatchObject({ status: "queued", replayed: false });
   });

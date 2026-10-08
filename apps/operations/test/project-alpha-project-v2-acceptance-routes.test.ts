@@ -4,7 +4,7 @@ import type { Env, StaffPrincipal } from "../src/worker/types";
 
 const mocks = vi.hoisted(() => ({
   scope: vi.fn(), native: vi.fn(), resolve: vi.fn(), withEnabled: vi.fn(),
-  plan: vi.fn(), dispatch: vi.fn(), settle: vi.fn(), activate: vi.fn(), audit: vi.fn(), batch: vi.fn(),
+  plan: vi.fn(), dispatch: vi.fn(), settle: vi.fn(), activate: vi.fn(), audit: vi.fn(), batch: vi.fn(), prepare: vi.fn(),
 }));
 vi.mock("../src/worker/acl", () => ({ sqlScope: mocks.scope }));
 vi.mock("../src/worker/native-staff-auth", () => ({ authenticateNativeStaffWithAdmissionVersion: mocks.native }));
@@ -17,8 +17,9 @@ vi.mock("../src/worker/project-alpha-project-v2-pending-dispatcher", () => ({ di
 vi.mock("../src/worker/project-alpha-project-read-settlement-adapter", () => ({ settleProjectAlphaProjectV2Read: mocks.settle }));
 vi.mock("../src/worker/project-alpha-project-canonical-activation-adapter", () => ({ activateProjectAlphaProjectV2Canonical: mocks.activate }));
 vi.mock("../src/worker/request-security", () => ({ auditStatement: mocks.audit }));
+vi.mock("../src/worker/project-alpha-project-v2-acceptance-preparation", () => ({ prepareProjectAlphaProjectV2Acceptance: mocks.prepare }));
 
-import { PROJECT_ALPHA_PROJECT_V2_ACCEPTANCE_ROUTE, registerProjectAlphaProjectV2AcceptanceRoutes } from "../src/worker/project-alpha-project-v2-acceptance-routes";
+import { PROJECT_ALPHA_PROJECT_V2_ACCEPTANCE_ROUTE, PROJECT_ALPHA_PROJECT_V2_PREPARATION_ROUTE, registerProjectAlphaProjectV2AcceptanceRoutes } from "../src/worker/project-alpha-project-v2-acceptance-routes";
 
 const principal: StaffPrincipal = { id: "native-admin", email: "native-admin@example.test", displayName: "Native administrator",
   accessSubject: "native-admin-subject", projectAlphaUserId: null };
@@ -68,7 +69,7 @@ function fixture(enabled = true, administrator = true, environment = "staging") 
   const app = new Hono<{ Bindings: Env; Variables: { principal: StaffPrincipal; administrator: boolean } }>();
   app.use("*", async (c, next) => { c.set("principal", principal); c.set("administrator", administrator); await next(); });
   registerProjectAlphaProjectV2AcceptanceRoutes(app);
-  const env = { ENVIRONMENT: environment, PROJECT_ALPHA_PROJECT_V2_ACTIVATION_ENABLED: enabled ? "true" : "false",
+  const env = { ENVIRONMENT: environment, EXPECTED_HOST: "ops-staging.ledgetopdroneservices.com", PROJECT_ALPHA_PROJECT_V2_ACTIVATION_ENABLED: enabled ? "true" : "false",
     TEAM_DOMAIN: "https://team.cloudflareaccess.com", OPERATIONS_AUD: "operations-audience-value",
     AUDIT_IP_SECRET: "audit-secret",
     OPS_DB: { batch: mocks.batch } } as unknown as Env;
@@ -76,7 +77,10 @@ function fixture(enabled = true, administrator = true, environment = "staging") 
     `https://ops.example${PROJECT_ALPHA_PROJECT_V2_ACCEPTANCE_ROUTE}`,
     { method: "POST", headers: { "Content-Type": "application/json", "Idempotency-Key": commandId, ...headers },
       body: typeof body === "string" ? body : JSON.stringify(body) }, env);
-  return { app, env, send };
+  const prepare = (body: unknown, origin = "https://ops-staging.ledgetopdroneservices.com") => app.request(
+    `${origin}${PROJECT_ALPHA_PROJECT_V2_PREPARATION_ROUTE}`, { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body) }, env);
+  return { app, env, send, prepare };
 }
 
 describe("Project-v2 administrator joined-acceptance route", () => {
@@ -97,6 +101,45 @@ describe("Project-v2 administrator joined-acceptance route", () => {
     mocks.activate.mockResolvedValue({ status: "activated", activationId, settlementId, commandId,
       externalProjectId: requestBody.command.externalId, version: 1, replayed: false });
     mocks.audit.mockResolvedValue({}); mocks.batch.mockResolvedValue([]);
+  });
+
+  const preparationBody = { operation: "create", sourceId: requestBody.sourceId, expectedApplicationId: appId,
+    externalProjectId: "staging/project-proof", scopes: [], organizationRecordId: "organization-1", clientRecordId: null };
+
+  it("prepares only on the enabled exact staging origin with trusted native authority", async () => {
+    for (const state of [fixture(false), fixture(true, true, "production"), fixture(true, false)])
+      expect((await state.prepare(preparationBody)).status).toBe(state.env.ENVIRONMENT === "staging"
+        && state.env.PROJECT_ALPHA_PROJECT_V2_ACTIVATION_ENABLED === "true" ? 403 : 404);
+    for (const origin of ["https://ops.ledgetopdroneservices.com", "http://ops-staging.ledgetopdroneservices.com",
+      "https://ops-staging.ledgetopdroneservices.com:8443"])
+      expect((await fixture().prepare(preparationBody, origin)).status).toBe(404);
+    mocks.scope.mockResolvedValueOnce({ global: true, deniedGlobal: true });
+    expect((await fixture().prepare(preparationBody)).status).toBe(403);
+    mocks.native.mockResolvedValueOnce({ admissionVersion: 1, identity: { staffId: "forged", email: principal.email,
+      verifiedAccessSubject: principal.accessSubject, profileVersion: 1 } });
+    expect((await fixture().prepare(preparationBody)).status).toBe(403);
+    expect(mocks.prepare).not.toHaveBeenCalled();
+  });
+
+  it("rejects caller-supplied identity or opaque CAS fences before preparing", async () => {
+    for (const extra of [{ actor: { staffId: "owner" } }, { expectedRevision: "1" }, { apiKey: "not-accepted" }])
+      expect((await fixture().prepare({ ...preparationBody, ...extra })).status).toBe(400);
+    expect((await fixture().prepare({ ...preparationBody, scopes: undefined })).status).toBe(400);
+    expect(mocks.prepare).not.toHaveBeenCalled();
+    expect(mocks.plan).not.toHaveBeenCalled();
+  });
+
+  it("derives preparation using the trusted actor and never invokes command dispatch", async () => {
+    mocks.prepare.mockResolvedValueOnce({ status: "blocked", reason: "stale" });
+    const response = await fixture().prepare(preparationBody);
+    expect(response.status).toBe(200);
+    expect(response.headers.get("Cache-Control")).toBe("no-store");
+    await expect(response.json()).resolves.toEqual({ status: "blocked", reason: "stale" });
+    expect(mocks.prepare).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ ...preparationBody,
+      actor: expect.objectContaining({ staffId: principal.id, accessSubject: principal.accessSubject, email: principal.email, scopes: [] }) }));
+    expect(mocks.audit).toHaveBeenCalled();
+    expect(mocks.plan).not.toHaveBeenCalled(); expect(mocks.dispatch).not.toHaveBeenCalled();
+    expect(mocks.settle).not.toHaveBeenCalled(); expect(mocks.activate).not.toHaveBeenCalled();
   });
 
   it("is hidden while default-off and does not authenticate, write, or dispatch", async () => {
