@@ -153,6 +153,7 @@ function acceptanceSummary(
   directory: Record<string, unknown>,
   projects: Record<string, unknown>,
   catalog: Record<string, unknown>,
+  clientWrites: Record<string, unknown>,
 ): Record<string, unknown> {
   return {
     sourceId: sourceIdValue,
@@ -161,7 +162,21 @@ function acceptanceSummary(
     directory,
     projects,
     catalog,
+    clientWrites,
   };
+}
+
+const CLIENT_CREATE_ENDPOINT = { method: "POST" as const, path: "/api/v2/directory/clients/commands",
+  requiredCapability: "directory.clients.create", requiresSourceInstanceId: true, requiresApplicationId: true,
+  requiresHistoryEpoch: true };
+const CLIENT_PROFILE_WRITE_ENDPOINT = { method: "POST" as const, path: "/api/v2/directory/clients/{publicId}/profile/commands",
+  requiredCapability: "directory.clients.write", requiresSourceInstanceId: true, requiresApplicationId: true,
+  requiresHistoryEpoch: true };
+
+function advertisedPrerequisite(probe: ProjectAlphaApiV2Probe): Record<string, unknown> {
+  return probe.status === "verified"
+    ? { status: "advertised", exactIdentityMatch: true, exactContractMatch: true }
+    : { status: "unavailable", reason: probe.reason, exactIdentityMatch: false, exactContractMatch: false };
 }
 
 /** Mounted after Operations' authenticated /api mutation middleware. That
@@ -208,7 +223,8 @@ export function registerProjectAlphaApiV2ReadAcceptanceRoutes(app: App): void {
         ]);
         if (probe.status !== "verified") {
           const unavailable = { status: "not_attempted", reason: "capabilities" };
-          return acceptanceSummary(requestedSourceId, safeProbe(probe), unavailable, unavailable, unavailable);
+          return acceptanceSummary(requestedSourceId, safeProbe(probe), unavailable, unavailable, unavailable,
+            { meaning: "advertised_prerequisites_only", create: unavailable, profileWrite: unavailable });
         }
         const directory = await readProjectAlphaDirectoryInventoryAfterVerifiedCapabilities(connection, requestedSourceId,
           { type: "all", limit: 200 }, fetch);
@@ -219,14 +235,23 @@ export function registerProjectAlphaApiV2ReadAcceptanceRoutes(app: App): void {
         const catalog = catalogProbe.status === "verified"
           ? await safeCatalog(await readProjectAlphaCatalogInventoryAfterVerifiedCapabilities(connection, { limit: 200 }, fetch))
           : { status: "not_attempted", reason: "capabilities", capability: safeProbe(catalogProbe) };
+        // These are capabilities-document GET probes only. The POST endpoint
+        // descriptors are compared with advertised metadata; no command is sent.
+        const clientCreateProbe = await probeProjectAlphaApiV2(connection, [], fetch, [CLIENT_CREATE_ENDPOINT],
+          [CLIENT_CREATE_ENDPOINT.requiredCapability]);
+        const clientProfileWriteProbe = await probeProjectAlphaApiV2(connection, [], fetch, [CLIENT_PROFILE_WRITE_ENDPOINT],
+          [CLIENT_PROFILE_WRITE_ENDPOINT.requiredCapability]);
         return acceptanceSummary(requestedSourceId, safeProbe(probe), await safeDirectory(directory),
-          await safeProject(projects), catalog);
+          await safeProject(projects), catalog, { meaning: "advertised_prerequisites_only",
+            create: advertisedPrerequisite(clientCreateProbe), profileWrite: advertisedPrerequisite(clientProfileWriteProbe) });
       });
     const result = selected.status === "enabled" ? selected.value : acceptanceSummary(requestedSourceId,
       { status: selected.status, exactIdentityMatch: false, exactContractMatch: false },
       { status: "not_attempted", reason: "connection" },
       { status: "not_attempted", reason: "connection" },
-      { status: "not_attempted", reason: "connection" });
+      { status: "not_attempted", reason: "connection" },
+      { meaning: "advertised_prerequisites_only", create: { status: "not_attempted", reason: "connection" },
+        profileWrite: { status: "not_attempted", reason: "connection" } });
 
     // This intentionally writes only a safe local audit event. It contains no
     // PA bearer value, URL, record identifier, profile field, or raw response.

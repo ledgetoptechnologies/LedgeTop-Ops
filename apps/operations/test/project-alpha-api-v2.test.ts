@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { probeProjectAlphaDirectoryApiV2 } from "../src/worker/project-alpha-api-v2";
+import { probeProjectAlphaApiV2, probeProjectAlphaDirectoryApiV2 } from "../src/worker/project-alpha-api-v2";
 
 const sourceInstanceId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const applicationId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
@@ -20,6 +20,25 @@ function response(capabilities: readonly [string, string], endpointCapabilities:
 }
 
 describe("Project Alpha directory API-v2 creation preflight", () => {
+  it("verifies advertised client-write prerequisites with a capabilities GET and sends no command", async () => {
+    const endpoint = { method: "POST" as const, path: "/api/v2/directory/clients/{publicId}/profile/commands",
+      requiredCapability: "directory.clients.write", requiresSourceInstanceId: true, requiresApplicationId: true,
+      requiresHistoryEpoch: true };
+    const send = vi.fn<typeof fetch>(async () => new Response(JSON.stringify({
+      apiVersion: "2", sourceInstanceId, applicationId, historyEpoch, requestId,
+      grantedCapabilities: [{ name: "api.capabilities.read" }, { name: endpoint.requiredCapability }],
+      implementedEndpoints: [
+        { method: "GET", path: "/api/v2/capabilities", requiredCapability: "api.capabilities.read" }, endpoint,
+      ],
+    }), { headers: { "Content-Type": "application/json", "Cache-Control": "no-store", "X-Request-ID": requestId } }));
+
+    await expect(probeProjectAlphaApiV2(connection, [], send, [endpoint], [endpoint.requiredCapability]))
+      .resolves.toMatchObject({ status: "verified" });
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(String(send.mock.calls[0]![0])).toBe("https://project-alpha.example.test/api/v2/capabilities");
+    expect(send.mock.calls[0]![1]).toMatchObject({ method: "GET" });
+  });
+
   it("accepts the PA create scopes on both exact command routes", async () => {
     const createScopes = ["directory.organizations.create", "directory.clients.create"] as const;
     const send = vi.fn<typeof fetch>(async () => response(createScopes));

@@ -20,6 +20,9 @@ test("shows safe PA preflight diagnostics after exact-ID staging binding refresh
       sourceId: "project-alpha:staging", readOnly: true,
       capabilities: { status: "verified", exactIdentityMatch: true, exactContractMatch: true },
       directory: { status: "observed", count: 1 }, projects: { status: "binding_stale" },
+      clientWrites: { meaning: "advertised_prerequisites_only",
+        create: { status: "advertised", exactIdentityMatch: true, exactContractMatch: true },
+        profileWrite: { status: "unavailable", reason: "missing_capability", exactIdentityMatch: false, exactContractMatch: false } },
     } });
     if (path === "/api/admin/project-alpha/private/projects/bindings/refresh") {
       refreshRequest = { body: JSON.parse(request.postData() || "null"), csrf: request.headers()["x-csrf-token"] ?? null,
@@ -32,6 +35,9 @@ test("shows safe PA preflight diagnostics after exact-ID staging binding refresh
   await page.goto("/administration");
   await page.getByText("Staging API-v2 operator review").click();
   await page.getByRole("button", { name: "Verify read-only API connection" }).click();
+  await expect(page.getByText("Advertised client-write prerequisites (no write attempted)")).toBeVisible();
+  await expect(page.getByText("Create endpoint and capability: advertised")).toBeVisible();
+  await expect(page.getByText("Profile-write endpoint and capability: unavailable (missing granted capability)")).toBeVisible();
   await expect(page.getByText("Staging project binding is stale.", { exact: false })).toBeVisible();
   await page.getByLabel("Exact external Project ID", { exact: true }).fill("pa-staging-project-123");
   await page.getByLabel("Confirm exact external Project ID", { exact: true }).fill("pa-staging-project-123");

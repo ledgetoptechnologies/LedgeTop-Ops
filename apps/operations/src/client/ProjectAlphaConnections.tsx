@@ -25,9 +25,13 @@ type PortalStatus = { available: boolean; authorities: PortalAuthority[];
 type ProjectManagementRoute = { sourceId: string; version: number; revision: number; enabled: boolean; reviewedUrlTemplate: string | null };
 type Directory = { connectors: Connector[]; health: Health[]; legacyPrimary: boolean; recovery?: Recovery[] | null;
   portal?: PortalStatus; projectManagement?: ProjectManagementRoute[] };
-type ReadAcceptancePart = { status: string; count?: number; exactIdentityMatch?: boolean; exactContractMatch?: boolean };
+type ReadAcceptancePart = { status: string; reason?: string; count?: number; exactIdentityMatch?: boolean; exactContractMatch?: boolean };
 type ReadAcceptance = { sourceId: string; readOnly: boolean; capabilities: ReadAcceptancePart;
-  directory: ReadAcceptancePart; projects: ReadAcceptancePart };
+  directory: ReadAcceptancePart; projects: ReadAcceptancePart; clientWrites?: {
+    meaning: "advertised_prerequisites_only";
+    create: ReadAcceptancePart;
+    profileWrite: ReadAcceptancePart;
+  } };
 type BindingRefreshOutcome = { status: string; reason?: string };
 type InventoryPageSurface = { status: "persisted" | "conflicted"; itemCount: number; conflictCount: number; hasMore: boolean; continuationToken?: string };
 type InventoryRequestedSurface = InventoryPageSurface
@@ -61,6 +65,13 @@ const FIELD_LABELS: Record<DirectoryField, string> = {
 };
 
 function date(value: string | null) { return value ? new Date(value.includes("T") ? value : `${value.replace(" ", "T")}Z`).toLocaleString() : "Not yet"; }
+function advertisedPrerequisiteText(value: ReadAcceptancePart): string {
+  if (value.status === "advertised") return "advertised";
+  const reasons: Record<string, string> = { missing_endpoint: "missing endpoint", missing_capability: "missing granted capability",
+    source_mismatch: "source identity mismatch", application_mismatch: "application identity mismatch",
+    history_epoch_mismatch: "history epoch mismatch", credentials_or_scope: "credentials or scope unavailable" };
+  return `${value.status}${value.reason && reasons[value.reason] ? ` (${reasons[value.reason]})` : ""}`;
+}
 function SyncHealth({ health }: { health?: Health }) {
   const labels: Record<string, string> = {
     "project-alpha-network-timeout": "Project Alpha did not respond before the request timed out.",
@@ -146,6 +157,12 @@ function ReadAcceptanceCheck({ connector, disabled }: { connector: Pick<Connecto
     {result && <p role={verified ? "status" : "alert"} className="notice">{verified
       ? `API v2 read connection verified · Directory ${result.directory.count ?? 0} · Projects ${result.projects.count ?? 0}`
       : `API v2 read verification did not pass · Capabilities ${result.capabilities.status} · Directory ${result.directory.status} · Projects ${result.projects.status}`}</p>}
+    {result?.clientWrites && <p role={result.clientWrites.create.status === "advertised"
+      && result.clientWrites.profileWrite.status === "advertised" ? "status" : "alert"} className="notice">
+      <strong>Advertised client-write prerequisites (no write attempted)</strong><br />
+      Create endpoint and capability: {advertisedPrerequisiteText(result.clientWrites.create)}<br />
+      Profile-write endpoint and capability: {advertisedPrerequisiteText(result.clientWrites.profileWrite)}
+    </p>}
     {error && <p role="alert" className="notice">{error}</p>}
     {staleStagingBinding && <form onSubmit={refresh} aria-busy={refreshBusy} className="alpha-binding-refresh">
       <p><strong>Staging project binding is stale.</strong> Confirm the exact external Project ID before requesting a guarded refresh.</p>

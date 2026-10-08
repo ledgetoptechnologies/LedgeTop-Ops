@@ -32,6 +32,8 @@ This is a source-reviewed execution map, not evidence of successful live accepta
 
 ## Current execution window
 
+**Current status:** the trial described below is stopped. Operations staging version `1516f6aa-0e98-4d9c-871a-9078052d6043` is now active at 100% after CI run `37823126203` passed all ten jobs for `00295e7c`. Runtime source is `7210567f`; the successor changes only a browser assertion and documentation. Its 140 bindings and runtime settings matched predecessor `ac6bdf2c-e6ea-4d7d-bec8-16af555ff6a6`, retained as rollback. Draining remains disabled and the cron registry empty. The historical tail handle below is not live. Settlement of the existing command and paired authority-window cleanup are still required; do not open a replacement window.
+
 - At approximately 17:34 UTC, promoted staging-only drain version `223333fb-28ee-4ea2-a94e-dfe1fc0dbe7e` and installed only `1-56/5 * * * *`. The pinned restore version is `ac6bdf2c-e6ea-4d7d-bec8-16af555ff6a6`; original cron registry is empty.
 - All database-backed command/evidence/actor/selected-grant/scope/deny diagnostics passed for the existing synthetic command. No diagnostic query wrote data. This does not prove runtime destination pins, scheduler invocation or remote settlement.
 - Filtered live tail session `58098` is the current observation handle. Cron propagation is asynchronous; do not restart the trial merely because a short observation returns no events. Recheck authoritative command state and scheduler evidence after propagation, and restore the staging controls after the bounded trial even if settlement fails.

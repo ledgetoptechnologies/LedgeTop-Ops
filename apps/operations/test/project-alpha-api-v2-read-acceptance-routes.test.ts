@@ -168,6 +168,9 @@ describe("Project Alpha API-v2 read acceptance route", () => {
         metadataSha256: expect.stringMatching(/^[0-9a-f]{64}$/) },
       catalog: { status: "observed", requestId, snapshotId: "c".repeat(64), totalCount: 1, pageCount: 1,
         hasMore: false, envelopeSha256: expect.stringMatching(/^[0-9a-f]{64}$/) },
+      clientWrites: { meaning: "advertised_prerequisites_only",
+        create: { status: "advertised", exactIdentityMatch: true, exactContractMatch: true },
+        profileWrite: { status: "advertised", exactIdentityMatch: true, exactContractMatch: true } },
     });
     const serialized = JSON.stringify(body);
     for (const privateValue of ["server-only-api-key", "private-pa.example.test", "private-customer-record", "private-project-record", "e".repeat(32), "a".repeat(32)])
@@ -175,6 +178,45 @@ describe("Project Alpha API-v2 read acceptance route", () => {
     expect(mocks.audit).toHaveBeenCalledWith(expect.anything(), expect.anything(), principal,
       "integration.project_alpha_api_v2_read_acceptance_completed", "project_alpha_api_v2_read_acceptance", sourceId,
       null, expect.objectContaining({ readOnly: true }));
+  });
+
+  it("checks client create and profile-write advertisements through capabilities probes only", async () => {
+    await fixture().send();
+    expect(mocks.probe).toHaveBeenNthCalledWith(3, expect.objectContaining({ apiKey: "server-only-api-key" }), [], fetch, [{
+      method: "POST", path: "/api/v2/directory/clients/commands", requiredCapability: "directory.clients.create",
+      requiresSourceInstanceId: true, requiresApplicationId: true, requiresHistoryEpoch: true,
+    }], ["directory.clients.create"]);
+    expect(mocks.probe).toHaveBeenNthCalledWith(4, expect.objectContaining({ apiKey: "server-only-api-key" }), [], fetch, [{
+      method: "POST", path: "/api/v2/directory/clients/{publicId}/profile/commands", requiredCapability: "directory.clients.write",
+      requiresSourceInstanceId: true, requiresApplicationId: true, requiresHistoryEpoch: true,
+    }], ["directory.clients.write"]);
+    expect(mocks.configured).toHaveBeenCalledTimes(1);
+  });
+
+  it("reports missing endpoint or granted capability per action without exposing capability names", async () => {
+    mocks.probe
+      .mockResolvedValueOnce({ status: "verified", sourceInstanceId, applicationId, historyEpoch, requestId,
+        grantedCapabilities: ["api.capabilities.read", "directory.inventory.read", "projects.inventory.read"] })
+      .mockResolvedValueOnce({ status: "verified", sourceInstanceId, applicationId, historyEpoch, requestId,
+        grantedCapabilities: ["api.capabilities.read", "catalog.inventory.read"] })
+      .mockResolvedValueOnce({ status: "incompatible", reason: "missing_endpoint", requestId })
+      .mockResolvedValueOnce({ status: "unauthorized", reason: "missing_capability", requestId });
+    const body = await (await fixture().send()).json() as Record<string, any>;
+    expect(body.clientWrites).toEqual({ meaning: "advertised_prerequisites_only",
+      create: { status: "unavailable", reason: "missing_endpoint", exactIdentityMatch: false, exactContractMatch: false },
+      profileWrite: { status: "unavailable", reason: "missing_capability", exactIdentityMatch: false, exactContractMatch: false } });
+    expect(JSON.stringify(body.clientWrites)).not.toContain("directory.clients");
+  });
+
+  it("fails advertised write readiness closed on exact connection identity mismatches", async () => {
+    mocks.probe
+      .mockResolvedValueOnce({ status: "verified", sourceInstanceId, applicationId, historyEpoch, requestId, grantedCapabilities: [] })
+      .mockResolvedValueOnce({ status: "verified", sourceInstanceId, applicationId, historyEpoch, requestId, grantedCapabilities: [] })
+      .mockResolvedValueOnce({ status: "incompatible", reason: "source_mismatch", requestId })
+      .mockResolvedValueOnce({ status: "incompatible", reason: "application_mismatch", requestId });
+    const body = await (await fixture().send()).json() as Record<string, any>;
+    expect(body.clientWrites.create).toMatchObject({ status: "unavailable", reason: "source_mismatch", exactIdentityMatch: false });
+    expect(body.clientWrites.profileWrite).toMatchObject({ status: "unavailable", reason: "application_mismatch", exactIdentityMatch: false });
   });
 
   it("does not run inventories after a failed capabilities contract", async () => {
