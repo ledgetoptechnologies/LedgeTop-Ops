@@ -227,6 +227,14 @@ async function databaseClock(db) {
 }
 
 function operations(dependencies) {
+  const progressObserver = typeof dependencies.progress === "function" ? dependencies.progress : () => {};
+  const progress = stage => {
+    try {
+      progressObserver(stage);
+    } catch {
+      // Diagnostics must never affect authorization, mutation, or recovery.
+    }
+  };
   return {
     root: dependencies.root ?? ROOT,
     withBinding: dependencies.withBinding ?? withStagingAuthorityBinding,
@@ -244,6 +252,7 @@ function operations(dependencies) {
     reviewedMigrations: dependencies.reviewedMigrations ?? reviewedMigrations,
     readMigrations: dependencies.readMigrations ?? readMigrationNames,
     referenceTables: dependencies.referenceTables ?? businessAreaReferenceTables,
+    progress,
     referenceCounts: dependencies.referenceCounts ?? referenceCounts,
     batch: dependencies.batch ?? applyBatch,
     windowMinutes: windowMinutes(dependencies.windowMinutes),
@@ -447,38 +456,60 @@ export async function openStagingNativeAuthorityWindow(configPath, requestedArea
   const grantCount = clientCreation ? 3 : 2;
   const ops = operations(dependencies);
   return ops.withBinding(configPath, async ({ db, target }) => {
+    ops.progress("binding-callback-entered");
     assert.deepEqual(target, STAGING_TARGET, "trusted staging target mismatch");
+    ops.progress("schema-discovery-started");
     const areaReferenceTables = await ops.referenceTables(db);
+    ops.progress("schema-discovery-completed");
+    ops.progress("reference-count-started");
     verifyIsolatedArea(await ops.referenceCounts(db, areaReferenceTables, requested.id), "before", grantCount);
+    ops.progress("reference-count-completed");
+    ops.progress("snapshot-started");
     const before = await ops.snapshot(db, requested.id);
+    ops.progress("snapshot-completed");
     assert.deepEqual(before.businessArea, requested, "reviewed synthetic business area differs or is absent");
+    ops.progress("clock-started");
     const issuedAt = await ops.clock(db);
+    ops.progress("clock-completed");
     const provision = ops.compile(buildProvisionInput(before, target, issuedAt, ops, clientCreation), { root: ops.root });
+    ops.progress("evidence-create-started");
     const evidence = ops.createEvidence(ops.root, provision.input.approval.approvalId);
+    ops.progress("evidence-create-completed");
 
     // Durable, private recovery evidence must exist before the only mutation.
+    ops.progress("evidence-write-started");
     ops.writeEvidence(ops.root, evidence.evidenceDir, "provision.json", provision);
+    ops.progress("evidence-write-completed");
 
     let transportError;
+    ops.progress("apply-started");
     try {
       await ops.apply(db, provision, { target, root: ops.root });
+      ops.progress("apply-completed");
     } catch (error) {
       transportError = error;
+      ops.progress("apply-response-error");
     }
 
     let receipt;
+    ops.progress("receipt-readback-started");
     try {
       receipt = await ops.first(db, "SELECT * FROM native_staff_bootstrap_receipts WHERE command_id=?",
         provision.input.approval.commandId);
+      ops.progress("receipt-readback-completed");
     } catch (error) {
+      ops.progress("receipt-readback-error");
       throw new AggregateError([...(transportError ? [transportError] : []), error],
         recoveryMessage(evidence.provisionPath, "provision outcome could not be reconciled"));
     }
     if (!receipt) {
       let current;
+      ops.progress("state-readback-started");
       try {
         current = await ops.snapshot(db, requested.id);
+        ops.progress("state-readback-completed");
       } catch (error) {
+        ops.progress("state-readback-error");
         throw new AggregateError([...(transportError ? [transportError] : []), error],
           recoveryMessage(evidence.provisionPath, "provision receipt and current state are unavailable"));
       }
@@ -493,17 +524,23 @@ export async function openStagingNativeAuthorityWindow(configPath, requestedArea
     }
 
     let granted;
+    ops.progress("granted-readback-started");
     try {
       granted = await ops.snapshot(db, requested.id);
       verifyGranted(granted, provision);
       verifyIsolatedArea(await ops.referenceCounts(db, areaReferenceTables, requested.id), "after", grantCount);
+      ops.progress("granted-readback-completed");
     } catch (error) {
+      ops.progress("granted-readback-error");
       throw new AggregateError([...(transportError ? [transportError] : []), error],
         recoveryMessage(evidence.provisionPath, "provision committed but granted state was not verified"));
     }
     try {
+      ops.progress("granted-evidence-write-started");
       ops.writeEvidence(ops.root, evidence.evidenceDir, "granted-readback.json", granted);
+      ops.progress("granted-evidence-write-completed");
     } catch (error) {
+      ops.progress("granted-evidence-write-error");
       throw new AggregateError([...(transportError ? [transportError] : []), error],
         recoveryMessage(evidence.provisionPath, "provision committed but private readback was not saved"));
     }
@@ -567,12 +604,16 @@ function parseArguments(argv) {
 
 export async function main(argv = process.argv.slice(2), dependencies = {}) {
   const args = parseArguments(argv);
+  const cliDependencies = {
+    ...dependencies,
+    progress: dependencies.progress ?? (stage => console.error(`staging-native-authority-window: ${stage}`)),
+  };
   const result = args.action === "prepare"
-    ? await prepareStagingNativeAuthorityArea(args.configPath, args.area, dependencies)
+    ? await prepareStagingNativeAuthorityArea(args.configPath, args.area, cliDependencies)
     : args.action === "open"
       ? await openStagingNativeAuthorityWindow(args.configPath, args.area,
-        { ...dependencies, windowMinutes: args.windowMinutes, clientCreation: args.clientCreation })
-      : await closeStagingNativeAuthorityWindow(args.configPath, args.provisionPath, dependencies);
+        { ...cliDependencies, windowMinutes: args.windowMinutes, clientCreation: args.clientCreation })
+      : await closeStagingNativeAuthorityWindow(args.configPath, args.provisionPath, cliDependencies);
   (dependencies.log ?? console.log)(JSON.stringify(result));
   return 0;
 }

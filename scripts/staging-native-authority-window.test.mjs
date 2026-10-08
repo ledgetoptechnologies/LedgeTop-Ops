@@ -197,6 +197,62 @@ test("open saves the private recovery artifact before apply and returns only a b
   }
 });
 
+test("open reports ordered static progress stages without private payloads", async () => {
+  const { dependencies } = harness();
+  const stages = [];
+  dependencies.progress = stage => { stages.push(stage); };
+  await openStagingNativeAuthorityWindow("binding.json", AREA, dependencies);
+  assert.deepEqual(stages, [
+    "binding-callback-entered",
+    "schema-discovery-started",
+    "schema-discovery-completed",
+    "reference-count-started",
+    "reference-count-completed",
+    "snapshot-started",
+    "snapshot-completed",
+    "clock-started",
+    "clock-completed",
+    "evidence-create-started",
+    "evidence-create-completed",
+    "evidence-write-started",
+    "evidence-write-completed",
+    "apply-started",
+    "apply-completed",
+    "receipt-readback-started",
+    "receipt-readback-completed",
+    "granted-readback-started",
+    "granted-readback-completed",
+    "granted-evidence-write-started",
+    "granted-evidence-write-completed",
+  ]);
+  const output = JSON.stringify(stages);
+  for (const privateValue of [
+    AREA.id,
+    AREA.name,
+    STAFF,
+    "private|subject",
+    "private@example.test",
+    "Private Owner",
+    IDS[0],
+    "directory.profile.edit",
+    "provision.json",
+  ]) assert.equal(output.includes(privateValue), false);
+});
+
+test("throwing progress diagnostics cannot affect verified open or recovery evidence", async () => {
+  const { dependencies, events } = harness();
+  let calls = 0;
+  dependencies.progress = () => {
+    calls += 1;
+    throw new Error("diagnostic sink unavailable");
+  };
+  const result = await openStagingNativeAuthorityWindow("binding.json", AREA, dependencies);
+  assert.equal(result.status, "opened");
+  assert.equal(result.grantedReadbackVerified, true);
+  assert.ok(calls > 0);
+  assert.deepEqual(events, ["write:provision.json", "apply", "write:granted-readback.json"]);
+});
+
 test("open reconciles a lost apply response from the immutable receipt and readback", async () => {
   const { dependencies } = harness({ transportFails: true });
   const result = await openStagingNativeAuthorityWindow("binding.json", AREA, dependencies);
