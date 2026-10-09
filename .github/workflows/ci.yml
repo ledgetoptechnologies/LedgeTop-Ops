@@ -47,6 +47,9 @@ jobs:
       - name: Verify retained staging authority and paired cleanup locally
         run: node --test scripts/staging-retained-directory-authority.test.mjs scripts/staging-retained-directory-authority-window.test.mjs scripts/staging-retained-directory-authority-fullschema.test.mjs
 
+      - name: Verify exact organization staging authority and paired cleanup locally
+        run: node --test scripts/staging-organization-relationship-authority.test.mjs scripts/staging-organization-relationship-authority-window.test.mjs scripts/staging-organization-relationship-authority-fullschema.test.mjs
+
   incoming-pickup:
     name: incoming-pickup-alpine
     runs-on: ubuntu-24.04
