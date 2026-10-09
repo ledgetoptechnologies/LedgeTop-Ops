@@ -4,17 +4,16 @@ import { spawnSync } from "node:child_process";
 import { isDeepStrictEqual } from "node:util";
 import { fileURLToPath } from "node:url";
 import {
-  buildProjectAlphaApiV2ViewerAcceptanceConfig,
-  PROJECT_ALPHA_API_V2_VIEWER_ACCEPTANCE_CONFIG,
-  validateProjectAlphaApiV2ViewerAcceptanceConfig,
-} from "./staging-project-alpha-api-v2-viewer-acceptance-profile.mjs";
+  buildProjectAlphaApiV2AcceptanceConfig,
+  PROJECT_ALPHA_API_V2_ACCEPTANCE_CONFIG,
+  validateProjectAlphaApiV2AcceptanceConfig,
+} from "./staging-project-alpha-api-v2-acceptance-profile.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 export const PROJECT_ADOPTION_FINALIZATION_ACCEPTANCE_PROFILE = "project-alpha-project-adoption-finalization-acceptance";
 export const PROJECT_ADOPTION_FINALIZATION_ACCEPTANCE_CONFIG = Object.freeze({
-  source: PROJECT_ALPHA_API_V2_VIEWER_ACCEPTANCE_CONFIG.source,
-  production: PROJECT_ALPHA_API_V2_VIEWER_ACCEPTANCE_CONFIG.production,
-  secretNames: PROJECT_ALPHA_API_V2_VIEWER_ACCEPTANCE_CONFIG.secretNames,
+  source: PROJECT_ALPHA_API_V2_ACCEPTANCE_CONFIG.source,
+  production: PROJECT_ALPHA_API_V2_ACCEPTANCE_CONFIG.production,
   output: "apps/operations/wrangler.staging.project-alpha-project-adoption-finalization-acceptance.json",
 });
 export const PROJECT_ADOPTION_FINALIZATION_ACCEPTANCE_VALUES = Object.freeze({
@@ -58,29 +57,29 @@ function validateDefaultOff(source, production) {
   return errors;
 }
 
-export function buildProjectAdoptionFinalizationAcceptanceConfig(source, production, secretNames) {
+export function buildProjectAdoptionFinalizationAcceptanceConfig(source, production) {
   const errors = validateDefaultOff(source, production);
   if (errors.length) throw new Error(errors.join("\n"));
-  const composed = buildProjectAlphaApiV2ViewerAcceptanceConfig(source, production, secretNames);
+  const composed = buildProjectAlphaApiV2AcceptanceConfig(source, production);
   const candidate = structuredClone(composed);
   Object.assign(candidate.vars, PROJECT_ADOPTION_FINALIZATION_ACCEPTANCE_VALUES);
   return candidate;
 }
 
-export function validateProjectAdoptionFinalizationAcceptanceConfig(source, candidate, production, secretNames) {
+export function validateProjectAdoptionFinalizationAcceptanceConfig(source, candidate, production) {
   const errors = validateDefaultOff(source, production);
   if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) {
     errors.push(`Operations ${PROJECT_ADOPTION_FINALIZATION_ACCEPTANCE_PROFILE} candidate must be a JSON object`);
     return errors;
   }
   let composed;
-  try { composed = buildProjectAlphaApiV2ViewerAcceptanceConfig(source, production, secretNames); }
+  try { composed = buildProjectAlphaApiV2AcceptanceConfig(source, production); }
   catch (error) { errors.push(error.message); return errors; }
-  errors.push(...validateProjectAlphaApiV2ViewerAcceptanceConfig(source, composed, production, secretNames));
+  errors.push(...validateProjectAlphaApiV2AcceptanceConfig(source, composed, production));
   const expected = structuredClone(composed);
   Object.assign(expected.vars, PROJECT_ADOPTION_FINALIZATION_ACCEPTANCE_VALUES);
   if (!isDeepStrictEqual(candidate, expected))
-    errors.push(`Operations ${PROJECT_ADOPTION_FINALIZATION_ACCEPTANCE_PROFILE} candidate drifted outside the exact finalization-only delta on the composed API-v2 plus Viewer window`);
+    errors.push(`Operations ${PROJECT_ADOPTION_FINALIZATION_ACCEPTANCE_PROFILE} candidate drifted outside the exact six-gate API-v2 plus finalization window`);
   for (const [flag, value] of Object.entries(PROJECT_ADOPTION_FINALIZATION_ACCEPTANCE_VALUES))
     if (candidate.vars?.[flag] !== value)
       errors.push(`Operations Project adoption finalization candidate must set ${flag}=${value}`);
@@ -104,16 +103,15 @@ export function run(argv = process.argv.slice(2), base = root) {
   };
   const source = load(PROJECT_ADOPTION_FINALIZATION_ACCEPTANCE_CONFIG.source);
   const production = load(PROJECT_ADOPTION_FINALIZATION_ACCEPTANCE_CONFIG.production);
-  const secretNames = load(PROJECT_ADOPTION_FINALIZATION_ACCEPTANCE_CONFIG.secretNames);
   if (!ignored(resolvedBase, PROJECT_ADOPTION_FINALIZATION_ACCEPTANCE_CONFIG.output))
     throw new Error(`${PROJECT_ADOPTION_FINALIZATION_ACCEPTANCE_CONFIG.output} must be ignored before candidate generation`);
-  const expected = buildProjectAdoptionFinalizationAcceptanceConfig(source, production, secretNames);
+  const expected = buildProjectAdoptionFinalizationAcceptanceConfig(source, production);
   const outputPath = path.join(resolvedBase, PROJECT_ADOPTION_FINALIZATION_ACCEPTANCE_CONFIG.output);
   canonicalWithin(resolvedBase, path.dirname(outputPath), path.dirname(PROJECT_ADOPTION_FINALIZATION_ACCEPTANCE_CONFIG.output));
   if (fs.existsSync(outputPath)) canonicalWithin(resolvedBase, outputPath, PROJECT_ADOPTION_FINALIZATION_ACCEPTANCE_CONFIG.output);
   const candidate = fs.existsSync(outputPath)
     ? readJson(outputPath, PROJECT_ADOPTION_FINALIZATION_ACCEPTANCE_CONFIG.output) : expected;
-  const errors = validateProjectAdoptionFinalizationAcceptanceConfig(source, candidate, production, secretNames);
+  const errors = validateProjectAdoptionFinalizationAcceptanceConfig(source, candidate, production);
   if (errors.length) throw new Error(`${PROJECT_ADOPTION_FINALIZATION_ACCEPTANCE_PROFILE} config is invalid or stale:\n${errors.map(error => `- ${error}`).join("\n")}`);
   if (mode === "--check") {
     if (!fs.existsSync(outputPath))
