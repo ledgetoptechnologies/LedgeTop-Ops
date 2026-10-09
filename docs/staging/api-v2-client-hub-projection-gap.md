@@ -9,7 +9,11 @@
   That suite is not a complete HTTP detail/render acceptance test. The broader
   HTTP run passed 41 cases; three incomplete native-mapping test fixtures
   failed closed. Corrected fixtures exposed a portal-alias context-stability
-  issue in two cases, which remains a local release gate rather than a pass.
+  issue in two cases. After preserving the established source display label,
+  all three affected HTTP cases pass; the mapping/context checks remain intact.
+  The isolated greater-than-500-root pagination regression also passes after
+  avoiding native per-row checks on databases without native mappings. A new
+  exact-revision CI run and live staging acceptance remain required.
 - The canonical-181 temporary-authority database test now executes an initial
   open/close and a second open/close, including exact audit/receipt history and
   atomic rollback on approval or grant conflicts, while preserving unrelated
@@ -62,10 +66,10 @@
 ## Current architecture
 
 - API-v2 inventory is immutable evidence; inventory sync alone must not create or mutate canonical Ops records, client access, Delivery records, or public links.
-- Client Hub is currently indexed from `pa_organizations`, `pa_clients`, and `pa_projects`. Do not write inventory observations directly to those legacy projections or to the disposable `client_hub_roots` cache.
+- Client Hub retains legacy projections and a disposable `client_hub_roots` cache. The native Directory path resolves approved canonical Ops records through active mappings; raw inventory observations must not be written directly into either legacy projections or the cache as an adoption shortcut.
 - The canonical Ops directory is `operations_directory_records`; canonical shared projects use `operations_shared_projects`.
 - Canonical mappings already exist: `project_alpha_active_directory_mappings` for directory records and `project_alpha_project_mappings` for projects.
-- Existing directory adoption reserves an explicitly selected Ops record and seals field decisions, but stops before activating a canonical mapping or applying a profile disposition.
+- Directory adoption reserves an explicitly selected Ops record and seals field decisions. Separate guarded acquisition and activation paths establish the canonical mapping; reservation or display alone does not activate it or grant portal access.
 - Existing project adoption rereads live Project Alpha inventory rather than starting from a selected, persisted API-v2 observation.
 
 ## Required staging implementation
@@ -73,7 +77,7 @@
 1. Expose bounded staff-only candidates from the conflict-free current observation views. Include the full source identity tuple, resource IDs/type, revision, authorization generation, and conflict/review status; do not infer identity from customer fields.
 2. Fetch current per-record detail under the dedicated scoped read capability, then let an authorized reviewer explicitly choose or create the corresponding Ops record and decide field-by-field what to adopt.
 3. Pin the review to current observation, detail revision/hash, binding, authorization generation, actor authority, local record version, and relationship state. Reject stale evidence and duplicate local↔remote mappings.
-4. Seal decisions durably, then use existing guarded acquisition/rebind and mapping-activation paths. Directory activation must prove `external_id` equals the canonical Ops record ID or use the guarded rebind workflow; never create a false active mapping.
+4. Seal decisions durably, then use existing guarded acquisition/rebind and mapping-activation paths. Enrollment mappings retain exact ID equality; acquired mappings may retain distinct immutable Ops `record_id` and PA `external_id` only through the exact acquisition/activation proof. Never infer an association from names or create a false active mapping.
 5. Project only approved canonical Ops records into the ordinary `business` Client Hub namespace. The separate `review` namespace is a display-only exception for already-sealed standalone-client comparisons: it is visible only to staff with effective `directory.profile.view` authority for the reviewed record (global, resource, assigned, business-area, or division scope, with deny precedence), is excluded from direct Client Hub detail/collection lookup, and can never establish canonical mapping, client invitation, portal access, service enrollment, Delivery access, or public-link authority. Keep existing public links separate and unchanged.
 6. Seed project adoption from the selected current observation, then keep its live detail/binding reread and existing canonical bind/activation checks.
 7. Add D1, route, browser, stale-evidence, conflict, idempotency, and rollback tests. Preserve the invariant that inventory sync alone changes no canonical or mapping rows.
