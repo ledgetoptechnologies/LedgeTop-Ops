@@ -144,3 +144,51 @@ test("default compiler accepts the genuine historical lineage without reconstruc
   const pairedRevoke = compileRetainedDirectoryAuthority(revokeValue, { root: path.resolve(import.meta.dirname, "..") });
   assertD1Envelope(pairedRevoke);
 });
+
+test("schema 2 reopens only the latest verified close and derives v5/v6 history guards", () => {
+  const firstOpen = compile(input());
+  const firstCloseInput = input("revoke");
+  const unrelated = { ...grant("unrelated-global-grant", "directory.profile.view", 0), scope_kind: "global", business_area_id: null };
+  firstCloseInput.grants.push(unrelated);
+  firstCloseInput.history.push({ ...history(unrelated, 1, 1, 20), recorded_at: "2026-10-08T12:20:00.000Z" },
+    { ...history(unrelated, 2, 0, 21), recorded_at: "2026-10-08T12:21:00.000Z" });
+  firstCloseInput.lineage.reactivationArtifact = firstOpen;
+  firstCloseInput.lineage.reactivationReceipt = firstOpen.receipt;
+  firstCloseInput.approval = { ...firstCloseInput.approval,
+    approvalId: "71000000-0000-4000-8000-000000000001", commandId: "71000000-0000-4000-8000-000000000002" };
+  const latestClose = compile(firstCloseInput);
+  const closedGrants = firstCloseInput.grants.map(row => ({ ...row, active: 0 }));
+  const closedHistory = [...firstCloseInput.history, ...closedGrants.filter(row => UUIDS.includes(row.id)).map((row, index) => ({
+    ...history(row, 4, 0, 10 + index), recorded_at: `2026-10-08T12:10:0${index}.000Z`,
+  }))];
+  const reopenInput = { ...structuredClone(firstCloseInput), schemaVersion: 2, phase: "reactivate",
+    grants: closedGrants, history: closedHistory,
+    generation: { ...firstCloseInput.generation, generation: 12 },
+    referenceCounts: { ...firstCloseInput.referenceCounts, native_directory_grant_history: 12 },
+    lineage: { latestCloseArtifact: latestClose, latestCloseReceipt: latestClose.receipt },
+    approval: { ...firstCloseInput.approval, approvalId: "72000000-0000-4000-8000-000000000001",
+      commandId: "72000000-0000-4000-8000-000000000002" } };
+  const reopened = compile(reopenInput);
+  assert.ok(reopened.statements.some(row => row.params.includes(5)));
+  const closeInput = { ...structuredClone(reopenInput), phase: "revoke",
+    grants: reopenInput.grants.map(row => UUIDS.includes(row.id) ? ({ ...row, active: 1 }) : row),
+    history: [...reopenInput.history, ...reopenInput.grants.filter(row => UUIDS.includes(row.id)).map((row, index) => ({
+      ...history({ ...row, active: 1 }, 5, 1, 13 + index), recorded_at: `2026-10-08T12:11:0${index}.000Z`,
+    }))],
+    generation: { ...reopenInput.generation, generation: 15 },
+    referenceCounts: { ...reopenInput.referenceCounts, native_directory_grant_history: 15 },
+    lineage: { ...reopenInput.lineage, reactivationArtifact: reopened, reactivationReceipt: reopened.receipt },
+    approval: { ...reopenInput.approval, approvalId: "73000000-0000-4000-8000-000000000001",
+      commandId: "73000000-0000-4000-8000-000000000002" } };
+  const closed = compile(closeInput);
+  assert.ok(closed.statements.some(row => row.params.includes(6)));
+  assert.deepEqual(closed.input.grants.find(row => row.id === unrelated.id), unrelated);
+  assert.equal(closed.input.history.filter(row => row.grant_id === unrelated.id).length, 2);
+  for (const [key, reused] of [["approvalId", reopened.approval.approval_id], ["commandId", reopened.receipt.command_id]]) {
+    const collision = structuredClone(closeInput); collision.approval[key] = reused;
+    assert.throws(() => compile(collision), /fresh phase identifiers required/);
+  }
+  const stale = structuredClone(reopenInput);
+  stale.history.splice(-1, 1); stale.referenceCounts.native_directory_grant_history--;
+  assert.throws(() => compile(stale), /complete retained grant history|complete latest retained history/);
+});

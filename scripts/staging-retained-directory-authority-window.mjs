@@ -109,7 +109,10 @@ function approval(clock, randomUUID) {
 }
 
 function exactPost(before, after, artifact) {
-  const ids = artifact.input.lineage.provisionArtifact.input.approval.grantIds;
+  let lineageArtifact = artifact;
+  while (lineageArtifact.input.schemaVersion === 2) lineageArtifact = lineageArtifact.input.lineage.latestCloseArtifact;
+  const ids = lineageArtifact.input.lineage?.provisionArtifact?.input?.approval?.grantIds
+    ?? lineageArtifact.input.approval?.grantIds ?? artifact.input.grants.map(row => row.id);
   for (const key of ["admission", "profile", "businessArea", "resourceScope", "projectGrant", "projectGeneration",
     "migrationNames", "predecessor"]) if (!same(after[key], before[key])) fail("independent postread drift");
   const expectedCounts = { ...before.referenceCounts,
@@ -130,7 +133,8 @@ function exactPost(before, after, artifact) {
     const expectedActive = artifact.input.phase === "reactivate" ? 1 : 0;
     if (!oldGrant || !same(current, { ...oldGrant, active: expectedActive })) fail("independent postread retained grant mismatch");
     const history = suffix.find(row => row.grant_id === id);
-    if (!history || history.grant_version !== (artifact.input.phase === "reactivate" ? 3 : 4)
+    const nextVersion = before.history.filter(row => row.grant_id === id).length + 1;
+    if (!history || history.grant_version !== nextVersion
       || history.active !== expectedActive || history.grant_generation !== before.generation.generation + index + 1
       || !["staff_id", "permission", "effect", "scope_kind", "business_area_id", "division_id", "resource_id"]
         .every(key => history[key] === oldGrant[key]) || typeof history.recorded_at !== "string"
@@ -148,19 +152,15 @@ function exactPhaseRows(rows, artifact) {
   }
 }
 
-function historicalLineage(op) {
-  const provision = op.readHistorical(op.root, "provision.json");
-  const revoke = op.readHistorical(op.root, "revoke-recovery-2026-10-08T21-51-25.947Z.json");
-  return { provisionArtifact: provision, revokeArtifact: revoke, provisionReceipt: provision.receipt, revokeReceipt: revoke.receipt };
-}
-
-async function build(db, phase, op, reactivation) {
-  const before = await op.snapshot(db), stamp = await op.clock(db), lineage = historicalLineage(op);
+async function build(db, phase, op, anchor, reactivation) {
+  const before = await op.snapshot(db), stamp = await op.clock(db);
+  if (!anchor?.receipt || anchor.input?.phase !== "revoke") fail("exact latest close artifact required");
+  const lineage = { latestCloseArtifact: anchor, latestCloseReceipt: anchor.receipt };
   if (phase === "revoke") {
     if (!reactivation?.receipt) fail("exact local reactivation artifact required");
     lineage.reactivationArtifact = reactivation; lineage.reactivationReceipt = reactivation.receipt;
   }
-  const input = { schemaVersion: 1, staging: STAGING_TARGET, phase, target: TARGET, ...before, lineage,
+  const input = { schemaVersion: 2, staging: STAGING_TARGET, phase, target: TARGET, ...before, lineage,
     approval: approval(stamp, op.randomUUID) };
   return { before, artifact: op.compile(input, { root: op.root }) };
 }
@@ -172,20 +172,20 @@ async function persistBeforeApply(op, artifact, filename) {
   return { evidence, path: saved };
 }
 
-export async function prepareRetainedDirectoryAuthority(configPath, dependencies = {}) {
-  const op = operations(dependencies);
+export async function prepareRetainedDirectoryAuthority(configPath, anchorPath, dependencies = {}) {
+  const op = operations(dependencies), anchor = op.readReactivation(op.root, anchorPath);
   return op.withBinding(configPath, async ({ db, target }) => {
     if (!same(target, STAGING_TARGET)) fail("trusted staging target mismatch");
-    const { artifact } = await build(db, "reactivate", op);
+    const { artifact } = await build(db, "reactivate", op, anchor);
     return { mode: "prepare-readonly", artifact, mutationsPerformed: false };
   }, dependencies);
 }
 
-export async function openRetainedDirectoryAuthority(configPath, dependencies = {}) {
-  const op = operations(dependencies);
+export async function openRetainedDirectoryAuthority(configPath, anchorPath, dependencies = {}) {
+  const op = operations(dependencies), anchor = op.readReactivation(op.root, anchorPath);
   return op.withBinding(configPath, async ({ db, target }) => {
     if (!same(target, STAGING_TARGET)) fail("trusted staging target mismatch");
-    const { before, artifact } = await build(db, "reactivate", op);
+    const { before, artifact } = await build(db, "reactivate", op, anchor);
     const saved = await persistBeforeApply(op, artifact, "provision.json");
     let outcome;
     try {
@@ -204,7 +204,8 @@ export async function closeRetainedDirectoryAuthority(configPath, reactivationPa
   if (reactivation?.input?.phase !== "reactivate") fail("exact private reactivation artifact required");
   return op.withBinding(configPath, async ({ db, target }) => {
     if (!same(target, STAGING_TARGET)) fail("trusted staging target mismatch");
-    const { before, artifact } = await build(db, "revoke", op, reactivation);
+    const anchor = reactivation.input.lineage.latestCloseArtifact;
+    const { before, artifact } = await build(db, "revoke", op, anchor, reactivation);
     const revokeFilename = `revoke-recovery-${artifact.input.approval.executedAt.replace(/:/g, "-")}.json`;
     const saved = await persistBeforeApply(op, artifact, revokeFilename);
     let outcome;
@@ -246,10 +247,9 @@ export async function main(argv = process.argv.slice(2), dependencies = {}) {
   const values = argv[0] === "--config" ? ["prepare-readonly", ...argv] : argv;
   const [mode = "prepare-readonly", configFlag, configPath, artifactFlag, artifactPath] = values;
   if (configFlag !== "--config" || !configPath) fail("usage: [prepare-readonly|apply|close|reconcile] --config <path> [--artifact <private-retained-artifact.json>]");
-  if ((mode === "prepare-readonly" || mode === "apply") && values.length !== 3) fail("unexpected CLI arguments");
-  if ((mode === "close" || mode === "reconcile") && values.length !== 5) fail("unexpected CLI arguments");
-  if (mode === "prepare-readonly") return prepareRetainedDirectoryAuthority(configPath, dependencies);
-  if (mode === "apply") return openRetainedDirectoryAuthority(configPath, dependencies);
+  if (["prepare-readonly", "apply", "close", "reconcile"].includes(mode) && values.length !== 5) fail("unexpected CLI arguments");
+  if (mode === "prepare-readonly" && artifactFlag === "--artifact" && artifactPath) return prepareRetainedDirectoryAuthority(configPath, artifactPath, dependencies);
+  if (mode === "apply" && artifactFlag === "--artifact" && artifactPath) return openRetainedDirectoryAuthority(configPath, artifactPath, dependencies);
   if (mode === "close" && artifactFlag === "--artifact" && artifactPath && values.length === 5) return closeRetainedDirectoryAuthority(configPath, artifactPath, dependencies);
   if (mode === "reconcile" && artifactFlag === "--artifact" && artifactPath && values.length === 5) return reconcileSavedRetainedDirectoryAuthority(configPath, artifactPath, dependencies);
   fail("explicit apply or close mode required");

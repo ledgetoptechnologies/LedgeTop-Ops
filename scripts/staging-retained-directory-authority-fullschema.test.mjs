@@ -4,6 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 import test from "node:test";
 import { createRequire } from "node:module";
+import { DatabaseSync } from "node:sqlite";
 
 import {
   RETAINED_DIRECTORY_TARGET as target, REVIEWED_REFERENCE_BASELINE,
@@ -26,6 +27,37 @@ const canonical = value => Array.isArray(value) ? value.map(canonical) : value &
 const json = value => JSON.stringify(canonical(value));
 const all = async (db, sql, ...params) => (await db.prepare(sql).bind(...params).all()).results;
 const first = (db, sql, ...params) => db.prepare(sql).bind(...params).first();
+function nodeSqliteD1() {
+  const sqlite = new DatabaseSync(":memory:");
+  const wrap = (sql, params = []) => ({
+    sql, params,
+    bind(...values) { return wrap(sql, values); },
+    async run() {
+      try {
+        const statement = sqlite.prepare(sql);
+        if (statement.columns().length) return { success: true, results: statement.all(...params).map(row => ({ ...row })),
+          meta: { changes: 0, last_row_id: 0 } };
+        const result = statement.run(...params);
+        return { success: true, results: [], meta: { changes: Number(result.changes), last_row_id: Number(result.lastInsertRowid) } };
+      } catch (error) { throw error; }
+    },
+    async all() { return { success: true, results: sqlite.prepare(sql).all(...params).map(row => ({ ...row })) }; },
+    async first(column) { const row = sqlite.prepare(sql).get(...params); return row === undefined ? null : column ? row[column] : { ...row }; },
+  });
+  const adapter = { prepare: wrap, withSession() { return adapter; }, async batch(statements) {
+    sqlite.exec("BEGIN IMMEDIATE");
+    try {
+      const results = [];
+      for (const [index, statement] of statements.entries()) {
+        try { results.push(await statement.run()); }
+        catch (error) { throw new Error(`node:sqlite batch statement ${index} failed: ${error.message}`, { cause: error }); }
+      }
+      sqlite.exec("COMMIT");
+      return results;
+    } catch (error) { sqlite.exec("ROLLBACK"); throw error; }
+  }, close() { sqlite.close(); } };
+  return adapter;
+}
 const nowWindow = (offset = 0) => {
   const now = Date.now() + offset;
   return { issuedAt: new Date(now - 60_000).toISOString(), expiresAt: new Date(now + 3_600_000).toISOString(), executedAt: new Date(now).toISOString() };
@@ -158,6 +190,22 @@ async function seed(db) {
   return { provision, revoke };
 }
 
+async function seedUnrelatedGrantHistory(db) {
+  const rows = [
+    { id: "retained-unrelated-global", permission: "directory.profile.view", scope: "global", area: null },
+    { id: "retained-unrelated-other-area", permission: "directory.profile.view", scope: "business_area", area: "retained-unrelated-area" },
+  ];
+  await db.prepare("INSERT INTO native_business_areas(id,name,active) VALUES(?,?,1)")
+    .bind("retained-unrelated-area", "Unrelated retained area").run();
+  for (const row of rows) {
+    await db.prepare(`INSERT INTO native_directory_grants
+      (id,staff_id,permission,effect,scope_kind,business_area_id,active,granted_by) VALUES(?,?,?,'allow',?,?,1,?)`)
+      .bind(row.id, target.staffId, row.permission, row.scope, row.area, target.staffId).run();
+    await db.prepare("UPDATE native_directory_grants SET active=0 WHERE id=? AND active=1").bind(row.id).run();
+  }
+  return rows.map(row => row.id);
+}
+
 async function makeInput(db, lineage, phase = "reactivate", approvalSequence = 1, window = nowWindow()) {
   const admission = await first(db, "SELECT * FROM native_staff_admissions WHERE staff_id=?", target.staffId);
   const profile = await first(db, "SELECT * FROM native_staff_profiles WHERE staff_id=?", target.staffId);
@@ -181,6 +229,18 @@ async function makeInput(db, lineage, phase = "reactivate", approvalSequence = 1
     approval: { approvalId: `40000000-0000-4000-8000-${String(approvalSequence).padStart(12, "0")}`,
       commandId: `50000000-0000-4000-8000-${String(approvalSequence).padStart(12, "0")}`, ...window } };
   return input;
+}
+
+async function makeSchema2Input(db, latestClose, phase, approvalSequence, reactivation) {
+  let rootClose = latestClose;
+  while (rootClose.input.schemaVersion === 2) rootClose = rootClose.input.lineage.latestCloseArtifact;
+  const value = await makeInput(db, { provision: rootClose.input.lineage.provisionArtifact,
+    revoke: rootClose.input.lineage.revokeArtifact }, "reactivate", approvalSequence);
+  value.schemaVersion = 2;
+  value.phase = phase;
+  value.lineage = { latestCloseArtifact: latestClose, latestCloseReceipt: latestClose.receipt,
+    ...(phase === "revoke" ? { reactivationArtifact: reactivation, reactivationReceipt: reactivation.receipt } : {}) };
+  return value;
 }
 
 async function recoverAndAcknowledgeRetainedCreate(db) {
@@ -324,4 +384,79 @@ test("a canonical extra pending Directory command rejects reactivation in an iso
     await assert.rejects(applyRetainedDirectoryAuthority(db, artifact, { target: STAGING_TARGET }));
     assert.equal(await first(db, "SELECT approval_id FROM native_staff_bootstrap_approvals WHERE approval_id=?", artifact.approval.approval_id), null);
   } finally { await mf.dispose(); }
+}, 120_000);
+
+test("node:sqlite executes canonical 181 authority batches atomically when workerd is unavailable", async () => {
+  const db = nodeSqliteD1();
+  try {
+    await migrate(db);
+    const lineage = await seed(db);
+    const unrelatedIds = await seedUnrelatedGrantHistory(db);
+    const unrelatedBefore = await all(db, `SELECT * FROM native_directory_grants WHERE id IN (?,?) ORDER BY id`, ...unrelatedIds);
+    const unrelatedHistoryBefore = await all(db, `SELECT * FROM native_directory_grant_history WHERE grant_id IN (?,?) ORDER BY grant_id,grant_version`, ...unrelatedIds);
+    assert.equal(unrelatedHistoryBefore.length, 4);
+    assert.equal((await first(db, "SELECT count(*) count FROM native_directory_grant_history WHERE business_area_id=?", target.areaId)).count, 6);
+    const activation = compileRetainedDirectoryAuthority(await makeInput(db, lineage, "reactivate", 20), { root });
+    await applyRetainedDirectoryAuthority(db, activation, { target: STAGING_TARGET });
+    assert.deepEqual((await all(db, "SELECT active FROM native_directory_grants WHERE id IN (?,?,?) ORDER BY id", ...grantIds)).map(row => row.active), [1, 1, 1]);
+    const receiptCount = (await first(db, "SELECT count(*) count FROM native_staff_bootstrap_receipts WHERE command_id=?", activation.receipt.command_id)).count;
+    assert.equal(receiptCount, 1);
+
+    await recoverAndAcknowledgeRetainedCreate(db);
+    lineage.reactivation = activation;
+    const initialClose = compileRetainedDirectoryAuthority(await makeInput(db, lineage, "revoke", 21), { root });
+    await applyRetainedDirectoryAuthority(db, initialClose, { target: STAGING_TARGET });
+    assert.deepEqual((await all(db, "SELECT active FROM native_directory_grants WHERE id IN (?,?,?) ORDER BY id", ...grantIds)).map(row => row.active), [0, 0, 0]);
+    assert.equal((await first(db, "SELECT count(*) count FROM native_directory_grant_history WHERE business_area_id=?", target.areaId)).count, 12);
+
+    const reopened = compileRetainedDirectoryAuthority(await makeSchema2Input(db, initialClose, "reactivate", 22), { root });
+    await applyRetainedDirectoryAuthority(db, reopened, { target: STAGING_TARGET });
+    assert.deepEqual((await all(db, "SELECT grant_version,active FROM native_directory_grant_history WHERE grant_id=? ORDER BY grant_version", grantIds[0])),
+      [{ grant_version: 1, active: 1 }, { grant_version: 2, active: 0 }, { grant_version: 3, active: 1 },
+        { grant_version: 4, active: 0 }, { grant_version: 5, active: 1 }]);
+    assert.equal((await first(db, "SELECT count(*) count FROM native_directory_grant_history WHERE business_area_id=?", target.areaId)).count, 15);
+
+    const repeatedClose = compileRetainedDirectoryAuthority(await makeSchema2Input(db, initialClose, "revoke", 23, reopened), { root });
+    await applyRetainedDirectoryAuthority(db, repeatedClose, { target: STAGING_TARGET });
+    assert.deepEqual((await all(db, "SELECT grant_version,active FROM native_directory_grant_history WHERE grant_id=? ORDER BY grant_version", grantIds[0])),
+      [{ grant_version: 1, active: 1 }, { grant_version: 2, active: 0 }, { grant_version: 3, active: 1 },
+        { grant_version: 4, active: 0 }, { grant_version: 5, active: 1 }, { grant_version: 6, active: 0 }]);
+    assert.equal((await first(db, "SELECT count(*) count FROM native_directory_grant_history WHERE business_area_id=?", target.areaId)).count, 18);
+    assert.equal((await first(db, "SELECT generation FROM native_directory_grant_generations WHERE staff_id=?", target.staffId)).generation,
+      repeatedClose.input.generation.generation + 3);
+    assert.equal((await first(db, "SELECT revoked_at FROM native_staff_bootstrap_approvals WHERE approval_id=?", lineage.provision.approval.approval_id)).revoked_at,
+      lineage.revoke.receipt.executed_at);
+    assert.equal((await first(db, "SELECT revoked_at FROM native_staff_bootstrap_approvals WHERE approval_id=?", activation.approval.approval_id)).revoked_at,
+      initialClose.input.approval.executedAt);
+    assert.equal((await first(db, "SELECT revoked_at FROM native_staff_bootstrap_approvals WHERE approval_id=?", reopened.approval.approval_id)).revoked_at,
+      repeatedClose.input.approval.executedAt);
+    for (const artifact of [lineage.provision, lineage.revoke, activation, initialClose, reopened, repeatedClose]) {
+      assert.deepEqual(await first(db, "SELECT * FROM native_staff_bootstrap_receipts WHERE command_id=?", artifact.receipt.command_id), artifact.receipt);
+    }
+    assert.deepEqual(await all(db, `SELECT * FROM native_directory_grants WHERE id IN (?,?) ORDER BY id`, ...unrelatedIds), unrelatedBefore);
+    assert.deepEqual(await all(db, `SELECT * FROM native_directory_grant_history WHERE grant_id IN (?,?) ORDER BY grant_id,grant_version`, ...unrelatedIds), unrelatedHistoryBefore);
+
+    const nextOpen = compileRetainedDirectoryAuthority(await makeSchema2Input(db, repeatedClose, "reactivate", 24), { root });
+    await applyRetainedDirectoryAuthority(db, nextOpen, { target: STAGING_TARGET });
+    const racedClose = compileRetainedDirectoryAuthority(await makeSchema2Input(db, repeatedClose, "revoke", 25, nextOpen), { root });
+    await db.prepare("UPDATE native_staff_bootstrap_approvals SET revoked_at=? WHERE approval_id=? AND revoked_at IS NULL")
+      .bind(new Date(Date.now()).toISOString(), nextOpen.approval.approval_id).run();
+    await assert.rejects(applyRetainedDirectoryAuthority(db, racedClose, { target: STAGING_TARGET }));
+    assert.equal(await first(db, "SELECT approval_id FROM native_staff_bootstrap_approvals WHERE approval_id=?", racedClose.approval.approval_id), null);
+    assert.equal(await first(db, "SELECT command_id FROM native_staff_bootstrap_receipts WHERE command_id=?", racedClose.receipt.command_id), null);
+    assert.deepEqual((await all(db, "SELECT active FROM native_directory_grants WHERE id IN (?,?,?) ORDER BY id", ...grantIds)).map(row => row.active), [1, 1, 1]);
+  } finally { db.close(); }
+
+  const racedDb = nodeSqliteD1();
+  try {
+    await migrate(racedDb);
+    const lineage = await seed(racedDb);
+    const raced = compileRetainedDirectoryAuthority(await makeInput(racedDb, lineage, "reactivate", 21), { root });
+    await racedDb.prepare(`CREATE TRIGGER retained_node_sqlite_race BEFORE UPDATE ON native_directory_grants
+      WHEN OLD.id='10000000-0000-4000-8000-000000000002' BEGIN SELECT RAISE(ABORT,'retained node sqlite race'); END`).run();
+    await assert.rejects(applyRetainedDirectoryAuthority(racedDb, raced, { target: STAGING_TARGET }), /retained node sqlite race/);
+    assert.equal(await first(racedDb, "SELECT command_id FROM native_staff_bootstrap_receipts WHERE command_id=?", raced.receipt.command_id), null);
+    assert.equal(await first(racedDb, "SELECT approval_id FROM native_staff_bootstrap_approvals WHERE approval_id=?", raced.approval.approval_id), null);
+    assert.deepEqual((await all(racedDb, "SELECT active FROM native_directory_grants WHERE id IN (?,?,?) ORDER BY id", ...grantIds)).map(row => row.active), [0, 0, 0]);
+  } finally { racedDb.close(); }
 }, 120_000);

@@ -114,6 +114,42 @@ function verifiedLegacyArtifact(value, root, label, historicalVerifier) {
   return expected;
 }
 
+function targetGrantIds(artifact) {
+  return artifact?.input?.schemaVersion === 2
+    ? targetGrantIds(artifact.input.lineage.latestCloseArtifact)
+    : artifact?.input?.approval?.grantIds ?? artifact?.input?.lineage?.provisionArtifact?.input?.approval?.grantIds;
+}
+
+function verifiedLatestClose(value, root, historicalVerifier) {
+  if (!value?.input || value.input.phase !== "revoke") fail("latest immutable close artifact required");
+  const expected = value.input.schemaVersion === 1
+    ? compileRetainedDirectoryAuthority(value.input, { root, historicalVerifier })
+    : compileRetainedDirectoryAuthority(value.input, { root, historicalVerifier });
+  if (!same(value, expected)) fail("latest immutable close artifact changed");
+  return expected;
+}
+
+function auditRows(artifact) {
+  if (artifact.input.schemaVersion === 1) {
+    const rows = [
+      [{ ...artifact.input.lineage.provisionArtifact.approval,
+        revoked_at: artifact.input.lineage.revokeReceipt.executed_at }, artifact.input.lineage.provisionReceipt],
+      [artifact.input.lineage.revokeArtifact.approval, artifact.input.lineage.revokeReceipt],
+    ];
+    if (artifact.input.phase === "revoke") rows.push([
+      { ...artifact.input.lineage.reactivationArtifact.approval, revoked_at: artifact.input.approval.executedAt },
+      artifact.input.lineage.reactivationReceipt,
+    ]);
+    rows.push([artifact.approval, artifact.receipt]);
+    return rows;
+  }
+  return [...auditRows(artifact.input.lineage.latestCloseArtifact),
+    ...(artifact.input.phase === "revoke" ? [[
+      { ...artifact.input.lineage.reactivationArtifact.approval, revoked_at: artifact.input.approval.executedAt },
+      artifact.input.lineage.reactivationReceipt,
+    ]] : []), [artifact.approval, artifact.receipt]];
+}
+
 export function verifyHistoricalNativeOnlyArtifact(input) {
   const artifact = input?.__artifact ?? input;
   if (!artifact || !artifact.input || !artifact.approval || !artifact.receipt) fail("historical artifact shape");
@@ -140,13 +176,17 @@ function validate(raw, root, historicalVerifier) {
   exact(raw, ["schemaVersion", "staging", "phase", "target", "migrationNames", "admission", "profile", "generation", "projectGeneration", "businessArea", "resourceScope", "projectGrant", "grants", "history", "referenceCounts", "predecessor", "lineage", "approval"], "input");
   const input = structuredClone(raw);
   exact(input, ["schemaVersion", "staging", "phase", "target", "migrationNames", "admission", "profile", "generation", "projectGeneration", "businessArea", "resourceScope", "projectGrant", "grants", "history", "referenceCounts", "predecessor", "lineage", "approval"], "input");
-  if (input.schemaVersion !== 1 || !["reactivate", "revoke"].includes(input.phase) || !same(input.staging, STAGING_TARGET)
+  if (![1, 2].includes(input.schemaVersion) || !["reactivate", "revoke"].includes(input.phase) || !same(input.staging, STAGING_TARGET)
     || !same(input.target, RETAINED_DIRECTORY_TARGET)) fail("exact staging retained target required");
   if (!same(input.migrationNames, reviewedMigrations(root ?? ROOT))) fail("exact canonical 181 migration ledger required");
   exact(input.referenceCounts, Object.keys(REVIEWED_REFERENCE_BASELINE), "reference baseline");
+  const expectedPriorVersion = input.schemaVersion === 1 ? (input.phase === "reactivate" ? 2 : 3) : null;
   const expectedReferences = { ...REVIEWED_REFERENCE_BASELINE,
     native_directory_grant_history: input.phase === "reactivate" ? 6 : 9 };
-  if (!same(input.referenceCounts, expectedReferences)) fail("exact reviewed reference baseline required");
+  if (input.schemaVersion === 1 ? !same(input.referenceCounts, expectedReferences)
+    : !same({ ...input.referenceCounts, native_directory_grant_history: REVIEWED_REFERENCE_BASELINE.native_directory_grant_history }, REVIEWED_REFERENCE_BASELINE)) {
+    fail("exact reviewed reference baseline required");
+  }
   exact(input.resourceScope, ["record_id", "scope_kind", "business_area_id", "division_id", "active"], "resource scope");
   exact(input.admission, ADMISSION_COLUMNS, "admission"); exact(input.profile, PROFILE_COLUMNS, "profile");
   exact(input.generation, GENERATION_COLUMNS, "generation"); exact(input.businessArea, AREA_COLUMNS, "business area");
@@ -173,7 +213,9 @@ function validate(raw, root, historicalVerifier) {
   if (input.businessArea.id !== input.target.areaId || input.businessArea.active !== 1) fail("exact active retained area required");
   if (!Array.isArray(input.grants) || !Array.isArray(input.history)) fail("complete staff grant snapshot required");
   input.grants.forEach(row => exact(row, GRANT_COLUMNS, "grant")); input.history.forEach(row => exact(row, HISTORY_COLUMNS, "history"));
-  const targetIds = input.lineage?.provisionArtifact?.input?.approval?.grantIds;
+  const targetIds = input.schemaVersion === 1
+    ? input.lineage?.provisionArtifact?.input?.approval?.grantIds
+    : targetGrantIds(input.lineage?.latestCloseArtifact);
   if (!Array.isArray(targetIds) || targetIds.length !== 3) fail("three prior grant ids required");
   const ordered = targetIds.map(id => input.grants.find(row => row.id === id));
   if (ordered.some(row => !row)) fail("complete retained target grant snapshot required");
@@ -183,12 +225,38 @@ function validate(raw, root, historicalVerifier) {
     || row.active !== (input.phase === "reactivate" ? 0 : 1))) fail("exact retained grant state required");
   for (const grant of ordered) {
     const rows = input.history.filter(row => row.grant_id === grant.id).sort((a, b) => a.grant_version - b.grant_version);
-    const expectedVersions = input.phase === "reactivate" ? [1, 2] : [1, 2, 3];
+    const lastVersion = expectedPriorVersion ?? rows.length;
+    const expectedVersions = Array.from({ length: lastVersion }, (_, index) => index + 1);
     if (rows.length !== expectedVersions.length || rows.some((row, index) => row.grant_version !== expectedVersions[index]
       || row.active !== (index % 2 === 0 ? 1 : 0)
       || !["staff_id", "permission", "effect", "scope_kind", "business_area_id", "division_id", "resource_id"].every(key => row[key] === grant[key])
       || !Number.isSafeInteger(row.grant_generation) || typeof row.recorded_at !== "string" || !TS.test(row.recorded_at))) fail("complete retained grant history required");
   }
+  if (input.schemaVersion === 2) {
+    exact(input.lineage, input.phase === "reactivate" ? ["latestCloseArtifact", "latestCloseReceipt"]
+      : ["latestCloseArtifact", "latestCloseReceipt", "reactivationArtifact", "reactivationReceipt"], "lineage");
+    const close = verifiedLatestClose(input.lineage.latestCloseArtifact, root, historicalVerifier);
+    if (!same(close.receipt, input.lineage.latestCloseReceipt) || !same(targetGrantIds(close), ordered.map(row => row.id))) fail("latest immutable close lineage mismatch");
+    const versions = ordered.map(grant => input.history.filter(row => row.grant_id === grant.id).length);
+    let closeResult; try { closeResult = JSON.parse(close.receipt.result_json); } catch { fail("latest close receipt result JSON"); }
+    const targetHistoryCount = input.history.filter(row => targetIds.includes(row.grant_id)).length;
+    const closeIds = targetGrantIds(close);
+    const closeVersion = close.input.history.filter(row => closeIds.includes(row.grant_id)).length / 3 + 1;
+    if (new Set(versions).size !== 1 || versions[0] < 4 || versions[0] % 2 !== (input.phase === "reactivate" ? 0 : 1)
+      || versions[0] !== (input.phase === "reactivate" ? closeVersion : closeVersion + 1)
+      || targetHistoryCount !== versions[0] * ordered.length
+      || input.referenceCounts.native_directory_grant_history !== targetHistoryCount
+      || closeResult.phase !== "revoke" || closeResult.active !== 0 || closeResult.generation !== close.input.generation.generation + 3
+      || !same(closeResult.grantIds, targetIds)
+      || input.generation.generation !== closeResult.generation + (input.phase === "reactivate" ? 0 : 3)) fail("complete latest retained history required");
+    if (input.phase === "revoke") {
+      const prior = input.lineage.reactivationArtifact;
+      if (!prior || prior.input?.schemaVersion !== 2 || prior.input?.phase !== "reactivate"
+        || !same(prior, compileRetainedDirectoryAuthority(prior.input, { root, historicalVerifier }))
+        || !same(prior.receipt, input.lineage.reactivationReceipt)
+        || !same(prior.input.lineage.latestCloseArtifact, close)) fail("immutable reactivation lineage required");
+    }
+  } else {
   exact(input.lineage, input.phase === "reactivate" ? ["provisionArtifact", "revokeArtifact", "provisionReceipt", "revokeReceipt"]
     : ["provisionArtifact", "revokeArtifact", "provisionReceipt", "revokeReceipt", "reactivationArtifact", "reactivationReceipt"], "lineage");
   const provision = verifiedLegacyArtifact(input.lineage.provisionArtifact, root, "prior provision", historicalVerifier);
@@ -199,6 +267,7 @@ function validate(raw, root, historicalVerifier) {
     || provision.input.admission?.staff_id !== input.target.staffId || provision.input.businessArea?.id !== input.target.areaId
     || !same(provision.input.staging, STAGING_TARGET) || !same(revoke.input.staging, STAGING_TARGET)
     || !same(provision.input.approval.grantIds, ordered.map(row => row.id))) fail("prior immutable provision/revoke lineage mismatch");
+  }
   exact(input.approval, ["approvalId", "commandId", "issuedAt", "expiresAt", "executedAt"], "approval");
   if (![input.approval.approvalId, input.approval.commandId].every(value => typeof value === "string" && UUID.test(value))
     || input.approval.approvalId === input.approval.commandId || ![input.approval.issuedAt, input.approval.expiresAt, input.approval.executedAt].every(value => TS.test(value))
@@ -206,9 +275,14 @@ function validate(raw, root, historicalVerifier) {
     || Date.parse(input.approval.expiresAt) - Date.parse(input.approval.issuedAt) > 4 * 3600_000
     || Date.parse(input.approval.executedAt) < Date.parse(input.approval.issuedAt)
     || Date.parse(input.approval.executedAt) >= Date.parse(input.approval.expiresAt)) fail("bounded fresh approval required");
-  const historicalIds = [provision.approval.approval_id, provision.receipt.command_id, revoke.approval.approval_id, revoke.receipt.command_id];
+  const historicalIds = input.schemaVersion === 1
+    ? [input.lineage.provisionArtifact.approval.approval_id, input.lineage.provisionReceipt.command_id,
+      input.lineage.revokeArtifact.approval.approval_id, input.lineage.revokeReceipt.command_id]
+    : [...auditRows(input.lineage.latestCloseArtifact).flatMap(([approval, receipt]) => [approval.approval_id, receipt.command_id]),
+      ...(input.phase === "revoke" ? [input.lineage.reactivationArtifact.approval.approval_id,
+        input.lineage.reactivationReceipt.command_id] : [])];
   if (historicalIds.includes(input.approval.approvalId) || historicalIds.includes(input.approval.commandId)) fail("fresh phase identifiers required");
-  if (input.phase === "revoke") {
+  if (input.schemaVersion === 1 && input.phase === "revoke") {
     const prior = input.lineage.reactivationArtifact;
     if (!prior || prior.input?.phase !== "reactivate" || !same(prior, compileRetainedDirectoryAuthority(prior.input, { root, historicalVerifier }))
       || !same(prior.receipt, input.lineage.reactivationReceipt)) fail("immutable reactivation lineage required");
@@ -219,7 +293,14 @@ function validate(raw, root, historicalVerifier) {
 export function compileRetainedDirectoryAuthority(raw, { root, historicalVerifier = verifyHistoricalNativeOnlyArtifact } = {}) {
   const { input, grants } = validate(raw, root, historicalVerifier);
   const activating = input.phase === "reactivate";
-  const compactLineage = {
+  const compactLineage = input.schemaVersion === 2 ? {
+    latestClose: { approvalId: input.lineage.latestCloseArtifact.approval.approval_id,
+      commandId: input.lineage.latestCloseReceipt.command_id, artifactSha256: sha(json(input.lineage.latestCloseArtifact)),
+      receiptSha256: sha(json(input.lineage.latestCloseReceipt)) },
+    ...(activating ? {} : { reactivation: { approvalId: input.lineage.reactivationArtifact.approval.approval_id,
+      commandId: input.lineage.reactivationReceipt.command_id, artifactSha256: sha(json(input.lineage.reactivationArtifact)),
+      receiptSha256: sha(json(input.lineage.reactivationReceipt)) } }),
+  } : {
     provision: { approvalId: input.lineage.provisionArtifact.approval.approval_id,
       commandId: input.lineage.provisionReceipt.command_id, artifactSha256: sha(json(input.lineage.provisionArtifact)),
       receiptSha256: sha(json(input.lineage.provisionReceipt)) },
@@ -237,7 +318,9 @@ export function compileRetainedDirectoryAuthority(raw, { root, historicalVerifie
     referenceCounts: input.referenceCounts, predecessor: input.predecessor, lineage: compactLineage, approval: input.approval }), planSha = sha(plan);
   if (Buffer.byteLength(plan) > MAX_PLAN_BYTES) fail("bounded canonical plan required");
   const verification = json({ staging: input.staging, target: input.target, migrationCount: 181, migrationFinal: input.migrationNames.at(-1), referenceBaseline: REVIEWED_REFERENCE_BASELINE,
-    priorProvisionReceiptSha256: sha(json(input.lineage.provisionReceipt)), priorRevokeReceiptSha256: sha(json(input.lineage.revokeReceipt)) });
+    ...(input.schemaVersion === 1 ? { priorProvisionReceiptSha256: sha(json(input.lineage.provisionReceipt)), priorRevokeReceiptSha256: sha(json(input.lineage.revokeReceipt)) }
+      : { latestCloseReceiptSha256: sha(json(input.lineage.latestCloseReceipt)),
+        priorGrantVersion: input.history.filter(row => row.grant_id === grants[0].id).length }) });
   const result = json({ phase: input.phase, grantIds: grants.map(row => row.id), generation: input.generation.generation + 3, active: activating ? 1 : 0 });
   const approval = { approval_id: input.approval.approvalId, canonical_plan_json: plan, canonical_plan_sha256: planSha,
     approved_operator_staff_id: input.target.staffId, approved_operator_access_subject: input.admission.bound_access_subject,
@@ -289,14 +372,14 @@ export function compileRetainedDirectoryAuthority(raw, { root, historicalVerifie
       AND NOT EXISTS(SELECT 1 FROM native_workforce_time_beneficiary_selection_issuer_delegations WHERE actor_staff_id=? OR beneficiary_staff_id=?)
       AND NOT EXISTS(SELECT 1 FROM native_workforce_time_beneficiary_selection_lifecycle_delegations WHERE actor_staff_id=? OR beneficiary_staff_id=?)`,
     Array(14).fill(input.target.staffId), "unrelated-authority"),
-    guard(input.phase === "reactivate"
+    guard(input.phase === "reactivate" && input.schemaVersion === 1
       ? `EXISTS(SELECT 1 FROM project_alpha_directory_unsettled_commands u JOIN project_alpha_directory_outbox o ON o.command_id=u.command_id
           WHERE u.command_id=? AND json_extract(o.origin_snapshot_json,'$.actorId')=?)
         AND NOT EXISTS(SELECT 1 FROM project_alpha_directory_unsettled_commands u JOIN project_alpha_directory_outbox o ON o.command_id=u.command_id
           WHERE json_extract(o.origin_snapshot_json,'$.actorId')=? AND u.command_id<>?)`
       : `NOT EXISTS(SELECT 1 FROM project_alpha_directory_unsettled_commands u JOIN project_alpha_directory_outbox o ON o.command_id=u.command_id
           WHERE json_extract(o.origin_snapshot_json,'$.actorId')=?)`,
-    input.phase === "reactivate"
+    input.phase === "reactivate" && input.schemaVersion === 1
       ? [input.target.predecessorCommandId, input.target.staffId, input.target.staffId, input.target.predecessorCommandId]
       : [input.target.staffId], "directory-unsettled"),
     guard("NOT EXISTS(SELECT 1 FROM project_alpha_project_v2_live_recovery_authorizations WHERE actor_staff_id=?)",
@@ -304,12 +387,16 @@ export function compileRetainedDirectoryAuthority(raw, { root, historicalVerifie
     guard("julianday(?)<=julianday('now') AND julianday(?)>julianday('now') AND julianday(?)<=julianday('now') AND julianday(?)>=julianday('now','-5 minutes')",
       [input.approval.issuedAt, input.approval.expiresAt, input.approval.executedAt, input.approval.executedAt], "expiry"),
     guard("NOT EXISTS(SELECT 1 FROM native_staff_bootstrap_approvals WHERE approval_id=?) AND NOT EXISTS(SELECT 1 FROM native_staff_bootstrap_receipts WHERE command_id=?)", [approval.approval_id, receipt.command_id], "unused-packet"),
-    equality("native_staff_bootstrap_approvals", APPROVAL_COLUMNS,
+    ...(input.schemaVersion === 1 ? [equality("native_staff_bootstrap_approvals", APPROVAL_COLUMNS,
       [{ ...input.lineage.provisionArtifact.approval, revoked_at: input.lineage.revokeReceipt.executed_at }],
       "approval_id=?", [input.lineage.provisionArtifact.approval.approval_id]),
     equality("native_staff_bootstrap_approvals", APPROVAL_COLUMNS, [input.lineage.revokeArtifact.approval], "approval_id=?", [input.lineage.revokeArtifact.approval.approval_id]),
     equality("native_staff_bootstrap_receipts", RECEIPT_COLUMNS, [input.lineage.provisionReceipt], "command_id=?", [input.lineage.provisionReceipt.command_id]),
-    equality("native_staff_bootstrap_receipts", RECEIPT_COLUMNS, [input.lineage.revokeReceipt], "command_id=?", [input.lineage.revokeReceipt.command_id]));
+    equality("native_staff_bootstrap_receipts", RECEIPT_COLUMNS, [input.lineage.revokeReceipt], "command_id=?", [input.lineage.revokeReceipt.command_id])]
+      : auditRows(input.lineage.latestCloseArtifact).flatMap(([priorApproval, priorReceipt]) => [
+        equality("native_staff_bootstrap_approvals", APPROVAL_COLUMNS, [priorApproval], "approval_id=?", [priorApproval.approval_id]),
+        equality("native_staff_bootstrap_receipts", RECEIPT_COLUMNS, [priorReceipt], "command_id=?", [priorReceipt.command_id]),
+      ])));
   if (!activating) statements.push(equality("native_staff_bootstrap_approvals", APPROVAL_COLUMNS, [input.lineage.reactivationArtifact.approval], "approval_id=?", [input.lineage.reactivationArtifact.approval.approval_id]),
     equality("native_staff_bootstrap_receipts", RECEIPT_COLUMNS, [input.lineage.reactivationReceipt], "command_id=?", [input.lineage.reactivationReceipt.command_id]),
     { sql: "UPDATE native_staff_bootstrap_approvals SET revoked_at=? WHERE approval_id=? AND revoked_at IS NULL", params: [input.approval.executedAt, input.lineage.reactivationReceipt.approval_id] },
@@ -323,10 +410,11 @@ export function compileRetainedDirectoryAuthority(raw, { root, historicalVerifie
     equality("native_project_grant_generations", PROJECT_GENERATION_COLUMNS, [input.projectGeneration], "staff_id=?", [input.target.staffId]),
     guard("(SELECT generation FROM native_directory_grant_generations WHERE staff_id=?)=?", [input.target.staffId, input.generation.generation + 3], "generation-poststate"),
     guard("(SELECT count(*) FROM native_directory_grant_history WHERE staff_id=? AND grant_generation>?)=3", [input.target.staffId, input.generation.generation], "history-suffix-count"));
+  const nextGrantVersion = input.history.filter(row => row.grant_id === grants[0].id).length + 1;
   grants.forEach((grant, index) => statements.push(guard(`EXISTS(SELECT 1 FROM native_directory_grant_history WHERE grant_id=? AND grant_version=?
       AND staff_id=? AND permission=? AND effect='allow' AND scope_kind='business_area' AND business_area_id=?
       AND division_id IS NULL AND resource_id IS NULL AND active=? AND grant_generation=?)`,
-  [grant.id, activating ? 3 : 4, input.target.staffId, grant.permission, input.target.areaId, activating ? 1 : 0,
+  [grant.id, nextGrantVersion, input.target.staffId, grant.permission, input.target.areaId, activating ? 1 : 0,
     input.generation.generation + index + 1], `history-${grant.permission}-poststate`)));
   statements.push(
     guard("julianday(?)>julianday('now')", [input.approval.expiresAt], "expiry-poststate"),

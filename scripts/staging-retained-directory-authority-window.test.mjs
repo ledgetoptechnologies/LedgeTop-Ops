@@ -11,12 +11,14 @@ import { STAGING_TARGET } from "./staging-onboarding-native-only-authority-packe
 
 const ids = ["g1", "g2", "g3"];
 const legacy = phase => ({ input: { phase, approval: { grantIds: ids } }, receipt: { command_id: `${phase}-command` }, approval: {} });
+const anchor = { input: { schemaVersion: 1, phase: "revoke" }, receipt: { command_id: "latest-close-command" }, approval: {} };
 const before = { migrationNames: ["0181.sql"], admission: { staff_id: target.staffId }, profile: {},
   generation: { staff_id: target.staffId, generation: 6, updated_at: "2026-10-08T11:00:00.000Z" },
   projectGeneration: {}, businessArea: {}, resourceScope: {}, projectGrant: {},
   grants: ids.map((id, index) => ({ id, staff_id: target.staffId, permission: `permission-${index}`, effect: "allow", scope_kind: "business_area",
     business_area_id: target.areaId, division_id: null, resource_id: null, active: 0 })),
-  history: Array.from({ length: 6 }, (_, index) => ({ grant_generation: index + 1 })),
+  history: Array.from({ length: 6 }, (_, index) => ({ grant_id: ids[index % 3], grant_version: Math.floor(index / 3) + 1,
+    grant_generation: index + 1 })),
   referenceCounts: { ...REVIEWED_REFERENCE_BASELINE }, predecessor: {} };
 const after = phase => {
   const active = phase === "reactivate" ? 1 : 0, grants = before.grants.map(row => ({ ...row, active }));
@@ -35,7 +37,8 @@ function dependencies({ phase = "reactivate", targetValue = STAGING_TARGET, save
     snapshot: async () => snapshots++ === 0 ? structuredClone(before) : after(phase),
     clock: async () => "2026-10-08T12:00:00.000Z", compile: compiled,
     readHistorical: (_root, name) => legacy(name === "provision.json" ? "provision" : "revoke"),
-    readReactivation: () => compiled({ phase: "reactivate", lineage: { provisionArtifact: legacy("provision") }, approval: { approvalId: "a" } }),
+    readReactivation: (_root, filename) => filename === "anchor" ? anchor
+      : compiled({ schemaVersion: 2, phase: "reactivate", lineage: { latestCloseArtifact: anchor }, approval: { approvalId: "a" } }),
     createEvidence: () => ({ evidenceDir: "private" }), writeEvidence: () => save ? "private/provision.json" : null,
     phaseRows: async (_db, artifact) => ({ approval: artifact.approval, receipt: artifact.receipt,
       activationApproval: artifact.input.phase === "revoke" ? { ...artifact.input.lineage.reactivationArtifact.approval,
@@ -44,26 +47,26 @@ function dependencies({ phase = "reactivate", targetValue = STAGING_TARGET, save
 }
 
 test("prepare is read-only and rejects a swapped binding target", async () => {
-  const prepared = await prepareRetainedDirectoryAuthority("config", dependencies());
+  const prepared = await prepareRetainedDirectoryAuthority("config", "anchor", dependencies());
   assert.equal(prepared.mode, "prepare-readonly"); assert.equal(prepared.mutationsPerformed, false);
-  await assert.rejects(prepareRetainedDirectoryAuthority("config", dependencies({ targetValue: { ...STAGING_TARGET, databaseName: "wrong" } })), /target mismatch/);
+  await assert.rejects(prepareRetainedDirectoryAuthority("config", "anchor", dependencies({ targetValue: { ...STAGING_TARGET, databaseName: "wrong" } })), /target mismatch/);
 });
 
 test("private artifact save must complete before any authority write", async () => {
   let applied = false;
-  await assert.rejects(openRetainedDirectoryAuthority("config", dependencies({ save: false, apply: async () => { applied = true; } })), /save failed/);
+  await assert.rejects(openRetainedDirectoryAuthority("config", "anchor", dependencies({ save: false, apply: async () => { applied = true; } })), /save failed/);
   assert.equal(applied, false);
 });
 
 test("open accepts only reconciled immutable-receipt outcome and verifies postread", async () => {
-  const result = await openRetainedDirectoryAuthority("config", dependencies());
+  const result = await openRetainedDirectoryAuthority("config", "anchor", dependencies());
   assert.equal(result.mode, "applied");
   assert.equal(result.outcome.status, "committed-after-response-recovery");
 });
 
 test("unknown open outcome directs read-only reconciliation before paired close", async () => {
   const deps = dependencies({ apply: async () => { throw new Error("transport details must remain private"); } });
-  await assert.rejects(openRetainedDirectoryAuthority("config", deps), error => {
+  await assert.rejects(openRetainedDirectoryAuthority("config", "anchor", deps), error => {
     assert.match(error.message, /reconcile exact private artifact private\/provision\.json before attempting paired close/);
     assert.doesNotMatch(error.message, /transport details/);
     return true;
@@ -99,7 +102,8 @@ test("real private evidence helpers persist and reload large paired open/close a
     delete deps.createEvidence; delete deps.writeEvidence;
     const baseCompile = deps.compile;
     deps.compile = input => ({ ...baseCompile(input), privatePadding: "x".repeat(2_100_000) });
-    const result = await openRetainedDirectoryAuthority("config", deps);
+    deps.readReactivation = () => anchor;
+    const result = await openRetainedDirectoryAuthority("config", "anchor", deps);
     assert.ok(fs.statSync(result.artifactPath).size > 1_900_000);
     assert.equal(path.basename(result.artifactPath), "provision.json");
     const closeDeps = dependencies({ phase: "revoke" });
@@ -176,7 +180,7 @@ test("postread rejects noncanonical generation and history timestamps without ex
   invalid.generation.updated_at = "2026-10-08 12:00:00";
   let count = 0;
   deps.snapshot = async () => count++ === 0 ? structuredClone(before) : invalid;
-  await assert.rejects(openRetainedDirectoryAuthority("config", deps), error => {
+  await assert.rejects(openRetainedDirectoryAuthority("config", "anchor", deps), error => {
     assert.match(error.message, /open failed/);
     assert.doesNotMatch(error.message, /permission-0|staff-beau-koltz/);
     return true;
@@ -188,5 +192,5 @@ test("postread rejects an extra interleaved history row", async () => {
   invalid.history.splice(7, 0, { ...invalid.history[6], grant_id: "interleaved", grant_generation: 7.5 });
   let count = 0;
   deps.snapshot = async () => count++ === 0 ? structuredClone(before) : invalid;
-  await assert.rejects(openRetainedDirectoryAuthority("config", deps), /open failed/);
+  await assert.rejects(openRetainedDirectoryAuthority("config", "anchor", deps), /open failed/);
 });
