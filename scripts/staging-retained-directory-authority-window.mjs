@@ -193,7 +193,7 @@ export async function openRetainedDirectoryAuthority(configPath, dependencies = 
       exactPost(before, await op.snapshot(db), artifact);
       exactPhaseRows(await op.phaseRows(db, artifact), artifact);
     } catch (error) {
-      throw new Error(`retained authority open failed; inspect and close using exact private artifact ${saved.path}`, { cause: error });
+      throw new Error(`retained authority open failed; reconcile exact private artifact ${saved.path} before attempting paired close`, { cause: error });
     }
     return { mode: "applied", artifactPath: saved.path, receipt: artifact.receipt, outcome };
   }, dependencies);

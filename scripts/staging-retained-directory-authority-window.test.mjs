@@ -61,6 +61,15 @@ test("open accepts only reconciled immutable-receipt outcome and verifies postre
   assert.equal(result.outcome.status, "committed-after-response-recovery");
 });
 
+test("unknown open outcome directs read-only reconciliation before paired close", async () => {
+  const deps = dependencies({ apply: async () => { throw new Error("transport details must remain private"); } });
+  await assert.rejects(openRetainedDirectoryAuthority("config", deps), error => {
+    assert.match(error.message, /reconcile exact private artifact private\/provision\.json before attempting paired close/);
+    assert.doesNotMatch(error.message, /transport details/);
+    return true;
+  });
+});
+
 test("paired close loads the exact private activation and persists revoke before apply", async () => {
   const deps = dependencies({ phase: "revoke" });
   deps.snapshot = (() => { let count = 0; const active = after("reactivate"); return async () => count++ === 0 ? active : ({ ...active,
