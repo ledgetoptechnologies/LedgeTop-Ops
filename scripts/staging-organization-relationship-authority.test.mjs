@@ -54,5 +54,13 @@ test("paired revoke rejects intervening snapshot or immutable context drift and 
 
 test("compiler retains target, record, area, and deny fail-closed guards",()=>{for(const mutate of [value=>value.target={...value.target,recordId:"other"},value=>value.record.current_version=2,value=>value.resourceScope.business_area_id="other",value=>{const deny=grant("deny","directory.profile.view");deny.effect="deny";value.grants.push(deny);value.history.push(history(deny,1,1,1));value.generation.generation=1;}]){const value=input();mutate(value);assert.throws(()=>compileOrganizationRelationshipAuthority(value));}});
 
+test("compiler requires exact snapshot shapes and fresh distinct UUID identifiers",()=>{const extraAdmission=input();extraAdmission.admission.extra=true;
+  const missingProfile=input();delete missingProfile.profile.version;
+  const extraGeneration=input();extraGeneration.generation.extra=0;
+  const badUuid=input();badUuid.approval.commandId="not-a-uuid";
+  const collision=input();collision.approval.approvalId=collision.approval.grantIds[0];
+  for(const value of [extraAdmission,missingProfile,extraGeneration,badUuid,collision])assert.throws(()=>compileOrganizationRelationshipAuthority(value));
+  const provision=compileOrganizationRelationshipAuthority(input()),revoke=activeAfterFresh(provision);revoke.approval.approvalId=provision.approval.approval_id;assert.throws(()=>compileOrganizationRelationshipAuthority(revoke),/fresh revoke identifiers/);});
+
 test("unknown response reconciles v2 and already-committed v1 artifacts only by exact receipt",async()=>{const artifact=compileOrganizationRelationshipAuthority(input()),db={prepare:()=>({bind(){return this;},first:async()=>artifact.receipt})};assert.equal((await applyAndReconcileOrganizationRelationshipAuthority(db,artifact,{target:STAGING_TARGET,root})).status,"committed-after-response-recovery");
   const old={schemaVersion:1,input:{schemaVersion:1},receipt:{command_id:"old-command",result_json:"old"}},oldDb={prepare:()=>({bind(){return this;},first:async()=>old.receipt})};assert.equal((await applyAndReconcileOrganizationRelationshipAuthority(oldDb,old,{target:STAGING_TARGET,root})).status,"committed-after-response-recovery");});

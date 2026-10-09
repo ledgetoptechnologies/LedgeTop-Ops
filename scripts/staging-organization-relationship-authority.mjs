@@ -12,6 +12,9 @@ export const ORGANIZATION_RELATIONSHIP_TARGET = Object.freeze({ staffId: "staff-
   recordId: "staging-directory-acceptance-ff089045-ea88-4c34-90a5-2ef898b9142f", recordKind: "organization",
   recordVersion: 1, sourceId: "project-alpha:staging", businessAreaId: "drone-services-staging" });
 const PERMISSIONS = ["directory.profile.edit", "directory.identity.link"];
+const ADMISSION = ["staff_id","bound_access_subject","active","admitted_by","created_at","updated_at","version"];
+const PROFILE = ["staff_id","login_email","display_name","version","created_at","updated_at"];
+const GENERATION = ["staff_id","generation","updated_at"];
 const GRANT = ["id","staff_id","permission","effect","scope_kind","business_area_id","division_id","resource_id","active","granted_by","created_at"];
 const HISTORY = ["grant_id","grant_version","staff_id","permission","effect","scope_kind","business_area_id","division_id","resource_id","active","grant_generation","recorded_at"];
 const APPROVAL = ["approval_id","canonical_plan_json","canonical_plan_sha256","approved_operator_staff_id","approved_operator_access_subject","independent_binding_verification_json","independent_binding_verification_sha256","issued_by_staff_id","issued_by_access_subject","issued_at","expires_at","revoked_at"];
@@ -20,6 +23,7 @@ const CHAIN = { count:182, final:"0182_project_alpha_directory_relationship_reco
   names:"5ca01798b82652a4b6bb64a35be85a82673d940d6e762805c147408e3ca298d8",
   contents:"09ebfcc544263a90c96b8ed5548cdc73e38e524aec977aa37042bc280f9dae56" };
 const TS=/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
+const UUID=/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const sha = value => crypto.createHash("sha256").update(value).digest("hex");
 const canonical = value => Array.isArray(value) ? value.map(canonical) : value && typeof value === "object"
   ? Object.fromEntries(Object.keys(value).sort().map(key => [key, canonical(value[key])])) : value;
@@ -86,14 +90,17 @@ export function compileOrganizationRelationshipAuthority(raw,{root=ROOT}={}) {
   const input=structuredClone(raw); exact(input,["schemaVersion","staging","phase","target","migrationNames","admission","profile","generation","record","resourceScope","grants","history","approval",...(raw.phase==="revoke"?["provisionArtifact"]:[])],"input");
   if(input.schemaVersion!==2||!same(input.staging,STAGING_TARGET)||!same(input.target,ORGANIZATION_RELATIONSHIP_TARGET)||!same(input.migrationNames,migrations(root))||!["provision","revoke"].includes(input.phase))fail("version 2 exact reviewed target required");
   if(!same(input.record,{record_id:input.target.recordId,record_kind:"organization",current_version:1})||!same(input.resourceScope,{record_id:input.target.recordId,scope_kind:"business_area",business_area_id:input.target.businessAreaId,division_id:null,active:1}))fail("exact current organization resource required");
+  exact(input.admission,ADMISSION,"admission");exact(input.profile,PROFILE,"profile");exact(input.generation,GENERATION,"generation");
   if(input.admission.staff_id!==input.target.staffId||input.admission.active!==1||input.profile.staff_id!==input.target.staffId||input.generation.staff_id!==input.target.staffId)fail("active operator snapshot required");
   if(!Array.isArray(input.grants)||!Array.isArray(input.history))fail("complete grant snapshot required");input.grants.forEach(row=>exact(row,GRANT,"grant"));input.history.forEach(row=>exact(row,HISTORY,"history"));
   exact(input.approval,["approvalId","commandId","grantIds","issuedAt","expiresAt","executedAt"],"approval");
   if(!Array.isArray(input.approval.grantIds)||input.approval.grantIds.length!==2||new Set(input.approval.grantIds).size!==2)fail("exact two grant ids required");
+  const identifiers=[input.approval.approvalId,input.approval.commandId,...input.approval.grantIds];if(!identifiers.every(value=>typeof value==="string"&&UUID.test(value))||new Set(identifiers).size!==identifiers.length)fail("fresh distinct UUID identifiers required");
   if(input.grants.some(row=>row.staff_id===input.target.staffId&&row.effect==="deny"&&row.active===1))fail("active Directory deny forbidden");
   const chains=validateHistorySnapshot(input),selection=selectGrantOperation(input,chains);
-  if(![input.approval.issuedAt,input.approval.expiresAt,input.approval.executedAt].every(value=>typeof value==="string"&&!Number.isNaN(Date.parse(value)))||Date.parse(input.approval.expiresAt)<=Date.parse(input.approval.issuedAt)||Date.parse(input.approval.expiresAt)-Date.parse(input.approval.issuedAt)>4*3600000||Date.parse(input.approval.executedAt)<Date.parse(input.approval.issuedAt)||Date.parse(input.approval.executedAt)>=Date.parse(input.approval.expiresAt))fail("bounded fresh approval required");
+  if(![input.approval.issuedAt,input.approval.expiresAt,input.approval.executedAt].every(value=>typeof value==="string"&&TS.test(value)&&!Number.isNaN(Date.parse(value)))||Date.parse(input.approval.expiresAt)<=Date.parse(input.approval.issuedAt)||Date.parse(input.approval.expiresAt)-Date.parse(input.approval.issuedAt)>4*3600000||Date.parse(input.approval.executedAt)<Date.parse(input.approval.issuedAt)||Date.parse(input.approval.executedAt)>=Date.parse(input.approval.expiresAt))fail("bounded fresh approval required");
   if(input.phase==="revoke"&&(!input.provisionArtifact||input.provisionArtifact.input?.phase!=="provision"||!same(input.approval.grantIds,input.provisionArtifact.input.approval.grantIds)||!same(input.provisionArtifact,compileOrganizationRelationshipAuthority(input.provisionArtifact.input,{root}))))fail("exact immutable provision artifact required");
+  if(input.phase==="revoke"&&[input.provisionArtifact.approval.approval_id,input.provisionArtifact.receipt.command_id].some(id=>id===input.approval.approvalId||id===input.approval.commandId))fail("fresh revoke identifiers required");
   if(input.phase==="revoke")verifyProvisionPoststate(input,selection);
   const plan=json({...input,provisionArtifact:input.provisionArtifact?{approvalId:input.provisionArtifact.approval.approval_id,commandId:input.provisionArtifact.receipt.command_id,sha256:sha(json(input.provisionArtifact))}:undefined}),{approval,receipt}=approvalRows(input,plan,selection),active=input.phase==="provision"?1:0;
   if(Buffer.byteLength(plan)>262144)fail("bounded canonical plan required");

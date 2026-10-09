@@ -53,6 +53,12 @@
 
 ## Remaining release gates
 
+### Latest local follow-up (October 9)
+
+- After independent review, the authority compiler now also requires exact admission/profile/generation snapshot shapes and distinct, fresh UUIDv4 approval identifiers. Root reran the combined runner/compiler/window/full-schema suites: **55/55 passed, zero skips**. This supersedes the earlier 54-test local count; it is not an additional live authority rehearsal.
+- Ops build and TypeScript check passed. The isolated headless Edge adoption UI regression passed on desktop and mobile (**2/2**), including frozen retry payloads and an explicit confirmation that review durably reserves the destination. No signed-in browser session or desktop input was used.
+- The missing-destination producer fix and normal bind finalizer are being implemented and independently reviewed in separate files. The UI checks use mocked API responses; they do not prove live destination creation, remote binding acknowledgement, or client access.
+
 - Complete the normal authorized synthetic organization/client relationship flow; do not seed around the application authorization path or reuse expired authority packets.
 - Prove current Directory create/update/relationship settlement, exact replay and changed-body conflict, with independent PA readback and paired temporary-grant cleanup.
 - Resolve the PA-first project discovery/adoption path. Inventory of already-bound projects alone does not satisfy project creation in either application.
