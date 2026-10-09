@@ -1,4 +1,4 @@
-import { useState, type FormEvent } from "react";
+import { useRef, useState, type FormEvent } from "react";
 import { Card } from "@ltds/ui";
 import { api, ApiError, setCsrf } from "./api";
 import { serializeNativeDirectoryProfile, type ProfileForm } from "./NativeDirectoryProfileEditor";
@@ -7,6 +7,10 @@ import { RETAINED_SYNTHETIC_CLIENT_ID } from "./DirectoryReplayAcceptanceRoute";
 const DETAIL = `/api/client-hub/directory/standalone-clients/${RETAINED_SYNTHETIC_CLIENT_ID}`;
 const RETAINED_AREA = "staging-native-only-portal-acceptance-20261008-window-1";
 const DESTINATION_READBACK = "/api/admin/staging/directory/replay-destination-readback";
+const CREATE_GENERATION_RECOVERY = "/api/client-hub/directory/create-generation-recovery";
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const RETAINED_PREDECESSOR_COMMAND_ID = "7dbf5685-91cf-494a-aa46-4d59c138d94e";
+const RETAINED_SOURCE_ID = "project-alpha:staging";
 
 type Snapshot = { recordId: string; kind: "client"; version: number; profile: ProfileForm;
   scopes: Array<{ businessAreaId: string; divisionId: string | null }>; linkage: "standalone";
@@ -16,6 +20,7 @@ type Write = { status: "pending" | "written"; recordId: string; kind: "client"; 
   replayed: boolean; destinations: Array<{ sourceId: string; state: string }> };
 type Frozen = { key: string; body: string; conflictBody: string; expectedVersion: number; target: ProfileForm;
   original: ProfileForm; phase: "write" | "replay" | "conflict" | "readback" };
+type FrozenRecovery = { authorizationId: string; successorCommandId: string; body: string };
 export type DirectoryAcceptanceRequest = typeof api;
 
 const profileKeys: Array<keyof ProfileForm> = ["name", "email", "phone", "clientType", "addressLine1", "addressLine2",
@@ -60,6 +65,11 @@ export function DirectoryReplayAcceptance({ request = api }: { request?: Directo
   const [restored, setRestored] = useState(false);
   const [destinationVerifiedVersion, setDestinationVerifiedVersion] = useState<number | null>(null);
   const [busy, setBusy] = useState(false), [error, setError] = useState(""), [result, setResult] = useState("");
+  const [recoveryInput, setRecoveryInput] = useState({ predecessorCommandId: "", sourceId: RETAINED_SOURCE_ID, reason: "" });
+  const [recoveryAttempt, setRecoveryAttempt] = useState<FrozenRecovery | null>(null);
+  const [recoveryBusy, setRecoveryBusy] = useState(false), [recoveryError, setRecoveryError] = useState("");
+  const [recoveryResult, setRecoveryResult] = useState("");
+  const operationInFlight = useRef(false), recoveryFrozen = useRef<FrozenRecovery | null>(null);
 
   const load = async () => {
     setBusy(true); setError(""); setResult(""); setAttempt(null); setRestore(null); setRestored(false);
@@ -72,13 +82,15 @@ export function DirectoryReplayAcceptance({ request = api }: { request?: Directo
       setCsrf(session.csrfToken);
       const value = await request<unknown>(DETAIL);
       if (!validSnapshot(value)) throw new Error("The retained synthetic client response could not be verified.");
-      if (!value.editing.available) throw new Error(`The retained synthetic client is pending or unavailable (${value.editing.reason ?? "unknown"}).`);
       setSnapshot(value); setProposedName(changedName(value.profile.name));
+      if (!value.editing.available) setError(`Profile replay is unavailable until recovery settles (${value.editing.reason ?? "unknown"}).`);
     } catch (caught) { setSnapshot(null); setError(caught instanceof Error ? caught.message : "The retained synthetic client could not be loaded."); }
     finally { setBusy(false); }
   };
 
   const verifyDestination = async () => {
+    if (operationInFlight.current) return;
+    operationInFlight.current = true;
     const expectedLocalVersion = restored ? snapshot!.version + 2 : snapshot!.version + 1;
     setBusy(true); setError("");
     try {
@@ -88,7 +100,7 @@ export function DirectoryReplayAcceptance({ request = api }: { request?: Directo
         || value.exactGeneration !== true || value.exactProfile !== true) throw new Error("Independent Project Alpha destination readback did not match.");
       setDestinationVerifiedVersion(expectedLocalVersion); setResult(`Independent Project Alpha destination readback verified for local version ${expectedLocalVersion}.`);
     } catch (caught) { setError(caught instanceof Error ? caught.message : "Independent destination readback failed."); }
-    finally { setBusy(false); }
+    finally { setBusy(false); operationInFlight.current = false; }
   };
 
   const send = (body: string, key: string) => request<unknown>(DETAIL,
@@ -124,14 +136,15 @@ export function DirectoryReplayAcceptance({ request = api }: { request?: Directo
   };
 
   const run = async (event: FormEvent) => {
-    event.preventDefault(); if (!snapshot || busy) return;
+    event.preventDefault(); if (!snapshot || busy || operationInFlight.current) return;
+    operationInFlight.current = true;
     let current = attempt;
     if (!current) {
       if (recordConfirmation !== RETAINED_SYNTHETIC_CLIENT_ID || nameConfirmation !== snapshot.profile.name)
-        return setError("Enter the exact retained record ID and current name before starting.");
+        { setError("Enter the exact retained record ID and current name before starting."); operationInFlight.current = false; return; }
       const name = proposedName.trim();
       if (!name || name.length > 150 || name === snapshot.profile.name || !name.endsWith(" [staging replay acceptance]"))
-        return setError("Use the bounded staging replay acceptance name shown for this synthetic client.");
+        { setError("Use the bounded staging replay acceptance name shown for this synthetic client."); operationInFlight.current = false; return; }
       const key = crypto.randomUUID(), target = { ...snapshot.profile, name };
       const body = JSON.stringify({ mutationId: key, expectedLocalVersion: snapshot.version,
         profile: serializeNativeDirectoryProfile("client", target, "update") });
@@ -147,36 +160,85 @@ export function DirectoryReplayAcceptance({ request = api }: { request?: Directo
       setAttempt(next);
       if (!next) { setResult(`Passed local replay/conflict/readback at version ${current.expectedVersion}. This is not independent Project Alpha readback proof.`); }
     } catch (caught) { setError(`${caught instanceof Error ? caught.message : "Acceptance step failed."} Retry retains the exact operation and key.`); }
-    finally { setBusy(false); }
+    finally { setBusy(false); operationInFlight.current = false; }
   };
 
   const runRestore = async () => {
+    if (operationInFlight.current) return;
+    operationInFlight.current = true;
     if (!attempt && !restore && snapshot && result && !restored) {
       const key = crypto.randomUUID(), body = JSON.stringify({ mutationId: key, expectedLocalVersion: snapshot.version + 1,
         profile: serializeNativeDirectoryProfile("client", snapshot.profile, "update") });
       setRestore({ key, body, conflictBody: "", expectedVersion: snapshot.version + 2, target: snapshot.profile,
-        original: snapshot.profile, phase: "write" }); return;
+        original: snapshot.profile, phase: "write" }); operationInFlight.current = false; return;
     }
-    if (!restore || busy) return;
+    if (!restore || busy) { operationInFlight.current = false; return; }
     setBusy(true); setError("");
     try { const next = await advance(restore, true); setRestore(next); if (!next) { setRestored(true); setResult(`Original profile restored and locally verified at version ${restore.expectedVersion}. This is not independent Project Alpha readback proof.`); } }
     catch (caught) { setError(`${caught instanceof Error ? caught.message : "Restore step failed."} Retry retains the exact restore operation and key.`); }
-    finally { setBusy(false); }
+    finally { setBusy(false); operationInFlight.current = false; }
+  };
+
+  const recoverCreateGeneration = async (event: FormEvent) => {
+    event.preventDefault(); if (!snapshot || recoveryBusy || operationInFlight.current) return;
+    operationInFlight.current = true;
+    let frozen = recoveryFrozen.current ?? recoveryAttempt;
+    if (!frozen) {
+      const predecessorCommandId = recoveryInput.predecessorCommandId.trim();
+      const sourceId = recoveryInput.sourceId.trim(), reason = recoveryInput.reason.trim();
+      if (!UUID.test(predecessorCommandId) || predecessorCommandId !== RETAINED_PREDECESSOR_COMMAND_ID
+        || sourceId !== RETAINED_SOURCE_ID || !reason || reason.length > 500) {
+        setRecoveryError("Enter the exact retained predecessor command ID, staging source ID, and a reason of 1–500 characters.");
+        operationInFlight.current = false; return;
+      }
+      const authorizationId = crypto.randomUUID(), successorCommandId = crypto.randomUUID();
+      frozen = { authorizationId, successorCommandId, body: JSON.stringify({ authorizationId, predecessorCommandId,
+        successorCommandId, sourceId, reason }) };
+      recoveryFrozen.current = frozen;
+      setRecoveryAttempt(frozen);
+    }
+    setRecoveryBusy(true); setRecoveryError(""); setRecoveryResult("");
+    try {
+      const value = await request<unknown>(CREATE_GENERATION_RECOVERY, { method: "POST",
+        headers: { "Idempotency-Key": frozen.authorizationId }, body: frozen.body });
+      if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("The recovery response could not be verified.");
+      const outcome = value as Record<string, unknown>;
+      if (JSON.stringify(Object.keys(outcome).sort()) !== JSON.stringify(["generation", "replayed", "status", "successorCommandId"])
+        || outcome.status !== "prepared" || outcome.successorCommandId !== frozen.successorCommandId
+        || typeof outcome.generation !== "string" || !/^(?:0|[1-9][0-9]{0,18})$/.test(outcome.generation)
+        || typeof outcome.replayed !== "boolean") throw new Error("The recovery response could not be verified.");
+      setRecoveryResult(`Recovery successor ${frozen.successorCommandId} is queued at generation ${outcome.generation}. Queued is not acknowledged; verify normal dispatcher settlement before continuing.`);
+    } catch (caught) {
+      setRecoveryError(`${caught instanceof Error ? caught.message : "Create-generation recovery failed."} Retry retains the exact authorization, successor, and request bytes.`);
+    } finally { setRecoveryBusy(false); operationInFlight.current = false; }
   };
 
   return <main className="page"><Card title="Staging Directory replay acceptance">
     <p>This fixed staging tool can update only the retained synthetic standalone client. It proves local replay/conflict handling and acknowledged delivery state, not independent Project Alpha readback.</p>
     {!snapshot ? <><button onClick={() => void load()} disabled={busy}>{busy ? "Loading…" : "Load retained synthetic client"}</button>{error && <p role="alert">{error}</p>}</>
-      : <form onSubmit={event => void run(event)}>
+      : snapshot.editing.available ? <form onSubmit={event => void run(event)}>
         <p>Current version: {snapshot.version}. Current name: <strong>{snapshot.profile.name}</strong></p>
         <label>Confirm exact record ID<input value={recordConfirmation} disabled={Boolean(attempt)} onChange={event => setRecordConfirmation(event.target.value)} /></label>
         <label>Confirm current name<input value={nameConfirmation} disabled={Boolean(attempt)} onChange={event => setNameConfirmation(event.target.value)} /></label>
         <label>Reviewed synthetic name change<input maxLength={150} value={proposedName} disabled={Boolean(attempt)} onChange={event => setProposedName(event.target.value)} /></label>
         {error && <p role="alert">{error}</p>}{result && <p role="status">{result}</p>}
-        {!result && <button disabled={busy}>{busy ? "Running fixed step…" : attempt ? "Retry same frozen step" : "Start reviewed acceptance"}</button>}
-      </form>}
-    {result && !restored && <button onClick={() => void runRestore()} disabled={busy || destinationVerifiedVersion !== snapshot!.version + 1}>{restore ? "Continue same frozen restore" : "Prepare explicit fresh-key restore"}</button>}
+        {!result && <button disabled={busy || recoveryBusy}>{busy ? "Running fixed step…" : attempt ? "Retry same frozen step" : "Start reviewed acceptance"}</button>}
+      </form> : <p role="status">Profile replay is blocked while retained Directory work is pending; use the recovery control below.</p>}
+    {result && !restored && <button onClick={() => void runRestore()} disabled={busy || recoveryBusy || destinationVerifiedVersion !== snapshot!.version + 1}>{restore ? "Continue same frozen restore" : "Prepare explicit fresh-key restore"}</button>}
     {result && destinationVerifiedVersion !== (restored ? snapshot!.version + 2 : snapshot!.version + 1)
-      && <button onClick={() => void verifyDestination()} disabled={busy}>Verify independent Project Alpha destination</button>}
+      && <button onClick={() => void verifyDestination()} disabled={busy || recoveryBusy}>Verify independent Project Alpha destination</button>}
+    {snapshot && <form onSubmit={event => void recoverCreateGeneration(event)}>
+      <h2>Retained create-generation recovery</h2>
+      <p>This staging-only administrator action prepares one successor for the retained terminal create. It queues work; it does not acknowledge delivery.</p>
+      <label>Predecessor command ID<input value={recoveryInput.predecessorCommandId} disabled={Boolean(recoveryAttempt)}
+        onChange={event => setRecoveryInput(previous => ({ ...previous, predecessorCommandId: event.target.value }))} /></label>
+      <label>Source ID<input value={recoveryInput.sourceId} disabled={Boolean(recoveryAttempt)}
+        onChange={event => setRecoveryInput(previous => ({ ...previous, sourceId: event.target.value }))} /></label>
+      <label>Recovery reason<textarea maxLength={500} value={recoveryInput.reason} disabled={Boolean(recoveryAttempt)}
+        onChange={event => setRecoveryInput(previous => ({ ...previous, reason: event.target.value }))} /></label>
+      {recoveryError && <p role="alert">{recoveryError}</p>}{recoveryResult && <p role="status">{recoveryResult}</p>}
+      {!recoveryResult && <button disabled={recoveryBusy || busy}>{recoveryBusy ? "Preparing recovery…"
+        : recoveryAttempt ? "Retry exact recovery request" : "Prepare retained create recovery"}</button>}
+    </form>}
   </Card></main>;
 }

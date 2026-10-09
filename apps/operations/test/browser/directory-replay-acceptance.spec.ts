@@ -3,7 +3,7 @@ import { fileURLToPath } from "node:url";
 import { expect, test, type Page } from "@playwright/test";
 import { isDirectoryReplayAcceptanceLocation } from "../../src/client/DirectoryReplayAcceptanceRoute";
 
-type Mode = "normal" | "pending" | "denied" | "wrong-record" | "lost-write" | "lost-restore" | "wrong-source" | "readback-mismatch" | "readback-unavailable" | "no-csrf" | "not-owner";
+type Mode = "normal" | "pending" | "denied" | "wrong-record" | "lost-write" | "lost-restore" | "lost-recovery" | "malformed-recovery" | "wrong-source" | "readback-mismatch" | "readback-unavailable" | "no-csrf" | "not-owner";
 type Call = { path: string; method: string; key: string | null; body: string | null; csrf: string | null; contentType: string | null; credentials: RequestCredentials | undefined };
 const fixture = new URL("./directory-replay-acceptance-fixture.tsx", import.meta.url);
 const bundle = buildSync({ entryPoints: [fileURLToPath(fixture)], bundle: true, format: "iife", platform: "browser", write: false,
@@ -37,14 +37,22 @@ test("uses only the retained standalone-client route and freezes replay/conflict
   expect(patches[2]!.key).toBe(patches[0]!.key); expect(patches[2]!.body).not.toBe(patches[0]!.body);
 });
 
-test("refuses pending and denied records without a write", async ({ page }) => {
-  for (const mode of ["pending", "denied", "wrong-record", "no-csrf", "not-owner"] as const) {
+test("refuses denied or invalid records without a write", async ({ page }) => {
+  for (const mode of ["denied", "wrong-record", "no-csrf", "not-owner"] as const) {
     await render(page, mode); await page.getByRole("button", { name: "Load retained synthetic client" }).click();
     await expect(page.getByRole("alert")).toBeVisible();
     expect((await calls(page)).filter(call => call.method === "PATCH")).toHaveLength(0);
     if (mode === "no-csrf" || mode === "not-owner") expect((await calls(page)).map(call => call.path)).toEqual(["/api/session"]);
     await page.reload({ waitUntil: "domcontentloaded" }).catch(() => undefined);
   }
+});
+
+test("pending profile state blocks profile mutation but permits retained recovery", async ({ page }) => {
+  await render(page, "pending"); await page.getByRole("button", { name: "Load retained synthetic client" }).click();
+  await expect(page.getByText(/Profile replay is blocked/)).toBeVisible();
+  await expect(page.getByRole("button", { name: "Start reviewed acceptance" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Prepare retained create recovery" })).toBeVisible();
+  expect((await calls(page)).filter(call => call.method === "PATCH")).toHaveLength(0);
 });
 
 test("route predicate admits only the exact staging HTTPS location", () => {
@@ -112,4 +120,74 @@ for (const mode of ["readback-mismatch", "readback-unavailable"] as const) test(
   await expect(page.getByRole("alert")).toContainText("destination readback did not match");
   await expect(restore).toBeDisabled();
   expect((await calls(page)).filter(call => call.method === "PATCH")).toHaveLength(3);
+});
+
+test("create-generation recovery freezes the complete request and reports prepared as queued", async ({ page }) => {
+  await render(page, "lost-recovery");
+  await page.getByRole("button", { name: "Load retained synthetic client" }).click();
+  await page.getByLabel("Predecessor command ID").fill("7dbf5685-91cf-494a-aa46-4d59c138d94e");
+  await page.getByLabel("Source ID").fill("project-alpha:staging");
+  await page.getByLabel("Recovery reason").fill("Recover retained staging fixture after verified generation conflict");
+  await page.getByRole("button", { name: "Prepare retained create recovery" }).click();
+  await expect(page.getByRole("alert")).toContainText("Retry retains the exact authorization, successor, and request bytes");
+  await expect(page.getByLabel("Predecessor command ID")).toBeDisabled();
+  await page.getByRole("button", { name: "Retry exact recovery request" }).click();
+  await expect(page.getByRole("status")).toContainText("Queued is not acknowledged");
+  const recovery = (await calls(page)).filter(call => call.path === "/api/client-hub/directory/create-generation-recovery");
+  expect(recovery).toHaveLength(2); expect(recovery[1]).toEqual(recovery[0]);
+  expect(recovery[0]).toMatchObject({ method: "POST", csrf: "fixture-only-csrf", contentType: "application/json", credentials: "same-origin" });
+  const body = JSON.parse(recovery[0]!.body!);
+  expect(recovery[0]!.key).toBe(body.authorizationId);
+  expect(body).toEqual({ authorizationId: "22222222-2222-4222-8222-000000000001",
+    predecessorCommandId: "7dbf5685-91cf-494a-aa46-4d59c138d94e",
+    successorCommandId: "22222222-2222-4222-8222-000000000002", sourceId: "project-alpha:staging",
+    reason: "Recover retained staging fixture after verified generation conflict" });
+});
+
+test("create-generation recovery validates deliberate administrator input before freezing", async ({ page }) => {
+  await render(page); await page.getByRole("button", { name: "Load retained synthetic client" }).click();
+  await page.getByLabel("Predecessor command ID").fill("not-a-command");
+  await page.getByLabel("Source ID").fill("https://arbitrary.example/api");
+  await page.getByRole("button", { name: "Prepare retained create recovery" }).click();
+  await expect(page.getByRole("alert")).toContainText("exact retained predecessor command ID, staging source ID");
+  expect((await calls(page)).filter(call => call.path === "/api/client-hub/directory/create-generation-recovery")).toHaveLength(0);
+  await expect(page.getByLabel("Predecessor command ID")).toBeEnabled();
+});
+
+test("same-tick double submit creates only one frozen recovery request", async ({ page }) => {
+  await render(page); await page.getByRole("button", { name: "Load retained synthetic client" }).click();
+  await page.getByLabel("Predecessor command ID").fill("7dbf5685-91cf-494a-aa46-4d59c138d94e");
+  await page.getByLabel("Recovery reason").fill("Recover the exact retained staging fixture");
+  await page.evaluate(() => {
+    const button = [...document.querySelectorAll("button")].find(value => value.textContent === "Prepare retained create recovery") as HTMLButtonElement;
+    button.click(); button.click();
+  });
+  await expect(page.getByRole("status")).toContainText("Queued is not acknowledged");
+  expect((await calls(page)).filter(call => call.path === "/api/client-hub/directory/create-generation-recovery")).toHaveLength(1);
+});
+
+test("shared latch prevents a profile mutation racing a recovery request", async ({ page }) => {
+  await render(page); await page.getByRole("button", { name: "Load retained synthetic client" }).click();
+  await page.getByLabel("Confirm exact record ID").fill("614ed50f-8800-4ab3-aa69-009d8e5cefa9");
+  await page.getByLabel("Confirm current name").fill("Synthetic Portal Acceptance 2026-10-08");
+  await page.getByLabel("Predecessor command ID").fill("7dbf5685-91cf-494a-aa46-4d59c138d94e");
+  await page.getByLabel("Recovery reason").fill("Recover the exact retained staging fixture");
+  await page.evaluate(() => {
+    const buttons = [...document.querySelectorAll("button")];
+    (buttons.find(value => value.textContent === "Prepare retained create recovery") as HTMLButtonElement).click();
+    (buttons.find(value => value.textContent === "Start reviewed acceptance") as HTMLButtonElement).click();
+  });
+  await expect(page.getByRole("status")).toContainText("Queued is not acknowledged");
+  const observed = await calls(page);
+  expect(observed.filter(call => call.path === "/api/client-hub/directory/create-generation-recovery")).toHaveLength(1);
+  expect(observed.filter(call => call.method === "PATCH")).toHaveLength(0);
+});
+
+test("strict recovery response validation rejects malformed prepared payloads", async ({ page }) => {
+  await render(page, "malformed-recovery"); await page.getByRole("button", { name: "Load retained synthetic client" }).click();
+  await page.getByLabel("Predecessor command ID").fill("7dbf5685-91cf-494a-aa46-4d59c138d94e");
+  await page.getByLabel("Recovery reason").fill("Recover the exact retained staging fixture");
+  await page.getByRole("button", { name: "Prepare retained create recovery" }).click();
+  await expect(page.getByRole("alert")).toContainText("recovery response could not be verified");
+  await expect(page.getByRole("button", { name: "Retry exact recovery request" })).toBeVisible();
 });

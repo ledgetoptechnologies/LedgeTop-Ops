@@ -4,7 +4,7 @@ import { RETAINED_SYNTHETIC_CLIENT_ID } from "../../src/client/DirectoryReplayAc
 import { ApiError } from "../../src/client/api";
 
 type Call = { path: string; method: string; key: string | null; body: string | null; csrf: string | null; contentType: string | null; credentials: RequestCredentials | undefined };
-declare global { interface Window { directoryReplayCalls?: Call[]; directoryReplayMode?: "normal" | "pending" | "denied" | "wrong-record" | "lost-write" | "lost-restore" | "wrong-source" | "readback-mismatch" | "readback-unavailable" | "no-csrf" | "not-owner" } }
+declare global { interface Window { directoryReplayCalls?: Call[]; directoryReplayMode?: "normal" | "pending" | "denied" | "wrong-record" | "lost-write" | "lost-restore" | "lost-recovery" | "malformed-recovery" | "wrong-source" | "readback-mismatch" | "readback-unavailable" | "no-csrf" | "not-owner" } }
 const calls = window.directoryReplayCalls = [];
 let uuidSequence = 0;
 Object.defineProperty(window.crypto, "randomUUID", { configurable: true,
@@ -13,6 +13,8 @@ let version = 4, profile = { name: "Synthetic Portal Acceptance 2026-10-08", ema
   addressLine1: "", addressLine2: "", city: "", state: "", postalCode: "", country: "" };
 const seen = new Map<string, string>();
 let lost = false;
+let recoveryLost = false;
+const recoverySeen = new Map<string, string>();
 const request = async <T,>(path: string, init: RequestInit = {}): Promise<T> => {
   const headers = new Headers(init.headers), body = typeof init.body === "string" ? init.body : null;
   calls.push({ path, method: init.method ?? "GET", key: headers.get("Idempotency-Key"), body,
@@ -24,6 +26,15 @@ const request = async <T,>(path: string, init: RequestInit = {}): Promise<T> => 
     : window.directoryReplayMode === "readback-unavailable"
       ? { status: "unavailable", exactIdentity: false, exactVersion: false, exactGeneration: false, exactProfile: false }
       : { status: "verified", exactIdentity: true, exactVersion: true, exactGeneration: true, exactProfile: true }) as T;
+  if (path === "/api/client-hub/directory/create-generation-recovery") {
+    const parsed = JSON.parse(body!), key = headers.get("Idempotency-Key")!, prior = recoverySeen.get(key);
+    if (prior && prior !== body) throw new ApiError("conflict", 409, { status: "conflict", reason: "authorization_id" });
+    const replayed = Boolean(prior); recoverySeen.set(key, body!);
+    if (window.directoryReplayMode === "lost-recovery" && !recoveryLost) { recoveryLost = true; throw new TypeError("response lost after recovery preparation"); }
+    if (window.directoryReplayMode === "malformed-recovery") return { status: "prepared", successorCommandId: parsed.successorCommandId,
+      generation: 42, replayed, unexpected: true } as T;
+    return { status: "prepared", successorCommandId: parsed.successorCommandId, generation: "42", replayed } as T;
+  }
   if (window.directoryReplayMode === "denied") throw new ApiError("denied", 403, {});
   if (!init.method) return { recordId: window.directoryReplayMode === "wrong-record" ? "00000000-0000-4000-8000-000000000000" : RETAINED_SYNTHETIC_CLIENT_ID,
     kind: "client", version, profile, scopes: [{ businessAreaId: "staging-native-only-portal-acceptance-20261008-window-1", divisionId: null }],
