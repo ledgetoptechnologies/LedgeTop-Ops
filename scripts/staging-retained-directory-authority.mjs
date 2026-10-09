@@ -29,9 +29,9 @@ export const REVIEWED_REFERENCE_BASELINE = Object.freeze({
   native_workforce_grant_issuer_ceilings: 0,
 });
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const CHAIN = Object.freeze({ count: 181, final: "0181_project_alpha_directory_create_generation_recovery.sql",
-  names: "42090dbacb9d23e4cc92371743c15e7ebc31c0e6d33f6bf7e48faf7f92cd96db",
-  contents: "7b165451ebea6bdc680ef8b54600924064a3871b09a227abeb38d6218b7fed2e" });
+const CHAIN = Object.freeze({ count: 182, final: "0182_project_alpha_directory_relationship_recovery_guard.sql",
+  names: "5ca01798b82652a4b6bb64a35be85a82673d940d6e762805c147408e3ca298d8",
+  contents: "09ebfcc544263a90c96b8ed5548cdc73e38e524aec977aa37042bc280f9dae56" });
 const ADMISSION_COLUMNS = ["staff_id", "bound_access_subject", "active", "admitted_by", "created_at", "updated_at", "version"];
 const PROFILE_COLUMNS = ["staff_id", "login_email", "display_name", "version", "created_at", "updated_at"];
 const GENERATION_COLUMNS = ["staff_id", "generation", "updated_at"];
@@ -317,7 +317,7 @@ export function compileRetainedDirectoryAuthority(raw, { root, historicalVerifie
     resourceScope: input.resourceScope, projectGrant: input.projectGrant, grants: input.grants, history: input.history,
     referenceCounts: input.referenceCounts, predecessor: input.predecessor, lineage: compactLineage, approval: input.approval }), planSha = sha(plan);
   if (Buffer.byteLength(plan) > MAX_PLAN_BYTES) fail("bounded canonical plan required");
-  const verification = json({ staging: input.staging, target: input.target, migrationCount: 181, migrationFinal: input.migrationNames.at(-1), referenceBaseline: REVIEWED_REFERENCE_BASELINE,
+  const verification = json({ staging: input.staging, target: input.target, migrationCount: 182, migrationFinal: input.migrationNames.at(-1), referenceBaseline: REVIEWED_REFERENCE_BASELINE,
     ...(input.schemaVersion === 1 ? { priorProvisionReceiptSha256: sha(json(input.lineage.provisionReceipt)), priorRevokeReceiptSha256: sha(json(input.lineage.revokeReceipt)) }
       : { latestCloseReceiptSha256: sha(json(input.lineage.latestCloseReceipt)),
         priorGrantVersion: input.history.filter(row => row.grant_id === grants[0].id).length }) });

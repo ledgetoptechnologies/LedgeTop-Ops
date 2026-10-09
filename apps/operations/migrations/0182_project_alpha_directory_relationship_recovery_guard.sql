@@ -1,5 +1,6 @@
--- Local proposal only. Promote through the reviewed migration process after
--- the canonical 0181 migration and authority pins are intentionally advanced.
+-- Forward-only relationship recovery guard promotion after canonical 0181.
+-- This migration preserves the reviewed proposal's strict persisted-ACK validation
+-- while admitting the dedicated native organization-bootstrap acknowledgement shape.
 -- This is the 0172 view definition verbatim except that pending profile
 -- commands are read through the recovery-aware 0181 unsettled-command view.
 

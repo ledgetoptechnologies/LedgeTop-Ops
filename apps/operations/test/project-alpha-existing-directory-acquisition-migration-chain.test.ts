@@ -603,8 +603,8 @@ describe("existing PA directory acquisition migration chain", () => {
     expect(await database.prepare(`SELECT count(*) FROM project_alpha_active_directory_mappings
       WHERE mapping_kind='acquired'`).first("count(*)")).toBe(3);
     const laterMigrations = readdirSync(directory)
-      .filter(name => /^\d{4}_.+\.sql$/.test(name) && name.slice(0, 4) >= "0133" && name.slice(0, 4) <= "0181").sort();
-    expect(laterMigrations.at(-1)).toBe("0181_project_alpha_directory_create_generation_recovery.sql");
+      .filter(name => /^\d{4}_.+\.sql$/.test(name) && name.slice(0, 4) >= "0133" && name.slice(0, 4) <= "0182").sort();
+    expect(laterMigrations.at(-1)).toBe("0182_project_alpha_directory_relationship_recovery_guard.sql");
     for (const migration of laterMigrations) {
       await database.batch(splitD1MigrationStatements(readFileSync(new URL(migration, directory), "utf8"))
         .map(statement => database.prepare(statement)));

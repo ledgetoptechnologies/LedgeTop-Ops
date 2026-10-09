@@ -1,5 +1,13 @@
 # Multiple Alpha sources: isolation before activation
 
+October 9, 2026 supersession: the implementation/deployment descriptions below
+are historical August/September evidence, not a current assertion that a second
+API-v2 connection is absent. The current native API-v2 path retains explicit
+source-qualified identity and separate recipient/resource authorization. Use the
+[current staging checkpoint](../staging/portal-acceptance-checkpoint-2026-10-08.md)
+for release state. Live two-source recipient/resource isolation remains an
+acceptance gate; neither old design status nor local tests prove activation.
+
 Status: staged implementation sequence; no second connection is enabled. The
 first local catalog-provenance increment is described in
 [catalog source isolation](catalog-source-isolation.md). The next local business

@@ -71,8 +71,6 @@ beforeAll(async()=>{runtime=new Miniflare({modules:true,compatibilityDate:"2026-
   db=await runtime.getD1Database("OPS_DB") as D1Database;const directory=new URL("../migrations/",import.meta.url);
   for(const name of readdirSync(directory).filter(name=>/^\d{4}_.+\.sql$/.test(name)).sort())
     await db.batch(splitD1MigrationStatements(readFileSync(new URL(name,directory),"utf8")).map(sql=>db.prepare(sql)));
-  const proposal=new URL("../../../scripts/proposals/0182_project_alpha_directory_relationship_recovery_guard.sql",import.meta.url);
-  await db.batch(splitD1MigrationStatements(readFileSync(proposal,"utf8")).map(sql=>db.prepare(sql)));
   await db.batch([db.prepare("INSERT INTO staff_users(id,email,display_name,access_subject,status) VALUES('owner','owner@example.test','Owner','access|owner','active')"),
     db.prepare("INSERT INTO staff_users(id,email,display_name,access_subject,status) VALUES('staff','staff@example.test','Staff','access|staff','active')"),
     db.prepare("INSERT INTO native_staff_admissions(staff_id,bound_access_subject,active,admitted_by) VALUES('staff','access|staff',1,'owner')"),

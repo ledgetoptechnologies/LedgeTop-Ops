@@ -163,9 +163,15 @@ async function activeHead(db: DirectoryWriteD1, recordId: string, kind: "client"
         AND json_type(outbox.outcome_json,'$.response.requestId')='text'
         AND length(json_extract(outbox.outcome_json,'$.response.requestId'))=36
         AND json_type(outbox.outcome_json,'$.response.replayed') IN ('true','false')
-        AND (SELECT count(*) FROM json_each(outbox.outcome_json,'$.response.result'))=3
-        AND json_type(outbox.outcome_json,'$.response.result.data')='object'
-        AND (SELECT count(*) FROM json_each(outbox.outcome_json,'$.response.result.data'))=1
+        AND ((SELECT count(*) FROM json_each(outbox.outcome_json,'$.response.result'))=2
+            AND json_type(outbox.outcome_json,'$.response.result.data') IS NULL
+            AND json_extract(outbox.command_json,'$.operation')='create'
+            AND outbox.resource_type='organization'
+          OR (SELECT count(*) FROM json_each(outbox.outcome_json,'$.response.result'))=3
+            AND json_type(outbox.outcome_json,'$.response.result.data')='object'
+            AND (SELECT count(*) FROM json_each(outbox.outcome_json,'$.response.result.data'))=1
+            AND json_extract(outbox.outcome_json,'$.response.result.data.publicId')=
+              json_extract(outbox.outcome_json,'$.response.result.resource.publicId'))
         AND json_type(outbox.outcome_json,'$.response.result.authorizationGeneration')='text'
         AND json_extract(outbox.outcome_json,'$.response.result.authorizationGeneration') GLOB '[0-9]*'
         AND json_extract(outbox.outcome_json,'$.response.result.authorizationGeneration') NOT GLOB '*[^0-9]*'
@@ -176,8 +182,6 @@ async function activeHead(db: DirectoryWriteD1, recordId: string, kind: "client"
           OR json_extract(outbox.outcome_json,'$.response.result.authorizationGeneration')<='9223372036854775807')
         AND json_extract(outbox.outcome_json,'$.response.result.resource.type')=outbox.resource_type
         AND json_extract(outbox.outcome_json,'$.response.result.resource.publicId')=?
-        AND json_extract(outbox.outcome_json,'$.response.result.data.publicId')=
-          json_extract(outbox.outcome_json,'$.response.result.resource.publicId')
         AND materialization.command_json=outbox.command_json
         AND CASE json_extract(materialization.command_json,'$.operation')
           WHEN 'create' THEN

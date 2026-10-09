@@ -301,20 +301,92 @@ async function linkedRelationshipEvidence(db: DirectoryWriteD1, relationship: Re
       AND mapping.source_instance_id=intent.source_instance_uuid AND mapping.application_id=intent.application_uuid
       AND mapping.history_epoch_id=intent.expected_history_epoch_id AND mapping.resource_type='organization'
       AND mapping.external_id=intent.external_canonical_id
-      AND mapping.project_alpha_public_id=json_extract(outbox.outcome_json,'$.response.result.data.publicId')
+      AND mapping.project_alpha_public_id=json_extract(outbox.outcome_json,'$.response.result.resource.publicId')
     WHERE intent.record_id=? AND intent.record_version=? AND intent.state='acknowledged'
       AND intent.source_id=? AND intent.source_instance_uuid=? AND intent.application_uuid=?
       AND intent.expected_history_epoch_id=? AND intent.destination_origin=? AND intent.external_canonical_id=?
       AND mapping.project_alpha_public_id=?
+      AND materialization.command_json=outbox.command_json
       AND json_extract(outbox.outcome_json,'$.status')='acknowledged'
+      AND (SELECT count(*) FROM json_each(outbox.outcome_json))=2
+      AND (SELECT count(*) FROM json_each(outbox.outcome_json,'$.response'))=6
       AND json_extract(outbox.outcome_json,'$.response.historyEpoch')=intent.expected_history_epoch_id
       AND json_extract(outbox.outcome_json,'$.response.sourceInstanceId')=intent.source_instance_uuid
       AND json_extract(outbox.outcome_json,'$.response.applicationId')=intent.application_uuid
+      AND json_type(outbox.outcome_json,'$.response.requestId')='text'
+      AND length(json_extract(outbox.outcome_json,'$.response.requestId'))=36
+      AND json_type(outbox.outcome_json,'$.response.replayed') IN ('true','false')
       AND json_extract(outbox.outcome_json,'$.response.result.resource.type')='organization'
-      AND json_extract(outbox.outcome_json,'$.response.result.resource.id')=intent.external_canonical_id
+      AND json_extract(outbox.outcome_json,'$.response.result.resource.publicId')=mapping.project_alpha_public_id
+      AND json_type(outbox.outcome_json,'$.response.result.authorizationGeneration')='text'
+      AND json_extract(outbox.outcome_json,'$.response.result.authorizationGeneration') GLOB '[0-9]*'
+      AND json_extract(outbox.outcome_json,'$.response.result.authorizationGeneration') NOT GLOB '*[^0-9]*'
+      AND (json_extract(outbox.outcome_json,'$.response.result.authorizationGeneration')='0'
+        OR substr(json_extract(outbox.outcome_json,'$.response.result.authorizationGeneration'),1,1)<>'0')
+      AND length(json_extract(outbox.outcome_json,'$.response.result.authorizationGeneration'))<=19
+      AND (length(json_extract(outbox.outcome_json,'$.response.result.authorizationGeneration'))<19
+        OR json_extract(outbox.outcome_json,'$.response.result.authorizationGeneration')<='9223372036854775807')
+      AND ((SELECT count(*) FROM json_each(outbox.outcome_json,'$.response.result'))=2
+          AND json_type(outbox.outcome_json,'$.response.result.data') IS NULL
+          AND json_extract(outbox.command_json,'$.operation')='create'
+          AND outbox.resource_type='organization'
+        OR (SELECT count(*) FROM json_each(outbox.outcome_json,'$.response.result'))=3
+          AND json_type(outbox.outcome_json,'$.response.result.data')='object'
+          AND (SELECT count(*) FROM json_each(outbox.outcome_json,'$.response.result.data'))=1
+          AND json_extract(outbox.outcome_json,'$.response.result.data.publicId')=
+            json_extract(outbox.outcome_json,'$.response.result.resource.publicId'))
+      AND CASE json_extract(outbox.command_json,'$.operation')
+        WHEN 'create' THEN
+          (SELECT count(*) FROM json_each(outbox.outcome_json,'$.response.result.resource'))=4
+          AND json_extract(outbox.command_json,'$.expectedRevision')='0'
+          AND json_extract(outbox.outcome_json,'$.response.result.resource.id')=intent.external_canonical_id
+          AND json_extract(outbox.outcome_json,'$.response.result.resource.revision')='1'
+          AND json_type(outbox.command_json,'$.expectedAuthorizationGeneration')='text'
+          AND json_extract(outbox.command_json,'$.expectedAuthorizationGeneration') GLOB '[0-9]*'
+          AND json_extract(outbox.command_json,'$.expectedAuthorizationGeneration') NOT GLOB '*[^0-9]*'
+          AND (json_extract(outbox.command_json,'$.expectedAuthorizationGeneration')='0'
+            OR substr(json_extract(outbox.command_json,'$.expectedAuthorizationGeneration'),1,1)<>'0')
+          AND length(json_extract(outbox.command_json,'$.expectedAuthorizationGeneration'))<=19
+          AND (length(json_extract(outbox.command_json,'$.expectedAuthorizationGeneration'))<19
+            OR json_extract(outbox.command_json,'$.expectedAuthorizationGeneration')<='9223372036854775807')
+          AND json_extract(outbox.command_json,'$.expectedAuthorizationGeneration')<>'9223372036854775807'
+          AND json_extract(outbox.outcome_json,'$.response.result.authorizationGeneration')=
+            CAST(CAST(json_extract(outbox.command_json,'$.expectedAuthorizationGeneration') AS INTEGER)+1 AS TEXT)
+        WHEN 'update' THEN
+          (SELECT count(*) FROM json_each(outbox.outcome_json,'$.response.result.resource'))=3
+          AND json_extract(outbox.command_json,'$.expectedProjectAlphaPublicId')=?
+          AND json_type(outbox.command_json,'$.expectedAuthorizationGeneration')='text'
+          AND json_extract(outbox.command_json,'$.expectedAuthorizationGeneration') GLOB '[0-9]*'
+          AND json_extract(outbox.command_json,'$.expectedAuthorizationGeneration') NOT GLOB '*[^0-9]*'
+          AND (json_extract(outbox.command_json,'$.expectedAuthorizationGeneration')='0'
+            OR substr(json_extract(outbox.command_json,'$.expectedAuthorizationGeneration'),1,1)<>'0')
+          AND length(json_extract(outbox.command_json,'$.expectedAuthorizationGeneration'))<=19
+          AND (length(json_extract(outbox.command_json,'$.expectedAuthorizationGeneration'))<19
+            OR json_extract(outbox.command_json,'$.expectedAuthorizationGeneration')<='9223372036854775807')
+          AND json_type(outbox.command_json,'$.expectedRevision')='text'
+          AND json_extract(outbox.command_json,'$.expectedRevision') GLOB '[1-9]*'
+          AND json_extract(outbox.command_json,'$.expectedRevision') NOT GLOB '*[^0-9]*'
+          AND length(json_extract(outbox.command_json,'$.expectedRevision'))<=19
+          AND (length(json_extract(outbox.command_json,'$.expectedRevision'))<19
+            OR json_extract(outbox.command_json,'$.expectedRevision')<='9223372036854775807')
+          AND json_type(outbox.outcome_json,'$.response.result.resource.revision')='text'
+          AND json_extract(outbox.outcome_json,'$.response.result.resource.revision') GLOB '[1-9]*'
+          AND json_extract(outbox.outcome_json,'$.response.result.resource.revision') NOT GLOB '*[^0-9]*'
+          AND length(json_extract(outbox.outcome_json,'$.response.result.resource.revision'))<=19
+          AND (length(json_extract(outbox.outcome_json,'$.response.result.resource.revision'))<19
+            OR json_extract(outbox.outcome_json,'$.response.result.resource.revision')<='9223372036854775807')
+          AND (length(json_extract(outbox.outcome_json,'$.response.result.resource.revision'))>
+              length(json_extract(outbox.command_json,'$.expectedRevision'))
+            OR (length(json_extract(outbox.outcome_json,'$.response.result.resource.revision'))=
+                length(json_extract(outbox.command_json,'$.expectedRevision'))
+              AND json_extract(outbox.outcome_json,'$.response.result.resource.revision')>=
+                json_extract(outbox.command_json,'$.expectedRevision')))
+          AND json_extract(outbox.outcome_json,'$.response.result.authorizationGeneration')=
+            json_extract(outbox.command_json,'$.expectedAuthorizationGeneration')
+        ELSE 0 END
     LIMIT 2`).bind(parentId, parentVersion, destinationValue.sourceId, destinationValue.sourceInstanceUUID,
       destinationValue.applicationUUID, destinationValue.historyEpoch, destinationValue.origin,
-      active.parentExternalCanonicalId, active.parentPublicId)
+      active.parentExternalCanonicalId, active.parentPublicId, active.parentPublicId)
     .all<{ parentIntentId: string; parentPublicId: string }>()).results;
   if (parentIntents.length === 1) return {
     evidenceKind: "parent_intent", parentExternalCanonicalId: active.parentExternalCanonicalId,
@@ -326,7 +398,14 @@ async function linkedRelationshipEvidence(db: DirectoryWriteD1, relationship: Re
   const legacy = await db.prepare(`SELECT mapping.command_id parentMappingCommandId,mapping.project_alpha_public_id parentPublicId,
       json_extract(outbox.outcome_json,'$.response.result.resource.revision') parentAckRevision,
       outbox.command_json parentAckCommandJson,outbox.outcome_json parentAckOutcomeJson
-    FROM project_alpha_directory_mappings mapping JOIN project_alpha_directory_outbox outbox ON outbox.command_id=mapping.command_id
+    FROM project_alpha_directory_mappings mapping
+    JOIN ${materializationReadSource} materialization ON materialization.command_id=mapping.command_id
+    JOIN operations_directory_intents intent ON intent.intent_id=materialization.intent_id
+      AND intent.record_id=? AND intent.record_version=? AND intent.state='acknowledged'
+      AND intent.source_id=mapping.source_id AND intent.source_instance_uuid=mapping.source_instance_id
+      AND intent.application_uuid=mapping.application_id AND intent.expected_history_epoch_id=mapping.history_epoch_id
+      AND intent.destination_origin=? AND intent.external_canonical_id=mapping.external_id
+    JOIN project_alpha_directory_outbox outbox ON outbox.command_id=mapping.command_id
     WHERE mapping.source_id=? AND mapping.source_instance_id=? AND mapping.application_id=? AND mapping.history_epoch_id=?
       AND mapping.resource_type='organization' AND mapping.external_id=? AND mapping.project_alpha_public_id=?
       AND outbox.state='acknowledged' AND outbox.source_id=mapping.source_id
@@ -334,13 +413,39 @@ async function linkedRelationshipEvidence(db: DirectoryWriteD1, relationship: Re
       AND outbox.expected_history_epoch_id=mapping.history_epoch_id AND outbox.destination_base_url=?
       AND outbox.resource_type='organization' AND outbox.external_id=mapping.external_id
       AND json_extract(outbox.outcome_json,'$.status')='acknowledged'
+      AND (SELECT count(*) FROM json_each(outbox.outcome_json))=2
+      AND (SELECT count(*) FROM json_each(outbox.outcome_json,'$.response'))=6
       AND json_extract(outbox.outcome_json,'$.response.historyEpoch')=mapping.history_epoch_id
       AND json_extract(outbox.outcome_json,'$.response.sourceInstanceId')=mapping.source_instance_id
       AND json_extract(outbox.outcome_json,'$.response.applicationId')=mapping.application_id
       AND json_extract(outbox.outcome_json,'$.response.result.resource.type')='organization'
       AND json_extract(outbox.outcome_json,'$.response.result.resource.id')=mapping.external_id
-      AND json_extract(outbox.outcome_json,'$.response.result.data.publicId')=mapping.project_alpha_public_id`)
-    .bind(destinationValue.sourceId, destinationValue.sourceInstanceUUID, destinationValue.applicationUUID,
+      AND (SELECT count(*) FROM json_each(outbox.outcome_json,'$.response.result.resource'))=4
+      AND json_extract(outbox.command_json,'$.operation')='create'
+      AND json_type(outbox.command_json,'$.expectedAuthorizationGeneration')='text'
+      AND json_extract(outbox.command_json,'$.expectedAuthorizationGeneration') GLOB '[0-9]*'
+      AND json_extract(outbox.command_json,'$.expectedAuthorizationGeneration') NOT GLOB '*[^0-9]*'
+      AND (json_extract(outbox.command_json,'$.expectedAuthorizationGeneration')='0'
+        OR substr(json_extract(outbox.command_json,'$.expectedAuthorizationGeneration'),1,1)<>'0')
+      AND length(json_extract(outbox.command_json,'$.expectedAuthorizationGeneration'))<=19
+      AND (length(json_extract(outbox.command_json,'$.expectedAuthorizationGeneration'))<19
+        OR json_extract(outbox.command_json,'$.expectedAuthorizationGeneration')<='9223372036854775807')
+      AND json_extract(outbox.command_json,'$.expectedAuthorizationGeneration')<>'9223372036854775807'
+      AND json_type(outbox.outcome_json,'$.response.result.authorizationGeneration')='text'
+      AND json_extract(outbox.outcome_json,'$.response.result.authorizationGeneration')=
+        CAST(CAST(json_extract(outbox.command_json,'$.expectedAuthorizationGeneration') AS INTEGER)+1 AS TEXT)
+      AND json_extract(outbox.outcome_json,'$.response.result.resource.publicId')=mapping.project_alpha_public_id
+      AND ((SELECT count(*) FROM json_each(outbox.outcome_json,'$.response.result'))=2
+          AND json_type(outbox.outcome_json,'$.response.result.data') IS NULL
+          AND json_extract(outbox.command_json,'$.operation')='create'
+          AND outbox.resource_type='organization'
+        OR (SELECT count(*) FROM json_each(outbox.outcome_json,'$.response.result'))=3
+          AND json_type(outbox.outcome_json,'$.response.result.data')='object'
+          AND (SELECT count(*) FROM json_each(outbox.outcome_json,'$.response.result.data'))=1
+          AND json_extract(outbox.outcome_json,'$.response.result.data.publicId')=
+            json_extract(outbox.outcome_json,'$.response.result.resource.publicId'))`)
+    .bind(parentId, parentVersion, destinationValue.origin,
+      destinationValue.sourceId, destinationValue.sourceInstanceUUID, destinationValue.applicationUUID,
       destinationValue.historyEpoch, active.parentExternalCanonicalId, active.parentPublicId, destinationValue.origin)
     .first<{ parentMappingCommandId: string; parentPublicId: string; parentAckRevision: string;
       parentAckCommandJson: string; parentAckOutcomeJson: string }>();

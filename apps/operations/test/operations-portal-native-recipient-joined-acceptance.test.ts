@@ -161,7 +161,8 @@ async function acknowledgeCreate(database: D1Database, seed: Awaited<ReturnType<
         seed.write.destinations[0]!.historyEpoch, commandId),
     database.prepare(`UPDATE project_alpha_directory_outbox SET state='acknowledged',outcome_json=?,
       lease_token=NULL,lease_expires_at=NULL WHERE command_id=? AND state='leased'`).bind(JSON.stringify({
-        status: "acknowledged", response: { sourceInstanceId: seed.write.destinations[0]!.sourceInstanceUUID,
+        status: "acknowledged", response: { requestId: id(), replayed: false,
+          sourceInstanceId: seed.write.destinations[0]!.sourceInstanceUUID,
           applicationId: seed.write.destinations[0]!.applicationUUID, historyEpoch: seed.write.destinations[0]!.historyEpoch,
           result: { resource: { type: seed.write.kind, id: seed.write.recordId, publicId, revision: "1" },
             data: { publicId }, authorizationGeneration: "1" } },
@@ -211,8 +212,8 @@ for (const chain of ["historical", "current-reviewed"] as const) describe(
       await applyDraft(client, "client", "0224_operations_portal_native_recipient_authority.sql");
     } else {
       const operationsNames = await applyReviewedChain(operations, "operations");
-      expect(operationsNames).toHaveLength(181);
-      expect(operationsNames.at(-1)).toBe("0181_project_alpha_directory_create_generation_recovery.sql");
+      expect(operationsNames).toHaveLength(182);
+      expect(operationsNames.at(-1)).toBe("0182_project_alpha_directory_relationship_recovery_guard.sql");
       const clientNames = await applyReviewedChain(client, "client");
       expect(clientNames).toHaveLength(147);
       expect(clientNames.at(-1)).toBe("0228_operations_portal_native_content_start_audit.sql");

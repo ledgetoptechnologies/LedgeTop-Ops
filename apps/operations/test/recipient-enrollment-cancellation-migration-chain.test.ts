@@ -27,8 +27,8 @@ describe("0150 cancellation preserves history after all prior canonical migratio
     db = await runtime.getD1Database("DB");
     const directory = new URL("../migrations/", import.meta.url);
     const names = reviewedOperationsMigrationNames(directory);
-    expect(names).toHaveLength(181);
-    expect(names.at(-1)).toBe("0181_project_alpha_directory_create_generation_recovery.sql");
+    expect(names).toHaveLength(182);
+    expect(names.at(-1)).toBe("0182_project_alpha_directory_relationship_recovery_guard.sql");
     const candidateIndex = names.indexOf("0150_client_portal_recipient_enrollment_cancellation.sql");
     expect(candidateIndex).toBe(149);
     // Exercise 0150 at its real position, not whichever migration is newest.

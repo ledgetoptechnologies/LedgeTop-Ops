@@ -213,9 +213,12 @@ beforeAll(async () => {
   const revisionMarker = "DROP VIEW project_alpha_directory_relationship_revision_evidence;";
   const revisionOffset = relationshipProposal.indexOf(revisionMarker);
   if (revisionOffset < 0) throw new Error("missing proposal revision-evidence replacement");
-  await db.batch(splitD1MigrationStatements(relationshipProposal.slice(revisionOffset)
-    .replaceAll("operations_directory_effective_materializations", "operations_directory_materializations"))
-    .map(statement => db.prepare(statement)));
+  const revisionStatements = splitD1MigrationStatements(relationshipProposal.slice(revisionOffset)
+    .replaceAll("operations_directory_effective_materializations", "operations_directory_materializations")).slice(0, 2);
+  expect(revisionStatements).toHaveLength(2);
+  expect(revisionStatements[1]).toMatch(/CREATE VIEW project_alpha_directory_relationship_revision_evidence AS/);
+  // Do not install later recovery-dependent objects into this historical cutoff.
+  await db.batch(revisionStatements.map(statement => db.prepare(statement)));
   await seedManager("portal-manager-a", "both");
   await seedManager("portal-manager-b", "revoke");
   await db.batch([

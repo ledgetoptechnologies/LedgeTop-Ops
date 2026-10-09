@@ -22,10 +22,10 @@ const issuedAt = new Date(Date.now() - 5 * 60 * 1000).toISOString();
 const expiresAt = new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString();
 const acquisitionRecord = Object.freeze({ id: "staging-directory-acquisition-record", kind: "organization", version: 1 });
 const activationId = "10000000-0000-4000-8000-000000000001";
-const REVIEWED_OPERATIONS_180 = Object.freeze({ count: 181,
-  finalMigration: "0181_project_alpha_directory_create_generation_recovery.sql",
-  namesSha256: "42090dbacb9d23e4cc92371743c15e7ebc31c0e6d33f6bf7e48faf7f92cd96db",
-  chainSha256: "7b165451ebea6bdc680ef8b54600924064a3871b09a227abeb38d6218b7fed2e" });
+const REVIEWED_OPERATIONS_180 = Object.freeze({ count: 182,
+  finalMigration: "0182_project_alpha_directory_relationship_recovery_guard.sql",
+  namesSha256: "5ca01798b82652a4b6bb64a35be85a82673d940d6e762805c147408e3ca298d8",
+  chainSha256: "09ebfcc544263a90c96b8ed5548cdc73e38e524aec977aa37042bc280f9dae56" });
 const sha256 = value => createHash("sha256").update(value).digest("hex");
 function reviewedOperationsMigrations() {
   const directory = path.join(repositoryRoot, "apps", "operations", "migrations");
@@ -874,10 +874,10 @@ test("fails closed for wrong staging identity and canonical migration drift", ()
   assert.throws(() => buildAuthorityArtifacts(drift, input(), "provision"), /contents changed/);
 });
 
-test("reviewed authority packets reject an unreviewed migration after the exact 0180 chain", () => {
+test("reviewed authority packets reject an unreviewed migration after the exact 0182 chain", () => {
   const base = fixture();
   fs.writeFileSync(path.join(base, "apps", "operations", "migrations", "0170_unreviewed_staging_test.sql"), "SELECT 1;\n");
-  assert.throws(() => buildAuthorityArtifacts(base, input(), "provision"), /exact reviewed 181-file Operations chain/);
+  assert.throws(() => buildAuthorityArtifacts(base, input(), "provision"), /exact reviewed 182-file Operations chain/);
 });
 
 test("full canonical schema provisions, revokes, and reactivates exact native authority", () => {

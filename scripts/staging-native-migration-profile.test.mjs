@@ -45,20 +45,20 @@ test.afterEach(() => {
 test("builds only the exact migration suffixes and strips every deployment field", () => {
   const profiles = buildProfiles(fixture());
   assert.deepEqual(profiles.operations.files.map(({ name }) => name),
-    ["0181_project_alpha_directory_create_generation_recovery.sql"]);
+    ["0182_project_alpha_directory_relationship_recovery_guard.sql"]);
   assert.deepEqual(profiles.client.files.map(({ name }) => name),
     []);
   assert.equal(profiles.operations.manifest.requiredRemoteBaseline,
-    "0180_project_alpha_project_v2_recovery_authorization.sql");
+    "0181_project_alpha_directory_create_generation_recovery.sql");
   assert.equal(profiles.client.manifest.requiredRemoteBaseline,
     "0228_operations_portal_native_content_start_audit.sql");
-  assert.equal(profiles.operations.expectedRemoteAppliedMigrations.length, 180);
+  assert.equal(profiles.operations.expectedRemoteAppliedMigrations.length, 181);
   assert.equal(profiles.client.expectedRemoteAppliedMigrations.length, 147);
-  assert.equal(profiles.operations.manifest.reviewedFinalChain.count, 181);
+  assert.equal(profiles.operations.manifest.reviewedFinalChain.count, 182);
   assert.equal(profiles.operations.manifest.reviewedFinalChain.finalMigration,
-    "0181_project_alpha_directory_create_generation_recovery.sql");
+    "0182_project_alpha_directory_relationship_recovery_guard.sql");
   assert.equal(profiles.operations.manifest.reviewedFinalChain.namesSha256,
-    "42090dbacb9d23e4cc92371743c15e7ebc31c0e6d33f6bf7e48faf7f92cd96db");
+    "5ca01798b82652a4b6bb64a35be85a82673d940d6e762805c147408e3ca298d8");
   assert.equal(profiles.client.manifest.reviewedFinalChain.count, 147);
   for (const profile of Object.values(profiles)) {
     assert.deepEqual(Object.keys(profile.config).sort(), ["$schema", "account_id", "d1_databases", "name"]);
@@ -110,12 +110,12 @@ test("writes deterministic ignored outputs and detects stale or extra output", (
   assert.equal(config.main, undefined);
   assert.equal(config.d1_databases[0].database_id, NATIVE_MIGRATION_PROFILES.client.databaseId);
 
-  const generated0181 = path.join(profiles.operations.migrationsDirectory,
-    "0181_project_alpha_directory_create_generation_recovery.sql");
-  const lfOnly = fs.readFileSync(generated0181, "utf8");
+  const generated0182 = path.join(profiles.operations.migrationsDirectory,
+    "0182_project_alpha_directory_relationship_recovery_guard.sql");
+  const lfOnly = fs.readFileSync(generated0182, "utf8");
   assert.equal(lfOnly.includes("\r"), false);
-  fs.writeFileSync(generated0181, lfOnly.replace("\n", "\r\n"));
-  assert.throws(() => validateGenerated(base), /generated migration must use LF-only line endings: 0181_/);
+  fs.writeFileSync(generated0182, lfOnly.replace("\n", "\r\n"));
+  assert.throws(() => validateGenerated(base), /generated migration must use LF-only line endings: 0182_/);
   writeProfiles(base);
 
   fs.appendFileSync(path.join(profiles.operations.migrationsDirectory,

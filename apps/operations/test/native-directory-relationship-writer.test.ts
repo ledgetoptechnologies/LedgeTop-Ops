@@ -89,8 +89,12 @@ beforeAll(async()=>{runtime=new Miniflare({modules:true,compatibilityDate:"2026-
   const proposal=readFileSync(new URL("../../../scripts/proposals/0182_project_alpha_directory_relationship_recovery_guard.sql",import.meta.url),"utf8"),
     revisionMarker="DROP VIEW project_alpha_directory_relationship_revision_evidence;",revisionOffset=proposal.indexOf(revisionMarker);
   if(revisionOffset<0)throw new Error("missing proposal revision-evidence replacement");
-  const revisionProposal=proposal.slice(revisionOffset).replaceAll("operations_directory_effective_materializations","operations_directory_materializations");
-  await db.batch(splitD1MigrationStatements(revisionProposal).map(sql=>db.prepare(sql)));
+  const revisionStatements=splitD1MigrationStatements(proposal.slice(revisionOffset));
+  if(revisionStatements.length<2||revisionStatements[0]!.trim().replace(/;$/,"")!==revisionMarker.replace(/;$/,"")
+    ||!revisionStatements[1]!.trimStart().startsWith("CREATE VIEW project_alpha_directory_relationship_revision_evidence AS"))
+    throw new Error("proposal revision-evidence replacement is not the expected first object pair");
+  await db.batch(revisionStatements.slice(0,2)
+    .map(sql=>db.prepare(sql.replaceAll("operations_directory_effective_materializations","operations_directory_materializations"))));
   await db.exec(`CREATE TABLE writer_test_active_mapping_rows(source_id TEXT,resource_type TEXT,record_id TEXT,external_id TEXT,
     project_alpha_public_id TEXT,source_instance_id TEXT,application_id TEXT,history_epoch_id TEXT,provenance_id TEXT,
     mapping_kind TEXT,created_at TEXT DEFAULT(strftime('%Y-%m-%dT%H:%M:%fZ','now')));
@@ -215,13 +219,15 @@ describe("native Directory relationship writer and outbox",()=>{
           .resolves.toEqual({status:"blocked",reason:"mapping_evidence"});
       }
       await db.prepare("DROP VIEW operations_directory_effective_materializations").run();
-      for(const change of ["publicId","revision","authorizationGeneration","authorizationGenerationOverflow","requestId","unexpectedId"] as const){
+      for(const change of ["publicId","dataMismatch","extraResult","revision","authorizationGeneration","authorizationGenerationOverflow","requestId","unexpectedId"] as const){
         const outcome=JSON.parse(originalOutcome) as {response:{requestId:string;result:{resource:{publicId:string;revision:string;id?:string};
           data:{publicId:string};authorizationGeneration:string}}};
         if(change==="publicId"){
           outcome.response.result.resource.publicId="f".repeat(32);
           outcome.response.result.data.publicId="f".repeat(32);
-        }else if(change==="revision")outcome.response.result.resource.revision="0";
+        }else if(change==="dataMismatch")outcome.response.result.data.publicId="f".repeat(32);
+        else if(change==="extraResult")(outcome.response.result as Record<string,unknown>).unexpected=true;
+        else if(change==="revision")outcome.response.result.resource.revision="0";
         else if(change==="authorizationGeneration")outcome.response.result.authorizationGeneration="09";
         else if(change==="authorizationGenerationOverflow")outcome.response.result.authorizationGeneration="9223372036854775808";
         else if(change==="requestId")outcome.response.requestId="44444444-4444-5444-8444-444444444444";

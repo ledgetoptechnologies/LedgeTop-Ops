@@ -16,9 +16,9 @@ const GRANT = ["id","staff_id","permission","effect","scope_kind","business_area
 const HISTORY = ["grant_id","grant_version","staff_id","permission","effect","scope_kind","business_area_id","division_id","resource_id","active","grant_generation","recorded_at"];
 const APPROVAL = ["approval_id","canonical_plan_json","canonical_plan_sha256","approved_operator_staff_id","approved_operator_access_subject","independent_binding_verification_json","independent_binding_verification_sha256","issued_by_staff_id","issued_by_access_subject","issued_at","expires_at","revoked_at"];
 const RECEIPT = ["command_id","approval_id","operator_staff_id","operator_access_subject","canonical_plan_json","canonical_plan_sha256","independent_binding_verification_json","independent_binding_verification_sha256","result_json","result_sha256","executed_at"];
-const CHAIN = { count:181, final:"0181_project_alpha_directory_create_generation_recovery.sql",
-  names:"42090dbacb9d23e4cc92371743c15e7ebc31c0e6d33f6bf7e48faf7f92cd96db",
-  contents:"7b165451ebea6bdc680ef8b54600924064a3871b09a227abeb38d6218b7fed2e" };
+const CHAIN = { count:182, final:"0182_project_alpha_directory_relationship_recovery_guard.sql",
+  names:"5ca01798b82652a4b6bb64a35be85a82673d940d6e762805c147408e3ca298d8",
+  contents:"09ebfcc544263a90c96b8ed5548cdc73e38e524aec977aa37042bc280f9dae56" };
 const sha = value => crypto.createHash("sha256").update(value).digest("hex");
 const canonical = value => Array.isArray(value) ? value.map(canonical) : value && typeof value === "object"
   ? Object.fromEntries(Object.keys(value).sort().map(key => [key, canonical(value[key])])) : value;

@@ -8,7 +8,8 @@ function apply(db:DatabaseSync,path:string){for(const sql of unstable_splitSqlQu
 describe("Directory create generation recovery candidate schema",()=>{
   it("compiles in the complete reviewed 0181 automatic chain",()=>{
     const db=new DatabaseSync(":memory:"),migrations=resolve(import.meta.dirname,"../migrations");db.exec("PRAGMA foreign_keys=ON");
-    for(const name of readdirSync(migrations).filter(name=>/^\d{4}_.+\.sql$/.test(name)).sort())apply(db,resolve(migrations,name));
+    const historicalNames=readdirSync(migrations).filter(name=>/^\d{4}_.+\.sql$/.test(name)&&name.slice(0,4)<="0181").sort();
+    for(const name of historicalNames)apply(db,resolve(migrations,name));
     expect(db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='project_alpha_directory_create_generation_recoveries'").get())
       .toEqual({name:"project_alpha_directory_create_generation_recoveries"});
     expect(db.prepare("SELECT name FROM sqlite_master WHERE type='view' AND name='operations_directory_effective_materializations'").get())
@@ -40,6 +41,6 @@ describe("Directory create generation recovery candidate schema",()=>{
       AND CAST(? AS INTEGER)>=0 AND CAST(? AS INTEGER)<9223372036854775807 accepted`).get(generation,generation,generation,generation);
     expect(accepted("9223372036854775806")).toEqual({accepted:1});
     expect(accepted("9223372036854775807")).toEqual({accepted:0});
-    expect(readdirSync(migrations).at(-1)).toBe("0181_project_alpha_directory_create_generation_recovery.sql");
+    expect(historicalNames.at(-1)).toBe("0181_project_alpha_directory_create_generation_recovery.sql");
   });
 });

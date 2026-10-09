@@ -140,6 +140,22 @@ beforeAll(async () => {
   expect((await db.prepare("SELECT name FROM d1_migrations ORDER BY id").all<{ name: string }>()).results.map(row => row.name))
     .toEqual(migrations);
   expect((await db.prepare("PRAGMA foreign_key_check").all()).results).toEqual([]);
+  const currentRelationshipMigrations = readdirSync(directory)
+    .filter(name => /^018[12]_.+\.sql$/.test(name)).sort();
+  expect(currentRelationshipMigrations).toEqual([
+    "0181_project_alpha_directory_create_generation_recovery.sql",
+    "0182_project_alpha_directory_relationship_recovery_guard.sql",
+  ]);
+  for (const migration of currentRelationshipMigrations) await db.batch([
+    ...splitD1MigrationStatements(readFileSync(new URL(migration, directory), "utf8")).map(sql => db.prepare(sql)),
+    db.prepare("INSERT INTO d1_migrations(name) VALUES(?)").bind(migration),
+  ]);
+  expect((await db.prepare("SELECT name FROM d1_migrations ORDER BY id DESC LIMIT 2").all<{ name: string }>()).results
+    .map(row => row.name).reverse()).toEqual(currentRelationshipMigrations);
+  expect(await db.prepare("SELECT name FROM d1_migrations ORDER BY id DESC LIMIT 1").first("name"))
+    .toBe("0182_project_alpha_directory_relationship_recovery_guard.sql");
+  expect(await db.prepare("SELECT count(*) FROM d1_migrations").first("count(*)")).toBe(182);
+  expect((await db.prepare("PRAGMA foreign_key_check").all()).results).toEqual([]);
   await db.batch([
     db.prepare("INSERT INTO staff_users(id,email,display_name,access_subject,status) VALUES('owner','owner@example.test','Owner','access|owner','active')"),
     db.prepare("INSERT INTO native_business_areas(id,name,active) VALUES('area','Area',1)"),
@@ -301,10 +317,21 @@ describe("native Directory profile outbox dispatcher", () => {
     expect(posts).toEqual([{ commandId: client.commandId, externalId: client.input.recordId,
       expectedAuthorizationGeneration: "0", profile: clientProfile,
       organization: { externalId: organization.input.recordId, expectedRevision: "2" } }]);
-    expect(await db.prepare(`SELECT evidence_kind,parent_public_id FROM operations_directory_intent_relationship_dependencies
-      WHERE client_record_id=?`).bind(client.input.recordId).first()).toEqual({ evidence_kind: "existing_mapping", parent_public_id: parentPublicId });
+    expect(await db.prepare(`SELECT evidence_kind,parent_intent_id,parent_public_id,parent_ack_revision
+      FROM operations_directory_intent_relationship_dependencies WHERE client_record_id=?`)
+      .bind(client.input.recordId).first()).toEqual({ evidence_kind: "parent_intent",
+        parent_intent_id: `${parentMutation}:intent:0`, parent_public_id: null, parent_ack_revision: null });
+    expect(await db.prepare(`SELECT resolved.resolved_parent_public_id,
+        json_extract(outbox.outcome_json,'$.response.result.resource.revision') parent_revision
+      FROM operations_directory_intent_relationship_resolved resolved
+      JOIN operations_directory_effective_materializations materialization
+        ON materialization.intent_id=resolved.parent_intent_id
+      JOIN project_alpha_directory_outbox outbox ON outbox.command_id=materialization.command_id
+      WHERE resolved.client_record_id=?`).bind(client.input.recordId).first())
+      .toEqual({ resolved_parent_public_id: parentPublicId, parent_revision: "2" });
 
     const negativeClient = await create("client", organization.input.recordId), noSend = vi.fn<typeof fetch>();
+    let corruptedDependencyReads = 0;
     const corruptedAck = new Proxy(db, { get(target, property) {
       if (property === "prepare") return (sql: string) => {
         const statement = target.prepare(sql);
@@ -312,6 +339,7 @@ describe("native Directory profile outbox dispatcher", () => {
         return { bind(...values: unknown[]) {
           const bound = statement.bind(...values);
           return { async all() {
+            corruptedDependencyReads += 1;
             const result = await bound.all<Record<string, unknown>>();
             return { ...result, results: result.results.map(row => ({ ...row, parent_ack_revision: "99" })) };
           } };
@@ -321,6 +349,7 @@ describe("native Directory profile outbox dispatcher", () => {
     } }) as D1Database;
     await expect(dispatchProjectAlphaDirectoryProfileOutboxCommand({ ...env(), OPS_DB: corruptedAck }, sourceId,
       negativeClient.commandId, noSend)).resolves.toEqual({ status: "conflict", reason: "command" });
+    expect(corruptedDependencyReads).toBeGreaterThan(0);
     expect(noSend).not.toHaveBeenCalled();
   });
 

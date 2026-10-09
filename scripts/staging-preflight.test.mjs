@@ -439,9 +439,9 @@ test("requires every portal-v2 and Operations capability to be explicitly false"
 });
 
 test("pins the native portal, the complete Operations chain, both 0199 files, and the 0200-0228 release contract", () => {
-  assert.equal(REQUIRED_STAGING_MIGRATIONS.operations.length, 168);
+  assert.equal(REQUIRED_STAGING_MIGRATIONS.operations.length, 169);
   assert.equal(REQUIRED_STAGING_MIGRATIONS.operations[0], "0014_staff_acl_controls.sql");
-  assert.equal(REQUIRED_STAGING_MIGRATIONS.operations.at(-1), "0181_project_alpha_directory_create_generation_recovery.sql");
+  assert.equal(REQUIRED_STAGING_MIGRATIONS.operations.at(-1), "0182_project_alpha_directory_relationship_recovery_guard.sql");
   assert.deepEqual(REQUIRED_STAGING_MIGRATIONS.delivery.slice(-46), [
     "0184_native_client_feedback.sql",
     "0185_native_service_request_ownership.sql",
@@ -550,6 +550,7 @@ test("pins the native portal, the complete Operations chain, both 0199 files, an
     "0179_project_alpha_acquired_native_identity_collision.sql",
     "0180_project_alpha_project_v2_recovery_authorization.sql",
     "0181_project_alpha_directory_create_generation_recovery.sql",
+    "0182_project_alpha_directory_relationship_recovery_guard.sql",
   ]);
   const nativeDirectoryStart = REQUIRED_STAGING_MIGRATIONS.operations.indexOf("0054_project_alpha_directory_outbox.sql");
   assert.deepEqual(REQUIRED_STAGING_MIGRATIONS.operations.slice(nativeDirectoryStart, nativeDirectoryStart + 3), [

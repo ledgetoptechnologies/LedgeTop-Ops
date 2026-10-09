@@ -55,7 +55,7 @@ function nodeSqliteD1() {
       sqlite.exec("COMMIT");
       return results;
     } catch (error) { sqlite.exec("ROLLBACK"); throw error; }
-  }, close() { sqlite.close(); } };
+  }, execScript(sql) { sqlite.exec(sql); }, close() { sqlite.close(); } };
   return adapter;
 }
 const nowWindow = (offset = 0) => {
@@ -127,14 +127,35 @@ function legacyArtifact(phase, sequence, priorProvision) {
 }
 
 async function migrate(db) {
-  assert.equal(migrationNames.length, 181);
-  assert.equal(migrationNames.at(-1), "0181_project_alpha_directory_create_generation_recovery.sql");
+  assert.equal(migrationNames.length, 182);
+  assert.equal(migrationNames.at(-1), "0182_project_alpha_directory_relationship_recovery_guard.sql");
   await db.prepare("CREATE TABLE d1_migrations(id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT UNIQUE NOT NULL,applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)").run();
   for (const name of migrationNames) {
     const source = fs.readFileSync(path.join(migrationDirectory, name), "utf8").replace(/\r\n/g, "\n");
-    const statements = unstable_splitSqlQuery(source).map(sql => sql.trim()).filter(sql => sql && !/^PRAGMA\s+foreign_keys\s*=\s*ON\s*;?$/i.test(sql));
-    await db.batch([...statements.map(sql => db.prepare(sql)), db.prepare("INSERT INTO d1_migrations(name) VALUES(?)").bind(name)]);
+    if (typeof db.execScript === "function") {
+      db.execScript(source);
+      await db.prepare("INSERT INTO d1_migrations(name) VALUES(?)").bind(name).run();
+    } else {
+      const statements = unstable_splitSqlQuery(source).map(sql => sql.trim()).filter(sql => sql && !/^PRAGMA\s+foreign_keys\s*=\s*ON\s*;?$/i.test(sql));
+      await db.batch([...statements.map(sql => db.prepare(sql)), db.prepare("INSERT INTO d1_migrations(name) VALUES(?)").bind(name)]);
+    }
   }
+  assert.deepEqual((await db.prepare(`SELECT type,name FROM sqlite_master WHERE name IN (
+    'project_alpha_directory_live_relationship_commands','operations_directory_intent_relationship_resolved',
+    'operations_directory_materializations_reserve','operations_directory_intent_relationship_dependencies_insert_guard',
+    'operations_directory_intent_relationship_dependencies_existing_mapping_ack_insert_guard',
+    'project_alpha_directory_relationship_revision_evidence','project_alpha_directory_validated_materialized_acknowledgements')
+    ORDER BY name`).all()).results, [
+    { type: "trigger", name: "operations_directory_intent_relationship_dependencies_existing_mapping_ack_insert_guard" },
+    { type: "trigger", name: "operations_directory_intent_relationship_dependencies_insert_guard" },
+    { type: "view", name: "operations_directory_intent_relationship_resolved" },
+    { type: "trigger", name: "operations_directory_materializations_reserve" },
+    { type: "view", name: "project_alpha_directory_live_relationship_commands" },
+    { type: "view", name: "project_alpha_directory_relationship_revision_evidence" },
+    { type: "view", name: "project_alpha_directory_validated_materialized_acknowledgements" },
+  ]);
+  assert.equal(await db.prepare("SELECT count(*) count FROM d1_migrations").first("count"), 182);
+  assert.deepEqual((await db.prepare("PRAGMA foreign_key_check").all()).results, []);
 }
 
 async function seed(db) {
@@ -168,7 +189,7 @@ async function seed(db) {
     actor: { staffId: target.staffId, accessSubject: "access|retained", admissionVersion: 1,
       selectedGrantId: grantIds[0], loginEmail: canonicalStaff.email, profileVersion: 1, selectedIdentityGrantId: grantIds[1] },
     relationship: { organizationRecordId: null, expectedRelationshipVersion: 0 } });
-  assert.equal(created.status, "written");
+  assert.equal(created.status, "written", JSON.stringify(created));
   assert.equal(created.commandIds.length, 1);
   assert.equal(created.commandIds[0], target.predecessorCommandId);
   await db.prepare(`UPDATE project_alpha_directory_outbox SET state='leased',lease_token='retained-test',
@@ -290,7 +311,7 @@ async function createCanonicalPendingDirectoryWork(db) {
   return created.commandIds[0];
 }
 
-test("retained directory authority executes against the complete 181-migration D1 schema", async t => {
+test("retained directory authority executes against the complete 182-migration D1 schema", async t => {
   const mf = new Miniflare({ modules: true, script: "export default {fetch(){return new Response('ok')}}",
     d1Databases: { DB: `retained-${crypto.randomUUID()}` } });
   try {
@@ -372,7 +393,7 @@ test("retained directory authority executes against the complete 181-migration D
   } finally { await mf.dispose(); }
 });
 
-test("a canonical extra pending Directory command rejects reactivation in an isolated 181-schema fixture", async () => {
+test("a canonical extra pending Directory command rejects reactivation in an isolated 182-schema fixture", async () => {
   const mf = new Miniflare({ modules: true, script: "export default {fetch(){return new Response('ok')}}",
     d1Databases: { DB: `retained-unsettled-${crypto.randomUUID()}` } });
   try {
@@ -386,7 +407,7 @@ test("a canonical extra pending Directory command rejects reactivation in an iso
   } finally { await mf.dispose(); }
 }, 120_000);
 
-test("node:sqlite executes canonical 181 authority batches atomically when workerd is unavailable", async () => {
+test("node:sqlite executes canonical 182 authority batches atomically when workerd is unavailable", async () => {
   const db = nodeSqliteD1();
   try {
     await migrate(db);

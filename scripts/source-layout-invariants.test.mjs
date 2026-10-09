@@ -96,19 +96,17 @@ function remoteIncompatibleTriggerCaseGuard(tokens) {
         else if (endsCase) depth -= 1;
         if (bodyToken === "SELECT") {
           let statementCaseDepth = 0;
-          let hasCase = false;
-          let hasRaise = false;
           for (let statementIndex = bodyIndex + 1; statementIndex < tokens.length; statementIndex += 1) {
             const statementToken = tokens[statementIndex];
             if (statementToken === "CASE") {
               statementCaseDepth += 1;
-              hasCase = true;
             } else if (statementToken === "RAISE") {
-              hasRaise = true;
+              // A top-level SELECT RAISE ... WHERE <CASE predicate> is the
+              // supported form. Only RAISE nested inside CASE is prohibited.
+              if (statementCaseDepth > 0) return true;
             } else if (statementToken === "END" && statementCaseDepth > 0) {
               statementCaseDepth -= 1;
             } else if (statementToken === ";" && statementCaseDepth === 0) {
-              if (hasCase && hasRaise) return true;
               break;
             }
           }
@@ -586,6 +584,20 @@ test("migration triggers avoid D1's nested SELECT CASE/RAISE transport form", ()
       SELECT CASE WHEN NEW.id IS NULL THEN 0 ELSE 1 END;
     END;
   `)), false);
+  assert.equal(remoteIncompatibleTriggerCaseGuard(sqlTokens(`
+    CREATE TRIGGER example BEFORE INSERT ON test
+    BEGIN
+      SELECT RAISE(ABORT, 'missing')
+      WHERE EXISTS(SELECT 1 FROM test WHERE CASE WHEN NEW.id IS NULL THEN 1 ELSE 0 END=1);
+    END;
+  `)), false);
+  assert.equal(remoteIncompatibleTriggerCaseGuard(sqlTokens(`
+    CREATE TRIGGER example BEFORE INSERT ON test
+    BEGIN
+      SELECT RAISE(ABORT, 'outer') WHERE EXISTS(
+        SELECT CASE WHEN NEW.id IS NULL THEN RAISE(ABORT, 'nested') ELSE 0 END);
+    END;
+  `)), true);
 });
 
 test("the Project Alpha handoff stays pinned to the reviewed compatibility corpus", () => {

@@ -263,7 +263,16 @@ async function relationshipDependency(db: D1Database, row: Row): Promise<Relatio
         AND json_extract(outbox.outcome_json,'$.response.result.resource.type')='organization'
         AND json_extract(outbox.outcome_json,'$.response.result.resource.id')=?
         AND json_extract(outbox.outcome_json,'$.response.result.resource.revision')=?
-        AND json_extract(outbox.outcome_json,'$.response.result.data.publicId')=?`)
+        AND json_extract(outbox.outcome_json,'$.response.result.resource.publicId')=?
+        AND ((SELECT count(*) FROM json_each(outbox.outcome_json,'$.response.result'))=2
+            AND json_type(outbox.outcome_json,'$.response.result.data') IS NULL
+            AND json_extract(outbox.command_json,'$.operation')='create'
+            AND outbox.resource_type='organization'
+          OR (SELECT count(*) FROM json_each(outbox.outcome_json,'$.response.result'))=3
+            AND json_type(outbox.outcome_json,'$.response.result.data')='object'
+            AND (SELECT count(*) FROM json_each(outbox.outcome_json,'$.response.result.data'))=1
+            AND json_extract(outbox.outcome_json,'$.response.result.data.publicId')=
+              json_extract(outbox.outcome_json,'$.response.result.resource.publicId'))`)
       .bind(dependency.parent_mapping_command_id, row.source_id, row.expected_source_instance_id, row.application_id,
         row.expected_history_epoch_id, dependency.parent_external_canonical_id, dependency.resolved_parent_public_id,
         dependency.parent_ack_command_json, dependency.parent_ack_outcome_json, row.source_id, row.expected_source_instance_id,

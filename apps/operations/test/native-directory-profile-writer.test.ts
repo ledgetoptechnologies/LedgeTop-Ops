@@ -328,16 +328,24 @@ describe("canonical native Directory profile writer", () => {
       .bind(client.input.recordId).first("count")).toBe(0);
   });
 
-  it("pins legacy mapping evidence when no acknowledged current parent intent is available", async () => {
+  it("rejects legacy mapping evidence without an acknowledged current-version parent intent", async () => {
     const actor = await seedActor(), organization = await create("organization", actor, uuid());
     const organizationPublicId = await acknowledgeCreate(organization.input, organization.outcome, "1", false);
-    const client = await create("client", actor, undefined, organization.input.recordId), created = written(client.outcome);
-    expect(await db.prepare(`SELECT evidence_kind,parent_mapping_command_id,parent_public_id,parent_ack_revision
-      FROM operations_directory_intent_relationship_dependencies WHERE client_record_id=?`).bind(client.input.recordId).first())
-      .toEqual({ evidence_kind: "existing_mapping", parent_mapping_command_id: written(organization.outcome).commandIds[0],
-        parent_public_id: organizationPublicId, parent_ack_revision: "1" });
-    expect(JSON.parse((await db.prepare("SELECT command_json FROM project_alpha_directory_outbox WHERE command_id=?")
-      .bind(created.commandIds[0]).first<string>("command_json"))!).fields.organizationPublicId).toBe(organizationPublicId);
+    const client = await create("client", actor, undefined, organization.input.recordId);
+    expect(organizationPublicId).toMatch(/^[0-9a-f]{32}$/);
+    expect(client.outcome).toEqual({ status: "blocked", reason: "client_relationship_evidence" });
+  });
+
+  it("does not fall back to a bootstrap mapping while the current parent profile version is pending", async () => {
+    const actor = await seedActor(), organization = await create("organization", actor, uuid());
+    await acknowledgeCreate(organization.input, organization.outcome);
+    const update = await writeNativeDirectoryProfile(db, { operation: "update", mutationId: uuid(),
+      recordId: organization.input.recordId, expectedLocalVersion: 1, kind: "organization",
+      profile: { ...organizationProfile, name: "Pending parent version" },
+      destinations: [destination(organization.input.recordId, "1")], actor } as NativeDirectoryProfileWrite);
+    expect(update.status).toBe("written");
+    const client = await create("client", actor, undefined, organization.input.recordId);
+    expect(client.outcome).toEqual({ status: "blocked", reason: "client_relationship_evidence" });
   });
 
   it("updates organization and client profiles from enrolled destinations and active mappings", async () => {

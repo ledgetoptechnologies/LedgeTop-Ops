@@ -476,6 +476,7 @@ export const REQUIRED_STAGING_MIGRATIONS = Object.freeze({
     "0179_project_alpha_acquired_native_identity_collision.sql",
     "0180_project_alpha_project_v2_recovery_authorization.sql",
     "0181_project_alpha_directory_create_generation_recovery.sql",
+    "0182_project_alpha_directory_relationship_recovery_guard.sql",
   ]),
 });
 
@@ -504,6 +505,7 @@ export const REQUIRED_STAGING_MIGRATION_SHA256 = Object.freeze({
     "0179_project_alpha_acquired_native_identity_collision.sql": "58a00c5c0c9ddf5892062d17b3e1e7bccd47705c97777454f042cb28cdb922f7",
     "0180_project_alpha_project_v2_recovery_authorization.sql": "deb385a1f97f2e82c7b4e634e19ae7fd406efe6368e89ac0085aed440a2a3528",
     "0181_project_alpha_directory_create_generation_recovery.sql": "8b0be2c23cb8a45dd1dd46e78067e00bfd8d5dbf2cc2294219e85d1e26915bd6",
+    "0182_project_alpha_directory_relationship_recovery_guard.sql": "1aeef8de3a6f3fb4f08a2b3e6c69d02c6fb0cb9d2c092b4cb507ed1759992b0f",
   }),
 });
 
