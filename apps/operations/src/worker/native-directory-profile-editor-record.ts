@@ -92,8 +92,9 @@ export async function nativeDirectoryOrganizationChoices(env: Env): Promise<Nati
   return choices.sort((left, right) => left.name.localeCompare(right.name) || left.recordId.localeCompare(right.recordId));
 }
 
-/** A projected PA public ID is never an Operations Directory record ID. Expose
- * an editor coordinate only when the active mapping proves the exact pair. */
+/** A projected PA public ID is never an Operations Directory record ID. Client
+ * Hub routes active mappings by their canonical Operations record ID; retain
+ * the server-read PA public ID only as part of the exact tuple proof. */
 export async function nativeDirectoryProfileEditorRecord(env: Env, root: { source_id: string; root_namespace: string;
   kind: "organization" | "standalone_client"; public_id: string }): Promise<{ recordId: string; kind: "organization" | "client" } | null> {
   if (root.root_namespace !== "business" || !root.source_id.startsWith("project-alpha:")) return null;
@@ -101,15 +102,24 @@ export async function nativeDirectoryProfileEditorRecord(env: Env, root: { sourc
   try {
     const configured = resolveProjectAlphaApiV2Connection(env, root.source_id);
     if (!configured.enabled || !configured.connection.expectedHistoryEpoch) return null;
-    const rows = (await env.OPS_DB.withSession("first-primary").prepare(`SELECT mapping.record_id recordId
+    const rows = (await env.OPS_DB.withSession("first-primary").prepare(`SELECT mapping.record_id recordId,
+        mapping.project_alpha_public_id projectAlphaPublicId
       FROM project_alpha_active_directory_mappings mapping JOIN operations_directory_records record
         ON record.record_id=mapping.record_id AND record.record_kind=mapping.resource_type
       WHERE mapping.source_id=? AND mapping.source_instance_id=? AND mapping.application_id=? AND mapping.history_epoch_id=?
-        AND mapping.resource_type=? AND mapping.project_alpha_public_id=?
-        AND record.record_kind=? LIMIT 2`).bind(root.source_id, configured.connection.expectedSourceInstanceId,
+        AND mapping.resource_type=? AND mapping.record_id=? AND record.record_kind=?
+        AND length(mapping.project_alpha_public_id)=32 AND mapping.project_alpha_public_id NOT GLOB '*[^0-9a-f]*'
+        AND (SELECT count(*) FROM project_alpha_active_directory_mappings candidate
+          WHERE candidate.source_id=mapping.source_id AND candidate.source_instance_id=mapping.source_instance_id
+            AND candidate.application_id=mapping.application_id AND candidate.history_epoch_id=mapping.history_epoch_id
+            AND candidate.resource_type=mapping.resource_type
+            AND (candidate.record_id=mapping.record_id OR candidate.external_id=mapping.external_id
+              OR candidate.project_alpha_public_id=mapping.project_alpha_public_id))=1
+      LIMIT 2`).bind(root.source_id, configured.connection.expectedSourceInstanceId,
         configured.connection.expectedApplicationId, configured.connection.expectedHistoryEpoch, recordKind, root.public_id, recordKind)
-      .all<{ recordId: string }>()).results;
-    return rows.length === 1 && typeof rows[0]?.recordId === "string" && rows[0].recordId.length > 0
+      .all<{ recordId: string; projectAlphaPublicId: string }>()).results;
+    return rows.length === 1 && rows[0]?.recordId === root.public_id
+      && /^[0-9a-f]{32}$/.test(rows[0].projectAlphaPublicId)
       ? { recordId: rows[0].recordId, kind: recordKind } : null;
   } catch { return null; }
 }
@@ -134,11 +144,14 @@ export async function nativeDirectoryLinkedClientEditorRecords(env: Env, root: {
       JOIN operations_directory_records record ON record.record_id=client.record_id AND record.record_kind='client'
       JOIN operations_directory_revisions revision ON revision.record_id=record.record_id AND revision.version=record.current_version
       WHERE parent.source_id=? AND parent.source_instance_id=? AND parent.application_id=? AND parent.history_epoch_id=?
-        AND parent.resource_type='organization' AND parent.project_alpha_public_id=?
+        AND parent.resource_type='organization' AND parent.record_id=?
+        AND length(parent.project_alpha_public_id)=32 AND parent.project_alpha_public_id NOT GLOB '*[^0-9a-f]*'
         AND (SELECT count(*) FROM project_alpha_active_directory_mappings exact_parent
           WHERE exact_parent.source_id=parent.source_id AND exact_parent.source_instance_id=parent.source_instance_id
             AND exact_parent.application_id=parent.application_id AND exact_parent.history_epoch_id=parent.history_epoch_id
-            AND exact_parent.resource_type='organization' AND exact_parent.project_alpha_public_id=parent.project_alpha_public_id)=1
+            AND exact_parent.resource_type='organization'
+            AND (exact_parent.record_id=parent.record_id OR exact_parent.external_id=parent.external_id
+              OR exact_parent.project_alpha_public_id=parent.project_alpha_public_id))=1
         AND (SELECT count(*) FROM project_alpha_active_directory_mappings exact_client
           WHERE exact_client.source_id=client.source_id AND exact_client.source_instance_id=client.source_instance_id
             AND exact_client.application_id=client.application_id AND exact_client.history_epoch_id=client.history_epoch_id
