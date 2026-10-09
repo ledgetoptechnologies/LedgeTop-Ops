@@ -16,6 +16,7 @@ const reviewerAccessSubject = "access|migration-chain-reviewer";
 type AcquisitionFixture = {
   stem: string;
   recordId: string;
+  externalId?: string;
   kind: "organization" | "client";
   publicId: string;
   requestHash: string;
@@ -27,6 +28,7 @@ type AcquisitionFixture = {
 
 async function seedAcquisitionFixture(database: D1Database, fixture: AcquisitionFixture) {
   const id = (part: string) => `${fixture.stem}${part}000000-0000-4000-8000-000000000001`;
+  const externalId = fixture.externalId ?? fixture.recordId;
   const reviewId = id("1"), commandId = id("2"), acquiredReceiptId = id("3");
   const claimId = id("4"), nativeOwnerEpochId = id("5");
   await database.prepare(`INSERT INTO project_alpha_existing_directory_binding_review_evidence(
@@ -36,12 +38,12 @@ async function seedAcquisitionFixture(database: D1Database, fixture: Acquisition
     reviewer_admission_version,reviewer_profile_version,reviewed_at,reviewed_local_record_version)
     VALUES(?,?,?,?,?,?,?,?,?,?,'7',?,?,?,?,1,1,strftime('%Y-%m-%dT%H:%M:%fZ','now'),1)`)
     .bind(reviewId,fixture.requestHash,fixture.recordId,sourceId,sourceInstanceId,applicationId,historyEpochId,
-      fixture.kind,fixture.recordId,fixture.publicId,id("6"),fixture.reviewHash,reviewerStaffId,reviewerAccessSubject).run();
+      fixture.kind,externalId,fixture.publicId,id("6"),fixture.reviewHash,reviewerStaffId,reviewerAccessSubject).run();
   await database.prepare(`INSERT INTO project_alpha_existing_directory_binding_acquisition_commands(
     command_id,request_sha256,record_id,source_id,source_instance_id,application_id,history_epoch_id,
     resource_type,external_id,project_alpha_public_id,project_alpha_revision,review_receipt_id)
     VALUES(?,?,?,?,?,?,?,?,?,?,'7',?)`).bind(commandId,fixture.requestHash,fixture.recordId,sourceId,
-      sourceInstanceId,applicationId,historyEpochId,fixture.kind,fixture.recordId,fixture.publicId,reviewId).run();
+      sourceInstanceId,applicationId,historyEpochId,fixture.kind,externalId,fixture.publicId,reviewId).run();
   for (const [version,state,part] of [[1,"pending","7"],[2,"acknowledged","8"]] as const) {
     await database.prepare(`INSERT INTO project_alpha_existing_directory_binding_acquisition_events(
       command_id,state_version,transition_id,request_sha256,state,occurred_at)
@@ -52,25 +54,25 @@ async function seedAcquisitionFixture(database: D1Database, fixture: Acquisition
     command_id,source_instance_id,application_id,history_epoch_id,resource_type,external_id,
     project_alpha_public_id,project_alpha_revision,destination_origin,pa_request_id,pa_replayed,response_sha256)
     VALUES(?,?,?,?,?,?,?,'7','https://pa.example.test',?,0,?)`).bind(commandId,sourceInstanceId,
-      applicationId,historyEpochId,fixture.kind,fixture.recordId,fixture.publicId,id("9"),fixture.acquisitionHash).run();
+      applicationId,historyEpochId,fixture.kind,externalId,fixture.publicId,id("9"),fixture.acquisitionHash).run();
   await database.prepare(`INSERT INTO project_alpha_existing_directory_binding_acquired_mapping_receipts(
     receipt_id,request_sha256,command_id,record_id,source_id,source_instance_id,application_id,
     history_epoch_id,resource_type,external_id,project_alpha_public_id,project_alpha_revision,
     acquisition_evidence_sha256,profile_evidence_sha256,binding_status_evidence_sha256)
     VALUES(?,?,?,?,?,?,?,?,?,?,?,'7',?,?,?)`).bind(acquiredReceiptId,fixture.requestHash,commandId,
-      fixture.recordId,sourceId,sourceInstanceId,applicationId,historyEpochId,fixture.kind,fixture.recordId,
+      fixture.recordId,sourceId,sourceInstanceId,applicationId,historyEpochId,fixture.kind,externalId,
       fixture.publicId,fixture.acquisitionHash,fixture.profileHash,fixture.bindingHash).run();
   await database.prepare(`INSERT INTO project_alpha_acquired_canonical_mappings(
     receipt_id,record_id,source_id,source_instance_id,application_id,history_epoch_id,
     resource_type,external_id,project_alpha_public_id) VALUES(?,?,?,?,?,?,?,?,?)`).bind(acquiredReceiptId,
-      fixture.recordId,sourceId,sourceInstanceId,applicationId,historyEpochId,fixture.kind,fixture.recordId,
+      fixture.recordId,sourceId,sourceInstanceId,applicationId,historyEpochId,fixture.kind,externalId,
       fixture.publicId).run();
   await database.prepare(`INSERT INTO project_alpha_acquired_native_owner_claims(
     claim_id,receipt_id,native_owner_epoch_id,record_id,source_id,source_instance_id,application_id,
     history_epoch_id,resource_type,external_id,project_alpha_public_id,expected_local_record_version,
     actor_id,request_sha256) VALUES(?,?,?,?,?,?,?,?,?,?,?,1,?,?)`).bind(claimId,acquiredReceiptId,
       nativeOwnerEpochId,fixture.recordId,sourceId,sourceInstanceId,applicationId,historyEpochId,fixture.kind,
-      fixture.recordId,fixture.publicId,reviewerStaffId,fixture.requestHash).run();
+      externalId,fixture.publicId,reviewerStaffId,fixture.requestHash).run();
   await database.prepare("INSERT INTO project_alpha_acquired_mapping_activation(receipt_id) VALUES(?)")
     .bind(acquiredReceiptId).run();
   return { reviewId, acquiredReceiptId, claimId };
@@ -78,6 +80,7 @@ async function seedAcquisitionFixture(database: D1Database, fixture: Acquisition
 
 async function activateFixture(database: D1Database, fixture: AcquisitionFixture,
   ids: Awaited<ReturnType<typeof seedAcquisitionFixture>>, activationId: string) {
+  const externalId = fixture.externalId ?? fixture.recordId;
   return database.prepare(`INSERT INTO project_alpha_existing_directory_binding_activation_receipts(
     activation_id,review_receipt_id,idempotency_key,acquired_receipt_id,native_owner_claim_id,
     record_id,source_id,source_instance_id,application_id,history_epoch_id,resource_type,external_id,
@@ -86,7 +89,7 @@ async function activateFixture(database: D1Database, fixture: AcquisitionFixture
     activated_by_staff_id,directory_grant_generation)
     VALUES(?,?,?, ?,?,?,?,?,?,?,?,?,?,'7',1,?,?,?,?,?,1)`)
     .bind(activationId,ids.reviewId,activationId,ids.acquiredReceiptId,ids.claimId,fixture.recordId,sourceId,
-      sourceInstanceId,applicationId,historyEpochId,fixture.kind,fixture.recordId,fixture.publicId,
+      sourceInstanceId,applicationId,historyEpochId,fixture.kind,externalId,fixture.publicId,
       fixture.requestHash,fixture.acquisitionHash,fixture.profileHash,fixture.bindingHash,reviewerStaffId).run();
 }
 
@@ -396,7 +399,7 @@ describe("existing PA directory acquisition migration chain", () => {
       .rejects.toThrow(/local record version is stale/);
   }, 180_000);
 
-  it("upgrades populated 0125 activation state through 0132 without changing protected rows", async () => {
+  it("upgrades populated 0125 activation state through 0181 without changing protected rows", async () => {
     const runtime = new Miniflare({ modules: true, compatibilityDate: "2026-08-06",
       script: "export default {fetch(){return new Response('ok')}}", d1Databases: ["OPS_DB"] });
     runtimes.push(runtime);
@@ -460,7 +463,7 @@ describe("existing PA directory acquisition migration chain", () => {
     ]);
 
     const preexisting: AcquisitionFixture = {
-      stem: "a", recordId: preexistingRecordId, kind: "organization",
+      stem: "a", recordId: preexistingRecordId, externalId: "pa-existing-organization-77", kind: "organization",
       publicId: "1".repeat(32), requestHash: "0".repeat(64), reviewHash: "1".repeat(64),
       acquisitionHash: "2".repeat(64), profileHash: "3".repeat(64), bindingHash: "1".repeat(64),
     };
@@ -599,6 +602,16 @@ describe("existing PA directory acquisition migration chain", () => {
     expect(await database.prepare("SELECT count(*) FROM project_alpha_project_adoption_bind_receipts").first("count(*)")).toBe(0);
     expect(await database.prepare(`SELECT count(*) FROM project_alpha_active_directory_mappings
       WHERE mapping_kind='acquired'`).first("count(*)")).toBe(3);
-    expect(await readPreserved()).toEqual(preserved);
+    const laterMigrations = readdirSync(directory)
+      .filter(name => /^\d{4}_.+\.sql$/.test(name) && name.slice(0, 4) >= "0133" && name.slice(0, 4) <= "0181").sort();
+    expect(laterMigrations.at(-1)).toBe("0181_project_alpha_directory_create_generation_recovery.sql");
+    for (const migration of laterMigrations) {
+      await database.batch(splitD1MigrationStatements(readFileSync(new URL(migration, directory), "utf8"))
+        .map(statement => database.prepare(statement)));
+    }
+    expect(await database.prepare(`SELECT record_id,external_id FROM project_alpha_active_directory_mappings
+      WHERE provenance_id='a9000000-0000-4000-8000-000000000001'`).first()).toEqual({
+      record_id: preexistingRecordId, external_id: preexisting.externalId,
+    });
   }, 60_000);
 });
