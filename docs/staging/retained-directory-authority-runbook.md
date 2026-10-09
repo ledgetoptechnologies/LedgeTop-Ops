@@ -11,7 +11,7 @@ client-portal access, or change public links.
 
 - Use the reviewed source revision and exact staging D1 binding. Run the normal
   exact-revision CI and staging preservation checks before promoting any Worker.
-- The compiler pins the complete 181-migration chain through 0181, including
+- The current compiler pins the complete 182-migration chain through 0182, including
   migration contents. Do not relax the pin after a new migration; review and
   intentionally advance it with matching tests instead.
 - The original provision and paired-revoke evidence must exist in the private,
@@ -28,14 +28,15 @@ Run from the isolated repository root, using the independently verified minimal
 staging configuration path rather than a production or mixed-resource config.
 
 ```powershell
-node scripts/staging-retained-directory-authority-window.mjs prepare-readonly --config <minimal-staging-config.json>
-node scripts/staging-retained-directory-authority-window.mjs apply --config <minimal-staging-config.json>
+node scripts/staging-retained-directory-authority-window.mjs prepare-readonly --config <minimal-staging-config.json> --artifact <exact-latest-close-artifact.json>
+node scripts/staging-retained-directory-authority-window.mjs apply --config <minimal-staging-config.json> --artifact <exact-latest-close-artifact.json>
 node scripts/staging-retained-directory-authority-window.mjs close --config <minimal-staging-config.json> --artifact <saved-provision.json>
 node scripts/staging-retained-directory-authority-window.mjs reconcile --config <minimal-staging-config.json> --artifact <saved-retained-artifact.json>
 ```
 
 - `prepare-readonly` reads and compiles current state; it does not save or apply
-  an authority packet.
+  an authority packet. It requires the exact verified latest close artifact,
+  not the original provision artifact or an inferred older receipt.
 - `apply` saves private recovery evidence before the atomic batch, then verifies
   exact grant/history state and immutable approval/receipt readback.
 - Save the returned artifact path. Complete the normal recovery workflow and
@@ -54,7 +55,16 @@ node scripts/staging-retained-directory-authority-window.mjs reconcile --config 
 - Approval expiry is **not** automatic grant removal. Always finish the paired
   close and independent readback; never claim cleanup based on elapsed time.
 
-## Live recovery ordering before a relationship-schema successor
+## Historical profile-recovery ordering before the 0182 successor
+
+The following sequence describes the earlier 0181 profile-recovery window, not
+permission to run an old artifact against today's schema. On October 9, a fresh
+staging read confirmed 0182 is applied. The retained client's latest close is a
+schema-v1 artifact pinned to the 181-file ledger, and current reactivation
+preparation rejects it. Historical-anchor compatibility is awaiting explicit
+approval and implementation/review; do not change the saved artifact, relax the
+current ledger requirement, issue replacement grants, or claim preparation
+passed until that specific issue is resolved.
 
 - Retained create-generation recovery and profile settlement use canonical 0181.
   Finish their acknowledged write/replay/conflict/readback and paired authority
