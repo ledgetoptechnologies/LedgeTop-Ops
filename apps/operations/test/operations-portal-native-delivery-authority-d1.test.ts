@@ -174,7 +174,8 @@ async function acknowledgeCreate(seed: Awaited<ReturnType<typeof seedRecord>>, p
       lease_token=NULL,lease_expires_at=NULL WHERE command_id=? AND state='leased'`).bind(JSON.stringify({
         status: "acknowledged", response: { sourceInstanceId: seed.write.destinations[0]!.sourceInstanceUUID,
           applicationId: seed.write.destinations[0]!.applicationUUID,
-          historyEpoch: seed.write.destinations[0]!.historyEpoch, result: { resource: { type: seed.write.kind,
+          historyEpoch: seed.write.destinations[0]!.historyEpoch, requestId: commandId, replayed: false,
+          result: { resource: { type: seed.write.kind,
             id: seed.write.recordId, publicId, revision: "1" }, data: { publicId },
             authorizationGeneration: "1" } },
       }), commandId),
