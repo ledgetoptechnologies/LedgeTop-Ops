@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { createRequire } from "node:module";
+import fs from "node:fs";
 import path from "node:path";
 import test from "node:test";
 
@@ -341,11 +342,11 @@ function preparationHarness(options = {}) {
     root: "C:\\private-root",
     withBinding: async (_config, callback) => callback({ db: {}, target: STAGING_TARGET }),
     reviewedMigrations: () => options.expectedMigrations
-      ?? ["0176_operations_directory_acquired_intent_authority.sql", "0177_operations_directory_acquired_intent_update_authority.sql", "0178_project_alpha_project_inbound_reconciliation.sql", "0179_project_alpha_acquired_native_identity_collision.sql", "0180_project_alpha_project_v2_recovery_authorization.sql"],
+      ?? ["0176_operations_directory_acquired_intent_authority.sql", "0177_operations_directory_acquired_intent_update_authority.sql", "0178_project_alpha_project_inbound_reconciliation.sql", "0179_project_alpha_acquired_native_identity_collision.sql", "0180_project_alpha_project_v2_recovery_authorization.sql", "0181_project_alpha_directory_create_generation_recovery.sql"],
     readMigrations: async () => {
       if (options.ledgerReadFails) throw new Error("private transport detail");
       return options.actualMigrations
-        ?? ["0176_operations_directory_acquired_intent_authority.sql", "0177_operations_directory_acquired_intent_update_authority.sql", "0178_project_alpha_project_inbound_reconciliation.sql", "0179_project_alpha_acquired_native_identity_collision.sql", "0180_project_alpha_project_v2_recovery_authorization.sql"];
+        ?? ["0176_operations_directory_acquired_intent_authority.sql", "0177_operations_directory_acquired_intent_update_authority.sql", "0178_project_alpha_project_inbound_reconciliation.sql", "0179_project_alpha_acquired_native_identity_collision.sql", "0180_project_alpha_project_v2_recovery_authorization.sql", "0181_project_alpha_directory_create_generation_recovery.sql"];
     },
     referenceTables: async () => ["native_directory_grants", "native_directory_grant_history"],
     referenceCounts: async () => [
@@ -379,6 +380,19 @@ test("prepare uses one guarded batch and verifies a pristine exact area", async 
   assert.match(sql, /INSERT INTO native_business_areas/);
   assert.match(sql, /changes\(\)=1/);
   assert.match(sql, /native-area-poststate-guard-failed/);
+});
+
+test("prepare accepts the exact canonical repository migration chain through 0181", async () => {
+  const migrationDirectory = path.join(ROOT, "apps", "operations", "migrations");
+  const migrations = fs.readdirSync(migrationDirectory)
+    .filter(name => /^\d{4}_.+\.sql$/.test(name))
+    .sort();
+  const { dependencies } = preparationHarness({ actualMigrations: migrations });
+  dependencies.root = ROOT;
+  delete dependencies.reviewedMigrations;
+  assert.equal((await prepareStagingNativeAuthorityArea(
+    "binding.json", AREA, dependencies,
+  )).status, "prepared");
 });
 
 test("prepare reconciles a lost insert response from exact unused readback", async () => {
