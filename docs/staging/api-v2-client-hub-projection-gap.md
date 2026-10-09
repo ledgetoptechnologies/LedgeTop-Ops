@@ -1,5 +1,64 @@
 # API v2 Client Hub Projection Gap
 
+## Superseding acceptance checkpoint — October 9, 2026 UTC
+
+- Latest local verification: the real legacy client-list HTTP route passes
+  without a native mapping relation, and nine focused source/visibility checks
+  pass. The canonical native list/exact-root-resolver suite also passes after
+  increasing only its migration-setup timeout (one test, 94.47 seconds total).
+  That suite is not a complete HTTP detail/render acceptance test. The broader
+  HTTP run passed 41 cases; three incomplete native-mapping test fixtures
+  failed closed. Corrected fixtures exposed a portal-alias context-stability
+  issue in two cases, which remains a local release gate rather than a pass.
+- The canonical-181 temporary-authority database test now executes an initial
+  open/close and a second open/close, including exact audit/receipt history and
+  atomic rollback on approval or grant conflicts, while preserving unrelated
+  staff grant/history rows. All eight focused Workers-runtime checks also pass.
+  These are local tests, not a live grant or a completed staging permission window.
+- Producer tracing disproved a proposed acquired differing-ID pending-command
+  race: the writer emits the resolved PA external ID for acquired updates, so
+  the canonical external-ID pending fence is retained. Fixtures now use that
+  actual wire identity, distinct from Ops record ID. Unsupported alias and
+  acquired-create acceptance paths were removed; current-intent-version proof
+  and an eight-case update response negative matrix are retained. Consumer
+  fixtures do not prove acquisition/activation producer enforcement. A separate
+  populated-upgrade test now passes through all 181 canonical migrations with
+  triggers enabled and proves activation retains distinct Ops and PA IDs.
+- A deliberately created synthetic customer now has independently verified PA
+  create and profile-update acknowledgments. Each dispatched once; the update
+  advanced the current PA resource revision. An active external binding may
+  retain its creation-time revision: do not equate that revision with the
+  current resource revision or report them as identical.
+- The reviewed staging base was restored after the bounded scheduler window.
+  Temporary preview credentials were removed and all three temporary
+  synthetic-area Directory grants were independently confirmed inactive.
+- Normal Client Hub navigation remains blocked for an API-v2-only source that
+  has no legacy connector registration. The correction must admit only exact,
+  unique, active native mappings under enabled deployment-owned identity;
+  preserve explicit connector hiding, legacy projection isolation, and
+  credential-free detail/context/pagination invalidation. Do not register a
+  legacy connector merely to bypass this gap.
+- Independent review caught two additional cases before deployment: the
+  historical primary-source visibility default must not substitute for native
+  identity proof, and an acquisition-time local version must not prevent a
+  later acknowledged profile update from supplying current relationship
+  evidence. Corrections and regression coverage are local work, not live
+  acceptance.
+- The relationship proposal passes six focused full-canonical-181 SQLite
+  tests, including an acquired mapping at local version 1 followed by an
+  acknowledged update at version 2. It remains a proposal, not a canonical or
+  applied migration. These fixtures isolate the consumer view by seeding
+  producer outputs; they do not prove the complete live producer workflow.
+- Remaining gates: deploy and verify the native Client Hub correction; restore
+  the synthetic profile through the normal editor; complete post-acknowledgment
+  replay/conflict and relationship acceptance; then verify real signed-in
+  recipient enrollment, selected direct/nested file bytes, sibling and
+  cross-customer denial, and same-session revocation.
+- The production owner-update checkpoint is **not ready**. No production PA
+  update, production client activation, portal cutover, or existing public-link
+  change is authorized by this evidence. Older dated observations below are
+  historical and must not be treated as current deployment or schema state.
+
 ## Current architecture
 
 - API-v2 inventory is immutable evidence; inventory sync alone must not create or mutate canonical Ops records, client access, Delivery records, or public links.
