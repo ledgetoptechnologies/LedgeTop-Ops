@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import test from "node:test";
+import { renderConfigs } from "./staging-config-scaffold.mjs";
 import { DIRECTORY_PROFILE_WRITE_ACCEPTANCE_VALUES } from "./staging-directory-writes-acceptance-profile.mjs";
 import { NATIVE_PORTAL_ACCEPTANCE_ACTIVATION_VALUES } from "./staging-native-portal-acceptance-profile.mjs";
 import { WORKSPACE_ACCEPTANCE_ACTIVATION_VALUES } from "./staging-native-workspace-acceptance-profile.mjs";
@@ -18,10 +19,27 @@ const root = path.resolve(import.meta.dirname, "..");
 const read = relative => JSON.parse(fs.readFileSync(path.join(root, relative), "utf8"));
 
 function state() {
+  // Clean CI checkouts intentionally do not contain concrete staging configs.
+  // Render the tracked templates with synthetic, non-secret fixture values.
+  const rendered = renderConfigs(root, {
+    DELIVERY_STAGING_ACCESS_AUD: "a".repeat(64),
+    OPERATIONS_STAGING_ACCESS_AUD: "b".repeat(64),
+    PROJECT_ALPHA_OPS_SYNC_STAGING_ACCESS_AUD: "c".repeat(64),
+    DEDICATED_CLIENT_PORTAL_STAGING_ACCESS_AUD: "d".repeat(64),
+    STAGING_PROJECT_ALPHA_SOURCE_ID: "project-alpha:staging",
+    STAGING_PROJECT_ALPHA_HTTPS_ORIGIN: "https://pa-staging.ledgetoptechnologies.com",
+    CLIENT_STAGING_RESTRICTED_MAPBOX_PUBLIC_TOKEN: "pk.client-staging",
+    OPERATIONS_STAGING_RESTRICTED_MAPBOX_PUBLIC_TOKEN: "pk.operations-staging",
+    MAPBOX_STAGING_ACCEPTANCE_DEFERRED: "false",
+    STAGING_EMAIL_DOMAIN: "staging.example.test",
+    STAGING_TRIAGE_EMAIL: "triage@staging.example.test",
+    STAGING_ACCESS_GROUP_ID: "11111111-1111-4111-8111-111111111111",
+    STAGING_ACCESS_GROUP_NAME: "LTDS staging operators",
+  });
   return {
     sources: {
-      delivery: read("apps/client/wrangler.staging.json"),
-      operations: read("apps/operations/wrangler.staging.json"),
+      delivery: rendered.delivery,
+      operations: rendered.operations,
     },
     production: {
       delivery: read("apps/client/wrangler.jsonc"),
