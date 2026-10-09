@@ -19,6 +19,7 @@ const { unstable_splitSqlQuery } = requireOperations("wrangler");
 const { build } = requireOperations("esbuild");
 const migrationDirectory = path.join(root, "apps/operations/migrations");
 const migrationNames = fs.readdirSync(migrationDirectory).filter(name => /^\d{4}_.+\.sql$/.test(name)).sort();
+const legacyMigrationNames = migrationNames.slice(0, 181);
 const grantIds = ["10000000-0000-4000-8000-000000000001", "10000000-0000-4000-8000-000000000002", "10000000-0000-4000-8000-000000000003"];
 const permissions = ["directory.profile.edit", "directory.identity.link", "directory.enrollment.manage"];
 const sha = value => crypto.createHash("sha256").update(value).digest("hex");
@@ -126,20 +127,27 @@ function legacyArtifact(phase, sequence, priorProvision) {
   return { schemaVersion: 3, input, planHash: sha(plan), approval, receipt, statements: [] };
 }
 
+async function applyMigration(db, name) {
+  const source = fs.readFileSync(path.join(migrationDirectory, name), "utf8").replace(/\r\n/g, "\n");
+  if (typeof db.execScript === "function") {
+    db.execScript(source);
+    await db.prepare("INSERT INTO d1_migrations(name) VALUES(?)").bind(name).run();
+  } else {
+    const statements = unstable_splitSqlQuery(source).map(sql => sql.trim()).filter(sql => sql && !/^PRAGMA\s+foreign_keys\s*=\s*ON\s*;?$/i.test(sql));
+    await db.batch([...statements.map(sql => db.prepare(sql)), db.prepare("INSERT INTO d1_migrations(name) VALUES(?)").bind(name)]);
+  }
+}
+
+async function migrateThrough(db, names) {
+  await db.prepare("CREATE TABLE d1_migrations(id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT UNIQUE NOT NULL,applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)").run();
+  for (const name of names) await applyMigration(db, name);
+  assert.equal(await db.prepare("SELECT count(*) count FROM d1_migrations").first("count"), names.length);
+}
+
 async function migrate(db) {
   assert.equal(migrationNames.length, 182);
   assert.equal(migrationNames.at(-1), "0182_project_alpha_directory_relationship_recovery_guard.sql");
-  await db.prepare("CREATE TABLE d1_migrations(id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT UNIQUE NOT NULL,applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)").run();
-  for (const name of migrationNames) {
-    const source = fs.readFileSync(path.join(migrationDirectory, name), "utf8").replace(/\r\n/g, "\n");
-    if (typeof db.execScript === "function") {
-      db.execScript(source);
-      await db.prepare("INSERT INTO d1_migrations(name) VALUES(?)").bind(name).run();
-    } else {
-      const statements = unstable_splitSqlQuery(source).map(sql => sql.trim()).filter(sql => sql && !/^PRAGMA\s+foreign_keys\s*=\s*ON\s*;?$/i.test(sql));
-      await db.batch([...statements.map(sql => db.prepare(sql)), db.prepare("INSERT INTO d1_migrations(name) VALUES(?)").bind(name)]);
-    }
-  }
+  await migrateThrough(db, migrationNames);
   assert.deepEqual((await db.prepare(`SELECT type,name FROM sqlite_master WHERE name IN (
     'project_alpha_directory_live_relationship_commands','operations_directory_intent_relationship_resolved',
     'operations_directory_materializations_reserve','operations_directory_intent_relationship_dependencies_insert_guard',
@@ -187,7 +195,8 @@ async function seed(db) {
   const created = await writeNativeDirectoryProfile(db, { operation: "create", mutationId, createAdmissionId: admissionId,
     recordId: target.recordId, expectedLocalVersion: 0, kind: "client", profile, scopes, destinations: [destination],
     actor: { staffId: target.staffId, accessSubject: "access|retained", admissionVersion: 1,
-      selectedGrantId: grantIds[0], loginEmail: canonicalStaff.email, profileVersion: 1, selectedIdentityGrantId: grantIds[1] },
+      selectedGrantId: grantIds[0], loginEmail: canonicalStaff.email, profileVersion: 1,
+      selectedIdentityGrantId: grantIds[1] },
     relationship: { organizationRecordId: null, expectedRelationshipVersion: 0 } });
   assert.equal(created.status, "written", JSON.stringify(created));
   assert.equal(created.commandIds.length, 1);
@@ -199,12 +208,13 @@ async function seed(db) {
       reason: "http_status", httpStatus: 409, requestId: "retained-request" }), target.predecessorCommandId).run();
   for (const id of grantIds) await db.prepare("UPDATE native_directory_grants SET active=0 WHERE id=?").bind(id).run();
   await db.prepare(`INSERT INTO native_project_grants(id,staff_id,capability,effect,scope_kind,business_area_id,active,version,granted_by)
-    VALUES('retained-project-grant',?,'project.shared.sync','allow','business_area',?,0,2,?)`).bind(target.staffId, target.areaId, target.staffId).run();
+    VALUES(?,?,'project.shared.sync','allow','business_area',?,0,2,?)`)
+    .bind("retained-project-grant", target.staffId, target.areaId, target.staffId).run();
   await db.prepare("UPDATE native_project_grant_generations SET generation=14 WHERE staff_id=?").bind(target.staffId).run();
   const provision = legacyArtifact("provision", 1, null);
   const revoke = legacyArtifact("revoke", 2, { receipt: provision.receipt });
-  for (const artifact of [provision, revoke]) {
-    const approval = artifact === provision ? { ...artifact.approval, revoked_at: revoke.receipt.executed_at } : artifact.approval;
+  const audit = [[provision, { ...provision.approval, revoked_at: revoke.receipt.executed_at }], [revoke, revoke.approval]];
+  for (const [artifact, approval] of audit) {
     await db.prepare(`INSERT INTO native_staff_bootstrap_approvals VALUES(${Array(12).fill("?").join(",")})`).bind(...Object.values(approval)).run();
     await db.prepare(`INSERT INTO native_staff_bootstrap_receipts VALUES(${Array(11).fill("?").join(",")})`).bind(...Object.values(artifact.receipt)).run();
   }
@@ -227,14 +237,14 @@ async function seedUnrelatedGrantHistory(db) {
   return rows.map(row => row.id);
 }
 
-async function makeInput(db, lineage, phase = "reactivate", approvalSequence = 1, window = nowWindow()) {
+async function makeInput(db, lineage, phase = "reactivate", approvalSequence = 1, window = nowWindow(), ledger = migrationNames) {
   const admission = await first(db, "SELECT * FROM native_staff_admissions WHERE staff_id=?", target.staffId);
   const profile = await first(db, "SELECT * FROM native_staff_profiles WHERE staff_id=?", target.staffId);
   const generation = await first(db, "SELECT * FROM native_directory_grant_generations WHERE staff_id=?", target.staffId);
   const grants = await all(db, "SELECT * FROM native_directory_grants WHERE staff_id=? ORDER BY id", target.staffId);
   const history = await all(db, "SELECT * FROM native_directory_grant_history WHERE staff_id=? ORDER BY grant_id,grant_version", target.staffId);
   const areaHistoryCount = (await first(db, "SELECT count(*) count FROM native_directory_grant_history WHERE business_area_id=?", target.areaId)).count;
-  const input = { schemaVersion: 1, staging: STAGING_TARGET, phase, target, migrationNames,
+  const input = { schemaVersion: 1, staging: STAGING_TARGET, phase, target, migrationNames: ledger,
     admission, profile, generation,
     projectGeneration: await first(db, "SELECT staff_id,generation FROM native_project_grant_generations WHERE staff_id=?", target.staffId),
     businessArea: await first(db, "SELECT id,name,active FROM native_business_areas WHERE id=?", target.areaId),
@@ -250,6 +260,23 @@ async function makeInput(db, lineage, phase = "reactivate", approvalSequence = 1
     approval: { approvalId: `40000000-0000-4000-8000-${String(approvalSequence).padStart(12, "0")}`,
       commandId: `50000000-0000-4000-8000-${String(approvalSequence).padStart(12, "0")}`, ...window } };
   return input;
+}
+
+async function loadPrivateLegacyCloseCompiler() {
+  const sourcePath = path.join(root, "scripts/staging-retained-directory-authority.mjs");
+  const dependencyUrl = new URL("./staging-onboarding-native-only-authority-packet.mjs", new URL(`file:///${sourcePath.replace(/\\/g, "/")}`)).href;
+  const source = fs.readFileSync(sourcePath, "utf8")
+    .replace('from "./staging-onboarding-native-only-authority-packet.mjs"', `from ${JSON.stringify(dependencyUrl)}`)
+    .replace("fileURLToPath(import.meta.url)", JSON.stringify(sourcePath));
+  const instrumented = `${source}\nexport { compileRetainedDirectoryAuthorityInternal as compileLegacyCloseForTest };`;
+  return (await import(`data:text/javascript;base64,${Buffer.from(instrumented).toString("base64")}`)).compileLegacyCloseForTest;
+}
+
+async function applyLegacyForTest(db, artifact, compileLegacy) {
+  assert.deepEqual(compileLegacy(artifact.input, { root, legacyClose: true }), artifact,
+    "the schema-v1 test artifact must still recompile exactly before execution");
+  await verifyReviewedReferenceSchema(db);
+  return db.batch(artifact.statements.map(statement => db.prepare(statement.sql).bind(...statement.params)));
 }
 
 async function makeSchema2Input(db, latestClose, phase, approvalSequence, reactivation) {
@@ -391,6 +418,72 @@ test("retained directory authority executes against the complete 182-migration D
     });
 
   } finally { await mf.dispose(); }
+});
+
+test("deterministic 181 close is an immutable anchor for a new paired 182-schema lifecycle", async () => {
+  const db = nodeSqliteD1();
+  try {
+    assert.equal(legacyMigrationNames.at(-1), "0181_project_alpha_directory_create_generation_recovery.sql");
+    await migrateThrough(db, legacyMigrationNames);
+    const lineage = await seed(db);
+    const compileLegacy = await loadPrivateLegacyCloseCompiler();
+
+    const activationInput = await makeInput(db, lineage, "reactivate", 70, nowWindow(), legacyMigrationNames);
+    const activation181 = compileLegacy(activationInput, { root, legacyClose: true });
+    await applyLegacyForTest(db, activation181, compileLegacy);
+    assert.deepEqual((await all(db, "SELECT active FROM native_directory_grants WHERE id IN (?,?,?) ORDER BY id",
+      ...grantIds)).map(row => row.active), [1, 1, 1]);
+
+    await recoverAndAcknowledgeRetainedCreate(db);
+    lineage.reactivation = activation181;
+    const closeInput = await makeInput(db, lineage, "revoke", 71, nowWindow(), legacyMigrationNames);
+    const close181 = compileLegacy(closeInput, { root, legacyClose: true });
+    await applyLegacyForTest(db, close181, compileLegacy);
+    assert.deepEqual((await all(db, "SELECT active FROM native_directory_grants WHERE id IN (?,?,?) ORDER BY id",
+      ...grantIds)).map(row => row.active), [0, 0, 0]);
+
+    await applyMigration(db, migrationNames[181]);
+    assert.deepEqual(await first(db, "SELECT count(*) count,max(id) last_id FROM d1_migrations"), { count: 182, last_id: 182 });
+    assert.equal((await first(db, "SELECT name FROM d1_migrations WHERE id=182")).name,
+      "0182_project_alpha_directory_relationship_recovery_guard.sql");
+
+    const unrelatedIds = await seedUnrelatedGrantHistory(db);
+    const unrelatedBefore = await all(db, "SELECT * FROM native_directory_grants WHERE id IN (?,?) ORDER BY id", ...unrelatedIds);
+    const unrelatedHistoryBefore = await all(db,
+      "SELECT * FROM native_directory_grant_history WHERE grant_id IN (?,?) ORDER BY grant_id,grant_version", ...unrelatedIds);
+    const activation182Input = await makeSchema2Input(db, close181, "reactivate", 72);
+    const malformedSuffix = structuredClone(activation182Input);
+    malformedSuffix.history.at(-1).grant_generation--;
+    assert.throws(() => compileRetainedDirectoryAuthority(malformedSuffix, { root }),
+      /continuous chronological staff grant generations required/);
+    const activation182 = compileRetainedDirectoryAuthority(activation182Input, { root });
+    await applyRetainedDirectoryAuthority(db, activation182, { target: STAGING_TARGET });
+    assert.deepEqual((await all(db, "SELECT active FROM native_directory_grants WHERE id IN (?,?,?) ORDER BY id",
+      ...grantIds)).map(row => row.active), [1, 1, 1]);
+
+    const close182 = compileRetainedDirectoryAuthority(
+      await makeSchema2Input(db, close181, "revoke", 73, activation182), { root });
+    await applyRetainedDirectoryAuthority(db, close182, { target: STAGING_TARGET });
+    assert.deepEqual((await all(db, "SELECT active FROM native_directory_grants WHERE id IN (?,?,?) ORDER BY id",
+      ...grantIds)).map(row => row.active), [0, 0, 0]);
+    for (const id of grantIds) assert.deepEqual(await all(db,
+      "SELECT grant_version,active FROM native_directory_grant_history WHERE grant_id=? ORDER BY grant_version", id),
+    [{ grant_version: 1, active: 1 }, { grant_version: 2, active: 0 }, { grant_version: 3, active: 1 },
+      { grant_version: 4, active: 0 }, { grant_version: 5, active: 1 }, { grant_version: 6, active: 0 }]);
+    for (const artifact of [activation181, close181, activation182, close182]) assert.deepEqual(
+      await first(db, "SELECT * FROM native_staff_bootstrap_receipts WHERE command_id=?", artifact.receipt.command_id),
+      artifact.receipt);
+    assert.equal((await first(db, "SELECT revoked_at FROM native_staff_bootstrap_approvals WHERE approval_id=?",
+      activation181.approval.approval_id)).revoked_at, close181.input.approval.executedAt);
+    assert.equal((await first(db, "SELECT revoked_at FROM native_staff_bootstrap_approvals WHERE approval_id=?",
+      activation182.approval.approval_id)).revoked_at, close182.input.approval.executedAt);
+    assert.deepEqual(await all(db, "SELECT * FROM native_directory_grants WHERE id IN (?,?) ORDER BY id", ...unrelatedIds),
+      unrelatedBefore);
+    assert.deepEqual(await all(db,
+      "SELECT * FROM native_directory_grant_history WHERE grant_id IN (?,?) ORDER BY grant_id,grant_version", ...unrelatedIds),
+    unrelatedHistoryBefore);
+    assert.deepEqual(await all(db, "PRAGMA foreign_key_check"), []);
+  } finally { db.close(); }
 });
 
 test("a canonical extra pending Directory command rejects reactivation in an isolated 182-schema fixture", async () => {

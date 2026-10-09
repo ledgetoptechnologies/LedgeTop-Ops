@@ -32,6 +32,9 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const CHAIN = Object.freeze({ count: 182, final: "0182_project_alpha_directory_relationship_recovery_guard.sql",
   names: "5ca01798b82652a4b6bb64a35be85a82673d940d6e762805c147408e3ca298d8",
   contents: "09ebfcc544263a90c96b8ed5548cdc73e38e524aec977aa37042bc280f9dae56" });
+const LEGACY_CLOSE_CHAIN = Object.freeze({ count: 181, final: "0181_project_alpha_directory_create_generation_recovery.sql",
+  names: "42090dbacb9d23e4cc92371743c15e7ebc31c0e6d33f6bf7e48faf7f92cd96db",
+  contents: "7b165451ebea6bdc680ef8b54600924064a3871b09a227abeb38d6218b7fed2e" });
 const ADMISSION_COLUMNS = ["staff_id", "bound_access_subject", "active", "admitted_by", "created_at", "updated_at", "version"];
 const PROFILE_COLUMNS = ["staff_id", "login_email", "display_name", "version", "created_at", "updated_at"];
 const GENERATION_COLUMNS = ["staff_id", "generation", "updated_at"];
@@ -78,16 +81,20 @@ function plainTree(value, label) {
     Object.values(value).forEach(item => plainTree(item, label));
   }
 }
-function reviewedMigrations(root) {
+function reviewedMigrations(root, chain = CHAIN, allowReviewedSuccessors = false) {
   const directory = path.join(root, "apps", "operations", "migrations");
-  const names = fs.readdirSync(directory).filter(name => /^\d{4}_.+\.sql$/.test(name)).sort();
+  const discovered = fs.readdirSync(directory).filter(name => /^\d{4}_.+\.sql$/.test(name)).sort();
+  if (allowReviewedSuccessors ? discovered.length < chain.count : discovered.length !== chain.count) {
+    fail(`exact canonical ${chain.count} migration chain required`);
+  }
+  const names = allowReviewedSuccessors ? discovered.slice(0, chain.count) : discovered;
   const contents = names.map(name => {
     const filename = path.join(directory, name), stat = fs.lstatSync(filename);
     if (!stat.isFile() || stat.isSymbolicLink()) fail("regular canonical migration required");
     return `${name}\0${sha(fs.readFileSync(filename))}`;
   });
-  if (names.length !== CHAIN.count || names.at(-1) !== CHAIN.final || sha(names.join("\n")) !== CHAIN.names
-    || sha(contents.join("\n")) !== CHAIN.contents) fail("exact canonical 181 migration chain required");
+  if (names.length !== chain.count || names.at(-1) !== chain.final || sha(names.join("\n")) !== chain.names
+    || sha(contents.join("\n")) !== chain.contents) fail(`exact canonical ${chain.count} migration chain required`);
   return names;
 }
 const guard = (condition, params, label) => ({
@@ -120,11 +127,86 @@ function targetGrantIds(artifact) {
     : artifact?.input?.approval?.grantIds ?? artifact?.input?.lineage?.provisionArtifact?.input?.approval?.grantIds;
 }
 
+function validateCompleteStaffHistory(input) {
+  const grants = new Map(input.grants.map(row => [row.id, row]));
+  const orderedHistory = [...input.history].sort((left, right) => left.grant_generation - right.grant_generation);
+  if (input.grants.some(row => row.staff_id !== input.target.staffId)
+    || input.history.some(row => row.staff_id !== input.target.staffId || !grants.has(row.grant_id))
+    || input.history.length !== input.generation.generation
+    || typeof input.generation.updated_at !== "string" || !TS.test(input.generation.updated_at)) {
+    fail("complete chronological staff grant history required");
+  }
+  const generationUpdatedAt = Date.parse(input.generation.updated_at);
+  const initialGeneration = orderedHistory[0]?.grant_generation;
+  const backfill = orderedHistory.slice(0, initialGeneration);
+  if (backfill.length !== initialGeneration || backfill.some(row => row.grant_version !== 1)
+    || new Set(backfill.map(row => row.grant_id)).size !== initialGeneration) {
+    fail("canonical initial staff grant history required");
+  }
+  let priorRecordedAt = -Infinity;
+  orderedHistory.forEach((row, index) => {
+    const recordedAt = Date.parse(row.recorded_at);
+    // Migration 0123 backfilled N pre-existing grants at generation N. After
+    // that authenticated prefix, every trigger event advances exactly once.
+    const expectedGeneration = index < initialGeneration ? initialGeneration : index + 1;
+    if (!Number.isSafeInteger(initialGeneration) || initialGeneration < 1
+      || row.grant_generation !== expectedGeneration || typeof row.recorded_at !== "string"
+      || !TS.test(row.recorded_at) || !Number.isFinite(recordedAt)
+      || recordedAt < priorRecordedAt || recordedAt > generationUpdatedAt) {
+      fail("continuous chronological staff grant generations required");
+    }
+    priorRecordedAt = recordedAt;
+  });
+  for (const grant of input.grants) {
+    const rows = input.history.filter(row => row.grant_id === grant.id)
+      .sort((left, right) => left.grant_version - right.grant_version);
+    if (!rows.length || rows.some((row, index) => row.grant_version !== index + 1
+      || !["staff_id", "permission", "effect", "scope_kind", "business_area_id", "division_id", "resource_id"]
+        .every(key => row[key] === grant[key])
+      || (index > 0 && (row.active === rows[index - 1].active
+        || row.grant_generation <= rows[index - 1].grant_generation)))
+      || rows.at(-1).active !== grant.active) fail("complete current staff grant history required");
+  }
+}
+
+function validateArtifactHistorySuccessor(input, artifact, expectedActive) {
+  let result; try { result = JSON.parse(artifact.receipt.result_json); } catch { fail("historical receipt result JSON"); }
+  const ids = targetGrantIds(artifact), baseGeneration = artifact.input.generation.generation;
+  if (result.phase !== artifact.input.phase || result.active !== expectedActive
+    || result.generation !== baseGeneration + 3 || !same(result.grantIds, ids)
+    || input.generation.generation < result.generation) fail("historical grant successor result required");
+  const prior = [...artifact.input.history].sort((left, right) => left.grant_generation - right.grant_generation);
+  const currentPrefix = input.history.filter(row => row.grant_generation <= baseGeneration)
+    .sort((left, right) => left.grant_generation - right.grant_generation);
+  if (!same(currentPrefix, prior)) fail("exact immutable grant history prefix required");
+  const executedAt = Date.parse(artifact.receipt.executed_at);
+  const expiresAt = Date.parse(artifact.input.approval.expiresAt);
+  ids.forEach((id, index) => {
+    const grant = artifact.input.grants.find(row => row.id === id);
+    const priorVersion = artifact.input.history.filter(row => row.grant_id === id).length;
+    const actual = input.history.find(row => row.grant_generation === baseGeneration + index + 1);
+    const expected = { grant_id: id, grant_version: priorVersion + 1, staff_id: grant.staff_id,
+      permission: grant.permission, effect: grant.effect, scope_kind: grant.scope_kind,
+      business_area_id: grant.business_area_id, division_id: grant.division_id, resource_id: grant.resource_id,
+      active: expectedActive, grant_generation: baseGeneration + index + 1 };
+    const withoutRecordedAt = actual && Object.fromEntries(Object.entries(actual).filter(([key]) => key !== "recorded_at"));
+    const recordedAt = Date.parse(actual?.recorded_at);
+    if (!same(withoutRecordedAt, expected) || !Number.isFinite(recordedAt)
+      || recordedAt < executedAt || recordedAt >= expiresAt) fail("exact historical grant successor required");
+  });
+  return result;
+}
+
 function verifiedLatestClose(value, root, historicalVerifier) {
   if (!value?.input || value.input.phase !== "revoke") fail("latest immutable close artifact required");
-  const expected = value.input.schemaVersion === 1
-    ? compileRetainedDirectoryAuthority(value.input, { root, historicalVerifier })
-    : compileRetainedDirectoryAuthority(value.input, { root, historicalVerifier });
+  // Schema-v1 closes were compiled while 0181 was the complete reviewed
+  // ledger. Authenticate the full immutable artifact against that pinned
+  // prefix only when it is nested under a current schema-v2 plan. Current
+  // compiler/apply entry points never expose this compatibility mode.
+  const expected = compileRetainedDirectoryAuthorityInternal(value.input, {
+    root, historicalVerifier, legacyClose: value.input.schemaVersion === 1
+      && value.input.migrationNames?.length === LEGACY_CLOSE_CHAIN.count,
+  });
   if (!same(value, expected)) fail("latest immutable close artifact changed");
   return expected;
 }
@@ -171,14 +253,19 @@ export function verifyHistoricalNativeOnlyArtifact(input) {
   return artifact;
 }
 
-function validate(raw, root, historicalVerifier) {
+function validate(raw, root, historicalVerifier, legacyClose = false) {
   plainTree(raw, "input");
   exact(raw, ["schemaVersion", "staging", "phase", "target", "migrationNames", "admission", "profile", "generation", "projectGeneration", "businessArea", "resourceScope", "projectGrant", "grants", "history", "referenceCounts", "predecessor", "lineage", "approval"], "input");
   const input = structuredClone(raw);
   exact(input, ["schemaVersion", "staging", "phase", "target", "migrationNames", "admission", "profile", "generation", "projectGeneration", "businessArea", "resourceScope", "projectGrant", "grants", "history", "referenceCounts", "predecessor", "lineage", "approval"], "input");
   if (![1, 2].includes(input.schemaVersion) || !["reactivate", "revoke"].includes(input.phase) || !same(input.staging, STAGING_TARGET)
     || !same(input.target, RETAINED_DIRECTORY_TARGET)) fail("exact staging retained target required");
-  if (!same(input.migrationNames, reviewedMigrations(root ?? ROOT))) fail("exact canonical 181 migration ledger required");
+  const expectedMigrations = legacyClose
+    ? reviewedMigrations(root ?? ROOT, LEGACY_CLOSE_CHAIN, true)
+    : reviewedMigrations(root ?? ROOT);
+  if (!same(input.migrationNames, expectedMigrations)) {
+    fail(`exact canonical ${legacyClose ? LEGACY_CLOSE_CHAIN.count : CHAIN.count} migration ledger required`);
+  }
   exact(input.referenceCounts, Object.keys(REVIEWED_REFERENCE_BASELINE), "reference baseline");
   const expectedPriorVersion = input.schemaVersion === 1 ? (input.phase === "reactivate" ? 2 : 3) : null;
   const expectedReferences = { ...REVIEWED_REFERENCE_BASELINE,
@@ -213,6 +300,7 @@ function validate(raw, root, historicalVerifier) {
   if (input.businessArea.id !== input.target.areaId || input.businessArea.active !== 1) fail("exact active retained area required");
   if (!Array.isArray(input.grants) || !Array.isArray(input.history)) fail("complete staff grant snapshot required");
   input.grants.forEach(row => exact(row, GRANT_COLUMNS, "grant")); input.history.forEach(row => exact(row, HISTORY_COLUMNS, "history"));
+  validateCompleteStaffHistory(input);
   const targetIds = input.schemaVersion === 1
     ? input.lineage?.provisionArtifact?.input?.approval?.grantIds
     : targetGrantIds(input.lineage?.latestCloseArtifact);
@@ -238,7 +326,7 @@ function validate(raw, root, historicalVerifier) {
     const close = verifiedLatestClose(input.lineage.latestCloseArtifact, root, historicalVerifier);
     if (!same(close.receipt, input.lineage.latestCloseReceipt) || !same(targetGrantIds(close), ordered.map(row => row.id))) fail("latest immutable close lineage mismatch");
     const versions = ordered.map(grant => input.history.filter(row => row.grant_id === grant.id).length);
-    let closeResult; try { closeResult = JSON.parse(close.receipt.result_json); } catch { fail("latest close receipt result JSON"); }
+    const closeResult = validateArtifactHistorySuccessor(input, close, 0);
     const targetHistoryCount = input.history.filter(row => targetIds.includes(row.grant_id)).length;
     const closeIds = targetGrantIds(close);
     const closeVersion = close.input.history.filter(row => closeIds.includes(row.grant_id)).length / 3 + 1;
@@ -247,14 +335,14 @@ function validate(raw, root, historicalVerifier) {
       || targetHistoryCount !== versions[0] * ordered.length
       || input.referenceCounts.native_directory_grant_history !== targetHistoryCount
       || closeResult.phase !== "revoke" || closeResult.active !== 0 || closeResult.generation !== close.input.generation.generation + 3
-      || !same(closeResult.grantIds, targetIds)
-      || input.generation.generation !== closeResult.generation + (input.phase === "reactivate" ? 0 : 3)) fail("complete latest retained history required");
+      || !same(closeResult.grantIds, targetIds)) fail("complete latest retained history required");
     if (input.phase === "revoke") {
       const prior = input.lineage.reactivationArtifact;
       if (!prior || prior.input?.schemaVersion !== 2 || prior.input?.phase !== "reactivate"
         || !same(prior, compileRetainedDirectoryAuthority(prior.input, { root, historicalVerifier }))
         || !same(prior.receipt, input.lineage.reactivationReceipt)
         || !same(prior.input.lineage.latestCloseArtifact, close)) fail("immutable reactivation lineage required");
+      validateArtifactHistorySuccessor(input, prior, 1);
     }
   } else {
   exact(input.lineage, input.phase === "reactivate" ? ["provisionArtifact", "revokeArtifact", "provisionReceipt", "revokeReceipt"]
@@ -284,14 +372,17 @@ function validate(raw, root, historicalVerifier) {
   if (historicalIds.includes(input.approval.approvalId) || historicalIds.includes(input.approval.commandId)) fail("fresh phase identifiers required");
   if (input.schemaVersion === 1 && input.phase === "revoke") {
     const prior = input.lineage.reactivationArtifact;
-    if (!prior || prior.input?.phase !== "reactivate" || !same(prior, compileRetainedDirectoryAuthority(prior.input, { root, historicalVerifier }))
+    if (!prior || prior.input?.phase !== "reactivate" || !same(prior, compileRetainedDirectoryAuthorityInternal(prior.input,
+      { root, historicalVerifier, legacyClose }))
       || !same(prior.receipt, input.lineage.reactivationReceipt)) fail("immutable reactivation lineage required");
   }
   return { input, grants: ordered };
 }
 
-export function compileRetainedDirectoryAuthority(raw, { root, historicalVerifier = verifyHistoricalNativeOnlyArtifact } = {}) {
-  const { input, grants } = validate(raw, root, historicalVerifier);
+function compileRetainedDirectoryAuthorityInternal(raw, {
+  root, historicalVerifier = verifyHistoricalNativeOnlyArtifact, legacyClose = false,
+} = {}) {
+  const { input, grants } = validate(raw, root, historicalVerifier, legacyClose);
   const activating = input.phase === "reactivate";
   const compactLineage = input.schemaVersion === 2 ? {
     latestClose: { approvalId: input.lineage.latestCloseArtifact.approval.approval_id,
@@ -317,7 +408,9 @@ export function compileRetainedDirectoryAuthority(raw, { root, historicalVerifie
     resourceScope: input.resourceScope, projectGrant: input.projectGrant, grants: input.grants, history: input.history,
     referenceCounts: input.referenceCounts, predecessor: input.predecessor, lineage: compactLineage, approval: input.approval }), planSha = sha(plan);
   if (Buffer.byteLength(plan) > MAX_PLAN_BYTES) fail("bounded canonical plan required");
-  const verification = json({ staging: input.staging, target: input.target, migrationCount: 182, migrationFinal: input.migrationNames.at(-1), referenceBaseline: REVIEWED_REFERENCE_BASELINE,
+  const verification = json({ staging: input.staging, target: input.target,
+    migrationCount: legacyClose ? LEGACY_CLOSE_CHAIN.count : CHAIN.count,
+    migrationFinal: input.migrationNames.at(-1), referenceBaseline: REVIEWED_REFERENCE_BASELINE,
     ...(input.schemaVersion === 1 ? { priorProvisionReceiptSha256: sha(json(input.lineage.provisionReceipt)), priorRevokeReceiptSha256: sha(json(input.lineage.revokeReceipt)) }
       : { latestCloseReceiptSha256: sha(json(input.lineage.latestCloseReceipt)),
         priorGrantVersion: input.history.filter(row => row.grant_id === grants[0].id).length }) });
@@ -422,6 +515,12 @@ export function compileRetainedDirectoryAuthority(raw, { root, historicalVerifie
     equality("native_staff_bootstrap_receipts", RECEIPT_COLUMNS, [receipt], "command_id=?", [receipt.command_id]));
   assertD1Bounds(statements, approval, receipt);
   return Object.freeze({ schemaVersion: 1, input, approval, receipt, statements });
+}
+
+export function compileRetainedDirectoryAuthority(raw, {
+  root, historicalVerifier = verifyHistoricalNativeOnlyArtifact,
+} = {}) {
+  return compileRetainedDirectoryAuthorityInternal(raw, { root, historicalVerifier, legacyClose: false });
 }
 
 export async function verifyReviewedReferenceSchema(db) {

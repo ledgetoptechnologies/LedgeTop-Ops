@@ -60,11 +60,16 @@ node scripts/staging-retained-directory-authority-window.mjs reconcile --config 
 The following sequence describes the earlier 0181 profile-recovery window, not
 permission to run an old artifact against today's schema. On October 9, a fresh
 staging read confirmed 0182 is applied. The retained client's latest close is a
-schema-v1 artifact pinned to the 181-file ledger, and current reactivation
-preparation rejects it. Historical-anchor compatibility is awaiting explicit
-approval and implementation/review; do not change the saved artifact, relax the
-current ledger requirement, issue replacement grants, or claim preparation
-passed until that specific issue is resolved.
+schema-v1 artifact pinned to the 181-file ledger. The approved compatibility
+implementation now verifies that artifact only as nested immutable lineage,
+using exact historical migration name/content pins and complete recompilation
+of statements, approvals and receipts. New/top-level compilation and apply
+still require all 182 migrations. Current preparation also authenticates the
+complete staff history, including audited unrelated-grant events after the
+retained close, and pins the current generation for CAS. Do not modify saved
+artifacts, replay an old top-level grant, relax history checks or issue broad
+replacement grants. Fresh read-only staging preparation passed; a new paired
+live authority window and PA relationship settlement remain acceptance gates.
 
 - Retained create-generation recovery and profile settlement use canonical 0181.
   Finish their acknowledged write/replay/conflict/readback and paired authority
@@ -101,7 +106,9 @@ passed until that specific issue is resolved.
 node --test scripts/staging-retained-directory-authority.test.mjs scripts/staging-retained-directory-authority-window.test.mjs scripts/staging-retained-directory-authority-fullschema.test.mjs
 ```
 
-The full-schema cases use a local synthetic Miniflare D1 instance. Two additional
-historical-lineage unit cases intentionally skip when private historical files
-are absent, including on CI. Local/mock results do not prove live PA settlement,
-recipient enrollment, file access or production readiness.
+The full-schema cases use local synthetic Miniflare D1 and SQLite instances.
+Deterministic historical-181/current-182 compatibility and paired lifecycle
+coverage do not depend on private files and run on clean CI. Additional genuine
+historical-artifact checks may skip when those private files are absent. Local
+results do not prove live PA settlement, recipient enrollment, file access or
+production readiness.
