@@ -10,8 +10,8 @@ const commandId = "30000000-0000-4000-8000-000000000003";
 type Captured = { headers: Record<string, string>; body: unknown };
 
 async function fixture(page: Page) {
-  const review: Captured[] = [], reserve: Captured[] = [], bind: Captured[] = [];
-  let reviewAttempts = 0, reserveAttempts = 0, connectorReads = 0;
+  const review: Captured[] = [], reserve: Captured[] = [], bind: Captured[] = [], finalize: Captured[] = [];
+  let reviewAttempts = 0, reserveAttempts = 0, connectorReads = 0, finalizeAttempts = 0;
   await page.route("**/api/**", async route => {
     const request = route.request(), url = new URL(request.url()), path = url.pathname;
     const capture = async (target: Captured[]) => target.push({ headers: request.headers(), body: request.postDataJSON() });
@@ -52,14 +52,21 @@ async function fixture(page: Page) {
       return route.fulfill({ json: { status: "planned", bridgeId: "40000000-0000-4000-8000-000000000004",
         reservationId, commandId, requestSha256: "d".repeat(64), replayed: false } });
     }
+    if (path === "/api/admin/project-alpha/private/projects/adoption/finalize") {
+      await capture(finalize); finalizeAttempts += 1;
+      return route.fulfill({ json: finalizeAttempts === 1
+        ? { stage: "dispatch", outcome: { status: "uncertain", reason: "lost_ack" } }
+        : { stage: "activate", outcome: { status: "activated", activationId: reviewItemId, replayed: true } } });
+    }
     return route.fulfill({ status: 404, json: { error: "not found" } });
   });
-  return { review, reserve, bind };
+  return { review, reserve, bind, finalize };
 }
 
 test("operator explicitly reviews, reserves, and queues an unbound Project with frozen retries", async ({ page }) => {
   const captured = await fixture(page);
-  page.on("dialog", dialog => dialog.accept());
+  const confirmations: string[] = [];
+  page.on("dialog", async dialog => { confirmations.push(dialog.message()); await dialog.accept(); });
   await page.goto("/administration");
   const panel = page.getByRole("region", { name: "PA-created Project adoption review" });
   await expect(panel).toBeVisible();
@@ -70,7 +77,7 @@ test("operator explicitly reviews, reserves, and queues an unbound Project with 
   await expect(panel.getByText("Second candidate")).toBeVisible();
   await panel.getByLabel(/First candidate/).check();
   await panel.getByLabel("New, unused Operations Project ID").fill("ops-pa-first-1");
-  await panel.getByRole("button", { name: "Create review evidence only" }).click();
+  await panel.getByRole("button", { name: "Reserve destination and create review evidence" }).click();
   await expect(panel.getByText(/outcome is uncertain/)).toBeVisible();
   await expect(panel.getByLabel("Project Alpha source")).toBeDisabled();
   await expect(panel.getByRole("button", { name: "Load next 50 Projects" })).toBeDisabled();
@@ -82,6 +89,11 @@ test("operator explicitly reviews, reserves, and queues an unbound Project with 
   expect(captured.review[1]!.headers["idempotency-key"]).toBe(captured.review[0]!.headers["idempotency-key"]);
   expect(captured.review[1]!.body).toEqual(captured.review[0]!.body);
   expect(captured.review[0]!.body).toEqual({ sourceId, externalProjectId: "ops-pa-first-1", projectAlphaPublicId: firstPublicId });
+  expect(confirmations).toHaveLength(1);
+  expect(confirmations[0]).toContain("Durably reserve this Operations Project ID");
+  expect(confirmations[0]).toContain("retained even if you reset");
+  expect(confirmations[0]).toContain("does not bind, grant access, or publish");
+  await expect(panel.getByRole("status")).toContainText("Operations destination reserved; review evidence created:");
 
   await panel.getByRole("button", { name: "Reserve reviewed intent" }).click();
   await expect(panel.getByText(/reservation outcome is uncertain/)).toBeVisible();
@@ -98,4 +110,24 @@ test("operator explicitly reviews, reserves, and queues an unbound Project with 
   await expect(panel.getByText(`Bind command queued locally: ${commandId}. Project Alpha acknowledgement is not yet confirmed.`)).toBeVisible();
   await expect(panel.getByText(/No step in this panel grants client access or publishes/)).toBeVisible();
   await expect(panel).not.toContainText("acknowledged");
+  await panel.getByRole("button", { name: "Finalize and verify Project binding" }).click();
+  await expect(panel.getByRole("alert")).toContainText("stopped at dispatch (uncertain)");
+  await expect(panel.getByRole("alert")).toContainText("do not queue a replacement command");
+  const references = panel.getByRole("group", { name: "Project adoption recovery references" });
+  await expect(references).toContainText("ops-pa-first-1");
+  await expect(references).toContainText(reservationId);
+  await expect(references).toContainText(commandId);
+  await expect(references).toContainText(captured.review[0]!.headers["idempotency-key"]!);
+  await expect(references).toContainText(captured.reserve[0]!.headers["idempotency-key"]!);
+  await expect(panel).not.toContainText("binding verified and Operations mapping activated");
+  await panel.getByRole("button", { name: "Resume verification of the same bind command" }).click();
+  expect(captured.finalize).toHaveLength(2);
+  expect(captured.finalize[0]!.body).toEqual({ reservationId, commandId });
+  expect(captured.finalize[1]).toEqual(captured.finalize[0]);
+  expect(captured.finalize[0]!.headers["idempotency-key"]).toBe(commandId);
+  expect(captured.bind).toHaveLength(1);
+  await expect(panel.getByRole("status")).toContainText("Project Alpha binding verified and Operations mapping activated");
+  await expect(panel.getByRole("status")).toContainText("Client access and portal publication remain unchanged");
+  await expect(panel.getByRole("button", { name: /verify Project binding|Resume verification/ })).toHaveCount(0);
+  await expect(references).toContainText(commandId);
 });

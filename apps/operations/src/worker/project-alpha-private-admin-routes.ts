@@ -11,6 +11,7 @@ import { acquireProjectAlphaDirectoryReconciliationFinding,
   readProjectAlphaDirectoryReconciliationFindingContext } from "./project-alpha-directory-reconciliation-review";
 import { reserveProjectAlphaProjectAdoptionReview } from "./project-alpha-project-adoption-review-consumer";
 import { planProjectAlphaProjectAdoptionBind } from "./project-alpha-project-adoption-bind-consumer";
+import { finalizeProjectAlphaProjectAdoption } from "./project-alpha-project-adoption-finalizer";
 import { listAuthorizedProjectAlphaProjectAdoptionCandidates } from "./project-alpha-project-adoption-candidates-consumer";
 import {
   readConfiguredProjectAlphaProjectBindingStatus,
@@ -69,6 +70,7 @@ const acquireSchema = z.object({
 const activationSchema = z.object({ reviewItemId: UUID, idempotencyKey: IDEMPOTENCY }).strict();
 const reservationSchema = z.object({ reviewItemId: UUID, idempotencyKey: IDEMPOTENCY }).strict();
 const bindSchema = z.object({ reservationId: UUID }).strict();
+const finalizeSchema = z.object({ reservationId: UUID, commandId: UUID }).strict();
 const projectAdoptionReviewSchema = z.object({
   sourceId: SOURCE_ID,
   externalProjectId: RECORD_ID,
@@ -577,6 +579,21 @@ export function registerProjectAlphaPrivateAdminRoutes(app: App): void {
     await currentReviewer(c.env, c.get("principal"));
     return c.json(await planProjectAlphaProjectAdoptionBind(c.env,
       principalActor(c.get("principal")), input));
+  });
+  app.post(`${PROJECT_ALPHA_PRIVATE_ADMIN_ROUTE}/projects/adoption/finalize`, async c => {
+    if (c.env.PROJECT_ALPHA_PROJECT_ADOPTION_FINALIZATION_ENABLED !== "true")
+      throw new HTTPException(404, { message: "Not found" });
+    const input = await json(c.req.raw, finalizeSchema, "Project adoption finalization");
+    requireIdempotency(c.req.raw, input.commandId);
+    const actor = await currentNativeProjectActor(c);
+    const result = await finalizeProjectAlphaProjectAdoption(c.env, actor, input, fetch);
+    const outcome = publicProjectV2RecoveryOutcome(result.outcome);
+    await c.env.OPS_DB.batch([await auditStatement(c.env, c.req.raw, c.get("principal"),
+      "integration.project_alpha_project_adoption_finalization_completed", "project_alpha_project_adoption",
+      input.commandId, null, { reservationId: input.reservationId, stage: result.stage,
+        status: outcome.status, ...(outcome.reason ? { reason: outcome.reason } : {}),
+        ...(typeof outcome.replayed === "boolean" ? { replayed: outcome.replayed } : {}) })]);
+    return c.json({ stage: result.stage, outcome });
   });
   app.get(`${PROJECT_ALPHA_PRIVATE_ADMIN_ROUTE}/projects/adoption/candidates`, async c => {
     if (!projectAdoptionReviewEnabled(c.env)) throw new HTTPException(404, { message: "Not found" });

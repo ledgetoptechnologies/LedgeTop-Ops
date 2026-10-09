@@ -5,7 +5,7 @@ import type { Env, StaffPrincipal } from "../src/worker/types";
 
 const mocks = vi.hoisted(() => ({
   scope: vi.fn(), acquire: vi.fn(), activate: vi.fn(), reserve: vi.fn(), bind: vi.fn(), first: vi.fn(),
-  produce: vi.fn(), candidates: vi.fn(),
+  produce: vi.fn(), candidates: vi.fn(), finalize: vi.fn(),
   bindingStatus: vi.fn(), bindingRefresh: vi.fn(),
   reconciliationList: vi.fn(), reconciliationAcquire: vi.fn(),
   reconciliationRecords: vi.fn(),
@@ -32,6 +32,9 @@ vi.mock("../src/worker/project-alpha-project-adoption-review-consumer", () => ({
 }));
 vi.mock("../src/worker/project-alpha-project-adoption-bind-consumer", () => ({
   planProjectAlphaProjectAdoptionBind: mocks.bind,
+}));
+vi.mock("../src/worker/project-alpha-project-adoption-finalizer", () => ({
+  finalizeProjectAlphaProjectAdoption: mocks.finalize,
 }));
 vi.mock("../src/worker/project-alpha-project-adoption-review-producer", () => ({
   produceProjectAlphaProjectAdoptionReview: mocks.produce,
@@ -87,7 +90,7 @@ const key = "10000000-0000-4000-8000-000000000003";
 const reservationId = "10000000-0000-4000-8000-000000000004";
 const publicId = "a".repeat(32);
 
-function fixture(options: { enabled?: boolean; adoptionReviewEnabled?: boolean; inboundEnabled?: boolean; projectBindingRefreshEnabled?: boolean; recoveryEnabled?: boolean; administrator?: boolean; global?: boolean; denied?: boolean; directoryView?: boolean; environment?: "staging" | "production" } = {}) {
+function fixture(options: { enabled?: boolean; adoptionReviewEnabled?: boolean; finalizationEnabled?: boolean; inboundEnabled?: boolean; projectBindingRefreshEnabled?: boolean; recoveryEnabled?: boolean; administrator?: boolean; global?: boolean; denied?: boolean; directoryView?: boolean; environment?: "staging" | "production" } = {}) {
   const app = new Hono<{ Bindings: Env; Variables: { principal: StaffPrincipal; administrator: boolean } }>();
   app.use("/api/*", async (c, next) => {
     c.set("principal", principal);
@@ -100,6 +103,7 @@ function fixture(options: { enabled?: boolean; adoptionReviewEnabled?: boolean; 
   const env = {
     PROJECT_ALPHA_PRIVATE_ADMIN_TRANSPORT_ENABLED: options.enabled === false ? "false" : "true",
     PROJECT_ALPHA_PROJECT_ADOPTION_REVIEW_ENABLED: options.adoptionReviewEnabled === true ? "true" : "false",
+    PROJECT_ALPHA_PROJECT_ADOPTION_FINALIZATION_ENABLED: options.finalizationEnabled === true ? "true" : "false",
     PROJECT_ALPHA_PROJECT_INBOUND_RECONCILIATION_ENABLED: options.inboundEnabled === true ? "true" : "false",
     PROJECT_ALPHA_PROJECT_BINDING_REVISION_REFRESH_ENABLED: options.projectBindingRefreshEnabled === true ? "true" : "false",
     PROJECT_ALPHA_PROJECT_V2_RECOVERY_ENABLED: options.recoveryEnabled === true ? "true" : "false",
@@ -141,6 +145,7 @@ describe("private Project Alpha administrator transport", () => {
     mocks.activate.mockResolvedValue({ status: "activated", activationId: key, reviewItemId: reviewId, idempotencyKey: key, replayed: false });
     mocks.reserve.mockResolvedValue({ status: "reserved", reservationId, reviewItemId: reviewId, idempotencyKey: key, replayed: false });
     mocks.bind.mockResolvedValue({ status: "planned", bridgeId: key, reservationId, commandId, requestSha256: "b".repeat(64), replayed: false });
+    mocks.finalize.mockResolvedValue({ stage: "activate", outcome: { status: "activated", activationId: key, replayed: false } });
     mocks.produce.mockResolvedValue({ status: "reviewed", reviewItemId: reviewId, requestSha256: "c".repeat(64), replayed: false });
     mocks.candidates.mockResolvedValue({ status: "observed", authorizationGeneration: "7", projects: [], nextCursor: null });
     mocks.inboundPropose.mockResolvedValue({ status: "proposed", proposalId: reviewId, replayed: false });
@@ -472,6 +477,52 @@ describe("private Project Alpha administrator transport", () => {
       { staffId: principal.id, accessSubject: principal.accessSubject }, fetch);
     expect(mocks.bind).toHaveBeenCalledWith(expect.anything(), { staffId: principal.id, accessSubject: principal.accessSubject },
       { reservationId });
+  });
+
+  it("keeps adoption finalization default-off and behind current administrator authority", async () => {
+    const input = { reservationId, commandId };
+    expect((await fixture().send("/projects/adoption/finalize", input, commandId)).status).toBe(404);
+    for (const options of [{ enabled: false }, { administrator: false }, { global: false }, { denied: true }]) {
+      expect((await fixture({ finalizationEnabled: true, ...options })
+        .send("/projects/adoption/finalize", input, commandId)).status).toBe(options.enabled === false ? 404 : 403);
+    }
+    expect(mocks.finalize).not.toHaveBeenCalled();
+  });
+
+  it("finalizes only strict durable identifiers with matching idempotency, origin and CSRF", async () => {
+    const { send } = fixture({ finalizationEnabled: true });
+    const input = { reservationId, commandId };
+    for (const invalid of [{ reservationId }, { ...input, sourceId: "project-alpha:primary" },
+      { ...input, actor: { staffId: "attacker" } }, { ...input, commandId: "bad" }])
+      expect((await send("/projects/adoption/finalize", invalid, commandId)).status).toBe(400);
+    expect((await send("/projects/adoption/finalize", input, reservationId)).status).toBe(400);
+    expect((await send("/projects/adoption/finalize", input, commandId, { Origin: "https://evil.example.test" })).status).toBe(403);
+    expect((await send("/projects/adoption/finalize", input, commandId, { "X-CSRF-Token": "wrong" })).status).toBe(403);
+    expect(mocks.finalize).not.toHaveBeenCalled();
+  });
+
+  it("derives finalization identity server-side and sanitizes the result", async () => {
+    const { send, env } = fixture({ finalizationEnabled: true });
+    mocks.finalize.mockResolvedValue({ stage: "activate", outcome: {
+      status: "activated", activationId: key, replayed: true, secret: "not-for-browser", canonicalRead: { private: true },
+    } });
+    const response = await send("/projects/adoption/finalize", { reservationId, commandId }, commandId);
+    expect(response.status).toBe(200);
+    expect(response.headers.get("Cache-Control")).toBe("no-store");
+    expect(await response.json()).toEqual({ stage: "activate", outcome: { status: "activated", activationId: key, replayed: true } });
+    expect(mocks.finalize).toHaveBeenCalledWith(env, {
+      staffId: principal.id, accessSubject: principal.accessSubject, email: principal.email,
+      admissionVersion: 1, profileVersion: 1, verifiedUntil: "2999-01-01T00:00:00.000Z",
+    }, { reservationId, commandId }, fetch);
+  });
+
+  it("rejects mismatched native identities before finalization", async () => {
+    const { send } = fixture({ finalizationEnabled: true });
+    mocks.native.mockResolvedValue({ admissionVersion: 1, verifiedUntil: "2999-01-01T00:00:00.000Z",
+      identity: { kind: "native", staffId: "another-staff", verifiedAccessSubject: principal.accessSubject,
+        email: principal.email, displayName: principal.displayName, profileVersion: 1 } });
+    expect((await send("/projects/adoption/finalize", { reservationId, commandId }, commandId)).status).toBe(403);
+    expect(mocks.finalize).not.toHaveBeenCalled();
   });
 
   it("keeps the PA-origin project review entry default-off and staging-only", async () => {

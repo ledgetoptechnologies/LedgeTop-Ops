@@ -612,6 +612,7 @@ function ProjectAdoptionPanel({ connectors, disabled }: { connectors: readonly C
   } | null>(null);
   const [reserveKey, setReserveKey] = useState(""), [reservationId, setReservationId] = useState("");
   const [commandId, setCommandId] = useState("");
+  const [finalizationStarted, setFinalizationStarted] = useState(false), [finalized, setFinalized] = useState(false);
   const [busy, setBusy] = useState(false), [message, setMessage] = useState(""), [error, setError] = useState("");
   const frozen = Boolean(reviewRequest || reviewKey || reviewItemId || reserveKey || reservationId || commandId);
   useEffect(() => {
@@ -640,7 +641,7 @@ function ProjectAdoptionPanel({ connectors, disabled }: { connectors: readonly C
     if (!PA_PUBLIC_ID.test(selected) || !exact || exact !== externalId || exact.length > 191 || /\p{C}/u.test(exact)) {
       setError("Select a candidate and enter a new, unused Operations Project ID."); return;
     }
-    if (!reviewKey && !window.confirm("Create short-lived review evidence for this exact PA Project and Operations destination? This does not bind, grant access, or publish a portal.")) return;
+    if (!reviewKey && !window.confirm("Durably reserve this Operations Project ID for the selected PA source and create short-lived review evidence? The destination reservation is retained even if you reset this flow. This does not bind, grant access, or publish a portal.")) return;
     const request = reviewRequest ?? { idempotencyKey: crypto.randomUUID(), sourceId,
       externalProjectId: exact, projectAlphaPublicId: selected };
     const idempotencyKey = request.idempotencyKey;
@@ -659,7 +660,7 @@ function ProjectAdoptionPanel({ connectors, disabled }: { connectors: readonly C
         return;
       }
       setReviewItemId(response.outcome.reviewItemId);
-      setMessage(`Review evidence created: ${response.outcome.reviewItemId}. Reservation remains a separate action.`);
+      setMessage(`Operations destination reserved; review evidence created: ${response.outcome.reviewItemId}. Reserving the reviewed adoption intent remains a separate action.`);
     } catch (caught) { setError(`${operatorError(caught, "Project adoption review outcome is uncertain.")} The same frozen request key is retained; retry only after operator review.`); }
     finally { setBusy(false); }
   };
@@ -706,14 +707,33 @@ function ProjectAdoptionPanel({ connectors, disabled }: { connectors: readonly C
     } catch (caught) { setError(`${operatorError(caught, "Project adoption bind outcome is uncertain.")} The reservation ID is retained; retry only after checking local command state.`); }
     finally { setBusy(false); }
   };
+  const finalize = async () => {
+    if (!reservationId || !commandId || busy || disabled || finalized) return;
+    if (!finalizationStarted && !window.confirm("Send the exact queued binding command to Project Alpha and verify its canonical response before activating the Operations mapping? This does not grant client access or publish a portal. An uncertain write requires reconciliation, not a new command.")) return;
+    setFinalizationStarted(true); setBusy(true); setError(""); setMessage("");
+    try {
+      const response = await api<{ stage?: string; outcome?: { status?: string; reason?: string } }>(
+        "/api/admin/project-alpha/private/projects/adoption/finalize", {
+          method: "POST", headers: { "Idempotency-Key": commandId }, body: JSON.stringify({ reservationId, commandId }),
+        });
+      if (response.stage === "activate" && response.outcome?.status === "activated") {
+        setFinalized(true);
+        setMessage(`Project Alpha binding verified and Operations mapping activated for command ${commandId}. Client access and portal publication remain unchanged.`);
+      } else {
+        setError(`Project adoption finalization stopped at ${response.stage ?? "unknown stage"} (${response.outcome?.status ?? "invalid response"}). Keep these exact IDs and review server state; do not queue a replacement command.`);
+      }
+    } catch (caught) {
+      setError(`${operatorError(caught, "Project adoption finalization outcome is uncertain.")} Keep these exact IDs and review server state; do not queue a replacement command.`);
+    } finally { setBusy(false); }
+  };
   const reset = () => {
-    if (busy || !window.confirm("Clear this local operator flow? Server-side review, reservation, or queued command records are retained.")) return;
+    if (busy || !window.confirm("Clear this local operator flow? Server-side destination, review, reservation, or queued command records are retained.")) return;
     setProjects([]); setNextCursor(null); setSelected(""); setExternalId(""); setReviewRequest(null); setReviewKey(""); setReviewItemId("");
-    setReserveKey(""); setReservationId(""); setCommandId(""); setMessage(""); setError("");
+    setReserveKey(""); setReservationId(""); setCommandId(""); setFinalizationStarted(false); setFinalized(false); setMessage(""); setError("");
   };
   return <section className="alpha-connection" aria-label="PA-created Project adoption review">
     <h3>Review an unbound Project</h3>
-    <p>Discovery is read-only and authority-filtered. Review does not bind the Project, grant client access, or publish it to a portal.</p>
+    <p>Discovery is read-only and authority-filtered. Review durably reserves the Operations Project ID for the selected PA source, but does not bind the Project, grant client access, or publish it to a portal.</p>
     <label htmlFor="project-adoption-source">Project Alpha source</label>
     <select id="project-adoption-source" value={sourceId} disabled={busy || disabled || frozen}
       onChange={event => { setSourceId(event.target.value); setProjects([]); setSelected(""); setNextCursor(null); setMessage(""); setError(""); }}>
@@ -733,15 +753,28 @@ function ProjectAdoptionPanel({ connectors, disabled }: { connectors: readonly C
       <input id="project-adoption-external-id" value={externalId} maxLength={191} disabled={busy || disabled || frozen}
         autoCapitalize="none" autoCorrect="off" spellCheck={false}
         onChange={event => { setExternalId(event.target.value); setMessage(""); setError(""); }} />
-      <button type="submit" disabled={busy || disabled || !selected || Boolean(reviewItemId)}>{reviewKey && !reviewItemId ? "Retry frozen review request" : "Create review evidence only"}</button>
+      <button type="submit" disabled={busy || disabled || !selected || Boolean(reviewItemId)}>{reviewKey && !reviewItemId ? "Retry frozen review request" : "Reserve destination and create review evidence"}</button>
     </form>}
     {reviewItemId && !reservationId && <button type="button" disabled={busy || disabled}
       onClick={() => void reserve()}>{reserveKey ? "Retry frozen reservation request" : "Reserve reviewed intent"}</button>}
     {reservationId && !commandId && <button type="button" disabled={busy || disabled}
       onClick={() => void bind()}>Create local bind plan and queue command</button>}
+    {commandId && !finalized && <button type="button" disabled={busy || disabled}
+      onClick={() => void finalize()}>{finalizationStarted ? "Resume verification of the same bind command" : "Finalize and verify Project binding"}</button>}
+    {frozen && <div role="group" aria-label="Project adoption recovery references">
+      <p><small>Keep these references before leaving or resetting this page. They identify the existing server-side flow; they do not grant access.</small></p>
+      <dl>
+        <dt>Operations Project ID</dt><dd><code>{reviewRequest?.externalProjectId ?? externalId}</code></dd>
+        {reviewKey && <><dt>Review request key</dt><dd><code>{reviewKey}</code></dd></>}
+        {reviewItemId && <><dt>Review evidence ID</dt><dd><code>{reviewItemId}</code></dd></>}
+        {reserveKey && <><dt>Reservation request key</dt><dd><code>{reserveKey}</code></dd></>}
+        {reservationId && <><dt>Reservation ID</dt><dd><code>{reservationId}</code></dd></>}
+        {commandId && <><dt>Bind command ID</dt><dd><code>{commandId}</code></dd></>}
+      </dl>
+    </div>}
     {frozen && <button type="button" className="button-ghost button-small" disabled={busy}
       onClick={reset}>Reset local flow</button>}
-    <p><small>No step in this panel grants client access or publishes the Project to a portal. A planned bind is only a locally queued command, not a Project Alpha acknowledgement.</small></p>
+    <p><small>No step in this panel grants client access or publishes the Project to a portal. A planned bind is only a locally queued command, not a Project Alpha acknowledgement. Finalization verifies the remote acknowledgement and canonical mapping separately.</small></p>
     {message && <p role="status" className="notice">{message}</p>}{error && <p role="alert" className="notice">{error}</p>}
   </section>;
 }
