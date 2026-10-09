@@ -161,15 +161,22 @@ function detailJson(clientId: string | null = null) {
   });
 }
 
-async function seedAuthority(externalProjectId = "server-generated-project", mappingKind: "legacy" | "acquired" = "legacy") {
+async function seedAuthority(externalProjectId = "server-generated-project", mappingKind: "legacy" | "acquired" = "legacy",
+  withDestination = true, destinationBaseUrl = "https://alpha.example.test") {
   await db.batch([
     db.prepare("INSERT INTO native_staff_admissions VALUES('staff',1,'access|staff',1,'staff','2026-09-21T00:00:00.000Z','2026-09-21T00:00:00.000Z') ON CONFLICT(staff_id) DO NOTHING"),
     db.prepare("INSERT INTO native_staff_profiles VALUES('staff','staff@example.test',1) ON CONFLICT(staff_id) DO NOTHING"),
     db.prepare("INSERT INTO staff_role_assignments VALUES('owner-assignment','staff','role-owner','global') ON CONFLICT(id) DO NOTHING"),
-    db.prepare(`INSERT INTO project_alpha_project_destinations(external_project_id,source_id,application_id,destination_base_url,expected_source_instance_id,expected_history_epoch_id)
-      VALUES(?,'project-alpha:primary',?,'https://alpha.example.test',?,?) ON CONFLICT(external_project_id) DO NOTHING`).bind(externalProjectId, applicationId, sourceInstanceId, historyEpochId),
-    db.prepare(`INSERT INTO native_project_grants(id,staff_id,capability,effect,scope_kind,external_project_id,granted_by)
-      VALUES(?, 'staff','project.shared.sync','allow','exact_project',?,'staff') ON CONFLICT DO NOTHING`).bind(`grant-${externalProjectId}`, externalProjectId),
+    ...(withDestination ? [db.prepare(`INSERT INTO project_alpha_project_destinations(external_project_id,source_id,application_id,destination_base_url,expected_source_instance_id,expected_history_epoch_id)
+      VALUES(?,'project-alpha:primary',?,?,?,?) ON CONFLICT(external_project_id) DO NOTHING`)
+      .bind(externalProjectId, applicationId, destinationBaseUrl, sourceInstanceId, historyEpochId)] : []),
+    withDestination
+      ? db.prepare(`INSERT INTO native_project_grants(id,staff_id,capability,effect,scope_kind,external_project_id,granted_by)
+          VALUES(?, 'staff','project.shared.sync','allow','exact_project',?,'staff') ON CONFLICT DO NOTHING`)
+        .bind(`grant-${externalProjectId}`, externalProjectId)
+      : db.prepare(`INSERT INTO native_project_grants(id,staff_id,capability,effect,scope_kind,granted_by)
+          VALUES(?, 'staff','project.shared.sync','allow','global','staff') ON CONFLICT DO NOTHING`)
+        .bind(`grant-${externalProjectId}`),
     db.prepare("INSERT INTO operations_directory_records VALUES('organization-record','organization') ON CONFLICT(record_id) DO NOTHING"),
     mappingKind === "legacy"
       ? db.prepare(`INSERT INTO project_alpha_directory_mappings
@@ -494,6 +501,8 @@ describe("private project adoption review producer", () => {
   it("creates and exactly replays one short-lived review without public-state mutation", async () => {
     await seedAuthority();
     const publicBefore = await db.prepare("SELECT * FROM delivery_public_shares ORDER BY id").all();
+    const destinationBefore = await db.prepare("SELECT * FROM project_alpha_project_destinations WHERE external_project_id=?")
+      .bind(producerSelection.externalProjectId).first();
     const first = await produceReview();
     expect(first).toMatchObject({ status: "reviewed", replayed: false });
     if (first.status !== "reviewed") throw new Error("producer setup failed");
@@ -509,6 +518,8 @@ describe("private project adoption review producer", () => {
       normalized_scopes_json: "[]",
     });
     expect((await db.prepare("SELECT * FROM delivery_public_shares ORDER BY id").all()).results).toEqual(publicBefore.results);
+    expect(await db.prepare("SELECT * FROM project_alpha_project_destinations WHERE external_project_id=?")
+      .bind(producerSelection.externalProjectId).first()).toEqual(destinationBefore);
     expect(await db.prepare("SELECT count(*) count FROM operations_shared_projects").first("count")).toBe(0);
     expect(await db.prepare("SELECT count(*) count FROM project_alpha_project_outbox").first("count")).toBe(0);
   });
@@ -522,6 +533,221 @@ describe("private project adoption review producer", () => {
     expect(send.mock.calls.some(([url]) => String(url).includes("/projects/inventory?"))).toBe(false);
     expect(await db.prepare("SELECT count(*) count FROM operations_shared_projects").first("count")).toBe(0);
     expect(await db.prepare("SELECT count(*) count FROM project_alpha_project_outbox").first("count")).toBe(0);
+  });
+
+  it("discovers, reviews, reserves, and plans an unbound PA project without a preseeded destination", async () => {
+    await seedAuthority("server-generated-project", "legacy", false);
+    const publicBefore = await db.prepare("SELECT * FROM delivery_public_shares ORDER BY id").all();
+    const send = producerSend({ bindingNotFound: true });
+
+    const first = await produceReview(send);
+    expect(first).toMatchObject({ status: "reviewed", replayed: false });
+    if (first.status !== "reviewed") throw new Error("producer setup failed");
+    expect(send.mock.calls.some(([url]) => String(url).includes("/projects/adoption-candidates?"))).toBe(true);
+    expect(await db.prepare(`SELECT source_id,application_id,destination_base_url,expected_source_instance_id,
+      expected_history_epoch_id FROM project_alpha_project_destinations WHERE external_project_id=?`)
+      .bind(producerSelection.externalProjectId).first()).toEqual({
+      source_id: producerSelection.sourceId,
+      application_id: applicationId,
+      destination_base_url: "https://alpha.example.test",
+      expected_source_instance_id: sourceInstanceId,
+      expected_history_epoch_id: historyEpochId,
+    });
+    await expect(produceReview(producerSend({ bindingNotFound: true })))
+      .resolves.toEqual({ ...first, replayed: true });
+
+    const reserved = await reserveReview({ reviewItemId: first.reviewItemId, idempotencyKey });
+    expect(reserved).toMatchObject({ status: "reserved", replayed: false });
+    if (reserved.status !== "reserved") throw new Error("reservation setup failed");
+    const planned = await planAdoption({ reservationId: reserved.reservationId });
+    expect(planned).toMatchObject({ status: "planned", replayed: false });
+    expect(await db.prepare("SELECT name FROM operations_shared_projects WHERE external_project_id=?")
+      .bind(producerSelection.externalProjectId).first("name")).toBe("Reviewed Project");
+    expect(await db.prepare("SELECT operation FROM project_alpha_project_outbox WHERE external_project_id=?")
+      .bind(producerSelection.externalProjectId).first("operation")).toBe("bind");
+    expect((await db.prepare("SELECT * FROM delivery_public_shares ORDER BY id").all()).results)
+      .toEqual(publicBefore.results);
+  });
+
+  it("rejects an existing conflicting destination without remote calls or review writes", async () => {
+    await seedAuthority("server-generated-project", "legacy", true, "https://conflict.example.test");
+    const before = await db.prepare("SELECT * FROM project_alpha_project_destinations WHERE external_project_id=?")
+      .bind(producerSelection.externalProjectId).first();
+    const send = producerSend({ bindingNotFound: true });
+
+    await expect(produceReview(send)).resolves.toEqual({ status: "blocked", reason: "destination" });
+    expect(send).not.toHaveBeenCalled();
+    expect(await db.prepare("SELECT * FROM project_alpha_project_destinations WHERE external_project_id=?")
+      .bind(producerSelection.externalProjectId).first()).toEqual(before);
+    expect(await db.prepare("SELECT count(*) count FROM project_alpha_project_adoption_review_evidence")
+      .first("count")).toBe(0);
+    expect(await db.prepare("SELECT count(*) count FROM project_alpha_project_adoption_review_producer_receipts")
+      .first("count")).toBe(0);
+  });
+
+  it("does not pin a destination before remote and current-authority checks pass", async () => {
+    await seedAuthority("server-generated-project", "legacy", false);
+    await expect(produceReview(producerSend({ bindingNotFound: true, candidates: {
+      apiVersion: "2", sourceInstanceId, applicationId, historyEpoch: historyEpochId,
+      requestId: producerRequestId, authorizationGeneration: "0", projects: [], nextCursor: null,
+    } }))).resolves.toEqual({ status: "blocked", reason: "remote" });
+    expect(await db.prepare("SELECT count(*) count FROM project_alpha_project_destinations").first("count")).toBe(0);
+
+    await db.prepare("UPDATE native_project_grants SET active=0,version=2 WHERE id='grant-server-generated-project'").run();
+    await expect(produceReview(producerSend({ bindingNotFound: true })))
+      .resolves.toEqual({ status: "blocked", reason: "authority" });
+    expect(await db.prepare("SELECT count(*) count FROM project_alpha_project_destinations").first("count")).toBe(0);
+    expect(await db.prepare("SELECT count(*) count FROM project_alpha_project_adoption_review_evidence")
+      .first("count")).toBe(0);
+    expect(await db.prepare("SELECT count(*) count FROM project_alpha_project_adoption_review_producer_receipts")
+      .first("count")).toBe(0);
+  });
+
+  it("rejects a conflicting destination introduced after remote evidence without partial review writes", async () => {
+    await seedAuthority("server-generated-project", "legacy", false);
+    const remote = producerSend({ bindingNotFound: true });
+    let changed = false;
+    const send = vi.fn<typeof fetch>(async (url, init) => {
+      const response = await remote(url, init);
+      if (!changed && String(url).includes("/projects/adoption-candidates?")) {
+        changed = true;
+        await db.prepare(`INSERT INTO project_alpha_project_destinations(
+          external_project_id,source_id,application_id,destination_base_url,expected_source_instance_id,expected_history_epoch_id)
+          VALUES(?,'project-alpha:primary',?,'https://conflict.example.test',?,?)`)
+          .bind(producerSelection.externalProjectId, applicationId, sourceInstanceId, historyEpochId).run();
+      }
+      return response;
+    });
+
+    await expect(produceReview(send)).resolves.toEqual({ status: "blocked", reason: "destination" });
+    expect(changed).toBe(true);
+    expect(await db.prepare("SELECT destination_base_url FROM project_alpha_project_destinations WHERE external_project_id=?")
+      .bind(producerSelection.externalProjectId).first("destination_base_url")).toBe("https://conflict.example.test");
+    expect(await db.prepare("SELECT count(*) count FROM project_alpha_project_adoption_review_evidence")
+      .first("count")).toBe(0);
+    expect(await db.prepare("SELECT count(*) count FROM project_alpha_project_adoption_review_producer_receipts")
+      .first("count")).toBe(0);
+  });
+
+  it("rolls back review writes when a conflicting destination wins immediately before the atomic batch", async () => {
+    await seedAuthority("server-generated-project", "legacy", false);
+    let raced = false;
+    const racingDb = new Proxy(db, { get(target, property) {
+      if (property !== "batch") {
+        const value = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      }
+      return async (statements: D1PreparedStatement[]) => {
+        await target.prepare(`INSERT INTO project_alpha_project_destinations(
+          external_project_id,source_id,application_id,destination_base_url,expected_source_instance_id,expected_history_epoch_id)
+          VALUES(?,'project-alpha:primary',?,'https://race.example.test',?,?)`)
+          .bind(producerSelection.externalProjectId, applicationId, sourceInstanceId, historyEpochId).run();
+        raced = true;
+        return target.batch(statements);
+      };
+    } }) as D1Database;
+
+    await expect(produceReview(producerSend({ bindingNotFound: true }), producerSelection, reviewerActor, racingDb))
+      .resolves.toEqual({ status: "blocked", reason: "destination" });
+    expect(raced).toBe(true);
+    expect(await db.prepare("SELECT destination_base_url FROM project_alpha_project_destinations WHERE external_project_id=?")
+      .bind(producerSelection.externalProjectId).first("destination_base_url")).toBe("https://race.example.test");
+    expect(await db.prepare("SELECT count(*) count FROM project_alpha_project_adoption_review_evidence")
+      .first("count")).toBe(0);
+    expect(await db.prepare("SELECT count(*) count FROM project_alpha_project_adoption_review_producer_receipts")
+      .first("count")).toBe(0);
+  });
+
+  it("accepts an exact destination introduced immediately before the atomic batch", async () => {
+    await seedAuthority("server-generated-project", "legacy", false);
+    const racingDb = new Proxy(db, { get(target, property) {
+      if (property !== "batch") {
+        const value = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      }
+      return async (statements: D1PreparedStatement[]) => {
+        await target.prepare(`INSERT INTO project_alpha_project_destinations(
+          external_project_id,source_id,application_id,destination_base_url,expected_source_instance_id,expected_history_epoch_id)
+          VALUES(?,'project-alpha:primary',?,'https://alpha.example.test',?,?)`)
+          .bind(producerSelection.externalProjectId, applicationId, sourceInstanceId, historyEpochId).run();
+        return target.batch(statements);
+      };
+    } }) as D1Database;
+
+    await expect(produceReview(producerSend({ bindingNotFound: true }), producerSelection, reviewerActor, racingDb))
+      .resolves.toMatchObject({ status: "reviewed", replayed: false });
+    expect(await db.prepare("SELECT count(*) count FROM project_alpha_project_destinations").first("count")).toBe(1);
+    expect(await db.prepare("SELECT count(*) count FROM project_alpha_project_adoption_review_evidence")
+      .first("count")).toBe(1);
+    expect(await db.prepare("SELECT count(*) count FROM project_alpha_project_adoption_review_producer_receipts")
+      .first("count")).toBe(1);
+  });
+
+  it("recovers an exact committed review after a lost batch response", async () => {
+    await seedAuthority("server-generated-project", "legacy", false);
+    const racingDb = new Proxy(db, { get(target, property) {
+      if (property !== "batch") {
+        const value = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      }
+      return async (statements: D1PreparedStatement[]) => {
+        await target.batch(statements);
+        throw new Error("lost batch response");
+      };
+    } }) as D1Database;
+
+    await expect(produceReview(producerSend({ bindingNotFound: true }), producerSelection, reviewerActor, racingDb))
+      .resolves.toMatchObject({ status: "reviewed", replayed: true });
+    expect(await db.prepare("SELECT count(*) count FROM project_alpha_project_destinations").first("count")).toBe(1);
+    expect(await db.prepare("SELECT count(*) count FROM project_alpha_project_adoption_review_evidence")
+      .first("count")).toBe(1);
+    expect(await db.prepare("SELECT count(*) count FROM project_alpha_project_adoption_review_producer_receipts")
+      .first("count")).toBe(1);
+  });
+
+  it("does not replay a concurrent winner after current authority is revoked", async () => {
+    await seedAuthority("server-generated-project", "legacy", false);
+    const racingDb = new Proxy(db, { get(target, property) {
+      if (property !== "batch") {
+        const value = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      }
+      return async (statements: D1PreparedStatement[]) => {
+        await target.batch(statements);
+        await target.prepare("UPDATE native_project_grants SET active=0,version=2 WHERE id='grant-server-generated-project'").run();
+        throw new Error("lost batch response");
+      };
+    } }) as D1Database;
+
+    await expect(produceReview(producerSend({ bindingNotFound: true }), producerSelection, reviewerActor, racingDb))
+      .resolves.toEqual({ status: "blocked", reason: "authority" });
+    expect(await db.prepare("SELECT count(*) count FROM project_alpha_project_destinations").first("count")).toBe(1);
+    expect(await db.prepare("SELECT count(*) count FROM project_alpha_project_adoption_review_evidence")
+      .first("count")).toBe(1);
+    expect(await db.prepare("SELECT count(*) count FROM project_alpha_project_adoption_review_producer_receipts")
+      .first("count")).toBe(1);
+  });
+
+  it("rolls back a newly pinned destination when authority changes immediately before persistence", async () => {
+    await seedAuthority("server-generated-project", "legacy", false);
+    const racingDb = new Proxy(db, { get(target, property) {
+      if (property !== "batch") {
+        const value = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      }
+      return async (statements: D1PreparedStatement[]) => {
+        await target.prepare("UPDATE native_project_grants SET active=0,version=2 WHERE id='grant-server-generated-project'").run();
+        return target.batch(statements);
+      };
+    } }) as D1Database;
+
+    await expect(produceReview(producerSend({ bindingNotFound: true }), producerSelection, reviewerActor, racingDb))
+      .resolves.toEqual({ status: "blocked", reason: "stale_evidence" });
+    expect(await db.prepare("SELECT count(*) count FROM project_alpha_project_destinations").first("count")).toBe(0);
+    expect(await db.prepare("SELECT count(*) count FROM project_alpha_project_adoption_review_evidence")
+      .first("count")).toBe(0);
+    expect(await db.prepare("SELECT count(*) count FROM project_alpha_project_adoption_review_producer_receipts")
+      .first("count")).toBe(0);
   });
 
   it("rejects candidate drift and never falls back for a non-404 binding failure", async () => {
@@ -707,7 +933,7 @@ describe("private project adoption review producer", () => {
   });
 
   it("rolls back evidence and receipt together on a final-batch failure", async () => {
-    await seedAuthority();
+    await seedAuthority("server-generated-project", "legacy", false);
     const failingDb = new Proxy(db, { get(target, property) {
       if (property !== "batch") {
         const value = Reflect.get(target, property, target);
@@ -723,6 +949,7 @@ describe("private project adoption review producer", () => {
       .resolves.toEqual({ status: "blocked", reason: "stale_evidence" });
     expect(await db.prepare("SELECT count(*) count FROM project_alpha_project_adoption_review_evidence").first("count")).toBe(0);
     expect(await db.prepare("SELECT count(*) count FROM project_alpha_project_adoption_review_producer_receipts").first("count")).toBe(0);
+    expect(await db.prepare("SELECT count(*) count FROM project_alpha_project_destinations").first("count")).toBe(0);
   });
 });
 

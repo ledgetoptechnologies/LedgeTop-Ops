@@ -412,7 +412,8 @@ export async function produceProjectAlphaProjectAdoptionReview(
       destination(env.OPS_DB, input), localState(env.OPS_DB, input, connection), actorState(env.OPS_DB, caller),
     ]);
   } catch { return { status: "uncertain", reason: "database" }; }
-  if (!exactDestination(configuredDestination, connection)) return { status: "blocked", reason: "destination" };
+  if (configuredDestination !== null && !exactDestination(configuredDestination, connection))
+    return { status: "blocked", reason: "destination" };
   if (!free(initialLocal)) return { status: "blocked", reason: "local_state" };
   if (!currentActor || currentActor.owner !== 1) return { status: "blocked", reason: "authority" };
 
@@ -439,7 +440,8 @@ export async function produceProjectAlphaProjectAdoptionReview(
       directoryIdentity(env.OPS_DB, connection, observed.detail.response.data.organizationPublicId,
         observed.detail.response.data.clientPublicId), grants(env.OPS_DB, caller.staffId),
     ]);
-    if (!exactDestination(finalDestination, connection)) return { status: "blocked", reason: "destination" };
+    if (finalDestination !== null && !exactDestination(finalDestination, connection))
+      return { status: "blocked", reason: "destination" };
     if (!free(finalLocal)) return { status: "blocked", reason: "local_state" };
     if (!finalActor || finalActor.owner !== 1 || JSON.stringify(finalActor) !== JSON.stringify(currentActor)
       || !authorized(finalGrants, input.externalProjectId, directory.scopes)) return { status: "blocked", reason: "authority" };
@@ -447,6 +449,7 @@ export async function produceProjectAlphaProjectAdoptionReview(
     if (!finalDirectory || JSON.stringify(finalDirectory) !== JSON.stringify(directory)) return { status: "blocked", reason: "directory" };
     const saved = await prior(env.OPS_DB, input.idempotencyKey, requestSha256);
     if (saved) {
+      if (!exactDestination(finalDestination, connection)) return { status: "blocked", reason: "destination" };
       if (saved.idempotency_key !== input.idempotencyKey) return { status: "conflict", reason: "request_sha256" };
       if (saved.request_sha256 !== requestSha256) return { status: "conflict", reason: "idempotency_key" };
       return await exactReplay(saved, input, caller, requestJson, connection, finalActor, directory, observed, scopesJson)
@@ -456,6 +459,18 @@ export async function produceProjectAlphaProjectAdoptionReview(
 
     const reviewItemId = crypto.randomUUID(), producerReceiptId = crypto.randomUUID();
     await env.OPS_DB.batch([
+      env.OPS_DB.prepare(`INSERT INTO project_alpha_project_destinations(
+        external_project_id,source_id,application_id,destination_base_url,expected_source_instance_id,expected_history_epoch_id)
+        SELECT ?,?,?,?,?,? WHERE NOT EXISTS(
+          SELECT 1 FROM project_alpha_project_destinations WHERE external_project_id=?)`).bind(
+        input.externalProjectId, connection.sourceId, connection.applicationId, connection.baseUrl,
+        connection.sourceInstanceId, connection.historyEpochId, input.externalProjectId),
+      env.OPS_DB.prepare(`SELECT CASE WHEN EXISTS(
+        SELECT 1 FROM project_alpha_project_destinations WHERE external_project_id=? AND source_id=?
+          AND application_id=? AND destination_base_url=? AND expected_source_instance_id=?
+          AND expected_history_epoch_id=?) THEN 1 ELSE json('project-adoption-destination-not-exact') END verified`).bind(
+        input.externalProjectId, connection.sourceId, connection.applicationId, connection.baseUrl,
+        connection.sourceInstanceId, connection.historyEpochId),
       env.OPS_DB.prepare(`INSERT INTO project_alpha_project_adoption_review_evidence(
         review_item_id,request_sha256,source_id,source_instance_id,application_id,history_epoch_id,
         external_project_id,project_alpha_public_id,project_alpha_revision,projection_sha256,
@@ -485,14 +500,34 @@ export async function produceProjectAlphaProjectAdoptionReview(
     return { status: "reviewed", reviewItemId, requestSha256, replayed: false };
   } catch (error) {
     try {
-      const winner = await prior(env.OPS_DB, input.idempotencyKey, requestSha256);
+      const [currentDestination, winner, recoveryLocal, recoveryActor, recoveryDirectory, recoveryGrants] = await Promise.all([
+        destination(env.OPS_DB, input), prior(env.OPS_DB, input.idempotencyKey, requestSha256),
+        localState(env.OPS_DB, input, connection), actorState(env.OPS_DB, caller),
+        directoryIdentity(env.OPS_DB, connection, observed.detail.response.data.organizationPublicId,
+          observed.detail.response.data.clientPublicId), grants(env.OPS_DB, caller.staffId),
+      ]);
+      if (currentDestination !== null && !exactDestination(currentDestination, connection))
+        return { status: "blocked", reason: "destination" };
       if (winner) {
+        if (!exactDestination(currentDestination, connection)) return { status: "blocked", reason: "destination" };
         if (winner.idempotency_key !== input.idempotencyKey) return { status: "conflict", reason: "request_sha256" };
         if (winner.request_sha256 !== requestSha256) return { status: "conflict", reason: "idempotency_key" };
-        return await exactReplay(winner, input, caller, requestJson, connection, currentActor, directory, observed, scopesJson)
+        if (!free(recoveryLocal)) return { status: "blocked", reason: "local_state" };
+        if (recoveryDirectory === "relationship") return { status: "blocked", reason: "relationship" };
+        if (!recoveryDirectory) return { status: "blocked", reason: "directory" };
+        if (!recoveryActor || recoveryActor.owner !== 1
+          || !authorized(recoveryGrants, input.externalProjectId, recoveryDirectory.scopes))
+          return { status: "blocked", reason: "authority" };
+        return await exactReplay(winner, input, caller, requestJson, connection, recoveryActor, recoveryDirectory,
+          observed, JSON.stringify(recoveryDirectory.scopes))
           ? { status: "reviewed", reviewItemId: winner.review_item_id, requestSha256, replayed: true }
           : { status: "blocked", reason: "stale_evidence" };
       }
+      if (!free(recoveryLocal) || recoveryDirectory === "relationship" || !recoveryDirectory)
+        return { status: "blocked", reason: "stale_evidence" };
+      if (!recoveryActor || recoveryActor.owner !== 1
+        || !authorized(recoveryGrants, input.externalProjectId, recoveryDirectory.scopes))
+        return { status: "blocked", reason: "stale_evidence" };
     } catch { return { status: "uncertain", reason: "database" }; }
     const message = error instanceof Error ? error.message : "";
     return /current authority|not exact|constraint failed|SQLITE_CONSTRAINT|UNIQUE constraint/i.test(message)
