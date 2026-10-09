@@ -8,6 +8,7 @@ import { STAGING_TARGET } from "./staging-onboarding-native-only-authority-packe
 import {
   applyReviewedNativeOnlyAuthorityPacket,
   main,
+  readStagingBindingConfig,
   readOnlyStagingAuthorityStatus,
   validateStagingBindingConfig,
   withStagingAuthorityBinding,
@@ -129,6 +130,222 @@ test("status uses exact proxy options, one read-only aggregate, sanitized output
     mutationsPerformed: false,
   });
   assert.doesNotMatch(logs[0], /staff|grant|admission|access_subject/i);
+});
+
+test("direct D1 API status transport uses only the reviewed staging database and hides token values", async t => {
+  const filename = configFile(t);
+  const token = "synthetic-test-token-never-real";
+  const requests = [];
+  const fetchImpl = async (url, init) => {
+    requests.push({ url, init, body: JSON.parse(init.body) });
+    return Response.json({
+      success: true,
+      result: [{
+        success: true,
+        results: [{ migration_count: 182, final_migration: "0182_project_alpha_project_v2_recovery_authorization.sql" }],
+        meta: { changed_db: false, rows_written: 0 },
+      }],
+    });
+  };
+  const logs = [];
+  assert.equal(await main(["status", "--config", filename], {
+    token,
+    fetchImpl,
+    getPlatformProxy: async () => assert.fail("REST transport must not start Miniflare"),
+    log: value => logs.push(value),
+  }), 0);
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].url, `https://api.cloudflare.com/client/v4/accounts/${STAGING_TARGET.accountId}/d1/database/${STAGING_TARGET.databaseId}/query`);
+  assert.equal(requests[0].init.method, "POST");
+  assert.equal(requests[0].init.redirect, "error");
+  assert.equal(requests[0].init.headers.Authorization, `Bearer ${token}`);
+  assert.deepEqual(requests[0].body, { sql: "SELECT count(*) AS migration_count, max(name) AS final_migration\n  FROM d1_migrations", params: [] });
+  assert.match(logs[0], /"migrations":\{"count":182/);
+  assert.equal(logs[0].includes(token), false);
+});
+
+test("an injected proxy wins over an ambient API token unless a token dependency is explicit", async t => {
+  const filename = configFile(t);
+  const ambientToken = "synthetic-ambient-token-never-real";
+  const explicitToken = "synthetic-explicit-token-never-real";
+  const previousToken = process.env.CLOUDFLARE_API_TOKEN;
+  process.env.CLOUDFLARE_API_TOKEN = ambientToken;
+  try {
+    const db = fakeDb();
+    const state = { starts: 0, options: [], disposals: 0 };
+    await readOnlyStagingAuthorityStatus(filename, {
+      getPlatformProxy: proxyFactory(db, state),
+      fetchImpl: async () => assert.fail("ambient token must not bypass the injected proxy"),
+    });
+    assert.equal(state.starts, 1);
+    assert.equal(state.disposals, 1);
+
+    let fetches = 0;
+    await readOnlyStagingAuthorityStatus(filename, {
+      token: explicitToken,
+      getPlatformProxy: async () => assert.fail("explicit token must select the REST transport"),
+      fetchImpl: async (_url, init) => {
+        fetches += 1;
+        assert.equal(init.headers.Authorization, `Bearer ${explicitToken}`);
+        return Response.json({
+          success: true,
+          result: [{
+            success: true,
+            results: [{ migration_count: 182, final_migration: "0182_project_alpha_directory_relationship_recovery_guard.sql" }],
+          }],
+        });
+      },
+    });
+    assert.equal(fetches, 1);
+  } finally {
+    if (previousToken === undefined) delete process.env.CLOUDFLARE_API_TOKEN;
+    else process.env.CLOUDFLARE_API_TOKEN = previousToken;
+  }
+});
+
+test("direct D1 API rejects config drift before fetch", async t => {
+  const filename = configFile(t);
+  const token = "synthetic-test-token-never-real";
+  let reads = 0;
+  let fetches = 0;
+  const readConfig = (configPath, dependencies) => {
+    const result = readStagingBindingConfig(configPath, dependencies);
+    reads += 1;
+    if (reads === 1) fs.writeFileSync(filename, JSON.stringify(reviewedConfig()), "utf8");
+    return result;
+  };
+  await assert.rejects(readOnlyStagingAuthorityStatus(filename, {
+    token,
+    readConfig,
+    fetchImpl: async () => {
+      fetches += 1;
+      return Response.json({ success: true, result: [] });
+    },
+  }), /config changed while opening binding/);
+  assert.equal(reads, 2);
+  assert.equal(fetches, 0);
+});
+
+test("direct D1 API batch transport sends the complete parameterized batch in one atomic request", async t => {
+  const filename = configFile(t);
+  const token = "synthetic-test-token-never-real";
+  const requests = [];
+  const fetchImpl = async (url, init) => {
+    requests.push({ url, init, body: JSON.parse(init.body) });
+    return Response.json({ success: true, result: [{ success: true }, { success: true }] });
+  };
+  const packet = { schemaVersion: 2, statements: [
+    { sql: "INSERT INTO synthetic_table(id) VALUES(?)", params: ["fixture-id"] },
+    { sql: "INSERT INTO synthetic_audit(id) VALUES(?)", params: ["fixture-audit"] },
+  ] };
+  const result = await applyReviewedNativeOnlyAuthorityPacket(filename, packet, {
+    token,
+    fetchImpl,
+    applyPacket: (db, actualPacket) => db.batch(actualPacket.statements.map(item => db.prepare(item.sql).bind(...item.params))),
+  });
+  assert.equal(requests.length, 1, "all mutations are submitted as one request");
+  assert.deepEqual(requests[0].body, { batch: packet.statements });
+  assert.deepEqual(result, [{ success: true }, { success: true }]);
+  assert.equal(JSON.stringify(requests[0].init.headers).includes(token), true, "token is sent only in the authorization header");
+});
+
+test("direct D1 API errors are sanitized and never echo provider messages or credentials", async t => {
+  const filename = configFile(t);
+  const token = "synthetic-test-token-never-real";
+  await assert.rejects(main(["status", "--config", filename], {
+    token,
+    fetchImpl: async () => Response.json({
+      success: false,
+      errors: [{ code: 7403, message: `upstream echoed ${token}` }],
+    }, { status: 403 }),
+    getPlatformProxy: async () => assert.fail("REST transport must not start Miniflare"),
+  }), error => {
+    assert.match(error.message, /HTTP 403/);
+    assert.match(error.message, /7403/);
+    assert.equal(error.message.includes(token), false);
+    assert.equal(error.message.includes("upstream echoed"), false);
+    return true;
+  });
+});
+
+test("direct D1 API transport and JSON failures are sanitized", async t => {
+  const token = "synthetic-test-token-never-real";
+  await t.test("network failure", async t => {
+    const filename = configFile(t);
+    await assert.rejects(readOnlyStagingAuthorityStatus(filename, {
+      token,
+      fetchImpl: async () => { throw new Error(`network echoed ${token}`); },
+    }), error => {
+      assert.match(error.message, /request failed before a response/);
+      assert.equal(error.message.includes(token), false);
+      assert.equal(error.message.includes("network echoed"), false);
+      return true;
+    });
+  });
+  await t.test("invalid JSON response", async t => {
+    const filename = configFile(t);
+    await assert.rejects(readOnlyStagingAuthorityStatus(filename, {
+      token,
+      fetchImpl: async () => ({
+        ok: true,
+        status: 200,
+        async json() { throw new Error(`JSON echoed ${token}`); },
+      }),
+    }), error => {
+      assert.match(error.message, /returned an invalid response/);
+      assert.equal(error.message.includes(token), false);
+      assert.equal(error.message.includes("JSON echoed"), false);
+      return true;
+    });
+  });
+});
+
+test("direct D1 API rejects malformed batch inputs before fetch", async t => {
+  const token = "synthetic-test-token-never-real";
+  const valid = { sql: "SELECT ? AS value", params: [1] };
+  const invalidBatches = [
+    ["empty batch", []],
+    ["batch over the limit", Array.from({ length: 1_001 }, () => valid)],
+    ["empty SQL", [{ sql: "", params: [] }]],
+    ["non-array parameters", [{ sql: "SELECT 1", params: "not-an-array" }]],
+  ];
+  for (const [name, statements] of invalidBatches) {
+    await t.test(name, async t => {
+      const filename = configFile(t);
+      let fetches = 0;
+      await assert.rejects(withStagingAuthorityBinding(filename, ({ db }) => db.batch(statements), {
+        token,
+        fetchImpl: async () => {
+          fetches += 1;
+          return Response.json({ success: true, result: [] });
+        },
+      }), /invalid D1 batch/);
+      assert.equal(fetches, 0);
+    });
+  }
+});
+
+test("direct D1 API rejects incomplete and failed batch results", async t => {
+  const token = "synthetic-test-token-never-real";
+  const cases = [
+    [{ success: true }],
+    [{ success: true }, { success: false }],
+  ];
+  for (const result of cases) {
+    const filename = configFile(t);
+    let fetches = 0;
+    await assert.rejects(withStagingAuthorityBinding(filename, ({ db }) => db.batch([
+      db.prepare("SELECT ? AS value").bind(1),
+      db.prepare("SELECT ? AS value").bind(null),
+    ]), {
+      token,
+      fetchImpl: async () => {
+        fetches += 1;
+        return Response.json({ success: true, result });
+      },
+    }), /invalid batch result/);
+    assert.equal(fetches, 1);
+  }
 });
 
 test("post-start config drift is rejected before the first database call and disposes", async t => {

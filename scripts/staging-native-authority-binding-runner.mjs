@@ -97,6 +97,94 @@ function loadGetPlatformProxy() {
   return requireOperations("wrangler").getPlatformProxy;
 }
 
+function createD1RestApiBinding(target, token, fetchImpl = globalThis.fetch) {
+  if (typeof token !== "string" || token !== token.trim() || token.length < 20) {
+    fail("Cloudflare API token required for the direct D1 transport");
+  }
+  if (typeof fetchImpl !== "function") fail("fetch implementation required for the direct D1 transport");
+
+  const endpoint = `https://api.cloudflare.com/client/v4/accounts/${target.accountId}/d1/database/${target.databaseId}/query`;
+  const execute = async body => {
+    let response;
+    try {
+      response = await fetchImpl(endpoint, {
+        method: "POST",
+        redirect: "error",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(20_000),
+      });
+    } catch {
+      fail("Cloudflare D1 request failed before a response");
+    }
+
+    let payload;
+    try {
+      payload = await response.json();
+    } catch {
+      fail("Cloudflare D1 returned an invalid response");
+    }
+    if (!response.ok || payload?.success !== true || !Array.isArray(payload.result)) {
+      const codes = Array.isArray(payload?.errors)
+        ? payload.errors.map(error => error?.code).filter(code => Number.isInteger(code))
+        : [];
+      fail(`Cloudflare D1 request rejected${response.status ? ` (HTTP ${response.status})` : ""}${codes.length ? ` (error codes ${[...new Set(codes)].join(",")})` : ""}`);
+    }
+    return payload.result;
+  };
+
+  const statement = (sql, params = []) => {
+    if (typeof sql !== "string" || !sql.trim() || !Array.isArray(params)) {
+      fail("invalid prepared D1 statement");
+    }
+    const bound = Object.freeze({ sql, params: Object.freeze([...params]) });
+    const single = async () => {
+      const results = await execute({ sql: bound.sql, params: bound.params });
+      if (results.length !== 1 || !results[0] || results[0].success !== true) {
+        fail("Cloudflare D1 returned an invalid single-query result");
+      }
+      return results[0];
+    };
+    return Object.freeze({
+      ...bound,
+      first: async column => {
+        const result = await single();
+        const row = result.results?.[0] ?? null;
+        return column === undefined || row === null ? row : (row[column] ?? null);
+      },
+      all: async () => {
+        const result = await single();
+        return { results: result.results ?? [], success: result.success, meta: result.meta };
+      },
+      run: single,
+    });
+  };
+
+  return Object.freeze({
+    prepare: sql => Object.freeze({
+      bind: (...params) => statement(sql, params),
+      ...statement(sql),
+    }),
+    batch: async statements => {
+      if (!Array.isArray(statements) || statements.length < 1 || statements.length > 1_000
+        || statements.some(item => !item || typeof item.sql !== "string" || !item.sql.trim()
+          || !Array.isArray(item.params))) {
+        fail("invalid D1 batch");
+      }
+      const results = await execute({
+        batch: statements.map(({ sql, params }) => ({ sql, params })),
+      });
+      if (results.length !== statements.length || results.some(result => result?.success !== true)) {
+        fail("Cloudflare D1 returned an invalid batch result");
+      }
+      return results;
+    },
+  });
+}
+
 function assertStableConfig(before, after) {
   if (before.configPath !== after.configPath
     || before.configSha256 !== after.configSha256
@@ -110,6 +198,16 @@ export async function withStagingAuthorityBinding(configPath, callback, dependen
   if (typeof callback !== "function") fail("binding callback required");
   const readConfig = dependencies.readConfig ?? readStagingBindingConfig;
   const before = readConfig(configPath, dependencies);
+  // Injected proxies are an isolation boundary for tests. An ambient real token
+  // must never silently replace a caller's fake binding with a live transport.
+  const token = dependencies.token ?? (dependencies.getPlatformProxy
+    ? undefined : process.env.CLOUDFLARE_API_TOKEN);
+  if (token) {
+    const after = readConfig(before.configPath, dependencies);
+    assertStableConfig(before, after);
+    const db = createD1RestApiBinding(before.target, token, dependencies.fetchImpl);
+    return callback(Object.freeze({ db, target: before.target }));
+  }
   const getPlatformProxy = dependencies.getPlatformProxy ?? loadGetPlatformProxy();
   const platform = await getPlatformProxy({
     configPath: before.configPath,
