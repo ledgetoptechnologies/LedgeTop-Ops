@@ -99,9 +99,9 @@ describe("local-only complete staging bootstrap migration rehearsal", () => {
 
   it("applies both reviewed chains to empty local D1 databases and stays idempotent", async () => {
     expect(artifacts.delivery.files).toHaveLength(147);
-    expect(artifacts.operations.files).toHaveLength(180);
+    expect(artifacts.operations.files).toHaveLength(181);
     expect(artifacts.delivery.files.at(-1)?.name).toBe("0228_operations_portal_native_content_start_audit.sql");
-    expect(artifacts.operations.files.at(-1)?.name).toBe("0180_project_alpha_project_v2_recovery_authorization.sql");
+    expect(artifacts.operations.files.at(-1)?.name).toBe("0181_project_alpha_directory_create_generation_recovery.sql");
     expect(artifacts.delivery.files.filter(file => file.name.startsWith("0199_")).map(file => file.name)).toEqual([
       "0199_incoming_upload_pickup_lifecycle.sql", "0199_native_viewer_grants.sql",
     ]);
@@ -130,6 +130,7 @@ describe("local-only complete staging bootstrap migration rehearsal", () => {
       "operations_portal_workspace_reservation_heads", "operations_portal_folder_reservation_heads"]) {
       expect(await count(operations, table)).toBe(0);
     }
+    expect(await count(operations, "project_alpha_directory_create_generation_recoveries")).toBe(0);
     expect(await rows<{ id: string; email: string }>(delivery, "SELECT id,email FROM staff_users ORDER BY id"))
       .toEqual([{ id: owner.clientStaffId, email: owner.email }]);
     expect(await rows<{ role: string }>(delivery, "SELECT role FROM staff_users WHERE id=?", owner.clientStaffId))
