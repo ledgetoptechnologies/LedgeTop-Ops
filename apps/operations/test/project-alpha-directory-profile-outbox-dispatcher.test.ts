@@ -370,7 +370,7 @@ describe("native Directory profile outbox dispatcher", () => {
     }
   });
 
-  it("accepts only the exact successor revision for update acknowledgements, including PA replay responses", async () => {
+  it("accepts bounded equal and advanced update revisions, including PA replay responses", async () => {
     for (const response of [
       { revision: "1", replayed: false },
       { revision: "3", replayed: false },
@@ -389,26 +389,14 @@ describe("native Directory profile outbox dispatcher", () => {
       const commandId = update.commandIds[0]!;
       await expect(dispatchProjectAlphaDirectoryProfileOutboxCommand(env(), sourceId, commandId,
         transport(publicId, "1", [], undefined, undefined, response.revision, response.replayed)))
-        .resolves.toMatchObject({ status: "uncertain" });
+        .resolves.toMatchObject({ status: "acknowledged", revision: response.revision, replayed: response.replayed });
       expect(await db.prepare("SELECT state FROM project_alpha_directory_outbox WHERE command_id=?").bind(commandId).first("state"))
-        .toBe("pending");
+        .toBe("acknowledged");
+      await db.prepare(`UPDATE project_alpha_directory_outbox SET outcome_json=json_set(outcome_json,
+        '$.response.result.resource.revision','0') WHERE command_id=?`).bind(commandId).run();
+      await expect(dispatchProjectAlphaDirectoryProfileOutboxCommand(env(), sourceId, commandId, vi.fn<typeof fetch>()))
+        .resolves.toEqual({ status: "uncertain", reason: "evidence" });
     }
-
-    const accepted = await create("organization"), publicId = (sequence++).toString(16).padStart(32, "0");
-    await dispatchProjectAlphaDirectoryProfileOutboxCommand(env(), sourceId, accepted.commandId, transport(publicId, "1", []));
-    const update = await writeNativeDirectoryProfile(db, { operation: "update", mutationId: uuid(), recordId: accepted.input.recordId,
-      expectedLocalVersion: 1, kind: "organization", profile: { ...organizationProfile, name: "Exact successor" },
-      destinations: [{ sourceId, sourceInstanceUUID: source, applicationUUID: application, historyEpoch: epoch, origin: baseUrl,
-        externalCanonicalId: accepted.input.recordId, expectedAuthorizationGeneration: "1" }], actor: accepted.staff } as NativeDirectoryProfileWrite);
-    if (update.status !== "written") throw new Error(update.reason);
-    await expect(dispatchProjectAlphaDirectoryProfileOutboxCommand(env(), sourceId, update.commandIds[0]!,
-      transport(publicId, "1", [], undefined, undefined, "2", true)))
-      .resolves.toMatchObject({ status: "acknowledged", revision: "2", replayed: true });
-
-    await db.prepare(`UPDATE project_alpha_directory_outbox SET outcome_json=json_set(outcome_json,
-      '$.response.result.resource.revision','3') WHERE command_id=?`).bind(update.commandIds[0]!).run();
-    await expect(dispatchProjectAlphaDirectoryProfileOutboxCommand(env(), sourceId, update.commandIds[0]!, vi.fn<typeof fetch>()))
-      .resolves.toEqual({ status: "uncertain", reason: "evidence" });
   });
 
   it("rechecks identity and current authority, and an expired settlement lease makes no partial acknowledgement", async () => {

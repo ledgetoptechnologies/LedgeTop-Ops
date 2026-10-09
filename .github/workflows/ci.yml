@@ -53,6 +53,9 @@ jobs:
       - name: Verify staging portal byte fixtures without remote writes
         run: node --test scripts/staging-portal-byte-fixture.test.mjs
 
+      - name: Verify local relationship recovery proposal against the canonical schema
+        run: node --test scripts/staging-directory-relationship-recovery-proposal.test.mjs
+
   incoming-pickup:
     name: incoming-pickup-alpine
     runs-on: ubuntu-24.04

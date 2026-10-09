@@ -24,15 +24,15 @@ async function seedSyntheticActiveMapping(recordId:string,kind:"organization"|"c
     project_alpha_public_id,source_instance_id,application_id,history_epoch_id,provenance_id,mapping_kind)
     VALUES(?,?,?,?,?,?,?,?,?,'acquired')`).bind(sourceId,kind,recordId,externalId,projectAlphaPublicId,source,application,epoch,uuid()).run();
 }
-function destination(recordId:string,second=false,originOverride=baseUrl){return{sourceId:second?"project-alpha:secondary":sourceId,
+function destination(recordId:string,second=false,originOverride=baseUrl,expectedAuthorizationGeneration="0"){return{sourceId:second?"project-alpha:secondary":sourceId,
   sourceInstanceUUID:second?"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa":source,applicationUUID:second?"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb":application,
   historyEpoch:second?"cccccccc-cccc-4ccc-8ccc-cccccccccccc":epoch,origin:second?"https://pa-secondary.example.test":originOverride,
-  externalCanonicalId:recordId,expectedAuthorizationGeneration:"0"};}
+  externalCanonicalId:recordId,expectedAuthorizationGeneration};}
 function env(second=false){const instances:Record<string,unknown>={[sourceId]:{sourceId,enabled:true,baseUrl,apiKey:"secret",sourceInstanceId:source,applicationId:application,historyEpoch:epoch}};
   if(second)instances["project-alpha:secondary"]={sourceId:"project-alpha:secondary",enabled:true,baseUrl:"https://pa-secondary.example.test",apiKey:"secret2",sourceInstanceId:"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",applicationId:"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",historyEpoch:"cccccccc-cccc-4ccc-8ccc-cccccccccccc"};
   return{OPS_DB:db,PROJECT_ALPHA_API_V2_CONNECTIONS:JSON.stringify({version:1,instances})};}
-async function create(kind:"organization"|"client",two=false,recordId=uuid(),originOverride=baseUrl){const mutationId=uuid(),createAdmissionId=`admission-${mutationId}`;
-  const destinations=[destination(recordId,false,originOverride),...(two?[destination(recordId,true)]:[])],scopes=[{businessAreaId:"area",divisionId:"division"}];
+async function create(kind:"organization"|"client",two=false,recordId=uuid(),originOverride=baseUrl,expectedAuthorizationGeneration="0"){const mutationId=uuid(),createAdmissionId=`admission-${mutationId}`;
+  const destinations=[destination(recordId,false,originOverride,expectedAuthorizationGeneration),...(two?[destination(recordId,true,originOverride,expectedAuthorizationGeneration)]:[])],scopes=[{businessAreaId:"area",divisionId:"division"}];
   const input={operation:"create",mutationId,createAdmissionId,recordId,expectedLocalVersion:0,kind,profile:kind==="client"?clientProfile:orgProfile,
     scopes,destinations,actor:profileActor,
     ...(kind==="client"?{relationship:{organizationRecordId:null,expectedRelationshipVersion:0}}:{})} as NativeDirectoryProfileWrite;
@@ -50,7 +50,8 @@ async function acknowledge(value:Awaited<ReturnType<typeof create>>,kind:"organi
         VALUES(?,?,?,?,?,?,?,?)`).bind(row!.source_id,kind,value.recordId,id,row!.expected_source_instance_id,row!.application_id,row!.expected_history_epoch_id,commandId),
       db.prepare("UPDATE project_alpha_directory_outbox SET state='acknowledged',outcome_json=?,lease_token=NULL,lease_expires_at=NULL WHERE command_id=?")
         .bind(JSON.stringify({status:"acknowledged",response:{sourceInstanceId:row!.expected_source_instance_id,applicationId:row!.application_id,
-          historyEpoch:row!.expected_history_epoch_id,result:{resource:{type:kind,id:value.recordId,publicId:id,revision:"1"},data:{publicId:id},authorizationGeneration:generation}}}),commandId)]);}
+          historyEpoch:row!.expected_history_epoch_id,requestId,replayed:false,
+          result:{resource:{type:kind,id:value.recordId,publicId:id,revision:"1"},data:{publicId:id},authorizationGeneration:generation}}}),commandId)]);}
   await db.prepare("UPDATE operations_directory_intents SET state='acknowledged' WHERE mutation_id=?").bind(value.mutationId).run();return id;}
 async function updateAndAcknowledge(value:Awaited<ReturnType<typeof create>>,kind:"organization"|"client",publicIdValue:string,
   expectedGeneration:string,revisionValue:string,generation:string,relationship?:{organizationRecordId:string|null;expectedRelationshipVersion:number}){
@@ -65,7 +66,8 @@ async function updateAndAcknowledge(value:Awaited<ReturnType<typeof create>>,kin
     await db.batch([db.prepare("UPDATE project_alpha_directory_outbox SET state='leased',lease_token='fixture',lease_expires_at=9999999999999 WHERE command_id=?").bind(commandId),
       db.prepare("UPDATE project_alpha_directory_outbox SET state='acknowledged',outcome_json=?,lease_token=NULL,lease_expires_at=NULL WHERE command_id=?")
         .bind(JSON.stringify({status:"acknowledged",response:{sourceInstanceId:row!.expected_source_instance_id,applicationId:row!.application_id,
-          historyEpoch:row!.expected_history_epoch_id,result:{resource:{type:kind,id:value.recordId,publicId:publicIdValue,revision:revisionValue},
+          historyEpoch:row!.expected_history_epoch_id,requestId,replayed:false,
+          result:{resource:{type:kind,publicId:publicIdValue,revision:revisionValue},
             data:{publicId:publicIdValue},authorizationGeneration:generation}}}),commandId)]);}
   await db.prepare("UPDATE operations_directory_intents SET state='acknowledged' WHERE mutation_id=?").bind(result.mutationId).run();return result;}
 function writeInput(client:string,version:number,previous:{recordId:string;expectedRecordVersion:number}|null,organization:{recordId:string;expectedRecordVersion:number}|null,mutationId=uuid()):NativeDirectoryRelationshipWrite{
@@ -84,6 +86,11 @@ function transport(action:"assign"|"move"|"remove",clientId:string,organizationI
 beforeAll(async()=>{runtime=new Miniflare({modules:true,compatibilityDate:"2026-08-06",script:"export default {fetch(){return new Response('ok')}}",d1Databases:["OPS_DB"]});db=await runtime.getD1Database("OPS_DB") as D1Database;
   const directory=new URL("../migrations/",import.meta.url);for(const migration of readdirSync(directory).filter(name=>/^\d{4}_.+\.sql$/.test(name)&&name.slice(0,4)<="0173").sort())
     try{await db.batch(splitD1MigrationStatements(readFileSync(new URL(migration,directory),"utf8")).map(sql=>db.prepare(sql)));}catch(error){throw new Error(`migration ${migration}: ${String(error)}`);}
+  const proposal=readFileSync(new URL("../../../scripts/proposals/0182_project_alpha_directory_relationship_recovery_guard.sql",import.meta.url),"utf8"),
+    revisionMarker="DROP VIEW project_alpha_directory_relationship_revision_evidence;",revisionOffset=proposal.indexOf(revisionMarker);
+  if(revisionOffset<0)throw new Error("missing proposal revision-evidence replacement");
+  const revisionProposal=proposal.slice(revisionOffset).replaceAll("operations_directory_effective_materializations","operations_directory_materializations");
+  await db.batch(splitD1MigrationStatements(revisionProposal).map(sql=>db.prepare(sql)));
   await db.exec(`CREATE TABLE writer_test_active_mapping_rows(source_id TEXT,resource_type TEXT,record_id TEXT,external_id TEXT,
     project_alpha_public_id TEXT,source_instance_id TEXT,application_id TEXT,history_epoch_id TEXT,provenance_id TEXT,
     mapping_kind TEXT,created_at TEXT DEFAULT(strftime('%Y-%m-%dT%H:%M:%fZ','now')));
@@ -135,8 +142,13 @@ describe("native Directory relationship writer and outbox",()=>{
       .bind(client.recordId).first("destinations_json")).toBe(originalClientEnrollment);
   });
 
-  it("assigns, moves, and removes with explicit versions, exact replay, and no public-link mutation",async()=>{const first=await create("organization"),second=await create("organization"),client=await create("client");
+  it("assigns, moves, and removes with explicit versions, exact replay, and no public-link mutation",async()=>{const first=await create("organization"),second=await create("organization",false,uuid(),baseUrl,"1"),client=await create("client",false,uuid(),baseUrl,"2");
     const firstPublic=await acknowledge(first,"organization","1"),secondPublic=await acknowledge(second,"organization","2"),clientPublic=await acknowledge(client,"client","3");
+    expect(await db.prepare(`SELECT record_id,record_kind,revision,identity_valid
+      FROM project_alpha_directory_relationship_revision_evidence WHERE record_id IN (?,?) ORDER BY record_kind`)
+      .bind(client.recordId,first.recordId).all()).toMatchObject({results:[
+        {record_id:client.recordId,record_kind:"client",revision:"1",identity_valid:1},
+        {record_id:first.recordId,record_kind:"organization",revision:"1",identity_valid:1}]});
     const before=await db.prepare("SELECT url,hex(payload) payload FROM delivery_public_links").first(),beforeDelivery=await db.prepare("SELECT hex(payload) payload FROM delivery_rows").first();
     const assignInput=writeInput(client.recordId,1,null,{recordId:first.recordId,expectedRecordVersion:1}),assigned=await writeNativeDirectoryRelationship(db,assignInput);
     expect(assigned).toMatchObject({status:"written",replayed:false,relationshipVersion:2,reservations:[{action:"assign",command:{expectedClientRevision:"1",expectedAuthorizationGeneration:"3",expectedCurrentOrganizationPublicId:null,organization:{publicId:firstPublic,expectedRevision:"1"}}}]});
@@ -155,14 +167,14 @@ describe("native Directory relationship writer and outbox",()=>{
     expect(await db.prepare("SELECT hex(payload) payload FROM delivery_rows").first()).toEqual(beforeDelivery);
   },60_000);
 
-  it("rolls back the local mutation when one enrolled destination lacks matching organization evidence",async()=>{const organization=await create("organization"),client=await create("client",true);await acknowledge(organization,"organization","1");await acknowledge(client,"client","2");
+  it("rolls back the local mutation when one enrolled destination lacks matching organization evidence",async()=>{const organization=await create("organization"),client=await create("client",true,uuid(),baseUrl,"1");await acknowledge(organization,"organization","1");await acknowledge(client,"client","2");
     await expect(writeNativeDirectoryRelationship(db,writeInput(client.recordId,1,null,{recordId:organization.recordId,expectedRecordVersion:1}))).resolves.toEqual({status:"blocked",reason:"destination_mismatch"});
     expect(await db.prepare("SELECT organization_record_id,relationship_version FROM operations_directory_client_organizations WHERE client_record_id=?").bind(client.recordId).first()).toEqual({organization_record_id:null,relationship_version:1});
     expect(await db.prepare("SELECT count(*) n FROM project_alpha_directory_relationship_outbox WHERE client_record_id=?").bind(client.recordId).first("n")).toBe(0);
   });
 
   it("fails replay closed after a deny-aware grant revocation without returning reservation identifiers",async()=>{
-    const organization=await create("organization"),client=await create("client");await acknowledge(organization,"organization","1");await acknowledge(client,"client","2");
+    const organization=await create("organization"),client=await create("client",false,uuid(),baseUrl,"1");await acknowledge(organization,"organization","1");await acknowledge(client,"client","2");
     const input=writeInput(client.recordId,1,null,{recordId:organization.recordId,expectedRecordVersion:1});
     const written=await writeNativeDirectoryRelationship(db,input);expect(written).toMatchObject({status:"written",replayed:false});
     const deny=`deny-${uuid()}`;await db.prepare("INSERT INTO native_directory_grants(id,staff_id,permission,effect,scope_kind,business_area_id,granted_by) VALUES(?,?,'directory.identity.link','deny','business_area','area','owner')").bind(deny,actor.staffId).run();
@@ -171,7 +183,7 @@ describe("native Directory relationship writer and outbox",()=>{
     await expect(writeNativeDirectoryRelationship(db,input)).resolves.toMatchObject({status:"written",replayed:true});
   });
 
-  it("accepts an organization with a superset of client destinations and canonical non-UUID IDs",async()=>{const organization=await create("organization",true,"ops/org/adopted-1001"),client=await create("client",false,"ops/client/adopted-1001");
+  it("accepts an organization with a superset of client destinations and canonical non-UUID IDs",async()=>{const organization=await create("organization",true,"ops/org/adopted-1001"),client=await create("client",false,"ops/client/adopted-1001",baseUrl,"1");
     const organizationPublic=await acknowledge(organization,"organization","1"),clientPublic=await acknowledge(client,"client","2");
     const written=await writeNativeDirectoryRelationship(db,writeInput(client.recordId,1,null,{recordId:organization.recordId,expectedRecordVersion:1}));
     if(written.status!=="written")throw new Error(JSON.stringify(written));
@@ -181,18 +193,64 @@ describe("native Directory relationship writer and outbox",()=>{
       transport("assign",clientPublic,organizationPublic,"2",acknowledgedGeneration))).resolves.toMatchObject({status:"acknowledged"});
   });
 
-  it("selects the numeric maximum when a current profile acknowledgement follows relationship evidence",async()=>{const first=await create("organization"),second=await create("organization"),client=await create("client");
+  it("accepts bounded advanced update evidence and rejects malformed materialization or receipt evidence",async()=>{const first=await create("organization"),second=await create("organization",false,uuid(),baseUrl,"1"),client=await create("client",false,uuid(),baseUrl,"2");
     const firstPublic=await acknowledge(first,"organization","1"),secondPublic=await acknowledge(second,"organization","2"),clientPublic=await acknowledge(client,"client","3");
     const assigned=await writeNativeDirectoryRelationship(db,writeInput(client.recordId,1,null,{recordId:first.recordId,expectedRecordVersion:1}));
     if(assigned.status!=="written")throw new Error(JSON.stringify(assigned));
     const relationshipGeneration=String(BigInt(assigned.reservations[0]!.command.expectedAuthorizationGeneration)+1n);
     await dispatchProjectAlphaDirectoryRelationshipCommand(env(),sourceId,assigned.reservations[0]!.commandId,transport("assign",clientPublic,firstPublic,"2",relationshipGeneration));
-    const profileGeneration=String(BigInt(relationshipGeneration)+1n);
-    await updateAndAcknowledge(client,"client",clientPublic,relationshipGeneration,"10",profileGeneration,{organizationRecordId:first.recordId,expectedRelationshipVersion:2});
-    const moved=await writeNativeDirectoryRelationship(db,{...writeInput(client.recordId,2,{recordId:first.recordId,expectedRecordVersion:1},
-      {recordId:second.recordId,expectedRecordVersion:1}),expectedClientRecordVersion:2});
-    expect(moved).toMatchObject({status:"written",reservations:[{command:{expectedClientRevision:"10",expectedAuthorizationGeneration:profileGeneration,
-      organization:{publicId:secondPublic}}}]});
+    const updated=await updateAndAcknowledge(client,"client",clientPublic,relationshipGeneration,"3",relationshipGeneration,
+      {organizationRecordId:first.recordId,expectedRelationshipVersion:2});
+    const moveInput={...writeInput(client.recordId,2,{recordId:first.recordId,expectedRecordVersion:1},
+      {recordId:second.recordId,expectedRecordVersion:1}),expectedClientRecordVersion:2};
+    const updateCommand=updated.commandIds[0]!,originalOutcome=String(await db.prepare("SELECT outcome_json FROM project_alpha_directory_outbox WHERE command_id=?")
+      .bind(updateCommand).first("outcome_json"));
+    try{
+      for(const commandProjection of ["json_remove(command_json,'$.operation')","json_set(command_json,'$.operation','delete')",
+        "json_set(command_json,'$.expectedProjectAlphaPublicId','ffffffffffffffffffffffffffffffff')"]){
+        await db.prepare("DROP VIEW IF EXISTS operations_directory_effective_materializations").run();
+        await db.prepare(`CREATE VIEW operations_directory_effective_materializations AS
+          SELECT intent_id,command_id,${commandProjection} command_json FROM operations_directory_materializations`).run();
+        await expect(writeNativeDirectoryRelationship(db,{...moveInput,mutationId:uuid()}))
+          .resolves.toEqual({status:"blocked",reason:"mapping_evidence"});
+      }
+      await db.prepare("DROP VIEW operations_directory_effective_materializations").run();
+      for(const change of ["publicId","revision","authorizationGeneration","authorizationGenerationOverflow","requestId","unexpectedId"] as const){
+        const outcome=JSON.parse(originalOutcome) as {response:{requestId:string;result:{resource:{publicId:string;revision:string;id?:string};
+          data:{publicId:string};authorizationGeneration:string}}};
+        if(change==="publicId"){
+          outcome.response.result.resource.publicId="f".repeat(32);
+          outcome.response.result.data.publicId="f".repeat(32);
+        }else if(change==="revision")outcome.response.result.resource.revision="0";
+        else if(change==="authorizationGeneration")outcome.response.result.authorizationGeneration="09";
+        else if(change==="authorizationGenerationOverflow")outcome.response.result.authorizationGeneration="9223372036854775808";
+        else if(change==="requestId")outcome.response.requestId="44444444-4444-5444-8444-444444444444";
+        else outcome.response.result.resource.id=client.recordId;
+        await db.prepare("UPDATE project_alpha_directory_outbox SET outcome_json=? WHERE command_id=?")
+          .bind(JSON.stringify(outcome),updateCommand).run();
+        await expect(writeNativeDirectoryRelationship(db,{...moveInput,mutationId:uuid()}))
+          .resolves.toEqual({status:"blocked",reason:"mapping_evidence"});
+      }
+      await db.prepare("UPDATE project_alpha_directory_outbox SET outcome_json=? WHERE command_id=?").bind(originalOutcome,updateCommand).run();
+      const moved=await writeNativeDirectoryRelationship(db,moveInput);
+      expect(moved).toMatchObject({status:"written",reservations:[{command:{expectedClientRevision:"3",
+        expectedAuthorizationGeneration:relationshipGeneration,organization:{publicId:secondPublic}}}]});
+    }finally{
+      await db.prepare("UPDATE project_alpha_directory_outbox SET outcome_json=? WHERE command_id=?").bind(originalOutcome,updateCommand).run();
+      await db.prepare("DROP VIEW IF EXISTS operations_directory_effective_materializations").run();
+    }
+  },60_000);
+
+  it("accepts a canonical equal update revision as current relationship head evidence",async()=>{
+    const organization=await create("organization"),client=await create("client",false,uuid(),baseUrl,"1");
+    const organizationPublic=await acknowledge(organization,"organization","1"),clientPublic=await acknowledge(client,"client","2");
+    const updated=await updateAndAcknowledge(client,"client",clientPublic,"2","1","2",
+      {organizationRecordId:null,expectedRelationshipVersion:1});
+    const written=await writeNativeDirectoryRelationship(db,{...writeInput(client.recordId,1,null,
+      {recordId:organization.recordId,expectedRecordVersion:1}),expectedClientRecordVersion:2});
+    expect(updated).toMatchObject({status:"written",version:2});
+    expect(written).toMatchObject({status:"written",reservations:[{command:{expectedClientRevision:"1",
+      organization:{publicId:organizationPublic}}}]});
   });
 
   it("selects a newer bounded refresh revision after profile acknowledgement",()=>{
@@ -202,16 +260,16 @@ describe("native Directory relationship writer and outbox",()=>{
   });
 
   it("ignores newer generation evidence from the same identity tuple at a different origin",async()=>{
-    const wrongOrigin=await create("organization",false,uuid(),"https://other-pa.example.test");
+    const wrongOrigin=await create("organization",false,uuid(),"https://other-pa.example.test","998");
     await acknowledge(wrongOrigin,"organization","999");
-    const organization=await create("organization"),client=await create("client");
+    const organization=await create("organization",false,uuid(),baseUrl,"99"),client=await create("client",false,uuid(),baseUrl,"100");
     await acknowledge(organization,"organization","100");await acknowledge(client,"client","101");
     const written=await writeNativeDirectoryRelationship(db,writeInput(client.recordId,1,null,
       {recordId:organization.recordId,expectedRecordVersion:1}));
     expect(written).toMatchObject({status:"written",reservations:[{command:{expectedAuthorizationGeneration:"101"}}]});
   });
 
-  it("fails closed before transport when exact newer or incoherent public-ID evidence appears",async()=>{const organization=await create("organization"),client=await create("client"),organizationPublic=await acknowledge(organization,"organization","1");await acknowledge(client,"client","2");
+  it("fails closed before transport when exact newer or incoherent public-ID evidence appears",async()=>{const organization=await create("organization"),client=await create("client",false,uuid(),baseUrl,"1"),organizationPublic=await acknowledge(organization,"organization","1");await acknowledge(client,"client","2");
     const pending=await writeNativeDirectoryRelationship(db,writeInput(client.recordId,1,null,{recordId:organization.recordId,expectedRecordVersion:1}));
     if(pending.status!=="written")throw new Error(JSON.stringify(pending));const send=vi.fn<typeof fetch>();
     const clientCommand=client.commandIds[0]!,outcome=JSON.parse(String(await db.prepare("SELECT outcome_json FROM project_alpha_directory_outbox WHERE command_id=?").bind(clientCommand).first("outcome_json")));
@@ -224,7 +282,7 @@ describe("native Directory relationship writer and outbox",()=>{
     await expect(writeNativeDirectoryRelationship(db,writeInput(client.recordId,2,{recordId:organization.recordId,expectedRecordVersion:1},null))).resolves.toEqual({status:"blocked",reason:"mapping_evidence"});
   });
 
-  it("requires and records explicit supersession of a terminal predecessor",async()=>{const first=await create("organization"),second=await create("organization"),client=await create("client");
+  it("requires and records explicit supersession of a terminal predecessor",async()=>{const first=await create("organization"),second=await create("organization",false,uuid(),baseUrl,"1"),client=await create("client",false,uuid(),baseUrl,"2");
     const firstPublic=await acknowledge(first,"organization","1"),secondPublic=await acknowledge(second,"organization","2"),clientPublic=await acknowledge(client,"client","3");
     const assigned=await writeNativeDirectoryRelationship(db,writeInput(client.recordId,1,null,{recordId:first.recordId,expectedRecordVersion:1}));
     if(assigned.status!=="written")throw new Error(JSON.stringify(assigned));const terminalId=assigned.reservations[0]!.commandId;
@@ -243,7 +301,7 @@ describe("native Directory relationship writer and outbox",()=>{
     expect(await db.prepare("SELECT state FROM project_alpha_directory_relationship_outbox WHERE command_id=?").bind(terminalId).first("state")).toBe("terminal");
   });
 
-  it("retries an outage with the identical command and distinguishes a remote conflict",async()=>{const organization=await create("organization"),client=await create("client"),organizationPublic=await acknowledge(organization,"organization","1"),clientPublic=await acknowledge(client,"client","2");
+  it("retries an outage with the identical command and distinguishes a remote conflict",async()=>{const organization=await create("organization"),client=await create("client",false,uuid(),baseUrl,"1"),organizationPublic=await acknowledge(organization,"organization","1"),clientPublic=await acknowledge(client,"client","2");
     const written=await writeNativeDirectoryRelationship(db,writeInput(client.recordId,1,null,{recordId:organization.recordId,expectedRecordVersion:1}));if(written.status!=="written")throw new Error(JSON.stringify(written));const id=written.reservations[0]!.commandId;
     const acknowledgedGeneration=String(BigInt(written.reservations[0]!.command.expectedAuthorizationGeneration)+1n);
     const failed=transport("assign",clientPublic,organizationPublic,"2",acknowledgedGeneration,500);await expect(dispatchProjectAlphaDirectoryRelationshipCommand(env(),sourceId,id,failed)).resolves.toMatchObject({status:"uncertain",reason:"http_status",httpStatus:500});
@@ -251,12 +309,12 @@ describe("native Directory relationship writer and outbox",()=>{
     const recovered=await dispatchProjectAlphaDirectoryRelationshipCommand(env(),sourceId,id,transport("assign",clientPublic,organizationPublic,"2",acknowledgedGeneration));
     expect(recovered).toMatchObject({status:"acknowledged"});
     expect(await db.prepare("SELECT command_json FROM project_alpha_directory_relationship_outbox WHERE command_id=?").bind(id).first("command_json")).toBe(body);
-    const otherOrg=await create("organization"),otherClient=await create("client");await acknowledge(otherOrg,"organization","4");await acknowledge(otherClient,"client","5");const conflict=await writeNativeDirectoryRelationship(db,writeInput(otherClient.recordId,1,null,{recordId:otherOrg.recordId,expectedRecordVersion:1}));if(conflict.status!=="written")throw new Error(JSON.stringify(conflict));
+    const otherOrg=await create("organization",false,uuid(),baseUrl,"3"),otherClient=await create("client",false,uuid(),baseUrl,"4");await acknowledge(otherOrg,"organization","4");await acknowledge(otherClient,"client","5");const conflict=await writeNativeDirectoryRelationship(db,writeInput(otherClient.recordId,1,null,{recordId:otherOrg.recordId,expectedRecordVersion:1}));if(conflict.status!=="written")throw new Error(JSON.stringify(conflict));
     await expect(dispatchProjectAlphaDirectoryRelationshipCommand(env(),sourceId,conflict.reservations[0]!.commandId,transport("assign","f".repeat(32),"e".repeat(32),"2","6",409))).resolves.toMatchObject({status:"conflict",reason:"remote",httpStatus:409});
     expect(await db.prepare("SELECT state FROM project_alpha_directory_relationship_outbox WHERE command_id=?").bind(conflict.reservations[0]!.commandId).first("state")).toBe("terminal");
   },60_000);
 
-  it("dispatcher fails closed when the local relationship becomes stale before send",async()=>{const organization=await create("organization"),client=await create("client");await acknowledge(organization,"organization","1");await acknowledge(client,"client","2");const pending=await writeNativeDirectoryRelationship(db,writeInput(client.recordId,1,null,{recordId:organization.recordId,expectedRecordVersion:1}));if(pending.status!=="written")throw new Error(JSON.stringify(pending));
+  it("dispatcher fails closed when the local relationship becomes stale before send",async()=>{const organization=await create("organization"),client=await create("client",false,uuid(),baseUrl,"1");await acknowledge(organization,"organization","1");await acknowledge(client,"client","2");const pending=await writeNativeDirectoryRelationship(db,writeInput(client.recordId,1,null,{recordId:organization.recordId,expectedRecordVersion:1}));if(pending.status!=="written")throw new Error(JSON.stringify(pending));
     const send=vi.fn<typeof fetch>();await db.prepare("INSERT INTO native_directory_grants(id,staff_id,permission,effect,scope_kind,granted_by) VALUES(?,?,'directory.identity.link','deny','global','owner')").bind(`deny-${uuid()}`,actor.staffId).run();
     await expect(dispatchProjectAlphaDirectoryRelationshipCommand(env(),sourceId,pending.reservations[0]!.commandId,send)).resolves.toEqual({status:"blocked",reason:"authority"});expect(send).not.toHaveBeenCalled();
     await db.prepare("UPDATE native_directory_grants SET active=0 WHERE staff_id=? AND permission='directory.identity.link' AND effect='deny'").bind(actor.staffId).run();

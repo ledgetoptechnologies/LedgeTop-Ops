@@ -133,7 +133,7 @@ async function activeHead(db: DirectoryWriteD1, recordId: string, kind: "client"
     .all<{ externalId: string; publicId: string }>()).results;
   if (mappings.length !== 1 || !canonicalId(mappings[0]!.externalId) || !/^[0-9a-f]{32}$/.test(mappings[0]!.publicId)) return null;
   const mapping = mappings[0]!;
-  const evidence: { publicId: unknown; revision: unknown; assertedPublicId?: unknown; coherent?: unknown }[] = [];
+  const evidence: { publicId: unknown; revision: unknown; assertedPublicId?: unknown; coherent?: unknown; requestId?: unknown }[] = [];
   if (kind === "client") {
     evidence.push(...(await db.prepare(`SELECT json_extract(outbox.outcome_json,'$.response.result.client.publicId') publicId,
         json_extract(outbox.outcome_json,'$.response.result.client.revision') revision,outbox.client_public_id assertedPublicId,
@@ -153,13 +153,81 @@ async function activeHead(db: DirectoryWriteD1, recordId: string, kind: "client"
   const materializationReadSource = await directoryMaterializationReadSource(db as D1Database);
   evidence.push(...(await db.prepare(`SELECT json_extract(outbox.outcome_json,'$.response.result.resource.publicId') publicId,
       json_extract(outbox.outcome_json,'$.response.result.resource.revision') revision,
+      json_extract(outbox.outcome_json,'$.response.requestId') requestId,
       CASE WHEN json_extract(outbox.outcome_json,'$.response.sourceInstanceId')=intent.source_instance_uuid
         AND json_extract(outbox.outcome_json,'$.response.applicationId')=intent.application_uuid
         AND json_extract(outbox.outcome_json,'$.response.historyEpoch')=intent.expected_history_epoch_id
+        AND json_extract(outbox.outcome_json,'$.status')='acknowledged'
+        AND (SELECT count(*) FROM json_each(outbox.outcome_json))=2
+        AND (SELECT count(*) FROM json_each(outbox.outcome_json,'$.response'))=6
+        AND json_type(outbox.outcome_json,'$.response.requestId')='text'
+        AND length(json_extract(outbox.outcome_json,'$.response.requestId'))=36
+        AND json_type(outbox.outcome_json,'$.response.replayed') IN ('true','false')
+        AND (SELECT count(*) FROM json_each(outbox.outcome_json,'$.response.result'))=3
+        AND json_type(outbox.outcome_json,'$.response.result.data')='object'
+        AND (SELECT count(*) FROM json_each(outbox.outcome_json,'$.response.result.data'))=1
+        AND json_type(outbox.outcome_json,'$.response.result.authorizationGeneration')='text'
+        AND json_extract(outbox.outcome_json,'$.response.result.authorizationGeneration') GLOB '[0-9]*'
+        AND json_extract(outbox.outcome_json,'$.response.result.authorizationGeneration') NOT GLOB '*[^0-9]*'
+        AND (json_extract(outbox.outcome_json,'$.response.result.authorizationGeneration')='0'
+          OR substr(json_extract(outbox.outcome_json,'$.response.result.authorizationGeneration'),1,1)<>'0')
+        AND length(json_extract(outbox.outcome_json,'$.response.result.authorizationGeneration'))<=19
+        AND (length(json_extract(outbox.outcome_json,'$.response.result.authorizationGeneration'))<19
+          OR json_extract(outbox.outcome_json,'$.response.result.authorizationGeneration')<='9223372036854775807')
         AND json_extract(outbox.outcome_json,'$.response.result.resource.type')=outbox.resource_type
-        AND json_extract(outbox.outcome_json,'$.response.result.resource.id')=outbox.external_id
+        AND json_extract(outbox.outcome_json,'$.response.result.resource.publicId')=?
         AND json_extract(outbox.outcome_json,'$.response.result.data.publicId')=
-          json_extract(outbox.outcome_json,'$.response.result.resource.publicId') THEN 1 ELSE 0 END coherent
+          json_extract(outbox.outcome_json,'$.response.result.resource.publicId')
+        AND materialization.command_json=outbox.command_json
+        AND CASE json_extract(materialization.command_json,'$.operation')
+          WHEN 'create' THEN
+            (SELECT count(*) FROM json_each(outbox.outcome_json,'$.response.result.resource'))=4
+            AND json_extract(materialization.command_json,'$.expectedRevision')='0'
+            AND json_extract(outbox.outcome_json,'$.response.result.resource.id')=outbox.external_id
+            AND json_extract(outbox.outcome_json,'$.response.result.resource.revision')='1'
+            AND json_type(materialization.command_json,'$.expectedAuthorizationGeneration')='text'
+            AND json_extract(materialization.command_json,'$.expectedAuthorizationGeneration') GLOB '[0-9]*'
+            AND json_extract(materialization.command_json,'$.expectedAuthorizationGeneration') NOT GLOB '*[^0-9]*'
+            AND (json_extract(materialization.command_json,'$.expectedAuthorizationGeneration')='0'
+              OR substr(json_extract(materialization.command_json,'$.expectedAuthorizationGeneration'),1,1)<>'0')
+            AND length(json_extract(materialization.command_json,'$.expectedAuthorizationGeneration'))<=19
+            AND (length(json_extract(materialization.command_json,'$.expectedAuthorizationGeneration'))<19
+              OR json_extract(materialization.command_json,'$.expectedAuthorizationGeneration')<='9223372036854775807')
+            AND json_extract(materialization.command_json,'$.expectedAuthorizationGeneration')<>'9223372036854775807'
+            AND json_extract(outbox.outcome_json,'$.response.result.authorizationGeneration')=
+              CAST(CAST(json_extract(materialization.command_json,'$.expectedAuthorizationGeneration') AS INTEGER)+1 AS TEXT)
+          WHEN 'update' THEN
+            (SELECT count(*) FROM json_each(outbox.outcome_json,'$.response.result.resource'))=3
+            AND json_extract(materialization.command_json,'$.expectedProjectAlphaPublicId')=?
+            AND json_type(materialization.command_json,'$.expectedAuthorizationGeneration')='text'
+            AND json_extract(materialization.command_json,'$.expectedAuthorizationGeneration') GLOB '[0-9]*'
+            AND json_extract(materialization.command_json,'$.expectedAuthorizationGeneration') NOT GLOB '*[^0-9]*'
+            AND (json_extract(materialization.command_json,'$.expectedAuthorizationGeneration')='0'
+              OR substr(json_extract(materialization.command_json,'$.expectedAuthorizationGeneration'),1,1)<>'0')
+            AND length(json_extract(materialization.command_json,'$.expectedAuthorizationGeneration'))<=19
+            AND (length(json_extract(materialization.command_json,'$.expectedAuthorizationGeneration'))<19
+              OR json_extract(materialization.command_json,'$.expectedAuthorizationGeneration')<='9223372036854775807')
+            AND json_type(materialization.command_json,'$.expectedRevision')='text'
+            AND json_extract(materialization.command_json,'$.expectedRevision') GLOB '[1-9]*'
+            AND json_extract(materialization.command_json,'$.expectedRevision') NOT GLOB '*[^0-9]*'
+            AND length(json_extract(materialization.command_json,'$.expectedRevision'))<=19
+            AND (length(json_extract(materialization.command_json,'$.expectedRevision'))<19
+              OR json_extract(materialization.command_json,'$.expectedRevision')<='9223372036854775807')
+            AND json_type(outbox.outcome_json,'$.response.result.resource.revision')='text'
+            AND json_extract(outbox.outcome_json,'$.response.result.resource.revision') GLOB '[1-9]*'
+            AND json_extract(outbox.outcome_json,'$.response.result.resource.revision') NOT GLOB '*[^0-9]*'
+            AND length(json_extract(outbox.outcome_json,'$.response.result.resource.revision'))<=19
+            AND (length(json_extract(outbox.outcome_json,'$.response.result.resource.revision'))<19
+              OR json_extract(outbox.outcome_json,'$.response.result.resource.revision')<='9223372036854775807')
+            AND (length(json_extract(outbox.outcome_json,'$.response.result.resource.revision'))>
+                length(json_extract(materialization.command_json,'$.expectedRevision'))
+              OR (length(json_extract(outbox.outcome_json,'$.response.result.resource.revision'))=
+                  length(json_extract(materialization.command_json,'$.expectedRevision'))
+                AND json_extract(outbox.outcome_json,'$.response.result.resource.revision')>=
+                  json_extract(materialization.command_json,'$.expectedRevision')))
+            AND json_extract(outbox.outcome_json,'$.response.result.authorizationGeneration')=
+              json_extract(materialization.command_json,'$.expectedAuthorizationGeneration')
+          ELSE 0 END THEN 1 ELSE 0 END coherent
     FROM operations_directory_intents intent
     JOIN ${materializationReadSource} materialization ON materialization.intent_id=intent.intent_id
     JOIN project_alpha_directory_outbox outbox ON outbox.command_id=materialization.command_id
@@ -169,8 +237,8 @@ async function activeHead(db: DirectoryWriteD1, recordId: string, kind: "client"
       AND outbox.source_id=intent.source_id AND outbox.expected_source_instance_id=intent.source_instance_uuid
       AND outbox.application_id=intent.application_uuid AND outbox.expected_history_epoch_id=intent.expected_history_epoch_id
       AND outbox.destination_base_url=intent.destination_origin AND outbox.resource_type=? AND outbox.external_id=intent.external_canonical_id`)
-    .bind(recordId,localVersion,destination.sourceId,destination.sourceInstanceUUID,destination.applicationUUID,
-      destination.historyEpoch,destination.origin,mapping.externalId,kind).all()).results as { publicId: unknown; revision: unknown; coherent: unknown }[]);
+    .bind(mapping.publicId,mapping.publicId,recordId,localVersion,destination.sourceId,destination.sourceInstanceUUID,destination.applicationUUID,
+      destination.historyEpoch,destination.origin,mapping.externalId,kind).all()).results as { publicId: unknown; revision: unknown; coherent: unknown; requestId: unknown }[]);
   evidence.push(...(await db.prepare(`SELECT refresh.project_alpha_public_id publicId,refresh.live_revision revision
     FROM project_alpha_existing_directory_binding_revision_refresh_receipts refresh
     JOIN project_alpha_acquired_native_owner_claims claim ON claim.claim_id=refresh.native_owner_claim_id
@@ -190,7 +258,8 @@ async function activeHead(db: DirectoryWriteD1, recordId: string, kind: "client"
     .bind(recordId,destination.sourceId,destination.sourceInstanceUUID,destination.applicationUUID,destination.historyEpoch,kind,
       mapping.externalId,localVersion,destination.origin)
     .all()).results as { publicId: unknown; revision: unknown }[]);
-  if (!evidence.length || evidence.some(value => (value.coherent !== undefined && value.coherent !== 1) || value.publicId !== mapping.publicId
+  if (!evidence.length || evidence.some(value => (value.coherent !== undefined && value.coherent !== 1)
+    || (value.requestId !== undefined && (typeof value.requestId !== "string" || !UUID.test(value.requestId))) || value.publicId !== mapping.publicId
     || (value.assertedPublicId !== undefined && value.assertedPublicId !== mapping.publicId))) return null;
   const head=maximumDirectoryRevisionEvidence(evidence.map(value => value.revision));if(head===null)return null;
   return { externalId: mapping.externalId, publicId: mapping.publicId, revision: head };

@@ -11,7 +11,7 @@ import {
 } from "./project-alpha-directory-profile-api-v2";
 import { withEnabledConfiguredProjectAlphaApiV2Connection, type ProjectAlphaApiV2ConnectionEnvironment } from "./project-alpha-api-v2-connections";
 import type { ProjectAlphaApiV2Connection } from "./project-alpha-api-v2";
-import { nextGeneration } from "./project-alpha-project-transport";
+import { advances, PROJECT_ALPHA_PROJECT_MAX_INTEGER } from "./project-alpha-project-transport";
 import { directoryMaterializationReadSource } from "./project-alpha-directory-materialization-read-source";
 import { validateDirectoryCreateRecoveryReservation } from "./project-alpha-directory-create-generation-recovery";
 
@@ -59,10 +59,12 @@ function exact(value: Record<string, unknown>, keys: readonly string[]): boolean
 }
 function origin(value: unknown): string | null { try { return typeof value === "string" ? new URL(value).origin : null; } catch { return null; } }
 function parse(value: string): Record<string, unknown> | null { try { const result = JSON.parse(value); return plain(result) ? result : null; } catch { return null; } }
-function exactUpdateRevision(command: unknown, revision: unknown): boolean {
+function acceptedUpdateRevision(command: unknown, revision: unknown): boolean {
   if (!plain(command) || typeof command.expectedRevision !== "string"
     || typeof revision !== "string") return false;
-  return nextGeneration(command.expectedRevision) === revision;
+  const canonical = (value: string): boolean => /^[1-9][0-9]{0,18}$/.test(value)
+    && (value.length < PROJECT_ALPHA_PROJECT_MAX_INTEGER.length || value <= PROJECT_ALPHA_PROJECT_MAX_INTEGER);
+  return canonical(command.expectedRevision) && canonical(revision) && advances(revision, command.expectedRevision);
 }
 function actor(value: unknown): Actor | null {
   if (!plain(value) || !exact(value, ["staffId", "accessSubject", "admissionVersion", "selectedGrantId", "loginEmail", "profileVersion", "selectedIdentityGrantId"])
@@ -505,7 +507,7 @@ function replay(value: Row): ProjectAlphaDirectoryProfileOutboxDispatcherOutcome
     ? outcome.response.result.resource : null;
   const command = parse(value.command_json);
   return response && typeof response.publicId === "string" && typeof response.revision === "string"
-    && (command?.operation !== "update" || exactUpdateRevision(command, response.revision))
+    && (command?.operation !== "update" || acceptedUpdateRevision(command, response.revision))
     ? { status: "acknowledged", commandId: value.command_id, replayed: true, publicId: response.publicId, revision: response.revision } : { status: "uncertain", reason: "evidence" };
 }
 async function release(db: D1Database, value: Row, token: string, now: number, reason: string): Promise<void> {
@@ -577,7 +579,7 @@ export async function dispatchProjectAlphaDirectoryProfileOutboxCommand(env: Env
       return { phase: "invalid" as const, reason: after };
     }
     const response = evidence.response, resource = response.result.resource;
-    if (current.operation === "update" && !exactUpdateRevision(evidence.command, resource.revision)) {
+    if (current.operation === "update" && !acceptedUpdateRevision(evidence.command, resource.revision)) {
       await release(env.OPS_DB, leased, token, Date.now(), "revision");
       return { phase: "uncertain" as const, reason: "evidence" };
     }

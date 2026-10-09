@@ -54,6 +54,37 @@ node scripts/staging-retained-directory-authority-window.mjs reconcile --config 
 - Approval expiry is **not** automatic grant removal. Always finish the paired
   close and independent readback; never claim cleanup based on elapsed time.
 
+## Live recovery ordering before a relationship-schema successor
+
+- Retained create-generation recovery and profile settlement use canonical 0181.
+  Finish their acknowledged write/replay/conflict/readback and paired authority
+  cleanup before advancing the chain for the separate organization relationship.
+- Use a newly committed, terminal-CI-green runtime revision and a fresh complete
+  staging-settings preservation upload/readback. Historical inactive versions
+  and ignored scripts pinned to older revisions are not release approval.
+- Browser preparation requires the recovery flag and the exact retained grants;
+  a `prepared` response is queued work, not a PA acknowledgment. Leave the normal
+  deployed Directory drain off and cron schedules empty.
+- The existing isolated remote-preview scheduled acceptance path can dispatch
+  without adding an endpoint or a deployed schedule. Before its single
+  invocation, prove the scheduler's entire eligible set is exactly the saved
+  successor across both profile and relationship queues, and prove no waiting
+  client intent can materialize additional work. Repeat that proof once the
+  preview is ready. A count limited to the intended source or command is not
+  sufficient. Use the scheduler's configured-source, due-time, lease and
+  materialization semantics, not a simplified pending-row query.
+- Use only the documented Directory cron contract and a short-lived staging-only
+  Access credential. Require one attempted and acknowledged command, no other
+  outcomes, exact durable acknowledgment/mapping/materialization readback, an
+  unchanged terminal predecessor, and an empty remaining eligible set. Stop the
+  preview and revoke its temporary Access policy/credential afterward, including
+  on failure. Do not blindly re-invoke after an uncertain response: reconcile
+  the saved command and receipts first.
+- Complete profile acceptance and paired `close`, independently verify inactive
+  grants, and restore recovery-off/drain-off/zero-cron staging configuration
+  before any new relationship migration. Neither this runbook nor the local
+  relationship SQL proposal is evidence that live acceptance has passed.
+
 ## Local evidence
 
 ```powershell

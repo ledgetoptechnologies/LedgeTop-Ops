@@ -5,6 +5,8 @@ import { splitD1MigrationStatements } from "../../client/test/helpers/d1-migrati
 import { writeNativeDirectoryProfile,type NativeDirectoryCreateWrite,type NativeDirectoryProfileWrite } from "../src/worker/native-directory-profile-writer";
 import { prepareDirectoryCreateGenerationRecovery } from "../src/worker/project-alpha-directory-create-generation-recovery";
 import { dispatchProjectAlphaDirectoryProfileOutboxCommand } from "../src/worker/project-alpha-directory-profile-outbox-dispatcher";
+import { writeNativeDirectoryRelationship } from "../src/worker/native-directory-relationship-writer";
+import { dispatchProjectAlphaDirectoryRelationshipCommand } from "../src/worker/project-alpha-directory-relationship-outbox-dispatcher";
 import { readConfiguredProjectAlphaDirectoryInventory } from "../src/worker/project-alpha-directory-command-api-v2";
 import { persistProjectAlphaDirectoryInventoryPage } from "../src/worker/project-alpha-v2-sync";
 
@@ -24,14 +26,15 @@ const response=(value:unknown,status=200)=>new Response(JSON.stringify(value),{s
   "Cache-Control":"no-store","X-Request-ID":requestId}});
 function capabilities(){return{apiVersion:"2",sourceInstanceId:instance,applicationId:application,historyEpoch:epoch,requestId,
     grantedCapabilities:["api.capabilities.read","directory.inventory.read","directory.clients.create","directory.clients.write",
-      "directory.organizations.create","directory.organizations.write"]
+      "directory.organizations.create","directory.organizations.write","directory.clients.organization.assign"]
     .map(name=>({name})),implementedEndpoints:[
       {method:"GET",path:"/api/v2/capabilities",requiredCapability:"api.capabilities.read"},
       {method:"GET",path:"/api/v2/directory/inventory",requiredCapability:"directory.inventory.read",requiresSourceInstanceId:true,requiresApplicationId:true,requiresHistoryEpoch:true},
       {method:"POST",path:"/api/v2/directory/clients/commands",requiredCapability:"directory.clients.create",requiresSourceInstanceId:true,requiresApplicationId:true,requiresHistoryEpoch:true},
       {method:"POST",path:"/api/v2/directory/clients/{publicId}/profile/commands",requiredCapability:"directory.clients.write",requiresSourceInstanceId:true,requiresApplicationId:true,requiresHistoryEpoch:true},
       {method:"POST",path:"/api/v2/directory/organizations/commands",requiredCapability:"directory.organizations.create",requiresSourceInstanceId:true,requiresApplicationId:true,requiresHistoryEpoch:true},
-      {method:"POST",path:"/api/v2/directory/organizations/{publicId}/profile/commands",requiredCapability:"directory.organizations.write",requiresSourceInstanceId:true,requiresApplicationId:true,requiresHistoryEpoch:true}]};}
+      {method:"POST",path:"/api/v2/directory/organizations/{publicId}/profile/commands",requiredCapability:"directory.organizations.write",requiresSourceInstanceId:true,requiresApplicationId:true,requiresHistoryEpoch:true},
+      {method:"POST",path:"/api/v2/directory/clients/{publicId}/organization/assign/commands",requiredCapability:"directory.clients.organization.assign",requiresSourceInstanceId:true,requiresApplicationId:true,requiresHistoryEpoch:true}]};}
 function generationTransport(generation:string){return vi.fn<typeof fetch>(async url=>{
   const path=new URL(String(url)).pathname;if(path.endsWith("/capabilities"))return response(capabilities());
   if(path.endsWith("/inventory")){const inventoryRequestId=id();return new Response(JSON.stringify({sourceInstanceId:instance,
@@ -45,11 +48,15 @@ function generationRecoveryTransport(generation:string){return vi.fn<typeof fetc
     {status:200,headers:{"Content-Type":"application/json; charset=utf-8","Cache-Control":"no-store","X-Request-ID":inventoryRequestId}});}
   return response({apiVersion:"2",sourceInstanceId:instance,applicationId:application,historyEpoch:epoch,requestId,
     error:{code:"authorization_generation_conflict"}},409);});}
-function acknowledgement(publicId:string,generation:string){return vi.fn<typeof fetch>(async(url,init)=>{
+function acknowledgement(publicId:string,generation:string,updateRevision="2"){return vi.fn<typeof fetch>(async(url,init)=>{
   const path=new URL(String(url)).pathname;if(path.endsWith("/capabilities"))return response(capabilities());
   const body=JSON.parse(String(init?.body)),update=path.includes("/profile/commands"),resourceType=path.includes("/organizations/")?"organization":"client";return response({sourceInstanceId:instance,
     applicationId:application,historyEpoch:epoch,requestId,replayed:false,result:{resource:update
-      ?{type:resourceType,publicId,revision:"2"}:{type:resourceType,id:body.externalId,publicId,revision:"1"},authorizationGeneration:generation}},update?200:201);});}
+      ?{type:resourceType,publicId,revision:updateRevision}:{type:resourceType,id:body.externalId,publicId,revision:"1"},authorizationGeneration:generation}},update?200:201);});}
+function relationshipAcknowledgement(clientPublicId:string,organizationPublicId:string,generation:string,clientRevision="3"){return vi.fn<typeof fetch>(async url=>{
+  const path=new URL(String(url)).pathname;if(path.endsWith("/capabilities"))return response(capabilities());
+  return response({sourceInstanceId:instance,applicationId:application,historyEpoch:epoch,requestId,replayed:false,
+    result:{action:"assign",client:{publicId:clientPublicId,revision:clientRevision},organizationPublicId,authorizationGeneration:generation}});});}
 const terminal409=vi.fn<typeof fetch>(async url=>new URL(String(url)).pathname.endsWith("/capabilities")
   ?response(capabilities()):response({},409));
 async function terminalizeTrustedGenerationConflict(commandId:string){
@@ -64,6 +71,8 @@ beforeAll(async()=>{runtime=new Miniflare({modules:true,compatibilityDate:"2026-
   db=await runtime.getD1Database("OPS_DB") as D1Database;const directory=new URL("../migrations/",import.meta.url);
   for(const name of readdirSync(directory).filter(name=>/^\d{4}_.+\.sql$/.test(name)).sort())
     await db.batch(splitD1MigrationStatements(readFileSync(new URL(name,directory),"utf8")).map(sql=>db.prepare(sql)));
+  const proposal=new URL("../../../scripts/proposals/0182_project_alpha_directory_relationship_recovery_guard.sql",import.meta.url);
+  await db.batch(splitD1MigrationStatements(readFileSync(proposal,"utf8")).map(sql=>db.prepare(sql)));
   await db.batch([db.prepare("INSERT INTO staff_users(id,email,display_name,access_subject,status) VALUES('owner','owner@example.test','Owner','access|owner','active')"),
     db.prepare("INSERT INTO staff_users(id,email,display_name,access_subject,status) VALUES('staff','staff@example.test','Staff','access|staff','active')"),
     db.prepare("INSERT INTO native_staff_admissions(staff_id,bound_access_subject,active,admitted_by) VALUES('staff','access|staff',1,'owner')"),
@@ -72,6 +81,18 @@ beforeAll(async()=>{runtime=new Miniflare({modules:true,compatibilityDate:"2026-
 },240_000);afterAll(async()=>runtime.dispose());
 
 describe("Directory create-generation recovery full chain",()=>{
+  it("applies only the recovery-aware source substitution and preserves the 0133 live insert guard",async()=>{
+    const live=await db.prepare("SELECT sql FROM sqlite_schema WHERE type='view' AND name='project_alpha_directory_live_relationship_commands'").first<string>("sql");
+    const guard=await db.prepare("SELECT sql FROM sqlite_schema WHERE type='trigger' AND name='project_alpha_directory_relationship_outbox_insert_guard'").first<string>("sql");
+    expect(live).toContain("project_alpha_directory_unsettled_commands pending");
+    expect(live).not.toContain("project_alpha_directory_outbox pending");
+    for(const fragment of ["mapping.record_id=resource.record_id","pending.source_id=command.source_id",
+      "pending.expected_source_instance_id=command.source_instance_id","pending.application_id=command.application_id",
+      "pending.expected_history_epoch_id=command.history_epoch_id","pending.resource_type=resource.record_kind",
+      "pending.external_id=mapping.external_id","pending.state<>'acknowledged'"])expect(live).toContain(fragment);
+    expect(guard).toContain("project_alpha_directory_live_relationship_commands");
+  });
+
   it("preserves the root terminal command and settles a fresh successor before a normal profile update",async()=>{
     const record=id(),mutation=id(),admission=`admission-${mutation}`;
     for(const [suffix,permission] of [["edit","directory.profile.edit"],["identity","directory.identity.link"],["enroll","directory.enrollment.manage"]])
@@ -125,6 +146,14 @@ describe("Directory create-generation recovery full chain",()=>{
       successorCommandId:successor,sourceId,reason:"Reviewed generation race"},{staffId:"staff",accessSubject:"access|staff",
       email:"staff@example.test",admissionVersion:1,profileVersion:1,verifiedUntil:"2999-01-01T00:00:00.000Z"},generationRecoveryTransport("53")))
       .resolves.toEqual({status:"prepared",successorCommandId:successor,generation:"53",replayed:false});
+    expect(await db.prepare("SELECT count(*) n FROM project_alpha_directory_unsettled_commands WHERE command_id IN (?,?)")
+      .bind(root,successor).first("n")).toBe(2);
+    await db.prepare(`UPDATE project_alpha_directory_outbox SET state='leased',lease_token='recovery-lease',lease_expires_at=?
+      WHERE command_id=? AND state='pending'`).bind(Date.now()+60_000,successor).run();
+    expect(await db.prepare("SELECT count(*) n FROM project_alpha_directory_unsettled_commands WHERE command_id IN (?,?)")
+      .bind(root,successor).first("n")).toBe(2);
+    await db.prepare(`UPDATE project_alpha_directory_outbox SET state='pending',lease_token=NULL,lease_expires_at=NULL
+      WHERE command_id=? AND state='leased' AND lease_token='recovery-lease'`).bind(successor).run();
     const original=await db.prepare("SELECT state,command_json,outcome_json FROM project_alpha_directory_outbox WHERE command_id=?").bind(root).first();
     expect(original).toMatchObject({state:"terminal"});
     await expect(dispatchProjectAlphaDirectoryProfileOutboxCommand(env(),sourceId,successor,acknowledgement("a".repeat(32),"54")))
@@ -145,6 +174,111 @@ describe("Directory create-generation recovery full chain",()=>{
     expect(updated).toMatchObject({status:"written",version:2});
     expect(await db.prepare("SELECT evidence_kind FROM operations_directory_intent_relationship_dependencies WHERE intent_id=?")
       .bind(`${updateMutation}:intent:0`).first("evidence_kind")).toBe("unlinked");
+    const updatedAcknowledgement=await dispatchProjectAlphaDirectoryProfileOutboxCommand(env(),sourceId,updated.commandIds[0]!,
+      acknowledgement("a".repeat(32),"54","1"));
+    if(updatedAcknowledgement.status!=="acknowledged")throw Error(JSON.stringify(updatedAcknowledgement));
+    expect(updatedAcknowledgement).toMatchObject({status:"acknowledged",revision:"1"});
+    expect(await db.prepare(`SELECT revision,identity_valid FROM project_alpha_directory_relationship_revision_evidence
+      WHERE record_id=? AND record_kind='client' AND record_version=2`).bind(record).first())
+      .toEqual({revision:"1",identity_valid:1});
+
+    const jumpedMutation=id();
+    const jumped=await writeNativeDirectoryProfile(db,{operation:"update",mutationId:jumpedMutation,recordId:record,expectedLocalVersion:2,
+      kind:"client",profile:{...updateProfile,name:"Recovered client jumped revision"},
+      destinations:[{...destination,expectedAuthorizationGeneration:"54"}],actor:updateActor,
+      relationship:{organizationRecordId:null,expectedRelationshipVersion:1}} as NativeDirectoryProfileWrite);
+    if(jumped.status!=="written")throw Error(JSON.stringify(jumped));
+    const jumpedCommand=jumped.commandIds[0]!;
+    await expect(dispatchProjectAlphaDirectoryProfileOutboxCommand(env(),sourceId,jumpedCommand,
+      acknowledgement("a".repeat(32),"54","7"))).resolves.toMatchObject({status:"acknowledged",revision:"7"});
+    expect(await db.prepare(`SELECT revision,identity_valid FROM project_alpha_directory_relationship_revision_evidence
+      WHERE record_id=? AND record_kind='client' AND record_version=3`).bind(record).first())
+      .toEqual({revision:"7",identity_valid:1});
+
+    await db.prepare("UPDATE native_directory_grants SET active=1 WHERE id IN ('old-edit','old-identity','old-enroll')").run();
+    const organization=id(),organizationMutation=id(),organizationAdmission=`admission-${organizationMutation}`;
+    const organizationDestination={...destination,externalCanonicalId:organization,expectedAuthorizationGeneration:"74"};
+    await db.prepare(`INSERT INTO native_directory_create_admissions(id,staff_id,bound_access_subject,record_id,record_kind,
+      scopes_json,profile_json,destinations_json,issued_by) VALUES(?,?,?,?, 'organization',?,?,?, 'staff')`)
+      .bind(organizationAdmission,"staff","access|staff",organization,JSON.stringify(scopes),JSON.stringify(organizationProfile),
+        JSON.stringify([{...organizationDestination,expectedAuthorizationGeneration:undefined}],(_,value)=>value)).run();
+    const organizationWrite=await writeNativeDirectoryProfile(db,{operation:"create",mutationId:organizationMutation,
+      createAdmissionId:organizationAdmission,recordId:organization,expectedLocalVersion:0,kind:"organization",
+      profile:organizationProfile,scopes,destinations:[organizationDestination],actor} as NativeDirectoryCreateWrite);
+    if(organizationWrite.status!=="written")throw Error(JSON.stringify(organizationWrite));
+    const organizationPublicId="d".repeat(32);
+    await expect(dispatchProjectAlphaDirectoryProfileOutboxCommand(env(),sourceId,organizationWrite.commandIds[0]!,
+      acknowledgement(organizationPublicId,"75"))).resolves.toMatchObject({status:"acknowledged"});
+
+    const relationship=await writeNativeDirectoryRelationship(db,{mutationId:id(),clientRecordId:record,
+      expectedRelationshipVersion:1,expectedClientRecordVersion:3,previousOrganization:null,
+      organization:{recordId:organization,expectedRecordVersion:1},actor:{staffId:"staff",accessSubject:"access|staff",
+        email:"staff@example.test",admissionVersion:1,profileVersion:1}});
+    if(relationship.status!=="written")throw Error(JSON.stringify(relationship));
+    expect(relationship).toMatchObject({status:"written",replayed:false});
+    const relationshipCommand=relationship.reservations[0]!;
+    expect(await db.prepare("SELECT count(*) n FROM project_alpha_directory_live_relationship_commands WHERE command_id=?")
+      .bind(relationshipCommand.commandId).first("n")).toBe(1);
+    const relationshipGeneration=String(BigInt(relationshipCommand.command.expectedAuthorizationGeneration)+1n);
+    const relationshipAcknowledged=await dispatchProjectAlphaDirectoryRelationshipCommand(env(),sourceId,relationshipCommand.commandId,
+      relationshipAcknowledgement("a".repeat(32),organizationPublicId,relationshipGeneration,"8"));
+    if(relationshipAcknowledged.status!=="acknowledged")throw Error(JSON.stringify({relationshipAcknowledged,command:relationshipCommand.command}));
+
+    const removal=await writeNativeDirectoryRelationship(db,{mutationId:id(),clientRecordId:record,
+      expectedRelationshipVersion:2,expectedClientRecordVersion:3,
+      previousOrganization:{recordId:organization,expectedRecordVersion:1},organization:null,
+      actor:{staffId:"staff",accessSubject:"access|staff",email:"staff@example.test",admissionVersion:1,profileVersion:1}});
+    if(removal.status!=="written")throw Error(JSON.stringify(removal));
+    const removalCommand=removal.reservations[0]!.commandId;
+    expect(await db.prepare("SELECT count(*) n FROM project_alpha_directory_live_relationship_commands WHERE command_id=?")
+      .bind(removalCommand).first("n")).toBe(1);
+
+    const originalJumpOutcome=await db.prepare("SELECT outcome_json FROM project_alpha_directory_outbox WHERE command_id=?")
+      .bind(jumpedCommand).first<string>("outcome_json");
+    if(!originalJumpOutcome)throw Error("missing jumped update evidence");
+    for(const [path,value] of [["$.response.result.authorizationGeneration","09"],
+      ["$.response.requestId","44444444-4444-5444-8444-444444444444"]] as const){
+      await db.prepare("UPDATE project_alpha_directory_outbox SET outcome_json=json_set(outcome_json,?,?) WHERE command_id=?")
+        .bind(path,value,jumpedCommand).run();
+      expect(await db.prepare(`SELECT identity_valid FROM project_alpha_directory_relationship_revision_evidence
+        WHERE record_id=? AND record_kind='client' AND record_version=3`).bind(record).first("identity_valid")).toBe(0);
+      expect(await db.prepare("SELECT count(*) n FROM project_alpha_directory_live_relationship_commands WHERE command_id=?")
+        .bind(removalCommand).first("n")).toBe(0);
+      await db.prepare("UPDATE project_alpha_directory_outbox SET outcome_json=? WHERE command_id=?")
+        .bind(originalJumpOutcome,jumpedCommand).run();
+      expect(await db.prepare(`SELECT identity_valid FROM project_alpha_directory_relationship_revision_evidence
+        WHERE record_id=? AND record_kind='client' AND record_version=3`).bind(record).first("identity_valid")).toBe(1);
+    }
+    expect(await db.prepare("SELECT count(*) n FROM project_alpha_directory_live_relationship_commands WHERE command_id=?")
+      .bind(removalCommand).first("n")).toBe(1);
+
+    const unrelatedMutation=id();
+    const unrelated=await writeNativeDirectoryProfile(db,{operation:"update",mutationId:unrelatedMutation,recordId:record,
+      expectedLocalVersion:3,kind:"client",profile:{...updateProfile,name:"Unrelated terminal update"},
+      destinations:[{...destination,expectedAuthorizationGeneration:relationshipGeneration}],actor:updateActor,
+      relationship:{organizationRecordId:null,expectedRelationshipVersion:3}} as NativeDirectoryProfileWrite);
+    if(unrelated.status!=="written")throw Error(JSON.stringify(unrelated));
+    const blocker=unrelated.commandIds[0]!,send=vi.fn<typeof fetch>();
+    expect(await db.prepare("SELECT count(*) n FROM project_alpha_directory_live_relationship_commands WHERE command_id=?")
+      .bind(removalCommand).first("n")).toBe(0);
+    await expect(dispatchProjectAlphaDirectoryRelationshipCommand(env(),sourceId,removalCommand,send))
+      .resolves.toEqual({status:"blocked",reason:"authority"});
+    await db.prepare(`UPDATE project_alpha_directory_outbox SET state='leased',lease_token='unrelated-lease',lease_expires_at=?
+      WHERE command_id=? AND state='pending'`).bind(Date.now()+60_000,blocker).run();
+    expect(await db.prepare("SELECT count(*) n FROM project_alpha_directory_live_relationship_commands WHERE command_id=?")
+      .bind(removalCommand).first("n")).toBe(0);
+    await db.prepare(`UPDATE project_alpha_directory_outbox SET state='terminal',outcome_json=?,lease_token=NULL,lease_expires_at=NULL
+      WHERE command_id=? AND state='leased' AND lease_token='unrelated-lease'`)
+      .bind(JSON.stringify({status:"conflict",reason:"remote",httpStatus:409,errorCode:"unrelated_terminal"}),blocker).run();
+    expect(await db.prepare("SELECT count(*) n FROM project_alpha_directory_live_relationship_commands WHERE command_id=?")
+      .bind(removalCommand).first("n")).toBe(0);
+    await expect(dispatchProjectAlphaDirectoryRelationshipCommand(env(),sourceId,removalCommand,send))
+      .resolves.toEqual({status:"blocked",reason:"authority"});
+    expect(send).not.toHaveBeenCalled();
+    expect(await db.prepare("SELECT count(*) n FROM project_alpha_directory_unsettled_commands WHERE command_id=?")
+      .bind(blocker).first("n")).toBe(1);
+    expect(await db.prepare("SELECT count(*) n FROM project_alpha_directory_unsettled_commands WHERE command_id=?")
+      .bind(root).first("n")).toBe(0);
   },120_000);
 
   it("resolves a linked client parent_intent through an acknowledged recovered organization successor",async()=>{
