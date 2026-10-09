@@ -36,7 +36,7 @@ jobs:
         run: node --test scripts/staging-paired-end-to-end-acceptance-cli.test.mjs
 
       - name: Verify isolated Project adoption finalization staging window
-        run: node --test scripts/staging-project-alpha-project-adoption-finalization-acceptance-profile.test.mjs scripts/staging-project-adoption-live-settings-preservation.test.mjs
+        run: node --test scripts/staging-project-alpha-project-adoption-finalization-acceptance-profile.test.mjs scripts/staging-project-adoption-live-settings-preservation.test.mjs scripts/staging-project-adoption-live-settings-profile.test.mjs
 
       - name: Verify exact live staging settings preservation
         run: node --test scripts/staging-paired-live-settings-preservation.test.mjs
