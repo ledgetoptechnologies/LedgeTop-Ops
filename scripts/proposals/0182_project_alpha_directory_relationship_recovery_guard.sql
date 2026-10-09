@@ -253,6 +253,9 @@ SELECT intent.record_id,outbox.resource_type AS record_kind,intent.record_versio
       AND json_extract(outbox.outcome_json,'$.response.result.data.publicId')=
         json_extract(outbox.outcome_json,'$.response.result.resource.publicId')
       AND materialization.command_json=outbox.command_json
+      AND EXISTS(SELECT 1 FROM operations_directory_records current_record
+        WHERE current_record.record_id=intent.record_id AND current_record.record_kind=outbox.resource_type
+          AND current_record.current_version=intent.record_version)
       AND EXISTS(SELECT 1 FROM project_alpha_active_directory_mappings mapping
         WHERE mapping.record_id=intent.record_id AND mapping.resource_type=outbox.resource_type
           AND mapping.source_id=intent.source_id AND mapping.source_instance_id=intent.source_instance_uuid
