@@ -426,7 +426,7 @@ test("the deployed Client Worker keeps reviewed resources, hosts, and portal ass
 
 test("the deployed Operations Worker keeps catalog and inactive binding transport private and default-off", () => {
   // Newly mounted PA adoption and binding-refresh routes remain disabled in production by default.
-  assert.equal(normalizedSha256("apps/operations/wrangler.jsonc"), "b1770c41df142dd5e011487e5144f159a3a71b2b5dd5c7be3bf547d4a9bf4f4d");
+  assert.equal(normalizedSha256("apps/operations/wrangler.jsonc"), "631a8a1fae4226456c2bcbdb102f63e03bd95d9978542033efde45f2578f8eb2");
   const config = readJson("apps/operations/wrangler.jsonc");
   for (const flag of ["PROJECT_ALPHA_API_V2_SYNC_ENABLED", "PROJECT_ALPHA_DIRECTORY_EXACT_ADOPTION_ENABLED", "PROJECT_ALPHA_PROJECT_V2_RECOVERY_ENABLED"]) {
     assert.equal([...read("apps/operations/wrangler.jsonc").matchAll(new RegExp(`"${flag}"\\s*:`, "g"))].length, 1);
@@ -448,6 +448,7 @@ test("the deployed Operations Worker keeps catalog and inactive binding transpor
   assert.equal(config.vars.CLIENT_PORTAL_SERVICE_METADATA_RPC_ENABLED, "false");
   assert.equal(config.vars.PROJECT_ALPHA_CATALOG_STAGING_COORDINATOR_ENABLED, "false");
   assert.equal(config.vars.PROJECT_ALPHA_PROJECT_ADOPTION_REVIEW_ENABLED, "false");
+  assert.equal(config.vars.PROJECT_ALPHA_PROJECT_ADOPTION_FINALIZATION_ENABLED, "false");
   assert.equal(config.vars.PROJECT_ALPHA_PROJECT_BINDING_REVISION_REFRESH_ENABLED, "false");
   assert.equal(config.vars.PROJECT_ALPHA_CATALOG_PROMOTION_COORDINATOR_ENABLED, "false");
   assert.equal(config.vars.CLIENT_PORTAL_ACCESS_AUTHORITY_OUTBOX_ENABLED, "false");

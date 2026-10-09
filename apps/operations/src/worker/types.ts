@@ -16,6 +16,7 @@ export type Env = Omit<
   | "PROJECT_ALPHA_DIRECTORY_EXACT_ADOPTION_ENABLED"
   | "PROJECT_ALPHA_DIRECTORY_LOCAL_PROFILE_ADOPTION_ENABLED"
   | "PROJECT_ALPHA_PROJECT_ADOPTION_REVIEW_ENABLED"
+  | "PROJECT_ALPHA_PROJECT_ADOPTION_FINALIZATION_ENABLED"
   | "PROJECT_ALPHA_PROJECT_INBOUND_RECONCILIATION_ENABLED"
   | "PROJECT_ALPHA_PROJECT_BINDING_REVISION_REFRESH_ENABLED"
   | "PROJECT_ALPHA_PROJECT_V2_ACTIVATION_ENABLED"
@@ -123,6 +124,8 @@ export type Env = Omit<
   PROJECT_ALPHA_DIRECTORY_LOCAL_PROFILE_ADOPTION_ENABLED?: string;
   /** Staging-only, default-off PA-origin project adoption review evidence entry route. */
   PROJECT_ALPHA_PROJECT_ADOPTION_REVIEW_ENABLED?: string;
+  /** Default-off owner-authorized completion of an exact PA-origin Project bind. */
+  PROJECT_ALPHA_PROJECT_ADOPTION_FINALIZATION_ENABLED?: string;
   /** Default-off reviewed PA-origin edits for already-mapped projects. */
   PROJECT_ALPHA_PROJECT_INBOUND_RECONCILIATION_ENABLED?: string;
   /** Staging-only administrator endpoint for refreshing an already-authorized stale Project binding. */
