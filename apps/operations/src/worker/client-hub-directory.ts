@@ -5,8 +5,10 @@ import { sha256 } from "./crypto";
 import { clientHubActiveDirectoryIdentities, clientHubActiveDirectoryIdentitySql, isBusinessProjectionSource,
   sourcePublicIdExpression, validatedUniquePublicIdExpression, type ClientHubMappingStatus } from "./client-hub-source";
 import type { Env, StaffPrincipal } from "./types";
-import { projectAlphaReadVisibleSql } from "./project-alpha-read-visibility";
+import { projectAlphaNativeMappingReadVisibleSql, projectAlphaReadVisibleSql,
+  requireProjectAlphaReadOrNativeMappingVisibility } from "./project-alpha-read-visibility";
 import { readableBusinessPartySql } from "./business-parties";
+import { resolveProjectAlphaApiV2Connection } from "./project-alpha-api-v2-connections";
 import { businessActivityRecencyCte } from "./client-business-activity";
 import { clientHubReviewedDisplayIdentities, clientHubReviewedDisplayLiveSql } from "./client-hub-reviewed-display";
 
@@ -150,7 +152,6 @@ export function clientHubDetailPath(root: Pick<ClientHubRoot, "source_id" | "roo
   return `/clients/sources/${encodeURIComponent(root.source_id)}/${root.root_namespace}/${clientHubRouteKind(root.kind)}/${encodeURIComponent(root.public_id)}`;
 }
 const visibleRoot = "root.status NOT IN ('closed','inactive')";
-const visibleSource = `(root.source_id='delivery:local' OR ${projectAlphaReadVisibleSql("root.source_id")})`;
 // An index refresh can lag an authoritative business reassignment/deactivation.
 // Only live business roots belong to this source. A portal UUID by itself never
 // establishes a business-root mapping, even when it resembles a record ID.
@@ -246,6 +247,13 @@ const activeBusinessExternalId = (currentMapping: string) => `(SELECT mapping.ex
   WHERE mapping.record_id=root.public_id AND mapping.source_id=root.source_id
     AND mapping.resource_type=CASE root.kind WHEN 'organization' THEN 'organization' ELSE 'client' END
     AND ${currentMapping} AND ${activeTupleUnique("mapping")} LIMIT 1)`;
+const activeBusinessProof = (currentMapping: string, field: "mapping_kind" | "provenance_id" | "external_id" | "record_version") =>
+  `(SELECT ${field === "record_version" ? "record.current_version" : `mapping.${field}`}
+    FROM project_alpha_active_directory_mappings mapping JOIN operations_directory_records record
+      ON record.record_id=mapping.record_id AND record.record_kind=mapping.resource_type
+    WHERE mapping.record_id=root.public_id AND mapping.source_id=root.source_id
+      AND mapping.resource_type=CASE root.kind WHEN 'organization' THEN 'organization' ELSE 'client' END
+      AND ${currentMapping} AND ${activeTupleUnique("mapping")} LIMIT 1)`;
 const activeLiveBusinessRoot = (currentMapping: string) => `(root.root_namespace<>'business' OR EXISTS (
   SELECT 1 FROM project_alpha_active_directory_mappings mapping
   JOIN operations_directory_records record ON record.record_id=mapping.record_id AND record.record_kind=mapping.resource_type
@@ -266,6 +274,16 @@ const activeLiveBusinessRoot = (currentMapping: string) => `(root.root_namespace
     AND json_valid(revision.profile_json) AND json_type(revision.profile_json,'$.name')='text'
     AND length(trim(json_extract(revision.profile_json,'$.name'))) BETWEEN 1 AND 150
     AND length(mapping.project_alpha_public_id)=32 AND mapping.project_alpha_public_id NOT GLOB '*[^0-9a-f]*')))`;
+const visibleSourceSql = (activeMappings: boolean, currentIdentity: string) => {
+  const nativeVisibleRoot = `root.root_namespace='business' AND NOT EXISTS (
+    SELECT 1 FROM pa_connectors native_visibility_connector WHERE native_visibility_connector.source_id=root.source_id)
+    AND EXISTS (SELECT 1 FROM project_alpha_active_directory_mappings mapping
+      WHERE mapping.source_id=root.source_id AND mapping.record_id=root.public_id
+        AND mapping.resource_type=CASE root.kind WHEN 'organization' THEN 'organization' ELSE 'client' END
+        AND ${currentIdentity} AND ${activeTupleUnique("mapping")})`;
+  return `(root.source_id='delivery:local' OR ${projectAlphaReadVisibleSql("root.source_id")}
+    ${activeMappings ? `OR (${nativeVisibleRoot})` : ""})`;
+};
 function unavailable(): never {
   throw new HTTPException(503, { message: "The client directory is being prepared; please retry shortly" });
 }
@@ -447,11 +465,13 @@ export async function listClientHubRoots(env: Env, principal: StaffPrincipal, op
   const cursor = options.cursor === undefined ? null : decodeCursor(options.cursor);
   const asOf = cursor?.asOf ?? new Date().toISOString();
   const { filter, policy: projectPolicy } = await projectSearchAccess(env, principal);
-  const policy = await sha256(JSON.stringify([projectPolicy, reviewPolicy]));
+  const activeIdentities = await clientHubActiveDirectoryIdentities(env);
+  const nativePolicyProof = (activeIdentities ?? []).map(identity => ({ ...identity,
+    origin: resolveProjectAlphaApiV2Connection(env, identity.sourceId).connection.baseUrl }));
+  const policy = await sha256(JSON.stringify([projectPolicy, reviewPolicy, nativePolicyProof]));
   if (cursor && (cursor.q !== q || cursor.kind !== (kind ?? null) || cursor.source !== (source ?? null) || cursor.grouping !== grouping
     || cursor.sort !== sort || cursor.policy !== policy || cursor.portalProof !== portal.fingerprint))
     throw new HTTPException(400, { message: "Client directory cursor does not match this search" });
-  const activeIdentities = await clientHubActiveDirectoryIdentities(env);
   const reviewEnabled = Boolean(reviewPolicy && reviewAuthority);
   const reviewIdentities = reviewEnabled ? await clientHubReviewedDisplayIdentities(env) : [];
   const liveReviewedDisplays = reviewEnabled
@@ -463,6 +483,7 @@ export async function listClientHubRoots(env: Env, principal: StaffPrincipal, op
         SELECT NULL,NULL,NULL WHERE 0)`;
   const activeMappings = activeIdentities !== null;
   const currentIdentity = clientHubActiveDirectoryIdentitySql("mapping", activeIdentities ?? []);
+  const visibleSource = visibleSourceSql(activeMappings, currentIdentity);
   const liveBusinessRoot = activeMappings ? activeLiveBusinessRoot(currentIdentity) : legacyLiveBusinessRoot;
   const currentMapping = activeMappings
     ? `CASE WHEN root.root_namespace='business' THEN ${activeBusinessMapping(currentIdentity)} ELSE root.pa_public_id END`
@@ -550,7 +571,8 @@ export async function listClientHubRoots(env: Env, principal: StaffPrincipal, op
   // State and page share one transaction. The writer advances revision only
   // alongside effective root/search changes, so mutable names cannot skip rows.
   type Snapshot = Pick<ClientHubDirectoryState, "revision" | "ready" | "last_success_at"> & { source_read_revision: number | null; activity_revision: number | null };
-  type LiveRoot = ClientHubRoot & { live_pa_public_id: string | null; business_party_id: string | null;
+  type LiveRoot = ClientHubRoot & { live_pa_public_id: string | null; native_mapping_kind: string | null;
+    native_provenance_id: string | null; native_external_id: string | null; native_record_version: number | null; business_party_id: string | null;
     business_party_name: string | null; business_party_member_count: number | null; display_sort_name: string; party_rank: number; live_activity_at: string | null };
   type SourceSummary = { source_id: ClientHubSource; display_name: string };
   const results = await db.batch<LiveRoot | Snapshot | SourceSummary>([
@@ -560,6 +582,10 @@ export async function listClientHubRoots(env: Env, principal: StaffPrincipal, op
       FROM client_hub_directory_state WHERE id='directory'`),
     db.prepare(`WITH ${activity.sql}, ${liveReviewedDisplays}, matching AS (
       SELECT root.*,${currentMapping} live_pa_public_id,
+        ${activeMappings ? activeBusinessProof(currentIdentity, "mapping_kind") : "NULL"} native_mapping_kind,
+        ${activeMappings ? activeBusinessProof(currentIdentity, "provenance_id") : "NULL"} native_provenance_id,
+        ${activeMappings ? activeBusinessProof(currentIdentity, "external_id") : "NULL"} native_external_id,
+        ${activeMappings ? activeBusinessProof(currentIdentity, "record_version") : "NULL"} native_record_version,
         party.id business_party_id,party.display_name business_party_name,
         CASE WHEN ${grouping === "customers" ? "party.id IS NOT NULL" : "0=1"} THEN (
           SELECT max(member_activity.meaningful_activity_at) FROM business_party_links member
@@ -591,6 +617,10 @@ export async function listClientHubRoots(env: Env, principal: StaffPrincipal, op
     db.prepare(`SELECT source_id,display_name FROM pa_connectors WHERE read_visible=1
       UNION ALL SELECT 'project-alpha:primary','Project Alpha' WHERE NOT EXISTS (
         SELECT 1 FROM pa_connectors WHERE source_id='project-alpha:primary')
+      ${activeMappings ? `UNION SELECT mapping.source_id,mapping.source_id
+        FROM project_alpha_active_directory_mappings mapping
+        WHERE ${currentIdentity} AND ${activeTupleUnique("mapping")}
+          AND NOT EXISTS(SELECT 1 FROM pa_connectors connector WHERE connector.source_id=mapping.source_id)` : ""}
       UNION ALL SELECT 'delivery:local','Local delivery'
       ORDER BY display_name COLLATE NOCASE,source_id LIMIT 35`),
   ]);
@@ -608,24 +638,38 @@ export async function listClientHubRoots(env: Env, principal: StaffPrincipal, op
   // Permissions are read before the SQL batch. Recheck them and the effective
   // source/ownership epoch before releasing names or permission-scoped recency.
   // No claim of a cross-request snapshot: a changed context requires a reload.
-  const [currentScope, currentProjectAccess, currentState, currentPortal, currentReviewPolicy] = await Promise.all([
+  const [currentScope, currentProjectAccess, currentState, currentPortal, currentReviewPolicy, currentNativeIdentities] = await Promise.all([
     sqlScope(env, principal, "team.view"), projectSearchAccess(env, principal),
     env.OPS_DB.withSession("first-primary").prepare(`SELECT revision,
       (SELECT revision FROM client_business_activity_state WHERE singleton=1) activity_revision,
       (SELECT read_revision FROM pa_connector_directory_state WHERE id='directory') source_read_revision
       FROM client_hub_directory_state WHERE id='directory'`).first<Snapshot>(), portalContactProof(env, q),
-    currentReviewAuthority(env, principal, reviewAuthority),
+    currentReviewAuthority(env, principal, reviewAuthority), clientHubActiveDirectoryIdentities(env),
   ]);
   if (!currentScope.global || currentScope.deniedGlobal)
     throw new HTTPException(403, { message: "Global team.view permission required" });
   if (currentState?.source_read_revision !== state.source_read_revision) sourcesChanged();
   if (currentPortal.fingerprint !== portal.fingerprint) changed();
-  const currentPolicy = await sha256(JSON.stringify([currentProjectAccess.policy, currentReviewPolicy.policy]));
+  const currentNativePolicyProof = (currentNativeIdentities ?? []).map(identity => ({ ...identity,
+    origin: resolveProjectAlphaApiV2Connection(env, identity.sourceId).connection.baseUrl }));
+  const currentPolicy = await sha256(JSON.stringify([currentProjectAccess.policy, currentReviewPolicy.policy, currentNativePolicyProof]));
   if (currentPolicy !== policy || currentState?.revision !== state.revision || currentState?.activity_revision !== state.activity_revision) changed();
   const roots = results[1]!.results.filter((row): row is LiveRoot => "root_namespace" in row);
   const page = roots.slice(0, limit);
+  if (activeMappings) await Promise.all(page.map(async row => {
+    if (row.root_namespace !== "business" || !row.source_id.startsWith("project-alpha:")) return [];
+    const visibility = await requireProjectAlphaReadOrNativeMappingVisibility(env, row.source_id, row.public_id, row.kind);
+    if (!("nativeProof" in visibility)) return [];
+    const proof = visibility.nativeProof;
+    if (proof.publicId !== row.live_pa_public_id || proof.externalId !== row.native_external_id
+      || proof.mappingKind !== row.native_mapping_kind || proof.provenanceId !== row.native_provenance_id
+      || proof.recordVersion !== row.native_record_version) changed();
+    return [];
+  }));
   const last = page.at(-1);
-  const clients = page.map(({ live_pa_public_id, party_rank: _rank, display_sort_name: _displaySort, live_activity_at, business_party_id, business_party_name, business_party_member_count, ...root }) => ({ ...root,
+  const clients = page.map(({ live_pa_public_id, native_mapping_kind: _mappingKind, native_provenance_id: _provenanceId,
+    native_external_id: _externalId, native_record_version: _recordVersion,
+    party_rank: _rank, display_sort_name: _displaySort, live_activity_at, business_party_id, business_party_name, business_party_member_count, ...root }) => ({ ...root,
       meaningful_activity_at: live_activity_at,
       ...(root.root_namespace === "business" && root.pa_public_id !== live_pa_public_id ? {
         pa_public_id: live_pa_public_id, mapping_status: live_pa_public_id ? "mapped" : "missing",
@@ -660,6 +704,7 @@ export async function findClientHubRoot(env: Env, kind: ClientHubKind, publicId:
   const activeIdentities = await clientHubActiveDirectoryIdentities(env);
   const activeMappings = activeIdentities !== null;
   const currentIdentity = clientHubActiveDirectoryIdentitySql("mapping", activeIdentities ?? []);
+  const visibleSource = visibleSourceSql(activeMappings, currentIdentity);
   const liveBusinessRoot = activeMappings ? activeLiveBusinessRoot(currentIdentity) : legacyLiveBusinessRoot;
   const rootLookupSql = `SELECT root.* FROM client_hub_roots root
     WHERE root.kind=? AND root.public_id=? AND root.root_namespace<>'review' AND ${visibleRoot} AND ${visibleSource} AND ${liveBusinessRoot}${sourceId === undefined ? "" : " AND root.source_id=?"}

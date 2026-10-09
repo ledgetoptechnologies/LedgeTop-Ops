@@ -741,7 +741,8 @@ describe("Client Hub bounded detail collections", () => {
       CREATE TABLE active_mapping_rows(source_id TEXT,resource_type TEXT,record_id TEXT,external_id TEXT,project_alpha_public_id TEXT,
         source_instance_id TEXT,application_id TEXT,history_epoch_id TEXT);
       CREATE VIEW project_alpha_active_directory_mappings AS SELECT source_id,resource_type,record_id,external_id,
-        project_alpha_public_id,source_instance_id,application_id,history_epoch_id FROM active_mapping_rows;
+        project_alpha_public_id,source_instance_id,application_id,history_epoch_id,
+        'acquired' mapping_kind,external_id provenance_id FROM active_mapping_rows;
       INSERT INTO operations_directory_records VALUES('ops-org','organization',1),('ops-login','client',1),('ops-no-login','client',1);
       INSERT INTO operations_directory_revisions VALUES
         ('ops-org',1,'{"name":"Organization One"}'),
@@ -777,7 +778,8 @@ describe("Client Hub bounded detail collections", () => {
       CREATE TABLE active_mapping_rows(source_id TEXT,resource_type TEXT,record_id TEXT,external_id TEXT,project_alpha_public_id TEXT,
         source_instance_id TEXT,application_id TEXT,history_epoch_id TEXT);
       CREATE VIEW project_alpha_active_directory_mappings AS SELECT source_id,resource_type,record_id,external_id,
-        project_alpha_public_id,source_instance_id,application_id,history_epoch_id FROM active_mapping_rows;
+        project_alpha_public_id,source_instance_id,application_id,history_epoch_id,
+        'acquired' mapping_kind,external_id provenance_id FROM active_mapping_rows;
       INSERT INTO operations_directory_records VALUES
         ('ops-org','organization',2),('ops-current','client',2),('ops-stale','client',1),
         ('ops-ambiguous-a','client',1),('ops-ambiguous-b','client',1),('ops-malformed','client',1);
@@ -1013,7 +1015,8 @@ describe("Client Hub", () => {
       CREATE TABLE active_mapping_rows(source_id TEXT,resource_type TEXT,record_id TEXT,external_id TEXT,project_alpha_public_id TEXT,
         source_instance_id TEXT,application_id TEXT,history_epoch_id TEXT);
       CREATE VIEW project_alpha_active_directory_mappings AS SELECT source_id,resource_type,record_id,external_id,
-        project_alpha_public_id,source_instance_id,application_id,history_epoch_id FROM active_mapping_rows;
+        project_alpha_public_id,source_instance_id,application_id,history_epoch_id,
+        'acquired' mapping_kind,external_id provenance_id FROM active_mapping_rows;
       INSERT INTO operations_directory_records VALUES('ops-org','organization',2);
       INSERT INTO operations_directory_revisions VALUES('ops-org',2,'{"name":"Current API v2 business"}');
       INSERT INTO active_mapping_rows VALUES('project-alpha:primary','organization','ops-org','pa-internal-org','${organizationUuid}',

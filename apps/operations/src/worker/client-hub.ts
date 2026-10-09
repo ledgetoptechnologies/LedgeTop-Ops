@@ -23,7 +23,7 @@ import { mutatePortalRootAccess, readPortalRootAccess } from "./client-portal-ro
 import { externalAccessQuery, listClientExternalAccess } from "./client-external-access";
 import { listClientServiceAssignments, serviceAssignmentQuery } from "./client-service-assignments";
 import type { Env, StaffPrincipal } from "./types";
-import { requireProjectAlphaReadVisibility } from "./project-alpha-read-visibility";
+import { requireProjectAlphaReadOrNativeMappingVisibility, requireProjectAlphaReadVisibility } from "./project-alpha-read-visibility";
 import { readBusinessPartyForRoot } from "./business-parties";
 import { registerProjectOperationalRoutes } from "./project-operational-routes";
 import { registerOrganizationOperationalContactRoutes } from "./organization-operational-contact-routes";
@@ -152,7 +152,9 @@ async function businessAlias(env: Env, root: WorkspaceRow, portal: ClientHubWork
 }
 
 async function liveDetailRoot(env: Env, root: WorkspaceRow): Promise<WorkspaceRow> {
-  const visibility = await requireProjectAlphaReadVisibility(env, root.source_id);
+  const visibility = root.root_namespace === "business" && root.source_id.startsWith("project-alpha:")
+    ? await requireProjectAlphaReadOrNativeMappingVisibility(env, root.source_id, root.public_id, root.kind)
+    : await requireProjectAlphaReadVisibility(env, root.source_id);
   root = { ...root, source_name: visibility.display_name! };
   const db = database(env);
   if (root.root_namespace === "account" && root.source_id === "delivery:local") {
@@ -213,7 +215,9 @@ async function resolveDetailContext(env: Env, principal: StaffPrincipal, kind: C
   requireHubAccess(access);
   if (!access.directory)
     throw new HTTPException(403, { message: "Global team.view permission required" });
-  if (sourceId) await requireProjectAlphaReadVisibility(env, sourceId);
+  if (sourceId) rootNamespace === "business"
+    ? await requireProjectAlphaReadOrNativeMappingVisibility(env, sourceId, publicId, kind)
+    : await requireProjectAlphaReadVisibility(env, sourceId);
   // Portal aliases outlive index folding into a business root. Resolve their
   // exact live workspace even after the old materialized portal row is swept.
   const portal = sourceId === "project-alpha:primary" && rootNamespace === "portal"

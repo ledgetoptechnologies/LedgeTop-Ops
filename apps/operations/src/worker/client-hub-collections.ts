@@ -9,7 +9,7 @@ import { clientHubActiveDirectoryIdentities, clientHubActiveDirectoryIdentitySql
   hasClientHubActiveDirectoryMappings, resolveClientHubSourceRoot } from "./client-hub-source";
 import type { ClientHubRoot } from "./client-hub-directory";
 import type { Env, StaffPrincipal } from "./types";
-import { projectAlphaReadVisibleSql, requireProjectAlphaReadVisibility } from "./project-alpha-read-visibility";
+import { projectAlphaReadVisibleSql, requireProjectAlphaReadOrNativeMappingVisibility, requireProjectAlphaReadVisibility } from "./project-alpha-read-visibility";
 
 export const CLIENT_HUB_COLLECTIONS = ["businessContacts", "accounts", "projects", "requests", "deliveryGrants",
   "authenticatedDeliveryGrants", "viewerGrants"] as const;
@@ -65,7 +65,9 @@ export async function createClientHubCollectionContext(env: Env, principal: Staf
       mapping_status: source.mapping_status, display_name: source.display_name };
   }
   root = liveRoot;
-  const visibility = await requireProjectAlphaReadVisibility(env, root.source_id);
+  const visibility = root.root_namespace === "business" && root.source_id.startsWith("project-alpha:")
+    ? await requireProjectAlphaReadOrNativeMappingVisibility(env, root.source_id, root.public_id, root.kind)
+    : await requireProjectAlphaReadVisibility(env, root.source_id);
   const scope = accountScope(root);
   // Migration 0103 uniquely indexes each non-null Alpha organization/client
   // account link; local roots identify exactly one account and portal roots none.
@@ -106,7 +108,8 @@ export async function createClientHubCollectionContext(env: Env, principal: Staf
     ORDER BY entity.public_id LIMIT 2`).bind(root.workspace_id, root.source_id).all<Record<string, unknown>>() : null;
   const canonicalRoot = { sourceId: root.source_id, rootNamespace: root.root_namespace, kind: root.kind, publicId: root.public_id };
   const businessProjectPolicy = await readClientHubBusinessProjectPolicy(env, principal);
-  const contextVersion = await sha256(JSON.stringify([canonicalRoot, principal.id, access, visibility.read_revision, root.source_name,
+  const contextVersion = await sha256(JSON.stringify([canonicalRoot, principal.id, access, visibility.read_revision,
+    "nativeProof" in visibility ? visibility.nativeProof : null, root.source_name,
     root.pa_internal_id ?? null, root.pa_public_id, root.mapping_status, root.status, root.workspace_id, root.legacy_account_id,
     root.portal_status, proof?.results ?? [], accountProof.results, await isAdministrator(env, principal),
     eligibilityBlockManagementEnabled(env), portalOperationsManagementEnabled(env), portalDenyPolicyManagementEnabled(env),

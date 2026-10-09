@@ -1,6 +1,6 @@
 import type { Env } from "./types";
 import { PRIMARY_ALPHA_SOURCE_ID } from "@ltds/shared";
-import { projectAlphaReadVisibleSql } from "./project-alpha-read-visibility";
+import { projectAlphaNativeMappingReadVisibleSql, projectAlphaReadVisibleSql } from "./project-alpha-read-visibility";
 import { HTTPException } from "hono/http-exception";
 import { resolveProjectAlphaApiV2Connection } from "./project-alpha-api-v2-connections";
 
@@ -142,7 +142,7 @@ export async function resolveClientHubSourceRoot(
       ${kind === "organization" ? "" : `JOIN operations_directory_client_organizations relationship
         ON relationship.client_record_id=record.record_id AND relationship.organization_record_id IS NULL`}
       WHERE mapping.record_id=? AND mapping.source_id=? AND mapping.resource_type='${resourceType}'
-        AND ${currentMapping} AND ${projectAlphaReadVisibleSql("mapping.source_id")}
+        AND ${currentMapping} AND ${projectAlphaNativeMappingReadVisibleSql("mapping.source_id", "mapping", identities ?? [])}
         AND json_valid(revision.profile_json) AND json_type(revision.profile_json,'$.name')='text'
         AND length(trim(json_extract(revision.profile_json,'$.name'))) BETWEEN 1 AND 150
         AND length(mapping.project_alpha_public_id)=32 AND mapping.project_alpha_public_id NOT GLOB '*[^0-9a-f]*'
@@ -232,7 +232,7 @@ export async function resolveClientHubSourceRootByAlphaPublicId(
       AND length(mapping.project_alpha_public_id)=32 AND mapping.project_alpha_public_id NOT GLOB '*[^0-9a-f]*'
       AND json_valid(revision.profile_json) AND json_type(revision.profile_json,'$.name')='text'
       AND length(trim(json_extract(revision.profile_json,'$.name'))) BETWEEN 1 AND 150
-      AND ${projectAlphaReadVisibleSql("mapping.source_id")}
+      AND ${projectAlphaNativeMappingReadVisibleSql("mapping.source_id", "mapping", identities ?? [])}
       AND (SELECT count(*) FROM project_alpha_active_directory_mappings candidate
         WHERE candidate.source_id=mapping.source_id AND candidate.source_instance_id=mapping.source_instance_id
           AND candidate.application_id=mapping.application_id AND candidate.history_epoch_id=mapping.history_epoch_id
