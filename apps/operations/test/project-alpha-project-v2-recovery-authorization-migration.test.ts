@@ -227,8 +227,9 @@ function authorizePostAck(
 }
 
 describe("Project v2 recovery authorization migration", () => {
-  it("is the next migration and preserves the full empty migration chain", () => {
-    expect(migrationFiles.at(-1)).toBe(recoveryMigration);
+  it("remains immediately before the current migration and preserves the full empty migration chain", () => {
+    expect(migrationFiles.at(-2)).toBe(recoveryMigration);
+    expect(migrationFiles.at(-1)).toBe("0181_project_alpha_directory_create_generation_recovery.sql");
     const db = new DatabaseSync(":memory:");
     db.exec("PRAGMA foreign_keys=ON");
     for (const name of migrationFiles) migrate(db, name);
