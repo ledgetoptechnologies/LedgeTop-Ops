@@ -91,7 +91,8 @@ async function acknowledgeCreate(input: NativeDirectoryProfileWrite, outcome: Na
     await db.prepare(`INSERT INTO project_alpha_directory_mappings(source_id,resource_type,external_id,project_alpha_public_id,
       source_instance_id,application_id,history_epoch_id,command_id) VALUES(?,?,?,?,?,?,?,?)`)
       .bind(sourceId, input.kind, input.recordId, id, sourceInstanceUUID, applicationUUID, historyEpoch, commandId).run();
-    const response = { status: "acknowledged", response: { sourceInstanceId: sourceInstanceUUID, applicationId: applicationUUID,
+    const response = { status: "acknowledged", response: { requestId: commandId, replayed: false,
+      sourceInstanceId: sourceInstanceUUID, applicationId: applicationUUID,
       historyEpoch, result: { resource: { type: input.kind, id: input.recordId, publicId: id, revision: "1" },
         data: { publicId: id }, authorizationGeneration: generation } } };
     await db.prepare(`UPDATE project_alpha_directory_outbox SET state='acknowledged',outcome_json=?,lease_token=NULL,lease_expires_at=NULL WHERE command_id=? AND state='leased'`)
@@ -266,7 +267,7 @@ describe("canonical native Directory profile writer", () => {
     const organization = await create("organization", actor, uuid());
     const client = await create("client", actor);
     await acknowledgeCreate(organization.input, organization.outcome, "1");
-    await acknowledgeCreate(client.input, client.outcome, "2");
+    await acknowledgeCreate(client.input, client.outcome, "1");
     const relationshipInput = {
       mutationId: uuid(), clientRecordId: client.input.recordId, expectedRelationshipVersion: 1,
       expectedClientRecordVersion: 1, previousOrganization: null,

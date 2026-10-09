@@ -1,6 +1,8 @@
+import { readFileSync } from "node:fs";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { Miniflare } from "miniflare";
 import { applyCanonicalChain, applyCanonicalMigrationSchema } from "./helpers/verified-recipient-canonical-lineage";
+import { splitD1MigrationStatements } from "../../client/test/helpers/d1-migrations";
 import { writeNativeDirectoryProfile, type NativeDirectoryCreateWrite,
   type NativeDirectoryProfileWriteOutcome } from "../src/worker/native-directory-profile-writer";
 import { writeNativeDirectoryRelationship } from "../src/worker/native-directory-relationship-writer";
@@ -96,7 +98,8 @@ async function acknowledgeCreate(seed: Awaited<ReturnType<typeof seedRecord>>, p
           seed.write.destinations[0]!.historyEpoch, commandId),
       db.prepare(`UPDATE project_alpha_directory_outbox SET state='acknowledged',outcome_json=?,lease_token=NULL,
         lease_expires_at=NULL WHERE command_id=? AND state='leased'`).bind(JSON.stringify({ status: "acknowledged",
-          response: { sourceInstanceId: seed.write.destinations[0]!.sourceInstanceUUID,
+          response: { requestId: commandId, replayed: false,
+            sourceInstanceId: seed.write.destinations[0]!.sourceInstanceUUID,
             applicationId: seed.write.destinations[0]!.applicationUUID,
             historyEpoch: seed.write.destinations[0]!.historyEpoch, result: { resource: { type: seed.write.kind,
               id: seed.write.recordId, publicId, revision: "1" }, data: { publicId }, authorizationGeneration } } }), commandId),
@@ -121,9 +124,10 @@ async function updateOrganizationProfile(seed: Awaited<ReturnType<typeof seedRec
         lease_expires_at=9999999999999 WHERE command_id=? AND state='pending'`).bind(commandId),
       db.prepare(`UPDATE project_alpha_directory_outbox SET state='acknowledged',outcome_json=?,lease_token=NULL,
         lease_expires_at=NULL WHERE command_id=? AND state='leased'`).bind(JSON.stringify({ status: "acknowledged",
-          response: { sourceInstanceId: destination.sourceInstanceUUID, applicationId: destination.applicationUUID,
-            historyEpoch: destination.historyEpoch, result: { resource: { type: "organization", id: seed.write.recordId,
-              publicId, revision: "2" }, data: { publicId }, authorizationGeneration: "2" } } }), commandId),
+          response: { requestId: commandId, replayed: false, sourceInstanceId: destination.sourceInstanceUUID,
+            applicationId: destination.applicationUUID, historyEpoch: destination.historyEpoch,
+            result: { resource: { type: "organization", publicId, revision: "2" }, data: { publicId },
+              authorizationGeneration: "1" } } }), commandId),
     ]);
   }
   await db.prepare(`UPDATE operations_directory_intents SET state='acknowledged'
@@ -201,6 +205,17 @@ beforeAll(async () => {
   // the distinct Ops record_id). Keep the historical authority fixture, but
   // install that exact current schema contract before exercising the writer.
   await applyCanonicalMigrationSchema(db, "0170_project_alpha_active_directory_project_guard.sql");
+  // This is an explicit local proposal supplement, not canonical migration
+  // 0182. It keeps the historical portal chain while exercising the current
+  // normalized relationship-revision evidence contract used by the writer.
+  const relationshipProposal = readFileSync(new URL(
+    "../../../scripts/proposals/0182_project_alpha_directory_relationship_recovery_guard.sql", import.meta.url), "utf8");
+  const revisionMarker = "DROP VIEW project_alpha_directory_relationship_revision_evidence;";
+  const revisionOffset = relationshipProposal.indexOf(revisionMarker);
+  if (revisionOffset < 0) throw new Error("missing proposal revision-evidence replacement");
+  await db.batch(splitD1MigrationStatements(relationshipProposal.slice(revisionOffset)
+    .replaceAll("operations_directory_effective_materializations", "operations_directory_materializations"))
+    .map(statement => db.prepare(statement)));
   await seedManager("portal-manager-a", "both");
   await seedManager("portal-manager-b", "revoke");
   await db.batch([

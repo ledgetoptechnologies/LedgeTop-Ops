@@ -138,7 +138,8 @@ async function acknowledgeCreate(seed: Awaited<ReturnType<typeof seedRecord>>, p
           seed.write.destinations[0]!.applicationUUID, seed.write.destinations[0]!.historyEpoch, commandId),
       operations.prepare(`UPDATE project_alpha_directory_outbox SET state='acknowledged',outcome_json=?,
         lease_token=NULL,lease_expires_at=NULL WHERE command_id=? AND state='leased'`).bind(JSON.stringify({
-          status: "acknowledged", response: { sourceInstanceId: seed.write.destinations[0]!.sourceInstanceUUID,
+          status: "acknowledged", response: { requestId: commandId, replayed: false,
+            sourceInstanceId: seed.write.destinations[0]!.sourceInstanceUUID,
             applicationId: seed.write.destinations[0]!.applicationUUID,
             historyEpoch: seed.write.destinations[0]!.historyEpoch, result: { resource: { type: seed.write.kind,
               id: seed.write.recordId, publicId, revision: "1" }, data: { publicId }, authorizationGeneration: "1" } },
@@ -201,6 +202,17 @@ beforeAll(async () => {
   const mappingViewMigration = readFileSync(new URL(
     "../migrations/0170_project_alpha_active_directory_project_guard.sql", import.meta.url), "utf8");
   await operations.batch(splitD1MigrationStatements(mappingViewMigration)
+    .map(statement => operations.prepare(statement)));
+  // This is an explicit local proposal supplement, not canonical migration
+  // 0182. It keeps the historical portal chain while exercising the current
+  // normalized relationship-revision evidence contract used by the writer.
+  const relationshipProposal = readFileSync(new URL(
+    "../../../scripts/proposals/0182_project_alpha_directory_relationship_recovery_guard.sql", import.meta.url), "utf8");
+  const revisionMarker = "DROP VIEW project_alpha_directory_relationship_revision_evidence;";
+  const revisionOffset = relationshipProposal.indexOf(revisionMarker);
+  if (revisionOffset < 0) throw new Error("missing proposal revision-evidence replacement");
+  await operations.batch(splitD1MigrationStatements(relationshipProposal.slice(revisionOffset)
+    .replaceAll("operations_directory_effective_materializations", "operations_directory_materializations"))
     .map(statement => operations.prepare(statement)));
   expect(await applyCanonicalChain(client, "client", "0223_operations_portal_workspace_publications.sql")).toHaveLength(142);
   await seedManager();
