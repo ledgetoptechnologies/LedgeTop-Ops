@@ -69,3 +69,31 @@ export function buildRelationshipRecoveryReleaseConfig(baseline, snapshot, targe
     summary: Object.freeze({ changedVariableNames }),
   });
 }
+
+// Read-only post-upload gate. Uploading a version is not permission to promote it:
+// provider readback must preserve the complete reviewed binding/runtime contract.
+export function verifyRelationshipRecoveryReleaseCandidate(baseline, snapshot, candidate, target) {
+  const expected = buildRelationshipRecoveryReleaseConfig(baseline, snapshot, target);
+  if (!plain(candidate) || typeof candidate.id !== "string" || !candidate.id
+    || candidate.id === expected.sourceVersionId || !plain(candidate.resources)
+    || !Array.isArray(candidate.resources.bindings)) fail("new complete candidate version required");
+  const sortBindings = bindings => {
+    const names = new Set();
+    for (const binding of bindings) {
+      if (!plain(binding) || typeof binding.name !== "string" || !binding.name || names.has(binding.name)) {
+        fail("candidate bindings must have unique names");
+      }
+      names.add(binding.name);
+    }
+    return [...bindings].sort((a, b) => a.name.localeCompare(b.name));
+  };
+  if (!same(sortBindings(candidate.resources.bindings), sortBindings(expected.expectedProviderBindings))) {
+    fail("candidate binding contract differs from reviewed live state");
+  }
+  if (!same(candidate.resources.script_runtime, expected.expectedScriptRuntime)) {
+    fail("candidate runtime differs from reviewed live state");
+  }
+  return Object.freeze({ status: "verified", sourceVersionId: expected.sourceVersionId,
+    candidateVersionId: candidate.id, bindingCount: candidate.resources.bindings.length,
+    recoveryEnabled: false, mutationsPerformed: false });
+}

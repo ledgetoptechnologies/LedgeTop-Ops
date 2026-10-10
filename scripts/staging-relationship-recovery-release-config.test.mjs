@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { buildRelationshipRecoveryReleaseConfig, RELATIONSHIP_RECOVERY_RELEASE_TARGET as target } from "./staging-relationship-recovery-release-config.mjs";
+import { buildRelationshipRecoveryReleaseConfig, verifyRelationshipRecoveryReleaseCandidate,
+  RELATIONSHIP_RECOVERY_RELEASE_TARGET as target } from "./staging-relationship-recovery-release-config.mjs";
 
 const recovery = "PROJECT_ALPHA_DIRECTORY_RELATIONSHIP_GENERATION_RECOVERY_ENABLED";
 const fiveLiveDrifts = {
@@ -86,4 +87,34 @@ test("fails closed on targets, deployment drift, active gates, duplicates, secre
 test("never accepts a production baseline", () => {
   const production = baseline(); production.name = "ledgetop-ops"; production.vars.ENVIRONMENT = "production";
   assert.throws(() => buildRelationshipRecoveryReleaseConfig(production, snapshot(), target), /exact staging baseline/);
+});
+
+const candidate = () => {
+  const source = snapshot(), expected = buildRelationshipRecoveryReleaseConfig(baseline(), source, target);
+  return { id: "new-candidate", resources: { bindings: [...expected.expectedProviderBindings].reverse(),
+    script_runtime: structuredClone(expected.expectedScriptRuntime), script: { etag: "new-code" } } };
+};
+
+test("candidate readback gate preserves every binding and runtime without relying on binding order", () => {
+  const result = verifyRelationshipRecoveryReleaseCandidate(baseline(), snapshot(), candidate(), target);
+  assert.deepEqual(result, { status: "verified", sourceVersionId: "dbe5d1b6", candidateVersionId: "new-candidate",
+    bindingCount: bindings().length + 1, recoveryEnabled: false, mutationsPerformed: false });
+  assert(!JSON.stringify(result).includes("preserve-me"));
+});
+
+test("candidate readback rejects omitted, added, changed, duplicate bindings and runtime drift", () => {
+  for (const mutate of [
+    c => c.resources.bindings.pop(),
+    c => c.resources.bindings.push({ name: "UNREVIEWED", type: "plain_text", text: "true" }),
+    c => c.resources.bindings.find(b => b.name === "OPS_DB").id = "other-db",
+    c => c.resources.bindings.find(b => b.name === recovery).text = "true",
+    c => c.resources.bindings.find(b => b.name === "PRIVATE_KEY").text = "exposed",
+    c => c.resources.bindings.push({ ...c.resources.bindings[0] }),
+    c => c.resources.script_runtime.compatibility_date = "2026-07-23",
+    c => c.resources.script_runtime.compatibility_flags = [],
+    c => c.id = "dbe5d1b6",
+  ]) {
+    const value = candidate(); mutate(value);
+    assert.throws(() => verifyRelationshipRecoveryReleaseCandidate(baseline(), snapshot(), value, target));
+  }
 });
