@@ -8,6 +8,13 @@ This is the remaining staging acceptance sequence, not a release approval or a c
 - Ops staging readback on this continuation has 183 migrations and no pending/leased Directory, relationship or Project commands. The retained failed relationship command is terminal, not recovered.
 - Local recovery and bounded-authority tests have passed. Full exact-revision CI, migration 0184, a live recovery acknowledgement and downstream portal acceptance remain required.
 
+### Additional local evidence (not live acceptance)
+
+- The closed recovery-lineage validator passed against actual local D1 trigger state after intact migrations 0001–0184 and the reviewed provision/revoke batches: one full-schema test passed, with no skips. This proves the cleanup evidence format, not a live recovery acknowledgement.
+- The focused scalar-settlement, recovery-lineage and release-configuration suite passed 35/35 tests. The current Project authority module is still a prerequisite validator, not a usable provision/revoke workflow.
+- The organization scalar fixture uses the actual Directory writer, but currently reproduces dispatcher acknowledgement persistence with local SQL. It does not prove the real dispatcher path or the retained client's acquired-ID/linked-parent path. Those remain required before relying on this fixture for live client acceptance.
+- Release configuration preparation is held at the Windows script-policy checkpoint. No generated live configuration values were written and no migration or Worker deployment was performed by these checks.
+
 ## 1. Recover the retained synthetic relationship
 
 - Freeze the reviewed source revision and bundle. Preserve all live Worker bindings, runtime resources, schedules and existing flags; add recovery explicitly false. Never deploy the older static config over live variable drift.
