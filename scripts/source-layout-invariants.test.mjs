@@ -14,9 +14,11 @@ const normalizedSha256 = (relative) => crypto.createHash("sha256").update(read(r
 test("CI installs the pinned Wrangler dependency before migration-ledger contract tests", () => {
   const workflow = read(".github/workflows/ci.yml");
   const sourceJob = workflow.slice(workflow.indexOf("  source-invariants:"), workflow.indexOf("  incoming-pickup:"));
-  const install = sourceJob.indexOf("run: npm ci --prefix apps/operations");
   const contracts = sourceJob.indexOf("- name: Verify repository contracts");
-  assert.ok(install >= 0 && contracts > install, "locked dependencies must precede contracts requiring the Wrangler entrypoint");
+  for (const application of ["operations", "client"]) {
+    const install = sourceJob.indexOf(`npm ci --prefix apps/${application}`);
+    assert.ok(install >= 0 && contracts > install, `${application} locked dependencies must precede contracts and cross-package migration helpers`);
+  }
   assert.ok(sourceJob.includes("scripts/staging-native-migration-profile.test.mjs"));
 });
 
