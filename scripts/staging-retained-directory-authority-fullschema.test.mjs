@@ -1,14 +1,16 @@
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
-import test from "node:test";
+import test, { after } from "node:test";
 import { createRequire } from "node:module";
 import { DatabaseSync } from "node:sqlite";
 
 import {
   RETAINED_DIRECTORY_TARGET as target, REVIEWED_REFERENCE_BASELINE,
-  applyRetainedDirectoryAuthority, compileRetainedDirectoryAuthority, verifyReviewedReferenceSchema,
+  applyRetainedDirectoryAuthority as applyRetainedDirectoryAuthorityImpl,
+  compileRetainedDirectoryAuthority as compileRetainedDirectoryAuthorityImpl, verifyReviewedReferenceSchema,
 } from "./staging-retained-directory-authority.mjs";
 import { STAGING_TARGET } from "./staging-onboarding-native-only-authority-packet.mjs";
 
@@ -18,7 +20,16 @@ const { Miniflare } = requireOperations("miniflare");
 const { unstable_splitSqlQuery } = requireOperations("wrangler");
 const { build } = requireOperations("esbuild");
 const migrationDirectory = path.join(root, "apps/operations/migrations");
-const migrationNames = fs.readdirSync(migrationDirectory).filter(name => /^\d{4}_.+\.sql$/.test(name)).sort();
+const migrationNames = fs.readdirSync(migrationDirectory).filter(name => /^\d{4}_.+\.sql$/.test(name) && name.slice(0, 4) <= "0183").sort();
+const reviewedRoot = fs.mkdtempSync(path.join(os.tmpdir(), "retained-authority-fullschema-reviewed-"));
+const reviewedMigrationDirectory = path.join(reviewedRoot, "apps/operations/migrations");
+fs.mkdirSync(reviewedMigrationDirectory, { recursive: true });
+for (const name of migrationNames) fs.copyFileSync(path.join(migrationDirectory, name), path.join(reviewedMigrationDirectory, name));
+after(() => fs.rmSync(reviewedRoot, { recursive: true, force: true }));
+const compileRetainedDirectoryAuthority = (value, options = {}) =>
+  compileRetainedDirectoryAuthorityImpl(value, { ...options, root: reviewedRoot });
+const applyRetainedDirectoryAuthority = (db, artifact, options = {}) =>
+  applyRetainedDirectoryAuthorityImpl(db, artifact, { ...options, root: reviewedRoot });
 const legacyMigrationNames = migrationNames.slice(0, 181);
 const grantIds = ["10000000-0000-4000-8000-000000000001", "10000000-0000-4000-8000-000000000002", "10000000-0000-4000-8000-000000000003"];
 const permissions = ["directory.profile.edit", "directory.identity.link", "directory.enrollment.manage"];

@@ -2,16 +2,27 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import test from "node:test";
+import test, { after } from "node:test";
 
 import {
   RETAINED_DIRECTORY_TARGET, REVIEWED_REFERENCE_BASELINE, applyAndReconcileRetainedDirectoryAuthority,
   applyRetainedDirectoryAuthority,
-  compileRetainedDirectoryAuthority, verifyHistoricalNativeOnlyArtifact, verifyReviewedReferenceSchema,
+  compileRetainedDirectoryAuthority as compileRetainedDirectoryAuthorityImpl, verifyHistoricalNativeOnlyArtifact, verifyReviewedReferenceSchema,
 } from "./staging-retained-directory-authority.mjs";
 import { STAGING_TARGET } from "./staging-onboarding-native-only-authority-packet.mjs";
 
 const UUIDS = ["10000000-0000-4000-8000-000000000001", "10000000-0000-4000-8000-000000000002", "10000000-0000-4000-8000-000000000003"];
+const repositoryRoot = path.resolve(import.meta.dirname, "..");
+const reviewedRoot = fs.mkdtempSync(path.join(os.tmpdir(), "retained-authority-reviewed-chain-"));
+const sourceMigrations = path.join(repositoryRoot, "apps/operations/migrations");
+const reviewedMigrations = path.join(reviewedRoot, "apps/operations/migrations");
+fs.mkdirSync(reviewedMigrations, { recursive: true });
+for (const name of fs.readdirSync(sourceMigrations).filter(name => /^\d{4}_.+\.sql$/.test(name) && name.slice(0, 4) <= "0183").sort()) {
+  fs.copyFileSync(path.join(sourceMigrations, name), path.join(reviewedMigrations, name));
+}
+after(() => fs.rmSync(reviewedRoot, { recursive: true, force: true }));
+const compileRetainedDirectoryAuthority = (value, options = {}) =>
+  compileRetainedDirectoryAuthorityImpl(value, { root: reviewedRoot, ...options });
 const grant = (id, permission, active) => ({ id, staff_id: RETAINED_DIRECTORY_TARGET.staffId, permission, effect: "allow", scope_kind: "business_area", business_area_id: RETAINED_DIRECTORY_TARGET.areaId, division_id: null, resource_id: null, active, granted_by: RETAINED_DIRECTORY_TARGET.staffId, created_at: "2026-10-08T12:00:00.000Z" });
 const history = (row, version, active, generation) => ({ grant_id: row.id, grant_version: version, staff_id: row.staff_id, permission: row.permission, effect: row.effect, scope_kind: row.scope_kind, business_area_id: row.business_area_id, division_id: null, resource_id: null, active, grant_generation: generation, recorded_at: `2026-10-08T12:0${generation}:00.000Z` });
 const receipt = (command, approval, plan = "{}") => ({ command_id: command, approval_id: approval, operator_staff_id: RETAINED_DIRECTORY_TARGET.staffId, operator_access_subject: "access|staff", canonical_plan_json: plan, canonical_plan_sha256: "a".repeat(64), independent_binding_verification_json: "{}", independent_binding_verification_sha256: "b".repeat(64), result_json: "{}", result_sha256: "c".repeat(64), executed_at: "2026-10-08T12:00:00.000Z" });
@@ -27,7 +38,7 @@ function input(phase = "reactivate") {
   const rows = grants.flatMap((row, index) => [history(row, 1, 1, index + 1), history(row, 2, 0, index + 4), ...(phase === "revoke" ? [history(row, 3, 1, index + 7)] : [])]);
   const provisionArtifact = legacy("provision"), revokeArtifact = legacy("revoke", { receipt: provisionArtifact.receipt });
   return { schemaVersion: 1, staging: STAGING_TARGET, phase, target: RETAINED_DIRECTORY_TARGET,
-    migrationNames: fs.readdirSync(path.resolve(import.meta.dirname, "../apps/operations/migrations")).filter(name => /^\d{4}_.+\.sql$/.test(name)).sort(),
+    migrationNames: fs.readdirSync(reviewedMigrations).filter(name => /^\d{4}_.+\.sql$/.test(name)).sort(),
     admission: { staff_id: RETAINED_DIRECTORY_TARGET.staffId, bound_access_subject: "access|staff", active: 1, admitted_by: RETAINED_DIRECTORY_TARGET.staffId, created_at: "2026-10-08T12:00:00.000Z", updated_at: "2026-10-08T12:00:00.000Z", version: 1 },
     profile: { staff_id: RETAINED_DIRECTORY_TARGET.staffId, login_email: "staff@example.test", display_name: "Staff", version: 1, created_at: "2026-10-08T12:00:00.000Z", updated_at: "2026-10-08T12:00:00.000Z" }, generation: { staff_id: RETAINED_DIRECTORY_TARGET.staffId, generation: phase === "revoke" ? 9 : 6, updated_at: "2026-10-08T12:30:00.000Z" },
     projectGeneration: { staff_id: RETAINED_DIRECTORY_TARGET.staffId, generation: 14 },
@@ -41,7 +52,7 @@ function input(phase = "reactivate") {
 
 const historicalVerifier = value => value;
 const compile = value => compileRetainedDirectoryAuthority(value,
-  { root: path.resolve(import.meta.dirname, ".."), historicalVerifier });
+  { historicalVerifier });
 const genuineLegacyClosePath = path.resolve(import.meta.dirname,
   "../.backups/staging-native-authority/0d5dd225-0d3b-46da-a049-28d4b0f84106/revoke-recovery-2026-10-09T04-16-01.367Z.json");
 
@@ -57,7 +68,7 @@ async function loadPrivateLegacyCloseCompiler() {
 
 async function syntheticLegacyClose() {
   const compileLegacy = await loadPrivateLegacyCloseCompiler();
-  const root = path.resolve(import.meta.dirname, "..");
+  const root = reviewedRoot;
   const activationInput = input(); activationInput.migrationNames = activationInput.migrationNames.slice(0, 181);
   const activation = compileLegacy(activationInput, { root, historicalVerifier, legacyClose: true });
   const closeInput = input("revoke"); closeInput.migrationNames = closeInput.migrationNames.slice(0, 181);
@@ -97,6 +108,18 @@ test("retained authority compiler is isolated to exact fixture and same three gr
   const artifact = compile(input());
   assert.deepEqual(artifact.input.grants.map(row => row.id), UUIDS);
   assert.equal(artifact.input.target.recordId, RETAINED_DIRECTORY_TARGET.recordId);
+});
+
+test("retained apply rejects live 0184 by default", async () => {
+  const artifact = compile(input());
+  let batches = 0;
+  const db = {
+    prepare: () => ({ all: async () => ({ results: Object.keys(REVIEWED_REFERENCE_BASELINE).map(name => ({ name })) }) }),
+    batch: async () => { batches += 1; return []; },
+  };
+  await assert.rejects(applyRetainedDirectoryAuthority(db, artifact, { target: STAGING_TARGET }),
+    /exact canonical 183 migration chain required/);
+  assert.equal(batches, 0);
 });
 
 test("rejects an unrelated area reference, deny-shaped grant, and changed predecessor", () => {
@@ -168,7 +191,7 @@ test("default compiler accepts the genuine historical lineage without reconstruc
   value.history = value.history.map(row => ({ ...row, grant_id: replacements.get(row.grant_id) }));
   value.lineage = { provisionArtifact: provision, revokeArtifact: revoke,
     provisionReceipt: provision.receipt, revokeReceipt: revoke.receipt };
-  const artifact = compileRetainedDirectoryAuthority(value, { root: path.resolve(import.meta.dirname, "..") });
+  const artifact = compileRetainedDirectoryAuthority(value);
   assert.deepEqual(artifact.input.grants.filter(row => actualIds.includes(row.id)).map(row => row.id), actualIds);
   const assertD1Envelope = compiled => {
     assert.ok(Buffer.byteLength(compiled.approval.canonical_plan_json) <= 262_144);
@@ -192,12 +215,12 @@ test("default compiler accepts the genuine historical lineage without reconstruc
   revokeValue.lineage.reactivationReceipt = artifact.receipt;
   revokeValue.approval = { ...revokeValue.approval,
     approvalId: "70000000-0000-4000-8000-000000000001", commandId: "70000000-0000-4000-8000-000000000002" };
-  const pairedRevoke = compileRetainedDirectoryAuthority(revokeValue, { root: path.resolve(import.meta.dirname, "..") });
+  const pairedRevoke = compileRetainedDirectoryAuthority(revokeValue);
   assertD1Envelope(pairedRevoke);
 });
 
 test("current schema accepts a complete legacy close only as a fully verified nested anchor", async () => {
-  const root = path.resolve(import.meta.dirname, "..");
+  const root = reviewedRoot;
   const { compileLegacy, close } = await syntheticLegacyClose();
   const compileCurrent = value => compileRetainedDirectoryAuthority(value, { root, historicalVerifier });
   assert.equal(close.input.migrationNames.length, 181);
@@ -215,7 +238,7 @@ test("current schema accepts a complete legacy close only as a fully verified ne
 
   let batchCalled = false;
   await assert.rejects(applyRetainedDirectoryAuthority({ batch: async () => { batchCalled = true; } }, close,
-    { target: STAGING_TARGET }), /canonical 183 migration ledger/);
+    { target: STAGING_TARGET, root: reviewedRoot }), /canonical 183 migration ledger/);
   assert.equal(batchCalled, false, "a historical anchor must never reach the apply transport directly");
 
   const changedStatement = structuredClone(current);
@@ -265,7 +288,7 @@ test("current schema accepts a complete legacy close only as a fully verified ne
 });
 
 test("current retained authority rejects a missing, extra, renamed, or modified 0183 migration", () => {
-  const root = path.resolve(import.meta.dirname, "..");
+  const root = reviewedRoot;
   const migrationName = "0183_project_alpha_binding_standalone_relationship_rows.sql";
   const cases = [
     ["missing", directory => fs.rmSync(path.join(directory, migrationName))],
@@ -288,7 +311,7 @@ test("current retained authority rejects a missing, extra, renamed, or modified 
 test("the genuine private legacy close remains compatible with the deterministic contract", {
   skip: !fs.existsSync(genuineLegacyClosePath),
 }, () => {
-  const root = path.resolve(import.meta.dirname, "..");
+  const root = reviewedRoot;
   const close = JSON.parse(fs.readFileSync(genuineLegacyClosePath, "utf8"));
   const compiled = compileRetainedDirectoryAuthority(currentInputAfterLegacyClose(close), { root });
   assert.equal(compiled.input.lineage.latestCloseReceipt.command_id, close.receipt.command_id);
@@ -371,20 +394,19 @@ test("schema 2 authenticates unrelated successor history and a migration-0123 ba
     { ...history(row, 2, 0, start + index * 2 + 2), recorded_at: `2026-10-08T13:0${index * 2 + 2}:00.000Z` },
   ));
   current.generation = { ...current.generation, generation: start + 4, updated_at: "2026-10-08T13:04:00.000Z" };
-  const compiled = compileRetainedDirectoryAuthority(current,
-    { root: path.resolve(import.meta.dirname, ".."), historicalVerifier });
+  const compiled = compileRetainedDirectoryAuthority(current, { historicalVerifier });
   assert.equal(JSON.parse(compiled.receipt.result_json).generation, start + 7);
 
   const missing = structuredClone(current); missing.history.pop();
   assert.throws(() => compileRetainedDirectoryAuthority(missing,
-    { root: path.resolve(import.meta.dirname, ".."), historicalVerifier }), /complete chronological staff grant history required/);
+    { historicalVerifier }), /complete chronological staff grant history required/);
   const duplicate = structuredClone(current); duplicate.history.at(-1).grant_generation--;
   assert.throws(() => compileRetainedDirectoryAuthority(duplicate,
-    { root: path.resolve(import.meta.dirname, ".."), historicalVerifier }), /continuous chronological staff grant generations required/);
+    { historicalVerifier }), /continuous chronological staff grant generations required/);
   const changedMetadata = structuredClone(current); changedMetadata.history.at(-1).permission = "directory.profile.edit";
   assert.throws(() => compileRetainedDirectoryAuthority(changedMetadata,
-    { root: path.resolve(import.meta.dirname, ".."), historicalVerifier }), /complete current staff grant history required/);
+    { historicalVerifier }), /complete current staff grant history required/);
   const noncanonicalTimestamp = structuredClone(current); noncanonicalTimestamp.history.at(-1).recorded_at = "2026-10-08 13:04:00Z";
   assert.throws(() => compileRetainedDirectoryAuthority(noncanonicalTimestamp,
-    { root: path.resolve(import.meta.dirname, ".."), historicalVerifier }), /continuous chronological staff grant generations required/);
+    { historicalVerifier }), /continuous chronological staff grant generations required/);
 });

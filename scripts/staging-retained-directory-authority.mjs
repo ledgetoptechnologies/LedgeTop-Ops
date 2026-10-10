@@ -535,18 +535,18 @@ export async function verifyReviewedReferenceSchema(db) {
   return references;
 }
 
-export async function applyRetainedDirectoryAuthority(db, artifact, { target } = {}) {
+export async function applyRetainedDirectoryAuthority(db, artifact, { target, root = ROOT } = {}) {
   if (!same(target, STAGING_TARGET)) fail("trusted staging target required");
-  const expected = compileRetainedDirectoryAuthority(artifact?.input, { root: ROOT });
+  const expected = compileRetainedDirectoryAuthority(artifact?.input, { root });
   if (!same(artifact, expected)) fail("compiled artifact changed");
   await verifyReviewedReferenceSchema(db);
   return db.batch(artifact.statements.map(statement => db.prepare(statement.sql).bind(...statement.params)));
 }
 
-export async function applyAndReconcileRetainedDirectoryAuthority(db, artifact, { apply = applyRetainedDirectoryAuthority, target } = {}) {
+export async function applyAndReconcileRetainedDirectoryAuthority(db, artifact, { apply = applyRetainedDirectoryAuthority, target, root = ROOT } = {}) {
   if (!same(target, STAGING_TARGET)) fail("trusted staging target required");
   let transportError;
-  try { await apply(db, artifact, { target }); } catch (error) { transportError = error; }
+  try { await apply(db, artifact, { target, root }); } catch (error) { transportError = error; }
   let receipt;
   try { receipt = await db.prepare("SELECT * FROM native_staff_bootstrap_receipts WHERE command_id=?").bind(artifact.receipt.command_id).first(); }
   catch (error) { throw new AggregateError([...(transportError ? [transportError] : []), error], "retained authority outcome is unknown"); }

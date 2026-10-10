@@ -2,7 +2,6 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { pathToFileURL, fileURLToPath } from "node:url";
-import { BOOTSTRAP_APPS } from "./staging-bootstrap.mjs";
 import { STAGING_ACCOUNT_ID, STAGING_INVENTORY } from "./staging-requirements.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -14,6 +13,12 @@ const EXPECTED_DATABASE_NAME = "ltds-ops-staging";
 const EXPECTED_WORKER_NAME = "ledgetop-ops-staging";
 const EXPECTED_BINDING = "OPS_DB";
 const EXPECTED_FINAL_MIGRATION = "0183_project_alpha_binding_standalone_relationship_rows.sql";
+const REVIEWED_OPERATIONS_MIGRATIONS = Object.freeze({
+  source: "operations",
+  count: 183,
+  namesSha256: "e85a63e7f7f018f8fb473f913660d5fbe13d798d3c19e281342b0cbca70d5ac7",
+  contentsSha256: "134957a54a3eb9462a2e19b839d0aa2bb5fe5eb46096dc4677ab9d8324547cb8",
+});
 const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9:._-]{0,190}$/;
 const SYNTHETIC_RECORD_ID = /^staging-[a-z0-9](?:[a-z0-9:._-]{0,182}[a-z0-9])?$/;
 const OUTPUT_NAME = /^recipient-authority-readback-\d{8}T\d{6}Z-[a-z0-9]{6,32}\.json$/;
@@ -91,13 +96,13 @@ export function parseArguments(argv) {
 }
 
 function canonicalMigrationInventory(base) {
-  const contract = BOOTSTRAP_APPS.operations;
+  const contract = REVIEWED_OPERATIONS_MIGRATIONS;
   const directory = path.join(base, "apps", contract.source, "migrations");
   const stat = lstat(directory);
   if (!stat?.isDirectory() || stat.isSymbolicLink()) throw new Error("Operations migrations must be a regular directory");
   const names = fs.readdirSync(directory).filter(name => /^\d{4}_.+\.sql$/.test(name)).sort();
   const namesSha256 = sha256(names.join("\n"));
-  if (names.length !== contract.migrationCount || namesSha256 !== contract.migrationNamesSha256
+  if (names.length !== contract.count || namesSha256 !== contract.namesSha256
     || names.at(-1) !== EXPECTED_FINAL_MIGRATION)
     throw new Error("Operations canonical migration inventory changed");
   const contents = names.map(name => {
@@ -106,7 +111,7 @@ function canonicalMigrationInventory(base) {
     return `${name}\0${sha256(fs.readFileSync(file, "utf8"))}`;
   });
   const contentsSha256 = sha256(contents.join("\n"));
-  if (contentsSha256 !== contract.migrationContentsSha256)
+  if (contentsSha256 !== contract.contentsSha256)
     throw new Error("Operations canonical migration contents changed");
   return { names, namesSha256, contentsSha256, finalMigration: names.at(-1) };
 }

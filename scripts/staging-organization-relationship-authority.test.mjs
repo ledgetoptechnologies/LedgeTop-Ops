@@ -2,14 +2,19 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import test from "node:test";
-import { ORGANIZATION_RELATIONSHIP_TARGET as target, compileOrganizationRelationshipAuthority,
-  compileOrganizationRelationshipAuthorityAfterAuditedWindow,
+import test, { after } from "node:test";
+import { ORGANIZATION_RELATIONSHIP_TARGET as target, compileOrganizationRelationshipAuthority as compileOrganizationRelationshipAuthorityImpl,
+  compileOrganizationRelationshipAuthorityAfterAuditedWindow as compileOrganizationRelationshipAuthorityAfterAuditedWindowImpl,
   applyOrganizationRelationshipAuthority, applyAndReconcileOrganizationRelationshipAuthority } from "./staging-organization-relationship-authority.mjs";
 import { STAGING_TARGET } from "./staging-onboarding-native-only-authority-packet.mjs";
 
 const root=path.resolve(import.meta.dirname,".."),ids=["10000000-0000-4000-8000-000000000001","10000000-0000-4000-8000-000000000002"];
-const migrations=fs.readdirSync(path.join(root,"apps/operations/migrations")).filter(name=>/^\d{4}_.+\.sql$/.test(name)).sort();
+const migrations=fs.readdirSync(path.join(root,"apps/operations/migrations")).filter(name=>/^\d{4}_.+\.sql$/.test(name)&&name.slice(0,4)<="0183").sort();
+const reviewedRoot=fs.mkdtempSync(path.join(os.tmpdir(),"organization-authority-reviewed-chain-")),reviewedDirectory=path.join(reviewedRoot,"apps/operations/migrations");
+fs.mkdirSync(reviewedDirectory,{recursive:true});for(const name of migrations)fs.copyFileSync(path.join(root,"apps/operations/migrations",name),path.join(reviewedDirectory,name));
+after(()=>fs.rmSync(reviewedRoot,{recursive:true,force:true}));
+const compileOrganizationRelationshipAuthority=(value,options={})=>compileOrganizationRelationshipAuthorityImpl(value,{root:reviewedRoot,...options});
+const compileOrganizationRelationshipAuthorityAfterAuditedWindow=(value,artifacts,options={})=>compileOrganizationRelationshipAuthorityAfterAuditedWindowImpl(value,artifacts,{root:reviewedRoot,...options});
 const grant=(id,permission,active=1)=>({id,staff_id:target.staffId,permission,effect:"allow",scope_kind:"resource",business_area_id:null,division_id:null,resource_id:target.recordId,active,granted_by:target.staffId,created_at:"2026-10-08T12:00:45.000Z"});
 const history=(row,grant_version,active,grant_generation)=>({grant_id:row.id,grant_version,staff_id:row.staff_id,permission:row.permission,effect:row.effect,scope_kind:row.scope_kind,business_area_id:row.business_area_id,division_id:row.division_id,resource_id:row.resource_id,active,grant_generation,recorded_at:`2026-10-08T12:${String(grant_generation).padStart(2,"0")}:00.000Z`});
 let sequence=0;
@@ -100,5 +105,5 @@ test("compiler requires exact snapshot shapes and fresh distinct UUID identifier
   for(const value of [extraAdmission,missingProfile,extraGeneration,badUuid,collision])assert.throws(()=>compileOrganizationRelationshipAuthority(value));
   const provision=compileOrganizationRelationshipAuthority(input()),revoke=activeAfterFresh(provision);revoke.approval.approvalId=provision.approval.approval_id;assert.throws(()=>compileOrganizationRelationshipAuthority(revoke),/fresh revoke identifiers/);});
 
-test("unknown response reconciles v2 and already-committed v1 artifacts only by exact receipt",async()=>{const artifact=compileOrganizationRelationshipAuthority(input()),db={prepare:()=>({bind(){return this;},first:async()=>artifact.receipt})};assert.equal((await applyAndReconcileOrganizationRelationshipAuthority(db,artifact,{target:STAGING_TARGET,root})).status,"committed-after-response-recovery");
-  const old={schemaVersion:1,input:{schemaVersion:1},receipt:{command_id:"old-command",result_json:"old"}},oldDb={prepare:()=>({bind(){return this;},first:async()=>old.receipt})};assert.equal((await applyAndReconcileOrganizationRelationshipAuthority(oldDb,old,{target:STAGING_TARGET,root})).status,"committed-after-response-recovery");});
+test("unknown response reconciles v2 and already-committed v1 artifacts only by exact receipt",async()=>{const artifact=compileOrganizationRelationshipAuthority(input()),db={prepare:()=>({bind(){return this;},first:async()=>artifact.receipt})};assert.equal((await applyAndReconcileOrganizationRelationshipAuthority(db,artifact,{target:STAGING_TARGET,root:reviewedRoot})).status,"committed-after-response-recovery");
+  const old={schemaVersion:1,input:{schemaVersion:1},receipt:{command_id:"old-command",result_json:"old"}},oldDb={prepare:()=>({bind(){return this;},first:async()=>old.receipt})};assert.equal((await applyAndReconcileOrganizationRelationshipAuthority(oldDb,old,{target:STAGING_TARGET,root:reviewedRoot})).status,"committed-after-response-recovery");});

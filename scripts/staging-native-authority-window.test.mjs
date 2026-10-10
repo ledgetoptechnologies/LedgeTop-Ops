@@ -384,24 +384,51 @@ test("prepare uses one guarded batch and verifies a pristine exact area", async 
 });
 
 test("prepare accepts the exact canonical repository migration chain through 0183", async () => {
+  const source = path.join(ROOT, "apps", "operations", "migrations");
+  const migrations = fs.readdirSync(source)
+    .filter(name => /^\d{4}_.+\.sql$/.test(name) && name.slice(0, 4) <= "0183")
+    .sort();
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ltds-authority-window-reviewed-chain-"));
+  const migrationDirectory = path.join(tempRoot, "apps", "operations", "migrations");
+  fs.mkdirSync(migrationDirectory, { recursive: true });
+  for (const name of migrations) fs.copyFileSync(path.join(source, name), path.join(migrationDirectory, name));
+  const { dependencies } = preparationHarness({ actualMigrations: migrations });
+  dependencies.root = tempRoot;
+  delete dependencies.reviewedMigrations;
+  try {
+    assert.equal((await prepareStagingNativeAuthorityArea(
+      "binding.json", AREA, dependencies,
+    )).status, "prepared");
+  } finally {
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test("prepare rejects the canonical repository migration chain through 0184", async () => {
   const migrationDirectory = path.join(ROOT, "apps", "operations", "migrations");
   const migrations = fs.readdirSync(migrationDirectory)
     .filter(name => /^\d{4}_.+\.sql$/.test(name))
     .sort();
+  assert.equal(migrations.at(-1), "0184_project_alpha_directory_relationship_generation_recovery.sql");
   const { dependencies } = preparationHarness({ actualMigrations: migrations });
   dependencies.root = ROOT;
   delete dependencies.reviewedMigrations;
-  assert.equal((await prepareStagingNativeAuthorityArea(
-    "binding.json", AREA, dependencies,
-  )).status, "prepared");
+  await assert.rejects(prepareStagingNativeAuthorityArea("binding.json", AREA, dependencies), error => {
+    assert.equal(error.prepareStageCode, "local-chain-mismatch");
+    return true;
+  });
 });
 
 test("prepare rejects a missing, extra, renamed, or modified 0183 migration", async t => {
   const source = path.join(ROOT, "apps", "operations", "migrations");
-  const canonicalNames = fs.readdirSync(source).filter(name => /^\d{4}_.+\.sql$/.test(name)).sort();
+  const canonicalNames = fs.readdirSync(source)
+    .filter(name => /^\d{4}_.+\.sql$/.test(name) && name.slice(0, 4) <= "0183")
+    .sort();
   const cases = [
     ["missing", directory => fs.rmSync(path.join(directory, "0183_project_alpha_binding_standalone_relationship_rows.sql"))],
-    ["extra", directory => fs.writeFileSync(path.join(directory, "0184_unreviewed.sql"), "SELECT 1;\n")],
+    ["extra", directory => fs.copyFileSync(
+      path.join(source, "0184_project_alpha_directory_relationship_generation_recovery.sql"),
+      path.join(directory, "0184_project_alpha_directory_relationship_generation_recovery.sql"))],
     ["renamed", directory => fs.renameSync(path.join(directory, "0183_project_alpha_binding_standalone_relationship_rows.sql"),
       path.join(directory, "0183_wrong_name.sql"))],
     ["modified", directory => fs.appendFileSync(path.join(directory, "0183_project_alpha_binding_standalone_relationship_rows.sql"), "-- drift\n")],

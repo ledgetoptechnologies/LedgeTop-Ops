@@ -1,6 +1,7 @@
-import assert from "node:assert/strict";import crypto from "node:crypto";import fs from "node:fs";import path from "node:path";import test from "node:test";import{createRequire}from"node:module";
+import assert from "node:assert/strict";import crypto from "node:crypto";import fs from "node:fs";import os from "node:os";import path from "node:path";import test,{after} from "node:test";import{createRequire}from"node:module";
 import{ORGANIZATION_RELATIONSHIP_TARGET as target,compileOrganizationRelationshipAuthority,applyOrganizationRelationshipAuthority}from"./staging-organization-relationship-authority.mjs";import{STAGING_TARGET}from"./staging-onboarding-native-only-authority-packet.mjs";
-const root=path.resolve(import.meta.dirname,".."),req=createRequire(path.join(root,"apps/operations/package.json")),{Miniflare}=req("miniflare"),{unstable_splitSqlQuery}=req("wrangler"),{build}=req("esbuild"),dir=path.join(root,"apps/operations/migrations"),migrationNames=fs.readdirSync(dir).filter(n=>/^\d{4}_.+\.sql$/.test(n)).sort();
+const root=path.resolve(import.meta.dirname,".."),req=createRequire(path.join(root,"apps/operations/package.json")),{Miniflare}=req("miniflare"),{unstable_splitSqlQuery}=req("wrangler"),{build}=req("esbuild"),dir=path.join(root,"apps/operations/migrations"),migrationNames=fs.readdirSync(dir).filter(n=>/^\d{4}_.+\.sql$/.test(n)&&n.slice(0,4)<="0183").sort();
+const reviewedRoot=fs.mkdtempSync(path.join(os.tmpdir(),"organization-authority-fullschema-reviewed-")),reviewedDir=path.join(reviewedRoot,"apps/operations/migrations");fs.mkdirSync(reviewedDir,{recursive:true});for(const name of migrationNames)fs.copyFileSync(path.join(dir,name),path.join(reviewedDir,name));after(()=>fs.rmSync(reviewedRoot,{recursive:true,force:true}));
 const all=async(db,sql,...p)=>(await db.prepare(sql).bind(...p).all()).results,first=(db,sql,...p)=>db.prepare(sql).bind(...p).first();
 async function migrate(db){await db.prepare("CREATE TABLE d1_migrations(id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT UNIQUE NOT NULL,applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)").run();for(const name of migrationNames){const source=fs.readFileSync(path.join(dir,name),"utf8").replace(/\r\n/g,"\n"),sqls=unstable_splitSqlQuery(source).map(s=>s.trim()).filter(s=>s&&!/^PRAGMA\s+foreign_keys\s*=\s*ON/i.test(s));await db.batch([...sqls.map(s=>db.prepare(s)),db.prepare("INSERT INTO d1_migrations(name) VALUES(?)").bind(name)]);}}
 let writer;async function loadWriter(){if(writer)return writer;const built=await build({entryPoints:[path.join(root,"apps/operations/src/worker/native-directory-profile-writer.ts")],bundle:true,platform:"node",format:"esm",write:false,target:"node22"});const loaded=await import(`data:text/javascript;base64,${Buffer.from(built.outputFiles[0].contents).toString("base64")}`);writer={...loaded,writeNativeDirectoryProfile:(db,input)=>loaded.writeNativeDirectoryProfile(db,{...input,mutationId:"70000000-0000-4000-8000-000000000001"})};return writer;}
@@ -15,34 +16,34 @@ test("exact organization authority is atomic across the current full schema and 
     await migrate(db);
     assert.deepEqual((await all(db, "SELECT name FROM d1_migrations ORDER BY name")).map(row => row.name), migrationNames);
     await seed(db);
-    const provision = compileOrganizationRelationshipAuthority(await input(db));
+    const provision = compileOrganizationRelationshipAuthority(await input(db), { root: reviewedRoot });
     await db.prepare("CREATE TRIGGER org_test_race BEFORE INSERT ON native_directory_grants WHEN NEW.id='60000000-0000-4000-8000-000000000002' BEGIN SELECT RAISE(ABORT,'org race');END").run();
-    await assert.rejects(applyOrganizationRelationshipAuthority(db, provision, { target: STAGING_TARGET, root }), /org race/);
+    await assert.rejects(applyOrganizationRelationshipAuthority(db, provision, { target: STAGING_TARGET, root: reviewedRoot }), /org race/);
     assert.equal(await first(db, "SELECT approval_id FROM native_staff_bootstrap_approvals WHERE approval_id=?", provision.approval.approval_id), null);
     await db.prepare("DROP TRIGGER org_test_race").run();
-    await applyOrganizationRelationshipAuthority(db, provision, { target: STAGING_TARGET, root });
+    await applyOrganizationRelationshipAuthority(db, provision, { target: STAGING_TARGET, root: reviewedRoot });
     assert.deepEqual((await all(db, "SELECT permission,scope_kind,business_area_id,division_id,resource_id,active FROM native_directory_grants WHERE id IN (?,?) ORDER BY permission", ...provision.input.approval.grantIds)), [
       { permission: "directory.identity.link", scope_kind: "resource", business_area_id: null, division_id: null, resource_id: target.recordId, active: 1 },
       { permission: "directory.profile.edit", scope_kind: "resource", business_area_id: null, division_id: null, resource_id: target.recordId, active: 1 },
     ]);
-    const revoke = compileOrganizationRelationshipAuthority(await input(db, "revoke", provision));
-    await applyOrganizationRelationshipAuthority(db, revoke, { target: STAGING_TARGET, root });
+    const revoke = compileOrganizationRelationshipAuthority(await input(db, "revoke", provision), { root: reviewedRoot });
+    await applyOrganizationRelationshipAuthority(db, revoke, { target: STAGING_TARGET, root: reviewedRoot });
     const beforeHistory = await all(db, "SELECT * FROM native_directory_grant_history WHERE grant_id IN (?,?) ORDER BY grant_id,grant_version", ...provision.input.approval.grantIds);
     const repeatedInput = await input(db);
     repeatedInput.approval.approvalId = crypto.randomUUID();
     repeatedInput.approval.commandId = crypto.randomUUID();
-    const repeated = compileOrganizationRelationshipAuthority(repeatedInput);
+    const repeated = compileOrganizationRelationshipAuthority(repeatedInput, { root: reviewedRoot });
     await db.prepare("CREATE TRIGGER org_test_reactivation_race BEFORE UPDATE ON native_directory_grants WHEN NEW.id='60000000-0000-4000-8000-000000000002' AND NEW.active=1 BEGIN SELECT RAISE(ABORT,'reactivation race');END").run();
-    await assert.rejects(applyOrganizationRelationshipAuthority(db, repeated, { target: STAGING_TARGET, root }), /reactivation race/);
+    await assert.rejects(applyOrganizationRelationshipAuthority(db, repeated, { target: STAGING_TARGET, root: reviewedRoot }), /reactivation race/);
     assert.equal(await first(db, "SELECT approval_id FROM native_staff_bootstrap_approvals WHERE approval_id=?", repeated.approval.approval_id), null);
     assert.deepEqual(await all(db, "SELECT * FROM native_directory_grant_history WHERE grant_id IN (?,?) ORDER BY grant_id,grant_version", ...provision.input.approval.grantIds), beforeHistory);
     await db.prepare("DROP TRIGGER org_test_reactivation_race").run();
-    await applyOrganizationRelationshipAuthority(db, repeated, { target: STAGING_TARGET, root });
+    await applyOrganizationRelationshipAuthority(db, repeated, { target: STAGING_TARGET, root: reviewedRoot });
     const repeatRevokeInput = await input(db, "revoke", repeated);
     repeatRevokeInput.approval.approvalId = crypto.randomUUID();
     repeatRevokeInput.approval.commandId = crypto.randomUUID();
-    const repeatRevoke = compileOrganizationRelationshipAuthority(repeatRevokeInput);
-    await applyOrganizationRelationshipAuthority(db, repeatRevoke, { target: STAGING_TARGET, root });
+    const repeatRevoke = compileOrganizationRelationshipAuthority(repeatRevokeInput, { root: reviewedRoot });
+    await applyOrganizationRelationshipAuthority(db, repeatRevoke, { target: STAGING_TARGET, root: reviewedRoot });
     assert.deepEqual((await all(db, "SELECT active FROM native_directory_grants WHERE id IN (?,?) ORDER BY id", ...provision.input.approval.grantIds)).map(row => row.active), [0, 0]);
     const afterHistory = await all(db, "SELECT * FROM native_directory_grant_history WHERE grant_id IN (?,?) ORDER BY grant_id,grant_version", ...provision.input.approval.grantIds);
     assert.deepEqual(afterHistory.filter(row => row.grant_version <= 2), beforeHistory);

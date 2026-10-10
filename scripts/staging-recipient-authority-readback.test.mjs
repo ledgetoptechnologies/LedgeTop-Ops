@@ -35,7 +35,7 @@ const reviewedHistoryGenerations = Object.freeze({
   onboardingHistoryGenerations: Object.freeze([2, 3, 4]),
 });
 const canonicalNames = fs.readdirSync(path.join(repositoryRoot, "apps", "operations", "migrations"))
-  .filter(name => /^\d{4}_.+\.sql$/.test(name)).sort();
+  .filter(name => /^\d{4}_.+\.sql$/.test(name) && name.slice(0, 4) <= "0183").sort();
 const reviewedRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ltds-recipient-readback-"));
 const reviewedOperations = path.join(reviewedRoot, "apps", "operations");
 fs.mkdirSync(path.join(reviewedOperations, "migrations"), { recursive: true });
@@ -55,6 +55,30 @@ const readbackInput = Object.freeze({
   base: reviewedRoot,
   selection: Object.freeze({ staffId, recordId }),
   expectations: reviewedHistoryGenerations,
+});
+
+test("readback rejects live 0184 and missing, extra, or modified reviewed migrations", async t => {
+  const cases = [
+    ["live 0184", directory => fs.copyFileSync(
+      path.join(repositoryRoot, "apps/operations/migrations/0184_project_alpha_directory_relationship_generation_recovery.sql"),
+      path.join(directory, "0184_project_alpha_directory_relationship_generation_recovery.sql"))],
+    ["missing", directory => fs.rmSync(path.join(directory, "0183_project_alpha_binding_standalone_relationship_rows.sql"))],
+    ["extra", directory => fs.writeFileSync(path.join(directory, "0184_unreviewed.sql"), "SELECT 1;\n")],
+    ["modified", directory => fs.appendFileSync(path.join(directory, "0183_project_alpha_binding_standalone_relationship_rows.sql"), "-- drift\n")],
+  ];
+  for (const [label, mutate] of cases) await t.test(label, async () => {
+    const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "ltds-recipient-readback-chain-"));
+    const operations = path.join(temporary, "apps/operations");
+    try {
+      fs.cpSync(reviewedOperations, operations, { recursive: true });
+      mutate(path.join(operations, "migrations"));
+      await assert.rejects(collectReadback({
+        ...readbackInput, base: temporary, query: async () => { throw new Error("query must not run"); },
+      }), /Operations canonical migration (?:inventory|contents) changed/, label);
+    } finally {
+      fs.rmSync(temporary, { recursive: true, force: true });
+    }
+  });
 });
 
 const grant = (overrides = {}) => ({
