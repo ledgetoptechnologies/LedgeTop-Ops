@@ -1,13 +1,13 @@
 # PA–Ops and client portal release gates
 
-Last authoritative checks: 2026-10-10 (successor CI and staging-image preflight). This is a staging checkpoint, not production readiness.
+Last authoritative checks: 2026-10-10 (live dispatcher promotion and relationship readback). This is a staging checkpoint, not production readiness.
 
 ## Current candidate
 
 - Review branch: `codex/staging-portal-acceptance-tooling`, PR 146.
-- Source/test-tooling revision: `ab0bfebc88858eb5ac8b98fd7e8b1b04ab94ab1e`.
+- Source/test-tooling revision: `f68eb53f3b0683cec1609e8f709b8e0a8eee598c` (relationship editing availability fix).
 - Predecessor CI `38016348061` failed three joined-recipient tests because their fixtures omitted migration 0170 while the current activation path uses its `record_id` view column. The fixture-only correction passed all four focused tests locally; no authorization guard changed. Successor exact-revision CI `38018710610` completed successfully at `ab0bfebc88858eb5ac8b98fd7e8b1b04ab94ab1e`: all ten jobs, including Operations tests/build and both applications' desktop/mobile browser acceptance, passed. This is CI evidence, not live recipient or sync acceptance.
-- Deployed Ops staging runtime: `dbe5d1b6-05bd-4aa2-b5bb-273493be57da`, built from runtime revision `bb694bb142e98dca955ef68f3660c2f6d08d42fb`. The successor only changes tooling, tests and documentation.
+- Restored Ops staging runtime: `dbe5d1b6-05bd-4aa2-b5bb-273493be57da`, built from runtime revision `bb694bb142e98dca955ef68f3660c2f6d08d42fb`. The `f68eb53f` successor includes the relationship editing-availability UI/read-contract fix; it is published for CI but not deployed.
 - Client staging: `811843ea-2a25-447d-9b35-70e541f02583`.
 - Ops staging migration chain: 183; migration 0183 and independent schema/history preservation readback passed. No production migration was applied.
 
@@ -22,6 +22,34 @@ Last authoritative checks: 2026-10-10 (successor CI and staging-image preflight)
 
 ## Completed evidence
 
+### Dispatcher candidate validation (2026-10-10 04:44 UTC)
+
+- Uploaded and promoted staging-only version `57ff936e-c0b4-4cf7-82fa-997e86cd01b3` from clean pinned runtime source `bb694bb142e98dca955ef68f3660c2f6d08d42fb`. The upload was inactive until independent module/runtime/binding checks passed.
+- Compared the full deployed JavaScript modules: all 346 changed lines are exact relative-path insertions in 284 source comments and 62 esbuild diagnostic object-method labels. Structural checks require an immediately preceding wrapper opener and an insertion inside the quoted method key; no imports, authorization predicates or other executable statements changed. This is path-only equivalence, not byte identity. Baseline module SHA-256: `bee10e7f860d57fd4cc85d0c5804ff2c55eff914d34e20f880982b8b7ddfaf34`; candidate: `cafdea578515fe106c0bfe18081c3dcf73c1e4f0570766fd833a7f6aaf764f3f`.
+- Complete `script_runtime` matches the baseline, including container metadata, exports and asset routing. All bindings match except `NATIVE_DIRECTORY_OUTBOX_DRAIN_ENABLED=true`. All eight existing schedules were preserved and independently read back after promotion.
+- Pre-promotion global queue readback confirmed only one pending synthetic relationship command, no active profile work and zero unmaterialized Directory intents. At 04:44:26 UTC the command remained pending with attempts 0; scheduled execution and PA acknowledgment are not yet proven.
+- CI `38024350253` for `f68eb53f` has nine successful jobs; the Operations job remains in progress. Do not substitute predecessor checks for this exact revision.
+- Temporary retained-client and organization authority windows remain active for this bounded acceptance run. Close retained-client `bbd507cc-6f17-4679-9023-065aacd59a1b` before organization `22ec155e-c682-4eda-bbf1-6ba36e00c865` using their saved private provision artifacts. Older cleanup observations below apply only to earlier windows.
+- Restore Worker traffic to baseline `dbe5d1b6-05bd-4aa2-b5bb-273493be57da` after the bounded dispatcher observation. Do not use settings PATCH, which omitted container runtime metadata in earlier attempts. Production, client activation and public links remain unchanged.
+
+### Scheduled dispatch result and conflict diagnosis (04:49 UTC)
+
+- The normal `1-56/5 * * * *` invocation processed the exact pending assignment at 04:46:14 UTC: attempts advanced to 1, then the command became terminal with HTTP 409, reason `http_status`, request ID `025e7ac3-1216-44fd-b2a7-095b3b66d71d`. Scheduler execution is proven; PA acknowledgment is not.
+- Independently read PA staging over its configured SSH/container connection: identity/epoch match; client revision is 2, organization revision 1, selected organization binding is active and its projection hash matches resource state; client remains standalone. PA authorization generation is 55, while the immutable Ops command pins 54. This is a concrete stale-generation conflict, not grounds to overwrite remote state or reset the terminal command.
+- Restored Worker traffic to baseline `dbe5d1b6-05bd-4aa2-b5bb-273493be57da` with drain off. Retained-client paired close succeeded with private evidence `21a0e858-7516-471d-90e7-c399883a097f/revoke-recovery-2026-10-10T04-46-42.746Z.json`.
+- Organization paired close refused compilation before writes: `exact prior provision poststate required`. The intervening retained-client provision and paired close advanced the staff grant history beyond the organization's originally frozen snapshot. Its two synthetic resource grants remain active; do not claim cleanup complete. A hardened, audited interleaving-aware cleanup is being prepared with immutable prior evidence and exact current-state/atomic checks; no raw SQL grant mutation or fabricated prior artifact is permitted.
+- Next acceptance must use the existing explicit terminal-conflict recovery/review path with fresh PA generation evidence, not a duplicate form submission or direct outbox rewrite. Production and public links remain untouched.
+
+### Cleanup completed and recovery gap confirmed (04:56 UTC)
+
+- Exact-revision CI `38024350253` completed successfully for `f68eb53f3b0683cec1609e8f709b8e0a8eee598c`: all ten jobs passed. This does not prove live relationship acknowledgment or recipient access.
+- The existing recovery route cannot retry the current intended organization: it rejects the same target as `no_change`, and a remove/move derives its remote-parent precondition from Ops rather than PA's still-standalone state. Do not use remove/re-add as a workaround. The dedicated same-state generation recovery remains **unimplemented**; its schema/dispatcher/evidence design is in [the recovery design](relationship-generation-conflict-recovery-2026-10-10.md). PA currently returns a generic relationship 409, not the structured create-command generation-conflict response.
+- Added a narrow trusted cleanup builder requiring the complete retained provision and paired close artifacts out-of-band. The ordinary raw compiler remains strict. The builder recompiles both artifacts, proves each exact grant/history transition, and retains atomic current-state, approval, receipt, expiry, scope, identity, no-deny and compare-and-swap checks. A compact hash-only proof is never accepted as self-authenticating input.
+- The bounded private compilation rehearsal passed with 33 statements and a 46,214-byte canonical plan. Existing compiler/window/full-schema tests passed **21/21** after allowing the local Worker test runtime to start; focused portable trusted-boundary tests additionally passed **2/2**. Initial sandbox runtime-start failure is not an application-test failure. No private backup fixtures are required by tracked tests.
+- Audited organization close succeeded with private evidence `4c904572-dc5f-4452-8149-5d8b48afa6be/revoke-recovery-2026-10-10T04-56-13.017Z.json`. Independent exact-receipt reconciliation returned `reconciled-committed`; readback at 04:56:30 UTC proves zero applicable organization edit/link grants. The retained-client window was already closed. Both temporary windows are now closed.
+- Readback at 04:56:32 UTC confirms active baseline `dbe5d1b6-05bd-4aa2-b5bb-273493be57da`, drain false, all eight unchanged schedules, and the original relationship command still terminal at attempts 1. The inactive tested dispatcher candidate remains retained for later controlled use. No production PA, client activation or public-link change occurred.
+- Final edited cleanup revision reran the entire focused compiler/window/current-full-schema suite successfully: **22/22**, exit 0. The source tests include raw proof-injection and missing out-of-band apply-lineage rejection; private exact-artifact rehearsal remains ignored and contains no published backup payloads.
+
 - Native standalone Client Hub and notes render in the authenticated in-app staging session.
 - Native create/ACK/acquisition, unequal Ops/PA ID, notes, race and trigger regressions: 59 tests passed.
 - Current-contract governed authority: 96 tests passed; organization/Project compilers: 20 passed; organization window/full-schema: 10 passed.
@@ -32,7 +60,7 @@ Last authoritative checks: 2026-10-10 (successor CI and staging-image preflight)
 ## Critical path, in order
 
 0. **Completed in staging:** upgrade web and cron to combined candidate `33486e0c`, apply/verify migrations through 106, preserve identity/public-link carriers and reconcile exact new cron readiness. Do not resume the old schema-incompatible web/cron. This deployment gate is not live sync acceptance.
-1. Submit the prepared synthetic client's organization assignment once through the normal authenticated UI. Current readback: relationship version 1, no parent, no relationship outbox command. Reconcile any uncertain response before retrying.
+1. **Submitted once:** the normal authenticated UI returned HTTP 202; relationship version 2 names the selected organization and its exact-destination command is pending. Do not resubmit it or issue a new idempotency key.
 2. Prove the resulting version-2 relationship and exact PA acknowledgment; a pending command alone is insufficient.
 3. Complete PA-first Project discovery, review, reservation, binding and finalization. Verify one-to-one mapping and explicit conflict/idempotency behavior.
 4. Complete verified recipient enrollment and explicit owner confirmation; establish service-home access without implicitly granting files.

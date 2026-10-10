@@ -4,7 +4,8 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { ORGANIZATION_RELATIONSHIP_TARGET as target, compileOrganizationRelationshipAuthority,
-  applyAndReconcileOrganizationRelationshipAuthority } from "./staging-organization-relationship-authority.mjs";
+  compileOrganizationRelationshipAuthorityAfterAuditedWindow,
+  applyOrganizationRelationshipAuthority, applyAndReconcileOrganizationRelationshipAuthority } from "./staging-organization-relationship-authority.mjs";
 import { STAGING_TARGET } from "./staging-onboarding-native-only-authority-packet.mjs";
 
 const root=path.resolve(import.meta.dirname,".."),ids=["10000000-0000-4000-8000-000000000001","10000000-0000-4000-8000-000000000002"];
@@ -72,6 +73,22 @@ test("paired revoke rejects intervening snapshot or immutable context drift and 
   const context=activeAfterFresh(provision);context.profile={...context.profile,display_name:"Changed"};assert.throws(()=>compileOrganizationRelationshipAuthority(context),/provision context changed/);
   const forgedCreated=activeAfterFresh(provision);forgedCreated.grants[0].created_at="2026-10-08T11:59:59.000Z";assert.throws(()=>compileOrganizationRelationshipAuthority(forgedCreated),/provision history suffix/);
   const substituted=activeAfterFresh(provision);substituted.approval.grantIds=[ids[0],"70000000-0000-4000-8000-000000000005"];assert.throws(()=>compileOrganizationRelationshipAuthority(substituted));});
+
+test("trusted builder boundary is revoke-only, paired, and not injectable through raw input",()=>{
+  const provision=input();
+  assert.throws(()=>compileOrganizationRelationshipAuthorityAfterAuditedWindow(provision,[]),/revoke-only/);
+  const revoke=activeAfterFresh(compileOrganizationRelationshipAuthority(provision));
+  assert.throws(()=>compileOrganizationRelationshipAuthorityAfterAuditedWindow(revoke),/paired audited/);
+  assert.throws(()=>compileOrganizationRelationshipAuthorityAfterAuditedWindow(revoke,[{},{}]),/exact audited intervening/);
+  const injected={...revoke,trustedInterveningLineage:{}};
+  assert.throws(()=>compileOrganizationRelationshipAuthority(injected),/input shape/);
+});
+
+test("trusted artifact apply refuses missing out-of-band lineage before database work",async()=>{
+  const revoke=activeAfterFresh(compileOrganizationRelationshipAuthority(input()));
+  const artifact={...compileOrganizationRelationshipAuthority(revoke),trustedInterveningLineage:{}};
+  await assert.rejects(applyOrganizationRelationshipAuthority({},artifact,{target:STAGING_TARGET}),/paired audited intervening artifacts/);
+});
 
 test("compiler retains target, record, area, and deny fail-closed guards",()=>{for(const mutate of [value=>value.target={...value.target,recordId:"other"},value=>value.record.current_version=2,value=>value.resourceScope.business_area_id="other",value=>{const deny=grant("deny","directory.profile.view");deny.effect="deny";value.grants.push(deny);value.history.push(history(deny,1,1,1));value.generation.generation=1;}]){const value=input();mutate(value);assert.throws(()=>compileOrganizationRelationshipAuthority(value));}});
 
