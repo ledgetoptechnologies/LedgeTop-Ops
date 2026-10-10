@@ -70,8 +70,17 @@ jobs:
       - name: Verify closed-lineage Project authority and paired cleanup locally
         run: node --test scripts/staging-project-business-area-authority-v184.test.mjs scripts/staging-project-business-area-authority-v184-apply.test.mjs scripts/staging-project-business-area-authority-v184-fullschema.test.mjs
 
+      - name: Verify organization-scoped Project authority and paired cleanup locally
+        run: node --test scripts/staging-project-organization-authority-v184.test.mjs scripts/staging-project-organization-authority-v184-fullschema.test.mjs
+
       - name: Verify ordinary Directory scalar settlement and cleanup locally
         run: node --test scripts/staging-directory-scalar-settlement.test.mjs scripts/staging-directory-scalar-settlement-fullschema.test.mjs
+
+      - name: Verify private scalar authority window and uncertain-outcome reconciliation
+        run: node --test scripts/staging-directory-scalar-authority-v184-window.test.mjs
+
+      - name: Verify scalar authority provision and acknowledged cleanup against the full schema
+        run: node --test scripts/staging-directory-scalar-authority-v184.test.mjs scripts/staging-directory-scalar-authority-v184-fullschema.test.mjs
 
   incoming-pickup:
     name: incoming-pickup-alpine

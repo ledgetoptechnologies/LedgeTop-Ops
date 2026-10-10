@@ -40,9 +40,21 @@ test("ordinary sync acceptance keeps real-schema authority and scalar checks in 
     "staging-project-business-area-authority-v184.test.mjs",
     "staging-project-business-area-authority-v184-apply.test.mjs",
     "staging-project-business-area-authority-v184-fullschema.test.mjs",
+    "staging-project-organization-authority-v184.test.mjs",
+    "staging-project-organization-authority-v184-fullschema.test.mjs",
     "staging-directory-scalar-settlement.test.mjs",
     "staging-directory-scalar-settlement-fullschema.test.mjs",
+    "staging-directory-scalar-authority-v184-window.test.mjs",
+    "staging-directory-scalar-authority-v184.test.mjs",
+    "staging-directory-scalar-authority-v184-fullschema.test.mjs",
   ]) assert.ok(sourceJob.includes(`scripts/${filename}`), `${filename} must run in source invariants`);
+});
+
+test("scalar full-schema acceptance bounds execution and closes the complete local server", () => {
+  const fixture = read("scripts/staging-directory-scalar-settlement-fullschema.test.mjs");
+  assert.match(fixture, /\{timeout:240_000\},async t=>/);
+  assert.match(fixture, /try\s*\{\s*await runtime\.dispose\(\);\s*\}\s*finally\s*\{\s*await server\.close\(\);\s*\}/);
+  assert.doesNotMatch(fixture, /await server\.watcher\.close\(\)/);
 });
 
 function filesUnder(relativeDirectory, predicate = () => true) {

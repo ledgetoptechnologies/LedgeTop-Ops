@@ -1,65 +1,12 @@
 import assert from "node:assert/strict";
-import fs from "node:fs";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { compileRelationshipRecoveryAuthorityV184, RELATIONSHIP_RECOVERY_AUTHORITY_TARGET as target,
   RELATIONSHIP_RECOVERY_AUTHORITY_TARGET_V2 as targetV2 } from "./staging-relationship-generation-recovery-authority-v184.mjs";
-import { STAGING_TARGET } from "./staging-onboarding-native-only-authority-packet.mjs";
+import { fixture, fixtureV2, grant, revokeFixture } from "./staging-directory-scalar-authority-v184-fixtures.mjs";
 
 const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),"..");
-const stamp="2026-10-10T12:00:00.000Z";
-const permissions=["directory.profile.edit","directory.identity.link","directory.enrollment.manage"];
-const uuid=n=>`00000000-0000-4000-8000-${String(n).padStart(12,"0")}`;
-const grant=(n,permission,recordId,active=0,scope="resource")=>({id:uuid(n),staff_id:target.staffId,permission,effect:"allow",scope_kind:scope,business_area_id:null,division_id:null,resource_id:recordId,active,granted_by:target.staffId,created_at:stamp});
-
-function fixture(){
-  const grants=[grant(1,"directory.profile.view",null,1,"global")];
-  let number=2;
-  for(const recordId of [target.clientRecordId,target.organizationRecordId]) for(const permission of permissions){
-    if(recordId===target.organizationRecordId&&permission==="directory.enrollment.manage") continue;
-    grants.push(grant(number++,permission,recordId));
-  }
-  const history=grants.map((row,index)=>({grant_id:row.id,grant_version:1,staff_id:row.staff_id,permission:row.permission,effect:row.effect,scope_kind:row.scope_kind,business_area_id:row.business_area_id,division_id:row.division_id,resource_id:row.resource_id,active:row.active,grant_generation:index+1,recorded_at:stamp}));
-  return {schemaVersion:1,staging:STAGING_TARGET,phase:"provision",target,
-    migrationNames:fs.readdirSync(path.join(root,"apps/operations/migrations")).filter(name=>/^\d{4}_.+\.sql$/.test(name)).sort(),
-    staff:{id:target.staffId,status:"active",access_subject:"access|owner"},roles:[{id:"owner-role",staff_id:target.staffId,role_id:"role-owner",scope:"global",scope_key:"global"}],
-    admission:{staff_id:target.staffId,bound_access_subject:"access|owner",active:1,admitted_by:target.staffId,created_at:stamp,updated_at:stamp,version:3},
-    profile:{staff_id:target.staffId,login_email:"owner@example.test",display_name:"Owner",version:2,created_at:stamp,updated_at:stamp},
-    generation:{staff_id:target.staffId,generation:history.length,updated_at:stamp},
-    records:[{record_id:target.clientRecordId,record_kind:"client",current_version:2},{record_id:target.organizationRecordId,record_kind:"organization",current_version:1}],
-    resourceScopes:[{record_id:target.clientRecordId,scope_kind:"business_area",business_area_id:target.businessAreaId,division_id:null,active:1},{record_id:target.organizationRecordId,scope_kind:"business_area",business_area_id:target.businessAreaId,division_id:null,active:1}],
-    relationship:{client_record_id:target.clientRecordId,organization_record_id:target.organizationRecordId,relationship_version:2},
-    predecessor:{command_id:target.predecessorCommandId,source_id:target.sourceId,source_instance_id:target.sourceInstanceId,application_id:target.applicationId,history_epoch_id:target.historyEpochId,destination_origin:target.destinationOrigin,client_record_id:target.clientRecordId,client_public_id:target.clientPublicId,relationship_version:2,action:"assign",organization_record_id:target.organizationRecordId,organization_public_id:target.organizationPublicId,command_json:JSON.stringify({expectedAuthorizationGeneration:"54"}),state:"terminal",outcome_json:JSON.stringify({httpStatus:409})},
-    grants,history,approval:{approvalId:uuid(90),commandId:uuid(91),grantIds:[uuid(2),uuid(3),uuid(4),uuid(5),uuid(6),uuid(7)],issuedAt:stamp,expiresAt:"2026-10-10T13:00:00.000Z",executedAt:stamp}};
-}
-
-function fixtureV2(){
-  const value=fixture();value.schemaVersion=2;value.target=targetV2;
-  value.resourceScopes=[
-    {record_id:targetV2.clientRecordId,scope_kind:"business_area",business_area_id:targetV2.clientBusinessAreaId,division_id:null,active:1},
-    {record_id:targetV2.organizationRecordId,scope_kind:"business_area",business_area_id:targetV2.organizationBusinessAreaId,division_id:null,active:1},
-  ];
-  return value;
-}
-
-function revokeFixture(base,provisionArtifact){
-  const value=base();
-  value.phase="revoke";
-  value.provisionArtifact=provisionArtifact;
-  const generation=value.generation.generation;
-  for(const [index,id] of value.approval.grantIds.entries()){
-    const recordId=index<3?value.target.clientRecordId:value.target.organizationRecordId;
-    const permission=permissions[index%3];
-    let row=value.grants.find(grant=>grant.id===id);
-    if(!row){row=grant(Number(id.slice(-12)),permission,recordId,1);value.grants.push(row)}else row.active=1;
-    const prior=value.history.filter(history=>history.grant_id===id).length;
-    value.history.push({grant_id:id,grant_version:prior+1,staff_id:row.staff_id,permission:row.permission,effect:row.effect,scope_kind:row.scope_kind,business_area_id:row.business_area_id,division_id:row.division_id,resource_id:row.resource_id,active:1,grant_generation:generation+index+1,recorded_at:stamp});
-  }
-  value.generation={...value.generation,generation:generation+6};
-  value.approval={...value.approval,approvalId:uuid(92),commandId:uuid(93)};
-  return value;
-}
 
 test("compiles the exact six-resource transition and eight-entry selection",()=>{
   const artifact=compileRelationshipRecoveryAuthorityV184(fixture());
