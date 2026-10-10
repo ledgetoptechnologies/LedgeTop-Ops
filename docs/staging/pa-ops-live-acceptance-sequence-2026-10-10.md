@@ -11,8 +11,8 @@ This is the remaining staging acceptance sequence, not a release approval or a c
 ### Additional local evidence (not live acceptance)
 
 - The closed recovery-lineage validator passed against actual local D1 trigger state after intact migrations 0001–0184 and the reviewed provision/revoke batches: one full-schema test passed, with no skips. This proves the cleanup evidence format, not a live recovery acknowledgement.
-- The focused scalar-settlement, recovery-lineage and release-configuration suite passed 35/35 tests. The current Project authority module is still a prerequisite validator, not a usable provision/revoke workflow.
-- The organization scalar fixture uses the actual Directory writer, but currently reproduces dispatcher acknowledgement persistence with local SQL. It does not prove the real dispatcher path or the retained client's acquired-ID/linked-parent path. Those remain required before relying on this fixture for live client acceptance.
+- The focused scalar-settlement, recovery-lineage and release-configuration suite passed 35/35 tests. The new Project authority compiler is under review; its emitted provision/revoke statements and trusted apply path are not yet proven usable. In particular, paired cleanup must use the actual persisted receipt timestamp, not an assumed execution time.
+- The revised organization scalar fixture passed its local full-schema run (one test, no skips) using the actual Directory writer and actual dispatcher with mocked PA HTTP transport. It does not prove the retained client's acquired-ID/linked-parent path, live PA HTTP behavior or complete independently recaptured cleanup protection. Those remain required before relying on this fixture for live client acceptance.
 - Release configuration preparation is held at the Windows script-policy checkpoint. No generated live configuration values were written and no migration or Worker deployment was performed by these checks.
 
 ## 1. Recover the retained synthetic relationship
