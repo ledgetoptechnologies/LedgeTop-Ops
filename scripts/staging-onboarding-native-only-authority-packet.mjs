@@ -8,9 +8,9 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 export const STAGING_TARGET = Object.freeze({accountId:"846c924bf17bf4f3dd15c97a4c5d1d51",workerName:"ledgetop-ops-staging",
   hostname:"ops-staging.ledgetopdroneservices.com",databaseId:"78b34173-b168-4e3d-9832-bb9d245cc6b8",
   databaseName:"ltds-ops-staging",binding:"OPS_DB",environment:"staging"});
-const CHAIN = Object.freeze({count:182,final:"0182_project_alpha_directory_relationship_recovery_guard.sql",
-  names:"5ca01798b82652a4b6bb64a35be85a82673d940d6e762805c147408e3ca298d8",
-  contents:"09ebfcc544263a90c96b8ed5548cdc73e38e524aec977aa37042bc280f9dae56"});
+const CHAIN = Object.freeze({count:183,final:"0183_project_alpha_binding_standalone_relationship_rows.sql",
+  names:"e85a63e7f7f018f8fb473f913660d5fbe13d798d3c19e281342b0cbca70d5ac7",
+  contents:"134957a54a3eb9462a2e19b839d0aa2bb5fe5eb46096dc4677ab9d8324547cb8"});
 const PERMISSIONS_V2 = Object.freeze(["directory.profile.edit","directory.identity.link"]);
 const PERMISSIONS_V3 = Object.freeze([...PERMISSIONS_V2,"directory.enrollment.manage"]);
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;

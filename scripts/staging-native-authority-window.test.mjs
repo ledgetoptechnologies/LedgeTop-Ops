@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { createRequire } from "node:module";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
@@ -342,11 +343,11 @@ function preparationHarness(options = {}) {
     root: "C:\\private-root",
     withBinding: async (_config, callback) => callback({ db: {}, target: STAGING_TARGET }),
     reviewedMigrations: () => options.expectedMigrations
-      ?? ["0176_operations_directory_acquired_intent_authority.sql", "0177_operations_directory_acquired_intent_update_authority.sql", "0178_project_alpha_project_inbound_reconciliation.sql", "0179_project_alpha_acquired_native_identity_collision.sql", "0180_project_alpha_project_v2_recovery_authorization.sql", "0181_project_alpha_directory_create_generation_recovery.sql", "0182_project_alpha_directory_relationship_recovery_guard.sql"],
+      ?? ["0176_operations_directory_acquired_intent_authority.sql", "0177_operations_directory_acquired_intent_update_authority.sql", "0178_project_alpha_project_inbound_reconciliation.sql", "0179_project_alpha_acquired_native_identity_collision.sql", "0180_project_alpha_project_v2_recovery_authorization.sql", "0181_project_alpha_directory_create_generation_recovery.sql", "0182_project_alpha_directory_relationship_recovery_guard.sql", "0183_project_alpha_binding_standalone_relationship_rows.sql"],
     readMigrations: async () => {
       if (options.ledgerReadFails) throw new Error("private transport detail");
       return options.actualMigrations
-        ?? ["0176_operations_directory_acquired_intent_authority.sql", "0177_operations_directory_acquired_intent_update_authority.sql", "0178_project_alpha_project_inbound_reconciliation.sql", "0179_project_alpha_acquired_native_identity_collision.sql", "0180_project_alpha_project_v2_recovery_authorization.sql", "0181_project_alpha_directory_create_generation_recovery.sql", "0182_project_alpha_directory_relationship_recovery_guard.sql"];
+        ?? ["0176_operations_directory_acquired_intent_authority.sql", "0177_operations_directory_acquired_intent_update_authority.sql", "0178_project_alpha_project_inbound_reconciliation.sql", "0179_project_alpha_acquired_native_identity_collision.sql", "0180_project_alpha_project_v2_recovery_authorization.sql", "0181_project_alpha_directory_create_generation_recovery.sql", "0182_project_alpha_directory_relationship_recovery_guard.sql", "0183_project_alpha_binding_standalone_relationship_rows.sql"];
     },
     referenceTables: async () => ["native_directory_grants", "native_directory_grant_history"],
     referenceCounts: async () => [
@@ -382,7 +383,7 @@ test("prepare uses one guarded batch and verifies a pristine exact area", async 
   assert.match(sql, /native-area-poststate-guard-failed/);
 });
 
-test("prepare accepts the exact canonical repository migration chain through 0181", async () => {
+test("prepare accepts the exact canonical repository migration chain through 0183", async () => {
   const migrationDirectory = path.join(ROOT, "apps", "operations", "migrations");
   const migrations = fs.readdirSync(migrationDirectory)
     .filter(name => /^\d{4}_.+\.sql$/.test(name))
@@ -393,6 +394,37 @@ test("prepare accepts the exact canonical repository migration chain through 018
   assert.equal((await prepareStagingNativeAuthorityArea(
     "binding.json", AREA, dependencies,
   )).status, "prepared");
+});
+
+test("prepare rejects a missing, extra, renamed, or modified 0183 migration", async t => {
+  const source = path.join(ROOT, "apps", "operations", "migrations");
+  const canonicalNames = fs.readdirSync(source).filter(name => /^\d{4}_.+\.sql$/.test(name)).sort();
+  const cases = [
+    ["missing", directory => fs.rmSync(path.join(directory, "0183_project_alpha_binding_standalone_relationship_rows.sql"))],
+    ["extra", directory => fs.writeFileSync(path.join(directory, "0184_unreviewed.sql"), "SELECT 1;\n")],
+    ["renamed", directory => fs.renameSync(path.join(directory, "0183_project_alpha_binding_standalone_relationship_rows.sql"),
+      path.join(directory, "0183_wrong_name.sql"))],
+    ["modified", directory => fs.appendFileSync(path.join(directory, "0183_project_alpha_binding_standalone_relationship_rows.sql"), "-- drift\n")],
+  ];
+  for (const [label, mutate] of cases) await t.test(label, async () => {
+    const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ltds-authority-window-chain-"));
+    const directory = path.join(tempRoot, "apps", "operations", "migrations");
+    fs.mkdirSync(directory, { recursive: true });
+    for (const name of canonicalNames) fs.copyFileSync(path.join(source, name), path.join(directory, name));
+    mutate(directory);
+    const actualMigrations = fs.readdirSync(directory).filter(name => /^\d{4}_.+\.sql$/.test(name)).sort();
+    const { dependencies } = preparationHarness({ actualMigrations });
+    dependencies.root = tempRoot;
+    delete dependencies.reviewedMigrations;
+    try {
+      await assert.rejects(prepareStagingNativeAuthorityArea("binding.json", AREA, dependencies), error => {
+        assert.equal(error.prepareStageCode, "local-chain-mismatch");
+        return true;
+      });
+    } finally {
+      fs.rmSync(tempRoot, { recursive: true, force: true });
+    }
+  });
 });
 
 test("prepare reconciles a lost insert response from exact unused readback", async () => {

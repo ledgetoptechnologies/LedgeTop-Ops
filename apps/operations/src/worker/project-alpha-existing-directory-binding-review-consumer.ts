@@ -281,6 +281,8 @@ async function current(db: D1Database, value: Review): Promise<Current | null> {
       (review.resource_type='organization'
         OR NOT EXISTS (SELECT 1 FROM operations_directory_client_organizations relationship
           WHERE relationship.client_record_id=review.record_id)
+        OR 1=(SELECT COUNT(*) FROM operations_directory_client_organizations relationship
+          WHERE relationship.client_record_id=review.record_id AND relationship.organization_record_id IS NULL)
         OR 1=(
           (SELECT COUNT(*) FROM operations_directory_client_organizations relationship
             JOIN project_alpha_directory_mappings parent ON parent.external_id=relationship.organization_record_id
@@ -383,12 +385,16 @@ export async function activateProjectAlphaExistingDirectoryBinding(
     || freshProfile.observation.authorizationGeneration !== freshBinding.observation.authorizationGeneration
     || freshProfile.observation.authorizationGeneration !== acquired.response_result_authorization_generation)
     return { status: "blocked", reason: "remote" };
+  const observedOrganizationPublicId = evidence.resource_type === "client"
+    ? freshProfile.observation.profile.organizationPublicId ?? null : null;
   if (evidence.resource_type === "client") {
-    const parentPublicId = freshProfile.observation.profile.organizationPublicId ?? null;
+    const parentPublicId = observedOrganizationPublicId;
     try {
       const relationship = await env.OPS_DB.prepare(`SELECT 1 current_relationship WHERE
-        (? IS NULL AND NOT EXISTS(SELECT 1 FROM operations_directory_client_organizations relationship
-          WHERE relationship.client_record_id=?))
+        (? IS NULL AND (NOT EXISTS(SELECT 1 FROM operations_directory_client_organizations relationship
+          WHERE relationship.client_record_id=?)
+          OR 1=(SELECT COUNT(*) FROM operations_directory_client_organizations relationship
+            WHERE relationship.client_record_id=? AND relationship.organization_record_id IS NULL)))
         OR (? IS NOT NULL AND 1=(SELECT COUNT(*) FROM operations_directory_client_organizations relationship
           JOIN project_alpha_active_directory_mappings parent ON parent.record_id=relationship.organization_record_id
             JOIN operations_directory_records parent_record ON parent_record.record_id=parent.record_id
@@ -396,7 +402,7 @@ export async function activateProjectAlphaExistingDirectoryBinding(
           WHERE relationship.client_record_id=? AND parent.source_id=? AND parent.source_instance_id=? AND parent.application_id=?
               AND parent.history_epoch_id=? AND parent.resource_type='organization'
               AND parent.project_alpha_public_id=?))`)
-        .bind(parentPublicId,evidence.record_id,parentPublicId,evidence.record_id,evidence.source_id,evidence.source_instance_id,
+        .bind(parentPublicId,evidence.record_id,evidence.record_id,parentPublicId,evidence.record_id,evidence.source_id,evidence.source_instance_id,
           evidence.application_id,evidence.history_epoch_id,parentPublicId).first();
       if (!relationship) return { status: "blocked", reason: "relationship" };
     } catch { return { status: "uncertain", reason: "database" }; }
@@ -417,15 +423,30 @@ export async function activateProjectAlphaExistingDirectoryBinding(
       project_alpha_public_id,project_alpha_revision,local_record_version,request_sha256,
       acquisition_evidence_sha256,profile_evidence_sha256,binding_status_evidence_sha256,
       activated_by_staff_id,directory_grant_generation,expected_authorization_generation,result_authorization_generation)
-      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(
+      SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?
+      WHERE (?='organization'
+        OR (? IS NULL AND (NOT EXISTS(SELECT 1 FROM operations_directory_client_organizations relationship
+          WHERE relationship.client_record_id=?)
+          OR 1=(SELECT COUNT(*) FROM operations_directory_client_organizations relationship
+            WHERE relationship.client_record_id=? AND relationship.organization_record_id IS NULL)))
+        OR (? IS NOT NULL AND 1=(SELECT COUNT(*) FROM operations_directory_client_organizations relationship
+          JOIN project_alpha_active_directory_mappings parent ON parent.record_id=relationship.organization_record_id
+          JOIN operations_directory_records parent_record ON parent_record.record_id=parent.record_id
+            AND parent_record.record_kind='organization'
+          WHERE relationship.client_record_id=? AND parent.source_id=? AND parent.source_instance_id=?
+            AND parent.application_id=? AND parent.history_epoch_id=? AND parent.resource_type='organization'
+            AND parent.project_alpha_public_id=?)))`).bind(
       activationId, input.reviewItemId, input.idempotencyKey, acquired.acquired_receipt_id, acquired.claim_id,
       evidence.record_id, evidence.source_id, evidence.source_instance_id, evidence.application_id,
       evidence.history_epoch_id, evidence.resource_type, evidence.external_id, evidence.project_alpha_public_id,
       evidence.project_alpha_revision, evidence.reviewed_local_record_version, evidence.request_sha256,
       acquired.acquisition_evidence_sha256, acquired.profile_evidence_sha256,
       acquired.binding_status_evidence_sha256, evidence.reviewer_staff_id, before.grant_generation,
-      acquired.response_expected_authorization_generation, acquired.response_result_authorization_generation).run();
-    if (inserted.meta.changes !== 1) return { status: "uncertain", reason: "database" };
+      acquired.response_expected_authorization_generation, acquired.response_result_authorization_generation,
+      evidence.resource_type, observedOrganizationPublicId, evidence.record_id, evidence.record_id,
+      observedOrganizationPublicId, evidence.record_id, evidence.source_id, evidence.source_instance_id,
+      evidence.application_id, evidence.history_epoch_id, observedOrganizationPublicId).run();
+    if (inserted.meta.changes !== 1) return { status: "blocked", reason: "relationship" };
     const saved = await prior(env.OPS_DB, input.reviewItemId, input.idempotencyKey);
     if (!saved || saved.activation_id !== activationId) return { status: "uncertain", reason: "database" };
     return { status: "activated", activationId, reviewItemId: input.reviewItemId,

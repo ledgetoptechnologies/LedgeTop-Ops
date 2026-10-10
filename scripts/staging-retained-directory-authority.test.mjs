@@ -79,7 +79,8 @@ function currentInputAfterLegacyClose(close) {
       active: 0, grant_generation: close.input.generation.generation + index + 1, recorded_at: close.receipt.executed_at };
   });
   return { ...structuredClone(close.input), schemaVersion: 2, phase: "reactivate",
-    migrationNames: [...close.input.migrationNames, "0182_project_alpha_directory_relationship_recovery_guard.sql"],
+    migrationNames: [...close.input.migrationNames, "0182_project_alpha_directory_relationship_recovery_guard.sql",
+      "0183_project_alpha_binding_standalone_relationship_rows.sql"],
     grants, history: [...close.input.history, ...closeHistory],
     generation: { ...close.input.generation, generation: close.input.generation.generation + 3,
       updated_at: close.receipt.executed_at },
@@ -200,12 +201,12 @@ test("current schema accepts a complete legacy close only as a fully verified ne
   const { compileLegacy, close } = await syntheticLegacyClose();
   const compileCurrent = value => compileRetainedDirectoryAuthority(value, { root, historicalVerifier });
   assert.equal(close.input.migrationNames.length, 181);
-  assert.throws(() => compileCurrent(close.input), /canonical 182 migration ledger/);
+  assert.throws(() => compileCurrent(close.input), /canonical 183 migration ledger/);
 
   const current = currentInputAfterLegacyClose(close);
   const compiled = compileCurrent(current);
   assert.equal(compiled.input.schemaVersion, 2);
-  assert.equal(JSON.parse(compiled.approval.independent_binding_verification_json).migrationCount, 182);
+  assert.equal(JSON.parse(compiled.approval.independent_binding_verification_json).migrationCount, 183);
   const currentSql = compiled.statements.map(statement => statement.sql).join("\n");
   assert.match(currentSql, /FROM d1_migrations/);
   assert.match(currentSql, /reference-schema-guard-failed/);
@@ -214,7 +215,7 @@ test("current schema accepts a complete legacy close only as a fully verified ne
 
   let batchCalled = false;
   await assert.rejects(applyRetainedDirectoryAuthority({ batch: async () => { batchCalled = true; } }, close,
-    { target: STAGING_TARGET }), /canonical 182 migration ledger/);
+    { target: STAGING_TARGET }), /canonical 183 migration ledger/);
   assert.equal(batchCalled, false, "a historical anchor must never reach the apply transport directly");
 
   const changedStatement = structuredClone(current);
@@ -240,7 +241,7 @@ test("current schema accepts a complete legacy close only as a fully verified ne
 
   const changedCurrentLedger = structuredClone(current);
   changedCurrentLedger.migrationNames.pop();
-  assert.throws(() => compileCurrent(changedCurrentLedger), /canonical 182 migration ledger/);
+  assert.throws(() => compileCurrent(changedCurrentLedger), /canonical 183 migration ledger/);
 
   const incompleteCurrentHistory = structuredClone(current);
   incompleteCurrentHistory.history.pop();
@@ -259,6 +260,27 @@ test("current schema accepts a complete legacy close only as a fully verified ne
       mutate(temporary);
       assert.throws(() => compileLegacy(close.input, { root: temporary, historicalVerifier, legacyClose: true }),
         /canonical 181 migration chain/);
+    } finally { fs.rmSync(temporary, { recursive: true, force: true }); }
+  }
+});
+
+test("current retained authority rejects a missing, extra, renamed, or modified 0183 migration", () => {
+  const root = path.resolve(import.meta.dirname, "..");
+  const migrationName = "0183_project_alpha_binding_standalone_relationship_rows.sql";
+  const cases = [
+    ["missing", directory => fs.rmSync(path.join(directory, migrationName))],
+    ["extra", directory => fs.writeFileSync(path.join(directory, "0184_unreviewed.sql"), "SELECT 1;\n")],
+    ["renamed", directory => fs.renameSync(path.join(directory, migrationName), path.join(directory, "0183_wrong_name.sql"))],
+    ["modified", directory => fs.appendFileSync(path.join(directory, migrationName), "-- drift\n")],
+  ];
+  for (const [label, mutate] of cases) {
+    const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "retained-current-chain-"));
+    try {
+      fs.mkdirSync(path.join(temporary, "apps/operations"), { recursive: true });
+      fs.cpSync(path.join(root, "apps/operations/migrations"), path.join(temporary, "apps/operations/migrations"), { recursive: true });
+      mutate(path.join(temporary, "apps/operations/migrations"));
+      assert.throws(() => compileRetainedDirectoryAuthority(input(), { root: temporary }),
+        /exact canonical 183 migration chain required/, label);
     } finally { fs.rmSync(temporary, { recursive: true, force: true }); }
   }
 });

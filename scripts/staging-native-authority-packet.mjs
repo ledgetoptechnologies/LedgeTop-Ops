@@ -7,14 +7,14 @@ import { STAGING_ACCOUNT_ID, STAGING_INVENTORY } from "./staging-requirements.mj
 import { boundedGuardInsert } from "./staging-bounded-guards.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-// Existing authority packet schemas were reviewed against this exact 182-file
+// Existing authority packet schemas were reviewed against this exact 183-file
 // staging chain. Keep the complete-ledger equality check below; any later
 // migration requires an explicit contract update and full-chain review.
 const REVIEWED_AUTHORITY_OPERATIONS_CHAIN = Object.freeze({
-  count: 182,
-  finalMigration: "0182_project_alpha_directory_relationship_recovery_guard.sql",
-  namesSha256: "5ca01798b82652a4b6bb64a35be85a82673d940d6e762805c147408e3ca298d8",
-  contentsSha256: "09ebfcc544263a90c96b8ed5548cdc73e38e524aec977aa37042bc280f9dae56",
+  count: 183,
+  finalMigration: "0183_project_alpha_binding_standalone_relationship_rows.sql",
+  namesSha256: "e85a63e7f7f018f8fb473f913660d5fbe13d798d3c19e281342b0cbca70d5ac7",
+  contentsSha256: "134957a54a3eb9462a2e19b839d0aa2bb5fe5eb46096dc4677ab9d8324547cb8",
 });
 export const PACKET_SCHEMA_VERSION = 3;
 export const ACQUISITION_PACKET_SCHEMA_VERSION = 4;

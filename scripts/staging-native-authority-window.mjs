@@ -28,10 +28,10 @@ const AREA_KEYS = Object.freeze(["id", "name", "active"]);
 const RESERVED_D1_TABLES = Object.freeze(new Set(["_cf_KV"]));
 const TABLE_INFO_BATCH_SIZE = 25;
 const CHAIN = Object.freeze({
-  count: 182,
-  final: "0182_project_alpha_directory_relationship_recovery_guard.sql",
-  names: "5ca01798b82652a4b6bb64a35be85a82673d940d6e762805c147408e3ca298d8",
-  contents: "09ebfcc544263a90c96b8ed5548cdc73e38e524aec977aa37042bc280f9dae56",
+  count: 183,
+  final: "0183_project_alpha_binding_standalone_relationship_rows.sql",
+  names: "e85a63e7f7f018f8fb473f913660d5fbe13d798d3c19e281342b0cbca70d5ac7",
+  contents: "134957a54a3eb9462a2e19b839d0aa2bb5fe5eb46096dc4677ab9d8324547cb8",
 });
 
 const all = async (db, sql, ...args) => (await db.prepare(sql).bind(...args).all()).results;

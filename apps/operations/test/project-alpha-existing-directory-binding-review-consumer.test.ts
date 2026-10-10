@@ -84,7 +84,8 @@ describe("private existing Directory binding activation consumer", () => {
       "0125_project_alpha_existing_directory_binding_activation.sql",
       "0127_project_alpha_existing_directory_binding_activation_evidence_transition.sql",
       "0129_project_alpha_existing_directory_binding_activation_relationship.sql",
-      "0169_project_alpha_existing_directory_binding_generation_evidence.sql"]) {
+      "0169_project_alpha_existing_directory_binding_generation_evidence.sql",
+      "0183_project_alpha_binding_standalone_relationship_rows.sql"]) {
       const sql = readFileSync(new URL(`../migrations/${migration}`, import.meta.url), "utf8");
       await db.batch(splitD1MigrationStatements(sql).map(statement => db.prepare(statement)));
     }
@@ -192,8 +193,8 @@ describe("private existing Directory binding activation consumer", () => {
   }
 
   const call = (key = idempotencyKey, raw: unknown = { reviewItemId, idempotencyKey: key }, rawConnection = connection(),
-    actor: unknown = reviewer, send: typeof fetch = freshReads()) =>
-    activateProjectAlphaExistingDirectoryBinding({ OPS_DB: db, PROJECT_ALPHA_API_V2_CONNECTIONS: rawConnection }, raw, actor, send);
+    actor: unknown = reviewer, send: typeof fetch = freshReads(), database: D1Database = db) =>
+    activateProjectAlphaExistingDirectoryBinding({ OPS_DB: database, PROJECT_ALPHA_API_V2_CONNECTIONS: rawConnection }, raw, actor, send);
 
   const directActivation = (hashes: { acquisition?: string; profile?: string; binding?: string;
     expectedGeneration?: string; resultGeneration?: string } = {}) =>
@@ -303,6 +304,50 @@ describe("private existing Directory binding activation consumer", () => {
     ]);
     await expect(call(idempotencyKey,{ reviewItemId,idempotencyKey },connection(),reviewer,
       freshReads({ kind: "client",parentPublicId: null }))).resolves.toEqual({ status: "blocked",reason: "relationship" });
+    expect(await db.prepare("SELECT count(*) count FROM project_alpha_existing_directory_binding_activation_receipts")
+      .first("count")).toBe(0);
+  });
+
+  it("atomically blocks a valid mapped-parent change after the fresh PA standalone read", async () => {
+    await seed({ kind: "client" });
+    const parentRecord = "30000000-0000-4000-8000-000000000099", parentPublic = "b".repeat(32);
+    await db.batch([
+      db.prepare("INSERT INTO operations_directory_records VALUES(?,'organization',1)").bind(parentRecord),
+      db.prepare("INSERT INTO project_alpha_directory_outbox(command_id) VALUES('mapped-parent-command')"),
+      db.prepare(`INSERT INTO project_alpha_directory_mappings(source_id,resource_type,external_id,project_alpha_public_id,
+        source_instance_id,application_id,history_epoch_id,command_id,created_at)
+        VALUES(?,'organization',?,?,?,?,?,'mapped-parent-command','2026-09-22T00:00:00.000Z')`)
+        .bind(sourceId,parentRecord,parentPublic,sourceInstanceId,applicationId,historyEpochId),
+    ]);
+    let changedAfterFreshRead = false;
+    const racedDatabase = new Proxy(db, { get(target, property) {
+      if (property === "prepare") return (sql: string) => {
+        const statement = target.prepare(sql);
+        if (!sql.includes("INSERT INTO project_alpha_existing_directory_binding_activation_receipts")) return statement;
+        const wrap = (bound: D1PreparedStatement): D1PreparedStatement => new Proxy(bound, { get(inner, key) {
+          if (key === "bind") return (...values: unknown[]) => wrap(inner.bind(...values));
+          if (key === "run") return async () => {
+            if (!changedAfterFreshRead) {
+              changedAfterFreshRead = true;
+              await db.prepare(`UPDATE operations_directory_client_organizations SET organization_record_id=?
+                WHERE client_record_id=?`).bind(parentRecord,recordId).run();
+            }
+            return inner.run();
+          };
+          const value = Reflect.get(inner, key, inner) as unknown;
+          return typeof value === "function" ? value.bind(inner) : value;
+        } });
+        return wrap(statement);
+      };
+      const value = Reflect.get(target, property, target) as unknown;
+      return typeof value === "function" ? value.bind(target) : value;
+    } }) as D1Database;
+    await expect(call(idempotencyKey,{ reviewItemId,idempotencyKey },connection(),reviewer,
+      freshReads({ kind: "client",parentPublicId: null }),racedDatabase))
+      .resolves.toEqual({ status: "blocked",reason: "relationship" });
+    expect(changedAfterFreshRead).toBe(true);
+    expect(await db.prepare("SELECT organization_record_id FROM operations_directory_client_organizations WHERE client_record_id=?")
+      .bind(recordId).first("organization_record_id")).toBe(parentRecord);
     expect(await db.prepare("SELECT count(*) count FROM project_alpha_existing_directory_binding_activation_receipts")
       .first("count")).toBe(0);
   });

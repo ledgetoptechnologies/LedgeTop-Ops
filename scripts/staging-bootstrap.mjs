@@ -25,9 +25,9 @@ export const BOOTSTRAP_APPS = Object.freeze({
     binding: "OPS_DB",
     databaseName: "ltds-ops-staging",
     seed: "0002_seed_acl.sql",
-    migrationCount: 182,
-    migrationNamesSha256: "5ca01798b82652a4b6bb64a35be85a82673d940d6e762805c147408e3ca298d8",
-    migrationContentsSha256: "09ebfcc544263a90c96b8ed5548cdc73e38e524aec977aa37042bc280f9dae56",
+    migrationCount: 183,
+    migrationNamesSha256: "e85a63e7f7f018f8fb473f913660d5fbe13d798d3c19e281342b0cbca70d5ac7",
+    migrationContentsSha256: "134957a54a3eb9462a2e19b839d0aa2bb5fe5eb46096dc4677ab9d8324547cb8",
   }),
 });
 export const PRODUCTION_DATABASE_IDENTITIES = Object.freeze([

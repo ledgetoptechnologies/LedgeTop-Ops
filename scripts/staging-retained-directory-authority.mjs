@@ -29,9 +29,9 @@ export const REVIEWED_REFERENCE_BASELINE = Object.freeze({
   native_workforce_grant_issuer_ceilings: 0,
 });
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const CHAIN = Object.freeze({ count: 182, final: "0182_project_alpha_directory_relationship_recovery_guard.sql",
-  names: "5ca01798b82652a4b6bb64a35be85a82673d940d6e762805c147408e3ca298d8",
-  contents: "09ebfcc544263a90c96b8ed5548cdc73e38e524aec977aa37042bc280f9dae56" });
+const CHAIN = Object.freeze({ count: 183, final: "0183_project_alpha_binding_standalone_relationship_rows.sql",
+  names: "e85a63e7f7f018f8fb473f913660d5fbe13d798d3c19e281342b0cbca70d5ac7",
+  contents: "134957a54a3eb9462a2e19b839d0aa2bb5fe5eb46096dc4677ab9d8324547cb8" });
 const LEGACY_CLOSE_CHAIN = Object.freeze({ count: 181, final: "0181_project_alpha_directory_create_generation_recovery.sql",
   names: "42090dbacb9d23e4cc92371743c15e7ebc31c0e6d33f6bf7e48faf7f92cd96db",
   contents: "7b165451ebea6bdc680ef8b54600924064a3871b09a227abeb38d6218b7fed2e" });

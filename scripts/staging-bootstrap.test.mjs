@@ -64,7 +64,7 @@ test("builds full isolated chains, changes exactly 0002, and preserves staging c
   const base = fixture();
   const artifacts = buildArtifacts(base, owner);
   for (const [app, artifact] of Object.entries(artifacts)) {
-    assert.equal(artifact.files.length, app === "delivery" ? 147 : 182, app);
+    assert.equal(artifact.files.length, app === "delivery" ? 147 : 183, app);
     assert.deepEqual(artifact.manifest.transformedFiles, [artifact.entry.seed]);
     assert.equal(artifact.files.find(({ name }) => name.startsWith("0001_")).transformed, false);
     assert.equal(artifact.config.name.endsWith("-staging"), true);
@@ -115,7 +115,7 @@ test("rejects any missing or extra canonical migration filename", () => {
   assert.throws(() => buildArtifacts(missing, owner), /exact complete ordered 147-file chain/);
   const extra = fixture();
   fs.writeFileSync(path.join(extra, "apps", "operations", "migrations", "0123_unreviewed.sql"), "-- unreviewed\n");
-  assert.throws(() => buildArtifacts(extra, owner), /exact complete ordered 182-file chain/);
+  assert.throws(() => buildArtifacts(extra, owner), /exact complete ordered 183-file chain/);
 });
 
 test("rejects one-byte content drift in an ordinary canonical migration", () => {
@@ -187,22 +187,22 @@ test("checked-in canonical 0002 migrations remain the reviewed source shapes", (
   assert.match(sourceOperations, /staff-beau-koltz/);
 });
 
-test("builds the complete checked-in 147/182 chains with both Client 0199 filenames", () => {
+test("builds the complete checked-in 147/183 chains with both Client 0199 filenames", () => {
   const base = fixture();
   const artifacts = buildArtifacts(base, owner);
   assert.equal(artifacts.delivery.files.length, 147);
-  assert.equal(artifacts.operations.files.length, 182);
+  assert.equal(artifacts.operations.files.length, 183);
   assert.deepEqual(artifacts.delivery.files.filter(({ name }) => name.startsWith("0199_")).map(({ name }) => name), [
     "0199_incoming_upload_pickup_lifecycle.sql", "0199_native_viewer_grants.sql",
   ]);
   assert.equal(artifacts.delivery.files.at(-1).name, "0228_operations_portal_native_content_start_audit.sql");
-  assert.equal(artifacts.operations.files.at(-1).name, "0182_project_alpha_directory_relationship_recovery_guard.sql");
-  assert.equal(artifacts.operations.files.at(-1).sourceSha256, "1aeef8de3a6f3fb4f08a2b3e6c69d02c6fb0cb9d2c092b4cb507ed1759992b0f");
-  assert.equal(artifacts.operations.files.at(-1).generatedSha256, "1aeef8de3a6f3fb4f08a2b3e6c69d02c6fb0cb9d2c092b4cb507ed1759992b0f");
+  assert.equal(artifacts.operations.files.at(-1).name, "0183_project_alpha_binding_standalone_relationship_rows.sql");
+  assert.equal(artifacts.operations.files.at(-1).sourceSha256, "70b155e7ff2bda667832f14a5bea72523dd3e0fb285ce91f48c3e4a44e05ccac");
+  assert.equal(artifacts.operations.files.at(-1).generatedSha256, "70b155e7ff2bda667832f14a5bea72523dd3e0fb285ce91f48c3e4a44e05ccac");
   assert.deepEqual(artifacts.delivery.manifest.transformedFiles, ["0002_seed_initial_staff.sql"]);
   assert.deepEqual(artifacts.operations.manifest.transformedFiles, ["0002_seed_acl.sql"]);
   assert.equal(artifacts.delivery.manifest.sourceChainSha256, "8a6cb183feae5ec6490cb4710f02a3289a05421786b9593e6392803a1e890f5c");
-  assert.equal(artifacts.operations.manifest.sourceChainSha256, "09ebfcc544263a90c96b8ed5548cdc73e38e524aec977aa37042bc280f9dae56");
+  assert.equal(artifacts.operations.manifest.sourceChainSha256, "134957a54a3eb9462a2e19b839d0aa2bb5fe5eb46096dc4677ab9d8324547cb8");
 });
 
 const disposableTargets = (runId = "portal-home-20260928") => ({ runId, applications: {

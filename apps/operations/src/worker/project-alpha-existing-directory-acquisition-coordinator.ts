@@ -154,8 +154,10 @@ async function authority(db: D1Database, selected: ProjectAlphaExistingDirectory
        AND NOT EXISTS(SELECT 1 FROM native_directory_grants grant_row WHERE grant_row.staff_id=? AND grant_row.permission='directory.identity.link'
           AND grant_row.effect='deny' AND grant_row.active=1 AND ${APPLICABLE})) authority_current,
       (?='organization'
-        OR (? IS NULL AND NOT EXISTS(SELECT 1 FROM operations_directory_client_organizations relationship
-          WHERE relationship.client_record_id=record.record_id))
+        OR (? IS NULL AND (NOT EXISTS(SELECT 1 FROM operations_directory_client_organizations relationship
+          WHERE relationship.client_record_id=record.record_id)
+          OR 1=(SELECT COUNT(*) FROM operations_directory_client_organizations relationship
+            WHERE relationship.client_record_id=record.record_id AND relationship.organization_record_id IS NULL)))
         OR (? IS NOT NULL AND 1=(SELECT COUNT(*) FROM operations_directory_client_organizations relationship
           JOIN project_alpha_active_directory_mappings parent ON parent.${mappingRecordId}=relationship.organization_record_id
             JOIN operations_directory_records parent_record ON parent_record.record_id=parent.${mappingRecordId}
@@ -514,8 +516,10 @@ export async function acquireProjectAlphaExistingDirectoryBinding(
           AND NOT EXISTS(SELECT 1 FROM native_directory_grants grant_row WHERE grant_row.staff_id=review.reviewer_staff_id
             AND grant_row.permission='directory.identity.link' AND grant_row.effect='deny' AND grant_row.active=1 AND ${APPLICABLE_FINAL})
           AND (review.resource_type='organization'
-            OR (? IS NULL AND NOT EXISTS(SELECT 1 FROM operations_directory_client_organizations relationship
-              WHERE relationship.client_record_id=review.record_id))
+            OR (? IS NULL AND (NOT EXISTS(SELECT 1 FROM operations_directory_client_organizations relationship
+              WHERE relationship.client_record_id=review.record_id)
+              OR 1=(SELECT COUNT(*) FROM operations_directory_client_organizations relationship
+                WHERE relationship.client_record_id=review.record_id AND relationship.organization_record_id IS NULL)))
             OR (? IS NOT NULL AND 1=(SELECT COUNT(*) FROM operations_directory_client_organizations relationship
               JOIN project_alpha_active_directory_mappings parent ON parent.${mappingRecordId}=relationship.organization_record_id
                 JOIN operations_directory_records parent_record ON parent_record.record_id=parent.${mappingRecordId}

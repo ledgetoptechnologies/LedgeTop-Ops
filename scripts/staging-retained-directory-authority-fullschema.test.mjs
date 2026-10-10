@@ -145,8 +145,8 @@ async function migrateThrough(db, names) {
 }
 
 async function migrate(db) {
-  assert.equal(migrationNames.length, 182);
-  assert.equal(migrationNames.at(-1), "0182_project_alpha_directory_relationship_recovery_guard.sql");
+  assert.equal(migrationNames.length, 183);
+  assert.equal(migrationNames.at(-1), "0183_project_alpha_binding_standalone_relationship_rows.sql");
   await migrateThrough(db, migrationNames);
   assert.deepEqual((await db.prepare(`SELECT type,name FROM sqlite_master WHERE name IN (
     'project_alpha_directory_live_relationship_commands','operations_directory_intent_relationship_resolved',
@@ -162,7 +162,7 @@ async function migrate(db) {
     { type: "view", name: "project_alpha_directory_relationship_revision_evidence" },
     { type: "view", name: "project_alpha_directory_validated_materialized_acknowledgements" },
   ]);
-  assert.equal(await db.prepare("SELECT count(*) count FROM d1_migrations").first("count"), 182);
+  assert.equal(await db.prepare("SELECT count(*) count FROM d1_migrations").first("count"), 183);
   assert.deepEqual((await db.prepare("PRAGMA foreign_key_check").all()).results, []);
 }
 
@@ -338,7 +338,7 @@ async function createCanonicalPendingDirectoryWork(db) {
   return created.commandIds[0];
 }
 
-test("retained directory authority executes against the complete 182-migration D1 schema", async t => {
+test("retained directory authority executes against the complete 183-migration D1 schema", async t => {
   const mf = new Miniflare({ modules: true, script: "export default {fetch(){return new Response('ok')}}",
     d1Databases: { DB: `retained-${crypto.randomUUID()}` } });
   try {
@@ -420,7 +420,7 @@ test("retained directory authority executes against the complete 182-migration D
   } finally { await mf.dispose(); }
 });
 
-test("deterministic 181 close is an immutable anchor for a new paired 182-schema lifecycle", async () => {
+test("deterministic 181 close is an immutable anchor for a new paired 183-schema lifecycle", async () => {
   const db = nodeSqliteD1();
   try {
     assert.equal(legacyMigrationNames.at(-1), "0181_project_alpha_directory_create_generation_recovery.sql");
@@ -446,6 +446,10 @@ test("deterministic 181 close is an immutable anchor for a new paired 182-schema
     assert.deepEqual(await first(db, "SELECT count(*) count,max(id) last_id FROM d1_migrations"), { count: 182, last_id: 182 });
     assert.equal((await first(db, "SELECT name FROM d1_migrations WHERE id=182")).name,
       "0182_project_alpha_directory_relationship_recovery_guard.sql");
+    await applyMigration(db, migrationNames[182]);
+    assert.deepEqual(await first(db, "SELECT count(*) count,max(id) last_id FROM d1_migrations"), { count: 183, last_id: 183 });
+    assert.equal((await first(db, "SELECT name FROM d1_migrations WHERE id=183")).name,
+      "0183_project_alpha_binding_standalone_relationship_rows.sql");
 
     const unrelatedIds = await seedUnrelatedGrantHistory(db);
     const unrelatedBefore = await all(db, "SELECT * FROM native_directory_grants WHERE id IN (?,?) ORDER BY id", ...unrelatedIds);
@@ -486,7 +490,7 @@ test("deterministic 181 close is an immutable anchor for a new paired 182-schema
   } finally { db.close(); }
 });
 
-test("a canonical extra pending Directory command rejects reactivation in an isolated 182-schema fixture", async () => {
+test("a canonical extra pending Directory command rejects reactivation in an isolated 183-schema fixture", async () => {
   const mf = new Miniflare({ modules: true, script: "export default {fetch(){return new Response('ok')}}",
     d1Databases: { DB: `retained-unsettled-${crypto.randomUUID()}` } });
   try {
@@ -500,7 +504,7 @@ test("a canonical extra pending Directory command rejects reactivation in an iso
   } finally { await mf.dispose(); }
 }, 120_000);
 
-test("node:sqlite executes canonical 182 authority batches atomically when workerd is unavailable", async () => {
+test("node:sqlite executes canonical 183 authority batches atomically when workerd is unavailable", async () => {
   const db = nodeSqliteD1();
   try {
     await migrate(db);

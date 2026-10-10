@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import {createRequire} from 'node:module';
@@ -97,19 +98,40 @@ async function seedDirectoryOutbox(db,values,state){
   return commandId;
 }
 
-test('guarded native-only packet against the complete current 180-migration schema',async t=>{
+test('guarded native-only packet against the complete current 183-migration schema',async t=>{
   const mf=new Miniflare({modules:true,script:"export default {fetch(){return new Response('ok')}}",
     d1Databases:{DB:`${id(900)}-${crypto.randomUUID()}`},d1Persist:"./.tmp-checks/staging-native-only-authority"});
   try {
     const db=await mf.getD1Database('DB');
     const files=fs.readdirSync(path.join(root,'apps/operations/migrations')).filter(name=>/^\d{4}_.+\.sql$/.test(name)).sort();
-    assert.equal(files.length,180);
+    assert.equal(files.length,183);
     await db.prepare('CREATE TABLE d1_migrations(id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT UNIQUE NOT NULL,applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)').run();
     for(const name of files){
       const sql=fs.readFileSync(path.join(root,'apps/operations/migrations',name),'utf8').replace(/\r\n/g,'\n');
       const parts=unstable_splitSqlQuery(sql).map(part=>part.trim()).filter(part=>part&&!/^PRAGMA\s+foreign_keys\s*=\s*ON\s*;?$/i.test(part));
       await db.batch([...parts.map(part=>db.prepare(part)),db.prepare('INSERT INTO d1_migrations(name) VALUES(?)').bind(name)]);
     }
+    await t.test('native-only compiler rejects a missing, extra, renamed, or modified 0183 migration', async t => {
+      const values=await fixture(db);
+      const source=path.join(root,'apps','operations','migrations');
+      const migrationName='0183_project_alpha_binding_standalone_relationship_rows.sql';
+      const cases=[
+        ['missing',directory=>fs.rmSync(path.join(directory,migrationName))],
+        ['extra',directory=>fs.writeFileSync(path.join(directory,'0184_unreviewed.sql'),'SELECT 1;\n')],
+        ['renamed',directory=>fs.renameSync(path.join(directory,migrationName),path.join(directory,'0183_wrong_name.sql'))],
+        ['modified',directory=>fs.appendFileSync(path.join(directory,migrationName),'-- drift\n')],
+      ];
+      for(const [label,mutate] of cases) await t.test(label,()=>{
+        const tempRoot=fs.mkdtempSync(path.join(os.tmpdir(),'ltds-native-only-chain-'));
+        const directory=path.join(tempRoot,'apps','operations','migrations');
+        try{
+          fs.mkdirSync(directory,{recursive:true});
+          fs.cpSync(source,directory,{recursive:true});
+          mutate(directory);
+          assert.throws(()=>compileNativeOnlyAuthorityPacket(values,{root:tempRoot}),/exact reviewed migration names and contents required/);
+        }finally{fs.rmSync(tempRoot,{recursive:true,force:true});}
+      });
+    });
     await t.test('provision, exact replay and paired revoke preserve prior owner access and histories',async()=>{
       const values=await fixture(db),before=await snapshot(db,values),packet=compileNativeOnlyAuthorityPacket(values);
       assert.deepEqual(await apply(db,packet),{replayed:false});

@@ -11,13 +11,34 @@ This is a read-only source-review conclusion. It does not authorize a staging or
 - Current fast route/coordinator/UI/import-boundary regression run: 49/49 passed. The full-schema coordinator suite additionally passed 2/2: real D1 dispatch/settlement/activation composition with synthetic PA transport, scope-drift denial, exact activated replay without transport, and persisted acknowledgement followed by a failed canonical GET and successful retry without another POST. It checks exact project identity/name and unchanged row snapshots for eight portal/public-control tables. This proves local composition, not live PA acceptance.
 - The UI now keeps recovery references visible after uncertainty and successful finalization, without storing credentials or adding authority. Headless desktop/mobile regression tests passed 2/2 after that change; build and Operations typecheck passed.
 - A separate exact-delta finalization staging profile preserves the generic five-gate API-v2 parent and enables only finalization above it. Both tracked staging and production baselines require the new finalization gate to remain string `false`. The initial Viewer-parent version passed 31 local profile tests but fresh staging comparison showed that parent would unnecessarily change Viewer settings. The corrected PA-only profile plus unchanged API-v2/Viewer regressions passed 20/20 and has no Viewer secret-inventory dependency. No existing acceptance profile was widened. The stale ignored candidate was preserved privately before controlled regeneration/check; it must not be deployed.
-- No production change, portal grant, client activation or public-link change is part of these local fixes. The latest observed staging deployment predates them and keeps the relevant write/adoption gates off.
+- No production change, portal grant, client activation or public-link change is part of these fixes. The later canonical-ID candidate `4f277bd696e1fc03ed9e3817c92f21bd3b51208c` includes them and is active in Ops staging as version `8bf8b9e0-76d7-430b-9952-649e56d90b45`. Exact-revision CI run `38006336619` passed all ten jobs. Independent provider readback at `2026-10-10T00:18:52.165Z` verified this version at 100%, the reviewed acceptance gates, and complete binding/runtime configuration equality. Live authenticated PA-first adoption remains unproved; deployment and CI are not remote acknowledgment.
+
+## Current normal-UI acceptance path
+
+Use `/administration#project-alpha-connections` with a current authenticated native operator and the exact scoped synthetic authority. Do not substitute the legacy full-sync button or internal delivery-intent ingress routes for this flow.
+
+- Discover: `GET /api/admin/project-alpha/private/projects/adoption/candidates` for the configured staging source. Require an observed candidate matching the independently verified synthetic PA project, not a name-based match.
+- Review: `POST /api/admin/project-alpha/private/projects/adoption/review` with a fresh UUID idempotency key and the exact source/external/public project coordinates. The UI separately confirms the unused Ops project ID. Require `reviewed` and retain `reviewItemId`.
+- Reserve: `POST /api/admin/project-alpha/private/projects/adoption/reserve` with the saved review ID and a frozen reservation idempotency key. Require `reserved` and retain `reservationId`.
+- Plan binding: `POST /api/admin/project-alpha/private/projects/adoption/bind` with that reservation ID as both body coordinate and idempotency key. Require `planned` and retain `commandId`. This is a queued command, not acknowledged sync.
+- Finalize: `POST /api/admin/project-alpha/private/projects/adoption/finalize` with the saved reservation/command IDs and command ID as idempotency key. Require `stage=activate` and `outcome.status=activated`, then independently verify normal bound inventory/canonical readback, exact one-to-one identity and shared name.
+- Replays must reuse the exact saved coordinates. Conflicting bodies must fail without creating a second mapping or command. An uncertain write requires durable receipt reconciliation, not a replacement command.
+- Independently verify unchanged portal/public-control rows and close the exact temporary authority. This adoption flow does not enroll a recipient or publish client data.
 
 ## Decision
 
 Do **not** widen normal Project inventory to include unbound Project Alpha projects. The normal inventory contract intentionally enumerates application-bound projects. PA-first creation is served by the separate, generic, default-off adoption-candidate API and an explicit owner-reviewed adoption flow.
 
 The synthetic staging project (PA local ID `8`, public ID `86099fc2948b9c9d2ed8b53cb587b3f0`, organization ID `10`) is therefore expected to be absent from normal inventory before binding. No implementation should special-case those identifiers.
+
+### Fresh application-mediated staging fixture readback
+
+- Read-only SSH used `migration_connection()` inside the pinned staging web container, using its normal configured database connection without extracting or printing credentials.
+- Exactly one project matched local ID `8` and the expected public ID: revision `1`, organization `10`, status `not_started`. The organization exists and is neither archived nor deleted.
+- Matching `api_v2_project_external_bindings` and `api_v2_project_command_receipts` counts are both zero. The project remains an unbound adoption fixture, not an acknowledged Ops mapping.
+- `public_project_enabled=0`. The project has zero `portal_project_entitlements` rows, zero matching `portal_projection_resource_state` rows, and the staging projection outbox count was zero at observation.
+- `portal_publish_enabled=1` must not be interpreted as a publication receipt or access grant. Read-only candidate-code tracing found no runtime use of this field in the projection path. Projection/delivery instead require their integration/workspace authorization gates and active entitlement/principal checks. Keep the actual entitlement/projection counts distinct from this field; do not silently flip it or claim that checking it proves recipient authorization.
+- This is fixture/precondition evidence only. Live discovery, normal-UI adoption, remote acknowledgment, replay/conflict and recipient/file-access acceptance remain required.
 
 ## Already supported
 
