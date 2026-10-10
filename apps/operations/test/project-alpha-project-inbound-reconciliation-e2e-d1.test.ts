@@ -292,7 +292,7 @@ beforeAll(async () => {
   db = await runtime.getD1Database("OPS_DB") as D1Database;
   const directory = new URL("../migrations/", import.meta.url);
   const files = readdirSync(directory).filter(file => /^\d{4}_.*\.sql$/.test(file)).sort();
-  expect(files.at(-1)).toBe("0183_project_alpha_binding_standalone_relationship_rows.sql");
+  expect(files.at(-1)).toBe("0184_project_alpha_directory_relationship_generation_recovery.sql");
   for (const file of files) {
     try {
       await migrate(file);

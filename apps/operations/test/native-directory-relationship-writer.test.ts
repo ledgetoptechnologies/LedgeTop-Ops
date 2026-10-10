@@ -293,10 +293,14 @@ describe("native Directory relationship writer and outbox",()=>{
     const assigned=await writeNativeDirectoryRelationship(db,writeInput(client.recordId,1,null,{recordId:first.recordId,expectedRecordVersion:1}));
     if(assigned.status!=="written")throw new Error(JSON.stringify(assigned));const terminalId=assigned.reservations[0]!.commandId;
     await expect(dispatchProjectAlphaDirectoryRelationshipCommand(env(),sourceId,terminalId,transport("assign",clientPublic,firstPublic,"2","4",409))).resolves.toMatchObject({status:"conflict"});
+    const predecessorBefore=await db.prepare("SELECT * FROM project_alpha_directory_relationship_outbox WHERE command_id=?").bind(terminalId).first();
+    const outboxCountBefore=await db.prepare("SELECT COUNT(*) count FROM project_alpha_directory_relationship_outbox").first("count");
     const reconciliation=writeInput(client.recordId,2,{recordId:first.recordId,expectedRecordVersion:1},{recordId:second.recordId,expectedRecordVersion:1});
     await expect(writeNativeDirectoryRelationship(db,reconciliation)).resolves.toEqual({status:"blocked",reason:"terminal_predecessor"});
     await expect(writeNativeDirectoryRelationship(db,{...reconciliation,mutationId:uuid(),supersedeTerminalCommandIds:[uuid()]}))
       .resolves.toEqual({status:"blocked",reason:"terminal_predecessor"});
+    expect(await db.prepare("SELECT * FROM project_alpha_directory_relationship_outbox WHERE command_id=?").bind(terminalId).first()).toEqual(predecessorBefore);
+    expect(await db.prepare("SELECT COUNT(*) count FROM project_alpha_directory_relationship_outbox").first("count")).toBe(outboxCountBefore);
     const recovered=await writeNativeDirectoryRelationship(db,{...reconciliation,mutationId:uuid(),supersedeTerminalCommandIds:[terminalId]});
     expect(recovered).toMatchObject({status:"written",reservations:[{action:"move"}]});if(recovered.status!=="written")throw new Error(JSON.stringify(recovered));
     expect(await db.prepare("SELECT supersedes_terminal_command_id FROM project_alpha_directory_relationship_outbox WHERE command_id=?")

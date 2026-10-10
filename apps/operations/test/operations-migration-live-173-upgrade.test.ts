@@ -29,6 +29,7 @@ it("upgrades the exact cloned live-173 lineage through the reviewed local suffix
     "0181_project_alpha_directory_create_generation_recovery.sql",
     "0182_project_alpha_directory_relationship_recovery_guard.sql",
     "0183_project_alpha_binding_standalone_relationship_rows.sql",
+    "0184_project_alpha_directory_relationship_generation_recovery.sql",
   ]);
 
   runtime = new Miniflare({ modules: true, compatibilityDate: "2026-08-06",

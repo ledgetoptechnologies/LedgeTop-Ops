@@ -378,8 +378,10 @@ async function planNativeDirectoryRelationshipWriteInternal(db: DirectoryWriteD1
     if (!client || (write.previousOrganization && !previous) || (write.organization && !organization) || generation === null)
       return { status: "blocked", reason: "mapping_evidence" };
     const predecessor = await db.prepare(`SELECT command.command_id commandId,
-      CASE WHEN command.state='terminal'${recoveryEnabled?` AND EXISTS(SELECT 1 FROM project_alpha_directory_validated_recovery_relationship_acknowledgements recovery
-        WHERE recovery.predecessor_command_id=command.command_id AND recovery.identity_valid=1)`:""} THEN 'acknowledged' ELSE command.state END state
+      ${recoveryEnabled ? `CASE WHEN command.state='terminal' AND EXISTS(
+        SELECT 1 FROM project_alpha_directory_validated_recovery_relationship_acknowledgements recovery
+        WHERE recovery.predecessor_command_id=command.command_id AND recovery.identity_valid=1)
+        THEN 'acknowledged' ELSE command.state END` : "command.state"} state
       FROM project_alpha_directory_relationship_outbox command
       WHERE client_record_id=? AND source_id=? AND source_instance_id=? AND application_id=? AND history_epoch_id=?
         AND relationship_version<? ORDER BY relationship_version DESC,command_id DESC LIMIT 1`)

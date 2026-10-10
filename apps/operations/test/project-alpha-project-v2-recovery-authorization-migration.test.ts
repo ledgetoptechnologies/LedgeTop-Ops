@@ -228,10 +228,11 @@ function authorizePostAck(
 
 describe("Project v2 recovery authorization migration", () => {
   it("preserves recovery migration order and the full current empty migration chain", () => {
-    expect(migrationFiles.at(-4)).toBe(recoveryMigration);
-    expect(migrationFiles.at(-3)).toBe("0181_project_alpha_directory_create_generation_recovery.sql");
-    expect(migrationFiles.at(-2)).toBe("0182_project_alpha_directory_relationship_recovery_guard.sql");
-    expect(migrationFiles.at(-1)).toBe("0183_project_alpha_binding_standalone_relationship_rows.sql");
+    expect(migrationFiles.at(-5)).toBe(recoveryMigration);
+    expect(migrationFiles.at(-4)).toBe("0181_project_alpha_directory_create_generation_recovery.sql");
+    expect(migrationFiles.at(-3)).toBe("0182_project_alpha_directory_relationship_recovery_guard.sql");
+    expect(migrationFiles.at(-2)).toBe("0183_project_alpha_binding_standalone_relationship_rows.sql");
+    expect(migrationFiles.at(-1)).toBe("0184_project_alpha_directory_relationship_generation_recovery.sql");
     const db = new DatabaseSync(":memory:");
     db.exec("PRAGMA foreign_keys=ON");
     for (const name of migrationFiles) migrate(db, name);

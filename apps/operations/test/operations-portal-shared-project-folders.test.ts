@@ -91,8 +91,8 @@ beforeAll(async () => {
     d1Databases: { OPS_DB: crypto.randomUUID() } });
   db = await runtime.getD1Database("OPS_DB");
   const migrationNames = await applyReviewedOperationsMigrationChain(db);
-  expect(migrationNames).toHaveLength(183);
-  expect(migrationNames.at(-1)).toBe("0183_project_alpha_binding_standalone_relationship_rows.sql");
+  expect(migrationNames).toHaveLength(184);
+  expect(migrationNames.at(-1)).toBe("0184_project_alpha_directory_relationship_generation_recovery.sql");
   const migrationLedger = await db.prepare("SELECT name FROM d1_migrations ORDER BY name").all<{ name: string }>();
   expect(migrationLedger.results.map(row => row.name)).toEqual(migrationNames);
   expect((await db.prepare("PRAGMA foreign_key_check").all()).results).toEqual([]);
