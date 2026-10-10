@@ -74,7 +74,10 @@ async function fullSchema(t){
   const [{createServer},{Miniflare}]=await Promise.all([import(viteUrl),import(miniflareUrl)]);
   const server=await createServer({root:path.join(root,"apps/operations"),configFile:false,server:{middlewareMode:true},appType:"custom",logLevel:"silent"});
   const runtime=new Miniflare({modules:true,compatibilityDate:"2026-08-06",script:"export default {fetch(){return new Response('ok')}}",d1Databases:["OPS_DB"]});
-  t.after(async()=>{await runtime.dispose();await server.watcher.close()});
+  t.after(async()=>{
+    try { await runtime.dispose(); }
+    finally { await server.close(); }
+  });
   const db=await runtime.getD1Database("OPS_DB");
   const [{splitD1MigrationStatements},writer,dispatcher,relationshipWriter,relationshipDispatcher]=await Promise.all([
     server.ssrLoadModule("/../client/test/helpers/d1-migrations.ts"),
@@ -395,6 +398,6 @@ async function fullSchema(t){
   const drift=clone(settlement);drift.settled.outbox[1].destination_base_url="https://wrong.example.test";
   assert.throws(()=>validateAcknowledgedScalarUpdate(drift),/outbox identity/);
 }
-test("full 0001-0184 schema settles acquired linked-client and organization updates before exact grant cleanup",async t=>{
+test("full 0001-0184 schema settles acquired linked-client and organization updates before exact grant cleanup",{timeout:240_000},async t=>{
   try{return await fullSchema(t)}catch(error){process.stderr.write(`${error?.stack??error}\n`);throw error}
-},240_000);
+});

@@ -11,6 +11,8 @@ This is the remaining staging acceptance sequence, not a release approval or a c
 
 ### Additional local evidence (not live acceptance)
 
+The bullets below are chronological investigation notes, not simultaneous current blockers. At candidate `9e58c868`, the acquired-client dispatcher/scalar tests and all three Project full-schema tests pass locally. Live PA acknowledgement remains unproved. The remaining authorization tooling gaps are a separate scalar-edit provision/cleanup lifecycle and a Project window covering the organization-owned candidate's actual business area; see the candidate checkpoint for release evidence.
+
 - The closed recovery-lineage validator passed against actual local D1 trigger state after intact migrations 0001–0184 and the reviewed provision/revoke batches: one full-schema test passed, with no skips. This proves the cleanup evidence format, not a live recovery acknowledgement.
 - The focused scalar-settlement, Project-authority/apply and release-configuration suite passed 47/47 tests. After correcting oversized recursive ledger evidence, the real-schema positive Project provision/readback/sealed revoke/replay test passed. The full suite is not green: its separately authorized pending-command fixture still fails native authority before reaching the intended check. That negative setup must be corrected, not counted as a successful rejection test. The compiler validates complete private lineage artifacts, stores exact canonical SHA-256 commitments plus closure facts in the bounded ledger, and rejects oversized UTF-8 evidence without truncation. Paired cleanup uses the actual persisted receipt timestamp, not an assumed execution time.
 - The revised organization scalar fixture passed its local full-schema run (one test, no skips) using the actual Directory writer and actual dispatcher with mocked PA HTTP transport. It does not prove the retained client's acquired-ID/linked-parent path, live PA HTTP behavior or complete independently recaptured cleanup protection. Those remain required before relying on this fixture for live client acceptance.
@@ -30,7 +32,7 @@ This is the remaining staging acceptance sequence, not a release approval or a c
 ## 1. Recover the retained synthetic relationship
 
 - Freeze the reviewed source revision and bundle. Preserve all live Worker bindings, runtime resources, schedules and existing flags; add recovery explicitly false. Never deploy the older static config over live variable drift.
-- Verify the private pre-0184 backup, exact migration suffix and staging database identity before applying only 0184.
+- Verify the private pre-0184 backup, staging database identity and already-applied 0184 migration. Do not rerun the applied migration.
 - Use the reviewed v184 authority window only for its exact synthetic client, organization and terminal predecessor. Save private evidence before mutation.
 - Enable the bounded staging recovery path, acquire fresh structured conflict proof and canonical reads, explicitly review the sealed comparison, authorize once and dispatch the immutable successor.
 - Require its exact acknowledgement. Compare the original terminal command and canonical relationship/history byte-for-byte; recovery must not change them.
@@ -40,9 +42,11 @@ This is the remaining staging acceptance sequence, not a release approval or a c
 
 - Through the signed-in Ops `/clients` workspace, use the ordinary native Directory profile editor for a scalar-only synthetic customer change. Its supported route is `GET/PATCH /api/client-hub/directory/{organizations|standalone-clients}/:recordId`.
 - This requires a fresh, separately reviewed scoped authority window for the current record version. Do not remove/re-add the organization to manufacture a new relationship command.
+- The existing Administration Team controls change legacy staff overrides, not native Directory grants. No ordinary runtime command currently administers an existing member's native Directory grants. Do not treat those controls or protected-owner status as satisfying the native writer's required resource grants.
 - Require the normal outbox acknowledgement and matching current PA/Operations readback. Revoke the temporary authority through its paired cleanup.
 - Prove PA-first project creation using `/administration#project-alpha-connections`: candidates → review → reserve → bind → finalize. The endpoints are under `/api/admin/project-alpha/private/projects/adoption/`.
 - Validate the exact PA candidate and revisions, the required PA read/bind scopes/flags, Ops adoption gates and a fresh deny-aware scoped `project.shared.sync` authority window. Finalization must report `stage=activate` with `outcome.status=activated`.
+- The retained organization-owned PA candidate requires business area `drone-services-staging`; the existing client-area Project packet targets `staging-native-only-portal-acceptance-20261008-window-1` and cannot authorize it. Recapture every linked customer scope immediately before review; do not broaden to global authority or infer scope from a project name.
 - Read back the one-to-one mapping and normal bound project inventory. Do not infer a mapping from matching names or treat an unbound PA project as synchronized.
 
 ## 3. Prove recipient login and actual selected-file access
