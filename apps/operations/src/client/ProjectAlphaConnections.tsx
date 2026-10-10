@@ -601,9 +601,10 @@ function PortalPurpose({ connector, status, primaryActive, disabled, onAction }:
   </div>;
 }
 
-function ProjectAdoptionPanel({ connectors, disabled }: { connectors: readonly Connector[]; disabled: boolean }) {
-  const sources = connectors.filter(row => row.state === "active");
-  const [sourceId, setSourceId] = useState(STAGING), [projects, setProjects] = useState<readonly ProjectAdoptionCandidate[]>([]);
+function ProjectAdoptionPanel({ disabled }: { disabled: boolean }) {
+  const [sources, setSources] = useState<readonly string[]>([]), [sourcesLoading, setSourcesLoading] = useState(true);
+  const [sourceError, setSourceError] = useState("");
+  const [sourceId, setSourceId] = useState(""), [projects, setProjects] = useState<readonly ProjectAdoptionCandidate[]>([]);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [selected, setSelected] = useState(""), [externalId, setExternalId] = useState("");
   const [reviewKey, setReviewKey] = useState(""), [reviewItemId, setReviewItemId] = useState("");
@@ -616,10 +617,26 @@ function ProjectAdoptionPanel({ connectors, disabled }: { connectors: readonly C
   const [busy, setBusy] = useState(false), [message, setMessage] = useState(""), [error, setError] = useState("");
   const frozen = Boolean(reviewRequest || reviewKey || reviewItemId || reserveKey || reservationId || commandId);
   useEffect(() => {
-    if (!frozen && sources.length && !sources.some(source => source.sourceId === sourceId)) setSourceId(sources[0]!.sourceId);
-  }, [frozen, sources, sourceId]);
+    let live = true;
+    setSourcesLoading(true); setSources([]); setSourceId(""); setSourceError("");
+    api<{ sources?: unknown }>(API_V2_SOURCES_ENDPOINT).then(result => {
+      if (!live) return;
+      if (!Array.isArray(result.sources) || result.sources.some(source => typeof source !== "string"
+        || !/^project-alpha:[a-z0-9][a-z0-9_-]{0,63}$/.test(source))) throw new Error("invalid source list");
+      const listed = [...new Set(result.sources)].sort();
+      setSources(listed); setSourceId(listed[0] ?? ""); setSourceError("");
+    }).catch(caught => {
+      if (!live) return;
+      setSources([]); setSourceId("");
+      setSourceError(caught instanceof ApiError && caught.status === 404
+        ? "Project adoption source discovery is disabled."
+        : "Project adoption source configuration could not be verified.");
+    }).finally(() => { if (live) setSourcesLoading(false); });
+    return () => { live = false; };
+  }, []);
+  const sourceReady = sources.includes(sourceId);
   const discover = async (cursor?: string) => {
-    if (busy || disabled || frozen) return;
+    if (busy || disabled || frozen || sourcesLoading || sourceError || !sourceReady) return;
     const requestedSource = sourceId;
     setBusy(true); setError(""); setMessage("");
     if (!cursor) { setProjects([]); setSelected(""); setNextCursor(null); }
@@ -638,7 +655,7 @@ function ProjectAdoptionPanel({ connectors, disabled }: { connectors: readonly C
   const review = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const exact = externalId.trim();
-    if (!PA_PUBLIC_ID.test(selected) || !exact || exact !== externalId || exact.length > 191 || /\p{C}/u.test(exact)) {
+    if (!sourceReady || !PA_PUBLIC_ID.test(selected) || !exact || exact !== externalId || exact.length > 191 || /\p{C}/u.test(exact)) {
       setError("Select a candidate and enter a new, unused Operations Project ID."); return;
     }
     if (!reviewKey && !window.confirm("Durably reserve this Operations Project ID for the selected PA source and create short-lived review evidence? The destination reservation is retained even if you reset this flow. This does not bind, grant access, or publish a portal.")) return;
@@ -735,12 +752,16 @@ function ProjectAdoptionPanel({ connectors, disabled }: { connectors: readonly C
     <h3>Review an unbound Project</h3>
     <p>Discovery is read-only and authority-filtered. Review durably reserves the Operations Project ID for the selected PA source, but does not bind the Project, grant client access, or publish it to a portal.</p>
     <label htmlFor="project-adoption-source">Project Alpha source</label>
-    <select id="project-adoption-source" value={sourceId} disabled={busy || disabled || frozen}
+    <select id="project-adoption-source" value={sourceId}
+      disabled={busy || disabled || frozen || sourcesLoading || Boolean(sourceError) || !sourceReady}
       onChange={event => { setSourceId(event.target.value); setProjects([]); setSelected(""); setNextCursor(null); setMessage(""); setError(""); }}>
-      {sources.map(source => <option key={source.sourceId} value={source.sourceId}>{source.displayName}</option>)}
+      {sources.map(source => <option key={source} value={source}>{source}</option>)}
     </select>
-    <button type="button" className="button-ghost button-small" disabled={busy || disabled || frozen || !sources.length}
+    <button type="button" className="button-ghost button-small" disabled={busy || disabled || frozen || sourcesLoading || Boolean(sourceError) || !sourceReady}
       onClick={() => void discover()}>{busy ? "Checking…" : "Find authorized unbound Projects"}</button>
+    {sourcesLoading && <p role="status">Loading enabled API-v2 Project sources…</p>}
+    {!sourcesLoading && !sourceError && sources.length === 0 && <p role="status">No enabled API-v2 sources are available for Project adoption.</p>}
+    {sourceError && <p role="alert" className="notice">{sourceError}</p>}
     {nextCursor && <button type="button" className="button-ghost button-small" disabled={busy || disabled || frozen}
       onClick={() => void discover(nextCursor)}>{busy ? "Loading…" : "Load next 50 Projects"}</button>}
     {projects.length > 0 && <form onSubmit={review} aria-busy={busy}>
@@ -852,7 +873,7 @@ export function ProjectAlphaConnections() {
       </section>;
     })}
     <ApiV2OperatorPanel disabled={loading || Boolean(syncing)} />
-    {data && <ProjectAdoptionPanel connectors={data.connectors} disabled={loading || Boolean(syncing)} />}
+    {data && <ProjectAdoptionPanel disabled={loading || Boolean(syncing)} />}
     {data?.portal?.recovery && <div className="notice" role="status"><p>A prior portal coordination operation is unfinished. Recovery cancels that uncertain update and pauses affected client portals; it never registers a source or retries activation.</p><button type="button" disabled={loading || Boolean(syncing)} onClick={() => void recoverPortalUpdate()}>Recover unfinished portal update</button></div>}
   </div></Card>;
 }
