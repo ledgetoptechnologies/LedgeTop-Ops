@@ -3,7 +3,8 @@ import fs from "node:fs";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import { compileRelationshipRecoveryAuthorityV184, RELATIONSHIP_RECOVERY_AUTHORITY_TARGET as target } from "./staging-relationship-generation-recovery-authority-v184.mjs";
+import { compileRelationshipRecoveryAuthorityV184, RELATIONSHIP_RECOVERY_AUTHORITY_TARGET as target,
+  RELATIONSHIP_RECOVERY_AUTHORITY_TARGET_V2 as targetV2 } from "./staging-relationship-generation-recovery-authority-v184.mjs";
 import { STAGING_TARGET } from "./staging-onboarding-native-only-authority-packet.mjs";
 
 const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),"..");
@@ -33,12 +34,67 @@ function fixture(){
     grants,history,approval:{approvalId:uuid(90),commandId:uuid(91),grantIds:[uuid(2),uuid(3),uuid(4),uuid(5),uuid(6),uuid(7)],issuedAt:stamp,expiresAt:"2026-10-10T13:00:00.000Z",executedAt:stamp}};
 }
 
+function fixtureV2(){
+  const value=fixture();value.schemaVersion=2;value.target=targetV2;
+  value.resourceScopes=[
+    {record_id:targetV2.clientRecordId,scope_kind:"business_area",business_area_id:targetV2.clientBusinessAreaId,division_id:null,active:1},
+    {record_id:targetV2.organizationRecordId,scope_kind:"business_area",business_area_id:targetV2.organizationBusinessAreaId,division_id:null,active:1},
+  ];
+  return value;
+}
+
+function revokeFixture(base,provisionArtifact){
+  const value=base();
+  value.phase="revoke";
+  value.provisionArtifact=provisionArtifact;
+  const generation=value.generation.generation;
+  for(const [index,id] of value.approval.grantIds.entries()){
+    const recordId=index<3?value.target.clientRecordId:value.target.organizationRecordId;
+    const permission=permissions[index%3];
+    let row=value.grants.find(grant=>grant.id===id);
+    if(!row){row=grant(Number(id.slice(-12)),permission,recordId,1);value.grants.push(row)}else row.active=1;
+    const prior=value.history.filter(history=>history.grant_id===id).length;
+    value.history.push({grant_id:id,grant_version:prior+1,staff_id:row.staff_id,permission:row.permission,effect:row.effect,scope_kind:row.scope_kind,business_area_id:row.business_area_id,division_id:row.division_id,resource_id:row.resource_id,active:1,grant_generation:generation+index+1,recorded_at:stamp});
+  }
+  value.generation={...value.generation,generation:generation+6};
+  value.approval={...value.approval,approvalId:uuid(92),commandId:uuid(93)};
+  return value;
+}
+
 test("compiles the exact six-resource transition and eight-entry selection",()=>{
   const artifact=compileRelationshipRecoveryAuthorityV184(fixture());
   assert.equal(artifact.selection.length,8);
   assert.equal(new Set(artifact.selection.map(row=>row.grantId)).size,7);
   assert.equal(JSON.parse(artifact.receipt.result_json).generation,12);
   assert.equal(artifact.statements.filter(row=>row.sql.includes("changes()=1")).length,6);
+});
+
+test("preserves historical v1 compilation while v2 pins the live mixed record scopes",()=>{
+  const historical=compileRelationshipRecoveryAuthorityV184(fixture());
+  const repeated=compileRelationshipRecoveryAuthorityV184(fixture());
+  assert.deepEqual(repeated,historical);
+  assert.equal(historical.receipt.canonical_plan_sha256,"6bedf7710d8bace3a740691a68915585df059c3eae45e390119738cf1574d853");
+  assert.equal(historical.schemaVersion,1);
+  const current=compileRelationshipRecoveryAuthorityV184(fixtureV2());
+  assert.equal(current.schemaVersion,2);
+  assert.deepEqual(current.input.resourceScopes,fixtureV2().resourceScopes);
+  assert.deepEqual(current.selection,historical.selection);
+  assert.deepEqual(JSON.parse(current.receipt.result_json).grantIds,JSON.parse(historical.receipt.result_json).grantIds);
+});
+
+test("v2 rejects either record being pinned to the other record's business area",()=>{
+  for(const index of [0,1]){
+    const value=fixtureV2();
+    value.resourceScopes[index].business_area_id=index===0?targetV2.organizationBusinessAreaId:targetV2.clientBusinessAreaId;
+    assert.throws(()=>compileRelationshipRecoveryAuthorityV184(value),/exact active resource scopes/);
+  }
+});
+
+test("revoke remains available for v1 artifacts but rejects cross-version pairing",()=>{
+  const historical=compileRelationshipRecoveryAuthorityV184(fixture());
+  assert.equal(compileRelationshipRecoveryAuthorityV184(revokeFixture(fixture,historical)).schemaVersion,1);
+  const crossVersion=revokeFixture(fixture,compileRelationshipRecoveryAuthorityV184(fixtureV2()));
+  assert.throws(()=>compileRelationshipRecoveryAuthorityV184(crossVersion),/exact paired provision artifact/);
 });
 
 test("compiles the actual four-fresh plus two-inactive resource shape",()=>{

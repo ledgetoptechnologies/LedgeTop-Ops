@@ -5,7 +5,7 @@ import path from "node:path";
 import test from "node:test";
 import {createRequire} from "node:module";
 import {fileURLToPath} from "node:url";
-import {RELATIONSHIP_RECOVERY_AUTHORITY_TARGET as target,compileRelationshipRecoveryAuthorityV184,applyRelationshipRecoveryAuthorityV184,reconcileRelationshipRecoveryAuthorityV184} from "./staging-relationship-generation-recovery-authority-v184.mjs";
+import {RELATIONSHIP_RECOVERY_AUTHORITY_TARGET_V2 as target,compileRelationshipRecoveryAuthorityV184,applyRelationshipRecoveryAuthorityV184,reconcileRelationshipRecoveryAuthorityV184} from "./staging-relationship-generation-recovery-authority-v184.mjs";
 import {STAGING_TARGET} from "./staging-onboarding-native-only-authority-packet.mjs";
 
 const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),".."),requireOperations=createRequire(path.join(root,"apps/operations/package.json"));
@@ -24,8 +24,8 @@ async function migrate(db){
       const guardAt=statements.findIndex(sql=>/^CREATE\s+TRIGGER\s+native_directory_enrollments_create_guard/i.test(sql));
       await db.batch(statements.slice(0,guardAt).map(sql=>db.prepare(sql)));
       await db.batch([
-        db.prepare("INSERT INTO native_directory_create_admissions(id,staff_id,bound_access_subject,record_id,record_kind,scopes_json,profile_json,destinations_json,active,issued_by) VALUES('fixture-client',?,'access|owner',?,'client',json_array(json_object('businessAreaId',?,'divisionId',NULL)),json_object('name','Client'),json_array(json_object('sourceId',?,'sourceInstanceUUID',?,'applicationUUID',?,'origin','https://pa-staging.ledgetoptechnologies.com','externalCanonicalId',?)),0,?)").bind(target.staffId,target.clientRecordId,target.businessAreaId,target.sourceId,uuid(101),uuid(102),target.clientRecordId,target.staffId),
-        db.prepare("INSERT INTO native_directory_create_admissions(id,staff_id,bound_access_subject,record_id,record_kind,scopes_json,profile_json,destinations_json,active,issued_by) VALUES('fixture-org',?,'access|owner',?,'organization',json_array(json_object('businessAreaId',?,'divisionId',NULL)),json_object('name','Organization'),json_array(json_object('sourceId',?,'sourceInstanceUUID',?,'applicationUUID',?,'origin','https://pa-staging.ledgetoptechnologies.com','externalCanonicalId',?)),0,?)").bind(target.staffId,target.organizationRecordId,target.businessAreaId,target.sourceId,uuid(101),uuid(102),target.organizationRecordId,target.staffId),
+        db.prepare("INSERT INTO native_directory_create_admissions(id,staff_id,bound_access_subject,record_id,record_kind,scopes_json,profile_json,destinations_json,active,issued_by) VALUES('fixture-client',?,'access|owner',?,'client',json_array(json_object('businessAreaId',?,'divisionId',NULL)),json_object('name','Client'),json_array(json_object('sourceId',?,'sourceInstanceUUID',?,'applicationUUID',?,'origin','https://pa-staging.ledgetoptechnologies.com','externalCanonicalId',?)),0,?)").bind(target.staffId,target.clientRecordId,target.clientBusinessAreaId,target.sourceId,uuid(101),uuid(102),target.clientRecordId,target.staffId),
+        db.prepare("INSERT INTO native_directory_create_admissions(id,staff_id,bound_access_subject,record_id,record_kind,scopes_json,profile_json,destinations_json,active,issued_by) VALUES('fixture-org',?,'access|owner',?,'organization',json_array(json_object('businessAreaId',?,'divisionId',NULL)),json_object('name','Organization'),json_array(json_object('sourceId',?,'sourceInstanceUUID',?,'applicationUUID',?,'origin','https://pa-staging.ledgetoptechnologies.com','externalCanonicalId',?)),0,?)").bind(target.staffId,target.organizationRecordId,target.organizationBusinessAreaId,target.sourceId,uuid(101),uuid(102),target.organizationRecordId,target.staffId),
         db.prepare("INSERT INTO native_directory_enrollments(record_id,destinations_json,create_admission_id) VALUES(?,json_array(json_object('sourceId',?,'sourceInstanceUUID',?,'applicationUUID',?,'historyEpoch',?,'origin','https://pa-staging.ledgetoptechnologies.com','externalCanonicalId',?)),'fixture-client')").bind(target.clientRecordId,target.sourceId,uuid(101),uuid(102),uuid(103),target.clientRecordId),
         db.prepare("INSERT INTO native_directory_enrollments(record_id,destinations_json,create_admission_id) VALUES(?,json_array(json_object('sourceId',?,'sourceInstanceUUID',?,'applicationUUID',?,'historyEpoch',?,'origin','https://pa-staging.ledgetoptechnologies.com','externalCanonicalId',?)),'fixture-org')").bind(target.organizationRecordId,target.sourceId,uuid(101),uuid(102),uuid(103),target.organizationRecordId),
       ]);
@@ -50,11 +50,12 @@ async function migrate(db){
     if(name.startsWith("0057_"))await db.batch([
       db.prepare("UPDATE staff_users SET access_subject='access|owner',status='active' WHERE id=?").bind(target.staffId),
       db.prepare("INSERT INTO native_staff_admissions(staff_id,bound_access_subject,active,admitted_by) VALUES(?,'access|owner',1,?)").bind(target.staffId,target.staffId),
-      db.prepare("INSERT OR IGNORE INTO native_business_areas(id,name,active) VALUES(?,'Drone Services Staging',1)").bind(target.businessAreaId),
+      db.prepare("INSERT OR IGNORE INTO native_business_areas(id,name,active) VALUES(?,'Portal Acceptance Staging',1)").bind(target.clientBusinessAreaId),
+      db.prepare("INSERT OR IGNORE INTO native_business_areas(id,name,active) VALUES(?,'Drone Services Staging',1)").bind(target.organizationBusinessAreaId),
       db.prepare("INSERT INTO operations_directory_records(record_id,record_kind,current_version) VALUES(?,'client',2)").bind(target.clientRecordId),
       db.prepare("INSERT INTO operations_directory_records(record_id,record_kind,current_version) VALUES(?,'organization',1)").bind(target.organizationRecordId),
-      db.prepare("INSERT INTO native_directory_resource_scopes(record_id,scope_kind,business_area_id,active) VALUES(?,'business_area',?,1)").bind(target.clientRecordId,target.businessAreaId),
-      db.prepare("INSERT INTO native_directory_resource_scopes(record_id,scope_kind,business_area_id,active) VALUES(?,'business_area',?,1)").bind(target.organizationRecordId,target.businessAreaId),
+      db.prepare("INSERT INTO native_directory_resource_scopes(record_id,scope_kind,business_area_id,active) VALUES(?,'business_area',?,1)").bind(target.clientRecordId,target.clientBusinessAreaId),
+      db.prepare("INSERT INTO native_directory_resource_scopes(record_id,scope_kind,business_area_id,active) VALUES(?,'business_area',?,1)").bind(target.organizationRecordId,target.organizationBusinessAreaId),
     ]);
     if(name.startsWith("0059_"))await db.prepare("INSERT INTO native_staff_profiles(staff_id,login_email,display_name) VALUES(?,'owner@example.test','Owner')").bind(target.staffId).run();
   }
@@ -64,7 +65,7 @@ async function migrate(db){
 async function seed(db){
   const t="2026-10-10T12:00:00.000Z",z="0".repeat(64),instance=uuid(101),application=uuid(102),epoch=uuid(103),clientPublic="a".repeat(32),organizationPublic="b".repeat(32);
   await db.batch([
-    db.prepare("INSERT OR IGNORE INTO native_business_areas(id,name,active) VALUES(?,'Drone Services Staging',1)").bind(target.businessAreaId),
+    db.prepare("INSERT OR IGNORE INTO native_business_areas(id,name,active) VALUES(?,'Drone Services Staging',1)").bind(target.organizationBusinessAreaId),
   ]);
   const grantIds=[uuid(2),uuid(3),uuid(4),uuid(5),uuid(6),uuid(7)];
   const grants=[{id:uuid(1),permission:"directory.profile.view",record:null,active:1,scope:"global"},{id:grantIds[3],permission:"directory.profile.edit",record:target.organizationRecordId,active:0,scope:"resource"},{id:grantIds[4],permission:"directory.identity.link",record:target.organizationRecordId,active:0,scope:"resource"}];
@@ -74,7 +75,7 @@ async function seed(db){
 
 async function input(db,phase,grantIds,provisionArtifact){
   const stamp=(await first(db,"SELECT strftime('%Y-%m-%dT%H:%M:%fZ','now') stamp")).stamp;
-  return {schemaVersion:1,staging:STAGING_TARGET,phase,target,migrationNames,
+  return {schemaVersion:2,staging:STAGING_TARGET,phase,target,migrationNames,
     staff:await first(db,"SELECT id,status,access_subject FROM staff_users WHERE id=?",target.staffId),roles:await all(db,"SELECT id,staff_id,role_id,scope,scope_key FROM staff_role_assignments WHERE staff_id=? ORDER BY id",target.staffId),
     admission:await first(db,"SELECT * FROM native_staff_admissions WHERE staff_id=?",target.staffId),profile:await first(db,"SELECT * FROM native_staff_profiles WHERE staff_id=?",target.staffId),generation:await first(db,"SELECT * FROM native_directory_grant_generations WHERE staff_id=?",target.staffId),
     records:await all(db,"SELECT record_id,record_kind,current_version FROM operations_directory_records WHERE record_id IN (?,?) ORDER BY CASE record_kind WHEN 'client' THEN 0 ELSE 1 END",target.clientRecordId,target.organizationRecordId),resourceScopes:await all(db,"SELECT record_id,scope_kind,business_area_id,division_id,active FROM native_directory_resource_scopes WHERE record_id IN (?,?) ORDER BY CASE record_id WHEN ? THEN 0 ELSE 1 END",target.clientRecordId,target.organizationRecordId,target.clientRecordId),relationship:await first(db,"SELECT client_record_id,organization_record_id,relationship_version FROM operations_directory_client_organizations WHERE client_record_id=?",target.clientRecordId),predecessor:await first(db,"SELECT command_id,source_id,source_instance_id,application_id,history_epoch_id,destination_origin,client_record_id,client_public_id,relationship_version,action,organization_record_id,organization_public_id,command_json,state,outcome_json FROM project_alpha_directory_relationship_outbox WHERE command_id=?",target.predecessorCommandId),grants:await all(db,"SELECT * FROM native_directory_grants WHERE staff_id=? ORDER BY id",target.staffId),history:await all(db,"SELECT * FROM native_directory_grant_history WHERE staff_id=? ORDER BY grant_generation",target.staffId),approval:{approvalId:crypto.randomUUID(),commandId:crypto.randomUUID(),grantIds,issuedAt:stamp,expiresAt:new Date(Date.parse(stamp)+3600000).toISOString(),executedAt:stamp},...(provisionArtifact?{provisionArtifact}:{})};
