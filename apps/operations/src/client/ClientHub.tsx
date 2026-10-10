@@ -18,7 +18,7 @@ import { OrganizationOperationalContacts } from "./OrganizationOperationalContac
 import { ClientInternalNotes } from "./ClientInternalNotes";
 import type { InvitationAdministrationAccess } from "./invitation-administration-api";
 import { ProjectAlphaContactRoles, type ProjectAlphaContactRolePage } from "./ProjectAlphaContactRoles";
-import { NativeDirectoryProfileEdit } from "./NativeDirectoryProfileEditor";
+import { isStagingNativeDirectoryProfilePreparationLocation, NativeDirectoryProfileEdit } from "./NativeDirectoryProfileEditor";
 
 interface CollectionItem { row_key?: string }
 interface ClientContact extends CollectionItem {
@@ -487,7 +487,8 @@ function ClientWorkspace({ route, canReviewFeedback, invitationAccess, nativeDir
         {portalStatus.description && <small>{portalStatus.description}</small>}</div>
     </div>
     {nativeDirectoryProfileWrites && data.nativeDirectoryProfile
-      && <NativeDirectoryProfileEdit kind={data.nativeDirectoryProfile.kind} recordId={data.nativeDirectoryProfile.recordId} />}
+      && <NativeDirectoryProfileEdit kind={data.nativeDirectoryProfile.kind} recordId={data.nativeDirectoryProfile.recordId}
+        allowPreparedAttempt={isStagingNativeDirectoryProfilePreparationLocation(window.location)} />}
     {nativeDirectoryProfileWrites && data.client.kind === "organization" && (data.nativeDirectoryLinkedClients?.length ?? 0) > 0 && <Card title="Edit linked client profile">
       <p>Select a currently linked client. Client Hub verifies its exact Project Alpha mapping and organization relationship on every refresh.</p>
       <label htmlFor="native-directory-linked-client">Linked client<select id="native-directory-linked-client" value={linkedClientRecordId}
@@ -496,7 +497,8 @@ function ClientWorkspace({ route, canReviewFeedback, invitationAccess, nativeDir
         {data.nativeDirectoryLinkedClients!.map(client => <option key={client.recordId} value={client.recordId}>{client.name}</option>)}
       </select></label>
       {linkedClientRecordId && data.nativeDirectoryLinkedClients!.some(client => client.recordId === linkedClientRecordId)
-        && <NativeDirectoryProfileEdit kind="client" recordId={linkedClientRecordId} />}
+        && <NativeDirectoryProfileEdit kind="client" recordId={linkedClientRecordId}
+          allowPreparedAttempt={isStagingNativeDirectoryProfilePreparationLocation(window.location)} />}
     </Card>}
     <SourceBusinessParty key={revision} client={data.client} party={data.businessParty} canManage={data.canManageBusinessParties}
       contextSignal={collectionProps.contextSignal} onInvalidated={invalidate} onRefresh={refresh} />

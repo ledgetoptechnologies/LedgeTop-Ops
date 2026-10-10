@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { Card } from "@ltds/ui";
 import { api, ApiError } from "./api";
+import { projectAdoptionReviewFailureMessage } from "./project-adoption-review-message";
 
 const ENDPOINT = "/api/admin/integrations/project-alpha/connectors";
 const READ_ACCEPTANCE_ENDPOINT = "/api/admin/integrations/project-alpha/api-v2/read-acceptance";
@@ -665,15 +666,13 @@ function ProjectAdoptionPanel({ disabled }: { disabled: boolean }) {
     if (!reviewRequest) { setReviewRequest(request); setReviewKey(idempotencyKey); }
     setBusy(true); setError(""); setMessage("");
     try {
-      const response = await api<{ outcome?: { status?: string; reviewItemId?: string } }>(PROJECT_ADOPTION_REVIEW_ENDPOINT, {
+      const response = await api<{ outcome?: { status?: string; reason?: unknown; reviewItemId?: string } }>(PROJECT_ADOPTION_REVIEW_ENDPOINT, {
         method: "POST", headers: { "Idempotency-Key": idempotencyKey },
         body: JSON.stringify({ sourceId: request.sourceId, externalProjectId: request.externalProjectId,
           projectAlphaPublicId: request.projectAlphaPublicId }),
       });
       if (response.outcome?.status !== "reviewed" || !response.outcome.reviewItemId) {
-        setError(response.outcome?.status === "uncertain"
-          ? "Project adoption review outcome is uncertain. The same frozen request key is retained; retry only after operator review."
-          : `Project adoption review was not completed (${response.outcome?.status ?? "invalid response"}). Reset only after reviewing server state.`);
+        setError(projectAdoptionReviewFailureMessage(response.outcome?.status, response.outcome?.reason));
         return;
       }
       setReviewItemId(response.outcome.reviewItemId);

@@ -4,7 +4,7 @@ import { expect, test, type Page } from "@playwright/test";
 
 type Scenario = "create-lost-response" | "admission-400" | "write-400" | "record-switch" | "reload-failure" | "relationship-readonly"
   | "recovery-review" | "recovery-absent" | "recovery-malformed" | "recovery-reentry" | "recovery-invalidated"
-  | "recovery-revoked" | "recovery-org-switch" | "recovery-record-switch";
+  | "recovery-revoked" | "recovery-org-switch" | "recovery-record-switch" | "prepared-update" | "prepared-lost-response";
 type Call = { path: string; method: string; mutationId: string | null; body: string | null };
 const fixture = new URL("./native-directory-profile-retry-fixture.tsx", import.meta.url);
 const bundle = buildSync({ entryPoints: [fileURLToPath(fixture)], bundle: true, format: "iife", platform: "browser", write: false,
@@ -112,6 +112,55 @@ test("a verified save followed by reload failure cannot submit a fresh UUID from
   const after = (await calls(page)).filter(call => call.method === "PATCH");
   expect(after).toEqual([before[0]!, before[0]!]);
   expect(new Set(after.map(call => call.mutationId)).size).toBe(1);
+});
+
+test("staging preparation freezes and displays one exact update before the normal PATCH", async ({ page }) => {
+  await render(page, "prepared-update");
+  await page.getByLabel("Organization name").fill("Prepared Record One");
+  await page.getByRole("button", { name: "Prepare update reference" }).click();
+
+  const prepared = page.getByRole("region", { name: "Prepared profile update" });
+  await expect(prepared).toContainText("11111111-1111-4111-8111-000000000001");
+  await expect(prepared).toContainText('"name": "Prepared Record One"');
+  await expect(page.getByLabel("Organization name")).toBeDisabled();
+  expect((await calls(page)).filter(call => call.method === "PATCH")).toHaveLength(0);
+
+  await page.getByRole("button", { name: "Cancel prepared update" }).click();
+  await expect(page.getByLabel("Organization name")).toBeEnabled();
+  await page.getByLabel("Organization name").fill("Final Prepared Record One");
+  await page.getByRole("button", { name: "Prepare update reference" }).click();
+  await page.getByRole("button", { name: "Submit prepared profile update" }).click();
+
+  const patches = (await calls(page)).filter(call => call.method === "PATCH");
+  expect(patches).toHaveLength(1);
+  expect(patches[0]!.mutationId).toBe("11111111-1111-4111-8111-000000000002");
+  expect(JSON.parse(patches[0]!.body!)).toEqual({ mutationId: patches[0]!.mutationId, expectedLocalVersion: 1,
+    profile: { name: "Final Prepared Record One", generalEmail: "", generalPhone: "", addressLine1: "", addressLine2: "",
+      city: "", state: "", postalCode: "", country: "" } });
+});
+
+test("a prepared client update keeps its exact request after a possibly committed lost response", async ({ page }) => {
+  await render(page, "prepared-lost-response");
+  await page.getByLabel("Email").fill("prepared-client@example.test");
+  await page.getByRole("button", { name: "Prepare update reference" }).click();
+  await page.getByRole("button", { name: "Submit prepared profile update" }).click();
+
+  await expect(page.getByRole("alert")).toContainText("Response lost after prepared profile commit");
+  await expect(page.getByRole("button", { name: "Cancel prepared update" })).toHaveCount(0);
+  await expect(page.getByLabel("Email")).toBeDisabled();
+  const retry = page.getByRole("button", { name: "Retry same profile update" });
+  await expect(retry).toBeVisible();
+  const first = (await calls(page)).filter(call => call.method === "PATCH");
+  expect(first).toHaveLength(1);
+
+  await retry.click();
+  await expect(page.getByText("Saved in Client Hub and queued for Project Alpha delivery.")).toBeVisible();
+  const patches = (await calls(page)).filter(call => call.method === "PATCH");
+  expect(patches).toHaveLength(2);
+  expect(patches[1]).toEqual(patches[0]);
+  expect(patches[0]!.mutationId).toBe("11111111-1111-4111-8111-000000000001");
+  expect(JSON.parse(patches[0]!.body!)).toMatchObject({ mutationId: patches[0]!.mutationId, expectedLocalVersion: 1,
+    profile: { email: "prepared-client@example.test" } });
 });
 
 test("missing relationship authority leaves profile editing mounted but hides relationship mutation controls", async ({ page }) => {

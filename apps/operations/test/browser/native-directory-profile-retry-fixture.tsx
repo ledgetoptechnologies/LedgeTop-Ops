@@ -5,7 +5,7 @@ import { DirectoryRelationshipRecoveryReview } from "../../src/client/DirectoryR
 
 type Scenario = "create-lost-response" | "admission-400" | "write-400" | "record-switch" | "reload-failure" | "relationship-readonly"
   | "recovery-review" | "recovery-absent" | "recovery-malformed" | "recovery-reentry" | "recovery-invalidated"
-  | "recovery-revoked" | "recovery-org-switch" | "recovery-record-switch";
+  | "recovery-revoked" | "recovery-org-switch" | "recovery-record-switch" | "prepared-update" | "prepared-lost-response";
 type Call = { path: string; method: string; mutationId: string | null; body: string | null };
 const fixtureWindow = window as Window & { nativeDirectoryScenario?: Scenario; nativeDirectoryCalls?: Call[] };
 const scenario = fixtureWindow.nativeDirectoryScenario ?? "create-lost-response", calls: Call[] = [];
@@ -76,6 +76,14 @@ window.fetch = async (input, init) => {
   }
   if (path.endsWith("/standalone-clients/client-one") && method === "GET")
     return Response.json(readonlyClientSnapshot());
+  if (path.endsWith("/standalone-clients/client-one") && method === "PATCH") {
+    profileWriteCalls += 1;
+    if (scenario === "prepared-lost-response" && profileWriteCalls === 1)
+      return new Response(JSON.stringify({ error: "Response lost after prepared profile commit" }), { status: 503 });
+    const parsed = JSON.parse(body!);
+    return Response.json({ status: "pending", recordId: "client-one", kind: "client",
+      version: parsed.expectedLocalVersion + 1, replayed: true, destinations: [{ sourceId, state: "pending" }] });
+  }
   if (path.endsWith("/standalone-clients/client-recovery") && method === "GET")
     return Response.json(recoveryClientSnapshot());
   if (path.includes("/standalone-clients/client-recovery/relationship-generation-recovery/status") && method === "GET") {
@@ -139,6 +147,7 @@ function Fixture() {
   const [recoveryIdentity, setRecoveryIdentity] = useState({ recordId: "client-prop", organizationRecordId: "organization-one" });
   if (["create-lost-response", "admission-400", "write-400"].includes(scenario)) return <NativeDirectoryProfileCreate />;
   if (scenario === "relationship-readonly") return <NativeDirectoryProfileEdit kind="client" recordId="client-one" />;
+  if (scenario === "prepared-lost-response") return <NativeDirectoryProfileEdit kind="client" recordId="client-one" allowPreparedAttempt />;
   if (scenario === "recovery-org-switch" || scenario === "recovery-record-switch") return <>
     <button type="button" onClick={() => setRecoveryIdentity(scenario === "recovery-org-switch"
       ? { recordId: "client-prop", organizationRecordId: "organization-two" }
@@ -148,6 +157,7 @@ function Fixture() {
       capability={{ available: true, status: "needs_review", sourceIds: [sourceId] }} /></>;
   if (["recovery-review", "recovery-absent", "recovery-malformed", "recovery-reentry", "recovery-invalidated", "recovery-revoked"].includes(scenario))
     return <NativeDirectoryProfileEdit kind="client" recordId="client-recovery" />;
+  if (scenario === "prepared-update") return <NativeDirectoryProfileEdit kind="organization" recordId="record-one" allowPreparedAttempt />;
   return <><button type="button" onClick={() => setRecordId("record-two")}>Switch to record two</button>
     <NativeDirectoryProfileEdit kind="organization" recordId={recordId} /></>;
 }

@@ -1,8 +1,16 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { serializeNativeDirectoryProfile, type ProfileForm } from "../src/client/NativeDirectoryProfileEditor";
+import { isStagingNativeDirectoryProfilePreparationLocation, serializeNativeDirectoryProfile, type ProfileForm } from "../src/client/NativeDirectoryProfileEditor";
 
 const editor = readFileSync(new URL("../src/client/NativeDirectoryProfileEditor.tsx", import.meta.url), "utf8");
+
+it("offers local preparation only on the exact secure Operations staging origin", () => {
+  const exact = { protocol: "https:", hostname: "ops-staging.ledgetopdroneservices.com", port: "" };
+  expect(isStagingNativeDirectoryProfilePreparationLocation(exact)).toBe(true);
+  expect(isStagingNativeDirectoryProfilePreparationLocation({ ...exact, protocol: "http:" })).toBe(false);
+  expect(isStagingNativeDirectoryProfilePreparationLocation({ ...exact, hostname: "ops.ledgetopdroneservices.com" })).toBe(false);
+  expect(isStagingNativeDirectoryProfilePreparationLocation({ ...exact, port: "8443" })).toBe(false);
+});
 const hub = readFileSync(new URL("../src/client/ClientHub.tsx", import.meta.url), "utf8");
 const directory = readFileSync(new URL("../src/client/ClientDirectory.tsx", import.meta.url), "utf8");
 const app = readFileSync(new URL("../src/client/OperationsApp.tsx", import.meta.url), "utf8");

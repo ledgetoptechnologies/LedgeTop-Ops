@@ -29,6 +29,8 @@ const EMPTY: ProfileForm = { name: "", generalEmail: "", generalPhone: "", email
   addressLine1: "", addressLine2: "", city: "", state: "", postalCode: "", country: "" };
 const routeKind = (kind: Kind): RouteKind => kind === "organization" ? "organizations" : "standalone-clients";
 const message = (caught: unknown, fallback: string) => caught instanceof Error ? caught.message : fallback;
+export const isStagingNativeDirectoryProfilePreparationLocation = (location: Pick<Location, "protocol" | "hostname" | "port">) =>
+  location.protocol === "https:" && location.hostname === "ops-staging.ledgetopdroneservices.com" && location.port === "";
 export function serializeNativeDirectoryProfile(kind: Kind, fields: ProfileForm, operation: "create" | "update") {
   const address = { addressLine1: fields.addressLine1.trim(), addressLine2: fields.addressLine2.trim(), city: fields.city.trim(),
     state: fields.state.trim(), postalCode: fields.postalCode.trim(), country: fields.country.trim() };
@@ -182,15 +184,16 @@ export function NativeDirectoryProfileCreate() {
   </Card>;
 }
 
-export function NativeDirectoryProfileEdit({ kind, recordId }: { kind: Kind; recordId: string }) {
-  return <NativeDirectoryProfileEditBound key={`${kind}\0${recordId}`} kind={kind} recordId={recordId} />;
+export function NativeDirectoryProfileEdit({ kind, recordId, allowPreparedAttempt = false }: { kind: Kind; recordId: string; allowPreparedAttempt?: boolean }) {
+  return <NativeDirectoryProfileEditBound key={`${kind}\0${recordId}`} kind={kind} recordId={recordId} allowPreparedAttempt={allowPreparedAttempt} />;
 }
 
-function NativeDirectoryProfileEditBound({ kind, recordId }: { kind: Kind; recordId: string }) {
+function NativeDirectoryProfileEditBound({ kind, recordId, allowPreparedAttempt = false }: { kind: Kind; recordId: string; allowPreparedAttempt?: boolean }) {
   const id = useId(), [snapshot, setSnapshot] = useState<ProfileSnapshot | null>(null), [fields, setFields] = useState<ProfileForm>(EMPTY);
   const [loading, setLoading] = useState(true), [missing, setMissing] = useState(false), [error, setError] = useState(""), [success, setSuccess] = useState(""), [busy, setBusy] = useState(false);
   const [relationshipOrganizationId, setRelationshipOrganizationId] = useState(""), [relationshipBusy, setRelationshipBusy] = useState(false);
-  const [profileAttempt, setProfileAttempt] = useState<{ request: FrozenDirectoryRequest; expectedVersion: number } | null>(null);
+  const [profileAttempt, setProfileAttempt] = useState<{ request: FrozenDirectoryRequest; expectedVersion: number; intendedProfile: ReturnType<typeof serializeNativeDirectoryProfile> } | null>(null);
+  const [profileAttemptTransmitted, setProfileAttemptTransmitted] = useState(false);
   const [relationshipAttempt, setRelationshipAttempt] = useState<{ request: FrozenDirectoryRequest; expectedVersion: number } | null>(null);
   const load = async (): Promise<boolean> => {
     setLoading(true); setError("");
@@ -207,19 +210,34 @@ function NativeDirectoryProfileEditBound({ kind, recordId }: { kind: Kind; recor
   };
   useEffect(() => { void load(); }, [kind, recordId]);
   const change = (field: keyof ProfileForm, value: string) => setFields(previous => ({ ...previous, [field]: value }));
+  const freezeProfileAttempt = () => {
+    if (!snapshot) return null;
+    const mutationId = crypto.randomUUID(), intendedProfile = serializeNativeDirectoryProfile(kind, fields, "update");
+    return { expectedVersion: snapshot.version + 1, intendedProfile,
+      request: { path: `/api/client-hub/directory/${routeKind(kind)}/${encodeURIComponent(recordId)}`, method: "PATCH" as const, mutationId,
+        body: JSON.stringify({ mutationId, expectedLocalVersion: snapshot.version, profile: intendedProfile }) } };
+  };
+  const prepareProfileAttempt = () => {
+    if (!allowPreparedAttempt || !snapshot || busy || relationshipAttempt || profileAttempt) return;
+    const frozen = freezeProfileAttempt();
+    if (frozen) { setProfileAttempt(frozen); setProfileAttemptTransmitted(false); setError(""); setSuccess(""); }
+  };
+  const cancelPreparedProfileAttempt = () => {
+    if (!profileAttempt || profileAttemptTransmitted || busy) return;
+    setProfileAttempt(null); setError(""); setSuccess("");
+  };
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault(); if (!snapshot || busy || relationshipAttempt) return;
-    const frozen = profileAttempt ?? (() => { const mutationId = crypto.randomUUID(); return { expectedVersion: snapshot.version + 1,
-      request: { path: `/api/client-hub/directory/${routeKind(kind)}/${encodeURIComponent(recordId)}`, method: "PATCH" as const, mutationId,
-        body: JSON.stringify({ mutationId, expectedLocalVersion: snapshot.version,
-          profile: serializeNativeDirectoryProfile(kind, fields, "update") }) } }; })();
+    const frozen = profileAttempt ?? freezeProfileAttempt();
+    if (!frozen) return;
     if (!profileAttempt) setProfileAttempt(frozen);
+    setProfileAttemptTransmitted(true);
     setBusy(true); setError(""); setSuccess("");
     try {
       const result = await executeProfileAttempt(frozen.request, request => api(request.path, { method: request.method,
         headers: { "Idempotency-Key": request.mutationId }, body: request.body }),
       { recordId, kind, version: frozen.expectedVersion });
-      if (await load()) { setProfileAttempt(null); setSuccess(status(result as { status?: unknown })); }
+      if (await load()) { setProfileAttempt(null); setProfileAttemptTransmitted(false); setSuccess(status(result as { status?: unknown })); }
     } catch (caught) { setError(`${message(caught, "The client profile could not be updated.")} Retry sends the same frozen operation. Reload this page to abandon it and review current state before starting another mutation.`); }
     finally { setBusy(false); }
   };
@@ -259,8 +277,16 @@ function NativeDirectoryProfileEditBound({ kind, recordId }: { kind: Kind; recor
       intendedOrganizationRecordId={recoveryTarget.recordId} capability={recovery} />}</Card>;
   return <Card title="Edit client profile"><p>Editing version {snapshot.version}. The current server-owned profile is loaded before any change is submitted.</p>
     <form onSubmit={event => void submit(event)} className="client-directory-profile-form"><ProfileFields kind={kind} value={fields} onChange={change} prefix={id} creating={false} disabled={Boolean(profileAttempt || relationshipAttempt)} />
+      {allowPreparedAttempt && !profileAttempt && <button type="button" className="button-ghost" disabled={busy || Boolean(relationshipAttempt)}
+        onClick={prepareProfileAttempt}>Prepare update reference</button>}
+      {profileAttempt && !profileAttemptTransmitted && <section aria-label="Prepared profile update"><p>This local staging preparation has not sent a request.</p>
+        <dl><dt>Update reference</dt><dd><code>{profileAttempt.request.mutationId}</code></dd><dt>Intended profile</dt>
+          <dd><pre>{JSON.stringify(profileAttempt.intendedProfile, null, 2)}</pre></dd></dl>
+        <button type="button" className="button-ghost" disabled={busy} onClick={cancelPreparedProfileAttempt}>Cancel prepared update</button>
+      </section>}
       {error && <p role="alert">{error}</p>}{success && <p role="status">{success}</p>}
-      <button className="button-orange" disabled={busy || Boolean(relationshipAttempt)}>{busy ? "Saving profile…" : profileAttempt ? "Retry same profile update" : "Save client profile"}</button>
+      <button className="button-orange" disabled={busy || Boolean(relationshipAttempt)}>{busy ? "Saving profile…" : profileAttempt
+        ? profileAttemptTransmitted ? "Retry same profile update" : "Submit prepared profile update" : "Save client profile"}</button>
     </form>
     {kind === "client" && snapshot.relationship && (snapshot.relationship.editing.available
       ? <form onSubmit={event => void submitRelationship(event)} className="client-directory-profile-form">

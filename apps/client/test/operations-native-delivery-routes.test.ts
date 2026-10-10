@@ -214,6 +214,28 @@ describe('native Operations folder HTTP routes', () => {
     expect(badRange.status).toBe(416); expect(badRange.headers.get('Content-Range')).toBe('bytes */42');
     expect(get).not.toHaveBeenCalled(); expect(audit).not.toHaveBeenCalled();
   });
+  it.each([
+    ['text/plain', 'selected preview text\n'],
+    ['application/json', '{"selected":true}\n'],
+  ])('serves exact safe %s preview bytes inline with private response headers', async (contentType, content) => {
+    const bytes = new TextEncoder().encode(content);
+    first.mockResolvedValue({ ...file, size: bytes.byteLength, content_type: contentType });
+    head.mockResolvedValue({ etag: 'synthetic-etag', httpEtag: '"synthetic-etag"', size: bytes.byteLength });
+    get.mockResolvedValue({ etag: 'synthetic-etag', size: bytes.byteLength,
+      body: new ReadableStream({ start(controller) { controller.enqueue(bytes); controller.close(); } }) });
+
+    const result = await router().fetch(request(`${await path('file')}/preview`), env);
+
+    expect(result.status).toBe(200);
+    expect(result.headers.get('Content-Type')).toBe('text/plain; charset=utf-8');
+    expect(result.headers.get('Content-Disposition')).toBe(`inline; filename="photo.jpg"; filename*=UTF-8''photo.jpg`);
+    expect(result.headers.get('Cache-Control')).toBe('private, no-store');
+    expect(result.headers.get('Cloudflare-CDN-Cache-Control')).toBe('no-store');
+    expect(result.headers.get('X-Content-Type-Options')).toBe('nosniff');
+    expect(new Uint8Array(await result.arrayBuffer())).toEqual(bytes);
+    expect(audit).toHaveBeenCalledWith(env, expect.objectContaining({ principal, feature: 'file.preview',
+      action: 'file.preview_requested', storageKey: file.r2_key, contentVersion: file.etag }));
+  });
   it('ignores stale If-Range and requires safe preview MIME types', async () => {
     const result = await router().fetch(request(`${await path('file')}/download`, { Range: 'bytes=0-4', 'If-Range': '"old-etag"' }), env);
     expect(result.status).toBe(200); expect(get).toHaveBeenCalledWith(file.r2_key, { onlyIf: { etagMatches: 'synthetic-etag' } });
