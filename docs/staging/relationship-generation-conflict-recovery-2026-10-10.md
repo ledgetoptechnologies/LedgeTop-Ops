@@ -1,6 +1,16 @@
 # Directory relationship generation conflict recovery
 
-Status: design only. No migration, runtime route, feature flag, authorization grant, or provider write is authorized by this document.
+Status: partially implemented locally. The assign-only pure successor planner and strict structured-conflict transport parser are implemented and tested; the recovery ledger, routes, dispatcher settlement, and UI remain unimplemented. No recovery migration, runtime route, feature flag, authorization grant, or provider write is authorized by this document.
+
+## Local implementation checkpoint
+
+- Operations retains transport provenance only for an exact API-v2 `authorization_generation_conflict` envelope with the configured source instance, application, history epoch, and matching request header/body ID. Generic, malformed, oversized, duplicate-key, untrusted-header, or stalled responses cannot become recovery evidence. Public conflict results remain sanitized and backward compatible.
+- The private provenance accessor returns isolated copies, and copied/serialized outcome objects cannot manufacture provenance. This proves transport only, never current authority or fresh canonical state.
+- The assign-only proposal helper requires matching source/origin, client identity/revision, unchanged remote parent, exact target organization identity/revision/binding external ID, active binding, and a strictly advanced non-exhausted signed-int64 generation. It changes only command ID and expected generation, and does not mutate or alias the original organization payload.
+- Focused Operations validation: 60 tests passed across transport and proposal suites; TypeScript check passed. No new route, migration, grant, dispatch path, or deployed configuration exists yet.
+- The accompanying local Project Alpha candidate adds the create-compatible structured error only after all existing relationship/resource/binding checks pass. Missing, malformed, exhausted, and earlier resource/parent/binding conflicts remain generic. Focused relationship validation: 11 tests / 91 assertions; adjacent external-directory policy validation: 17 tests / 182 assertions.
+- The deployed PA revision does not yet include this structured relationship error. Future recovery must replay the frozen predecessor against the reviewed candidate and require that validated structured error plus fresh canonical reads; the earlier stored generic 409 alone is not eligible evidence.
+- Next implementation boundary: immutable sealed review/authorization ledger and separate recovery outbox, atomic current-state guards, then effective-command scheduling/settlement and explicit administrator review UI. The original relationship history and failed command remain untouched.
 
 ## Decision
 
