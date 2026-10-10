@@ -1067,7 +1067,8 @@ describe("Client Hub", () => {
     const wrongSource = await app.request(organizationPath.replace("project-alpha%3Aprimary", "project-alpha%3Asecondary")
       + "/project-alpha-contact-roles", {}, env);
     expect(wrongSource.status).toBe(404);
-  }, 15_000);
+  // This full-D1 fixture exercises four separately bounded read paths through Miniflare.
+  }, 30_000);
 
   it("hydrates exact project roles behind the existing project-view policy without adding mutation authority", async () => {
     const { app, env, ops, delivery } = await fixture();
