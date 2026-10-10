@@ -62,7 +62,7 @@ jobs:
         run: node --test scripts/staging-portal-byte-fixture.test.mjs
 
       - name: Verify credential-preserving portal browser acceptance transport locally
-        run: node --test scripts/staging-client-portal-browser-context-acceptance.test.mjs scripts/staging-client-portal-playwright-context-request.test.mjs
+        run: node --test scripts/staging-client-portal-browser-context-acceptance.test.mjs scripts/staging-client-portal-playwright-context-request.test.mjs scripts/staging-client-portal-principal-observation.test.mjs
 
       - name: Verify local relationship recovery proposal against the canonical schema
         run: node --test scripts/staging-directory-relationship-recovery-proposal.test.mjs

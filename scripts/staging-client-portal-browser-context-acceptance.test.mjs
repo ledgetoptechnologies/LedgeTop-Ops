@@ -7,6 +7,7 @@ import {
   checkClientPortalDistinctPrincipalDenial,
   checkClientPortalOldHandleDenial,
   checkClientPortalServiceHomeDenial,
+  checkClientPortalUnenrolledContextDenial,
   parseClientPortalBrowserAcceptanceConfig,
   runClientPortalBrowserContextAcceptance,
 } from "./staging-client-portal-browser-context-acceptance.mjs";
@@ -163,6 +164,42 @@ test("checks service-home denial without trying enrollment, grant, revoke, or re
   assert.equal(report.statusCode, 403);
   assert.deepEqual(calls.map(call => new URL(call.url).pathname), ["/api/client/v2/operations/home"]);
   assert.equal(calls[0].init.method, "GET");
+});
+
+test("unenrolled context denial checks actual home and handle responses without claiming distinct identity", async () => {
+  const calls = [], old = handle("captured_unenrolled");
+  const report = await checkClientPortalUnenrolledContextDenial(config,
+    { kind: "file", handle: old, action: "download" }, {
+      browserContextFetcher: async (url, init) => {
+        const path = new URL(url).pathname; calls.push({ path, init });
+        return body({ error: "unavailable" }, path.endsWith("/home") ? 403 : 404);
+      },
+    });
+  assert.equal(report.check, "unenrolled_context_denial");
+  assert.equal(report.homeStatus, 403);
+  assert.deepEqual(report.denial, { kind: "file", action: "download", status: 404 });
+  assert.equal(Object.hasOwn(report, "principalBindings"), false);
+  assert.equal(JSON.stringify(report).includes(old), false);
+  assert.deepEqual(calls.map(call => call.path), ["/api/client/v2/operations/home",
+    `/api/client/operations/data/files/${old}/download`]);
+  assert(calls.every(call => call.init.method === "GET"));
+});
+
+test("unenrolled context denial rejects invalid probes and unexpected statuses without claiming success", async () => {
+  const input = { kind: "folder", handle: handle("private_folder"), action: "list" };
+  await assert.rejects(() => checkClientPortalUnenrolledContextDenial(config,
+    { ...input, handle: "raw/private/path" }, { browserContextFetcher: async () => assert.fail("must not fetch") }),
+  /invalid_denial_probe/);
+  for (const status of [200, 401, 404, 302]) {
+    const calls = [];
+    await assert.rejects(() => checkClientPortalUnenrolledContextDenial(config, input, {
+      browserContextFetcher: async url => { calls.push(url); return body({ error: "unavailable" }, status); },
+    }), /service_home_denial_http_|browser_context_redirect_denied/);
+    assert.equal(calls.length, 1);
+  }
+  for (const status of [200, 403, 401, 302]) await assert.rejects(() => checkClientPortalUnenrolledContextDenial(config, input, {
+    browserContextFetcher: async url => body({ error: "unavailable" }, new URL(url).pathname.endsWith("/home") ? 403 : status),
+  }), /opaque_handle_denial_http_|browser_context_redirect_denied/);
 });
 
 function principalFetcher(binding, old, calls) {

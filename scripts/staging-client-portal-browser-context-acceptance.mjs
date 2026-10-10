@@ -419,6 +419,20 @@ export async function checkClientPortalServiceHomeDenial(configValue, dependenci
     credentials: { browserContext: true, nativeSameOrigin: true, valuesExcluded: true } });
 }
 
+/** Checks denial in one supplied context only. This deliberately makes no
+ * identity/distinct-principal claim: the observation orchestrator must bind
+ * genuine principals before and after these actual read-only requests. */
+export async function checkClientPortalUnenrolledContextDenial(configValue, input, dependencies = {}) {
+  const config = parseClientPortalBrowserAcceptanceConfig(configValue);
+  denialPath(input);
+  const home = await checkClientPortalServiceHomeDenial(configValue, dependencies);
+  const denial = await expectDenied(config, dependencies.browserContextFetcher, input);
+  return Object.freeze({ schemaVersion: 1, environment: "staging", status: "passed", mutationsPerformed: false,
+    observedAt: new Date(dependencies.now ?? Date.now()).toISOString(), check: "unenrolled_context_denial",
+    homeStatus: home.statusCode, denial,
+    credentials: { browserContext: true, nativeSameOrigin: true, valuesExcluded: true } });
+}
+
 async function serverPrincipal(config, fetcher) {
   const response = await contextRequest(config, fetcher, SESSION_PATH,
     { headers: { Accept: "application/json", "Cache-Control": "no-store" } });
