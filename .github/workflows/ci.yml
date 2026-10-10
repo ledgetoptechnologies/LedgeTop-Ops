@@ -53,6 +53,9 @@ jobs:
       - name: Verify exact organization staging authority and paired cleanup locally
         run: node --test scripts/staging-organization-relationship-authority.test.mjs scripts/staging-organization-relationship-authority-window.test.mjs scripts/staging-organization-relationship-authority-fullschema.test.mjs
 
+      - name: Verify scoped Project staging authority and recipient readback locally
+        run: node --test scripts/staging-project-business-area-authority-packet.test.mjs scripts/staging-recipient-authority-readback.test.mjs
+
       - name: Verify staging portal byte fixtures without remote writes
         run: node --test scripts/staging-portal-byte-fixture.test.mjs
 

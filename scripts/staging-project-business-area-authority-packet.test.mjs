@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import crypto from "node:crypto";
 import { createRequire } from "node:module";
@@ -12,6 +13,25 @@ const {Miniflare}=requireOperations("miniflare");
 const {unstable_splitSqlQuery}=requireOperations("wrangler");
 const id=n=>`00000000-0000-4000-8000-${String(n).padStart(12,"0")}`;
 const fixture=()=>({schemaVersion:1,purpose:PURPOSE,staging:{...STAGING_TARGET},admission:{staff_id:PINNED_OPERATOR.staffId,bound_access_subject:PINNED_OPERATOR.accessSubject,active:1,version:2},profile:{staff_id:PINNED_OPERATOR.staffId,login_email:PINNED_OPERATOR.email,display_name:PINNED_OPERATOR.displayName,version:3},businessArea:{...PINNED_BUSINESS_AREA,active:1},generation:{staff_id:PINNED_OPERATOR.staffId,generation:4},grants:[],approval:{approvalId:id(1),commandId:id(2),revokeApprovalId:id(3),revokeCommandId:id(4),grantId:id(5),issuedAt:"2026-10-08T20:00:00.000Z",expiresAt:"2026-10-08T21:00:00.000Z",provisionExecutedAt:"2026-10-08T20:01:00.000Z",revokeExecutedAt:"2026-10-08T20:30:00.000Z",changeTicket:"staging-window-20261008",reviewer:"reviewed-operator"}});
+test("business-area packet rejects missing, extra, renamed, or modified 0183 migration",()=>{
+ const migrationName="0183_project_alpha_binding_standalone_relationship_rows.sql";
+ const cases=[
+  ["missing",directory=>fs.rmSync(path.join(directory,migrationName))],
+  ["extra",directory=>fs.writeFileSync(path.join(directory,"0184_unreviewed.sql"),"SELECT 1;\n")],
+  ["renamed",directory=>fs.renameSync(path.join(directory,migrationName),path.join(directory,"0183_wrong_name.sql"))],
+  ["modified",directory=>fs.appendFileSync(path.join(directory,migrationName),"-- drift\n")],
+ ];
+ for(const [label,mutate] of cases){
+  const temporary=fs.mkdtempSync(path.join(os.tmpdir(),"business-area-authority-chain-"));
+  try{
+   const directory=path.join(temporary,"apps","operations","migrations");
+   fs.mkdirSync(path.dirname(directory),{recursive:true});
+   fs.cpSync(path.join(root,"apps","operations","migrations"),directory,{recursive:true});
+   mutate(directory);
+   assert.throws(()=>compileBusinessAreaAuthorityPair(fixture(),{root:temporary}),/exact reviewed migration chain required/,label);
+  }finally{fs.rmSync(temporary,{recursive:true,force:true});}
+ }
+});
 test("compiles immutable paired statements for trusted module-only apply",()=>{const pair=compileBusinessAreaAuthorityPair(fixture());assert.equal(pair.trustedApplyOnly,true);assert.equal(pair.provision.approval.canonical_plan_sha256,pair.planHash);assert.equal(pair.revoke.approval.canonical_plan_sha256,pair.planHash);assert.ok(pair.revoke.statements.some(s=>/changes\(\)=1/.test(s.sql)));assert.ok(pair.revoke.statements.some(s=>/revoke-poststate/.test(s.sql)));assert.ok(pair.provision.statements.every(s=>Array.isArray(s.params)&&!s.sql.includes("BEGIN")));});
 test("canonical plan binds the complete reviewed window",()=>{const base=compileBusinessAreaAuthorityPair(fixture());for(const mutate of [v=>v.approval.expiresAt="2026-10-08T20:59:00.000Z",v=>v.approval.changeTicket="different-ticket",v=>v.approval.reviewer="different-reviewer"]){const changed=fixture();mutate(changed);assert.notEqual(compileBusinessAreaAuthorityPair(changed).planHash,base.planHash);}});
 test("rejects wrong target, actor, area, malformed scope, and reversed pair",()=>{const wrong=fixture();wrong.staging={...wrong.staging,environment:"production"};assert.throws(()=>compileBusinessAreaAuthorityPair(wrong),/staging contract/);for(const mutate of [v=>v.admission.staff_id="staff-other",v=>v.admission.bound_access_subject="other-subject",v=>v.profile.login_email="other@example.test",v=>v.businessArea.id="staging-native-only-other"]){const value=fixture();mutate(value);assert.throws(()=>compileBusinessAreaAuthorityPair(value),/exact pinned operator and synthetic area required/);}const malformed=fixture();malformed.grants=[{id:"existing",staff_id:malformed.admission.staff_id,capability:"project.shared.sync",effect:"allow",scope_kind:"business_area",business_area_id:null,division_id:null,external_project_id:null,active:1,version:1,granted_by:malformed.admission.staff_id,created_at:"2026-10-08T19:00:00.000Z"}];assert.throws(()=>compileBusinessAreaAuthorityPair(malformed),/scope tuple/);const reversed=fixture();reversed.approval.revokeExecutedAt="2026-10-08T20:00:30.000Z";assert.throws(()=>compileBusinessAreaAuthorityPair(reversed),/bounded paired window/);});
@@ -27,7 +47,7 @@ async function migratedDatabase(){
  const mf=new Miniflare({modules:true,script:"export default {fetch(){return new Response('ok')}}",d1Databases:{DB:`${id(900)}-${crypto.randomUUID()}`},d1Persist:false});
  const db=await mf.getD1Database("DB"),dir=path.join(root,"apps","operations","migrations");
  await db.prepare("CREATE TABLE d1_migrations(id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT UNIQUE NOT NULL,applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)").run();
- for(const name of fs.readdirSync(dir).filter(name=>/^\d{4}_.+\.sql$/.test(name)&&name<="0180_project_alpha_project_v2_recovery_authorization.sql").sort()){
+ for(const name of fs.readdirSync(dir).filter(name=>/^\d{4}_.+\.sql$/.test(name)).sort()){
   const sql=fs.readFileSync(path.join(dir,name),"utf8").replace(/\r\n/g,"\n");
   const parts=unstable_splitSqlQuery(sql).map(part=>part.trim()).filter(part=>part&&!/^PRAGMA\s+foreign_keys\s*=\s*ON\s*;?$/i.test(part));
   await db.batch([...parts.map(part=>db.prepare(part)),db.prepare("INSERT INTO d1_migrations(name) VALUES(?)").bind(name)]);

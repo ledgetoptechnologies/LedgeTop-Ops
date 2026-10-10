@@ -19,9 +19,9 @@ const GRANT = ["id","staff_id","permission","effect","scope_kind","business_area
 const HISTORY = ["grant_id","grant_version","staff_id","permission","effect","scope_kind","business_area_id","division_id","resource_id","active","grant_generation","recorded_at"];
 const APPROVAL = ["approval_id","canonical_plan_json","canonical_plan_sha256","approved_operator_staff_id","approved_operator_access_subject","independent_binding_verification_json","independent_binding_verification_sha256","issued_by_staff_id","issued_by_access_subject","issued_at","expires_at","revoked_at"];
 const RECEIPT = ["command_id","approval_id","operator_staff_id","operator_access_subject","canonical_plan_json","canonical_plan_sha256","independent_binding_verification_json","independent_binding_verification_sha256","result_json","result_sha256","executed_at"];
-const CHAIN = { count:182, final:"0182_project_alpha_directory_relationship_recovery_guard.sql",
-  names:"5ca01798b82652a4b6bb64a35be85a82673d940d6e762805c147408e3ca298d8",
-  contents:"09ebfcc544263a90c96b8ed5548cdc73e38e524aec977aa37042bc280f9dae56" };
+const CHAIN = { count:183, final:"0183_project_alpha_binding_standalone_relationship_rows.sql",
+  names:"e85a63e7f7f018f8fb473f913660d5fbe13d798d3c19e281342b0cbca70d5ac7",
+  contents:"134957a54a3eb9462a2e19b839d0aa2bb5fe5eb46096dc4677ab9d8324547cb8" };
 const TS=/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 const UUID=/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const sha = value => crypto.createHash("sha256").update(value).digest("hex");
@@ -35,7 +35,7 @@ const equality=(table,columns,rows,where,params=[])=>guard(`(SELECT count(*) FRO
 function exact(value, keys, label) { if (!value || Object.getPrototypeOf(value)!==Object.prototype || !same(Object.keys(value).sort(),[...keys].sort())) fail(`${label} shape`); }
 function migrations(root=ROOT) { const directory=path.join(root,"apps/operations/migrations"),names=fs.readdirSync(directory).filter(name=>/^\d{4}_.+\.sql$/.test(name)).sort();
   const contents=names.map(name=>`${name}\0${sha(fs.readFileSync(path.join(directory,name)))}`);
-  if(names.length!==CHAIN.count||names.at(-1)!==CHAIN.final||sha(names.join("\n"))!==CHAIN.names||sha(contents.join("\n"))!==CHAIN.contents)fail("canonical 182 migration chain required");return names; }
+  if(names.length!==CHAIN.count||names.at(-1)!==CHAIN.final||sha(names.join("\n"))!==CHAIN.names||sha(contents.join("\n"))!==CHAIN.contents)fail("canonical 183 migration chain required");return names; }
 const targetGrant=(row,permission,target)=>row.staff_id===target.staffId&&row.permission===permission&&row.effect==="allow"&&row.scope_kind==="resource"&&row.resource_id===target.recordId;
 const exactGrant=(row,permission,target,active)=>targetGrant(row,permission,target)&&row.business_area_id===null&&row.division_id===null&&row.active===active&&row.granted_by===target.staffId&&typeof row.created_at==="string"&&TS.test(row.created_at);
 const historyIdentity=(row,grant)=>row.staff_id===grant.staff_id&&row.permission===grant.permission&&row.effect===grant.effect&&row.scope_kind===grant.scope_kind&&row.business_area_id===grant.business_area_id&&row.division_id===grant.division_id&&row.resource_id===grant.resource_id;

@@ -141,20 +141,21 @@ beforeAll(async () => {
     .toEqual(migrations);
   expect((await db.prepare("PRAGMA foreign_key_check").all()).results).toEqual([]);
   const currentRelationshipMigrations = readdirSync(directory)
-    .filter(name => /^018[12]_.+\.sql$/.test(name)).sort();
+    .filter(name => /^018[123]_.+\.sql$/.test(name)).sort();
   expect(currentRelationshipMigrations).toEqual([
     "0181_project_alpha_directory_create_generation_recovery.sql",
     "0182_project_alpha_directory_relationship_recovery_guard.sql",
+    "0183_project_alpha_binding_standalone_relationship_rows.sql",
   ]);
   for (const migration of currentRelationshipMigrations) await db.batch([
     ...splitD1MigrationStatements(readFileSync(new URL(migration, directory), "utf8")).map(sql => db.prepare(sql)),
     db.prepare("INSERT INTO d1_migrations(name) VALUES(?)").bind(migration),
   ]);
-  expect((await db.prepare("SELECT name FROM d1_migrations ORDER BY id DESC LIMIT 2").all<{ name: string }>()).results
+  expect((await db.prepare("SELECT name FROM d1_migrations ORDER BY id DESC LIMIT 3").all<{ name: string }>()).results
     .map(row => row.name).reverse()).toEqual(currentRelationshipMigrations);
   expect(await db.prepare("SELECT name FROM d1_migrations ORDER BY id DESC LIMIT 1").first("name"))
-    .toBe("0182_project_alpha_directory_relationship_recovery_guard.sql");
-  expect(await db.prepare("SELECT count(*) FROM d1_migrations").first("count(*)")).toBe(182);
+    .toBe("0183_project_alpha_binding_standalone_relationship_rows.sql");
+  expect(await db.prepare("SELECT count(*) FROM d1_migrations").first("count(*)")).toBe(183);
   expect((await db.prepare("PRAGMA foreign_key_check").all()).results).toEqual([]);
   await db.batch([
     db.prepare("INSERT INTO staff_users(id,email,display_name,access_subject,status) VALUES('owner','owner@example.test','Owner','access|owner','active')"),

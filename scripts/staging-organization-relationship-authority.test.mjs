@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { ORGANIZATION_RELATIONSHIP_TARGET as target, compileOrganizationRelationshipAuthority,
@@ -24,6 +25,26 @@ function activeAfterReactivation(provision) { const value=inactiveSnapshot(),gra
 
 test("v2 compiler provisions only a fresh exact organization grant pair",()=>{const artifact=compileOrganizationRelationshipAuthority(input()),sql=artifact.statements.map(row=>row.sql).join("\n"),result=JSON.parse(artifact.receipt.result_json);
   assert.deepEqual(artifact.selection,{mode:"fresh",historyVersions:[1,1]});assert.equal(artifact.schemaVersion,2);assert.equal((sql.match(/INSERT INTO native_directory_grants/g)??[]).length,2);assert.doesNotMatch(sql,/'global'/);assert.deepEqual(result,{active:1,generation:2,grantIds:ids,grantVersions:[1,1],operation:"fresh",phase:"provision"});});
+
+test("current organization authority rejects missing, extra, renamed, or modified 0183 migration",()=>{
+  const migrationName="0183_project_alpha_binding_standalone_relationship_rows.sql";
+  const cases=[
+    ["missing",directory=>fs.rmSync(path.join(directory,migrationName))],
+    ["extra",directory=>fs.writeFileSync(path.join(directory,"0184_unreviewed.sql"),"SELECT 1;\n")],
+    ["renamed",directory=>fs.renameSync(path.join(directory,migrationName),path.join(directory,"0183_wrong_name.sql"))],
+    ["modified",directory=>fs.appendFileSync(path.join(directory,migrationName),"-- drift\n")],
+  ];
+  for(const [label,mutate] of cases){
+    const temporary=fs.mkdtempSync(path.join(os.tmpdir(),"organization-authority-chain-"));
+    try{
+      const directory=path.join(temporary,"apps","operations","migrations");
+      fs.mkdirSync(path.dirname(directory),{recursive:true});
+      fs.cpSync(path.join(root,"apps","operations","migrations"),directory,{recursive:true});
+      mutate(directory);
+      assert.throws(()=>compileOrganizationRelationshipAuthority(input(),{root:temporary}),/canonical 183 migration chain required/,label);
+    }finally{fs.rmSync(temporary,{recursive:true,force:true});}
+  }
+});
 
 test("v2 compiler reactivates the sole exact inactive pair with retained IDs and next versions",()=>{const value=inactiveSnapshot(),artifact=compileOrganizationRelationshipAuthority(value),updates=artifact.statements.filter(row=>row.sql.startsWith("UPDATE native_directory_grants"));
   assert.deepEqual(artifact.selection,{mode:"reactivate",historyVersions:[3,3]});assert.equal(updates.length,2);assert.deepEqual(updates.map(row=>row.params),[[1,ids[0],target.staffId,"directory.profile.edit",target.recordId,0,target.staffId],[1,ids[1],target.staffId,"directory.identity.link",target.recordId,0,target.staffId]]);assert.equal(JSON.parse(artifact.receipt.result_json).operation,"reactivate");});

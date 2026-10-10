@@ -10,7 +10,7 @@ export const SCHEMA_VERSION=1;
 export const PURPOSE="synthetic-staging-business-area-project-shared-sync";
 export const PINNED_OPERATOR=Object.freeze({staffId:"staff-beau-koltz",email:"beaukoltz@ledgetopdroneservices.com",displayName:"Beau Koltz",accessSubject:"1fa6ad50-df7f-5b76-8884-6d46548d6627"});
 export const PINNED_BUSINESS_AREA=Object.freeze({id:"staging-native-only-portal-acceptance-20261008-window-1",name:"Synthetic portal acceptance - 2026-10-08 window 1"});
-const CHAIN=Object.freeze({count:182,final:"0182_project_alpha_directory_relationship_recovery_guard.sql",names:"5ca01798b82652a4b6bb64a35be85a82673d940d6e762805c147408e3ca298d8",contents:"09ebfcc544263a90c96b8ed5548cdc73e38e524aec977aa37042bc280f9dae56"});
+const CHAIN=Object.freeze({count:183,final:"0183_project_alpha_binding_standalone_relationship_rows.sql",names:"e85a63e7f7f018f8fb473f913660d5fbe13d798d3c19e281342b0cbca70d5ac7",contents:"134957a54a3eb9462a2e19b839d0aa2bb5fe5eb46096dc4677ab9d8324547cb8"});
 const UUID=/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const TS=/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 const GRANT=["id","staff_id","capability","effect","scope_kind","business_area_id","division_id","external_project_id","active","version","granted_by","created_at"];
@@ -29,7 +29,7 @@ function plainTree(v,label="input"){
 function text(v,max,label){if(typeof v!=="string"||!v.length||v.length>max||v!==v.trim()||/[\u0000-\u001f\u007f]/.test(v))fail(label);}
 function timestamp(v,label){if(typeof v!=="string"||!TS.test(v)||new Date(v).toISOString()!==v)fail(label);}
 function actualTimestamp(v){return typeof v==="string"&&TS.test(v)&&Number.isFinite(Date.parse(v))&&new Date(v).toISOString()===v;}
-function reviewedMigrations(root){const dir=path.join(root,"apps","operations","migrations"),names=fs.readdirSync(dir).filter(n=>/^\d{4}_.+\.sql$/.test(n)&&n<=CHAIN.final).sort();const contents=names.map(n=>{const f=path.join(dir,n),s=fs.lstatSync(f);if(!s.isFile()||s.isSymbolicLink())fail("regular migration file required");return `${n}\0${sha(fs.readFileSync(f))}`;});if(names.length!==CHAIN.count||names.at(-1)!==CHAIN.final||sha(names.join("\n"))!==CHAIN.names||sha(contents.join("\n"))!==CHAIN.contents)fail("exact reviewed migration chain required");return names;}
+function reviewedMigrations(root){const dir=path.join(root,"apps","operations","migrations"),names=fs.readdirSync(dir).filter(n=>/^\d{4}_.+\.sql$/.test(n)).sort();const contents=names.map(n=>{const f=path.join(dir,n),s=fs.lstatSync(f);if(!s.isFile()||s.isSymbolicLink())fail("regular migration file required");return `${n}\0${sha(fs.readFileSync(f))}`;});if(names.length!==CHAIN.count||names.at(-1)!==CHAIN.final||sha(names.join("\n"))!==CHAIN.names||sha(contents.join("\n"))!==CHAIN.contents)fail("exact reviewed migration chain required");return names;}
 function validate(raw){
  plainTree(raw);const i=structuredClone(raw);exact(i,["schemaVersion","purpose","staging","admission","profile","businessArea","generation","grants","approval"],"input");
  if(i.schemaVersion!==SCHEMA_VERSION||i.purpose!==PURPOSE||!same(i.staging,STAGING_TARGET))fail("staging contract");
