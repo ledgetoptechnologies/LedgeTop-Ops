@@ -116,8 +116,8 @@ describe("verified recipient authority canonical joined prerequisite",()=>{
       .bind(written.outcome.commandIds[0],canonicalUuidOrganization.recordId).first("count")).toBe(1);
     const authority=await authorizeCanonicalUuidAcquisition(ops);
     expect(await applyCanonicalTail(ops,"0152_operations_portal_workspace_reservations.sql",
-      "0169_project_alpha_existing_directory_binding_generation_evidence.sql")).toHaveLength(17);
-    expect(await ops.prepare("SELECT count(*) count FROM d1_migrations").first("count")).toBe(169);
+      "0170_project_alpha_active_directory_project_guard.sql")).toHaveLength(18);
+    expect(await ops.prepare("SELECT count(*) count FROM d1_migrations").first("count")).toBe(170);
     const fetcher=projectAlphaRemote(),reviewId="40000000-0000-4000-8000-000000000001",commandId="40000000-0000-4000-8000-000000000002";
     const acquired=await acquireProjectAlphaExistingDirectoryBinding({OPS_DB:ops,PROJECT_ALPHA_API_V2_CONNECTIONS:connections},{reviewId,commandId,
       sourceId:acquiredSource.sourceId,recordId:canonicalUuidOrganization.recordId,externalId:canonicalUuidOrganization.recordId,resourceType:"organization",
@@ -140,7 +140,7 @@ describe("verified recipient authority canonical joined prerequisite",()=>{
     const activated=await activateProjectAlphaExistingDirectoryBinding({OPS_DB:ops,PROJECT_ALPHA_API_V2_CONNECTIONS:connections},
       {reviewItemId:acquired.reviewReceiptId,idempotencyKey:"40000000-0000-4000-8000-000000000003"},
       {staffId:canonicalOwner.operationsStaffId,accessSubject:canonicalOwner.accessSubject},fetcher);
-    expect(activated).toMatchObject({status:"activated",replayed:false,recordId:canonicalUuidOrganization.recordId});
+    expect(activated,JSON.stringify(activated)).toMatchObject({status:"activated",replayed:false,recordId:canonicalUuidOrganization.recordId});
     if(activated.status!=="activated")throw Error(`canonical activation failed: ${JSON.stringify(activated)}`);
     expect(await ops.prepare(`SELECT count(*) count FROM project_alpha_existing_directory_binding_activation_receipts activation
       JOIN project_alpha_existing_directory_binding_acquired_mapping_receipts acquired
@@ -181,6 +181,7 @@ describe("verified recipient authority canonical joined prerequisite",()=>{
         canonicalUuidOrganization.sourceId,written.outcome.commandIds[0]!,createRemote())).resolves.toMatchObject({status:"acknowledged"});
       const reviewer=await transitionCleanV3ToV4Acquisition(database),fetcher=projectAlphaRemote();
       await applyCanonicalMigrationSchema(database,"0169_project_alpha_existing_directory_binding_generation_evidence.sql");
+      await applyCanonicalMigrationSchema(database,"0170_project_alpha_active_directory_project_guard.sql");
       const acquired=await acquireProjectAlphaExistingDirectoryBinding({OPS_DB:database,PROJECT_ALPHA_API_V2_CONNECTIONS:connections},{
         reviewId:"70000000-0000-4000-8000-000000000001",commandId:"70000000-0000-4000-8000-000000000002",
         sourceId:acquiredSource.sourceId,recordId:canonicalUuidOrganization.recordId,externalId:canonicalUuidOrganization.recordId,resourceType:"organization",
@@ -190,7 +191,7 @@ describe("verified recipient authority canonical joined prerequisite",()=>{
       const activated=await activateProjectAlphaExistingDirectoryBinding({OPS_DB:database,PROJECT_ALPHA_API_V2_CONNECTIONS:connections},
         {reviewItemId:acquired.reviewReceiptId,idempotencyKey:"70000000-0000-4000-8000-000000000003"},
         {staffId:canonicalOwner.operationsStaffId,accessSubject:canonicalOwner.accessSubject},fetcher);
-      expect(activated).toMatchObject({status:"activated",replayed:false});if(activated.status!=="activated")throw Error(JSON.stringify(activated));
+      expect(activated,JSON.stringify(activated)).toMatchObject({status:"activated",replayed:false});if(activated.status!=="activated")throw Error(JSON.stringify(activated));
       const portal=await transitionCleanV4ToV6PortalAuthority(database,activated.activationId);
       const actor={identity:{kind:"native" as const,staffId:canonicalOwner.operationsStaffId,
         verifiedAccessSubject:canonicalOwner.accessSubject,email:canonicalOwner.email,displayName:canonicalOwner.displayName,
@@ -216,6 +217,7 @@ describe("verified recipient authority canonical joined prerequisite",()=>{
       expect(await database.prepare("SELECT count(*) count FROM verified_recipient_delivery_authority_commands")
         .first("count")).toBe(0);
       await registerCanonicalMigration(database,"0169_project_alpha_existing_directory_binding_generation_evidence.sql");
+      await registerCanonicalMigration(database,"0170_project_alpha_active_directory_project_guard.sql");
     }finally{await isolated.dispose();}
   },240_000);
 
@@ -248,6 +250,7 @@ describe("verified recipient authority canonical joined prerequisite",()=>{
 
       const authority=await transitionHistoricalOnboardingToV7Acquisition(database);
       await applyCanonicalMigrationSchema(database,"0169_project_alpha_existing_directory_binding_generation_evidence.sql");
+      await applyCanonicalMigrationSchema(database,"0170_project_alpha_active_directory_project_guard.sql");
       expect(authority.reviewer).toMatchObject({admissionVersion:5,profileVersion:1,grantGeneration:6});
       expect((await database.prepare(`SELECT grant_version,active,grant_generation FROM native_directory_grant_history
         WHERE grant_id=? ORDER BY grant_version`).bind(historical.onboardingGrantId).all()).results).toEqual([
@@ -277,7 +280,7 @@ describe("verified recipient authority canonical joined prerequisite",()=>{
       const activationRequest={reviewItemId:acquired.reviewReceiptId,idempotencyKey:"80000000-0000-4000-8000-000000000003"};
       const activated=await activateProjectAlphaExistingDirectoryBinding({OPS_DB:database,PROJECT_ALPHA_API_V2_CONNECTIONS:connections},
         activationRequest,{staffId:canonicalOwner.operationsStaffId,accessSubject:canonicalOwner.accessSubject},fetcher);
-      expect(activated).toMatchObject({status:"activated",replayed:false,recordId:canonicalUuidOrganization.recordId});
+      expect(activated,JSON.stringify(activated)).toMatchObject({status:"activated",replayed:false,recordId:canonicalUuidOrganization.recordId});
       if(activated.status!=="activated")throw Error(JSON.stringify(activated));
       await expect(activateProjectAlphaExistingDirectoryBinding({OPS_DB:database,PROJECT_ALPHA_API_V2_CONNECTIONS:connections},
         activationRequest,{staffId:canonicalOwner.operationsStaffId,accessSubject:canonicalOwner.accessSubject},fetcher))
@@ -321,6 +324,7 @@ describe("verified recipient authority canonical joined prerequisite",()=>{
       ]);
       await expect(selectPortalWorkspaceBinding(database,portal.actor,selectionCommand)).rejects.toThrow("portal_workspace_binding_selection_denied");
       await registerCanonicalMigration(database,"0169_project_alpha_existing_directory_binding_generation_evidence.sql");
+      await registerCanonicalMigration(database,"0170_project_alpha_active_directory_project_guard.sql");
     }finally{await isolated.dispose();}
   },240_000);
 });
