@@ -31,6 +31,18 @@ test("bounded relationship recovery release tooling remains a required local CI 
   ]) assert.ok(sourceJob.includes(`scripts/${filename}`), `${filename} must run in source invariants`);
 });
 
+test("ordinary sync acceptance keeps real-schema authority and scalar checks in CI", () => {
+  const workflow = read(".github/workflows/ci.yml");
+  const sourceJob = workflow.slice(workflow.indexOf("  source-invariants:"), workflow.indexOf("  incoming-pickup:"));
+  for (const filename of [
+    "staging-project-business-area-authority-v184.test.mjs",
+    "staging-project-business-area-authority-v184-apply.test.mjs",
+    "staging-project-business-area-authority-v184-fullschema.test.mjs",
+    "staging-directory-scalar-settlement.test.mjs",
+    "staging-directory-scalar-settlement-fullschema.test.mjs",
+  ]) assert.ok(sourceJob.includes(`scripts/${filename}`), `${filename} must run in source invariants`);
+});
+
 function filesUnder(relativeDirectory, predicate = () => true) {
   return fs.readdirSync(path.join(root, relativeDirectory), { withFileTypes: true }).flatMap((entry) => {
     const relative = path.join(relativeDirectory, entry.name);

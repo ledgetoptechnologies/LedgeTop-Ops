@@ -65,6 +65,12 @@ jobs:
       - name: Verify bounded v184 relationship recovery authority and release configuration locally
         run: node --test scripts/staging-relationship-generation-recovery-authority-v184.test.mjs scripts/staging-relationship-generation-recovery-authority-v184-window.test.mjs scripts/staging-relationship-generation-recovery-authority-v184-fullschema.test.mjs scripts/staging-relationship-recovery-release-config.test.mjs
 
+      - name: Verify closed-lineage Project authority and paired cleanup locally
+        run: node --test scripts/staging-project-business-area-authority-v184.test.mjs scripts/staging-project-business-area-authority-v184-apply.test.mjs scripts/staging-project-business-area-authority-v184-fullschema.test.mjs
+
+      - name: Verify ordinary Directory scalar settlement and cleanup locally
+        run: node --test scripts/staging-directory-scalar-settlement.test.mjs scripts/staging-directory-scalar-settlement-fullschema.test.mjs
+
   incoming-pickup:
     name: incoming-pickup-alpine
     runs-on: ubuntu-24.04

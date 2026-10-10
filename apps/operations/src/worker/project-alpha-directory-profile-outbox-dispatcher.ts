@@ -151,21 +151,20 @@ async function acquiredMappingRevisionMatches(db: D1Database, row: AcquiredUpdat
     || typeof mapping.provenance_id !== "string" || typeof command.expectedRevision !== "string"
     || typeof command.expectedAuthorizationGeneration !== "string"
     || command.expectedProjectAlphaPublicId !== mapping.project_alpha_public_id) return false;
-  const versions = (await db.prepare(`SELECT revision,authorization_generation FROM (
-      SELECT activation.project_alpha_revision revision,? authorization_generation
-      FROM project_alpha_existing_directory_binding_activation_receipts activation
-      WHERE activation.activation_id=? AND activation.record_id=? AND activation.local_record_version=?
-        AND activation.source_id=? AND activation.source_instance_id=? AND activation.application_id=?
-        AND activation.history_epoch_id=? AND activation.resource_type=? AND activation.external_id=?
-        AND activation.project_alpha_public_id=?
-      UNION ALL
-      SELECT refresh.live_revision revision,refresh.authorization_generation
-      FROM project_alpha_existing_directory_binding_revision_refresh_receipts refresh
-      WHERE refresh.record_id=? AND refresh.local_record_version=? AND refresh.source_id=?
-        AND refresh.source_instance_id=? AND refresh.application_id=? AND refresh.history_epoch_id=?
-        AND refresh.resource_type=? AND refresh.external_id=? AND refresh.project_alpha_public_id=?
-      UNION ALL
-      SELECT json_extract(outbox.outcome_json,'$.response.result.resource.revision') revision,
+  type Version = { revision: unknown; authorization_generation: unknown };
+  const authoritative = (values: Version[]): Version | null => {
+    const bounded=(value:unknown,zero=false):value is string=>typeof value==="string"
+      &&(zero?/^(?:0|[1-9][0-9]{0,18})$/:/^[1-9][0-9]{0,18}$/).test(value)
+      && (value.length<PROJECT_ALPHA_PROJECT_MAX_INTEGER.length||value<=PROJECT_ALPHA_PROJECT_MAX_INTEGER);
+    if (!values.length || values.some(value => !bounded(value.revision) || !bounded(value.authorization_generation,true))) return null;
+    const canonicalValues=values as {revision:string;authorization_generation:string}[];
+    const maximum=canonicalValues.reduce((left,right)=>left.length>right.revision.length
+      ||(left.length===right.revision.length&&left>right.revision)?left:right.revision,canonicalValues[0]!.revision);
+    const heads=new Map(canonicalValues.filter(value=>value.revision===maximum)
+      .map(value=>[`${value.revision}\0${value.authorization_generation}`,value]));
+    return heads.size===1?heads.values().next().value??null:null;
+  };
+  const delivered = (await db.prepare(`SELECT json_extract(outbox.outcome_json,'$.response.result.resource.revision') revision,
         json_extract(outbox.outcome_json,'$.response.result.authorizationGeneration') authorization_generation
       FROM operations_directory_intents intent
       JOIN operations_directory_records record ON record.record_id=intent.record_id
@@ -187,18 +186,54 @@ async function acquiredMappingRevisionMatches(db: D1Database, row: AcquiredUpdat
         AND json_extract(outbox.outcome_json,'$.response.applicationId')=intent.application_uuid
         AND json_extract(outbox.outcome_json,'$.response.historyEpoch')=intent.expected_history_epoch_id
         AND json_extract(outbox.outcome_json,'$.response.result.resource.type')=record.record_kind
-        AND json_extract(outbox.outcome_json,'$.response.result.resource.publicId')=?
-    ) WHERE revision IS NOT NULL AND authorization_generation IS NOT NULL LIMIT 2`)
-    .bind(command.expectedAuthorizationGeneration, mapping.provenance_id, row.record_id, row.record_version - 1,
+        AND json_extract(outbox.outcome_json,'$.response.result.resource.publicId')=?`)
+    .bind(row.record_id,row.record_version-1,row.source_id,row.expected_source_instance_id,row.application_id,
+      row.expected_history_epoch_id,row.destination_base_url,row.external_id,mapping.project_alpha_public_id,mapping.project_alpha_public_id)
+    .all<Version>()).results;
+  const refreshed = (await db.prepare(`SELECT refresh.live_revision revision,refresh.authorization_generation
+      FROM project_alpha_existing_directory_binding_revision_refresh_receipts refresh
+      JOIN project_alpha_existing_directory_binding_activation_receipts activation ON activation.activation_id=?
+      JOIN project_alpha_acquired_native_owner_claims claim ON claim.claim_id=refresh.native_owner_claim_id
+        AND claim.receipt_id=activation.acquired_receipt_id AND claim.record_id=refresh.record_id AND claim.source_id=refresh.source_id
+        AND claim.source_instance_id=refresh.source_instance_id AND claim.application_id=refresh.application_id
+        AND claim.history_epoch_id=refresh.history_epoch_id AND claim.resource_type=refresh.resource_type
+        AND claim.external_id=refresh.external_id AND claim.project_alpha_public_id=refresh.project_alpha_public_id
+        AND activation.record_id=refresh.record_id AND activation.local_record_version=refresh.local_record_version
+        AND activation.source_id=refresh.source_id AND activation.source_instance_id=refresh.source_instance_id
+        AND activation.application_id=refresh.application_id AND activation.history_epoch_id=refresh.history_epoch_id
+        AND activation.resource_type=refresh.resource_type AND activation.external_id=refresh.external_id
+        AND activation.project_alpha_public_id=refresh.project_alpha_public_id
+      WHERE refresh.record_id=? AND refresh.local_record_version=? AND refresh.source_id=?
+        AND refresh.source_instance_id=? AND refresh.application_id=? AND refresh.history_epoch_id=?
+        AND refresh.resource_type=? AND refresh.external_id=? AND refresh.project_alpha_public_id=?
+        AND NOT EXISTS(SELECT 1 FROM project_alpha_existing_directory_binding_revision_refresh_commands successor
+          WHERE successor.predecessor_refresh_receipt_id=refresh.receipt_id)`)
+    .bind(mapping.provenance_id,row.record_id,row.record_version-1,row.source_id,row.expected_source_instance_id,
+      row.application_id,row.expected_history_epoch_id,row.resource_type,row.external_id,mapping.project_alpha_public_id).all<Version>()).results;
+  const refreshCommands=await db.prepare(`SELECT count(*) count
+      FROM project_alpha_existing_directory_binding_revision_refresh_commands command
+      JOIN project_alpha_existing_directory_binding_activation_receipts activation ON activation.activation_id=?
+      JOIN project_alpha_acquired_native_owner_claims claim ON claim.claim_id=command.native_owner_claim_id
+        AND claim.receipt_id=activation.acquired_receipt_id
+      WHERE command.record_id=? AND command.expected_local_record_version=? AND command.source_id=?
+        AND command.source_instance_id=? AND command.application_id=? AND command.history_epoch_id=?
+        AND command.resource_type=? AND command.external_id=? AND command.project_alpha_public_id=?`)
+    .bind(mapping.provenance_id,row.record_id,row.record_version-1,row.source_id,row.expected_source_instance_id,
+      row.application_id,row.expected_history_epoch_id,row.resource_type,row.external_id,mapping.project_alpha_public_id).first<number>("count");
+  if((refreshCommands??0)>0&&refreshed.length!==1)return false;
+  const activated = (await db.prepare(`SELECT activation.project_alpha_revision revision,
+        activation.result_authorization_generation authorization_generation
+      FROM project_alpha_existing_directory_binding_activation_receipts activation
+      WHERE activation.activation_id=? AND activation.record_id=? AND activation.local_record_version=?
+        AND activation.source_id=? AND activation.source_instance_id=? AND activation.application_id=?
+        AND activation.history_epoch_id=? AND activation.resource_type=? AND activation.external_id=?
+        AND activation.project_alpha_public_id=?`)
+    .bind(mapping.provenance_id, row.record_id, row.record_version - 1,
       row.source_id, row.expected_source_instance_id, row.application_id, row.expected_history_epoch_id,
-      row.resource_type, row.external_id, mapping.project_alpha_public_id,
-      row.record_id, row.record_version - 1, row.source_id, row.expected_source_instance_id, row.application_id,
-      row.expected_history_epoch_id, row.resource_type, row.external_id, mapping.project_alpha_public_id,
-      row.record_id, row.record_version - 1, row.source_id, row.expected_source_instance_id, row.application_id,
-      row.expected_history_epoch_id, row.destination_base_url, row.external_id, mapping.project_alpha_public_id,
-      mapping.project_alpha_public_id).all<{ revision: string; authorization_generation: string }>()).results;
-  return versions.length === 1 && versions[0]!.revision === command.expectedRevision
-    && versions[0]!.authorization_generation === command.expectedAuthorizationGeneration;
+      row.resource_type, row.external_id, mapping.project_alpha_public_id).all<Version>()).results;
+  const selected = authoritative([...activated,...refreshed,...delivered]);
+  return selected?.revision === command.expectedRevision
+    && selected.authorization_generation === command.expectedAuthorizationGeneration;
 }
 /** Verifies the prior PA state for one acquired mapping before an update is sent. */
 export async function acquiredDirectoryMappingUpdateEvidence(db: D1Database, context: AcquiredUpdateContext,

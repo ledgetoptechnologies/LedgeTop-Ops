@@ -3,7 +3,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { Miniflare } from "miniflare";
 import { splitD1MigrationStatements } from "../../client/test/helpers/d1-migrations";
 import { writeNativeDirectoryProfile, type NativeDirectoryCreateWrite, type NativeDirectoryProfileWrite } from "../src/worker/native-directory-profile-writer";
-import { dispatchProjectAlphaDirectoryProfileOutboxCommand } from "../src/worker/project-alpha-directory-profile-outbox-dispatcher";
+import { acquiredDirectoryMappingUpdateEvidence, dispatchProjectAlphaDirectoryProfileOutboxCommand } from "../src/worker/project-alpha-directory-profile-outbox-dispatcher";
 import { drainNativeDirectoryOutboxes } from "../src/worker/native-directory-outbox-scheduler";
 import { stagingDirectoryDestinationProof } from "../src/worker/staging-directory-destination-readback";
 import { evaluateStagingDirectoryDestinationReadback, expectedStagingDirectoryDestinationProfile }
@@ -352,6 +352,42 @@ describe("native Directory profile outbox dispatcher", () => {
       negativeClient.commandId, noSend)).resolves.toEqual({ status: "conflict", reason: "command" });
     expect(corruptedDependencyReads).toBeGreaterThan(0);
     expect(noSend).not.toHaveBeenCalled();
+  });
+
+  it("selects the current acquired head and fails closed for pending, ambiguous, or malformed refresh evidence", async () => {
+    const context={record_id:"ops-client",external_id:"pa-client",source_id:sourceId,expected_source_instance_id:source,
+      application_id:application,expected_history_epoch_id:epoch,resource_type:"client" as const,destination_base_url:baseUrl,record_version:2};
+    const mapping={record_id:"ops-client",external_id:"pa-client",project_alpha_public_id:"a".repeat(32),
+      mapping_kind:"acquired",provenance_id:"55555555-5555-4555-8555-555555555555"};
+    type Evidence={revision:unknown;authorization_generation:unknown};
+    const evidenceDb=(value:{delivered?:Evidence[];refreshed?:Evidence[];activated?:Evidence[];refreshCommands?:number})=>({
+      prepare(sql:string){const statement={bind(){return statement},async first(column?:string){
+        if(sql.includes("sqlite_master"))return null;
+        if(sql.includes("count(*) count")){const count=value.refreshCommands??value.refreshed?.length??0;return column?count:{count};}
+        return null;},async all(){
+        if(sql.includes("FROM project_alpha_active_directory_mappings WHERE"))return{results:[mapping]};
+        if(sql.includes("SELECT refresh.live_revision revision"))return{results:value.refreshed??[]};
+        if(sql.includes("SELECT activation.project_alpha_revision revision"))return{results:value.activated??[]};
+        if(sql.includes("FROM operations_directory_intents intent"))return{results:value.delivered??[]};
+        return{results:[]};}};return statement;},
+    }) as unknown as D1Database;
+    const check=(value:Parameters<typeof evidenceDb>[0],revision:string,generation:string)=>
+      acquiredDirectoryMappingUpdateEvidence(evidenceDb(value),context,revision,generation,mapping.project_alpha_public_id);
+    await expect(check({activated:[{revision:"7",authorization_generation:"1"}],refreshed:[{revision:"9",authorization_generation:"3"}],refreshCommands:2},"9","3")).resolves.toBe(true);
+    await expect(check({activated:[{revision:"7",authorization_generation:"1"}],refreshed:[{revision:"9",authorization_generation:"3"}],
+      delivered:[{revision:"8",authorization_generation:"2"}],refreshCommands:2},"9","3")).resolves.toBe(true);
+    await expect(check({activated:[{revision:"7",authorization_generation:"1"}],refreshed:[{revision:"9",authorization_generation:"3"}],
+      delivered:[{revision:"10",authorization_generation:"3"}],refreshCommands:2},"10","3")).resolves.toBe(true);
+    await expect(check({activated:[{revision:"7",authorization_generation:"1"}],refreshed:[{revision:"9",authorization_generation:"3"}],
+      delivered:[{revision:"10",authorization_generation:"3"}],refreshCommands:2},"9","3")).resolves.toBe(false);
+    await expect(check({activated:[{revision:"7",authorization_generation:"1"}],refreshed:[{revision:"9",authorization_generation:"3"}],
+      delivered:[{revision:"9",authorization_generation:"4"}],refreshCommands:2},"9","3")).resolves.toBe(false);
+    await expect(check({activated:[{revision:"7",authorization_generation:"1"}],refreshed:[],refreshCommands:2},"7","1")).resolves.toBe(false);
+    await expect(check({activated:[{revision:"7",authorization_generation:"1"}],refreshed:[{revision:"9",authorization_generation:"3"},
+      {revision:"9",authorization_generation:"4"}],refreshCommands:2},"9","3")).resolves.toBe(false);
+    for(const malformed of [{revision:9,authorization_generation:"3"},{revision:"9",authorization_generation:null},
+      {revision:"9223372036854775808",authorization_generation:"3"}])
+      await expect(check({activated:[{revision:"7",authorization_generation:"1"}],refreshed:[malformed],refreshCommands:1},"9","3")).resolves.toBe(false);
   });
 
   it("retries an uncertain request with the same command and safely terminalizes a trusted conflict", async () => {
