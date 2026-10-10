@@ -99,7 +99,8 @@ async function discover(db: D1Database, record: string, source: string): Promise
       AND organization_mapping.application_id=predecessor.application_id AND organization_mapping.history_epoch_id=predecessor.history_epoch_id
     WHERE predecessor.client_record_id=? AND predecessor.source_id=? AND predecessor.state='terminal' AND predecessor.action='assign'
       AND predecessor.expected_current_organization_record_id IS NULL AND predecessor.expected_current_organization_public_id IS NULL
-      AND json_extract(predecessor.outcome_json,'$.status')='conflict' AND json_extract(predecessor.outcome_json,'$.httpStatus')=409
+      AND json_extract(predecessor.outcome_json,'$.directoryRelationshipDispatcher')='conflict'
+      AND json_extract(predecessor.outcome_json,'$.httpStatus')=409
       AND NOT EXISTS(SELECT 1 FROM project_alpha_directory_relationship_generation_recoveries recovery
         WHERE recovery.predecessor_command_id=predecessor.command_id)
       AND EXISTS(SELECT 1 FROM native_directory_enrollments enrollment,json_each(enrollment.destinations_json) destination

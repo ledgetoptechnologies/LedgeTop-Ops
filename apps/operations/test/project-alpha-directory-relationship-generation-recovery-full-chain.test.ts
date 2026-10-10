@@ -41,7 +41,7 @@ function setup(){const db=new DatabaseSync(":memory:");db.exec("PRAGMA foreign_k
       expected_organization_revision,command_json,request_json,state,next_attempt_at,outcome_json,created_at,updated_at)
       VALUES('${predecessor}','mutation','${client}',2,'assign','${source}','${instance}','${application}','${epoch}','${origin}',
       '${clientPublic}','7','10',NULL,NULL,'${org}','${orgPublic}','9',json('${command(predecessor,"10")}'),json_object('body',1),'terminal',0,
-      json_object('status','conflict','reason','remote','httpStatus',409),'2026-01-01T00:00:00.000Z','2026-01-01T00:00:00.000Z');
+      json_object('directoryRelationshipDispatcher','conflict','reason','http_status','httpStatus',409),'2026-01-01T00:00:00.000Z','2026-01-01T00:00:00.000Z');
     INSERT INTO project_alpha_api_v2_inventory_receipts(source_id,source_instance_id,application_id,history_epoch_id,inventory_kind,request_id,
       authorization_generation,page_sha256,item_count) VALUES
       ('${source}','${instance}','${application}','${epoch}','directory','${clientRequest}','11','${z}',1),
