@@ -836,11 +836,18 @@ async function profile(c: AppContext, kind: NativeDirectoryProfileKind) {
   const settled = relationship && sourceIds ? await relationshipDeliverySettled(c.env.OPS_DB, record,
     relationship.relationship_version, sourceIds.length) : false;
   const available = !!relationship && !!sourceIds && settled && (relationship.organization_record_id === null || !!selected);
+  const relationshipAuthorized = !!relationship && await Promise.all(
+    (["directory.profile.edit", "directory.identity.link"] as const)
+      .map(permission => selectGrant(c.env.OPS_DB, actor.staffId, permission, record, [], false)))
+    .then(grants => grants.every(Boolean));
   return c.json({ recordId: record, kind, version: current.version, profile: normalizeProfile(current.profile),
     scopes: currentScopes.data, linkage: relationship?.organization_record_id ? "linked" : relationship ? "standalone" : "unavailable",
     relationship: relationship ? { version: relationship.relationship_version,
       organization: selected ? { recordId: selected.recordId, expectedVersion: selected.expectedVersion, name: selected.name } : null,
-      organizations: choices.map(choice => ({ recordId: choice.recordId, expectedVersion: choice.expectedVersion, name: choice.name })) } : null,
+      organizations: choices.map(choice => ({ recordId: choice.recordId, expectedVersion: choice.expectedVersion, name: choice.name })),
+      editing: available && relationshipAuthorized ? { available: true, reason: null }
+        : { available: false, reason: !relationshipAuthorized ? "relationship_permission_required"
+          : relationship && !settled ? "relationship_delivery_pending" : "relationship_state_unavailable" } } : null,
     editing: available ? { available: true, reason: null } : { available: false,
       reason: relationship && !settled ? "relationship_delivery_pending" : "relationship_state_unavailable" } });
 }

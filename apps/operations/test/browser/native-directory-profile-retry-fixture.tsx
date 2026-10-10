@@ -2,7 +2,7 @@ import { useState } from "react";
 import { createRoot } from "react-dom/client";
 import { NativeDirectoryProfileCreate, NativeDirectoryProfileEdit } from "../../src/client/NativeDirectoryProfileEditor";
 
-type Scenario = "create-lost-response" | "admission-400" | "write-400" | "record-switch" | "reload-failure";
+type Scenario = "create-lost-response" | "admission-400" | "write-400" | "record-switch" | "reload-failure" | "relationship-readonly";
 type Call = { path: string; method: string; mutationId: string | null; body: string | null };
 const fixtureWindow = window as Window & { nativeDirectoryScenario?: Scenario; nativeDirectoryCalls?: Call[] };
 const scenario = fixtureWindow.nativeDirectoryScenario ?? "create-lost-response", calls: Call[] = [];
@@ -19,6 +19,17 @@ function snapshot(recordId: string, version = 1) {
     profile: { name: recordId === "record-one" ? "Record One" : "Record Two", generalEmail: "", generalPhone: "",
       addressLine1: "", addressLine2: "", city: "", state: "", postalCode: "", country: "" },
     scopes: [{ businessAreaId: "area:one", divisionId: null }], editing: { available: true, reason: null } };
+}
+
+function readonlyClientSnapshot() {
+  return { recordId: "client-one", kind: "client", version: 1,
+    profile: { name: "Client One", email: "", phone: "", clientType: "business",
+      addressLine1: "", addressLine2: "", city: "", state: "", postalCode: "", country: "" },
+    scopes: [{ businessAreaId: "area:one", divisionId: null }], linkage: "standalone",
+    relationship: { version: 1, organization: null,
+      organizations: [{ recordId: "organization-one", expectedVersion: 1, name: "Organization One" }],
+      editing: { available: false, reason: "relationship_permission_required" } },
+    editing: { available: true, reason: null } };
 }
 
 window.fetch = async (input, init) => {
@@ -43,6 +54,8 @@ window.fetch = async (input, init) => {
     return Response.json({ status: "pending", recordId: parsed.mutationId, kind: "organization", version: 1, replayed: true,
       destinations: [{ sourceId, state: "pending" }] });
   }
+  if (path.endsWith("/standalone-clients/client-one") && method === "GET")
+    return Response.json(readonlyClientSnapshot());
   const match = path.match(/\/organizations\/(record-(?:one|two))$/);
   if (match && method === "GET") {
     const recordId = match[1]!;
@@ -65,6 +78,7 @@ window.fetch = async (input, init) => {
 function Fixture() {
   const [recordId, setRecordId] = useState("record-one");
   if (["create-lost-response", "admission-400", "write-400"].includes(scenario)) return <NativeDirectoryProfileCreate />;
+  if (scenario === "relationship-readonly") return <NativeDirectoryProfileEdit kind="client" recordId="client-one" />;
   return <><button type="button" onClick={() => setRecordId("record-two")}>Switch to record two</button>
     <NativeDirectoryProfileEdit kind="organization" recordId={recordId} /></>;
 }

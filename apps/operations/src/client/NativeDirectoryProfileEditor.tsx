@@ -15,7 +15,8 @@ export type ProfileForm = {
 type ProfileSnapshot = {
   recordId: string; kind: Kind; version: number; profile: ProfileForm; scopes: Scope[];
   linkage?: "standalone" | "linked" | "unavailable";
-  relationship?: { version: number; organization: OrganizationChoice | null; organizations: OrganizationChoice[] } | null;
+  relationship?: { version: number; organization: OrganizationChoice | null; organizations: OrganizationChoice[];
+    editing: { available: boolean; reason: string | null } } | null;
   editing: { available: boolean; reason: string | null };
 };
 type OrganizationChoice = { recordId: string; expectedVersion: number; name: string };
@@ -59,7 +60,12 @@ function usableSnapshot(value: unknown, kind: Kind, recordId: string): value is 
       && ((row.relationship as Record<string, unknown>).organization === null
         || usableOrganizationChoice((row.relationship as Record<string, unknown>).organization))
       && Array.isArray((row.relationship as Record<string, unknown>).organizations)
-      && ((row.relationship as Record<string, unknown>).organizations as unknown[]).every(usableOrganizationChoice)))
+      && ((row.relationship as Record<string, unknown>).organizations as unknown[]).every(usableOrganizationChoice)
+      && (row.relationship as Record<string, unknown>).editing !== null
+      && typeof (row.relationship as Record<string, unknown>).editing === "object"
+      && typeof ((row.relationship as Record<string, unknown>).editing as Record<string, unknown>).available === "boolean"
+      && (((row.relationship as Record<string, unknown>).editing as Record<string, unknown>).reason === null
+        || typeof ((row.relationship as Record<string, unknown>).editing as Record<string, unknown>).reason === "string")))
     && row.editing !== null && typeof row.editing === "object" && !Array.isArray(row.editing)
     && typeof (row.editing as Record<string, unknown>).available === "boolean"
     && ((row.editing as Record<string, unknown>).reason === null || typeof (row.editing as Record<string, unknown>).reason === "string");
@@ -249,7 +255,8 @@ function NativeDirectoryProfileEditBound({ kind, recordId }: { kind: Kind; recor
       {error && <p role="alert">{error}</p>}{success && <p role="status">{success}</p>}
       <button className="button-orange" disabled={busy || Boolean(relationshipAttempt)}>{busy ? "Saving profile…" : profileAttempt ? "Retry same profile update" : "Save client profile"}</button>
     </form>
-    {kind === "client" && snapshot.relationship && <form onSubmit={event => void submitRelationship(event)} className="client-directory-profile-form">
+    {kind === "client" && snapshot.relationship && (snapshot.relationship.editing.available
+      ? <form onSubmit={event => void submitRelationship(event)} className="client-directory-profile-form">
       <h3>Organization relationship</h3><p>This is separate from profile editing. Saving here will assign, move, or remove the client’s organization relationship.</p>
       <label htmlFor={`${id}-relationship`}>Organization<select id={`${id}-relationship`} value={relationshipOrganizationId} disabled={Boolean(profileAttempt || relationshipAttempt)}
         onChange={event => setRelationshipOrganizationId(event.target.value)}>
@@ -262,6 +269,7 @@ function NativeDirectoryProfileEditBound({ kind, recordId }: { kind: Kind; recor
           ? relationshipOrganizationId ? "Move client to organization" : "Remove organization relationship"
           : "Assign client to organization"}
       </button>
-    </form>}
+    </form>
+      : <section><h3>Organization relationship</h3><p>The organization relationship is read-only because current relationship authority or destination evidence is unavailable.</p></section>)}
   </Card>;
 }

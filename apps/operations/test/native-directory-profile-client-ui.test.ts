@@ -52,6 +52,8 @@ describe("Client Hub profile editor UI contract", () => {
     expect(editor).toContain("Organization relationship");
     expect(editor).toContain("No organization (standalone client)");
     expect(editor).toContain("This is separate from profile editing");
+    expect(editor).toContain("snapshot.relationship.editing.available");
+    expect(editor).toContain("The organization relationship is read-only");
     expect(editor).toContain("expectedRelationshipVersion: snapshot.relationship!.version");
     expect(editor).toContain("Retry same profile creation");
     expect(editor).toContain("Retry same profile update");

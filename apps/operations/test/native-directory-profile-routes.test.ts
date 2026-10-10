@@ -55,7 +55,7 @@ function database(options: { enrollment?: unknown; outboxState?: string; missing
   relationshipReplay?: { organization: { recordId: string; expectedRecordVersion: number } | null;
     supersedeTerminalCommandIds?: string[] };
   terminalPredecessor?: { command_id: string; state: string } | null;
-  relationshipPending?: boolean } = {}) {
+  relationshipPending?: boolean; missingGrantResource?: string } = {}) {
   let preparedAdmission: Row | null = null, preparedRelationship: Row | null = null;
   const db = { prepare(sql: string) {
     let values: unknown[] = [];
@@ -94,7 +94,8 @@ function database(options: { enrollment?: unknown; outboxState?: string; missing
       },
       async first<T>(column?: string): Promise<T | null> {
         let value: unknown = null;
-        if (sql.includes("SELECT grant.id")) value = options.deny === String(values[1]) ? null
+        if (sql.includes("SELECT grant.id")) value = options.deny === String(values[1])
+          || (options.missingGrantResource === values[2] && values[1] !== "directory.profile.view") ? null
           : { id: String(values[1]) === "directory.identity.link" ? "identity-grant" : "edit-grant" };
         else if (sql.includes("SELECT record.current_version version,revision.profile_json")) value = {
           version: 4, profile_json: JSON.stringify(options.profile === "client" ? client : organization),
@@ -306,8 +307,25 @@ describe("native Directory profile routes", () => {
     await expect(response.json()).resolves.toEqual(expect.objectContaining({ recordId: "acquired:client:one", kind: "client", version: 4,
       profile: client, scopes, linkage: "linked", relationship: { version: 2,
         organization: { recordId: acquiredOrganizationId, expectedVersion: 3, name: "Acquired Organization" },
-        organizations: [{ recordId: acquiredOrganizationId, expectedVersion: 3, name: "Acquired Organization" }] },
+        organizations: [{ recordId: acquiredOrganizationId, expectedVersion: 3, name: "Acquired Organization" }],
+        editing: { available: true, reason: null } },
       editing: { available: true, reason: null } }));
+  });
+
+  it("keeps profile editing available but marks relationship editing unavailable without client relationship grants", async () => {
+    const enrollment = [{ sourceId, sourceInstanceUUID: ids.instance, applicationUUID: ids.application,
+      historyEpoch: ids.epoch, origin, externalCanonicalId: "acquired:client:one" }];
+    mocks.organizationChoices.mockResolvedValueOnce([
+      { recordId: acquiredOrganizationId, expectedVersion: 3, name: "Acquired Organization", sourceIds: [sourceId] },
+    ]);
+    const response = await fixture({ db: database({ profile: "client", linked: true, enrollment,
+      missingGrantResource: "acquired:client:one" }) }).send(
+      `${NATIVE_DIRECTORY_PROFILE_ROUTE}/standalone-clients/acquired%3Aclient%3Aone`, null, "GET");
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual(expect.objectContaining({
+      editing: { available: true, reason: null },
+      relationship: expect.objectContaining({ editing: { available: false, reason: "relationship_permission_required" } }),
+    }));
   });
 
   it("prepares and exactly replays a deterministic server-derived create admission", async () => {

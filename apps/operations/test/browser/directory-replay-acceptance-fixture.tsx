@@ -38,7 +38,8 @@ const request = async <T,>(path: string, init: RequestInit = {}): Promise<T> => 
   if (window.directoryReplayMode === "denied") throw new ApiError("denied", 403, {});
   if (!init.method) return { recordId: window.directoryReplayMode === "wrong-record" ? "00000000-0000-4000-8000-000000000000" : RETAINED_SYNTHETIC_CLIENT_ID,
     kind: "client", version, profile, scopes: [{ businessAreaId: "staging-native-only-portal-acceptance-20261008-window-1", divisionId: null }],
-    linkage: "standalone", relationship: { version: 1, organization: null, organizations: [] },
+    linkage: "standalone", relationship: { version: 1, organization: null, organizations: [],
+      editing: { available: true, reason: null } },
     editing: window.directoryReplayMode === "pending" ? { available: false, reason: "relationship_delivery_pending" } : { available: true, reason: null } } as T;
   const parsed = JSON.parse(body!), key = headers.get("Idempotency-Key")!, prior = seen.get(key);
   if (prior && prior !== body) throw new ApiError("conflict", 409, { status: "conflict", reason: "idempotency_body_conflict" });

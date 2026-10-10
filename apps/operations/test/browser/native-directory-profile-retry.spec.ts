@@ -2,7 +2,7 @@ import { buildSync } from "esbuild";
 import { fileURLToPath } from "node:url";
 import { expect, test, type Page } from "@playwright/test";
 
-type Scenario = "create-lost-response" | "admission-400" | "write-400" | "record-switch" | "reload-failure";
+type Scenario = "create-lost-response" | "admission-400" | "write-400" | "record-switch" | "reload-failure" | "relationship-readonly";
 type Call = { path: string; method: string; mutationId: string | null; body: string | null };
 const fixture = new URL("./native-directory-profile-retry-fixture.tsx", import.meta.url);
 const bundle = buildSync({ entryPoints: [fileURLToPath(fixture)], bundle: true, format: "iife", platform: "browser", write: false,
@@ -110,4 +110,14 @@ test("a verified save followed by reload failure cannot submit a fresh UUID from
   const after = (await calls(page)).filter(call => call.method === "PATCH");
   expect(after).toEqual([before[0]!, before[0]!]);
   expect(new Set(after.map(call => call.mutationId)).size).toBe(1);
+});
+
+test("missing relationship authority leaves profile editing mounted but hides relationship mutation controls", async ({ page }) => {
+  await render(page, "relationship-readonly");
+  await expect(page.getByLabel("Client name")).toHaveValue("Client One");
+  await expect(page.getByRole("button", { name: "Save client profile" })).toBeVisible();
+  await expect(page.getByText("The organization relationship is read-only")).toBeVisible();
+  await expect(page.getByLabel("Organization")).toHaveCount(0);
+  await expect(page.getByRole("button", { name: /Assign client to organization|Move client to organization|Remove organization relationship/ })).toHaveCount(0);
+  expect((await calls(page)).filter(call => call.method === "POST")).toHaveLength(0);
 });
