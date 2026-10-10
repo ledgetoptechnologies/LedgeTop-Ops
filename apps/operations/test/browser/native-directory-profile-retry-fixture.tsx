@@ -1,9 +1,11 @@
 import { useState } from "react";
 import { createRoot } from "react-dom/client";
 import { NativeDirectoryProfileCreate, NativeDirectoryProfileEdit } from "../../src/client/NativeDirectoryProfileEditor";
+import { DirectoryRelationshipRecoveryReview } from "../../src/client/DirectoryRelationshipRecoveryReview";
 
 type Scenario = "create-lost-response" | "admission-400" | "write-400" | "record-switch" | "reload-failure" | "relationship-readonly"
-  | "recovery-review" | "recovery-absent" | "recovery-malformed";
+  | "recovery-review" | "recovery-absent" | "recovery-malformed" | "recovery-reentry" | "recovery-invalidated"
+  | "recovery-revoked" | "recovery-org-switch" | "recovery-record-switch";
 type Call = { path: string; method: string; mutationId: string | null; body: string | null };
 const fixtureWindow = window as Window & { nativeDirectoryScenario?: Scenario; nativeDirectoryCalls?: Call[] };
 const scenario = fixtureWindow.nativeDirectoryScenario ?? "create-lost-response", calls: Call[] = [];
@@ -14,7 +16,7 @@ Object.defineProperty(window.crypto, "randomUUID", { configurable: true,
 
 const sourceId = "project-alpha:primary";
 let createAdmissionCalls = 0, createWriteCalls = 0, profileWriteCalls = 0, recordOneReads = 0;
-let recoveryAuthorizationCalls = 0;
+let recoveryAuthorizationCalls = 0, recoveryStatusCalls = 0;
 
 function snapshot(recordId: string, version = 1) {
   return { recordId, kind: "organization", version,
@@ -35,7 +37,7 @@ function readonlyClientSnapshot() {
 }
 
 function recoveryClientSnapshot() {
-  const recovery = scenario === "recovery-review"
+  const recovery = scenario === "recovery-review" || scenario === "recovery-invalidated" || scenario === "recovery-revoked"
     ? { available: true, status: "needs_review", sourceIds: ["project-alpha:primary", "project-alpha:secondary"] }
     : scenario === "recovery-malformed"
       ? { available: true, status: "needs_review", sourceIds: ["project-alpha:primary"], leaked: "not-allowed" }
@@ -76,6 +78,30 @@ window.fetch = async (input, init) => {
     return Response.json(readonlyClientSnapshot());
   if (path.endsWith("/standalone-clients/client-recovery") && method === "GET")
     return Response.json(recoveryClientSnapshot());
+  if (path.includes("/standalone-clients/client-recovery/relationship-generation-recovery/status") && method === "GET") {
+    recoveryStatusCalls += 1;
+    if (scenario === "recovery-reentry") return Response.json(recoveryStatusCalls === 1
+      ? { status: "prepared", sourceId, updatedAt: "2026-10-10T00:00:00.000Z" }
+      : { status: "acknowledged", sourceId, updatedAt: "2026-10-10T00:01:00.000Z" });
+    if (scenario === "recovery-invalidated" && recoveryStatusCalls > 1)
+      return Response.json({ status: "review_ready", review: { reviewId: "44444444-4444-4444-8444-444444444444",
+        recordId: "client-recovery", sourceId, predecessorCommandId: "55555555-5555-4555-8555-555555555555",
+        evidenceSha256: "b".repeat(64), clientRevision: "8", organizationRevision: "10", organizationRecordId: "organization-one",
+        remoteParentPublicId: null, observedAuthorizationGeneration: "13", expiresAt: "2026-10-10T02:00:00.000Z" } });
+    if (scenario === "recovery-revoked") return new Response(JSON.stringify({ status: "authority_revoked" }), { status: 403 });
+    return Response.json({ status: "none" });
+  }
+  if (path.includes("/standalone-clients/client-prop/relationship-generation-recovery/status") && method === "GET") {
+    recoveryStatusCalls += 1;
+    if (recoveryStatusCalls === 1) return Response.json({ status: "review_ready", review: {
+      reviewId: "66666666-6666-4666-8666-666666666666", recordId: "client-prop", sourceId,
+      predecessorCommandId: "77777777-7777-4777-8777-777777777777", evidenceSha256: "c".repeat(64),
+      clientRevision: "11", organizationRevision: "12", organizationRecordId: "organization-one",
+      remoteParentPublicId: null, observedAuthorizationGeneration: "14", expiresAt: "2026-10-10T03:00:00.000Z" } });
+    return Response.json({ status: "none" });
+  }
+  if (path.includes("/standalone-clients/client-prop-new/relationship-generation-recovery/status") && method === "GET")
+    return Response.json({ status: "none" });
   if (path.endsWith("/standalone-clients/client-recovery/relationship-generation-recovery/reviews") && method === "POST") {
     const parsed = JSON.parse(body!);
     return Response.json({ status: "review", review: { reviewId: "22222222-2222-4222-8222-222222222222",
@@ -110,9 +136,17 @@ window.fetch = async (input, init) => {
 
 function Fixture() {
   const [recordId, setRecordId] = useState("record-one");
+  const [recoveryIdentity, setRecoveryIdentity] = useState({ recordId: "client-prop", organizationRecordId: "organization-one" });
   if (["create-lost-response", "admission-400", "write-400"].includes(scenario)) return <NativeDirectoryProfileCreate />;
   if (scenario === "relationship-readonly") return <NativeDirectoryProfileEdit kind="client" recordId="client-one" />;
-  if (["recovery-review", "recovery-absent", "recovery-malformed"].includes(scenario))
+  if (scenario === "recovery-org-switch" || scenario === "recovery-record-switch") return <>
+    <button type="button" onClick={() => setRecoveryIdentity(scenario === "recovery-org-switch"
+      ? { recordId: "client-prop", organizationRecordId: "organization-two" }
+      : { recordId: "client-prop-new", organizationRecordId: "organization-one" })}>Switch recovery identity</button>
+    <DirectoryRelationshipRecoveryReview recordId={recoveryIdentity.recordId} intendedOrganizationName="Current Organization"
+      intendedOrganizationRecordId={recoveryIdentity.organizationRecordId}
+      capability={{ available: true, status: "needs_review", sourceIds: [sourceId] }} /></>;
+  if (["recovery-review", "recovery-absent", "recovery-malformed", "recovery-reentry", "recovery-invalidated", "recovery-revoked"].includes(scenario))
     return <NativeDirectoryProfileEdit kind="client" recordId="client-recovery" />;
   return <><button type="button" onClick={() => setRecordId("record-two")}>Switch to record two</button>
     <NativeDirectoryProfileEdit kind="organization" recordId={recordId} /></>;

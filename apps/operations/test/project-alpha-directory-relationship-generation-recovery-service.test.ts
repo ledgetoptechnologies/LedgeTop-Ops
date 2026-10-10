@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { createDirectoryRelationshipRecoveryReview, authorizeDirectoryRelationshipRecoveryReview }
+import { createDirectoryRelationshipRecoveryReview, authorizeDirectoryRelationshipRecoveryReview,
+  validateDirectoryRelationshipRecoveryReviewCurrent }
   from "../src/worker/project-alpha-directory-relationship-generation-recovery-service";
 
 const mocks = vi.hoisted(() => ({ administrator: vi.fn(), grant: vi.fn(), collect: vi.fn(), persist: vi.fn() }));
@@ -30,7 +31,7 @@ type Statement = { sql: string; values: unknown[]; bind: (...values: unknown[]) 
   first: () => Promise<Stored | null>; all: () => Promise<{ results: typeof predecessor[] }>; run: () => Promise<object> };
 function database() {
   const controls = { eligible: true, review: null as Stored | null, ledger: null as Stored | null,
-    outbox: null as Stored | null, failBatch: false, sql: [] as string[] };
+    outbox: null as Stored | null, failBatch: false, newerInventory: false, sql: [] as string[] };
   function inserted(statement: Statement): Stored {
     const keys = statement.sql.match(/INSERT INTO \w+\(([^)]+)\)/)?.[1]?.split(",") ?? [];
     return Object.fromEntries(keys.map((key, index) => {
@@ -42,7 +43,9 @@ function database() {
   const db = { withSession: vi.fn(() => db), prepare: vi.fn((sql: string): Statement => {
     controls.sql.push(sql);
     const statement: Statement = { sql, values: [], bind(...values) { statement.values = values; return statement; },
-      async first() { return sql.includes("FROM project_alpha_directory_relationship_generation_recoveries WHERE authorization_id")
+      async first() { return sql.includes("FROM project_alpha_api_v2_inventory_receipts")
+        ? controls.newerInventory ? { present: 1 } : null
+        : sql.includes("FROM project_alpha_directory_relationship_generation_recoveries WHERE authorization_id")
         ? controls.ledger : controls.review; },
       async all() { return { results: controls.eligible ? [{ ...predecessor }] : [] }; },
       async run() { controls.review = inserted(statement); return { success: true }; } };
@@ -124,6 +127,38 @@ describe("relationship recovery review service (mocked I/O; SQL atomicity covere
     mocks.collect.mockImplementation(async () => { mocks.grant.mockResolvedValue(null); return observed(); });
     expect((await createDirectoryRelationshipRecoveryReview(env, { recordId: client, sourceId: source }, actor)).status).toBe("blocked");
     expect(controls.review).toBeNull(); expect(mocks.persist).not.toHaveBeenCalled();
+  });
+  it("validates open review re-entry without remote requests or writes", async () => {
+    const { env, controls, db } = setup();
+    const result = await createDirectoryRelationshipRecoveryReview(env, { recordId: client, sourceId: source }, actor);
+    if (result.status !== "review") throw new Error("expected sealed review");
+    const input = { recordId: client, sourceId: source, reviewId: result.review.reviewId,
+      evidenceSha256: result.review.evidenceSha256 };
+    expect(await validateDirectoryRelationshipRecoveryReviewCurrent(env, input, actor)).toBe("current");
+    controls.newerInventory = true;
+    expect(await validateDirectoryRelationshipRecoveryReviewCurrent(env, input, actor)).toBe("evidence_changed");
+    controls.newerInventory = false;
+    controls.eligible = false;
+    expect(await validateDirectoryRelationshipRecoveryReviewCurrent(env, input, actor)).toBe("evidence_changed");
+    controls.eligible = true;
+    mocks.grant.mockResolvedValue(null);
+    expect(await validateDirectoryRelationshipRecoveryReviewCurrent(env, input, actor)).toBe("authority_revoked");
+    expect(mocks.collect).toHaveBeenCalledOnce(); expect(db.batch).not.toHaveBeenCalled();
+  });
+  it("rejects forged or expired re-entry and does no I/O while disabled", async () => {
+    const { env, controls, db } = setup();
+    const result = await createDirectoryRelationshipRecoveryReview(env, { recordId: client, sourceId: source }, actor);
+    if (result.status !== "review") throw new Error("expected sealed review");
+    const input = { recordId: client, sourceId: source, reviewId: result.review.reviewId,
+      evidenceSha256: result.review.evidenceSha256 };
+    expect(await validateDirectoryRelationshipRecoveryReviewCurrent(env, input, { ...actor, accessSubject: "forged" }))
+      .toBe("authority_revoked");
+    if (controls.review) controls.review.expires_at = "2000-01-01T00:00:00.000Z";
+    expect(await validateDirectoryRelationshipRecoveryReviewCurrent(env, input, actor)).toBe("evidence_changed");
+    env.PROJECT_ALPHA_DIRECTORY_RELATIONSHIP_GENERATION_RECOVERY_ENABLED = "false";
+    db.prepare.mockClear();
+    expect(await validateDirectoryRelationshipRecoveryReviewCurrent(env, input, actor)).toBe("authority_revoked");
+    expect(db.prepare).not.toHaveBeenCalled();
   });
   it("rejects a changed evidence seal, wrong reviewer, expiry and local drift without reserving", async () => {
     for (const kind of ["seal", "reviewer", "expiry", "local"] as const) {

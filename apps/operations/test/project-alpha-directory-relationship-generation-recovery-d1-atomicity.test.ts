@@ -54,9 +54,16 @@ beforeAll(async()=>{runtime=new Miniflare({modules:true,compatibilityDate:"2026-
   await db.batch(splitD1MigrationStatements(stubs).map(sql=>db.prepare(sql)));
   const migration=readFileSync(new URL("../migrations/0184_project_alpha_directory_relationship_generation_recovery.sql",import.meta.url),"utf8");
   await db.batch(splitD1MigrationStatements(migration).map(sql=>db.prepare(sql)));
-  for(const name of ["project_alpha_directory_relationship_generation_recovery_review_exact","project_alpha_directory_relationship_generation_recovery_exact",
+  for(const name of ["project_alpha_directory_relationship_generation_recovery_review_exact","project_alpha_directory_relationship_generation_recovery_authorization_review_exact",
+    "project_alpha_directory_relationship_generation_recovery_predecessor_exact","project_alpha_directory_relationship_generation_recovery_canonical_exact","project_alpha_directory_relationship_generation_recovery_successor_exact",
     "project_alpha_directory_relationship_generation_recovery_actor","project_alpha_directory_relationship_generation_recovery_grants_shape",
-    "project_alpha_directory_relationship_generation_recovery_grants_live","project_alpha_directory_relationship_generation_recovery_resources",
+    "project_alpha_directory_relationship_generation_recovery_grants_allow","project_alpha_directory_relationship_generation_recovery_grants_deny",
+    "project_alpha_directory_relationship_generation_recovery_record_versions",
+    "project_alpha_directory_relationship_generation_recovery_client_enrollment",
+    "project_alpha_directory_relationship_generation_recovery_organization_enrollment",
+    "project_alpha_directory_relationship_generation_recovery_client_mapping",
+    "project_alpha_directory_relationship_generation_recovery_organization_mapping",
+    "project_alpha_directory_relationship_generation_recovery_newer_generation",
     "project_alpha_directory_relationship_recovery_outbox_exact"])
     await db.exec(`DROP TRIGGER ${name}`);
   await db.batch([db.prepare("INSERT INTO operations_directory_records VALUES(?)").bind(client),db.prepare("INSERT INTO operations_directory_records VALUES(?)").bind(org),

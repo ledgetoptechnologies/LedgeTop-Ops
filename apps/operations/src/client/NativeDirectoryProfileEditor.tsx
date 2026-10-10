@@ -252,10 +252,11 @@ function NativeDirectoryProfileEditBound({ kind, recordId }: { kind: Kind; recor
   if (!snapshot) return null;
   const recovery = kind === "client" && usableRelationshipRecoveryCapability(snapshot.relationship?.recovery)
     && snapshot.relationship?.organization ? snapshot.relationship.recovery : null;
+  const recoveryTarget = kind === "client" ? snapshot.relationship?.organization ?? null : null;
   if (!snapshot.editing.available) return <Card title="Client profile"><p>This client profile is read-only because its current relationship or destination evidence is unavailable.</p>
-    {recovery && <DirectoryRelationshipRecoveryReview recordId={recordId}
-      intendedOrganizationName={snapshot.relationship!.organization!.name}
-      intendedOrganizationRecordId={snapshot.relationship!.organization!.recordId} capability={recovery} />}</Card>;
+    {recoveryTarget && <DirectoryRelationshipRecoveryReview recordId={recordId}
+      intendedOrganizationName={recoveryTarget.name}
+      intendedOrganizationRecordId={recoveryTarget.recordId} capability={recovery} />}</Card>;
   return <Card title="Edit client profile"><p>Editing version {snapshot.version}. The current server-owned profile is loaded before any change is submitted.</p>
     <form onSubmit={event => void submit(event)} className="client-directory-profile-form"><ProfileFields kind={kind} value={fields} onChange={change} prefix={id} creating={false} disabled={Boolean(profileAttempt || relationshipAttempt)} />
       {error && <p role="alert">{error}</p>}{success && <p role="status">{success}</p>}
@@ -277,8 +278,8 @@ function NativeDirectoryProfileEditBound({ kind, recordId }: { kind: Kind; recor
       </button>
     </form>
       : <section><h3>Organization relationship</h3><p>The organization relationship is read-only because current relationship authority or destination evidence is unavailable.</p></section>)}
-    {recovery && <DirectoryRelationshipRecoveryReview recordId={recordId}
-      intendedOrganizationName={snapshot.relationship!.organization!.name}
-      intendedOrganizationRecordId={snapshot.relationship!.organization!.recordId} capability={recovery} />}
+    {recoveryTarget && <DirectoryRelationshipRecoveryReview recordId={recordId}
+      intendedOrganizationName={recoveryTarget.name}
+      intendedOrganizationRecordId={recoveryTarget.recordId} capability={recovery} />}
   </Card>;
 }

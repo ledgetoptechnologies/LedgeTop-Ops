@@ -7,6 +7,7 @@ import {
   authorizeDirectoryRelationshipRecoveryReview,
   createDirectoryRelationshipRecoveryReview,
 } from "./project-alpha-directory-relationship-generation-recovery-service";
+import { readDirectoryRelationshipRecoveryStatus } from "./project-alpha-directory-relationship-generation-recovery-status";
 import type { Env, StaffPrincipal } from "./types";
 
 type Variables = { principal: StaffPrincipal; administrator: boolean };
@@ -94,6 +95,18 @@ function outcomeResponse(c: AppContext, result: { status: string }) {
 }
 
 export function registerDirectoryRelationshipGenerationRecoveryRoutes(app: App): void {
+  app.get(`${DIRECTORY_RELATIONSHIP_RECOVERY_ROUTE}/status`, async c => {
+    requireAvailable(c);
+    const recordId = RECORD_ID.safeParse(c.req.param("recordId"));
+    if (!recordId.success) throw new HTTPException(400, { message: "recordId is invalid" });
+    const source = c.req.query("sourceId"), sourceId = source === undefined ? undefined : SOURCE_ID.safeParse(source);
+    if (sourceId !== undefined && !sourceId.success) throw new HTTPException(400, { message: "sourceId is invalid" });
+    const result = await readDirectoryRelationshipRecoveryStatus(c.env,
+      { recordId: recordId.data, ...(sourceId === undefined ? {} : { sourceId: sourceId.data }) }, await actor(c));
+    if (result.status === "authority_revoked") return c.json(result, 403);
+    if (result.status === "uncertain") return c.json(result, 503);
+    return c.json(result);
+  });
   app.post(`${DIRECTORY_RELATIONSHIP_RECOVERY_ROUTE}/reviews`, async c => {
     requireAvailable(c);
     const recordId = RECORD_ID.safeParse(c.req.param("recordId"));

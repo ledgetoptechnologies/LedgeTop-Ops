@@ -37,6 +37,7 @@ test("renders all three exact staging configs without placeholders", () => {
   assert.equal(configs.operations.vars.PROJECT_ALPHA_PROJECT_ADOPTION_FINALIZATION_ENABLED, "false");
   assert.equal(configs.operations.vars.PROJECT_ALPHA_DIRECTORY_EXACT_ADOPTION_ENABLED, "false");
   assert.equal(configs.operations.vars.PROJECT_ALPHA_DIRECTORY_RECONCILIATION_ENABLED, "false");
+  assert.equal(configs.operations.vars.PROJECT_ALPHA_DIRECTORY_RELATIONSHIP_GENERATION_RECOVERY_ENABLED, "false");
   assert.equal(configs.operations.vars.CLIENT_REQUEST_TRIAGE_TO, values.STAGING_TRIAGE_EMAIL);
   assert.equal(configs.operations.main, "src/worker/staging-native-authority-entrypoint.ts");
   assert.deepEqual(configs.operations.triggers?.crons,
@@ -58,6 +59,16 @@ test("renders all three exact staging configs without placeholders", () => {
     && entrypoint === "OperationsPortalNativeDeliveryAuthorityIngress"));
   assert.equal(configs["ops-sync"].vars.CF_ACCESS_GROUP_ID, values.STAGING_ACCESS_GROUP_ID);
   assert.equal(JSON.stringify(configs).includes("<"), false);
+});
+
+test("relationship recovery stays explicitly off in rendered baselines and rejects omission or activation", () => {
+  for (const value of [undefined, "true"]) {
+    const configs = renderConfigs(root, values);
+    const flag = "PROJECT_ALPHA_DIRECTORY_RELATIONSHIP_GENERATION_RECOVERY_ENABLED";
+    if (value === undefined) delete configs.operations.vars[flag];
+    else configs.operations.vars[flag] = value;
+    assert(validateRenderedConfigs(root, configs).some(error => error.includes(flag)));
+  }
 });
 
 test("keeps native authority registration out of production Wrangler configs", () => {

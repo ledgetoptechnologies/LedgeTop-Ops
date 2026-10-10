@@ -3,7 +3,8 @@ import { fileURLToPath } from "node:url";
 import { expect, test, type Page } from "@playwright/test";
 
 type Scenario = "create-lost-response" | "admission-400" | "write-400" | "record-switch" | "reload-failure" | "relationship-readonly"
-  | "recovery-review" | "recovery-absent" | "recovery-malformed";
+  | "recovery-review" | "recovery-absent" | "recovery-malformed" | "recovery-reentry" | "recovery-invalidated"
+  | "recovery-revoked" | "recovery-org-switch" | "recovery-record-switch";
 type Call = { path: string; method: string; mutationId: string | null; body: string | null };
 const fixture = new URL("./native-directory-profile-retry-fixture.tsx", import.meta.url);
 const bundle = buildSync({ entryPoints: [fileURLToPath(fixture)], bundle: true, format: "iife", platform: "browser", write: false,
@@ -161,4 +162,47 @@ test("read-only recovery review compares sealed state and retries one frozen aut
   expect(authorizationCalls[0]!.mutationId).toBeTruthy();
   expect(JSON.parse(authorizationCalls[0]!.body!)).toMatchObject({ authorizationId: authorizationCalls[0]!.mutationId,
     evidenceSha256: "a".repeat(64), reason: "Reviewed exact remote evidence" });
+});
+
+test("page re-entry restores server recovery status after discovery capability disappears", async ({ page }) => {
+  await render(page, "recovery-reentry");
+  await expect(page.getByText(/prepared and queued for delivery.*not a Project Alpha acknowledgement/i)).toBeVisible();
+  await expect(page.getByRole("button", { name: "Review generation conflict" })).toHaveCount(0);
+  await page.getByRole("button", { name: "Refresh recovery status" }).click();
+  await expect(page.getByText("Project Alpha acknowledged the recovery delivery.")).toBeVisible();
+  const statusCalls = (await calls(page)).filter(call => call.path.includes("/relationship-generation-recovery/status"));
+  expect(statusCalls).toHaveLength(2);
+  expect(statusCalls.every(call => call.method === "GET" && call.body === null && call.mutationId === null)).toBe(true);
+  expect((await calls(page)).filter(call => call.method === "POST")).toHaveLength(0);
+});
+
+test("a different latest review cannot redirect a frozen unknown authorization attempt", async ({ page }) => {
+  await render(page, "recovery-invalidated");
+  await page.getByRole("button", { name: "Review generation conflict" }).click();
+  await page.getByLabel("Reason").fill("Reviewed exact remote evidence");
+  await page.getByLabel(/I confirm the local relationship/).check();
+  await page.getByRole("button", { name: "Authorize recovery" }).click();
+  await expect(page.getByText("Synthetic reservation response loss")).toBeVisible();
+  await page.getByRole("button", { name: "Refresh recovery status" }).click();
+  await expect(page.getByLabel("Reason")).toHaveCount(0);
+  await expect(page.getByText("Local intended organization:")).toHaveCount(0);
+  await expect(page.getByRole("button", { name: /Authorize recovery|Retry same recovery reservation|Review generation conflict/ })).toHaveCount(0);
+  await expect(page.getByText(/previous authorization attempt remains frozen/i)).toBeVisible();
+  expect((await calls(page)).filter(call => call.path.endsWith("/authorize"))).toHaveLength(1);
+});
+
+test("revoked recovery authority suppresses controls despite a stale capability", async ({ page }) => {
+  await render(page, "recovery-revoked");
+  await expect(page.getByText("Current recovery authority is no longer available.")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Review generation conflict" })).toHaveCount(0);
+  expect((await calls(page)).filter(call => call.method === "POST")).toHaveLength(0);
+});
+
+for (const scenario of ["recovery-org-switch", "recovery-record-switch"] as const) test(`stale recovery state is hidden synchronously for ${scenario}`, async ({ page }) => {
+  await render(page, scenario);
+  await expect(page.getByText("Local intended organization:")).toBeVisible();
+  await page.getByRole("button", { name: "Switch recovery identity" }).click();
+  await expect(page.getByText("Local intended organization:")).toHaveCount(0);
+  await expect(page.getByLabel("Reason")).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Authorize recovery" })).toHaveCount(0);
 });

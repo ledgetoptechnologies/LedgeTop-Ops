@@ -2,11 +2,14 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { Hono } from "hono";
 import type { Env, StaffPrincipal } from "../src/worker/types";
 
-const mocks = vi.hoisted(() => ({ authenticate: vi.fn(), review: vi.fn(), authorize: vi.fn() }));
+const mocks = vi.hoisted(() => ({ authenticate: vi.fn(), review: vi.fn(), authorize: vi.fn(), status: vi.fn() }));
 vi.mock("../src/worker/native-staff-auth", () => ({ authenticateNativeStaffWithAdmissionVersion: mocks.authenticate }));
 vi.mock("../src/worker/project-alpha-directory-relationship-generation-recovery-service", () => ({
   createDirectoryRelationshipRecoveryReview: mocks.review,
   authorizeDirectoryRelationshipRecoveryReview: mocks.authorize,
+}));
+vi.mock("../src/worker/project-alpha-directory-relationship-generation-recovery-status", () => ({
+  readDirectoryRelationshipRecoveryStatus: mocks.status,
 }));
 import { registerDirectoryRelationshipGenerationRecoveryRoutes }
   from "../src/worker/project-alpha-directory-relationship-generation-recovery-routes";
@@ -45,6 +48,7 @@ describe("directory relationship generation recovery routes", () => {
       observedAuthorizationGeneration: "12", expiresAt: "2026-10-10T01:00:00.000Z", privateToken: "never" } });
     mocks.authorize.mockResolvedValue({ status: "prepared", successorCommandId: ids.successor, generation: "12", replayed: false,
       privateEvidence: "never" });
+    mocks.status.mockResolvedValue({ status: "prepared", sourceId: "project-alpha:staging", updatedAt: "2026-10-10T00:00:00.000Z" });
   });
 
   it("keeps both routes absent before authentication or database work while either gate is off", async () => {
@@ -98,5 +102,13 @@ describe("directory relationship generation recovery routes", () => {
     const fixture = app(), response = await post(fixture.application, fixture.environment, `${base}/reviews`, { sourceId: "project-alpha:staging" });
     expect(response.status).toBe(expected);
     expect(await response.json()).toEqual({ status, reason: "synthetic" });
+  });
+
+  it("reads sanitized server status without requiring a browser-held review ID", async () => {
+    const fixture = app(), response = await fixture.application.request(`${base}/status`, {}, fixture.environment);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ status: "prepared", sourceId: "project-alpha:staging", updatedAt: "2026-10-10T00:00:00.000Z" });
+    expect(mocks.status).toHaveBeenCalledWith(expect.anything(), { recordId: ids.record }, expect.objectContaining({ staffId: principal.id }));
+    expect(mocks.review).not.toHaveBeenCalled(); expect(mocks.authorize).not.toHaveBeenCalled();
   });
 });

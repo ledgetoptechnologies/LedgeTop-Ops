@@ -835,7 +835,8 @@
         "0180_project_alpha_project_v2_recovery_authorization.sql",
         "0181_project_alpha_directory_create_generation_recovery.sql",
         "0182_project_alpha_directory_relationship_recovery_guard.sql",
-        "0183_project_alpha_binding_standalone_relationship_rows.sql"
+        "0183_project_alpha_binding_standalone_relationship_rows.sql",
+        "0184_project_alpha_directory_relationship_generation_recovery.sql"
       ],
       "appliedToStaging": false,
       "listEvidenceRef": "<EVIDENCE_REFERENCE>",
@@ -901,8 +902,8 @@
           "applyEvidenceRef": "<EVIDENCE_REFERENCE>",
           "readbackEvidenceRef": "<EVIDENCE_REFERENCE>",
           "transformedFiles": ["0002_seed_acl.sql"],
-          "ledgerCount": 183,
-          "finalMigration": "0183_project_alpha_binding_standalone_relationship_rows.sql",
+          "ledgerCount": 184,
+          "finalMigration": "0184_project_alpha_directory_relationship_generation_recovery.sql",
           "sourceSeedSha256": "<CANONICAL_SEED_SHA256>",
           "generatedSeedSha256": "<GENERATED_SEED_SHA256>",
           "databaseWasEmpty": false,
@@ -1125,6 +1126,7 @@
       "PROJECT_ALPHA_PROJECT_V2_ACTIVATION_ENABLED",
       "PROJECT_ALPHA_PROJECT_V2_RECOVERY_ENABLED",
       "PROJECT_ALPHA_DIRECTORY_CREATE_GENERATION_RECOVERY_ENABLED",
+      "PROJECT_ALPHA_DIRECTORY_RELATIONSHIP_GENERATION_RECOVERY_ENABLED",
       "PROJECT_ALPHA_DELIVERY_INTENTS_ENABLED",
       "PROJECT_ALPHA_DELIVERY_GUEST_ENABLED",
       "CLIENT_DELEGATED_SHARE_SIGNER_ENABLED",

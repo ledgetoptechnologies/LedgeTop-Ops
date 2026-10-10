@@ -49,7 +49,7 @@ CREATE INDEX project_alpha_directory_relationship_generation_recovery_reviews_ex
 CREATE INDEX project_alpha_directory_relationship_generation_recovery_reviews_predecessor
  ON project_alpha_directory_relationship_generation_recovery_reviews(predecessor_command_id,created_at);
 
-CREATE TRIGGER project_alpha_directory_relationship_generation_recovery_review_exact BEFORE INSERT
+CREATE TRIGGER project_alpha_directory_relationship_generation_recovery_authorization_review_exact BEFORE INSERT
 ON project_alpha_directory_relationship_generation_recovery_reviews
 WHEN NEW.replay_request_path<>'/api/v2/directory/clients/'||NEW.client_public_id||'/organization/assign/commands'
  OR (SELECT count(*) FROM json_each(NEW.replay_conflict_json))<>6
@@ -237,13 +237,9 @@ ON project_alpha_directory_relationship_generation_recoveries BEGIN SELECT RAISE
 CREATE TRIGGER project_alpha_directory_relationship_generation_recoveries_no_delete BEFORE DELETE
 ON project_alpha_directory_relationship_generation_recoveries BEGIN SELECT RAISE(ABORT,'relationship generation recovery authorization is durable'); END;
 
-CREATE TRIGGER project_alpha_directory_relationship_generation_recovery_exact BEFORE INSERT
+CREATE TRIGGER project_alpha_directory_relationship_generation_recovery_review_exact BEFORE INSERT
 ON project_alpha_directory_relationship_generation_recoveries
 WHEN NOT EXISTS(SELECT 1 FROM project_alpha_directory_relationship_generation_recovery_reviews review
-  JOIN project_alpha_directory_relationship_outbox predecessor ON predecessor.command_id=review.predecessor_command_id
-  JOIN operations_directory_client_organizations relation ON relation.client_record_id=review.client_record_id
-  JOIN operations_directory_client_organization_history history ON history.client_record_id=review.client_record_id
-    AND history.relationship_version=review.relationship_version
   WHERE review.review_id=NEW.review_id AND review.state='open' AND review.expires_at>NEW.authorized_at
     AND NEW.authorized_at>=review.created_at AND NEW.authorized_at<=strftime('%Y-%m-%dT%H:%M:%fZ','now')
     AND NEW.expires_at=review.expires_at
@@ -259,18 +255,42 @@ WHEN NOT EXISTS(SELECT 1 FROM project_alpha_directory_relationship_generation_re
     AND NEW.actor_access_subject=review.reviewer_access_subject
     AND NEW.actor_email=review.reviewer_email
     AND NEW.actor_admission_version=review.reviewer_admission_version
-    AND NEW.actor_profile_version=review.reviewer_profile_version
+    AND NEW.actor_profile_version=review.reviewer_profile_version)
+BEGIN SELECT RAISE(ABORT,'relationship generation recovery review is not current and exact'); END;
+
+CREATE TRIGGER project_alpha_directory_relationship_generation_recovery_predecessor_exact BEFORE INSERT
+ON project_alpha_directory_relationship_generation_recoveries
+WHEN NOT EXISTS(SELECT 1 FROM project_alpha_directory_relationship_generation_recovery_reviews review
+  JOIN project_alpha_directory_relationship_outbox predecessor ON predecessor.command_id=review.predecessor_command_id
+  WHERE review.review_id=NEW.review_id
     AND predecessor.state='terminal' AND json_extract(predecessor.outcome_json,'$.httpStatus')=409
     AND predecessor.action='assign' AND predecessor.command_json=NEW.predecessor_command_json
     AND predecessor.request_json=NEW.successor_request_json
     AND predecessor.client_record_id=review.client_record_id AND predecessor.relationship_version=review.relationship_version
     AND predecessor.source_id=review.source_id AND predecessor.source_instance_id=review.source_instance_id
     AND predecessor.application_id=review.application_id AND predecessor.history_epoch_id=review.history_epoch_id
-    AND predecessor.destination_origin=review.destination_origin
+    AND predecessor.destination_origin=review.destination_origin)
+BEGIN SELECT RAISE(ABORT,'relationship generation recovery predecessor is not current and exact'); END;
+
+CREATE TRIGGER project_alpha_directory_relationship_generation_recovery_canonical_exact BEFORE INSERT
+ON project_alpha_directory_relationship_generation_recoveries
+WHEN NOT EXISTS(SELECT 1 FROM project_alpha_directory_relationship_generation_recovery_reviews review
+  JOIN project_alpha_directory_relationship_outbox predecessor ON predecessor.command_id=review.predecessor_command_id
+  JOIN operations_directory_client_organizations relation ON relation.client_record_id=review.client_record_id
+  JOIN operations_directory_client_organization_history history ON history.client_record_id=review.client_record_id
+    AND history.relationship_version=review.relationship_version
+  WHERE review.review_id=NEW.review_id
     AND relation.relationship_version=review.relationship_version
     AND relation.organization_record_id=review.intended_organization_record_id
     AND history.mutation_id=predecessor.mutation_id AND history.previous_organization_record_id IS NULL
-    AND history.organization_record_id=review.intended_organization_record_id
+    AND history.organization_record_id=review.intended_organization_record_id)
+BEGIN SELECT RAISE(ABORT,'relationship generation recovery canonical history is not current and exact'); END;
+
+CREATE TRIGGER project_alpha_directory_relationship_generation_recovery_successor_exact BEFORE INSERT
+ON project_alpha_directory_relationship_generation_recoveries
+WHEN NOT EXISTS(SELECT 1 FROM project_alpha_directory_relationship_generation_recovery_reviews review
+  JOIN project_alpha_directory_relationship_outbox predecessor ON predecessor.command_id=review.predecessor_command_id
+  WHERE review.review_id=NEW.review_id
     AND json_extract(NEW.successor_command_json,'$.commandId')=NEW.successor_command_id
     AND json_extract(NEW.successor_command_json,'$.expectedAuthorizationGeneration')=NEW.observed_authorization_generation
     AND json_remove(NEW.successor_command_json,'$.commandId','$.expectedAuthorizationGeneration')=
@@ -300,7 +320,7 @@ BEGIN SELECT RAISE(ABORT,'relationship generation recovery actor is not current'
 -- Review evidence is immutable, but authorization is a later authority
 -- boundary. Re-evaluate every mutable local/resource fact instead of treating
 -- the sealed review as current authority.
-CREATE TRIGGER project_alpha_directory_relationship_generation_recovery_resources BEFORE INSERT
+CREATE TRIGGER project_alpha_directory_relationship_generation_recovery_record_versions BEFORE INSERT
 ON project_alpha_directory_relationship_generation_recoveries
 WHEN NOT EXISTS(SELECT 1 FROM project_alpha_directory_relationship_generation_recovery_reviews review
   JOIN operations_directory_records client ON client.record_id=review.client_record_id
@@ -308,37 +328,61 @@ WHEN NOT EXISTS(SELECT 1 FROM project_alpha_directory_relationship_generation_re
   JOIN operations_directory_records organization ON organization.record_id=review.intended_organization_record_id
     AND organization.record_kind='organization' AND organization.current_version=review.organization_record_version
   WHERE review.review_id=NEW.review_id)
- OR EXISTS(SELECT 1 FROM project_alpha_directory_relationship_generation_recovery_reviews review
-    WHERE review.review_id=NEW.review_id AND (
-      NOT EXISTS(SELECT 1 FROM native_directory_enrollments enrollment,json_each(enrollment.destinations_json) destination
+BEGIN SELECT RAISE(ABORT,'relationship generation recovery record versions are not current'); END;
+
+CREATE TRIGGER project_alpha_directory_relationship_generation_recovery_client_enrollment BEFORE INSERT
+ON project_alpha_directory_relationship_generation_recoveries
+WHEN EXISTS(SELECT 1 FROM project_alpha_directory_relationship_generation_recovery_reviews review
+    WHERE review.review_id=NEW.review_id AND NOT EXISTS(
+      SELECT 1 FROM native_directory_enrollments enrollment,json_each(enrollment.destinations_json) destination
       WHERE enrollment.record_id=review.client_record_id
         AND json_extract(destination.value,'$.sourceId')=review.source_id
         AND json_extract(destination.value,'$.sourceInstanceUUID')=review.source_instance_id
         AND json_extract(destination.value,'$.applicationUUID')=review.application_id
         AND json_extract(destination.value,'$.historyEpoch')=review.history_epoch_id
         AND json_extract(destination.value,'$.origin')=review.destination_origin
-        AND json_extract(destination.value,'$.externalCanonicalId')=review.client_external_id)
-      OR NOT EXISTS(SELECT 1 FROM native_directory_enrollments enrollment,json_each(enrollment.destinations_json) destination
+        AND json_extract(destination.value,'$.externalCanonicalId')=review.client_external_id))
+BEGIN SELECT RAISE(ABORT,'relationship generation recovery client enrollment is not current'); END;
+
+CREATE TRIGGER project_alpha_directory_relationship_generation_recovery_organization_enrollment BEFORE INSERT
+ON project_alpha_directory_relationship_generation_recoveries
+WHEN EXISTS(SELECT 1 FROM project_alpha_directory_relationship_generation_recovery_reviews review
+    WHERE review.review_id=NEW.review_id AND NOT EXISTS(
+      SELECT 1 FROM native_directory_enrollments enrollment,json_each(enrollment.destinations_json) destination
       WHERE enrollment.record_id=review.intended_organization_record_id
         AND json_extract(destination.value,'$.sourceId')=review.source_id
         AND json_extract(destination.value,'$.sourceInstanceUUID')=review.source_instance_id
         AND json_extract(destination.value,'$.applicationUUID')=review.application_id
         AND json_extract(destination.value,'$.historyEpoch')=review.history_epoch_id
         AND json_extract(destination.value,'$.origin')=review.destination_origin
-        AND json_extract(destination.value,'$.externalCanonicalId')=review.organization_external_id)))
- OR NOT EXISTS(SELECT 1 FROM project_alpha_directory_relationship_generation_recovery_reviews review
+        AND json_extract(destination.value,'$.externalCanonicalId')=review.organization_external_id))
+BEGIN SELECT RAISE(ABORT,'relationship generation recovery organization enrollment is not current'); END;
+
+CREATE TRIGGER project_alpha_directory_relationship_generation_recovery_client_mapping BEFORE INSERT
+ON project_alpha_directory_relationship_generation_recoveries
+WHEN NOT EXISTS(SELECT 1 FROM project_alpha_directory_relationship_generation_recovery_reviews review
     JOIN project_alpha_active_directory_mappings client_mapping ON client_mapping.record_id=review.client_record_id
       AND client_mapping.resource_type='client' AND client_mapping.source_id=review.source_id
       AND client_mapping.source_instance_id=review.source_instance_id AND client_mapping.application_id=review.application_id
       AND client_mapping.history_epoch_id=review.history_epoch_id AND client_mapping.external_id=review.client_external_id
       AND client_mapping.project_alpha_public_id=review.client_public_id
+    WHERE review.review_id=NEW.review_id)
+BEGIN SELECT RAISE(ABORT,'relationship generation recovery client mapping is not current'); END;
+
+CREATE TRIGGER project_alpha_directory_relationship_generation_recovery_organization_mapping BEFORE INSERT
+ON project_alpha_directory_relationship_generation_recoveries
+WHEN NOT EXISTS(SELECT 1 FROM project_alpha_directory_relationship_generation_recovery_reviews review
     JOIN project_alpha_active_directory_mappings organization_mapping ON organization_mapping.record_id=review.intended_organization_record_id
       AND organization_mapping.resource_type='organization' AND organization_mapping.source_id=review.source_id
       AND organization_mapping.source_instance_id=review.source_instance_id AND organization_mapping.application_id=review.application_id
       AND organization_mapping.history_epoch_id=review.history_epoch_id AND organization_mapping.external_id=review.organization_external_id
       AND organization_mapping.project_alpha_public_id=review.organization_public_id
     WHERE review.review_id=NEW.review_id)
- OR EXISTS(SELECT 1 FROM project_alpha_directory_relationship_generation_recovery_reviews review
+BEGIN SELECT RAISE(ABORT,'relationship generation recovery organization mapping is not current'); END;
+
+CREATE TRIGGER project_alpha_directory_relationship_generation_recovery_newer_generation BEFORE INSERT
+ON project_alpha_directory_relationship_generation_recoveries
+WHEN EXISTS(SELECT 1 FROM project_alpha_directory_relationship_generation_recovery_reviews review
     JOIN project_alpha_api_v2_inventory_receipts newer ON newer.source_id=review.source_id
       AND newer.source_instance_id=review.source_instance_id AND newer.application_id=review.application_id
       AND newer.history_epoch_id=review.history_epoch_id AND newer.inventory_kind='directory'
@@ -346,7 +390,7 @@ WHEN NOT EXISTS(SELECT 1 FROM project_alpha_directory_relationship_generation_re
       AND (length(newer.authorization_generation)>length(review.observed_authorization_generation)
         OR length(newer.authorization_generation)=length(review.observed_authorization_generation)
           AND newer.authorization_generation>review.observed_authorization_generation))
-BEGIN SELECT RAISE(ABORT,'relationship generation recovery resources are not current and exact'); END;
+BEGIN SELECT RAISE(ABORT,'relationship generation recovery generation is no longer current'); END;
 
 CREATE TRIGGER project_alpha_directory_relationship_generation_recovery_grants_shape BEFORE INSERT
 ON project_alpha_directory_relationship_generation_recoveries
@@ -365,7 +409,7 @@ WHEN NEW.selected_grants_json<>(SELECT selected_grants_json FROM project_alpha_d
       WHERE json_extract(selected.value,'$.recordId')=resource.record_id AND json_extract(selected.value,'$.permission')=needed.permission))
 BEGIN SELECT RAISE(ABORT,'relationship generation recovery grants are not current and exact'); END;
 
-CREATE TRIGGER project_alpha_directory_relationship_generation_recovery_grants_live BEFORE INSERT
+CREATE TRIGGER project_alpha_directory_relationship_generation_recovery_grants_allow BEFORE INSERT
 ON project_alpha_directory_relationship_generation_recoveries
 WHEN EXISTS(SELECT 1 FROM json_each(NEW.selected_grants_json) selected
   WHERE NOT EXISTS(SELECT 1 FROM native_directory_grants g
@@ -374,14 +418,19 @@ WHEN EXISTS(SELECT 1 FROM json_each(NEW.selected_grants_json) selected
       AND (g.scope_kind='global' OR g.scope_kind='resource' AND g.resource_id=json_extract(selected.value,'$.recordId')
         OR g.scope_kind='assigned' AND EXISTS(SELECT 1 FROM native_directory_assignments a WHERE a.record_id=json_extract(selected.value,'$.recordId') AND a.staff_id=NEW.actor_staff_id AND a.active=1)
         OR g.scope_kind='business_area' AND EXISTS(SELECT 1 FROM native_directory_resource_scopes s WHERE s.record_id=json_extract(selected.value,'$.recordId') AND s.active=1 AND s.business_area_id=g.business_area_id)
-        OR g.scope_kind='division' AND EXISTS(SELECT 1 FROM native_directory_resource_scopes s WHERE s.record_id=json_extract(selected.value,'$.recordId') AND s.active=1 AND s.division_id=g.division_id)))
-    OR EXISTS(SELECT 1 FROM native_directory_grants d WHERE d.staff_id=NEW.actor_staff_id
+        OR g.scope_kind='division' AND EXISTS(SELECT 1 FROM native_directory_resource_scopes s WHERE s.record_id=json_extract(selected.value,'$.recordId') AND s.active=1 AND s.division_id=g.division_id))))
+BEGIN SELECT RAISE(ABORT,'relationship generation recovery selected grants are not live allows'); END;
+
+CREATE TRIGGER project_alpha_directory_relationship_generation_recovery_grants_deny BEFORE INSERT
+ON project_alpha_directory_relationship_generation_recoveries
+WHEN EXISTS(SELECT 1 FROM json_each(NEW.selected_grants_json) selected
+  WHERE EXISTS(SELECT 1 FROM native_directory_grants d WHERE d.staff_id=NEW.actor_staff_id
       AND d.permission=json_extract(selected.value,'$.permission') AND d.effect='deny' AND d.active=1
       AND (d.scope_kind='global' OR d.scope_kind='resource' AND d.resource_id=json_extract(selected.value,'$.recordId')
         OR d.scope_kind='assigned' AND EXISTS(SELECT 1 FROM native_directory_assignments a WHERE a.record_id=json_extract(selected.value,'$.recordId') AND a.staff_id=NEW.actor_staff_id AND a.active=1)
         OR d.scope_kind='business_area' AND EXISTS(SELECT 1 FROM native_directory_resource_scopes s WHERE s.record_id=json_extract(selected.value,'$.recordId') AND s.active=1 AND s.business_area_id=d.business_area_id)
         OR d.scope_kind='division' AND EXISTS(SELECT 1 FROM native_directory_resource_scopes s WHERE s.record_id=json_extract(selected.value,'$.recordId') AND s.active=1 AND s.division_id=d.division_id))))
-BEGIN SELECT RAISE(ABORT,'relationship generation recovery grants are not live'); END;
+BEGIN SELECT RAISE(ABORT,'relationship generation recovery applicable deny is live'); END;
 
 CREATE TRIGGER project_alpha_directory_relationship_recovery_outbox_exact BEFORE INSERT
 ON project_alpha_directory_relationship_recovery_outbox

@@ -211,6 +211,43 @@ type AuthorizationInput = Readonly<{ recordId: string; reviewId: string; evidenc
 type Prepared = { status: "prepared"; successorCommandId: string; generation: string; replayed: boolean };
 type AuthorizationOutcome = Prepared | Failure | { status: "conflict"; reason: string };
 
+/** Read-only re-entry validation. Persisted open reviews are not themselves
+ * proof that their sealed evidence or the reviewer's authority is still current. */
+export async function validateDirectoryRelationshipRecoveryReviewCurrent(env: DirectoryRelationshipRecoveryEnvironment,
+  input: Readonly<{ recordId: string; sourceId: string; reviewId: string; evidenceSha256: string }>, actor: Actor):
+  Promise<"current" | "evidence_changed" | "authority_revoked"> {
+  if (env.PROJECT_ALPHA_DIRECTORY_RELATIONSHIP_GENERATION_RECOVERY_ENABLED !== "true"
+    || !recordId(input.recordId) || !SOURCE.test(input.sourceId) || !UUID.test(input.reviewId)
+    || !/^[a-f0-9]{64}$/.test(input.evidenceSha256) || !actorFresh(actor)) return "authority_revoked";
+  try {
+    if (!await currentDirectoryRelationshipRecoveryAdministrator(env.OPS_DB, actor)) return "authority_revoked";
+    const row = await env.OPS_DB.withSession("first-primary").prepare(`SELECT ${REVIEW_COLUMNS.join(",")}
+      FROM project_alpha_directory_relationship_generation_recovery_reviews
+      WHERE review_id=? AND client_record_id=? AND source_id=?`)
+      .bind(input.reviewId, input.recordId, input.sourceId).first<Review>();
+    if (!row || row.reviewer_staff_id !== actor.staffId || row.reviewer_access_subject !== actor.accessSubject
+      || row.reviewer_email !== actor.email || row.reviewer_admission_version !== actor.admissionVersion
+      || row.reviewer_profile_version !== actor.profileVersion) return "authority_revoked";
+    const grants = await selectGrants(env.OPS_DB, actor, row.client_record_id, row.intended_organization_record_id);
+    if (!grants || JSON.stringify(grants) !== row.selected_grants_json) return "authority_revoked";
+    if (row.state !== "open" || row.evidence_sha256 !== input.evidenceSha256
+      || !Number.isFinite(Date.parse(row.expires_at)) || Date.parse(row.expires_at) <= Date.now()) return "evidence_changed";
+    const predecessor = await discover(env.OPS_DB, input.recordId, input.sourceId);
+    if (!predecessor || predecessor.command_id !== row.predecessor_command_id || !configured(env, predecessor)
+      || await seal(row, predecessor) !== row.evidence_sha256) return "evidence_changed";
+    const newer = await env.OPS_DB.withSession("first-primary").prepare(`SELECT 1 AS present
+      FROM project_alpha_api_v2_inventory_receipts receipt WHERE receipt.source_id=?
+        AND receipt.source_instance_id=? AND receipt.application_id=? AND receipt.history_epoch_id=?
+        AND (length(receipt.authorization_generation)>length(?)
+          OR length(receipt.authorization_generation)=length(?) AND receipt.authorization_generation>?) LIMIT 1`)
+      .bind(row.source_id, row.source_instance_id, row.application_id, row.history_epoch_id,
+        row.observed_authorization_generation, row.observed_authorization_generation, row.observed_authorization_generation)
+      .first<{ present: number }>();
+    return newer || !actorFresh(actor)
+      || env.PROJECT_ALPHA_DIRECTORY_RELATIONSHIP_GENERATION_RECOVERY_ENABLED !== "true" ? "evidence_changed" : "current";
+  } catch { return "evidence_changed"; }
+}
+
 export async function authorizeDirectoryRelationshipRecoveryReview(env: DirectoryRelationshipRecoveryEnvironment,
   input: AuthorizationInput, actor: Actor): Promise<AuthorizationOutcome> {
   if (env.PROJECT_ALPHA_DIRECTORY_RELATIONSHIP_GENERATION_RECOVERY_ENABLED !== "true") return { status: "blocked", reason: "disabled" };
