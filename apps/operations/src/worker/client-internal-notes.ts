@@ -1,10 +1,12 @@
 import { z } from "zod";
 import { HTTPException } from "hono/http-exception";
 import type { ClientHubCollectionContext } from "./client-hub-collections";
-import { projectAlphaReadVisibleSql } from "./project-alpha-read-visibility";
+import { clientHubAlphaInternalId, hasClientHubActiveDirectoryMappings, resolveClientHubSourceRoot } from "./client-hub-source";
+import { projectAlphaReadVisibleSql, requireProjectAlphaReadOrNativeMappingVisibility } from "./project-alpha-read-visibility";
+import { resolveProjectAlphaApiV2Connection } from "./project-alpha-api-v2-connections";
 import type { Env, StaffPrincipal } from "./types";
 
-type Environment = Pick<Env, "OPS_DB" | "DELIVERY_DB">;
+type Environment = Pick<Env, "OPS_DB" | "DELIVERY_DB"> & Partial<Pick<Env, "PROJECT_ALPHA_API_V2_CONNECTIONS">>;
 type Database = Pick<D1Database, "prepare" | "batch">;
 type Operation = "create" | "update" | "delete";
 const contextVersion = z.string().regex(/^[A-Za-z0-9_-]{43}$/);
@@ -64,10 +66,75 @@ function tuple(context: ClientHubCollectionContext): [string, string, string, st
 async function rootProof(env: Environment, context: ClientHubCollectionContext): Promise<string> {
   const root = context.root;
   if (root.root_namespace === "business") {
+    // Acquired API-v2 records are canonical Operations directory identities;
+    // they need not have a legacy pa_clients/pa_organizations projection.
+    // Resolve through the same exact, current mapping contract as Client Hub,
+    // then fingerprint the tuple and current canonical record/relationship so
+    // the existing before/after proof still detects a concurrent change.
+    const nativeRecord = await db(env).prepare(`SELECT record_kind FROM operations_directory_records
+      WHERE record_id=? LIMIT 1`).bind(root.public_id).first<{ record_kind: string }>();
+    if (nativeRecord) {
+      if (!await hasClientHubActiveDirectoryMappings(env.OPS_DB) || !env.PROJECT_ALPHA_API_V2_CONNECTIONS
+        || nativeRecord.record_kind !== (root.kind === "organization" ? "organization" : "client"))
+        throw new HTTPException(404, { message: "Client workspace is unavailable" });
+      const nativeEnv = { OPS_DB: env.OPS_DB, PROJECT_ALPHA_API_V2_CONNECTIONS: env.PROJECT_ALPHA_API_V2_CONNECTIONS };
+      const visibility = await requireProjectAlphaReadOrNativeMappingVisibility(nativeEnv, root.source_id, root.public_id, root.kind);
+      const nativeProof = "nativeProof" in visibility ? visibility.nativeProof : null;
+      const resolved = await resolveClientHubSourceRoot(nativeEnv, root.kind, root.public_id, root.source_id);
+      if (!resolved || resolved.id !== root.public_id || !resolved.active
+        || resolved.pa_internal_id !== context.paRootId || resolved.pa_public_id !== root.pa_public_id
+        || resolved.mapping_status !== "mapped"
+        || (root.kind === "standalone_client" && resolved.organization_id !== null))
+        throw new HTTPException(404, { message: "Client workspace is unavailable" });
+      let configured;
+      try { configured = resolveProjectAlphaApiV2Connection(nativeEnv, root.source_id); }
+      catch { throw new HTTPException(404, { message: "Client workspace is unavailable" }); }
+      if (!configured.enabled || !configured.connection.expectedHistoryEpoch)
+        throw new HTTPException(404, { message: "Client workspace is unavailable" });
+      const resourceType = root.kind === "organization" ? "organization" : "client";
+      const tupleProof = await db(env).prepare(`SELECT mapping.source_id,mapping.source_instance_id,mapping.application_id,
+          mapping.history_epoch_id,mapping.resource_type,mapping.record_id,mapping.external_id,
+          mapping.project_alpha_public_id,mapping.mapping_kind,mapping.provenance_id,record.current_version,
+          revision.profile_json,relationship.organization_record_id,relationship.relationship_version
+        FROM project_alpha_active_directory_mappings mapping
+        JOIN operations_directory_records record ON record.record_id=mapping.record_id
+          AND record.record_kind=mapping.resource_type
+        JOIN operations_directory_revisions revision ON revision.record_id=record.record_id
+          AND revision.version=record.current_version
+        ${root.kind === "standalone_client" ? `JOIN operations_directory_client_organizations relationship
+          ON relationship.client_record_id=record.record_id AND relationship.organization_record_id IS NULL` :
+          "LEFT JOIN operations_directory_client_organizations relationship ON relationship.client_record_id=record.record_id"}
+        WHERE mapping.source_id=? AND mapping.resource_type=? AND mapping.record_id=?
+          AND mapping.source_instance_id=? AND mapping.application_id=? AND mapping.history_epoch_id=?
+          AND length(mapping.project_alpha_public_id)=32 AND mapping.project_alpha_public_id NOT GLOB '*[^0-9a-f]*'
+          AND json_valid(revision.profile_json) AND json_type(revision.profile_json,'$.name')='text'
+          AND length(trim(json_extract(revision.profile_json,'$.name'))) BETWEEN 1 AND 150
+          AND (SELECT count(*) FROM project_alpha_active_directory_mappings candidate
+            WHERE candidate.source_id=mapping.source_id AND candidate.source_instance_id=mapping.source_instance_id
+              AND candidate.application_id=mapping.application_id AND candidate.history_epoch_id=mapping.history_epoch_id
+              AND candidate.resource_type=mapping.resource_type
+              AND (candidate.record_id=mapping.record_id OR candidate.external_id=mapping.external_id
+                OR candidate.project_alpha_public_id=mapping.project_alpha_public_id))=1 LIMIT 2`)
+        .bind(root.source_id, resourceType, root.public_id, configured.connection.expectedSourceInstanceId,
+          configured.connection.expectedApplicationId, configured.connection.expectedHistoryEpoch)
+        .all<Record<string, unknown>>();
+      if (tupleProof.results.length !== 1
+        || tupleProof.results[0]!.external_id !== resolved.pa_internal_id
+        || tupleProof.results[0]!.project_alpha_public_id !== resolved.pa_public_id
+        || (nativeProof && (nativeProof.recordId !== root.public_id
+          || nativeProof.externalId !== resolved.pa_internal_id
+          || nativeProof.publicId !== resolved.pa_public_id
+          || nativeProof.recordVersion !== tupleProof.results[0]!.current_version)))
+        throw new HTTPException(404, { message: "Client workspace is unavailable" });
+      return JSON.stringify({ canonicalRecordId: root.public_id, source: resolved,
+        visibility: { readRevision: visibility.read_revision, visible: visibility.visible,
+          connectorSourceId: visibility.connector_source_id, nativeProof },
+        mapping: tupleProof.results[0] });
+    }
     const table = root.kind === "organization" ? "pa_organizations" : "pa_clients";
     const row = await db(env).prepare(`SELECT id,projection_source_id,active,last_sync_id FROM ${table}
       WHERE id=? AND projection_source_id=? AND active=1 ${root.kind === "standalone_client" ? "AND organization_id IS NULL" : ""}
-      AND ${projectAlphaReadVisibleSql("projection_source_id")} LIMIT 1`).bind(root.public_id, root.source_id).first<Record<string, unknown>>();
+      AND ${projectAlphaReadVisibleSql("projection_source_id")} LIMIT 1`).bind(clientHubAlphaInternalId(root, context.paRootId), root.source_id).first<Record<string, unknown>>();
     if (!row) throw new HTTPException(404, { message: "Client workspace is unavailable" });
     return JSON.stringify(row);
   }

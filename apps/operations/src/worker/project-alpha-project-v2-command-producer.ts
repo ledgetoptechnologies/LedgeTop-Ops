@@ -100,19 +100,23 @@ async function readState(db: D1Database, externalProjectId: string) {
   ]);
   return { head, mapping };
 }
-async function directoryReady(db: D1Database, connection: Connection, organizationRecordId: string | null, clientRecordId: string | null, expected?: Readonly<{ organizationPublicId: string; clientPublicId: string | null }>): Promise<boolean> {
-  async function record(kind: "organization" | "client", recordId: string | null, publicId?: string | null): Promise<boolean> {
-    if (recordId === null) return publicId === undefined || publicId === null;
-    const row = await db.prepare(`SELECT mapping.project_alpha_public_id FROM operations_directory_records record
-      JOIN project_alpha_directory_mappings mapping ON mapping.external_id=record.record_id
+async function directoryReady(db: D1Database, connection: Connection, organizationRecordId: string | null, clientRecordId: string | null,
+  expected?: Readonly<{ organization: ProjectAlphaProjectCreateCommand["organization"]; client: ProjectAlphaProjectCreateCommand["client"] }>): Promise<boolean> {
+  async function record(kind: "organization" | "client", recordId: string | null,
+    proof?: ProjectAlphaProjectCreateCommand["organization"] | null): Promise<boolean> {
+    if (recordId === null) return proof === undefined || proof === null;
+    if (proof === null) return false;
+    const row = await db.prepare(`SELECT mapping.external_id,mapping.project_alpha_public_id FROM operations_directory_records record
+      JOIN project_alpha_active_directory_mappings mapping ON mapping.record_id=record.record_id
       WHERE record.record_id=? AND record.record_kind=? AND mapping.source_id=? AND mapping.source_instance_id=?
         AND mapping.application_id=? AND mapping.history_epoch_id=? AND mapping.resource_type=?`)
       .bind(recordId, kind, connection.sourceId, connection.sourceInstanceId, connection.applicationId, connection.historyEpochId, kind)
-      .all<{ project_alpha_public_id: string }>();
-    return row.results.length === 1 && (publicId === undefined || row.results[0]!.project_alpha_public_id === publicId);
+      .all<{ external_id: string; project_alpha_public_id: string }>();
+    return row.results.length === 1 && (proof === undefined
+      || row.results[0]!.external_id === proof.externalId && row.results[0]!.project_alpha_public_id === proof.expectedPublicId);
   }
-  if (organizationRecordId === null || !(await record("organization", organizationRecordId, expected?.organizationPublicId))
-    || !(await record("client", clientRecordId, expected?.clientPublicId))) return false;
+  if (organizationRecordId === null || !(await record("organization", organizationRecordId, expected?.organization))
+    || !(await record("client", clientRecordId, expected?.client))) return false;
   if (clientRecordId === null) return true;
   return !!await db.prepare(`SELECT 1 present FROM operations_directory_client_organizations
     WHERE client_record_id=? AND organization_record_id=?`).bind(clientRecordId, organizationRecordId).first("present");
@@ -166,9 +170,7 @@ export async function planProjectAlphaProjectV2Command(
   if (!canonical || canonical.command.commandId !== action.command.commandId) return { status: "blocked", reason: "invalid_action" };
   if (action.operation === "create") {
     const command = canonical.command as ProjectAlphaProjectCreateCommand;
-    if (command.organization.externalId !== action.directory.organizationRecordId
-      || (command.client === null) !== (action.directory.clientRecordId === null)
-      || (command.client !== null && command.client.externalId !== action.directory.clientRecordId)) return { status: "blocked", reason: "invalid_action" };
+    if ((command.client === null) !== (action.directory.clientRecordId === null)) return { status: "blocked", reason: "invalid_action" };
   }
   if (action.operation === "bind" && (canonical.command as ProjectAlphaProjectBindCommand).expectedProjectionSha256 !== action.local.expectedLocalProjectionSha256)
     return { status: "blocked", reason: "invalid_action" };
@@ -206,7 +208,7 @@ export async function planProjectAlphaProjectV2Command(
       organizationRecordId = action.directory.organizationRecordId; clientRecordId = action.directory.clientRecordId;
       const command = canonical.command as ProjectAlphaProjectCreateCommand;
       if (!await directoryReady(env.OPS_DB, connection, organizationRecordId, clientRecordId,
-        { organizationPublicId: command.organization.expectedPublicId, clientPublicId: command.client?.expectedPublicId ?? null })) return { status: "blocked", reason: "directory" };
+        { organization: command.organization, client: command.client })) return { status: "blocked", reason: "directory" };
     } else if (action.operation === "update") {
       if (!mapping || !identity(connection, mapping) || !headMatches(head, action.local, connection, true)) return { status: "blocked", reason: "stale" };
       organizationRecordId = head!.organization_record_id; clientRecordId = head!.client_record_id;
@@ -218,7 +220,9 @@ export async function planProjectAlphaProjectV2Command(
       organizationRecordId = head!.organization_record_id; clientRecordId = head!.client_record_id;
       if (!await directoryReady(env.OPS_DB, connection, organizationRecordId, clientRecordId)) return { status: "blocked", reason: "directory" };
     }
-    const originSnapshot = JSON.stringify({ actorId: action.actor.staffId });
+    const originSnapshot = JSON.stringify(action.operation === "create"
+      ? { actorId: action.actor.staffId, organizationRecordId, clientRecordId }
+      : { actorId: action.actor.staffId });
     const nextAttemptAt = Math.floor(Date.now() / 1000);
     const mappingState = action.operation === "update" ? "exact" : "absent";
     const expectedPublicId = action.operation === "update" ? mapping!.project_alpha_public_id : null;
@@ -226,12 +230,46 @@ export async function planProjectAlphaProjectV2Command(
     if (!destination) statements.push(env.OPS_DB.prepare(`INSERT INTO project_alpha_project_destinations(external_project_id,source_id,application_id,
       destination_base_url,expected_source_instance_id,expected_history_epoch_id) VALUES(?,?,?,?,?,?)`).bind(
       canonical.command.externalId, connection.sourceId, connection.applicationId, connection.baseUrl, connection.sourceInstanceId, connection.historyEpochId));
-    statements.push(
-      env.OPS_DB.prepare(`INSERT INTO native_project_command_proofs(command_id,external_project_id,actor_staff_id,actor_access_subject,
+    const proofInsert = action.operation === "create" ? (() => {
+      const command = canonical.command as ProjectAlphaProjectCreateCommand;
+      const organizationPredicate = `(SELECT count(*) FROM project_alpha_active_directory_mappings mapping
+        JOIN operations_directory_records record ON record.record_id=mapping.record_id AND record.record_kind='organization'
+        WHERE mapping.record_id=? AND mapping.source_id=? AND mapping.source_instance_id=? AND mapping.application_id=?
+          AND mapping.history_epoch_id=? AND mapping.resource_type='organization')=1
+        AND EXISTS(SELECT 1 FROM project_alpha_active_directory_mappings mapping
+          WHERE mapping.record_id=? AND mapping.source_id=? AND mapping.source_instance_id=? AND mapping.application_id=?
+            AND mapping.history_epoch_id=? AND mapping.resource_type='organization' AND mapping.external_id=?
+            AND mapping.project_alpha_public_id=?)`;
+      const clientPredicate = clientRecordId === null ? ""
+        : ` AND (SELECT count(*) FROM project_alpha_active_directory_mappings mapping
+          JOIN operations_directory_records record ON record.record_id=mapping.record_id AND record.record_kind='client'
+          WHERE mapping.record_id=? AND mapping.source_id=? AND mapping.source_instance_id=? AND mapping.application_id=?
+            AND mapping.history_epoch_id=? AND mapping.resource_type='client')=1
+          AND EXISTS(SELECT 1 FROM project_alpha_active_directory_mappings mapping
+            WHERE mapping.record_id=? AND mapping.source_id=? AND mapping.source_instance_id=? AND mapping.application_id=?
+              AND mapping.history_epoch_id=? AND mapping.resource_type='client' AND mapping.external_id=?
+              AND mapping.project_alpha_public_id=?)
+          AND (SELECT count(*) FROM operations_directory_client_organizations relationship
+            WHERE relationship.client_record_id=? AND relationship.organization_record_id=?)=1`;
+      return env.OPS_DB.prepare(`INSERT INTO native_project_command_proofs(command_id,external_project_id,actor_staff_id,actor_access_subject,
+        actor_admission_version,actor_profile_version,actor_email,verified_until,grant_generation,scopes_json)
+        SELECT ?,?,?,?,?,?,?,?,?,? WHERE ${organizationPredicate}${clientPredicate}`).bind(canonical.command.commandId,
+        canonical.command.externalId, action.actor.staffId, action.actor.accessSubject, action.actor.admissionVersion,
+        action.actor.profileVersion, action.actor.email, action.actor.verifiedUntil, currentActor.generation, scopesJson,
+        organizationRecordId, connection.sourceId, connection.sourceInstanceId, connection.applicationId, connection.historyEpochId,
+        organizationRecordId, connection.sourceId, connection.sourceInstanceId, connection.applicationId, connection.historyEpochId,
+        command.organization.externalId, command.organization.expectedPublicId,
+        ...(clientRecordId === null ? [] : [clientRecordId, connection.sourceId, connection.sourceInstanceId,
+          connection.applicationId, connection.historyEpochId, clientRecordId, connection.sourceId, connection.sourceInstanceId,
+          connection.applicationId, connection.historyEpochId, command.client!.externalId, command.client!.expectedPublicId,
+          clientRecordId, organizationRecordId]));
+    })() : env.OPS_DB.prepare(`INSERT INTO native_project_command_proofs(command_id,external_project_id,actor_staff_id,actor_access_subject,
         actor_admission_version,actor_profile_version,actor_email,verified_until,grant_generation,scopes_json)
         VALUES(?,?,?,?,?,?,?,?,?,?)`).bind(canonical.command.commandId, canonical.command.externalId, action.actor.staffId,
         action.actor.accessSubject, action.actor.admissionVersion, action.actor.profileVersion, action.actor.email,
-        action.actor.verifiedUntil, currentActor.generation, scopesJson),
+        action.actor.verifiedUntil, currentActor.generation, scopesJson);
+    statements.push(
+      proofInsert,
       env.OPS_DB.prepare(`INSERT INTO project_alpha_project_outbox(command_id,external_project_id,operation,command_json,source_id,
         application_id,destination_base_url,expected_source_instance_id,origin_snapshot_json,state,attempts,next_attempt_at,expected_history_epoch_id)
         VALUES(?,?,?,?,?,?,?,?,?,'pending',0,?,?)`).bind(canonical.command.commandId, canonical.command.externalId,

@@ -17,7 +17,7 @@ const scope: SqlScope = { global: true, divisions: [], assigned: false, own: fal
 function context(kind: "organization" | "standalone_client" = "organization", id = "org-a"): ClientHubCollectionContext {
   return {
     root: { source_id: "project-alpha:primary", root_namespace: "business", kind, public_id: id,
-      pa_public_id: null, mapping_status: "missing", display_name: id, sort_name: id, status: "active",
+      pa_internal_id: id, pa_public_id: null, mapping_status: "missing", display_name: id, sort_name: id, status: "active",
       portal_status: "not_provisioned", workspace_id: null, legacy_account_id: null, account_count: 0,
       project_count: 0, request_count: 0, contact_count: 0, meaningful_activity_at: null,
       source_version: null, indexed_at: "", scan_generation: 0 },
@@ -46,7 +46,11 @@ async function fixture() {
     INSERT INTO pa_clients(id,name,organization_id,active,payload_json) VALUES('client-a','Contact A','org-a',1,'{}'),('client-b','Contact B','org-b',1,'{}'),
       ('standalone','Standalone',NULL,1,'{}'),('inactive','Inactive','org-a',0,'{}');
     INSERT INTO pa_users(id,display_name) VALUES('user-a','Manager A');`);
-  const env = { OPS_DB: db } as Env;
+  const env = { OPS_DB: db, PROJECT_ALPHA_API_V2_CONNECTIONS: JSON.stringify({ version: 1, instances: {
+    "project-alpha:primary": { sourceId: "project-alpha:primary", enabled: true, baseUrl: "https://alpha.example.test/", apiKey: "test-key",
+      sourceInstanceId: "00000000-0000-4000-8000-000000000001", applicationId: "00000000-0000-4000-8000-000000000002",
+      historyEpoch: "00000000-0000-4000-8000-000000000003" },
+  } }) } as Env;
   async function project(id: string, values: { client?: string | null; organization?: string | null; status?: string;
     created?: unknown; payload?: string; active?: number; manager?: string | null; syncTime?: string } = {}) {
     await db.prepare(`INSERT INTO pa_projects(id,name,status,start_date,end_date,client_id,organization_id,manager_user_id,active,payload_json,updated_at) VALUES(?,?,?,'2026-08-01',NULL,?,?,?,?,?,?)`)
@@ -85,7 +89,7 @@ describe("Client Hub business project history", () => {
     expect(first.items[0]).not.toHaveProperty("r2_prefix");
     expect(first.items[0]).not.toHaveProperty("updated_at");
     expect(first.items[0]).not.toHaveProperty("__created");
-    expect(first.items[0]?.row_key).toBe(JSON.stringify(["businessProjects", "project-alpha:primary", "project-0212"]));
+    expect(first.items[0]?.row_key).toBe(JSON.stringify(["businessProjects", "project-alpha:primary", "pa", "project-0212"]));
   }, 60_000);
 
   it("normalizes source timezone offsets, puts malformed or missing dates last, and ignores local sync times", async () => {
@@ -134,6 +138,32 @@ describe("Client Hub business project history", () => {
     expect((await listClientHubBusinessProjects(env, staff, solo)).items).toEqual([]);
     await db.prepare("UPDATE pa_clients SET organization_id='org-a' WHERE id='standalone'").run();
     await expect(listClientHubBusinessProjects(env, staff, solo)).rejects.toMatchObject({ status: 404 });
+  });
+
+  it("uses the PA internal organization ID while preserving the distinct Ops route ID", async () => {
+    const { db, env, project } = await fixture();
+    const publicId = "11111111111111111111111111111111";
+    await db.exec(`CREATE TABLE operations_directory_records(record_id TEXT PRIMARY KEY,record_kind TEXT,current_version INTEGER);
+      CREATE TABLE operations_directory_revisions(record_id TEXT,version INTEGER,profile_json TEXT,PRIMARY KEY(record_id,version));`);
+    await sql(db, `CREATE TABLE mapping_rows(source_id TEXT,resource_type TEXT,record_id TEXT,external_id TEXT,project_alpha_public_id TEXT,
+      source_instance_id TEXT,application_id TEXT,history_epoch_id TEXT,active INTEGER)`);
+    await sql(db, `CREATE VIEW project_alpha_active_directory_mappings AS SELECT source_id,resource_type,record_id,external_id,
+      project_alpha_public_id,source_instance_id,application_id,history_epoch_id FROM mapping_rows WHERE active=1`);
+    await db.batch([
+      db.prepare("INSERT INTO operations_directory_records VALUES('ops-org-9','organization',1)"),
+      db.prepare(`INSERT INTO operations_directory_revisions VALUES('ops-org-9',1,'{"name":"Ops Org 9"}')`),
+      db.prepare("UPDATE pa_organizations SET payload_json=? WHERE id='org-a'").bind(JSON.stringify({ public_id: publicId })),
+      db.prepare(`INSERT INTO mapping_rows VALUES('project-alpha:primary','organization','ops-org-9','org-a',?,
+        '00000000-0000-4000-8000-000000000001','00000000-0000-4000-8000-000000000002','00000000-0000-4000-8000-000000000003',1)`).bind(publicId),
+    ]);
+    await project("mismatched-root-id", { organization: "org-a" });
+    const mapped = context("organization", "ops-org-9");
+    mapped.root.pa_internal_id = "org-a";
+    mapped.root.pa_public_id = publicId;
+    expect((await listClientHubBusinessProjects(env, staff, mapped)).items).toMatchObject([
+      { id: "mismatched-root-id", organization_id: "org-a" },
+    ]);
+    expect((await listClientHubBusinessProjects(env, staff, mapped)).canonicalRoot.publicId).toBe("ops-org-9");
   });
 
   it("requires project permission in addition to directory access", async () => {

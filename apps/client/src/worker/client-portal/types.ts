@@ -364,11 +364,24 @@ export interface ClientServiceRequest {
   } | null;
   /** A current, source-qualified Project Alpha draft receipt exists. */
   projectAlphaDraftCreated?: boolean;
+  /** Immutable source-qualified selections, present on authorized detail reads only. */
+  submittedServices?: ClientSubmittedServiceReview[];
+  submittedServiceDetailsAvailable?: boolean;
   status: "submitted" | "under_review" | "accepted_pending_pa_linkage" | "accepted_linked" | "declined" | "cancelled" | "completed";
   acceptedQuote?: ClientAcceptedQuote | null;
   operationalEstimate?: ClientOperationalEstimate | null;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface ClientSubmittedServiceReview {
+  publicId: string;
+  sourceVersion: string;
+  name: string;
+  summary: string | null;
+  category: string;
+  geometryRequirement: "none" | "optional" | "required";
+  answers: Array<{ questionId: string; label: string; displayValue: string }>;
 }
 
 export type ClientServiceRequestCreateResult =
@@ -414,6 +427,7 @@ export interface ClientPortalRepository {
   updateNotification(env: Env, session: ClientPortalSession, notificationId: string, action: "read" | "dismiss", guard?: { sql: string; bindings: unknown[] }): Promise<boolean>;
   listServiceRequests(env: Env, session: ClientPortalSession): Promise<ClientServiceRequest[]>;
   getServiceRequest(env: Env, session: ClientPortalSession, requestId: string): Promise<ClientServiceRequest | null>;
+  getServiceRequestDetail?(env: Env, session: ClientPortalSession, requestId: string): Promise<ClientServiceRequest | null>;
   createServiceRequest(env: Env, session: ClientPortalSession, input: ClientServiceRequestInput): Promise<ClientServiceRequestDirectCreateResult | null>;
   updateServiceRequest(env: Env, session: ClientPortalSession, requestId: string, input: ClientServiceRequestInput): Promise<ClientServiceRequest | null>;
   cancelServiceRequest?(env: Env, session: ClientPortalSession, requestId: string, mutationKey: string): Promise<ClientServiceRequestCancelResult | null>;

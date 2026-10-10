@@ -19,14 +19,15 @@ export type ProjectAlphaApiV2Endpoint = {
   requiresUpdatePublicId?: boolean;
   requiresHistoryEpoch?: boolean;
   requiresExpectedPublicId?: boolean;
+  requiresExpectedRevision?: boolean;
   requiresExpectedProfileSha256?: boolean;
 };
 
 const DIRECTORY_ENDPOINTS: readonly ProjectAlphaApiV2Endpoint[] = [
   { method: "POST", path: "/api/v2/directory/organizations/commands", requiredCapability: "directory.organizations.create",
-    requiresSourceInstanceId: true, requiresApplicationId: true, requiresUpdatePublicId: true, requiresHistoryEpoch: true },
+    requiresSourceInstanceId: true, requiresApplicationId: true, requiresHistoryEpoch: true },
   { method: "POST", path: "/api/v2/directory/clients/commands", requiredCapability: "directory.clients.create",
-    requiresSourceInstanceId: true, requiresApplicationId: true, requiresUpdatePublicId: true, requiresHistoryEpoch: true },
+    requiresSourceInstanceId: true, requiresApplicationId: true, requiresHistoryEpoch: true },
 ];
 
 export type ProjectAlphaApiV2Connection = {
@@ -71,6 +72,7 @@ function endpointContract(value: unknown): value is ProjectAlphaApiV2Endpoint {
     && (value.requiresUpdatePublicId === undefined || typeof value.requiresUpdatePublicId === "boolean")
     && (value.requiresHistoryEpoch === undefined || typeof value.requiresHistoryEpoch === "boolean")
     && (value.requiresExpectedPublicId === undefined || typeof value.requiresExpectedPublicId === "boolean")
+    && (value.requiresExpectedRevision === undefined || typeof value.requiresExpectedRevision === "boolean")
     && (value.requiresExpectedProfileSha256 === undefined || typeof value.requiresExpectedProfileSha256 === "boolean");
 }
 
@@ -112,6 +114,7 @@ export async function probeProjectAlphaApiV2(
   requiredCapabilities: readonly string[] = [],
   send: typeof fetch = fetch,
   requiredEndpoints: readonly ProjectAlphaApiV2Endpoint[] = [],
+  requiredGrantedCapabilities: readonly string[] = [],
 ): Promise<ProjectAlphaApiV2Probe> {
   let url: URL, headers: Headers;
   try {
@@ -194,7 +197,7 @@ export async function probeProjectAlphaApiV2(
     if (connection.expectedHistoryEpoch !== undefined && data.historyEpoch !== connection.expectedHistoryEpoch) {
       return { status: "incompatible", reason: "history_epoch_mismatch", ...diagnostic };
     }
-    if (!["api.capabilities.read", ...requiredCapabilities, ...requiredEndpoints.map(endpoint => endpoint.requiredCapability)]
+    if (!["api.capabilities.read", ...requiredCapabilities, ...requiredGrantedCapabilities, ...requiredEndpoints.map(endpoint => endpoint.requiredCapability)]
       .every(capability => granted.includes(capability))) {
       return { status: "unauthorized", reason: "missing_capability", ...diagnostic };
     }
@@ -212,6 +215,8 @@ export async function probeProjectAlphaApiV2(
             && implementedEndpoint.requiresHistoryEpoch !== endpoint.requiresHistoryEpoch)
           || (endpoint.requiresExpectedPublicId !== undefined
             && implementedEndpoint.requiresExpectedPublicId !== endpoint.requiresExpectedPublicId)
+          || (endpoint.requiresExpectedRevision !== undefined
+            && implementedEndpoint.requiresExpectedRevision !== endpoint.requiresExpectedRevision)
           || (endpoint.requiresExpectedProfileSha256 !== undefined
             && implementedEndpoint.requiresExpectedProfileSha256 !== endpoint.requiresExpectedProfileSha256);
       })) {

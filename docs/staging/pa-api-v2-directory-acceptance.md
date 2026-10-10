@@ -146,3 +146,26 @@ projection SHA-256 digests, and page/generation counts. It excludes bearer token
 credentials, profile contents, external IDs, public IDs, and command bodies.
 Archive is a soft lifecycle event: retain the disposable records, bindings,
 receipts, tombstones, and audit history; do not hard-delete them after a run.
+
+## Authenticated browser-context transport
+
+`parseBrowserContextDirectoryJoinedAcceptanceConfig` and
+`runDirectoryJoinedAcceptanceWithBrowserContext` support a manually invoked,
+already-authenticated Operations browser. This remains staging-only,
+default-off, and requires the exact
+`OPS_DIRECTORY_ACCEPTANCE_ALLOW_MUTATIONS=allow` gate. The existing Node CLI is
+unchanged.
+
+Browser mode rejects copied `OPS_SESSION_COOKIE`, `OPS_STORAGE_STATE`,
+`OPS_CF_ACCESS_JWT_ASSERTION`, and `CLOUDFLARE_API_TOKEN` values. Its native
+browser fetcher is restricted to the canonical Operations staging origin and
+the fixed session, create-options, admission, standalone-create, and exact
+synthetic-record routes. It receives `credentials: "same-origin"` but no
+Cookie, Access assertion, Authorization, or Origin header from the harness.
+The public sentinel uses a separate fetcher with `credentials: "omit"`.
+
+Destination verification is mandatory and must be supplied as a trusted
+`destinationReadback` dependency. Browser mode never calls Cloudflare, reads
+browser storage, extracts a session secret, or accepts D1 credentials. The
+trusted caller must return the same bounded readback shape checked by the CLI;
+missing, duplicate, colliding, or revision-inconsistent evidence fails closed.

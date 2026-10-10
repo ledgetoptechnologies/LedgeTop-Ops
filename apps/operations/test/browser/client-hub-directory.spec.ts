@@ -154,7 +154,7 @@ test("matching business IDs from two producers retain source labels, contacts an
     const root = roots.find(row => row.source_id === source);
     if (!root) return route.fulfill({ status: 404, json: { error: "Unknown source" } });
     const label = source === "project-alpha:primary" ? "Primary" : "Secondary";
-    const project = { id: "9", row_key: `${source}:project:9`, name: `${label} project`, status: "active",
+    const project = { id: "9", origin: "pa", row_key: `${source}:project:9`, name: `${label} project`, status: "active",
       start_date: null, end_date: null, created_at: null, manager: null, manager_name: null, manager_user_id: null, description: null };
     const contact = { id: "7", public_id: "7", contact_key: `${source}:7`, row_key: `${source}:contact:7`,
       record_type: "business_contact", organization_id: "42", display_name: `${label} contact`,
@@ -190,7 +190,7 @@ test("matching business IDs from two producers retain source labels, contacts an
   await expect(page.getByRole("link", { name: "Open Secondary business client workspace" })).toContainText("Portal ready");
   await page.getByRole("link", { name: "Open Primary business client workspace" }).click();
   await expect(page.getByText("Primary contact", { exact: true })).toBeVisible();
-  await expect(page.getByRole("link", { name: "Primary project", exact: true })).toHaveAttribute("href", roots[0]!.detail_path + "/projects/9");
+  await expect(page.getByRole("link", { name: "Primary project", exact: true })).toHaveAttribute("href", roots[0]!.detail_path + "/projects/pa/9");
   await page.goBack();
   await page.getByRole("link", { name: "Open Secondary business client workspace" }).click();
   await expect(page.getByText("Secondary contact", { exact: true })).toBeVisible();
@@ -202,7 +202,7 @@ test("matching business IDs from two producers retain source labels, contacts an
   await page.reload();
   await expect(page.getByText("Secondary contact", { exact: true })).toBeVisible();
   const link = page.getByRole("link", { name: "Secondary project", exact: true });
-  await expect(link).toHaveAttribute("href", roots[1]!.detail_path + "/projects/9");
+  await expect(link).toHaveAttribute("href", roots[1]!.detail_path + "/projects/pa/9");
   await link.click();
   await expect(page.getByRole("region", { name: "Business project workspace", exact: true }).getByRole("heading", { name: "Secondary project", exact: true })).toBeVisible();
   await expect(page.getByText("secondary@example.test", { exact: true })).toBeVisible();

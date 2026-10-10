@@ -143,6 +143,8 @@ async function fixture() {
   `);
   await applyBusinessPartySchema(ops);
   await applySql(ops, `
+    INSERT INTO pa_projection_record_ids(projection_source_id,record_kind,external_id,local_id)
+      VALUES('project-alpha:primary','organization','pa-org','pa-org');
     INSERT INTO client_hub_roots(source_id,kind,public_id,display_name,sort_name,status,portal_status,workspace_id,legacy_account_id,account_count,project_count,request_count,contact_count)
       VALUES('project-alpha:primary','organization','pa-org','Organization One','organization one','active','active','workspace-org','account-org',1,0,0,2),
         ('project-alpha:primary','standalone_client','pa-standalone','Standalone One','standalone one','active','not_provisioned',NULL,'account-standalone',1,1,1,1);
@@ -201,7 +203,11 @@ async function fixture() {
   const app = new Hono<{ Bindings: Env; Variables: { principal: StaffPrincipal; administrator: boolean } }>();
   app.use("*", async (c, next) => { c.set("principal", principal); c.set("administrator", true); await next(); });
   registerClientHubRoutes(app);
-  const env = { OPS_DB: ops, DELIVERY_DB: delivery, CLIENT_PORTAL_ROOT_ACCESS_POLICY_ENABLED: "true",
+  const env = { OPS_DB: ops, DELIVERY_DB: delivery, PROJECT_ALPHA_API_V2_CONNECTIONS: JSON.stringify({ version: 1, instances: {
+    "project-alpha:primary": { sourceId: "project-alpha:primary", enabled: true, baseUrl: "https://alpha.example.test/", apiKey: "test-key",
+      sourceInstanceId: "00000000-0000-4000-8000-000000000001", applicationId: "00000000-0000-4000-8000-000000000002",
+      historyEpoch: "00000000-0000-4000-8000-000000000003" },
+  } }), CLIENT_PORTAL_ROOT_ACCESS_POLICY_ENABLED: "true",
     CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED: "true", CLIENT_PORTAL_DENY_POLICY_MANAGEMENT_ENABLED: "true" } as Env;
   return { app, env, ops, delivery };
 }
@@ -300,8 +306,7 @@ describe("Client Hub bounded detail collections", () => {
     await ops.batch([
       ops.prepare("INSERT INTO pa_organizations(id,name,active,payload_json,projection_source_id) VALUES('party-secondary-org','Second source customer',1,'{}','project-alpha:secondary')"),
       ops.prepare(`INSERT INTO pa_projection_record_ids(projection_source_id,record_kind,external_id,local_id)
-        VALUES('project-alpha:primary','organization','pa-org','pa-org'),
-          ('project-alpha:secondary','organization','pa-org','party-secondary-org')`),
+        VALUES('project-alpha:secondary','organization','pa-org','party-secondary-org')`),
     ]);
     const link = () => ops.batch([
       ops.prepare(`INSERT INTO business_parties(id,kind,display_name,sort_name,created_by,updated_by)
@@ -440,13 +445,17 @@ describe("Client Hub bounded detail collections", () => {
       acl.hasPermission.mockImplementation(async (_env, _principal, permission) =>
         ["delivery.share.audit", "viewer.view", "projects.view"].includes(permission));
       const url = organizationPath + "/business-projects/business-one";
-      const first = await app.request(url, {}, env);
+      const typedUrl = url + "?origin=pa";
+      const first = await app.request(typedUrl, {}, env);
       expect(first.status).toBe(200);
       const result = await first.json() as { contextVersion: string };
       expect(result).toMatchObject({ canonicalRoot: { sourceId: "project-alpha:primary", rootNamespace: "business", publicId: "pa-org" },
-        project: { id: "business-one", description: "Business detail" }, linkedContact: { id: "pa-child-login", sourceField: "project.client_id" } });
-      expect((await app.request(url + "?expectedContextVersion=" + result.contextVersion, {}, env)).status).toBe(200);
-      expect((await app.request(url + "?expectedContextVersion=" + "b".repeat(43), {}, env)).status).toBe(409);
+        project: { id: "business-one", origin: "pa", description: "Business detail" }, linkedContact: { id: "pa-child-login", sourceField: "project.client_id" } });
+      expect((await app.request(typedUrl + "&expectedContextVersion=" + result.contextVersion, {}, env)).status).toBe(200);
+      expect((await app.request(typedUrl + "&expectedContextVersion=" + "b".repeat(43), {}, env)).status).toBe(409);
+      expect((await app.request(url + "?origin=unknown", {}, env)).status).toBe(400);
+      // Retained one-segment bookmarks are unambiguously PA-only.
+      expect((await app.request(url, {}, env)).status).toBe(200);
       expect((await app.request(organizationPath + "/business-projects/hidden-project", {}, env)).status).toBe(404);
       expect((await app.request(url.replace("/business/organizations/pa-org", "/portal/organizations/workspace-org"), {}, env)).status).toBe(404);
       expect((await app.request(url.replace("project-alpha%3Aprimary/business", "delivery%3Alocal/account"), {}, env)).status).toBe(404);
@@ -725,6 +734,96 @@ describe("Client Hub bounded detail collections", () => {
     expect((await readCollection(app, env, organizationPath, "businessContacts", first.page.nextCursor, 1)).items).toHaveLength(1);
   }, 30_000);
 
+  it("retains legacy portal aliases across unequal Ops, PA-internal, and PA-public IDs without exposing the internal ID", async () => {
+    const { app, env, ops } = await fixture();
+    await applySql(ops, `CREATE TABLE operations_directory_records(record_id TEXT PRIMARY KEY,record_kind TEXT,current_version INTEGER);
+      CREATE TABLE operations_directory_revisions(record_id TEXT,version INTEGER,profile_json TEXT,PRIMARY KEY(record_id,version));
+      CREATE TABLE operations_directory_client_organizations(client_record_id TEXT PRIMARY KEY,organization_record_id TEXT);
+      CREATE TABLE active_mapping_rows(source_id TEXT,resource_type TEXT,record_id TEXT,external_id TEXT,project_alpha_public_id TEXT,
+        source_instance_id TEXT,application_id TEXT,history_epoch_id TEXT);
+      CREATE VIEW project_alpha_active_directory_mappings AS SELECT source_id,resource_type,record_id,external_id,
+        project_alpha_public_id,source_instance_id,application_id,history_epoch_id,
+        'acquired' mapping_kind,external_id provenance_id FROM active_mapping_rows;
+      INSERT INTO operations_directory_records VALUES('ops-org','organization',1),('ops-login','client',1),('ops-no-login','client',1);
+      INSERT INTO operations_directory_revisions VALUES
+        ('ops-org',1,'{"name":"Organization One"}'),
+        ('ops-login',1,'{"name":"Login Contact"}'),
+        ('ops-no-login',1,'{"name":"No Login Contact"}');
+      INSERT INTO operations_directory_client_organizations VALUES('ops-login','ops-org'),('ops-no-login','ops-org');
+      INSERT INTO active_mapping_rows VALUES('project-alpha:primary','organization','ops-org','pa-org','${organizationUuid}',
+        '00000000-0000-4000-8000-000000000001','00000000-0000-4000-8000-000000000002','00000000-0000-4000-8000-000000000003');
+      INSERT INTO active_mapping_rows VALUES('project-alpha:primary','client','ops-login','pa-child-login','${"d".repeat(32)}',
+        '00000000-0000-4000-8000-000000000001','00000000-0000-4000-8000-000000000002','00000000-0000-4000-8000-000000000003');
+      INSERT INTO active_mapping_rows VALUES('project-alpha:primary','client','ops-no-login','pa-child-no-login','${"e".repeat(32)}',
+        '00000000-0000-4000-8000-000000000001','00000000-0000-4000-8000-000000000002','00000000-0000-4000-8000-000000000003');`);
+    const response = await app.request("http://local/api/client-hub/sources/project-alpha%3Aprimary/portal/organizations/workspace-org", {}, env);
+    expect(response.status).toBe(200);
+    const detail = await response.json() as { client: Record<string, unknown>; contacts: unknown[] };
+    expect(detail.client).toMatchObject({ root_namespace: "business", public_id: "ops-org", pa_public_id: organizationUuid });
+    expect(detail.client).not.toHaveProperty("pa_internal_id");
+    expect(detail.contacts).toHaveLength(2);
+    // The PA internal ID is deliberately also an old cached route key. Once
+    // acquired mappings are active, it must not resolve as an Ops route ID.
+    const staleInternalRoute = await app.request("http://local/api/client-hub/sources/project-alpha%3Aprimary/business/organizations/pa-org", {}, env);
+    expect(staleInternalRoute.status, await staleInternalRoute.text()).toBe(404);
+  }, 30_000);
+
+  it("serves current canonical Operations contacts without legacy PA organization or client rows", async () => {
+    const { app, env, ops } = await fixture();
+    const sourceInstance = "00000000-0000-4000-8000-000000000001";
+    const application = "00000000-0000-4000-8000-000000000002";
+    const history = "00000000-0000-4000-8000-000000000003";
+    await applySql(ops, `CREATE TABLE operations_directory_records(record_id TEXT PRIMARY KEY,record_kind TEXT,current_version INTEGER);
+      CREATE TABLE operations_directory_revisions(record_id TEXT,version INTEGER,profile_json TEXT,PRIMARY KEY(record_id,version));
+      CREATE TABLE operations_directory_client_organizations(client_record_id TEXT PRIMARY KEY,organization_record_id TEXT);
+      CREATE TABLE active_mapping_rows(source_id TEXT,resource_type TEXT,record_id TEXT,external_id TEXT,project_alpha_public_id TEXT,
+        source_instance_id TEXT,application_id TEXT,history_epoch_id TEXT);
+      CREATE VIEW project_alpha_active_directory_mappings AS SELECT source_id,resource_type,record_id,external_id,
+        project_alpha_public_id,source_instance_id,application_id,history_epoch_id,
+        'acquired' mapping_kind,external_id provenance_id FROM active_mapping_rows;
+      INSERT INTO operations_directory_records VALUES
+        ('ops-org','organization',2),('ops-current','client',2),('ops-stale','client',1),
+        ('ops-ambiguous-a','client',1),('ops-ambiguous-b','client',1),('ops-malformed','client',1);
+      INSERT INTO operations_directory_revisions VALUES
+        ('ops-org',1,'{"name":"Old organization"}'),('ops-org',2,'{"name":"Canonical organization"}'),
+        ('ops-current',1,'{"name":"Old contact","email":"old@example.test"}'),
+        ('ops-current',2,'{"name":"Current contact","email":"current@example.test","phone":"+1 (920) 555-0123"}'),
+        ('ops-stale',1,'{"name":"Stale contact","email":"stale@example.test"}'),
+        ('ops-ambiguous-a',1,'{"name":"Ambiguous A","email":"ambiguous-a@example.test"}'),
+        ('ops-ambiguous-b',1,'{"name":"Ambiguous B","email":"ambiguous-b@example.test"}'),
+        ('ops-malformed',1,'{"name":"Malformed","email":"malformed@example.test"}');
+      INSERT INTO operations_directory_client_organizations VALUES
+        ('ops-current','ops-org'),('ops-stale','ops-org'),('ops-ambiguous-a','ops-org'),
+        ('ops-ambiguous-b','ops-org'),('ops-malformed','ops-org');
+      INSERT INTO active_mapping_rows VALUES
+        ('project-alpha:primary','organization','ops-org','pa-org','${organizationUuid}','${sourceInstance}','${application}','${history}'),
+        ('project-alpha:primary','client','ops-current','pa-current','${"1".repeat(32)}','${sourceInstance}','${application}','${history}'),
+        ('project-alpha:primary','client','ops-stale','pa-stale','${"2".repeat(32)}','${sourceInstance}','${application}','00000000-0000-4000-8000-000000000099'),
+        ('project-alpha:primary','client','ops-ambiguous-a','pa-ambiguous','${"3".repeat(32)}','${sourceInstance}','${application}','${history}'),
+        ('project-alpha:primary','client','ops-ambiguous-b','pa-ambiguous','${"3".repeat(32)}','${sourceInstance}','${application}','${history}'),
+        ('project-alpha:primary','client','ops-malformed','pa-malformed','NOT-A-PUBLIC-ID','${sourceInstance}','${application}','${history}');
+      DELETE FROM pa_clients;
+      DELETE FROM pa_organizations;`);
+    const path = "http://local/api/client-hub/sources/project-alpha%3Aprimary/business/organizations/ops-org";
+    const detailResponse = await app.request(path, {}, env);
+    expect(detailResponse.status, await detailResponse.clone().text()).toBe(200);
+    await expect(detailResponse.json()).resolves.toMatchObject({
+      client: { public_id: "ops-org", root_namespace: "business", kind: "organization" },
+      organizationOperationalContactsAvailable: false,
+    });
+    const response = await app.request(path + "/collections/businessContacts", {}, env);
+    expect(response.status, await response.clone().text()).toBe(200);
+    const collection = await response.json() as { items: Array<Record<string, unknown>>; page: Page };
+    expect(collection.items).toEqual([expect.objectContaining({
+      public_id: "ops-current", organization_id: "ops-org", display_name: "Current contact",
+      email: "current@example.test", phone: "+1 (920) 555-0123", record_type: "business_contact",
+      contact_key: "business:project-alpha:primary:ops-current",
+    })]);
+    expect(collection.page).toMatchObject({ available: true, returned: 1, hasMore: false });
+    expect(await ops.prepare("SELECT count(*) count FROM pa_clients").first("count")).toBe(0);
+    expect(await ops.prepare("SELECT count(*) count FROM pa_organizations").first("count")).toBe(0);
+  }, 30_000);
+
   it("does not bypass canonical ID validation through live-source fallback", async () => {
     const { app, env, ops } = await fixture();
     for (const id of ["x".repeat(513), "bad\u0001id"]) {
@@ -912,6 +1011,31 @@ describe("Client Hub", () => {
       accounts: [{ id: "account-org" }] });
   });
 
+  it("resolves a v2-only portal workspace to its current Ops root without legacy PA rows or account aliases", async () => {
+    const { app, env, ops, delivery } = await fixture();
+    await applySql(ops, `DELETE FROM pa_organizations; DELETE FROM pa_clients;`);
+    await delivery.prepare("DELETE FROM client_accounts").run();
+    await delivery.prepare("UPDATE portal_v2_workspaces SET legacy_account_id=NULL WHERE id='workspace-org'").run();
+    await applySql(ops, `CREATE TABLE operations_directory_records(record_id TEXT PRIMARY KEY,record_kind TEXT,current_version INTEGER);
+      CREATE TABLE operations_directory_revisions(record_id TEXT,version INTEGER,profile_json TEXT,PRIMARY KEY(record_id,version));
+      CREATE TABLE operations_directory_client_organizations(client_record_id TEXT PRIMARY KEY,organization_record_id TEXT);
+      CREATE TABLE active_mapping_rows(source_id TEXT,resource_type TEXT,record_id TEXT,external_id TEXT,project_alpha_public_id TEXT,
+        source_instance_id TEXT,application_id TEXT,history_epoch_id TEXT);
+      CREATE VIEW project_alpha_active_directory_mappings AS SELECT source_id,resource_type,record_id,external_id,
+        project_alpha_public_id,source_instance_id,application_id,history_epoch_id,
+        'acquired' mapping_kind,external_id provenance_id FROM active_mapping_rows;
+      INSERT INTO operations_directory_records VALUES('ops-org','organization',2);
+      INSERT INTO operations_directory_revisions VALUES('ops-org',2,'{"name":"Current API v2 business"}');
+      INSERT INTO active_mapping_rows VALUES('project-alpha:primary','organization','ops-org','pa-internal-org','${organizationUuid}',
+        '00000000-0000-4000-8000-000000000001','00000000-0000-4000-8000-000000000002','00000000-0000-4000-8000-000000000003');`);
+    const response = await app.request("http://local/api/client-hub/sources/project-alpha%3Aprimary/portal/organizations/workspace-org", {}, env);
+    expect(response.status, await response.clone().text()).toBe(200);
+    const detail = await response.json() as { client: Record<string, unknown> };
+    expect(detail.client).toMatchObject({ root_namespace: "business", public_id: "ops-org", pa_public_id: organizationUuid,
+      workspace_id: "workspace-org" });
+    expect(detail.client).not.toHaveProperty("pa_internal_id");
+  }, 30_000);
+
   it("keeps the contact-role API default-off, source-qualified and read-only when explicitly enabled", async () => {
     const { app, env, ops, delivery } = await fixture();
     expect((await app.request(`${organizationPath}/project-alpha-contact-roles`, {}, env)).status).toBe(404);
@@ -950,7 +1074,8 @@ describe("Client Hub", () => {
     const wrongSource = await app.request(organizationPath.replace("project-alpha%3Aprimary", "project-alpha%3Asecondary")
       + "/project-alpha-contact-roles", {}, env);
     expect(wrongSource.status).toBe(404);
-  }, 15_000);
+  // This full-D1 fixture exercises four separately bounded read paths through Miniflare.
+  }, 30_000);
 
   it("hydrates exact project roles behind the existing project-view policy without adding mutation authority", async () => {
     const { app, env, ops, delivery } = await fixture();

@@ -2,7 +2,7 @@ import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
 import { isAdministrator, sqlScope } from "./acl";
 import type { ClientHubCollectionContext } from "./client-hub-collections";
-import { isBusinessProjectionSource } from "./client-hub-source";
+import { clientHubAlphaInternalId, isBusinessProjectionSource } from "./client-hub-source";
 import type { Env, StaffPrincipal } from "./types";
 
 type Database = Pick<D1Database, "prepare" | "batch">;
@@ -270,7 +270,7 @@ export async function readClientHubProjectManagementAction(env: Env, principal: 
       LEFT JOIN integration_health health ON health.integration='project-alpha'
         AND health.projection_source_id=connector.source_id
       WHERE connector.source_id=?
-      ORDER BY mapping.external_id LIMIT 2`).bind(kind, root.public_id, root.source_id).all<ActionRow>()
+      ORDER BY mapping.external_id LIMIT 2`).bind(kind, clientHubAlphaInternalId(root, context.paRootId), root.source_id).all<ActionRow>()
       .then(result => result.results.length === 1 ? result.results[0]! : null);
     // The original primary connection predates the source registry. Preserve
     // that exact, deployment-owned synchronization as a read-only compatibility
@@ -284,7 +284,7 @@ export async function readClientHubProjectManagementAction(env: Env, principal: 
         LEFT JOIN integration_health health ON health.integration='project-alpha'
           AND health.projection_source_id=mapping.projection_source_id
         WHERE mapping.projection_source_id='project-alpha:primary' AND mapping.record_kind=? AND mapping.local_id=?
-        ORDER BY mapping.external_id LIMIT 2`).bind(root.source_id, root.source_name ?? "Project Alpha", kind, root.public_id)
+        ORDER BY mapping.external_id LIMIT 2`).bind(root.source_id, root.source_name ?? "Project Alpha", kind, clientHubAlphaInternalId(root, context.paRootId))
         .all<ActionRow>().then(result => result.results.length === 1 ? result.results[0]! : null);
     }
   }
@@ -309,7 +309,7 @@ export async function readClientHubProjectManagementAction(env: Env, principal: 
     WHERE connector.source_id=? AND connector.state='active' AND connector.read_visible=1
       AND connector.version=? AND route.version=? AND route.active_revision=?
       AND revision.enabled=1 AND revision.reviewed_url_template=?`)
-    .bind(root.kind === "organization" ? "organization" : "client", root.public_id, row!.external_id,
+    .bind(root.kind === "organization" ? "organization" : "client", clientHubAlphaInternalId(root, context.paRootId), row!.external_id,
       root.source_id, row!.connector_version, row!.route_version, row!.route_revision, row!.reviewed_url_template).first()) {
     throw new HTTPException(409, { message: "Project Alpha project management configuration changed. Refresh the client workspace." });
   }

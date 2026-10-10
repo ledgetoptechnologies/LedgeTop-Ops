@@ -81,7 +81,7 @@ async function fixture(status = "active"): Promise<Fixture> {
   ]);
   const contextVersion = "c".repeat(43);
   return { projectId: project, contactId: contact, secondContactId: second, otherContactId: other,
-    context: { root: { source_id: source, root_namespace: "business", kind: "organization", public_id: org,
+    context: { root: { source_id: source, root_namespace: "business", kind: "organization", public_id: org, pa_internal_id: org,
       pa_public_id: org, mapping_status: "mapped", display_name: `Organization ${n}`, source_name: "Project Alpha",
       sort_name: `organization ${n}`, status: "active", portal_status: "none", workspace_id: null, legacy_account_id: null,
       account_count: 0, project_count: 1, request_count: 0, contact_count: 2, meaningful_activity_at: null,

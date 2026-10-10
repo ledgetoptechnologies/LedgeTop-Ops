@@ -36,6 +36,10 @@ describe("live portal-contact Client Hub search", () => {
       CREATE TABLE pa_operation_assignments(operation_id TEXT,user_id TEXT,active INTEGER,projection_source_id TEXT NOT NULL DEFAULT 'project-alpha:primary');
       CREATE TABLE pa_tasks(id TEXT,project_id TEXT,active INTEGER,projection_source_id TEXT NOT NULL DEFAULT 'project-alpha:primary');
       CREATE TABLE pa_task_assignments(task_id TEXT,user_id TEXT,active INTEGER,projection_source_id TEXT NOT NULL DEFAULT 'project-alpha:primary');
+      -- The Client Hub query references this projection even when review-only
+      -- roots are excluded; its full constraints are covered by migration tests.
+      CREATE TABLE project_alpha_reviewed_standalone_client_displays(
+        projection_id TEXT PRIMARY KEY,source_id TEXT,project_alpha_public_id TEXT,state TEXT);
     `));
     for (const name of ["0032_client_hub_directory.sql", "0034_client_hub_projection_sources.sql", "0042_client_hub_secondary_portal_visibility.sql"])
       await ops.batch(splitD1MigrationStatements(readFileSync(new URL(`../migrations/${name}`, import.meta.url), "utf8")).map(sql => ops.prepare(sql)));

@@ -19,6 +19,7 @@ import { z } from "zod";
 import { readFeedbackRecord, type FeedbackRecord } from "../../../client/src/worker/client-portal/feedback-store";
 import { sqlScope } from "./acl";
 import { eligibleBusinessActivitySql } from "./client-business-activity";
+import { clientHubAlphaInternalId } from "./client-hub-source";
 import { readClientHubBusinessProjectDetail } from "./client-hub-business-project-detail";
 import { clientHubBusinessProjectSourceProof } from "./client-hub-business-projects";
 import { readClientHubBusinessProjectPolicy } from "./client-hub-project-policy";
@@ -270,7 +271,7 @@ async function deliveryScope(env: Env, context: ClientHubCollectionContext, proj
       : "project_alpha_client_id=? AND project_alpha_organization_id IS NULL";
     accounts = (await db.prepare(`SELECT id,status,project_alpha_source_id,project_alpha_client_id,project_alpha_organization_id
       FROM client_accounts WHERE status='active' AND project_alpha_source_id=? AND ${owner} LIMIT 2`)
-      .bind(PRIMARY_ALPHA_SOURCE_ID, root.public_id).all<typeof accounts[number]>()).results;
+      .bind(PRIMARY_ALPHA_SOURCE_ID, clientHubAlphaInternalId(root, context.paRootId)).all<typeof accounts[number]>()).results;
   }
   if (accounts.length > 1) changed();
   const account = accounts[0] ?? null;

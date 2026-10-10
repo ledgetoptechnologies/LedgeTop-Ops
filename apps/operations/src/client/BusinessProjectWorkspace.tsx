@@ -20,13 +20,14 @@ export interface BusinessProjectDetail {
   contextVersion: string;
   refreshedAt: string;
   project: { id: string; name: string; status: string | null; description: string | null; start_date: string | null; end_date: string | null;
-    created_at: string | null; manager: { id: string; display_name: string | null } | null };
+    created_at: string | null; manager: { id: string; display_name: string | null } | null; overdue_warning?: boolean; origin: "pa" | "canonical" };
   linkedContact: { id: string; display_name: string | null; email: string | null; phone: string | null; sourceField: "project.client_id" } | null;
   availability: { linkedContact: "available" | "not_projected" | "unavailable"; siteContacts: "not_projected"; billingContacts: "not_projected"; projectMemory: "not_projected" };
   operationalWorkspaceAvailable?: boolean;
   businessActivityAvailable?: boolean;
   auditTimelineAvailable?: boolean;
   feedbackHistoryAvailable?: boolean;
+  projectInternalNotesAvailable?: boolean;
   projectAlphaContactRolesAvailable?: boolean;
   projectAlphaContactRoles?: ProjectAlphaContactRolePage;
 }
@@ -53,7 +54,7 @@ function matchesRoute(detail: unknown, route: BusinessProjectRoute): detail is B
       && typeof contact.id === "string" && [contact.display_name, contact.email, contact.phone].every(nullableText))
     && (!(detail.projectAlphaContactRolesAvailable === true) || isProjectAlphaContactRolePage(detail.projectAlphaContactRoles,
       root as BusinessProjectDetail["canonicalRoot"], detail.contextVersion))
-    && project.id === route.projectId && root.sourceId === route.sourceId && root.rootNamespace === route.rootNamespace
+    && project.id === route.projectId && project.origin === route.projectOrigin && root.sourceId === route.sourceId && root.rootNamespace === route.rootNamespace
     && root.publicId === route.publicId && root.kind === (route.kind === "organizations" ? "organization" : "standalone_client");
 }
 function projectTone(status: string | null): "success" | "warning" | "danger" | "neutral" {
@@ -62,7 +63,8 @@ function projectTone(status: string | null): "success" | "warning" | "danger" | 
 
 function ProjectWorkspace({ route, feedbackEnabled }: { route: BusinessProjectRoute; feedbackEnabled: boolean }) {
   const clientPath = businessProjectClientPath(route), backPath = `${clientPath}${clientWorkspaceFilters(location.search)}`;
-  const requestPath = `/api${clientPath.replace("/clients/", "/client-hub/")}/business-projects/${encodeURIComponent(route.projectId)}`;
+  const paProjectResourcePath = `/api${clientPath.replace("/clients/", "/client-hub/")}/business-projects/${encodeURIComponent(route.projectId)}`;
+  const requestPath = `${paProjectResourcePath}?origin=${route.projectOrigin}`;
   const [revision, setRevision] = useState(0);
   const [state, setState] = useState<{ data: BusinessProjectDetail | null; error: string; status: number | null; busy: boolean }>({ data: null, error: "", status: null, busy: true });
   const pending = useRef<AbortController | null>(null), sequence = useRef(0), refreshing = useRef(true);
@@ -127,12 +129,12 @@ function ProjectWorkspace({ route, feedbackEnabled }: { route: BusinessProjectRo
         </Card>
       </div>
       {detail.projectAlphaContactRolesAvailable === true && detail.projectAlphaContactRoles && <ProjectAlphaContactRoles
-        initial={detail.projectAlphaContactRoles} basePath={requestPath} root={detail.canonicalRoot}
+        initial={detail.projectAlphaContactRoles} basePath={paProjectResourcePath} root={detail.canonicalRoot}
         contextVersion={detail.contextVersion} contextSignal={pending.current!.signal} onInvalidated={invalidate} />}
       {detail.operationalWorkspaceAvailable === true && <ProjectOperationalWorkspace key={`operations-${revision}`} root={detail.canonicalRoot} projectId={project.id}
         contextVersion={detail.contextVersion} contextSignal={pending.current!.signal} onInvalidated={invalidate} />}
-      <ClientInternalNotes key={`project-notes-${revision}`} root={detail.canonicalRoot} projectId={project.id}
-        contextVersion={detail.contextVersion} contextSignal={pending.current!.signal} onInvalidated={invalidate} />
+      {detail.projectInternalNotesAvailable !== false && <ClientInternalNotes key={`project-notes-${revision}`} root={detail.canonicalRoot} projectId={project.id}
+        contextVersion={detail.contextVersion} contextSignal={pending.current!.signal} onInvalidated={invalidate} />}
       {detail.businessActivityAvailable === true && <ClientBusinessActivity key={revision} root={detail.canonicalRoot} projectId={project.id} contextVersion={detail.contextVersion}
         contextSignal={pending.current!.signal} onInvalidated={invalidate} />}
       {detail.auditTimelineAvailable === true && <ClientAuditTimeline key={`audit-${revision}`} root={detail.canonicalRoot} projectId={project.id} contextVersion={detail.contextVersion}
@@ -146,7 +148,7 @@ function ProjectWorkspace({ route, feedbackEnabled }: { route: BusinessProjectRo
 }
 
 /** Project routes live inside Client Hub without expanding a client card inline. */
-export function ClientHubWorkspaceRouter({ mapToken, permissions, feedbackEnabled=false, invitationAccess, canManagePortalSetup=false }: { mapToken: string | null; permissions: Permission[]; feedbackEnabled?: boolean; invitationAccess?: InvitationAdministrationAccess; canManagePortalSetup?: boolean }) {
+export function ClientHubWorkspaceRouter({ mapToken, permissions, feedbackEnabled=false, invitationAccess, canManagePortalSetup=false, nativeDirectoryProfileWrites=false }: { mapToken: string | null; permissions: Permission[]; feedbackEnabled?: boolean; invitationAccess?: InvitationAdministrationAccess; canManagePortalSetup?: boolean; nativeDirectoryProfileWrites?: boolean }) {
   const [, setLocationRevision] = useState(0);
   useEffect(() => {
     const sync = () => setLocationRevision(value => value + 1);
@@ -154,7 +156,7 @@ export function ClientHubWorkspaceRouter({ mapToken, permissions, feedbackEnable
     return () => removeEventListener("popstate", sync);
   }, []);
   const route = readBusinessProjectRoute(location.pathname);
-  if (!route) return <ClientHub mapToken={mapToken} permissions={permissions} feedbackEnabled={feedbackEnabled} invitationAccess={invitationAccess} canManagePortalSetup={canManagePortalSetup} />;
+  if (!route) return <ClientHub mapToken={mapToken} permissions={permissions} feedbackEnabled={feedbackEnabled} invitationAccess={invitationAccess} canManagePortalSetup={canManagePortalSetup} nativeDirectoryProfileWrites={nativeDirectoryProfileWrites} />;
   if ("invalid" in route) return <Card><EmptyState title="Project link unavailable" detail="This project link is invalid." /><a href={clientDirectoryReturnPath()}>Back to Client Hub</a></Card>;
   if (!permissions.includes("team.view")) return <Card><EmptyState title="Project unavailable" detail="Client-directory access is required." /><a href={clientDirectoryReturnPath()}>Back to Client Hub</a></Card>;
   return <ProjectWorkspace key={JSON.stringify(route)} route={route} feedbackEnabled={feedbackEnabled} />;

@@ -2,7 +2,7 @@ import { z } from "zod";
 import { HTTPException } from "hono/http-exception";
 import { businessContactChannels, businessContactChannelsSql } from "./client-business-contact";
 import { clientHubBusinessProjectSourceProof } from "./client-hub-business-projects";
-import { isBusinessProjectionSource } from "./client-hub-source";
+import { clientHubAlphaInternalId, isBusinessProjectionSource } from "./client-hub-source";
 import type { ClientHubCollectionContext } from "./client-hub-collections";
 import { projectAlphaReadVisibleSql } from "./project-alpha-read-visibility";
 import type { Env, StaffPrincipal } from "./types";
@@ -84,10 +84,43 @@ function validateContext(context: ClientHubCollectionContext, expected?: string)
   if (!context.access.directory) throw new HTTPException(403, { message: "Client-directory access is required" });
   if (expected !== undefined && expected !== context.contextVersion) return changed();
 }
+async function supportedLegacyOrganizationId(database: Database,
+  context: ClientHubCollectionContext): Promise<string | null> {
+  const organizationId = clientHubAlphaInternalId(context.root, context.paRootId);
+  // This legacy-backed feature returns its stored organization ID to the
+  // browser. A canonical native route with a different Operations record ID is
+  // therefore not a compatible contact workspace, even when it has a valid PA
+  // mapping. Do not blur those identities or invent a legacy projection.
+  if (organizationId !== context.root.public_id) return null;
+  const row = await database.prepare(`SELECT organization.id
+    FROM pa_organizations organization JOIN pa_projection_record_ids projection
+      ON projection.projection_source_id=organization.projection_source_id
+      AND projection.record_kind='organization' AND projection.local_id=organization.id
+    WHERE organization.id=? AND organization.projection_source_id=? AND organization.active=1
+      AND ${projectAlphaReadVisibleSql("organization.projection_source_id")} LIMIT 1`)
+    .bind(organizationId, context.root.source_id).first<{ id: string }>();
+  return row?.id === organizationId ? organizationId : null;
+}
 async function rootRow(database: Database, context: ClientHubCollectionContext): Promise<RootRow | null> {
+  const organizationId = await supportedLegacyOrganizationId(database, context);
+  if (!organizationId) return null;
   return database.prepare(`SELECT id,projection_source_id,active,last_sync_id FROM pa_organizations
-    WHERE id=? AND projection_source_id=? AND active=1 AND ${projectAlphaReadVisibleSql("projection_source_id")} LIMIT 1`)
-    .bind(context.root.public_id, context.root.source_id).first<RootRow>();
+    WHERE id=? AND projection_source_id=? AND active=1
+      AND ${projectAlphaReadVisibleSql("projection_source_id")} LIMIT 1`)
+    .bind(organizationId, context.root.source_id).first<RootRow>();
+}
+/** This is a support predicate, not an authorization shortcut. The Client Hub
+ * has already resolved the exact context and re-verifies it after hydration;
+ * the contact endpoint retains every permission, ownership and revision check. */
+export async function organizationOperationalContactsAvailable(env: Environment,
+  context: ClientHubCollectionContext): Promise<boolean> {
+  if (context.root.root_namespace !== "business" || context.root.kind !== "organization"
+    || !isBusinessProjectionSource(context.root.source_id) || !context.access.directory) return false;
+  try { return await supportedLegacyOrganizationId(db(env), context) !== null; }
+  catch (error) {
+    if (error instanceof HTTPException && error.status === 409) return false;
+    throw error;
+  }
 }
 async function permission(database: Database, principal: StaffPrincipal, key: "team.view" | "organization.contacts.manage"): Promise<boolean> {
   return (await database.prepare(`SELECT ${globalPermissionSql(key)} allowed FROM staff_users actor
@@ -130,7 +163,8 @@ async function replay(env: Environment, principal: StaffPrincipal, context: Clie
   expectedContextVersion: string, expectedFingerprint: string,
   receipt: ReceiptRow): Promise<OrganizationOperationalContactsMutationResult> {
   if (receipt.operation_kind !== "contacts_save" || receipt.request_fingerprint !== expectedFingerprint
-    || receipt.projection_source_id !== context.root.source_id || receipt.organization_id !== context.root.public_id)
+    || receipt.projection_source_id !== context.root.source_id
+    || receipt.organization_id !== clientHubAlphaInternalId(context.root, context.paRootId))
     throw new HTTPException(409, { message: "This operation key was already used for a different organization contact change" });
   await prepareOrganization(env, principal, context, true, expectedContextVersion);
   return { ...receiptResult(receipt), replayed: true };

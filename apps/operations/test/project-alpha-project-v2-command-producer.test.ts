@@ -33,30 +33,65 @@ async function actor() {
   ]);
   return { staffId, accessSubject, email, admissionVersion: 1, profileVersion: 1 };
 }
-async function directory(sourceId: string, sourceInstanceId: string, applicationId: string, historyEpochId: string) {
+async function businessAreaActor(businessAreaId: string) {
+  const staffId = `staff-${++sequence}`, accessSubject = `subject-${sequence}`, email = `${staffId}@example.test`;
+  await db.batch([
+    db.prepare("INSERT OR IGNORE INTO native_business_areas(id,active) VALUES(?,1)").bind(businessAreaId),
+    db.prepare("INSERT INTO native_staff_admissions VALUES(?,1,?,1)").bind(staffId, accessSubject),
+    db.prepare("INSERT INTO native_staff_profiles VALUES(?,?,1)").bind(staffId, email),
+    db.prepare(`INSERT INTO native_project_grants(id,staff_id,capability,effect,scope_kind,business_area_id,granted_by)
+      VALUES(?,?,'project.shared.sync','allow','business_area',?,?)`)
+      .bind(`grant-business-area-${staffId}`, staffId, businessAreaId, staffId),
+  ]);
+  return { staffId, accessSubject, email, admissionVersion: 1, profileVersion: 1 };
+}
+async function expectNoCommandRows(commandId: string, externalProjectId: string) {
+  const checks = [
+    ["native_project_command_proofs", "command_id", commandId],
+    ["project_alpha_project_outbox", "command_id", commandId],
+    ["native_project_command_reservations", "command_id", commandId],
+    ["project_alpha_project_v2_request_fingerprints", "command_id", commandId],
+    ["project_alpha_project_v2_events", "command_id", commandId],
+    ["project_alpha_project_v2_canonical_intents", "command_id", commandId],
+    ["project_alpha_project_destinations", "external_project_id", externalProjectId],
+  ] as const;
+  for (const [table, column, value] of checks) {
+    expect(await db.prepare(`SELECT count(*) n FROM ${table} WHERE ${column}=?`).bind(value).first("n"), table).toBe(0);
+  }
+}
+async function directory(sourceId: string, sourceInstanceId: string, applicationId: string, historyEpochId: string, mappingKind: "legacy" | "acquired" = "legacy") {
   const organizationRecordId = uuid(), clientRecordId = uuid(), organizationPublicId = crypto.randomUUID().replaceAll("-", ""), clientPublicId = crypto.randomUUID().replaceAll("-", "");
+  const organizationExternalId = mappingKind === "acquired" ? `pa-org-${sequence}` : organizationRecordId;
+  const clientExternalId = mappingKind === "acquired" ? `pa-client-${sequence}` : clientRecordId;
+  const mappingTable = mappingKind === "legacy" ? "project_alpha_directory_mappings" : "project_alpha_existing_directory_binding_activation_receipts";
+  const mappingColumns = mappingKind === "legacy"
+    ? "source_id,source_instance_id,application_id,history_epoch_id,resource_type,external_id,project_alpha_public_id"
+    : "source_id,source_instance_id,application_id,history_epoch_id,resource_type,external_id,project_alpha_public_id,record_id";
+  const mappingValues = mappingKind === "legacy" ? "?,?,?,?,?,?,?" : "?,?,?,?,?,?,?,?";
+  const mapping = (resourceType: "organization" | "client", recordId: string, externalId: string, publicId: string) =>
+    db.prepare(`INSERT INTO ${mappingTable}(${mappingColumns}) VALUES(${mappingValues})`)
+      .bind(sourceId, sourceInstanceId, applicationId, historyEpochId, resourceType, externalId, publicId,
+        ...(mappingKind === "acquired" ? [recordId] : []));
   await db.batch([
     db.prepare("INSERT INTO operations_directory_records(record_id,record_kind) VALUES(?,'organization')").bind(organizationRecordId),
     db.prepare("INSERT INTO operations_directory_records(record_id,record_kind) VALUES(?,'client')").bind(clientRecordId),
-    db.prepare(`INSERT INTO project_alpha_directory_mappings(source_id,source_instance_id,application_id,history_epoch_id,resource_type,external_id,project_alpha_public_id)
-      VALUES(?,?,?,?,?,?,?)`).bind(sourceId, sourceInstanceId, applicationId, historyEpochId, "organization", organizationRecordId, organizationPublicId),
-    db.prepare(`INSERT INTO project_alpha_directory_mappings(source_id,source_instance_id,application_id,history_epoch_id,resource_type,external_id,project_alpha_public_id)
-      VALUES(?,?,?,?,?,?,?)`).bind(sourceId, sourceInstanceId, applicationId, historyEpochId, "client", clientRecordId, clientPublicId),
+    mapping("organization", organizationRecordId, organizationExternalId, organizationPublicId),
+    mapping("client", clientRecordId, clientExternalId, clientPublicId),
     db.prepare("INSERT INTO operations_directory_client_organizations(client_record_id,organization_record_id) VALUES(?,?)").bind(clientRecordId, organizationRecordId),
   ]);
-  return { organizationRecordId, clientRecordId, organizationPublicId, clientPublicId };
+  return { organizationRecordId, clientRecordId, organizationExternalId, clientExternalId, organizationPublicId, clientPublicId };
 }
-async function createAction(sourceId = "project-alpha:one"): Promise<Extract<ProjectAlphaProjectV2CommandProducerAction, { operation: "create" }>> {
+async function createAction(sourceId = "project-alpha:one", mappingKind: "legacy" | "acquired" = "legacy"): Promise<Extract<ProjectAlphaProjectV2CommandProducerAction, { operation: "create" }>> {
   const sourceInstanceId = sourceId === "project-alpha:one" ? sourceOne : sourceTwo;
   const applicationId = sourceId === "project-alpha:one" ? appOne : appTwo;
   const historyEpochId = sourceId === "project-alpha:one" ? epochOne : epochTwo;
-  const [staff, records] = await Promise.all([actor(), directory(sourceId, sourceInstanceId, applicationId, historyEpochId)]);
+  const [staff, records] = await Promise.all([actor(), directory(sourceId, sourceInstanceId, applicationId, historyEpochId, mappingKind)]);
   return { sourceId, actor: { ...staff, verifiedUntil: until, scopes: [] }, operation: "create", local: { expectedLocalVersion: 0, expectedLocalProjectionSha256: null },
     directory: { organizationRecordId: records.organizationRecordId, clientRecordId: records.clientRecordId },
     command: { commandId: uuid(), externalId: `ops/project-${sequence}`, expectedAuthorizationGeneration: "0",
       project: { name: "Survey", description: null, estimatedStart: null, estimatedEnd: null },
-      organization: { externalId: records.organizationRecordId, expectedPublicId: records.organizationPublicId, expectedRevision: "1", expectedProjectionSha256: sha },
-      client: { externalId: records.clientRecordId, expectedPublicId: records.clientPublicId, expectedRevision: "1", expectedProjectionSha256: sha } },
+      organization: { externalId: records.organizationExternalId, expectedPublicId: records.organizationPublicId, expectedRevision: "1", expectedProjectionSha256: sha },
+      client: { externalId: records.clientExternalId, expectedPublicId: records.clientPublicId, expectedRevision: "1", expectedProjectionSha256: sha } },
   };
 }
 function response(value: unknown, status = 200) { return new Response(JSON.stringify(value), { status, headers: { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store", "X-Request-ID": "11111111-1111-4111-8111-111111111111" } }); }
@@ -64,11 +99,14 @@ function transport(action: Extract<ProjectAlphaProjectV2CommandProducerAction, {
   const sourceInstanceId = action.sourceId === "project-alpha:one" ? sourceOne : sourceTwo;
   const applicationId = action.sourceId === "project-alpha:one" ? appOne : appTwo;
   const historyEpoch = action.sourceId === "project-alpha:one" ? epochOne : epochTwo;
+  let commandCommitted = false;
   return vi.fn<typeof fetch>(async (_url, init) => {
     if (init?.method !== "POST") return response({ apiVersion: "2", sourceInstanceId, applicationId, historyEpoch,
       requestId: "11111111-1111-4111-8111-111111111111", grantedCapabilities: [{ name: "api.capabilities.read" }, { name: "projects.create" }],
       implementedEndpoints: [{ method: "GET", path: "/api/v2/capabilities", requiredCapability: "api.capabilities.read" }, { method: "POST", path: "/api/v2/projects/commands", requiredCapability: "projects.create", requiresSourceInstanceId: true, requiresApplicationId: true, requiresHistoryEpoch: true }] });
-    return response({ apiVersion: "2", sourceInstanceId, applicationId, historyEpoch, requestId: "11111111-1111-4111-8111-111111111111", replayed: false,
+    const replayed = commandCommitted;
+    commandCommitted = true;
+    return response({ apiVersion: "2", sourceInstanceId, applicationId, historyEpoch, requestId: "11111111-1111-4111-8111-111111111111", replayed,
       result: { resource: { type: "project", id: action.command.externalId, publicId: "d".repeat(32), revision: "1", projectionSha256: sha }, authorizationGeneration: "1", presentation: { portalPublished: false, publicLinkEnabled: false } } }, 201);
   });
 }
@@ -96,12 +134,52 @@ beforeAll(async () => {
   runtime = new Miniflare({ modules: true, compatibilityDate: "2026-08-06", script: "export default {fetch(){return new Response('ok')}}", d1Databases: ["OPS_DB"] });
   db = await runtime.getD1Database("OPS_DB") as D1Database;
   await migrate("0062_project_alpha_project_outbox.sql"); await migrate("0063_project_alpha_project_adoption.sql"); await migrate("0064_project_alpha_project_history_epoch.sql");
-  await db.exec("CREATE TABLE native_staff_admissions(staff_id TEXT PRIMARY KEY,active INTEGER,bound_access_subject TEXT,version INTEGER); CREATE TABLE native_staff_profiles(staff_id TEXT PRIMARY KEY,login_email TEXT,version INTEGER); CREATE TABLE native_business_areas(id TEXT PRIMARY KEY,active INTEGER); CREATE TABLE native_business_divisions(id TEXT PRIMARY KEY,business_area_id TEXT,active INTEGER,UNIQUE(business_area_id,id)); CREATE TABLE operations_directory_records(record_id TEXT PRIMARY KEY,record_kind TEXT); CREATE TABLE project_alpha_directory_mappings(source_id TEXT,source_instance_id TEXT,application_id TEXT,history_epoch_id TEXT,resource_type TEXT,external_id TEXT,project_alpha_public_id TEXT); CREATE TABLE operations_directory_client_organizations(client_record_id TEXT,organization_record_id TEXT); CREATE TABLE delivery_public_shares(id TEXT PRIMARY KEY,url TEXT,payload BLOB); CREATE TABLE delivery_records(id TEXT PRIMARY KEY,payload BLOB); INSERT INTO delivery_public_shares VALUES('share','https://public.example.test/s/keep',x'00ff80'); INSERT INTO delivery_records VALUES('delivery',x'ff0001');");
-  await migrate("0086_native_shared_projects.sql"); await migrate("0119_project_alpha_project_v2_persistence_ledger.sql"); await migrate("0120_project_alpha_project_v2_canonical_settlement.sql"); await migrate("0121_project_alpha_project_v2_settlement_proof_expiry.sql"); await migrate("0122_project_alpha_project_v2_canonical_activation.sql");
+  await db.exec("CREATE TABLE native_staff_admissions(staff_id TEXT PRIMARY KEY,active INTEGER,bound_access_subject TEXT,version INTEGER); CREATE TABLE native_staff_profiles(staff_id TEXT PRIMARY KEY,login_email TEXT,version INTEGER); CREATE TABLE native_business_areas(id TEXT PRIMARY KEY,active INTEGER); CREATE TABLE native_business_divisions(id TEXT PRIMARY KEY,business_area_id TEXT,active INTEGER,UNIQUE(business_area_id,id)); CREATE TABLE operations_directory_records(record_id TEXT PRIMARY KEY,record_kind TEXT); CREATE TABLE project_alpha_directory_mappings(source_id TEXT,source_instance_id TEXT,application_id TEXT,history_epoch_id TEXT,resource_type TEXT,external_id TEXT,project_alpha_public_id TEXT,command_id TEXT,created_at TEXT DEFAULT(strftime('%Y-%m-%dT%H:%M:%fZ','now'))); CREATE TABLE project_alpha_existing_directory_binding_activation_receipts(activation_id TEXT PRIMARY KEY,source_id TEXT,resource_type TEXT,external_id TEXT,project_alpha_public_id TEXT,source_instance_id TEXT,application_id TEXT,history_epoch_id TEXT,activated_at TEXT); CREATE VIEW project_alpha_active_directory_mappings AS SELECT source_id,resource_type,external_id,project_alpha_public_id,source_instance_id,application_id,history_epoch_id,command_id AS provenance_id,'legacy' AS mapping_kind,created_at FROM project_alpha_directory_mappings UNION ALL SELECT source_id,resource_type,external_id,project_alpha_public_id,source_instance_id,application_id,history_epoch_id,activation_id AS provenance_id,'acquired' AS mapping_kind,activated_at AS created_at FROM project_alpha_existing_directory_binding_activation_receipts; CREATE TABLE operations_directory_client_organizations(client_record_id TEXT,organization_record_id TEXT); CREATE TABLE delivery_public_shares(id TEXT PRIMARY KEY,url TEXT,payload BLOB); CREATE TABLE delivery_records(id TEXT PRIMARY KEY,payload BLOB); INSERT INTO delivery_public_shares VALUES('share','https://public.example.test/s/keep',x'00ff80'); INSERT INTO delivery_records VALUES('delivery',x'ff0001');");
+  await db.exec("ALTER TABLE project_alpha_existing_directory_binding_activation_receipts ADD COLUMN record_id TEXT");
+  await migrate("0086_native_shared_projects.sql"); await migrate("0119_project_alpha_project_v2_persistence_ledger.sql"); await migrate("0120_project_alpha_project_v2_canonical_settlement.sql"); await migrate("0121_project_alpha_project_v2_settlement_proof_expiry.sql"); await migrate("0122_project_alpha_project_v2_canonical_activation.sql"); await migrate("0170_project_alpha_active_directory_project_guard.sql"); await migrate("0171_project_alpha_active_directory_update_guard.sql");
+  await db.exec("CREATE VIEW project_alpha_project_v2_live_settlement_proofs AS SELECT * FROM native_project_live_command_proofs");
 });
 afterAll(async () => runtime.dispose());
 
 describe("unmounted project-v2 command producer", () => {
+  it("enforces a single business-area grant across nonempty, mixed, and empty project scopes atomically", async () => {
+    const allowedArea = `area-allowed-${++sequence}`, allowedDivision = `division-allowed-${sequence}`, otherArea = `area-other-${sequence}`;
+    const allowed = await createAction();
+    const staff = await businessAreaActor(allowedArea);
+    await db.batch([
+      db.prepare("INSERT INTO native_business_areas(id,active) VALUES(?,1)").bind(otherArea),
+      db.prepare("INSERT INTO native_business_divisions(id,business_area_id,active) VALUES(?,?,1)").bind(allowedDivision, allowedArea),
+    ]);
+
+    const withScopes = (action: Awaited<ReturnType<typeof createAction>>, scopes: ProjectAlphaProjectV2CommandProducerAction["actor"]["scopes"]): ProjectAlphaProjectV2CommandProducerAction => ({
+      ...action,
+      actor: { ...staff, verifiedUntil: until, scopes },
+    });
+    await expect(planProjectAlphaProjectV2Command(env(), withScopes(allowed, [
+      { scopeKind: "business_area", businessAreaId: allowedArea, divisionId: null },
+      { scopeKind: "division", businessAreaId: allowedArea, divisionId: allowedDivision },
+    ]))).resolves.toMatchObject({ status: "queued", replayed: false });
+    expect(await db.prepare("SELECT scopes_json FROM native_project_command_proofs WHERE command_id=?")
+      .bind(allowed.command.commandId).first("scopes_json")).toBe(JSON.stringify([
+        { scopeKind: "business_area", businessAreaId: allowedArea, divisionId: null },
+        { scopeKind: "division", businessAreaId: allowedArea, divisionId: allowedDivision },
+      ]));
+
+    for (const scopes of [
+      [{ scopeKind: "business_area", businessAreaId: otherArea, divisionId: null }],
+      [
+        { scopeKind: "business_area", businessAreaId: allowedArea, divisionId: null },
+        { scopeKind: "business_area", businessAreaId: otherArea, divisionId: null },
+      ],
+      [],
+    ] as const) {
+      const rejected = await createAction();
+      const action = withScopes(rejected, scopes);
+      await expect(planProjectAlphaProjectV2Command(env(), action)).resolves.toEqual({ status: "uncertain", reason: "database" });
+      await expectNoCommandRows(rejected.command.commandId, rejected.command.externalId);
+    }
+  });
+
   it("pins each deliberately selected source, canonicalizes once, and inserts only pending local evidence", async () => {
     const one = await createAction("project-alpha:one"), two = await createAction("project-alpha:two");
     const publicBefore = await db.prepare("SELECT id,url,hex(payload) payload FROM delivery_public_shares").all();
@@ -117,6 +195,37 @@ describe("unmounted project-v2 command producer", () => {
     expect(await db.prepare("SELECT count(*) n FROM project_alpha_project_v2_canonical_intents WHERE command_id IN (?,?)").bind(one.command.commandId, two.command.commandId).first("n")).toBe(2);
     expect((await db.prepare("SELECT id,url,hex(payload) payload FROM delivery_public_shares").all()).results).toEqual(publicBefore.results);
     expect((await db.prepare("SELECT id,hex(payload) payload FROM delivery_records").all()).results).toEqual(deliveryBefore.results);
+  });
+
+  it("accepts activated mappings without legacy copies and fails closed on relationship loss or cross-view collisions", async () => {
+    const activated = await createAction("project-alpha:one", "acquired");
+    const publicBefore = await db.prepare("SELECT id,url,hex(payload) payload FROM delivery_public_shares ORDER BY id").all();
+    await expect(planProjectAlphaProjectV2Command(env(), activated)).resolves.toMatchObject({ status: "queued", replayed: false });
+    expect(await db.prepare("SELECT count(*) n FROM project_alpha_directory_mappings WHERE external_id IN (?,?)")
+      .bind(activated.command.organization.externalId, activated.command.client!.externalId).first("n")).toBe(0);
+    const guards = await db.prepare(`SELECT name,sql FROM sqlite_master WHERE type='trigger'
+      AND name IN ('operations_shared_projects_bound_refresh_guard','operations_shared_projects_no_update') ORDER BY name`).all<{ name: string; sql: string }>();
+    expect(guards.results).toHaveLength(2);
+    const guardSql = Object.fromEntries(guards.results.map(guard => [guard.name, guard.sql]));
+    expect(guardSql.operations_shared_projects_bound_refresh_guard).toContain("project_alpha_directory_mappings customer");
+    expect(guardSql.operations_shared_projects_bound_refresh_guard).toContain("project_alpha_active_directory_mappings d");
+    expect(guardSql.operations_shared_projects_no_update).toContain("project_alpha_active_directory_mappings d");
+    expect(guards.results.every(guard => guard.sql.includes("r.record_id=d.record_id"))).toBe(true);
+    expect((await db.prepare("SELECT id,url,hex(payload) payload FROM delivery_public_shares ORDER BY id").all()).results).toEqual(publicBefore.results);
+
+    const unlinked = await createAction("project-alpha:one", "acquired");
+    await db.prepare("DELETE FROM operations_directory_client_organizations WHERE client_record_id=?")
+      .bind(unlinked.directory.clientRecordId).run();
+    await expect(planProjectAlphaProjectV2Command(env(), unlinked)).resolves.toEqual({ status: "blocked", reason: "directory" });
+    expect(await db.prepare("SELECT count(*) n FROM project_alpha_project_outbox WHERE command_id=?").bind(unlinked.command.commandId).first("n")).toBe(0);
+
+    const collision = await createAction("project-alpha:one", "acquired");
+    await db.prepare(`INSERT INTO project_alpha_directory_mappings(source_id,source_instance_id,application_id,history_epoch_id,resource_type,external_id,project_alpha_public_id)
+      VALUES(?,?,?,?,?,?,?)`).bind(collision.sourceId, sourceOne, appOne, epochOne, "organization",
+      collision.directory.organizationRecordId, collision.command.organization.expectedPublicId).run();
+    await expect(planProjectAlphaProjectV2Command(env(), collision)).resolves.toEqual({ status: "blocked", reason: "directory" });
+    expect(await db.prepare("SELECT count(*) n FROM project_alpha_project_outbox WHERE command_id=?").bind(collision.command.commandId).first("n")).toBe(0);
+    expect((await db.prepare("SELECT id,url,hex(payload) payload FROM delivery_public_shares ORDER BY id").all()).results).toEqual(publicBefore.results);
   });
 
   it("replays byte-identical command IDs and rejects a changed canonical body", async () => {
@@ -180,12 +289,74 @@ describe("unmounted project-v2 command producer", () => {
     const different = await createAction();
     const wrong = { ...different, command: { ...different.command, organization: { ...different.command.organization, expectedPublicId: "f".repeat(32) } } } as ProjectAlphaProjectV2CommandProducerAction;
     await expect(planProjectAlphaProjectV2Command(env(), wrong)).resolves.toEqual({ status: "blocked", reason: "directory" });
+    const wrongExternal = { ...different, command: { ...different.command,
+      organization: { ...different.command.organization, externalId: "wrong-pa-binding" } } } as ProjectAlphaProjectV2CommandProducerAction;
+    await expect(planProjectAlphaProjectV2Command(env(), wrongExternal)).resolves.toEqual({ status: "blocked", reason: "directory" });
     const mismatchedId = { ...different, directory: { ...different.directory, organizationRecordId: uuid() } };
-    await expect(planProjectAlphaProjectV2Command(env(), mismatchedId)).resolves.toEqual({ status: "blocked", reason: "invalid_action" });
+    await expect(planProjectAlphaProjectV2Command(env(), mismatchedId)).resolves.toEqual({ status: "blocked", reason: "directory" });
     const mismatchedClient = { ...different, directory: { ...different.directory, clientRecordId: uuid() } };
-    await expect(planProjectAlphaProjectV2Command(env(), mismatchedClient)).resolves.toEqual({ status: "blocked", reason: "invalid_action" });
+    await expect(planProjectAlphaProjectV2Command(env(), mismatchedClient)).resolves.toEqual({ status: "blocked", reason: "directory" });
     const mismatchedNullClient = { ...different, directory: { ...different.directory, clientRecordId: null } };
     await expect(planProjectAlphaProjectV2Command(env(), mismatchedNullClient)).resolves.toEqual({ status: "blocked", reason: "invalid_action" });
+
+  });
+
+  it("rejects wrong client binding external and public IDs", async () => {
+    const action = await createAction("project-alpha:one", "acquired");
+    const wrongExternal = { ...action, command: { ...action.command,
+      client: { ...action.command.client!, externalId: "wrong-pa-client-binding" } } } as ProjectAlphaProjectV2CommandProducerAction;
+    await expect(planProjectAlphaProjectV2Command(env(), wrongExternal)).resolves.toEqual({ status: "blocked", reason: "directory" });
+    const wrongPublic = { ...action, command: { ...action.command,
+      client: { ...action.command.client!, expectedPublicId: "e".repeat(32) } } } as ProjectAlphaProjectV2CommandProducerAction;
+    await expect(planProjectAlphaProjectV2Command(env(), wrongPublic)).resolves.toEqual({ status: "blocked", reason: "directory" });
+  });
+
+  it("rejects a selected active mapping from the wrong connection tuple", async () => {
+    const action = await createAction("project-alpha:one", "acquired");
+    await db.prepare(`UPDATE project_alpha_existing_directory_binding_activation_receipts SET application_id=?
+      WHERE record_id=?`).bind(appTwo, action.directory.organizationRecordId).run();
+    await expect(planProjectAlphaProjectV2Command(env(), action)).resolves.toEqual({ status: "blocked", reason: "directory" });
+  });
+
+  it("rolls back the complete reservation when a competing active mapping appears after the read check", async () => {
+    const action = await createAction("project-alpha:one", "acquired"), base = env();
+    let raced = false;
+    const racingDb = {
+      prepare: (query: string) => db.prepare(query),
+      batch: async (statements: D1PreparedStatement[]) => {
+        if (!raced) {
+          raced = true;
+          await db.prepare(`INSERT INTO project_alpha_existing_directory_binding_activation_receipts(
+            activation_id,source_id,resource_type,record_id,external_id,project_alpha_public_id,source_instance_id,application_id,history_epoch_id,activated_at)
+            VALUES(?,?,?,?,?,?,?,?,?,?)`).bind(`race-${action.command.commandId}`, action.sourceId, "organization",
+            action.directory.organizationRecordId, "competing-pa-organization", action.command.organization.expectedPublicId,
+            sourceOne, appOne, epochOne, "2026-10-08T00:00:00.000Z").run();
+        }
+        return db.batch(statements);
+      },
+    } as D1Database;
+    await expect(planProjectAlphaProjectV2Command({ ...base, OPS_DB: racingDb }, action))
+      .resolves.toEqual({ status: "uncertain", reason: "database" });
+    for (const table of ["native_project_command_proofs", "project_alpha_project_outbox", "project_alpha_project_destinations",
+      "project_alpha_project_v2_request_fingerprints", "project_alpha_project_v2_canonical_intents",
+      "project_alpha_project_v2_events", "native_project_command_reservations"]) {
+      const column = table === "project_alpha_project_destinations" ? "external_project_id" : "command_id";
+      const value = table === "project_alpha_project_destinations" ? action.command.externalId : action.command.commandId;
+      expect(await db.prepare(`SELECT count(*) n FROM ${table} WHERE ${column}=?`).bind(value).first("n"), table).toBe(0);
+    }
+  });
+
+  it("accepts explicitly activated acquired directory mappings through the active-mapping view", async () => {
+    const action = await createAction("project-alpha:one", "acquired");
+    expect(action.command.organization.externalId).not.toBe(action.directory.organizationRecordId);
+    expect(action.command.client!.externalId).not.toBe(action.directory.clientRecordId);
+    expect(await db.prepare(`SELECT mapping_kind,record_id,external_id FROM project_alpha_active_directory_mappings
+      WHERE record_id IN (?,?) ORDER BY external_id`).bind(action.directory.organizationRecordId, action.directory.clientRecordId).all())
+      .toMatchObject({ results: [
+        { mapping_kind: "acquired", record_id: action.directory.clientRecordId, external_id: action.command.client!.externalId },
+        { mapping_kind: "acquired", record_id: action.directory.organizationRecordId, external_id: action.command.organization.externalId },
+      ] });
+    await expect(planProjectAlphaProjectV2Command(env(), action)).resolves.toMatchObject({ status: "queued", replayed: false });
   });
 
   it("keeps a disabled/outage-selected connection pending and never sends", async () => {
@@ -299,6 +470,44 @@ describe("unmounted project-v2 command producer", () => {
     expect(replay).not.toHaveBeenCalled();
   });
 
+  it("acknowledges a recovered exact command at the next immutable event version", async () => {
+    const action = await createAction(), remote = transport(action), failAfterCommit = vi.fn<typeof fetch>(async (url, init) => {
+      const original = await remote(url, init);
+      if (init?.method === "POST") return response({ error: "acknowledgement lost" }, 500);
+      return original;
+    });
+    await planProjectAlphaProjectV2Command(env(), action);
+    await expect(dispatchProjectAlphaProjectV2PendingCommand(env(true), action.sourceId,
+      action.command.commandId, failAfterCommit)).resolves.toMatchObject({ status: "uncertain" });
+
+    // This fixture models the separate guarded recovery transaction: it keeps
+    // the original uncertainty event and appends a fresh pending event. The
+    // production route must obtain the matching immutable authorization first.
+    const fingerprint = await db.prepare("SELECT request_sha256 FROM project_alpha_project_v2_request_fingerprints WHERE command_id=?")
+      .bind(action.command.commandId).first<string>("request_sha256");
+    await db.batch([
+      db.prepare(`INSERT INTO project_alpha_project_v2_events(command_id,state_version,transition_id,request_sha256,state)
+        VALUES(?,3,?,?,'pending')`).bind(action.command.commandId, uuid(), fingerprint),
+      db.prepare("UPDATE project_alpha_project_outbox SET state='pending',outcome_json=NULL WHERE command_id=? AND state='terminal'")
+        .bind(action.command.commandId),
+    ]);
+
+    // Reuse the same simulated PA endpoint so its first committed request is
+    // still present when Ops retries the exact command after the lost ack.
+    const replay = remote;
+    const recovered = await dispatchProjectAlphaProjectV2PendingCommand(env(true), action.sourceId,
+      action.command.commandId, replay);
+    expect(recovered).toMatchObject({ status: "acknowledged", replayed: true });
+    expect(replay.mock.calls.some(([, init]) => init?.method === "POST")).toBe(true);
+    expect(await db.prepare("SELECT state_version,state FROM project_alpha_project_v2_events WHERE command_id=? ORDER BY state_version")
+      .bind(action.command.commandId).all()).toMatchObject({ results: [
+        { state_version: 1, state: "pending" }, { state_version: 2, state: "uncertain" },
+        { state_version: 3, state: "pending" }, { state_version: 4, state: "acknowledged" },
+      ] });
+    expect(await db.prepare("SELECT acknowledged_state_version FROM project_alpha_project_v2_validated_acknowledgements WHERE command_id=?")
+      .bind(action.command.commandId).first("acknowledged_state_version")).toBe(4);
+  });
+
   it("releases a preflight-only lease back to pending without appending terminal evidence", async () => {
     const action = await createAction(), unavailable = vi.fn<typeof fetch>(async () => response({ malformed: true }));
     await planProjectAlphaProjectV2Command(env(), action);
@@ -400,6 +609,18 @@ describe("unmounted project-v2 command producer", () => {
       db.prepare("SELECT id,url,hex(payload) payload FROM delivery_public_shares ORDER BY id").all(),
     ])).map(result => result.results)).toEqual(before);
     if (settled.status !== "settled") throw new Error("read settlement setup failed");
+    await db.prepare("DELETE FROM project_alpha_directory_mappings WHERE external_id IN (?,?)")
+      .bind(action.directory.organizationRecordId, action.directory.clientRecordId).run();
+    await db.batch([
+      db.prepare(`INSERT INTO project_alpha_existing_directory_binding_activation_receipts(
+        activation_id,source_id,resource_type,record_id,external_id,project_alpha_public_id,source_instance_id,application_id,history_epoch_id,activated_at)
+        VALUES(?,?,?,?,?,?,?,?,?,?)`).bind("canonical-activation-organization", action.sourceId, "organization",
+        action.directory.organizationRecordId, "pa-org-internal-42", action.command.organization.expectedPublicId, sourceOne, appOne, epochOne, "2026-10-01T00:00:00.000Z"),
+      db.prepare(`INSERT INTO project_alpha_existing_directory_binding_activation_receipts(
+        activation_id,source_id,resource_type,record_id,external_id,project_alpha_public_id,source_instance_id,application_id,history_epoch_id,activated_at)
+        VALUES(?,?,?,?,?,?,?,?,?,?)`).bind("canonical-activation-client", action.sourceId, "client",
+        action.directory.clientRecordId, "pa-client-internal-57", action.command.client!.expectedPublicId, sourceOne, appOne, epochOne, "2026-10-01T00:00:00.000Z"),
+    ]);
     await expect(activateProjectAlphaProjectV2Canonical({ OPS_DB: db }, settled.settlementId)).resolves.toMatchObject({ status: "activated", commandId: action.command.commandId });
     expect(await db.prepare("SELECT state FROM project_alpha_project_outbox WHERE command_id=?").bind(action.command.commandId).first("state")).toBe("acknowledged");
     expect((await db.prepare("SELECT id,url,hex(payload) payload FROM delivery_public_shares ORDER BY id").all()).results).toEqual(before[2]);

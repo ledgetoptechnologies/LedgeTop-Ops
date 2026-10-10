@@ -1,7 +1,8 @@
 import fs from "node:fs";
+import crypto from "node:crypto";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { APP_SOURCE_DIRS, REQUIRED_DISABLED_FEATURE_FLAGS, REQUIRED_STAGING_MIGRATIONS, REQUIRED_STAGING_SECRETS, STAGING_ACCOUNT_ID, STAGING_ALLOWED_VAR_NAMES, STAGING_HOSTS, STAGING_INVENTORY, STAGING_REQUEST_ATTACHMENT_R2_CORS, STAGING_STATIC_VARS } from "./staging-requirements.mjs";
+import { APP_SOURCE_DIRS, REQUIRED_DISABLED_FEATURE_FLAGS, REQUIRED_STAGING_MIGRATIONS, REQUIRED_STAGING_MIGRATION_SHA256, REQUIRED_STAGING_SECRETS, STAGING_ACCOUNT_ID, STAGING_ALLOWED_VAR_NAMES, STAGING_HOSTS, STAGING_INVENTORY, STAGING_REQUEST_ATTACHMENT_R2_CORS, STAGING_STATIC_VARS } from "./staging-requirements.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const apps = ["delivery", "operations", "ops-sync"];
@@ -87,7 +88,7 @@ export function validateApp(app, staging, production) {
   if (!/^[a-f0-9]{64}$/i.test(vars[audienceKey] ?? "")) errors.push(`${app} Access audience must be a 64-character staging audience`);
   if (app === "operations" && vars.PUBLIC_BASE_URL !== `https://${STAGING_HOSTS.operations}`) errors.push("operations PUBLIC_BASE_URL must match the approved staging host");
   if (app === "delivery") {
-    if (vars.CLIENT_PORTAL_ENABLED !== "false") errors.push("delivery CLIENT_PORTAL_ENABLED must remain false for release preparation");
+    if (vars.CLIENT_PORTAL_ENABLED !== "true") errors.push("delivery CLIENT_PORTAL_ENABLED must be true for the reviewed native authority staging window");
     if (vars.CLIENT_PORTAL_ORIGIN !== `https://${STAGING_HOSTS.client}`) errors.push("delivery CLIENT_PORTAL_ORIGIN must match the approved authenticated client staging host");
     if (vars.CLIENT_PORTAL_ORIGINS !== STAGING_STATIC_VARS.delivery.CLIENT_PORTAL_ORIGINS)
       errors.push("delivery CLIENT_PORTAL_ORIGINS must contain both approved staging client origins");
@@ -107,6 +108,53 @@ export function validateApp(app, staging, production) {
     }
   }
   if (app === "operations") {
+    if (vars.CLIENT_PORTAL_RECIPIENT_ENROLLMENT_OWNER_ENABLED === "false"
+      && vars.CLIENT_PORTAL_RECIPIENT_ENROLLMENT_OWNER_ORIGIN !== "")
+      errors.push("operations recipient enrollment owner origin must remain empty while disabled");
+    if (vars.CLIENT_PORTAL_RECIPIENT_ENROLLMENT_OWNER_ENABLED === "true") {
+      try {
+        const ownerOrigin = new URL(vars.CLIENT_PORTAL_RECIPIENT_ENROLLMENT_OWNER_ORIGIN);
+        if (ownerOrigin.protocol !== "https:"
+          || ownerOrigin.origin !== vars.CLIENT_PORTAL_RECIPIENT_ENROLLMENT_OWNER_ORIGIN
+          || ownerOrigin.hostname !== STAGING_HOSTS.operations) throw new Error();
+      } catch {
+        errors.push("operations enabled recipient enrollment owner requires the exact Ops HTTPS staging origin");
+      }
+    }
+    if (vars.CLIENT_PORTAL_AUTHORITY_V3_OWNER_ENABLED === "false"
+      && vars.CLIENT_PORTAL_AUTHORITY_V3_OWNER_ORIGIN !== "")
+      errors.push("operations authority v3 owner origin must remain empty while disabled");
+    if (vars.CLIENT_PORTAL_AUTHORITY_V3_OWNER_ENABLED === "true") {
+      try {
+        const ownerOrigin = new URL(vars.CLIENT_PORTAL_AUTHORITY_V3_OWNER_ORIGIN);
+        if (ownerOrigin.protocol !== "https:" || ownerOrigin.origin !== vars.CLIENT_PORTAL_AUTHORITY_V3_OWNER_ORIGIN
+          || ownerOrigin.hostname !== STAGING_HOSTS.operations) throw new Error();
+      } catch { errors.push("operations enabled authority v3 owner requires the exact Ops HTTPS staging origin"); }
+    }
+    if (vars.CLIENT_PORTAL_WORKSPACE_BINDING_ADMIN_ENABLED === "false"
+      && vars.CLIENT_PORTAL_WORKSPACE_BINDING_ADMIN_ORIGIN !== "")
+      errors.push("operations workspace binding admin origin must remain empty while disabled");
+    if (vars.CLIENT_PORTAL_WORKSPACE_BINDING_ADMIN_ENABLED === "true") {
+      try {
+        const bindingOrigin = new URL(vars.CLIENT_PORTAL_WORKSPACE_BINDING_ADMIN_ORIGIN);
+        if (bindingOrigin.protocol !== "https:"
+          || bindingOrigin.origin !== vars.CLIENT_PORTAL_WORKSPACE_BINDING_ADMIN_ORIGIN
+          || bindingOrigin.hostname !== STAGING_HOSTS.operations) throw new Error();
+      } catch {
+        errors.push("operations enabled workspace binding admin requires the exact Ops HTTPS staging origin");
+      }
+    }
+    if (vars.CLIENT_ONBOARDING_ADMIN_ENABLED === "false" && vars.CLIENT_ONBOARDING_ADMIN_ORIGIN !== "")
+      errors.push("operations client onboarding admin origin must remain empty while disabled");
+    if (vars.CLIENT_ONBOARDING_ADMIN_ENABLED === "true") {
+      try {
+        const adminOrigin = new URL(vars.CLIENT_ONBOARDING_ADMIN_ORIGIN);
+        if (adminOrigin.protocol !== "https:" || adminOrigin.origin !== vars.CLIENT_ONBOARDING_ADMIN_ORIGIN
+          || !/(?:^|[.-])staging(?:[.-]|$)/i.test(adminOrigin.hostname)) throw new Error();
+      } catch {
+        errors.push("operations enabled client onboarding admin requires an exact HTTPS staging origin");
+      }
+    }
     if (vars.NATIVE_INTEGRATION_CONTROL_ENABLED === "false" && vars.NATIVE_INTEGRATION_CONTROL_ORIGIN !== "")
       errors.push("operations native integration control origin must remain empty while control is disabled");
     if (vars.NATIVE_INTEGRATION_CONTROL_ENABLED === "true") {
@@ -151,6 +199,14 @@ export function validateApp(app, staging, production) {
     if (!/(?:EXPECTED_HOST|BASE_URL|_ORIGIN)$/.test(key)) continue;
     if (app === "operations" && key === "NATIVE_INTEGRATION_CONTROL_ORIGIN"
       && vars.NATIVE_INTEGRATION_CONTROL_ENABLED === "false" && vars[key] === "") continue;
+    if (app === "operations" && key === "CLIENT_ONBOARDING_ADMIN_ORIGIN"
+      && vars.CLIENT_ONBOARDING_ADMIN_ENABLED === "false" && vars[key] === "") continue;
+    if (app === "operations" && key === "CLIENT_PORTAL_WORKSPACE_BINDING_ADMIN_ORIGIN"
+      && vars.CLIENT_PORTAL_WORKSPACE_BINDING_ADMIN_ENABLED === "false" && vars[key] === "") continue;
+    if (app === "operations" && key === "CLIENT_PORTAL_AUTHORITY_V3_OWNER_ORIGIN"
+      && vars.CLIENT_PORTAL_AUTHORITY_V3_OWNER_ENABLED === "false" && vars[key] === "") continue;
+    if (app === "operations" && key === "CLIENT_PORTAL_RECIPIENT_ENROLLMENT_OWNER_ORIGIN"
+      && vars.CLIENT_PORTAL_RECIPIENT_ENROLLMENT_OWNER_ENABLED === "false" && vars[key] === "") continue;
     complete(vars[key], `${app} vars.${key}`, errors);
     if (vars[key] === production.vars[key]) errors.push(`${app} vars.${key} reuses production`);
   }
@@ -218,8 +274,37 @@ export function validateCrossApp(configs, productionConfigs = {}) {
   const deliveryBucket = mapped(configs.delivery.r2_buckets, "bucket_name").get("DATA_BUCKET");
   if (deliveryBucket !== mapped(configs.operations.r2_buckets, "bucket_name").get("DATA_BUCKET")) errors.push("operations DATA_BUCKET must equal delivery staging DATA_BUCKET");
   const delegatedSigner = (configs.delivery.services ?? []).find((service) => service.binding === "CLIENT_DELEGATED_SHARE_SIGNER");
+  const serviceMetadataReader = (configs.delivery.services ?? []).find((service) => service.binding === "CLIENT_PORTAL_SERVICE_METADATA_READER");
+  const recipientEnrollmentBridge = (configs.delivery.services ?? []).find((service) => service.binding === "CLIENT_PORTAL_RECIPIENT_ENROLLMENT_BRIDGE");
+  const nativeRecipientEnrollment = (configs.delivery.services ?? []).find((service) => service.binding === "OPERATIONS_PORTAL_NATIVE_RECIPIENT_ENROLLMENT");
+  const nativeDeliveryReader = (configs.delivery.services ?? []).find((service) => service.binding === "OPERATIONS_PORTAL_NATIVE_DELIVERY_AUTHORIZATION_READER");
+  const nativeRecipientAuthority = (configs.operations.services ?? []).find((service) => service.binding === "OPERATIONS_PORTAL_NATIVE_RECIPIENT_AUTHORITY");
+  const nativeDeliveryAuthority = (configs.operations.services ?? []).find((service) => service.binding === "OPERATIONS_PORTAL_NATIVE_DELIVERY_AUTHORITY");
+  if (serviceMetadataReader?.service !== configs.operations.name || serviceMetadataReader?.entrypoint !== "ClientPortalServiceMetadataReader") {
+    errors.push("delivery service metadata reader must target the Operations staging Worker and named metadata entrypoint");
+  }
   if (delegatedSigner?.service !== configs.operations.name || delegatedSigner?.entrypoint !== "ClientDelegatedShareSigner") {
     errors.push("delivery delegated-share signer must target the Operations staging Worker and named signer entrypoint");
+  }
+  if (recipientEnrollmentBridge?.service !== configs.operations.name
+    || recipientEnrollmentBridge?.entrypoint !== "ClientPortalRecipientEnrollmentBridge") {
+    errors.push("delivery recipient enrollment bridge must target the Operations staging Worker and private named entrypoint");
+  }
+  if (nativeRecipientEnrollment?.service !== configs.operations.name
+    || nativeRecipientEnrollment?.entrypoint !== "OperationsPortalNativeRecipientEnrollmentIngress") {
+    errors.push("delivery native recipient enrollment must target the exact Operations staging ingress");
+  }
+  if (nativeDeliveryReader?.service !== configs.operations.name
+    || nativeDeliveryReader?.entrypoint !== "OperationsPortalNativeDeliveryAuthorizationReader") {
+    errors.push("delivery native authorization reader must target the exact Operations staging reader");
+  }
+  if (nativeRecipientAuthority?.service !== configs.delivery.name
+    || nativeRecipientAuthority?.entrypoint !== "OperationsPortalNativeRecipientAuthorityIngress") {
+    errors.push("operations native recipient authority must target the exact Client staging ingress");
+  }
+  if (nativeDeliveryAuthority?.service !== configs.delivery.name
+    || nativeDeliveryAuthority?.entrypoint !== "OperationsPortalNativeDeliveryAuthorityIngress") {
+    errors.push("operations native delivery authority must target the exact Client staging ingress");
   }
   const viewerSessionIssuer = (configs.delivery.services ?? []).find((service) => service.binding === "VIEWER_SESSION_ISSUER");
   if (viewerSessionIssuer?.service !== configs.operations.name || viewerSessionIssuer?.entrypoint !== "ViewerSessionIssuer") {
@@ -332,6 +417,12 @@ export function validateMigrationInventory(base = root) {
     const actual = entries.filter((entry) => entry.isFile() && !entry.isSymbolicLink() && entry.name.endsWith(".sql") && entry.name.localeCompare(first) >= 0).map((entry) => entry.name).sort();
     const expected = [...REQUIRED_STAGING_MIGRATIONS[app]];
     if (JSON.stringify(actual) !== JSON.stringify(expected)) errors.push(`${app} release migration inventory must exactly match the ordered contract`);
+    for (const [name, expectedSha256] of Object.entries(REQUIRED_STAGING_MIGRATION_SHA256[app] ?? {})) {
+      const file = path.join(directory, name);
+      if (!actual.includes(name)) continue;
+      const actualSha256 = crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex");
+      if (actualSha256 !== expectedSha256) errors.push(`${app} release migration ${name} SHA-256 does not match the reviewed contract`);
+    }
   }
   return errors;
 }

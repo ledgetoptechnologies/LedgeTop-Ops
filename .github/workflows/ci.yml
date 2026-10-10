@@ -26,8 +26,64 @@ jobs:
         with:
           node-version: 24
 
+      - name: Install locked staging authority test dependencies
+        run: |
+          npm ci --prefix apps/operations
+          npm ci --prefix apps/client
+
       - name: Verify repository contracts
-        run: node --test scripts/source-layout-invariants.test.mjs scripts/client-portal-rollout-manifest.test.mjs scripts/client-portal-release-profile.test.mjs scripts/pa-api-v2-staging-acceptance.test.mjs scripts/pa-api-v2-directory-staging-acceptance.test.mjs scripts/ops-project-v2-joined-live-acceptance.test.mjs
+        run: node --test scripts/source-layout-invariants.test.mjs scripts/client-portal-joined-acceptance.test.mjs scripts/client-portal-rollout-manifest.test.mjs scripts/client-portal-release-profile.test.mjs scripts/staging-cloudflare-d1-target.test.mjs scripts/staging-native-migration-profile.test.mjs scripts/staging-project-alpha-api-v2-acceptance-profile.test.mjs scripts/staging-project-alpha-api-v2-viewer-acceptance-profile.test.mjs scripts/staging-project-alpha-directory-adoption-acceptance-profile.test.mjs scripts/staging-directory-writes-acceptance-profile.test.mjs scripts/staging-paired-end-to-end-acceptance-profile.test.mjs scripts/staging-native-workspace-acceptance-cli.test.mjs scripts/staging-directory-nonmutation-snapshot-verifier.test.mjs scripts/native-recipient-route-mount.test.mjs scripts/native-delivery-migration-evidence.test.mjs scripts/pa-api-v2-staging-acceptance.test.mjs scripts/pa-api-v2-directory-staging-acceptance.test.mjs scripts/ops-project-v2-joined-live-acceptance.test.mjs scripts/ops-directory-v2-joined-live-acceptance.test.mjs
+
+      - name: Verify non-deploying paired staging config generator
+        run: node --test scripts/staging-paired-end-to-end-acceptance-cli.test.mjs
+
+      - name: Verify isolated Project adoption finalization staging window
+        run: node --test scripts/staging-project-alpha-project-adoption-finalization-acceptance-profile.test.mjs scripts/staging-project-adoption-live-settings-preservation.test.mjs scripts/staging-project-adoption-live-settings-profile.test.mjs scripts/staging-pa-native-portal-acceptance-profile.test.mjs scripts/staging-pa-native-portal-acceptance-cli.test.mjs
+
+      - name: Verify exact live staging settings preservation
+        run: node --test scripts/staging-paired-live-settings-preservation.test.mjs
+
+      - name: Verify non-deploying staging release gates
+        run: node --test scripts/staging-preflight.test.mjs scripts/staging-bootstrap.test.mjs scripts/staging-evidence.test.mjs scripts/staging-acceptance.test.mjs scripts/staging-native-client-onboarding-acceptance-profile.test.mjs scripts/staging-ops-project-v2-joined-acceptance-profile.test.mjs
+
+      - name: Verify governed staging authority packets locally
+        run: node --test scripts/staging-native-authority-packet.test.mjs scripts/staging-bounded-guards.test.mjs scripts/staging-onboarding-authority-packet.test.mjs scripts/staging-native-authority-window.test.mjs
+
+      - name: Verify retained staging authority and paired cleanup locally
+        run: node --test scripts/staging-retained-directory-authority.test.mjs scripts/staging-retained-directory-authority-window.test.mjs scripts/staging-retained-directory-authority-fullschema.test.mjs
+
+      - name: Verify exact organization staging authority and paired cleanup locally
+        run: node --test scripts/staging-organization-relationship-authority.test.mjs scripts/staging-organization-relationship-authority-window.test.mjs scripts/staging-organization-relationship-authority-fullschema.test.mjs
+
+      - name: Verify scoped Project staging authority and recipient readback locally
+        run: node --test scripts/staging-project-business-area-authority-packet.test.mjs scripts/staging-recipient-authority-readback.test.mjs
+
+      - name: Verify staging portal byte fixtures without remote writes
+        run: node --test scripts/staging-portal-byte-fixture.test.mjs
+
+      - name: Verify credential-preserving portal browser acceptance transport locally
+        run: node --test scripts/staging-client-portal-browser-context-acceptance.test.mjs scripts/staging-client-portal-playwright-context-request.test.mjs scripts/staging-client-portal-principal-observation.test.mjs
+
+      - name: Verify local relationship recovery proposal against the canonical schema
+        run: node --test scripts/staging-directory-relationship-recovery-proposal.test.mjs
+
+      - name: Verify bounded v184 relationship recovery authority and release configuration locally
+        run: node --test scripts/staging-relationship-generation-recovery-authority-v184.test.mjs scripts/staging-relationship-generation-recovery-authority-v184-window.test.mjs scripts/staging-relationship-generation-recovery-authority-v184-fullschema.test.mjs scripts/staging-relationship-recovery-release-config.test.mjs
+
+      - name: Verify closed-lineage Project authority and paired cleanup locally
+        run: node --test scripts/staging-project-business-area-authority-v184.test.mjs scripts/staging-project-business-area-authority-v184-apply.test.mjs scripts/staging-project-business-area-authority-v184-fullschema.test.mjs
+
+      - name: Verify organization-scoped Project authority and paired cleanup locally
+        run: node --test scripts/staging-project-organization-authority-v184.test.mjs scripts/staging-project-organization-authority-v184-fullschema.test.mjs
+
+      - name: Verify ordinary Directory scalar settlement and cleanup locally
+        run: node --test scripts/staging-directory-scalar-settlement.test.mjs scripts/staging-directory-scalar-settlement-fullschema.test.mjs
+
+      - name: Verify private scalar authority window and uncertain-outcome reconciliation
+        run: node --test scripts/staging-directory-scalar-authority-v184-window.test.mjs
+
+      - name: Verify scalar authority provision and acknowledged cleanup against the full schema
+        run: node --test scripts/staging-directory-scalar-authority-v184.test.mjs scripts/staging-directory-scalar-authority-v184-fullschema.test.mjs
 
   incoming-pickup:
     name: incoming-pickup-alpine

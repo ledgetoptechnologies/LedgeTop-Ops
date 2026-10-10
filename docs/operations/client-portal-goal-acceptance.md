@@ -1,5 +1,21 @@
 # Client portal and Client Hub acceptance checklist
 
+## API-v2 supersession note — October 9, 2026
+
+The September External Operations, snapshot-key and Ed25519 prerequisites below
+describe the historical pre-API-v2 path. They are not the current migration's
+connection prerequisites. Preserve that history, but use the
+[dated staging checkpoint](../staging/portal-acceptance-checkpoint-2026-10-08.md)
+and native API-v2 release/acceptance evidence for current status. Native
+recipient/service-home authority is selected explicitly; missing native grants
+must not fall back to historical PA recipient grants. Service summaries do not
+authorize file access.
+
+Current completion still requires live recipient consent and owner confirmation,
+selected-folder byte access, cross-recipient/source denial and revocation, plus
+the owner production-update checkpoint. Local source-isolation tests and an
+API connection alone do not prove that both sources are live client-ready.
+
 This checklist is the release evidence map for the August 2026 Project Alpha,
 Operations, and Client Portal handoff. A feature is not complete merely because
 a table, route, or card exists. Completion requires the stated source of truth,

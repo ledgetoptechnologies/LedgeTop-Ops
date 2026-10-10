@@ -309,6 +309,28 @@ describe('secondary source-owned collaborator memberships',{timeout:90_000,concu
       .bind(a.workspace,a.manager).run();
   });
 
+  it('does not accept a historical secondary invitation after its workspace is claimed',async()=>{
+    const created=await invite(b,'claimed-secondary@example.test');
+    expect(created.result.outcome).toBe('created');
+    await db.prepare(`CREATE TABLE portal_client_authority_workspace_claims
+      (workspace_id TEXT PRIMARY KEY,state TEXT NOT NULL)`).run();
+    try{
+      await db.prepare(`INSERT INTO portal_client_authority_workspace_claims(workspace_id,state)
+        VALUES(?,'active')`).bind(b.workspace).run();
+      expect(await acceptPortalWorkspaceInvitation(env,principal('claimed-secondary','claimed-secondary@example.test'),created.token!)).toBe('denied');
+      const invitationId='invitation' in created.result?created.result.invitation.id:'';
+      expect(await db.prepare(`SELECT status FROM portal_v2_invitations WHERE id=?`).bind(invitationId).first('status')).toBe('pending');
+      expect(await db.prepare(`SELECT count(*) n FROM portal_v2_workspace_memberships membership
+        JOIN portal_v2_identities identity ON identity.id=membership.identity_id
+        WHERE membership.workspace_id=? AND identity.subject='claimed-secondary'`).bind(b.workspace).first('n')).toBe(0);
+      expect(await db.prepare(`SELECT count(*) n FROM portal_v2_entitlements entitlement
+        JOIN portal_v2_identities identity ON identity.id=entitlement.identity_id
+        WHERE entitlement.workspace_id=? AND identity.subject='claimed-secondary'`).bind(b.workspace).first('n')).toBe(0);
+    }finally{
+      await db.exec('DROP TABLE portal_client_authority_workspace_claims');
+    }
+  });
+
   it('does not convert projected members, keeps source-managed rows immutable through local APIs and scopes revoke/suspend exactly',async()=>{
     const collision=await invite(a,a.principal.email);expect(collision.result.outcome).toBe('created');
     expect(await acceptPortalWorkspaceInvitation(env,a.principal,collision.token!)).toBe('denied');

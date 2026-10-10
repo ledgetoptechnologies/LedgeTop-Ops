@@ -4,7 +4,7 @@ import type { Env, StaffPrincipal } from "../src/worker/types";
 
 const mocks = vi.hoisted(() => ({
   scope: vi.fn(), native: vi.fn(), resolve: vi.fn(), withEnabled: vi.fn(),
-  plan: vi.fn(), dispatch: vi.fn(), settle: vi.fn(), activate: vi.fn(), audit: vi.fn(), batch: vi.fn(),
+  plan: vi.fn(), dispatch: vi.fn(), settle: vi.fn(), activate: vi.fn(), audit: vi.fn(), batch: vi.fn(), prepare: vi.fn(),
 }));
 vi.mock("../src/worker/acl", () => ({ sqlScope: mocks.scope }));
 vi.mock("../src/worker/native-staff-auth", () => ({ authenticateNativeStaffWithAdmissionVersion: mocks.native }));
@@ -17,8 +17,9 @@ vi.mock("../src/worker/project-alpha-project-v2-pending-dispatcher", () => ({ di
 vi.mock("../src/worker/project-alpha-project-read-settlement-adapter", () => ({ settleProjectAlphaProjectV2Read: mocks.settle }));
 vi.mock("../src/worker/project-alpha-project-canonical-activation-adapter", () => ({ activateProjectAlphaProjectV2Canonical: mocks.activate }));
 vi.mock("../src/worker/request-security", () => ({ auditStatement: mocks.audit }));
+vi.mock("../src/worker/project-alpha-project-v2-acceptance-preparation", () => ({ prepareProjectAlphaProjectV2Acceptance: mocks.prepare }));
 
-import { PROJECT_ALPHA_PROJECT_V2_ACCEPTANCE_ROUTE, registerProjectAlphaProjectV2AcceptanceRoutes } from "../src/worker/project-alpha-project-v2-acceptance-routes";
+import { PROJECT_ALPHA_PROJECT_V2_ACCEPTANCE_ROUTE, PROJECT_ALPHA_PROJECT_V2_PREPARATION_ROUTE, registerProjectAlphaProjectV2AcceptanceRoutes } from "../src/worker/project-alpha-project-v2-acceptance-routes";
 
 const principal: StaffPrincipal = { id: "native-admin", email: "native-admin@example.test", displayName: "Native administrator",
   accessSubject: "native-admin-subject", projectAlphaUserId: null };
@@ -28,6 +29,11 @@ const receiptId = "10000000-0000-4000-8000-000000000002";
 const settlementId = "10000000-0000-4000-8000-000000000003";
 const activationId = "10000000-0000-4000-8000-000000000004";
 const sha = "a".repeat(64);
+const selectedConnection = {
+  baseUrl: "https://pa.example.test", apiKey: "server-only",
+  expectedSourceInstanceId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", expectedApplicationId: appId,
+  expectedHistoryEpoch: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+} as const;
 const requestBody = {
   sourceId: "project-alpha:staging", expectedApplicationId: appId, operation: "create", scopes: [],
   local: { expectedLocalVersion: 0, expectedLocalProjectionSha256: null },
@@ -37,12 +43,33 @@ const requestBody = {
     organization: { externalId: "organization-1", expectedPublicId: "a".repeat(32), expectedRevision: "1", expectedProjectionSha256: sha },
     client: null },
 } as const;
+const updateRequestBody = {
+  sourceId: requestBody.sourceId, expectedApplicationId: appId, operation: "update",
+  scopes: [{ scopeKind: "business_area", businessAreaId: "drone", divisionId: null }],
+  local: { expectedLocalVersion: 7, expectedLocalProjectionSha256: sha },
+  command: {
+    commandId: "20000000-0000-4000-8000-000000000001", externalId: "ops/project-update-1",
+    expectedRevision: "7", expectedProjectionSha256: sha, expectedAuthorizationGeneration: "5",
+    project: { name: "Acceptance project updated", description: "Joined update",
+      estimatedStart: "2026-10-01", estimatedEnd: "2026-10-31" },
+  },
+} as const;
+const bindRequestBody = {
+  sourceId: requestBody.sourceId, expectedApplicationId: appId, operation: "bind",
+  scopes: [{ scopeKind: "division", businessAreaId: "drone", divisionId: "survey" }],
+  local: { expectedLocalVersion: 9, expectedLocalProjectionSha256: sha },
+  command: {
+    commandId: "30000000-0000-4000-8000-000000000001", externalId: "ops/project-bind-1",
+    expectedPublicId: "b".repeat(32), expectedRevision: "9", expectedProjectionSha256: sha,
+    expectedAuthorizationGeneration: "6",
+  },
+} as const;
 
 function fixture(enabled = true, administrator = true, environment = "staging") {
   const app = new Hono<{ Bindings: Env; Variables: { principal: StaffPrincipal; administrator: boolean } }>();
   app.use("*", async (c, next) => { c.set("principal", principal); c.set("administrator", administrator); await next(); });
   registerProjectAlphaProjectV2AcceptanceRoutes(app);
-  const env = { ENVIRONMENT: environment, PROJECT_ALPHA_PROJECT_V2_ACTIVATION_ENABLED: enabled ? "true" : "false",
+  const env = { ENVIRONMENT: environment, EXPECTED_HOST: "ops-staging.ledgetopdroneservices.com", PROJECT_ALPHA_PROJECT_V2_ACTIVATION_ENABLED: enabled ? "true" : "false",
     TEAM_DOMAIN: "https://team.cloudflareaccess.com", OPERATIONS_AUD: "operations-audience-value",
     AUDIT_IP_SECRET: "audit-secret",
     OPS_DB: { batch: mocks.batch } } as unknown as Env;
@@ -50,7 +77,10 @@ function fixture(enabled = true, administrator = true, environment = "staging") 
     `https://ops.example${PROJECT_ALPHA_PROJECT_V2_ACCEPTANCE_ROUTE}`,
     { method: "POST", headers: { "Content-Type": "application/json", "Idempotency-Key": commandId, ...headers },
       body: typeof body === "string" ? body : JSON.stringify(body) }, env);
-  return { app, env, send };
+  const prepare = (body: unknown, origin = "https://ops-staging.ledgetopdroneservices.com") => app.request(
+    `${origin}${PROJECT_ALPHA_PROJECT_V2_PREPARATION_ROUTE}`, { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body) }, env);
+  return { app, env, send, prepare };
 }
 
 describe("Project-v2 administrator joined-acceptance route", () => {
@@ -63,16 +93,53 @@ describe("Project-v2 administrator joined-acceptance route", () => {
     mocks.resolve.mockReturnValue({ sourceId: requestBody.sourceId, enabled: true,
       connection: { baseUrl: "https://pa.example.test", expectedSourceInstanceId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
         expectedApplicationId: appId, expectedHistoryEpoch: "cccccccc-cccc-4ccc-8ccc-cccccccccccc" } });
-    mocks.withEnabled.mockImplementation(async (_env, _source, callback) => ({ status: "enabled", value: await callback({
-      baseUrl: "https://pa.example.test", apiKey: "server-only", expectedSourceInstanceId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
-      expectedApplicationId: appId, expectedHistoryEpoch: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
-    }) }));
+    mocks.withEnabled.mockImplementation(async (_env, _source, callback) =>
+      ({ status: "enabled", value: await callback(selectedConnection) }));
     mocks.plan.mockResolvedValue({ status: "queued", commandId, requestSha256: sha, replayed: false });
     mocks.dispatch.mockResolvedValue({ status: "acknowledged", receiptId, replayed: false });
     mocks.settle.mockResolvedValue({ status: "settled", settlementId, successReceiptId: receiptId, commandId, replayed: false });
     mocks.activate.mockResolvedValue({ status: "activated", activationId, settlementId, commandId,
       externalProjectId: requestBody.command.externalId, version: 1, replayed: false });
     mocks.audit.mockResolvedValue({}); mocks.batch.mockResolvedValue([]);
+  });
+
+  const preparationBody = { operation: "create", sourceId: requestBody.sourceId, expectedApplicationId: appId,
+    externalProjectId: "staging/project-proof", scopes: [], organizationRecordId: "organization-1", clientRecordId: null };
+
+  it("prepares only on the enabled exact staging origin with trusted native authority", async () => {
+    for (const state of [fixture(false), fixture(true, true, "production"), fixture(true, false)])
+      expect((await state.prepare(preparationBody)).status).toBe(state.env.ENVIRONMENT === "staging"
+        && state.env.PROJECT_ALPHA_PROJECT_V2_ACTIVATION_ENABLED === "true" ? 403 : 404);
+    for (const origin of ["https://ops.ledgetopdroneservices.com", "http://ops-staging.ledgetopdroneservices.com",
+      "https://ops-staging.ledgetopdroneservices.com:8443"])
+      expect((await fixture().prepare(preparationBody, origin)).status).toBe(404);
+    mocks.scope.mockResolvedValueOnce({ global: true, deniedGlobal: true });
+    expect((await fixture().prepare(preparationBody)).status).toBe(403);
+    mocks.native.mockResolvedValueOnce({ admissionVersion: 1, identity: { staffId: "forged", email: principal.email,
+      verifiedAccessSubject: principal.accessSubject, profileVersion: 1 } });
+    expect((await fixture().prepare(preparationBody)).status).toBe(403);
+    expect(mocks.prepare).not.toHaveBeenCalled();
+  });
+
+  it("rejects caller-supplied identity or opaque CAS fences before preparing", async () => {
+    for (const extra of [{ actor: { staffId: "owner" } }, { expectedRevision: "1" }, { apiKey: "not-accepted" }])
+      expect((await fixture().prepare({ ...preparationBody, ...extra })).status).toBe(400);
+    expect((await fixture().prepare({ ...preparationBody, scopes: undefined })).status).toBe(400);
+    expect(mocks.prepare).not.toHaveBeenCalled();
+    expect(mocks.plan).not.toHaveBeenCalled();
+  });
+
+  it("derives preparation using the trusted actor and never invokes command dispatch", async () => {
+    mocks.prepare.mockResolvedValueOnce({ status: "blocked", reason: "stale" });
+    const response = await fixture().prepare(preparationBody);
+    expect(response.status).toBe(200);
+    expect(response.headers.get("Cache-Control")).toBe("no-store");
+    await expect(response.json()).resolves.toEqual({ status: "blocked", reason: "stale" });
+    expect(mocks.prepare).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ ...preparationBody,
+      actor: expect.objectContaining({ staffId: principal.id, accessSubject: principal.accessSubject, email: principal.email, scopes: [] }) }));
+    expect(mocks.audit).toHaveBeenCalled();
+    expect(mocks.plan).not.toHaveBeenCalled(); expect(mocks.dispatch).not.toHaveBeenCalled();
+    expect(mocks.settle).not.toHaveBeenCalled(); expect(mocks.activate).not.toHaveBeenCalled();
   });
 
   it("is hidden while default-off and does not authenticate, write, or dispatch", async () => {
@@ -124,6 +191,78 @@ describe("Project-v2 administrator joined-acceptance route", () => {
     expect(mocks.dispatch.mock.invocationCallOrder[0]).toBeLessThan(mocks.settle.mock.invocationCallOrder[0]!);
     expect(mocks.settle.mock.invocationCallOrder[0]).toBeLessThan(mocks.activate.mock.invocationCallOrder[0]!);
     expect(JSON.stringify(await (await fixture().send()).json())).not.toContain("server-only");
+  });
+
+  it.each([
+    {
+      operation: "update", body: updateRequestBody,
+      receiptId: "20000000-0000-4000-8000-000000000002",
+      settlementId: "20000000-0000-4000-8000-000000000003",
+      activationId: "20000000-0000-4000-8000-000000000004",
+    },
+    {
+      operation: "bind", body: bindRequestBody,
+      receiptId: "30000000-0000-4000-8000-000000000002",
+      settlementId: "30000000-0000-4000-8000-000000000003",
+      activationId: "30000000-0000-4000-8000-000000000004",
+    },
+  ] as const)("composes the strict $operation envelope through activation without exposing private evidence",
+    async ({ body, receiptId: operationReceiptId, settlementId: operationSettlementId,
+      activationId: operationActivationId }) => {
+      mocks.plan.mockResolvedValueOnce({ status: "queued", commandId: body.command.commandId,
+        requestSha256: sha, replayed: false, requestId: "private-plan-request" });
+      mocks.dispatch.mockResolvedValueOnce({ status: "acknowledged", receiptId: operationReceiptId,
+        replayed: false, requestId: "private-dispatch-request" });
+      mocks.settle.mockResolvedValueOnce({ status: "settled", settlementId: operationSettlementId,
+        successReceiptId: operationReceiptId, commandId: body.command.commandId, replayed: false,
+        apiKey: "private-settlement-key" });
+      mocks.activate.mockResolvedValueOnce({ status: "activated", activationId: operationActivationId,
+        settlementId: operationSettlementId, commandId: body.command.commandId,
+        externalProjectId: body.command.externalId, version: 11, replayed: false,
+        requestId: "private-activation-request" });
+      const state = fixture();
+
+      const routeResponse = await state.send(body, { "Idempotency-Key": body.command.commandId });
+
+      expect(routeResponse.status).toBe(200);
+      const json = await routeResponse.json();
+      expect(json).toEqual({ sourceId: body.sourceId, expectedApplicationId: appId, stage: "activate",
+        outcome: { status: "activated", activationId: operationActivationId,
+          settlementId: operationSettlementId, commandId: body.command.commandId,
+          externalProjectId: body.command.externalId, version: 11, replayed: false } });
+      expect(mocks.plan).toHaveBeenCalledOnce();
+      expect(mocks.plan).toHaveBeenCalledWith(state.env, {
+        sourceId: body.sourceId,
+        actor: { staffId: principal.id, accessSubject: principal.accessSubject,
+          email: principal.email, admissionVersion: 1, profileVersion: 1,
+          verifiedUntil: "2999-01-01T00:00:00.000Z", scopes: body.scopes },
+        operation: body.operation, scopes: body.scopes, local: body.local, command: body.command,
+      });
+      expect(mocks.dispatch).toHaveBeenCalledOnce();
+      expect(mocks.dispatch).toHaveBeenCalledWith(state.env, body.sourceId, body.command.commandId, fetch);
+      expect(mocks.settle).toHaveBeenCalledOnce();
+      expect(mocks.settle).toHaveBeenCalledWith(state.env, operationReceiptId, selectedConnection, fetch);
+      expect(mocks.activate).toHaveBeenCalledOnce();
+      expect(mocks.activate).toHaveBeenCalledWith(state.env, operationSettlementId);
+      expect(JSON.stringify(json)).not.toContain("private-");
+      expect(JSON.stringify(json)).not.toContain("server-only");
+    });
+
+  it("denies a stale update plan without dispatch, read settlement, or activation", async () => {
+    mocks.plan.mockResolvedValueOnce({ status: "blocked", reason: "stale", requestId: "private-plan-request" });
+    const state = fixture();
+
+    const routeResponse = await state.send(updateRequestBody,
+      { "Idempotency-Key": updateRequestBody.command.commandId });
+
+    expect(routeResponse.status).toBe(200);
+    await expect(routeResponse.json()).resolves.toEqual({ sourceId: updateRequestBody.sourceId,
+      expectedApplicationId: appId, stage: "plan", outcome: { status: "blocked", reason: "stale" } });
+    expect(mocks.plan).toHaveBeenCalledOnce();
+    expect(mocks.dispatch).not.toHaveBeenCalled();
+    expect(mocks.withEnabled).not.toHaveBeenCalled();
+    expect(mocks.settle).not.toHaveBeenCalled();
+    expect(mocks.activate).not.toHaveBeenCalled();
   });
 
   it("stops at the first non-success stage and exact replay does not broaden the route surface", async () => {

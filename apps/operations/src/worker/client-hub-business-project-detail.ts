@@ -3,6 +3,8 @@ import { businessContactChannels, businessContactChannelsSql } from "./client-bu
 import { clientHubDetailPath } from "./client-hub-directory";
 import { clientHubBusinessProjectOwnership, clientHubBusinessProjectSourceProof } from "./client-hub-business-projects";
 import { readClientHubBusinessProjectPolicy, type ClientHubBusinessProjectPolicy } from "./client-hub-project-policy";
+import { canonicalBusinessProjectPredicate } from "./client-hub-canonical-projects";
+import { clientHubAlphaInternalId } from "./client-hub-source";
 import type { ClientHubCollectionContext } from "./client-hub-collections";
 import type { Env, StaffPrincipal } from "./types";
 
@@ -12,9 +14,10 @@ export interface ClientHubBusinessProjectDetail {
   contextVersion: string;
   refreshedAt: string;
   project: {
-    id: string; name: string; status: string | null; description: string | null;
+    id: string; origin: ClientHubBusinessProjectOrigin; name: string; status: string | null; description: string | null;
     start_date: string | null; end_date: string | null; created_at: string | null;
     manager: { id: string; display_name: string | null } | null;
+    overdue_warning?: boolean;
   };
   linkedContact: {
     id: string; display_name: string; email: string | null; phone: string | null;
@@ -28,6 +31,12 @@ export interface ClientHubBusinessProjectDetail {
   businessActivityAvailable: boolean;
   auditTimelineAvailable: boolean;
   feedbackHistoryAvailable: boolean;
+  projectInternalNotesAvailable: boolean;
+}
+export const CLIENT_HUB_BUSINESS_PROJECT_ORIGINS = ["pa", "canonical"] as const;
+export type ClientHubBusinessProjectOrigin = typeof CLIENT_HUB_BUSINESS_PROJECT_ORIGINS[number];
+export function isClientHubBusinessProjectOrigin(value: unknown): value is ClientHubBusinessProjectOrigin {
+  return typeof value === "string" && (CLIENT_HUB_BUSINESS_PROJECT_ORIGINS as readonly string[]).includes(value);
 }
 interface DetailRow {
   id: string; name: string; status: string | null; start_date: string | null; end_date: string | null;
@@ -73,7 +82,7 @@ async function readRow(env: Env, context: ClientHubCollectionContext, projectId:
       LEFT JOIN pa_clients contact ON contact.id=p.client_id AND contact.projection_source_id=p.projection_source_id AND contact.active=1 AND (${contact})
       LEFT JOIN pa_users manager ON manager.id=p.manager_user_id AND manager.projection_source_id=p.projection_source_id AND manager.active=1
     WHERE p.id=? AND (${owner.sql}) AND (${policy.filter.sql}) LIMIT 1`)
-    .bind(context.root.public_id, projectId, ...owner.values, ...policy.filter.values).first<DetailRow>();
+    .bind(clientHubAlphaInternalId(context.root, context.paRootId), projectId, ...owner.values, ...policy.filter.values).first<DetailRow>();
 }
 
 /** Read-only projected business data, not a portal grant or a write capability.
@@ -82,7 +91,10 @@ async function readRow(env: Env, context: ClientHubCollectionContext, projectId:
  * are checked before and after the bounded projection query. */
 export async function readClientHubBusinessProjectDetail(env: Env, principal: StaffPrincipal,
   context: ClientHubCollectionContext, projectId: string,
-  options: { expectedContextVersion?: string } = {}): Promise<ClientHubBusinessProjectDetail> {
+  options: { expectedContextVersion?: string; origin?: ClientHubBusinessProjectOrigin } = {}): Promise<ClientHubBusinessProjectDetail> {
+  const origin = options.origin ?? "pa";
+  if (!isClientHubBusinessProjectOrigin(origin))
+    throw new HTTPException(400, { message: "Business project origin is invalid" });
   if (!projectId || projectId.length > 512 || /[\u0000-\u001f\u007f]/.test(projectId))
     throw new HTTPException(400, { message: "Business project identifier is invalid" });
   if (options.expectedContextVersion !== undefined && !/^[A-Za-z0-9_-]{43}$/.test(options.expectedContextVersion))
@@ -94,6 +106,43 @@ export async function readClientHubBusinessProjectDetail(env: Env, principal: St
   if (!context.access.directory || !policy.allowed)
     throw new HTTPException(403, { message: "Client directory and project-view permissions are required" });
   const source = await clientHubBusinessProjectSourceProof(env, context);
+  if (origin === "canonical") {
+    const externalId = projectId;
+    const proof = await canonicalBusinessProjectPredicate(env, context, policy);
+    if (!proof) throw new HTTPException(404, { message: "Business project not found" });
+    const readCanonical = () => env.OPS_DB.withSession("first-primary").prepare(`SELECT s.external_project_id id,
+      s.name,s.lifecycle status,s.description,s.planned_start start_date,s.planned_end end_date,
+      s.current_version,s.canonical_projection_sha256,s.overdue_warning
+      FROM operations_shared_projects s WHERE ${proof.sql} AND s.external_project_id=? LIMIT 1`)
+      .bind(...proof.values, externalId).first<DetailRow & { current_version: number; canonical_projection_sha256: string; overdue_warning: number }>();
+    const canonical = await readCanonical();
+    if (!canonical) throw new HTTPException(404, { message: "Business project not found" });
+    const [currentPolicy, currentSource] = await Promise.all([
+      readClientHubBusinessProjectPolicy(env, principal), clientHubBusinessProjectSourceProof(env, context),
+    ]);
+    if (!currentPolicy.allowed || currentPolicy.proof !== policy.proof || currentSource !== source) changed();
+    const currentProof = await canonicalBusinessProjectPredicate(env, context, currentPolicy);
+    const current = currentProof ? await env.OPS_DB.withSession("first-primary").prepare(`SELECT s.external_project_id id,
+      s.name,s.lifecycle status,s.description,s.planned_start start_date,s.planned_end end_date,
+      s.current_version,s.canonical_projection_sha256,s.overdue_warning
+      FROM operations_shared_projects s WHERE ${currentProof.sql} AND s.external_project_id=? LIMIT 1`)
+      .bind(...currentProof.values, externalId).first<typeof canonical>() : null;
+    if (!current || JSON.stringify(current) !== JSON.stringify(canonical)) changed();
+    return {
+      canonicalRoot: context.canonicalRoot,
+      client: { display_name: context.root.display_name, detail_path: clientHubDetailPath(context.root) },
+      contextVersion: context.contextVersion, refreshedAt: new Date().toISOString(),
+      project: { id: projectId, origin, name: canonical.name, status: text(canonical.status, 80),
+        description: text(canonical.description, 8000, true), start_date: date(canonical.start_date),
+        end_date: date(canonical.end_date), created_at: null, manager: null,
+        overdue_warning: canonical.overdue_warning === 1 },
+      linkedContact: null,
+      availability: { linkedContact: "not_projected", siteContacts: "not_projected",
+        billingContacts: "not_projected", projectMemory: "not_projected" },
+      operationalWorkspaceAvailable: false, businessActivityAvailable: false,
+      auditTimelineAvailable: false, feedbackHistoryAvailable: false, projectInternalNotesAvailable: false,
+    };
+  }
   const row = await readRow(env, context, projectId, policy);
   if (!row) throw new HTTPException(404, { message: "Business project not found" });
   const currentPolicy = await readClientHubBusinessProjectPolicy(env, principal);
@@ -109,7 +158,7 @@ export async function readClientHubBusinessProjectDetail(env: Env, principal: St
     canonicalRoot: context.canonicalRoot,
     client: { display_name: context.root.display_name, detail_path: clientHubDetailPath(context.root) },
     contextVersion: context.contextVersion, refreshedAt: new Date().toISOString(),
-    project: { id: row.id, name: row.name, status: text(row.status, 80), description: text(row.description, 8000, true),
+    project: { id: row.id, origin, name: row.name, status: text(row.status, 80), description: text(row.description, 8000, true),
       start_date: date(row.start_date), end_date: date(row.end_date), created_at: date(row.created_at),
       manager: row.manager_id ? { id: row.manager_id, display_name: text(row.manager_name, 500) } : null },
     linkedContact,
@@ -119,5 +168,6 @@ export async function readClientHubBusinessProjectDetail(env: Env, principal: St
     businessActivityAvailable: true,
     auditTimelineAvailable: true,
     feedbackHistoryAvailable: true,
+    projectInternalNotesAvailable: true,
   };
 }

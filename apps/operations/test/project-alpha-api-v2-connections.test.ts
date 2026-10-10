@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   ProjectAlphaApiV2ConnectionConfigurationError,
+  listEnabledProjectAlphaApiV2SourceIds,
   probeConfiguredProjectAlphaApiV2Connection,
   resolveProjectAlphaApiV2Connection,
 } from "../src/worker/project-alpha-api-v2-connections";
@@ -26,6 +27,28 @@ function metadata(value: typeof ids.first) {
 }
 
 describe("deployment-owned Project Alpha API-v2 connections", () => {
+  it("lists only enabled source IDs in stable order without returning credentials or identities", () => {
+    const env = environment({ [second]: entry(second, ids.second, "https://source-b.example.test", true),
+      [first]: entry(first, ids.first, "https://source-a.example.test", true) });
+    const listed = listEnabledProjectAlphaApiV2SourceIds(env);
+    expect(listed).toEqual([first, second]);
+    expect(Object.isFrozen(listed)).toBe(true);
+    expect(JSON.stringify(listed)).not.toContain("secret-for-");
+    expect(JSON.stringify(listed)).not.toContain(ids.first.source);
+    expect(listEnabledProjectAlphaApiV2SourceIds(environment({
+      [first]: entry(first, ids.first, "https://source-a.example.test"),
+      [second]: entry(second, ids.second, "https://source-b.example.test", true),
+    }))).toEqual([second]);
+  });
+
+  it("fails closed for a malformed sibling or absent deployment configuration", () => {
+    expect(() => listEnabledProjectAlphaApiV2SourceIds({})).toThrow(ProjectAlphaApiV2ConnectionConfigurationError);
+    expect(() => listEnabledProjectAlphaApiV2SourceIds(environment({
+      [first]: entry(first, ids.first, "https://source-a.example.test", true),
+      [second]: { ...entry(second, ids.second, "https://source-b.example.test", true), apiKey: "bad key" },
+    }))).toThrow(ProjectAlphaApiV2ConnectionConfigurationError);
+  });
+
   it("resolves isolated source-keyed instances and defaults omitted enablement to false", () => {
     const env = environment({ [first]: entry(first, ids.first, "https://source-a.example.test"), [second]: entry(second, ids.second, "https://source-b.example.test", true) });
     const one = resolveProjectAlphaApiV2Connection(env, first);
@@ -157,14 +180,33 @@ describe("deployment-owned Project Alpha API-v2 connections", () => {
     () => ({ version: 1, instances: { "wrong:source": entry("wrong:source", ids.first, "https://source-a.example.test") } }),
     () => ({ version: 1, instances: { "project-alpha:repeated:colon": entry("project-alpha:repeated:colon", ids.first, "https://source-a.example.test") } }),
     () => ({ version: 1, instances: { [`project-alpha:${"a".repeat(65)}`]: entry(`project-alpha:${"a".repeat(65)}`, ids.first, "https://source-a.example.test") } }),
-    () => ({ version: 1, instances: { [first]: entry(first, ids.first, "https://source-a.example.test"), [second]: entry(second, ids.second, "https://source-a.example.test") } }),
-    () => ({ version: 1, instances: { [first]: entry(first, ids.first, "https://source-a.example.test"), [second]: entry(second, { ...ids.second, source: ids.first.source }, "https://source-b.example.test") } }),
-    () => ({ version: 1, instances: { [first]: entry(first, ids.first, "https://source-a.example.test"), [second]: entry(second, { ...ids.second, application: ids.first.application }, "https://source-b.example.test") } }),
-    () => ({ version: 1, instances: { [first]: entry(first, ids.first, "https://source-a.example.test"), [second]: entry(second, { ...ids.second, epoch: ids.first.epoch }, "https://source-b.example.test") } }),
+    () => ({ version: 1, instances: { [first]: entry(first, ids.first, "https://source-a.example.test"), [second]: entry(second, { ...ids.second, source: ids.first.source, application: ids.first.application }, "https://source-b.example.test") } }),
     () => ({ version: 1, instances: { [first]: entry(first, ids.first, "https://source-a.example.test"), [second]: entry(first, ids.second, "https://source-b.example.test") } }),
   ])("rejects malformed, non-origin, duplicate, and unknown configuration", make => {
     const env = { PROJECT_ALPHA_API_V2_CONNECTIONS: JSON.stringify(make()) };
     expect(() => resolveProjectAlphaApiV2Connection(env, first)).toThrow(ProjectAlphaApiV2ConnectionConfigurationError);
+  });
+
+  it("scopes application and history identifiers to each independent PA instance", () => {
+    const sharedLocalIdentity = environment({
+      [first]: entry(first, ids.first, "https://source-a.example.test", true),
+      [second]: entry(second, { ...ids.second, application: ids.first.application, epoch: ids.first.epoch }, "https://source-b.example.test", true),
+    });
+    expect(resolveProjectAlphaApiV2Connection(sharedLocalIdentity, first).enabled).toBe(true);
+    expect(resolveProjectAlphaApiV2Connection(sharedLocalIdentity, second).enabled).toBe(true);
+  });
+
+  it("allows one trusted origin to route to distinct PA instances while rejecting duplicate source/application aliases", () => {
+    const sharedOrigin = environment({
+      [first]: entry(first, ids.first, "https://shared-gateway.example.test", true),
+      [second]: entry(second, ids.second, "https://shared-gateway.example.test", true),
+    });
+    expect(resolveProjectAlphaApiV2Connection(sharedOrigin, first).enabled).toBe(true);
+    expect(resolveProjectAlphaApiV2Connection(sharedOrigin, second).enabled).toBe(true);
+    expect(() => resolveProjectAlphaApiV2Connection(environment({
+      [first]: entry(first, ids.first, "https://source-a.example.test"),
+      [second]: entry(second, { ...ids.second, source: ids.first.source, application: ids.first.application }, "https://source-b.example.test"),
+    }), second)).toThrow(ProjectAlphaApiV2ConnectionConfigurationError);
   });
 
   it("fails closed for absent, oversized, and unavailable source configuration without a fetch", async () => {

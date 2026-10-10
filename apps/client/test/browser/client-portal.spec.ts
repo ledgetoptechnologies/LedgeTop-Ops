@@ -43,7 +43,7 @@ async function mockAuthorizedPortal(
   mapboxPublicToken: string | null = null,
   fixtureRequests = requests,
   workflowEvents?: { edited?: boolean; changeRequested?: boolean; estimateAccepted?: boolean; cancelled?: boolean;
-    cancellationKeys?: string[]; failFirstCancellation?: boolean },
+    cancellationKeys?: string[]; failFirstCancellation?: boolean; detailGate?: Promise<void>; detailStarted?: () => void },
   locationFixtures: { project: DeliveryLocationCollection; past: DeliveryLocationCollection } = {
     project: { points: [], imageCount: 0, truncated: false },
     past: { points: [], imageCount: 0, truncated: false },
@@ -68,6 +68,12 @@ async function mockAuthorizedPortal(
       await route.fulfill({ json: { projects } });
     } else if (request.method() === "GET" && path === "/api/client/service-requests") {
       await route.fulfill({ json: { requests: fixtureRequests } });
+    } else if (request.method() === "GET" && path === "/api/client/service-requests/request-a") {
+      workflowEvents?.detailStarted?.();
+      await workflowEvents?.detailGate;
+      await route.fulfill({ json: { request: { ...fixtureRequests[0], submittedServices: [{ publicId: "svc-2d-map",
+        sourceVersion: "pa-v4", name: "2D Mapping", summary: "Orthomosaic mapping and site coverage.", category: "Mapping",
+        geometryRequirement: "optional", answers: [{ questionId: "resolution", label: "Preferred resolution", displayValue: "Standard" }] }] } } });
     } else if (request.method() === "GET" && path === "/api/client/service-catalog") {
       await route.fulfill({ json: { services: serviceCatalog } });
     } else if (request.method() === "GET" && path === "/api/client/service-catalog/page") {
@@ -331,7 +337,7 @@ test("portal identifies an unfinished schema update and retries cleanly on mobil
   await expect(page.getByText("Portal update in progress", { exact: true })).toBeVisible();
   await expect(page.getByText(/access is valid/i)).toBeVisible();
   await page.getByRole("button", { name: "Retry portal" }).click();
-  await expect(page.getByRole("heading", { name: "Hello, Acme Surveying" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Acme Surveying" })).toBeVisible();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
 });
 
@@ -429,12 +435,12 @@ test("workspace-v2 selection scopes every authenticated resource request and swi
   });
 
   await page.goto("/portal");
-  await expect(page.getByRole("heading", { name: "Hello, Alpha" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Alpha" })).toBeVisible();
   await expect(page.getByRole("combobox", { name: "Client workspace" })).toHaveValue("workspace-a");
   expect(observed.filter(item => ["/api/client/projects", "/api/client/service-requests", "/api/client/map-config", "/api/client/notification-history"].includes(item.path)).every(item => item.workspace === "workspace-a")).toBe(true);
 
   await page.getByRole("combobox", { name: "Client workspace" }).selectOption("workspace-b");
-  await expect(page.getByRole("heading", { name: "Hello, Beta" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Beta" })).toBeVisible();
   await expect(page.getByText("Beta Site")).toBeVisible();
   expect(observed.filter(item => item.path === "/api/client/projects").at(-1)?.workspace).toBe("workspace-b");
   await expect(page).toHaveURL(/\/portal\?workspace=workspace-b$/);
@@ -443,7 +449,7 @@ test("workspace-v2 selection scopes every authenticated resource request and swi
 test("authorized portal supports project, delivery, and request workflows", async ({ page }) => {
   await mockAuthorizedPortal(page);
   await page.goto("/portal");
-  await expect(page.getByRole("heading", { name: "Hello, Acme Surveying" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Acme Surveying" })).toBeVisible();
   await expect(page.getByText("1", { exact: true }).first()).toBeVisible();
 
   await navigatePortal(page, "Projects");
@@ -478,6 +484,47 @@ test("authorized portal supports project, delivery, and request workflows", asyn
   await expect(page.getByText("North Site spring imagery")).toBeVisible();
 
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+});
+
+test("submitted-service browser presentation renders immutable labeled answers after expansion", async ({ page }) => {
+  await mockAuthorizedPortal(page, null, [{ ...requests[0]!, submittedServiceDetailsAvailable: true }]);
+  await page.goto("/portal/requests");
+  await expect(page.getByRole("heading", { name: "Submitted services" })).toHaveCount(0);
+  await page.getByRole("button", { name: "View submitted services" }).first().click();
+  await expect(page.getByRole("heading", { name: "Submitted services" })).toBeVisible();
+  await expect(page.getByText("2D Mapping", { exact: true })).toBeVisible();
+  await expect(page.getByText("Preferred resolution", { exact: true })).toBeVisible();
+  await expect(page.getByText("Standard", { exact: true })).toBeVisible();
+});
+
+test("a late submitted-service detail cannot repopulate cache after the request context refreshes", async ({ page }) => {
+  let releaseDetail!: () => void;
+  let markStarted!: () => void;
+  const detailGate = new Promise<void>(resolve => { releaseDetail = resolve; });
+  const detailStarted = new Promise<void>(resolve => { markStarted = resolve; });
+  await mockAuthorizedPortal(page, null, [{ ...requests[0]!, submittedServiceDetailsAvailable: true }],
+    { cancellationKeys: [], detailGate, detailStarted: markStarted });
+  await page.goto("/portal/requests");
+  const detailSettled = new Promise<void>(resolve => {
+    const settled = (request: Request) => {
+      if (request.method() !== "GET" || new URL(request.url()).pathname !== "/api/client/service-requests/request-a") return;
+      page.off("requestfinished", settled);
+      page.off("requestfailed", settled);
+      resolve();
+    };
+    page.on("requestfinished", settled);
+    page.on("requestfailed", settled);
+  });
+  await page.getByRole("button", { name: "View submitted services" }).click();
+  await detailStarted;
+  page.once("dialog", dialog => dialog.accept());
+  await page.getByRole("button", { name: "Cancel request" }).click();
+  await expect(page.getByText("Cancelled", { exact: true })).toBeVisible();
+  releaseDetail();
+  await detailSettled;
+  await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+  await expect(page.getByRole("heading", { name: "Submitted services" })).toHaveCount(0);
+  await expect(page.getByText("Preferred resolution", { exact: true })).toHaveCount(0);
 });
 
 test("native workspace branding identifies the selected source across compact viewports", async ({ page }) => {
@@ -832,6 +879,149 @@ test("project files progressively paint 1200 immediate children with one request
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
 });
 
+test("a stale project-file observer callback cannot replay an already consumed cursor", async ({ page }) => {
+  await page.addInitScript(() => {
+    const callbacks: IntersectionObserverCallback[] = [];
+    Object.defineProperty(window, "__portalPaginationObservers", { value: callbacks });
+    Object.defineProperty(window, "IntersectionObserver", { configurable: true, value: class {
+      constructor(callback: IntersectionObserverCallback) { callbacks.push(callback); }
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+      takeRecords() { return []; }
+      readonly root = null;
+      readonly rootMargin = "0px";
+      readonly thresholds = [0];
+    } });
+  });
+  let inFlight = 0;
+  let maximumInFlight = 0;
+  const requestedPages: number[] = [];
+  const fixture = async (url: URL): Promise<PortalFilePage> => {
+    const folder = url.searchParams.get("folder");
+    if (folder !== "pf1_stale") return { files: [], folders: [{ id: "pf1_stale", name: "Stale observer fixture" }],
+      breadcrumbs: [{ id: null, name: "Project files" }], folderId: null, prefix: "", cursor: null };
+    inFlight += 1;
+    maximumInFlight = Math.max(maximumInFlight, inFlight);
+    const pageIndex = Number(url.searchParams.get("cursor") ?? "0");
+    requestedPages.push(pageIndex);
+    await new Promise(resolve => setTimeout(resolve, 8));
+    inFlight -= 1;
+    return {
+      files: Array.from({ length: 150 }, (_, offset) => ({ ...filePage.files[0]!, id: `stale-${pageIndex}-${offset}`,
+        name: `stale-${String(pageIndex * 150 + offset).padStart(3, "0")}.pdf` })),
+      folders: [], breadcrumbs: [{ id: null, name: "Project files" }, { id: folder, name: "Stale observer fixture" }],
+      folderId: folder, prefix: "", cursor: pageIndex < 2 ? String(pageIndex + 1) : null,
+    };
+  };
+  await mockAuthorizedPortal(page, null, requests, undefined, undefined, true, false, undefined, fixture);
+  await page.goto("/portal/projects/project-a?tab=files");
+  await page.getByRole("button", { name: /Stale observer fixture/ }).click();
+  await expect(page.getByText("stale-000.pdf")).toBeVisible();
+  await expect.poll(() => requestedPages).toEqual([0, 1]);
+  await page.getByRole("button", { name: "Load more" }).click();
+  await expect(page.getByText("stale-299.pdf")).toBeVisible();
+  await expect.poll(() => requestedPages).toEqual([0, 1, 2]);
+  await expect.poll(() => inFlight).toBe(0);
+  await page.evaluate(() => {
+    const callbacks = (window as unknown as { __portalPaginationObservers: IntersectionObserverCallback[] }).__portalPaginationObservers;
+    const staleCallback = callbacks[0];
+    if (!staleCallback) throw new Error("The first pagination observer was not installed.");
+    staleCallback([{ isIntersecting: true } as IntersectionObserverEntry], {} as IntersectionObserver);
+  });
+  await page.waitForTimeout(25);
+  expect({ requestedPages, maximumInFlight }).toEqual({ requestedPages: [0, 1, 2], maximumInFlight: 1 });
+  await page.getByRole("button", { name: "Load more" }).click();
+  await expect(page.getByText("stale-449.pdf")).toBeVisible();
+  await expect(page.locator(".portal-file-row")).toHaveCount(450);
+  expect({ requestedPages, maximumInFlight }).toEqual({ requestedPages: [0, 1, 2], maximumInFlight: 1 });
+});
+
+test("a transient project-file continuation failure releases the matching cursor for explicit retry", async ({ page }) => {
+  await page.addInitScript(() => {
+    Object.defineProperty(window, "requestIdleCallback", { configurable: true, value: () => 1 });
+    Object.defineProperty(window, "cancelIdleCallback", { configurable: true, value: () => {} });
+    Object.defineProperty(window, "IntersectionObserver", { configurable: true, value: class {
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+      takeRecords() { return []; }
+      readonly root = null;
+      readonly rootMargin = "0px";
+      readonly thresholds = [0];
+    } });
+  });
+  const requestedCursors: Array<string | null> = [];
+  await mockAuthorizedPortal(page);
+  await page.route("**/api/client/projects/project-a/files**", async route => {
+    const url = new URL(route.request().url());
+    const folder = url.searchParams.get("folder");
+    if (folder !== "pf1_retry") return route.fulfill({ json: { files: [], folders: [{ id: "pf1_retry", name: "Retry fixture" }],
+      breadcrumbs: [{ id: null, name: "Project files" }], folderId: null, prefix: "", cursor: null } });
+    const cursor = url.searchParams.get("cursor");
+    requestedCursors.push(cursor);
+    if (!cursor) return route.fulfill({ json: { files: [{ ...filePage.files[0]!, id: "retry-initial", name: "retry-initial.pdf" }], folders: [],
+      breadcrumbs: [{ id: null, name: "Project files" }, { id: folder, name: "Retry fixture" }], folderId: folder, prefix: "", cursor: "retry-next" } });
+    if (requestedCursors.length === 2) return route.fulfill({ status: 503, json: { error: "Temporary continuation failure" } });
+    return route.fulfill({ json: { files: [{ ...filePage.files[0]!, id: "retry-success", name: "retry-success.pdf" }], folders: [],
+      breadcrumbs: [{ id: null, name: "Project files" }, { id: folder, name: "Retry fixture" }], folderId: folder, prefix: "", cursor: null } });
+  });
+  await page.goto("/portal/projects/project-a?tab=files");
+  await page.getByRole("button", { name: /Retry fixture/ }).click();
+  await expect(page.getByText("retry-initial.pdf")).toBeVisible();
+  await page.getByRole("button", { name: "Load more" }).click();
+  await expect(page.getByRole("alert")).toContainText("More files could not be loaded.");
+  await page.getByRole("button", { name: "Load more" }).click();
+  await expect(page.getByText("retry-success.pdf")).toBeVisible();
+  expect(requestedCursors).toEqual([null, "retry-next", "retry-next"]);
+});
+
+test("a project-file continuation denial clears private rows and fences stale observer callbacks", async ({ page }) => {
+  await page.addInitScript(() => {
+    const callbacks: IntersectionObserverCallback[] = [];
+    Object.defineProperty(window, "__portalDenialObservers", { value: callbacks });
+    Object.defineProperty(window, "requestIdleCallback", { configurable: true, value: () => 1 });
+    Object.defineProperty(window, "cancelIdleCallback", { configurable: true, value: () => {} });
+    Object.defineProperty(window, "IntersectionObserver", { configurable: true, value: class {
+      constructor(callback: IntersectionObserverCallback) { callbacks.push(callback); }
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+      takeRecords() { return []; }
+      readonly root = null;
+      readonly rootMargin = "0px";
+      readonly thresholds = [0];
+    } });
+  });
+  let continuationCalls = 0;
+  await mockAuthorizedPortal(page);
+  await page.route("**/api/client/projects/project-a/files**", async route => {
+    const url = new URL(route.request().url());
+    const folder = url.searchParams.get("folder");
+    if (folder !== "pf1_denied") return route.fulfill({ json: { files: [], folders: [{ id: "pf1_denied", name: "Denied fixture" }],
+      breadcrumbs: [{ id: null, name: "Project files" }], folderId: null, prefix: "", cursor: null } });
+    if (!url.searchParams.has("cursor")) return route.fulfill({ json: { files: [{ ...filePage.files[0]!, id: "denied-private", name: "denied-private.pdf" }], folders: [],
+      breadcrumbs: [{ id: null, name: "Project files" }, { id: folder, name: "Denied fixture" }], folderId: folder, prefix: "", cursor: "denied-next" } });
+    continuationCalls += 1;
+    return route.fulfill({ status: 403, json: { error: "File authority changed" } });
+  });
+  await page.goto("/portal/projects/project-a?tab=files");
+  await page.getByRole("button", { name: /Denied fixture/ }).click();
+  await expect(page.getByText("denied-private.pdf")).toBeVisible();
+  await page.getByRole("button", { name: "Load more" }).click();
+  await expect(page.getByText("denied-private.pdf")).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Load more" })).toHaveCount(0);
+  await page.evaluate(() => {
+    const callbacks = (window as unknown as { __portalDenialObservers: IntersectionObserverCallback[] }).__portalDenialObservers;
+    const staleCallback = callbacks[0];
+    if (!staleCallback) throw new Error("The denied pagination observer was not installed.");
+    staleCallback([{ isIntersecting: true } as IntersectionObserverEntry], {} as IntersectionObserver);
+  });
+  await page.waitForTimeout(25);
+  expect(continuationCalls).toBe(1);
+  await expect(page.getByText("denied-private.pdf")).toHaveCount(0);
+});
+
 test("leaving a folder aborts a continuation and ignores its stale result", async ({ page }) => {
   let continuationStarted = false;
   const fixture = async (url: URL): Promise<PortalFilePage> => {
@@ -1112,7 +1302,7 @@ for (const width of [320, 390, 768]) {
     await expect(page.getByRole("dialog", { name: "Navigation" })).toHaveCount(0);
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
     const headerBottom = await page.locator(".client-portal-header").evaluate((node) => node.getBoundingClientRect().bottom);
-    const headingTop = await page.getByRole("heading", { name: "Hello, Acme Surveying" }).evaluate((node) => node.getBoundingClientRect().top);
+    const headingTop = await page.getByRole("heading", { name: "Acme Surveying" }).evaluate((node) => node.getBoundingClientRect().top);
     expect(headingTop).toBeGreaterThanOrEqual(headerBottom);
   });
 }
@@ -1502,7 +1692,7 @@ test("Viewer shell is openerless and keeps the iframe and idempotency key across
   await viewerPopup.close();
 });
 
-test("disabled or unavailable session stops before account data requests", async ({ page }) => {
+test("disabled Operations home and unavailable legacy session stop before account data requests", async ({ page }) => {
   const requestedPaths: string[] = [];
   await page.route("**/api/client/**", async route => {
     const path = new URL(route.request().url()).pathname;
@@ -1511,7 +1701,10 @@ test("disabled or unavailable session stops before account data requests", async
   });
   await page.goto("/portal");
   await expect(page.getByText("Portal unavailable", { exact: true })).toBeVisible();
-  expect(requestedPaths).toEqual(["/api/client/session"]);
+  // The unified root checks its separately authorized home first. Only the
+  // explicit disabled-route 404 permits legacy admission; neither response
+  // permits any account/resource data request.
+  expect(requestedPaths).toEqual(["/api/client/v2/operations/home", "/api/client/session"]);
 });
 
 test("map starts under the production CSP contract without policy errors", async ({ page }) => {

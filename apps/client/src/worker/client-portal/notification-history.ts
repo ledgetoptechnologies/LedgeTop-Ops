@@ -164,6 +164,8 @@ async function nativeDeliveryMutationGuard(env:Env,principal:VerifiedClientPrinc
   const event=await db(env).prepare(`SELECT folder_binding_id bindingId FROM ${eventTable} WHERE id=? AND workspace_id=? AND source_id=?`).bind(eventId,session.workspaceId,session.nativeSourceId).first<{bindingId:string}>();
   const target=event?(await readNativeTargetScopes(env,context,[{scopeType:'folder',publicId:event.bindingId}],{retention:'structural'})).get(`folder:${event.bindingId}`):null;if(!target)return null;
   const authority=portalProjectionSourceGuard(context.authority),parts=[authority.sql],bindings:(string|number|null)[]=[...authority.bindings];
+  const claimTablePresent=(await db(env).prepare(`SELECT 1 present FROM sqlite_master
+    WHERE type='table' AND name='portal_client_authority_workspace_claims'`).first<number>('present'))===1;
   const scopes=JSON.stringify([...target.scopes]);
   const termsProject='(SELECT project_public_id FROM portal_project_access_terms WHERE id=allow_record.access_terms_id)';
   const expired=JSON.stringify(target.proofRows.filter(row=>row.entity_type==='project'&&row.retained===0).map(row=>row.public_id));
@@ -188,6 +190,11 @@ async function nativeDeliveryMutationGuard(env:Env,principal:VerifiedClientPrinc
     native_scope_guard AS MATERIALIZED(SELECT 1 ok FROM native_scope_proof WHERE native_scope_proof.proof=?)`);
   bindings.push(JSON.stringify([{scopeType:'folder',publicId:event!.bindingId}]),context.workspaceId,context.generationId,
     env.CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED==='true'?1:0,66,scopeProof);
+  if(claimTablePresent){
+    parts.push(`NOT EXISTS(SELECT 1 FROM portal_client_authority_workspace_claims claim
+      WHERE claim.workspace_id=? AND claim.state='active')`);
+    bindings.push(context.workspaceId);
+  }
   parts.push(`EXISTS(SELECT 1 FROM portal_v2_workspaces workspace
     JOIN pa_portal_workspace_sources source ON source.workspace_id=workspace.id AND source.projection_source_id=workspace.project_alpha_source_id
     JOIN portal_v2_workspace_memberships membership ON membership.workspace_id=workspace.id AND membership.identity_id=?

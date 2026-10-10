@@ -35,6 +35,7 @@ import {
   ServiceAssignmentPolicyUnavailableError,
   type ServiceAssignmentPolicyProof,
 } from "./service-assignment-policy";
+import { parseSubmittedServiceReview, type SubmittedServiceReviewRow } from "./submitted-service-review";
 
 const PUBLIC_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
 const SOURCE_VERSION = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/;
@@ -82,7 +83,7 @@ function mapRequest(row: Record<string, unknown>): ClientServiceRequest {
     latitude: row.latitude as number | null, longitude: row.longitude as number | null,
     areaGeoJson: row.area_geojson ? JSON.parse(String(row.area_geojson)) : null,
     poiPoints: row.poi_points_json ? JSON.parse(String(row.poi_points_json)) : [],
-    status: row.status as ClientServiceRequest["status"], ...(row.project_alpha_draft_created === 1 ? { projectAlphaDraftCreated: true } : {}), acceptedQuote: null, operationalEstimate: null,
+    status: row.status as ClientServiceRequest["status"], submittedServiceDetailsAvailable: true, ...(row.project_alpha_draft_created === 1 ? { projectAlphaDraftCreated: true } : {}), acceptedQuote: null, operationalEstimate: null,
     createdAt: String(row.created_at), updatedAt: String(row.updated_at),
   };
 }
@@ -468,6 +469,23 @@ async function loadNativeRequest(env: Env, session: ClientPortalSession, request
   if (!row) return null;
   const proof = await resolveNativeRequestAuthority(env, session, row.portal_project_public_id as string | null);
   return proof && proof.sourceId === row.catalog_source_id ? mapRequest(row) : null;
+}
+
+export async function getNativeServiceRequestDetail(env: Env, session: ClientPortalSession, requestId: string): Promise<ClientServiceRequest | null> {
+  const request = await loadNativeRequest(env, session, requestId);
+  if (!request || !session.nativeSourceId) return null;
+  const sourceId = session.nativeSourceId;
+  const rows = await database(env).prepare(`SELECT service_source_id,service_public_id,service_source_version,service_snapshot_json,answers_json
+    FROM client_service_request_services WHERE request_id=? AND service_source_id=? ORDER BY ordinal LIMIT 11`)
+    .bind(requestId, sourceId).all<SubmittedServiceReviewRow>();
+  if (rows.results.length > 10) return null;
+  const submittedServices = rows.results.map(row => parseSubmittedServiceReview(row, sourceId));
+  if (submittedServices.some(service => service === null)) return null;
+  // The second exact read is the post-metadata authority fence. It repeats the
+  // workspace, identity, source and current project authority checks.
+  const current = await loadNativeRequest(env, session, requestId);
+  if (!current || current.projectId !== request.projectId) return null;
+  return { ...current, submittedServices: submittedServices as NonNullable<ClientServiceRequest["submittedServices"]> };
 }
 
 export async function submitNativeServiceRequestDraft(env: Env, session: ClientPortalSession, draftId: string,
