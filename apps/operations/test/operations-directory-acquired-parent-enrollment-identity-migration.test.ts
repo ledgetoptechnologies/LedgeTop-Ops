@@ -13,6 +13,9 @@ const organizationRecordId = "ops/organization/parent";
 const organizationExternalId = "pa/organization/parent";
 const organizationPublicId = "a".repeat(32);
 const activationId = "20000000-0000-4000-8000-000000000001";
+const acquiredReceiptId = "20000000-0000-4000-8000-000000000002";
+const nativeOwnerClaimId = "20000000-0000-4000-8000-000000000003";
+const nativeOwnerEpochId = "20000000-0000-4000-8000-000000000004";
 const enrollment = JSON.stringify([{ sourceId, sourceInstanceUUID: sourceInstanceId,
   applicationUUID: applicationId, historyEpoch: historyEpochId, origin,
   externalCanonicalId: organizationRecordId }]);
@@ -67,16 +70,45 @@ describe("0175 acquired parent enrollment identity guard", () => {
       CREATE TABLE project_alpha_directory_mappings(
         source_id TEXT,resource_type TEXT,external_id TEXT,project_alpha_public_id TEXT,
         source_instance_id TEXT,application_id TEXT,history_epoch_id TEXT,command_id TEXT,created_at TEXT);
+      CREATE TABLE project_alpha_acquired_native_owner_claims(
+        claim_id TEXT PRIMARY KEY,receipt_id TEXT NOT NULL,native_owner_epoch_id TEXT NOT NULL,
+        record_id TEXT NOT NULL,source_id TEXT NOT NULL,source_instance_id TEXT NOT NULL,
+        application_id TEXT NOT NULL,history_epoch_id TEXT NOT NULL,resource_type TEXT NOT NULL,
+        external_id TEXT NOT NULL,project_alpha_public_id TEXT NOT NULL,
+        expected_local_record_version INTEGER NOT NULL,actor_id TEXT NOT NULL,request_sha256 TEXT NOT NULL);
       CREATE TABLE project_alpha_existing_directory_binding_activation_receipts(
-        activation_id TEXT PRIMARY KEY,record_id TEXT NOT NULL,source_id TEXT NOT NULL,
+        activation_id TEXT PRIMARY KEY,acquired_receipt_id TEXT NOT NULL,
+        native_owner_claim_id TEXT NOT NULL REFERENCES project_alpha_acquired_native_owner_claims(claim_id),
+        record_id TEXT NOT NULL,source_id TEXT NOT NULL,
         source_instance_id TEXT NOT NULL,application_id TEXT NOT NULL,history_epoch_id TEXT NOT NULL,
         resource_type TEXT NOT NULL,external_id TEXT NOT NULL,project_alpha_public_id TEXT NOT NULL,
-        project_alpha_revision TEXT NOT NULL,local_record_version INTEGER NOT NULL,activated_at TEXT NOT NULL);
+        project_alpha_revision TEXT NOT NULL,local_record_version INTEGER NOT NULL,
+        expected_authorization_generation TEXT NOT NULL,result_authorization_generation TEXT NOT NULL,
+        activated_at TEXT NOT NULL);
+      CREATE TRIGGER project_alpha_existing_directory_binding_activation_owner_exact
+        BEFORE INSERT ON project_alpha_existing_directory_binding_activation_receipts
+        WHEN NOT EXISTS(SELECT 1 FROM project_alpha_acquired_native_owner_claims claim
+          WHERE claim.claim_id=NEW.native_owner_claim_id AND claim.receipt_id=NEW.acquired_receipt_id
+            AND claim.record_id=NEW.record_id AND claim.source_id=NEW.source_id
+            AND claim.source_instance_id=NEW.source_instance_id AND claim.application_id=NEW.application_id
+            AND claim.history_epoch_id=NEW.history_epoch_id AND claim.resource_type=NEW.resource_type
+            AND claim.external_id=NEW.external_id
+            AND claim.project_alpha_public_id=NEW.project_alpha_public_id
+            AND claim.expected_local_record_version=NEW.local_record_version)
+        BEGIN SELECT RAISE(ABORT,'activation requires exact native owner claim'); END;
       CREATE TABLE project_alpha_existing_directory_binding_revision_refresh_receipts(
+        receipt_id TEXT PRIMARY KEY,native_owner_claim_id TEXT NOT NULL
+          REFERENCES project_alpha_acquired_native_owner_claims(claim_id),
         record_id TEXT NOT NULL,local_record_version INTEGER NOT NULL,source_id TEXT NOT NULL,
         source_instance_id TEXT NOT NULL,application_id TEXT NOT NULL,history_epoch_id TEXT NOT NULL,
         resource_type TEXT NOT NULL,external_id TEXT NOT NULL,project_alpha_public_id TEXT NOT NULL,
         live_revision TEXT NOT NULL,authorization_generation TEXT NOT NULL);
+      CREATE TABLE project_alpha_existing_directory_binding_revision_refresh_commands(
+        predecessor_refresh_receipt_id TEXT,native_owner_claim_id TEXT NOT NULL
+          REFERENCES project_alpha_acquired_native_owner_claims(claim_id),
+        record_id TEXT NOT NULL,expected_local_record_version INTEGER NOT NULL,source_id TEXT NOT NULL,
+        source_instance_id TEXT NOT NULL,application_id TEXT NOT NULL,history_epoch_id TEXT NOT NULL,
+        resource_type TEXT NOT NULL,external_id TEXT NOT NULL,project_alpha_public_id TEXT NOT NULL);
       CREATE VIEW project_alpha_active_directory_mappings AS
         SELECT source_id,resource_type,external_id AS record_id,external_id,project_alpha_public_id,
           source_instance_id,application_id,history_epoch_id,command_id AS provenance_id,
@@ -108,10 +140,21 @@ describe("0175 acquired parent enrollment identity guard", () => {
       db.prepare("INSERT INTO operations_directory_revisions VALUES(?,1,'parent-create','{}')").bind(organizationRecordId),
       db.prepare("INSERT INTO native_directory_enrollments VALUES(?,?,'parent-admission')")
         .bind(organizationRecordId,enrollment),
-      db.prepare(`INSERT INTO project_alpha_existing_directory_binding_activation_receipts
-        VALUES(?,?,?,?,?,?, 'organization',?,?, '7',1,'2026-10-05T00:00:00.000Z')`)
-        .bind(activationId,organizationRecordId,sourceId,sourceInstanceId,applicationId,historyEpochId,
-          organizationExternalId,organizationPublicId),
+      db.prepare(`INSERT INTO project_alpha_acquired_native_owner_claims(
+        claim_id,receipt_id,native_owner_epoch_id,record_id,source_id,source_instance_id,application_id,
+        history_epoch_id,resource_type,external_id,project_alpha_public_id,expected_local_record_version,
+        actor_id,request_sha256) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+        .bind(nativeOwnerClaimId,acquiredReceiptId,nativeOwnerEpochId,
+          organizationRecordId,sourceId,sourceInstanceId,applicationId,historyEpochId,"organization",
+          organizationExternalId,organizationPublicId,1,"owner","c".repeat(64)),
+      db.prepare(`INSERT INTO project_alpha_existing_directory_binding_activation_receipts(
+        activation_id,acquired_receipt_id,native_owner_claim_id,record_id,source_id,source_instance_id,
+        application_id,history_epoch_id,resource_type,external_id,project_alpha_public_id,
+        project_alpha_revision,local_record_version,expected_authorization_generation,
+        result_authorization_generation,activated_at)
+        VALUES(?,?,?,?,?,?,?,?,'organization',?,?,'7',1,'3','4','2026-10-05T00:00:00.000Z')`)
+        .bind(activationId,acquiredReceiptId,nativeOwnerClaimId,organizationRecordId,sourceId,
+          sourceInstanceId,applicationId,historyEpochId,organizationExternalId,organizationPublicId),
     ]);
   });
 
@@ -203,6 +246,45 @@ describe("0175 acquired parent enrollment identity guard", () => {
     await expect(acquiredDirectoryMappingUpdateEvidence(db, { ...context, external_id: "pa/organization/wrong" },
       "7", "4", organizationPublicId)).resolves.toBe(false);
     await expect(acquiredDirectoryMappingUpdateEvidence(db, context, "7", "4", "b".repeat(32))).resolves.toBe(false);
+  });
+
+  it("requires an acquired activation to carry the exact native owner claim", async () => {
+    await expect(db.prepare(`INSERT INTO project_alpha_existing_directory_binding_activation_receipts(
+      activation_id,acquired_receipt_id,native_owner_claim_id,record_id,source_id,source_instance_id,
+      application_id,history_epoch_id,resource_type,external_id,project_alpha_public_id,
+      project_alpha_revision,local_record_version,expected_authorization_generation,
+      result_authorization_generation,activated_at)
+      VALUES('20000000-0000-4000-8000-000000000005','wrong-receipt',?,?,?,?,?,?,
+        'organization',?,?,'7',1,'3','4','2026-10-05T00:00:00.000Z')`)
+      .bind(nativeOwnerClaimId,organizationRecordId,sourceId,sourceInstanceId,applicationId,historyEpochId,
+        organizationExternalId,organizationPublicId).run())
+      .rejects.toThrow("activation requires exact native owner claim");
+  });
+
+  it("does not accept refresh evidence whose owner claim is for a different acquired receipt", async () => {
+    const mismatchedClaimId = "20000000-0000-4000-8000-000000000006";
+    await db.batch([
+      db.prepare(`INSERT INTO project_alpha_acquired_native_owner_claims(
+        claim_id,receipt_id,native_owner_epoch_id,record_id,source_id,source_instance_id,application_id,
+        history_epoch_id,resource_type,external_id,project_alpha_public_id,expected_local_record_version,
+        actor_id,request_sha256) VALUES(?,'wrong-receipt','20000000-0000-4000-8000-000000000007',
+          ?,?,?,?,?,'organization',?,?,1,'owner',?)`)
+        .bind(mismatchedClaimId,organizationRecordId,sourceId,sourceInstanceId,applicationId,historyEpochId,
+          organizationExternalId,organizationPublicId,"d".repeat(64)),
+      db.prepare(`INSERT INTO project_alpha_existing_directory_binding_revision_refresh_receipts(
+        receipt_id,native_owner_claim_id,record_id,local_record_version,source_id,source_instance_id,
+        application_id,history_epoch_id,resource_type,external_id,project_alpha_public_id,
+        live_revision,authorization_generation)
+        VALUES('20000000-0000-4000-8000-000000000008',?,?,1,?,?,?,?,'organization',?,?,'8','5')`)
+        .bind(mismatchedClaimId,organizationRecordId,sourceId,sourceInstanceId,applicationId,historyEpochId,
+          organizationExternalId,organizationPublicId),
+    ]);
+    const context = { record_id: organizationRecordId, external_id: organizationExternalId, source_id: sourceId,
+      expected_source_instance_id: sourceInstanceId, application_id: applicationId,
+      expected_history_epoch_id: historyEpochId, resource_type: "organization" as const,
+      destination_base_url: origin, record_version: 2 };
+    await expect(acquiredDirectoryMappingUpdateEvidence(db, context, "8", "5", organizationPublicId))
+      .resolves.toBe(false);
   });
 
   it("accepts later acquired updates only from the exact acknowledged current-version PA tuple", async () => {
