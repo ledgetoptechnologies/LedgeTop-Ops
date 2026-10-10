@@ -62,6 +62,9 @@ jobs:
       - name: Verify local relationship recovery proposal against the canonical schema
         run: node --test scripts/staging-directory-relationship-recovery-proposal.test.mjs
 
+      - name: Verify bounded v184 relationship recovery authority and release configuration locally
+        run: node --test scripts/staging-relationship-generation-recovery-authority-v184.test.mjs scripts/staging-relationship-generation-recovery-authority-v184-window.test.mjs scripts/staging-relationship-generation-recovery-authority-v184-fullschema.test.mjs scripts/staging-relationship-recovery-release-config.test.mjs
+
   incoming-pickup:
     name: incoming-pickup-alpine
     runs-on: ubuntu-24.04

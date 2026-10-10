@@ -20,6 +20,17 @@ test("CI installs the pinned Wrangler dependency before migration-ledger contrac
   assert.ok(sourceJob.includes("scripts/staging-native-migration-profile.test.mjs"));
 });
 
+test("bounded relationship recovery release tooling remains a required local CI gate", () => {
+  const workflow = read(".github/workflows/ci.yml");
+  const sourceJob = workflow.slice(workflow.indexOf("  source-invariants:"), workflow.indexOf("  incoming-pickup:"));
+  for (const filename of [
+    "staging-relationship-generation-recovery-authority-v184.test.mjs",
+    "staging-relationship-generation-recovery-authority-v184-window.test.mjs",
+    "staging-relationship-generation-recovery-authority-v184-fullschema.test.mjs",
+    "staging-relationship-recovery-release-config.test.mjs",
+  ]) assert.ok(sourceJob.includes(`scripts/${filename}`), `${filename} must run in source invariants`);
+});
+
 function filesUnder(relativeDirectory, predicate = () => true) {
   return fs.readdirSync(path.join(root, relativeDirectory), { withFileTypes: true }).flatMap((entry) => {
     const relative = path.join(relativeDirectory, entry.name);
