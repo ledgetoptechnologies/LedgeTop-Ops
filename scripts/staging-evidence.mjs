@@ -17,7 +17,7 @@ const apps = ["delivery", "operations", "ops-sync"];
 const CURRENT_FRESH_BOOTSTRAP_SCHEMA_VERSION = 2;
 const CURRENT_FRESH_BOOTSTRAP_APPLICATIONS = Object.freeze({
   delivery: Object.freeze({ source: "client", databaseName: BOOTSTRAP_APPS.delivery.databaseName, configPath: "apps/client/wrangler.staging.bootstrap.json", manifestPath: "apps/client/.staging-bootstrap/manifest.json", seed: "0002_seed_initial_staff.sql", ledgerCount: BOOTSTRAP_APPS.delivery.migrationCount, finalMigration: "0228_operations_portal_native_content_start_audit.sql" }),
-  operations: Object.freeze({ source: "operations", databaseName: BOOTSTRAP_APPS.operations.databaseName, configPath: "apps/operations/wrangler.staging.bootstrap.json", manifestPath: "apps/operations/.staging-bootstrap/manifest.json", seed: "0002_seed_acl.sql", ledgerCount: BOOTSTRAP_APPS.operations.migrationCount, finalMigration: "0184_project_alpha_directory_relationship_generation_recovery.sql" }),
+  operations: Object.freeze({ source: "operations", databaseName: BOOTSTRAP_APPS.operations.databaseName, configPath: "apps/operations/wrangler.staging.bootstrap.json", manifestPath: "apps/operations/.staging-bootstrap/manifest.json", seed: "0002_seed_acl.sql", ledgerCount: BOOTSTRAP_APPS.operations.migrationCount, finalMigration: "0187_operations_portal_native_delivery_literal_prefix_guard.sql" }),
 });
 const DISPOSABLE_RUN_ID = /^[a-z0-9](?:[a-z0-9-]{1,18}[a-z0-9])$/;
 const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;

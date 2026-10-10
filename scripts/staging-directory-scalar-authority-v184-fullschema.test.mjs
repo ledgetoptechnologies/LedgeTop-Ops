@@ -178,7 +178,7 @@ async function lifecycle(t){
  t.after(async()=>{try{await runtime.dispose()}finally{await server.close()}});
  const db=await runtime.getD1Database("OPS_DB");
  const [writer,profileDispatcher,relationshipDispatcher]=await Promise.all([server.ssrLoadModule("/src/worker/native-directory-profile-writer.ts"),server.ssrLoadModule("/src/worker/project-alpha-directory-profile-outbox-dispatcher.ts"),server.ssrLoadModule("/src/worker/project-alpha-directory-relationship-outbox-dispatcher.ts")]);
- await migrate(db);assert.equal(migrationNames.length,184);assert.deepEqual((await all(db,"SELECT name FROM d1_migrations ORDER BY name")).map(row=>row.name),migrationNames);assert.deepEqual((await all(db,"PRAGMA foreign_key_check")),[]);
+ await migrate(db);assert.equal(migrationNames.length,187);assert.deepEqual((await all(db,"SELECT name FROM d1_migrations ORDER BY name")).map(row=>row.name),migrationNames);assert.deepEqual((await all(db,"PRAGMA foreign_key_check")),[]);
  const recoveryGrantIds=await seedRecoveryGrants(db);
  const recoveryProvision=compileRelationshipRecoveryAuthorityV184(await recoveryInput(db,"provision",recoveryGrantIds));
  await applyRelationshipRecoveryAuthorityV184(db,recoveryProvision,{target:STAGING_TARGET,root});

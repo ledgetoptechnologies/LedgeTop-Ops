@@ -228,11 +228,14 @@ function authorizePostAck(
 
 describe("Project v2 recovery authorization migration", () => {
   it("preserves recovery migration order and the full current empty migration chain", () => {
-    expect(migrationFiles.at(-5)).toBe(recoveryMigration);
-    expect(migrationFiles.at(-4)).toBe("0181_project_alpha_directory_create_generation_recovery.sql");
-    expect(migrationFiles.at(-3)).toBe("0182_project_alpha_directory_relationship_recovery_guard.sql");
-    expect(migrationFiles.at(-2)).toBe("0183_project_alpha_binding_standalone_relationship_rows.sql");
-    expect(migrationFiles.at(-1)).toBe("0184_project_alpha_directory_relationship_generation_recovery.sql");
+    expect(migrationFiles.at(-8)).toBe(recoveryMigration);
+    expect(migrationFiles.at(-7)).toBe("0181_project_alpha_directory_create_generation_recovery.sql");
+    expect(migrationFiles.at(-6)).toBe("0182_project_alpha_directory_relationship_recovery_guard.sql");
+    expect(migrationFiles.at(-5)).toBe("0183_project_alpha_binding_standalone_relationship_rows.sql");
+    expect(migrationFiles.at(-4)).toBe("0184_project_alpha_directory_relationship_generation_recovery.sql");
+    expect(migrationFiles.at(-3)).toBe("0185_project_alpha_directory_binding_generation_epochs.sql");
+    expect(migrationFiles.at(-2)).toBe("0186_project_alpha_directory_conflict_evidence_binding.sql");
+    expect(migrationFiles.at(-1)).toBe("0187_operations_portal_native_delivery_literal_prefix_guard.sql");
     const db = new DatabaseSync(":memory:");
     db.exec("PRAGMA foreign_keys=ON");
     for (const name of migrationFiles) migrate(db, name);

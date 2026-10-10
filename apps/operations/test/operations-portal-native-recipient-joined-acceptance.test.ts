@@ -212,8 +212,8 @@ for (const chain of ["historical", "current-reviewed"] as const) describe(
       await applyDraft(client, "client", "0224_operations_portal_native_recipient_authority.sql");
     } else {
       const operationsNames = await applyReviewedChain(operations, "operations");
-      expect(operationsNames).toHaveLength(184);
-      expect(operationsNames.at(-1)).toBe("0184_project_alpha_directory_relationship_generation_recovery.sql");
+      expect(operationsNames).toHaveLength(187);
+      expect(operationsNames.at(-1)).toBe("0187_operations_portal_native_delivery_literal_prefix_guard.sql");
       const clientNames = await applyReviewedChain(client, "client");
       expect(clientNames).toHaveLength(147);
       expect(clientNames.at(-1)).toBe("0228_operations_portal_native_content_start_audit.sql");

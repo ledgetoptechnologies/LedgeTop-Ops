@@ -836,7 +836,10 @@
         "0181_project_alpha_directory_create_generation_recovery.sql",
         "0182_project_alpha_directory_relationship_recovery_guard.sql",
         "0183_project_alpha_binding_standalone_relationship_rows.sql",
-        "0184_project_alpha_directory_relationship_generation_recovery.sql"
+        "0184_project_alpha_directory_relationship_generation_recovery.sql",
+        "0185_project_alpha_directory_binding_generation_epochs.sql",
+        "0186_project_alpha_directory_conflict_evidence_binding.sql",
+        "0187_operations_portal_native_delivery_literal_prefix_guard.sql"
       ],
       "appliedToStaging": false,
       "listEvidenceRef": "<EVIDENCE_REFERENCE>",
@@ -902,8 +905,8 @@
           "applyEvidenceRef": "<EVIDENCE_REFERENCE>",
           "readbackEvidenceRef": "<EVIDENCE_REFERENCE>",
           "transformedFiles": ["0002_seed_acl.sql"],
-          "ledgerCount": 184,
-          "finalMigration": "0184_project_alpha_directory_relationship_generation_recovery.sql",
+          "ledgerCount": 187,
+          "finalMigration": "0187_operations_portal_native_delivery_literal_prefix_guard.sql",
           "sourceSeedSha256": "<CANONICAL_SEED_SHA256>",
           "generatedSeedSha256": "<GENERATED_SEED_SHA256>",
           "databaseWasEmpty": false,
