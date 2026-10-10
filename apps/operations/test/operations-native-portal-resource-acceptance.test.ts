@@ -20,7 +20,8 @@ import { reserveOperationsPortalWorkspacePublicationInvocation } from
 import { publishOperationsPortalWorkspaceRpc, getOperationsPortalWorkspacePublicationStatusRpc } from
   "../../client/src/worker/operations-portal-workspace-publication-entrypoint";
 import { issueOperationsPortalNativeRecipientIntent, redeemOperationsPortalNativeRecipientIntent,
-  confirmOperationsPortalNativeRecipientIntent, readOperationsPortalNativeRecipientIntent } from
+  confirmOperationsPortalNativeRecipientIntent, revokeOperationsPortalNativeRecipient,
+  readOperationsPortalNativeRecipientIntent } from
   "../src/worker/operations-portal-native-recipient-authority";
 import { materializeOperationsPortalNativeRecipientAuthority,
   dispatchOperationsPortalNativeRecipientAuthority } from
@@ -318,11 +319,7 @@ describe("Ops Delivery to authenticated Client portal resource acceptance", { ti
     bucket = await runtime.getR2Bucket("DATA_BUCKET") as unknown as R2Bucket;
     // Keep the migrated schema aligned with the current native-directory
     // producers used to establish the pre-onboarding source of truth.
-    await applyCanonicalChain(operations, "operations", "0176_operations_directory_acquired_intent_authority.sql", true);
-    for (const name of ["0177_operations_directory_acquired_intent_update_authority.sql",
-      "0178_project_alpha_project_inbound_reconciliation.sql", "0179_project_alpha_acquired_native_identity_collision.sql",
-      "0180_project_alpha_project_v2_recovery_authorization.sql"])
-      await applyDraft(operations, "operations", name);
+    await applyCanonicalChain(operations, "operations", "0187_operations_portal_native_delivery_literal_prefix_guard.sql", true);
     await applyCanonicalChain(client, "client", "0223_operations_portal_workspace_publications.sql");
     for (const name of ["0224_operations_portal_native_recipient_authority.sql",
       "0225_operations_portal_workspace_publication_cancellations.sql",
@@ -586,6 +583,10 @@ describe("Ops Delivery to authenticated Client portal resource acceptance", { ti
       `${portalOrigin}/api/client/operations/data/files/${encodeURIComponent(siblingKey)}/download`), portalEnvironment);
     expect(sibling.status).toBe(404);
     expect(await sibling.text()).not.toContain("sibling secret");
+    const contentStartCount = await client.prepare(
+      "SELECT count(*) count FROM operations_portal_native_content_start_events")
+      .first<number>("count");
+    expect(contentStartCount).toBeGreaterThan(0);
 
     const revokeOperationId = id();
     await revokeOperationsPortalNativeDeliveryAuthority(operations, { operationId: revokeOperationId,
@@ -602,6 +603,34 @@ describe("Ops Delivery to authenticated Client portal resource acceptance", { ti
     const homeAfterDeliveryRevoke = await router.fetch(new Request(`${portalOrigin}/api/client/v2/operations/home`), portalEnvironment);
     expect(homeAfterDeliveryRevoke.status).toBe(200);
     expect(await homeAfterDeliveryRevoke.json()).toMatchObject({ homes: [{ services: [{ serviceId: "acceptance-drone" }] }] });
+
+    const recipientRevokeOperationId = id();
+    await revokeOperationsPortalNativeRecipient(operations, { operationId: recipientRevokeOperationId,
+      intentId: issued.review.intentId, expectedRevision: 4, owner: owner() });
+    await materializeOperationsPortalNativeRecipientAuthority(operations, recipientRevokeOperationId);
+    await expect(dispatchOperationsPortalNativeRecipientAuthority({ OPS_DB: operations,
+      OPERATIONS_PORTAL_NATIVE_RECIPIENT_AUTHORITY_DISPATCH_ENABLED: "true",
+      OPERATIONS_PORTAL_NATIVE_RECIPIENT_AUTHORITY: {
+        applyNativeAuthority: wire => applyOperationsPortalNativeRecipientAuthority(recipientEnvironment, wire),
+        getNativeAuthorityStatus: wire => readOperationsPortalNativeRecipientAuthorityStatus(recipientEnvironment, wire),
+      } }, recipientRevokeOperationId)).resolves.toMatchObject({ status: "acknowledged" });
+    await expect(readOperationsPortalNativeRecipientIntent(operations, issued.review.intentId))
+      .resolves.toMatchObject({ state: "revoked", revision: 6 });
+    expect((await router.fetch(new Request(
+      `${portalOrigin}/api/client/operations/data/folders/${encodeURIComponent(rootHandle)}`), portalEnvironment)).status)
+      .toBe(404);
+    expect((await router.fetch(new Request(downloadUrl), portalEnvironment)).status).toBe(404);
+    expect(await client.prepare("SELECT state FROM operations_portal_native_delivery_heads WHERE authority_id=?")
+      .bind(authorityId).first("state")).toBe("revoked");
+    expect(await client.prepare(`SELECT state FROM operations_portal_native_recipient_authority_heads
+      WHERE recipient_binding_id=?`).bind(home.recipientBindingId).first("state")).toBe("revoked");
+    expect(await operations.prepare(`SELECT count(*) count FROM operations_portal_native_authority_receipts
+      WHERE operation_id=?`).bind(recipientRevokeOperationId).first<number>("count")).toBe(1);
+    expect(await client.prepare("SELECT count(*) count FROM operations_portal_native_content_start_events")
+      .first<number>("count")).toBe(contentStartCount);
+    expect((await router.fetch(new Request(`${portalOrigin}/api/client/v2/operations/home`), portalEnvironment)).status)
+      .toBe(403);
+    await expectPublicShareUnchanged();
     expect(await client.prepare("SELECT * FROM shares WHERE id='acceptance-public-share'").first()).toEqual(publicShareBefore);
     expect((await client.prepare("PRAGMA foreign_key_check").all()).results).toEqual([]);
   });
