@@ -22,6 +22,7 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const EVIDENCE_SUBDIRECTORY = path.join(".backups", "staging-native-authority");
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const REVOKE_FILE = /^revoke(?:-recovery-[0-9TZ.-]+)?\.json$/;
+const SCALAR_EVIDENCE_FILES = new Set(["recovery-lineage.json", "scalar-prestate.json", "settlement.json"]);
 
 const all = async (db, sql, ...args) => (await db.prepare(sql).bind(...args).all()).results;
 const first = (db, sql, ...args) => db.prepare(sql).bind(...args).first();
@@ -91,7 +92,7 @@ function assertSafeEvidenceDirectory(root, evidenceDir, fsImpl) {
 
 export function writePrivateEvidence(root, evidenceDir, filename, value, dependencies = {}) {
   if (filename !== "provision.json" && filename !== "granted-readback.json"
-    && filename !== "revoked-readback.json" && !REVOKE_FILE.test(filename)) {
+    && filename !== "revoked-readback.json" && !SCALAR_EVIDENCE_FILES.has(filename) && !REVOKE_FILE.test(filename)) {
     throw new Error("invalid private evidence filename");
   }
   const fsImpl = dependencies.fs ?? fs;

@@ -82,6 +82,9 @@ jobs:
       - name: Verify private scalar authority window and uncertain-outcome reconciliation
         run: node --test scripts/staging-directory-scalar-authority-v184-window.test.mjs
 
+      - name: Verify read-only scalar evidence and drain-only acceptance preparation
+        run: node --test scripts/staging-directory-scalar-evidence-capture.test.mjs scripts/staging-directory-scalar-queue-preflight.test.mjs scripts/staging-directory-scalar-drain-acceptance-cli.test.mjs
+
       - name: Verify scalar authority provision and acknowledged cleanup against the full schema
         run: node --test scripts/staging-directory-scalar-authority-v184.test.mjs scripts/staging-directory-scalar-authority-v184-fullschema.test.mjs
 

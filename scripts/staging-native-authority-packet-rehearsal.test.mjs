@@ -233,6 +233,23 @@ test("private artifacts use closed paths, 0700 directories, 0600 files, and reje
   assert.throws(() => createPrivateEvidenceDirectory(root, IDS.approvalId, { fs: symlinkFs }), /non-symlink/);
 });
 
+test("scalar evidence uses only the exact window filenames and never overwrites existing artifacts", t => {
+  const root = tempRoot(t);
+  const { evidenceDir } = createPrivateEvidenceDirectory(root, IDS.approvalId);
+  for (const filename of ["recovery-lineage.json", "scalar-prestate.json", "settlement.json"]) {
+    const value = { synthetic: true, filename };
+    const saved = writePrivateEvidence(root, evidenceDir, filename, value);
+    assert.equal(path.dirname(saved), evidenceDir);
+    assert.deepEqual(JSON.parse(fs.readFileSync(saved, "utf8")), value);
+    assert.throws(() => writePrivateEvidence(root, evidenceDir, filename, { replaced: true }), /EEXIST/);
+    assert.deepEqual(JSON.parse(fs.readFileSync(saved, "utf8")), value);
+    if (process.platform !== "win32") assert.equal(fs.statSync(saved).mode & 0o777, 0o600);
+  }
+  for (const filename of ["prepared-plan.json", "arbitrary.json", "../settlement.json", "nested/settlement.json"]) {
+    assert.throws(() => writePrivateEvidence(root, evidenceDir, filename, {}), /filename/);
+  }
+});
+
 test("revoke evidence write failure cannot block paired revocation", async () => {
   const model = engine();
   const writes = [];
