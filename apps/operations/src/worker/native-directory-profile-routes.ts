@@ -334,7 +334,8 @@ async function updateDestinations(env: Env, kind: NativeDirectoryProfileKind, re
     if (!configured || JSON.stringify(configured) !== JSON.stringify(enrolled)) return null;
     const expectedAuthorizationGeneration = await liveGeneration(env, enrolled);
     if (!expectedAuthorizationGeneration) return null;
-    const durable = await readNativeDirectoryDurableRemoteHead(env.OPS_DB, kind, record, expectedLocalVersion, enrolled);
+    const durable = await readNativeDirectoryDurableRemoteHead(env.OPS_DB, kind, record, expectedLocalVersion, enrolled,
+      env.PROJECT_ALPHA_DIRECTORY_RELATIONSHIP_GENERATION_RECOVERY_ENABLED === "true");
     if (!durable) return null;
     const binding = await readConfiguredProjectAlphaDirectoryBindingStatus(env, enrolled.sourceId, kind,
       durable.externalCanonicalId, durable.projectAlphaPublicId);
@@ -377,13 +378,49 @@ async function enrollmentSourceIds(env: Env, record: string): Promise<string[] |
 }
 
 async function relationshipDeliverySettled(db: D1Database, record: string, relationshipVersion: number,
-  destinationCount: number): Promise<boolean> {
+  destinationCount: number, recoveryEnabled = false): Promise<boolean> {
   if (relationshipVersion === 1) return true;
+  const recovery = recoveryEnabled ? ` OR EXISTS(SELECT 1
+      FROM project_alpha_directory_validated_recovery_relationship_acknowledgements recovery
+      WHERE recovery.predecessor_command_id=normal.command_id AND recovery.client_record_id=normal.client_record_id
+        AND recovery.relationship_version=normal.relationship_version AND recovery.source_id=normal.source_id
+        AND recovery.source_instance_id=normal.source_instance_id AND recovery.application_id=normal.application_id
+        AND recovery.history_epoch_id=normal.history_epoch_id AND recovery.destination_origin=normal.destination_origin
+        AND recovery.identity_valid=1)` : "";
   const row = await db.withSession("first-primary").prepare(`SELECT count(*) total,
-      sum(CASE WHEN state='acknowledged' THEN 1 ELSE 0 END) acknowledged
-    FROM project_alpha_directory_relationship_outbox WHERE client_record_id=? AND relationship_version=?`)
+      sum(CASE WHEN normal.state='acknowledged'${recovery} THEN 1 ELSE 0 END) acknowledged
+    FROM project_alpha_directory_relationship_outbox normal WHERE normal.client_record_id=? AND normal.relationship_version=?`)
     .bind(record, relationshipVersion).first<{ total: number; acknowledged: number }>();
   return !!row && row.total === destinationCount && row.acknowledged === destinationCount;
+}
+
+async function relationshipRecoveryCapability(c: AppContext, record: string, relationshipVersion: number,
+  enrolledSourceIds: readonly string[], settled: boolean): Promise<{ available: true; status: "needs_review";
+    sourceIds: readonly string[] } | null> {
+  if (c.env.PROJECT_ALPHA_DIRECTORY_RELATIONSHIP_GENERATION_RECOVERY_ENABLED !== "true"
+    || !c.get("administrator") || settled || enrolledSourceIds.length === 0) return null;
+  const placeholders = enrolledSourceIds.map(() => "?").join(",");
+  const rows = (await c.env.OPS_DB.withSession("first-primary").prepare(`SELECT DISTINCT source_id
+    FROM project_alpha_directory_relationship_outbox
+    WHERE client_record_id=? AND relationship_version=? AND action='assign' AND state='terminal'
+      AND source_id IN (${placeholders}) AND json_extract(outcome_json,'$.httpStatus')=409
+    ORDER BY source_id`).bind(record, relationshipVersion, ...enrolledSourceIds)
+    .all<{ source_id: string }>()).results;
+  const sourceIds = rows.map(row => row.source_id).filter(sourceId => enrolledSourceIds.includes(sourceId));
+  return sourceIds.length > 0 && new Set(sourceIds).size === sourceIds.length
+    ? { available: true, status: "needs_review", sourceIds } : null;
+}
+
+function writeRelationship(c: AppContext, input: NativeDirectoryRelationshipWrite) {
+  return c.env.PROJECT_ALPHA_DIRECTORY_RELATIONSHIP_GENERATION_RECOVERY_ENABLED === "true"
+    ? writeNativeDirectoryRelationship(c.env.OPS_DB, input, true)
+    : writeNativeDirectoryRelationship(c.env.OPS_DB, input);
+}
+
+function writeProfile(c: AppContext, input: NativeDirectoryProfileWrite) {
+  return c.env.PROJECT_ALPHA_DIRECTORY_RELATIONSHIP_GENERATION_RECOVERY_ENABLED === "true"
+    ? writeNativeDirectoryProfile(c.env.OPS_DB, input, true)
+    : writeNativeDirectoryProfile(c.env.OPS_DB, input);
 }
 
 function sameSources(choice: NativeDirectoryOrganizationChoice, selectedSources: readonly string[]): boolean {
@@ -523,7 +560,7 @@ async function mutateRelationship(c: AppContext) {
   if (replay) {
     await requireRelationshipGrants(c, actor, [clientRecordId, ...(replay.previousOrganization ? [replay.previousOrganization.recordId] : []),
       ...(replay.organization ? [replay.organization.recordId] : [])]);
-    return publicRelationshipResult(c, await writeNativeDirectoryRelationship(c.env.OPS_DB, replay));
+    return publicRelationshipResult(c, await writeRelationship(c, replay));
   }
   const current = await currentClientRelationship(c.env.OPS_DB, clientRecordId);
   if (!current || current.relationship_version !== input.expectedRelationshipVersion)
@@ -539,7 +576,7 @@ async function mutateRelationship(c: AppContext) {
     expectedRecordVersion: input.organization.expectedVersion } : null;
   if (previousOrganization?.recordId === organization?.recordId)
     return c.json({ status: "invalid_request", reason: "no_change" }, 400);
-  return publicRelationshipResult(c, await writeNativeDirectoryRelationship(c.env.OPS_DB, {
+  return publicRelationshipResult(c, await writeRelationship(c, {
     mutationId: input.mutationId, clientRecordId, expectedRelationshipVersion: input.expectedRelationshipVersion,
     expectedClientRecordVersion: current.client_version, previousOrganization, organization,
     actor: { staffId: actor.staffId, accessSubject: actor.accessSubject, email: actor.loginEmail,
@@ -560,7 +597,7 @@ async function recoverRelationship(c: AppContext) {
   if (replay) {
     await requireRelationshipGrants(c, actor, [clientRecordId, ...(replay.previousOrganization ? [replay.previousOrganization.recordId] : []),
       ...(replay.organization ? [replay.organization.recordId] : [])]);
-    return publicRelationshipResult(c, await writeNativeDirectoryRelationship(c.env.OPS_DB, replay));
+    return publicRelationshipResult(c, await writeRelationship(c, replay));
   }
   const current = await currentClientRelationship(c.env.OPS_DB, clientRecordId);
   if (!current || current.relationship_version !== input.expectedRelationshipVersion)
@@ -579,7 +616,7 @@ async function recoverRelationship(c: AppContext) {
     expectedRecordVersion: input.organization.expectedVersion } : null;
   if (previousOrganization?.recordId === organization?.recordId)
     return c.json({ status: "invalid_request", reason: "no_change" }, 400);
-  return publicRelationshipResult(c, await writeNativeDirectoryRelationship(c.env.OPS_DB, {
+  return publicRelationshipResult(c, await writeRelationship(c, {
     mutationId: input.mutationId, clientRecordId, expectedRelationshipVersion: input.expectedRelationshipVersion,
     expectedClientRecordVersion: current.client_version, previousOrganization, organization,
     supersedeTerminalCommandIds: terminalCommandIds,
@@ -722,7 +759,7 @@ async function create(c: AppContext, kind: NativeDirectoryProfileKind) {
     ? { ...common, kind: "client", profile: normalizedProfile as NativeDirectoryClientCreateProfile,
         relationship: { organizationRecordId: relationship!.organizationRecordId, expectedRelationshipVersion: 0 } }
     : { ...common, kind: "organization", profile: normalizedProfile as NativeDirectoryOrganizationProfile };
-  return publicResult(c, await writeNativeDirectoryProfile(c.env.OPS_DB, write));
+  return publicResult(c, await writeProfile(c, write));
 }
 
 async function update(c: AppContext, kind: NativeDirectoryProfileKind) {
@@ -744,7 +781,8 @@ async function update(c: AppContext, kind: NativeDirectoryProfileKind) {
     return c.json({ status: "conflict", reason: "relationship_state_unavailable" }, 409);
   const enrolledSources = kind === "client" ? await enrollmentSourceIds(c.env, localRecordId) : null;
   if (kind === "client" && (!enrolledSources || !await relationshipDeliverySettled(c.env.OPS_DB, localRecordId,
-    currentRelationship!.relationship_version, enrolledSources.length)))
+    currentRelationship!.relationship_version, enrolledSources.length,
+    c.env.PROJECT_ALPHA_DIRECTORY_RELATIONSHIP_GENERATION_RECOVERY_ENABLED === "true")))
     return c.json({ status: "conflict", reason: "relationship_delivery_pending" }, 409);
   const destinations = await updateDestinations(c.env, kind, localRecordId, input.expectedLocalVersion);
   if (!destinations) return c.json({ status: "conflict", reason: "source_authority_unavailable" }, 409);
@@ -753,7 +791,7 @@ async function update(c: AppContext, kind: NativeDirectoryProfileKind) {
   const write: NativeDirectoryProfileWrite = kind === "client"
     ? { ...common, kind: "client", profile: normalizedProfile as NativeDirectoryClientUpdateProfile, relationship: relationship! }
     : { ...common, kind: "organization", profile: normalizedProfile as NativeDirectoryOrganizationProfile };
-  return publicResult(c, await writeNativeDirectoryProfile(c.env.OPS_DB, write));
+  return publicResult(c, await writeProfile(c, write));
 }
 
 /** Server-owned choices for a create intent.  These are advisory UI choices;
@@ -834,7 +872,10 @@ async function profile(c: AppContext, kind: NativeDirectoryProfileKind) {
   const selected = relationship?.organization_record_id ? representable.find(choice => choice.recordId === relationship.organization_record_id
     && choice.expectedVersion === relationship.organization_version) : null;
   const settled = relationship && sourceIds ? await relationshipDeliverySettled(c.env.OPS_DB, record,
-    relationship.relationship_version, sourceIds.length) : false;
+    relationship.relationship_version, sourceIds.length,
+    c.env.PROJECT_ALPHA_DIRECTORY_RELATIONSHIP_GENERATION_RECOVERY_ENABLED === "true") : false;
+  const recovery = relationship && sourceIds ? await relationshipRecoveryCapability(c, record,
+    relationship.relationship_version, sourceIds, settled) : null;
   const available = !!relationship && !!sourceIds && settled && (relationship.organization_record_id === null || !!selected);
   const relationshipAuthorized = !!relationship && await Promise.all(
     (["directory.profile.edit", "directory.identity.link"] as const)
@@ -845,6 +886,7 @@ async function profile(c: AppContext, kind: NativeDirectoryProfileKind) {
     relationship: relationship ? { version: relationship.relationship_version,
       organization: selected ? { recordId: selected.recordId, expectedVersion: selected.expectedVersion, name: selected.name } : null,
       organizations: choices.map(choice => ({ recordId: choice.recordId, expectedVersion: choice.expectedVersion, name: choice.name })),
+      ...(recovery ? { recovery } : {}),
       editing: available && relationshipAuthorized ? { available: true, reason: null }
         : { available: false, reason: !relationshipAuthorized ? "relationship_permission_required"
           : relationship && !settled ? "relationship_delivery_pending" : "relationship_state_unavailable" } } : null,

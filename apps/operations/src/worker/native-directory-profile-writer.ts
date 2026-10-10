@@ -461,6 +461,7 @@ async function updateRemoteState(db: DirectoryWriteD1,
   write: Pick<NormalizedWrite, "kind" | "recordId" | "expectedLocalVersion">,
   destinationValue: DestinationIdentity & Readonly<{ expectedAuthorizationGeneration?: string }>,
   allowAcquiredEnrollmentCoordinate = false,
+  relationshipRecoveryEnabled = false,
 ): Promise<RemoteState | null> {
   const activeRows = (await db.prepare(`SELECT external_id externalId,project_alpha_public_id projectAlphaPublicId,
       mapping_kind mappingKind,provenance_id provenanceId
@@ -559,7 +560,18 @@ async function updateRemoteState(db: DirectoryWriteD1,
     ) return { externalId: active.externalId, projectAlphaPublicId: row.projectAlphaPublicId,
       revision: row.revision, authorizationGeneration: row.authorizationGeneration, mappingKind: "legacy" };
   if (write.kind !== "client") return null;
-  const relationship = await db.prepare(`SELECT
+  const relationshipSource = relationshipRecoveryEnabled ? `SELECT ack.client_public_id projectAlphaPublicId,ack.revision,
+      json_extract(recovery.outcome_json,'$.response.result.authorizationGeneration') authorizationGeneration
+    FROM project_alpha_directory_validated_recovery_relationship_acknowledgements ack
+    JOIN project_alpha_directory_relationship_recovery_outbox recovery ON recovery.command_id=ack.command_id
+    JOIN project_alpha_directory_relationship_outbox predecessor ON predecessor.command_id=ack.predecessor_command_id
+    JOIN operations_directory_client_organization_history history ON history.client_record_id=ack.client_record_id
+      AND history.relationship_version=ack.relationship_version AND history.mutation_id=predecessor.mutation_id
+    WHERE ack.client_record_id=? AND history.client_record_version=? AND ack.source_id=?
+      AND ack.source_instance_id=? AND ack.application_id=? AND ack.history_epoch_id=?
+      AND ack.destination_origin=? AND ack.identity_valid=1
+    UNION ALL ` : "";
+  const relationship = await db.prepare(`SELECT * FROM (${relationshipSource}SELECT
       json_extract(outbox.outcome_json,'$.response.result.client.publicId') projectAlphaPublicId,
       json_extract(outbox.outcome_json,'$.response.result.client.revision') revision,
       json_extract(outbox.outcome_json,'$.response.result.authorizationGeneration') authorizationGeneration
@@ -574,10 +586,11 @@ async function updateRemoteState(db: DirectoryWriteD1,
       AND json_extract(outbox.outcome_json,'$.response.historyEpoch')=outbox.history_epoch_id
       AND json_extract(outbox.outcome_json,'$.response.result.action')=outbox.action
       AND json_extract(outbox.outcome_json,'$.response.result.client.publicId')=outbox.client_public_id
-      AND json_extract(outbox.outcome_json,'$.response.result.organizationPublicId') IS outbox.organization_public_id
-    ORDER BY length(json_extract(outbox.outcome_json,'$.response.result.client.revision')) DESC,
-      json_extract(outbox.outcome_json,'$.response.result.client.revision') DESC LIMIT 1`)
-    .bind(write.recordId,write.expectedLocalVersion,destinationValue.sourceId,destinationValue.sourceInstanceUUID,
+      AND json_extract(outbox.outcome_json,'$.response.result.organizationPublicId') IS outbox.organization_public_id)
+    ORDER BY length(revision) DESC,revision DESC LIMIT 1`)
+    .bind(...(relationshipRecoveryEnabled?[write.recordId,write.expectedLocalVersion,destinationValue.sourceId,
+      destinationValue.sourceInstanceUUID,destinationValue.applicationUUID,destinationValue.historyEpoch,destinationValue.origin]:[]),
+      write.recordId,write.expectedLocalVersion,destinationValue.sourceId,destinationValue.sourceInstanceUUID,
       destinationValue.applicationUUID,destinationValue.historyEpoch,destinationValue.origin).first<Record<string, unknown>>();
   return relationship && relationship.projectAlphaPublicId === active.projectAlphaPublicId
     && revision(relationship.revision) && revision(relationship.authorizationGeneration)
@@ -592,9 +605,10 @@ async function updateRemoteState(db: DirectoryWriteD1,
  * authenticated PA read before issuing an update. */
 export async function readNativeDirectoryDurableRemoteHead(db: DirectoryWriteD1,
   kind: NativeDirectoryProfileKind, recordId: string, expectedLocalVersion: number,
-  destinationValue: DestinationIdentity,
+  destinationValue: DestinationIdentity, relationshipRecoveryEnabled = false,
 ): Promise<NativeDirectoryDurableRemoteHead | null> {
-  const state = await updateRemoteState(db, { kind, recordId, expectedLocalVersion }, destinationValue, true);
+  const state = await updateRemoteState(db, { kind, recordId, expectedLocalVersion }, destinationValue, true,
+    relationshipRecoveryEnabled);
   return state ? { projectAlphaPublicId: state.projectAlphaPublicId,
     externalCanonicalId: state.externalId, revision: state.revision } : null;
 }
@@ -608,7 +622,8 @@ export async function readNativeDirectoryDurableRemoteHead(db: DirectoryWriteD1,
  */
 async function planNativeDirectoryProfileWriteInternal(db: DirectoryWriteD1, input: NativeDirectoryProfileWrite,
   allowEmptyDestinations = false, stagedOnboardingDecisionId: string | null = null,
-  stagedOrganization: StagedOrganization | null = null): Promise<NativeDirectoryProfileWritePlanningResult> {
+  stagedOrganization: StagedOrganization | null = null,
+  relationshipRecoveryEnabled = false): Promise<NativeDirectoryProfileWritePlanningResult> {
   const write = normalize(input, allowEmptyDestinations); if (!write) return { status: "rejected", reason: "invalid_write" };
   const auditJson = auditCommand(write);
   const replay = await db.prepare(`SELECT audit.command_json,audit.actor_id,audit.original_verified_access_subject,revision.record_id,
@@ -704,7 +719,7 @@ async function planNativeDirectoryProfileWriteInternal(db: DirectoryWriteD1, inp
       const snapshot = enrolled.find(item => destinationKey(item) === destinationKey(value));
       if (!snapshot || snapshot.historyEpoch !== value.historyEpoch || snapshot.origin !== value.origin)
         return { status: "blocked", reason: "enrollment_drift" };
-      const state = await updateRemoteState(db, write, value);
+      const state = await updateRemoteState(db, write, value, false, relationshipRecoveryEnabled);
       if (!state) return { status: "blocked", reason: "mapping_or_delivery_state" };
       // The immutable enrollment keeps the original Ops identity. Only a
       // currently active acquired mapping may resolve that snapshot to a
@@ -802,9 +817,10 @@ async function planNativeDirectoryProfileWriteInternal(db: DirectoryWriteD1, inp
 
 async function executeNativeDirectoryProfileWrite(db: DirectoryWriteD1, input: NativeDirectoryProfileWrite,
   allowEmptyDestinations = false, stagedOnboardingDecisionId: string | null = null,
-  stagedOrganization: StagedOrganization | null = null): Promise<NativeDirectoryProfileWriteOutcome> {
+  stagedOrganization: StagedOrganization | null = null,
+  relationshipRecoveryEnabled = false): Promise<NativeDirectoryProfileWriteOutcome> {
   const planned = await planNativeDirectoryProfileWriteInternal(db, input, allowEmptyDestinations,
-    stagedOnboardingDecisionId, stagedOrganization);
+    stagedOnboardingDecisionId, stagedOrganization, relationshipRecoveryEnabled);
   if (planned.status !== "planned") return planned;
   try { await db.batch([...planned.statements]); }
   catch { return { status: "blocked", reason: "authority_or_atomic_write" }; }
@@ -812,8 +828,9 @@ async function executeNativeDirectoryProfileWrite(db: DirectoryWriteD1, input: N
 }
 
 /** Normal profile routes always require PA destinations. */
-export async function writeNativeDirectoryProfile(db: D1Database, input: NativeDirectoryProfileWrite): Promise<NativeDirectoryProfileWriteOutcome> {
-  return executeNativeDirectoryProfileWrite(db, input);
+export async function writeNativeDirectoryProfile(db: D1Database, input: NativeDirectoryProfileWrite,
+  relationshipRecoveryEnabled = false): Promise<NativeDirectoryProfileWriteOutcome> {
+  return executeNativeDirectoryProfileWrite(db, input, false, null, null, relationshipRecoveryEnabled);
 }
 
 /**

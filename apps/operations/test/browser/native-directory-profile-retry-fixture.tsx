@@ -2,7 +2,8 @@ import { useState } from "react";
 import { createRoot } from "react-dom/client";
 import { NativeDirectoryProfileCreate, NativeDirectoryProfileEdit } from "../../src/client/NativeDirectoryProfileEditor";
 
-type Scenario = "create-lost-response" | "admission-400" | "write-400" | "record-switch" | "reload-failure" | "relationship-readonly";
+type Scenario = "create-lost-response" | "admission-400" | "write-400" | "record-switch" | "reload-failure" | "relationship-readonly"
+  | "recovery-review" | "recovery-absent" | "recovery-malformed";
 type Call = { path: string; method: string; mutationId: string | null; body: string | null };
 const fixtureWindow = window as Window & { nativeDirectoryScenario?: Scenario; nativeDirectoryCalls?: Call[] };
 const scenario = fixtureWindow.nativeDirectoryScenario ?? "create-lost-response", calls: Call[] = [];
@@ -13,6 +14,7 @@ Object.defineProperty(window.crypto, "randomUUID", { configurable: true,
 
 const sourceId = "project-alpha:primary";
 let createAdmissionCalls = 0, createWriteCalls = 0, profileWriteCalls = 0, recordOneReads = 0;
+let recoveryAuthorizationCalls = 0;
 
 function snapshot(recordId: string, version = 1) {
   return { recordId, kind: "organization", version,
@@ -30,6 +32,22 @@ function readonlyClientSnapshot() {
       organizations: [{ recordId: "organization-one", expectedVersion: 1, name: "Organization One" }],
       editing: { available: false, reason: "relationship_permission_required" } },
     editing: { available: true, reason: null } };
+}
+
+function recoveryClientSnapshot() {
+  const recovery = scenario === "recovery-review"
+    ? { available: true, status: "needs_review", sourceIds: ["project-alpha:primary", "project-alpha:secondary"] }
+    : scenario === "recovery-malformed"
+      ? { available: true, status: "needs_review", sourceIds: ["project-alpha:primary"], leaked: "not-allowed" }
+      : undefined;
+  return { recordId: "client-recovery", kind: "client", version: 3,
+    profile: { name: "Recovery Client", email: "", phone: "", clientType: "business",
+      addressLine1: "", addressLine2: "", city: "", state: "", postalCode: "", country: "" },
+    scopes: [{ businessAreaId: "area:one", divisionId: null }], linkage: "linked",
+    relationship: { version: 2, organization: { recordId: "organization-one", expectedVersion: 5, name: "Intended Organization" },
+      organizations: [{ recordId: "organization-one", expectedVersion: 5, name: "Intended Organization" }],
+      editing: { available: false, reason: "terminal_generation_conflict" }, ...(recovery ? { recovery } : {}) },
+    editing: { available: false, reason: "terminal_generation_conflict" } };
 }
 
 window.fetch = async (input, init) => {
@@ -56,6 +74,21 @@ window.fetch = async (input, init) => {
   }
   if (path.endsWith("/standalone-clients/client-one") && method === "GET")
     return Response.json(readonlyClientSnapshot());
+  if (path.endsWith("/standalone-clients/client-recovery") && method === "GET")
+    return Response.json(recoveryClientSnapshot());
+  if (path.endsWith("/standalone-clients/client-recovery/relationship-generation-recovery/reviews") && method === "POST") {
+    const parsed = JSON.parse(body!);
+    return Response.json({ status: "review", review: { reviewId: "22222222-2222-4222-8222-222222222222",
+      recordId: "client-recovery", sourceId: parsed.sourceId, predecessorCommandId: "33333333-3333-4333-8333-333333333333",
+      evidenceSha256: "a".repeat(64), clientRevision: "7", organizationRevision: "9", organizationRecordId: "organization-one",
+      remoteParentPublicId: null, observedAuthorizationGeneration: "12", expiresAt: "2026-10-10T01:00:00.000Z" } });
+  }
+  if (path.includes("/standalone-clients/client-recovery/relationship-generation-recovery/reviews/") && path.endsWith("/authorize") && method === "POST") {
+    recoveryAuthorizationCalls += 1;
+    if (recoveryAuthorizationCalls === 1) return new Response(JSON.stringify({ error: "Synthetic reservation response loss" }), { status: 503 });
+    const parsed = JSON.parse(body!);
+    return Response.json({ status: "prepared", successorCommandId: parsed.successorCommandId, generation: "12", replayed: true });
+  }
   const match = path.match(/\/organizations\/(record-(?:one|two))$/);
   if (match && method === "GET") {
     const recordId = match[1]!;
@@ -79,6 +112,8 @@ function Fixture() {
   const [recordId, setRecordId] = useState("record-one");
   if (["create-lost-response", "admission-400", "write-400"].includes(scenario)) return <NativeDirectoryProfileCreate />;
   if (scenario === "relationship-readonly") return <NativeDirectoryProfileEdit kind="client" recordId="client-one" />;
+  if (["recovery-review", "recovery-absent", "recovery-malformed"].includes(scenario))
+    return <NativeDirectoryProfileEdit kind="client" recordId="client-recovery" />;
   return <><button type="button" onClick={() => setRecordId("record-two")}>Switch to record two</button>
     <NativeDirectoryProfileEdit kind="organization" recordId={recordId} /></>;
 }

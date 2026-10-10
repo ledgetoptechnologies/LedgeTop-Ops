@@ -3,6 +3,7 @@ import { Card } from "@ltds/ui";
 import { api, ApiError } from "./api";
 import { executeCreateAttempt, executeProfileAttempt, executeRelationshipAttempt,
   type FrozenCreateAttempt, type FrozenDirectoryRequest } from "./NativeDirectoryProfileAttempts";
+import { DirectoryRelationshipRecoveryReview, usableRelationshipRecoveryCapability } from "./DirectoryRelationshipRecoveryReview";
 
 type Kind = "organization" | "client";
 type RouteKind = "organizations" | "standalone-clients";
@@ -16,7 +17,7 @@ type ProfileSnapshot = {
   recordId: string; kind: Kind; version: number; profile: ProfileForm; scopes: Scope[];
   linkage?: "standalone" | "linked" | "unavailable";
   relationship?: { version: number; organization: OrganizationChoice | null; organizations: OrganizationChoice[];
-    editing: { available: boolean; reason: string | null } } | null;
+    editing: { available: boolean; reason: string | null }; recovery?: unknown } | null;
   editing: { available: boolean; reason: string | null };
 };
 type OrganizationChoice = { recordId: string; expectedVersion: number; name: string };
@@ -249,7 +250,12 @@ function NativeDirectoryProfileEditBound({ kind, recordId }: { kind: Kind; recor
   if (loading) return <Card title="Client profile"><p role="status">Loading client profile…</p></Card>;
   if (error && !snapshot) return <Card title="Client profile"><p role="alert">{error}</p><button type="button" className="button-ghost" onClick={() => void load()}>Retry profile</button></Card>;
   if (!snapshot) return null;
-  if (!snapshot.editing.available) return <Card title="Client profile"><p>This client profile is read-only because its current relationship or destination evidence is unavailable.</p></Card>;
+  const recovery = kind === "client" && usableRelationshipRecoveryCapability(snapshot.relationship?.recovery)
+    && snapshot.relationship?.organization ? snapshot.relationship.recovery : null;
+  if (!snapshot.editing.available) return <Card title="Client profile"><p>This client profile is read-only because its current relationship or destination evidence is unavailable.</p>
+    {recovery && <DirectoryRelationshipRecoveryReview recordId={recordId}
+      intendedOrganizationName={snapshot.relationship!.organization!.name}
+      intendedOrganizationRecordId={snapshot.relationship!.organization!.recordId} capability={recovery} />}</Card>;
   return <Card title="Edit client profile"><p>Editing version {snapshot.version}. The current server-owned profile is loaded before any change is submitted.</p>
     <form onSubmit={event => void submit(event)} className="client-directory-profile-form"><ProfileFields kind={kind} value={fields} onChange={change} prefix={id} creating={false} disabled={Boolean(profileAttempt || relationshipAttempt)} />
       {error && <p role="alert">{error}</p>}{success && <p role="status">{success}</p>}
@@ -271,5 +277,8 @@ function NativeDirectoryProfileEditBound({ kind, recordId }: { kind: Kind; recor
       </button>
     </form>
       : <section><h3>Organization relationship</h3><p>The organization relationship is read-only because current relationship authority or destination evidence is unavailable.</p></section>)}
+    {recovery && <DirectoryRelationshipRecoveryReview recordId={recordId}
+      intendedOrganizationName={snapshot.relationship!.organization!.name}
+      intendedOrganizationRecordId={snapshot.relationship!.organization!.recordId} capability={recovery} />}
   </Card>;
 }

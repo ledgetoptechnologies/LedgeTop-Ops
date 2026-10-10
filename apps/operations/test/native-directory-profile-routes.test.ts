@@ -55,13 +55,18 @@ function database(options: { enrollment?: unknown; outboxState?: string; missing
   relationshipReplay?: { organization: { recordId: string; expectedRecordVersion: number } | null;
     supersedeTerminalCommandIds?: string[] };
   terminalPredecessor?: { command_id: string; state: string } | null;
-  relationshipPending?: boolean; missingGrantResource?: string } = {}) {
+  relationshipPending?: boolean; recoveryAcknowledged?: boolean; recoveryReviewSources?: string[];
+  missingGrantResource?: string } = {}) {
   let preparedAdmission: Row | null = null, preparedRelationship: Row | null = null;
+  const queries: string[] = [];
   const db = { prepare(sql: string) {
+    queries.push(sql);
     let values: unknown[] = [];
     const statement = {
       bind(...next: unknown[]) { values = next; return statement; },
       async all<T>() {
+        if (sql.includes("SELECT DISTINCT source_id") && sql.includes("action='assign'"))
+          return { results: (options.recoveryReviewSources ?? []).map(source_id => ({ source_id })) as T[] };
         if (sql.includes("current.profile_json currentProfileJson")) return { results: options.profile === "client" ? [{
           version: 4, currentProfileJson: JSON.stringify(client), creationProfileJson: JSON.stringify(client),
         }] as T[] : [] as T[] };
@@ -121,8 +126,9 @@ function database(options: { enrollment?: unknown; outboxState?: string; missing
           organization_record_id: options.linked ? acquiredOrganizationId : null, relationship_version: 2,
           client_version: 4, organization_version: options.linked ? 3 : null,
         } : { organization_record_id: options.linked ? acquiredOrganizationId : null, relationship_version: 2 };
-        else if (sql.includes("sum(CASE WHEN state='acknowledged'")) value = {
-          total: 1, acknowledged: options.relationshipPending ? 0 : 1,
+        else if (sql.includes("sum(CASE WHEN") && sql.includes("relationship_version")) value = {
+          total: 1, acknowledged: options.relationshipPending && !(options.recoveryAcknowledged
+            && sql.includes("project_alpha_directory_validated_recovery_relationship_acknowledgements")) ? 0 : 1,
         };
         else if (sql.includes("native_directory_assignments")) value = null;
         else if (sql.includes("native_directory_enrollments")) value = options.enrollment === undefined ? null
@@ -152,17 +158,21 @@ function database(options: { enrollment?: unknown; outboxState?: string; missing
     };
     return statement;
   }, async batch(statements: Array<{ run(): Promise<unknown> }>) { for (const statement of statements) await statement.run(); return []; },
-  withSession() { return db; }, preparedAdmission() { return preparedAdmission; }, preparedRelationship() { return preparedRelationship; } };
-  return db as unknown as D1Database & { preparedAdmission(): Row | null; preparedRelationship(): Row | null };
+  withSession() { return db; }, preparedAdmission() { return preparedAdmission; }, preparedRelationship() { return preparedRelationship; },
+  queries() { return queries; } };
+  return db as unknown as D1Database & { preparedAdmission(): Row | null; preparedRelationship(): Row | null; queries(): string[] };
 }
 
-function fixture(options: { enabled?: boolean; db?: D1Database; administrator?: boolean; createGenerationRecovery?: boolean } = {}) {
+function fixture(options: { enabled?: boolean; db?: D1Database; administrator?: boolean; createGenerationRecovery?: boolean;
+  relationshipGenerationRecovery?: boolean } = {}) {
   const app = new Hono<{ Bindings: Env; Variables: { principal: StaffPrincipal; administrator: boolean } }>();
   app.use("*", async (c, next) => { c.set("principal", principal); c.set("administrator", options.administrator ?? false); await next(); });
   registerNativeDirectoryProfileRoutes(app);
   const env = { NATIVE_DIRECTORY_PROFILE_WRITES_ENABLED: options.enabled === false ? "false" : "true",
     TEAM_DOMAIN: "https://team.example.test", OPERATIONS_AUD: "operations-audience-1234",
     ...(options.createGenerationRecovery ? { PROJECT_ALPHA_DIRECTORY_CREATE_GENERATION_RECOVERY_ENABLED: "true" } : {}),
+    ...(options.relationshipGenerationRecovery
+      ? { PROJECT_ALPHA_DIRECTORY_RELATIONSHIP_GENERATION_RECOVERY_ENABLED: "true" } : {}),
     PROJECT_ALPHA_API_V2_CONNECTIONS: "server-owned", OPS_DB: options.db ?? database() } as unknown as Env;
   const send = (path: string, body: unknown, method = "POST", key = ids.mutation) => app.request(`https://ops.example${path}`, {
     method, headers: { "Content-Type": "application/json", "Idempotency-Key": key },
@@ -310,6 +320,29 @@ describe("native Directory profile routes", () => {
         organizations: [{ recordId: acquiredOrganizationId, expectedVersion: 3, name: "Acquired Organization" }],
         editing: { available: true, reason: null } },
       editing: { available: true, reason: null } }));
+  });
+
+  it("exposes only a sanitized administrator recovery-review capability while enabled", async () => {
+    const enrollment = [{ sourceId, sourceInstanceUUID: ids.instance, applicationUUID: ids.application,
+      historyEpoch: ids.epoch, origin, externalCanonicalId: "acquired:client:one" }];
+    const path = `${NATIVE_DIRECTORY_PROFILE_ROUTE}/standalone-clients/acquired%3Aclient%3Aone`;
+    const disabled = await fixture({ administrator: true, db: database({ profile: "client", linked: true,
+      enrollment, relationshipPending: true, recoveryReviewSources: [sourceId] }) }).send(path, null, "GET");
+    const disabledBody = await disabled.json() as { relationship: Record<string, unknown> };
+    expect(disabledBody.relationship).not.toHaveProperty("recovery");
+
+    const ordinary = await fixture({ relationshipGenerationRecovery: true,
+      db: database({ profile: "client", linked: true, enrollment, relationshipPending: true,
+        recoveryReviewSources: [sourceId] }) }).send(path, null, "GET");
+    const ordinaryBody = await ordinary.json() as { relationship: Record<string, unknown> };
+    expect(ordinaryBody.relationship).not.toHaveProperty("recovery");
+
+    const administrator = await fixture({ administrator: true, relationshipGenerationRecovery: true,
+      db: database({ profile: "client", linked: true, enrollment, relationshipPending: true,
+        recoveryReviewSources: [sourceId, "project-alpha:not-enrolled"] }) }).send(path, null, "GET");
+    await expect(administrator.json()).resolves.toEqual(expect.objectContaining({ relationship: expect.objectContaining({
+      recovery: { available: true, status: "needs_review", sourceIds: [sourceId] },
+    }) }));
   });
 
   it("keeps profile editing available but marks relationship editing unavailable without client relationship grants", async () => {
@@ -568,9 +601,26 @@ describe("native Directory profile routes", () => {
       relationship: { organizationRecordId: acquiredOrganizationId, expectedRelationshipVersion: 2 },
       profile: value.profile,
     }));
-    const pending = await fixture({ db: database({ enrollment, linked: true, relationshipPending: true }) }).send(route, value, "PATCH");
+    const pendingDb = database({ enrollment, linked: true, relationshipPending: true });
+    const pending = await fixture({ db: pendingDb }).send(route, value, "PATCH");
     expect(pending.status).toBe(409);
     await expect(pending.json()).resolves.toEqual({ status: "conflict", reason: "relationship_delivery_pending" });
+    expect(pendingDb.queries().every(sql => !sql.includes("validated_recovery_relationship_acknowledgements"))).toBe(true);
+    mocks.writer.mockResolvedValueOnce({ status: "written", replayed: false, mutationId: ids.mutation,
+      recordId: ids.client, kind: "client", version: 2, commandIds: [ids.command] });
+    const recoveredDb = database({ enrollment, linked: true, relationshipPending: true, recoveryAcknowledged: true });
+    const recovered = await fixture({ relationshipGenerationRecovery: true, db: recoveredDb })
+      .send(route, value, "PATCH");
+    expect(recovered.status).toBe(202);
+    expect(mocks.writer).toHaveBeenLastCalledWith(expect.anything(), expect.objectContaining({
+      relationship: { organizationRecordId: acquiredOrganizationId, expectedRelationshipVersion: 2 },
+    }), true);
+    const settlement = recoveredDb.queries().find(sql => sql.includes("sum(CASE WHEN")) ?? "";
+    expect(settlement).toContain("recovery.predecessor_command_id=normal.command_id");
+    for (const column of ["client_record_id", "relationship_version", "source_id", "source_instance_id",
+      "application_id", "history_epoch_id", "destination_origin"])
+      expect(settlement).toContain(`recovery.${column}=normal.${column}`);
+    expect(settlement).toContain("recovery.identity_valid=1");
   });
 
   it("requires a live binding at the persisted generation and exact durable revision before update", async () => {

@@ -31,8 +31,8 @@ export const NATIVE_MIGRATION_PROFILES = Object.freeze({
     baseCount: 173,
     baseNamesSha256: "46d20b48362be8052f5b2fd35ec4ccefee2c267476a2a076af87a955c4cfca3a",
     baseContentsSha256: "cd35de12e87325fb6de854f4ecba47e5172e115f75830af9f4a908710d10a450",
-    remoteBaseline: "0182_project_alpha_directory_relationship_recovery_guard.sql",
-    finalMigration: "0183_project_alpha_binding_standalone_relationship_rows.sql",
+    remoteBaseline: "0183_project_alpha_binding_standalone_relationship_rows.sql",
+    finalMigration: "0184_project_alpha_directory_relationship_generation_recovery.sql",
     candidates: Object.freeze({
       "0174_project_alpha_directory_preserved_external_identity.sql": "9e794a73b75e025edc04967888631b9336931eb16113f42d855bea3fcb30a158",
       "0175_operations_directory_acquired_parent_enrollment_identity.sql": "de022736243342f203fcf9a1cb22993e49c50bbb18c7b3b2fc95d8fb3fa48ed0",
@@ -44,9 +44,10 @@ export const NATIVE_MIGRATION_PROFILES = Object.freeze({
       "0181_project_alpha_directory_create_generation_recovery.sql": "8b0be2c23cb8a45dd1dd46e78067e00bfd8d5dbf2cc2294219e85d1e26915bd6",
       "0182_project_alpha_directory_relationship_recovery_guard.sql": "1aeef8de3a6f3fb4f08a2b3e6c69d02c6fb0cb9d2c092b4cb507ed1759992b0f",
       "0183_project_alpha_binding_standalone_relationship_rows.sql": "70b155e7ff2bda667832f14a5bea72523dd3e0fb285ce91f48c3e4a44e05ccac",
+      "0184_project_alpha_directory_relationship_generation_recovery.sql": "e44dd91042d9f0b6602722ca85acf337759465a701f0c4ed1c3a5595efede0d1",
     }),
     expectedAppliedMigrations: Object.freeze([
-      "0183_project_alpha_binding_standalone_relationship_rows.sql",
+      "0184_project_alpha_directory_relationship_generation_recovery.sql",
     ]),
   }),
 });

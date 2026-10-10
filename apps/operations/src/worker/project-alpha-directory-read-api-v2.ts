@@ -125,21 +125,33 @@ function trustedHeaders(response: Response, json: boolean): boolean {
 async function boundedJson(response: Response): Promise<unknown> {
   const declared = response.headers.get("Content-Length");
   if (declared !== null && (!/^\d+$/.test(declared) || !Number.isSafeInteger(Number(declared)) || Number(declared) > RESPONSE_LIMIT)) {
-    await response.body?.cancel(); throw new Error("response_limit");
+    void response.body?.cancel().catch(() => undefined); throw new Error("response_limit");
   }
   const reader = response.body?.getReader();
   if (!reader) throw new Error("invalid_contract");
   const chunks: Uint8Array[] = []; let size = 0;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => reject(new Error("timeout")), REQUEST_TIMEOUT_MS);
+  });
   try {
     for (;;) {
       let part: ReadableStreamReadResult<Uint8Array>;
-      try { part = await reader.read(); } catch { throw new Error("transport"); }
+      try { part = await Promise.race([reader.read(), deadline]); } catch (error) {
+        if (error instanceof Error && error.message === "timeout") {
+          // Cancellation is deliberately best-effort. An uncooperative peer's
+          // cancel promise must not extend the response-body deadline.
+          void reader.cancel().catch(() => undefined);
+          throw error;
+        }
+        throw new Error("transport");
+      }
       if (part.done) break;
       size += part.value.byteLength;
-      if (size > RESPONSE_LIMIT) { await reader.cancel(); throw new Error("response_limit"); }
+      if (size > RESPONSE_LIMIT) { void reader.cancel().catch(() => undefined); throw new Error("response_limit"); }
       chunks.push(part.value);
     }
-  } finally { reader.releaseLock(); }
+  } finally { if (timer !== undefined) clearTimeout(timer); reader.releaseLock(); }
   const bytes = new Uint8Array(size); let offset = 0;
   for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
   try { return parseDuplicateFreeJson(new TextDecoder("utf-8", { fatal: true }).decode(bytes)); }
@@ -226,7 +238,7 @@ export async function readConfiguredProjectAlphaDirectoryProfile(
     try {
       const observed = profile(await boundedJson(response), kindValue, requestedPublicId, connection, requestId, sourceId);
       return observed ? { status: "observed", observation: observed } : { status: "uncertain", reason: "invalid_contract", httpStatus: 200 };
-    } catch (error) { return { status: "uncertain", reason: error instanceof Error && error.message === "response_limit" ? "response_limit" : error instanceof Error && error.message === "transport" ? "transport" : "invalid_contract", httpStatus: 200 }; }
+    } catch (error) { return { status: "uncertain", reason: error instanceof Error && error.message === "timeout" ? "timeout" : error instanceof Error && error.message === "response_limit" ? "response_limit" : error instanceof Error && error.message === "transport" ? "transport" : "invalid_contract", httpStatus: 200 }; }
   });
   return configured.status === "enabled" ? configured.value : configured.status === "disabled" ? configured : { status: "blocked", reason: "configuration" };
 }
@@ -251,7 +263,7 @@ export async function readConfiguredProjectAlphaDirectoryBindingStatus(
     try {
       const observed = binding(await boundedJson(response), kindValue, requestedExternalId, expectedPublicId, connection, requestId, sourceId);
       return observed ? { status: "observed", observation: observed } : { status: "uncertain", reason: "invalid_contract", httpStatus: 200 };
-    } catch (error) { return { status: "uncertain", reason: error instanceof Error && error.message === "response_limit" ? "response_limit" : error instanceof Error && error.message === "transport" ? "transport" : "invalid_contract", httpStatus: 200 }; }
+    } catch (error) { return { status: "uncertain", reason: error instanceof Error && error.message === "timeout" ? "timeout" : error instanceof Error && error.message === "response_limit" ? "response_limit" : error instanceof Error && error.message === "transport" ? "transport" : "invalid_contract", httpStatus: 200 }; }
   });
   return configured.status === "enabled" ? configured.value : configured.status === "disabled" ? configured : { status: "blocked", reason: "configuration" };
 }

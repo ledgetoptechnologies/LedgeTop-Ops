@@ -120,7 +120,7 @@ export function maximumDirectoryRevisionEvidence(values: readonly unknown[], zer
   return head;
 }
 async function activeHead(db: DirectoryWriteD1, recordId: string, kind: "client" | "organization", localVersion: number,
-  destination: Destination): Promise<Head | null> {
+  destination: Destination, recoveryEnabled = false): Promise<Head | null> {
   const record = await db.prepare("SELECT record_kind kind,current_version version FROM operations_directory_records WHERE record_id=?")
     .bind(recordId).first<{ kind: string; version: number }>();
   if (!record || record.kind !== kind || record.version !== localVersion) return null;
@@ -147,6 +147,16 @@ async function activeHead(db: DirectoryWriteD1, recordId: string, kind: "client"
         AND history.relationship_version=outbox.relationship_version
       WHERE outbox.client_record_id=? AND history.client_record_version=? AND outbox.source_id=? AND outbox.source_instance_id=?
         AND outbox.application_id=? AND outbox.history_epoch_id=? AND outbox.destination_origin=? AND outbox.state='acknowledged'`)
+      .bind(recordId,localVersion,destination.sourceId,destination.sourceInstanceUUID,destination.applicationUUID,
+        destination.historyEpoch,destination.origin).all()).results as { publicId: unknown; revision: unknown; assertedPublicId: unknown; coherent: unknown }[]);
+    if (recoveryEnabled) evidence.push(...(await db.prepare(`SELECT ack.client_public_id publicId,ack.revision,
+        ack.client_public_id assertedPublicId,ack.identity_valid coherent
+      FROM project_alpha_directory_validated_recovery_relationship_acknowledgements ack
+      JOIN project_alpha_directory_relationship_outbox predecessor ON predecessor.command_id=ack.predecessor_command_id
+      JOIN operations_directory_client_organization_history history ON history.client_record_id=ack.client_record_id
+        AND history.relationship_version=ack.relationship_version AND history.mutation_id=predecessor.mutation_id
+      WHERE ack.client_record_id=? AND history.client_record_version=? AND ack.source_id=? AND ack.source_instance_id=?
+        AND ack.application_id=? AND ack.history_epoch_id=? AND ack.destination_origin=? AND ack.identity_valid=1`)
       .bind(recordId,localVersion,destination.sourceId,destination.sourceInstanceUUID,destination.applicationUUID,
         destination.historyEpoch,destination.origin).all()).results as { publicId: unknown; revision: unknown; assertedPublicId: unknown; coherent: unknown }[]);
   }
@@ -268,7 +278,12 @@ async function activeHead(db: DirectoryWriteD1, recordId: string, kind: "client"
   const head=maximumDirectoryRevisionEvidence(evidence.map(value => value.revision));if(head===null)return null;
   return { externalId: mapping.externalId, publicId: mapping.publicId, revision: head };
 }
-async function currentGeneration(db: DirectoryWriteD1, destination: Destination): Promise<string | null> {
+async function currentGeneration(db: DirectoryWriteD1, destination: Destination, recoveryEnabled = false): Promise<string | null> {
+  const recovery = recoveryEnabled ? ` UNION ALL SELECT json_extract(outbox.outcome_json,'$.response.result.authorizationGeneration')
+        FROM project_alpha_directory_validated_recovery_relationship_acknowledgements ack
+        JOIN project_alpha_directory_relationship_recovery_outbox outbox ON outbox.command_id=ack.command_id
+        WHERE ack.source_id=? AND ack.source_instance_id=? AND ack.application_id=? AND ack.history_epoch_id=?
+          AND ack.destination_origin=? AND ack.identity_valid=1` : "";
   const rows = (await db.prepare(`SELECT generation FROM (
       SELECT json_extract(outcome_json,'$.response.result.authorizationGeneration') generation
       FROM project_alpha_directory_outbox WHERE source_id=? AND expected_source_instance_id=? AND application_id=?
@@ -282,11 +297,12 @@ async function currentGeneration(db: DirectoryWriteD1, destination: Destination)
           AND response.destination_origin=?
       UNION ALL SELECT json_extract(outcome_json,'$.response.result.authorizationGeneration')
         FROM project_alpha_directory_relationship_outbox WHERE source_id=? AND source_instance_id=? AND application_id=?
-          AND history_epoch_id=? AND destination_origin=? AND state='acknowledged'
+          AND history_epoch_id=? AND destination_origin=? AND state='acknowledged'${recovery}
     )`)
     .bind(destination.sourceId,destination.sourceInstanceUUID,destination.applicationUUID,destination.historyEpoch,destination.origin,
       destination.sourceId,destination.sourceInstanceUUID,destination.applicationUUID,destination.historyEpoch,destination.origin,
-      destination.sourceId,destination.sourceInstanceUUID,destination.applicationUUID,destination.historyEpoch,destination.origin)
+      destination.sourceId,destination.sourceInstanceUUID,destination.applicationUUID,destination.historyEpoch,destination.origin,
+      ...(recoveryEnabled?[destination.sourceId,destination.sourceInstanceUUID,destination.applicationUUID,destination.historyEpoch,destination.origin]:[]))
     .all<{ generation: string }>()).results;
   if (rows.some(row => row.generation === MAX_REVISION)) return null;
   return maximumDirectoryRevisionEvidence(rows.map(row=>row.generation),true);
@@ -299,7 +315,7 @@ async function loadEnrollment(db: DirectoryWriteD1, recordId: string): Promise<D
 /** Canonically changes an existing native client relationship and reserves the
  * exact PA work in the same D1 batch.  This function performs no HTTP work. */
 async function planNativeDirectoryRelationshipWriteInternal(db: DirectoryWriteD1,
-  input: NativeDirectoryRelationshipWrite): Promise<NativeDirectoryRelationshipWritePlanningResult> {
+  input: NativeDirectoryRelationshipWrite, recoveryEnabled = false): Promise<NativeDirectoryRelationshipWritePlanningResult> {
   const write = normalize(input); if (!write) return { status: "rejected", reason: "invalid_write" };
   const relationshipAction = action(write); if (!relationshipAction) return { status: "rejected", reason: "no_change" };
   const body = requestJson(write);
@@ -351,17 +367,20 @@ async function planNativeDirectoryRelationshipWriteInternal(db: DirectoryWriteD1
   const prepared: { destination: Destination; reservation: NativeDirectoryRelationshipReservation; clientPublicId: string;
     supersededTerminalCommandId: string | null }[] = [];
   for (const destination of enrolled) {
-    const client = await activeHead(db,write.clientRecordId,"client",write.expectedClientRecordVersion,destination);
+    const client = await activeHead(db,write.clientRecordId,"client",write.expectedClientRecordVersion,destination,recoveryEnabled);
     const endpointDestination = (value: NativeDirectoryRelationshipEndpoint) => endpointEnrollments.get(value.recordId)!
       .find(candidate => destinationKey(candidate) === destinationKey(destination))!;
     const previous = write.previousOrganization ? await activeHead(db,write.previousOrganization.recordId,"organization",
       write.previousOrganization.expectedRecordVersion,endpointDestination(write.previousOrganization)) : null;
     const organization = write.organization ? await activeHead(db,write.organization.recordId,"organization",
       write.organization.expectedRecordVersion,endpointDestination(write.organization)) : null;
-    const generation = await currentGeneration(db,destination);
+    const generation = await currentGeneration(db,destination,recoveryEnabled);
     if (!client || (write.previousOrganization && !previous) || (write.organization && !organization) || generation === null)
       return { status: "blocked", reason: "mapping_evidence" };
-    const predecessor = await db.prepare(`SELECT command_id commandId,state FROM project_alpha_directory_relationship_outbox
+    const predecessor = await db.prepare(`SELECT command.command_id commandId,
+      CASE WHEN command.state='terminal'${recoveryEnabled?` AND EXISTS(SELECT 1 FROM project_alpha_directory_validated_recovery_relationship_acknowledgements recovery
+        WHERE recovery.predecessor_command_id=command.command_id AND recovery.identity_valid=1)`:""} THEN 'acknowledged' ELSE command.state END state
+      FROM project_alpha_directory_relationship_outbox command
       WHERE client_record_id=? AND source_id=? AND source_instance_id=? AND application_id=? AND history_epoch_id=?
         AND relationship_version<? ORDER BY relationship_version DESC,command_id DESC LIMIT 1`)
       .bind(write.clientRecordId,destination.sourceId,destination.sourceInstanceUUID,destination.applicationUUID,
@@ -413,8 +432,8 @@ async function planNativeDirectoryRelationshipWriteInternal(db: DirectoryWriteD1
 }
 
 export async function writeNativeDirectoryRelationship(db: D1Database,
-  input: NativeDirectoryRelationshipWrite): Promise<NativeDirectoryRelationshipWriteOutcome> {
-  const planned = await planNativeDirectoryRelationshipWriteInternal(db, input);
+  input: NativeDirectoryRelationshipWrite, recoveryEnabled = false): Promise<NativeDirectoryRelationshipWriteOutcome> {
+  const planned = await planNativeDirectoryRelationshipWriteInternal(db, input, recoveryEnabled);
   if (planned.status !== "planned") return planned;
   try { await db.batch([...planned.statements]); }
   catch { return { status: "blocked", reason: "authority_or_race" }; }

@@ -45,11 +45,18 @@ async function command(queue: "profile" | "relationship", commandId: string, sou
       state === "leased" ? eligibleAt : null, `2026-09-22T00:00:${commandId.slice(-2)}.000Z`).run();
 }
 
+async function recoveryCommand(commandId: string, sourceId: string): Promise<void> {
+  await db.prepare(`INSERT INTO project_alpha_directory_relationship_recovery_outbox
+    (command_id,source_id,state,next_attempt_at,lease_expires_at,created_at) VALUES(?,?,'pending',0,NULL,?)`)
+    .bind(commandId, sourceId, `2026-09-22T00:00:${commandId.slice(-2)}.000Z`).run();
+}
+
 beforeAll(async () => {
   runtime = new Miniflare({ modules: true, compatibilityDate: "2026-07-22",
     script: "export default {fetch(){return new Response('ok')}}", d1Databases: ["OPS_DB"] });
   db = await runtime.getD1Database("OPS_DB") as D1Database;
-  for (const table of ["project_alpha_directory_outbox", "project_alpha_directory_relationship_outbox"])
+  for (const table of ["project_alpha_directory_outbox", "project_alpha_directory_relationship_outbox",
+    "project_alpha_directory_relationship_recovery_outbox"])
     await db.prepare(`CREATE TABLE ${table}(command_id TEXT PRIMARY KEY,source_id TEXT NOT NULL,state TEXT NOT NULL,
       next_attempt_at INTEGER NOT NULL,lease_expires_at INTEGER,created_at TEXT NOT NULL)`).run();
 });
@@ -58,6 +65,7 @@ beforeEach(async () => {
   await db.batch([
     db.prepare("DELETE FROM project_alpha_directory_outbox"),
     db.prepare("DELETE FROM project_alpha_directory_relationship_outbox"),
+    db.prepare("DELETE FROM project_alpha_directory_relationship_recovery_outbox"),
   ]);
   profileDispatch.mockReset().mockResolvedValue({ status: "acknowledged" });
   relationshipDispatch.mockReset().mockResolvedValue({ status: "acknowledged" });
@@ -144,6 +152,23 @@ describe("native Directory scheduled outbox drain", () => {
     expect(relationshipDispatch.mock.calls.map(call => call[2])).toEqual(["relationship-due"]);
     expect(materializeClients).toHaveBeenCalledTimes(1);
     expect(materializeClients.mock.calls[0]!.slice(1)).toEqual([[sourceId], 12, dueAt]);
+  });
+
+  it("does not query or dispatch recovery commands unless the recovery flag is exactly true", async () => {
+    const sourceId = "project-alpha:primary";
+    await recoveryCommand("recovery-due", sourceId);
+    await expect(drainNativeDirectoryOutboxes(environment([sourceId]), { now: () => dueAt, rotationTime: 0 }))
+      .resolves.toMatchObject({ attempted: 0 });
+    expect(relationshipDispatch).not.toHaveBeenCalled();
+
+    await expect(drainNativeDirectoryOutboxes({ ...environment([sourceId]),
+      PROJECT_ALPHA_DIRECTORY_RELATIONSHIP_GENERATION_RECOVERY_ENABLED: "true" },
+    { now: () => dueAt, rotationTime: 0 })).resolves.toMatchObject({ attempted: 1, acknowledged: 1 });
+    expect(relationshipDispatch).toHaveBeenCalledTimes(1);
+    expect(relationshipDispatch.mock.calls[0]![2]).toBe("recovery-due");
+    expect(relationshipDispatch.mock.calls[0]![4]).toBe("generation_recovery");
+    expect(relationshipDispatch.mock.calls[0]![0].PROJECT_ALPHA_DIRECTORY_RELATIONSHIP_GENERATION_RECOVERY_ENABLED)
+      .toBe("true");
   });
 
   it("rotates fairly across enabled sources and queues while enforcing the work bound", async () => {

@@ -173,6 +173,8 @@ import { provePrimaryBusinessReferences } from "./project-alpha-primary-referenc
 import { registerTeamAssignedWorkRoutes } from "./team-assigned-work";
 import { registerClientHubRoutes } from "./client-hub";
 import { NATIVE_DIRECTORY_PROFILE_ROUTE, nativeDirectoryProfileWritesEnabled, registerNativeDirectoryProfileRoutes } from "./native-directory-profile-routes";
+import { directoryRelationshipRecoveryEnabled, isDirectoryRelationshipRecoveryPath,
+  registerDirectoryRelationshipGenerationRecoveryRoutes } from "./project-alpha-directory-relationship-generation-recovery-routes";
 import { NATIVE_DIRECTORY_STAGING_EMPTY_ENROLLMENT_FIXTURE_ROUTE, nativeDirectoryStagingEmptyEnrollmentFixtureEnabled, registerNativeDirectoryStagingEmptyEnrollmentFixtureRoutes } from "./native-directory-staging-empty-enrollment-fixture-routes";
 import { registerBusinessPartyRoutes } from "./business-party-routes";
 import { registerNotificationCenterRoutes } from "./notification-center";
@@ -545,6 +547,8 @@ app.use(PROJECT_ALPHA_DIRECTORY_V2_BOOTSTRAP_ACCEPTANCE_ROUTE, async (c, next) =
 // authentication, matching other rollout-gated authenticated route families.
 app.use(`${NATIVE_DIRECTORY_PROFILE_ROUTE}/*`, async (c, next) => {
   if (!nativeDirectoryProfileWritesEnabled(c.env)) return c.json({ error: "Not found" }, 404);
+  if (isDirectoryRelationshipRecoveryPath(c.req.path) && !directoryRelationshipRecoveryEnabled(c.env))
+    return c.json({ error: "Not found" }, 404);
   await next();
 });
 app.use(NATIVE_DIRECTORY_STAGING_EMPTY_ENROLLMENT_FIXTURE_ROUTE, async (c, next) => {
@@ -1669,6 +1673,7 @@ registerClientRequestAttachmentRoutes(app);
 registerProjectAlphaDraftQuoteRoutes(app);
 registerTeamAssignedWorkRoutes(app);
 registerNativeDirectoryProfileRoutes(app);
+registerDirectoryRelationshipGenerationRecoveryRoutes(app);
 registerClientHubRoutes(app);
 registerNativeDirectoryStagingEmptyEnrollmentFixtureRoutes(app);
 registerBusinessPartyRoutes(app);

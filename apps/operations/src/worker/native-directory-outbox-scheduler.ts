@@ -18,10 +18,12 @@ type Environment = ProjectAlphaApiV2ConnectionEnvironment & Readonly<{
   OPS_DB: D1Database;
   NATIVE_DIRECTORY_OUTBOX_DRAIN_ENABLED?: string;
   PROJECT_ALPHA_DIRECTORY_CREATE_GENERATION_RECOVERY_ENABLED?: string;
+  PROJECT_ALPHA_DIRECTORY_RELATIONSHIP_GENERATION_RECOVERY_ENABLED?: string;
 }>;
 type QueueKind = "profile" | "relationship";
 type Candidate = Readonly<{
   queue_kind: QueueKind;
+  command_kind: "normal" | "generation_recovery";
   command_id: string;
   source_id: string;
   position: number;
@@ -82,32 +84,41 @@ function configuredSourceIds(raw: unknown): readonly string[] | null {
 }
 
 async function eligibleCandidates(db: D1Database, sourceIds: readonly string[], now: number,
-  maxCommands: number): Promise<readonly Candidate[]> {
+  maxCommands: number, relationshipRecoveryEnabled: boolean): Promise<readonly Candidate[]> {
   if (sourceIds.length === 0) return [];
   const placeholders = sourceIds.map(() => "?").join(",");
-  const maximumCandidates = MAX_SOURCES * 2 * maxCommands;
-  const query = `WITH eligible(queue_kind,command_id,source_id,eligible_at,created_at) AS (
-      SELECT 'profile',command_id,source_id,
+  const maximumCandidates = MAX_SOURCES * 3 * maxCommands;
+  const recoveryArm = relationshipRecoveryEnabled ? `
+      UNION ALL
+      SELECT 'relationship','generation_recovery',command_id,source_id,
+        CASE state WHEN 'leased' THEN lease_expires_at ELSE next_attempt_at END,created_at
+      FROM project_alpha_directory_relationship_recovery_outbox
+      WHERE (state='pending' AND next_attempt_at<=?) OR (state='leased' AND lease_expires_at<=?)` : "";
+  const query = `WITH eligible(queue_kind,command_kind,command_id,source_id,eligible_at,created_at) AS (
+      SELECT 'profile','normal',command_id,source_id,
         CASE state WHEN 'leased' THEN lease_expires_at ELSE next_attempt_at END,created_at
       FROM project_alpha_directory_outbox
       WHERE (state='pending' AND next_attempt_at<=?) OR (state='leased' AND lease_expires_at<=?)
       UNION ALL
-      SELECT 'relationship',command_id,source_id,
+      SELECT 'relationship','normal',command_id,source_id,
         CASE state WHEN 'leased' THEN lease_expires_at ELSE next_attempt_at END,created_at
       FROM project_alpha_directory_relationship_outbox
-      WHERE (state='pending' AND next_attempt_at<=?) OR (state='leased' AND lease_expires_at<=?)
+      WHERE (state='pending' AND next_attempt_at<=?) OR (state='leased' AND lease_expires_at<=?)${recoveryArm}
     ), ranked AS (
-      SELECT queue_kind,command_id,source_id,
-        row_number() OVER(PARTITION BY source_id,queue_kind ORDER BY eligible_at,created_at,command_id) position
+      SELECT queue_kind,command_kind,command_id,source_id,
+        row_number() OVER(PARTITION BY source_id,queue_kind,command_kind ORDER BY eligible_at,created_at,command_id) position
       FROM eligible WHERE source_id IN (${placeholders})
     )
-    SELECT queue_kind,command_id,source_id,position FROM ranked
+    SELECT queue_kind,command_kind,command_id,source_id,position FROM ranked
     WHERE position<=? ORDER BY position,source_id,queue_kind LIMIT ?`;
   const session = db.withSession("first-primary");
+  const timing = relationshipRecoveryEnabled ? [now, now, now, now, now, now] : [now, now, now, now];
   const rows = (await session.prepare(query)
-    .bind(now, now, now, now, ...sourceIds, maxCommands, maximumCandidates)
+    .bind(...timing, ...sourceIds, maxCommands, maximumCandidates)
     .all<Candidate>()).results;
   return rows.filter(row => (row.queue_kind === "profile" || row.queue_kind === "relationship")
+    && (row.command_kind === "normal" || row.command_kind === "generation_recovery")
+    && (row.queue_kind === "relationship" || row.command_kind === "normal")
     && typeof row.command_id === "string" && row.command_id.length > 0
     && sourceIds.includes(row.source_id) && Number.isSafeInteger(row.position)
     && row.position >= 1 && row.position <= maxCommands).slice(0, maximumCandidates);
@@ -118,21 +129,24 @@ function fairOrder(candidates: readonly Candidate[], sourceIds: readonly string[
   if (candidates.length === 0 || sourceIds.length === 0) return [];
   const groups = new Map<string, Map<number, Candidate>>();
   for (const candidate of candidates) {
-    const key = `${candidate.source_id}\u0000${candidate.queue_kind}`;
+    const key = `${candidate.source_id}\u0000${candidate.queue_kind}\u0000${candidate.command_kind}`;
     const group = groups.get(key) ?? new Map<number, Candidate>();
     group.set(candidate.position, candidate);
     groups.set(key, group);
   }
   const tick = Math.max(0, Math.floor(rotationTime / ROTATION_INTERVAL_MS));
   const sourceStart = tick % sourceIds.length;
-  const queues: readonly QueueKind[] = tick % 2 === 0
-    ? ["profile", "relationship"] : ["relationship", "profile"];
+  const queues: readonly Readonly<{ queue: QueueKind; command: Candidate["command_kind"] }>[] = tick % 2 === 0
+    ? [{ queue: "profile", command: "normal" }, { queue: "relationship", command: "normal" },
+      { queue: "relationship", command: "generation_recovery" }]
+    : [{ queue: "relationship", command: "normal" }, { queue: "relationship", command: "generation_recovery" },
+      { queue: "profile", command: "normal" }];
   const ordered: Candidate[] = [];
   for (let position = 1; position <= maxCommands && ordered.length < maxCommands; position += 1) {
     for (let offset = 0; offset < sourceIds.length && ordered.length < maxCommands; offset += 1) {
       const sourceId = sourceIds[(sourceStart + offset) % sourceIds.length]!;
-      for (const queue of queues) {
-        const candidate = groups.get(`${sourceId}\u0000${queue}`)?.get(position);
+      for (const lane of queues) {
+        const candidate = groups.get(`${sourceId}\u0000${lane.queue}\u0000${lane.command}`)?.get(position);
         if (candidate) ordered.push(candidate);
         if (ordered.length >= maxCommands) break;
       }
@@ -170,6 +184,7 @@ export async function drainNativeDirectoryOutboxes(env: Environment,
   // the same configuration that was used to choose eligible sources.
   const connections = env.PROJECT_ALPHA_API_V2_CONNECTIONS;
   const createGenerationRecovery = env.PROJECT_ALPHA_DIRECTORY_CREATE_GENERATION_RECOVERY_ENABLED;
+  const relationshipGenerationRecovery = env.PROJECT_ALPHA_DIRECTORY_RELATIONSHIP_GENERATION_RECOVERY_ENABLED;
   const sourceIds = configuredSourceIds(connections);
   if (!sourceIds) return empty("unavailable");
   const maxCommands = boundedInteger(options.maxCommands, MAX_COMMANDS, MAX_COMMANDS);
@@ -182,11 +197,13 @@ export async function drainNativeDirectoryOutboxes(env: Environment,
   // pinned parent intent is acknowledged. Materialization is local, bounded,
   // and guarded transactionally by the existing 0132 relationship triggers.
   await materializeResolvedProjectAlphaDirectoryClientIntents(env.OPS_DB, sourceIds, maxCommands, startedAt);
-  const candidates = await eligibleCandidates(env.OPS_DB, sourceIds, startedAt, maxCommands);
+  const candidates = await eligibleCandidates(env.OPS_DB, sourceIds, startedAt, maxCommands,
+    relationshipGenerationRecovery === "true");
   const selected = fairOrder(candidates, sourceIds, rotationTime, maxCommands);
   const send = deadlineFetch(options.send ?? fetch, deadline, now);
   const dispatchEnvironment = { OPS_DB: env.OPS_DB, PROJECT_ALPHA_API_V2_CONNECTIONS: connections,
-    PROJECT_ALPHA_DIRECTORY_CREATE_GENERATION_RECOVERY_ENABLED: createGenerationRecovery };
+    PROJECT_ALPHA_DIRECTORY_CREATE_GENERATION_RECOVERY_ENABLED: createGenerationRecovery,
+    PROJECT_ALPHA_DIRECTORY_RELATIONSHIP_GENERATION_RECOVERY_ENABLED: relationshipGenerationRecovery };
   const result = { ...empty("drained") };
   for (const candidate of selected) {
     if (result.attempted >= maxCommands || now() >= deadline) break;
@@ -194,7 +211,8 @@ export async function drainNativeDirectoryOutboxes(env: Environment,
     try {
       const outcome = candidate.queue_kind === "profile"
         ? await dispatchProjectAlphaDirectoryProfileOutboxCommand(dispatchEnvironment, candidate.source_id, candidate.command_id, send)
-        : await dispatchProjectAlphaDirectoryRelationshipCommand(dispatchEnvironment, candidate.source_id, candidate.command_id, send);
+        : await dispatchProjectAlphaDirectoryRelationshipCommand(dispatchEnvironment, candidate.source_id, candidate.command_id, send,
+          candidate.command_kind);
       if (outcome.status === "acknowledged") result.acknowledged += 1;
       else if (outcome.status === "conflict") result.conflicted += 1;
       else if (outcome.status === "uncertain") result.uncertain += 1;
