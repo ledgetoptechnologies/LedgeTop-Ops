@@ -5,15 +5,16 @@ This is the remaining staging acceptance sequence, not a release approval or a c
 ## Current gate
 
 - PA staging has the reviewed structured relationship-conflict prerequisite. Ops relationship recovery is still default-off and undeployed.
-- Ops staging readback on this continuation has 183 migrations and no pending/leased Directory, relationship or Project commands. The retained failed relationship command is terminal, not recovered.
-- Local recovery and bounded-authority tests have passed. Full exact-revision CI, migration 0184, a live recovery acknowledgement and downstream portal acceptance remain required.
+- Ops staging migration 0184 was applied after verifying the exact staging target, single pending migration and private backup. Post-apply readback has 184 migrations, zero recovery review/authorization/command rows and no pending/leased Directory, relationship or Project commands. The retained failed relationship command is terminal, not recovered.
+- The active staging Worker remains `dbe5d1b6-05bd-4aa2-b5bb-273493be57da`, with recovery and Directory drain disabled. Applying the migration did not deploy a Worker or issue authority/client grants.
+- Local recovery and bounded-authority tests have passed. Full exact-revision CI, a preserved-configuration Worker release, a live recovery acknowledgement and downstream portal acceptance remain required.
 
 ### Additional local evidence (not live acceptance)
 
 - The closed recovery-lineage validator passed against actual local D1 trigger state after intact migrations 0001–0184 and the reviewed provision/revoke batches: one full-schema test passed, with no skips. This proves the cleanup evidence format, not a live recovery acknowledgement.
 - The focused scalar-settlement, recovery-lineage and release-configuration suite passed 35/35 tests. The new Project authority compiler is under review; its emitted provision/revoke statements and trusted apply path are not yet proven usable. In particular, paired cleanup must use the actual persisted receipt timestamp, not an assumed execution time.
 - The revised organization scalar fixture passed its local full-schema run (one test, no skips) using the actual Directory writer and actual dispatcher with mocked PA HTTP transport. It does not prove the retained client's acquired-ID/linked-parent path, live PA HTTP behavior or complete independently recaptured cleanup protection. Those remain required before relying on this fixture for live client acceptance.
-- Release configuration preparation is held at the Windows script-policy checkpoint. No generated live configuration values were written and no migration or Worker deployment was performed by these checks.
+- Release configuration preparation is held at the Windows script-policy checkpoint. No generated live configuration values were written and no Worker deployment was performed. The separately validated migration-only operation applied only 0184; no recovery action, client activation or public-link change accompanied it.
 
 ## 1. Recover the retained synthetic relationship
 
