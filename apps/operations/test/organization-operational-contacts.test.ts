@@ -3,7 +3,8 @@ import { Miniflare } from "miniflare";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { splitD1MigrationStatements } from "../../client/test/helpers/d1-migrations";
 import { registerVisibleTestSource } from "./helpers/project-alpha-connectors";
-import { readOrganizationOperationalContacts, saveOrganizationOperationalContacts } from "../src/worker/organization-operational-contacts";
+import { organizationOperationalContactsAvailable, readOrganizationOperationalContacts,
+  saveOrganizationOperationalContacts } from "../src/worker/organization-operational-contacts";
 import type { ClientHubCollectionContext } from "../src/worker/client-hub-collections";
 import type { Env, StaffPrincipal } from "../src/worker/types";
 
@@ -102,6 +103,17 @@ function readRaceDatabase(action: () => Promise<void>): D1Database {
   return proxy;
 }
 
+function recordingDatabase(queries: string[]): D1Database {
+  let proxy: D1Database;
+  proxy = new Proxy(database, { get(target, property) {
+    if (property === "withSession") return () => proxy;
+    if (property === "prepare") return (sql: string) => { queries.push(sql); return target.prepare(sql); };
+    const value = Reflect.get(target, property, target);
+    return typeof value === "function" ? value.bind(target) : value;
+  } });
+  return proxy;
+}
+
 beforeAll(async () => {
   runtime = new Miniflare({ modules: true, compatibilityDate: "2026-07-22",
     script: "export default {fetch(){return new Response('organization contacts')}}", d1Databases: ["OPS_DB"] });
@@ -133,6 +145,43 @@ describe("source-qualified organization operational contacts", () => {
       { role_id: "role-owner", permission_key: "organization.contacts.manage" },
     ]);
     expect((await database.prepare("PRAGMA foreign_key_check").all()).results).toEqual([]);
+  }, TEST_TIMEOUT_MS);
+
+  it("advertises only an exact active legacy projection with a response-compatible root ID", async () => {
+    const supported = await fixture();
+    expect(await organizationOperationalContactsAvailable(environment, supported.context)).toBe(true);
+    expect(await organizationOperationalContactsAvailable(environment, { ...supported.context,
+      root: { ...supported.context.root, public_id: `${supported.organizationId}-canonical` } })).toBe(false);
+    expect(await organizationOperationalContactsAvailable(environment, { ...supported.context,
+      root: { ...supported.context.root, source_id: secondary } })).toBe(false);
+    expect(await organizationOperationalContactsAvailable(environment, { ...supported.context,
+      access: { ...supported.context.access, directory: false } })).toBe(false);
+    await database.prepare("UPDATE pa_organizations SET active=0 WHERE id=? AND projection_source_id=?")
+      .bind(supported.organizationId, source).run();
+    expect(await organizationOperationalContactsAvailable(environment, supported.context)).toBe(false);
+    const neverReservedId = `organization-contacts-never-reserved-${sequence}`;
+    expect(await organizationOperationalContactsAvailable(environment, { ...supported.context, paRootId: neverReservedId,
+      root: { ...supported.context.root, public_id: neverReservedId, pa_internal_id: neverReservedId } })).toBe(false);
+  }, TEST_TIMEOUT_MS);
+
+  it("rejects a native organization without legacy contact backing before contact reads or writes", async () => {
+    const item = await fixture(), queries: string[] = [];
+    const nativeContext: ClientHubCollectionContext = { ...item.context, paRootId: item.organizationId,
+      root: { ...item.context.root, public_id: `native-${item.organizationId}`, pa_internal_id: item.organizationId } };
+    const tracedEnvironment = { OPS_DB: recordingDatabase(queries) } as Pick<Env, "OPS_DB">;
+    const counts = async () => Promise.all(["organization_operational_contact_sets",
+      "organization_operational_contact_assignments", "organization_operational_contact_revisions",
+      "organization_operational_events", "organization_operational_mutations", "organization_operational_write_fences"]
+      .map(table => database.prepare(`SELECT count(*) count FROM ${table}`).first<number>("count")));
+    const before = await counts();
+    await expect(readOrganizationOperationalContacts(tracedEnvironment, owner, nativeContext))
+      .rejects.toMatchObject({ status: 404 });
+    await expect(saveOrganizationOperationalContacts(tracedEnvironment, owner, nativeContext, {
+      expectedContextVersion: nativeContext.contextVersion, expectedVersion: 0, idempotencyKey: operationKey(),
+      assignments: [{ contactId: item.primaryId, role: "primary_operational" }],
+    })).rejects.toMatchObject({ status: 404 });
+    expect(queries.some(sql => sql.includes("pa_clients contact"))).toBe(false);
+    expect(await counts()).toEqual(before);
   }, TEST_TIMEOUT_MS);
 
   it("saves one primary and multiple delivery contacts without authority side effects", async () => {

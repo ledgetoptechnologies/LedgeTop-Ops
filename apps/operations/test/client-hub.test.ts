@@ -143,6 +143,8 @@ async function fixture() {
   `);
   await applyBusinessPartySchema(ops);
   await applySql(ops, `
+    INSERT INTO pa_projection_record_ids(projection_source_id,record_kind,external_id,local_id)
+      VALUES('project-alpha:primary','organization','pa-org','pa-org');
     INSERT INTO client_hub_roots(source_id,kind,public_id,display_name,sort_name,status,portal_status,workspace_id,legacy_account_id,account_count,project_count,request_count,contact_count)
       VALUES('project-alpha:primary','organization','pa-org','Organization One','organization one','active','active','workspace-org','account-org',1,0,0,2),
         ('project-alpha:primary','standalone_client','pa-standalone','Standalone One','standalone one','active','not_provisioned',NULL,'account-standalone',1,1,1,1);
@@ -304,8 +306,7 @@ describe("Client Hub bounded detail collections", () => {
     await ops.batch([
       ops.prepare("INSERT INTO pa_organizations(id,name,active,payload_json,projection_source_id) VALUES('party-secondary-org','Second source customer',1,'{}','project-alpha:secondary')"),
       ops.prepare(`INSERT INTO pa_projection_record_ids(projection_source_id,record_kind,external_id,local_id)
-        VALUES('project-alpha:primary','organization','pa-org','pa-org'),
-          ('project-alpha:secondary','organization','pa-org','party-secondary-org')`),
+        VALUES('project-alpha:secondary','organization','pa-org','party-secondary-org')`),
     ]);
     const link = () => ops.batch([
       ops.prepare(`INSERT INTO business_parties(id,kind,display_name,sort_name,created_by,updated_by)
@@ -804,6 +805,12 @@ describe("Client Hub bounded detail collections", () => {
       DELETE FROM pa_clients;
       DELETE FROM pa_organizations;`);
     const path = "http://local/api/client-hub/sources/project-alpha%3Aprimary/business/organizations/ops-org";
+    const detailResponse = await app.request(path, {}, env);
+    expect(detailResponse.status, await detailResponse.clone().text()).toBe(200);
+    await expect(detailResponse.json()).resolves.toMatchObject({
+      client: { public_id: "ops-org", root_namespace: "business", kind: "organization" },
+      organizationOperationalContactsAvailable: false,
+    });
     const response = await app.request(path + "/collections/businessContacts", {}, env);
     expect(response.status, await response.clone().text()).toBe(200);
     const collection = await response.json() as { items: Array<Record<string, unknown>>; page: Page };

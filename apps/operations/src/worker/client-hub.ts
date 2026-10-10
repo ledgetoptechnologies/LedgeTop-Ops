@@ -27,6 +27,7 @@ import { requireProjectAlphaReadOrNativeMappingVisibility, requireProjectAlphaRe
 import { readBusinessPartyForRoot } from "./business-parties";
 import { registerProjectOperationalRoutes } from "./project-operational-routes";
 import { registerOrganizationOperationalContactRoutes } from "./organization-operational-contact-routes";
+import { organizationOperationalContactsAvailable } from "./organization-operational-contacts";
 import { readClientHubProjectManagementAction } from "./project-alpha-project-management";
 import { exactBusinessProjectPublicId, listProjectAlphaContactRoles, projectAlphaContactRolesEnabled } from "./project-alpha-contact-roles";
 import { nativeDirectoryLinkedClientEditorRecords, nativeDirectoryProfileEditorRecord } from "./native-directory-profile-editor-record";
@@ -272,7 +273,8 @@ async function clientHubDetail(env: Env, principal: StaffPrincipal, kind: Client
   const context = await resolveDetailContext(env, principal, kind, publicId, sourceId, rootNamespace);
   const workspace = context.root, access = context.access;
   const contactRolesAvailable = projectAlphaContactRolesEnabled(env) && workspace.root_namespace === "business";
-  const [portalIdentities, portalRootAccess, externalAccess, serviceAssignments, collections, projectAlphaContactRoles] = await Promise.all([
+  const [portalIdentities, portalRootAccess, externalAccess, serviceAssignments, collections, projectAlphaContactRoles,
+    operationalContactsAvailable] = await Promise.all([
     listPortalIdentityPage(env, principal, { kind: "client", context }, { limit: 5 }),
     readPortalRootAccess(env, principal, context),
     listClientExternalAccess(env, context, { limit: 5 }),
@@ -281,6 +283,8 @@ async function clientHubDetail(env: Env, principal: StaffPrincipal, kind: Client
       result: collection === "businessProjects" ? await listClientHubBusinessProjects(env, principal, context, { initial: true, limit: 5 })
         : await listClientHubCollection(env, context, collection, { initial: true, limit: 5 }) }))),
     contactRolesAvailable ? listProjectAlphaContactRoles(env, context, { initial: true, limit: 5 }) : Promise.resolve(undefined),
+    workspace.root_namespace === "business" && workspace.kind === "organization"
+      ? organizationOperationalContactsAvailable(env, context) : Promise.resolve(false),
   ]);
   const items = (collection: typeof DETAIL_COLLECTIONS[number]) => collections.find(page => page.collection === collection)!.result.items;
   await verifyContext(env, principal, context);
@@ -316,7 +320,7 @@ async function clientHubDetail(env: Env, principal: StaffPrincipal, kind: Client
     contextVersion: context.contextVersion,
     capabilities: access,
     internalNotesAvailable: true,
-    organizationOperationalContactsAvailable: workspace.root_namespace === "business" && workspace.kind === "organization",
+    organizationOperationalContactsAvailable: operationalContactsAvailable,
     projectAlphaContactRolesAvailable: contactRolesAvailable,
     projectAlphaContactRoles,
     projectManagementAvailable: workspace.root_namespace === "business",
