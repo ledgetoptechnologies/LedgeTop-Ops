@@ -43,11 +43,13 @@ function settledState(packet, phase, state) {
     || Date.parse(provisionReceipt.executed_at) >= expires) fail("provision receipt chronology or identity mismatch");
   const provisionApproval = state.approvals.find(row => row.approval_id === approval.provisionApprovalId);
   const grant = state.grants.find(row => row.id === approval.grantId);
-  if (!grant || !timestamp(grant.created_at) || Date.parse(grant.created_at) < issued
-    || Date.parse(grant.created_at) > Date.parse(provisionReceipt.executed_at)) fail("grant creation chronology mismatch");
-  const active = phase === "provision" ? 1 : 0, version = phase === "provision" ? 1 : 2;
-  const expectedGrant = { id: approval.grantId, staff_id: input.target.staffId, capability: "project.shared.sync", effect: "allow", scope_kind: "business_area", business_area_id: input.target.businessAreaId, division_id: null, external_project_id: null, active, version, granted_by: input.target.staffId, created_at: grant.created_at };
-  const expectedGrants = [...input.projectGrants, expectedGrant].sort((left, right) => left.id.localeCompare(right.id));
+  const reused = input.schemaVersion === 2 ? input.projectGrants.find(row => row.id === approval.grantId) : null;
+  if (!grant || !timestamp(grant.created_at) || (reused ? grant.created_at !== reused.created_at
+    : Date.parse(grant.created_at) < issued || Date.parse(grant.created_at) > Date.parse(provisionReceipt.executed_at))) fail("grant creation chronology mismatch");
+  const active = phase === "provision" ? 1 : 0;
+  const provisionVersion = reused ? reused.version + 1 : 1, version = provisionVersion + (phase === "revoke" ? 1 : 0);
+  const expectedGrant = { id: approval.grantId, staff_id: input.target.staffId, capability: "project.shared.sync", effect: "allow", scope_kind: "business_area", business_area_id: input.target.businessAreaId, division_id: null, external_project_id: null, active, version, granted_by: reused?.granted_by ?? input.target.staffId, created_at: grant.created_at };
+  const expectedGrants = [...input.projectGrants.filter(row => row.id !== approval.grantId), expectedGrant].sort((left, right) => left.id.localeCompare(right.id));
   if (!same([...state.grants].sort((left, right) => left.id.localeCompare(right.id)), expectedGrants)
     || !same(state.generations, [{ staff_id: input.target.staffId, generation: input.projectGeneration.generation + (phase === "provision" ? 1 : 2) }])) fail("grant or generation poststate mismatch");
   if (phase === "provision") {
@@ -58,7 +60,7 @@ function settledState(packet, phase, state) {
     if (!same(provisionApproval, { ...packet.provision.approval, revoked_at: provisionApproval.revoked_at })
       || !same(state.approvals.find(row => row.approval_id === approval.revokeApprovalId), packet.revoke.approval)
       || state.approvals.length !== 2 || state.receipts.length !== 2) fail("paired revoke approval poststate mismatch");
-    if (!same(provisionReceipt, input.provisionReadback.receipt) || !same({ ...grant, active: 1, version: 1 }, input.provisionReadback.grant)) fail("sealed provision readback mismatch");
+    if (!same(provisionReceipt, input.provisionReadback.receipt) || !same({ ...grant, active: 1, version: provisionVersion }, input.provisionReadback.grant)) fail("sealed provision readback mismatch");
   }
   return { phase, status: "settled", active: Boolean(active), generation: state.generations[0].generation };
 }

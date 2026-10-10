@@ -164,7 +164,7 @@ async function readAuthorization(database: D1Database, input: ReadOperationsPort
       AND head.publication_snapshot_sha256=? AND head.folder_reservation_id=? AND head.folder_reservation_revision=?
       AND head.client_folder_binding_id=? AND head.external_project_id=? AND head.project_version=?
       AND head.ops_folder_project_id=? AND head.ops_division_id=?
-      AND head.selected_r2_prefix LIKE replace(replace(replace(head.base_r2_prefix,'\\','\\\\'),'%','\\%'),'_','\\_') || '%' ESCAPE '\\'`)
+      AND substr(head.selected_r2_prefix,1,length(head.base_r2_prefix))=head.base_r2_prefix COLLATE BINARY`)
     .bind(input.feature, requireAcknowledgedDelivery ? 1 : 0, input.authorityId, input.authorityRevision,
       input.recipientBindingId, input.enrollmentIntentId, input.issuer, input.subject,
       input.targetId, input.targetRevision, input.targetClientRecordId, input.clientAuthorityId, input.workspaceId,

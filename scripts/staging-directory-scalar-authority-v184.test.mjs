@@ -35,6 +35,19 @@ const addConsistentInactiveAuthority = input => {
     recorded_at: "2026-10-10T12:00:00.000Z" });
   input.generation = { ...input.generation, generation, updated_at: "2026-10-10T12:00:00.000Z" };
 };
+const useRecoveryV3 = input => {
+  const previous = input.recoveryLineage;
+  const provisionArtifact = compileRelationshipRecoveryAuthorityV184({ ...clone(previous.provisionArtifact.input), schemaVersion: 3 });
+  const revokeArtifact = compileRelationshipRecoveryAuthorityV184({ ...clone(previous.revokeArtifact.input), schemaVersion: 3, provisionArtifact });
+  input.recoveryLineage = {
+    ...previous,
+    provisionArtifact,
+    revokeArtifact,
+    approvals: [{ ...provisionArtifact.approval, revoked_at: revokeArtifact.receipt.executed_at }, revokeArtifact.approval],
+    receipts: [provisionArtifact.receipt, revokeArtifact.receipt],
+  };
+  return input;
+};
 
 function lifecycle() {
   const provisionInput = makeScalarAuthorityInput();
@@ -70,6 +83,23 @@ test("compiles exact two-grant provision and ACK-bound paired cleanup after clos
     provisionArtifact.input.recoveryLineage.revokeArtifact.approval.approval_id, ""]);
   assertBoundStatements(provisionArtifact);
   assertBoundStatements(revokeArtifact);
+});
+
+test("compiles scalar authority after exact closed v3 self-revoking recovery", () => {
+  const artifact = compileDirectoryScalarAuthorityV184(useRecoveryV3(makeScalarAuthorityInput()));
+  assert.equal(artifact.input.recoveryLineage.provisionArtifact.schemaVersion, 3);
+  assert.equal(artifact.input.recoveryLineage.revokeArtifact.approval.revoked_at,
+    artifact.input.recoveryLineage.revokeArtifact.receipt.executed_at);
+});
+
+test("rejects forged v3 close approval and missing close receipt", () => {
+  for (const mutate of [
+    input => { input.recoveryLineage.approvals[1].revoked_at = null; },
+    input => { input.recoveryLineage.receipts.pop(); },
+  ]) {
+    const input = useRecoveryV3(makeScalarAuthorityInput()); mutate(input);
+    assert.throws(() => compileDirectoryScalarAuthorityV184(input));
+  }
 });
 
 test("canonical plan binds exact scalar prestate, relationship mapping, and current mixed-area scope", () => {

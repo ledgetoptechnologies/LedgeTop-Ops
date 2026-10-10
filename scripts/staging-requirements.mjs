@@ -479,6 +479,9 @@ export const REQUIRED_STAGING_MIGRATIONS = Object.freeze({
     "0182_project_alpha_directory_relationship_recovery_guard.sql",
     "0183_project_alpha_binding_standalone_relationship_rows.sql",
     "0184_project_alpha_directory_relationship_generation_recovery.sql",
+    "0185_project_alpha_directory_binding_generation_epochs.sql",
+    "0186_project_alpha_directory_conflict_evidence_binding.sql",
+    "0187_operations_portal_native_delivery_literal_prefix_guard.sql",
   ]),
 });
 
@@ -510,6 +513,9 @@ export const REQUIRED_STAGING_MIGRATION_SHA256 = Object.freeze({
     "0182_project_alpha_directory_relationship_recovery_guard.sql": "1aeef8de3a6f3fb4f08a2b3e6c69d02c6fb0cb9d2c092b4cb507ed1759992b0f",
     "0183_project_alpha_binding_standalone_relationship_rows.sql": "70b155e7ff2bda667832f14a5bea72523dd3e0fb285ce91f48c3e4a44e05ccac",
     "0184_project_alpha_directory_relationship_generation_recovery.sql": "12ccc3ccc3c3ad56edb8b21245a279581548c509d884b0ed5df6041988225f3b",
+    "0185_project_alpha_directory_binding_generation_epochs.sql": "3c536f6e8ea3c745e0167d3a81308abbac7e9b24c127a95a3a8ab1d7c9fcd39e",
+    "0186_project_alpha_directory_conflict_evidence_binding.sql": "6d19b3e6be44382c51681444e95a501845f8f3958e83930c5fba50501951fd92",
+    "0187_operations_portal_native_delivery_literal_prefix_guard.sql": "ded89fe037cfb56f9ddf4316a4ddcc67c8ae00e58d66eebec9a8129c6536eb28",
   }),
 });
 

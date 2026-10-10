@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { loadOperationsHome, type PortalRequest } from "../src/client/portal-api";
 import { isUnifiedPortalRoot, operationsBootstrapOutcome } from "../src/client/PortalBootstrapApp";
+import { isOptionalClientWorkspaceBootstrapAbsence } from "../src/client/portal-bootstrap-classification";
 
 const home = {
   authorityId: "12345678-1234-4123-8123-123456789abc",
@@ -66,6 +67,23 @@ describe("operations home browser API", () => {
 });
 
 describe("operations home bootstrap routing", () => {
+  it("classifies only an unscoped Client admission denial as an absent optional workspace surface", () => {
+    const absent = Object.assign(new Error("not provisioned"), {
+      status: 403,
+      body: { error: "Client access is not provisioned" },
+    });
+    expect(isOptionalClientWorkspaceBootstrapAbsence(absent, null)).toBe(true);
+    expect(isOptionalClientWorkspaceBootstrapAbsence(absent, "requested-workspace")).toBe(false);
+    expect(isOptionalClientWorkspaceBootstrapAbsence(Object.assign(new Error("denied"), {
+      status: 403,
+      body: { error: "Select an authorized client workspace" },
+    }), null)).toBe(false);
+    expect(isOptionalClientWorkspaceBootstrapAbsence(Object.assign(new Error("unavailable"), {
+      status: 503,
+      body: { error: "Client access is not provisioned" },
+    }), null)).toBe(false);
+  });
+
   it("probes only the unified portal root", () => {
     expect(isUnifiedPortalRoot("/portal")).toBe(true);
     expect(isUnifiedPortalRoot("/portal/")).toBe(true);

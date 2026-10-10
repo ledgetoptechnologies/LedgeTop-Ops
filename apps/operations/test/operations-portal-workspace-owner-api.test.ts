@@ -3,6 +3,7 @@ import {
   confirmOperationsProjectFolder,
   lookupOperationsProjectFolder,
   operationsWorkspaceCsrf,
+  refreshAndPublishOperationsWorkspace,
 } from "../src/client/operations-portal-workspace-owner-api";
 import type {
   ConfirmOperationsPortalSharedProjectFolder,
@@ -119,5 +120,21 @@ describe("operations portal workspace owner project-folder API", () => {
 
     vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new TypeError("network unavailable")));
     await expect(confirmOperationsProjectFolder(csrfToken, confirmation)).rejects.toThrow("network unavailable");
+  });
+
+  it("sends an exact refresh request with the publication operation as its idempotency key", async () => {
+    const body = { targetId, publication: { operationId: "22222222-2222-4222-8222-222222222222",
+      publicationId: "33333333-3333-4333-8333-333333333333", snapshotId: "44444444-4444-4444-8444-444444444444",
+      checkpointId: "55555555-5555-4555-8555-555555555555", invocationId: "66666666-6666-4666-8666-666666666666",
+      expectedRevision: 4, reason: "Refresh current workspace membership" } };
+    const fetch = json({ publicationOperationId: body.publication.operationId, publicationRevision: 5,
+      publicationState: "acknowledged", publicationReplayed: false });
+    await refreshAndPublishOperationsWorkspace(csrfToken, body);
+    expect(fetch).toHaveBeenCalledWith("/api/native-client-portal/operations-workspaces/refresh-and-publish", {
+      method: "POST", credentials: "same-origin", headers: { "Content-Type": "application/json",
+        "X-CSRF-Token": csrfToken, "Idempotency-Key": body.publication.operationId }, body: JSON.stringify(body),
+    });
+    await expect(refreshAndPublishOperationsWorkspace(csrfToken, { targetId })).rejects.toThrow("invalid_request");
+    expect(fetch).toHaveBeenCalledTimes(1);
   });
 });

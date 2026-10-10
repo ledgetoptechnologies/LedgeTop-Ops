@@ -47,6 +47,9 @@ function folderInput(action: "reserve" | "revoke" = "reserve") { return { folder
     reason: "Revoke exact selected folder" }, publication: { operationId: id(13), publicationId: id(14),
     snapshotId: id(15), checkpointId: id(16), invocationId: id(17), expectedRevision: 4,
     reason: "Publish exact folder change" } }; }
+function refreshInput() { return { targetId: id(2), publication: { operationId: id(20), publicationId: id(21),
+  snapshotId: id(22), checkpointId: id(23), invocationId: id(24), expectedRevision: 4,
+  reason: "Refresh current workspace membership" } }; }
 async function csrf(d: Dependencies) { const response = await handle(new Request(`${base}/csrf`), d);
   return (await response.json() as { csrfToken: string }).csrfToken; }
 function post(path: string, body: unknown, token: string, key: string) { return new Request(`${base}/${path}`, { method: "POST",
@@ -193,6 +196,48 @@ describe("operations portal workspace owner HTTP", () => {
     expect(calls.reserveInvocation).toHaveBeenCalledWith(d.database, actor, { ...recovery, action: "recover" });
     expect(calls.dispatch).toHaveBeenCalledWith({ db: d.database, binding: d.publication,
       operationId: id(4), invocationId: id(9), action: "recover" });
+  });
+
+  it("refreshes only the current publication topology and preserves every replay ID", async () => {
+    const d = deps(), token = await csrf(d), body = refreshInput();
+    calls.reservePublication.mockResolvedValue({ operationId: id(20), publicationRevision: 5, replayed: false });
+    calls.dispatch.mockResolvedValue({ operationId: id(20), status: "acknowledged" });
+    const first = await handle(post("refresh-and-publish", body, token, id(20)), d);
+    expect(first.status).toBe(200); expect(await first.json()).toEqual({ targetId: id(2),
+      publicationOperationId: id(20), publicationRevision: 5, publicationState: "acknowledged",
+      publicationReplayed: false });
+    calls.reservePublication.mockResolvedValue({ operationId: id(20), publicationRevision: 5, replayed: true });
+    calls.dispatch.mockResolvedValue({ operationId: id(20), status: "acknowledged", replayed: true });
+    const replay = await handle(post("refresh-and-publish", body, token, id(20)), d);
+    expect(replay.status).toBe(200); expect(await replay.json()).toMatchObject({ publicationReplayed: true });
+    const { invocationId: _invocationId, ...publication } = body.publication;
+    expect(calls.reservePublication).toHaveBeenLastCalledWith(d.database, actor, { ...publication, targetId: id(2) });
+    expect(calls.reserveInvocation).toHaveBeenLastCalledWith(d.database, actor, { invocationId: id(24),
+      operationId: id(20), action: "publish", reason: body.publication.reason });
+    expect(calls.dispatch).toHaveBeenLastCalledWith({ db: d.database, binding: d.publication,
+      operationId: id(20), invocationId: id(24), action: "publish" });
+    expect(calls.reserveWorkspace).not.toHaveBeenCalled(); expect(calls.reserveFolder).not.toHaveBeenCalled();
+    expect(calls.revokeFolder).not.toHaveBeenCalled();
+  });
+
+  it("rejects unsafe refresh inputs before every domain mutation", async () => {
+    const d = deps(), token = await csrf(d), valid = refreshInput();
+    const duplicate = refreshInput(); duplicate.publication.invocationId = duplicate.publication.operationId;
+    const zero = refreshInput(); zero.publication.expectedRevision = 0;
+    const requests = [
+      post("refresh-and-publish", valid, "", id(20)),
+      post("refresh-and-publish", valid, token, id(99)),
+      post("refresh-and-publish", { ...valid, actor: "forged" }, token, id(20)),
+      post("refresh-and-publish", { ...valid, targetId: "invalid" }, token, id(20)),
+      post("refresh-and-publish", duplicate, token, id(20)),
+      post("refresh-and-publish", zero, token, id(20)),
+    ];
+    const crossSite = post("refresh-and-publish", valid, token, id(20)); crossSite.headers.set("Sec-Fetch-Site", "cross-site");
+    requests.push(crossSite);
+    for (const request of requests) expect((await handle(request, d)).status).toBe(request === requests[0] || request === crossSite ? 403 : 400);
+    expect(calls.reservePublication).not.toHaveBeenCalled(); expect(calls.reserveInvocation).not.toHaveBeenCalled();
+    expect(calls.dispatch).not.toHaveBeenCalled(); expect(calls.reserveWorkspace).not.toHaveBeenCalled();
+    expect(calls.reserveFolder).not.toHaveBeenCalled(); expect(calls.revokeFolder).not.toHaveBeenCalled();
   });
 
   it("reserves the exact selected folder and publishes at the explicit current revision", async () => {

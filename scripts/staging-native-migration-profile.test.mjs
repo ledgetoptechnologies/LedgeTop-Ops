@@ -45,7 +45,12 @@ test.afterEach(() => {
 test("builds only the exact migration suffixes and strips every deployment field", () => {
   const profiles = buildProfiles(fixture());
   assert.deepEqual(profiles.operations.files.map(({ name }) => name),
-    ["0184_project_alpha_directory_relationship_generation_recovery.sql"]);
+    [
+      "0184_project_alpha_directory_relationship_generation_recovery.sql",
+      "0185_project_alpha_directory_binding_generation_epochs.sql",
+      "0186_project_alpha_directory_conflict_evidence_binding.sql",
+      "0187_operations_portal_native_delivery_literal_prefix_guard.sql",
+    ]);
   assert.deepEqual(profiles.client.files.map(({ name }) => name),
     []);
   assert.equal(profiles.operations.manifest.requiredRemoteBaseline,
@@ -54,11 +59,11 @@ test("builds only the exact migration suffixes and strips every deployment field
     "0228_operations_portal_native_content_start_audit.sql");
   assert.equal(profiles.operations.expectedRemoteAppliedMigrations.length, 183);
   assert.equal(profiles.client.expectedRemoteAppliedMigrations.length, 147);
-  assert.equal(profiles.operations.manifest.reviewedFinalChain.count, 184);
+  assert.equal(profiles.operations.manifest.reviewedFinalChain.count, 187);
   assert.equal(profiles.operations.manifest.reviewedFinalChain.finalMigration,
-    "0184_project_alpha_directory_relationship_generation_recovery.sql");
+    "0187_operations_portal_native_delivery_literal_prefix_guard.sql");
   assert.equal(profiles.operations.manifest.reviewedFinalChain.namesSha256,
-    "c6d567a0c4d9450cc867d99db6188dc54e7a827e581059d4714e7bf55b66bc15");
+    "ce00ad1a6b67cb8a7f0ed5e197ebd5fbdfabd2566dc3c402f1eee79302036951");
   assert.equal(profiles.client.manifest.reviewedFinalChain.count, 147);
   for (const profile of Object.values(profiles)) {
     assert.deepEqual(Object.keys(profile.config).sort(), ["$schema", "account_id", "d1_databases", "name"]);

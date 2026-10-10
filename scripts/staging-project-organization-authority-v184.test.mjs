@@ -37,12 +37,21 @@ function recoveryLineage(schemaVersion = 2) {
   const revokeArtifact = compileRelationshipRecoveryAuthorityV184(revokeInput), closed = successor(revokeInput, 0, closeStamp);
   return { provisionArtifact, revokeArtifact, approvals: [{ ...provisionArtifact.approval, revoked_at: closeStamp }, revokeArtifact.approval], receipts: [provisionArtifact.receipt, revokeArtifact.receipt], directoryGrants: closed.grants, directoryGrantHistory: closed.history, directoryGrantGeneration: closed.generation };
 }
-function fixture() {
-  return { schemaVersion: 1, purpose, staging: STAGING_TARGET, migrationNames: [...migrationNames], target, staff: { id: target.staffId, status: "active", access_subject: "access|owner" }, roles: [{ id: "owner-role", staff_id: target.staffId, role_id: "role-owner", scope: "global", division_id: null, scope_key: "global", created_by: target.staffId, created_at: stamp }], admission: { staff_id: target.staffId, bound_access_subject: "access|owner", active: 1, admitted_by: target.staffId, created_at: stamp, updated_at: stamp, version: 3 }, profile: { staff_id: target.staffId, login_email: "owner@example.test", display_name: "Owner", version: 2, created_at: stamp, updated_at: stamp }, businessArea: { id: target.businessAreaId, name: target.businessAreaName, active: 1 }, projectGeneration: { staff_id: target.staffId, generation: 1 }, projectGrants: [{ id: uuid(40), staff_id: target.staffId, capability: "project.shared.sync", effect: "allow", scope_kind: "global", business_area_id: null, division_id: null, external_project_id: null, active: 0, version: 2, granted_by: target.staffId, created_at: stamp }], recoveryLineage: recoveryLineage(), approval: { provisionApprovalId: uuid(50), provisionCommandId: uuid(51), revokeApprovalId: uuid(52), revokeCommandId: uuid(53), grantId: uuid(54), issuedAt: stamp, expiresAt: "2026-10-10T13:00:00.000Z" } };
+function fixture(recoverySchemaVersion = 2) {
+  return { schemaVersion: 1, purpose, staging: STAGING_TARGET, migrationNames: [...migrationNames], target, staff: { id: target.staffId, status: "active", access_subject: "access|owner" }, roles: [{ id: "owner-role", staff_id: target.staffId, role_id: "role-owner", scope: "global", division_id: null, scope_key: "global", created_by: target.staffId, created_at: stamp }], admission: { staff_id: target.staffId, bound_access_subject: "access|owner", active: 1, admitted_by: target.staffId, created_at: stamp, updated_at: stamp, version: 3 }, profile: { staff_id: target.staffId, login_email: "owner@example.test", display_name: "Owner", version: 2, created_at: stamp, updated_at: stamp }, businessArea: { id: target.businessAreaId, name: target.businessAreaName, active: 1 }, projectGeneration: { staff_id: target.staffId, generation: 1 }, projectGrants: [{ id: uuid(40), staff_id: target.staffId, capability: "project.shared.sync", effect: "allow", scope_kind: "global", business_area_id: null, division_id: null, external_project_id: null, active: 0, version: 2, granted_by: target.staffId, created_at: stamp }], recoveryLineage: recoveryLineage(recoverySchemaVersion), approval: { provisionApprovalId: uuid(50), provisionCommandId: uuid(51), revokeApprovalId: uuid(52), revokeCommandId: uuid(53), grantId: uuid(54), issuedAt: stamp, expiresAt: "2026-10-10T13:00:00.000Z" } };
 }
 function sealed(executedAt = stamp) {
   const value = fixture(), provision = compileProjectOrganizationAuthorityV184(value, { root });
   return { ...value, provisionReadback: { approval: provision.provision.approval, receipt: { ...provision.provision.receipt, executed_at: executedAt }, grant: { id: value.approval.grantId, staff_id: value.target.staffId, capability: "project.shared.sync", effect: "allow", scope_kind: "business_area", business_area_id: value.target.businessAreaId, division_id: null, external_project_id: null, active: 1, version: 1, granted_by: value.target.staffId, created_at: executedAt } } };
+}
+
+function reusableFixture() {
+  const value = fixture();
+  value.schemaVersion = 2;
+  const reusable = { id: uuid(54), staff_id: value.target.staffId, capability: "project.shared.sync", effect: "allow", scope_kind: "business_area", business_area_id: value.target.businessAreaId, division_id: null, external_project_id: null, active: 0, version: 2, granted_by: value.target.staffId, created_at: stamp };
+  value.projectGrants.push(reusable);
+  value.projectGeneration.generation++;
+  return value;
 }
 
 test("compiles an exact organization-area provision and paired cleanup", () => {
@@ -56,6 +65,28 @@ test("compiles an exact organization-area provision and paired cleanup", () => {
   assert.ok(pair.revoke.statements.some(statement => statement.sql.startsWith("UPDATE native_project_grants SET active=0")));
   assert.ok(pair.revoke.statements.some(statement => statement.sql.includes("paired-receipt")));
   assert.ok(pair.revoke.statements.some(statement => statement.sql.includes("revoke-unrelated-grant")));
+});
+
+test("v2 reuses only the exact inactive grant identity with versioned CAS", () => {
+  const value = reusableFixture(), artifact = compileProjectOrganizationAuthorityV184(value, { root });
+  const mutation = artifact.provision.statements.find(statement => statement.sql.startsWith("UPDATE native_project_grants SET active=1"));
+  assert.deepEqual(mutation.params, [value.approval.grantId, value.target.staffId, value.target.businessAreaId, 2, value.target.staffId, stamp]);
+  assert.equal(artifact.provision.statements.some(statement => statement.sql.startsWith("INSERT INTO native_project_grants")), false);
+
+  for (const mutate of [
+    input => input.projectGrants.find(grant => grant.id === input.approval.grantId).active = 1,
+    input => input.projectGrants.find(grant => grant.id === input.approval.grantId).business_area_id = clientAreaTarget.businessAreaId,
+    input => input.approval.grantId = uuid(55),
+  ]) {
+    const rejected = reusableFixture(); mutate(rejected);
+    assert.throws(() => compileProjectOrganizationAuthorityV184(rejected, { root }), /exact inactive project grant identity/);
+  }
+});
+
+test("accepts exact closed v3 recovery lineage without weakening the organization target", () => {
+  const artifact = compileProjectOrganizationAuthorityV184(fixture(3), { root });
+  assert.equal(artifact.input.recoveryLineage.revokeArtifact.approval.revoked_at, closeStamp);
+  assert.equal(artifact.input.target.businessAreaId, target.businessAreaId);
 });
 
 test("rejects client-area and arbitrary organization targets", () => {

@@ -84,6 +84,33 @@ test("operations metadata remains the only surface when the independent client b
   expect(calls).toEqual(["/api/client/v2/operations/home", "/api/client/session"]);
 });
 
+test("native operations home does not label an absent optional Client workspace as unavailable", async ({ page }) => {
+  const calls: string[] = [];
+  const nativeHome = { ...response, homes: [{ ...response.homes[0], services: [] }] };
+  await page.route("**/api/client/**", route => {
+    const path = new URL(route.request().url()).pathname;
+    calls.push(path);
+    if (path === "/api/client/v2/operations/home") return route.fulfill({ json: nativeHome });
+    if (path === "/api/client/session") return route.fulfill({
+      status: 403,
+      json: { error: "Client access is not provisioned" },
+    });
+    if (path === "/api/client/operations/data/context") return route.fulfill({ json: {
+      resourceMode: "operations_native_delivery",
+      homes: [],
+    } });
+    return route.fulfill({ status: 404, json: { error: "not found" } });
+  });
+
+  await page.goto("/portal");
+  await expect(page.getByRole("heading", { name: "Your services" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "No services available" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Client resources unavailable" })).toHaveCount(0);
+  await expect(page.getByRole("region", { name: "Shared deliveries" })).toBeVisible();
+  await expect(page.getByRole("navigation")).toHaveCount(0);
+  expect(calls.slice(0, 2)).toEqual(["/api/client/v2/operations/home", "/api/client/session"]);
+});
+
 for (const [name, emptyResponse, detail] of [
   ["no authorized homes", { ...response, homes: [] }, "Your account has no active operations services."],
   ["an authorized home with no listed services", { ...response, homes: [{ ...response.homes[0], services: [] }] }, "No services are currently listed for this access."],

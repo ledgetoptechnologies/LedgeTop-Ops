@@ -166,6 +166,7 @@ export async function handleOperationsPortalWorkspaceOwnerHttp(request: Request,
   try {
     const config = settings(dependencies), url = new URL(request.url);
     const mutation = url.pathname === `${BASE}/reserve-and-publish`
+      || url.pathname === `${BASE}/refresh-and-publish`
       || url.pathname === `${BASE}/reserve-folder-and-publish` || url.pathname === `${BASE}/revoke-folder-and-publish`
       || url.pathname === `${BASE}/confirm-project-folder`;
     if (url.origin !== config.origin || (url.pathname !== `${BASE}/csrf` && !mutation
@@ -200,6 +201,27 @@ export async function handleOperationsPortalWorkspaceOwnerHttp(request: Request,
       const dispatch = await dispatchOperationsPortalWorkspacePublication({ db: dependencies.database,
         binding: dependencies.publication, operationId: body.operationId, invocationId: body.invocationId, action: "recover" });
       return response(200, { operationId: dispatch.operationId, status: dispatch.status, replayed: dispatch.replayed === true });
+    }
+    if (url.pathname === `${BASE}/refresh-and-publish`) {
+      const body = exact(await readBoundedJson(request, 4096, "operations workspace publication refresh"),
+        ["targetId", "publication"]);
+      const targetId = body?.targetId, publication = publicationInput(body?.publication);
+      if (typeof targetId !== "string" || !UUID.test(targetId) || !publication || publication.expectedRevision < 1
+        || request.headers.get("Idempotency-Key") !== publication.operationId)
+        throw new Failure(400, "invalid_request");
+      const staged = await reserveOperationsPortalWorkspacePublication(dependencies.database, actor, {
+        operationId: publication.operationId, publicationId: publication.publicationId, targetId,
+        snapshotId: publication.snapshotId, checkpointId: publication.checkpointId,
+        expectedRevision: publication.expectedRevision, reason: publication.reason });
+      await reserveOperationsPortalWorkspacePublicationInvocation(dependencies.database, actor, {
+        invocationId: publication.invocationId, operationId: publication.operationId, action: "publish",
+        reason: publication.reason });
+      const dispatched = await dispatchOperationsPortalWorkspacePublication({ db: dependencies.database,
+        binding: dependencies.publication, operationId: publication.operationId,
+        invocationId: publication.invocationId, action: "publish" });
+      return response(200, { targetId, publicationOperationId: staged.operationId,
+        publicationRevision: staged.publicationRevision, publicationState: dispatched.status,
+        publicationReplayed: staged.replayed || dispatched.replayed === true });
     }
     if (url.pathname === `${BASE}/reserve-folder-and-publish` || url.pathname === `${BASE}/revoke-folder-and-publish`) {
       const body = exact(await readBoundedJson(request, 8192, "operations workspace folder owner"), ["folder", "publication"]);

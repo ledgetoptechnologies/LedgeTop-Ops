@@ -229,18 +229,7 @@ beforeAll(async () => {
   operations = await runtime.getD1Database("OPS_DB") as unknown as D1Database;
   client = await runtime.getD1Database("CLIENT_DB") as unknown as D1Database;
   expect(await applyCanonicalChain(operations, "operations",
-    "0153_operations_portal_workspace_publication_outbox.sql", true)).toHaveLength(153);
-  for (const name of ["0154_operations_portal_native_recipient_authority.sql",
-    "0155_operations_portal_workspace_publication_cancellations.sql",
-    "0156_operations_portal_workspace_publication_invocations.sql",
-    "0157_operations_portal_native_workspace_cleanup.sql",
-    "0158_operations_portal_native_delivery_authority.sql",
-    "0159_operations_portal_native_delivery_recovery_invocations.sql",
-    "0160_operations_portal_native_recipient_labels.sql"]) await applyDraft(operations, "operations", name);
-  // The current directory writer expects the explicit Operations-record ID
-  // projection introduced by 0170; keep this focused fixture otherwise pinned
-  // to the historical 0153 + selected draft-migration lineage above.
-  await applyDraft(operations, "operations", "0170_project_alpha_active_directory_project_guard.sql");
+    "0187_operations_portal_native_delivery_literal_prefix_guard.sql", true)).toHaveLength(187);
   expect(await applyCanonicalChain(client, "client", "0223_operations_portal_workspace_publications.sql"))
     .toHaveLength(142);
   await applyDraft(client, "client", "0224_operations_portal_native_recipient_authority.sql");
@@ -291,9 +280,21 @@ beforeAll(async () => {
 afterAll(async () => runtime.dispose());
 
 describe("Ops native selected-folder authority against real 0152-0160 plus current 0170 mapping view", () => {
+  it("uses literal, case-sensitive selected-prefix containment without D1 LIKE patterns", async () => {
+    const contained = async (selected: string, base: string) => operations.prepare(`SELECT
+      substr(?,1,length(?))=? COLLATE BINARY matches`).bind(selected, base, base).first<number>("matches");
+    const longLiteralBase = `clients/${"literal-segment/".repeat(5)}percent%/underscore_/backslash\\/`;
+    expect(longLiteralBase.length).toBeGreaterThan(50);
+    await expect(contained(`${longLiteralBase}selected/`, longLiteralBase)).resolves.toBe(1);
+    await expect(contained(`${longLiteralBase.toUpperCase()}selected/`, longLiteralBase)).resolves.toBe(0);
+    await expect(contained(`${longLiteralBase.slice(0, -1)}-sibling/selected/`, longLiteralBase)).resolves.toBe(0);
+    await expect(contained("", longLiteralBase)).resolves.toBe(0);
+    await expect(contained(`${longLiteralBase}selected/`, `${longLiteralBase}invalid`)).resolves.toBe(0);
+  });
+
   it("grants, dispatches, reads exact current proof, denies drift/retarget, and revokes locally first", async () => {
-    const containment = async (candidate: string) => operations.prepare(`SELECT ? LIKE
-      replace(replace(replace(r2_prefix,'\\','\\\\'),'%','\\%'),'_','\\_') || '%' ESCAPE '\\' matches
+    const containment = async (candidate: string) => operations.prepare(`SELECT
+      substr(?,1,length(r2_prefix))=r2_prefix COLLATE BINARY matches
       FROM project_folders WHERE project_id=?`).bind(candidate, wildcardPhysicalProject).first<number>("matches");
     await expect(containment(`${wildcardBasePrefix}selected/`)).resolves.toBe(1);
     await expect(containment("clients/nativeAA_delivery/project/selected/")).resolves.toBe(0);
@@ -523,5 +524,42 @@ describe("Ops native selected-folder authority against real 0152-0160 plus curre
       .rejects.toThrow("authorization_denied");
     expect(await operations.prepare(`SELECT state FROM operations_portal_native_delivery_authority_outbox
       WHERE operation_id=?`).bind(revokeOperationId).first("state")).toBe("pending");
+  });
+
+  it("keeps the forward folder guard executable and rejects a literal-prefix mismatch", async () => {
+    const guards = await operations.prepare(`SELECT name FROM sqlite_master WHERE type='trigger'
+      AND tbl_name='operations_portal_native_delivery_authority_commands'
+      AND sql LIKE 'CREATE TRIGGER%BEFORE INSERT%'`).all<{ name: string }>();
+    for (const guard of guards.results) {
+      if (guard.name === "operations_portal_native_delivery_grant_folder_guard") continue;
+      expect(guard.name).toMatch(/^operations_portal_native_delivery_[a-z0-9_]+$/u);
+      await operations.prepare(`DROP TRIGGER ${guard.name}`).run();
+    }
+    const sourceOperationId = await operations.prepare(`SELECT operation_id FROM
+      operations_portal_native_delivery_authority_commands WHERE action='delivery.grant' ORDER BY created_at LIMIT 1`)
+      .first<string>("operation_id");
+    expect(sourceOperationId).toBeTruthy();
+    const operationId = id(), authorityId = id();
+    await expect(operations.prepare(`INSERT INTO operations_portal_native_delivery_authority_commands
+      (operation_id,command_sha256,operation_fingerprint,canonical_command_json,action,authority_id,expected_revision,
+       resulting_revision,target_id,target_revision,client_authority_id,workspace_id,root_kind,root_record_id,
+       recipient_binding_id,enrollment_intent_id,target_client_record_id,issuer,subject,home_ownership_epoch,
+       home_grant_revision,home_grant_operation_id,home_request_fingerprint,publication_operation_id,publication_id,
+       publication_revision,publication_source_sequence,publication_snapshot_id,publication_snapshot_sha256,
+       folder_reservation_id,folder_reservation_revision,client_folder_binding_id,external_project_id,project_version,
+       ops_folder_project_id,ops_division_id,selected_r2_prefix,base_r2_prefix,base_match_method,base_confirmed_by,
+       base_confirmed_at,features_json,expires_at,reason_code,observed_at)
+      SELECT ?,?, ?,json_set(canonical_command_json,'$.operationId',?,'$.authority.authorityId',?),
+       action,?,expected_revision,resulting_revision,target_id,target_revision,client_authority_id,workspace_id,
+       root_kind,root_record_id,recipient_binding_id,enrollment_intent_id,target_client_record_id,issuer,subject,
+       home_ownership_epoch,home_grant_revision,home_grant_operation_id,home_request_fingerprint,
+       publication_operation_id,publication_id,publication_revision,publication_source_sequence,
+       publication_snapshot_id,publication_snapshot_sha256,folder_reservation_id,folder_reservation_revision,
+       client_folder_binding_id,external_project_id,project_version,ops_folder_project_id,ops_division_id,
+       upper(selected_r2_prefix),base_r2_prefix,base_match_method,base_confirmed_by,base_confirmed_at,
+       features_json,expires_at,'literal prefix mismatch',observed_at
+      FROM operations_portal_native_delivery_authority_commands WHERE operation_id=?`)
+      .bind(operationId, "a".repeat(64), "b".repeat(64), operationId, authorityId, authorityId, sourceOperationId).run())
+      .rejects.toThrow("operations portal native delivery current folder denied");
   });
 }, 300_000);

@@ -202,7 +202,7 @@ const contextSql = `SELECT workspace.target_id,workspace.target_revision,workspa
     AND folder.project_version=project.current_version AND physical.division_id=folder.ops_division_id
     AND physical.r2_prefix=folder.base_r2_prefix AND physical.match_method=folder.base_match_method
     AND physical.confirmed_by=folder.base_confirmed_by AND physical.confirmed_at=folder.base_confirmed_at
-    AND folder.selected_r2_prefix LIKE replace(replace(replace(folder.base_r2_prefix,'\\','\\\\'),'%','\\%'),'_','\\_') || '%' ESCAPE '\\'
+    AND substr(folder.selected_r2_prefix,1,length(folder.base_r2_prefix))=folder.base_r2_prefix COLLATE BINARY
     AND published_folder.binding_version=folder.revision
     AND published_folder.external_project_id=folder.external_project_id
     AND published_folder.ops_folder_project_id=folder.ops_folder_project_id

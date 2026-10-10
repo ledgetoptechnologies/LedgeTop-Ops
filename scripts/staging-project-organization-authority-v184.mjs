@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { RELATIONSHIP_RECOVERY_AUTHORITY_TARGET_V2 } from "./staging-relationship-generation-recovery-authority-v184.mjs";
 import { validateClosedRelationshipRecoveryLineageV184 } from "./staging-project-business-area-authority-v184.mjs";
 import { STAGING_TARGET } from "./staging-onboarding-native-only-authority-packet.mjs";
+import { validateAuthorityMigrationChainV185 } from "./staging-authority-migration-chain-v185.mjs";
 
 export { validateClosedRelationshipRecoveryLineageV184 };
 
@@ -53,17 +54,7 @@ function timestamp(value, label) {
   if (typeof value !== "string" || !TS.test(value) || new Date(value).toISOString() !== value) fail(`${label} timestamp`);
   return Date.parse(value);
 }
-function migrations(root) {
-  const directory = path.join(root, "apps", "operations", "migrations");
-  const names = fs.readdirSync(directory).filter(name => /^\d{4}_.+\.sql$/.test(name)).sort();
-  const contents = names.map(name => {
-    const file = path.join(directory, name), stat = fs.lstatSync(file);
-    if (!stat.isFile() || stat.isSymbolicLink()) fail("regular migration required");
-    return `${name}\0${sha(fs.readFileSync(file))}`;
-  });
-  if (names.length !== CHAIN.count || names.at(-1) !== CHAIN.final || sha(names.join("\n")) !== CHAIN.names || sha(contents.join("\n")) !== CHAIN.contents) fail("exact reviewed 0184 migration chain required");
-  return names;
-}
+function migrations(root, names) { return validateAuthorityMigrationChainV185(root, names, fail); }
 const guard = (condition, params = [], label = "state") => ({ sql: `SELECT CASE WHEN (${condition}) THEN 1 ELSE json('project-organization-authority-v184-${label}-guard-failed') END verified`, params });
 const insert = (table, row, dbClock = false) => {
   const keys = Object.keys(row).filter(key => !dbClock || key !== "executed_at");
@@ -78,8 +69,9 @@ export function compileProjectOrganizationAuthorityV184(raw, { root = ROOT } = {
   plain(raw);
   const input = structuredClone(raw), hasReadback = Object.hasOwn(raw, "provisionReadback");
   exact(input, ["schemaVersion", "purpose", "staging", "migrationNames", "target", "staff", "roles", "admission", "profile", "businessArea", "projectGeneration", "projectGrants", "recoveryLineage", "approval", ...(hasReadback ? ["provisionReadback"] : [])], "input");
-  if (input.schemaVersion !== 1 || input.purpose !== PROJECT_ORGANIZATION_AUTHORITY_V184_PURPOSE || !same(input.staging, STAGING_TARGET)
-    || !same(input.migrationNames, migrations(root)) || !same(input.target, PROJECT_ORGANIZATION_AUTHORITY_V184_TARGET)) fail("exact staging target required");
+  const migrationChain = migrations(root, input.migrationNames);
+  if (![1, 2].includes(input.schemaVersion) || input.purpose !== PROJECT_ORGANIZATION_AUTHORITY_V184_PURPOSE || !same(input.staging, STAGING_TARGET)
+    || !same(input.target, PROJECT_ORGANIZATION_AUTHORITY_V184_TARGET)) fail("exact staging target required");
   exact(input.staff, STAFF, "staff");
   if (input.staff.id !== input.target.staffId || input.staff.status !== "active" || input.staff.access_subject !== input.admission?.bound_access_subject) fail("active pinned staff required");
   if (!Array.isArray(input.roles) || !input.roles.length) fail("complete current administrator roles required");
@@ -110,12 +102,22 @@ export function compileProjectOrganizationAuthorityV184(raw, { root = ROOT } = {
     || grant.scope_kind === "business_area" && grant.business_area_id === input.target.businessAreaId))) fail("applicable project deny");
   const closed = validateClosedRelationshipRecoveryLineageV184(input.recoveryLineage, { root });
   const recoveryProvision = input.recoveryLineage.provisionArtifact, recoveryRevoke = input.recoveryLineage.revokeArtifact;
-  if (recoveryProvision.input.schemaVersion !== 2 || recoveryRevoke.input.schemaVersion !== 2
+  if (![2, 3].includes(recoveryProvision.input.schemaVersion) || recoveryRevoke.input.schemaVersion !== recoveryProvision.input.schemaVersion
     || !same(recoveryProvision.input.target, RELATIONSHIP_RECOVERY_AUTHORITY_TARGET_V2)
     || !same(recoveryRevoke.input.target, RELATIONSHIP_RECOVERY_AUTHORITY_TARGET_V2)) fail("exact paired v2 recovery lineage required");
   exact(input.approval, ["provisionApprovalId", "provisionCommandId", "revokeApprovalId", "revokeCommandId", "grantId", "issuedAt", "expiresAt"], "approval");
   const ids = [input.approval.provisionApprovalId, input.approval.provisionCommandId, input.approval.revokeApprovalId, input.approval.revokeCommandId, input.approval.grantId];
-  if (!ids.every(value => UUID.test(value)) || new Set(ids).size !== 5 || input.projectGrants.some(grant => grant.id === input.approval.grantId)) fail("fresh approval ids required");
+  if (!ids.every(value => UUID.test(value)) || new Set(ids).size !== 5) fail("distinct approval ids required");
+  const identityMatches = input.projectGrants.filter(grant => grant.capability === "project.shared.sync" && grant.effect === "allow"
+    && grant.scope_kind === "business_area" && grant.business_area_id === input.target.businessAreaId
+    && grant.division_id === null && grant.external_project_id === null);
+  const reuseGrant = input.schemaVersion === 2 && identityMatches.length === 1 ? identityMatches[0] : null;
+  if (input.schemaVersion === 1 && input.projectGrants.some(grant => grant.id === input.approval.grantId)) fail("fresh approval ids required");
+  if (input.schemaVersion === 2 && (identityMatches.length > 1 || identityMatches.some(grant => grant.active !== 0)
+    || (reuseGrant ? input.approval.grantId !== reuseGrant.id : input.projectGrants.some(grant => grant.id === input.approval.grantId)))) {
+    fail("exact inactive project grant identity required");
+  }
+  const provisionGrantVersion = reuseGrant ? reuseGrant.version + 1 : 1;
   const issued = timestamp(input.approval.issuedAt, "issuedAt"), expires = timestamp(input.approval.expiresAt, "expiresAt");
   if (expires <= issued || expires - issued > 14_400_000) fail("bounded approval window");
 
@@ -123,7 +125,7 @@ export function compileProjectOrganizationAuthorityV184(raw, { root = ROOT } = {
   const planInput = { ...input, recoveryLineage: lineageReferences };
   delete planInput.provisionReadback;
   const plan = json(planInput), planHash = sha(plan);
-  const verification = json({ staging: input.staging, target: input.target, migrationChain: CHAIN, recoveryLineage: lineageReferences });
+  const verification = json({ staging: input.staging, target: input.target, migrationChain, recoveryLineage: lineageReferences });
   const verificationHash = sha(verification);
   if (Buffer.byteLength(plan) > 262_144 || Buffer.byteLength(verification) > 262_144) fail("bounded ledger evidence exceeded");
   const metadata = phase => {
@@ -142,9 +144,10 @@ export function compileProjectOrganizationAuthorityV184(raw, { root = ROOT } = {
     const receipt = input.provisionReadback.receipt, grant = input.provisionReadback.grant;
     const executed = timestamp(receipt.executed_at, "provision receipt executed_at"), created = timestamp(grant.created_at, "provision grant created_at");
     const expectedReceipt = { ...provisionMetadata.receipt, executed_at: receipt.executed_at };
-    const expectedGrant = { id: input.approval.grantId, staff_id: input.target.staffId, capability: "project.shared.sync", effect: "allow", scope_kind: "business_area", business_area_id: input.target.businessAreaId, division_id: null, external_project_id: null, active: 1, version: 1, granted_by: input.target.staffId, created_at: grant.created_at };
+    const expectedGrant = { id: input.approval.grantId, staff_id: input.target.staffId, capability: "project.shared.sync", effect: "allow", scope_kind: "business_area", business_area_id: input.target.businessAreaId, division_id: null, external_project_id: null, active: 1, version: provisionGrantVersion, granted_by: reuseGrant?.granted_by ?? input.target.staffId, created_at: grant.created_at };
     if (!same(input.provisionReadback.approval, provisionMetadata.approval) || !same(receipt, expectedReceipt) || !same(grant, expectedGrant)
-      || executed < issued || executed >= expires || created < issued || created > executed) fail("exact bounded provision readback required");
+      || executed < issued || executed >= expires || (!reuseGrant && (created < issued || created > executed))
+      || (reuseGrant && created !== timestamp(reuseGrant.created_at, "reused grant created_at"))) fail("exact bounded provision readback required");
     readback = input.provisionReadback;
   }
 
@@ -167,32 +170,44 @@ export function compileProjectOrganizationAuthorityV184(raw, { root = ROOT } = {
     ...rows("native_project_grants", PROJECT_GRANT, input.projectGrants, "staff_id=?", [input.target.staffId], "project-grants"),
     guard("EXISTS(SELECT 1 FROM native_project_grant_generations WHERE staff_id=? AND generation=?)", [input.target.staffId, input.projectGeneration.generation], "generation"),
   ];
+  const grantMutation = reuseGrant
+    ? { sql: "UPDATE native_project_grants SET active=1,version=version+1 WHERE id=? AND staff_id=? AND capability='project.shared.sync' AND effect='allow' AND scope_kind='business_area' AND business_area_id=? AND division_id IS NULL AND external_project_id IS NULL AND active=0 AND version=? AND granted_by=? AND created_at=?", params: [reuseGrant.id, input.target.staffId, input.target.businessAreaId, reuseGrant.version, reuseGrant.granted_by, reuseGrant.created_at] }
+    : { sql: "INSERT INTO native_project_grants(id,staff_id,capability,effect,scope_kind,business_area_id,active,granted_by) VALUES(?,?,'project.shared.sync','allow','business_area',?,1,?)", params: [input.approval.grantId, input.target.staffId, input.target.businessAreaId, input.target.staffId] };
+  const poststateGrant = reuseGrant
+    ? guard("EXISTS(SELECT 1 FROM native_project_grants WHERE id=? AND staff_id=? AND capability='project.shared.sync' AND effect='allow' AND scope_kind='business_area' AND business_area_id=? AND division_id IS NULL AND external_project_id IS NULL AND active=1 AND version=? AND granted_by=? AND created_at=?) AND (SELECT generation FROM native_project_grant_generations WHERE staff_id=?)=?", [input.approval.grantId, input.target.staffId, input.target.businessAreaId, provisionGrantVersion, reuseGrant.granted_by, reuseGrant.created_at, input.target.staffId, input.projectGeneration.generation + 1], "poststate")
+    : guard("EXISTS(SELECT 1 FROM native_project_grants WHERE id=? AND staff_id=? AND capability='project.shared.sync' AND effect='allow' AND scope_kind='business_area' AND business_area_id=? AND division_id IS NULL AND external_project_id IS NULL AND active=1 AND version=1 AND granted_by=?) AND (SELECT generation FROM native_project_grant_generations WHERE staff_id=?)=?", [input.approval.grantId, input.target.staffId, input.target.businessAreaId, input.target.staffId, input.target.staffId, input.projectGeneration.generation + 1], "poststate");
   const provisionStatements = [
     ...common, ...snapshot, quiet,
     guard("julianday(?)<=julianday('now') AND julianday(?)>julianday('now')", [input.approval.issuedAt, input.approval.expiresAt], "expiry"),
     guard("NOT EXISTS(SELECT 1 FROM native_staff_bootstrap_approvals WHERE approved_operator_staff_id=? AND revoked_at IS NULL AND julianday(expires_at)>julianday('now') AND approval_id<>?)", [input.target.staffId, closed.revokeApprovalId], "open-window"),
     insert("native_staff_bootstrap_approvals", provisionMetadata.approval),
-    { sql: "INSERT INTO native_project_grants(id,staff_id,capability,effect,scope_kind,business_area_id,active,granted_by) VALUES(?,?,'project.shared.sync','allow','business_area',?,1,?)", params: [input.approval.grantId, input.target.staffId, input.target.businessAreaId, input.target.staffId] },
+    grantMutation,
     guard("changes()=1", [], "grant-cas"),
-    guard("EXISTS(SELECT 1 FROM native_project_grants WHERE id=? AND staff_id=? AND capability='project.shared.sync' AND effect='allow' AND scope_kind='business_area' AND business_area_id=? AND division_id IS NULL AND external_project_id IS NULL AND active=1 AND version=1 AND granted_by=?) AND (SELECT generation FROM native_project_grant_generations WHERE staff_id=?)=?", [input.approval.grantId, input.target.staffId, input.target.businessAreaId, input.target.staffId, input.target.staffId, input.projectGeneration.generation + 1], "poststate"),
+    poststateGrant,
     insert("native_staff_bootstrap_receipts", provisionMetadata.receipt, true),
   ];
+  const revokeGrantMutation = reuseGrant
+    ? { sql: "UPDATE native_project_grants SET active=0,version=version+1 WHERE id=? AND staff_id=? AND active=1 AND version=?", params: [input.approval.grantId, input.target.staffId, provisionGrantVersion] }
+    : { sql: "UPDATE native_project_grants SET active=0,version=version+1 WHERE id=? AND staff_id=? AND active=1 AND version=1", params: [input.approval.grantId, input.target.staffId] };
+  const revokePoststate = reuseGrant
+    ? guard("EXISTS(SELECT 1 FROM native_project_grants WHERE id=? AND active=0 AND version=?) AND (SELECT generation FROM native_project_grant_generations WHERE staff_id=?)=?", [input.approval.grantId, provisionGrantVersion + 1, input.target.staffId, input.projectGeneration.generation + 2], "poststate")
+    : guard("EXISTS(SELECT 1 FROM native_project_grants WHERE id=? AND active=0 AND version=2) AND (SELECT generation FROM native_project_grant_generations WHERE staff_id=?)=?", [input.approval.grantId, input.target.staffId, input.projectGeneration.generation + 2], "poststate");
   const revokeStatements = readback ? [
     ...common, quiet,
     guard("julianday('now')>=julianday(?)", [readback.receipt.executed_at], "revoke-chronology"),
-    guard("(SELECT count(*) FROM native_project_grants WHERE staff_id=?)=?", [input.target.staffId, input.projectGrants.length + 1], "revoke-grant-count"),
-    ...input.projectGrants.map(grant => guard(`EXISTS(SELECT 1 FROM native_project_grants WHERE ${PROJECT_GRANT.map(key => `${key} IS ?`).join(" AND ")})`, PROJECT_GRANT.map(key => grant[key]), "revoke-unrelated-grant")),
+    guard("(SELECT count(*) FROM native_project_grants WHERE staff_id=?)=?", [input.target.staffId, input.projectGrants.length + (reuseGrant ? 0 : 1)], "revoke-grant-count"),
+    ...input.projectGrants.filter(grant => grant.id !== input.approval.grantId).map(grant => guard(`EXISTS(SELECT 1 FROM native_project_grants WHERE ${PROJECT_GRANT.map(key => `${key} IS ?`).join(" AND ")})`, PROJECT_GRANT.map(key => grant[key]), "revoke-unrelated-grant")),
     ...rows("native_project_grants", PROJECT_GRANT, [readback.grant], "id=?", [input.approval.grantId], "paired-grant"),
     guard("(SELECT generation FROM native_project_grant_generations WHERE staff_id=?)=?", [input.target.staffId, input.projectGeneration.generation + 1], "revoke-generation"),
     ...rows("native_staff_bootstrap_approvals", APPROVAL, [readback.approval], "approval_id=?", [provisionMetadata.approval.approval_id], "paired-approval"),
     ...rows("native_staff_bootstrap_receipts", RECEIPT, [readback.receipt], "command_id=?", [provisionMetadata.receipt.command_id], "paired-receipt"),
     insert("native_staff_bootstrap_approvals", revokeMetadata.approval),
-    { sql: "UPDATE native_project_grants SET active=0,version=version+1 WHERE id=? AND staff_id=? AND active=1 AND version=1", params: [input.approval.grantId, input.target.staffId] },
+    revokeGrantMutation,
     guard("changes()=1", [], "grant-cas"),
     { sql: "UPDATE native_staff_bootstrap_approvals SET revoked_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE approval_id=? AND revoked_at IS NULL", params: [provisionMetadata.approval.approval_id] },
     guard("changes()=1", [], "approval-cas"),
-    guard("EXISTS(SELECT 1 FROM native_project_grants WHERE id=? AND active=0 AND version=2) AND (SELECT generation FROM native_project_grant_generations WHERE staff_id=?)=?", [input.approval.grantId, input.target.staffId, input.projectGeneration.generation + 2], "poststate"),
+    revokePoststate,
     insert("native_staff_bootstrap_receipts", revokeMetadata.receipt, true),
   ] : null;
-  return Object.freeze({ schemaVersion: 1, input, planHash, provision: { ...provisionMetadata, ...(!readback ? { statements: provisionStatements } : {}) }, ...(revokeStatements ? { revoke: { ...revokeMetadata, statements: revokeStatements } } : {}), trustedApplyOnly: true });
+  return Object.freeze({ schemaVersion: input.schemaVersion, input, planHash, provision: { ...provisionMetadata, ...(!readback ? { statements: provisionStatements } : {}) }, ...(revokeStatements ? { revoke: { ...revokeMetadata, statements: revokeStatements } } : {}), trustedApplyOnly: true });
 }

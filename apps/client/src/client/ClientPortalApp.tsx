@@ -113,6 +113,7 @@ import { NativeWorkspaceContent } from "./NativeWorkspaceContent";
 import { loadNativeViewerModels, type NativePortalBootstrap } from "./native-portal-api";
 import { invitationCapabilitiesLabel, invitationRequestSchema } from "./invitation-request-api";
 import { PortalInvitationRequests } from "./PortalInvitationRequests";
+import { isOptionalClientWorkspaceBootstrapAbsence } from "./portal-bootstrap-classification";
 import { PortalAddressBook, PortalAddressBookPicker } from "./PortalAddressBook";
 import type { AddressBookContact } from "./address-book-api";
 import { resolvePortalBrand, type PortalBrandContext } from "./portal-brand";
@@ -124,7 +125,7 @@ type TopPage = "dashboard" | "projects" | "deliveries" | "requests" | "feedback"
 type WorkspaceTab = "overview" | "files" | "models" | "requests";
 type PortalGate =
   | { status: "loading" }
-  | { status: "blocked"; title: string; detail: string }
+  | { status: "blocked"; title: string; detail: string; optionalClientWorkspaceAbsent: boolean }
   | { status: "ready"; data: PortalBootstrap | NativePortalBootstrap };
 
 const navigation: Array<{ page: TopPage; label: string }> = [
@@ -146,11 +147,14 @@ function readAuthenticatedDeliveryFolderLocation(): DeliveryFolderLocation {
 
 function blockedPortal(
   caught: unknown,
+  requestedWorkspaceId: string | null = null,
 ): Extract<PortalGate, { status: "blocked" }> {
   const error = caught as RequestError;
+  const optionalClientWorkspaceAbsent = isOptionalClientWorkspaceBootstrapAbsence(caught, requestedWorkspaceId);
   if (error.body?.code === "CLIENT_PORTAL_SCHEMA_OUTDATED")
     return {
       status: "blocked",
+      optionalClientWorkspaceAbsent,
       title: "Portal update in progress",
       detail:
         "Your access is valid, but the client portal database update has not finished. Retry shortly or contact Ledge Top if this continues.",
@@ -158,18 +162,21 @@ function blockedPortal(
   if (error.status === 404)
     return {
       status: "blocked",
+      optionalClientWorkspaceAbsent,
       title: "Portal unavailable",
       detail: "The client portal is not enabled for this site.",
     };
   if (error.status === 401)
     return {
       status: "blocked",
+      optionalClientWorkspaceAbsent,
       title: "Sign in required",
       detail: "Sign in with the client identity provided by Ledge Top to continue.",
     };
   if (error.status === 403)
     return {
       status: "blocked",
+      optionalClientWorkspaceAbsent,
       title: "Access not provisioned",
       detail:
         "This workspace is not available to your verified identity. Contact your Ledge Top representative.",
@@ -177,11 +184,13 @@ function blockedPortal(
   if (error.status === 503)
     return {
       status: "blocked",
+      optionalClientWorkspaceAbsent,
       title: "Portal configuration incomplete",
       detail: "Client portal access is not ready on this site.",
     };
   return {
     status: "blocked",
+    optionalClientWorkspaceAbsent,
     title: "Portal temporarily unavailable",
     detail: "We could not load the client portal. Please try again later.",
   };
@@ -2879,7 +2888,8 @@ export function ClientPortalApp({
   useEffect(() => {
     let active = true;
     bootstrapController.current?.abort(); const controller = new AbortController(); bootstrapController.current = controller;
-    loadPortalBootstrap(undefined, new URLSearchParams(location.search).get("workspace"), controller.signal)
+    const requestedWorkspaceId = new URLSearchParams(location.search).get("workspace");
+    loadPortalBootstrap(undefined, requestedWorkspaceId, controller.signal)
       .then((data) => {
         if (active && !controller.signal.aborted) {
           history.replaceState(null, "", withPortalWorkspace(`${location.pathname}${location.search}`));
@@ -2888,7 +2898,7 @@ export function ClientPortalApp({
         }
       })
       .catch((caught) => {
-        if (active && !controller.signal.aborted) setGate(blockedPortal(caught));
+        if (active && !controller.signal.aborted) setGate(blockedPortal(caught, requestedWorkspaceId));
       });
     return () => {
       active = false;
@@ -3020,7 +3030,8 @@ export function ClientPortalApp({
       </PortalBoundary>
     );
   if (gate.status === "blocked") {
-    if (currentOperationsHome) return <OperationsHomeApp response={currentOperationsHome} clientUnavailable onRetryClient={() => {
+    if (currentOperationsHome) return <OperationsHomeApp response={currentOperationsHome}
+      clientUnavailable={!gate.optionalClientWorkspaceAbsent || currentOperationsHome.homes.length === 0} onRetryClient={() => {
       setPortalWorkspaceSelection(null);
       window.location.assign("/portal");
     }} />;
@@ -3208,7 +3219,7 @@ export function ClientPortalApp({
 
   if (native)
     content = <NativeWorkspaceContent key={`${native.workspace.sourceId}:${native.workspace.id}:${native.contextVersion}`} context={native} page={page} projectId={projectId} feedbackId={feedbackId} openProject={openProject}
-      onInvalid={caught => { bootstrapController.current?.abort(); const status = (caught as RequestError).status; setGate(status === 409 ? {status: "blocked", title: "Workspace changed", detail: "Your workspace changed. Refresh the portal before continuing."} : status === 404 || status === 410 ? {status: "blocked", title: "Shared item unavailable", detail: "This shared item or its access has changed. Refresh the portal to check your current workspace."} : blockedPortal(caught)); }}
+      onInvalid={caught => { bootstrapController.current?.abort(); const status = (caught as RequestError).status; setGate(status === 409 ? {status: "blocked", optionalClientWorkspaceAbsent: false, title: "Workspace changed", detail: "Your workspace changed. Refresh the portal before continuing."} : status === 404 || status === 410 ? {status: "blocked", optionalClientWorkspaceAbsent: false, title: "Shared item unavailable", detail: "This shared item or its access has changed. Refresh the portal to check your current workspace."} : blockedPortal(caught)); }}
       renderTeam={native.capabilities.workspaceMembershipManagement ? () => <Card title="Team access" className="portal-team-card"><WorkspaceTeamPanel initialWorkspaceId={native.workspace.id} workspaceMode="native" expectedSourceId={native.workspace.sourceId} invitationEmailDelivery={native.capabilities.invitationEmailDelivery} hierarchyScopedInvitations={native.capabilities.hierarchyScopedInvitations} /></Card> : undefined}
       renderRequests={renderRequestSurface}
       renderModels={id => <ProjectViewerModels projectId={id} initialDisplayUnits={readClientViewerUnits()}

@@ -13,6 +13,22 @@ const owner = { email: "delivery-schema-owner@staging.example.test", displayName
   operationsStaffId: "staging-delivery-schema-operations-owner" };
 const hash = (text: string) => createHash("sha256").update(text).digest("hex");
 
+it("0187 changes only the native delivery folder guard's prefix predicate", () => {
+  const directory = new URL("../migrations/", import.meta.url);
+  const original = readFileSync(new URL("0158_operations_portal_native_delivery_authority.sql", directory), "utf8");
+  const forward = readFileSync(new URL("0187_operations_portal_native_delivery_literal_prefix_guard.sql", directory), "utf8");
+  const trigger = (source: string) => source.match(/CREATE TRIGGER operations_portal_native_delivery_grant_folder_guard[\s\S]*?END;/u)?.[0];
+  const before = trigger(original), after = trigger(forward);
+  expect(before).toBeDefined(); expect(after).toBeDefined();
+  expect(before).toContain("NEW.selected_r2_prefix LIKE");
+  expect(after).toContain("substr(NEW.selected_r2_prefix,1,length(NEW.base_r2_prefix))=NEW.base_r2_prefix COLLATE BINARY");
+  expect(after!.replace("substr(NEW.selected_r2_prefix,1,length(NEW.base_r2_prefix))=NEW.base_r2_prefix COLLATE BINARY",
+    "NEW.selected_r2_prefix LIKE replace(replace(replace(NEW.base_r2_prefix,'\\','\\\\'),'%','\\%'),'_','\\_') || '%' ESCAPE '\\'"))
+    .toBe(before);
+  expect((forward.match(/DROP TRIGGER /gu) ?? [])).toHaveLength(1);
+  expect((forward.match(/CREATE TRIGGER /gu) ?? [])).toHaveLength(1);
+});
+
 it("applies the exact Ops native delivery authority draft after its reviewed prerequisites", async () => {
   const runtime = new Miniflare({ modules: true, compatibilityDate: "2026-08-06", script: "export default {}",
     d1Databases: { OPS_DB: crypto.randomUUID() } });

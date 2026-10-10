@@ -20,6 +20,14 @@ export async function reserveAndPublishOperationsWorkspace(csrfToken: string, bo
     ...headers, "X-CSRF-Token": csrfToken, "Idempotency-Key": operationId,
   }, body: JSON.stringify(body) }));
 }
+export async function refreshAndPublishOperationsWorkspace(csrfToken: string, body: unknown) {
+  const operationId = body && typeof body === "object" && "publication" in body && body.publication
+    && typeof body.publication === "object" && "operationId" in body.publication ? body.publication.operationId : null;
+  if (typeof operationId !== "string") throw new Error("invalid_request");
+  return value(await fetch(`${BASE}/refresh-and-publish`, { method: "POST", credentials: "same-origin", headers: {
+    ...headers, "X-CSRF-Token": csrfToken, "Idempotency-Key": operationId,
+  }, body: JSON.stringify(body) }));
+}
 async function mutateFolder(csrfToken: string, path: "reserve-folder-and-publish" | "revoke-folder-and-publish",
   body: unknown) {
   const operationId = body && typeof body === "object" && "folder" in body && body.folder

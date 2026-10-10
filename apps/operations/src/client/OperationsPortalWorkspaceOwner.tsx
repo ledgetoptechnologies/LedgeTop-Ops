@@ -1,6 +1,7 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { operationsWorkspaceCsrf, recoverOperationsWorkspacePublication, reserveAndPublishOperationsFolder,
-  reserveAndPublishOperationsWorkspace, revokeAndPublishOperationsFolder, lookupOperationsProjectFolder, confirmOperationsProjectFolder }
+  reserveAndPublishOperationsWorkspace, refreshAndPublishOperationsWorkspace, revokeAndPublishOperationsFolder,
+  lookupOperationsProjectFolder, confirmOperationsProjectFolder }
   from "./operations-portal-workspace-owner-api";
 import type { OperationsPortalSharedProjectFolder } from "../worker/operations-portal-shared-project-folders";
 import { assertSameFolderRetry, assertSameWorkspaceRetry } from "./operations-folder-retry";
@@ -8,6 +9,51 @@ import { assertSameFolderRetry, assertSameWorkspaceRetry } from "./operations-fo
 type RootKind = "organization" | "standalone_client";
 const integer = (value: string) => Number.parseInt(value, 10);
 type FolderAction = "reserve" | "revoke";
+type RefreshPublicationRequest = Readonly<{ targetId: string; publication: Readonly<{
+  operationId: string; publicationId: string; snapshotId: string; checkpointId: string; invocationId: string;
+  expectedRevision: number; reason: string;
+}> }>;
+export function prepareOperationsWorkspaceRefreshRequest(pending: RefreshPublicationRequest | null,
+  targetId: string, expectedRevision: number, reason: string): RefreshPublicationRequest {
+  if (pending) {
+    if (pending.targetId !== targetId || pending.publication.expectedRevision !== expectedRevision
+      || pending.publication.reason !== reason)
+      throw new Error("Discard the retained refresh request before changing its target, revision, or reason.");
+    return pending;
+  }
+  return { targetId, publication: { operationId: crypto.randomUUID(), publicationId: crypto.randomUUID(),
+    snapshotId: crypto.randomUUID(), checkpointId: crypto.randomUUID(), invocationId: crypto.randomUUID(),
+    expectedRevision, reason } };
+}
+function RefreshPublication({ csrf, busy, setBusy, setError, setResult, setRecoverOperationId }: Readonly<{
+  csrf: string; busy: boolean; setBusy(value: boolean): void; setError(value: string): void;
+  setResult(value: string): void; setRecoverOperationId(value: string): void;
+}>) {
+  const [pending, setPending] = useState<RefreshPublicationRequest | null>(null);
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault(); setBusy(true); setError(""); setResult("");
+    const data = new FormData(event.currentTarget), value = (name: string) => String(data.get(name) ?? "").trim();
+    try {
+      const body = prepareOperationsWorkspaceRefreshRequest(pending, value("refreshTargetId"),
+        integer(value("refreshPublicationRevision")), value("refreshReason"));
+      setPending(body); setRecoverOperationId(body.publication.operationId);
+      const response = await refreshAndPublishOperationsWorkspace(csrf, body);
+      setResult(JSON.stringify(response, null, 2));
+      if (response && typeof response === "object" && "publicationState" in response
+        && response.publicationState === "acknowledged") setPending(null);
+    } catch (caught) { setError(caught instanceof Error ? caught.message : "request_failed"); }
+    finally { setBusy(false); }
+  }
+  return <form className="form-card" onSubmit={submit}><h2>Refresh and publish current workspace topology</h2>
+    <p>This publishes a fresh snapshot of current workspace membership. It does not grant or revoke a folder or recipient.</p>
+    <label>Workspace target UUID<input name="refreshTargetId" required /></label>
+    <label>Current publication revision<input name="refreshPublicationRevision" type="number" min="1" step="1" required /></label>
+    <label>Reason<textarea name="refreshReason" maxLength={500} required /></label>
+    <button className="button-orange" disabled={busy || !csrf}>{busy ? "Publishing…" : "Refresh and publish current topology"}</button>
+    {pending && <><p role="status">Exact publication IDs are retained. Submit again unchanged to replay safely.</p>
+      <button type="button" className="button-ghost" disabled={busy} onClick={() => setPending(null)}>Discard retained refresh</button></>}
+  </form>;
+}
 function FolderProof({ csrf, busy, setBusy, setError, proof, setProof }: Readonly<{
   csrf: string; busy: boolean; setBusy(value: boolean): void; setError(value: string): void;
   proof: OperationsPortalSharedProjectFolder | null; setProof(value: OperationsPortalSharedProjectFolder | null): void;
@@ -158,6 +204,8 @@ export function OperationsPortalWorkspaceOwner() {
       {pending && <><p role="status">The exact request IDs are retained. Submit again to replay safely.</p>
         <button type="button" className="button-ghost" disabled={busy} onClick={() => setPending(null)}>Discard retained request</button></>}
     </form>
+    <RefreshPublication csrf={csrf} busy={busy} setBusy={setBusy} setError={setError} setResult={setResult}
+      setRecoverOperationId={setRecoverOperationId} />
     <FolderProof csrf={csrf} busy={busy} setBusy={setBusy} setError={setError} proof={folderProof} setProof={setFolderProof} />
     <FolderMutation action="reserve" csrf={csrf} busy={busy} setBusy={setBusy} setError={setError} folderProof={folderProof}
       setResult={setResult} setRecoverOperationId={setRecoverOperationId} />

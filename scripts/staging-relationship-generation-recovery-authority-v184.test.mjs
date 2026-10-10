@@ -17,16 +17,39 @@ test("compiles the exact six-resource transition and eight-entry selection",()=>
 });
 
 test("preserves historical v1 compilation while v2 pins the live mixed record scopes",()=>{
-  const historical=compileRelationshipRecoveryAuthorityV184(fixture());
-  const repeated=compileRelationshipRecoveryAuthorityV184(fixture());
+  const historicalInput=fixture();historicalInput.migrationNames.splice(184);
+  const historical=compileRelationshipRecoveryAuthorityV184(historicalInput);
+  const repeated=compileRelationshipRecoveryAuthorityV184(structuredClone(historicalInput));
   assert.deepEqual(repeated,historical);
   assert.equal(historical.receipt.canonical_plan_sha256,"6bedf7710d8bace3a740691a68915585df059c3eae45e390119738cf1574d853");
   assert.equal(historical.schemaVersion,1);
+  const reviewed185Input=fixtureV2();reviewed185Input.migrationNames.splice(185);
+  assert.deepEqual(compileRelationshipRecoveryAuthorityV184(structuredClone(reviewed185Input)),
+    compileRelationshipRecoveryAuthorityV184(reviewed185Input));
   const current=compileRelationshipRecoveryAuthorityV184(fixtureV2());
   assert.equal(current.schemaVersion,2);
   assert.deepEqual(current.input.resourceScopes,fixtureV2().resourceScopes);
   assert.deepEqual(current.selection,historical.selection);
   assert.deepEqual(JSON.parse(current.receipt.result_json).grantIds,JSON.parse(historical.receipt.result_json).grantIds);
+});
+
+test("v3 revoke self-revokes only after its receipt while v2 remains reproducible",()=>{
+  const v2Provision=compileRelationshipRecoveryAuthorityV184(fixtureV2());
+  const v2Revoke=compileRelationshipRecoveryAuthorityV184(revokeFixture(fixtureV2,v2Provision));
+  assert.equal(v2Revoke.approval.revoked_at,null);
+  assert.equal(v2Revoke.statements.some(row=>row.params?.includes(v2Revoke.approval.approval_id)&&row.sql.startsWith("UPDATE native_staff_bootstrap_approvals SET revoked_at")),false);
+  const provisionInput=fixtureV2();provisionInput.schemaVersion=3;
+  const provision=compileRelationshipRecoveryAuthorityV184(provisionInput);
+  assert.equal(provision.schemaVersion,3);assert.equal(provision.approval.revoked_at,null);
+  const revokeInput=revokeFixture(()=>{const value=fixtureV2();value.schemaVersion=3;return value},provision);
+  const revoke=compileRelationshipRecoveryAuthorityV184(revokeInput);
+  assert.equal(revoke.approval.revoked_at,revoke.input.approval.executedAt);
+  const approvalInsert=revoke.statements.find(row=>row.sql.startsWith("INSERT INTO native_staff_bootstrap_approvals"));
+  assert.equal(approvalInsert.params.at(-1),null);
+  const receiptIndex=revoke.statements.findIndex(row=>row.sql.startsWith("INSERT INTO native_staff_bootstrap_receipts"));
+  const selfRevokeIndex=revoke.statements.findIndex(row=>row.sql.startsWith("UPDATE native_staff_bootstrap_approvals SET revoked_at")&&row.params[1]===revoke.approval.approval_id);
+  assert.ok(receiptIndex>=0&&selfRevokeIndex>receiptIndex);
+  assert.match(revoke.statements[selfRevokeIndex+1].sql,/changes\(\)=1/);
 });
 
 test("v2 rejects either record being pinned to the other record's business area",()=>{
@@ -55,7 +78,7 @@ test("compiles the actual four-fresh plus two-inactive resource shape",()=>{
 });
 
 test("rejects chain, target, relationship, predecessor, deny and grant drift",()=>{
-  for(const mutate of [value=>value.migrationNames.pop(),value=>value.target={...value.target,clientRecordId:"other"},value=>value.relationship.relationship_version=3,value=>value.predecessor.source_id="wrong",value=>value.predecessor.source_instance_id="wrong",value=>value.predecessor.application_id="wrong",value=>value.predecessor.history_epoch_id="wrong",value=>value.predecessor.destination_origin="https://wrong.example",value=>value.predecessor.client_public_id="wrong",value=>value.predecessor.organization_public_id="wrong",value=>value.approval.grantIds[0]=value.approval.grantIds[1]]){
+  for(const mutate of [value=>value.migrationNames[value.migrationNames.length-1]="0185_unreviewed.sql",value=>value.target={...value.target,clientRecordId:"other"},value=>value.relationship.relationship_version=3,value=>value.predecessor.source_id="wrong",value=>value.predecessor.source_instance_id="wrong",value=>value.predecessor.application_id="wrong",value=>value.predecessor.history_epoch_id="wrong",value=>value.predecessor.destination_origin="https://wrong.example",value=>value.predecessor.client_public_id="wrong",value=>value.predecessor.organization_public_id="wrong",value=>value.approval.grantIds[0]=value.approval.grantIds[1]]){
     const value=fixture();mutate(value);assert.throws(()=>compileRelationshipRecoveryAuthorityV184(value));
   }
   const value=fixture(),deny=grant(50,"directory.profile.edit",target.clientRecordId,1);deny.effect="deny";value.grants.push(deny);value.history.push({...value.history[0],grant_id:deny.id,permission:deny.permission,effect:"deny",scope_kind:"resource",resource_id:deny.resource_id,active:1,grant_generation:++value.generation.generation});
