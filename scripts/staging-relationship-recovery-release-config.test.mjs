@@ -67,6 +67,8 @@ test("fails closed on targets, deployment drift, active gates, duplicates, secre
   const cases = [
     ["account", baseline(), snapshot(), { ...target, accountId: "production" }],
     ["worker", { ...baseline(), name: "ledgetop-ops" }, snapshot(), target],
+    ["runtime date", { ...baseline(), compatibility_date: "2026-07-23" }, snapshot(), target],
+    ["runtime flags", { ...baseline(), compatibility_flags: [] }, snapshot(), target],
     ["environment", baseline(), (() => { const s=snapshot();s.version.resources.bindings[0].text="production";return s; })(), target],
     ["percentage", baseline(), (() => { const s=snapshot();s.deployment.deployments[0].versions[0].percentage=99;return s; })(), target],
     ["two versions", baseline(), (() => { const s=snapshot();s.deployment.deployments[0].versions.push({version_id:"other",percentage:0});return s; })(), target],

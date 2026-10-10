@@ -26,6 +26,11 @@ export function buildRelationshipRecoveryReleaseConfig(baseline, snapshot, targe
   }
   if (!plain(snapshot.deployment) || !Array.isArray(snapshot.deployment.deployments)
     || snapshot.deployment.deployments.length < 1) fail("exact provider deployment snapshot required");
+  const runtime = snapshot.version.resources.script_runtime;
+  if (baseline.compatibility_date !== runtime.compatibility_date
+    || !same(baseline.compatibility_flags ?? [], runtime.compatibility_flags ?? [])) {
+    fail("baseline runtime differs from live runtime; explicit review required");
+  }
   const deployment = snapshot.deployment.deployments[0];
   if (!plain(deployment) || !Array.isArray(deployment.versions) || deployment.versions.length !== 1
     || !plain(deployment.versions[0]) || deployment.versions[0].version_id !== snapshot.version.id
