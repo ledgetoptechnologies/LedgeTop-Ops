@@ -16,7 +16,8 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const sourceName = "apps/operations/wrangler.staging.provider-preserved-scalar.json";
 
 function providerSource() {
-  const source = JSON.parse(fs.readFileSync(path.join(root, "apps/operations/wrangler.staging.json"), "utf8"));
+  // CI has only tracked sources, never the operator's ignored live config.
+  const source = JSON.parse(fs.readFileSync(path.join(root, "docs/staging/operations.wrangler.json.example"), "utf8"));
   source.vars.NATIVE_DIRECTORY_PROFILE_WRITES_ENABLED = "true";
   source.vars.NATIVE_DIRECTORY_OUTBOX_DRAIN_ENABLED = "false";
   source.vars.PROJECT_ALPHA_DIRECTORY_CREATE_GENERATION_RECOVERY_ENABLED = "false";
