@@ -7,6 +7,8 @@ import { readClientPortalNativeFinancialDocuments } from
   "../src/worker/client-portal-native-financial-reader";
 import { resolveTrustedNativeFinancialMapping } from "../src/worker/project-alpha-financial-mapping";
 import { persistProjectAlphaProjectInventoryPage } from "../src/worker/project-alpha-v2-sync";
+import { readClientPortalNativeFinancialCollections } from
+  "../src/worker/client-portal-native-financial-entrypoint";
 
 type Row = Record<string, string | number | null>;
 const required = async (db: D1Database, sql: string, ...values: unknown[]) => {
@@ -186,7 +188,14 @@ async function proveProjectBillingLifecycle(context: CanonicalPortalAcceptanceCo
   expect(financial.status).toBe("ok");
   if(financial.status==="ok") expect(financial.value.documents).toEqual([expect.objectContaining({kind:"contract",status:"pending"})]);
   expect(financialCalls).toBe(1);
+  const collection=await readClientPortalNativeFinancialCollections(financialEnv,financialRequest,financialRemote as typeof fetch);
+  expect(collection).toMatchObject({ok:true,authorityId:workspace.clientAuthorityId,
+    collections:[{status:"ok",grantId,revision:1,value:{documents:[{kind:"contract",status:"pending"}]}}]});
+  expect(financialCalls).toBe(2);
   await context.advanceProject();
+  await expect(readClientPortalNativeFinancialCollections(financialEnv,financialRequest,financialRemote as typeof fetch))
+    .resolves.toEqual({ok:false,protocolVersion:1,code:"denied"});
+  expect(financialCalls).toBe(2);
   expect(await db.prepare(`SELECT native_entity_id FROM operations_portal_native_billing_live_authority
     WHERE grant_id=?`).bind(grantId).first("native_entity_id")).toBeNull();
 
