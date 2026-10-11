@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { nativeProjectPrepareSchema, nativeProjectSubmitSchema } from "../src/worker/client-hub-native-project-management";
+import { classifyNativeProjectPreparationInsertFailure, nativeProjectPrepareSchema,
+  nativeProjectSubmitSchema } from "../src/worker/client-hub-native-project-management";
 
 const commandId = "11111111-1111-4111-8111-111111111111";
 const externalProjectId = "22222222-2222-4222-8222-222222222222";
@@ -48,5 +49,19 @@ describe("Client Hub native project request boundaries", () => {
       { ...update, command: { ...update.command, expectedRevision: undefined } },
       { ...update, directory: prepared.directory },
     ]) expect(nativeProjectSubmitSchema.safeParse({ expectedContextVersion: "context", request: invalid }).success).toBe(false);
+  });
+
+  it("classifies only bounded Error cause chains without inspecting arbitrary values", () => {
+    expect(classifyNativeProjectPreparationInsertFailure(new Error("outer", { cause:
+      new Error("D1_ERROR: client hub native project preparation authority is not current and exact") }))).toBe("authority_stale");
+    expect(classifyNativeProjectPreparationInsertFailure(new Error("D1_ERROR: Expression tree is too large (maximum depth 100)")))
+      .toBe("expression_depth");
+    expect(classifyNativeProjectPreparationInsertFailure(new Error("SQLITE_CONSTRAINT: CHECK constraint failed"))).toBe("constraint");
+    const cyclic = new Error("unclassified");
+    cyclic.cause = cyclic;
+    expect(classifyNativeProjectPreparationInsertFailure(cyclic)).toBe("database_unavailable");
+    const opaque = Object.create(null) as Record<string, unknown>;
+    Object.defineProperty(opaque,"message",{get(){throw new Error("must not inspect");}});
+    expect(classifyNativeProjectPreparationInsertFailure(opaque)).toBe("database_unavailable");
   });
 });
