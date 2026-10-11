@@ -55,7 +55,8 @@ function database(options: { enrollment?: unknown; outboxState?: string; missing
   relationshipReplay?: { organization: { recordId: string; expectedRecordVersion: number } | null;
     supersedeTerminalCommandIds?: string[] };
   terminalPredecessor?: { command_id: string; state: string } | null;
-  relationshipPending?: boolean; recoveryAcknowledged?: boolean; recoveryReviewSources?: string[];
+  relationshipPending?: boolean; recoveryAcknowledged?: boolean; recoveryIdentityInvalid?: boolean;
+  recoveryTupleMismatch?: boolean; relationshipRowCount?: number; recoveryReviewSources?: string[];
   missingGrantResource?: string } = {}) {
   let preparedAdmission: Row | null = null, preparedRelationship: Row | null = null;
   const queries: string[] = [];
@@ -127,8 +128,9 @@ function database(options: { enrollment?: unknown; outboxState?: string; missing
           client_version: 4, organization_version: options.linked ? 3 : null,
         } : { organization_record_id: options.linked ? acquiredOrganizationId : null, relationship_version: 2 };
         else if (sql.includes("sum(CASE WHEN") && sql.includes("relationship_version")) value = {
-          total: 1, acknowledged: options.relationshipPending && !(options.recoveryAcknowledged
-            && sql.includes("project_alpha_directory_validated_recovery_relationship_acknowledgements")) ? 0 : 1,
+          total: options.relationshipRowCount ?? 1, acknowledged: options.relationshipPending && !(options.recoveryAcknowledged
+            && !options.recoveryIdentityInvalid && !options.recoveryTupleMismatch
+            && sql.includes("project_alpha_directory_validated_recovery_relationship_acknowledgements")) ? 0 : (options.relationshipRowCount ?? 1),
         };
         else if (sql.includes("native_directory_assignments")) value = null;
         else if (sql.includes("native_directory_enrollments")) value = options.enrollment === undefined ? null
@@ -330,6 +332,14 @@ describe("native Directory profile routes", () => {
       enrollment, relationshipPending: true, recoveryReviewSources: [sourceId] }) }).send(path, null, "GET");
     const disabledBody = await disabled.json() as { relationship: Record<string, unknown> };
     expect(disabledBody.relationship).not.toHaveProperty("recovery");
+
+    const settledAfterClose = await fixture({ db: database({ profile: "client", linked: true,
+      enrollment, relationshipPending: true, recoveryAcknowledged: true }) }).send(path, null, "GET");
+    expect(settledAfterClose.status).toBe(200);
+    await expect(settledAfterClose.json()).resolves.toEqual(expect.objectContaining({
+      editing: { available: true, reason: null },
+      relationship: expect.objectContaining({ editing: { available: true, reason: null } }),
+    }));
 
     const ordinary = await fixture({ relationshipGenerationRecovery: true,
       db: database({ profile: "client", linked: true, enrollment, relationshipPending: true,
@@ -605,22 +615,31 @@ describe("native Directory profile routes", () => {
     const pending = await fixture({ db: pendingDb }).send(route, value, "PATCH");
     expect(pending.status).toBe(409);
     await expect(pending.json()).resolves.toEqual({ status: "conflict", reason: "relationship_delivery_pending" });
-    expect(pendingDb.queries().every(sql => !sql.includes("validated_recovery_relationship_acknowledgements"))).toBe(true);
+    expect(pendingDb.queries().some(sql => sql.includes("validated_recovery_relationship_acknowledgements"))).toBe(true);
     mocks.writer.mockResolvedValueOnce({ status: "written", replayed: false, mutationId: ids.mutation,
       recordId: ids.client, kind: "client", version: 2, commandIds: [ids.command] });
     const recoveredDb = database({ enrollment, linked: true, relationshipPending: true, recoveryAcknowledged: true });
-    const recovered = await fixture({ relationshipGenerationRecovery: true, db: recoveredDb })
-      .send(route, value, "PATCH");
+    const recovered = await fixture({ db: recoveredDb }).send(route, value, "PATCH");
     expect(recovered.status).toBe(202);
     expect(mocks.writer).toHaveBeenLastCalledWith(expect.anything(), expect.objectContaining({
       relationship: { organizationRecordId: acquiredOrganizationId, expectedRelationshipVersion: 2 },
-    }), true);
+    }));
     const settlement = recoveredDb.queries().find(sql => sql.includes("sum(CASE WHEN")) ?? "";
     expect(settlement).toContain("recovery.predecessor_command_id=normal.command_id");
     for (const column of ["client_record_id", "relationship_version", "source_id", "source_instance_id",
       "application_id", "history_epoch_id", "destination_origin"])
       expect(settlement).toContain(`recovery.${column}=normal.${column}`);
     expect(settlement).toContain("recovery.identity_valid=1");
+
+    for (const rejected of [
+      database({ enrollment, linked: true, relationshipPending: true, recoveryAcknowledged: true, recoveryIdentityInvalid: true }),
+      database({ enrollment, linked: true, relationshipPending: true, recoveryAcknowledged: true, recoveryTupleMismatch: true }),
+      database({ enrollment, linked: true, relationshipPending: true, recoveryAcknowledged: true, relationshipRowCount: 2 }),
+    ]) {
+      const denied = await fixture({ db: rejected }).send(route, value, "PATCH");
+      expect(denied.status).toBe(409);
+      await expect(denied.json()).resolves.toEqual({ status: "conflict", reason: "relationship_delivery_pending" });
+    }
   });
 
   it("requires a live binding at the persisted generation and exact durable revision before update", async () => {

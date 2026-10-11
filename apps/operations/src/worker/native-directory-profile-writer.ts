@@ -461,8 +461,11 @@ async function updateRemoteState(db: DirectoryWriteD1,
   write: Pick<NormalizedWrite, "kind" | "recordId" | "expectedLocalVersion">,
   destinationValue: DestinationIdentity & Readonly<{ expectedAuthorizationGeneration?: string }>,
   allowAcquiredEnrollmentCoordinate = false,
-  relationshipRecoveryEnabled = false,
+  _relationshipRecoveryEnabled = false,
 ): Promise<RemoteState | null> {
+  // Keep the compatibility argument for callers compiled against the bounded
+  // recovery window. It no longer controls reads of already-validated history;
+  // recovery review/authorization/dispatch remains gated at its mutation routes.
   const activeRows = (await db.prepare(`SELECT external_id externalId,project_alpha_public_id projectAlphaPublicId,
       mapping_kind mappingKind,provenance_id provenanceId
     FROM project_alpha_active_directory_mappings WHERE source_id=? AND source_instance_id=? AND application_id=? AND history_epoch_id=?
@@ -560,7 +563,7 @@ async function updateRemoteState(db: DirectoryWriteD1,
     ) return { externalId: active.externalId, projectAlphaPublicId: row.projectAlphaPublicId,
       revision: row.revision, authorizationGeneration: row.authorizationGeneration, mappingKind: "legacy" };
   if (write.kind !== "client") return null;
-  const relationshipSource = relationshipRecoveryEnabled ? `SELECT ack.client_public_id projectAlphaPublicId,ack.revision,
+  const relationshipSource = `SELECT ack.client_public_id projectAlphaPublicId,ack.revision,
       json_extract(recovery.outcome_json,'$.response.result.authorizationGeneration') authorizationGeneration
     FROM project_alpha_directory_validated_recovery_relationship_acknowledgements ack
     JOIN project_alpha_directory_relationship_recovery_outbox recovery ON recovery.command_id=ack.command_id
@@ -570,7 +573,7 @@ async function updateRemoteState(db: DirectoryWriteD1,
     WHERE ack.client_record_id=? AND history.client_record_version=? AND ack.source_id=?
       AND ack.source_instance_id=? AND ack.application_id=? AND ack.history_epoch_id=?
       AND ack.destination_origin=? AND ack.identity_valid=1
-    UNION ALL ` : "";
+    UNION ALL `;
   const relationship = await db.prepare(`SELECT * FROM (${relationshipSource}SELECT
       json_extract(outbox.outcome_json,'$.response.result.client.publicId') projectAlphaPublicId,
       json_extract(outbox.outcome_json,'$.response.result.client.revision') revision,
@@ -588,8 +591,8 @@ async function updateRemoteState(db: DirectoryWriteD1,
       AND json_extract(outbox.outcome_json,'$.response.result.client.publicId')=outbox.client_public_id
       AND json_extract(outbox.outcome_json,'$.response.result.organizationPublicId') IS outbox.organization_public_id)
     ORDER BY length(revision) DESC,revision DESC LIMIT 1`)
-    .bind(...(relationshipRecoveryEnabled?[write.recordId,write.expectedLocalVersion,destinationValue.sourceId,
-      destinationValue.sourceInstanceUUID,destinationValue.applicationUUID,destinationValue.historyEpoch,destinationValue.origin]:[]),
+    .bind(write.recordId,write.expectedLocalVersion,destinationValue.sourceId,
+      destinationValue.sourceInstanceUUID,destinationValue.applicationUUID,destinationValue.historyEpoch,destinationValue.origin,
       write.recordId,write.expectedLocalVersion,destinationValue.sourceId,destinationValue.sourceInstanceUUID,
       destinationValue.applicationUUID,destinationValue.historyEpoch,destinationValue.origin).first<Record<string, unknown>>();
   return relationship && relationship.projectAlphaPublicId === active.projectAlphaPublicId
