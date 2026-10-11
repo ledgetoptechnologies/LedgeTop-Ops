@@ -40,7 +40,7 @@ export const NATIVE_MIGRATION_PROFILES = Object.freeze({
     baseNamesSha256: "46d20b48362be8052f5b2fd35ec4ccefee2c267476a2a076af87a955c4cfca3a",
     baseContentsSha256: "cd35de12e87325fb6de854f4ecba47e5172e115f75830af9f4a908710d10a450",
     remoteBaseline: "0183_project_alpha_binding_standalone_relationship_rows.sql",
-    finalMigration: "0198_native_directory_active_binding_revision_refresh.sql",
+    finalMigration: "0199_native_directory_profile_binding_continuations.sql",
     candidates: Object.freeze({
       "0174_project_alpha_directory_preserved_external_identity.sql": "9e794a73b75e025edc04967888631b9336931eb16113f42d855bea3fcb30a158",
       "0175_operations_directory_acquired_parent_enrollment_identity.sql": "de022736243342f203fcf9a1cb22993e49c50bbb18c7b3b2fc95d8fb3fa48ed0",
@@ -67,6 +67,7 @@ export const NATIVE_MIGRATION_PROFILES = Object.freeze({
       "0196_native_directory_maintenance_authority.sql": "84fe7276bb83bb72da6637d5b6827b56e80094c14acbc872935c444fb2a3870a",
       "0197_operations_portal_native_delivery_cancellation_checkpoint_scope.sql": "9cf2194a57cf7888c768d492c78cacf842e3f6c6814d3f395e6fa8f4d0a31a76",
       "0198_native_directory_active_binding_revision_refresh.sql": "a51026608eb70a0645540cfe12bad51feb7a97f924e0b2c3b83837a3ae2fa7c3",
+      "0199_native_directory_profile_binding_continuations.sql": "e5847ab76b50b1a40b64b9663e7934a78a9d2961a52a6158ac7d65a27faf7568",
     }),
     expectedAppliedMigrations: Object.freeze([
       "0184_project_alpha_directory_relationship_generation_recovery.sql",
@@ -84,6 +85,7 @@ export const NATIVE_MIGRATION_PROFILES = Object.freeze({
       "0196_native_directory_maintenance_authority.sql",
       "0197_operations_portal_native_delivery_cancellation_checkpoint_scope.sql",
       "0198_native_directory_active_binding_revision_refresh.sql",
+      "0199_native_directory_profile_binding_continuations.sql",
     ]),
     historical195ExpectedAppliedMigrations: Object.freeze([
       "0184_project_alpha_directory_relationship_generation_recovery.sql",
@@ -317,6 +319,7 @@ function validateSourceMigrations(base, application, contract) {
   // Preserve the exact previously reviewed 0196 window; 0197 alone is not a reviewed successor.
   const historical196CandidateNames = contract.historical195CandidateNames
     ? [...contract.historical195CandidateNames, "0196_native_directory_maintenance_authority.sql"] : candidateNames;
+  const historical198CandidateNames = application === "operations" ? candidateNames.filter(name => !name.startsWith("0199_")) : candidateNames;
   const presentCandidateNames = candidateNames.filter((name) => names.includes(name));
   const currentChain = JSON.stringify(presentCandidateNames) === JSON.stringify(candidateNames);
   const historicalChain = JSON.stringify(presentCandidateNames) === JSON.stringify(historicalCandidateNames);
@@ -325,7 +328,8 @@ function validateSourceMigrations(base, application, contract) {
   const historical194Chain = JSON.stringify(presentCandidateNames) === JSON.stringify(historical194CandidateNames);
   const historical195Chain = JSON.stringify(presentCandidateNames) === JSON.stringify(historical195CandidateNames);
   const historical196Chain = JSON.stringify(presentCandidateNames) === JSON.stringify(historical196CandidateNames);
-  const selectedCandidateNames = currentChain ? candidateNames : historical196Chain ? historical196CandidateNames
+  const historical198Chain = JSON.stringify(presentCandidateNames) === JSON.stringify(historical198CandidateNames);
+  const selectedCandidateNames = currentChain ? candidateNames : historical198Chain ? historical198CandidateNames : historical196Chain ? historical196CandidateNames
     : historical195Chain ? historical195CandidateNames
     : historical194Chain ? historical194CandidateNames
     : historical192Chain ? historical192CandidateNames
@@ -347,7 +351,8 @@ function validateSourceMigrations(base, application, contract) {
   const baselineIndex = finalNames.indexOf(contract.remoteBaseline);
   const expectedAppliedMigrations = finalNames.slice(baselineIndex + 1);
   const reviewedAppliedMigrations = currentChain
-    ? contract.expectedAppliedMigrations : historical196Chain
+    ? contract.expectedAppliedMigrations : historical198Chain
+      ? contract.expectedAppliedMigrations.filter(name => !name.startsWith("0199_")) : historical196Chain
       ? [...contract.historical195ExpectedAppliedMigrations, "0196_native_directory_maintenance_authority.sql"] : historical195Chain
       ? contract.historical195ExpectedAppliedMigrations : historical194Chain
       ? contract.historical194ExpectedAppliedMigrations : historical192Chain

@@ -27,9 +27,9 @@ test.afterEach(() => {
   for (const directory of temporary.splice(0)) fs.rmSync(directory, { recursive: true, force: true });
 });
 
-test("accepts only exact immutable reviewed artifact prefixes through 0198", () => {
+test("accepts only exact immutable reviewed artifact prefixes through 0199", () => {
   const migrationNames = names();
-  for (const count of [184, 185, 186, 187, 190, 192, 194, 195, 196, 198]) {
+  for (const count of [184, 185, 186, 187, 190, 192, 194, 195, 196, 198, 199]) {
     const chain = validateAuthorityMigrationChainV185(root, migrationNames.slice(0, count), fail);
     assert.equal(chain.count, count);
     assert.equal(chain.final, migrationNames[count - 1]);
@@ -77,6 +77,6 @@ test("rejects altered reviewed migrations and an unknown repository suffix", () 
   ]) {
     const base = fixture(); mutate(base);
     assert.throws(() => validateAuthorityMigrationChainV185(base, names(base), fail),
-      /exact reviewed 0198 migration chain/);
+      /exact reviewed 0199 migration chain/);
   }
 });

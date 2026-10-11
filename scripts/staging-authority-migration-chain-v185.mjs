@@ -65,6 +65,13 @@ export const AUTHORITY_MIGRATION_CHAIN_198 = Object.freeze({
   contents: "47369a1c36e64853cf8e82c874af734ff0c2745bef416cca9c3a01cae16f8409",
 });
 
+export const AUTHORITY_MIGRATION_CHAIN_199 = Object.freeze({
+  count: 199,
+  final: "0199_native_directory_profile_binding_continuations.sql",
+  names: "7be05fcb2b54c3a345b76b1f37e3dbbf33c0f4278b6cabe8307a064549c33821",
+  contents: "68586300b95972f8af21d3b75fdfaa936d9b7fc8f30c032e09b4ce480bec92a4",
+});
+
 const sha = value => crypto.createHash("sha256").update(value).digest("hex");
 const matches = (names, contents, chain) => names.length === chain.count
   && names.at(-1) === chain.final && sha(names.join("\n")) === chain.names
@@ -78,8 +85,10 @@ export function validateAuthorityMigrationChainV185(root, requestedNames, fail) 
     if (!stat.isFile() || stat.isSymbolicLink()) fail("regular migration required");
     return `${name}\0${sha(fs.readFileSync(file))}`;
   });
-  if (!matches(names, contents, AUTHORITY_MIGRATION_CHAIN_198)) fail("exact reviewed 0198 migration chain required");
-  const requestedChain = requestedNames?.length === AUTHORITY_MIGRATION_CHAIN_198.count
+  if (!matches(names, contents, AUTHORITY_MIGRATION_CHAIN_199)) fail("exact reviewed 0199 migration chain required");
+  const requestedChain = requestedNames?.length === AUTHORITY_MIGRATION_CHAIN_199.count
+    ? AUTHORITY_MIGRATION_CHAIN_199
+    : requestedNames?.length === AUTHORITY_MIGRATION_CHAIN_198.count
     ? AUTHORITY_MIGRATION_CHAIN_198
     : requestedNames?.length === AUTHORITY_MIGRATION_CHAIN_196.count
     ? AUTHORITY_MIGRATION_CHAIN_196

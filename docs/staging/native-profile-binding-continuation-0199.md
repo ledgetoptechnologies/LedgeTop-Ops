@@ -1,0 +1,29 @@
+# Native Directory profile binding continuation (0199)
+
+Status: local implementation under review; not deployed or enabled. The 0199 migration, canonical full-chain validation, and exact-candidate source CI are still release gates. This note authorizes no provider operation, deployment, production flag, grant, or public-link change.
+
+## Runtime boundary
+
+The continuation is derived only when an exact Project Alpha profile-update ACK is durably settled. The migration trigger records an immutable job from the acknowledged outbox, effective materialization, matching intent, audit event, current local record version, and the one exact active Directory mapping. The intent reaches acknowledged state in the same settlement transaction; subsequent continuation guards require that acknowledged state. The mapping carries its existing `legacy` or `acquired` provenance and exact source, instance, application, epoch, external ID, and PA public ID. The continuation does not create a mapping, impersonate the original actor, add client authority, or change grants or links.
+
+Pre-ACK dispatch keeps its existing actor and authority revalidation. After the durable ACK, continuation validity is based on that immutable ACK plus the still-current local record and already-owned mapping; it deliberately does not revalidate or impersonate the original actor. Any source/configuration, local-version, mapping, ACK, PA identity/revision, or effective-conflict drift fails closed.
+
+The scheduler selects this separate lane only when `NATIVE_DIRECTORY_PROFILE_BINDING_CONTINUATION_ENABLED=true` in `local` or `staging`; production is always refused. It also remains behind the existing `NATIVE_DIRECTORY_OUTBOX_DRAIN_ENABLED=true` scheduler gate. Both flags default off. An ACK can therefore derive a dormant local job without enabling automatic dispatch.
+
+## Inventory and refresh invariants
+
+Before freezing a refresh command, the worker reads canonical PA inventory for the exact source identity tuple and owned mapping. It may accept a fresh authorization generation `G` greater than or equal to the immutable profile ACK generation because other authorized PA operations can advance the application-wide generation after that ACK. If inventory already shows the exact binding at the acknowledged resource revision, it completes from canonical inventory without issuing a PA refresh.
+
+Inventory scanning is bounded to five 200-item pages per scheduler attempt. The worker persists progress only after canonical page persistence and under the active lease. A saved cursor must be a cursor returned by a persisted inventory receipt for the same source, application, history epoch, resource type, and authorization generation. Invalid cursor responses or generation/identity drift clear progress and restart the scan; retries resume from persisted progress, so a target beyond the first 1,000 rows can eventually be reached without synthesizing a cursor from an identity.
+
+If a refresh is needed, the worker freezes one command ID and exact body, prior binding revision, live profile revision, projection hash, and generation `G`. Its body hash and contents are immutable. A retry may proceed only against the original `G` and prior binding revision, or the exact `G+1` and target binding revision that demonstrate the original command applied. It never rebases or replaces an uncertain command. The signed-int64 maximum generation cannot be frozen for a refresh needing `G+1`; it conflicts explicitly. An already-aligned binding can still complete at that maximum.
+
+The PA ACK receipt is immutable and must match the frozen command and exact target. Completion waits for normal canonical inventory proving the same resource revision, active exact binding, projection hash, and receipt generation. Transient transport/storage failures remain retryable with capped exponential backoff; evidence drift parks the job as conflict. Completion is also guarded transactionally by the migration's canonical-inventory and exact-mapping predicates.
+
+## Existing ACKs and release separation
+
+0199 derives jobs only for ACKs settled after the migration is active. It does not backfill preexisting acknowledged profile updates. Any repair of those records uses the separately reviewed manual 0198 refresh workflow and its own flag/release process; enabling 0199 does not authorize or replace that work.
+
+Reported local evidence: the final 0199 schema passed all 36 continuation/manual full-schema cases plus 11 scheduler cases (47 total), including bounded cursor resumption beyond 1,000 resources, cursor/generation resets, generation boundaries, and retry/fail-closed coverage. The genuine acquired-mapping continuation and migration-0173-to-0199 upgrade passed (2 total). The legacy profile writer passed 25 cases. The legacy profile dispatcher passed all 13 cases on a standalone rerun; an earlier combined run had two blocked-result failures, and their cause remains unestablished. Its two affected cases also passed a targeted rerun. Operations type checking and whitespace/diff checks passed. These are local results, not a deployment or release claim. Canonical 0199 release validation and fresh exact-candidate source CI remain pending; any changed candidate needs its own passing CI result before staging consideration.
+
+No production rollout is proposed. Staging enablement requires its own reviewed release evidence after the migration, runtime, canonical-chain, and exact-candidate CI gates pass, under the user's existing staging authorization; preserve the default-off settings and existing authority boundaries until then.

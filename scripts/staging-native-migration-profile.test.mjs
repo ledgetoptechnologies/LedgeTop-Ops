@@ -10,7 +10,7 @@ import { parseRemoteLedgerJson, validateExactRemoteLedger, verifyLiveRemoteLedge
 const root = path.resolve(import.meta.dirname, "..");
 const temporary = [];
 
-function fixture(operationsCutoff = 198) {
+function fixture(operationsCutoff = 199) {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), "ltds-native-migration-profile-"));
   temporary.push(base);
   fs.writeFileSync(path.join(base, ".gitignore"), "apps/*/wrangler.staging.*.json\napps/*/.staging-bootstrap/\n");
@@ -66,6 +66,7 @@ test("builds only the exact migration suffixes and strips every deployment field
       "0196_native_directory_maintenance_authority.sql",
       "0197_operations_portal_native_delivery_cancellation_checkpoint_scope.sql",
       "0198_native_directory_active_binding_revision_refresh.sql",
+      "0199_native_directory_profile_binding_continuations.sql",
     ]);
   assert.deepEqual(profiles.client.files.map(({ name }) => name),
     ["0229_operations_portal_native_delivery_regrant.sql",
@@ -76,11 +77,11 @@ test("builds only the exact migration suffixes and strips every deployment field
     "0228_operations_portal_native_content_start_audit.sql");
   assert.equal(profiles.operations.expectedRemoteAppliedMigrations.length, 183);
   assert.equal(profiles.client.expectedRemoteAppliedMigrations.length, 147);
-  assert.equal(profiles.operations.manifest.reviewedFinalChain.count, 198);
+  assert.equal(profiles.operations.manifest.reviewedFinalChain.count, 199);
   assert.equal(profiles.operations.manifest.reviewedFinalChain.finalMigration,
-    "0198_native_directory_active_binding_revision_refresh.sql");
+    "0199_native_directory_profile_binding_continuations.sql");
   assert.equal(profiles.operations.manifest.reviewedFinalChain.namesSha256,
-    "d88ba83a54c045e5eb416fb912324047d68160f9f198e6b56591f0f0909788f2");
+    "7be05fcb2b54c3a345b76b1f37e3dbbf33c0f4278b6cabe8307a064549c33821");
   assert.equal(profiles.client.manifest.reviewedFinalChain.count, 149);
   assert.equal(profiles.client.manifest.reviewedFinalChain.finalMigration,
     "0230_operations_portal_native_delivery_terminal_cancellations.sql");
@@ -196,7 +197,11 @@ test("accepts exact historical 0187, 0190, 0192, 0194, 0195, and 0196 chains but
   assert.equal(profile196.manifest.reviewedFinalChain.namesSha256,
     "c8f55f7a543d1e51d69abce753c2ce54a4640c35fd93c2769c8e971bb8162106");
   assert.deepEqual(profile196.manifest.expectedAppliedMigrations,
-    NATIVE_MIGRATION_PROFILES.operations.expectedAppliedMigrations.slice(0, -2));
+    NATIVE_MIGRATION_PROFILES.operations.expectedAppliedMigrations.slice(0, -3));
+  const profile198 = buildProfiles(fixture(198)).operations;
+  assert.equal(profile198.manifest.reviewedFinalChain.count, 198);
+  assert.equal(profile198.manifest.reviewedFinalChain.namesSha256,
+    "d88ba83a54c045e5eb416fb912324047d68160f9f198e6b56591f0f0909788f2");
   assert.equal(profile196.files.some(({ name }) => /^019[78]_/.test(name)), false);
   assert.throws(() => buildProfiles(fixture(197)), /not an exact reviewed historical or current chain/);
   const missing197 = fixture();

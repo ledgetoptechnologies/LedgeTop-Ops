@@ -105,9 +105,9 @@ export function buildNativeDirectory196To198Plan(base = root, label) {
     assert.equal(item.sha256, SPEC.suffix[index].sha256, `${name} content hash drifted`);
     return Object.freeze(item);
   });
-  assert.equal(sourceNames.length, SPEC.to, "current chain must end exactly at migration 0198");
+  assert(sourceNames.length >= SPEC.to, "current chain must include the reviewed migration 0198 prefix");
   return Object.freeze({ spec: SPEC, windowKey: "operations", artifactSet, sourceDirectory,
-    priorNames: Object.freeze(priorNames), finalNames: Object.freeze(sourceNames), migrations: Object.freeze(migrations),
+    priorNames: Object.freeze(priorNames), finalNames: Object.freeze(sourceNames.slice(0, SPEC.to)), migrations: Object.freeze(migrations),
     ...locations(base, artifactSet) });
 }
 
