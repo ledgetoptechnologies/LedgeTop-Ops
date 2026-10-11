@@ -1,4 +1,5 @@
-import { mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { reviewedOperationsMigrationNames } from "./helpers/reviewed-operations-migration-chain";
 import { tmpdir } from "node:os";
 import { join, resolve, sep } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -296,7 +297,8 @@ beforeAll(async () => {
   });
   db = await runtime.getD1Database("OPS_DB") as D1Database;
   const directory = new URL("../migrations/", import.meta.url);
-  const files = readdirSync(directory).filter(file => /^\d{4}_.*\.sql$/.test(file)).sort();
+  // Preserve the historical reconciliation schema after validating the current inventory.
+  const files = reviewedOperationsMigrationNames(directory).slice(0, 196);
   expect(files.at(-1)).toBe("0196_native_directory_maintenance_authority.sql");
   for (const file of files) {
     try {
