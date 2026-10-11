@@ -134,7 +134,7 @@ beforeAll(async () => {
   db = await runtime.getD1Database("OPS_DB") as D1Database;
   const directory = new URL("../migrations/", import.meta.url);
   const names = readdirSync(directory).filter(name => /^\d{4}_.+\.sql$/.test(name)).sort();
-  expect(names.at(-1)).toBe("0190_client_hub_native_project_preparation_authority.sql");
+  expect(names.at(-1)).toBe("0192_ops_service_definition_authority.sql");
   for (const name of names) {
     const migration = readFileSync(new URL(name,directory),"utf8");
     const statements=splitD1MigrationStatements(migration);
@@ -401,7 +401,7 @@ describe("Client Hub native project durable preparation ledger", () => {
         command2,command2,command2,command2,command2,command2,external);
     await expect(db.batch([exactFence,
       db.prepare("UPDATE native_project_grants SET active=0,version=version+1 WHERE id='grant-native'"),exactUpdate]))
-      .rejects.toThrow(/versioned writer/);
+      .rejects.toThrow(/update fence lacks current authority/);
     expect(await db.prepare("SELECT count(*) n FROM project_alpha_project_v2_update_activation_fences WHERE command_id=?")
       .bind(command2).first("n")).toBe(0);
     expect(await db.prepare("SELECT active FROM native_project_grants WHERE id='grant-native'").first("active")).toBe(1);
