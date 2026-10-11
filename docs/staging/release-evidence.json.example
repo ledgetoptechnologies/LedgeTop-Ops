@@ -850,7 +850,9 @@
         "0193_operations_portal_native_delivery_dead_conflict_recovery.sql",
         "0194_operations_portal_native_delivery_terminal_cancellations.sql",
         "0195_client_hub_native_project_current_owner_observation.sql",
-        "0196_native_directory_maintenance_authority.sql"
+        "0196_native_directory_maintenance_authority.sql",
+        "0197_operations_portal_native_delivery_cancellation_checkpoint_scope.sql",
+        "0198_native_directory_active_binding_revision_refresh.sql"
       ],
       "appliedToStaging": false,
       "listEvidenceRef": "<EVIDENCE_REFERENCE>",
@@ -916,8 +918,8 @@
           "applyEvidenceRef": "<EVIDENCE_REFERENCE>",
           "readbackEvidenceRef": "<EVIDENCE_REFERENCE>",
           "transformedFiles": ["0002_seed_acl.sql"],
-          "ledgerCount": 196,
-          "finalMigration": "0196_native_directory_maintenance_authority.sql",
+          "ledgerCount": 198,
+          "finalMigration": "0198_native_directory_active_binding_revision_refresh.sql",
           "sourceSeedSha256": "<CANONICAL_SEED_SHA256>",
           "generatedSeedSha256": "<GENERATED_SEED_SHA256>",
           "databaseWasEmpty": false,

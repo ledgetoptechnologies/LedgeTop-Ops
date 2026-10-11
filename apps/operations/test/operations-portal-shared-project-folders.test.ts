@@ -90,7 +90,7 @@ beforeAll(async () => {
   runtime = new Miniflare({ modules: true, compatibilityDate: "2026-08-06", script: "export default {}",
     d1Databases: { OPS_DB: crypto.randomUUID() } });
   db = await runtime.getD1Database("OPS_DB");
-  const migrationNames = await applyReviewedOperationsMigrationChain(db);
+  const migrationNames = await applyReviewedOperationsMigrationChain(db, "0196_native_directory_maintenance_authority.sql");
   expect(migrationNames).toHaveLength(196);
   expect(migrationNames.at(-1)).toBe("0196_native_directory_maintenance_authority.sql");
   const migrationLedger = await db.prepare("SELECT name FROM d1_migrations ORDER BY name").all<{ name: string }>();

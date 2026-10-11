@@ -91,6 +91,7 @@ interface Session {
     authenticatedDeliveryGrants?: AuthenticatedDeliveryCapability;
     clientFeedback?: { enabled: boolean };
     nativeDirectoryProfileWrites?: { enabled: boolean };
+    nativeDirectoryBindingRefresh?: { enabled: boolean };
     projectAlphaPrivateAdminTransport?: { enabled: boolean };
   };
 }
@@ -830,7 +831,8 @@ function ClientHubSurface({ session }: { session: Session }) {
     {selected === "directory" && <ClientHubWorkspaceRouter mapToken={session.mapboxPublicToken} permissions={session.user.permissions}
       feedbackEnabled={session.capabilities?.clientFeedback?.enabled === true} invitationAccess={session.invitationAdministration}
       canManagePortalSetup={session.user.isAdministrator && allowed(session.user, "operations.manage")}
-      nativeDirectoryProfileWrites={session.capabilities?.nativeDirectoryProfileWrites?.enabled === true} />}
+      nativeDirectoryProfileWrites={session.capabilities?.nativeDirectoryProfileWrites?.enabled === true}
+      nativeDirectoryBindingRefresh={session.capabilities?.nativeDirectoryBindingRefresh?.enabled === true} />}
     {selected === "feedback" && session.capabilities?.clientFeedback?.enabled === true && <OperationsFeedback />}
     {selected === "feedback" && session.capabilities?.clientFeedback?.enabled !== true && <Card><EmptyState title="Client feedback unavailable" detail="Feedback-review access is required." /></Card>}
     {selected === "invitation-requests" && <InvitationApprovals access={invitationAccess} />}

@@ -27,14 +27,14 @@ test.afterEach(() => {
   for (const directory of temporary.splice(0)) fs.rmSync(directory, { recursive: true, force: true });
 });
 
-test("accepts only exact immutable reviewed artifact prefixes through 0196", () => {
+test("accepts only exact immutable reviewed artifact prefixes through 0198", () => {
   const migrationNames = names();
-  for (const count of [184, 185, 186, 187, 190, 192, 194, 195, 196]) {
+  for (const count of [184, 185, 186, 187, 190, 192, 194, 195, 196, 198]) {
     const chain = validateAuthorityMigrationChainV185(root, migrationNames.slice(0, count), fail);
     assert.equal(chain.count, count);
     assert.equal(chain.final, migrationNames[count - 1]);
   }
-  for (const count of [188, 189]) assert.throws(() =>
+  for (const count of [188, 189, 197]) assert.throws(() =>
     validateAuthorityMigrationChainV185(root, migrationNames.slice(0, count), fail),
     /exact authority artifact migration chain/);
   assert.throws(() => validateAuthorityMigrationChainV185(root,
@@ -69,10 +69,14 @@ test("rejects altered reviewed migrations and an unknown repository suffix", () 
       "0195_client_hub_native_project_current_owner_observation.sql"), " "),
     base => fs.appendFileSync(path.join(base, "apps", "operations", "migrations",
       "0196_native_directory_maintenance_authority.sql"), " "),
-    base => fs.writeFileSync(path.join(base, "apps", "operations", "migrations", "0197_unknown.sql"), "SELECT 1;\n"),
+    base => fs.appendFileSync(path.join(base, "apps", "operations", "migrations",
+      "0197_operations_portal_native_delivery_cancellation_checkpoint_scope.sql"), " "),
+    base => fs.appendFileSync(path.join(base, "apps", "operations", "migrations",
+      "0198_native_directory_active_binding_revision_refresh.sql"), " "),
+    base => fs.writeFileSync(path.join(base, "apps", "operations", "migrations", "0199_unknown.sql"), "SELECT 1;\n"),
   ]) {
     const base = fixture(); mutate(base);
     assert.throws(() => validateAuthorityMigrationChainV185(base, names(base), fail),
-      /exact reviewed 0196 migration chain/);
+      /exact reviewed 0198 migration chain/);
   }
 });

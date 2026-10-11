@@ -26,7 +26,7 @@ describe("native directory maintenance authority on the canonical D1 chain", { t
   it("requires a preinstalled exact approval, fences current state, and never restores revoked authority", async () => {
     await runCanonicalPortalResourceAcceptance(async context => {
       const { operations: db, owner: originalOwner } = context;
-      // The fixture applies the complete canonical chain through 0196.
+      // The fixture explicitly pins the historical 0196 endpoint; later release migrations are not applied.
       expect(await db.prepare("SELECT count(*) count FROM d1_migrations").first<number>("count")).toBe(196);
 
       // A new admitted/profiled owner in the already-populated staging fixture

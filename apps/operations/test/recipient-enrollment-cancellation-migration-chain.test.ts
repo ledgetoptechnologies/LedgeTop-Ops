@@ -26,7 +26,8 @@ describe("0150 cancellation preserves history after all prior canonical migratio
       script: "export default {}", d1Databases: { DB: crypto.randomUUID() } });
     db = await runtime.getD1Database("DB");
     const directory = new URL("../migrations/", import.meta.url);
-    const names = reviewedOperationsMigrationNames(directory);
+    // Preserve the pre-0197 cancellation contract under the reviewed 0196 schema.
+    const names = reviewedOperationsMigrationNames(directory).slice(0, 196);
     expect(names).toHaveLength(196);
     expect(names.at(-1)).toBe("0196_native_directory_maintenance_authority.sql");
     const candidateIndex = names.indexOf("0150_client_portal_recipient_enrollment_cancellation.sql");

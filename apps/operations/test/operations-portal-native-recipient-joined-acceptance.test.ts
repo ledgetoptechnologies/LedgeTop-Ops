@@ -66,7 +66,8 @@ async function applyDraft(database: D1Database, application: "operations" | "cli
 async function applyReviewedChain(database: D1Database, application: "operations" | "client") {
   const directory = application === "operations" ? new URL("../migrations/", import.meta.url)
     : new URL("../../client/migrations/", import.meta.url);
-  const names = application === "operations" ? reviewedOperationsMigrationNames(directory)
+  // This joined acceptance window intentionally ends at the immutable 0196 schema.
+  const names = application === "operations" ? reviewedOperationsMigrationNames(directory).slice(0, 196)
     : reviewedClientMigrationNames(directory);
   await database.prepare(`CREATE TABLE d1_migrations(
     id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT UNIQUE NOT NULL,

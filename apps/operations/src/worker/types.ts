@@ -74,6 +74,8 @@ export type Env = Omit<
 > & {
   /** Explicit because Operations modules are also type-checked from sibling Worker projects with narrower generated Env types. */
   ENVIRONMENT?: string;
+  /** Default-off explicit active Directory binding revision refresh; local/staging only. */
+  NATIVE_DIRECTORY_BINDING_REFRESH_ENABLED?: string;
   PROJECT_ALPHA_DIRECTORY_RELATIONSHIP_GENERATION_RECOVERY_ENABLED?: string;
   PROJECT_ALPHA_API_KEY?: string;
   /** Temporary release barrier for the preserving client-notification table rebuild. */

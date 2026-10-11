@@ -1,11 +1,14 @@
-import { readFileSync, readdirSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { describe, expect, it } from "vitest";
 import { unstable_splitSqlQuery } from "wrangler";
+import { reviewedOperationsMigrationNames } from "./helpers/reviewed-operations-migration-chain";
+import { pathToFileURL } from "node:url";
 
 const migrations = resolve(import.meta.dirname, "../migrations");
-const migrationFiles = readdirSync(migrations).filter(name => name.endsWith(".sql")).sort();
+// Validate current reviewed bytes before selecting the historical 0196 recovery window.
+const migrationFiles = reviewedOperationsMigrationNames(pathToFileURL(`${migrations}/`)).slice(0, 196);
 const recoveryMigration = "0180_project_alpha_project_v2_recovery_authorization.sql";
 
 const originalActor = "staff-beau-koltz";

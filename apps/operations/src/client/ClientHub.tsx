@@ -19,6 +19,7 @@ import { ClientInternalNotes } from "./ClientInternalNotes";
 import type { InvitationAdministrationAccess } from "./invitation-administration-api";
 import { ProjectAlphaContactRoles, type ProjectAlphaContactRolePage } from "./ProjectAlphaContactRoles";
 import { isStagingNativeDirectoryProfilePreparationLocation, NativeDirectoryProfileEdit } from "./NativeDirectoryProfileEditor";
+import { NativeDirectoryBindingRefresh } from "./NativeDirectoryBindingRefresh";
 import { OpsServiceManagement } from "./OpsServiceManagement";
 
 interface CollectionItem { row_key?: string }
@@ -528,7 +529,7 @@ function BusinessProjects({ initial, page, client, contextVersion, contextSignal
   </Card>;
 }
 
-function ClientWorkspace({ route, canReviewFeedback, invitationAccess, nativeDirectoryProfileWrites }: { route: ClientRoute; canReviewFeedback: boolean; invitationAccess?: InvitationAdministrationAccess; nativeDirectoryProfileWrites: boolean }) {
+function ClientWorkspace({ route, canReviewFeedback, invitationAccess, nativeDirectoryProfileWrites, nativeDirectoryBindingRefresh }: { route: ClientRoute; canReviewFeedback: boolean; invitationAccess?: InvitationAdministrationAccess; nativeDirectoryProfileWrites: boolean; nativeDirectoryBindingRefresh: boolean }) {
   const [revision, setRevision] = useState(0);
   const [invalidated, setInvalidated] = useState("");
   const [portalFeedback, setPortalFeedback] = useState("");
@@ -582,6 +583,8 @@ function ClientWorkspace({ route, canReviewFeedback, invitationAccess, nativeDir
     {nativeDirectoryProfileWrites && data.nativeDirectoryProfile
       && <NativeDirectoryProfileEdit kind={data.nativeDirectoryProfile.kind} recordId={data.nativeDirectoryProfile.recordId}
         allowPreparedAttempt={isStagingNativeDirectoryProfilePreparationLocation(window.location)} />}
+    {nativeDirectoryBindingRefresh && data.nativeDirectoryProfile && data.client.source_id
+      && <NativeDirectoryBindingRefresh enabled recordId={data.nativeDirectoryProfile.recordId} sourceId={data.client.source_id} />}
     {nativeDirectoryProfileWrites && data.client.kind === "organization" && (data.nativeDirectoryLinkedClients?.length ?? 0) > 0 && <Card title="Edit linked client profile">
       <p>Select a currently linked client. Client Hub verifies its exact Project Alpha mapping and organization relationship on every refresh.</p>
       <label htmlFor="native-directory-linked-client">Linked client<select id="native-directory-linked-client" value={linkedClientRecordId}
@@ -692,7 +695,7 @@ function ClientWorkspace({ route, canReviewFeedback, invitationAccess, nativeDir
   </>;
 }
 
-export function ClientHub({ mapToken, permissions, feedbackEnabled=false, invitationAccess, canManagePortalSetup=false, nativeDirectoryProfileWrites=false }: { mapToken: string | null; permissions: Permission[]; feedbackEnabled?: boolean; invitationAccess?: InvitationAdministrationAccess; canManagePortalSetup?: boolean; nativeDirectoryProfileWrites?: boolean }) {
+export function ClientHub({ mapToken, permissions, feedbackEnabled=false, invitationAccess, canManagePortalSetup=false, nativeDirectoryProfileWrites=false, nativeDirectoryBindingRefresh=false }: { mapToken: string | null; permissions: Permission[]; feedbackEnabled?: boolean; invitationAccess?: InvitationAdministrationAccess; canManagePortalSetup?: boolean; nativeDirectoryProfileWrites?: boolean; nativeDirectoryBindingRefresh?: boolean }) {
   const [, setLocationRevision] = useState(0);
   useEffect(() => {
     const sync = () => setLocationRevision(value => value + 1);
@@ -712,7 +715,7 @@ export function ClientHub({ mapToken, permissions, feedbackEnabled=false, invita
   if (selectedRequest)
     return canReview ? <ClientRequestWorkflow mapToken={mapToken} basePath="/clients/requests" /> : <Card><EmptyState title="Request unavailable" detail="Request-review access is required." /></Card>;
   if (route && "invalid" in route) return <Card><EmptyState title="Client workspace unavailable" detail="This client link is invalid." /><a href={clientDirectoryReturnPath()}>Back to Client Hub</a></Card>;
-  if (route) return canViewDirectory ? <ClientWorkspace key={JSON.stringify([route.sourceId || "", route.rootNamespace || "", route.kind, route.publicId])} route={route} canReviewFeedback={feedbackEnabled} invitationAccess={invitationAccess} nativeDirectoryProfileWrites={nativeDirectoryProfileWrites} /> : <Card><EmptyState title="Client unavailable" detail="Client-directory access is required." /></Card>;
+  if (route) return canViewDirectory ? <ClientWorkspace key={JSON.stringify([route.sourceId || "", route.rootNamespace || "", route.kind, route.publicId])} route={route} canReviewFeedback={feedbackEnabled} invitationAccess={invitationAccess} nativeDirectoryProfileWrites={nativeDirectoryProfileWrites} nativeDirectoryBindingRefresh={nativeDirectoryBindingRefresh} /> : <Card><EmptyState title="Client unavailable" detail="Client-directory access is required." /></Card>;
   return <>
     {canReview && <section className="client-hub-queue"><ClientRequestWorkflow mapToken={mapToken} basePath="/clients/requests" pendingOnly hideWhenEmpty={canViewDirectory} /></section>}
     {canViewDirectory && <section>

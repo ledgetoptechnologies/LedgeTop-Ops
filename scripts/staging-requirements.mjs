@@ -493,6 +493,8 @@ export const REQUIRED_STAGING_MIGRATIONS = Object.freeze({
     "0194_operations_portal_native_delivery_terminal_cancellations.sql",
     "0195_client_hub_native_project_current_owner_observation.sql",
     "0196_native_directory_maintenance_authority.sql",
+    "0197_operations_portal_native_delivery_cancellation_checkpoint_scope.sql",
+    "0198_native_directory_active_binding_revision_refresh.sql",
   ]),
 });
 
@@ -536,6 +538,8 @@ export const REQUIRED_STAGING_MIGRATION_SHA256 = Object.freeze({
     "0194_operations_portal_native_delivery_terminal_cancellations.sql": "75a8852921ff81e2926c97acc1636a38fc7dae13b45e653cceda93c23f962f6d",
     "0195_client_hub_native_project_current_owner_observation.sql": "aaa8b35e502ed634cd38ed16c5a870a91f63c0ee578a031aec15744e7947ea44",
     "0196_native_directory_maintenance_authority.sql": "84fe7276bb83bb72da6637d5b6827b56e80094c14acbc872935c444fb2a3870a",
+    "0197_operations_portal_native_delivery_cancellation_checkpoint_scope.sql": "9cf2194a57cf7888c768d492c78cacf842e3f6c6814d3f395e6fa8f4d0a31a76",
+    "0198_native_directory_active_binding_revision_refresh.sql": "a51026608eb70a0645540cfe12bad51feb7a97f924e0b2c3b83837a3ae2fa7c3",
   }),
 });
 
