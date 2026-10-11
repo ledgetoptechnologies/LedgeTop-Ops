@@ -377,16 +377,19 @@ async function enrollmentSourceIds(env: Env, record: string): Promise<string[] |
   return new Set(result).size === result.length ? result.sort() : null;
 }
 
-async function relationshipDeliverySettled(db: D1Database, record: string, relationshipVersion: number,
-  destinationCount: number, recoveryEnabled = false): Promise<boolean> {
+export async function relationshipDeliverySettled(db: D1Database, record: string, relationshipVersion: number,
+  destinationCount: number): Promise<boolean> {
   if (relationshipVersion === 1) return true;
-  const recovery = recoveryEnabled ? ` OR EXISTS(SELECT 1
+  // Recovery creation/review remains feature-gated. Once the database has
+  // validated its immutable successor ACK, it is historical delivery evidence
+  // and must remain readable after that mutation window closes.
+  const recovery = ` OR EXISTS(SELECT 1
       FROM project_alpha_directory_validated_recovery_relationship_acknowledgements recovery
       WHERE recovery.predecessor_command_id=normal.command_id AND recovery.client_record_id=normal.client_record_id
         AND recovery.relationship_version=normal.relationship_version AND recovery.source_id=normal.source_id
         AND recovery.source_instance_id=normal.source_instance_id AND recovery.application_id=normal.application_id
         AND recovery.history_epoch_id=normal.history_epoch_id AND recovery.destination_origin=normal.destination_origin
-        AND recovery.identity_valid=1)` : "";
+        AND recovery.identity_valid=1)`;
   const row = await db.withSession("first-primary").prepare(`SELECT count(*) total,
       sum(CASE WHEN normal.state='acknowledged'${recovery} THEN 1 ELSE 0 END) acknowledged
     FROM project_alpha_directory_relationship_outbox normal WHERE normal.client_record_id=? AND normal.relationship_version=?`)
@@ -781,8 +784,7 @@ async function update(c: AppContext, kind: NativeDirectoryProfileKind) {
     return c.json({ status: "conflict", reason: "relationship_state_unavailable" }, 409);
   const enrolledSources = kind === "client" ? await enrollmentSourceIds(c.env, localRecordId) : null;
   if (kind === "client" && (!enrolledSources || !await relationshipDeliverySettled(c.env.OPS_DB, localRecordId,
-    currentRelationship!.relationship_version, enrolledSources.length,
-    c.env.PROJECT_ALPHA_DIRECTORY_RELATIONSHIP_GENERATION_RECOVERY_ENABLED === "true")))
+    currentRelationship!.relationship_version, enrolledSources.length)))
     return c.json({ status: "conflict", reason: "relationship_delivery_pending" }, 409);
   const destinations = await updateDestinations(c.env, kind, localRecordId, input.expectedLocalVersion);
   if (!destinations) return c.json({ status: "conflict", reason: "source_authority_unavailable" }, 409);
@@ -872,8 +874,7 @@ async function profile(c: AppContext, kind: NativeDirectoryProfileKind) {
   const selected = relationship?.organization_record_id ? representable.find(choice => choice.recordId === relationship.organization_record_id
     && choice.expectedVersion === relationship.organization_version) : null;
   const settled = relationship && sourceIds ? await relationshipDeliverySettled(c.env.OPS_DB, record,
-    relationship.relationship_version, sourceIds.length,
-    c.env.PROJECT_ALPHA_DIRECTORY_RELATIONSHIP_GENERATION_RECOVERY_ENABLED === "true") : false;
+    relationship.relationship_version, sourceIds.length) : false;
   const recovery = relationship && sourceIds ? await relationshipRecoveryCapability(c, record,
     relationship.relationship_version, sourceIds, settled) : null;
   const available = !!relationship && !!sourceIds && settled && (relationship.organization_record_id === null || !!selected);

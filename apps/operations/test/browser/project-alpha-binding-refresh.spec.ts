@@ -96,3 +96,28 @@ test("discovers API-v2 acceptance independently when the legacy connector regist
   await page.getByLabel("Enabled API-v2 sources").getByRole("button", { name: "Verify read-only API connection" }).click();
   await expect(page.getByText("Staging project binding is stale.", { exact: false })).toBeVisible();
 });
+
+test("reads the default-off synthetic scalar successor evidence through the authenticated operator panel", async ({ page }) => {
+  let method = "";
+  await page.route("**/api/**", async route => {
+    const request = route.request(), path = new URL(request.url()).pathname;
+    if (path === "/api/session") return route.fulfill({ json: {
+      user: { id: "staff-beau-koltz", email: "owner@example.test", displayName: "Owner", status: "Active", profileType: "Administrator",
+        isAdministrator: true, permissions: ["administration.view", "integrations.manage"], divisions: [] }, csrfToken: "csrf-test",
+      timezone: "America/Chicago", mapStyleUrl: null, mapboxPublicToken: null, capabilities: {},
+    } });
+    if (path === "/api/admin/integrations/project-alpha/connectors") return route.fulfill({ json: { connectors: [], health: [], legacyPrimary: false } });
+    if (path === "/api/admin/integrations/project-alpha/api-v2/sources") return route.fulfill({ json: { sources: ["project-alpha:staging"] } });
+    if (path === "/api/admin/staging/directory/scalar-successor-head") {
+      method = request.method();
+      return route.fulfill({ json: { status: "observed", local: { sourceId: "project-alpha:staging", revision: "3" }, inventoryReceipt: { authorization_generation: "60" }, bindingObservation: { authorizationGeneration: "60" } } });
+    }
+    return route.fulfill({ status: 404, json: { error: "not found" } });
+  });
+  await page.goto("/administration");
+  await page.getByText("Staging API-v2 operator review").click();
+  await page.getByRole("button", { name: "Read synthetic scalar head" }).click();
+  await expect(page.getByLabel("Synthetic scalar successor head")).toContainText('"status": "observed"');
+  await expect(page.getByLabel("Synthetic scalar successor head")).toContainText('"authorization_generation": "60"');
+  expect(method).toBe("POST");
+});

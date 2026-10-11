@@ -461,8 +461,16 @@ async function updateRemoteState(db: DirectoryWriteD1,
   write: Pick<NormalizedWrite, "kind" | "recordId" | "expectedLocalVersion">,
   destinationValue: DestinationIdentity & Readonly<{ expectedAuthorizationGeneration?: string }>,
   allowAcquiredEnrollmentCoordinate = false,
-  relationshipRecoveryEnabled = false,
+  _relationshipRecoveryEnabled = false,
 ): Promise<RemoteState | null> {
+  // A durable ACK proves the exact remote identity and revision, but its
+  // authorization generation is historical: PA advances that application-wide
+  // generation for unrelated records. Update routes replace it with the fresh
+  // inventory/binding generation they just verified; PA still CAS-checks that
+  // generation on dispatch. Callers that omit it retain the durable generation.
+  // Keep the compatibility argument for callers compiled against the bounded
+  // recovery window. It no longer controls reads of already-validated history;
+  // recovery review/authorization/dispatch remains gated at its mutation routes.
   const activeRows = (await db.prepare(`SELECT external_id externalId,project_alpha_public_id projectAlphaPublicId,
       mapping_kind mappingKind,provenance_id provenanceId
     FROM project_alpha_active_directory_mappings WHERE source_id=? AND source_instance_id=? AND application_id=? AND history_epoch_id=?
@@ -515,10 +523,10 @@ async function updateRemoteState(db: DirectoryWriteD1,
         destinationValue.origin, active.externalId, write.kind, active.projectAlphaPublicId, write.kind, active.projectAlphaPublicId)
       .first<Record<string, unknown>>();
     if (delivered) return revision(delivered.revision) && revision(delivered.authorizationGeneration)
-      && (destinationValue.expectedAuthorizationGeneration === undefined
-        || delivered.authorizationGeneration === destinationValue.expectedAuthorizationGeneration)
       ? { externalId: active.externalId, projectAlphaPublicId: active.projectAlphaPublicId,
-          revision: delivered.revision, authorizationGeneration: delivered.authorizationGeneration, mappingKind: "acquired" } : null;
+          revision: delivered.revision,
+          authorizationGeneration: destinationValue.expectedAuthorizationGeneration ?? delivered.authorizationGeneration,
+          mappingKind: "acquired" } : null;
     const refreshed = await db.prepare(`SELECT live_revision revision,authorization_generation authorizationGeneration
       FROM project_alpha_existing_directory_binding_revision_refresh_receipts WHERE record_id=? AND source_id=?
         AND source_instance_id=? AND application_id=? AND history_epoch_id=? AND resource_type=? AND external_id=?
@@ -526,10 +534,10 @@ async function updateRemoteState(db: DirectoryWriteD1,
         destinationValue.sourceInstanceUUID, destinationValue.applicationUUID, destinationValue.historyEpoch, write.kind, active.externalId,
         active.projectAlphaPublicId, write.expectedLocalVersion).first<Record<string, unknown>>();
     if (refreshed) return revision(refreshed.revision) && revision(refreshed.authorizationGeneration)
-      && (destinationValue.expectedAuthorizationGeneration === undefined
-        || refreshed.authorizationGeneration === destinationValue.expectedAuthorizationGeneration)
       ? { externalId: active.externalId, projectAlphaPublicId: active.projectAlphaPublicId,
-          revision: refreshed.revision, authorizationGeneration: refreshed.authorizationGeneration, mappingKind: "acquired" } : null;
+          revision: refreshed.revision,
+          authorizationGeneration: destinationValue.expectedAuthorizationGeneration ?? refreshed.authorizationGeneration,
+          mappingKind: "acquired" } : null;
     const activated = await db.prepare(`SELECT project_alpha_revision revision FROM project_alpha_existing_directory_binding_activation_receipts
       WHERE activation_id=? AND record_id=? AND source_id=? AND source_instance_id=? AND application_id=? AND history_epoch_id=?
         AND resource_type=? AND external_id=? AND project_alpha_public_id=? AND local_record_version=?`)
@@ -542,7 +550,7 @@ async function updateRemoteState(db: DirectoryWriteD1,
           revision: activated.revision, authorizationGeneration: destinationValue.expectedAuthorizationGeneration ?? "",
           mappingKind: "acquired" } : null;
   }
-  const row = await db.prepare(`SELECT mapping.project_alpha_public_id projectAlphaPublicId,
+  const profileRows = (await db.prepare(`WITH evidence AS (SELECT mapping.project_alpha_public_id projectAlphaPublicId,
       json_extract(outbox.outcome_json,'$.response.result.resource.revision') revision,
       json_extract(outbox.outcome_json,'$.response.result.authorizationGeneration') authorizationGeneration
     FROM project_alpha_directory_mappings mapping JOIN project_alpha_directory_outbox outbox
@@ -550,17 +558,20 @@ async function updateRemoteState(db: DirectoryWriteD1,
       AND outbox.application_id=mapping.application_id AND outbox.expected_history_epoch_id=mapping.history_epoch_id
       AND outbox.resource_type=mapping.resource_type AND outbox.external_id=mapping.external_id
     WHERE mapping.source_id=? AND mapping.source_instance_id=? AND mapping.application_id=? AND mapping.history_epoch_id=?
-      AND mapping.resource_type=? AND mapping.external_id=? AND outbox.state='acknowledged'
-    ORDER BY outbox.created_at DESC,outbox.command_id DESC LIMIT 1`).bind(destinationValue.sourceId, destinationValue.sourceInstanceUUID,
-      destinationValue.applicationUUID, destinationValue.historyEpoch, write.kind, active.externalId).first<Record<string, unknown>>();
-  if (row && row.projectAlphaPublicId === active.projectAlphaPublicId
-    && revision(row.revision) && revision(row.authorizationGeneration)
-    && (destinationValue.expectedAuthorizationGeneration === undefined
-      || row.authorizationGeneration === destinationValue.expectedAuthorizationGeneration)
-    ) return { externalId: active.externalId, projectAlphaPublicId: row.projectAlphaPublicId,
-      revision: row.revision, authorizationGeneration: row.authorizationGeneration, mappingKind: "legacy" };
-  if (write.kind !== "client") return null;
-  const relationshipSource = relationshipRecoveryEnabled ? `SELECT ack.client_public_id projectAlphaPublicId,ack.revision,
+      AND mapping.resource_type=? AND mapping.external_id=? AND outbox.state='acknowledged')
+    SELECT projectAlphaPublicId,revision,authorizationGeneration,
+      MAX(CASE WHEN projectAlphaPublicId<>? OR typeof(revision)<>'text' OR (revision<>'0' AND revision NOT GLOB '[1-9]*') OR revision GLOB '*[^0-9]*'
+        OR length(revision)>19 OR (length(revision)=19 AND revision>'9223372036854775807')
+        OR typeof(authorizationGeneration)<>'text' OR (authorizationGeneration<>'0' AND authorizationGeneration NOT GLOB '[1-9]*')
+        OR authorizationGeneration GLOB '*[^0-9]*' OR length(authorizationGeneration)>19
+        OR (length(authorizationGeneration)=19 AND authorizationGeneration>'9223372036854775807') THEN 1 ELSE 0 END) OVER () invalidEvidence
+    FROM evidence GROUP BY projectAlphaPublicId,revision,authorizationGeneration
+    ORDER BY invalidEvidence DESC,length(revision) DESC,revision DESC LIMIT 3`).bind(destinationValue.sourceId, destinationValue.sourceInstanceUUID,
+      destinationValue.applicationUUID, destinationValue.historyEpoch, write.kind, active.externalId,
+      active.projectAlphaPublicId).all<Record<string, unknown>>()).results;
+  const hasRecoveryRelationshipEvidence = !!await db.prepare(`SELECT 1 present FROM sqlite_schema
+    WHERE type='view' AND name='project_alpha_directory_validated_recovery_relationship_acknowledgements'`).first("present");
+  const relationshipSource = hasRecoveryRelationshipEvidence ? `SELECT ack.client_public_id projectAlphaPublicId,ack.revision,
       json_extract(recovery.outcome_json,'$.response.result.authorizationGeneration') authorizationGeneration
     FROM project_alpha_directory_validated_recovery_relationship_acknowledgements ack
     JOIN project_alpha_directory_relationship_recovery_outbox recovery ON recovery.command_id=ack.command_id
@@ -571,7 +582,7 @@ async function updateRemoteState(db: DirectoryWriteD1,
       AND ack.source_instance_id=? AND ack.application_id=? AND ack.history_epoch_id=?
       AND ack.destination_origin=? AND ack.identity_valid=1
     UNION ALL ` : "";
-  const relationship = await db.prepare(`SELECT * FROM (${relationshipSource}SELECT
+  const relationshipRows = write.kind === "client" ? (await db.prepare(`WITH evidence AS (${relationshipSource}SELECT
       json_extract(outbox.outcome_json,'$.response.result.client.publicId') projectAlphaPublicId,
       json_extract(outbox.outcome_json,'$.response.result.client.revision') revision,
       json_extract(outbox.outcome_json,'$.response.result.authorizationGeneration') authorizationGeneration
@@ -587,17 +598,37 @@ async function updateRemoteState(db: DirectoryWriteD1,
       AND json_extract(outbox.outcome_json,'$.response.result.action')=outbox.action
       AND json_extract(outbox.outcome_json,'$.response.result.client.publicId')=outbox.client_public_id
       AND json_extract(outbox.outcome_json,'$.response.result.organizationPublicId') IS outbox.organization_public_id)
-    ORDER BY length(revision) DESC,revision DESC LIMIT 1`)
-    .bind(...(relationshipRecoveryEnabled?[write.recordId,write.expectedLocalVersion,destinationValue.sourceId,
-      destinationValue.sourceInstanceUUID,destinationValue.applicationUUID,destinationValue.historyEpoch,destinationValue.origin]:[]),
+    SELECT projectAlphaPublicId,revision,authorizationGeneration,
+      MAX(CASE WHEN projectAlphaPublicId<>? OR typeof(revision)<>'text' OR (revision<>'0' AND revision NOT GLOB '[1-9]*') OR revision GLOB '*[^0-9]*'
+        OR length(revision)>19 OR (length(revision)=19 AND revision>'9223372036854775807')
+        OR typeof(authorizationGeneration)<>'text' OR (authorizationGeneration<>'0' AND authorizationGeneration NOT GLOB '[1-9]*')
+        OR authorizationGeneration GLOB '*[^0-9]*' OR length(authorizationGeneration)>19
+        OR (length(authorizationGeneration)=19 AND authorizationGeneration>'9223372036854775807') THEN 1 ELSE 0 END) OVER () invalidEvidence
+    FROM evidence GROUP BY projectAlphaPublicId,revision,authorizationGeneration
+    ORDER BY invalidEvidence DESC,length(revision) DESC,revision DESC LIMIT 3`)
+    .bind(...(hasRecoveryRelationshipEvidence ? [write.recordId,write.expectedLocalVersion,destinationValue.sourceId,
+      destinationValue.sourceInstanceUUID,destinationValue.applicationUUID,destinationValue.historyEpoch,destinationValue.origin] : []),
       write.recordId,write.expectedLocalVersion,destinationValue.sourceId,destinationValue.sourceInstanceUUID,
-      destinationValue.applicationUUID,destinationValue.historyEpoch,destinationValue.origin).first<Record<string, unknown>>();
-  return relationship && relationship.projectAlphaPublicId === active.projectAlphaPublicId
-    && revision(relationship.revision) && revision(relationship.authorizationGeneration)
-    && (destinationValue.expectedAuthorizationGeneration === undefined
-      || relationship.authorizationGeneration === destinationValue.expectedAuthorizationGeneration)
-    ? { externalId: active.externalId, projectAlphaPublicId: relationship.projectAlphaPublicId, revision: relationship.revision,
-      authorizationGeneration: relationship.authorizationGeneration, mappingKind: "legacy" } : null;
+      destinationValue.applicationUUID,destinationValue.historyEpoch,destinationValue.origin,
+      active.projectAlphaPublicId).all<Record<string, unknown>>()).results : [];
+  const heads = [...profileRows,...relationshipRows];
+  if (!heads.length) return null;
+  if (heads.some(value => value.invalidEvidence === 1 || value.projectAlphaPublicId !== active.projectAlphaPublicId
+    || !revision(value.revision) || !revision(value.authorizationGeneration))) return null;
+  const maximum = heads.reduce((left, right) => {
+    const leftRevision = left.revision as string, rightRevision = right.revision as string;
+    return leftRevision.length > rightRevision.length
+      || (leftRevision.length === rightRevision.length && leftRevision >= rightRevision) ? left : right;
+  });
+  const tied = heads.filter(value => value.revision === maximum.revision);
+  // PA may acknowledge a no-op profile command at the same resource revision
+  // after its application-wide generation advanced. Identity/revision is the
+  // durable head; the authenticated route supplies the current generation.
+  if (new Set(tied.map(value => `${value.projectAlphaPublicId}\0${value.revision}`)).size !== 1) return null;
+  return { externalId: active.externalId, projectAlphaPublicId: maximum.projectAlphaPublicId as string,
+    revision: maximum.revision as string,
+    authorizationGeneration: destinationValue.expectedAuthorizationGeneration ?? maximum.authorizationGeneration as string,
+    mappingKind: "legacy" };
 }
 
 /** Resolves only durable/local acknowledgement evidence for an existing PA

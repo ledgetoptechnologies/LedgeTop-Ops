@@ -118,6 +118,8 @@ export type Env = Omit<
   PROJECT_ALPHA_DIRECTORY_RECONCILIATION_ENABLED?: string;
   /** Default-off administrator-only API-v2 capabilities and inventory readiness check. */
   PROJECT_ALPHA_API_V2_READ_ACCEPTANCE_ENABLED?: string;
+  /** Default-off staging-only exact scalar successor remote-head observation. */
+  STAGING_DIRECTORY_SCALAR_SUCCESSOR_HEAD_ENABLED?: string;
   /** Default-off bounded API-v2 inventory evidence ingestion. */
   PROJECT_ALPHA_API_V2_SYNC_ENABLED?: string;
   /** Staging-only, administrator-protected exact adoption of already-bound Directory identities. */
