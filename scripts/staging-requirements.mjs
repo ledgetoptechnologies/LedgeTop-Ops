@@ -482,6 +482,11 @@ export const REQUIRED_STAGING_MIGRATIONS = Object.freeze({
     "0185_project_alpha_directory_binding_generation_epochs.sql",
     "0186_project_alpha_directory_conflict_evidence_binding.sql",
     "0187_operations_portal_native_delivery_literal_prefix_guard.sql",
+    "0188_client_hub_native_project_preparations.sql",
+    "0189_client_hub_native_project_uncertain_recovery.sql",
+    "0190_client_hub_native_project_preparation_authority.sql",
+    "0191_operations_portal_native_billing_authority.sql",
+    "0192_ops_service_definition_authority.sql",
   ]),
 });
 
@@ -516,6 +521,11 @@ export const REQUIRED_STAGING_MIGRATION_SHA256 = Object.freeze({
     "0185_project_alpha_directory_binding_generation_epochs.sql": "3c536f6e8ea3c745e0167d3a81308abbac7e9b24c127a95a3a8ab1d7c9fcd39e",
     "0186_project_alpha_directory_conflict_evidence_binding.sql": "6d19b3e6be44382c51681444e95a501845f8f3958e83930c5fba50501951fd92",
     "0187_operations_portal_native_delivery_literal_prefix_guard.sql": "ded89fe037cfb56f9ddf4316a4ddcc67c8ae00e58d66eebec9a8129c6536eb28",
+    "0188_client_hub_native_project_preparations.sql": "5c455a13128a912a716d75b2dbba9bcde64bfd8479495036d4f63bbf3a7098bc",
+    "0189_client_hub_native_project_uncertain_recovery.sql": "e7ee262257b677589cf089e0157fdf09863f3e14c2852b5da6bb51eff717a745",
+    "0190_client_hub_native_project_preparation_authority.sql": "a662cd4a50c5eaee7a02bf720b1e5399d5d05712022fdd1426413fc707a83882",
+    "0191_operations_portal_native_billing_authority.sql": "46b1adb3e6addb91ae108762af9cc8c855ec7a9ccc2e988d5dce056e697ffdfc",
+    "0192_ops_service_definition_authority.sql": "8a2d278e0a3a852b08d23efcb9c278a44ba3ea01da89742bba5d3909c3b1d8b9",
   }),
 });
 

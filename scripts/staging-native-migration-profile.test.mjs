@@ -53,6 +53,8 @@ test("builds only the exact migration suffixes and strips every deployment field
       "0188_client_hub_native_project_preparations.sql",
       "0189_client_hub_native_project_uncertain_recovery.sql",
       "0190_client_hub_native_project_preparation_authority.sql",
+      "0191_operations_portal_native_billing_authority.sql",
+      "0192_ops_service_definition_authority.sql",
     ]);
   assert.deepEqual(profiles.client.files.map(({ name }) => name),
     []);
@@ -62,11 +64,11 @@ test("builds only the exact migration suffixes and strips every deployment field
     "0228_operations_portal_native_content_start_audit.sql");
   assert.equal(profiles.operations.expectedRemoteAppliedMigrations.length, 183);
   assert.equal(profiles.client.expectedRemoteAppliedMigrations.length, 147);
-  assert.equal(profiles.operations.manifest.reviewedFinalChain.count, 190);
+  assert.equal(profiles.operations.manifest.reviewedFinalChain.count, 192);
   assert.equal(profiles.operations.manifest.reviewedFinalChain.finalMigration,
-    "0190_client_hub_native_project_preparation_authority.sql");
+    "0192_ops_service_definition_authority.sql");
   assert.equal(profiles.operations.manifest.reviewedFinalChain.namesSha256,
-    "1c42cda3e4a770e59da42fecb2eaa9063abbe415eb500d5cde22b5755fc0ddbf");
+    "2ac701ff1485af80b9b2edfcd0ce1b8cb9a413a925bf799d6531069eabb1f78c");
   assert.equal(profiles.client.manifest.reviewedFinalChain.count, 147);
   for (const profile of Object.values(profiles)) {
     assert.deepEqual(Object.keys(profile.config).sort(), ["$schema", "account_id", "d1_databases", "name"]);
@@ -97,32 +99,43 @@ test("rejects an extra SQL file and a changed native migration", () => {
   assert.throws(() => buildProfiles(changed), /native candidate changed: 0174_/);
   for (const name of ["0188_client_hub_native_project_preparations.sql",
     "0189_client_hub_native_project_uncertain_recovery.sql",
-    "0190_client_hub_native_project_preparation_authority.sql"]) {
+    "0190_client_hub_native_project_preparation_authority.sql",
+    "0191_operations_portal_native_billing_authority.sql",
+    "0192_ops_service_definition_authority.sql"]) {
     const currentChanged = fixture();
     fs.appendFileSync(path.join(currentChanged, "apps", "operations", "migrations", name), " ");
     assert.throws(() => buildProfiles(currentChanged), new RegExp(`native candidate changed: ${name.slice(0, 4)}_`));
   }
 });
 
-test("accepts exact historical 0187 but rejects partial 0188 and 0189 chains", () => {
+test("accepts exact historical 0187 and 0190 but rejects partial successor chains", () => {
   const historical = fixture();
   for (const name of ["0188_client_hub_native_project_preparations.sql",
     "0189_client_hub_native_project_uncertain_recovery.sql",
-    "0190_client_hub_native_project_preparation_authority.sql"])
+    "0190_client_hub_native_project_preparation_authority.sql",
+    "0191_operations_portal_native_billing_authority.sql",
+    "0192_ops_service_definition_authority.sql"])
     fs.rmSync(path.join(historical, "apps", "operations", "migrations", name));
   const profile = buildProfiles(historical).operations;
   assert.equal(profile.manifest.reviewedFinalChain.count, 187);
   assert.equal(profile.manifest.finalMigration, "0187_operations_portal_native_delivery_literal_prefix_guard.sql");
+
+  const historical190 = fixture();
+  for (const name of ["0191_operations_portal_native_billing_authority.sql", "0192_ops_service_definition_authority.sql"])
+    fs.rmSync(path.join(historical190, "apps", "operations", "migrations", name));
+  const profile190 = buildProfiles(historical190).operations;
+  assert.equal(profile190.manifest.reviewedFinalChain.count, 190);
+  assert.equal(profile190.manifest.finalMigration, "0190_client_hub_native_project_preparation_authority.sql");
 
   for (const remove of [["0190_client_hub_native_project_preparation_authority.sql"],
     ["0189_client_hub_native_project_uncertain_recovery.sql"],
     ["0189_client_hub_native_project_uncertain_recovery.sql", "0190_client_hub_native_project_preparation_authority.sql"]]) {
     const partial = fixture();
     for (const name of remove) fs.rmSync(path.join(partial, "apps", "operations", "migrations", name));
-    assert.throws(() => buildProfiles(partial), /not an exact reviewed 0187 or 0190 chain/);
+    assert.throws(() => buildProfiles(partial), /not an exact reviewed 0187, 0190, or 0192 chain/);
   }
   const unknown = fixture();
-  fs.writeFileSync(path.join(unknown, "apps", "operations", "migrations", "0191_unknown.sql"), "SELECT 1;\n");
+  fs.writeFileSync(path.join(unknown, "apps", "operations", "migrations", "0193_unknown.sql"), "SELECT 1;\n");
   assert.throws(() => buildProfiles(unknown), /pinned base migration inventory changed/);
 });
 

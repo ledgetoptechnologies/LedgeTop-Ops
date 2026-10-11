@@ -64,7 +64,7 @@ test("builds full isolated chains, changes exactly 0002, and preserves staging c
   const base = fixture();
   const artifacts = buildArtifacts(base, owner);
   for (const [app, artifact] of Object.entries(artifacts)) {
-    assert.equal(artifact.files.length, app === "delivery" ? 147 : 190, app);
+    assert.equal(artifact.files.length, app === "delivery" ? 147 : 192, app);
     assert.deepEqual(artifact.manifest.transformedFiles, [artifact.entry.seed]);
     assert.equal(artifact.files.find(({ name }) => name.startsWith("0001_")).transformed, false);
     assert.equal(artifact.config.name.endsWith("-staging"), true);
@@ -197,35 +197,45 @@ test("checked-in canonical 0002 migrations remain the reviewed source shapes", (
   assert.match(sourceOperations, /staff-beau-koltz/);
 });
 
-test("builds the complete checked-in 147/190 chains with both Client 0199 filenames", () => {
+test("builds the complete checked-in 147/192 chains with both Client 0199 filenames", () => {
   const base = fixture();
   const artifacts = buildArtifacts(base, owner);
   assert.equal(artifacts.delivery.files.length, 147);
-  assert.equal(artifacts.operations.files.length, 190);
+  assert.equal(artifacts.operations.files.length, 192);
   assert.deepEqual(artifacts.delivery.files.filter(({ name }) => name.startsWith("0199_")).map(({ name }) => name), [
     "0199_incoming_upload_pickup_lifecycle.sql", "0199_native_viewer_grants.sql",
   ]);
   assert.equal(artifacts.delivery.files.at(-1).name, "0228_operations_portal_native_content_start_audit.sql");
-  assert.equal(artifacts.operations.files.at(-1).name, "0190_client_hub_native_project_preparation_authority.sql");
+  assert.equal(artifacts.operations.files.at(-1).name, "0192_ops_service_definition_authority.sql");
   const literalPrefixGuard = artifacts.operations.files.find(({ name }) => name === "0187_operations_portal_native_delivery_literal_prefix_guard.sql");
   assert.equal(literalPrefixGuard.generatedSha256, literalPrefixGuard.sourceSha256,
     "bootstrap must preserve the literal-prefix guard migration byte-for-byte");
   assert.deepEqual(artifacts.delivery.manifest.transformedFiles, ["0002_seed_initial_staff.sql"]);
   assert.deepEqual(artifacts.operations.manifest.transformedFiles, ["0002_seed_acl.sql"]);
   assert.equal(artifacts.delivery.manifest.sourceChainSha256, "8a6cb183feae5ec6490cb4710f02a3289a05421786b9593e6392803a1e890f5c");
-  assert.equal(artifacts.operations.manifest.sourceChainSha256, "7407ed23afc813385694f3339229b70780a91d7027384a6a37686e9db9093458");
+  assert.equal(artifacts.operations.manifest.sourceChainSha256, "148ff7d7b73ec90af81730f48520f2b7e4f0c1d80eebe32143c6a088d5f81e62");
 });
 
-test("accepts exact historical 187 and rejects partial 188 or 189 Operations chains", () => {
+test("accepts exact historical 187 and 190 chains and rejects partial successors", () => {
   const historical = fixture();
   for (const name of ["0188_client_hub_native_project_preparations.sql",
     "0189_client_hub_native_project_uncertain_recovery.sql",
-    "0190_client_hub_native_project_preparation_authority.sql"])
+    "0190_client_hub_native_project_preparation_authority.sql",
+    "0191_operations_portal_native_billing_authority.sql",
+    "0192_ops_service_definition_authority.sql"])
     fs.rmSync(path.join(historical, "apps", "operations", "migrations", name));
   const artifact = buildArtifacts(historical, owner).operations;
   assert.equal(artifact.files.length, 187);
   assert.equal(artifact.files.at(-1).name, "0187_operations_portal_native_delivery_literal_prefix_guard.sql");
   assert.equal(artifact.manifest.sourceChainSha256, "3e0f92864210aab88c97220e50649a46d4ec8d6367262ea8f42ca75ce17a8567");
+
+  const historical190 = fixture();
+  for (const name of ["0191_operations_portal_native_billing_authority.sql", "0192_ops_service_definition_authority.sql"])
+    fs.rmSync(path.join(historical190, "apps", "operations", "migrations", name));
+  const artifact190 = buildArtifacts(historical190, owner).operations;
+  assert.equal(artifact190.files.length, 190);
+  assert.equal(artifact190.files.at(-1).name, "0190_client_hub_native_project_preparation_authority.sql");
+  assert.equal(artifact190.manifest.sourceChainSha256, "7e6f75368c5aed14209b092e026458894c6509324c8fdbedcf96c8df2ac0f260");
 
   for (const remove of [["0190_client_hub_native_project_preparation_authority.sql"],
     ["0189_client_hub_native_project_uncertain_recovery.sql"],

@@ -440,10 +440,10 @@ test("requires every portal-v2 and Operations capability to be explicitly false"
   }
 });
 
-test("pins the native portal, the complete Operations chain, both 0199 files, and the 0200-0228 release contract", () => {
-  assert.equal(REQUIRED_STAGING_MIGRATIONS.operations.length, 174);
+test("pins the native portal, the complete Operations 0192 chain, both 0199 files, and the 0200-0228 release contract", () => {
+  assert.equal(REQUIRED_STAGING_MIGRATIONS.operations.length, 179);
   assert.equal(REQUIRED_STAGING_MIGRATIONS.operations[0], "0014_staff_acl_controls.sql");
-  assert.equal(REQUIRED_STAGING_MIGRATIONS.operations.at(-1), "0187_operations_portal_native_delivery_literal_prefix_guard.sql");
+  assert.equal(REQUIRED_STAGING_MIGRATIONS.operations.at(-1), "0192_ops_service_definition_authority.sql");
   assert.deepEqual(REQUIRED_STAGING_MIGRATIONS.delivery.slice(-46), [
     "0184_native_client_feedback.sql",
     "0185_native_service_request_ownership.sql",
@@ -558,6 +558,11 @@ test("pins the native portal, the complete Operations chain, both 0199 files, an
     "0185_project_alpha_directory_binding_generation_epochs.sql",
     "0186_project_alpha_directory_conflict_evidence_binding.sql",
     "0187_operations_portal_native_delivery_literal_prefix_guard.sql",
+    "0188_client_hub_native_project_preparations.sql",
+    "0189_client_hub_native_project_uncertain_recovery.sql",
+    "0190_client_hub_native_project_preparation_authority.sql",
+    "0191_operations_portal_native_billing_authority.sql",
+    "0192_ops_service_definition_authority.sql",
   ]);
   const nativeDirectoryStart = REQUIRED_STAGING_MIGRATIONS.operations.indexOf("0054_project_alpha_directory_outbox.sql");
   assert.deepEqual(REQUIRED_STAGING_MIGRATIONS.operations.slice(nativeDirectoryStart, nativeDirectoryStart + 3), [

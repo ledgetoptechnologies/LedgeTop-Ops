@@ -27,9 +27,9 @@ test.afterEach(() => {
   for (const directory of temporary.splice(0)) fs.rmSync(directory, { recursive: true, force: true });
 });
 
-test("accepts only exact immutable reviewed artifact prefixes through 0190", () => {
+test("accepts only exact immutable reviewed artifact prefixes through 0192", () => {
   const migrationNames = names();
-  for (const count of [184, 185, 186, 187, 190]) {
+  for (const count of [184, 185, 186, 187, 190, 192]) {
     const chain = validateAuthorityMigrationChainV185(root, migrationNames.slice(0, count), fail);
     assert.equal(chain.count, count);
     assert.equal(chain.final, migrationNames[count - 1]);
@@ -57,10 +57,14 @@ test("rejects altered reviewed migrations and an unknown repository suffix", () 
       "0189_client_hub_native_project_uncertain_recovery.sql"), " "),
     base => fs.appendFileSync(path.join(base, "apps", "operations", "migrations",
       "0190_client_hub_native_project_preparation_authority.sql"), " "),
-    base => fs.writeFileSync(path.join(base, "apps", "operations", "migrations", "0191_unknown.sql"), "SELECT 1;\n"),
+    base => fs.appendFileSync(path.join(base, "apps", "operations", "migrations",
+      "0191_operations_portal_native_billing_authority.sql"), " "),
+    base => fs.appendFileSync(path.join(base, "apps", "operations", "migrations",
+      "0192_ops_service_definition_authority.sql"), " "),
+    base => fs.writeFileSync(path.join(base, "apps", "operations", "migrations", "0193_unknown.sql"), "SELECT 1;\n"),
   ]) {
     const base = fixture(); mutate(base);
     assert.throws(() => validateAuthorityMigrationChainV185(base, names(base), fail),
-      /exact reviewed 0190 migration chain/);
+      /exact reviewed 0192 migration chain/);
   }
 });
