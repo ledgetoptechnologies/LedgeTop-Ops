@@ -362,7 +362,7 @@ export type CanonicalPortalAcceptanceContext={runtime:Miniflare;operations:D1Dat
 
 export async function runCanonicalPortalResourceAcceptance(onReady?:(context:CanonicalPortalAcceptanceContext)=>Promise<void>,
   options?:Readonly<{stopAfterReady?:boolean}>){
-  
+
   runtime = new Miniflare({ modules: true, compatibilityDate: "2026-08-06", script: "export default {}",
     d1Databases: { OPS_DB: crypto.randomUUID(), CLIENT_DB: crypto.randomUUID() },
     r2Buckets: { DATA_BUCKET: crypto.randomUUID() } });
@@ -436,7 +436,7 @@ export async function runCanonicalPortalResourceAcceptance(onReady?:(context:Can
       VALUES(?,?,?,?,?,?)`).bind(physicalProject, division, basePrefix, "manual", "acceptance-owner", "2026-10-01 12:00:00"),
   ]);
   try {
-    
+
     // Model a pre-existing PA-authoritative public link. Seed it before any
     // workspace publication, recipient enrollment, or delivery-authority work
     // so the invariant covers the complete onboarding/grant path, not only
@@ -462,7 +462,7 @@ export async function runCanonicalPortalResourceAcceptance(onReady?:(context:Can
       customerRecordId: clientRecord, serviceId: "acceptance-website", desiredState: "active", expectedRevision: 0 });
     await writeCustomerServiceEnrollment(operations, owner(), { mutationId: id(), idempotencyKey: id(),
       customerRecordId: clientRecord, serviceId: "acceptance-website", desiredState: "revoked", expectedRevision: 1 });
-    
+
     const workspace = { operationId: id(), targetId: id(), clientAuthorityId: id(), workspaceId: `workspace:${id()}`,
       rootKind: "organization" as const, rootRecordId: organization, rootRecordVersion: 1,
       relationshipVersion: null, expectedRevision: 0 as const, reason: "Acceptance workspace" };
@@ -479,7 +479,7 @@ export async function runCanonicalPortalResourceAcceptance(onReady?:(context:Can
       reason: "Publish exact selected folder" });
     await expect(dispatchPublicationCommand(publication.operationId)).resolves.toMatchObject({ status: "acknowledged" });
     await expectPublicShareUnchanged();
-    
+
     const reader = { readNativeDeliveryAuthorization: (input: Parameters<typeof readOperationsPortalNativeDeliveryAuthorizationEntrypoint>[1]) =>
       readOperationsPortalNativeDeliveryAuthorizationEntrypoint({ OPS_DB: operations, ENVIRONMENT: "staging",
         EXPECTED_HOST: "ops-staging.ledgetopdroneservices.com",
@@ -518,7 +518,7 @@ export async function runCanonicalPortalResourceAcceptance(onReady?:(context:Can
         :path.startsWith("/api/client/operations/data/")
           ?deliveryRouter.fetch(mounted(request,"/api/client/operations/data"),environment)
           :portalRouter.fetch(mounted(request,"/api/client"),environment);}};
-    
+
     const unenrolledHome = await router.fetch(new Request(`${portalOrigin}/api/client/v2/operations/home`), portalEnvironment);
     expect(unenrolledHome.status).toBe(403);
     expect(await unenrolledHome.json()).toEqual({ error: "Client access is not provisioned" });
@@ -530,7 +530,7 @@ export async function runCanonicalPortalResourceAcceptance(onReady?:(context:Can
       items: [],
       page: { nextCursor: null }
     });
-    
+
     const issued = await issueOperationsPortalNativeRecipientIntent(operations, { operationId: id(),
       targetId: workspace.targetId, targetClientRecordId: clientRecord, expiresAt: future(24), owner: owner() });
     await redeemOperationsPortalNativeRecipientIntent(operations, { operationId: id(), intentId: issued.review.intentId,
@@ -554,13 +554,13 @@ export async function runCanonicalPortalResourceAcceptance(onReady?:(context:Can
     const home = await readOperationsPortalNativeRecipientIntent(operations, issued.review.intentId);
     expect(home).toMatchObject({ state: "active", recipientBindingId: expect.any(String) });
     if (!home?.recipientBindingId) throw new Error("recipient onboarding did not produce a binding");
-    
+
       await onReady?.({ runtime, operations, client, bucket, owner: owner(), organization, clientRecord,
         externalProject, projectPublicId, workspace, publication, recipient: home, sourceId, sourceInstanceId,
     applicationId, historyEpochId, id, issuer, subject, projectAlphaConnections,
     advanceProject:advanceCanonicalProject });
   if(options?.stopAfterReady)return;
-    
+
     const candidate = (await listOperationsPortalNativeDeliveryCandidates(operations,
       { targetId: workspace.targetId, owner: owner() })).items.find(value =>
         value.recipientBindingId === home.recipientBindingId && value.folderReservationId === folder.reservationId);
@@ -582,7 +582,7 @@ export async function runCanonicalPortalResourceAcceptance(onReady?:(context:Can
       binding: deliveryBinding, operationId: grantOperationId })).resolves.toEqual({ operationId: grantOperationId,
       state: "acknowledged" });
     await expectPublicShareUnchanged();
-    
+
     const selectedKey = `${selectedPrefix}selected.txt`, siblingKey = `${siblingPrefix}sibling.txt`;
     const selectedObject = await bucket.put(selectedKey, "selected body", { httpMetadata: { contentType: "text/plain" } });
     const siblingObject = await bucket.put(siblingKey, "sibling secret", { httpMetadata: { contentType: "text/plain" } });
@@ -608,13 +608,13 @@ export async function runCanonicalPortalResourceAcceptance(onReady?:(context:Can
     expect([401, 403]).toContain(genericSession.status);
     const genericCatalog = await router.fetch(new Request(`${portalOrigin}/api/client/service-catalog`), portalEnvironment);
     expect([401, 403]).toContain(genericCatalog.status);
-    
+
     const discovery = await router.fetch(new Request(`${portalOrigin}/api/client/operations/data/deliveries`), portalEnvironment);
     expect(discovery.status, await discovery.clone().text()).toBe(200);
     const deliveryPage = await discovery.json() as { items: Array<{ id: string; displayName: string }> };
     expect(deliveryPage.items).toEqual([{ id: expect.stringMatching(/^ond1_/), displayName: "Selected Deliverables" }]);
     const rootHandle = deliveryPage.items[0]!.id;
-    
+
     // The same provider-local subject under another Access issuer is another tenant.
     // It must not collide with the enrolled issuer+subject tuple or reuse its handle.
     activePrincipal = {
@@ -637,7 +637,7 @@ export async function runCanonicalPortalResourceAcceptance(onReady?:(context:Can
       portalEnvironment);
     expect(collisionHandle.status).toBe(404);
     activePrincipal = { issuer, subject, email: "recipient@example.test" };
-    
+
     const listing = await router.fetch(new Request(`${portalOrigin}/api/client/operations/data/folders/${encodeURIComponent(rootHandle)}`), portalEnvironment);
     expect(listing.status, await listing.clone().text()).toBe(200);
     const contents = await listing.json() as { files: Array<{ id: string; name: string }>; folders: Array<{ name: string }> };
@@ -650,7 +650,7 @@ export async function runCanonicalPortalResourceAcceptance(onReady?:(context:Can
     const download = await router.fetch(new Request(downloadUrl), portalEnvironment);
     expect(download.status, await download.clone().text()).toBe(200);
     expect(await download.text()).toBe("selected body");
-    
+
     const sibling = await router.fetch(new Request(
       `${portalOrigin}/api/client/operations/data/files/${encodeURIComponent(siblingKey)}/download`), portalEnvironment);
     expect(sibling.status).toBe(404);
@@ -659,7 +659,7 @@ export async function runCanonicalPortalResourceAcceptance(onReady?:(context:Can
       "SELECT count(*) count FROM operations_portal_native_content_start_events")
       .first<number>("count");
     expect(contentStartCount).toBeGreaterThan(0);
-    
+
     const revokeOperationId = id();
     await revokeOperationsPortalNativeDeliveryAuthority(operations, { operationId: revokeOperationId,
       authorityId, expectedRevision: 1, reasonCode: "Acceptance revoke", owner: owner() });
@@ -675,7 +675,7 @@ export async function runCanonicalPortalResourceAcceptance(onReady?:(context:Can
     const homeAfterDeliveryRevoke = await router.fetch(new Request(`${portalOrigin}/api/client/v2/operations/home`), portalEnvironment);
     expect(homeAfterDeliveryRevoke.status).toBe(200);
     expect(await homeAfterDeliveryRevoke.json()).toMatchObject({ homes: [{ services: [{ serviceId: "acceptance-drone" }] }] });
-    
+
     const recipientRevokeOperationId = id();
     await revokeOperationsPortalNativeRecipient(operations, { operationId: recipientRevokeOperationId,
       intentId: issued.review.intentId, expectedRevision: 4, owner: owner() });
@@ -707,4 +707,3 @@ export async function runCanonicalPortalResourceAcceptance(onReady?:(context:Can
     expect((await client.prepare("PRAGMA foreign_key_check").all()).results).toEqual([]);
   } finally { await runtime?.dispose(); }
 }
-

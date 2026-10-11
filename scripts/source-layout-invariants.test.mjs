@@ -20,6 +20,10 @@ test("CI installs the pinned Wrangler dependency before migration-ledger contrac
     assert.ok(install >= 0 && contracts > install, `${application} locked dependencies must precede contracts and cross-package migration helpers`);
   }
   assert.ok(sourceJob.includes("scripts/staging-native-migration-profile.test.mjs"));
+  for (const filename of [
+    "staging-authority-migration-chain-v185.test.mjs",
+    "staging-native-portal-149-194-migrations.test.mjs",
+  ]) assert.ok(sourceJob.includes(`scripts/${filename}`), `${filename} must run with the installed Operations runtime`);
 });
 
 test("bounded relationship recovery release tooling remains a required local CI gate", () => {
