@@ -16,6 +16,49 @@ type MappingRow = {
 const SOURCE = /^project-alpha:[a-z0-9][a-z0-9_-]{0,63}$/;
 const LOCAL_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,190}$/;
 
+// 0165 corrected future generation comparisons but deliberately retained the
+// immutable conflicts emitted by 0161. Exempt only a fully evidenced old
+// cross-surface comparison, never a real earlier same-surface regression.
+// Receipt rowid is insertion order in this ordinary, immutable rowid table;
+// timestamp checks also fail closed on inconsistent/ambiguous chronology.
+function historicalCrossSurfaceGenerationConflict(surface: "directory" | "project"): string {
+  return `conflict.conflict_kind='authorization_generation_regressed'
+    AND conflict.resource_type='source' AND conflict.inventory_kind='${surface}'
+    AND conflict.project_alpha_public_id IS NULL AND conflict.external_id IS NULL
+    AND EXISTS (SELECT 1 FROM project_alpha_api_v2_inventory_receipts observed
+      JOIN project_alpha_api_v2_inventory_receipts prior
+        ON prior.source_id=observed.source_id AND prior.source_instance_id=observed.source_instance_id
+        AND prior.application_id=observed.application_id AND prior.history_epoch_id=observed.history_epoch_id
+        AND prior.inventory_kind<>observed.inventory_kind AND prior.request_id=conflict.prior_reference
+      WHERE observed.source_id=conflict.source_id AND observed.source_instance_id=conflict.source_instance_id
+        AND observed.application_id=conflict.application_id AND observed.history_epoch_id=conflict.history_epoch_id
+        AND observed.inventory_kind=conflict.inventory_kind AND observed.request_id=conflict.request_id
+        AND observed.authorization_generation=conflict.observed_revision
+        AND conflict.details_json=json_object('observedAuthorizationGeneration',observed.authorization_generation,
+          'priorAuthorizationGeneration',prior.authorization_generation)
+        AND prior.rowid<observed.rowid AND prior.observed_at<=observed.observed_at
+        AND conflict.created_at>=observed.observed_at
+        AND (length(prior.authorization_generation)>length(observed.authorization_generation)
+          OR length(prior.authorization_generation)=length(observed.authorization_generation)
+            AND prior.authorization_generation>observed.authorization_generation)
+        AND (SELECT count(*) FROM project_alpha_api_v2_inventory_receipts reference
+          WHERE reference.source_id=observed.source_id AND reference.source_instance_id=observed.source_instance_id
+            AND reference.application_id=observed.application_id AND reference.history_epoch_id=observed.history_epoch_id
+            AND reference.request_id=conflict.prior_reference)=1
+        AND (SELECT count(*) FROM project_alpha_api_v2_inventory_receipts reference
+          WHERE reference.source_id=observed.source_id AND reference.source_instance_id=observed.source_instance_id
+            AND reference.application_id=observed.application_id AND reference.history_epoch_id=observed.history_epoch_id
+            AND reference.request_id=conflict.request_id)=1
+        AND NOT EXISTS (SELECT 1 FROM project_alpha_api_v2_inventory_receipts same_surface
+          WHERE same_surface.source_id=observed.source_id AND same_surface.source_instance_id=observed.source_instance_id
+            AND same_surface.application_id=observed.application_id AND same_surface.history_epoch_id=observed.history_epoch_id
+            AND same_surface.inventory_kind=observed.inventory_kind
+            AND (same_surface.rowid<observed.rowid OR same_surface.observed_at<=observed.observed_at)
+            AND (length(same_surface.authorization_generation)>length(observed.authorization_generation)
+              OR length(same_surface.authorization_generation)=length(observed.authorization_generation)
+                AND same_surface.authorization_generation>observed.authorization_generation)))`;
+}
+
 function currentConfiguredRow(env: Pick<Env, "PROJECT_ALPHA_API_V2_CONNECTIONS">, row: MappingRow): boolean {
   try {
     const configured = resolveProjectAlphaApiV2Connection(env, row.source_id);
@@ -55,6 +98,7 @@ export async function resolveTrustedNativeFinancialMapping(
           FROM project_alpha_api_v2_inventory_receipts generation WHERE generation.source_id=mapping.source_id
             AND generation.source_instance_id=mapping.source_instance_id AND generation.application_id=mapping.application_id
             AND generation.history_epoch_id=mapping.history_epoch_id
+            AND generation.inventory_kind='directory'
           ORDER BY length(generation.authorization_generation) DESC,generation.authorization_generation DESC LIMIT 1) authorization_generation
         FROM project_alpha_active_directory_mappings mapping
         JOIN operations_directory_records record ON record.record_id=mapping.record_id AND record.record_kind=mapping.resource_type
@@ -72,10 +116,12 @@ export async function resolveTrustedNativeFinancialMapping(
           AND observation.binding_status='active' AND observation.binding_external_id=mapping.external_id
           AND observation.binding_resource_revision=observation.resource_revision
           AND json_valid(revision.profile_json)
-          AND NOT EXISTS (SELECT 1 FROM project_alpha_api_v2_inventory_conflicts conflict
+          AND NOT EXISTS (SELECT 1 FROM client_hub_native_project_effective_directory_conflicts conflict
             WHERE conflict.source_id=mapping.source_id AND conflict.source_instance_id=mapping.source_instance_id
               AND conflict.application_id=mapping.application_id AND conflict.history_epoch_id=mapping.history_epoch_id
-              AND (conflict.resource_type='source' OR conflict.inventory_kind='directory'
+              AND (conflict.resource_type='source' AND (conflict.conflict_kind IN ('source_identity_changed','request_reuse_mismatch')
+                OR conflict.inventory_kind='directory' AND NOT (${historicalCrossSurfaceGenerationConflict("directory")}))
+                OR conflict.inventory_kind='directory'
                 AND conflict.resource_type=mapping.resource_type AND (conflict.project_alpha_public_id=mapping.project_alpha_public_id
                   OR conflict.external_id=mapping.external_id)))
           AND (SELECT count(*) FROM project_alpha_active_directory_mappings candidate
@@ -92,6 +138,7 @@ export async function resolveTrustedNativeFinancialMapping(
           FROM project_alpha_api_v2_inventory_receipts generation WHERE generation.source_id=mapping.source_id
             AND generation.source_instance_id=mapping.source_instance_id AND generation.application_id=mapping.application_id
             AND generation.history_epoch_id=mapping.history_epoch_id
+            AND generation.inventory_kind='project'
           ORDER BY length(generation.authorization_generation) DESC,generation.authorization_generation DESC LIMIT 1) authorization_generation
         FROM project_alpha_project_mappings mapping
         JOIN operations_shared_projects project ON project.external_project_id=mapping.external_project_id
@@ -129,7 +176,9 @@ export async function resolveTrustedNativeFinancialMapping(
           AND NOT EXISTS (SELECT 1 FROM project_alpha_api_v2_inventory_conflicts conflict
             WHERE conflict.source_id=mapping.source_id AND conflict.source_instance_id=mapping.source_instance_id
               AND conflict.application_id=mapping.application_id AND conflict.history_epoch_id=mapping.history_epoch_id
-              AND (conflict.resource_type='source' OR conflict.inventory_kind='project'
+              AND (conflict.resource_type='source' AND (conflict.conflict_kind IN ('source_identity_changed','request_reuse_mismatch')
+                OR conflict.inventory_kind='project' AND NOT (${historicalCrossSurfaceGenerationConflict("project")}))
+                OR conflict.inventory_kind='project' AND conflict.resource_type='project'
                 AND (conflict.project_alpha_public_id=mapping.project_alpha_public_id OR conflict.external_id=mapping.external_project_id)))
           AND (SELECT count(*) FROM project_alpha_project_mappings candidate
             WHERE candidate.source_id=mapping.source_id AND candidate.source_instance_id=mapping.source_instance_id
