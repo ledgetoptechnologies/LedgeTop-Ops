@@ -34,6 +34,26 @@ const standaloneContext={...context,root:{...context.root,kind:"standalone_clien
   canonicalRoot:{...context.canonicalRoot,kind:"standalone_client",publicId:clientId},contextVersion:"y".repeat(43)} as ClientHubCollectionContext;
 const env = () => ({ OPS_DB:db,PROJECT_ALPHA_API_V2_CONNECTIONS:JSON.stringify({version:1,instances:{"project-alpha:primary":{
   sourceId:"project-alpha:primary",enabled:true,baseUrl:"https://one.example.test",apiKey:"secret",sourceInstanceId,applicationId,historyEpoch:historyEpochId}}}) });
+function activationSchemaDatabase(mode: "lookup-error" | "missing-fence"): D1Database {
+  return new Proxy(db, { get(target, property) {
+    if (property !== "prepare") {
+      const value = Reflect.get(target, property);
+      return typeof value === "function" ? value.bind(target) : value;
+    }
+    return (sql: string) => {
+      if (mode === "lookup-error" && sql.includes("FROM client_hub_native_project_preparations WHERE command_id"))
+        throw new Error("synthetic native preparation lookup failure");
+      const statement = target.prepare(sql);
+      if (mode !== "missing-fence" || !sql.includes("SELECT name FROM sqlite_master")) return statement;
+      return new Proxy(statement, { get(statementTarget, statementProperty) {
+        if (statementProperty === "all") return async () => ({ success: true,
+          results: [{ name: "client_hub_native_project_preparations" }], meta: {} }) as D1Result<{ name: string }>;
+        const value = Reflect.get(statementTarget, statementProperty);
+        return typeof value === "function" ? value.bind(statementTarget) : value;
+      } });
+    };
+  } }) as D1Database;
+}
 const inventoryReaders = () => ({inventory:vi.fn(async()=>({status:"observed" as const,httpStatus:200 as const,response:{apiVersion:"2" as const,
   sourceInstanceId,applicationId,historyEpoch:historyEpochId,requestId:crypto.randomUUID(),authorizationGeneration:"7",projects:[],nextCursor:null}})),
   bindingStatus:vi.fn(),project:vi.fn()});
@@ -238,6 +258,14 @@ describe("Client Hub native project durable preparation ledger", () => {
       if(url.pathname===`/api/v2/projects/${projectPublic}`)return new Response(JSON.stringify({apiVersion:"2",sourceInstanceId,applicationId,historyEpoch:historyEpochId,requestId:headers["X-Request-ID"],replayed:false,accepted:true,
         resource:{type:"project",id:projectPublic,revision:"2",projectionSha256:nextProjection},data:{name:"Updated project",description:"Revised",status:"active",archived:false,overdueWarning:false,completedAt:null,archivedAt:null,
           estimatedStart:null,estimatedEnd:null,clientPublicId:null,organizationPublicId:orgPublic}}),{headers});throw new Error(`unexpected ${method} ${url.pathname}`);});
+    await expect(submitClientHubNativeProject({ ...env(), OPS_DB: activationSchemaDatabase("missing-fence") } as never,
+      request,staff,context,{expectedContextVersion:context.contextVersion,request:prepared.request},send))
+      .resolves.toMatchObject({status:"uncertain",reason:"database"});
+    expect(posts).toBe(1);
+    await expect(submitClientHubNativeProject({ ...env(), OPS_DB: activationSchemaDatabase("lookup-error") } as never,
+      request,staff,context,{expectedContextVersion:context.contextVersion,request:prepared.request},send))
+      .resolves.toMatchObject({status:"uncertain",reason:"database"});
+    expect(posts).toBe(1);
     const updated=await submitClientHubNativeProject(env() as never,request,staff,context,{expectedContextVersion:context.contextVersion,request:prepared.request},send);
     if(updated.status!=="activated"){
       const diagnostics=await Promise.all([

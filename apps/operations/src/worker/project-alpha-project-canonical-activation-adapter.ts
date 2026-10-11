@@ -196,13 +196,20 @@ export async function activateProjectAlphaProjectV2Canonical(
   catch { return { status: "uncertain", reason: "database" }; }
   let nativeClientHubCommand = false, updateFenceAvailable = false;
   try {
-    [nativeClientHubCommand, updateFenceAvailable] = await Promise.all([
-      env.OPS_DB.prepare("SELECT 1 present FROM client_hub_native_project_preparations WHERE command_id=?")
-        .bind(source.command_id).first("present").then(Boolean).catch(() => false),
-      env.OPS_DB.prepare("SELECT 1 present FROM sqlite_master WHERE type='table' AND name='project_alpha_project_v2_update_activation_fences'")
-        .first("present").then(Boolean),
-    ]);
+    const schema = await env.OPS_DB.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name IN(
+      'client_hub_native_project_preparations','project_alpha_project_v2_update_activation_fences')`).all<{ name: string }>();
+    const names = new Set(schema.results.map(row => row.name));
+    updateFenceAvailable = names.has("project_alpha_project_v2_update_activation_fences");
+    if (names.has("client_hub_native_project_preparations")) {
+      nativeClientHubCommand = Boolean(await env.OPS_DB.prepare(
+        "SELECT 1 present FROM client_hub_native_project_preparations WHERE command_id=?")
+        .bind(source.command_id).first("present"));
+    }
   } catch { return { status: "uncertain", reason: "database" }; }
+  // An 0188-native update must never fall through the legacy writer when its
+  // 0190 activation fence schema is absent or only partially applied.
+  if (nativeClientHubCommand && source.operation === "update" && !updateFenceAvailable)
+    return { status: "uncertain", reason: "database" };
   let organizationRecordId: string | null | "missing", clientRecordId: string | null | "missing";
   try {
     [organizationRecordId, clientRecordId] = await Promise.all([
