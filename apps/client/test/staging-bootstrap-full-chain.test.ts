@@ -98,10 +98,10 @@ describe("local-only complete staging bootstrap migration rehearsal", () => {
   });
 
   it("applies both reviewed chains to empty local D1 databases and stays idempotent", async () => {
-    expect(artifacts.delivery.files).toHaveLength(147);
-    expect(artifacts.operations.files).toHaveLength(190);
-    expect(artifacts.delivery.files.at(-1)?.name).toBe("0228_operations_portal_native_content_start_audit.sql");
-    expect(artifacts.operations.files.at(-1)?.name).toBe("0190_client_hub_native_project_preparation_authority.sql");
+    expect(artifacts.delivery.files).toHaveLength(149);
+    expect(artifacts.operations.files).toHaveLength(194);
+    expect(artifacts.delivery.files.at(-1)?.name).toBe("0230_operations_portal_native_delivery_terminal_cancellations.sql");
+    expect(artifacts.operations.files.at(-1)?.name).toBe("0194_operations_portal_native_delivery_terminal_cancellations.sql");
     expect(artifacts.delivery.files.filter(file => file.name.startsWith("0199_")).map(file => file.name)).toEqual([
       "0199_incoming_upload_pickup_lifecycle.sql", "0199_native_viewer_grants.sql",
     ]);

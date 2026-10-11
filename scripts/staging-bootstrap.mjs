@@ -15,9 +15,14 @@ export const BOOTSTRAP_APPS = Object.freeze({
     binding: "DELIVERY_DB",
     databaseName: "client-data-staging",
     seed: "0002_seed_initial_staff.sql",
-    migrationCount: 147,
-    migrationNamesSha256: "1adce32fb9cad385417f3f058664ecb105559c31a5efd8c87e9f642f97a45db9",
-    migrationContentsSha256: "8a6cb183feae5ec6490cb4710f02a3289a05421786b9593e6392803a1e890f5c",
+    migrationCount: 149,
+    migrationNamesSha256: "adec3554555949068ac785d0720c6dcddc8813489c98b5c88e88c0afd23ee659",
+    migrationContentsSha256: "f0131c4467cbe6046c5da7c54f0bcd604cc39f743d9a98082d3ff59a7d34c1f1",
+    historicalMigrationChains: Object.freeze([Object.freeze({
+      count: 147,
+      namesSha256: "1adce32fb9cad385417f3f058664ecb105559c31a5efd8c87e9f642f97a45db9",
+      contentsSha256: "8a6cb183feae5ec6490cb4710f02a3289a05421786b9593e6392803a1e890f5c",
+    })]),
   }),
   operations: Object.freeze({
     source: "operations",
@@ -25,9 +30,9 @@ export const BOOTSTRAP_APPS = Object.freeze({
     binding: "OPS_DB",
     databaseName: "ltds-ops-staging",
     seed: "0002_seed_acl.sql",
-    migrationCount: 192,
-    migrationNamesSha256: "2ac701ff1485af80b9b2edfcd0ce1b8cb9a413a925bf799d6531069eabb1f78c",
-    migrationContentsSha256: "148ff7d7b73ec90af81730f48520f2b7e4f0c1d80eebe32143c6a088d5f81e62",
+    migrationCount: 194,
+    migrationNamesSha256: "21797f48e9c38621119a6e78eb431594609ae5520aea9036f1e5db288a984a10",
+    migrationContentsSha256: "156c845b6185e89ae18533015055b0c0e09f6939348a165da68a1a3c10eabc25",
     historicalMigrationChains: Object.freeze([Object.freeze({
       count: 187,
       namesSha256: "ce00ad1a6b67cb8a7f0ed5e197ebd5fbdfabd2566dc3c402f1eee79302036951",
@@ -36,6 +41,10 @@ export const BOOTSTRAP_APPS = Object.freeze({
       count: 190,
       namesSha256: "1c42cda3e4a770e59da42fecb2eaa9063abbe415eb500d5cde22b5755fc0ddbf",
       contentsSha256: "7e6f75368c5aed14209b092e026458894c6509324c8fdbedcf96c8df2ac0f260",
+    }), Object.freeze({
+      count: 192,
+      namesSha256: "2ac701ff1485af80b9b2edfcd0ce1b8cb9a413a925bf799d6531069eabb1f78c",
+      contentsSha256: "148ff7d7b73ec90af81730f48520f2b7e4f0c1d80eebe32143c6a088d5f81e62",
     })]),
   }),
 });
