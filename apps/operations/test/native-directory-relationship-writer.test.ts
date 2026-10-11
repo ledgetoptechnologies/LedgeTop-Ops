@@ -95,6 +95,33 @@ beforeAll(async()=>{runtime=new Miniflare({modules:true,compatibilityDate:"2026-
     throw new Error("proposal revision-evidence replacement is not the expected first object pair");
   await db.batch(revisionStatements.slice(0,2)
     .map(sql=>db.prepare(sql.replaceAll("operations_directory_effective_materializations","operations_directory_materializations"))));
+  // This focused pre-0184 fixture has no recovery rows, but current writers always
+  // read the canonical validated-ACK projection. Preserve that schema boundary as
+  // an exact empty projection instead of weakening the production query.
+  await db.prepare(`CREATE VIEW project_alpha_directory_relationship_recovery_outbox AS SELECT
+      CAST(NULL AS TEXT) command_id,CAST(NULL AS TEXT) authorization_id,
+      CAST(NULL AS TEXT) predecessor_command_id,CAST(NULL AS TEXT) source_id,
+      CAST(NULL AS TEXT) source_instance_id,CAST(NULL AS TEXT) application_id,
+      CAST(NULL AS TEXT) history_epoch_id,CAST(NULL AS TEXT) destination_origin,
+      CAST(NULL AS TEXT) client_record_id,CAST(NULL AS INTEGER) relationship_version,
+      CAST(NULL AS TEXT) client_public_id,CAST(NULL AS TEXT) action,
+      CAST(NULL AS TEXT) expected_client_revision,CAST(NULL AS TEXT) expected_authorization_generation,
+      CAST(NULL AS TEXT) expected_current_organization_public_id,CAST(NULL AS TEXT) organization_record_id,
+      CAST(NULL AS TEXT) organization_public_id,CAST(NULL AS TEXT) expected_organization_revision,
+      CAST(NULL AS TEXT) command_json,CAST(NULL AS TEXT) request_json,CAST(NULL AS TEXT) state,
+      CAST(NULL AS INTEGER) attempts,CAST(NULL AS INTEGER) next_attempt_at,
+      CAST(NULL AS TEXT) lease_token,CAST(NULL AS INTEGER) lease_expires_at,
+      CAST(NULL AS TEXT) outcome_json,CAST(NULL AS TEXT) created_at,CAST(NULL AS TEXT) updated_at
+    WHERE 0`).run();
+  await db.prepare(`CREATE VIEW project_alpha_directory_validated_recovery_relationship_acknowledgements AS
+    SELECT CAST(NULL AS TEXT) command_id,CAST(NULL AS TEXT) authorization_id,
+      CAST(NULL AS TEXT) predecessor_command_id,CAST(NULL AS TEXT) client_record_id,
+      CAST(NULL AS INTEGER) relationship_version,CAST(NULL AS TEXT) source_id,
+      CAST(NULL AS TEXT) source_instance_id,CAST(NULL AS TEXT) application_id,
+      CAST(NULL AS TEXT) history_epoch_id,CAST(NULL AS TEXT) destination_origin,
+      CAST(NULL AS TEXT) client_public_id,CAST(NULL AS TEXT) organization_public_id,
+      CAST(NULL AS TEXT) revision,CAST(NULL AS INTEGER) identity_valid
+    WHERE 0`).run();
   await db.exec(`CREATE TABLE writer_test_active_mapping_rows(source_id TEXT,resource_type TEXT,record_id TEXT,external_id TEXT,
     project_alpha_public_id TEXT,source_instance_id TEXT,application_id TEXT,history_epoch_id TEXT,provenance_id TEXT,
     mapping_kind TEXT,created_at TEXT DEFAULT(strftime('%Y-%m-%dT%H:%M:%fZ','now')));
