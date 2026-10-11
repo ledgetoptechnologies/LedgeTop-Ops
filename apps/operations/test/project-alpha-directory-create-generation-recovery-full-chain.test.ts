@@ -67,6 +67,66 @@ async function terminalizeTrustedGenerationConflict(commandId:string){
         httpStatus:409,errorCode:"authorization_generation_conflict"}),commandId)]);
 }
 
+async function activateAcquiredMapping(recordId:string,externalId:string,publicId:string,kind:"organization"|"client",
+  localRecordVersion=1,revision="7",historicalGeneration="59",staffId="staff",accessSubject="access|staff"){
+  const reviewId=id(),commandId=id(),receiptId=id(),claimId=id(),ownerEpoch=id(),activationId=id();
+  const requestHash="1".repeat(64),reviewHash="2".repeat(64),acquisitionHash="3".repeat(64),profileHash="4".repeat(64),bindingHash="5".repeat(64);
+  await db.batch([
+    db.prepare(`INSERT INTO project_alpha_existing_directory_binding_review_evidence(
+      receipt_id,request_sha256,record_id,source_id,source_instance_id,application_id,history_epoch_id,
+      resource_type,external_id,project_alpha_public_id,project_alpha_revision,review_id,
+      reviewed_binding_evidence_sha256,reviewer_staff_id,reviewer_access_subject,
+      reviewer_admission_version,reviewer_profile_version,reviewed_at,reviewed_local_record_version)
+      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,1,strftime('%Y-%m-%dT%H:%M:%fZ','now'),?)`)
+      .bind(reviewId,requestHash,recordId,sourceId,instance,application,epoch,kind,externalId,publicId,revision,id(),reviewHash,
+        staffId,accessSubject,localRecordVersion),
+    db.prepare(`INSERT INTO project_alpha_existing_directory_binding_acquisition_commands(
+      command_id,request_sha256,record_id,source_id,source_instance_id,application_id,history_epoch_id,
+      resource_type,external_id,project_alpha_public_id,project_alpha_revision,review_receipt_id)
+      VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`).bind(commandId,requestHash,recordId,sourceId,instance,application,epoch,kind,externalId,publicId,revision,reviewId),
+  ]);
+  await db.batch([
+    db.prepare(`INSERT INTO project_alpha_existing_directory_binding_acquisition_events(command_id,state_version,transition_id,
+      request_sha256,state,occurred_at) VALUES(?,1,?,?,'pending',strftime('%Y-%m-%dT%H:%M:%fZ','now'))`).bind(commandId,id(),requestHash),
+    db.prepare(`INSERT INTO project_alpha_existing_directory_binding_acquisition_events(command_id,state_version,transition_id,
+      request_sha256,state,occurred_at) VALUES(?,2,?,?,'acknowledged',strftime('%Y-%m-%dT%H:%M:%fZ','now'))`).bind(commandId,id(),requestHash),
+    db.prepare(`INSERT INTO project_alpha_existing_directory_binding_acquisition_response_receipts(command_id,source_instance_id,
+      application_id,history_epoch_id,resource_type,external_id,project_alpha_public_id,project_alpha_revision,destination_origin,
+      pa_request_id,pa_replayed,response_sha256,expected_authorization_generation,result_authorization_generation)
+      VALUES(?,?,?,?,?,?,?,?,?,?,0,?,?,?)`)
+      .bind(commandId,instance,application,epoch,kind,externalId,publicId,revision,origin,id(),acquisitionHash,
+        String(BigInt(historicalGeneration)-1n),historicalGeneration),
+  ]);
+  await db.batch([
+    db.prepare(`INSERT INTO project_alpha_existing_directory_binding_acquired_mapping_receipts(receipt_id,request_sha256,command_id,
+      record_id,source_id,source_instance_id,application_id,history_epoch_id,resource_type,external_id,project_alpha_public_id,
+      project_alpha_revision,acquisition_evidence_sha256,profile_evidence_sha256,binding_status_evidence_sha256)
+      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(receiptId,requestHash,commandId,recordId,sourceId,instance,application,epoch,kind,
+        externalId,publicId,revision,acquisitionHash,profileHash,bindingHash),
+    db.prepare(`INSERT INTO project_alpha_acquired_canonical_mappings(receipt_id,record_id,source_id,source_instance_id,application_id,
+      history_epoch_id,resource_type,external_id,project_alpha_public_id) VALUES(?,?,?,?,?,?,?,?,?)`)
+      .bind(receiptId,recordId,sourceId,instance,application,epoch,kind,externalId,publicId),
+  ]);
+  await db.batch([
+    db.prepare(`INSERT INTO project_alpha_acquired_native_owner_claims(claim_id,receipt_id,native_owner_epoch_id,record_id,source_id,
+      source_instance_id,application_id,history_epoch_id,resource_type,external_id,project_alpha_public_id,
+      expected_local_record_version,actor_id,request_sha256) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+      .bind(claimId,receiptId,ownerEpoch,recordId,sourceId,instance,application,epoch,kind,externalId,publicId,localRecordVersion,staffId,requestHash),
+    db.prepare("INSERT INTO project_alpha_acquired_mapping_activation(receipt_id) VALUES(?)").bind(receiptId),
+  ]);
+  const grantGeneration=await db.prepare("SELECT generation FROM native_directory_grant_generations WHERE staff_id=?")
+    .bind(staffId).first<number>("generation");
+  await db.prepare(`INSERT INTO project_alpha_existing_directory_binding_activation_receipts(activation_id,review_receipt_id,
+    idempotency_key,acquired_receipt_id,native_owner_claim_id,record_id,source_id,source_instance_id,application_id,history_epoch_id,
+    resource_type,external_id,project_alpha_public_id,project_alpha_revision,local_record_version,request_sha256,
+    acquisition_evidence_sha256,profile_evidence_sha256,binding_status_evidence_sha256,activated_by_staff_id,directory_grant_generation,
+    expected_authorization_generation,result_authorization_generation)
+    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(activationId,reviewId,activationId,receiptId,claimId,recordId,sourceId,
+      instance,application,epoch,kind,externalId,publicId,revision,localRecordVersion,requestHash,acquisitionHash,profileHash,bindingHash,
+      staffId,grantGeneration,String(BigInt(historicalGeneration)-1n),historicalGeneration).run();
+  return activationId;
+}
+
 beforeAll(async()=>{runtime=new Miniflare({modules:true,compatibilityDate:"2026-08-06",script:"export default {fetch(){return new Response('ok')}}",d1Databases:["OPS_DB"]});
   db=await runtime.getD1Database("OPS_DB") as D1Database;const directory=new URL("../migrations/",import.meta.url);
   for(const name of readdirSync(directory).filter(name=>/^\d{4}_.+\.sql$/.test(name)).sort())
@@ -79,6 +139,78 @@ beforeAll(async()=>{runtime=new Miniflare({modules:true,compatibilityDate:"2026-
 },240_000);afterAll(async()=>runtime.dispose());
 
 describe("Directory create-generation recovery full chain",()=>{
+  it("updates a canonically acquired mapping with fresh authority, acknowledges it, and fails a later PA race closed",async()=>{
+    const acquiredStaff="acquired-staff",acquiredSubject="access|acquired-staff";
+    await db.batch([
+      db.prepare("INSERT INTO staff_users(id,email,display_name,access_subject,status) VALUES(?,'acquired@example.test','Acquired',?,'active')")
+        .bind(acquiredStaff,acquiredSubject),
+      db.prepare("INSERT INTO native_staff_admissions(staff_id,bound_access_subject,active,admitted_by) VALUES(?,?,1,'owner')")
+        .bind(acquiredStaff,acquiredSubject),
+      db.prepare("INSERT INTO native_staff_profiles(staff_id,login_email,display_name) VALUES(?,'acquired@example.test','Acquired')")
+        .bind(acquiredStaff),
+    ]);
+    for(const [suffix,permission] of [["edit","directory.profile.edit"],["identity","directory.identity.link"]])
+      await db.prepare("INSERT INTO native_directory_grants(id,staff_id,permission,effect,scope_kind,granted_by) VALUES(?,?,?,'allow','global','owner')")
+        .bind(`acquired-${suffix}`,acquiredStaff,permission).run();
+    await db.prepare(`INSERT INTO staff_role_assignments(id,staff_id,role_id,scope,scope_key,created_by)
+      VALUES('acquired-owner',?,'role-owner','global','global','owner')`).bind(acquiredStaff).run();
+    const actor={staffId:acquiredStaff,accessSubject:acquiredSubject,admissionVersion:1,selectedGrantId:"acquired-edit",
+      loginEmail:"acquired@example.test",profileVersion:1,selectedIdentityGrantId:"acquired-identity"};
+    const record=id(),initialMutation=id(),admission=`admission-${initialMutation}`;
+    const initialDestination={sourceId,sourceInstanceUUID:instance,applicationUUID:application,historyEpoch:epoch,origin,
+      externalCanonicalId:record,expectedAuthorizationGeneration:"59"};
+    const scopes=[{businessAreaId:"area",divisionId:null}];
+    await db.prepare(`INSERT INTO native_directory_create_admissions(id,staff_id,bound_access_subject,record_id,record_kind,
+      scopes_json,profile_json,destinations_json,issued_by) VALUES(?,?,?,?, 'organization',?,?,?,?)`)
+      .bind(admission,acquiredStaff,acquiredSubject,record,JSON.stringify(scopes),JSON.stringify(organizationProfile),
+        JSON.stringify([{...initialDestination,expectedAuthorizationGeneration:undefined}],(_,value)=>value),acquiredStaff).run();
+    const created=await writeNativeDirectoryProfile(db,{operation:"create",mutationId:initialMutation,createAdmissionId:admission,
+      recordId:record,expectedLocalVersion:0,kind:"organization",profile:organizationProfile,scopes,
+      destinations:[initialDestination],actor} as NativeDirectoryCreateWrite);
+    if(created.status!=="written")throw Error(JSON.stringify(created));
+    const externalId=`pa/acquired/${id()}`,publicId="e".repeat(32);
+    await activateAcquiredMapping(record,externalId,publicId,"organization",1,"7","59",acquiredStaff,acquiredSubject);
+
+    const updateMutation=id(),updatedProfile={...organizationProfile,name:"Acquired generation 60"};
+    const updated=await writeNativeDirectoryProfile(db,{operation:"update",mutationId:updateMutation,recordId:record,
+      expectedLocalVersion:1,kind:"organization",profile:updatedProfile,destinations:[{...initialDestination,
+        externalCanonicalId:externalId,expectedAuthorizationGeneration:"60"}],actor} as NativeDirectoryProfileWrite);
+    if(updated.status!=="written")throw Error(JSON.stringify(updated));
+    const commandId=updated.commandIds[0]!;
+    expect(JSON.parse((await db.prepare("SELECT command_json FROM project_alpha_directory_outbox WHERE command_id=?")
+      .bind(commandId).first<string>("command_json"))!)).toMatchObject({externalId,expectedProjectAlphaPublicId:publicId,
+        expectedRevision:"7",expectedAuthorizationGeneration:"60"});
+    const posts:string[]=[];
+    const acknowledged=await dispatchProjectAlphaDirectoryProfileOutboxCommand(env(),sourceId,commandId,
+      vi.fn<typeof fetch>(async(url,init)=>{const path=new URL(String(url)).pathname;
+        if(path.endsWith("/capabilities"))return response(capabilities());
+        posts.push(String(init?.body));return response({sourceInstanceId:instance,applicationId:application,historyEpoch:epoch,
+          requestId,replayed:false,result:{resource:{type:"organization",publicId,revision:"8"},authorizationGeneration:"60"}});
+      }));
+    expect(acknowledged).toMatchObject({status:"acknowledged",revision:"8"});
+    expect(posts).toHaveLength(1);
+    expect(await db.prepare("SELECT state FROM operations_directory_intents WHERE mutation_id=?").bind(updateMutation).first("state"))
+      .toBe("acknowledged");
+    expect(JSON.parse((await db.prepare("SELECT outcome_json FROM project_alpha_directory_outbox WHERE command_id=?")
+      .bind(commandId).first<string>("outcome_json"))!)).toMatchObject({status:"acknowledged",response:{result:{
+        resource:{publicId,revision:"8"},authorizationGeneration:"60"}}});
+
+    const raceMutation=id(),raced=await writeNativeDirectoryProfile(db,{operation:"update",mutationId:raceMutation,recordId:record,
+      expectedLocalVersion:2,kind:"organization",profile:{...updatedProfile,name:"Acquired generation 61 race"},
+      destinations:[{...initialDestination,externalCanonicalId:externalId,expectedAuthorizationGeneration:"61"}],actor
+    } as NativeDirectoryProfileWrite);
+    if(raced.status!=="written")throw Error(JSON.stringify(raced));
+    const raceCommand=raced.commandIds[0]!;
+    await expect(dispatchProjectAlphaDirectoryProfileOutboxCommand(env(),sourceId,raceCommand,terminal409))
+      .resolves.toMatchObject({status:"conflict",reason:"remote",httpStatus:409});
+    expect(await db.prepare("SELECT state FROM project_alpha_directory_outbox WHERE command_id=?").bind(raceCommand).first("state"))
+      .toBe("terminal");
+    expect(await db.prepare(`SELECT count(*) n FROM project_alpha_existing_directory_binding_revision_refresh_receipts
+      WHERE record_id=? AND local_record_version=3`).bind(record).first("n")).toBe(0);
+    expect(await db.prepare("SELECT state FROM operations_directory_intents WHERE mutation_id=?").bind(raceMutation).first("state"))
+      .toBe("materialized");
+  });
+
   it("applies only the recovery-aware source substitution and preserves the 0133 live insert guard",async()=>{
     const live=await db.prepare("SELECT sql FROM sqlite_schema WHERE type='view' AND name='project_alpha_directory_live_relationship_commands'").first<string>("sql");
     const guard=await db.prepare("SELECT sql FROM sqlite_schema WHERE type='trigger' AND name='project_alpha_directory_relationship_outbox_insert_guard'").first<string>("sql");

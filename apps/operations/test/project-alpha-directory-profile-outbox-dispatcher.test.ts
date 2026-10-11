@@ -373,7 +373,7 @@ describe("native Directory profile outbox dispatcher", () => {
     }) as unknown as D1Database;
     const check=(value:Parameters<typeof evidenceDb>[0],revision:string,generation:string)=>
       acquiredDirectoryMappingUpdateEvidence(evidenceDb(value),context,revision,generation,mapping.project_alpha_public_id);
-    await expect(check({activated:[{revision:"7",authorization_generation:"1"}],refreshed:[{revision:"9",authorization_generation:"3"}],refreshCommands:2},"9","3")).resolves.toBe(true);
+    await expect(check({activated:[{revision:"7",authorization_generation:"1"}],refreshed:[{revision:"9",authorization_generation:"3"}],refreshCommands:2},"9","8")).resolves.toBe(true);
     await expect(check({activated:[{revision:"7",authorization_generation:"1"}],refreshed:[{revision:"9",authorization_generation:"3"}],
       delivered:[{revision:"8",authorization_generation:"2"}],refreshCommands:2},"9","3")).resolves.toBe(true);
     await expect(check({activated:[{revision:"7",authorization_generation:"1"}],refreshed:[{revision:"9",authorization_generation:"3"}],
@@ -381,7 +381,7 @@ describe("native Directory profile outbox dispatcher", () => {
     await expect(check({activated:[{revision:"7",authorization_generation:"1"}],refreshed:[{revision:"9",authorization_generation:"3"}],
       delivered:[{revision:"10",authorization_generation:"3"}],refreshCommands:2},"9","3")).resolves.toBe(false);
     await expect(check({activated:[{revision:"7",authorization_generation:"1"}],refreshed:[{revision:"9",authorization_generation:"3"}],
-      delivered:[{revision:"9",authorization_generation:"4"}],refreshCommands:2},"9","3")).resolves.toBe(false);
+      delivered:[{revision:"9",authorization_generation:"4"}],refreshCommands:2},"9","8")).resolves.toBe(false);
     await expect(check({activated:[{revision:"7",authorization_generation:"1"}],refreshed:[],refreshCommands:2},"7","1")).resolves.toBe(false);
     await expect(check({activated:[{revision:"7",authorization_generation:"1"}],refreshed:[{revision:"9",authorization_generation:"3"},
       {revision:"9",authorization_generation:"4"}],refreshCommands:2},"9","3")).resolves.toBe(false);
@@ -434,6 +434,44 @@ describe("native Directory profile outbox dispatcher", () => {
       expect(await db.prepare("SELECT count(*) n FROM project_alpha_directory_mappings WHERE external_id=?").bind(value.input.recordId).first("n")).toBe(1);
       expect(await db.prepare("SELECT url,hex(payload) payload FROM delivery_public_links").first()).toEqual(beforeLink);
     }
+  });
+
+  it("pins the fresh generation and lets PA CAS reject a later generation race", async () => {
+    const value = await create("organization"), publicId = (sequence++).toString(16).padStart(32, "0");
+    await dispatchProjectAlphaDirectoryProfileOutboxCommand(env(), sourceId, value.commandId,
+      transport(publicId, "1", []));
+    const updateMutationId = uuid();
+    const update = await writeNativeDirectoryProfile(db, { operation: "update", mutationId: updateMutationId,
+      recordId: value.input.recordId, expectedLocalVersion: 1, kind: "organization",
+      profile: { ...organizationProfile, name: "Observed at generation 2" },
+      destinations: [{ sourceId, sourceInstanceUUID: source, applicationUUID: application, historyEpoch: epoch,
+        origin: baseUrl, externalCanonicalId: value.input.recordId, expectedAuthorizationGeneration: "2" }],
+      actor: value.staff } as NativeDirectoryProfileWrite);
+    if (update.status !== "written") throw new Error(update.reason);
+    const posts: unknown[] = [];
+    await expect(dispatchProjectAlphaDirectoryProfileOutboxCommand(env(), sourceId, update.commandIds[0]!,
+      transport(publicId, "2", posts))).resolves.toMatchObject({ status: "acknowledged", revision: "2" });
+    expect(posts).toEqual([{ commandId: update.commandIds[0], expectedRevision: "1",
+      expectedAuthorizationGeneration: "2", profile: { ...organizationProfile, name: "Observed at generation 2" } }]);
+    expect(await db.prepare("SELECT state FROM operations_directory_intents WHERE mutation_id=?")
+      .bind(updateMutationId).first("state")).toBe("acknowledged");
+
+    const raced = await writeNativeDirectoryProfile(db, { operation: "update", mutationId: uuid(),
+      recordId: value.input.recordId, expectedLocalVersion: 2, kind: "organization",
+      profile: { ...organizationProfile, name: "Observed at generation 3" },
+      destinations: [{ sourceId, sourceInstanceUUID: source, applicationUUID: application, historyEpoch: epoch,
+        origin: baseUrl, externalCanonicalId: value.input.recordId, expectedAuthorizationGeneration: "3" }],
+      actor: value.staff } as NativeDirectoryProfileWrite);
+    if (raced.status !== "written") throw new Error(raced.reason);
+    const racedPosts: unknown[] = [];
+    await expect(dispatchProjectAlphaDirectoryProfileOutboxCommand(env(), sourceId, raced.commandIds[0]!,
+      transport(publicId, "4", racedPosts, 409))).resolves.toMatchObject({ status: "conflict", reason: "remote", httpStatus: 409 });
+    expect(racedPosts).toEqual([{ commandId: raced.commandIds[0], expectedRevision: "2",
+      expectedAuthorizationGeneration: "3", profile: { ...organizationProfile, name: "Observed at generation 3" } }]);
+    expect(await db.prepare("SELECT state FROM project_alpha_directory_outbox WHERE command_id=?")
+      .bind(raced.commandIds[0]).first("state")).toBe("terminal");
+    expect(await db.prepare("SELECT count(*) n FROM project_alpha_directory_mappings WHERE command_id=?")
+      .bind(raced.commandIds[0]).first("n")).toBe(0);
   });
 
   it("accepts bounded equal and advanced update revisions, including PA replay responses", async () => {

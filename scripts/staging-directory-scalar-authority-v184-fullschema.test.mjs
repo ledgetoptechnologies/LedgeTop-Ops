@@ -213,13 +213,14 @@ async function lifecycle(t){
  assert.deepEqual(await all(db,"SELECT * FROM native_directory_grants WHERE id NOT IN (?,?) ORDER BY id",...grantIds),otherBefore);
 
  // The recovery mutation window is closed here. Its identity-valid historical
- // ACK must still be usable by the ordinary profile writer with the flag off.
- const beforeStaleGeneration=await scalarSnapshot(db);
- assert.deepEqual(await writer.writeNativeDirectoryProfile(db,{operation:"update",mutationId:uuid(300),recordId:plan.recordId,expectedLocalVersion:2,kind:"client",profile:afterProfile,relationship:{organizationRecordId:scalarTarget.organizationRecordId,expectedRelationshipVersion:2},destinations:[{...destination,expectedAuthorizationGeneration:"55"}],actor}),{status:"blocked",reason:"mapping_or_delivery_state"});
- assert.deepEqual(await scalarSnapshot(db),beforeStaleGeneration,"stale authorization generation must not change records, outbox, or intents");
+ // ACK proves the durable head, while the ordinary route-proven generation is
+ // deliberately newer and remains the PA compare-and-swap value on the wire.
  const updated=await writer.writeNativeDirectoryProfile(db,{operation:"update",mutationId:plan.mutationId,recordId:plan.recordId,expectedLocalVersion:2,kind:"client",profile:afterProfile,relationship:{organizationRecordId:scalarTarget.organizationRecordId,expectedRelationshipVersion:2},destinations:[destination],actor});
  if(updated.status!=="written")throw new Error(`normal client profile writer: ${JSON.stringify(updated)}`);
  assert.equal(updated.commandIds.length,1);const commandId=updated.commandIds[0],posts=[],requestId=uuid(302);
+ const freshCommand=JSON.parse((await first(db,"SELECT command_json FROM project_alpha_directory_outbox WHERE command_id=?",commandId)).command_json);
+ assert.equal(freshCommand.commandId,commandId);assert.equal(freshCommand.expectedRevision,"8");
+ assert.equal(freshCommand.expectedAuthorizationGeneration,"56");assert.equal(freshCommand.fields.email,afterProfile.email);
  const send=async(url,init)=>{if(String(url).endsWith("/capabilities"))return Response.json({apiVersion:"2",sourceInstanceId:recoveryTarget.sourceInstanceId,applicationId:recoveryTarget.applicationId,historyEpoch:recoveryTarget.historyEpochId,requestId,grantedCapabilities:[{name:"api.capabilities.read"},{name:"directory.clients.write"}],implementedEndpoints:[{method:"GET",path:"/api/v2/capabilities",requiredCapability:"api.capabilities.read"},{method:"POST",path:"/api/v2/directory/clients/{publicId}/profile/commands",requiredCapability:"directory.clients.write",requiresSourceInstanceId:true,requiresApplicationId:true,requiresHistoryEpoch:true}]},{headers:{"Cache-Control":"no-store","X-Request-ID":requestId}});posts.push(JSON.parse(String(init?.body)));return Response.json({sourceInstanceId:recoveryTarget.sourceInstanceId,applicationId:recoveryTarget.applicationId,historyEpoch:recoveryTarget.historyEpochId,requestId,replayed:false,result:{resource:{type:"client",publicId:recoveryTarget.clientPublicId,revision:"9"},authorizationGeneration:"56"}},{headers:{"Cache-Control":"no-store","X-Request-ID":requestId}})};
  const env={OPS_DB:db,PROJECT_ALPHA_API_V2_CONNECTIONS:JSON.stringify({version:1,instances:{[recoveryTarget.sourceId]:{sourceId:recoveryTarget.sourceId,enabled:true,baseUrl:recoveryTarget.destinationOrigin,apiKey:"local-test-only",sourceInstanceId:recoveryTarget.sourceInstanceId,applicationId:recoveryTarget.applicationId,historyEpoch:recoveryTarget.historyEpochId}}})};
  assert.deepEqual(await profileDispatcher.dispatchProjectAlphaDirectoryProfileOutboxCommand(env,recoveryTarget.sourceId,commandId,send),{status:"acknowledged",commandId,replayed:false,publicId:recoveryTarget.clientPublicId,revision:"9"});
