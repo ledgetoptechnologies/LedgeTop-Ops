@@ -9,13 +9,17 @@ import {applyRelationshipRecoveryAuthorityV184,compileRelationshipRecoveryAuthor
 import {STAGING_TARGET} from "./staging-onboarding-native-only-authority-packet.mjs";
 import {validateClosedRelationshipRecoveryLineageV184,compileProjectOrganizationAuthorityV184,PROJECT_ORGANIZATION_AUTHORITY_V184_PURPOSE as projectPurpose,PROJECT_ORGANIZATION_AUTHORITY_V184_TARGET as projectTarget} from "./staging-project-organization-authority-v184.mjs";
 import {applyProjectOrganizationAuthorityV184,reconcileProjectOrganizationAuthorityV184} from "./staging-project-organization-authority-v184-apply.mjs";
-import {migrateProjectOrganizationFullSchema as migrate} from "./staging-project-organization-fullschema-migrations.mjs";
+import {migrateProjectOrganizationFullSchema} from "./staging-project-organization-fullschema-migrations.mjs";
 
 const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),".."),requireOperations=createRequire(path.join(root,"apps/operations/package.json"));
 const {Miniflare}=requireOperations("miniflare"),migrationDir=path.join(root,"apps/operations/migrations");
 const migrationNames=fs.readdirSync(migrationDir).filter(name=>/^\d{4}_.+\.sql$/.test(name)&&name.slice(0,4)<="0195").sort();
 const CANONICAL_BOOTSTRAP_MIGRATION_COUNT=195;
 const CANONICAL_BOOTSTRAP_FINAL_MIGRATION="0195_client_hub_native_project_current_owner_observation.sql";
+// This is the reviewed historical 195-prefix authority contract, not the
+// evolving physical migration inventory. Keep setup and exact ledger guards
+// on the SAME prefix when future migrations are added to the repository.
+const migrate=db=>migrateProjectOrganizationFullSchema(db,"0195");
 const all=async(db,sql,...params)=>(await db.prepare(sql).bind(...params).all()).results;
 const first=(db,sql,...params)=>db.prepare(sql).bind(...params).first();
 const uuid=n=>`70000000-0000-4000-8000-${String(n).padStart(12,"0")}`;
@@ -51,6 +55,7 @@ test("closed recovery lineage validates from actual 0001-0184 D1 trigger state",
  try{
   const db=await mf.getD1Database("DB");await migrate(db);
   assert.deepEqual((await all(db,"SELECT name FROM d1_migrations ORDER BY name")).map(row=>row.name),migrationNames);
+  assert.equal(await first(db,"SELECT name FROM sqlite_master WHERE type='table' AND name='native_directory_maintenance_authority_approvals'"),null);
   const grantIds=await seed(db),provisionArtifact=compileRelationshipRecoveryAuthorityV184(await input(db,"provision",grantIds));
   await applyRelationshipRecoveryAuthorityV184(db,provisionArtifact,{target:STAGING_TARGET,root});
   const revokeArtifact=compileRelationshipRecoveryAuthorityV184(await input(db,"revoke",grantIds,provisionArtifact));

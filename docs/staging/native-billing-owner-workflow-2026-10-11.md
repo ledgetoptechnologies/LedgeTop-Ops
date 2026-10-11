@@ -51,6 +51,8 @@ This candidate is not deployed or production-ready. It adds a recipient billing-
 
 ### Maintenance implementation status (local only)
 
+- Published delegation revision `079fe889f89bbf157e3015301238fbe14af9116b` passed all ten CI jobs in run `38147752087`. That evidence does not cover the newer local maintenance revision.
+- The historical Project-organization full-schema fixture initially included migration 0196 despite expecting the frozen 195 ledger. Its exact migration checks correctly rejected that mismatch. The test now explicitly applies through 0195 and asserts the maintenance table is absent; all six full-schema cases passed (587.54 seconds, zero failures/skips). No runtime authorization guard was weakened.
 - Forward-only migration `0196_native_directory_maintenance_authority.sql` and a bounded compiler/executor are implemented locally. They add separate approval, immutable receipt and transactional guard tables; existing grant/history triggers remain unchanged.
 - The compiler/executor pins the exact staging account, Worker and D1 identifiers. These labels are not proof of the physical database: a future trusted runner must independently verify the provider environment and `OPS_DB` binding before execution.
 - The executor never installs approvals or authenticates its own caller. It requires a separately authenticated current native owner and a preinstalled approval matching the plan, issuer and independent identity-verification evidence.
