@@ -12,6 +12,11 @@ vi.mock("../src/worker/client-hub-project-policy",() => ({ readClientHubBusiness
 import { prepareClientHubNativeProject, readClientHubNativeProjectCapability, submitClientHubNativeProject } from "../src/worker/client-hub-native-project-management";
 import { listClientHubBusinessProjects } from "../src/worker/client-hub-business-projects";
 import { canonicalBusinessProjectPredicate } from "../src/worker/client-hub-canonical-projects";
+import { prepareProjectAlphaProjectV2Acceptance } from "../src/worker/project-alpha-project-v2-preparation";
+import { planProjectAlphaProjectV2Command, type ProjectAlphaProjectV2CommandProducerAction } from "../src/worker/project-alpha-project-v2-command-producer";
+import { dispatchProjectAlphaProjectV2PendingCommand } from "../src/worker/project-alpha-project-v2-pending-dispatcher";
+import { settleProjectAlphaProjectV2Read } from "../src/worker/project-alpha-project-read-settlement-adapter";
+import { activateProjectAlphaProjectV2Canonical } from "../src/worker/project-alpha-project-canonical-activation-adapter";
 
 let runtime: Miniflare;
 let db: D1Database;
@@ -58,8 +63,8 @@ const inventoryReaders = () => ({inventory:vi.fn(async()=>({status:"observed" as
   sourceInstanceId,applicationId,historyEpoch:historyEpochId,requestId:crypto.randomUUID(),authorizationGeneration:"7",projects:[],nextCursor:null}})),
   bindingStatus:vi.fn(),project:vi.fn()});
 function projectAlphaTransport(external:string,name:string,failPost=false){let posts=0;
-  const responsePublic=external.startsWith("60000000")?"6".repeat(32):external.startsWith("70000000")?"8".repeat(32):external.startsWith("71000000")?"f".repeat(32):external.startsWith("75000000")?"4".repeat(32):projectPublic;
-  const responseProjection=external.startsWith("60000000")?"7".repeat(64):external.startsWith("70000000")?"9".repeat(64):external.startsWith("71000000")?"1".repeat(64):external.startsWith("75000000")?"5".repeat(64):projection;
+  const responsePublic=external.startsWith("ops/")?"5".repeat(32):external.startsWith("60000000")?"6".repeat(32):external.startsWith("70000000")?"8".repeat(32):external.startsWith("71000000")?"f".repeat(32):external.startsWith("75000000")?"4".repeat(32):projectPublic;
+  const responseProjection=external.startsWith("ops/")?"8".repeat(64):external.startsWith("60000000")?"7".repeat(64):external.startsWith("70000000")?"9".repeat(64):external.startsWith("71000000")?"1".repeat(64):external.startsWith("75000000")?"5".repeat(64):projection;
   const send=vi.fn<typeof fetch>(async(input,init)=>{
   const url=new URL(input instanceof Request?input.url:String(input)),method=input instanceof Request?input.method:init?.method??"GET";
   const headers={"Content-Type":"application/json","Cache-Control":"no-store","X-Request-ID":"50000000-0000-4000-8000-000000000008"};
@@ -72,6 +77,28 @@ function projectAlphaTransport(external:string,name:string,failPost=false){let p
   if(url.pathname===`/api/v2/projects/${responsePublic}`)return new Response(JSON.stringify({apiVersion:"2",sourceInstanceId,applicationId,historyEpoch:historyEpochId,
     requestId:headers["X-Request-ID"],replayed:false,accepted:true,resource:{type:"project",id:responsePublic,revision:"1",projectionSha256:responseProjection},data:{name,description:null,status:"active",archived:false,overdueWarning:false,completedAt:null,archivedAt:null,estimatedStart:null,estimatedEnd:null,clientPublicId:null,organizationPublicId:orgPublic}}),{headers});
   throw new Error(`unexpected ${method} ${url.pathname}`);});return {send,get posts(){return posts;}};}
+async function createLegacyMappedProject(external:string) {
+  const commandId="39000000-0000-4000-8000-000000000090", transport=projectAlphaTransport(external,"Imported legacy project");
+  const actor={staffId:staff.id,accessSubject:staff.accessSubject,email:staff.email,admissionVersion:1,profileVersion:1,scopes:[]};
+  const prepared=await prepareProjectAlphaProjectV2Acceptance(env() as never,{operation:"create",sourceId:"project-alpha:primary",
+    expectedApplicationId:applicationId,externalProjectId:external,organizationRecordId:orgId,clientRecordId:null,actor},inventoryReaders() as never);
+  if(prepared.status!=="prepared"||prepared.preparation.operation!=="create")throw new Error(`legacy prepare ${JSON.stringify(prepared)}`);
+  const value=prepared.preparation;
+  const action:Extract<ProjectAlphaProjectV2CommandProducerAction,{operation:"create"}>={sourceId:value.sourceId,actor:{...actor,
+    verifiedUntil:"2999-01-01T00:00:00.000Z"},operation:"create",local:value.local,directory:value.directory,
+    command:{commandId,externalId:external,expectedAuthorizationGeneration:value.expectedAuthorizationGeneration,
+      project:{name:"Imported legacy project",description:null,estimatedStart:null,estimatedEnd:null},
+      organization:value.organization,client:value.client}};
+  const environment=env() as never;
+  const planned=await planProjectAlphaProjectV2Command(environment,action);if(planned.status!=="queued")throw new Error(`legacy plan ${JSON.stringify(planned)}`);
+  const dispatched=await dispatchProjectAlphaProjectV2PendingCommand(environment,"project-alpha:primary",commandId,transport.send);
+  if(dispatched.status!=="acknowledged")throw new Error(`legacy dispatch ${JSON.stringify(dispatched)}`);
+  const settled=await settleProjectAlphaProjectV2Read({OPS_DB:db},dispatched.receiptId,{baseUrl:"https://one.example.test",apiKey:"secret",
+    expectedSourceInstanceId:sourceInstanceId,expectedApplicationId:applicationId,expectedHistoryEpoch:historyEpochId},transport.send);
+  if(settled.status!=="settled")throw new Error(`legacy settlement ${JSON.stringify(settled)}`);
+  const activated=await activateProjectAlphaProjectV2Canonical({OPS_DB:db},settled.settlementId);
+  if(activated.status!=="activated")throw new Error(`legacy activation ${JSON.stringify(activated)}`);
+}
 function standaloneTransport(external:string,name:string,failPost=false,publicChar="0"){let posts=0;const responsePublic=publicChar.repeat(32),responseProjection="6".repeat(64);
   const send=vi.fn<typeof fetch>(async(input,init)=>{const url=new URL(input instanceof Request?input.url:String(input));
     const method=input instanceof Request?input.method:init?.method??"GET",requestId=crypto.randomUUID();
@@ -382,6 +409,52 @@ describe("Client Hub native project durable preparation ledger", () => {
       .resolves.toMatchObject({status:"activated",version:3});
     expect(secondPosts).toBe(1);
     expect(await db.prepare("SELECT count(*) n FROM client_hub_native_project_preparations WHERE external_project_id=?").bind(external).first("n")).toBe(3);
+  });
+  it("updates an existing canonical project whose external ID is not a UUID without widening its frozen scope",async()=>{
+    await db.prepare("UPDATE native_project_grants SET active=1,version=version+1 WHERE id='grant-native'").run();
+    const external="ops/project-acceptance-20261008-portal-1",command="43000000-0000-4000-8000-000000000001";
+    const publicId="5".repeat(32),initialProjection="8".repeat(64),nextProjection="7".repeat(64);
+    await createLegacyMappedProject(external);
+    const request=new Request("https://ops.example.test/client",{headers:{Authorization:"Bearer local","Idempotency-Key":command}});
+    const readers={inventory:vi.fn(),bindingStatus:vi.fn(async()=>({status:"observed" as const,httpStatus:200 as const,response:{apiVersion:"2" as const,
+      sourceInstanceId,applicationId,historyEpoch:historyEpochId,requestId:crypto.randomUUID(),authorizationGeneration:"8",
+      binding:{externalId:external,publicId,createdAt:"2026-01-01T00:00:00.000Z",updatedAt:"2026-01-01T00:00:00.000Z"},
+      resource:{revision:"1",projectionSha256:initialProjection,status:"active" as const,archived:false}}})),project:vi.fn(async()=>({status:"read" as const,httpStatus:200 as const,
+      response:{apiVersion:"2" as const,sourceInstanceId,applicationId,historyEpoch:historyEpochId,requestId:crypto.randomUUID(),replayed:false as const,accepted:true,
+        resource:{type:"project" as const,id:publicId,revision:"1",projectionSha256:initialProjection},data:{name:"Imported legacy project",description:null,
+          status:"active" as const,archived:false,overdueWarning:false,completedAt:null,archivedAt:null,estimatedStart:null,estimatedEnd:null,
+          clientPublicId:null,organizationPublicId:orgPublic}}}))};
+    const prepared=await prepareClientHubNativeProject(env() as never,request,staff,context,{expectedContextVersion:context.contextVersion,
+      operation:"update",commandId:command,externalProjectId:external,scopes:[],project:{name:"Updated legacy project",description:"Preserved by explicit edit",
+        estimatedStart:null,estimatedEnd:null}},readers as never);
+    expect(prepared).toMatchObject({status:"prepared",request:{operation:"update",command:{externalId:external,expectedPublicId:publicId}}});
+    if(prepared.status!=="prepared")throw new Error("legacy update prepare failed");
+    const send=vi.fn<typeof fetch>(async(input,init)=>{const url=new URL(input instanceof Request?input.url:String(input));
+      const method=input instanceof Request?input.method:init?.method??"GET",requestId=crypto.randomUUID();
+      const headers={"Content-Type":"application/json","Cache-Control":"no-store","X-Request-ID":requestId};
+      if(url.pathname==="/api/v2/capabilities")return new Response(JSON.stringify({apiVersion:"2",sourceInstanceId,applicationId,historyEpoch:historyEpochId,
+        requestId,grantedCapabilities:["api.capabilities.read","projects.write","projects.v2.read"].map(name=>({name})),implementedEndpoints:[
+          {method:"GET",path:"/api/v2/capabilities",requiredCapability:"api.capabilities.read"},
+          {method:"POST",path:"/api/v2/projects/profile/commands",requiredCapability:"projects.write",requiresSourceInstanceId:true,requiresApplicationId:true,requiresHistoryEpoch:true},
+          {method:"GET",path:"/api/v2/projects/{publicId}",requiredCapability:"projects.v2.read",requiresSourceInstanceId:true,requiresApplicationId:true,requiresHistoryEpoch:true}]}),{headers});
+      if(method==="POST")return new Response(JSON.stringify({apiVersion:"2",sourceInstanceId,applicationId,historyEpoch:historyEpochId,requestId,replayed:false,
+        result:{resource:{type:"project",id:external,publicId,revision:"2",projectionSha256:nextProjection},authorizationGeneration:"8",
+          presentation:{portalPublished:false,publicLinkEnabled:false}}}),{headers});
+      if(url.pathname===`/api/v2/projects/${publicId}`)return new Response(JSON.stringify({apiVersion:"2",sourceInstanceId,applicationId,historyEpoch:historyEpochId,
+        requestId,replayed:false,accepted:true,resource:{type:"project",id:publicId,revision:"2",projectionSha256:nextProjection},
+        data:{name:"Updated legacy project",description:"Preserved by explicit edit",status:"active",archived:false,overdueWarning:false,completedAt:null,
+          archivedAt:null,estimatedStart:null,estimatedEnd:null,clientPublicId:null,organizationPublicId:orgPublic}}),{headers});
+      throw new Error(`unexpected ${method} ${url.pathname}`);});
+    const changedScope={...prepared.request,scopes:[{scopeKind:"business_area" as const,businessAreaId:"forged",divisionId:null}]};
+    await expect(submitClientHubNativeProject(env() as never,request,staff,context,
+      {expectedContextVersion:context.contextVersion,request:changedScope},send)).rejects.toMatchObject({status:409});
+    expect(send).not.toHaveBeenCalled();
+    await expect(submitClientHubNativeProject(env() as never,request,staff,context,
+      {expectedContextVersion:context.contextVersion,request:prepared.request},send)).resolves.toMatchObject({status:"activated",externalProjectId:external,version:2});
+    expect(await db.prepare("SELECT current_version,canonical_projection_sha256 FROM operations_shared_projects WHERE external_project_id=?")
+      .bind(external).first()).toEqual({current_version:2,canonical_projection_sha256:nextProjection});
+    expect(await db.prepare("SELECT count(*) n FROM client_hub_native_project_preparations WHERE external_project_id=?")
+      .bind(external).first("n")).toBe(1);
   });
   it("creates and lists a project for an exact standalone client without fabricating an organization",async()=>{
     await db.prepare("UPDATE native_project_grants SET active=1,version=version+1 WHERE id='grant-native'").run();

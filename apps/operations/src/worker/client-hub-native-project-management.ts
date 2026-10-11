@@ -9,11 +9,13 @@ import { planProjectAlphaProjectV2Command, type ProjectAlphaProjectV2CommandProd
 import { dispatchProjectAlphaProjectV2PendingCommand } from "./project-alpha-project-v2-pending-dispatcher";
 import { prepareProjectAlphaProjectV2Acceptance, type ProjectAcceptancePreparationReaders } from "./project-alpha-project-v2-preparation";
 import { settleProjectAlphaProjectV2Read } from "./project-alpha-project-read-settlement-adapter";
+import { externalId as validProjectAlphaExternalId } from "./project-alpha-project-transport";
 import type { Env, StaffPrincipal } from "./types";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const SHA256 = /^[0-9a-f]{64}$/;
 const externalId = z.string().min(1).max(191);
+const projectExternalId = z.string().refine(validProjectAlphaExternalId);
 const scope = z.discriminatedUnion("scopeKind", [
   z.object({ scopeKind: z.literal("business_area"), businessAreaId: externalId, divisionId: z.null() }).strict(),
   z.object({ scopeKind: z.literal("division"), businessAreaId: externalId, divisionId: externalId }).strict(),
@@ -22,7 +24,11 @@ const project = z.object({ name: z.string().trim().min(1).max(160), description:
   estimatedStart: z.string().date().nullable(), estimatedEnd: z.string().date().nullable() }).strict();
 export const nativeProjectPrepareSchema = z.object({ expectedContextVersion: z.string().min(1).max(128),
   operation: z.enum(["create","update"]).default("create"), commandId: z.string().regex(UUID),
-  externalProjectId: z.string().regex(UUID), scopes: z.array(scope).max(128), project }).strict();
+  externalProjectId: projectExternalId, scopes: z.array(scope).max(128), project }).strict()
+  .superRefine((value, context) => {
+    if (value.operation === "create" && !UUID.test(value.externalProjectId))
+      context.addIssue({ code: "custom", path: ["externalProjectId"], message: "Create project IDs must be UUIDs" });
+  });
 const relation = z.object({ externalId, expectedPublicId: z.string().regex(/^[0-9a-f]{32}$/),
   expectedRevision: z.string().regex(/^(?:0|[1-9][0-9]{0,18})$/), expectedProjectionSha256: z.string().regex(SHA256) }).strict();
 const frozenCreateRequest = z.object({ sourceId: z.string().regex(/^project-alpha:[a-z0-9][a-z0-9_-]{0,63}$/),
@@ -38,7 +44,7 @@ const frozenCreateRequest = z.object({ sourceId: z.string().regex(/^project-alph
 const frozenUpdateRequest = z.object({ sourceId: z.string().regex(/^project-alpha:[a-z0-9][a-z0-9_-]{0,63}$/),
   expectedApplicationId: z.string().regex(UUID), operation: z.literal("update"), scopes: z.array(scope).max(128),
   local: z.object({ expectedLocalVersion: z.number().int().positive(), expectedLocalProjectionSha256: z.string().regex(SHA256) }).strict(),
-  command: z.object({ commandId: z.string().regex(UUID), externalId: z.string().regex(UUID),
+  command: z.object({ commandId: z.string().regex(UUID), externalId: projectExternalId,
     expectedAuthorizationGeneration: z.string().regex(/^(?:0|[1-9][0-9]{0,18})$/),
     expectedPublicId: z.string().regex(/^[0-9a-f]{32}$/), expectedRevision: z.string().regex(/^[1-9][0-9]{0,18}$/),
     expectedProjectionSha256: z.string().regex(SHA256), project }).strict(),

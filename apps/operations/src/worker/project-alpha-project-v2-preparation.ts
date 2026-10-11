@@ -4,7 +4,8 @@ import { resolveProjectAlphaApiV2Connection, type ProjectAlphaApiV2ConnectionEnv
 import { readConfiguredProjectAlphaProjectBindingStatus } from "./project-alpha-project-binding-status-api-v2";
 import { readConfiguredProjectAlphaProjectInventory } from "./project-alpha-project-inventory-api-v2";
 import { readConfiguredProjectAlphaProject } from "./project-alpha-project-read-api-v2";
-import type { ProjectAlphaProjectProfile, ProjectAlphaProjectRelationProof } from "./project-alpha-project-transport";
+import { externalId as validProjectAlphaExternalId,
+  type ProjectAlphaProjectProfile, type ProjectAlphaProjectRelationProof } from "./project-alpha-project-transport";
 
 export type ProjectAcceptanceScope = Readonly<
   { scopeKind: "business_area"; businessAreaId: string; divisionId: null }
@@ -79,7 +80,7 @@ function validScope(scope: ProjectAcceptanceScope): boolean {
       : scope.scopeKind === "division" && typeof scope.divisionId === "string" && scope.divisionId.length > 0);
 }
 function validRequest(input: ProjectAcceptancePreparationRequest): boolean {
-  return EXTERNAL.test(input.externalProjectId) && EXTERNAL.test(input.actor.staffId) && input.actor.accessSubject.length > 0
+  return validProjectAlphaExternalId(input.externalProjectId) && EXTERNAL.test(input.actor.staffId) && input.actor.accessSubject.length > 0
     && input.actor.email.length >= 3 && Number.isSafeInteger(input.actor.admissionVersion) && input.actor.admissionVersion > 0
     && Number.isSafeInteger(input.actor.profileVersion) && input.actor.profileVersion > 0
     && input.actor.scopes.length <= 128 && input.actor.scopes.every(validScope)

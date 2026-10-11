@@ -34,6 +34,15 @@ describe("Client Hub native project request boundaries", () => {
     expect(nativeProjectPrepareSchema.safeParse({ expectedContextVersion: "context", operation: "update", commandId,
       externalProjectId, scopes: [], project }).success).toBe(true);
     expect(nativeProjectSubmitSchema.safeParse({ expectedContextVersion: "context", request: update }).success).toBe(true);
+    const legacyId = "ops/project-acceptance-20261008-portal-1";
+    expect(nativeProjectPrepareSchema.safeParse({ expectedContextVersion: "context", operation: "update", commandId,
+      externalProjectId: legacyId, scopes: [], project }).success).toBe(true);
+    expect(nativeProjectSubmitSchema.safeParse({ expectedContextVersion: "context", request: {
+      ...update, command: { ...update.command, externalId: legacyId } } }).success).toBe(true);
+    expect(nativeProjectPrepareSchema.safeParse({ expectedContextVersion: "context", operation: "create", commandId,
+      externalProjectId: legacyId, scopes: [], project }).success).toBe(false);
+    expect(nativeProjectPrepareSchema.safeParse({ expectedContextVersion: "context", operation: "update", commandId,
+      externalProjectId: `bad\u0000id`, scopes: [], project }).success).toBe(false);
     for (const invalid of [
       { ...update, local: { ...update.local, expectedLocalVersion: 0 } },
       { ...update, command: { ...update.command, expectedRevision: undefined } },
