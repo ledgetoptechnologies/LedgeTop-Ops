@@ -119,6 +119,86 @@ export async function compileNativeDirectoryMaintenanceAuthorityPlan(db:D1Databa
   return {plan,canonicalPlanJson,canonicalPlanSha256:await sha(canonicalPlanJson),independentBindingVerificationJson,
     independentBindingVerificationSha256:await sha(independentBindingVerificationJson)};
 }
+export type FrozenNativeDirectoryMaintenanceApproval = Readonly<{
+  approvalId:string; plan:NativeDirectoryMaintenanceAuthorityPlan; canonicalPlanSha256:string;
+}>;
+/** Loads only the immutable plan already approved out-of-band. This validates
+ * canonical bytes without recomputing today's snapshot: executor's receipt
+ * path must remain usable after an uncertain successful first execution. */
+export async function readFrozenNativeDirectoryMaintenanceApproval(db:D1Database,approvalId:string,
+  commandId:string,canonicalPlanSha256:string):Promise<FrozenNativeDirectoryMaintenanceApproval>{
+  if(!valid(approvalId)||!valid(commandId)||!/^[0-9a-f]{64}$/u.test(canonicalPlanSha256))fail();
+  const raw:unknown=await db.prepare(`SELECT approval_id,canonical_plan_json,canonical_plan_sha256,
+    approved_operator_staff_id,approved_operator_access_subject,independent_binding_verification_json,
+    independent_binding_verification_sha256,issued_by_staff_id,issued_by_access_subject
+    FROM native_directory_maintenance_authority_approvals WHERE approval_id=?`).bind(approvalId).first<unknown>();
+  const columns=['approval_id','canonical_plan_json','canonical_plan_sha256','approved_operator_staff_id',
+    'approved_operator_access_subject','independent_binding_verification_json','independent_binding_verification_sha256',
+    'issued_by_staff_id','issued_by_access_subject'] as const;
+  if(!exact(raw,columns))throw Error('native_directory_maintenance_authority_denied');
+  const jsonValue=raw.canonical_plan_json;
+  if(typeof jsonValue!=='string')throw Error('native_directory_maintenance_authority_denied');
+  const json=jsonValue;
+  if(new TextEncoder().encode(json).byteLength>131072||raw.approval_id!==approvalId
+    ||raw.canonical_plan_sha256!==canonicalPlanSha256)fail();
+  let value:unknown;try{value=JSON.parse(json) as unknown;}catch{return fail();}
+  const keys=['protocol','version','target','staffId','grantId','commandId','operator','approvalIssuer','identityEvidence','snapshot'] as const;
+  if(!exact(value,keys))throw Error('native_directory_maintenance_authority_denied');
+  if(value.protocol!=='native-directory-maintenance-authority'||value.version!==1||value.commandId!==commandId
+    ||typeof value.staffId!=='string'||typeof value.grantId!=='string')throw Error('native_directory_maintenance_authority_denied');
+  const target=value.target,operator=value.operator,approvalIssuer=value.approvalIssuer,evidence=value.identityEvidence,snapshotValue=value.snapshot;
+  if(!exact(target,['environment','accountLabel','workerLabel','databaseLabel'])||target.environment!=='staging'
+    ||typeof target.accountLabel!=='string'||typeof target.workerLabel!=='string'||typeof target.databaseLabel!=='string')throw Error('native_directory_maintenance_authority_denied');
+  if(!exact(operator,['staffId','accessSubject'])||typeof operator.staffId!=='string'||typeof operator.accessSubject!=='string')throw Error('native_directory_maintenance_authority_denied');
+  if(!exact(approvalIssuer,['staffId','accessSubject'])||typeof approvalIssuer.staffId!=='string'
+    ||typeof approvalIssuer.accessSubject!=='string')throw Error('native_directory_maintenance_authority_denied');
+  if(!exact(evidence,['staffId','accessSubject','verificationId','verifiedAt','expiresAt','issuer'])
+    ||typeof evidence.staffId!=='string'||typeof evidence.accessSubject!=='string'
+    ||typeof evidence.verificationId!=='string'||typeof evidence.verifiedAt!=='string'
+    ||typeof evidence.expiresAt!=='string'||typeof evidence.issuer!=='string')throw Error('native_directory_maintenance_authority_denied');
+  if(!exact(snapshotValue,Object.keys(tables)))throw Error('native_directory_maintenance_authority_denied');
+  const snapshotRecord=snapshotValue;
+  function parseRows(name:keyof typeof tables):Row[]{
+    const source=snapshotRecord[name],spec=tables[name];
+    if(!Array.isArray(source)||source.length>spec.limit)throw Error('native_directory_maintenance_authority_denied');
+    return source.map((item:unknown)=>{
+      const names=spec.columns.split(',');
+      if(!exact(item,names))throw Error('native_directory_maintenance_authority_denied');
+      const row:Record<string,Scalar>={};
+      for(const column of names){
+        const field=item[column];
+        if(field!==null&&typeof field!=='string'&&!(typeof field==='number'&&Number.isSafeInteger(field)))
+          throw Error('native_directory_maintenance_authority_denied');
+        row[column]=field;
+      }
+      return row;
+    });
+  }
+  const snapshot:Snapshot={staff:parseRows('staff'),admission:parseRows('admission'),profile:parseRows('profile'),
+    roles:parseRows('roles'),grants:parseRows('grants'),history:parseRows('history'),generation:parseRows('generation')};
+  const input:NativeDirectoryMaintenancePlanInput={
+    target:{environment:'staging',accountLabel:target.accountLabel,workerLabel:target.workerLabel,databaseLabel:target.databaseLabel},
+    staffId:value.staffId,grantId:value.grantId,commandId,
+    operator:{staffId:operator.staffId,accessSubject:operator.accessSubject},
+    approvalIssuer:{staffId:approvalIssuer.staffId,accessSubject:approvalIssuer.accessSubject},
+    identityEvidence:{staffId:evidence.staffId,accessSubject:evidence.accessSubject,
+      verificationId:evidence.verificationId,verifiedAt:evidence.verifiedAt,
+      expiresAt:evidence.expiresAt,issuer:evidence.issuer},
+  };
+  const plan:NativeDirectoryMaintenanceAuthorityPlan={...input,protocol:'native-directory-maintenance-authority',version:1,snapshot};
+  validatePlan(plan);
+  const canonicalPlanJson=canonical(plan),independentBindingVerificationJson=canonical(plan.identityEvidence);
+  if(canonicalPlanJson!==json||await sha(canonicalPlanJson)!==canonicalPlanSha256
+    ||typeof raw.canonical_plan_sha256!=='string'||typeof raw.approved_operator_staff_id!=='string'
+    ||typeof raw.approved_operator_access_subject!=='string'||typeof raw.independent_binding_verification_json!=='string'
+    ||typeof raw.independent_binding_verification_sha256!=='string'||typeof raw.issued_by_staff_id!=='string'
+    ||typeof raw.issued_by_access_subject!=='string'||raw.canonical_plan_sha256!==canonicalPlanSha256
+    ||raw.approved_operator_staff_id!==plan.operator.staffId||raw.approved_operator_access_subject!==plan.operator.accessSubject
+    ||raw.issued_by_staff_id!==plan.approvalIssuer.staffId||raw.issued_by_access_subject!==plan.approvalIssuer.accessSubject
+    ||raw.independent_binding_verification_json!==independentBindingVerificationJson
+    ||await sha(independentBindingVerificationJson)!==raw.independent_binding_verification_sha256)fail();
+  return {approvalId,plan,canonicalPlanSha256};
+}
 function rowFence(db:D1DatabaseSession,commandId:string,name:keyof typeof tables,staffId:string,rows:readonly Row[],excludeGrantId?:string){
   const t=tables[name],columns=t.columns.split(','),match=columns.map(c=>`a.${c} COLLATE BINARY IS json_extract(e.value,'$.${c}') COLLATE BINARY`).join(' AND ');
   const exclusion=excludeGrantId?(name==='grants'?' AND id<>?':' AND grant_id<>?'):'';

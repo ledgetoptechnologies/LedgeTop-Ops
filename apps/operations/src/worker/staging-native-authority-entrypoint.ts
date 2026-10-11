@@ -4,7 +4,9 @@ import { handleOperationsPortalNativeDeliveryAuthorityOwnerHttp } from "./operat
 import { handleOperationsPortalWorkspaceOwnerHttp } from "./operations-portal-workspace-owner-http";
 import type { OperationsPortalWorkspacePublicationBinding } from "./operations-portal-workspace-publication-outbox";
 import type { OperationsPortalNativeDeliveryAuthorityDispatchEnv } from "./operations-portal-native-delivery-authority-dispatch";
-import { exactNativeStagingConfiguration, exactNativeBillingStagingConfiguration } from "./staging-native-authority-policy";
+import { exactNativeStagingConfiguration, exactNativeBillingStagingConfiguration,
+  exactNativeDirectoryMaintenanceStagingConfiguration } from "./staging-native-authority-policy";
+import { handleOperationsNativeDirectoryMaintenanceOwnerHttp } from "./operations-native-directory-maintenance-owner-http";
 import { handleOperationsPortalNativeBillingAuthorityOwnerHttp } from "./operations-portal-native-billing-authority-owner-http";
 import { handleOperationsPortalNativeBillingPermissionOwnerHttp,
   OPERATIONS_NATIVE_BILLING_PERMISSION_OWNER_BASE } from "./operations-portal-native-billing-permission-owner-http";
@@ -21,6 +23,8 @@ const WORKSPACE_PAGE = "/administration/client-portal/operations-workspaces";
 const BILLING_API = "/api/native-client-portal/operations-billing-authority";
 const BILLING_PAGE = "/administration/client-portal/operations-billing-authority";
 const BILLING_PERMISSION_PAGE = "/administration/client-portal/operations-billing-permissions";
+const DIRECTORY_MAINTENANCE_API = "/api/native-client-portal/directory-maintenance-authority";
+const DIRECTORY_MAINTENANCE_PAGE = "/administration/staging/directory-maintenance-authority";
 const OWNER_PAGES = new Set([
   "/administration/client-portal/operations-recipients",
   "/administration/client-portal/operations-delivery-authority",
@@ -35,6 +39,7 @@ type NativeStagingEnv = Env & OperationsPortalNativeDeliveryAuthorityDispatchEnv
   OPERATIONS_PORTAL_NATIVE_DELIVERY_READER_ENABLED?: string;
   OPERATIONS_PORTAL_NATIVE_DELIVERY_CANCELLATION_ENABLED?: string;
   OPERATIONS_PORTAL_NATIVE_BILLING_OWNER_ENABLED?: string;
+  NATIVE_DIRECTORY_MAINTENANCE_OWNER_ENABLED?: string;
   OPERATIONS_PORTAL_WORKSPACE_OWNER_ENABLED?: string;
   OPERATIONS_PORTAL_WORKSPACE_PUBLICATION_DISPATCH_ENABLED?: string;
   OPERATIONS_PORTAL_WORKSPACE_PUBLICATION?: OperationsPortalWorkspacePublicationBinding;
@@ -49,6 +54,16 @@ const notFound = () => Response.json({ error: "Not found" }, { status: 404 });
 export default {
   async fetch(request: Request, env: NativeStagingEnv, ctx: ExecutionContext): Promise<Response> {
     const pathname = new URL(request.url).pathname;
+    if (pathFamily(pathname, DIRECTORY_MAINTENANCE_API) || pathname === DIRECTORY_MAINTENANCE_PAGE) {
+      if (!exactNativeDirectoryMaintenanceStagingConfiguration(request, env)) return notFound();
+      if (pathname === DIRECTORY_MAINTENANCE_PAGE) return env.ASSETS.fetch(request);
+      return handleOperationsNativeDirectoryMaintenanceOwnerHttp(request, {
+        environment: env.ENVIRONMENT, expectedHost: STAGING_HOST,
+        enabledFlag: env.NATIVE_DIRECTORY_MAINTENANCE_OWNER_ENABLED ?? "false",
+        configuration: { enabled: true, issuer: env.TEAM_DOMAIN ?? "", staffAudience: env.OPERATIONS_AUD,
+          origin: STAGING_ORIGIN, csrfSecret: env.OPERATIONS_SESSION_SECRET }, database: env.OPS_DB,
+      });
+    }
     if (pathFamily(pathname, OPERATIONS_NATIVE_BILLING_PERMISSION_OWNER_BASE) || pathname === BILLING_PERMISSION_PAGE) {
       if (!exactNativeBillingStagingConfiguration(request, env)) return notFound();
       if (pathname === BILLING_PERMISSION_PAGE) return env.ASSETS.fetch(request);

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { exactNativeStagingConfiguration, exactNativeBillingStagingConfiguration } from "../src/worker/staging-native-authority-policy";
+import { exactNativeStagingConfiguration, exactNativeBillingStagingConfiguration,
+  exactNativeDirectoryMaintenanceStagingConfiguration } from "../src/worker/staging-native-authority-policy";
 
 type NativeEnv = Parameters<typeof exactNativeStagingConfiguration>[1];
 const exact = {
@@ -17,6 +18,25 @@ const exact = {
 } as NativeEnv;
 
 describe("staging native authority entrypoint", () => {
+  it("keeps directory maintenance independently default-off on the exact staging host", () => {
+    const request = new Request("https://ops-staging.ledgetopdroneservices.com/api/native-client-portal/directory-maintenance-authority/session");
+    expect(exactNativeDirectoryMaintenanceStagingConfiguration(request, exact)).toBe(false);
+    const enabled = { ...exact, NATIVE_DIRECTORY_MAINTENANCE_OWNER_ENABLED: "true" };
+    expect(exactNativeDirectoryMaintenanceStagingConfiguration(request, enabled)).toBe(true);
+    expect(exactNativeDirectoryMaintenanceStagingConfiguration(request,
+      { ...exact, OPERATIONS_PORTAL_NATIVE_BILLING_OWNER_ENABLED: "true" })).toBe(false);
+    for (const override of [
+      { NATIVE_DIRECTORY_MAINTENANCE_OWNER_ENABLED: "false" },
+      { NATIVE_DIRECTORY_MAINTENANCE_OWNER_ENABLED: "TRUE" },
+      { ENVIRONMENT: "production" },
+      { EXPECTED_HOST: "ops.ledgetopdroneservices.com" },
+      { PUBLIC_BASE_URL: "https://ops.ledgetopdroneservices.com" },
+      { OPERATIONS_PORTAL_NATIVE_RECIPIENT_AUTHORITY: undefined },
+    ]) expect(exactNativeDirectoryMaintenanceStagingConfiguration(request, { ...enabled, ...override })).toBe(false);
+    expect(exactNativeDirectoryMaintenanceStagingConfiguration(new Request(
+      "https://ops.ledgetopdroneservices.com/api/native-client-portal/directory-maintenance-authority/session",
+    ), enabled)).toBe(false);
+  });
   it("keeps the scoped staff-delegation surface behind the same exact default-off billing gate", () => {
     for (const path of [
       "/api/native-client-portal/operations-billing-permissions/session",

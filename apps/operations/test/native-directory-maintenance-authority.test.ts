@@ -4,6 +4,7 @@ import {
   compileNativeDirectoryMaintenanceAuthorityPlan,
   executeNativeDirectoryMaintenanceAuthority,
   NATIVE_DIRECTORY_MAINTENANCE_STAGING_TARGET,
+  readFrozenNativeDirectoryMaintenanceApproval,
   type NativeDirectoryMaintenanceAuthorityPlan,
   type NativeDirectoryMaintenancePlanInput,
 } from "../src/worker/native-directory-maintenance-authority";
@@ -112,6 +113,12 @@ describe("native directory maintenance authority on the canonical D1 chain", { t
       expect(compiled.plan.snapshot.grants).toHaveLength(2);
       expect(compiled.plan.snapshot.grants.some(row => row.permission === "directory.portal_access.manage")).toBe(false);
       const approvalId = await installSyntheticTrustedApproval(compiled.plan);
+      const frozenBeforeExecution = await readFrozenNativeDirectoryMaintenanceApproval(
+        db, approvalId, compiled.plan.commandId, compiled.canonicalPlanSha256);
+      expect(frozenBeforeExecution.plan).toEqual(compiled.plan);
+      await expect(readFrozenNativeDirectoryMaintenanceApproval(
+        db, approvalId, compiled.plan.commandId, "f".repeat(64))).rejects.toThrow(
+        "native_directory_maintenance_authority_denied");
 
       const firstHistory = compiled.plan.snapshot.history[0]!;
       const rejectAlteredPlan = (plan: NativeDirectoryMaintenanceAuthorityPlan) =>
@@ -150,6 +157,11 @@ describe("native directory maintenance authority on the canonical D1 chain", { t
       const applied = concurrent.find(result => result.status === "applied")!;
       expect(applied).toMatchObject({ commandId: compiled.plan.commandId, approvalId,
         grantId: compiled.plan.grantId, resultingGeneration: 3 });
+      // An uncertain HTTP result must still be reconcilable after the first
+      // commit, when recompiling today's plan would (correctly) be ineligible.
+      const frozenAfterExecution = await readFrozenNativeDirectoryMaintenanceApproval(
+        db, approvalId, compiled.plan.commandId, compiled.canonicalPlanSha256);
+      expect(frozenAfterExecution.plan).toEqual(compiled.plan);
       const exactReplay = await execute(compiled.plan, approvalId);
       expect(exactReplay).toMatchObject({ status: "replayed", grantId: compiled.plan.grantId });
       expect(await db.prepare(`SELECT count(*) count FROM native_directory_grant_history WHERE grant_id=?`)

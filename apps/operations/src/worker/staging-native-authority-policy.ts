@@ -14,6 +14,7 @@ export type NativeStagingAdmissionEnv = Readonly<{
   OPERATIONS_PORTAL_NATIVE_DELIVERY_AUTHORITY?: unknown;
   OPERATIONS_PORTAL_NATIVE_DELIVERY_READER_ENABLED?: string;
   OPERATIONS_PORTAL_NATIVE_BILLING_OWNER_ENABLED?: string;
+  NATIVE_DIRECTORY_MAINTENANCE_OWNER_ENABLED?: string;
 }>;
 
 export function exactNativeStagingConfiguration(request: Request, env: NativeStagingAdmissionEnv): boolean {
@@ -34,4 +35,10 @@ export function exactNativeStagingConfiguration(request: Request, env: NativeSta
 export function exactNativeBillingStagingConfiguration(request: Request, env: NativeStagingAdmissionEnv): boolean {
   return exactNativeStagingConfiguration(request, env)
     && env.OPERATIONS_PORTAL_NATIVE_BILLING_OWNER_ENABLED === "true";
+}
+
+/** Independent, default-off maintenance gate; billing activation cannot substitute. */
+export function exactNativeDirectoryMaintenanceStagingConfiguration(request: Request, env: NativeStagingAdmissionEnv): boolean {
+  return exactNativeStagingConfiguration(request, env)
+    && env.NATIVE_DIRECTORY_MAINTENANCE_OWNER_ENABLED === "true";
 }
