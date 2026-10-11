@@ -181,6 +181,31 @@ it('scheduler drains the derived lane through its separate explicit policy',asyn
   expect(result.attempted).toBeGreaterThan(0);
   expect(await db.prepare('SELECT state FROM native_directory_profile_binding_dispatch WHERE command_id=?').bind(f.commandId).first('state')).toBe('complete');
 });
+for(const interruption of ['503','scheduler_deadline'] as const)it(`checkpoints each persisted page and resumes after mid-scan ${interruption}`,async()=>{
+  const f=await fixture(true),prefix=(BigInt(`0x${f.publicId}`)-1n).toString(16).padStart(32,'0'),checkpoint=`organization:${prefix}`;
+  const cursors:(string|null)[]=[];let interrupted=false,inventoryCalls=0,now=Date.now();const started=now;
+  const send=vi.fn<typeof fetch>(async(url,init)=>{
+    const parsed=new URL(String(url));if(!parsed.pathname.endsWith('/inventory'))return f.send(url,init);
+    const cursor=parsed.searchParams.get('cursor');cursors.push(cursor);inventoryCalls++;
+    if(!interrupted&&inventoryCalls===2&&interruption==='503'){interrupted=true;return new Response(null,{status:503});}
+    const response=await f.send(url,init),body=await response.json() as {resources:unknown[]};
+    if(!cursor){
+      if(!interrupted&&interruption==='scheduler_deadline'){interrupted=true;now=started+20_001;}
+      return json({...body,resources:[{type:'organization',publicId:prefix,revision:'1',present:true,lastAction:'upsert',projectionSha256:'b'.repeat(64),binding:null}],nextCursor:checkpoint});
+    }
+    return json({...body,nextCursor:null});
+  });
+  const result=await drainNativeDirectoryOutboxes({...automaticEnv(),NATIVE_DIRECTORY_OUTBOX_DRAIN_ENABLED:'true'},
+    {send,rotationTime:300_000,maxCommands:1,now:()=>now});
+  expect(result.uncertain).toBe(1);expect(f.posts).toHaveLength(0);
+  expect(await db.prepare('SELECT inventory_cursor FROM native_directory_profile_binding_dispatch WHERE command_id=?').bind(f.commandId).first('inventory_cursor')).toBe(checkpoint);
+  const prior=cursors.length;await db.prepare('UPDATE native_directory_profile_binding_dispatch SET next_attempt_at=0 WHERE command_id=?').bind(f.commandId).run();
+  expect(await dispatchNativeDirectoryProfileBindingContinuation(automaticEnv(),sourceId,f.commandId,send)).toMatchObject({status:'uncertain'});
+  expect(cursors[prior]).toBe(checkpoint);expect(f.posts).toHaveLength(1);
+  await db.prepare('UPDATE native_directory_profile_binding_dispatch SET next_attempt_at=0 WHERE command_id=?').bind(f.commandId).run();
+  expect(await dispatchNativeDirectoryProfileBindingContinuation(automaticEnv(),sourceId,f.commandId,send)).toEqual({status:'acknowledged'});
+  expect(f.posts).toHaveLength(1);
+},60000);
 it('parks current local-version drift without retargeting the durable ACK job',async()=>{
   const f=await fixture(true);
   expect((await writeNativeDirectoryProfile(db,{...f.update,mutationId:randomUUID(),expectedLocalVersion:2,
@@ -322,7 +347,8 @@ it('drains two owned records acknowledged at the same source generation without 
   expect(await dispatchProjectAlphaDirectoryProfileOutboxCommand(env(),sourceId,second.commandIds[0]!,send)).toMatchObject({status:'acknowledged'});
   const newerFirst=await writeNativeDirectoryProfile(db,{...first.update,mutationId:randomUUID(),expectedLocalVersion:2,profile:{...profile,name:'First updated again'},
     destinations:first.update.destinations.map(d=>({...d,expectedAuthorizationGeneration:'2'}))});if(newerFirst.status!=='written')throw Error(newerFirst.reason);
-  expect(await dispatchProjectAlphaDirectoryProfileOutboxCommand(env(),sourceId,newerFirst.commandIds[0]!,send)).toMatchObject({status:'acknowledged'});
+  const firstAck=await dispatchProjectAlphaDirectoryProfileOutboxCommand(env(),sourceId,newerFirst.commandIds[0]!,send);
+  expect(firstAck,'reason' in firstAck?firstAck.reason:firstAck.status).toMatchObject({status:'acknowledged'});
   for(const id of [newerFirst.commandIds[0]!,second.commandIds[0]!])
     expect(await db.prepare('SELECT authorization_generation FROM native_directory_profile_binding_jobs WHERE command_id=?').bind(id).first('authorization_generation')).toBe('2');
   expect(await dispatchNativeDirectoryProfileBindingContinuation(automaticEnv(),sourceId,newerFirst.commandIds[0]!,send)).toEqual({status:'acknowledged'});

@@ -77,14 +77,22 @@ async function observed(env:Environment,j:Job,lease:string,send:typeof fetch):Pr
   const progress=await env.OPS_DB.prepare('SELECT inventory_cursor,inventory_generation FROM native_directory_profile_binding_dispatch WHERE command_id=?')
     .bind(j.command_id).first<{inventory_cursor:string|null;inventory_generation:string|null}>();
   let cursor=progress?.inventory_cursor??null,generation=progress?.inventory_generation??null;
+  let savedCursor=cursor,savedGeneration=generation;
   const save=async(next:string|null,at:string|null)=>{
-    if(next===(progress?.inventory_cursor??null)&&at===(progress?.inventory_generation??null))return;
+    if(next===savedCursor&&at===savedGeneration)return;
     await guarded(env.OPS_DB,j,lease,[env.OPS_DB.prepare(`UPDATE native_directory_profile_binding_dispatch
       SET inventory_cursor=?,inventory_generation=? WHERE command_id=? AND state='leased' AND lease_token=?`).bind(next,at,j.command_id,lease)]);
+    savedCursor=next;savedGeneration=at;
   };
   for(let page=0;page<5;page++){
     const out=await readConfiguredProjectAlphaDirectoryInventory(env,j.source_id,{type:j.resource_type,cursor,limit:200},send);
-    if(out.status!=='observed'){if(cursor)await save(null,null);return null;}
+    if(out.status!=='observed'){
+      // A valid non-null query rejected as HTTP400 is explicit cursor rejection.
+      // Timeouts, transport failures, 5xx and unavailable preflight are not
+      // evidence that previously persisted canonical progress became invalid.
+      if(cursor&&out.status==='uncertain'&&out.reason==='http_status'&&out.httpStatus===400)await save(null,null);
+      return null;
+    }
     const inventory=out.inventory;
     if(inventory.sourceInstanceId!==j.source_instance_id||inventory.applicationId!==j.application_id||inventory.historyEpoch!==j.history_epoch_id
       ||generation!==null&&generation!==inventory.authorizationGeneration){await save(null,null);return null;}
@@ -105,6 +113,9 @@ async function observed(env:Environment,j:Job,lease:string,send:typeof fetch):Pr
       return{item,generation,requestId:inventory.requestId};
     }
     cursor=inventory.nextCursor;if(!cursor)throw new EvidenceChanged('inventory_binding_absent');
+    // Checkpoint each successful page before the scheduler/request deadline
+    // can interrupt the next fetch. Never wait for the whole page allowance.
+    await save(cursor,generation);
   }
   await save(cursor,generation);return null;
 }
