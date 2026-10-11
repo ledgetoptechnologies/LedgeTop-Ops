@@ -27,29 +27,40 @@ test.afterEach(() => {
   for (const directory of temporary.splice(0)) fs.rmSync(directory, { recursive: true, force: true });
 });
 
-test("accepts exact immutable 0184 through 0187 artifact prefixes on reviewed 0187", () => {
+test("accepts only exact immutable reviewed artifact prefixes through 0190", () => {
   const migrationNames = names();
-  for (const count of [184, 185, 186, 187]) {
+  for (const count of [184, 185, 186, 187, 190]) {
     const chain = validateAuthorityMigrationChainV185(root, migrationNames.slice(0, count), fail);
     assert.equal(chain.count, count);
     assert.equal(chain.final, migrationNames[count - 1]);
   }
+  for (const count of [188, 189]) assert.throws(() =>
+    validateAuthorityMigrationChainV185(root, migrationNames.slice(0, count), fail),
+    /exact authority artifact migration chain/);
   assert.throws(() => validateAuthorityMigrationChainV185(root,
     [...migrationNames.slice(0, 185), "0186_unknown.sql"], fail), /exact authority artifact migration chain/);
 });
 
-test("rejects altered reviewed suffixes and an unknown 0188 repository suffix", () => {
+test("rejects altered reviewed migrations and an unknown repository suffix", () => {
   for (const mutate of [
+    base => fs.appendFileSync(path.join(base, "apps", "operations", "migrations",
+      "0184_project_alpha_directory_relationship_generation_recovery.sql"), " "),
     base => fs.appendFileSync(path.join(base, "apps", "operations", "migrations",
       "0185_project_alpha_directory_binding_generation_epochs.sql"), " "),
     base => fs.appendFileSync(path.join(base, "apps", "operations", "migrations",
       "0186_project_alpha_directory_conflict_evidence_binding.sql"), " "),
     base => fs.appendFileSync(path.join(base, "apps", "operations", "migrations",
       "0187_operations_portal_native_delivery_literal_prefix_guard.sql"), " "),
-    base => fs.writeFileSync(path.join(base, "apps", "operations", "migrations", "0188_unknown.sql"), "SELECT 1;\n"),
+    base => fs.appendFileSync(path.join(base, "apps", "operations", "migrations",
+      "0188_client_hub_native_project_preparations.sql"), " "),
+    base => fs.appendFileSync(path.join(base, "apps", "operations", "migrations",
+      "0189_client_hub_native_project_uncertain_recovery.sql"), " "),
+    base => fs.appendFileSync(path.join(base, "apps", "operations", "migrations",
+      "0190_client_hub_native_project_preparation_authority.sql"), " "),
+    base => fs.writeFileSync(path.join(base, "apps", "operations", "migrations", "0191_unknown.sql"), "SELECT 1;\n"),
   ]) {
     const base = fixture(); mutate(base);
-    assert.throws(() => validateAuthorityMigrationChainV185(base, names(base).slice(0, 187), fail),
-      /exact reviewed 0187 migration chain/);
+    assert.throws(() => validateAuthorityMigrationChainV185(base, names(base), fail),
+      /exact reviewed 0190 migration chain/);
   }
 });
