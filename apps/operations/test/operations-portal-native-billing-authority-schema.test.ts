@@ -54,7 +54,7 @@ describe("native billing authority migration",()=>{
     try{
       const directory=new URL("../migrations/",import.meta.url),database=await runtime.getD1Database("OPS_DB") as unknown as D1Database;
       const reviewed=reviewedOperationsMigrationNames(directory);
-      expect(reviewed.at(-1)).toBe("0194_operations_portal_native_delivery_terminal_cancellations.sql");
+      expect(reviewed.at(-1)).toBe("0195_client_hub_native_project_current_owner_observation.sql");
       const suffix=["0191_operations_portal_native_billing_authority.sql","0192_ops_service_definition_authority.sql"];
       expect(suffix.every(name=>reviewed.includes(name))).toBe(true);
       const historical=reviewed.slice(0,reviewed.indexOf("0193_operations_portal_native_delivery_dead_conflict_recovery.sql"));

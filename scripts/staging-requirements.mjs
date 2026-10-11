@@ -491,6 +491,7 @@ export const REQUIRED_STAGING_MIGRATIONS = Object.freeze({
     "0192_ops_service_definition_authority.sql",
     "0193_operations_portal_native_delivery_dead_conflict_recovery.sql",
     "0194_operations_portal_native_delivery_terminal_cancellations.sql",
+    "0195_client_hub_native_project_current_owner_observation.sql",
   ]),
 });
 
@@ -532,6 +533,7 @@ export const REQUIRED_STAGING_MIGRATION_SHA256 = Object.freeze({
     "0192_ops_service_definition_authority.sql": "8a2d278e0a3a852b08d23efcb9c278a44ba3ea01da89742bba5d3909c3b1d8b9",
     "0193_operations_portal_native_delivery_dead_conflict_recovery.sql": "2454b60512fa5aec38942d9bd62338f753b527c2e4319e6e7e391509f59bfa56",
     "0194_operations_portal_native_delivery_terminal_cancellations.sql": "75a8852921ff81e2926c97acc1636a38fc7dae13b45e653cceda93c23f962f6d",
+    "0195_client_hub_native_project_current_owner_observation.sql": "aaa8b35e502ed634cd38ed16c5a870a91f63c0ee578a031aec15744e7947ea44",
   }),
 });
 

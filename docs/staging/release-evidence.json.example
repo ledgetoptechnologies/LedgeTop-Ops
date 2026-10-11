@@ -848,7 +848,8 @@
         "0191_operations_portal_native_billing_authority.sql",
         "0192_ops_service_definition_authority.sql",
         "0193_operations_portal_native_delivery_dead_conflict_recovery.sql",
-        "0194_operations_portal_native_delivery_terminal_cancellations.sql"
+        "0194_operations_portal_native_delivery_terminal_cancellations.sql",
+        "0195_client_hub_native_project_current_owner_observation.sql"
       ],
       "appliedToStaging": false,
       "listEvidenceRef": "<EVIDENCE_REFERENCE>",
@@ -914,8 +915,8 @@
           "applyEvidenceRef": "<EVIDENCE_REFERENCE>",
           "readbackEvidenceRef": "<EVIDENCE_REFERENCE>",
           "transformedFiles": ["0002_seed_acl.sql"],
-          "ledgerCount": 194,
-          "finalMigration": "0194_operations_portal_native_delivery_terminal_cancellations.sql",
+          "ledgerCount": 195,
+          "finalMigration": "0195_client_hub_native_project_current_owner_observation.sql",
           "sourceSeedSha256": "<CANONICAL_SEED_SHA256>",
           "generatedSeedSha256": "<GENERATED_SEED_SHA256>",
           "databaseWasEmpty": false,

@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 import { isDeepStrictEqual as same } from "node:util";
 import { BOOTSTRAP_APPS } from "./staging-bootstrap.mjs";
 import { collectOrderedReadOnlySnapshot } from "./ordered-read-only-snapshot.mjs";
+import { readCompleteTableSnapshot } from "./read-complete-table-snapshot.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const require = createRequire(path.join(root,"apps/operations/package.json"));
@@ -15,20 +16,26 @@ const { unstable_splitSqlQuery: splitSql } = require("wrangler");
 const account = "846c924bf17bf4f3dd15c97a4c5d1d51";
 const sha = value => crypto.createHash("sha256").update(value).digest("hex");
 const SPECS = Object.freeze({
-  client: Object.freeze({ application: "client", from: 147, to: 149,
+  client: Object.freeze({ application: "client", preservationPolicy:"client", from: 147, to: 149,
     database: "b6f653ab-9acd-4421-9ad0-207754b59aeb", databaseName: "client-data-staging", binding: "DELIVERY_DB",
     migrationNamesSha256: "adec3554555949068ac785d0720c6dcddc8813489c98b5c88e88c0afd23ee659",
     migrationContentsSha256: "f0131c4467cbe6046c5da7c54f0bcd604cc39f743d9a98082d3ff59a7d34c1f1",
     suffix: Object.freeze(["0229_operations_portal_native_delivery_regrant.sql",
       "0230_operations_portal_native_delivery_terminal_cancellations.sql"]),
   }),
-  operations: Object.freeze({ application: "operations", from: 190, to: 194,
+  operations: Object.freeze({ application: "operations", preservationPolicy:"operations", from: 190, to: 194,
     database: "78b34173-b168-4e3d-9832-bb9d245cc6b8", databaseName: "ltds-ops-staging", binding: "OPS_DB",
     migrationNamesSha256: "21797f48e9c38621119a6e78eb431594609ae5520aea9036f1e5db288a984a10",
     migrationContentsSha256: "156c845b6185e89ae18533015055b0c0e09f6939348a165da68a1a3c10eabc25",
     suffix: Object.freeze(["0191_operations_portal_native_billing_authority.sql","0192_ops_service_definition_authority.sql",
       "0193_operations_portal_native_delivery_dead_conflict_recovery.sql",
       "0194_operations_portal_native_delivery_terminal_cancellations.sql"]),
+  }),
+  "project-guard": Object.freeze({ application:"operations",preservationPolicy:"strict",from:194,to:195,
+    database:"78b34173-b168-4e3d-9832-bb9d245cc6b8",databaseName:"ltds-ops-staging",binding:"OPS_DB",
+    migrationNamesSha256:"3aecb42400d7a5e95687cca3eb256e880aa306dd4184747c0171f6301ffb71fd",
+    migrationContentsSha256:"46d06078251512d73faf9b96f277165d2a7a01e8c7d97d3e775dde0a167ef9da",
+    suffix:Object.freeze(["0195_client_hub_native_project_current_owner_observation.sql"]),
   }),
 });
 
@@ -87,18 +94,24 @@ export function reviewedSchemaDefinitions(sql) {
 }
 export function buildPairedMigrationPlan(application, base = root, label) {
   const artifactSet=artifactSetLabel(label);
-  const spec = SPECS[application]; assert(spec, "application must be client or operations");
-  const sourceDirectory = path.join(base,`apps/${application}/migrations`);
+  const spec = SPECS[application]; assert(spec, "window must be client, operations or project-guard");
+  const sourceDirectory = path.join(base,`apps/${spec.application}/migrations`);
   const entries=fs.readdirSync(sourceDirectory,{withFileTypes:true}).filter(entry=>entry.name.endsWith(".sql"));
   assert(entries.every(entry=>entry.isFile()&&!entry.isSymbolicLink()),"migration chain must contain regular files");
-  const finalNames=entries.map(entry=>entry.name).sort(),chain=application==="client"?BOOTSTRAP_APPS.delivery:BOOTSTRAP_APPS.operations;
-  assert.equal(chain.migrationCount,spec.to); assert.equal(chain.migrationNamesSha256,spec.migrationNamesSha256);
-  assert.equal(chain.migrationContentsSha256,spec.migrationContentsSha256);
+  const sourceNames=entries.map(entry=>entry.name).sort(),chain=application==="client"?BOOTSTRAP_APPS.delivery:BOOTSTRAP_APPS.operations;
+  // Validate the complete, currently reviewed source chain first. A newer
+  // reviewed chain may contain this frozen window, but arbitrary extra SQL or
+  // any change to its immutable 149/194 prefix must still fail closed.
+  assert.equal(sourceNames.length,chain.migrationCount);
+  assert.equal(sha(sourceNames.join("\n")),chain.migrationNamesSha256);
+  assert.equal(sha(sourceNames.map(name=>`${name}\0${sha(fs.readFileSync(path.join(sourceDirectory,name)))}`).join("\n")),chain.migrationContentsSha256);
+  assert(chain.migrationCount>=spec.to,"reviewed source chain is shorter than frozen migration window");
+  const finalNames=sourceNames.slice(0,spec.to);
   assert.equal(finalNames.length,spec.to);assert.equal(sha(finalNames.join("\n")),spec.migrationNamesSha256);
   assert.equal(sha(finalNames.map(name=>`${name}\0${sha(fs.readFileSync(path.join(sourceDirectory,name)))}`).join("\n")),spec.migrationContentsSha256);
   assert.deepEqual(finalNames.slice(spec.from), spec.suffix);
   const migrations = spec.suffix.map(name => Object.freeze({ name, sha256: sha(fs.readFileSync(path.join(sourceDirectory,name))) }));
-  return Object.freeze({ spec, sourceDirectory, priorNames:Object.freeze(finalNames.slice(0,spec.from)),
+  return Object.freeze({ spec, windowKey:application, sourceDirectory, priorNames:Object.freeze(finalNames.slice(0,spec.from)),
     finalNames:Object.freeze(finalNames), migrations:Object.freeze(migrations), ...locations(base,spec,artifactSet) });
 }
 export function assertExactLedger(rows, names, label) { assert.deepEqual(rows.map(row => row.name), names, `exact ${label} ledger required`); }
@@ -191,8 +204,10 @@ export function assertApplyReady(current, saved, markerExists, now = Date.now())
   assert(Number.isFinite(createdAt) && createdAt <= now && now - createdAt < 30 * 60 * 1000, "fresh backup required");
 }
 export function assertAttemptMarker(marker, plan) {
-  assert.deepEqual(Object.keys(marker).sort(), ["application","attemptedAt","database","from","migrations","retryAllowed","to",...(plan.artifactSet?["artifactSet"]:[])].sort());
+  const distinctWindow=plan.windowKey!==plan.spec.application;
+  assert.deepEqual(Object.keys(marker).sort(), ["application","attemptedAt","database","from","migrations","retryAllowed","to",...(plan.artifactSet?["artifactSet"]:[]),...(distinctWindow?["window"]:[])].sort());
   assert.equal(marker.application, plan.spec.application); assert.equal(marker.database, plan.spec.database);
+  if(distinctWindow)assert.equal(marker.window,plan.windowKey);
   assert.equal(marker.from, plan.spec.from); assert.equal(marker.to, plan.spec.to);
   assert.deepEqual(marker.migrations, plan.migrations); assert.equal(marker.retryAllowed, false);
   if(plan.artifactSet)assert.equal(marker.artifactSet,plan.artifactSet);
@@ -207,8 +222,15 @@ export function materialize(plan) {
   privateFile(plan.config,`${JSON.stringify(config(plan),null,2)}\n`); return plan;
 }
 function credential(){const values=fs.readFileSync("C:/Users/fstor/Downloads/prompt.md","utf8").split(/\r?\n/u).map(v=>v.trim()).filter(v=>/^cfat_[A-Za-z0-9_-]+$/u.test(v));assert.equal(values.length,1);return values[0];}
-async function select(token,spec,sql){assert.match(sql,/^SELECT\s/u);const response=await fetch(`https://api.cloudflare.com/client/v4/accounts/${account}/d1/database/${spec.database}/query`,{method:"POST",redirect:"error",signal:AbortSignal.timeout(30000),headers:{Authorization:`Bearer ${token}`,"Content-Type":"application/json"},body:JSON.stringify({sql})});const body=await response.json();assert(response.ok&&body.success&&body.result?.length===1&&body.result[0].success,"read-only D1 query failed");assert.equal(body.result[0].meta.changed_db,false);return body.result[0].results;}
-async function remoteState(token,plan){const schema=await select(token,plan.spec,schemaSql),data=await collectOrderedReadOnlySnapshot(applicationTableNames(schema),async table=>canonicalRows(await select(token,plan.spec,`SELECT * FROM ${quoteSqlIdentifier(table)}`)));return{ledger:await select(token,plan.spec,"SELECT name FROM d1_migrations ORDER BY name"),foreignKeys:await select(token,plan.spec,'SELECT * FROM pragma_foreign_key_check ORDER BY "table", rowid, parent, fkid'),schema,data};}
+export async function readOnlyQueries(token,spec,queries,request=fetch){
+  assert(Array.isArray(queries)&&queries.length>=1&&queries.length<=2,"bounded read-only query batch required");
+  for(const sql of queries)assert.match(sql,/^SELECT\s/u);
+  const response=await request(`https://api.cloudflare.com/client/v4/accounts/${account}/d1/database/${spec.database}/query`,{method:"POST",redirect:"error",signal:AbortSignal.timeout(30000),headers:{Authorization:`Bearer ${token}`,"Content-Type":"application/json"},body:JSON.stringify(queries.length===1?{sql:queries[0]}:{batch:queries.map(sql=>({sql}))})});
+  const body=await response.json();assert(response.ok&&body.success&&body.result?.length===queries.length,"read-only D1 query failed");
+  return body.result.map(result=>{assert(result.success&&Array.isArray(result.results),"read-only D1 result failed");assert.equal(result.meta.changed_db,false);return result.results;});
+}
+async function select(token,spec,sql){return(await readOnlyQueries(token,spec,[sql]))[0];}
+async function remoteState(token,plan){const schema=await select(token,plan.spec,schemaSql),data=await collectOrderedReadOnlySnapshot(applicationTableNames(schema),async table=>canonicalRows(await readCompleteTableSnapshot(table,queries=>readOnlyQueries(token,plan.spec,queries))));return{ledger:await select(token,plan.spec,"SELECT name FROM d1_migrations ORDER BY name"),foreignKeys:await select(token,plan.spec,'SELECT * FROM pragma_foreign_key_check ORDER BY "table", rowid, parent, fkid'),schema,data};}
 const wranglerFailure = outcomeCode => { const error=Error("provider command outcome unavailable; reconcile before any retry");error.outcomeCode=outcomeCode;return error;};
 export function assertPinnedWranglerVersion(lockfile, installedPackage) {
   const expected=lockfile?.packages?.["node_modules/wrangler"]?.version,actual=installedPackage?.version;
@@ -230,33 +252,35 @@ function wrangler(token,plan,args){const appDirectory=path.join(root,"apps",plan
   if(child.status!==0)throw wranglerFailure("exit-nonzero");
 }
 export async function runPairedMigration(argv=process.argv.slice(2),dependencies={}){
-  assert([2,3].includes(argv.length),"usage: <client|operations> <preflight|backup|apply|reconcile> [artifact-set]");const [application,mode,label]=argv;assert(["preflight","backup","apply","reconcile"].includes(mode));
+  assert([2,3].includes(argv.length),"usage: <client|operations|project-guard> <preflight|backup|apply|reconcile> [artifact-set]");const [application,mode,label]=argv;assert(["preflight","backup","apply","reconcile"].includes(mode));
   const plan=buildPairedMigrationPlan(application,root,label),clientPlan=buildPairedMigrationPlan("client",root,label),token=(dependencies.credential??credential)();
+  const identity={application:plan.spec.application,...(plan.windowKey!==plan.spec.application?{window:plan.windowKey}:{})};
   const read=dependencies.remoteState??remoteState;
-  if(application==="operations")assertClientReadyForOperations(await read(token,clientPlan),clientPlan);
+  if(application!=="client")assertClientReadyForOperations(await read(token,clientPlan),clientPlan);
   const current=await read(token,plan);assert.deepEqual(current.foreignKeys,[]);
   assertExactLedger(current.ledger,mode==="reconcile"?plan.finalNames:plan.priorNames,`${application} ${mode==="reconcile"?plan.spec.to:plan.spec.from}`);
-  if(mode==="preflight")return{application,mode,pending:plan.migrations.map(x=>x.name),mutationsPerformed:false};
+  if(mode==="preflight")return{...identity,mode,pending:plan.migrations.map(x=>x.name),mutationsPerformed:false};
   if(mode==="backup"){
     for(const file of[plan.backup,plan.evidence,plan.marker,plan.config])assert(!fs.existsSync(file));materialize(plan);privateFile(plan.backup);
     try{(dependencies.wrangler??wrangler)(token,plan,["export",plan.spec.databaseName,"--remote","--output",plan.backup]);}
     catch(error){const failure=Error("provider export failed");failure.stage="provider-export";failure.outcomeCode=error?.outcomeCode;throw failure;}
     try{restrictPrivate(plan.backup);regular(plan.backup,"backup");assert(fs.statSync(plan.backup).size>1000);}
     catch(error){error.stage="export-verification";throw error;}
-    try{privateFile(plan.evidence,JSON.stringify({application,database:plan.spec.database,...(plan.artifactSet?{artifactSet:plan.artifactSet}:{}),createdAt:new Date().toISOString(),backupSha256:sha(fs.readFileSync(plan.backup)),migrations:plan.migrations,snapshot:current}));}
+    try{privateFile(plan.evidence,JSON.stringify({...identity,database:plan.spec.database,...(plan.artifactSet?{artifactSet:plan.artifactSet}:{}),createdAt:new Date().toISOString(),backupSha256:sha(fs.readFileSync(plan.backup)),migrations:plan.migrations,snapshot:current}));}
     catch(error){error.stage="evidence-write";throw error;}
-    return{application,mode,mutationsPerformed:false,backupBytes:fs.statSync(plan.backup).size};
+    return{...identity,mode,mutationsPerformed:false,backupBytes:fs.statSync(plan.backup).size};
   }
-  for(const file of[plan.config,plan.backup,plan.evidence])regular(file,"private release artifact");const saved=JSON.parse(fs.readFileSync(plan.evidence,"utf8"));assert.equal(saved.application,application);assert.equal(saved.database,plan.spec.database);assert.equal(saved.artifactSet??null,plan.artifactSet);assert.equal(saved.backupSha256,sha(fs.readFileSync(plan.backup)));assert.deepEqual(saved.migrations,plan.migrations);
+  for(const file of[plan.config,plan.backup,plan.evidence])regular(file,"private release artifact");const saved=JSON.parse(fs.readFileSync(plan.evidence,"utf8"));assert.equal(saved.application,plan.spec.application);assert.equal(saved.database,plan.spec.database);assert.equal(saved.artifactSet??null,plan.artifactSet);assert.equal(saved.backupSha256,sha(fs.readFileSync(plan.backup)));assert.deepEqual(saved.migrations,plan.migrations);
+  assert.equal(saved.window,identity.window,"private evidence window mismatch");
   assert.deepEqual(JSON.parse(fs.readFileSync(plan.config,"utf8")),config(plan));assert.deepEqual(fs.readdirSync(plan.directory).sort(),plan.migrations.map(item=>item.name));for(const item of plan.migrations)assert.equal(sha(fs.readFileSync(path.join(plan.directory,item.name))),item.sha256);
   if(mode==="apply"){
     assertApplyReady(current,saved,fs.existsSync(plan.marker));
     assert.equal(fs.existsSync(plan.marker),false,"existing attempt; reconcile only");
-    privateFile(plan.marker,JSON.stringify({application,database:plan.spec.database,from:plan.spec.from,to:plan.spec.to,...(plan.artifactSet?{artifactSet:plan.artifactSet}:{}),migrations:plan.migrations,attemptedAt:new Date().toISOString(),retryAllowed:false}));
-    (dependencies.wrangler??wrangler)(token,plan,["migrations","apply",plan.spec.databaseName,"--remote"]);return{application,mode,retryAllowed:false,next:"reconcile"};
+    privateFile(plan.marker,JSON.stringify({...identity,database:plan.spec.database,from:plan.spec.from,to:plan.spec.to,...(plan.artifactSet?{artifactSet:plan.artifactSet}:{}),migrations:plan.migrations,attemptedAt:new Date().toISOString(),retryAllowed:false}));
+    (dependencies.wrangler??wrangler)(token,plan,["migrations","apply",plan.spec.databaseName,"--remote"]);return{...identity,mode,retryAllowed:false,next:"reconcile"};
   }
   regular(plan.marker,"attempt marker");assertAttemptMarker(JSON.parse(fs.readFileSync(plan.marker,"utf8")),plan);
-  const after=current;const sql=plan.migrations.map(item=>fs.readFileSync(path.join(plan.directory,item.name),"utf8")).join("\n");assertPreserved(saved.snapshot,after,reviewedSchemaDefinitions(sql),application);return{application,mode,applied:plan.spec.to,mutationsPerformed:false,retryAllowed:false};
+  const after=current;const sql=plan.migrations.map(item=>fs.readFileSync(path.join(plan.directory,item.name),"utf8")).join("\n");assertPreserved(saved.snapshot,after,reviewedSchemaDefinitions(sql),plan.spec.preservationPolicy);return{...identity,mode,applied:plan.spec.to,mutationsPerformed:false,retryAllowed:false};
 }
 export { SPECS };
 const SAFE_STAGES=new Set(["provider-export","export-verification","evidence-write"]);

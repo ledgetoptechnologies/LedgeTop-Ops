@@ -242,7 +242,7 @@ beforeAll(async () => {
   db = await runtime.getD1Database("OPS_DB") as D1Database;
   const directory = new URL("../migrations/", import.meta.url);
   const names = readdirSync(directory).filter(name => /^\d{4}_.+\.sql$/.test(name)).sort();
-  expect(names.at(-1)).toBe("0194_operations_portal_native_delivery_terminal_cancellations.sql");
+  expect(names.at(-1)).toBe("0195_client_hub_native_project_current_owner_observation.sql");
   for (const name of names) {
     const migration = readFileSync(new URL(name,directory),"utf8");
     const statements=splitD1MigrationStatements(migration);
@@ -924,6 +924,50 @@ describe("Client Hub native project durable preparation ledger", () => {
       .bind(commandId).first<{ created_at: string; expires_at: string }>();
     expect(row).not.toBeNull();
     expect(Date.parse(row!.expires_at)-Date.parse(row!.created_at)).toBe(15*60*1000);
+  });
+
+  it("accepts a repeated latest owner tuple and rejects later owner drift", async () => {
+    await db.prepare("UPDATE native_project_grants SET active=1,version=version+1 WHERE id='grant-native'").run();
+    const observe=async(requestId:string,revision:string,observedProjection:string,present:number,
+      bindingExternalId:string,bindingStatus:string,bindingRevision:string)=>db.batch([
+      db.prepare(`INSERT INTO project_alpha_api_v2_inventory_receipts(
+        source_id,source_instance_id,application_id,history_epoch_id,inventory_kind,request_id,
+        authorization_generation,page_sha256,item_count)
+        VALUES('project-alpha:primary',?,?,?,'directory',?,'50',?,1)`)
+        .bind(sourceInstanceId,applicationId,historyEpochId,requestId,"5".repeat(64)),
+      db.prepare(`INSERT INTO project_alpha_api_v2_directory_observations(
+        source_id,source_instance_id,application_id,history_epoch_id,request_id,resource_type,
+        project_alpha_public_id,resource_revision,present,last_action,projection_sha256,
+        binding_external_id,binding_status,binding_resource_revision)
+        VALUES('project-alpha:primary',?,?,?,?,'organization',?,?,?,?,?,?,?,?)`)
+        .bind(sourceInstanceId,applicationId,historyEpochId,requestId,orgPublic,revision,present,
+          present ? "upsert" : "delete",observedProjection,bindingExternalId,bindingStatus,bindingRevision),
+    ]);
+    const restore=(suffix:string)=>observe(`30000000-0000-4000-8000-0000000000${suffix}`,
+      "3",projection,1,orgId,"active","3");
+    await restore("50");
+    const repeatedCommand="39000000-0000-4000-8000-000000000050";
+    await expect(insert(repeatedCommand,"39000000-0000-4000-8000-000000000051")).resolves.toMatchObject({success:true});
+    expect(await db.prepare("SELECT count(*) n FROM client_hub_native_project_preparations WHERE command_id=?")
+      .bind(repeatedCommand).first("n")).toBe(1);
+
+    const rejectsLatest=async(suffix:string,revision:string,observedProjection:string,present:number,
+      bindingExternalId:string,bindingStatus:string,bindingRevision:string)=>{
+      await observe(`30000000-0000-4000-8000-0000000000${suffix}`,revision,observedProjection,present,
+        bindingExternalId,bindingStatus,bindingRevision);
+      const command=`39000000-0000-4000-8000-0000000000${suffix}`;
+      await expect(insert(command,`39000000-0000-4000-8000-1000000000${suffix}`))
+        .rejects.toThrow(/authority is not current and exact/);
+      expect(await db.prepare("SELECT count(*) n FROM client_hub_native_project_preparations WHERE command_id=?")
+        .bind(command).first("n")).toBe(0);
+    };
+    await rejectsLatest("51","3","6".repeat(64),1,orgId,"active","3");
+    await restore("52");
+    await rejectsLatest("53","3",projection,1,"changed-owner","active","3");
+    await restore("54");
+    await rejectsLatest("55","3",projection,0,orgId,"tombstoned","3");
+    await restore("56");
+    await rejectsLatest("57","4",projection,1,orgId,"active","4");
   });
 
   it("rejects preparation when the exact owner observation changes after readiness", async () => {

@@ -64,7 +64,7 @@ test("builds full isolated chains, changes exactly 0002, and preserves staging c
   const base = fixture();
   const artifacts = buildArtifacts(base, owner);
   for (const [app, artifact] of Object.entries(artifacts)) {
-    assert.equal(artifact.files.length, app === "delivery" ? 149 : 194, app);
+    assert.equal(artifact.files.length, app === "delivery" ? 149 : 195, app);
     assert.deepEqual(artifact.manifest.transformedFiles, [artifact.entry.seed]);
     assert.equal(artifact.files.find(({ name }) => name.startsWith("0001_")).transformed, false);
     assert.equal(artifact.config.name.endsWith("-staging"), true);
@@ -197,23 +197,23 @@ test("checked-in canonical 0002 migrations remain the reviewed source shapes", (
   assert.match(sourceOperations, /staff-beau-koltz/);
 });
 
-test("builds the complete checked-in 149/194 chains with both Client 0199 filenames", () => {
+test("builds the complete checked-in 149/195 chains with both Client 0199 filenames", () => {
   const base = fixture();
   const artifacts = buildArtifacts(base, owner);
   assert.equal(artifacts.delivery.files.length, 149);
-  assert.equal(artifacts.operations.files.length, 194);
+  assert.equal(artifacts.operations.files.length, 195);
   assert.deepEqual(artifacts.delivery.files.filter(({ name }) => name.startsWith("0199_")).map(({ name }) => name), [
     "0199_incoming_upload_pickup_lifecycle.sql", "0199_native_viewer_grants.sql",
   ]);
   assert.equal(artifacts.delivery.files.at(-1).name, "0230_operations_portal_native_delivery_terminal_cancellations.sql");
-  assert.equal(artifacts.operations.files.at(-1).name, "0194_operations_portal_native_delivery_terminal_cancellations.sql");
+  assert.equal(artifacts.operations.files.at(-1).name, "0195_client_hub_native_project_current_owner_observation.sql");
   const literalPrefixGuard = artifacts.operations.files.find(({ name }) => name === "0187_operations_portal_native_delivery_literal_prefix_guard.sql");
   assert.equal(literalPrefixGuard.generatedSha256, literalPrefixGuard.sourceSha256,
     "bootstrap must preserve the literal-prefix guard migration byte-for-byte");
   assert.deepEqual(artifacts.delivery.manifest.transformedFiles, ["0002_seed_initial_staff.sql"]);
   assert.deepEqual(artifacts.operations.manifest.transformedFiles, ["0002_seed_acl.sql"]);
   assert.equal(artifacts.delivery.manifest.sourceChainSha256, "f0131c4467cbe6046c5da7c54f0bcd604cc39f743d9a98082d3ff59a7d34c1f1");
-  assert.equal(artifacts.operations.manifest.sourceChainSha256, "156c845b6185e89ae18533015055b0c0e09f6939348a165da68a1a3c10eabc25");
+  assert.equal(artifacts.operations.manifest.sourceChainSha256, "46d06078251512d73faf9b96f277165d2a7a01e8c7d97d3e775dde0a167ef9da");
 });
 
 test("preserves the exact previously reviewed 147/192 bootstrap chains", () => {
@@ -222,7 +222,8 @@ test("preserves the exact previously reviewed 147/192 bootstrap chains", () => {
     "0230_operations_portal_native_delivery_terminal_cancellations.sql"])
     fs.rmSync(path.join(base, "apps", "client", "migrations", name));
   for (const name of ["0193_operations_portal_native_delivery_dead_conflict_recovery.sql",
-    "0194_operations_portal_native_delivery_terminal_cancellations.sql"])
+    "0194_operations_portal_native_delivery_terminal_cancellations.sql",
+    "0195_client_hub_native_project_current_owner_observation.sql"])
     fs.rmSync(path.join(base, "apps", "operations", "migrations", name));
   const artifacts = buildArtifacts(base, owner);
   assert.equal(artifacts.delivery.files.length, 147);
@@ -239,7 +240,8 @@ test("accepts exact historical 187 and 190 chains and rejects partial successors
     "0191_operations_portal_native_billing_authority.sql",
     "0192_ops_service_definition_authority.sql",
     "0193_operations_portal_native_delivery_dead_conflict_recovery.sql",
-    "0194_operations_portal_native_delivery_terminal_cancellations.sql"])
+    "0194_operations_portal_native_delivery_terminal_cancellations.sql",
+    "0195_client_hub_native_project_current_owner_observation.sql"])
     fs.rmSync(path.join(historical, "apps", "operations", "migrations", name));
   const artifact = buildArtifacts(historical, owner).operations;
   assert.equal(artifact.files.length, 187);
@@ -248,7 +250,8 @@ test("accepts exact historical 187 and 190 chains and rejects partial successors
 
   const historical190 = fixture();
   for (const name of ["0191_operations_portal_native_billing_authority.sql", "0192_ops_service_definition_authority.sql",
-    "0193_operations_portal_native_delivery_dead_conflict_recovery.sql", "0194_operations_portal_native_delivery_terminal_cancellations.sql"])
+    "0193_operations_portal_native_delivery_dead_conflict_recovery.sql", "0194_operations_portal_native_delivery_terminal_cancellations.sql",
+    "0195_client_hub_native_project_current_owner_observation.sql"])
     fs.rmSync(path.join(historical190, "apps", "operations", "migrations", name));
   const artifact190 = buildArtifacts(historical190, owner).operations;
   assert.equal(artifact190.files.length, 190);

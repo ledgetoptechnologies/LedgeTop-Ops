@@ -40,6 +40,7 @@ it("upgrades the exact cloned live-173 lineage through the reviewed local suffix
     "0192_ops_service_definition_authority.sql",
     "0193_operations_portal_native_delivery_dead_conflict_recovery.sql",
     "0194_operations_portal_native_delivery_terminal_cancellations.sql",
+    "0195_client_hub_native_project_current_owner_observation.sql",
   ]);
 
   runtime = new Miniflare({ modules: true, compatibilityDate: "2026-08-06",

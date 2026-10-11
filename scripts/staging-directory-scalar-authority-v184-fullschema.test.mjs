@@ -26,8 +26,8 @@ const requireOperations=createRequire(path.join(root,"apps/operations/package.js
 const {Miniflare}=requireOperations("miniflare"),{unstable_splitSqlQuery}=requireOperations("wrangler");
 const migrationDir=path.join(root,"apps/operations/migrations");
 const migrationNames=fs.readdirSync(migrationDir).filter(name=>/^\d{4}_.+\.sql$/.test(name)).sort();
-const CANONICAL_BOOTSTRAP_MIGRATION_COUNT=194;
-const CANONICAL_BOOTSTRAP_FINAL_MIGRATION="0194_operations_portal_native_delivery_terminal_cancellations.sql";
+const CANONICAL_BOOTSTRAP_MIGRATION_COUNT=195;
+const CANONICAL_BOOTSTRAP_FINAL_MIGRATION="0195_client_hub_native_project_current_owner_observation.sql";
 const viteUrl=pathToFileURL(path.join(root,"apps/operations/node_modules/vite/dist/node/index.js")).href;
 const all=async(db,sql,...params)=>(await db.prepare(sql).bind(...params).all()).results;
 const first=(db,sql,...params)=>db.prepare(sql).bind(...params).first();

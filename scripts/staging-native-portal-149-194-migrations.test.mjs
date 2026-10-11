@@ -3,9 +3,10 @@ import fs from "node:fs";
 import crypto from "node:crypto";
 import { createRequire } from "node:module";
 import path from "node:path";
+import os from "node:os";
 import test from "node:test";
 import { applicationTableNames, assertApplyReady, assertAttemptMarker, assertClientReadyForOperations, assertClientReconciliationDrift, assertExactLedger, assertPinnedWranglerVersion, assertPreserved, buildPairedMigrationPlan,
-  normalizedSql, quoteSqlIdentifier, reviewedSchemaDefinitions, runPairedMigration, safeFailure, SPECS } from "./staging-native-portal-149-194-migrations.mjs";
+  normalizedSql, quoteSqlIdentifier, readOnlyQueries, reviewedSchemaDefinitions, runPairedMigration, safeFailure, SPECS } from "./staging-native-portal-149-194-migrations.mjs";
 import { transformSeed } from "./staging-bootstrap.mjs";
 
 const root=path.resolve(import.meta.dirname,"..");
@@ -19,6 +20,26 @@ test("pins exact Client 147->149 and Ops 190->194 suffixes and targets",()=>{
   assert.equal(client.spec.database,"b6f653ab-9acd-4421-9ad0-207754b59aeb");assert.equal(ops.spec.database,"78b34173-b168-4e3d-9832-bb9d245cc6b8");
   assert.equal(client.spec.migrationContentsSha256,"f0131c4467cbe6046c5da7c54f0bcd604cc39f743d9a98082d3ff59a7d34c1f1");
   assert.equal(ops.spec.migrationContentsSha256,"156c845b6185e89ae18533015055b0c0e09f6939348a165da68a1a3c10eabc25");
+});
+test("frozen 194 plan validates the entire reviewed source and excludes later SQL from apply",()=>{
+  const plan=buildPairedMigrationPlan("operations",root);
+  const names=fs.readdirSync(plan.sourceDirectory).filter(name=>name.endsWith(".sql")).sort();
+  assert.deepEqual(plan.finalNames,names.slice(0,194));
+  assert.deepEqual(plan.migrations.map(item=>item.name),SPECS.operations.suffix);
+  assert(!plan.migrations.some(item=>item.name.startsWith("0195_")));
+  const temporary=fs.mkdtempSync(path.join(os.tmpdir(),"paired-frozen-chain-"));
+  try{
+    const destination=path.join(temporary,"apps/operations/migrations");
+    fs.cpSync(plan.sourceDirectory,destination,{recursive:true});
+    fs.writeFileSync(path.join(destination,"9999_unreviewed.sql"),"SELECT 1;\n",{flag:"wx"});
+    assert.throws(()=>buildPairedMigrationPlan("operations",temporary));
+    fs.unlinkSync(path.join(destination,"9999_unreviewed.sql"));
+    const latest=names.at(-1);fs.appendFileSync(path.join(destination,latest),"\n-- unreviewed source change\n");
+    assert.throws(()=>buildPairedMigrationPlan("operations",temporary));
+  }finally{
+    assert(path.dirname(temporary)===path.resolve(os.tmpdir())&&path.basename(temporary).startsWith("paired-frozen-chain-"));
+    fs.rmSync(temporary,{recursive:true,force:true});
+  }
 });
 test("exact ledgers and Client-first dependency fail closed",()=>{
   const client=buildPairedMigrationPlan("client",root);assert.doesNotThrow(()=>assertExactLedger(client.finalNames.map(name=>({name})),client.finalNames,"Client"));
@@ -93,17 +114,61 @@ test("captures every application table while excluding only provider and ledger 
   assert.deepEqual(applicationTableNames(schema),["known",'odd"table']);
   assert.equal(quoteSqlIdentifier('odd"table'),'"odd""table"');
 });
-for(const application of ["client","operations"]){test(`schema model matches genuine SQLite ${application} suffix`,{timeout:180000,skip:process.env.SKIP_REAL_SQL==="1"},async()=>{
+for(const application of ["client","operations","project-guard"]){test(`schema model matches genuine SQLite ${application} suffix`,{timeout:180000,skip:process.env.SKIP_REAL_SQL==="1"},async()=>{
   const plan=buildPairedMigrationPlan(application,root),mf=new Miniflare({modules:true,script:"export default {fetch(){return new Response('ok')}}",compatibilityDate:"2026-08-06",d1Databases:{DB:crypto.randomUUID()}});
-  try{const db=await mf.getD1Database("DB");for(const name of plan.priorNames)await applyMigration(db,application,name);for(const item of plan.migrations)await applyMigration(db,application,item.name);
+  try{const db=await mf.getD1Database("DB");for(const name of plan.priorNames)await applyMigration(db,plan.spec.application,name);
+    const capture=async()=>{const schema=(await db.prepare("SELECT type,name,tbl_name,sql FROM sqlite_master WHERE type IN ('table','trigger','view','index') AND name NOT LIKE 'sqlite_%' ORDER BY type,name").all()).results,data={};
+      // Miniflare's private metadata table is not application state and rejects SELECT.
+      for(const table of applicationTableNames(schema).filter(name=>name!=="_cf_METADATA"))data[table]=(await db.prepare(`SELECT * FROM ${quoteSqlIdentifier(table)}`).all()).results.map(value=>JSON.stringify(value)).sort();
+      return {schema,data,foreignKeys:(await db.prepare("SELECT * FROM pragma_foreign_key_check").all()).results};};
+    const before=application==="project-guard"?await capture():null;
+    for(const item of plan.migrations)await applyMigration(db,plan.spec.application,item.name);
     const schema=(await db.prepare("SELECT type,name,tbl_name,sql FROM sqlite_master WHERE type IN ('table','trigger','view','index') AND name NOT LIKE 'sqlite_%' ORDER BY type,name").all()).results;
     const actual=new Map(schema.map(row=>[row.name,row])),sql=plan.migrations.map(item=>fs.readFileSync(path.join(plan.sourceDirectory,item.name),"utf8")).join("\n"),reviewed=reviewedSchemaDefinitions(sql);
     for(const [name,expected] of reviewed){const found=actual.get(name);assert(found,`missing ${application} ${name}`);assert.equal(found.type,expected.type);assert.equal(normalizedSql(found.sql),expected.sql,`definition ${application} ${name}`);}
+    if(before)assertPreserved(before,await capture(),reviewed,plan.spec.preservationPolicy);
   }finally{await mf.dispose();}
 });}
+test("project guard window is isolated and cannot inherit the earlier permission-seed exception",async()=>{
+  const guard=buildPairedMigrationPlan("project-guard",root,"guard01"),old=buildPairedMigrationPlan("operations",root,"guard01"),client=buildPairedMigrationPlan("client",root,"guard01");
+  assert.equal(guard.spec.application,"operations");assert.equal(guard.spec.from,194);assert.equal(guard.spec.to,195);
+  assert.equal(guard.priorNames.length,194);assert.equal(guard.finalNames.length,195);
+  assert.deepEqual(guard.migrations.map(item=>item.name),["0195_client_hub_native_project_current_owner_observation.sql"]);
+  assert.equal(guard.migrations[0].sha256,"aaa8b35e502ed634cd38ed16c5a870a91f63c0ee578a031aec15744e7947ea44");
+  for(const file of [guard.sourceDirectory,guard.config,guard.backup,guard.marker])assert(file.startsWith(path.join(root,"apps/operations")));
+  assert.notEqual(guard.marker,old.marker);assert.equal(guard.spec.preservationPolicy,"strict");
+  const marker={application:"operations",window:"project-guard",database:guard.spec.database,from:194,to:195,artifactSet:"guard01",migrations:guard.migrations,retryAllowed:false,attemptedAt:"2026-10-11T11:00:00Z"};
+  assert.doesNotThrow(()=>assertAttemptMarker(marker,guard));
+  assert.throws(()=>assertAttemptMarker({...marker,window:"operations"},guard));
+  assert.throws(()=>assertAttemptMarker({...marker,application:"project-guard"},guard));
+  assert.throws(()=>assertAttemptMarker(marker,old));
+  const before={foreignKeys:[],schema:[],data:{permissions:[]}},after={...before,data:{permissions:[JSON.stringify({key:"billing.portal_access.manage",description:"Grant or revoke one explicit native billing entity in an enrolled client portal"})]}};
+  assert.throws(()=>assertPreserved(before,after,new Map(),guard.spec.preservationPolicy),/pre-existing table changed/u);
+  const calls=[],states={client:{ledger:client.finalNames.map(name=>({name})),foreignKeys:[],schema:[],data:{}},operations:{ledger:guard.priorNames.map(name=>({name})),foreignKeys:[],schema:[],data:{}}};
+  const dependencies={credential:()=>"synthetic",remoteState:async(_token,plan)=>{calls.push(plan.spec.application);return states[plan.spec.application];},wrangler:()=>assert.fail("read-only preflight attempted a write")};
+  assert.deepEqual(await runPairedMigration(["project-guard","preflight"],dependencies),{application:"operations",window:"project-guard",mode:"preflight",pending:guard.migrations.map(item=>item.name),mutationsPerformed:false});
+  assert.deepEqual(calls,["client","operations"]);
+  states.client.ledger=states.client.ledger.slice(0,-1);await assert.rejects(runPairedMigration(["project-guard","preflight"],dependencies),/Client 0149/u);
+  states.client.ledger=client.finalNames.map(name=>({name}));states.client.foreignKeys=[{}];await assert.rejects(runPairedMigration(["project-guard","preflight"],dependencies),/FK/u);
+  states.client.foreignKeys=[];
+  for(const names of [guard.priorNames.slice(0,-1),guard.finalNames]){states.operations.ledger=names.map(name=>({name}));await assert.rejects(runPairedMigration(["project-guard","preflight"],dependencies),/exact operations|exact project-guard/u);}
+});
 test("failure output is fixed and cannot disclose assertion snapshots",()=>{
   const sentinel="PRIVATE_ROW_SENTINEL_DO_NOT_LOG",output=safeFailure(new Error(`actual ${sentinel}`));
   assert.equal(output,'{"error":"staging migration boundary rejected; inspect private local evidence","retryAllowed":false}');assert(!output.includes(sentinel));
+});
+test("read-only API batches require every bounded result to report no database change",async()=>{
+  const queries=["SELECT COUNT(*) AS snapshot_count FROM x","SELECT * FROM x"],calls=[];
+  const response=results=>({ok:true,json:async()=>({success:true,result:results})});
+  const results=[{success:true,meta:{changed_db:false},results:[{snapshot_count:1}]},{success:true,meta:{changed_db:false},results:[{id:1}]}];
+  const request=async(_url,options)=>{calls.push(JSON.parse(options.body));return response(results);};
+  assert.deepEqual(await readOnlyQueries("synthetic-token",SPECS.client,queries,request),results.map(result=>result.results));
+  assert.deepEqual(calls,[{batch:queries.map(sql=>({sql}))}]);
+  for(const invalid of [results.slice(0,1),[results[0],{...results[1],success:false}],[results[0],{...results[1],meta:{changed_db:true}}]])
+    await assert.rejects(readOnlyQueries("synthetic-token",SPECS.client,queries,async()=>response(invalid)));
+  await assert.rejects(readOnlyQueries("synthetic-token",SPECS.client,["DELETE FROM x"],request));
+  await assert.rejects(readOnlyQueries("synthetic-token",SPECS.client,[...queries,"SELECT 1"],request));
+  assert.equal(calls.length,1);
 });
 test("preflight is read-only and Operations refuses an unverified Client ledger",async()=>{
   const client=buildPairedMigrationPlan("client",root),ops=buildPairedMigrationPlan("operations",root),calls=[];
