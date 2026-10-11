@@ -1,0 +1,93 @@
+import assert from "node:assert/strict";
+import fs from "node:fs";
+import crypto from "node:crypto";
+import { createRequire } from "node:module";
+import path from "node:path";
+import test from "node:test";
+import { applicationTableNames, assertApplyReady, assertAttemptMarker, assertClientReadyForOperations, assertExactLedger, assertPreserved, buildPairedMigrationPlan,
+  normalizedSql, quoteSqlIdentifier, reviewedSchemaDefinitions, runPairedMigration, safeFailure, SPECS } from "./staging-native-portal-149-194-migrations.mjs";
+import { transformSeed } from "./staging-bootstrap.mjs";
+
+const root=path.resolve(import.meta.dirname,"..");
+const require=createRequire(path.join(root,"apps/operations/package.json")),{Miniflare}=require("miniflare"),{unstable_splitSqlQuery}=require("wrangler");
+const syntheticOwner={email:"owner@staging.example.test",displayName:"Synthetic Staging Owner",clientStaffId:"staging-client-owner",operationsStaffId:"staging-operations-owner"};
+async function applyMigration(db,application,name){let sql=fs.readFileSync(path.join(root,"apps",application,"migrations",name),"utf8");if(name===(application==="client"?"0002_seed_initial_staff.sql":"0002_seed_acl.sql"))sql=transformSeed(application==="client"?"delivery":"operations",sql,syntheticOwner);const statements=unstable_splitSqlQuery(sql.replace(/\r\n/gu,"\n")).map(value=>value.trim()).filter(value=>value&&!/^PRAGMA\s+foreign_keys\s*=\s*ON/iu.test(value));await db.batch(statements.map(value=>db.prepare(value)));}
+test("pins exact Client 147->149 and Ops 190->194 suffixes and targets",()=>{
+  const client=buildPairedMigrationPlan("client",root),ops=buildPairedMigrationPlan("operations",root);
+  assert.equal(client.priorNames.length,147);assert.equal(client.finalNames.length,149);assert.deepEqual(client.migrations.map(x=>x.name),SPECS.client.suffix);
+  assert.equal(ops.priorNames.length,190);assert.equal(ops.finalNames.length,194);assert.deepEqual(ops.migrations.map(x=>x.name),SPECS.operations.suffix);
+  assert.equal(client.spec.database,"b6f653ab-9acd-4421-9ad0-207754b59aeb");assert.equal(ops.spec.database,"78b34173-b168-4e3d-9832-bb9d245cc6b8");
+  assert.equal(client.spec.migrationContentsSha256,"f0131c4467cbe6046c5da7c54f0bcd604cc39f743d9a98082d3ff59a7d34c1f1");
+  assert.equal(ops.spec.migrationContentsSha256,"156c845b6185e89ae18533015055b0c0e09f6939348a165da68a1a3c10eabc25");
+});
+test("exact ledgers and Client-first dependency fail closed",()=>{
+  const client=buildPairedMigrationPlan("client",root);assert.doesNotThrow(()=>assertExactLedger(client.finalNames.map(name=>({name})),client.finalNames,"Client"));
+  assert.throws(()=>assertExactLedger(client.finalNames.slice(0,-1).map(name=>({name})),client.finalNames,"Client"));
+  assert.doesNotThrow(()=>assertClientReadyForOperations({ledger:client.finalNames.map(name=>({name})),foreignKeys:[]},client));
+  assert.throws(()=>assertClientReadyForOperations({ledger:client.priorNames.map(name=>({name})),foreignKeys:[]},client));
+  assert.throws(()=>assertClientReadyForOperations({ledger:client.finalNames.map(name=>({name})),foreignKeys:[{}]},client));
+});
+test("schema preservation allows only reviewed created objects and preserves authority rows",()=>{
+  const reviewed=reviewedSchemaDefinitions("CREATE TABLE x(a); CREATE TRIGGER y BEFORE INSERT ON x BEGIN SELECT 1; SELECT 2; END;");
+  const before={foreignKeys:[],schema:[{type:"table",name:"old",sql:"same"}],data:{heads:["a"]}},after={foreignKeys:[],schema:[{type:"table",name:"old",sql:"same"},{type:"table",name:"x",sql:"CREATE TABLE x(a)"},{type:"trigger",name:"y",sql:"CREATE TRIGGER y BEFORE INSERT ON x BEGIN SELECT 1; SELECT 2; END"}],data:{heads:["a"],x:[]}};
+  assert.doesNotThrow(()=>assertPreserved(before,after,reviewed,"client"));
+  assert.throws(()=>assertPreserved(before,{...after,data:{...after.data,heads:["b"]}},reviewed,"client"));
+  assert.throws(()=>assertPreserved(before,{...after,schema:after.schema.filter(row=>row.name!=="y")},reviewed,"client"),/missing/u);
+  assert.throws(()=>assertPreserved(before,{...after,schema:after.schema.map(row=>row.name==="y"?{...row,sql:"CREATE TRIGGER y BEFORE INSERT ON x BEGIN SELECT 9; END"}:row)},reviewed,"client"),/definition/u);
+  assert.throws(()=>assertPreserved(before,{...after,schema:[...after.schema,{type:"view",name:"z",sql:"CREATE VIEW z AS SELECT 1"}]},reviewed,"client"));
+});
+test("models Client heads rebuild and the single reviewed Ops permission seed exactly",()=>{
+  const clientSql=SPECS.client.suffix.map(name=>fs.readFileSync(path.join(root,"apps/client/migrations",name),"utf8")).join("\n");
+  const reviewed=reviewedSchemaDefinitions(clientSql);
+  assert.equal(reviewed.has("operations_portal_native_delivery_heads_next"),false);
+  assert.equal(reviewed.has("operations_portal_native_delivery_heads"),true);
+  assert.match(reviewed.get("operations_portal_native_delivery_heads").sql,/^CREATE TABLE operations_portal_native_delivery_heads \(/u);
+  const before={foreignKeys:[],schema:[],data:{permissions:[JSON.stringify({key:"existing",description:"Existing"})]}},after={foreignKeys:[],schema:[],data:{permissions:[JSON.stringify({key:"billing.portal_access.manage",description:"Grant or revoke one explicit native billing entity in an enrolled client portal"}),JSON.stringify({key:"existing",description:"Existing"})].sort()}};
+  assert.doesNotThrow(()=>assertPreserved(before,after,new Map(),"operations"));
+  assert.throws(()=>assertPreserved(before,after,new Map(),"client"),/pre-existing table/u);
+  assert.throws(()=>assertPreserved(before,{...after,data:{permissions:[...after.data.permissions,JSON.stringify({key:"extra",description:"Extra"})].sort()}},new Map(),"operations"),/permissions/u);
+});
+test("SQL normalization preserves quoted literal bytes",()=>{
+  assert.equal(normalizedSql("CREATE VIEW x AS SELECT  'a  b' AS \"value\";"),"CREATE VIEW x AS SELECT 'a  b' AS value");
+  assert.notEqual(normalizedSql("CREATE VIEW x AS SELECT 'a  b'"),normalizedSql("CREATE VIEW x AS SELECT 'a b'"));
+  const reviewed=reviewedSchemaDefinitions("CREATE VIEW literal_guard AS SELECT 'PRIVATE  SENTINEL' value;");
+  const before={foreignKeys:[],schema:[],data:{}},after={foreignKeys:[],schema:[{type:"view",name:"literal_guard",tbl_name:"literal_guard",sql:"CREATE VIEW literal_guard AS SELECT 'PRIVATE SENTINEL' value"}],data:{}};
+  assert.throws(()=>assertPreserved(before,after,reviewed,"client"),/definition/u);
+});
+test("captures every application table while excluding only provider and ledger internals",()=>{
+  const schema=[{type:"table",name:"d1_migrations"},{type:"table",name:"_cf_KV"},{type:"table",name:"known"},{type:"table",name:'odd"table'},{type:"view",name:"not_a_table"}];
+  assert.deepEqual(applicationTableNames(schema),["known",'odd"table']);
+  assert.equal(quoteSqlIdentifier('odd"table'),'"odd""table"');
+});
+for(const application of ["client","operations"]){test(`schema model matches genuine SQLite ${application} suffix`,{timeout:180000,skip:process.env.SKIP_REAL_SQL==="1"},async()=>{
+  const plan=buildPairedMigrationPlan(application,root),mf=new Miniflare({modules:true,script:"export default {fetch(){return new Response('ok')}}",compatibilityDate:"2026-08-06",d1Databases:{DB:crypto.randomUUID()}});
+  try{const db=await mf.getD1Database("DB");for(const name of plan.priorNames)await applyMigration(db,application,name);for(const item of plan.migrations)await applyMigration(db,application,item.name);
+    const schema=(await db.prepare("SELECT type,name,tbl_name,sql FROM sqlite_master WHERE type IN ('table','trigger','view','index') AND name NOT LIKE 'sqlite_%' ORDER BY type,name").all()).results;
+    const actual=new Map(schema.map(row=>[row.name,row])),sql=plan.migrations.map(item=>fs.readFileSync(path.join(plan.sourceDirectory,item.name),"utf8")).join("\n"),reviewed=reviewedSchemaDefinitions(sql);
+    for(const [name,expected] of reviewed){const found=actual.get(name);assert(found,`missing ${application} ${name}`);assert.equal(found.type,expected.type);assert.equal(normalizedSql(found.sql),expected.sql,`definition ${application} ${name}`);}
+  }finally{await mf.dispose();}
+});}
+test("failure output is fixed and cannot disclose assertion snapshots",()=>{
+  const sentinel="PRIVATE_ROW_SENTINEL_DO_NOT_LOG",output=safeFailure(new Error(`actual ${sentinel}`));
+  assert.equal(output,'{"error":"staging migration boundary rejected; inspect private local evidence","retryAllowed":false}');assert(!output.includes(sentinel));
+});
+test("preflight is read-only and Operations refuses an unverified Client ledger",async()=>{
+  const client=buildPairedMigrationPlan("client",root),ops=buildPairedMigrationPlan("operations",root),calls=[];
+  const states=new Map([[client.spec.database,{ledger:client.priorNames.map(name=>({name})),foreignKeys:[],schema:[],data:{}}],[ops.spec.database,{ledger:ops.priorNames.map(name=>({name})),foreignKeys:[],schema:[],data:{}}]]);
+  const dependencies={credential:()=>"private",remoteState:async(_token,plan)=>{calls.push(plan.spec.application);return states.get(plan.spec.database);},wrangler:()=>assert.fail("preflight mutated")};
+  assert.deepEqual((await runPairedMigration(["client","preflight"],dependencies)).mutationsPerformed,false);
+  await assert.rejects(runPairedMigration(["operations","preflight"],dependencies),/Client 0149/u);assert.deepEqual(calls,["client","client"]);
+});
+test("apply boundary requires a fresh identical snapshot and no prior attempt",()=>{
+  const plan=buildPairedMigrationPlan("client",root),now=Date.parse("2026-10-11T12:00:00.000Z");
+  const current={ledger:[{name:"x"}],foreignKeys:[],schema:[],data:{}},saved={createdAt:"2026-10-11T11:45:00.000Z",snapshot:current};
+  assert.doesNotThrow(()=>assertApplyReady(current,saved,false,now));
+  assert.throws(()=>assertApplyReady(current,saved,true,now),/reconcile only/u);
+  assert.throws(()=>assertApplyReady({...current,data:{changed:[]}},saved,false,now),/moved/u);
+  assert.throws(()=>assertApplyReady(current,{...saved,createdAt:"2026-10-11T11:29:59.000Z"},false,now),/fresh backup/u);
+  assert.throws(()=>assertApplyReady(current,{...saved,createdAt:"invalid"},false,now),/fresh backup/u);
+  const marker={application:"client",database:plan.spec.database,from:147,to:149,migrations:plan.migrations,attemptedAt:"2026-10-11T11:50:00.000Z",retryAllowed:false};
+  assert.doesNotThrow(()=>assertAttemptMarker(marker,plan));
+  assert.throws(()=>assertAttemptMarker({...marker,retryAllowed:true},plan));
+  assert.throws(()=>assertAttemptMarker({...marker,extra:true},plan));
+});
