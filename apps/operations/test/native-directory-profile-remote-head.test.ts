@@ -141,5 +141,29 @@ describe("native Directory durable remote head for acquired mappings", () => {
     await expect(readNativeDirectoryDurableRemoteHead(d1 as Database,"organization",recordId,1,
       {...identity,externalCanonicalId:recordId})).resolves.toEqual({externalCanonicalId:recordId,
         projectAlphaPublicId:publicId,revision:"101"});
+    const head = () => readNativeDirectoryDurableRemoteHead(d1 as Database,"organization",recordId,1,
+      {...identity,externalCanonicalId:recordId});
+    // A real SQL aggregate must retain a no-op ACK at the same revision even
+    // when unrelated work advanced the application-wide generation.
+    await d1.prepare("INSERT INTO project_alpha_directory_outbox VALUES(?,?,?,?,?,?,?,'acknowledged',?,?)")
+      .bind("noop",identity.sourceId,identity.sourceInstanceUUID,identity.applicationUUID,identity.historyEpoch,
+        "organization",recordId,JSON.stringify({response:{result:{resource:{revision:"101"},authorizationGeneration:"5"}}}),
+        "2026-01-02T00:00:00.000Z").run();
+    await expect(head()).resolves.toEqual({externalCanonicalId:recordId,projectAlphaPublicId:publicId,revision:"101"});
+    // Corrupt low-ranked historical evidence cannot disappear behind LIMIT 3.
+    // These updates touch only the deliberately unconstrained local SQL fixture.
+    for (const [badRevision,badGeneration] of [["01","0"],[null,"0"],[1,"0"],
+      ["1","9223372036854775808"],["1",null],["1",0]] as const) {
+      await d1.prepare("UPDATE project_alpha_directory_outbox SET outcome_json=? WHERE command_id='command-0'")
+        .bind(JSON.stringify({response:{result:{resource:{revision:badRevision},authorizationGeneration:badGeneration}}})).run();
+      await expect(head()).resolves.toBeNull();
+    }
+    await d1.prepare("UPDATE project_alpha_directory_outbox SET outcome_json=? WHERE command_id='command-0'")
+      .bind(JSON.stringify({response:{result:{resource:{revision:"1"},authorizationGeneration:"0"}}})).run();
+    await expect(head()).resolves.toEqual({externalCanonicalId:recordId,projectAlphaPublicId:publicId,revision:"101"});
+    await d1.prepare("INSERT INTO project_alpha_directory_mappings VALUES(?,?,?,?,?,?,?)")
+      .bind(identity.sourceId,identity.sourceInstanceUUID,identity.applicationUUID,identity.historyEpoch,
+        "organization",recordId,"b".repeat(32)).run();
+    await expect(head()).resolves.toBeNull();
   });
 });
