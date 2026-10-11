@@ -519,10 +519,21 @@ function FileBrowser({
     const version = browserVersion.current;
     let cancelled = false;
     const prepare = () => {
+      const authoritative = authoritativeContinuation.current;
+      const consumed = consumedContinuation.current;
+      if (cancelled || version !== browserVersion.current
+        || authoritative?.version !== version || authoritative.folderId !== requestFolderId || authoritative.cursor !== requestCursor
+        || consumed?.version === version && consumed.folderId === requestFolderId && consumed.cursor === requestCursor) return;
       const request = requestPage(requestFolderId, requestCursor);
       if (!request) return;
       void request.then(page => {
-        if (!cancelled && version === browserVersion.current) prefetchedPage.current = { folderId: requestFolderId, cursor: requestCursor, page };
+        const current = authoritativeContinuation.current;
+        const consumedAfterRequest = consumedContinuation.current;
+        if (!cancelled && version === browserVersion.current
+          && current?.version === version && current.folderId === requestFolderId && current.cursor === requestCursor
+          && !(consumedAfterRequest?.version === version && consumedAfterRequest.folderId === requestFolderId && consumedAfterRequest.cursor === requestCursor)) {
+          prefetchedPage.current = { folderId: requestFolderId, cursor: requestCursor, page };
+        }
       }).catch(caught => {
         if (!cancelled && version === browserVersion.current && (caught as Error).name !== "AbortError") setError("The next page could not be prepared. Use Load more to retry.");
       });
