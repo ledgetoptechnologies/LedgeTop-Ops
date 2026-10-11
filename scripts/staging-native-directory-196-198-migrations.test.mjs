@@ -7,6 +7,7 @@ import test from "node:test";
 import { createRequire } from "node:module";
 import {
   applicationTableNames,
+  assertNativeDirectoryExactLedger,
   assertApplyReady,
   assertAttemptMarker,
   assertPreserved,
@@ -29,6 +30,13 @@ const syntheticOwner = { email: "owner@staging.example.test", displayName: "Synt
   clientStaffId: "staging-client-owner", operationsStaffId: "staging-operations-owner" };
 const current = plan => ({ ledger: plan.priorNames.map(name => ({ name })), foreignKeys: [], schema: [], data: {} });
 const sha = value => crypto.createHash("sha256").update(value).digest("hex");
+
+test("historical exact-ledger export remains compatible", () => {
+  assert.equal(typeof assertNativeDirectoryExactLedger, "function");
+  const names = buildNativeDirectory196To198Plan(root).priorNames;
+  assert.doesNotThrow(() => assertNativeDirectoryExactLedger(names.map(name => ({ name })), names, 196));
+  assert.throws(() => assertNativeDirectoryExactLedger(names.slice(1).map(name => ({ name })), names, 196));
+});
 
 test("dry-run pins exact Ops staging 196-to-198 chain and performs no I/O", async () => {
   const plan = buildNativeDirectory196To198Plan(root);
