@@ -27,28 +27,35 @@ async function render(page: Page, mode = "normal") {
     const exposed = window as Window & { billingMode?: string; billingCalls?: Call[] };
     exposed.billingMode = selected;
     const calls: Call[] = []; exposed.billingCalls = calls;
-    let grants = 0;
+    let grants = 0, revokes = 0, sessions = 0;
     window.fetch = async (input, init = {}) => {
       const path = String(input), method = init.method ?? "GET";
       const body = typeof init.body === "string" ? JSON.parse(init.body) as Record<string, unknown> : null;
       calls.push({ path, method, body });
-      if (path.endsWith("/session")) return selected === "session-denied"
-        ? new Response("denied", { status: 403, headers: { "Content-Type": "text/plain" } })
-        : Response.json({ csrfToken });
+      if (path.endsWith("/session")) {
+        sessions += 1;
+        return selected === "session-denied" || selected.endsWith("retry-session-denied") && sessions === 2
+          ? new Response("denied", { status: 403, headers: { "Content-Type": "text/plain" } })
+          : Response.json({ csrfToken });
+      }
       if (path.endsWith("/review")) return Response.json({ review: reviewed });
       if (/\/grants\/[0-9a-f-]{36}$/u.test(path) && method === "GET")
         return Response.json({ authority: { ...authority, grantId: path.split("/").pop() } });
       if (path.endsWith("/grants") && method === "POST") {
         grants += 1;
-        if (selected === "grant-network" && grants === 1) throw new TypeError("response lost");
+        if ((selected === "grant-network" || selected === "grant-retry-session-denied") && grants === 1)
+          throw new TypeError("response lost");
         const finalAuthority = selected === "replayed-revoked"
           ? { ...authority, state: "revoked", live: false, revision: 2 } : authority;
         return Response.json({ status: grants > 1 ? "replayed" : "applied", operationId: body?.operationId ?? operationId,
           authority: { ...finalAuthority, grantId: body?.grantId ?? grantId } });
       }
-      if (path.endsWith(`/grants/${grantId}/revoke`) && method === "POST")
-        return Response.json({ status: "applied", operationId: body?.operationId ?? operationId,
+      if (path.endsWith(`/grants/${grantId}/revoke`) && method === "POST") {
+        revokes += 1;
+        if (selected === "revoke-retry-session-denied" && revokes === 1) throw new TypeError("response lost");
+        return Response.json({ status: revokes > 1 ? "replayed" : "applied", operationId: body?.operationId ?? operationId,
           authority: { ...authority, state: "revoked", live: false, revision: 2 } });
+      }
       return Response.json({ error: "denied" }, { status: 403 });
     };
   }, { mode, csrfToken, reviewed, authority, grantId, operationId });
@@ -121,6 +128,38 @@ test("reports replayed revoked state separately from live status on mobile width
   await expect(page.getByText("Ledger state", { exact: true }).locator("..")).toContainText("revoked");
   await expect(page.getByText("Live", { exact: true }).locator("..")).toContainText("No");
 });
+
+for (const kind of ["grant", "revoke"] as const) {
+  test(`keeps an uncertain ${kind} frozen when retry session refresh is denied`, async ({ page }) => {
+    await render(page, `${kind}-retry-session-denied`);
+    if (kind === "grant") await reviewExact(page);
+    else {
+      await page.getByLabel("Exact billing grant ID").fill(grantId);
+      await page.getByRole("button", { name: "Load exact grant status" }).click();
+      await expect(page.getByRole("heading", { name: "Current billing authority" })).toBeVisible();
+    }
+    page.once("dialog", dialog => dialog.accept());
+    const submit = page.getByRole("button", { name: kind === "grant"
+      ? "Confirm exact billing grant" : "Confirm exact billing revocation" });
+    await submit.scrollIntoViewIfNeeded(); await submit.click();
+    await expect(page.getByRole("alert")).toContainText("outcome is uncertain");
+    const mutations = async () => (await calls(page)).filter(call => call.method === "POST"
+      && (kind === "grant" ? call.path.endsWith("/grants") : call.path.endsWith("/revoke")));
+    const original = (await mutations())[0];
+    const retry = page.getByRole("button", { name: `Retry same frozen ${kind}` });
+    page.once("dialog", dialog => dialog.accept());
+    await retry.scrollIntoViewIfNeeded(); await retry.click();
+    await expect(page.getByRole("alert")).toContainText("outcome is uncertain");
+    await expect(page.getByLabel("Exact native portal target ID")).toBeDisabled();
+    await expect(retry).toBeEnabled();
+    expect(await mutations()).toHaveLength(1);
+    page.once("dialog", dialog => dialog.accept()); await retry.click();
+    await expect(page.getByRole("status")).toContainText("operation was replayed");
+    const retried = await mutations();
+    expect(retried).toHaveLength(2); expect(retried[1]?.body).toEqual(original?.body);
+    expect((await calls(page)).filter(call => call.path.endsWith("/session"))).toHaveLength(3);
+  });
+}
 
 test("loads current status then uses explicit browser confirmation for exact revocation", async ({ page }) => {
   await render(page);

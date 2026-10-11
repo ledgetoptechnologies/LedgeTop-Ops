@@ -6,6 +6,8 @@ import type { OperationsPortalWorkspacePublicationBinding } from "./operations-p
 import type { OperationsPortalNativeDeliveryAuthorityDispatchEnv } from "./operations-portal-native-delivery-authority-dispatch";
 import { exactNativeStagingConfiguration, exactNativeBillingStagingConfiguration } from "./staging-native-authority-policy";
 import { handleOperationsPortalNativeBillingAuthorityOwnerHttp } from "./operations-portal-native-billing-authority-owner-http";
+import { handleOperationsPortalNativeBillingPermissionOwnerHttp,
+  OPERATIONS_NATIVE_BILLING_PERMISSION_OWNER_BASE } from "./operations-portal-native-billing-permission-owner-http";
 import { reviewOperationsPortalNativeBillingCandidate, grantOperationsPortalNativeBillingAuthority,
   revokeOperationsPortalNativeBillingAuthority, readOperationsPortalNativeBillingAuthorityStatus } from "./operations-portal-native-billing-authority-issuer";
 import type { Env } from "./types";
@@ -18,6 +20,7 @@ const WORKSPACE_API = "/api/native-client-portal/operations-workspaces";
 const WORKSPACE_PAGE = "/administration/client-portal/operations-workspaces";
 const BILLING_API = "/api/native-client-portal/operations-billing-authority";
 const BILLING_PAGE = "/administration/client-portal/operations-billing-authority";
+const BILLING_PERMISSION_PAGE = "/administration/client-portal/operations-billing-permissions";
 const OWNER_PAGES = new Set([
   "/administration/client-portal/operations-recipients",
   "/administration/client-portal/operations-delivery-authority",
@@ -46,6 +49,16 @@ const notFound = () => Response.json({ error: "Not found" }, { status: 404 });
 export default {
   async fetch(request: Request, env: NativeStagingEnv, ctx: ExecutionContext): Promise<Response> {
     const pathname = new URL(request.url).pathname;
+    if (pathFamily(pathname, OPERATIONS_NATIVE_BILLING_PERMISSION_OWNER_BASE) || pathname === BILLING_PERMISSION_PAGE) {
+      if (!exactNativeBillingStagingConfiguration(request, env)) return notFound();
+      if (pathname === BILLING_PERMISSION_PAGE) return env.ASSETS.fetch(request);
+      return handleOperationsPortalNativeBillingPermissionOwnerHttp(request, {
+        environment: env.ENVIRONMENT, expectedHost: STAGING_HOST,
+        delegationFlag: env.OPERATIONS_PORTAL_NATIVE_BILLING_OWNER_ENABLED ?? "false",
+        configuration: { enabled: true, issuer: env.TEAM_DOMAIN ?? "", staffAudience: env.OPERATIONS_AUD,
+          origin: STAGING_ORIGIN, csrfSecret: env.OPERATIONS_SESSION_SECRET }, database: env.OPS_DB,
+      });
+    }
     if (pathFamily(pathname, BILLING_API) || pathname === BILLING_PAGE) {
       if (!exactNativeBillingStagingConfiguration(request, env)) return notFound();
       if (pathname === BILLING_PAGE) return env.ASSETS.fetch(request);

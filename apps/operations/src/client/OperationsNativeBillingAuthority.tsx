@@ -86,7 +86,9 @@ function BillingAuthorityWorkspace({ initialSession }: { initialSession: Session
         ? `The exact operation was replayed. Current ledger state is ${result.authority.state}; live is ${result.authority.live ? "yes" : "no"}.`
         : `The operation was applied. Current ledger state is ${result.authority.state}; live is ${result.authority.live ? "yes" : "no"}.`);
     } catch (caught) {
-      if (caught instanceof NativeBillingOwnerApiError && caught.uncertain) {
+      // A failed refresh or denied retry cannot establish the original outcome.
+      // Keep its operation identity locked until an authoritative result arrives.
+      if (retrying || caught instanceof NativeBillingOwnerApiError && caught.uncertain) {
         setAttempt(current);
         setError(`The ${current.kind} outcome is uncertain. Retry only this frozen operation; do not change its identifiers or create another operation.`);
       } else {

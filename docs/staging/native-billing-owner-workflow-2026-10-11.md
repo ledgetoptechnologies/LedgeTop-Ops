@@ -18,7 +18,7 @@ This candidate is not deployed or production-ready. It adds a recipient billing-
 
 - Canonical full-schema real-D1 lifecycle test passes, including late-stage transaction rollback, expiry, altered-body/revision/review rejection, deny/generation changes, refreshed-session replay and distinct-manager revocation.
 - HTTP/client/staging-gate suites: 18 focused tests pass.
-- Owner UI: 12 desktop/mobile browser checks pass with ordinary clicks, including narrow-screen overflow, denied sessions, review invalidation and identical frozen retries. No forced clicks or skipped mobile cases.
+- Owner UI: 16 desktop/mobile browser checks pass with ordinary clicks, including narrow-screen overflow, denied sessions, review invalidation and identical frozen retries. A denied retry-time session refresh keeps the original uncertain operation locked. No forced clicks or skipped mobile cases.
 - Operations type-check and final candidate build pass. These checks are not proof of live acceptance.
 - Independent read-only review found no concrete issuer/schema/staging-mount regression.
 
@@ -30,3 +30,21 @@ This candidate is not deployed or production-ready. It adds a recipient billing-
 - Use a new Ops-first preserved-runtime release profile. Required additions are Ops billing-owner and financial-RPC flags, then Client financial flag and its private financial-reader service binding. Preserve existing flags, bindings, handlers, schedules, container, schema and public links.
 - Prove normal owner issuance, recipient PA financial reads, tenant exclusions and same-session revocation in staging. Existing local tests do not prove that live flow.
 - Production routing/configuration and the owner PA-update checkpoint remain future gates; this candidate authorizes no production activation.
+
+## Follow-up delegation surface (local work, not released)
+
+- The normal resource-scoped staff billing delegation API/UI is mounted only in the staging entrypoint under the existing exact, default-off billing-owner gate. It does not create its prerequisite Directory management authority, infer it from a role label, or expose global grant mutation.
+- Review selects one admitted staff member and one native customer resource. Issuance/revocation uses the existing immutable permission issuer, expected generation and original operation identity. Current owner identity, existing global native Directory management allow, and relevant denies remain enforced.
+- An already authorized single owner may delegate scoped billing management to themselves; a second business owner is not required. This is distinct from bootstrapping the missing prerequisite authority.
+- Independently reviewed maintenance setup is still needed for the existing admitted staging owner. The old first-account bootstrap must not be reused: its contract rejects preexisting profiles, admissions and grants.
+- Delegation verification: 10 HTTP checks (including canonical real-D1 issue/replay/revoke), 5 client API checks, 14 desktop/mobile UI checks and 3 real-entrypoint dispatch checks pass. The revoke wire body contains only confirmation, operation ID and expected generation; its immutable grant ID is carried in the route. Review exposes only unrevoked exact-resource rows, not global policy or historical grants.
+- The mounted delegation and retry fixes are a new local follow-up candidate. The earlier `0c19b11` release/CI evidence does not cover them; fresh publication and exact-revision CI are required before deployment.
+
+### Exact maintenance setup to review before execution
+
+- Target only the staging Ops account/Worker/database already used by this release. Add exactly one missing global native `directory.portal_access.manage` allow to the existing, verified owner. This is Directory portal-management authority, broader than billing; it is not a recipient financial grant.
+- Use a separate domain-separated authority-upgrade approval and immutable execution receipt, never reinterpret old bootstrap approvals. An out-of-band trusted procedure installs approval only; no browser route manufactures its own approval.
+- Bind approval to the exact canonical plan/hash, current owner/admission/profile/subject, current grant generation/history, independently verified identity evidence, operator/issuer attribution, expiry and revocation. Keep populated identity evidence private.
+- Recheck all state and applicable denies inside the bounded write transaction; grant plus receipt must commit together or roll back. Preserve all old grants/denies, bootstrap approvals, staff records, memberships and audit history.
+- Exact replay returns history under current authorization but never recreates revoked access. Reject expired/revoked approvals, changed bodies, different operators, stale identity/generation, existing conflicting IDs, concurrent reuse and late-stage failures.
+- This setup does not issue billing staff delegation automatically, grant any recipient access, enable financial reads, activate clients, change PA mappings or modify public links. Normal scoped billing delegation and recipient disclosure remain separate reviewed actions afterward.

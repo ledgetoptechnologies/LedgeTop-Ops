@@ -17,6 +17,19 @@ const exact = {
 } as NativeEnv;
 
 describe("staging native authority entrypoint", () => {
+  it("keeps the scoped staff-delegation surface behind the same exact default-off billing gate", () => {
+    for (const path of [
+      "/api/native-client-portal/operations-billing-permissions/session",
+      "/administration/client-portal/operations-billing-permissions",
+    ]) {
+      const request = new Request(`https://ops-staging.ledgetopdroneservices.com${path}`);
+      expect(exactNativeBillingStagingConfiguration(request, exact)).toBe(false);
+      expect(exactNativeBillingStagingConfiguration(request,
+        { ...exact, OPERATIONS_PORTAL_NATIVE_BILLING_OWNER_ENABLED: "true" })).toBe(true);
+      expect(exactNativeBillingStagingConfiguration(request,
+        { ...exact, OPERATIONS_PORTAL_NATIVE_BILLING_OWNER_ENABLED: "true", ENVIRONMENT: "production" })).toBe(false);
+    }
+  });
   it("keeps billing management separately default-off and staging-only", () => {
     const request = new Request("https://ops-staging.ledgetopdroneservices.com/api/native-client-portal/operations-billing-authority/session");
     expect(exactNativeBillingStagingConfiguration(request, exact)).toBe(false);

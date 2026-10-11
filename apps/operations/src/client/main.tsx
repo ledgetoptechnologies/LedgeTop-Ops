@@ -11,6 +11,7 @@ import { ClientPortalRecipientEnrollment } from "./ClientPortalRecipientEnrollme
 import { OperationsNativeRecipientEnrollment } from "./OperationsNativeRecipientEnrollment";
 import { OperationsNativeDeliveryAuthority } from "./OperationsNativeDeliveryAuthority";
 import { OperationsNativeBillingAuthority } from "./OperationsNativeBillingAuthority";
+import { OperationsNativeBillingPermissions } from "./OperationsNativeBillingPermissions";
 import { OperationsPortalWorkspaceOwner } from "./OperationsPortalWorkspaceOwner";
 import { DirectoryReplayAcceptance } from "./DirectoryReplayAcceptance";
 import { isDirectoryReplayAcceptanceLocation } from "./DirectoryReplayAcceptanceRoute";
@@ -29,6 +30,8 @@ const operationsDeliveryAuthorityRoute = nativeOwnerHost
   && window.location.pathname === "/administration/client-portal/operations-delivery-authority";
 const operationsBillingAuthorityRoute = nativeOwnerHost
   && window.location.pathname === "/administration/client-portal/operations-billing-authority";
+const operationsBillingPermissionsRoute = nativeOwnerHost
+  && window.location.pathname === "/administration/client-portal/operations-billing-permissions";
 const operationsWorkspaceRoute = nativeOwnerHost
   && window.location.pathname === "/administration/client-portal/operations-workspaces";
 const directoryReplayAcceptanceRoute = isDirectoryReplayAcceptanceLocation(window.location);
@@ -43,6 +46,8 @@ createRoot(document.getElementById("root")!).render(<StrictMode>{projectReplayAc
   ? <OperationsNativeDeliveryAuthority />
   : operationsBillingAuthorityRoute
   ? <OperationsNativeBillingAuthority />
+  : operationsBillingPermissionsRoute
+  ? <OperationsNativeBillingPermissions />
   : operationsRecipientEnrollmentRoute
   ? <OperationsNativeRecipientEnrollment />
   : recipientEnrollmentRoute
