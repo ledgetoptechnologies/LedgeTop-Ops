@@ -4,7 +4,7 @@ import crypto from "node:crypto";
 import { createRequire } from "node:module";
 import path from "node:path";
 import test from "node:test";
-import { applicationTableNames, assertApplyReady, assertAttemptMarker, assertClientReadyForOperations, assertExactLedger, assertPinnedWranglerVersion, assertPreserved, buildPairedMigrationPlan,
+import { applicationTableNames, assertApplyReady, assertAttemptMarker, assertClientReadyForOperations, assertClientReconciliationDrift, assertExactLedger, assertPinnedWranglerVersion, assertPreserved, buildPairedMigrationPlan,
   normalizedSql, quoteSqlIdentifier, reviewedSchemaDefinitions, runPairedMigration, safeFailure, SPECS } from "./staging-native-portal-149-194-migrations.mjs";
 import { transformSeed } from "./staging-bootstrap.mjs";
 
@@ -35,6 +35,40 @@ test("schema preservation allows only reviewed created objects and preserves aut
   assert.throws(()=>assertPreserved(before,{...after,schema:after.schema.filter(row=>row.name!=="y")},reviewed,"client"),/missing/u);
   assert.throws(()=>assertPreserved(before,{...after,schema:after.schema.map(row=>row.name==="y"?{...row,sql:"CREATE TRIGGER y BEFORE INSERT ON x BEGIN SELECT 9; END"}:row)},reviewed,"client"),/definition/u);
   assert.throws(()=>assertPreserved(before,{...after,schema:[...after.schema,{type:"view",name:"z",sql:"CREATE VIEW z AS SELECT 1"}]},reviewed,"client"));
+});
+const row=value=>JSON.stringify(value);
+const health=(source,overrides={})=>row({source,last_attempt_at:"2026-10-11 10:00:00",last_success_at:"2026-10-11 10:00:00",status:"healthy",object_count:7,details_json:"{}",updated_at:"2026-10-11 10:00:00",...overrides});
+const idle=(overrides={})=>row({singleton:1,cursor:null,scanned_count:0,cleaned_count:0,completed_cycles:4,updated_at:"2026-10-11 10:00:00",...overrides});
+const observation="2026-10-11T10:10:00Z";
+test("permits only observed timestamp-only health heartbeats for the exact existing sources",()=>{
+  const before=[health("reconciliation"),health("thumbnail-fallback-republisher"),health("truenas")];
+  const after=[health("reconciliation",{last_attempt_at:"2026-10-11 10:01:00",updated_at:"2026-10-11 10:01:00"}),health("thumbnail-fallback-republisher",{last_attempt_at:"2026-10-11 10:02:00",last_success_at:"2026-10-11 10:02:00",updated_at:"2026-10-11 10:02:00"}),health("truenas",{last_success_at:"2026-10-11 10:03:00",updated_at:"2026-10-11 10:03:00"})];
+  assert.doesNotThrow(()=>assertClientReconciliationDrift("delivery_sync_health",before,after,observation));
+  assert.throws(()=>assertClientReconciliationDrift("delivery_sync_health",before,after.slice(1),observation),/row count/u);
+  assert.throws(()=>assertClientReconciliationDrift("delivery_sync_health",before,[...after.slice(0,2),health("other",{updated_at:"2026-10-11 10:03:00"})],observation),/deleted or replaced|unreviewed/u);
+  assert.throws(()=>assertClientReconciliationDrift("delivery_sync_health",before,[health("reconciliation",{status:"error",updated_at:"2026-10-11 10:01:00"}),...after.slice(1)],observation),/status changed/u);
+  assert.throws(()=>assertClientReconciliationDrift("delivery_sync_health",before,[health("reconciliation",{updated_at:"2026-10-11 09:59:59"}),...after.slice(1)],observation),/regressed/u);
+  assert.throws(()=>assertClientReconciliationDrift("delivery_sync_health",before,[health("reconciliation",{updated_at:"2026-10-11 10:11:00"}),...after.slice(1)],observation),/future/u);
+});
+test("permits only an idle singleton reconciliation cycle heartbeat",()=>{
+  for(const table of ["image_thumbnail_managed_orphan_reconciliation","image_thumbnail_registration_reconciliation"])
+    assert.doesNotThrow(()=>assertClientReconciliationDrift(table,[idle()],[idle({completed_cycles:5,updated_at:"2026-10-11 10:01:00"})],observation));
+  assert.throws(()=>assertClientReconciliationDrift("image_thumbnail_registration_reconciliation",[idle()],[idle({cursor:"next",completed_cycles:5,updated_at:"2026-10-11 10:01:00"})],observation),/cursor/u);
+  assert.throws(()=>assertClientReconciliationDrift("image_thumbnail_registration_reconciliation",[idle()],[idle({scanned_count:1,completed_cycles:5,updated_at:"2026-10-11 10:01:00"})],observation),/scanned_count/u);
+  assert.throws(()=>assertClientReconciliationDrift("image_thumbnail_registration_reconciliation",[idle()],[idle({completed_cycles:3,updated_at:"2026-10-11 10:01:00"})],observation),/completed_cycles/u);
+});
+test("live heartbeat policy cannot conceal authorization, row-shape or malformed-time changes",()=>{
+  const prior=health("reconciliation"),advance={updated_at:"2026-10-11 10:01:00"};
+  for(const overrides of [{...advance,object_count:8},{...advance,details_json:'{"changed":true}'},{...advance,extra:1},
+    {...advance,last_success_at:null},{updated_at:"2026-02-30 10:01:00"}])
+    assert.throws(()=>assertClientReconciliationDrift("delivery_sync_health",[prior],[health("reconciliation",overrides)],observation));
+  assert.throws(()=>assertClientReconciliationDrift("delivery_sync_health",[prior],[prior,health("truenas")],observation));
+  for(const overrides of [{completed_cycles:NaN},{completed_cycles:1.5},{updated_at:"2026-10-11 10:11:00"},{singleton:2},{cleaned_count:1}])
+    assert.throws(()=>assertClientReconciliationDrift("image_thumbnail_registration_reconciliation",[idle()],[idle(overrides)],observation));
+  const before={foreignKeys:[],schema:[],data:{delivery_sync_health:[prior],authority:['{"state":"private"}']}};
+  const after={foreignKeys:[],schema:[],data:{delivery_sync_health:[health("reconciliation",advance)],authority:['{"state":"active"}']}};
+  assert.throws(()=>assertPreserved(before,after,new Map(),"client",observation),/pre-existing table changed: authority/u);
+  assert.throws(()=>assertPreserved(before,{...after,data:{...after.data,authority:before.data.authority},schema:[{name:"unreviewed"}]},new Map(),"client",observation),/schema changed/u);
 });
 test("models Client heads rebuild and the single reviewed Ops permission seed exactly",()=>{
   const clientSql=SPECS.client.suffix.map(name=>fs.readFileSync(path.join(root,"apps/client/migrations",name),"utf8")).join("\n");

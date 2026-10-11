@@ -5,7 +5,9 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
+import { isDeepStrictEqual as same } from "node:util";
 import { BOOTSTRAP_APPS } from "./staging-bootstrap.mjs";
+import { collectOrderedReadOnlySnapshot } from "./ordered-read-only-snapshot.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const require = createRequire(path.join(root,"apps/operations/package.json"));
@@ -103,7 +105,69 @@ export function assertExactLedger(rows, names, label) { assert.deepEqual(rows.ma
 export function assertClientReadyForOperations(state, clientPlan) {
   assertExactLedger(state.ledger, clientPlan.finalNames, "Client 0149"); assert.deepEqual(state.foreignKeys, [], "Client FK violations");
 }
-export function assertPreserved(before, after, reviewedDefinitions, application) {
+const CLIENT_HEARTBEAT_SOURCES = new Set(["reconciliation", "thumbnail-fallback-republisher", "truenas"]);
+const CLIENT_IDLE_RECONCILIATION_TABLES = new Set([
+  "image_thumbnail_managed_orphan_reconciliation",
+  "image_thumbnail_registration_reconciliation",
+]);
+const DB_UTC = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/u;
+function dbUtc(value, now, label) {
+  assert(typeof value === "string" && DB_UTC.test(value), `${label} must be a DB UTC timestamp`);
+  const instant = Date.parse(`${value.replace(" ", "T")}Z`);
+  assert(Number.isFinite(instant) && instant <= now, `${label} must not be in the future`);
+  assert.equal(new Date(instant).toISOString().slice(0,19).replace("T"," "),value,`${label} must be a real DB UTC date`);
+  return instant;
+}
+function parsedRows(rows, label) {
+  return rows.map((row, index) => {
+    try { return JSON.parse(row); }
+    catch { assert.fail(`${label}[${index}] must be canonical JSON`); }
+  });
+}
+export function assertClientReconciliationDrift(table, beforeRows, afterRows, now = Date.now()) {
+  const nowMs = now instanceof Date ? now.getTime() : typeof now === "string" ? Date.parse(now) : now;
+  assert(Number.isFinite(nowMs), "reconciliation observation time must be valid");
+  const before = parsedRows(beforeRows, `${table} before`), after = parsedRows(afterRows, `${table} after`);
+  assert.equal(after.length, before.length, `${table} row count changed`);
+  if (table === "delivery_sync_health") {
+    const bySource = new Map(after.map(row => [row.source, row]));
+    assert.equal(bySource.size, after.length, "delivery_sync_health sources must remain unique");
+    for (const prior of before) {
+      assert(CLIENT_HEARTBEAT_SOURCES.has(prior.source), "delivery_sync_health changed for an unreviewed source");
+      const current = bySource.get(prior.source);
+      assert(current, "delivery_sync_health source was deleted or replaced");
+      if (same(current, prior)) { bySource.delete(prior.source); continue; }
+      assert.deepEqual(Object.keys(current).sort(), Object.keys(prior).sort(), "delivery_sync_health row shape changed");
+      for (const key of Object.keys(prior)) if (!["last_attempt_at", "last_success_at", "updated_at"].includes(key))
+        assert.deepEqual(current[key], prior[key], `delivery_sync_health.${prior.source}.${key} changed`);
+      assert.notEqual(current.updated_at, prior.updated_at, "delivery_sync_health heartbeat must advance updated_at");
+      for (const key of ["last_attempt_at", "last_success_at", "updated_at"]) {
+        if (current[key] === null) { assert.equal(prior[key], null, `delivery_sync_health.${prior.source}.${key} was cleared`); continue; }
+        const currentMs = dbUtc(current[key], nowMs, `delivery_sync_health.${prior.source}.${key}`);
+        if (prior[key] !== null) assert(currentMs >= dbUtc(prior[key], nowMs, `delivery_sync_health.${prior.source}.${key} prior`),
+          `delivery_sync_health.${prior.source}.${key} regressed`);
+      }
+      bySource.delete(prior.source);
+    }
+    assert.equal(bySource.size, 0, "delivery_sync_health source was inserted");
+    return;
+  }
+  assert(CLIENT_IDLE_RECONCILIATION_TABLES.has(table), "unreviewed reconciliation table");
+  assert.equal(before.length, 1, `${table} must retain its singleton row`);
+  const [prior] = before, [current] = after;
+  if (same(current, prior)) return;
+  assert.deepEqual(Object.keys(current).sort(), Object.keys(prior).sort(), `${table} row shape changed`);
+  assert.equal(prior.singleton, 1); assert.equal(current.singleton, 1);
+  assert.equal(prior.cursor, null, `${table} prior cursor must be idle`); assert.equal(current.cursor, null, `${table} cursor must remain idle`);
+  for (const key of Object.keys(prior)) if (!["completed_cycles", "updated_at"].includes(key))
+    assert.deepEqual(current[key], prior[key], `${table}.${key} changed`);
+  assert(Number.isSafeInteger(prior.completed_cycles) && prior.completed_cycles >= 0, `${table} prior completed_cycles is invalid`);
+  assert(Number.isSafeInteger(current.completed_cycles) && current.completed_cycles >= prior.completed_cycles,
+    `${table} completed_cycles regressed or is invalid`);
+  const priorUpdated = dbUtc(prior.updated_at, nowMs, `${table}.updated_at prior`);
+  assert(dbUtc(current.updated_at, nowMs, `${table}.updated_at`) >= priorUpdated, `${table}.updated_at regressed`);
+}
+export function assertPreserved(before, after, reviewedDefinitions, application, now = Date.now()) {
   assert.deepEqual(after.foreignKeys, []); const reviewed = new Set(reviewedDefinitions.keys());
   assert.deepEqual(after.schema.filter(row => !reviewed.has(row.name)), before.schema.filter(row => !reviewed.has(row.name)),
     "pre-existing schema changed outside reviewed migration objects");
@@ -113,7 +177,9 @@ export function assertPreserved(before, after, reviewedDefinitions, application)
     if(application==="operations"&&table==="permissions"){
       const expected=[...rows,JSON.stringify({key:"billing.portal_access.manage",description:"Grant or revoke one explicit native billing entity in an enrolled client portal"})].sort();
       assert.deepEqual(after.data[table],expected,"permissions changed outside exact reviewed billing capability");
-    }else assert.deepEqual(after.data[table],rows,`pre-existing table changed: ${table}`);
+    }else if(application === "client" && (table === "delivery_sync_health" || CLIENT_IDLE_RECONCILIATION_TABLES.has(table)))
+      assertClientReconciliationDrift(table, rows, after.data[table], now);
+    else assert.deepEqual(after.data[table],rows,`pre-existing table changed: ${table}`);
   }
   const priorTables=new Set(Object.keys(before.data));
   for(const [table,rows] of Object.entries(after.data))if(!priorTables.has(table))assert.deepEqual(rows,[],`new table unexpectedly populated: ${table}`);
@@ -142,7 +208,7 @@ export function materialize(plan) {
 }
 function credential(){const values=fs.readFileSync("C:/Users/fstor/Downloads/prompt.md","utf8").split(/\r?\n/u).map(v=>v.trim()).filter(v=>/^cfat_[A-Za-z0-9_-]+$/u.test(v));assert.equal(values.length,1);return values[0];}
 async function select(token,spec,sql){assert.match(sql,/^SELECT\s/u);const response=await fetch(`https://api.cloudflare.com/client/v4/accounts/${account}/d1/database/${spec.database}/query`,{method:"POST",redirect:"error",signal:AbortSignal.timeout(30000),headers:{Authorization:`Bearer ${token}`,"Content-Type":"application/json"},body:JSON.stringify({sql})});const body=await response.json();assert(response.ok&&body.success&&body.result?.length===1&&body.result[0].success,"read-only D1 query failed");assert.equal(body.result[0].meta.changed_db,false);return body.result[0].results;}
-async function remoteState(token,plan){const schema=await select(token,plan.spec,schemaSql),data={};for(const table of applicationTableNames(schema))data[table]=canonicalRows(await select(token,plan.spec,`SELECT * FROM ${quoteSqlIdentifier(table)}`));return{ledger:await select(token,plan.spec,"SELECT name FROM d1_migrations ORDER BY name"),foreignKeys:await select(token,plan.spec,'SELECT * FROM pragma_foreign_key_check ORDER BY "table", rowid, parent, fkid'),schema,data};}
+async function remoteState(token,plan){const schema=await select(token,plan.spec,schemaSql),data=await collectOrderedReadOnlySnapshot(applicationTableNames(schema),async table=>canonicalRows(await select(token,plan.spec,`SELECT * FROM ${quoteSqlIdentifier(table)}`)));return{ledger:await select(token,plan.spec,"SELECT name FROM d1_migrations ORDER BY name"),foreignKeys:await select(token,plan.spec,'SELECT * FROM pragma_foreign_key_check ORDER BY "table", rowid, parent, fkid'),schema,data};}
 const wranglerFailure = outcomeCode => { const error=Error("provider command outcome unavailable; reconcile before any retry");error.outcomeCode=outcomeCode;return error;};
 export function assertPinnedWranglerVersion(lockfile, installedPackage) {
   const expected=lockfile?.packages?.["node_modules/wrangler"]?.version,actual=installedPackage?.version;
