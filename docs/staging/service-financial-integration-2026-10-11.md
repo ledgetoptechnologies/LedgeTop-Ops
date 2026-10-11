@@ -20,10 +20,12 @@
 - Client financial decoding reconstructs only allowlisted document fields and rejects unexpected private fields and duplicate grant IDs. Display keys include authority/grant/revision so equal document IDs in different homes do not collide.
 - Full mounted Operations-home browser suite after exact scoped-financial request expectations were corrected: **58/58 passed**, desktop/mobile; independently repeated by root in18.2seconds. No-home denial cases still permit no financial read.
 - Corrected0190 and canonical activation adapter integrated as `ad322b07f35e89ebcadae99ec4c0f7682639fa5f`;0190 matches SHA-256 `a662cd4a50c5eaee7a02bf720b1e5399d5d05712022fdd1426413fc707a83882`. Combined genuine financial-mapping plus service-enrollment lifecycle passes **9/9 across two files,111.23seconds**, and Operations typecheck passes.
+- Default-off financial staging configuration is integrated at `fb5d5489`: both flags remain false normally; only the Client staging configuration includes the named `ClientPortalNativeFinancialReader` binding. The native portal acceptance profile enables both sides together and rejects missing, duplicate, wrong-target and one-sided configurations. Pure configuration checks **71/71 passed**; both generated-type checks and Operations typecheck passed.
+- Five strict-null assertions in the existing browser fixtures were corrected at `ba6d5aee`, without changing runtime code or route/count assertions. Client typecheck passed and the full Operations-home desktop/mobile browser suite passed again **58/58**.
 
 ## Release exclusions
 
 - Corrected0190 runtime is integrated and locally tested, but the complete0192 release hash contract still must be deliberately advanced; the separate190 sync candidate remains its own exact revision and CI gate.
 - Full release pins have not been advanced to 0192. Do not use the old 0188–0190 suffix runner to apply a 0191/0192 deployment.
-- Local financial route/display tests pass; live staging acceptance remains required. Named service-binding configuration must be wired deliberately with default-off gates; merely exporting the private class is not a deployed binding.
+- Local financial route/display tests pass; live staging acceptance remains required. Named service-binding configuration is now wired with default-off gates, but has not been deployed; exporting/configuring the private class is not proof of live RPC acceptance.
 - No production PA update checkpoint is ready from this local evidence alone.
