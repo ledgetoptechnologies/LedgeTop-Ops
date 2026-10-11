@@ -463,6 +463,11 @@ async function updateRemoteState(db: DirectoryWriteD1,
   allowAcquiredEnrollmentCoordinate = false,
   _relationshipRecoveryEnabled = false,
 ): Promise<RemoteState | null> {
+  // A durable ACK proves the exact remote identity and revision, but its
+  // authorization generation is historical: PA advances that application-wide
+  // generation for unrelated records. Update routes replace it with the fresh
+  // inventory/binding generation they just verified; PA still CAS-checks that
+  // generation on dispatch. Callers that omit it retain the durable generation.
   // Keep the compatibility argument for callers compiled against the bounded
   // recovery window. It no longer controls reads of already-validated history;
   // recovery review/authorization/dispatch remains gated at its mutation routes.
@@ -518,10 +523,10 @@ async function updateRemoteState(db: DirectoryWriteD1,
         destinationValue.origin, active.externalId, write.kind, active.projectAlphaPublicId, write.kind, active.projectAlphaPublicId)
       .first<Record<string, unknown>>();
     if (delivered) return revision(delivered.revision) && revision(delivered.authorizationGeneration)
-      && (destinationValue.expectedAuthorizationGeneration === undefined
-        || delivered.authorizationGeneration === destinationValue.expectedAuthorizationGeneration)
       ? { externalId: active.externalId, projectAlphaPublicId: active.projectAlphaPublicId,
-          revision: delivered.revision, authorizationGeneration: delivered.authorizationGeneration, mappingKind: "acquired" } : null;
+          revision: delivered.revision,
+          authorizationGeneration: destinationValue.expectedAuthorizationGeneration ?? delivered.authorizationGeneration,
+          mappingKind: "acquired" } : null;
     const refreshed = await db.prepare(`SELECT live_revision revision,authorization_generation authorizationGeneration
       FROM project_alpha_existing_directory_binding_revision_refresh_receipts WHERE record_id=? AND source_id=?
         AND source_instance_id=? AND application_id=? AND history_epoch_id=? AND resource_type=? AND external_id=?
@@ -529,10 +534,10 @@ async function updateRemoteState(db: DirectoryWriteD1,
         destinationValue.sourceInstanceUUID, destinationValue.applicationUUID, destinationValue.historyEpoch, write.kind, active.externalId,
         active.projectAlphaPublicId, write.expectedLocalVersion).first<Record<string, unknown>>();
     if (refreshed) return revision(refreshed.revision) && revision(refreshed.authorizationGeneration)
-      && (destinationValue.expectedAuthorizationGeneration === undefined
-        || refreshed.authorizationGeneration === destinationValue.expectedAuthorizationGeneration)
       ? { externalId: active.externalId, projectAlphaPublicId: active.projectAlphaPublicId,
-          revision: refreshed.revision, authorizationGeneration: refreshed.authorizationGeneration, mappingKind: "acquired" } : null;
+          revision: refreshed.revision,
+          authorizationGeneration: destinationValue.expectedAuthorizationGeneration ?? refreshed.authorizationGeneration,
+          mappingKind: "acquired" } : null;
     const activated = await db.prepare(`SELECT project_alpha_revision revision FROM project_alpha_existing_directory_binding_activation_receipts
       WHERE activation_id=? AND record_id=? AND source_id=? AND source_instance_id=? AND application_id=? AND history_epoch_id=?
         AND resource_type=? AND external_id=? AND project_alpha_public_id=? AND local_record_version=?`)
@@ -558,10 +563,10 @@ async function updateRemoteState(db: DirectoryWriteD1,
       destinationValue.applicationUUID, destinationValue.historyEpoch, write.kind, active.externalId).first<Record<string, unknown>>();
   if (row && row.projectAlphaPublicId === active.projectAlphaPublicId
     && revision(row.revision) && revision(row.authorizationGeneration)
-    && (destinationValue.expectedAuthorizationGeneration === undefined
-      || row.authorizationGeneration === destinationValue.expectedAuthorizationGeneration)
     ) return { externalId: active.externalId, projectAlphaPublicId: row.projectAlphaPublicId,
-      revision: row.revision, authorizationGeneration: row.authorizationGeneration, mappingKind: "legacy" };
+      revision: row.revision,
+      authorizationGeneration: destinationValue.expectedAuthorizationGeneration ?? row.authorizationGeneration,
+      mappingKind: "legacy" };
   if (write.kind !== "client") return null;
   const relationshipSource = `SELECT ack.client_public_id projectAlphaPublicId,ack.revision,
       json_extract(recovery.outcome_json,'$.response.result.authorizationGeneration') authorizationGeneration
@@ -597,10 +602,9 @@ async function updateRemoteState(db: DirectoryWriteD1,
       destinationValue.applicationUUID,destinationValue.historyEpoch,destinationValue.origin).first<Record<string, unknown>>();
   return relationship && relationship.projectAlphaPublicId === active.projectAlphaPublicId
     && revision(relationship.revision) && revision(relationship.authorizationGeneration)
-    && (destinationValue.expectedAuthorizationGeneration === undefined
-      || relationship.authorizationGeneration === destinationValue.expectedAuthorizationGeneration)
     ? { externalId: active.externalId, projectAlphaPublicId: relationship.projectAlphaPublicId, revision: relationship.revision,
-      authorizationGeneration: relationship.authorizationGeneration, mappingKind: "legacy" } : null;
+      authorizationGeneration: destinationValue.expectedAuthorizationGeneration ?? relationship.authorizationGeneration,
+      mappingKind: "legacy" } : null;
 }
 
 /** Resolves only durable/local acknowledgement evidence for an existing PA

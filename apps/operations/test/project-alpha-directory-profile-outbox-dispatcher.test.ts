@@ -436,6 +436,44 @@ describe("native Directory profile outbox dispatcher", () => {
     }
   });
 
+  it("pins the fresh generation and lets PA CAS reject a later generation race", async () => {
+    const value = await create("organization"), publicId = (sequence++).toString(16).padStart(32, "0");
+    await dispatchProjectAlphaDirectoryProfileOutboxCommand(env(), sourceId, value.commandId,
+      transport(publicId, "1", []));
+    const updateMutationId = uuid();
+    const update = await writeNativeDirectoryProfile(db, { operation: "update", mutationId: updateMutationId,
+      recordId: value.input.recordId, expectedLocalVersion: 1, kind: "organization",
+      profile: { ...organizationProfile, name: "Observed at generation 2" },
+      destinations: [{ sourceId, sourceInstanceUUID: source, applicationUUID: application, historyEpoch: epoch,
+        origin: baseUrl, externalCanonicalId: value.input.recordId, expectedAuthorizationGeneration: "2" }],
+      actor: value.staff } as NativeDirectoryProfileWrite);
+    if (update.status !== "written") throw new Error(update.reason);
+    const posts: unknown[] = [];
+    await expect(dispatchProjectAlphaDirectoryProfileOutboxCommand(env(), sourceId, update.commandIds[0]!,
+      transport(publicId, "2", posts))).resolves.toMatchObject({ status: "acknowledged", revision: "2" });
+    expect(posts).toEqual([{ commandId: update.commandIds[0], expectedRevision: "1",
+      expectedAuthorizationGeneration: "2", profile: { ...organizationProfile, name: "Observed at generation 2" } }]);
+    expect(await db.prepare("SELECT state FROM operations_directory_intents WHERE mutation_id=?")
+      .bind(updateMutationId).first("state")).toBe("acknowledged");
+
+    const raced = await writeNativeDirectoryProfile(db, { operation: "update", mutationId: uuid(),
+      recordId: value.input.recordId, expectedLocalVersion: 2, kind: "organization",
+      profile: { ...organizationProfile, name: "Observed at generation 3" },
+      destinations: [{ sourceId, sourceInstanceUUID: source, applicationUUID: application, historyEpoch: epoch,
+        origin: baseUrl, externalCanonicalId: value.input.recordId, expectedAuthorizationGeneration: "3" }],
+      actor: value.staff } as NativeDirectoryProfileWrite);
+    if (raced.status !== "written") throw new Error(raced.reason);
+    const racedPosts: unknown[] = [];
+    await expect(dispatchProjectAlphaDirectoryProfileOutboxCommand(env(), sourceId, raced.commandIds[0]!,
+      transport(publicId, "4", racedPosts, 409))).resolves.toMatchObject({ status: "conflict", reason: "remote", httpStatus: 409 });
+    expect(racedPosts).toEqual([{ commandId: raced.commandIds[0], expectedRevision: "2",
+      expectedAuthorizationGeneration: "3", profile: { ...organizationProfile, name: "Observed at generation 3" } }]);
+    expect(await db.prepare("SELECT state FROM project_alpha_directory_outbox WHERE command_id=?")
+      .bind(raced.commandIds[0]).first("state")).toBe("terminal");
+    expect(await db.prepare("SELECT count(*) n FROM project_alpha_directory_mappings WHERE command_id=?")
+      .bind(raced.commandIds[0]).first("n")).toBe(0);
+  });
+
   it("accepts bounded equal and advanced update revisions, including PA replay responses", async () => {
     for (const response of [
       { revision: "1", replayed: false },
