@@ -72,7 +72,7 @@ test("dry-run pins exact Ops staging 198-to-199 chain and performs no I/O", asyn
   assert.equal(SPEC.priorNamesSha256, "d88ba83a54c045e5eb416fb912324047d68160f9f198e6b56591f0f0909788f2");
   assert.equal(SPEC.priorContentsSha256, "47369a1c36e64853cf8e82c874af734ff0c2745bef416cca9c3a01cae16f8409");
   assert.deepEqual(result.migrations, [
-    { name: "0199_native_directory_profile_binding_continuations.sql", sha256: "e5847ab76b50b1a40b64b9663e7934a78a9d2961a52a6158ac7d65a27faf7568" },
+    { name: "0199_native_directory_profile_binding_continuations.sql", sha256: "056007062980460404fe85093cb796b855b91c23351a323457e91d5b053a2006" },
   ]);
   assert.deepEqual(plan.migrations, result.migrations);
   assert.equal(result.mutationsPerformed, false);

@@ -265,9 +265,11 @@ BEGIN
     AND json_extract(NEW.outcome_json,'$.response.result.resource.type')=NEW.resource_type
     AND json_extract(NEW.outcome_json,'$.response.result.resource.publicId')=m.project_alpha_public_id
     AND json_extract(NEW.outcome_json,'$.response.result.authorizationGeneration')=json_extract(NEW.command_json,'$.expectedAuthorizationGeneration')
+    -- PA may acknowledge a no-op profile command at the same canonical revision.
+    -- ACK evidence must not regress; a frozen binding refresh still strictly advances its prior revision.
     AND (length(json_extract(NEW.outcome_json,'$.response.result.resource.revision'))>length(json_extract(NEW.command_json,'$.expectedRevision'))
       OR length(json_extract(NEW.outcome_json,'$.response.result.resource.revision'))=length(json_extract(NEW.command_json,'$.expectedRevision'))
-      AND json_extract(NEW.outcome_json,'$.response.result.resource.revision')>json_extract(NEW.command_json,'$.expectedRevision'));
+      AND json_extract(NEW.outcome_json,'$.response.result.resource.revision')>=json_extract(NEW.command_json,'$.expectedRevision'));
   INSERT INTO native_directory_profile_binding_guards(guard_id,ok)
     VALUES(NEW.command_id,CASE WHEN EXISTS(SELECT 1 FROM native_directory_profile_binding_jobs WHERE command_id=NEW.command_id) THEN 1 ELSE 0 END);
   INSERT INTO native_directory_profile_binding_dispatch(command_id,state) VALUES(NEW.command_id,'pending');

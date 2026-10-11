@@ -69,7 +69,7 @@ export const AUTHORITY_MIGRATION_CHAIN_199 = Object.freeze({
   count: 199,
   final: "0199_native_directory_profile_binding_continuations.sql",
   names: "7be05fcb2b54c3a345b76b1f37e3dbbf33c0f4278b6cabe8307a064549c33821",
-  contents: "68586300b95972f8af21d3b75fdfaa936d9b7fc8f30c032e09b4ce480bec92a4",
+  contents: "9fd14f1d7bb71719c532e11ed55963a05b962ae433fd1ead8be400752b550a53",
 });
 
 const sha = value => crypto.createHash("sha256").update(value).digest("hex");

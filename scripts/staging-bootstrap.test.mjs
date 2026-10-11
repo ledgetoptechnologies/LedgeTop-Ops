@@ -213,7 +213,7 @@ test("builds the complete checked-in 149/199 chains with both Client 0199 filena
   assert.deepEqual(artifacts.delivery.manifest.transformedFiles, ["0002_seed_initial_staff.sql"]);
   assert.deepEqual(artifacts.operations.manifest.transformedFiles, ["0002_seed_acl.sql"]);
   assert.equal(artifacts.delivery.manifest.sourceChainSha256, "f0131c4467cbe6046c5da7c54f0bcd604cc39f743d9a98082d3ff59a7d34c1f1");
-  assert.equal(artifacts.operations.manifest.sourceChainSha256, "68586300b95972f8af21d3b75fdfaa936d9b7fc8f30c032e09b4ce480bec92a4");
+  assert.equal(artifacts.operations.manifest.sourceChainSha256, "9fd14f1d7bb71719c532e11ed55963a05b962ae433fd1ead8be400752b550a53");
 });
 
 test("preserves the exact deployed 0196 chain and rejects an incomplete 0197 successor", () => {

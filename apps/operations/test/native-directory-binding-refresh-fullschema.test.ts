@@ -53,7 +53,7 @@ beforeAll(async()=>{
 },240000);
 afterAll(async()=>{await runtime?.dispose();});
 
-async function fixture(automatic=false){
+async function fixture(automatic=false,updateRevision='2'){
   sourceId=automatic?`project-alpha:fixture_${randomUUID().replaceAll('-','')}`:'project-alpha:primary';
   const recordId=`refresh-org-${randomUUID()}`,publicId=randomUUID().replaceAll('-','');
   const writer={staffId,accessSubject:'access|owner',admissionVersion:1,selectedGrantId:'refresh-global-0',selectedIdentityGrantId:'refresh-global-1',loginEmail:'owner@example.test',profileVersion:1};
@@ -63,15 +63,15 @@ async function fixture(automatic=false){
   const normal=vi.fn<typeof fetch>(async(url,init)=>{
     const path=new URL(String(url)).pathname;if(path.endsWith('/capabilities'))return json(capabilities());
     const body=JSON.parse(String(init?.body)),update=path.endsWith('/profile/commands');
-    return json({...envelope,replayed:false,result:{resource:update?{type:'organization',publicId,revision:'2'}:{type:'organization',id:body.externalId,publicId,revision:'1'},authorizationGeneration:'1'}},update?200:201);
+    return json({...envelope,replayed:false,result:{resource:update?{type:'organization',publicId,revision:updateRevision}:{type:'organization',id:body.externalId,publicId,revision:'1'},authorizationGeneration:'1'}},update?200:201);
   });
   const created=await writeNativeDirectoryProfile(db,input);expect(created.status).toBe('written');if(created.status!=='written')throw Error(created.reason);
   expect((await dispatchProjectAlphaDirectoryProfileOutboxCommand(env(),sourceId,created.commandIds[0]!,normal)).status).toBe('acknowledged');
-  const update={operation:'update' as const,mutationId:randomUUID(),recordId,expectedLocalVersion:1,kind:'organization' as const,profile:{...profile,name:'Updated fixture'},destinations:destinations.map(x=>({...x,expectedAuthorizationGeneration:'1'})),actor:writer};
+  const update={operation:'update' as const,mutationId:randomUUID(),recordId,expectedLocalVersion:1,kind:'organization' as const,profile:{...profile,name:updateRevision==='1'?profile.name:'Updated fixture'},destinations:destinations.map(x=>({...x,expectedAuthorizationGeneration:'1'})),actor:writer};
   const written=await writeNativeDirectoryProfile(db,update);expect(written.status).toBe('written');if(written.status!=='written')throw Error(written.reason);
   const settled=await dispatchProjectAlphaDirectoryProfileOutboxCommand(env(),sourceId,written.commandIds[0]!,normal);
   if(settled.status!=='acknowledged')throw new Error(JSON.stringify(settled));
-  let binding='1',generation='1',revision='2',projectionSha256='a'.repeat(64);const posts:string[]=[];
+  let binding='1',generation='1',revision=updateRevision,projectionSha256='a'.repeat(64);const posts:string[]=[];
   let postHook:(()=>Promise<void>)|undefined;
   const send=vi.fn<typeof fetch>(async(url,init)=>{
     const path=new URL(String(url)).pathname;
@@ -108,6 +108,50 @@ it('completes an already aligned binding without POST',async()=>{
   expect(await dispatchNativeDirectoryProfileBindingContinuation(automaticEnv(),sourceId,f.commandId,f.send)).toEqual({status:'acknowledged'});
   expect(f.posts).toHaveLength(0);
   expect(await db.prepare('SELECT count(*) n FROM native_directory_profile_binding_commands WHERE job_command_id=?').bind(f.commandId).first('n')).toBe(0);
+});
+it('settles an equal-revision no-op profile ACK and completes its aligned continuation without POST',async()=>{
+  // PA records an idempotent no-op receipt without advancing its canonical projection revision.
+  const f=await fixture(true,'1');
+  expect(await db.prepare('SELECT live_revision,local_version FROM native_directory_profile_binding_jobs WHERE command_id=?')
+    .bind(f.commandId).first()).toMatchObject({live_revision:'1',local_version:2});
+  expect(await dispatchNativeDirectoryProfileBindingContinuation(automaticEnv(),sourceId,f.commandId,f.send)).toEqual({status:'acknowledged'});
+  expect(f.posts).toHaveLength(0);
+  expect(await db.prepare('SELECT count(*) n FROM native_directory_profile_binding_commands WHERE job_command_id=?').bind(f.commandId).first('n')).toBe(0);
+});
+it('rejects a regressing profile ACK both at transport and the atomic continuation enqueue guard',async()=>{
+  const f=await fixture(true);
+  const updated=await writeNativeDirectoryProfile(db,{...f.update,mutationId:randomUUID(),expectedLocalVersion:2,
+    profile:{...profile,name:'Regressing response fixture'}});
+  if(updated.status!=='written')throw Error(updated.reason);
+  const commandId=updated.commandIds[0]!;
+  const regressing=vi.fn<typeof fetch>(async url=>new URL(String(url)).pathname.endsWith('/capabilities')?json(capabilities()):
+    json({...envelope,replayed:false,result:{resource:{type:'organization',publicId:f.publicId,revision:'1'},authorizationGeneration:'1'}}));
+  expect(await dispatchProjectAlphaDirectoryProfileOutboxCommand(env(),sourceId,commandId,regressing)).toMatchObject({status:'uncertain',reason:'invalid_contract'});
+  expect(await count('native_directory_profile_binding_jobs',commandId)).toBe(0);
+  await db.prepare("UPDATE project_alpha_directory_outbox SET state='leased',lease_token='regression-guard',lease_expires_at=? WHERE command_id=?")
+    .bind(Date.now()+60_000,commandId).run();
+  const outcomeValue=JSON.parse((await db.prepare('SELECT acknowledged_outcome_json FROM native_directory_profile_binding_jobs WHERE command_id=?')
+    .bind(f.commandId).first<string>('acknowledged_outcome_json'))!);
+  outcomeValue.response.result.resource.revision='1';
+  const outcome=JSON.stringify(outcomeValue);
+  await expect(db.prepare("UPDATE project_alpha_directory_outbox SET state='acknowledged',outcome_json=?,lease_token=NULL,lease_expires_at=NULL WHERE command_id=? AND state='leased' AND lease_token='regression-guard'")
+    .bind(outcome,commandId).run()).rejects.toThrow();
+  expect(await count('native_directory_profile_binding_jobs',commandId)).toBe(0);
+  expect(await db.prepare('SELECT state FROM project_alpha_directory_outbox WHERE command_id=?').bind(commandId).first('state')).toBe('leased');
+});
+it('refreshes a stale owned binding after an equal-revision second no-op profile ACK',async()=>{
+  const f=await fixture(true);
+  const written=await writeNativeDirectoryProfile(db,{...f.update,mutationId:randomUUID(),expectedLocalVersion:2});
+  if(written.status!=='written')throw Error(written.reason);
+  const commandId=written.commandIds[0]!;
+  const noOp=vi.fn<typeof fetch>(async url=>new URL(String(url)).pathname.endsWith('/capabilities')?json(capabilities()):
+    json({...envelope,replayed:false,result:{resource:{type:'organization',publicId:f.publicId,revision:'2'},authorizationGeneration:'1'}}));
+  expect(await dispatchProjectAlphaDirectoryProfileOutboxCommand(env(),sourceId,commandId,noOp)).toMatchObject({status:'acknowledged',revision:'2'});
+  expect(await db.prepare('SELECT live_revision,local_version FROM native_directory_profile_binding_jobs WHERE command_id=?')
+    .bind(commandId).first()).toMatchObject({live_revision:'2',local_version:3});
+  expect(await dispatchNativeDirectoryProfileBindingContinuation(automaticEnv(),sourceId,commandId,f.send)).toEqual({status:'acknowledged'});
+  expect(f.posts).toHaveLength(1);
+  expect(JSON.parse(f.posts[0]!)).toMatchObject({expectedPriorRevision:'1',expectedLiveRevision:'2'});
 });
 it('retains the exact ID and body after an unknown successful POST and recovers its receipt',async()=>{
   const f=await fixture(true);f.setHook(async()=>{throw new Error('lost successful response');});
