@@ -104,4 +104,7 @@ it("upgrades the exact cloned live-173 lineage through the reviewed local suffix
     WHERE type='table' AND name='native_directory_profile_binding_commands'`).first())
     .toEqual({ name: "native_directory_profile_binding_commands" });
   expect((await db.prepare('PRAGMA foreign_key_check').all()).results).toEqual([]);
+  expect(await db.prepare(`SELECT name FROM sqlite_master
+    WHERE type='table' AND name='native_directory_active_binding_refresh_commands'`).first())
+    .toEqual({ name: "native_directory_active_binding_refresh_commands" });
 }, 180_000);
