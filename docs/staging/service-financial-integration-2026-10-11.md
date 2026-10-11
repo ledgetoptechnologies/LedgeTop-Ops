@@ -13,7 +13,7 @@
 - Operations and Client typechecks passed.
 - Canonical resource lifecycle: 1/1 passed, 115.87 seconds, with service creation through the production audited writer.
 - First financial collection failed because prerequisite modules were not yet integrated; that condition was corrected before the passing focused tests/typechecks.
-- Next full financial lifecycle run ended with local `EADDRINUSE` during migration application, not an accepted application success. A subsequent run at session7228 is in progress; record its terminal outcome before accepting the combined database evidence.
+- Next full financial lifecycle run ended with local `EADDRINUSE` during migration application, not an accepted application success. The subsequent run at session7228 is terminal **PASS: 1/1, 112.69 seconds**. It proves the integrated 0001–0192 financial/service lifecycle, including trusted financial collection and post-drift denial, on local D1.
 
 ## Release exclusions
 
