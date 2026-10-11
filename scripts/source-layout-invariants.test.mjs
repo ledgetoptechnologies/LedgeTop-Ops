@@ -326,9 +326,10 @@ test("the deployed Client Worker keeps reviewed resources, hosts, and portal ass
   // Reviewed recipient-delivery authority adds only explicit disabled flags.
   // Native recipient/data transport flags are explicit and remain disabled;
   // their staging-only reader binding and audit secret are absent here.
-  assert.equal(normalizedSha256("apps/client/wrangler.jsonc"), "b424712ba7d1031b9f7790a5cb69275dcc06d98d3ddcb0d8739161bd8a70bb69");
+  assert.equal(normalizedSha256("apps/client/wrangler.jsonc"), "321687326947fcddb105fc5ea1f918d7d1f278c561a056597f0f8710e0200b75");
   const config = readJson("apps/client/wrangler.jsonc");
   for (const flag of ["CLIENT_PORTAL_NATIVE_RECIPIENT_SERVICE_HOME_ENABLED",
+    "CLIENT_PORTAL_NATIVE_FINANCIAL_ENABLED",
     "CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_WRITER_ENABLED", "CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_STATUS_ENABLED",
     "CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_READ_ENABLED", "CLIENT_PORTAL_OPERATIONS_NATIVE_CONTENT_AUDIT_ENABLED"])
     assert.equal(config.vars[flag], "false");
@@ -371,6 +372,8 @@ test("the deployed Client Worker keeps reviewed resources, hosts, and portal ass
   assert.equal(config.vars.CLIENT_PORTAL_AUTHORITY_V2_STATUS_ENABLED, "false");
   assert.equal(config.vars.CLIENT_PORTAL_AUTHORITY_V2_ENROLLMENT_STATUS_ENABLED, "false");
   assert.equal(config.vars.CLIENT_PORTAL_OPERATIONS_SERVICE_HOME_ENABLED, "false");
+  assert.equal(config.vars.CLIENT_PORTAL_NATIVE_FINANCIAL_ENABLED, "false");
+  assert.equal(config.services?.find(service => service.binding === "CLIENT_PORTAL_NATIVE_FINANCIAL_READER"), undefined);
   assert.equal(config.vars.CLIENT_PORTAL_OPERATIONS_PUBLICATION_WRITER_ENABLED, "false");
   assert.equal(config.vars.OPS_PORTAL_ACCESS_AUTHORITY_SHADOW_ENABLED, "false");
   assert.equal(config.vars.CLIENT_PORTAL_CONTENT_AUDIT_ENABLED, "false");
@@ -463,7 +466,7 @@ test("the deployed Client Worker keeps reviewed resources, hosts, and portal ass
 
 test("the deployed Operations Worker keeps catalog and inactive binding transport private and default-off", () => {
   // Newly mounted PA adoption and binding-refresh routes remain disabled in production by default.
-  assert.equal(normalizedSha256("apps/operations/wrangler.jsonc"), "9a0fb93c57b9ca98b570ff135a0eaebae124cc25760323196e1c0507e8346ef5");
+  assert.equal(normalizedSha256("apps/operations/wrangler.jsonc"), "d02f9fbdb53d2403e7ff47e9d2f06c0a95417c36e90ade0e13694e49aa62c43e");
   const config = readJson("apps/operations/wrangler.jsonc");
   for (const flag of ["PROJECT_ALPHA_API_V2_SYNC_ENABLED", "PROJECT_ALPHA_DIRECTORY_EXACT_ADOPTION_ENABLED", "PROJECT_ALPHA_PROJECT_V2_RECOVERY_ENABLED"]) {
     assert.equal([...read("apps/operations/wrangler.jsonc").matchAll(new RegExp(`"${flag}"\\s*:`, "g"))].length, 1);
@@ -485,6 +488,7 @@ test("the deployed Operations Worker keeps catalog and inactive binding transpor
   assert.equal(config.vars.CLIENT_ONBOARDING_ADMIN_ENABLED, "false");
   assert.equal(config.vars.CLIENT_ONBOARDING_RECIPIENT_BRIDGE_ENABLED, "false");
   assert.equal(config.vars.CLIENT_PORTAL_SERVICE_METADATA_RPC_ENABLED, "false");
+  assert.equal(config.vars.CLIENT_PORTAL_NATIVE_FINANCIAL_RPC_ENABLED, "false");
   assert.equal(config.vars.PROJECT_ALPHA_CATALOG_STAGING_COORDINATOR_ENABLED, "false");
   assert.equal(config.vars.PROJECT_ALPHA_PROJECT_ADOPTION_REVIEW_ENABLED, "false");
   assert.equal(config.vars.PROJECT_ALPHA_PROJECT_ADOPTION_FINALIZATION_ENABLED, "false");

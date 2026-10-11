@@ -275,6 +275,7 @@ export function validateCrossApp(configs, productionConfigs = {}) {
   if (deliveryBucket !== mapped(configs.operations.r2_buckets, "bucket_name").get("DATA_BUCKET")) errors.push("operations DATA_BUCKET must equal delivery staging DATA_BUCKET");
   const delegatedSigner = (configs.delivery.services ?? []).find((service) => service.binding === "CLIENT_DELEGATED_SHARE_SIGNER");
   const serviceMetadataReader = (configs.delivery.services ?? []).find((service) => service.binding === "CLIENT_PORTAL_SERVICE_METADATA_READER");
+  const financialReaders = (configs.delivery.services ?? []).filter((service) => service.binding === "CLIENT_PORTAL_NATIVE_FINANCIAL_READER");
   const recipientEnrollmentBridge = (configs.delivery.services ?? []).find((service) => service.binding === "CLIENT_PORTAL_RECIPIENT_ENROLLMENT_BRIDGE");
   const nativeRecipientEnrollment = (configs.delivery.services ?? []).find((service) => service.binding === "OPERATIONS_PORTAL_NATIVE_RECIPIENT_ENROLLMENT");
   const nativeDeliveryReader = (configs.delivery.services ?? []).find((service) => service.binding === "OPERATIONS_PORTAL_NATIVE_DELIVERY_AUTHORIZATION_READER");
@@ -282,6 +283,10 @@ export function validateCrossApp(configs, productionConfigs = {}) {
   const nativeDeliveryAuthority = (configs.operations.services ?? []).find((service) => service.binding === "OPERATIONS_PORTAL_NATIVE_DELIVERY_AUTHORITY");
   if (serviceMetadataReader?.service !== configs.operations.name || serviceMetadataReader?.entrypoint !== "ClientPortalServiceMetadataReader") {
     errors.push("delivery service metadata reader must target the Operations staging Worker and named metadata entrypoint");
+  }
+  if (financialReaders.length !== 1 || financialReaders[0]?.service !== configs.operations.name
+    || financialReaders[0]?.entrypoint !== "ClientPortalNativeFinancialReader") {
+    errors.push("delivery native financial reader must be the unique binding to the Operations staging Worker and named financial entrypoint");
   }
   if (delegatedSigner?.service !== configs.operations.name || delegatedSigner?.entrypoint !== "ClientDelegatedShareSigner") {
     errors.push("delivery delegated-share signer must target the Operations staging Worker and named signer entrypoint");

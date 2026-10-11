@@ -283,6 +283,7 @@ test("requires shared staging resources to agree", () => {
   configs.delivery.services.find(service => service.binding === "CLIENT_DELEGATED_SHARE_SIGNER").service = "wrong-ops-staging";
   configs.delivery.services.find(service => service.binding === "VIEWER_SESSION_ISSUER").entrypoint = "WrongViewerIssuer";
   configs.delivery.services.find(service => service.binding === "CLIENT_PORTAL_SERVICE_METADATA_READER").entrypoint = "WrongMetadataReader";
+  configs.delivery.services.find(service => service.binding === "CLIENT_PORTAL_NATIVE_FINANCIAL_READER").entrypoint = "WrongFinancialReader";
   configs.delivery.services.find(service => service.binding === "CLIENT_PORTAL_RECIPIENT_ENROLLMENT_BRIDGE").entrypoint = "WrongRecipientEnrollmentBridge";
   configs.delivery.services.find(service => service.binding === "OPERATIONS_PORTAL_NATIVE_RECIPIENT_ENROLLMENT").entrypoint = "WrongNativeRecipientIngress";
   configs.delivery.services.find(service => service.binding === "OPERATIONS_PORTAL_NATIVE_DELIVERY_AUTHORIZATION_READER").entrypoint = "WrongNativeDeliveryReader";
@@ -295,6 +296,7 @@ test("requires shared staging resources to agree", () => {
   assert(errors.some((error) => error.includes("delegated-share signer")));
   assert(errors.some((error) => error.includes("Viewer session issuer")));
   assert(errors.some((error) => error.includes("service metadata reader")));
+  assert(errors.some((error) => error.includes("native financial reader")));
   assert(errors.some((error) => error.includes("recipient enrollment bridge")));
   assert(errors.some((error) => error.includes("native recipient enrollment")));
   assert(errors.some((error) => error.includes("native authorization reader")));

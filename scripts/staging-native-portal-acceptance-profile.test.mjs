@@ -53,7 +53,7 @@ function fixture() {
   return { base, sources, productionConfigs };
 }
 
-test("builds the separately named three-gate native portal acceptance profile", () => {
+test("builds the separately named five-gate native portal acceptance profile", () => {
   const { sources, productionConfigs } = pair();
   const candidates = buildNativePortalAcceptanceConfigs(sources, productionConfigs);
   assert.equal(NATIVE_PORTAL_ACCEPTANCE_PROFILE_NAME, "native-recipient-service-home-acceptance");
@@ -61,6 +61,8 @@ test("builds the separately named three-gate native portal acceptance profile", 
     "CLIENT_PORTAL_OPERATIONS_SERVICE_HOME_ENABLED",
     "CLIENT_PORTAL_SERVICE_METADATA_RPC_ENABLED",
     "CLIENT_PORTAL_NATIVE_RECIPIENT_SERVICE_HOME_ENABLED",
+    "CLIENT_PORTAL_NATIVE_FINANCIAL_ENABLED",
+    "CLIENT_PORTAL_NATIVE_FINANCIAL_RPC_ENABLED",
   ]));
   assert.deepEqual(validateNativePortalAcceptanceConfigs(sources, candidates, productionConfigs), []);
   assert.deepEqual(candidates.operations.assets.run_worker_first, sources.operations.assets.run_worker_first);
@@ -83,7 +85,7 @@ test("rejects partial selection, unrelated drift, and any legacy-fallback-capabl
   candidates.delivery.vars.CLIENT_PORTAL_NATIVE_RECIPIENT_SERVICE_HOME_ENABLED = "false";
   candidates.operations.vars.CLIENT_PORTAL_OPERATIONS_MANAGEMENT_ENABLED = "true";
   const errors = validateNativePortalAcceptanceConfigs(sources, candidates, productionConfigs);
-  assert(errors.some((error) => error.includes("outside the three-gate activation window")), errors.join(" | "));
+  assert(errors.some((error) => error.includes("outside the five-gate activation window")), errors.join(" | "));
   assert(errors.some((error) => error.includes("legacy PA fallback is forbidden")), errors.join(" | "));
   assert(errors.some((error) => error.includes("CLIENT_PORTAL_NATIVE_RECIPIENT_SERVICE_HOME_ENABLED=true")), errors.join(" | "));
 });
@@ -94,11 +96,25 @@ test("refuses active base or production gates, missing native prerequisites, and
     ({ productionConfigs }) => { productionConfigs.operations.vars.CLIENT_PORTAL_SERVICE_METADATA_RPC_ENABLED = "true"; },
     ({ sources }) => { sources.operations.vars.OPERATIONS_PORTAL_NATIVE_DELIVERY_READER_ENABLED = "false"; },
     ({ sources }) => { sources.delivery.services.find(({ binding }) => binding === "CLIENT_PORTAL_SERVICE_METADATA_READER").service = "ledgetop-ops"; },
+    ({ sources }) => { sources.delivery.services.find(({ binding }) => binding === "CLIENT_PORTAL_NATIVE_FINANCIAL_READER").entrypoint = "WrongFinancialReader"; },
+    ({ sources }) => { sources.delivery.services = sources.delivery.services.filter(({ binding }) => binding !== "CLIENT_PORTAL_NATIVE_FINANCIAL_READER"); },
+    ({ sources }) => { sources.delivery.services.push(structuredClone(sources.delivery.services.find(({ binding }) => binding === "CLIENT_PORTAL_NATIVE_FINANCIAL_READER"))); },
   ]) {
     const state = pair();
     mutate(state);
     assert.throws(() => buildNativePortalAcceptanceConfigs(state.sources, state.productionConfigs),
-      /explicitly set|default staging config|production config|native portal acceptance source|metadata reader/);
+      /explicitly set|default staging config|production config|native portal acceptance source|metadata reader|financial reader/);
+  }
+});
+
+test("rejects one-sided financial activation", () => {
+  const { sources, productionConfigs } = pair();
+  for (const [app, flag] of [["delivery", "CLIENT_PORTAL_NATIVE_FINANCIAL_ENABLED"],
+    ["operations", "CLIENT_PORTAL_NATIVE_FINANCIAL_RPC_ENABLED"]]) {
+    const candidates = buildNativePortalAcceptanceConfigs(sources, productionConfigs);
+    candidates[app].vars[flag] = "false";
+    const errors = validateNativePortalAcceptanceConfigs(sources, candidates, productionConfigs);
+    assert(errors.some((error) => error.includes("native financial access must be enabled on both")), errors.join(" | "));
   }
 });
 
