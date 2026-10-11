@@ -1,6 +1,5 @@
 import { readFileSync } from "node:fs";
 import { Miniflare } from "miniflare";
-import { Hono } from "hono";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
 vi.mock("cloudflare:workers", () => ({ WorkerEntrypoint: class {} }));
@@ -448,10 +447,22 @@ describe("Ops Delivery to authenticated Client portal resource acceptance", { ti
     // Match the production Client Worker mount order and prefixes: this proves
     // service discovery, Delivery content, and generic portal admission share
     // one host without turning a service-home grant into broad portal access.
-    const router = new Hono<{ Bindings: ClientEnv }>();
-    router.route("/api/client/v2/operations", createOperationsHomeRouter({ resolvePrincipal }));
-    router.route("/api/client/operations/data", createOperationsNativeDeliveryRouter({ resolvePrincipal }));
-    router.route("/api/client", createClientPortalRouter({ resolvePrincipal }));
+    // Exercise each Client router with its production prefix in isolation. The
+    // Operations test package intentionally must not compose them through its
+    // independently resolved Hono copy: compatible Hono patch versions have
+    // nominal route-schema internals. This dispatcher does not claim to test
+    // the production root app's route()/middleware composition semantics.
+    const homeRouter=createOperationsHomeRouter({resolvePrincipal});
+    const deliveryRouter=createOperationsNativeDeliveryRouter({resolvePrincipal});
+    const portalRouter=createClientPortalRouter({resolvePrincipal});
+    const mounted=(request:Request,prefix:string)=>{const url=new URL(request.url);url.pathname=url.pathname.slice(prefix.length)||"/";
+      return new Request(url,request);};
+    const router={fetch(request:Request,environment:ClientEnv){const path=new URL(request.url).pathname;
+      return path.startsWith("/api/client/v2/operations/")
+        ?homeRouter.fetch(mounted(request,"/api/client/v2/operations"),environment)
+        :path.startsWith("/api/client/operations/data/")
+          ?deliveryRouter.fetch(mounted(request,"/api/client/operations/data"),environment)
+          :portalRouter.fetch(mounted(request,"/api/client"),environment);}};
 
     const unenrolledHome = await router.fetch(new Request(`${portalOrigin}/api/client/v2/operations/home`), portalEnvironment);
     expect(unenrolledHome.status).toBe(403);
