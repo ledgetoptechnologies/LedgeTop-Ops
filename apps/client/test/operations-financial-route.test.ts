@@ -9,7 +9,7 @@ const home={authorityId,workspaceId:"workspace-1",ownershipEpoch:2,grantRevision
 const document={publicId:"doc-1",kind:"contract",status:"pending",currency:"USD",total:"0.00",amountPaid:null,balanceDue:null,
   documentUrl:"https://pa.example.test/?page=public-doc&token=abcdefghijklmnop",actionUrl:"https://pa.example.test/?page=public-doc&token=abcdefghijklmnop"};
 const rpc=vi.fn(async()=>JSON.stringify({ok:true,protocolVersion:1,...home,collections:[{status:"ok",
-  grantId:"20000000-0000-4000-8000-000000000002",revision:1,value:{documents:[document]}}]}));
+  grantId:"20000000-0000-4000-8000-000000000002",revision:1,value:{selector:{},snapshotSha256:"a".repeat(64),documents:[document]}}]}));
 const env={CLIENT_PORTAL_ENABLED:"true",CLIENT_PORTAL_OPERATIONS_SERVICE_HOME_ENABLED:"true",
   CLIENT_PORTAL_NATIVE_RECIPIENT_SERVICE_HOME_ENABLED:"true",CLIENT_PORTAL_NATIVE_FINANCIAL_ENABLED:"true",
   CLIENT_PORTAL_ORIGIN:"https://client.example.test",DELIVERY_DB:{},

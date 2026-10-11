@@ -305,7 +305,7 @@ export async function loadOperationsHome(
   return parsed;
 }
 
-export interface PortalFinancialDocument { publicId:string;kind:"invoice"|"contract"|"project_invoice";status:string;
+export interface PortalFinancialDocument { scopeKey:string;publicId:string;kind:"invoice"|"contract"|"project_invoice";status:string;
   currency:string;total:string;amountPaid:string|null;balanceDue:string|null;documentUrl:string|null;actionUrl:string|null }
 function portalFinancialLink(value:unknown){if(value===null)return true;if(typeof value!=="string"||value.length>2048)return false;
   try{const url=new URL(value),keys=[...url.searchParams.keys()];return url.protocol==="https:"&&!url.username&&!url.password&&!url.hash
@@ -314,16 +314,18 @@ function portalFinancialLink(value:unknown){if(value===null)return true;if(typeo
     &&/^[A-Za-z0-9_-]{16,64}$/.test(url.searchParams.get("token")??"");}catch{return false;}}
 export async function loadOperationsFinancial(authorityId:string,request:PortalRequest=requestJson,signal?:AbortSignal){
   if(!operationsAuthorityIdPattern.test(authorityId))throw Object.assign(new Error("Invalid Operations authority"),{status:403});
-  const value=await request<{resourceMode:string;collections:Array<{documents:PortalFinancialDocument[]}>}>(
+  const value=await request<{resourceMode:string;collections:Array<{grantId:string;revision:number;documents:Array<Omit<PortalFinancialDocument,"scopeKey">>}>}>(
     `/api/client/v2/operations/home/${encodeURIComponent(authorityId)}/financial`,{signal,omitWorkspace:true});
   if(!value||value.resourceMode!=="operations_financial"||!Array.isArray(value.collections)||value.collections.length>20
-    ||value.collections.some(collection=>!Array.isArray(collection.documents)||collection.documents.length>10_000
+    ||value.collections.some(collection=>typeof collection.grantId!=="string"||!operationsAuthorityIdPattern.test(collection.grantId)
+      ||!positiveSafeInteger(collection.revision)||!Array.isArray(collection.documents)||collection.documents.length>10_000
       ||collection.documents.some(document=>!document||typeof document.publicId!=="string"
         ||!(document.kind==="invoice"||document.kind==="contract"||document.kind==="project_invoice")
         ||typeof document.status!=="string"||!/^([A-Z]{3})$/.test(document.currency)||!/^(?:0|[1-9][0-9]{0,17})\.[0-9]{2}$/.test(document.total)
         ||!portalFinancialLink(document.documentUrl)||!portalFinancialLink(document.actionUrl))))
     throw Object.assign(new Error("The financial response could not be verified."),{status:503});
-  return value.collections.flatMap(collection=>collection.documents);
+  return value.collections.flatMap(collection=>collection.documents.map(document=>({...document,
+    scopeKey:`${authorityId}:${collection.grantId}:${collection.revision}`})));
 }
 
 export async function loadPortalBootstrap(

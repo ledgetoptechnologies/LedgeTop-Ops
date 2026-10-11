@@ -32,7 +32,7 @@ export function OperationsNativeServicePanel({ response, embedded = false }: {
     .sort());
   return <>
     <OperationsServiceSummary response={response} embedded={embedded} />
-    <OperationsFinancialPanel response={response}/>
+    <OperationsFinancialPanel key={nativeDataScope} response={response}/>
     <OperationsNativeDataBrowser key={nativeDataScope} />
   </>;
 }
@@ -51,7 +51,7 @@ export function OperationsFinancialSummary({state,documents}:{state:"loading"|"r
   return <section className="portal-card" aria-label="Invoices and contracts"><h2>Invoices and contracts</h2>
     {state==="loading"?<p>Loading financial documents…</p>:state==="unavailable"?<p>Financial information is temporarily unavailable.</p>
       :documents.length===0?<p>No invoices or contracts are currently available.</p>
-      :<ul>{documents.map(document=><li key={`${document.kind}:${document.publicId}`}><strong>{document.kind==="contract"?"Contract":"Invoice"}</strong>
+      :<ul>{documents.map(document=><li key={`${document.scopeKey}:${document.kind}:${document.publicId}`}><strong>{document.kind==="contract"?"Contract":"Invoice"}</strong>
         {` — ${document.status} — ${document.currency} ${document.total}`}
         {document.documentUrl&&<> · <a href={document.documentUrl} rel="noreferrer">View document</a></>}
         {document.actionUrl&&document.actionUrl!==document.documentUrl&&<> · <a href={document.actionUrl} rel="noreferrer">Open payment</a></>}

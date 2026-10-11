@@ -7,7 +7,7 @@ const authorityId="10000000-0000-4000-8000-000000000001";
 const home={authorityId,workspaceId:"workspace-1",ownershipEpoch:2,grantRevision:3};
 const principal={issuer:"https://issuer.example.test",subject:"recipient-1"};
 const success=JSON.stringify({ok:true,protocolVersion:1,...home,collections:[{status:"ok",
-  grantId:"20000000-0000-4000-8000-000000000002",revision:1,value:{documents:[{publicId:"doc-1",kind:"invoice",
+  grantId:"20000000-0000-4000-8000-000000000002",revision:1,value:{selector:{},snapshotSha256:"a".repeat(64),documents:[{publicId:"doc-1",kind:"invoice",
     status:"unpaid",currency:"USD",total:"10.00",amountPaid:"0.00",balanceDue:"10.00",
     documentUrl:"https://pa.example.test/?page=public-doc&token=abcdefghijklmnop",
     actionUrl:"https://pa.example.test/?page=stripe-checkout&token=abcdefghijklmnop"}]}}]});
@@ -41,6 +41,13 @@ describe("Client private native financial consumer",()=>{
   it("rejects unsafe document links at the server-side Client boundary",async()=>{
     await expect(readPortalFinancialDocuments(env(vi.fn(async()=>success.replace(
       "https://pa.example.test/?page=stripe-checkout&token=abcdefghijklmnop","javascript:alert(1)"))),principal,authorityId))
+      .resolves.toEqual({ok:false,code:"unavailable"});
+  });
+  it("rejects unexpected private fields and duplicate grants instead of forwarding them",async()=>{
+    await expect(readPortalFinancialDocuments(env(vi.fn(async()=>success.replace('"publicId":"doc-1"','"publicId":"doc-1","privateNote":"secret"'))),principal,authorityId))
+      .resolves.toEqual({ok:false,code:"unavailable"});
+    const parsed=JSON.parse(success) as {collections:unknown[]};parsed.collections.push(parsed.collections[0]);
+    await expect(readPortalFinancialDocuments(env(vi.fn(async()=>JSON.stringify(parsed))),principal,authorityId))
       .resolves.toEqual({ok:false,code:"unavailable"});
   });
 });

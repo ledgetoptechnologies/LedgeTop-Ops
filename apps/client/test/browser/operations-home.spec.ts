@@ -14,6 +14,31 @@ const response = {
   }],
 };
 
+test("financial panel clears the prior authority synchronously while a replacement read is deferred", async ({ page }) => {
+  const authorityB="22345678-1234-4123-8123-123456789abc";
+  const authorityA=response.homes[0]!.authorityId;
+  let homeReads=0,releaseB:undefined|(()=>void);
+  const financial=(label:string,url:string)=>({resourceMode:"operations_financial",collections:[{grantId:"32345678-1234-4123-8123-123456789abc",
+    revision:1,documents:[{publicId:`doc-${label}`,kind:"contract",status:"pending",currency:"USD",total:"0.00",
+      amountPaid:null,balanceDue:null,documentUrl:url,actionUrl:url}]}]});
+  await page.route("**/api/client/**",async route=>{const path=new URL(route.request().url()).pathname;
+    if(path==="/api/client/v2/operations/home"){
+      const body=homeReads++===0?response:{...response,homes:[{...response.homes[0],authorityId:authorityB,workspaceId:"workspace-two"}]};
+      return route.fulfill({json:body});}
+    if(path.endsWith(`/${authorityA}/financial`))return route.fulfill({json:financial("A","https://pa-a.example.test/?page=public-doc&token=abcdefghijklmnop")});
+    if(path.endsWith(`/${authorityB}/financial`)){await new Promise<void>(resolve=>{releaseB=resolve;});
+      return route.fulfill({json:financial("B","https://pa-b.example.test/?page=public-doc&token=abcdefghijklmnop")});}
+    if(path==="/api/client/session")return route.fulfill({status:401,json:{error:"Sign in required"}});
+    return route.fulfill({status:404,json:{error:"not found"}});});
+  await page.goto("/portal");
+  await expect(page.getByRole("link",{name:"View document"})).toHaveAttribute("href",/pa-a\.example\.test/);
+  await page.evaluate(()=>document.dispatchEvent(new Event("visibilitychange")));
+  await expect(page.getByText("Loading financial documents…",{exact:true})).toBeVisible();
+  await expect(page.locator('a[href*="pa-a.example.test"]')).toHaveCount(0);
+  releaseB?.();
+  await expect(page.getByRole("link",{name:"View document"})).toHaveAttribute("href",/pa-b\.example\.test/);
+});
+
 async function expectAuthorizedNavigation(page: Page, unavailableLinks: string[] = []) {
   const trigger = page.getByRole("button", { name: "Open navigation", exact: true });
   const mobile = await trigger.isVisible();
