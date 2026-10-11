@@ -22,7 +22,7 @@ const candidate = { candidateFingerprint: "a".repeat(64), recipientBindingId,
   externalProjectId: "project:one", projectLabel: "Project One", projectVersion: 7,
   opsFolderProjectId: "ops-project:one", folderLabel: "Folder One", opsDivisionId: "division:one" };
 function active(operationId: string, transportStatus: "pending" | "acknowledged" | "dead" = "acknowledged",
-  selectedAuthorityId = authorityId) {
+  selectedAuthorityId = authorityId, recoverableDead = false) {
   return { authorityId: selectedAuthorityId, revision: 1, state: "active", recipientBindingId, folderReservationId, targetId,
     enrollmentIntentId: candidate.enrollmentIntentId, targetClientRecordId: "client:one", workspaceId: "workspace:one",
     clientFolderBindingId: "folder-binding:one", externalProjectId: "project:one", opsFolderProjectId: "ops-project:one",
@@ -30,9 +30,10 @@ function active(operationId: string, transportStatus: "pending" | "acknowledged"
     projectLabel: "Project One", folderLabel: "Folder One",
     features: ["folder.list", "file.metadata"], expiresAt: "2099-01-01T00:00:00.000Z",
     latestOperationId: operationId, latestAction: "delivery.grant", transportStatus,
-    recoveryOperationId: transportStatus === "pending" ? operationId : null };
+    recoveryOperationId: transportStatus === "pending" || recoverableDead ? operationId : null,
+    cancellationOperationId: null as string | null };
 }
-let grantCalls = 0, revokeCalls = 0, candidateCalls = 0;
+let grantCalls = 0, revokeCalls = 0, candidateCalls = 0, cancelCalls = 0;
 
 window.fetch = async (input, init = {}) => {
   const path = String(input), method = init.method ?? "GET";
@@ -50,13 +51,23 @@ window.fetch = async (input, init = {}) => {
     const paged = mode === "authority-pages", second = path.includes("cursor=");
     return Response.json({ items: [paged && second ? active(recoveryOperationId, "acknowledged", secondAuthorityId)
       : mode === "load-pending" ? active(recoveryOperationId, "pending")
-        : mode === "load-dead" ? active(recoveryOperationId, "dead") : active(recoveryOperationId)],
+        : mode === "load-dead" ? active(recoveryOperationId, "dead", authorityId, true) : active(recoveryOperationId)],
     page: { nextCursor: paged && !second ? authorityCursor : null } });
   }
   if (path.endsWith(`/authorities/${authorityId}`) && method === "GET") {
     const authority = mode === "load-pending" ? active(recoveryOperationId, "pending")
-      : mode === "load-dead" ? active(recoveryOperationId, "dead") : active(recoveryOperationId);
+      : mode === "load-dead" ? active(recoveryOperationId, "dead", authorityId, true) : active(recoveryOperationId);
+    if (mode.startsWith("cancel-")) {
+      authority.transportStatus = "dead";
+      authority.expiresAt = "2026-01-01T00:00:00.000Z";
+      authority.cancellationOperationId = recoveryOperationId;
+    }
     return Response.json({ authority });
+  }
+  if (path.endsWith(`/authorities/${authorityId}/cancel`) && method === "POST") {
+    cancelCalls += 1;
+    if (mode === "cancel-network" && cancelCalls === 1) throw new TypeError("simulated cancellation response loss");
+    return Response.json({ operationId: body!.operationId, status: mode === "cancel-committed" ? "committed" : "cancelled", replayed: cancelCalls > 1 });
   }
   if (path.endsWith("/authorities") && method === "POST") {
     grantCalls += 1;

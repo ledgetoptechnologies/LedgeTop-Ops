@@ -12,10 +12,14 @@ const syntheticOwner = Object.freeze({
   operationsStaffId: "staging-operations-owner",
 });
 
-/** Applies only the exact byte-reviewed Operations migration inventory. */
-export async function applyReviewedOperationsMigrationChain(database: D1Database): Promise<readonly string[]> {
+/** Validates the entire byte-reviewed source before applying current or frozen historical schema. */
+export async function applyReviewedOperationsMigrationChain(database: D1Database,
+  throughMigration?: "0196_native_directory_maintenance_authority.sql"): Promise<readonly string[]> {
   const directory = new URL("../../../operations/migrations/", import.meta.url);
-  const names = reviewedOperationsMigrationNames(directory);
+  const reviewed = reviewedOperationsMigrationNames(directory);
+  const last = throughMigration === undefined ? reviewed.length - 1 : reviewed.indexOf(throughMigration);
+  if (last < 0) throw new Error("reviewed-operations-migration-prefix-missing");
+  const names = reviewed.slice(0, last + 1);
   await database.prepare(`CREATE TABLE d1_migrations(
     id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT UNIQUE NOT NULL,
     applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)`).run();

@@ -92,22 +92,25 @@ test("pending recovery is unavailable until reload and uses the exact stored ope
   await expect(page.getByText("pending", { exact: true })).toBeVisible();
   await page.getByLabel("Exact recovery reason").fill("retry-after-current-owner-review");
   await page.getByLabel(/I reviewed this exact authority/).check();
-  await page.getByRole("button", { name: "Recover exact pending delivery" }).click();
+  await page.getByRole("button", { name: "Recover exact stored delivery" }).click();
   await expect(page.getByText("Recovery delivery was acknowledged.")).toBeVisible();
   const recovery = (await calls(page)).find(call => call.path.endsWith("/recover"));
   expect(recovery?.body).toMatchObject({ invocationId: expect.any(String), operationId: recoveryOperationId,
     expectedRevision: 1, reason: "retry-after-current-owner-review" });
 });
 
-test("a dead transport cannot recover and requires explicit revoke before reissue", async ({ page }) => {
+test("a rejected exact grant exposes only audited recovery of the frozen operation", async ({ page }) => {
   await render(page, "load-dead"); await loadAuthority(page);
-  await expect(page.getByRole("alert")).toContainText("Delivery is dead and cannot be recovered");
-  await expect(page.getByRole("button", { name: /Recover exact pending/ })).toHaveCount(0);
-  await expect(page.getByText(/revoke an active local authority, then separately review/)).toBeVisible();
-  await page.getByLabel("Exact revocation reason code").fill("dead-transport-cleanup");
+  await expect(page.getByRole("alert")).toContainText("Recovery checks Client status first");
+  await expect(page.getByRole("button", { name: "Revoke exact delivery authority" })).toHaveCount(0);
+  await expect(page.getByLabel("Exact revocation reason code")).toHaveCount(0);
+  await page.getByLabel("Exact recovery reason").fill("recover-exact-rejected-operation");
   await page.getByLabel(/I reviewed this exact authority/).check();
-  await page.getByRole("button", { name: "Revoke exact delivery authority" }).click();
-  await expect(page.getByText("Revocation delivery was acknowledged.")).toBeVisible();
+  await page.getByRole("button", { name: "Recover exact stored delivery" }).click();
+  await expect(page.getByText("Recovery delivery was acknowledged.")).toBeVisible();
+  const recovery = (await calls(page)).find(call => call.path.endsWith("/recover"));
+  expect(recovery?.body).toMatchObject({ operationId: recoveryOperationId, expectedRevision: 1,
+    reason: "recover-exact-rejected-operation" });
 });
 
 test("an uncertain revoke retries the exact body without silently changing authority", async ({ page }) => {
@@ -121,6 +124,45 @@ test("an uncertain revoke retries the exact body without silently changing autho
   const recorded = await calls(page), revokes = recorded.filter(call => call.path.endsWith("/revoke"));
   expect(revokes).toHaveLength(2); expect(revokes[1]?.body).toEqual(revokes[0]?.body);
   expect(recorded.filter(call => call.path.endsWith("/session"))).toHaveLength(2);
+});
+
+test("expired cancellation requires exact detail review and an in-page confirmation", async ({ page }) => {
+  await render(page, "cancel-success"); await loadAuthority(page);
+  await expect(page.getByRole("button", { name: "Reconcile exact expired grant" })).toBeDisabled();
+  await page.getByLabel(/I reviewed this exact authority/).check();
+  await page.getByRole("button", { name: "Reconcile exact expired grant" }).click();
+  await expect(page.getByRole("dialog").getByRole("button", { name: "Cancel", exact: true })).toBeFocused();
+  await page.getByRole("dialog").getByRole("button", { name: "Cancel", exact: true }).click();
+  expect((await calls(page)).filter(call => call.path.endsWith("/cancel"))).toHaveLength(0);
+  await page.getByRole("button", { name: "Reconcile exact expired grant" }).click();
+  await page.getByRole("dialog").getByRole("button", { name: "Confirm", exact: true }).click();
+  await expect(page.locator('p[role="status"]')).toContainText("durably cancelled");
+  expect((await calls(page)).find(call => call.path.endsWith("/cancel"))?.body)
+    .toEqual({ operationId: recoveryOperationId, expectedRevision: 1 });
+  await expect(page.getByRole("heading", { name: "Current native delivery authority" })).toHaveCount(0);
+});
+
+test("uncertain cancellation retries the same stored operation without creating a replacement", async ({ page }) => {
+  await render(page, "cancel-network"); await loadAuthority(page);
+  await page.getByLabel(/I reviewed this exact authority/).check();
+  await page.getByRole("button", { name: "Reconcile exact expired grant" }).click();
+  await page.getByRole("dialog").getByRole("button", { name: "Confirm", exact: true }).click();
+  await expect(page.getByRole("alert").filter({ hasText: "The cancel outcome is uncertain" })).toBeVisible();
+  await page.getByRole("button", { name: "Retry same frozen cancellation" }).click();
+  await expect(page.locator('p[role="status"]')).toContainText("durably cancelled");
+  const recorded = await calls(page), attempts = recorded.filter(call => call.path.endsWith("/cancel"));
+  expect(attempts).toHaveLength(2); expect(attempts[1]?.body).toEqual(attempts[0]?.body);
+  expect(recorded.filter(call => call.path.endsWith("/session"))).toHaveLength(2);
+  expect(recorded.filter(call => call.path.endsWith("/authorities") && call.method === "POST")).toHaveLength(0);
+});
+
+test("an already committed grant is acknowledged rather than reported as cancelled", async ({ page }) => {
+  await render(page, "cancel-committed"); await loadAuthority(page);
+  await page.getByLabel(/I reviewed this exact authority/).check();
+  await page.getByRole("button", { name: "Reconcile exact expired grant" }).click();
+  await page.getByRole("dialog").getByRole("button", { name: "Confirm", exact: true }).click();
+  await expect(page.locator('p[role="status"]')).toContainText("already recorded");
+  await expect(page.locator('p[role="status"]')).not.toContainText("durably cancelled");
 });
 
 test("an access denial clears candidate labels and identifiers", async ({ page }) => {

@@ -54,7 +54,8 @@ describe("Operations native content-start audit with real delivery authority", (
     await db.batch(splitD1MigrationStatements(tombstones).map(statement => db.prepare(statement)));
     for (const name of ["0223_operations_portal_workspace_publications.sql", "0224_operations_portal_native_recipient_authority.sql",
       "0225_operations_portal_workspace_publication_cancellations.sql", "0226_operations_portal_native_workspace_cleanup.sql",
-      "0227_operations_portal_native_delivery_authority.sql", "0228_operations_portal_native_content_start_audit.sql"]) {
+      "0227_operations_portal_native_delivery_authority.sql", "0228_operations_portal_native_content_start_audit.sql",
+      "0229_operations_portal_native_delivery_regrant.sql", "0230_operations_portal_native_delivery_terminal_cancellations.sql"]) {
       const sql = readFileSync(new URL(`../migrations/${name}`, import.meta.url), "utf8");
       await db.batch(splitD1MigrationStatements(sql).map(statement => db.prepare(statement)));
     }

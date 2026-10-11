@@ -5,6 +5,7 @@ import { dispatchStagedOperationsPortalNativeDeliveryAuthority,
   type OperationsPortalNativeDeliveryAuthorityDispatchEnv }
   from "./operations-portal-native-delivery-authority-dispatch";
 import { issueOperationsPortalNativeDeliveryAuthority, listOperationsPortalNativeDeliveryCandidates,
+  cancelOperationsPortalNativeDeliveryAuthorityForOwner,
   listOperationsPortalNativeDeliveryAuthoritiesForOwner, OperationsPortalNativeDeliveryCandidateStaleError,
   readOperationsPortalNativeDeliveryAuthorityStatusForOwner,
   revokeOperationsPortalNativeDeliveryAuthority, type OperationsPortalNativeDeliveryAuthorityOwnerStatus }
@@ -12,7 +13,7 @@ import { issueOperationsPortalNativeDeliveryAuthority, listOperationsPortalNativ
 import { reserveOperationsPortalNativeDeliveryRecoveryInvocation }
   from "./operations-portal-native-delivery-recovery-invocations";
 import { OPERATIONS_PORTAL_NATIVE_DELIVERY_FEATURES,
-  type OperationsPortalNativeDeliveryFeature } from "@ltds/shared/operations-portal-native-delivery-authority";
+  type OperationsPortalNativeDeliveryCancellationBinding, type OperationsPortalNativeDeliveryFeature } from "@ltds/shared/operations-portal-native-delivery-authority";
 
 const BASE = "/api/native-client-portal/operations-delivery-authority";
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
@@ -170,7 +171,8 @@ function expiry(value: unknown): value is string {
 }
 function ownerAuthority(status: OperationsPortalNativeDeliveryAuthorityOwnerStatus) {
   return Object.freeze({ ...status.authority, latestAction: status.latestAction,
-    transportStatus: status.transportStatus, recoveryOperationId: status.recoveryOperationId });
+    transportStatus: status.transportStatus, recoveryOperationId: status.recoveryOperationId,
+    cancellationOperationId: status.cancellationOperationId });
 }
 async function mutationResponse(database: D1Database, authorityId: string, operationId: string, actor: Actor,
   dispatched: Awaited<ReturnType<typeof dispatchStagedOperationsPortalNativeDeliveryAuthority>>, replayed = false) {
@@ -198,7 +200,7 @@ export async function handleOperationsPortalNativeDeliveryAuthorityOwnerHttp(req
     const issueRoute = request.method === "POST" && relative === "/authorities";
     const readRoute = request.method === "GET" && /^\/authorities\/[0-9a-f-]{36}$/u.test(relative);
     const mutationRoute = request.method === "POST"
-      && /^\/authorities\/[0-9a-f-]{36}\/(revoke|recover)$/u.test(relative);
+      && /^\/authorities\/[0-9a-f-]{36}\/(revoke|recover|cancel)$/u.test(relative);
     if (!sessionRoute && !candidatesRoute && !authoritiesRoute && !issueRoute && !readRoute && !mutationRoute)
       throw new Failure(404, "not_found");
     const collectionRoute = candidatesRoute || authoritiesRoute;
@@ -238,7 +240,9 @@ export async function handleOperationsPortalNativeDeliveryAuthorityOwnerHttp(req
     if (authorityId && !UUID.test(authorityId)) throw new Failure(404, "not_found");
     if (readRoute) {
       const status = await readOperationsPortalNativeDeliveryAuthorityStatusForOwner(d.database, authorityId!, actor);
-      alive(actor); return response(200, { authority: ownerAuthority(status) });
+      alive(actor); return response(200, { authority: ownerAuthority({ ...status,
+        cancellationOperationId: d.dispatch.OPERATIONS_PORTAL_NATIVE_DELIVERY_CANCELLATION_ENABLED === "true"
+          ? status.cancellationOperationId : null }) });
     }
     await csrf(config.secret, config.origin, actor, request); alive(actor);
     if (issueRoute) {
@@ -266,6 +270,7 @@ export async function handleOperationsPortalNativeDeliveryAuthorityOwnerHttp(req
     }
     const action = relative.split("/")[3]!;
     const value = await body(request, action === "revoke" ? ["operationId", "expectedRevision", "reasonCode"]
+      : action === "cancel" ? ["operationId", "expectedRevision"]
       : ["invocationId", "operationId", "expectedRevision", "reason"]);
     if (!uuid(value.operationId) || !integer(value.expectedRevision, 1)) throw new Failure(400, "invalid_request");
     if (action === "revoke") {
@@ -275,6 +280,17 @@ export async function handleOperationsPortalNativeDeliveryAuthorityOwnerHttp(req
       alive(actor);
       const dispatched = await dispatchStagedOperationsPortalNativeDeliveryAuthority(d.dispatch, value.operationId);
       return mutationResponse(d.database, authorityId!, value.operationId, actor, dispatched, revoked.replayed);
+    }
+    if (action === "cancel") {
+      if (value.expectedRevision !== 1) throw new Failure(400, "invalid_request");
+      if (d.dispatch.OPERATIONS_PORTAL_NATIVE_DELIVERY_CANCELLATION_ENABLED !== "true")
+        throw new Failure(503, "unavailable");
+      const binding = d.dispatch.OPERATIONS_PORTAL_NATIVE_DELIVERY_AUTHORITY as OperationsPortalNativeDeliveryCancellationBinding;
+      if (typeof binding?.getNativeDeliveryAuthorityDisposition !== "function"
+        || typeof binding.cancelNativeDeliveryAuthority !== "function") throw new Failure(503, "unavailable");
+      const cancelled = await cancelOperationsPortalNativeDeliveryAuthorityForOwner(d.database, binding,
+        { authorityId: authorityId!, operationId: value.operationId, owner: actor });
+      alive(actor); return response(200, { operationId: value.operationId, status: cancelled.disposition, replayed: cancelled.replayed });
     }
     if (!uuid(value.invocationId) || !bounded(value.reason, 500)) throw new Failure(400, "invalid_request");
     const before = await readOperationsPortalNativeDeliveryAuthorityStatusForOwner(d.database, authorityId!, actor); alive(actor);

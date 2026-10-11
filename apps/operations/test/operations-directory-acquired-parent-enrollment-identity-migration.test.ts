@@ -294,10 +294,28 @@ describe("0175 acquired parent enrollment identity guard", () => {
       expected_history_epoch_id: historyEpochId, resource_type: "organization" as const,
       destination_base_url: origin, record_version: 3 };
     await expect(acquiredDirectoryMappingUpdateEvidence(db, context, "8", "5", organizationPublicId)).resolves.toBe(true);
+    await expect(acquiredDirectoryMappingUpdateEvidence(db, context, "8", "6", organizationPublicId)).resolves.toBe(true);
     await expect(acquiredDirectoryMappingUpdateEvidence(db, context, "7", "5", organizationPublicId)).resolves.toBe(false);
     await expect(acquiredDirectoryMappingUpdateEvidence(db, context, "8", "4", organizationPublicId)).resolves.toBe(false);
+    for (const generation of ["0", "05", "-1", "5.0", "", "9223372036854775808"])
+      await expect(acquiredDirectoryMappingUpdateEvidence(db, context, "8", generation, organizationPublicId)).resolves.toBe(false);
     await expect(acquiredDirectoryMappingUpdateEvidence(db, { ...context, expected_history_epoch_id: "30000000-0000-4000-8000-000000000003" },
       "8", "5", organizationPublicId)).resolves.toBe(false);
+  });
+
+  it("compares fresh and historical acquired generations exactly above the JavaScript integer limit", async () => {
+    await seedParentUpdate();
+    await db.prepare(`UPDATE project_alpha_directory_outbox
+      SET outcome_json=json_set(outcome_json,'$.response.result.authorizationGeneration',?)
+      WHERE command_id='parent-update-command'`).bind("9007199254740993").run();
+    const context = { record_id: organizationRecordId, external_id: organizationExternalId, source_id: sourceId,
+      expected_source_instance_id: sourceInstanceId, application_id: applicationId,
+      expected_history_epoch_id: historyEpochId, resource_type: "organization" as const,
+      destination_base_url: origin, record_version: 3 };
+    await expect(acquiredDirectoryMappingUpdateEvidence(db, context, "8", "9007199254740992", organizationPublicId)).resolves.toBe(false);
+    await expect(acquiredDirectoryMappingUpdateEvidence(db, context, "8", "9007199254740993", organizationPublicId)).resolves.toBe(true);
+    await expect(acquiredDirectoryMappingUpdateEvidence(db, context, "8", "9007199254740994", organizationPublicId)).resolves.toBe(true);
+    await expect(acquiredDirectoryMappingUpdateEvidence(db, context, "8", "9223372036854775807", organizationPublicId)).resolves.toBe(true);
   });
 
   it("accepts only the exact acknowledged PA update for the current Ops parent version", async () => {

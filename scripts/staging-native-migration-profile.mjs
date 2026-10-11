@@ -19,9 +19,17 @@ export const NATIVE_MIGRATION_PROFILES = Object.freeze({
     baseNamesSha256: "1adce32fb9cad385417f3f058664ecb105559c31a5efd8c87e9f642f97a45db9",
     baseContentsSha256: "8a6cb183feae5ec6490cb4710f02a3289a05421786b9593e6392803a1e890f5c",
     remoteBaseline: "0228_operations_portal_native_content_start_audit.sql",
-    finalMigration: "0228_operations_portal_native_content_start_audit.sql",
-    candidates: Object.freeze({}),
-    expectedAppliedMigrations: Object.freeze([]),
+    finalMigration: "0230_operations_portal_native_delivery_terminal_cancellations.sql",
+    candidates: Object.freeze({
+      "0229_operations_portal_native_delivery_regrant.sql": "1ac5f5df43dca126b28c05b50803a158ed54618c3e136669d06005cbaf56e3a9",
+      "0230_operations_portal_native_delivery_terminal_cancellations.sql": "484231c43eee9957f6d1427bf8caedd409db78f40a7aca08115cbc85e1951c77",
+    }),
+    expectedAppliedMigrations: Object.freeze([
+      "0229_operations_portal_native_delivery_regrant.sql",
+      "0230_operations_portal_native_delivery_terminal_cancellations.sql",
+    ]),
+    historicalExpectedAppliedMigrations: Object.freeze([]),
+    historicalCandidateNames: Object.freeze([]),
   }),
   operations: Object.freeze({
     binding: "OPS_DB",
@@ -32,7 +40,7 @@ export const NATIVE_MIGRATION_PROFILES = Object.freeze({
     baseNamesSha256: "46d20b48362be8052f5b2fd35ec4ccefee2c267476a2a076af87a955c4cfca3a",
     baseContentsSha256: "cd35de12e87325fb6de854f4ecba47e5172e115f75830af9f4a908710d10a450",
     remoteBaseline: "0183_project_alpha_binding_standalone_relationship_rows.sql",
-    finalMigration: "0187_operations_portal_native_delivery_literal_prefix_guard.sql",
+    finalMigration: "0198_native_directory_active_binding_revision_refresh.sql",
     candidates: Object.freeze({
       "0174_project_alpha_directory_preserved_external_identity.sql": "9e794a73b75e025edc04967888631b9336931eb16113f42d855bea3fcb30a158",
       "0175_operations_directory_acquired_parent_enrollment_identity.sql": "de022736243342f203fcf9a1cb22993e49c50bbb18c7b3b2fc95d8fb3fa48ed0",
@@ -48,12 +56,190 @@ export const NATIVE_MIGRATION_PROFILES = Object.freeze({
       "0185_project_alpha_directory_binding_generation_epochs.sql": "3c536f6e8ea3c745e0167d3a81308abbac7e9b24c127a95a3a8ab1d7c9fcd39e",
       "0186_project_alpha_directory_conflict_evidence_binding.sql": "6d19b3e6be44382c51681444e95a501845f8f3958e83930c5fba50501951fd92",
       "0187_operations_portal_native_delivery_literal_prefix_guard.sql": "ded89fe037cfb56f9ddf4316a4ddcc67c8ae00e58d66eebec9a8129c6536eb28",
+      "0188_client_hub_native_project_preparations.sql": "5c455a13128a912a716d75b2dbba9bcde64bfd8479495036d4f63bbf3a7098bc",
+      "0189_client_hub_native_project_uncertain_recovery.sql": "e7ee262257b677589cf089e0157fdf09863f3e14c2852b5da6bb51eff717a745",
+      "0190_client_hub_native_project_preparation_authority.sql": "a662cd4a50c5eaee7a02bf720b1e5399d5d05712022fdd1426413fc707a83882",
+      "0191_operations_portal_native_billing_authority.sql": "46b1adb3e6addb91ae108762af9cc8c855ec7a9ccc2e988d5dce056e697ffdfc",
+      "0192_ops_service_definition_authority.sql": "8a2d278e0a3a852b08d23efcb9c278a44ba3ea01da89742bba5d3909c3b1d8b9",
+      "0193_operations_portal_native_delivery_dead_conflict_recovery.sql": "2454b60512fa5aec38942d9bd62338f753b527c2e4319e6e7e391509f59bfa56",
+      "0194_operations_portal_native_delivery_terminal_cancellations.sql": "75a8852921ff81e2926c97acc1636a38fc7dae13b45e653cceda93c23f962f6d",
+      "0195_client_hub_native_project_current_owner_observation.sql": "aaa8b35e502ed634cd38ed16c5a870a91f63c0ee578a031aec15744e7947ea44",
+      "0196_native_directory_maintenance_authority.sql": "84fe7276bb83bb72da6637d5b6827b56e80094c14acbc872935c444fb2a3870a",
+      "0197_operations_portal_native_delivery_cancellation_checkpoint_scope.sql": "9cf2194a57cf7888c768d492c78cacf842e3f6c6814d3f395e6fa8f4d0a31a76",
+      "0198_native_directory_active_binding_revision_refresh.sql": "a51026608eb70a0645540cfe12bad51feb7a97f924e0b2c3b83837a3ae2fa7c3",
     }),
     expectedAppliedMigrations: Object.freeze([
       "0184_project_alpha_directory_relationship_generation_recovery.sql",
       "0185_project_alpha_directory_binding_generation_epochs.sql",
       "0186_project_alpha_directory_conflict_evidence_binding.sql",
       "0187_operations_portal_native_delivery_literal_prefix_guard.sql",
+      "0188_client_hub_native_project_preparations.sql",
+      "0189_client_hub_native_project_uncertain_recovery.sql",
+      "0190_client_hub_native_project_preparation_authority.sql",
+      "0191_operations_portal_native_billing_authority.sql",
+      "0192_ops_service_definition_authority.sql",
+      "0193_operations_portal_native_delivery_dead_conflict_recovery.sql",
+      "0194_operations_portal_native_delivery_terminal_cancellations.sql",
+      "0195_client_hub_native_project_current_owner_observation.sql",
+      "0196_native_directory_maintenance_authority.sql",
+      "0197_operations_portal_native_delivery_cancellation_checkpoint_scope.sql",
+      "0198_native_directory_active_binding_revision_refresh.sql",
+    ]),
+    historical195ExpectedAppliedMigrations: Object.freeze([
+      "0184_project_alpha_directory_relationship_generation_recovery.sql",
+      "0185_project_alpha_directory_binding_generation_epochs.sql",
+      "0186_project_alpha_directory_conflict_evidence_binding.sql",
+      "0187_operations_portal_native_delivery_literal_prefix_guard.sql",
+      "0188_client_hub_native_project_preparations.sql",
+      "0189_client_hub_native_project_uncertain_recovery.sql",
+      "0190_client_hub_native_project_preparation_authority.sql",
+      "0191_operations_portal_native_billing_authority.sql",
+      "0192_ops_service_definition_authority.sql",
+      "0193_operations_portal_native_delivery_dead_conflict_recovery.sql",
+      "0194_operations_portal_native_delivery_terminal_cancellations.sql",
+      "0195_client_hub_native_project_current_owner_observation.sql",
+    ]),
+    historical194ExpectedAppliedMigrations: Object.freeze([
+      "0184_project_alpha_directory_relationship_generation_recovery.sql",
+      "0185_project_alpha_directory_binding_generation_epochs.sql",
+      "0186_project_alpha_directory_conflict_evidence_binding.sql",
+      "0187_operations_portal_native_delivery_literal_prefix_guard.sql",
+      "0188_client_hub_native_project_preparations.sql",
+      "0189_client_hub_native_project_uncertain_recovery.sql",
+      "0190_client_hub_native_project_preparation_authority.sql",
+      "0191_operations_portal_native_billing_authority.sql",
+      "0192_ops_service_definition_authority.sql",
+      "0193_operations_portal_native_delivery_dead_conflict_recovery.sql",
+      "0194_operations_portal_native_delivery_terminal_cancellations.sql",
+    ]),
+    historicalExpectedAppliedMigrations: Object.freeze([
+      "0184_project_alpha_directory_relationship_generation_recovery.sql",
+      "0185_project_alpha_directory_binding_generation_epochs.sql",
+      "0186_project_alpha_directory_conflict_evidence_binding.sql",
+      "0187_operations_portal_native_delivery_literal_prefix_guard.sql",
+    ]),
+    historical190ExpectedAppliedMigrations: Object.freeze([
+      "0184_project_alpha_directory_relationship_generation_recovery.sql",
+      "0185_project_alpha_directory_binding_generation_epochs.sql",
+      "0186_project_alpha_directory_conflict_evidence_binding.sql",
+      "0187_operations_portal_native_delivery_literal_prefix_guard.sql",
+      "0188_client_hub_native_project_preparations.sql",
+      "0189_client_hub_native_project_uncertain_recovery.sql",
+      "0190_client_hub_native_project_preparation_authority.sql",
+    ]),
+    historical192ExpectedAppliedMigrations: Object.freeze([
+      "0184_project_alpha_directory_relationship_generation_recovery.sql",
+      "0185_project_alpha_directory_binding_generation_epochs.sql",
+      "0186_project_alpha_directory_conflict_evidence_binding.sql",
+      "0187_operations_portal_native_delivery_literal_prefix_guard.sql",
+      "0188_client_hub_native_project_preparations.sql",
+      "0189_client_hub_native_project_uncertain_recovery.sql",
+      "0190_client_hub_native_project_preparation_authority.sql",
+      "0191_operations_portal_native_billing_authority.sql",
+      "0192_ops_service_definition_authority.sql",
+    ]),
+    historicalCandidateNames: Object.freeze([
+      "0174_project_alpha_directory_preserved_external_identity.sql",
+      "0175_operations_directory_acquired_parent_enrollment_identity.sql",
+      "0176_operations_directory_acquired_intent_authority.sql",
+      "0177_operations_directory_acquired_intent_update_authority.sql",
+      "0178_project_alpha_project_inbound_reconciliation.sql",
+      "0179_project_alpha_acquired_native_identity_collision.sql",
+      "0180_project_alpha_project_v2_recovery_authorization.sql",
+      "0181_project_alpha_directory_create_generation_recovery.sql",
+      "0182_project_alpha_directory_relationship_recovery_guard.sql",
+      "0183_project_alpha_binding_standalone_relationship_rows.sql",
+      "0184_project_alpha_directory_relationship_generation_recovery.sql",
+      "0185_project_alpha_directory_binding_generation_epochs.sql",
+      "0186_project_alpha_directory_conflict_evidence_binding.sql",
+      "0187_operations_portal_native_delivery_literal_prefix_guard.sql",
+    ]),
+    historical190CandidateNames: Object.freeze([
+      "0174_project_alpha_directory_preserved_external_identity.sql",
+      "0175_operations_directory_acquired_parent_enrollment_identity.sql",
+      "0176_operations_directory_acquired_intent_authority.sql",
+      "0177_operations_directory_acquired_intent_update_authority.sql",
+      "0178_project_alpha_project_inbound_reconciliation.sql",
+      "0179_project_alpha_acquired_native_identity_collision.sql",
+      "0180_project_alpha_project_v2_recovery_authorization.sql",
+      "0181_project_alpha_directory_create_generation_recovery.sql",
+      "0182_project_alpha_directory_relationship_recovery_guard.sql",
+      "0183_project_alpha_binding_standalone_relationship_rows.sql",
+      "0184_project_alpha_directory_relationship_generation_recovery.sql",
+      "0185_project_alpha_directory_binding_generation_epochs.sql",
+      "0186_project_alpha_directory_conflict_evidence_binding.sql",
+      "0187_operations_portal_native_delivery_literal_prefix_guard.sql",
+      "0188_client_hub_native_project_preparations.sql",
+      "0189_client_hub_native_project_uncertain_recovery.sql",
+      "0190_client_hub_native_project_preparation_authority.sql",
+    ]),
+    historical192CandidateNames: Object.freeze([
+      "0174_project_alpha_directory_preserved_external_identity.sql",
+      "0175_operations_directory_acquired_parent_enrollment_identity.sql",
+      "0176_operations_directory_acquired_intent_authority.sql",
+      "0177_operations_directory_acquired_intent_update_authority.sql",
+      "0178_project_alpha_project_inbound_reconciliation.sql",
+      "0179_project_alpha_acquired_native_identity_collision.sql",
+      "0180_project_alpha_project_v2_recovery_authorization.sql",
+      "0181_project_alpha_directory_create_generation_recovery.sql",
+      "0182_project_alpha_directory_relationship_recovery_guard.sql",
+      "0183_project_alpha_binding_standalone_relationship_rows.sql",
+      "0184_project_alpha_directory_relationship_generation_recovery.sql",
+      "0185_project_alpha_directory_binding_generation_epochs.sql",
+      "0186_project_alpha_directory_conflict_evidence_binding.sql",
+      "0187_operations_portal_native_delivery_literal_prefix_guard.sql",
+      "0188_client_hub_native_project_preparations.sql",
+      "0189_client_hub_native_project_uncertain_recovery.sql",
+      "0190_client_hub_native_project_preparation_authority.sql",
+      "0191_operations_portal_native_billing_authority.sql",
+      "0192_ops_service_definition_authority.sql",
+    ]),
+    historical194CandidateNames: Object.freeze([
+      "0174_project_alpha_directory_preserved_external_identity.sql",
+      "0175_operations_directory_acquired_parent_enrollment_identity.sql",
+      "0176_operations_directory_acquired_intent_authority.sql",
+      "0177_operations_directory_acquired_intent_update_authority.sql",
+      "0178_project_alpha_project_inbound_reconciliation.sql",
+      "0179_project_alpha_acquired_native_identity_collision.sql",
+      "0180_project_alpha_project_v2_recovery_authorization.sql",
+      "0181_project_alpha_directory_create_generation_recovery.sql",
+      "0182_project_alpha_directory_relationship_recovery_guard.sql",
+      "0183_project_alpha_binding_standalone_relationship_rows.sql",
+      "0184_project_alpha_directory_relationship_generation_recovery.sql",
+      "0185_project_alpha_directory_binding_generation_epochs.sql",
+      "0186_project_alpha_directory_conflict_evidence_binding.sql",
+      "0187_operations_portal_native_delivery_literal_prefix_guard.sql",
+      "0188_client_hub_native_project_preparations.sql",
+      "0189_client_hub_native_project_uncertain_recovery.sql",
+      "0190_client_hub_native_project_preparation_authority.sql",
+      "0191_operations_portal_native_billing_authority.sql",
+      "0192_ops_service_definition_authority.sql",
+      "0193_operations_portal_native_delivery_dead_conflict_recovery.sql",
+      "0194_operations_portal_native_delivery_terminal_cancellations.sql",
+    ]),
+    historical195CandidateNames: Object.freeze([
+      "0174_project_alpha_directory_preserved_external_identity.sql",
+      "0175_operations_directory_acquired_parent_enrollment_identity.sql",
+      "0176_operations_directory_acquired_intent_authority.sql",
+      "0177_operations_directory_acquired_intent_update_authority.sql",
+      "0178_project_alpha_project_inbound_reconciliation.sql",
+      "0179_project_alpha_acquired_native_identity_collision.sql",
+      "0180_project_alpha_project_v2_recovery_authorization.sql",
+      "0181_project_alpha_directory_create_generation_recovery.sql",
+      "0182_project_alpha_directory_relationship_recovery_guard.sql",
+      "0183_project_alpha_binding_standalone_relationship_rows.sql",
+      "0184_project_alpha_directory_relationship_generation_recovery.sql",
+      "0185_project_alpha_directory_binding_generation_epochs.sql",
+      "0186_project_alpha_directory_conflict_evidence_binding.sql",
+      "0187_operations_portal_native_delivery_literal_prefix_guard.sql",
+      "0188_client_hub_native_project_preparations.sql",
+      "0189_client_hub_native_project_uncertain_recovery.sql",
+      "0190_client_hub_native_project_preparation_authority.sql",
+      "0191_operations_portal_native_billing_authority.sql",
+      "0192_ops_service_definition_authority.sql",
+      "0193_operations_portal_native_delivery_dead_conflict_recovery.sql",
+      "0194_operations_portal_native_delivery_terminal_cancellations.sql",
+      "0195_client_hub_native_project_current_owner_observation.sql",
     ]),
   }),
 });
@@ -123,20 +309,53 @@ function validateSourceMigrations(base, application, contract) {
   if (migrationChainDigest(directory, baseNames) !== contract.baseContentsSha256) {
     throw new Error(`${application} pinned base migration contents changed`);
   }
-  for (const [name, expected] of Object.entries(contract.candidates)) {
+  const historicalCandidateNames = contract.historicalCandidateNames ?? candidateNames;
+  const historical190CandidateNames = contract.historical190CandidateNames ?? candidateNames;
+  const historical192CandidateNames = contract.historical192CandidateNames ?? candidateNames;
+  const historical194CandidateNames = contract.historical194CandidateNames ?? candidateNames;
+  const historical195CandidateNames = contract.historical195CandidateNames ?? candidateNames;
+  // Preserve the exact previously reviewed 0196 window; 0197 alone is not a reviewed successor.
+  const historical196CandidateNames = contract.historical195CandidateNames
+    ? [...contract.historical195CandidateNames, "0196_native_directory_maintenance_authority.sql"] : candidateNames;
+  const presentCandidateNames = candidateNames.filter((name) => names.includes(name));
+  const currentChain = JSON.stringify(presentCandidateNames) === JSON.stringify(candidateNames);
+  const historicalChain = JSON.stringify(presentCandidateNames) === JSON.stringify(historicalCandidateNames);
+  const historical190Chain = JSON.stringify(presentCandidateNames) === JSON.stringify(historical190CandidateNames);
+  const historical192Chain = JSON.stringify(presentCandidateNames) === JSON.stringify(historical192CandidateNames);
+  const historical194Chain = JSON.stringify(presentCandidateNames) === JSON.stringify(historical194CandidateNames);
+  const historical195Chain = JSON.stringify(presentCandidateNames) === JSON.stringify(historical195CandidateNames);
+  const historical196Chain = JSON.stringify(presentCandidateNames) === JSON.stringify(historical196CandidateNames);
+  const selectedCandidateNames = currentChain ? candidateNames : historical196Chain ? historical196CandidateNames
+    : historical195Chain ? historical195CandidateNames
+    : historical194Chain ? historical194CandidateNames
+    : historical192Chain ? historical192CandidateNames
+    : historical190Chain ? historical190CandidateNames
+    : historicalChain ? historicalCandidateNames : null;
+  if (!selectedCandidateNames) throw new Error(`${application} migration directory is not an exact reviewed historical or current chain`);
+  for (const name of selectedCandidateNames) {
+    const expected = contract.candidates[name];
     const file = path.join(directory, name);
     requireRegularFile(file, `${application} native candidate ${name}`);
     const contents = fs.readFileSync(file);
     if (contents.includes(13)) throw new Error(`${application} native candidate must use LF-only line endings: ${name}`);
     if (sha256(contents) !== expected) throw new Error(`${application} native candidate changed: ${name}`);
   }
-  if (names.length !== baseNames.length + candidateNames.length) {
+  if (names.length !== baseNames.length + selectedCandidateNames.length) {
     throw new Error(`${application} migration directory contains an unreviewed SQL file`);
   }
-  const finalNames = [...baseNames, ...candidateNames].sort();
+  const finalNames = [...baseNames, ...selectedCandidateNames].sort();
   const baselineIndex = finalNames.indexOf(contract.remoteBaseline);
-  if (baselineIndex < 0 || JSON.stringify(finalNames.slice(baselineIndex + 1)) !== JSON.stringify(contract.expectedAppliedMigrations)
-    || finalNames.at(-1) !== contract.finalMigration) {
+  const expectedAppliedMigrations = finalNames.slice(baselineIndex + 1);
+  const reviewedAppliedMigrations = currentChain
+    ? contract.expectedAppliedMigrations : historical196Chain
+      ? [...contract.historical195ExpectedAppliedMigrations, "0196_native_directory_maintenance_authority.sql"] : historical195Chain
+      ? contract.historical195ExpectedAppliedMigrations : historical194Chain
+      ? contract.historical194ExpectedAppliedMigrations : historical192Chain
+      ? contract.historical192ExpectedAppliedMigrations : historical190Chain
+      ? contract.historical190ExpectedAppliedMigrations : contract.historicalExpectedAppliedMigrations;
+  const reviewedFinalMigration = reviewedAppliedMigrations.at(-1) ?? contract.remoteBaseline;
+  if (baselineIndex < 0 || JSON.stringify(expectedAppliedMigrations) !== JSON.stringify(reviewedAppliedMigrations)
+    || finalNames.at(-1) !== reviewedFinalMigration) {
     throw new Error(`${application} native migration range is not the exact reviewed contiguous suffix`);
   }
   return {
@@ -144,6 +363,7 @@ function validateSourceMigrations(base, application, contract) {
     baseNames,
     finalNames,
     expectedRemoteAppliedMigrations: finalNames.slice(0, baselineIndex + 1),
+    expectedAppliedMigrations,
   };
 }
 
@@ -187,7 +407,7 @@ export function buildProfiles(base) {
         migrations_dir: migrationsDir,
       }],
     };
-    const files = contract.expectedAppliedMigrations.map((name) => ({
+    const files = source.expectedAppliedMigrations.map((name) => ({
       name,
       sourcePath: path.join(source.directory, name),
       sha256: sha256(fs.readFileSync(path.join(source.directory, name))),
@@ -200,11 +420,11 @@ export function buildProfiles(base) {
         databaseName: contract.databaseName, databaseId: contract.databaseId },
       pinnedBase: { count: contract.baseCount, namesSha256: contract.baseNamesSha256,
         contentsSha256: contract.baseContentsSha256 },
-      reviewedFinalChain: { count: source.finalNames.length, finalMigration: contract.finalMigration,
+      reviewedFinalChain: { count: source.finalNames.length, finalMigration: source.finalNames.at(-1),
         namesSha256: sha256(source.finalNames.join("\n")) },
       requiredRemoteBaseline: contract.remoteBaseline,
-      expectedAppliedMigrations: [...contract.expectedAppliedMigrations],
-      finalMigration: contract.finalMigration,
+      expectedAppliedMigrations: [...source.expectedAppliedMigrations],
+      finalMigration: source.finalNames.at(-1),
       migrations: files.map(({ name, sha256: digest }) => ({ name, sha256: digest })),
       remoteActionsPerformed: false,
     };

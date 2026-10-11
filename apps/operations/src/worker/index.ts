@@ -70,6 +70,7 @@ import { registerProjectAlphaApiV2SyncRoutes } from "./project-alpha-api-v2-sync
 import { registerProjectAlphaDirectoryReadAdoptionRoutes } from "./project-alpha-directory-read-adoption-routes";
 import { registerStagingDirectoryOwnerViewGrantRoute } from "./staging-directory-owner-view-grant";
 import { registerStagingDirectoryDestinationReadbackRoute } from "./staging-directory-destination-readback";
+import { registerStagingDirectoryScalarSuccessorHeadRoute } from "./staging-directory-scalar-successor-head";
 import { PROJECT_ALPHA_DIRECTORY_V2_BOOTSTRAP_ACCEPTANCE_ROUTE, projectAlphaDirectoryV2BootstrapAcceptanceEnabled, registerProjectAlphaDirectoryV2BootstrapAcceptanceRoutes } from "./project-alpha-directory-v2-bootstrap-acceptance-routes";
 import { PortalSourceAuthorityError } from "../../../client/src/worker/project-alpha-portal-authority";
 import { ensureDeploymentConfiguredProjectAlphaConnectors, ProjectAlphaConnectorError } from "./project-alpha-connectors";
@@ -172,7 +173,10 @@ import { registerProjectAlphaDraftQuoteRoutes } from "./project-alpha-draft-quot
 import { provePrimaryBusinessReferences } from "./project-alpha-primary-references";
 import { registerTeamAssignedWorkRoutes } from "./team-assigned-work";
 import { registerClientHubRoutes } from "./client-hub";
+import { registerOpsServiceManagementRoutes } from "./ops-service-management-routes";
 import { NATIVE_DIRECTORY_PROFILE_ROUTE, nativeDirectoryProfileWritesEnabled, registerNativeDirectoryProfileRoutes } from "./native-directory-profile-routes";
+import { DIRECTORY_BINDING_REFRESH_ROUTE, DIRECTORY_BINDING_REFRESH_PROTECTED_OWNER, directoryBindingRefreshEnabled } from './native-directory-binding-refresh';
+import { registerNativeDirectoryBindingRefreshRoutes } from './native-directory-binding-refresh-routes';
 import { directoryRelationshipRecoveryEnabled, isDirectoryRelationshipRecoveryPath,
   registerDirectoryRelationshipGenerationRecoveryRoutes } from "./project-alpha-directory-relationship-generation-recovery-routes";
 import { NATIVE_DIRECTORY_STAGING_EMPTY_ENROLLMENT_FIXTURE_ROUTE, nativeDirectoryStagingEmptyEnrollmentFixtureEnabled, registerNativeDirectoryStagingEmptyEnrollmentFixtureRoutes } from "./native-directory-staging-empty-enrollment-fixture-routes";
@@ -545,6 +549,10 @@ app.use(PROJECT_ALPHA_DIRECTORY_V2_BOOTSTRAP_ACCEPTANCE_ROUTE, async (c, next) =
 });
 // Keep the default-off write surface absent before ordinary staff
 // authentication, matching other rollout-gated authenticated route families.
+app.use(`${DIRECTORY_BINDING_REFRESH_ROUTE}/*`,async(c,next)=>{
+  if(!directoryBindingRefreshEnabled(c.env))return c.json({error:'Not found'},404);
+  await next();
+});
 app.use(`${NATIVE_DIRECTORY_PROFILE_ROUTE}/*`, async (c, next) => {
   if (!nativeDirectoryProfileWritesEnabled(c.env)) return c.json({ error: "Not found" }, 404);
   if (isDirectoryRelationshipRecoveryPath(c.req.path) && !directoryRelationshipRecoveryEnabled(c.env))
@@ -950,6 +958,8 @@ app.get("/api/session", async (c) => {
           && integrationsManageScope.global && !integrationsManageScope.deniedGlobal,
       },
       nativeDirectoryProfileWrites: { enabled: nativeDirectoryProfileWritesEnabled(c.env) },
+      nativeDirectoryBindingRefresh: { enabled: directoryBindingRefreshEnabled(c.env) && principal.id===DIRECTORY_BINDING_REFRESH_PROTECTED_OWNER
+        && administrator && integrationsManageScope.global && !integrationsManageScope.deniedGlobal },
       clientFeedback: { enabled: clientFeedbackEnabled },
       dropboxImport: dropboxImportCapability(c.env),
       incomingUploads: incomingUploadsCapability(c.env),
@@ -1673,8 +1683,10 @@ registerClientRequestAttachmentRoutes(app);
 registerProjectAlphaDraftQuoteRoutes(app);
 registerTeamAssignedWorkRoutes(app);
 registerNativeDirectoryProfileRoutes(app);
+registerNativeDirectoryBindingRefreshRoutes(app);
 registerDirectoryRelationshipGenerationRecoveryRoutes(app);
 registerClientHubRoutes(app);
+registerOpsServiceManagementRoutes(app);
 registerNativeDirectoryStagingEmptyEnrollmentFixtureRoutes(app);
 registerBusinessPartyRoutes(app);
 registerNotificationCenterRoutes(app);
@@ -3302,6 +3314,7 @@ registerProjectAlphaApiV2SyncRoutes(app);
 registerProjectAlphaDirectoryReadAdoptionRoutes(app);
 registerStagingDirectoryOwnerViewGrantRoute(app);
 registerStagingDirectoryDestinationReadbackRoute(app);
+registerStagingDirectoryScalarSuccessorHeadRoute(app);
 registerProjectAlphaProjectV2AcceptanceRoutes(app);
 registerProjectAlphaPrivateAdminRoutes(app);
 registerProjectAlphaDirectoryV2BootstrapAcceptanceRoutes(app);
@@ -3637,5 +3650,6 @@ export { ClientOnboardingRecipientBridge } from "./client-onboarding-recipient-e
 export { ClientPortalRecipientEnrollmentBridge } from "./client-portal-recipient-enrollment-entrypoint";
 export { OperationsPortalNativeRecipientEnrollmentIngress } from "./operations-portal-native-recipient-enrollment-entrypoint";
 export { ClientPortalServiceMetadataReader } from "./client-portal-service-metadata-entrypoint";
+export { ClientPortalNativeFinancialReader } from "./client-portal-native-financial-entrypoint";
 export { ProjectAlphaDeliveryIntentIngress } from "./project-alpha-delivery-intent-entrypoint";
 export { ProjectAlphaCatalogPromotionWorkflow } from "./project-alpha-catalog-promotion-workflow";

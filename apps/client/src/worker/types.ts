@@ -63,6 +63,9 @@ export interface Env {
   CLIENT_PORTAL_RECIPIENT_ENROLLMENT_BRIDGE?: Service & import("./client-portal/recipient-enrollment-http").RecipientEnrollmentBinding;
   /** Named Service binding plus its reviewed RPC contract; Wrangler cannot resolve a remote entrypoint's methods. */
   CLIENT_PORTAL_SERVICE_METADATA_READER?: Service & import("./client-portal/operations-service-home").OperationsServiceMetadataBinding;
+  /** Default-off private native billing read; recipient identity is derived from authenticated Client context. */
+  CLIENT_PORTAL_NATIVE_FINANCIAL_ENABLED?: string;
+  CLIENT_PORTAL_NATIVE_FINANCIAL_READER?: Service & import("./client-portal/operations-financial").OperationsFinancialBinding;
   CLIENT_PORTAL_ORIGIN?: string;
   CLIENT_PORTAL_ORIGINS?: string;
   /** Legacy delivery/portal origins retained only for compatible reads and canonical redirects. */

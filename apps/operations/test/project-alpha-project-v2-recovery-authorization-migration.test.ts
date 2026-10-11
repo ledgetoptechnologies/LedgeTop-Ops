@@ -1,11 +1,14 @@
-import { readFileSync, readdirSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { describe, expect, it } from "vitest";
 import { unstable_splitSqlQuery } from "wrangler";
+import { reviewedOperationsMigrationNames } from "./helpers/reviewed-operations-migration-chain";
+import { pathToFileURL } from "node:url";
 
 const migrations = resolve(import.meta.dirname, "../migrations");
-const migrationFiles = readdirSync(migrations).filter(name => name.endsWith(".sql")).sort();
+// Validate current reviewed bytes before selecting the historical 0196 recovery window.
+const migrationFiles = reviewedOperationsMigrationNames(pathToFileURL(`${migrations}/`)).slice(0, 196);
 const recoveryMigration = "0180_project_alpha_project_v2_recovery_authorization.sql";
 
 const originalActor = "staff-beau-koltz";
@@ -35,7 +38,11 @@ function migrate(db: DatabaseSync, name: string): void {
 function fixture(mode: "terminal_uncertain" | "expired_lease_lost_ack"): DatabaseSync {
   const db = new DatabaseSync(":memory:");
   db.exec("PRAGMA foreign_keys=ON");
-  for (const name of migrationFiles) migrate(db, name);
+  // These fixtures exercise the historical 0180 administrator contract.
+  // 0189 deliberately replaces several dispatcher triggers for a separate
+  // Client Hub proof and has its own joined migration tests.
+  for (const name of migrationFiles.slice(0, migrationFiles.indexOf("0188_client_hub_native_project_preparations.sql")))
+    migrate(db, name);
 
   db.prepare(`INSERT INTO native_staff_admissions(staff_id,bound_access_subject,active,admitted_by,version)
     VALUES(?,?,1,?,1)`).run(originalActor, originalSubject, originalActor);
@@ -228,14 +235,36 @@ function authorizePostAck(
 
 describe("Project v2 recovery authorization migration", () => {
   it("preserves recovery migration order and the full current empty migration chain", () => {
-    expect(migrationFiles.at(-8)).toBe(recoveryMigration);
-    expect(migrationFiles.at(-7)).toBe("0181_project_alpha_directory_create_generation_recovery.sql");
-    expect(migrationFiles.at(-6)).toBe("0182_project_alpha_directory_relationship_recovery_guard.sql");
-    expect(migrationFiles.at(-5)).toBe("0183_project_alpha_binding_standalone_relationship_rows.sql");
-    expect(migrationFiles.at(-4)).toBe("0184_project_alpha_directory_relationship_generation_recovery.sql");
-    expect(migrationFiles.at(-3)).toBe("0185_project_alpha_directory_binding_generation_epochs.sql");
-    expect(migrationFiles.at(-2)).toBe("0186_project_alpha_directory_conflict_evidence_binding.sql");
-    expect(migrationFiles.at(-1)).toBe("0187_operations_portal_native_delivery_literal_prefix_guard.sql");
+    // Historical ordering is anchored to 0180, not to a moving distance from
+    // the current tail. Keep the independent current-chain admission explicit.
+    const recoverySequence = [
+      recoveryMigration,
+      "0181_project_alpha_directory_create_generation_recovery.sql",
+      "0182_project_alpha_directory_relationship_recovery_guard.sql",
+      "0183_project_alpha_binding_standalone_relationship_rows.sql",
+      "0184_project_alpha_directory_relationship_generation_recovery.sql",
+      "0185_project_alpha_directory_binding_generation_epochs.sql",
+      "0186_project_alpha_directory_conflict_evidence_binding.sql",
+      "0187_operations_portal_native_delivery_literal_prefix_guard.sql",
+      "0188_client_hub_native_project_preparations.sql",
+      "0189_client_hub_native_project_uncertain_recovery.sql",
+      "0190_client_hub_native_project_preparation_authority.sql",
+    ];
+    const recoveryIndex = migrationFiles.indexOf(recoveryMigration);
+    expect(recoveryIndex).toBeGreaterThanOrEqual(0);
+    expect(migrationFiles.slice(recoveryIndex, recoveryIndex + recoverySequence.length)).toEqual(recoverySequence);
+    expect(migrationFiles).toHaveLength(196);
+    expect(migrationFiles.map(name => name.slice(0, 4))).toEqual(
+      Array.from({ length: 196 }, (_, index) => String(index + 1).padStart(4, "0")),
+    );
+    expect(migrationFiles.slice(-6)).toEqual([
+      "0191_operations_portal_native_billing_authority.sql",
+      "0192_ops_service_definition_authority.sql",
+      "0193_operations_portal_native_delivery_dead_conflict_recovery.sql",
+      "0194_operations_portal_native_delivery_terminal_cancellations.sql",
+      "0195_client_hub_native_project_current_owner_observation.sql",
+      "0196_native_directory_maintenance_authority.sql",
+    ]);
     const db = new DatabaseSync(":memory:");
     db.exec("PRAGMA foreign_keys=ON");
     for (const name of migrationFiles) migrate(db, name);
@@ -243,6 +272,8 @@ describe("Project v2 recovery authorization migration", () => {
       AND name='project_alpha_project_v2_recovery_authorizations'`).get()).toEqual({
       name: "project_alpha_project_v2_recovery_authorizations",
     });
+    expect(db.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
+    db.close();
   });
 
   it("authorizes an exact terminal-uncertain replay for the original actor at the exact generation", () => {

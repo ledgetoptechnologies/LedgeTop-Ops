@@ -152,10 +152,11 @@ async function acquiredMappingRevisionMatches(db: D1Database, row: AcquiredUpdat
     || typeof command.expectedAuthorizationGeneration !== "string"
     || command.expectedProjectAlphaPublicId !== mapping.project_alpha_public_id) return false;
   type Version = { revision: unknown; authorization_generation: unknown };
+  const bounded=(value:unknown,zero=false):value is string=>typeof value==="string"
+    &&(zero?/^(?:0|[1-9][0-9]{0,18})$/:/^[1-9][0-9]{0,18}$/).test(value)
+    && (value.length<PROJECT_ALPHA_PROJECT_MAX_INTEGER.length||value<=PROJECT_ALPHA_PROJECT_MAX_INTEGER);
+  if (!bounded(command.expectedRevision) || !bounded(command.expectedAuthorizationGeneration,true)) return false;
   const authoritative = (values: Version[]): Version | null => {
-    const bounded=(value:unknown,zero=false):value is string=>typeof value==="string"
-      &&(zero?/^(?:0|[1-9][0-9]{0,18})$/:/^[1-9][0-9]{0,18}$/).test(value)
-      && (value.length<PROJECT_ALPHA_PROJECT_MAX_INTEGER.length||value<=PROJECT_ALPHA_PROJECT_MAX_INTEGER);
     if (!values.length || values.some(value => !bounded(value.revision) || !bounded(value.authorization_generation,true))) return null;
     const canonicalValues=values as {revision:string;authorization_generation:string}[];
     const maximum=canonicalValues.reduce((left,right)=>left.length>right.revision.length
@@ -232,8 +233,14 @@ async function acquiredMappingRevisionMatches(db: D1Database, row: AcquiredUpdat
       row.source_id, row.expected_source_instance_id, row.application_id, row.expected_history_epoch_id,
       row.resource_type, row.external_id, mapping.project_alpha_public_id).all<Version>()).results;
   const selected = authoritative([...activated,...refreshed,...delivered]);
+  // The selected receipt proves the exact acquired identity and durable head.
+  // Its application-wide authorization generation is historical; update routes
+  // supply a fresh inventory/binding generation and PA CAS-checks it on send.
+  // Fresh authority may advance independently, but cannot precede the exact
+  // durable head in this source/application/history epoch.
   return selected?.revision === command.expectedRevision
-    && selected.authorization_generation === command.expectedAuthorizationGeneration;
+    && bounded(selected.authorization_generation,true)
+    && BigInt(command.expectedAuthorizationGeneration) >= BigInt(selected.authorization_generation);
 }
 /** Verifies the prior PA state for one acquired mapping before an update is sent. */
 export async function acquiredDirectoryMappingUpdateEvidence(db: D1Database, context: AcquiredUpdateContext,

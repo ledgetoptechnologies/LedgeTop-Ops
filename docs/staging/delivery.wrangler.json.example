@@ -29,6 +29,7 @@
     "CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_WRITER_ENABLED": "true",
     "CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_STATUS_ENABLED": "true",
     "CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_READ_ENABLED": "true",
+    "CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_CANCELLATION_ENABLED": "false",
     "CLIENT_PORTAL_OPERATIONS_NATIVE_CONTENT_AUDIT_ENABLED": "true",
     "CLIENT_PORTAL_CONTENT_AUDIT_ENABLED": "false",
     "CLIENT_PORTAL_REQUEST_V2_ENABLED": "false",
@@ -80,6 +81,7 @@
     "CLIENT_PORTAL_AUTHORITY_V2_ENROLLMENT_STATUS_ENABLED": "false",
     "CLIENT_PORTAL_OPERATIONS_SERVICE_HOME_ENABLED": "false",
     "CLIENT_PORTAL_NATIVE_RECIPIENT_SERVICE_HOME_ENABLED": "false",
+    "CLIENT_PORTAL_NATIVE_FINANCIAL_ENABLED": "false",
     "CLIENT_PORTAL_OPERATIONS_PUBLICATION_WRITER_ENABLED": "false",
     "CLIENT_PORTAL_RECIPIENT_ENROLLMENT_ENABLED": "false",
     "CLIENT_PORTAL_VERIFIED_RECIPIENT_DELIVERY_AUTHORITY_WRITER_ENABLED": "false",
@@ -122,6 +124,7 @@
   "d1_databases": [{ "binding": "DELIVERY_DB", "database_name": "client-data-staging", "database_id": "b6f653ab-9acd-4421-9ad0-207754b59aeb", "migrations_dir": "migrations" }],
   "services": [
     { "binding": "CLIENT_PORTAL_SERVICE_METADATA_READER", "service": "ledgetop-ops-staging", "entrypoint": "ClientPortalServiceMetadataReader" },
+    { "binding": "CLIENT_PORTAL_NATIVE_FINANCIAL_READER", "service": "ledgetop-ops-staging", "entrypoint": "ClientPortalNativeFinancialReader" },
     { "binding": "CLIENT_DELEGATED_SHARE_SIGNER", "service": "ledgetop-ops-staging", "entrypoint": "ClientDelegatedShareSigner" },
     { "binding": "VIEWER_SESSION_ISSUER", "service": "ledgetop-ops-staging", "entrypoint": "ViewerSessionIssuer" },
     { "binding": "CLIENT_ONBOARDING_RECIPIENT_BRIDGE", "service": "ledgetop-ops-staging", "entrypoint": "ClientOnboardingRecipientBridge" },

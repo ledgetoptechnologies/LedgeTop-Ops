@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { grantOperationsNativeDeliveryAuthority, listOperationsNativeDeliveryAuthorities,
+import { cancelOperationsNativeDeliveryAuthority, grantOperationsNativeDeliveryAuthority, listOperationsNativeDeliveryAuthorities,
   listOperationsNativeDeliveryCandidates,
   openOperationsNativeDeliveryOwnerSession, readOperationsNativeDeliveryAuthority,
   recoverOperationsNativeDeliveryAuthority, revokeOperationsNativeDeliveryAuthority,
@@ -29,7 +29,7 @@ const active = (overrides: Partial<OperationsNativeDeliveryAuthority> = {}): Ope
   opsFolderProjectId: "ops-project:one", opsDivisionId: "division:one", clientLabel: "Client One",
   recipientLabel: "Recipient One", projectLabel: "Project One", folderLabel: "Folder One",
   features: ["folder.list", "file.metadata"], expiresAt: expiry, latestOperationId: operationId,
-  latestAction: "delivery.grant", transportStatus: "acknowledged", recoveryOperationId: null, ...overrides });
+  latestAction: "delivery.grant", transportStatus: "acknowledged", recoveryOperationId: null, cancellationOperationId: null, ...overrides });
 
 function json(value: unknown, status = 200) {
   const mocked = vi.fn().mockResolvedValue(Response.json(value, { status }));
@@ -39,6 +39,19 @@ function json(value: unknown, status = 200) {
 afterEach(() => vi.unstubAllGlobals());
 
 describe("operations-native delivery owner API", () => {
+  it("cancels only the server-reviewed expired operation and rejects wrong or ambiguous proof", async () => {
+    const current = active({ transportStatus: "dead", expiresAt: "2026-01-01T00:00:00.000Z", cancellationOperationId: operationId });
+    const fetch = json({ operationId, status: "cancelled", replayed: false });
+    await expect(cancelOperationsNativeDeliveryAuthority(csrfToken, current)).resolves.toEqual({ operationId, status: "cancelled", replayed: false });
+    expect(JSON.parse(fetch.mock.calls[0]![1].body as string)).toEqual({ operationId, expectedRevision: 1 });
+    await expect(cancelOperationsNativeDeliveryAuthority(csrfToken, active())).rejects.toMatchObject({ status: 400 });
+    json({ operationId: invocationId, status: "cancelled", replayed: false });
+    await expect(cancelOperationsNativeDeliveryAuthority(csrfToken, current)).rejects.toMatchObject({ uncertain: true });
+    json({ operationId, status: "not-found", replayed: false });
+    await expect(cancelOperationsNativeDeliveryAuthority(csrfToken, current)).rejects.toMatchObject({ uncertain: true });
+    json({ operationId, status: "committed", replayed: true });
+    await expect(cancelOperationsNativeDeliveryAuthority(csrfToken, current)).resolves.toMatchObject({ status: "committed" });
+  });
   it("parses the exact session and preserves access-denial status without requiring a JSON body", async () => {
     json({ csrfToken, verifiedUntil: expiry });
     await expect(openOperationsNativeDeliveryOwnerSession()).resolves.toEqual({ csrfToken, verifiedUntil: expiry });

@@ -19,6 +19,8 @@ import { ClientInternalNotes } from "./ClientInternalNotes";
 import type { InvitationAdministrationAccess } from "./invitation-administration-api";
 import { ProjectAlphaContactRoles, type ProjectAlphaContactRolePage } from "./ProjectAlphaContactRoles";
 import { isStagingNativeDirectoryProfilePreparationLocation, NativeDirectoryProfileEdit } from "./NativeDirectoryProfileEditor";
+import { NativeDirectoryBindingRefresh } from "./NativeDirectoryBindingRefresh";
+import { OpsServiceManagement } from "./OpsServiceManagement";
 
 interface CollectionItem { row_key?: string }
 interface ClientContact extends CollectionItem {
@@ -58,13 +60,15 @@ interface ClientDetailResponse {
   nativeDirectoryProfile?: { recordId: string; kind: "organization" | "client" } | null;
   nativeDirectoryLinkedClients?: Array<{ recordId: string; name: string }>;
 }
-interface BusinessProject extends CollectionItem { id: string; origin: "pa" | "canonical"; name: string; status: string | null; start_date: string | null; end_date: string | null; manager_name: string | null; created_at: string | null }
+interface BusinessProject extends CollectionItem { id: string; origin: "pa" | "canonical"; name: string; description: string | null; status: string | null; start_date: string | null; end_date: string | null; manager_name: string | null; created_at: string | null }
 interface ProjectManagementResult {
   canonicalRoot: CanonicalClientRoot;
   contextVersion: string;
   source: { sourceId: string; displayName: string; state: string };
   availability: { available: boolean; reason: string | null; explanation: string };
-  action: null | { label: "Create project in Project Alpha"; href: string; external: true };
+  action: null | { kind: "legacy_external_link"; label: "Create project in Project Alpha"; href: string; external: true }
+    | { kind: "native_create"; label: "Create project"; prepareHref: string; submitHref: string; external: false;
+      scopeOptions: Array<Array<{ scopeKind: "business_area" | "division"; businessAreaId: string; divisionId: string | null }>> };
   sync: { status: string; lastAttemptAt: string | null; lastSuccessAt: string | null; explanation: string;
     refresh: { label: string; href: string; method: "GET" };
     requestSync: null | { label: string; href: string; method: "POST" } };
@@ -189,21 +193,39 @@ function verifiedProjectManagement(value: unknown, expectedRoot: CanonicalClient
   if (!refresh || (value.sync.requestSync !== null && !requestSync))
     throw new Error("Project Alpha synchronization controls could not be verified. Refresh this client workspace.");
   if (value.action !== null) {
-    if (!object(value.action) || value.action.label !== "Create project in Project Alpha" || value.action.external !== true
-      || !safeHttpsExternal(value.action.href) || value.availability.available !== true)
+    if (!object(value.action) || value.availability.available !== true)
       throw new Error("The Project Alpha project link could not be verified. Refresh this client workspace.");
+    if (value.action.kind === "legacy_external_link") {
+      if (value.action.label !== "Create project in Project Alpha" || value.action.external !== true || !safeHttpsExternal(value.action.href))
+        throw new Error("The Project Alpha project link could not be verified. Refresh this client workspace.");
+    } else if (value.action.kind === "native_create") {
+      const expectedBase = `${endpoint}/native-projects/`;
+      if (value.action.label !== "Create project" || value.action.external !== false
+        || value.action.prepareHref !== `${expectedBase}prepare` || value.action.submitHref !== `${expectedBase}submit`
+        || !Array.isArray(value.action.scopeOptions) || !value.action.scopeOptions.length)
+        throw new Error("The native Project Alpha destination could not be verified. Refresh this client workspace.");
+    } else throw new Error("The Project Alpha project action is unsupported. Refresh this client workspace.");
   } else if (value.availability.available) throw new Error("The Project Alpha project link is incomplete. Refresh this client workspace.");
   return value as unknown as ProjectManagementResult;
 }
 
-function ProjectManagementRouting({ client, contextVersion, contextSignal, onInvalidated, onWorkspaceRefresh }: {
+function ProjectManagementRouting({ client, contextVersion, contextSignal, onInvalidated, onWorkspaceRefresh, updateTarget, onUpdateTargetConsumed }: {
   client: ClientSummary; contextVersion?: string; contextSignal: AbortSignal; onInvalidated: (message: string) => void; onWorkspaceRefresh: () => void;
+  updateTarget?: Pick<BusinessProject,"id"|"name"|"description"|"start_date"|"end_date"> | null; onUpdateTargetConsumed: () => void;
 }) {
   const exactRoot = client.source_id && client.root_namespace === "business" && contextVersion
     ? { sourceId: client.source_id, rootNamespace: "business" as const, kind: client.kind, publicId: client.public_id } : null;
   const endpoint = exactRoot ? `/api/client-hub/sources/${encodeURIComponent(exactRoot.sourceId)}/business/${client.route_kind}/${encodeURIComponent(exactRoot.publicId)}/project-management` : null;
   const [state, setState] = useState<{ data: ProjectManagementResult | null; busy: boolean; error: string; syncBusy: boolean }>({ data: null, busy: Boolean(endpoint), error: "", syncBusy: false });
   const pending = useRef<AbortController | null>(null), sequence = useRef(0), active = useRef(true);
+  const [nativeForm, setNativeForm] = useState({ operation: "create" as "create"|"update", externalProjectId: "",
+    name: "", description: "", start: "", end: "", scope: 0 });
+  const [nativeAttempt, setNativeAttempt] = useState<{ request: unknown; sent: boolean; message: string } | null>(null);
+  useEffect(() => {
+    if (!updateTarget || nativeAttempt) return;
+    setNativeForm(value => ({ ...value, operation: "update", externalProjectId: updateTarget.id, name: updateTarget.name,
+      description: updateTarget.description ?? "", start: updateTarget.start_date ?? "", end: updateTarget.end_date ?? "" }));
+  }, [updateTarget, nativeAttempt]);
   const load = async (href = endpoint, refreshWorkspace = false) => {
     if (!endpoint || !exactRoot || !contextVersion || !href || contextSignal.aborted) return;
     pending.current?.abort(); const controller = new AbortController(), request = ++sequence.current; pending.current = controller;
@@ -246,14 +268,83 @@ function ProjectManagementRouting({ client, contextVersion, contextSignal, onInv
       if (caught instanceof ApiError && [401, 403, 404, 409].includes(caught.status)) onInvalidated(message);
     } finally { if (pending.current === controller) pending.current = null; }
   };
-  const result = state.data, externalHref = result?.action ? safeHttpsExternal(result.action.href) : null;
+  const result = state.data, externalHref = result?.action?.kind === "legacy_external_link" ? safeHttpsExternal(result.action.href) : null;
+  const nativeAction = result?.action?.kind === "native_create" ? result.action : null;
+  const frozenRequest = nativeAttempt?.request as { operation?: unknown; command?: { commandId?: unknown; externalId?: unknown;
+    project?: { name?: unknown; description?: unknown; estimatedStart?: unknown; estimatedEnd?: unknown } } } | undefined;
+  const frozenOperation = frozenRequest?.operation === "update" ? "update" : "create";
+  const prepareNative = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!nativeAction || !contextVersion || state.busy || nativeAttempt || !nativeForm.name.trim()) return;
+    if (nativeForm.operation === "update" && (!updateTarget || updateTarget.id !== nativeForm.externalProjectId))
+      return setState(value => ({ ...value, error: "Choose an existing canonical project before preparing an update." }));
+    if (!window.confirm("Prepare this exact Project Alpha project request? Preparation does not create the project.")) return;
+    setState(value => ({ ...value, syncBusy: true, error: "" }));
+    try {
+      const prepared = await api<unknown>(nativeAction.prepareHref, { method: "POST", body: JSON.stringify({
+        expectedContextVersion: contextVersion, operation: nativeForm.operation, commandId: crypto.randomUUID(),
+        externalProjectId: nativeForm.operation === "create" ? crypto.randomUUID() : nativeForm.externalProjectId.trim(),
+        scopes: nativeAction.scopeOptions[nativeForm.scope]!, project: { name: nativeForm.name.trim(),
+          description: nativeForm.description.trim() || null, estimatedStart: nativeForm.start || null, estimatedEnd: nativeForm.end || null },
+      }), signal: contextSignal });
+      if (!object(prepared) || prepared.status !== "prepared" || !object(prepared.request)) throw new Error("The native project request could not be prepared.");
+      setNativeAttempt({ request: prepared.request, sent: false, message: `Prepared. Review the values, then ${nativeForm.operation} the project.` });
+    } catch (caught) { setState(value => ({ ...value, error: caught instanceof Error ? caught.message : "Native project preparation failed." })); }
+    finally { setState(value => ({ ...value, syncBusy: false })); }
+  };
+  const submitNative = async () => {
+    if (!nativeAction || !contextVersion || !nativeAttempt || state.syncBusy) return;
+    const request = nativeAttempt.request as { command?: { commandId?: unknown } };
+    if (typeof request.command?.commandId !== "string") return setState(value => ({ ...value, error: "The prepared project reference is invalid." }));
+    if (!nativeAttempt.sent && !window.confirm(`${frozenOperation === "create" ? "Create" : "Update"} this exact project in Project Alpha? After transmission, cancellation is not available.`)) return;
+    setNativeAttempt(value => value && ({ ...value, sent: true, message: "Project request transmitted. Keep this reference until the outcome is confirmed." }));
+    setState(value => ({ ...value, syncBusy: true, error: "" }));
+    try {
+      const outcome = await api<unknown>(nativeAction.submitHref, { method: "POST", headers: { "Idempotency-Key": request.command.commandId },
+        body: JSON.stringify({ expectedContextVersion: contextVersion, request: nativeAttempt.request }), signal: contextSignal });
+      if (!object(outcome) || typeof outcome.status !== "string") throw new Error("The native project outcome could not be verified. Retry the exact request.");
+      if (outcome.status !== "activated") {
+        setNativeAttempt(value => value && ({ ...value, sent: true, message: "Creation is not confirmed. Retry this exact request; do not prepare another project." }));
+        throw new Error(`Project creation is not confirmed (${outcome.status}).`);
+      }
+      setNativeAttempt(null); setNativeForm({ operation: "create", externalProjectId: "", name: "", description: "", start: "", end: "", scope: 0 });
+      onUpdateTargetConsumed(); onWorkspaceRefresh();
+    } catch (caught) { setState(value => ({ ...value, error: caught instanceof Error ? caught.message : "Project creation is not confirmed." })); }
+    finally { setState(value => ({ ...value, syncBusy: false })); }
+  };
   return <section className="client-project-management" aria-label="Project creation" aria-busy={state.busy || state.syncBusy}>
     {state.busy && <p role="status">Loading Project Alpha project creation…</p>}
     {state.error && <div role="alert"><p>{state.error}</p><button type="button" className="button-ghost" onClick={() => void load(endpoint)}>Retry project creation status</button></div>}
     {result && <>
       <div className="client-project-management-summary"><div><strong>Project creation</strong><p>{result.availability.explanation}</p></div>
-        {externalHref && result.action && <a className="button button-orange" href={externalHref} target="_blank" rel="noopener noreferrer">{result.action.label}<span className="visually-hidden"> (opens in a new tab)</span></a>}</div>
+        {externalHref && result.action?.kind === "legacy_external_link" && <a className="button button-orange" href={externalHref} target="_blank" rel="noopener noreferrer">{result.action.label}<span className="visually-hidden"> (opens in a new tab)</span></a>}</div>
       {externalHref && <p>Complete the project in {result.source.displayName}. It will appear here after Project Alpha synchronizes.</p>}
+      {nativeAction && <form onSubmit={event => void prepareNative(event)}><label>Action<select value={nativeForm.operation} disabled={Boolean(nativeAttempt)}
+        onChange={event => { onUpdateTargetConsumed(); setNativeForm({ operation: event.target.value as "create"|"update", externalProjectId: "",
+          name: "", description: "", start: "", end: "", scope: 0 }); }}>
+        <option value="create">Create project</option><option value="update" disabled={!updateTarget}>Update selected project</option></select></label>
+        {nativeForm.operation === "update" && <label>Existing project ID<input required pattern="[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}"
+          value={nativeForm.externalProjectId} readOnly disabled={Boolean(nativeAttempt)} /></label>}
+        <label>Project name<input required maxLength={160} value={nativeForm.name}
+        disabled={Boolean(nativeAttempt)} onChange={event => setNativeForm(value => ({ ...value, name: event.target.value }))} /></label>
+        <label>Description<textarea maxLength={4000} value={nativeForm.description} disabled={Boolean(nativeAttempt)}
+          onChange={event => setNativeForm(value => ({ ...value, description: event.target.value }))} /></label>
+        <label>Estimated start<input type="date" value={nativeForm.start} disabled={Boolean(nativeAttempt)}
+          onChange={event => setNativeForm(value => ({ ...value, start: event.target.value }))} /></label>
+        <label>Estimated end<input type="date" value={nativeForm.end} disabled={Boolean(nativeAttempt)}
+          onChange={event => setNativeForm(value => ({ ...value, end: event.target.value }))} /></label>
+        {nativeAction.scopeOptions.length > 1 && <label>Project scope<select value={nativeForm.scope} disabled={Boolean(nativeAttempt)}
+          onChange={event => setNativeForm(value => ({ ...value, scope: Number(event.target.value) }))}>{nativeAction.scopeOptions.map((option, index) =>
+            <option key={index} value={index}>{option[0]?.divisionId ?? option[0]?.businessAreaId ?? "All permitted business scopes"}</option>)}</select></label>}
+        {!nativeAttempt && <button className="button button-orange" disabled={state.syncBusy}>Prepare {nativeForm.operation === "create" ? "project" : "update"}</button>}
+        {nativeAttempt && <div role="status"><p>{nativeAttempt.message}</p><p>Command reference: {String(frozenRequest?.command?.commandId ?? "unavailable")}</p>
+          <p>Exact prepared project: {String(frozenRequest?.command?.project?.name ?? "unavailable")}</p>
+          <p>Description: {typeof frozenRequest?.command?.project?.description === "string" ? frozenRequest.command.project.description : "Not set"}</p>
+          <p>Estimated dates: {String(frozenRequest?.command?.project?.estimatedStart ?? "Not set")} – {String(frozenRequest?.command?.project?.estimatedEnd ?? "Not set")}</p>
+          <button type="button" className="button button-orange" disabled={state.syncBusy} onClick={() => void submitNative()}>{nativeAttempt.sent ? "Retry exact request" : frozenOperation === "create" ? "Create project" : "Update project"}</button>
+          {!nativeAttempt.sent && <button type="button" className="button-ghost" onClick={() => { setNativeAttempt(null);
+            setNativeForm({ operation: "create", externalProjectId: "", name: "", description: "", start: "", end: "", scope: 0 }); onUpdateTargetConsumed(); }}>Cancel prepared request</button>}</div>}
+      </form>}
       <dl><dt>Synchronization</dt><dd>{syncStatusLabel(result.sync.status)}</dd><dt>Last attempt</dt><dd>{syncDate(result.sync.lastAttemptAt)}</dd><dt>Last success</dt><dd>{syncDate(result.sync.lastSuccessAt)}</dd></dl>
       <p>{result.sync.explanation}</p>
       <div className="client-project-management-actions">
@@ -363,6 +454,7 @@ function BusinessProjects({ initial, page, client, contextVersion, contextSignal
     return value === "current" || value === "completed" || value === "cancelled" ? value : "all";
   };
   const [filter, setFilter] = useState(readFilter);
+  const [updateTarget, setUpdateTarget] = useState<Pick<BusinessProject,"id"|"name"|"description"|"start_date"|"end_date"> | null>(null);
   const [state, setState] = useState({ filter: "all", items: initial, page, busy: false, error: "", revision: 0 });
   const pending = useRef<AbortController | null>(null), active = useRef(true), sequence = useRef(0);
   const initialConsumed = useRef(false);
@@ -414,7 +506,7 @@ function BusinessProjects({ initial, page, client, contextVersion, contextSignal
   return <Card title="Business projects">
     <p>Projects recorded for this client in Project Alpha. This list does not grant portal or delivery access.</p>
     {projectManagementAvailable === true && <ProjectManagementRouting client={client} contextVersion={contextVersion} contextSignal={contextSignal}
-      onInvalidated={onInvalidated} onWorkspaceRefresh={onWorkspaceRefresh} />}
+      onInvalidated={onInvalidated} onWorkspaceRefresh={onWorkspaceRefresh} updateTarget={updateTarget} onUpdateTargetConsumed={() => setUpdateTarget(null)} />}
     {page?.available !== false && <label className="client-hub-business-filter">Project status<select value={filter} onChange={event => selectFilter(event.target.value)}>
       <option value="all">All projects</option><option value="current">Current projects</option><option value="completed">Completed</option><option value="cancelled">Cancelled</option>
     </select></label>}
@@ -429,13 +521,15 @@ function BusinessProjects({ initial, page, client, contextVersion, contextSignal
           <small>{project.manager_name ? `Manager: ${project.manager_name}` : "Manager not recorded"}</small>
           <small>Start: {calendarDate(project.start_date)} · End: {calendarDate(project.end_date)}</small>
           {project.created_at && <small>Project created: {date(project.created_at)}</small>}</div>
-          <StatusPill tone={project.status === "overdue" ? "warning" : tone(project.status || "")}>{project.status?.replaceAll("_", " ") || "Status not recorded"}</StatusPill></div>;
+          <div><StatusPill tone={project.status === "overdue" ? "warning" : tone(project.status || "")}>{project.status?.replaceAll("_", " ") || "Status not recorded"}</StatusPill>
+          {projectManagementAvailable === true && project.origin === "canonical" && <button type="button" className="button-ghost"
+            onClick={() => setUpdateTarget({id:project.id,name:project.name,description:project.description,start_date:project.start_date,end_date:project.end_date})}>Update project</button>}</div></div>;
         })}</div>}
       </ClientCollection>}
   </Card>;
 }
 
-function ClientWorkspace({ route, canReviewFeedback, invitationAccess, nativeDirectoryProfileWrites }: { route: ClientRoute; canReviewFeedback: boolean; invitationAccess?: InvitationAdministrationAccess; nativeDirectoryProfileWrites: boolean }) {
+function ClientWorkspace({ route, canReviewFeedback, invitationAccess, nativeDirectoryProfileWrites, nativeDirectoryBindingRefresh }: { route: ClientRoute; canReviewFeedback: boolean; invitationAccess?: InvitationAdministrationAccess; nativeDirectoryProfileWrites: boolean; nativeDirectoryBindingRefresh: boolean }) {
   const [revision, setRevision] = useState(0);
   const [invalidated, setInvalidated] = useState("");
   const [portalFeedback, setPortalFeedback] = useState("");
@@ -489,6 +583,8 @@ function ClientWorkspace({ route, canReviewFeedback, invitationAccess, nativeDir
     {nativeDirectoryProfileWrites && data.nativeDirectoryProfile
       && <NativeDirectoryProfileEdit kind={data.nativeDirectoryProfile.kind} recordId={data.nativeDirectoryProfile.recordId}
         allowPreparedAttempt={isStagingNativeDirectoryProfilePreparationLocation(window.location)} />}
+    {nativeDirectoryBindingRefresh && data.nativeDirectoryProfile && data.client.source_id
+      && <NativeDirectoryBindingRefresh enabled recordId={data.nativeDirectoryProfile.recordId} sourceId={data.client.source_id} />}
     {nativeDirectoryProfileWrites && data.client.kind === "organization" && (data.nativeDirectoryLinkedClients?.length ?? 0) > 0 && <Card title="Edit linked client profile">
       <p>Select a currently linked client. Client Hub verifies its exact Project Alpha mapping and organization relationship on every refresh.</p>
       <label htmlFor="native-directory-linked-client">Linked client<select id="native-directory-linked-client" value={linkedClientRecordId}
@@ -545,6 +641,7 @@ function ClientWorkspace({ route, canReviewFeedback, invitationAccess, nativeDir
           {items => <div className="simple-rows">{items.map(grant => <div key={collectionKey("authenticatedDeliveryGrants", grant)}><div><strong>{grant.r2_prefix}</strong><small>{grant.audience_type} audience · {date(grant.expires_at)}</small></div><GrantStatus status={grant.status} expiresAt={grant.expires_at} /></div>)}</div>}
         </ClientCollection>
       </Card></div>}
+      {data.nativeDirectoryProfile?.kind === "client" && <OpsServiceManagement customerRecordId={data.nativeDirectoryProfile.recordId} />}
       {data.capabilities.viewer && <Card title="Shared models"><ClientCollection {...collectionProps} collection="viewerGrants" label="Shared models" initial={data.viewerGrants} page={data.pages?.viewerGrants}
         emptyTitle="No Viewer access" emptyDetail="Models remain unavailable until explicitly granted.">
         {items => <div className="simple-rows">{items.map(grant => <div key={collectionKey("viewerGrants", grant)}><div><strong>{grant.model_title || grant.project_name}</strong><small>{grant.scope_type} access · {date(grant.authorization_expires_at)}</small></div><GrantStatus status={grant.status} expiresAt={grant.authorization_expires_at} /></div>)}</div>}
@@ -598,7 +695,7 @@ function ClientWorkspace({ route, canReviewFeedback, invitationAccess, nativeDir
   </>;
 }
 
-export function ClientHub({ mapToken, permissions, feedbackEnabled=false, invitationAccess, canManagePortalSetup=false, nativeDirectoryProfileWrites=false }: { mapToken: string | null; permissions: Permission[]; feedbackEnabled?: boolean; invitationAccess?: InvitationAdministrationAccess; canManagePortalSetup?: boolean; nativeDirectoryProfileWrites?: boolean }) {
+export function ClientHub({ mapToken, permissions, feedbackEnabled=false, invitationAccess, canManagePortalSetup=false, nativeDirectoryProfileWrites=false, nativeDirectoryBindingRefresh=false }: { mapToken: string | null; permissions: Permission[]; feedbackEnabled?: boolean; invitationAccess?: InvitationAdministrationAccess; canManagePortalSetup?: boolean; nativeDirectoryProfileWrites?: boolean; nativeDirectoryBindingRefresh?: boolean }) {
   const [, setLocationRevision] = useState(0);
   useEffect(() => {
     const sync = () => setLocationRevision(value => value + 1);
@@ -618,7 +715,7 @@ export function ClientHub({ mapToken, permissions, feedbackEnabled=false, invita
   if (selectedRequest)
     return canReview ? <ClientRequestWorkflow mapToken={mapToken} basePath="/clients/requests" /> : <Card><EmptyState title="Request unavailable" detail="Request-review access is required." /></Card>;
   if (route && "invalid" in route) return <Card><EmptyState title="Client workspace unavailable" detail="This client link is invalid." /><a href={clientDirectoryReturnPath()}>Back to Client Hub</a></Card>;
-  if (route) return canViewDirectory ? <ClientWorkspace key={JSON.stringify([route.sourceId || "", route.rootNamespace || "", route.kind, route.publicId])} route={route} canReviewFeedback={feedbackEnabled} invitationAccess={invitationAccess} nativeDirectoryProfileWrites={nativeDirectoryProfileWrites} /> : <Card><EmptyState title="Client unavailable" detail="Client-directory access is required." /></Card>;
+  if (route) return canViewDirectory ? <ClientWorkspace key={JSON.stringify([route.sourceId || "", route.rootNamespace || "", route.kind, route.publicId])} route={route} canReviewFeedback={feedbackEnabled} invitationAccess={invitationAccess} nativeDirectoryProfileWrites={nativeDirectoryProfileWrites} nativeDirectoryBindingRefresh={nativeDirectoryBindingRefresh} /> : <Card><EmptyState title="Client unavailable" detail="Client-directory access is required." /></Card>;
   return <>
     {canReview && <section className="client-hub-queue"><ClientRequestWorkflow mapToken={mapToken} basePath="/clients/requests" pendingOnly hideWhenEmpty={canViewDirectory} /></section>}
     {canViewDirectory && <section>

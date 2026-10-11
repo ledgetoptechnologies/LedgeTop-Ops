@@ -364,6 +364,19 @@ describe("canonical native Directory profile writer", () => {
     }
   });
 
+  it("uses fresh PA authority after an unrelated generation advance without weakening legacy identity proof", async () => {
+    const seeded = await create("organization");
+    const remotePublicId = await acknowledgeCreate(seeded.input, seeded.outcome, "59");
+    const result = written(await writeNativeDirectoryProfile(db, { operation: "update", mutationId: uuid(),
+      recordId: seeded.input.recordId, expectedLocalVersion: 1, kind: "organization",
+      profile: { ...organizationProfile, name: "Generation 60" },
+      destinations: [destination(seeded.input.recordId, "60")], actor: seeded.actor }));
+    const command = JSON.parse((await db.prepare("SELECT command_json FROM project_alpha_directory_outbox WHERE command_id=?")
+      .bind(result.commandIds[0]).first<string>("command_json"))!);
+    expect(command).toMatchObject({ expectedProjectAlphaPublicId: remotePublicId, expectedRevision: "1",
+      expectedAuthorizationGeneration: "60" });
+  });
+
   it("keeps create IDs pinned but targets the exact active Ops-to-PA pair for updates", async () => {
     const seeded = await create("organization", undefined, `ops/profile-split-${sequence++}`), created = written(seeded.outcome);
     const paExternalId = `pa/profile-split-${sequence++}`, activePublicId = publicId();
@@ -462,7 +475,7 @@ describe("canonical native Directory profile writer", () => {
           if (sql.includes("FROM project_alpha_active_directory_mappings")) return fake({ externalId: paExternalId,
             projectAlphaPublicId: activePublicId, mappingKind: "acquired", provenanceId: "activation-fixture" });
           if (sql.includes("FROM project_alpha_existing_directory_binding_revision_refresh_receipts"))
-            return fake(refreshed ? { revision: "4", authorizationGeneration: "8" } : null);
+            return fake(refreshed ? { revision: "4", authorizationGeneration: "7" } : null);
           if (sql.includes("FROM project_alpha_existing_directory_binding_activation_receipts")) return fake({ revision: "3" });
           return target.prepare(sql);
         };

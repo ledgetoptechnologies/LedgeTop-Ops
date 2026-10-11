@@ -1,6 +1,7 @@
 /**
- * Private planner for Project Alpha project-v2 commands. Its only production
- * caller is the default-off administrator joined-acceptance composition route.
+ * Environment-neutral planner for Project Alpha project-v2 commands. Callers
+ * own their route-level authorization and must supply the exact current actor
+ * and grant evidence enforced by the database preparation guards.
  *
  * This deliberately has no fetcher, route, queue, scheduler, or transport
  * dependency. It only reserves a canonical request for a deliberately
@@ -25,7 +26,7 @@ type Actor = Readonly<{
 type LocalExpectation = Readonly<{ expectedLocalVersion: number; expectedLocalProjectionSha256: string | null }>;
 
 export type ProjectAlphaProjectV2CommandProducerAction =
-  | Readonly<{ sourceId: string; actor: Actor; operation: "create"; command: ProjectAlphaProjectCreateCommand; directory: Readonly<{ organizationRecordId: string; clientRecordId: string | null }>; local: Readonly<{ expectedLocalVersion: 0; expectedLocalProjectionSha256: null }> }>
+  | Readonly<{ sourceId: string; actor: Actor; operation: "create"; command: ProjectAlphaProjectCreateCommand; directory: Readonly<{ organizationRecordId: string | null; clientRecordId: string | null }>; local: Readonly<{ expectedLocalVersion: 0; expectedLocalProjectionSha256: null }> }>
   | Readonly<{ sourceId: string; actor: Actor; operation: "update"; command: ProjectAlphaProjectUpdateCommand; local: LocalExpectation }>
   | Readonly<{ sourceId: string; actor: Actor; operation: "bind"; command: ProjectAlphaProjectBindCommand; local: LocalExpectation }>;
 
@@ -115,11 +116,12 @@ async function directoryReady(db: D1Database, connection: Connection, organizati
     return row.results.length === 1 && (proof === undefined
       || row.results[0]!.external_id === proof.externalId && row.results[0]!.project_alpha_public_id === proof.expectedPublicId);
   }
-  if (organizationRecordId === null || !(await record("organization", organizationRecordId, expected?.organization))
+  if (organizationRecordId === null && clientRecordId === null
+    || !(await record("organization", organizationRecordId, expected?.organization))
     || !(await record("client", clientRecordId, expected?.client))) return false;
-  if (clientRecordId === null) return true;
+  if (clientRecordId === null) return organizationRecordId !== null;
   return !!await db.prepare(`SELECT 1 present FROM operations_directory_client_organizations
-    WHERE client_record_id=? AND organization_record_id=?`).bind(clientRecordId, organizationRecordId).first("present");
+    WHERE client_record_id=? AND organization_record_id IS ?`).bind(clientRecordId, organizationRecordId).first("present");
 }
 async function actorState(db: D1Database, actor: Actor): Promise<ActorState | null> {
   return db.prepare(`SELECT admission.version admission_version,profile.version profile_version,profile.login_email email,generation.generation
@@ -163,6 +165,7 @@ function sameReservation(previous: Awaited<ReturnType<typeof prior>>, connection
 export async function planProjectAlphaProjectV2Command(
   env: ProjectAlphaProjectV2CommandProducerEnvironment,
   action: ProjectAlphaProjectV2CommandProducerAction,
+  atomicAdmission?: D1PreparedStatement,
 ): Promise<ProjectAlphaProjectV2CommandProducerOutcome> {
   const connection = configured(env, action.sourceId);
   if (!connection || !validActor(action.actor) || !validLocal(action.local, action.operation === "create")) return { status: "blocked", reason: connection ? "invalid_action" : "configuration" };
@@ -170,7 +173,9 @@ export async function planProjectAlphaProjectV2Command(
   if (!canonical || canonical.command.commandId !== action.command.commandId) return { status: "blocked", reason: "invalid_action" };
   if (action.operation === "create") {
     const command = canonical.command as ProjectAlphaProjectCreateCommand;
-    if ((command.client === null) !== (action.directory.clientRecordId === null)) return { status: "blocked", reason: "invalid_action" };
+    if ((command.client === null) !== (action.directory.clientRecordId === null)
+      || (command.organization === null) !== (action.directory.organizationRecordId === null)
+      || command.client === null && command.organization === null) return { status: "blocked", reason: "invalid_action" };
   }
   if (action.operation === "bind" && (canonical.command as ProjectAlphaProjectBindCommand).expectedProjectionSha256 !== action.local.expectedLocalProjectionSha256)
     return { status: "blocked", reason: "invalid_action" };
@@ -226,13 +231,13 @@ export async function planProjectAlphaProjectV2Command(
     const nextAttemptAt = Math.floor(Date.now() / 1000);
     const mappingState = action.operation === "update" ? "exact" : "absent";
     const expectedPublicId = action.operation === "update" ? mapping!.project_alpha_public_id : null;
-    const statements: D1PreparedStatement[] = [];
+    const statements: D1PreparedStatement[] = atomicAdmission ? [atomicAdmission] : [];
     if (!destination) statements.push(env.OPS_DB.prepare(`INSERT INTO project_alpha_project_destinations(external_project_id,source_id,application_id,
       destination_base_url,expected_source_instance_id,expected_history_epoch_id) VALUES(?,?,?,?,?,?)`).bind(
       canonical.command.externalId, connection.sourceId, connection.applicationId, connection.baseUrl, connection.sourceInstanceId, connection.historyEpochId));
     const proofInsert = action.operation === "create" ? (() => {
       const command = canonical.command as ProjectAlphaProjectCreateCommand;
-      const organizationPredicate = `(SELECT count(*) FROM project_alpha_active_directory_mappings mapping
+      const organizationPredicate = organizationRecordId === null ? "1=1" : `(SELECT count(*) FROM project_alpha_active_directory_mappings mapping
         JOIN operations_directory_records record ON record.record_id=mapping.record_id AND record.record_kind='organization'
         WHERE mapping.record_id=? AND mapping.source_id=? AND mapping.source_instance_id=? AND mapping.application_id=?
           AND mapping.history_epoch_id=? AND mapping.resource_type='organization')=1
@@ -250,15 +255,16 @@ export async function planProjectAlphaProjectV2Command(
               AND mapping.history_epoch_id=? AND mapping.resource_type='client' AND mapping.external_id=?
               AND mapping.project_alpha_public_id=?)
           AND (SELECT count(*) FROM operations_directory_client_organizations relationship
-            WHERE relationship.client_record_id=? AND relationship.organization_record_id=?)=1`;
+            WHERE relationship.client_record_id=? AND relationship.organization_record_id IS ?)=1`;
       return env.OPS_DB.prepare(`INSERT INTO native_project_command_proofs(command_id,external_project_id,actor_staff_id,actor_access_subject,
         actor_admission_version,actor_profile_version,actor_email,verified_until,grant_generation,scopes_json)
         SELECT ?,?,?,?,?,?,?,?,?,? WHERE ${organizationPredicate}${clientPredicate}`).bind(canonical.command.commandId,
         canonical.command.externalId, action.actor.staffId, action.actor.accessSubject, action.actor.admissionVersion,
         action.actor.profileVersion, action.actor.email, action.actor.verifiedUntil, currentActor.generation, scopesJson,
-        organizationRecordId, connection.sourceId, connection.sourceInstanceId, connection.applicationId, connection.historyEpochId,
-        organizationRecordId, connection.sourceId, connection.sourceInstanceId, connection.applicationId, connection.historyEpochId,
-        command.organization.externalId, command.organization.expectedPublicId,
+        ...(organizationRecordId === null ? [] : [organizationRecordId, connection.sourceId, connection.sourceInstanceId,
+          connection.applicationId, connection.historyEpochId, organizationRecordId, connection.sourceId,
+          connection.sourceInstanceId, connection.applicationId, connection.historyEpochId,
+          command.organization!.externalId, command.organization!.expectedPublicId]),
         ...(clientRecordId === null ? [] : [clientRecordId, connection.sourceId, connection.sourceInstanceId,
           connection.applicationId, connection.historyEpochId, clientRecordId, connection.sourceId, connection.sourceInstanceId,
           connection.applicationId, connection.historyEpochId, command.client!.externalId, command.client!.expectedPublicId,

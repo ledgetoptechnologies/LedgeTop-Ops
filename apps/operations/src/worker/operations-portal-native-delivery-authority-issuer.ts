@@ -1,9 +1,12 @@
 import {
   OPERATIONS_PORTAL_NATIVE_DELIVERY_AUTHORITY_PROTOCOL,
   canonicalOperationsPortalNativeDeliveryAuthorityCommand,
+  canonicalOperationsPortalNativeDeliveryCancellationRequest,
+  parseOperationsPortalNativeDeliveryDisposition,
   parseOperationsPortalNativeDeliveryAuthorityCommand,
   sha256OperationsPortalNativeDeliveryAuthorityCommand,
   type OperationsPortalNativeDeliveryAuthorityCommand,
+  type OperationsPortalNativeDeliveryCancellationBinding,
   type OperationsPortalNativeDeliveryFeature,
 } from "@ltds/shared/operations-portal-native-delivery-authority";
 import type { AuthenticatedNativeStaffWithAdmissionVersion } from "./native-staff-auth";
@@ -12,7 +15,7 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{1
 const HASH = /^[0-9a-f]{64}$/u;
 const FEATURES = ["folder.list", "file.metadata", "file.preview", "file.download"] as const;
 const encoder = new TextEncoder();
-type Owner = AuthenticatedNativeStaffWithAdmissionVersion;
+export type Owner = AuthenticatedNativeStaffWithAdmissionVersion;
 type ContextRow = {
   target_id: string; target_revision: number; client_authority_id: string; workspace_id: string;
   root_kind: "organization" | "standalone_client"; root_record_id: string;
@@ -36,6 +39,9 @@ export type IssueOperationsPortalNativeDeliveryAuthorityInput = Readonly<{
 export type RevokeOperationsPortalNativeDeliveryAuthorityInput = Readonly<{
   operationId: string; authorityId: string; expectedRevision: number; reasonCode: string; owner: Owner;
 }>;
+export type CancelOperationsPortalNativeDeliveryAuthorityInput = Readonly<{
+  authorityId: string; operationId: string; owner: Owner;
+}>;
 export type OperationsPortalNativeDeliveryAuthorityReview = Readonly<{
   authorityId: string; revision: number; state: "active" | "revoked"; recipientBindingId: string;
   enrollmentIntentId: string; folderReservationId: string; targetId: string; targetClientRecordId: string;
@@ -49,6 +55,7 @@ export type OperationsPortalNativeDeliveryAuthorityOwnerStatus = Readonly<{
   latestAction: "delivery.grant" | "delivery.revoke";
   transportStatus: "pending" | "acknowledged" | "dead";
   recoveryOperationId: string | null;
+  cancellationOperationId: string | null;
 }>;
 export type OperationsPortalNativeDeliveryAuthorityOwnerPage = Readonly<{
   items: readonly OperationsPortalNativeDeliveryAuthorityOwnerStatus[];
@@ -103,6 +110,8 @@ async function ownerAuthorized(database: Pick<D1Database, "prepare">, owner: Own
   rootRecordId: string, divisionId: string, action: "delivery.grant" | "delivery.revoke"): Promise<boolean> {
   const mutationPermission = action === "delivery.grant" ? "delivery.share.create" : "delivery.share.revoke";
   return Boolean(await database.prepare(`SELECT 1 FROM native_staff_admissions admission
+    JOIN staff_users staff ON staff.id=admission.staff_id AND staff.status='active'
+      AND staff.email=? AND staff.access_subject=?
     JOIN native_staff_profiles profile ON profile.staff_id=admission.staff_id AND profile.login_email=? AND profile.version=?
     JOIN native_directory_grant_generations generation ON generation.staff_id=admission.staff_id AND generation.generation=?
     WHERE admission.staff_id=? AND admission.active=1 AND admission.bound_access_subject=? AND admission.version=?
@@ -121,7 +130,7 @@ async function ownerAuthorized(database: Pick<D1Database, "prepare">, owner: Own
         WHERE permission.staff_id=admission.staff_id AND permission.effect='deny'
           AND permission.permission_key IN ('projects.view','delivery.browse',?)
           AND (permission.scope='global' OR (permission.scope='division' AND permission.division_id=?)))`)
-    .bind(owner.identity.email, owner.identity.profileVersion, generationValue, owner.identity.staffId,
+    .bind(owner.identity.email, owner.identity.verifiedAccessSubject, owner.identity.email, owner.identity.profileVersion, generationValue, owner.identity.staffId,
       owner.identity.verifiedAccessSubject, owner.admissionVersion, divisionId, rootRecordId, rootRecordId,
       mutationPermission, divisionId, mutationPermission, divisionId).first());
 }
@@ -216,6 +225,9 @@ const contextSql = `SELECT workspace.target_id,workspace.target_revision,workspa
     AND published_project.project_version=project.current_version
     AND published_project.organization_record_id IS project.organization_record_id
     AND published_project.client_record_id IS project.client_record_id
+    AND NOT EXISTS(SELECT 1 FROM operations_portal_native_delivery_authority_heads delivery
+      WHERE delivery.recipient_binding_id=recipient.recipient_binding_id
+        AND delivery.folder_reservation_id=folder.reservation_id AND delivery.state='active')
     AND recipient.recipient_binding_id=? AND folder.reservation_id=?`;
 
 async function currentContext(database: Pick<D1Database, "prepare">, recipientBindingId: string, folderReservationId: string) {
@@ -573,17 +585,145 @@ export async function readOperationsPortalNativeDeliveryAuthorityStatusForOwner(
   const current = await head(session, authorityId); if (!current) denied();
   if (!await ownerAuthorized(session, owner, generationValue, current.root_record_id, current.ops_division_id,
     current.state === "active" ? "delivery.grant" : "delivery.revoke")) denied();
-  const transport = await session.prepare(`SELECT command.action,outbox.state
+  const transport = await session.prepare(`SELECT command.action,command.expected_revision,command.resulting_revision,
+      command.expires_at,outbox.state,outbox.last_error_code,
+      outbox.claim_token,outbox.claim_until,outbox.acknowledged_claim_token,
+      EXISTS(SELECT 1 FROM operations_portal_native_delivery_authority_receipts receipt
+        WHERE receipt.operation_id=outbox.operation_id) has_receipt
     FROM operations_portal_native_delivery_authority_commands command
     JOIN operations_portal_native_delivery_authority_outbox outbox ON outbox.operation_id=command.operation_id
     WHERE command.operation_id=? AND command.authority_id=? AND command.resulting_revision=?`)
     .bind(current.latest_operation_id, current.authority_id, current.revision)
-    .first<{ action: "delivery.grant" | "delivery.revoke"; state: string }>();
+    .first<{ action: "delivery.grant" | "delivery.revoke"; expected_revision:number;resulting_revision:number;expires_at:string|null;
+      state: string; last_error_code: string | null;
+      claim_token: string | null; claim_until: string | null; acknowledged_claim_token: string | null; has_receipt: number }>();
   if (!transport || transport.action !== "delivery.grant" && transport.action !== "delivery.revoke") denied();
   const transportStatus = transport.state === "acknowledged" ? "acknowledged" as const
     : transport.state === "dead" ? "dead" as const : "pending" as const;
+  const recoverableDeadConflict = transport.state === "dead" && transport.action === "delivery.grant"
+    && transport.last_error_code === "conflict" && transport.claim_token === null
+    && transport.claim_until === null && transport.acknowledged_claim_token === null && transport.has_receipt === 0
+    && transport.expires_at !== null && transport.expires_at > new Date().toISOString();
+  const cancellationIntent = await session.prepare(`SELECT state FROM operations_portal_native_delivery_cancellation_intents
+    WHERE operation_id=? AND authority_id=?`).bind(current.latest_operation_id,current.authority_id).first<string>("state");
+  const cancellableDeadConflict = transport.state === "dead" && transport.action === "delivery.grant"
+    && transport.expected_revision === 0 && transport.resulting_revision === 1 && current.state === 'active' && current.revision === 1
+    && transport.last_error_code === 'conflict' && transport.claim_token === null && transport.claim_until === null
+    && transport.acknowledged_claim_token === null && transport.has_receipt === 0
+    && transport.expires_at !== null && transport.expires_at <= new Date().toISOString()
+    && (cancellationIntent === null || cancellationIntent === "pending");
   return Object.freeze({ authority: review(current), latestAction: transport.action, transportStatus,
-    recoveryOperationId: transportStatus === "pending" ? current.latest_operation_id : null });
+    recoveryOperationId: transportStatus === "pending" || recoverableDeadConflict ? current.latest_operation_id : null,
+    cancellationOperationId: cancellableDeadConflict ? current.latest_operation_id : null });
+}
+
+/** Explicit terminal cleanup for one expired, never-materialized initial grant. */
+export async function cancelOperationsPortalNativeDeliveryAuthorityForOwner(database: D1Database,
+  binding: OperationsPortalNativeDeliveryCancellationBinding,
+  input: CancelOperationsPortalNativeDeliveryAuthorityInput): Promise<Readonly<{ disposition: 'cancelled' | 'committed'; replayed: boolean }>> {
+  if (!UUID.test(input.authorityId) || !UUID.test(input.operationId)) denied();
+  const session = database.withSession('first-primary'), generationValue = await generation(session, input.owner);
+  const completed = await session.prepare(`SELECT command.root_record_id,command.ops_division_id FROM
+    operations_portal_native_delivery_cancellation_intents intent
+    JOIN operations_portal_native_delivery_cancellation_receipts receipt ON receipt.operation_id=intent.operation_id
+    JOIN operations_portal_native_delivery_authority_commands command ON command.operation_id=intent.operation_id
+    WHERE intent.operation_id=? AND intent.authority_id=? AND intent.state='completed'
+      AND receipt.authority_id=intent.authority_id AND receipt.request_fingerprint=intent.request_fingerprint`)
+    .bind(input.operationId,input.authorityId).first<{root_record_id:string;ops_division_id:string}>();
+  if (completed) {
+    if (!await ownerAuthorized(session,input.owner,generationValue,completed.root_record_id,completed.ops_division_id,'delivery.revoke')) denied();
+    return { disposition: 'cancelled', replayed: true };
+  }
+  const committed = await session.prepare(`SELECT command.root_record_id,command.ops_division_id FROM
+    operations_portal_native_delivery_cancellation_intents intent
+    JOIN operations_portal_native_delivery_authority_receipts receipt ON receipt.operation_id=intent.operation_id
+    JOIN operations_portal_native_delivery_authority_commands command ON command.operation_id=intent.operation_id
+    JOIN operations_portal_native_delivery_authority_outbox outbox ON outbox.operation_id=command.operation_id
+    WHERE intent.operation_id=? AND intent.authority_id=? AND intent.state='committed'
+      AND receipt.operation_id=command.operation_id AND outbox.request_fingerprint=intent.request_fingerprint
+      AND outbox.state='acknowledged'`)
+    .bind(input.operationId,input.authorityId).first<{root_record_id:string;ops_division_id:string}>();
+  if (committed) {
+    if (!await ownerAuthorized(session,input.owner,generationValue,committed.root_record_id,committed.ops_division_id,'delivery.revoke')) denied();
+    return { disposition: 'committed', replayed: true };
+  }
+  const row = await session.prepare(`SELECT command.canonical_command_json,command.command_sha256,command.root_record_id,
+      command.ops_division_id,command.expires_at,outbox.state,outbox.last_error_code,outbox.claim_token,outbox.claim_until,
+      outbox.acknowledged_claim_token,head.state head_state,head.revision head_revision
+    FROM operations_portal_native_delivery_authority_commands command
+    JOIN operations_portal_native_delivery_authority_outbox outbox ON outbox.operation_id=command.operation_id
+    JOIN operations_portal_native_delivery_authority_heads head ON head.latest_operation_id=command.operation_id
+    WHERE command.operation_id=? AND command.authority_id=? AND command.action='delivery.grant'
+      AND command.expected_revision=0 AND command.resulting_revision=1`)
+    .bind(input.operationId, input.authorityId).first<{ canonical_command_json:string;command_sha256:string;root_record_id:string;
+      ops_division_id:string;expires_at:string;state:string;last_error_code:string|null;claim_token:string|null;claim_until:string|null;
+      acknowledged_claim_token:string|null;head_state:string;head_revision:number }>();
+  if (!row || row.expires_at > new Date().toISOString() || row.state !== 'dead' || row.last_error_code !== 'conflict'
+    || row.claim_token !== null || row.claim_until !== null || row.acknowledged_claim_token !== null
+    || row.head_state !== 'active' || row.head_revision !== 1
+    || await session.prepare('SELECT 1 FROM operations_portal_native_delivery_authority_receipts WHERE operation_id=?').bind(input.operationId).first()
+    || !await ownerAuthorized(session, input.owner, generationValue, row.root_record_id, row.ops_division_id, 'delivery.revoke')) denied();
+  const command = parseOperationsPortalNativeDeliveryAuthorityCommand(JSON.parse(row.canonical_command_json)); if (!command) denied();
+  if (await sha256OperationsPortalNativeDeliveryAuthorityCommand(command) !== row.command_sha256) denied();
+  const request = canonicalOperationsPortalNativeDeliveryCancellationRequest({ protocol: command.protocol, protocolVersion: 1,
+    command, requestFingerprint: row.command_sha256 });
+  const existing = await session.prepare('SELECT state FROM operations_portal_native_delivery_cancellation_intents WHERE operation_id=?')
+    .bind(input.operationId).first<string>('state');
+  if (!existing) await session.prepare(`INSERT INTO operations_portal_native_delivery_cancellation_intents
+    (operation_id,authority_id,request_fingerprint,canonical_request_json,actor_staff_id,actor_access_subject,actor_email,
+     actor_admission_version,actor_profile_version,actor_grant_generation,actor_verified_until,state)
+    VALUES(?,?,?,?,?,?,?,?,?,?,?,'pending')`).bind(input.operationId,input.authorityId,row.command_sha256,request,
+      input.owner.identity.staffId,input.owner.identity.verifiedAccessSubject,input.owner.identity.email,input.owner.admissionVersion,
+      input.owner.identity.profileVersion,generationValue,input.owner.verifiedUntil).run();
+  else if (existing === 'completed') return { disposition: 'cancelled', replayed: true };
+  else if (existing === 'committed') return { disposition: 'committed', replayed: true };
+  let value;
+  try { const response = await binding.getNativeDeliveryAuthorityDisposition(request);
+    value = parseOperationsPortalNativeDeliveryDisposition(typeof response === 'string' ? JSON.parse(response) : response, command, row.command_sha256); }
+  catch { denied(); }
+  if (!value) denied();
+  if (value.disposition === 'committed') {
+    const currentGeneration = await generation(session, input.owner);
+    if (currentGeneration !== generationValue
+      || !await ownerAuthorized(session,input.owner,currentGeneration,row.root_record_id,row.ops_division_id,'delivery.revoke')) denied();
+    const claim = crypto.randomUUID(), receiptJson = JSON.stringify(value.receipt), receiptHash = await sha256(receiptJson);
+    await session.batch([
+      session.prepare(`UPDATE operations_portal_native_delivery_authority_outbox SET state='dispatching',claim_token=?,
+        claim_until=strftime('%Y-%m-%dT%H:%M:%fZ','now','+60 seconds'),attempt_count=attempt_count+1
+        WHERE operation_id=? AND state='dead' AND last_error_code='conflict' AND claim_token IS NULL AND claim_until IS NULL
+          AND acknowledged_claim_token IS NULL`).bind(claim,input.operationId),
+      session.prepare(`INSERT OR IGNORE INTO operations_portal_native_delivery_authority_receipts
+        (operation_id,receipt_sha256,receipt_json,acknowledged_claim_token) VALUES(?,?,?,?)`)
+        .bind(input.operationId,receiptHash,receiptJson,claim),
+      session.prepare(`UPDATE operations_portal_native_delivery_authority_outbox SET state='acknowledged',
+        acknowledged_claim_token=?,claim_token=NULL,claim_until=NULL,last_error_code=NULL WHERE operation_id=? AND state='dispatching' AND claim_token=?`)
+        .bind(claim,input.operationId,claim),
+      session.prepare("UPDATE operations_portal_native_delivery_cancellation_intents SET state='committed' WHERE operation_id=? AND state='pending'")
+        .bind(input.operationId),
+    ]);
+    return { disposition: 'committed', replayed: value.receipt.status === 'duplicate' };
+  }
+  if (value.disposition === 'not-found') {
+    try { const response = await binding.cancelNativeDeliveryAuthority(request);
+      value = parseOperationsPortalNativeDeliveryDisposition(typeof response === 'string' ? JSON.parse(response) : response, command, row.command_sha256); }
+    catch { denied(); }
+  }
+  if (!value || value.disposition !== 'cancelled') denied();
+  const currentGeneration = await generation(session, input.owner);
+  if (currentGeneration !== generationValue
+    || !await ownerAuthorized(session, input.owner, currentGeneration, row.root_record_id, row.ops_division_id, 'delivery.revoke')) denied();
+  await session.batch([
+    session.prepare(`INSERT OR IGNORE INTO operations_portal_native_delivery_cancellation_receipts
+      (operation_id,authority_id,request_fingerprint,cancellation_json,cancelled_at) VALUES(?,?,?,?,?)`)
+      .bind(input.operationId,input.authorityId,row.command_sha256,JSON.stringify(value.cancellation),value.cancellation.cancelledAt),
+    session.prepare('DELETE FROM operations_portal_native_delivery_authority_heads WHERE authority_id=? AND latest_operation_id=? AND revision=1 AND state=\'active\'')
+      .bind(input.authorityId,input.operationId),
+    session.prepare("UPDATE operations_portal_native_delivery_cancellation_intents SET state='completed' WHERE operation_id=? AND state='pending'")
+      .bind(input.operationId),
+  ]);
+  const done = await session.prepare("SELECT 1 FROM operations_portal_native_delivery_cancellation_intents WHERE operation_id=? AND state='completed'")
+    .bind(input.operationId).first(); if (!done) denied();
+  return { disposition: 'cancelled', replayed: value.cancellation.replayed };
 }
 
 export async function listOperationsPortalNativeDeliveryAuthoritiesForOwner(database: D1Database, input: Readonly<{
@@ -622,7 +762,9 @@ export async function listOperationsPortalNativeDeliveryAuthoritiesForOwner(data
       const transportStatus = row.transport_state === "acknowledged" ? "acknowledged" as const
         : row.transport_state === "dead" ? "dead" as const : "pending" as const;
       items.push(Object.freeze({ authority: review(row), latestAction: row.latest_action, transportStatus,
-        recoveryOperationId: transportStatus === "pending" ? row.latest_operation_id : null }));
+        recoveryOperationId: transportStatus === "pending" ? row.latest_operation_id : null,
+        // Cancellation eligibility is derived from the detailed, current-context read only.
+        cancellationOperationId: null }));
       if (items.length > limit) break;
     }
     if (items.length > limit || rows.results.length < 50) break;

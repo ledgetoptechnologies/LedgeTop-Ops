@@ -1,5 +1,6 @@
 import { WorkerEntrypoint } from "cloudflare:workers";
-import { applyOperationsPortalNativeDeliveryAuthority, readOperationsPortalNativeDeliveryAuthorityStatus }
+import { applyOperationsPortalNativeDeliveryAuthority, cancelOperationsPortalNativeDeliveryAuthority,
+  readOperationsPortalNativeDeliveryAuthorityDisposition, readOperationsPortalNativeDeliveryAuthorityStatus }
   from "./operations-portal-native-delivery-authority";
 import type { Env } from "./types";
 
@@ -11,5 +12,13 @@ export class OperationsPortalNativeDeliveryAuthorityIngress extends WorkerEntryp
 
   getNativeDeliveryAuthorityStatus(input: unknown): Promise<string> {
     return readOperationsPortalNativeDeliveryAuthorityStatus(this.env, input);
+  }
+
+  getNativeDeliveryAuthorityDisposition(input: unknown): Promise<string> {
+    return readOperationsPortalNativeDeliveryAuthorityDisposition(this.env, input);
+  }
+
+  cancelNativeDeliveryAuthority(input: unknown): Promise<string> {
+    return cancelOperationsPortalNativeDeliveryAuthority(this.env, input);
   }
 }

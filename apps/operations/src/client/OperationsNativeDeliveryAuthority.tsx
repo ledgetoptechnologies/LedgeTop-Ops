@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { Brand, Card, Loading } from "@ltds/ui";
-import { grantOperationsNativeDeliveryAuthority, listOperationsNativeDeliveryAuthorities,
+import { cancelOperationsNativeDeliveryAuthority, grantOperationsNativeDeliveryAuthority, listOperationsNativeDeliveryAuthorities,
   listOperationsNativeDeliveryCandidates,
   newOperationsNativeDeliveryOperationId, openOperationsNativeDeliveryOwnerSession,
   OPERATIONS_NATIVE_DELIVERY_FEATURES, OperationsNativeDeliveryOwnerApiError,
@@ -11,12 +11,14 @@ import { grantOperationsNativeDeliveryAuthority, listOperationsNativeDeliveryAut
   type OperationsNativeDeliveryRecoverInput, type OperationsNativeDeliveryRevokeInput }
   from "./operations-native-delivery-owner-api";
 import "./ClientOnboardingStaff.css";
+import { confirmAction } from "./confirm-action";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 type Attempt = Readonly<
   | { kind: "grant"; candidate: OperationsNativeDeliveryCandidate; input: OperationsNativeDeliveryGrantInput }
   | { kind: "revoke"; authority: OperationsNativeDeliveryAuthority; input: OperationsNativeDeliveryRevokeInput }
   | { kind: "recover"; authority: OperationsNativeDeliveryAuthority; input: OperationsNativeDeliveryRecoverInput }
+  | { kind: "cancel"; authority: OperationsNativeDeliveryAuthority }
 >;
 
 function localDateTime(date: Date) {
@@ -176,6 +178,15 @@ function NativeDeliveryAuthorityWorkspace({ initialSession }: { initialSession: 
     setBusy(current.kind); setError(""); setMessage("");
     try {
       const active = retrying ? await renewSession() : session;
+      if (current.kind === "cancel") {
+        const result = await cancelOperationsNativeDeliveryAuthority(active.csrfToken, current.authority);
+        setAttempt(null); setAuthorityReviewed(false); setAuthority(null); setAuthorityRead(false);
+        setAuthorities([]); setNextAuthorityCursor(null); setCandidate(null); setCandidates([]); setNextCursor(null);
+        setMessage(result.status === "cancelled"
+          ? "Client durably cancelled this expired, never-recorded grant. History is retained. Reload candidates for a separate reissue review."
+          : "Client had already recorded this grant. Its acknowledgement was reconciled; no authority was deleted. Reload the exact authority before any revocation.");
+        return;
+      }
       const result = current.kind === "grant"
         ? await grantOperationsNativeDeliveryAuthority(active.csrfToken, current.input)
         : current.kind === "revoke"
@@ -229,6 +240,9 @@ function NativeDeliveryAuthorityWorkspace({ initialSession }: { initialSession: 
   const actAuthority = async (kind: "revoke" | "recover") => {
     if (!authority || busy || (!attempt && !authorityReviewed)) return;
     if (attempt) { if (attempt.kind === kind) await execute(attempt, true); return; }
+    if (kind === "revoke" && authority.transportStatus === "dead") {
+      setError("Resolve the exact failed delivery before revocation. A failed grant is not proof that Client recorded access."); return;
+    }
     const reason = (kind === "revoke" ? revokeReason : recoveryReason).trim();
     const maximum = kind === "revoke" ? 200 : 500;
     if (reason.length < 1 || reason.length > maximum
@@ -243,6 +257,14 @@ function NativeDeliveryAuthorityWorkspace({ initialSession }: { initialSession: 
         expectedRevision: authority.revision, reasonCode: reason }) })
       : Object.freeze({ kind, authority, input: Object.freeze({ invocationId: newOperationsNativeDeliveryOperationId(),
         operationId: authority.recoveryOperationId!, expectedRevision: authority.revision, reason }) });
+    setAttempt(current); await execute(current, false);
+  };
+  const cancelAuthority = async () => {
+    if (busy) return;
+    if (attempt) { if (attempt.kind === "cancel") await execute(attempt, true); return; }
+    if (!authority || !authorityRead || !authorityReviewed || !authority.cancellationOperationId) return;
+    if (!await confirmAction("Reconcile this exact expired grant with Client? Cancel only if Client proves it never recorded the grant. Preserve all history; this does not grant access or create a replacement.")) return;
+    const current = Object.freeze({ kind: "cancel", authority }) satisfies Attempt;
     setAttempt(current); await execute(current, false);
   };
   const toggleFeature = (feature: OperationsNativeDeliveryFeature, checked: boolean) => {
@@ -327,10 +349,12 @@ function NativeDeliveryAuthorityWorkspace({ initialSession }: { initialSession: 
         <div><dt>Expires</dt><dd>{authority.expiresAt ?? "Revoked"}</dd></div>
         <div><dt>Latest operation / action</dt><dd>{authority.latestOperationId} / {authority.latestAction}</dd></div>
         <div><dt>Recovery operation</dt><dd>{authority.recoveryOperationId ?? "Not available"}</dd></div></dl>
-      {authority.transportStatus === "dead" && <p role="alert">Delivery is dead and cannot be recovered. Explicitly revoke an active local authority, then separately review a current candidate before any reissue.</p>}
-      {authority.state === "active" && !attempt && <label>Exact revocation reason code<input value={revokeReason} maxLength={200}
+      {authority.transportStatus === "dead" && !authority.recoveryOperationId && <p role="alert">Delivery is dead and cannot be recovered. Do not create a replacement authority.</p>}
+      {authority.transportStatus === "dead" && authority.recoveryOperationId && <p role="alert">The Client rejected this exact grant before recording it. Recovery checks Client status first and may submit only this immutable operation under current authority.</p>}
+      {authority.cancellationOperationId && authorityRead && <p>Server review permits reconciliation of this exact expired initial grant. Only durable Client cancellation proof can clear the local unacknowledged head. An already-recorded grant is acknowledged instead; no automatic reissue occurs.</p>}
+      {authority.state === "active" && authority.transportStatus !== "dead" && !attempt && <label>Exact revocation reason code<input value={revokeReason} maxLength={200}
         onChange={event => { setRevokeReason(event.currentTarget.value); setAuthorityReviewed(false); }} /></label>}
-      {authority.transportStatus === "pending" && authority.recoveryOperationId && authorityRead && !attempt
+      {authority.recoveryOperationId && authorityRead && !attempt
         && <label>Exact recovery reason<input value={recoveryReason} maxLength={500}
           onChange={event => { setRecoveryReason(event.currentTarget.value); setAuthorityReviewed(false); }} /></label>}
       <label><input type="checkbox" checked={authorityReviewed} disabled={Boolean(attempt) || Boolean(busy)}
@@ -340,15 +364,19 @@ function NativeDeliveryAuthorityWorkspace({ initialSession }: { initialSession: 
         onClick={() => void actAuthority("revoke")}>Retry same frozen revoke</button>}
       {attempt?.kind === "recover" && <button type="button" className="button-orange" disabled={Boolean(busy)}
         onClick={() => void actAuthority("recover")}>Retry same frozen recovery</button>}
-      {!attempt && authority.state === "active" && <button type="button" className="button-danger"
+      {attempt?.kind === "cancel" && <button type="button" className="button-orange" disabled={Boolean(busy)}
+        onClick={() => void cancelAuthority()}>Retry same frozen cancellation</button>}
+      {!attempt && authority.cancellationOperationId && authorityRead && <button type="button" className="button-orange"
+        disabled={Boolean(busy) || !authorityReviewed} onClick={() => void cancelAuthority()}>Reconcile exact expired grant</button>}
+      {!attempt && authority.state === "active" && authority.transportStatus !== "dead" && <button type="button" className="button-danger"
         disabled={Boolean(busy) || !authorityReviewed || !revokeReason}
         onClick={() => void actAuthority("revoke")}>Revoke exact delivery authority</button>}
-      {!attempt && authority.transportStatus === "pending" && authority.recoveryOperationId && authorityRead
+      {!attempt && authority.recoveryOperationId && authorityRead
         && <button type="button" className="button-orange" disabled={Boolean(busy) || !authorityReviewed || !recoveryReason}
-          onClick={() => void actAuthority("recover")}>Recover exact pending delivery</button>}
-      {authority.transportStatus === "pending" && !authorityRead
+          onClick={() => void actAuthority("recover")}>Recover exact stored delivery</button>}
+      {authority.recoveryOperationId && !authorityRead
         && <p>Reload this exact authority before recovery so the stored operation and current owner authority are revalidated.</p>}
-      {authority.state === "active" && <p>Features and expiry are immutable here. Revoke explicitly, then separately review and reissue a current candidate.</p>}
+      {authority.state === "active" && authority.transportStatus !== "dead" && <p>Features and expiry are immutable here. Revoke explicitly, then separately review and reissue a current candidate.</p>}
     </section></Card>}
     {message && <p role="status">{message}</p>}{error && <p role="alert">{error}</p>}
   </main></div>;

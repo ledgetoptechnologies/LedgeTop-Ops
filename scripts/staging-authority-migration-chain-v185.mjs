@@ -27,6 +27,43 @@ export const AUTHORITY_MIGRATION_CHAIN_187 = Object.freeze({
   names: "ce00ad1a6b67cb8a7f0ed5e197ebd5fbdfabd2566dc3c402f1eee79302036951",
   contents: "3e0f92864210aab88c97220e50649a46d4ec8d6367262ea8f42ca75ce17a8567",
 });
+export const AUTHORITY_MIGRATION_CHAIN_190 = Object.freeze({
+  count: 190,
+  final: "0190_client_hub_native_project_preparation_authority.sql",
+  names: "1c42cda3e4a770e59da42fecb2eaa9063abbe415eb500d5cde22b5755fc0ddbf",
+  contents: "7e6f75368c5aed14209b092e026458894c6509324c8fdbedcf96c8df2ac0f260",
+});
+export const AUTHORITY_MIGRATION_CHAIN_192 = Object.freeze({
+  count: 192,
+  final: "0192_ops_service_definition_authority.sql",
+  names: "2ac701ff1485af80b9b2edfcd0ce1b8cb9a413a925bf799d6531069eabb1f78c",
+  contents: "148ff7d7b73ec90af81730f48520f2b7e4f0c1d80eebe32143c6a088d5f81e62",
+});
+export const AUTHORITY_MIGRATION_CHAIN_194 = Object.freeze({
+  count: 194,
+  final: "0194_operations_portal_native_delivery_terminal_cancellations.sql",
+  names: "21797f48e9c38621119a6e78eb431594609ae5520aea9036f1e5db288a984a10",
+  contents: "156c845b6185e89ae18533015055b0c0e09f6939348a165da68a1a3c10eabc25",
+});
+export const AUTHORITY_MIGRATION_CHAIN_195 = Object.freeze({
+  count: 195,
+  final: "0195_client_hub_native_project_current_owner_observation.sql",
+  names: "3aecb42400d7a5e95687cca3eb256e880aa306dd4184747c0171f6301ffb71fd",
+  contents: "46d06078251512d73faf9b96f277165d2a7a01e8c7d97d3e775dde0a167ef9da",
+});
+export const AUTHORITY_MIGRATION_CHAIN_196 = Object.freeze({
+  count: 196,
+  final: "0196_native_directory_maintenance_authority.sql",
+  names: "c8f55f7a543d1e51d69abce753c2ce54a4640c35fd93c2769c8e971bb8162106",
+  contents: "5dd50102b800eb3b49c9c5f41adb6f1ce44005425118b718ecc544e7f0b49c03",
+});
+
+export const AUTHORITY_MIGRATION_CHAIN_198 = Object.freeze({
+  count: 198,
+  final: "0198_native_directory_active_binding_revision_refresh.sql",
+  names: "d88ba83a54c045e5eb416fb912324047d68160f9f198e6b56591f0f0909788f2",
+  contents: "47369a1c36e64853cf8e82c874af734ff0c2745bef416cca9c3a01cae16f8409",
+});
 
 const sha = value => crypto.createHash("sha256").update(value).digest("hex");
 const matches = (names, contents, chain) => names.length === chain.count
@@ -41,8 +78,20 @@ export function validateAuthorityMigrationChainV185(root, requestedNames, fail) 
     if (!stat.isFile() || stat.isSymbolicLink()) fail("regular migration required");
     return `${name}\0${sha(fs.readFileSync(file))}`;
   });
-  if (!matches(names, contents, AUTHORITY_MIGRATION_CHAIN_187)) fail("exact reviewed 0187 migration chain required");
-  const requestedChain = requestedNames?.length === AUTHORITY_MIGRATION_CHAIN_184.count
+  if (!matches(names, contents, AUTHORITY_MIGRATION_CHAIN_198)) fail("exact reviewed 0198 migration chain required");
+  const requestedChain = requestedNames?.length === AUTHORITY_MIGRATION_CHAIN_198.count
+    ? AUTHORITY_MIGRATION_CHAIN_198
+    : requestedNames?.length === AUTHORITY_MIGRATION_CHAIN_196.count
+    ? AUTHORITY_MIGRATION_CHAIN_196
+    : requestedNames?.length === AUTHORITY_MIGRATION_CHAIN_195.count
+    ? AUTHORITY_MIGRATION_CHAIN_195
+    : requestedNames?.length === AUTHORITY_MIGRATION_CHAIN_194.count
+    ? AUTHORITY_MIGRATION_CHAIN_194
+    : requestedNames?.length === AUTHORITY_MIGRATION_CHAIN_192.count
+    ? AUTHORITY_MIGRATION_CHAIN_192
+    : requestedNames?.length === AUTHORITY_MIGRATION_CHAIN_190.count
+    ? AUTHORITY_MIGRATION_CHAIN_190
+    : requestedNames?.length === AUTHORITY_MIGRATION_CHAIN_184.count
     ? AUTHORITY_MIGRATION_CHAIN_184
     : requestedNames?.length === AUTHORITY_MIGRATION_CHAIN_185.count ? AUTHORITY_MIGRATION_CHAIN_185
       : requestedNames?.length === AUTHORITY_MIGRATION_CHAIN_186.count ? AUTHORITY_MIGRATION_CHAIN_186

@@ -4,7 +4,14 @@ import { handleOperationsPortalNativeDeliveryAuthorityOwnerHttp } from "./operat
 import { handleOperationsPortalWorkspaceOwnerHttp } from "./operations-portal-workspace-owner-http";
 import type { OperationsPortalWorkspacePublicationBinding } from "./operations-portal-workspace-publication-outbox";
 import type { OperationsPortalNativeDeliveryAuthorityDispatchEnv } from "./operations-portal-native-delivery-authority-dispatch";
-import { exactNativeStagingConfiguration } from "./staging-native-authority-policy";
+import { exactNativeStagingConfiguration, exactNativeBillingStagingConfiguration,
+  exactNativeDirectoryMaintenanceStagingConfiguration } from "./staging-native-authority-policy";
+import { handleOperationsNativeDirectoryMaintenanceOwnerHttp } from "./operations-native-directory-maintenance-owner-http";
+import { handleOperationsPortalNativeBillingAuthorityOwnerHttp } from "./operations-portal-native-billing-authority-owner-http";
+import { handleOperationsPortalNativeBillingPermissionOwnerHttp,
+  OPERATIONS_NATIVE_BILLING_PERMISSION_OWNER_BASE } from "./operations-portal-native-billing-permission-owner-http";
+import { reviewOperationsPortalNativeBillingCandidate, grantOperationsPortalNativeBillingAuthority,
+  revokeOperationsPortalNativeBillingAuthority, readOperationsPortalNativeBillingAuthorityStatus } from "./operations-portal-native-billing-authority-issuer";
 import type { Env } from "./types";
 
 const STAGING_HOST = "ops-staging.ledgetopdroneservices.com";
@@ -13,6 +20,11 @@ const RECIPIENT_API = "/api/native-client-portal/operations-recipient-enrollment
 const DELIVERY_API = "/api/native-client-portal/operations-delivery-authority";
 const WORKSPACE_API = "/api/native-client-portal/operations-workspaces";
 const WORKSPACE_PAGE = "/administration/client-portal/operations-workspaces";
+const BILLING_API = "/api/native-client-portal/operations-billing-authority";
+const BILLING_PAGE = "/administration/client-portal/operations-billing-authority";
+const BILLING_PERMISSION_PAGE = "/administration/client-portal/operations-billing-permissions";
+const DIRECTORY_MAINTENANCE_API = "/api/native-client-portal/directory-maintenance-authority";
+const DIRECTORY_MAINTENANCE_PAGE = "/administration/staging/directory-maintenance-authority";
 const OWNER_PAGES = new Set([
   "/administration/client-portal/operations-recipients",
   "/administration/client-portal/operations-delivery-authority",
@@ -25,6 +37,9 @@ type NativeStagingEnv = Env & OperationsPortalNativeDeliveryAuthorityDispatchEnv
   OPERATIONS_PORTAL_NATIVE_RECIPIENT_AUTHORITY?: unknown;
   OPERATIONS_PORTAL_NATIVE_DELIVERY_OWNER_ENABLED?: string;
   OPERATIONS_PORTAL_NATIVE_DELIVERY_READER_ENABLED?: string;
+  OPERATIONS_PORTAL_NATIVE_DELIVERY_CANCELLATION_ENABLED?: string;
+  OPERATIONS_PORTAL_NATIVE_BILLING_OWNER_ENABLED?: string;
+  NATIVE_DIRECTORY_MAINTENANCE_OWNER_ENABLED?: string;
   OPERATIONS_PORTAL_WORKSPACE_OWNER_ENABLED?: string;
   OPERATIONS_PORTAL_WORKSPACE_PUBLICATION_DISPATCH_ENABLED?: string;
   OPERATIONS_PORTAL_WORKSPACE_PUBLICATION?: OperationsPortalWorkspacePublicationBinding;
@@ -39,6 +54,38 @@ const notFound = () => Response.json({ error: "Not found" }, { status: 404 });
 export default {
   async fetch(request: Request, env: NativeStagingEnv, ctx: ExecutionContext): Promise<Response> {
     const pathname = new URL(request.url).pathname;
+    if (pathFamily(pathname, DIRECTORY_MAINTENANCE_API) || pathname === DIRECTORY_MAINTENANCE_PAGE) {
+      if (!exactNativeDirectoryMaintenanceStagingConfiguration(request, env)) return notFound();
+      if (pathname === DIRECTORY_MAINTENANCE_PAGE) return env.ASSETS.fetch(request);
+      return handleOperationsNativeDirectoryMaintenanceOwnerHttp(request, {
+        environment: env.ENVIRONMENT, expectedHost: STAGING_HOST,
+        enabledFlag: env.NATIVE_DIRECTORY_MAINTENANCE_OWNER_ENABLED ?? "false",
+        configuration: { enabled: true, issuer: env.TEAM_DOMAIN ?? "", staffAudience: env.OPERATIONS_AUD,
+          origin: STAGING_ORIGIN, csrfSecret: env.OPERATIONS_SESSION_SECRET }, database: env.OPS_DB,
+      });
+    }
+    if (pathFamily(pathname, OPERATIONS_NATIVE_BILLING_PERMISSION_OWNER_BASE) || pathname === BILLING_PERMISSION_PAGE) {
+      if (!exactNativeBillingStagingConfiguration(request, env)) return notFound();
+      if (pathname === BILLING_PERMISSION_PAGE) return env.ASSETS.fetch(request);
+      return handleOperationsPortalNativeBillingPermissionOwnerHttp(request, {
+        environment: env.ENVIRONMENT, expectedHost: STAGING_HOST,
+        delegationFlag: env.OPERATIONS_PORTAL_NATIVE_BILLING_OWNER_ENABLED ?? "false",
+        configuration: { enabled: true, issuer: env.TEAM_DOMAIN ?? "", staffAudience: env.OPERATIONS_AUD,
+          origin: STAGING_ORIGIN, csrfSecret: env.OPERATIONS_SESSION_SECRET }, database: env.OPS_DB,
+      });
+    }
+    if (pathFamily(pathname, BILLING_API) || pathname === BILLING_PAGE) {
+      if (!exactNativeBillingStagingConfiguration(request, env)) return notFound();
+      if (pathname === BILLING_PAGE) return env.ASSETS.fetch(request);
+      return handleOperationsPortalNativeBillingAuthorityOwnerHttp(request, {
+        environment: env.ENVIRONMENT, expectedHost: STAGING_HOST,
+        lifecycleFlag: env.OPERATIONS_PORTAL_NATIVE_BILLING_OWNER_ENABLED ?? "false",
+        configuration: { enabled: true, issuer: env.TEAM_DOMAIN ?? "", staffAudience: env.OPERATIONS_AUD,
+          origin: STAGING_ORIGIN, csrfSecret: env.OPERATIONS_SESSION_SECRET }, database: env.OPS_DB,
+        core: { review: reviewOperationsPortalNativeBillingCandidate, grant: grantOperationsPortalNativeBillingAuthority,
+          revoke: revokeOperationsPortalNativeBillingAuthority, readStatus: readOperationsPortalNativeBillingAuthorityStatus },
+      });
+    }
     const workspaceOwned = pathFamily(pathname, WORKSPACE_API) || pathname === WORKSPACE_PAGE;
     const owned = pathFamily(pathname, RECIPIENT_API) || pathFamily(pathname, DELIVERY_API) || OWNER_PAGES.has(pathname);
     if (owned && !exactNativeStagingConfiguration(request, env)) return notFound();
@@ -75,3 +122,4 @@ export default {
 
 export * from "./index";
 export { OperationsPortalNativeDeliveryAuthorizationReader } from "./operations-portal-native-delivery-authorization-entrypoint";
+export { ClientPortalNativeFinancialReader } from "./client-portal-native-financial-entrypoint";

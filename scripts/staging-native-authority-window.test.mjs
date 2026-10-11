@@ -404,18 +404,22 @@ test("prepare accepts the exact canonical repository migration chain through 018
   }
 });
 
-test("prepare rejects the canonical repository migration chain through 0187", async () => {
+test("prepare rejects reviewed successor chains beyond its exact 0183 authority boundary", async t => {
   const migrationDirectory = path.join(ROOT, "apps", "operations", "migrations");
-  const migrations = fs.readdirSync(migrationDirectory)
-    .filter(name => /^\d{4}_.+\.sql$/.test(name))
-    .sort();
-  assert.equal(migrations.at(-1), "0187_operations_portal_native_delivery_literal_prefix_guard.sql");
-  const { dependencies } = preparationHarness({ actualMigrations: migrations });
-  dependencies.root = ROOT;
-  delete dependencies.reviewedMigrations;
-  await assert.rejects(prepareStagingNativeAuthorityArea("binding.json", AREA, dependencies), error => {
-    assert.equal(error.prepareStageCode, "local-chain-mismatch");
-    return true;
+  const canonical = fs.readdirSync(migrationDirectory).filter(name => /^\d{4}_.+\.sql$/.test(name)).sort();
+  for (const [boundary, finalMigration] of [
+    ["0187", "0187_operations_portal_native_delivery_literal_prefix_guard.sql"],
+    ["0194", "0194_operations_portal_native_delivery_terminal_cancellations.sql"],
+  ]) await t.test(`through ${boundary}`, async () => {
+    const migrations = canonical.filter(name => name.slice(0, 4) <= boundary);
+    assert.equal(migrations.at(-1), finalMigration);
+    const { dependencies } = preparationHarness({ actualMigrations: migrations });
+    dependencies.root = ROOT;
+    delete dependencies.reviewedMigrations;
+    await assert.rejects(prepareStagingNativeAuthorityArea("binding.json", AREA, dependencies), error => {
+      assert.equal(error.prepareStageCode, "local-chain-mismatch");
+      return true;
+    });
   });
 });
 

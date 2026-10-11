@@ -54,6 +54,26 @@ function reusableFixture() {
   return value;
 }
 
+function successorFixture() {
+  const value = reusableFixture(), historical = value.recoveryLineage;
+  value.schemaVersion = 3;
+  const prior = historical.directoryGrants[0];
+  const next = { ...prior, active: prior.active === 1 ? 0 : 1 };
+  const nextVersion = historical.directoryGrantHistory.filter(row => row.grant_id === next.id).length + 1;
+  value.currentDirectory = {
+    grants: [next, ...historical.directoryGrants.slice(1)].sort((a, b) => a.id.localeCompare(b.id)),
+    history: [...historical.directoryGrantHistory, {
+      grant_id: next.id, grant_version: nextVersion, staff_id: next.staff_id, permission: next.permission,
+      effect: next.effect, scope_kind: next.scope_kind, business_area_id: next.business_area_id,
+      division_id: next.division_id, resource_id: next.resource_id, active: next.active,
+      grant_generation: historical.directoryGrantGeneration.generation + 1, recorded_at: "2026-10-10T12:20:00.000Z",
+    }],
+    generation: { staff_id: target.staffId, generation: historical.directoryGrantGeneration.generation + 1,
+      updated_at: "2026-10-10T12:20:00.000Z" },
+  };
+  return value;
+}
+
 test("compiles an exact organization-area provision and paired cleanup", () => {
   const provision = compileProjectOrganizationAuthorityV184(fixture(), { root });
   assert.equal(provision.input.target.businessAreaId, "drone-services-staging");
@@ -87,6 +107,74 @@ test("accepts exact closed v3 recovery lineage without weakening the organizatio
   const artifact = compileProjectOrganizationAuthorityV184(fixture(3), { root });
   assert.equal(artifact.input.recoveryLineage.revokeArtifact.approval.revoked_at, closeStamp);
   assert.equal(artifact.input.target.businessAreaId, target.businessAreaId);
+});
+
+test("successor accepts legitimate later closed Directory history and pins its complete current state", () => {
+  const value = successorFixture(), artifact = compileProjectOrganizationAuthorityV184(value, { root });
+  assert.equal(artifact.input.schemaVersion, 3);
+  assert.ok(artifact.provision.statements.some(statement => statement.sql.includes("current-directory-generation")));
+  assert.ok(artifact.provision.statements.some(statement => statement.sql.includes("current-directory-history-count")));
+  assert.equal(artifact.input.currentDirectory.generation.generation,
+    artifact.input.recoveryLineage.directoryGrantGeneration.generation + 1);
+});
+
+test("successor rejects forged, deleted or reordered recovery prefixes and current Directory drift", () => {
+  const mutations = [
+    value => value.currentDirectory.history[0].active ^= 1,
+    value => value.currentDirectory.history.splice(0, 1),
+    value => [value.currentDirectory.history[0], value.currentDirectory.history[1]]
+      = [value.currentDirectory.history[1], value.currentDirectory.history[0]],
+    value => value.currentDirectory.generation.generation++,
+    value => value.currentDirectory.generation.updated_at = stamp,
+    value => value.currentDirectory.grants.pop(),
+    value => value.currentDirectory.history.at(-1).grant_version += 2,
+    value => value.currentDirectory.history.at(-1).permission = "directory.identity.link",
+    value => value.currentDirectory.history.at(-1).recorded_at = "not-a-timestamp",
+    value => value.recoveryLineage.receipts[0].result_sha256 = "0".repeat(64),
+  ];
+  for (const mutate of mutations) {
+    const value = successorFixture(); mutate(value);
+    assert.throws(() => compileProjectOrganizationAuthorityV184(value, { root }));
+  }
+});
+
+test("schema3 cleanup preserves original provision evidence and requires an exact fresh successor snapshot", () => {
+  const value = successorFixture(), provision = compileProjectOrganizationAuthorityV184(value, { root });
+  const row = value.currentDirectory.grants[0], recordedAt = "2026-10-10T12:30:00.000Z";
+  const cleanupCurrentDirectory = structuredClone(value.currentDirectory), cleanupGrant = cleanupCurrentDirectory.grants[0];
+  cleanupGrant.active ^= 1;
+  cleanupCurrentDirectory.history.push({ grant_id: cleanupGrant.id,
+    grant_version: cleanupCurrentDirectory.history.filter(item => item.grant_id === cleanupGrant.id).length + 1,
+    staff_id: cleanupGrant.staff_id, permission: cleanupGrant.permission, effect: cleanupGrant.effect,
+    scope_kind: cleanupGrant.scope_kind, business_area_id: cleanupGrant.business_area_id,
+    division_id: cleanupGrant.division_id, resource_id: cleanupGrant.resource_id, active: cleanupGrant.active,
+    grant_generation: cleanupCurrentDirectory.generation.generation + 1, recorded_at: recordedAt });
+  cleanupCurrentDirectory.generation = { staff_id: target.staffId,
+    generation: cleanupCurrentDirectory.generation.generation + 1, updated_at: recordedAt };
+  const reusable = value.projectGrants.find(item => item.id === value.approval.grantId);
+  const readback = { approval: provision.provision.approval,
+    receipt: { ...provision.provision.receipt, executed_at: stamp },
+    grant: { ...reusable, active: 1, version: reusable.version + 1 } };
+  const sealedValue = { ...value, cleanupCurrentDirectory, provisionReadback: readback };
+  const cleanup = compileProjectOrganizationAuthorityV184(sealedValue, { root });
+  assert.deepEqual(cleanup.provision, { approval: provision.provision.approval, receipt: provision.provision.receipt });
+  assert.notEqual(cleanup.revoke.approval.canonical_plan_sha256, provision.provision.approval.canonical_plan_sha256);
+  const forged = structuredClone(sealedValue); forged.cleanupCurrentDirectory.history[0].active ^= 1;
+  assert.throws(() => compileProjectOrganizationAuthorityV184(forged, { root }), /immutable prefix/);
+  assert.throws(() => compileProjectOrganizationAuthorityV184({ ...value, cleanupCurrentDirectory }, { root }), /cleanup directory/);
+  assert.throws(() => compileProjectOrganizationAuthorityV184({ ...value, provisionReadback: readback }, { root }), /cleanup directory/);
+  assert.equal(row.id, cleanupGrant.id);
+});
+
+test("successor rejects any unexpected active Project authority", () => {
+  for (const effect of ["allow", "deny"]) {
+    const value = successorFixture();
+    value.projectGrants.push({ id: uuid(effect === "allow" ? 70 : 71), staff_id: target.staffId,
+      capability: "project.shared.sync", effect, scope_kind: "business_area",
+      business_area_id: clientAreaTarget.businessAreaId, division_id: null, external_project_id: null,
+      active: 1, version: 1, granted_by: target.staffId, created_at: stamp });
+    assert.throws(() => compileProjectOrganizationAuthorityV184(value, { root }), /no pre-existing active project authority/);
+  }
 });
 
 test("rejects client-area and arbitrary organization targets", () => {

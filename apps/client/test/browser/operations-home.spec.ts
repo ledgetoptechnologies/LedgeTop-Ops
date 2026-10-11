@@ -14,6 +14,34 @@ const response = {
   }],
 };
 
+const financialPath = (authorityId: string) =>
+  `/api/client/v2/operations/home/${encodeURIComponent(authorityId)}/financial`;
+
+test("financial panel clears the prior authority synchronously while a replacement read is deferred", async ({ page }) => {
+  const authorityB="22345678-1234-4123-8123-123456789abc";
+  const authorityA=response.homes[0]!.authorityId;
+  let homeReads=0,releaseB:undefined|(()=>void);
+  const financial=(label:string,url:string)=>({resourceMode:"operations_financial",collections:[{grantId:"32345678-1234-4123-8123-123456789abc",
+    revision:1,documents:[{publicId:`doc-${label}`,kind:"contract",status:"pending",currency:"USD",total:"0.00",
+      amountPaid:null,balanceDue:null,documentUrl:url,actionUrl:url}]}]});
+  await page.route("**/api/client/**",async route=>{const path=new URL(route.request().url()).pathname;
+    if(path==="/api/client/v2/operations/home"){
+      const body=homeReads++===0?response:{...response,homes:[{...response.homes[0],authorityId:authorityB,workspaceId:"workspace-two"}]};
+      return route.fulfill({json:body});}
+    if(path.endsWith(`/${authorityA}/financial`))return route.fulfill({json:financial("A","https://pa-a.example.test/?page=public-doc&token=abcdefghijklmnop")});
+    if(path.endsWith(`/${authorityB}/financial`)){await new Promise<void>(resolve=>{releaseB=resolve;});
+      return route.fulfill({json:financial("B","https://pa-b.example.test/?page=public-doc&token=abcdefghijklmnop")});}
+    if(path==="/api/client/session")return route.fulfill({status:401,json:{error:"Sign in required"}});
+    return route.fulfill({status:404,json:{error:"not found"}});});
+  await page.goto("/portal");
+  await expect(page.getByRole("link",{name:"View document"})).toHaveAttribute("href",/pa-a\.example\.test/);
+  await page.evaluate(()=>document.dispatchEvent(new Event("visibilitychange")));
+  await expect(page.getByText("Loading financial documents…",{exact:true})).toBeVisible();
+  await expect(page.locator('a[href*="pa-a.example.test"]')).toHaveCount(0);
+  releaseB?.();
+  await expect(page.getByRole("link",{name:"View document"})).toHaveAttribute("href",/pa-b\.example\.test/);
+});
+
 async function expectAuthorizedNavigation(page: Page, unavailableLinks: string[] = []) {
   const trigger = page.getByRole("button", { name: "Open navigation", exact: true });
   const mobile = await trigger.isVisible();
@@ -81,7 +109,11 @@ test("operations metadata remains the only surface when the independent client b
   await accountMenu.click();
   await expect(page.getByRole("menuitem", { name: "Logout" }))
     .toHaveAttribute("href", "/cdn-cgi/access/logout");
-  expect(calls).toEqual(["/api/client/v2/operations/home", "/api/client/session"]);
+  expect(calls).toEqual([
+    "/api/client/v2/operations/home",
+    "/api/client/session",
+    financialPath(response.homes[0]!.authorityId),
+  ]);
 });
 
 test("native operations home does not label an absent optional Client workspace as unavailable", async ({ page }) => {
@@ -126,7 +158,13 @@ for (const [name, emptyResponse, detail] of [
     await expect(summary.getByRole("link")).toHaveCount(0);
     await expect(summary.getByRole("button")).toHaveCount(0);
     await expect(page.getByRole("navigation")).toHaveCount(0);
-    expect(calls).toEqual(["/api/client/v2/operations/home", "/api/client/session"]);
+    expect(calls).toEqual(emptyResponse.homes.length === 0
+      ? ["/api/client/v2/operations/home", "/api/client/session"]
+      : [
+          "/api/client/v2/operations/home",
+          "/api/client/session",
+          financialPath(emptyResponse.homes[0]!.authorityId!),
+        ]);
   });
 }
 
@@ -147,11 +185,12 @@ test("independently authorized client portal composes an actionless operations s
   await expect(summary.getByRole("link")).toHaveCount(0);
   await expect(summary.getByRole("button")).toHaveCount(0);
   await expect(page.getByRole("heading", { name: "Your services" })).toHaveCount(0);
-  await expect.poll(() => calls.length).toBe(7);
+  await expect.poll(() => calls.length).toBe(8);
   expect(calls.slice(0, 2)).toEqual(["/api/client/v2/operations/home", "/api/client/session"]);
   expect(new Set(calls.slice(2))).toEqual(new Set([
     "/api/client/projects", "/api/client/service-requests", "/api/client/map-config",
     "/api/client/notification-history", "/api/client/request-readiness",
+    financialPath(response.homes[0]!.authorityId),
   ]));
 });
 
@@ -186,7 +225,8 @@ test("combined portal keeps its operations heading when an authorized home has n
   await expect(summary.getByRole("link")).toHaveCount(0);
   await expect(summary.getByRole("button")).toHaveCount(0);
   await expectAuthorizedNavigation(page, ["Requests", "Feedback"]);
-  await expect.poll(() => calls.length).toBe(7);
+  await expect.poll(() => calls.length).toBe(8);
+  expect(calls).toContain(financialPath(response.homes[0]!.authorityId));
 });
 
 test("independently authorized native dashboard keeps its workspace distinct from operations metadata", async ({ page }) => {
@@ -318,7 +358,11 @@ test("unified portal accepts server metadata boundaries and opaque slash IDs", a
   const calls = await interceptClientApi(page, 200, boundaryResponse);
   await page.goto("/portal");
   await expect(page.getByText(label, { exact: true })).toBeVisible();
-  expect(calls).toEqual(["/api/client/v2/operations/home", "/api/client/session"]);
+  expect(calls).toEqual([
+    "/api/client/v2/operations/home",
+    "/api/client/session",
+    financialPath(boundaryResponse.homes[0]!.authorityId),
+  ]);
 });
 
 for (const [status, heading] of [[401, "Sign in required"], [403, "Service home access is not enabled"], [503, "Service home unavailable"]] as const) {

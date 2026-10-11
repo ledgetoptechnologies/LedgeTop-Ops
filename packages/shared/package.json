@@ -10,6 +10,7 @@
     "./api-v2-portal-publication-proof": "./src/api-v2-portal-publication-proof.ts",
     "./operations-portal-workspace-publication": "./src/operations-portal-workspace-publication.ts",
     "./operations-portal-native-authority": "./src/operations-portal-native-authority.ts",
+    "./operations-portal-native-billing-authority": "./src/operations-portal-native-billing-authority.ts",
     "./operations-portal-native-delivery-authority": "./src/operations-portal-native-delivery-authority.ts"
   }
 }

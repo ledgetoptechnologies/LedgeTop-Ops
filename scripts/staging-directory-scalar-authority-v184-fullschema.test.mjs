@@ -25,7 +25,9 @@ const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),"..");
 const requireOperations=createRequire(path.join(root,"apps/operations/package.json"));
 const {Miniflare}=requireOperations("miniflare"),{unstable_splitSqlQuery}=requireOperations("wrangler");
 const migrationDir=path.join(root,"apps/operations/migrations");
-const migrationNames=fs.readdirSync(migrationDir).filter(name=>/^\d{4}_.+\.sql$/.test(name)).sort();
+const migrationNames=fs.readdirSync(migrationDir).filter(name=>/^\d{4}_.+\.sql$/.test(name)&&name.slice(0,4)<="0195").sort();
+const CANONICAL_BOOTSTRAP_MIGRATION_COUNT=195;
+const CANONICAL_BOOTSTRAP_FINAL_MIGRATION="0195_client_hub_native_project_current_owner_observation.sql";
 const viteUrl=pathToFileURL(path.join(root,"apps/operations/node_modules/vite/dist/node/index.js")).href;
 const all=async(db,sql,...params)=>(await db.prepare(sql).bind(...params).all()).results;
 const first=(db,sql,...params)=>db.prepare(sql).bind(...params).first();
@@ -178,7 +180,7 @@ async function lifecycle(t){
  t.after(async()=>{try{await runtime.dispose()}finally{await server.close()}});
  const db=await runtime.getD1Database("OPS_DB");
  const [writer,profileRoutes,profileDispatcher,relationshipDispatcher]=await Promise.all([server.ssrLoadModule("/src/worker/native-directory-profile-writer.ts"),server.ssrLoadModule("/src/worker/native-directory-profile-routes.ts"),server.ssrLoadModule("/src/worker/project-alpha-directory-profile-outbox-dispatcher.ts"),server.ssrLoadModule("/src/worker/project-alpha-directory-relationship-outbox-dispatcher.ts")]);
- await migrate(db);assert.equal(migrationNames.length,187);assert.deepEqual((await all(db,"SELECT name FROM d1_migrations ORDER BY name")).map(row=>row.name),migrationNames);assert.deepEqual((await all(db,"PRAGMA foreign_key_check")),[]);
+ await migrate(db);assert.equal(migrationNames.length,CANONICAL_BOOTSTRAP_MIGRATION_COUNT);assert.equal(migrationNames.at(-1),CANONICAL_BOOTSTRAP_FINAL_MIGRATION);assert.deepEqual((await all(db,"SELECT name FROM d1_migrations ORDER BY name")).map(row=>row.name),migrationNames);assert.deepEqual((await all(db,"PRAGMA foreign_key_check")),[]);
  const recoveryGrantIds=await seedRecoveryGrants(db);
  const recoveryProvision=compileRelationshipRecoveryAuthorityV184(await recoveryInput(db,"provision",recoveryGrantIds));
  await applyRelationshipRecoveryAuthorityV184(db,recoveryProvision,{target:STAGING_TARGET,root});
@@ -213,13 +215,14 @@ async function lifecycle(t){
  assert.deepEqual(await all(db,"SELECT * FROM native_directory_grants WHERE id NOT IN (?,?) ORDER BY id",...grantIds),otherBefore);
 
  // The recovery mutation window is closed here. Its identity-valid historical
- // ACK must still be usable by the ordinary profile writer with the flag off.
- const beforeStaleGeneration=await scalarSnapshot(db);
- assert.deepEqual(await writer.writeNativeDirectoryProfile(db,{operation:"update",mutationId:uuid(300),recordId:plan.recordId,expectedLocalVersion:2,kind:"client",profile:afterProfile,relationship:{organizationRecordId:scalarTarget.organizationRecordId,expectedRelationshipVersion:2},destinations:[{...destination,expectedAuthorizationGeneration:"55"}],actor}),{status:"blocked",reason:"mapping_or_delivery_state"});
- assert.deepEqual(await scalarSnapshot(db),beforeStaleGeneration,"stale authorization generation must not change records, outbox, or intents");
+ // ACK proves the durable head, while the ordinary route-proven generation is
+ // deliberately newer and remains the PA compare-and-swap value on the wire.
  const updated=await writer.writeNativeDirectoryProfile(db,{operation:"update",mutationId:plan.mutationId,recordId:plan.recordId,expectedLocalVersion:2,kind:"client",profile:afterProfile,relationship:{organizationRecordId:scalarTarget.organizationRecordId,expectedRelationshipVersion:2},destinations:[destination],actor});
  if(updated.status!=="written")throw new Error(`normal client profile writer: ${JSON.stringify(updated)}`);
  assert.equal(updated.commandIds.length,1);const commandId=updated.commandIds[0],posts=[],requestId=uuid(302);
+ const freshCommand=JSON.parse((await first(db,"SELECT command_json FROM project_alpha_directory_outbox WHERE command_id=?",commandId)).command_json);
+ assert.equal(freshCommand.commandId,commandId);assert.equal(freshCommand.expectedRevision,"8");
+ assert.equal(freshCommand.expectedAuthorizationGeneration,"56");assert.equal(freshCommand.fields.email,afterProfile.email);
  const send=async(url,init)=>{if(String(url).endsWith("/capabilities"))return Response.json({apiVersion:"2",sourceInstanceId:recoveryTarget.sourceInstanceId,applicationId:recoveryTarget.applicationId,historyEpoch:recoveryTarget.historyEpochId,requestId,grantedCapabilities:[{name:"api.capabilities.read"},{name:"directory.clients.write"}],implementedEndpoints:[{method:"GET",path:"/api/v2/capabilities",requiredCapability:"api.capabilities.read"},{method:"POST",path:"/api/v2/directory/clients/{publicId}/profile/commands",requiredCapability:"directory.clients.write",requiresSourceInstanceId:true,requiresApplicationId:true,requiresHistoryEpoch:true}]},{headers:{"Cache-Control":"no-store","X-Request-ID":requestId}});posts.push(JSON.parse(String(init?.body)));return Response.json({sourceInstanceId:recoveryTarget.sourceInstanceId,applicationId:recoveryTarget.applicationId,historyEpoch:recoveryTarget.historyEpochId,requestId,replayed:false,result:{resource:{type:"client",publicId:recoveryTarget.clientPublicId,revision:"9"},authorizationGeneration:"56"}},{headers:{"Cache-Control":"no-store","X-Request-ID":requestId}})};
  const env={OPS_DB:db,PROJECT_ALPHA_API_V2_CONNECTIONS:JSON.stringify({version:1,instances:{[recoveryTarget.sourceId]:{sourceId:recoveryTarget.sourceId,enabled:true,baseUrl:recoveryTarget.destinationOrigin,apiKey:"local-test-only",sourceInstanceId:recoveryTarget.sourceInstanceId,applicationId:recoveryTarget.applicationId,historyEpoch:recoveryTarget.historyEpochId}}})};
  assert.deepEqual(await profileDispatcher.dispatchProjectAlphaDirectoryProfileOutboxCommand(env,recoveryTarget.sourceId,commandId,send),{status:"acknowledged",commandId,replayed:false,publicId:recoveryTarget.clientPublicId,revision:"9"});

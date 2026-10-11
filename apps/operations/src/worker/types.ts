@@ -29,6 +29,7 @@ export type Env = Omit<
   | "NATIVE_DIRECTORY_STAGING_EMPTY_ENROLLMENT_FIXTURE_ENABLED"
   | "NATIVE_DIRECTORY_STAGING_EMPTY_ENROLLMENT_FIXTURE_BUSINESS_AREA_ID"
   | "NATIVE_DIRECTORY_PROFILE_WRITES_ENABLED"
+  | "OPS_SERVICE_MANAGEMENT_ENABLED"
   | "NATIVE_DIRECTORY_OUTBOX_DRAIN_ENABLED"
   | "STAGING_DIRECTORY_PROFILE_VIEW_GRANT_ENABLED"
   | "NATIVE_INTEGRATION_CONTROL_ENABLED"
@@ -73,6 +74,8 @@ export type Env = Omit<
 > & {
   /** Explicit because Operations modules are also type-checked from sibling Worker projects with narrower generated Env types. */
   ENVIRONMENT?: string;
+  /** Default-off explicit active Directory binding revision refresh; local/staging only. */
+  NATIVE_DIRECTORY_BINDING_REFRESH_ENABLED?: string;
   PROJECT_ALPHA_DIRECTORY_RELATIONSHIP_GENERATION_RECOVERY_ENABLED?: string;
   PROJECT_ALPHA_API_KEY?: string;
   /** Temporary release barrier for the preserving client-notification table rebuild. */
@@ -118,6 +121,8 @@ export type Env = Omit<
   PROJECT_ALPHA_DIRECTORY_RECONCILIATION_ENABLED?: string;
   /** Default-off administrator-only API-v2 capabilities and inventory readiness check. */
   PROJECT_ALPHA_API_V2_READ_ACCEPTANCE_ENABLED?: string;
+  /** Default-off staging-only exact scalar successor remote-head observation. */
+  STAGING_DIRECTORY_SCALAR_SUCCESSOR_HEAD_ENABLED?: string;
   /** Default-off bounded API-v2 inventory evidence ingestion. */
   PROJECT_ALPHA_API_V2_SYNC_ENABLED?: string;
   /** Staging-only, administrator-protected exact adoption of already-bound Directory identities. */
@@ -150,6 +155,8 @@ export type Env = Omit<
   NATIVE_DIRECTORY_STAGING_EMPTY_ENROLLMENT_FIXTURE_BUSINESS_AREA_ID?: string;
   /** Default-off authenticated native Directory profile create/update routes. */
   NATIVE_DIRECTORY_PROFILE_WRITES_ENABLED?: string;
+  /** Default-off staging-only audited Operations service catalog and exact-client enrollment management. */
+  OPS_SERVICE_MANAGEMENT_ENABLED?: string;
   /** Default-off bounded scheduled delivery for native Directory outboxes. */
   NATIVE_DIRECTORY_OUTBOX_DRAIN_ENABLED?: string;
   /** Default-off native, explicit-grant authority for monitor lifecycle control. */

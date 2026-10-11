@@ -283,6 +283,7 @@ test("requires shared staging resources to agree", () => {
   configs.delivery.services.find(service => service.binding === "CLIENT_DELEGATED_SHARE_SIGNER").service = "wrong-ops-staging";
   configs.delivery.services.find(service => service.binding === "VIEWER_SESSION_ISSUER").entrypoint = "WrongViewerIssuer";
   configs.delivery.services.find(service => service.binding === "CLIENT_PORTAL_SERVICE_METADATA_READER").entrypoint = "WrongMetadataReader";
+  configs.delivery.services.find(service => service.binding === "CLIENT_PORTAL_NATIVE_FINANCIAL_READER").entrypoint = "WrongFinancialReader";
   configs.delivery.services.find(service => service.binding === "CLIENT_PORTAL_RECIPIENT_ENROLLMENT_BRIDGE").entrypoint = "WrongRecipientEnrollmentBridge";
   configs.delivery.services.find(service => service.binding === "OPERATIONS_PORTAL_NATIVE_RECIPIENT_ENROLLMENT").entrypoint = "WrongNativeRecipientIngress";
   configs.delivery.services.find(service => service.binding === "OPERATIONS_PORTAL_NATIVE_DELIVERY_AUTHORIZATION_READER").entrypoint = "WrongNativeDeliveryReader";
@@ -295,6 +296,7 @@ test("requires shared staging resources to agree", () => {
   assert(errors.some((error) => error.includes("delegated-share signer")));
   assert(errors.some((error) => error.includes("Viewer session issuer")));
   assert(errors.some((error) => error.includes("service metadata reader")));
+  assert(errors.some((error) => error.includes("native financial reader")));
   assert(errors.some((error) => error.includes("recipient enrollment bridge")));
   assert(errors.some((error) => error.includes("native recipient enrollment")));
   assert(errors.some((error) => error.includes("native authorization reader")));
@@ -438,11 +440,11 @@ test("requires every portal-v2 and Operations capability to be explicitly false"
   }
 });
 
-test("pins the native portal, the complete Operations chain, both 0199 files, and the 0200-0228 release contract", () => {
-  assert.equal(REQUIRED_STAGING_MIGRATIONS.operations.length, 174);
+test("pins the native portal, the complete Operations 0198 chain, both 0199 files, and the 0200-0230 release contract", () => {
+  assert.equal(REQUIRED_STAGING_MIGRATIONS.operations.length, 185);
   assert.equal(REQUIRED_STAGING_MIGRATIONS.operations[0], "0014_staff_acl_controls.sql");
-  assert.equal(REQUIRED_STAGING_MIGRATIONS.operations.at(-1), "0187_operations_portal_native_delivery_literal_prefix_guard.sql");
-  assert.deepEqual(REQUIRED_STAGING_MIGRATIONS.delivery.slice(-46), [
+  assert.equal(REQUIRED_STAGING_MIGRATIONS.operations.at(-1), "0198_native_directory_active_binding_revision_refresh.sql");
+  assert.deepEqual(REQUIRED_STAGING_MIGRATIONS.delivery.slice(-48), [
     "0184_native_client_feedback.sql",
     "0185_native_service_request_ownership.sql",
     "0186_delivery_notification_authority_provenance.sql",
@@ -489,6 +491,8 @@ test("pins the native portal, the complete Operations chain, both 0199 files, an
     "0226_operations_portal_native_workspace_cleanup.sql",
     "0227_operations_portal_native_delivery_authority.sql",
     "0228_operations_portal_native_content_start_audit.sql",
+    "0229_operations_portal_native_delivery_regrant.sql",
+    "0230_operations_portal_native_delivery_terminal_cancellations.sql",
   ]);
   assert.deepEqual(REQUIRED_STAGING_MIGRATIONS.operations.slice(REQUIRED_STAGING_MIGRATIONS.operations.indexOf("0123_native_directory_authority_history.sql")), [
     "0123_native_directory_authority_history.sql",
@@ -556,6 +560,17 @@ test("pins the native portal, the complete Operations chain, both 0199 files, an
     "0185_project_alpha_directory_binding_generation_epochs.sql",
     "0186_project_alpha_directory_conflict_evidence_binding.sql",
     "0187_operations_portal_native_delivery_literal_prefix_guard.sql",
+    "0188_client_hub_native_project_preparations.sql",
+    "0189_client_hub_native_project_uncertain_recovery.sql",
+    "0190_client_hub_native_project_preparation_authority.sql",
+    "0191_operations_portal_native_billing_authority.sql",
+    "0192_ops_service_definition_authority.sql",
+    "0193_operations_portal_native_delivery_dead_conflict_recovery.sql",
+    "0194_operations_portal_native_delivery_terminal_cancellations.sql",
+    "0195_client_hub_native_project_current_owner_observation.sql",
+    "0196_native_directory_maintenance_authority.sql",
+    "0197_operations_portal_native_delivery_cancellation_checkpoint_scope.sql",
+    "0198_native_directory_active_binding_revision_refresh.sql",
   ]);
   const nativeDirectoryStart = REQUIRED_STAGING_MIGRATIONS.operations.indexOf("0054_project_alpha_directory_outbox.sql");
   assert.deepEqual(REQUIRED_STAGING_MIGRATIONS.operations.slice(nativeDirectoryStart, nativeDirectoryStart + 3), [

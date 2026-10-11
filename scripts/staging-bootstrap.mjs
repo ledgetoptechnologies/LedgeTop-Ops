@@ -15,9 +15,14 @@ export const BOOTSTRAP_APPS = Object.freeze({
     binding: "DELIVERY_DB",
     databaseName: "client-data-staging",
     seed: "0002_seed_initial_staff.sql",
-    migrationCount: 147,
-    migrationNamesSha256: "1adce32fb9cad385417f3f058664ecb105559c31a5efd8c87e9f642f97a45db9",
-    migrationContentsSha256: "8a6cb183feae5ec6490cb4710f02a3289a05421786b9593e6392803a1e890f5c",
+    migrationCount: 149,
+    migrationNamesSha256: "adec3554555949068ac785d0720c6dcddc8813489c98b5c88e88c0afd23ee659",
+    migrationContentsSha256: "f0131c4467cbe6046c5da7c54f0bcd604cc39f743d9a98082d3ff59a7d34c1f1",
+    historicalMigrationChains: Object.freeze([Object.freeze({
+      count: 147,
+      namesSha256: "1adce32fb9cad385417f3f058664ecb105559c31a5efd8c87e9f642f97a45db9",
+      contentsSha256: "8a6cb183feae5ec6490cb4710f02a3289a05421786b9593e6392803a1e890f5c",
+    })]),
   }),
   operations: Object.freeze({
     source: "operations",
@@ -25,9 +30,34 @@ export const BOOTSTRAP_APPS = Object.freeze({
     binding: "OPS_DB",
     databaseName: "ltds-ops-staging",
     seed: "0002_seed_acl.sql",
-    migrationCount: 187,
-    migrationNamesSha256: "ce00ad1a6b67cb8a7f0ed5e197ebd5fbdfabd2566dc3c402f1eee79302036951",
-    migrationContentsSha256: "3e0f92864210aab88c97220e50649a46d4ec8d6367262ea8f42ca75ce17a8567",
+    migrationCount: 198,
+    migrationNamesSha256: "d88ba83a54c045e5eb416fb912324047d68160f9f198e6b56591f0f0909788f2",
+    migrationContentsSha256: "47369a1c36e64853cf8e82c874af734ff0c2745bef416cca9c3a01cae16f8409",
+    historicalMigrationChains: Object.freeze([Object.freeze({
+      count: 196,
+      namesSha256: "c8f55f7a543d1e51d69abce753c2ce54a4640c35fd93c2769c8e971bb8162106",
+      contentsSha256: "5dd50102b800eb3b49c9c5f41adb6f1ce44005425118b718ecc544e7f0b49c03",
+    }), Object.freeze({
+      count: 195,
+      namesSha256: "3aecb42400d7a5e95687cca3eb256e880aa306dd4184747c0171f6301ffb71fd",
+      contentsSha256: "46d06078251512d73faf9b96f277165d2a7a01e8c7d97d3e775dde0a167ef9da",
+    }), Object.freeze({
+      count: 194,
+      namesSha256: "21797f48e9c38621119a6e78eb431594609ae5520aea9036f1e5db288a984a10",
+      contentsSha256: "156c845b6185e89ae18533015055b0c0e09f6939348a165da68a1a3c10eabc25",
+    }), Object.freeze({
+      count: 187,
+      namesSha256: "ce00ad1a6b67cb8a7f0ed5e197ebd5fbdfabd2566dc3c402f1eee79302036951",
+      contentsSha256: "3e0f92864210aab88c97220e50649a46d4ec8d6367262ea8f42ca75ce17a8567",
+    }), Object.freeze({
+      count: 190,
+      namesSha256: "1c42cda3e4a770e59da42fecb2eaa9063abbe415eb500d5cde22b5755fc0ddbf",
+      contentsSha256: "7e6f75368c5aed14209b092e026458894c6509324c8fdbedcf96c8df2ac0f260",
+    }), Object.freeze({
+      count: 192,
+      namesSha256: "2ac701ff1485af80b9b2edfcd0ce1b8cb9a413a925bf799d6531069eabb1f78c",
+      contentsSha256: "148ff7d7b73ec90af81730f48520f2b7e4f0c1d80eebe32143c6a088d5f81e62",
+    })]),
   }),
 });
 export const PRODUCTION_DATABASE_IDENTITIES = Object.freeze([
@@ -207,7 +237,11 @@ export function buildArtifacts(base, owner, options = {}) {
     }
     const names = entries.filter((item) => item.isFile() && !item.isSymbolicLink() && item.name.endsWith(".sql")).map((item) => item.name).sort();
     const namesSha256 = sha256(names.join("\n"));
-    if (names.length !== entry.migrationCount || namesSha256 !== entry.migrationNamesSha256) throw new Error(`${app} canonical migration inventory must be the exact complete ordered ${entry.migrationCount}-file chain (found ${names.length} files, names sha256 ${namesSha256})`);
+    const reviewedChains = [{ count: entry.migrationCount, namesSha256: entry.migrationNamesSha256,
+      contentsSha256: entry.migrationContentsSha256 }, ...(entry.historicalMigrationChains ?? [])];
+    const reviewedChain = reviewedChains.find(chain => names.length === chain.count && namesSha256 === chain.namesSha256);
+    if (!reviewedChain) throw new Error(`${app} canonical migration inventory must be an exact complete reviewed chain `
+      + `(found ${names.length} files, names sha256 ${namesSha256})`);
     if (!names.includes(entry.seed)) throw new Error(`${app} canonical seed ${entry.seed} is missing`);
     const canonicalFiles = names.map((name) => {
       const sourcePath = path.join(sourceDir, name);
@@ -216,7 +250,7 @@ export function buildArtifacts(base, owner, options = {}) {
       return { name, source, sourceSha256: sha256(source) };
     });
     const sourceChainSha256 = sha256(canonicalFiles.map(({ name, sourceSha256 }) => `${name}\0${sourceSha256}`).join("\n"));
-    if (sourceChainSha256 !== entry.migrationContentsSha256) throw new Error(`${app} canonical migration contents do not match the reviewed full-chain digest`);
+    if (sourceChainSha256 !== reviewedChain.contentsSha256) throw new Error(`${app} canonical migration contents do not match the reviewed full-chain digest`);
     const files = canonicalFiles.map(({ name, source, sourceSha256 }) => {
       const generated = name === entry.seed ? transformSeed(app, source, owner) : source;
       return { name, source, generated, sourceSha256, generatedSha256: sha256(generated), transformed: source !== generated };

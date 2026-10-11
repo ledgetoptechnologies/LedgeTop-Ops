@@ -22,16 +22,18 @@ export const NATIVE_PORTAL_ACCEPTANCE_CONFIGS = Object.freeze({
 });
 
 // The selector is deliberately set on both sides of the private RPC. These are
-// three unique gates and four exact config placements; none may be enabled on
+// five unique gates and six exact config placements; none may be enabled on
 // its own by this profile.
 export const NATIVE_PORTAL_ACCEPTANCE_ACTIVATION_VALUES = Object.freeze({
   delivery: Object.freeze({
     CLIENT_PORTAL_OPERATIONS_SERVICE_HOME_ENABLED: "true",
     CLIENT_PORTAL_NATIVE_RECIPIENT_SERVICE_HOME_ENABLED: "true",
+    CLIENT_PORTAL_NATIVE_FINANCIAL_ENABLED: "true",
   }),
   operations: Object.freeze({
     CLIENT_PORTAL_SERVICE_METADATA_RPC_ENABLED: "true",
     CLIENT_PORTAL_NATIVE_RECIPIENT_SERVICE_HOME_ENABLED: "true",
+    CLIENT_PORTAL_NATIVE_FINANCIAL_RPC_ENABLED: "true",
   }),
 });
 
@@ -39,6 +41,8 @@ export const NATIVE_PORTAL_ACCEPTANCE_GATES = Object.freeze([
   "CLIENT_PORTAL_OPERATIONS_SERVICE_HOME_ENABLED",
   "CLIENT_PORTAL_SERVICE_METADATA_RPC_ENABLED",
   "CLIENT_PORTAL_NATIVE_RECIPIENT_SERVICE_HOME_ENABLED",
+  "CLIENT_PORTAL_NATIVE_FINANCIAL_ENABLED",
+  "CLIENT_PORTAL_NATIVE_FINANCIAL_RPC_ENABLED",
 ]);
 
 const REQUIRED_NATIVE_BASE_FLAGS = Object.freeze({
@@ -86,6 +90,11 @@ function validateSourcePair(sources, productionConfigs) {
   if (metadataReader?.service !== sources?.operations?.name || metadataReader?.entrypoint !== "ClientPortalServiceMetadataReader") {
     errors.push("delivery metadata reader must target the exact Operations staging Worker and private named entrypoint");
   }
+  const financialReaders = sources?.delivery?.services?.filter(({ binding }) => binding === "CLIENT_PORTAL_NATIVE_FINANCIAL_READER") ?? [];
+  if (financialReaders.length !== 1 || financialReaders[0]?.service !== sources?.operations?.name
+    || financialReaders[0]?.entrypoint !== "ClientPortalNativeFinancialReader") {
+    errors.push("delivery native financial reader must be the unique binding to the exact Operations staging Worker and private named entrypoint");
+  }
   return errors;
 }
 
@@ -110,7 +119,7 @@ export function validateNativePortalAcceptanceConfigs(sources, candidates, produ
     const expected = clone(sources[app]);
     Object.assign(expected.vars, NATIVE_PORTAL_ACCEPTANCE_ACTIVATION_VALUES[app]);
     if (!isDeepStrictEqual(candidate, expected)) {
-      errors.push(`${app} ${NATIVE_PORTAL_ACCEPTANCE_PROFILE_NAME} candidate drifted outside the three-gate activation window`);
+      errors.push(`${app} ${NATIVE_PORTAL_ACCEPTANCE_PROFILE_NAME} candidate drifted outside the five-gate activation window`);
     }
     for (const [flag, value] of Object.entries(NATIVE_PORTAL_ACCEPTANCE_ACTIVATION_VALUES[app])) {
       if (candidate.vars?.[flag] !== value) errors.push(`${app} acceptance candidate must set ${flag}=${value}`);
@@ -120,6 +129,13 @@ export function validateNativePortalAcceptanceConfigs(sources, candidates, produ
     .filter((app) => candidates?.[app]?.vars?.CLIENT_PORTAL_NATIVE_RECIPIENT_SERVICE_HOME_ENABLED === "true");
   if (selectorPlacements.length !== Object.keys(NATIVE_PORTAL_ACCEPTANCE_CONFIGS).length) {
     errors.push("native recipient service-home selection must be enabled on both Client and Operations; legacy PA fallback is forbidden");
+  }
+  const financialPlacements = [
+    candidates?.delivery?.vars?.CLIENT_PORTAL_NATIVE_FINANCIAL_ENABLED,
+    candidates?.operations?.vars?.CLIENT_PORTAL_NATIVE_FINANCIAL_RPC_ENABLED,
+  ];
+  if (financialPlacements.some((value) => value !== "true")) {
+    errors.push("native financial access must be enabled on both Client and Operations in the same acceptance profile");
   }
   return errors;
 }

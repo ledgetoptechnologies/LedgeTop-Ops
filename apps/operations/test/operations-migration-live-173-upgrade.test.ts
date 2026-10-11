@@ -33,6 +33,17 @@ it("upgrades the exact cloned live-173 lineage through the reviewed local suffix
     "0185_project_alpha_directory_binding_generation_epochs.sql",
     "0186_project_alpha_directory_conflict_evidence_binding.sql",
     "0187_operations_portal_native_delivery_literal_prefix_guard.sql",
+    "0188_client_hub_native_project_preparations.sql",
+    "0189_client_hub_native_project_uncertain_recovery.sql",
+    "0190_client_hub_native_project_preparation_authority.sql",
+    "0191_operations_portal_native_billing_authority.sql",
+    "0192_ops_service_definition_authority.sql",
+    "0193_operations_portal_native_delivery_dead_conflict_recovery.sql",
+    "0194_operations_portal_native_delivery_terminal_cancellations.sql",
+    "0195_client_hub_native_project_current_owner_observation.sql",
+    "0196_native_directory_maintenance_authority.sql",
+    "0197_operations_portal_native_delivery_cancellation_checkpoint_scope.sql",
+    "0198_native_directory_active_binding_revision_refresh.sql",
   ]);
 
   runtime = new Miniflare({ modules: true, compatibilityDate: "2026-08-06",
@@ -88,4 +99,7 @@ it("upgrades the exact cloned live-173 lineage through the reviewed local suffix
   expect(await db.prepare(`SELECT name FROM sqlite_master
     WHERE type='table' AND name='project_alpha_project_inbound_proposals'`).first())
     .toEqual({ name: "project_alpha_project_inbound_proposals" });
+  expect(await db.prepare(`SELECT name FROM sqlite_master
+    WHERE type='table' AND name='native_directory_active_binding_refresh_commands'`).first())
+    .toEqual({ name: "native_directory_active_binding_refresh_commands" });
 }, 180_000);

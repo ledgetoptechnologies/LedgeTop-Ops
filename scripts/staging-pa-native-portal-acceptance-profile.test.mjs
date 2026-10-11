@@ -53,6 +53,7 @@ const expectedValues = Object.freeze({
     CLIENT_PORTAL_OPERATIONS_PUBLICATION_WRITER_ENABLED: "true",
     CLIENT_PORTAL_OPERATIONS_SERVICE_HOME_ENABLED: "true",
     CLIENT_PORTAL_NATIVE_RECIPIENT_SERVICE_HOME_ENABLED: "true",
+    CLIENT_PORTAL_NATIVE_FINANCIAL_ENABLED: "true",
   }),
   operations: Object.freeze({
     PROJECT_ALPHA_API_V2_READ_ACCEPTANCE_ENABLED: "true",
@@ -68,6 +69,7 @@ const expectedValues = Object.freeze({
     OPERATIONS_PORTAL_WORKSPACE_PUBLICATION_DISPATCH_ENABLED: "true",
     CLIENT_PORTAL_SERVICE_METADATA_RPC_ENABLED: "true",
     CLIENT_PORTAL_NATIVE_RECIPIENT_SERVICE_HOME_ENABLED: "true",
+    CLIENT_PORTAL_NATIVE_FINANCIAL_RPC_ENABLED: "true",
   }),
 });
 
@@ -177,6 +179,6 @@ test("exports the exact union of constituent deltas without blanket activation",
     ...WORKSPACE_ACCEPTANCE_ACTIVATION_VALUES.operations,
     ...NATIVE_PORTAL_ACCEPTANCE_ACTIVATION_VALUES.operations,
   });
-  assert.equal(Object.keys(PA_NATIVE_PORTAL_ACCEPTANCE_VALUES.delivery).length, 3);
-  assert.equal(Object.keys(PA_NATIVE_PORTAL_ACCEPTANCE_VALUES.operations).length, 13);
+  assert.equal(Object.keys(PA_NATIVE_PORTAL_ACCEPTANCE_VALUES.delivery).length, 4);
+  assert.equal(Object.keys(PA_NATIVE_PORTAL_ACCEPTANCE_VALUES.operations).length, 14);
 });

@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
+  canonicalOperationsPortalNativeDeliveryCancellationRequest,
   canonicalOperationsPortalNativeDeliveryAuthorityCommand,
+  parseOperationsPortalNativeDeliveryCancellation,
+  parseOperationsPortalNativeDeliveryCancellationRequest,
+  parseOperationsPortalNativeDeliveryDisposition,
   parseOperationsPortalNativeDeliveryAuthorityCommand,
   parseOperationsPortalNativeDeliveryAuthorityReceipt,
   sha256OperationsPortalNativeDeliveryAuthorityCommand,
@@ -60,5 +64,62 @@ describe("operations native delivery authority contract", () => {
     expect(parseOperationsPortalNativeDeliveryAuthorityReceipt(receipt, parsed, "c".repeat(64))).toEqual(receipt);
     expect(parseOperationsPortalNativeDeliveryAuthorityReceipt({ ...receipt, folderReservationId: id(99) }, parsed,
       "c".repeat(64))).toBeNull();
+  });
+
+  it("canonicalizes a bounded cancellation request containing the complete exact initial grant", () => {
+    const parsed = parseOperationsPortalNativeDeliveryAuthorityCommand(command())!;
+    const request = { protocol: parsed.protocol, protocolVersion: 1, command: parsed,
+      requestFingerprint: "c".repeat(64) };
+    expect(parseOperationsPortalNativeDeliveryCancellationRequest(request, parsed, "c".repeat(64))).toEqual(request);
+    expect(JSON.parse(canonicalOperationsPortalNativeDeliveryCancellationRequest(request))).toEqual(request);
+    expect(parseOperationsPortalNativeDeliveryCancellationRequest({ ...request, extra: true })).toBeNull();
+    expect(parseOperationsPortalNativeDeliveryCancellationRequest({ ...request,
+      command: { ...parsed, operationId: id(99) } }, parsed, "c".repeat(64))).toBeNull();
+    expect(parseOperationsPortalNativeDeliveryCancellationRequest({ ...request,
+      requestFingerprint: "d".repeat(64) }, parsed, "c".repeat(64))).toBeNull();
+    const revoke = { ...parsed, action: "delivery.revoke", features: [], expiresAt: null };
+    expect(parseOperationsPortalNativeDeliveryCancellationRequest({ ...request, command: revoke })).toBeNull();
+  });
+
+  it("strictly binds immutable cancellation proof to every identifying command field", () => {
+    const parsed = parseOperationsPortalNativeDeliveryAuthorityCommand(command())!;
+    const cancellation = { protocol: parsed.protocol, protocolVersion: 1, status: "cancelled",
+      operationId: parsed.operationId, requestFingerprint: "c".repeat(64), authorityId: parsed.authority.authorityId,
+      targetId: parsed.target.targetId, recipientBindingId: parsed.recipient.recipientBindingId,
+      folderReservationId: parsed.resource.folderReservationId, expectedRevision: "0", resultingRevision: "1",
+      cancelledAt: "2026-10-11T08:15:00.000Z", replayed: false };
+    expect(parseOperationsPortalNativeDeliveryCancellation(cancellation, parsed, "c".repeat(64))).toEqual(cancellation);
+    for (const changed of [
+      { ...cancellation, operationId: id(99) }, { ...cancellation, authorityId: id(99) },
+      { ...cancellation, targetId: id(99) }, { ...cancellation, recipientBindingId: id(99) },
+      { ...cancellation, folderReservationId: id(99) }, { ...cancellation, resultingRevision: "2" },
+      { ...cancellation, cancelledAt: "invalid" }, { ...cancellation, extra: true },
+    ]) expect(parseOperationsPortalNativeDeliveryCancellation(changed, parsed, "c".repeat(64))).toBeNull();
+  });
+
+  it("parses only exact committed, cancelled, or not-found dispositions", () => {
+    const parsed = parseOperationsPortalNativeDeliveryAuthorityCommand(command())!, fingerprint = "c".repeat(64);
+    const receipt = { protocol: parsed.protocol, protocolVersion: 1, status: "recorded", operationId: parsed.operationId,
+      requestFingerprint: fingerprint, action: parsed.action, authorityId: parsed.authority.authorityId,
+      recipientBindingId: parsed.recipient.recipientBindingId, folderReservationId: parsed.resource.folderReservationId,
+      resultingRevision: "1", resultingState: "active" };
+    const cancellation = { protocol: parsed.protocol, protocolVersion: 1, status: "cancelled",
+      operationId: parsed.operationId, requestFingerprint: fingerprint, authorityId: parsed.authority.authorityId,
+      targetId: parsed.target.targetId, recipientBindingId: parsed.recipient.recipientBindingId,
+      folderReservationId: parsed.resource.folderReservationId, expectedRevision: "0", resultingRevision: "1",
+      cancelledAt: "2026-10-11T08:15:00.000Z", replayed: true };
+    expect(parseOperationsPortalNativeDeliveryDisposition({ ok: true, protocolVersion: 1,
+      disposition: "committed", receipt }, parsed, fingerprint)?.disposition).toBe("committed");
+    expect(parseOperationsPortalNativeDeliveryDisposition({ ok: true, protocolVersion: 1,
+      disposition: "cancelled", cancellation }, parsed, fingerprint)?.disposition).toBe("cancelled");
+    expect(parseOperationsPortalNativeDeliveryDisposition({ ok: true, protocolVersion: 1,
+      disposition: "not-found" }, parsed, fingerprint)?.disposition).toBe("not-found");
+    expect(parseOperationsPortalNativeDeliveryDisposition({ ok: true, protocolVersion: 1,
+      disposition: "not-found", receipt }, parsed, fingerprint)).toBeNull();
+    expect(parseOperationsPortalNativeDeliveryDisposition({ ok: true, protocolVersion: 1,
+      disposition: "cancelled", cancellation: { ...cancellation, requestFingerprint: "d".repeat(64) } },
+    parsed, fingerprint)).toBeNull();
+    expect(parseOperationsPortalNativeDeliveryDisposition({ ok: false, protocolVersion: 1,
+      code: "not-found", retryable: false }, parsed, fingerprint)).toBeNull();
   });
 });

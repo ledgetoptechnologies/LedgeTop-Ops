@@ -4,6 +4,7 @@ import { configuredClientPortalOrigins } from "../origin-policy";
 import { clientAccessConfiguration, resolveCloudflareClientPrincipal } from "./access-identity";
 import type { ResolveClientPrincipal, VerifiedClientPrincipal } from "./types";
 import { readOperationsServiceHome, readOperationsServiceHomes } from "./operations-service-home";
+import { readPortalFinancialDocuments } from "./operations-financial";
 
 /** Independent of legacy PA session/membership admission. This endpoint grants
  * no resource access: its explicit permission permits descriptive service labels only. */
@@ -54,6 +55,13 @@ export function createOperationsHomeRouter(dependencies: { resolvePrincipal?: Re
     } catch {
       return c.json({ error: "Client services are temporarily unavailable" }, 503);
     }
+  });
+  router.get("/home/:authorityId/financial", async c => {
+    const result=await readPortalFinancialDocuments(c.env,c.get("operationsPrincipal"),c.req.param("authorityId"));
+    if(!result.ok)return result.code==="disabled"?c.json({error:"Not found"},404)
+      :result.code==="denied"?c.json({error:"Client access is not provisioned"},403)
+      :c.json({error:"Client financial information is temporarily unavailable"},503);
+    return c.json({resourceMode:"operations_financial",collections:result.collections});
   });
   return router;
 }
