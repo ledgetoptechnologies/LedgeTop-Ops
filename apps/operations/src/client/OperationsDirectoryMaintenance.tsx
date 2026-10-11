@@ -3,6 +3,7 @@ import { Card, Loading } from "@ltds/ui";
 import { DirectoryMaintenanceApiError, executeDirectoryMaintenance, readDirectoryMaintenanceSession,
   reviewDirectoryMaintenance, type DirectoryMaintenanceAttempt, type DirectoryMaintenanceReview,
   type DirectoryMaintenanceResult } from "./operations-directory-maintenance-api";
+import { confirmAction } from "./confirm-action";
 import "./ClientOnboardingStaff.css";
 
 type Session = Awaited<ReturnType<typeof readDirectoryMaintenanceSession>>;
@@ -85,7 +86,7 @@ function DirectoryMaintenanceWorkspace({ initialSession }: { initialSession: Ses
     } finally { setBusy(false); }
   };
 
-  const confirmExecute = (event: FormEvent) => {
+  const confirmExecute = async (event: FormEvent) => {
     event.preventDefault();
     if (!review || locked) return;
     const installedApprovalId = approvalId.trim();
@@ -94,7 +95,7 @@ function DirectoryMaintenanceWorkspace({ initialSession }: { initialSession: Ses
     }
     const frozen = { approvalId: installedApprovalId, commandId: review.commandId,
       planSha256: review.planSha256 };
-    if (!window.confirm("Execute the exact preinstalled staging maintenance approval for this reviewed plan hash?")) return;
+    if (!await confirmAction("Execute the exact preinstalled staging maintenance approval for this reviewed plan hash?")) return;
     setAttempt(frozen);
     void runAttempt(frozen);
   };
@@ -122,8 +123,9 @@ function DirectoryMaintenanceWorkspace({ initialSession }: { initialSession: Ses
     {attempt && <section className="onboarding-created" aria-labelledby="maintenance-uncertain-heading">
       <h2 id="maintenance-uncertain-heading">Frozen command</h2>
       <p>The approval ID, command ID, and plan hash remain frozen. Do not submit a new command while this outcome is uncertain.</p>
-      <button type="button" disabled={busy} onClick={() => {
-        if (window.confirm("Retry only the exact frozen maintenance command?")) void runAttempt(attempt, true);
+      <button type="button" disabled={busy} onClick={async () => {
+        if (busy) return;
+        if (await confirmAction("Retry only the exact frozen maintenance command?")) void runAttempt(attempt, true);
       }}>Retry exact frozen command</button>
     </section>}
     {result && <p role="status">{result.status === "replayed" ? "Replayed" : "Applied"}: grant {result.grantId}, generation {result.resultingGeneration}.</p>}

@@ -5,6 +5,7 @@ import { issueNativeBillingPermission, NativeBillingPermissionOwnerApiError, rea
   type NativeBillingPermissionReview, type NativeBillingPermissionSession,
   type NativeBillingPermissionRevoke, type NativeBillingPermissionResult }
   from "./operations-native-billing-permission-owner-api";
+import { confirmAction } from "./confirm-action";
 import "./ClientOnboardingStaff.css";
 
 type Attempt = Readonly<{ kind: "issue"; input: NativeBillingPermissionIssue }> |
@@ -87,18 +88,18 @@ function BillingPermissionsWorkspace({ initialSession }: { initialSession: Nativ
     } finally { setBusy(false); }
   };
 
-  const issue = () => {
+  const issue = async () => {
     if (!review || locked) return;
     const input: NativeBillingPermissionIssue = { operationId: newId(), grantId: newId(),
       expectedGeneration: review.generation, staffId: review.staffId, effect, resourceId: review.resourceId };
-    if (!window.confirm(`Issue ${input.effect} billing permission to staff ${input.staffId} for resource ${input.resourceId}?`)) return;
+    if (!await confirmAction(`Issue ${input.effect} billing permission to staff ${input.staffId} for resource ${input.resourceId}?`)) return;
     void execute({ kind: "issue", input });
   };
-  const revoke = (grantId: string) => {
+  const revoke = async (grantId: string) => {
     if (!review || locked) return;
     const input: NativeBillingPermissionRevoke = { operationId: newId(), grantId,
       expectedGeneration: review.generation };
-    if (!window.confirm(`Revoke resource-scoped billing permission ${grantId} at generation ${input.expectedGeneration}?`)) return;
+    if (!await confirmAction(`Revoke resource-scoped billing permission ${grantId} at generation ${input.expectedGeneration}?`)) return;
     void execute({ kind: "revoke", input });
   };
 
@@ -127,8 +128,9 @@ function BillingPermissionsWorkspace({ initialSession }: { initialSession: Nativ
       </ul>}
       <button type="button" disabled={locked} onClick={issue}>Confirm exact resource grant</button>
     </section>}
-    {attempt && <button type="button" disabled={busy} onClick={() => {
-      if (window.confirm(`Refresh CSRF and retry this exact frozen ${attempt.kind} operation?`)) void execute(attempt, true);
+    {attempt && <button type="button" disabled={busy} onClick={async () => {
+      if (busy) return;
+      if (await confirmAction(`Refresh CSRF and retry this exact frozen ${attempt.kind} operation?`)) void execute(attempt, true);
     }}>Retry same frozen {attempt.kind}</button>}
     {message && <p role="status">{message}</p>}{error && <p role="alert">{error}</p>}
   </Card></main>;

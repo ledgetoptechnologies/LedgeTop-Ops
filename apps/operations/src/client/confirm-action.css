@@ -1,0 +1,18 @@
+.ops-confirm-action {
+  width: min(32rem, calc(100vw - 2rem));
+  max-height: calc(100dvh - 2rem);
+  overflow: auto;
+  box-sizing: border-box;
+  border: 1px solid #cbd5e1;
+  border-radius: 1rem;
+  padding: 1.5rem;
+  color: #172033;
+  background: #fff;
+  box-shadow: 0 1.5rem 5rem #0f172a40;
+}
+.ops-confirm-action::backdrop { background: #0f172a99; }
+.ops-confirm-action h2 { margin: 0 0 1rem; font-size: 1.25rem; }
+.ops-confirm-action p { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.5; }
+.ops-confirm-actions { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: .75rem; margin-top: 1.5rem; }
+.ops-confirm-actions button { min-height: 44px; min-width: 88px; }
+.ops-confirm-actions button:focus-visible { outline: 3px solid #2563eb; outline-offset: 3px; }

@@ -73,11 +73,15 @@ test("issues only an explicit reviewed resource grant and exposes no global perm
   await expect(page.getByText("Global policy and revocation history are not exposed here.")).toBeVisible();
   await expect(page.getByRole("listitem")).toHaveCount(1);
   await expect(page.getByRole("listitem").first()).toContainText(`Resource ${resourceId}`);
-  page.once("dialog", dialog => dialog.dismiss());
   const issueButton = page.getByRole("button", { name: "Confirm exact resource grant" });
   await issueButton.click();
+  await expect(page.getByRole("dialog", { name: "Confirm action" })).toBeVisible();
+  await expect(page.getByRole("dialog").getByRole("button", { name: "Cancel", exact: true })).toBeFocused();
+  await page.getByRole("dialog").getByRole("button", { name: "Cancel", exact: true }).click();
   expect((await calls(page)).filter(call => call.path.endsWith("/grants") && call.method === "POST")).toHaveLength(0);
-  page.once("dialog", dialog => dialog.accept()); await issueButton.click();
+  await issueButton.click();
+  await expect(page.getByRole("dialog", { name: "Confirm action" })).toBeVisible();
+  await page.getByRole("dialog").getByRole("button", { name: "Confirm", exact: true }).click();
   await expect(page.getByRole("status")).toContainText("Permission applied at generation 5");
   const issue = (await calls(page)).find(call => call.path.endsWith("/grants") && call.method === "POST");
   expect(issue?.body).toMatchObject({ confirm: true, staffId, resourceId, effect: "deny", expectedGeneration: 4,
@@ -88,12 +92,14 @@ test("issues only an explicit reviewed resource grant and exposes no global perm
 
 test("uncertain issue freezes reviewed inputs and requires CSRF refresh before exact retry", async ({ page }) => {
   await render(page, "issue-network"); await reviewExact(page);
-  page.once("dialog", dialog => dialog.accept());
   await page.getByRole("button", { name: "Confirm exact resource grant" }).click();
+  await expect(page.getByRole("dialog", { name: "Confirm action" })).toBeVisible();
+  await page.getByRole("dialog").getByRole("button", { name: "Confirm", exact: true }).click();
   await expect(page.getByRole("alert")).toContainText("outcome is uncertain");
   await expect(page.getByLabel("Exact native staff ID")).toBeDisabled();
-  page.once("dialog", dialog => dialog.accept());
   await page.getByRole("button", { name: "Retry same frozen issue" }).click();
+  await expect(page.getByRole("dialog", { name: "Confirm action" })).toBeVisible();
+  await page.getByRole("dialog").getByRole("button", { name: "Confirm", exact: true }).click();
   await expect(page.getByRole("status")).toContainText("Permission replayed at generation 5");
   const recorded = await calls(page), issues = recorded.filter(call => call.path.endsWith("/grants") && call.method === "POST");
   expect(issues).toHaveLength(2); expect(issues[1]?.body).toEqual(issues[0]?.body);
@@ -102,27 +108,31 @@ test("uncertain issue freezes reviewed inputs and requires CSRF refresh before e
 
 test("retry session denial preserves the uncertain issue until the exact operation is later replayed", async ({ page }) => {
   await render(page, "issue-refresh-denied"); await reviewExact(page);
-  page.once("dialog", dialog => dialog.accept());
   await page.getByRole("button", { name: "Confirm exact resource grant" }).click();
+  await expect(page.getByRole("dialog", { name: "Confirm action" })).toBeVisible();
+  await page.getByRole("dialog").getByRole("button", { name: "Confirm", exact: true }).click();
   await expect(page.getByRole("alert")).toContainText("outcome is uncertain");
   const first = (await calls(page)).find(call => call.path.endsWith("/grants") && call.method === "POST");
-  page.once("dialog", dialog => dialog.accept());
   await page.getByRole("button", { name: "Retry same frozen issue" }).click();
+  await expect(page.getByRole("dialog", { name: "Confirm action" })).toBeVisible();
+  await page.getByRole("dialog").getByRole("button", { name: "Confirm", exact: true }).click();
   await expect(page.getByRole("alert")).toContainText("original operation outcome is still unresolved");
   await expect(page.getByLabel("Exact native staff ID")).toBeDisabled();
   await expect(page.getByRole("button", { name: "Retry same frozen issue" })).toBeVisible();
-  page.once("dialog", dialog => dialog.accept());
   await page.getByRole("button", { name: "Retry same frozen issue" }).click();
+  await expect(page.getByRole("dialog", { name: "Confirm action" })).toBeVisible();
+  await page.getByRole("dialog").getByRole("button", { name: "Confirm", exact: true }).click();
   await expect(page.getByRole("status")).toContainText("Permission replayed at generation 5");
   const issues = (await calls(page)).filter(call => call.path.endsWith("/grants") && call.method === "POST");
   expect(issues).toHaveLength(2); expect(issues[1]?.body).toEqual(first?.body);
   expect((await calls(page)).filter(call => call.path.endsWith("/session"))).toHaveLength(3);
 });
 
-test("revokes only the exact active resource grant with a browser confirmation", async ({ page }) => {
+test("revokes only the exact active resource grant with an in-page confirmation", async ({ page }) => {
   await render(page); await reviewExact(page);
-  page.once("dialog", dialog => dialog.accept());
   await page.getByRole("button", { name: "Revoke this resource grant" }).click();
+  await expect(page.getByRole("dialog", { name: "Confirm action" })).toBeVisible();
+  await page.getByRole("dialog").getByRole("button", { name: "Confirm", exact: true }).click();
   await expect(page.getByRole("status")).toContainText("Permission applied at generation 5");
   const revoke = (await calls(page)).find(call => call.path.endsWith(`/grants/${grantId}/revoke`));
   expect(revoke?.body).toMatchObject({ confirm: true, expectedGeneration: 4, operationId: expect.any(String) });
@@ -131,17 +141,20 @@ test("revokes only the exact active resource grant with a browser confirmation",
 
 test("retry session denial preserves the uncertain revoke until the exact operation is later replayed", async ({ page }) => {
   await render(page, "revoke-refresh-denied"); await reviewExact(page);
-  page.once("dialog", dialog => dialog.accept());
   await page.getByRole("button", { name: "Revoke this resource grant" }).click();
+  await expect(page.getByRole("dialog", { name: "Confirm action" })).toBeVisible();
+  await page.getByRole("dialog").getByRole("button", { name: "Confirm", exact: true }).click();
   await expect(page.getByRole("alert")).toContainText("outcome is uncertain");
   const first = (await calls(page)).find(call => call.path.endsWith("/revoke"));
-  page.once("dialog", dialog => dialog.accept());
   await page.getByRole("button", { name: "Retry same frozen revoke" }).click();
+  await expect(page.getByRole("dialog", { name: "Confirm action" })).toBeVisible();
+  await page.getByRole("dialog").getByRole("button", { name: "Confirm", exact: true }).click();
   await expect(page.getByRole("alert")).toContainText("original operation outcome is still unresolved");
   await expect(page.getByLabel("Exact native staff ID")).toBeDisabled();
   await expect(page.getByRole("button", { name: "Retry same frozen revoke" })).toBeVisible();
-  page.once("dialog", dialog => dialog.accept());
   await page.getByRole("button", { name: "Retry same frozen revoke" }).click();
+  await expect(page.getByRole("dialog", { name: "Confirm action" })).toBeVisible();
+  await page.getByRole("dialog").getByRole("button", { name: "Confirm", exact: true }).click();
   await expect(page.getByRole("status")).toContainText("Permission replayed at generation 5");
   const revokes = (await calls(page)).filter(call => call.path.endsWith("/revoke"));
   expect(revokes).toHaveLength(2); expect(revokes[1]?.body).toEqual(first?.body);

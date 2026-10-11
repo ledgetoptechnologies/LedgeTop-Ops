@@ -4,6 +4,7 @@ import { grantNativeBillingAuthority, NativeBillingOwnerApiError, readNativeBill
   readNativeBillingOwnerSession, revokeNativeBillingAuthority, reviewNativeBillingSelection,
   type NativeBillingAuthority, type NativeBillingGrant, type NativeBillingReview, type NativeBillingSelection }
   from "./operations-native-billing-owner-api";
+import { confirmAction } from "./confirm-action";
 import "./ClientOnboardingStaff.css";
 
 type Session = Awaited<ReturnType<typeof readNativeBillingOwnerSession>>;
@@ -98,14 +99,14 @@ function BillingAuthorityWorkspace({ initialSession }: { initialSession: Session
       }
     } finally { setBusy(false); }
   };
-  const confirmGrant = () => {
+  const confirmGrant = async () => {
     if (!review || locked) return;
     const currentSelection = selectionFromForm();
     if (!currentSelection) { setError("Enter a valid expiry time or leave expiry empty."); return; }
     const exactGrantId = review.grantId ?? uuid();
     const input: NativeBillingGrant = { ...currentSelection, operationId: uuid(), grantId: exactGrantId,
       expectedRevision: review.expectedRevision, reviewFingerprint: review.reviewFingerprint };
-    if (!window.confirm(`Grant billing authority to ${input.entity.kind} ${input.entity.nativeId} for recipient ${input.recipientBindingId}?`)) return;
+    if (!await confirmAction(`Grant billing authority to ${input.entity.kind} ${input.entity.nativeId} for recipient ${input.recipientBindingId}?`)) return;
     setAuthorityId(exactGrantId); void runAttempt({ kind: "grant", input });
   };
   const loadAuthority = async (event: FormEvent) => {
@@ -120,10 +121,10 @@ function BillingAuthorityWorkspace({ initialSession }: { initialSession: Session
         : "The exact grant status could not be loaded.");
     } finally { setBusy(false); }
   };
-  const confirmRevoke = () => {
+  const confirmRevoke = async () => {
     if (!authority || locked || authority.state === "revoked") return;
     const input = { operationId: uuid(), grantId: authority.grantId, expectedRevision: authority.revision };
-    if (!window.confirm(`Revoke billing authority ${authority.grantId} at revision ${authority.revision}?`)) return;
+    if (!await confirmAction(`Revoke billing authority ${authority.grantId} at revision ${authority.revision}?`)) return;
     void runAttempt({ kind: "revoke", input });
   };
 
@@ -159,8 +160,9 @@ function BillingAuthorityWorkspace({ initialSession }: { initialSession: Session
       <p>Ledger status is local authority state, not remote client acknowledgement.</p>
       <button type="button" disabled={locked || authority.state === "revoked"} onClick={confirmRevoke}>Confirm exact billing revocation</button>
     </section>}
-    {attempt && <button type="button" disabled={busy} onClick={() => {
-      const confirmed = window.confirm(`Retry the exact frozen ${attempt.kind} operation with its original identifiers and body?`);
+    {attempt && <button type="button" disabled={busy} onClick={async () => {
+      if (busy) return;
+      const confirmed = await confirmAction(`Retry the exact frozen ${attempt.kind} operation with its original identifiers and body?`);
       if (confirmed) void runAttempt(attempt, true);
     }}>Retry same frozen {attempt.kind}</button>}
     {message && <p role="status">{message}</p>}{error && <p role="alert">{error}</p>}

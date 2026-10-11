@@ -70,11 +70,14 @@ test("review is redacted, private export is explicit, and execution requires con
   await expect(page.getByRole("alert")).toContainText("exact preinstalled approval ID");
   expect((await calls(page)).filter(call => call.path.endsWith("/execute"))).toHaveLength(0);
   await page.getByLabel("Exact preinstalled approval ID").fill("22222222-2222-4222-8222-222222222222");
-  page.once("dialog", dialog => dialog.dismiss());
   await page.getByRole("button", { name: "Confirm exact approved execution" }).click();
+  await expect(page.getByRole("dialog", { name: "Confirm action" })).toBeVisible();
+  await expect(page.getByRole("dialog").getByRole("button", { name: "Cancel", exact: true })).toBeFocused();
+  await page.getByRole("dialog").getByRole("button", { name: "Cancel", exact: true }).click();
   expect((await calls(page)).filter(call => call.path.endsWith("/execute"))).toHaveLength(0);
-  page.once("dialog", dialog => dialog.accept());
   await page.getByRole("button", { name: "Confirm exact approved execution" }).click();
+  await expect(page.getByRole("dialog", { name: "Confirm action" })).toBeVisible();
+  await page.getByRole("dialog").getByRole("button", { name: "Confirm", exact: true }).click();
   await expect(page.getByRole("status").first()).toContainText("Applied");
   const execute = (await calls(page)).find(call => call.path.endsWith("/execute"));
   expect(execute?.body).toEqual({ approvalId: "22222222-2222-4222-8222-222222222222", commandId: "11111111-1111-4111-8111-111111111111",
@@ -86,13 +89,15 @@ test("uncertain execution freezes identity and retries exactly the same body", a
   await render(page, "lost-response");
   await page.getByRole("button", { name: "Review server-derived plan" }).click();
   await page.getByLabel("Exact preinstalled approval ID").fill("22222222-2222-4222-8222-222222222222");
-  page.once("dialog", dialog => dialog.accept());
   await page.getByRole("button", { name: "Confirm exact approved execution" }).click();
+  await expect(page.getByRole("dialog", { name: "Confirm action" })).toBeVisible();
+  await page.getByRole("dialog").getByRole("button", { name: "Confirm", exact: true }).click();
   await expect(page.getByRole("alert")).toContainText("Outcome uncertain");
   await expect(page.getByLabel("Exact preinstalled approval ID")).toBeDisabled();
   await expect(page.getByRole("button", { name: "Review server-derived plan" })).toBeDisabled();
-  page.once("dialog", dialog => dialog.accept());
   await page.getByRole("button", { name: "Retry exact frozen command" }).click();
+  await expect(page.getByRole("dialog", { name: "Confirm action" })).toBeVisible();
+  await page.getByRole("dialog").getByRole("button", { name: "Confirm", exact: true }).click();
   await expect(page.getByRole("status").first()).toContainText("Replayed");
   const executions = (await calls(page)).filter(call => call.path.endsWith("/execute"));
   expect(executions).toHaveLength(2);

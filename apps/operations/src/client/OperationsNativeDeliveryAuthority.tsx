@@ -11,6 +11,7 @@ import { cancelOperationsNativeDeliveryAuthority, grantOperationsNativeDeliveryA
   type OperationsNativeDeliveryRecoverInput, type OperationsNativeDeliveryRevokeInput }
   from "./operations-native-delivery-owner-api";
 import "./ClientOnboardingStaff.css";
+import { confirmAction } from "./confirm-action";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 type Attempt = Readonly<
@@ -262,7 +263,7 @@ function NativeDeliveryAuthorityWorkspace({ initialSession }: { initialSession: 
     if (busy) return;
     if (attempt) { if (attempt.kind === "cancel") await execute(attempt, true); return; }
     if (!authority || !authorityRead || !authorityReviewed || !authority.cancellationOperationId) return;
-    if (!window.confirm("Reconcile this exact expired grant with Client? Cancel only if Client proves it never recorded the grant. Preserve all history; this does not grant access or create a replacement.")) return;
+    if (!await confirmAction("Reconcile this exact expired grant with Client? Cancel only if Client proves it never recorded the grant. Preserve all history; this does not grant access or create a replacement.")) return;
     const current = Object.freeze({ kind: "cancel", authority }) satisfies Attempt;
     setAttempt(current); await execute(current, false);
   };

@@ -76,16 +76,24 @@ async function reviewExact(page: Page) {
   await expect(page.getByRole("heading", { name: "Reviewed selection" })).toBeVisible();
 }
 
-test("requires exact review and browser confirmation before an explicit grant", async ({ page }) => {
+test("requires exact review and in-page confirmation before an explicit grant", async ({ page }) => {
   await render(page);
   await expect(page.getByRole("button", { name: "Confirm exact billing grant" })).toHaveCount(0);
   await reviewExact(page);
-  page.once("dialog", dialog => dialog.dismiss());
   const grantButton = page.getByRole("button", { name: "Confirm exact billing grant" });
   await grantButton.scrollIntoViewIfNeeded(); await grantButton.click();
+  await expect(page.getByRole("dialog", { name: "Confirm action" })).toBeVisible();
+  await expect(page.getByRole("dialog").getByRole("button", { name: "Cancel", exact: true })).toBeFocused();
+  await page.getByRole("dialog").getByRole("button", { name: "Cancel", exact: true }).click();
   expect((await calls(page)).filter(call => call.path.endsWith("/grants") && call.method === "POST")).toHaveLength(0);
-  page.once("dialog", dialog => dialog.accept());
+  await expect(grantButton).toBeFocused();
   await grantButton.click();
+  await page.getByRole("dialog", { name: "Confirm action" }).press("Escape");
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  expect((await calls(page)).filter(call => call.path.endsWith("/grants") && call.method === "POST")).toHaveLength(0);
+  await grantButton.click();
+  await expect(page.getByRole("dialog", { name: "Confirm action" })).toBeVisible();
+  await page.getByRole("dialog").getByRole("button", { name: "Confirm", exact: true }).click();
   await expect(page.getByRole("status")).toContainText("operation was applied");
   const grant = (await calls(page)).find(call => call.path.endsWith("/grants") && call.method === "POST");
   expect(grant?.body).toMatchObject({ confirm: true, targetId, recipientBindingId, entity: selectedEntity,
@@ -97,10 +105,11 @@ test("requires exact review and browser confirmation before an explicit grant", 
 
 test("uncertain grant locks the reviewed input and retries only the identical frozen operation", async ({ page }) => {
   await render(page, "grant-network"); await reviewExact(page);
-  page.once("dialog", dialog => dialog.accept());
   const grantButton = page.getByRole("button", { name: "Confirm exact billing grant" });
   await grantButton.scrollIntoViewIfNeeded();
   await grantButton.click();
+  await expect(page.getByRole("dialog", { name: "Confirm action" })).toBeVisible();
+  await page.getByRole("dialog").getByRole("button", { name: "Confirm", exact: true }).click();
   await expect(page.getByRole("alert")).toContainText("outcome is uncertain");
   await expect(page.getByLabel("Exact native portal target ID")).toBeDisabled();
   const firstGrant = (await calls(page)).find(call => call.path.endsWith("/grants") && call.method === "POST");
@@ -109,9 +118,10 @@ test("uncertain grant locks the reviewed input and retries only the identical fr
   await statusButton.scrollIntoViewIfNeeded(); await statusButton.click();
   await expect(page.getByRole("heading", { name: "Current billing authority" })).toBeVisible();
   expect((await calls(page)).some(call => call.path.endsWith(`/grants/${frozenGrantId}`) && call.method === "GET")).toBe(true);
-  page.once("dialog", dialog => dialog.accept());
   const retryButton = page.getByRole("button", { name: "Retry same frozen grant" });
   await retryButton.scrollIntoViewIfNeeded(); await retryButton.click();
+  await expect(page.getByRole("dialog", { name: "Confirm action" })).toBeVisible();
+  await page.getByRole("dialog").getByRole("button", { name: "Confirm", exact: true }).click();
   await expect(page.getByRole("status")).toContainText("operation was replayed");
   const requests = (await calls(page)).filter(call => call.path.endsWith("/grants") && call.method === "POST");
   expect(requests).toHaveLength(2); expect(requests[1]?.body).toEqual(requests[0]?.body);
@@ -121,9 +131,10 @@ test("uncertain grant locks the reviewed input and retries only the identical fr
 test("reports replayed revoked state separately from live status on mobile width", async ({ page }) => {
   await page.setViewportSize({ width: 375, height: 812 }); await render(page, "replayed-revoked"); await reviewExact(page);
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
-  page.once("dialog", dialog => dialog.accept());
   const grantButton = page.getByRole("button", { name: "Confirm exact billing grant" });
   await grantButton.scrollIntoViewIfNeeded(); await grantButton.click();
+  await expect(page.getByRole("dialog", { name: "Confirm action" })).toBeVisible();
+  await page.getByRole("dialog").getByRole("button", { name: "Confirm", exact: true }).click();
   await expect(page.getByRole("status")).toContainText("Current ledger state is revoked; live is no.");
   await expect(page.getByText("Ledger state", { exact: true }).locator("..")).toContainText("revoked");
   await expect(page.getByText("Live", { exact: true }).locator("..")).toContainText("No");
@@ -138,22 +149,26 @@ for (const kind of ["grant", "revoke"] as const) {
       await page.getByRole("button", { name: "Load exact grant status" }).click();
       await expect(page.getByRole("heading", { name: "Current billing authority" })).toBeVisible();
     }
-    page.once("dialog", dialog => dialog.accept());
     const submit = page.getByRole("button", { name: kind === "grant"
       ? "Confirm exact billing grant" : "Confirm exact billing revocation" });
     await submit.scrollIntoViewIfNeeded(); await submit.click();
+    await expect(page.getByRole("dialog", { name: "Confirm action" })).toBeVisible();
+    await page.getByRole("dialog").getByRole("button", { name: "Confirm", exact: true }).click();
     await expect(page.getByRole("alert")).toContainText("outcome is uncertain");
     const mutations = async () => (await calls(page)).filter(call => call.method === "POST"
       && (kind === "grant" ? call.path.endsWith("/grants") : call.path.endsWith("/revoke")));
     const original = (await mutations())[0];
     const retry = page.getByRole("button", { name: `Retry same frozen ${kind}` });
-    page.once("dialog", dialog => dialog.accept());
     await retry.scrollIntoViewIfNeeded(); await retry.click();
+    await expect(page.getByRole("dialog", { name: "Confirm action" })).toBeVisible();
+    await page.getByRole("dialog").getByRole("button", { name: "Confirm", exact: true }).click();
     await expect(page.getByRole("alert")).toContainText("outcome is uncertain");
     await expect(page.getByLabel("Exact native portal target ID")).toBeDisabled();
     await expect(retry).toBeEnabled();
     expect(await mutations()).toHaveLength(1);
-    page.once("dialog", dialog => dialog.accept()); await retry.click();
+    await retry.click();
+    await expect(page.getByRole("dialog", { name: "Confirm action" })).toBeVisible();
+    await page.getByRole("dialog").getByRole("button", { name: "Confirm", exact: true }).click();
     await expect(page.getByRole("status")).toContainText("operation was replayed");
     const retried = await mutations();
     expect(retried).toHaveLength(2); expect(retried[1]?.body).toEqual(original?.body);
@@ -161,15 +176,16 @@ for (const kind of ["grant", "revoke"] as const) {
   });
 }
 
-test("loads current status then uses explicit browser confirmation for exact revocation", async ({ page }) => {
+test("loads current status then uses explicit in-page confirmation for exact revocation", async ({ page }) => {
   await render(page);
   await page.getByLabel("Exact billing grant ID").fill(grantId);
   const statusButton = page.getByRole("button", { name: "Load exact grant status" });
   await statusButton.scrollIntoViewIfNeeded(); await statusButton.click();
   await expect(page.getByRole("heading", { name: "Current billing authority" })).toBeVisible();
-  page.once("dialog", dialog => dialog.accept());
   const revokeButton = page.getByRole("button", { name: "Confirm exact billing revocation" });
   await revokeButton.scrollIntoViewIfNeeded(); await revokeButton.click();
+  await expect(page.getByRole("dialog", { name: "Confirm action" })).toBeVisible();
+  await page.getByRole("dialog").getByRole("button", { name: "Confirm", exact: true }).click();
   await expect(page.getByRole("status")).toContainText("ledger state is revoked");
   const revoke = (await calls(page)).find(call => call.path.endsWith("/revoke"));
   expect(revoke?.body).toMatchObject({ confirm: true, operationId: expect.any(String), expectedRevision: 1 });
