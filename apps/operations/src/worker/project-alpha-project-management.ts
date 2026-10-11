@@ -3,6 +3,7 @@ import { z } from "zod";
 import { isAdministrator, sqlScope } from "./acl";
 import type { ClientHubCollectionContext } from "./client-hub-collections";
 import { clientHubAlphaInternalId, isBusinessProjectionSource } from "./client-hub-source";
+import { readClientHubNativeProjectCapability } from "./client-hub-native-project-management";
 import type { Env, StaffPrincipal } from "./types";
 
 type Database = Pick<D1Database, "prepare" | "batch">;
@@ -16,7 +17,8 @@ const mutationSchema = z.object({
 }).strict();
 
 export type ProjectManagementAvailabilityReason = "available" | "not_applicable" | "source_not_registered"
-  | "source_inactive" | "route_not_configured" | "route_disabled" | "source_mapping_unavailable";
+  | "source_inactive" | "route_not_configured" | "route_disabled" | "source_mapping_unavailable"
+  | "native_authority_required" | "native_destination_unavailable";
 export interface ProjectManagementRouteSummary {
   sourceId: string;
   version: number;
@@ -248,6 +250,8 @@ function explanation(reason: ProjectManagementAvailabilityReason, sourceName: st
   if (reason === "route_not_configured") return `An administrator has not reviewed a Project Alpha project-management link for ${sourceName}.`;
   if (reason === "source_mapping_unavailable") return `The exact ${sourceName} client identifier is unavailable. Refresh after source synchronization completes.`;
   if (reason === "source_not_registered") return `This Project Alpha source is not registered for project management.`;
+  if (reason === "native_authority_required") return `Your current native Project authority does not permit project creation for this organization.`;
+  if (reason === "native_destination_unavailable") return `The exact native Project Alpha destination is unavailable.`;
   return "Project creation is available only from an exact Project Alpha business record.";
 }
 
@@ -288,9 +292,10 @@ export async function readClientHubProjectManagementAction(env: Env, principal: 
         .all<ActionRow>().then(result => result.results.length === 1 ? result.results[0]! : null);
     }
   }
+  const native = !row ? await readClientHubNativeProjectCapability(env, principal, context) : null;
   const sourceName = row?.display_name ?? root.source_name ?? "Project Alpha";
   let reason: ProjectManagementAvailabilityReason = root.root_namespace !== "business" || !isBusinessProjectionSource(root.source_id)
-    ? "not_applicable" : !row?.source_id ? "source_not_registered" : row.state !== "active" || row.read_visible !== 1
+    ? "not_applicable" : native ? native.available ? "available" : native.reason : !row?.source_id ? "source_not_registered" : row.state !== "active" || row.read_visible !== 1
       ? "source_inactive" : row.route_version === null ? "route_not_configured" : row.enabled !== 1 || !row.reviewed_url_template
         ? "route_disabled" : !row.external_id ? "source_mapping_unavailable" : "available";
   let href: string | null = null;
@@ -322,14 +327,19 @@ export async function readClientHubProjectManagementAction(env: Env, principal: 
   return {
     canonicalRoot: context.canonicalRoot,
     contextVersion: context.contextVersion,
-    source: { sourceId: root.source_id, displayName: sourceName, state: row?.state ?? "unregistered" },
+    source: { sourceId: root.source_id, displayName: sourceName,
+      state: row?.state ?? (native?.available ? "active" : native ? "unavailable" : "unregistered") },
     availability: { available: reason === "available", reason, explanation: explanation(reason, sourceName) },
-    action: href ? { label: "Create project in Project Alpha", href, external: true as const } : null,
+    action: href ? { kind: "legacy_external_link" as const, label: "Create project in Project Alpha", href, external: true as const }
+      : native?.available ? { kind: "native_create" as const, label: "Create project",
+        prepareHref: `${refreshHref}/native-projects/prepare`, submitHref: `${refreshHref}/native-projects/submit`,
+        external: false as const, scopeOptions: native.scopes } : null,
     sync: {
       status: syncStatus,
       lastAttemptAt: safeTimestamp(row?.last_attempt_at ?? null),
       lastSuccessAt: safeTimestamp(row?.last_success_at ?? null),
-      explanation: syncStatus === "not_configured" ? `No exact-source project-management connector is enrolled for ${sourceName}. Existing business records may still come from the primary Project Alpha synchronization.`
+      explanation: native?.available ? `Native projects appear here only after Project Alpha acknowledges the command and Operations activates the exact canonical readback.`
+        : syncStatus === "not_configured" ? `No exact-source project-management connector is enrolled for ${sourceName}. Existing business records may still come from the primary Project Alpha synchronization.`
         : syncStatus === "healthy" ? `The latest ${sourceName} synchronization completed successfully.`
         : syncStatus === "error" ? `${sourceName} synchronization needs attention. Creating a project in Project Alpha does not create a local Operations project.`
         : syncStatus === "disabled" ? `${sourceName} synchronization is disabled.`

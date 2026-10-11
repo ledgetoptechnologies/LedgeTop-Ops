@@ -1,8 +1,8 @@
 /**
- * Finalizer for the Project Alpha project-v2 evidence chain. It performs no
- * network I/O and is reachable only through the default-off administrator
- * acceptance composition. Do not import it from any other route, queue,
- * scheduler, Durable Object, service entrypoint, or worker index.
+ * Environment-neutral finalizer for the Project Alpha project-v2 evidence
+ * chain. It performs no network I/O. Every caller must establish its own
+ * current authorization before invoking this service; the database guards
+ * still require the exact immutable command, settlement, and writer proof.
  */
 export type ProjectAlphaProjectCanonicalActivationEnvironment = Readonly<{ OPS_DB: D1Database }>;
 
@@ -194,6 +194,15 @@ export async function activateProjectAlphaProjectV2Canonical(
   let data: ProjectData;
   try { data = (JSON.parse(source.read_json) as { data: ProjectData }).data; }
   catch { return { status: "uncertain", reason: "database" }; }
+  let nativeClientHubCommand = false, updateFenceAvailable = false;
+  try {
+    [nativeClientHubCommand, updateFenceAvailable] = await Promise.all([
+      env.OPS_DB.prepare("SELECT 1 present FROM client_hub_native_project_preparations WHERE command_id=?")
+        .bind(source.command_id).first("present").then(Boolean).catch(() => false),
+      env.OPS_DB.prepare("SELECT 1 present FROM sqlite_master WHERE type='table' AND name='project_alpha_project_v2_update_activation_fences'")
+        .first("present").then(Boolean),
+    ]);
+  } catch { return { status: "uncertain", reason: "database" }; }
   let organizationRecordId: string | null | "missing", clientRecordId: string | null | "missing";
   try {
     [organizationRecordId, clientRecordId] = await Promise.all([
@@ -201,9 +210,14 @@ export async function activateProjectAlphaProjectV2Canonical(
       directoryRecord(env.OPS_DB, source, "client", data.clientPublicId),
     ]);
     if (organizationRecordId === "missing" || clientRecordId === "missing") return { status: "blocked", reason: "directory" };
+    if (nativeClientHubCommand && !organizationRecordId && !clientRecordId) return { status: "blocked", reason: "directory" };
     if (organizationRecordId && clientRecordId) {
       const linked = await env.OPS_DB.prepare(`SELECT 1 linked FROM operations_directory_client_organizations
         WHERE client_record_id=? AND organization_record_id=?`).bind(clientRecordId, organizationRecordId).first("linked");
+      if (!linked) return { status: "blocked", reason: "directory" };
+    } else if (clientRecordId) {
+      const linked = await env.OPS_DB.prepare(`SELECT 1 linked FROM operations_directory_client_organizations
+        WHERE client_record_id=? AND organization_record_id IS NULL`).bind(clientRecordId).first("linked");
       if (!linked) return { status: "blocked", reason: "directory" };
     }
   } catch { return { status: "uncertain", reason: "database" }; }
@@ -239,6 +253,24 @@ export async function activateProjectAlphaProjectV2Canonical(
       data.description, data.completedAt, data.archived ? 1 : 0, data.archivedAt, source.projection_sha256,
       data.overdueWarning ? 1 : 0));
   } else {
+    if (updateFenceAvailable) statements.push(env.OPS_DB.prepare(`INSERT INTO project_alpha_project_v2_update_activation_fences(
+      settlement_id,command_id,external_project_id,prior_version,prior_projection_sha256,resulting_version,
+      source_id,source_instance_id,application_id,history_epoch_id,project_alpha_public_id,project_alpha_revision,
+      projection_sha256,name,description,lifecycle,planned_start,planned_end,organization_record_id,client_record_id,
+      scopes_json,actor_staff_id,actor_access_subject,actor_admission_version,actor_profile_version,actor_email,
+      grant_generation,verified_until,completed_at,archived,archived_at,overdue_warning)
+      SELECT DISTINCT ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,proof.actor_staff_id,proof.actor_access_subject,
+        proof.actor_admission_version,proof.actor_profile_version,proof.actor_email,proof.grant_generation,
+        proof.verified_until,?,?,?,?
+      FROM project_alpha_project_v2_live_settlement_proofs proof
+      WHERE proof.command_id=? AND proof.external_project_id=? AND proof.grant_generation=?
+        AND json(proof.scopes_json)=json(?) AND proof.verified_until>strftime('%Y-%m-%dT%H:%M:%fZ','now')`).bind(source.settlement_id,source.command_id,
+      source.external_project_id,source.prior_local_version,source.expected_local_projection_sha256,resultingVersion,
+      source.source_id,source.source_instance_id,source.application_id,source.history_epoch_id,source.project_alpha_public_id,
+      source.project_alpha_revision,source.projection_sha256,data.name,data.description,data.status,data.estimatedStart,
+      data.estimatedEnd,organizationRecordId,clientRecordId,source.scopes_json,data.completedAt,data.archived ? 1 : 0,
+      data.archivedAt,data.overdueWarning ? 1 : 0,source.command_id,source.external_project_id,
+      source.expected_grant_generation,source.scopes_json));
     statements.push(env.OPS_DB.prepare(`UPDATE operations_shared_projects SET
       source_id=?,source_instance_id=?,application_id=?,history_epoch_id=?,project_alpha_public_id=?,
       pa_revision=?,current_version=current_version+1,name=?,lifecycle=?,planned_start=?,planned_end=?,

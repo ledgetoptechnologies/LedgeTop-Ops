@@ -118,9 +118,16 @@ function sameHead(value: Head | null, row: Outbox): boolean {
 }
 async function exactReservation(db: D1Database, row: Outbox, sourceId: string, connection: ProjectAlphaApiV2Connection): Promise<{ command: ProjectAlphaProjectCommand; body: string } | "authority" | "destination" | "stale" | "command"> {
   if (!sameIdentity(row, sourceId, connection)) return row.source_id === sourceId ? "destination" : "authority";
-  if (!await db.prepare(`SELECT 1 current_proof FROM native_project_live_command_proofs
-      WHERE command_id=? AND external_project_id=?
-        AND verified_until>strftime('%Y-%m-%dT%H:%M:%fZ','now')`).bind(row.command_id, row.external_project_id).first("current_proof")) return "authority";
+  const originalProof = await db.prepare(`SELECT 1 current_proof FROM native_project_live_command_proofs
+    WHERE command_id=? AND external_project_id=? AND verified_until>strftime('%Y-%m-%dT%H:%M:%fZ','now')`)
+    .bind(row.command_id,row.external_project_id).first("current_proof");
+  if (!originalProof) {
+    const recoverySchema = await db.prepare(`SELECT 1 present FROM sqlite_master
+      WHERE type='view' AND name='client_hub_native_project_live_recovery_authorizations'`).first("present");
+    if (!recoverySchema || !await db.prepare(`SELECT 1 current_proof FROM client_hub_native_project_live_recovery_authorizations
+        WHERE command_id=? AND external_project_id=?`).bind(row.command_id,row.external_project_id).first("current_proof"))
+      return "authority";
+  }
   let parsed: unknown;
   try { parsed = JSON.parse(row.command_json); } catch { return "command"; }
   if (!operation(row.operation) || !isProjectAlphaProjectCommand(row.operation, parsed)) return "command";
@@ -248,7 +255,7 @@ async function dispatchEnabledProjectAlphaProjectV2PendingCommand(
       return { status: "uncertain", reason: "evidence" };
     }
     const response = evidence.response, resource = response.result.resource, acknowledgementId = crypto.randomUUID(), receiptId = crypto.randomUUID();
-    await env.OPS_DB.batch([
+    const settlementStatements = [
       env.OPS_DB.prepare(`INSERT INTO project_alpha_project_v2_events(command_id,state_version,transition_id,request_sha256,state)
         SELECT ?,COALESCE(MAX(state_version),0)+1,?,?,'acknowledged' FROM project_alpha_project_v2_events WHERE command_id=?`)
         .bind(current!.command_id, crypto.randomUUID(), current!.request_sha256, current!.command_id),
@@ -263,6 +270,25 @@ async function dispatchEnabledProjectAlphaProjectV2PendingCommand(
         response.sourceInstanceId, response.applicationId, response.historyEpoch, evidence.destinationOrigin, resource.publicId,
         resource.revision, resource.projectionSha256, response.result.authorizationGeneration, response.requestId,
         response.replayed ? 1 : 0, evidence.responseSha256),
+    ];
+    const recoverySchema = await env.OPS_DB.prepare(`SELECT 1 present FROM sqlite_master
+      WHERE type='table' AND name='client_hub_native_project_post_ack_continuations'`).first("present");
+    if (recoverySchema) settlementStatements.push(env.OPS_DB.prepare(`INSERT INTO client_hub_native_project_post_ack_continuations(
+        continuation_id,command_id,authorization_id,success_receipt_id,acknowledgement_id,acknowledged_state_version,
+        request_sha256,external_project_id,actor_staff_id,actor_access_subject,actor_admission_version,
+        actor_profile_version,actor_email,grant_generation,current_grant_generation,scopes_json,expires_at)
+        SELECT ?,recovery.command_id,recovery.authorization_id,?,?,event.state_version,
+          recovery.command_request_sha256,recovery.external_project_id,recovery.original_actor_staff_id,
+          recovery.original_actor_access_subject,recovery.original_actor_admission_version,
+          recovery.original_actor_profile_version,recovery.original_actor_email,
+          recovery.original_authority_generation,recovery.current_authority_generation,recovery.scopes_json,recovery.expires_at
+        FROM client_hub_native_project_live_recovery_authorizations recovery
+        JOIN project_alpha_project_outbox outbox ON outbox.command_id=recovery.command_id
+          AND outbox.client_hub_recovery_authorization_id=recovery.authorization_id
+        JOIN project_alpha_project_v2_events event ON event.command_id=recovery.command_id AND event.state='acknowledged'
+        WHERE recovery.command_id=?
+        ON CONFLICT(command_id,current_grant_generation) DO NOTHING`).bind(crypto.randomUUID(),receiptId,acknowledgementId,current!.command_id));
+    settlementStatements.push(
       // 0122 activation deliberately leases a *pending* outbox row while it
       // atomically changes the canonical mapping/head/history. The immutable
       // acknowledgement and success receipt above record POST completion;
@@ -271,7 +297,8 @@ async function dispatchEnabledProjectAlphaProjectV2PendingCommand(
       env.OPS_DB.prepare(`UPDATE project_alpha_project_outbox SET state='pending',lease_token=NULL,lease_expires_at=NULL,
         outcome_json=?,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE command_id=? AND state='leased' AND lease_token=?`)
         .bind(outcomeJson("acknowledged", "validated"), current!.command_id, leaseToken),
-    ]);
+    );
+    await env.OPS_DB.batch(settlementStatements);
     return { status: "acknowledged", receiptId, replayed: outcome.response.replayed };
   } catch {
     const winner = await receipt(env.OPS_DB, commandId).catch(() => null);
