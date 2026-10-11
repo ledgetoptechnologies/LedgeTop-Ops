@@ -213,11 +213,11 @@ for (const chain of ["historical", "current-reviewed"] as const) describe(
       await applyDraft(client, "client", "0224_operations_portal_native_recipient_authority.sql");
     } else {
       const operationsNames = await applyReviewedChain(operations, "operations");
-      expect(operationsNames).toHaveLength(192);
-      expect(operationsNames.at(-1)).toBe("0192_ops_service_definition_authority.sql");
+      expect(operationsNames).toHaveLength(194);
+      expect(operationsNames.at(-1)).toBe("0194_operations_portal_native_delivery_terminal_cancellations.sql");
       const clientNames = await applyReviewedChain(client, "client");
-      expect(clientNames).toHaveLength(147);
-      expect(clientNames.at(-1)).toBe("0228_operations_portal_native_content_start_audit.sql");
+      expect(clientNames).toHaveLength(149);
+      expect(clientNames.at(-1)).toBe("0230_operations_portal_native_delivery_terminal_cancellations.sql");
       for (const [database, names] of [[operations, operationsNames], [client, clientNames]] as const) {
         const ledger = await database.prepare("SELECT name FROM d1_migrations ORDER BY id").all<{ name: string }>();
         expect(ledger.results.map(row => row.name)).toEqual(names);

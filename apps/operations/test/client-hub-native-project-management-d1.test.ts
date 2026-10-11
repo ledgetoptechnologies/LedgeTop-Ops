@@ -134,7 +134,7 @@ beforeAll(async () => {
   db = await runtime.getD1Database("OPS_DB") as D1Database;
   const directory = new URL("../migrations/", import.meta.url);
   const names = readdirSync(directory).filter(name => /^\d{4}_.+\.sql$/.test(name)).sort();
-  expect(names.at(-1)).toBe("0192_ops_service_definition_authority.sql");
+  expect(names.at(-1)).toBe("0194_operations_portal_native_delivery_terminal_cancellations.sql");
   for (const name of names) {
     const migration = readFileSync(new URL(name,directory),"utf8");
     const statements=splitD1MigrationStatements(migration);

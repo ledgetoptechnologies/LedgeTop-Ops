@@ -19,9 +19,17 @@ export const NATIVE_MIGRATION_PROFILES = Object.freeze({
     baseNamesSha256: "1adce32fb9cad385417f3f058664ecb105559c31a5efd8c87e9f642f97a45db9",
     baseContentsSha256: "8a6cb183feae5ec6490cb4710f02a3289a05421786b9593e6392803a1e890f5c",
     remoteBaseline: "0228_operations_portal_native_content_start_audit.sql",
-    finalMigration: "0228_operations_portal_native_content_start_audit.sql",
-    candidates: Object.freeze({}),
-    expectedAppliedMigrations: Object.freeze([]),
+    finalMigration: "0230_operations_portal_native_delivery_terminal_cancellations.sql",
+    candidates: Object.freeze({
+      "0229_operations_portal_native_delivery_regrant.sql": "1ac5f5df43dca126b28c05b50803a158ed54618c3e136669d06005cbaf56e3a9",
+      "0230_operations_portal_native_delivery_terminal_cancellations.sql": "484231c43eee9957f6d1427bf8caedd409db78f40a7aca08115cbc85e1951c77",
+    }),
+    expectedAppliedMigrations: Object.freeze([
+      "0229_operations_portal_native_delivery_regrant.sql",
+      "0230_operations_portal_native_delivery_terminal_cancellations.sql",
+    ]),
+    historicalExpectedAppliedMigrations: Object.freeze([]),
+    historicalCandidateNames: Object.freeze([]),
   }),
   operations: Object.freeze({
     binding: "OPS_DB",
@@ -32,7 +40,7 @@ export const NATIVE_MIGRATION_PROFILES = Object.freeze({
     baseNamesSha256: "46d20b48362be8052f5b2fd35ec4ccefee2c267476a2a076af87a955c4cfca3a",
     baseContentsSha256: "cd35de12e87325fb6de854f4ecba47e5172e115f75830af9f4a908710d10a450",
     remoteBaseline: "0183_project_alpha_binding_standalone_relationship_rows.sql",
-    finalMigration: "0192_ops_service_definition_authority.sql",
+    finalMigration: "0194_operations_portal_native_delivery_terminal_cancellations.sql",
     candidates: Object.freeze({
       "0174_project_alpha_directory_preserved_external_identity.sql": "9e794a73b75e025edc04967888631b9336931eb16113f42d855bea3fcb30a158",
       "0175_operations_directory_acquired_parent_enrollment_identity.sql": "de022736243342f203fcf9a1cb22993e49c50bbb18c7b3b2fc95d8fb3fa48ed0",
@@ -53,6 +61,8 @@ export const NATIVE_MIGRATION_PROFILES = Object.freeze({
       "0190_client_hub_native_project_preparation_authority.sql": "a662cd4a50c5eaee7a02bf720b1e5399d5d05712022fdd1426413fc707a83882",
       "0191_operations_portal_native_billing_authority.sql": "46b1adb3e6addb91ae108762af9cc8c855ec7a9ccc2e988d5dce056e697ffdfc",
       "0192_ops_service_definition_authority.sql": "8a2d278e0a3a852b08d23efcb9c278a44ba3ea01da89742bba5d3909c3b1d8b9",
+      "0193_operations_portal_native_delivery_dead_conflict_recovery.sql": "2454b60512fa5aec38942d9bd62338f753b527c2e4319e6e7e391509f59bfa56",
+      "0194_operations_portal_native_delivery_terminal_cancellations.sql": "75a8852921ff81e2926c97acc1636a38fc7dae13b45e653cceda93c23f962f6d",
     }),
     expectedAppliedMigrations: Object.freeze([
       "0184_project_alpha_directory_relationship_generation_recovery.sql",
@@ -64,6 +74,8 @@ export const NATIVE_MIGRATION_PROFILES = Object.freeze({
       "0190_client_hub_native_project_preparation_authority.sql",
       "0191_operations_portal_native_billing_authority.sql",
       "0192_ops_service_definition_authority.sql",
+      "0193_operations_portal_native_delivery_dead_conflict_recovery.sql",
+      "0194_operations_portal_native_delivery_terminal_cancellations.sql",
     ]),
     historicalExpectedAppliedMigrations: Object.freeze([
       "0184_project_alpha_directory_relationship_generation_recovery.sql",
@@ -79,6 +91,17 @@ export const NATIVE_MIGRATION_PROFILES = Object.freeze({
       "0188_client_hub_native_project_preparations.sql",
       "0189_client_hub_native_project_uncertain_recovery.sql",
       "0190_client_hub_native_project_preparation_authority.sql",
+    ]),
+    historical192ExpectedAppliedMigrations: Object.freeze([
+      "0184_project_alpha_directory_relationship_generation_recovery.sql",
+      "0185_project_alpha_directory_binding_generation_epochs.sql",
+      "0186_project_alpha_directory_conflict_evidence_binding.sql",
+      "0187_operations_portal_native_delivery_literal_prefix_guard.sql",
+      "0188_client_hub_native_project_preparations.sql",
+      "0189_client_hub_native_project_uncertain_recovery.sql",
+      "0190_client_hub_native_project_preparation_authority.sql",
+      "0191_operations_portal_native_billing_authority.sql",
+      "0192_ops_service_definition_authority.sql",
     ]),
     historicalCandidateNames: Object.freeze([
       "0174_project_alpha_directory_preserved_external_identity.sql",
@@ -114,6 +137,27 @@ export const NATIVE_MIGRATION_PROFILES = Object.freeze({
       "0188_client_hub_native_project_preparations.sql",
       "0189_client_hub_native_project_uncertain_recovery.sql",
       "0190_client_hub_native_project_preparation_authority.sql",
+    ]),
+    historical192CandidateNames: Object.freeze([
+      "0174_project_alpha_directory_preserved_external_identity.sql",
+      "0175_operations_directory_acquired_parent_enrollment_identity.sql",
+      "0176_operations_directory_acquired_intent_authority.sql",
+      "0177_operations_directory_acquired_intent_update_authority.sql",
+      "0178_project_alpha_project_inbound_reconciliation.sql",
+      "0179_project_alpha_acquired_native_identity_collision.sql",
+      "0180_project_alpha_project_v2_recovery_authorization.sql",
+      "0181_project_alpha_directory_create_generation_recovery.sql",
+      "0182_project_alpha_directory_relationship_recovery_guard.sql",
+      "0183_project_alpha_binding_standalone_relationship_rows.sql",
+      "0184_project_alpha_directory_relationship_generation_recovery.sql",
+      "0185_project_alpha_directory_binding_generation_epochs.sql",
+      "0186_project_alpha_directory_conflict_evidence_binding.sql",
+      "0187_operations_portal_native_delivery_literal_prefix_guard.sql",
+      "0188_client_hub_native_project_preparations.sql",
+      "0189_client_hub_native_project_uncertain_recovery.sql",
+      "0190_client_hub_native_project_preparation_authority.sql",
+      "0191_operations_portal_native_billing_authority.sql",
+      "0192_ops_service_definition_authority.sql",
     ]),
   }),
 });
@@ -185,13 +229,16 @@ function validateSourceMigrations(base, application, contract) {
   }
   const historicalCandidateNames = contract.historicalCandidateNames ?? candidateNames;
   const historical190CandidateNames = contract.historical190CandidateNames ?? candidateNames;
+  const historical192CandidateNames = contract.historical192CandidateNames ?? candidateNames;
   const presentCandidateNames = candidateNames.filter((name) => names.includes(name));
   const currentChain = JSON.stringify(presentCandidateNames) === JSON.stringify(candidateNames);
   const historicalChain = JSON.stringify(presentCandidateNames) === JSON.stringify(historicalCandidateNames);
   const historical190Chain = JSON.stringify(presentCandidateNames) === JSON.stringify(historical190CandidateNames);
-  const selectedCandidateNames = currentChain ? candidateNames : historical190Chain ? historical190CandidateNames
+  const historical192Chain = JSON.stringify(presentCandidateNames) === JSON.stringify(historical192CandidateNames);
+  const selectedCandidateNames = currentChain ? candidateNames : historical192Chain ? historical192CandidateNames
+    : historical190Chain ? historical190CandidateNames
     : historicalChain ? historicalCandidateNames : null;
-  if (!selectedCandidateNames) throw new Error(`${application} migration directory is not an exact reviewed 0187, 0190, or 0192 chain`);
+  if (!selectedCandidateNames) throw new Error(`${application} migration directory is not an exact reviewed historical or current chain`);
   for (const name of selectedCandidateNames) {
     const expected = contract.candidates[name];
     const file = path.join(directory, name);
@@ -207,7 +254,8 @@ function validateSourceMigrations(base, application, contract) {
   const baselineIndex = finalNames.indexOf(contract.remoteBaseline);
   const expectedAppliedMigrations = finalNames.slice(baselineIndex + 1);
   const reviewedAppliedMigrations = currentChain
-    ? contract.expectedAppliedMigrations : historical190Chain
+    ? contract.expectedAppliedMigrations : historical192Chain
+      ? contract.historical192ExpectedAppliedMigrations : historical190Chain
       ? contract.historical190ExpectedAppliedMigrations : contract.historicalExpectedAppliedMigrations;
   const reviewedFinalMigration = reviewedAppliedMigrations.at(-1) ?? contract.remoteBaseline;
   if (baselineIndex < 0 || JSON.stringify(expectedAppliedMigrations) !== JSON.stringify(reviewedAppliedMigrations)

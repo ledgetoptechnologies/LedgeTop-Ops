@@ -30,9 +30,9 @@ describe("reviewed release migration fixtures", () => {
   it("selects the immutable release inventories including the promoted native portal migrations", () => {
     const operations = reviewedOperationsMigrationNames(new URL("../migrations/", import.meta.url));
     const client = reviewedClientMigrationNames(new URL("../../client/migrations/", import.meta.url));
-    expect(operations).toHaveLength(192);
-    expect(operations.at(-1)).toBe("0192_ops_service_definition_authority.sql");
-    expect(operations.slice(-23)).toEqual([
+    expect(operations).toHaveLength(194);
+    expect(operations.at(-1)).toBe("0194_operations_portal_native_delivery_terminal_cancellations.sql");
+    expect(operations.slice(-25)).toEqual([
       "0170_project_alpha_active_directory_project_guard.sql",
       "0171_project_alpha_active_directory_update_guard.sql",
       "0172_project_alpha_active_directory_consumer_guards.sql",
@@ -56,13 +56,16 @@ describe("reviewed release migration fixtures", () => {
       "0190_client_hub_native_project_preparation_authority.sql",
       "0191_operations_portal_native_billing_authority.sql",
       "0192_ops_service_definition_authority.sql",
+      "0193_operations_portal_native_delivery_dead_conflict_recovery.sql",
+      "0194_operations_portal_native_delivery_terminal_cancellations.sql",
     ]);
     expect(operations).toContain("0154_operations_portal_native_recipient_authority.sql");
     expect(operations).toContain("0158_operations_portal_native_delivery_authority.sql");
-    expect(client).toHaveLength(147);
-    expect(client.at(-1)).toBe("0228_operations_portal_native_content_start_audit.sql");
+    expect(client).toHaveLength(149);
+    expect(client.at(-1)).toBe("0230_operations_portal_native_delivery_terminal_cancellations.sql");
     expect(client).toContain("0224_operations_portal_native_recipient_authority.sql");
     expect(client).toContain("0227_operations_portal_native_delivery_authority.sql");
+    expect(client).toContain("0229_operations_portal_native_delivery_regrant.sql");
   });
 
   it("rejects changed or missing reviewed migration bytes", () => {

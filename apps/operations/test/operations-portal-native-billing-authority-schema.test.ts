@@ -54,10 +54,11 @@ describe("native billing authority migration",()=>{
     try{
       const directory=new URL("../migrations/",import.meta.url),database=await runtime.getD1Database("OPS_DB") as unknown as D1Database;
       const reviewed=reviewedOperationsMigrationNames(directory);
-      expect(reviewed.at(-1)).toBe("0192_ops_service_definition_authority.sql");
+      expect(reviewed.at(-1)).toBe("0194_operations_portal_native_delivery_terminal_cancellations.sql");
       const suffix=["0191_operations_portal_native_billing_authority.sql","0192_ops_service_definition_authority.sql"];
       expect(suffix.every(name=>reviewed.includes(name))).toBe(true);
-      const names=reviewed.filter(name=>!suffix.includes(name));
+      const historical=reviewed.slice(0,reviewed.indexOf("0193_operations_portal_native_delivery_dead_conflict_recovery.sql"));
+      const names=historical.filter(name=>!suffix.includes(name));
       expect(names.at(-1)).toBe("0190_client_hub_native_project_preparation_authority.sql");
       await database.prepare("CREATE TABLE d1_migrations(id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT NOT NULL UNIQUE)").run();
       const owner={email:"billing-schema-owner@staging.example.test",displayName:"Synthetic Staging Billing Schema Owner",

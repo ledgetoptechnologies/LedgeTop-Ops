@@ -440,11 +440,11 @@ test("requires every portal-v2 and Operations capability to be explicitly false"
   }
 });
 
-test("pins the native portal, the complete Operations 0192 chain, both 0199 files, and the 0200-0228 release contract", () => {
-  assert.equal(REQUIRED_STAGING_MIGRATIONS.operations.length, 179);
+test("pins the native portal, the complete Operations 0194 chain, both 0199 files, and the 0200-0230 release contract", () => {
+  assert.equal(REQUIRED_STAGING_MIGRATIONS.operations.length, 181);
   assert.equal(REQUIRED_STAGING_MIGRATIONS.operations[0], "0014_staff_acl_controls.sql");
-  assert.equal(REQUIRED_STAGING_MIGRATIONS.operations.at(-1), "0192_ops_service_definition_authority.sql");
-  assert.deepEqual(REQUIRED_STAGING_MIGRATIONS.delivery.slice(-46), [
+  assert.equal(REQUIRED_STAGING_MIGRATIONS.operations.at(-1), "0194_operations_portal_native_delivery_terminal_cancellations.sql");
+  assert.deepEqual(REQUIRED_STAGING_MIGRATIONS.delivery.slice(-48), [
     "0184_native_client_feedback.sql",
     "0185_native_service_request_ownership.sql",
     "0186_delivery_notification_authority_provenance.sql",
@@ -491,6 +491,8 @@ test("pins the native portal, the complete Operations 0192 chain, both 0199 file
     "0226_operations_portal_native_workspace_cleanup.sql",
     "0227_operations_portal_native_delivery_authority.sql",
     "0228_operations_portal_native_content_start_audit.sql",
+    "0229_operations_portal_native_delivery_regrant.sql",
+    "0230_operations_portal_native_delivery_terminal_cancellations.sql",
   ]);
   assert.deepEqual(REQUIRED_STAGING_MIGRATIONS.operations.slice(REQUIRED_STAGING_MIGRATIONS.operations.indexOf("0123_native_directory_authority_history.sql")), [
     "0123_native_directory_authority_history.sql",
@@ -563,6 +565,8 @@ test("pins the native portal, the complete Operations 0192 chain, both 0199 file
     "0190_client_hub_native_project_preparation_authority.sql",
     "0191_operations_portal_native_billing_authority.sql",
     "0192_ops_service_definition_authority.sql",
+    "0193_operations_portal_native_delivery_dead_conflict_recovery.sql",
+    "0194_operations_portal_native_delivery_terminal_cancellations.sql",
   ]);
   const nativeDirectoryStart = REQUIRED_STAGING_MIGRATIONS.operations.indexOf("0054_project_alpha_directory_outbox.sql");
   assert.deepEqual(REQUIRED_STAGING_MIGRATIONS.operations.slice(nativeDirectoryStart, nativeDirectoryStart + 3), [
