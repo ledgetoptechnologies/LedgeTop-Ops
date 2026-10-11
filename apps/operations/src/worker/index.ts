@@ -173,6 +173,7 @@ import { registerProjectAlphaDraftQuoteRoutes } from "./project-alpha-draft-quot
 import { provePrimaryBusinessReferences } from "./project-alpha-primary-references";
 import { registerTeamAssignedWorkRoutes } from "./team-assigned-work";
 import { registerClientHubRoutes } from "./client-hub";
+import { registerOpsServiceManagementRoutes } from "./ops-service-management-routes";
 import { NATIVE_DIRECTORY_PROFILE_ROUTE, nativeDirectoryProfileWritesEnabled, registerNativeDirectoryProfileRoutes } from "./native-directory-profile-routes";
 import { directoryRelationshipRecoveryEnabled, isDirectoryRelationshipRecoveryPath,
   registerDirectoryRelationshipGenerationRecoveryRoutes } from "./project-alpha-directory-relationship-generation-recovery-routes";
@@ -1676,6 +1677,7 @@ registerTeamAssignedWorkRoutes(app);
 registerNativeDirectoryProfileRoutes(app);
 registerDirectoryRelationshipGenerationRecoveryRoutes(app);
 registerClientHubRoutes(app);
+registerOpsServiceManagementRoutes(app);
 registerNativeDirectoryStagingEmptyEnrollmentFixtureRoutes(app);
 registerBusinessPartyRoutes(app);
 registerNotificationCenterRoutes(app);

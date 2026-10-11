@@ -52,6 +52,7 @@ import { acquireProjectAlphaExistingDirectoryBinding } from
 import { activateProjectAlphaExistingDirectoryBinding } from
   "../src/worker/project-alpha-existing-directory-binding-review-consumer";
 import { writeCustomerServiceEnrollment } from "../src/worker/ops-customer-service-enrollments";
+import { createOperationsServiceDefinition } from "../src/worker/ops-service-management";
 import { readClientPortalServiceMetadataRpc } from "../src/worker/client-portal-service-metadata-entrypoint";
 import { planProjectAlphaProjectV2Command, type ProjectAlphaProjectV2CommandProducerAction } from "../src/worker/project-alpha-project-v2-command-producer";
 import { dispatchProjectAlphaProjectV2PendingCommand } from "../src/worker/project-alpha-project-v2-pending-dispatcher";
@@ -320,6 +321,7 @@ describe("Ops Delivery to authenticated Client portal resource acceptance", { ti
     // Keep the migrated schema aligned with the current native-directory
     // producers used to establish the pre-onboarding source of truth.
     await applyCanonicalChain(operations, "operations", "0187_operations_portal_native_delivery_literal_prefix_guard.sql", true);
+    await applyDraft(operations, "operations", "0192_ops_service_definition_authority.sql");
     await applyCanonicalChain(client, "client", "0223_operations_portal_workspace_publications.sql");
     for (const name of ["0224_operations_portal_native_recipient_authority.sql",
       "0225_operations_portal_workspace_publication_cancellations.sql",
@@ -394,14 +396,12 @@ describe("Ops Delivery to authenticated Client portal resource acceptance", { ti
       expect(await client.prepare("SELECT * FROM shares WHERE id='acceptance-public-share'").first())
         .toEqual(publicShareBefore);
     };
-    await operations.batch([
-      operations.prepare(`INSERT INTO operations_service_definitions
-        (service_id,provider_id,source_id,source_service_id,display_name)
-        VALUES('acceptance-drone','ltds-drone','project-alpha:primary','drone','Drone services')`),
-      operations.prepare(`INSERT INTO operations_service_definitions
-        (service_id,provider_id,source_id,source_service_id,display_name)
-        VALUES('acceptance-website','ltt-web','project-alpha:secondary','website','Website services')`),
-    ]);
+    await createOperationsServiceDefinition(operations, owner(), { mutationId: id(), idempotencyKey: id(),
+      serviceId: "acceptance-drone", providerId: "ltds-drone", sourceId: "project-alpha:primary",
+      sourceServiceId: "drone", displayName: "Drone services" });
+    await createOperationsServiceDefinition(operations, owner(), { mutationId: id(), idempotencyKey: id(),
+      serviceId: "acceptance-website", providerId: "ltt-web", sourceId: "project-alpha:secondary",
+      sourceServiceId: "website", displayName: "Website services" });
     await writeCustomerServiceEnrollment(operations, owner(), { mutationId: id(), idempotencyKey: id(),
       customerRecordId: clientRecord, serviceId: "acceptance-drone", desiredState: "active", expectedRevision: 0 });
     await writeCustomerServiceEnrollment(operations, owner(), { mutationId: id(), idempotencyKey: id(),

@@ -41,43 +41,43 @@ async function sha256(value: string): Promise<string> {
     .map(byte => byte.toString(16).padStart(2, "0")).join("");
 }
 
-async function currentGrantGeneration(db: D1Database, actor: AuthenticatedNativeStaffWithAdmissionVersion,
+export async function resolveCustomerServiceEnrollmentGrantGeneration(db: D1Database, actor: AuthenticatedNativeStaffWithAdmissionVersion,
   customerRecordId: string): Promise<number | null> {
   return db.withSession("first-primary").prepare(`SELECT generation.generation
     FROM native_staff_admissions admission
     JOIN native_staff_profiles profile ON profile.staff_id=admission.staff_id
     JOIN native_directory_grant_generations generation ON generation.staff_id=admission.staff_id
+    JOIN operations_directory_records customer ON customer.record_id=? AND customer.record_kind='client'
     WHERE admission.staff_id=? AND admission.active=1 AND admission.bound_access_subject=?
       AND admission.version=? AND profile.version=?
       AND EXISTS(SELECT 1 FROM native_directory_grants allow_row
         WHERE allow_row.staff_id=admission.staff_id AND allow_row.permission='directory.enrollment.manage'
           AND allow_row.effect='allow' AND allow_row.active=1
-          AND (allow_row.scope_kind='global' OR (allow_row.scope_kind='resource' AND allow_row.resource_id=?)
+          AND (allow_row.scope_kind='global' OR (allow_row.scope_kind='resource' AND allow_row.resource_id=customer.record_id)
             OR (allow_row.scope_kind='assigned' AND EXISTS(SELECT 1 FROM native_directory_assignments assignment
-              WHERE assignment.record_id=? AND assignment.staff_id=admission.staff_id AND assignment.active=1))
+              WHERE assignment.record_id=customer.record_id AND assignment.staff_id=admission.staff_id AND assignment.active=1))
             OR (allow_row.scope_kind='business_area' AND EXISTS(SELECT 1 FROM native_directory_resource_scopes scope
               JOIN native_business_areas area ON area.id=scope.business_area_id AND area.active=1
-              WHERE scope.record_id=? AND scope.active=1 AND scope.business_area_id=allow_row.business_area_id))
+              WHERE scope.record_id=customer.record_id AND scope.active=1 AND scope.business_area_id=allow_row.business_area_id))
             OR (allow_row.scope_kind='division' AND EXISTS(SELECT 1 FROM native_directory_resource_scopes scope
               JOIN native_business_areas area ON area.id=scope.business_area_id AND area.active=1
               JOIN native_business_divisions division ON division.id=scope.division_id AND division.business_area_id=scope.business_area_id AND division.active=1
-              WHERE scope.record_id=? AND scope.active=1 AND scope.division_id=allow_row.division_id))))
+              WHERE scope.record_id=customer.record_id AND scope.active=1 AND scope.division_id=allow_row.division_id))))
       AND NOT EXISTS(SELECT 1 FROM native_directory_grants deny_row
         WHERE deny_row.staff_id=admission.staff_id AND deny_row.permission='directory.enrollment.manage'
           AND deny_row.effect='deny' AND deny_row.active=1
-          AND (deny_row.scope_kind='global' OR (deny_row.scope_kind='resource' AND deny_row.resource_id=?)
+          AND (deny_row.scope_kind='global' OR (deny_row.scope_kind='resource' AND deny_row.resource_id=customer.record_id)
             OR (deny_row.scope_kind='assigned' AND EXISTS(SELECT 1 FROM native_directory_assignments assignment
-              WHERE assignment.record_id=? AND assignment.staff_id=admission.staff_id AND assignment.active=1))
+              WHERE assignment.record_id=customer.record_id AND assignment.staff_id=admission.staff_id AND assignment.active=1))
             OR (deny_row.scope_kind='business_area' AND EXISTS(SELECT 1 FROM native_directory_resource_scopes scope
               JOIN native_business_areas area ON area.id=scope.business_area_id AND area.active=1
-              WHERE scope.record_id=? AND scope.active=1 AND scope.business_area_id=deny_row.business_area_id))
+              WHERE scope.record_id=customer.record_id AND scope.active=1 AND scope.business_area_id=deny_row.business_area_id))
             OR (deny_row.scope_kind='division' AND EXISTS(SELECT 1 FROM native_directory_resource_scopes scope
               JOIN native_business_areas area ON area.id=scope.business_area_id AND area.active=1
               JOIN native_business_divisions division ON division.id=scope.division_id AND division.business_area_id=scope.business_area_id AND division.active=1
-              WHERE scope.record_id=? AND scope.active=1 AND scope.division_id=deny_row.division_id))))`)
-    .bind(actor.identity.staffId, actor.identity.verifiedAccessSubject, actor.admissionVersion, actor.identity.profileVersion,
-      customerRecordId, customerRecordId, customerRecordId, customerRecordId,
-      customerRecordId, customerRecordId, customerRecordId, customerRecordId).first<number>("generation");
+              WHERE scope.record_id=customer.record_id AND scope.active=1 AND scope.division_id=deny_row.division_id))))`)
+    .bind(customerRecordId, actor.identity.staffId, actor.identity.verifiedAccessSubject,
+      actor.admissionVersion, actor.identity.profileVersion).first<number>("generation");
 }
 
 function matches(row: Saved, command: CustomerServiceEnrollmentCommand, fingerprint: string): boolean {
@@ -98,7 +98,7 @@ export async function writeCustomerServiceEnrollment(db: D1Database, actor: Auth
   const verifiedUntil = Date.parse(actor.verifiedUntil);
   if (!parsed.success || !Number.isFinite(verifiedUntil) || verifiedUntil <= Date.now()) return denied();
   const command = parsed.data;
-  const generation = await currentGrantGeneration(db, actor, command.customerRecordId);
+  const generation = await resolveCustomerServiceEnrollmentGrantGeneration(db, actor, command.customerRecordId);
   if (!Number.isSafeInteger(generation) || generation === null || generation < 1) return denied();
   const fingerprint = await sha256(JSON.stringify(["ops-customer-service-enrollment-v1", command.idempotencyKey,
     command.customerRecordId, command.serviceId, command.desiredState, command.expectedRevision, actor.identity.staffId]));

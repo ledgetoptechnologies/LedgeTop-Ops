@@ -29,6 +29,7 @@ export type Env = Omit<
   | "NATIVE_DIRECTORY_STAGING_EMPTY_ENROLLMENT_FIXTURE_ENABLED"
   | "NATIVE_DIRECTORY_STAGING_EMPTY_ENROLLMENT_FIXTURE_BUSINESS_AREA_ID"
   | "NATIVE_DIRECTORY_PROFILE_WRITES_ENABLED"
+  | "OPS_SERVICE_MANAGEMENT_ENABLED"
   | "NATIVE_DIRECTORY_OUTBOX_DRAIN_ENABLED"
   | "STAGING_DIRECTORY_PROFILE_VIEW_GRANT_ENABLED"
   | "NATIVE_INTEGRATION_CONTROL_ENABLED"
@@ -152,6 +153,8 @@ export type Env = Omit<
   NATIVE_DIRECTORY_STAGING_EMPTY_ENROLLMENT_FIXTURE_BUSINESS_AREA_ID?: string;
   /** Default-off authenticated native Directory profile create/update routes. */
   NATIVE_DIRECTORY_PROFILE_WRITES_ENABLED?: string;
+  /** Default-off staging-only audited Operations service catalog and exact-client enrollment management. */
+  OPS_SERVICE_MANAGEMENT_ENABLED?: string;
   /** Default-off bounded scheduled delivery for native Directory outboxes. */
   NATIVE_DIRECTORY_OUTBOX_DRAIN_ENABLED?: string;
   /** Default-off native, explicit-grant authority for monitor lifecycle control. */

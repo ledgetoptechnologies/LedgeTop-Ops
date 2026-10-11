@@ -19,6 +19,7 @@ import { ClientInternalNotes } from "./ClientInternalNotes";
 import type { InvitationAdministrationAccess } from "./invitation-administration-api";
 import { ProjectAlphaContactRoles, type ProjectAlphaContactRolePage } from "./ProjectAlphaContactRoles";
 import { isStagingNativeDirectoryProfilePreparationLocation, NativeDirectoryProfileEdit } from "./NativeDirectoryProfileEditor";
+import { OpsServiceManagement } from "./OpsServiceManagement";
 
 interface CollectionItem { row_key?: string }
 interface ClientContact extends CollectionItem {
@@ -637,6 +638,7 @@ function ClientWorkspace({ route, canReviewFeedback, invitationAccess, nativeDir
           {items => <div className="simple-rows">{items.map(grant => <div key={collectionKey("authenticatedDeliveryGrants", grant)}><div><strong>{grant.r2_prefix}</strong><small>{grant.audience_type} audience · {date(grant.expires_at)}</small></div><GrantStatus status={grant.status} expiresAt={grant.expires_at} /></div>)}</div>}
         </ClientCollection>
       </Card></div>}
+      {data.nativeDirectoryProfile?.kind === "client" && <OpsServiceManagement customerRecordId={data.nativeDirectoryProfile.recordId} />}
       {data.capabilities.viewer && <Card title="Shared models"><ClientCollection {...collectionProps} collection="viewerGrants" label="Shared models" initial={data.viewerGrants} page={data.pages?.viewerGrants}
         emptyTitle="No Viewer access" emptyDetail="Models remain unavailable until explicitly granted.">
         {items => <div className="simple-rows">{items.map(grant => <div key={collectionKey("viewerGrants", grant)}><div><strong>{grant.model_title || grant.project_name}</strong><small>{grant.scope_type} access · {date(grant.authorization_expires_at)}</small></div><GrantStatus status={grant.status} expiresAt={grant.authorization_expires_at} /></div>)}</div>}

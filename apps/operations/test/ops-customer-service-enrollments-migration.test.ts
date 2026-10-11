@@ -4,6 +4,7 @@ import { Miniflare } from "miniflare";
 import { splitD1MigrationStatements } from "../../client/test/helpers/d1-migrations";
 import { writeCustomerServiceEnrollment } from "../src/worker/ops-customer-service-enrollments";
 import type { AuthenticatedNativeStaffWithAdmissionVersion } from "../src/worker/native-staff-auth";
+import { canManageOperationsCustomerServices } from "../src/worker/ops-service-management";
 
 describe("0146 Operations customer service enrollments", () => {
   let runtime: Miniflare;
@@ -64,6 +65,13 @@ describe("0146 Operations customer service enrollments", () => {
         { provider_id: "ltt", source_id: "ltt:catalog", source_service_id: "inspection", display_name: "Inspection" }]);
     expect((await db.prepare("SELECT service_id,state,revision FROM operations_customer_service_enrollments WHERE customer_record_id=? ORDER BY service_id").bind(customerA).all()).results)
       .toEqual([{ service_id: ltds, state: "active", revision: 1 }, { service_id: ltt, state: "active", revision: 1 }]);
+  });
+
+  it("authorizes reads only for an exact existing client even with a global allow", async () => {
+    await db.prepare("UPDATE native_directory_grants SET scope_kind='global',resource_id=NULL WHERE staff_id=?").bind(staff).run();
+    await expect(canManageOperationsCustomerServices(db, actor, customerA)).resolves.toBe(true);
+    await expect(canManageOperationsCustomerServices(db, actor, organization)).resolves.toBe(false);
+    await expect(canManageOperationsCustomerServices(db, actor, "ops/client/missing")).resolves.toBe(false);
   });
 
   it("requires canonical provider and source identities", async () => {
