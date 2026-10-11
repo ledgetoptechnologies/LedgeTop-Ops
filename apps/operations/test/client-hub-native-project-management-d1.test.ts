@@ -401,7 +401,7 @@ describe("Client Hub native project durable preparation ledger", () => {
         command2,command2,command2,command2,command2,command2,external);
     await expect(db.batch([exactFence,
       db.prepare("UPDATE native_project_grants SET active=0,version=version+1 WHERE id='grant-native'"),exactUpdate]))
-      .rejects.toThrow(/versioned writer/);
+      .rejects.toThrow(/update fence lacks current authority/);
     expect(await db.prepare("SELECT count(*) n FROM project_alpha_project_v2_update_activation_fences WHERE command_id=?")
       .bind(command2).first("n")).toBe(0);
     expect(await db.prepare("SELECT active FROM native_project_grants WHERE id='grant-native'").first("active")).toBe(1);

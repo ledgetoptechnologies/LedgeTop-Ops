@@ -317,7 +317,8 @@ BEGIN SELECT RAISE(ABORT,'project v2 update activation fence is durable'); END;
 CREATE TRIGGER project_alpha_project_v2_update_activation_fences_authority AFTER INSERT ON project_alpha_project_v2_update_activation_fences
 WHEN NOT EXISTS (
  SELECT 1 FROM project_alpha_project_v2_canonical_settlement_receipts settlement
- JOIN project_alpha_project_v2_canonical_intents intent ON intent.command_id=settlement.command_id AND intent.operation='update'
+ JOIN project_alpha_project_v2_canonical_intents intent ON intent.command_id=settlement.command_id
+  AND intent.operation IN ('update','bind')
  JOIN project_alpha_project_v2_live_settlement_proofs proof ON proof.command_id=intent.command_id
   AND proof.external_project_id=intent.external_project_id AND proof.grant_generation=intent.expected_grant_generation
  WHERE settlement.settlement_id=NEW.settlement_id AND settlement.command_id=NEW.command_id
@@ -345,12 +346,18 @@ WHEN NOT EXISTS (
  JOIN project_alpha_project_v2_canonical_intents intent ON intent.command_id=settlement.command_id
  JOIN operations_shared_projects project ON project.external_project_id=intent.external_project_id
  JOIN project_alpha_project_mappings mapping ON mapping.external_project_id=intent.external_project_id
- WHERE settlement.settlement_id=NEW.settlement_id AND intent.operation='update'
+ WHERE settlement.settlement_id=NEW.settlement_id AND intent.operation IN ('update','bind')
   AND project.current_version=NEW.prior_version AND project.canonical_projection_sha256=NEW.prior_projection_sha256
   AND intent.expected_local_version=NEW.prior_version AND intent.expected_local_projection_sha256=NEW.prior_projection_sha256
   AND mapping.source_id=intent.source_id AND mapping.source_instance_id=intent.source_instance_id
   AND mapping.application_id=intent.application_id AND mapping.history_epoch_id=intent.history_epoch_id
-  AND mapping.project_alpha_public_id=intent.expected_project_alpha_public_id)
+  AND ((intent.operation='update' AND intent.expected_mapping_state='exact'
+      AND mapping.project_alpha_public_id=intent.expected_project_alpha_public_id)
+    OR (intent.operation='bind' AND intent.expected_mapping_state='absent'
+      AND intent.expected_project_alpha_public_id IS NULL
+      AND mapping.project_alpha_public_id=settlement.project_alpha_public_id
+      AND mapping.establishment_kind='bind' AND mapping.establishment_command_id=intent.command_id
+      AND mapping.create_command_id IS NULL)))
 BEGIN SELECT RAISE(ABORT,'project v2 update activation fence state is stale'); END;
 CREATE TRIGGER project_alpha_project_v2_update_activation_fences_target AFTER INSERT ON project_alpha_project_v2_update_activation_fences
 WHEN NOT EXISTS (
@@ -403,6 +410,58 @@ WHEN NOT EXISTS (
   AND json(NEW.scopes_json)=json(fence.scopes_json) AND NEW.completed_at IS fence.completed_at
   AND NEW.archived=fence.archived AND NEW.archived_at IS fence.archived_at AND NEW.overdue_warning=fence.overdue_warning
   AND fence.verified_until>strftime('%Y-%m-%dT%H:%M:%fZ','now')
+) AND NOT EXISTS (
+ SELECT 1 FROM project_alpha_project_inbound_resolution_authorizations authorization
+ JOIN project_alpha_project_inbound_proposals proposal ON proposal.proposal_id=authorization.proposal_id
+ WHERE authorization.decision='accept_project_alpha' AND proposal.external_project_id=OLD.external_project_id
+  AND OLD.current_version=proposal.expected_local_version AND OLD.canonical_projection_sha256=proposal.expected_local_projection_sha256
+  AND NEW.external_project_id IS OLD.external_project_id AND NEW.created_at IS OLD.created_at
+  AND NEW.source_id IS OLD.source_id AND NEW.source_instance_id IS OLD.source_instance_id
+  AND NEW.application_id IS OLD.application_id AND NEW.history_epoch_id IS OLD.history_epoch_id
+  AND NEW.project_alpha_public_id IS OLD.project_alpha_public_id AND NEW.current_version=OLD.current_version+1
+  AND NEW.pa_revision=authorization.final_remote_revision AND NEW.canonical_projection_sha256=authorization.final_remote_projection_sha256
+  AND NEW.name=json_extract(authorization.final_remote_snapshot_json,'$.data.name')
+  AND NEW.description IS json_extract(authorization.final_remote_snapshot_json,'$.data.description')
+  AND NEW.lifecycle=json_extract(authorization.final_remote_snapshot_json,'$.data.status')
+  AND NEW.archived=(json_extract(authorization.final_remote_snapshot_json,'$.data.archived') IS 1)
+  AND NEW.overdue_warning=(json_extract(authorization.final_remote_snapshot_json,'$.data.overdueWarning') IS 1)
+  AND NEW.completed_at IS json_extract(authorization.final_remote_snapshot_json,'$.data.completedAt')
+  AND NEW.archived_at IS json_extract(authorization.final_remote_snapshot_json,'$.data.archivedAt')
+  AND NEW.planned_start IS json_extract(authorization.final_remote_snapshot_json,'$.data.estimatedStart')
+  AND NEW.planned_end IS json_extract(authorization.final_remote_snapshot_json,'$.data.estimatedEnd')
+  AND NEW.organization_record_id IS authorization.target_organization_record_id
+  AND NEW.client_record_id IS authorization.target_client_record_id
+  AND json(NEW.scopes_json)=json(authorization.normalized_scopes_json))
+BEGIN SELECT RAISE(ABORT,'shared project update requires a versioned writer'); END;
+
+CREATE TRIGGER operations_shared_projects_update_fence_authority BEFORE UPDATE ON operations_shared_projects
+WHEN EXISTS (SELECT 1 FROM project_alpha_project_v2_update_activation_fences fence
+  JOIN project_alpha_project_v2_canonical_intents intent ON intent.command_id=fence.command_id AND intent.operation='update'
+  WHERE fence.external_project_id=OLD.external_project_id AND fence.prior_version=OLD.current_version
+    AND NEW.external_project_id IS OLD.external_project_id AND NEW.created_at IS OLD.created_at
+    AND json_array(fence.prior_projection_sha256,fence.resulting_version,fence.source_id,fence.source_instance_id,
+      fence.application_id,fence.history_epoch_id,fence.project_alpha_public_id,fence.project_alpha_revision,
+      fence.projection_sha256,fence.name,fence.description,fence.lifecycle,fence.planned_start,fence.planned_end,
+      fence.organization_record_id,fence.client_record_id,json(fence.scopes_json),fence.completed_at,fence.archived,
+      fence.archived_at,fence.overdue_warning)=json_array(OLD.canonical_projection_sha256,NEW.current_version,
+      NEW.source_id,NEW.source_instance_id,NEW.application_id,NEW.history_epoch_id,NEW.project_alpha_public_id,
+      NEW.pa_revision,NEW.canonical_projection_sha256,NEW.name,NEW.description,NEW.lifecycle,NEW.planned_start,
+      NEW.planned_end,NEW.organization_record_id,NEW.client_record_id,json(NEW.scopes_json),NEW.completed_at,
+      NEW.archived,NEW.archived_at,NEW.overdue_warning))
+AND NOT EXISTS (SELECT 1 FROM project_alpha_project_v2_update_activation_fences fence
+ JOIN project_alpha_project_v2_canonical_intents intent ON intent.command_id=fence.command_id AND intent.operation='update'
+ WHERE fence.external_project_id=OLD.external_project_id AND fence.prior_version=OLD.current_version
+  AND NEW.external_project_id IS OLD.external_project_id AND NEW.created_at IS OLD.created_at
+  AND json_array(fence.prior_projection_sha256,fence.resulting_version,fence.source_id,fence.source_instance_id,
+    fence.application_id,fence.history_epoch_id,fence.project_alpha_public_id,fence.project_alpha_revision,
+    fence.projection_sha256,fence.name,fence.description,fence.lifecycle,fence.planned_start,fence.planned_end,
+    fence.organization_record_id,fence.client_record_id,json(fence.scopes_json),fence.completed_at,fence.archived,
+    fence.archived_at,fence.overdue_warning)=json_array(OLD.canonical_projection_sha256,NEW.current_version,
+    NEW.source_id,NEW.source_instance_id,NEW.application_id,NEW.history_epoch_id,NEW.project_alpha_public_id,
+    NEW.pa_revision,NEW.canonical_projection_sha256,NEW.name,NEW.description,NEW.lifecycle,NEW.planned_start,
+    NEW.planned_end,NEW.organization_record_id,NEW.client_record_id,json(NEW.scopes_json),NEW.completed_at,
+    NEW.archived,NEW.archived_at,NEW.overdue_warning)
+  AND fence.verified_until>strftime('%Y-%m-%dT%H:%M:%fZ','now')
   AND EXISTS (SELECT 1 FROM staff_users staff JOIN native_staff_admissions admission ON admission.staff_id=staff.id
     JOIN native_staff_profiles profile ON profile.staff_id=staff.id
     JOIN native_project_grant_generations generation ON generation.staff_id=staff.id
@@ -427,27 +486,46 @@ WHEN NOT EXISTS (
      OR EXISTS (SELECT 1 FROM json_each(fence.scopes_json) scope
       WHERE deny.scope_kind='business_area' AND deny.business_area_id=json_extract(scope.value,'$.businessAreaId')
        OR deny.scope_kind='division' AND deny.business_area_id=json_extract(scope.value,'$.businessAreaId')
-        AND deny.division_id=json_extract(scope.value,'$.divisionId'))))
-) AND NOT EXISTS (
- SELECT 1 FROM project_alpha_project_inbound_resolution_authorizations authorization
- JOIN project_alpha_project_inbound_proposals proposal ON proposal.proposal_id=authorization.proposal_id
- WHERE authorization.decision='accept_project_alpha' AND proposal.external_project_id=OLD.external_project_id
-  AND OLD.current_version=proposal.expected_local_version AND OLD.canonical_projection_sha256=proposal.expected_local_projection_sha256
+        AND deny.division_id=json_extract(scope.value,'$.divisionId')))))
+BEGIN SELECT RAISE(ABORT,'shared project update fence lacks current authority'); END;
+
+CREATE TRIGGER operations_shared_projects_bind_fence_authority BEFORE UPDATE ON operations_shared_projects
+WHEN EXISTS (SELECT 1 FROM project_alpha_project_v2_update_activation_fences fence
+ JOIN project_alpha_project_v2_canonical_intents intent ON intent.command_id=fence.command_id AND intent.operation='bind'
+ WHERE fence.external_project_id=OLD.external_project_id AND fence.prior_version=OLD.current_version
   AND NEW.external_project_id IS OLD.external_project_id AND NEW.created_at IS OLD.created_at
-  AND NEW.source_id IS OLD.source_id AND NEW.source_instance_id IS OLD.source_instance_id
-  AND NEW.application_id IS OLD.application_id AND NEW.history_epoch_id IS OLD.history_epoch_id
-  AND NEW.project_alpha_public_id IS OLD.project_alpha_public_id AND NEW.current_version=OLD.current_version+1
-  AND NEW.pa_revision=authorization.final_remote_revision AND NEW.canonical_projection_sha256=authorization.final_remote_projection_sha256
-  AND NEW.name=json_extract(authorization.final_remote_snapshot_json,'$.data.name')
-  AND NEW.description IS json_extract(authorization.final_remote_snapshot_json,'$.data.description')
-  AND NEW.lifecycle=json_extract(authorization.final_remote_snapshot_json,'$.data.status')
-  AND NEW.archived=(json_extract(authorization.final_remote_snapshot_json,'$.data.archived') IS 1)
-  AND NEW.overdue_warning=(json_extract(authorization.final_remote_snapshot_json,'$.data.overdueWarning') IS 1)
-  AND NEW.completed_at IS json_extract(authorization.final_remote_snapshot_json,'$.data.completedAt')
-  AND NEW.archived_at IS json_extract(authorization.final_remote_snapshot_json,'$.data.archivedAt')
-  AND NEW.planned_start IS json_extract(authorization.final_remote_snapshot_json,'$.data.estimatedStart')
-  AND NEW.planned_end IS json_extract(authorization.final_remote_snapshot_json,'$.data.estimatedEnd')
-  AND NEW.organization_record_id IS authorization.target_organization_record_id
-  AND NEW.client_record_id IS authorization.target_client_record_id
-  AND json(NEW.scopes_json)=json(authorization.normalized_scopes_json))
-BEGIN SELECT RAISE(ABORT,'shared project update requires a versioned writer'); END;
+  AND json_array(fence.prior_projection_sha256,fence.resulting_version,fence.source_id,fence.source_instance_id,
+    fence.application_id,fence.history_epoch_id,fence.project_alpha_public_id,fence.project_alpha_revision,
+    fence.projection_sha256,fence.name,fence.description,fence.lifecycle,fence.planned_start,fence.planned_end,
+    fence.organization_record_id,fence.client_record_id,json(fence.scopes_json),fence.completed_at,fence.archived,
+    fence.archived_at,fence.overdue_warning)=json_array(OLD.canonical_projection_sha256,NEW.current_version,
+    NEW.source_id,NEW.source_instance_id,NEW.application_id,NEW.history_epoch_id,NEW.project_alpha_public_id,
+    NEW.pa_revision,NEW.canonical_projection_sha256,NEW.name,NEW.description,NEW.lifecycle,NEW.planned_start,
+    NEW.planned_end,NEW.organization_record_id,NEW.client_record_id,json(NEW.scopes_json),NEW.completed_at,
+    NEW.archived,NEW.archived_at,NEW.overdue_warning))
+AND NOT EXISTS (SELECT 1 FROM project_alpha_project_v2_update_activation_fences fence
+ JOIN project_alpha_project_v2_canonical_intents intent ON intent.command_id=fence.command_id AND intent.operation='bind'
+ JOIN project_alpha_project_v2_canonical_settlement_receipts settlement
+  ON settlement.command_id=intent.command_id AND settlement.settlement_id=fence.settlement_id
+ JOIN project_alpha_project_v2_live_settlement_proofs proof
+  ON proof.command_id=intent.command_id AND proof.external_project_id=intent.external_project_id
+  AND proof.grant_generation=intent.expected_grant_generation
+ WHERE fence.external_project_id=OLD.external_project_id AND fence.prior_version=OLD.current_version
+  AND NEW.external_project_id IS OLD.external_project_id AND NEW.created_at IS OLD.created_at
+  AND json_array(fence.prior_projection_sha256,fence.resulting_version,fence.source_id,fence.source_instance_id,
+    fence.application_id,fence.history_epoch_id,fence.project_alpha_public_id,fence.project_alpha_revision,
+    fence.projection_sha256,fence.name,fence.description,fence.lifecycle,fence.planned_start,fence.planned_end,
+    fence.organization_record_id,fence.client_record_id,json(fence.scopes_json),fence.completed_at,fence.archived,
+    fence.archived_at,fence.overdue_warning)=json_array(OLD.canonical_projection_sha256,NEW.current_version,
+    NEW.source_id,NEW.source_instance_id,NEW.application_id,NEW.history_epoch_id,NEW.project_alpha_public_id,
+    NEW.pa_revision,NEW.canonical_projection_sha256,NEW.name,NEW.description,NEW.lifecycle,NEW.planned_start,
+    NEW.planned_end,NEW.organization_record_id,NEW.client_record_id,json(NEW.scopes_json),NEW.completed_at,
+    NEW.archived,NEW.archived_at,NEW.overdue_warning)
+  AND intent.expected_mapping_state='absent' AND intent.expected_project_alpha_public_id IS NULL
+  AND settlement.external_project_id=fence.external_project_id
+  AND proof.actor_staff_id=fence.actor_staff_id AND proof.actor_access_subject=fence.actor_access_subject
+  AND proof.actor_admission_version=fence.actor_admission_version
+  AND proof.actor_profile_version=fence.actor_profile_version AND proof.actor_email=fence.actor_email
+  AND proof.grant_generation=fence.grant_generation AND json(proof.scopes_json)=json(fence.scopes_json)
+  AND proof.verified_until=fence.verified_until AND proof.verified_until>strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+BEGIN SELECT RAISE(ABORT,'shared project bind fence lacks current authority'); END;

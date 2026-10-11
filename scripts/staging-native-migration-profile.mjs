@@ -50,7 +50,7 @@ export const NATIVE_MIGRATION_PROFILES = Object.freeze({
       "0187_operations_portal_native_delivery_literal_prefix_guard.sql": "ded89fe037cfb56f9ddf4316a4ddcc67c8ae00e58d66eebec9a8129c6536eb28",
       "0188_client_hub_native_project_preparations.sql": "5c455a13128a912a716d75b2dbba9bcde64bfd8479495036d4f63bbf3a7098bc",
       "0189_client_hub_native_project_uncertain_recovery.sql": "e7ee262257b677589cf089e0157fdf09863f3e14c2852b5da6bb51eff717a745",
-      "0190_client_hub_native_project_preparation_authority.sql": "67fa969eb5bbecb03ec357a14d388443f9ca16bc6464eb4727edab3cc904fcce",
+      "0190_client_hub_native_project_preparation_authority.sql": "a662cd4a50c5eaee7a02bf720b1e5399d5d05712022fdd1426413fc707a83882",
     }),
     expectedAppliedMigrations: Object.freeze([
       "0184_project_alpha_directory_relationship_generation_recovery.sql",

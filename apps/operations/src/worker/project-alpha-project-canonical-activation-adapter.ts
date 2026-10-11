@@ -34,6 +34,12 @@ type Candidate = Readonly<{
   outbox_history_epoch_id: string;
   live_grant_generation: number | null;
   scopes_json: string | null;
+  actor_staff_id: string | null;
+  actor_access_subject: string | null;
+  actor_admission_version: number | null;
+  actor_profile_version: number | null;
+  actor_email: string | null;
+  proof_verified_until: string | null;
 }>;
 type Head = Readonly<{
   current_version: number;
@@ -104,7 +110,9 @@ async function candidate(db: D1Database, settlementId: string): Promise<Candidat
       outbox.external_project_id outbox_external_project_id,outbox.source_id outbox_source_id,
       outbox.expected_source_instance_id outbox_source_instance_id,
       outbox.application_id outbox_application_id,outbox.expected_history_epoch_id outbox_history_epoch_id,
-      proof.grant_generation live_grant_generation,proof.scopes_json
+      proof.grant_generation live_grant_generation,proof.scopes_json,proof.actor_staff_id,
+      proof.actor_access_subject,proof.actor_admission_version,proof.actor_profile_version,
+      proof.actor_email,proof.verified_until proof_verified_until
     FROM project_alpha_project_v2_canonical_settlement_receipts settlement
     JOIN project_alpha_project_v2_canonical_intents intent ON intent.command_id=settlement.command_id
     JOIN project_alpha_project_outbox outbox ON outbox.command_id=settlement.command_id
@@ -271,13 +279,16 @@ export async function activateProjectAlphaProjectV2Canonical(
         proof.verified_until,?,?,?,?
       FROM project_alpha_project_v2_live_settlement_proofs proof
       WHERE proof.command_id=? AND proof.external_project_id=? AND proof.grant_generation=?
-        AND json(proof.scopes_json)=json(?) AND proof.verified_until>strftime('%Y-%m-%dT%H:%M:%fZ','now')`).bind(source.settlement_id,source.command_id,
+        AND json(proof.scopes_json)=json(?) AND proof.actor_staff_id=? AND proof.actor_access_subject=?
+        AND proof.actor_admission_version=? AND proof.actor_profile_version=? AND proof.actor_email=?
+        AND proof.verified_until=? AND proof.verified_until>strftime('%Y-%m-%dT%H:%M:%fZ','now')`).bind(source.settlement_id,source.command_id,
       source.external_project_id,source.prior_local_version,source.expected_local_projection_sha256,resultingVersion,
       source.source_id,source.source_instance_id,source.application_id,source.history_epoch_id,source.project_alpha_public_id,
       source.project_alpha_revision,source.projection_sha256,data.name,data.description,data.status,data.estimatedStart,
       data.estimatedEnd,organizationRecordId,clientRecordId,source.scopes_json,data.completedAt,data.archived ? 1 : 0,
       data.archivedAt,data.overdueWarning ? 1 : 0,source.command_id,source.external_project_id,
-      source.expected_grant_generation,source.scopes_json));
+      source.expected_grant_generation,source.scopes_json,source.actor_staff_id,source.actor_access_subject,
+      source.actor_admission_version,source.actor_profile_version,source.actor_email,source.proof_verified_until));
     statements.push(env.OPS_DB.prepare(`UPDATE operations_shared_projects SET
       source_id=?,source_instance_id=?,application_id=?,history_epoch_id=?,project_alpha_public_id=?,
       pa_revision=?,current_version=current_version+1,name=?,lifecycle=?,planned_start=?,planned_end=?,

@@ -27,7 +27,7 @@ export const BOOTSTRAP_APPS = Object.freeze({
     seed: "0002_seed_acl.sql",
     migrationCount: 190,
     migrationNamesSha256: "1c42cda3e4a770e59da42fecb2eaa9063abbe415eb500d5cde22b5755fc0ddbf",
-    migrationContentsSha256: "7407ed23afc813385694f3339229b70780a91d7027384a6a37686e9db9093458",
+    migrationContentsSha256: "7e6f75368c5aed14209b092e026458894c6509324c8fdbedcf96c8df2ac0f260",
     historicalMigrationChains: Object.freeze([Object.freeze({
       count: 187,
       namesSha256: "ce00ad1a6b67cb8a7f0ed5e197ebd5fbdfabd2566dc3c402f1eee79302036951",

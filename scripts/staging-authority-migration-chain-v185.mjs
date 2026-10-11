@@ -31,7 +31,7 @@ export const AUTHORITY_MIGRATION_CHAIN_190 = Object.freeze({
   count: 190,
   final: "0190_client_hub_native_project_preparation_authority.sql",
   names: "1c42cda3e4a770e59da42fecb2eaa9063abbe415eb500d5cde22b5755fc0ddbf",
-  contents: "7407ed23afc813385694f3339229b70780a91d7027384a6a37686e9db9093458",
+  contents: "7e6f75368c5aed14209b092e026458894c6509324c8fdbedcf96c8df2ac0f260",
 });
 
 const sha = value => crypto.createHash("sha256").update(value).digest("hex");

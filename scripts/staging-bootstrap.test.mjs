@@ -213,7 +213,7 @@ test("builds the complete checked-in 147/190 chains with both Client 0199 filena
   assert.deepEqual(artifacts.delivery.manifest.transformedFiles, ["0002_seed_initial_staff.sql"]);
   assert.deepEqual(artifacts.operations.manifest.transformedFiles, ["0002_seed_acl.sql"]);
   assert.equal(artifacts.delivery.manifest.sourceChainSha256, "8a6cb183feae5ec6490cb4710f02a3289a05421786b9593e6392803a1e890f5c");
-  assert.equal(artifacts.operations.manifest.sourceChainSha256, "7407ed23afc813385694f3339229b70780a91d7027384a6a37686e9db9093458");
+  assert.equal(artifacts.operations.manifest.sourceChainSha256, "7e6f75368c5aed14209b092e026458894c6509324c8fdbedcf96c8df2ac0f260");
 });
 
 test("accepts exact historical 187 and rejects partial 188 or 189 Operations chains", () => {
