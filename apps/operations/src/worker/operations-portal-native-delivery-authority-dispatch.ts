@@ -202,10 +202,15 @@ export async function dispatchNextOperationsPortalNativeDeliveryAuthority(input:
   }
   let response: unknown;
   try { response = await input.binding.applyNativeDeliveryAuthority(row.canonical_wire_json); }
-  catch { try { response = await input.binding.getNativeDeliveryAuthorityStatus(statusJson); } catch { response = null; } }
+  catch { response = JSON.stringify({ ok: false, protocolVersion: 1, code: "unavailable", retryable: true }); }
   let result = envelope(response);
   if (result?.code && result.retryable) {
-    try { result = envelope(await input.binding.getNativeDeliveryAuthorityStatus(statusJson)); } catch { /* retry below */ }
+    try {
+      const recovered = envelope(await input.binding.getNativeDeliveryAuthorityStatus(statusJson));
+      // An absent receipt does not turn an uncertain apply into a rejection.
+      if (parseOperationsPortalNativeDeliveryAuthorityReceipt(recovered?.receipt, command, row.request_fingerprint))
+        result = recovered;
+    } catch { /* Preserve the retryable apply failure below. */ }
   }
   const receipt = parseOperationsPortalNativeDeliveryAuthorityReceipt(result?.receipt, command, row.request_fingerprint);
   if (!receipt) {

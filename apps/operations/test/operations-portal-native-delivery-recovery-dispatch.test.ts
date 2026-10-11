@@ -16,7 +16,7 @@ import { dispatchNextOperationsPortalNativeDeliveryAuthority }
 
 const id = (value: number) => `00000000-0000-4000-8000-${String(value).padStart(12, "0")}`;
 
-async function fixture() {
+async function fixture(attemptCount = 1) {
   const command = parseOperationsPortalNativeDeliveryAuthorityCommand({
     protocol: "operations-portal-native-delivery-authority", protocolVersion: 1, permissionSchemaVersion: 3,
     action: "delivery.grant", operationId: id(1),
@@ -44,13 +44,13 @@ async function fixture() {
       if (sql.startsWith("SELECT 1 FROM operations_portal_native_delivery_authority_receipts")) return null;
       if (sql.includes("SELECT outbox.operation_id,command.action")) return { operation_id: command.operationId,
         action: command.action, request_fingerprint: fingerprint, canonical_wire_json: canonical,
-        state: "dispatching", attempt_count: 1, claim_token: values[1] };
+        state: "dispatching", attempt_count: attemptCount, claim_token: values[1] };
       return null;
     },
     run: async () => { if (sql.includes("SET state=?")) releases.push(values); return { meta: { changes: 1 } }; },
   }) });
   return { command, fingerprint, releases,
-    database: { withSession: () => ({ prepare }) } as unknown as D1Database };
+    database: { withSession: () => ({ prepare, batch: vi.fn(async () => []) }) } as unknown as D1Database };
 }
 
 describe("native delivery manual recovery final actor proof", () => {
@@ -69,5 +69,60 @@ describe("native delivery manual recovery final actor proof", () => {
     expect(calls.reader).toHaveBeenCalledTimes(1);
     expect(apply).not.toHaveBeenCalled();
     expect(value.releases[0]?.[2]).toBe("recovery_invoker_changed");
+  });
+
+  it.each(["retryable", "throws"])("preserves an uncertain %s apply when status has no receipt", async kind => {
+    const value = await fixture();
+    calls.current.mockResolvedValue(true);
+    const apply = vi.fn(async () => {
+      if (kind === "throws") throw new Error("transport failed");
+      return JSON.stringify({ ok: false, protocolVersion: 1, code: "unavailable", retryable: true });
+    });
+    const status = vi.fn(async () => JSON.stringify({ ok: false, protocolVersion: 1,
+      code: "not_found", retryable: false }));
+    await expect(dispatchNextOperationsPortalNativeDeliveryAuthority({ database: value.database,
+      operationId: value.command.operationId, recoveryInvocationId: id(12),
+      binding: { applyNativeDeliveryAuthority: apply, getNativeDeliveryAuthorityStatus: status } }))
+      .resolves.toEqual({ operationId: value.command.operationId, state: "retry" });
+    expect(apply).toHaveBeenCalledTimes(1);
+    expect(status).toHaveBeenCalledTimes(2);
+    expect(value.releases[0]?.[2]).toBe("unavailable");
+  });
+
+  it.each([false, true])("retains terminal apply rejection and attempt-cap behavior (cap=%s)", async atCap => {
+    const value = await fixture(atCap ? 8 : 1);
+    calls.current.mockResolvedValue(true);
+    const apply = vi.fn(async () => JSON.stringify({ ok: false, protocolVersion: 1,
+      code: atCap ? "unavailable" : "conflict", retryable: atCap }));
+    const status = vi.fn(async () => JSON.stringify({ ok: false, protocolVersion: 1,
+      code: "not_found", retryable: false }));
+    await expect(dispatchNextOperationsPortalNativeDeliveryAuthority({ database: value.database,
+      operationId: value.command.operationId, recoveryInvocationId: id(12),
+      binding: { applyNativeDeliveryAuthority: apply, getNativeDeliveryAuthorityStatus: status } }))
+      .resolves.toEqual({ operationId: value.command.operationId, state: "dead" });
+    expect(value.releases[0]?.[2]).toBe(atCap ? "unavailable" : "conflict");
+  });
+
+  it.each([false, true])("accepts only a matching status recovery receipt (mismatch=%s)", async mismatch => {
+    const value = await fixture();
+    calls.current.mockResolvedValue(true);
+    const apply = vi.fn(async () => JSON.stringify({ ok: false, protocolVersion: 1,
+      code: "unavailable", retryable: true }));
+    const status = vi.fn()
+      .mockResolvedValueOnce(JSON.stringify({ ok: false, protocolVersion: 1, code: "not_found", retryable: false }))
+      .mockResolvedValueOnce(JSON.stringify({ ok: true, protocolVersion: 1, receipt: {
+        protocol: value.command.protocol, protocolVersion: 1, status: "duplicate",
+        operationId: mismatch ? id(99) : value.command.operationId, requestFingerprint: value.fingerprint,
+        action: value.command.action, authorityId: value.command.authority.authorityId,
+        recipientBindingId: value.command.recipient.recipientBindingId,
+        folderReservationId: value.command.resource.folderReservationId,
+        resultingRevision: "1", resultingState: "active",
+      } }));
+    await expect(dispatchNextOperationsPortalNativeDeliveryAuthority({ database: value.database,
+      operationId: value.command.operationId, recoveryInvocationId: id(12),
+      binding: { applyNativeDeliveryAuthority: apply, getNativeDeliveryAuthorityStatus: status } }))
+      .resolves.toEqual({ operationId: value.command.operationId, state: mismatch ? "retry" : "acknowledged" });
+    if (mismatch) expect(value.releases[0]?.[2]).toBe("unavailable");
+    else expect(value.releases).toEqual([]);
   });
 });

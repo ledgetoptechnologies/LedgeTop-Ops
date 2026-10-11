@@ -1,10 +1,8 @@
-import { readFileSync } from "node:fs";
 import { Miniflare } from "miniflare";
 import { expect, vi } from "vitest";
 
 vi.mock("cloudflare:workers", () => ({ WorkerEntrypoint: class {} }));
 
-import { splitD1MigrationStatements } from "../../../client/test/helpers/d1-migrations";
 import { applyCanonicalChain } from "./verified-recipient-canonical-lineage";
 import { writeNativeDirectoryProfile, type NativeDirectoryCreateWrite } from
   "../../src/worker/native-directory-profile-writer";
@@ -271,11 +269,6 @@ function owner(): AuthenticatedNativeStaffWithAdmissionVersion {
     verifiedAccessSubject: "access|acceptance-owner", email: "acceptance-owner@example.test",
     displayName: "Acceptance Owner", profileVersion: 1 }, admissionVersion: 1, verifiedUntil: future(2) };
 }
-async function applyDraft(database: D1Database, application: "operations" | "client", name: string) {
-  const url = application === "operations" ? new URL(`../../migrations/${name}`, import.meta.url)
-    : new URL(`../../../client/migrations/${name}`, import.meta.url);
-  await database.batch(splitD1MigrationStatements(readFileSync(url, "utf8")).map(sql => database.prepare(sql)));
-}
 async function seedOwner() {
   await operations.batch([
     operations.prepare(`INSERT INTO staff_users(id,email,display_name,access_subject,status)
@@ -369,22 +362,14 @@ export async function runCanonicalPortalResourceAcceptance(onReady?:(context:Can
   operations = await runtime.getD1Database("OPS_DB") as unknown as D1Database;
   client = await runtime.getD1Database("CLIENT_DB") as unknown as D1Database;
   bucket = await runtime.getR2Bucket("DATA_BUCKET") as unknown as R2Bucket;
-  // Keep the migrated schema aligned with the current native-directory
-  // producers used to establish the pre-onboarding source of truth.
-  await applyCanonicalChain(operations, "operations", "0187_operations_portal_native_delivery_literal_prefix_guard.sql", true);
-  for (const name of ["0188_client_hub_native_project_preparations.sql",
-    "0189_client_hub_native_project_uncertain_recovery.sql",
-    "0190_client_hub_native_project_preparation_authority.sql",
-    "0191_operations_portal_native_billing_authority.sql",
-    "0192_ops_service_definition_authority.sql"])
-    await applyDraft(operations, "operations", name);
-  await applyCanonicalChain(client, "client", "0223_operations_portal_workspace_publications.sql");
-  for (const name of ["0224_operations_portal_native_recipient_authority.sql",
-    "0225_operations_portal_workspace_publication_cancellations.sql",
-    "0226_operations_portal_native_workspace_cleanup.sql",
-    "0227_operations_portal_native_delivery_authority.sql",
-    "0228_operations_portal_native_content_start_audit.sql"])
-    await applyDraft(client, "client", name);
+  // Exercise current producers/consumers against the complete canonical schema,
+  // including delivery replacement and terminal-cancellation guards and ledgers.
+  await applyCanonicalChain(operations, "operations", "0195_client_hub_native_project_current_owner_observation.sql", true);
+  await applyCanonicalChain(client, "client", "0230_operations_portal_native_delivery_terminal_cancellations.sql");
+  expect(await operations.prepare("SELECT count(*) AS count FROM d1_migrations").first<number>("count")).toBe(195);
+  expect(await client.prepare("SELECT count(*) AS count FROM d1_migrations").first<number>("count")).toBe(149);
+  expect((await operations.prepare("PRAGMA foreign_key_check").all()).results).toEqual([]);
+  expect((await client.prepare("PRAGMA foreign_key_check").all()).results).toEqual([]);
   await seedOwner();
   await operations.batch([
     operations.prepare("INSERT INTO divisions(id,name,code,active) VALUES(?,'Acceptance Division','ACCEPT',1)").bind(division),
@@ -578,8 +563,12 @@ export async function runCanonicalPortalResourceAcceptance(onReady?:(context:Can
       applyNativeDeliveryAuthority: wire => applyOperationsPortalNativeDeliveryAuthority(deliveryEnvironment, wire),
       getNativeDeliveryAuthorityStatus: wire => readOperationsPortalNativeDeliveryAuthorityStatus(deliveryEnvironment, wire),
     };
-    await expect(dispatchNextOperationsPortalNativeDeliveryAuthority({ database: operations,
-      binding: deliveryBinding, operationId: grantOperationId })).resolves.toEqual({ operationId: grantOperationId,
+    const grantDispatch = await dispatchNextOperationsPortalNativeDeliveryAuthority({ database: operations,
+      binding: deliveryBinding, operationId: grantOperationId });
+    const grantDispatchStatus = await operations.prepare(`SELECT state,last_error_code
+      FROM operations_portal_native_delivery_authority_outbox WHERE operation_id=?`)
+      .bind(grantOperationId).first();
+    expect(grantDispatch, JSON.stringify(grantDispatchStatus)).toEqual({ operationId: grantOperationId,
       state: "acknowledged" });
     await expectPublicShareUnchanged();
 
