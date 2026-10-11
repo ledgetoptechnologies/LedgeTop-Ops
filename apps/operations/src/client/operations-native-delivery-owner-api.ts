@@ -61,6 +61,7 @@ export type OperationsNativeDeliveryAuthority = Readonly<{
   latestAction: "delivery.grant" | "delivery.revoke";
   transportStatus: "pending" | "acknowledged" | "dead";
   recoveryOperationId: string | null;
+  cancellationOperationId: string | null;
 }>;
 export type OperationsNativeDeliveryAuthorityPage = Readonly<{
   items: readonly OperationsNativeDeliveryAuthority[];
@@ -166,7 +167,7 @@ export function parseOperationsNativeDeliveryAuthority(value: unknown): Operatio
     "enrollmentIntentId", "targetId", "targetClientRecordId", "workspaceId", "clientFolderBindingId",
     "externalProjectId", "opsFolderProjectId", "opsDivisionId", "clientLabel", "recipientLabel", "projectLabel",
     "folderLabel", "features", "expiresAt", "latestOperationId", "latestAction", "transportStatus",
-    "recoveryOperationId"]);
+    "recoveryOperationId", "cancellationOperationId"]);
   const features = row && parseFeatures(row.features, row.state === "revoked");
   if (!row || typeof row.authorityId !== "string" || !UUID.test(row.authorityId) || !integer(row.revision)
     || row.state !== "active" && row.state !== "revoked"
@@ -189,7 +190,11 @@ export function parseOperationsNativeDeliveryAuthority(value: unknown): Operatio
       && (typeof row.recoveryOperationId !== "string" || !UUID.test(row.recoveryOperationId))
     || row.transportStatus === "pending" && row.recoveryOperationId !== row.latestOperationId
     || row.transportStatus === "dead" && row.recoveryOperationId !== null && row.recoveryOperationId !== row.latestOperationId
-    || row.transportStatus === "acknowledged" && row.recoveryOperationId !== null) return null;
+    || row.transportStatus === "acknowledged" && row.recoveryOperationId !== null
+    || row.cancellationOperationId !== null && (row.cancellationOperationId !== row.latestOperationId
+      || row.state !== "active" || row.revision !== 1 || row.latestAction !== "delivery.grant"
+      || row.transportStatus !== "dead" || !canonicalInstant(row.expiresAt)
+      || Date.parse(row.expiresAt) > Date.now())) return null;
   return Object.freeze({ ...row, features }) as OperationsNativeDeliveryAuthority;
 }
 
@@ -326,7 +331,8 @@ export async function listOperationsNativeDeliveryAuthorities(targetId: string,
     || page.nextCursor !== null && (typeof page.nextCursor !== "string"
       || page.nextCursor.length > 1024 || !CURSOR.test(page.nextCursor))) denied(503, true);
   const items = row.items.map(parseOperationsNativeDeliveryAuthority);
-  if (items.some(item => item === null) || items.some(item => item!.targetId !== targetId)) denied(503, true);
+  if (items.some(item => item === null) || items.some(item => item!.targetId !== targetId
+    || item!.cancellationOperationId !== null)) denied(503, true);
   const ids = new Set<string>();
   for (const item of items as OperationsNativeDeliveryAuthority[]) {
     if (ids.has(item.authorityId)) denied(503, true);
@@ -412,4 +418,21 @@ export function newOperationsNativeDeliveryOperationId(): string {
   bytes[8] = (bytes[8]! & 0x3f) | 0x80;
   const hex = [...bytes].map(byte => byte.toString(16).padStart(2, "0")).join("");
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
+export async function cancelOperationsNativeDeliveryAuthority(csrfToken: string,
+  authority: OperationsNativeDeliveryAuthority) {
+  const operationId = authority.cancellationOperationId;
+  if (!operationId || operationId !== authority.latestOperationId || !UUID.test(operationId)
+    || authority.revision !== 1 || authority.state !== "active" || authority.transportStatus !== "dead"
+    || authority.latestAction !== "delivery.grant" || !canonicalInstant(authority.expiresAt)
+    || Date.parse(authority.expiresAt) > Date.now()) denied(400, false);
+  const { response, value } = await request(`/authorities/${encodeURIComponent(authority.authorityId)}/cancel`, {
+    method: "POST", headers: mutationHeaders(csrfToken), body: JSON.stringify({ operationId, expectedRevision: 1 }),
+  });
+  if (!response.ok) denied(response.status);
+  const row = exactRecord(value, ["operationId", "status", "replayed"]);
+  if (response.status !== 200 || !row || row.operationId !== operationId
+    || row.status !== "cancelled" && row.status !== "committed" || typeof row.replayed !== "boolean") denied(503, true);
+  return Object.freeze({ operationId, status: row.status as "cancelled" | "committed", replayed: row.replayed });
 }

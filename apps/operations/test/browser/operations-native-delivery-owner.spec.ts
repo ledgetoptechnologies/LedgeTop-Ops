@@ -126,6 +126,44 @@ test("an uncertain revoke retries the exact body without silently changing autho
   expect(recorded.filter(call => call.path.endsWith("/session"))).toHaveLength(2);
 });
 
+test("expired cancellation requires exact detail review and a browser confirmation", async ({ page }) => {
+  await render(page, "cancel-success"); await loadAuthority(page);
+  await expect(page.getByRole("button", { name: "Reconcile exact expired grant" })).toBeDisabled();
+  await page.getByLabel(/I reviewed this exact authority/).check();
+  page.once("dialog", dialog => dialog.dismiss());
+  await page.getByRole("button", { name: "Reconcile exact expired grant" }).click();
+  expect((await calls(page)).filter(call => call.path.endsWith("/cancel"))).toHaveLength(0);
+  page.once("dialog", dialog => dialog.accept());
+  await page.getByRole("button", { name: "Reconcile exact expired grant" }).click();
+  await expect(page.locator('p[role="status"]')).toContainText("durably cancelled");
+  expect((await calls(page)).find(call => call.path.endsWith("/cancel"))?.body)
+    .toEqual({ operationId: recoveryOperationId, expectedRevision: 1 });
+  await expect(page.getByRole("heading", { name: "Current native delivery authority" })).toHaveCount(0);
+});
+
+test("uncertain cancellation retries the same stored operation without creating a replacement", async ({ page }) => {
+  await render(page, "cancel-network"); await loadAuthority(page);
+  await page.getByLabel(/I reviewed this exact authority/).check();
+  page.once("dialog", dialog => dialog.accept());
+  await page.getByRole("button", { name: "Reconcile exact expired grant" }).click();
+  await expect(page.getByRole("alert").filter({ hasText: "The cancel outcome is uncertain" })).toBeVisible();
+  await page.getByRole("button", { name: "Retry same frozen cancellation" }).click();
+  await expect(page.locator('p[role="status"]')).toContainText("durably cancelled");
+  const recorded = await calls(page), attempts = recorded.filter(call => call.path.endsWith("/cancel"));
+  expect(attempts).toHaveLength(2); expect(attempts[1]?.body).toEqual(attempts[0]?.body);
+  expect(recorded.filter(call => call.path.endsWith("/session"))).toHaveLength(2);
+  expect(recorded.filter(call => call.path.endsWith("/authorities") && call.method === "POST")).toHaveLength(0);
+});
+
+test("an already committed grant is acknowledged rather than reported as cancelled", async ({ page }) => {
+  await render(page, "cancel-committed"); await loadAuthority(page);
+  await page.getByLabel(/I reviewed this exact authority/).check();
+  page.once("dialog", dialog => dialog.accept());
+  await page.getByRole("button", { name: "Reconcile exact expired grant" }).click();
+  await expect(page.locator('p[role="status"]')).toContainText("already recorded");
+  await expect(page.locator('p[role="status"]')).not.toContainText("durably cancelled");
+});
+
 test("an access denial clears candidate labels and identifiers", async ({ page }) => {
   await render(page, "candidate-denied-after-first");
   await page.getByLabel("Exact native portal target ID").fill(targetId);

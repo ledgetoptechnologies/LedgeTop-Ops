@@ -30,9 +30,10 @@ function active(operationId: string, transportStatus: "pending" | "acknowledged"
     projectLabel: "Project One", folderLabel: "Folder One",
     features: ["folder.list", "file.metadata"], expiresAt: "2099-01-01T00:00:00.000Z",
     latestOperationId: operationId, latestAction: "delivery.grant", transportStatus,
-    recoveryOperationId: transportStatus === "pending" || recoverableDead ? operationId : null };
+    recoveryOperationId: transportStatus === "pending" || recoverableDead ? operationId : null,
+    cancellationOperationId: null as string | null };
 }
-let grantCalls = 0, revokeCalls = 0, candidateCalls = 0;
+let grantCalls = 0, revokeCalls = 0, candidateCalls = 0, cancelCalls = 0;
 
 window.fetch = async (input, init = {}) => {
   const path = String(input), method = init.method ?? "GET";
@@ -56,7 +57,17 @@ window.fetch = async (input, init = {}) => {
   if (path.endsWith(`/authorities/${authorityId}`) && method === "GET") {
     const authority = mode === "load-pending" ? active(recoveryOperationId, "pending")
       : mode === "load-dead" ? active(recoveryOperationId, "dead", authorityId, true) : active(recoveryOperationId);
+    if (mode.startsWith("cancel-")) {
+      authority.transportStatus = "dead";
+      authority.expiresAt = "2026-01-01T00:00:00.000Z";
+      authority.cancellationOperationId = recoveryOperationId;
+    }
     return Response.json({ authority });
+  }
+  if (path.endsWith(`/authorities/${authorityId}/cancel`) && method === "POST") {
+    cancelCalls += 1;
+    if (mode === "cancel-network" && cancelCalls === 1) throw new TypeError("simulated cancellation response loss");
+    return Response.json({ operationId: body!.operationId, status: mode === "cancel-committed" ? "committed" : "cancelled", replayed: cancelCalls > 1 });
   }
   if (path.endsWith("/authorities") && method === "POST") {
     grantCalls += 1;
