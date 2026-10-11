@@ -15,6 +15,11 @@ export type PortalFinancialResult=Readonly<{ok:true;collections:readonly PortalF
 
 const plain=(value:unknown):value is Record<string,unknown>=>Boolean(value)&&typeof value==="object"&&!Array.isArray(value)
   &&Object.getPrototypeOf(value)===Object.prototype;
+function safeLink(value:unknown){if(value===null)return true;if(typeof value!=="string"||value.length>2048)return false;
+  try{const url=new URL(value),keys=[...url.searchParams.keys()];return url.protocol==="https:"&&!url.username&&!url.password&&!url.hash
+    &&url.pathname==="/"&&keys.length===2&&keys.filter(key=>key==="page").length===1&&keys.filter(key=>key==="token").length===1
+    &&(url.searchParams.get("page")==="public-doc"||url.searchParams.get("page")==="stripe-checkout")
+    &&/^[A-Za-z0-9_-]{16,64}$/.test(url.searchParams.get("token")??"");}catch{return false;}}
 function decode(wire:unknown,request:ClientPortalServiceMetadataRequestV1):PortalFinancialCollection[]|null{
   if(typeof wire!=="string"||new TextEncoder().encode(wire).byteLength>MAX_BYTES)return null;
   try{
@@ -32,7 +37,7 @@ function decode(wire:unknown,request:ClientPortalServiceMetadataRequestV1):Porta
         ||!(item.kind==="invoice"||item.kind==="contract"||item.kind==="project_invoice")
         ||typeof item.status!=="string"||typeof item.currency!=="string"||typeof item.total!=="string"
         ||!(item.amountPaid===null||typeof item.amountPaid==="string")||!(item.balanceDue===null||typeof item.balanceDue==="string")
-        ||!(item.documentUrl===null||typeof item.documentUrl==="string")||!(item.actionUrl===null||typeof item.actionUrl==="string"))return null;
+        ||!safeLink(item.documentUrl)||!safeLink(item.actionUrl))return null;
         documents.push(item as PortalFinancialDocument);}
       collections.push({grantId:candidate.grantId,revision:candidate.revision,documents});}
     return collections;

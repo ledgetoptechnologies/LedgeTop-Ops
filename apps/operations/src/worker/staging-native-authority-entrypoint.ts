@@ -75,3 +75,4 @@ export default {
 
 export * from "./index";
 export { OperationsPortalNativeDeliveryAuthorizationReader } from "./operations-portal-native-delivery-authorization-entrypoint";
+export { ClientPortalNativeFinancialReader } from "./client-portal-native-financial-entrypoint";

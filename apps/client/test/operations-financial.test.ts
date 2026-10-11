@@ -38,4 +38,9 @@ describe("Client private native financial consumer",()=>{
     await expect(readPortalFinancialDocuments(env(vi.fn(async()=>success.replace("workspace-1","workspace-2"))),principal,authorityId))
       .resolves.toEqual({ok:false,code:"unavailable"});
   });
+  it("rejects unsafe document links at the server-side Client boundary",async()=>{
+    await expect(readPortalFinancialDocuments(env(vi.fn(async()=>success.replace(
+      "https://pa.example.test/?page=stripe-checkout&token=abcdefghijklmnop","javascript:alert(1)"))),principal,authorityId))
+      .resolves.toEqual({ok:false,code:"unavailable"});
+  });
 });
