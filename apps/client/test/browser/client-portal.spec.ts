@@ -937,6 +937,53 @@ test("a stale project-file observer callback cannot replay an already consumed c
   expect({ requestedPages, maximumInFlight }).toEqual({ requestedPages: [0, 1, 2], maximumInFlight: 1 });
 });
 
+test("a stale idle prefetch callback cannot request a cursor after manual consumption", async ({ page }) => {
+  await page.addInitScript(() => {
+    const callbacks: Array<() => void> = [];
+    Object.defineProperty(window, "__portalIdlePrefetchCallbacks", { value: callbacks });
+    Object.defineProperty(window, "requestIdleCallback", { configurable: true, value: (callback: () => void) => {
+      callbacks.push(callback); return callbacks.length;
+    } });
+    Object.defineProperty(window, "cancelIdleCallback", { configurable: true, value: () => {} });
+    Object.defineProperty(window, "IntersectionObserver", { configurable: true, value: class {
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+      takeRecords() { return []; }
+      readonly root = null;
+      readonly rootMargin = "0px";
+      readonly thresholds = [0];
+    } });
+  });
+  const requestedCursors: Array<string | null> = [];
+  const fixture = async (url: URL): Promise<PortalFilePage> => {
+    const folder = url.searchParams.get("folder");
+    if (folder !== "pf1_idle") return { files: [], folders: [{ id: "pf1_idle", name: "Idle callback fixture" }],
+      breadcrumbs: [{ id: null, name: "Project files" }], folderId: null, prefix: "", cursor: null };
+    const cursor = url.searchParams.get("cursor"); requestedCursors.push(cursor);
+    const pageIndex = Number(cursor ?? "0");
+    return { files: [{ ...filePage.files[0]!, id: `idle-${pageIndex}`, name: `idle-${pageIndex}.pdf` }], folders: [],
+      breadcrumbs: [{ id: null, name: "Project files" }, { id: folder, name: "Idle callback fixture" }],
+      folderId: folder, prefix: "", cursor: pageIndex < 2 ? String(pageIndex + 1) : null };
+  };
+  await mockAuthorizedPortal(page, null, requests, undefined, undefined, true, false, undefined, fixture);
+  await page.goto("/portal/projects/project-a?tab=files");
+  await page.getByRole("button", { name: /Idle callback fixture/ }).click();
+  await expect(page.getByText("idle-0.pdf")).toBeVisible();
+  await expect.poll(() => page.evaluate(() => (window as unknown as { __portalIdlePrefetchCallbacks: unknown[] }).__portalIdlePrefetchCallbacks.length)).toBe(1);
+  await page.getByRole("button", { name: "Load more" }).click();
+  await expect(page.getByText("idle-1.pdf")).toBeVisible();
+  await expect.poll(() => page.evaluate(() => (window as unknown as { __portalIdlePrefetchCallbacks: unknown[] }).__portalIdlePrefetchCallbacks.length)).toBe(2);
+  await page.evaluate(() => (window as unknown as { __portalIdlePrefetchCallbacks: Array<() => void> }).__portalIdlePrefetchCallbacks[0]?.());
+  await page.waitForTimeout(25);
+  expect(requestedCursors).toEqual([null, "1"]);
+  await page.evaluate(() => (window as unknown as { __portalIdlePrefetchCallbacks: Array<() => void> }).__portalIdlePrefetchCallbacks[1]?.());
+  await expect.poll(() => requestedCursors).toEqual([null, "1", "2"]);
+  await page.getByRole("button", { name: "Load more" }).click();
+  await expect(page.getByText("idle-2.pdf")).toBeVisible();
+  expect(requestedCursors).toEqual([null, "1", "2"]);
+});
+
 test("a transient project-file continuation failure releases the matching cursor for explicit retry", async ({ page }) => {
   await page.addInitScript(() => {
     Object.defineProperty(window, "requestIdleCallback", { configurable: true, value: () => 1 });
