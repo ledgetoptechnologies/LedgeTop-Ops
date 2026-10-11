@@ -48,7 +48,7 @@ const SELECTOR_KEYS = ["kind", "externalId", "publicId", "revision", "projection
 const MONEY = /^(?:0|[1-9][0-9]{0,17})\.[0-9]{2}$/;
 const MAX_BYTES = 128 * 1024;
 
-function selector(value: unknown): value is FinancialSelector {
+export function isFinancialSelector(value: unknown): value is FinancialSelector {
   return plain(value) && exact(value, SELECTOR_KEYS)
     && ["organization", "client", "project"].includes(String(value.kind))
     && externalId(value.externalId) && publicId(value.publicId)
@@ -105,14 +105,14 @@ function document(value: unknown, expectedOrigin: string): value is FinancialDoc
 /** Decodes already-bounded transport bytes. Never logs or returns invalid
  * payloads: they may contain private data or bearer capabilities. */
 export function decodeProjectAlphaFinancialPage(bytes: Uint8Array, expected: FinancialExpectation): FinancialPage | null {
-  if (bytes.byteLength > MAX_BYTES || !origin(expected.paOrigin) || !selector(expected.selector)
+  if (bytes.byteLength > MAX_BYTES || !origin(expected.paOrigin) || !isFinancialSelector(expected.selector)
     || ![expected.sourceInstanceId, expected.applicationId, expected.historyEpoch, expected.requestId].every(uuid)
     || expected.snapshotSha256 !== undefined && !hash(expected.snapshotSha256)) return null;
   try {
     const value = parseDuplicateFreeJson(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
     if (!plain(value) || !exact(value, ["apiVersion", "sourceInstanceId", "applicationId", "historyEpoch", "requestId", "selector", "snapshot", "documents", "nextCursor"])
       || value.apiVersion !== "2" || value.sourceInstanceId !== expected.sourceInstanceId || value.applicationId !== expected.applicationId
-      || value.historyEpoch !== expected.historyEpoch || value.requestId !== expected.requestId || !selector(value.selector)
+      || value.historyEpoch !== expected.historyEpoch || value.requestId !== expected.requestId || !isFinancialSelector(value.selector)
       || !sameSelector(value.selector, expected.selector)
       || !plain(value.snapshot) || !exact(value.snapshot, ["sha256", "documentCount"]) || !hash(value.snapshot.sha256)
       || expected.snapshotSha256 !== undefined && value.snapshot.sha256 !== expected.snapshotSha256
