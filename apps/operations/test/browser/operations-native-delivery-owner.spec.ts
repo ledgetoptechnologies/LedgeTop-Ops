@@ -102,6 +102,8 @@ test("pending recovery is unavailable until reload and uses the exact stored ope
 test("a rejected exact grant exposes only audited recovery of the frozen operation", async ({ page }) => {
   await render(page, "load-dead"); await loadAuthority(page);
   await expect(page.getByRole("alert")).toContainText("Recovery checks Client status first");
+  await expect(page.getByRole("button", { name: "Revoke exact delivery authority" })).toHaveCount(0);
+  await expect(page.getByLabel("Exact revocation reason code")).toHaveCount(0);
   await page.getByLabel("Exact recovery reason").fill("recover-exact-rejected-operation");
   await page.getByLabel(/I reviewed this exact authority/).check();
   await page.getByRole("button", { name: "Recover exact stored delivery" }).click();

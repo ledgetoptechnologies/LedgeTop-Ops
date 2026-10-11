@@ -229,6 +229,9 @@ function NativeDeliveryAuthorityWorkspace({ initialSession }: { initialSession: 
   const actAuthority = async (kind: "revoke" | "recover") => {
     if (!authority || busy || (!attempt && !authorityReviewed)) return;
     if (attempt) { if (attempt.kind === kind) await execute(attempt, true); return; }
+    if (kind === "revoke" && authority.transportStatus === "dead") {
+      setError("Resolve the exact failed delivery before revocation. A failed grant is not proof that Client recorded access."); return;
+    }
     const reason = (kind === "revoke" ? revokeReason : recoveryReason).trim();
     const maximum = kind === "revoke" ? 200 : 500;
     if (reason.length < 1 || reason.length > maximum
@@ -329,7 +332,7 @@ function NativeDeliveryAuthorityWorkspace({ initialSession }: { initialSession: 
         <div><dt>Recovery operation</dt><dd>{authority.recoveryOperationId ?? "Not available"}</dd></div></dl>
       {authority.transportStatus === "dead" && !authority.recoveryOperationId && <p role="alert">Delivery is dead and cannot be recovered. Do not create a replacement authority.</p>}
       {authority.transportStatus === "dead" && authority.recoveryOperationId && <p role="alert">The Client rejected this exact grant before recording it. Recovery checks Client status first and may submit only this immutable operation under current authority.</p>}
-      {authority.state === "active" && !attempt && <label>Exact revocation reason code<input value={revokeReason} maxLength={200}
+      {authority.state === "active" && authority.transportStatus !== "dead" && !attempt && <label>Exact revocation reason code<input value={revokeReason} maxLength={200}
         onChange={event => { setRevokeReason(event.currentTarget.value); setAuthorityReviewed(false); }} /></label>}
       {authority.recoveryOperationId && authorityRead && !attempt
         && <label>Exact recovery reason<input value={recoveryReason} maxLength={500}
@@ -341,7 +344,7 @@ function NativeDeliveryAuthorityWorkspace({ initialSession }: { initialSession: 
         onClick={() => void actAuthority("revoke")}>Retry same frozen revoke</button>}
       {attempt?.kind === "recover" && <button type="button" className="button-orange" disabled={Boolean(busy)}
         onClick={() => void actAuthority("recover")}>Retry same frozen recovery</button>}
-      {!attempt && authority.state === "active" && <button type="button" className="button-danger"
+      {!attempt && authority.state === "active" && authority.transportStatus !== "dead" && <button type="button" className="button-danger"
         disabled={Boolean(busy) || !authorityReviewed || !revokeReason}
         onClick={() => void actAuthority("revoke")}>Revoke exact delivery authority</button>}
       {!attempt && authority.recoveryOperationId && authorityRead
@@ -349,7 +352,7 @@ function NativeDeliveryAuthorityWorkspace({ initialSession }: { initialSession: 
           onClick={() => void actAuthority("recover")}>Recover exact stored delivery</button>}
       {authority.recoveryOperationId && !authorityRead
         && <p>Reload this exact authority before recovery so the stored operation and current owner authority are revalidated.</p>}
-      {authority.state === "active" && <p>Features and expiry are immutable here. Revoke explicitly, then separately review and reissue a current candidate.</p>}
+      {authority.state === "active" && authority.transportStatus !== "dead" && <p>Features and expiry are immutable here. Revoke explicitly, then separately review and reissue a current candidate.</p>}
     </section></Card>}
     {message && <p role="status">{message}</p>}{error && <p role="alert">{error}</p>}
   </main></div>;
