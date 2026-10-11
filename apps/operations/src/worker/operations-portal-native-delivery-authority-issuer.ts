@@ -216,6 +216,9 @@ const contextSql = `SELECT workspace.target_id,workspace.target_revision,workspa
     AND published_project.project_version=project.current_version
     AND published_project.organization_record_id IS project.organization_record_id
     AND published_project.client_record_id IS project.client_record_id
+    AND NOT EXISTS(SELECT 1 FROM operations_portal_native_delivery_authority_heads delivery
+      WHERE delivery.recipient_binding_id=recipient.recipient_binding_id
+        AND delivery.folder_reservation_id=folder.reservation_id AND delivery.state='active')
     AND recipient.recipient_binding_id=? AND folder.reservation_id=?`;
 
 async function currentContext(database: Pick<D1Database, "prepare">, recipientBindingId: string, folderReservationId: string) {
@@ -573,17 +576,24 @@ export async function readOperationsPortalNativeDeliveryAuthorityStatusForOwner(
   const current = await head(session, authorityId); if (!current) denied();
   if (!await ownerAuthorized(session, owner, generationValue, current.root_record_id, current.ops_division_id,
     current.state === "active" ? "delivery.grant" : "delivery.revoke")) denied();
-  const transport = await session.prepare(`SELECT command.action,outbox.state
+  const transport = await session.prepare(`SELECT command.action,outbox.state,outbox.last_error_code,
+      outbox.claim_token,outbox.claim_until,outbox.acknowledged_claim_token,
+      EXISTS(SELECT 1 FROM operations_portal_native_delivery_authority_receipts receipt
+        WHERE receipt.operation_id=outbox.operation_id) has_receipt
     FROM operations_portal_native_delivery_authority_commands command
     JOIN operations_portal_native_delivery_authority_outbox outbox ON outbox.operation_id=command.operation_id
     WHERE command.operation_id=? AND command.authority_id=? AND command.resulting_revision=?`)
     .bind(current.latest_operation_id, current.authority_id, current.revision)
-    .first<{ action: "delivery.grant" | "delivery.revoke"; state: string }>();
+    .first<{ action: "delivery.grant" | "delivery.revoke"; state: string; last_error_code: string | null;
+      claim_token: string | null; claim_until: string | null; acknowledged_claim_token: string | null; has_receipt: number }>();
   if (!transport || transport.action !== "delivery.grant" && transport.action !== "delivery.revoke") denied();
   const transportStatus = transport.state === "acknowledged" ? "acknowledged" as const
     : transport.state === "dead" ? "dead" as const : "pending" as const;
+  const recoverableDeadConflict = transport.state === "dead" && transport.action === "delivery.grant"
+    && transport.last_error_code === "conflict" && transport.claim_token === null
+    && transport.claim_until === null && transport.acknowledged_claim_token === null && transport.has_receipt === 0;
   return Object.freeze({ authority: review(current), latestAction: transport.action, transportStatus,
-    recoveryOperationId: transportStatus === "pending" ? current.latest_operation_id : null });
+    recoveryOperationId: transportStatus === "pending" || recoverableDeadConflict ? current.latest_operation_id : null });
 }
 
 export async function listOperationsPortalNativeDeliveryAuthoritiesForOwner(database: D1Database, input: Readonly<{

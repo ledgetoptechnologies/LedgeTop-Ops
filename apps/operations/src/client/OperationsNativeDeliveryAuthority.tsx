@@ -327,10 +327,11 @@ function NativeDeliveryAuthorityWorkspace({ initialSession }: { initialSession: 
         <div><dt>Expires</dt><dd>{authority.expiresAt ?? "Revoked"}</dd></div>
         <div><dt>Latest operation / action</dt><dd>{authority.latestOperationId} / {authority.latestAction}</dd></div>
         <div><dt>Recovery operation</dt><dd>{authority.recoveryOperationId ?? "Not available"}</dd></div></dl>
-      {authority.transportStatus === "dead" && <p role="alert">Delivery is dead and cannot be recovered. Explicitly revoke an active local authority, then separately review a current candidate before any reissue.</p>}
+      {authority.transportStatus === "dead" && !authority.recoveryOperationId && <p role="alert">Delivery is dead and cannot be recovered. Do not create a replacement authority.</p>}
+      {authority.transportStatus === "dead" && authority.recoveryOperationId && <p role="alert">The Client rejected this exact grant before recording it. Recovery checks Client status first and may submit only this immutable operation under current authority.</p>}
       {authority.state === "active" && !attempt && <label>Exact revocation reason code<input value={revokeReason} maxLength={200}
         onChange={event => { setRevokeReason(event.currentTarget.value); setAuthorityReviewed(false); }} /></label>}
-      {authority.transportStatus === "pending" && authority.recoveryOperationId && authorityRead && !attempt
+      {authority.recoveryOperationId && authorityRead && !attempt
         && <label>Exact recovery reason<input value={recoveryReason} maxLength={500}
           onChange={event => { setRecoveryReason(event.currentTarget.value); setAuthorityReviewed(false); }} /></label>}
       <label><input type="checkbox" checked={authorityReviewed} disabled={Boolean(attempt) || Boolean(busy)}
@@ -343,10 +344,10 @@ function NativeDeliveryAuthorityWorkspace({ initialSession }: { initialSession: 
       {!attempt && authority.state === "active" && <button type="button" className="button-danger"
         disabled={Boolean(busy) || !authorityReviewed || !revokeReason}
         onClick={() => void actAuthority("revoke")}>Revoke exact delivery authority</button>}
-      {!attempt && authority.transportStatus === "pending" && authority.recoveryOperationId && authorityRead
+      {!attempt && authority.recoveryOperationId && authorityRead
         && <button type="button" className="button-orange" disabled={Boolean(busy) || !authorityReviewed || !recoveryReason}
-          onClick={() => void actAuthority("recover")}>Recover exact pending delivery</button>}
-      {authority.transportStatus === "pending" && !authorityRead
+          onClick={() => void actAuthority("recover")}>Recover exact stored delivery</button>}
+      {authority.recoveryOperationId && !authorityRead
         && <p>Reload this exact authority before recovery so the stored operation and current owner authority are revalidated.</p>}
       {authority.state === "active" && <p>Features and expiry are immutable here. Revoke explicitly, then separately review and reissue a current candidate.</p>}
     </section></Card>}

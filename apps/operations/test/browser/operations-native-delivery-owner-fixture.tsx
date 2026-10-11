@@ -22,7 +22,7 @@ const candidate = { candidateFingerprint: "a".repeat(64), recipientBindingId,
   externalProjectId: "project:one", projectLabel: "Project One", projectVersion: 7,
   opsFolderProjectId: "ops-project:one", folderLabel: "Folder One", opsDivisionId: "division:one" };
 function active(operationId: string, transportStatus: "pending" | "acknowledged" | "dead" = "acknowledged",
-  selectedAuthorityId = authorityId) {
+  selectedAuthorityId = authorityId, recoverableDead = false) {
   return { authorityId: selectedAuthorityId, revision: 1, state: "active", recipientBindingId, folderReservationId, targetId,
     enrollmentIntentId: candidate.enrollmentIntentId, targetClientRecordId: "client:one", workspaceId: "workspace:one",
     clientFolderBindingId: "folder-binding:one", externalProjectId: "project:one", opsFolderProjectId: "ops-project:one",
@@ -30,7 +30,7 @@ function active(operationId: string, transportStatus: "pending" | "acknowledged"
     projectLabel: "Project One", folderLabel: "Folder One",
     features: ["folder.list", "file.metadata"], expiresAt: "2099-01-01T00:00:00.000Z",
     latestOperationId: operationId, latestAction: "delivery.grant", transportStatus,
-    recoveryOperationId: transportStatus === "pending" ? operationId : null };
+    recoveryOperationId: transportStatus === "pending" || recoverableDead ? operationId : null };
 }
 let grantCalls = 0, revokeCalls = 0, candidateCalls = 0;
 
@@ -50,12 +50,12 @@ window.fetch = async (input, init = {}) => {
     const paged = mode === "authority-pages", second = path.includes("cursor=");
     return Response.json({ items: [paged && second ? active(recoveryOperationId, "acknowledged", secondAuthorityId)
       : mode === "load-pending" ? active(recoveryOperationId, "pending")
-        : mode === "load-dead" ? active(recoveryOperationId, "dead") : active(recoveryOperationId)],
+        : mode === "load-dead" ? active(recoveryOperationId, "dead", authorityId, true) : active(recoveryOperationId)],
     page: { nextCursor: paged && !second ? authorityCursor : null } });
   }
   if (path.endsWith(`/authorities/${authorityId}`) && method === "GET") {
     const authority = mode === "load-pending" ? active(recoveryOperationId, "pending")
-      : mode === "load-dead" ? active(recoveryOperationId, "dead") : active(recoveryOperationId);
+      : mode === "load-dead" ? active(recoveryOperationId, "dead", authorityId, true) : active(recoveryOperationId);
     return Response.json({ authority });
   }
   if (path.endsWith("/authorities") && method === "POST") {

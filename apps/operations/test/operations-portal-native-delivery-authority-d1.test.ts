@@ -230,6 +230,7 @@ beforeAll(async () => {
   client = await runtime.getD1Database("CLIENT_DB") as unknown as D1Database;
   expect(await applyCanonicalChain(operations, "operations",
     "0187_operations_portal_native_delivery_literal_prefix_guard.sql", true)).toHaveLength(187);
+  await applyDraft(operations, "operations", "0193_operations_portal_native_delivery_dead_conflict_recovery.sql");
   expect(await applyCanonicalChain(client, "client", "0223_operations_portal_workspace_publications.sql"))
     .toHaveLength(142);
   await applyDraft(client, "client", "0224_operations_portal_native_recipient_authority.sql");
@@ -394,6 +395,11 @@ describe("Ops native selected-folder authority against real 0152-0160 plus curre
       reasonCode: "Owner approved exact selected folder", owner: originalAuthor });
     expect(delivery).toMatchObject({ replayed: false,
       review: { state: "active", revision: 1, recipientLabel: "recipient@example.test" } });
+    await operations.prepare(`UPDATE operations_portal_native_delivery_authority_outbox
+      SET state='dead',last_error_code='conflict',claim_token=NULL,claim_until=NULL
+      WHERE operation_id=? AND state='pending'`).bind(deliveryOperationId).run();
+    expect(await operations.prepare(`SELECT state FROM operations_portal_native_delivery_authority_outbox
+      WHERE operation_id=?`).bind(deliveryOperationId).first("state")).toBe("dead");
     const deliveryBinding: OperationsPortalNativeDeliveryAuthorityBinding = {
       getNativeDeliveryAuthorityStatus: async () => JSON.stringify({ ok: false, protocolVersion: 1,
         code: "not_found", retryable: false }),
@@ -524,6 +530,13 @@ describe("Ops native selected-folder authority against real 0152-0160 plus curre
       .rejects.toThrow("authorization_denied");
     expect(await operations.prepare(`SELECT state FROM operations_portal_native_delivery_authority_outbox
       WHERE operation_id=?`).bind(revokeOperationId).first("state")).toBe("pending");
+    await operations.prepare(`UPDATE operations_portal_native_delivery_authority_outbox
+      SET state='dead',last_error_code='conflict',claim_token=NULL,claim_until=NULL
+      WHERE operation_id=? AND state='pending'`).bind(revokeOperationId).run();
+    await expect(reserveOperationsPortalNativeDeliveryRecoveryInvocation(operations, { invocationId: id(),
+      operationId: revokeOperationId, authorityId: deliveryAuthorityId, expectedRevision: 2,
+      reason: "A dead revoke is not a recoverable grant", owner: recoveryOwner() }))
+      .rejects.toThrow("invocation_denied");
   });
 
   it("keeps the forward folder guard executable and rejects a literal-prefix mismatch", async () => {

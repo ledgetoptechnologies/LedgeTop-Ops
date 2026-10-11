@@ -11,6 +11,7 @@ type DeliveryWriterEnv = Readonly<{ DELIVERY_DB: D1Database; ENVIRONMENT?: strin
 type ReceiptRow = { operation_id: string; request_fingerprint: string; action: 'delivery.grant' | 'delivery.revoke';
   authority_id: string; recipient_binding_id: string; folder_reservation_id: string; resulting_revision: number;
   resulting_state: 'active' | 'revoked' };
+type ReplacementTip = { authority_id: string; operation_id: string; request_fingerprint: string };
 const encoder = new TextEncoder();
 const failure = (code: string, retryable = false) => JSON.stringify({ ok: false, protocolVersion: 1, code, retryable });
 function result(row: ReceiptRow, duplicate: boolean): OperationsPortalNativeDeliveryAuthorityReceipt {
@@ -57,6 +58,23 @@ export async function applyOperationsPortalNativeDeliveryAuthority(env: Delivery
       .bind(command.operationId, fingerprint, command.action, command.authority.authorityId,
         command.recipient.recipientBindingId, command.resource.folderReservationId, command.target.targetId,
         expected, revision, canonical);
+    const tips = expected === 0 ? await db.prepare(`SELECT head.authority_id,receipt.operation_id,receipt.request_fingerprint
+      FROM operations_portal_native_delivery_heads head
+      JOIN operations_portal_native_delivery_commands command ON command.operation_id=head.latest_operation_id
+      JOIN operations_portal_native_delivery_history history ON history.operation_id=command.operation_id
+      JOIN operations_portal_native_delivery_receipts receipt ON receipt.operation_id=command.operation_id
+      WHERE head.recipient_binding_id=? AND head.folder_reservation_id=? AND head.target_id=? AND head.state='revoked'
+        AND command.action='delivery.revoke' AND command.authority_id=head.authority_id
+        AND command.resulting_revision=head.revision AND history.authority_id=head.authority_id
+        AND history.revision=head.revision AND history.state='revoked'
+        AND history.request_fingerprint=receipt.request_fingerprint AND receipt.authority_id=head.authority_id
+        AND receipt.resulting_revision=head.revision AND receipt.resulting_state='revoked'
+        AND NOT EXISTS(SELECT 1 FROM operations_portal_native_delivery_replacements replacement
+          WHERE replacement.prior_authority_id=head.authority_id OR replacement.prior_revoke_operation_id=head.latest_operation_id)
+      LIMIT 2`).bind(command.recipient.recipientBindingId, command.resource.folderReservationId,
+        command.target.targetId).all<ReplacementTip>() : { results: [] as ReplacementTip[] };
+    if (tips.results.length > 1) return failure('conflict');
+    const tip = tips.results[0];
     const head = expected === 0
       ? db.prepare(`INSERT INTO operations_portal_native_delivery_heads
         (authority_id,recipient_binding_id,folder_reservation_id,target_id,revision,state,latest_operation_id) VALUES(?,?,?,?,?,?,?)`)
@@ -66,7 +84,13 @@ export async function applyOperationsPortalNativeDeliveryAuthority(env: Delivery
           WHERE authority_id=? AND recipient_binding_id=? AND folder_reservation_id=? AND target_id=? AND revision=? AND state='active'`)
         .bind(revision, state, command.operationId, command.authority.authorityId, command.recipient.recipientBindingId,
           command.resource.folderReservationId, command.target.targetId, expected);
-    await db.batch([insert, head,
+    const replacement = tip ? db.prepare(`INSERT INTO operations_portal_native_delivery_replacements
+      (new_authority_id,grant_operation_id,prior_authority_id,prior_revoke_operation_id,recipient_binding_id,
+       folder_reservation_id,target_id,prior_revoke_fingerprint) VALUES(?,?,?,?,?,?,?,?)`)
+      .bind(command.authority.authorityId, command.operationId, tip.authority_id, tip.operation_id,
+        command.recipient.recipientBindingId, command.resource.folderReservationId, command.target.targetId,
+        tip.request_fingerprint) : null;
+    await db.batch([insert, ...(replacement ? [replacement] : []), head,
       db.prepare(`INSERT INTO operations_portal_native_delivery_history
         (operation_id,authority_id,revision,state,request_fingerprint) VALUES(?,?,?,?,?)`)
         .bind(command.operationId, command.authority.authorityId, revision, state, fingerprint),

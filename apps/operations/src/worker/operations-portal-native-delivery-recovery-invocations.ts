@@ -119,7 +119,14 @@ export async function claimOperationsPortalNativeDeliveryRecoveryInvocation(data
           claim_token=?,claim_until=strftime('%Y-%m-%dT%H:%M:%fZ','now','+60 seconds'),
           attempt_count=attempt_count+1,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')
         WHERE operation_id=? AND (state IN ('pending','retry')
-          OR (state='dispatching' AND claim_until<=strftime('%Y-%m-%dT%H:%M:%fZ','now')))
+          OR (state='dispatching' AND claim_until<=strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+          OR (state='dead' AND last_error_code='conflict' AND claim_token IS NULL AND claim_until IS NULL
+            AND acknowledged_claim_token IS NULL AND NOT EXISTS(
+              SELECT 1 FROM operations_portal_native_delivery_authority_receipts receipt
+              WHERE receipt.operation_id=operations_portal_native_delivery_authority_outbox.operation_id)
+            AND EXISTS(SELECT 1 FROM operations_portal_native_delivery_authority_commands command
+              WHERE command.operation_id=operations_portal_native_delivery_authority_outbox.operation_id
+                AND command.action='delivery.grant')))
           AND EXISTS(SELECT 1 FROM operations_portal_native_delivery_recovery_invocations invocation
             WHERE invocation.invocation_id=? AND invocation.operation_id=? AND invocation.state='authorized')`)
         .bind(input.claimToken, input.operationId, input.invocationId, input.operationId),

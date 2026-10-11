@@ -92,22 +92,23 @@ test("pending recovery is unavailable until reload and uses the exact stored ope
   await expect(page.getByText("pending", { exact: true })).toBeVisible();
   await page.getByLabel("Exact recovery reason").fill("retry-after-current-owner-review");
   await page.getByLabel(/I reviewed this exact authority/).check();
-  await page.getByRole("button", { name: "Recover exact pending delivery" }).click();
+  await page.getByRole("button", { name: "Recover exact stored delivery" }).click();
   await expect(page.getByText("Recovery delivery was acknowledged.")).toBeVisible();
   const recovery = (await calls(page)).find(call => call.path.endsWith("/recover"));
   expect(recovery?.body).toMatchObject({ invocationId: expect.any(String), operationId: recoveryOperationId,
     expectedRevision: 1, reason: "retry-after-current-owner-review" });
 });
 
-test("a dead transport cannot recover and requires explicit revoke before reissue", async ({ page }) => {
+test("a rejected exact grant exposes only audited recovery of the frozen operation", async ({ page }) => {
   await render(page, "load-dead"); await loadAuthority(page);
-  await expect(page.getByRole("alert")).toContainText("Delivery is dead and cannot be recovered");
-  await expect(page.getByRole("button", { name: /Recover exact pending/ })).toHaveCount(0);
-  await expect(page.getByText(/revoke an active local authority, then separately review/)).toBeVisible();
-  await page.getByLabel("Exact revocation reason code").fill("dead-transport-cleanup");
+  await expect(page.getByRole("alert")).toContainText("Recovery checks Client status first");
+  await page.getByLabel("Exact recovery reason").fill("recover-exact-rejected-operation");
   await page.getByLabel(/I reviewed this exact authority/).check();
-  await page.getByRole("button", { name: "Revoke exact delivery authority" }).click();
-  await expect(page.getByText("Revocation delivery was acknowledged.")).toBeVisible();
+  await page.getByRole("button", { name: "Recover exact stored delivery" }).click();
+  await expect(page.getByText("Recovery delivery was acknowledged.")).toBeVisible();
+  const recovery = (await calls(page)).find(call => call.path.endsWith("/recover"));
+  expect(recovery?.body).toMatchObject({ operationId: recoveryOperationId, expectedRevision: 1,
+    reason: "recover-exact-rejected-operation" });
 });
 
 test("an uncertain revoke retries the exact body without silently changing authority", async ({ page }) => {

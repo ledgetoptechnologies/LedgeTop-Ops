@@ -188,7 +188,8 @@ export function parseOperationsNativeDeliveryAuthority(value: unknown): Operatio
     || row.recoveryOperationId !== null
       && (typeof row.recoveryOperationId !== "string" || !UUID.test(row.recoveryOperationId))
     || row.transportStatus === "pending" && row.recoveryOperationId !== row.latestOperationId
-    || row.transportStatus !== "pending" && row.recoveryOperationId !== null) return null;
+    || row.transportStatus === "dead" && row.recoveryOperationId !== null && row.recoveryOperationId !== row.latestOperationId
+    || row.transportStatus === "acknowledged" && row.recoveryOperationId !== null) return null;
   return Object.freeze({ ...row, features }) as OperationsNativeDeliveryAuthority;
 }
 
@@ -394,7 +395,8 @@ export async function recoverOperationsNativeDeliveryAuthority(csrfToken: string
   authority: OperationsNativeDeliveryAuthority, input: OperationsNativeDeliveryRecoverInput) {
   if (!UUID.test(input.invocationId) || !UUID.test(input.operationId) || input.operationId !== authority.recoveryOperationId
     || !integer(input.expectedRevision) || input.expectedRevision !== authority.revision
-    || authority.transportStatus !== "pending" || !bounded(input.reason, 500)) denied(400, false);
+    || authority.transportStatus !== "pending" && authority.transportStatus !== "dead"
+    || !bounded(input.reason, 500)) denied(400, false);
   const body: OperationsNativeDeliveryRecoverInput = Object.freeze({ invocationId: input.invocationId,
     operationId: input.operationId, expectedRevision: input.expectedRevision, reason: input.reason });
   return mutation(`/authorities/${encodeURIComponent(authority.authorityId)}/recover`, csrfToken,
