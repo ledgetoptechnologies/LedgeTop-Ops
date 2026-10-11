@@ -132,7 +132,13 @@ test("an uncertain injected apply writes one durable shared sentinel and never r
     fs.writeFileSync(plan.evidence, JSON.stringify({ application: "operations", database: SPEC.database, artifactSet: "attempt-a",
       createdAt: new Date().toISOString(), backupSha256: sha(bytes), migrations: plan.migrations, snapshot }), { flag: "wx" });
     const dependencies = { root: temporary, credential: () => "synthetic", remoteState: async () => structuredClone(snapshot),
-      wrangler: () => { providerCalls += 1; throw Error("unknown outcome sentinel fixture"); } };
+      wrangler: () => {
+        providerCalls += 1;
+        if (process.platform !== "win32") {
+          assert.equal(fs.statSync(plan.marker).mode & 0o777, 0o600, "sentinel must be owner-only before provider call");
+        }
+        throw Error("unknown outcome sentinel fixture");
+      } };
     await assert.rejects(runNativeDirectory196To198(["apply", "attempt-a"], dependencies), /unknown outcome sentinel fixture/u);
     assert(fs.existsSync(plan.marker), "apply attempt marker must persist after uncertain provider outcome");
     assert.equal(providerCalls, 1);

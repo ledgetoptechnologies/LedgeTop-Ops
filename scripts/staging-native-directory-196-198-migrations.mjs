@@ -62,6 +62,11 @@ function regular(file, label) {
   assert(stat.isFile() && !stat.isSymbolicLink(), `${label} must be a regular non-symlink file`);
 }
 function restrictPrivate(file) {
+  if (process.platform !== "win32") {
+    fs.chmodSync(file, 0o600);
+    assert.equal(fs.statSync(file).mode & 0o077, 0, "private artifact must not be accessible to group or other users");
+    return;
+  }
   const result = spawnSync("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "RemoteSigned", "-File",
     path.join(root, "scripts/restrict-private-authority-file.ps1"), "-LiteralFile", file],
   { windowsHide: true, encoding: "utf8", timeout: 30000 });
@@ -69,7 +74,7 @@ function restrictPrivate(file) {
 }
 function privateFile(file, contents = "") {
   fs.mkdirSync(path.dirname(file), { recursive: true });
-  fs.writeFileSync(file, "", { flag: "wx" });
+  fs.writeFileSync(file, "", { flag: "wx", ...(process.platform === "win32" ? {} : { mode: 0o600 }) });
   restrictPrivate(file);
   fs.writeFileSync(file, contents);
 }
