@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const calls = vi.hoisted(() => ({ auth: vi.fn(), list: vi.fn(), listAuthorities: vi.fn(), issue: vi.fn(), revoke: vi.fn(),
-  read: vi.fn(), dispatch: vi.fn(), reserve: vi.fn() }));
+  cancel: vi.fn(), read: vi.fn(), dispatch: vi.fn(), reserve: vi.fn() }));
 vi.mock("../src/worker/native-staff-auth", () => ({ authenticateNativeStaffWithAdmissionVersion: calls.auth }));
 vi.mock("../src/worker/operations-portal-native-delivery-authority-issuer", async importOriginal => {
   const original = await importOriginal<typeof import("../src/worker/operations-portal-native-delivery-authority-issuer")>();
@@ -9,6 +9,7 @@ vi.mock("../src/worker/operations-portal-native-delivery-authority-issuer", asyn
     listOperationsPortalNativeDeliveryAuthoritiesForOwner: calls.listAuthorities,
     issueOperationsPortalNativeDeliveryAuthority: calls.issue,
     revokeOperationsPortalNativeDeliveryAuthority: calls.revoke,
+    cancelOperationsPortalNativeDeliveryAuthorityForOwner: calls.cancel,
     readOperationsPortalNativeDeliveryAuthorityStatusForOwner: calls.read };
 });
 vi.mock("../src/worker/operations-portal-native-delivery-authority-dispatch", () => ({
@@ -36,7 +37,7 @@ const review = { authorityId, revision: 1, state: "active", recipientBindingId, 
   features: ["folder.list", "file.download"], expiresAt: "2099-01-01T00:00:00.000Z", latestOperationId: operationId };
 const status = (transportStatus: "pending" | "acknowledged" | "dead" = "acknowledged") => ({ authority: review,
   latestAction: "delivery.grant", transportStatus,
-  recoveryOperationId: transportStatus === "pending" ? operationId : null });
+  recoveryOperationId: transportStatus === "pending" ? operationId : null, cancellationOperationId: null });
 function deps(): Dependencies { return { environment: "staging", expectedHost: "ops-staging.example.test",
   configuration: { enabled: true, issuer: "https://team.cloudflareaccess.com", staffAudience: "a".repeat(16), origin,
     csrfSecret: "native-delivery-owner-test-csrf-secret-long-enough" }, database: {} as D1Database,
@@ -145,6 +146,18 @@ describe("Ops native delivery owner HTTP boundary", () => {
     const d = deps(), result = await handle(request("authorities", grant(), await token(d)), d);
     expect(result.status).toBe(202); expect(await result.json()).toMatchObject({ operationId, status: "pending",
       recoveryOperationId: operationId, authority: { recoveryOperationId: operationId, transportStatus: "pending" } });
+  });
+
+  it("exposes server-derived cancellation eligibility only behind its exact default-off flag", async () => {
+    calls.read.mockResolvedValue({ ...status("dead"), cancellationOperationId: operationId });
+    const disabled = deps(), disabledResult = await handle(request(`authorities/${authorityId}`), disabled);
+    expect(disabledResult.status).toBe(200);
+    expect(await disabledResult.json()).toMatchObject({ authority: { cancellationOperationId: null } });
+    const enabled = { ...deps(), dispatch: { ...deps().dispatch,
+      OPERATIONS_PORTAL_NATIVE_DELIVERY_CANCELLATION_ENABLED: "true" } };
+    const enabledResult = await handle(request(`authorities/${authorityId}`), enabled);
+    expect(enabledResult.status).toBe(200);
+    expect(await enabledResult.json()).toMatchObject({ authority: { cancellationOperationId: operationId } });
   });
 
   it("recovers only the exact pending command through one current-manager invocation", async () => {

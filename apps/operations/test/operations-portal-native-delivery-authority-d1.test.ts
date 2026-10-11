@@ -7,7 +7,7 @@ import { splitD1MigrationStatements } from "../../client/test/helpers/d1-migrati
 import { applyCanonicalChain } from "./helpers/verified-recipient-canonical-lineage";
 import { writeNativeDirectoryProfile, type NativeDirectoryCreateWrite } from
   "../src/worker/native-directory-profile-writer";
-import { reserveOperationsPortalFolder, reserveOperationsPortalWorkspace } from
+import { reserveOperationsPortalFolder, reserveOperationsPortalWorkspace, revokeOperationsPortalFolder } from
   "../src/worker/operations-portal-workspace-reservations";
 import { reserveOperationsPortalWorkspacePublication,
   dispatchOperationsPortalWorkspacePublication as dispatchPublication,
@@ -26,6 +26,7 @@ import { materializeOperationsPortalNativeRecipientAuthority,
 import { applyOperationsPortalNativeRecipientAuthority, readOperationsPortalNativeRecipientAuthorityStatus } from
   "../../client/src/worker/operations-portal-native-recipient-authority";
 import { issueOperationsPortalNativeDeliveryAuthority, listOperationsPortalNativeDeliveryCandidates,
+  cancelOperationsPortalNativeDeliveryAuthorityForOwner, readOperationsPortalNativeDeliveryAuthorityStatusForOwner,
   revokeOperationsPortalNativeDeliveryAuthority } from
   "../src/worker/operations-portal-native-delivery-authority-issuer";
 import { dispatchNextOperationsPortalNativeDeliveryAuthority } from
@@ -36,10 +37,13 @@ import { claimOperationsPortalNativeDeliveryRecoveryInvocation,
   reserveOperationsPortalNativeDeliveryRecoveryInvocation } from
   "../src/worker/operations-portal-native-delivery-recovery-invocations";
 import { parseOperationsPortalNativeDeliveryAuthorityCommand,
-  type OperationsPortalNativeDeliveryAuthorityBinding,
+  type OperationsPortalNativeDeliveryAuthorityBinding, type OperationsPortalNativeDeliveryCancellationBinding,
   type OperationsPortalNativeDeliveryAuthorityCommand } from
   "@ltds/shared/operations-portal-native-delivery-authority";
 import type { AuthenticatedNativeStaffWithAdmissionVersion } from "../src/worker/native-staff-auth";
+import { applyOperationsPortalNativeDeliveryAuthority, cancelOperationsPortalNativeDeliveryAuthority,
+  readOperationsPortalNativeDeliveryAuthorityDisposition, readOperationsPortalNativeDeliveryAuthorityStatus } from
+  "../../client/src/worker/operations-portal-native-delivery-authority";
 
 let runtime: Miniflare, operations: D1Database, client: D1Database, sequence = 1;
 const id = () => `d0000000-0000-4000-8000-${String(sequence++).padStart(12, "0")}`;
@@ -231,9 +235,15 @@ beforeAll(async () => {
   expect(await applyCanonicalChain(operations, "operations",
     "0187_operations_portal_native_delivery_literal_prefix_guard.sql", true)).toHaveLength(187);
   await applyDraft(operations, "operations", "0193_operations_portal_native_delivery_dead_conflict_recovery.sql");
+  await applyDraft(operations, "operations", "0194_operations_portal_native_delivery_terminal_cancellations.sql");
   expect(await applyCanonicalChain(client, "client", "0223_operations_portal_workspace_publications.sql"))
     .toHaveLength(142);
   await applyDraft(client, "client", "0224_operations_portal_native_recipient_authority.sql");
+  for (const name of ["0225_operations_portal_workspace_publication_cancellations.sql",
+    "0226_operations_portal_native_workspace_cleanup.sql", "0227_operations_portal_native_delivery_authority.sql",
+    "0228_operations_portal_native_content_start_audit.sql", "0229_operations_portal_native_delivery_regrant.sql",
+    "0230_operations_portal_native_delivery_terminal_cancellations.sql"])
+    await applyDraft(client, "client", name);
   await seedManager();
   await seedRecoveryManager();
   await operations.batch([
@@ -317,6 +327,10 @@ describe("Ops native selected-folder authority against real 0152-0160 plus curre
       clientFolderBindingId: `client-folder:${id()}`, selectedR2Prefix: `${siblingBasePrefix}selected/`,
       reason: "Reserve sibling client folder" };
     await reserveOperationsPortalFolder(operations, owner(), siblingFolder);
+    const alternateFolder = { ...folder, operationId: id(), reservationId: id(),
+      clientFolderBindingId: `client-folder:${id()}`, selectedR2Prefix: `${basePrefix}alternate/`,
+      reason: "Reserve alternate exact-client folder" };
+    await reserveOperationsPortalFolder(operations, owner(), alternateFolder);
     const organizationFolder = { operationId: id(), targetId: workspace.targetId, reservationId: id(),
       expectedRevision: 0 as const, expectedWorkspaceRevision: 1, externalProjectId: organizationExternalProject,
       projectVersion: 1, opsFolderProjectId: organizationPhysicalProject, opsDivisionId: division,
@@ -526,6 +540,224 @@ describe("Ops native selected-folder authority against real 0152-0160 plus curre
     await expect(revokeOperationsPortalNativeDeliveryAuthority(operations, { operationId: revokeOperationId,
       authorityId: deliveryAuthorityId, expectedRevision: 1, reasonCode: "Remove exact selected folder", owner: owner() }))
       .resolves.toMatchObject({ replayed: false, review: { state: "revoked", revision: 2 } });
+    const expiredOperationId = id(), expiredAuthorityId = id();
+    await expect(issueOperationsPortalNativeDeliveryAuthority(operations, { operationId: expiredOperationId,
+      authorityId: expiredAuthorityId, recipientBindingId: activeHome.recipientBindingId!,
+      folderReservationId: organizationFolder.reservationId, expectedRevision: 0,
+      expectedCandidateFingerprint: organizationCandidate.candidateFingerprint, features: ["file.download"],
+      expiresAt: new Date(Date.now() + 1_000).toISOString(), reasonCode: "Terminal never-materialized grant",
+      owner: owner() })).resolves.toMatchObject({ replayed: false, review: { state: "active", revision: 1 } });
+    await operations.prepare(`UPDATE operations_portal_native_delivery_authority_outbox
+      SET state='dead',last_error_code='conflict',claim_token=NULL,claim_until=NULL WHERE operation_id=? AND state='pending'`)
+      .bind(expiredOperationId).run();
+    await new Promise(resolve => setTimeout(resolve, 1_100));
+    const cancellationEnvironment = { DELIVERY_DB: client, ENVIRONMENT: "staging",
+      CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_WRITER_ENABLED: "true",
+      CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_STATUS_ENABLED: "true",
+      CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_CANCELLATION_ENABLED: "true" };
+    const cancellationBinding: OperationsPortalNativeDeliveryCancellationBinding = {
+      applyNativeDeliveryAuthority: input => applyOperationsPortalNativeDeliveryAuthority(cancellationEnvironment, input),
+      getNativeDeliveryAuthorityStatus: input => readOperationsPortalNativeDeliveryAuthorityStatus(cancellationEnvironment, input),
+      getNativeDeliveryAuthorityDisposition: input => readOperationsPortalNativeDeliveryAuthorityDisposition(cancellationEnvironment, input),
+      cancelNativeDeliveryAuthority: input => cancelOperationsPortalNativeDeliveryAuthority(cancellationEnvironment, input),
+    };
+    const notFoundOnly: OperationsPortalNativeDeliveryCancellationBinding = {
+      ...cancellationBinding,
+      getNativeDeliveryAuthorityDisposition: async () => JSON.stringify({ ok: true, protocolVersion: 1, disposition: "not-found" }),
+      cancelNativeDeliveryAuthority: async () => JSON.stringify({ ok: true, protocolVersion: 1, disposition: "not-found" }),
+    };
+    const cancellationRaceInvocationId = id();
+    await reserveOperationsPortalNativeDeliveryRecoveryInvocation(operations, { invocationId: cancellationRaceInvocationId,
+      operationId: expiredOperationId, authorityId: expiredAuthorityId, expectedRevision: 1,
+      reason: "Authorized before terminal cancellation begins", owner: recoveryOwner() });
+    await expect(cancelOperationsPortalNativeDeliveryAuthorityForOwner(operations, notFoundOnly,
+      { authorityId: expiredAuthorityId, operationId: expiredOperationId, owner: recoveryOwner() }))
+      .rejects.toThrow("operations_portal_native_delivery_authority_denied");
+    await expect(readOperationsPortalNativeDeliveryAuthorityStatusForOwner(operations, expiredAuthorityId,
+      recoveryOwner())).resolves.toMatchObject({ cancellationOperationId: expiredOperationId });
+    await expect(operations.prepare(`INSERT INTO operations_portal_native_delivery_cancellation_intents
+      SELECT operation_id,authority_id,request_fingerprint,canonical_request_json,actor_staff_id,actor_access_subject,
+       actor_email,actor_admission_version,actor_profile_version,actor_grant_generation,actor_verified_until,'completed',created_at
+      FROM operations_portal_native_delivery_cancellation_intents WHERE operation_id=?`).bind(expiredOperationId).run())
+      .rejects.toThrow('intent denied');
+    await expect(operations.prepare(`INSERT INTO operations_portal_native_delivery_cancellation_intents
+      SELECT operation_id,authority_id,request_fingerprint,canonical_request_json,actor_staff_id,actor_access_subject,
+       actor_email,actor_admission_version,actor_profile_version,actor_grant_generation,'zzzz','pending',created_at
+      FROM operations_portal_native_delivery_cancellation_intents WHERE operation_id=?`).bind(expiredOperationId).run())
+      .rejects.toThrow();
+    const racedClaimToken = id();
+    await operations.prepare(`UPDATE operations_portal_native_delivery_authority_outbox SET state='dispatching',claim_token=?,
+      claim_until=strftime('%Y-%m-%dT%H:%M:%fZ','now','+60 seconds') WHERE operation_id=? AND state='dead'`)
+      .bind(racedClaimToken,expiredOperationId).run();
+    await expect(operations.prepare(`UPDATE operations_portal_native_delivery_recovery_invocations
+      SET state='claimed',claim_token=?,claimed_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE invocation_id=?`)
+      .bind(racedClaimToken,cancellationRaceInvocationId).run()).rejects.toThrow('claim denied');
+    await operations.prepare(`UPDATE operations_portal_native_delivery_authority_outbox SET state='dead',claim_token=NULL,
+      claim_until=NULL WHERE operation_id=? AND state='dispatching' AND claim_token=?`).bind(expiredOperationId,racedClaimToken).run();
+    await expect(claimOperationsPortalNativeDeliveryRecoveryInvocation(operations.withSession("first-primary"), {
+      invocationId: cancellationRaceInvocationId, operationId: expiredOperationId, claimToken: id() })).resolves.toBe(false);
+    expect(await operations.prepare(`SELECT state FROM operations_portal_native_delivery_recovery_invocations
+      WHERE invocation_id=?`).bind(cancellationRaceInvocationId).first("state")).toBe("authorized");
+    expect(await operations.prepare("SELECT count(*) n FROM operations_portal_native_delivery_authority_heads WHERE authority_id=?")
+      .bind(expiredAuthorityId).first("n")).toBe(1);
+
+    const cancellationRequest = await operations.prepare(`SELECT canonical_request_json FROM
+      operations_portal_native_delivery_cancellation_intents WHERE operation_id=?`).bind(expiredOperationId)
+      .first<string>("canonical_request_json");
+    const clientCancellationRaw = await cancellationBinding.cancelNativeDeliveryAuthority(cancellationRequest!);
+    const clientCancellationEnvelope = JSON.parse(String(clientCancellationRaw));
+    const cancellation = clientCancellationEnvelope.cancellation as Record<string, unknown>;
+    const canonicalCancellation = JSON.stringify(cancellation);
+    const forgedCancellations = [
+      JSON.stringify({ ...cancellation, privateNote: "must never persist" }),
+      JSON.stringify({ ...cancellation, targetId: id() }),
+      JSON.stringify({ ...cancellation, cancelledAt: "not-an-instant" }),
+      JSON.stringify({ ...cancellation, replayed: "false" }),
+      `{\"status\":\"cancelled\",${canonicalCancellation.slice(1)}`,
+      canonicalCancellation.replace(/,/u, ", "),
+    ];
+    for (const forgedCancellation of forgedCancellations) {
+      await expect(operations.prepare(`INSERT INTO operations_portal_native_delivery_cancellation_receipts
+        (operation_id,authority_id,request_fingerprint,cancellation_json,cancelled_at)
+        SELECT operation_id,authority_id,request_fingerprint,?,json_extract(?,'$.cancelledAt')
+        FROM operations_portal_native_delivery_cancellation_intents WHERE operation_id=?`)
+        .bind(forgedCancellation,forgedCancellation,expiredOperationId).run()).rejects.toThrow("receipt denied");
+    }
+    expect(await operations.prepare(`SELECT count(*) n FROM operations_portal_native_delivery_cancellation_receipts
+      WHERE operation_id=?`).bind(expiredOperationId).first("n")).toBe(0);
+
+    const retiredDuringRpc: OperationsPortalNativeDeliveryCancellationBinding = {
+      ...cancellationBinding,
+      getNativeDeliveryAuthorityDisposition: async input => {
+        await operations.prepare("UPDATE staff_users SET status='disabled' WHERE id='native-delivery-recovery-manager'").run();
+        return cancellationBinding.getNativeDeliveryAuthorityDisposition(input);
+      },
+    };
+    await expect(cancelOperationsPortalNativeDeliveryAuthorityForOwner(operations, retiredDuringRpc,
+      { authorityId: expiredAuthorityId, operationId: expiredOperationId, owner: recoveryOwner() }))
+      .rejects.toThrow("operations_portal_native_delivery_authority_denied");
+    await operations.prepare("UPDATE staff_users SET status='active' WHERE id='native-delivery-recovery-manager'").run();
+    expect(await operations.prepare("SELECT count(*) n FROM operations_portal_native_delivery_authority_heads WHERE authority_id=?")
+      .bind(expiredAuthorityId).first("n")).toBe(1);
+
+    const driftDuringRpc: OperationsPortalNativeDeliveryCancellationBinding = {
+      ...cancellationBinding,
+      getNativeDeliveryAuthorityDisposition: async input => {
+        await operations.prepare(`UPDATE operations_portal_native_delivery_authority_outbox SET state='retry'
+          WHERE operation_id=? AND state='dead'`).bind(expiredOperationId).run();
+        return cancellationBinding.getNativeDeliveryAuthorityDisposition(input);
+      },
+    };
+    await expect(cancelOperationsPortalNativeDeliveryAuthorityForOwner(operations, driftDuringRpc,
+      { authorityId: expiredAuthorityId, operationId: expiredOperationId, owner: recoveryOwner() }))
+      .rejects.toThrow();
+    await operations.prepare(`UPDATE operations_portal_native_delivery_authority_outbox
+      SET state='dead',last_error_code='conflict',claim_token=NULL,claim_until=NULL WHERE operation_id=? AND state='retry'`)
+      .bind(expiredOperationId).run();
+    expect(await operations.prepare(`SELECT count(*) n FROM operations_portal_native_delivery_cancellation_receipts
+      WHERE operation_id=?`).bind(expiredOperationId).first("n")).toBe(0);
+    await expect(cancelOperationsPortalNativeDeliveryAuthorityForOwner(operations, cancellationBinding,
+      { authorityId: expiredAuthorityId, operationId: expiredOperationId, owner: recoveryOwner() }))
+      .resolves.toMatchObject({ disposition: "cancelled" });
+    expect(await operations.prepare("SELECT count(*) n FROM operations_portal_native_delivery_authority_heads WHERE authority_id=?")
+      .bind(expiredAuthorityId).first("n")).toBe(0);
+    expect(await operations.prepare("SELECT count(*) n FROM operations_portal_native_delivery_authority_commands WHERE operation_id=?")
+      .bind(expiredOperationId).first("n")).toBe(1);
+    expect(await operations.prepare("SELECT count(*) n FROM operations_portal_native_delivery_authority_outbox WHERE operation_id=?")
+      .bind(expiredOperationId).first("n")).toBe(1);
+    expect(await client.prepare("SELECT count(*) n FROM operations_portal_native_delivery_cancellations WHERE operation_id=?")
+      .bind(expiredOperationId).first("n")).toBe(1);
+    await expect(cancelOperationsPortalNativeDeliveryAuthorityForOwner(operations, cancellationBinding,
+      { authorityId: expiredAuthorityId, operationId: expiredOperationId, owner: recoveryOwner() }))
+      .resolves.toEqual({ disposition: "cancelled", replayed: true });
+
+    const committedOperationId = id(), committedAuthorityId = id();
+    const committedCandidate = (await listOperationsPortalNativeDeliveryCandidates(operations, {
+      targetId: workspace.targetId, owner: owner() })).items.find(item => item.folderReservationId === alternateFolder.reservationId)!;
+    await issueOperationsPortalNativeDeliveryAuthority(operations, { operationId: committedOperationId,
+      authorityId: committedAuthorityId, recipientBindingId: activeHome.recipientBindingId!,
+      folderReservationId: alternateFolder.reservationId, expectedRevision: 0,
+      expectedCandidateFingerprint: committedCandidate.candidateFingerprint, features: ["file.download"],
+      expiresAt: new Date(Date.now() + 1_000).toISOString(), reasonCode: "Reconcile factual committed grant",
+      owner: owner() });
+    await operations.prepare(`UPDATE operations_portal_native_delivery_authority_outbox
+      SET state='dead',last_error_code='conflict',claim_token=NULL,claim_until=NULL WHERE operation_id=? AND state='pending'`)
+      .bind(committedOperationId).run();
+    await new Promise(resolve => setTimeout(resolve, 1_100));
+    const committedBinding: OperationsPortalNativeDeliveryCancellationBinding = {
+      ...cancellationBinding,
+      getNativeDeliveryAuthorityDisposition: async requestJson => {
+        const requestValue = JSON.parse(requestJson) as { command: OperationsPortalNativeDeliveryAuthorityCommand;
+          requestFingerprint: string };
+        const committedCommand = requestValue.command;
+        return JSON.stringify({ ok: true, protocolVersion: 1, disposition: "committed", receipt: {
+          protocol: committedCommand.protocol, protocolVersion: 1, status: "recorded",
+          operationId: committedCommand.operationId, requestFingerprint: requestValue.requestFingerprint,
+          action: "delivery.grant", authorityId: committedCommand.authority.authorityId,
+          recipientBindingId: committedCommand.recipient.recipientBindingId,
+          folderReservationId: committedCommand.resource.folderReservationId,
+          resultingRevision: "1", resultingState: "active" } });
+      },
+    };
+    await expect(cancelOperationsPortalNativeDeliveryAuthorityForOwner(operations, committedBinding,
+      { authorityId: committedAuthorityId, operationId: committedOperationId, owner: recoveryOwner() }))
+      .resolves.toEqual({ disposition: "committed", replayed: false });
+    expect(await operations.prepare(`SELECT state FROM operations_portal_native_delivery_authority_outbox
+      WHERE operation_id=?`).bind(committedOperationId).first("state")).toBe("acknowledged");
+    expect(await operations.prepare(`SELECT count(*) n FROM operations_portal_native_delivery_authority_receipts
+      WHERE operation_id=?`).bind(committedOperationId).first("n")).toBe(1);
+    expect(await operations.prepare(`SELECT count(*) n FROM operations_portal_native_delivery_authority_heads
+      WHERE authority_id=? AND state='active'`).bind(committedAuthorityId).first("n")).toBe(1);
+    await expect(cancelOperationsPortalNativeDeliveryAuthorityForOwner(operations, committedBinding,
+      { authorityId: committedAuthorityId, operationId: committedOperationId, owner: recoveryOwner() }))
+      .resolves.toEqual({ disposition: "committed", replayed: true });
+
+    const publicationDriftOperationId = id(), publicationDriftAuthorityId = id();
+    const currentOrganizationCandidate = (await listOperationsPortalNativeDeliveryCandidates(operations, {
+      targetId: workspace.targetId, owner: owner() })).items.find(item => item.folderReservationId === organizationFolder.reservationId)!;
+    await issueOperationsPortalNativeDeliveryAuthority(operations, { operationId: publicationDriftOperationId,
+      authorityId: publicationDriftAuthorityId, recipientBindingId: activeHome.recipientBindingId!,
+      folderReservationId: organizationFolder.reservationId, expectedRevision: 0,
+      expectedCandidateFingerprint: currentOrganizationCandidate.candidateFingerprint, features: ["file.download"],
+      expiresAt: new Date(Date.now() + 1_000).toISOString(), reasonCode: "Publication drift cancellation fence",
+      owner: owner() });
+    await operations.prepare(`UPDATE operations_portal_native_delivery_authority_outbox SET state='dead',last_error_code='conflict'
+      WHERE operation_id=? AND state='pending'`).bind(publicationDriftOperationId).run();
+    await new Promise(resolve => setTimeout(resolve, 1_100));
+    await expect(cancelOperationsPortalNativeDeliveryAuthorityForOwner(operations, notFoundOnly,
+      { authorityId: publicationDriftAuthorityId, operationId: publicationDriftOperationId, owner: recoveryOwner() }))
+      .rejects.toThrow();
+    const changedPublication = await reserveOperationsPortalWorkspacePublication(operations, owner(), { operationId: id(),
+      publicationId: id(), targetId: workspace.targetId, snapshotId: id(), checkpointId: id(), expectedRevision: 1,
+      reason: "Advance publication after frozen cancellation" });
+    await expect(dispatchCurrentPublication(changedPublication.operationId)).resolves.toMatchObject({ status: "acknowledged" });
+    await expect(cancelOperationsPortalNativeDeliveryAuthorityForOwner(operations, cancellationBinding,
+      { authorityId: publicationDriftAuthorityId, operationId: publicationDriftOperationId, owner: recoveryOwner() }))
+      .rejects.toThrow();
+    expect(await operations.prepare(`SELECT count(*) n FROM operations_portal_native_delivery_authority_heads
+      WHERE authority_id=?`).bind(publicationDriftAuthorityId).first("n")).toBe(1);
+
+    const folderDriftOperationId = id(), folderDriftAuthorityId = id();
+    const currentFolderCandidate = (await listOperationsPortalNativeDeliveryCandidates(operations, {
+      targetId: workspace.targetId, owner: owner() })).items.find(item => item.folderReservationId === folder.reservationId)!;
+    await issueOperationsPortalNativeDeliveryAuthority(operations, { operationId: folderDriftOperationId,
+      authorityId: folderDriftAuthorityId, recipientBindingId: activeHome.recipientBindingId!,
+      folderReservationId: folder.reservationId, expectedRevision: 0,
+      expectedCandidateFingerprint: currentFolderCandidate.candidateFingerprint, features: ["file.download"],
+      expiresAt: new Date(Date.now() + 1_000).toISOString(), reasonCode: "Folder drift cancellation fence", owner: owner() });
+    await operations.prepare(`UPDATE operations_portal_native_delivery_authority_outbox SET state='dead',last_error_code='conflict'
+      WHERE operation_id=? AND state='pending'`).bind(folderDriftOperationId).run();
+    await new Promise(resolve => setTimeout(resolve, 1_100));
+    await expect(cancelOperationsPortalNativeDeliveryAuthorityForOwner(operations, notFoundOnly,
+      { authorityId: folderDriftAuthorityId, operationId: folderDriftOperationId, owner: recoveryOwner() })).rejects.toThrow();
+    // The canonical reservation boundary prevents folder drift while any active
+    // delivery head still pins it; the cancellation receipt guard independently
+    // rechecks the same exact folder tuple at finalization.
+    await expect(revokeOperationsPortalFolder(operations, owner(), { operationId: id(), targetId: workspace.targetId,
+      reservationId: folder.reservationId, expectedRevision: 1, reason: "Drift frozen cancellation folder" }))
+      .rejects.toThrow("operations_portal_workspace_reservation_denied");
+    expect(await operations.prepare(`SELECT count(*) n FROM operations_portal_native_delivery_authority_heads
+      WHERE authority_id=?`).bind(folderDriftAuthorityId).first("n")).toBe(1);
     await expect(readOperationsPortalNativeDeliveryAuthorization(operations, request))
       .rejects.toThrow("authorization_denied");
     expect(await operations.prepare(`SELECT state FROM operations_portal_native_delivery_authority_outbox

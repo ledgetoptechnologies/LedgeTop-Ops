@@ -9,7 +9,8 @@ import { sha256OperationsPortalWorkspaceSnapshot, type OperationsPortalWorkspace
   from '@ltds/shared/operations-portal-workspace-publication';
 import { consumeOperationsPortalWorkspacePublication } from '../src/worker/operations-portal-workspace-publications';
 import { applyOperationsPortalNativeRecipientAuthority } from '../src/worker/operations-portal-native-recipient-authority';
-import { applyOperationsPortalNativeDeliveryAuthority as apply, readOperationsPortalNativeDeliveryAuthorityStatus as status }
+import { applyOperationsPortalNativeDeliveryAuthority as apply, cancelOperationsPortalNativeDeliveryAuthority as cancel,
+  readOperationsPortalNativeDeliveryAuthorityDisposition as disposition, readOperationsPortalNativeDeliveryAuthorityStatus as status }
   from '../src/worker/operations-portal-native-delivery-authority';
 import { splitD1MigrationStatements } from './helpers/d1-migrations';
 import { authorizeNativeOperationsDelivery, type NativeOperationsDeliveryAuthorizationRequest }
@@ -232,6 +233,15 @@ describe('Operations-native delivery consumer with real forward schemas and prod
       .all<{ name: string }>()).results.map(row => row.name);
     const regrantSql = readFileSync(new URL('../migrations/0229_operations_portal_native_delivery_regrant.sql', import.meta.url), 'utf8');
     await db.batch(splitD1MigrationStatements(regrantSql).map(statement => db.prepare(statement)));
+    const cancellationSql = readFileSync(new URL('../migrations/0230_operations_portal_native_delivery_terminal_cancellations.sql', import.meta.url), 'utf8');
+    await db.batch(splitD1MigrationStatements(cancellationSql).map(statement => db.prepare(statement)));
+    const committedCancellationRequest = JSON.stringify({ protocol: value.protocol, protocolVersion: 1,
+      command: value, requestFingerprint: first.receipt.requestFingerprint });
+    const cancellationEnv = { ...env(), CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_CANCELLATION_ENABLED: 'true' };
+    expect(JSON.parse(await disposition(cancellationEnv, committedCancellationRequest))).toMatchObject({ ok: true,
+      disposition: 'committed', receipt: { operationId: value.operationId } });
+    expect(JSON.parse(await cancel(cancellationEnv, committedCancellationRequest))).toMatchObject({ ok: true,
+      disposition: 'committed', receipt: { operationId: value.operationId } });
     const retainedAfter = await db.prepare(`SELECT
       (SELECT json_group_array(json_object('authority_id',authority_id,'recipient_binding_id',recipient_binding_id,
         'folder_reservation_id',folder_reservation_id,'target_id',target_id,'revision',revision,'state',state,
@@ -249,7 +259,9 @@ describe('Operations-native delivery consumer with real forward schemas and prod
       .all<{ name: string }>()).results.map(row => row.name);
     expect(triggersAfter).toEqual([...triggersBefore,
       'operations_native_delivery_replacement_delete', 'operations_native_delivery_replacement_grant_guard',
-      'operations_native_delivery_replacement_insert', 'operations_native_delivery_replacement_update'].sort());
+      'operations_native_delivery_replacement_insert', 'operations_native_delivery_replacement_update',
+      'operations_native_delivery_cancellation_delete', 'operations_native_delivery_cancellation_insert',
+      'operations_native_delivery_cancellation_update', 'operations_native_delivery_cancelled_command_insert'].sort());
     const replacement = { ...value, operationId: id(19), authority: { authorityId: id(20), expectedRevision: '0', resultingRevision: '1' },
       publication: { operationId: drifted.operationId, publicationId: drifted.publicationId, revision: '2', sourceSequence: '2',
         snapshotId: drifted.snapshot.snapshotId, snapshotSha256: drifted.snapshot.snapshotSha256 } };
@@ -299,5 +311,29 @@ describe('Operations-native delivery consumer with real forward schemas and prod
     expect(JSON.parse(await apply(env(), canonical(replacement)))).toMatchObject({ ok: true, receipt: { status: 'duplicate' } });
     expect((await db.prepare('PRAGMA foreign_key_check').all()).results).toEqual([]);
     await expect(db.prepare('DELETE FROM operations_portal_native_delivery_heads').run()).rejects.toThrow();
+  });
+  it('records only an expired never-materialized grant cancellation and blocks delayed apply', async () => {
+    const command = { ...grant(), operationId: id(30), authority: { authorityId: id(31), expectedRevision: '0', resultingRevision: '1' },
+      resource: { ...grant().resource, folderReservationId: id(32) }, observedAt: new Date(Date.now() - 120_000).toISOString(),
+      expiresAt: new Date(Date.now() - 60_000).toISOString() };
+    const request = { protocol: command.protocol, protocolVersion: 1 as const, command,
+      requestFingerprint: await sha256OperationsPortalNativeDeliveryAuthorityCommand(command) };
+    const raw = JSON.stringify(request), cancellationEnv = { ...env(), CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_CANCELLATION_ENABLED: 'true' };
+    expect(JSON.parse(await disposition(cancellationEnv, raw))).toMatchObject({ ok: true, disposition: 'not-found' });
+    for (const poisonedTimestamp of ['zzzz', new Date(Date.now() + 60_000).toISOString()]) {
+      await expect(db.prepare(`INSERT INTO operations_portal_native_delivery_cancellations
+        (operation_id,request_fingerprint,authority_id,target_id,recipient_binding_id,folder_reservation_id,
+         canonical_request_json,cancelled_at) VALUES(?,?,?,?,?,?,?,?)`)
+        .bind(command.operationId,request.requestFingerprint,command.authority.authorityId,command.target.targetId,
+          command.recipient.recipientBindingId,command.resource.folderReservationId,raw,poisonedTimestamp).run())
+        .rejects.toThrow('cancellation denied');
+    }
+    expect(JSON.parse(await cancel(cancellationEnv, raw))).toMatchObject({ ok: true, disposition: 'cancelled',
+      cancellation: { operationId: id(30), authorityId: id(31), replayed: false } });
+    expect(JSON.parse(await cancel(cancellationEnv, raw))).toMatchObject({ ok: true, disposition: 'cancelled',
+      cancellation: { replayed: true } });
+    expect(JSON.parse(await apply(env(), canonical(command)))).toMatchObject({ ok: false, code: 'conflict' });
+    expect(await db.prepare('SELECT count(*) n FROM operations_portal_native_delivery_commands WHERE operation_id=?').bind(id(30)).first('n')).toBe(0);
+    await expect(db.prepare('DELETE FROM operations_portal_native_delivery_cancellations WHERE operation_id=?').bind(id(30)).run()).rejects.toThrow();
   });
 });

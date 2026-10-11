@@ -1,13 +1,15 @@
 import { canonicalOperationsPortalNativeDeliveryAuthorityCommand,
+  canonicalOperationsPortalNativeDeliveryCancellationRequest,
   canonicalOperationsPortalNativeDeliveryAuthorityStatusRequest,
   parseOperationsPortalNativeDeliveryAuthorityCommand, parseOperationsPortalNativeDeliveryAuthorityStatusRequest,
   parseOperationsPortalNativeDeliveryAuthorityReceipt, sha256OperationsPortalNativeDeliveryAuthorityCommand,
-  type OperationsPortalNativeDeliveryAuthorityCommand, type OperationsPortalNativeDeliveryAuthorityReceipt,
+  parseOperationsPortalNativeDeliveryCancellationRequest, type OperationsPortalNativeDeliveryAuthorityCommand, type OperationsPortalNativeDeliveryAuthorityReceipt,
 } from '@ltds/shared/operations-portal-native-delivery-authority';
 
 type DeliveryWriterEnv = Readonly<{ DELIVERY_DB: D1Database; ENVIRONMENT?: string;
   CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_WRITER_ENABLED?: string;
-  CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_STATUS_ENABLED?: string }>;
+  CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_STATUS_ENABLED?: string;
+  CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_CANCELLATION_ENABLED?: string }>;
 type ReceiptRow = { operation_id: string; request_fingerprint: string; action: 'delivery.grant' | 'delivery.revoke';
   authority_id: string; recipient_binding_id: string; folder_reservation_id: string; resulting_revision: number;
   resulting_state: 'active' | 'revoked' };
@@ -131,4 +133,45 @@ export async function readOperationsPortalNativeDeliveryAuthorityStatus(env: Del
     const receipt = parseOperationsPortalNativeDeliveryAuthorityReceipt(result(saved, true), undefined, request.requestFingerprint);
     return receipt ? success(receipt) : failure('conflict');
   } catch { return failure('unavailable', true); }
+}
+
+export async function readOperationsPortalNativeDeliveryAuthorityDisposition(env: DeliveryWriterEnv, raw: unknown): Promise<string> {
+  if (env.ENVIRONMENT !== 'staging' || env.CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_CANCELLATION_ENABLED !== 'true') return failure('disabled', true);
+  let request;
+  try { request = parseOperationsPortalNativeDeliveryCancellationRequest(JSON.parse(String(raw)));
+    if (!request || canonicalOperationsPortalNativeDeliveryCancellationRequest(request) !== raw) return failure('invalid'); }
+  catch { return failure('invalid'); }
+  if (await sha256OperationsPortalNativeDeliveryAuthorityCommand(request.command) !== request.requestFingerprint) return failure('invalid');
+  const receipt = await prior(env.DELIVERY_DB.withSession('first-primary'), request.command.operationId);
+  if (receipt) return JSON.stringify({ ok: true, protocolVersion: 1, disposition: 'committed', receipt: result(receipt, true) });
+  const cancellation = await env.DELIVERY_DB.prepare(`SELECT * FROM operations_portal_native_delivery_cancellations WHERE operation_id=?`)
+    .bind(request.command.operationId).first<Record<string, unknown>>();
+  if (!cancellation) return JSON.stringify({ ok: true, protocolVersion: 1, disposition: 'not-found' });
+  return JSON.stringify({ ok: true, protocolVersion: 1, disposition: 'cancelled', cancellation: {
+    protocol: request.protocol, protocolVersion: 1, status: 'cancelled', operationId: cancellation.operation_id,
+    requestFingerprint: cancellation.request_fingerprint, authorityId: cancellation.authority_id, targetId: cancellation.target_id,
+    recipientBindingId: cancellation.recipient_binding_id, folderReservationId: cancellation.folder_reservation_id,
+    expectedRevision: '0', resultingRevision: '1', cancelledAt: cancellation.cancelled_at, replayed: true } });
+}
+
+export async function cancelOperationsPortalNativeDeliveryAuthority(env: DeliveryWriterEnv, raw: unknown): Promise<string> {
+  if (env.ENVIRONMENT !== 'staging' || env.CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_CANCELLATION_ENABLED !== 'true') return failure('disabled', true);
+  let request;
+  try { request = parseOperationsPortalNativeDeliveryCancellationRequest(JSON.parse(String(raw)));
+    if (!request || canonicalOperationsPortalNativeDeliveryCancellationRequest(request) !== raw) return failure('invalid'); }
+  catch { return failure('invalid'); }
+  if (await sha256OperationsPortalNativeDeliveryAuthorityCommand(request.command) !== request.requestFingerprint) return failure('invalid');
+  const before = JSON.parse(await readOperationsPortalNativeDeliveryAuthorityDisposition(env, raw as string));
+  if (before.disposition === 'committed' || before.disposition === 'cancelled') return JSON.stringify(before);
+  const command = request.command;
+  let inserted = false;
+  try { const result = await env.DELIVERY_DB.prepare(`INSERT INTO operations_portal_native_delivery_cancellations
+    (operation_id,request_fingerprint,authority_id,target_id,recipient_binding_id,folder_reservation_id,canonical_request_json)
+    VALUES(?,?,?,?,?,?,?)`).bind(command.operationId, request.requestFingerprint, command.authority.authorityId,
+      command.target.targetId, command.recipient.recipientBindingId, command.resource.folderReservationId, raw).run();
+    inserted = result.meta.changes === 1; }
+  catch { /* Resolve the concurrent committed/cancelled winner below. */ }
+  const resolved = JSON.parse(await readOperationsPortalNativeDeliveryAuthorityDisposition(env, raw as string));
+  if (inserted && resolved.disposition === 'cancelled') resolved.cancellation.replayed = false;
+  return JSON.stringify(resolved);
 }

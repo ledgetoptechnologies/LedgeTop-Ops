@@ -127,13 +127,18 @@ export async function claimOperationsPortalNativeDeliveryRecoveryInvocation(data
             AND EXISTS(SELECT 1 FROM operations_portal_native_delivery_authority_commands command
               WHERE command.operation_id=operations_portal_native_delivery_authority_outbox.operation_id
                 AND command.action='delivery.grant')))
+          AND NOT EXISTS(SELECT 1 FROM operations_portal_native_delivery_cancellation_intents cancellation
+            WHERE cancellation.operation_id=operations_portal_native_delivery_authority_outbox.operation_id)
           AND EXISTS(SELECT 1 FROM operations_portal_native_delivery_recovery_invocations invocation
             WHERE invocation.invocation_id=? AND invocation.operation_id=? AND invocation.state='authorized')`)
         .bind(input.claimToken, input.operationId, input.invocationId, input.operationId),
       database.prepare(`UPDATE operations_portal_native_delivery_recovery_invocations
         SET state='claimed',claim_token=?,claimed_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')
-        WHERE invocation_id=? AND operation_id=? AND state='authorized'`)
-        .bind(input.claimToken, input.invocationId, input.operationId),
+        WHERE invocation_id=? AND operation_id=? AND state='authorized'
+          AND EXISTS(SELECT 1 FROM operations_portal_native_delivery_authority_outbox outbox
+            WHERE outbox.operation_id=operations_portal_native_delivery_recovery_invocations.operation_id
+              AND outbox.state='dispatching' AND outbox.claim_token=?)`)
+        .bind(input.claimToken, input.invocationId, input.operationId, input.claimToken),
     ]);
   } catch { return false; }
   return Boolean(await database.prepare(`SELECT 1 FROM operations_portal_native_delivery_recovery_invocation_audit audit

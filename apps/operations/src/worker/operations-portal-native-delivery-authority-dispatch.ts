@@ -23,6 +23,7 @@ export type OperationsPortalNativeDeliveryAuthorityDispatchEnv = Readonly<{
   OPS_DB: D1Database; ENVIRONMENT?: string; EXPECTED_HOST?: string;
   OPERATIONS_PORTAL_NATIVE_DELIVERY_AUTHORITY?: OperationsPortalNativeDeliveryAuthorityBinding;
   OPERATIONS_PORTAL_NATIVE_DELIVERY_AUTHORITY_DISPATCH_ENABLED?: string;
+  OPERATIONS_PORTAL_NATIVE_DELIVERY_CANCELLATION_ENABLED?: string;
 }>;
 
 async function sha256(value: string): Promise<string> {
