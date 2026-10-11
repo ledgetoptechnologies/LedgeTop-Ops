@@ -25,9 +25,14 @@ export const BOOTSTRAP_APPS = Object.freeze({
     binding: "OPS_DB",
     databaseName: "ltds-ops-staging",
     seed: "0002_seed_acl.sql",
-    migrationCount: 187,
-    migrationNamesSha256: "ce00ad1a6b67cb8a7f0ed5e197ebd5fbdfabd2566dc3c402f1eee79302036951",
-    migrationContentsSha256: "3e0f92864210aab88c97220e50649a46d4ec8d6367262ea8f42ca75ce17a8567",
+    migrationCount: 190,
+    migrationNamesSha256: "1c42cda3e4a770e59da42fecb2eaa9063abbe415eb500d5cde22b5755fc0ddbf",
+    migrationContentsSha256: "7e6f75368c5aed14209b092e026458894c6509324c8fdbedcf96c8df2ac0f260",
+    historicalMigrationChains: Object.freeze([Object.freeze({
+      count: 187,
+      namesSha256: "ce00ad1a6b67cb8a7f0ed5e197ebd5fbdfabd2566dc3c402f1eee79302036951",
+      contentsSha256: "3e0f92864210aab88c97220e50649a46d4ec8d6367262ea8f42ca75ce17a8567",
+    })]),
   }),
 });
 export const PRODUCTION_DATABASE_IDENTITIES = Object.freeze([
@@ -207,7 +212,11 @@ export function buildArtifacts(base, owner, options = {}) {
     }
     const names = entries.filter((item) => item.isFile() && !item.isSymbolicLink() && item.name.endsWith(".sql")).map((item) => item.name).sort();
     const namesSha256 = sha256(names.join("\n"));
-    if (names.length !== entry.migrationCount || namesSha256 !== entry.migrationNamesSha256) throw new Error(`${app} canonical migration inventory must be the exact complete ordered ${entry.migrationCount}-file chain (found ${names.length} files, names sha256 ${namesSha256})`);
+    const reviewedChains = [{ count: entry.migrationCount, namesSha256: entry.migrationNamesSha256,
+      contentsSha256: entry.migrationContentsSha256 }, ...(entry.historicalMigrationChains ?? [])];
+    const reviewedChain = reviewedChains.find(chain => names.length === chain.count && namesSha256 === chain.namesSha256);
+    if (!reviewedChain) throw new Error(`${app} canonical migration inventory must be an exact complete reviewed chain `
+      + `(found ${names.length} files, names sha256 ${namesSha256})`);
     if (!names.includes(entry.seed)) throw new Error(`${app} canonical seed ${entry.seed} is missing`);
     const canonicalFiles = names.map((name) => {
       const sourcePath = path.join(sourceDir, name);
@@ -216,7 +225,7 @@ export function buildArtifacts(base, owner, options = {}) {
       return { name, source, sourceSha256: sha256(source) };
     });
     const sourceChainSha256 = sha256(canonicalFiles.map(({ name, sourceSha256 }) => `${name}\0${sourceSha256}`).join("\n"));
-    if (sourceChainSha256 !== entry.migrationContentsSha256) throw new Error(`${app} canonical migration contents do not match the reviewed full-chain digest`);
+    if (sourceChainSha256 !== reviewedChain.contentsSha256) throw new Error(`${app} canonical migration contents do not match the reviewed full-chain digest`);
     const files = canonicalFiles.map(({ name, source, sourceSha256 }) => {
       const generated = name === entry.seed ? transformSeed(app, source, owner) : source;
       return { name, source, generated, sourceSha256, generatedSha256: sha256(generated), transformed: source !== generated };

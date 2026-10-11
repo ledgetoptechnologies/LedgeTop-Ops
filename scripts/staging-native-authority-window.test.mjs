@@ -404,12 +404,12 @@ test("prepare accepts the exact canonical repository migration chain through 018
   }
 });
 
-test("prepare rejects the canonical repository migration chain through 0187", async () => {
+test("prepare rejects the canonical repository migration chain through 0190", async () => {
   const migrationDirectory = path.join(ROOT, "apps", "operations", "migrations");
   const migrations = fs.readdirSync(migrationDirectory)
     .filter(name => /^\d{4}_.+\.sql$/.test(name))
     .sort();
-  assert.equal(migrations.at(-1), "0187_operations_portal_native_delivery_literal_prefix_guard.sql");
+  assert.equal(migrations.at(-1), "0190_client_hub_native_project_preparation_authority.sql");
   const { dependencies } = preparationHarness({ actualMigrations: migrations });
   dependencies.root = ROOT;
   delete dependencies.reviewedMigrations;

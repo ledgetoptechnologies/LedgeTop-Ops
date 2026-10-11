@@ -5,7 +5,7 @@ import {
 import { withEnabledConfiguredProjectAlphaApiV2Connection, type ProjectAlphaApiV2ConnectionEnvironment } from "./project-alpha-api-v2-connections";
 import type { ProjectAlphaApiV2Connection, ProjectAlphaApiV2Endpoint } from "./project-alpha-api-v2";
 
-export type ProjectAlphaProjectCreateCommand = Readonly<{ commandId: string; externalId: string; expectedAuthorizationGeneration: string; project: ProjectAlphaProjectProfile; organization: ProjectAlphaProjectRelationProof; client: ProjectAlphaProjectRelationProof | null }>;
+export type ProjectAlphaProjectCreateCommand = Readonly<{ commandId: string; externalId: string; expectedAuthorizationGeneration: string; project: ProjectAlphaProjectProfile; organization: ProjectAlphaProjectRelationProof | null; client: ProjectAlphaProjectRelationProof | null }>;
 export type ProjectAlphaProjectUpdateCommand = Readonly<{ commandId: string; externalId: string; expectedRevision: string; expectedProjectionSha256: string; expectedAuthorizationGeneration: string; project: ProjectAlphaProjectProfile }>;
 export type ProjectAlphaProjectBindCommand = Readonly<{ commandId: string; externalId: string; expectedPublicId: string; expectedRevision: string; expectedProjectionSha256: string; expectedAuthorizationGeneration: string }>;
 export type ProjectAlphaProjectRefreshCommand = Readonly<{ commandId: string; externalId: string; expectedPublicId: string; expectedPriorRevision: string; expectedRevision: string; expectedProjectionSha256: string; expectedAuthorizationGeneration: string }>;
@@ -84,7 +84,7 @@ function plain(value: unknown): value is Record<string, unknown> { return !!valu
 function canonicalProject(value: ProjectAlphaProjectProfile): ProjectAlphaProjectProfile { return { name: value.name, description: value.description, estimatedStart: value.estimatedStart, estimatedEnd: value.estimatedEnd }; }
 function canonicalRelation(value: ProjectAlphaProjectRelationProof | null): ProjectAlphaProjectRelationProof | null { return value === null ? null : { externalId: value.externalId, expectedPublicId: value.expectedPublicId, expectedRevision: value.expectedRevision, expectedProjectionSha256: value.expectedProjectionSha256 }; }
 function canonicalCommand(type: ProjectAlphaProjectCommandType, value: ProjectAlphaProjectCommand): ProjectAlphaProjectCommand {
-  if (type === "create") { const command = value as ProjectAlphaProjectCreateCommand; return { commandId: command.commandId, externalId: command.externalId, expectedAuthorizationGeneration: command.expectedAuthorizationGeneration, project: canonicalProject(command.project), organization: canonicalRelation(command.organization)!, client: canonicalRelation(command.client) }; }
+  if (type === "create") { const command = value as ProjectAlphaProjectCreateCommand; return { commandId: command.commandId, externalId: command.externalId, expectedAuthorizationGeneration: command.expectedAuthorizationGeneration, project: canonicalProject(command.project), organization: canonicalRelation(command.organization), client: canonicalRelation(command.client) }; }
   if (type === "update") { const command = value as ProjectAlphaProjectUpdateCommand; return { commandId: command.commandId, externalId: command.externalId, expectedRevision: command.expectedRevision, expectedProjectionSha256: command.expectedProjectionSha256, expectedAuthorizationGeneration: command.expectedAuthorizationGeneration, project: canonicalProject(command.project) }; }
   if (type === "bind") { const command = value as ProjectAlphaProjectBindCommand; return { commandId: command.commandId, externalId: command.externalId, expectedPublicId: command.expectedPublicId, expectedRevision: command.expectedRevision, expectedProjectionSha256: command.expectedProjectionSha256, expectedAuthorizationGeneration: command.expectedAuthorizationGeneration }; }
   const command = value as ProjectAlphaProjectRefreshCommand; return { commandId: command.commandId, externalId: command.externalId, expectedPublicId: command.expectedPublicId, expectedPriorRevision: command.expectedPriorRevision, expectedRevision: command.expectedRevision, expectedProjectionSha256: command.expectedProjectionSha256, expectedAuthorizationGeneration: command.expectedAuthorizationGeneration };
@@ -100,7 +100,9 @@ export function canonicalProjectAlphaProjectRequest(type: ProjectAlphaProjectCom
   } catch { return null; }
 }
 export function isProjectAlphaProjectCreateCommand(value: unknown): value is ProjectAlphaProjectCreateCommand {
-  return validBase(value, ["commandId", "externalId", "expectedAuthorizationGeneration", "project", "organization", "client"]) && profile(value.project) && relation(value.organization, true) && relation(value.client, false);
+  return validBase(value, ["commandId", "externalId", "expectedAuthorizationGeneration", "project", "organization", "client"])
+    && profile(value.project) && relation(value.organization, false) && relation(value.client, false)
+    && (value.organization !== null || value.client !== null);
 }
 export function isProjectAlphaProjectUpdateCommand(value: unknown): value is ProjectAlphaProjectUpdateCommand {
   return validBase(value, ["commandId", "externalId", "expectedRevision", "expectedProjectionSha256", "expectedAuthorizationGeneration", "project"])

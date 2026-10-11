@@ -32,7 +32,7 @@ export const NATIVE_MIGRATION_PROFILES = Object.freeze({
     baseNamesSha256: "46d20b48362be8052f5b2fd35ec4ccefee2c267476a2a076af87a955c4cfca3a",
     baseContentsSha256: "cd35de12e87325fb6de854f4ecba47e5172e115f75830af9f4a908710d10a450",
     remoteBaseline: "0183_project_alpha_binding_standalone_relationship_rows.sql",
-    finalMigration: "0187_operations_portal_native_delivery_literal_prefix_guard.sql",
+    finalMigration: "0190_client_hub_native_project_preparation_authority.sql",
     candidates: Object.freeze({
       "0174_project_alpha_directory_preserved_external_identity.sql": "9e794a73b75e025edc04967888631b9336931eb16113f42d855bea3fcb30a158",
       "0175_operations_directory_acquired_parent_enrollment_identity.sql": "de022736243342f203fcf9a1cb22993e49c50bbb18c7b3b2fc95d8fb3fa48ed0",
@@ -48,8 +48,36 @@ export const NATIVE_MIGRATION_PROFILES = Object.freeze({
       "0185_project_alpha_directory_binding_generation_epochs.sql": "3c536f6e8ea3c745e0167d3a81308abbac7e9b24c127a95a3a8ab1d7c9fcd39e",
       "0186_project_alpha_directory_conflict_evidence_binding.sql": "6d19b3e6be44382c51681444e95a501845f8f3958e83930c5fba50501951fd92",
       "0187_operations_portal_native_delivery_literal_prefix_guard.sql": "ded89fe037cfb56f9ddf4316a4ddcc67c8ae00e58d66eebec9a8129c6536eb28",
+      "0188_client_hub_native_project_preparations.sql": "5c455a13128a912a716d75b2dbba9bcde64bfd8479495036d4f63bbf3a7098bc",
+      "0189_client_hub_native_project_uncertain_recovery.sql": "e7ee262257b677589cf089e0157fdf09863f3e14c2852b5da6bb51eff717a745",
+      "0190_client_hub_native_project_preparation_authority.sql": "a662cd4a50c5eaee7a02bf720b1e5399d5d05712022fdd1426413fc707a83882",
     }),
     expectedAppliedMigrations: Object.freeze([
+      "0184_project_alpha_directory_relationship_generation_recovery.sql",
+      "0185_project_alpha_directory_binding_generation_epochs.sql",
+      "0186_project_alpha_directory_conflict_evidence_binding.sql",
+      "0187_operations_portal_native_delivery_literal_prefix_guard.sql",
+      "0188_client_hub_native_project_preparations.sql",
+      "0189_client_hub_native_project_uncertain_recovery.sql",
+      "0190_client_hub_native_project_preparation_authority.sql",
+    ]),
+    historicalExpectedAppliedMigrations: Object.freeze([
+      "0184_project_alpha_directory_relationship_generation_recovery.sql",
+      "0185_project_alpha_directory_binding_generation_epochs.sql",
+      "0186_project_alpha_directory_conflict_evidence_binding.sql",
+      "0187_operations_portal_native_delivery_literal_prefix_guard.sql",
+    ]),
+    historicalCandidateNames: Object.freeze([
+      "0174_project_alpha_directory_preserved_external_identity.sql",
+      "0175_operations_directory_acquired_parent_enrollment_identity.sql",
+      "0176_operations_directory_acquired_intent_authority.sql",
+      "0177_operations_directory_acquired_intent_update_authority.sql",
+      "0178_project_alpha_project_inbound_reconciliation.sql",
+      "0179_project_alpha_acquired_native_identity_collision.sql",
+      "0180_project_alpha_project_v2_recovery_authorization.sql",
+      "0181_project_alpha_directory_create_generation_recovery.sql",
+      "0182_project_alpha_directory_relationship_recovery_guard.sql",
+      "0183_project_alpha_binding_standalone_relationship_rows.sql",
       "0184_project_alpha_directory_relationship_generation_recovery.sql",
       "0185_project_alpha_directory_binding_generation_epochs.sql",
       "0186_project_alpha_directory_conflict_evidence_binding.sql",
@@ -123,20 +151,31 @@ function validateSourceMigrations(base, application, contract) {
   if (migrationChainDigest(directory, baseNames) !== contract.baseContentsSha256) {
     throw new Error(`${application} pinned base migration contents changed`);
   }
-  for (const [name, expected] of Object.entries(contract.candidates)) {
+  const historicalCandidateNames = contract.historicalCandidateNames ?? candidateNames;
+  const presentCandidateNames = candidateNames.filter((name) => names.includes(name));
+  const currentChain = JSON.stringify(presentCandidateNames) === JSON.stringify(candidateNames);
+  const historicalChain = JSON.stringify(presentCandidateNames) === JSON.stringify(historicalCandidateNames);
+  const selectedCandidateNames = currentChain ? candidateNames : historicalChain ? historicalCandidateNames : null;
+  if (!selectedCandidateNames) throw new Error(`${application} migration directory is not an exact reviewed 0187 or 0190 chain`);
+  for (const name of selectedCandidateNames) {
+    const expected = contract.candidates[name];
     const file = path.join(directory, name);
     requireRegularFile(file, `${application} native candidate ${name}`);
     const contents = fs.readFileSync(file);
     if (contents.includes(13)) throw new Error(`${application} native candidate must use LF-only line endings: ${name}`);
     if (sha256(contents) !== expected) throw new Error(`${application} native candidate changed: ${name}`);
   }
-  if (names.length !== baseNames.length + candidateNames.length) {
+  if (names.length !== baseNames.length + selectedCandidateNames.length) {
     throw new Error(`${application} migration directory contains an unreviewed SQL file`);
   }
-  const finalNames = [...baseNames, ...candidateNames].sort();
+  const finalNames = [...baseNames, ...selectedCandidateNames].sort();
   const baselineIndex = finalNames.indexOf(contract.remoteBaseline);
-  if (baselineIndex < 0 || JSON.stringify(finalNames.slice(baselineIndex + 1)) !== JSON.stringify(contract.expectedAppliedMigrations)
-    || finalNames.at(-1) !== contract.finalMigration) {
+  const expectedAppliedMigrations = finalNames.slice(baselineIndex + 1);
+  const reviewedAppliedMigrations = currentChain
+    ? contract.expectedAppliedMigrations : contract.historicalExpectedAppliedMigrations;
+  const reviewedFinalMigration = reviewedAppliedMigrations.at(-1) ?? contract.remoteBaseline;
+  if (baselineIndex < 0 || JSON.stringify(expectedAppliedMigrations) !== JSON.stringify(reviewedAppliedMigrations)
+    || finalNames.at(-1) !== reviewedFinalMigration) {
     throw new Error(`${application} native migration range is not the exact reviewed contiguous suffix`);
   }
   return {
@@ -144,6 +183,7 @@ function validateSourceMigrations(base, application, contract) {
     baseNames,
     finalNames,
     expectedRemoteAppliedMigrations: finalNames.slice(0, baselineIndex + 1),
+    expectedAppliedMigrations,
   };
 }
 
@@ -187,7 +227,7 @@ export function buildProfiles(base) {
         migrations_dir: migrationsDir,
       }],
     };
-    const files = contract.expectedAppliedMigrations.map((name) => ({
+    const files = source.expectedAppliedMigrations.map((name) => ({
       name,
       sourcePath: path.join(source.directory, name),
       sha256: sha256(fs.readFileSync(path.join(source.directory, name))),
@@ -200,11 +240,11 @@ export function buildProfiles(base) {
         databaseName: contract.databaseName, databaseId: contract.databaseId },
       pinnedBase: { count: contract.baseCount, namesSha256: contract.baseNamesSha256,
         contentsSha256: contract.baseContentsSha256 },
-      reviewedFinalChain: { count: source.finalNames.length, finalMigration: contract.finalMigration,
+      reviewedFinalChain: { count: source.finalNames.length, finalMigration: source.finalNames.at(-1),
         namesSha256: sha256(source.finalNames.join("\n")) },
       requiredRemoteBaseline: contract.remoteBaseline,
-      expectedAppliedMigrations: [...contract.expectedAppliedMigrations],
-      finalMigration: contract.finalMigration,
+      expectedAppliedMigrations: [...source.expectedAppliedMigrations],
+      finalMigration: source.finalNames.at(-1),
       migrations: files.map(({ name, sha256: digest }) => ({ name, sha256: digest })),
       remoteActionsPerformed: false,
     };

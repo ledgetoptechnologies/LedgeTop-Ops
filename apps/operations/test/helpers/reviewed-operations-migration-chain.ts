@@ -41,6 +41,16 @@ const initialClientMigrations = Object.freeze([
   "0095_trash_object_manifests.sql",
 ]);
 
+// These migrations are part of the reviewed 190-file bootstrap contract but
+// are deliberately not yet part of the staging release-requirements suffix.
+// Keep the test inventory explicit so it cannot silently admit other physical
+// migration files.
+const reviewedOperationsPostStagingSuffix = Object.freeze([
+  "0188_client_hub_native_project_preparations.sql",
+  "0189_client_hub_native_project_uncertain_recovery.sql",
+  "0190_client_hub_native_project_preparation_authority.sql",
+]);
+
 function sha256(value: string | Uint8Array): string {
   return createHash("sha256").update(value).digest("hex");
 }
@@ -52,7 +62,8 @@ function sha256(value: string | Uint8Array): string {
  */
 function reviewedMigrationNames(directory: URL, application: "delivery" | "operations",
   initial: readonly string[]): readonly string[] {
-  const names = [...initial, ...REQUIRED_STAGING_MIGRATIONS[application]] as string[];
+  const names = [...initial, ...REQUIRED_STAGING_MIGRATIONS[application],
+    ...(application === "operations" ? reviewedOperationsPostStagingSuffix : [])] as string[];
   const contract = BOOTSTRAP_APPS[application] as {
     migrationCount: number;
     migrationNamesSha256: string;

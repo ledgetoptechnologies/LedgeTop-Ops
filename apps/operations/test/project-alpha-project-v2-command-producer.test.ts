@@ -121,7 +121,7 @@ function readTransport(action: Extract<ProjectAlphaProjectV2CommandProducerActio
     return response({ apiVersion: "2", sourceInstanceId, applicationId, historyEpoch, requestId: "11111111-1111-4111-8111-111111111111", replayed: false, accepted: true,
       resource: { type: "project", id: publicId, revision: "1", projectionSha256: sha }, data: { name: action.command.project.name, description: action.command.project.description,
         status: "active", archived: false, overdueWarning: false, completedAt: null, archivedAt: null, estimatedStart: action.command.project.estimatedStart,
-        estimatedEnd: action.command.project.estimatedEnd, clientPublicId: action.command.client!.expectedPublicId, organizationPublicId: action.command.organization.expectedPublicId } });
+        estimatedEnd: action.command.project.estimatedEnd, clientPublicId: action.command.client!.expectedPublicId, organizationPublicId: action.command.organization!.expectedPublicId } });
   });
 }
 function selectedConnection(sourceId: string) {
@@ -202,7 +202,7 @@ describe("unmounted project-v2 command producer", () => {
     const publicBefore = await db.prepare("SELECT id,url,hex(payload) payload FROM delivery_public_shares ORDER BY id").all();
     await expect(planProjectAlphaProjectV2Command(env(), activated)).resolves.toMatchObject({ status: "queued", replayed: false });
     expect(await db.prepare("SELECT count(*) n FROM project_alpha_directory_mappings WHERE external_id IN (?,?)")
-      .bind(activated.command.organization.externalId, activated.command.client!.externalId).first("n")).toBe(0);
+      .bind(activated.command.organization!.externalId, activated.command.client!.externalId).first("n")).toBe(0);
     const guards = await db.prepare(`SELECT name,sql FROM sqlite_master WHERE type='trigger'
       AND name IN ('operations_shared_projects_bound_refresh_guard','operations_shared_projects_no_update') ORDER BY name`).all<{ name: string; sql: string }>();
     expect(guards.results).toHaveLength(2);
@@ -222,7 +222,7 @@ describe("unmounted project-v2 command producer", () => {
     const collision = await createAction("project-alpha:one", "acquired");
     await db.prepare(`INSERT INTO project_alpha_directory_mappings(source_id,source_instance_id,application_id,history_epoch_id,resource_type,external_id,project_alpha_public_id)
       VALUES(?,?,?,?,?,?,?)`).bind(collision.sourceId, sourceOne, appOne, epochOne, "organization",
-      collision.directory.organizationRecordId, collision.command.organization.expectedPublicId).run();
+      collision.directory.organizationRecordId, collision.command.organization!.expectedPublicId).run();
     await expect(planProjectAlphaProjectV2Command(env(), collision)).resolves.toEqual({ status: "blocked", reason: "directory" });
     expect(await db.prepare("SELECT count(*) n FROM project_alpha_project_outbox WHERE command_id=?").bind(collision.command.commandId).first("n")).toBe(0);
     expect((await db.prepare("SELECT id,url,hex(payload) payload FROM delivery_public_shares ORDER BY id").all()).results).toEqual(publicBefore.results);
@@ -242,7 +242,7 @@ describe("unmounted project-v2 command producer", () => {
     const one = await createAction();
     await db.batch([
       db.prepare(`INSERT INTO project_alpha_directory_mappings(source_id,source_instance_id,application_id,history_epoch_id,resource_type,external_id,project_alpha_public_id)
-        VALUES('project-alpha:two',?,?,?,'organization',?,?)`).bind(sourceTwo, appTwo, epochTwo, one.directory.organizationRecordId, one.command.organization.expectedPublicId),
+        VALUES('project-alpha:two',?,?,?,'organization',?,?)`).bind(sourceTwo, appTwo, epochTwo, one.directory.organizationRecordId, one.command.organization!.expectedPublicId),
       db.prepare(`INSERT INTO project_alpha_directory_mappings(source_id,source_instance_id,application_id,history_epoch_id,resource_type,external_id,project_alpha_public_id)
         VALUES('project-alpha:two',?,?,?,'client',?,?)`).bind(sourceTwo, appTwo, epochTwo, one.directory.clientRecordId, one.command.client!.expectedPublicId),
     ]);
@@ -329,7 +329,7 @@ describe("unmounted project-v2 command producer", () => {
           await db.prepare(`INSERT INTO project_alpha_existing_directory_binding_activation_receipts(
             activation_id,source_id,resource_type,record_id,external_id,project_alpha_public_id,source_instance_id,application_id,history_epoch_id,activated_at)
             VALUES(?,?,?,?,?,?,?,?,?,?)`).bind(`race-${action.command.commandId}`, action.sourceId, "organization",
-            action.directory.organizationRecordId, "competing-pa-organization", action.command.organization.expectedPublicId,
+            action.directory.organizationRecordId, "competing-pa-organization", action.command.organization!.expectedPublicId,
             sourceOne, appOne, epochOne, "2026-10-08T00:00:00.000Z").run();
         }
         return db.batch(statements);
@@ -348,13 +348,13 @@ describe("unmounted project-v2 command producer", () => {
 
   it("accepts explicitly activated acquired directory mappings through the active-mapping view", async () => {
     const action = await createAction("project-alpha:one", "acquired");
-    expect(action.command.organization.externalId).not.toBe(action.directory.organizationRecordId);
+    expect(action.command.organization!.externalId).not.toBe(action.directory.organizationRecordId);
     expect(action.command.client!.externalId).not.toBe(action.directory.clientRecordId);
     expect(await db.prepare(`SELECT mapping_kind,record_id,external_id FROM project_alpha_active_directory_mappings
       WHERE record_id IN (?,?) ORDER BY external_id`).bind(action.directory.organizationRecordId, action.directory.clientRecordId).all())
       .toMatchObject({ results: [
         { mapping_kind: "acquired", record_id: action.directory.clientRecordId, external_id: action.command.client!.externalId },
-        { mapping_kind: "acquired", record_id: action.directory.organizationRecordId, external_id: action.command.organization.externalId },
+        { mapping_kind: "acquired", record_id: action.directory.organizationRecordId, external_id: action.command.organization!.externalId },
       ] });
     await expect(planProjectAlphaProjectV2Command(env(), action)).resolves.toMatchObject({ status: "queued", replayed: false });
   });
@@ -615,7 +615,7 @@ describe("unmounted project-v2 command producer", () => {
       db.prepare(`INSERT INTO project_alpha_existing_directory_binding_activation_receipts(
         activation_id,source_id,resource_type,record_id,external_id,project_alpha_public_id,source_instance_id,application_id,history_epoch_id,activated_at)
         VALUES(?,?,?,?,?,?,?,?,?,?)`).bind("canonical-activation-organization", action.sourceId, "organization",
-        action.directory.organizationRecordId, "pa-org-internal-42", action.command.organization.expectedPublicId, sourceOne, appOne, epochOne, "2026-10-01T00:00:00.000Z"),
+        action.directory.organizationRecordId, "pa-org-internal-42", action.command.organization!.expectedPublicId, sourceOne, appOne, epochOne, "2026-10-01T00:00:00.000Z"),
       db.prepare(`INSERT INTO project_alpha_existing_directory_binding_activation_receipts(
         activation_id,source_id,resource_type,record_id,external_id,project_alpha_public_id,source_instance_id,application_id,history_epoch_id,activated_at)
         VALUES(?,?,?,?,?,?,?,?,?,?)`).bind("canonical-activation-client", action.sourceId, "client",

@@ -64,7 +64,7 @@ test("builds full isolated chains, changes exactly 0002, and preserves staging c
   const base = fixture();
   const artifacts = buildArtifacts(base, owner);
   for (const [app, artifact] of Object.entries(artifacts)) {
-    assert.equal(artifact.files.length, app === "delivery" ? 147 : 187, app);
+    assert.equal(artifact.files.length, app === "delivery" ? 147 : 190, app);
     assert.deepEqual(artifact.manifest.transformedFiles, [artifact.entry.seed]);
     assert.equal(artifact.files.find(({ name }) => name.startsWith("0001_")).transformed, false);
     assert.equal(artifact.config.name.endsWith("-staging"), true);
@@ -112,10 +112,10 @@ test("rejects a mutated secondary Operations DELIVERY_DB binding", () => {
 test("rejects any missing or extra canonical migration filename", () => {
   const missing = fixture();
   fs.rmSync(path.join(missing, "apps", "client", "migrations", "0214_ops_inventory_catalog_staging.sql"));
-  assert.throws(() => buildArtifacts(missing, owner), /exact complete ordered 147-file chain/);
+  assert.throws(() => buildArtifacts(missing, owner), /exact complete reviewed chain/);
   const extra = fixture();
-  fs.writeFileSync(path.join(extra, "apps", "operations", "migrations", "0123_unreviewed.sql"), "-- unreviewed\n");
-  assert.throws(() => buildArtifacts(extra, owner), /exact complete ordered 187-file chain/);
+  fs.writeFileSync(path.join(extra, "apps", "operations", "migrations", "0191_unreviewed.sql"), "-- unreviewed\n");
+  assert.throws(() => buildArtifacts(extra, owner), /exact complete reviewed chain/);
 });
 
 test("rejects one-byte content drift in an ordinary canonical migration", () => {
@@ -123,6 +123,16 @@ test("rejects one-byte content drift in an ordinary canonical migration", () => 
   const file = path.join(base, "apps", "client", "migrations", "0003_delivery_platform.sql");
   fs.appendFileSync(file, " ");
   assert.throws(() => buildArtifacts(base, owner), /delivery canonical migration contents do not match the reviewed full-chain digest/);
+});
+
+test("rejects one-byte drift in each reviewed native project migration", () => {
+  for (const name of ["0188_client_hub_native_project_preparations.sql",
+    "0189_client_hub_native_project_uncertain_recovery.sql",
+    "0190_client_hub_native_project_preparation_authority.sql"]) {
+    const base = fixture();
+    fs.appendFileSync(path.join(base, "apps", "operations", "migrations", name), " ");
+    assert.throws(() => buildArtifacts(base, owner), /operations canonical migration contents do not match the reviewed full-chain digest/);
+  }
 });
 
 test("rejects one-byte content drift in either canonical seed before transformation", () => {
@@ -187,22 +197,43 @@ test("checked-in canonical 0002 migrations remain the reviewed source shapes", (
   assert.match(sourceOperations, /staff-beau-koltz/);
 });
 
-test("builds the complete checked-in 147/187 chains with both Client 0199 filenames", () => {
+test("builds the complete checked-in 147/190 chains with both Client 0199 filenames", () => {
   const base = fixture();
   const artifacts = buildArtifacts(base, owner);
   assert.equal(artifacts.delivery.files.length, 147);
-  assert.equal(artifacts.operations.files.length, 187);
+  assert.equal(artifacts.operations.files.length, 190);
   assert.deepEqual(artifacts.delivery.files.filter(({ name }) => name.startsWith("0199_")).map(({ name }) => name), [
     "0199_incoming_upload_pickup_lifecycle.sql", "0199_native_viewer_grants.sql",
   ]);
   assert.equal(artifacts.delivery.files.at(-1).name, "0228_operations_portal_native_content_start_audit.sql");
-  assert.equal(artifacts.operations.files.at(-1).name, "0187_operations_portal_native_delivery_literal_prefix_guard.sql");
-  assert.equal(artifacts.operations.files.at(-1).generatedSha256, artifacts.operations.files.at(-1).sourceSha256,
+  assert.equal(artifacts.operations.files.at(-1).name, "0190_client_hub_native_project_preparation_authority.sql");
+  const literalPrefixGuard = artifacts.operations.files.find(({ name }) => name === "0187_operations_portal_native_delivery_literal_prefix_guard.sql");
+  assert.equal(literalPrefixGuard.generatedSha256, literalPrefixGuard.sourceSha256,
     "bootstrap must preserve the literal-prefix guard migration byte-for-byte");
   assert.deepEqual(artifacts.delivery.manifest.transformedFiles, ["0002_seed_initial_staff.sql"]);
   assert.deepEqual(artifacts.operations.manifest.transformedFiles, ["0002_seed_acl.sql"]);
   assert.equal(artifacts.delivery.manifest.sourceChainSha256, "8a6cb183feae5ec6490cb4710f02a3289a05421786b9593e6392803a1e890f5c");
-  assert.equal(artifacts.operations.manifest.sourceChainSha256, "3e0f92864210aab88c97220e50649a46d4ec8d6367262ea8f42ca75ce17a8567");
+  assert.equal(artifacts.operations.manifest.sourceChainSha256, "7e6f75368c5aed14209b092e026458894c6509324c8fdbedcf96c8df2ac0f260");
+});
+
+test("accepts exact historical 187 and rejects partial 188 or 189 Operations chains", () => {
+  const historical = fixture();
+  for (const name of ["0188_client_hub_native_project_preparations.sql",
+    "0189_client_hub_native_project_uncertain_recovery.sql",
+    "0190_client_hub_native_project_preparation_authority.sql"])
+    fs.rmSync(path.join(historical, "apps", "operations", "migrations", name));
+  const artifact = buildArtifacts(historical, owner).operations;
+  assert.equal(artifact.files.length, 187);
+  assert.equal(artifact.files.at(-1).name, "0187_operations_portal_native_delivery_literal_prefix_guard.sql");
+  assert.equal(artifact.manifest.sourceChainSha256, "3e0f92864210aab88c97220e50649a46d4ec8d6367262ea8f42ca75ce17a8567");
+
+  for (const remove of [["0190_client_hub_native_project_preparation_authority.sql"],
+    ["0189_client_hub_native_project_uncertain_recovery.sql"],
+    ["0189_client_hub_native_project_uncertain_recovery.sql", "0190_client_hub_native_project_preparation_authority.sql"]]) {
+    const partial = fixture();
+    for (const name of remove) fs.rmSync(path.join(partial, "apps", "operations", "migrations", name));
+    assert.throws(() => buildArtifacts(partial, owner), /exact complete reviewed chain/);
+  }
 });
 
 const disposableTargets = (runId = "portal-home-20260928") => ({ runId, applications: {

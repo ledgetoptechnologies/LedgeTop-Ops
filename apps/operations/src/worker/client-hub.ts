@@ -29,6 +29,7 @@ import { registerProjectOperationalRoutes } from "./project-operational-routes";
 import { registerOrganizationOperationalContactRoutes } from "./organization-operational-contact-routes";
 import { organizationOperationalContactsAvailable } from "./organization-operational-contacts";
 import { readClientHubProjectManagementAction } from "./project-alpha-project-management";
+import { prepareClientHubNativeProject, submitClientHubNativeProject } from "./client-hub-native-project-management";
 import { exactBusinessProjectPublicId, listProjectAlphaContactRoles, projectAlphaContactRolesEnabled } from "./project-alpha-contact-roles";
 import { nativeDirectoryLinkedClientEditorRecords, nativeDirectoryProfileEditorRecord } from "./native-directory-profile-editor-record";
 import { nativeDirectoryProfileWritesEnabled } from "./native-directory-profile-routes";
@@ -376,6 +377,22 @@ export function registerClientHubRoutes(app: App): void {
     c.header("Cache-Control", "no-store");
     return c.json(result);
   });
+  for (const operation of ["prepare", "submit"] as const) app.post(
+    `/api/client-hub/sources/:sourceId/:rootNamespace/:kind/:publicId/project-management/native-projects/${operation}`,
+    async c => {
+      const kind = routeKind(c.req.param("kind"));
+      if (!kind) throw new HTTPException(404, { message: "Client not found" });
+      const principal = c.get("principal");
+      const context = await resolveDetailContext(c.env, principal, kind, c.req.param("publicId"),
+        c.req.param("sourceId"), c.req.param("rootNamespace"));
+      const body = await readBoundedJson(c.req.raw, 32 * 1024, `Client Hub native project ${operation}`);
+      const result = operation === "prepare"
+        ? await prepareClientHubNativeProject(c.env, c.req.raw, principal, context, body)
+        : await submitClientHubNativeProject(c.env, c.req.raw, principal, context, body);
+      await verifyContext(c.env, principal, context);
+      c.header("Cache-Control", "no-store");
+      return c.json(result);
+    });
   app.get("/api/client-hub/sources/:sourceId/:rootNamespace/:kind/:publicId/timeline", async c => {
     const kind = routeKind(c.req.param("kind"));
     if (!kind) throw new HTTPException(404, { message: "Client not found" });

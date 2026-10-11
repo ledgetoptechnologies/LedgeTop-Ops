@@ -9,8 +9,9 @@ const contextVersion = "client-context-one";
 function businessProjectsCard(page: Page) {
   return page.locator(".ltds-card").filter({ has: page.getByRole("heading", { name: "Business projects", exact: true }) });
 }
-function project(id: string) { return { id, row_key: `project:${id}`, name: `Project ${id}`, status: "active", manager_name: null,
-  start_date: null, end_date: null, created_at: "2026-08-28T12:00:00Z" }; }
+function project(id: string) { return { id, row_key: `project:${id}`, origin: "canonical" as const, name: `Project ${id}`,
+  description: null as string|null, status: "active", manager_name: null, start_date: null as string|null,
+  end_date: null as string|null, created_at: "2026-08-28T12:00:00Z" }; }
 function detail(projects: ReturnType<typeof project>[] = []) {
   return { client: { workspace_id: null, public_id: "42", kind: "organization", route_kind: "organizations", source_id: sourceId,
     source_name: "Business B", root_namespace: "business", pa_public_id: "external-org-42", detail_path: path, display_name: "Acme Construction",
@@ -23,7 +24,7 @@ function detail(projects: ReturnType<typeof project>[] = []) {
 function status(overrides: Record<string, unknown> = {}) {
   return { canonicalRoot: root, contextVersion, source: { sourceId, displayName: "Business B", state: "active" },
     availability: { available: true, reason: "available", explanation: "Create the authoritative project in Business B." },
-    action: { label: "Create project in Project Alpha", href: "https://alpha-business-b.example.test/projects", external: true },
+    action: { kind: "legacy_external_link", label: "Create project in Project Alpha", href: "https://alpha-business-b.example.test/projects", external: true },
     sync: { status: "healthy", lastAttemptAt: "2026-08-28T12:00:00Z", lastSuccessAt: "2026-08-28T12:00:00Z",
       explanation: "The latest Business B synchronization completed successfully.",
       refresh: { label: "Refresh synchronization status", href: management, method: "GET" }, requestSync: null }, ...overrides };
@@ -38,7 +39,10 @@ async function fixture(page: Page, managementHandler: (route: Route, request: Pl
       status: "Active", profileType: "Employee", isAdministrator: false, permissions: options.permissions ?? ["team.view"], divisions: [] },
       csrfToken: "csrf-project-management", timezone: "America/Chicago", mapStyleUrl: null, mapboxPublicToken: null, capabilities: {} } });
     if (url.pathname === detailBase) return route.fulfill({ json: (options.detail ?? (() => detail()))() });
-    if (url.pathname === `${detailBase}/project-management`
+    if (url.pathname === `${detailBase}/collections/businessProjects`) { const current=(options.detail ?? (()=>detail()))();
+      return route.fulfill({json:{items:current.businessProjects,canonicalRoot:root,contextVersion,
+        page:{available:true,reason:null,hasMore:false,nextCursor:null,limit:5,returned:current.businessProjects.length}}}); }
+    if (url.pathname === `${detailBase}/project-management` || url.pathname.startsWith(`${detailBase}/project-management/native-projects/`)
       || url.pathname === "/api/admin/integrations/project-alpha/sync"
       || /^\/api\/admin\/integrations\/project-alpha\/connectors\/[^/]+\/sync$/.test(url.pathname)) return managementHandler(route, request);
     return route.fulfill({ status: 503, json: { error: "Ancillary fixture endpoint unavailable" } });
@@ -132,11 +136,87 @@ test("unavailable and malformed project-management actions fail closed without l
   const region = businessProjectsCard(page);
   await expect(region).toContainText("The exact client identifier is unavailable.");
   await expect(region.getByRole("link", { name: /Create project/ })).toHaveCount(0);
-  response = status({ action: { label: "Create project in Project Alpha", href: "http://unsafe.example.test/create", external: true } });
+  response = status({ action: { kind: "legacy_external_link", label: "Create project in Project Alpha", href: "http://unsafe.example.test/create", external: true } });
   await region.getByRole("button", { name: "Refresh synchronization status" }).click();
   await expect(region.getByRole("alert")).toContainText("could not be verified");
   await expect(region.getByRole("link", { name: /Create project/ })).toHaveCount(0);
   expect(calls.filter(call => call.method !== "GET")).toHaveLength(0);
+});
+
+test("native creation freezes one exact request and retries it after an uncertain outcome", async ({ page }) => {
+  const prepare = `${management}/native-projects/prepare`, submit = `${management}/native-projects/submit`;
+  const commandId = "11111111-1111-4111-8111-111111111111", externalProjectId = "22222222-2222-4222-8222-222222222222";
+  const frozen = { sourceId, expectedApplicationId: "33333333-3333-4333-8333-333333333333", operation: "create",
+    scopes: [], local: { expectedLocalVersion: 0, expectedLocalProjectionSha256: null },
+    directory: { organizationRecordId: "42", clientRecordId: null }, command: { commandId, externalId: externalProjectId,
+      expectedAuthorizationGeneration: "7", project: { name: "Native project", description: null, estimatedStart: null, estimatedEnd: null },
+      organization: { externalId: "org-external", expectedPublicId: "a".repeat(32), expectedRevision: "9", expectedProjectionSha256: "b".repeat(64) }, client: null } };
+  const submissions: unknown[] = []; let attempts = 0;
+  await page.addInitScript(({ commandId, externalProjectId }) => {
+    let call = 0; Object.defineProperty(globalThis.crypto, "randomUUID", { configurable: true,
+      value: () => call++ === 0 ? commandId : externalProjectId });
+  }, { commandId, externalProjectId });
+  await fixture(page, async (route, request) => {
+    const url = new URL(request.url());
+    if (url.pathname === prepare) return route.fulfill({ json: { status: "prepared", request: frozen } });
+    if (url.pathname === submit) {
+      submissions.push(request.postDataJSON()); attempts += 1;
+      expect(request.headers()["idempotency-key"]).toBe(commandId);
+      return route.fulfill({ json: attempts === 1 ? { status: "uncertain", reason: "remote" }
+        : { status: "activated", commandId, externalProjectId } });
+    }
+    return route.fulfill({ json: status({ action: { kind: "native_create", label: "Create project", prepareHref: prepare,
+      submitHref: submit, external: false, scopeOptions: [[]] } }) });
+  });
+  await page.goto(path);
+  const region = businessProjectsCard(page);
+  await region.getByLabel("Project name").fill("Native project");
+  const prepareDialog = page.waitForEvent("dialog"), prepareClick = region.getByRole("button", { name: "Prepare project" }).click();
+  await (await prepareDialog).accept(); await prepareClick;
+  await expect(region.getByText(`Command reference: ${commandId}`)).toBeVisible();
+  const createDialog = page.waitForEvent("dialog"), createClick = region.getByRole("button", { name: "Create project", exact: true }).click();
+  await (await createDialog).accept(); await createClick;
+  await expect(region.getByRole("button", { name: "Retry exact request" })).toBeVisible();
+  await expect(region.getByLabel("Project name")).toBeDisabled();
+  await expect(region.getByRole("button", { name: "Cancel prepared request" })).toHaveCount(0);
+  await region.getByRole("button", { name: "Retry exact request" }).click();
+  await expect(region.getByRole("button", { name: "Prepare project" })).toBeVisible();
+  expect(submissions).toHaveLength(2); expect(submissions[1]).toEqual(submissions[0]);
+});
+
+test("native update preserves the selected canonical description, switches targets exactly, and clears selection after success", async ({ page }) => {
+  const first={...project("44444444-4444-4444-8444-444444444441"),name:"First canonical",description:"Keep first description"};
+  const second={...project("44444444-4444-4444-8444-444444444442"),name:"Second canonical",description:"Keep second description",
+    start_date:"2026-11-01",end_date:"2026-11-30"};
+  const prepare=`${management}/native-projects/prepare`,submit=`${management}/native-projects/submit`;
+  const commandId="55555555-5555-4555-8555-555555555555";
+  const frozen={sourceId,expectedApplicationId:"33333333-3333-4333-8333-333333333333",operation:"update",scopes:[],
+    local:{expectedLocalVersion:2,expectedLocalProjectionSha256:"b".repeat(64)},command:{commandId,externalId:second.id,
+      expectedAuthorizationGeneration:"7",expectedPublicId:"a".repeat(32),expectedRevision:"2",expectedProjectionSha256:"b".repeat(64),
+      project:{name:second.name,description:second.description,estimatedStart:second.start_date,estimatedEnd:second.end_date}}};
+  let preparedBody:Record<string,unknown>|null=null,submitted:unknown=null;
+  await page.addInitScript(commandId=>Object.defineProperty(globalThis.crypto,"randomUUID",{configurable:true,value:()=>commandId}),commandId);
+  await fixture(page,async(route,request)=>{const url=new URL(request.url());
+    if(url.pathname===prepare){preparedBody=request.postDataJSON();return route.fulfill({json:{status:"prepared",request:frozen}});}
+    if(url.pathname===submit){submitted=request.postDataJSON();return route.fulfill({json:{status:"activated",commandId,externalProjectId:second.id}});}
+    return route.fulfill({json:status({action:{kind:"native_create",label:"Create project",prepareHref:prepare,submitHref:submit,external:false,scopeOptions:[[]]}})});
+  },{detail:()=>detail([first,second])});
+  await page.goto(`${path}?business_status=current`);const region=businessProjectsCard(page);
+  await expect(region.getByText(first.name,{exact:true})).toBeVisible();
+  await region.getByRole("button",{name:"Update project"}).nth(0).click();
+  await expect(region.getByLabel("Description")).toHaveValue(first.description);
+  await region.getByRole("button",{name:"Update project"}).nth(1).click();
+  await expect(region.getByLabel("Project name")).toHaveValue(second.name);
+  await expect(region.getByLabel("Description")).toHaveValue(second.description);
+  const prepareDialog=page.waitForEvent("dialog"),prepareClick=region.getByRole("button",{name:"Prepare update"}).click();
+  await(await prepareDialog).accept();await prepareClick;
+  expect(preparedBody).toMatchObject({operation:"update",externalProjectId:second.id,project:{description:second.description}});
+  await expect(region.getByText(`Description: ${second.description}`)).toBeVisible();
+  const updateDialog=page.waitForEvent("dialog"),updateClick=region.getByRole("region",{name:"Project creation"}).getByRole("button",{name:"Update project",exact:true}).click();
+  await(await updateDialog).accept();await updateClick;
+  expect(submitted).toEqual({expectedContextVersion:contextVersion,request:frozen});
+  await expect(region.getByLabel("Action")).toHaveValue("create");
+  await expect(region.getByLabel("Description")).toHaveValue("");
 });
 
 test("an unenrolled exact-source connector is not presented as an unknown synchronization failure", async ({ page }) => {

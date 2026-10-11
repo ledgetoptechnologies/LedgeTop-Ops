@@ -1,4 +1,6 @@
-import { readFileSync, readdirSync } from "node:fs";
+import { mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve, sep } from "node:path";
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { Miniflare } from "miniflare";
@@ -75,6 +77,7 @@ const fixtures = [happy, stale, authority, keepOperations] as const;
 let runtime: Miniflare;
 let db: D1Database;
 let env: InboundProjectEnvironment;
+let persistenceDirectory: string | undefined;
 
 function connectionConfiguration() {
   return JSON.stringify({ version: 1, instances: { [sourceId]: {
@@ -282,17 +285,19 @@ function selection(fixture: ProjectFixture, idempotencyKey = fixture.proposalKey
 }
 
 beforeAll(async () => {
+  // Keep SQLite's database/WAL paths below Windows MAX_PATH in deep worktrees.
+  persistenceDirectory = mkdtempSync(join(tmpdir(), "pa-inbound-"));
   runtime = new Miniflare({
     modules: true,
     compatibilityDate: "2026-08-06",
     script: "export default { fetch() { return new Response('local test'); } }",
     d1Databases: { OPS_DB: `inbound-reconciliation-${randomUUID()}` },
-    d1Persist: "./.tmp-checks/inbound-reconciliation-e2e",
+    d1Persist: persistenceDirectory,
   });
   db = await runtime.getD1Database("OPS_DB") as D1Database;
   const directory = new URL("../migrations/", import.meta.url);
   const files = readdirSync(directory).filter(file => /^\d{4}_.*\.sql$/.test(file)).sort();
-  expect(files.at(-1)).toBe("0187_operations_portal_native_delivery_literal_prefix_guard.sql");
+  expect(files.at(-1)).toBe("0190_client_hub_native_project_preparation_authority.sql");
   for (const file of files) {
     try {
       await migrate(file);
@@ -307,7 +312,16 @@ beforeAll(async () => {
   env = { OPS_DB: db, PROJECT_ALPHA_API_V2_CONNECTIONS: connectionConfiguration() };
 }, 180_000);
 
-afterAll(async () => { await runtime?.dispose(); });
+afterAll(async () => {
+  await runtime?.dispose();
+  if (persistenceDirectory) {
+    const target = resolve(persistenceDirectory);
+    const prefix = `${resolve(tmpdir())}${sep}pa-inbound-`;
+    if (!target.startsWith(prefix) || target.slice(prefix.length).includes(sep))
+      throw new Error("Refusing unexpected test persistence cleanup target");
+    rmSync(target, { recursive: true, force: true });
+  }
+});
 
 describe("PA-origin inbound project edit end-to-end on migrated Miniflare D1", () => {
   it("proposes, reviews, accepts, and replays without changing mapping, outbox, public-link, or financial state",

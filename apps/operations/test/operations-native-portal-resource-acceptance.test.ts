@@ -164,7 +164,7 @@ async function activateProjectAlphaProject() {
   const environment = { OPS_DB: operations, PROJECT_ALPHA_API_V2_CONNECTIONS: projectAlphaConnections };
   const mismatchedCommandId = id();
   const mismatchedAction = { ...action, command: { ...action.command, commandId: mismatchedCommandId,
-    organization: { ...action.command.organization, externalId: organization } } };
+    organization: { ...action.command.organization!, externalId: organization } } } satisfies ProjectAlphaProjectV2CommandProducerAction;
   await expect(planProjectAlphaProjectV2Command(environment, mismatchedAction))
     .resolves.toEqual({ status: "blocked", reason: "directory" });
   await expect(Promise.all([

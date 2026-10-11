@@ -23,6 +23,7 @@ describe("project v2 canonical activation import graph", () => {
     const privateAdminUrl = new URL("project-alpha-private-admin-routes.ts", worker);
     const privateAdmin = privateAdminUrl.pathname;
     const finalizerUrl = new URL("project-alpha-project-adoption-finalizer.ts", worker);
+    const clientHubNativeManagement = new URL("client-hub-native-project-management.ts", worker).pathname;
     const acceptedImports = new Map<string, ReadonlySet<string>>([
       [acceptance, new Set([
       "project-alpha-project-v2-command-producer",
@@ -39,6 +40,12 @@ describe("project v2 canonical activation import graph", () => {
         "project-alpha-project-read-settlement-adapter",
         "project-alpha-project-canonical-activation-adapter",
         "project-alpha-project-v2-pending-dispatcher",
+      ])],
+      [clientHubNativeManagement, new Set([
+        "project-alpha-project-v2-command-producer",
+        "project-alpha-project-v2-pending-dispatcher",
+        "project-alpha-project-read-settlement-adapter",
+        "project-alpha-project-canonical-activation-adapter",
       ])],
     ]);
     const offenders = files(worker).filter(file => !adapters.has(file.pathname)).flatMap(file => {
@@ -71,10 +78,10 @@ describe("project v2 canonical activation import graph", () => {
     expect(module.activateProjectAlphaProjectV2Canonical.length).toBe(2);
   });
 
-  it("keeps the command producer private and without a transport argument", async () => {
+  it("keeps the command producer private and accepts only an optional atomic admission statement", async () => {
     const module = await import("../src/worker/project-alpha-project-v2-command-producer");
     expect(Object.keys(module)).toEqual(["planProjectAlphaProjectV2Command"]);
-    expect(module.planProjectAlphaProjectV2Command.length).toBe(2);
+    expect(module.planProjectAlphaProjectV2Command.length).toBe(3);
   });
 
   it("keeps the queued dispatcher private and requires an injected transport", async () => {
