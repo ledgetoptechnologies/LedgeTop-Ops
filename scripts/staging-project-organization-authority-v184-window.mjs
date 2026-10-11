@@ -105,13 +105,25 @@ export function readProjectOrganizationPrivateArtifact(root, filename, compile =
 
 async function lineage(db, artifacts) {
   const p = artifacts.provisionArtifact, r = artifacts.revokeArtifact, staff = RELATIONSHIP_RECOVERY_AUTHORITY_TARGET_V2.staffId;
+  const before = r.input.generation.generation, ids = r.input.approval.grantIds;
+  const history = await all(db, "SELECT * FROM native_directory_grant_history WHERE staff_id=? AND grant_generation<=? ORDER BY grant_generation,grant_id,grant_version", staff, before + ids.length);
+  const closedGrants = r.input.grants.map(grant => ids.includes(grant.id) ? { ...grant, active: 0 } : grant).sort((a, b) => a.id.localeCompare(b.id));
   return {
     ...artifacts,
     approvals: await all(db, "SELECT * FROM native_staff_bootstrap_approvals WHERE approval_id IN (?,?) ORDER BY approval_id", p.approval.approval_id, r.approval.approval_id),
     receipts: await all(db, "SELECT * FROM native_staff_bootstrap_receipts WHERE command_id IN (?,?) ORDER BY command_id", p.receipt.command_id, r.receipt.command_id),
-    directoryGrants: await all(db, "SELECT * FROM native_directory_grants WHERE staff_id=? ORDER BY id", staff),
-    directoryGrantHistory: await all(db, "SELECT * FROM native_directory_grant_history WHERE staff_id=? ORDER BY grant_generation,grant_id,grant_version", staff),
-    directoryGrantGeneration: await first(db, "SELECT * FROM native_directory_grant_generations WHERE staff_id=?", staff),
+    directoryGrants: closedGrants,
+    directoryGrantHistory: history,
+    directoryGrantGeneration: { staff_id: staff, generation: before + ids.length, updated_at: history.at(-1)?.recorded_at },
+  };
+}
+
+async function currentDirectory(db) {
+  const staff = RELATIONSHIP_RECOVERY_AUTHORITY_TARGET_V2.staffId;
+  return {
+    grants: await all(db, "SELECT * FROM native_directory_grants WHERE staff_id=? ORDER BY id", staff),
+    history: await all(db, "SELECT * FROM native_directory_grant_history WHERE staff_id=? ORDER BY grant_generation,grant_id,grant_version", staff),
+    generation: await first(db, "SELECT * FROM native_directory_grant_generations WHERE staff_id=?", staff),
   };
 }
 
@@ -136,18 +148,20 @@ async function clock(db) {
 async function buildProvision(db, recovery, root, deps) {
   const state = await (deps.snapshot ?? projectSnapshot)(db);
   const closed = await (deps.lineage ?? lineage)(db, recovery);
+  const directory = await (deps.currentDirectory ?? currentDirectory)(db);
   const now = await (deps.clock ?? clock)(db), uuid = deps.randomUUID ?? crypto.randomUUID;
   const reusable = state.projectGrants.filter(grant => grant.capability === "project.shared.sync" && grant.effect === "allow"
     && grant.scope_kind === "business_area" && grant.business_area_id === PROJECT_ORGANIZATION_AUTHORITY_V184_TARGET.businessAreaId
     && grant.division_id === null && grant.external_project_id === null);
   if (reusable.length > 1 || reusable.some(grant => grant.active !== 0)) fail("exact inactive project grant identity required");
   const input = {
-    schemaVersion: 2,
+    schemaVersion: 3,
     purpose: PROJECT_ORGANIZATION_AUTHORITY_V184_PURPOSE,
     staging: STAGING_TARGET,
     ...state,
     target: PROJECT_ORGANIZATION_AUTHORITY_V184_TARGET,
     recoveryLineage: closed,
+    currentDirectory: directory,
     approval: {
       provisionApprovalId: uuid(), provisionCommandId: uuid(), revokeApprovalId: uuid(),
       revokeCommandId: uuid(), grantId: reusable[0]?.id ?? uuid(), issuedAt: now,
@@ -216,7 +230,9 @@ export async function closeProjectOrganizationAuthorityV184(config, projectProvi
       receipt: await first(db, "SELECT * FROM native_staff_bootstrap_receipts WHERE command_id=?", ids.provisionCommandId),
       grant: await first(db, "SELECT * FROM native_project_grants WHERE id=?", ids.grantId),
     };
-    const artifact = (deps.compile ?? compileProjectOrganizationAuthorityV184)({ ...input, provisionReadback }, { root });
+    const cleanupCurrentDirectory = input.schemaVersion === 3 ? await (deps.currentDirectory ?? currentDirectory)(db) : undefined;
+    const artifact = (deps.compile ?? compileProjectOrganizationAuthorityV184)({ ...input, provisionReadback,
+      ...(cleanupCurrentDirectory ? { cleanupCurrentDirectory } : {}) }, { root });
     const write = deps.writeEvidence ?? writeProjectOrganizationPrivateEvidence;
     const saved = write(root, prior.directory, "revoke.json", artifact);
     if (!saved) fail("private revoke artifact save failed");
@@ -258,7 +274,10 @@ async function atomicReconciliationSnapshot(db, artifact, phase) {
   const rows = index => results[index].results, one = index => rows(index).length === 1 ? rows(index)[0] : rows(index).length === 0 ? null : fail("non-unique reconciliation row");
   return {
     current: { migrationNames: rows(0).map(row => row.name), staff: one(1), roles: rows(2), admission: one(3), profile: one(4), businessArea: one(5), projectGeneration: one(6), projectGrants: rows(7) },
-    currentLineage: { provisionArtifact: recoveryProvision, revokeArtifact: recoveryRevoke, approvals: rows(8), receipts: rows(9), directoryGrants: rows(10), directoryGrantHistory: rows(11), directoryGrantGeneration: one(12) },
+    currentLineage: { provisionArtifact: recoveryProvision, revokeArtifact: recoveryRevoke, approvals: rows(8), receipts: rows(9),
+      directoryGrants: input.recoveryLineage.directoryGrants, directoryGrantHistory: input.recoveryLineage.directoryGrantHistory,
+      directoryGrantGeneration: input.recoveryLineage.directoryGrantGeneration },
+    currentDirectory: { grants: rows(10), history: rows(11), generation: one(12) },
     selectedApproval: one(13), selectedReceipt: one(14), provisionApproval: one(15), provisionReceipt: one(16),
   };
 }
@@ -266,14 +285,16 @@ async function atomicReconciliationSnapshot(db, artifact, phase) {
 async function exactUntouched(db, artifact, phase, deps) {
   const input = artifact.input, ids = input.approval;
   const state = await (deps.reconciliationSnapshot ?? atomicReconciliationSnapshot)(db, artifact, phase);
-  const { current, currentLineage, selectedApproval, selectedReceipt, provisionApproval, provisionReceipt } = state;
+  const { current, currentLineage, currentDirectory, selectedApproval, selectedReceipt, provisionApproval, provisionReceipt } = state;
   const expectedGrants = phase === "provision" ? input.projectGrants
     : [...input.projectGrants.filter(grant => grant.id !== input.approval.grantId), input.provisionReadback.grant].sort((a, b) => a.id.localeCompare(b.id));
   const expectedGeneration = { ...input.projectGeneration, generation: input.projectGeneration.generation + (phase === "revoke" ? 1 : 0) };
   const staticState = ["migrationNames", "staff", "roles", "admission", "profile", "businessArea"]
     .every(key => same(current[key], input[key]));
   return staticState && same(current.projectGrants, expectedGrants) && same(current.projectGeneration, expectedGeneration)
-    && same(currentLineage, input.recoveryLineage) && selectedApproval === null && selectedReceipt === null
+    && same(currentLineage, input.recoveryLineage)
+    && (input.schemaVersion !== 3 || same(currentDirectory, input.cleanupCurrentDirectory ?? input.currentDirectory))
+    && selectedApproval === null && selectedReceipt === null
     && (phase === "provision" || same(provisionApproval, input.provisionReadback.approval)
       && same(provisionReceipt, input.provisionReadback.receipt));
 }

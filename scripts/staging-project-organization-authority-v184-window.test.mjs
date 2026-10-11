@@ -46,10 +46,12 @@ function context(root, extra = {}) {
     withBinding: async (_config, callback) => callback({ db, target: STAGING_TARGET }),
     readRecovery: () => ({ provisionArtifact: {}, revokeArtifact: {} }),
     lineage: async () => ({ provisionArtifact: {}, revokeArtifact: {}, approvals: [], receipts: [], directoryGrants: [], directoryGrantHistory: [], directoryGrantGeneration: {} }),
+    currentDirectory: async () => ({ grants: [], history: [], generation: {} }),
     snapshot: async () => structuredClone(state.snapshot), clock: async () => "2026-10-10T12:00:00.000Z",
     randomUUID: () => ids[uuid++], compile: compiled,
     reconciliationSnapshot: async (_db, artifact, phase) => ({
       current: structuredClone(state.snapshot), currentLineage: structuredClone(artifact.input.recoveryLineage),
+      currentDirectory: structuredClone(artifact.input.currentDirectory),
       selectedApproval: state.approval, selectedReceipt: state.receipt,
       provisionApproval: phase === "revoke" ? state.approval : null,
       provisionReceipt: phase === "revoke" ? state.receipt : null,
@@ -72,7 +74,7 @@ test("prepare is read-only and freezes five distinct identifiers", async () => {
     const result = await prepare("config", "recovery-provision", "recovery-revoke", deps);
     assert.equal(result.mode, "prepare-readonly");
     assert.equal(result.mutationsPerformed, false);
-    assert.equal(result.artifact.input.schemaVersion, 2);
+    assert.equal(result.artifact.input.schemaVersion, 3);
     assert.equal(new Set(Object.values(result.artifact.input.approval).slice(0, 5)).size, 5);
     assert.equal(PROJECT_ORGANIZATION_APPROVAL_WINDOW_MS, 600_000);
     assert.equal(Date.parse(result.artifact.input.approval.expiresAt)
@@ -143,6 +145,25 @@ test("reconcile reports exact committed, exact untouched, and rejects ambiguity"
     setup.deps.reconcile = async () => null;
     setup.state.snapshot.profile = { drift: true };
     await assert.rejects(reconcile("config", opened.artifactPath, setup.deps), /manual review required/);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("legacy schema reconciliation retains exact untouched compatibility", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "project-org-legacy-reconcile-"));
+  try {
+    const { deps } = context(root);
+    deps.reconcile = async () => null;
+    const artifact = compiled({ schemaVersion: 2, ...snapshot, recoveryLineage: {}, approval: {
+      provisionApprovalId: ids[0], provisionCommandId: ids[1], revokeApprovalId: ids[2],
+      revokeCommandId: ids[3], grantId: ids[4], issuedAt: "2026-10-10T12:00:00.000Z",
+      expiresAt: "2026-10-10T12:10:00.000Z",
+    } });
+    const directory = path.join(root, ".backups", "staging-native-authority", ids[0]);
+    fs.mkdirSync(directory, { recursive: true });
+    const filename = path.join(directory, "provision.json");
+    fs.writeFileSync(filename, JSON.stringify(artifact));
+    const result = await reconcile("config", filename, deps);
+    assert.equal(result.status, "not-committed");
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
