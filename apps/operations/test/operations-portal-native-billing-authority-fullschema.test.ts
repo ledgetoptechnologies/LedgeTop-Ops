@@ -3,6 +3,10 @@ import { runCanonicalPortalResourceAcceptance, type CanonicalPortalAcceptanceCon
   "./helpers/operations-native-portal-resource-acceptance-fixture";
 import { manageOperationsPortalNativeBillingPermission } from
   "../src/worker/operations-portal-native-billing-permission-issuer";
+import { readClientPortalNativeFinancialDocuments } from
+  "../src/worker/client-portal-native-financial-reader";
+import { resolveTrustedNativeFinancialMapping } from "../src/worker/project-alpha-financial-mapping";
+import { persistProjectAlphaProjectInventoryPage } from "../src/worker/project-alpha-v2-sync";
 
 type Row = Record<string, string | number | null>;
 const required = async (db: D1Database, sql: string, ...values: unknown[]) => {
@@ -142,6 +146,46 @@ async function proveProjectBillingLifecycle(context: CanonicalPortalAcceptanceCo
     .bind(grantId,bindingId,externalProject,finalizationId,operationId,operationId).run();
   expect(await db.prepare(`SELECT native_entity_id FROM operations_portal_native_billing_live_authority
     WHERE grant_id=?`).bind(grantId).first("native_entity_id")).toBe(externalProject);
+  const financialRequest={protocolVersion:1 as const,authorityId:workspace.clientAuthorityId,
+    workspaceId:workspace.workspaceId,ownershipEpoch:integer(workspaceHead,"ownership_epoch"),
+    grantRevision:integer(recipientHead,"grant_revision"),issuer:context.issuer,subject:context.subject,grantId};
+  const financialEnv={OPS_DB:db,PROJECT_ALPHA_API_V2_CONNECTIONS:context.projectAlphaConnections,
+    CLIENT_PORTAL_NATIVE_FINANCIAL_RPC_ENABLED:"true"};
+  const currentProject=await required(db,`SELECT project_alpha_public_id,pa_revision,canonical_projection_sha256,archived
+    FROM operations_shared_projects WHERE external_project_id=?`,externalProject);
+  const observationRequest=id();
+  await expect(persistProjectAlphaProjectInventoryPage(db,context.sourceId,{apiVersion:"2",sourceInstanceId:context.sourceInstanceId,
+    applicationId:context.applicationId,historyEpoch:context.historyEpochId,requestId:observationRequest,
+    authorizationGeneration:"11",projects:[{externalId:externalProject,
+      publicId:text(currentProject,"project_alpha_public_id"),revision:text(currentProject,"pa_revision"),
+      projectionSha256:text(currentProject,"canonical_projection_sha256"),status:"active",
+      archived:integer(currentProject,"archived")===1}],nextCursor:null},null)).resolves.toMatchObject({status:"persisted"});
+  const financialMapping=await resolveTrustedNativeFinancialMapping(financialEnv,
+    {kind:"project",externalProjectId:externalProject});
+  expect(financialMapping).not.toBeNull();
+  if(!financialMapping) throw new Error("canonical project financial mapping missing");
+  let financialCalls=0;
+  const financialRemote=async(input:RequestInfo|URL,init?:RequestInit)=>{
+    financialCalls+=1;
+    const url=new URL(String(input)),headers=new Headers(init?.headers);
+    expect(url.pathname).toBe("/api/v2/financial-documents");
+    expect(headers.get("Authorization")).toBe("Bearer acceptance-private-key");
+    const requestId=`a1000000-0000-4000-8000-${String(financialCalls).padStart(12,"0")}`;
+    const selector={kind:financialMapping.kind,externalId:financialMapping.externalId,publicId:financialMapping.publicId,
+      revision:financialMapping.revision,projectionSha256:financialMapping.projectionSha256,
+      authorizationGeneration:financialMapping.authorizationGeneration};
+    return new Response(JSON.stringify({apiVersion:"2",sourceInstanceId:context.sourceInstanceId,
+      applicationId:context.applicationId,historyEpoch:context.historyEpochId,requestId,selector,
+      snapshot:{sha256:"b".repeat(64),documentCount:1},documents:[{publicId:"80000000000000000000000000000001",
+        kind:"contract",status:"pending",currency:"USD",total:"0.00",amountPaid:null,balanceDue:null,
+        documentUrl:"https://pa.example.test/?page=public-doc&token=abcdefghijklmnop",
+        actionUrl:"https://pa.example.test/?page=public-doc&token=abcdefghijklmnop"}],nextCursor:null}),
+      {headers:{"Content-Type":"application/json","Cache-Control":"no-store","X-Request-ID":requestId}});
+  };
+  const financial=await readClientPortalNativeFinancialDocuments(financialEnv,financialRequest,financialRemote as typeof fetch);
+  expect(financial.status).toBe("ok");
+  if(financial.status==="ok") expect(financial.value.documents).toEqual([expect.objectContaining({kind:"contract",status:"pending"})]);
+  expect(financialCalls).toBe(1);
   await context.advanceProject();
   expect(await db.prepare(`SELECT native_entity_id FROM operations_portal_native_billing_live_authority
     WHERE grant_id=?`).bind(grantId).first("native_entity_id")).toBeNull();

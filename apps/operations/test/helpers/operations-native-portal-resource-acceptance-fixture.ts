@@ -357,6 +357,7 @@ export type CanonicalPortalAcceptanceContext={runtime:Miniflare;operations:D1Dat
  publication:{operationId:string;targetId:string;publicationRevision:number;sourceSequence:number;snapshotId:string;snapshotSha256:string;state:string;replayed:boolean};
  recipient:{state:string;recipientBindingId:string|null};
  sourceId:string;sourceInstanceId:string;applicationId:string;historyEpochId:string;id:()=>string;issuer:string;subject:string;
+ projectAlphaConnections:string;
  advanceProject:()=>Promise<void>};
 
 export async function runCanonicalPortalResourceAcceptance(onReady?:(context:CanonicalPortalAcceptanceContext)=>Promise<void>,
@@ -556,7 +557,8 @@ export async function runCanonicalPortalResourceAcceptance(onReady?:(context:Can
     
       await onReady?.({ runtime, operations, client, bucket, owner: owner(), organization, clientRecord,
         externalProject, projectPublicId, workspace, publication, recipient: home, sourceId, sourceInstanceId,
-    applicationId, historyEpochId, id, issuer, subject, advanceProject:advanceCanonicalProject });
+    applicationId, historyEpochId, id, issuer, subject, projectAlphaConnections,
+    advanceProject:advanceCanonicalProject });
   if(options?.stopAfterReady)return;
     
     const candidate = (await listOperationsPortalNativeDeliveryCandidates(operations,
