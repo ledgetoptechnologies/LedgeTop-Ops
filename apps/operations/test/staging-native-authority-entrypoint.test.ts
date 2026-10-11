@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { exactNativeStagingConfiguration } from "../src/worker/staging-native-authority-policy";
+import { exactNativeStagingConfiguration, exactNativeBillingStagingConfiguration } from "../src/worker/staging-native-authority-policy";
 
 type NativeEnv = Parameters<typeof exactNativeStagingConfiguration>[1];
 const exact = {
@@ -17,6 +17,22 @@ const exact = {
 } as NativeEnv;
 
 describe("staging native authority entrypoint", () => {
+  it("keeps billing management separately default-off and staging-only", () => {
+    const request = new Request("https://ops-staging.ledgetopdroneservices.com/api/native-client-portal/operations-billing-authority/session");
+    expect(exactNativeBillingStagingConfiguration(request, exact)).toBe(false);
+    const enabled = { ...exact, OPERATIONS_PORTAL_NATIVE_BILLING_OWNER_ENABLED: "true" };
+    expect(exactNativeBillingStagingConfiguration(request, enabled)).toBe(true);
+    for (const override of [
+      { OPERATIONS_PORTAL_NATIVE_BILLING_OWNER_ENABLED: "false" },
+      { OPERATIONS_PORTAL_NATIVE_BILLING_OWNER_ENABLED: "TRUE" },
+      { ENVIRONMENT: "production" },
+      { PUBLIC_BASE_URL: "https://ops.ledgetopdroneservices.com" },
+      { OPERATIONS_PORTAL_NATIVE_RECIPIENT_AUTHORITY: undefined },
+    ]) expect(exactNativeBillingStagingConfiguration(request, { ...enabled, ...override })).toBe(false);
+    expect(exactNativeBillingStagingConfiguration(new Request(
+      "https://ops.ledgetopdroneservices.com/api/native-client-portal/operations-billing-authority/session",
+    ), enabled)).toBe(false);
+  });
   it("admits only the exact HTTPS Operations staging configuration", () => {
     const request = new Request("https://ops-staging.ledgetopdroneservices.com/api/native-client-portal/operations-delivery-authority/session");
     expect(exactNativeStagingConfiguration(request, exact)).toBe(true);

@@ -13,6 +13,7 @@ export type NativeStagingAdmissionEnv = Readonly<{
   OPERATIONS_PORTAL_NATIVE_DELIVERY_AUTHORITY_DISPATCH_ENABLED?: string;
   OPERATIONS_PORTAL_NATIVE_DELIVERY_AUTHORITY?: unknown;
   OPERATIONS_PORTAL_NATIVE_DELIVERY_READER_ENABLED?: string;
+  OPERATIONS_PORTAL_NATIVE_BILLING_OWNER_ENABLED?: string;
 }>;
 
 export function exactNativeStagingConfiguration(request: Request, env: NativeStagingAdmissionEnv): boolean {
@@ -27,4 +28,10 @@ export function exactNativeStagingConfiguration(request: Request, env: NativeSta
     && env.OPERATIONS_PORTAL_NATIVE_DELIVERY_AUTHORITY_DISPATCH_ENABLED === "true"
     && Boolean(env.OPERATIONS_PORTAL_NATIVE_DELIVERY_AUTHORITY)
     && env.OPERATIONS_PORTAL_NATIVE_DELIVERY_READER_ENABLED === "true";
+}
+
+/** Financial disclosure remains separate from recipient enrollment and file access. */
+export function exactNativeBillingStagingConfiguration(request: Request, env: NativeStagingAdmissionEnv): boolean {
+  return exactNativeStagingConfiguration(request, env)
+    && env.OPERATIONS_PORTAL_NATIVE_BILLING_OWNER_ENABLED === "true";
 }
