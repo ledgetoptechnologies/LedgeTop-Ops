@@ -43,7 +43,7 @@ function settledState(packet, phase, state) {
     || Date.parse(provisionReceipt.executed_at) >= expires) fail("provision receipt chronology or identity mismatch");
   const provisionApproval = state.approvals.find(row => row.approval_id === approval.provisionApprovalId);
   const grant = state.grants.find(row => row.id === approval.grantId);
-  const reused = input.schemaVersion === 2 ? input.projectGrants.find(row => row.id === approval.grantId) : null;
+  const reused = [2, 3].includes(input.schemaVersion) ? input.projectGrants.find(row => row.id === approval.grantId) : null;
   if (!grant || !timestamp(grant.created_at) || (reused ? grant.created_at !== reused.created_at
     : Date.parse(grant.created_at) < issued || Date.parse(grant.created_at) > Date.parse(provisionReceipt.executed_at))) fail("grant creation chronology mismatch");
   const active = phase === "provision" ? 1 : 0;
