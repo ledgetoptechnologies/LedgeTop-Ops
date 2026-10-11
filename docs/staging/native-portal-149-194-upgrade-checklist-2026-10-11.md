@@ -19,6 +19,10 @@ Status: preparation only. No migration or deployment is authorized by this docum
 - Do not use the historical `0188–0190` runner or its markers for this upgrade. Its old revision, CI, source hashes, and ledger assumptions are intentionally incompatible.
 - On an uncertain apply response, inspect the existing attempt and provider state. Never automatically retry, remove the marker, edit migration history, or manually delete a grant to make a test pass.
 
+The reviewed paired runner is `scripts/staging-native-portal-149-194-migrations.mjs` (local commit `ccf33552`). Its explicit interface is `node scripts/staging-native-portal-149-194-migrations.mjs <client|operations> <preflight|backup|apply|reconcile>`. Execute each mode separately and inspect its result. Operations requires independently verified Client 149 even for its preflight; it cannot be used to skip Client-first ordering. The first successful live Client preflight reported exactly 0229/0230 pending and `mutationsPerformed:false`. No backup or apply has run yet.
+
+The runner compares every application table while excluding the migration ledger and Cloudflare-owned `_cf_KV` data. The latter rejects access with `SQLITE_AUTH`; do not retry or bypass that boundary. Its schema remains checked for preservation. Final schema modeling has passed genuine local SQLite tests for both suffixes, including the Client heads-table rename and the exact Operations permission-definition insertion, which grants no role or user authority.
+
 ## Deployment and activation order
 
 - Build from the final clean revision and record exact artifact hashes and CI results. Historical `f4959748` upload/promotion evidence is not proof for a new candidate.
