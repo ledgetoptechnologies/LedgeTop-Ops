@@ -250,16 +250,17 @@ describe("Project v2 recovery authorization migration", () => {
     const recoveryIndex = migrationFiles.indexOf(recoveryMigration);
     expect(recoveryIndex).toBeGreaterThanOrEqual(0);
     expect(migrationFiles.slice(recoveryIndex, recoveryIndex + recoverySequence.length)).toEqual(recoverySequence);
-    expect(migrationFiles).toHaveLength(195);
+    expect(migrationFiles).toHaveLength(196);
     expect(migrationFiles.map(name => name.slice(0, 4))).toEqual(
-      Array.from({ length: 195 }, (_, index) => String(index + 1).padStart(4, "0")),
+      Array.from({ length: 196 }, (_, index) => String(index + 1).padStart(4, "0")),
     );
-    expect(migrationFiles.slice(-5)).toEqual([
+    expect(migrationFiles.slice(-6)).toEqual([
       "0191_operations_portal_native_billing_authority.sql",
       "0192_ops_service_definition_authority.sql",
       "0193_operations_portal_native_delivery_dead_conflict_recovery.sql",
       "0194_operations_portal_native_delivery_terminal_cancellations.sql",
       "0195_client_hub_native_project_current_owner_observation.sql",
+      "0196_native_directory_maintenance_authority.sql",
     ]);
     const db = new DatabaseSync(":memory:");
     db.exec("PRAGMA foreign_keys=ON");

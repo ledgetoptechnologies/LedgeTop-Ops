@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { lstatSync, readFileSync } from "node:fs";
+import { lstatSync, readFileSync, readdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 // Test artifact contracts are JavaScript modules without declarations.
@@ -51,7 +51,7 @@ function sha256(value: string | Uint8Array): string {
  * names and every source byte must match the immutable bootstrap contract.
  */
 function reviewedMigrationNames(directory: URL, application: "delivery" | "operations",
-  initial: readonly string[]): readonly string[] {
+  initial: readonly string[], rejectExtras: boolean): readonly string[] {
   const names = [...initial, ...REQUIRED_STAGING_MIGRATIONS[application]] as string[];
   const contract = BOOTSTRAP_APPS[application] as {
     migrationCount: number;
@@ -61,6 +61,14 @@ function reviewedMigrationNames(directory: URL, application: "delivery" | "opera
   if (names.length !== contract.migrationCount || new Set(names).size !== names.length
     || sha256(names.join("\n")) !== contract.migrationNamesSha256) {
     throw new Error(`reviewed-${application}-migration-name-contract-mismatch`);
+  }
+  if (rejectExtras) {
+    const physical = readdirSync(fileURLToPath(directory), { withFileTypes: true })
+      .filter(entry => /^\d{4}_.+\.sql$/.test(entry.name));
+    if (physical.some(entry => !entry.isFile() || entry.isSymbolicLink())
+      || JSON.stringify(physical.map(entry => entry.name).sort()) !== JSON.stringify(names)) {
+      throw new Error(`reviewed-${application}-migration-physical-inventory-mismatch`);
+    }
   }
   const contents = names.map(name => {
     const url = new URL(name, directory), path = fileURLToPath(url);
@@ -76,10 +84,10 @@ function reviewedMigrationNames(directory: URL, application: "delivery" | "opera
   return names;
 }
 
-export function reviewedOperationsMigrationNames(directory: URL): readonly string[] {
-  return reviewedMigrationNames(directory, "operations", initialOperationsMigrations);
+export function reviewedOperationsMigrationNames(directory: URL, { rejectExtras = true }: Readonly<{ rejectExtras?: boolean }> = {}): readonly string[] {
+  return reviewedMigrationNames(directory, "operations", initialOperationsMigrations, rejectExtras);
 }
 
 export function reviewedClientMigrationNames(directory: URL): readonly string[] {
-  return reviewedMigrationNames(directory, "delivery", initialClientMigrations);
+  return reviewedMigrationNames(directory, "delivery", initialClientMigrations, true);
 }

@@ -13,7 +13,7 @@ import {migrateProjectOrganizationFullSchema as migrate} from "./staging-project
 
 const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),".."),requireOperations=createRequire(path.join(root,"apps/operations/package.json"));
 const {Miniflare}=requireOperations("miniflare"),migrationDir=path.join(root,"apps/operations/migrations");
-const migrationNames=fs.readdirSync(migrationDir).filter(name=>/^\d{4}_.+\.sql$/.test(name)).sort();
+const migrationNames=fs.readdirSync(migrationDir).filter(name=>/^\d{4}_.+\.sql$/.test(name)&&name.slice(0,4)<="0195").sort();
 const CANONICAL_BOOTSTRAP_MIGRATION_COUNT=195;
 const CANONICAL_BOOTSTRAP_FINAL_MIGRATION="0195_client_hub_native_project_current_owner_observation.sql";
 const all=async(db,sql,...params)=>(await db.prepare(sql).bind(...params).all()).results;

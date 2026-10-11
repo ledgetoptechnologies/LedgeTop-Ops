@@ -40,7 +40,7 @@ export const NATIVE_MIGRATION_PROFILES = Object.freeze({
     baseNamesSha256: "46d20b48362be8052f5b2fd35ec4ccefee2c267476a2a076af87a955c4cfca3a",
     baseContentsSha256: "cd35de12e87325fb6de854f4ecba47e5172e115f75830af9f4a908710d10a450",
     remoteBaseline: "0183_project_alpha_binding_standalone_relationship_rows.sql",
-    finalMigration: "0195_client_hub_native_project_current_owner_observation.sql",
+    finalMigration: "0196_native_directory_maintenance_authority.sql",
     candidates: Object.freeze({
       "0174_project_alpha_directory_preserved_external_identity.sql": "9e794a73b75e025edc04967888631b9336931eb16113f42d855bea3fcb30a158",
       "0175_operations_directory_acquired_parent_enrollment_identity.sql": "de022736243342f203fcf9a1cb22993e49c50bbb18c7b3b2fc95d8fb3fa48ed0",
@@ -64,8 +64,24 @@ export const NATIVE_MIGRATION_PROFILES = Object.freeze({
       "0193_operations_portal_native_delivery_dead_conflict_recovery.sql": "2454b60512fa5aec38942d9bd62338f753b527c2e4319e6e7e391509f59bfa56",
       "0194_operations_portal_native_delivery_terminal_cancellations.sql": "75a8852921ff81e2926c97acc1636a38fc7dae13b45e653cceda93c23f962f6d",
       "0195_client_hub_native_project_current_owner_observation.sql": "aaa8b35e502ed634cd38ed16c5a870a91f63c0ee578a031aec15744e7947ea44",
+      "0196_native_directory_maintenance_authority.sql": "84fe7276bb83bb72da6637d5b6827b56e80094c14acbc872935c444fb2a3870a",
     }),
     expectedAppliedMigrations: Object.freeze([
+      "0184_project_alpha_directory_relationship_generation_recovery.sql",
+      "0185_project_alpha_directory_binding_generation_epochs.sql",
+      "0186_project_alpha_directory_conflict_evidence_binding.sql",
+      "0187_operations_portal_native_delivery_literal_prefix_guard.sql",
+      "0188_client_hub_native_project_preparations.sql",
+      "0189_client_hub_native_project_uncertain_recovery.sql",
+      "0190_client_hub_native_project_preparation_authority.sql",
+      "0191_operations_portal_native_billing_authority.sql",
+      "0192_ops_service_definition_authority.sql",
+      "0193_operations_portal_native_delivery_dead_conflict_recovery.sql",
+      "0194_operations_portal_native_delivery_terminal_cancellations.sql",
+      "0195_client_hub_native_project_current_owner_observation.sql",
+      "0196_native_directory_maintenance_authority.sql",
+    ]),
+    historical195ExpectedAppliedMigrations: Object.freeze([
       "0184_project_alpha_directory_relationship_generation_recovery.sql",
       "0185_project_alpha_directory_binding_generation_epochs.sql",
       "0186_project_alpha_directory_conflict_evidence_binding.sql",
@@ -197,6 +213,30 @@ export const NATIVE_MIGRATION_PROFILES = Object.freeze({
       "0193_operations_portal_native_delivery_dead_conflict_recovery.sql",
       "0194_operations_portal_native_delivery_terminal_cancellations.sql",
     ]),
+    historical195CandidateNames: Object.freeze([
+      "0174_project_alpha_directory_preserved_external_identity.sql",
+      "0175_operations_directory_acquired_parent_enrollment_identity.sql",
+      "0176_operations_directory_acquired_intent_authority.sql",
+      "0177_operations_directory_acquired_intent_update_authority.sql",
+      "0178_project_alpha_project_inbound_reconciliation.sql",
+      "0179_project_alpha_acquired_native_identity_collision.sql",
+      "0180_project_alpha_project_v2_recovery_authorization.sql",
+      "0181_project_alpha_directory_create_generation_recovery.sql",
+      "0182_project_alpha_directory_relationship_recovery_guard.sql",
+      "0183_project_alpha_binding_standalone_relationship_rows.sql",
+      "0184_project_alpha_directory_relationship_generation_recovery.sql",
+      "0185_project_alpha_directory_binding_generation_epochs.sql",
+      "0186_project_alpha_directory_conflict_evidence_binding.sql",
+      "0187_operations_portal_native_delivery_literal_prefix_guard.sql",
+      "0188_client_hub_native_project_preparations.sql",
+      "0189_client_hub_native_project_uncertain_recovery.sql",
+      "0190_client_hub_native_project_preparation_authority.sql",
+      "0191_operations_portal_native_billing_authority.sql",
+      "0192_ops_service_definition_authority.sql",
+      "0193_operations_portal_native_delivery_dead_conflict_recovery.sql",
+      "0194_operations_portal_native_delivery_terminal_cancellations.sql",
+      "0195_client_hub_native_project_current_owner_observation.sql",
+    ]),
   }),
 });
 
@@ -269,13 +309,16 @@ function validateSourceMigrations(base, application, contract) {
   const historical190CandidateNames = contract.historical190CandidateNames ?? candidateNames;
   const historical192CandidateNames = contract.historical192CandidateNames ?? candidateNames;
   const historical194CandidateNames = contract.historical194CandidateNames ?? candidateNames;
+  const historical195CandidateNames = contract.historical195CandidateNames ?? candidateNames;
   const presentCandidateNames = candidateNames.filter((name) => names.includes(name));
   const currentChain = JSON.stringify(presentCandidateNames) === JSON.stringify(candidateNames);
   const historicalChain = JSON.stringify(presentCandidateNames) === JSON.stringify(historicalCandidateNames);
   const historical190Chain = JSON.stringify(presentCandidateNames) === JSON.stringify(historical190CandidateNames);
   const historical192Chain = JSON.stringify(presentCandidateNames) === JSON.stringify(historical192CandidateNames);
   const historical194Chain = JSON.stringify(presentCandidateNames) === JSON.stringify(historical194CandidateNames);
-  const selectedCandidateNames = currentChain ? candidateNames : historical194Chain ? historical194CandidateNames
+  const historical195Chain = JSON.stringify(presentCandidateNames) === JSON.stringify(historical195CandidateNames);
+  const selectedCandidateNames = currentChain ? candidateNames : historical195Chain ? historical195CandidateNames
+    : historical194Chain ? historical194CandidateNames
     : historical192Chain ? historical192CandidateNames
     : historical190Chain ? historical190CandidateNames
     : historicalChain ? historicalCandidateNames : null;
@@ -295,7 +338,8 @@ function validateSourceMigrations(base, application, contract) {
   const baselineIndex = finalNames.indexOf(contract.remoteBaseline);
   const expectedAppliedMigrations = finalNames.slice(baselineIndex + 1);
   const reviewedAppliedMigrations = currentChain
-    ? contract.expectedAppliedMigrations : historical194Chain
+    ? contract.expectedAppliedMigrations : historical195Chain
+      ? contract.historical195ExpectedAppliedMigrations : historical194Chain
       ? contract.historical194ExpectedAppliedMigrations : historical192Chain
       ? contract.historical192ExpectedAppliedMigrations : historical190Chain
       ? contract.historical190ExpectedAppliedMigrations : contract.historicalExpectedAppliedMigrations;

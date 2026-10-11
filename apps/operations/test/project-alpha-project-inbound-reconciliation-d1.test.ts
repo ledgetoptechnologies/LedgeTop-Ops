@@ -16,7 +16,7 @@ beforeAll(async () => {
   db = await runtime.getD1Database("OPS_DB") as D1Database;
   const directory = new URL("../migrations/", import.meta.url);
   const files = readdirSync(directory).filter(file => /^\d{4}_.*\.sql$/.test(file)).sort();
-  expect(files.at(-1)).toBe("0195_client_hub_native_project_current_owner_observation.sql");
+  expect(files.at(-1)).toBe("0196_native_directory_maintenance_authority.sql");
   for (const file of files) {
     const sql = readFileSync(new URL(file, directory), "utf8");
     await db.batch(splitD1MigrationStatements(sql).map(statement => db.prepare(statement)));

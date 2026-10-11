@@ -364,9 +364,9 @@ export async function runCanonicalPortalResourceAcceptance(onReady?:(context:Can
   bucket = await runtime.getR2Bucket("DATA_BUCKET") as unknown as R2Bucket;
   // Exercise current producers/consumers against the complete canonical schema,
   // including delivery replacement and terminal-cancellation guards and ledgers.
-  await applyCanonicalChain(operations, "operations", "0195_client_hub_native_project_current_owner_observation.sql", true);
+  await applyCanonicalChain(operations, "operations", "0196_native_directory_maintenance_authority.sql", true);
   await applyCanonicalChain(client, "client", "0230_operations_portal_native_delivery_terminal_cancellations.sql");
-  expect(await operations.prepare("SELECT count(*) AS count FROM d1_migrations").first<number>("count")).toBe(195);
+  expect(await operations.prepare("SELECT count(*) AS count FROM d1_migrations").first<number>("count")).toBe(196);
   expect(await client.prepare("SELECT count(*) AS count FROM d1_migrations").first<number>("count")).toBe(149);
   expect((await operations.prepare("PRAGMA foreign_key_check").all()).results).toEqual([]);
   expect((await client.prepare("PRAGMA foreign_key_check").all()).results).toEqual([]);

@@ -58,6 +58,7 @@ test("builds only the exact migration suffixes and strips every deployment field
       "0193_operations_portal_native_delivery_dead_conflict_recovery.sql",
       "0194_operations_portal_native_delivery_terminal_cancellations.sql",
       "0195_client_hub_native_project_current_owner_observation.sql",
+      "0196_native_directory_maintenance_authority.sql",
     ]);
   assert.deepEqual(profiles.client.files.map(({ name }) => name),
     ["0229_operations_portal_native_delivery_regrant.sql",
@@ -68,11 +69,11 @@ test("builds only the exact migration suffixes and strips every deployment field
     "0228_operations_portal_native_content_start_audit.sql");
   assert.equal(profiles.operations.expectedRemoteAppliedMigrations.length, 183);
   assert.equal(profiles.client.expectedRemoteAppliedMigrations.length, 147);
-  assert.equal(profiles.operations.manifest.reviewedFinalChain.count, 195);
+  assert.equal(profiles.operations.manifest.reviewedFinalChain.count, 196);
   assert.equal(profiles.operations.manifest.reviewedFinalChain.finalMigration,
-    "0195_client_hub_native_project_current_owner_observation.sql");
+    "0196_native_directory_maintenance_authority.sql");
   assert.equal(profiles.operations.manifest.reviewedFinalChain.namesSha256,
-    "3aecb42400d7a5e95687cca3eb256e880aa306dd4184747c0171f6301ffb71fd");
+    "c8f55f7a543d1e51d69abce753c2ce54a4640c35fd93c2769c8e971bb8162106");
   assert.equal(profiles.client.manifest.reviewedFinalChain.count, 149);
   assert.equal(profiles.client.manifest.reviewedFinalChain.finalMigration,
     "0230_operations_portal_native_delivery_terminal_cancellations.sql");
@@ -118,14 +119,15 @@ test("rejects an extra SQL file and a changed native migration", () => {
     ["client", "0230_operations_portal_native_delivery_terminal_cancellations.sql"],
     ["operations", "0193_operations_portal_native_delivery_dead_conflict_recovery.sql"],
     ["operations", "0194_operations_portal_native_delivery_terminal_cancellations.sql"],
-    ["operations", "0195_client_hub_native_project_current_owner_observation.sql"]]) {
+    ["operations", "0195_client_hub_native_project_current_owner_observation.sql"],
+    ["operations", "0196_native_directory_maintenance_authority.sql"]]) {
     const stableChanged = fixture();
     fs.appendFileSync(path.join(stableChanged, "apps", application, "migrations", name), " ");
     assert.throws(() => buildProfiles(stableChanged), new RegExp(`native candidate changed: ${name.slice(0, 4)}_`));
   }
 });
 
-test("accepts exact historical 0187, 0190, 0192, and 0194 chains but rejects partial successor chains", () => {
+test("accepts exact historical 0187, 0190, 0192, 0194, and 0195 chains but rejects partial successors", () => {
   const historical = fixture();
   for (const name of ["0188_client_hub_native_project_preparations.sql",
     "0189_client_hub_native_project_uncertain_recovery.sql",
@@ -134,7 +136,7 @@ test("accepts exact historical 0187, 0190, 0192, and 0194 chains but rejects par
     "0192_ops_service_definition_authority.sql",
     "0193_operations_portal_native_delivery_dead_conflict_recovery.sql",
     "0194_operations_portal_native_delivery_terminal_cancellations.sql",
-    "0195_client_hub_native_project_current_owner_observation.sql"])
+    "0195_client_hub_native_project_current_owner_observation.sql", "0196_native_directory_maintenance_authority.sql"])
     fs.rmSync(path.join(historical, "apps", "operations", "migrations", name));
   const profile = buildProfiles(historical).operations;
   assert.equal(profile.manifest.reviewedFinalChain.count, 187);
@@ -144,7 +146,7 @@ test("accepts exact historical 0187, 0190, 0192, and 0194 chains but rejects par
   for (const name of ["0191_operations_portal_native_billing_authority.sql", "0192_ops_service_definition_authority.sql",
     "0193_operations_portal_native_delivery_dead_conflict_recovery.sql",
     "0194_operations_portal_native_delivery_terminal_cancellations.sql",
-    "0195_client_hub_native_project_current_owner_observation.sql"])
+    "0195_client_hub_native_project_current_owner_observation.sql", "0196_native_directory_maintenance_authority.sql"])
     fs.rmSync(path.join(historical190, "apps", "operations", "migrations", name));
   const profile190 = buildProfiles(historical190).operations;
   assert.equal(profile190.manifest.reviewedFinalChain.count, 190);
@@ -153,15 +155,15 @@ test("accepts exact historical 0187, 0190, 0192, and 0194 chains but rejects par
   const historical192 = fixture();
   for (const name of ["0193_operations_portal_native_delivery_dead_conflict_recovery.sql",
     "0194_operations_portal_native_delivery_terminal_cancellations.sql",
-    "0195_client_hub_native_project_current_owner_observation.sql"])
+    "0195_client_hub_native_project_current_owner_observation.sql", "0196_native_directory_maintenance_authority.sql"])
     fs.rmSync(path.join(historical192, "apps", "operations", "migrations", name));
   const profile192 = buildProfiles(historical192).operations;
   assert.equal(profile192.manifest.reviewedFinalChain.count, 192);
   assert.equal(profile192.manifest.finalMigration, "0192_ops_service_definition_authority.sql");
 
   const historical194 = fixture();
-  fs.rmSync(path.join(historical194, "apps", "operations", "migrations",
-    "0195_client_hub_native_project_current_owner_observation.sql"));
+  for (const name of ["0195_client_hub_native_project_current_owner_observation.sql", "0196_native_directory_maintenance_authority.sql"])
+    fs.rmSync(path.join(historical194, "apps", "operations", "migrations", name));
   const profile194 = buildProfiles(historical194).operations;
   assert.equal(profile194.manifest.reviewedFinalChain.count, 194);
   assert.equal(profile194.manifest.reviewedFinalChain.namesSha256,
@@ -171,6 +173,14 @@ test("accepts exact historical 0187, 0190, 0192, and 0194 chains but rejects par
   assert.equal(profile194.files.some(({ name }) => name.startsWith("0195_")), false);
   assert.equal(profile194.manifest.expectedAppliedMigrations.some(name => name.startsWith("0195_")), false);
 
+  const historical195 = fixture();
+  fs.rmSync(path.join(historical195, "apps", "operations", "migrations", "0196_native_directory_maintenance_authority.sql"));
+  const profile195 = buildProfiles(historical195).operations;
+  assert.equal(profile195.manifest.reviewedFinalChain.count, 195);
+  assert.equal(profile195.manifest.reviewedFinalChain.namesSha256,
+    "3aecb42400d7a5e95687cca3eb256e880aa306dd4184747c0171f6301ffb71fd");
+  assert.equal(profile195.manifest.finalMigration, "0195_client_hub_native_project_current_owner_observation.sql");
+
   for (const remove of [["0190_client_hub_native_project_preparation_authority.sql"],
     ["0189_client_hub_native_project_uncertain_recovery.sql"],
     ["0189_client_hub_native_project_uncertain_recovery.sql", "0190_client_hub_native_project_preparation_authority.sql"]]) {
@@ -179,7 +189,7 @@ test("accepts exact historical 0187, 0190, 0192, and 0194 chains but rejects par
     assert.throws(() => buildProfiles(partial), /not an exact reviewed historical or current chain/);
   }
   const unknown = fixture();
-  fs.writeFileSync(path.join(unknown, "apps", "operations", "migrations", "0196_unknown.sql"), "SELECT 1;\n");
+  fs.writeFileSync(path.join(unknown, "apps", "operations", "migrations", "0197_unknown.sql"), "SELECT 1;\n");
   assert.throws(() => buildProfiles(unknown), /pinned base migration inventory changed/);
 });
 

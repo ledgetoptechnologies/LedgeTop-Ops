@@ -30,9 +30,9 @@ describe("reviewed release migration fixtures", () => {
   it("selects the immutable release inventories including the promoted native portal migrations", () => {
     const operations = reviewedOperationsMigrationNames(new URL("../migrations/", import.meta.url));
     const client = reviewedClientMigrationNames(new URL("../../client/migrations/", import.meta.url));
-    expect(operations).toHaveLength(195);
-    expect(operations.at(-1)).toBe("0195_client_hub_native_project_current_owner_observation.sql");
-    expect(operations.slice(-26)).toEqual([
+    expect(operations).toHaveLength(196);
+    expect(operations.at(-1)).toBe("0196_native_directory_maintenance_authority.sql");
+    expect(operations.slice(-27)).toEqual([
       "0170_project_alpha_active_directory_project_guard.sql",
       "0171_project_alpha_active_directory_update_guard.sql",
       "0172_project_alpha_active_directory_consumer_guards.sql",
@@ -59,6 +59,7 @@ describe("reviewed release migration fixtures", () => {
       "0193_operations_portal_native_delivery_dead_conflict_recovery.sql",
       "0194_operations_portal_native_delivery_terminal_cancellations.sql",
       "0195_client_hub_native_project_current_owner_observation.sql",
+      "0196_native_directory_maintenance_authority.sql",
     ]);
     expect(operations).toContain("0154_operations_portal_native_recipient_authority.sql");
     expect(operations).toContain("0158_operations_portal_native_delivery_authority.sql");
@@ -78,6 +79,14 @@ describe("reviewed release migration fixtures", () => {
     const client = copyMigrations("client");
     unlinkSync(join(client.directory, "0001_initial.sql"));
     expect(() => reviewedClientMigrationNames(client.url))
-      .toThrow("reviewed-delivery-migration-file-invalid:0001_initial.sql");
+      .toThrow("reviewed-delivery-migration-physical-inventory-mismatch");
+  });
+
+  it("rejects unreviewed physical SQL files in full-chain mode but permits intentional reviewed prefixes", () => {
+    const operations = copyMigrations("operations");
+    writeFileSync(join(operations.directory, "0197_unreviewed.sql"), "-- unreviewed\n");
+    expect(() => reviewedOperationsMigrationNames(operations.url))
+      .toThrow("reviewed-operations-migration-physical-inventory-mismatch");
+    expect(reviewedOperationsMigrationNames(operations.url, { rejectExtras: false })).toHaveLength(196);
   });
 });
