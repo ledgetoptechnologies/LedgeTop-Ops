@@ -242,9 +242,11 @@ function inventorySurfaceText(label: string, surface: InventoryRequestedSurface)
 function valueCell(value: string | null) { return value === null ? <em>Not set</em> : value === "" ? <em>Empty string</em> : <code>{value}</code>; }
 
 const STAGING_DIRECTORY_OWNER_VIEW_GRANT_ENDPOINT = "/api/admin/staging/directory/owner-profile-view-grant";
+const STAGING_DIRECTORY_SCALAR_SUCCESSOR_HEAD_ENDPOINT = "/api/admin/staging/directory/scalar-successor-head";
 function ApiV2OperatorPanel({ disabled }: { disabled: boolean }) {
   const [ownerViewGrantEnabled, setOwnerViewGrantEnabled] = useState(false);
   const [ownerGrantBusy, setOwnerGrantBusy] = useState(false), [ownerGrantMessage, setOwnerGrantMessage] = useState("");
+  const [successorHeadBusy, setSuccessorHeadBusy] = useState(false), [successorHeadResult, setSuccessorHeadResult] = useState<Record<string, unknown> | null>(null), [successorHeadError, setSuccessorHeadError] = useState("");
   const [available, setAvailable] = useState<boolean | null>(null), [sources, setSources] = useState<string[]>([]), [sourceError, setSourceError] = useState("");
   const [inventorySource, setInventorySource] = useState("");
   const [inventoryBusy, setInventoryBusy] = useState<"initial" | "directory" | "projects" | null>(null);
@@ -457,6 +459,16 @@ function ApiV2OperatorPanel({ disabled }: { disabled: boolean }) {
     } catch (caught) { setOwnerGrantMessage(operatorError(caught, "The staging owner view grant could not be verified. Refresh before retrying.")); }
     finally { setOwnerGrantBusy(false); }
   };
+  const readScalarSuccessorHead = async () => {
+    if (disabled || successorHeadBusy) return;
+    setSuccessorHeadBusy(true); setSuccessorHeadResult(null); setSuccessorHeadError("");
+    try {
+      const response = await api<unknown>(STAGING_DIRECTORY_SCALAR_SUCCESSOR_HEAD_ENDPOINT, { method: "POST", body: JSON.stringify({}) });
+      if (!record(response) || !["observed", "blocked", "unavailable"].includes(String(response.status))) throw new Error("invalid scalar successor head response");
+      setSuccessorHeadResult(response);
+    } catch (caught) { setSuccessorHeadError(operatorError(caught, "The synthetic scalar successor head could not be verified.")); }
+    finally { setSuccessorHeadBusy(false); }
+  };
   const allDecided = Boolean(comparison) && comparison!.fields.every(field => Boolean(decisions[field.field]));
   if (available !== true) return null;
   return <details className="alpha-connection"><summary>Staging API-v2 operator review</summary>
@@ -479,6 +491,12 @@ function ApiV2OperatorPanel({ disabled }: { disabled: boolean }) {
       </div>}
       {inventoryStopped.projects && <p role="alert" className="notice">{inventoryStopped.projects}</p>}
       {inventoryError && <p role="alert" className="notice">{inventoryError}</p>}
+    </section>
+    <section aria-label="Synthetic scalar successor evidence"><h3>Synthetic scalar successor evidence</h3>
+      <p>This staging-only, default-off read collects the fixed synthetic client&apos;s canonical local tuple, bounded Project Alpha inventory, and binding observation. It does not update either system.</p>
+      <button type="button" className="button-ghost button-small" disabled={disabled || successorHeadBusy} onClick={() => void readScalarSuccessorHead()}>{successorHeadBusy ? "Reading synthetic scalar head…" : "Read synthetic scalar head"}</button>
+      {successorHeadError && <p role="alert" className="notice">{successorHeadError}</p>}
+      {successorHeadResult && <pre aria-label="Synthetic scalar successor head" role="status">{JSON.stringify(successorHeadResult, null, 2)}</pre>}
     </section>
     <section aria-label="Exact-record field review"><h3>Exact-record field review</h3>
       {ownerViewGrantEnabled && <div><h4>Staging owner profile review</h4><p>This one-time action grants the protected owner only global Directory profile-view access. It does not change client access or Project Alpha.</p>
