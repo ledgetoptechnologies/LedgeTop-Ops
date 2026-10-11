@@ -299,7 +299,7 @@ export async function readClientHubProjectManagementAction(env: Env, principal: 
       ? "source_inactive" : row.route_version === null ? "route_not_configured" : row.enabled !== 1 || !row.reviewed_url_template
         ? "route_disabled" : !row.external_id ? "source_mapping_unavailable" : "available";
   let href: string | null = null;
-  if (reason === "available") {
+  if (reason === "available" && row) {
     try { href = render(validateProjectManagementUrlTemplate(row!.reviewed_url_template!), row!.external_id!); }
     catch { reason = "route_disabled"; }
   }
