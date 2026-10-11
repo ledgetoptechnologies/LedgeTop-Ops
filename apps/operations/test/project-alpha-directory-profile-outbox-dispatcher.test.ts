@@ -373,7 +373,7 @@ describe("native Directory profile outbox dispatcher", () => {
     }) as unknown as D1Database;
     const check=(value:Parameters<typeof evidenceDb>[0],revision:string,generation:string)=>
       acquiredDirectoryMappingUpdateEvidence(evidenceDb(value),context,revision,generation,mapping.project_alpha_public_id);
-    await expect(check({activated:[{revision:"7",authorization_generation:"1"}],refreshed:[{revision:"9",authorization_generation:"3"}],refreshCommands:2},"9","3")).resolves.toBe(true);
+    await expect(check({activated:[{revision:"7",authorization_generation:"1"}],refreshed:[{revision:"9",authorization_generation:"3"}],refreshCommands:2},"9","8")).resolves.toBe(true);
     await expect(check({activated:[{revision:"7",authorization_generation:"1"}],refreshed:[{revision:"9",authorization_generation:"3"}],
       delivered:[{revision:"8",authorization_generation:"2"}],refreshCommands:2},"9","3")).resolves.toBe(true);
     await expect(check({activated:[{revision:"7",authorization_generation:"1"}],refreshed:[{revision:"9",authorization_generation:"3"}],
@@ -381,7 +381,7 @@ describe("native Directory profile outbox dispatcher", () => {
     await expect(check({activated:[{revision:"7",authorization_generation:"1"}],refreshed:[{revision:"9",authorization_generation:"3"}],
       delivered:[{revision:"10",authorization_generation:"3"}],refreshCommands:2},"9","3")).resolves.toBe(false);
     await expect(check({activated:[{revision:"7",authorization_generation:"1"}],refreshed:[{revision:"9",authorization_generation:"3"}],
-      delivered:[{revision:"9",authorization_generation:"4"}],refreshCommands:2},"9","3")).resolves.toBe(false);
+      delivered:[{revision:"9",authorization_generation:"4"}],refreshCommands:2},"9","8")).resolves.toBe(false);
     await expect(check({activated:[{revision:"7",authorization_generation:"1"}],refreshed:[],refreshCommands:2},"7","1")).resolves.toBe(false);
     await expect(check({activated:[{revision:"7",authorization_generation:"1"}],refreshed:[{revision:"9",authorization_generation:"3"},
       {revision:"9",authorization_generation:"4"}],refreshCommands:2},"9","3")).resolves.toBe(false);

@@ -232,8 +232,10 @@ async function acquiredMappingRevisionMatches(db: D1Database, row: AcquiredUpdat
       row.source_id, row.expected_source_instance_id, row.application_id, row.expected_history_epoch_id,
       row.resource_type, row.external_id, mapping.project_alpha_public_id).all<Version>()).results;
   const selected = authoritative([...activated,...refreshed,...delivered]);
-  return selected?.revision === command.expectedRevision
-    && selected.authorization_generation === command.expectedAuthorizationGeneration;
+  // The selected receipt proves the exact acquired identity and durable head.
+  // Its application-wide authorization generation is historical; update routes
+  // supply a fresh inventory/binding generation and PA CAS-checks it on send.
+  return selected?.revision === command.expectedRevision;
 }
 /** Verifies the prior PA state for one acquired mapping before an update is sent. */
 export async function acquiredDirectoryMappingUpdateEvidence(db: D1Database, context: AcquiredUpdateContext,
