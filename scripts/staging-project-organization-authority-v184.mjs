@@ -21,6 +21,7 @@ const RECEIPT = ["command_id", "approval_id", "operator_staff_id", "operator_acc
 const PROJECT_GRANT = ["id", "staff_id", "capability", "effect", "scope_kind", "business_area_id", "division_id", "external_project_id", "active", "version", "granted_by", "created_at"];
 const ROLE = ["id", "staff_id", "role_id", "scope", "division_id", "scope_key", "created_by", "created_at"];
 const STAFF = ["id", "status", "access_subject"];
+const CURRENT_DIRECTORY = ["grants", "history", "generation"];
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const CHAIN = Object.freeze({ count: 184, final: "0184_project_alpha_directory_relationship_generation_recovery.sql", names: "c6d567a0c4d9450cc867d99db6188dc54e7a827e581059d4714e7bf55b66bc15", contents: "52a45f212ce83e639a9ac3b9753a7122a56d897c187bf4dcbc741b4a059948cc" });
 
@@ -68,9 +69,10 @@ const rows = (table, columns, values, predicate, params, label) => [
 export function compileProjectOrganizationAuthorityV184(raw, { root = ROOT } = {}) {
   plain(raw);
   const input = structuredClone(raw), hasReadback = Object.hasOwn(raw, "provisionReadback");
-  exact(input, ["schemaVersion", "purpose", "staging", "migrationNames", "target", "staff", "roles", "admission", "profile", "businessArea", "projectGeneration", "projectGrants", "recoveryLineage", "approval", ...(hasReadback ? ["provisionReadback"] : [])], "input");
+  const hasCleanupDirectory = Object.hasOwn(raw, "cleanupCurrentDirectory");
+  exact(input, ["schemaVersion", "purpose", "staging", "migrationNames", "target", "staff", "roles", "admission", "profile", "businessArea", "projectGeneration", "projectGrants", "recoveryLineage", ...(input.schemaVersion === 3 ? ["currentDirectory"] : []), "approval", ...(hasReadback ? ["provisionReadback"] : []), ...(hasCleanupDirectory ? ["cleanupCurrentDirectory"] : [])], "input");
   const migrationChain = migrations(root, input.migrationNames);
-  if (![1, 2].includes(input.schemaVersion) || input.purpose !== PROJECT_ORGANIZATION_AUTHORITY_V184_PURPOSE || !same(input.staging, STAGING_TARGET)
+  if (![1, 2, 3].includes(input.schemaVersion) || input.purpose !== PROJECT_ORGANIZATION_AUTHORITY_V184_PURPOSE || !same(input.staging, STAGING_TARGET)
     || !same(input.target, PROJECT_ORGANIZATION_AUTHORITY_V184_TARGET)) fail("exact staging target required");
   exact(input.staff, STAFF, "staff");
   if (input.staff.id !== input.target.staffId || input.staff.status !== "active" || input.staff.access_subject !== input.admission?.bound_access_subject) fail("active pinned staff required");
@@ -100,20 +102,54 @@ export function compileProjectOrganizationAuthorityV184(raw, { root = ROOT } = {
   }
   if (input.projectGrants.some(grant => grant.effect === "deny" && grant.active === 1 && (grant.scope_kind === "global"
     || grant.scope_kind === "business_area" && grant.business_area_id === input.target.businessAreaId))) fail("applicable project deny");
+  if (input.schemaVersion === 3 && input.projectGrants.some(grant => grant.active === 1)) {
+    fail("successor requires no pre-existing active project authority");
+  }
   const closed = validateClosedRelationshipRecoveryLineageV184(input.recoveryLineage, { root });
   const recoveryProvision = input.recoveryLineage.provisionArtifact, recoveryRevoke = input.recoveryLineage.revokeArtifact;
   if (![2, 3].includes(recoveryProvision.input.schemaVersion) || recoveryRevoke.input.schemaVersion !== recoveryProvision.input.schemaVersion
     || !same(recoveryProvision.input.target, RELATIONSHIP_RECOVERY_AUTHORITY_TARGET_V2)
     || !same(recoveryRevoke.input.target, RELATIONSHIP_RECOVERY_AUTHORITY_TARGET_V2)) fail("exact paired v2 recovery lineage required");
+  if (hasCleanupDirectory && (input.schemaVersion !== 3 || !hasReadback) || input.schemaVersion === 3 && hasReadback !== hasCleanupDirectory) fail("cleanup directory is required only for sealed schema3 cleanup");
+  const currentDirectory = input.schemaVersion === 3 ? input.currentDirectory : {
+    grants: input.recoveryLineage.directoryGrants,
+    history: input.recoveryLineage.directoryGrantHistory,
+    generation: input.recoveryLineage.directoryGrantGeneration,
+  };
+  const validateDirectorySuccessor = (candidate, predecessor, label) => {
+    exact(candidate, CURRENT_DIRECTORY, label);
+    exactRows(candidate.grants, GRANT, `${label} grant`); exactRows(candidate.history, HISTORY, `${label} history`); exact(candidate.generation, GENERATION, `${label} generation`);
+    if (candidate.generation.staff_id !== input.target.staffId || !Number.isSafeInteger(candidate.generation.generation)
+      || candidate.generation.generation < predecessor.generation.generation || new Set(candidate.grants.map(grant => grant.id)).size !== candidate.grants.length
+      || candidate.grants.some(grant => grant.staff_id !== input.target.staffId) || candidate.history.some(row => row.staff_id !== input.target.staffId)
+      || !same(candidate.history.slice(0, predecessor.history.length), predecessor.history)) fail(`exact ${label} state and immutable prefix required`);
+    const suffix = candidate.history.slice(predecessor.history.length), priorGeneration = predecessor.generation.generation;
+    if (suffix.some((row, index) => row.grant_generation !== priorGeneration + index + 1)
+      || candidate.generation.generation !== priorGeneration + suffix.length
+      || (candidate.history.length && Date.parse(candidate.generation.updated_at) !== Date.parse(candidate.history.at(-1).recorded_at))) fail(`ordered ${label} successor history required`);
+    const latest = new Map(); for (const row of predecessor.history) latest.set(row.grant_id, row);
+    let priorRecordedAt = Date.parse(predecessor.history.at(-1)?.recorded_at);
+    for (const row of suffix) {
+      const recordedAt = timestamp(row.recorded_at, `${label} history recorded_at`), prior = latest.get(row.grant_id);
+    const identity = value => value && [value.staff_id, value.permission, value.effect, value.scope_kind,
+      value.business_area_id, value.division_id, value.resource_id];
+      if (recordedAt < priorRecordedAt || row.grant_version !== (prior?.grant_version ?? 0) + 1 || prior && !same(identity(row), identity(prior))) fail(`ordered ${label} successor history required`);
+      priorRecordedAt = recordedAt; latest.set(row.grant_id, row);
+    }
+    if (latest.size !== candidate.grants.length || candidate.grants.some(grant => { const row = latest.get(grant.id); return !row || !same(Object.fromEntries(GRANT.map(key => [key, grant[key]])), { id: row.grant_id, staff_id: row.staff_id, permission: row.permission, effect: row.effect, scope_kind: row.scope_kind, business_area_id: row.business_area_id, division_id: row.division_id, resource_id: row.resource_id, active: row.active, granted_by: grant.granted_by, created_at: grant.created_at }); })) fail(`${label} grants do not match latest immutable history`);
+    return candidate;
+  };
+  validateDirectorySuccessor(currentDirectory, { history: input.recoveryLineage.directoryGrantHistory, generation: input.recoveryLineage.directoryGrantGeneration }, "current directory");
+  const cleanupCurrentDirectory = hasCleanupDirectory ? validateDirectorySuccessor(input.cleanupCurrentDirectory, currentDirectory, "cleanup current directory") : currentDirectory;
   exact(input.approval, ["provisionApprovalId", "provisionCommandId", "revokeApprovalId", "revokeCommandId", "grantId", "issuedAt", "expiresAt"], "approval");
   const ids = [input.approval.provisionApprovalId, input.approval.provisionCommandId, input.approval.revokeApprovalId, input.approval.revokeCommandId, input.approval.grantId];
   if (!ids.every(value => UUID.test(value)) || new Set(ids).size !== 5) fail("distinct approval ids required");
   const identityMatches = input.projectGrants.filter(grant => grant.capability === "project.shared.sync" && grant.effect === "allow"
     && grant.scope_kind === "business_area" && grant.business_area_id === input.target.businessAreaId
     && grant.division_id === null && grant.external_project_id === null);
-  const reuseGrant = input.schemaVersion === 2 && identityMatches.length === 1 ? identityMatches[0] : null;
+  const reuseGrant = [2, 3].includes(input.schemaVersion) && identityMatches.length === 1 ? identityMatches[0] : null;
   if (input.schemaVersion === 1 && input.projectGrants.some(grant => grant.id === input.approval.grantId)) fail("fresh approval ids required");
-  if (input.schemaVersion === 2 && (identityMatches.length > 1 || identityMatches.some(grant => grant.active !== 0)
+  if ([2, 3].includes(input.schemaVersion) && (identityMatches.length > 1 || identityMatches.some(grant => grant.active !== 0)
     || (reuseGrant ? input.approval.grantId !== reuseGrant.id : input.projectGrants.some(grant => grant.id === input.approval.grantId)))) {
     fail("exact inactive project grant identity required");
   }
@@ -122,19 +158,25 @@ export function compileProjectOrganizationAuthorityV184(raw, { root = ROOT } = {
   if (expires <= issued || expires - issued > 14_400_000) fail("bounded approval window");
 
   const lineageReferences = { schemaVersion: 2, provisionArtifactSha256: sha(json(input.recoveryLineage.provisionArtifact)), revokeArtifactSha256: sha(json(input.recoveryLineage.revokeArtifact)), approvalsSha256: sha(json(input.recoveryLineage.approvals)), receiptsSha256: sha(json(input.recoveryLineage.receipts)), directoryGrantsSha256: sha(json(input.recoveryLineage.directoryGrants)), directoryGrantHistorySha256: sha(json(input.recoveryLineage.directoryGrantHistory)), directoryGrantGenerationSha256: sha(json(input.recoveryLineage.directoryGrantGeneration)), closedRecovery: closed };
-  const planInput = { ...input, recoveryLineage: lineageReferences };
-  delete planInput.provisionReadback;
-  const plan = json(planInput), planHash = sha(plan);
-  const verification = json({ staging: input.staging, target: input.target, migrationChain, recoveryLineage: lineageReferences });
-  const verificationHash = sha(verification);
-  if (Buffer.byteLength(plan) > 262_144 || Buffer.byteLength(verification) > 262_144) fail("bounded ledger evidence exceeded");
-  const metadata = phase => {
+  const currentDirectoryReferences = { schemaVersion: 1, grantsSha256: sha(json(currentDirectory.grants)),
+    historySha256: sha(json(currentDirectory.history)), generationSha256: sha(json(currentDirectory.generation)) };
+  const planInput = { ...input, recoveryLineage: lineageReferences }; delete planInput.provisionReadback; delete planInput.cleanupCurrentDirectory;
+  if (input.schemaVersion === 3) planInput.currentDirectory = currentDirectoryReferences;
+  const provisionPlan = json(planInput), provisionPlanHash = sha(provisionPlan);
+  const provisionVerification = json({ staging: input.staging, target: input.target, migrationChain, recoveryLineage: lineageReferences,
+    ...(input.schemaVersion === 3 ? { currentDirectory: currentDirectoryReferences } : {}) });
+  const provisionVerificationHash = sha(provisionVerification);
+  const cleanupDirectoryReferences = { schemaVersion: 1, grantsSha256: sha(json(cleanupCurrentDirectory.grants)), historySha256: sha(json(cleanupCurrentDirectory.history)), generationSha256: sha(json(cleanupCurrentDirectory.generation)) };
+  const revokePlan = hasCleanupDirectory ? json({ ...planInput, phase: "revoke", provisionEvidence: { canonicalPlanSha256: provisionPlanHash, independentBindingVerificationSha256: provisionVerificationHash }, cleanupCurrentDirectory: cleanupDirectoryReferences }) : provisionPlan;
+  const revokeVerification = hasCleanupDirectory ? json({ staging: input.staging, target: input.target, migrationChain, recoveryLineage: lineageReferences, provisionEvidence: { canonicalPlanSha256: provisionPlanHash, independentBindingVerificationSha256: provisionVerificationHash }, cleanupCurrentDirectory: cleanupDirectoryReferences }) : provisionVerification;
+  if ([provisionPlan, provisionVerification, revokePlan, revokeVerification].some(value => Buffer.byteLength(value) > 262_144)) fail("bounded ledger evidence exceeded");
+  const metadata = (phase, plan, verification) => {
     const provision = phase === "provision";
-    const approval = { approval_id: provision ? input.approval.provisionApprovalId : input.approval.revokeApprovalId, canonical_plan_json: plan, canonical_plan_sha256: planHash, approved_operator_staff_id: input.target.staffId, approved_operator_access_subject: input.admission.bound_access_subject, independent_binding_verification_json: verification, independent_binding_verification_sha256: verificationHash, issued_by_staff_id: input.target.staffId, issued_by_access_subject: input.admission.bound_access_subject, issued_at: input.approval.issuedAt, expires_at: input.approval.expiresAt, revoked_at: null };
+    const approval = { approval_id: provision ? input.approval.provisionApprovalId : input.approval.revokeApprovalId, canonical_plan_json: plan, canonical_plan_sha256: sha(plan), approved_operator_staff_id: input.target.staffId, approved_operator_access_subject: input.admission.bound_access_subject, independent_binding_verification_json: verification, independent_binding_verification_sha256: sha(verification), issued_by_staff_id: input.target.staffId, issued_by_access_subject: input.admission.bound_access_subject, issued_at: input.approval.issuedAt, expires_at: input.approval.expiresAt, revoked_at: null };
     const result = json({ phase, grantId: input.approval.grantId, generation: input.projectGeneration.generation + (provision ? 1 : 2), active: provision ? 1 : 0 });
-    return { approval, receipt: { command_id: provision ? input.approval.provisionCommandId : input.approval.revokeCommandId, approval_id: approval.approval_id, operator_staff_id: input.target.staffId, operator_access_subject: input.admission.bound_access_subject, canonical_plan_json: plan, canonical_plan_sha256: planHash, independent_binding_verification_json: verification, independent_binding_verification_sha256: verificationHash, result_json: result, result_sha256: sha(result), executed_at: input.approval.issuedAt } };
+    return { approval, receipt: { command_id: provision ? input.approval.provisionCommandId : input.approval.revokeCommandId, approval_id: approval.approval_id, operator_staff_id: input.target.staffId, operator_access_subject: input.admission.bound_access_subject, canonical_plan_json: plan, canonical_plan_sha256: sha(plan), independent_binding_verification_json: verification, independent_binding_verification_sha256: sha(verification), result_json: result, result_sha256: sha(result), executed_at: input.approval.issuedAt } };
   };
-  const provisionMetadata = metadata("provision"), revokeMetadata = metadata("revoke");
+  const provisionMetadata = metadata("provision", provisionPlan, provisionVerification), revokeMetadata = metadata("revoke", revokePlan, revokeVerification);
   let readback = null;
   if (hasReadback) {
     exact(input.provisionReadback, ["approval", "receipt", "grant"], "provision readback");
@@ -145,9 +187,11 @@ export function compileProjectOrganizationAuthorityV184(raw, { root = ROOT } = {
     const executed = timestamp(receipt.executed_at, "provision receipt executed_at"), created = timestamp(grant.created_at, "provision grant created_at");
     const expectedReceipt = { ...provisionMetadata.receipt, executed_at: receipt.executed_at };
     const expectedGrant = { id: input.approval.grantId, staff_id: input.target.staffId, capability: "project.shared.sync", effect: "allow", scope_kind: "business_area", business_area_id: input.target.businessAreaId, division_id: null, external_project_id: null, active: 1, version: provisionGrantVersion, granted_by: reuseGrant?.granted_by ?? input.target.staffId, created_at: grant.created_at };
-    if (!same(input.provisionReadback.approval, provisionMetadata.approval) || !same(receipt, expectedReceipt) || !same(grant, expectedGrant)
-      || executed < issued || executed >= expires || (!reuseGrant && (created < issued || created > executed))
-      || (reuseGrant && created !== timestamp(reuseGrant.created_at, "reused grant created_at"))) fail("exact bounded provision readback required");
+    if (!same(input.provisionReadback.approval, provisionMetadata.approval)) fail("exact provision approval readback required");
+    if (!same(receipt, expectedReceipt)) fail("exact provision receipt readback required");
+    if (!same(grant, expectedGrant)) fail("exact provision grant readback required");
+    if (executed < issued || executed >= expires || (!reuseGrant && (created < issued || created > executed))
+      || (reuseGrant && created !== timestamp(reuseGrant.created_at, "reused grant created_at"))) fail("bounded provision readback chronology required");
     readback = input.provisionReadback;
   }
 
@@ -161,10 +205,8 @@ export function compileProjectOrganizationAuthorityV184(raw, { root = ROOT } = {
     ...rows("native_business_areas", Object.keys(input.businessArea), [input.businessArea], "id=?", [input.target.businessAreaId], "area"),
     ...rows("native_staff_bootstrap_approvals", APPROVAL, lineage.approvals, "approval_id IN (?,?)", lineage.approvals.map(value => value.approval_id), "closed-recovery-approvals"),
     ...rows("native_staff_bootstrap_receipts", RECEIPT, lineage.receipts, "command_id IN (?,?)", lineage.receipts.map(value => value.command_id), "closed-recovery-receipts"),
-    ...rows("native_directory_grants", GRANT, lineage.directoryGrants, "staff_id=?", [input.target.staffId], "closed-recovery-grants"),
-    ...rows("native_directory_grant_history", HISTORY, lineage.directoryGrantHistory, "staff_id=?", [input.target.staffId], "closed-recovery-history"),
-    ...rows("native_directory_grant_generations", GENERATION, [lineage.directoryGrantGeneration], "staff_id=?", [input.target.staffId], "closed-recovery-generation"),
   ];
+  const directoryGuards = directory => [...rows("native_directory_grants", GRANT, directory.grants, "staff_id=?", [input.target.staffId], "current-directory-grants"), ...rows("native_directory_grant_history", HISTORY, directory.history, "staff_id=?", [input.target.staffId], "current-directory-history"), ...rows("native_directory_grant_generations", GENERATION, [directory.generation], "staff_id=?", [input.target.staffId], "current-directory-generation")];
   const quiet = guard("NOT EXISTS(SELECT 1 FROM native_staff_management_fences WHERE actor_staff_id=? OR target_staff_id=?) AND NOT EXISTS(SELECT 1 FROM native_staff_admin_command_fences WHERE actor_staff_id=? OR target_staff_id=?) AND NOT EXISTS(SELECT 1 FROM operations_directory_write_fences WHERE actor_id=?) AND NOT EXISTS(SELECT 1 FROM operations_directory_relationship_write_fences WHERE actor_staff_id=?) AND NOT EXISTS(SELECT 1 FROM project_alpha_directory_outbox WHERE state IN ('pending','leased')) AND NOT EXISTS(SELECT 1 FROM project_alpha_directory_relationship_outbox WHERE state IN ('pending','leased')) AND NOT EXISTS(SELECT 1 FROM project_alpha_directory_relationship_recovery_outbox WHERE state IN ('pending','leased')) AND NOT EXISTS(SELECT 1 FROM project_alpha_project_outbox WHERE state IN ('pending','leased'))", [input.target.staffId, input.target.staffId, input.target.staffId, input.target.staffId, input.target.staffId, input.target.staffId], "work");
   const snapshot = [
     ...rows("native_project_grants", PROJECT_GRANT, input.projectGrants, "staff_id=?", [input.target.staffId], "project-grants"),
@@ -177,7 +219,7 @@ export function compileProjectOrganizationAuthorityV184(raw, { root = ROOT } = {
     ? guard("EXISTS(SELECT 1 FROM native_project_grants WHERE id=? AND staff_id=? AND capability='project.shared.sync' AND effect='allow' AND scope_kind='business_area' AND business_area_id=? AND division_id IS NULL AND external_project_id IS NULL AND active=1 AND version=? AND granted_by=? AND created_at=?) AND (SELECT generation FROM native_project_grant_generations WHERE staff_id=?)=?", [input.approval.grantId, input.target.staffId, input.target.businessAreaId, provisionGrantVersion, reuseGrant.granted_by, reuseGrant.created_at, input.target.staffId, input.projectGeneration.generation + 1], "poststate")
     : guard("EXISTS(SELECT 1 FROM native_project_grants WHERE id=? AND staff_id=? AND capability='project.shared.sync' AND effect='allow' AND scope_kind='business_area' AND business_area_id=? AND division_id IS NULL AND external_project_id IS NULL AND active=1 AND version=1 AND granted_by=?) AND (SELECT generation FROM native_project_grant_generations WHERE staff_id=?)=?", [input.approval.grantId, input.target.staffId, input.target.businessAreaId, input.target.staffId, input.target.staffId, input.projectGeneration.generation + 1], "poststate");
   const provisionStatements = [
-    ...common, ...snapshot, quiet,
+    ...common, ...directoryGuards(currentDirectory), ...snapshot, quiet,
     guard("julianday(?)<=julianday('now') AND julianday(?)>julianday('now')", [input.approval.issuedAt, input.approval.expiresAt], "expiry"),
     guard("NOT EXISTS(SELECT 1 FROM native_staff_bootstrap_approvals WHERE approved_operator_staff_id=? AND revoked_at IS NULL AND julianday(expires_at)>julianday('now') AND approval_id<>?)", [input.target.staffId, closed.revokeApprovalId], "open-window"),
     insert("native_staff_bootstrap_approvals", provisionMetadata.approval),
@@ -193,7 +235,7 @@ export function compileProjectOrganizationAuthorityV184(raw, { root = ROOT } = {
     ? guard("EXISTS(SELECT 1 FROM native_project_grants WHERE id=? AND active=0 AND version=?) AND (SELECT generation FROM native_project_grant_generations WHERE staff_id=?)=?", [input.approval.grantId, provisionGrantVersion + 1, input.target.staffId, input.projectGeneration.generation + 2], "poststate")
     : guard("EXISTS(SELECT 1 FROM native_project_grants WHERE id=? AND active=0 AND version=2) AND (SELECT generation FROM native_project_grant_generations WHERE staff_id=?)=?", [input.approval.grantId, input.target.staffId, input.projectGeneration.generation + 2], "poststate");
   const revokeStatements = readback ? [
-    ...common, quiet,
+    ...common, ...directoryGuards(cleanupCurrentDirectory), quiet,
     guard("julianday('now')>=julianday(?)", [readback.receipt.executed_at], "revoke-chronology"),
     guard("(SELECT count(*) FROM native_project_grants WHERE staff_id=?)=?", [input.target.staffId, input.projectGrants.length + (reuseGrant ? 0 : 1)], "revoke-grant-count"),
     ...input.projectGrants.filter(grant => grant.id !== input.approval.grantId).map(grant => guard(`EXISTS(SELECT 1 FROM native_project_grants WHERE ${PROJECT_GRANT.map(key => `${key} IS ?`).join(" AND ")})`, PROJECT_GRANT.map(key => grant[key]), "revoke-unrelated-grant")),
@@ -209,5 +251,5 @@ export function compileProjectOrganizationAuthorityV184(raw, { root = ROOT } = {
     revokePoststate,
     insert("native_staff_bootstrap_receipts", revokeMetadata.receipt, true),
   ] : null;
-  return Object.freeze({ schemaVersion: input.schemaVersion, input, planHash, provision: { ...provisionMetadata, ...(!readback ? { statements: provisionStatements } : {}) }, ...(revokeStatements ? { revoke: { ...revokeMetadata, statements: revokeStatements } } : {}), trustedApplyOnly: true });
+  return Object.freeze({ schemaVersion: input.schemaVersion, input, planHash: hasReadback ? sha(revokePlan) : provisionPlanHash, provision: { ...provisionMetadata, ...(!readback ? { statements: provisionStatements } : {}) }, ...(revokeStatements ? { revoke: { ...revokeMetadata, statements: revokeStatements } } : {}), trustedApplyOnly: true });
 }

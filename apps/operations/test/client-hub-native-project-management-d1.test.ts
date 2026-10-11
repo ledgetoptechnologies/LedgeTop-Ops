@@ -26,6 +26,8 @@ const hash = "a".repeat(43);
 const sourceInstanceId="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",applicationId="bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
 const historyEpochId="cccccccc-cccc-4ccc-8ccc-cccccccccccc",orgId="20000000-0000-4000-8000-000000000001";
 const orgPublic="c".repeat(32),projectPublic="d".repeat(32),projection="e".repeat(64);
+const acquiredOrgRecordId="acquired-organization-record",acquiredOrgExternalId="project-alpha/acquired-organization";
+const acquiredOrgPublic="7".repeat(32),acquiredOrgProjection="3".repeat(64);
 const clientId="20000000-0000-4000-8000-000000000002",clientPublic="a".repeat(32),clientProjection="b".repeat(64);
 const staff = { id:"staff-native",email:"staff-native@example.test",accessSubject:"access|staff-native",projectAlphaUserId:null } as StaffPrincipal;
 const context = { root:{ source_id:"project-alpha:primary",root_namespace:"business",kind:"organization",public_id:orgId,
@@ -37,8 +39,54 @@ const context = { root:{ source_id:"project-alpha:primary",root_namespace:"busin
 const standaloneContext={...context,root:{...context.root,kind:"standalone_client",public_id:clientId,
   pa_internal_id:clientId,pa_public_id:clientPublic,display_name:"Standalone client",sort_name:"Standalone client"},
   canonicalRoot:{...context.canonicalRoot,kind:"standalone_client",publicId:clientId},contextVersion:"y".repeat(43)} as ClientHubCollectionContext;
+const acquiredOrganizationContext={...context,root:{...context.root,public_id:acquiredOrgRecordId,
+  pa_internal_id:acquiredOrgRecordId,pa_public_id:acquiredOrgPublic,display_name:"Acquired organization",sort_name:"Acquired organization"},
+  canonicalRoot:{...context.canonicalRoot,publicId:acquiredOrgRecordId},contextVersion:"z".repeat(43)} as ClientHubCollectionContext;
 const env = () => ({ OPS_DB:db,PROJECT_ALPHA_API_V2_CONNECTIONS:JSON.stringify({version:1,instances:{"project-alpha:primary":{
   sourceId:"project-alpha:primary",enabled:true,baseUrl:"https://one.example.test",apiKey:"secret",sourceInstanceId,applicationId,historyEpoch:historyEpochId}}}) });
+function preparationInsertFailureDatabase(error: Error): D1Database {
+  const wrapStatement = (statement: D1PreparedStatement): D1PreparedStatement => new Proxy(statement,{get(target,property){
+    if(property==="bind")return (...values:Parameters<D1PreparedStatement["bind"]>)=>wrapStatement(target.bind(...values));
+    if(property==="run")return async()=>{throw error;};
+    const value=Reflect.get(target,property);return typeof value==="function"?value.bind(target):value;
+  }});
+  const session=db.withSession("first-primary");
+  const wrappedSession=new Proxy(session,{get(target,property){
+    if(property==="prepare")return(sql:string)=>sql.includes("INSERT INTO client_hub_native_project_preparations(")
+      ?wrapStatement(target.prepare(sql)):target.prepare(sql);
+    const value=Reflect.get(target,property);return typeof value==="function"?value.bind(target):value;
+  }});
+  return new Proxy(db,{get(target,property){
+    if(property==="withSession")return()=>wrappedSession;
+    const value=Reflect.get(target,property);return typeof value==="function"?value.bind(target):value;
+  }});
+}
+function revokeAfterGenerationReadDatabase(): D1Database {
+  const session=db.withSession("first-primary");
+  let revoked=false;
+  const wrappedSession=new Proxy(session,{get(target,property){
+    if(property!=="prepare"){const value=Reflect.get(target,property);return typeof value==="function"?value.bind(target):value;}
+    return(sql:string)=>{const statement=target.prepare(sql);
+      if(!sql.startsWith("SELECT generation FROM native_project_grant_generations"))return statement;
+      return new Proxy(statement,{get(statementTarget,statementProperty){
+        if(statementProperty==="bind")return(...values:Parameters<D1PreparedStatement["bind"]>)=>{
+          const bound=statementTarget.bind(...values);
+          return new Proxy(bound,{get(boundTarget,boundProperty){
+            if(boundProperty==="first")return async(...args:Parameters<D1PreparedStatement["first"]>)=>{
+              const result=await boundTarget.first(...args);
+              if(!revoked){revoked=true;await db.prepare("UPDATE native_project_grants SET active=0,version=version+1 WHERE id='grant-native'").run();}
+              return result;
+            };
+            const value=Reflect.get(boundTarget,boundProperty);return typeof value==="function"?value.bind(boundTarget):value;
+          }});
+        };
+        const value=Reflect.get(statementTarget,statementProperty);return typeof value==="function"?value.bind(statementTarget):value;
+      }});
+    };
+  }});
+  return new Proxy(db,{get(target,property){if(property==="withSession")return()=>wrappedSession;
+    const value=Reflect.get(target,property);return typeof value==="function"?value.bind(target):value;}});
+}
 function activationSchemaDatabase(mode: "lookup-error" | "missing-fence"): D1Database {
   return new Proxy(db, { get(target, property) {
     if (property !== "prepare") {
@@ -128,6 +176,66 @@ async function insert(id = commandId, external = externalId) {
       sourceInstanceId,applicationId,historyEpochId).run();
 }
 
+async function activateAcquiredOrganization() {
+  const id=(part:string)=>`e${part}000000-0000-4000-8000-000000000001`,requestHash="4".repeat(64);
+  const reviewId=id("1"),acquisitionCommand=id("2"),acquiredReceiptId=id("3"),claimId=id("4"),activationId=id("9");
+  await db.batch([
+    db.prepare(`INSERT INTO project_alpha_existing_directory_binding_review_evidence(
+      receipt_id,request_sha256,record_id,source_id,source_instance_id,application_id,history_epoch_id,resource_type,
+      external_id,project_alpha_public_id,project_alpha_revision,review_id,reviewed_binding_evidence_sha256,
+      reviewer_staff_id,reviewer_access_subject,reviewer_admission_version,reviewer_profile_version,reviewed_at,reviewed_local_record_version)
+      VALUES(?,?,?,?,?,?,?,'organization',?,?,'4',?, ?,?,?,1,1,strftime('%Y-%m-%dT%H:%M:%fZ','now'),1)`)
+      .bind(reviewId,requestHash,acquiredOrgRecordId,"project-alpha:primary",sourceInstanceId,applicationId,historyEpochId,
+        acquiredOrgExternalId,acquiredOrgPublic,id("6"),"2".repeat(64),staff.id,staff.accessSubject),
+    db.prepare(`INSERT INTO project_alpha_existing_directory_binding_acquisition_commands(
+      command_id,request_sha256,record_id,source_id,source_instance_id,application_id,history_epoch_id,resource_type,
+      external_id,project_alpha_public_id,project_alpha_revision,review_receipt_id)
+      VALUES(?,?,?,?,?,?,?,'organization',?,?,'4',?)`).bind(acquisitionCommand,requestHash,acquiredOrgRecordId,
+        "project-alpha:primary",sourceInstanceId,applicationId,historyEpochId,acquiredOrgExternalId,acquiredOrgPublic,reviewId),
+  ]);
+  await db.batch(([[1,"pending","7"],[2,"acknowledged","8"]] as const).map(([version,state,part])=>db.prepare(
+    `INSERT INTO project_alpha_existing_directory_binding_acquisition_events(command_id,state_version,transition_id,request_sha256,state,occurred_at)
+      VALUES(?,?,?,?,?,strftime('%Y-%m-%dT%H:%M:%fZ','now'))`).bind(acquisitionCommand,version,id(part),requestHash,state)));
+  await db.batch([
+    db.prepare(`INSERT INTO project_alpha_existing_directory_binding_acquisition_response_receipts(
+      command_id,source_instance_id,application_id,history_epoch_id,resource_type,external_id,project_alpha_public_id,
+      project_alpha_revision,destination_origin,pa_request_id,pa_replayed,response_sha256,
+      expected_authorization_generation,result_authorization_generation)
+      VALUES(?,?,?,?,'organization',?,?,'4','https://one.example.test',?,0,?,'6','7')`)
+      .bind(acquisitionCommand,sourceInstanceId,applicationId,historyEpochId,acquiredOrgExternalId,acquiredOrgPublic,id("a"),"5".repeat(64)),
+    db.prepare(`INSERT INTO project_alpha_existing_directory_binding_acquired_mapping_receipts(
+      receipt_id,request_sha256,command_id,record_id,source_id,source_instance_id,application_id,history_epoch_id,
+      resource_type,external_id,project_alpha_public_id,project_alpha_revision,acquisition_evidence_sha256,
+      profile_evidence_sha256,binding_status_evidence_sha256)
+      VALUES(?,?,?,?,?,?,?,?,'organization',?,?,'4',?,?,?)`).bind(acquiredReceiptId,requestHash,acquisitionCommand,
+        acquiredOrgRecordId,"project-alpha:primary",sourceInstanceId,applicationId,historyEpochId,acquiredOrgExternalId,
+        acquiredOrgPublic,"5".repeat(64),"6".repeat(64),acquiredOrgProjection),
+  ]);
+  await db.batch([
+    db.prepare(`INSERT INTO project_alpha_acquired_canonical_mappings(receipt_id,record_id,source_id,source_instance_id,
+      application_id,history_epoch_id,resource_type,external_id,project_alpha_public_id)
+      VALUES(?,?,?,?,?,?,'organization',?,?)`).bind(acquiredReceiptId,acquiredOrgRecordId,"project-alpha:primary",
+        sourceInstanceId,applicationId,historyEpochId,acquiredOrgExternalId,acquiredOrgPublic),
+    db.prepare(`INSERT INTO project_alpha_acquired_native_owner_claims(claim_id,receipt_id,native_owner_epoch_id,record_id,
+      source_id,source_instance_id,application_id,history_epoch_id,resource_type,external_id,project_alpha_public_id,
+      expected_local_record_version,actor_id,request_sha256) VALUES(?,?,?,?,?,?,?,?,'organization',?,?,1,?,?)`)
+      .bind(claimId,acquiredReceiptId,id("5"),acquiredOrgRecordId,"project-alpha:primary",sourceInstanceId,applicationId,
+        historyEpochId,acquiredOrgExternalId,acquiredOrgPublic,staff.id,requestHash),
+    db.prepare("INSERT INTO project_alpha_acquired_mapping_activation(receipt_id) VALUES(?)").bind(acquiredReceiptId),
+  ]);
+  const generation=await db.prepare("SELECT generation FROM native_directory_grant_generations WHERE staff_id=?").bind(staff.id).first<number>("generation");
+  await db.prepare(`INSERT INTO project_alpha_existing_directory_binding_activation_receipts(
+    activation_id,review_receipt_id,idempotency_key,acquired_receipt_id,native_owner_claim_id,record_id,source_id,
+    source_instance_id,application_id,history_epoch_id,resource_type,external_id,project_alpha_public_id,
+    project_alpha_revision,local_record_version,request_sha256,acquisition_evidence_sha256,profile_evidence_sha256,
+    binding_status_evidence_sha256,activated_by_staff_id,directory_grant_generation,
+    expected_authorization_generation,result_authorization_generation)
+    VALUES(?,?,?,?,?,?,'project-alpha:primary',?,?,?,'organization',?,?,'4',1,?,?,?,?,?,?,'6','7')`)
+    .bind(activationId,reviewId,activationId,acquiredReceiptId,claimId,acquiredOrgRecordId,sourceInstanceId,applicationId,
+      historyEpochId,acquiredOrgExternalId,acquiredOrgPublic,requestHash,"5".repeat(64),"6".repeat(64),
+      acquiredOrgProjection,staff.id,generation).run();
+}
+
 beforeAll(async () => {
   runtime = new Miniflare({ modules: true, compatibilityDate: "2026-08-06",
     script: "export default {fetch(){return new Response('ok')}}", d1Databases: ["OPS_DB"] });
@@ -158,6 +266,10 @@ beforeAll(async () => {
       db.prepare(`INSERT INTO operations_directory_records(record_id,record_kind,current_version) VALUES(?,'client',1)`).bind(clientId),
       db.prepare(`INSERT INTO operations_directory_revisions(record_id,version,mutation_id,profile_json)
         VALUES(?,1,'fixture-client-revision',?)`).bind(clientId,JSON.stringify({name:"Standalone client"})),
+      db.prepare(`INSERT INTO operations_directory_records(record_id,record_kind,current_version) VALUES(?,'organization',1)`)
+        .bind(acquiredOrgRecordId),
+      db.prepare(`INSERT INTO operations_directory_revisions(record_id,version,mutation_id,profile_json)
+        VALUES(?,1,'fixture-acquired-org-revision',?)`).bind(acquiredOrgRecordId,JSON.stringify({name:"Acquired organization"})),
     ]);
     if(name==="0059_native_staff_profiles.sql")await db.batch([
       db.prepare(`INSERT INTO staff_users(id,email,display_name,access_subject,status) VALUES(?,?,?,?,'active')`).bind(staff.id,staff.email,"Native Staff",staff.accessSubject),
@@ -180,6 +292,12 @@ beforeAll(async () => {
     ]);
   }
   await db.batch([
+    db.prepare("INSERT INTO staff_role_assignments(id,staff_id,role_id,scope,scope_key,created_by) VALUES('fixture-acquired-owner',?,'role-owner','global','global',?)").bind(staff.id,staff.id),
+    db.prepare(`INSERT INTO native_directory_grants(id,staff_id,permission,effect,scope_kind,active,granted_by)
+      VALUES('fixture-acquired-identity-link',?,'directory.identity.link','allow','global',1,?)`).bind(staff.id,staff.id),
+  ]);
+  await activateAcquiredOrganization();
+  await db.batch([
     db.prepare(`INSERT INTO native_project_grants(id,staff_id,capability,effect,scope_kind,active,version,granted_by)
       VALUES('grant-native',?,'project.shared.sync','allow','global',1,1,?)`).bind(staff.id,staff.id),
     db.prepare(`INSERT INTO project_alpha_api_v2_inventory_receipts(source_id,source_instance_id,application_id,history_epoch_id,inventory_kind,request_id,authorization_generation,page_sha256,item_count)
@@ -190,6 +308,9 @@ beforeAll(async () => {
     db.prepare(`INSERT INTO project_alpha_api_v2_directory_observations(source_id,source_instance_id,application_id,history_epoch_id,request_id,resource_type,project_alpha_public_id,resource_revision,present,last_action,projection_sha256,binding_external_id,binding_status,binding_resource_revision)
       VALUES('project-alpha:primary',?,?,?,'30000000-0000-4000-8000-000000000001','client',?,'2',1,'upsert',?,?,'active','2')`)
       .bind(sourceInstanceId,applicationId,historyEpochId,clientPublic,clientProjection,clientId),
+    db.prepare(`INSERT INTO project_alpha_api_v2_directory_observations(source_id,source_instance_id,application_id,history_epoch_id,request_id,resource_type,project_alpha_public_id,resource_revision,present,last_action,projection_sha256,binding_external_id,binding_status,binding_resource_revision)
+      VALUES('project-alpha:primary',?,?,?,'30000000-0000-4000-8000-000000000001','organization',?,'4',1,'upsert',?,?,'active','4')`)
+      .bind(sourceInstanceId,applicationId,historyEpochId,acquiredOrgPublic,acquiredOrgProjection,acquiredOrgExternalId),
   ]);
   auth.current.mockResolvedValue({ identity:{staffId:staff.id,email:staff.email,verifiedAccessSubject:staff.accessSubject,profileVersion:1},
     admissionVersion:1,verifiedUntil:"2999-01-01T00:00:00.000Z" });
@@ -207,6 +328,65 @@ describe("Client Hub native project durable preparation ledger", () => {
     expect(await db.prepare("SELECT count(*) n FROM client_hub_native_project_preparations WHERE command_id=?")
       .bind(raceCommand).first("n")).toBe(0);
     await db.prepare("UPDATE native_project_grants SET active=1,version=version+1 WHERE id='grant-native'").run();
+  });
+  it("prepares an acquired organization under exact business-area authority when external and record IDs differ",async()=>{
+    await db.batch([
+      db.prepare("UPDATE native_project_grants SET active=0,version=version+1 WHERE id='grant-native'"),
+      db.prepare("INSERT INTO native_business_areas(id,name,active) VALUES('drone-services-staging','Drone services staging',1) ON CONFLICT(id) DO NOTHING"),
+      db.prepare(`INSERT INTO native_project_grants(id,staff_id,capability,effect,scope_kind,business_area_id,active,version,granted_by)
+        VALUES('grant-acquired-area',?,'project.shared.sync','allow','business_area','drone-services-staging',1,1,?)
+        ON CONFLICT(id) DO UPDATE SET active=1,version=version+1`).bind(staff.id,staff.id),
+    ]);
+    const scopes=[{scopeKind:"business_area" as const,businessAreaId:"drone-services-staging",divisionId:null}];
+    try {
+      await expect(readClientHubNativeProjectCapability(env() as never,staff,acquiredOrganizationContext))
+        .resolves.toMatchObject({available:true,scopes:[scopes]});
+      const command="38000000-0000-4000-8000-000000000001",external="38000000-0000-4000-8000-000000000002";
+      const request=new Request("https://ops.example.test/client",{headers:{Authorization:"Bearer local"}});
+      const prepared=await prepareClientHubNativeProject(env() as never,request,staff,acquiredOrganizationContext,
+        {expectedContextVersion:acquiredOrganizationContext.contextVersion,commandId:command,externalProjectId:external,scopes,
+          project:{name:"Acquired organization project",description:null,estimatedStart:null,estimatedEnd:null}},inventoryReaders() as never);
+      expect(prepared).toMatchObject({status:"prepared",request:{directory:{organizationRecordId:acquiredOrgRecordId,clientRecordId:null},
+        command:{organization:{externalId:acquiredOrgExternalId,expectedPublicId:acquiredOrgPublic,expectedRevision:"4",
+          expectedProjectionSha256:acquiredOrgProjection}}}});
+      expect(acquiredOrgExternalId).not.toBe(acquiredOrgRecordId);
+      expect(await db.prepare("SELECT count(*) n FROM client_hub_native_project_preparations WHERE command_id=?")
+        .bind(command).first("n")).toBe(1);
+    } finally {
+      await db.batch([
+        db.prepare("UPDATE native_project_grants SET active=0,version=version+1 WHERE id='grant-acquired-area'"),
+        db.prepare("UPDATE native_project_grants SET active=1,version=version+1 WHERE id='grant-native'"),
+      ]);
+    }
+  });
+  it("classifies a real authority trigger abort as refreshable without claiming a duplicate",async()=>{
+    await db.prepare("UPDATE native_project_grants SET active=1,version=version+1 WHERE id='grant-native'").run();
+    const command="38100000-0000-4000-8000-000000000001",external="38100000-0000-4000-8000-000000000002";
+    const log=vi.spyOn(console,"error").mockImplementation(()=>undefined);
+    try {
+      await expect(prepareClientHubNativeProject({...env(),OPS_DB:revokeAfterGenerationReadDatabase()} as never,
+        new Request("https://ops.example.test/client",{headers:{Authorization:"Bearer local"}}),staff,context,
+        {expectedContextVersion:context.contextVersion,commandId:command,externalProjectId:external,scopes:[],
+          project:{name:"Trigger classification",description:null,estimatedStart:null,estimatedEnd:null}},inventoryReaders() as never))
+        .rejects.toMatchObject({status:409,message:"Native project authority or owner state changed. Refresh the workspace to continue"});
+      expect(log).toHaveBeenCalledWith(JSON.stringify({event:"client_hub_native_project_preparation_insert_failed",category:"authority_stale"}));
+      expect(await db.prepare("SELECT count(*) n FROM client_hub_native_project_preparations WHERE command_id=?").bind(command).first("n")).toBe(0);
+    } finally { log.mockRestore(); await db.prepare("UPDATE native_project_grants SET active=1,version=version+1 WHERE id='grant-native'").run(); }
+  });
+  it("returns a retryable safe category for an injected platform insert failure",async()=>{
+    const secret="must-not-be-logged";
+    const log=vi.spyOn(console,"error").mockImplementation(()=>undefined);
+    try {
+      await expect(prepareClientHubNativeProject({...env(),OPS_DB:preparationInsertFailureDatabase(new Error(secret))} as never,
+        new Request("https://ops.example.test/client",{headers:{Authorization:"Bearer local"}}),staff,context,
+        {expectedContextVersion:context.contextVersion,commandId:"38200000-0000-4000-8000-000000000001",
+          externalProjectId:"38200000-0000-4000-8000-000000000002",scopes:[],
+          project:{name:"Platform classification",description:null,estimatedStart:null,estimatedEnd:null}},inventoryReaders() as never))
+        .rejects.toMatchObject({status:503,message:"Native project preparation could not be recorded. Try again later"});
+      expect(log).toHaveBeenCalledTimes(1);
+      expect(log).toHaveBeenCalledWith(JSON.stringify({event:"client_hub_native_project_preparation_insert_failed",category:"database_unavailable"}));
+      expect(log.mock.calls.flat().join(" ")).not.toContain(secret);
+    } finally { log.mockRestore(); }
   });
   it("joins normal preparation through the real outbox, PA acknowledgement, settlement, activation, and business collection",async()=>{
     const command="40000000-0000-4000-8000-000000000001",external="40000000-0000-4000-8000-000000000002";

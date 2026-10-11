@@ -14,6 +14,26 @@ import type { Env, StaffPrincipal } from "./types";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const SHA256 = /^[0-9a-f]{64}$/;
+const PREPARATION_AUTHORITY_ERROR = "client hub native project preparation authority is not current and exact";
+export type NativeProjectPreparationInsertFailureCategory =
+  | "authority_stale"
+  | "constraint"
+  | "expression_depth"
+  | "database_unavailable";
+
+export function classifyNativeProjectPreparationInsertFailure(error: unknown): NativeProjectPreparationInsertFailureCategory {
+  const seen = new Set<Error>();
+  let current: unknown = error;
+  for (let depth = 0; depth < 4 && current instanceof Error && !seen.has(current); depth += 1) {
+    seen.add(current);
+    const message = current.message;
+    if (/expression tree is too large|maximum depth|maximum.*expression.*depth/i.test(message)) return "expression_depth";
+    if (message.includes(PREPARATION_AUTHORITY_ERROR)) return "authority_stale";
+    if (/SQLITE_CONSTRAINT|(?:UNIQUE|CHECK|FOREIGN KEY|NOT NULL) constraint failed/i.test(message)) return "constraint";
+    current = current.cause;
+  }
+  return "database_unavailable";
+}
 const externalId = z.string().min(1).max(191);
 const projectExternalId = z.string().refine(validProjectAlphaExternalId);
 const scope = z.discriminatedUnion("scopeKind", [
@@ -380,8 +400,12 @@ export async function prepareClientHubNativeProject(env: Env, request: Request, 
       currentActor.admissionVersion,currentActor.profileVersion,generation,selected.connection.expectedSourceInstanceId,
       selected.connection.expectedApplicationId,selected.connection.expectedHistoryEpoch,
     ).run();
-  } catch {
-    throw new HTTPException(409, { message: "The native project reference is already prepared" });
+  } catch (error) {
+    const category = classifyNativeProjectPreparationInsertFailure(error);
+    console.error(JSON.stringify({ event: "client_hub_native_project_preparation_insert_failed", category }));
+    if (category === "authority_stale" || category === "constraint")
+      throw new HTTPException(409, { message: "Native project authority or owner state changed. Refresh the workspace to continue" });
+    throw new HTTPException(503, { message: "Native project preparation could not be recorded. Try again later" });
   }
   if (!insert.meta.changes) {
     const existing = await env.OPS_DB.withSession("first-primary").prepare(
