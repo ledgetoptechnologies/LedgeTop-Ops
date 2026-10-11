@@ -99,9 +99,9 @@ describe("local-only complete staging bootstrap migration rehearsal", () => {
 
   it("applies both reviewed chains to empty local D1 databases and stays idempotent", async () => {
     expect(artifacts.delivery.files).toHaveLength(147);
-    expect(artifacts.operations.files).toHaveLength(187);
+    expect(artifacts.operations.files).toHaveLength(190);
     expect(artifacts.delivery.files.at(-1)?.name).toBe("0228_operations_portal_native_content_start_audit.sql");
-    expect(artifacts.operations.files.at(-1)?.name).toBe("0187_operations_portal_native_delivery_literal_prefix_guard.sql");
+    expect(artifacts.operations.files.at(-1)?.name).toBe("0190_client_hub_native_project_preparation_authority.sql");
     expect(artifacts.delivery.files.filter(file => file.name.startsWith("0199_")).map(file => file.name)).toEqual([
       "0199_incoming_upload_pickup_lifecycle.sql", "0199_native_viewer_grants.sql",
     ]);
@@ -192,9 +192,18 @@ describe("local-only complete staging bootstrap migration rehearsal", () => {
     expect(activeDirectoryGuards.map(row => row.name)).toEqual([
       "operations_shared_projects_bound_refresh_guard", "operations_shared_projects_no_update",
     ]);
-    expect(activeDirectoryGuards.every(row => row.sql.includes("project_alpha_active_directory_mappings")
-      && row.sql.includes("d.record_id=NEW.organization_record_id")
-      && row.sql.includes("d.record_id=NEW.client_record_id"))).toBe(true);
+    const guardSql = Object.fromEntries(activeDirectoryGuards.map(row => [row.name, row.sql]));
+    expect(guardSql.operations_shared_projects_bound_refresh_guard).toContain("project_alpha_active_directory_mappings");
+    expect(guardSql.operations_shared_projects_bound_refresh_guard).toContain("d.record_id=NEW.organization_record_id");
+    expect(guardSql.operations_shared_projects_bound_refresh_guard).toContain("d.record_id=NEW.client_record_id");
+    expect(guardSql.operations_shared_projects_no_update).toContain("project_alpha_project_v2_update_activation_fences");
+
+    const updateOwnerGuards = await rows<{ name: string; sql: string }>(operations,
+      "SELECT name,sql FROM sqlite_master WHERE type='trigger' AND name IN ('client_hub_native_project_preparations_insert_update_organization','client_hub_native_project_preparations_insert_update_client') ORDER BY name");
+    expect(updateOwnerGuards).toHaveLength(2);
+    expect(updateOwnerGuards.every(row => row.sql.includes("project_alpha_active_directory_mappings"))).toBe(true);
+    expect(updateOwnerGuards.find(row => row.name.endsWith("_organization"))?.sql).toContain("mapping.record_id=project.organization_record_id");
+    expect(updateOwnerGuards.find(row => row.name.endsWith("_client"))?.sql).toContain("mapping.record_id=project.client_record_id");
 
     const resourceHeadColumns = await rows<{ name: string }>(delivery,
       "PRAGMA table_info(portal_verified_recipient_delivery_authority_heads)");
