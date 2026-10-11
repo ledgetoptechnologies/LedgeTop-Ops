@@ -26,6 +26,8 @@ const requireOperations=createRequire(path.join(root,"apps/operations/package.js
 const {Miniflare}=requireOperations("miniflare"),{unstable_splitSqlQuery}=requireOperations("wrangler");
 const migrationDir=path.join(root,"apps/operations/migrations");
 const migrationNames=fs.readdirSync(migrationDir).filter(name=>/^\d{4}_.+\.sql$/.test(name)).sort();
+const CANONICAL_BOOTSTRAP_MIGRATION_COUNT=194;
+const CANONICAL_BOOTSTRAP_FINAL_MIGRATION="0194_operations_portal_native_delivery_terminal_cancellations.sql";
 const viteUrl=pathToFileURL(path.join(root,"apps/operations/node_modules/vite/dist/node/index.js")).href;
 const all=async(db,sql,...params)=>(await db.prepare(sql).bind(...params).all()).results;
 const first=(db,sql,...params)=>db.prepare(sql).bind(...params).first();
@@ -178,7 +180,7 @@ async function lifecycle(t){
  t.after(async()=>{try{await runtime.dispose()}finally{await server.close()}});
  const db=await runtime.getD1Database("OPS_DB");
  const [writer,profileRoutes,profileDispatcher,relationshipDispatcher]=await Promise.all([server.ssrLoadModule("/src/worker/native-directory-profile-writer.ts"),server.ssrLoadModule("/src/worker/native-directory-profile-routes.ts"),server.ssrLoadModule("/src/worker/project-alpha-directory-profile-outbox-dispatcher.ts"),server.ssrLoadModule("/src/worker/project-alpha-directory-relationship-outbox-dispatcher.ts")]);
- await migrate(db);assert.equal(migrationNames.length,190);assert.deepEqual((await all(db,"SELECT name FROM d1_migrations ORDER BY name")).map(row=>row.name),migrationNames);assert.deepEqual((await all(db,"PRAGMA foreign_key_check")),[]);
+ await migrate(db);assert.equal(migrationNames.length,CANONICAL_BOOTSTRAP_MIGRATION_COUNT);assert.equal(migrationNames.at(-1),CANONICAL_BOOTSTRAP_FINAL_MIGRATION);assert.deepEqual((await all(db,"SELECT name FROM d1_migrations ORDER BY name")).map(row=>row.name),migrationNames);assert.deepEqual((await all(db,"PRAGMA foreign_key_check")),[]);
  const recoveryGrantIds=await seedRecoveryGrants(db);
  const recoveryProvision=compileRelationshipRecoveryAuthorityV184(await recoveryInput(db,"provision",recoveryGrantIds));
  await applyRelationshipRecoveryAuthorityV184(db,recoveryProvision,{target:STAGING_TARGET,root});

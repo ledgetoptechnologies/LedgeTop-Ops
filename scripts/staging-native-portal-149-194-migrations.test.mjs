@@ -4,7 +4,7 @@ import crypto from "node:crypto";
 import { createRequire } from "node:module";
 import path from "node:path";
 import test from "node:test";
-import { applicationTableNames, assertApplyReady, assertAttemptMarker, assertClientReadyForOperations, assertExactLedger, assertPreserved, buildPairedMigrationPlan,
+import { applicationTableNames, assertApplyReady, assertAttemptMarker, assertClientReadyForOperations, assertExactLedger, assertPinnedWranglerVersion, assertPreserved, buildPairedMigrationPlan,
   normalizedSql, quoteSqlIdentifier, reviewedSchemaDefinitions, runPairedMigration, safeFailure, SPECS } from "./staging-native-portal-149-194-migrations.mjs";
 import { transformSeed } from "./staging-bootstrap.mjs";
 
@@ -90,4 +90,51 @@ test("apply boundary requires a fresh identical snapshot and no prior attempt",(
   assert.doesNotThrow(()=>assertAttemptMarker(marker,plan));
   assert.throws(()=>assertAttemptMarker({...marker,retryAllowed:true},plan));
   assert.throws(()=>assertAttemptMarker({...marker,extra:true},plan));
+});
+test("artifact-set labels namespace recoverable artifacts while sharing the default-compatible attempt sentinel",()=>{
+  const defaultPlan=buildPairedMigrationPlan("client",root),labeled=buildPairedMigrationPlan("client",root,"successor01");
+  assert.equal(defaultPlan.artifactSet,null);assert.match(defaultPlan.backup,/native-portal-before-149\.sql$/u);
+  assert.match(defaultPlan.evidence,/native-portal-before-149\.json$/u);assert.match(defaultPlan.config,/native-portal-147-149-config\.json$/u);
+  assert.match(defaultPlan.directory,/native-portal-147-149-migrations$/u);assert.match(defaultPlan.marker,/native-portal-147-149-apply-attempt\.json$/u);
+  for(const file of[labeled.directory,labeled.config,labeled.backup,labeled.evidence]){
+    assert(file.startsWith(path.join(root,"apps","client")));assert(file.includes("successor01"));
+  }
+  assert.equal(labeled.marker,defaultPlan.marker);
+  assert.equal(labeled.artifactSet,"successor01");
+});
+test("artifact-set labels are path confined strict safe ASCII",()=>{
+  for(const label of[null,{},[],42,"","../escape","a/b","a\\b",".hidden","space value","é","a".repeat(65)])
+    assert.throws(()=>buildPairedMigrationPlan("client",root,label),/safe ASCII/u);
+  for(const label of["a","A_1","successor-20261011","x".repeat(64)])
+    assert.doesNotThrow(()=>buildPairedMigrationPlan("client",root,label));
+});
+test("labeled modes share one migration-window attempt sentinel across labels",async()=>{
+  const plan=buildPairedMigrationPlan("client",root,"successor01"),state={ledger:plan.priorNames.map(name=>({name})),foreignKeys:[],schema:[],data:{}},seen=[];
+  const dependencies={credential:()=>"private",remoteState:async(_token,value)=>{seen.push(value);return state;},wrangler:()=>assert.fail("preflight mutated")};
+  const result=await runPairedMigration(["client","preflight","successor01"],dependencies);assert.equal(result.mutationsPerformed,false);
+  assert.equal(seen[0].artifactSet,"successor01");assert.equal(seen[0].backup,plan.backup);
+  assert.equal(plan.marker,buildPairedMigrationPlan("client",root,"other-set").marker);
+  const saved={createdAt:"2026-10-11T11:45:00.000Z",snapshot:state},now=Date.parse("2026-10-11T12:00:00.000Z");
+  assert.doesNotThrow(()=>assertApplyReady(state,saved,false,now),"no sentinel permits the first labeled attempt");
+  assert.throws(()=>assertApplyReady(state,saved,true,now),/reconcile only/u,"a sentinel from any label blocks every other label");
+  const marker={application:"client",database:plan.spec.database,from:147,to:149,artifactSet:"successor01",migrations:plan.migrations,attemptedAt:"2026-10-11T12:00:00.000Z",retryAllowed:false};
+  assert.doesNotThrow(()=>assertAttemptMarker(marker,plan));assert.throws(()=>assertAttemptMarker({...marker,artifactSet:"other"},plan));
+});
+test("stage diagnostics are allowlisted and never disclose raw errors, tokens, or snapshots",()=>{
+  const secret="cfat_PRIVATE_ROW_SENTINEL",staged=Error(secret);staged.stage="provider-export";
+  assert.deepEqual(JSON.parse(safeFailure(staged)),{error:"staging migration boundary rejected; inspect private local evidence",stage:"provider-export",retryAllowed:false});
+  const unknown=Error(secret);unknown.stage=secret;const output=safeFailure(unknown);
+  assert.deepEqual(JSON.parse(output),{error:"staging migration boundary rejected; inspect private local evidence",retryAllowed:false});assert(!output.includes(secret));
+  const attributable=Error(secret);attributable.stage="provider-export";attributable.outcomeCode="exit-nonzero";
+  assert.deepEqual(JSON.parse(safeFailure(attributable)),{error:"staging migration boundary rejected; inspect private local evidence",stage:"provider-export",outcomeCode:"exit-nonzero",retryAllowed:false});
+  attributable.outcomeCode=secret;assert(!safeFailure(attributable).includes(secret));
+});
+test("Wrangler command dependency must exactly match the selected application lockfile",()=>{
+  const lockfile={packages:{"node_modules/wrangler":{version:"4.118.0"}}};
+  assert.equal(assertPinnedWranglerVersion(lockfile,{name:"wrangler",version:"4.118.0"}),"4.118.0");
+  assert.throws(()=>assertPinnedWranglerVersion(lockfile,{name:"wrangler",version:"4.149.0"}),/differs/u);
+  assert.throws(()=>assertPinnedWranglerVersion(lockfile,{name:"other",version:"4.118.0"}),/identity/u);
+  assert.throws(()=>assertPinnedWranglerVersion({}, {name:"wrangler",version:"4.118.0"}),/lockfile pin/u);
+  const mismatch=Error("private dependency details");mismatch.stage="provider-export";mismatch.outcomeCode="dependency-mismatch";
+  assert.deepEqual(JSON.parse(safeFailure(mismatch)),{error:"staging migration boundary rejected; inspect private local evidence",stage:"provider-export",outcomeCode:"dependency-mismatch",retryAllowed:false});
 });

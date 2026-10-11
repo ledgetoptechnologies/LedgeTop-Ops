@@ -14,6 +14,8 @@ import {migrateProjectOrganizationFullSchema as migrate} from "./staging-project
 const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),".."),requireOperations=createRequire(path.join(root,"apps/operations/package.json"));
 const {Miniflare}=requireOperations("miniflare"),migrationDir=path.join(root,"apps/operations/migrations");
 const migrationNames=fs.readdirSync(migrationDir).filter(name=>/^\d{4}_.+\.sql$/.test(name)).sort();
+const CANONICAL_BOOTSTRAP_MIGRATION_COUNT=194;
+const CANONICAL_BOOTSTRAP_FINAL_MIGRATION="0194_operations_portal_native_delivery_terminal_cancellations.sql";
 const all=async(db,sql,...params)=>(await db.prepare(sql).bind(...params).all()).results;
 const first=(db,sql,...params)=>db.prepare(sql).bind(...params).first();
 const uuid=n=>`70000000-0000-4000-8000-${String(n).padStart(12,"0")}`;
@@ -95,7 +97,7 @@ test("organization Project authority reuses an exact inactive identity on actual
 test("organization Project authority provisions and sealed cleanup after actual self-revoking v3 recovery",{timeout:240000},async()=>{
  const mf=new Miniflare({modules:true,script:"export default {fetch(){return new Response('ok')}}",d1Databases:{DB:`project-organization-v184-authority-v3-${crypto.randomUUID()}`}});
  try{
-  const db=await mf.getD1Database("DB");await migrate(db);assert.equal(migrationNames.length,190);assert.equal(migrationNames.at(-1),"0190_client_hub_native_project_preparation_authority.sql");assert.deepEqual(await all(db,"PRAGMA foreign_key_check"),[]);const recoveryIds=await seed(db);
+  const db=await mf.getD1Database("DB");await migrate(db);assert.equal(migrationNames.length,CANONICAL_BOOTSTRAP_MIGRATION_COUNT);assert.equal(migrationNames.at(-1),CANONICAL_BOOTSTRAP_FINAL_MIGRATION);assert.deepEqual(await all(db,"PRAGMA foreign_key_check"),[]);const recoveryIds=await seed(db);
   const recoveryProvision=compileRelationshipRecoveryAuthorityV184(await input(db,"provision",recoveryIds,undefined,3));
   await applyRelationshipRecoveryAuthorityV184(db,recoveryProvision,{target:STAGING_TARGET,root});
   const recoveryRevoke=compileRelationshipRecoveryAuthorityV184(await input(db,"revoke",recoveryIds,recoveryProvision,3));
