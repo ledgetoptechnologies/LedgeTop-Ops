@@ -55,12 +55,46 @@ export type OperationsPortalNativeDeliveryAuthorityReceipt = Readonly<{
   resultingRevision: string;
   resultingState: "active" | "revoked";
 }>;
+export const OPERATIONS_PORTAL_NATIVE_DELIVERY_CANCELLATION_MAX_BYTES =
+  OPERATIONS_PORTAL_NATIVE_DELIVERY_AUTHORITY_MAX_BYTES + 256;
+export type OperationsPortalNativeDeliveryCancellationRequest = Readonly<{
+  protocol: typeof OPERATIONS_PORTAL_NATIVE_DELIVERY_AUTHORITY_PROTOCOL;
+  protocolVersion: typeof OPERATIONS_PORTAL_NATIVE_DELIVERY_AUTHORITY_VERSION;
+  command: OperationsPortalNativeDeliveryAuthorityCommand;
+  requestFingerprint: string;
+}>;
+export type OperationsPortalNativeDeliveryCancellation = Readonly<{
+  protocol: typeof OPERATIONS_PORTAL_NATIVE_DELIVERY_AUTHORITY_PROTOCOL;
+  protocolVersion: typeof OPERATIONS_PORTAL_NATIVE_DELIVERY_AUTHORITY_VERSION;
+  status: "cancelled";
+  operationId: string;
+  requestFingerprint: string;
+  authorityId: string;
+  targetId: string;
+  recipientBindingId: string;
+  folderReservationId: string;
+  expectedRevision: "0";
+  resultingRevision: "1";
+  cancelledAt: string;
+  replayed: boolean;
+}>;
+export type OperationsPortalNativeDeliveryDisposition =
+  | Readonly<{ ok: true; protocolVersion: 1; disposition: "committed";
+      receipt: OperationsPortalNativeDeliveryAuthorityReceipt }>
+  | Readonly<{ ok: true; protocolVersion: 1; disposition: "cancelled";
+      cancellation: OperationsPortalNativeDeliveryCancellation }>
+  | Readonly<{ ok: true; protocolVersion: 1; disposition: "not-found" }>;
 export type OperationsPortalNativeDeliveryAuthorityRpcResult =
   | Readonly<{ ok: true; protocolVersion: 1; receipt: OperationsPortalNativeDeliveryAuthorityReceipt }>
   | Readonly<{ ok: false; protocolVersion: 1; code: string; retryable: boolean }>;
 export interface OperationsPortalNativeDeliveryAuthorityBinding {
   applyNativeDeliveryAuthority(canonicalCommandJson: string): Promise<unknown>;
   getNativeDeliveryAuthorityStatus(canonicalStatusRequestJson: string): Promise<unknown>;
+}
+export interface OperationsPortalNativeDeliveryCancellationBinding
+  extends OperationsPortalNativeDeliveryAuthorityBinding {
+  getNativeDeliveryAuthorityDisposition(canonicalCancellationRequestJson: string): Promise<unknown>;
+  cancelNativeDeliveryAuthority(canonicalCancellationRequestJson: string): Promise<unknown>;
 }
 export type OperationsPortalNativeDeliveryAuthorizationReadRequest = Readonly<{
   authorityId: string; authorityRevision: number; recipientBindingId: string; enrollmentIntentId: string;
@@ -274,5 +308,84 @@ export function parseOperationsPortalNativeDeliveryAuthorityReceipt(value: unkno
       || parsed.resultingRevision !== command.authority.resultingRevision
       || parsed.resultingState !== (command.action === "delivery.grant" ? "active" : "revoked"))) return null;
     return parsed;
+  } catch { return null; }
+}
+
+export function parseOperationsPortalNativeDeliveryCancellationRequest(value: unknown,
+  command?: OperationsPortalNativeDeliveryAuthorityCommand, requestFingerprint?: string,
+): OperationsPortalNativeDeliveryCancellationRequest | null {
+  try {
+    const request = exact(value, ["protocol", "protocolVersion", "command", "requestFingerprint"]);
+    const parsedCommand = request ? parseOperationsPortalNativeDeliveryAuthorityCommand(request.command) : null;
+    if (!request || request.protocol !== OPERATIONS_PORTAL_NATIVE_DELIVERY_AUTHORITY_PROTOCOL
+      || request.protocolVersion !== 1 || !parsedCommand || parsedCommand.action !== "delivery.grant"
+      || parsedCommand.authority.expectedRevision !== "0" || parsedCommand.authority.resultingRevision !== "1"
+      || !hash(request.requestFingerprint)) return null;
+    if (command && canonicalOperationsPortalNativeDeliveryAuthorityCommand(parsedCommand)
+      !== canonicalOperationsPortalNativeDeliveryAuthorityCommand(command)) return null;
+    if (requestFingerprint && request.requestFingerprint !== requestFingerprint) return null;
+    const parsed = Object.freeze({ protocol: OPERATIONS_PORTAL_NATIVE_DELIVERY_AUTHORITY_PROTOCOL,
+      protocolVersion: 1 as const, command: parsedCommand, requestFingerprint: request.requestFingerprint });
+    return encoder.encode(JSON.stringify(parsed)).byteLength <= OPERATIONS_PORTAL_NATIVE_DELIVERY_CANCELLATION_MAX_BYTES
+      ? parsed : null;
+  } catch { return null; }
+}
+export function canonicalOperationsPortalNativeDeliveryCancellationRequest(value: unknown): string {
+  const request = parseOperationsPortalNativeDeliveryCancellationRequest(value);
+  if (!request) throw new Error("operations_portal_native_delivery_cancellation_invalid");
+  return JSON.stringify(request);
+}
+export function parseOperationsPortalNativeDeliveryCancellation(value: unknown,
+  command?: OperationsPortalNativeDeliveryAuthorityCommand, requestFingerprint?: string,
+): OperationsPortalNativeDeliveryCancellation | null {
+  try {
+    const cancellation = exact(value, ["protocol", "protocolVersion", "status", "operationId",
+      "requestFingerprint", "authorityId", "targetId", "recipientBindingId", "folderReservationId",
+      "expectedRevision", "resultingRevision", "cancelledAt", "replayed"]);
+    if (!cancellation || cancellation.protocol !== OPERATIONS_PORTAL_NATIVE_DELIVERY_AUTHORITY_PROTOCOL
+      || cancellation.protocolVersion !== 1 || cancellation.status !== "cancelled"
+      || !uuid(cancellation.operationId) || !hash(cancellation.requestFingerprint)
+      || !uuid(cancellation.authorityId) || !uuid(cancellation.targetId)
+      || !uuid(cancellation.recipientBindingId) || !uuid(cancellation.folderReservationId)
+      || cancellation.expectedRevision !== "0" || cancellation.resultingRevision !== "1"
+      || !instant(cancellation.cancelledAt) || typeof cancellation.replayed !== "boolean") return null;
+    const parsed = Object.freeze({ protocol: OPERATIONS_PORTAL_NATIVE_DELIVERY_AUTHORITY_PROTOCOL,
+      protocolVersion: 1 as const, status: "cancelled" as const, operationId: cancellation.operationId,
+      requestFingerprint: cancellation.requestFingerprint, authorityId: cancellation.authorityId,
+      targetId: cancellation.targetId, recipientBindingId: cancellation.recipientBindingId,
+      folderReservationId: cancellation.folderReservationId, expectedRevision: "0" as const,
+      resultingRevision: "1" as const, cancelledAt: cancellation.cancelledAt, replayed: cancellation.replayed });
+    if (requestFingerprint && parsed.requestFingerprint !== requestFingerprint) return null;
+    if (command && (command.action !== "delivery.grant" || parsed.operationId !== command.operationId
+      || parsed.authorityId !== command.authority.authorityId || parsed.targetId !== command.target.targetId
+      || parsed.recipientBindingId !== command.recipient.recipientBindingId
+      || parsed.folderReservationId !== command.resource.folderReservationId
+      || parsed.expectedRevision !== command.authority.expectedRevision
+      || parsed.resultingRevision !== command.authority.resultingRevision)) return null;
+    return parsed;
+  } catch { return null; }
+}
+export function parseOperationsPortalNativeDeliveryDisposition(value: unknown,
+  command: OperationsPortalNativeDeliveryAuthorityCommand, requestFingerprint: string,
+): OperationsPortalNativeDeliveryDisposition | null {
+  try {
+    const missing = exact(value, ["ok", "protocolVersion", "disposition"]);
+    if (missing?.ok === true && missing.protocolVersion === 1 && missing.disposition === "not-found") {
+      return Object.freeze({ ok: true as const, protocolVersion: 1 as const, disposition: "not-found" as const });
+    }
+    const committed = exact(value, ["ok", "protocolVersion", "disposition", "receipt"]);
+    if (committed?.ok === true && committed.protocolVersion === 1 && committed.disposition === "committed") {
+      const receipt = parseOperationsPortalNativeDeliveryAuthorityReceipt(committed.receipt, command, requestFingerprint);
+      return receipt ? Object.freeze({ ok: true as const, protocolVersion: 1 as const,
+        disposition: "committed" as const, receipt }) : null;
+    }
+    const cancelled = exact(value, ["ok", "protocolVersion", "disposition", "cancellation"]);
+    if (cancelled?.ok === true && cancelled.protocolVersion === 1 && cancelled.disposition === "cancelled") {
+      const cancellation = parseOperationsPortalNativeDeliveryCancellation(cancelled.cancellation, command,
+        requestFingerprint);
+      return cancellation ? Object.freeze({ ok: true as const, protocolVersion: 1 as const,
+        disposition: "cancelled" as const, cancellation }) : null;
+    }
+    return null;
   } catch { return null; }
 }
