@@ -112,7 +112,7 @@ test("operations metadata remains the only surface when the independent client b
   expect(calls).toEqual([
     "/api/client/v2/operations/home",
     "/api/client/session",
-    financialPath(response.homes[0].authorityId),
+    financialPath(response.homes[0]!.authorityId),
   ]);
 });
 
@@ -163,7 +163,7 @@ for (const [name, emptyResponse, detail] of [
       : [
           "/api/client/v2/operations/home",
           "/api/client/session",
-          financialPath(emptyResponse.homes[0].authorityId),
+          financialPath(emptyResponse.homes[0]!.authorityId!),
         ]);
   });
 }
@@ -190,7 +190,7 @@ test("independently authorized client portal composes an actionless operations s
   expect(new Set(calls.slice(2))).toEqual(new Set([
     "/api/client/projects", "/api/client/service-requests", "/api/client/map-config",
     "/api/client/notification-history", "/api/client/request-readiness",
-    financialPath(response.homes[0].authorityId),
+    financialPath(response.homes[0]!.authorityId),
   ]));
 });
 
@@ -226,7 +226,7 @@ test("combined portal keeps its operations heading when an authorized home has n
   await expect(summary.getByRole("button")).toHaveCount(0);
   await expectAuthorizedNavigation(page, ["Requests", "Feedback"]);
   await expect.poll(() => calls.length).toBe(8);
-  expect(calls).toContain(financialPath(response.homes[0].authorityId));
+  expect(calls).toContain(financialPath(response.homes[0]!.authorityId));
 });
 
 test("independently authorized native dashboard keeps its workspace distinct from operations metadata", async ({ page }) => {
@@ -361,7 +361,7 @@ test("unified portal accepts server metadata boundaries and opaque slash IDs", a
   expect(calls).toEqual([
     "/api/client/v2/operations/home",
     "/api/client/session",
-    financialPath(boundaryResponse.homes[0].authorityId),
+    financialPath(boundaryResponse.homes[0]!.authorityId),
   ]);
 });
 
