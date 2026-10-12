@@ -142,10 +142,11 @@ describe("Project Alpha exact Directory read-adoption route", () => {
   it("lists configured sources through only the narrow adoption authorization boundary", async () => {
     expect((await fixture(false).sources()).status).toBe(404);
     expect((await fixture(false, false, "production", true).sources()).status).toBe(403);
+    expect(await (await fixture(true).sources()).json()).toEqual({ sources: ["project-alpha:primary"], operational: false });
     const response = await fixture(false, true, "production", true).sources();
     expect(response.status).toBe(200);
-    expect(await response.json()).toEqual({ sources: ["project-alpha:primary"] });
-    expect(mocks.sources).toHaveBeenCalledTimes(1);
+    expect(await response.json()).toEqual({ sources: ["project-alpha:primary"], operational: true });
+    expect(mocks.sources).toHaveBeenCalledTimes(2);
   });
 
   it("requires administrator membership and deny-aware global integrations.manage", async () => {

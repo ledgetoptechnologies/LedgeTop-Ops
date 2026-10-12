@@ -120,9 +120,11 @@ export function registerProjectAlphaDirectoryReadAdoptionRoutes(app: App): void 
   app.get(PROJECT_ALPHA_DIRECTORY_READ_ADOPTION_SOURCES_ROUTE, async c => {
     await requireReviewAdministrator(c);
     try {
-      return c.json({ sources: listEnabledProjectAlphaApiV2SourceIds(c.env) });
+      return c.json({ sources: listEnabledProjectAlphaApiV2SourceIds(c.env),
+        operational: c.env.PROJECT_ALPHA_DIRECTORY_EXISTING_RECORD_ADOPTION_ENABLED === "true" });
     } catch {
-      return c.json({ sources: [], configuration: "unavailable" });
+      return c.json({ sources: [], operational: c.env.PROJECT_ALPHA_DIRECTORY_EXISTING_RECORD_ADOPTION_ENABLED === "true",
+        configuration: "unavailable" });
     }
   });
 
