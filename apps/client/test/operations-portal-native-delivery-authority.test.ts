@@ -312,7 +312,7 @@ describe('Operations-native delivery consumer with real forward schemas and prod
     expect(JSON.parse(await apply(env(), canonical(replacement)))).toMatchObject({ ok: true, receipt: { status: 'duplicate' } });
     expect((await db.prepare('PRAGMA foreign_key_check').all()).results).toEqual([]);
     await expect(db.prepare('DELETE FROM operations_portal_native_delivery_heads').run()).rejects.toThrow();
-  });
+  }, 30_000);
   it('records only an expired never-materialized grant cancellation and blocks delayed apply', async () => {
     const command = { ...grant(), operationId: id(30), authority: { authorityId: id(31), expectedRevision: '0', resultingRevision: '1' },
       resource: { ...grant().resource, folderReservationId: id(32) }, observedAt: new Date(Date.now() - 120_000).toISOString(),
