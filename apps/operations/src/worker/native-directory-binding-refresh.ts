@@ -5,7 +5,7 @@ import { resolveProjectAlphaApiV2Connection, withEnabledConfiguredProjectAlphaAp
 import { readConfiguredProjectAlphaDirectoryInventory, type ProjectAlphaDirectoryInventoryResource } from './project-alpha-directory-inventory-api-v2';
 import { directoryMaterializationReadSource } from './project-alpha-directory-materialization-read-source';
 import { readNativeDirectoryDurableRemoteHead } from './native-directory-profile-writer';
-import { sendProjectAlphaDirectoryBindingRevisionRefreshCommand, validatedProjectAlphaDirectoryBindingRevisionRefreshAcknowledgement,
+import { preflightProjectAlphaDirectoryBindingRevisionRefresh, sendProjectAlphaDirectoryBindingRevisionRefreshCommand, validatedProjectAlphaDirectoryBindingRevisionRefreshAcknowledgement,
   isProjectAlphaDirectoryBindingRevisionRefreshCommand, type ProjectAlphaDirectoryBindingRevisionRefreshCommand,
   type ProjectAlphaDirectoryBindingRevisionRefreshOutcome } from './project-alpha-directory-binding-revision-refresh-api-v2';
 
@@ -33,7 +33,7 @@ type Command=Mapping&{command_id:string;acknowledged_command_id:string;acknowled
   grant_generation:number;command_json:string;request_sha256:string;created_at:string};
 type Authority={grant_generation:number};
 export type DirectoryBindingRefreshReview={commandId:string;recordId:string;sourceId:string;localVersion:number;priorRevision:string;liveRevision:string};
-export type DirectoryBindingRefreshResult={commandId:string;status:'acknowledged'|'uncertain'|'blocked'|'conflict';revision?:string;inventoryRefreshRequired?:true;reason?:string};
+export type DirectoryBindingRefreshResult={commandId:string;status:'acknowledged'|'uncertain'|'blocked'|'conflict';revision?:string;inventoryRefreshRequired?:true;reason?:string;frozenCommandRetained?:true;latestAttemptSent?:false};
 const hash=async(value:string)=>Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(value))),x=>x.toString(16).padStart(2,'0')).join('');
 function applies(alias:string):string{return `(${alias}.scope_kind='global' OR ${alias}.scope_kind='resource' AND ${alias}.resource_id=c.record_id
   OR ${alias}.scope_kind='assigned' AND EXISTS(SELECT 1 FROM native_directory_assignments a WHERE a.record_id=c.record_id AND a.staff_id=c.actor_id AND a.active=1)
@@ -232,18 +232,24 @@ export async function executeDirectoryBindingRefresh(env:Env,actor:Actor,id:stri
   const replay=state.attempts>0&&live.generation===(BigInt(c.authorization_generation)+1n).toString()&&binding.resourceRevision===c.live_revision;
   if(live.item.revision!==c.live_revision||live.item.projectionSha256!==c.projection_sha256||!initial&&!replay)
     return{status:'blocked',commandId:id,reason:'frozen_remote_head_or_generation_changed'};
+  let command:unknown;try{command=JSON.parse(c.command_json);}catch{return deny();}if(!isProjectAlphaDirectoryBindingRevisionRefreshCommand(command))return deny();
+  const frozen=command;
+  // Fail closed before reserving an attempt. Do not rewrite a prior uncertain dispatch.
+  const preflight=await withEnabledConfiguredProjectAlphaApiV2Connection(env,c.source_id,connection=>preflightProjectAlphaDirectoryBindingRevisionRefresh(connection,c.resource_type,send));
+  if(preflight.status!=='enabled'||preflight.value.status!=='verified')return{status:state.attempts>0?'uncertain':'blocked',commandId:id,
+    reason:'refresh_capability_unavailable',frozenCommandRetained:true,latestAttemptSent:false};
   const lease=crypto.randomUUID(),guard=crypto.randomUUID();
   try{await guarded(env.OPS_DB,c,actor,[env.OPS_DB.prepare(`UPDATE native_directory_active_binding_refresh_dispatch SET state='leased',lease_token=?,lease_until=unixepoch('now')+60,attempts=attempts+1
     WHERE command_id=? AND state<>'acknowledged' AND (state<>'leased' OR lease_until<=unixepoch('now'))`).bind(lease,id),
     env.OPS_DB.prepare(`INSERT INTO native_directory_active_binding_refresh_guards(guard_id,ok) VALUES(?,CASE WHEN EXISTS(
       SELECT 1 FROM native_directory_active_binding_refresh_dispatch WHERE command_id=? AND lease_token=?) THEN 1 ELSE 0 END)`).bind(guard,id,lease),
     env.OPS_DB.prepare('DELETE FROM native_directory_active_binding_refresh_guards WHERE guard_id=?').bind(guard)]);}catch{return{status:'conflict',commandId:id};}
-  let command:unknown;try{command=JSON.parse(c.command_json);}catch{return deny();}if(!isProjectAlphaDirectoryBindingRevisionRefreshCommand(command))return deny();
-  const frozen=command;
+  let preflightBlocked=false;
   try{
     const sent=await withEnabledConfiguredProjectAlphaApiV2Connection(env,c.source_id,connection=>sendProjectAlphaDirectoryBindingRevisionRefreshCommand(connection,c.resource_type,frozen,send));
     if(sent.status==='enabled'&&sent.value.status==='acknowledged')return await settleDirectoryBindingRefresh(env,actor,id,lease,sent.value);
+    preflightBlocked=sent.status!=='enabled'||(sent.value.status==='blocked'&&sent.value.reason==='preflight');
   }catch{/* A POST may have succeeded. Preserve its identity for an exact retry. */}
   await env.OPS_DB.prepare("UPDATE native_directory_active_binding_refresh_dispatch SET state='uncertain',lease_token=NULL,lease_until=NULL WHERE command_id=? AND state='leased' AND lease_token=?").bind(id,lease).run();
-  return{status:'uncertain',commandId:id};
+  return{status:'uncertain',commandId:id,...(preflightBlocked?{reason:'refresh_capability_unavailable',frozenCommandRetained:true as const,latestAttemptSent:false as const}:{})};
 }

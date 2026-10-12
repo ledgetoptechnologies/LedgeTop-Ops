@@ -17,6 +17,8 @@ window.fetch = async (input, init) => {
   executions++;
   if (scenario === "network" && executions === 1) throw new TypeError("lost response");
   if (scenario === "uncertain" && executions === 1) return Response.json({ commandId, status: "uncertain" });
+  if ((scenario === "preflight-fresh" || scenario === "preflight-prior") && executions === 1) return Response.json({ commandId,
+    status: scenario === "preflight-prior" ? "uncertain" : "blocked", reason: "refresh_capability_unavailable", frozenCommandRetained: true, latestAttemptSent: false });
   if (scenario === "wrong-command" && executions === 1) return Response.json({ commandId: "22222222-2222-4222-8222-222222222222", status: "acknowledged", revision: "8" });
   if (scenario === "wrong-revision" && executions === 1) return Response.json({ commandId, status: "acknowledged", revision: "9" });
   if (scenario === "blocked" || scenario === "conflict") return Response.json({ commandId, status: scenario });

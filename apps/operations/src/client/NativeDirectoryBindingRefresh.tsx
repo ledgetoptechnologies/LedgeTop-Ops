@@ -62,6 +62,11 @@ function BindingRefreshBound({ recordId, sourceId }: { recordId: string; sourceI
       if (result.status === "acknowledged") {
         if (result.revision !== frozen.liveRevision) throw new Error("wrong revision");
         setUncertain(false); setReview(null); setMessage("The reviewed binding revision refresh was acknowledged. Refresh normal directory inventory before using the updated binding.");
+      } else if ((result.status === "blocked" || result.status === "uncertain") && result.reason === "refresh_capability_unavailable"
+        && result.frozenCommandRetained === true && result.latestAttemptSent === false) {
+        // This invocation sent no PA write; any earlier outcome stays unresolved.
+        setUncertain(true);
+        setError("Project Alpha binding refresh capability is unavailable. This invocation sent no refresh write. Keep this frozen command; retry only the same command. Earlier outcomes, if any, remain unresolved.");
       } else if (result.status === "blocked" || result.status === "conflict") {
         setUncertain(false); setReview(null);
         setError("The frozen binding refresh was blocked or its review is stale. Review current state before another request.");

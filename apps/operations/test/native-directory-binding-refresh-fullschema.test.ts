@@ -430,6 +430,36 @@ it('retries a lost committed response with the exact frozen command body',async(
   expect(f.posts).toHaveLength(2);expect(f.posts[1]).toBe(f.posts[0]);
 },30000);
 
+it.each([0,2])('capability preflight preserves the entire frozen dispatch at attempts %s without POST',async attempts=>{
+  const f=await fixture(),review=await reviewDirectoryBindingRefresh(env(),actor(),f.recordId,sourceId,f.send);
+  if(attempts){
+    // Establish genuine uncertain attempts through the ordinary transition guards.
+    f.setHook(async()=>{throw new TypeError('lost fixture response');});
+    for(let attempt=0;attempt<attempts;attempt++)expect(await executeDirectoryBindingRefresh(env(),actor(),review.commandId,f.send)).toMatchObject({status:'uncertain'});
+  }
+  const snapshot=async()=>Promise.all(['native_directory_active_binding_refresh_commands','native_directory_active_binding_refresh_dispatch','native_directory_active_binding_refresh_receipts'].map(async table=>(await db.prepare(`SELECT * FROM ${table} WHERE command_id=?`).bind(review.commandId).all()).results));
+  const authorityAndMappings=async()=>Promise.all(['native_directory_grants','native_directory_grant_history','native_directory_grant_generations','project_alpha_active_directory_mappings','project_alpha_api_v2_directory_observations'].map(async table=>(await db.prepare(`SELECT * FROM ${table}`).all()).results));
+  const before=await snapshot(),unchanged=await authorityAndMappings(),priorPosts=[...f.posts];
+  const send=vi.fn<typeof fetch>(async(url,init)=>{
+    if(new URL(String(url)).pathname.endsWith('/capabilities')){const meta=capabilities();meta.grantedCapabilities=meta.grantedCapabilities.filter(c=>!c.name.endsWith('.binding.revision.refresh'));return json(meta);}
+    return f.send(url,init);
+  });
+  expect(await executeDirectoryBindingRefresh(env(),actor(),review.commandId,send)).toEqual({status:attempts?'uncertain':'blocked',commandId:review.commandId,reason:'refresh_capability_unavailable',frozenCommandRetained:true,latestAttemptSent:false});
+  expect(await snapshot()).toEqual(before);expect(await authorityAndMappings()).toEqual(unchanged);expect(f.posts).toEqual(priorPosts);
+},30000);
+
+it('send-time capability drift remains conservatively uncertain without a PA POST',async()=>{
+  const f=await fixture(),review=await reviewDirectoryBindingRefresh(env(),actor(),f.recordId,sourceId,f.send);
+  let inventorySeen=false,probes=0;
+  const send=vi.fn<typeof fetch>(async(url,init)=>{
+    const path=new URL(String(url)).pathname;
+    if(path.endsWith('/capabilities')&&inventorySeen&&++probes===2){const meta=capabilities();meta.grantedCapabilities=meta.grantedCapabilities.filter(c=>!c.name.endsWith('.binding.revision.refresh'));return json(meta);}
+    const result=await f.send(url,init);if(path.endsWith('/inventory'))inventorySeen=true;return result;
+  });
+  expect(await executeDirectoryBindingRefresh(env(),actor(),review.commandId,send)).toEqual({status:'uncertain',commandId:review.commandId,reason:'refresh_capability_unavailable',frozenCommandRetained:true,latestAttemptSent:false});
+  expect(await db.prepare('SELECT state,attempts,lease_token,lease_until FROM native_directory_active_binding_refresh_dispatch WHERE command_id=?').bind(review.commandId).first()).toEqual({state:'uncertain',attempts:1,lease_token:null,lease_until:null});expect(f.posts).toEqual([]);
+},30000);
+
 it('leases concurrent execution so only one PA POST occurs',async()=>{
   const f=await fixture(),review=await reviewDirectoryBindingRefresh(env(),actor(),f.recordId,sourceId,f.send);
   let release!:()=>void,entered!:()=>void;const gate=new Promise<void>(resolve=>{release=resolve;}),started=new Promise<void>(resolve=>{entered=resolve;});
