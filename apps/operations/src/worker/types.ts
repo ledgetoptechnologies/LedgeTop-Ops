@@ -14,6 +14,7 @@ export type Env = Omit<
   | "PROJECT_ALPHA_API_V2_READ_ACCEPTANCE_ENABLED"
   | "PROJECT_ALPHA_API_V2_SYNC_ENABLED"
   | "PROJECT_ALPHA_DIRECTORY_EXACT_ADOPTION_ENABLED"
+  | "PROJECT_ALPHA_DIRECTORY_EXISTING_RECORD_ADOPTION_ENABLED"
   | "PROJECT_ALPHA_DIRECTORY_LOCAL_PROFILE_ADOPTION_ENABLED"
   | "PROJECT_ALPHA_PROJECT_ADOPTION_REVIEW_ENABLED"
   | "PROJECT_ALPHA_PROJECT_ADOPTION_FINALIZATION_ENABLED"
@@ -130,7 +131,9 @@ export type Env = Omit<
   PROJECT_ALPHA_API_V2_SYNC_ENABLED?: string;
   /** Staging-only, administrator-protected exact adoption of already-bound Directory identities. */
   PROJECT_ALPHA_DIRECTORY_EXACT_ADOPTION_ENABLED?: string;
-  /** Separate default-off staging gate for applying explicitly adopted scalar PA profile fields locally. */
+  /** Independent default-off operational gate for exact existing-record Directory adoption. */
+  PROJECT_ALPHA_DIRECTORY_EXISTING_RECORD_ADOPTION_ENABLED?: string;
+  /** Separate default-off gate for applying explicitly adopted scalar PA profile fields locally. */
   PROJECT_ALPHA_DIRECTORY_LOCAL_PROFILE_ADOPTION_ENABLED?: string;
   /** Staging-only, default-off PA-origin project adoption review evidence entry route. */
   PROJECT_ALPHA_PROJECT_ADOPTION_REVIEW_ENABLED?: string;

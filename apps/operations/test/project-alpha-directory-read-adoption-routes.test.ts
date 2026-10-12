@@ -4,7 +4,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Env, StaffPrincipal } from "../src/worker/types";
 
 const mocks = vi.hoisted(() => ({ scope: vi.fn(), authenticate: vi.fn(), candidates: vi.fn(), reserve: vi.fn(), compare: vi.fn(), seal: vi.fn(), finalize: vi.fn(),
-  audit: vi.fn(), batch: vi.fn(), generation: vi.fn() }));
+  audit: vi.fn(), batch: vi.fn(), generation: vi.fn(), sources: vi.fn() }));
 vi.mock("../src/worker/acl", () => ({ sqlScope: mocks.scope }));
 vi.mock("../src/worker/native-staff-auth", () => ({
   authenticateNativeStaffWithAdmissionVersion: mocks.authenticate,
@@ -22,6 +22,9 @@ vi.mock("../src/worker/project-alpha-directory-read-adoption-field-review", () =
 vi.mock("../src/worker/project-alpha-directory-read-adoption-runtime-finalizer", () => ({
   finalizeProjectAlphaDirectoryReadAdoption: mocks.finalize,
 }));
+vi.mock("../src/worker/project-alpha-api-v2-connections", () => ({
+  listEnabledProjectAlphaApiV2SourceIds: mocks.sources,
+}));
 vi.mock("../src/worker/request-security", () => ({ auditStatement: mocks.audit }));
 
 import {
@@ -30,6 +33,7 @@ import {
   PROJECT_ALPHA_DIRECTORY_READ_ADOPTION_FIELD_REVIEW_ROUTE,
   PROJECT_ALPHA_DIRECTORY_READ_ADOPTION_FINALIZE_ROUTE,
   PROJECT_ALPHA_DIRECTORY_READ_ADOPTION_ROUTE,
+  PROJECT_ALPHA_DIRECTORY_READ_ADOPTION_SOURCES_ROUTE,
   registerProjectAlphaDirectoryReadAdoptionRoutes,
 } from "../src/worker/project-alpha-directory-read-adoption-routes";
 
@@ -46,11 +50,12 @@ const request = { sourceId: "project-alpha:primary", resourceType: "client",
   resourceRevision: "3", authorizationGeneration: "7", bindingExternalId: "pa-client-77",
   bindingResourceRevision: "3" };
 
-function fixture(enabled = true, administrator = true, environment = "staging") {
+function fixture(enabled = true, administrator = true, environment = "staging", operational = false) {
   const app = new Hono<{ Bindings: Env; Variables: { principal: StaffPrincipal; administrator: boolean } }>();
   app.use("*", async (c, next) => { c.set("principal", principal); c.set("administrator", administrator); await next(); });
   registerProjectAlphaDirectoryReadAdoptionRoutes(app);
   const env = { ENVIRONMENT: environment, PROJECT_ALPHA_DIRECTORY_EXACT_ADOPTION_ENABLED: enabled ? "true" : "false",
+    PROJECT_ALPHA_DIRECTORY_EXISTING_RECORD_ADOPTION_ENABLED: operational ? "true" : "false",
     OPS_DB: { batch: mocks.batch, prepare: () => ({ bind: () => ({ first: mocks.generation }) }) }, TEAM_DOMAIN: "https://team.cloudflareaccess.com", OPERATIONS_AUD: "audience_12345678",
     AUDIT_IP_SECRET: "audit" } as unknown as Env;
   const send = (body: unknown = request, key = idempotencyKey) => app.request(
@@ -67,7 +72,9 @@ function fixture(enabled = true, administrator = true, environment = "staging") 
   const finalize = (body:unknown={}, key=idempotencyKey) => app.request(
     `https://ops.example.test${PROJECT_ALPHA_DIRECTORY_READ_ADOPTION_FINALIZE_ROUTE.replace(":receiptId",receiptId)}`,
     {method:"POST",headers:{"Content-Type":"application/json","Idempotency-Key":key},body:JSON.stringify(body)},env);
-  return { send, compare, seal, candidates, finalize };
+  const sources = () => app.request(`https://ops.example.test${PROJECT_ALPHA_DIRECTORY_READ_ADOPTION_SOURCES_ROUTE}`,
+    { method: "GET" }, env);
+  return { send, compare, seal, candidates, finalize, sources };
 }
 
 beforeEach(() => {
@@ -91,6 +98,7 @@ beforeEach(() => {
   mocks.finalize.mockResolvedValue({status:"finalized",finalizationId:"a0000000-0000-4000-8000-00000000000a",
     activationId:"b0000000-0000-4000-8000-00000000000b",recordId:"ops-customer-1",resourceType:"client",adoptedFields:[]});
   mocks.generation.mockResolvedValue(6);
+  mocks.sources.mockReturnValue(["project-alpha:primary"]);
   mocks.audit.mockResolvedValue({});
   mocks.batch.mockResolvedValue([]);
 });
@@ -124,10 +132,20 @@ describe("Project Alpha exact Directory read-adoption route", () => {
     expect((await fixture().candidates("sourceId=project-alpha%3Aprimary&cursor=invalid")).status).toBe(400);
   });
 
-  it("is staging-only and default-off before authentication or reservation", async () => {
+  it("is default-off, preserves the legacy staging window, and requires the independent flag in production", async () => {
     expect((await fixture(false).send()).status).toBe(404);
     expect((await fixture(true, true, "production").send()).status).toBe(404);
-    expect(mocks.reserve).not.toHaveBeenCalled();
+    expect((await fixture(false, true, "production", true).send()).status).toBe(200);
+    expect(mocks.reserve).toHaveBeenCalledTimes(1);
+  });
+
+  it("lists configured sources through only the narrow adoption authorization boundary", async () => {
+    expect((await fixture(false).sources()).status).toBe(404);
+    expect((await fixture(false, false, "production", true).sources()).status).toBe(403);
+    const response = await fixture(false, true, "production", true).sources();
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ sources: ["project-alpha:primary"] });
+    expect(mocks.sources).toHaveBeenCalledTimes(1);
   });
 
   it("requires administrator membership and deny-aware global integrations.manage", async () => {

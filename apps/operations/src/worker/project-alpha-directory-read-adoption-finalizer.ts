@@ -4,6 +4,7 @@ import {
   type ProjectAlphaDirectoryReadKind,
 } from "./project-alpha-directory-read-api-v2";
 import type { Env } from "./types";
+import { projectAlphaDirectoryExistingRecordAdoptionEnabled } from "./project-alpha-directory-read-adoption-enabled";
 
 export type ProjectAlphaDirectoryReadAdoptionFinalizationActor = Readonly<{
   staffId: string;
@@ -204,11 +205,12 @@ function result(row: Saved, replayed: boolean): Extract<ProjectAlphaDirectoryRea
  * no canonical mapping, portal grant, Delivery record, or public link.
  */
 export async function prepareProjectAlphaDirectoryReadAdoptionFinalization(
-  env: Pick<Env, "ENVIRONMENT" | "PROJECT_ALPHA_DIRECTORY_EXACT_ADOPTION_ENABLED" | "OPS_DB">,
+  env: Pick<Env, "ENVIRONMENT" | "PROJECT_ALPHA_DIRECTORY_EXACT_ADOPTION_ENABLED"
+    | "PROJECT_ALPHA_DIRECTORY_EXISTING_RECORD_ADOPTION_ENABLED" | "OPS_DB">,
   inputValue: unknown,
   overrides: Partial<ProjectAlphaDirectoryReadAdoptionFinalizationDependencies> = {},
 ): Promise<ProjectAlphaDirectoryReadAdoptionFinalizationOutcome> {
-  if (env.ENVIRONMENT !== "staging" || env.PROJECT_ALPHA_DIRECTORY_EXACT_ADOPTION_ENABLED !== "true") return { status: "disabled" };
+  if (!projectAlphaDirectoryExistingRecordAdoptionEnabled(env)) return { status: "disabled" };
   if (!valid(inputValue)) return { status: "rejected", reason: "invalid_input" };
   const input = inputValue;
   const use = { ...dependencies, ...overrides };

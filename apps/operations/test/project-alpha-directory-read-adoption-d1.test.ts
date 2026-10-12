@@ -76,6 +76,7 @@ async function seed(externalId = paExternalId, selectedPublicId = publicId): Pro
     database.prepare("INSERT INTO native_staff_admissions VALUES(?,?,1,1)").bind(actor.staffId, accessSubject),
     database.prepare("INSERT INTO native_staff_profiles VALUES(?,1)").bind(actor.staffId),
     database.prepare("INSERT INTO native_directory_grants VALUES('grant',?,'directory.identity.link','allow','global',NULL,NULL,NULL,1)").bind(actor.staffId),
+    database.prepare("INSERT INTO native_directory_grants VALUES('profile-view',?,'directory.profile.view','allow','global',NULL,NULL,NULL,1)").bind(actor.staffId),
     database.prepare("INSERT INTO client_portal_accounts VALUES('portal','keep')"),
     database.prepare("INSERT INTO delivery_records VALUES('delivery',x'00ff80')"),
     database.prepare("INSERT INTO delivery_public_shares VALUES('share','https://public.example.test/keep')"),
@@ -497,6 +498,37 @@ describe("Project Alpha Directory adoption field-review receipt", () => {
       .bind(actor.staffId,recordId).run();
     await expect(compareProjectAlphaDirectoryReadAdoptionFields(env,revoked.reviewId,actor,dependencies().readProfile))
       .resolves.toEqual({status:"blocked",reason:"reservation_not_current"});
+  });
+
+  it("requires current scoped profile-view authority for comparison and sealing", async () => {
+    const revoked=await reserve();
+    await database.prepare("UPDATE native_directory_grants SET active=0 WHERE id='profile-view'").run();
+    await expect(compareProjectAlphaDirectoryReadAdoptionFields(env,revoked.reviewId,actor,dependencies().readProfile))
+      .resolves.toEqual({status:"blocked",reason:"reservation_not_current"});
+    await expect(sealProjectAlphaDirectoryReadAdoptionFieldReview(env,{reviewId:revoked.reviewId,
+      decisions:fieldDecisions(),actor},dependencies().readProfile))
+      .resolves.toEqual({status:"blocked",reason:"reservation_not_current"});
+    await database.prepare("UPDATE native_directory_grants SET active=1 WHERE id='profile-view'").run();
+    await database.prepare("INSERT INTO native_directory_grants VALUES('profile-view-deny',?,'directory.profile.view','deny','resource',NULL,NULL,?,1)")
+      .bind(actor.staffId,recordId).run();
+    await expect(compareProjectAlphaDirectoryReadAdoptionFields(env,revoked.reviewId,actor,dependencies().readProfile))
+      .resolves.toEqual({status:"blocked",reason:"reservation_not_current"});
+    expect(await count("project_alpha_directory_read_adoption_field_review_receipts")).toBe(0);
+  });
+
+  it("atomically refuses a seal when profile-view authority is revoked after comparison", async () => {
+    const reserved=await reserve(),reads=dependencies(),readProfile=reads.readProfile;
+    const revokeAfterRead=vi.fn(async (...args:Parameters<typeof readProfile>)=>{
+      const value=await readProfile(...args);
+      await database.prepare("UPDATE native_directory_grants SET active=0 WHERE id='profile-view'").run();
+      return value;
+    });
+    await expect(sealProjectAlphaDirectoryReadAdoptionFieldReview(env,{reviewId:reserved.reviewId,
+      decisions:fieldDecisions(),actor},revokeAfterRead))
+      .resolves.toEqual({status:"blocked",reason:"storage"});
+    expect(await count("project_alpha_directory_read_adoption_field_review_receipts")).toBe(0);
+    expect(await count("project_alpha_directory_read_adoption_field_decisions")).toBe(0);
+    expect(await count("project_alpha_directory_read_adoption_field_review_audit")).toBe(0);
   });
 
   it("enforces the same authority at the receipt insert boundary", async () => {
