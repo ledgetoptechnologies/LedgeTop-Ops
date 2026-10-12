@@ -10,7 +10,8 @@ import {STAGING_TARGET} from "./staging-onboarding-native-only-authority-packet.
 
 const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),".."),requireOperations=createRequire(path.join(root,"apps/operations/package.json"));
 const {Miniflare}=requireOperations("miniflare"),{unstable_splitSqlQuery}=requireOperations("wrangler"),migrationDir=path.join(root,"apps/operations/migrations");
-const migrationNames=fs.readdirSync(migrationDir).filter(name=>/^\d{4}_.+\.sql$/.test(name)).sort();
+const sourceMigrationNames=fs.readdirSync(migrationDir).filter(name=>/^\d{4}_.+\.sql$/.test(name)).sort();
+const authorityMigrationNames=sourceMigrationNames.filter(name=>name<="0199_native_directory_profile_binding_continuations.sql");
 const all=async(db,sql,...params)=>(await db.prepare(sql).bind(...params).all()).results;
 const first=(db,sql,...params)=>db.prepare(sql).bind(...params).first();
 const uuid=n=>`70000000-0000-4000-8000-${String(n).padStart(12,"0")}`;
@@ -18,7 +19,7 @@ const uuid=n=>`70000000-0000-4000-8000-${String(n).padStart(12,"0")}`;
 async function migrate(db){
   await db.prepare("PRAGMA foreign_keys=OFF").run();
   await db.prepare("CREATE TABLE d1_migrations(id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT UNIQUE NOT NULL,applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)").run();
-  for(const name of migrationNames){
+  for(const name of authorityMigrationNames){
     const statements=unstable_splitSqlQuery(fs.readFileSync(path.join(migrationDir,name),"utf8").replace(/\r\n/g,"\n")).map(sql=>sql.trim()).filter(sql=>sql&&!/^PRAGMA\s+foreign_keys\s*=\s*ON/i.test(sql));
     if(name.startsWith("0058_")){
       const guardAt=statements.findIndex(sql=>/^CREATE\s+TRIGGER\s+native_directory_enrollments_create_guard/i.test(sql));
@@ -75,7 +76,7 @@ async function seed(db){
 
 async function input(db,phase,grantIds,provisionArtifact){
   const stamp=(await first(db,"SELECT strftime('%Y-%m-%dT%H:%M:%fZ','now') stamp")).stamp;
-  return {schemaVersion:3,staging:STAGING_TARGET,phase,target,migrationNames,
+  return {schemaVersion:3,staging:STAGING_TARGET,phase,target,migrationNames:authorityMigrationNames,
     staff:await first(db,"SELECT id,status,access_subject FROM staff_users WHERE id=?",target.staffId),roles:await all(db,"SELECT id,staff_id,role_id,scope,scope_key FROM staff_role_assignments WHERE staff_id=? ORDER BY id",target.staffId),
     admission:await first(db,"SELECT * FROM native_staff_admissions WHERE staff_id=?",target.staffId),profile:await first(db,"SELECT * FROM native_staff_profiles WHERE staff_id=?",target.staffId),generation:await first(db,"SELECT * FROM native_directory_grant_generations WHERE staff_id=?",target.staffId),
     records:await all(db,"SELECT record_id,record_kind,current_version FROM operations_directory_records WHERE record_id IN (?,?) ORDER BY CASE record_kind WHEN 'client' THEN 0 ELSE 1 END",target.clientRecordId,target.organizationRecordId),resourceScopes:await all(db,"SELECT record_id,scope_kind,business_area_id,division_id,active FROM native_directory_resource_scopes WHERE record_id IN (?,?) ORDER BY CASE record_id WHEN ? THEN 0 ELSE 1 END",target.clientRecordId,target.organizationRecordId,target.clientRecordId),relationship:await first(db,"SELECT client_record_id,organization_record_id,relationship_version FROM operations_directory_client_organizations WHERE client_record_id=?",target.clientRecordId),predecessor:await first(db,"SELECT command_id,source_id,source_instance_id,application_id,history_epoch_id,destination_origin,client_record_id,client_public_id,relationship_version,action,organization_record_id,organization_public_id,command_json,state,outcome_json FROM project_alpha_directory_relationship_outbox WHERE command_id=?",target.predecessorCommandId),grants:await all(db,"SELECT * FROM native_directory_grants WHERE staff_id=? ORDER BY id",target.staffId),history:await all(db,"SELECT * FROM native_directory_grant_history WHERE staff_id=? ORDER BY grant_generation",target.staffId),approval:{approvalId:crypto.randomUUID(),commandId:crypto.randomUUID(),grantIds,issuedAt:stamp,expiresAt:new Date(Date.parse(stamp)+3600000).toISOString(),executedAt:stamp},...(provisionArtifact?{provisionArtifact}:{})};
@@ -84,7 +85,7 @@ async function input(db,phase,grantIds,provisionArtifact){
 test("v184 fixed relationship authority provisions and revokes atomically on intact 0001-0184 D1",async()=>{
   const mf=new Miniflare({modules:true,script:"export default {fetch(){return new Response('ok')}}",d1Databases:{DB:`v184-${crypto.randomUUID()}`}});
   try{
-    const db=await mf.getD1Database("DB");await migrate(db);assert.deepEqual((await all(db,"SELECT name FROM d1_migrations ORDER BY name")).map(row=>row.name),migrationNames);
+    const db=await mf.getD1Database("DB");await migrate(db);assert.deepEqual((await all(db,"SELECT name FROM d1_migrations ORDER BY name")).map(row=>row.name),authorityMigrationNames);
     const grantIds=await seed(db),before=await first(db,"SELECT generation FROM native_directory_grant_generations WHERE staff_id=?",target.staffId),provision=compileRelationshipRecoveryAuthorityV184(await input(db,"provision",grantIds));
     await db.prepare(`CREATE TRIGGER v184_cas_race BEFORE INSERT ON native_directory_grants WHEN NEW.id='${grantIds[5]}' AND NEW.active=1 BEGIN SELECT RAISE(ABORT,'v184 cas race'); END`).run();
     await assert.rejects(applyRelationshipRecoveryAuthorityV184(db,provision,{target:STAGING_TARGET,root}),/v184 cas race/);

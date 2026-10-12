@@ -13,7 +13,8 @@ import { compileProjectOrganizationAuthorityV184, PROJECT_ORGANIZATION_AUTHORITY
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const stamp = "2026-10-10T12:00:00.000Z", closeStamp = "2026-10-10T12:10:00.000Z";
 const uuid = value => `00000000-0000-4000-8000-${String(value).padStart(12, "0")}`;
-const migrationNames = fs.readdirSync(path.join(root, "apps", "operations", "migrations")).filter(name => /^\d{4}_.+\.sql$/.test(name)).sort();
+const migrationNames = fs.readdirSync(path.join(root, "apps", "operations", "migrations"))
+  .filter(name => /^\d{4}_.+\.sql$/.test(name) && name <= "0199_native_directory_profile_binding_continuations.sql").sort();
 const grant = (value, permission, recordId, active = 0, scope = "resource") => ({ id: uuid(value), staff_id: recoveryTarget.staffId, permission, effect: "allow", scope_kind: scope, business_area_id: null, division_id: null, resource_id: recordId, active, granted_by: recoveryTarget.staffId, created_at: stamp });
 
 function recoveryBase(schemaVersion = 2) {
