@@ -21,6 +21,7 @@ import { ProjectAlphaContactRoles, type ProjectAlphaContactRolePage } from "./Pr
 import { isStagingNativeDirectoryProfilePreparationLocation, NativeDirectoryProfileEdit } from "./NativeDirectoryProfileEditor";
 import { NativeDirectoryBindingRefresh } from "./NativeDirectoryBindingRefresh";
 import { OpsServiceManagement } from "./OpsServiceManagement";
+import { ProjectAlphaOperationalProjectAdoption } from "./ProjectAlphaOperationalProjectAdoption";
 
 interface CollectionItem { row_key?: string }
 interface ClientContact extends CollectionItem {
@@ -53,6 +54,7 @@ interface ClientDetailResponse {
   internalNotesAvailable?: boolean;
   organizationOperationalContactsAvailable?: boolean;
   projectManagementAvailable?: boolean;
+  projectAdoptionAvailable?: boolean;
   businessActivityAvailable?: boolean;
   auditTimelineAvailable?: boolean;
   projectAlphaContactRolesAvailable?: boolean;
@@ -444,10 +446,11 @@ function ContactList({ contacts }: { contacts: ClientContact[] }) {
   })}</div>;
 }
 
-function BusinessProjects({ initial, page, client, contextVersion, contextSignal, onInvalidated, onWorkspaceRefresh, projectManagementAvailable }: {
+function BusinessProjects({ initial, page, client, contextVersion, contextSignal, onInvalidated, onWorkspaceRefresh, projectManagementAvailable, projectAdoptionAvailable }: {
   initial: BusinessProject[]; page?: ClientCollectionPage; client: ClientSummary; contextVersion?: string;
   contextSignal: AbortSignal; onInvalidated: (message: string) => void; onWorkspaceRefresh: () => void;
   projectManagementAvailable?: boolean;
+  projectAdoptionAvailable?: boolean;
 }) {
   const readFilter = () => {
     const value = new URLSearchParams(location.search).get("business_status");
@@ -505,6 +508,10 @@ function BusinessProjects({ initial, page, client, contextVersion, contextSignal
   const calendarDate = (value: string | null) => value && /^\d{4}-\d{2}-\d{2}$/.test(value) ? value : value ? date(value) : "Not set";
   return <Card title="Business projects">
     <p>Projects recorded for this client in Project Alpha. This list does not grant portal or delivery access.</p>
+    {projectAdoptionAvailable===true&&client.source_id&&client.root_namespace==="business"&&contextVersion&&<ProjectAlphaOperationalProjectAdoption
+      root={{sourceId:client.source_id,rootNamespace:"business",kind:client.kind,publicId:client.public_id}}
+      contextVersion={contextVersion} contextSignal={contextSignal} disabled={state.busy}
+      onInvalidated={onInvalidated} onRefresh={onWorkspaceRefresh}/>}
     {projectManagementAvailable === true && <ProjectManagementRouting client={client} contextVersion={contextVersion} contextSignal={contextSignal}
       onInvalidated={onInvalidated} onWorkspaceRefresh={onWorkspaceRefresh} updateTarget={updateTarget} onUpdateTargetConsumed={() => setUpdateTarget(null)} />}
     {page?.available !== false && <label className="client-hub-business-filter">Project status<select value={filter} onChange={event => selectFilter(event.target.value)}>
@@ -621,7 +628,7 @@ function ClientWorkspace({ route, canReviewFeedback, invitationAccess, nativeDir
         <div className="client-hub-primary-panel"><OrganizationOperationalContacts root={{ sourceId: data.client.source_id, rootNamespace: "business", kind: "organization", publicId: data.client.public_id }}
           contextVersion={data.contextVersion} contextSignal={collectionProps.contextSignal} onInvalidated={invalidate} /></div>}
       {data.businessProjects && <div id="client-business-projects" className="client-hub-primary-panel"><BusinessProjects {...collectionProps} initial={data.businessProjects} page={data.pages?.businessProjects}
-        onWorkspaceRefresh={refresh} projectManagementAvailable={data.projectManagementAvailable} /></div>}
+        onWorkspaceRefresh={refresh} projectManagementAvailable={data.projectManagementAvailable} projectAdoptionAvailable={data.projectAdoptionAvailable} /></div>}
       </div>
       <div className="dashboard-grid client-hub-detail-grid client-hub-work-band" aria-label="Client work and delivery">
       <Card title="Shared projects" className="client-hub-primary-panel"><ClientCollection {...collectionProps} collection="projects" label="Shared projects" initial={data.projects} page={data.pages?.projects}
