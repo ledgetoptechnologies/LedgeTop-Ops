@@ -1480,6 +1480,7 @@ test("rejected request attachments block submission and provide remove-and-repla
   await expect(page.getByText(/remove each rejected file/i)).toBeVisible();
   await page.getByRole("button", { name: "Edit files" }).click();
   await page.getByRole("button", { name: "Remove" }).click();
+  await expect(page.locator(".portal-attachment-list article")).toHaveCount(0);
   expect(attachmentEvents.removed).toBe(true);
   attachmentEvents.scanRejected = false;
   attachmentEvents.scanAccepted = true;
@@ -1511,6 +1512,7 @@ test("expired request attachments stay visible and require explicit removal", as
   await expect(page.getByText(/remove each expired file/i)).toBeVisible();
   await page.getByRole("button", { name: "Edit files" }).click();
   await page.getByRole("button", { name: "Remove" }).click();
+  await expect(page.locator(".portal-attachment-list article")).toHaveCount(0);
   expect(attachmentEvents.removed).toBe(true);
   await page.getByRole("button", { name: "Continue" }).click();
   await expect(page.getByRole("button", { name: "Submit request" })).toBeEnabled();
