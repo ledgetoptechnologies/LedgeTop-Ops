@@ -8,6 +8,7 @@ import { renderConfigs, REQUIRED_STAGING_CONFIG_VALUES, validateRenderedConfigs,
 const root = path.resolve(import.meta.dirname, "..");
 const operationsWorkspacePage = "/administration/client-portal/operations-workspaces";
 const productionOwnerPages = [
+  "/administration/client-portal/operations-recipients",
   "/administration/client-portal/operations-delivery-authority",
   operationsWorkspacePage,
   "/administration/client-portal/operations-billing-authority",

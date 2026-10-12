@@ -13,6 +13,10 @@ const base = {
   OPERATIONS_AUD: "d09e298c864b9c8f4491b4b42a4dbe2ecbf558b5868d18258443740e56032407",
   OPERATIONS_SESSION_SECRET: "s".repeat(32), OPS_DB: {},
   ASSETS: { fetch: vi.fn(async () => asset.clone()) },
+  OPERATIONS_PORTAL_NATIVE_RECIPIENT_AUTHORITY_DISPATCH_ENABLED: "true",
+  OPERATIONS_PORTAL_NATIVE_RECIPIENT_AUTHORITY: {
+    applyNativeAuthority: vi.fn(), getNativeAuthorityStatus: vi.fn(),
+  },
   OPERATIONS_PORTAL_NATIVE_DELIVERY_AUTHORITY_DISPATCH_ENABLED: "true",
   OPERATIONS_PORTAL_NATIVE_DELIVERY_CANCELLATION_ENABLED: "false",
   OPERATIONS_PORTAL_NATIVE_DELIVERY_AUTHORITY: {
@@ -49,15 +53,27 @@ describe("standard production native owner entrypoint", () => {
     ]));
   });
   it.each([
+    ["recipient", "/administration/client-portal/operations-recipients", "CLIENT_PORTAL_NATIVE_RECIPIENT_ENROLLMENT_ENABLED"],
     ["delivery", "/administration/client-portal/operations-delivery-authority", "OPERATIONS_PORTAL_NATIVE_DELIVERY_OWNER_ENABLED"],
     ["workspace", "/administration/client-portal/operations-workspaces", "OPERATIONS_PORTAL_WORKSPACE_OWNER_ENABLED"],
     ["billing", "/administration/client-portal/operations-billing-authority", "OPERATIONS_PORTAL_NATIVE_BILLING_OWNER_ENABLED"],
     ["billing permissions", "/administration/client-portal/operations-billing-permissions", "OPERATIONS_PORTAL_NATIVE_BILLING_OWNER_ENABLED"],
   ] as const)("keeps %s default-off and serves its asset only with the exact explicit flag", async (_name, path, flag) => {
-    expect((await send(path, { ...base, [flag]: "false" })).status).toBe(404);
-    const response = await send(path, { ...base, [flag]: "true" });
+    const enabled = flag === "CLIENT_PORTAL_NATIVE_RECIPIENT_ENROLLMENT_ENABLED"
+      ? { CLIENT_PORTAL_NATIVE_RECIPIENT_ENROLLMENT_ENABLED: "true", CLIENT_PORTAL_NATIVE_RECIPIENT_OWNER_ENABLED: "true" }
+      : { [flag]: "true" };
+    expect((await send(path, { ...base, ...enabled, [flag]: "false" })).status).toBe(404);
+    const response = await send(path, { ...base, ...enabled });
     expect(response.status).toBe(200);
     expect(await response.text()).toBe("owner asset");
+  });
+
+  it("fails closed when the recipient page has only one flag or an incomplete private binding", async () => {
+    const path = "/administration/client-portal/operations-recipients";
+    expect((await send(path, { ...base, CLIENT_PORTAL_NATIVE_RECIPIENT_ENROLLMENT_ENABLED: "true" })).status).toBe(404);
+    expect((await send(path, { ...base, CLIENT_PORTAL_NATIVE_RECIPIENT_ENROLLMENT_ENABLED: "true",
+      CLIENT_PORTAL_NATIVE_RECIPIENT_OWNER_ENABLED: "true",
+      OPERATIONS_PORTAL_NATIVE_RECIPIENT_AUTHORITY: { applyNativeAuthority: vi.fn() } as never })).status).toBe(404);
   });
 
   it("fails closed for a missing workspace RPC binding and a wrong request origin", async () => {

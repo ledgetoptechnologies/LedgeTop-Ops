@@ -19,6 +19,7 @@
       "/api/*",
       "/health",
       "/r/*",
+      "/administration/client-portal/operations-recipients",
       "/administration/client-portal/operations-delivery-authority",
       "/administration/client-portal/operations-workspaces",
       "/administration/client-portal/operations-billing-authority",

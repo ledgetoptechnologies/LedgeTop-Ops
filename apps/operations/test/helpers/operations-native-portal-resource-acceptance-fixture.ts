@@ -468,6 +468,7 @@ export async function runCanonicalPortalResourceAcceptance(onReady?:(context:Can
     const reader = { readNativeDeliveryAuthorization: (input: Parameters<typeof readOperationsPortalNativeDeliveryAuthorizationEntrypoint>[1]) =>
       readOperationsPortalNativeDeliveryAuthorizationEntrypoint({ OPS_DB: operations, ENVIRONMENT: "staging",
         EXPECTED_HOST: "ops-staging.ledgetopdroneservices.com",
+        PUBLIC_BASE_URL: "https://ops-staging.ledgetopdroneservices.com",
         OPERATIONS_PORTAL_NATIVE_DELIVERY_READER_ENABLED: "true" }, input) };
     const portalEnvironment = { DELIVERY_DB: client, DATA_BUCKET: bucket, ENVIRONMENT: "staging",
       CLIENT_PORTAL_ENABLED: "true", CLIENT_PORTAL_ORIGIN: portalOrigin,

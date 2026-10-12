@@ -77,15 +77,29 @@ describe("operations native delivery authorization reader", () => {
       .rejects.toThrow("authorization_denied");
   });
 
-  it("keeps both the reader and dispatcher staging/default-off", async () => {
+  it("admits the exact configured production reader and keeps malformed/default-off dispatch disabled", async () => {
     const fake = database(row);
     await expect(readOperationsPortalNativeDeliveryAuthorizationEntrypoint({ OPS_DB: fake.value,
       ENVIRONMENT: "production", EXPECTED_HOST: "ops.ledgetopdroneservices.com",
+      PUBLIC_BASE_URL: "https://ops.ledgetopdroneservices.com",
       OPERATIONS_PORTAL_NATIVE_DELIVERY_READER_ENABLED: "true" }, request))
+      .resolves.toContain('"ok":true');
+    expect(fake.prepare).toHaveBeenCalledTimes(1);
+    const malformed = database(row);
+    await expect(readOperationsPortalNativeDeliveryAuthorizationEntrypoint({ OPS_DB: malformed.value,
+      ENVIRONMENT: "production", EXPECTED_HOST: "ops.ledgetopdroneservices.com",
+      PUBLIC_BASE_URL: "https://other.example.test", OPERATIONS_PORTAL_NATIVE_DELIVERY_READER_ENABLED: "true" }, request))
       .resolves.toBe(JSON.stringify({ ok: false, protocolVersion: 1, code: "disabled" }));
-    expect(fake.prepare).not.toHaveBeenCalled();
+    expect(malformed.prepare).not.toHaveBeenCalled();
     await expect(dispatchStagedOperationsPortalNativeDeliveryAuthority({ OPS_DB: fake.value,
       ENVIRONMENT: "staging", EXPECTED_HOST: "ops-staging.ledgetopdroneservices.com",
+      PUBLIC_BASE_URL: "https://ops-staging.ledgetopdroneservices.com",
       OPERATIONS_PORTAL_NATIVE_DELIVERY_AUTHORITY_DISPATCH_ENABLED: "false" }, id(20))).resolves.toBeNull();
+    await expect(dispatchStagedOperationsPortalNativeDeliveryAuthority({ OPS_DB: fake.value,
+      ENVIRONMENT: "production", EXPECTED_HOST: "ops.ledgetopdroneservices.com",
+      PUBLIC_BASE_URL: "https://ops.ledgetopdroneservices.com",
+      OPERATIONS_PORTAL_NATIVE_DELIVERY_AUTHORITY_DISPATCH_ENABLED: "true",
+      OPERATIONS_PORTAL_NATIVE_DELIVERY_AUTHORITY: { applyNativeDeliveryAuthority: vi.fn() } as never }, id(20)))
+      .resolves.toBeNull();
   });
 });

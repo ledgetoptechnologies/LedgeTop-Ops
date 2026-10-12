@@ -10,7 +10,9 @@ import { reviewOperationsPortalNativeBillingCandidate, grantOperationsPortalNati
   from "./operations-portal-native-billing-authority-issuer";
 import { handleOperationsPortalWorkspaceOwnerHttp } from "./operations-portal-workspace-owner-http";
 import type { OperationsPortalWorkspacePublicationBinding } from "./operations-portal-workspace-publication-outbox";
+import type { OperationsPortalNativeRecipientAuthorityBinding } from "./operations-portal-native-recipient-authority-dispatch";
 
+const RECIPIENT_PAGE = "/administration/client-portal/operations-recipients";
 const DELIVERY_API = "/api/native-client-portal/operations-delivery-authority";
 const DELIVERY_PAGE = "/administration/client-portal/operations-delivery-authority";
 const WORKSPACE_API = "/api/native-client-portal/operations-workspaces";
@@ -20,6 +22,10 @@ const BILLING_PAGE = "/administration/client-portal/operations-billing-authority
 const BILLING_PERMISSION_PAGE = "/administration/client-portal/operations-billing-permissions";
 
 export type OperationsPortalNativeOwnerEnv = Env & OperationsPortalNativeDeliveryAuthorityDispatchEnv & {
+  CLIENT_PORTAL_NATIVE_RECIPIENT_ENROLLMENT_ENABLED?: string;
+  CLIENT_PORTAL_NATIVE_RECIPIENT_OWNER_ENABLED?: string;
+  OPERATIONS_PORTAL_NATIVE_RECIPIENT_AUTHORITY_DISPATCH_ENABLED?: string;
+  OPERATIONS_PORTAL_NATIVE_RECIPIENT_AUTHORITY?: OperationsPortalNativeRecipientAuthorityBinding;
   OPERATIONS_PORTAL_NATIVE_DELIVERY_OWNER_ENABLED?: string;
   OPERATIONS_PORTAL_NATIVE_BILLING_OWNER_ENABLED?: string;
   OPERATIONS_PORTAL_WORKSPACE_OWNER_ENABLED?: string;
@@ -31,7 +37,8 @@ const family = (pathname: string, base: string) => pathname === base || pathname
 const notFound = () => Response.json({ error: "Not found" }, { status: 404 });
 
 export function isOperationsPortalNativeOwnerPath(pathname: string): boolean {
-  return family(pathname, DELIVERY_API) || pathname === DELIVERY_PAGE
+  return pathname === RECIPIENT_PAGE
+    || family(pathname, DELIVERY_API) || pathname === DELIVERY_PAGE
     || family(pathname, WORKSPACE_API) || pathname === WORKSPACE_PAGE
     || family(pathname, BILLING_API) || pathname === BILLING_PAGE
     || family(pathname, OPERATIONS_NATIVE_BILLING_PERMISSION_OWNER_BASE) || pathname === BILLING_PERMISSION_PAGE;
@@ -41,18 +48,28 @@ export function isOperationsPortalNativeOwnerPath(pathname: string): boolean {
 export async function dispatchOperationsPortalNativeOwnerRequest(request: Request,
   env: OperationsPortalNativeOwnerEnv): Promise<Response | null> {
   const pathname = new URL(request.url).pathname;
+  const recipient = pathname === RECIPIENT_PAGE;
   const delivery = family(pathname, DELIVERY_API) || pathname === DELIVERY_PAGE;
   const workspace = family(pathname, WORKSPACE_API) || pathname === WORKSPACE_PAGE;
   const billing = family(pathname, BILLING_API) || pathname === BILLING_PAGE;
   const billingPermission = family(pathname, OPERATIONS_NATIVE_BILLING_PERMISSION_OWNER_BASE)
     || pathname === BILLING_PERMISSION_PAGE;
-  if (!delivery && !workspace && !billing && !billingPermission) return null;
+  if (!recipient && !delivery && !workspace && !billing && !billingPermission) return null;
 
   const origin = configuredDeploymentOrigin({ environment: env.ENVIRONMENT,
     origin: env.PUBLIC_BASE_URL, expectedHost: env.EXPECTED_HOST });
   if (!origin || new URL(request.url).origin !== origin) return notFound();
   const configuration = { enabled: true, issuer: env.TEAM_DOMAIN ?? "", staffAudience: env.OPERATIONS_AUD,
     origin, csrfSecret: env.OPERATIONS_SESSION_SECRET };
+
+  if (recipient) {
+    if (env.CLIENT_PORTAL_NATIVE_RECIPIENT_ENROLLMENT_ENABLED !== "true"
+      || env.CLIENT_PORTAL_NATIVE_RECIPIENT_OWNER_ENABLED !== "true"
+      || env.OPERATIONS_PORTAL_NATIVE_RECIPIENT_AUTHORITY_DISPATCH_ENABLED !== "true"
+      || typeof env.OPERATIONS_PORTAL_NATIVE_RECIPIENT_AUTHORITY?.applyNativeAuthority !== "function"
+      || typeof env.OPERATIONS_PORTAL_NATIVE_RECIPIENT_AUTHORITY?.getNativeAuthorityStatus !== "function") return notFound();
+    return env.ASSETS.fetch(request);
+  }
 
   if (delivery) {
     if (env.OPERATIONS_PORTAL_NATIVE_DELIVERY_OWNER_ENABLED !== "true") return notFound();

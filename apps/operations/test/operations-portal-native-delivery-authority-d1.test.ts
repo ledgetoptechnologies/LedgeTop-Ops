@@ -29,9 +29,11 @@ import { issueOperationsPortalNativeDeliveryAuthority, listOperationsPortalNativ
   cancelOperationsPortalNativeDeliveryAuthorityForOwner, readOperationsPortalNativeDeliveryAuthorityStatusForOwner,
   revokeOperationsPortalNativeDeliveryAuthority } from
   "../src/worker/operations-portal-native-delivery-authority-issuer";
-import { dispatchNextOperationsPortalNativeDeliveryAuthority } from
+import { dispatchNextOperationsPortalNativeDeliveryAuthority,
+  dispatchStagedOperationsPortalNativeDeliveryAuthority } from
   "../src/worker/operations-portal-native-delivery-authority-dispatch";
-import { readOperationsPortalNativeDeliveryAuthorization } from
+import { readOperationsPortalNativeDeliveryAuthorization,
+  readOperationsPortalNativeDeliveryAuthorizationEntrypoint } from
   "../src/worker/operations-portal-native-delivery-authority-reader";
 import { claimOperationsPortalNativeDeliveryRecoveryInvocation,
   reserveOperationsPortalNativeDeliveryRecoveryInvocation } from
@@ -437,6 +439,46 @@ describe("Ops native selected-folder authority against real 0152-0160 plus curre
     await reserveOperationsPortalNativeDeliveryRecoveryInvocation(operations, { invocationId: staleInvocationId,
       operationId: deliveryOperationId, authorityId: deliveryAuthorityId, expectedRevision: 1,
       reason: "Original manager began recovery", owner: originalAuthor });
+    const productionOperationId = id(), productionAuthorityId = id();
+    await expect(issueOperationsPortalNativeDeliveryAuthority(operations, { operationId: productionOperationId,
+      authorityId: productionAuthorityId, recipientBindingId: activeHome.recipientBindingId!,
+      folderReservationId: organizationFolder.reservationId, expectedRevision: 0,
+      expectedCandidateFingerprint: organizationCandidate.candidateFingerprint, features: ["file.download"],
+      expiresAt: future(1), reasonCode: "Production-shaped exact selected folder", owner: recoveryOwner() }))
+      .resolves.toMatchObject({ replayed: false, review: { state: "active", revision: 1 } });
+    await expect(dispatchStagedOperationsPortalNativeDeliveryAuthority({ OPS_DB: operations,
+      ENVIRONMENT: "production", EXPECTED_HOST: "ops.ledgetopdroneservices.com",
+      PUBLIC_BASE_URL: "https://ops.ledgetopdroneservices.com",
+      OPERATIONS_PORTAL_NATIVE_DELIVERY_AUTHORITY_DISPATCH_ENABLED: "true",
+      OPERATIONS_PORTAL_NATIVE_DELIVERY_AUTHORITY: deliveryBinding }, productionOperationId))
+      .resolves.toEqual({ operationId: productionOperationId, state: "acknowledged" });
+    const productionWire = await operations.prepare(`SELECT canonical_wire_json FROM
+      operations_portal_native_delivery_authority_outbox WHERE operation_id=?`).bind(productionOperationId)
+      .first<string>("canonical_wire_json");
+    const productionCommand = parseOperationsPortalNativeDeliveryAuthorityCommand(JSON.parse(productionWire!))!;
+    const productionRead = deliveryReadRequest(productionCommand);
+    await expect(readOperationsPortalNativeDeliveryAuthorizationEntrypoint({ OPS_DB: operations,
+      ENVIRONMENT: "production", EXPECTED_HOST: "ops.ledgetopdroneservices.com",
+      PUBLIC_BASE_URL: "https://ops.ledgetopdroneservices.com",
+      OPERATIONS_PORTAL_NATIVE_DELIVERY_READER_ENABLED: "true" }, productionRead))
+      .resolves.toContain(`"authorityId":"${productionAuthorityId}"`);
+    expect(await operations.prepare(`SELECT state FROM operations_portal_native_delivery_authority_outbox
+      WHERE operation_id=?`).bind(productionOperationId).first<string>("state")).toBe("acknowledged");
+    const productionRevokeOperationId = id();
+    await expect(revokeOperationsPortalNativeDeliveryAuthority(operations, { operationId: productionRevokeOperationId,
+      authorityId: productionAuthorityId, expectedRevision: 1, reasonCode: "Close production-shaped proof",
+      owner: recoveryOwner() })).resolves.toMatchObject({ replayed: false, review: { state: "revoked", revision: 2 } });
+    await expect(dispatchStagedOperationsPortalNativeDeliveryAuthority({ OPS_DB: operations,
+      ENVIRONMENT: "production", EXPECTED_HOST: "ops.ledgetopdroneservices.com",
+      PUBLIC_BASE_URL: "https://ops.ledgetopdroneservices.com",
+      OPERATIONS_PORTAL_NATIVE_DELIVERY_AUTHORITY_DISPATCH_ENABLED: "true",
+      OPERATIONS_PORTAL_NATIVE_DELIVERY_AUTHORITY: deliveryBinding }, productionRevokeOperationId))
+      .resolves.toEqual({ operationId: productionRevokeOperationId, state: "acknowledged" });
+    await expect(readOperationsPortalNativeDeliveryAuthorizationEntrypoint({ OPS_DB: operations,
+      ENVIRONMENT: "production", EXPECTED_HOST: "ops.ledgetopdroneservices.com",
+      PUBLIC_BASE_URL: "https://ops.ledgetopdroneservices.com",
+      OPERATIONS_PORTAL_NATIVE_DELIVERY_READER_ENABLED: "true" }, productionRead))
+      .resolves.toBe(JSON.stringify({ ok: false, protocolVersion: 1, code: "denied" }));
     await new Promise(resolve => setTimeout(resolve, 2_700));
     await reserveOperationsPortalNativeDeliveryRecoveryInvocation(operations, { invocationId: recoveryInvocationId,
       operationId: deliveryOperationId, authorityId: deliveryAuthorityId, expectedRevision: 1,
