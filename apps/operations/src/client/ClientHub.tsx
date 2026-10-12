@@ -593,8 +593,11 @@ function ClientWorkspace({ route, canReviewFeedback, invitationAccess, nativeDir
         {data.nativeDirectoryLinkedClients!.map(client => <option key={client.recordId} value={client.recordId}>{client.name}</option>)}
       </select></label>
       {linkedClientRecordId && data.nativeDirectoryLinkedClients!.some(client => client.recordId === linkedClientRecordId)
-        && <NativeDirectoryProfileEdit kind="client" recordId={linkedClientRecordId}
-          allowPreparedAttempt={isStagingNativeDirectoryProfilePreparationLocation(window.location)} />}
+        && <><NativeDirectoryProfileEdit kind="client" recordId={linkedClientRecordId}
+          allowPreparedAttempt={isStagingNativeDirectoryProfilePreparationLocation(window.location)} />
+          {nativeDirectoryBindingRefresh && data.client.source_id
+            && <NativeDirectoryBindingRefresh enabled recordId={linkedClientRecordId} sourceId={data.client.source_id} />}
+        </>}
     </Card>}
     <SourceBusinessParty key={revision} client={data.client} party={data.businessParty} canManage={data.canManageBusinessParties}
       contextSignal={collectionProps.contextSignal} onInvalidated={invalidate} onRefresh={refresh} />
