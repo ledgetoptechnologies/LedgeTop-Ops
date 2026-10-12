@@ -67,11 +67,12 @@ This is a current-state audit, not production approval. Historical successful te
 
 ## Next execution order
 
-1. Publish the reviewed combined successor after retaining terminal diagnostics for `38300828883`, then require fresh exact-head CI. Retain the separate full-schema local results; neither the old run nor local focused tests certify the new combined release.
-2. Recover/verify private live-attempt evidence, then finish the already-started automatic-sync acceptance with exact cleanup. No blind replay.
-3. Stage the combined operational candidate with preserved settings and run normal Directory/project adoption/create/edit/conflict-review flows.
-4. Complete paired Client enrollment, scoped financial/file reads, distinct-principal denial and revocation acceptance against the exact release pair.
-5. Prepare the owner's production PA update checkpoint from actual production read-only state: revisions, pending migrations, scoped credentials, configuration, backups and safe validation order.
+1. Retain terminal diagnostics for active exact-head CI `38304291256`; separately review the owner-exposure corrections before integrating them. Local rehearsal/CI additions and any further runtime correction require a fresh combined-head run.
+2. Recover and verify the real private prior-attempt evidence if restored. Otherwise prove current quiet state and terminal cleanup, then use an independently reviewed new current-head acceptance window with fresh artifacts; never reconstruct or replay the lost attempt.
+3. Stage the combined operational candidate with preserved settings and run normal Directory/project adoption/create/edit/conflict-review flows, including a real scalar edit, scheduler acknowledgement and canonical binding continuation with exact cleanup.
+4. In parallel, complete PA #199's exact baseline/bootstrap and 0106-to-0107 synthetic upgrade rehearsals and the real financial HTTP MySQL CI runner. Its current host-PHP runner cannot simply be added to CI, where PHP/vendor live in the built image: use an isolated disposable fixture and compatible image-mode runner with fail-on-skip enforcement.
+5. After exact PA runtime/schema attestation, complete paired Client enrollment, scoped financial/file reads, distinct-principal denial and same-session revocation acceptance against the exact release pair. Keep all production exposure off.
+6. Prepare the owner's production PA update checkpoint from actual production read-only state: final revisions, pending migrations, scoped credentials, configuration, backups and safe validation order. Only passing staging acceptance can open that checkpoint.
 
 Read-only ordered standard ledgers and historical Client schema are now retained in `production-migration-ledger-order-2026-10-12.md` and `production-client-historical-schema-2026-10-12.md`. These establish the historical renderer/backfill migrations ran before the current same-number privacy migration. A local ordered upgrade rehearsal is being implemented; this evidence does not authorize production migration application or reconstruct private production authority data.
 
