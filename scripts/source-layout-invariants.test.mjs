@@ -470,13 +470,14 @@ test("the deployed Client Worker keeps reviewed resources, hosts, and portal ass
 
 test("the deployed Operations Worker keeps catalog and inactive binding transport private and default-off", () => {
   // Newly mounted PA adoption and binding-refresh routes remain disabled in production by default.
-  assert.equal(normalizedSha256("apps/operations/wrangler.jsonc"), "d02f9fbdb53d2403e7ff47e9d2f06c0a95417c36e90ade0e13694e49aa62c43e");
+  assert.equal(normalizedSha256("apps/operations/wrangler.jsonc"), "cb460bc90a364c911ad798e35662980fad2111599c7b551b3cb0a427b0928cf6");
   const config = readJson("apps/operations/wrangler.jsonc");
-  for (const flag of ["PROJECT_ALPHA_API_V2_SYNC_ENABLED", "PROJECT_ALPHA_DIRECTORY_EXACT_ADOPTION_ENABLED", "PROJECT_ALPHA_PROJECT_V2_RECOVERY_ENABLED"]) {
+  for (const flag of ["PROJECT_ALPHA_API_V2_SYNC_ENABLED", "PROJECT_ALPHA_DIRECTORY_EXACT_ADOPTION_ENABLED", "PROJECT_ALPHA_PROJECT_V2_RECOVERY_ENABLED", "PROJECT_ALPHA_DIRECTORY_EXISTING_RECORD_ADOPTION_ENABLED", "PROJECT_ALPHA_PROJECT_ADOPTION_OPERATIONAL_ENABLED"]) {
     assert.equal([...read("apps/operations/wrangler.jsonc").matchAll(new RegExp(`"${flag}"\\s*:`, "g"))].length, 1);
   }
   assert.equal(config.vars.PROJECT_ALPHA_API_V2_SYNC_ENABLED, "false");
   assert.equal(config.vars.PROJECT_ALPHA_DIRECTORY_EXACT_ADOPTION_ENABLED, "false");
+  assert.equal(config.vars.PROJECT_ALPHA_DIRECTORY_EXISTING_RECORD_ADOPTION_ENABLED, "false");
   assert.equal(config.vars.PROJECT_ALPHA_PROJECT_V2_RECOVERY_ENABLED, "false");
   assert.equal(config.vars.PROJECT_ALPHA_DIRECTORY_CREATE_GENERATION_RECOVERY_ENABLED, "false");
   assert.equal(config.vars.PROJECT_ALPHA_DIRECTORY_RELATIONSHIP_GENERATION_RECOVERY_ENABLED, "false");
@@ -495,6 +496,7 @@ test("the deployed Operations Worker keeps catalog and inactive binding transpor
   assert.equal(config.vars.CLIENT_PORTAL_NATIVE_FINANCIAL_RPC_ENABLED, "false");
   assert.equal(config.vars.PROJECT_ALPHA_CATALOG_STAGING_COORDINATOR_ENABLED, "false");
   assert.equal(config.vars.PROJECT_ALPHA_PROJECT_ADOPTION_REVIEW_ENABLED, "false");
+  assert.equal(config.vars.PROJECT_ALPHA_PROJECT_ADOPTION_OPERATIONAL_ENABLED, "false");
   assert.equal(config.vars.PROJECT_ALPHA_PROJECT_ADOPTION_FINALIZATION_ENABLED, "false");
   assert.equal(config.vars.PROJECT_ALPHA_PROJECT_BINDING_REVISION_REFRESH_ENABLED, "false");
   assert.equal(config.vars.PROJECT_ALPHA_CATALOG_PROMOTION_COORDINATOR_ENABLED, "false");
