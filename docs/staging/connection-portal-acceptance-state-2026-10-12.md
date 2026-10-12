@@ -40,6 +40,9 @@ This is a current-state audit, not production approval. Historical successful te
 
 ## Evidence recovery and diagnostic limits
 
+- Fresh read-only provider/D1 recheck at approximately `2026-10-12T20:46Z` confirms the same staging release pair: Ops deployment `ca4959fa-7129-4a1e-8d64-522056a2a9e1` serves `a6fd8a5d-0c61-4e02-8885-6325f77e2236` at 100%; Client deployment `d29fdd1f-3d92-4c98-b071-b80dd14d4f8e` serves `e09964d3-4cc0-4eca-aaa8-dd386fbf624d` at 100%. Ops profile writes are true, outbox drain false, binding continuation true; standard migration count is 200.
+- The same bounded diagnostic found global Directory outbox counts of four acknowledged and one terminal, relationship outbox one terminal, and zero profile-binding dispatch rows. These three aggregates show no queued/live rows in those tables at inspection time, not complete authority/history reconciliation or end-to-end sync acceptance. No setting, record, grant or link was changed. The two private artifact folders were still absent at recheck.
+
 - Committed source from the removed worktrees has been recovered. Private, uncommitted `.private-releases` and `.tmp-checks` artifacts are still missing from the original checkout path; the owner is restoring them.
 - Recover the actual artifacts, verify hashes and private file permissions, and reconcile each prior attempt before resuming its live workflow. Do not fabricate an attestation or repeat an uncertain operation because its local marker disappeared.
 - A fresh hidden in-app tab restored browser interaction and verified the current Ops session. An attachment timeout on an older tab was not evidence that the account lacked permission.
