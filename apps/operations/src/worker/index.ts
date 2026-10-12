@@ -175,7 +175,8 @@ import { registerTeamAssignedWorkRoutes } from "./team-assigned-work";
 import { registerClientHubRoutes } from "./client-hub";
 import { registerOpsServiceManagementRoutes } from "./ops-service-management-routes";
 import { NATIVE_DIRECTORY_PROFILE_ROUTE, nativeDirectoryProfileWritesEnabled, registerNativeDirectoryProfileRoutes } from "./native-directory-profile-routes";
-import { DIRECTORY_BINDING_REFRESH_ROUTE, DIRECTORY_BINDING_REFRESH_PROTECTED_OWNER, directoryBindingRefreshEnabled } from './native-directory-binding-refresh';
+import { DIRECTORY_BINDING_REFRESH_ROUTE, DIRECTORY_BINDING_REFRESH_PROTECTED_OWNER, directoryBindingRefreshEnabled,
+  directoryBindingRefreshRecoveryEnabled } from './native-directory-binding-refresh';
 import { registerNativeDirectoryBindingRefreshRoutes } from './native-directory-binding-refresh-routes';
 import { directoryRelationshipRecoveryEnabled, isDirectoryRelationshipRecoveryPath,
   registerDirectoryRelationshipGenerationRecoveryRoutes } from "./project-alpha-directory-relationship-generation-recovery-routes";
@@ -959,7 +960,9 @@ app.get("/api/session", async (c) => {
       },
       nativeDirectoryProfileWrites: { enabled: nativeDirectoryProfileWritesEnabled(c.env) },
       nativeDirectoryBindingRefresh: { enabled: directoryBindingRefreshEnabled(c.env) && principal.id===DIRECTORY_BINDING_REFRESH_PROTECTED_OWNER
-        && administrator && integrationsManageScope.global && !integrationsManageScope.deniedGlobal },
+        && administrator && integrationsManageScope.global && !integrationsManageScope.deniedGlobal,
+        recoveryEnabled: directoryBindingRefreshRecoveryEnabled(c.env) && principal.id===DIRECTORY_BINDING_REFRESH_PROTECTED_OWNER
+          && administrator && integrationsManageScope.global && !integrationsManageScope.deniedGlobal },
       clientFeedback: { enabled: clientFeedbackEnabled },
       dropboxImport: dropboxImportCapability(c.env),
       incomingUploads: incomingUploadsCapability(c.env),

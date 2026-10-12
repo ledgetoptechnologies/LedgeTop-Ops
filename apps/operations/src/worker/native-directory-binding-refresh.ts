@@ -6,6 +6,7 @@ import { readConfiguredProjectAlphaDirectoryInventory, type ProjectAlphaDirector
 import { directoryMaterializationReadSource } from './project-alpha-directory-materialization-read-source';
 import { readNativeDirectoryDurableRemoteHead } from './native-directory-profile-writer';
 import { preflightProjectAlphaDirectoryBindingRevisionRefresh, sendProjectAlphaDirectoryBindingRevisionRefreshCommand, validatedProjectAlphaDirectoryBindingRevisionRefreshAcknowledgement,
+  reconcileProjectAlphaDirectoryBindingRevisionRefreshCommand,validatedProjectAlphaDirectoryBindingRevisionRefreshReconciliation,
   isProjectAlphaDirectoryBindingRevisionRefreshCommand, type ProjectAlphaDirectoryBindingRevisionRefreshCommand,
   type ProjectAlphaDirectoryBindingRevisionRefreshOutcome } from './project-alpha-directory-binding-revision-refresh-api-v2';
 
@@ -15,6 +16,9 @@ export const DIRECTORY_BINDING_REFRESH_ROUTE='/api/client-hub/directory/binding-
 export const DIRECTORY_BINDING_REFRESH_PROTECTED_OWNER='staff-beau-koltz';
 export function directoryBindingRefreshEnabled(env: Pick<Env,'ENVIRONMENT'|'NATIVE_DIRECTORY_BINDING_REFRESH_ENABLED'>): boolean {
   return env.NATIVE_DIRECTORY_BINDING_REFRESH_ENABLED==='true' && (env.ENVIRONMENT==='staging'||env.ENVIRONMENT==='local');
+}
+export function directoryBindingRefreshRecoveryEnabled(env:Pick<Env,'ENVIRONMENT'|'NATIVE_DIRECTORY_BINDING_REFRESH_ENABLED'|'NATIVE_DIRECTORY_BINDING_REFRESH_RECOVERY_ENABLED'>):boolean{
+  return directoryBindingRefreshEnabled(env)&&env.NATIVE_DIRECTORY_BINDING_REFRESH_RECOVERY_ENABLED==='true';
 }
 export class DirectoryBindingRefreshDenied extends Error { constructor(){super('directory_binding_refresh_denied');} }
 const deny=():never=>{throw new DirectoryBindingRefreshDenied();};
@@ -33,7 +37,9 @@ type Command=Mapping&{command_id:string;acknowledged_command_id:string;acknowled
   grant_generation:number;command_json:string;request_sha256:string;created_at:string};
 type Authority={grant_generation:number};
 export type DirectoryBindingRefreshReview={commandId:string;recordId:string;sourceId:string;localVersion:number;priorRevision:string;liveRevision:string};
-export type DirectoryBindingRefreshResult={commandId:string;status:'acknowledged'|'uncertain'|'blocked'|'conflict';revision?:string;inventoryRefreshRequired?:true;reason?:string;frozenCommandRetained?:true;latestAttemptSent?:false};
+export type DirectoryBindingRefreshRecoveryCandidate=DirectoryBindingRefreshReview&{recoveryCandidate:true;capturedAttempts:number};
+export type DirectoryBindingRefreshResult={commandId:string;status:'acknowledged'|'uncertain'|'blocked'|'conflict';revision?:string;inventoryRefreshRequired?:true;reason?:string;frozenCommandRetained?:true;latestAttemptSent?:false;successorCommandId?:string};
+export type DirectoryBindingRefreshRecoveryReview=DirectoryBindingRefreshReview&{supersededCommandId:string;capturedAttempts:number};
 const hash=async(value:string)=>Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(value))),x=>x.toString(16).padStart(2,'0')).join('');
 function applies(alias:string):string{return `(${alias}.scope_kind='global' OR ${alias}.scope_kind='resource' AND ${alias}.resource_id=c.record_id
   OR ${alias}.scope_kind='assigned' AND EXISTS(SELECT 1 FROM native_directory_assignments a WHERE a.record_id=c.record_id AND a.staff_id=c.actor_id AND a.active=1)
@@ -150,7 +156,7 @@ async function guarded(db:D1Database,c:Command,actor:Actor,statements:D1Prepared
     ...statements,db.prepare('DELETE FROM native_directory_active_binding_refresh_guards WHERE guard_id IN(?,?)').bind(id,`${id}:exists`)]);
   }catch(error){if(error instanceof Error&&/CHECK constraint failed: ok=1/u.test(error.message))return deny();throw error;}
 }
-export async function reviewDirectoryBindingRefresh(env:Env,actor:Actor,recordId:string,sourceId:string,send:typeof fetch=fetch):Promise<DirectoryBindingRefreshReview>{
+export async function reviewDirectoryBindingRefresh(env:Env,actor:Actor,recordId:string,sourceId:string,send:typeof fetch=fetch):Promise<DirectoryBindingRefreshReview|DirectoryBindingRefreshRecoveryCandidate|DirectoryBindingRefreshRecoveryReview>{
   if(!directoryBindingRefreshEnabled(env)||Date.parse(actor.verifiedUntil)<=Date.now())return deny();
   env={...env,OPS_DB:primary(env.OPS_DB)};
   const db=env.OPS_DB.withSession('first-primary'),m=await mapping(env.OPS_DB,recordId,sourceId),origin=configured(env,m);
@@ -172,10 +178,15 @@ export async function reviewDirectoryBindingRefresh(env:Env,actor:Actor,recordId
   if(pending.length>1)return deny();
   const live=await fresh(env,m,send);
   if(pending.length){const c=await load(env.OPS_DB,pending[0]!.command_id);
+    const successor=await loadSuccessor(env.OPS_DB,c.command_id);if(successor){if(!directoryBindingRefreshRecoveryEnabled(env))return deny();await guardedSuccessor(env.OPS_DB,successor,actor,[]);
+      return{...review(successor),supersededCommandId:successor.superseded_command_id,capturedAttempts:successor.captured_attempts};}
     const original=live.generation===c.authorization_generation&&live.item.binding!.resourceRevision===c.prior_revision;
     const replay=pending[0]!.attempts>0&&live.generation===(BigInt(c.authorization_generation)+1n).toString()&&live.item.binding!.resourceRevision===c.live_revision;
+    const recoverable=pending[0]!.attempts>0&&BigInt(live.generation)>BigInt(c.authorization_generation)&&live.item.binding!.resourceRevision===c.prior_revision;
     if(c.acknowledged_command_id!==ack.command_id||c.destination_origin!==origin||live.item.revision!==c.live_revision
-      ||live.item.projectionSha256!==c.projection_sha256||!original&&!replay)return deny();
+      ||live.item.projectionSha256!==c.projection_sha256||!original&&!replay&&!recoverable)return deny();
+    if(recoverable){if(!directoryBindingRefreshRecoveryEnabled(env)||actor.identity.staffId!==c.actor_id||actor.identity.verifiedAccessSubject!==c.access_subject||actor.identity.email!==c.actor_login_email)return deny();
+      return{...review(c),recoveryCandidate:true,capturedAttempts:pending[0]!.attempts};}
     await guarded(env.OPS_DB,c,actor,[]);return review(c);
   }
   if(live.item.revision!==ack.revision||BigInt(live.item.revision)<=BigInt(live.item.binding!.resourceRevision))return deny();
@@ -220,6 +231,9 @@ export async function settleDirectoryBindingRefresh(env:Env,actor:Actor,id:strin
 export async function executeDirectoryBindingRefresh(env:Env,actor:Actor,id:string,send:typeof fetch=fetch):Promise<DirectoryBindingRefreshResult>{
   if(!directoryBindingRefreshEnabled(env)||!UUID.test(id))return deny();
   env={...env,OPS_DB:primary(env.OPS_DB)};
+  const successor=await loadSuccessor(env.OPS_DB,id);
+  if(successor&&successor.superseded_command_id===id){await guardedSuccessor(env.OPS_DB,successor,actor,[]);
+    return{status:'conflict',commandId:id,reason:'terminally_superseded',successorCommandId:successor.command_id};}
   const c=await load(env.OPS_DB,id);
   if(configured(env,c)!==c.destination_origin||await hash(c.command_json)!==c.request_sha256)return deny();
   await guarded(env.OPS_DB,c,actor,[]);
@@ -251,5 +265,138 @@ export async function executeDirectoryBindingRefresh(env:Env,actor:Actor,id:stri
     preflightBlocked=sent.status!=='enabled'||(sent.value.status==='blocked'&&sent.value.reason==='preflight');
   }catch{/* A POST may have succeeded. Preserve its identity for an exact retry. */}
   await env.OPS_DB.prepare("UPDATE native_directory_active_binding_refresh_dispatch SET state='uncertain',lease_token=NULL,lease_until=NULL WHERE command_id=? AND state='leased' AND lease_token=?").bind(id,lease).run();
+  return{status:'uncertain',commandId:id,...(preflightBlocked?{reason:'refresh_capability_unavailable',frozenCommandRetained:true as const,latestAttemptSent:false as const}:{})};
+}
+
+type Supersession={successor_command_id:string;superseded_command_id:string;captured_attempts:number;reason:string;reconciliation_request_id:string;
+  reconciliation_response_json:string;reconciliation_response_sha256:string;observed_resource_revision:string;observed_resource_projection_sha256:string;
+  observed_binding_revision:string;observed_binding_projection_sha256:string;observed_authorization_generation:string;actor_id:string;access_subject:string;
+  actor_login_email:string;admission_version:number;profile_version:number;grant_generation:number;command_json:string;request_sha256:string;created_at:string};
+type SuccessorCommand=Command&{superseded_command_id:string;captured_attempts:number};
+const successorProjection=`old.record_id,old.source_id,old.source_instance_id,old.application_id,old.history_epoch_id,old.resource_type,
+  old.external_id,old.public_id,old.mapping_kind,old.mapping_provenance_id,old.local_version,s.successor_command_id command_id,
+  old.acknowledged_command_id,old.acknowledged_command_json,old.acknowledged_outcome_json,old.destination_origin,old.prior_revision,old.live_revision,
+  old.projection_sha256,s.observed_authorization_generation authorization_generation,s.actor_id,s.access_subject,s.actor_login_email,
+  s.admission_version,s.profile_version,s.grant_generation,s.command_json,s.request_sha256,s.created_at`;
+const recoveryAuthorityProjection=`old.record_id,old.source_id,old.source_instance_id,old.application_id,old.history_epoch_id,old.resource_type,
+  old.external_id,old.public_id,old.mapping_kind,old.mapping_provenance_id,old.local_version,old.command_id,old.acknowledged_command_id,
+  old.acknowledged_command_json,old.acknowledged_outcome_json,old.destination_origin,old.prior_revision,old.live_revision,old.projection_sha256,
+  old.authorization_generation,? actor_id,? access_subject,? actor_login_email,? admission_version,? profile_version,? grant_generation,
+  old.command_json,old.request_sha256,old.created_at`;
+async function loadSuccessor(db:D1Database,id:string):Promise<SuccessorCommand|null>{
+  const s=await db.prepare(`SELECT * FROM native_directory_active_binding_refresh_supersessions
+    WHERE successor_command_id=? OR superseded_command_id=? LIMIT 2`).bind(id,id).all<Supersession>();
+  if(s.results.length===0)return null;if(s.results.length!==1)return deny();const row=s.results[0]!,base=await load(db,row.superseded_command_id);
+  return{...base,command_id:row.successor_command_id,authorization_generation:row.observed_authorization_generation,actor_id:row.actor_id,
+    access_subject:row.access_subject,actor_login_email:row.actor_login_email,admission_version:row.admission_version,profile_version:row.profile_version,
+    grant_generation:row.grant_generation,command_json:row.command_json,request_sha256:row.request_sha256,created_at:row.created_at,
+    superseded_command_id:row.superseded_command_id,captured_attempts:row.captured_attempts};
+}
+async function guardedSuccessor(db:D1Database,c:SuccessorCommand,actor:Actor,statements:D1PreparedStatement[]):Promise<void>{
+  if(!actorMatches(actor,c))return deny();const id=crypto.randomUUID();
+  try{await db.batch([db.prepare(`INSERT INTO native_directory_active_binding_refresh_guards(guard_id,ok)
+    SELECT ?,CASE WHEN julianday(?)>julianday('now') AND c.command_id=? AND ${currentPredicate()} THEN 1 ELSE 0 END FROM(
+      SELECT ${successorProjection}
+      FROM native_directory_active_binding_refresh_supersessions s JOIN native_directory_active_binding_refresh_commands old
+        ON old.command_id=s.superseded_command_id WHERE s.successor_command_id=?) c`).bind(id,actor.verifiedUntil,c.command_id,c.command_id),
+    db.prepare(`INSERT INTO native_directory_active_binding_refresh_guards(guard_id,ok) VALUES(?,CASE WHEN EXISTS(
+      SELECT 1 FROM native_directory_active_binding_refresh_guards WHERE guard_id=?) THEN 1 ELSE 0 END)`).bind(`${id}:exists`,id),
+    ...statements,db.prepare('DELETE FROM native_directory_active_binding_refresh_guards WHERE guard_id IN(?,?)').bind(id,`${id}:exists`)]);
+  }catch(error){if(error instanceof Error&&/CHECK constraint failed: ok=1/u.test(error.message))return deny();throw error;}
+}
+
+/** Explicit, read-only PA reconciliation followed by one atomic local terminal
+ * marker and successor reservation. It never POSTs the refresh command. */
+export async function reviewDirectoryBindingRefreshRecovery(env:Env,actor:Actor,supersededCommandId:string,send:typeof fetch=fetch):Promise<DirectoryBindingRefreshRecoveryReview>{
+  if(!directoryBindingRefreshRecoveryEnabled(env)||!UUID.test(supersededCommandId)||Date.parse(actor.verifiedUntil)<=Date.now())return deny();
+  env={...env,OPS_DB:primary(env.OPS_DB)};const db=env.OPS_DB;
+  const existing=await loadSuccessor(db,supersededCommandId);if(existing){await guardedSuccessor(db,existing,actor,[]);return{...review(existing),supersededCommandId:existing.superseded_command_id,capturedAttempts:existing.captured_attempts};}
+  const old=await load(db,supersededCommandId);
+  if(actor.identity.staffId!==old.actor_id||actor.identity.verifiedAccessSubject!==old.access_subject||actor.identity.email!==old.actor_login_email
+    ||Date.parse(actor.verifiedUntil)<=Date.now())return deny();
+  const dispatch=await db.prepare(`SELECT state,attempts,lease_token,lease_until FROM native_directory_active_binding_refresh_dispatch WHERE command_id=?`)
+    .bind(old.command_id).first<{state:string;attempts:number;lease_token:string|null;lease_until:number|null}>();
+  if(!dispatch||dispatch.state!=='uncertain'||dispatch.attempts<1||dispatch.lease_token!==null||dispatch.lease_until!==null)return deny();
+  const generation=await db.prepare('SELECT generation grant_generation FROM native_directory_grant_generations WHERE staff_id=?').bind(actor.identity.staffId).first<Authority>();if(!generation)return deny();
+  const admitted=await db.prepare(`WITH c AS(SELECT ? actor_id,? access_subject,? actor_login_email,? admission_version,? profile_version,? grant_generation,? record_id)
+    SELECT 1 ok FROM c WHERE ${authoritySql} AND julianday(?)>julianday('now')`).bind(actor.identity.staffId,actor.identity.verifiedAccessSubject,
+      actor.identity.email,actor.admissionVersion,actor.identity.profileVersion,generation.grant_generation,old.record_id,actor.verifiedUntil).first();if(!admitted)return deny();
+  if(configured(env,old)!==old.destination_origin||await hash(old.command_json)!==old.request_sha256)return deny();
+  let frozen:unknown;try{frozen=JSON.parse(old.command_json);}catch{return deny();}if(!isProjectAlphaDirectoryBindingRevisionRefreshCommand(frozen))return deny();
+  const outcome=await withEnabledConfiguredProjectAlphaApiV2Connection(env,old.source_id,connection=>
+    reconcileProjectAlphaDirectoryBindingRevisionRefreshCommand(connection,old.resource_type,frozen,old.request_sha256,send));
+  if(outcome.status!=='enabled'||outcome.value.status!=='reconciled')return deny();const evidence=validatedProjectAlphaDirectoryBindingRevisionRefreshReconciliation(outcome.value);if(!evidence)return deny();
+  const observed=evidence.response.observation;if(evidence.destinationOrigin!==old.destination_origin||JSON.stringify(evidence.command)!==old.command_json
+    ||evidence.response.status!=='terminal_conflict'||evidence.response.acknowledgement!==null||observed.resource.type!==old.resource_type
+    ||observed.resource.id!==old.external_id||observed.resource.revision!==old.live_revision||observed.resource.projectionSha256!==old.projection_sha256
+    ||observed.binding.publicId!==old.public_id||observed.binding.revision!==old.prior_revision
+    ||BigInt(observed.authorizationGeneration)<=BigInt(old.authorization_generation))return deny();
+  const successorCommandId=crypto.randomUUID(),command:ProjectAlphaDirectoryBindingRevisionRefreshCommand={commandId:successorCommandId,externalId:old.external_id,
+    expectedPriorRevision:old.prior_revision,expectedLiveRevision:old.live_revision,expectedAuthorizationGeneration:observed.authorizationGeneration};
+  if(!isProjectAlphaDirectoryBindingRevisionRefreshCommand(command))return deny();const body=JSON.stringify(command),response=JSON.stringify(evidence.response);
+  const values=[successorCommandId,old.command_id,dispatch.attempts,'remote_receipt_absent_generation_advanced',evidence.response.requestId,response,await hash(response),
+    observed.resource.revision,observed.resource.projectionSha256,observed.binding.revision,observed.binding.projectionSha256,observed.authorizationGeneration,
+    actor.identity.staffId,actor.identity.verifiedAccessSubject,actor.identity.email,actor.admissionVersion,actor.identity.profileVersion,generation.grant_generation,body,await hash(body)];
+  const guard=crypto.randomUUID();
+  try{await db.batch([db.prepare(`INSERT INTO native_directory_active_binding_refresh_guards(guard_id,ok)
+      WITH c AS(SELECT ${recoveryAuthorityProjection}
+        FROM native_directory_active_binding_refresh_commands old WHERE old.command_id=?)
+      SELECT ?,CASE WHEN julianday(?)>julianday('now') AND ${currentPredicate()} AND EXISTS(
+        SELECT 1 FROM native_directory_active_binding_refresh_dispatch d WHERE d.command_id=c.command_id AND d.state='uncertain'
+          AND d.attempts=? AND d.lease_token IS NULL AND d.lease_until IS NULL)
+        AND NOT EXISTS(SELECT 1 FROM native_directory_active_binding_refresh_receipts r WHERE r.command_id=c.command_id)
+        AND NOT EXISTS(SELECT 1 FROM native_directory_active_binding_refresh_supersessions s WHERE s.superseded_command_id=c.command_id)
+        THEN 1 ELSE 0 END FROM c`).bind(actor.identity.staffId,actor.identity.verifiedAccessSubject,actor.identity.email,actor.admissionVersion,
+          actor.identity.profileVersion,generation.grant_generation,old.command_id,guard,actor.verifiedUntil,dispatch.attempts),
+    db.prepare(`INSERT INTO native_directory_active_binding_refresh_supersessions(successor_command_id,superseded_command_id,captured_attempts,reason,
+      reconciliation_request_id,reconciliation_response_json,reconciliation_response_sha256,observed_resource_revision,observed_resource_projection_sha256,
+      observed_binding_revision,observed_binding_projection_sha256,observed_authorization_generation,actor_id,access_subject,actor_login_email,
+      admission_version,profile_version,grant_generation,command_json,request_sha256) VALUES(${values.map(()=>'?').join(',')})`).bind(...values),
+    db.prepare("INSERT INTO native_directory_active_binding_refresh_successor_dispatch(command_id,state) VALUES(?,'pending')").bind(successorCommandId),
+    db.prepare('DELETE FROM native_directory_active_binding_refresh_guards WHERE guard_id=?').bind(guard)]);
+  }catch{
+    const winner=await loadSuccessor(db,old.command_id);if(!winner)return deny();await guardedSuccessor(db,winner,actor,[]);
+    return{...review(winner),supersededCommandId:winner.superseded_command_id,capturedAttempts:winner.captured_attempts};
+  }
+  return{commandId:successorCommandId,supersededCommandId:old.command_id,recordId:old.record_id,sourceId:old.source_id,localVersion:old.local_version,
+    priorRevision:old.prior_revision,liveRevision:old.live_revision,capturedAttempts:dispatch.attempts};
+}
+
+async function settleDirectoryBindingRefreshSuccessor(env:Env,actor:Actor,c:SuccessorCommand,lease:string,outcome:ProjectAlphaDirectoryBindingRevisionRefreshOutcome):Promise<DirectoryBindingRefreshResult>{
+  const evidence=validatedProjectAlphaDirectoryBindingRevisionRefreshAcknowledgement(outcome);if(!evidence||JSON.stringify(evidence.command)!==c.command_json
+    ||evidence.destinationOrigin!==c.destination_origin||evidence.response.result.binding.publicId!==c.public_id)return deny();
+  const response=JSON.stringify(evidence.response),guard=crypto.randomUUID();
+  await guardedSuccessor(env.OPS_DB,c,actor,[env.OPS_DB.prepare(`INSERT INTO native_directory_active_binding_refresh_guards(guard_id,ok) VALUES(?,CASE WHEN EXISTS(
+      SELECT 1 FROM native_directory_active_binding_refresh_successor_dispatch WHERE command_id=? AND state='leased' AND lease_token=? AND lease_until>unixepoch('now')) THEN 1 ELSE 0 END)`).bind(guard,c.command_id,lease),
+    env.OPS_DB.prepare(`INSERT INTO native_directory_active_binding_refresh_successor_receipts(command_id,response_json,response_sha256,pa_request_id,authorization_generation) VALUES(?,?,?,?,?)`)
+      .bind(c.command_id,response,await hash(response),evidence.response.requestId,evidence.response.result.binding.authorizationGeneration),
+    env.OPS_DB.prepare("UPDATE native_directory_active_binding_refresh_successor_dispatch SET state='acknowledged',lease_token=NULL,lease_until=NULL WHERE command_id=? AND lease_token=?").bind(c.command_id,lease),
+    env.OPS_DB.prepare('DELETE FROM native_directory_active_binding_refresh_guards WHERE guard_id=?').bind(guard)]);
+  return{status:'acknowledged',commandId:c.command_id,revision:c.live_revision,inventoryRefreshRequired:true};
+}
+
+export async function executeDirectoryBindingRefreshSuccessor(env:Env,actor:Actor,id:string,send:typeof fetch=fetch):Promise<DirectoryBindingRefreshResult>{
+  if(!directoryBindingRefreshRecoveryEnabled(env)||!UUID.test(id))return deny();env={...env,OPS_DB:primary(env.OPS_DB)};
+  const c=await loadSuccessor(env.OPS_DB,id);if(!c||c.command_id!==id)return deny();
+  if(configured(env,c)!==c.destination_origin||await hash(c.command_json)!==c.request_sha256)return deny();await guardedSuccessor(env.OPS_DB,c,actor,[]);
+  if(await env.OPS_DB.prepare('SELECT 1 FROM native_directory_active_binding_refresh_successor_receipts WHERE command_id=?').bind(id).first())
+    return{status:'acknowledged',commandId:id,revision:c.live_revision,inventoryRefreshRequired:true};
+  if((await acknowledgedHead(env.OPS_DB,c,c.destination_origin)).command_id!==c.acknowledged_command_id)return deny();
+  const state=await env.OPS_DB.prepare('SELECT state,attempts FROM native_directory_active_binding_refresh_successor_dispatch WHERE command_id=?').bind(id).first<{state:string;attempts:number}>();if(!state)return deny();
+  const live=await fresh(env,c,send),binding=live.item.binding!,initial=live.generation===c.authorization_generation&&binding.resourceRevision===c.prior_revision,
+    replay=state.attempts>0&&live.generation===(BigInt(c.authorization_generation)+1n).toString()&&binding.resourceRevision===c.live_revision;
+  if(live.item.revision!==c.live_revision||live.item.projectionSha256!==c.projection_sha256||!initial&&!replay)return{status:'blocked',commandId:id,reason:'frozen_remote_head_or_generation_changed'};
+  let command:unknown;try{command=JSON.parse(c.command_json);}catch{return deny();}if(!isProjectAlphaDirectoryBindingRevisionRefreshCommand(command))return deny();
+  const preflight=await withEnabledConfiguredProjectAlphaApiV2Connection(env,c.source_id,connection=>preflightProjectAlphaDirectoryBindingRevisionRefresh(connection,c.resource_type,send));
+  if(preflight.status!=='enabled'||preflight.value.status!=='verified')return{status:state.attempts>0?'uncertain':'blocked',commandId:id,reason:'refresh_capability_unavailable',frozenCommandRetained:true,latestAttemptSent:false};
+  const lease=crypto.randomUUID(),guard=crypto.randomUUID();
+  try{await guardedSuccessor(env.OPS_DB,c,actor,[env.OPS_DB.prepare(`UPDATE native_directory_active_binding_refresh_successor_dispatch SET state='leased',lease_token=?,lease_until=unixepoch('now')+60,attempts=attempts+1
+      WHERE command_id=? AND state<>'acknowledged' AND (state<>'leased' OR lease_until<=unixepoch('now'))`).bind(lease,id),
+    env.OPS_DB.prepare(`INSERT INTO native_directory_active_binding_refresh_guards(guard_id,ok) VALUES(?,CASE WHEN EXISTS(SELECT 1 FROM native_directory_active_binding_refresh_successor_dispatch WHERE command_id=? AND lease_token=?) THEN 1 ELSE 0 END)`).bind(guard,id,lease),
+    env.OPS_DB.prepare('DELETE FROM native_directory_active_binding_refresh_guards WHERE guard_id=?').bind(guard)]);}catch{return{status:'conflict',commandId:id};}
+  let preflightBlocked=false;try{const sent=await withEnabledConfiguredProjectAlphaApiV2Connection(env,c.source_id,connection=>sendProjectAlphaDirectoryBindingRevisionRefreshCommand(connection,c.resource_type,command,send));
+    if(sent.status==='enabled'&&sent.value.status==='acknowledged')return await settleDirectoryBindingRefreshSuccessor(env,actor,c,lease,sent.value);
+    preflightBlocked=sent.status!=='enabled'||sent.value.status==='blocked'&&sent.value.reason==='preflight';}catch{/* preserve exact successor for replay */}
+  await env.OPS_DB.prepare("UPDATE native_directory_active_binding_refresh_successor_dispatch SET state='uncertain',lease_token=NULL,lease_until=NULL WHERE command_id=? AND state='leased' AND lease_token=?").bind(id,lease).run();
   return{status:'uncertain',commandId:id,...(preflightBlocked?{reason:'refresh_capability_unavailable',frozenCommandRetained:true as const,latestAttemptSent:false as const}:{})};
 }

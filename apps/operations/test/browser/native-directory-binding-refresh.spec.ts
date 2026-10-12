@@ -8,6 +8,7 @@ const bundle = buildSync({ entryPoints: [fileURLToPath(new URL("./native-directo
 const script=bundle.outputFiles.find(file=>file.path.endsWith(".js"))!.text;
 const style=bundle.outputFiles.find(file=>file.path.endsWith(".css"))?.text ?? "";
 const commandId="11111111-1111-4111-8111-111111111111";
+const successorId="22222222-2222-4222-8222-222222222222";
 const calls = (page: Page) => page.evaluate(() => (window as Window & { bindingCalls?: Array<{path:string;body:unknown}> }).bindingCalls ?? []);
 async function render(page: Page, scenario="acknowledged") {
   await page.setContent('<meta name="viewport" content="width=device-width, initial-scale=1"><div id="root"></div>');
@@ -108,4 +109,41 @@ test("duplicate activation cannot reserve or dispatch a second command",async({p
   await expect(page.getByRole("status")).toContainText("acknowledged");
   expect((await calls(page)).filter(call=>call.path.endsWith("/review"))).toHaveLength(1);
   expect((await calls(page)).filter(call=>call.path.endsWith("/execute"))).toHaveLength(1);
+});
+
+test('incident reload exposes reconciliation without retrying the obsolete command and executes only its reviewed successor',async({page})=>{
+  await render(page,'recovery-candidate');await review(page);
+  await expect(page.getByRole('button',{name:'Retry same binding refresh',exact:true})).toHaveCount(0);
+  await page.getByRole('button',{name:'Review terminal conflict without retry',exact:true}).click();
+  await page.getByRole('dialog',{name:'Confirm action'}).getByRole('button',{name:'Confirm',exact:true}).click();
+  await expect(page.getByRole('button',{name:'Confirm reviewed successor',exact:true})).toBeVisible();
+  await page.getByRole('button',{name:'Confirm reviewed successor',exact:true}).click();
+  await page.getByRole('dialog',{name:'Confirm action'}).getByRole('button',{name:'Confirm',exact:true}).click();
+  await expect(page.getByRole('status')).toContainText('acknowledged');
+  expect(await calls(page)).toEqual([
+    {path:'/api/client-hub/directory/binding-revisions/review',body:{recordId:'client-one',sourceId:'project-alpha:primary'}},
+    {path:'/api/client-hub/directory/binding-revisions/recovery-review',body:{commandId,confirm:true}},
+    {path:'/api/client-hub/directory/binding-revisions/recovery-execute',body:{commandId:successorId,confirm:true}},
+  ]);
+});
+
+test('reload after a reserved successor restores its recovery identity',async({page})=>{
+  await render(page,'recovery-reserved-reload');await review(page);
+  await expect(page.getByRole('button',{name:'Confirm reviewed successor',exact:true})).toBeVisible();
+  await page.getByRole('button',{name:'Confirm reviewed successor',exact:true}).click();
+  await page.getByRole('dialog',{name:'Confirm action'}).getByRole('button',{name:'Confirm',exact:true}).click();
+  expect((await calls(page))[1]).toEqual({path:'/api/client-hub/directory/binding-revisions/recovery-execute',body:{commandId:successorId,confirm:true}});
+});
+
+test('a lost recovery-review response keeps the predecessor terminal and resolves to the same single successor',async({page})=>{
+  await render(page,'recovery-lost');await review(page);
+  for(let attempt=0;attempt<2;attempt++){
+    await page.getByRole('button',{name:'Review terminal conflict without retry',exact:true}).click();
+    await page.getByRole('dialog',{name:'Confirm action'}).getByRole('button',{name:'Confirm',exact:true}).click();
+    if(attempt===0)await expect(page.getByRole('alert')).toContainText('was not retried');
+  }
+  await expect(page.getByRole('button',{name:'Confirm reviewed successor',exact:true})).toBeVisible();
+  const recovery=(await calls(page)).filter(call=>call.path.endsWith('/recovery-review'));
+  expect(recovery).toEqual([{path:'/api/client-hub/directory/binding-revisions/recovery-review',body:{commandId,confirm:true}},
+    {path:'/api/client-hub/directory/binding-revisions/recovery-review',body:{commandId,confirm:true}}]);
 });

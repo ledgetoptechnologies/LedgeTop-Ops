@@ -7,7 +7,8 @@ import { splitD1MigrationStatements } from '../../client/test/helpers/d1-migrati
 import { migrateProjectOrganizationFullSchema } from '../../../scripts/staging-project-organization-fullschema-migrations.mjs';
 import { writeNativeDirectoryProfile, type NativeDirectoryCreateWrite } from '../src/worker/native-directory-profile-writer';
 import { dispatchProjectAlphaDirectoryProfileOutboxCommand } from '../src/worker/project-alpha-directory-profile-outbox-dispatcher';
-import { reviewDirectoryBindingRefresh, executeDirectoryBindingRefresh, settleDirectoryBindingRefresh } from '../src/worker/native-directory-binding-refresh';
+import { reviewDirectoryBindingRefresh, executeDirectoryBindingRefresh, settleDirectoryBindingRefresh,
+  reviewDirectoryBindingRefreshRecovery,executeDirectoryBindingRefreshSuccessor } from '../src/worker/native-directory-binding-refresh';
 import type { Env } from '../src/worker/types';
 import type { AuthenticatedNativeStaffWithAdmissionVersion } from '../src/worker/native-staff-auth';
 import { readConfiguredProjectAlphaDirectoryInventory } from '../src/worker/project-alpha-directory-inventory-api-v2';
@@ -22,7 +23,7 @@ const source='11111111-1111-4111-8111-111111111111';
 const application='22222222-2222-4222-8222-222222222222', epoch='33333333-3333-4333-8333-333333333333';
 const origin='https://pa.example.test', staffId='staff-beau-koltz';
 const profile={name:'Refresh fixture',generalEmail:'fixture@example.test',generalPhone:'512-555-0100',addressLine1:'1 Main',addressLine2:'',city:'Austin',state:'Texas',postalCode:'78701',country:'US'};
-const env=()=>({OPS_DB:db,ENVIRONMENT:'local',NATIVE_DIRECTORY_BINDING_REFRESH_ENABLED:'true',PROJECT_ALPHA_API_V2_CONNECTIONS:JSON.stringify({version:1,instances:{[sourceId]:{sourceId,enabled:true,baseUrl:origin,apiKey:'fixture-secret',sourceInstanceId:source,applicationId:application,historyEpoch:epoch}}})}) as Env;
+const env=()=>({OPS_DB:db,ENVIRONMENT:'local',NATIVE_DIRECTORY_BINDING_REFRESH_ENABLED:'true',NATIVE_DIRECTORY_BINDING_REFRESH_RECOVERY_ENABLED:'true',PROJECT_ALPHA_API_V2_CONNECTIONS:JSON.stringify({version:1,instances:{[sourceId]:{sourceId,enabled:true,baseUrl:origin,apiKey:'fixture-secret',sourceInstanceId:source,applicationId:application,historyEpoch:epoch}}})}) as Env;
 const actor=():AuthenticatedNativeStaffWithAdmissionVersion=>({identity:{kind:'native',staffId,verifiedAccessSubject:'access|owner',email:'owner@example.test',displayName:'Owner',profileVersion:1},admissionVersion:1,verifiedUntil:new Date(Date.now()+3600000).toISOString()});
 function json(value:unknown,status=200){return new Response(JSON.stringify(value),{status,headers:{'Content-Type':'application/json; charset=utf-8','Cache-Control':'no-store','X-Request-ID':(value as {requestId:string}).requestId}});}
 const envelope={sourceInstanceId:source,applicationId:application,historyEpoch:epoch,requestId:'44444444-4444-4444-8444-444444444444'};
@@ -43,7 +44,7 @@ beforeAll(async()=>{
   }
   expect(await db.prepare("SELECT count(*) n FROM project_alpha_api_v2_inventory_conflicts WHERE source_id=? AND inventory_kind='directory' AND resource_type='source' AND conflict_kind='authorization_generation_regressed'").bind(sourceId).first('n')).toBe(1);
   const directory=new URL('../migrations/',import.meta.url);
-  for(const name of readdirSync(directory).filter(name=>/^\d{4}_.+\.sql$/.test(name)&&name.slice(0,4)>'0161'&&name.slice(0,4)<='0199').sort()){
+  for(const name of readdirSync(directory).filter(name=>/^\d{4}_.+\.sql$/.test(name)&&name.slice(0,4)>'0161'&&name.slice(0,4)<='0200').sort()){
     await db.batch([...splitD1MigrationStatements(readFileSync(new URL(name,directory),'utf8')).map(sql=>db.prepare(sql)),db.prepare('INSERT INTO d1_migrations(name) VALUES(?)').bind(name)]);
   }
   await db.batch([
@@ -102,6 +103,122 @@ it('keeps automatic authority default off and impossible in production',async()=
   expect(await dispatchNativeDirectoryProfileBindingContinuation(env(),sourceId,f.commandId,f.send)).toMatchObject({status:'blocked',reason:'disabled'});
   expect(await dispatchNativeDirectoryProfileBindingContinuation({...automaticEnv(),ENVIRONMENT:'production'},sourceId,f.commandId,f.send)).toMatchObject({status:'blocked',reason:'disabled'});
   expect(f.send).not.toHaveBeenCalled();
+});
+
+async function uncertainRecoveryFixture(options:{attempts?:number;authorizationGeneration?:string;priorRevision?:string;liveRevision?:string}={}){
+  const attempts=options.attempts??1,authorizationGeneration=options.authorizationGeneration??'1',priorRevision=options.priorRevision??'1',liveRevision=options.liveRevision??'2';
+  const f=await fixture(true,liveRevision);f.setFresh({generation:authorizationGeneration,binding:priorRevision,revision:liveRevision});
+  const reviewed=await reviewDirectoryBindingRefresh(env(),actor(),f.recordId,sourceId,f.send);
+  const uncertain=vi.fn<typeof fetch>(async(url,init)=>{
+    const path=new URL(String(url)).pathname;
+    if(path.endsWith('/bindings/revisions/commands'))throw new Error('lost response');
+    return f.send(url,init);
+  });
+  for(let attempt=0;attempt<attempts;attempt++)expect(await executeDirectoryBindingRefresh(env(),actor(),reviewed.commandId,uncertain)).toMatchObject({status:'uncertain'});
+  const old=await db.prepare('SELECT command_json,request_sha256,projection_sha256,prior_revision,live_revision,authorization_generation FROM native_directory_active_binding_refresh_commands WHERE command_id=?')
+    .bind(reviewed.commandId).first<{command_json:string;request_sha256:string;projection_sha256:string;prior_revision:string;live_revision:string;authorization_generation:string}>();if(!old)throw new Error('missing frozen command');
+  await db.prepare("UPDATE native_directory_grants SET active=0 WHERE id='refresh-global-0'").run();
+  await db.prepare("UPDATE native_directory_grants SET active=1 WHERE id='refresh-global-0'").run();
+  const observedGeneration=(BigInt(old.authorization_generation)+1n).toString();f.setFresh({generation:observedGeneration,binding:old.prior_revision,revision:old.live_revision});
+  const requestId=randomUUID(),reconcilePath='/api/v2/directory/organizations/bindings/revisions/commands/reconcile';
+  const terminal={...envelope,requestId,status:'terminal_conflict' as const,command:{commandId:reviewed.commandId,requestSha256:old.request_sha256},
+    observation:{resource:{type:'organization' as const,id:f.recordId,revision:old.live_revision,projectionSha256:old.projection_sha256},
+      binding:{publicId:f.publicId,revision:old.prior_revision,projectionSha256:'d'.repeat(64)},authorizationGeneration:observedGeneration},acknowledgement:null};
+  const reconciliationCapabilities={...capabilities(),requestId,implementedEndpoints:[capabilities().implementedEndpoints[0],
+    {method:'POST',path:reconcilePath,requiredCapability:'directory.organizations.binding.revision.refresh',requiresSourceInstanceId:true,requiresApplicationId:true,requiresHistoryEpoch:true}]};
+  const recovery=vi.fn<typeof fetch>(async url=>new URL(String(url)).pathname.endsWith('/capabilities')?json(reconciliationCapabilities):json(terminal));
+  return{f,reviewed,old,terminal,recovery};
+}
+
+async function directSupersession(x:Awaited<ReturnType<typeof uncertainRecoveryFixture>>,response:Record<string,unknown>,command:Record<string,unknown>){
+  const id=String(command.commandId),generation=await db.prepare('SELECT generation FROM native_directory_grant_generations WHERE staff_id=?').bind(staffId).first<number>('generation');
+  return db.prepare(`INSERT INTO native_directory_active_binding_refresh_supersessions(successor_command_id,superseded_command_id,captured_attempts,reason,
+    reconciliation_request_id,reconciliation_response_json,reconciliation_response_sha256,observed_resource_revision,observed_resource_projection_sha256,
+    observed_binding_revision,observed_binding_projection_sha256,observed_authorization_generation,actor_id,access_subject,actor_login_email,
+    admission_version,profile_version,grant_generation,command_json,request_sha256) VALUES(${Array.from({length:20},()=>'?').join(',')})`).bind(
+      id,x.reviewed.commandId,1,'remote_receipt_absent_generation_advanced',String(response.requestId),JSON.stringify(response),'e'.repeat(64),'2',x.old.projection_sha256,
+      '1','d'.repeat(64),'2',staffId,'access|owner','owner@example.test',1,1,generation,JSON.stringify(command),'f'.repeat(64)).run();
+}
+
+it('records one terminal conflict and successor without rewriting the uncertain predecessor, then executes only the successor',async()=>{
+  const x=await uncertainRecoveryFixture(),before=await db.prepare('SELECT * FROM native_directory_active_binding_refresh_dispatch WHERE command_id=?').bind(x.reviewed.commandId).first();
+  const candidate=await reviewDirectoryBindingRefresh(env(),actor(),x.f.recordId,sourceId,x.f.send);
+  expect(candidate).toEqual({...x.reviewed,recoveryCandidate:true,capturedAttempts:1});expect(x.f.posts).toEqual([]);
+  const successor=await reviewDirectoryBindingRefreshRecovery(env(),actor(),x.reviewed.commandId,x.recovery);
+  expect(successor).toMatchObject({supersededCommandId:x.reviewed.commandId,capturedAttempts:1,priorRevision:'1',liveRevision:'2'});
+  expect(await db.prepare('SELECT * FROM native_directory_active_binding_refresh_dispatch WHERE command_id=?').bind(x.reviewed.commandId).first()).toEqual(before);
+  expect(await db.prepare('SELECT observed_authorization_generation,captured_attempts FROM native_directory_active_binding_refresh_supersessions WHERE successor_command_id=?')
+    .bind(successor.commandId).first()).toEqual({observed_authorization_generation:'2',captured_attempts:1});
+  const authority=await db.prepare(`SELECT old.grant_generation old_generation,s.grant_generation fresh_generation
+    FROM native_directory_active_binding_refresh_supersessions s JOIN native_directory_active_binding_refresh_commands old ON old.command_id=s.superseded_command_id
+    WHERE s.successor_command_id=?`).bind(successor.commandId).first<{old_generation:number;fresh_generation:number}>();
+  expect(authority?.fresh_generation).toBe((authority?.old_generation??0)+2);
+  expect(await reviewDirectoryBindingRefresh(env(),actor(),x.f.recordId,sourceId,x.f.send)).toEqual(successor);
+  const stateProbe=vi.fn<typeof fetch>();
+  await expect(executeDirectoryBindingRefresh(env(),{...actor(),identity:{...actor().identity,verifiedAccessSubject:'access|foreign'}},x.reviewed.commandId,stateProbe))
+    .rejects.toThrow('directory_binding_refresh_denied');expect(stateProbe).not.toHaveBeenCalled();
+  expect(await executeDirectoryBindingRefresh(env(),actor(),x.reviewed.commandId,x.f.send)).toEqual({status:'conflict',commandId:x.reviewed.commandId,
+    reason:'terminally_superseded',successorCommandId:successor.commandId});
+  expect(await executeDirectoryBindingRefreshSuccessor(env(),actor(),successor.commandId,x.f.send)).toMatchObject({status:'acknowledged',revision:'2'});
+  expect(await db.prepare('SELECT state,attempts FROM native_directory_active_binding_refresh_successor_dispatch WHERE command_id=?').bind(successor.commandId).first())
+    .toEqual({state:'acknowledged',attempts:1});
+  const refreshed=await readConfiguredProjectAlphaDirectoryInventory(env(),sourceId,{type:'organization',cursor:null,limit:200},x.f.send);
+  expect(refreshed.status).toBe('observed');if(refreshed.status!=='observed')throw new Error('missing successor inventory');
+  expect((await persistProjectAlphaDirectoryInventoryPage(db,refreshed.inventory,null)).status).toBe('persisted');
+  const next={...x.f.update,mutationId:randomUUID(),expectedLocalVersion:2,profile:{...profile,name:'Post-successor profile'},
+    destinations:x.f.update.destinations.map(destination=>({...destination,expectedAuthorizationGeneration:'3'}))};
+  const written=await writeNativeDirectoryProfile(db,next);expect(written.status).toBe('written');if(written.status!=='written')throw new Error(written.reason);
+  const profileSend=vi.fn<typeof fetch>(async(url,init)=>{
+    if(new URL(String(url)).pathname.endsWith('/capabilities'))return json(capabilities());const body=JSON.parse(String(init?.body));
+    return json({...envelope,requestId:randomUUID(),replayed:false,result:{resource:{type:'organization',publicId:x.f.publicId,revision:'3'},
+      authorizationGeneration:body.expectedAuthorizationGeneration}});
+  });
+  expect(await dispatchProjectAlphaDirectoryProfileOutboxCommand(env(),sourceId,written.commandIds[0]!,profileSend)).toMatchObject({status:'acknowledged',revision:'3'});
+  let continuationBinding='2',continuationGeneration='3';
+  const continuation=vi.fn<typeof fetch>(async(url,init)=>{const path=new URL(String(url)).pathname;
+    if(path.endsWith('/capabilities'))return json(capabilities());
+    if(path.endsWith('/inventory'))return json({...envelope,requestId:randomUUID(),authorizationGeneration:continuationGeneration,resources:[{type:'organization',publicId:x.f.publicId,
+      revision:'3',present:true,lastAction:'upsert',projectionSha256:'9'.repeat(64),binding:{externalId:x.f.recordId,status:'active',resourceRevision:continuationBinding}}],nextCursor:null});
+    const body=JSON.parse(String(init?.body));continuationBinding='3';continuationGeneration=(BigInt(body.expectedAuthorizationGeneration)+1n).toString();
+    return json({...envelope,requestId:randomUUID(),replayed:false,result:{resource:{type:'organization',id:x.f.recordId,revision:'3'},
+      binding:{publicId:x.f.publicId,previousRevision:'2',authorizationGeneration:continuationGeneration}}});});
+  expect(await dispatchNativeDirectoryProfileBindingContinuation(automaticEnv(),sourceId,written.commandIds[0]!,continuation)).toEqual({status:'acknowledged'});
+  expect(await db.prepare('PRAGMA foreign_key_check').all()).toMatchObject({results:[]});
+},30000);
+
+it('keeps unresolved reconciliation read-only and recovery default-off',async()=>{
+  const x=await uncertainRecoveryFixture(),unresolved={...x.terminal,status:'unresolved' as const};
+  const send=vi.fn<typeof fetch>(async url=>new URL(String(url)).pathname.endsWith('/capabilities')?x.recovery(url):json(unresolved));
+  await expect(reviewDirectoryBindingRefreshRecovery(env(),actor(),x.reviewed.commandId,send)).rejects.toThrow('directory_binding_refresh_denied');
+  await expect(reviewDirectoryBindingRefreshRecovery({...env(),NATIVE_DIRECTORY_BINDING_REFRESH_RECOVERY_ENABLED:undefined},actor(),x.reviewed.commandId,x.recovery)).rejects.toThrow('directory_binding_refresh_denied');
+  expect(await db.prepare('SELECT count(*) n FROM native_directory_active_binding_refresh_supersessions WHERE superseded_command_id=?').bind(x.reviewed.commandId).first('n')).toBe(0);
+});
+
+it('rolls back when current authority changes after PA terminal evidence and converges concurrent reviews to one successor',async()=>{
+  const drift=await uncertainRecoveryFixture(),drifting=vi.fn<typeof fetch>(async(url,init)=>{
+    if(new URL(String(url)).pathname.endsWith('/reconcile')){
+      await db.prepare("UPDATE native_directory_grants SET active=0 WHERE id='refresh-global-1'").run();
+      await db.prepare("UPDATE native_directory_grants SET active=1 WHERE id='refresh-global-1'").run();
+    }return drift.recovery(url,init);
+  });
+  await expect(reviewDirectoryBindingRefreshRecovery(env(),actor(),drift.reviewed.commandId,drifting)).rejects.toThrow('directory_binding_refresh_denied');
+  expect(await db.prepare('SELECT count(*) n FROM native_directory_active_binding_refresh_supersessions WHERE superseded_command_id=?').bind(drift.reviewed.commandId).first('n')).toBe(0);
+  const concurrent=await uncertainRecoveryFixture(),results=await Promise.all([
+    reviewDirectoryBindingRefreshRecovery(env(),actor(),concurrent.reviewed.commandId,concurrent.recovery),
+    reviewDirectoryBindingRefreshRecovery(env(),actor(),concurrent.reviewed.commandId,concurrent.recovery),
+  ]);
+  expect(results[0]!.commandId).toBe(results[1]!.commandId);
+  expect(await db.prepare('SELECT count(*) n FROM native_directory_active_binding_refresh_supersessions WHERE superseded_command_id=?').bind(concurrent.reviewed.commandId).first('n')).toBe(1);
+},30000);
+
+it('durably rejects foreign reconciliation identity and a successor command with extra keys',async()=>{
+  const foreign=await uncertainRecoveryFixture(),foreignId=randomUUID(),foreignCommand={commandId:foreignId,externalId:foreign.f.recordId,expectedPriorRevision:'1',expectedLiveRevision:'2',expectedAuthorizationGeneration:'2'};
+  await expect(directSupersession(foreign,{...foreign.terminal,sourceInstanceId:randomUUID()},foreignCommand)).rejects.toThrow('active binding refresh supersession is not exact');
+  await expect(directSupersession(foreign,{...foreign.terminal,privateError:'no'},foreignCommand)).rejects.toThrow();
+  const extra=await uncertainRecoveryFixture(),extraId=randomUUID(),extraCommand={commandId:extraId,externalId:extra.f.recordId,expectedPriorRevision:'1',expectedLiveRevision:'2',expectedAuthorizationGeneration:'2',retry:true};
+  await expect(directSupersession(extra,{...extra.terminal,command:{commandId:extra.reviewed.commandId,requestSha256:extra.old.request_sha256}},extraCommand)).rejects.toThrow();
+  expect(await db.prepare('SELECT count(*) n FROM native_directory_active_binding_refresh_supersessions WHERE superseded_command_id IN(?,?)')
+    .bind(foreign.reviewed.commandId,extra.reviewed.commandId).first('n')).toBe(0);
 });
 it('completes an already aligned binding without POST',async()=>{
   const f=await fixture(true);f.setFresh({binding:'2'});
@@ -520,6 +637,24 @@ it('denies a newly effective resource inventory conflict before POST',async()=>{
     conflict_kind,observed_revision,details_json) VALUES(?,?,?,?,'directory','organization',?,?,?,?,
     'revision_reuse_mismatch','2','{}')`).bind(sourceId,source,application,epoch,f.publicId,f.recordId,randomUUID(),randomUUID()).run();
   await expect(executeDirectoryBindingRefresh(env(),actor(),review.commandId,f.send)).rejects.toThrow();expect(f.posts).toEqual([]);
+},30000);
+
+it('recovers the exact two-attempt generation-60 incident shape under renewed staff authority',async()=>{
+  const x=await uncertainRecoveryFixture({attempts:2,authorizationGeneration:'60',priorRevision:'3',liveRevision:'4'});
+  const successor=await reviewDirectoryBindingRefreshRecovery(env(),actor(),x.reviewed.commandId,x.recovery);
+  expect(successor).toMatchObject({supersededCommandId:x.reviewed.commandId,capturedAttempts:2,priorRevision:'3',liveRevision:'4'});
+  const durable=await db.prepare(`SELECT s.captured_attempts,s.observed_authorization_generation,s.observed_resource_revision,s.observed_binding_revision,
+    old.authorization_generation old_authorization_generation,old.grant_generation old_grant_generation,s.grant_generation fresh_grant_generation
+    FROM native_directory_active_binding_refresh_supersessions s JOIN native_directory_active_binding_refresh_commands old
+      ON old.command_id=s.superseded_command_id WHERE s.successor_command_id=?`).bind(successor.commandId).first<{captured_attempts:number;observed_authorization_generation:string;
+        observed_resource_revision:string;observed_binding_revision:string;old_authorization_generation:string;old_grant_generation:number;fresh_grant_generation:number}>();
+  expect(durable).toMatchObject({
+      captured_attempts:2,observed_authorization_generation:'61',observed_resource_revision:'4',observed_binding_revision:'3',
+      old_authorization_generation:'60',
+    });
+  expect(durable?.fresh_grant_generation).toBe((durable?.old_grant_generation??0)+2);
+  expect(await db.prepare('SELECT state,attempts FROM native_directory_active_binding_refresh_dispatch WHERE command_id=?').bind(x.reviewed.commandId).first())
+    .toEqual({state:'uncertain',attempts:2});
 },30000);
 
 // Global protected-owner policy is intentionally changed only in the last case.
