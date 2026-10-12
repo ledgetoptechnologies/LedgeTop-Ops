@@ -133,6 +133,26 @@ describe("Ops-native recipient owner HTTP boundary", () => {
     calls.auth.mockResolvedValue({ ...actor, identity: { ...actor.identity, verifiedAccessSubject: "access|other" } });
     expect((await handle(request("intents", issue(), csrf), d)).status).toBe(403); expect(calls.issue).not.toHaveBeenCalled();
   });
+  it("does not accept CSRF tokens minted for the other configured deployment origin", async () => {
+    const staging = deps(), stagingToken = await token(staging);
+    const production = { ...staging, environment: "production", expectedHost: "ops.example.test",
+      configuration: { ...staging.configuration, origin: "https://ops.example.test",
+        recipientOrigin: "https://portal.example.test" } };
+    const productionRequest = (csrfToken?: string) => new Request(
+      "https://ops.example.test/api/native-client-portal/operations-recipient-enrollment/intents", {
+        method: "POST", headers: { Origin: "https://ops.example.test", "Sec-Fetch-Site": "same-origin",
+          "X-Native-Staff-Request": "1", "Content-Type": "application/json",
+          ...(csrfToken ? { "X-CSRF-Token": csrfToken } : {}) }, body: JSON.stringify(issue()),
+      });
+    expect((await handle(productionRequest(stagingToken), production)).status).toBe(403);
+    const productionSession = await handle(new Request(
+      "https://ops.example.test/api/native-client-portal/operations-recipient-enrollment/session", {
+        headers: { Origin: "https://ops.example.test", "Sec-Fetch-Site": "same-origin", "X-Native-Staff-Request": "1" },
+      }), production);
+    const productionToken = (await productionSession.json() as { csrfToken: string }).csrfToken;
+    expect((await handle(request("intents", issue(), productionToken), staging)).status).toBe(403);
+    expect(calls.issue).not.toHaveBeenCalled();
+  });
   it("rejects malformed identifiers, revision ambiguity, GET mutations and query tokens", async () => {
     const d = deps(), csrf = await token(d);
     expect((await handle(request(`intents/${intentId}/confirm`), d)).status).toBe(404);

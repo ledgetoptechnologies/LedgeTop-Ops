@@ -1,12 +1,12 @@
 import { beforeEach, expect, it, vi } from "vitest";
 
 vi.mock("cloudflare:workers", () => ({ WorkerEntrypoint: class {} }));
-const calls = vi.hoisted(() => ({ inspect: vi.fn() }));
+const calls = vi.hoisted(() => ({ inspect: vi.fn(), redeem: vi.fn() }));
 vi.mock("../src/worker/operations-portal-native-recipient-authority", () => ({
   inspectOperationsPortalNativeRecipientIntent: calls.inspect,
-  redeemOperationsPortalNativeRecipientIntent: vi.fn(),
+  redeemOperationsPortalNativeRecipientIntent: calls.redeem,
 }));
-import { inspectOperationsPortalNativeRecipientEnrollmentRpc } from
+import { inspectOperationsPortalNativeRecipientEnrollmentRpc, redeemOperationsPortalNativeRecipientEnrollmentRpc } from
   "../src/worker/operations-portal-native-recipient-enrollment-entrypoint";
 
 const intentId = "10000000-0000-4000-8000-000000000000";
@@ -48,4 +48,26 @@ it.each([
   { protocolVersion: 1, intentId, opaqueToken: token });
   expect(JSON.parse(wire)).toEqual({ ok: false, protocolVersion: 1, code: "unavailable" });
   expect(calls.inspect).not.toHaveBeenCalled();
+});
+
+it("inspects and redeems through the named RPC in an exact production deployment", async () => {
+  calls.inspect.mockResolvedValue({ intentId, revision: 1, state: "issued",
+    target: { targetId, targetRevision: 1, clientRecordId: "client:one" }, principal: null,
+    recipientBindingId: null, expiresAt });
+  calls.redeem.mockResolvedValue({ review: { intentId, revision: 2, state: "pending" } });
+  const first = vi.fn().mockResolvedValue("Example Client");
+  const env = { OPS_DB: { withSession: vi.fn().mockReturnValue({ prepare: vi.fn().mockReturnValue({
+    bind: vi.fn().mockReturnValue({ first }),
+  }) }) } as unknown as D1Database, ENVIRONMENT: "production", EXPECTED_HOST: "ops.example.test",
+    PUBLIC_BASE_URL: "https://ops.example.test", TEAM_DOMAIN: "https://team.cloudflareaccess.com",
+    CLIENT_PORTAL_NATIVE_RECIPIENT_ENROLLMENT_ENABLED: "true" } as const;
+  expect(JSON.parse(await inspectOperationsPortalNativeRecipientEnrollmentRpc(env,
+    { protocolVersion: 1, intentId, opaqueToken: token }))).toMatchObject({ intentId, state: "issued" });
+  const operationId = "30000000-0000-4000-8000-000000000000";
+  expect(JSON.parse(await redeemOperationsPortalNativeRecipientEnrollmentRpc(env, { protocolVersion: 1,
+    intentId, opaqueToken: token, operationId, acknowledged: true,
+    acknowledgedTarget: { targetId, targetRevision: 1, clientRecordId: "client:one" },
+    principal: { issuer: env.TEAM_DOMAIN, subject: "access|recipient" }, recipientLabel: "person@example.test",
+    verifiedUntil: expiresAt }))).toEqual({ intentId, revision: 2, state: "pending" });
+  expect(calls.redeem).toHaveBeenCalledOnce();
 });
