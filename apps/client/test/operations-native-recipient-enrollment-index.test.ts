@@ -39,6 +39,17 @@ describe("standard Client Worker native recipient enrollment mount", () => {
   });
 
   it.each([
+    { CLIENT_PORTAL_ENABLED: undefined },
+    { CLIENT_PORTAL_ENABLED: "false" },
+    { CLIENT_PORTAL_NATIVE_RECIPIENT_ENROLLMENT_ENABLED: undefined },
+  ])("keeps consent absent with missing or disabled normal-route flags %#", async overrides => {
+    expect((await worker.fetch(session(), env(overrides), execution)).status).toBe(404);
+    expect(calls.proof).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { overrides: { OPERATIONS_PORTAL_NATIVE_RECIPIENT_ENROLLMENT: { inspectNativeEnrollment: vi.fn() } }, status: 503 },
+    { overrides: { OPERATIONS_PORTAL_NATIVE_RECIPIENT_ENROLLMENT: { redeemNativeEnrollment: vi.fn() } }, status: 503 },
     { overrides: { OPERATIONS_PORTAL_NATIVE_RECIPIENT_ENROLLMENT: undefined }, status: 503 },
     { overrides: { ENVIRONMENT: "development" }, status: 503 },
     { overrides: { CLIENT_PORTAL_ORIGIN: "https://other.example.test" }, status: 404 },

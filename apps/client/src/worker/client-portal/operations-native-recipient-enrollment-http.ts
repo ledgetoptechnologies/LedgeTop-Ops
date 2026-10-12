@@ -128,7 +128,9 @@ export async function handleOperationsNativeRecipientEnrollmentHttp(request: Req
     origin = new URL(configured);
   }
   catch { return response({ error: "Unavailable" }, 503); }
-  if (dependencies.csrfSecret.length < 32 || dependencies.csrfSecret.length > 512 || !dependencies.binding)
+  if (dependencies.csrfSecret.length < 32 || dependencies.csrfSecret.length > 512
+    || typeof dependencies.binding?.inspectNativeEnrollment !== "function"
+    || typeof dependencies.binding?.redeemNativeEnrollment !== "function")
     return response({ error: "Unavailable" }, 503);
   const presentedOrigin = request.headers.get("Origin");
   if (url.origin !== origin.origin || (request.method === "GET" ? presentedOrigin !== null && presentedOrigin !== origin.origin : presentedOrigin !== origin.origin)

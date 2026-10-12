@@ -41,6 +41,19 @@ describe("standard Operations Worker native recipient enrollment mount", () => {
   });
 
   it.each([
+    { CLIENT_PORTAL_NATIVE_RECIPIENT_OWNER_ENABLED: undefined },
+    { CLIENT_PORTAL_NATIVE_RECIPIENT_ENROLLMENT_ENABLED: undefined },
+    { CLIENT_PORTAL_NATIVE_RECIPIENT_ENROLLMENT_ENABLED: "false" },
+  ])("keeps enrollment absent with missing or disabled normal-route flags %#", async overrides => {
+    expect((await worker.fetch(session(), env(overrides), execution)).status).toBe(404);
+    expect(calls.auth).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { OPERATIONS_PORTAL_NATIVE_RECIPIENT_AUTHORITY_DISPATCH_ENABLED: undefined },
+    { OPERATIONS_PORTAL_NATIVE_RECIPIENT_AUTHORITY_DISPATCH_ENABLED: "false" },
+    { OPERATIONS_PORTAL_NATIVE_RECIPIENT_AUTHORITY: { applyNativeAuthority: vi.fn() } },
+    { OPERATIONS_PORTAL_NATIVE_RECIPIENT_AUTHORITY: { getNativeAuthorityStatus: vi.fn() } },
     { OPERATIONS_PORTAL_NATIVE_RECIPIENT_AUTHORITY: undefined },
     { ENVIRONMENT: "development" },
     { PUBLIC_BASE_URL: "https://other.example.test" },
