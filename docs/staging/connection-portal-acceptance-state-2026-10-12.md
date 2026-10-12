@@ -5,9 +5,9 @@ This is a current-state audit, not production approval. Historical successful te
 ## Release identities
 
 - PA connection candidate: draft PR #198, `5c07268f1633e4d712bb31bcecabd2b55f14a00c`; five GitHub checks passed on recheck.
-- Combined Ops candidate: draft PR #156, published head `596dc8ab30fc14b42e0945098b75ea37776428b9`, based on `007617483d64425e6e16664273d9c7344731d82c`.
-- Reviewed local correction: `298c8418076938a7ea24d91baae5dc8d28cc06bd`. This updates the exact source-contract configuration pin for the two reviewed default-off operational flags and asserts their uniqueness/default-false values. It does not enable a feature.
-- CI run `38297498664` is for the published head, not the local correction. All four desktop/mobile browser jobs, Client application, ops-sync, incoming pickup and thumbnail jobs passed. Ops application tests remain running; source-invariants failed at the stale hash in the first repository-contract step. A new exact-head run is required after the correction is published.
+- Combined Ops candidate: draft PR #156, published head `6c1b93e18eb33b84e70fe50309cf9fccc253eccc`, based on `007617483d64425e6e16664273d9c7344731d82c`.
+- Published correction `298c8418076938a7ea24d91baae5dc8d28cc06bd` updates the exact source-contract configuration pin for the two reviewed default-off operational flags and asserts their uniqueness/default-false values. It does not enable a feature. Correction `6c1b93e1` explicitly allows the independently reviewed operational finalizer importer while retaining the low-level adapter restrictions and adding assertions for the existing flag, authenticated identity, owner, permission, idempotency and current-context gates. It changes a test, not runtime authorization.
+- CI run `38297498664` at prior head `596dc8ab` finished: all four desktop/mobile browser jobs, Client application, ops-sync, incoming pickup and thumbnail jobs passed. Ops application tests passed 4,366/4,367; its only failure was the stale finalizer importer assertion. Source-invariants failed at the stale hash in the first repository-contract step. Both are corrected above; fresh exact-head run `38300828883` is active and is not yet a passing release result.
 - Last provider-verified staging pair: Ops `a6fd8a5d-0c61-4e02-8885-6325f77e2236`, Client `e09964d3-4cc0-4eca-aaa8-dd386fbf624d`. These are distinct from the combined source candidate above. Automatic outbox dispatch remains paused in that verified configuration.
 
 ## Acceptance matrix
@@ -29,6 +29,8 @@ This is a current-state audit, not production approval. Historical successful te
 - Three browser-context acceptance/principal-observation scripts: 30 tests passed.
 - Real Miniflare/D1 fixtures substantiate permission removal, revocation and revoke/regrant ABA behavior. Sequenced mocks substantiate mapping/authority changes during an in-flight read. These are deterministic local tests, not live remote acceptance.
 - First CI repository-contract command rerun locally on the correction: 211 total, 208 passed, zero failed, three Windows symlink-policy skips.
+- Finalizer import-graph and operational adoption route tests on the published correction: 12/12 passed. Independent source review found the operational route to be an authorized second importer, not a runtime bypass.
+- Remaining 19 contract commands passed with exactly seven full-schema test-file arguments excluded: 623 total, 614 passed, zero failed, nine Windows-policy skips. The seven excluded files are running separately at concurrency one; this partial local evidence does not replace complete Linux CI.
 - Earlier combined-candidate evidence remains in `connection-assembly-2026-10-12.md`; do not add these counts to historical reruns and present the sum as unique coverage.
 
 ## Evidence recovery and diagnostic limits
@@ -47,7 +49,7 @@ This is a current-state audit, not production approval. Historical successful te
 
 ## Next execution order
 
-1. Retain terminal diagnostics from the active CI run, publish the reviewed correction, and require all checks on the resulting exact revision.
+1. Require all checks on published correction `6c1b93e1` in run `38300828883`, and retain the separate full-schema local results. The prior run's terminal diagnostics have been retained and both failed contracts corrected.
 2. Recover/verify private live-attempt evidence, then finish the already-started automatic-sync acceptance with exact cleanup. No blind replay.
 3. Stage the combined operational candidate with preserved settings and run normal Directory/project adoption/create/edit/conflict-review flows.
 4. Complete paired Client enrollment, scoped financial/file reads, distinct-principal denial and revocation acceptance against the exact release pair.
