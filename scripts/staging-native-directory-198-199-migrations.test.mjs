@@ -75,6 +75,10 @@ test("dry-run pins exact Ops staging 198-to-199 chain and performs no I/O", asyn
     { name: "0199_native_directory_profile_binding_continuations.sql", sha256: "056007062980460404fe85093cb796b855b91c23351a323457e91d5b053a2006" },
   ]);
   assert.deepEqual(plan.migrations, result.migrations);
+  assert.equal(plan.finalNames.length, 199);
+  assert.equal(plan.finalNames.at(-1), "0199_native_directory_profile_binding_continuations.sql");
+  assert.equal(plan.finalNames.includes("0200_native_directory_active_binding_refresh_supersessions.sql"), false,
+    "the frozen 198-to-199 constructor cannot become a 199-to-200 plan");
   assert.equal(result.mutationsPerformed, false);
 });
 
@@ -114,9 +118,9 @@ test("wrong target, extra SQL, and source drift fail closed", async () => {
     fs.mkdirSync(destination, { recursive: true });
     fs.cpSync(path.join(root, "apps/operations/migrations"), destination, { recursive: true });
     assert.equal(buildNativeDirectory198To199Plan(temporary).finalNames.length, 199);
-    fs.writeFileSync(path.join(destination, "0200_unreviewed.sql"), "SELECT 1;\n", { flag: "wx" });
-    assert.throws(() => buildNativeDirectory198To199Plan(temporary), /exact 0199 source profile|exact current Operations bootstrap inventory/u);
-    fs.unlinkSync(path.join(destination, "0200_unreviewed.sql"));
+    fs.writeFileSync(path.join(destination, "0201_unreviewed.sql"), "SELECT 1;\n", { flag: "wx" });
+    assert.throws(() => buildNativeDirectory198To199Plan(temporary), /exact current Operations source inventory/u);
+    fs.unlinkSync(path.join(destination, "0201_unreviewed.sql"));
     const last = path.join(destination, SPEC.suffix[0].name);
     fs.appendFileSync(last, "\n-- local drift\n");
     assert.throws(() => buildNativeDirectory198To199Plan(temporary), /content drifted/u);

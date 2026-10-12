@@ -92,4 +92,12 @@ describe("reviewed release migration fixtures", () => {
       .toThrow("reviewed-operations-migration-physical-inventory-mismatch");
     expect(reviewedOperationsMigrationNames(operations.url, { rejectExtras: false })).toHaveLength(199);
   });
+
+  it("validates the exact appended 0200 source independently without granting it historical-chain authority", () => {
+    const operations = copyMigrations("operations");
+    writeFileSync(join(operations.directory, "0200_native_directory_active_binding_refresh_supersessions.sql"), "-- changed current source\n");
+    expect(() => reviewedOperationsMigrationNames(operations.url))
+      .toThrow("reviewed-operations-current-source-content-contract-mismatch");
+    expect(reviewedOperationsMigrationNames(operations.url, { rejectExtras: false })).toHaveLength(199);
+  });
 });

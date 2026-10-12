@@ -853,7 +853,8 @@
         "0196_native_directory_maintenance_authority.sql",
         "0197_operations_portal_native_delivery_cancellation_checkpoint_scope.sql",
         "0198_native_directory_active_binding_revision_refresh.sql",
-        "0199_native_directory_profile_binding_continuations.sql"
+        "0199_native_directory_profile_binding_continuations.sql",
+        "0200_native_directory_active_binding_refresh_supersessions.sql"
       ],
       "appliedToStaging": false,
       "listEvidenceRef": "<EVIDENCE_REFERENCE>",

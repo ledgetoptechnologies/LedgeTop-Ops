@@ -197,7 +197,7 @@ test("checked-in canonical 0002 migrations remain the reviewed source shapes", (
   assert.match(sourceOperations, /staff-beau-koltz/);
 });
 
-test("builds the complete checked-in 149/199 chains with both Client 0199 filenames", () => {
+test("validates the complete checked-in source and builds only the authorized Client 149 and Operations 199 chains", () => {
   const base = fixture();
   const artifacts = buildArtifacts(base, owner);
   assert.equal(artifacts.delivery.files.length, 149);
@@ -207,6 +207,8 @@ test("builds the complete checked-in 149/199 chains with both Client 0199 filena
   ]);
   assert.equal(artifacts.delivery.files.at(-1).name, "0230_operations_portal_native_delivery_terminal_cancellations.sql");
   assert.equal(artifacts.operations.files.at(-1).name, "0199_native_directory_profile_binding_continuations.sql");
+  assert.equal(artifacts.operations.files.some(({ name }) => name.startsWith("0200_")), false,
+    "the exact current repository append must not enter the bootstrap artifact");
   const literalPrefixGuard = artifacts.operations.files.find(({ name }) => name === "0187_operations_portal_native_delivery_literal_prefix_guard.sql");
   assert.equal(literalPrefixGuard.generatedSha256, literalPrefixGuard.sourceSha256,
     "bootstrap must preserve the literal-prefix guard migration byte-for-byte");
@@ -216,9 +218,11 @@ test("builds the complete checked-in 149/199 chains with both Client 0199 filena
   assert.equal(artifacts.operations.manifest.sourceChainSha256, "9fd14f1d7bb71719c532e11ed55963a05b962ae433fd1ead8be400752b550a53");
 });
 
-test("preserves the exact deployed 0196 chain and rejects an incomplete 0197 successor", () => {
+test("preserves exact historical 0199 and 0196 chains and rejects an incomplete 0197 successor", () => {
   const base = fixture();
   const directory = path.join(base, "apps", "operations", "migrations");
+  fs.rmSync(path.join(directory, "0200_native_directory_active_binding_refresh_supersessions.sql"));
+  assert.equal(buildArtifacts(base, owner).operations.files.length, 199);
   fs.rmSync(path.join(directory, "0199_native_directory_profile_binding_continuations.sql"));
   assert.equal(buildArtifacts(base, owner).operations.files.length, 198);
   fs.rmSync(path.join(directory, "0198_native_directory_active_binding_revision_refresh.sql"));
@@ -237,7 +241,8 @@ test("preserves the exact previously reviewed 147/192 bootstrap chains", () => {
   for (const name of ["0193_operations_portal_native_delivery_dead_conflict_recovery.sql",
     "0194_operations_portal_native_delivery_terminal_cancellations.sql",
     "0195_client_hub_native_project_current_owner_observation.sql", "0196_native_directory_maintenance_authority.sql",
-    "0197_operations_portal_native_delivery_cancellation_checkpoint_scope.sql", "0198_native_directory_active_binding_revision_refresh.sql", "0199_native_directory_profile_binding_continuations.sql"])
+    "0197_operations_portal_native_delivery_cancellation_checkpoint_scope.sql", "0198_native_directory_active_binding_revision_refresh.sql", "0199_native_directory_profile_binding_continuations.sql",
+    "0200_native_directory_active_binding_refresh_supersessions.sql"])
     fs.rmSync(path.join(base, "apps", "operations", "migrations", name));
   const artifacts = buildArtifacts(base, owner);
   assert.equal(artifacts.delivery.files.length, 147);
@@ -256,7 +261,8 @@ test("accepts exact historical 187 and 190 chains and rejects partial successors
     "0193_operations_portal_native_delivery_dead_conflict_recovery.sql",
     "0194_operations_portal_native_delivery_terminal_cancellations.sql",
     "0195_client_hub_native_project_current_owner_observation.sql", "0196_native_directory_maintenance_authority.sql",
-    "0197_operations_portal_native_delivery_cancellation_checkpoint_scope.sql", "0198_native_directory_active_binding_revision_refresh.sql", "0199_native_directory_profile_binding_continuations.sql"])
+    "0197_operations_portal_native_delivery_cancellation_checkpoint_scope.sql", "0198_native_directory_active_binding_revision_refresh.sql", "0199_native_directory_profile_binding_continuations.sql",
+    "0200_native_directory_active_binding_refresh_supersessions.sql"])
     fs.rmSync(path.join(historical, "apps", "operations", "migrations", name));
   const artifact = buildArtifacts(historical, owner).operations;
   assert.equal(artifact.files.length, 187);
@@ -267,7 +273,8 @@ test("accepts exact historical 187 and 190 chains and rejects partial successors
   for (const name of ["0191_operations_portal_native_billing_authority.sql", "0192_ops_service_definition_authority.sql",
     "0193_operations_portal_native_delivery_dead_conflict_recovery.sql", "0194_operations_portal_native_delivery_terminal_cancellations.sql",
     "0195_client_hub_native_project_current_owner_observation.sql", "0196_native_directory_maintenance_authority.sql",
-    "0197_operations_portal_native_delivery_cancellation_checkpoint_scope.sql", "0198_native_directory_active_binding_revision_refresh.sql", "0199_native_directory_profile_binding_continuations.sql"])
+    "0197_operations_portal_native_delivery_cancellation_checkpoint_scope.sql", "0198_native_directory_active_binding_revision_refresh.sql", "0199_native_directory_profile_binding_continuations.sql",
+    "0200_native_directory_active_binding_refresh_supersessions.sql"])
     fs.rmSync(path.join(historical190, "apps", "operations", "migrations", name));
   const artifact190 = buildArtifacts(historical190, owner).operations;
   assert.equal(artifact190.files.length, 190);

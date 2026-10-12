@@ -70,7 +70,7 @@ test("wrong target, extra SQL, and source drift fail closed", async () => {
     fs.cpSync(path.join(root, "apps/operations/migrations"), destination, { recursive: true });
     assert.equal(buildNativeDirectory196To198Plan(temporary).finalNames.length, 198);
     fs.writeFileSync(path.join(destination, "0199_unreviewed.sql"), "SELECT 1;\n", { flag: "wx" });
-    assert.throws(() => buildNativeDirectory196To198Plan(temporary), /exact current Operations bootstrap inventory/u);
+    assert.throws(() => buildNativeDirectory196To198Plan(temporary), /exact current Operations source inventory/u);
     fs.unlinkSync(path.join(destination, "0199_unreviewed.sql"));
     const last = path.join(destination, SPEC.suffix[1].name);
     fs.appendFileSync(last, "\n-- local drift\n");

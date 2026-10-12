@@ -76,6 +76,8 @@ export type Env = Omit<
   ENVIRONMENT?: string;
   /** Default-off explicit active Directory binding revision refresh; local/staging only. */
   NATIVE_DIRECTORY_BINDING_REFRESH_ENABLED?: string;
+  /** Default-off one-level terminal-conflict recovery for an uncertain binding refresh. */
+  NATIVE_DIRECTORY_BINDING_REFRESH_RECOVERY_ENABLED?: string;
   NATIVE_DIRECTORY_PROFILE_BINDING_CONTINUATION_ENABLED?: string;
   PROJECT_ALPHA_DIRECTORY_RELATIONSHIP_GENERATION_RECOVERY_ENABLED?: string;
   PROJECT_ALPHA_API_KEY?: string;

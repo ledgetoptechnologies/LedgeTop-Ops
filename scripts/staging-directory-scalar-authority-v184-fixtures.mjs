@@ -11,6 +11,7 @@ import {
 import { DIRECTORY_SCALAR_AUTHORITY_V184_TARGET as scalarTarget } from "./staging-directory-scalar-authority-v184.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const reviewedAuthorityFinal = "0199_native_directory_profile_binding_continuations.sql";
 export const stamp = "2026-10-10T12:00:00.000Z";
 export const clone = value => structuredClone(value);
 export const uuid = n => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
@@ -40,7 +41,7 @@ export function fixture() {
   return {
     schemaVersion: 1, staging: STAGING_TARGET, phase: "provision", target: recoveryTarget,
     migrationNames: fs.readdirSync(path.join(root, "apps/operations/migrations"))
-      .filter(name => /^\d{4}_.+\.sql$/.test(name)).sort(),
+      .filter(name => /^\d{4}_.+\.sql$/.test(name) && name <= reviewedAuthorityFinal).sort(),
     staff: { id: recoveryTarget.staffId, status: "active", access_subject: "access|owner" },
     roles: [{ id: "owner-role", staff_id: recoveryTarget.staffId, role_id: "role-owner", scope: "global", scope_key: "global" }],
     admission: { staff_id: recoveryTarget.staffId, bound_access_subject: "access|owner", active: 1, admitted_by: recoveryTarget.staffId, created_at: stamp, updated_at: stamp, version: 3 },

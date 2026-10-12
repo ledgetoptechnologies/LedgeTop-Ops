@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { OPERATIONS_CURRENT_SOURCE_MIGRATION_CHAIN } from "./staging-bootstrap.mjs";
 
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -41,6 +42,7 @@ export const NATIVE_MIGRATION_PROFILES = Object.freeze({
     baseContentsSha256: "cd35de12e87325fb6de854f4ecba47e5172e115f75830af9f4a908710d10a450",
     remoteBaseline: "0183_project_alpha_binding_standalone_relationship_rows.sql",
     finalMigration: "0199_native_directory_profile_binding_continuations.sql",
+    currentRepositoryChain: OPERATIONS_CURRENT_SOURCE_MIGRATION_CHAIN,
     candidates: Object.freeze({
       "0174_project_alpha_directory_preserved_external_identity.sql": "9e794a73b75e025edc04967888631b9336931eb16113f42d855bea3fcb30a158",
       "0175_operations_directory_acquired_parent_enrollment_identity.sql": "de022736243342f203fcf9a1cb22993e49c50bbb18c7b3b2fc95d8fb3fa48ed0",
@@ -300,8 +302,25 @@ function validateSourceMigrations(base, application, contract) {
       throw new Error(`${application} migration ${entry.name} must be a regular non-symlink file`);
     }
   }
-  const names = entries.filter((entry) => entry.isFile() && !entry.isSymbolicLink() && entry.name.endsWith(".sql"))
+  const repositoryNames = entries.filter((entry) => entry.isFile() && !entry.isSymbolicLink() && entry.name.endsWith(".sql"))
     .map((entry) => entry.name).sort();
+  const currentRepositoryChain = contract.currentRepositoryChain;
+  const hasCurrentAppend = currentRepositoryChain
+    && repositoryNames.includes(currentRepositoryChain.appendedMigration);
+  if (hasCurrentAppend) {
+    const appendedFile = path.join(directory, currentRepositoryChain.appendedMigration);
+    requireRegularFile(appendedFile, `${application} current repository append`);
+    if (repositoryNames.length !== currentRepositoryChain.count
+      || repositoryNames.at(-1) !== currentRepositoryChain.finalMigration
+      || sha256(repositoryNames.join("\n")) !== currentRepositoryChain.namesSha256
+      || migrationChainDigest(directory, repositoryNames) !== currentRepositoryChain.contentsSha256
+      || sha256(fs.readFileSync(appendedFile)) !== currentRepositoryChain.appendedSha256) {
+      throw new Error(`${application} current repository migration inventory changed`);
+    }
+  }
+  const names = hasCurrentAppend
+    ? repositoryNames.filter((name) => name !== currentRepositoryChain.appendedMigration)
+    : repositoryNames;
   const candidateNames = Object.keys(contract.candidates).sort();
   const candidateSet = new Set(candidateNames);
   const baseNames = names.filter((name) => !candidateSet.has(name));

@@ -6,7 +6,7 @@ import { spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import { isDeepStrictEqual as same } from "node:util";
-import { BOOTSTRAP_APPS } from "./staging-bootstrap.mjs";
+import { BOOTSTRAP_APPS, OPERATIONS_CURRENT_SOURCE_MIGRATION_CHAIN } from "./staging-bootstrap.mjs";
 import { collectOrderedReadOnlySnapshot } from "./ordered-read-only-snapshot.mjs";
 import { readCompleteTableSnapshot } from "./read-complete-table-snapshot.mjs";
 
@@ -98,14 +98,17 @@ export function buildPairedMigrationPlan(application, base = root, label) {
   const sourceDirectory = path.join(base,`apps/${spec.application}/migrations`);
   const entries=fs.readdirSync(sourceDirectory,{withFileTypes:true}).filter(entry=>entry.name.endsWith(".sql"));
   assert(entries.every(entry=>entry.isFile()&&!entry.isSymbolicLink()),"migration chain must contain regular files");
-  const sourceNames=entries.map(entry=>entry.name).sort(),chain=application==="client"?BOOTSTRAP_APPS.delivery:BOOTSTRAP_APPS.operations;
+  const sourceNames=entries.map(entry=>entry.name).sort(),chain=application==="client"?{
+    count:BOOTSTRAP_APPS.delivery.migrationCount,namesSha256:BOOTSTRAP_APPS.delivery.migrationNamesSha256,
+    contentsSha256:BOOTSTRAP_APPS.delivery.migrationContentsSha256,
+  }:OPERATIONS_CURRENT_SOURCE_MIGRATION_CHAIN;
   // Validate the complete, currently reviewed source chain first. A newer
   // reviewed chain may contain this frozen window, but arbitrary extra SQL or
   // any change to its immutable 149/194 prefix must still fail closed.
-  assert.equal(sourceNames.length,chain.migrationCount);
-  assert.equal(sha(sourceNames.join("\n")),chain.migrationNamesSha256);
-  assert.equal(sha(sourceNames.map(name=>`${name}\0${sha(fs.readFileSync(path.join(sourceDirectory,name)))}`).join("\n")),chain.migrationContentsSha256);
-  assert(chain.migrationCount>=spec.to,"reviewed source chain is shorter than frozen migration window");
+  assert.equal(sourceNames.length,chain.count);
+  assert.equal(sha(sourceNames.join("\n")),chain.namesSha256);
+  assert.equal(sha(sourceNames.map(name=>`${name}\0${sha(fs.readFileSync(path.join(sourceDirectory,name)))}`).join("\n")),chain.contentsSha256);
+  assert(chain.count>=spec.to,"reviewed source chain is shorter than frozen migration window");
   const finalNames=sourceNames.slice(0,spec.to);
   assert.equal(finalNames.length,spec.to);assert.equal(sha(finalNames.join("\n")),spec.migrationNamesSha256);
   assert.equal(sha(finalNames.map(name=>`${name}\0${sha(fs.readFileSync(path.join(sourceDirectory,name)))}`).join("\n")),spec.migrationContentsSha256);
