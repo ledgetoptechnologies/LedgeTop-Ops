@@ -703,8 +703,9 @@ test("current bootstrap evidence contract matches the complete canonical generat
     ["delivery", "client", "0230_operations_portal_native_delivery_terminal_cancellations.sql"],
     ["operations", "operations", "0199_native_directory_profile_binding_continuations.sql"],
   ]) {
-    const names = fs.readdirSync(path.join(repository, "apps", source, "migrations"))
+    let names = fs.readdirSync(path.join(repository, "apps", source, "migrations"))
       .filter(name => name.endsWith(".sql")).sort();
+    if (app === "operations") names = names.filter(name => name !== "0200_native_directory_active_binding_refresh_supersessions.sql");
     assert.equal(names.length, BOOTSTRAP_APPS[app].migrationCount, `${app} canonical count`);
     assert.equal(names.at(-1), finalMigration, `${app} canonical final migration`);
   }
@@ -1080,6 +1081,7 @@ test("checked-in evidence example stays complete as migrations, flags, gates, an
     "0197_operations_portal_native_delivery_cancellation_checkpoint_scope.sql",
     "0198_native_directory_active_binding_revision_refresh.sql",
     "0199_native_directory_profile_binding_continuations.sql",
+    "0200_native_directory_active_binding_refresh_supersessions.sql",
   ]);
   assert.deepEqual(
     fs.readdirSync(path.join(root, "apps", "operations", "migrations")).filter((name) => REQUIRED_STAGING_MIGRATIONS.operations.includes(name)).sort().slice(-79),

@@ -16,7 +16,7 @@ import {
   quoteSqlIdentifier,
   reviewedSchemaDefinitions,
 } from "./staging-native-portal-149-194-migrations.mjs";
-import { BOOTSTRAP_APPS } from "./staging-bootstrap.mjs";
+import { OPERATIONS_CURRENT_SOURCE_MIGRATION_CHAIN } from "./staging-bootstrap.mjs";
 import { collectOrderedReadOnlySnapshot } from "./ordered-read-only-snapshot.mjs";
 import { readCompleteTableSnapshot } from "./read-complete-table-snapshot.mjs";
 
@@ -81,12 +81,12 @@ function buildNativeDirectoryMigrationWindowPlan(base = root, label) {
   const entries = fs.readdirSync(sourceDirectory, { withFileTypes: true }).filter(entry => entry.name.endsWith(".sql"));
   assert(entries.every(entry => entry.isFile() && !entry.isSymbolicLink()), "migration chain must contain regular files");
   const sourceNames = entries.map(entry => entry.name).sort();
-  const current = BOOTSTRAP_APPS.operations;
-  if (SPEC.to === 199) assert.equal(sourceNames.length, SPEC.to, "exact 0199 source profile required");
-  assert.equal(sourceNames.length, current.migrationCount, "exact current Operations bootstrap inventory required");
-  assert.equal(sha(sourceNames.join("\n")), current.migrationNamesSha256, "current Operations migration names drifted");
+  const current = OPERATIONS_CURRENT_SOURCE_MIGRATION_CHAIN;
+  if (SPEC.to === 199) assert(sourceNames.length >= SPEC.to, "reviewed source chain must contain the exact 0199 window");
+  assert.equal(sourceNames.length, current.count, "exact current Operations source inventory required");
+  assert.equal(sha(sourceNames.join("\n")), current.namesSha256, "current Operations migration names drifted");
   assert.equal(sha(sourceNames.map(name => `${name}\0${sha(fs.readFileSync(path.join(sourceDirectory, name)))}`).join("\n")),
-    current.migrationContentsSha256, "current Operations migration content drifted");
+    current.contentsSha256, "current Operations migration content drifted");
 
   const priorNames = sourceNames.slice(0, SPEC.from);
   assert.equal(priorNames.length, SPEC.from);

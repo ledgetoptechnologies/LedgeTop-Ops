@@ -8,6 +8,14 @@ import { STAGING_ACCOUNT_ID, STAGING_INVENTORY } from "./staging-requirements.mj
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 export const BOOTSTRAP_SCHEMA_VERSION = 1;
 export const DISPOSABLE_REHEARSAL_SCHEMA_VERSION = 1;
+export const OPERATIONS_CURRENT_SOURCE_MIGRATION_CHAIN = Object.freeze({
+  count: 200,
+  finalMigration: "0200_native_directory_active_binding_refresh_supersessions.sql",
+  namesSha256: "33b6dbc6d8270cc82b7af0c315c5d874a5e8369ad0884185a60085218e75601f",
+  contentsSha256: "8544d12cba6a51f3ab909c85d02e5fb8b48c54f054f1ca30d426ea17be924138",
+  appendedMigration: "0200_native_directory_active_binding_refresh_supersessions.sql",
+  appendedSha256: "0e0ade02ba1088a8f3ef33d5d30d5be92441a879c984ccc822c15db6368ede5d",
+});
 export const BOOTSTRAP_APPS = Object.freeze({
   delivery: Object.freeze({
     source: "client",
@@ -239,7 +247,27 @@ export function buildArtifacts(base, owner, options = {}) {
     for (const item of entries) {
       if (item.name.endsWith(".sql") && (!item.isFile() || item.isSymbolicLink())) throw new Error(`${app} canonical migration ${item.name} must be a regular non-symlink file`);
     }
-    const names = entries.filter((item) => item.isFile() && !item.isSymbolicLink() && item.name.endsWith(".sql")).map((item) => item.name).sort();
+    const repositoryNames = entries.filter((item) => item.isFile() && !item.isSymbolicLink() && item.name.endsWith(".sql")).map((item) => item.name).sort();
+    const currentSource = app === "operations" ? OPERATIONS_CURRENT_SOURCE_MIGRATION_CHAIN : null;
+    const hasCurrentAppend = currentSource && repositoryNames.includes(currentSource.appendedMigration);
+    if (hasCurrentAppend) {
+      if (repositoryNames.length !== currentSource.count || repositoryNames.at(-1) !== currentSource.finalMigration
+        || sha256(repositoryNames.join("\n")) !== currentSource.namesSha256) {
+        throw new Error(`${app} canonical migration inventory must be an exact complete reviewed chain`);
+      }
+      const repositoryContentsSha256 = sha256(repositoryNames.map((name) => {
+        const sourcePath = path.join(sourceDir, name);
+        requireRegularFile(sourcePath, `${app} canonical migration ${name}`);
+        return `${name}\0${sha256(fs.readFileSync(sourcePath))}`;
+      }).join("\n"));
+      if (repositoryContentsSha256 !== currentSource.contentsSha256
+        || sha256(fs.readFileSync(path.join(sourceDir, currentSource.appendedMigration))) !== currentSource.appendedSha256) {
+        throw new Error(`${app} canonical migration contents do not match the reviewed full-chain digest`);
+      }
+    }
+    const names = hasCurrentAppend
+      ? repositoryNames.filter((name) => name !== currentSource.appendedMigration)
+      : repositoryNames;
     const namesSha256 = sha256(names.join("\n"));
     const reviewedChains = [{ count: entry.migrationCount, namesSha256: entry.migrationNamesSha256,
       contentsSha256: entry.migrationContentsSha256 }, ...(entry.historicalMigrationChains ?? [])];

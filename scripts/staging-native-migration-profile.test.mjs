@@ -10,7 +10,7 @@ import { parseRemoteLedgerJson, validateExactRemoteLedger, verifyLiveRemoteLedge
 const root = path.resolve(import.meta.dirname, "..");
 const temporary = [];
 
-function fixture(operationsCutoff = 199) {
+function fixture(operationsCutoff = 200) {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), "ltds-native-migration-profile-"));
   temporary.push(base);
   fs.writeFileSync(path.join(base, ".gitignore"), "apps/*/wrangler.staging.*.json\napps/*/.staging-bootstrap/\n");
@@ -82,6 +82,8 @@ test("builds only the exact migration suffixes and strips every deployment field
     "0199_native_directory_profile_binding_continuations.sql");
   assert.equal(profiles.operations.manifest.reviewedFinalChain.namesSha256,
     "7be05fcb2b54c3a345b76b1f37e3dbbf33c0f4278b6cabe8307a064549c33821");
+  assert.equal(profiles.operations.files.some(({ name }) => name.startsWith("0200_")), false,
+    "the current repository append is verified but never enters the staging migration-only profile");
   assert.equal(profiles.client.manifest.reviewedFinalChain.count, 149);
   assert.equal(profiles.client.manifest.reviewedFinalChain.finalMigration,
     "0230_operations_portal_native_delivery_terminal_cancellations.sql");
@@ -110,7 +112,7 @@ test("rejects an extra SQL file and a changed native migration", () => {
   fs.writeFileSync(path.join(extra, "apps", "client", "migrations", "0229_unreviewed.sql"), "-- no\n");
   assert.throws(() => buildProfiles(extra), /pinned base migration inventory changed/);
 
-  const changed = fixture();
+  const changed = fixture(199);
   fs.appendFileSync(path.join(changed, "apps", "operations", "migrations",
     "0174_project_alpha_directory_preserved_external_identity.sql"), " ");
   assert.throws(() => buildProfiles(changed), /native candidate changed: 0174_/);
@@ -119,7 +121,7 @@ test("rejects an extra SQL file and a changed native migration", () => {
     "0190_client_hub_native_project_preparation_authority.sql",
     "0191_operations_portal_native_billing_authority.sql",
     "0192_ops_service_definition_authority.sql"]) {
-    const currentChanged = fixture();
+    const currentChanged = fixture(199);
     fs.appendFileSync(path.join(currentChanged, "apps", "operations", "migrations", name), " ");
     assert.throws(() => buildProfiles(currentChanged), new RegExp(`native candidate changed: ${name.slice(0, 4)}_`));
   }
@@ -130,11 +132,16 @@ test("rejects an extra SQL file and a changed native migration", () => {
     ["operations", "0195_client_hub_native_project_current_owner_observation.sql"],
     ["operations", "0196_native_directory_maintenance_authority.sql"],
     ["operations", "0197_operations_portal_native_delivery_cancellation_checkpoint_scope.sql"],
-    ["operations", "0198_native_directory_active_binding_revision_refresh.sql"]]) {
-    const stableChanged = fixture();
+    ["operations", "0198_native_directory_active_binding_revision_refresh.sql"],
+    ["operations", "0199_native_directory_profile_binding_continuations.sql"]]) {
+    const stableChanged = fixture(application === "operations" ? 199 : 200);
     fs.appendFileSync(path.join(stableChanged, "apps", application, "migrations", name), " ");
     assert.throws(() => buildProfiles(stableChanged), new RegExp(`native candidate changed: ${name.slice(0, 4)}_`));
   }
+  const currentAppendChanged = fixture();
+  fs.appendFileSync(path.join(currentAppendChanged, "apps", "operations", "migrations",
+    "0200_native_directory_active_binding_refresh_supersessions.sql"), " ");
+  assert.throws(() => buildProfiles(currentAppendChanged), /current repository migration inventory changed/);
 });
 
 test("accepts exact historical 0187, 0190, 0192, 0194, 0195, and 0196 chains but rejects partial successors", () => {
@@ -202,9 +209,14 @@ test("accepts exact historical 0187, 0190, 0192, 0194, 0195, and 0196 chains but
   assert.equal(profile198.manifest.reviewedFinalChain.count, 198);
   assert.equal(profile198.manifest.reviewedFinalChain.namesSha256,
     "d88ba83a54c045e5eb416fb912324047d68160f9f198e6b56591f0f0909788f2");
+  const profile199 = buildProfiles(fixture(199)).operations;
+  assert.equal(profile199.manifest.reviewedFinalChain.count, 199);
+  assert.equal(profile199.manifest.finalMigration, "0199_native_directory_profile_binding_continuations.sql");
+  assert.equal(profile199.manifest.reviewedFinalChain.namesSha256,
+    "7be05fcb2b54c3a345b76b1f37e3dbbf33c0f4278b6cabe8307a064549c33821");
   assert.equal(profile196.files.some(({ name }) => /^019[78]_/.test(name)), false);
   assert.throws(() => buildProfiles(fixture(197)), /not an exact reviewed historical or current chain/);
-  const missing197 = fixture();
+  const missing197 = fixture(199);
   fs.rmSync(path.join(missing197, "apps", "operations", "migrations",
     "0197_operations_portal_native_delivery_cancellation_checkpoint_scope.sql"));
   assert.throws(() => buildProfiles(missing197), /not an exact reviewed historical or current chain/);
@@ -212,11 +224,11 @@ test("accepts exact historical 0187, 0190, 0192, 0194, 0195, and 0196 chains but
   for (const remove of [["0190_client_hub_native_project_preparation_authority.sql"],
     ["0189_client_hub_native_project_uncertain_recovery.sql"],
     ["0189_client_hub_native_project_uncertain_recovery.sql", "0190_client_hub_native_project_preparation_authority.sql"]]) {
-    const partial = fixture();
+    const partial = fixture(199);
     for (const name of remove) fs.rmSync(path.join(partial, "apps", "operations", "migrations", name));
     assert.throws(() => buildProfiles(partial), /not an exact reviewed historical or current chain/);
   }
-  const unknown = fixture();
+  const unknown = fixture(199);
   fs.writeFileSync(path.join(unknown, "apps", "operations", "migrations", "0197_unknown.sql"), "SELECT 1;\n");
   assert.throws(() => buildProfiles(unknown), /pinned base migration inventory changed/);
 });
@@ -235,7 +247,7 @@ test("accepts the exact historical Client 147 chain", () => {
 });
 
 test("rejects a missing or changed pinned base migration", () => {
-  const missing = fixture();
+  const missing = fixture(199);
   fs.rmSync(path.join(missing, "apps", "operations", "migrations", "0001_operations.sql"));
   assert.throws(() => buildProfiles(missing), /pinned base migration inventory changed/);
 
