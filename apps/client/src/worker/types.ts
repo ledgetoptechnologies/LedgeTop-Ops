@@ -17,6 +17,8 @@ export interface Env {
   /** Canonical public delivery/share origin. PUBLIC_BASE_URL remains a rollout-compatible mirror. */
   PUBLIC_SHARE_ORIGIN?: string;
   EXPECTED_HOST: string;
+  /** Exact hostname for CLIENT_PORTAL_ORIGIN when it differs from the public delivery host. */
+  CLIENT_PORTAL_EXPECTED_HOST?: string;
   CLIENT_PORTAL_ENABLED?: string;
   /** Route-less ownership evidence writer. Default-off; does not fence PA reads or grant access. */
   CLIENT_AUTHORITY_WORKSPACE_CLAIM_WRITER_ENABLED?: string;

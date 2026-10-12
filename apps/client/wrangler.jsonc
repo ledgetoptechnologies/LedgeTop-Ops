@@ -37,6 +37,7 @@
     "PUBLIC_BASE_URL": "https://portal.ledgetopdroneservices.com",
     "PUBLIC_SHARE_ORIGIN": "https://portal.ledgetopdroneservices.com",
     "EXPECTED_HOST": "portal.ledgetopdroneservices.com",
+    "CLIENT_PORTAL_EXPECTED_HOST": "portal.ledgetopdroneservices.com",
     "ENVIRONMENT": "production",
     "CLIENT_PORTAL_ENABLED": "true",
     "CLIENT_AUTHORITY_WORKSPACE_CLAIM_WRITER_ENABLED": "false",

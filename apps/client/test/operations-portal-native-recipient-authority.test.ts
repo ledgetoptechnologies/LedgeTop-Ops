@@ -31,7 +31,8 @@ function command(operationId: string, action: "recipient.grant" | "recipient.rev
 }
 const env = (db: D1Database) => ({ DELIVERY_DB: db,
   ENVIRONMENT: "staging",
-  EXPECTED_HOST: "client-staging.example.test",
+  EXPECTED_HOST: "delivery-staging.example.test",
+  CLIENT_PORTAL_EXPECTED_HOST: "client-staging.example.test",
   CLIENT_PORTAL_ORIGIN: "https://client-staging.example.test",
   CLIENT_PORTAL_OPERATIONS_NATIVE_AUTHORITY_WRITER_ENABLED: "true" });
 
@@ -91,19 +92,23 @@ describe("Operations-native recipient authority consumer", () => {
 
   it("supports exact configured production writer and status while malformed configuration stays disabled", async () => {
     const operationId = id(12), production = { ...env(db), ENVIRONMENT: "production",
-      EXPECTED_HOST: "portal.example.test", CLIENT_PORTAL_ORIGIN: "https://portal.example.test",
+      EXPECTED_HOST: "delivery.example.test", CLIENT_PORTAL_EXPECTED_HOST: "portal.example.test",
+      CLIENT_PORTAL_ORIGIN: "https://portal.example.test",
       CLIENT_PORTAL_OPERATIONS_NATIVE_AUTHORITY_STATUS_ENABLED: "true" };
     expect(JSON.parse(await applyOperationsPortalNativeRecipientAuthority(production,
       command(operationId, "recipient.grant", 0)))).toMatchObject({ ok: true, operationId });
     expect(JSON.parse(await readOperationsPortalNativeRecipientAuthorityStatus(production,
       JSON.stringify({ protocolVersion: 1, operationId })))).toMatchObject({ ok: true, operationId });
-    for (const change of [{ ENVIRONMENT: "development" }, { EXPECTED_HOST: "other.example.test" },
+    for (const change of [{ ENVIRONMENT: "development" }, { CLIENT_PORTAL_EXPECTED_HOST: "other.example.test" },
       { CLIENT_PORTAL_ORIGIN: "https://other.example.test" }, { CLIENT_PORTAL_ORIGIN: undefined }]) {
       expect(JSON.parse(await applyOperationsPortalNativeRecipientAuthority({ ...production, ...change },
         command(id(13), "recipient.grant", 0)))).toMatchObject({ ok: false, code: "disabled" });
       expect(JSON.parse(await readOperationsPortalNativeRecipientAuthorityStatus({ ...production, ...change },
         JSON.stringify({ protocolVersion: 1, operationId })))).toMatchObject({ ok: false, code: "disabled" });
     }
+    const fallback = { ...production, CLIENT_PORTAL_EXPECTED_HOST: undefined, EXPECTED_HOST: "portal.example.test" };
+    expect(JSON.parse(await readOperationsPortalNativeRecipientAuthorityStatus(fallback,
+      JSON.stringify({ protocolVersion: 1, operationId })))).toMatchObject({ ok: true, operationId });
   });
 
   it("fails closed for stale topology, same operation drift and stale CAS", async () => {

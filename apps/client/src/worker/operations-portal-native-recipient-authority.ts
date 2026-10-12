@@ -116,13 +116,14 @@ function result(operationId: string, row: ReceiptRow, replayed: boolean) {
 }
 
 export async function applyOperationsPortalNativeRecipientAuthority(
-  env: Pick<Env, "DELIVERY_DB" | "ENVIRONMENT"> & Partial<Pick<Env, "EXPECTED_HOST" | "CLIENT_PORTAL_ORIGIN">> & {
+  env: Pick<Env, "DELIVERY_DB" | "ENVIRONMENT"> & Partial<Pick<Env,
+    "EXPECTED_HOST" | "CLIENT_PORTAL_EXPECTED_HOST" | "CLIENT_PORTAL_ORIGIN">> & {
     CLIENT_PORTAL_OPERATIONS_NATIVE_AUTHORITY_WRITER_ENABLED?: string
   }, raw: unknown,
 ): Promise<string> {
   if (env.CLIENT_PORTAL_OPERATIONS_NATIVE_AUTHORITY_WRITER_ENABLED !== "true"
     || !configuredDeploymentOrigin({ environment: env.ENVIRONMENT,
-      origin: env.CLIENT_PORTAL_ORIGIN, expectedHost: env.EXPECTED_HOST }))
+      origin: env.CLIENT_PORTAL_ORIGIN, expectedHost: env.CLIENT_PORTAL_EXPECTED_HOST ?? env.EXPECTED_HOST }))
     return response({ ok: false, protocolVersion: 1, code: "disabled", retryable: true });
   const parsed = parseCanonical(raw);
   if (!parsed) return response({ ok: false, protocolVersion: 1, code: "invalid", retryable: false });
@@ -226,13 +227,14 @@ export async function applyOperationsPortalNativeRecipientAuthority(
 }
 
 export async function readOperationsPortalNativeRecipientAuthorityStatus(
-  env: Pick<Env, "DELIVERY_DB" | "ENVIRONMENT"> & Partial<Pick<Env, "EXPECTED_HOST" | "CLIENT_PORTAL_ORIGIN">> & {
+  env: Pick<Env, "DELIVERY_DB" | "ENVIRONMENT"> & Partial<Pick<Env,
+    "EXPECTED_HOST" | "CLIENT_PORTAL_EXPECTED_HOST" | "CLIENT_PORTAL_ORIGIN">> & {
     CLIENT_PORTAL_OPERATIONS_NATIVE_AUTHORITY_STATUS_ENABLED?: string
   }, raw: unknown,
 ): Promise<string> {
   if (env.CLIENT_PORTAL_OPERATIONS_NATIVE_AUTHORITY_STATUS_ENABLED !== "true"
     || !configuredDeploymentOrigin({ environment: env.ENVIRONMENT,
-      origin: env.CLIENT_PORTAL_ORIGIN, expectedHost: env.EXPECTED_HOST }))
+      origin: env.CLIENT_PORTAL_ORIGIN, expectedHost: env.CLIENT_PORTAL_EXPECTED_HOST ?? env.EXPECTED_HOST }))
     return response({ ok: false, protocolVersion: 1, code: "disabled", retryable: true });
   if (typeof raw !== "string" || encoder.encode(raw).byteLength > 1024) return response({ ok: false, protocolVersion: 1, code: "invalid", retryable: false });
   let parsed: unknown; try { parsed = JSON.parse(raw); } catch { return response({ ok: false, protocolVersion: 1, code: "invalid", retryable: false }); }
