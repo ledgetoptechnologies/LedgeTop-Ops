@@ -292,14 +292,16 @@ export async function readClientHubProjectManagementAction(env: Env, principal: 
         .all<ActionRow>().then(result => result.results.length === 1 ? result.results[0]! : null);
     }
   }
-  const native = !row ? await readClientHubNativeProjectCapability(env, principal, context) : null;
+  const native = root.root_namespace === "business" && isBusinessProjectionSource(root.source_id)
+    ? await readClientHubNativeProjectCapability(env, principal, context) : null;
   const sourceName = row?.display_name ?? root.source_name ?? "Project Alpha";
   let reason: ProjectManagementAvailabilityReason = root.root_namespace !== "business" || !isBusinessProjectionSource(root.source_id)
-    ? "not_applicable" : native ? native.available ? "available" : native.reason : !row?.source_id ? "source_not_registered" : row.state !== "active" || row.read_visible !== 1
+    ? "not_applicable" : native?.available ? "available" : native?.reason === "native_authority_required"
+      ? "native_authority_required" : !row?.source_id ? native?.reason ?? "source_not_registered" : row.state !== "active" || row.read_visible !== 1
       ? "source_inactive" : row.route_version === null ? "route_not_configured" : row.enabled !== 1 || !row.reviewed_url_template
         ? "route_disabled" : !row.external_id ? "source_mapping_unavailable" : "available";
   let href: string | null = null;
-  if (reason === "available" && row) {
+  if (reason === "available" && row && !native?.available) {
     try { href = render(validateProjectManagementUrlTemplate(row!.reviewed_url_template!), row!.external_id!); }
     catch { reason = "route_disabled"; }
   }
@@ -330,10 +332,10 @@ export async function readClientHubProjectManagementAction(env: Env, principal: 
     source: { sourceId: root.source_id, displayName: sourceName,
       state: row?.state ?? (native?.available ? "active" : native ? "unavailable" : "unregistered") },
     availability: { available: reason === "available", reason, explanation: explanation(reason, sourceName) },
-    action: href ? { kind: "legacy_external_link" as const, label: "Create project in Project Alpha", href, external: true as const }
-      : native?.available ? { kind: "native_create" as const, label: "Create project",
+    action: native?.available ? { kind: "native_create" as const, label: "Create project",
         prepareHref: `${refreshHref}/native-projects/prepare`, submitHref: `${refreshHref}/native-projects/submit`,
-        external: false as const, scopeOptions: native.scopes } : null,
+        external: false as const, scopeOptions: native.scopes }
+      : href ? { kind: "legacy_external_link" as const, label: "Create project in Project Alpha", href, external: true as const } : null,
     sync: {
       status: syncStatus,
       lastAttemptAt: safeTimestamp(row?.last_attempt_at ?? null),
