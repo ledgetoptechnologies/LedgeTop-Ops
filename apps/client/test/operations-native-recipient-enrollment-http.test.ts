@@ -10,7 +10,8 @@ const intentId = id(1), opaqueToken = "a".repeat(64), operationId = id(2);
 const target = { targetId: id(3), targetRevision: 1, clientRecordId: "ops/client/example" };
 const proof = { principal: { issuer: "https://team.cloudflareaccess.com", subject: "individual-person", email: "not-an-identity@example.invalid" },
   verifiedUntil: "2099-01-01T00:00:00.000Z" };
-function deps(): Dependencies { return { env: {} as Env, enabled: true, environment: "staging", origin,
+function deps(): Dependencies { return { env: {} as Env, enabled: true, environment: "staging",
+  expectedHost: "client-staging.example.test", origin,
   csrfSecret: "synthetic-native-consent-csrf-secret-long-enough", resolveProof: vi.fn().mockResolvedValue(proof), binding: {
     inspectNativeEnrollment: vi.fn().mockResolvedValue(JSON.stringify({ intentId, revision: 1, state: "issued",
       target: { ...target, displayLabel: "Example Customer" }, expiresAt: "2099-01-01T00:00:00.000Z" })),
@@ -38,9 +39,32 @@ describe("Ops-native individual consent HTTP boundary", () => {
       acknowledged: true, acknowledgedTarget: target, principal: { issuer: proof.principal.issuer, subject: proof.principal.subject },
       recipientLabel: proof.principal.email, verifiedUntil: proof.verifiedUntil });
   });
-  it.each(["disabled", "production"])("is absent when %s", async mode => {
-    const d = deps(); if (mode === "disabled") d.enabled = false; else d.environment = "production";
+  it("is absent when disabled", async () => {
+    const d = deps(); d.enabled = false;
     expect((await handle(request("session"), d)).status).toBe(404); expect(d.resolveProof).not.toHaveBeenCalled();
+  });
+  it("accepts the exact configured production portal origin", async () => {
+    const d = deps(); d.environment = "production";
+    expect((await handle(request("session"), d)).status).toBe(200);
+  });
+  it.each([
+    { environment: "development" },
+    { expectedHost: "other.example.test" },
+    { origin: "https://other.example.test" },
+    { origin: "http://client-staging.example.test" },
+    { origin: "https://user@client-staging.example.test" },
+    { origin: "https://client-staging.example.test:444" },
+    { origin: "https://client-staging.example.test/path" },
+    { origin: "https://client-staging.example.test?query=1" },
+    { origin: "https://client-staging.example.test#fragment" },
+    { origin: "https://CLIENT-staging.example.test" },
+    { origin: "https://client-staging.example.test.", expectedHost: "client-staging.example.test." },
+    { environment: "production", origin: "https://127.0.0.2", expectedHost: "127.0.0.2" },
+    { binding: undefined },
+  ])("fails closed for invalid or missing deployment dependency %#", async change => {
+    const d = { ...deps(), ...change };
+    expect((await handle(request("session"), d)).status).toBe(503);
+    expect(d.resolveProof).not.toHaveBeenCalled();
   });
   it.each([{ subject: "forged" }, { issuer: "forged" }, { email: "forged" }, { owner: true }, { verifiedUntil: proof.verifiedUntil }])
     ("rejects browser identity/authority input %j", async extra => {

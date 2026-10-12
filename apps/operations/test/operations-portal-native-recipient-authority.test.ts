@@ -324,7 +324,9 @@ describe("Operations-native recipient authority end-to-end D1", () => {
     const binding = {
       applyNativeAuthority: async (wire: string) => {
         const response = await applyOperationsPortalNativeRecipientAuthority({ DELIVERY_DB: client,
-          ENVIRONMENT: "staging", CLIENT_PORTAL_OPERATIONS_NATIVE_AUTHORITY_WRITER_ENABLED: "true" }, wire);
+          ENVIRONMENT: "staging", EXPECTED_HOST: "client-staging.example.test",
+          CLIENT_PORTAL_ORIGIN: "https://client-staging.example.test",
+          CLIENT_PORTAL_OPERATIONS_NATIVE_AUTHORITY_WRITER_ENABLED: "true" }, wire);
         if (simulateAmbiguousGrant) {
           simulateAmbiguousGrant = false;
           throw new Error("simulated response loss after committed native grant");
@@ -332,7 +334,9 @@ describe("Operations-native recipient authority end-to-end D1", () => {
         return response;
       },
       getNativeAuthorityStatus: (wire: string) => readOperationsPortalNativeRecipientAuthorityStatus({ DELIVERY_DB: client,
-        ENVIRONMENT: "staging", CLIENT_PORTAL_OPERATIONS_NATIVE_AUTHORITY_STATUS_ENABLED: "true" }, wire),
+        ENVIRONMENT: "staging", EXPECTED_HOST: "client-staging.example.test",
+        CLIENT_PORTAL_ORIGIN: "https://client-staging.example.test",
+        CLIENT_PORTAL_OPERATIONS_NATIVE_AUTHORITY_STATUS_ENABLED: "true" }, wire),
     };
     const dispatchEnv = { OPS_DB: ops, OPERATIONS_PORTAL_NATIVE_RECIPIENT_AUTHORITY: binding,
       OPERATIONS_PORTAL_NATIVE_RECIPIENT_AUTHORITY_DISPATCH_ENABLED: "true" };
@@ -420,7 +424,9 @@ describe("Operations-native recipient authority end-to-end D1", () => {
     const cleanupDispatch = { ...dispatchEnv, OPERATIONS_PORTAL_NATIVE_RECIPIENT_AUTHORITY: {
       ...binding, applyNativeAuthority: async (wire: string) => { cleanupApplyCalls += 1;
         return applyOperationsPortalNativeRecipientAuthority({ DELIVERY_DB: client,
-          ENVIRONMENT: "staging", CLIENT_PORTAL_OPERATIONS_NATIVE_AUTHORITY_WRITER_ENABLED: "true" }, wire); },
+          ENVIRONMENT: "staging", EXPECTED_HOST: "client-staging.example.test",
+          CLIENT_PORTAL_ORIGIN: "https://client-staging.example.test",
+          CLIENT_PORTAL_OPERATIONS_NATIVE_AUTHORITY_WRITER_ENABLED: "true" }, wire); },
     } };
     await expect(dispatchOperationsPortalNativeRecipientAuthority(cleanupDispatch, id(14), id(15)))
       .resolves.toEqual({ status: "acknowledged", operationId: id(14) });
@@ -469,7 +475,9 @@ describe("Operations-native recipient authority end-to-end D1", () => {
     let applyCalls = 0, statusCalls = 0;
     const shouldNotApply = async () => { applyCalls += 1; throw new Error("stale authority reached Client apply"); };
     const status = async (wire: string) => { statusCalls += 1; return readOperationsPortalNativeRecipientAuthorityStatus({
-      DELIVERY_DB: client, ENVIRONMENT: "staging", CLIENT_PORTAL_OPERATIONS_NATIVE_AUTHORITY_STATUS_ENABLED: "true" }, wire); };
+      DELIVERY_DB: client, ENVIRONMENT: "staging", EXPECTED_HOST: "client-staging.example.test",
+      CLIENT_PORTAL_ORIGIN: "https://client-staging.example.test",
+      CLIENT_PORTAL_OPERATIONS_NATIVE_AUTHORITY_STATUS_ENABLED: "true" }, wire); };
     await expect(dispatchOperationsPortalNativeRecipientAuthority({ OPS_DB: ops,
       OPERATIONS_PORTAL_NATIVE_RECIPIENT_AUTHORITY_DISPATCH_ENABLED: "true",
       OPERATIONS_PORTAL_NATIVE_RECIPIENT_AUTHORITY: { applyNativeAuthority: shouldNotApply,
@@ -495,6 +503,7 @@ describe("Operations-native recipient authority end-to-end D1", () => {
     await expect(ops.prepare(`UPDATE operations_portal_native_authority_outbox SET canonical_wire_json='{}'
       WHERE operation_id=?`).bind(id(62)).run()).rejects.toThrow("operations portal native authority wire is immutable");
     const lostResponse = await applyOperationsPortalNativeRecipientAuthority({ DELIVERY_DB: client, ENVIRONMENT: "staging",
+      EXPECTED_HOST: "client-staging.example.test", CLIENT_PORTAL_ORIGIN: "https://client-staging.example.test",
       CLIENT_PORTAL_OPERATIONS_NATIVE_AUTHORITY_WRITER_ENABLED: "true" }, wire!);
     expect(JSON.parse(lostResponse)).toMatchObject({ ok: true, status: "recorded", operationId: id(62) });
     await advancePublication(ops);
@@ -503,7 +512,9 @@ describe("Operations-native recipient authority end-to-end D1", () => {
     let applyCalls = 0, statusCalls = 0;
     const shouldNotApply = async () => { applyCalls += 1; throw new Error("stale authority reached Client apply"); };
     const status = async (request: string) => { statusCalls += 1; return readOperationsPortalNativeRecipientAuthorityStatus({
-      DELIVERY_DB: client, ENVIRONMENT: "staging", CLIENT_PORTAL_OPERATIONS_NATIVE_AUTHORITY_STATUS_ENABLED: "true" }, request); };
+      DELIVERY_DB: client, ENVIRONMENT: "staging", EXPECTED_HOST: "client-staging.example.test",
+      CLIENT_PORTAL_ORIGIN: "https://client-staging.example.test",
+      CLIENT_PORTAL_OPERATIONS_NATIVE_AUTHORITY_STATUS_ENABLED: "true" }, request); };
     await expect(dispatchOperationsPortalNativeRecipientAuthority({ OPS_DB: ops,
       OPERATIONS_PORTAL_NATIVE_RECIPIENT_AUTHORITY_DISPATCH_ENABLED: "true",
       OPERATIONS_PORTAL_NATIVE_RECIPIENT_AUTHORITY: { applyNativeAuthority: shouldNotApply,

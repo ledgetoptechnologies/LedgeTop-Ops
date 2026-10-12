@@ -52,14 +52,37 @@ describe("Ops-native recipient owner HTTP boundary", () => {
     calls.workspaceInvocation.mockResolvedValue({ operationId, state: "authorized" });
     calls.materialize.mockResolvedValue({ operationId }); calls.dispatch.mockResolvedValue({ status: "acknowledged", operationId });
   });
-  it.each(["disabled", "production"])("is absent for %s without authentication or writes", async mode => {
-    const d = deps(), modified = mode === "disabled" ? { ...d, configuration: { ...d.configuration, enabled: false } }
-      : { ...d, environment: "production" };
+  it("is absent when disabled without authentication or writes", async () => {
+    const d = deps(), modified = { ...d, configuration: { ...d.configuration, enabled: false } };
     for (const path of ["session", `workspaces/${targetId}`, `workspaces/${targetId}/revoke`]) {
       expect((await handle(request(path, path.endsWith("/revoke")
         ? { operationId, expectedOwnershipEpoch: 1, reason: "cleanup" } : undefined), modified)).status).toBe(404);
     }
     expect(calls.auth).not.toHaveBeenCalled(); expect(calls.workspaceRevoke).not.toHaveBeenCalled();
+  });
+  it("fails closed for an unrecognized environment before authentication or writes", async () => {
+    const d = deps(), modified = { ...d, environment: "development" };
+    expect((await handle(request("session"), modified)).status).toBe(503);
+    expect(calls.auth).not.toHaveBeenCalled(); expect(calls.workspaceRevoke).not.toHaveBeenCalled();
+  });
+  it("accepts the exact configured production origin without weakening the default-off gate", async () => {
+    const d = deps(), production = { ...d, environment: "production", expectedHost: "ops.example.test",
+      configuration: { ...d.configuration, origin: "https://ops.example.test", recipientOrigin: "https://portal.example.test" } };
+    const productionRequest = new Request("https://ops.example.test/api/native-client-portal/operations-recipient-enrollment/session", {
+      headers: { Origin: "https://ops.example.test", "Sec-Fetch-Site": "same-origin", "X-Native-Staff-Request": "1" },
+    });
+    expect((await handle(productionRequest, production)).status).toBe(200);
+    expect(calls.auth).toHaveBeenCalledOnce();
+  });
+  it.each([
+    { expectedHost: "other.example.test", origin },
+    { expectedHost: "ops.example.test", origin: "https://other.example.test" },
+    { expectedHost: "localhost", origin: "https://localhost" },
+  ])("fails closed for incorrect production origin configuration %#", async change => {
+    const d = deps(), modified = { ...d, environment: "production", expectedHost: change.expectedHost,
+      configuration: { ...d.configuration, origin: change.origin } };
+    expect((await handle(request("session"), modified)).status).toBe(503);
+    expect(calls.auth).not.toHaveBeenCalled();
   });
   it("rejects an incomplete private transport before issuing intents", async () => {
     const d = deps(); expect((await handle(request("session"), { ...d, dispatch: { OPS_DB: d.database } })).status).toBe(503);

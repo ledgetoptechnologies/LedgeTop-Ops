@@ -72,6 +72,7 @@ describe("Operations native content-start audit with real delivery authority", (
         snapshotId: published.snapshot.snapshotId, snapshotSha256: published.snapshot.snapshotSha256,
         requestFingerprint: publicationReceipt.requestFingerprint }, actorProof: actor, observedAt: new Date().toISOString() };
     const homeResult = JSON.parse(await applyOperationsPortalNativeRecipientAuthority({ DELIVERY_DB: db, ENVIRONMENT: "staging",
+      EXPECTED_HOST: "client-staging.example.test", CLIENT_PORTAL_ORIGIN: "https://client-staging.example.test",
       CLIENT_PORTAL_OPERATIONS_NATIVE_AUTHORITY_WRITER_ENABLED: "true" }, JSON.stringify(home)));
     expect(homeResult.ok).toBe(true);
     command = { protocol: "operations-portal-native-delivery-authority", protocolVersion: 1, permissionSchemaVersion: 3,

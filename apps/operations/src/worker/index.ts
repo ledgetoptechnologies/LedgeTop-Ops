@@ -530,7 +530,7 @@ async function dispatchOperationsNativeRecipientOwner(c: Context<{ Bindings: Env
         && c.env.CLIENT_PORTAL_NATIVE_RECIPIENT_OWNER_ENABLED === "true",
       issuer: c.env.TEAM_DOMAIN ?? "",
       staffAudience: c.env.OPERATIONS_AUD,
-      origin: `https://${c.env.EXPECTED_HOST}`,
+      origin: c.env.PUBLIC_BASE_URL,
       recipientOrigin: c.env.DELIVERY_BASE_URL,
       csrfSecret: c.env.OPERATIONS_SESSION_SECRET,
     },

@@ -354,6 +354,7 @@ describe("Ops native selected-folder authority against real 0152-0160 plus curre
       intentId: issued.review.intentId, expectedRevision: 2, owner: owner() });
     await materializeOperationsPortalNativeRecipientAuthority(operations, homeOperationId);
     const recipientEnvironment = { DELIVERY_DB: client, ENVIRONMENT: "staging",
+      EXPECTED_HOST: "client-staging.example.test", CLIENT_PORTAL_ORIGIN: "https://client-staging.example.test",
       CLIENT_PORTAL_OPERATIONS_NATIVE_AUTHORITY_WRITER_ENABLED: "true",
       CLIENT_PORTAL_OPERATIONS_NATIVE_AUTHORITY_STATUS_ENABLED: "true" } as const;
     await expect(dispatchOperationsPortalNativeRecipientAuthority({ OPS_DB: operations,

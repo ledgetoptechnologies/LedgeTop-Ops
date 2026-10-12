@@ -9,6 +9,7 @@ import { issueOperationsPortalNativeRecipientIntent, readOperationsPortalNativeR
 import { materializeOperationsPortalNativeRecipientAuthority, dispatchOperationsPortalNativeRecipientAuthority,
   type OperationsPortalNativeRecipientAuthorityDispatchEnv } from "./operations-portal-native-recipient-authority-dispatch";
 import { reserveOperationsPortalNativeWorkspaceCleanupRecovery } from "./operations-portal-native-workspace-cleanup";
+import { configuredDeploymentOrigin } from "@ltds/shared/configured-deployment-origin";
 
 const BASE = "/api/native-client-portal/operations-recipient-enrollment";
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
@@ -31,12 +32,14 @@ function httpsOrigin(value: string): URL {
   return url;
 }
 function configuration(d: OperationsNativeRecipientOwnerHttpDependencies) {
-  if (d.environment !== "staging" || !d.configuration.enabled) throw new Failure(404, "not_found");
+  if (!d.configuration.enabled) throw new Failure(404, "not_found");
   try {
-    const origin = httpsOrigin(d.configuration.origin), recipient = httpsOrigin(d.configuration.recipientOrigin);
+    const configuredOrigin = configuredDeploymentOrigin({ environment: d.environment,
+      origin: d.configuration.origin, expectedHost: d.expectedHost });
+    if (!configuredOrigin) throw Error();
+    const origin = httpsOrigin(configuredOrigin), recipient = httpsOrigin(d.configuration.recipientOrigin);
     const issuer = httpsOrigin(d.configuration.issuer), size = encoder.encode(d.configuration.csrfSecret).byteLength;
-    if (origin.hostname !== d.expectedHost || !/(?:^|[-.])staging(?:[-.]|$)/u.test(origin.hostname)
-      || !/(?:^|[-.])staging(?:[-.]|$)/u.test(recipient.hostname) || origin.origin === recipient.origin
+    if (origin.origin === recipient.origin
       || !issuer.hostname.endsWith(".cloudflareaccess.com") || issuer.hostname === ".cloudflareaccess.com"
       || !/^[A-Za-z0-9_-]{16,128}$/u.test(d.configuration.staffAudience) || size < 32 || size > 512
       || d.dispatch.OPERATIONS_PORTAL_NATIVE_RECIPIENT_AUTHORITY_DISPATCH_ENABLED !== "true"

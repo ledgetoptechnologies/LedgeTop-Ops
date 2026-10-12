@@ -1,4 +1,5 @@
 import type { Env } from "./types";
+import { configuredDeploymentOrigin } from "@ltds/shared/configured-deployment-origin";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 const SHA256 = /^[0-9a-f]{64}$/u;
@@ -115,9 +116,13 @@ function result(operationId: string, row: ReceiptRow, replayed: boolean) {
 }
 
 export async function applyOperationsPortalNativeRecipientAuthority(
-  env: Pick<Env, "DELIVERY_DB" | "ENVIRONMENT"> & { CLIENT_PORTAL_OPERATIONS_NATIVE_AUTHORITY_WRITER_ENABLED?: string }, raw: unknown,
+  env: Pick<Env, "DELIVERY_DB" | "ENVIRONMENT"> & Partial<Pick<Env, "EXPECTED_HOST" | "CLIENT_PORTAL_ORIGIN">> & {
+    CLIENT_PORTAL_OPERATIONS_NATIVE_AUTHORITY_WRITER_ENABLED?: string
+  }, raw: unknown,
 ): Promise<string> {
-  if (env.ENVIRONMENT !== "staging" || env.CLIENT_PORTAL_OPERATIONS_NATIVE_AUTHORITY_WRITER_ENABLED !== "true")
+  if (env.CLIENT_PORTAL_OPERATIONS_NATIVE_AUTHORITY_WRITER_ENABLED !== "true"
+    || !configuredDeploymentOrigin({ environment: env.ENVIRONMENT,
+      origin: env.CLIENT_PORTAL_ORIGIN, expectedHost: env.EXPECTED_HOST }))
     return response({ ok: false, protocolVersion: 1, code: "disabled", retryable: true });
   const parsed = parseCanonical(raw);
   if (!parsed) return response({ ok: false, protocolVersion: 1, code: "invalid", retryable: false });
@@ -221,9 +226,13 @@ export async function applyOperationsPortalNativeRecipientAuthority(
 }
 
 export async function readOperationsPortalNativeRecipientAuthorityStatus(
-  env: Pick<Env, "DELIVERY_DB" | "ENVIRONMENT"> & { CLIENT_PORTAL_OPERATIONS_NATIVE_AUTHORITY_STATUS_ENABLED?: string }, raw: unknown,
+  env: Pick<Env, "DELIVERY_DB" | "ENVIRONMENT"> & Partial<Pick<Env, "EXPECTED_HOST" | "CLIENT_PORTAL_ORIGIN">> & {
+    CLIENT_PORTAL_OPERATIONS_NATIVE_AUTHORITY_STATUS_ENABLED?: string
+  }, raw: unknown,
 ): Promise<string> {
-  if (env.ENVIRONMENT !== "staging" || env.CLIENT_PORTAL_OPERATIONS_NATIVE_AUTHORITY_STATUS_ENABLED !== "true")
+  if (env.CLIENT_PORTAL_OPERATIONS_NATIVE_AUTHORITY_STATUS_ENABLED !== "true"
+    || !configuredDeploymentOrigin({ environment: env.ENVIRONMENT,
+      origin: env.CLIENT_PORTAL_ORIGIN, expectedHost: env.EXPECTED_HOST }))
     return response({ ok: false, protocolVersion: 1, code: "disabled", retryable: true });
   if (typeof raw !== "string" || encoder.encode(raw).byteLength > 1024) return response({ ok: false, protocolVersion: 1, code: "invalid", retryable: false });
   let parsed: unknown; try { parsed = JSON.parse(raw); } catch { return response({ ok: false, protocolVersion: 1, code: "invalid", retryable: false }); }
