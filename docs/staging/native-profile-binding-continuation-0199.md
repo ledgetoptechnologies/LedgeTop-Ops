@@ -8,7 +8,7 @@ The continuation is derived only when an exact Project Alpha profile-update ACK 
 
 Pre-ACK dispatch keeps its existing actor and authority revalidation. After the durable ACK, continuation validity is based on that immutable ACK plus the still-current local record and already-owned mapping; it deliberately does not revalidate or impersonate the original actor. Any source/configuration, local-version, mapping, ACK, PA identity/revision, or effective-conflict drift fails closed.
 
-The scheduler selects this separate lane only when `NATIVE_DIRECTORY_PROFILE_BINDING_CONTINUATION_ENABLED=true` in `local` or `staging`; production is always refused. It also remains behind the existing `NATIVE_DIRECTORY_OUTBOX_DRAIN_ENABLED=true` scheduler gate. Both flags default off. An ACK can therefore derive a dormant local job without enabling automatic dispatch.
+The scheduler selects this separate lane only when `NATIVE_DIRECTORY_PROFILE_BINDING_CONTINUATION_ENABLED=true` in an admitted `local`, `staging`, or `production` runtime. Production support is an explicit, independently reviewed opt-in; unknown environments are always refused. The lane also remains behind the existing `NATIVE_DIRECTORY_OUTBOX_DRAIN_ENABLED=true` scheduler gate. Both flags default off in canonical deployment configuration. An ACK can therefore derive a dormant local job without enabling automatic dispatch.
 
 ## Inventory and refresh invariants
 

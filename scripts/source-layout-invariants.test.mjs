@@ -494,7 +494,7 @@ test("the deployed Client Worker keeps reviewed resources, hosts, and portal ass
 
 test("the deployed Operations Worker keeps catalog and inactive binding transport private and default-off", () => {
   // Newly mounted PA adoption and binding-refresh routes remain disabled in production by default.
-  assert.equal(normalizedSha256("apps/operations/wrangler.jsonc"), "bed298781557a903d1f8becca81bb46f67515952d3302a3ca369eeb17c6ae8af");
+  assert.equal(normalizedSha256("apps/operations/wrangler.jsonc"), "7e18fa494f2e4ccc72331dea6938daf169de8cb7167b641c934c4164cafa6fd7");
   const config = readJson("apps/operations/wrangler.jsonc");
   for (const flag of ["PROJECT_ALPHA_API_V2_SYNC_ENABLED", "PROJECT_ALPHA_DIRECTORY_EXACT_ADOPTION_ENABLED", "PROJECT_ALPHA_PROJECT_V2_RECOVERY_ENABLED", "PROJECT_ALPHA_DIRECTORY_EXISTING_RECORD_ADOPTION_ENABLED", "PROJECT_ALPHA_PROJECT_ADOPTION_OPERATIONAL_ENABLED"]) {
     assert.equal([...read("apps/operations/wrangler.jsonc").matchAll(new RegExp(`"${flag}"\\s*:`, "g"))].length, 1);

@@ -25,6 +25,7 @@
     "NATIVE_INTEGRATION_CONTROL_ORIGIN": "",
     "NATIVE_DIRECTORY_PROFILE_WRITES_ENABLED": "false",
     "NATIVE_DIRECTORY_OUTBOX_DRAIN_ENABLED": "false",
+    "NATIVE_DIRECTORY_PROFILE_BINDING_CONTINUATION_ENABLED": "false",
     "DELIVERY_BASE_URL": "https://client-staging.ledgetopdroneservices.com",
     "CLIENT_PORTAL_ORIGINS": "https://client-staging.ledgetopdroneservices.com,https://portal-staging.ledgetoptechnologies.com",
     "PUBLIC_SHARE_ORIGIN": "https://delivery-staging.ledgetopdroneservices.com",
