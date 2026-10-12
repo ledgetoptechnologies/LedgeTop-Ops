@@ -89,6 +89,8 @@ export function validateApp(app, staging, production) {
   if (app === "operations" && vars.PUBLIC_BASE_URL !== `https://${STAGING_HOSTS.operations}`) errors.push("operations PUBLIC_BASE_URL must match the approved staging host");
   if (app === "delivery") {
     if (vars.CLIENT_PORTAL_ENABLED !== "true") errors.push("delivery CLIENT_PORTAL_ENABLED must be true for the reviewed native authority staging window");
+    if (vars.CLIENT_PORTAL_EXPECTED_HOST !== STAGING_HOSTS.client)
+      errors.push("delivery CLIENT_PORTAL_EXPECTED_HOST must match the approved authenticated client staging host");
     if (vars.CLIENT_PORTAL_ORIGIN !== `https://${STAGING_HOSTS.client}`) errors.push("delivery CLIENT_PORTAL_ORIGIN must match the approved authenticated client staging host");
     if (vars.CLIENT_PORTAL_ORIGINS !== STAGING_STATIC_VARS.delivery.CLIENT_PORTAL_ORIGINS)
       errors.push("delivery CLIENT_PORTAL_ORIGINS must contain both approved staging client origins");

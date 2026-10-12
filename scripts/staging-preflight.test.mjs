@@ -404,12 +404,14 @@ test("fails closed on client portal deactivation, host namespace origins, and au
   const staging = stagingConfig("delivery");
   const production = productionFrom(staging);
   staging.vars.CLIENT_PORTAL_ENABLED = "false";
+  staging.vars.CLIENT_PORTAL_EXPECTED_HOST = "other-staging.example";
   staging.vars.CLIENT_PORTAL_ORIGIN = "https://other-staging.example";
   staging.vars.PUBLIC_SHARE_ORIGIN = `https://${STAGING_HOSTS.client}`;
   staging.vars.PUBLIC_BASE_URL = staging.vars.PUBLIC_SHARE_ORIGIN;
   staging.vars.CLIENT_ACCESS_AUD = staging.vars.PROJECT_ALPHA_CATALOG_ACCESS_AUD;
   const errors = validateApp("delivery", staging, production);
-  for (const expected of ["CLIENT_PORTAL_ENABLED", "authenticated client staging host", "anonymous delivery staging host", "must remain distinct"]) {
+  for (const expected of ["CLIENT_PORTAL_ENABLED", "CLIENT_PORTAL_EXPECTED_HOST", "authenticated client staging host",
+    "anonymous delivery staging host", "must remain distinct"]) {
     assert(errors.some((error) => error.includes(expected)), `${expected}: ${errors.join(" | ")}`);
   }
 });
