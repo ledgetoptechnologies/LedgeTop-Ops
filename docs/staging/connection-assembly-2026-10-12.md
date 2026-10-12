@@ -37,6 +37,8 @@ Original source commits integrated in order:
 - Operational connection/adoption browser checks: 10/10 passed on desktop and mobile Edge.
 - The first browser run used stale built assets; after rebuilding the current source, all checks passed without assertion changes.
 - Exact project adoption source commits received an independent clear review, including the bounded 64 KiB, duplicate-free PA response check and negative response tests.
+- Six database-backed/core integration suites passed 53/53: native project management, Directory adoption preparation/runtime finalization, project adoption finalization and candidate API validation. The project adoption D1 fixture applies the migration chain; these local fixtures are not live PA calls.
+- Combined integration review found a stale generated `NodeJS.ProcessEnv` flag entry. Regenerating with the locked Wrangler version corrected it; `cf-typegen:check` passed. No binding value or deployment was changed.
 
 Commands run from `apps/operations`:
 
@@ -45,6 +47,8 @@ npm run check
 npm run build
 npx vitest run --config vitest.config.ts test/project-alpha-project-adoption-operational-routes.test.ts test/client-hub-native-project-management.test.ts test/client-hub-project-inbound-review.test.ts test/project-alpha-directory-read-adoption-routes.test.ts
 npx playwright test --config playwright.config.ts test/browser/project-alpha-operational-project-adoption.spec.ts test/browser/project-alpha-connections.spec.ts --grep 'operational|PA-first'
+npx vitest run --config vitest.config.ts test/project-alpha-project-adoption-finalizer-d1.test.ts test/project-alpha-directory-read-adoption-finalizer-d1.test.ts test/client-hub-native-project-management-d1.test.ts test/project-alpha-directory-read-adoption-runtime-finalizer.test.ts test/project-alpha-project-adoption-finalizer.test.ts test/project-alpha-project-adoption-candidates-api-v2.test.ts
+npm run cf-typegen:check
 ```
 
 ## Remaining release gates
