@@ -47,6 +47,19 @@ This is a current-state audit, not production approval. Historical successful te
 
 ## Production exposure boundary
 
+- Independent review of the unintegrated owner-exposure candidate `b2229ee59a76f4316990865772646ac295a0a720` is **blocked**: the recipient management SPA route lacks Worker-first/default-off admission, and delivery dispatch/reader deployment admission still accepts staging only. The author is correcting both in isolation; do not integrate this revision or treat its mocked dispatch tests as production transport acceptance.
+
+## Financial producer release prerequisite
+
+- PA PR #198 is connection infrastructure, not the complete financial producer. Portal document/action-link acceptance additionally requires PR #199 at `cdcb1337` and migration `0107_financial_document_public_ids.sql`.
+- Required producer contract: `GET /api/v2/financial-documents`, capability `financial_documents`, explicit `api.capabilities.read` and `financial.documents.read` key scopes, and `APP_API_V2_FINANCIAL_DOCUMENTS_ENABLED=true` during the bounded staging window. The financial route is default-off; legacy `full` is not a substitute for the explicit financial scope.
+- Migration 0107 supplies immutable public IDs, recorded currencies, existing-row backfill, constraints, snapshot triggers and a public-link lookup index. It must precede route activation. Existing document totals, timestamps and public links must remain unchanged.
+- PR #199's green checks do not establish the missing full bootstrap/upgrade rehearsal. The actual financial HTTP MySQL runner is not currently wired into CI. Close those evidence gaps before declaring the financial producer release ready.
+- Exact PA staging runtime revision/image and migration-ledger 0107 readback remain unverified. A disabled-route 404 cannot distinguish absent code from installed but disabled code.
+- After default-off deployment and exact runtime/schema attestation, test paired Ops/Client financial gates, the synthetic current mapping/billing grant, positive documents and canonical action links, wrong principal/source/application/history/selector denial, stale state, same-session revocation, and absence of writes or duplicate notifications. Then restore the bounded window settings.
+
+## Remaining production exposure policy
+
 - The dedicated staging entrypoint owns the authorized staging exposure for workspace publication, delivery authority, billing authority and billing-permission owner surfaces. Those HTTP surfaces remain isolated from the standard entrypoint. The locally integrated native-recipient slice now admits exact configured staging/production origins behind existing default-off gates; it has not been deployed or enabled in production. This is not missing staging business logic.
 - Future production exposure must reuse the audited business handlers behind configured HTTPS-origin checks, normal staff permissions, default-off flags and the exact required private service bindings. Generalize the operational exposure policy narrowly; never expose the complete staging wrapper, synthetic fixtures or maintenance-authority pages wholesale.
 - The existing mounted `/api/delivery/native-grants` path is separately production-compatible and default-off. It is not automatically interchangeable with the newer native-recipient/workspace-publication lineage.
