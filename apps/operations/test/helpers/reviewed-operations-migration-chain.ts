@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 
 // Test artifact contracts are JavaScript modules without declarations.
 // @ts-expect-error reviewed test-only JavaScript module
-import { BOOTSTRAP_APPS } from "../../../../scripts/staging-bootstrap.mjs";
+import { BOOTSTRAP_APPS, OPERATIONS_CURRENT_SOURCE_MIGRATION_CHAIN } from "../../../../scripts/staging-bootstrap.mjs";
 // @ts-expect-error reviewed test-only JavaScript module
 import { REQUIRED_STAGING_MIGRATIONS } from "../../../../scripts/staging-requirements.mjs";
 
@@ -52,12 +52,13 @@ function sha256(value: string | Uint8Array): string {
  */
 function reviewedMigrationNames(directory: URL, application: "delivery" | "operations",
   initial: readonly string[], rejectExtras: boolean): readonly string[] {
-  const names = [...initial, ...REQUIRED_STAGING_MIGRATIONS[application]] as string[];
   const contract = BOOTSTRAP_APPS[application] as {
     migrationCount: number;
     migrationNamesSha256: string;
     migrationContentsSha256: string;
   };
+  const required = REQUIRED_STAGING_MIGRATIONS[application] as readonly string[];
+  const names = [...initial, ...required.slice(0, contract.migrationCount - initial.length)] as string[];
   if (names.length !== contract.migrationCount || new Set(names).size !== names.length
     || sha256(names.join("\n")) !== contract.migrationNamesSha256) {
     throw new Error(`reviewed-${application}-migration-name-contract-mismatch`);
@@ -65,9 +66,20 @@ function reviewedMigrationNames(directory: URL, application: "delivery" | "opera
   if (rejectExtras) {
     const physical = readdirSync(fileURLToPath(directory), { withFileTypes: true })
       .filter(entry => /^\d{4}_.+\.sql$/.test(entry.name));
+    const physicalNames = physical.map(entry => entry.name).sort();
+    const expectedNames = application === "operations"
+      ? [...initial, ...required]
+      : names;
     if (physical.some(entry => !entry.isFile() || entry.isSymbolicLink())
-      || JSON.stringify(physical.map(entry => entry.name).sort()) !== JSON.stringify(names)) {
+      || JSON.stringify(physicalNames) !== JSON.stringify(expectedNames)) {
       throw new Error(`reviewed-${application}-migration-physical-inventory-mismatch`);
+    }
+    if (application === "operations") {
+      if (physicalNames.length !== OPERATIONS_CURRENT_SOURCE_MIGRATION_CHAIN.count
+        || physicalNames.at(-1) !== OPERATIONS_CURRENT_SOURCE_MIGRATION_CHAIN.finalMigration
+        || sha256(physicalNames.join("\n")) !== OPERATIONS_CURRENT_SOURCE_MIGRATION_CHAIN.namesSha256) {
+        throw new Error("reviewed-operations-current-source-name-contract-mismatch");
+      }
     }
   }
   const contents = names.map(name => {
@@ -80,6 +92,18 @@ function reviewedMigrationNames(directory: URL, application: "delivery" | "opera
   });
   if (sha256(contents.join("\n")) !== contract.migrationContentsSha256) {
     throw new Error(`reviewed-${application}-migration-content-contract-mismatch`);
+  }
+  if (rejectExtras && application === "operations") {
+    const currentNames = [...initial, ...required];
+    const currentContents = currentNames.map(name => {
+      const path = fileURLToPath(new URL(name, directory));
+      const stat = lstatSync(path);
+      if (!stat.isFile() || stat.isSymbolicLink()) throw new Error(`reviewed-operations-migration-file-invalid:${name}`);
+      return `${name}\0${sha256(readFileSync(path))}`;
+    });
+    if (sha256(currentContents.join("\n")) !== OPERATIONS_CURRENT_SOURCE_MIGRATION_CHAIN.contentsSha256) {
+      throw new Error("reviewed-operations-current-source-content-contract-mismatch");
+    }
   }
   return names;
 }

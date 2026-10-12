@@ -1,8 +1,9 @@
 import crypto from "node:crypto";
-import { readFileSync, readdirSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { afterEach, expect, it } from "vitest";
 import { Miniflare } from "miniflare";
 import { splitD1MigrationStatements } from "../../client/test/helpers/d1-migrations";
+import { reviewedOperationsMigrationNames } from "./helpers/reviewed-operations-migration-chain";
 
 let runtime: Miniflare | undefined;
 afterEach(async () => { await runtime?.dispose(); runtime = undefined; });
@@ -11,7 +12,7 @@ const hash = (value: string | Buffer) => crypto.createHash("sha256").update(valu
 
 it("upgrades the exact cloned live-173 lineage through the reviewed local suffix", async () => {
   const directory = new URL("../migrations/", import.meta.url);
-  const names = readdirSync(directory).filter(name => /^\d{4}_.+\.sql$/.test(name)).sort();
+  const names = [...reviewedOperationsMigrationNames(directory)];
   const base = names.slice(0, 173);
   const suffix = names.slice(173);
   expect(base.at(-1)).toBe("0173_operations_directory_intent_acquired_destination_transition.sql");
