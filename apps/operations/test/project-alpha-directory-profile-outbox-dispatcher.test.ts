@@ -427,8 +427,8 @@ describe("native Directory profile outbox dispatcher", () => {
         ...(kind === "client" ? { relationship: { organizationRecordId: null, expectedRelationshipVersion: 1 } } : {}) } as NativeDirectoryProfileWrite);
       if (result.status !== "written") throw new Error(result.reason);
       const posts: unknown[] = [];
-      await expect(dispatchProjectAlphaDirectoryProfileOutboxCommand(env(), sourceId, result.commandIds[0]!, transport(publicId, "1", posts)))
-        .resolves.toMatchObject({ status: "acknowledged", publicId, revision: "2" });
+      const dispatched=await dispatchProjectAlphaDirectoryProfileOutboxCommand(env(), sourceId, result.commandIds[0]!, transport(publicId, "1", posts));
+      expect(dispatched,'reason' in dispatched?dispatched.reason:dispatched.status).toMatchObject({ status: "acknowledged", publicId, revision: "2" });
       expect(posts).toEqual([{ commandId: result.commandIds[0], expectedRevision: "1", expectedAuthorizationGeneration: "1", profile }]);
       expect(await db.prepare("SELECT * FROM project_alpha_directory_mappings WHERE command_id=?").bind(value.commandId).first()).toEqual(beforeMapping);
       expect(await db.prepare("SELECT count(*) n FROM project_alpha_directory_mappings WHERE external_id=?").bind(value.input.recordId).first("n")).toBe(1);
@@ -534,8 +534,9 @@ describe("native Directory profile outbox dispatcher", () => {
     expect(noSend).not.toHaveBeenCalled();
     await db.prepare(`INSERT INTO native_directory_grants(id,staff_id,permission,effect,scope_kind,granted_by)
       VALUES(?,?,'directory.enrollment.manage','allow','global','owner')`).bind(`enrollment-${value.staff.staffId}`,value.staff.staffId).run();
-    await expect(dispatchProjectAlphaDirectoryProfileOutboxCommand({...env(),OPS_DB:onboardingDb},sourceId,value.commandId,
-      transport("e".repeat(32),"1",[]))).resolves.toMatchObject({status:"acknowledged"});
+    const dispatched=await dispatchProjectAlphaDirectoryProfileOutboxCommand({...env(),OPS_DB:onboardingDb},sourceId,value.commandId,
+      transport("e".repeat(32),"1",[]));
+    expect(dispatched,'reason' in dispatched?dispatched.reason:dispatched.status).toMatchObject({status:"acknowledged"});
 
     const denied=await create("organization"),deniedDb=onboardingAuditDatabase(db);
     await db.batch([

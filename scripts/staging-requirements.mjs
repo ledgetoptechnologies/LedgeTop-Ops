@@ -495,6 +495,7 @@ export const REQUIRED_STAGING_MIGRATIONS = Object.freeze({
     "0196_native_directory_maintenance_authority.sql",
     "0197_operations_portal_native_delivery_cancellation_checkpoint_scope.sql",
     "0198_native_directory_active_binding_revision_refresh.sql",
+      "0199_native_directory_profile_binding_continuations.sql",
   ]),
 });
 
@@ -540,6 +541,7 @@ export const REQUIRED_STAGING_MIGRATION_SHA256 = Object.freeze({
     "0196_native_directory_maintenance_authority.sql": "84fe7276bb83bb72da6637d5b6827b56e80094c14acbc872935c444fb2a3870a",
     "0197_operations_portal_native_delivery_cancellation_checkpoint_scope.sql": "9cf2194a57cf7888c768d492c78cacf842e3f6c6814d3f395e6fa8f4d0a31a76",
     "0198_native_directory_active_binding_revision_refresh.sql": "a51026608eb70a0645540cfe12bad51feb7a97f924e0b2c3b83837a3ae2fa7c3",
+      "0199_native_directory_profile_binding_continuations.sql": "056007062980460404fe85093cb796b855b91c23351a323457e91d5b053a2006",
   }),
 });
 

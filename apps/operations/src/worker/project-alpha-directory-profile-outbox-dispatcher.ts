@@ -653,7 +653,17 @@ export async function dispatchProjectAlphaDirectoryProfileOutboxCommand(env: Env
       .bind(leased.intent_id, leased.command_id, outcomeJson));
     try {
       const settled = await env.OPS_DB.batch(statements);
-      if (settled.some(result => result.meta.changes !== 1)) return { phase: "uncertain" as const, reason: "lost_lease" };
+      // D1 counts the atomic derived-continuation trigger writes as changes,
+      // too. A successful ACK UPDATE may therefore report more than one;
+      // zero still means that this lease did not settle its statement.
+      if (settled.some(result => result.meta.changes < 1)) return { phase: "uncertain" as const, reason: "lost_lease" };
+      if (settled.some(result => result.meta.changes > 1)) {
+        const exact = await env.OPS_DB.prepare(`SELECT 1 ok FROM project_alpha_directory_outbox o
+          JOIN operations_directory_intents i ON i.intent_id=? AND i.state='acknowledged'
+          WHERE o.command_id=? AND o.command_json=? AND o.outcome_json=? AND o.state='acknowledged'`)
+          .bind(leased.intent_id,leased.command_id,leased.command_json,outcomeJson).first();
+        if (!exact) return { phase: "uncertain" as const, reason: "evidence" };
+      }
     } catch { return { phase: "uncertain" as const, reason: "database" }; }
     return { phase: "acknowledged" as const, publicId: resource.publicId, revision: resource.revision, replayed: response.replayed };
   });
