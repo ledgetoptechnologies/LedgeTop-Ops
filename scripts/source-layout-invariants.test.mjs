@@ -338,8 +338,9 @@ test("the deployed Client Worker keeps reviewed resources, hosts, and portal ass
   // Reviewed recipient-delivery authority adds only explicit disabled flags.
   // Native recipient/data transport flags are explicit and remain disabled;
   // their private production reader binding is present but all HTTP capabilities remain off.
-  assert.equal(normalizedSha256("apps/client/wrangler.jsonc"), "3d39a25dc08680dd6e4d8db4d614bab112a65672597be6355118c49be09d3f5a");
+  assert.equal(normalizedSha256("apps/client/wrangler.jsonc"), "f47bc8323b023861151f3585ae36fe4175b0db907893b83b411905f669326e8c");
   const config = readJson("apps/client/wrangler.jsonc");
+  assert.equal(config.vars.CLIENT_PORTAL_EXPECTED_HOST, "portal.ledgetopdroneservices.com");
   for (const flag of ["CLIENT_PORTAL_NATIVE_RECIPIENT_SERVICE_HOME_ENABLED",
     "CLIENT_PORTAL_NATIVE_FINANCIAL_ENABLED",
     "CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_WRITER_ENABLED", "CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_STATUS_ENABLED",
