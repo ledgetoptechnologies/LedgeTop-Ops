@@ -9,7 +9,7 @@ function files(directory: URL): URL[] {
 }
 
 describe("project v2 canonical activation import graph", () => {
-  it("mounts the current chain only through acceptance/private-admin paths and keeps the legacy adapter private", () => {
+  it("mounts the current chain through reviewed acceptance, private-admin and operational paths while keeping low-level adapters private", () => {
     const worker = new URL("../src/worker/", import.meta.url);
     const forbidden = [
       "project-alpha-project-settlement-adapter",
@@ -23,6 +23,7 @@ describe("project v2 canonical activation import graph", () => {
     const privateAdminUrl = new URL("project-alpha-private-admin-routes.ts", worker);
     const privateAdmin = privateAdminUrl.pathname;
     const finalizerUrl = new URL("project-alpha-project-adoption-finalizer.ts", worker);
+    const operationalRoutesUrl = new URL("project-alpha-project-adoption-operational-routes.ts", worker);
     const clientHubNativeManagement = new URL("client-hub-native-project-management.ts", worker).pathname;
     const acceptedImports = new Map<string, ReadonlySet<string>>([
       [acceptance, new Set([
@@ -69,7 +70,23 @@ describe("project v2 canonical activation import graph", () => {
     expect(readFileSync(finalizerUrl, "utf8")).toContain('env.PROJECT_ALPHA_PROJECT_ADOPTION_FINALIZATION_ENABLED !== "true"');
     const finalizerImporters = files(worker).filter(file => file.pathname !== finalizerUrl.pathname
       && readFileSync(file, "utf8").includes("project-alpha-project-adoption-finalizer"));
-    expect(finalizerImporters.map(file => file.pathname)).toEqual([privateAdmin]);
+    expect(finalizerImporters.map(file => file.pathname).sort()).toEqual([
+      privateAdmin, operationalRoutesUrl.pathname,
+    ].sort());
+    const operationalRoutes = readFileSync(operationalRoutesUrl, "utf8");
+    for (const flag of ["OPERATIONAL", "REVIEW", "FINALIZATION"])
+      expect(operationalRoutes).toContain(`env.PROJECT_ALPHA_PROJECT_ADOPTION_${flag}_ENABLED === "true"`);
+    expect(operationalRoutes).toContain("requireEnabled(c.env)");
+    expect(operationalRoutes).toContain("authenticateNativeStaffWithAdmissionVersion");
+    expect(operationalRoutes).toContain("identity.verifiedAccessSubject !== principal.accessSubject");
+    expect(operationalRoutes).toContain("role_id='role-owner' AND scope='global'");
+    expect(operationalRoutes).toContain('sqlScope(c.env, principal, "integrations.manage")');
+    expect(operationalRoutes).toContain("owner !== 1 || !integration.global || integration.deniedGlobal");
+    expect(operationalRoutes).toContain("contextVersion(input, context)");
+    expect(operationalRoutes).toContain("requireIdempotency(c.req.raw, input.commandId)");
+    expect(operationalRoutes).toContain('exactStoredRelationship(c.env.OPS_DB, context, "command", input.commandId, input.reservationId)');
+    expect(operationalRoutes).toContain("await finalizeProjectAlphaProjectAdoption(c.env, actor,");
+    expect(operationalRoutes).toContain("await verify(c.env, c.get(\"principal\"), context); await currentActor(c)");
   });
 
   it("keeps the activation surface free of fetcher, connection, request, route, queue, and scheduler inputs", async () => {
