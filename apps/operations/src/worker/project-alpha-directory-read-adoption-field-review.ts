@@ -143,6 +143,9 @@ async function compareEvidence(env:Env,reviewId:string,actor:DirectoryAdoptionFi
     || observed.historyEpoch!==selected.history_epoch_id || observed.resource.type!==selected.resource_type
     || observed.resource.id!==selected.project_alpha_public_id || observed.resource.revision!==selected.project_alpha_revision
     || observed.authorizationGeneration!==selected.authorization_generation) return {status:"blocked",reason:"pa_profile_changed"};
+  if(!await currentDirectoryAuthority(env.OPS_DB,selected,"directory.identity.link")
+    || !await currentDirectoryAuthority(env.OPS_DB,selected,"directory.profile.view"))
+    return {status:"blocked",reason:"reservation_not_current"};
   return {selected,observed,local,remote:remoteProfile(observed.profile,selected.resource_type)};
 }
 

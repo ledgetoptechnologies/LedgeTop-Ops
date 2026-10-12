@@ -525,10 +525,22 @@ describe("Project Alpha Directory adoption field-review receipt", () => {
     });
     await expect(sealProjectAlphaDirectoryReadAdoptionFieldReview(env,{reviewId:reserved.reviewId,
       decisions:fieldDecisions(),actor},revokeAfterRead))
-      .resolves.toEqual({status:"blocked",reason:"storage"});
+      .resolves.toEqual({status:"blocked",reason:"reservation_not_current"});
     expect(await count("project_alpha_directory_read_adoption_field_review_receipts")).toBe(0);
     expect(await count("project_alpha_directory_read_adoption_field_decisions")).toBe(0);
     expect(await count("project_alpha_directory_read_adoption_field_review_audit")).toBe(0);
+  });
+
+  it("does not disclose compared fields when profile-view authority is revoked during the remote read", async () => {
+    const reserved=await reserve(),reads=dependencies(),readProfile=reads.readProfile;
+    const revokeDuringRead=vi.fn(async (...args:Parameters<typeof readProfile>)=>{
+      const value=await readProfile(...args);
+      await database.prepare("UPDATE native_directory_grants SET active=0 WHERE id='profile-view'").run();
+      return value;
+    });
+    await expect(compareProjectAlphaDirectoryReadAdoptionFields(env,reserved.reviewId,actor,revokeDuringRead))
+      .resolves.toEqual({status:"blocked",reason:"reservation_not_current"});
+    expect(await count("project_alpha_directory_read_adoption_field_review_receipts")).toBe(0);
   });
 
   it("enforces the same authority at the receipt insert boundary", async () => {
