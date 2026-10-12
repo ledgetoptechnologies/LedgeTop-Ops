@@ -65,6 +65,18 @@ for(const scenario of ["blocked","conflict"]) {
   });
 }
 
+for(const scenario of ["preflight-fresh","preflight-prior"]) {
+  test(`${scenario} retains the exact frozen command without another review`,async({page})=>{
+    await render(page,scenario);await review(page);await confirm(page);
+    await expect(page.getByRole("alert")).toContainText("capability is unavailable");
+    await expect(page.getByRole("region",{name:"Reviewed binding revision"})).toContainText(commandId);
+    await expect(page.getByRole("button",{name:"Review binding revision",exact:true})).toHaveCount(0);
+    await confirm(page,true);await expect(page.getByRole("status")).toContainText("acknowledged");
+    const recorded=await calls(page);expect(recorded.filter(call=>call.path.endsWith("/review"))).toHaveLength(1);
+    const writes=recorded.filter(call=>call.path.endsWith("/execute"));expect(writes).toHaveLength(2);expect(writes[1]).toEqual(writes[0]);
+  });
+}
+
 test("mismatched review identity cannot expose execute",async({page})=>{
   await render(page,"bad-review"); await page.getByRole("button",{name:"Review binding revision",exact:true}).click();
   await expect(page.getByRole("alert")).toContainText("review is unavailable");

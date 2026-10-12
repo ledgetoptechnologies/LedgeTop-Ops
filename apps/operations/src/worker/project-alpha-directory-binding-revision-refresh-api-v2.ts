@@ -93,6 +93,12 @@ async function boundedJson(response: Response): Promise<unknown> {
   const bytes = new Uint8Array(size); let offset = 0; for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; } return JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
 }
 
+/** Read-only exact refresh capability check, shared by pre-lease and send-time fences. */
+export async function preflightProjectAlphaDirectoryBindingRevisionRefresh(connection: ProjectAlphaApiV2Connection, kind: ProjectAlphaDirectoryBindingRevisionRefreshKind, send: typeof fetch = fetch): Promise<ProjectAlphaApiV2Probe> {
+  if ((kind !== "client" && kind !== "organization") || typeof connection.expectedHistoryEpoch !== "string" || !UUID.test(connection.expectedHistoryEpoch)) return { status: "misconfigured", reason: "configuration" };
+  return probeProjectAlphaApiV2(connection, [], send, [endpoint(kind)]);
+}
+
 /** One bounded, default-off transport attempt. It neither stores a receipt nor changes local mappings, links, or authority. */
 export async function sendProjectAlphaDirectoryBindingRevisionRefreshCommand(inputConnection: ProjectAlphaApiV2Connection, kind: ProjectAlphaDirectoryBindingRevisionRefreshKind, inputCommand: ProjectAlphaDirectoryBindingRevisionRefreshCommand, send: typeof fetch = fetch): Promise<ProjectAlphaDirectoryBindingRevisionRefreshOutcome> {
   let command: ProjectAlphaDirectoryBindingRevisionRefreshCommand, connection: ProjectAlphaApiV2Connection, body: string;
@@ -103,7 +109,7 @@ export async function sendProjectAlphaDirectoryBindingRevisionRefreshCommand(inp
     connection = { ...inputConnection, expectedSourceInstanceId: inputConnection.expectedSourceInstanceId.toLowerCase(), expectedApplicationId: inputConnection.expectedApplicationId.toLowerCase() };
     if (typeof connection.expectedHistoryEpoch !== "string" || !UUID.test(connection.expectedHistoryEpoch)) return { status: "blocked", reason: "preflight", preflight: { status: "misconfigured", reason: "configuration" } };
   } catch { return { status: "rejected", reason: "invalid_command" }; }
-  const preflight = await probeProjectAlphaApiV2(connection, [], send, [endpoint(kind)]); if (preflight.status !== "verified") return { status: "blocked", reason: "preflight", preflight };
+  const preflight = await preflightProjectAlphaDirectoryBindingRevisionRefresh(connection, kind, send); if (preflight.status !== "verified") return { status: "blocked", reason: "preflight", preflight };
   const controller = new AbortController(), timer = setTimeout(() => controller.abort(), 10_000); let response: Response | undefined;
   try {
     const headers = new Headers({ Accept: "application/json", "Content-Type": "application/json; charset=utf-8", Authorization: `Bearer ${connection.apiKey}`, "X-PA-Source-Instance-ID": connection.expectedSourceInstanceId, "X-PA-Application-ID": connection.expectedApplicationId, "X-PA-History-Epoch": connection.expectedHistoryEpoch });
