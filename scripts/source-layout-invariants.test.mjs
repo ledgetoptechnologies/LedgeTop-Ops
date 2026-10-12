@@ -26,6 +26,14 @@ test("CI installs the pinned Wrangler dependency before migration-ledger contrac
   ]) assert.ok(sourceJob.includes(`scripts/${filename}`), `${filename} must run with the installed Operations runtime`);
 });
 
+test("captured production upgrade rehearsals remain local CI gates with byte-pinned history", () => {
+  const workflow = read(".github/workflows/ci.yml");
+  const sourceJob = workflow.slice(workflow.indexOf("  source-invariants:"), workflow.indexOf("  incoming-pickup:"));
+  assert.ok(sourceJob.includes("run: node --test scripts/production-native-authority-packet.test.mjs scripts/production-ops-structural-upgrade-rehearsal.test.mjs"));
+  assert.match(read("apps/client/test/fixtures/production-history/.gitattributes"), /^\*\.sql text eol=lf$/m);
+  assert.ok(fs.existsSync(path.join(root, "apps/client/test/production-client-upgrade-rehearsal.test.ts")));
+});
+
 test("bounded relationship recovery release tooling remains a required local CI gate", () => {
   const workflow = read(".github/workflows/ci.yml");
   const sourceJob = workflow.slice(workflow.indexOf("  source-invariants:"), workflow.indexOf("  incoming-pickup:"));

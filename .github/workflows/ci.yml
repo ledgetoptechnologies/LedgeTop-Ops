@@ -52,6 +52,9 @@ jobs:
       - name: Verify governed staging authority packets locally
         run: node --test scripts/staging-native-authority-packet.test.mjs scripts/staging-bounded-guards.test.mjs scripts/staging-onboarding-authority-packet.test.mjs scripts/staging-native-authority-window.test.mjs
 
+      - name: Rehearse the captured Operations upgrade without production access
+        run: node --test scripts/production-native-authority-packet.test.mjs scripts/production-ops-structural-upgrade-rehearsal.test.mjs
+
       - name: Verify retained staging authority and paired cleanup locally
         run: node --test scripts/staging-retained-directory-authority.test.mjs scripts/staging-retained-directory-authority-window.test.mjs scripts/staging-retained-directory-authority-fullschema.test.mjs
 
