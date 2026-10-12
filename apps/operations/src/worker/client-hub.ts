@@ -36,6 +36,10 @@ import { exactBusinessProjectPublicId, listProjectAlphaContactRoles, projectAlph
 import { nativeDirectoryLinkedClientEditorRecords, nativeDirectoryProfileEditorRecord } from "./native-directory-profile-editor-record";
 import { nativeDirectoryProfileWritesEnabled } from "./native-directory-profile-routes";
 import { authenticateNativeStaffWithAdmissionVersion } from "./native-staff-auth";
+import {
+  projectAlphaProjectOperationalAdoptionEnabled,
+  registerProjectAlphaProjectOperationalAdoptionRoutes,
+} from "./project-alpha-project-adoption-operational-routes";
 
 type AppEnv = {
   Bindings: Env;
@@ -327,6 +331,8 @@ async function clientHubDetail(env: Env, principal: StaffPrincipal, kind: Client
     projectAlphaContactRolesAvailable: contactRolesAvailable,
     projectAlphaContactRoles,
     projectManagementAvailable: workspace.root_namespace === "business",
+    projectAdoptionAvailable: workspace.root_namespace === "business"
+      && workspace.source_id.startsWith("project-alpha:") && projectAlphaProjectOperationalAdoptionEnabled(env),
     businessActivityAvailable: workspace.root_namespace === "business",
     auditTimelineAvailable: true,
     nativeDirectoryProfile,
@@ -365,6 +371,7 @@ export function registerClientHubRoutes(app: App): void {
   registerClientInternalNoteRoutes(app, resolveDetailContext, verifyContext);
   registerProjectOperationalRoutes(app, resolveDetailContext, verifyContext);
   registerOrganizationOperationalContactRoutes(app, resolveDetailContext, verifyContext);
+  registerProjectAlphaProjectOperationalAdoptionRoutes(app, resolveDetailContext, verifyContext);
   app.get("/api/client-hub/sources/:sourceId/:rootNamespace/:kind/:publicId/project-management", async c => {
     const kind = routeKind(c.req.param("kind"));
     if (!kind) throw new HTTPException(404, { message: "Client not found" });
