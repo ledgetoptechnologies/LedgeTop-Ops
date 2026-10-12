@@ -45,16 +45,24 @@ describe("Ops native billing owner HTTP boundary", () => {
     core.readStatus.mockResolvedValue({ ...authority, canonicalWire: "SECRET", actorProof: "SECRET" });
   });
 
-  it.each(["production", "flag-off", "wrong-host", "bad-origin-config"])(
+  it.each(["flag-off", "wrong-host", "bad-origin-config"])(
     "is closed before authentication for %s", async mode => {
       const d = deps();
-      const changed: Dependencies = mode === "production" ? { ...d, environment: "production" }
-        : mode === "flag-off" ? { ...d, lifecycleFlag: "false" }
+      const changed: Dependencies = mode === "flag-off" ? { ...d, lifecycleFlag: "false" }
         : mode === "wrong-host" ? { ...d, expectedHost: "ops.example.test" }
         : { ...d, configuration: { ...d.configuration, origin: "http://ops-staging.example.test" } };
-      expect((await handle(request("session"), changed)).status).toBe(mode === "production" || mode === "flag-off" ? 404 : 503);
+      expect((await handle(request("session"), changed)).status).toBe(mode === "flag-off" ? 404 : 503);
       expect(authenticate).not.toHaveBeenCalled();
     });
+
+  it("accepts an exact configured production deployment", async () => {
+    const production = "https://ops.example.test", d = deps();
+    const response = await handle(new Request(`${production}/api/native-client-portal/operations-billing-authority/session`,
+      { headers: { Origin: production, "Sec-Fetch-Site": "same-origin", "X-Native-Staff-Request": "1" } }),
+    { ...d, environment: "production", expectedHost: "ops.example.test",
+      configuration: { ...d.configuration, origin: production } });
+    expect(response.status).toBe(200); expect(authenticate).toHaveBeenCalledOnce();
+  });
 
   it("requires normal authentication, same-origin request metadata, and actor-bound CSRF", async () => {
     const d = deps();

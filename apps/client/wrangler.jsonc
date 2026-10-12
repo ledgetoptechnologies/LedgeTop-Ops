@@ -200,6 +200,16 @@
       "binding": "CLIENT_ONBOARDING_RECIPIENT_BRIDGE",
       "service": "ledgetop-ops",
       "entrypoint": "ClientOnboardingRecipientBridge"
+    },
+    {
+      "binding": "CLIENT_PORTAL_NATIVE_FINANCIAL_READER",
+      "service": "ledgetop-ops",
+      "entrypoint": "ClientPortalNativeFinancialReader"
+    },
+    {
+      "binding": "OPERATIONS_PORTAL_NATIVE_DELIVERY_AUTHORIZATION_READER",
+      "service": "ledgetop-ops",
+      "entrypoint": "OperationsPortalNativeDeliveryAuthorizationReader"
     }
   ],
   "stream": { "binding": "STREAM" }

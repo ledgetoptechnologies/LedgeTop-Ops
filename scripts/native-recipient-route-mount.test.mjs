@@ -13,7 +13,7 @@ test("native delivery routes precede PA admission without replacing public links
   assert.match(worker, /app\.post\("\/api\/public\/shares\/:routeId\/session"/);
 });
 
-test("native delivery production configuration remains off without a new reader binding or audit secret", () => {
+test("native delivery production configuration remains off with the exact private reader binding and no audit secret", () => {
   const config = JSON.parse(readFileSync(new URL("../apps/client/wrangler.jsonc", import.meta.url), "utf8"));
   for (const name of ["CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_WRITER_ENABLED",
     "CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_STATUS_ENABLED", "CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_READ_ENABLED",
@@ -21,7 +21,10 @@ test("native delivery production configuration remains off without a new reader 
     assert.equal(config.vars[name], "false");
   }
   assert.equal(config.vars.CLIENT_PORTAL_OPERATIONS_NATIVE_CONTENT_AUDIT_HMAC_SECRET, undefined);
-  assert.ok(!config.services.some(binding => binding.binding === "OPERATIONS_PORTAL_NATIVE_DELIVERY_AUTHORIZATION_READER"));
+  assert.deepEqual(config.services.find(binding => binding.binding === "OPERATIONS_PORTAL_NATIVE_DELIVERY_AUTHORIZATION_READER"), {
+    binding: "OPERATIONS_PORTAL_NATIVE_DELIVERY_AUTHORIZATION_READER", service: "ledgetop-ops",
+    entrypoint: "OperationsPortalNativeDeliveryAuthorizationReader",
+  });
 });
 
 test("native consent is mounted before historical PA admission with independent default-off configuration", () => {

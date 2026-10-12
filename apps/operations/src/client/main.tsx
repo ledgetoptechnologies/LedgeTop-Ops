@@ -19,24 +19,17 @@ import { isDirectoryReplayAcceptanceLocation } from "./DirectoryReplayAcceptance
 import { ProjectReplayAcceptance } from "./ProjectReplayAcceptance";
 import { isProjectReplayAcceptanceLocation } from "./ProjectReplayAcceptanceRoute";
 
-const nativeOwnerHost = window.location.protocol === "https:"
-  && window.location.hostname === "ops-staging.ledgetopdroneservices.com"
-  && window.location.port === "";
 const viewerShellRoute = parseOperationsViewerShellRoute(window.location.pathname);
 const onboardingStaffRoute = window.location.pathname === "/administration/client-onboarding";
 const recipientEnrollmentRoute = window.location.pathname === "/administration/client-portal/recipients";
-const operationsRecipientEnrollmentRoute = nativeOwnerHost
-  && window.location.pathname === "/administration/client-portal/operations-recipients";
-const operationsDeliveryAuthorityRoute = nativeOwnerHost
-  && window.location.pathname === "/administration/client-portal/operations-delivery-authority";
-const operationsBillingAuthorityRoute = nativeOwnerHost
-  && window.location.pathname === "/administration/client-portal/operations-billing-authority";
-const operationsBillingPermissionsRoute = nativeOwnerHost
-  && window.location.pathname === "/administration/client-portal/operations-billing-permissions";
-const directoryMaintenanceRoute = nativeOwnerHost
+const operationsRecipientEnrollmentRoute = window.location.pathname === "/administration/client-portal/operations-recipients";
+const operationsDeliveryAuthorityRoute = window.location.pathname === "/administration/client-portal/operations-delivery-authority";
+const operationsBillingAuthorityRoute = window.location.pathname === "/administration/client-portal/operations-billing-authority";
+const operationsBillingPermissionsRoute = window.location.pathname === "/administration/client-portal/operations-billing-permissions";
+const directoryMaintenanceRoute = window.location.protocol === "https:"
+  && window.location.hostname === "ops-staging.ledgetopdroneservices.com" && window.location.port === ""
   && window.location.pathname === "/administration/staging/directory-maintenance-authority";
-const operationsWorkspaceRoute = nativeOwnerHost
-  && window.location.pathname === "/administration/client-portal/operations-workspaces";
+const operationsWorkspaceRoute = window.location.pathname === "/administration/client-portal/operations-workspaces";
 const directoryReplayAcceptanceRoute = isDirectoryReplayAcceptanceLocation(window.location);
 const projectReplayAcceptanceRoute = isProjectReplayAcceptanceLocation(window.location);
 createRoot(document.getElementById("root")!).render(<StrictMode>{projectReplayAcceptanceRoute

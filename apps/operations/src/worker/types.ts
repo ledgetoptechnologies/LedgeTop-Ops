@@ -73,6 +73,15 @@ export type Env = Omit<
   | "CLIENT_PORTAL_RECIPIENT_ENROLLMENT_OWNER_ORIGIN"
   | "VERIFIED_RECIPIENT_DELIVERY_AUTHORITY_DISPATCH_ENABLED"
   | "VERIFIED_RECIPIENT_DELIVERY_AUTHORITY"
+  | "OPERATIONS_PORTAL_NATIVE_DELIVERY_OWNER_ENABLED"
+  | "OPERATIONS_PORTAL_NATIVE_DELIVERY_AUTHORITY_DISPATCH_ENABLED"
+  | "OPERATIONS_PORTAL_NATIVE_DELIVERY_READER_ENABLED"
+  | "OPERATIONS_PORTAL_NATIVE_DELIVERY_CANCELLATION_ENABLED"
+  | "OPERATIONS_PORTAL_NATIVE_DELIVERY_AUTHORITY"
+  | "OPERATIONS_PORTAL_NATIVE_BILLING_OWNER_ENABLED"
+  | "OPERATIONS_PORTAL_WORKSPACE_OWNER_ENABLED"
+  | "OPERATIONS_PORTAL_WORKSPACE_PUBLICATION_DISPATCH_ENABLED"
+  | "OPERATIONS_PORTAL_WORKSPACE_PUBLICATION"
 > & {
   /** Explicit because Operations modules are also type-checked from sibling Worker projects with narrower generated Env types. */
   ENVIRONMENT?: string;
@@ -229,6 +238,18 @@ export type Env = Omit<
   OPERATIONS_PORTAL_NATIVE_RECIPIENT_AUTHORITY_DISPATCH_ENABLED?: string;
   /** Staging-only private audited grant/revoke transport; not a public HTTP endpoint. */
   OPERATIONS_PORTAL_NATIVE_RECIPIENT_AUTHORITY?: Service & import("./operations-portal-native-recipient-authority-dispatch").OperationsPortalNativeRecipientAuthorityBinding;
+  /** Default-off staff owner surface and private Client authority dispatch. */
+  OPERATIONS_PORTAL_NATIVE_DELIVERY_OWNER_ENABLED?: string;
+  OPERATIONS_PORTAL_NATIVE_DELIVERY_AUTHORITY_DISPATCH_ENABLED?: string;
+  OPERATIONS_PORTAL_NATIVE_DELIVERY_READER_ENABLED?: string;
+  OPERATIONS_PORTAL_NATIVE_DELIVERY_CANCELLATION_ENABLED?: string;
+  OPERATIONS_PORTAL_NATIVE_DELIVERY_AUTHORITY?: import("@ltds/shared/operations-portal-native-delivery-authority").OperationsPortalNativeDeliveryAuthorityBinding;
+  /** Default-off billing authority and exact-resource permission delegation surface. */
+  OPERATIONS_PORTAL_NATIVE_BILLING_OWNER_ENABLED?: string;
+  /** Default-off workspace owner surface and private Client publication dispatch. */
+  OPERATIONS_PORTAL_WORKSPACE_OWNER_ENABLED?: string;
+  OPERATIONS_PORTAL_WORKSPACE_PUBLICATION_DISPATCH_ENABLED?: string;
+  OPERATIONS_PORTAL_WORKSPACE_PUBLICATION?: import("./operations-portal-workspace-publication-outbox").OperationsPortalWorkspacePublicationBinding;
   /** Enables staff recovery for the additive client workspace hierarchy. */
   CLIENT_PORTAL_HIERARCHY_V2_ENABLED?: string;
   /** Must match the Client deployment before publishing relation-backed grants. */

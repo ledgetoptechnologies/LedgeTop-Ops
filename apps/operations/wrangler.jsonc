@@ -15,7 +15,15 @@
     "binding": "ASSETS",
     "directory": "./dist/client",
     "not_found_handling": "single-page-application",
-    "run_worker_first": ["/api/*", "/health", "/r/*"]
+    "run_worker_first": [
+      "/api/*",
+      "/health",
+      "/r/*",
+      "/administration/client-portal/operations-delivery-authority",
+      "/administration/client-portal/operations-workspaces",
+      "/administration/client-portal/operations-billing-authority",
+      "/administration/client-portal/operations-billing-permissions"
+    ]
   },
   "vars": {
     "PUBLIC_BASE_URL": "https://ops.ledgetopdroneservices.com",
@@ -78,6 +86,13 @@
     "CLIENT_PORTAL_SERVICE_METADATA_RPC_ENABLED": "false",
     "CLIENT_PORTAL_NATIVE_RECIPIENT_SERVICE_HOME_ENABLED": "false",
     "CLIENT_PORTAL_NATIVE_FINANCIAL_RPC_ENABLED": "false",
+    "OPERATIONS_PORTAL_NATIVE_DELIVERY_OWNER_ENABLED": "false",
+    "OPERATIONS_PORTAL_NATIVE_DELIVERY_AUTHORITY_DISPATCH_ENABLED": "false",
+    "OPERATIONS_PORTAL_NATIVE_DELIVERY_READER_ENABLED": "false",
+    "OPERATIONS_PORTAL_NATIVE_DELIVERY_CANCELLATION_ENABLED": "false",
+    "OPERATIONS_PORTAL_NATIVE_BILLING_OWNER_ENABLED": "false",
+    "OPERATIONS_PORTAL_WORKSPACE_OWNER_ENABLED": "false",
+    "OPERATIONS_PORTAL_WORKSPACE_PUBLICATION_DISPATCH_ENABLED": "false",
     "CLIENT_PORTAL_HIERARCHY_V2_ENABLED": "true",
     "CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED": "false",
     "CLIENT_PORTAL_MEMBERSHIP_MANAGEMENT_ENABLED": "false",
@@ -203,6 +218,16 @@
       "binding": "CLIENT_PORTAL_AUTHORITY_V2",
       "service": "ledgetop-clients",
       "entrypoint": "ClientPortalAuthorityV2Ingress"
+    },
+    {
+      "binding": "OPERATIONS_PORTAL_NATIVE_DELIVERY_AUTHORITY",
+      "service": "ledgetop-clients",
+      "entrypoint": "OperationsPortalNativeDeliveryAuthorityIngress"
+    },
+    {
+      "binding": "OPERATIONS_PORTAL_WORKSPACE_PUBLICATION",
+      "service": "ledgetop-clients",
+      "entrypoint": "OperationsPortalWorkspacePublicationIngress"
     }
   ],
   "durable_objects": {

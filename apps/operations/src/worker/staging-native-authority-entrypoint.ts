@@ -1,36 +1,22 @@
 import standardWorker from "./index";
 import { handleOperationsNativeRecipientOwnerHttp } from "./operations-portal-native-recipient-owner-http";
-import { handleOperationsPortalNativeDeliveryAuthorityOwnerHttp } from "./operations-portal-native-delivery-authority-owner-http";
-import { handleOperationsPortalWorkspaceOwnerHttp } from "./operations-portal-workspace-owner-http";
-import type { OperationsPortalWorkspacePublicationBinding } from "./operations-portal-workspace-publication-outbox";
 import type { OperationsPortalNativeDeliveryAuthorityDispatchEnv } from "./operations-portal-native-delivery-authority-dispatch";
-import { exactNativeStagingConfiguration, exactNativeBillingStagingConfiguration,
-  exactNativeDirectoryMaintenanceStagingConfiguration } from "./staging-native-authority-policy";
+import { exactNativeStagingConfiguration, exactNativeDirectoryMaintenanceStagingConfiguration } from "./staging-native-authority-policy";
 import { handleOperationsNativeDirectoryMaintenanceOwnerHttp } from "./operations-native-directory-maintenance-owner-http";
-import { handleOperationsPortalNativeBillingAuthorityOwnerHttp } from "./operations-portal-native-billing-authority-owner-http";
-import { handleOperationsPortalNativeBillingPermissionOwnerHttp,
-  OPERATIONS_NATIVE_BILLING_PERMISSION_OWNER_BASE } from "./operations-portal-native-billing-permission-owner-http";
-import { reviewOperationsPortalNativeBillingCandidate, grantOperationsPortalNativeBillingAuthority,
-  revokeOperationsPortalNativeBillingAuthority, readOperationsPortalNativeBillingAuthorityStatus } from "./operations-portal-native-billing-authority-issuer";
 import type { Env } from "./types";
+import { dispatchOperationsPortalNativeOwnerRequest, isOperationsPortalNativeOwnerPath, type OperationsPortalNativeOwnerEnv }
+  from "./operations-portal-native-owner-routes";
 
 const STAGING_HOST = "ops-staging.ledgetopdroneservices.com";
 const STAGING_ORIGIN = `https://${STAGING_HOST}`;
 const RECIPIENT_API = "/api/native-client-portal/operations-recipient-enrollment";
-const DELIVERY_API = "/api/native-client-portal/operations-delivery-authority";
-const WORKSPACE_API = "/api/native-client-portal/operations-workspaces";
-const WORKSPACE_PAGE = "/administration/client-portal/operations-workspaces";
-const BILLING_API = "/api/native-client-portal/operations-billing-authority";
-const BILLING_PAGE = "/administration/client-portal/operations-billing-authority";
-const BILLING_PERMISSION_PAGE = "/administration/client-portal/operations-billing-permissions";
 const DIRECTORY_MAINTENANCE_API = "/api/native-client-portal/directory-maintenance-authority";
 const DIRECTORY_MAINTENANCE_PAGE = "/administration/staging/directory-maintenance-authority";
 const OWNER_PAGES = new Set([
   "/administration/client-portal/operations-recipients",
-  "/administration/client-portal/operations-delivery-authority",
 ]);
 
-type NativeStagingEnv = Env & OperationsPortalNativeDeliveryAuthorityDispatchEnv & {
+type NativeStagingEnv = OperationsPortalNativeOwnerEnv & Env & OperationsPortalNativeDeliveryAuthorityDispatchEnv & {
   CLIENT_PORTAL_NATIVE_RECIPIENT_ENROLLMENT_ENABLED?: string;
   CLIENT_PORTAL_NATIVE_RECIPIENT_OWNER_ENABLED?: string;
   OPERATIONS_PORTAL_NATIVE_RECIPIENT_AUTHORITY_DISPATCH_ENABLED?: string;
@@ -42,7 +28,6 @@ type NativeStagingEnv = Env & OperationsPortalNativeDeliveryAuthorityDispatchEnv
   NATIVE_DIRECTORY_MAINTENANCE_OWNER_ENABLED?: string;
   OPERATIONS_PORTAL_WORKSPACE_OWNER_ENABLED?: string;
   OPERATIONS_PORTAL_WORKSPACE_PUBLICATION_DISPATCH_ENABLED?: string;
-  OPERATIONS_PORTAL_WORKSPACE_PUBLICATION?: OperationsPortalWorkspacePublicationBinding;
 };
 
 function pathFamily(pathname: string, base: string): boolean {
@@ -64,55 +49,17 @@ export default {
           origin: STAGING_ORIGIN, csrfSecret: env.OPERATIONS_SESSION_SECRET }, database: env.OPS_DB,
       });
     }
-    if (pathFamily(pathname, OPERATIONS_NATIVE_BILLING_PERMISSION_OWNER_BASE) || pathname === BILLING_PERMISSION_PAGE) {
-      if (!exactNativeBillingStagingConfiguration(request, env)) return notFound();
-      if (pathname === BILLING_PERMISSION_PAGE) return env.ASSETS.fetch(request);
-      return handleOperationsPortalNativeBillingPermissionOwnerHttp(request, {
-        environment: env.ENVIRONMENT, expectedHost: STAGING_HOST,
-        delegationFlag: env.OPERATIONS_PORTAL_NATIVE_BILLING_OWNER_ENABLED ?? "false",
-        configuration: { enabled: true, issuer: env.TEAM_DOMAIN ?? "", staffAudience: env.OPERATIONS_AUD,
-          origin: STAGING_ORIGIN, csrfSecret: env.OPERATIONS_SESSION_SECRET }, database: env.OPS_DB,
-      });
-    }
-    if (pathFamily(pathname, BILLING_API) || pathname === BILLING_PAGE) {
-      if (!exactNativeBillingStagingConfiguration(request, env)) return notFound();
-      if (pathname === BILLING_PAGE) return env.ASSETS.fetch(request);
-      return handleOperationsPortalNativeBillingAuthorityOwnerHttp(request, {
-        environment: env.ENVIRONMENT, expectedHost: STAGING_HOST,
-        lifecycleFlag: env.OPERATIONS_PORTAL_NATIVE_BILLING_OWNER_ENABLED ?? "false",
-        configuration: { enabled: true, issuer: env.TEAM_DOMAIN ?? "", staffAudience: env.OPERATIONS_AUD,
-          origin: STAGING_ORIGIN, csrfSecret: env.OPERATIONS_SESSION_SECRET }, database: env.OPS_DB,
-        core: { review: reviewOperationsPortalNativeBillingCandidate, grant: grantOperationsPortalNativeBillingAuthority,
-          revoke: revokeOperationsPortalNativeBillingAuthority, readStatus: readOperationsPortalNativeBillingAuthorityStatus },
-      });
-    }
-    const workspaceOwned = pathFamily(pathname, WORKSPACE_API) || pathname === WORKSPACE_PAGE;
-    const owned = pathFamily(pathname, RECIPIENT_API) || pathFamily(pathname, DELIVERY_API) || OWNER_PAGES.has(pathname);
+    if (isOperationsPortalNativeOwnerPath(pathname) && env.ENVIRONMENT !== "staging") return notFound();
+    const ordinaryOwner = await dispatchOperationsPortalNativeOwnerRequest(request, env);
+    if (ordinaryOwner) return ordinaryOwner;
+    const owned = pathFamily(pathname, RECIPIENT_API) || OWNER_PAGES.has(pathname);
     if (owned && !exactNativeStagingConfiguration(request, env)) return notFound();
-    const workspaceEnabled = exactNativeStagingConfiguration(request, env)
-      && env.OPERATIONS_PORTAL_WORKSPACE_OWNER_ENABLED === "true"
-      && env.OPERATIONS_PORTAL_WORKSPACE_PUBLICATION_DISPATCH_ENABLED === "true"
-      && typeof env.OPERATIONS_PORTAL_WORKSPACE_PUBLICATION?.publishWorkspace === "function"
-      && typeof env.OPERATIONS_PORTAL_WORKSPACE_PUBLICATION?.getPublicationStatus === "function";
-    if (workspaceOwned && !workspaceEnabled) return notFound();
-    if (pathname === WORKSPACE_PAGE) return env.ASSETS.fetch(request);
     if (OWNER_PAGES.has(pathname)) return env.ASSETS.fetch(request);
     if (pathFamily(pathname, RECIPIENT_API)) return handleOperationsNativeRecipientOwnerHttp(request, {
       environment: env.ENVIRONMENT, expectedHost: env.EXPECTED_HOST,
       configuration: { enabled: true, issuer: env.TEAM_DOMAIN ?? "", staffAudience: env.OPERATIONS_AUD,
         origin: STAGING_ORIGIN, recipientOrigin: env.DELIVERY_BASE_URL, csrfSecret: env.OPERATIONS_SESSION_SECRET },
       database: env.OPS_DB, dispatch: env,
-    });
-    if (pathFamily(pathname, DELIVERY_API)) return handleOperationsPortalNativeDeliveryAuthorityOwnerHttp(request, {
-      environment: env.ENVIRONMENT, expectedHost: env.EXPECTED_HOST,
-      configuration: { enabled: true, issuer: env.TEAM_DOMAIN ?? "", staffAudience: env.OPERATIONS_AUD,
-        origin: STAGING_ORIGIN, csrfSecret: env.OPERATIONS_SESSION_SECRET }, database: env.OPS_DB, dispatch: env,
-    });
-    if (pathFamily(pathname, WORKSPACE_API)) return handleOperationsPortalWorkspaceOwnerHttp(request, {
-      environment: env.ENVIRONMENT, expectedHost: env.EXPECTED_HOST,
-      configuration: { enabled: true, issuer: env.TEAM_DOMAIN ?? "", staffAudience: env.OPERATIONS_AUD,
-        origin: STAGING_ORIGIN, csrfSecret: env.OPERATIONS_SESSION_SECRET }, database: env.OPS_DB,
-      publication: env.OPERATIONS_PORTAL_WORKSPACE_PUBLICATION!,
     });
     return standardWorker.fetch(request, env, ctx);
   },

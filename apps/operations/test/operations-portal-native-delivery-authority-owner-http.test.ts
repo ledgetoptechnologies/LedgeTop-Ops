@@ -69,11 +69,21 @@ describe("Ops native delivery owner HTTP boundary", () => {
       state: "authorized", replayed: false });
   });
 
-  it.each(["disabled", "production"])("is absent for %s before authenticating", async mode => {
-    const d = deps(), modified = mode === "disabled" ? { ...d, configuration: { ...d.configuration, enabled: false } }
-      : { ...d, environment: "production" };
+  it("is absent when disabled before authenticating", async () => {
+    const d = deps(), modified = { ...d, configuration: { ...d.configuration, enabled: false } };
     expect((await handle(request("session"), modified)).status).toBe(404);
     expect(calls.auth).not.toHaveBeenCalled();
+  });
+
+  it("accepts an exact configured production deployment", async () => {
+    const production = "https://ops.example.test", d = deps();
+    const response = await handle(new Request(`${production}/api/native-client-portal/operations-delivery-authority/session`,
+      { headers: { Origin: production, "Sec-Fetch-Site": "same-origin", "X-Native-Staff-Request": "1" } }), {
+      ...d, environment: "production", expectedHost: "ops.example.test",
+      configuration: { ...d.configuration, origin: production },
+      dispatch: { ...d.dispatch, ENVIRONMENT: "production", EXPECTED_HOST: "ops.example.test" },
+    });
+    expect(response.status).toBe(200); expect(calls.auth).toHaveBeenCalledOnce();
   });
 
   it("requires a complete staging-only private transport", async () => {

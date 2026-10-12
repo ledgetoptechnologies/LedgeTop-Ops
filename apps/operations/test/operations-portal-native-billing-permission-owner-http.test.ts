@@ -33,10 +33,16 @@ const issue={confirm:true,operationId:id(1),grantId:id(2),expectedGeneration:0,s
 describe("resource-scoped billing permission owner HTTP",()=>{
   beforeEach(()=>{vi.clearAllMocks();allowed=true;grantExists=true;rows=[];lastManagerValues=[];authenticate.mockResolvedValue(actor);
     manage.mockResolvedValue({status:"applied",operationId:id(1),grantId:id(2),generation:1});});
-  it("is default-off, staging-only, fixed-host before any authentication",async()=>{
-    for(const d of [{...deps(),environment:"production"},{...deps(),delegationFlag:"false"},{...deps(),expectedHost:"ops-staging.example.test"},
+  it("is default-off and exact-configured-host before any authentication",async()=>{
+    for(const d of [{...deps(),delegationFlag:"false"},{...deps(),expectedHost:"ops-staging.example.test"},
       {...deps(),configuration:{...deps().configuration,origin:"https://ops-staging.example.test"}}])expect((await handle(request("session"),d)).status).toBeGreaterThanOrEqual(400);
     expect(authenticate).not.toHaveBeenCalled();expect(manage).not.toHaveBeenCalled();
+  });
+  it("accepts an exact configured production deployment",async()=>{
+    const production="https://ops.example.test",d=deps();
+    const response=await handle(new Request(`${production}${base}/session`,{headers:{Origin:production,"Sec-Fetch-Site":"same-origin","X-Native-Staff-Request":"1"}}),
+      {...d,environment:"production",expectedHost:"ops.example.test",configuration:{...d.configuration,origin:production}});
+    expect(response.status).toBe(200);expect(authenticate).toHaveBeenCalledOnce();
   });
   it("session conveys CSRF but no owner privilege or permission data",async()=>{
     allowed=false;const d=deps(),csrf=await token(d);expect(prepare).not.toHaveBeenCalled();

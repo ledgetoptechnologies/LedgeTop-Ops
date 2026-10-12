@@ -359,6 +359,8 @@ test("routes the workspace owner page through the guarded staging Worker exactly
     "/administration/client-portal/operations-recipients",
     "/administration/client-portal/operations-delivery-authority",
     operationsWorkspacePage,
+    "/administration/client-portal/operations-billing-authority",
+    "/administration/client-portal/operations-billing-permissions",
   ]);
   assert.equal(approvedRoutes.filter((route) => route === operationsWorkspacePage).length, 1);
 
