@@ -87,21 +87,22 @@ async function fixture(automatic=false,updateRevision='2'){
 async function count(table:string,commandId:string){return db.prepare(`SELECT count(*) n FROM ${table} WHERE command_id=?`).bind(commandId).first<number>('n');}
 
 const automaticEnv=()=>({...env(),NATIVE_DIRECTORY_PROFILE_BINDING_CONTINUATION_ENABLED:'true'});
-it('atomically derives an immutable destination job with original attribution, and automatically persists aligned canonical inventory',async()=>{
+const productionAutomaticEnv=()=>({...automaticEnv(),ENVIRONMENT:'production'});
+it('atomically derives an immutable destination job and completes and replays it under explicit production opt-in',async()=>{
   const f=await fixture(true);
   const job=await db.prepare('SELECT * FROM native_directory_profile_binding_jobs WHERE command_id=?').bind(f.commandId).first();
   expect(job).toMatchObject({record_id:f.recordId,local_version:2,source_id:sourceId,actor_id:staffId,access_subject:'access|owner',live_revision:'2',authorization_generation:'1'});
   await expect(db.prepare("UPDATE native_directory_profile_binding_jobs SET actor_id='other' WHERE command_id=?").bind(f.commandId).run()).rejects.toThrow();
-  expect(await dispatchNativeDirectoryProfileBindingContinuation(automaticEnv(),sourceId,f.commandId,f.send)).toEqual({status:'acknowledged'});
+  expect(await dispatchNativeDirectoryProfileBindingContinuation(productionAutomaticEnv(),sourceId,f.commandId,f.send)).toEqual({status:'acknowledged'});
   expect(f.posts).toHaveLength(1);
   expect(await resolveTrustedNativeFinancialMapping(env(),{kind:'organization',recordId:f.recordId,sourceId})).toMatchObject({revision:'2',authorizationGeneration:'2'});
-  expect(await dispatchNativeDirectoryProfileBindingContinuation(automaticEnv(),sourceId,f.commandId,f.send)).toEqual({status:'acknowledged'});
+  expect(await dispatchNativeDirectoryProfileBindingContinuation(productionAutomaticEnv(),sourceId,f.commandId,f.send)).toEqual({status:'acknowledged'});
   expect(f.posts).toHaveLength(1);
 },30000);
-it('keeps automatic authority default off and impossible in production',async()=>{
+it('keeps automatic authority default off in production and fails closed for unknown environments',async()=>{
   const f=await fixture(true);
-  expect(await dispatchNativeDirectoryProfileBindingContinuation(env(),sourceId,f.commandId,f.send)).toMatchObject({status:'blocked',reason:'disabled'});
-  expect(await dispatchNativeDirectoryProfileBindingContinuation({...automaticEnv(),ENVIRONMENT:'production'},sourceId,f.commandId,f.send)).toMatchObject({status:'blocked',reason:'disabled'});
+  expect(await dispatchNativeDirectoryProfileBindingContinuation({...env(),ENVIRONMENT:'production'},sourceId,f.commandId,f.send)).toMatchObject({status:'blocked',reason:'disabled'});
+  expect(await dispatchNativeDirectoryProfileBindingContinuation({...automaticEnv(),ENVIRONMENT:'preview'},sourceId,f.commandId,f.send)).toMatchObject({status:'blocked',reason:'disabled'});
   expect(f.send).not.toHaveBeenCalled();
 });
 
@@ -423,7 +424,7 @@ it('retries normal inventory persistence after a durable receipt without another
   expect(f.posts).toHaveLength(1);
 },30000);
 it.each(['sourceInstanceId','applicationId','historyEpoch'] as const)('parks configured %s drift before any PA request',async field=>{
-  const f=await fixture(true),configured=automaticEnv(),connections=JSON.parse(configured.PROJECT_ALPHA_API_V2_CONNECTIONS!);
+  const f=await fixture(true),configured=productionAutomaticEnv(),connections=JSON.parse(configured.PROJECT_ALPHA_API_V2_CONNECTIONS!);
   connections.instances[sourceId][field]=randomUUID();
   expect(await dispatchNativeDirectoryProfileBindingContinuation({...configured,PROJECT_ALPHA_API_V2_CONNECTIONS:JSON.stringify(connections)},sourceId,f.commandId,f.send))
     .toMatchObject({status:'conflict',reason:'destination_changed'});
@@ -438,7 +439,7 @@ it.each(['publicId','externalId','revision'] as const)('parks fresh inventory %s
     else if(field==='externalId')body.resources[0]!.binding.externalId='wrong-external-id';else body.resources[0]!.revision='3';
     return json(body);
   });
-  expect(await dispatchNativeDirectoryProfileBindingContinuation(automaticEnv(),sourceId,f.commandId,wrong)).toMatchObject({status:'conflict'});
+  expect(await dispatchNativeDirectoryProfileBindingContinuation(productionAutomaticEnv(),sourceId,f.commandId,wrong)).toMatchObject({status:'conflict'});
   expect(f.posts).toHaveLength(0);
   expect(await db.prepare('SELECT count(*) n FROM native_directory_profile_binding_commands WHERE job_command_id=?').bind(f.commandId).first('n')).toBe(0);
 });
