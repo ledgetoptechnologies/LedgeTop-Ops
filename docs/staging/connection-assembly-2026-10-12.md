@@ -39,6 +39,8 @@ Original source commits integrated in order:
 - Exact project adoption source commits received an independent clear review, including the bounded 64 KiB, duplicate-free PA response check and negative response tests.
 - Six database-backed/core integration suites passed 53/53: native project management, Directory adoption preparation/runtime finalization, project adoption finalization and candidate API validation. The project adoption D1 fixture applies the migration chain; these local fixtures are not live PA calls.
 - Combined integration review found a stale generated `NodeJS.ProcessEnv` flag entry. Regenerating with the locked Wrangler version corrected it; `cf-typegen:check` passed. No binding value or deployment was changed.
+- Added a combined desktop/mobile browser regression for adoption and native creation coexistence, adoption completion, customer-project refresh, canonical project navigation and inbound proposal review. The delegated run passed 2/2 new cases and 22/22 combined adoption/native-management cases. Its browser-boundary API fixtures prove UI/route-shape integration, not actual remote PA transport or live client access.
+- Root independently reran the new coexistence spec: 2/2 passed. Three additional native-action/Directory-adoption suites passed 39/39. Combined root focused evidence is therefore 122 tests across thirteen server/integration files and 12 browser cases; this is not the full repository suite.
 
 Commands run from `apps/operations`:
 
@@ -54,6 +56,7 @@ npm run cf-typegen:check
 ## Remaining release gates
 
 - Complete combined database-backed verification and integration-specific review.
+- Require successful CI for the exact combined candidate, not merely its base commit's already-passing CI.
 - Recover and verify the private staging release/attempt markers before continuing the already-started live automatic-sync acceptance. Do not fabricate markers or repeat uncertain operations.
 - Prove the live normal profile update → PA acknowledgement → automatic binding continuation → test-authority cleanup cycle.
 - Run combined normal operational workflow acceptance against the exact staged candidate.
