@@ -1,5 +1,6 @@
 import { readConfiguredProjectAlphaDirectoryProfile, type ProjectAlphaDirectoryProfile } from "./project-alpha-directory-read-api-v2";
 import type { Env } from "./types";
+import { projectAlphaDirectoryExistingRecordAdoptionEnabled } from "./project-alpha-directory-read-adoption-enabled";
 
 export const DIRECTORY_ADOPTION_ORGANIZATION_FIELDS = ["name","email","phone","address_line1","address_line2","city","state","postal_code","country"] as const;
 export const DIRECTORY_ADOPTION_CLIENT_FIELDS = [...DIRECTORY_ADOPTION_ORGANIZATION_FIELDS,"client_type","organization_public_id"] as const;
@@ -94,12 +95,13 @@ async function reservation(db:D1Database,input:DirectoryAdoptionFieldReviewInput
 
 type Compared = Readonly<{ selected:Reservation; observed:Extract<Awaited<ReturnType<typeof readConfiguredProjectAlphaDirectoryProfile>>,{status:"observed"}>["observation"];
   local:Record<DirectoryAdoptionField,unknown>; remote:Record<DirectoryAdoptionField,unknown> }>;
-async function currentIdentityLinkAuthority(db:D1Database, selected:Reservation):Promise<boolean>{
+async function currentDirectoryAuthority(db:D1Database, selected:Reservation,
+  permission:"directory.identity.link"|"directory.profile.view"):Promise<boolean>{
   const row=await db.prepare(`SELECT 1 AS allowed
     FROM operations_directory_records record
     WHERE record.record_id=? AND record.record_kind=?
       AND EXISTS(SELECT 1 FROM native_directory_grants allow_row
-        WHERE allow_row.staff_id=? AND allow_row.permission='directory.identity.link'
+        WHERE allow_row.staff_id=? AND allow_row.permission=?
           AND allow_row.effect='allow' AND allow_row.active=1
           AND (allow_row.scope_kind='global'
             OR (allow_row.scope_kind='resource' AND allow_row.resource_id=record.record_id)
@@ -110,7 +112,7 @@ async function currentIdentityLinkAuthority(db:D1Database, selected:Reservation)
             OR (allow_row.scope_kind='division' AND EXISTS(SELECT 1 FROM native_directory_resource_scopes scope
               WHERE scope.record_id=record.record_id AND scope.active=1 AND scope.division_id=allow_row.division_id))))
       AND NOT EXISTS(SELECT 1 FROM native_directory_grants deny_row
-        WHERE deny_row.staff_id=? AND deny_row.permission='directory.identity.link'
+        WHERE deny_row.staff_id=? AND deny_row.permission=?
           AND deny_row.effect='deny' AND deny_row.active=1
           AND (deny_row.scope_kind='global'
             OR (deny_row.scope_kind='resource' AND deny_row.resource_id=record.record_id)
@@ -120,16 +122,18 @@ async function currentIdentityLinkAuthority(db:D1Database, selected:Reservation)
               WHERE scope.record_id=record.record_id AND scope.active=1 AND scope.business_area_id=deny_row.business_area_id))
             OR (deny_row.scope_kind='division' AND EXISTS(SELECT 1 FROM native_directory_resource_scopes scope
               WHERE scope.record_id=record.record_id AND scope.active=1 AND scope.division_id=deny_row.division_id))))`).bind(
-    selected.record_id,selected.resource_type,selected.reviewer_staff_id,selected.reviewer_staff_id,
-    selected.reviewer_staff_id,selected.reviewer_staff_id).first<{allowed:number}>();
+    selected.record_id,selected.resource_type,selected.reviewer_staff_id,permission,selected.reviewer_staff_id,
+    selected.reviewer_staff_id,permission,selected.reviewer_staff_id).first<{allowed:number}>();
   return row?.allowed===1;
 }
 async function compareEvidence(env:Env,reviewId:string,actor:DirectoryAdoptionFieldReviewInput["actor"],readProfile:typeof readConfiguredProjectAlphaDirectoryProfile):Promise<Compared|Exclude<DirectoryAdoptionFieldComparisonOutcome,{status:"compared"}>>{
-  if(env.ENVIRONMENT!=="staging" || env.PROJECT_ALPHA_DIRECTORY_EXACT_ADOPTION_ENABLED!=="true") return {status:"disabled"};
+  if(!projectAlphaDirectoryExistingRecordAdoptionEnabled(env)) return {status:"disabled"};
   if(!UUID.test(reviewId) || !actorValid(actor)) return {status:"rejected",reason:"invalid_input"};
   const selected=await reservation(env.OPS_DB,{reviewId,decisions:{} as DirectoryAdoptionFieldReviewInput["decisions"],actor});
   if(!selected) return {status:"blocked",reason:"reservation_not_current"};
-  if(!await currentIdentityLinkAuthority(env.OPS_DB,selected)) return {status:"blocked",reason:"reservation_not_current"};
+  if(!await currentDirectoryAuthority(env.OPS_DB,selected,"directory.identity.link")
+    || !await currentDirectoryAuthority(env.OPS_DB,selected,"directory.profile.view"))
+    return {status:"blocked",reason:"reservation_not_current"};
   const local=localProfile(selected.profile_json,selected.resource_type);
   if(!local) return {status:"blocked",reason:"local_profile_contract"};
   const read=await readProfile(env,selected.source_id,selected.resource_type,selected.project_alpha_public_id);
@@ -139,6 +143,9 @@ async function compareEvidence(env:Env,reviewId:string,actor:DirectoryAdoptionFi
     || observed.historyEpoch!==selected.history_epoch_id || observed.resource.type!==selected.resource_type
     || observed.resource.id!==selected.project_alpha_public_id || observed.resource.revision!==selected.project_alpha_revision
     || observed.authorizationGeneration!==selected.authorization_generation) return {status:"blocked",reason:"pa_profile_changed"};
+  if(!await currentDirectoryAuthority(env.OPS_DB,selected,"directory.identity.link")
+    || !await currentDirectoryAuthority(env.OPS_DB,selected,"directory.profile.view"))
+    return {status:"blocked",reason:"reservation_not_current"};
   return {selected,observed,local,remote:remoteProfile(observed.profile,selected.resource_type)};
 }
 
@@ -159,7 +166,7 @@ export async function sealProjectAlphaDirectoryReadAdoptionFieldReview(
   env:Env,input:DirectoryAdoptionFieldReviewInput,
   readProfile:typeof readConfiguredProjectAlphaDirectoryProfile=readConfiguredProjectAlphaDirectoryProfile,
 ):Promise<DirectoryAdoptionFieldReviewOutcome>{
-  if(env.ENVIRONMENT!=="staging" || env.PROJECT_ALPHA_DIRECTORY_EXACT_ADOPTION_ENABLED!=="true") return {status:"disabled"};
+  if(!projectAlphaDirectoryExistingRecordAdoptionEnabled(env)) return {status:"disabled"};
   if (!object(input) || !UUID.test(input.reviewId) || !actorValid(input.actor)) return {status:"rejected",reason:"invalid_input"};
   const requestSha=await sha({reviewId:input.reviewId,decisions:input.decisions,actor:input.actor});
   const prior=await env.OPS_DB.prepare(`SELECT receipt_id,request_sha256,resource_type FROM project_alpha_directory_read_adoption_field_review_receipts WHERE review_id=?`).bind(input.reviewId).first<{receipt_id:string;request_sha256:string;resource_type:Reservation["resource_type"]}>();
@@ -182,11 +189,36 @@ export async function sealProjectAlphaDirectoryReadAdoptionFieldReview(
         receipt_id,review_id,claim_id,request_sha256,source_id,source_instance_id,application_id,history_epoch_id,resource_type,
         record_id,external_id,project_alpha_public_id,project_alpha_revision,authorization_generation,local_record_version,
         local_profile_sha256,project_alpha_profile_sha256,project_alpha_profile_request_id,reviewer_staff_id,reviewer_access_subject,
-        reviewer_admission_version,reviewer_profile_version,decision_count,reviewed_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(
+        reviewer_admission_version,reviewer_profile_version,decision_count,reviewed_at)
+        SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,? WHERE EXISTS(
+          SELECT 1 FROM operations_directory_records record WHERE record.record_id=? AND record.record_kind=?
+          AND EXISTS(SELECT 1 FROM native_directory_grants allow_row
+            WHERE allow_row.staff_id=? AND allow_row.permission='directory.profile.view'
+              AND allow_row.effect='allow' AND allow_row.active=1
+              AND (allow_row.scope_kind='global'
+                OR (allow_row.scope_kind='resource' AND allow_row.resource_id=record.record_id)
+                OR (allow_row.scope_kind='assigned' AND EXISTS(SELECT 1 FROM native_directory_assignments assignment
+                  WHERE assignment.record_id=record.record_id AND assignment.staff_id=? AND assignment.active=1))
+                OR (allow_row.scope_kind='business_area' AND EXISTS(SELECT 1 FROM native_directory_resource_scopes scope
+                  WHERE scope.record_id=record.record_id AND scope.active=1 AND scope.business_area_id=allow_row.business_area_id))
+                OR (allow_row.scope_kind='division' AND EXISTS(SELECT 1 FROM native_directory_resource_scopes scope
+                  WHERE scope.record_id=record.record_id AND scope.active=1 AND scope.division_id=allow_row.division_id))))
+          AND NOT EXISTS(SELECT 1 FROM native_directory_grants deny_row
+            WHERE deny_row.staff_id=? AND deny_row.permission='directory.profile.view'
+              AND deny_row.effect='deny' AND deny_row.active=1
+              AND (deny_row.scope_kind='global'
+                OR (deny_row.scope_kind='resource' AND deny_row.resource_id=record.record_id)
+                OR (deny_row.scope_kind='assigned' AND EXISTS(SELECT 1 FROM native_directory_assignments assignment
+                  WHERE assignment.record_id=record.record_id AND assignment.staff_id=? AND assignment.active=1))
+                OR (deny_row.scope_kind='business_area' AND EXISTS(SELECT 1 FROM native_directory_resource_scopes scope
+                  WHERE scope.record_id=record.record_id AND scope.active=1 AND scope.business_area_id=deny_row.business_area_id))
+                OR (deny_row.scope_kind='division' AND EXISTS(SELECT 1 FROM native_directory_resource_scopes scope
+                  WHERE scope.record_id=record.record_id AND scope.active=1 AND scope.division_id=deny_row.division_id)))))`).bind(
         receiptId,input.reviewId,selected.claim_id,requestSha,selected.source_id,selected.source_instance_id,selected.application_id,selected.history_epoch_id,
         selected.resource_type,selected.record_id,selected.external_id,selected.project_alpha_public_id,selected.project_alpha_revision,selected.authorization_generation,
         selected.expected_local_record_version,await sha(JSON.parse(selected.profile_json)),await sha(observed.profile),observed.requestId,
-        input.actor.staffId,input.actor.accessSubject,input.actor.admissionVersion,input.actor.profileVersion,fields(selected.resource_type).length,at),
+        input.actor.staffId,input.actor.accessSubject,input.actor.admissionVersion,input.actor.profileVersion,fields(selected.resource_type).length,at,
+        selected.record_id,selected.resource_type,input.actor.staffId,input.actor.staffId,input.actor.staffId,input.actor.staffId),
       ...fields(selected.resource_type).map(field=>env.OPS_DB.prepare(`INSERT INTO project_alpha_directory_read_adoption_field_decisions(receipt_id,field_name,decision) VALUES(?,?,?)`).bind(receiptId,field,input.decisions[field])),
       env.OPS_DB.prepare(`INSERT INTO project_alpha_directory_read_adoption_field_review_audit(audit_id,receipt_id,event,actor_staff_id,occurred_at) VALUES(?,?,'field_review_sealed',?,?)`).bind(auditId,receiptId,input.actor.staffId,at),
     ]);

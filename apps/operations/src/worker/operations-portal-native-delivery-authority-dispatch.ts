@@ -11,6 +11,7 @@ import { verifyOperationsPortalNativeDeliveryGrantForDispatch }
 import { claimOperationsPortalNativeDeliveryRecoveryInvocation,
   currentOperationsPortalNativeDeliveryRecoveryInvocation }
   from "./operations-portal-native-delivery-recovery-invocations";
+import { configuredDeploymentOrigin } from "@ltds/shared/configured-deployment-origin";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 const encoder = new TextEncoder();
@@ -20,7 +21,7 @@ type OutboxRow = { operation_id: string; action: "delivery.grant" | "delivery.re
   state: string; attempt_count: number; claim_token: string | null };
 
 export type OperationsPortalNativeDeliveryAuthorityDispatchEnv = Readonly<{
-  OPS_DB: D1Database; ENVIRONMENT?: string; EXPECTED_HOST?: string;
+  OPS_DB: D1Database; ENVIRONMENT?: string; EXPECTED_HOST?: string; PUBLIC_BASE_URL?: string;
   OPERATIONS_PORTAL_NATIVE_DELIVERY_AUTHORITY?: OperationsPortalNativeDeliveryAuthorityBinding;
   OPERATIONS_PORTAL_NATIVE_DELIVERY_AUTHORITY_DISPATCH_ENABLED?: string;
   OPERATIONS_PORTAL_NATIVE_DELIVERY_CANCELLATION_ENABLED?: string;
@@ -228,9 +229,12 @@ export async function dispatchNextOperationsPortalNativeDeliveryAuthority(input:
 export function dispatchStagedOperationsPortalNativeDeliveryAuthority(
   env: OperationsPortalNativeDeliveryAuthorityDispatchEnv, operationId?: string, recoveryInvocationId?: string,
 ) {
-  if (env.ENVIRONMENT !== "staging" || env.EXPECTED_HOST !== "ops-staging.ledgetopdroneservices.com"
+  if (!configuredDeploymentOrigin({ environment: env.ENVIRONMENT ?? "", origin: env.PUBLIC_BASE_URL,
+      expectedHost: env.EXPECTED_HOST })
     || env.OPERATIONS_PORTAL_NATIVE_DELIVERY_AUTHORITY_DISPATCH_ENABLED !== "true"
-    || !env.OPERATIONS_PORTAL_NATIVE_DELIVERY_AUTHORITY) return Promise.resolve(null);
+    || typeof env.OPERATIONS_PORTAL_NATIVE_DELIVERY_AUTHORITY?.applyNativeDeliveryAuthority !== "function"
+    || typeof env.OPERATIONS_PORTAL_NATIVE_DELIVERY_AUTHORITY?.getNativeDeliveryAuthorityStatus !== "function")
+    return Promise.resolve(null);
   return dispatchNextOperationsPortalNativeDeliveryAuthority({ database: env.OPS_DB,
     binding: env.OPERATIONS_PORTAL_NATIVE_DELIVERY_AUTHORITY, operationId, recoveryInvocationId });
 }

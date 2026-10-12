@@ -8,7 +8,7 @@
   "workers_dev": false,
   "preview_urls": false,
   "routes": [{ "pattern": "ops-staging.ledgetopdroneservices.com", "custom_domain": true }],
-  "assets": { "binding": "ASSETS", "directory": "./dist/client", "not_found_handling": "single-page-application", "run_worker_first": ["/api/*", "/health", "/r/*", "/administration/client-portal/operations-recipients", "/administration/client-portal/operations-delivery-authority", "/administration/client-portal/operations-workspaces"] },
+  "assets": { "binding": "ASSETS", "directory": "./dist/client", "not_found_handling": "single-page-application", "run_worker_first": ["/api/*", "/health", "/r/*", "/administration/client-portal/operations-recipients", "/administration/client-portal/operations-delivery-authority", "/administration/client-portal/operations-workspaces", "/administration/client-portal/operations-billing-authority", "/administration/client-portal/operations-billing-permissions"] },
   "vars": {
     "PUBLIC_BASE_URL": "https://ops-staging.ledgetopdroneservices.com",
     "EXPECTED_HOST": "ops-staging.ledgetopdroneservices.com",
@@ -25,6 +25,7 @@
     "NATIVE_INTEGRATION_CONTROL_ORIGIN": "",
     "NATIVE_DIRECTORY_PROFILE_WRITES_ENABLED": "false",
     "NATIVE_DIRECTORY_OUTBOX_DRAIN_ENABLED": "false",
+    "NATIVE_DIRECTORY_PROFILE_BINDING_CONTINUATION_ENABLED": "false",
     "DELIVERY_BASE_URL": "https://client-staging.ledgetopdroneservices.com",
     "CLIENT_PORTAL_ORIGINS": "https://client-staging.ledgetopdroneservices.com,https://portal-staging.ledgetoptechnologies.com",
     "PUBLIC_SHARE_ORIGIN": "https://delivery-staging.ledgetopdroneservices.com",

@@ -4,6 +4,7 @@ import { Miniflare } from "miniflare";
 
 const profileDispatch = vi.hoisted(() => vi.fn());
 const relationshipDispatch = vi.hoisted(() => vi.fn());
+const continuationDispatch = vi.hoisted(() => vi.fn());
 const materializeClients = vi.hoisted(() => vi.fn());
 vi.mock("../src/worker/project-alpha-directory-profile-outbox-dispatcher", () => ({
   dispatchProjectAlphaDirectoryProfileOutboxCommand: profileDispatch,
@@ -13,6 +14,12 @@ vi.mock("../src/worker/project-alpha-directory-relationship-outbox-dispatcher", 
 }));
 vi.mock("../src/worker/project-alpha-directory-client-intent-materializer", () => ({
   materializeResolvedProjectAlphaDirectoryClientIntents: materializeClients,
+}));
+vi.mock("../src/worker/native-directory-profile-binding-continuation", () => ({
+  profileBindingContinuationEnabled: (env: { ENVIRONMENT?: string; NATIVE_DIRECTORY_PROFILE_BINDING_CONTINUATION_ENABLED?: string }) =>
+    env.NATIVE_DIRECTORY_PROFILE_BINDING_CONTINUATION_ENABLED === "true"
+      && ["local", "staging", "production"].includes(env.ENVIRONMENT ?? ""),
+  dispatchNativeDirectoryProfileBindingContinuation: continuationDispatch,
 }));
 
 import { drainNativeDirectoryOutboxes } from "../src/worker/native-directory-outbox-scheduler";
@@ -59,6 +66,10 @@ beforeAll(async () => {
     "project_alpha_directory_relationship_recovery_outbox"])
     await db.prepare(`CREATE TABLE ${table}(command_id TEXT PRIMARY KEY,source_id TEXT NOT NULL,state TEXT NOT NULL,
       next_attempt_at INTEGER NOT NULL,lease_expires_at INTEGER,created_at TEXT NOT NULL)`).run();
+  await db.prepare(`CREATE TABLE native_directory_profile_binding_jobs(
+    command_id TEXT PRIMARY KEY,source_id TEXT NOT NULL,created_at TEXT NOT NULL)`).run();
+  await db.prepare(`CREATE TABLE native_directory_profile_binding_dispatch(
+    command_id TEXT PRIMARY KEY,state TEXT NOT NULL,next_attempt_at INTEGER NOT NULL,lease_expires_at INTEGER)`).run();
 });
 
 beforeEach(async () => {
@@ -66,9 +77,12 @@ beforeEach(async () => {
     db.prepare("DELETE FROM project_alpha_directory_outbox"),
     db.prepare("DELETE FROM project_alpha_directory_relationship_outbox"),
     db.prepare("DELETE FROM project_alpha_directory_relationship_recovery_outbox"),
+    db.prepare("DELETE FROM native_directory_profile_binding_jobs"),
+    db.prepare("DELETE FROM native_directory_profile_binding_dispatch"),
   ]);
   profileDispatch.mockReset().mockResolvedValue({ status: "acknowledged" });
   relationshipDispatch.mockReset().mockResolvedValue({ status: "acknowledged" });
+  continuationDispatch.mockReset().mockResolvedValue({ status: "acknowledged" });
   materializeClients.mockReset().mockResolvedValue({ examined: 0, materialized: 0, blocked: 0 });
 });
 
@@ -92,6 +106,7 @@ describe("native Directory scheduled outbox drain", () => {
     const config = readFileSync(new URL("../wrangler.jsonc", import.meta.url), "utf8");
     const entrypoint = readFileSync(new URL("../src/worker/index.ts", import.meta.url), "utf8");
     expect(config).toMatch(/"NATIVE_DIRECTORY_OUTBOX_DRAIN_ENABLED"\s*:\s*"false"/);
+    expect(config).toMatch(/"NATIVE_DIRECTORY_PROFILE_BINDING_CONTINUATION_ENABLED"\s*:\s*"false"/);
     expect(config.match(/"1-56\/5 \* \* \* \*"/g)).toHaveLength(1);
     expect(entrypoint).toContain("drainNativeDirectoryOutboxes(env, { rotationTime: event.scheduledTime })");
     const disabled = new Proxy({ NATIVE_DIRECTORY_OUTBOX_DRAIN_ENABLED: "false" }, { get(target, key) {
@@ -103,6 +118,28 @@ describe("native Directory scheduled outbox drain", () => {
     expect(profileDispatch).not.toHaveBeenCalled();
     expect(relationshipDispatch).not.toHaveBeenCalled();
     expect(materializeClients).not.toHaveBeenCalled();
+  });
+
+  it("selects the continuation lane in production only under explicit dual opt-in", async () => {
+    const sourceId = "project-alpha:production", commandId = uuid(91);
+    await db.batch([
+      db.prepare("INSERT INTO native_directory_profile_binding_jobs(command_id,source_id,created_at) VALUES(?,?,?)")
+        .bind(commandId, sourceId, "2026-09-22T00:00:00.000Z"),
+      db.prepare("INSERT INTO native_directory_profile_binding_dispatch(command_id,state,next_attempt_at,lease_expires_at) VALUES(?,'pending',0,NULL)")
+        .bind(commandId),
+    ]);
+    const production = { ...environment([sourceId]), ENVIRONMENT: "production",
+      NATIVE_DIRECTORY_PROFILE_BINDING_CONTINUATION_ENABLED: "true" };
+    await drainNativeDirectoryOutboxes(production, { now: () => dueAt });
+    expect(continuationDispatch).toHaveBeenCalledWith(expect.objectContaining({
+      ENVIRONMENT: "production", NATIVE_DIRECTORY_PROFILE_BINDING_CONTINUATION_ENABLED: "true",
+    }), sourceId, commandId, expect.any(Function));
+
+    continuationDispatch.mockClear();
+    await db.prepare("UPDATE native_directory_profile_binding_dispatch SET state='pending',next_attempt_at=0").run();
+    await drainNativeDirectoryOutboxes({ ...production, NATIVE_DIRECTORY_PROFILE_BINDING_CONTINUATION_ENABLED: "false" },
+      { now: () => dueAt });
+    expect(continuationDispatch).not.toHaveBeenCalled();
   });
 
   it("rejects a malformed disabled sibling before database work or diagnostics", async () => {

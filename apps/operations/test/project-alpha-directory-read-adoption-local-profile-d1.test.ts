@@ -67,7 +67,8 @@ async function seed(options:{deny?:boolean;stale?:boolean;unsupported?:boolean}=
   ]);
   return localHash;
 }
-function env(flag="true"){return{ENVIRONMENT:"staging",PROJECT_ALPHA_DIRECTORY_LOCAL_PROFILE_ADOPTION_ENABLED:flag,OPS_DB:db};}
+function env(flag="true"){return{ENVIRONMENT:"staging",PROJECT_ALPHA_DIRECTORY_EXACT_ADOPTION_ENABLED:"true",
+  PROJECT_ALPHA_DIRECTORY_LOCAL_PROFILE_ADOPTION_ENABLED:flag,OPS_DB:db};}
 function input(localHash:string,overrides:Record<string,unknown>={}){return{finalizationId,idempotencyKey:key,expectedRecordVersion:1,expectedLocalProfileSha256:localHash,projectAlphaProfile:remote,actor,...overrides};}
 const ids=["40000000-0000-4000-8000-000000000004","50000000-0000-4000-8000-000000000005","60000000-0000-4000-8000-000000000006","70000000-0000-4000-8000-000000000007"];
 function deps(){let i=0;return{uuid:()=>ids[i++]!,now:()=>"2026-10-03T12:00:00.000Z"};}

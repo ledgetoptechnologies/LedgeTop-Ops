@@ -81,6 +81,7 @@ describe('Operations-native delivery consumer with real forward schemas and prod
         snapshotId: published.snapshot.snapshotId, snapshotSha256: published.snapshot.snapshotSha256, requestFingerprint: receipt.requestFingerprint },
       actorProof: actor, observedAt: new Date().toISOString() };
     const granted = JSON.parse(await applyOperationsPortalNativeRecipientAuthority({ DELIVERY_DB: db, ENVIRONMENT: 'staging',
+      EXPECTED_HOST: 'client-staging.example.test', CLIENT_PORTAL_ORIGIN: 'https://client-staging.example.test',
       CLIENT_PORTAL_OPERATIONS_NATIVE_AUTHORITY_WRITER_ENABLED: 'true' }, JSON.stringify(home)));
     expect(granted.ok).toBe(true); homeFingerprint = granted.requestFingerprint;
   }, 120_000);

@@ -14,8 +14,10 @@ export type Env = Omit<
   | "PROJECT_ALPHA_API_V2_READ_ACCEPTANCE_ENABLED"
   | "PROJECT_ALPHA_API_V2_SYNC_ENABLED"
   | "PROJECT_ALPHA_DIRECTORY_EXACT_ADOPTION_ENABLED"
+  | "PROJECT_ALPHA_DIRECTORY_EXISTING_RECORD_ADOPTION_ENABLED"
   | "PROJECT_ALPHA_DIRECTORY_LOCAL_PROFILE_ADOPTION_ENABLED"
   | "PROJECT_ALPHA_PROJECT_ADOPTION_REVIEW_ENABLED"
+  | "PROJECT_ALPHA_PROJECT_ADOPTION_OPERATIONAL_ENABLED"
   | "PROJECT_ALPHA_PROJECT_ADOPTION_FINALIZATION_ENABLED"
   | "PROJECT_ALPHA_PROJECT_INBOUND_RECONCILIATION_ENABLED"
   | "PROJECT_ALPHA_PROJECT_BINDING_REVISION_REFRESH_ENABLED"
@@ -71,6 +73,15 @@ export type Env = Omit<
   | "CLIENT_PORTAL_RECIPIENT_ENROLLMENT_OWNER_ORIGIN"
   | "VERIFIED_RECIPIENT_DELIVERY_AUTHORITY_DISPATCH_ENABLED"
   | "VERIFIED_RECIPIENT_DELIVERY_AUTHORITY"
+  | "OPERATIONS_PORTAL_NATIVE_DELIVERY_OWNER_ENABLED"
+  | "OPERATIONS_PORTAL_NATIVE_DELIVERY_AUTHORITY_DISPATCH_ENABLED"
+  | "OPERATIONS_PORTAL_NATIVE_DELIVERY_READER_ENABLED"
+  | "OPERATIONS_PORTAL_NATIVE_DELIVERY_CANCELLATION_ENABLED"
+  | "OPERATIONS_PORTAL_NATIVE_DELIVERY_AUTHORITY"
+  | "OPERATIONS_PORTAL_NATIVE_BILLING_OWNER_ENABLED"
+  | "OPERATIONS_PORTAL_WORKSPACE_OWNER_ENABLED"
+  | "OPERATIONS_PORTAL_WORKSPACE_PUBLICATION_DISPATCH_ENABLED"
+  | "OPERATIONS_PORTAL_WORKSPACE_PUBLICATION"
 > & {
   /** Explicit because Operations modules are also type-checked from sibling Worker projects with narrower generated Env types. */
   ENVIRONMENT?: string;
@@ -130,10 +141,14 @@ export type Env = Omit<
   PROJECT_ALPHA_API_V2_SYNC_ENABLED?: string;
   /** Staging-only, administrator-protected exact adoption of already-bound Directory identities. */
   PROJECT_ALPHA_DIRECTORY_EXACT_ADOPTION_ENABLED?: string;
-  /** Separate default-off staging gate for applying explicitly adopted scalar PA profile fields locally. */
+  /** Independent default-off operational gate for exact existing-record Directory adoption. */
+  PROJECT_ALPHA_DIRECTORY_EXISTING_RECORD_ADOPTION_ENABLED?: string;
+  /** Separate default-off gate for applying explicitly adopted scalar PA profile fields locally. */
   PROJECT_ALPHA_DIRECTORY_LOCAL_PROFILE_ADOPTION_ENABLED?: string;
   /** Staging-only, default-off PA-origin project adoption review evidence entry route. */
   PROJECT_ALPHA_PROJECT_ADOPTION_REVIEW_ENABLED?: string;
+  /** Default-off Client Hub operational path for exact PA-first Project adoption. */
+  PROJECT_ALPHA_PROJECT_ADOPTION_OPERATIONAL_ENABLED?: string;
   /** Default-off owner-authorized completion of an exact PA-origin Project bind. */
   PROJECT_ALPHA_PROJECT_ADOPTION_FINALIZATION_ENABLED?: string;
   /** Default-off reviewed PA-origin edits for already-mapped projects. */
@@ -223,6 +238,18 @@ export type Env = Omit<
   OPERATIONS_PORTAL_NATIVE_RECIPIENT_AUTHORITY_DISPATCH_ENABLED?: string;
   /** Staging-only private audited grant/revoke transport; not a public HTTP endpoint. */
   OPERATIONS_PORTAL_NATIVE_RECIPIENT_AUTHORITY?: Service & import("./operations-portal-native-recipient-authority-dispatch").OperationsPortalNativeRecipientAuthorityBinding;
+  /** Default-off staff owner surface and private Client authority dispatch. */
+  OPERATIONS_PORTAL_NATIVE_DELIVERY_OWNER_ENABLED?: string;
+  OPERATIONS_PORTAL_NATIVE_DELIVERY_AUTHORITY_DISPATCH_ENABLED?: string;
+  OPERATIONS_PORTAL_NATIVE_DELIVERY_READER_ENABLED?: string;
+  OPERATIONS_PORTAL_NATIVE_DELIVERY_CANCELLATION_ENABLED?: string;
+  OPERATIONS_PORTAL_NATIVE_DELIVERY_AUTHORITY?: import("@ltds/shared/operations-portal-native-delivery-authority").OperationsPortalNativeDeliveryAuthorityBinding;
+  /** Default-off billing authority and exact-resource permission delegation surface. */
+  OPERATIONS_PORTAL_NATIVE_BILLING_OWNER_ENABLED?: string;
+  /** Default-off workspace owner surface and private Client publication dispatch. */
+  OPERATIONS_PORTAL_WORKSPACE_OWNER_ENABLED?: string;
+  OPERATIONS_PORTAL_WORKSPACE_PUBLICATION_DISPATCH_ENABLED?: string;
+  OPERATIONS_PORTAL_WORKSPACE_PUBLICATION?: import("./operations-portal-workspace-publication-outbox").OperationsPortalWorkspacePublicationBinding;
   /** Enables staff recovery for the additive client workspace hierarchy. */
   CLIENT_PORTAL_HIERARCHY_V2_ENABLED?: string;
   /** Must match the Client deployment before publishing relation-backed grants. */

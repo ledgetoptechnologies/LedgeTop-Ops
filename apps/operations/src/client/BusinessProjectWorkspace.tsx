@@ -13,6 +13,7 @@ import { clientDirectoryReturnPath } from "./ClientDirectory";
 import { businessProjectClientPath, clientWorkspaceFilters, readBusinessProjectRoute, type BusinessProjectRoute } from "./business-project-route";
 import "./BusinessProjectWorkspace.css";
 import { isProjectAlphaContactRolePage, ProjectAlphaContactRoles, type ProjectAlphaContactRolePage } from "./ProjectAlphaContactRoles";
+import { ProjectInboundReview } from "./ProjectInboundReview";
 
 export interface BusinessProjectDetail {
   canonicalRoot: { sourceId: string; rootNamespace: "business" | "portal" | "account"; kind: "organization" | "standalone_client"; publicId: string };
@@ -30,6 +31,7 @@ export interface BusinessProjectDetail {
   projectInternalNotesAvailable?: boolean;
   projectAlphaContactRolesAvailable?: boolean;
   projectAlphaContactRoles?: ProjectAlphaContactRolePage;
+  projectInboundReviewAvailable?: boolean;
 }
 
 function displayDate(value: string | null, calendar = false): string {
@@ -52,6 +54,7 @@ function matchesRoute(detail: unknown, route: BusinessProjectRoute): detail is B
     && [availability.siteContacts, availability.billingContacts, availability.projectMemory].every(value => value === "not_projected")
     && (contact === null ? availability.linkedContact !== "available" : record(contact) && contact.sourceField === "project.client_id"
       && typeof contact.id === "string" && [contact.display_name, contact.email, contact.phone].every(nullableText))
+    && (detail.projectInboundReviewAvailable === undefined || typeof detail.projectInboundReviewAvailable === "boolean")
     && (!(detail.projectAlphaContactRolesAvailable === true) || isProjectAlphaContactRolePage(detail.projectAlphaContactRoles,
       root as BusinessProjectDetail["canonicalRoot"], detail.contextVersion))
     && project.id === route.projectId && project.origin === route.projectOrigin && root.sourceId === route.sourceId && root.rootNamespace === route.rootNamespace
@@ -133,6 +136,9 @@ function ProjectWorkspace({ route, feedbackEnabled }: { route: BusinessProjectRo
         contextVersion={detail.contextVersion} contextSignal={pending.current!.signal} onInvalidated={invalidate} />}
       {detail.operationalWorkspaceAvailable === true && <ProjectOperationalWorkspace key={`operations-${revision}`} root={detail.canonicalRoot} projectId={project.id}
         contextVersion={detail.contextVersion} contextSignal={pending.current!.signal} onInvalidated={invalidate} />}
+      {project.origin === "canonical" && detail.projectInboundReviewAvailable === true
+        && <ProjectInboundReview root={detail.canonicalRoot} projectId={project.id}
+        contextVersion={detail.contextVersion} onResolved={refresh} />}
       {detail.projectInternalNotesAvailable !== false && <ClientInternalNotes key={`project-notes-${revision}`} root={detail.canonicalRoot} projectId={project.id}
         contextVersion={detail.contextVersion} contextSignal={pending.current!.signal} onInvalidated={invalidate} />}
       {detail.businessActivityAvailable === true && <ClientBusinessActivity key={revision} root={detail.canonicalRoot} projectId={project.id} contextVersion={detail.contextVersion}

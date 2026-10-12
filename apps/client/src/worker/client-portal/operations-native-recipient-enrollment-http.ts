@@ -1,6 +1,7 @@
 import type { Env } from "../types";
 import type { VerifiedClientPrincipal } from "./types";
 import { resolveCloudflareRecipientEnrollmentProof } from "./access-identity";
+import { configuredDeploymentOrigin } from "@ltds/shared/configured-deployment-origin";
 
 const BASE = "/api/client/operations/recipient-enrollment";
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
@@ -14,7 +15,7 @@ export interface OperationsNativeRecipientEnrollmentBinding {
     principal: { issuer: string; subject: string }; recipientLabel: string; verifiedUntil: string }): Promise<unknown>;
 }
 export interface OperationsNativeRecipientEnrollmentHttpDependencies {
-  env: Env; enabled: boolean; environment: string; origin: string; csrfSecret: string;
+  env: Env; enabled: boolean; environment: string; expectedHost: string; origin: string; csrfSecret: string;
   binding?: OperationsNativeRecipientEnrollmentBinding;
   /** Deterministic test adapter only. Production uses signed Access proof. */
   resolveProof?: (request: Request, env: Env) => Promise<Proof | null>;
@@ -117,12 +118,19 @@ function canonicalRpc(input: unknown, keys: readonly string[]): Record<string, u
  * a PA selection. Consent becomes pending review, not home or file access. */
 export async function handleOperationsNativeRecipientEnrollmentHttp(request: Request,
   dependencies: OperationsNativeRecipientEnrollmentHttpDependencies): Promise<Response> {
-  if (!dependencies.enabled || dependencies.environment !== "staging") return response({ error: "Not found" }, 404);
+  if (!dependencies.enabled) return response({ error: "Not found" }, 404);
   let url: URL, origin: URL;
-  try { url = new URL(request.url); origin = new URL(dependencies.origin); }
+  try {
+    url = new URL(request.url);
+    const configured = configuredDeploymentOrigin({ environment: dependencies.environment,
+      origin: dependencies.origin, expectedHost: dependencies.expectedHost });
+    if (!configured) throw Error();
+    origin = new URL(configured);
+  }
   catch { return response({ error: "Unavailable" }, 503); }
-  if (origin.protocol !== "https:" || origin.origin !== dependencies.origin || !/(?:^|[-.])staging(?:[-.]|$)/u.test(origin.hostname)
-    || dependencies.csrfSecret.length < 32 || dependencies.csrfSecret.length > 512 || !dependencies.binding)
+  if (dependencies.csrfSecret.length < 32 || dependencies.csrfSecret.length > 512
+    || typeof dependencies.binding?.inspectNativeEnrollment !== "function"
+    || typeof dependencies.binding?.redeemNativeEnrollment !== "function")
     return response({ error: "Unavailable" }, 503);
   const presentedOrigin = request.headers.get("Origin");
   if (url.origin !== origin.origin || (request.method === "GET" ? presentedOrigin !== null && presentedOrigin !== origin.origin : presentedOrigin !== origin.origin)

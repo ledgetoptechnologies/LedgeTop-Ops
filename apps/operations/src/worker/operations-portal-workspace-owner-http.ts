@@ -10,6 +10,7 @@ import { reserveOperationsPortalWorkspacePublication, dispatchOperationsPortalWo
   from "./operations-portal-workspace-publication-outbox";
 import { reserveOperationsPortalWorkspacePublicationInvocation }
   from "./operations-portal-workspace-publication-invocations";
+import { configuredDeploymentOrigin } from "@ltds/shared/configured-deployment-origin";
 import { lookupOperationsPortalSharedProjectFolder, confirmOperationsPortalSharedProjectFolder,
   type ConfirmOperationsPortalSharedProjectFolder, type OperationsPortalSharedProjectFolderAssociation }
   from "./operations-portal-shared-project-folders";
@@ -121,8 +122,11 @@ function confirmProjectFolderInput(value: unknown): ConfirmOperationsPortalShare
 }
 function settings(d: OperationsPortalWorkspaceOwnerHttpDependencies) {
   try {
-    const origin = new URL(d.configuration.origin), issuer = new URL(d.configuration.issuer);
-    if (d.environment !== "staging" || d.configuration.enabled !== true || origin.protocol !== "https:"
+    const configuredOrigin = configuredDeploymentOrigin({ environment: d.environment,
+      origin: d.configuration.origin, expectedHost: d.expectedHost });
+    if (!configuredOrigin) throw Error();
+    const origin = new URL(configuredOrigin), issuer = new URL(d.configuration.issuer);
+    if (d.configuration.enabled !== true || origin.protocol !== "https:"
       || origin.origin !== d.configuration.origin || origin.pathname !== "/" || origin.hostname !== d.expectedHost
       || origin.port || origin.search || origin.hash || issuer.protocol !== "https:"
       || issuer.origin !== d.configuration.issuer || issuer.pathname !== "/"

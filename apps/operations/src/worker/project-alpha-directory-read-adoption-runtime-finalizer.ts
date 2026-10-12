@@ -4,6 +4,7 @@ import { prepareProjectAlphaDirectoryReadAdoptionFinalization } from "./project-
 import { applyProjectAlphaDirectoryReadAdoptionLocalProfile } from "./project-alpha-directory-read-adoption-local-profile";
 import { readConfiguredProjectAlphaDirectoryProfile, type ProjectAlphaDirectoryProfile, type ProjectAlphaDirectoryReadKind } from "./project-alpha-directory-read-api-v2";
 import type { Env } from "./types";
+import { projectAlphaDirectoryExistingRecordAdoptionEnabled } from "./project-alpha-directory-read-adoption-enabled";
 
 export type ProjectAlphaDirectoryReadAdoptionRuntimeActor = Readonly<{
   staffId: string; accessSubject: string; admissionVersion: number; profileVersion: number; grantGeneration: number;
@@ -19,6 +20,7 @@ export type ProjectAlphaDirectoryReadAdoptionRuntimeOutcome =
       stage: "prepare" | "local_profile" | "acquire" | "activate"; reason: string }>;
 
 type RuntimeEnv = Pick<Env, "ENVIRONMENT" | "PROJECT_ALPHA_DIRECTORY_EXACT_ADOPTION_ENABLED" |
+  "PROJECT_ALPHA_DIRECTORY_EXISTING_RECORD_ADOPTION_ENABLED" |
   "OPS_DB" | "PROJECT_ALPHA_API_V2_CONNECTIONS"> & Readonly<{ PROJECT_ALPHA_DIRECTORY_LOCAL_PROFILE_ADOPTION_ENABLED?: string }>;
 type Finalization = Readonly<{
   finalization_id: string; idempotency_key: string; request_sha256: string; field_review_receipt_id: string;
@@ -134,10 +136,10 @@ const defaults: ProjectAlphaDirectoryReadAdoptionRuntimeDependencies = Object.fr
   readCurrentLocalProfile: currentLocalProfile,
 });
 
-/** Staging-only saga over immutable phase receipts. It creates no portal, Delivery, workspace, folder, or public-link authority. */
+/** Default-off saga over immutable phase receipts. It creates no portal, Delivery, workspace, folder, or public-link authority. */
 export async function finalizeProjectAlphaDirectoryReadAdoption(env: RuntimeEnv, inputValue: unknown,
   overrides: Partial<ProjectAlphaDirectoryReadAdoptionRuntimeDependencies> = {}): Promise<ProjectAlphaDirectoryReadAdoptionRuntimeOutcome> {
-  if (env.ENVIRONMENT !== "staging" || env.PROJECT_ALPHA_DIRECTORY_EXACT_ADOPTION_ENABLED !== "true") return { status: "disabled" };
+  if (!projectAlphaDirectoryExistingRecordAdoptionEnabled(env)) return { status: "disabled" };
   if (!valid(inputValue)) return { status: "rejected", stage: "prepare", reason: "invalid_input" };
   const input = inputValue, use = { ...defaults, ...overrides };
   const requestHash = await sha({ fieldReviewReceiptId: input.fieldReviewReceiptId, actor: input.actor });

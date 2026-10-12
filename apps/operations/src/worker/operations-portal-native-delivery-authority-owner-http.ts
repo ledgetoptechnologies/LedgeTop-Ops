@@ -14,6 +14,7 @@ import { reserveOperationsPortalNativeDeliveryRecoveryInvocation }
   from "./operations-portal-native-delivery-recovery-invocations";
 import { OPERATIONS_PORTAL_NATIVE_DELIVERY_FEATURES,
   type OperationsPortalNativeDeliveryCancellationBinding, type OperationsPortalNativeDeliveryFeature } from "@ltds/shared/operations-portal-native-delivery-authority";
+import { configuredDeploymentOrigin } from "@ltds/shared/configured-deployment-origin";
 
 const BASE = "/api/native-client-portal/operations-delivery-authority";
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
@@ -40,15 +41,18 @@ function httpsOrigin(value: string): URL {
   return url;
 }
 function configuration(d: OperationsPortalNativeDeliveryAuthorityOwnerHttpDependencies) {
-  if (d.environment !== "staging" || !d.configuration.enabled) throw new Failure(404, "not_found");
+  if (!d.configuration.enabled) throw new Failure(404, "not_found");
   try {
-    const origin = httpsOrigin(d.configuration.origin), issuer = httpsOrigin(d.configuration.issuer);
+    const configuredOrigin = configuredDeploymentOrigin({ environment: d.environment,
+      origin: d.configuration.origin, expectedHost: d.expectedHost });
+    if (!configuredOrigin) throw Error();
+    const origin = httpsOrigin(configuredOrigin), issuer = httpsOrigin(d.configuration.issuer);
     const secretBytes = encoder.encode(d.configuration.csrfSecret).byteLength;
-    if (origin.hostname !== d.expectedHost || !/(?:^|[-.])staging(?:[-.]|$)/u.test(origin.hostname)
+    if (origin.hostname !== d.expectedHost
       || !issuer.hostname.endsWith(".cloudflareaccess.com") || issuer.hostname === ".cloudflareaccess.com"
       || !/^[A-Za-z0-9_-]{16,128}$/u.test(d.configuration.staffAudience)
       || secretBytes < 32 || secretBytes > 512
-      || d.dispatch.ENVIRONMENT !== "staging" || d.dispatch.EXPECTED_HOST !== d.expectedHost
+      || d.dispatch.ENVIRONMENT !== d.environment || d.dispatch.EXPECTED_HOST !== d.expectedHost
       || d.dispatch.OPERATIONS_PORTAL_NATIVE_DELIVERY_AUTHORITY_DISPATCH_ENABLED !== "true"
       || typeof d.dispatch.OPERATIONS_PORTAL_NATIVE_DELIVERY_AUTHORITY?.applyNativeDeliveryAuthority !== "function"
       || typeof d.dispatch.OPERATIONS_PORTAL_NATIVE_DELIVERY_AUTHORITY?.getNativeDeliveryAuthorityStatus !== "function") throw Error();

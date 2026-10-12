@@ -108,11 +108,18 @@ describe("operations portal workspace owner HTTP", () => {
 
   it.each([
     ["disabled", (d: Dependencies) => ({ ...d, configuration: { ...d.configuration, enabled: false } })],
-    ["production", (d: Dependencies) => ({ ...d, environment: "production" })],
     ["wrong expected host", (d: Dependencies) => ({ ...d, expectedHost: "other-staging.example.test" })],
   ])("is absent before authentication when %s", async (_label, modify) => {
     const response = await handle(new Request(`${base}/csrf`), modify(deps()));
     expect(response.status).toBe(404); expect(calls.auth).not.toHaveBeenCalled();
+  });
+
+  it("accepts an exact configured production deployment", async () => {
+    const production = "https://ops.example.test", d = deps();
+    const response = await handle(new Request(`${production}/api/native-client-portal/operations-workspaces/csrf`),
+      { ...d, environment: "production", expectedHost: "ops.example.test",
+        configuration: { ...d.configuration, origin: production } });
+    expect(response.status).toBe(200); expect(calls.auth).toHaveBeenCalledOnce();
   });
 
   it("is absent on the wrong request origin before authentication", async () => {

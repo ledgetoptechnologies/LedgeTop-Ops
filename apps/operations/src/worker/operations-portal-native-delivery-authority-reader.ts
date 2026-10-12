@@ -2,6 +2,7 @@ import type { OperationsPortalNativeDeliveryAuthorizationProof,
   OperationsPortalNativeDeliveryAuthorizationReadRequest,
   OperationsPortalNativeDeliveryAuthorizationReaderResult,
   OperationsPortalNativeDeliveryFeature } from "@ltds/shared/operations-portal-native-delivery-authority";
+import { configuredDeploymentOrigin } from "@ltds/shared/configured-deployment-origin";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 const HASH = /^[0-9a-f]{64}$/u;
@@ -208,16 +209,17 @@ export async function verifyOperationsPortalNativeDeliveryGrantForDispatch(datab
 }
 
 export type OperationsPortalNativeDeliveryAuthorizationReaderEnv = Readonly<{
-  OPS_DB: D1Database; ENVIRONMENT?: string; EXPECTED_HOST?: string;
+  OPS_DB: D1Database; ENVIRONMENT?: string; EXPECTED_HOST?: string; PUBLIC_BASE_URL?: string;
   OPERATIONS_PORTAL_NATIVE_DELIVERY_READER_ENABLED?: string;
 }>;
 /** Root mounts this behind a private RPC entrypoint; it intentionally has no
- * HTTP/browser serializer and defaults off outside the exact staging host. */
+ * HTTP/browser serializer and defaults off outside an exact configured deployment. */
 export async function readOperationsPortalNativeDeliveryAuthorizationEntrypoint(
   env: OperationsPortalNativeDeliveryAuthorizationReaderEnv,
   input: ReadOperationsPortalNativeDeliveryAuthorizationInput,
 ): Promise<string> {
-  if (env.ENVIRONMENT !== "staging" || env.EXPECTED_HOST !== "ops-staging.ledgetopdroneservices.com"
+  if (!configuredDeploymentOrigin({ environment: env.ENVIRONMENT ?? "", origin: env.PUBLIC_BASE_URL,
+      expectedHost: env.EXPECTED_HOST })
     || env.OPERATIONS_PORTAL_NATIVE_DELIVERY_READER_ENABLED !== "true") {
     const result: OperationsPortalNativeDeliveryAuthorizationReaderResult =
       { ok: false, protocolVersion: 1, code: "disabled" };

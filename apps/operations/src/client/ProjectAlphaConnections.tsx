@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type FormEvent } from "react";
 import { Card } from "@ltds/ui";
 import { api, ApiError } from "./api";
 import { projectAdoptionReviewFailureMessage } from "./project-adoption-review-message";
+import { DirectoryExistingRecordAdoptionPanel } from "./DirectoryExistingRecordAdoptionPanel";
 
 const ENDPOINT = "/api/admin/integrations/project-alpha/connectors";
 const READ_ACCEPTANCE_ENDPOINT = "/api/admin/integrations/project-alpha/api-v2/read-acceptance";
@@ -890,6 +891,7 @@ export function ProjectAlphaConnections() {
       </section>;
     })}
     <ApiV2OperatorPanel disabled={loading || Boolean(syncing)} />
+    <DirectoryExistingRecordAdoptionPanel disabled={loading || Boolean(syncing)} />
     {data && <ProjectAdoptionPanel disabled={loading || Boolean(syncing)} />}
     {data?.portal?.recovery && <div className="notice" role="status"><p>A prior portal coordination operation is unfinished. Recovery cancels that uncertain update and pauses affected client portals; it never registers a source or retries activation.</p><button type="button" disabled={loading || Boolean(syncing)} onClick={() => void recoverPortalUpdate()}>Recover unfinished portal update</button></div>}
   </div></Card>;

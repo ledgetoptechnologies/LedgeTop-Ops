@@ -17,10 +17,12 @@ describe('native private reader class transport and environment boundaries', () 
     const entry = output.output.find(item => item.type === 'chunk' && item.isEntry);
     if (!entry || entry.type !== 'chunk') throw new Error('Reader entry missing');
     const script = `${entry.code}\nexport default { fetch() { return new Response('Not found', {status:404}); } };`;
-    const target = (name: string, enabled: string, environment = 'staging', host = 'ops-staging.ledgetopdroneservices.com') => ({
+    const target = (name: string, enabled: string, environment = 'staging', host = 'ops-staging.ledgetopdroneservices.com',
+      origin = `https://${host}`) => ({
       name, modules: true as const, compatibilityDate: '2026-08-06', compatibilityFlags: ['nodejs_compat'], script,
       // Deliberately no database: disabled/invalid requests must reject before I/O.
-      bindings: { ENVIRONMENT: environment, EXPECTED_HOST: host, OPERATIONS_PORTAL_NATIVE_DELIVERY_READER_ENABLED: enabled },
+      bindings: { ENVIRONMENT: environment, EXPECTED_HOST: host, PUBLIC_BASE_URL: origin,
+        OPERATIONS_PORTAL_NATIVE_DELIVERY_READER_ENABLED: enabled },
     });
     runtime = new Miniflare({ workers: [
       { name: 'driver', modules: true, compatibilityDate: '2026-08-06',
@@ -35,7 +37,7 @@ describe('native private reader class transport and environment boundaries', () 
           name, entrypoint: 'OperationsPortalNativeDeliveryAuthorizationReader',
         }])),
       }, target('enabled','true'), target('disabled','false'), target('production','true','production'),
-      target('wronghost','true','staging','ops.ledgetopdroneservices.com'),
+      target('wronghost','true','staging','ops.ledgetopdroneservices.com','https://ops-staging.ledgetopdroneservices.com'),
     ] });
   }, 120_000);
   afterAll(async () => { await runtime?.dispose(); });
@@ -48,13 +50,16 @@ describe('native private reader class transport and environment boundaries', () 
     expect(body.result).not.toMatch(/SELECT|sqlite|__rpc|dispos|stack/i);
   });
 
-  it('rejects disabled, production, and wrong-host invocations before database access', async () => {
-    for (const selector of ['disabled','production','wronghost']) {
+  it('supports exact production configuration but rejects disabled and mismatched-origin invocations', async () => {
+    for (const selector of ['disabled','wronghost']) {
       const response = await runtime.dispatchFetch(`https://synthetic.test/?case=${selector}`);
       const body = await response.json() as { primitive: string; result: string };
       expect(body.primitive).toBe('string');
       expect(JSON.parse(body.result)).toEqual({ ok: false, protocolVersion: 1, code: 'disabled' });
     }
+    const production = await runtime.dispatchFetch('https://synthetic.test/?case=production');
+    expect(await production.json()).toEqual({ primitive: 'string',
+      result: JSON.stringify({ ok: false, protocolVersion: 1, code: 'denied' }) });
   });
 
   it('does not expose runtime errors or infer authority from malformed or forged owner inputs', async () => {

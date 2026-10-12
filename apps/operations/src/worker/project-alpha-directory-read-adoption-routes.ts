@@ -14,6 +14,8 @@ import {
   sealProjectAlphaDirectoryReadAdoptionFieldReview,
 } from "./project-alpha-directory-read-adoption-field-review";
 import { finalizeProjectAlphaDirectoryReadAdoption } from "./project-alpha-directory-read-adoption-runtime-finalizer";
+import { projectAlphaDirectoryExistingRecordAdoptionEnabled } from "./project-alpha-directory-read-adoption-enabled";
+import { listEnabledProjectAlphaApiV2SourceIds } from "./project-alpha-api-v2-connections";
 import { auditStatement } from "./request-security";
 import type { Env, StaffPrincipal } from "./types";
 
@@ -31,6 +33,8 @@ export const PROJECT_ALPHA_DIRECTORY_READ_ADOPTION_CANDIDATES_ROUTE =
   `${PROJECT_ALPHA_DIRECTORY_READ_ADOPTION_ROUTE}/candidates`;
 export const PROJECT_ALPHA_DIRECTORY_READ_ADOPTION_FINALIZE_ROUTE =
   `${PROJECT_ALPHA_DIRECTORY_READ_ADOPTION_ROUTE}/field-reviews/:receiptId/finalize`;
+export const PROJECT_ALPHA_DIRECTORY_READ_ADOPTION_SOURCES_ROUTE =
+  `${PROJECT_ALPHA_DIRECTORY_READ_ADOPTION_ROUTE}/sources`;
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const requestSchema = z.object({
@@ -59,10 +63,10 @@ const fieldReviewSchema = z.union([
 const comparisonSchema = z.object({}).strict();
 
 export function projectAlphaDirectoryReadAdoptionEnabled(
-  env: Pick<Env, "ENVIRONMENT" | "PROJECT_ALPHA_DIRECTORY_EXACT_ADOPTION_ENABLED">,
+  env: Pick<Env, "ENVIRONMENT" | "PROJECT_ALPHA_DIRECTORY_EXACT_ADOPTION_ENABLED"
+    | "PROJECT_ALPHA_DIRECTORY_EXISTING_RECORD_ADOPTION_ENABLED">,
 ): boolean {
-  return env.ENVIRONMENT === "staging"
-    && env.PROJECT_ALPHA_DIRECTORY_EXACT_ADOPTION_ENABLED === "true";
+  return projectAlphaDirectoryExistingRecordAdoptionEnabled(env);
 }
 
 async function nativeActor(c: AppContext): Promise<ProjectAlphaDirectoryReadAdoptionActor> {
@@ -110,9 +114,20 @@ async function runtimeActor(c: AppContext): Promise<ProjectAlphaDirectoryReadAdo
 }
 
 /** Mounted after Operations' authenticated mutation middleware, which supplies
- * same-origin and CSRF enforcement. This route adds staging, administrator,
- * global integrations.manage, and current native-identity gates. */
+ * same-origin and CSRF enforcement. This route adds the operational (or legacy
+ * staging) gate, administrator, global integrations.manage, and current native-identity gates. */
 export function registerProjectAlphaDirectoryReadAdoptionRoutes(app: App): void {
+  app.get(PROJECT_ALPHA_DIRECTORY_READ_ADOPTION_SOURCES_ROUTE, async c => {
+    await requireReviewAdministrator(c);
+    try {
+      return c.json({ sources: listEnabledProjectAlphaApiV2SourceIds(c.env),
+        operational: c.env.PROJECT_ALPHA_DIRECTORY_EXISTING_RECORD_ADOPTION_ENABLED === "true" });
+    } catch {
+      return c.json({ sources: [], operational: c.env.PROJECT_ALPHA_DIRECTORY_EXISTING_RECORD_ADOPTION_ENABLED === "true",
+        configuration: "unavailable" });
+    }
+  });
+
   app.post(PROJECT_ALPHA_DIRECTORY_READ_ADOPTION_FINALIZE_ROUTE, async c => {
     const actor = await runtimeActor(c);
     const receiptId = c.req.param("receiptId");

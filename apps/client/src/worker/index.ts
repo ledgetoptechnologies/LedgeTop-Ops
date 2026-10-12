@@ -1106,6 +1106,7 @@ app.all("/api/client/operations/recipient-enrollment/*", c => handleOperationsNa
   env: c.env,
   enabled: c.env.CLIENT_PORTAL_ENABLED === "true" && c.env.CLIENT_PORTAL_NATIVE_RECIPIENT_ENROLLMENT_ENABLED === "true",
   environment: c.env.ENVIRONMENT,
+  expectedHost: c.env.EXPECTED_HOST,
   origin: c.env.CLIENT_PORTAL_ORIGIN ?? "",
   csrfSecret: c.env.CLIENT_PORTAL_NATIVE_RECIPIENT_ENROLLMENT_CSRF_SECRET ?? "",
   binding: c.env.OPERATIONS_PORTAL_NATIVE_RECIPIENT_ENROLLMENT,

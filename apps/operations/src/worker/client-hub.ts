@@ -30,10 +30,16 @@ import { registerOrganizationOperationalContactRoutes } from "./organization-ope
 import { organizationOperationalContactsAvailable } from "./organization-operational-contacts";
 import { readClientHubProjectManagementAction } from "./project-alpha-project-management";
 import { prepareClientHubNativeProject, submitClientHubNativeProject } from "./client-hub-native-project-management";
+import { proposeClientHubProjectInboundReview, readClientHubProjectInboundReview,
+  resolveClientHubProjectInboundReview } from "./client-hub-project-inbound-review";
 import { exactBusinessProjectPublicId, listProjectAlphaContactRoles, projectAlphaContactRolesEnabled } from "./project-alpha-contact-roles";
 import { nativeDirectoryLinkedClientEditorRecords, nativeDirectoryProfileEditorRecord } from "./native-directory-profile-editor-record";
 import { nativeDirectoryProfileWritesEnabled } from "./native-directory-profile-routes";
 import { authenticateNativeStaffWithAdmissionVersion } from "./native-staff-auth";
+import {
+  projectAlphaProjectOperationalAdoptionEnabled,
+  registerProjectAlphaProjectOperationalAdoptionRoutes,
+} from "./project-alpha-project-adoption-operational-routes";
 
 type AppEnv = {
   Bindings: Env;
@@ -325,6 +331,8 @@ async function clientHubDetail(env: Env, principal: StaffPrincipal, kind: Client
     projectAlphaContactRolesAvailable: contactRolesAvailable,
     projectAlphaContactRoles,
     projectManagementAvailable: workspace.root_namespace === "business",
+    projectAdoptionAvailable: workspace.root_namespace === "business"
+      && workspace.source_id.startsWith("project-alpha:") && projectAlphaProjectOperationalAdoptionEnabled(env),
     businessActivityAvailable: workspace.root_namespace === "business",
     auditTimelineAvailable: true,
     nativeDirectoryProfile,
@@ -363,6 +371,7 @@ export function registerClientHubRoutes(app: App): void {
   registerClientInternalNoteRoutes(app, resolveDetailContext, verifyContext);
   registerProjectOperationalRoutes(app, resolveDetailContext, verifyContext);
   registerOrganizationOperationalContactRoutes(app, resolveDetailContext, verifyContext);
+  registerProjectAlphaProjectOperationalAdoptionRoutes(app, resolveDetailContext, verifyContext);
   app.get("/api/client-hub/sources/:sourceId/:rootNamespace/:kind/:publicId/project-management", async c => {
     const kind = routeKind(c.req.param("kind"));
     if (!kind) throw new HTTPException(404, { message: "Client not found" });
@@ -454,7 +463,43 @@ export function registerClientHubRoutes(app: App): void {
     }
     await verifyContext(c.env, principal, context);
     c.header("Cache-Control", "no-store");
-    return c.json({ ...result, projectAlphaContactRolesAvailable: contactRolesAvailable, projectAlphaContactRoles });
+    return c.json({ ...result, projectAlphaContactRolesAvailable: contactRolesAvailable, projectAlphaContactRoles,
+      projectInboundReviewAvailable: projectOrigin === "canonical"
+        && c.env.PROJECT_ALPHA_PROJECT_INBOUND_RECONCILIATION_ENABLED === "true" });
+  });
+  const inboundBase = "/api/client-hub/sources/:sourceId/:rootNamespace/:kind/:publicId/business-projects/:projectId/inbound-review";
+  app.post(`${inboundBase}/propose`, async c => {
+    const kind = routeKind(c.req.param("kind"));
+    if (!kind) throw new HTTPException(404, { message: "Client not found" });
+    const principal = c.get("principal"), context = await resolveDetailContext(c.env, principal, kind,
+      c.req.param("publicId"), c.req.param("sourceId"), c.req.param("rootNamespace"));
+    await readClientHubBusinessProjectDetail(c.env, principal, context, c.req.param("projectId"),
+      { expectedContextVersion: context.contextVersion, origin: "canonical" });
+    const result = await proposeClientHubProjectInboundReview(c.env, c.req.raw, principal, context,
+      c.req.param("projectId"), await readBoundedJson(c.req.raw, 32 * 1024, "Project inbound review"));
+    await verifyContext(c.env, principal, context); c.header("Cache-Control", "no-store"); return c.json(result);
+  });
+  app.get(`${inboundBase}/proposals/:proposalId`, async c => {
+    const kind = routeKind(c.req.param("kind"));
+    if (!kind) throw new HTTPException(404, { message: "Client not found" });
+    const principal = c.get("principal"), context = await resolveDetailContext(c.env, principal, kind,
+      c.req.param("publicId"), c.req.param("sourceId"), c.req.param("rootNamespace"));
+    await readClientHubBusinessProjectDetail(c.env, principal, context, c.req.param("projectId"),
+      { expectedContextVersion: c.req.query("expectedContextVersion"), origin: "canonical" });
+    const result = await readClientHubProjectInboundReview(c.env, c.req.raw, principal, context,
+      c.req.param("projectId"), c.req.param("proposalId"), c.req.query("expectedContextVersion") ?? "");
+    await verifyContext(c.env, principal, context); c.header("Cache-Control", "no-store"); return c.json(result);
+  });
+  app.post(`${inboundBase}/resolve`, async c => {
+    const kind = routeKind(c.req.param("kind"));
+    if (!kind) throw new HTTPException(404, { message: "Client not found" });
+    const principal = c.get("principal"), context = await resolveDetailContext(c.env, principal, kind,
+      c.req.param("publicId"), c.req.param("sourceId"), c.req.param("rootNamespace"));
+    await readClientHubBusinessProjectDetail(c.env, principal, context, c.req.param("projectId"),
+      { expectedContextVersion: context.contextVersion, origin: "canonical" });
+    const result = await resolveClientHubProjectInboundReview(c.env, c.req.raw, principal, context,
+      c.req.param("projectId"), await readBoundedJson(c.req.raw, 32 * 1024, "Project inbound resolution"));
+    await verifyContext(c.env, principal, context); c.header("Cache-Control", "no-store"); return c.json(result);
   });
   app.get("/api/client-hub/sources/:sourceId/:rootNamespace/:kind/:publicId/project-alpha-contact-roles", async c => {
     if (!projectAlphaContactRolesEnabled(c.env))

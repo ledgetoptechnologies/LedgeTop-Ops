@@ -6,6 +6,7 @@ import {
   type ProjectAlphaDirectoryReadKind,
 } from "./project-alpha-directory-read-api-v2";
 import type { Env } from "./types";
+import { projectAlphaDirectoryExistingRecordAdoptionEnabled } from "./project-alpha-directory-read-adoption-enabled";
 
 const SOURCE_ID = /^project-alpha:[a-z0-9][a-z0-9_-]{0,63}$/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
@@ -205,7 +206,7 @@ export async function reserveProjectAlphaDirectoryReadAdoption(
   input: ProjectAlphaDirectoryReadAdoptionInput,
   dependencies: ProjectAlphaDirectoryReadAdoptionDependencies = defaultDependencies,
 ): Promise<ProjectAlphaDirectoryReadAdoptionOutcome> {
-  if (env.ENVIRONMENT !== "staging" || env.PROJECT_ALPHA_DIRECTORY_EXACT_ADOPTION_ENABLED !== "true")
+  if (!projectAlphaDirectoryExistingRecordAdoptionEnabled(env))
     return { status: "disabled" };
   if (!validInput(input)) return { status: "rejected", reason: "invalid_input" };
 

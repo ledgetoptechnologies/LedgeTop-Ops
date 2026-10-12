@@ -2,6 +2,7 @@ import { WorkerEntrypoint } from "cloudflare:workers";
 import { inspectOperationsPortalNativeRecipientIntent, redeemOperationsPortalNativeRecipientIntent }
   from "./operations-portal-native-recipient-authority";
 import type { Env } from "./types";
+import { configuredDeploymentOrigin } from "@ltds/shared/configured-deployment-origin";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 const TOKEN = /^[0-9a-f]{64}$/u;
@@ -15,12 +16,13 @@ function exact(input: unknown, keys: readonly string[]): Record<string, unknown>
   } catch { return null; }
 }
 export type OperationsPortalNativeRecipientEnrollmentRpcEnv = Pick<Env,
-  "OPS_DB" | "ENVIRONMENT" | "EXPECTED_HOST" | "TEAM_DOMAIN"> & {
+  "OPS_DB" | "ENVIRONMENT" | "EXPECTED_HOST" | "TEAM_DOMAIN"> & Partial<Pick<Env, "PUBLIC_BASE_URL">> & {
   CLIENT_PORTAL_NATIVE_RECIPIENT_ENROLLMENT_ENABLED?: string;
 };
 function enabled(env: OperationsPortalNativeRecipientEnrollmentRpcEnv): boolean {
-  if (env.CLIENT_PORTAL_NATIVE_RECIPIENT_ENROLLMENT_ENABLED !== "true" || env.ENVIRONMENT !== "staging"
-    || !/(?:^|[-.])staging(?:[-.]|$)/u.test(env.EXPECTED_HOST)) return false;
+  if (env.CLIENT_PORTAL_NATIVE_RECIPIENT_ENROLLMENT_ENABLED !== "true"
+    || !configuredDeploymentOrigin({ environment: env.ENVIRONMENT,
+      origin: env.PUBLIC_BASE_URL, expectedHost: env.EXPECTED_HOST })) return false;
   try { const issuer = new URL(env.TEAM_DOMAIN); return issuer.origin === env.TEAM_DOMAIN
     && issuer.protocol === "https:" && issuer.hostname.endsWith(".cloudflareaccess.com"); }
   catch { return false; }

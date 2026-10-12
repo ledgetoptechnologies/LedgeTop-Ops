@@ -199,6 +199,7 @@ beforeAll(async () => {
     intentId: recipient.review.intentId, expectedRevision: 2, owner: owner() });
   await materializeOperationsPortalNativeRecipientAuthority(operations, homeOperation);
   const recipientEnvironment = { DELIVERY_DB: client, ENVIRONMENT: "staging",
+    EXPECTED_HOST: "client-staging.example.test", CLIENT_PORTAL_ORIGIN: "https://client-staging.example.test",
     CLIENT_PORTAL_OPERATIONS_NATIVE_AUTHORITY_WRITER_ENABLED: "true", CLIENT_PORTAL_OPERATIONS_NATIVE_AUTHORITY_STATUS_ENABLED: "true" } as const;
   await expect(dispatchOperationsPortalNativeRecipientAuthority({ OPS_DB: operations,
     OPERATIONS_PORTAL_NATIVE_RECIPIENT_AUTHORITY_DISPATCH_ENABLED: "true", OPERATIONS_PORTAL_NATIVE_RECIPIENT_AUTHORITY: {

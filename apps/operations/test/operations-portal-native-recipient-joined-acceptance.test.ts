@@ -279,8 +279,10 @@ for (const chain of ["historical", "current-reviewed"] as const) describe(
     const recipientAccessToken = await accessToken();
     const clientAccessEnv = { CLIENT_ACCESS_TEAM_DOMAIN: issuer, CLIENT_ACCESS_AUD: audience } as ClientEnv;
     const enrollmentEnv = { OPS_DB: operations, ENVIRONMENT: "staging", EXPECTED_HOST: "ops-staging.example.test",
+      PUBLIC_BASE_URL: "https://ops-staging.example.test",
       TEAM_DOMAIN: issuer, CLIENT_PORTAL_NATIVE_RECIPIENT_ENROLLMENT_ENABLED: "true" } as const;
-    const dependencies = { env: clientAccessEnv, enabled: true, environment: "staging", origin: clientOrigin,
+    const dependencies = { env: clientAccessEnv, enabled: true, environment: "staging",
+      expectedHost: new URL(clientOrigin).hostname, origin: clientOrigin,
       csrfSecret: "joined-native-recipient-csrf-secret-long-enough", binding: {
         inspectNativeEnrollment: (input: unknown) => inspectOperationsPortalNativeRecipientEnrollmentRpc(enrollmentEnv, input),
         redeemNativeEnrollment: (input: unknown) => redeemOperationsPortalNativeRecipientEnrollmentRpc(enrollmentEnv, input),
@@ -318,6 +320,7 @@ for (const chain of ["historical", "current-reviewed"] as const) describe(
       intentId: issued.review.intentId, expectedRevision: 2, owner: owner() });
     await materializeOperationsPortalNativeRecipientAuthority(operations, confirmOperationId);
     const clientAuthorityEnv = { DELIVERY_DB: client, ENVIRONMENT: "staging",
+      EXPECTED_HOST: "client-staging.example.test", CLIENT_PORTAL_ORIGIN: "https://client-staging.example.test",
       CLIENT_PORTAL_OPERATIONS_NATIVE_AUTHORITY_WRITER_ENABLED: "true",
       CLIENT_PORTAL_OPERATIONS_NATIVE_AUTHORITY_STATUS_ENABLED: "true" } as const;
     const dispatchEnv = { OPS_DB: operations, OPERATIONS_PORTAL_NATIVE_RECIPIENT_AUTHORITY_DISPATCH_ENABLED: "true",

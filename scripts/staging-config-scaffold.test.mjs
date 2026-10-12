@@ -7,6 +7,13 @@ import { renderConfigs, REQUIRED_STAGING_CONFIG_VALUES, validateRenderedConfigs,
 
 const root = path.resolve(import.meta.dirname, "..");
 const operationsWorkspacePage = "/administration/client-portal/operations-workspaces";
+const productionOwnerPages = [
+  "/administration/client-portal/operations-recipients",
+  "/administration/client-portal/operations-delivery-authority",
+  operationsWorkspacePage,
+  "/administration/client-portal/operations-billing-authority",
+  "/administration/client-portal/operations-billing-permissions",
+];
 const values = Object.freeze({
   DELIVERY_STAGING_ACCESS_AUD: "a".repeat(64),
   OPERATIONS_STAGING_ACCESS_AUD: "b".repeat(64),
@@ -38,6 +45,7 @@ test("renders all three exact staging configs without placeholders", () => {
   assert.equal(configs.operations.vars.PROJECT_ALPHA_DIRECTORY_EXACT_ADOPTION_ENABLED, "false");
   assert.equal(configs.operations.vars.PROJECT_ALPHA_DIRECTORY_RECONCILIATION_ENABLED, "false");
   assert.equal(configs.operations.vars.PROJECT_ALPHA_DIRECTORY_RELATIONSHIP_GENERATION_RECOVERY_ENABLED, "false");
+  assert.equal(configs.operations.vars.NATIVE_DIRECTORY_PROFILE_BINDING_CONTINUATION_ENABLED, "false");
   assert.equal(configs.operations.vars.CLIENT_REQUEST_TRIAGE_TO, values.STAGING_TRIAGE_EMAIL);
   assert.equal(configs.operations.main, "src/worker/staging-native-authority-entrypoint.ts");
   assert.deepEqual(configs.operations.triggers?.crons,
@@ -51,6 +59,8 @@ test("renders all three exact staging configs without placeholders", () => {
     "/administration/client-portal/operations-recipients",
     "/administration/client-portal/operations-delivery-authority",
     operationsWorkspacePage,
+    "/administration/client-portal/operations-billing-authority",
+    "/administration/client-portal/operations-billing-permissions",
   ]);
   assert.equal(configs.operations.assets.run_worker_first.filter((route) => route === operationsWorkspacePage).length, 1);
   assert(configs.operations.services.some(({ binding, service, entrypoint }) => binding === "OPERATIONS_PORTAL_WORKSPACE_PUBLICATION"
@@ -71,11 +81,12 @@ test("relationship recovery stays explicitly off in rendered baselines and rejec
   }
 });
 
-test("keeps native authority registration out of production Wrangler configs", () => {
+test("keeps production native authority registrations exact and default-off", () => {
   const client = JSON.parse(fs.readFileSync(path.join(root, "apps/client/wrangler.jsonc"), "utf8"));
   const operations = JSON.parse(fs.readFileSync(path.join(root, "apps/operations/wrangler.jsonc"), "utf8"));
-  assert.equal(operations.assets?.run_worker_first?.includes(operationsWorkspacePage) ?? false, false,
-    "operations production must not register the staging-only workspace owner page");
+  for (const page of productionOwnerPages)
+    assert.equal(operations.assets?.run_worker_first?.filter(route => route === page).length, 1,
+      `operations production must route ${page} through the default-off Worker boundary exactly once`);
   for (const flag of ["CLIENT_PORTAL_NATIVE_RECIPIENT_ENROLLMENT_ENABLED",
     "CLIENT_PORTAL_OPERATIONS_NATIVE_AUTHORITY_WRITER_ENABLED", "CLIENT_PORTAL_OPERATIONS_NATIVE_AUTHORITY_STATUS_ENABLED"])
     assert.equal(Object.hasOwn(client.vars ?? {}, flag), false, `client production must omit ${flag}`);
@@ -84,15 +95,24 @@ test("keeps native authority registration out of production Wrangler configs", (
     "CLIENT_PORTAL_OPERATIONS_NATIVE_CONTENT_AUDIT_ENABLED"])
     assert.equal(client.vars?.[flag], "false", `client production must preserve ${flag}=false`);
   for (const flag of ["CLIENT_PORTAL_NATIVE_RECIPIENT_OWNER_ENABLED",
-    "OPERATIONS_PORTAL_NATIVE_RECIPIENT_AUTHORITY_DISPATCH_ENABLED", "OPERATIONS_PORTAL_NATIVE_DELIVERY_OWNER_ENABLED",
-    "OPERATIONS_PORTAL_NATIVE_DELIVERY_AUTHORITY_DISPATCH_ENABLED", "OPERATIONS_PORTAL_NATIVE_DELIVERY_READER_ENABLED",
-    "OPERATIONS_PORTAL_WORKSPACE_OWNER_ENABLED", "OPERATIONS_PORTAL_WORKSPACE_PUBLICATION_DISPATCH_ENABLED"])
+    "OPERATIONS_PORTAL_NATIVE_RECIPIENT_AUTHORITY_DISPATCH_ENABLED"])
     assert.equal(Object.hasOwn(operations.vars ?? {}, flag), false, `operations production must omit ${flag}`);
-  for (const binding of ["OPERATIONS_PORTAL_NATIVE_RECIPIENT_ENROLLMENT", "OPERATIONS_PORTAL_NATIVE_DELIVERY_AUTHORIZATION_READER"])
-    assert.equal((client.services ?? []).some(service => service.binding === binding), false, `client production must omit ${binding}`);
-  for (const binding of ["OPERATIONS_PORTAL_NATIVE_RECIPIENT_AUTHORITY", "OPERATIONS_PORTAL_NATIVE_DELIVERY_AUTHORITY",
-    "OPERATIONS_PORTAL_WORKSPACE_PUBLICATION"])
-    assert.equal((operations.services ?? []).some(service => service.binding === binding), false, `operations production must omit ${binding}`);
+  for (const flag of ["OPERATIONS_PORTAL_NATIVE_DELIVERY_OWNER_ENABLED",
+    "OPERATIONS_PORTAL_NATIVE_DELIVERY_AUTHORITY_DISPATCH_ENABLED", "OPERATIONS_PORTAL_NATIVE_DELIVERY_READER_ENABLED",
+    "OPERATIONS_PORTAL_NATIVE_DELIVERY_CANCELLATION_ENABLED", "OPERATIONS_PORTAL_NATIVE_BILLING_OWNER_ENABLED",
+    "OPERATIONS_PORTAL_WORKSPACE_OWNER_ENABLED", "OPERATIONS_PORTAL_WORKSPACE_PUBLICATION_DISPATCH_ENABLED"])
+    assert.equal(operations.vars?.[flag], "false", `operations production must preserve ${flag}=false`);
+  assert.equal((client.services ?? []).some(service => service.binding === "OPERATIONS_PORTAL_NATIVE_RECIPIENT_ENROLLMENT"), false);
+  assert.deepEqual(client.services.find(service => service.binding === "OPERATIONS_PORTAL_NATIVE_DELIVERY_AUTHORIZATION_READER"),
+    { binding: "OPERATIONS_PORTAL_NATIVE_DELIVERY_AUTHORIZATION_READER", service: "ledgetop-ops",
+      entrypoint: "OperationsPortalNativeDeliveryAuthorizationReader" });
+  assert.equal((operations.services ?? []).some(service => service.binding === "OPERATIONS_PORTAL_NATIVE_RECIPIENT_AUTHORITY"), false);
+  assert.deepEqual(operations.services.find(service => service.binding === "OPERATIONS_PORTAL_NATIVE_DELIVERY_AUTHORITY"),
+    { binding: "OPERATIONS_PORTAL_NATIVE_DELIVERY_AUTHORITY", service: "ledgetop-clients",
+      entrypoint: "OperationsPortalNativeDeliveryAuthorityIngress" });
+  assert.deepEqual(operations.services.find(service => service.binding === "OPERATIONS_PORTAL_WORKSPACE_PUBLICATION"),
+    { binding: "OPERATIONS_PORTAL_WORKSPACE_PUBLICATION", service: "ledgetop-clients",
+      entrypoint: "OperationsPortalWorkspacePublicationIngress" });
 });
 
 test("rejects missing, unexpected, duplicated, and malformed values", () => {

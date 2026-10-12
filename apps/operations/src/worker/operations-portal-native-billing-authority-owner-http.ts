@@ -1,4 +1,5 @@
 import { readBoundedJson } from "./bounded-json";
+import { configuredDeploymentOrigin } from "@ltds/shared/configured-deployment-origin";
 import { authenticateNativeStaffWithAdmissionVersion, type AuthenticatedNativeStaffWithAdmissionVersion,
   type NativeStaffAccessConfiguration } from "./native-staff-auth";
 
@@ -66,12 +67,15 @@ function httpsOrigin(value: string): URL {
   return url;
 }
 function configuration(d: OperationsPortalNativeBillingAuthorityOwnerHttpDependencies) {
-  if (d.environment !== "staging" || d.lifecycleFlag !== "true" || !d.configuration.enabled)
+  if (d.lifecycleFlag !== "true" || !d.configuration.enabled)
     throw new Failure(404, "not_found");
   try {
-    const origin = httpsOrigin(d.configuration.origin), issuer = httpsOrigin(d.configuration.issuer);
+    const configuredOrigin = configuredDeploymentOrigin({ environment: d.environment,
+      origin: d.configuration.origin, expectedHost: d.expectedHost });
+    if (!configuredOrigin) throw Error();
+    const origin = httpsOrigin(configuredOrigin), issuer = httpsOrigin(d.configuration.issuer);
     const secretBytes = encoder.encode(d.configuration.csrfSecret).byteLength;
-    if (origin.hostname !== d.expectedHost || !/(?:^|[-.])staging(?:[-.]|$)/u.test(origin.hostname)
+    if (origin.hostname !== d.expectedHost
       || !issuer.hostname.endsWith(".cloudflareaccess.com") || issuer.hostname === ".cloudflareaccess.com"
       || !/^[A-Za-z0-9_-]{16,128}$/u.test(d.configuration.staffAudience)
       || secretBytes < 32 || secretBytes > 512 || !d.database
@@ -150,7 +154,7 @@ function statusOutput(value: unknown, grantId: string) {
     entity: value.entity, expiresAt: value.expiresAt };
 }
 
-/** Unmounted, staging-only boundary; core remains the sole local-ledger authority. */
+/** Default-off owner boundary; core remains the sole local-ledger authority. */
 export async function handleOperationsPortalNativeBillingAuthorityOwnerHttp(request: Request,
   d: OperationsPortalNativeBillingAuthorityOwnerHttpDependencies): Promise<Response> {
   try {

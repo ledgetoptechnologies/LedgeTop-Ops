@@ -18,7 +18,8 @@ export type ProfileBindingContinuationOutcome = {status:'acknowledged'|'blocked'
 const digest=async(value:string)=>Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(value))),x=>x.toString(16).padStart(2,'0')).join('');
 class EvidenceChanged extends Error {}
 export function profileBindingContinuationEnabled(env:Pick<Environment,'ENVIRONMENT'|'NATIVE_DIRECTORY_PROFILE_BINDING_CONTINUATION_ENABLED'>):boolean{
-  return env.NATIVE_DIRECTORY_PROFILE_BINDING_CONTINUATION_ENABLED==='true'&&(env.ENVIRONMENT==='local'||env.ENVIRONMENT==='staging');
+  return env.NATIVE_DIRECTORY_PROFILE_BINDING_CONTINUATION_ENABLED==='true'
+    && (env.ENVIRONMENT==='local'||env.ENVIRONMENT==='staging'||env.ENVIRONMENT==='production');
 }
 function primary(database:D1Database):D1Database{
   const session=database.withSession('first-primary');

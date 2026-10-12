@@ -1,4 +1,5 @@
 import type { ProjectAlphaDirectoryProfile, ProjectAlphaDirectoryReadKind } from "./project-alpha-directory-read-api-v2";
+import { projectAlphaDirectoryExistingRecordAdoptionEnabled } from "./project-alpha-directory-read-adoption-enabled";
 
 export type ProjectAlphaDirectoryLocalProfileAdoptionActor = Readonly<{
   staffId: string; accessSubject: string; admissionVersion: number; profileVersion: number;
@@ -18,7 +19,9 @@ export type ProjectAlphaDirectoryLocalProfileAdoptionOutcome =
       "no_scalar_adoption" | "stale_local" | "stale_source" | "authority" | "storage" }>
   | Readonly<{ status: "conflict"; reason: "idempotency_key_reused" | "finalization_already_applied" }>;
 
-type AdoptionEnv = Readonly<{ ENVIRONMENT?: string; PROJECT_ALPHA_DIRECTORY_LOCAL_PROFILE_ADOPTION_ENABLED?: string; OPS_DB: D1Database }>;
+type AdoptionEnv = Readonly<{ ENVIRONMENT?: string; PROJECT_ALPHA_DIRECTORY_EXACT_ADOPTION_ENABLED?: string;
+  PROJECT_ALPHA_DIRECTORY_EXISTING_RECORD_ADOPTION_ENABLED?: string;
+  PROJECT_ALPHA_DIRECTORY_LOCAL_PROFILE_ADOPTION_ENABLED?: string; OPS_DB: D1Database }>;
 type Selected = Readonly<{
   finalization_id:string; field_review_receipt_id:string; record_id:string; resource_type:ProjectAlphaDirectoryReadKind;
   source_id:string;source_instance_id:string;application_id:string;history_epoch_id:string;reviewed_external_id:string;
@@ -136,10 +139,11 @@ async function sourceCurrent(db:D1Database,s:Selected):Promise<boolean>{
       s.resource_type,s.project_alpha_public_id,s.reviewed_external_id).first<number>("ok");return row===1;
 }
 
-/** Staging-only, local-only CAS application. No route imports this primitive. */
+/** Separately gated local-only CAS application. No route imports this primitive. */
 export async function applyProjectAlphaDirectoryReadAdoptionLocalProfile(env:AdoptionEnv,inputValue:unknown,
   overrides:Readonly<{uuid?:()=>string;now?:()=>string}>={}):Promise<ProjectAlphaDirectoryLocalProfileAdoptionOutcome>{
-  if(env.ENVIRONMENT!=="staging"||env.PROJECT_ALPHA_DIRECTORY_LOCAL_PROFILE_ADOPTION_ENABLED!=="true")return{status:"disabled"};
+  if(!projectAlphaDirectoryExistingRecordAdoptionEnabled(env)
+    ||env.PROJECT_ALPHA_DIRECTORY_LOCAL_PROFILE_ADOPTION_ENABLED!=="true")return{status:"disabled"};
   if(!validBase(inputValue))return{status:"rejected",reason:"invalid_input"};const input=inputValue;
   const requestHash=await sha({finalizationId:input.finalizationId,idempotencyKey:input.idempotencyKey,expectedRecordVersion:input.expectedRecordVersion,
     expectedLocalProfileSha256:input.expectedLocalProfileSha256,projectAlphaProfile:input.projectAlphaProfile,actor:input.actor});
