@@ -32,15 +32,23 @@ async function migrationsThrough(max:string){const directory=new URL("../migrati
 }
 async function applyMigration(name:string){const url=new URL(`../migrations/${name}`,import.meta.url);
   await db.batch(splitD1MigrationStatements(readFileSync(url,"utf8")).map(sql=>db.prepare(sql)));}
-async function createRecord(two=false){const recordId=uuid(),mutationId=uuid(),admission=`admission-${mutationId}`;
+async function createRecord(two=false,kind:"organization"|"client"="organization"){const recordId=uuid(),mutationId=uuid(),admission=`admission-${mutationId}`;
+  const recordProfile=kind==="organization"?profile:{name:"Lifecycle Client",email:profile.generalEmail,phone:profile.generalPhone,
+    clientType:"consumer",addressLine1:profile.addressLine1,addressLine2:profile.addressLine2,city:profile.city,
+    state:profile.state,postalCode:profile.postalCode,country:profile.country};
   const destinations=[destination(recordId),...(two?[destination(recordId,true)]:[])]
     .sort((left,right)=>`${left.sourceId}\0${left.sourceInstanceUUID}\0${left.applicationUUID}`.localeCompare(`${right.sourceId}\0${right.sourceInstanceUUID}\0${right.applicationUUID}`));
-  const input={operation:"create",mutationId,recordId,expectedLocalVersion:0,kind:"organization",createAdmissionId:admission,profile,
+  const input={operation:"create",mutationId,recordId,expectedLocalVersion:0,kind,createAdmissionId:admission,profile:recordProfile,
+    ...(kind==="client"?{relationship:{organizationRecordId:null,expectedRelationshipVersion:0}}:{}),
     scopes:[{businessAreaId:"area",divisionId:"division"}],destinations,actor:profileActor} as NativeDirectoryCreateWrite;
-  await db.prepare(`INSERT INTO native_directory_create_admissions
+  const admissionStatement=db.prepare(`INSERT INTO native_directory_create_admissions
     (id,staff_id,bound_access_subject,record_id,record_kind,scopes_json,profile_json,destinations_json,issued_by)
-    VALUES(?,?,?,?,?,?,?,?,?)`).bind(admission,actor.staffId,actor.accessSubject,recordId,"organization",JSON.stringify(input.scopes),
-      JSON.stringify(profile),JSON.stringify(destinations.map(({expectedAuthorizationGeneration:_,...value})=>value)),actor.staffId).run();
+    VALUES(?,?,?,?,?,?,?,?,?)`).bind(admission,actor.staffId,actor.accessSubject,recordId,kind,JSON.stringify(input.scopes),
+      JSON.stringify(recordProfile),JSON.stringify(destinations.map(({expectedAuthorizationGeneration:_,...value})=>value)),actor.staffId);
+  if(kind==="client")await db.batch([admissionStatement,db.prepare(`INSERT INTO native_directory_create_admission_relationships
+    (create_admission_id,client_record_id,organization_record_id,organization_record_version) VALUES(?,?,NULL,NULL)`)
+    .bind(admission,recordId)]);
+  else await admissionStatement.run();
   const result=await writeNativeDirectoryProfile(db,input);if(result.status!=="written")throw new Error(JSON.stringify(result));
   for(let index=0;index<result.commandIds.length;index++){const commandId=result.commandIds[index]!,row=await db.prepare(`SELECT source_id,
       expected_source_instance_id,application_id,expected_history_epoch_id,destination_base_url FROM project_alpha_directory_outbox WHERE command_id=?`)
@@ -48,17 +56,17 @@ async function createRecord(two=false){const recordId=uuid(),mutationId=uuid(),a
         &&value.sourceInstanceUUID===row!.expected_source_instance_id&&value.applicationUUID===row!.application_id)!,id=publicId(),generation="1";
     await db.prepare(`UPDATE project_alpha_directory_outbox SET state='leased',lease_token='lease',lease_expires_at=9999999999999 WHERE command_id=?`).bind(commandId).run();
     await db.prepare(`INSERT INTO project_alpha_directory_mappings(source_id,resource_type,external_id,project_alpha_public_id,
-      source_instance_id,application_id,history_epoch_id,command_id) VALUES(?,'organization',?,?,?,?,?,?)`)
-      .bind(d.sourceId,recordId,id,d.sourceInstanceUUID,d.applicationUUID,d.historyEpoch,commandId).run();
+      source_instance_id,application_id,history_epoch_id,command_id) VALUES(?,?,?,?,?,?,?,?)`)
+      .bind(d.sourceId,kind,recordId,id,d.sourceInstanceUUID,d.applicationUUID,d.historyEpoch,commandId).run();
     const response={status:"acknowledged",response:{requestId:commandId,replayed:false,sourceInstanceId:d.sourceInstanceUUID,
-      applicationId:d.applicationUUID,historyEpoch:d.historyEpoch,result:{resource:{type:"organization",id:recordId,publicId:id,revision:"1"},
+      applicationId:d.applicationUUID,historyEpoch:d.historyEpoch,result:{resource:{type:kind,id:recordId,publicId:id,revision:"1"},
       data:{publicId:id},authorizationGeneration:generation}}};
     await db.prepare(`UPDATE project_alpha_directory_outbox SET state='acknowledged',outcome_json=?,lease_token=NULL,lease_expires_at=NULL WHERE command_id=?`)
       .bind(JSON.stringify(response),commandId).run();
     const requestId=uuid();
     const observed=await persistProjectAlphaDirectoryInventoryPage(db,{authoritative:false,sourceId:d.sourceId,
       sourceInstanceId:d.sourceInstanceUUID,applicationId:d.applicationUUID,historyEpoch:d.historyEpoch,requestId,
-      authorizationGeneration:generation,nextCursor:null,resources:[{type:"organization",publicId:id,revision:"1",present:true,
+      authorizationGeneration:generation,nextCursor:null,resources:[{type:kind,publicId:id,revision:"1",present:true,
         lastAction:"upsert",projectionSha256:"a".repeat(64),binding:{externalId:recordId,status:"active",resourceRevision:"1"}}]},null);
     if(observed.status==="blocked")throw new Error(JSON.stringify(observed));
   }
@@ -203,6 +211,53 @@ describe("native Directory lifecycle writer",()=>{
     expect(injected).toBe(true);expect(send).not.toHaveBeenCalled();
     expect(await db.prepare("SELECT state,attempts,lease_token FROM project_alpha_directory_lifecycle_outbox WHERE command_id=?")
       .bind(candidate.commandId).first()).toEqual({state:"pending",attempts:0,lease_token:null});
+  },180_000);
+
+  it("archives a client only after both source-qualified PA acknowledgements without changing public links",async()=>{
+    const target=await createRecord(true,"client"),input={...lifecycle(target.recordId),kind:"client" as const},
+      deliveryBefore=(await db.prepare("SELECT id,hex(payload) payload FROM lifecycle_delivery_fixture ORDER BY id").all()).results,
+      linksBefore=(await db.prepare("SELECT id,url,hex(payload) payload FROM lifecycle_public_link_fixture ORDER BY id").all()).results;
+    const written=await writeNativeDirectoryLifecycle(db,input);
+    if(written.status!=="written")throw new Error(JSON.stringify(written));
+    expect(written.reservations).toHaveLength(2);
+    expect(written.reservations.map(row=>row.sourceId).sort()).toEqual([source2,source].sort());
+    const env={OPS_DB:db,PROJECT_ALPHA_DIRECTORY_LIFECYCLE_ENABLED:"true",PROJECT_ALPHA_API_V2_CONNECTIONS:JSON.stringify({version:1,
+      instances:Object.fromEntries(target.input.destinations.map(d=>[d.sourceId,{sourceId:d.sourceId,enabled:true,baseUrl:d.origin,
+        apiKey:"secret",sourceInstanceId:d.sourceInstanceUUID,applicationId:d.applicationUUID,historyEpoch:d.historyEpoch}]))})};
+    const send=vi.fn(async(url:RequestInfo|URL,init?:RequestInit)=>{
+      const reservation=written.reservations.find(row=>JSON.stringify(row.command)===init?.body);
+      expect(reservation).toBeDefined();
+      const d=target.input.destinations.find(row=>row.sourceId===reservation!.sourceId)!;
+      const row=await db.prepare(`SELECT source_id,source_instance_id,application_id,history_epoch_id,destination_origin,
+        project_alpha_public_id FROM project_alpha_directory_lifecycle_outbox WHERE command_id=?`)
+        .bind(reservation!.commandId).first<Record<string,string>>();
+      expect(row).toMatchObject({source_id:d.sourceId,source_instance_id:d.sourceInstanceUUID,application_id:d.applicationUUID,
+        history_epoch_id:d.historyEpoch,destination_origin:d.origin});
+      expect(String(url)).toBe(`${d.origin}/api/v2/directory/clients/${row!.project_alpha_public_id}/archive/commands`);
+      const requestId=uuid();
+      // Keep this fixture's destination-wide authorization generation unchanged;
+      // advancing it would invalidate later records' generation-1 observations.
+      return new Response(JSON.stringify({sourceInstanceId:d.sourceInstanceUUID,applicationId:d.applicationUUID,
+        historyEpoch:d.historyEpoch,requestId,replayed:false,result:{action:"archive",resource:{type:"client",
+          publicId:row!.project_alpha_public_id,revision:"2",present:false},authorizationGeneration:"1"}}),
+        {status:200,headers:{"Content-Type":"application/json","Cache-Control":"no-store","X-Request-ID":requestId}});
+    });
+    for(let index=0;index<written.reservations.length;index++){
+      const reservation=written.reservations[index]!;
+      await expect(dispatchProjectAlphaDirectoryLifecycleCommand(env,reservation.sourceId,reservation.commandId,send))
+        .resolves.toMatchObject({status:"acknowledged",revision:"2"});
+      expect(await db.prepare("SELECT status FROM operations_directory_lifecycle_state WHERE record_id=?")
+        .bind(target.recordId).first("status")).toBe(index===0?"archive_pending":"archived");
+      expect((await db.prepare("SELECT id,hex(payload) payload FROM lifecycle_delivery_fixture ORDER BY id").all()).results).toEqual(deliveryBefore);
+      expect((await db.prepare("SELECT id,url,hex(payload) payload FROM lifecycle_public_link_fixture ORDER BY id").all()).results).toEqual(linksBefore);
+    }
+    expect(send).toHaveBeenCalledTimes(2);
+    await expect(writeNativeDirectoryLifecycle(db,input)).resolves.toMatchObject({status:"written",replayed:true,
+      reservations:written.reservations.map(({commandId,sourceId,command})=>({commandId,sourceId,command}))});
+    expect(await db.prepare("SELECT count(*) n FROM project_alpha_directory_lifecycle_outbox WHERE mutation_id=?")
+      .bind(input.mutationId).first("n")).toBe(2);
+    expect(await db.prepare("SELECT status,lifecycle_version FROM operations_directory_lifecycle_state WHERE record_id=?")
+      .bind(target.recordId).first()).toEqual({status:"archived",lifecycle_version:1});
   },180_000);
 
   it("dispatches the candidate PA archive contract and settles the final archived state",async()=>{
