@@ -131,7 +131,7 @@ beforeAll(async () => {
   runtime = new Miniflare({ modules: true, compatibilityDate: "2026-08-06", script: "export default {fetch(){return new Response('ok')}}", d1Databases: ["OPS_DB"] });
   db = await runtime.getD1Database("OPS_DB") as D1Database;
   const directory = new URL("../migrations/", import.meta.url);
-  const migrations = readdirSync(directory).filter(name => /^\d{4}_.+\.sql$/.test(name) && name.slice(0, 4) <= "0180").sort();
+  const migrations = readdirSync(directory).filter(name => /^\d{4}_.+\.sql$/.test(name) && name.slice(0, 4) <= "0203").sort();
   await db.prepare("CREATE TABLE d1_migrations(id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT NOT NULL UNIQUE)").run();
   for (const migration of migrations) await db.batch([
     ...splitD1MigrationStatements(readFileSync(new URL(migration, directory), "utf8")).map(sql => db.prepare(sql)),
@@ -140,22 +140,9 @@ beforeAll(async () => {
   expect((await db.prepare("SELECT name FROM d1_migrations ORDER BY id").all<{ name: string }>()).results.map(row => row.name))
     .toEqual(migrations);
   expect((await db.prepare("PRAGMA foreign_key_check").all()).results).toEqual([]);
-  const currentRelationshipMigrations = readdirSync(directory)
-    .filter(name => /^018[123]_.+\.sql$/.test(name)).sort();
-  expect(currentRelationshipMigrations).toEqual([
-    "0181_project_alpha_directory_create_generation_recovery.sql",
-    "0182_project_alpha_directory_relationship_recovery_guard.sql",
-    "0183_project_alpha_binding_standalone_relationship_rows.sql",
-  ]);
-  for (const migration of currentRelationshipMigrations) await db.batch([
-    ...splitD1MigrationStatements(readFileSync(new URL(migration, directory), "utf8")).map(sql => db.prepare(sql)),
-    db.prepare("INSERT INTO d1_migrations(name) VALUES(?)").bind(migration),
-  ]);
-  expect((await db.prepare("SELECT name FROM d1_migrations ORDER BY id DESC LIMIT 3").all<{ name: string }>()).results
-    .map(row => row.name).reverse()).toEqual(currentRelationshipMigrations);
   expect(await db.prepare("SELECT name FROM d1_migrations ORDER BY id DESC LIMIT 1").first("name"))
-    .toBe("0183_project_alpha_binding_standalone_relationship_rows.sql");
-  expect(await db.prepare("SELECT count(*) FROM d1_migrations").first("count(*)")).toBe(183);
+    .toBe("0203_effective_native_directory_enrollment_consumers.sql");
+  expect(await db.prepare("SELECT count(*) FROM d1_migrations").first("count(*)")).toBe(203);
   expect((await db.prepare("PRAGMA foreign_key_check").all()).results).toEqual([]);
   await db.batch([
     db.prepare("INSERT INTO staff_users(id,email,display_name,access_subject,status) VALUES('owner','owner@example.test','Owner','access|owner','active')"),
@@ -178,7 +165,7 @@ describe("native Directory profile outbox dispatcher", () => {
     expect(source).toContain("recovery?.identityGrantId ?? originalActor.selectedIdentityGrantId");
     expect(source).toContain("const rootCommand = recovery ? parse(recovery.rootCommandJson) : command");
   });
-  it("derives the fixed destination proof from the current 0180 schema and only an exact acknowledged update", async () => {
+  it("derives the fixed destination proof from the current 0203 schema and only an exact acknowledged update", async () => {
     const recordId = "614ed50f-8800-4ab3-aa69-009d8e5cefa9";
     const areaId = "staging-native-only-portal-acceptance-20261008-window-1";
     await db.prepare("INSERT INTO native_business_areas(id,name,active) VALUES(?,?,1)").bind(areaId, "Acceptance area").run();

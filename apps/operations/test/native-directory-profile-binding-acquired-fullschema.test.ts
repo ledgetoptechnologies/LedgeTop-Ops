@@ -7,7 +7,7 @@ import { writeNativeDirectoryProfile } from '../src/worker/native-directory-prof
 import { dispatchProjectAlphaDirectoryProfileOutboxCommand } from '../src/worker/project-alpha-directory-profile-outbox-dispatcher';
 import { dispatchNativeDirectoryProfileBindingContinuation } from '../src/worker/native-directory-profile-binding-continuation';
 
-it('continues a genuinely acquired mapping with distinct native and external IDs through canonical 0199', async()=>{
+it('continues a genuinely acquired mapping with distinct native and external IDs through canonical 0203', async()=>{
   await runCanonicalPortalResourceAcceptance(async c=>{
     const db=c.operations;
     for(const name of ['0197_operations_portal_native_delivery_cancellation_checkpoint_scope.sql',
@@ -72,5 +72,5 @@ it('continues a genuinely acquired mapping with distinct native and external IDs
       receipt:await db.prepare('SELECT * FROM native_directory_profile_binding_receipts WHERE job_command_id=?').bind(commandId).first()})).toEqual({status:'acknowledged'});
     expect(posts).toBe(1);expect(await db.prepare('SELECT state FROM native_directory_profile_binding_dispatch WHERE command_id=?').bind(commandId).first('state')).toBe('complete');
     expect((await db.prepare('PRAGMA foreign_key_check').all()).results).toEqual([]);
-  },{stopAfterReady:true});
+  },{stopAfterReady:true,operationsThroughMigration:"0203_effective_native_directory_enrollment_consumers.sql"});
 },240000);

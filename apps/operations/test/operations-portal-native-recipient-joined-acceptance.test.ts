@@ -66,8 +66,7 @@ async function applyDraft(database: D1Database, application: "operations" | "cli
 async function applyReviewedChain(database: D1Database, application: "operations" | "client") {
   const directory = application === "operations" ? new URL("../migrations/", import.meta.url)
     : new URL("../../client/migrations/", import.meta.url);
-  // This joined acceptance window intentionally ends at the immutable 0196 schema.
-  const names = application === "operations" ? reviewedOperationsMigrationNames(directory).slice(0, 196)
+  const names = application === "operations" ? reviewedOperationsMigrationNames(directory).slice(0, 203)
     : reviewedClientMigrationNames(directory);
   await database.prepare(`CREATE TABLE d1_migrations(
     id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT UNIQUE NOT NULL,
@@ -174,7 +173,9 @@ async function acknowledgeCreate(database: D1Database, seed: Awaited<ReturnType<
     WHERE mutation_id=? AND state='materialized'`).bind(seed.write.mutationId).run();
 }
 
-for (const chain of ["historical", "current-reviewed"] as const) describe(
+// Operations always runs the current 0203 chain; only the Client side retains
+// the historical 0223+0224 acceptance boundary in this branch.
+for (const chain of ["historical-client", "current-reviewed"] as const) describe(
   `Ops-native recipient joined local acceptance (${chain})`, () => {
   let runtime: Miniflare, operations: D1Database, client: D1Database;
   let accessPrivateKey: CryptoKey, accessJwks: JWTVerifyGetKey;
@@ -197,25 +198,16 @@ for (const chain of ["historical", "current-reviewed"] as const) describe(
     accessPublicJwk.alg = "RS256"; accessPublicJwk.kid = "joined-recipient-access"; accessPublicJwk.use = "sig";
     accessPrivateKey = accessKeys.privateKey;
     accessJwks = createLocalJWKSet({ keys: [accessPublicJwk] });
-    if (chain === "historical") {
+    if (chain === "historical-client") {
       expect(await applyCanonicalChain(operations, "operations",
-        "0153_operations_portal_workspace_publication_outbox.sql", true)).toHaveLength(153);
-      for (const name of ["0154_operations_portal_native_recipient_authority.sql",
-        "0156_operations_portal_workspace_publication_invocations.sql",
-        "0157_operations_portal_native_workspace_cleanup.sql", "0160_operations_portal_native_recipient_labels.sql"])
-        await applyDraft(operations, "operations", name);
-      // Current directory consumers require the explicit Operations-record ID
-      // projection introduced by 0170; this historical acceptance fixture stops
-      // its canonical chain at 0153 and therefore applies that view migration
-      // explicitly rather than exercising an obsolete mapping shape.
-      await applyDraft(operations, "operations", "0170_project_alpha_active_directory_project_guard.sql");
+        "0203_effective_native_directory_enrollment_consumers.sql", true)).toHaveLength(203);
       expect(await applyCanonicalChain(client, "client", "0223_operations_portal_workspace_publications.sql"))
         .toHaveLength(142);
       await applyDraft(client, "client", "0224_operations_portal_native_recipient_authority.sql");
     } else {
       const operationsNames = await applyReviewedChain(operations, "operations");
-      expect(operationsNames).toHaveLength(196);
-      expect(operationsNames.at(-1)).toBe("0196_native_directory_maintenance_authority.sql");
+      expect(operationsNames).toHaveLength(203);
+      expect(operationsNames.at(-1)).toBe("0203_effective_native_directory_enrollment_consumers.sql");
       const clientNames = await applyReviewedChain(client, "client");
       expect(clientNames).toHaveLength(149);
       expect(clientNames.at(-1)).toBe("0230_operations_portal_native_delivery_terminal_cancellations.sql");
@@ -234,7 +226,7 @@ for (const chain of ["historical", "current-reviewed"] as const) describe(
     const organization = await seedRecord(operations, rootId, "organization");
     await acknowledgeCreate(operations, organization, "10000000000000000000000000000001");
     await seedRecord(operations, clientId, "client", rootId);
-    if (chain === "historical") {
+    if (chain === "historical-client") {
       await operations.prepare(`INSERT INTO operations_service_definitions
         (service_id,provider_id,source_id,source_service_id,display_name)
         VALUES('web','operations','joined-fixture','web','Website services')`).run();

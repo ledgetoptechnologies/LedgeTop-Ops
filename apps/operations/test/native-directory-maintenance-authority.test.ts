@@ -26,8 +26,7 @@ describe("native directory maintenance authority on the canonical D1 chain", { t
   it("requires a preinstalled exact approval, fences current state, and never restores revoked authority", async () => {
     await runCanonicalPortalResourceAcceptance(async context => {
       const { operations: db, owner: originalOwner } = context;
-      // The fixture explicitly pins the historical 0196 endpoint; later release migrations are not applied.
-      expect(await db.prepare("SELECT count(*) count FROM d1_migrations").first<number>("count")).toBe(196);
+      expect(await db.prepare("SELECT count(*) count FROM d1_migrations").first<number>("count")).toBe(203);
 
       // A new admitted/profiled owner in the already-populated staging fixture
       // has other normal Directory grants but lacks portal_access.manage.
@@ -292,6 +291,6 @@ describe("native directory maintenance authority on the canonical D1 chain", { t
         .bind(lateOwner.identity.staffId).first<number>("generation")).toBe(generationBefore);
       expect(await db.prepare("SELECT count(*) count FROM native_directory_maintenance_authority_guards")
         .first<number>("count")).toBe(0);
-    }, { stopAfterReady: true });
+    }, { stopAfterReady: true, operationsThroughMigration: "0203_effective_native_directory_enrollment_consumers.sql" });
   });
 });

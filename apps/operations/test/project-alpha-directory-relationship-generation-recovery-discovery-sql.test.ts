@@ -24,7 +24,7 @@ function database(outcome: Record<string, unknown>): DatabaseSync {
     CREATE TABLE operations_directory_records(record_id TEXT,record_kind TEXT,current_version INTEGER);
     CREATE TABLE project_alpha_active_directory_mappings(record_id TEXT,resource_type TEXT,external_id TEXT,project_alpha_public_id TEXT,
       source_id TEXT,source_instance_id TEXT,application_id TEXT,history_epoch_id TEXT);
-    CREATE TABLE native_directory_enrollments(record_id TEXT,destinations_json TEXT);
+    CREATE TABLE effective_native_directory_enrollments(record_id TEXT,destinations_json TEXT);
     CREATE TABLE project_alpha_directory_relationship_generation_recoveries(predecessor_command_id TEXT);`);
   db.prepare(`INSERT INTO operations_directory_client_organizations VALUES(?,2,?)`).run(client, organization);
   db.prepare(`INSERT INTO operations_directory_client_organization_history VALUES(?,2,'mutation',NULL,?,3,4)`).run(client, organization);
@@ -35,7 +35,7 @@ function database(outcome: Record<string, unknown>): DatabaseSync {
       organization, organizationPublic, source, instance, application, epoch);
   const destination = (externalCanonicalId: string) => JSON.stringify([{ sourceId: source, sourceInstanceUUID: instance,
     applicationUUID: application, historyEpoch: epoch, origin, externalCanonicalId }]);
-  db.prepare(`INSERT INTO native_directory_enrollments VALUES(?,?),(?,?)`)
+  db.prepare(`INSERT INTO effective_native_directory_enrollments VALUES(?,?),(?,?)`)
     .run(client, destination("client-remote"), organization, destination("organization-remote"));
   const command = JSON.stringify({ commandId: "predecessor" });
   db.prepare(`INSERT INTO project_alpha_directory_relationship_outbox(command_id,mutation_id,client_record_id,relationship_version,

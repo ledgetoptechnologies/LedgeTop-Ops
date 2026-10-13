@@ -265,8 +265,8 @@ async function proveProjectBillingLifecycle(context: CanonicalPortalAcceptanceCo
   expect((await db.prepare("PRAGMA foreign_key_check").all()).results).toEqual([]);
 }
 
-describe("native billing authority on the canonical 0001-0191 portal lifecycle", { timeout: 300_000 }, () => {
+describe("native billing authority on the canonical 0001-0203 portal lifecycle", { timeout: 300_000 }, () => {
   it("grants an exact published project, denies it after canonical drift, and permits only frozen-lineage cleanup", async () => {
-    await runCanonicalPortalResourceAcceptance(proveProjectBillingLifecycle,{stopAfterReady:true});
+    await runCanonicalPortalResourceAcceptance(proveProjectBillingLifecycle,{stopAfterReady:true,operationsThroughMigration:"0203_effective_native_directory_enrollment_consumers.sql"});
   });
 });

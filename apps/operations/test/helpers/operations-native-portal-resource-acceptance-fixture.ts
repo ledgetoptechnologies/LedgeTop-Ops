@@ -354,7 +354,7 @@ export type CanonicalPortalAcceptanceContext={runtime:Miniflare;operations:D1Dat
  advanceProject:()=>Promise<void>};
 
 export async function runCanonicalPortalResourceAcceptance(onReady?:(context:CanonicalPortalAcceptanceContext)=>Promise<void>,
-  options?:Readonly<{stopAfterReady?:boolean}>){
+  options?:Readonly<{stopAfterReady?:boolean;operationsThroughMigration?:"0203_effective_native_directory_enrollment_consumers.sql"}>){
 
   runtime = new Miniflare({ modules: true, compatibilityDate: "2026-08-06", script: "export default {}",
     d1Databases: { OPS_DB: crypto.randomUUID(), CLIENT_DB: crypto.randomUUID() },
@@ -364,9 +364,11 @@ export async function runCanonicalPortalResourceAcceptance(onReady?:(context:Can
   bucket = await runtime.getR2Bucket("DATA_BUCKET") as unknown as R2Bucket;
   // Exercise current producers/consumers against the complete canonical schema,
   // including delivery replacement and terminal-cancellation guards and ledgers.
-  await applyCanonicalChain(operations, "operations", "0196_native_directory_maintenance_authority.sql", true);
+  const operationsThroughMigration=options?.operationsThroughMigration??"0196_native_directory_maintenance_authority.sql";
+  await applyCanonicalChain(operations, "operations", operationsThroughMigration, true);
   await applyCanonicalChain(client, "client", "0230_operations_portal_native_delivery_terminal_cancellations.sql");
-  expect(await operations.prepare("SELECT count(*) AS count FROM d1_migrations").first<number>("count")).toBe(196);
+  expect(await operations.prepare("SELECT count(*) AS count FROM d1_migrations").first<number>("count"))
+    .toBe(operationsThroughMigration.startsWith("0203_")?203:196);
   expect(await client.prepare("SELECT count(*) AS count FROM d1_migrations").first<number>("count")).toBe(149);
   expect((await operations.prepare("PRAGMA foreign_key_check").all()).results).toEqual([]);
   expect((await client.prepare("PRAGMA foreign_key_check").all()).results).toEqual([]);

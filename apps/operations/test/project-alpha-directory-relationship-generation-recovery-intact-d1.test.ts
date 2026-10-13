@@ -72,7 +72,8 @@ describe("relationship recovery followed by a normal write on intact D1 guards",
     const restored=(await db.prepare("SELECT name,sql FROM sqlite_schema WHERE type='trigger' AND sql IS NOT NULL ORDER BY name").all<{name:string;sql:string}>()).results;
     expect(restored).toEqual(triggers);
     expect((await db.prepare("PRAGMA foreign_key_check").all()).results).toEqual([]);
-    await runSql(db,readFileSync(new URL("0184_project_alpha_directory_relationship_generation_recovery.sql",directory),"utf8"));
+    for(const name of readdirSync(fileURLToPath(directory)).filter(name=>/^\d{4}_.+\.sql$/.test(name)&&name.slice(0,4)>="0184"&&name.slice(0,4)<="0203").sort())
+      await runSql(db,readFileSync(new URL(name,directory),"utf8"));
   },240_000);
   afterAll(async()=>{await runtime.dispose();});
 

@@ -235,9 +235,7 @@ beforeAll(async () => {
   operations = await runtime.getD1Database("OPS_DB") as unknown as D1Database;
   client = await runtime.getD1Database("CLIENT_DB") as unknown as D1Database;
   expect(await applyCanonicalChain(operations, "operations",
-    "0187_operations_portal_native_delivery_literal_prefix_guard.sql", true)).toHaveLength(187);
-  await applyDraft(operations, "operations", "0193_operations_portal_native_delivery_dead_conflict_recovery.sql");
-  await applyDraft(operations, "operations", "0194_operations_portal_native_delivery_terminal_cancellations.sql");
+    "0203_effective_native_directory_enrollment_consumers.sql", true)).toHaveLength(203);
   expect(await applyCanonicalChain(client, "client", "0223_operations_portal_workspace_publications.sql"))
     .toHaveLength(142);
   await applyDraft(client, "client", "0224_operations_portal_native_recipient_authority.sql");

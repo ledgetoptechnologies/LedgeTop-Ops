@@ -25,6 +25,10 @@ it(
   async () => {
     let text = readFileSync(source, "utf8");
     text = text
+      .replace('name.slice(0,4)<="0195"', 'name.slice(0,4)<="0203"')
+      .replace("const CANONICAL_BOOTSTRAP_MIGRATION_COUNT=195;", "const CANONICAL_BOOTSTRAP_MIGRATION_COUNT=203;")
+      .replace('const CANONICAL_BOOTSTRAP_FINAL_MIGRATION="0195_client_hub_native_project_current_owner_observation.sql";',
+        'const CANONICAL_BOOTSTRAP_FINAL_MIGRATION="0203_effective_native_directory_enrollment_consumers.sql";')
       .replace(
         "async function lifecycle(t){",
         "export async function lifecycle(t,successorHeadHook){",

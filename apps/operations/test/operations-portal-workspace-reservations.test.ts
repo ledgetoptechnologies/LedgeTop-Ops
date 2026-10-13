@@ -1,8 +1,6 @@
-import { readFileSync } from "node:fs";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { Miniflare } from "miniflare";
-import { applyCanonicalChain, applyCanonicalMigrationSchema } from "./helpers/verified-recipient-canonical-lineage";
-import { splitD1MigrationStatements } from "../../client/test/helpers/d1-migrations";
+import { applyCanonicalChain } from "./helpers/verified-recipient-canonical-lineage";
 import { writeNativeDirectoryProfile, type NativeDirectoryCreateWrite,
   type NativeDirectoryProfileWriteOutcome } from "../src/worker/native-directory-profile-writer";
 import { writeNativeDirectoryRelationship } from "../src/worker/native-directory-relationship-writer";
@@ -199,26 +197,9 @@ beforeAll(async () => {
   runtime = new Miniflare({ modules: true, compatibilityDate: "2026-08-06", script: "export default {}",
     d1Databases: { OPS_DB: crypto.randomUUID() } });
   db = await runtime.getD1Database("OPS_DB") as unknown as D1Database;
-  const migrations = await applyCanonicalChain(db, "operations", "0152_operations_portal_workspace_reservations.sql", true);
-  expect(migrations).toHaveLength(152);
-  // The current writer consumes the 0170 active-mapping projection (including
-  // the distinct Ops record_id). Keep the historical authority fixture, but
-  // install that exact current schema contract before exercising the writer.
-  await applyCanonicalMigrationSchema(db, "0170_project_alpha_active_directory_project_guard.sql");
-  // This is an explicit local proposal supplement, not canonical migration
-  // 0182. It keeps the historical portal chain while exercising the current
-  // normalized relationship-revision evidence contract used by the writer.
-  const relationshipProposal = readFileSync(new URL(
-    "../../../scripts/proposals/0182_project_alpha_directory_relationship_recovery_guard.sql", import.meta.url), "utf8");
-  const revisionMarker = "DROP VIEW project_alpha_directory_relationship_revision_evidence;";
-  const revisionOffset = relationshipProposal.indexOf(revisionMarker);
-  if (revisionOffset < 0) throw new Error("missing proposal revision-evidence replacement");
-  const revisionStatements = splitD1MigrationStatements(relationshipProposal.slice(revisionOffset)
-    .replaceAll("operations_directory_effective_materializations", "operations_directory_materializations")).slice(0, 2);
-  expect(revisionStatements).toHaveLength(2);
-  expect(revisionStatements[1]).toMatch(/CREATE VIEW project_alpha_directory_relationship_revision_evidence AS/);
-  // Do not install later recovery-dependent objects into this historical cutoff.
-  await db.batch(revisionStatements.map(statement => db.prepare(statement)));
+  const migrations = await applyCanonicalChain(db, "operations",
+    "0203_effective_native_directory_enrollment_consumers.sql", true);
+  expect(migrations).toHaveLength(203);
   await seedManager("portal-manager-a", "both");
   await seedManager("portal-manager-b", "revoke");
   await db.batch([
