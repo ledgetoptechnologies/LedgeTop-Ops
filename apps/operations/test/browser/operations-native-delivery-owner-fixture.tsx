@@ -3,7 +3,7 @@ import "@ltds/ui/styles.css";
 import "../../src/client/styles.css";
 import { OperationsNativeDeliveryAuthority } from "../../src/client/OperationsNativeDeliveryAuthority";
 
-type Call = { path: string; method: string; body: Record<string, unknown> | null };
+type Call = { path: string; method: string; body: Record<string, unknown> | null; csrfToken: string | null };
 const exposed = window as Window & { nativeDeliveryMode?: string; nativeDeliveryCalls?: Call[] };
 const mode = exposed.nativeDeliveryMode ?? "success", calls: Call[] = [];
 exposed.nativeDeliveryCalls = calls;
@@ -33,14 +33,22 @@ function active(operationId: string, transportStatus: "pending" | "acknowledged"
     recoveryOperationId: transportStatus === "pending" || recoverableDead ? operationId : null,
     cancellationOperationId: null as string | null };
 }
-let grantCalls = 0, revokeCalls = 0, candidateCalls = 0, cancelCalls = 0;
+let grantCalls = 0, revokeCalls = 0, candidateCalls = 0, cancelCalls = 0, sessionCalls = 0;
 
 window.fetch = async (input, init = {}) => {
   const path = String(input), method = init.method ?? "GET";
   const body = typeof init.body === "string" ? JSON.parse(init.body) as Record<string, unknown> : null;
-  calls.push({ path, method, body });
-  if (path.endsWith("/session")) return Response.json({ csrfToken: `123.${"b".repeat(64)}`,
-    verifiedUntil: "2099-01-01T00:00:00.000Z" });
+  const csrfToken = new Headers(init.headers).get("X-CSRF-Token");
+  calls.push({ path, method, body, csrfToken });
+  if (path.endsWith("/session")) {
+    sessionCalls++;
+    if (mode === "renewal-denied" && sessionCalls > 1 || mode === "grant-network-renewal-denied" && sessionCalls === 3)
+      return Response.json({ error: "denied" }, { status: 403 });
+    if (mode === "renewal-network" && sessionCalls > 1) throw new TypeError("session renewal unavailable");
+    return Response.json({ csrfToken: `${sessionCalls}.${"b".repeat(64)}`, verifiedUntil: "2099-01-01T00:00:00.000Z" });
+  }
+  if (mode === "session-stale" && method === "POST" && csrfToken !== `2.${"b".repeat(64)}`)
+    return Response.json({ error: "denied" }, { status: 403 });
   if (path.includes("/candidates?")) {
     candidateCalls += 1;
     if (mode === "candidate-denied" || mode === "candidate-denied-after-first" && candidateCalls > 1)
@@ -71,7 +79,7 @@ window.fetch = async (input, init = {}) => {
   }
   if (path.endsWith("/authorities") && method === "POST") {
     grantCalls += 1;
-    if (mode === "grant-network" && grantCalls === 1) throw new TypeError("simulated network loss");
+    if ((mode === "grant-network" || mode === "grant-network-renewal-denied") && grantCalls === 1) throw new TypeError("simulated network loss");
     if (mode === "candidate-stale") return Response.json({ error: "candidate_review_stale" }, { status: 409 });
     const pending = mode === "grant-pending";
     const authority = active(body!.operationId as string, pending ? "pending" : "acknowledged",

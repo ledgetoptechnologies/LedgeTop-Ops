@@ -176,8 +176,13 @@ function NativeDeliveryAuthorityWorkspace({ initialSession }: { initialSession: 
   };
   const execute = async (current: Attempt, retrying: boolean) => {
     setBusy(current.kind); setError(""); setMessage("");
+    let mutationStarted = false;
     try {
-      const active = retrying ? await renewSession() : session;
+      // CSRF is short-lived and admission-bound. Renew authorization, never the
+      // already confirmed operation/body, before any explicit mutation attempt.
+      const active = await renewSession();
+      if (!mounted.current) return;
+      mutationStarted = true;
       if (current.kind === "cancel") {
         const result = await cancelOperationsNativeDeliveryAuthority(active.csrfToken, current.authority);
         setAttempt(null); setAuthorityReviewed(false); setAuthority(null); setAuthorityRead(false);
@@ -207,13 +212,16 @@ function NativeDeliveryAuthorityWorkspace({ initialSession }: { initialSession: 
         ? "The operation is durable, but delivery is pending. Reload this authority before an explicit recovery."
         : `${current.kind === "revoke" ? "Revocation" : current.kind === "recover" ? "Recovery" : "Grant"} delivery was acknowledged.`);
     } catch (caught) {
-      const uncertain = caught instanceof OperationsNativeDeliveryOwnerApiError && caught.uncertain;
-      if (!uncertain) { setAttempt(null); setGrantReviewed(false); setAuthorityReviewed(false); }
+      const uncertain = mutationStarted && caught instanceof OperationsNativeDeliveryOwnerApiError && caught.uncertain;
+      const renewalBlockedRetry = retrying && !mutationStarted;
+      if (!uncertain && !renewalBlockedRetry) { setAttempt(null); setGrantReviewed(false); setAuthorityReviewed(false); }
       if (isScopeDenial(caught)) clearPrivateReview();
       if (caught instanceof OperationsNativeDeliveryOwnerApiError && caught.status === 409 && current.kind === "grant") {
         setCandidate(null); setCandidates([]); setNextCursor(null);
       }
-      setError(uncertain
+      setError(renewalBlockedRetry
+        ? `Owner session renewal failed. The uncertain ${current.kind} remains locked; no operation was replayed.`
+        : uncertain
         ? `The ${current.kind} outcome is uncertain. Retry the same frozen operation and body; no replacement ID will be created.`
         : caught instanceof OperationsNativeDeliveryOwnerApiError && caught.status === 409 && current.kind === "grant"
           ? "The reviewed candidate is stale. Reload candidates and perform a new explicit review; no grant was substituted."
@@ -378,6 +386,8 @@ function NativeDeliveryAuthorityWorkspace({ initialSession }: { initialSession: 
         && <p>Reload this exact authority before recovery so the stored operation and current owner authority are revalidated.</p>}
       {authority.state === "active" && authority.transportStatus !== "dead" && <p>Features and expiry are immutable here. Revoke explicitly, then separately review and reissue a current candidate.</p>}
     </section></Card>}
+    {attempt && !candidate && !authority && <button type="button" className="button-orange" disabled={Boolean(busy)}
+      onClick={() => void execute(attempt, true)}>Retry same frozen operation</button>}
     {message && <p role="status">{message}</p>}{error && <p role="alert">{error}</p>}
   </main></div>;
 }
