@@ -59,6 +59,11 @@ function reviewedMigrationNames(directory: URL, application: "delivery" | "opera
   };
   const required = REQUIRED_STAGING_MIGRATIONS[application] as readonly string[];
   const names = [...initial, ...required.slice(0, contract.migrationCount - initial.length)] as string[];
+  // Current source suffixes are reviewed independently; they must not become
+  // part of the immutable bootstrap/release prefix returned by this helper.
+  const currentNames = application === "operations"
+    ? [...new Set([...initial, ...required, ...Object.keys(OPERATIONS_CURRENT_SOURCE_MIGRATION_CHAIN.appendedMigrations)])].sort()
+    : names;
   if (names.length !== contract.migrationCount || new Set(names).size !== names.length
     || sha256(names.join("\n")) !== contract.migrationNamesSha256) {
     throw new Error(`reviewed-${application}-migration-name-contract-mismatch`);
@@ -67,9 +72,7 @@ function reviewedMigrationNames(directory: URL, application: "delivery" | "opera
     const physical = readdirSync(fileURLToPath(directory), { withFileTypes: true })
       .filter(entry => /^\d{4}_.+\.sql$/.test(entry.name));
     const physicalNames = physical.map(entry => entry.name).sort();
-    const expectedNames = application === "operations"
-      ? [...initial, ...required]
-      : names;
+    const expectedNames = currentNames;
     if (physical.some(entry => !entry.isFile() || entry.isSymbolicLink())
       || JSON.stringify(physicalNames) !== JSON.stringify(expectedNames)) {
       throw new Error(`reviewed-${application}-migration-physical-inventory-mismatch`);
@@ -94,7 +97,6 @@ function reviewedMigrationNames(directory: URL, application: "delivery" | "opera
     throw new Error(`reviewed-${application}-migration-content-contract-mismatch`);
   }
   if (rejectExtras && application === "operations") {
-    const currentNames = [...initial, ...required];
     const currentContents = currentNames.map(name => {
       const path = fileURLToPath(new URL(name, directory));
       const stat = lstatSync(path);

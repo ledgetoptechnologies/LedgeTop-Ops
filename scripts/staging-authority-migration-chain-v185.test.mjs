@@ -38,7 +38,7 @@ test("accepts only exact immutable reviewed artifact prefixes through 0199", () 
     validateAuthorityMigrationChainV185(root, migrationNames.slice(0, count), fail),
     /exact authority artifact migration chain/);
   assert.throws(() => validateAuthorityMigrationChainV185(root, migrationNames, fail),
-    /exact authority artifact migration chain/, "0200 must not broaden historical authority artifacts");
+    /exact authority artifact migration chain/, "0201-0203 must not broaden historical authority artifacts");
   assert.throws(() => validateAuthorityMigrationChainV185(root,
     [...migrationNames.slice(0, 185), "0186_unknown.sql"], fail), /exact authority artifact migration chain/);
 });
@@ -79,11 +79,14 @@ test("rejects altered reviewed migrations and an unknown repository suffix", () 
       "0199_native_directory_profile_binding_continuations.sql"), " "),
     base => fs.appendFileSync(path.join(base, "apps", "operations", "migrations",
       "0200_native_directory_active_binding_refresh_supersessions.sql"), " "),
+    base => fs.appendFileSync(path.join(base, "apps", "operations", "migrations", "0201_native_directory_lifecycle.sql"), " "),
+    base => fs.appendFileSync(path.join(base, "apps", "operations", "migrations", "0202_reviewed_import_enrollment.sql"), " "),
+    base => fs.appendFileSync(path.join(base, "apps", "operations", "migrations", "0203_effective_native_directory_enrollment_consumers.sql"), " "),
     base => fs.writeFileSync(path.join(base, "apps", "operations", "migrations", "0199_unknown.sql"), "SELECT 1;\n"),
-    base => fs.writeFileSync(path.join(base, "apps", "operations", "migrations", "0201_unknown.sql"), "SELECT 1;\n"),
+    base => fs.writeFileSync(path.join(base, "apps", "operations", "migrations", "0204_unknown.sql"), "SELECT 1;\n"),
   ]) {
     const base = fixture(); mutate(base);
     assert.throws(() => validateAuthorityMigrationChainV185(base, names(base), fail),
-      /exact reviewed 0200 migration chain/);
+      /exact reviewed 0203 migration chain/);
   }
 });

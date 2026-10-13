@@ -705,7 +705,7 @@ test("current bootstrap evidence contract matches the complete canonical generat
   ]) {
     let names = fs.readdirSync(path.join(repository, "apps", source, "migrations"))
       .filter(name => name.endsWith(".sql")).sort();
-    if (app === "operations") names = names.filter(name => name !== "0200_native_directory_active_binding_refresh_supersessions.sql");
+    if (app === "operations") names = names.filter(name => !/^020[0-3]_/.test(name));
     assert.equal(names.length, BOOTSTRAP_APPS[app].migrationCount, `${app} canonical count`);
     assert.equal(names.at(-1), finalMigration, `${app} canonical final migration`);
   }
