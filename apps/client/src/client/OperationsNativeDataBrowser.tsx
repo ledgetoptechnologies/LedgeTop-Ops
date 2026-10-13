@@ -68,6 +68,8 @@ export function OperationsNativeDataBrowser({ authorityCurrent = true }: { autho
   const activeController = useRef<AbortController | null>(null);
   const intent = useRef<OperationsNativeBrowserIntent>({ kind: "deliveries" });
   const previousAuthorityCurrent = useRef(authorityCurrent);
+  const authorityCurrentRef = useRef(authorityCurrent);
+  authorityCurrentRef.current = authorityCurrent;
 
   const clearPrivateData = useCallback(() => {
     setView(null);
@@ -83,7 +85,8 @@ export function OperationsNativeDataBrowser({ authorityCurrent = true }: { autho
   }, []);
 
   const isCurrent = useCallback((sequence: number, controller: AbortController) =>
-    requestSequence.current === sequence && activeController.current === controller && !controller.signal.aborted, []);
+    authorityCurrentRef.current && requestSequence.current === sequence
+      && activeController.current === controller && !controller.signal.aborted, []);
 
   const fail = useCallback((error: unknown, append: boolean, sequence: number, controller: AbortController) => {
     if (!isCurrent(sequence, controller)) return;

@@ -60,14 +60,14 @@ async function expectAuthorizedNavigation(page: Page, unavailableLinks: string[]
 }
 
 async function interceptClientApi(page: Page, status: number, body: unknown, clientSession?: unknown,
-  operationsHomeForRead?: (read: number) => { status: number; body: unknown }) {
+  operationsHomeForRead?: (read: number) => { status: number; body: unknown } | Promise<{ status: number; body: unknown }>) {
   const calls: string[] = [];
   let operationsHomeReads = 0;
-  await page.route("**/api/client/**", route => {
+  await page.route("**/api/client/**", async route => {
     const path = new URL(route.request().url()).pathname;
     calls.push(path);
     if (path === "/api/client/v2/operations/home") {
-      const result = operationsHomeForRead?.(operationsHomeReads++);
+      const result = await operationsHomeForRead?.(operationsHomeReads++);
       return route.fulfill({ status: result?.status ?? status, json: result?.body ?? body });
     }
     if (path === "/api/client/session") return clientSession
@@ -522,29 +522,53 @@ for (const revokedStatus of [401, 403, 404, 410]) {
   });
 }
 
-test("focus revalidation aborts an in-flight folder scope and ignores its late response", async ({ page }) => {
-  let discoveryReads = 0;
-  let releaseFolder: (() => void) | undefined;
-  const folderBlocked = new Promise<void>(resolve => { releaseFolder = resolve; });
-  const calls = await interceptOperationsNativeData(page, async url => {
-    if (url.pathname === "/api/client/operations/data/deliveries") return ++discoveryReads === 1
-      ? { body: { resourceMode: "operations_native_delivery", items: [{ id: deliveryAlpha, displayName: "Old delivery" }], page: { nextCursor: null } } }
-      : { body: { resourceMode: "operations_native_delivery", items: [{ id: deliveryBeta, displayName: "Revalidated delivery" }], page: { nextCursor: null } } };
+test("focus authority checking clears private rows and reloads the selected folder intent", async ({ page }) => {
+  let homeReads = 0;
+  let folderReads = 0;
+  let blockHome = false;
+  let releaseHome: (() => void) | undefined;
+  const homeBlocked = new Promise<void>(resolve => { releaseHome = resolve; });
+  await interceptClientApi(page, 200, response, {
+    account: { id: "account-a", displayName: "Authorized Client" }, capabilities: { requestV2: false, feedback: false },
+  }, async () => {
+    ++homeReads;
+    if (blockHome) await homeBlocked;
+    return { status: 200, body: response };
+  });
+  await page.route("**/api/client/operations/data/**", async route => {
+    const url = new URL(route.request().url());
+    if (url.pathname === "/api/client/operations/data/deliveries") return route.fulfill({ json: {
+      resourceMode: "operations_native_delivery", items: [{ id: deliveryAlpha, displayName: "Old delivery" }], page: { nextCursor: null },
+    } });
     if (url.pathname === `/api/client/operations/data/folders/${deliveryAlpha}`) {
-      await folderBlocked;
-      return { body: { resourceMode: "operations_native_delivery", files: [nativeFile(fileOne, "stale-private.pdf")], folders: [], breadcrumbs: [{ id: deliveryAlpha, name: "Old delivery" }], folderId: deliveryAlpha, prefix: "", cursor: null } };
+      const read = ++folderReads;
+      return route.fulfill({ json: {
+        resourceMode: "operations_native_delivery",
+        files: [nativeFile(read === 1 ? fileOne : fileTwo, read === 1 ? "old-private.pdf" : "current-private.pdf")],
+        folders: [], breadcrumbs: [{ id: deliveryAlpha, name: "Old delivery" }],
+        folderId: deliveryAlpha, prefix: "", cursor: null,
+      } }).catch(() => undefined);
     }
-    return { status: 404, body: { error: "not found" } };
+    return route.fulfill({ status: 404, json: { error: "not found" } });
   });
   await page.goto("/portal");
   const browser = page.getByRole("region", { name: "Shared deliveries" });
   await browser.getByRole("button", { name: "Browse shared deliveries" }).click();
   await browser.getByRole("button", { name: /Old delivery/ }).click();
+  await expect(browser.getByText("old-private.pdf", { exact: true })).toBeVisible();
+  await expect.poll(() => folderReads).toBe(1);
+  await page.waitForTimeout(1_050);
+  blockHome = true;
+  const homeReadsBeforeRefresh = homeReads;
   await page.evaluate(() => window.dispatchEvent(new Event("focus")));
-  await expect(browser.getByRole("button", { name: "Browse shared deliveries" })).toBeVisible();
-  releaseFolder?.();
-  await expect(browser.getByText("stale-private.pdf", { exact: true })).toHaveCount(0);
-  expect(calls.filter(call => call === "/api/client/v2/operations/home").length).toBeGreaterThanOrEqual(2);
+  await expect.poll(() => homeReads).toBeGreaterThan(homeReadsBeforeRefresh);
+  await expect(page.getByRole("heading", { name: "Refreshing Operations services" })).toBeVisible();
+  await expect(browser.getByText("Checking your current delivery access…", { exact: true })).toBeVisible();
+  await expect(browser.getByText("old-private.pdf", { exact: true })).toHaveCount(0);
+  releaseHome?.();
+  await expect.poll(() => folderReads).toBeGreaterThanOrEqual(2);
+  await expect(browser.getByText("current-private.pdf", { exact: true })).toBeVisible();
+  expect(homeReads).toBeGreaterThanOrEqual(2);
 });
 
 test("an Operations authority scope change remounts the browser and suppresses a prior scope response", async ({ page }) => {
@@ -631,7 +655,7 @@ test("combined portal hides native delivery data when Operations-home revalidati
 
   await page.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
   await expect(page.getByRole("heading", { name: "Operations services unavailable" })).toBeVisible();
-  await expect(page.getByRole("region", { name: "Shared deliveries" })).toHaveCount(0);
+  await expect(page.getByRole("region", { name: "Shared deliveries" })).toContainText("Checking your current delivery access");
   await expect(page.getByText("Private combined delivery", { exact: true })).toHaveCount(0);
   expect(calls.filter(path => path === "/api/client/v2/operations/home").length).toBeGreaterThanOrEqual(2);
 });
