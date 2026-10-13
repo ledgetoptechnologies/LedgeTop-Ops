@@ -21,7 +21,8 @@ export const canonicalOwner=Object.freeze({email:"owner@staging.example.test",di
 
 /** Test-only full-chain loader. It intentionally exposes no trigger bypass or
  * direct history/receipt seeding primitive. */
-export async function applyCanonicalChain(database:D1Database,app:"operations"|"client",final:string,syntheticOwner=false){
+export async function applyCanonicalChain(database:D1Database,app:"operations"|"client",final:string,syntheticOwner=false,
+  syntheticOwnerAccessSubject?:string){
   const directory=new URL(`../../../${app}/migrations/`,import.meta.url);
   const names=readdirSync(directory).filter(name=>/^\d{4}_.+\.sql$/.test(name)&&name<=final).sort();
   if(names.at(-1)!==final)throw new Error(`canonical-${app}-final-migration-missing`);
@@ -30,9 +31,16 @@ export async function applyCanonicalChain(database:D1Database,app:"operations"|"
     applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)`).run();
   for(const name of names){
     const raw=readFileSync(new URL(name,directory),"utf8");
-    const source=syntheticOwner&&app==="operations"&&name==="0002_seed_acl.sql"?transformSeed("operations",raw,{
+    let source=syntheticOwner&&app==="operations"&&name==="0002_seed_acl.sql"?transformSeed("operations",raw,{
       email:canonicalOwner.email,displayName:canonicalOwner.displayName,clientStaffId:canonicalOwner.clientStaffId,
       operationsStaffId:canonicalOwner.operationsStaffId}):raw;
+    if(syntheticOwner&&app==="operations"&&name==="0002_seed_acl.sql"&&syntheticOwnerAccessSubject){
+      if(syntheticOwnerAccessSubject!==canonicalOwner.accessSubject)throw Error("canonical synthetic owner subject is fixed");
+      const before=`INSERT INTO staff_users (id,email,display_name) VALUES ('${canonicalOwner.operationsStaffId}','${canonicalOwner.email}','${canonicalOwner.displayName}');`;
+      const after=`INSERT INTO staff_users (id,email,display_name,access_subject) VALUES ('${canonicalOwner.operationsStaffId}','${canonicalOwner.email}','${canonicalOwner.displayName}','${syntheticOwnerAccessSubject}');`;
+      if(source.split(before).length!==2)throw Error("canonical synthetic owner subject seed shape changed");
+      source=source.replace(before,after);
+    }
     const statements=splitD1MigrationStatements(source);
     await database.batch([...statements.map(statement=>database.prepare(statement)),
       database.prepare("INSERT INTO d1_migrations(name) VALUES(?)").bind(name)]);
