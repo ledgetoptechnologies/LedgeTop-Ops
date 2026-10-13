@@ -11,6 +11,17 @@ type BrowserView =
   | { kind: "folder"; data: OperationsNativeDataListing };
 
 type BrowserPhase = "idle" | "loading" | "ready" | "denied" | "error";
+export type OperationsNativeBrowserIntent =
+  | { kind: "deliveries" }
+  | { kind: "folder"; folderId: string };
+
+export function operationsNativeRefreshTarget(
+  activated: boolean,
+  authorityCurrent: boolean,
+  intent: OperationsNativeBrowserIntent,
+): OperationsNativeBrowserIntent | null {
+  return activated && authorityCurrent ? intent : null;
+}
 
 function errorStatus(error: unknown): number | undefined {
   if (typeof error !== "object" || error === null) return undefined;
@@ -47,7 +58,7 @@ function appendListing(current: OperationsNativeDataListing, page: OperationsNat
   };
 }
 
-export function OperationsNativeDataBrowser() {
+export function OperationsNativeDataBrowser({ authorityCurrent = true }: { authorityCurrent?: boolean }) {
   const [activated, setActivated] = useState(false);
   const [phase, setPhase] = useState<BrowserPhase>("idle");
   const [view, setView] = useState<BrowserView | null>(null);
@@ -55,6 +66,8 @@ export function OperationsNativeDataBrowser() {
   const [pageError, setPageError] = useState(false);
   const requestSequence = useRef(0);
   const activeController = useRef<AbortController | null>(null);
+  const intent = useRef<OperationsNativeBrowserIntent>({ kind: "deliveries" });
+  const previousAuthorityCurrent = useRef(authorityCurrent);
 
   const clearPrivateData = useCallback(() => {
     setView(null);
@@ -116,6 +129,7 @@ export function OperationsNativeDataBrowser() {
     const append = current !== undefined;
     const cursor = current?.cursor;
     if (append && cursor === null) return;
+    if (!append) intent.current = { kind: "folder", folderId };
     const { controller, sequence } = startRequest();
     setPageError(false);
     if (append) setLoadingMore(true);
@@ -137,20 +151,39 @@ export function OperationsNativeDataBrowser() {
   }, [fail, isCurrent, startRequest]);
 
   const begin = useCallback(() => {
+    intent.current = { kind: "deliveries" };
     setActivated(true);
     void openDeliveries();
   }, [openDeliveries]);
 
+  const revalidateIntent = useCallback(() => {
+    const target = operationsNativeRefreshTarget(activated, authorityCurrent, intent.current);
+    if (!target) return;
+    clearPrivateData();
+    setPhase("loading");
+    if (target.kind === "folder") void openFolder(target.folderId);
+    else void openDeliveries();
+  }, [activated, authorityCurrent, clearPrivateData, openDeliveries, openFolder]);
+
+  useEffect(() => {
+    const wasCurrent = previousAuthorityCurrent.current;
+    previousAuthorityCurrent.current = authorityCurrent;
+    if (!authorityCurrent) {
+      ++requestSequence.current;
+      activeController.current?.abort();
+      activeController.current = null;
+      clearPrivateData();
+      if (activated) setPhase("loading");
+      return;
+    }
+    if (!wasCurrent) revalidateIntent();
+  }, [activated, authorityCurrent, clearPrivateData, revalidateIntent]);
+
   useEffect(() => {
     if (!activated) return;
-    const revalidate = () => {
-      clearPrivateData();
-      setPhase("loading");
-      void openDeliveries();
-    };
-    window.addEventListener("focus", revalidate);
-    return () => window.removeEventListener("focus", revalidate);
-  }, [activated, clearPrivateData, openDeliveries]);
+    window.addEventListener("focus", revalidateIntent);
+    return () => window.removeEventListener("focus", revalidateIntent);
+  }, [activated, revalidateIntent]);
 
   useEffect(() => () => {
     ++requestSequence.current;
@@ -160,6 +193,11 @@ export function OperationsNativeDataBrowser() {
 
   const delivery = view?.kind === "deliveries" ? view.data : null;
   const listing = view?.kind === "folder" ? view.data : null;
+
+  if (!authorityCurrent) return <section className="portal-card" aria-labelledby="operations-shared-deliveries-heading">
+    <h2 id="operations-shared-deliveries-heading">Shared deliveries</h2>
+    <p role="status" aria-live="polite">Checking your current delivery access…</p>
+  </section>;
 
   return <section className="portal-card" aria-labelledby="operations-shared-deliveries-heading">
     <h2 id="operations-shared-deliveries-heading">Shared deliveries</h2>
