@@ -90,7 +90,7 @@ import { handleOperationsNativeRecipientOwnerHttp } from "./operations-portal-na
 import { handleOperationsNativeDirectoryLifecycleOwnerHttp,
   OPERATIONS_NATIVE_DIRECTORY_LIFECYCLE_OWNER_BASE } from "./operations-portal-native-directory-lifecycle-owner-http";
 import { handleReviewedImportEnrollmentHttp, REVIEWED_IMPORT_ENROLLMENT_BASE } from "./reviewed-import-enrollment-http";
-import { resolveReviewedImportEnrollmentDestinations } from "./reviewed-import-enrollment-destinations";
+import { readReviewedImportEnrollmentReview, resolveReviewedImportEnrollmentDestinations } from "./reviewed-import-enrollment-destinations";
 import { dispatchViewerWorkspaceRenewal } from "./viewer-workspace-renewal";
 import { consumeNativeStaffOnboardingRateLimit } from "./native-staff-onboarding-rate-limit";
 import {
@@ -571,6 +571,7 @@ async function dispatchReviewedImportEnrollment(c: Context<{ Bindings: Env; Vari
       origin: c.env.PUBLIC_BASE_URL, csrfSecret: c.env.OPERATIONS_SESSION_SECRET },
     database: c.env.OPS_DB,
     resolveDestinations: (_db, _actor, selection) => resolveReviewedImportEnrollmentDestinations(c.env, selection),
+    readReview: (_db, _actor, input) => readReviewedImportEnrollmentReview(c.env, input),
   });
 }
 app.use(REVIEWED_IMPORT_ENROLLMENT_BASE, dispatchReviewedImportEnrollment);
@@ -994,6 +995,7 @@ app.get("/api/session", async (c) => {
           && integrationsManageScope.global && !integrationsManageScope.deniedGlobal,
       },
       nativeDirectoryProfileWrites: { enabled: nativeDirectoryProfileWritesEnabled(c.env) },
+      reviewedImportEnrollment: { enabled: c.env.ENVIRONMENT === "staging" && c.env.REVIEWED_IMPORT_ENROLLMENT_ENABLED === "true" },
       nativeDirectoryBindingRefresh: { enabled: directoryBindingRefreshEnabled(c.env) && principal.id===DIRECTORY_BINDING_REFRESH_PROTECTED_OWNER
         && administrator && integrationsManageScope.global && !integrationsManageScope.deniedGlobal,
         recoveryEnabled: directoryBindingRefreshRecoveryEnabled(c.env) && principal.id===DIRECTORY_BINDING_REFRESH_PROTECTED_OWNER

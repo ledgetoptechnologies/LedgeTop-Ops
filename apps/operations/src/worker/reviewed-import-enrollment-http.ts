@@ -4,6 +4,7 @@ import { authenticateNativeStaffWithAdmissionVersion,
   type NativeStaffAccessConfiguration } from "./native-staff-auth";
 import { writeReviewedImportEnrollment, type ReviewedImportDestination,
   type ReviewedImportEnrollmentOutcome } from "./reviewed-import-enrollment-writer";
+import type { ReviewedImportEnrollmentReview, ReviewedImportEnrollmentReviewOutcome } from "./reviewed-import-enrollment-destinations";
 
 export const REVIEWED_IMPORT_ENROLLMENT_BASE = "/api/native-directory/reviewed-import-enrollment";
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
@@ -16,7 +17,7 @@ const HEADERS = { "Cache-Control": "no-store", "Cloudflare-CDN-Cache-Control": "
 
 type Actor = AuthenticatedNativeStaffWithAdmissionVersion;
 type Authority = Readonly<{ selectedProfileGrantId: string; selectedEnrollmentGrantId: string }>;
-type Route = Readonly<{ kind: "client" | "organization"; recordId: string }>;
+type Route = Readonly<{ kind: "client" | "organization"; recordId: string; review: boolean }>;
 export type ReviewedImportEnrollmentCommittedReplay = Readonly<{status:"absent"}>
   | Readonly<{status:"exact";destinations:readonly ReviewedImportDestination[];authority:Authority}>
   | Readonly<{status:"denied"}>
@@ -37,6 +38,7 @@ export type ReviewedImportEnrollmentHttpDependencies = Readonly<{
   readCommittedReplay?: (db: D1Database, actor: Actor, authority: Authority,
     input: ReviewedImportEnrollmentResolveInput & Readonly<{mutationId:string}>) => Promise<ReviewedImportEnrollmentCommittedReplay>;
   resolveDestinations: (db: D1Database, actor: Actor, input: ReviewedImportEnrollmentResolveInput) => Promise<ReviewedImportEnrollmentResolution>;
+  readReview?: (db: D1Database, actor: Actor, input: Readonly<{ recordId: string; kind: "client" | "organization" }>) => Promise<ReviewedImportEnrollmentReviewOutcome>;
   write?: typeof writeReviewedImportEnrollment;
 }>;
 
@@ -93,13 +95,13 @@ async function csrf(secret: string, origin: string, actor: Actor, request?: Requ
 }
 function route(url: URL, method: string): Route | "session" | null {
   if (method === "GET" && url.pathname === `${REVIEWED_IMPORT_ENROLLMENT_BASE}/session`) return "session";
-  if (method !== "POST") return null;
-  const match = new RegExp(`^${REVIEWED_IMPORT_ENROLLMENT_BASE}/(clients|organizations)/([^/]+)$`, "u").exec(url.pathname);
+  if (method !== "POST" && method !== "GET") return null;
+  const match = new RegExp(`^${REVIEWED_IMPORT_ENROLLMENT_BASE}/(clients|organizations)/([^/]+)${method === "GET" ? "/review" : ""}$`, "u").exec(url.pathname);
   if (!match) return null;
   let recordId: string;
   try { recordId = decodeURIComponent(match[2]!); } catch { return null; }
   if (!recordId || recordId.length > 191 || encoder.encode(recordId).byteLength > 764 || /[\p{C}/]/u.test(recordId)) return null;
-  return { kind: match[1] === "clients" ? "client" : "organization", recordId };
+  return { kind: match[1] === "clients" ? "client" : "organization", recordId, review: method === "GET" };
 }
 type Grant = Readonly<{ id: string; effect: string; scope_kind: string; business_area_id: string | null;
   division_id: string | null; resource_id: string | null }>;
@@ -217,6 +219,15 @@ function outcome(outcome: ReviewedImportEnrollmentOutcome): Response {
   if (outcome.status === "conflict") return response(409, { error: outcome.reason });
   return response(409, { error: outcome.reason });
 }
+function validReview(value: ReviewedImportEnrollmentReview, selected: Route): boolean {
+  return !!value && value.recordId === selected.recordId && value.kind === selected.kind
+    && Number.isSafeInteger(value.recordVersion) && value.recordVersion > 0
+    && Number.isSafeInteger(value.enrollmentVersion) && value.enrollmentVersion >= 0
+    && Array.isArray(value.sources) && value.sources.length <= 64
+    && value.sources.every(item => exact(item, ["sourceId", "enrolled"]) && typeof item.sourceId === "string"
+      && SOURCE.test(item.sourceId) && typeof item.enrolled === "boolean")
+    && new Set(value.sources.map(item => item.sourceId)).size === value.sources.length;
+}
 
 export async function handleReviewedImportEnrollmentHttp(request: Request,
   d: ReviewedImportEnrollmentHttpDependencies): Promise<Response> {
@@ -225,7 +236,7 @@ export async function handleReviewedImportEnrollmentHttp(request: Request,
     if (!selected) throw new Failure(404, "not_found");
     if (url.origin !== configured.origin || url.search || url.hash || request.headers.get("Sec-Fetch-Site") !== "same-origin")
       throw new Failure(403, "denied");
-    if (selected === "session") {
+    if (selected === "session" || selected.review) {
       if (request.headers.get("X-Native-Staff-Request") !== "1"
         || request.headers.has("Origin") && request.headers.get("Origin") !== configured.origin) throw new Failure(403, "denied");
     } else if (request.headers.get("Origin") !== configured.origin) throw new Failure(403, "denied");
@@ -236,6 +247,22 @@ export async function handleReviewedImportEnrollmentHttp(request: Request,
     alive(actor);
     if (selected === "session") return response(200, { csrfToken: await csrf(configured.secret, configured.origin, actor),
       verifiedUntil: actor.verifiedUntil });
+    if (selected.review) {
+      const authority = await (d.selectAuthority ?? selectAuthority)(d.database, actor, selected.recordId);
+      if (!authority) throw new Failure(403, "denied");
+      if (!d.readReview) throw new Failure(503, "unavailable");
+      const result = await d.readReview(d.database, actor, { recordId: selected.recordId, kind: selected.kind });
+      // Reading candidates can span several database round trips. Do not
+      // return choices after the actor's grants/admission were revoked meanwhile.
+      if (!await (d.selectAuthority ?? selectAuthority)(d.database, actor, selected.recordId))
+        throw new Failure(403, "denied");
+      alive(actor);
+      if (result.status !== "reviewed") return response(409, { error: "source_authority_unavailable" });
+      if (!validReview(result.review, selected)) throw new Failure(503, "unavailable");
+      return response(200, { review: { recordId: result.review.recordId, kind: result.review.kind,
+        recordVersion: result.review.recordVersion, enrollmentVersion: result.review.enrollmentVersion,
+        sources: result.review.sources.map(item => ({ sourceId: item.sourceId, enrolled: item.enrolled })) } });
+    }
     await csrf(configured.secret, configured.origin, actor, request); alive(actor);
     const value = await body(request), sourceIds = value.sourceIds;
     if (typeof value.mutationId !== "string" || !UUID.test(value.mutationId)

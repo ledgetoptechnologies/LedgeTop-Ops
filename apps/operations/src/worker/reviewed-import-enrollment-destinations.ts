@@ -9,6 +9,10 @@ export type ReviewedImportEnrollmentResolution =
   | Readonly<{ status: "resolved"; destinations: readonly ReviewedImportDestination[] }>
   | Readonly<{ status: "conflict"; reason: "stale_record" | "stale_enrollment" | "source_authority_unavailable" }>
   | Readonly<{ status: "denied" }>;
+export type ReviewedImportEnrollmentReview = Readonly<{ recordId: string; kind: "client" | "organization";
+  recordVersion: number; enrollmentVersion: number; sources: readonly Readonly<{ sourceId: string; enrolled: boolean }>[] }>;
+export type ReviewedImportEnrollmentReviewOutcome = Readonly<{ status: "reviewed"; review: ReviewedImportEnrollmentReview }>
+  | Readonly<{ status: "conflict"; reason: "source_authority_unavailable" }>;
 type Environment = ProjectAlphaApiV2ConnectionEnvironment & Readonly<{ OPS_DB: D1Database }>;
 type Mapping = { sourceId: string; sourceInstanceUUID: string; applicationUUID: string; historyEpoch: string;
   externalCanonicalId: string; origin: string; activationVersion: number; publicId: string };
@@ -131,4 +135,51 @@ export async function resolveReviewedImportEnrollmentDestinations(env: Environme
     }
     return { status: "resolved", destinations };
   } catch { return unavailable(); }
+}
+
+/** Read-only choices for an explicitly selected Operations record. Only source
+ * aliases and current CAS versions leave this helper; no PA provenance does.
+ * Every candidate is passed through the same exact server resolver as POST. */
+export async function readReviewedImportEnrollmentReview(env: Environment,
+  input: Readonly<{ recordId: string; kind: "client" | "organization" }>): Promise<ReviewedImportEnrollmentReviewOutcome> {
+  const failed = (): ReviewedImportEnrollmentReviewOutcome => ({ status: "conflict", reason: "source_authority_unavailable" });
+  if (!input || !["client", "organization"].includes(input.kind) || typeof input.recordId !== "string"
+    || !input.recordId || input.recordId.length > 191 || /\p{C}/u.test(input.recordId)) return failed();
+  try {
+    const db = env.OPS_DB.withSession("first-primary");
+    const record = await db.prepare(`SELECT record.current_version version FROM operations_directory_records record
+      JOIN operations_directory_revisions revision ON revision.record_id=record.record_id AND revision.version=record.current_version
+      WHERE record.record_id=? AND record.record_kind=?
+        AND NOT EXISTS(SELECT 1 FROM operations_directory_lifecycle_state state WHERE state.record_id=record.record_id AND state.status<>'active')
+        AND NOT EXISTS(SELECT 1 FROM operations_directory_lifecycle_fences fence WHERE fence.record_id=record.record_id)`)
+      .bind(input.recordId, input.kind).first<{ version: number }>();
+    if (!record || !Number.isSafeInteger(record.version) || record.version < 1) return failed();
+    const enrollment = await db.prepare(`SELECT enrollment_version version,enrollment_kind kind,destinations_json destinations
+      FROM effective_native_directory_enrollments WHERE record_id=?`).bind(input.recordId)
+      .first<{ version: number; kind: string; destinations: string }>();
+    if (enrollment && (enrollment.kind !== "reviewed_import" || !Number.isSafeInteger(enrollment.version) || enrollment.version < 1)) return failed();
+    let existing: string[] = [];
+    if (enrollment) {
+      const prior: unknown = JSON.parse(enrollment.destinations);
+      if (!Array.isArray(prior) || prior.length < 1 || prior.length > 16 || !prior.every(destination)
+        || new Set(prior.map(item => item.sourceId)).size !== prior.length) return failed();
+      existing = prior.map(item => item.sourceId).sort();
+    }
+    const selection = { recordId: input.recordId, kind: input.kind, expectedRecordVersion: record.version,
+      expectedEnrollmentVersion: enrollment?.version ?? 0 };
+    if (existing.length && (await resolveReviewedImportEnrollmentDestinations(env, { ...selection, sourceIds: existing })).status !== "resolved")
+      return failed();
+    const candidates = (await db.prepare(`SELECT DISTINCT source_id sourceId FROM project_alpha_active_directory_mappings
+      WHERE record_id=? AND resource_type=? AND mapping_kind='acquired' ORDER BY source_id LIMIT 65`)
+      .bind(input.recordId, input.kind).all<{ sourceId: string }>()).results;
+    if (candidates.length > 64 || candidates.some(row => !SOURCE.test(row.sourceId))) return failed();
+    const sources = existing.map(sourceId => ({ sourceId, enrolled: true }));
+    if (existing.length < 16) for (const candidate of candidates) {
+      if (existing.includes(candidate.sourceId)) continue;
+      const result = await resolveReviewedImportEnrollmentDestinations(env, { ...selection, sourceIds: [...existing, candidate.sourceId] });
+      if (result.status === "resolved") sources.push({ sourceId: candidate.sourceId, enrolled: false });
+    }
+    return { status: "reviewed", review: { recordId: input.recordId, kind: input.kind, recordVersion: record.version,
+      enrollmentVersion: enrollment?.version ?? 0, sources: sources.sort((left, right) => left.sourceId.localeCompare(right.sourceId)) } };
+  } catch { return failed(); }
 }

@@ -304,9 +304,12 @@ async function clientHubDetail(env: Env, principal: StaffPrincipal, kind: Client
   // check around this final independently authorized metadata read.
   await verifyContext(env, principal, context);
   const { pa_internal_id: _internalOnly, ...clientWorkspace } = workspace;
-  const [nativeDirectoryProfile, nativeDirectoryLinkedClients] = nativeDirectoryProfileWritesEnabled(env)
-    ? await Promise.all([nativeDirectoryProfileEditorRecord(env, workspace), nativeDirectoryLinkedClientEditorRecords(env, workspace, principal.id)])
-    : [null, []];
+  const profileWrites = nativeDirectoryProfileWritesEnabled(env);
+  const importReview = env.ENVIRONMENT === "staging" && env.REVIEWED_IMPORT_ENROLLMENT_ENABLED === "true";
+  const [nativeDirectoryProfile, nativeDirectoryLinkedClients] = await Promise.all([
+    profileWrites || importReview ? nativeDirectoryProfileEditorRecord(env, workspace) : Promise.resolve(null),
+    profileWrites || importReview ? nativeDirectoryLinkedClientEditorRecords(env, workspace, principal.id) : Promise.resolve([]),
+  ]);
   await verifyContext(env, principal, context);
   return {
     ...party,

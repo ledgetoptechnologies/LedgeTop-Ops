@@ -10,13 +10,13 @@ const actor = { identity: { kind: "native" as const, staffId: "owner", verifiedA
 const destination = { sourceId: "project-alpha:primary", sourceInstanceUUID: "22222222-2222-4222-8222-222222222222",
   applicationUUID: "33333333-3333-4333-8333-333333333333", historyEpoch: "44444444-4444-4444-8444-444444444444",
   origin: "https://pa.example.test", externalCanonicalId: "pa-client" };
-const authenticate = vi.fn(), selectAuthority = vi.fn(), readCommittedReplay = vi.fn(), resolveDestinations = vi.fn(), write = vi.fn();
+const authenticate = vi.fn(), selectAuthority = vi.fn(), readCommittedReplay = vi.fn(), resolveDestinations = vi.fn(), write = vi.fn(), readReview = vi.fn();
 
 function deps(overrides: Partial<ReviewedImportEnrollmentHttpDependencies> = {}): ReviewedImportEnrollmentHttpDependencies {
   return { environment: "staging", enabledFlag: "true", expectedHost: "ops-staging.example.test",
     configuration: { enabled: true, origin, issuer: "https://team.cloudflareaccess.com",
       staffAudience: "a".repeat(16), csrfSecret: "synthetic-test-secret-at-least-thirty-two-bytes" },
-    database: {} as D1Database, authenticate, selectAuthority, readCommittedReplay, resolveDestinations, write, ...overrides };
+    database: {} as D1Database, authenticate, selectAuthority, readCommittedReplay, resolveDestinations, write, readReview, ...overrides };
 }
 function request(path: string, body?: unknown, headers: Record<string,string> = {}): Request {
   const method = body === undefined ? "GET" : "POST";
@@ -37,6 +37,8 @@ describe("reviewed import enrollment HTTP adapter", () => {
     vi.clearAllMocks(); authenticate.mockResolvedValue(actor);
     selectAuthority.mockResolvedValue({ selectedProfileGrantId: "profile-grant", selectedEnrollmentGrantId: "enrollment-grant" });
     readCommittedReplay.mockResolvedValue({ status: "absent" });
+    readReview.mockResolvedValue({status:"reviewed",review:{recordId:"client-one",kind:"client",recordVersion:4,
+      enrollmentVersion:0,sources:[{sourceId:"project-alpha:primary",enrolled:false}]}});
     resolveDestinations.mockResolvedValue({ status: "resolved", destinations: [destination] });
     write.mockResolvedValue({ status: "written", replayed: false, recordId: "client-one", enrollmentVersion: 1,
       destinations: [destination] });
@@ -46,6 +48,39 @@ describe("reviewed import enrollment HTTP adapter", () => {
     expect((await handleReviewedImportEnrollmentHttp(request("session"), deps({ enabledFlag: "false" }))).status).toBe(404);
     expect((await handleReviewedImportEnrollmentHttp(request("session"), deps({ environment: "production" }))).status).toBe(404);
     expect(authenticate).not.toHaveBeenCalled();
+  });
+
+  it("reviews explicit source choices without a mutation or provenance response", async () => {
+    const result=await handleReviewedImportEnrollmentHttp(request("clients/client-one/review"),deps());
+    expect(result.status).toBe(200);
+    expect(await result.json()).toEqual({review:{recordId:"client-one",kind:"client",recordVersion:4,
+      enrollmentVersion:0,sources:[{sourceId:"project-alpha:primary",enrolled:false}]}});
+    expect(readReview).toHaveBeenCalledWith(expect.anything(),actor,{recordId:"client-one",kind:"client"});
+    expect(write).not.toHaveBeenCalled();expect(readCommittedReplay).not.toHaveBeenCalled();
+    expect(resolveDestinations).not.toHaveBeenCalled();
+  });
+
+  it("rejects review without current grants, same-origin headers or exact redacted choices", async () => {
+    selectAuthority.mockResolvedValueOnce(null);
+    expect((await handleReviewedImportEnrollmentHttp(request("clients/client-one/review"),deps())).status).toBe(403);
+    expect(readReview).not.toHaveBeenCalled();
+    expect((await handleReviewedImportEnrollmentHttp(request("clients/client-one/review",undefined,
+      {"Sec-Fetch-Site":"cross-site"}),deps())).status).toBe(403);
+    readReview.mockResolvedValueOnce({status:"reviewed",review:{recordId:"client-one",kind:"client",recordVersion:4,
+      enrollmentVersion:0,sources:[{sourceId:"project-alpha:primary",enrolled:false,externalCanonicalId:"hidden"}]}});
+    expect((await handleReviewedImportEnrollmentHttp(request("clients/client-one/review"),deps())).status).toBe(503);
+    expect(write).not.toHaveBeenCalled();
+  });
+
+  it("does not return choices when authority is revoked while the read is awaited", async () => {
+    readReview.mockImplementationOnce(async()=>{
+      selectAuthority.mockResolvedValueOnce(null);
+      return {status:"reviewed",review:{recordId:"client-one",kind:"client",recordVersion:4,
+        enrollmentVersion:0,sources:[{sourceId:"project-alpha:primary",enrolled:false}]}};
+    });
+    const result=await handleReviewedImportEnrollmentHttp(request("clients/client-one/review"),deps());
+    expect(result.status).toBe(403);expect(await result.json()).toEqual({error:"denied"});
+    expect(write).not.toHaveBeenCalled();
   });
 
   it("requires same-origin native authentication and actor-bound CSRF", async () => {

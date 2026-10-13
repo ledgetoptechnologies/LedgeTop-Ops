@@ -4,7 +4,7 @@ import {Miniflare} from 'miniflare';
 import {splitD1MigrationStatements} from '../../client/test/helpers/d1-migrations';
 import {writeReviewedImportEnrollment} from '../src/worker/reviewed-import-enrollment-writer';
 import {writeNativeDirectoryProfile} from '../src/worker/native-directory-profile-writer';
-import {resolveReviewedImportEnrollmentDestinations} from '../src/worker/reviewed-import-enrollment-destinations';
+import {readReviewedImportEnrollmentReview,resolveReviewedImportEnrollmentDestinations} from '../src/worker/reviewed-import-enrollment-destinations';
 import {handleReviewedImportEnrollmentHttp,REVIEWED_IMPORT_ENROLLMENT_BASE} from '../src/worker/reviewed-import-enrollment-http';
 
 let runtime:Miniflare,db:D1Database;
@@ -143,6 +143,17 @@ describe('reviewed imported-record enrollment foundation',()=>{
       .resolves.toEqual({status:'conflict',reason:'stale_record'});
     await expect(resolveReviewedImportEnrollmentDestinations(resolverEnvironment(),{...selection,expectedEnrollmentVersion:1}))
       .resolves.toEqual({status:'conflict',reason:'stale_enrollment'});
+    expect(await db.prepare('SELECT count(*) count FROM reviewed_import_enrollment_receipts').first<number>('count')).toBe(0);
+  });
+
+  it('reviews only eligible server-derived source choices without enrolling them',async()=>{
+    await expect(readReviewedImportEnrollmentReview(resolverEnvironment(),{recordId,kind:'organization'}))
+      .resolves.toEqual({status:'reviewed',review:{recordId,kind:'organization',recordVersion:1,enrollmentVersion:0,
+        sources:[{sourceId,enrolled:false}]}});
+    await expect(readReviewedImportEnrollmentReview(resolverEnvironment({enabled:false}),{recordId,kind:'organization'}))
+      .resolves.toMatchObject({status:'reviewed',review:{sources:[]}});
+    await expect(readReviewedImportEnrollmentReview(resolverEnvironment(),{recordId,kind:'client'}))
+      .resolves.toEqual({status:'conflict',reason:'source_authority_unavailable'});
     expect(await db.prepare('SELECT count(*) count FROM reviewed_import_enrollment_receipts').first<number>('count')).toBe(0);
   });
 
@@ -307,6 +318,9 @@ describe('reviewed imported-record enrollment foundation',()=>{
     expect(updated).toMatchObject({status:'written',recordId,version:2});
     if(updated.status!=='written')throw new Error(`Imported profile update rejected: ${updated.reason}`);
     expect(updated.commandIds).toHaveLength(1);
+    await expect(readReviewedImportEnrollmentReview(resolverEnvironment(),{recordId,kind:'organization'}))
+      .resolves.toEqual({status:'reviewed',review:{recordId,kind:'organization',recordVersion:2,enrollmentVersion:5,
+        sources:[{sourceId,enrolled:true}]}});
     // The immutable activation is still for record v1. A previously reviewed
     // destination remains resolvable for v2; only the atomic writer decides
     // when pending PA/binding work has settled enough to change enrollment.
