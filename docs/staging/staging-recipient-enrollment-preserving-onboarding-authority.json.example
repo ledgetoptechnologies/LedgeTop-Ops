@@ -1,0 +1,55 @@
+{
+  "schemaVersion": 8,
+  "packet": {
+    "packetId": "staging-authority-preservative-recipient-001",
+    "purpose": "recipient-enrollment-portal-access-preserving-onboarding-profile",
+    "recordId": "REPLACE_WITH_REVIEWED_ACTIVATED_SYNTHETIC_RECORD_ID",
+    "recordKind": "organization",
+    "recordVersion": "REPLACE_WITH_REVIEWED_RECORD_VERSION_INTEGER",
+    "activationId": "REPLACE_WITH_REVIEWED_ACTIVATION_UUID",
+    "businessAreaId": "REPLACE_WITH_REVIEWED_BUSINESS_AREA_ID",
+    "mode": "reactivate",
+    "operatorKind": "synthetic",
+    "staffId": "staging-operations-owner",
+    "email": "owner@staging.example.test",
+    "displayName": "Synthetic Staging Owner",
+    "accessSubject": "REPLACE_WITH_REVIEWED_ACCESS_SUBJECT",
+    "issuedAt": "2026-09-28T15:00:00.000Z",
+    "expiresAt": "2026-09-28T17:00:00.000Z",
+    "reason": "Bounded portal access preserving reviewed onboarding history",
+    "expected": {
+      "admissionVersion": "REPLACE_WITH_REVIEWED_ADMISSION_VERSION_INTEGER",
+      "profileVersion": "REPLACE_WITH_REVIEWED_PROFILE_VERSION_INTEGER",
+      "grantVersion": "REPLACE_WITH_REVIEWED_PROJECT_GRANT_VERSION_INTEGER",
+      "grantGeneration": "REPLACE_WITH_REVIEWED_PROJECT_GRANT_GENERATION_INTEGER",
+      "directoryGrantGeneration": "REPLACE_WITH_REVIEWED_DIRECTORY_GENERATION_INTEGER",
+      "activationReceiptDirectoryGrantGeneration": "REPLACE_WITH_REVIEWED_ACTIVATION_RECEIPT_DIRECTORY_GENERATION_INTEGER",
+      "profileGrantVersion": 3,
+      "profileHistoryGenerations": [
+        "REPLACE_WITH_REVIEWED_GLOBAL_PROFILE_HISTORY_GENERATION_1",
+        "REPLACE_WITH_REVIEWED_GLOBAL_PROFILE_HISTORY_GENERATION_2",
+        "REPLACE_WITH_REVIEWED_GLOBAL_PROFILE_HISTORY_GENERATION_3"
+      ],
+      "onboardingGrantVersion": 3,
+      "onboardingHistoryGenerations": [
+        "REPLACE_WITH_REVIEWED_ONBOARDING_HISTORY_GENERATION_1",
+        "REPLACE_WITH_REVIEWED_ONBOARDING_HISTORY_GENERATION_2",
+        "REPLACE_WITH_REVIEWED_ONBOARDING_HISTORY_GENERATION_3"
+      ],
+      "identityGrantVersion": 2,
+      "identityHistoryGenerations": [
+        "REPLACE_WITH_REVIEWED_IDENTITY_HISTORY_GENERATION_1",
+        "REPLACE_WITH_REVIEWED_IDENTITY_HISTORY_GENERATION_2"
+      ],
+      "portalGrantVersion": 0,
+      "portalHistoryGenerations": [],
+      "portalGrantState": "absent",
+      "directoryAuthorityState": "v7-acquisition-plus-onboarding-inactive"
+    },
+    "evidence": {
+      "changeTicket": "REPLACE_WITH_APPROVED_CHANGE_TICKET",
+      "reviewer": "REPLACE_WITH_INDEPENDENT_REVIEWER_REFERENCE",
+      "bindingEvidenceSha256": "REPLACE_WITH_64_LOWERCASE_HEX_CHARACTERS"
+    }
+  }
+}

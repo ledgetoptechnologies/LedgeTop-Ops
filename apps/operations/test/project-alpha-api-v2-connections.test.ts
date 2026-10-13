@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   ProjectAlphaApiV2ConnectionConfigurationError,
+  listEnabledProjectAlphaApiV2SourceIds,
   probeConfiguredProjectAlphaApiV2Connection,
   resolveProjectAlphaApiV2Connection,
 } from "../src/worker/project-alpha-api-v2-connections";
@@ -26,6 +27,28 @@ function metadata(value: typeof ids.first) {
 }
 
 describe("deployment-owned Project Alpha API-v2 connections", () => {
+  it("lists only enabled source IDs in stable order without returning credentials or identities", () => {
+    const env = environment({ [second]: entry(second, ids.second, "https://source-b.example.test", true),
+      [first]: entry(first, ids.first, "https://source-a.example.test", true) });
+    const listed = listEnabledProjectAlphaApiV2SourceIds(env);
+    expect(listed).toEqual([first, second]);
+    expect(Object.isFrozen(listed)).toBe(true);
+    expect(JSON.stringify(listed)).not.toContain("secret-for-");
+    expect(JSON.stringify(listed)).not.toContain(ids.first.source);
+    expect(listEnabledProjectAlphaApiV2SourceIds(environment({
+      [first]: entry(first, ids.first, "https://source-a.example.test"),
+      [second]: entry(second, ids.second, "https://source-b.example.test", true),
+    }))).toEqual([second]);
+  });
+
+  it("fails closed for a malformed sibling or absent deployment configuration", () => {
+    expect(() => listEnabledProjectAlphaApiV2SourceIds({})).toThrow(ProjectAlphaApiV2ConnectionConfigurationError);
+    expect(() => listEnabledProjectAlphaApiV2SourceIds(environment({
+      [first]: entry(first, ids.first, "https://source-a.example.test", true),
+      [second]: { ...entry(second, ids.second, "https://source-b.example.test", true), apiKey: "bad key" },
+    }))).toThrow(ProjectAlphaApiV2ConnectionConfigurationError);
+  });
+
   it("resolves isolated source-keyed instances and defaults omitted enablement to false", () => {
     const env = environment({ [first]: entry(first, ids.first, "https://source-a.example.test"), [second]: entry(second, ids.second, "https://source-b.example.test", true) });
     const one = resolveProjectAlphaApiV2Connection(env, first);

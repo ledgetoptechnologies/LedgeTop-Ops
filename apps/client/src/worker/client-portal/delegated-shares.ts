@@ -13,6 +13,7 @@ import {
   authorizeAuthenticatedDeliveryGrant,
 } from "./authenticated-delivery-grants";
 import { portalRootAccessAllowedSql } from "./workspace-access-policy";
+import { activeClientAuthorityWorkspaceClaim } from "./client-authority-claim-read";
 
 export const CLIENT_DELEGATED_SHARE_COOKIE = "__Secure-ltds_client_share";
 export const CLIENT_DELEGATED_SHARE_PATH_PREFIX = "/client-share/";
@@ -500,6 +501,36 @@ export async function verifyAndRecordClientDelegatedShareSignerResult(
       request.idempotencyKey, request.expiresAt, request.label,
     ).first<{ token_hash: string }>();
   if (!row || !constantTimeEqual(row.token_hash, await sha256(secret))) return null;
+
+  // The signer and this Worker are separate services, so a claim can commit
+  // after the pre-signer authorization and before its response is finalized.
+  // Never disclose that newly minted bearer in that case. The public router
+  // independently reauthorizes each use, but revoking the exact row here also
+  // compensates the signer result before this function returns it to a caller.
+  //
+  // This cannot fence a claim which commits *after* this D1 decision: that
+  // requires the future claim protocol to make the claim writer and delegated
+  // share state one atomic authority transaction (or use a shared epoch).
+  if (await activeClientAuthorityWorkspaceClaim(env.DELIVERY_DB, request.workspaceId)) {
+    const revoked = await delegatedShareDb(env).prepare(`UPDATE client_delegated_shares
+      SET status='revoked',revoked_at=datetime('now'),revoked_reason='client_authority_claim_fenced',
+        share_version=share_version+1,updated_at=datetime('now')
+      WHERE id=? AND workspace_id=? AND delegation_id=? AND status='active' AND revoked_at IS NULL`).bind(
+      value.share.id, request.workspaceId, request.delegationId,
+    ).run();
+    if (revoked.meta.changes === 1) {
+      const eventId = `client-share-claim-fenced-${(await sha256(JSON.stringify([
+        request.workspaceId, value.share.id,
+      ]))).slice(0, 43)}`;
+      await delegatedShareDb(env).prepare(`INSERT OR IGNORE INTO client_delegated_share_events
+        (id,workspace_id,delegation_id,share_id,actor_type,actor_id,event_type,request_idempotency_key,details_json)
+        VALUES (?,?,?,?,? ,?,'client_share.claim_fenced',?,'{}')`).bind(
+        eventId, request.workspaceId, request.delegationId, value.share.id,
+        "system", delegation.identityId, request.idempotencyKey,
+      ).run();
+    }
+    return null;
+  }
 
   const eventId = `client-share-event-${(await sha256(JSON.stringify([
     request.workspaceId, delegation.identityId, request.idempotencyKey,

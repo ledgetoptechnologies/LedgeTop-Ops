@@ -104,7 +104,7 @@ async function directoryReady(db: D1Database, connection: Connection, organizati
   async function record(kind: "organization" | "client", recordId: string | null, publicId?: string | null): Promise<boolean> {
     if (recordId === null) return publicId === undefined || publicId === null;
     const row = await db.prepare(`SELECT mapping.project_alpha_public_id FROM operations_directory_records record
-      JOIN project_alpha_directory_mappings mapping ON mapping.external_id=record.record_id
+      JOIN project_alpha_active_directory_mappings mapping ON mapping.external_id=record.record_id
       WHERE record.record_id=? AND record.record_kind=? AND mapping.source_id=? AND mapping.source_instance_id=?
         AND mapping.application_id=? AND mapping.history_epoch_id=? AND mapping.resource_type=?`)
       .bind(recordId, kind, connection.sourceId, connection.sourceInstanceId, connection.applicationId, connection.historyEpochId, kind)

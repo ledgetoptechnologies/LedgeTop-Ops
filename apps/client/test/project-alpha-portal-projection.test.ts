@@ -10,6 +10,7 @@ import sourceMigration from "../migrations/0158_portal_source_ownership.sql?raw"
 import contactAssignmentMigration from "../migrations/0190_portal_contact_assignments_v4.sql?raw";
 import wireContractClaimMigration from "../migrations/0191_portal_projection_wire_contract_claim.sql?raw";
 import billingIndependenceMigration from "../migrations/0192_contact_assignment_billing_independence.sql?raw";
+import clientAuthorityWorkspaceClaimMigration from "../migrations/0216_client_authority_workspace_ownership_claim.sql?raw";
 import { splitD1MigrationStatements } from "./helpers/d1-migrations";
 import { authorizePortalWorkspaceCapability } from "../src/worker/client-portal/workspace-v2";
 import type { VerifiedClientPrincipal } from "../src/worker/client-portal/types";
@@ -93,6 +94,7 @@ describe("Project Alpha portal hierarchy projection", () => {
     await applyMigration(db, contactAssignmentMigration);
     await applyMigration(db, wireContractClaimMigration);
     await applyMigration(db, billingIndependenceMigration);
+    await applyMigration(db, clientAuthorityWorkspaceClaimMigration);
     await db.prepare("PRAGMA foreign_keys=ON").run();
     env = {
       DELIVERY_DB: db,
@@ -263,6 +265,85 @@ describe("Project Alpha portal hierarchy projection", () => {
     return await db.prepare("SELECT workspace_id FROM pa_portal_workspace_sources WHERE projection_source_id=? AND source_workspace_id=?")
       .bind(sourceId, workspace.publicId).first<string>("workspace_id") as string;
   }
+
+  it("preserves legacy authorization refresh while the claim migration is not yet present", async () => {
+    await db.prepare("ALTER TABLE portal_client_authority_workspace_claims RENAME TO portal_client_authority_workspace_claims_pending_migration").run();
+    try {
+      const source = "project-alpha:pre-claim-migration";
+      const localId = await baseline(source);
+      await db.prepare("INSERT OR IGNORE INTO portal_v2_identities(id,issuer,subject,verified_email,status) VALUES ('verified-identity',?,?,?,'active')")
+        .bind(principal.issuer, principal.subject, principal.email).run();
+      await db.prepare("UPDATE pa_portal_principals SET identity_id='verified-identity' WHERE workspace_id=? AND public_id=?")
+        .bind(localId, projectedPrincipal.publicId).run();
+      await applyFrom(source, envelope("event", "pre-claim-migration-refresh", 11, {
+        sourceGeneration: "source-generation-ten",
+        event: { resource: "principal", action: "upsert", principal: { ...projectedPrincipal, sourceVersion: "pre-claim-principal-v2" } },
+      }));
+      expect(await db.prepare("SELECT status FROM portal_v2_workspace_memberships WHERE workspace_id=? AND identity_id='verified-identity'")
+        .bind(localId).first("status")).toBe("active");
+      expect(await db.prepare("SELECT COUNT(*) count FROM portal_v2_entitlements WHERE workspace_id=? AND status='active'")
+        .bind(localId).first("count")).toBeGreaterThan(0);
+    } finally {
+      await db.prepare("ALTER TABLE portal_client_authority_workspace_claims_pending_migration RENAME TO portal_client_authority_workspace_claims").run();
+    }
+  }, 20_000);
+
+  it("keeps staging PA changes while an active client-authority claim fences effective authorization writes", async () => {
+    const source = "project-alpha:claimed-authorization";
+    const localId = await baseline(source);
+    await db.prepare("INSERT OR IGNORE INTO portal_v2_identities(id,issuer,subject,verified_email,status) VALUES ('verified-identity',?,?,?,'active')")
+      .bind(principal.issuer, principal.subject, principal.email).run();
+    await db.prepare("UPDATE pa_portal_principals SET identity_id='verified-identity' WHERE workspace_id=? AND public_id=?")
+      .bind(localId, projectedPrincipal.publicId).run();
+    await applyFrom(source, envelope("event", "claimed-auth-refresh", 11, {
+      sourceGeneration: "source-generation-ten",
+      event: { resource: "principal", action: "upsert", principal: { ...projectedPrincipal, sourceVersion: "claimed-principal-v2" } },
+    }));
+    expect(await db.prepare("SELECT status FROM portal_v2_workspace_memberships WHERE workspace_id=? AND identity_id='verified-identity'")
+      .bind(localId).first("status")).toBe("active");
+    expect(await db.prepare("SELECT COUNT(*) count FROM portal_v2_entitlements WHERE workspace_id=? AND status='active'")
+      .bind(localId).first("count")).toBeGreaterThan(0);
+    const effectiveMembershipBefore = (await db.prepare(`SELECT id,status,source_version,revoked_at,updated_at
+      FROM portal_v2_workspace_memberships WHERE workspace_id=? AND source_type='project_alpha' ORDER BY id`).bind(localId).all()).results;
+    const effectiveEntitlementsBefore = (await db.prepare(`SELECT id,status,source_version,revoked_at,entitlement_version
+      FROM portal_v2_entitlements WHERE workspace_id=? AND source_type='project_alpha' ORDER BY id`).bind(localId).all()).results;
+
+    const checkpoint = await db.prepare(`SELECT checkpoint.source_generation,checkpoint.source_sequence,checkpoint.snapshot_generation_id,
+      source.source_workspace_id FROM pa_portal_projection_checkpoints checkpoint
+      JOIN pa_portal_workspace_sources source ON source.workspace_id=checkpoint.workspace_id
+      WHERE checkpoint.workspace_id=?`).bind(localId).first<{
+        source_generation: string; source_sequence: number; snapshot_generation_id: string; source_workspace_id: string;
+      }>();
+    await db.prepare(`INSERT INTO portal_client_authority_workspace_claims
+      (client_authority_id,workspace_id,projection_source_id,source_workspace_id,state,ownership_epoch,
+       reconciliation_source_generation,reconciliation_source_sequence,reconciliation_snapshot_generation_id,last_operation_id)
+      VALUES('00000000-0000-4000-8000-000000000216',?,?,?,'active',1,?,?,?,'claim-effective-authorization')`)
+      .bind(localId, source, checkpoint!.source_workspace_id, checkpoint!.source_generation, checkpoint!.source_sequence,
+        checkpoint!.snapshot_generation_id).run();
+
+    const workspaceEntitlement = portalFixture.valid.snapshotPage.entitlements.find(row => row.scopeType === "workspace")!;
+    await applyFrom(source, envelope("event", "claimed-entitlement-tombstone", 12, {
+      sourceGeneration: "source-generation-ten",
+      event: { resource: "entitlement", action: "tombstone", publicId: workspaceEntitlement.publicId, sourceVersion: "claimed-entitlement-v2" },
+    }));
+    await applyFrom(source, envelope("event", "claimed-principal-tombstone", 13, {
+      sourceGeneration: "source-generation-ten",
+      event: { resource: "principal", action: "tombstone", publicId: projectedPrincipal.publicId, sourceVersion: "claimed-principal-v3" },
+    }));
+
+    expect(await db.prepare("SELECT status FROM pa_portal_entitlement_intents WHERE workspace_id=? AND public_id=?")
+      .bind(localId, workspaceEntitlement.publicId).first("status")).toBe("suspended");
+    expect(await db.prepare("SELECT status FROM pa_portal_principals WHERE workspace_id=? AND public_id=?")
+      .bind(localId, projectedPrincipal.publicId).first("status")).toBe("revoked");
+    expect(await db.prepare("SELECT source_sequence FROM pa_portal_projection_checkpoints WHERE workspace_id=?")
+      .bind(localId).first("source_sequence")).toBe(13);
+    expect((await db.prepare(`SELECT id,status,source_version,revoked_at,updated_at
+      FROM portal_v2_workspace_memberships WHERE workspace_id=? AND source_type='project_alpha' ORDER BY id`).bind(localId).all()).results)
+      .toEqual(effectiveMembershipBefore);
+    expect((await db.prepare(`SELECT id,status,source_version,revoked_at,entitlement_version
+      FROM portal_v2_entitlements WHERE workspace_id=? AND source_type='project_alpha' ORDER BY id`).bind(localId).all()).results)
+      .toEqual(effectiveEntitlementsBefore);
+  }, 20_000);
 
   it("claims schema v2 with relations disabled and rejects a v3 page after the flag is enabled", async () => {
     const source = "project-alpha:v2-flag-transition";

@@ -112,6 +112,12 @@ describe("native portal source ownership populated migration", () => {
       db.prepare(`INSERT INTO portal_v2_entitlements
         (id,workspace_id,identity_id,capability,scope_type,scope_public_id,source_type)
         VALUES('grant-native','native-workspace','global-person','workspace.view','workspace','native-workspace','project_alpha')`),
+      db.prepare(`INSERT INTO portal_v2_entitlements
+        (id,workspace_id,identity_id,capability,scope_type,scope_public_id,source_type)
+        VALUES
+          ('grant-native-project','native-workspace','global-person','delivery.view','project','project-native','project_alpha'),
+          ('grant-native-client','native-workspace','global-person','delivery.view','client','client-native','project_alpha'),
+          ('grant-native-folder','native-workspace','global-person','delivery.view','folder','binding-native-folder','project_alpha')`),
       db.prepare(`INSERT INTO portal_v2_invitations(id,workspace_id,token_hash,invited_email,invited_by_identity_id,expires_at)
         VALUES('invitation','native-workspace',?,'invite@example.test','global-person','2099-01-01')`).bind("i".repeat(43)),
       db.prepare(`INSERT INTO portal_v2_invitation_entitlements(invitation_id,capability,scope_type,scope_public_id)
@@ -119,7 +125,11 @@ describe("native portal source ownership populated migration", () => {
       db.prepare(`INSERT INTO portal_v2_identity_denials(id,identity_id,scope_type,reason_code,created_by_actor_type,created_by_actor_id)
         VALUES('global-denial','global-person','global','fixture','staff','staff')`),
       db.prepare(`INSERT INTO portal_v2_folder_bindings(id,workspace_id,owner_scope_type,owner_public_id,r2_prefix,source_type,source_version)
-        VALUES('binding','native-workspace','organization',?,'Clients/Native/','project_alpha','v1')`).bind(root),
+        VALUES
+          ('binding','native-workspace','organization',?,'Clients/Native/','project_alpha','v1'),
+          ('binding-native-project','native-workspace','project','project-native','Clients/Native/Project/','project_alpha','v1'),
+          ('binding-native-client','native-workspace','client','client-native','Clients/Native/Client/','project_alpha','v1'),
+          ('binding-native-folder','native-workspace','project','project-native','Clients/Native/Folder/','project_alpha','v1')`).bind(root),
       ...([["projection-native", "native-workspace", "native-generation", 10, "active", 1],
         ["projection-pending", "staged-only-workspace", "pending-generation", 11, "staging", 0]] as const)
         .map(([id, workspaceId, sourceGeneration, sequence, status, complete]) => db.prepare(`INSERT INTO pa_portal_projection_generations
@@ -176,6 +186,27 @@ describe("native portal source ownership populated migration", () => {
     expect((await db.prepare("PRAGMA foreign_key_check").all()).results).toEqual([]);
     const checks = await db.batch<{ quick_check: string }>(tables.map(table => db.prepare(`PRAGMA quick_check('${table}')`)));
     expect(checks.map(result => result.results.map(row => row.quick_check))).toEqual(tables.map(() => ["ok"]));
+  });
+
+  it("preserves exact project/client/folder entitlements and R2 prefixes during workspace remapping", async () => {
+    expect(after.portal_v2_entitlements.filter(row => row.workspace_id === "native-workspace").map(row => ({
+      id: row.id, capability: row.capability, scope_type: row.scope_type, scope_public_id: row.scope_public_id,
+    })).sort((left, right) => String(left.id).localeCompare(String(right.id)))).toEqual([
+      { id: "grant-native", capability: "workspace.view", scope_type: "workspace", scope_public_id: "native-workspace" },
+      { id: "grant-native-client", capability: "delivery.view", scope_type: "client", scope_public_id: "client-native" },
+      { id: "grant-native-folder", capability: "delivery.view", scope_type: "folder", scope_public_id: "binding-native-folder" },
+      { id: "grant-native-project", capability: "delivery.view", scope_type: "project", scope_public_id: "project-native" },
+    ]);
+    expect(after.portal_v2_folder_bindings.filter(row => row.workspace_id === "native-workspace").map(row => ({
+      id: row.id, owner_scope_type: row.owner_scope_type, owner_public_id: row.owner_public_id, r2_prefix: row.r2_prefix,
+    })).sort((left, right) => String(left.id).localeCompare(String(right.id)))).toEqual([
+      { id: "binding", owner_scope_type: "organization", owner_public_id: root, r2_prefix: "Clients/Native/" },
+      { id: "binding-native-client", owner_scope_type: "client", owner_public_id: "client-native", r2_prefix: "Clients/Native/Client/" },
+      { id: "binding-native-folder", owner_scope_type: "project", owner_public_id: "project-native", r2_prefix: "Clients/Native/Folder/" },
+      { id: "binding-native-project", owner_scope_type: "project", owner_public_id: "project-native", r2_prefix: "Clients/Native/Project/" },
+    ]);
+    expect(after.portal_v2_entitlements.filter(row => row.workspace_id === "legacy-workspace")).toEqual([]);
+    expect(after.portal_v2_folder_bindings.filter(row => row.workspace_id === "legacy-workspace")).toEqual([]);
   });
 
   it("adopts native, legacy, pending, receipt-only and audit-only workspace handles exactly", async () => {

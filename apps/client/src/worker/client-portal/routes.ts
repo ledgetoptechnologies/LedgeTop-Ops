@@ -1489,11 +1489,9 @@ export function createClientPortalRouter(
     if (workspace && !(await authorizeEffectiveWorkspaceRequest(
       c.env, c.get("clientPrincipal"), workspace, requestId.data,
     ))) throw new HTTPException(404, { message: "Service request not found" });
-    const request = await repository.getServiceRequest(
-      c.env,
-      c.get("clientSession"),
-      requestId.data,
-    );
+    const request = repository.getServiceRequestDetail
+      ? await repository.getServiceRequestDetail(c.env, c.get("clientSession"), requestId.data)
+      : await repository.getServiceRequest(c.env, c.get("clientSession"), requestId.data);
     if (!request)
       throw new HTTPException(404, { message: "Service request not found" });
     return c.json({ request });

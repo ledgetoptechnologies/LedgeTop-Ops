@@ -10,15 +10,33 @@ export type Env = Omit<
   | "PROJECT_ALPHA_DRAFT_QUOTES_ENABLED"
   | "PROJECT_ALPHA_API_V2_MONITOR_ENABLED"
   | "PROJECT_ALPHA_API_V2_MONITOR_RECIPIENT"
+  | "PROJECT_ALPHA_DIRECTORY_RECONCILIATION_ENABLED"
   | "PROJECT_ALPHA_API_V2_READ_ACCEPTANCE_ENABLED"
+  | "PROJECT_ALPHA_API_V2_SYNC_ENABLED"
+  | "PROJECT_ALPHA_DIRECTORY_EXACT_ADOPTION_ENABLED"
+  | "PROJECT_ALPHA_DIRECTORY_LOCAL_PROFILE_ADOPTION_ENABLED"
+  | "PROJECT_ALPHA_PROJECT_ADOPTION_REVIEW_ENABLED"
+  | "PROJECT_ALPHA_PROJECT_BINDING_REVISION_REFRESH_ENABLED"
   | "PROJECT_ALPHA_PROJECT_V2_ACTIVATION_ENABLED"
+  | "PROJECT_ALPHA_PRIVATE_ADMIN_TRANSPORT_ENABLED"
   | "PROJECT_ALPHA_DIRECTORY_V2_BOOTSTRAP_ACCEPTANCE_ENABLED"
   | "PROJECT_ALPHA_DIRECTORY_V2_BOOTSTRAP_SOURCE_ID"
   | "PROJECT_ALPHA_DIRECTORY_V2_BOOTSTRAP_ORIGIN"
+  | "NATIVE_DIRECTORY_STAGING_EMPTY_ENROLLMENT_FIXTURE_ENABLED"
+  | "NATIVE_DIRECTORY_STAGING_EMPTY_ENROLLMENT_FIXTURE_BUSINESS_AREA_ID"
+  | "NATIVE_DIRECTORY_PROFILE_WRITES_ENABLED"
+  | "NATIVE_DIRECTORY_OUTBOX_DRAIN_ENABLED"
+  | "STAGING_DIRECTORY_PROFILE_VIEW_GRANT_ENABLED"
   | "NATIVE_INTEGRATION_CONTROL_ENABLED"
   | "NATIVE_INTEGRATION_CONTROL_ORIGIN"
+  | "CLIENT_ONBOARDING_ADMIN_ENABLED"
+  | "CLIENT_ONBOARDING_ADMIN_ORIGIN"
+  | "CLIENT_ONBOARDING_HANDOFF_KEYRING"
   | "DELIVERY_SHARE_DIRECTORY_RECIPIENTS_ENABLED"
   | "CLIENT_DELEGATED_SHARE_SIGNER_ENABLED"
+  | "CLIENT_ONBOARDING_RECIPIENT_BRIDGE_ENABLED"
+  | "CLIENT_PORTAL_SERVICE_METADATA_RPC_ENABLED"
+  | "CLIENT_PORTAL_NATIVE_RECIPIENT_SERVICE_HOME_ENABLED"
   | "CLIENT_PORTAL_HIERARCHY_V2_ENABLED"
   | "CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED"
   | "CLIENT_PORTAL_MEMBERSHIP_MANAGEMENT_ENABLED"
@@ -31,7 +49,26 @@ export type Env = Omit<
   | "OPERATIONS_ORIGINS"
   | "CLIENT_HUB_PA_CONTACT_ASSIGNMENTS_ENABLED"
   | "CLIENT_PORTAL_NOTIFICATION_MIGRATION_MAINTENANCE"
+  | "PROJECT_ALPHA_CATALOG_STAGING_COORDINATOR_ENABLED"
+  | "PROJECT_ALPHA_CATALOG_PROMOTION_COORDINATOR_ENABLED"
+  | "OPS_INVENTORY_CATALOG_STAGING"
+  | "OPS_INVENTORY_CATALOG_PROMOTION"
+  | "CLIENT_PORTAL_ACCESS_AUTHORITY"
+  | "CLIENT_PORTAL_AUTHORITY_V2"
+  | "CLIENT_AUTHORITY_WORKSPACE_BINDING"
+  | "CLIENT_AUTHORITY_WORKSPACE_BINDING_OUTBOX_ENABLED"
+  | "CLIENT_PORTAL_WORKSPACE_BINDING_ADMIN_ENABLED"
+  | "CLIENT_PORTAL_WORKSPACE_BINDING_ADMIN_ORIGIN"
+  | "CLIENT_PORTAL_AUTHORITY_V3_OWNER_ENABLED"
+  | "CLIENT_PORTAL_AUTHORITY_V3_OWNER_ORIGIN"
+  | "CLIENT_PORTAL_RECIPIENT_ENROLLMENT_ENABLED"
+  | "CLIENT_PORTAL_RECIPIENT_ENROLLMENT_OWNER_ENABLED"
+  | "CLIENT_PORTAL_RECIPIENT_ENROLLMENT_OWNER_ORIGIN"
+  | "VERIFIED_RECIPIENT_DELIVERY_AUTHORITY_DISPATCH_ENABLED"
+  | "VERIFIED_RECIPIENT_DELIVERY_AUTHORITY"
 > & {
+  /** Explicit because Operations modules are also type-checked from sibling Worker projects with narrower generated Env types. */
+  ENVIRONMENT?: string;
   PROJECT_ALPHA_API_KEY?: string;
   /** Temporary release barrier for the preserving client-notification table rebuild. */
   CLIENT_PORTAL_NOTIFICATION_MIGRATION_MAINTENANCE?: string;
@@ -39,24 +76,83 @@ export type Env = Omit<
   PROJECT_ALPHA_CONNECTOR_CREDENTIALS?: string;
   /** Versioned, deployment-owned API-v2 connections. Never accepted from a browser or connector registry request. */
   PROJECT_ALPHA_API_V2_CONNECTIONS?: string;
+  /** Default-off, route-less PA catalog snapshot to Client staging coordinator. */
+  PROJECT_ALPHA_CATALOG_STAGING_COORDINATOR_ENABLED?: string;
+  /** Default-off, route-less promotion after an exact staged snapshot. */
+  PROJECT_ALPHA_CATALOG_PROMOTION_COORDINATOR_ENABLED?: string;
+  /** Private Client Worker RPC; receives catalog content only, never PA credentials. */
+  OPS_INVENTORY_CATALOG_STAGING?: import("./project-alpha-catalog-staging-coordinator").OpsCatalogStagingBinding;
+  /** Private Client Worker RPC; accepts only explicit registry/source/checkpoint authority. */
+  OPS_INVENTORY_CATALOG_PROMOTION?: import("./project-alpha-catalog-staging-coordinator").OpsCatalogPromotionBinding;
+  /** Private shadow-authority RPC. It cannot materialize portal access. */
+  CLIENT_PORTAL_ACCESS_AUTHORITY?: import("./client-portal-access-authority-outbox").ClientPortalAuthorityBinding;
+  CLIENT_PORTAL_ACCESS_AUTHORITY_OUTBOX_ENABLED?: string;
+  CLIENT_PORTAL_AUTHORITY_V2?: import("./client-portal-authority-v2-outbox").ClientPortalAuthorityV2Binding;
+  CLIENT_PORTAL_AUTHORITY_V2_OUTBOX_ENABLED?: string;
+  /** Private, default-off inactive Client workspace-binding RPC. No portal grant is created. */
+  CLIENT_AUTHORITY_WORKSPACE_BINDING?: import("./client-portal-workspace-binding-outbox").ClientAuthorityWorkspaceBindingBinding;
+  CLIENT_AUTHORITY_WORKSPACE_BINDING_OUTBOX_ENABLED?: string;
+  /** Staging-only native-owner HTTP boundary for explicit inactive binding review and delivery. */
+  CLIENT_PORTAL_WORKSPACE_BINDING_ADMIN_ENABLED?: string;
+  CLIENT_PORTAL_WORKSPACE_BINDING_ADMIN_ORIGIN?: string;
+  /** Default-off native owner boundary for protocol-v3 service-home permission changes. */
+  CLIENT_PORTAL_AUTHORITY_V3_OWNER_ENABLED?: string;
+  CLIENT_PORTAL_AUTHORITY_V3_OWNER_ORIGIN?: string;
+  /** Staging-only verified recipient enrollment; independent and default-off. */
+  CLIENT_PORTAL_RECIPIENT_ENROLLMENT_ENABLED?: string;
+  /** Separate default-off staging owner confirmation/revocation boundary. */
+  CLIENT_PORTAL_RECIPIENT_ENROLLMENT_OWNER_ENABLED?: string;
+  CLIENT_PORTAL_RECIPIENT_ENROLLMENT_OWNER_ORIGIN?: string;
+  VERIFIED_RECIPIENT_DELIVERY_AUTHORITY_DISPATCH_ENABLED?: string;
+  VERIFIED_RECIPIENT_DELIVERY_AUTHORITY?: Service & import("./verified-recipient-delivery-authority-ledger").DeliveryAuthorityBridge;
   /** Default-off bounded API-v2 health/incident monitor. */
   PROJECT_ALPHA_API_V2_MONITOR_ENABLED?: string;
   /** Explicit deployment-owned owner mailbox for outage alerts; never inferred from Project Alpha data. */
   PROJECT_ALPHA_API_V2_MONITOR_RECIPIENT?: string;
+  /** Default-off bounded read-only PA Directory reconciliation scheduler. */
+  PROJECT_ALPHA_DIRECTORY_RECONCILIATION_ENABLED?: string;
   /** Default-off administrator-only API-v2 capabilities and inventory readiness check. */
   PROJECT_ALPHA_API_V2_READ_ACCEPTANCE_ENABLED?: string;
+  /** Default-off bounded API-v2 inventory evidence ingestion. */
+  PROJECT_ALPHA_API_V2_SYNC_ENABLED?: string;
+  /** Staging-only, administrator-protected exact adoption of already-bound Directory identities. */
+  PROJECT_ALPHA_DIRECTORY_EXACT_ADOPTION_ENABLED?: string;
+  /** Separate default-off staging gate for applying explicitly adopted scalar PA profile fields locally. */
+  PROJECT_ALPHA_DIRECTORY_LOCAL_PROFILE_ADOPTION_ENABLED?: string;
+  /** Staging-only, default-off PA-origin project adoption review evidence entry route. */
+  PROJECT_ALPHA_PROJECT_ADOPTION_REVIEW_ENABLED?: string;
+  /** Staging-only administrator endpoint for refreshing an already-authorized stale Project binding. */
+  PROJECT_ALPHA_PROJECT_BINDING_REVISION_REFRESH_ENABLED?: string;
   /** Default-off, manually invoked administrator-only Project-v2 staging acceptance. */
   PROJECT_ALPHA_PROJECT_V2_ACTIVATION_ENABLED?: string;
+  /** Default-off administrator transport for private PA Directory and Project consumers. */
+  PROJECT_ALPHA_PRIVATE_ADMIN_TRANSPORT_ENABLED?: string;
   /** Staging-only, manually invoked Directory bootstrap acceptance fixture. */
   PROJECT_ALPHA_DIRECTORY_V2_BOOTSTRAP_ACCEPTANCE_ENABLED?: string;
   /** Staging-only immutable source pin for the Directory bootstrap fixture. */
   PROJECT_ALPHA_DIRECTORY_V2_BOOTSTRAP_SOURCE_ID?: string;
   /** Staging-only exact HTTPS origin pin for the Directory bootstrap fixture. */
   PROJECT_ALPHA_DIRECTORY_V2_BOOTSTRAP_ORIGIN?: string;
+  /** Default-off, staging-only native organization fixture with no PA enrollment. */
+  NATIVE_DIRECTORY_STAGING_EMPTY_ENROLLMENT_FIXTURE_ENABLED?: string;
+  /** Deployment-pinned active business area for the native-only staging fixture. */
+  NATIVE_DIRECTORY_STAGING_EMPTY_ENROLLMENT_FIXTURE_BUSINESS_AREA_ID?: string;
+  /** Default-off authenticated native Directory profile create/update routes. */
+  NATIVE_DIRECTORY_PROFILE_WRITES_ENABLED?: string;
+  /** Default-off bounded scheduled delivery for native Directory outboxes. */
+  NATIVE_DIRECTORY_OUTBOX_DRAIN_ENABLED?: string;
   /** Default-off native, explicit-grant authority for monitor lifecycle control. */
   NATIVE_INTEGRATION_CONTROL_ENABLED?: string;
+  /** Temporary, default-off, staging-only protected owner profile-view repair. */
+  STAGING_DIRECTORY_PROFILE_VIEW_GRANT_ENABLED?: string;
   /** Exact same-origin native monitor-control UI origin; no implicit fallback. */
   NATIVE_INTEGRATION_CONTROL_ORIGIN?: string;
+  /** Default-off native staff issuance/reveal boundary for client profile onboarding. */
+  CLIENT_ONBOARDING_ADMIN_ENABLED?: string;
+  /** Exact HTTPS Operations origin for the native onboarding staff boundary. */
+  CLIENT_ONBOARDING_ADMIN_ORIGIN?: string;
+  /** Deployment secret containing the bounded AES-GCM handoff keyring. */
+  CLIENT_ONBOARDING_HANDOFF_KEYRING?: string;
   PROJECT_ALPHA_CONNECTOR_SNAPSHOT_CREDENTIALS?: string;
   PROJECT_ALPHA_CONNECTOR_EVENT_CREDENTIALS?: string;
   /** Deploy-managed source manifest; selects configured credential references and is never browser-administered. */
@@ -94,6 +190,18 @@ export type Env = Omit<
   DELIVERY_SHARE_DIRECTORY_RECIPIENTS_ENABLED?: string;
   /** Defense-in-depth gate for the private Client -> Operations share signer RPC. */
   CLIENT_DELEGATED_SHARE_SIGNER_ENABLED?: string;
+  /** Default-off private Client -> Operations onboarding recipient bridge. */
+  CLIENT_ONBOARDING_RECIPIENT_BRIDGE_ENABLED?: string;
+  /** Default-off private service metadata RPC; never grants content access. */
+  CLIENT_PORTAL_SERVICE_METADATA_RPC_ENABLED?: string;
+  /** Default-off native authority selection; never falls back to PA-backed grants. */
+  CLIENT_PORTAL_NATIVE_RECIPIENT_SERVICE_HOME_ENABLED?: string;
+  CLIENT_PORTAL_NATIVE_RECIPIENT_ENROLLMENT_ENABLED?: string;
+  /** Separate default-off staging manager HTTP surface; no legacy owner inference. */
+  CLIENT_PORTAL_NATIVE_RECIPIENT_OWNER_ENABLED?: string;
+  OPERATIONS_PORTAL_NATIVE_RECIPIENT_AUTHORITY_DISPATCH_ENABLED?: string;
+  /** Staging-only private audited grant/revoke transport; not a public HTTP endpoint. */
+  OPERATIONS_PORTAL_NATIVE_RECIPIENT_AUTHORITY?: Service & import("./operations-portal-native-recipient-authority-dispatch").OperationsPortalNativeRecipientAuthorityBinding;
   /** Enables staff recovery for the additive client workspace hierarchy. */
   CLIENT_PORTAL_HIERARCHY_V2_ENABLED?: string;
   /** Must match the Client deployment before publishing relation-backed grants. */

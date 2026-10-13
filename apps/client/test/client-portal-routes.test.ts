@@ -347,6 +347,30 @@ describe("client portal service request reads", () => {
     expect(fetched.status).toBe(200);
     expect(await fetched.json()).toMatchObject({ request: { id: "request-1", status: "submitted" } });
   });
+
+  it("keeps detail and legacy fallback calls bound to their repository receiver", async () => {
+    let detailRepo!: ClientPortalRepository;
+    const getServiceRequestDetail = vi.fn(function (this: ClientPortalRepository) {
+      expect(this).toBe(detailRepo);
+      return Promise.resolve({ ...serviceRequest, submittedServiceDetailsAvailable: true, submittedServices: [] });
+    });
+    detailRepo = repository({ getServiceRequestDetail });
+    const detail = await createClientPortalRouter({ resolvePrincipal: principal, repository: detailRepo })
+      .request("/service-requests/request-1", {}, env("true"));
+    expect(detail.status).toBe(200);
+    expect(await detail.json()).toMatchObject({ request: { submittedServices: [] } });
+
+    let legacyRepo!: ClientPortalRepository;
+    const getServiceRequest = vi.fn(function (this: ClientPortalRepository) {
+      expect(this).toBe(legacyRepo);
+      return Promise.resolve(serviceRequest);
+    });
+    legacyRepo = repository({ getServiceRequest });
+    const legacy = await createClientPortalRouter({ resolvePrincipal: principal, repository: legacyRepo })
+      .request("/service-requests/request-1", {}, env("true"));
+    expect(legacy.status).toBe(200);
+    expect((await legacy.json() as { request: ClientServiceRequest }).request).not.toHaveProperty("submittedServices");
+  });
 });
 
 describe("client portal team management", () => {

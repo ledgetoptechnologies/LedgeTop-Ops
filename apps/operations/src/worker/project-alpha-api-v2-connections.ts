@@ -148,6 +148,24 @@ export function resolveProjectAlphaApiV2Connection(
   catch { return invalid(); }
 }
 
+/** A credential-free, deterministic inventory for authorized staff discovery.
+ * Parsing every entry through the normal resolver keeps this list subject to
+ * the same whole-envelope identity and duplicate checks as a write path. */
+export function listEnabledProjectAlphaApiV2SourceIds(
+  env: ProjectAlphaApiV2ConnectionEnvironment,
+): readonly string[] {
+  try {
+    const raw = env.PROJECT_ALPHA_API_V2_CONNECTIONS;
+    if (typeof raw !== "string" || !raw.trim() || new TextEncoder().encode(raw).byteLength > MAX_SECRET_BYTES) invalid();
+    const envelope = parseDuplicateFreeJson(raw);
+    if (!plain(envelope) || !exact(envelope, ["version", "instances"])
+      || envelope.version !== 1 || !plain(envelope.instances)) invalid();
+    const keys = Object.keys(envelope.instances);
+    if (keys.length === 0 || keys.length > MAX_CONNECTIONS) invalid();
+    return Object.freeze(keys.filter(key => parseProjectAlphaApiV2Connection(env, key).resolved.enabled).sort());
+  } catch { return invalid(); }
+}
+
 /** Explicit, one-shot probe bridge.  No scheduler or route calls this.  A
  * disabled connection exits before the provided fetch function is touched. */
 export function probeConfiguredProjectAlphaApiV2Connection(

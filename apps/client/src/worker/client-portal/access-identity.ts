@@ -123,3 +123,35 @@ export async function resolveCloudflareClientPrincipal(
     return null;
   }
 }
+
+/** Enrollment needs the signed assertion's deadline, not a deadline supplied
+ * by the browser or inferred from an existing portal grant. Keep this stricter
+ * proof separate so legacy read-only principal mapping remains unchanged. */
+export async function resolveCloudflareRecipientEnrollmentProof(
+  request: Request,
+  env: Env,
+  getKey?: JWTVerifyGetKey,
+): Promise<{ principal: VerifiedClientPrincipal; verifiedUntil: string } | null> {
+  const configuration = clientAccessConfiguration(env);
+  const assertion = request.headers.get("Cf-Access-Jwt-Assertion")
+    ?? accessAuthorizationCookie(request.headers.get("Cookie"));
+  if (!assertion || assertion.length > 16384 || /\s/.test(assertion)) return null;
+  try {
+    const { payload } = await jwtVerify(assertion,
+      getKey ?? createRemoteJWKSet(new URL(`${configuration.issuer}/cdn-cgi/access/certs`)),
+      { issuer: configuration.issuer, audience: configuration.audiences, algorithms: ["RS256"],
+        requiredClaims: ["iss", "aud", "sub", "exp"] });
+    const audiences = Array.isArray(payload.aud) ? payload.aud : [payload.aud];
+    if (audiences.length !== 1 || !configuration.audiences.includes(audiences[0] ?? "")
+      || payload.service_token_id !== undefined
+      || (payload.service_token_status !== undefined && payload.service_token_status !== false)
+      || !Number.isSafeInteger(payload.exp)) return null;
+    const expires = (payload.exp as number) * 1000;
+    if (!Number.isSafeInteger(expires) || expires <= Date.now() || expires > 8.64e15) return null;
+    const principal = verifiedClientPrincipalFromAccessPayload(payload, configuration);
+    return principal ? { principal, verifiedUntil: new Date(expires).toISOString() } : null;
+  } catch {
+    // No assertion, identity claim, or transport diagnostic is exposed here.
+    return null;
+  }
+}

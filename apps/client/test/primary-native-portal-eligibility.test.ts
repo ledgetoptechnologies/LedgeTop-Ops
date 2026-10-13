@@ -175,6 +175,31 @@ describe("primary signed-native first-login eligibility", () => {
     await assertNoBinding(workspaceId);
   });
 
+  it("leaves an actively Client-authority-claimed workspace outside automatic PA enrollment", async () => {
+    const { actor, workspaceId, principalId } = await project("client-authority-claimed");
+    await db.prepare(`INSERT INTO portal_client_authority_workspace_claims
+      (client_authority_id,workspace_id,projection_source_id,source_workspace_id,state,ownership_epoch,
+       reconciliation_source_generation,reconciliation_source_sequence,reconciliation_snapshot_generation_id,last_operation_id)
+      SELECT ?,source.workspace_id,source.projection_source_id,source.source_workspace_id,'active',1,
+        checkpoint.source_generation,checkpoint.source_sequence,checkpoint.snapshot_generation_id,?
+      FROM pa_portal_workspace_sources source JOIN pa_portal_projection_checkpoints checkpoint
+        ON checkpoint.workspace_id=source.workspace_id WHERE source.workspace_id=?`)
+      .bind("12345678-1234-1234-1234-123456789abc", "test-claim-client-authority-claimed", workspaceId).run();
+
+    expect((await request(actor, "/session")).status).toBe(403);
+    expect((await request(actor, "/v2/workspaces")).status).toBe(403);
+    await assertNoBinding(workspaceId);
+    expect(await db.prepare("SELECT count(*) n FROM portal_v2_identities WHERE issuer=? AND subject=?")
+      .bind(actor.issuer, actor.subject).first("n")).toBe(0);
+    expect(await db.prepare("SELECT identity_id FROM pa_portal_principals WHERE workspace_id=? AND public_id=?")
+      .bind(workspaceId, principalId).first("identity_id")).toBeNull();
+    expect(await db.prepare("SELECT count(*) n FROM portal_v2_entitlements WHERE workspace_id=?")
+      .bind(workspaceId).first("n")).toBe(0);
+    expect(await db.prepare("SELECT state FROM portal_client_authority_workspace_claims WHERE workspace_id=?")
+      .bind(workspaceId).first("state")).toBe("active");
+    await assertNoLegacyOrMail();
+  }, 60_000);
+
   it("leaves no-email roots and ambiguous signed principal emails unclaimed", async () => {
     const noEmail = await project("no-email", { noPrincipals: true });
     expect((await request({ ...noEmail.actor, email: "" }, "/session")).status).toBe(403);

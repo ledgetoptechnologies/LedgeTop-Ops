@@ -1,6 +1,7 @@
 import { HTTPException } from "hono/http-exception";
 import { sha256 } from "./crypto";
-import { isBusinessProjectionSource, resolveClientHubSourceRoot } from "./client-hub-source";
+import { isBusinessProjectionSource, resolveCanonicalClientHubSourceRoot, resolveClientHubSourceRoot,
+  validatedUniquePublicIdExpression } from "./client-hub-source";
 import { readClientHubBusinessProjectPolicy } from "./client-hub-project-policy";
 import type { SqlFilter } from "./visibility";
 import type { ClientHubCollectionContext, ClientHubCollectionResult } from "./client-hub-collections";
@@ -50,7 +51,9 @@ export async function clientHubBusinessProjectSourceProof(env: Env, context: Cli
   const root = context.root;
   if (!validId(root.public_id) || !["organization", "standalone_client"].includes(root.kind))
     throw new HTTPException(404, { message: "Client not found" });
-  const source = await resolveClientHubSourceRoot(env, root.kind, root.public_id, root.source_id);
+  const canonical = await resolveCanonicalClientHubSourceRoot(env, root.kind, root.public_id, root.source_id);
+  const source = canonical.state === "current" ? canonical.root
+    : canonical.state === "absent" ? await resolveClientHubSourceRoot(env, root.kind, root.public_id, root.source_id) : null;
   if (!source?.active || (root.kind === "standalone_client" && source.organization_id !== null))
     throw new HTTPException(404, { message: "Client not found" });
   return sha256(JSON.stringify([rootTuple(context), source.id, source.active, source.organization_id,
@@ -58,6 +61,27 @@ export async function clientHubBusinessProjectSourceProof(env: Env, context: Cli
 }
 
 export function clientHubBusinessProjectOwnership(context: ClientHubCollectionContext): SqlFilter {
+  if (context.root.pa_public_id) {
+    if (context.root.kind === "organization") {
+      const organizationPublicId = validatedUniquePublicIdExpression("pa_organizations", "project_organization");
+      const inheritedOrganizationPublicId = validatedUniquePublicIdExpression("pa_organizations", "inherited_organization");
+      return { sql: `p.projection_source_id=? AND (
+        EXISTS(SELECT 1 FROM pa_organizations project_organization
+          WHERE project_organization.id=p.organization_id AND project_organization.projection_source_id=p.projection_source_id
+            AND project_organization.active=1 AND ${organizationPublicId}=? )
+        OR (p.organization_id IS NULL AND EXISTS(SELECT 1 FROM pa_clients project_owner
+          JOIN pa_organizations inherited_organization ON inherited_organization.id=project_owner.organization_id
+            AND inherited_organization.projection_source_id=project_owner.projection_source_id AND inherited_organization.active=1
+          WHERE project_owner.id=p.client_id AND project_owner.projection_source_id=p.projection_source_id
+            AND project_owner.active=1 AND ${inheritedOrganizationPublicId}=?)))`,
+      values: [context.root.source_id, context.root.pa_public_id, context.root.pa_public_id] };
+    }
+    const clientPublicId = validatedUniquePublicIdExpression("pa_clients", "project_owner");
+    return { sql: `p.projection_source_id=? AND p.organization_id IS NULL AND EXISTS(SELECT 1 FROM pa_clients project_owner
+      WHERE project_owner.id=p.client_id AND project_owner.projection_source_id=p.projection_source_id
+        AND project_owner.active=1 AND project_owner.organization_id IS NULL AND ${clientPublicId}=?)`,
+    values: [context.root.source_id, context.root.pa_public_id] };
+  }
   return context.root.kind === "organization"
     ? { sql: "p.projection_source_id=? AND (p.organization_id=? OR (p.organization_id IS NULL AND owner.organization_id=?))", values: [context.root.source_id, context.root.public_id, context.root.public_id] }
     : { sql: "p.projection_source_id=? AND p.client_id=? AND owner.id IS NOT NULL AND owner.organization_id IS NULL AND p.organization_id IS NULL", values: [context.root.source_id, context.root.public_id] };

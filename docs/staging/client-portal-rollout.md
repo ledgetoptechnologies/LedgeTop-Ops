@@ -1,12 +1,21 @@
 # Client portal staging rollout and rollback
 
-Status: Access applications provisioned; rollout not activated. A live
+Status: Access applications provisioned; the reviewed
+`staff-synthetic-acceptance` window is the only active portal phase. A live
 dashboard readback on 2026-09-16 verified the dedicated client group, portal
 path application, and separate public Bypass application described below.
 DNS, secrets, migrations, Workers, routes, and Project Alpha remain governed by
 their individual gates. This document is not authorization for another
-mutation, and the checked-in and ignored staging configuration must end with
-`CLIENT_PORTAL_ENABLED=false`.
+mutation. The checked-in staging configuration keeps
+`CLIENT_PORTAL_ENABLED=true` only so one explicitly approved staff tester can
+exercise a synthetic workspace. Client admission, invitation sending, and
+automatic enrollment remain disabled; broad Access policies are prohibited.
+Release evidence must record the exact protected Access application and Allow
+policy IDs, its dedicated-group-only selector set, the approved tester's hashed
+issuer/subject identity, the identical hashed group membership set, and
+unchanged production Access application/policy/config snapshots before and
+after the staging window. The anonymous public-path Bypass application remains
+separate and is never evidence of portal admission.
 
 ## Fixed staging topology
 
@@ -61,7 +70,9 @@ and warns that Bypass disables Access enforcement in
    `PUBLIC_BASE_URL`, Operations `DELIVERY_BASE_URL`, and Client
    `CLIENT_PORTAL_ORIGIN` as one reviewed cutover set. The Client
    `EXPECTED_HOST` must equal the anonymous delivery hostname; never move the
-   origins without it. Keep `CLIENT_PORTAL_ENABLED=false`.
+   origins without it. Keep `CLIENT_PORTAL_ENABLED=true` only within the
+   reviewed `staff-synthetic-acceptance` phase and preserve its explicit-staff,
+   synthetic-workspace-only admission evidence.
 
 ## Ordered rollout
 
@@ -72,7 +83,7 @@ and warns that Bypass disables Access enforcement in
    `0177_domain_neutral_delivery_notifications.sql` and
    `0178_domain_neutral_delivery_notification_contract.sql`, plus the later
    `0179`-`0186` assignment/notification/native-portal sequence, and the complete
-   ordered Operations `0054`-`0122` suffix. Client migration `0113` is
+   ordered Operations `0054`-`0139` suffix. Client migration `0113` is
    intentionally reserved and absent. The
    release evidence validator compares the complete filename sets; do not
    shorten them to a range or infer success from a local migration run.
@@ -104,7 +115,7 @@ and warns that Bypass disables Access enforcement in
    drain proof. Only then apply `0180`-`0183` from the final input. Keep native
     capabilities unavailable while applying Client `0184`-`0195`, satisfying
     the separate `0187` content-audit and `0189` primary-binding barriers, then
-    apply Operations through `0122` only after the remote-ledger, open-fence,
+    apply Operations through `0139` only after the remote-ledger, open-fence,
     quiescence, populated-export/time-travel-recovery, and compatible-writer
     ordering evidence is recorded. The combined candidate is not an expand-only input; do not
    run one all-pending apply or execute raw migration SQL.

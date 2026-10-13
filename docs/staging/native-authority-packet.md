@@ -22,33 +22,102 @@ or `exact_project` grants cannot authorize those creates. No other directory,
 staff-management, integration-control, workforce, or delegation authority is
 created.
 
+### Existing-directory acquisition packet (schema v4)
+
+The normal schema-v3 packet remains profile-edit/Project-sync only. A schema-v4
+packet with the exact `purpose: "existing-directory-acquisition"` is the sole
+exception: it provisions global `directory.profile.edit` plus
+`directory.identity.link` scoped to one exact reviewed native record ID, kind,
+and current version. The purpose and record selection are fixed; the input
+never accepts a permission list or arbitrary additional grant. The packet does
+not grant `directory.profile.view`; the reconciliation-panel context endpoint
+has a separate global read-authority gate.
+
+Use [the v4 example](staging-native-directory-acquisition-authority.json.example)
+only after independently verifying the disposable native record and its exact
+version, an unmapped PA target in a staging-only source/application, the PA
+staging revision, and the generated provision *and* revoke artifacts. This
+packet does not create the fixture, enable a PA route, compensate a successful
+remote bind after a later local failure, or authorize production cutover.
+
+Schema v4 records the exact prior Directory state as `absent`,
+`v3-profile-only-inactive`, or `v4-acquisition-inactive`. This permits one
+audited transition from the old durable schema-v3 row, then requires the
+complete two-row inactive set for later reactivation. Provision and revoke
+verify the complete set, and revoke deactivates both rows atomically. Any
+additional, missing, changed, denied, scoped, or active-state-drift row aborts
+the packet; do not delete a row to force recovery.
+
+### Empty-enrollment fixture and acquisition successor (schema v5)
+
+Schema v5 has two fixed staging-only purposes; it is not a configurable
+permission list. `staging-empty-enrollment-fixture` temporarily adds only
+global `directory.profile.edit` and one `directory.enrollment.manage` allow
+scoped to the reviewed active business area. It requires `mode: "reactivate"`
+from the exact inactive prior authority state, and the compiled fixture
+record, mutation, and create-admission IDs to be absent before provision. Its
+revoke requires the exact prior provision ledger, unrevoked approval and
+receipt, active admission and grant shapes, and no actor write fence or
+pending/leased Project or Directory work. The revoke deactivates both grants; it never
+deletes the durable enrollment-grant row.
+
+When the same owner later performs acquisition, use v5 purpose
+`existing-directory-acquisition-after-fixture` with the reviewed record and
+business-area IDs, `mode: "reactivate"`, and
+`directoryAuthorityState: "v5-fixture-inactive"`.
+It reactivates profile edit, adds only the record-scoped identity-link allow,
+and keeps enrollment management inactive through both acquisition provision
+and revoke. Do not use the v4 packet against this three-row durable state or
+delete the inactive row to make v4 fit. Generate and review both revoke
+artifacts before either staging-only authority window; keep the windows
+separate and disable the fixture route before fixture revoke.
+
+### Current preservative lineage packets (schemas v7 and v8)
+
+The current generator also supports the confirmed onboarding-profile lineage
+without rewriting its earlier state. Schema v7 uses the fixed purpose
+`existing-directory-acquisition-preserving-onboarding-profile`; it pins the
+reviewed business area and record, preserves the deterministic onboarding grant
+and all three of its immutable history revisions, and changes only the global
+profile and exact resource identity-link grants. Schema v8 uses the fixed
+purpose `recipient-enrollment-portal-access-preserving-onboarding-profile`; it
+requires the exact normal-workflow activation receipt and changes only the exact
+resource-scoped portal-access grant.
+
+Both schemas require the independently read Directory generation and the exact
+ordered per-revision generations for every applicable profile, onboarding,
+identity, and portal grant. Missing, extra, duplicate, non-increasing, or stale
+history fails closed. Use the schema-v7/v8 examples and the detailed
+[recipient enrollment authority plan](recipient-enrollment-authority-plan.md)
+for this known lineage; do not substitute a v3-v6 packet or infer historical
+generations. These current contracts do not alter the historical packet evidence
+recorded later in this file.
+
 ## Safety model
 
 The checked-in generator validates the exact staging account, Operations D1 ID,
-complete D1 binding inventory, and the exact reviewed 122-file Operations
+complete D1 binding inventory, and the exact reviewed 170-file Operations
 migration chain. Generated files are ignored. Provision and revoke use separate
 Wrangler configs and separate one-file migration directories so applying the
 provision config cannot select the revoke migration.
 
 Both configs use the staging-only
 `staging_native_authority_migrations` migration table. They do not add rows to
-the canonical `d1_migrations` ledger. Each migration rechecks the exact 122-name
+the canonical `d1_migrations` ledger. Each migration rechecks the exact 166-name
 canonical ledger in D1 and its expected auxiliary-ledger predecessor before any
 authority mutation. Wrangler migration rollback, database constraints, final
 sentinel checks, immutable bootstrap approvals/receipts, admission versions, and
-project-grant generations make the change atomic and auditable. Packet schema
-v2 records the exact directory-grant identity and active result in each
-canonical plan, immutable approval/receipt, and sanitized manifest. The
-directory-grant table has no version column, so each transition instead requires
-exactly one full-shape row and rejects any additional or conflicting row.
+project-grant generations make the change atomic and auditable. The packet
+records its exact Directory-grant identities and result in the canonical plan,
+immutable approval/receipt, and sanitized manifest.
 
-Remaining hardening: the canonical `native_directory_grants` schema has no
-version/generation column or deletion-protection trigger. The packet's exact
-current-state guards and immutable approval/receipt evidence cannot detect a
-historical off/on transition or delete/reinsert performed outside this governed
-path. Adding revisioned, deletion-protected grant history requires a future
-canonical schema migration; it is intentionally not simulated in generated
-staging SQL.
+Canonical migration `0123_native_directory_authority_history.sql` already adds
+the per-staff Directory generation, immutable per-grant revision history, and
+no-delete guards for current grants, generations, and history. The current
+schema-v7/v8 paths check the complete expected row set, current generation, and
+the exact contiguous immutable history and per-revision generations before and
+after their narrowly defined transitions. They reject additional, missing,
+changed, or stale authority rather than simulating history in generated SQL.
 
 The preferred `operatorKind` is `synthetic`. A staging database that still
 contains the immutable production-seeded owner may explicitly use
@@ -71,7 +140,8 @@ in the ignored local directory with operator-only filesystem access.
 ## Prepare and review
 
 1. Keep both acceptance-route flags and the selected PA connection disabled.
-2. Apply and verify the canonical Operations migrations through `0122`. Confirm
+2. Apply and verify the complete reviewed staging Operations migration chain
+   through `0170_client_hub_canonical_directory_projection_reset.sql`. Confirm
    that no native staff-management, directory, or Project command fence is open
    and neither Project nor Directory outbox has pending or leased actor work.
 3. Sign in once through the ordinary staging Operations Access application so
@@ -89,8 +159,10 @@ in the ignored local directory with operator-only filesystem access.
    explicit `operatorKind`, and zero expected versions. For a later window use a new packet ID,
    `mode: "reactivate"`, and the exact inactive admission/profile/Project-grant
    versions and generation recorded by the preceding revoke manifest and
-   independent readback. Reactivation also requires the one exact inactive
-   directory-grant row; there is no directory-grant version counter.
+   independent readback. Reactivation requires the packet's exact inactive
+   Directory-grant set. For the known onboarding lineage, use schema v7 or v8
+   with the exact current Directory generation and every independently read
+   immutable history generation; do not infer or omit those values.
 
 Generate both phases before opening the window so reviewed emergency revocation
 is already available:
@@ -124,8 +196,9 @@ The list must contain exactly the one reviewed provision filename. After apply,
 list again and require no pending migration. Record the generated manifest hash,
 Wrangler backup/migration output, auxiliary-ledger filename, and sanitized
 readback proving the active admission/profile/Project-grant versions and
-generation plus the one exact active global directory grant. Do not record the
-raw email or subject in release evidence.
+generation plus the packet's exact active Directory-grant set, current Directory
+generation, and immutable history. Do not record the raw email or subject in
+release evidence.
 
 Only then may separately approved acceptance windows enable the Directory-v2
 bootstrap or joined Project-v2 route flag and the exact disposable PA
@@ -150,16 +223,25 @@ windows; provisioned authority is not permission to enable both routes at once.
 
 The migration requires the provision filename in the auxiliary ledger, exact
 active admission/profile/Project-grant versions, the exact Project grant
-generation, the one exact active directory-grant row, and the unrevoked
-provision approval. It deactivates both grants, increments the Project grant
-version and generation, deactivates the admission and increments its version,
+generation, the packet's exact active Directory-grant set and history, and the
+unrevoked provision approval. It deactivates the packet-selected grants,
+increments the applicable generations and versions, deactivates the admission,
+and increments its version,
 marks the provision approval revoked, and writes a separate immutable revocation
 receipt. The profile and durable authority history remain. The inactive
-directory row remains as the packet's durable authority identity; revoke never
+Directory rows remain as the packet's durable authority identities; revoke never
 uses destructive cleanup, and any surviving directory write fence makes it fail
 closed. Existing native Project proofs cease to be live.
 
-### Applied Directory-v2 packet evidence — September 19, 2026
+## Historical applied packet evidence — September 19–20, 2026
+
+The following records describe the packet schemas, migration chain, and receipt
+state reviewed at the time. They are retained as historical evidence and are not
+instructions to replay those packets against the current 150-migration schema or
+the current schema-v7/v8 lineage. References to a “next gate” are likewise the
+then-current status, not a present readiness claim.
+
+### Historical Directory-v2 packet evidence — September 19, 2026
 
 The reviewed revocation packet for the bounded Directory-v2 acceptance window
 was applied after the route was removed, the selected PA connection was
@@ -173,7 +255,7 @@ acknowledgement/mapping/audit evidence retained under
 This is evidence of a closed Directory-v2 staging authority window only; it
 does not establish a live Project-v2 authority window or production readiness.
 
-### Applied staging-only Project authority packet — September 19–20, 2026
+### Historical staging-only Project authority packet — September 19–20, 2026
 
 Temporary Ops native authority packet
 `staging-authority-project-v2-20260919-215846z` was provisioned only for
