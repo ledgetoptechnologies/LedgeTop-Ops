@@ -1,4 +1,6 @@
 import type { AuthenticatedNativeStaffWithAdmissionVersion } from "./native-staff-auth";
+import { billingPermissionDiagnosticEnabled, classifyBillingPermissionBatchError,
+  type BillingPermissionDiagnostic, type BillingPermissionDiagnosticOptions } from "./operations-portal-native-billing-permission-diagnostic";
 
 type Scope = Readonly<{ kind: "global"; resourceId: null } | { kind: "resource"; resourceId: string }>;
 export type NativeBillingPermissionChange = Readonly<{
@@ -78,6 +80,7 @@ export async function manageOperationsPortalNativeBillingPermission(
   db: D1Database,
   actor: AuthenticatedNativeStaffWithAdmissionVersion,
   input: NativeBillingPermissionChange,
+  diagnostic?: BillingPermissionDiagnosticOptions,
 ): Promise<NativeBillingPermissionChangeResult> {
   if (!validInput(input)) return { status: "conflict", reason: "request" };
   const requestFingerprint = await sha256(canonicalRequest(actor, input));
@@ -132,15 +135,45 @@ export async function manageOperationsPortalNativeBillingPermission(
         .bind(resultingGeneration,staffId,input.expectedGeneration),
     ]);
     return { status: "applied", operationId: input.operationId, grantId: input.grantId, generation: resultingGeneration };
-  } catch {
+  } catch (error) {
+    // Freeze the original reconciliation outcome before any optional diagnostic awaits.
     const winner = await db.prepare(`SELECT request_fingerprint,grant_id,resulting_generation
       FROM operations_portal_native_billing_permission_commands WHERE operation_id=?`).bind(input.operationId)
       .first<{ request_fingerprint: string; grant_id: string; resulting_generation: number }>();
+    let result: NativeBillingPermissionChangeResult;
     if (winner?.request_fingerprint === requestFingerprint && winner.grant_id === input.grantId) {
-      if (!await currentManager(db, actor)) return { status: "conflict", reason: "authority" };
-      return { status: "replayed", operationId: input.operationId, grantId: input.grantId,
-        generation: winner.resulting_generation };
+      result = !await currentManager(db, actor) ? { status: "conflict", reason: "authority" }
+        : { status: "replayed", operationId: input.operationId, grantId: input.grantId,
+          generation: winner.resulting_generation };
+    } else result = { status: "conflict", reason: winner ? "request" : "generation" };
+    if (diagnostic && billingPermissionDiagnosticEnabled(diagnostic.environment, diagnostic.enabled)) {
+      // This observation is post-failure, not an authorization decision or historical proof.
+      // Even a failed SELECT or logging callback must not change the existing result path.
+      const event: BillingPermissionDiagnostic = {
+        event: "native-billing-permission-batch-failed", classification: classifyBillingPermissionBatchError(error),
+        action: input.action, managerCurrent: null, generationMatches: null, grantIdExists: null,
+        operationIdExists: null, verifiedUntilCanonical: actor.verifiedUntil.length === 24
+          && Number.isFinite(Date.parse(actor.verifiedUntil)) && new Date(actor.verifiedUntil).toISOString() === actor.verifiedUntil,
+        verifiedUntilFuture: null, observedAtFresh: null,
+      };
+      let observation = event;
+      try {
+        const managerCurrent = await currentManager(db, actor);
+        const predicates = await db.prepare(`SELECT
+          EXISTS(SELECT 1 FROM operations_portal_native_billing_permission_generations WHERE staff_id=? AND generation=?) generationMatches,
+          EXISTS(SELECT 1 FROM operations_portal_native_billing_permissions WHERE grant_id=?) grantIdExists,
+          EXISTS(SELECT 1 FROM operations_portal_native_billing_permission_commands WHERE operation_id=?) operationIdExists,
+          ?>strftime('%Y-%m-%dT%H:%M:%fZ','now') verifiedUntilFuture,
+          (?<=strftime('%Y-%m-%dT%H:%M:%fZ','now') AND ?>=strftime('%Y-%m-%dT%H:%M:%fZ','now','-15 minutes')) observedAtFresh`)
+          .bind(staffId,input.expectedGeneration,input.grantId,input.operationId,actor.verifiedUntil,observedAt,observedAt)
+          .first<Record<string, number>>();
+        const boolean = (key: string) => predicates?.[key] === 1 ? true : predicates?.[key] === 0 ? false : null;
+        observation = { ...event, managerCurrent, generationMatches: boolean("generationMatches"),
+          grantIdExists: boolean("grantIdExists"), operationIdExists: boolean("operationIdExists"),
+          verifiedUntilFuture: boolean("verifiedUntilFuture"), observedAtFresh: boolean("observedAtFresh") };
+      } catch { /* Unknown observations remain null; no raw error is emitted. */ }
+      try { diagnostic.emit(observation); } catch { /* Observability cannot change command semantics. */ }
     }
-    return { status: "conflict", reason: winner ? "request" : "generation" };
+    return result;
   }
 }

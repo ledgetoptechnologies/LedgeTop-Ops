@@ -28,6 +28,7 @@ export type OperationsPortalNativeOwnerEnv = Env & OperationsPortalNativeDeliver
   OPERATIONS_PORTAL_NATIVE_RECIPIENT_AUTHORITY?: OperationsPortalNativeRecipientAuthorityBinding;
   OPERATIONS_PORTAL_NATIVE_DELIVERY_OWNER_ENABLED?: string;
   OPERATIONS_PORTAL_NATIVE_BILLING_OWNER_ENABLED?: string;
+  OPERATIONS_PORTAL_NATIVE_BILLING_PERMISSION_DIAGNOSTIC_ENABLED?: string;
   OPERATIONS_PORTAL_WORKSPACE_OWNER_ENABLED?: string;
   OPERATIONS_PORTAL_WORKSPACE_PUBLICATION_DISPATCH_ENABLED?: string;
   OPERATIONS_PORTAL_WORKSPACE_PUBLICATION?: OperationsPortalWorkspacePublicationBinding;
@@ -92,6 +93,7 @@ export async function dispatchOperationsPortalNativeOwnerRequest(request: Reques
   if (billingPermission) return handleOperationsPortalNativeBillingPermissionOwnerHttp(request, {
     environment: env.ENVIRONMENT, expectedHost: env.EXPECTED_HOST,
     delegationFlag: env.OPERATIONS_PORTAL_NATIVE_BILLING_OWNER_ENABLED,
+    diagnosticFlag: env.OPERATIONS_PORTAL_NATIVE_BILLING_PERMISSION_DIAGNOSTIC_ENABLED,
     configuration, database: env.OPS_DB,
   });
   return handleOperationsPortalNativeBillingAuthorityOwnerHttp(request, { environment: env.ENVIRONMENT,
