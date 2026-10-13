@@ -29,7 +29,7 @@ async function render(page: Page, mode = "success") {
 }
 async function calls(page: Page) {
   return page.evaluate(() => (window as Window & { nativeDeliveryCalls?: Array<{
-    path: string; method: string; body: Record<string, unknown> | null;
+    path: string; method: string; body: Record<string, unknown> | null; csrfToken: string | null;
   }> }).nativeDeliveryCalls ?? []);
 }
 async function loadCandidate(page: Page) {
@@ -73,7 +73,40 @@ test("an uncertain grant renews the session and retries the identical frozen bod
   await expect(page.getByText("Grant delivery was acknowledged.")).toBeVisible();
   const recorded = await calls(page), grants = recorded.filter(call => call.path.endsWith("/authorities") && call.method === "POST");
   expect(grants).toHaveLength(2); expect(grants[1]?.body).toEqual(grants[0]?.body);
+  expect(recorded.filter(call => call.path.endsWith("/session"))).toHaveLength(3);
+});
+
+test("a fresh explicit grant renews an expired initial CSRF without changing the reviewed body", async ({ page }) => {
+  await render(page, "session-stale"); await loadCandidate(page); await submitGrant(page);
+  await expect(page.getByText("Grant delivery was acknowledged.")).toBeVisible();
+  const recorded = await calls(page), writes = recorded.filter(call => call.method === "POST");
+  expect(writes).toHaveLength(1);
+  expect(writes[0]?.csrfToken).toBe(`2.${"b".repeat(64)}`);
+  expect(writes[0]?.body).toMatchObject({ recipientBindingId, folderReservationId,
+    expectedRevision: 0, expectedCandidateFingerprint: "a".repeat(64),
+    features: ["folder.list", "file.metadata"], reasonCode: "approved-staging-review" });
   expect(recorded.filter(call => call.path.endsWith("/session"))).toHaveLength(2);
+});
+
+for (const mode of ["renewal-denied", "renewal-network"]) test(`${mode} prevents every fresh mutation POST`, async ({ page }) => {
+  await render(page, mode); await loadCandidate(page); await submitGrant(page);
+  await expect(page.getByRole("alert")).toContainText("grant was denied");
+  expect((await calls(page)).filter(call => call.method === "POST")).toHaveLength(0);
+});
+
+test("failed retry renewal preserves the uncertain body and never automatically replays it", async ({ page }) => {
+  await render(page, "grant-network-renewal-denied"); await loadCandidate(page); await submitGrant(page);
+  await expect(page.getByRole("alert")).toContainText("outcome is uncertain");
+  const first = (await calls(page)).find(call => call.method === "POST")!.body;
+  await page.getByRole("button", { name: "Retry same frozen grant" }).click();
+  await expect(page.getByRole("alert")).toContainText("remains locked; no operation was replayed");
+  expect((await calls(page)).filter(call => call.method === "POST")).toHaveLength(1);
+  await expect(page.getByLabel("Exact native portal target ID")).toBeDisabled();
+  await expect(page.getByText(recipientBindingId, { exact: true })).toHaveCount(0);
+  await page.getByRole("button", { name: "Retry same frozen operation" }).click();
+  await expect(page.getByText("Grant delivery was acknowledged.")).toBeVisible();
+  const writes = (await calls(page)).filter(call => call.method === "POST");
+  expect(writes).toHaveLength(2); expect(writes[1]?.body).toEqual(first);
 });
 
 test("a stale candidate is cleared and requires a fresh explicit review", async ({ page }) => {
@@ -123,7 +156,7 @@ test("an uncertain revoke retries the exact body without silently changing autho
   await expect(page.getByText("Revocation delivery was acknowledged.")).toBeVisible();
   const recorded = await calls(page), revokes = recorded.filter(call => call.path.endsWith("/revoke"));
   expect(revokes).toHaveLength(2); expect(revokes[1]?.body).toEqual(revokes[0]?.body);
-  expect(recorded.filter(call => call.path.endsWith("/session"))).toHaveLength(2);
+  expect(recorded.filter(call => call.path.endsWith("/session"))).toHaveLength(3);
 });
 
 test("expired cancellation requires exact detail review and an in-page confirmation", async ({ page }) => {
@@ -152,7 +185,7 @@ test("uncertain cancellation retries the same stored operation without creating 
   await expect(page.locator('p[role="status"]')).toContainText("durably cancelled");
   const recorded = await calls(page), attempts = recorded.filter(call => call.path.endsWith("/cancel"));
   expect(attempts).toHaveLength(2); expect(attempts[1]?.body).toEqual(attempts[0]?.body);
-  expect(recorded.filter(call => call.path.endsWith("/session"))).toHaveLength(2);
+  expect(recorded.filter(call => call.path.endsWith("/session"))).toHaveLength(3);
   expect(recorded.filter(call => call.path.endsWith("/authorities") && call.method === "POST")).toHaveLength(0);
 });
 

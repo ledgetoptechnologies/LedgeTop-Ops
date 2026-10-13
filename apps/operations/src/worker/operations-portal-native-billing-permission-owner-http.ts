@@ -2,12 +2,14 @@ import { authenticateNativeStaffWithAdmissionVersion, type AuthenticatedNativeSt
 import { readBoundedJson } from "./bounded-json";
 import { manageOperationsPortalNativeBillingPermission, type NativeBillingPermissionChange } from "./operations-portal-native-billing-permission-issuer";
 import { configuredDeploymentOrigin } from "@ltds/shared/configured-deployment-origin";
+import { billingPermissionDiagnosticEnabled } from "./operations-portal-native-billing-permission-diagnostic";
 
 export const OPERATIONS_NATIVE_BILLING_PERMISSION_OWNER_BASE = "/api/native-client-portal/operations-billing-permissions";
 const UUID=/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 const ID=/^[A-Za-z0-9][A-Za-z0-9._:/-]{0,190}$/u;
 export type OperationsPortalNativeBillingPermissionOwnerHttpDependencies=Readonly<{
   environment:string;expectedHost:string;delegationFlag:string;database:D1Database;
+  diagnosticFlag?:string;
   configuration:Readonly<{enabled:boolean;origin:string;issuer:string;staffAudience:string;csrfSecret:string}>;
   authenticate?:typeof authenticateNativeStaffWithAdmissionVersion;
   manage?:typeof manageOperationsPortalNativeBillingPermission;
@@ -135,7 +137,11 @@ export async function handleOperationsPortalNativeBillingPermissionOwnerHttp(req
       await manager(db,actor,grant.resource_id);
       change={action:"revoke",operationId:value.operationId,grantId,expectedGeneration:value.expectedGeneration};
     }
-    const result=await(d.manage??manageOperationsPortalNativeBillingPermission)(d.database,actor,change);alive(actor);
+    const issuer=d.manage??manageOperationsPortalNativeBillingPermission;
+    const result=billingPermissionDiagnosticEnabled(d.environment,d.diagnosticFlag)
+      ?await issuer(d.database,actor,change,{environment:d.environment,enabled:d.diagnosticFlag,
+        emit:event=>console.warn(JSON.stringify(event))})
+      :await issuer(d.database,actor,change);alive(actor);
     if(result.status==="conflict")throw new Failure(result.reason==="authority"?403:409,result.reason==="authority"?"denied":"conflict");
     if(result.operationId!==change.operationId||result.grantId!==change.grantId||!generation(result.generation)
       ||result.generation!==change.expectedGeneration+1||result.status!=="applied"&&result.status!=="replayed")throw new Failure(503,"unavailable");
