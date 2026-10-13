@@ -29,6 +29,8 @@ test("renders all three exact staging configs without placeholders", () => {
   assert.equal(configs.delivery.vars.CLIENT_ACCESS_AUD, values.DEDICATED_CLIENT_PORTAL_STAGING_ACCESS_AUD);
   assert.equal(configs.operations.vars.NATIVE_INTEGRATION_CONTROL_ENABLED, "false");
   assert.equal(configs.operations.vars.NATIVE_INTEGRATION_CONTROL_ORIGIN, "");
+  assert.equal(configs.operations.vars.PROJECT_ALPHA_API_V2_SYNC_ENABLED, "false");
+  assert.equal(configs.operations.vars.PROJECT_ALPHA_DIRECTORY_EXACT_ADOPTION_ENABLED, "false");
   assert.equal(configs.operations.vars.CLIENT_REQUEST_TRIAGE_TO, values.STAGING_TRIAGE_EMAIL);
   assert.equal(configs["ops-sync"].vars.CF_ACCESS_GROUP_ID, values.STAGING_ACCESS_GROUP_ID);
   assert.equal(JSON.stringify(configs).includes("<"), false);

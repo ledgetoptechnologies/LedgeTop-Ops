@@ -11,7 +11,10 @@ export type Env = Omit<
   | "PROJECT_ALPHA_API_V2_MONITOR_ENABLED"
   | "PROJECT_ALPHA_API_V2_MONITOR_RECIPIENT"
   | "PROJECT_ALPHA_API_V2_READ_ACCEPTANCE_ENABLED"
+  | "PROJECT_ALPHA_API_V2_SYNC_ENABLED"
+  | "PROJECT_ALPHA_DIRECTORY_EXACT_ADOPTION_ENABLED"
   | "PROJECT_ALPHA_PROJECT_V2_ACTIVATION_ENABLED"
+  | "PROJECT_ALPHA_PROJECT_BINDING_REFRESH_ENABLED"
   | "PROJECT_ALPHA_DIRECTORY_V2_BOOTSTRAP_ACCEPTANCE_ENABLED"
   | "PROJECT_ALPHA_DIRECTORY_V2_BOOTSTRAP_SOURCE_ID"
   | "PROJECT_ALPHA_DIRECTORY_V2_BOOTSTRAP_ORIGIN"
@@ -39,14 +42,24 @@ export type Env = Omit<
   PROJECT_ALPHA_CONNECTOR_CREDENTIALS?: string;
   /** Versioned, deployment-owned API-v2 connections. Never accepted from a browser or connector registry request. */
   PROJECT_ALPHA_API_V2_CONNECTIONS?: string;
+  /** Default-off PA API-v2 invoice summary bridge for the Client Worker RPC. */
+  PROJECT_ALPHA_FINANCIAL_SUMMARY_ENABLED?: string;
+  /** Exact HTTPS origins permitted for existing PA public invoice/payment links. Defaults to each API origin. */
+  PROJECT_ALPHA_FINANCIAL_SUMMARY_PUBLIC_ORIGINS?: string;
   /** Default-off bounded API-v2 health/incident monitor. */
   PROJECT_ALPHA_API_V2_MONITOR_ENABLED?: string;
   /** Explicit deployment-owned owner mailbox for outage alerts; never inferred from Project Alpha data. */
   PROJECT_ALPHA_API_V2_MONITOR_RECIPIENT?: string;
   /** Default-off administrator-only API-v2 capabilities and inventory readiness check. */
   PROJECT_ALPHA_API_V2_READ_ACCEPTANCE_ENABLED?: string;
+  /** Default-off bounded API-v2 inventory evidence ingestion. */
+  PROJECT_ALPHA_API_V2_SYNC_ENABLED?: string;
+  /** Staging-only, administrator-protected exact adoption of already-bound Directory identities. */
+  PROJECT_ALPHA_DIRECTORY_EXACT_ADOPTION_ENABLED?: string;
   /** Default-off, manually invoked administrator-only Project-v2 staging acceptance. */
   PROJECT_ALPHA_PROJECT_V2_ACTIVATION_ENABLED?: string;
+  /** Staging-only, default-off refresh of an explicitly selected stale PA project binding. */
+  PROJECT_ALPHA_PROJECT_BINDING_REFRESH_ENABLED?: string;
   /** Staging-only, manually invoked Directory bootstrap acceptance fixture. */
   PROJECT_ALPHA_DIRECTORY_V2_BOOTSTRAP_ACCEPTANCE_ENABLED?: string;
   /** Staging-only immutable source pin for the Directory bootstrap fixture. */

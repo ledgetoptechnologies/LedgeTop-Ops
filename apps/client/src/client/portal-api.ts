@@ -1,5 +1,5 @@
 import { requestJson, selectClientWorkspaceId, selectedClientWorkspaceId } from "./bulk-download";
-import type { DeliveryLocationCollection, ViewerPublicShareCreation, ViewerPublicShareSummary, ViewerShellSessionGrant } from "@ltds/shared";
+import type { DeliveryLocationCollection, ProjectAlphaFinancialSummaryV2, ViewerPublicShareCreation, ViewerPublicShareSummary, ViewerShellSessionGrant } from "@ltds/shared";
 import { loadNativePortalContext, type NativePortalBootstrap } from "./native-portal-api";
 
 export interface PortalCapabilities {
@@ -40,6 +40,8 @@ export interface PortalProject {
   nextMilestone: string | null;
   lastUpdateAt: string | null;
 }
+
+export type PortalProjectFinancialSummary = Pick<ProjectAlphaFinancialSummaryV2, "returnedPageTotals" | "invoices" | "nextCursor">;
 
 export interface PortalFile {
   id: string;
@@ -194,6 +196,20 @@ export interface PortalServiceRequestInput {
 }
 
 export type PortalRequest = typeof requestJson;
+
+export async function loadPortalProjectFinancialSummary(
+  projectId: string,
+  cursor: string | null = null,
+  signal?: AbortSignal,
+  requestApi: PortalRequest = requestJson,
+): Promise<PortalProjectFinancialSummary> {
+  const query = cursor ? `?cursor=${encodeURIComponent(cursor)}` : "";
+  const result = await requestApi<{ summary: PortalProjectFinancialSummary }>(
+    `/api/client/projects/${encodeURIComponent(projectId)}/financial-summary${query}`,
+    signal ? { signal } : undefined,
+  );
+  return result.summary;
+}
 
 export async function loadPortalBootstrap(
   requestApi: PortalRequest = requestJson,

@@ -11,12 +11,9 @@ export const STAGING_PROJECT_ALPHA_ORIGIN = "https://pa-staging.ledgetoptechnolo
 // independent cross-repository gate; reset it before changing any pin.
 export const RELEASE_CONTRACT_FINALIZED = false;
 export const RELEASE_CANDIDATES = Object.freeze({
-  // Runtime changes end here. Commits after this boundary only make the
-  // contract/CI verification portable and must not silently move the runtime pin.
-  // The executable boundary is the reviewed Access-authenticated PA API-v2
-  // secret-envelope commit. The following contract-only commit pins it
-  // without making the release-packet HEAD self-referential.
-  operations: "5ca70d4f5ec834bfddf7bff68ffc1d89c6fd32a7",
+  // The API-v2 sync/read-adoption branch is intentionally unpinned until its
+  // reviewed runtime files and migrations are committed and pushed.
+  operations: "PENDING_OPERATIONS_COMMIT",
   viewer: "32cece808289a942ce902797535ccff6e24763e3",
   projectAlpha: "31deb85b87b95de27dc9e90a5591e036ae96709e",
 });
@@ -398,7 +395,24 @@ export const REQUIRED_STAGING_MIGRATIONS = Object.freeze({
     "0120_project_alpha_project_v2_canonical_settlement.sql",
     "0121_project_alpha_project_v2_settlement_proof_expiry.sql",
     "0122_project_alpha_project_v2_canonical_activation.sql",
+    "0123_native_directory_authority_history.sql",
+    "0124_project_alpha_project_adoption_review_evidence.sql",
+    "0125_project_alpha_api_v2_inventory_observations.sql",
+    "0126_project_alpha_directory_read_adoption_claims.sql",
+    "0127_project_alpha_directory_read_adoption_field_review_receipts.sql",
+    "0128_project_alpha_project_binding_revision_refresh_ledger.sql",
   ]),
+});
+
+export const REQUIRED_STAGING_MIGRATION_SHA256 = Object.freeze({
+  operations: Object.freeze({
+    "0123_native_directory_authority_history.sql": "5e36893c738c6a058271db521e4c5e8907009f135c25ee635f2f1ec709b3caf5",
+    "0124_project_alpha_project_adoption_review_evidence.sql": "b35a14babab1e10caf5420fe8d1209a81009b5bd55cfcb0361a4a3085c503a05",
+    "0125_project_alpha_api_v2_inventory_observations.sql": "1b6fbb3b3ce8b50dbb553fd38ec8544c25f88a2837d8523b5ddeb0494534bd45",
+    "0126_project_alpha_directory_read_adoption_claims.sql": "4bd97d25bd96a0a872bd3106ab936ab3fe1806b7456aec6cf02c92195715d1b0",
+    "0127_project_alpha_directory_read_adoption_field_review_receipts.sql": "ef4abf5411e8fd4e10d4daeb94dd4ca3469ae7d179d2b135a9d04ca4a0cf12aa",
+    "0128_project_alpha_project_binding_revision_refresh_ledger.sql": "00ee73af4d5db881d959868d6b84b995753cb82c94964315f384f9ae6fd40f5a",
+  }),
 });
 
 // Every additive capability must be present and false in a release-preparation
@@ -440,6 +454,9 @@ export const REQUIRED_DISABLED_FEATURE_FLAGS = Object.freeze({
   operations: Object.freeze([
     "NATIVE_INTEGRATION_CONTROL_ENABLED",
     "PROJECT_ALPHA_DRAFT_QUOTES_ENABLED",
+    "PROJECT_ALPHA_API_V2_SYNC_ENABLED",
+    "PROJECT_ALPHA_DIRECTORY_EXACT_ADOPTION_ENABLED",
+    "PROJECT_ALPHA_PROJECT_BINDING_REFRESH_ENABLED",
     "PROJECT_ALPHA_PROJECT_V2_ACTIVATION_ENABLED",
     "PROJECT_ALPHA_DELIVERY_INTENTS_ENABLED",
     "PROJECT_ALPHA_DELIVERY_GUEST_ENABLED",
@@ -636,6 +653,9 @@ export const FEATURE_FLAG_ACTIVATION_POLICIES = Object.freeze({
   operations: Object.freeze({
     NATIVE_INTEGRATION_CONTROL_ENABLED: Object.freeze({ prohibitedReason: "Native integration control requires a separately approved native-authority and origin-bound activation packet" }),
     PROJECT_ALPHA_DRAFT_QUOTES_ENABLED: Object.freeze({ gates: Object.freeze(["projectAlphaDraftQuotes", "projectAlphaCatalogProjection"]) }),
+    PROJECT_ALPHA_API_V2_SYNC_ENABLED: Object.freeze({ prohibitedReason: "API-v2 inventory sync requires migrations 0125-0127, a reviewed staging-only connection envelope, and a separately approved bounded activation packet" }),
+    PROJECT_ALPHA_DIRECTORY_EXACT_ADOPTION_ENABLED: Object.freeze({ prohibitedReason: "Exact Directory read adoption requires migrations 0125-0127, current native Directory authority, and a separately approved staging-only review window" }),
+    PROJECT_ALPHA_PROJECT_BINDING_REFRESH_ENABLED: Object.freeze({ prohibitedReason: "Project binding revision refresh requires migration 0128, a reviewed staging-only API-v2 connection envelope, and a separately approved single-binding recovery window" }),
     PROJECT_ALPHA_PROJECT_V2_ACTIVATION_ENABLED: Object.freeze({ prohibitedReason: "Project-v2 activation is limited to a separately approved, manually invoked joined staging window with remote migration 0122, native project authority, rollback, and public-link preservation evidence" }),
     PROJECT_ALPHA_DELIVERY_INTENTS_ENABLED: Object.freeze({ prohibitedReason: "Project Alpha managed delivery requires migration 0069/0147/0031 and an independently approved end-to-end intent, notification, and revocation activation window" }),
     PROJECT_ALPHA_DELIVERY_GUEST_ENABLED: Object.freeze({ prohibitedReason: "Guest delivery remains explicit-only and requires a separate public-bearer notification and revocation approval after the portal intent path is proven" }),
@@ -759,6 +779,7 @@ export const STAGING_STATIC_VARS = Object.freeze({
     PROJECT_ALPHA_PRICING_HINT_ALLOWED_ORIGIN: STAGING_PROJECT_ALPHA_ORIGIN,
     PROJECT_ALPHA_PRICING_HINT_APPLICATION_KEY: "ledgetop_client_pricing_staging",
     PROJECT_ALPHA_PRICING_HINT_CURRENCIES: "USD",
+    CLIENT_PORTAL_PA_FINANCIAL_SUMMARY_ENABLED: "false",
     CLIENT_REQUEST_ATTACHMENTS_ENABLED: "false",
     CLIENT_PORTAL_TEAM_ENABLED: "false",
     CLIENT_PORTAL_HIERARCHY_V2_ENABLED: "false",
@@ -790,6 +811,8 @@ export const STAGING_STATIC_VARS = Object.freeze({
     CLIENT_PORTAL_ORIGINS: `https://${STAGING_HOSTS.client},https://${STAGING_CLIENT_PORTAL.secondaryHostname}`,
     PUBLIC_SHARE_ORIGIN: `https://${STAGING_HOSTS.delivery}`,
     PROJECT_ALPHA_BASE_URL: STAGING_PROJECT_ALPHA_ORIGIN,
+    PROJECT_ALPHA_FINANCIAL_SUMMARY_ENABLED: "false",
+    PROJECT_ALPHA_FINANCIAL_SUMMARY_PUBLIC_ORIGINS: STAGING_PROJECT_ALPHA_ORIGIN,
     R2_ACCOUNT_ID: STAGING_ACCOUNT_ID,
     R2_BUCKET_NAME: "client-data-staging",
     R2_INCOMING_BUCKET_NAME: "ltds-incoming-staging",
@@ -800,6 +823,9 @@ export const STAGING_STATIC_VARS = Object.freeze({
     THUMBNAIL_RENDERER_EXPECTED_HOST: STAGING_HOSTS.incoming,
     APPLICATION_KEY: "ledgetop_ops_staging",
     PROJECT_ALPHA_DRAFT_QUOTES_ENABLED: "false",
+    PROJECT_ALPHA_API_V2_SYNC_ENABLED: "false",
+    PROJECT_ALPHA_DIRECTORY_EXACT_ADOPTION_ENABLED: "false",
+    PROJECT_ALPHA_PROJECT_BINDING_REFRESH_ENABLED: "false",
     PROJECT_ALPHA_PROJECT_V2_ACTIVATION_ENABLED: "false",
     PROJECT_ALPHA_DIRECTORY_V2_BOOTSTRAP_ACCEPTANCE_ENABLED: "false",
     PROJECT_ALPHA_DELIVERY_INTENTS_ENABLED: "false",
@@ -856,7 +882,7 @@ export const STAGING_ALLOWED_VAR_NAMES = Object.freeze({
     "PROJECT_ALPHA_SERVICE_ASSIGNMENT_SYNC_ENABLED", "CLIENT_PORTAL_SERVICE_ASSIGNMENT_POLICY_ENABLED",
     "PROJECT_ALPHA_PRICING_HINTS_ENABLED", "PROJECT_ALPHA_PRICING_HINT_URL",
     "PROJECT_ALPHA_PRICING_HINT_ALLOWED_ORIGIN", "PROJECT_ALPHA_PRICING_HINT_APPLICATION_KEY",
-    "PROJECT_ALPHA_PRICING_HINT_CURRENCIES", "CLIENT_REQUEST_ATTACHMENTS_ENABLED",
+    "PROJECT_ALPHA_PRICING_HINT_CURRENCIES", "CLIENT_PORTAL_PA_FINANCIAL_SUMMARY_ENABLED", "CLIENT_REQUEST_ATTACHMENTS_ENABLED",
     "CLIENT_PORTAL_TEAM_ENABLED", "CLIENT_PORTAL_HIERARCHY_V2_ENABLED", "CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED", "CLIENT_PORTAL_ROOT_ACCESS_POLICY_ENABLED",
     "CLIENT_PORTAL_PA_IDENTITY_AUTO_ELIGIBILITY_ENABLED",
     "AUTHENTICATED_DELIVERY_GRANTS_ENABLED",
@@ -880,7 +906,7 @@ export const STAGING_ALLOWED_VAR_NAMES = Object.freeze({
     "ENVIRONMENT", "TEAM_DOMAIN", "OPERATIONS_AUD",
     "NATIVE_INTEGRATION_CONTROL_ENABLED", "NATIVE_INTEGRATION_CONTROL_ORIGIN",
     "DELIVERY_BASE_URL", "CLIENT_PORTAL_ORIGINS", "PUBLIC_SHARE_ORIGIN",
-    "PROJECT_ALPHA_BASE_URL", "PROJECT_ALPHA_DRAFT_QUOTES_ENABLED", "PROJECT_ALPHA_PROJECT_V2_ACTIVATION_ENABLED",
+    "PROJECT_ALPHA_BASE_URL", "PROJECT_ALPHA_FINANCIAL_SUMMARY_ENABLED", "PROJECT_ALPHA_FINANCIAL_SUMMARY_PUBLIC_ORIGINS", "PROJECT_ALPHA_DRAFT_QUOTES_ENABLED", "PROJECT_ALPHA_API_V2_SYNC_ENABLED", "PROJECT_ALPHA_DIRECTORY_EXACT_ADOPTION_ENABLED", "PROJECT_ALPHA_PROJECT_BINDING_REFRESH_ENABLED", "PROJECT_ALPHA_PROJECT_V2_ACTIVATION_ENABLED",
     "PROJECT_ALPHA_DIRECTORY_V2_BOOTSTRAP_ACCEPTANCE_ENABLED", "PROJECT_ALPHA_DIRECTORY_V2_BOOTSTRAP_SOURCE_ID", "PROJECT_ALPHA_DIRECTORY_V2_BOOTSTRAP_ORIGIN",
     "PROJECT_ALPHA_DELIVERY_INTENTS_ENABLED", "PROJECT_ALPHA_DELIVERY_GUEST_ENABLED",
     "CLIENT_DELEGATED_SHARE_SIGNER_ENABLED", "CLIENT_HUB_PA_CONTACT_ASSIGNMENTS_ENABLED", "CLIENT_PORTAL_HIERARCHY_V2_ENABLED",
@@ -928,6 +954,7 @@ export const STAGING_INVENTORY = Object.freeze({
     services: [
       { binding: "CLIENT_DELEGATED_SHARE_SIGNER", service: "ledgetop-ops-staging", entrypoint: "ClientDelegatedShareSigner" },
       { binding: "VIEWER_SESSION_ISSUER", service: "ledgetop-ops-staging", entrypoint: "ViewerSessionIssuer" },
+      { binding: "PROJECT_ALPHA_FINANCIAL_SUMMARY", service: "ledgetop-ops-staging", entrypoint: "ProjectAlphaFinancialSummary" },
     ],
     queues: [],
     crons: ["*/5 * * * *", "15 * * * *"],

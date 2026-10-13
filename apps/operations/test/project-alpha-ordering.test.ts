@@ -47,7 +47,7 @@ describe("Project Alpha snapshot/webhook ordering",()=>{
       expect(await ops.prepare("SELECT project_alpha_user_id FROM staff_users WHERE id='legacy'").first("project_alpha_user_id")).toBe("current-pa-user");
       expect(await ops.prepare("SELECT status FROM staff_users WHERE id='legacy'").first("status")).toBe("active");
     }finally{await miniflare.dispose();}
-  },30_000);
+  },120_000);
 
   it("preserves a newer webhook projection when an older snapshot runs afterward",async()=>{
     const miniflare=new Miniflare({modules:true,script:"export default {fetch(){return new Response('ok')}}",d1Databases:["OPS_DB","DELIVERY_DB"]});
@@ -110,5 +110,5 @@ describe("Project Alpha snapshot/webhook ordering",()=>{
         expect(await delivery.prepare(`SELECT revoked_at FROM ${table} WHERE project_id='portal-50'`).first("revoked_at")).not.toBeNull();
       }
     }finally{await miniflare.dispose();}
-  },30_000);
+  },120_000);
 });

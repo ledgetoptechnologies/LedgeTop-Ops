@@ -13,6 +13,8 @@ import { assertProjectAlphaConnectorStateTransition, registerProjectAlphaConnect
 import type { Env, StaffPrincipal } from "../src/worker/types";
 
 const ROOT = "/api/admin/integrations/project-alpha/connectors";
+const API_V2_READ_ACCEPTANCE = "/api/admin/api-v2/project-alpha/read-acceptance";
+const API_V2_READ_ACCEPTANCE_CONNECTIONS = `${API_V2_READ_ACCEPTANCE}/connections`;
 const primary = "project-alpha:primary";
 const secondary = "project-alpha:ltt";
 const principal: StaffPrincipal = { id: "registry-route-admin", email: "registry-admin@example.test", displayName: "Registry administrator", accessSubject: "verified-admin-subject", projectAlphaUserId: null };
@@ -81,7 +83,8 @@ describe("Project Alpha deployment-owned connector administration boundary", { t
     expect(projectAlphaProjectionApiRequest("/api/delivery/native-grants/audiences")).toBe(true);
     expect(projectAlphaProjectionApiRequest("/api/viewer/native-client-grants")).toBe(true);
     expect(projectAlphaProjectionApiRequest("/api/team/staff/member-1/assigned-work")).toBe(true);
-    for (const path of ["/api/session", "/api/airspace/tfrs", "/api/delivery/folders", "/api/team/staff", "/api/admin/roles"])
+    for (const path of ["/api/session", "/api/airspace/tfrs", "/api/delivery/folders", "/api/team/staff", "/api/admin/roles",
+      API_V2_READ_ACCEPTANCE, API_V2_READ_ACCEPTANCE_CONNECTIONS])
       expect(projectAlphaProjectionApiRequest(path)).toBe(false);
 
     const priorManifest = env.PROJECT_ALPHA_CONNECTOR_SOURCES;
@@ -92,6 +95,23 @@ describe("Project Alpha deployment-owned connector administration boundary", { t
       expect((await send("/api/admin/roles")).status).toBe(200);
       expect((await send(ROOT)).status).toBe(503);
       expect((await send("/api/viewer/native-client-grants")).status).toBe(503);
+    } finally {
+      env.PROJECT_ALPHA_CONNECTOR_SOURCES = priorManifest;
+      env.PROJECT_ALPHA_CONNECTOR_SOURCES_REQUIRED = priorRequired;
+    }
+  });
+
+  it("serves the API-v2 acceptance inventory without reconciling legacy connector state", async () => {
+    const priorManifest = env.PROJECT_ALPHA_CONNECTOR_SOURCES;
+    const priorRequired = env.PROJECT_ALPHA_CONNECTOR_SOURCES_REQUIRED;
+    env.PROJECT_ALPHA_CONNECTOR_SOURCES = "{malformed";
+    env.PROJECT_ALPHA_CONNECTOR_SOURCES_REQUIRED = "true";
+    const before = await counts();
+    try {
+      const response = await send(API_V2_READ_ACCEPTANCE_CONNECTIONS);
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual({ status: "unconfigured", connections: [], readAcceptanceEnabled: false });
+      expect(await counts()).toEqual(before);
     } finally {
       env.PROJECT_ALPHA_CONNECTOR_SOURCES = priorManifest;
       env.PROJECT_ALPHA_CONNECTOR_SOURCES_REQUIRED = priorRequired;

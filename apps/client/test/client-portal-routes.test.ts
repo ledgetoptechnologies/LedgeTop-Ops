@@ -38,6 +38,7 @@ function repository(overrides: Partial<ClientPortalRepository> = {}): ClientPort
     resolveSession: vi.fn(async () => session),
     listProjects: vi.fn(async () => []),
     getProject: vi.fn(async () => null),
+    getProjectFinancialReference: vi.fn(async () => null),
     listProjectFiles: vi.fn(async () => null),
     listPastDeliveries: vi.fn(async () => ({ files: [], prefix: "", cursor: null })),
     listProjectFileLocations: vi.fn(async () => null),
@@ -113,6 +114,77 @@ describe("client portal feature gate", () => {
       repository: repository({ resolveSession: vi.fn(async () => null) }),
     }).request("/session", {}, env("true"));
     expect(response.status).toBe(403);
+  });
+});
+
+describe("read-only Project Alpha financial summary route", () => {
+  const mappedReference = { sourceId: "project-alpha:ltt", projectPublicId: "0123456789abcdef0123456789abcdef" };
+  const pageTotals = { invoiceTotal: "100.00", amountPaid: "25.00", balanceDue: "75.00" };
+  const invoices = [{ documentNumber: 12, status: "partial", total: "100.00", amountPaid: "25.00", balanceDue: "75.00",
+    dueDate: null, documentDate: "2026-10-01", invoicePublicUrl: null, paymentPublicUrl: null }];
+  const result = {
+    ok: true as const,
+    protocolVersion: 1 as const,
+    summary: { sourceInstanceId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", applicationId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+      historyEpoch: "cccccccc-cccc-4ccc-8ccc-cccccccccccc", requestId: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+      resource: { type: "project" as const, externalId: "42", publicId: mappedReference.projectPublicId },
+      returnedPageTotals: pageTotals, invoices, nextCursor: null },
+  };
+
+  function enabledEnv(binding: { readProjectAlphaFinancialSummary: ReturnType<typeof vi.fn> }) {
+    return Object.assign(env("true"), {
+      CLIENT_PORTAL_PA_FINANCIAL_SUMMARY_ENABLED: "true",
+      PROJECT_ALPHA_FINANCIAL_SUMMARY: binding,
+    }) as Env;
+  }
+
+  it("denies sessions without billing access before resolving or calling PA mappings", async () => {
+    const getProjectFinancialReference = vi.fn();
+    const readProjectAlphaFinancialSummary = vi.fn();
+    const app = createClientPortalRouter({ resolvePrincipal: principal,
+      repository: repository({ getProjectFinancialReference }),
+    });
+    const response = await app.request("http://localhost/projects/project-1/financial-summary", {},
+      enabledEnv({ readProjectAlphaFinancialSummary }));
+    expect(response.status).toBe(404);
+    expect(response.headers.get("Cache-Control")).toBe("private, no-store");
+    expect(getProjectFinancialReference).not.toHaveBeenCalled();
+    expect(readProjectAlphaFinancialSummary).not.toHaveBeenCalled();
+  });
+
+  it("uses only the exact mapped PA identity for a billing-authorized project", async () => {
+    const readProjectAlphaFinancialSummary = vi.fn(async () => result);
+    const getProject = vi.fn(async () => ({ id: "project-1" } as never));
+    const getProjectFinancialReference = vi.fn(async () => mappedReference);
+    const app = createClientPortalRouter({
+      resolvePrincipal: principal,
+      repository: repository({ resolveSession: vi.fn(async () => ({ ...session, canViewBilling: true })), getProject,
+        getProjectFinancialReference }),
+    });
+    const response = await app.request("http://localhost/projects/project-1/financial-summary?projectPublicId=attacker-value", {},
+      enabledEnv({ readProjectAlphaFinancialSummary }));
+    expect(response.status).toBe(200);
+    expect(response.headers.get("Cache-Control")).toBe("private, no-store");
+    const payload = await response.json();
+    expect(payload).toEqual({ summary: { returnedPageTotals: pageTotals, invoices, nextCursor: null } });
+    expect(JSON.stringify(payload)).not.toContain("externalId");
+    expect(getProjectFinancialReference).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ canViewBilling: true }), "project-1");
+    expect(readProjectAlphaFinancialSummary).toHaveBeenCalledWith({
+      protocolVersion: 1, sourceId: mappedReference.sourceId,
+      projectPublicId: mappedReference.projectPublicId, cursor: null,
+    });
+  });
+
+  it("does not call PA for an unauthorized or unmapped project", async () => {
+    const readProjectAlphaFinancialSummary = vi.fn(async () => result);
+    const app = createClientPortalRouter({ resolvePrincipal: principal,
+      repository: repository({ resolveSession: vi.fn(async () => ({ ...session, canViewBilling: true })),
+        getProject: vi.fn(async () => null), getProjectFinancialReference: vi.fn(async () => mappedReference) }),
+    });
+    const response = await app.request("http://localhost/projects/project-2/financial-summary", {},
+      enabledEnv({ readProjectAlphaFinancialSummary }));
+    expect(response.status).toBe(404);
+    expect(readProjectAlphaFinancialSummary).not.toHaveBeenCalled();
   });
 });
 

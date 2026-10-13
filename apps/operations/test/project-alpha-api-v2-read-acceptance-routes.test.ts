@@ -9,12 +9,14 @@ const mocks = vi.hoisted(() => ({
   probe: vi.fn(),
   directory: vi.fn(),
   projects: vi.fn(),
+  inventory: vi.fn(),
   audit: vi.fn(),
   batch: vi.fn(),
 }));
 
 vi.mock("../src/worker/acl", () => ({ sqlScope: mocks.scope }));
 vi.mock("../src/worker/project-alpha-api-v2-connections", () => ({
+  listProjectAlphaApiV2Connections: mocks.inventory,
   withEnabledConfiguredProjectAlphaApiV2Connection: mocks.configured,
 }));
 vi.mock("../src/worker/project-alpha-api-v2", () => ({ probeProjectAlphaApiV2: mocks.probe }));
@@ -30,6 +32,7 @@ vi.mock("../src/worker/request-security", () => ({ auditStatement: mocks.audit }
 
 import {
   PROJECT_ALPHA_API_V2_READ_ACCEPTANCE_ROUTE,
+  PROJECT_ALPHA_API_V2_READ_ACCEPTANCE_CONNECTIONS_ROUTE,
   registerProjectAlphaApiV2ReadAcceptanceRoutes,
 } from "../src/worker/project-alpha-api-v2-read-acceptance-routes";
 
@@ -58,7 +61,9 @@ function fixture(enabled = true, administrator = true) {
   const send = (body: unknown = { sourceId }) => app.request(
     `https://ops.example.test${PROJECT_ALPHA_API_V2_READ_ACCEPTANCE_ROUTE}`,
     { method: "POST", headers: { Origin: "https://ops.example.test", "Content-Type": "application/json", "X-CSRF-Token": "middleware-tested" }, body: JSON.stringify(body) }, env);
-  return { app, env, send };
+  const sendInventory = () => app.request(`https://ops.example.test${PROJECT_ALPHA_API_V2_READ_ACCEPTANCE_CONNECTIONS_ROUTE}`,
+    { method: "GET", headers: { Origin: "https://ops.example.test" } }, env);
+  return { app, env, send, sendInventory };
 }
 
 beforeEach(() => {
@@ -81,11 +86,29 @@ beforeEach(() => {
     authorizationGeneration: "12", nextCursor: null, projects: [{ externalId: "private-project-record",
       publicId: "a".repeat(32), revision: "2", projectionSha256: "b".repeat(64), status: "active", archived: false }],
   } });
+  mocks.inventory.mockReturnValue({ status: "configured", connections: [{ sourceId, enabled: true }] });
   mocks.audit.mockResolvedValue({});
   mocks.batch.mockResolvedValue([]);
 });
 
 describe("Project Alpha API-v2 read acceptance route", () => {
+  it("lists only redacted API-v2 source selectors independently of the acceptance flag", async () => {
+    const { sendInventory } = fixture(false);
+    const response = await sendInventory();
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ status: "configured", connections: [{ sourceId, enabled: true }], readAcceptanceEnabled: false });
+    expect(mocks.inventory).toHaveBeenCalledTimes(1);
+    expect(mocks.batch).not.toHaveBeenCalled();
+    expect(response.headers.get("Cache-Control")).toBe("no-store");
+  });
+
+  it("requires administrator and deny-aware global integrations.manage for source inventory", async () => {
+    expect((await fixture(true, false).sendInventory()).status).toBe(403);
+    mocks.scope.mockResolvedValueOnce({ global: true, deniedGlobal: true });
+    expect((await fixture().sendInventory()).status).toBe(403);
+    expect(mocks.inventory).not.toHaveBeenCalled();
+  });
+
   it("is default-off before configuration or remote reads", async () => {
     expect((await fixture(false).send()).status).toBe(404);
     expect(mocks.configured).not.toHaveBeenCalled();
@@ -116,10 +139,10 @@ describe("Project Alpha API-v2 read acceptance route", () => {
     expect(mocks.projects).toHaveBeenCalledWith(expect.anything(), { limit: 200 }, fetch);
   });
 
-  it("returns only safe status, request IDs, counts, hashes, and identity/contract matches", async () => {
+  it("returns only safe status, request IDs, counts, hashes, and identity/contract booleans", async () => {
     const body = await (await fixture().send()).json() as Record<string, any>;
     expect(body).toMatchObject({ sourceId, readOnly: true,
-      capabilities: { status: "verified", requestId, sourceInstanceId, applicationId, historyEpoch,
+      capabilities: { status: "verified", requestId,
         capabilityCount: 3, exactIdentityMatch: true, exactContractMatch: true },
       directory: { status: "observed", requestId, authorizationGeneration: "9", count: 1, hasMore: false,
         metadataSha256: expect.stringMatching(/^[0-9a-f]{64}$/) },
@@ -127,11 +150,15 @@ describe("Project Alpha API-v2 read acceptance route", () => {
         metadataSha256: expect.stringMatching(/^[0-9a-f]{64}$/) },
     });
     const serialized = JSON.stringify(body);
-    for (const privateValue of ["server-only-api-key", "private-pa.example.test", "private-customer-record", "private-project-record", "e".repeat(32), "a".repeat(32)])
+    for (const privateValue of ["server-only-api-key", "private-pa.example.test", "private-customer-record", "private-project-record",
+      sourceInstanceId, applicationId, historyEpoch, "e".repeat(32), "a".repeat(32)])
       expect(serialized).not.toContain(privateValue);
     expect(mocks.audit).toHaveBeenCalledWith(expect.anything(), expect.anything(), principal,
       "integration.project_alpha_api_v2_read_acceptance_completed", "project_alpha_api_v2_read_acceptance", sourceId,
       null, expect.objectContaining({ readOnly: true }));
+    expect(JSON.stringify(mocks.audit.mock.calls[0])).not.toContain(sourceInstanceId);
+    expect(JSON.stringify(mocks.audit.mock.calls[0])).not.toContain(applicationId);
+    expect(JSON.stringify(mocks.audit.mock.calls[0])).not.toContain(historyEpoch);
   });
 
   it("does not run inventories after a failed capabilities contract", async () => {

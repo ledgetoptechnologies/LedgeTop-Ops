@@ -1020,6 +1020,42 @@ export function createClientPortalRouter(
     return c.json({ project: { ...project, canRequestService: project.canRequestService && request } });
   });
 
+  router.get("/projects/:projectId/financial-summary", async c => {
+    c.header("Cache-Control", "private, no-store");
+    if (c.env.CLIENT_PORTAL_PA_FINANCIAL_SUMMARY_ENABLED !== "true" || !c.env.PROJECT_ALPHA_FINANCIAL_SUMMARY)
+      throw new HTTPException(404, { message: "Not found" });
+    const session = c.get("clientSession");
+    if (!session.canViewBilling) throw new HTTPException(404, { message: "Project not found" });
+    const projectId = opaqueId.safeParse(c.req.param("projectId"));
+    const cursorValue = c.req.query("cursor");
+    const cursor = cursorValue === undefined ? null : z.string().regex(/^[1-9][0-9]{0,9}$/)
+      .refine(value => Number(value) <= 2_147_483_647).safeParse(cursorValue);
+    if (!projectId.success || (cursor !== null && !cursor.success))
+      throw new HTTPException(404, { message: "Project not found" });
+    const project = await repository.getProject(c.env, session, projectId.data);
+    if (!project) throw new HTTPException(404, { message: "Project not found" });
+    if (!repository.getProjectFinancialReference)
+      throw new HTTPException(503, { message: "Financial information is temporarily unavailable" });
+    const reference = await repository.getProjectFinancialReference(c.env, session, projectId.data);
+    if (!reference) throw new HTTPException(404, { message: "Financial records not found" });
+    const result = await c.env.PROJECT_ALPHA_FINANCIAL_SUMMARY.readProjectAlphaFinancialSummary({
+      protocolVersion: 1,
+      sourceId: reference.sourceId,
+      projectPublicId: reference.projectPublicId,
+      cursor: cursor === null ? null : cursor.data,
+    });
+    if (!result.ok) {
+      if (result.code === "not_found") throw new HTTPException(404, { message: "Financial records not found" });
+      if (result.code === "disabled") throw new HTTPException(404, { message: "Not found" });
+      throw new HTTPException(503, { message: "Financial information is temporarily unavailable" });
+    }
+    return c.json({ summary: {
+      returnedPageTotals: result.summary.returnedPageTotals,
+      invoices: result.summary.invoices,
+      nextCursor: result.summary.nextCursor,
+    } });
+  });
+
   router.get("/projects/:projectId/files", async (c) => {
     const authStarted = performance.now();
     const projectId = opaqueId.safeParse(c.req.param("projectId"));

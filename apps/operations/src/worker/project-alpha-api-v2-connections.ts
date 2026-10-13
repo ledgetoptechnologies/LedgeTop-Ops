@@ -24,6 +24,11 @@ export type ProjectAlphaApiV2ConfiguredProbe =
   | { status: "disabled"; sourceId: string }
   | ProjectAlphaApiV2Probe;
 
+export type ProjectAlphaApiV2ConnectionInventory = Readonly<{
+  status: "configured" | "unconfigured" | "misconfigured";
+  connections: ReadonlyArray<Readonly<{ sourceId: string; enabled: boolean }>>;
+}>;
+
 /** Deliberately has no configuration detail: callers must not surface secret
  * envelope contents in logs, responses, or diagnostics. */
 export class ProjectAlphaApiV2ConnectionConfigurationError extends Error {
@@ -82,6 +87,7 @@ function origin(value: unknown): string {
 type ParsedConfiguredConnection = Readonly<{
   resolved: ProjectAlphaApiV2ConfiguredConnection;
   apiKey: string;
+  financialApiKey?: string;
   accessClientId?: string;
   accessClientSecret?: string;
 }>;
@@ -120,11 +126,17 @@ function parseProjectAlphaApiV2Connection(
       ? ["sourceId", "baseUrl", "apiKey", "sourceInstanceId", "applicationId", "historyEpoch"]
       : ["sourceId", "enabled", "baseUrl", "apiKey", "sourceInstanceId", "applicationId", "historyEpoch"];
     const hasAccessCredentials = value.accessClientId !== undefined || value.accessClientSecret !== undefined;
-    const allowed = hasAccessCredentials ? [...baseFields, "accessClientId", "accessClientSecret"] : baseFields;
+    const hasFinancialApiKey = value.financialApiKey !== undefined;
+    const allowed = [
+      ...baseFields,
+      ...(hasAccessCredentials ? ["accessClientId", "accessClientSecret"] : []),
+      ...(hasFinancialApiKey ? ["financialApiKey"] : []),
+    ];
     const access = hasAccessCredentials && accessCredentials(value)
       ? { accessClientId: value.accessClientId, accessClientSecret: value.accessClientSecret } : undefined;
     if (!exact(value, allowed) || !sourceId(value.sourceId) || value.sourceId !== key || !apiKey(value.apiKey)
       || (hasAccessCredentials && !access)
+      || (hasFinancialApiKey && !apiKey(value.financialApiKey))
       || !uuid(value.sourceInstanceId) || !uuid(value.applicationId) || !uuid(value.historyEpoch)) invalid();
     const baseUrl = origin(value.baseUrl);
     const identity = [value.sourceInstanceId.toLowerCase(), value.applicationId.toLowerCase(), value.historyEpoch.toLowerCase()];
@@ -134,10 +146,38 @@ function parseProjectAlphaApiV2Connection(
     const configured = Object.freeze({ sourceId: value.sourceId, enabled: value.enabled ?? false,
       connection: Object.freeze({ baseUrl, expectedSourceInstanceId: identity[0]!, expectedApplicationId: identity[1]!, expectedHistoryEpoch: identity[2]! }) });
     const parsed = Object.freeze({ resolved: configured, apiKey: value.apiKey,
+      ...(hasFinancialApiKey ? { financialApiKey: value.financialApiKey as string } : {}),
       ...(access ?? {}) });
     if (key === requestedSourceId) selected = parsed;
   }
   return selected ?? invalid();
+}
+
+/** Safe administrator inventory for the read-only acceptance UI. It returns
+ * only canonical source selectors and enablement; no URL, API key, or PA
+ * identity commitment crosses the response boundary. The same strict parser
+ * validates the complete versioned envelope before any entry is listed. */
+export function listProjectAlphaApiV2Connections(
+  env: ProjectAlphaApiV2ConnectionEnvironment,
+): ProjectAlphaApiV2ConnectionInventory {
+  try {
+    const raw = env.PROJECT_ALPHA_API_V2_CONNECTIONS;
+    if (raw === undefined) return { status: "unconfigured", connections: [] };
+    if (typeof raw !== "string" || !raw.trim()) return { status: "misconfigured", connections: [] };
+    if (new TextEncoder().encode(raw).byteLength > MAX_SECRET_BYTES) return { status: "misconfigured", connections: [] };
+    const envelope: unknown = parseDuplicateFreeJson(raw);
+    if (!plain(envelope) || !exact(envelope, ["version", "instances"]) || envelope.version !== 1 || !plain(envelope.instances))
+      return { status: "misconfigured", connections: [] };
+    const entries = Object.entries(envelope.instances);
+    if (entries.length === 0 || entries.length > MAX_CONNECTIONS) return { status: "misconfigured", connections: [] };
+    const connections = entries.map(([key]) => parseProjectAlphaApiV2Connection(env, key).resolved)
+      .map(connection => Object.freeze({ sourceId: connection.sourceId, enabled: connection.enabled }));
+    return { status: "configured", connections: Object.freeze(connections) };
+  } catch {
+    // Deliberately suppress parser/environment details: the raw envelope is a
+    // deployment secret and must not escape via API errors or UI diagnostics.
+    return { status: "misconfigured", connections: [] };
+  }
 }
 
 export function resolveProjectAlphaApiV2Connection(
@@ -179,5 +219,22 @@ export async function withEnabledConfiguredProjectAlphaApiV2Connection<T>(
     const configured = parseProjectAlphaApiV2Connection(env, sourceId);
     if (!configured.resolved.enabled) return { status: "disabled", sourceId: configured.resolved.sourceId };
     return { status: "enabled", value: await callback(enabledConnection(configured)) };
+  } catch { return { status: "misconfigured" }; }
+}
+
+/** A separate read-only invoice key can be configured beside the general
+ * sync key. This prevents a portal finance consumer from inheriting broad
+ * Directory/Project read scopes; there is deliberately no fallback. */
+export async function withEnabledConfiguredProjectAlphaFinancialApiV2Connection<T>(
+  env: ProjectAlphaApiV2ConnectionEnvironment,
+  sourceId: string,
+  callback: (connection: Readonly<ProjectAlphaApiV2Connection>) => Promise<T> | T,
+): Promise<{ status: "enabled"; value: T } | { status: "disabled"; sourceId: string } | { status: "misconfigured" }> {
+  try {
+    const configured = parseProjectAlphaApiV2Connection(env, sourceId);
+    if (!configured.resolved.enabled) return { status: "disabled", sourceId: configured.resolved.sourceId };
+    if (!configured.financialApiKey) return { status: "misconfigured" };
+    const connection = enabledConnection(configured);
+    return { status: "enabled", value: await callback(Object.freeze({ ...connection, apiKey: configured.financialApiKey })) };
   } catch { return { status: "misconfigured" }; }
 }
