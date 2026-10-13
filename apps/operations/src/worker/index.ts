@@ -87,6 +87,8 @@ import { handleWorkspaceBindingAdminHttp } from "./client-portal-workspace-bindi
 import { handleAuthorityV3OwnerHttp } from "./client-portal-authority-v3-owner-http";
 import { handleRecipientEnrollmentOwnerHttp } from "./client-portal-recipient-enrollment-owner-http";
 import { handleOperationsNativeRecipientOwnerHttp } from "./operations-portal-native-recipient-owner-http";
+import { handleOperationsNativeDirectoryLifecycleOwnerHttp,
+  OPERATIONS_NATIVE_DIRECTORY_LIFECYCLE_OWNER_BASE } from "./operations-portal-native-directory-lifecycle-owner-http";
 import { dispatchViewerWorkspaceRenewal } from "./viewer-workspace-renewal";
 import { consumeNativeStaffOnboardingRateLimit } from "./native-staff-onboarding-rate-limit";
 import {
@@ -541,6 +543,19 @@ async function dispatchOperationsNativeRecipientOwner(c: Context<{ Bindings: Env
 }
 app.use("/api/native-client-portal/operations-recipient-enrollment", dispatchOperationsNativeRecipientOwner);
 app.use("/api/native-client-portal/operations-recipient-enrollment/*", dispatchOperationsNativeRecipientOwner);
+async function dispatchOperationsNativeDirectoryLifecycle(c: Context<{ Bindings: Env; Variables: Variables }>) {
+  if (c.env.ENVIRONMENT !== "staging" || c.env.NATIVE_DIRECTORY_LIFECYCLE_ENABLED !== "true")
+    return c.json({ error: "Not found" }, 404);
+  return handleOperationsNativeDirectoryLifecycleOwnerHttp(c.req.raw, {
+    environment: c.env.ENVIRONMENT, enabledFlag: c.env.NATIVE_DIRECTORY_LIFECYCLE_ENABLED,
+    expectedHost: c.env.EXPECTED_HOST,
+    configuration: { enabled: true, issuer: c.env.TEAM_DOMAIN ?? "", staffAudience: c.env.OPERATIONS_AUD,
+      origin: c.env.PUBLIC_BASE_URL, csrfSecret: c.env.OPERATIONS_SESSION_SECRET },
+    database: c.env.OPS_DB,
+  });
+}
+app.use(OPERATIONS_NATIVE_DIRECTORY_LIFECYCLE_OWNER_BASE, dispatchOperationsNativeDirectoryLifecycle);
+app.use(`${OPERATIONS_NATIVE_DIRECTORY_LIFECYCLE_OWNER_BASE}/*`, dispatchOperationsNativeDirectoryLifecycle);
 // This is intentionally before staff authentication. A disabled staging
 // fixture must be indistinguishable from an absent route, even to a request
 // without a valid Operations session.

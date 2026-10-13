@@ -7,6 +7,7 @@ import { dispatchProjectAlphaDirectoryProfileOutboxCommand } from "./project-alp
 import { dispatchProjectAlphaDirectoryRelationshipCommand } from "./project-alpha-directory-relationship-outbox-dispatcher";
 import { materializeResolvedProjectAlphaDirectoryClientIntents } from "./project-alpha-directory-client-intent-materializer";
 import { dispatchNativeDirectoryProfileBindingContinuation, profileBindingContinuationEnabled } from './native-directory-profile-binding-continuation';
+import { dispatchProjectAlphaDirectoryLifecycleCommand } from "./project-alpha-directory-lifecycle-outbox-dispatcher";
 
 const MAX_CONNECTION_BYTES = 256 * 1024;
 const MAX_SOURCES = 64;
@@ -22,8 +23,9 @@ type Environment = ProjectAlphaApiV2ConnectionEnvironment & Readonly<{
   PROJECT_ALPHA_DIRECTORY_RELATIONSHIP_GENERATION_RECOVERY_ENABLED?: string;
   ENVIRONMENT?: string;
   NATIVE_DIRECTORY_PROFILE_BINDING_CONTINUATION_ENABLED?: string;
+  NATIVE_DIRECTORY_LIFECYCLE_ENABLED?: string;
 }>;
-type QueueKind = "profile" | "relationship" | "binding_continuation";
+type QueueKind = "profile" | "relationship" | "binding_continuation" | "lifecycle";
 type Candidate = Readonly<{
   queue_kind: QueueKind;
   command_kind: "normal" | "generation_recovery";
@@ -87,10 +89,11 @@ function configuredSourceIds(raw: unknown): readonly string[] | null {
 }
 
 async function eligibleCandidates(db: D1Database, sourceIds: readonly string[], now: number,
-  maxCommands: number, relationshipRecoveryEnabled: boolean, bindingContinuationEnabled: boolean): Promise<readonly Candidate[]> {
+  maxCommands: number, relationshipRecoveryEnabled: boolean, bindingContinuationEnabled: boolean,
+  lifecycleEnabled: boolean): Promise<readonly Candidate[]> {
   if (sourceIds.length === 0) return [];
   const placeholders = sourceIds.map(() => "?").join(",");
-  const maximumCandidates = MAX_SOURCES * 4 * maxCommands;
+  const maximumCandidates = MAX_SOURCES * 5 * maxCommands;
   const bindingArm = bindingContinuationEnabled ? `
       UNION ALL
       SELECT 'binding_continuation','normal',j.command_id,j.source_id,
@@ -103,6 +106,14 @@ async function eligibleCandidates(db: D1Database, sourceIds: readonly string[], 
         CASE state WHEN 'leased' THEN lease_expires_at ELSE next_attempt_at END,created_at
       FROM project_alpha_directory_relationship_recovery_outbox
       WHERE (state='pending' AND next_attempt_at<=?) OR (state='leased' AND lease_expires_at<=?)` : "";
+  const lifecycleArm = lifecycleEnabled ? `
+      UNION ALL
+      SELECT 'lifecycle','normal',command_id,source_id,
+        CASE state WHEN 'leased' THEN lease_expires_at ELSE next_attempt_at END,created_at
+      FROM project_alpha_directory_lifecycle_outbox lifecycle
+      WHERE ((state='pending' AND next_attempt_at<=?) OR (state='leased' AND lease_expires_at<=?))
+        AND NOT EXISTS(SELECT 1 FROM project_alpha_directory_lifecycle_outbox sibling
+          WHERE sibling.mutation_id=lifecycle.mutation_id AND sibling.state='terminal')` : "";
   const query = `WITH eligible(queue_kind,command_kind,command_id,source_id,eligible_at,created_at) AS (
       SELECT 'profile','normal',command_id,source_id,
         CASE state WHEN 'leased' THEN lease_expires_at ELSE next_attempt_at END,created_at
@@ -112,7 +123,7 @@ async function eligibleCandidates(db: D1Database, sourceIds: readonly string[], 
       SELECT 'relationship','normal',command_id,source_id,
         CASE state WHEN 'leased' THEN lease_expires_at ELSE next_attempt_at END,created_at
       FROM project_alpha_directory_relationship_outbox
-      WHERE (state='pending' AND next_attempt_at<=?) OR (state='leased' AND lease_expires_at<=?)${recoveryArm}${bindingArm}
+      WHERE (state='pending' AND next_attempt_at<=?) OR (state='leased' AND lease_expires_at<=?)${recoveryArm}${bindingArm}${lifecycleArm}
     ), ranked AS (
       SELECT queue_kind,command_kind,command_id,source_id,
         row_number() OVER(PARTITION BY source_id,queue_kind,command_kind ORDER BY eligible_at,created_at,command_id) position
@@ -121,11 +132,13 @@ async function eligibleCandidates(db: D1Database, sourceIds: readonly string[], 
     SELECT queue_kind,command_kind,command_id,source_id,position FROM ranked
     WHERE position<=? ORDER BY position,source_id,queue_kind LIMIT ?`;
   const session = db.withSession("first-primary");
-  const timing = Array(4 + (relationshipRecoveryEnabled ? 2 : 0) + (bindingContinuationEnabled ? 2 : 0)).fill(now);
+  const timing = Array(4 + (relationshipRecoveryEnabled ? 2 : 0) + (bindingContinuationEnabled ? 2 : 0)
+    + (lifecycleEnabled ? 2 : 0)).fill(now);
   const rows = (await session.prepare(query)
     .bind(...timing, ...sourceIds, maxCommands, maximumCandidates)
     .all<Candidate>()).results;
-  return rows.filter(row => (row.queue_kind === "profile" || row.queue_kind === "relationship" || row.queue_kind === 'binding_continuation')
+  return rows.filter(row => (row.queue_kind === "profile" || row.queue_kind === "relationship"
+      || row.queue_kind === 'binding_continuation' || row.queue_kind === "lifecycle")
     && (row.command_kind === "normal" || row.command_kind === "generation_recovery")
     && (row.queue_kind === "relationship" || row.command_kind === "normal")
     && typeof row.command_id === "string" && row.command_id.length > 0
@@ -147,8 +160,9 @@ function fairOrder(candidates: readonly Candidate[], sourceIds: readonly string[
   const sourceStart = tick % sourceIds.length;
   const queues: readonly Readonly<{ queue: QueueKind; command: Candidate["command_kind"] }>[] = tick % 2 === 0
     ? [{ queue: "profile", command: "normal" }, { queue: "relationship", command: "normal" },
-      { queue: "relationship", command: "generation_recovery" }, { queue:'binding_continuation',command:'normal' }]
-    : [{ queue:'binding_continuation',command:'normal' }, { queue: "relationship", command: "normal" }, { queue: "relationship", command: "generation_recovery" },
+      { queue: "relationship", command: "generation_recovery" }, { queue:'binding_continuation',command:'normal' },
+      { queue: "lifecycle", command: "normal" }]
+    : [{ queue: "lifecycle", command: "normal" }, { queue:'binding_continuation',command:'normal' }, { queue: "relationship", command: "normal" }, { queue: "relationship", command: "generation_recovery" },
       { queue: "profile", command: "normal" }];
   const ordered: Candidate[] = [];
   for (let position = 1; position <= maxCommands && ordered.length < maxCommands; position += 1) {
@@ -170,8 +184,34 @@ function deadlineFetch(send: typeof fetch, deadline: number, now: Clock): typeof
     if (remaining === 0) throw new Error("native directory outbox drain deadline exceeded");
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), remaining);
-    try { return await send(input, { ...init, signal: controller.signal }); }
-    finally { clearTimeout(timeout); }
+    const signal = init?.signal ? AbortSignal.any([init.signal, controller.signal]) : controller.signal;
+    let response: Response;
+    try { response = await send(input, { ...init, signal }); }
+    catch (error) { clearTimeout(timeout); throw error; }
+    if (!response.body) { clearTimeout(timeout); return response; }
+    const reader = response.body.getReader();
+    let finished = false;
+    const finish = () => { if (!finished) { finished = true; clearTimeout(timeout); } };
+    const body = new ReadableStream<Uint8Array>({
+      async pull(stream) {
+        try {
+          const part = await reader.read();
+          if (part.done) { finish(); reader.releaseLock(); stream.close(); }
+          else stream.enqueue(part.value);
+        } catch (error) { finish(); reader.releaseLock(); stream.error(error); }
+      },
+      async cancel(reason) {
+        try { await reader.cancel(reason); }
+        finally { finish(); reader.releaseLock(); }
+      },
+    });
+    const wrapped = new Response(body, response);
+    Object.defineProperties(wrapped, {
+      redirected: { value: response.redirected },
+      type: { value: response.type },
+      url: { value: response.url },
+    });
+    return wrapped;
   };
 }
 
@@ -196,6 +236,7 @@ export async function drainNativeDirectoryOutboxes(env: Environment,
   const relationshipGenerationRecovery = env.PROJECT_ALPHA_DIRECTORY_RELATIONSHIP_GENERATION_RECOVERY_ENABLED;
   const continuationPolicy = { ENVIRONMENT:env.ENVIRONMENT,
     NATIVE_DIRECTORY_PROFILE_BINDING_CONTINUATION_ENABLED:env.NATIVE_DIRECTORY_PROFILE_BINDING_CONTINUATION_ENABLED };
+  const lifecycleEnabled = env.ENVIRONMENT === "staging" && env.NATIVE_DIRECTORY_LIFECYCLE_ENABLED === "true";
   const sourceIds = configuredSourceIds(connections);
   if (!sourceIds) return empty("unavailable");
   const maxCommands = boundedInteger(options.maxCommands, MAX_COMMANDS, MAX_COMMANDS);
@@ -209,18 +250,22 @@ export async function drainNativeDirectoryOutboxes(env: Environment,
   // and guarded transactionally by the existing 0132 relationship triggers.
   await materializeResolvedProjectAlphaDirectoryClientIntents(env.OPS_DB, sourceIds, maxCommands, startedAt);
   const candidates = await eligibleCandidates(env.OPS_DB, sourceIds, startedAt, maxCommands,
-    relationshipGenerationRecovery === "true", profileBindingContinuationEnabled(continuationPolicy));
+    relationshipGenerationRecovery === "true", profileBindingContinuationEnabled(continuationPolicy), lifecycleEnabled);
   const selected = fairOrder(candidates, sourceIds, rotationTime, maxCommands);
   const send = deadlineFetch(options.send ?? fetch, deadline, now);
   const dispatchEnvironment = { OPS_DB: env.OPS_DB, PROJECT_ALPHA_API_V2_CONNECTIONS: connections,
     PROJECT_ALPHA_DIRECTORY_CREATE_GENERATION_RECOVERY_ENABLED: createGenerationRecovery,
-    PROJECT_ALPHA_DIRECTORY_RELATIONSHIP_GENERATION_RECOVERY_ENABLED: relationshipGenerationRecovery, ...continuationPolicy };
+    PROJECT_ALPHA_DIRECTORY_RELATIONSHIP_GENERATION_RECOVERY_ENABLED: relationshipGenerationRecovery, ...continuationPolicy,
+    ...(lifecycleEnabled ? { PROJECT_ALPHA_DIRECTORY_LIFECYCLE_ENABLED: "true" } : {}) };
   const result = { ...empty("drained") };
   for (const candidate of selected) {
     if (result.attempted >= maxCommands || now() >= deadline) break;
     result.attempted += 1;
     try {
-      const outcome = candidate.queue_kind === 'binding_continuation'
+      const outcome = candidate.queue_kind === "lifecycle"
+        ? await dispatchProjectAlphaDirectoryLifecycleCommand(dispatchEnvironment, candidate.source_id,
+          candidate.command_id, send)
+        : candidate.queue_kind === 'binding_continuation'
         ? await dispatchNativeDirectoryProfileBindingContinuation(dispatchEnvironment,candidate.source_id,candidate.command_id,send)
         : candidate.queue_kind === "profile"
         ? await dispatchProjectAlphaDirectoryProfileOutboxCommand(dispatchEnvironment, candidate.source_id, candidate.command_id, send)
