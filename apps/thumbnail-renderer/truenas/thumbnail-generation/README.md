@@ -34,8 +34,11 @@ new images use the explicit `includeKind=all` contract.
 
 ## Deployment
 
-Use the digest-qualified `ltds-thumbnail-queue-worker` reference published by
-the **Publish TrueNAS thumbnail renderer images** workflow. Configure the
+Use the canary-verified `ltds-thumbnail-queue-worker:stable` reference for the
+standalone updating Compose, or a digest-qualified reference for a pinned
+rollout. The publish workflow advances `stable` only after its exact published
+queue image passes the all-media container smoke test. `pull_policy: always`
+applies to Compose up/redeploy, not a plain container restart. Configure the
 `queue-renderer` service from `compose.truenas.yaml`; do not mount a Jobs dataset
 or grant R2 credentials. It needs only the dedicated renderer bearer and,
 when using the Access-protected Operations host, the paired Cloudflare Access
@@ -46,8 +49,9 @@ For a server that needs only the claim worker, use
 It is the supported replacement for the legacy `jrottenberg/ffmpeg:latest`
 standalone YAML: it runs as TrueNAS uid/gid 568, contains the exact decoder
 dependencies at image-build time, uses four isolated slots, and keeps source
-scratch entirely in bounded tmpfs. Replace the image digest and renderer token
-before installing it. Do not copy a loose worker script into that container or
+scratch entirely in bounded tmpfs. Replace the renderer token before installing
+it. Rotate any token previously pasted into chat; never check it into the repo.
+Do not copy a loose worker script into that container or
 install packages during startup.
 
 The normal API base is

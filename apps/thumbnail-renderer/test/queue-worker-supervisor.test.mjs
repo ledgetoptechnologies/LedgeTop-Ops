@@ -38,9 +38,11 @@ test("TrueNAS service has no source mount and uses bounded tmpfs", () => {
   assert.doesNotMatch(service, /R2_ACCESS_KEY|R2_SECRET/);
 });
 
-test("standalone queue renderer is pinned and hardened", () => {
+test("standalone queue renderer follows verified stable and remains hardened", () => {
   const service = queueCompose.slice(queueCompose.indexOf("  queue-renderer:"));
-  assert.match(service, /image: ghcr\.io\/ledgetoptechnologies\/ltds-thumbnail-queue-worker@sha256:REPLACE_WITH_PUBLISHED_DIGEST/);
+  assert.match(service, /image: "ghcr\.io\/ledgetoptechnologies\/ltds-thumbnail-queue-worker:stable"/);
+  assert.match(service, /pull_policy: always/);
+  assert.match(service, /container_name: ltds-thumbnail-gen/);
   assert.doesNotMatch(service, /:latest\b/);
   assert.match(service, /user: "568:568"/);
   assert.match(service, /init: true/);
@@ -52,8 +54,9 @@ test("standalone queue renderer is pinned and hardened", () => {
 
 test("standalone queue renderer bounds concurrency and RAM scratch without source or R2 mounts", () => {
   assert.match(queueCompose, /LTDSTHUMB_WORKER_CONCURRENCY: "4"/);
-  assert.match(queueCompose, /mem_limit: 5g/);
-  assert.match(queueCompose, /cpus: "4\.0"/);
+  assert.match(queueCompose, /mem_limit: 10g/);
+  assert.match(queueCompose, /cpus: "8\.0"/);
+  assert.match(queueCompose, /stop_grace_period: 5m/);
   assert.match(queueCompose, /\/scratch:rw,nosuid,nodev,noexec,size=4g,mode=0700,uid=568,gid=568/);
   assert.match(queueCompose, /\/cache:rw,nosuid,nodev,noexec,size=256m,mode=0700,uid=568,gid=568/);
   assert.match(queueCompose, /\/tmp:rw,nosuid,nodev,noexec,size=64m,mode=1777/);
@@ -74,7 +77,11 @@ test("publish is blocked on source checks and proves the exact published all-med
   const receipt = publishWorkflow.indexOf("Write the immutable deployment receipt");
   assert.ok(readback > publishWorkflow.indexOf("Build and publish the linux/amd64 image"));
   assert.ok(smoke > readback);
-  assert.ok(receipt > smoke);
+  const promotion = publishWorkflow.indexOf("Promote canary-verified queue worker to stable");
+  assert.ok(promotion > smoke);
+  assert.ok(receipt > promotion);
+  assert.match(publishWorkflow, /docker buildx imagetools create --tag "\$\{IMAGE\}:stable"/);
+  assert.match(publishWorkflow, /stable digest does not match canary-tested image/);
   assert.match(publishWorkflow, /docker buildx imagetools inspect "\$\{TAG\}"/);
   assert.match(publishWorkflow, /"\$\{resolved_digest\}" != "\$\{EXPECTED_DIGEST\}"/);
   assert.match(publishWorkflow, /LTDSTHUMB_SMOKE_IMAGE: \$\{\{ steps\.names\.outputs\.image \}\}@\$\{\{ steps\.build\.outputs\.digest \}\}/);

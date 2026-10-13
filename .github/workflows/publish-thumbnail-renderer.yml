@@ -122,6 +122,17 @@ jobs:
           LTDSTHUMB_SMOKE_IMAGE: ${{ steps.names.outputs.image }}@${{ steps.build.outputs.digest }}
         run: npm --prefix apps/thumbnail-renderer run test:video-worker-container
 
+      - name: Promote canary-verified queue worker to stable
+        if: matrix.target == 'queue-worker'
+        shell: bash
+        env:
+          IMAGE: ${{ steps.names.outputs.image }}
+          EXPECTED_DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          docker buildx imagetools create --tag "${IMAGE}:stable" "${IMAGE}@${EXPECTED_DIGEST}"
+          docker buildx imagetools inspect "${IMAGE}:stable" --format '{{json .Manifest}}' > stable-manifest.json
+          node -e 'const fs=require("fs"); const m=JSON.parse(fs.readFileSync("stable-manifest.json","utf8")); if(m.digest !== process.env.EXPECTED_DIGEST) throw new Error("stable digest does not match canary-tested image")'
+
       - name: Write the immutable deployment receipt
         id: receipt
         shell: bash

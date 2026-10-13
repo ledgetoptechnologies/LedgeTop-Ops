@@ -1,15 +1,17 @@
 # Standalone TrueNAS SCALE app for the Operations claim queue.
 #
-# Use a digest-qualified queue-worker image from the publish workflow. Replace
-# the two REPLACE_* values before installing this YAML. Cloudflare Access
+# stable advances only after the publish workflow passes its container canary.
+# pull_policy applies to Compose up/redeploy, not docker restart. Replace
+# the renderer token before installing this YAML. Cloudflare Access
 # credentials are optional and should remain empty unless the renderer API is
 # protected by an Access service-token policy.
 name: ledgetop-thumbnail-queue
 
 services:
   queue-renderer:
-    image: ghcr.io/ledgetoptechnologies/ltds-thumbnail-queue-worker@sha256:REPLACE_WITH_PUBLISHED_DIGEST
-    container_name: ledgetop-thumbnail-queue-renderer
+    image: "ghcr.io/ledgetoptechnologies/ltds-thumbnail-queue-worker:stable"
+    pull_policy: always
+    container_name: ltds-thumbnail-gen
     user: "568:568"
     init: true
     restart: unless-stopped
@@ -17,9 +19,9 @@ services:
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
     pids_limit: 256
-    cpus: "4.0"
-    mem_limit: 5g
-    stop_grace_period: 30s
+    cpus: "8.0"
+    mem_limit: 10g
+    stop_grace_period: 5m
     environment:
       LTDSTHUMB_API_BASE: https://incoming.ledgetopdroneservices.com/api/internal/thumbnail-renderer/v1
       LTDSTHUMB_API_TOKEN: REPLACE_WITH_RENDERER_TOKEN
