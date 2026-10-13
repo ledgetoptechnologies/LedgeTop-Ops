@@ -30,6 +30,20 @@ describe("Client private native financial consumer",()=>{
     mocks.homes.mockResolvedValue([]);
     await expect(readPortalFinancialDocuments(env(),principal,authorityId)).resolves.toEqual({ok:false,code:"denied"});
   });
+  it("accepts only the exact upstream denial envelope as denied",async()=>{
+    await expect(readPortalFinancialDocuments(env(vi.fn(async()=>JSON.stringify({ok:false,protocolVersion:1,code:"denied"}))),principal,authorityId))
+      .resolves.toEqual({ok:false,code:"denied"});
+    expect(mocks.homes).toHaveBeenCalledTimes(1);
+  });
+  it("keeps other and data-bearing upstream errors unavailable",async()=>{
+    for(const response of [
+      {ok:false,protocolVersion:1,code:"unavailable"},
+      {ok:false,protocolVersion:1,code:"overflow"},
+      {ok:false,protocolVersion:1,code:"disabled"},
+      {ok:false,protocolVersion:1,code:"denied",privateNote:"must-not-cross"},
+    ])await expect(readPortalFinancialDocuments(env(vi.fn(async()=>JSON.stringify(response))),principal,authorityId))
+      .resolves.toEqual({ok:false,code:"unavailable"});
+  });
   it("discards a valid private response if recipient authority changes while it is in flight",async()=>{
     mocks.homes.mockResolvedValueOnce([home]).mockResolvedValueOnce([]);
     await expect(readPortalFinancialDocuments(env(),principal,authorityId)).resolves.toEqual({ok:false,code:"denied"});
