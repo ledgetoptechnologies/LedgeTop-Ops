@@ -2834,7 +2834,6 @@ export function ClientPortalApp({
       controller?.abort();
       const requestController = new AbortController();
       controller = requestController;
-      setCurrentOperationsHome(undefined);
       setOperationsHomeStatus("checking");
       void loadOperationsHome(undefined, requestController.signal).then(response => {
         if (!active || requestController.signal.aborted || requestSequence !== sequence) return;
@@ -2842,7 +2841,6 @@ export function ClientPortalApp({
         setOperationsHomeStatus("current");
       }).catch(() => {
         if (!active || requestController.signal.aborted || requestSequence !== sequence) return;
-        setCurrentOperationsHome(undefined);
         setOperationsHomeStatus("unavailable");
       });
     };
@@ -2852,7 +2850,6 @@ export function ClientPortalApp({
         sequence++;
         controller?.abort();
         controller = null;
-        setCurrentOperationsHome(undefined);
         setOperationsHomeStatus("checking");
       }
     };
@@ -2870,15 +2867,8 @@ export function ClientPortalApp({
   }, [operationsHomeResponse]);
 
   const operationsHomeSummary = currentOperationsHome
-    ? <OperationsNativeServicePanel response={currentOperationsHome} embedded />
-    : operationsHomeResponse
-      ? <section className="portal-card" role="status" aria-label="Operations service summary status">
-        <h2>{operationsHomeStatus === "checking" ? "Refreshing Operations services" : "Operations services unavailable"}</h2>
-        <p>{operationsHomeStatus === "checking"
-          ? "Checking your current service access. The previous summary is hidden until it is verified."
-          : "Your Operations service summary could not be revalidated, so it is hidden. Refresh the portal to check access again."}</p>
-      </section>
-      : null;
+    ? <OperationsNativeServicePanel response={currentOperationsHome} embedded authorityStatus={operationsHomeStatus} />
+    : null;
   const pastDeliveryLoader = useMemo(
     () => (_folderId: string | null, cursor: string | null, signal: AbortSignal) => loadPortalPastDeliveries(cursor, undefined, signal),
     [],
@@ -3041,7 +3031,7 @@ export function ClientPortalApp({
       </PortalBoundary>
     );
   if (gate.status === "blocked") {
-    if (currentOperationsHome) return <OperationsHomeApp response={currentOperationsHome}
+    if (currentOperationsHome) return <OperationsHomeApp response={currentOperationsHome} authorityStatus={operationsHomeStatus}
       clientUnavailable={!gate.optionalClientWorkspaceAbsent || currentOperationsHome.homes.length === 0} onRetryClient={() => {
       setPortalWorkspaceSelection(null);
       window.location.assign("/portal");

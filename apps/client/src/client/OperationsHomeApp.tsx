@@ -23,17 +23,25 @@ export function OperationsServiceSummary({ response, embedded = false }: {
   </section>;
 }
 
-export function OperationsNativeServicePanel({ response, embedded = false }: {
+export function OperationsNativeServicePanel({ response, embedded = false, authorityStatus = "current" }: {
   response: PortalOperationsHomeResponse;
   embedded?: boolean;
+  authorityStatus?: "current" | "checking" | "unavailable";
 }) {
   const nativeDataScope = JSON.stringify(response.homes
     .map(home => JSON.stringify([home.authorityId, home.workspaceId, home.ownershipEpoch, home.grantRevision]))
     .sort());
   return <>
-    <OperationsServiceSummary response={response} embedded={embedded} />
-    <OperationsFinancialPanel key={nativeDataScope} response={response}/>
-    <OperationsNativeDataBrowser key={nativeDataScope} />
+    {authorityStatus === "current" ? <>
+      <OperationsServiceSummary response={response} embedded={embedded} />
+      <OperationsFinancialPanel key={nativeDataScope} response={response}/>
+    </> : <section className="portal-card" role="status" aria-label="Operations service summary status">
+      <h2>{authorityStatus === "checking" ? "Refreshing Operations services" : "Operations services unavailable"}</h2>
+      <p>{authorityStatus === "checking"
+        ? "Checking your current service access. The previous summary is hidden until it is verified."
+        : "Your Operations service summary could not be revalidated, so it is hidden. Refresh the portal to check access again."}</p>
+    </section>}
+    <OperationsNativeDataBrowser key={nativeDataScope} authorityCurrent={authorityStatus === "current"} />
   </>;
 }
 
@@ -59,10 +67,11 @@ export function OperationsFinancialSummary({state,documents}:{state:"loading"|"r
   </section>;
 }
 
-export function OperationsHomeApp({ response, clientUnavailable = false, onRetryClient }: {
+export function OperationsHomeApp({ response, clientUnavailable = false, onRetryClient, authorityStatus = "current" }: {
   response: PortalOperationsHomeResponse;
   clientUnavailable?: boolean;
   onRetryClient?: () => void;
+  authorityStatus?: "current" | "checking" | "unavailable";
 }) {
   return <div className="client-portal operations-home">
     <header className="client-portal-header">
@@ -80,7 +89,7 @@ export function OperationsHomeApp({ response, clientUnavailable = false, onRetry
         <p>Your Operations service summary is still available. You can retry without the unavailable workspace selection.</p>
         {onRetryClient && <button type="button" className="button-ghost" onClick={onRetryClient}>Try available client workspaces</button>}
       </section>}
-      <OperationsNativeServicePanel response={response} />
+      <OperationsNativeServicePanel response={response} authorityStatus={authorityStatus} />
     </main>
   </div>;
 }

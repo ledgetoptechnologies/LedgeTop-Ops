@@ -13,8 +13,9 @@ import type { Env } from "../src/worker/types";
 const origin = "https://portal.example.test";
 const execution = { waitUntil() {}, passThroughOnException() {} } as unknown as ExecutionContext;
 function env(overrides: Partial<Env> = {}): Env {
-  return { ENVIRONMENT: "production", EXPECTED_HOST: "portal.example.test", PUBLIC_BASE_URL: origin,
-    PUBLIC_SHARE_ORIGIN: origin, CLIENT_PORTAL_ORIGIN: origin, CLIENT_PORTAL_ORIGINS: origin,
+  return { ENVIRONMENT: "production", EXPECTED_HOST: "delivery.example.test",
+    CLIENT_PORTAL_EXPECTED_HOST: "portal.example.test", PUBLIC_BASE_URL: "https://delivery.example.test",
+    PUBLIC_SHARE_ORIGIN: "https://delivery.example.test", CLIENT_PORTAL_ORIGIN: origin, CLIENT_PORTAL_ORIGINS: origin,
     CLIENT_PORTAL_ENABLED: "true", CLIENT_PORTAL_NATIVE_RECIPIENT_ENROLLMENT_ENABLED: "true",
     CLIENT_PORTAL_NATIVE_RECIPIENT_ENROLLMENT_CSRF_SECRET: "production-native-enrollment-csrf-secret",
     OPERATIONS_PORTAL_NATIVE_RECIPIENT_ENROLLMENT: {
@@ -38,6 +39,14 @@ describe("standard Client Worker native recipient enrollment mount", () => {
     expect(calls.proof).toHaveBeenCalledOnce();
   });
 
+  it("uses the dedicated portal host and falls back only to the configured global host", async () => {
+    expect((await worker.fetch(session(), env(), execution)).status).toBe(200);
+    expect((await worker.fetch(session(), env({ CLIENT_PORTAL_EXPECTED_HOST: undefined }), execution)).status).toBe(503);
+    expect((await worker.fetch(session(), env({ CLIENT_PORTAL_EXPECTED_HOST: undefined,
+      EXPECTED_HOST: "portal.example.test", PUBLIC_BASE_URL: origin,
+      PUBLIC_SHARE_ORIGIN: origin }), execution)).status).toBe(200);
+  });
+
   it.each([
     { CLIENT_PORTAL_ENABLED: undefined },
     { CLIENT_PORTAL_ENABLED: "false" },
@@ -52,6 +61,7 @@ describe("standard Client Worker native recipient enrollment mount", () => {
     { overrides: { OPERATIONS_PORTAL_NATIVE_RECIPIENT_ENROLLMENT: { redeemNativeEnrollment: vi.fn() } }, status: 503 },
     { overrides: { OPERATIONS_PORTAL_NATIVE_RECIPIENT_ENROLLMENT: undefined }, status: 503 },
     { overrides: { ENVIRONMENT: "development" }, status: 503 },
+    { overrides: { CLIENT_PORTAL_EXPECTED_HOST: "other.example.test" }, status: 503 },
     { overrides: { CLIENT_PORTAL_ORIGIN: "https://other.example.test" }, status: 404 },
   ])("fails closed for missing dependency or invalid deployment configuration %#", async ({ overrides, status }) => {
     expect((await worker.fetch(session(), env(overrides as Partial<Env>), execution)).status).toBe(status);
