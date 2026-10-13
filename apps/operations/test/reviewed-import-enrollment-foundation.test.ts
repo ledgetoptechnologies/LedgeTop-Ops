@@ -3,6 +3,7 @@ import {afterAll,beforeAll,describe,expect,it} from 'vitest';
 import {Miniflare} from 'miniflare';
 import {splitD1MigrationStatements} from '../../client/test/helpers/d1-migrations';
 import {writeReviewedImportEnrollment} from '../src/worker/reviewed-import-enrollment-writer';
+import {writeNativeDirectoryProfile} from '../src/worker/native-directory-profile-writer';
 
 let runtime:Miniflare,db:D1Database;
 const recordId='legacy-local-customer',externalId='pa-customer-older-than-ops',staffId='staff-import-reviewer';
@@ -116,6 +117,60 @@ describe('reviewed imported-record enrollment foundation',()=>{
     await expect(writeReviewedImportEnrollment(db,{destinations:[]} as never)).resolves.toEqual({status:'rejected',reason:'invalid_write'});
   });
 
+  it('rejects an older complete page when the equal-time current request is incomplete',async()=>{
+    const observedAt=await db.prepare(`SELECT observed_at FROM project_alpha_api_v2_inventory_receipts
+      WHERE source_id=? AND request_id=?`).bind(sourceId,uid(32)).first<string>('observed_at');
+    expect(observedAt).toBeTruthy();
+    async function observe(requestId:string,nextCursor:string|null){
+      await db.batch([
+        db.prepare(`INSERT INTO project_alpha_api_v2_inventory_receipts(source_id,source_instance_id,application_id,
+          history_epoch_id,inventory_kind,request_id,authorization_generation,requested_cursor,next_cursor,page_sha256,
+          item_count,observed_at) VALUES(?,?,?,?,'directory',?,'7',NULL,?,?,1,?)`)
+          .bind(sourceId,instance,application,epoch,requestId,nextCursor,hash('8'),observedAt),
+        db.prepare(`INSERT INTO project_alpha_api_v2_directory_observations(source_id,source_instance_id,application_id,
+          history_epoch_id,request_id,resource_type,project_alpha_public_id,resource_revision,present,last_action,
+          projection_sha256,binding_external_id,binding_status,binding_resource_revision)
+          VALUES(?,?,?,?,?,'organization',?,'7',1,'upsert',?,?,'active','7')`)
+          .bind(sourceId,instance,application,epoch,requestId,publicId,hash('6'),externalId),
+      ]);
+    }
+    // Resource and binding evidence is identical, so no conflict obscures the
+    // ordering predicate. Only the higher request ID's page completeness differs.
+    await observe(uid(80),'synthetic-continuation');
+    const current=await db.prepare(`SELECT observation.request_id,observation.has_conflict,receipt.next_cursor
+      FROM project_alpha_api_v2_directory_observations_current observation
+      JOIN project_alpha_api_v2_inventory_receipts receipt ON receipt.source_id=observation.source_id
+        AND receipt.source_instance_id=observation.source_instance_id AND receipt.application_id=observation.application_id
+        AND receipt.history_epoch_id=observation.history_epoch_id AND receipt.inventory_kind='directory'
+        AND receipt.request_id=observation.request_id
+      WHERE observation.source_id=? AND observation.project_alpha_public_id=?`)
+      .bind(sourceId,publicId).first<{request_id:string;has_conflict:number;next_cursor:string|null}>();
+    expect(current).toEqual({request_id:uid(80),has_conflict:0,next_cursor:'synthetic-continuation'});
+
+    const admissionId=uid(81),mutationId=uid(82),reviewedAt=new Date().toISOString();
+    const destinations=JSON.stringify([{sourceId,sourceInstanceUUID:instance,applicationUUID:application,
+      historyEpoch:epoch,origin,externalCanonicalId:externalId}]);
+    await db.prepare(`INSERT INTO reviewed_import_enrollment_admissions(admission_id,mutation_id,record_id,record_kind,
+      enrollment_version,expected_record_version,expected_enrollment_version,destinations_json,actor_staff_id,
+      actor_access_subject,actor_admission_version,actor_email,actor_profile_version,selected_profile_grant_id,
+      selected_enrollment_grant_id,actor_verified_until,reviewed_at)
+      VALUES(?,?,?,'organization',1,1,0,?,?,?,1,'reviewer@example.test',1,'import-profile','import-enrollment',?,?)`)
+      .bind(admissionId,mutationId,recordId,destinations,staffId,subject,
+        new Date(Date.now()+10*60_000).toISOString(),reviewedAt).run();
+    await expect(db.prepare(`INSERT INTO reviewed_import_enrollment_receipts(receipt_id,admission_id,mutation_id,
+      record_id,enrollment_version,destinations_json,admitted_by_staff_id,admitted_at) VALUES(?,?,?,?,1,?,?,?)`)
+      .bind(uid(83),admissionId,mutationId,recordId,destinations,staffId,reviewedAt).run())
+      .rejects.toThrow(/requires fresh complete inventory evidence/);
+    expect(await db.prepare('SELECT count(*) count FROM reviewed_import_enrollment_receipts')
+      .first<number>('count')).toBe(0);
+
+    // Append a later request, without mutating either immutable observation,
+    // so the following positive writer test also proves recovery with fresh evidence.
+    await observe(uid(90),null);
+    expect(await db.prepare(`SELECT request_id FROM project_alpha_api_v2_directory_observations_current
+      WHERE source_id=? AND project_alpha_public_id=?`).bind(sourceId,publicId).first<string>('request_id')).toBe(uid(90));
+  });
+
   it('explicitly enrolls a legacy imported record whose PA external ID differs from its Ops ID',async()=>{
     const mutationId=uid(40),startedAt=Date.now(),verifiedUntil=new Date(startedAt+7*24*60*60_000).toISOString();
     const input={mutationId,recordId,kind:'organization' as const,expectedRecordVersion:1,expectedEnrollmentVersion:0,
@@ -209,15 +264,98 @@ describe('reviewed imported-record enrollment foundation',()=>{
       .bind(recordId).first<number>('count')).toBe(1);
   });
 
+  it('edits an imported profile using its acquired external ID and freezes enrollment until the update settles',async()=>{
+    const destination={sourceId,sourceInstanceUUID:instance,applicationUUID:application,historyEpoch:epoch,
+      origin,externalCanonicalId:externalId};
+    const profileMutation=uid(100);
+    const updated=await writeNativeDirectoryProfile(db,{operation:'update',mutationId:profileMutation,recordId,
+      kind:'organization',expectedLocalVersion:1,
+      profile:{name:'Reviewed imported organization',generalEmail:'',generalPhone:'',addressLine1:'',addressLine2:'',
+        city:'',state:'',postalCode:'',country:''},
+      destinations:[{...destination,expectedAuthorizationGeneration:'7'}],
+      actor:{staffId,accessSubject:subject,admissionVersion:1,loginEmail:'reviewer@example.test',profileVersion:1,
+        selectedGrantId:'import-profile',selectedIdentityGrantId:'import-identity'}});
+    expect(updated).toMatchObject({status:'written',recordId,version:2});
+    if(updated.status!=='written')throw new Error(`Imported profile update rejected: ${updated.reason}`);
+    expect(updated.commandIds).toHaveLength(1);
+    const commandId=updated.commandIds[0]!;
+    expect(await db.prepare(`SELECT external_id FROM project_alpha_directory_outbox WHERE command_id=?`)
+      .bind(commandId).first<string>('external_id')).toBe(externalId);
+
+    const actor={staffId,accessSubject:subject,admissionVersion:1,loginEmail:'reviewer@example.test',profileVersion:1,
+      selectedProfileGrantId:'import-profile',selectedEnrollmentGrantId:'import-enrollment',
+      verifiedUntil:new Date(Date.now()+10*60_000).toISOString()};
+    await expect(writeReviewedImportEnrollment(db,{mutationId:uid(101),recordId,kind:'organization',expectedRecordVersion:2,
+      expectedEnrollmentVersion:5,destinations:[destination],actor}))
+      .resolves.toEqual({status:'blocked',reason:'authority_or_evidence'});
+    const admissionId=uid(102),mutationId=uid(103),reviewedAt=new Date().toISOString(),encoded=JSON.stringify([destination]);
+    await db.prepare(`INSERT INTO reviewed_import_enrollment_admissions(admission_id,mutation_id,record_id,record_kind,
+      enrollment_version,expected_record_version,expected_enrollment_version,destinations_json,actor_staff_id,
+      actor_access_subject,actor_admission_version,actor_email,actor_profile_version,selected_profile_grant_id,
+      selected_enrollment_grant_id,actor_verified_until,reviewed_at)
+      VALUES(?,?,?,'organization',6,2,5,?,?,?,1,'reviewer@example.test',1,'import-profile','import-enrollment',?,?)`)
+      .bind(admissionId,mutationId,recordId,encoded,staffId,subject,actor.verifiedUntil,reviewedAt).run();
+    await expect(db.prepare(`INSERT INTO reviewed_import_enrollment_receipts(receipt_id,admission_id,mutation_id,
+      record_id,enrollment_version,destinations_json,admitted_by_staff_id,admitted_at) VALUES(?,?,?,?,6,?,?,?)`)
+      .bind(uid(104),admissionId,mutationId,recordId,encoded,staffId,reviewedAt).run())
+      .rejects.toThrow(/requires completed directory work/);
+
+    // Settle through the normal immutable-outcome/state guards. No trigger or
+    // mapping is replaced; this is the same lease/ACK sequence the dispatcher uses.
+    await db.prepare(`UPDATE project_alpha_directory_outbox SET state='leased',attempts=1,lease_token='fixture-lease',
+      lease_expires_at=9999999999999 WHERE command_id=? AND state='pending'`).bind(commandId).run();
+    const outcome={status:'acknowledged',response:{requestId:commandId,replayed:false,sourceInstanceId:instance,
+      applicationId:application,historyEpoch:epoch,result:{resource:{type:'organization',id:externalId,publicId,revision:'8'},
+        data:{publicId},authorizationGeneration:'7'}}};
+    await db.prepare(`UPDATE project_alpha_directory_outbox SET state='acknowledged',outcome_json=?,lease_token=NULL,
+      lease_expires_at=NULL WHERE command_id=? AND state='leased'`).bind(JSON.stringify(outcome),commandId).run();
+    await db.prepare(`UPDATE operations_directory_intents SET state='acknowledged'
+      WHERE mutation_id=? AND state='materialized'`).bind(profileMutation).run();
+    expect(await db.prepare(`SELECT state FROM native_directory_profile_binding_dispatch WHERE command_id=?`)
+      .bind(commandId).first<string>('state')).toBe('pending');
+    await expect(writeReviewedImportEnrollment(db,{mutationId:uid(105),recordId,kind:'organization',expectedRecordVersion:2,
+      expectedEnrollmentVersion:5,destinations:[destination],actor}))
+      .resolves.toEqual({status:'blocked',reason:'authority_or_evidence'});
+    await expect(db.prepare(`INSERT INTO reviewed_import_enrollment_receipts(receipt_id,admission_id,mutation_id,
+      record_id,enrollment_version,destinations_json,admitted_by_staff_id,admitted_at) VALUES(?,?,?,?,6,?,?,?)`)
+      .bind(uid(106),admissionId,mutationId,recordId,encoded,staffId,reviewedAt).run())
+      .rejects.toThrow(/requires completed profile binding work/);
+
+    // The continuation's legitimate already-aligned path requires fresh,
+    // exact canonical inventory; completing a job without that evidence is forbidden.
+    await db.prepare(`UPDATE native_directory_profile_binding_dispatch SET state='leased',attempts=1,
+      lease_token='fixture-binding-lease',lease_expires_at=9999999999999 WHERE command_id=? AND state='pending'`)
+      .bind(commandId).run();
+    await expect(db.prepare(`UPDATE native_directory_profile_binding_dispatch SET state='complete',lease_token=NULL,
+      lease_expires_at=NULL WHERE command_id=? AND state='leased'`).bind(commandId).run())
+      .rejects.toThrow(/requires canonical aligned inventory/);
+    const inventoryRequest=uid(107);
+    await db.batch([
+      db.prepare(`INSERT INTO project_alpha_api_v2_inventory_receipts(source_id,source_instance_id,application_id,
+        history_epoch_id,inventory_kind,request_id,authorization_generation,requested_cursor,next_cursor,page_sha256,item_count)
+        VALUES(?,?,?,?,'directory',?,'7',NULL,NULL,?,1)`).bind(sourceId,instance,application,epoch,inventoryRequest,hash('9')),
+      db.prepare(`INSERT INTO project_alpha_api_v2_directory_observations(source_id,source_instance_id,application_id,
+        history_epoch_id,request_id,resource_type,project_alpha_public_id,resource_revision,present,last_action,
+        projection_sha256,binding_external_id,binding_status,binding_resource_revision)
+        VALUES(?,?,?,?,?,'organization',?,'8',1,'upsert',?,?,'active','8')`)
+        .bind(sourceId,instance,application,epoch,inventoryRequest,publicId,hash('9'),externalId),
+    ]);
+    await db.prepare(`UPDATE native_directory_profile_binding_dispatch SET state='complete',lease_token=NULL,
+      lease_expires_at=NULL WHERE command_id=? AND state='leased'`).bind(commandId).run();
+    await expect(writeReviewedImportEnrollment(db,{mutationId:uid(108),recordId,kind:'organization',expectedRecordVersion:2,
+      expectedEnrollmentVersion:5,destinations:[destination],actor}))
+      .resolves.toMatchObject({status:'written',enrollmentVersion:6});
+  });
+
   it('freezes enrollment while a lifecycle mutation is pending',async()=>{
     const destinations=[{sourceId,sourceInstanceUUID:instance,applicationUUID:application,historyEpoch:epoch,origin,externalCanonicalId:externalId}];
     await db.prepare(`INSERT INTO operations_directory_lifecycle_fences(mutation_id,record_id,record_kind,action,expected_lifecycle_version,
       expected_record_version,actor_staff_id,actor_access_subject,actor_admission_version,actor_email,actor_profile_version,
       selected_profile_grant_id,selected_enrollment_grant_id,destinations_json,observations_json,verified_until)
-      VALUES(?,?,'organization','archive',0,1,?,?,1,'reviewer@example.test',1,'import-profile','import-enrollment',?,json_array(),?)`)
+      VALUES(?,?,'organization','archive',0,2,?,?,1,'reviewer@example.test',1,'import-profile','import-enrollment',?,json_array(),?)`)
       .bind(uid(70),recordId,staffId,subject,JSON.stringify(destinations),new Date(Date.now()+10*60_000).toISOString()).run();
-    await expect(writeReviewedImportEnrollment(db,{mutationId:uid(71),recordId,kind:'organization',expectedRecordVersion:1,
-      expectedEnrollmentVersion:5,destinations,actor:{staffId,accessSubject:subject,admissionVersion:1,loginEmail:'reviewer@example.test',
+    await expect(writeReviewedImportEnrollment(db,{mutationId:uid(71),recordId,kind:'organization',expectedRecordVersion:2,
+      expectedEnrollmentVersion:6,destinations,actor:{staffId,accessSubject:subject,admissionVersion:1,loginEmail:'reviewer@example.test',
         profileVersion:1,selectedProfileGrantId:'import-profile',selectedEnrollmentGrantId:'import-enrollment',
         verifiedUntil:new Date(Date.now()+60*60_000).toISOString()}})).resolves.toEqual({status:'blocked',reason:'authority_or_evidence'});
   });
