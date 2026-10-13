@@ -16,7 +16,7 @@ let delivery: D1Database;
 let ops: D1Database;
 let env: Env;
 
-function scriptedSocket(options: { authCode?: number; suppressFinalReply?: boolean } = {}) {
+function scriptedSocket(options: { authCode?: number; suppressFinalReply?: boolean; greeting?: string } = {}) {
   const writes: string[] = [];
   let controller!: ReadableStreamDefaultController<Uint8Array>;
   let step = 0;
@@ -25,7 +25,7 @@ function scriptedSocket(options: { authCode?: number; suppressFinalReply?: boole
   const readable = new ReadableStream<Uint8Array>({
     start(value) {
       controller = value;
-      controller.enqueue(new TextEncoder().encode("220 Ready\r\n"));
+      controller.enqueue(new TextEncoder().encode(options.greeting ?? "220 Ready\r\n"));
     },
   });
   const writable = new WritableStream<Uint8Array>({
@@ -193,6 +193,20 @@ describe("incoming upload notification joined SMTP outcomes", () => {
     expect(smtp.connect).toHaveBeenCalledOnce();
   });
 
+  it("keeps connection and protocol failure details out of durable state", async () => {
+    smtp.connect.mockImplementationOnce(() => { throw new Error("private connection detail"); });
+    expect(await processIncomingUploadNotifications(env)).toBe(1);
+    expect(await row()).toEqual({ status: "retry", attempt_count: 1,
+      delivered_at: null, last_error_code: "mail-transport-failed" });
+
+    await makeDue();
+    const invalid = scriptedSocket({ greeting: "not-an-smtp-response\r\n" });
+    smtp.connect.mockReturnValueOnce(invalid.socket);
+    expect(await processIncomingUploadNotifications(env)).toBe(1);
+    expect(await row()).toEqual({ status: "retry", attempt_count: 2,
+      delivered_at: null, last_error_code: "mail-transport-failed" });
+    expect(invalid.writes).toHaveLength(0);
+  });
   it("does not send when the exact-attempt marker CAS loses ownership", async () => {
     const real = delivery;
     const database = new Proxy(real, {

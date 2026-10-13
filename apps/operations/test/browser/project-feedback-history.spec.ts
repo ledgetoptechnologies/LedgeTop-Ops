@@ -3,13 +3,13 @@ import type { ProjectFeedbackHistoryPage } from "@ltds/shared";
 import type { BusinessProjectDetail } from "../../src/client/BusinessProjectWorkspace";
 
 const clientPath="/clients/sources/project-alpha%3Aprimary/business/standalone/client-one";
-const projectPath=`${clientPath}/projects/project-one`;
+const projectPath=`${clientPath}/projects/pa/project-one`;
 const projectApi="/api/client-hub/sources/project-alpha%3Aprimary/business/standalone/client-one/business-projects/project-one";
 const historyApi=`${projectApi}/feedback-history`;
 const root={sourceId:"project-alpha:primary",rootNamespace:"business",kind:"standalone_client",publicId:"client-one"} as const;
 const sourceClientPath=(sourceId:string)=>`/clients/sources/${encodeURIComponent(sourceId)}/business/standalone/client-one`;
 function project(sourceId:string=root.sourceId):BusinessProjectDetail{return {canonicalRoot:{...root,sourceId},client:{display_name:"Acme Construction",detail_path:sourceClientPath(sourceId)},
-  contextVersion:"project-context",refreshedAt:"2026-08-25T12:00:00.000Z",project:{id:"project-one",name:"Church survey",status:"active",description:null,
+  contextVersion:"project-context",refreshedAt:"2026-08-25T12:00:00.000Z",project:{id:"project-one",origin:"pa",name:"Church survey",status:"active",description:null,
     start_date:null,end_date:null,created_at:"2026-08-01T12:00:00.000Z",manager:null},linkedContact:null,
   feedbackHistoryAvailable:true,
   availability:{linkedContact:"not_projected",siteContacts:"not_projected",billingContacts:"not_projected",projectMemory:"not_projected"}};}

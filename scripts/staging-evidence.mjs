@@ -5,11 +5,22 @@ import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { APP_SOURCE_DIRS, FEATURE_FLAG_ACTIVATION_POLICIES, FEATURE_FLAG_DEPENDENCY_WINDOWS, PROJECT_ALPHA_STAGING, RELEASE_CANDIDATES, RELEASE_CONTRACT_FINALIZED, REQUIRED_DISABLED_FEATURE_FLAGS, REQUIRED_EXTERNAL_GATES, REQUIRED_EXTERNAL_GATE_PROOFS, REQUIRED_STAGING_MIGRATIONS, REQUIRED_STAGING_SECRETS, STAGING_ACCOUNT_ID, STAGING_CLIENT_PORTAL, STAGING_HOSTS, STAGING_INVENTORY, STAGING_STATIC_VARS, STAGING_VIEWER } from "./staging-requirements.mjs";
 import { validateFiles as validateStagingFiles } from "./staging-preflight.mjs";
+import { BOOTSTRAP_APPS, PRODUCTION_DATABASE_IDENTITIES } from "./staging-bootstrap.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const defaultEvidence = path.join(root, ".backups", "staging-release-evidence.json");
 const marker = /<[^>]+>|CHANGE[_-]?ME|REPLACE[_-]?ME|example\.invalid/i;
 const apps = ["delivery", "operations", "ops-sync"];
+// Schema version 1 is the immutable September 18 rehearsal (Client 133 through
+// 0214, Operations 139 through 0139). It remains historical evidence only and
+// must never satisfy the current release gate.
+const CURRENT_FRESH_BOOTSTRAP_SCHEMA_VERSION = 2;
+const CURRENT_FRESH_BOOTSTRAP_APPLICATIONS = Object.freeze({
+  delivery: Object.freeze({ source: "client", databaseName: BOOTSTRAP_APPS.delivery.databaseName, configPath: "apps/client/wrangler.staging.bootstrap.json", manifestPath: "apps/client/.staging-bootstrap/manifest.json", seed: "0002_seed_initial_staff.sql", ledgerCount: BOOTSTRAP_APPS.delivery.migrationCount, finalMigration: "0228_operations_portal_native_content_start_audit.sql" }),
+  operations: Object.freeze({ source: "operations", databaseName: BOOTSTRAP_APPS.operations.databaseName, configPath: "apps/operations/wrangler.staging.bootstrap.json", manifestPath: "apps/operations/.staging-bootstrap/manifest.json", seed: "0002_seed_acl.sql", ledgerCount: BOOTSTRAP_APPS.operations.migrationCount, finalMigration: "0187_operations_portal_native_delivery_literal_prefix_guard.sql" }),
+});
+const DISPOSABLE_RUN_ID = /^[a-z0-9](?:[a-z0-9-]{1,18}[a-z0-9])$/;
+const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const populated = (value) => typeof value === "string" && value.length > 0 && !marker.test(value);
 const sha256Digest = (value) => /^sha256:[a-f0-9]{64}$/i.test(value ?? "");
 const sha256Hex = (value) => /^[a-f0-9]{64}$/i.test(value ?? "");
@@ -194,6 +205,113 @@ export function validateEvidence(evidence, options = {}) {
   if (projectAlpha.releaseCommit !== PROJECT_ALPHA_STAGING.releaseCommit || projectAlpha.sourceCommitVerified !== true || !populated(projectAlpha.remoteRef)) errors.push("Project Alpha deployment must pin and verify the reviewed source commit");
   if (!sha256Digest(projectAlpha.webImageDigest) || !sha256Digest(projectAlpha.cronImageDigest) || projectAlpha.imagesShareSourceCommit !== true) errors.push("Project Alpha web and cron images must have immutable digests from the reviewed commit");
   if (!recentDate(projectAlpha.deployedAt, now) || !populated(projectAlpha.deploymentEvidenceRef)) errors.push("Project Alpha deployment evidence must be current and referenced");
+  const joinedAcceptance = projectAlpha.joinedOpsProjectV2Acceptance ?? {};
+  const firstProjectRun = joinedAcceptance.exactReplay?.first, replayProjectRun = joinedAcceptance.exactReplay?.replay;
+  const firstProjectOutcome = firstProjectRun?.outcome, replayProjectOutcome = replayProjectRun?.outcome;
+  const publicBefore = joinedAcceptance.publicLink?.before, publicAfter = joinedAcceptance.publicLink?.after;
+  const projectAcceptancePassed = joinedAcceptance.status === "passed" && joinedAcceptance.schemaVersion === 1
+    && joinedAcceptance.inputBinding?.schemaVersion === 1 && sha256Hex(joinedAcceptance.inputBinding?.sha256)
+    && joinedAcceptance.inputBinding?.valuesExcluded === true && joinedAcceptance.mutationsPerformed === true
+    && joinedAcceptance.command?.operation === "create" && populated(joinedAcceptance.command?.commandId)
+    && populated(joinedAcceptance.command?.externalProjectId)
+    && firstProjectRun?.stage === "activate" && firstProjectOutcome?.status === "activated"
+    && firstProjectOutcome?.replayed === false && firstProjectOutcome?.commandId === joinedAcceptance.command.commandId
+    && firstProjectOutcome?.externalProjectId === joinedAcceptance.command.externalProjectId
+    && populated(firstProjectOutcome?.activationId) && populated(firstProjectOutcome?.settlementId)
+    && replayProjectRun?.stage === "activate" && replayProjectOutcome?.status === "activated"
+    && replayProjectOutcome?.replayed === true && replayProjectOutcome?.commandId === firstProjectOutcome.commandId
+    && replayProjectOutcome?.externalProjectId === firstProjectOutcome.externalProjectId
+    && replayProjectOutcome?.activationId === firstProjectOutcome.activationId
+    && replayProjectOutcome?.settlementId === firstProjectOutcome.settlementId
+    && replayProjectOutcome?.version === firstProjectOutcome.version
+    && joinedAcceptance.changedBodyConflict?.stage === "plan"
+    && joinedAcceptance.changedBodyConflict?.outcome?.status === "conflict"
+    && joinedAcceptance.changedBodyConflict?.outcome?.reason === "command_id"
+    && joinedAcceptance.readSettlement?.status === "evidence_present"
+    && joinedAcceptance.readSettlement?.settlementId === firstProjectOutcome.settlementId
+    && joinedAcceptance.canonicalActivation?.status === "evidence_present"
+    && joinedAcceptance.canonicalActivation?.activationId === firstProjectOutcome.activationId
+    && joinedAcceptance.canonicalActivation?.version === firstProjectOutcome.version
+    && publicBefore?.status === 200 && publicAfter?.status === publicBefore.status
+    && sha256Hex(publicBefore?.bodySha256) && publicAfter?.bodySha256 === publicBefore.bodySha256
+    && publicAfter?.contentType === publicBefore.contentType
+    && joinedAcceptance.credentials?.valuesExcluded === true && joinedAcceptance.credentials?.sessionPresent === true
+    && recentDate(joinedAcceptance.observedAt, now) && populated(joinedAcceptance.evidenceRef);
+  if (!projectAcceptancePassed)
+    errors.push("Project Alpha joined Ops Project-v2 acceptance must bind a current sanitized input digest to referenced passing evidence");
+
+  const directoryAcceptance = projectAlpha.joinedOpsDirectoryV2Acceptance ?? {};
+  const directorySynthetic = directoryAcceptance.synthetic ?? {};
+  const directoryAdmission = directoryAcceptance.admission ?? {};
+  const directoryCreate = directoryAcceptance.create ?? {};
+  const directoryCreateFirst = directoryCreate.first ?? {};
+  const directoryCreateAck = directoryCreate.acknowledgement?.outcome ?? {};
+  const directoryCreateRead = directoryCreate.exactRead ?? {};
+  const directoryUpdate = directoryAcceptance.update ?? {};
+  const directoryUpdateFirst = directoryUpdate.first ?? {};
+  const directoryUpdateAck = directoryUpdate.acknowledgement?.outcome ?? {};
+  const directoryUpdateRead = directoryUpdate.exactRead ?? {};
+  const directoryReadback = directoryAcceptance.destinationReadback ?? {};
+  const directoryPublicBefore = directoryAcceptance.publicLink?.before;
+  const directoryPublicAfter = directoryAcceptance.publicLink?.after;
+  const directoryRecordId = directorySynthetic.recordId;
+  const directoryAcceptancePassed = directoryAcceptance.status === "passed"
+    && directoryAcceptance.schemaVersion === 1 && directoryAcceptance.environment === "staging"
+    && directoryAcceptance.inputBinding?.schemaVersion === 1
+    && sha256Hex(directoryAcceptance.inputBinding?.sha256)
+    && directoryAcceptance.inputBinding?.valuesExcluded === true
+    && directoryAcceptance.mutationsPerformed === true
+    && UUID_V4.test(directoryRecordId ?? "")
+    && directorySynthetic.createMutationId === directoryRecordId
+    && UUID_V4.test(directorySynthetic.updateMutationId ?? "")
+    && directorySynthetic.updateMutationId !== directoryRecordId
+    && directoryAdmission.first?.status === "prepared" && directoryAdmission.replay?.status === "prepared"
+    && directoryAdmission.changedBodyConflict?.status === "conflict"
+    && directoryAdmission.changedBodyConflict?.reason === "idempotency_body_conflict"
+    && ["written", "pending"].includes(directoryCreateFirst.status)
+    && directoryCreateFirst.recordId === directoryRecordId && directoryCreateFirst.kind === "client"
+    && directoryCreateFirst.version === 1 && directoryCreateFirst.replayed === false
+    && Array.isArray(directoryCreateFirst.destinationStates) && directoryCreateFirst.destinationStates.length === 1
+    && ["pending", "acknowledged"].includes(directoryCreateFirst.destinationStates[0])
+    && directoryCreateAck.status === "written" && directoryCreateAck.recordId === directoryRecordId
+    && directoryCreateAck.kind === "client" && directoryCreateAck.version === 1 && directoryCreateAck.replayed === true
+    && sameSequence(directoryCreateAck.destinationStates, ["acknowledged"])
+    && directoryCreate.changedBodyConflict?.status === "conflict"
+    && directoryCreate.changedBodyConflict?.reason === "idempotency_body_conflict"
+    && directoryCreateRead.status === "verified" && directoryCreateRead.recordId === directoryRecordId
+    && directoryCreateRead.version === 1 && directoryCreateRead.linkage === "standalone"
+    && sha256Hex(directoryCreateRead.profileSha256) && sha256Hex(directoryCreateRead.scopesSha256)
+    && ["written", "pending"].includes(directoryUpdateFirst.status)
+    && directoryUpdateFirst.recordId === directoryRecordId && directoryUpdateFirst.kind === "client"
+    && directoryUpdateFirst.version === 2 && directoryUpdateFirst.replayed === false
+    && Array.isArray(directoryUpdateFirst.destinationStates) && directoryUpdateFirst.destinationStates.length === 1
+    && ["pending", "acknowledged"].includes(directoryUpdateFirst.destinationStates[0])
+    && directoryUpdateAck.status === "written" && directoryUpdateAck.recordId === directoryRecordId
+    && directoryUpdateAck.kind === "client" && directoryUpdateAck.version === 2 && directoryUpdateAck.replayed === true
+    && sameSequence(directoryUpdateAck.destinationStates, ["acknowledged"])
+    && directoryUpdate.changedBodyConflict?.status === "conflict"
+    && directoryUpdate.changedBodyConflict?.reason === "idempotency_body_conflict"
+    && directoryUpdate.staleVersionConflict?.status === "conflict"
+    && directoryUpdate.staleVersionConflict?.reason === "stale_local_version"
+    && directoryUpdateRead.status === "verified" && directoryUpdateRead.recordId === directoryRecordId
+    && directoryUpdateRead.version === 2 && directoryUpdateRead.linkage === "standalone"
+    && sha256Hex(directoryUpdateRead.profileSha256) && sha256Hex(directoryUpdateRead.scopesSha256)
+    && directoryUpdateRead.profileSha256 !== directoryCreateRead.profileSha256
+    && directoryUpdateRead.scopesSha256 === directoryCreateRead.scopesSha256
+    && directoryReadback.status === "verified" && sha256Hex(directoryReadback.recordIdSha256)
+    && sha256Hex(directoryReadback.publicIdSha256) && directoryReadback.mappingCount === 1
+    && directoryReadback.collisionCount === 0
+    && directoryReadback.bindingRevision === String(directoryUpdateRead.version)
+    && directoryPublicBefore?.status === 200 && directoryPublicAfter?.status === directoryPublicBefore.status
+    && sha256Hex(directoryPublicBefore?.bodySha256)
+    && directoryPublicAfter?.bodySha256 === directoryPublicBefore.bodySha256
+    && populated(directoryPublicBefore?.contentType)
+    && directoryPublicAfter?.contentType === directoryPublicBefore.contentType
+    && directoryAcceptance.credentials?.valuesExcluded === true
+    && directoryAcceptance.credentials?.sessionPresent === true
+    && recentDate(directoryAcceptance.observedAt, now) && populated(directoryAcceptance.evidenceRef);
+  if (!directoryAcceptancePassed)
+    errors.push("Project Alpha joined Ops Directory-v2 acceptance must bind current sanitized create, update, replay, conflict, readback, and public-link evidence");
 
   const projectAlphaMigrations = projectAlpha.migrations ?? {};
   if (!sameSet(projectAlphaMigrations.expected, Object.keys(PROJECT_ALPHA_STAGING.migrations))) errors.push("Project Alpha migration set must exactly match the release contract");
@@ -299,7 +417,10 @@ export function validateEvidence(evidence, options = {}) {
   if (deliveryVars.PUBLIC_SHARE_ORIGIN !== `https://${STAGING_CLIENT_PORTAL.publicHostname}` ||
     deliveryVars.PUBLIC_BASE_URL !== deliveryVars.PUBLIC_SHARE_ORIGIN)
     errors.push("public share origin must match the anonymous Delivery staging host");
-  if (portal.enabled !== false || deliveryVars.CLIENT_PORTAL_ENABLED !== "false") errors.push("client portal must remain default-off in release preparation evidence");
+  if (portal.releasePhase !== STAGING_CLIENT_PORTAL.releasePhase)
+    errors.push("client portal release phase must match the reviewed staff-synthetic acceptance contract");
+  if (portal.runtimeEnabled !== true || deliveryVars.CLIENT_PORTAL_ENABLED !== "true")
+    errors.push("client portal runtime must be enabled only for the reviewed staff-synthetic staging acceptance phase");
   if (portal.teamDomain !== STAGING_STATIC_VARS.delivery.CLIENT_ACCESS_TEAM_DOMAIN || portal.teamDomain !== deliveryVars.CLIENT_ACCESS_TEAM_DOMAIN) errors.push("client portal Access team domain must match Delivery staging config");
   if (portal.applicationName !== STAGING_CLIENT_PORTAL.applicationName || !populated(portal.applicationId)) errors.push("client portal needs the dedicated Access application identity");
   if (!/^[a-f0-9]{64}$/i.test(portal.audience ?? "") || portal.audience !== deliveryVars.CLIENT_ACCESS_AUD) errors.push("client portal audience must match the dedicated Access app and Delivery staging config");
@@ -313,6 +434,48 @@ export function validateEvidence(evidence, options = {}) {
     errors.push("client portal Access application, audience, destination, and policy readback needs an evidence reference");
   if (!populated(portal.rollbackSnapshotRef))
     errors.push("client portal Access and custom-domain rollback snapshot needs an evidence reference");
+  const admission = portal.admission ?? {};
+  if (admission.mode !== STAGING_CLIENT_PORTAL.admissionMode)
+    errors.push("client portal admission must be restricted to explicit staff synthetic testers");
+  for (const proof of [
+    "clientAdmissionEnabled", "invitationSendingEnabled", "automaticEnrollmentEnabled",
+  ]) if (admission[proof] !== false) errors.push(`client portal admission ${proof} must remain false`);
+  if (admission.syntheticWorkspaceOnly !== true) errors.push("client portal admission must prove syntheticWorkspaceOnly");
+  const tester = admission.approvedStaffTester ?? {};
+  const expectedIssuerSubjectSha256 = typeof tester.issuer === "string" && sha256Hex(tester.subjectSha256)
+    ? crypto.createHash("sha256").update(`${tester.issuer}\n${tester.subjectSha256.toLowerCase()}`).digest("hex")
+    : null;
+  if (tester.issuer !== portal.teamDomain || !sha256Hex(tester.subjectSha256) || !sha256Hex(tester.issuerSubjectSha256)
+    || tester.issuerSubjectSha256.toLowerCase() !== expectedIssuerSubjectSha256
+    || !sha256Hex(tester.identityReadbackSha256) || tester.activeOperationsUser !== true || !populated(tester.evidenceRef))
+    errors.push("client portal admission must bind one active staff tester to a verified issuer and subject readback");
+  const protectedPolicy = admission.protectedAccessPolicy ?? {};
+  const expectedInclude = [{ type: "group", id: portal.groupId }];
+  if (protectedPolicy.applicationId !== portal.applicationId || !populated(protectedPolicy.policyId)
+    || protectedPolicy.decision !== "allow" || protectedPolicy.bypass !== false
+    || JSON.stringify(protectedPolicy.includeSelectors) !== JSON.stringify(expectedInclude)
+    || !sameSequence(protectedPolicy.excludeSelectors, []) || !sameSequence(protectedPolicy.requireSelectors, [])
+    || !sha256Hex(protectedPolicy.readbackSha256) || !populated(protectedPolicy.evidenceRef))
+    errors.push("client portal protected Access policy must be one exact dedicated-group Allow policy with no broad selectors, exclusions, requirements, or Bypass");
+  const membership = admission.testerGroupMembership ?? {};
+  if (membership.groupId !== portal.groupId
+    || !sameSequence(membership.issuerSubjectSha256, [tester.issuerSubjectSha256])
+    || !sha256Hex(membership.readbackSha256) || !populated(membership.evidenceRef))
+    errors.push("client portal tester group membership must contain exactly the approved issuer-subject hash");
+  const productionAccess = admission.productionAccess ?? {};
+  const productionBefore = productionAccess.before ?? {};
+  const productionAfter = productionAccess.after ?? {};
+  for (const [label, snapshot] of [["before", productionBefore], ["after", productionAfter]]) {
+    if (!populated(snapshot.applicationId) || !Array.isArray(snapshot.policyIds) || !snapshot.policyIds.length
+      || new Set(snapshot.policyIds).size !== snapshot.policyIds.length || snapshot.policyIds.some((id) => !populated(id))
+      || !sha256Hex(snapshot.configSha256))
+      errors.push(`client portal production Access ${label} snapshot must pin immutable application/policy IDs and a configuration hash`);
+  }
+  if (productionBefore.applicationId !== productionAfter.applicationId
+    || !sameSequence(productionBefore.policyIds, productionAfter.policyIds)
+    || productionBefore.configSha256 !== productionAfter.configSha256)
+    errors.push("client portal production Access before/after snapshots must be exactly unchanged");
+  if (!populated(productionAccess.evidenceRef)) errors.push("client portal production Access comparison needs a readback evidence reference");
   const publicAccess = portal.publicAccess ?? {};
   if (publicAccess.applicationName !== STAGING_CLIENT_PORTAL.publicApplicationName || !populated(publicAccess.applicationId) || !populated(publicAccess.policyId)) errors.push("client public paths need a separately identified Access Bypass application and policy");
   if (publicAccess.decision !== "bypass" || publicAccess.include !== "everyone") errors.push("client public path policy must be Bypass Everyone");
@@ -322,7 +485,10 @@ export function validateEvidence(evidence, options = {}) {
 
   const portalTests = portal.tests ?? {};
   for (const gate of [
-    "portalDisabled404",
+    "staffSyntheticWorkspaceAccessVerified",
+    "clientAdmissionDenied",
+    "invitationSendingDenied",
+    "automaticEnrollmentDenied",
     "invalidAudienceDenied",
     "unprovisionedIdentityDenied",
     "crossAccountDenied",
@@ -356,18 +522,20 @@ export function validateEvidence(evidence, options = {}) {
 
   const migrations = evidence.migrations ?? {};
   const freshBootstrap = migrations.freshBootstrap ?? {};
-  if (freshBootstrap.schemaVersion !== 1 || freshBootstrap.mode !== "generated-empty-d1") {
-    errors.push("fresh bootstrap evidence must use schemaVersion 1 and generated-empty-d1 mode");
+  const disposableBootstrap = freshBootstrap.mode === "generated-empty-d1-disposable";
+  if (freshBootstrap.schemaVersion !== CURRENT_FRESH_BOOTSTRAP_SCHEMA_VERSION
+    || (!disposableBootstrap && freshBootstrap.mode !== "generated-empty-d1")) {
+    errors.push(`current fresh bootstrap evidence must use schemaVersion ${CURRENT_FRESH_BOOTSTRAP_SCHEMA_VERSION} and an approved generated-empty-d1 mode; historical schemaVersion 1 evidence cannot satisfy this release gate`);
   }
+  if (disposableBootstrap && !DISPOSABLE_RUN_ID.test(freshBootstrap.runId ?? "")) errors.push("disposable fresh bootstrap requires a strict runId");
   if (freshBootstrap.canonicalMigrationsUnchanged !== true) errors.push("fresh bootstrap must prove canonical migrations remained unchanged");
   if (!/^[a-f0-9]{64}$/i.test(freshBootstrap.ownerEmailSha256 ?? "")) errors.push("fresh bootstrap must record the normalized owner email SHA-256, not the email");
   if (!recentDate(freshBootstrap.generatedAt, now) || !populated(freshBootstrap.generatorEvidenceRef)) errors.push("fresh bootstrap generation must be current and referenced");
-  for (const [app, expected] of Object.entries({
-    delivery: { configPath: "apps/client/wrangler.staging.bootstrap.json", manifestPath: "apps/client/.staging-bootstrap/manifest.json", seed: "0002_seed_initial_staff.sql", ledgerCount: 132, finalMigration: "0213_incoming_rclone_promotion.sql" },
-    operations: { configPath: "apps/operations/wrangler.staging.bootstrap.json", manifestPath: "apps/operations/.staging-bootstrap/manifest.json", seed: "0002_seed_acl.sql", ledgerCount: 122, finalMigration: "0122_project_alpha_project_v2_canonical_activation.sql" },
-  })) {
+  for (const [app, expected] of Object.entries(CURRENT_FRESH_BOOTSTRAP_APPLICATIONS)) {
     const proof = freshBootstrap.applications?.[app] ?? {};
-    if (proof.configPath !== expected.configPath || proof.manifestPath !== expected.manifestPath) errors.push(`${app} fresh bootstrap must identify the generated config and manifest`);
+    const expectedConfigPath = disposableBootstrap ? `apps/${expected.source}/wrangler.staging.bootstrap.${freshBootstrap.runId}.json` : expected.configPath;
+    const expectedManifestPath = disposableBootstrap ? `apps/${expected.source}/.staging-bootstrap/rehearsals/${freshBootstrap.runId}/manifest.json` : expected.manifestPath;
+    if (proof.configPath !== expectedConfigPath || proof.manifestPath !== expectedManifestPath) errors.push(`${app} fresh bootstrap must identify the generated config and manifest`);
     if (!sameSequence(proof.transformedFiles, [expected.seed])) errors.push(`${app} fresh bootstrap must transform exactly ${expected.seed}`);
     if (proof.ledgerCount !== expected.ledgerCount || proof.finalMigration !== expected.finalMigration) errors.push(`${app} fresh bootstrap ledger count and final migration must match the full canonical chain`);
     if (!/^[a-f0-9]{64}$/i.test(proof.sourceSeedSha256 ?? "") || !/^[a-f0-9]{64}$/i.test(proof.generatedSeedSha256 ?? "") || proof.sourceSeedSha256 === proof.generatedSeedSha256) errors.push(`${app} fresh bootstrap must record distinct source and generated seed SHA-256 values`);
@@ -376,7 +544,24 @@ export function validateEvidence(evidence, options = {}) {
     }
     if (app === "delivery" && proof.both0199FilenamesExactlyOnce !== true) errors.push("delivery fresh bootstrap must prove both 0199 filenames exactly once");
     if (app === "operations" && proof.portableCatalogSeedVerified !== true) errors.push("operations fresh bootstrap must prove the portable ACL catalog seed");
+    if (disposableBootstrap) {
+      const expectedTargetName = `${expected.databaseName}-rehearsal-${freshBootstrap.runId}`;
+      if (proof.targetKind !== "disposable-staging-d1" || proof.targetDatabaseName !== expectedTargetName || !UUID_V4.test(proof.targetDatabaseId ?? "")) {
+        errors.push(`${app} disposable fresh bootstrap must identify its exact run-scoped staging D1 target`);
+      }
+      const reserved = Object.values(STAGING_INVENTORY).flatMap(inventory => inventory.d1_databases ?? []);
+      if (reserved.some(item => item.database_name === proof.targetDatabaseName || item.database_id === proof.targetDatabaseId)) errors.push(`${app} disposable fresh bootstrap must not reuse a canonical staging D1 identity`);
+      if (PRODUCTION_DATABASE_IDENTITIES.some(item => item.databaseName === proof.targetDatabaseName || item.databaseId === proof.targetDatabaseId)) errors.push(`${app} disposable fresh bootstrap must not reuse a production D1 identity`);
+      for (const field of ["creationEvidenceRef", "applyEvidenceRef", "readbackEvidenceRef"])
+        if (!populated(proof[field])) errors.push(`${app} disposable fresh bootstrap needs ${field}`);
+    }
     if (!populated(proof.evidenceRef)) errors.push(`${app} fresh bootstrap needs an evidence reference`);
+  }
+  if (disposableBootstrap) {
+    const deliveryTarget = freshBootstrap.applications?.delivery ?? {}, operationsTarget = freshBootstrap.applications?.operations ?? {};
+    if (deliveryTarget.targetDatabaseName === operationsTarget.targetDatabaseName || deliveryTarget.targetDatabaseId === operationsTarget.targetDatabaseId) {
+      errors.push("disposable fresh bootstrap database names and IDs must be distinct");
+    }
   }
   for (const app of ["delivery", "operations"]) {
     const migration = migrations[app] ?? {};
@@ -389,10 +574,10 @@ export function validateEvidence(evidence, options = {}) {
   }
   const operationsMigration = migrations.operations ?? {};
   for (const proof of ["remoteLedgerOrderVerified", "openFencesChecked", "writerAndSchedulerQuiescent", "compatibleWritersOrdered"]) {
-    if (operationsMigration[proof] !== true) errors.push(`operations 0054-0122 release gate must prove ${proof}`);
+    if (operationsMigration[proof] !== true) errors.push(`operations full-chain release gate must prove ${proof}`);
   }
   for (const field of ["remoteLedgerEvidenceRef", "preMigrationFenceEvidenceRef", "compatibleWriterVersionId", "compatibleWriterOrderingEvidenceRef"]) {
-    if (!populated(operationsMigration[field])) errors.push(`operations 0054-0122 release gate needs ${field}`);
+    if (!populated(operationsMigration[field])) errors.push(`operations full-chain release gate needs ${field}`);
   }
   const deliveryMigration = migrations.delivery ?? {};
   for (const proof of ["videoRecoveryCompleted", "videoRowsPendingForTrueNas", "legacyBridgeAcceptanceMatrixPassed"]) {

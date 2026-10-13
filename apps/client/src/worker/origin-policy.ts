@@ -32,6 +32,7 @@ export function requestNamespace(path: string): RequestNamespace {
     || path === "/api/public" || path.startsWith("/api/public/")) return "public";
   if (path === "/api/internal" || path.startsWith("/api/internal/")) return "internal";
   if (path === "/portal" || path.startsWith("/portal/")
+    || path === "/onboarding" || path.startsWith("/onboarding/")
     || path === "/api/client" || path.startsWith("/api/client/")) return "portal";
   return "unknown";
 }

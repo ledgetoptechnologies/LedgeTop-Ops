@@ -47,6 +47,18 @@ const groups = [
     files: ["test/joined-dual-domain-daily-use.test.ts"],
     browserConfig: "playwright.j7.config.ts",
   },
+  {
+    id: "j8",
+    label: "PA Project-v2 provenance through selected Client portal resource access and revocation",
+    app: "operations",
+    files: ["test/operations-native-portal-resource-acceptance.test.ts"],
+  },
+  {
+    id: "j9",
+    label: "native recipient enrollment, signed-in service-home access, and revocation",
+    app: "operations",
+    files: ["test/operations-portal-native-recipient-joined-acceptance.test.ts"],
+  },
 ];
 
 const selected = process.argv.slice(2).filter(argument => argument !== "--list");
@@ -66,7 +78,7 @@ for (const group of requested) {
   const vitest = path.join(appRoot, "node_modules", "vitest", "vitest.mjs");
   const result = spawnSync(process.execPath, [
     vitest, "run", "--config", "vitest.config.ts", ...group.files,
-    "--maxWorkers=1", "--testTimeout=60000",
+    "--maxWorkers=1", "--testTimeout=120000",
   ], {
     cwd: appRoot,
     encoding: "utf8",

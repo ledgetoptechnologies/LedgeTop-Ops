@@ -139,17 +139,21 @@ by `PROJECT_ALPHA_PORTAL_DIRECT_HTTP_ENABLED`, which production must keep
 exactly `false`. Public share, download, portal shell, and session routes are
 unchanged; this removal affects only obsolete machine write endpoints.
 
-The Client-side projection configuration is:
+The Client-side projection configuration for the private Worker-to-Worker
+receiver is:
 
 ```text
-PROJECT_ALPHA_PORTAL_APPLICATION_KEY=ltds_ops
 PROJECT_ALPHA_PORTAL_SYNC_ENABLED=true
 PROJECT_ALPHA_PORTAL_DIRECT_HTTP_ENABLED=false
 ```
 
 Ops Sync owns the external Access and HMAC credentials. The Client Worker does
-not need a second copy of those secrets. `CLIENT_PORTAL_HIERARCHY_V2_ENABLED`
-remains an independent authorization/read cutover.
+not need a second copy of those secrets. `PROJECT_ALPHA_PORTAL_APPLICATION_KEY`
+is not required for this projection receiver or for API-v2 source selection;
+it belongs to the legacy primary delivery-intent HMAC compatibility path. Keep
+that legacy setting isolated until the compatibility path is retired after
+the API-v2 cutover. `CLIENT_PORTAL_HIERARCHY_V2_ENABLED` remains an independent
+authorization/read cutover.
 
 The strict schema-v2 envelope carries an opaque `workspaceId`, delivery ID,
 source generation, and monotonic per-workspace source sequence. A snapshot page
@@ -400,11 +404,23 @@ currency/amounts, or any configuration error degrades to **Pricing provided
 after review**. LTDS has no local pricing formula and no stale-price fallback;
 request submission remains available.
 
-## Deployment configuration
+## Legacy v1 deployment configuration
 
-Choose a deployment-specific application key such as `field_operations`. Configure that same value as `APPLICATION_KEY` on both the provisioning Worker and the Operations snapshot importer, and in Project Alpha’s Custom Integrations settings. The display label, Worker names, URLs, D1 database, Access application, Access group, and application key are deployment choices.
+This section documents the legacy v1 event/snapshot bridge only; it is not
+used to configure the API-v2 connection. For that compatibility bridge, choose
+a deployment-specific application key such as `field_operations`. Configure
+that same value as `APPLICATION_KEY` on both the provisioning Worker and the
+Operations snapshot importer, and in Project Alpha's legacy Custom Integrations
+settings. The display label, Worker names, URLs, D1 database, Access application,
+Access group, and application key are deployment choices.
 
-This repository's current LTDS production deployment uses `ltds_ops`. That value is deployment configuration, not an application default: forks must choose their own key and use it consistently on all three components.
+This repository's current LTDS legacy compatibility configuration uses
+`ltds_ops`. That value is deployment configuration, not an application default.
+Do not reuse it as the identity for both new API-v2 sources: each LTT/LTDS
+Project Alpha connection has its own scoped API key and immutable source,
+application, and history identities. Retire this legacy setting only after the
+corresponding v1 event/snapshot and delivery-intent paths are disabled and the
+API-v2/portal acceptance gates pass.
 
 Create a dedicated Project Alpha API key with only:
 

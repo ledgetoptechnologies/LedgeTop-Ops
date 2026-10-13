@@ -9,7 +9,7 @@ function files(directory: URL): URL[] {
 }
 
 describe("project v2 canonical activation import graph", () => {
-  it("mounts the current chain only through the dedicated acceptance route and keeps the legacy settlement adapter private", () => {
+  it("mounts the current chain only through acceptance/private-admin paths and keeps the legacy adapter private", () => {
     const worker = new URL("../src/worker/", import.meta.url);
     const forbidden = [
       "project-alpha-project-settlement-adapter",
@@ -20,22 +20,49 @@ describe("project v2 canonical activation import graph", () => {
     ];
     const adapters = new Set(forbidden.map(name => new URL(`${name}.ts`, worker).pathname));
     const acceptance = new URL("project-alpha-project-v2-acceptance-routes.ts", worker).pathname;
-    const acceptedImports = new Set([
+    const privateAdminUrl = new URL("project-alpha-private-admin-routes.ts", worker);
+    const privateAdmin = privateAdminUrl.pathname;
+    const finalizerUrl = new URL("project-alpha-project-adoption-finalizer.ts", worker);
+    const acceptedImports = new Map<string, ReadonlySet<string>>([
+      [acceptance, new Set([
       "project-alpha-project-v2-command-producer",
       "project-alpha-project-v2-pending-dispatcher",
       "project-alpha-project-read-settlement-adapter",
       "project-alpha-project-canonical-activation-adapter",
+      ])],
+      [privateAdmin, new Set([
+        "project-alpha-project-read-settlement-adapter",
+        "project-alpha-project-canonical-activation-adapter",
+        "project-alpha-project-v2-pending-dispatcher",
+      ])],
+      [finalizerUrl.pathname, new Set([
+        "project-alpha-project-read-settlement-adapter",
+        "project-alpha-project-canonical-activation-adapter",
+        "project-alpha-project-v2-pending-dispatcher",
+      ])],
     ]);
     const offenders = files(worker).filter(file => !adapters.has(file.pathname)).flatMap(file => {
       const source = readFileSync(file, "utf8");
+      const allowed = acceptedImports.get(file.pathname) ?? new Set<string>();
       return forbidden.filter(name => source.includes(name)
-        && !(file.pathname === acceptance && acceptedImports.has(name)))
+        && !allowed.has(name))
         .map(name => `${file.pathname} -> ${name}`);
     });
     expect(offenders).toEqual([]);
     const index = readFileSync(new URL("index.ts", worker), "utf8");
     expect(index).toContain("project-alpha-project-v2-acceptance-routes");
     for (const adapter of forbidden) expect(index).not.toContain(`./${adapter}`);
+    expect(index).not.toContain("project-alpha-project-adoption-finalizer");
+    const privateRoutes = readFileSync(privateAdminUrl, "utf8");
+    expect(privateRoutes).toContain("app.use(`${PROJECT_ALPHA_PRIVATE_ADMIN_ROUTE}/*`, guard)");
+    expect(privateRoutes).toContain("if (!enabled(c.env)) throw new HTTPException(404");
+    expect(privateRoutes).toContain('if (!c.get("administrator")) throw new HTTPException(403');
+    expect(privateRoutes).toContain('c.env.PROJECT_ALPHA_PROJECT_ADOPTION_FINALIZATION_ENABLED !== "true"');
+    expect(privateRoutes).toContain('requireIdempotency(c.req.raw, input.commandId)');
+    expect(readFileSync(finalizerUrl, "utf8")).toContain('env.PROJECT_ALPHA_PROJECT_ADOPTION_FINALIZATION_ENABLED !== "true"');
+    const finalizerImporters = files(worker).filter(file => file.pathname !== finalizerUrl.pathname
+      && readFileSync(file, "utf8").includes("project-alpha-project-adoption-finalizer"));
+    expect(finalizerImporters.map(file => file.pathname)).toEqual([privateAdmin]);
   });
 
   it("keeps the activation surface free of fetcher, connection, request, route, queue, and scheduler inputs", async () => {

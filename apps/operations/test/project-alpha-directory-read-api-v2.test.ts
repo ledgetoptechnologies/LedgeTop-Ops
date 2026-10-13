@@ -104,4 +104,27 @@ describe("dormant Project Alpha API-v2 directory reads", () => {
       sendFor(ids.a, endpoint("client", true), json(binding(ids.a))));
     expect(result).toMatchObject({ status: "observed", observation: { authoritative: false, binding: { externalId: "ops/client-42", publicId: clientId, createdAt: "2026-09-15T12:34:56.789Z" }, resource: { revision: "8", present: true }, authorizationGeneration: "7" } });
   });
+
+  it("bounds a response body that stalls after trusted headers", async () => {
+    vi.useFakeTimers();
+    try {
+      const stalled = new Response(new ReadableStream<Uint8Array>({ start() { /* intentionally never closes */ } }), {
+        status: 200, headers: { "Content-Type": "application/json", "Cache-Control": "no-store", "X-Request-ID": requestId },
+      });
+      const pending = readConfiguredProjectAlphaDirectoryProfile(env(), sourceA, "client", clientId,
+        sendFor(ids.a, endpoint("client"), stalled));
+      await vi.advanceTimersByTimeAsync(10_001);
+      await expect(pending).resolves.toEqual({ status: "uncertain", reason: "timeout", httpStatus: 200 });
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("does not let a noncooperative cancel extend an oversized streamed-body rejection", async () => {
+    const oversized = new Response(new ReadableStream<Uint8Array>({
+      start(controller) { controller.enqueue(new Uint8Array(65_537)); },
+      cancel() { return new Promise<void>(() => { /* intentionally never settles */ }); },
+    }), { status: 200, headers: { "Content-Type": "application/json", "Cache-Control": "no-store", "X-Request-ID": requestId } });
+    const result = await readConfiguredProjectAlphaDirectoryProfile(env(), sourceA, "client", clientId,
+      sendFor(ids.a, endpoint("client"), oversized));
+    expect(result).toEqual({ status: "uncertain", reason: "response_limit", httpStatus: 200 });
+  });
 });

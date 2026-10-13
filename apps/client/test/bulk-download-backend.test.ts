@@ -4,7 +4,6 @@ import deliveryWranglerConfig from "../wrangler.jsonc?raw";
 vi.mock("cloudflare:workers", () => ({ WorkflowEntrypoint: class {}, WorkerEntrypoint: class {} }));
 
 import deliveryWorker, {
-  BULK_CACHE_CLEANUP_MAX_D1_QUERIES,
   bulkQuotaRetryAfterSeconds,
   bulkDownloadResumeExpiresAt,
   bulkJobProgress,
@@ -13,6 +12,7 @@ import deliveryWorker, {
   friendlyBulkFailure,
   readyBulkJobIsExpired,
 } from "../src/worker/index";
+import { BULK_CACHE_CLEANUP_MAX_D1_QUERIES } from "../src/worker/bulk-cache-limits";
 import { encodeItemRef } from "../src/worker/files";
 import { BULK_DOWNLOAD_RESUME_COOKIE, createBulkDownloadResumeCookie, createSessionCookie } from "../src/worker/security";
 import {

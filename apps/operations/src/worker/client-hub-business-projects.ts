@@ -1,7 +1,8 @@
 import { HTTPException } from "hono/http-exception";
 import { sha256 } from "./crypto";
-import { isBusinessProjectionSource, resolveClientHubSourceRoot } from "./client-hub-source";
+import { clientHubAlphaInternalId, isBusinessProjectionSource, resolveClientHubSourceRoot } from "./client-hub-source";
 import { readClientHubBusinessProjectPolicy } from "./client-hub-project-policy";
+import { canonicalBusinessProjectPredicate, listCanonicalClientHubProjects, recheckCanonicalClientHubProjects } from "./client-hub-canonical-projects";
 import type { SqlFilter } from "./visibility";
 import type { ClientHubCollectionContext, ClientHubCollectionResult } from "./client-hub-collections";
 import type { Env, StaffPrincipal } from "./types";
@@ -9,10 +10,10 @@ import type { Env, StaffPrincipal } from "./types";
 export const BUSINESS_PROJECT_FILTERS = ["all", "current", "completed", "cancelled"] as const;
 export type BusinessProjectFilter = typeof BUSINESS_PROJECT_FILTERS[number];
 interface Cursor {
-  v: 1; collection: "businessProjects"; root: string[]; context: string; policy: string; source: string;
+  v: 2; collection: "businessProjects"; root: string[]; context: string; policy: string; source: string;
   filter: BusinessProjectFilter; after: [string, string];
 }
-interface ProjectRow extends Record<string, unknown> { id: string; __created: string }
+interface ProjectRow extends Record<string, unknown> { id: string; __created: string; __sort_id: string; __origin: "pa" | "canonical" }
 
 function eligible(context: ClientHubCollectionContext): boolean {
   const root = context.root;
@@ -37,7 +38,7 @@ function decode(raw: string): Cursor {
     if (!/^[A-Za-z0-9_-]{1,4096}$/.test(raw)) throw new Error();
     const bytes = Uint8Array.from(atob(raw.replaceAll("-", "+").replaceAll("_", "/")), value => value.charCodeAt(0));
     const value = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)) as Partial<Cursor>;
-    if (!value || value.v !== 1 || value.collection !== "businessProjects" || !isFilter(value.filter)
+    if (!value || value.v !== 2 || value.collection !== "businessProjects" || !isFilter(value.filter)
       || !Array.isArray(value.root) || value.root.length !== 4 || !value.root.every(validId)
       || ![value.context, value.policy, value.source].every(item => typeof item === "string" && /^[A-Za-z0-9_-]{43}$/.test(item))
       || !Array.isArray(value.after) || value.after.length !== 2 || !validId(value.after[1])
@@ -54,13 +55,14 @@ export async function clientHubBusinessProjectSourceProof(env: Env, context: Cli
   if (!source?.active || (root.kind === "standalone_client" && source.organization_id !== null))
     throw new HTTPException(404, { message: "Client not found" });
   return sha256(JSON.stringify([rootTuple(context), source.id, source.active, source.organization_id,
-    source.pa_public_id, source.mapping_status]));
+    source.pa_internal_id, source.pa_public_id, source.mapping_status]));
 }
 
 export function clientHubBusinessProjectOwnership(context: ClientHubCollectionContext): SqlFilter {
+  const paRootId = clientHubAlphaInternalId(context.root, context.paRootId);
   return context.root.kind === "organization"
-    ? { sql: "p.projection_source_id=? AND (p.organization_id=? OR (p.organization_id IS NULL AND owner.organization_id=?))", values: [context.root.source_id, context.root.public_id, context.root.public_id] }
-    : { sql: "p.projection_source_id=? AND p.client_id=? AND owner.id IS NOT NULL AND owner.organization_id IS NULL AND p.organization_id IS NULL", values: [context.root.source_id, context.root.public_id] };
+    ? { sql: "p.projection_source_id=? AND (p.organization_id=? OR (p.organization_id IS NULL AND owner.organization_id=?))", values: [context.root.source_id, paRootId, paRootId] }
+    : { sql: "p.projection_source_id=? AND p.client_id=? AND owner.id IS NOT NULL AND owner.organization_id IS NULL AND p.organization_id IS NULL", values: [context.root.source_id, paRootId] };
 }
 function statusFilter(filter: BusinessProjectFilter): string {
   if (filter === "current") return " AND p.status IN ('not_started','active','overdue')";
@@ -105,8 +107,18 @@ export async function listClientHubBusinessProjects(env: Env, principal: StaffPr
   // excludes SQLite-relative inputs such as "now" before parsing the date.
   const rawDate = `CASE WHEN json_valid(p.payload_json) THEN CASE WHEN json_type(p.payload_json,'$.created_at')='text'
     THEN json_extract(p.payload_json,'$.created_at') END END`;
-  const rows = (await env.OPS_DB.withSession("first-primary").prepare(`WITH owned AS (
+  const canonicalMirrorProof = await canonicalBusinessProjectPredicate(env, context, policy);
+  // Materialize the full display proof independently: nesting it inside the
+  // anti-join exceeds SQLite's expression depth. Suppress mirrors before LIMIT,
+  // so duplicate source rows cannot truncate a page or hide later projects.
+  const canonicalMirrors = canonicalMirrorProof
+    ? `SELECT DISTINCT s.project_alpha_public_id FROM operations_shared_projects s WHERE ${canonicalMirrorProof.sql}`
+    : "SELECT NULL project_alpha_public_id WHERE 0";
+  const paRows = (await env.OPS_DB.withSession("first-primary").prepare(`WITH canonical_mirrors AS MATERIALIZED (
+    ${canonicalMirrors}
+  ), owned AS (
     SELECT p.id,p.name,p.status,p.start_date,p.end_date,p.client_id,p.organization_id,
+      CASE WHEN json_valid(p.payload_json) THEN json_extract(p.payload_json,'$.public_id') END pa_public_id,
       p.manager_user_id,manager.display_name manager_name,${rawDate} source_created_at
     FROM pa_projects p LEFT JOIN pa_clients owner ON owner.id=p.client_id AND owner.projection_source_id=p.projection_source_id AND owner.active=1
       LEFT JOIN pa_users manager ON manager.id=p.manager_user_id AND manager.projection_source_id=p.projection_source_id
@@ -116,11 +128,18 @@ export async function listClientHubBusinessProjects(env: Env, principal: StaffPr
       AND source_created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]*'
       AND strftime('%Y-%m-%d',substr(source_created_at,1,10),'+0 days')=substr(source_created_at,1,10)
       THEN strftime('%Y-%m-%dT%H:%M:%fZ',source_created_at) END created_at FROM owned
-  ) SELECT id,name,status,start_date,end_date,client_id,organization_id,manager_user_id,manager_name,created_at,
-      COALESCE(created_at,'') __created FROM dated
-    ${cursor ? "WHERE (COALESCE(created_at,''),id)<(?,?)" : ""}
-    ORDER BY COALESCE(created_at,'') DESC,id DESC LIMIT ?`)
-    .bind(...values, ...(cursor?.after ?? []), limit + 1).all<ProjectRow>()).results;
+  ) SELECT id,'pa' origin,name,status,start_date,end_date,client_id,organization_id,manager_user_id,manager_name,created_at,
+      COALESCE(created_at,'') __created,'pa:'||id __sort_id,'pa' __origin FROM dated
+    WHERE NOT EXISTS (SELECT 1 FROM canonical_mirrors mirror WHERE mirror.project_alpha_public_id=dated.pa_public_id)
+    ${cursor ? "AND (COALESCE(created_at,''),'pa:'||id)<(?,?)" : ""}
+    ORDER BY COALESCE(created_at,'') DESC,('pa:'||id) DESC LIMIT ?`)
+    .bind(...(canonicalMirrorProof?.values ?? []), ...values, ...(cursor?.after ?? []), limit + 1).all<ProjectRow>()).results;
+  const canonicalRows = await listCanonicalClientHubProjects(env, context, policy, { limit: limit + 1,
+    after: cursor?.after, filter });
+  const rows: ProjectRow[] = [...paRows, ...canonicalRows]
+    .sort((a, b) => a.__created === b.__created
+      ? a.__sort_id === b.__sort_id ? 0 : a.__sort_id > b.__sort_id ? -1 : 1
+      : a.__created > b.__created ? -1 : 1);
   const pageRows = rows.slice(0, limit);
 
   const [currentPolicy, currentSource] = await Promise.all([
@@ -131,20 +150,23 @@ export async function listClientHubBusinessProjects(env: Env, principal: StaffPr
   // of the root proof. Recheck every returned ID through live SQL before release.
   // Bounded chunks leave room for the owner/assignment parameters in D1.
   for (let start = 0; start < pageRows.length; start += 40) {
-    const ids = pageRows.slice(start, start + 40).map(row => row.id);
-    const count = await env.OPS_DB.withSession("first-primary").prepare(`SELECT count(*) count FROM pa_projects p
+    const selected = pageRows.slice(start, start + 40);
+    const ids = selected.filter(row => row.__origin === "pa").map(row => row.id);
+    const count = ids.length ? await env.OPS_DB.withSession("first-primary").prepare(`SELECT count(*) count FROM pa_projects p
       LEFT JOIN pa_clients owner ON owner.id=p.client_id AND owner.projection_source_id=p.projection_source_id AND owner.active=1
-      WHERE ${where} AND p.id IN (${ids.map(() => "?").join(",")})`).bind(...values, ...ids).first<number>("count");
+      WHERE ${where} AND p.id IN (${ids.map(() => "?").join(",")})`).bind(...values, ...ids).first<number>("count") : 0;
     if (count !== ids.length) changed();
+    const canonicalIds = selected.filter(row => row.__origin === "canonical").map(row => row.external_project_id as string);
+    if (!await recheckCanonicalClientHubProjects(env, context, currentPolicy, canonicalIds, filter)) changed();
   }
   response.page.returned = pageRows.length;
   response.page.hasMore = rows.length > limit;
   if (response.page.hasMore) {
     const last = pageRows[pageRows.length - 1]!;
-    response.page.nextCursor = encode({ v: 1, collection: "businessProjects", root: rootTuple(context),
-      context: context.contextVersion, policy: policy.proof, source, filter, after: [last.__created, last.id] });
+    response.page.nextCursor = encode({ v: 2, collection: "businessProjects", root: rootTuple(context),
+      context: context.contextVersion, policy: policy.proof, source, filter, after: [last.__created, last.__sort_id] });
   }
-  response.items = pageRows.map(({ __created: _created, ...row }) => ({ ...row,
-    row_key: JSON.stringify(["businessProjects", context.root.source_id, row.id]) }));
+  response.items = pageRows.map(({ __created: _created, __sort_id: _sortId, __origin, pa_public_id: _paPublicId, ...row }) => ({ ...row, origin: __origin,
+    row_key: JSON.stringify(["businessProjects", context.root.source_id, __origin, row.id]) }));
   return response;
 }

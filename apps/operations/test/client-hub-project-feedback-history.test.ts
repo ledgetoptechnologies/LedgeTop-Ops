@@ -20,7 +20,7 @@ import { listClientHubFeedbackHistory, listClientHubProjectFeedbackHistory } fro
 import { transitionStaffFeedback } from "../src/worker/client-feedback";
 
 function context(publicId:string,sourceId:ClientHubCollectionContext["root"]["source_id"]="project-alpha:primary"):ClientHubCollectionContext{
-  return {root:{source_id:sourceId,root_namespace:"business",kind:"standalone_client",public_id:publicId,
+  return {root:{source_id:sourceId,root_namespace:"business",kind:"standalone_client",public_id:publicId,pa_internal_id:publicId,
     pa_public_id:null,mapping_status:"missing",display_name:"Client",sort_name:"client",status:"active",portal_status:"not_provisioned",
     workspace_id:null,legacy_account_id:null,account_count:0,project_count:0,request_count:0,contact_count:0,
     meaningful_activity_at:null,source_version:null,indexed_at:"",scan_generation:0},

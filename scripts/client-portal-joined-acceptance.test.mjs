@@ -16,6 +16,7 @@ test("joined portal runner lists the implemented acceptance partitions", () => {
   assert.match(result.stdout, /^j4\tclient\tmembership and delegated access remain independently revocable$/m);
   assert.match(result.stdout, /^j5\toperations\tnative delivery and notifications fail closed$/m);
   assert.match(result.stdout, /^j6\tclient\tfeedback and service requests remain independently authorized$/m);
+  assert.match(result.stdout, /^j9\toperations\tnative recipient enrollment, signed-in service-home access, and revocation$/m);
 });
 
 test("joined portal runner rejects unknown or duplicate groups before starting Vitest", () => {

@@ -129,7 +129,9 @@ Before ignored `apps/*/wrangler.staging.json` files can pass preflight:
 - create and record the distinct client portal audience and group, assign both
   approved portal hosts to that single application, set `CLIENT_ACCESS_AUD`,
   `CLIENT_ACCESS_TEAM_DOMAIN`, `CLIENT_PORTAL_ORIGIN`, and the exact two-entry
-  `CLIENT_PORTAL_ORIGINS`, and keep `CLIENT_PORTAL_ENABLED=false`;
+  `CLIENT_PORTAL_ORIGINS`, and keep `CLIENT_PORTAL_ENABLED=true` only for the
+  reviewed `staff-synthetic-acceptance` phase; client admission, invitation
+  sending, automatic enrollment, and broad Access policies remain disabled;
 - record the anonymous delivery origin as `PUBLIC_SHARE_ORIGIN` on both
   Workers and Client `PUBLIC_BASE_URL`; keep Operations `DELIVERY_BASE_URL`
   pointed at the authenticated client portal origin;

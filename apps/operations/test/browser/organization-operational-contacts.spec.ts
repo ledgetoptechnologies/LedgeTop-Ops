@@ -314,3 +314,15 @@ test("standalone source workspaces never request or render organization role ass
   await expect(page.getByRole("heading", { name: "Organization contacts", exact: true })).toHaveCount(0);
   expect(contactCalls).toBe(0);
 });
+
+test("native organization without legacy contact backing keeps the client workspace available", async ({ page }) => {
+  const state = await mock(page, route => route.fulfill({ status: 500 }), () => ({
+    ...detail(), organizationOperationalContactsAvailable: false,
+  }));
+  await page.goto(clientPath);
+  await expect(page.getByRole("heading", { name: "Acme Construction", exact: true })).toBeVisible();
+  await expect(page.getByLabel("Client overview", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Refresh client workspace", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("heading", { name: "Organization contacts", exact: true })).toHaveCount(0);
+  expect(state.calls()).toBe(0);
+});

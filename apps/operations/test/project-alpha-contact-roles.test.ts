@@ -7,7 +7,7 @@ import type { Env } from "../src/worker/types";
 const active: Miniflare[] = [];
 const orgPublicId = "a".repeat(32), projectPublicId = "b".repeat(32);
 function context(overrides: Partial<ClientHubCollectionContext["root"]> = {}): ClientHubCollectionContext {
-  return { root: { source_id: "project-alpha:primary", root_namespace: "business", kind: "organization", public_id: "org-internal",
+  return { root: { source_id: "project-alpha:primary", root_namespace: "business", kind: "organization", public_id: "org-internal", pa_internal_id: "org-internal",
     pa_public_id: orgPublicId, mapping_status: "mapped", display_name: "Acme", sort_name: "acme", status: "active",
     portal_status: "active", workspace_id: "workspace-one", legacy_account_id: null, account_count: 0, project_count: 1,
     request_count: 0, contact_count: 2, meaningful_activity_at: null, source_version: "root-v1", indexed_at: "", scan_generation: 1,
@@ -119,7 +119,8 @@ describe("default-off Project Alpha contact-role adapter", () => {
   it("reads exact project roles only after an exact source/root project mapping is available", async () => {
     const { env, ops } = await fixture();
     expect(await exactBusinessProjectPublicId(env, context(), "project-internal")).toBe(projectPublicId);
-    expect(await exactBusinessProjectPublicId(env, context({ public_id: "another-org" }), "project-internal")).toBeNull();
+    expect(await exactBusinessProjectPublicId(env, context({ public_id: "another-ops-root" }), "project-internal")).toBe(projectPublicId);
+    expect(await exactBusinessProjectPublicId(env, context({ pa_internal_id: "another-org" }), "project-internal")).toBeNull();
     const result = await listProjectAlphaContactRoles(env, context(), { project: true, projectPublicId, limit: 10 });
     expect(result).toMatchObject({ state: "populated", returned: 1, items: [{ scopeType: "project", role: "billing_contact",
       primary: true, primaryBilling: true, sendProjectInvoices: true, canViewInvoiceLinks: true }] });

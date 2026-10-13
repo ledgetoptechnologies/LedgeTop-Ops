@@ -2,16 +2,20 @@ import { HTTPException } from "hono/http-exception";
 import { hasLocalGlobalAllow, hasPermission, isAdministrator, sqlScope } from "./acl";
 import { paProjectFilter } from "./visibility";
 import { sha256 } from "./crypto";
-import { isBusinessProjectionSource, validatedUniquePublicIdExpression, type ClientHubMappingStatus } from "./client-hub-source";
+import { clientHubActiveDirectoryIdentities, clientHubActiveDirectoryIdentitySql, isBusinessProjectionSource,
+  sourcePublicIdExpression, validatedUniquePublicIdExpression, type ClientHubMappingStatus } from "./client-hub-source";
 import type { Env, StaffPrincipal } from "./types";
-import { projectAlphaReadVisibleSql } from "./project-alpha-read-visibility";
+import { projectAlphaNativeMappingReadVisibleSql, projectAlphaReadVisibleSql,
+  requireProjectAlphaReadOrNativeMappingVisibility } from "./project-alpha-read-visibility";
 import { readableBusinessPartySql } from "./business-parties";
+import { resolveProjectAlphaApiV2Connection } from "./project-alpha-api-v2-connections";
 import { businessActivityRecencyCte } from "./client-business-activity";
+import { clientHubReviewedDisplayIdentities, clientHubReviewedDisplayLiveSql } from "./client-hub-reviewed-display";
 
 export const CLIENT_HUB_SOURCES = ["project-alpha:primary", "delivery:local"] as const;
 export type ClientHubSource = `project-alpha:${string}` | "delivery:local";
 export type ClientHubKind = "organization" | "standalone_client";
-export type ClientHubRootNamespace = "business" | "portal" | "account";
+export type ClientHubRootNamespace = "business" | "portal" | "account" | "review";
 export interface ClientHubRoot {
   source_id: ClientHubSource;
   root_namespace: ClientHubRootNamespace;
@@ -19,6 +23,9 @@ export interface ClientHubRoot {
   /** Namespace-local key: internal business ID, exact portal workspace ID, or
    * local account ID. Only pa_public_id contains the exported Alpha public ID. */
   public_id: string;
+  /** Project Alpha internal row key, internal-only; public_id remains the
+   * namespace-canonical Operations key for business roots. */
+  pa_internal_id?: string | null;
   pa_public_id: string | null;
   mapping_status: ClientHubMappingStatus;
   display_name: string;
@@ -41,13 +48,16 @@ export interface ClientHubRoot {
 
 async function hydrateRootAccessStates<T extends Pick<ClientHubRoot,
   "source_id" | "root_namespace" | "kind" | "pa_public_id">>(env: Env, clients: T[]): Promise<Array<T & {
-    portal_access_state: "active" | "revoked";
+    portal_access_state?: "active" | "revoked";
   }>> {
+  const activeUnlessReview = (client: T): T & { portal_access_state?: "active" } => client.root_namespace === "review"
+    ? { ...client }
+    : { ...client, portal_access_state: "active" as const };
   if (env.CLIENT_PORTAL_ROOT_ACCESS_POLICY_ENABLED !== "true")
-    return clients.map(client => ({ ...client, portal_access_state: "active" as const }));
+    return clients.map(activeUnlessReview);
   const roots = clients.flatMap(client => client.root_namespace === "business" && client.pa_public_id
     ? [{ sourceId: client.source_id, rootType: client.kind, rootPublicId: client.pa_public_id }] : []);
-  if (!roots.length) return clients.map(client => ({ ...client, portal_access_state: "active" as const }));
+  if (!roots.length) return clients.map(activeUnlessReview);
   const rows = await env.DELIVERY_DB.withSession("first-primary").prepare(`WITH requested AS (
       SELECT json_extract(value,'$.sourceId') source_id,
         json_extract(value,'$.rootType') root_type,
@@ -61,8 +71,11 @@ async function hydrateRootAccessStates<T extends Pick<ClientHubRoot,
     .all<{ source_id: string; root_type: ClientHubKind; root_public_id: string; state: "revoked" }>();
   if (rows.results.length > 100) throw new HTTPException(503, { message: "Client portal status is temporarily unavailable" });
   const revoked = new Set(rows.results.map(row => JSON.stringify([row.source_id, row.root_type, row.root_public_id])));
-  return clients.map(client => ({ ...client, portal_access_state: client.root_namespace === "business" && client.pa_public_id
-    && revoked.has(JSON.stringify([client.source_id, client.kind, client.pa_public_id])) ? "revoked" : "active" }));
+  return clients.map(client => client.root_namespace === "review" ? { ...client } : ({
+    ...client,
+    portal_access_state: client.root_namespace === "business" && client.pa_public_id
+      && revoked.has(JSON.stringify([client.source_id, client.kind, client.pa_public_id])) ? "revoked" : "active",
+  }));
 }
 export interface ClientHubDirectoryState {
   revision: number;
@@ -75,7 +88,16 @@ export interface ClientHubDirectoryState {
   lease_until: string | null;
   next_run_at: string | null;
 }
-export interface ClientHubDirectoryQuery { q?: string; kind?: string; source?: string; cursor?: string; limit?: number; grouping?: string; sort?: string }
+export interface ClientHubReviewAuthority {
+  staffId: string;
+  accessSubject: string;
+  admissionVersion: number;
+  profileVersion: number;
+  grantGeneration: number;
+  verifiedUntil: string;
+}
+export interface ClientHubDirectoryQuery { q?: string; kind?: string; source?: string; cursor?: string; limit?: number; grouping?: string; sort?: string;
+  /** Built only from a verified native Access assertion; never parsed from query/body input. */ reviewAuthority?: ClientHubReviewAuthority | null }
 type Position = [string, string, ClientHubSource, ClientHubRootNamespace, ClientHubKind, string];
 interface Cursor { v: 6; revision: number; activityRevision: number; asOf: string; sort: "recent" | "name";
   visibility: number; portalProof: string; source: ClientHubSource | null; q: string; kind: ClientHubKind | null;
@@ -121,7 +143,7 @@ export function isClientHubKind(value: string): value is ClientHubKind {
   return value === "organization" || value === "standalone_client";
 }
 export function isClientHubRootNamespace(value: string): value is ClientHubRootNamespace {
-  return value === "business" || value === "portal" || value === "account";
+  return value === "business" || value === "portal" || value === "account" || value === "review";
 }
 export function clientHubRouteKind(kind: ClientHubKind): "organizations" | "standalone" {
   return kind === "organization" ? "organizations" : "standalone";
@@ -130,20 +152,138 @@ export function clientHubDetailPath(root: Pick<ClientHubRoot, "source_id" | "roo
   return `/clients/sources/${encodeURIComponent(root.source_id)}/${root.root_namespace}/${clientHubRouteKind(root.kind)}/${encodeURIComponent(root.public_id)}`;
 }
 const visibleRoot = "root.status NOT IN ('closed','inactive')";
-const visibleSource = `(root.source_id='delivery:local' OR ${projectAlphaReadVisibleSql("root.source_id")})`;
 // An index refresh can lag an authoritative business reassignment/deactivation.
 // Only live business roots belong to this source. A portal UUID by itself never
 // establishes a business-root mapping, even when it resembles a record ID.
-const liveBusinessRoot = `(root.root_namespace<>'business' OR (
+const legacyLiveBusinessRoot = `(root.root_namespace<>'business' OR (
   (root.kind='organization' AND EXISTS (SELECT 1 FROM pa_organizations organization
     WHERE organization.id=root.public_id AND organization.projection_source_id=root.source_id AND organization.active=1)) OR
   (root.kind='standalone_client' AND EXISTS (SELECT 1 FROM pa_clients client
     WHERE client.id=root.public_id AND client.projection_source_id=root.source_id AND client.active=1 AND client.organization_id IS NULL))))`;
-const currentMapping = `CASE WHEN root.root_namespace='business'
+/** Recheck the native admission, profile, and grant epoch from the primary.
+ * Review-only profile data is never authorized by the legacy staff principal. */
+async function currentReviewAuthority(env: Env, principal: StaffPrincipal, authority: ClientHubReviewAuthority | null | undefined): Promise<{ policy: string | null; idsJson: string }> {
+  if (!authority || authority.staffId !== principal.id || authority.accessSubject !== principal.accessSubject
+    || !Number.isSafeInteger(authority.admissionVersion) || authority.admissionVersion < 1
+    || !Number.isSafeInteger(authority.profileVersion) || authority.profileVersion < 1
+    || !Number.isSafeInteger(authority.grantGeneration) || authority.grantGeneration < 1
+    || !Number.isFinite(Date.parse(authority.verifiedUntil)) || Date.parse(authority.verifiedUntil) <= Date.now())
+    return { policy: null, idsJson: "[]" };
+  try {
+    const current = await env.OPS_DB.withSession("first-primary").prepare(`SELECT generation.generation
+      FROM native_staff_admissions admission
+      JOIN native_staff_profiles profile ON profile.staff_id=admission.staff_id
+      JOIN native_directory_grant_generations generation ON generation.staff_id=admission.staff_id
+      WHERE admission.staff_id=? AND admission.active=1 AND admission.bound_access_subject=? AND admission.version=?
+        AND profile.version=? AND lower(profile.login_email)=lower(?) AND generation.generation=?`)
+      .bind(authority.staffId, authority.accessSubject, authority.admissionVersion, authority.profileVersion,
+        principal.email, authority.grantGeneration).first<{ generation: number }>();
+    if (!current) return { policy: null, idsJson: "[]" };
+    const identities = await clientHubReviewedDisplayIdentities(env);
+    const values = [authority.staffId, authority.accessSubject, authority.admissionVersion,
+      authority.profileVersion, principal.email, authority.grantGeneration];
+    const ids = await env.OPS_DB.withSession("first-primary").prepare(`${reviewedRowPermissionSql(identities)}
+      ORDER BY display.projection_id LIMIT 101`).bind(...values).all<{ projection_id: string }>();
+    if (ids.results.length > 100) unavailable();
+    const visibleIds = ids.results.map(row => row.projection_id);
+    const idsJson = JSON.stringify(visibleIds);
+    return { policy: await sha256(JSON.stringify([authority.staffId, authority.accessSubject, authority.admissionVersion,
+      authority.profileVersion, current.generation, visibleIds])), idsJson };
+  } catch { return { policy: null, idsJson: "[]" }; }
+}
+
+/** A reviewed row is display-only and requires a current native staff admission
+ * plus record-specific profile.view. Any applicable deny wins, matching the
+ * canonical native-directory profile reader. */
+function reviewedRowPermissionSql(identities: Parameters<typeof clientHubReviewedDisplayLiveSql>[1]): string {
+  return `SELECT display.projection_id FROM project_alpha_reviewed_standalone_client_displays display
+    JOIN project_alpha_directory_read_adoption_field_review_receipts receipt
+      ON receipt.receipt_id=display.receipt_id AND receipt.record_id=display.record_id
+    JOIN operations_directory_records local_record ON local_record.record_id=display.record_id
+      AND local_record.record_kind='client' AND local_record.current_version=receipt.local_record_version
+    JOIN native_staff_admissions admission ON admission.staff_id=? AND admission.active=1
+      AND admission.bound_access_subject=? AND admission.version=?
+    JOIN native_staff_profiles profile ON profile.staff_id=admission.staff_id AND profile.version=?
+      AND lower(profile.login_email)=lower(?)
+    JOIN native_directory_grant_generations generation ON generation.staff_id=admission.staff_id AND generation.generation=?
+    WHERE ${clientHubReviewedDisplayLiveSql("display", identities)}
+      AND EXISTS(SELECT 1 FROM native_directory_grants allow_row WHERE allow_row.staff_id=admission.staff_id
+        AND allow_row.permission='directory.profile.view' AND allow_row.effect='allow' AND allow_row.active=1
+        AND (allow_row.scope_kind='global' OR (allow_row.scope_kind='resource' AND allow_row.resource_id=display.record_id)
+          OR (allow_row.scope_kind='assigned' AND EXISTS(SELECT 1 FROM native_directory_assignments assignment
+            WHERE assignment.record_id=display.record_id AND assignment.staff_id=admission.staff_id AND assignment.active=1))
+          OR (allow_row.scope_kind='business_area' AND EXISTS(SELECT 1 FROM native_directory_resource_scopes scope
+            WHERE scope.record_id=display.record_id AND scope.active=1 AND scope.business_area_id=allow_row.business_area_id))
+          OR (allow_row.scope_kind='division' AND EXISTS(SELECT 1 FROM native_directory_resource_scopes scope
+            WHERE scope.record_id=display.record_id AND scope.active=1 AND scope.division_id=allow_row.division_id)))
+        AND NOT EXISTS(SELECT 1 FROM native_directory_grants deny_row WHERE deny_row.staff_id=admission.staff_id
+          AND deny_row.permission='directory.profile.view' AND deny_row.effect='deny' AND deny_row.active=1
+          AND (deny_row.scope_kind='global' OR (deny_row.scope_kind='resource' AND deny_row.resource_id=display.record_id)
+            OR (deny_row.scope_kind='assigned' AND EXISTS(SELECT 1 FROM native_directory_assignments assignment
+              WHERE assignment.record_id=display.record_id AND assignment.staff_id=admission.staff_id AND assignment.active=1))
+            OR (deny_row.scope_kind='business_area' AND EXISTS(SELECT 1 FROM native_directory_resource_scopes scope
+              WHERE scope.record_id=display.record_id AND scope.active=1 AND scope.business_area_id=deny_row.business_area_id))
+            OR (deny_row.scope_kind='division' AND EXISTS(SELECT 1 FROM native_directory_resource_scopes scope
+              WHERE scope.record_id=display.record_id AND scope.active=1 AND scope.division_id=deny_row.division_id)))))`;
+}
+const legacyCurrentMapping = `CASE WHEN root.root_namespace='business'
   THEN CASE WHEN root.kind='organization' THEN (SELECT ${validatedUniquePublicIdExpression("pa_organizations", "source")}
     FROM pa_organizations source WHERE source.id=root.public_id AND source.projection_source_id=root.source_id)
   ELSE (SELECT ${validatedUniquePublicIdExpression("pa_clients", "source")} FROM pa_clients source WHERE source.id=root.public_id AND source.projection_source_id=root.source_id) END
   ELSE root.pa_public_id END`;
+const activeTupleUnique = (alias: string) => `(SELECT count(*) FROM project_alpha_active_directory_mappings candidate
+  WHERE candidate.source_id=${alias}.source_id AND candidate.source_instance_id=${alias}.source_instance_id
+    AND candidate.application_id=${alias}.application_id AND candidate.history_epoch_id=${alias}.history_epoch_id
+    AND candidate.resource_type=${alias}.resource_type
+    AND (candidate.record_id=${alias}.record_id OR candidate.external_id=${alias}.external_id
+      OR candidate.project_alpha_public_id=${alias}.project_alpha_public_id))=1`;
+const activeBusinessMapping = (currentMapping: string) => `(SELECT mapping.project_alpha_public_id
+  FROM project_alpha_active_directory_mappings mapping
+  JOIN operations_directory_records record ON record.record_id=mapping.record_id AND record.record_kind=mapping.resource_type
+  WHERE mapping.record_id=root.public_id AND mapping.source_id=root.source_id
+    AND mapping.resource_type=CASE root.kind WHEN 'organization' THEN 'organization' ELSE 'client' END
+    AND ${currentMapping} AND ${activeTupleUnique("mapping")} LIMIT 1)`;
+const activeBusinessExternalId = (currentMapping: string) => `(SELECT mapping.external_id FROM project_alpha_active_directory_mappings mapping
+  WHERE mapping.record_id=root.public_id AND mapping.source_id=root.source_id
+    AND mapping.resource_type=CASE root.kind WHEN 'organization' THEN 'organization' ELSE 'client' END
+    AND ${currentMapping} AND ${activeTupleUnique("mapping")} LIMIT 1)`;
+const activeBusinessProof = (currentMapping: string, field: "mapping_kind" | "provenance_id" | "external_id" | "record_version") =>
+  `(SELECT ${field === "record_version" ? "record.current_version" : `mapping.${field}`}
+    FROM project_alpha_active_directory_mappings mapping JOIN operations_directory_records record
+      ON record.record_id=mapping.record_id AND record.record_kind=mapping.resource_type
+    WHERE mapping.record_id=root.public_id AND mapping.source_id=root.source_id
+      AND mapping.resource_type=CASE root.kind WHEN 'organization' THEN 'organization' ELSE 'client' END
+      AND ${currentMapping} AND ${activeTupleUnique("mapping")} LIMIT 1)`;
+const activeLiveBusinessRoot = (currentMapping: string) => `(root.root_namespace<>'business' OR EXISTS (
+  SELECT 1 FROM project_alpha_active_directory_mappings mapping
+  JOIN operations_directory_records record ON record.record_id=mapping.record_id AND record.record_kind=mapping.resource_type
+  JOIN operations_directory_revisions revision ON revision.record_id=record.record_id AND revision.version=record.current_version
+  WHERE mapping.record_id=root.public_id AND mapping.source_id=root.source_id AND mapping.resource_type='organization'
+    AND root.kind='organization' AND ${currentMapping} AND ${activeTupleUnique("mapping")}
+    AND json_valid(revision.profile_json) AND json_type(revision.profile_json,'$.name')='text'
+    AND length(trim(json_extract(revision.profile_json,'$.name'))) BETWEEN 1 AND 150
+    AND length(mapping.project_alpha_public_id)=32 AND mapping.project_alpha_public_id NOT GLOB '*[^0-9a-f]*')
+  OR (root.root_namespace='business' AND root.kind='standalone_client' AND EXISTS (
+  SELECT 1 FROM project_alpha_active_directory_mappings mapping
+  JOIN operations_directory_records record ON record.record_id=mapping.record_id AND record.record_kind=mapping.resource_type
+  JOIN operations_directory_revisions revision ON revision.record_id=record.record_id AND revision.version=record.current_version
+  JOIN operations_directory_client_organizations relationship
+    ON relationship.client_record_id=record.record_id AND relationship.organization_record_id IS NULL
+  WHERE mapping.record_id=root.public_id AND mapping.source_id=root.source_id AND mapping.resource_type='client'
+    AND ${currentMapping} AND ${activeTupleUnique("mapping")}
+    AND json_valid(revision.profile_json) AND json_type(revision.profile_json,'$.name')='text'
+    AND length(trim(json_extract(revision.profile_json,'$.name'))) BETWEEN 1 AND 150
+    AND length(mapping.project_alpha_public_id)=32 AND mapping.project_alpha_public_id NOT GLOB '*[^0-9a-f]*')))`;
+const visibleSourceSql = (activeMappings: boolean, currentIdentity: string) => {
+  const nativeVisibleRoot = `root.root_namespace='business' AND NOT EXISTS (
+    SELECT 1 FROM pa_connectors native_visibility_connector WHERE native_visibility_connector.source_id=root.source_id)
+    AND EXISTS (SELECT 1 FROM project_alpha_active_directory_mappings mapping
+      WHERE mapping.source_id=root.source_id AND mapping.record_id=root.public_id
+        AND mapping.resource_type=CASE root.kind WHEN 'organization' THEN 'organization' ELSE 'client' END
+        AND ${currentIdentity} AND ${activeTupleUnique("mapping")})`;
+  return `(root.source_id='delivery:local' OR ${projectAlphaReadVisibleSql("root.source_id")}
+    ${activeMappings ? `OR (${nativeVisibleRoot})` : ""})`;
+};
 function unavailable(): never {
   throw new HTTPException(503, { message: "The client directory is being prepared; please retry shortly" });
 }
@@ -305,6 +445,16 @@ export async function listClientHubRoots(env: Env, principal: StaffPrincipal, op
   if ((options.q?.length ?? 0) > 200 || /[\0-\x1f\x7f]/.test(options.q ?? ""))
     throw new HTTPException(400, { message: "Client directory search is invalid" });
   const q = normalizeClientHubText(options.q ?? "");
+  // Review projections are a staging-only, default-off surface. Treat the
+  // environment/flag pair as part of the read authorization so disabling the
+  // feature hides already-materialized cache rows immediately, without
+  // waiting for a later index sweep.
+  const reviewAuthority = env.ENVIRONMENT === "staging"
+    && env.PROJECT_ALPHA_DIRECTORY_EXACT_ADOPTION_ENABLED === "true"
+    ? options.reviewAuthority ?? null
+    : null;
+  const reviewState = await currentReviewAuthority(env, principal, reviewAuthority);
+  const reviewPolicy = reviewState.policy;
   const portal = await portalContactProof(env, q);
   const grouping = options.grouping ?? "customers";
   if (grouping !== "customers" && grouping !== "records")
@@ -314,11 +464,39 @@ export async function listClientHubRoots(env: Env, principal: StaffPrincipal, op
     throw new HTTPException(400, { message: "Client directory sort is invalid" });
   const cursor = options.cursor === undefined ? null : decodeCursor(options.cursor);
   const asOf = cursor?.asOf ?? new Date().toISOString();
-  const { filter, policy } = await projectSearchAccess(env, principal);
+  const { filter, policy: projectPolicy } = await projectSearchAccess(env, principal);
+  const activeIdentities = await clientHubActiveDirectoryIdentities(env);
+  const nativePolicyProof = (activeIdentities ?? []).map(identity => ({ ...identity,
+    origin: resolveProjectAlphaApiV2Connection(env, identity.sourceId).connection.baseUrl }));
+  const policy = await sha256(JSON.stringify([projectPolicy, reviewPolicy, nativePolicyProof]));
   if (cursor && (cursor.q !== q || cursor.kind !== (kind ?? null) || cursor.source !== (source ?? null) || cursor.grouping !== grouping
     || cursor.sort !== sort || cursor.policy !== policy || cursor.portalProof !== portal.fingerprint))
     throw new HTTPException(400, { message: "Client directory cursor does not match this search" });
+  const reviewEnabled = Boolean(reviewPolicy && reviewAuthority);
+  const reviewIdentities = reviewEnabled ? await clientHubReviewedDisplayIdentities(env) : [];
+  const liveReviewedDisplays = reviewEnabled
+    ? `live_reviewed_displays AS MATERIALIZED (
+        SELECT display.projection_id,display.source_id,display.project_alpha_public_id
+        FROM project_alpha_reviewed_standalone_client_displays display
+        WHERE ${clientHubReviewedDisplayLiveSql("display", reviewIdentities)})`
+    : `live_reviewed_displays(projection_id,source_id,project_alpha_public_id) AS MATERIALIZED (
+        SELECT NULL,NULL,NULL WHERE 0)`;
+  const activeMappings = activeIdentities !== null;
+  const currentIdentity = clientHubActiveDirectoryIdentitySql("mapping", activeIdentities ?? []);
+  const visibleSource = visibleSourceSql(activeMappings, currentIdentity);
+  const liveBusinessRoot = activeMappings ? activeLiveBusinessRoot(currentIdentity) : legacyLiveBusinessRoot;
+  const currentMapping = activeMappings
+    ? `CASE WHEN root.root_namespace='business' THEN ${activeBusinessMapping(currentIdentity)} ELSE root.pa_public_id END`
+    : legacyCurrentMapping;
+  const currentExternalId = activeMappings ? activeBusinessExternalId(currentIdentity) : "root.public_id";
   const clauses = [visibleRoot, visibleSource, liveBusinessRoot], values: unknown[] = [];
+  if (reviewEnabled) {
+    clauses.push(`(root.root_namespace<>'review' OR (root.public_id IN (SELECT value FROM json_each(?))
+      AND EXISTS(SELECT 1 FROM live_reviewed_displays display
+        WHERE display.projection_id=root.public_id AND display.source_id=root.source_id
+          AND display.project_alpha_public_id=root.pa_public_id)))`);
+    values.push(reviewState.idsJson);
+  } else clauses.push("root.root_namespace<>'review'");
   if (kind) { clauses.push("root.kind=?"); values.push(kind); }
   if (source) { clauses.push("root.source_id=?"); values.push(source); }
   if (q) {
@@ -333,14 +511,38 @@ export async function listClientHubRoots(env: Env, principal: StaffPrincipal, op
           AND (instr(search.normalized_value,?)>0${phone.length >= 3 ? " OR (search.field='phone' AND instr(search.normalized_value,?)>0)" : ""})
           AND ((search.record_type='pa_client' AND search.project_id IS NULL AND EXISTS (
             SELECT 1 FROM pa_clients contact WHERE contact.id=search.record_id AND contact.projection_source_id=root.source_id AND contact.active=1 AND
-              ((root.kind='organization' AND contact.organization_id=root.public_id) OR
-               (root.kind='standalone_client' AND contact.id=root.public_id AND contact.organization_id IS NULL))))
+              ((root.kind='organization' AND contact.organization_id=${currentExternalId}) OR
+               (root.kind='standalone_client' AND contact.id=${currentExternalId} AND contact.organization_id IS NULL))))
+          ${activeMappings ? `OR (search.record_type='operations_directory_client' AND search.project_id IS NULL AND EXISTS (
+            SELECT 1 FROM operations_directory_records contact_record
+            JOIN operations_directory_revisions contact_revision
+              ON contact_revision.record_id=contact_record.record_id AND contact_revision.version=contact_record.current_version
+            JOIN project_alpha_active_directory_mappings mapped_contact
+              ON mapped_contact.record_id=contact_record.record_id AND mapped_contact.source_id=root.source_id
+              AND mapped_contact.resource_type='client'
+              AND ${clientHubActiveDirectoryIdentitySql("mapped_contact", activeIdentities ?? [])}
+            JOIN operations_directory_client_organizations contact_relationship
+              ON contact_relationship.client_record_id=contact_record.record_id
+            WHERE contact_record.record_id=search.record_id AND contact_record.record_kind='client'
+              AND json_valid(contact_revision.profile_json) AND json_type(contact_revision.profile_json,'$.name')='text'
+              AND length(trim(json_extract(contact_revision.profile_json,'$.name'))) BETWEEN 1 AND 150
+              AND length(mapped_contact.project_alpha_public_id)=32
+              AND mapped_contact.project_alpha_public_id NOT GLOB '*[^0-9a-f]*'
+              AND ${activeTupleUnique("mapped_contact")}
+              AND ((root.kind='organization' AND contact_relationship.organization_record_id=root.public_id)
+                OR (root.kind='standalone_client' AND contact_relationship.organization_record_id IS NULL
+                  AND contact_record.record_id=root.public_id))))` : ""}
           OR (search.record_type='pa_project' AND search.record_id=search.project_id AND EXISTS (
             SELECT 1 FROM pa_projects p LEFT JOIN pa_clients owner ON owner.id=p.client_id AND owner.projection_source_id=p.projection_source_id AND owner.active=1
             WHERE p.id=search.project_id AND p.projection_source_id=root.source_id AND ${filter.sql} AND
-              ((root.kind='organization' AND COALESCE(p.organization_id,owner.organization_id)=root.public_id) OR
-               (root.kind='standalone_client' AND p.client_id=root.public_id AND owner.id IS NOT NULL
+              ((root.kind='organization' AND COALESCE(p.organization_id,owner.organization_id)=${currentExternalId}) OR
+               (root.kind='standalone_client' AND p.client_id=${currentExternalId} AND owner.id IS NOT NULL
                  AND COALESCE(p.organization_id,owner.organization_id) IS NULL))))))
+        OR (search.root_namespace='review' AND search.record_type='api_v2_reviewed_client'
+          AND (instr(search.normalized_value,?)>0${phone.length >= 3 ? " OR (search.field='phone' AND instr(search.normalized_value,?)>0)" : ""})
+          AND EXISTS(SELECT 1 FROM live_reviewed_displays display
+            WHERE display.projection_id=search.record_id AND display.source_id=root.source_id
+              AND display.project_alpha_public_id=root.pa_public_id))
         OR (search.record_type='portal_principal' AND EXISTS (
           SELECT 1 FROM json_each(?) proof WHERE
             json_extract(proof.value,'$.sourceId')=root.source_id
@@ -348,10 +550,12 @@ export async function listClientHubRoots(env: Env, principal: StaffPrincipal, op
             AND json_extract(proof.value,'$.rootType')=root.kind
             AND (json_extract(proof.value,'$.rootPublicId')=${currentMapping}
               OR (json_extract(proof.value,'$.legacyRoot')=1 AND root.source_id='project-alpha:primary'
-                AND root.legacy_account_id IS NOT NULL AND json_extract(proof.value,'$.rootPublicId')=root.public_id)))))))`);
+                AND root.legacy_account_id IS NOT NULL AND json_extract(proof.value,'$.rootPublicId')=${currentExternalId})))))))`);
     values.push(q, q, q);
     if (phone.length >= 3) values.push(phone);
     values.push(...filter.values);
+    values.push(q);
+    if (phone.length >= 3) values.push(phone);
     values.push(portalRoots);
   }
   // Match and authorize individual records first, then collapse the matching
@@ -367,7 +571,8 @@ export async function listClientHubRoots(env: Env, principal: StaffPrincipal, op
   // State and page share one transaction. The writer advances revision only
   // alongside effective root/search changes, so mutable names cannot skip rows.
   type Snapshot = Pick<ClientHubDirectoryState, "revision" | "ready" | "last_success_at"> & { source_read_revision: number | null; activity_revision: number | null };
-  type LiveRoot = ClientHubRoot & { live_pa_public_id: string | null; business_party_id: string | null;
+  type LiveRoot = ClientHubRoot & { live_pa_public_id: string | null; native_mapping_kind: string | null;
+    native_provenance_id: string | null; native_external_id: string | null; native_record_version: number | null; business_party_id: string | null;
     business_party_name: string | null; business_party_member_count: number | null; display_sort_name: string; party_rank: number; live_activity_at: string | null };
   type SourceSummary = { source_id: ClientHubSource; display_name: string };
   const results = await db.batch<LiveRoot | Snapshot | SourceSummary>([
@@ -375,8 +580,12 @@ export async function listClientHubRoots(env: Env, principal: StaffPrincipal, op
       (SELECT revision FROM client_business_activity_state WHERE singleton=1) activity_revision,
       (SELECT read_revision FROM pa_connector_directory_state WHERE id='directory') source_read_revision
       FROM client_hub_directory_state WHERE id='directory'`),
-    db.prepare(`WITH ${activity.sql}, matching AS (
+    db.prepare(`WITH ${activity.sql}, ${liveReviewedDisplays}, matching AS (
       SELECT root.*,${currentMapping} live_pa_public_id,
+        ${activeMappings ? activeBusinessProof(currentIdentity, "mapping_kind") : "NULL"} native_mapping_kind,
+        ${activeMappings ? activeBusinessProof(currentIdentity, "provenance_id") : "NULL"} native_provenance_id,
+        ${activeMappings ? activeBusinessProof(currentIdentity, "external_id") : "NULL"} native_external_id,
+        ${activeMappings ? activeBusinessProof(currentIdentity, "record_version") : "NULL"} native_record_version,
         party.id business_party_id,party.display_name business_party_name,
         CASE WHEN ${grouping === "customers" ? "party.id IS NOT NULL" : "0=1"} THEN (
           SELECT max(member_activity.meaningful_activity_at) FROM business_party_links member
@@ -408,6 +617,10 @@ export async function listClientHubRoots(env: Env, principal: StaffPrincipal, op
     db.prepare(`SELECT source_id,display_name FROM pa_connectors WHERE read_visible=1
       UNION ALL SELECT 'project-alpha:primary','Project Alpha' WHERE NOT EXISTS (
         SELECT 1 FROM pa_connectors WHERE source_id='project-alpha:primary')
+      ${activeMappings ? `UNION SELECT mapping.source_id,mapping.source_id
+        FROM project_alpha_active_directory_mappings mapping
+        WHERE ${currentIdentity} AND ${activeTupleUnique("mapping")}
+          AND NOT EXISTS(SELECT 1 FROM pa_connectors connector WHERE connector.source_id=mapping.source_id)` : ""}
       UNION ALL SELECT 'delivery:local','Local delivery'
       ORDER BY display_name COLLATE NOCASE,source_id LIMIT 35`),
   ]);
@@ -425,22 +638,38 @@ export async function listClientHubRoots(env: Env, principal: StaffPrincipal, op
   // Permissions are read before the SQL batch. Recheck them and the effective
   // source/ownership epoch before releasing names or permission-scoped recency.
   // No claim of a cross-request snapshot: a changed context requires a reload.
-  const [currentScope, currentProjectAccess, currentState, currentPortal] = await Promise.all([
+  const [currentScope, currentProjectAccess, currentState, currentPortal, currentReviewPolicy, currentNativeIdentities] = await Promise.all([
     sqlScope(env, principal, "team.view"), projectSearchAccess(env, principal),
     env.OPS_DB.withSession("first-primary").prepare(`SELECT revision,
       (SELECT revision FROM client_business_activity_state WHERE singleton=1) activity_revision,
       (SELECT read_revision FROM pa_connector_directory_state WHERE id='directory') source_read_revision
       FROM client_hub_directory_state WHERE id='directory'`).first<Snapshot>(), portalContactProof(env, q),
+    currentReviewAuthority(env, principal, reviewAuthority), clientHubActiveDirectoryIdentities(env),
   ]);
   if (!currentScope.global || currentScope.deniedGlobal)
     throw new HTTPException(403, { message: "Global team.view permission required" });
   if (currentState?.source_read_revision !== state.source_read_revision) sourcesChanged();
   if (currentPortal.fingerprint !== portal.fingerprint) changed();
-  if (currentProjectAccess.policy !== policy || currentState?.revision !== state.revision || currentState?.activity_revision !== state.activity_revision) changed();
+  const currentNativePolicyProof = (currentNativeIdentities ?? []).map(identity => ({ ...identity,
+    origin: resolveProjectAlphaApiV2Connection(env, identity.sourceId).connection.baseUrl }));
+  const currentPolicy = await sha256(JSON.stringify([currentProjectAccess.policy, currentReviewPolicy.policy, currentNativePolicyProof]));
+  if (currentPolicy !== policy || currentState?.revision !== state.revision || currentState?.activity_revision !== state.activity_revision) changed();
   const roots = results[1]!.results.filter((row): row is LiveRoot => "root_namespace" in row);
   const page = roots.slice(0, limit);
+  if (activeMappings) await Promise.all(page.map(async row => {
+    if (row.root_namespace !== "business" || !row.source_id.startsWith("project-alpha:")) return [];
+    const visibility = await requireProjectAlphaReadOrNativeMappingVisibility(env, row.source_id, row.public_id, row.kind);
+    if (!("nativeProof" in visibility)) return [];
+    const proof = visibility.nativeProof;
+    if (proof.publicId !== row.live_pa_public_id || proof.externalId !== row.native_external_id
+      || proof.mappingKind !== row.native_mapping_kind || proof.provenanceId !== row.native_provenance_id
+      || proof.recordVersion !== row.native_record_version) changed();
+    return [];
+  }));
   const last = page.at(-1);
-  const clients = page.map(({ live_pa_public_id, party_rank: _rank, display_sort_name: _displaySort, live_activity_at, business_party_id, business_party_name, business_party_member_count, ...root }) => ({ ...root,
+  const clients = page.map(({ live_pa_public_id, native_mapping_kind: _mappingKind, native_provenance_id: _provenanceId,
+    native_external_id: _externalId, native_record_version: _recordVersion,
+    party_rank: _rank, display_sort_name: _displaySort, live_activity_at, business_party_id, business_party_name, business_party_member_count, ...root }) => ({ ...root,
       meaningful_activity_at: live_activity_at,
       ...(root.root_namespace === "business" && root.pa_public_id !== live_pa_public_id ? {
         pa_public_id: live_pa_public_id, mapping_status: live_pa_public_id ? "mapped" : "missing",
@@ -472,9 +701,15 @@ export async function findClientHubRoot(env: Env, kind: ClientHubKind, publicId:
     (rootNamespace !== undefined && !isClientHubRootNamespace(rootNamespace)))
     throw new HTTPException(404, { message: "Client not found" });
   const db = env.OPS_DB.withSession("first-primary");
-  const rows = await db.prepare(`SELECT root.* FROM client_hub_roots root
-    WHERE root.kind=? AND root.public_id=? AND ${visibleRoot} AND ${visibleSource} AND ${liveBusinessRoot}${sourceId === undefined ? "" : " AND root.source_id=?"}
-      ${rootNamespace === undefined ? "" : " AND root.root_namespace=?"} LIMIT 2`)
+  const activeIdentities = await clientHubActiveDirectoryIdentities(env);
+  const activeMappings = activeIdentities !== null;
+  const currentIdentity = clientHubActiveDirectoryIdentitySql("mapping", activeIdentities ?? []);
+  const visibleSource = visibleSourceSql(activeMappings, currentIdentity);
+  const liveBusinessRoot = activeMappings ? activeLiveBusinessRoot(currentIdentity) : legacyLiveBusinessRoot;
+  const rootLookupSql = `SELECT root.* FROM client_hub_roots root
+    WHERE root.kind=? AND root.public_id=? AND root.root_namespace<>'review' AND ${visibleRoot} AND ${visibleSource} AND ${liveBusinessRoot}${sourceId === undefined ? "" : " AND root.source_id=?"}
+      ${rootNamespace === undefined ? "" : " AND root.root_namespace=?"} LIMIT 2`;
+  const rows = await db.prepare(rootLookupSql)
     .bind(kind, publicId, ...(sourceId === undefined ? [] : [sourceId]), ...(rootNamespace === undefined ? [] : [rootNamespace])).all<ClientHubRoot>();
   if (rows.results.length > 1)
     throw new HTTPException(409, { message: "This client link is ambiguous. Open the client from Client Hub" });

@@ -36,6 +36,41 @@ function sha256Bytes(value) {
   return createHash("sha256").update(value).digest("hex");
 }
 
+// Bind acceptance results to the exact source/application, authorization scope,
+// generation, and selected PA directory proofs without copying those values
+// (or session credentials) into the evidence report.
+export function acceptanceInputSha256(config) {
+  const scopes = [...config.scopes].map(scope => ({
+    scopeKind: scope.scopeKind,
+    businessAreaId: scope.businessAreaId,
+    divisionId: scope.divisionId,
+  })).sort((a, b) => {
+    const left = `${a.scopeKind}\u0000${a.businessAreaId}\u0000${a.divisionId ?? ""}`;
+    const right = `${b.scopeKind}\u0000${b.businessAreaId}\u0000${b.divisionId ?? ""}`;
+    return left < right ? -1 : left > right ? 1 : 0;
+  });
+  const input = {
+    schemaVersion: 1,
+    sourceId: config.identity.sourceId,
+    applicationId: config.identity.applicationId,
+    authorizationGeneration: config.authorizationGeneration,
+    scopes,
+    organization: {
+      recordId: config.proof.organization.organizationRecordId,
+      publicId: config.proof.organization.expectedPublicId,
+      revision: config.proof.organization.expectedRevision,
+      projectionSha256: config.proof.organization.expectedProjectionSha256,
+    },
+    client: {
+      recordId: config.proof.client.recordId,
+      publicId: config.proof.client.publicId,
+      revision: config.proof.client.revision,
+      projectionSha256: config.proof.client.hash,
+    },
+  };
+  return sha256Bytes(JSON.stringify(input));
+}
+
 function required(env, name) {
   const value = env[name];
   return typeof value === "string" && value.trim() ? value.trim() : fail(`missing_${name.toLowerCase()}`);
@@ -97,14 +132,14 @@ function parseDirectoryProof(env) {
   if (!validExternalId(organization.organizationRecordId) || !/^[0-9a-f]{32}$/.test(organization.expectedPublicId)
     || !/^[1-9][0-9]{0,18}$/.test(organization.expectedRevision) || !SHA256.test(organization.expectedProjectionSha256))
     fail("invalid_organization_proof");
-  const clientRecordId = env.OPS_ACCEPTANCE_CLIENT_RECORD_ID?.trim() || null;
-  const clientPublicId = env.OPS_ACCEPTANCE_CLIENT_PUBLIC_ID?.trim() || null;
-  const client = clientRecordId || clientPublicId ? {
-    recordId: clientRecordId, publicId: clientPublicId,
-    revision: env.OPS_ACCEPTANCE_CLIENT_REVISION?.trim() || "", hash: env.OPS_ACCEPTANCE_CLIENT_PROJECTION_SHA256?.trim() || "",
-  } : null;
-  if (client && (!client.recordId || !client.publicId || !client.revision || !client.hash || !validExternalId(client.recordId)
-    || !/^[0-9a-f]{32}$/.test(client.publicId) || !/^[1-9][0-9]{0,18}$/.test(client.revision) || !SHA256.test(client.hash)))
+  const client = {
+    recordId: required(env, "OPS_ACCEPTANCE_CLIENT_RECORD_ID"),
+    publicId: required(env, "OPS_ACCEPTANCE_CLIENT_PUBLIC_ID"),
+    revision: required(env, "OPS_ACCEPTANCE_CLIENT_REVISION"),
+    hash: required(env, "OPS_ACCEPTANCE_CLIENT_PROJECTION_SHA256"),
+  };
+  if (!validExternalId(client.recordId)
+    || !/^[0-9a-f]{32}$/.test(client.publicId) || !/^[1-9][0-9]{0,18}$/.test(client.revision) || !SHA256.test(client.hash))
     fail("invalid_client_proof");
   return { organization, client };
 }
@@ -250,14 +285,14 @@ function generatedCommand(config) {
   return {
     sourceId: config.identity.sourceId, expectedApplicationId: config.identity.applicationId, operation: "create",
     scopes: clone(config.scopes), local: { expectedLocalVersion: 0, expectedLocalProjectionSha256: null },
-    directory: { organizationRecordId: config.proof.organization.organizationRecordId, clientRecordId: config.proof.client?.recordId ?? null },
+    directory: { organizationRecordId: config.proof.organization.organizationRecordId, clientRecordId: config.proof.client.recordId },
     command: {
       commandId, externalId, expectedAuthorizationGeneration: config.authorizationGeneration,
       project: { name, description: "staging-only joined Project-v2 acceptance", estimatedStart: null, estimatedEnd: null },
       organization: { externalId: config.proof.organization.organizationRecordId, expectedPublicId: config.proof.organization.expectedPublicId,
         expectedRevision: config.proof.organization.expectedRevision, expectedProjectionSha256: config.proof.organization.expectedProjectionSha256 },
-      client: config.proof.client ? { externalId: config.proof.client.recordId, expectedPublicId: config.proof.client.publicId,
-        expectedRevision: config.proof.client.revision, expectedProjectionSha256: config.proof.client.hash } : null,
+      client: { externalId: config.proof.client.recordId, expectedPublicId: config.proof.client.publicId,
+        expectedRevision: config.proof.client.revision, expectedProjectionSha256: config.proof.client.hash },
     },
   };
 }
@@ -320,6 +355,7 @@ export async function runJoinedAcceptance(config, dependencies = {}) {
   const after = await publicLinkProbe(requestConfig.publicLinkUrl, fetcher);
   assertPublicLinkPreserved(before, after);
   return Object.freeze({ schemaVersion: 1, environment: "staging", status: "passed", observedAt: new Date(dependencies.now ?? Date.now()).toISOString(),
+    inputBinding: { schemaVersion: 1, sha256: acceptanceInputSha256(config), valuesExcluded: true },
     mutationsPerformed: true, command: { commandId: command.command.commandId, externalProjectId: command.command.externalId, operation: "create" },
     exactReplay: { first, replay }, changedBodyConflict: conflict,
     readSettlement: { status: first.outcome.status === "activated" ? "evidence_present" : "missing", settlementId: first.outcome.settlementId },

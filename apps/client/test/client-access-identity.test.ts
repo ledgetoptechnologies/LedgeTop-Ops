@@ -1,6 +1,6 @@
 import { beforeAll, describe, expect, it } from "vitest";
 import { SignJWT, createLocalJWKSet, exportJWK, generateKeyPair, type JWTPayload, type JWTVerifyGetKey } from "jose";
-import { clientAccessConfiguration, resolveCloudflareClientPrincipal, verifiedClientPrincipalFromAccessPayload } from "../src/worker/client-portal/access-identity";
+import { clientAccessConfiguration, resolveCloudflareClientPrincipal, resolveCloudflareRecipientEnrollmentProof, verifiedClientPrincipalFromAccessPayload } from "../src/worker/client-portal/access-identity";
 import { clientAccessSyncSecretManifest, processClientAccessSyncBatch, type ClientAccessSyncCommand, type ClientAccessSyncOutbox } from "../src/worker/client-portal/access-sync";
 import type { Env } from "../src/worker/types";
 
@@ -85,6 +85,33 @@ describe("Client Portal Cloudflare Access identity boundary", () => {
   it("accepts a real RS256 Access application token without an email_verified claim", async () => {
     const principal = await resolveCloudflareClientPrincipal(accessRequest(await signAccessToken()), accessEnv, localJwks);
     expect(principal).toEqual({ issuer: configuration.issuer, subject: "access-subject", email: "client@example.com" });
+  });
+
+  it("derives enrollment identity and deadline only from a verified human assertion", async () => {
+    const payload = accessPayload();
+    const proof = await resolveCloudflareRecipientEnrollmentProof(accessRequest(await signAccessToken(payload)), accessEnv, localJwks);
+    expect(proof).toEqual({ principal: { issuer: configuration.issuer, subject: "access-subject", email: "client@example.com" },
+      verifiedUntil: new Date((payload.exp as number) * 1000).toISOString() });
+    expect(await resolveCloudflareRecipientEnrollmentProof(cookieAccessRequest(await signAccessToken(payload)), accessEnv, localJwks)).toEqual(proof);
+  });
+
+  it.each([
+    { aud: [primaryAudience, "staff-audience"] },
+    { service_token_id: "service-identity" },
+    { service_token_status: true },
+    { exp: Math.floor(Date.now() / 1000) + 300.5 },
+    { exp: Math.floor(Date.now() / 1000) - 1 },
+    { iss: "https://another.cloudflareaccess.com" },
+    { aud: "staff-audience" },
+  ])("rejects non-human, ambiguous, expired or wrong-scope enrollment proof %j", async overrides => {
+    expect(await resolveCloudflareRecipientEnrollmentProof(accessRequest(await signAccessToken(accessPayload(overrides))), accessEnv, localJwks)).toBeNull();
+  });
+
+  it("never falls back to a cookie when an invalid enrollment header is present", async () => {
+    const request = new Request("https://client.example/api/client/recipient-enrollment", {
+      headers: { "Cf-Access-Jwt-Assertion": "invalid", Cookie: `CF_Authorization=${await signAccessToken()}` },
+    });
+    expect(await resolveCloudflareRecipientEnrollmentProof(request, accessEnv, localJwks)).toBeNull();
   });
 
   it("accepts the canonical portal's separately scoped Access audience", async () => {

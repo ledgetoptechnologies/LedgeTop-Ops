@@ -2,6 +2,7 @@ import { HTTPException } from "hono/http-exception";
 import { projectAlphaReadVisibleSql } from "./project-alpha-read-visibility";
 import { clientHubBusinessProjectSourceProof, clientHubBusinessProjectOwnership } from "./client-hub-business-projects";
 import { readClientHubBusinessProjectPolicy } from "./client-hub-project-policy";
+import { clientHubAlphaInternalId } from "./client-hub-source";
 import type { ClientHubCollectionContext, ClientHubCollectionPage } from "./client-hub-collections";
 import type { Env, StaffPrincipal } from "./types";
 import type { SqlFilter } from "./visibility";
@@ -187,7 +188,7 @@ export async function listClientBusinessActivity(env: Env, principal: StaffPrinc
       ${options.projectId?"AND record_kind='project' AND record_id=?":""}
       ${cursor?"AND (occurred_at,sequence)<(?,?)":""}
       ORDER BY occurred_at DESC,sequence DESC LIMIT ?`).bind(...eligible.values,context.root.source_id,context.root.kind,
-        context.root.public_id,...(options.projectId?[options.projectId]:[]),...(cursor?.after??[]),limit+1),
+        clientHubAlphaInternalId(context.root, context.paRootId),...(options.projectId?[options.projectId]:[]),...(cursor?.after??[]),limit+1),
   ]);
   const state=results[0]!.results.find((row):row is {revision:number}=>"revision" in row);
   if (!state || !Number.isSafeInteger(state.revision)) throw new HTTPException(503,{message:"Business activity is unavailable"});

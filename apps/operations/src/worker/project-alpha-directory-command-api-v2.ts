@@ -96,6 +96,14 @@ export type ProjectAlphaDirectoryLifecycleOutcome =
 export type ProjectAlphaDirectoryRelationshipOutcome =
   | Readonly<{ status: "acknowledged"; httpStatus: 200; response: ProjectAlphaDirectoryRelationshipSuccess }>
   | ProjectAlphaDirectoryTransportFailure;
+export type ProjectAlphaDirectoryRelationshipGenerationConflict = Readonly<{
+  apiVersion: "2";
+  sourceInstanceId: string;
+  applicationId: string;
+  historyEpoch: string;
+  requestId: string;
+  error: Readonly<{ code: "authorization_generation_conflict" }>;
+}>;
 export type ProjectAlphaDirectoryBindingRevokeOutcome =
   | Readonly<{ status: "acknowledged"; httpStatus: 200; response: ProjectAlphaDirectoryBindingRevokeSuccess }>
   | ProjectAlphaDirectoryTransportFailure;
@@ -217,23 +225,36 @@ function trusted(response: Response, json: boolean): boolean {
   return uuid(response.headers.get("X-Request-ID")) && (response.headers.get("Cache-Control") ?? "").split(",").some(part => part.trim().toLowerCase() === "no-store")
     && !response.headers.has("Set-Cookie") && !response.headers.has("Location") && (!json || /^application\/json(?:\s*;|$)/i.test(response.headers.get("Content-Type") ?? ""));
 }
-async function boundedJson(response: Response, maximum = RESPONSE_LIMIT): Promise<unknown> {
+async function boundedJson(response: Response, maximum = RESPONSE_LIMIT, timeoutMs?: number): Promise<unknown> {
   const declared = response.headers.get("Content-Length");
   if (declared !== null && (!/^\d+$/.test(declared) || !Number.isSafeInteger(Number(declared)) || Number(declared) > maximum)) { await response.body?.cancel(); throw new Error("response_limit"); }
   const reader = response.body?.getReader(); if (!reader) throw new Error("invalid_contract");
   const chunks: Uint8Array[] = []; let size = 0;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = timeoutMs === undefined ? null : new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => reject(new Error("timeout")), timeoutMs);
+  });
   try {
-    for (;;) { let part: ReadableStreamReadResult<Uint8Array>; try { part = await reader.read(); } catch { throw new Error("transport"); } if (part.done) break; size += part.value.byteLength; if (size > maximum) { await reader.cancel(); throw new Error("response_limit"); } chunks.push(part.value); }
-  } finally { reader.releaseLock(); }
+    for (;;) { let part: ReadableStreamReadResult<Uint8Array>; try { part = await (deadline ? Promise.race([reader.read(), deadline]) : reader.read()); } catch (error) {
+      if (error instanceof Error && error.message === "timeout") {
+        // Cancellation is best-effort: an uncooperative peer must not extend
+        // the deadline by keeping its cancellation promise pending as well.
+        void reader.cancel().catch(() => undefined);
+        throw error;
+      }
+      throw new Error("transport");
+    } if (part.done) break; size += part.value.byteLength; if (size > maximum) { await reader.cancel(); throw new Error("response_limit"); } chunks.push(part.value); }
+  } finally { if (timer !== undefined) clearTimeout(timer); reader.releaseLock(); }
   const bytes = new Uint8Array(size); let offset = 0; for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
   try { return parseDuplicateFreeJson(new TextDecoder("utf-8", { fatal: true }).decode(bytes)); } catch { throw new Error("invalid_contract"); }
 }
-async function post(connection: ProjectAlphaApiV2Connection, path: string, body: string, send: typeof fetch): Promise<Response | ProjectAlphaDirectoryTransportFailure> {
+async function post(connection: ProjectAlphaApiV2Connection, path: string, body: string, send: typeof fetch, inspectConflict = false): Promise<Response | ProjectAlphaDirectoryTransportFailure> {
   const controller = new AbortController(); const timer = setTimeout(() => controller.abort(), 10_000); let response: Response | undefined;
   try {
     response = await send(new URL(path, connection.baseUrl), { method: "POST", headers: headers(connection), body, redirect: "manual", credentials: "omit", cache: "no-store", signal: controller.signal });
     const info = diagnostic(response);
     if (response.redirected || (response.status >= 300 && response.status < 400)) { await response.body?.cancel(); return { status: "uncertain", reason: "invalid_contract", ...info }; }
+    if (inspectConflict && response.status === 409 && trusted(response, true)) return response;
     if (response.status !== 200) { await response.body?.cancel(); return { status: response.status === 409 ? "conflict" : response.status >= 500 ? "uncertain" : response.status === 401 || response.status === 403 ? "blocked" : response.status === 400 || response.status === 413 || response.status === 415 ? "rejected" : "uncertain", reason: "http_status", ...info }; }
     if (!trusted(response, true)) { await response.body?.cancel(); return { status: "uncertain", reason: "invalid_contract", ...info }; }
     return response;
@@ -254,19 +275,49 @@ function bindingSuccess(value: unknown, kind: ProjectAlphaDirectoryCommandKind, 
   return plain(value) && exact(value, ["sourceInstanceId", "applicationId", "historyEpoch", "requestId", "replayed", "result"]) && value.sourceInstanceId === connection.expectedSourceInstanceId && value.applicationId === connection.expectedApplicationId && value.historyEpoch === connection.expectedHistoryEpoch && uuid(value.requestId) && value.requestId === requestId && typeof value.replayed === "boolean" && plain(value.result) && exact(value.result, ["action", "binding", "authorizationGeneration"]) && value.result.action === "revoke" && revision(value.result.authorizationGeneration, true) && advances(value.result.authorizationGeneration, command.expectedAuthorizationGeneration) && plain(value.result.binding) && exact(value.result.binding, ["resourceType", "externalId", "publicId", "resourceRevision", "status"]) && value.result.binding.resourceType === kind && value.result.binding.externalId === command.externalId && value.result.binding.publicId === command.expectedPublicId && value.result.binding.resourceRevision === command.expectedRevision && value.result.binding.status === "tombstoned";
 }
 
-async function sendCommand<T>(connectionInput: ProjectAlphaApiV2Connection, endpointValue: ProjectAlphaApiV2Endpoint, requestPath: string, body: string, valid: (value: unknown, requestId: string | null, connection: ProjectAlphaApiV2Connection) => value is T, send: typeof fetch): Promise<{ outcome: ProjectAlphaDirectoryTransportFailure | { status: "acknowledged"; httpStatus: 200; response: T }; evidence?: { commandJson: string; responseJson: string; destinationOrigin: string } }> {
+async function sendCommand<T>(connectionInput: ProjectAlphaApiV2Connection, endpointValue: ProjectAlphaApiV2Endpoint, requestPath: string, body: string, valid: (value: unknown, requestId: string | null, connection: ProjectAlphaApiV2Connection) => value is T, send: typeof fetch, inspectRelationshipConflict = false): Promise<{ outcome: ProjectAlphaDirectoryTransportFailure | { status: "acknowledged"; httpStatus: 200; response: T }; evidence?: { commandJson: string; responseJson: string; destinationOrigin: string } }> {
   let connection: ProjectAlphaApiV2Connection;
   try { connection = normalizedConnection(connectionInput); if (typeof connection.expectedHistoryEpoch !== "string" || !uuid(connection.expectedHistoryEpoch)) return { outcome: { status: "blocked", reason: "preflight", preflight: { status: "misconfigured", reason: "configuration" } } }; }
   catch { return { outcome: { status: "blocked", reason: "preflight", preflight: { status: "misconfigured", reason: "configuration" } } }; }
   const preflight = await probeProjectAlphaApiV2(connection, [], send, [endpointValue]); if (preflight.status !== "verified") return { outcome: preflightOutcome(preflight) };
-  const posted = await post(connection, requestPath, body, send);
+  const posted = await post(connection, requestPath, body, send, inspectRelationshipConflict);
   if (!(posted instanceof Response)) return { outcome: posted };
   const info = diagnostic(posted);
+  if (posted.status === 409) {
+    // Keep the public failure sanitized and backwards compatible. Only the
+    // exact authenticated provider envelope receives private transport proof;
+    // a generic/malformed 409 must never authorize generation recovery.
+    const outcome: ProjectAlphaDirectoryTransportFailure = { status: "conflict", reason: "http_status", ...info };
+    try {
+      const value = await boundedJson(posted, COMMAND_RESPONSE_LIMIT, 10_000);
+      if (plain(value) && exact(value, ["apiVersion", "sourceInstanceId", "applicationId", "historyEpoch", "requestId", "error"])
+        && value.apiVersion === "2" && value.sourceInstanceId === connection.expectedSourceInstanceId
+        && value.applicationId === connection.expectedApplicationId && value.historyEpoch === connection.expectedHistoryEpoch
+        && uuid(value.requestId) && value.requestId === info.requestId
+        && plain(value.error) && exact(value.error, ["code"]) && value.error.code === "authorization_generation_conflict") {
+        validatedRelationshipGenerationConflicts.set(outcome, { commandJson: body, responseJson: JSON.stringify(value), destinationOrigin: new URL(connection.baseUrl).origin, requestPath });
+      }
+    } catch { /* A bounded unreadable conflict is not recovery evidence. */ }
+    return { outcome };
+  }
   try { const parsed = await boundedJson(posted, COMMAND_RESPONSE_LIMIT); if (!valid(parsed, info.requestId ?? null, connection)) return { outcome: { status: "uncertain", reason: "invalid_contract", ...info } }; return { outcome: { status: "acknowledged", httpStatus: 200, response: parsed }, evidence: { commandJson: body, responseJson: JSON.stringify(parsed), destinationOrigin: new URL(connection.baseUrl).origin } }; }
   catch (error) { return { outcome: { status: "uncertain", reason: error instanceof Error && error.message === "response_limit" ? "response_limit" : error instanceof Error && error.message === "transport" ? "transport" : "invalid_contract", ...info } }; }
 }
 
 const validatedAcknowledgements = new WeakMap<object, Readonly<{ commandJson: string; responseJson: string; destinationOrigin: string }>>();
+const validatedRelationshipGenerationConflicts = new WeakMap<object, Readonly<{ commandJson: string; responseJson: string; destinationOrigin: string; requestPath: string }>>();
+/** Transport provenance only: callers must still prove current authority,
+ * unchanged canonical resources/parent, and a newly observed generation. */
+export function validatedProjectAlphaDirectoryRelationshipGenerationConflict(outcome: unknown): Readonly<{
+  response: ProjectAlphaDirectoryRelationshipGenerationConflict;
+  command: ProjectAlphaDirectoryRelationshipCommand;
+  destinationOrigin: string;
+  requestPath: string;
+}> | null {
+  if (!outcome || typeof outcome !== "object") return null;
+  const evidence = validatedRelationshipGenerationConflicts.get(outcome);
+  return evidence ? { response: JSON.parse(evidence.responseJson), command: JSON.parse(evidence.commandJson), destinationOrigin: evidence.destinationOrigin, requestPath: evidence.requestPath } : null;
+}
 export function validatedProjectAlphaDirectoryCommandAcknowledgement<T extends ProjectAlphaDirectoryLifecycleSuccess | ProjectAlphaDirectoryRelationshipSuccess | ProjectAlphaDirectoryBindingRevokeSuccess>(outcome: unknown): Readonly<{ response: T; command: ProjectAlphaDirectoryCommand; destinationOrigin: string }> | null {
   if (!outcome || typeof outcome !== "object") return null;
   const evidence = validatedAcknowledgements.get(outcome);
@@ -282,7 +333,7 @@ export async function sendConfiguredProjectAlphaDirectoryLifecycleCommand(env: P
 }
 
 export async function sendProjectAlphaDirectoryOrganizationRelationshipCommand(connection: ProjectAlphaApiV2Connection, publicIdValue: string, action: ProjectAlphaDirectoryRelationshipAction, inputCommand: ProjectAlphaDirectoryRelationshipCommand, send: typeof fetch = fetch): Promise<ProjectAlphaDirectoryRelationshipOutcome> {
-  try { if ((action !== "assign" && action !== "remove" && action !== "move") || !publicId(publicIdValue) || !isProjectAlphaDirectoryRelationshipCommand(action, inputCommand)) return { status: "rejected", reason: "invalid_command" }; const body = commandBody(inputCommand); if (body === null) return { status: "rejected", reason: "request_limit" }; const command = JSON.parse(body) as ProjectAlphaDirectoryRelationshipCommand; const required = relationshipEndpoint(action); const result = await sendCommand(connection, required, required.path.replace("{publicId}", publicIdValue), body, (value, requestId, normalized) => relationshipSuccess(value, action, publicIdValue, command, normalized, requestId), send); if (result.evidence && result.outcome.status === "acknowledged") validatedAcknowledgements.set(result.outcome, result.evidence); return result.outcome; } catch { return { status: "rejected", reason: "invalid_command" }; }
+  try { if ((action !== "assign" && action !== "remove" && action !== "move") || !publicId(publicIdValue) || !isProjectAlphaDirectoryRelationshipCommand(action, inputCommand)) return { status: "rejected", reason: "invalid_command" }; const body = commandBody(inputCommand); if (body === null) return { status: "rejected", reason: "request_limit" }; const command = JSON.parse(body) as ProjectAlphaDirectoryRelationshipCommand; const required = relationshipEndpoint(action); const result = await sendCommand(connection, required, required.path.replace("{publicId}", publicIdValue), body, (value, requestId, normalized) => relationshipSuccess(value, action, publicIdValue, command, normalized, requestId), send, true); if (result.evidence && result.outcome.status === "acknowledged") validatedAcknowledgements.set(result.outcome, result.evidence); return result.outcome; } catch { return { status: "rejected", reason: "invalid_command" }; }
 }
 export async function sendConfiguredProjectAlphaDirectoryOrganizationRelationshipCommand(env: ProjectAlphaApiV2ConnectionEnvironment, sourceId: string, publicIdValue: string, action: ProjectAlphaDirectoryRelationshipAction, command: ProjectAlphaDirectoryRelationshipCommand, send: typeof fetch = fetch): Promise<ProjectAlphaDirectoryRelationshipOutcome | Readonly<{ status: "disabled"; sourceId: string }>> {
   const configured = await withEnabledConfiguredProjectAlphaApiV2Connection(env, sourceId, connection => sendProjectAlphaDirectoryOrganizationRelationshipCommand(connection, publicIdValue, action, command, send));

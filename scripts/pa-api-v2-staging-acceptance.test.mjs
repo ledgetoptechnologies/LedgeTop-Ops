@@ -44,6 +44,19 @@ function capabilities() {
     implementedEndpoints: [{ method: "GET", path: "/api/v2/capabilities", requiredCapability: "api.capabilities.read" }, ...routes.map(([, scope, method, path]) => ({ method, path, requiredCapability: scope, requiresSourceInstanceId: true, requiresApplicationId: true, requiresHistoryEpoch: true }))] };
 }
 
+function lifecycleCapabilitiesPayload() {
+  const body = capabilities();
+  body.grantedCapabilities = body.grantedCapabilities.filter(({ name }) =>
+    ["api.capabilities.read", "projects.v2.read"].includes(name));
+  body.implementedEndpoints = body.implementedEndpoints.filter(({ requiredCapability }) =>
+    ["api.capabilities.read", "projects.v2.read"].includes(requiredCapability));
+  for (const [scope, path] of [["projects.lifecycle.archive", "/api/v2/projects/{publicId}/archive/commands"], ["projects.lifecycle.restore", "/api/v2/projects/{publicId}/restore/commands"]]) {
+    body.implementedEndpoints.push({ method: "POST", path, requiredCapability: scope, requiresSourceInstanceId: true, requiresApplicationId: true, requiresHistoryEpoch: true });
+    body.grantedCapabilities.push({ name: scope });
+  }
+  return body;
+}
+
 function fixtureFetcher() {
   const calls = [];
   const created = { publicId: projectId, revision, projectionSha256: hash };
@@ -253,12 +266,7 @@ test("lifecycle-only mode calls only capability, fixture read, archive, restore,
     if (text.startsWith("https://public.example.test/")) return new Response("", { status: publicVisible ? 200 : 404 });
     const parsed = new URL(text);
     if (parsed.pathname === "/api/v2/capabilities") {
-      const body = capabilities();
-      for (const [scope, path] of [["projects.lifecycle.archive", "/api/v2/projects/{publicId}/archive/commands"], ["projects.lifecycle.restore", "/api/v2/projects/{publicId}/restore/commands"]]) {
-        body.implementedEndpoints.push({ method: "POST", path, requiredCapability: scope, requiresSourceInstanceId: true, requiresApplicationId: true, requiresHistoryEpoch: true });
-        body.grantedCapabilities.push({ name: scope });
-      }
-      return response(body);
+      return response(lifecycleCapabilitiesPayload());
     }
     if (parsed.pathname === `/api/v2/projects/${projectId}`) return response({
       apiVersion: "2", sourceInstanceId: source, applicationId: application, historyEpoch: epoch,
@@ -294,28 +302,20 @@ test("lifecycle-only mode calls only capability, fixture read, archive, restore,
   assert.equal(calls.filter(call => call.text.endsWith(`/api/v2/projects/${projectId}`)).length, 1);
 });
 
-test("lifecycle-only mode rejects missing or surplus advertised Project capabilities", async () => {
+test("lifecycle-only mode requires only exercised routes and rejects surplus Project authority", async () => {
   const config = parseAcceptanceConfig(env({
     PA_ACCEPTANCE_LIFECYCLE_ONLY: "allow", PA_ACCEPTANCE_ALLOW_LIFECYCLE: "allow",
     PA_ACCEPTANCE_ORGANIZATION_BINDING_JSON: undefined, PA_ACCEPTANCE_PROJECT_PROFILE_JSON: undefined,
     PA_ACCEPTANCE_LIFECYCLE_FIXTURE_JSON: JSON.stringify({ projectPublicId: projectId, expectedRevision: "2", expectedProjectionSha256: updatedHash, expectedName: `${prefix} Project`, publicLinkUrl: "https://public.example.test/project", enabledStatus: 200, disabledStatus: 404 }),
   }));
-  const lifecycleCapabilities = () => {
-    const body = capabilities();
-    for (const [scope, path] of [["projects.lifecycle.archive", "/api/v2/projects/{publicId}/archive/commands"], ["projects.lifecycle.restore", "/api/v2/projects/{publicId}/restore/commands"]]) {
-      body.implementedEndpoints.push({ method: "POST", path, requiredCapability: scope, requiresSourceInstanceId: true, requiresApplicationId: true, requiresHistoryEpoch: true });
-      body.grantedCapabilities.push({ name: scope });
-    }
-    return body;
-  };
   const missing = async url => {
-    const body = lifecycleCapabilities();
-    body.grantedCapabilities = body.grantedCapabilities.filter(item => item.name !== "projects.binding_status.read");
+    const body = lifecycleCapabilitiesPayload();
+    body.grantedCapabilities = body.grantedCapabilities.filter(item => item.name !== "projects.v2.read");
     return response(body);
   };
-  await assert.rejects(runPaApiV2StagingAcceptance(config, { fetcher: missing }), { code: "missing_route_or_scope_status" });
+  await assert.rejects(runPaApiV2StagingAcceptance(config, { fetcher: missing }), { code: "missing_route_or_scope_read" });
   const surplus = async url => {
-    const body = lifecycleCapabilities();
+    const body = lifecycleCapabilitiesPayload();
     body.grantedCapabilities.push({ name: "projects.lifecycle.cancel" });
     return response(body);
   };
@@ -334,7 +334,8 @@ test("rejects added or reordered lifecycle envelope and resource members", async
     if (parsed.pathname === "/api/v2/capabilities") {
       const body = capabilities();
       for (const [scope, path] of [["projects.lifecycle.archive", "/api/v2/projects/{publicId}/archive/commands"], ["projects.lifecycle.restore", "/api/v2/projects/{publicId}/restore/commands"]]) {
-        body.implementedEndpoints.push({ method: "POST", path, requiredCapability: scope, requiresSourceInstanceId: true, requiresApplicationId: true, requiresHistoryEpoch: true }); body.grantedCapabilities.push({ name: scope });
+        body.implementedEndpoints.push({ method: "POST", path, requiredCapability: scope, requiresSourceInstanceId: true, requiresApplicationId: true, requiresHistoryEpoch: true });
+        body.grantedCapabilities.push({ name: scope });
       }
       return response(body);
     }
@@ -445,6 +446,53 @@ test("fails closed on surplus advertised routes or capabilities", async () => {
   await assert.rejects(runPaApiV2StagingAcceptance(config, { fetcher: surplus }), { code: "unexpected_route_or_scope_advertised" });
 });
 
+test("accepts a coupled additive generic endpoint without broadening the Project window", async () => {
+  const config = parseAcceptanceConfig(env());
+  const { fetcher } = fixtureFetcher();
+  const additive = async (url, init) => {
+    if (String(url).endsWith("/api/v2/capabilities")) {
+      const body = capabilities();
+      body.implementedEndpoints.push({ method: "GET", path: "/api/v2/catalog/inventory",
+        requiredCapability: "catalog.inventory.read", requiresSourceInstanceId: true,
+        requiresApplicationId: true, requiresHistoryEpoch: true });
+      body.grantedCapabilities.push({ name: "catalog.inventory.read" });
+      return response(body);
+    }
+    return fetcher(url, init);
+  };
+  const values = ["aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1", "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa2", "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa3"];
+  const report = await runPaApiV2StagingAcceptance(config, { fetcher: additive,
+    uuid: () => values.shift(), now: () => Date.UTC(2026, 8, 17) });
+  assert.equal(report.status, "passed");
+  assert.equal(report.stages.capabilities.implementedEndpointCount, 7);
+  assert.equal(report.stages.capabilities.grantedCapabilityCount, 7);
+});
+
+test("rejects mismatched required-route capability and unpaired generic authority", async () => {
+  const config = parseAcceptanceConfig(env());
+  const { fetcher } = fixtureFetcher();
+  const mismatched = async (url, init) => {
+    if (String(url).endsWith("/api/v2/capabilities")) {
+      const body = capabilities();
+      body.implementedEndpoints.find(endpoint => endpoint.path === "/api/v2/projects/profile/commands").requiredCapability = "catalog.inventory.read";
+      body.grantedCapabilities.push({ name: "catalog.inventory.read" });
+      return response(body);
+    }
+    return fetcher(url, init);
+  };
+  await assert.rejects(runPaApiV2StagingAcceptance(config, { fetcher: mismatched }), { code: "missing_route_or_scope_write" });
+
+  const unpaired = async (url, init) => {
+    if (String(url).endsWith("/api/v2/capabilities")) {
+      const body = capabilities();
+      body.grantedCapabilities.push({ name: "catalog.inventory.read" });
+      return response(body);
+    }
+    return fetcher(url, init);
+  };
+  await assert.rejects(runPaApiV2StagingAcceptance(config, { fetcher: unpaired }), { code: "unexpected_route_or_scope_advertised" });
+});
+
 test("rejects duplicate, reordered, and oversized PA wire-contract members", async () => {
   assert.throws(() => parseAcceptanceConfig(env({ PA_ACCEPTANCE_ORGANIZATION_BINDING_JSON: JSON.stringify({ ...organization, expectedRevision: "1".repeat(20) }) })), { code: "invalid_pa_acceptance_organization_binding_json" });
   const config = parseAcceptanceConfig(env());
@@ -456,6 +504,14 @@ test("rejects duplicate, reordered, and oversized PA wire-contract members", asy
     return fetcher(url, init);
   };
   await assert.rejects(runPaApiV2StagingAcceptance(config, { fetcher: duplicateCapability }), { code: "unexpected_route_or_scope_advertised" });
+
+  const duplicateEndpoint = async (url, init) => {
+    if (String(url).endsWith("/api/v2/capabilities")) {
+      const body = capabilities(); body.implementedEndpoints.push({ ...body.implementedEndpoints[1] }); return response(body);
+    }
+    return fetcher(url, init);
+  };
+  await assert.rejects(runPaApiV2StagingAcceptance(config, { fetcher: duplicateEndpoint }), { code: "unexpected_route_or_scope_advertised" });
 
   const { fetcher: syncFetcher } = fixtureFetcher();
   let createFingerprint;
@@ -536,19 +592,22 @@ test("authenticated baseline is read-only and validates the bound identity", asy
   assert.equal(JSON.stringify(report).includes(token), false);
 });
 
-test("no-key baseline proves authentication and default-off routing", async () => {
-  const config = parseAcceptanceConfig({ PA_BASE_URL: "https://pa-staging.example.test" });
-  const responses = [
-    response({ error: "Unauthorized" }, 401),
-    response({ error: "Not found" }, 404),
-  ];
-  const report = await runPaApiV2StagingAcceptance(config, {
-    fetcher: async (_url, init) => {
-      assert.equal(init.headers.authorization, undefined);
-      return responses.shift();
-    },
-  });
-  assert.equal(report.mutationsPerformed, false);
-  assert.equal(report.stages.capabilitiesNoKey.status, 401);
-  assert.equal(report.stages.projectsDefaultOff.status, 404);
+test("no-key baseline proves authentication while accepting protected or hidden Project routing", async () => {
+  for (const routeStatus of [401, 404]) {
+    const config = parseAcceptanceConfig({ PA_BASE_URL: "https://pa-staging.example.test" });
+    const responses = [
+      response({ error: "Unauthorized" }, 401),
+      response({ error: routeStatus === 401 ? "Unauthorized" : "Not found" }, routeStatus),
+    ];
+    const report = await runPaApiV2StagingAcceptance(config, {
+      fetcher: async (_url, init) => {
+        assert.equal(init.headers.authorization, undefined);
+        return responses.shift();
+      },
+    });
+    assert.equal(report.mutationsPerformed, false);
+    assert.equal(report.stages.capabilitiesNoKey.status, 401);
+    assert.equal(report.stages.projectsUnauthenticated.status, routeStatus);
+    assert.equal(report.stages.projectsDefaultOff, undefined);
+  }
 });

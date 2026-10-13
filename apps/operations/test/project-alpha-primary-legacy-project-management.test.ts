@@ -16,6 +16,7 @@ const root = {
   root_namespace: "business",
   kind: "standalone_client",
   public_id: "local-client-1",
+  pa_internal_id: "local-client-1",
 };
 const context = {
   root,

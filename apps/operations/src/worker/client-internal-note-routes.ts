@@ -14,7 +14,8 @@ function route(c: { req: { param(name: string): string } }) {
   const sourceId = c.req.param("sourceId"), namespace = c.req.param("rootNamespace"), routeKind = c.req.param("kind");
   const kind: "organization" | "standalone_client" | null = routeKind === "organizations" ? "organization"
     : routeKind === "standalone" ? "standalone_client" : null;
-  if (!isClientHubSource(sourceId) || !isClientHubRootNamespace(namespace) || !kind || !isClientHubKind(kind))
+  if (!isClientHubSource(sourceId) || !isClientHubRootNamespace(namespace) || namespace === "review"
+    || !kind || !isClientHubKind(kind))
     throw new HTTPException(404, { message: "Client notes are unavailable" });
   return { sourceId, namespace, kind };
 }
