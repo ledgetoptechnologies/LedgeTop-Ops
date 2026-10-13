@@ -249,6 +249,8 @@ export type Env = Omit<
   OPERATIONS_PORTAL_NATIVE_BILLING_OWNER_ENABLED?: string;
   /** Default-off staging-only native Directory archive/restore HTTP boundary. */
   NATIVE_DIRECTORY_LIFECYCLE_ENABLED?: string;
+  /** Default-off staging-only explicit imported-record sync enrollment. */
+  REVIEWED_IMPORT_ENROLLMENT_ENABLED?: string;
   /** Default-off workspace owner surface and private Client publication dispatch. */
   OPERATIONS_PORTAL_WORKSPACE_OWNER_ENABLED?: string;
   OPERATIONS_PORTAL_WORKSPACE_PUBLICATION_DISPATCH_ENABLED?: string;

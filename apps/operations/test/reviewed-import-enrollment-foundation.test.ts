@@ -4,6 +4,8 @@ import {Miniflare} from 'miniflare';
 import {splitD1MigrationStatements} from '../../client/test/helpers/d1-migrations';
 import {writeReviewedImportEnrollment} from '../src/worker/reviewed-import-enrollment-writer';
 import {writeNativeDirectoryProfile} from '../src/worker/native-directory-profile-writer';
+import {resolveReviewedImportEnrollmentDestinations} from '../src/worker/reviewed-import-enrollment-destinations';
+import {handleReviewedImportEnrollmentHttp,REVIEWED_IMPORT_ENROLLMENT_BASE} from '../src/worker/reviewed-import-enrollment-http';
 
 let runtime:Miniflare,db:D1Database;
 const recordId='legacy-local-customer',externalId='pa-customer-older-than-ops',staffId='staff-import-reviewer';
@@ -12,6 +14,11 @@ const instance='33333333-3333-4333-8333-333333333333',application='44444444-4444
 const epoch='55555555-5555-4555-8555-555555555555',publicId='a'.repeat(32),origin='https://pa.example.test';
 const uid=(n:number)=>`${String(n).padStart(8,'0')}-0000-4000-8000-${String(n).padStart(12,'0')}`;
 const hash=(c:string)=>c.repeat(64);
+function resolverEnvironment(overrides:Record<string,unknown>={}){
+  return {OPS_DB:db,PROJECT_ALPHA_API_V2_CONNECTIONS:JSON.stringify({version:1,instances:{[sourceId]:{
+    sourceId,enabled:true,baseUrl:origin,apiKey:'synthetic-resolver-test-only',sourceInstanceId:instance,
+    applicationId:application,historyEpoch:epoch,...overrides}}})};
+}
 
 async function seedActivatedAcquisition(){
   const review=uid(21),command=uid(22),acquired=uid(23),claim=uid(24),ownerEpoch=uid(25),activation=uid(26),request=hash('1');
@@ -115,6 +122,28 @@ describe('reviewed imported-record enrollment foundation',()=>{
   it('rejects malformed outer input without touching D1',async()=>{
     await expect(writeReviewedImportEnrollment(db,undefined as never)).resolves.toEqual({status:'rejected',reason:'invalid_write'});
     await expect(writeReviewedImportEnrollment(db,{destinations:[]} as never)).resolves.toEqual({status:'rejected',reason:'invalid_write'});
+  });
+
+  it('derives imported destination identity only from the actual acquired chain and configured source',async()=>{
+    const selection={recordId,kind:'organization' as const,expectedRecordVersion:1,expectedEnrollmentVersion:0,sourceIds:[sourceId]};
+    const expected={sourceId,sourceInstanceUUID:instance,applicationUUID:application,historyEpoch:epoch,
+      origin,externalCanonicalId:externalId};
+    await expect(resolveReviewedImportEnrollmentDestinations(resolverEnvironment(),selection))
+      .resolves.toEqual({status:'resolved',destinations:[expected]});
+    for(const overrides of [{enabled:false},{baseUrl:'https://other.example.test'},
+      {sourceInstanceId:uid(201)},{applicationId:uid(202)},{historyEpoch:uid(203)}]){
+      await expect(resolveReviewedImportEnrollmentDestinations(resolverEnvironment(overrides),selection))
+        .resolves.toEqual({status:'conflict',reason:'source_authority_unavailable'});
+    }
+    await expect(resolveReviewedImportEnrollmentDestinations(resolverEnvironment(),{...selection,sourceIds:['project-alpha:other']}))
+      .resolves.toEqual({status:'conflict',reason:'source_authority_unavailable'});
+    await expect(resolveReviewedImportEnrollmentDestinations(resolverEnvironment(),{...selection,sourceIds:[sourceId,sourceId]}))
+      .resolves.toEqual({status:'conflict',reason:'source_authority_unavailable'});
+    await expect(resolveReviewedImportEnrollmentDestinations(resolverEnvironment(),{...selection,expectedRecordVersion:2}))
+      .resolves.toEqual({status:'conflict',reason:'stale_record'});
+    await expect(resolveReviewedImportEnrollmentDestinations(resolverEnvironment(),{...selection,expectedEnrollmentVersion:1}))
+      .resolves.toEqual({status:'conflict',reason:'stale_enrollment'});
+    expect(await db.prepare('SELECT count(*) count FROM reviewed_import_enrollment_receipts').first<number>('count')).toBe(0);
   });
 
   it('rejects an older complete page when the equal-time current request is incomplete',async()=>{
@@ -278,6 +307,12 @@ describe('reviewed imported-record enrollment foundation',()=>{
     expect(updated).toMatchObject({status:'written',recordId,version:2});
     if(updated.status!=='written')throw new Error(`Imported profile update rejected: ${updated.reason}`);
     expect(updated.commandIds).toHaveLength(1);
+    // The immutable activation is still for record v1. A previously reviewed
+    // destination remains resolvable for v2; only the atomic writer decides
+    // when pending PA/binding work has settled enough to change enrollment.
+    await expect(resolveReviewedImportEnrollmentDestinations(resolverEnvironment(),{recordId,kind:'organization',
+      expectedRecordVersion:2,expectedEnrollmentVersion:5,sourceIds:[sourceId]}))
+      .resolves.toMatchObject({status:'resolved',destinations:[{externalCanonicalId:externalId}]});
     const commandId=updated.commandIds[0]!;
     expect(await db.prepare(`SELECT external_id FROM project_alpha_directory_outbox WHERE command_id=?`)
       .bind(commandId).first<string>('external_id')).toBe(externalId);
@@ -358,6 +393,46 @@ describe('reviewed imported-record enrollment foundation',()=>{
       expectedEnrollmentVersion:6,destinations,actor:{staffId,accessSubject:subject,admissionVersion:1,loginEmail:'reviewer@example.test',
         profileVersion:1,selectedProfileGrantId:'import-profile',selectedEnrollmentGrantId:'import-enrollment',
         verifiedUntil:new Date(Date.now()+60*60_000).toISOString()}})).resolves.toEqual({status:'blocked',reason:'authority_or_evidence'});
+  });
+
+  it('replays through actual HTTP ledger and grant reads without exposing tuples or bypassing a current deny',async()=>{
+    const opsOrigin='https://ops-staging.example.test';
+    const actor={identity:{kind:'native' as const,staffId,verifiedAccessSubject:subject,email:'reviewer@example.test',
+      displayName:'Reviewer',profileVersion:1},admissionVersion:1,verifiedUntil:new Date(Date.now()+10*60_000).toISOString()};
+    const dependencies={environment:'staging',enabledFlag:'true',expectedHost:'ops-staging.example.test',
+      configuration:{enabled:true,origin:opsOrigin,issuer:'https://team.cloudflareaccess.com',staffAudience:'a'.repeat(16),
+        csrfSecret:'synthetic-foundation-http-secret-thirty-two-bytes'},database:db,authenticate:async()=>actor,
+      resolveDestinations:async()=>{throw new Error('Committed replay must not resolve a stale selection');}};
+    const session=await handleReviewedImportEnrollmentHttp(new Request(`${opsOrigin}${REVIEWED_IMPORT_ENROLLMENT_BASE}/session`,
+      {headers:{'Sec-Fetch-Site':'same-origin','X-Native-Staff-Request':'1'}}),dependencies);
+    expect(session.status).toBe(200);
+    const csrf=(await session.json() as {csrfToken:string}).csrfToken;
+    const input={mutationId:uid(50),expectedRecordVersion:1,expectedEnrollmentVersion:1,sourceIds:[sourceId]};
+    const send=(value=input)=>handleReviewedImportEnrollmentHttp(new Request(
+      `${opsOrigin}${REVIEWED_IMPORT_ENROLLMENT_BASE}/organizations/${recordId}`,{method:'POST',headers:{
+        'Sec-Fetch-Site':'same-origin',Origin:opsOrigin,'Content-Type':'application/json','X-CSRF-Token':csrf,
+        'Idempotency-Key':value.mutationId},body:JSON.stringify(value)}),dependencies);
+    const count=await db.prepare('SELECT count(*) count FROM reviewed_import_enrollment_receipts').first<number>('count');
+    const replay=await send();
+    expect(replay.status).toBe(200);
+    expect(await replay.json()).toEqual({outcome:{status:'written',replayed:true,recordId,enrollmentVersion:2,sourceIds:[sourceId]}});
+    expect((await send({...input,expectedRecordVersion:2})).status).toBe(409);
+    await db.batch([
+      db.prepare("INSERT INTO native_directory_grants(id,staff_id,permission,effect,scope_kind,business_area_id,granted_by) VALUES('aaa-added-profile',?,'directory.profile.edit','allow','business_area','imports',?)")
+        .bind(staffId,staffId),
+      db.prepare("INSERT INTO native_directory_grants(id,staff_id,permission,effect,scope_kind,business_area_id,granted_by) VALUES('aaa-added-enrollment',?,'directory.enrollment.manage','allow','business_area','imports',?)")
+        .bind(staffId,staffId),
+    ]);
+    expect((await send()).status).toBe(200);
+    await db.prepare("INSERT INTO native_directory_grants(id,staff_id,permission,effect,scope_kind,resource_id,granted_by) VALUES('http-replay-deny',?,'directory.profile.edit','deny','resource',?,?)")
+      .bind(staffId,recordId,staffId).run();
+    expect((await send()).status).toBe(403);
+    await db.prepare("UPDATE native_directory_grants SET active=0 WHERE id='http-replay-deny'").run();
+    await db.prepare("UPDATE native_directory_grants SET active=0 WHERE id='assigned-profile'").run();
+    // Other current allows remain, but replay may not replace the original
+    // audited grant with a different grant after that original is revoked.
+    expect((await send()).status).toBe(403);
+    expect(await db.prepare('SELECT count(*) count FROM reviewed_import_enrollment_receipts').first<number>('count')).toBe(count);
   });
 });
 

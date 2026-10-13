@@ -1,0 +1,21 @@
+# Reviewed imported-customer enrollment — staging candidate
+
+- Purpose: explicitly admit an already acquired client or organization to Operations-managed PA profile synchronization. This is **not** recipient enrollment, portal activation, financial disclosure, or file sharing.
+- Default-off: `REVIEWED_IMPORT_ENROLLMENT_ENABLED` must equal `true` and `ENVIRONMENT` must equal `staging`. Production remains unavailable even if the flag is accidentally set.
+- Database prerequisites: the reviewed-import admission/receipt guards and effective enrollment view in migrations 0202–0203, plus their earlier acquisition and lifecycle dependencies. No new migration is introduced by this HTTP adapter.
+- Routes: authenticated `GET /api/native-directory/reviewed-import-enrollment/session`; `POST /api/native-directory/reviewed-import-enrollment/{clients|organizations}/{recordId}`. This native-staff route family verifies its own Access assertion, current staff admission/profile, exact Origin and actor-bound CSRF; it does not infer authority from the legacy PA login or an owner label.
+- POST accepts only `mutationId`, `expectedRecordVersion`, `expectedEnrollmentVersion` and one to sixteen unique `sourceIds`. `Idempotency-Key` must equal `mutationId`. The session returns the required `X-CSRF-Token`. The request must be same-origin JSON.
+- Both current `directory.profile.edit` and `directory.enrollment.manage` grants are required, with applicable denies taking precedence. The database commit independently rechecks current authority and settled work.
+- Source selection is explicit. Server configuration and the exact activated acquisition/review/response chain determine PA instance, application, history, origin and external IDs. The browser cannot submit those values. Ambiguous or mismatched mappings fail closed; no names or emails are matched.
+- Existing reviewed destinations must be retained. New destinations require activation for the current Operations record version. Previously reviewed destinations can survive later profile edits; pending PA delivery or binding work still blocks the atomic enrollment receipt.
+- Native-create enrollment history is not converted through this imported-record endpoint. In particular, missing historical epoch fields are never filled in speculatively.
+- Fresh, complete, aligned inventory is enforced by the existing receipt guards. This endpoint does not pretend an incomplete first inventory page proves the complete dataset; refresh inventory through the bounded inventory workflow before retrying an evidence conflict.
+- A committed retry reads its immutable admission/receipt after current authorization checks, independently revalidates the originally recorded grants, then returns the writer's idempotent result. Adding another applicable allow does not change that original authority; revoking it or adding an applicable deny prevents replay. It does not create another receipt. Changed bodies conflict. Success responses contain only record/version/source choices, never destination/provenance tuples or credentials.
+
+## Evidence and remaining rollout work
+
+- Local coverage exercises the full D1 migration/acquisition chain, server-derived destinations, source/config mismatches, pending profile settlement, immutable committed replay, current deny rejection and response redaction.
+- HTTP and actual Worker-mount tests cover default-off/staging-only behavior, authentication/CSRF boundaries, strict request shape and sanitized failures. TypeScript and a local build are separate checks, not live staging acceptance.
+- Still required: an operator review/options UI with explicit source choices and confirmation; exact paired release assembly (including the separately verified fresh-session UI fix); staging migration/deployment with preservation checks; live isolated two-source import/sync and portal acceptance.
+- The second isolated PA staging instance still requires its first-administrator credential handoff, followed by scoped key/application provisioning and a dedicated HTTPS connector. Do not modify the existing shared tunnel to shortcut that isolation.
+- No production PA deployment, client activation, existing public-link mutation or file-platform rollout is authorized by this candidate.
