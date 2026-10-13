@@ -201,8 +201,11 @@ test("removes a previously authorized service summary when foreground revalidati
   await page.goto("/portal");
   await expect(page.getByText("Aerial operations", { exact: true })).toBeVisible();
 
-  await page.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
-  await expect(page.getByText("Sign in required", { exact: true })).toBeVisible();
+  await expect.poll(() => calls.filter(path => path === "/api/client/v2/operations/home").length).toBe(1);
+  await page.waitForTimeout(1_050);
+  await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+  await expect.poll(() => calls.filter(path => path === "/api/client/v2/operations/home").length).toBeGreaterThanOrEqual(2);
+  await expect(page.getByRole("heading", { name: "Operations services unavailable" })).toBeVisible();
   await expect(page.getByText("Aerial operations", { exact: true })).toHaveCount(0);
   await expect(page.getByText("Infrastructure review", { exact: true })).toHaveCount(0);
   expect(calls.filter(path => path === "/api/client/v2/operations/home").length).toBeGreaterThanOrEqual(2);

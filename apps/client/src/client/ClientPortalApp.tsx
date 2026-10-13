@@ -3031,7 +3031,7 @@ export function ClientPortalApp({
       </PortalBoundary>
     );
   if (gate.status === "blocked") {
-    if (currentOperationsHome) return <OperationsHomeApp response={currentOperationsHome}
+    if (currentOperationsHome) return <OperationsHomeApp response={currentOperationsHome} authorityStatus={operationsHomeStatus}
       clientUnavailable={!gate.optionalClientWorkspaceAbsent || currentOperationsHome.homes.length === 0} onRetryClient={() => {
       setPortalWorkspaceSelection(null);
       window.location.assign("/portal");

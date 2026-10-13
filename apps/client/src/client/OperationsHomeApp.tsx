@@ -67,10 +67,11 @@ export function OperationsFinancialSummary({state,documents}:{state:"loading"|"r
   </section>;
 }
 
-export function OperationsHomeApp({ response, clientUnavailable = false, onRetryClient }: {
+export function OperationsHomeApp({ response, clientUnavailable = false, onRetryClient, authorityStatus = "current" }: {
   response: PortalOperationsHomeResponse;
   clientUnavailable?: boolean;
   onRetryClient?: () => void;
+  authorityStatus?: "current" | "checking" | "unavailable";
 }) {
   return <div className="client-portal operations-home">
     <header className="client-portal-header">
@@ -88,7 +89,7 @@ export function OperationsHomeApp({ response, clientUnavailable = false, onRetry
         <p>Your Operations service summary is still available. You can retry without the unavailable workspace selection.</p>
         {onRetryClient && <button type="button" className="button-ghost" onClick={onRetryClient}>Try available client workspaces</button>}
       </section>}
-      <OperationsNativeServicePanel response={response} />
+      <OperationsNativeServicePanel response={response} authorityStatus={authorityStatus} />
     </main>
   </div>;
 }
