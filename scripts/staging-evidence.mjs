@@ -364,7 +364,7 @@ export function validateEvidence(evidence, options = {}) {
   if (!recentDate(freshBootstrap.generatedAt, now) || !populated(freshBootstrap.generatorEvidenceRef)) errors.push("fresh bootstrap generation must be current and referenced");
   for (const [app, expected] of Object.entries({
     delivery: { configPath: "apps/client/wrangler.staging.bootstrap.json", manifestPath: "apps/client/.staging-bootstrap/manifest.json", seed: "0002_seed_initial_staff.sql", ledgerCount: 132, finalMigration: "0213_incoming_rclone_promotion.sql" },
-    operations: { configPath: "apps/operations/wrangler.staging.bootstrap.json", manifestPath: "apps/operations/.staging-bootstrap/manifest.json", seed: "0002_seed_acl.sql", ledgerCount: 122, finalMigration: "0122_project_alpha_project_v2_canonical_activation.sql" },
+    operations: { configPath: "apps/operations/wrangler.staging.bootstrap.json", manifestPath: "apps/operations/.staging-bootstrap/manifest.json", seed: "0002_seed_acl.sql", ledgerCount: 124, finalMigration: "0124_project_alpha_project_adoption_review_evidence.sql" },
   })) {
     const proof = freshBootstrap.applications?.[app] ?? {};
     if (proof.configPath !== expected.configPath || proof.manifestPath !== expected.manifestPath) errors.push(`${app} fresh bootstrap must identify the generated config and manifest`);
@@ -389,10 +389,10 @@ export function validateEvidence(evidence, options = {}) {
   }
   const operationsMigration = migrations.operations ?? {};
   for (const proof of ["remoteLedgerOrderVerified", "openFencesChecked", "writerAndSchedulerQuiescent", "compatibleWritersOrdered"]) {
-    if (operationsMigration[proof] !== true) errors.push(`operations 0054-0122 release gate must prove ${proof}`);
+    if (operationsMigration[proof] !== true) errors.push(`operations 0054-0124 release gate must prove ${proof}`);
   }
   for (const field of ["remoteLedgerEvidenceRef", "preMigrationFenceEvidenceRef", "compatibleWriterVersionId", "compatibleWriterOrderingEvidenceRef"]) {
-    if (!populated(operationsMigration[field])) errors.push(`operations 0054-0122 release gate needs ${field}`);
+    if (!populated(operationsMigration[field])) errors.push(`operations 0054-0124 release gate needs ${field}`);
   }
   const deliveryMigration = migrations.delivery ?? {};
   for (const proof of ["videoRecoveryCompleted", "videoRowsPendingForTrueNas", "legacyBridgeAcceptanceMatrixPassed"]) {

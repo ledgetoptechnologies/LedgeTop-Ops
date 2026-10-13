@@ -1,5 +1,17 @@
 # Client portal and Client Hub acceptance checklist
 
+## Latest connection-first checkpoint — September 30, 2026
+
+The owner prioritizes verified PA↔Operations connectivity before client portal
+sign-in and data access. Ops PR #140 adds the missing API-v2 read-acceptance
+source inventory/UI independently of the legacy connector panel and updates
+the staging migration contract through Operations `0124`. Local focused checks
+pass, but the PR is not yet merged or deployed to staging. This does not prove
+synchronization, dual-source parity, client
+enrollment, or portal data authorization. Keep client portal access disabled
+until the API-v2 reads are accepted against both PA instances and the existing
+portal rollout gates pass. Production PA changes remain an owner checkpoint.
+
 This checklist is the release evidence map for the August 2026 Project Alpha,
 Operations, and Client Portal handoff. A feature is not complete merely because
 a table, route, or card exists. Completion requires the stated source of truth,

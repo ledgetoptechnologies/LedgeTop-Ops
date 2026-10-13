@@ -24,6 +24,11 @@ export type ProjectAlphaApiV2ConfiguredProbe =
   | { status: "disabled"; sourceId: string }
   | ProjectAlphaApiV2Probe;
 
+export type ProjectAlphaApiV2ConnectionInventory = Readonly<{
+  status: "configured" | "unconfigured" | "misconfigured";
+  connections: ReadonlyArray<Readonly<{ sourceId: string; enabled: boolean }>>;
+}>;
+
 /** Deliberately has no configuration detail: callers must not surface secret
  * envelope contents in logs, responses, or diagnostics. */
 export class ProjectAlphaApiV2ConnectionConfigurationError extends Error {
@@ -138,6 +143,33 @@ function parseProjectAlphaApiV2Connection(
     if (key === requestedSourceId) selected = parsed;
   }
   return selected ?? invalid();
+}
+
+/** Safe administrator inventory for the read-only acceptance UI. It returns
+ * only canonical source selectors and enablement; no URL, API key, or PA
+ * identity commitment crosses the response boundary. The same strict parser
+ * validates the complete versioned envelope before any entry is listed. */
+export function listProjectAlphaApiV2Connections(
+  env: ProjectAlphaApiV2ConnectionEnvironment,
+): ProjectAlphaApiV2ConnectionInventory {
+  try {
+    const raw = env.PROJECT_ALPHA_API_V2_CONNECTIONS;
+    if (raw === undefined) return { status: "unconfigured", connections: [] };
+    if (typeof raw !== "string" || !raw.trim()) return { status: "misconfigured", connections: [] };
+    if (new TextEncoder().encode(raw).byteLength > MAX_SECRET_BYTES) return { status: "misconfigured", connections: [] };
+    const envelope: unknown = parseDuplicateFreeJson(raw);
+    if (!plain(envelope) || !exact(envelope, ["version", "instances"]) || envelope.version !== 1 || !plain(envelope.instances))
+      return { status: "misconfigured", connections: [] };
+    const entries = Object.entries(envelope.instances);
+    if (entries.length === 0 || entries.length > MAX_CONNECTIONS) return { status: "misconfigured", connections: [] };
+    const connections = entries.map(([key]) => parseProjectAlphaApiV2Connection(env, key).resolved)
+      .map(connection => Object.freeze({ sourceId: connection.sourceId, enabled: connection.enabled }));
+    return { status: "configured", connections: Object.freeze(connections) };
+  } catch {
+    // Deliberately suppress parser/environment details: the raw envelope is a
+    // deployment secret and must not escape via API errors or UI diagnostics.
+    return { status: "misconfigured", connections: [] };
+  }
 }
 
 export function resolveProjectAlphaApiV2Connection(

@@ -12,7 +12,7 @@ default-off Project-v2 pending dispatcher. Its entrypoints remain unmounted;
 the dispatcher is transport-capable through its injected sender, but no
 deployed production caller can invoke it. It has no mounted public route and
 does not currently make production calls or activate Project-v2 authority.
-Migration `0122` exists in source; remote application and runtime activation
+Migrations `0122`-`0124` exist in source; remote application and runtime activation
 remain separate gates. The authoritative post-merge workflow
 `35291426513` completed successfully at exact head
 `ecf9d24ef839793dd32d98435b48686a865b2e14`; all 10 jobs passed.
@@ -351,7 +351,7 @@ comparison with those repositories. The verifier intentionally fails while any
 release-candidate placeholder remains.
 
 The current candidate inventory extends through Client `0213` (including both
-distinct `0199` filenames), Operations `0122`, and Project Alpha `0102`. The
+distinct `0199` filenames), Operations `0124`, and Project Alpha `0102`. The
 reviewed Operations runtime boundary is commit
 `5ca70d4f5ec834bfddf7bff68ffc1d89c6fd32a7`, which adds default-off,
 fail-closed Cloudflare Access service-auth support to the PA API-v2 connection
@@ -508,8 +508,8 @@ owner input, then use only those configs for the first full apply. The ordinary
 configs would replay the canonical named-human `0002` rows. A populated or
 partially migrated database must never use the bootstrap configs. Attach both
 generated manifests and complete `migrations.freshBootstrap`; the required
-proof includes 132/122 ledger rows, both Client `0199` filenames exactly once,
-final `0213`/`0122`, canonical-human absence, the one synthetic owner and its
+proof includes 132/124 ledger rows, both Client `0199` filenames exactly once,
+final `0213`/`0124`, canonical-human absence, the one synthetic owner and its
 role, the retained Operations ACL catalog, no pending reapply, and an empty
 foreign-key check.
 
@@ -587,7 +587,7 @@ apply time and is the explicit exception to this packet's normal
 migration-first order. Confirm every predecessor is already applied; otherwise
 resolve those predecessors in a separately reviewed release.
 
-For Operations, preserve the full ordered `0054` through `0122` suffix in the
+For Operations, preserve the full ordered `0054` through `0124` suffix in the
 remote Wrangler ledger. Attach the list output that proves every filename is in
 the exact checked-in order, with no duplicate, renamed, skipped, or unexpected
 row. A local migration-chain run, a directory listing, or a successful raw SQL
@@ -599,7 +599,7 @@ all are terminal or deliberately cancelled, then close mutation ingress and
 drain HTTP requests, queue consumers, leases, schedulers, and reconciliation
 batches. The evidence must prove this quiescent state and name the compatible
 Operations writer version already handling all traffic. Do not apply `0054`-
-`0122` while an old writer, an in-flight fence, or a scheduled/retry worker can
+`0124` while an old writer, an in-flight fence, or a scheduled/retry worker can
 commit a pre-migration assumption. Keep the compatible writer in place through
 the final ledger readback; use a compatible fix forward, never a pre-suffix
 writer rollback.
@@ -686,7 +686,7 @@ Confirm Operations
 `0014_staff_acl_controls.sql` through
 `0052_project_operational_reassignment_recovery.sql` and
 `0053_project_internal_notes.sql`, then Operations `0054` through
-`0122_project_alpha_project_v2_canonical_activation.sql` in
+`0124_project_alpha_project_adoption_review_evidence.sql` in
 that exact ledger order. Migration `0100` removes
 `share_version` from the delivery-grant parent key so existing share
 rotation/revocation updates cannot be blocked by a portal grant; the grant
