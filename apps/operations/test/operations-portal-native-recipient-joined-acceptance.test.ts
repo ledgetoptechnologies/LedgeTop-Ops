@@ -205,7 +205,8 @@ for (const chain of ["historical-client", "current-reviewed"] as const) describe
         .toHaveLength(142);
       await applyDraft(client, "client", "0224_operations_portal_native_recipient_authority.sql");
     } else {
-      const operationsNames = await applyReviewedChain(operations, "operations");
+      const operationsNames = await applyCanonicalChain(operations, "operations",
+        "0203_effective_native_directory_enrollment_consumers.sql", true);
       expect(operationsNames).toHaveLength(203);
       expect(operationsNames.at(-1)).toBe("0203_effective_native_directory_enrollment_consumers.sql");
       const clientNames = await applyReviewedChain(client, "client");
@@ -226,16 +227,10 @@ for (const chain of ["historical-client", "current-reviewed"] as const) describe
     const organization = await seedRecord(operations, rootId, "organization");
     await acknowledgeCreate(operations, organization, "10000000000000000000000000000001");
     await seedRecord(operations, clientId, "client", rootId);
-    if (chain === "historical-client") {
-      await operations.prepare(`INSERT INTO operations_service_definitions
-        (service_id,provider_id,source_id,source_service_id,display_name)
-        VALUES('web','operations','joined-fixture','web','Website services')`).run();
-    } else {
-      await expect(createOperationsServiceDefinition(operations, owner(), {
-        mutationId: id(), idempotencyKey: id(), serviceId: "web", providerId: "operations",
-        sourceId: "joined-fixture", sourceServiceId: "web", displayName: "Website services",
-      })).resolves.toMatchObject({ serviceId: "web", replayed: false });
-    }
+    await expect(createOperationsServiceDefinition(operations, owner(), {
+      mutationId: id(), idempotencyKey: id(), serviceId: "web", providerId: "operations",
+      sourceId: "joined-fixture", sourceServiceId: "web", displayName: "Website services",
+    })).resolves.toMatchObject({ serviceId: "web", replayed: false });
     await expect(writeCustomerServiceEnrollment(operations, owner(), { mutationId: id(), idempotencyKey: id(),
       customerRecordId: clientId, serviceId: "web", desiredState: "active", expectedRevision: 0 }))
       .resolves.toMatchObject({ state: "active", revision: 1, replayed: false });

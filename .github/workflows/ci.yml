@@ -92,7 +92,7 @@ jobs:
         run: node --test scripts/staging-directory-scalar-evidence-capture.test.mjs scripts/staging-directory-scalar-queue-preflight.test.mjs scripts/staging-directory-scalar-drain-acceptance-cli.test.mjs
 
       - name: Verify scalar authority provision and acknowledged cleanup against the full schema
-        run: node --test scripts/staging-directory-scalar-authority-v184.test.mjs scripts/staging-directory-scalar-authority-v184-fullschema.test.mjs
+        run: node --test scripts/historical-0195-scalar-writer-fixture.test.mjs scripts/staging-directory-scalar-authority-v184.test.mjs scripts/staging-directory-scalar-authority-v184-fullschema.test.mjs
 
   incoming-pickup:
     name: incoming-pickup-alpine
