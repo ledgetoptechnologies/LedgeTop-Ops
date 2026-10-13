@@ -253,7 +253,7 @@ async function linkedRelationshipEvidence(db: DirectoryWriteD1, relationship: Re
     JOIN operations_directory_records parent ON parent.record_id=mapping.record_id AND parent.record_kind='organization'
       AND parent.current_version=?
     JOIN operations_directory_revisions revision ON revision.record_id=parent.record_id AND revision.version=parent.current_version
-    JOIN native_directory_enrollments enrollment ON enrollment.record_id=parent.record_id
+    JOIN effective_native_directory_enrollments enrollment ON enrollment.record_id=parent.record_id
     WHERE mapping.source_id=? AND mapping.source_instance_id=? AND mapping.application_id=? AND mapping.history_epoch_id=?
       AND mapping.resource_type='organization' AND mapping.record_id=?
       AND EXISTS(SELECT 1 FROM json_each(enrollment.destinations_json) enrolled
@@ -707,7 +707,7 @@ async function planNativeDirectoryProfileWriteInternal(db: DirectoryWriteD1, inp
         } else {
           const parent = await db.prepare(`SELECT record.current_version version FROM operations_directory_records record
             JOIN operations_directory_revisions revision ON revision.record_id=record.record_id AND revision.version=record.current_version
-            JOIN native_directory_enrollments enrollment ON enrollment.record_id=record.record_id
+            JOIN effective_native_directory_enrollments enrollment ON enrollment.record_id=record.record_id
             WHERE record.record_id=? AND record.record_kind='organization'`).bind(organizationRecordId).first<{ version: number }>();
           if (!parent || !Number.isSafeInteger(parent.version) || parent.version < 1)
             return { status: "blocked", reason: "client_relationship_parent_state" };
@@ -723,7 +723,7 @@ async function planNativeDirectoryProfileWriteInternal(db: DirectoryWriteD1, inp
           ON history.client_record_id=relation.client_record_id AND history.relationship_version=relation.relationship_version
         LEFT JOIN operations_directory_records parent ON parent.record_id=relation.organization_record_id AND parent.record_kind='organization'
         LEFT JOIN operations_directory_revisions parent_revision ON parent_revision.record_id=parent.record_id AND parent_revision.version=parent.current_version
-        LEFT JOIN native_directory_enrollments parent_enrollment ON parent_enrollment.record_id=parent.record_id
+        LEFT JOIN effective_native_directory_enrollments parent_enrollment ON parent_enrollment.record_id=parent.record_id
         WHERE relation.client_record_id=?`).bind(write.recordId)
         .first<{ organization_record_id: string | null; relationship_version: number; mutation_id: string; organization_record_version: number | null }>();
       if (!relationship) return { status: "blocked", reason: "client_relationship_missing" };
@@ -740,7 +740,7 @@ async function planNativeDirectoryProfileWriteInternal(db: DirectoryWriteD1, inp
   let enrolled: readonly DestinationIdentity[] = write.destinations.map(identity);
   const remote = new Map<string, RemoteState>();
   if (write.operation === "update") {
-    const enrollment = await db.prepare(`SELECT destinations_json FROM native_directory_enrollments WHERE record_id=?`).bind(write.recordId).first<{ destinations_json: string }>();
+    const enrollment = await db.prepare(`SELECT destinations_json FROM effective_native_directory_enrollments WHERE record_id=?`).bind(write.recordId).first<{ destinations_json: string }>();
     try { enrolled = enrollment ? JSON.parse(enrollment.destinations_json) as DestinationIdentity[] : []; } catch { enrolled = []; }
     const decisionScopedLocalUpdate = stagedOnboardingDecisionId !== null && write.destinations.length === 0;
     if (!Array.isArray(enrolled) || enrolled.length !== write.destinations.length

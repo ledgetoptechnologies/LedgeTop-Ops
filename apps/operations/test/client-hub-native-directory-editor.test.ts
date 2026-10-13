@@ -179,10 +179,10 @@ describe("Client Hub native profile editor coordinate", () => {
     } finally { await runtime.dispose(); }
   });
 
-  it("offers a non-UUID acquired organization only with exact configured enrollment and active mapping", async () => {
-    const recordId = "acquired:organization:west", destination = { sourceId: identity.sourceId,
+  it("offers a non-UUID acquired organization only with exact configured enrollment and active external mapping", async () => {
+    const recordId = "acquired:organization:west", externalId = "pa:legacy:organization:west", destination = { sourceId: identity.sourceId,
       sourceInstanceUUID: identity.sourceInstanceId, applicationUUID: identity.applicationId,
-      historyEpoch: identity.historyEpochId, origin: "https://pa.example.test", externalCanonicalId: recordId };
+      historyEpoch: identity.historyEpochId, origin: "https://pa.example.test", externalCanonicalId: externalId };
     let activeMappingLookup: unknown[] | null = null;
     const make = (matchingRows: number) => {
       let bound: unknown[] = [];
@@ -190,7 +190,7 @@ describe("Client Hub native profile editor coordinate", () => {
         if (sql.includes("FROM project_alpha_active_directory_mappings")) {
           expect(sql).not.toContain("pa_connectors");
           expect(sql).toContain("mapping.record_id=?");
-          expect(sql).not.toContain("mapping.external_id=?");
+          expect(sql).toContain("mapping.external_id=?");
           expect(sql).toContain("HAVING count(*)=1");
         }
         const statement = { bind: (...values: unknown[]) => { bound = values;
@@ -198,7 +198,7 @@ describe("Client Hub native profile editor coordinate", () => {
           return statement; }, all: async () => ({ results: sql.includes("operations_directory_records") ? [{
           recordId, expectedVersion: 7, profileJson: JSON.stringify({ name: "Acquired West" }),
           destinationsJson: JSON.stringify([destination]),
-        }] : [] }), first: async () => matchingRows === 1 && bound[4] === recordId ? { present: 1 } : null };
+        }] : [] }), first: async () => matchingRows === 1 && bound[4] === recordId && bound[5] === externalId ? { present: 1 } : null };
         return statement;
       } };
       return { OPS_DB: database } as unknown as Env;
@@ -207,10 +207,8 @@ describe("Client Hub native profile editor coordinate", () => {
       recordId, expectedVersion: 7, name: "Acquired West", sourceIds: [identity.sourceId],
     }]);
     expect(activeMappingLookup).toEqual([identity.sourceId, identity.sourceInstanceId, identity.applicationId,
-      identity.historyEpochId, recordId]);
-    // Enrollment uses the stable Operations ID; it must not infer that ID from
-    // a Project Alpha external binding, which may differ for acquired mappings.
-    expect(destination.externalCanonicalId).toBe(recordId);
+      identity.historyEpochId, recordId, externalId]);
+    expect(destination.externalCanonicalId).not.toBe(recordId);
     await expect(nativeDirectoryOrganizationChoices(make(0))).resolves.toEqual([]);
     await expect(nativeDirectoryOrganizationChoices(make(2))).resolves.toEqual([]);
     mocks.connection.mockReturnValueOnce({ enabled: true, connection: { expectedSourceInstanceId: "wrong",

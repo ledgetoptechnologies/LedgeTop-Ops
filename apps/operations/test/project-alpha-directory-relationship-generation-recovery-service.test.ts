@@ -100,7 +100,7 @@ describe("relationship recovery review service (mocked I/O; SQL atomicity covere
     const { env, controls } = setup();
     await createDirectoryRelationshipRecoveryReview(env, { recordId: client, sourceId: source }, actor);
     const discovery = controls.sql.find(sql => sql.startsWith("SELECT predecessor.command_id"));
-    expect(discovery?.match(/FROM native_directory_enrollments/g)).toHaveLength(2);
+    expect(discovery?.match(/FROM effective_native_directory_enrollments/g)).toHaveLength(2);
     expect(discovery).toContain("externalCanonicalId"); expect(discovery).toContain("predecessor.history_epoch_id");
   });
   it("requires the canonical persisted relationship-dispatcher conflict marker", async () => {

@@ -203,7 +203,7 @@ export async function writeNativeDirectoryLifecycle(db:D1Database,input:NativeDi
   if(state&&((input.action==="archive"&&state.status!=="active")||(input.action==="restore"&&state.status!=="archived")))
     return{status:"conflict",reason:"state"};
   if(await unsettled(db,input.recordId))return{status:"blocked",reason:"unsettled_work"};
-  const enrollment=await db.prepare(`SELECT destinations_json FROM native_directory_enrollments WHERE record_id=?`).bind(input.recordId).first<string>("destinations_json");
+  const enrollment=await db.prepare(`SELECT destinations_json FROM effective_native_directory_enrollments WHERE record_id=?`).bind(input.recordId).first<string>("destinations_json");
   const destinations=typeof enrollment==="string"?parseDestinations(enrollment):null;
   if(!destinations)return{status:"blocked",reason:"destination"};
   const reservations:Array<NativeDirectoryLifecycleReservation&{destination:Destination;publicId:string}> = [];

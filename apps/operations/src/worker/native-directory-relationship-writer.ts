@@ -308,7 +308,7 @@ async function currentGeneration(db: DirectoryWriteD1, destination: Destination,
   return maximumDirectoryRevisionEvidence(rows.map(row=>row.generation),true);
 }
 async function loadEnrollment(db: DirectoryWriteD1, recordId: string): Promise<Destination[] | null> {
-  const row = await db.prepare("SELECT destinations_json FROM native_directory_enrollments WHERE record_id=?").bind(recordId).first<{ destinations_json: string }>();
+  const row = await db.prepare("SELECT destinations_json FROM effective_native_directory_enrollments WHERE record_id=?").bind(recordId).first<{ destinations_json: string }>();
   return row ? destinations(row.destinations_json, recordId) : null;
 }
 

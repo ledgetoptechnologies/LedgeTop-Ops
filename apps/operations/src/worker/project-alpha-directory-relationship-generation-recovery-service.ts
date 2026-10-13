@@ -103,14 +103,14 @@ async function discover(db: D1Database, record: string, source: string): Promise
       AND json_extract(predecessor.outcome_json,'$.httpStatus')=409
       AND NOT EXISTS(SELECT 1 FROM project_alpha_directory_relationship_generation_recoveries recovery
         WHERE recovery.predecessor_command_id=predecessor.command_id)
-      AND EXISTS(SELECT 1 FROM native_directory_enrollments enrollment,json_each(enrollment.destinations_json) destination
+      AND EXISTS(SELECT 1 FROM effective_native_directory_enrollments enrollment,json_each(enrollment.destinations_json) destination
         WHERE enrollment.record_id=client.record_id AND json_extract(destination.value,'$.sourceId')=predecessor.source_id
           AND json_extract(destination.value,'$.sourceInstanceUUID')=predecessor.source_instance_id
           AND json_extract(destination.value,'$.applicationUUID')=predecessor.application_id
           AND json_extract(destination.value,'$.historyEpoch')=predecessor.history_epoch_id
           AND json_extract(destination.value,'$.origin')=predecessor.destination_origin
           AND json_extract(destination.value,'$.externalCanonicalId')=client_mapping.external_id)
-      AND EXISTS(SELECT 1 FROM native_directory_enrollments enrollment,json_each(enrollment.destinations_json) destination
+      AND EXISTS(SELECT 1 FROM effective_native_directory_enrollments enrollment,json_each(enrollment.destinations_json) destination
         WHERE enrollment.record_id=organization.record_id AND json_extract(destination.value,'$.sourceId')=predecessor.source_id
           AND json_extract(destination.value,'$.sourceInstanceUUID')=predecessor.source_instance_id
           AND json_extract(destination.value,'$.applicationUUID')=predecessor.application_id

@@ -95,6 +95,10 @@ beforeAll(async()=>{runtime=new Miniflare({modules:true,compatibilityDate:"2026-
     throw new Error("proposal revision-evidence replacement is not the expected first object pair");
   await db.batch(revisionStatements.slice(0,2)
     .map(sql=>db.prepare(sql.replaceAll("operations_directory_effective_materializations","operations_directory_materializations"))));
+  await db.prepare(`CREATE VIEW effective_native_directory_enrollments AS
+    SELECT record_id,destinations_json,0 enrollment_version,'native_create' enrollment_kind,
+      create_admission_id provenance_id,created_at
+    FROM native_directory_enrollments`).run();
   // This focused pre-0184 fixture has no recovery rows, but current writers always
   // read the canonical validated-ACK projection. Preserve that schema boundary as
   // an exact empty projection instead of weakening the production query.

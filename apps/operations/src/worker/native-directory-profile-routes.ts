@@ -321,16 +321,16 @@ async function requestedCreateDestinations(env: Env, selectedSources: readonly s
 
 async function updateDestinations(env: Env, kind: NativeDirectoryProfileKind, record: string,
   expectedLocalVersion: number): Promise<NativeDirectoryDestinationAuthority[] | null> {
-  const enrollment = await env.OPS_DB.withSession("first-primary").prepare(`SELECT destinations_json FROM native_directory_enrollments WHERE record_id=?`)
+  const enrollment = await env.OPS_DB.withSession("first-primary").prepare(`SELECT destinations_json FROM effective_native_directory_enrollments WHERE record_id=?`)
     .bind(record).first<{ destinations_json: string }>();
   let values: unknown;
   try { values = enrollment ? JSON.parse(enrollment.destinations_json) : null; } catch { return null; }
   if (!Array.isArray(values) || values.length < 1 || values.length > 16) return null;
   const destinations: NativeDirectoryDestinationAuthority[] = [];
   for (const value of values) {
-    const enrolled = storedDestination(value, record);
+    const enrolled = storedDestination(value, null);
     if (!enrolled) return null;
-    const configured = await configuredDestination(env, enrolled.sourceId, record);
+    const configured = await configuredDestination(env, enrolled.sourceId, enrolled.externalCanonicalId);
     if (!configured || JSON.stringify(configured) !== JSON.stringify(enrolled)) return null;
     const expectedAuthorizationGeneration = await liveGeneration(env, enrolled);
     if (!expectedAuthorizationGeneration) return null;
@@ -362,15 +362,15 @@ async function currentClientRelationship(db: D1Database, record: string): Promis
 
 async function enrollmentSourceIds(env: Env, record: string): Promise<string[] | null> {
   const row = await env.OPS_DB.withSession("first-primary").prepare(`SELECT destinations_json
-    FROM native_directory_enrollments WHERE record_id=?`).bind(record).first<{ destinations_json: string }>();
+    FROM effective_native_directory_enrollments WHERE record_id=?`).bind(record).first<{ destinations_json: string }>();
   let values: unknown;
   try { values = row ? JSON.parse(row.destinations_json) : null; } catch { return null; }
   if (!Array.isArray(values) || values.length < 1 || values.length > 16) return null;
   const result: string[] = [];
   for (const value of values) {
-    const destination = storedDestination(value, record);
+    const destination = storedDestination(value, null);
     if (!destination) return null;
-    const configured = await configuredDestination(env, destination.sourceId, record);
+    const configured = await configuredDestination(env, destination.sourceId, destination.externalCanonicalId);
     if (!configured || JSON.stringify(configured) !== JSON.stringify(destination)) return null;
     result.push(destination.sourceId);
   }
@@ -522,15 +522,15 @@ async function relationshipReplay(c: AppContext, actor: Omit<NativeDirectoryWrit
 async function immediateTerminalPredecessors(env: Env, clientRecordId: string,
   expectedRelationshipVersion: number): Promise<string[] | null> {
   const row = await env.OPS_DB.withSession("first-primary").prepare(`SELECT destinations_json
-    FROM native_directory_enrollments WHERE record_id=?`).bind(clientRecordId).first<{ destinations_json: string }>();
+    FROM effective_native_directory_enrollments WHERE record_id=?`).bind(clientRecordId).first<{ destinations_json: string }>();
   let stored: unknown;
   try { stored = row ? JSON.parse(row.destinations_json) : null; } catch { return null; }
   if (!Array.isArray(stored) || stored.length < 1 || stored.length > 16) return null;
   const commandIds: string[] = [];
   for (const value of stored) {
-    const destination = storedDestination(value, clientRecordId);
+    const destination = storedDestination(value, null);
     if (!destination) return null;
-    const configured = await configuredDestination(env, destination.sourceId, clientRecordId);
+    const configured = await configuredDestination(env, destination.sourceId, destination.externalCanonicalId);
     if (!configured || JSON.stringify(configured) !== JSON.stringify(destination)) return null;
     const predecessor = await env.OPS_DB.withSession("first-primary").prepare(`SELECT command_id,state
       FROM project_alpha_directory_relationship_outbox

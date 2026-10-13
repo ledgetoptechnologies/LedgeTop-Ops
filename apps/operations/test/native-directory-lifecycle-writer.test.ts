@@ -99,6 +99,10 @@ beforeAll(async()=>{runtime=new Miniflare({modules:true,compatibilityDate:"2026-
     db.prepare("INSERT INTO lifecycle_public_link_fixture VALUES('keep','https://public.example.test/keep',x'00ff80')")]);
   legacyRecord=await createRecord(true);
   await applyMigration("0201_native_directory_lifecycle.sql");
+  await db.prepare(`CREATE VIEW effective_native_directory_enrollments AS
+    SELECT record_id,destinations_json,0 enrollment_version,'native_create' enrollment_kind,
+      create_admission_id provenance_id,created_at
+    FROM native_directory_enrollments`).run();
 },240_000);
 afterAll(async()=>runtime.dispose());
 
