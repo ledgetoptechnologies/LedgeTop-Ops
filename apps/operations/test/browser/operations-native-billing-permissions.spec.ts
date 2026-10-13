@@ -12,17 +12,18 @@ const route = "/billing-permissions-owner-fixture";
 const staffId = "staff:billing-manager", resourceId = "ops/project:alpha";
 const grantId = "11111111-1111-4111-8111-111111111111";
 const csrfToken = `123.${"a".repeat(64)}`;
+const refreshedCsrfToken = `124.${"b".repeat(64)}`;
 const permissions = [
   { grantId, effect: "allow", scopeKind: "resource", resourceId, revoked: false },
 ];
 const currentReview = { staffId, resourceId, generation: 4, permissions };
-type Call = { path: string; method: string; body: Record<string, unknown> | null };
+type Call = { path: string; method: string; body: Record<string, unknown> | null; csrf: string | null };
 
 async function render(page: Page, mode = "normal") {
   await page.route(`**${route}`, request => request.fulfill({ contentType: "text/html",
     body: '<meta name="viewport" content="width=device-width, initial-scale=1"><div id="root"></div>' }));
   await page.goto(route);
-  await page.evaluate(({ mode: selected, csrfToken, currentReview, grantId }) => {
+  await page.evaluate(({ mode: selected, csrfToken, refreshedCsrfToken, currentReview, grantId }) => {
     const exposed = window as Window & { billingPermissionMode?: string; billingPermissionCalls?: Call[] };
     exposed.billingPermissionMode = selected;
     const calls: Call[] = []; exposed.billingPermissionCalls = calls;
@@ -30,14 +31,21 @@ async function render(page: Page, mode = "normal") {
     window.fetch = async (input, init = {}) => {
       const path = String(input), method = init.method ?? "GET";
       const body = typeof init.body === "string" ? JSON.parse(init.body) as Record<string, unknown> : null;
-      calls.push({ path, method, body });
+      const csrf = new Headers(init.headers).get("X-CSRF-Token");
+      calls.push({ path, method, body, csrf });
       if (path.endsWith("/session")) {
         sessions += 1;
-        if (selected === "session-denied" || (selected === "issue-refresh-denied" || selected === "revoke-refresh-denied") && sessions === 2)
+        if (selected === "session-denied" || selected === "review-refresh-denied" && sessions === 2
+          || (selected === "issue-refresh-denied" || selected === "revoke-refresh-denied") && sessions === 3)
           return new Response("denied", { status: 403, headers: { "Content-Type": "text/plain" } });
-        return Response.json({ csrfToken });
+        if (selected === "review-refresh-pending" && sessions === 2)
+          await new Promise(resolve => setTimeout(resolve, 100));
+        return Response.json({ csrfToken: sessions === 1 ? csrfToken : refreshedCsrfToken });
       }
-      if (path.endsWith("/review")) return Response.json({ review: currentReview });
+      if (path.endsWith("/review")) {
+        if (csrf !== refreshedCsrfToken) return Response.json({ error: "denied" }, { status: 403 });
+        return Response.json({ review: currentReview });
+      }
       if (path.endsWith("/grants") && method === "POST") {
         issues += 1;
         if ((selected === "issue-network" || selected === "issue-refresh-denied") && issues === 1) throw new TypeError("lost response");
@@ -52,7 +60,7 @@ async function render(page: Page, mode = "normal") {
       }
       return Response.json({ error: "denied" }, { status: 403 });
     };
-  }, { mode, csrfToken, currentReview, grantId });
+  }, { mode, csrfToken, refreshedCsrfToken, currentReview, grantId });
   await page.addStyleTag({ content: stylesheet }); await page.addScriptTag({ content: script });
   await expect(page.getByRole("heading", { name: mode === "session-denied"
     ? "Billing permission delegation unavailable" : "Operations-native billing permission delegation" })).toBeVisible();
@@ -70,6 +78,8 @@ async function reviewExact(page: Page) {
 
 test("issues only an explicit reviewed resource grant and exposes no global permission identity", async ({ page }) => {
   await render(page); await reviewExact(page);
+  const recordedReview = (await calls(page)).find(call => call.path.endsWith("/review"));
+  expect(recordedReview?.csrf).toBe(refreshedCsrfToken);
   await expect(page.getByText("Global policy and revocation history are not exposed here.")).toBeVisible();
   await expect(page.getByRole("listitem")).toHaveCount(1);
   await expect(page.getByRole("listitem").first()).toContainText(`Resource ${resourceId}`);
@@ -103,7 +113,7 @@ test("uncertain issue freezes reviewed inputs and requires CSRF refresh before e
   await expect(page.getByRole("status")).toContainText("Permission replayed at generation 5");
   const recorded = await calls(page), issues = recorded.filter(call => call.path.endsWith("/grants") && call.method === "POST");
   expect(issues).toHaveLength(2); expect(issues[1]?.body).toEqual(issues[0]?.body);
-  expect(recorded.filter(call => call.path.endsWith("/session"))).toHaveLength(2);
+  expect(recorded.filter(call => call.path.endsWith("/session"))).toHaveLength(3);
 });
 
 test("retry session denial preserves the uncertain issue until the exact operation is later replayed", async ({ page }) => {
@@ -125,7 +135,7 @@ test("retry session denial preserves the uncertain issue until the exact operati
   await expect(page.getByRole("status")).toContainText("Permission replayed at generation 5");
   const issues = (await calls(page)).filter(call => call.path.endsWith("/grants") && call.method === "POST");
   expect(issues).toHaveLength(2); expect(issues[1]?.body).toEqual(first?.body);
-  expect((await calls(page)).filter(call => call.path.endsWith("/session"))).toHaveLength(3);
+  expect((await calls(page)).filter(call => call.path.endsWith("/session"))).toHaveLength(4);
 });
 
 test("revokes only the exact active resource grant with an in-page confirmation", async ({ page }) => {
@@ -158,7 +168,34 @@ test("retry session denial preserves the uncertain revoke until the exact operat
   await expect(page.getByRole("status")).toContainText("Permission replayed at generation 5");
   const revokes = (await calls(page)).filter(call => call.path.endsWith("/revoke"));
   expect(revokes).toHaveLength(2); expect(revokes[1]?.body).toEqual(first?.body);
-  expect((await calls(page)).filter(call => call.path.endsWith("/session"))).toHaveLength(3);
+  expect((await calls(page)).filter(call => call.path.endsWith("/session"))).toHaveLength(4);
+});
+
+test("refreshes an expired mount session before review and blocks review when refresh is denied", async ({ page }) => {
+  await render(page); await reviewExact(page);
+  const recorded = await calls(page);
+  expect(recorded.filter(call => call.path.endsWith("/session"))).toHaveLength(2);
+  expect(recorded.filter(call => call.path.endsWith("/review"))).toHaveLength(1);
+  expect(recorded.find(call => call.path.endsWith("/review"))?.csrf).toBe(refreshedCsrfToken);
+
+  await render(page, "review-refresh-denied");
+  await page.getByLabel("Exact native staff ID").fill(staffId);
+  await page.getByLabel("Exact operations resource ID").fill(resourceId);
+  await page.getByRole("button", { name: "Review exact permission scope" }).click();
+  await expect(page.getByRole("alert")).toContainText("authorization was denied");
+  expect((await calls(page)).filter(call => call.path.endsWith("/review"))).toHaveLength(0);
+});
+
+test("pending session refresh prevents duplicate review submission", async ({ page }) => {
+  await render(page, "review-refresh-pending");
+  await page.getByLabel("Exact native staff ID").fill(staffId);
+  await page.getByLabel("Exact operations resource ID").fill(resourceId);
+  const button = page.getByRole("button", { name: "Review exact permission scope" });
+  await button.dblclick();
+  await expect(page.getByRole("heading", { name: "Current active resource permissions" })).toBeVisible();
+  const recorded = await calls(page);
+  expect(recorded.filter(call => call.path.endsWith("/session"))).toHaveLength(2);
+  expect(recorded.filter(call => call.path.endsWith("/review"))).toHaveLength(1);
 });
 
 test("selection edits clear review and unavailable owner sessions expose no mutation controls", async ({ page }) => {
