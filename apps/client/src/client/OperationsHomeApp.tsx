@@ -40,7 +40,12 @@ export function OperationsNativeServicePanel({ response, embedded = false }: {
 function OperationsFinancialPanel({response}:{response:PortalOperationsHomeResponse}){
   const[documents,setDocuments]=useState<PortalFinancialDocument[]>([]),[state,setState]=useState<"loading"|"ready"|"unavailable">("loading");
   useEffect(()=>{const controller=new AbortController();setState("loading");
-    void Promise.all(response.homes.map(home=>loadOperationsFinancial(home.authorityId,undefined,controller.signal)))
+    void Promise.all(response.homes.map(home=>loadOperationsFinancial(home.authorityId,undefined,controller.signal)
+      .catch((error:unknown)=>{
+        const denial=error as {status?:unknown;body?:{error?:unknown}};
+        if(denial?.status===403&&denial.body?.error==="Client access is not provisioned")return [];
+        throw error;
+      })))
       .then(values=>{if(!controller.signal.aborted){setDocuments(values.flat());setState("ready");}})
       .catch(()=>{if(!controller.signal.aborted){setDocuments([]);setState("unavailable");}});
     return()=>controller.abort();},[response]);
