@@ -48,7 +48,9 @@ function BillingPermissionsWorkspace({ initialSession }: { initialSession: Nativ
     const input = { staffId: staffId.trim(), resourceId: resourceId.trim() };
     setBusy(true); setReview(null); setError(""); setMessage("");
     try {
-      const value = await reviewNativeBillingPermission(session.csrfToken, input);
+      const currentSession = await readNativeBillingPermissionSession();
+      setSession(currentSession);
+      const value = await reviewNativeBillingPermission(currentSession.csrfToken, input);
       setReview(value);
       setMessage("Exact staff and resource scope reviewed. Only current active grants for this resource are shown.");
     } catch (caught) {
