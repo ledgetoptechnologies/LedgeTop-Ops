@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import { OPERATIONS_SOURCE_CHAIN_204 } from "./staging-operations-source-v204.mjs";
 import fs from "node:fs";
 import path from "node:path";
 import { isDeepStrictEqual } from "node:util";
@@ -19,6 +20,8 @@ export const CLIENT_CURRENT_SOURCE_MIGRATION_CHAIN = Object.freeze({
     "0231_portal_primary_private_ingress_authority.sql": "b5582f703cf2e00567f49998922e9d1aaee86455c43c1fdc7a1326cd436e3353",
   }),
 });
+// Historical current203 alias: separately versioned203 authority tools retain
+// this exact contract. New source/release readers use LATEST below.
 export const OPERATIONS_CURRENT_SOURCE_MIGRATION_CHAIN = Object.freeze({
   count: 203,
   finalMigration: "0203_effective_native_directory_enrollment_consumers.sql",
@@ -29,6 +32,13 @@ export const OPERATIONS_CURRENT_SOURCE_MIGRATION_CHAIN = Object.freeze({
     "0201_native_directory_lifecycle.sql": "7bdd6d02c5ab97ba705e9a6d32238917ffb9a0757f3aa49d4eb8dcf7795e2878",
     "0202_reviewed_import_enrollment.sql": "77388f0dfa96e3715ef9754dd2dc92a7b1ec18139be0b8bf4590b79a3a77cedf",
     "0203_effective_native_directory_enrollment_consumers.sql": "3e331b0de53c0e4ca0b22395b879ef0e799f66872c2f49afd4ef7f7a58be0008",
+  }),
+});
+export const OPERATIONS_LATEST_SOURCE_MIGRATION_CHAIN = Object.freeze({
+  ...OPERATIONS_SOURCE_CHAIN_204,
+  appendedMigrations: Object.freeze({
+    ...OPERATIONS_CURRENT_SOURCE_MIGRATION_CHAIN.appendedMigrations,
+    ...OPERATIONS_SOURCE_CHAIN_204.appendedMigrations,
   }),
 });
 export const BOOTSTRAP_APPS = Object.freeze({
@@ -260,10 +270,14 @@ export function buildArtifacts(base, owner, options = {}) {
     requireRegularDirectory(sourceDir, `${app} canonical migration directory`);
     const entries = fs.readdirSync(sourceDir, { withFileTypes: true });
     for (const item of entries) {
-      if (item.name.endsWith(".sql") && (!item.isFile() || item.isSymbolicLink())) throw new Error(`${app} canonical migration ${item.name} must be a regular non-symlink file`);
+      if (/\.sql$/i.test(item.name) && !/^\d{4}_.+\.sql$/.test(item.name)) throw new Error("canonical migration names required");
+      if (/\.sql$/i.test(item.name) && (!item.isFile() || item.isSymbolicLink())) throw new Error(`${app} canonical migration ${item.name} must be a regular non-symlink file`);
     }
-    const repositoryNames = entries.filter((item) => item.isFile() && !item.isSymbolicLink() && item.name.endsWith(".sql")).map((item) => item.name).sort();
-    const currentSource = app === "operations" ? OPERATIONS_CURRENT_SOURCE_MIGRATION_CHAIN : CLIENT_CURRENT_SOURCE_MIGRATION_CHAIN;
+    const repositoryNames = entries.filter((item) => item.isFile() && !item.isSymbolicLink() && /\.sql$/i.test(item.name)).map((item) => item.name).sort();
+    const currentSource = app === "operations"
+      ? repositoryNames.includes(OPERATIONS_LATEST_SOURCE_MIGRATION_CHAIN.finalMigration)
+        ? OPERATIONS_LATEST_SOURCE_MIGRATION_CHAIN : OPERATIONS_CURRENT_SOURCE_MIGRATION_CHAIN
+      : CLIENT_CURRENT_SOURCE_MIGRATION_CHAIN;
     const appendedNames = currentSource ? Object.keys(currentSource.appendedMigrations) : [];
     const hasCurrentAppend = currentSource && appendedNames.every((name) => repositoryNames.includes(name));
     if (currentSource && repositoryNames.some((name) => appendedNames.includes(name)) && !hasCurrentAppend) {
@@ -373,8 +387,9 @@ export function validateGenerated(base, artifacts) {
     if (stat) {
       if (!stat.isDirectory() || stat.isSymbolicLink()) { errors.push(`${path.relative(base, directory)} must be a regular non-symlink directory`); continue; }
       const entries = fs.readdirSync(directory, { withFileTypes: true });
-      for (const item of entries) if (item.name.endsWith(".sql") && (!item.isFile() || item.isSymbolicLink())) errors.push(`${path.relative(base, path.join(directory, item.name))} must be a regular non-symlink file`);
-      const actual = entries.filter((item) => item.isFile() && !item.isSymbolicLink() && item.name.endsWith(".sql")).map((item) => item.name).sort();
+      for (const item of entries) if (/\.sql$/i.test(item.name) && !/^\d{4}_.+\.sql$/.test(item.name)) errors.push("canonical migration names required");
+      for (const item of entries) if (/\.sql$/i.test(item.name) && (!item.isFile() || item.isSymbolicLink())) errors.push(`${path.relative(base, path.join(directory, item.name))} must be a regular non-symlink file`);
+      const actual = entries.filter((item) => item.isFile() && !item.isSymbolicLink() && /\.sql$/i.test(item.name)).map((item) => item.name).sort();
       const wanted = files.map(({ name }) => name);
       if (!isDeepStrictEqual(actual, wanted)) errors.push(`${path.relative(base, directory)} has missing or unexpected SQL files`);
     }

@@ -3,7 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { CLIENT_CURRENT_SOURCE_MIGRATION_CHAIN, OPERATIONS_CURRENT_SOURCE_MIGRATION_CHAIN } from "./staging-bootstrap.mjs";
+import { CLIENT_CURRENT_SOURCE_MIGRATION_CHAIN, OPERATIONS_LATEST_SOURCE_MIGRATION_CHAIN } from "./staging-bootstrap.mjs";
 
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -43,7 +43,7 @@ export const NATIVE_MIGRATION_PROFILES = Object.freeze({
     baseContentsSha256: "cd35de12e87325fb6de854f4ecba47e5172e115f75830af9f4a908710d10a450",
     remoteBaseline: "0183_project_alpha_binding_standalone_relationship_rows.sql",
     finalMigration: "0199_native_directory_profile_binding_continuations.sql",
-    currentRepositoryChain: OPERATIONS_CURRENT_SOURCE_MIGRATION_CHAIN,
+    currentRepositoryChain: OPERATIONS_LATEST_SOURCE_MIGRATION_CHAIN,
     candidates: Object.freeze({
       "0174_project_alpha_directory_preserved_external_identity.sql": "9e794a73b75e025edc04967888631b9336931eb16113f42d855bea3fcb30a158",
       "0175_operations_directory_acquired_parent_enrollment_identity.sql": "de022736243342f203fcf9a1cb22993e49c50bbb18c7b3b2fc95d8fb3fa48ed0",
@@ -299,11 +299,12 @@ function validateSourceMigrations(base, application, contract) {
   requireRegularDirectory(directory, `${application} migration directory`);
   const entries = fs.readdirSync(directory, { withFileTypes: true });
   for (const entry of entries) {
-    if (entry.name.endsWith(".sql") && (!entry.isFile() || entry.isSymbolicLink())) {
+    if (/\.sql$/i.test(entry.name) && !/^\d{4}_.+\.sql$/.test(entry.name)) throw new Error("canonical migration names required");
+    if (/\.sql$/i.test(entry.name) && (!entry.isFile() || entry.isSymbolicLink())) {
       throw new Error(`${application} migration ${entry.name} must be a regular non-symlink file`);
     }
   }
-  const repositoryNames = entries.filter((entry) => entry.isFile() && !entry.isSymbolicLink() && entry.name.endsWith(".sql"))
+  const repositoryNames = entries.filter((entry) => entry.isFile() && !entry.isSymbolicLink() && /\.sql$/i.test(entry.name))
     .map((entry) => entry.name).sort();
   const currentRepositoryChain = contract.currentRepositoryChain;
   const appendedNames = currentRepositoryChain ? Object.keys(currentRepositoryChain.appendedMigrations) : [];

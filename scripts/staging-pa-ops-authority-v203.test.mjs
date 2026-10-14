@@ -3,16 +3,34 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import crypto from "node:crypto";
 import path from "node:path";
+import os from "node:os";
+import { pathToFileURL } from "node:url";
 import { createRequire } from "node:module";
-import { applyPaOpsAuthority203, compilePaOpsAuthority203, prepareAuthority203, readAuthorityPacket203, run as runAuthority203,
-  runReviewedApply, authorityArtifact203, MAX_AUTHORITY_ARTIFACT_BYTES, STAFF } from "./staging-pa-ops-authority-v203.mjs";
 import { createPrivateEvidenceDirectory } from "./staging-native-authority-packet-rehearsal.mjs";
 import { STAGING_TARGET } from "./staging-directory-authority-v203.mjs";
 import { PINNED_BUSINESS_AREA, PINNED_OPERATOR } from "./staging-project-authority-v203.mjs";
 import { PROFILE, INITIAL_READ_SCOPES, STAGING_ORIGINS } from "./staging-ops-two-source-connection-profile-v1.mjs";
 
-const root = path.resolve(import.meta.dirname, "..");
-const requireOperations = createRequire(path.join(root, "apps/operations/package.json"));
+const repositoryRoot = path.resolve(import.meta.dirname, "..");
+// Historical positive tests use the unchanged compiler against its actual203
+// source inventory. The new204 suite separately proves203 refuses newer source
+// and ledger inventories; adding204 must not silently widen this old tool.
+const root = fs.mkdtempSync(path.join(os.tmpdir(), "pa-authority-frozen203-"));
+fs.cpSync(path.join(repositoryRoot, "scripts"), path.join(root, "scripts"), { recursive: true });
+const historicalMigrations = path.join(root, "apps/operations/migrations");
+fs.mkdirSync(historicalMigrations, { recursive: true });
+for (const name of fs.readdirSync(path.join(repositoryRoot, "apps/operations/migrations"))
+  .filter(name => /^\d{4}_.+\.sql$/.test(name) && name.slice(0, 4) <= "0203"))
+  fs.copyFileSync(path.join(repositoryRoot, "apps/operations/migrations", name), path.join(historicalMigrations, name));
+const { applyPaOpsAuthority203, compilePaOpsAuthority203, prepareAuthority203, readAuthorityPacket203,
+  run: runAuthority203, runReviewedApply, authorityArtifact203, MAX_AUTHORITY_ARTIFACT_BYTES, STAFF } =
+  await import(pathToFileURL(path.join(root, "scripts/staging-pa-ops-authority-v203.mjs")).href);
+test.after(() => {
+  assert.equal(path.dirname(root), path.resolve(os.tmpdir()));
+  assert(path.basename(root).startsWith("pa-authority-frozen203-"));
+  fs.rmSync(root, { recursive: true, force: true });
+});
+const requireOperations = createRequire(path.join(repositoryRoot, "apps/operations/package.json"));
 const { Miniflare } = requireOperations("miniflare");
 const { unstable_splitSqlQuery } = requireOperations("wrangler");
 const id = n => `${String(n).padStart(8, "0")}-0000-4000-8000-000000000000`;

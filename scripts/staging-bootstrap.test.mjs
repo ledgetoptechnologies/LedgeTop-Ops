@@ -11,7 +11,7 @@ const sourceClient = fs.readFileSync(new URL("../apps/client/migrations/0002_see
 const sourceOperations = fs.readFileSync(new URL("../apps/operations/migrations/0002_seed_acl.sql", import.meta.url), "utf8");
 const operationsLocalSuffix = ["0200_native_directory_active_binding_refresh_supersessions.sql",
   "0201_native_directory_lifecycle.sql", "0202_reviewed_import_enrollment.sql",
-  "0203_effective_native_directory_enrollment_consumers.sql"];
+  "0203_effective_native_directory_enrollment_consumers.sql", "0204_native_project_archive_restore.sql"];
 const clientLocalSuffix = ["0231_portal_primary_private_ingress_authority.sql"];
 
 function fixture() {
@@ -139,14 +139,14 @@ test("rejects one-byte drift in each reviewed native project migration", () => {
   }
 });
 
-test("rejects drift in every reviewed local suffix migration and unknown 0204", () => {
+test("rejects drift in every reviewed local suffix migration and unknown 0205", () => {
   for (const name of operationsLocalSuffix) {
     const base = fixture();
     fs.appendFileSync(path.join(base, "apps", "operations", "migrations", name), " ");
     assert.throws(() => buildArtifacts(base, owner), /operations canonical migration contents do not match the reviewed full-chain digest/);
   }
   const unknown = fixture();
-  fs.writeFileSync(path.join(unknown, "apps", "operations", "migrations", "0204_unknown.sql"), "SELECT 1;\n");
+  fs.writeFileSync(path.join(unknown, "apps", "operations", "migrations", "0205_unknown.sql"), "SELECT 1;\n");
   assert.throws(() => buildArtifacts(unknown, owner), /exact complete reviewed chain/);
 });
 
@@ -160,6 +160,14 @@ test("validates Client 150 source while preserving the frozen 149 bootstrap and 
   const unknown = fixture();
   fs.writeFileSync(path.join(unknown, "apps", "client", "migrations", "0232_unknown.sql"), "SELECT 1;\n");
   assert.throws(() => buildArtifacts(unknown, owner), /exact complete reviewed chain/);
+});
+
+test("keeps the reviewed203 source fixture compatible without admitting an unknown successor", () => {
+  const base = fixture();
+  fs.unlinkSync(path.join(base, "apps/operations/migrations/0204_native_project_archive_restore.sql"));
+  assert.equal(buildArtifacts(base, owner).operations.files.length, 199);
+  fs.writeFileSync(path.join(base, "apps/operations/migrations/0204_unknown.sql"), "SELECT 1;\n");
+  assert.throws(() => buildArtifacts(base, owner), /exact complete reviewed chain/);
 });
 
 test("rejects one-byte content drift in either canonical seed before transformation", () => {
@@ -420,4 +428,12 @@ test("disposable target input rejects a symlinked ancestor", (t) => {
   if (!symlinkOrSkip(t, real, link, process.platform === "win32" ? "junction" : "dir")) return;
   assert.throws(() => run(["--check", "--values", "owner.json", "--disposable-targets", "target-input-link/targets.json"], base),
     /ancestor .*regular non-symlink directory/);
+});
+
+test("current bootstrap inventory refuses uppercase and noncanonical SQL files", () => {
+  for (const name of ["unreviewed.SQL", "0205_unreviewed.SQL", "unreviewed.sql"]) {
+    const base = fixture();
+    fs.writeFileSync(path.join(base, "apps/operations/migrations", name), "SELECT 1;");
+    assert.throws(() => buildArtifacts(base, owner), /canonical migration names/);
+  }
 });
