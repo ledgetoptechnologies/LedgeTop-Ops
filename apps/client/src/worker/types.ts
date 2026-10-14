@@ -35,6 +35,8 @@ export interface Env {
   /** Default-off native authority selection; never falls back to PA-backed grants. */
   CLIENT_PORTAL_NATIVE_RECIPIENT_SERVICE_HOME_ENABLED?: string;
   CLIENT_PORTAL_NATIVE_RECIPIENT_ENROLLMENT_ENABLED?: string;
+  /** Native consent portal host; falls back to EXPECTED_HOST for existing single-host deployments. */
+  CLIENT_PORTAL_NATIVE_RECIPIENT_ENROLLMENT_EXPECTED_HOST?: string;
   /** Dedicated native consent CSRF key; never reused for historical enrollment. */
   CLIENT_PORTAL_NATIVE_RECIPIENT_ENROLLMENT_CSRF_SECRET?: string;
   CLIENT_PORTAL_OPERATIONS_NATIVE_AUTHORITY_WRITER_ENABLED?: string;
