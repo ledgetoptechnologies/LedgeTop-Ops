@@ -17,6 +17,7 @@ const reviewedCurrentSuffix = Object.freeze([
   Object.freeze({ name: "0201_native_directory_lifecycle.sql", sha256: "7bdd6d02c5ab97ba705e9a6d32238917ffb9a0757f3aa49d4eb8dcf7795e2878" }),
   Object.freeze({ name: "0202_reviewed_import_enrollment.sql", sha256: "77388f0dfa96e3715ef9754dd2dc92a7b1ec18139be0b8bf4590b79a3a77cedf" }),
   Object.freeze({ name: "0203_effective_native_directory_enrollment_consumers.sql", sha256: "3e331b0de53c0e4ca0b22395b879ef0e799f66872c2f49afd4ef7f7a58be0008" }),
+  Object.freeze({ name: "0204_native_project_archive_restore.sql", sha256: "f74d721311f3c0b978a5ff246a99f8ef179c8b7a3d3c42940393ee9fd44b212b" }),
 ]);
 const owner = Object.freeze({
   staffId: "staff-structural-rehearsal-owner",
@@ -145,12 +146,12 @@ function schema(db) {
     WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name`).all().map(row => ({ ...row }));
 }
 
-test("synthetic pinned-9000 authority survives the captured 0124 boundary through the reviewed 0203 chain", () => {
+test("synthetic pinned-9000 authority survives the captured 0124 boundary through the reviewed 0204 chain", () => {
   const captured = capturedOperationsLedger(), names = sourceMigrations();
   assert.equal(captured.length, capturedBoundary);
   assert.deepEqual(captured.map(row => row.id), Array.from({ length: capturedBoundary }, (_, index) => index + 1));
   assert.deepEqual(names.slice(0, capturedBoundary), captured.map(row => row.name));
-  assert.equal(names.length, 203);
+  assert.equal(names.length, 204);
   assert.match(names[capturedBoundary], /^0125_/);
   assert.match(names[199], /^0200_/);
   assert.deepEqual(names.slice(200), reviewedCurrentSuffix.map(row => row.name));
@@ -177,11 +178,11 @@ test("synthetic pinned-9000 authority survives the captured 0124 boundary throug
   assert.deepEqual(after.value, before.value);
   assert(before.bytes.equals(after.bytes));
   assert.equal(after.sha256, before.sha256);
-  assert.deepEqual(after.value, through0200.value, "0201-0203 must preserve pinned production-authority rows");
+  assert.deepEqual(after.value, through0200.value, "0201-0204 must preserve pinned production-authority rows");
   assert.deepEqual(canonicalRows(db, "native_directory_enrollments"), nativeEnrollmentsThrough0200,
-    "0201-0203 must not rewrite the pre-existing native enrollment authority surface");
+    "0201-0204 must not rewrite the pre-existing native enrollment authority surface");
   assert.deepEqual(canonicalRows(db, "operations_directory_records"), directoryRecordsThrough0200,
-    "0201-0203 must not rewrite pre-existing directory records");
+    "0201-0204 must not rewrite pre-existing directory records");
   assert.equal(db.prepare("SELECT count(*) AS count FROM reviewed_import_enrollment_admissions").get().count, 0);
   assert.equal(db.prepare("SELECT count(*) AS count FROM reviewed_import_enrollment_receipts").get().count, 0);
   assert.equal(db.prepare("SELECT count(*) AS count FROM operations_directory_lifecycle_state").get().count, 0,

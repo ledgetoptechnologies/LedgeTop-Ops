@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import { OPERATIONS_SOURCE_CHAIN_204 } from "./staging-operations-source-v204.mjs";
 import fs from "node:fs";
 import path from "node:path";
 import { isDeepStrictEqual as same } from "node:util";
@@ -86,13 +87,20 @@ const matches = (names, contents, chain) => names.length === chain.count
 
 export function validateAuthorityMigrationChainV185(root, requestedNames, fail) {
   const directory = path.join(root, "apps", "operations", "migrations");
-  const names = fs.readdirSync(directory).filter(name => /^\d{4}_.+\.sql$/.test(name)).sort();
+  const directoryStat = fs.lstatSync(directory);
+  if (!directoryStat.isDirectory() || directoryStat.isSymbolicLink()) fail("regular migration directory required");
+  const names = fs.readdirSync(directory).filter(name => /\.sql$/i.test(name)).sort();
+  if (names.some(name => !/^\d{4}_.+\.sql$/.test(name))) fail("canonical migration names required");
   const contents = names.map(name => {
     const file = path.join(directory, name), stat = fs.lstatSync(file);
     if (!stat.isFile() || stat.isSymbolicLink()) fail("regular migration required");
     return `${name}\0${sha(fs.readFileSync(file))}`;
   });
-  if (!matches(names, contents, CURRENT_AUTHORITY_MIGRATION_CHAIN)) fail("exact reviewed 0203 migration chain required");
+  const reviewed204 = { count: OPERATIONS_SOURCE_CHAIN_204.count, final: OPERATIONS_SOURCE_CHAIN_204.finalMigration,
+    names: OPERATIONS_SOURCE_CHAIN_204.namesSha256, contents: OPERATIONS_SOURCE_CHAIN_204.contentsSha256 };
+  if (!matches(names, contents, CURRENT_AUTHORITY_MIGRATION_CHAIN) && !matches(names, contents, reviewed204)) {
+    fail("exact reviewed 0203 or 0204 migration chain required");
+  }
   const requestedChain = requestedNames?.length === AUTHORITY_MIGRATION_CHAIN_199.count
     ? AUTHORITY_MIGRATION_CHAIN_199
     : requestedNames?.length === AUTHORITY_MIGRATION_CHAIN_198.count

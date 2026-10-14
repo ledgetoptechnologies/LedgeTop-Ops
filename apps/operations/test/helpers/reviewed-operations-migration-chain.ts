@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 
 // Test artifact contracts are JavaScript modules without declarations.
 // @ts-expect-error reviewed test-only JavaScript module
-import { BOOTSTRAP_APPS, CLIENT_CURRENT_SOURCE_MIGRATION_CHAIN, OPERATIONS_CURRENT_SOURCE_MIGRATION_CHAIN } from "../../../../scripts/staging-bootstrap.mjs";
+import { BOOTSTRAP_APPS, CLIENT_CURRENT_SOURCE_MIGRATION_CHAIN, OPERATIONS_LATEST_SOURCE_MIGRATION_CHAIN } from "../../../../scripts/staging-bootstrap.mjs";
 // @ts-expect-error reviewed test-only JavaScript module
 import { REQUIRED_STAGING_MIGRATIONS } from "../../../../scripts/staging-requirements.mjs";
 
@@ -62,18 +62,20 @@ function reviewedMigrationNames(directory: URL, application: "delivery" | "opera
   // Current source suffixes are reviewed independently; they must not become
   // part of the immutable bootstrap/release prefix returned by this helper.
   const currentSource = application === "operations"
-    ? OPERATIONS_CURRENT_SOURCE_MIGRATION_CHAIN : CLIENT_CURRENT_SOURCE_MIGRATION_CHAIN;
+    ? OPERATIONS_LATEST_SOURCE_MIGRATION_CHAIN : CLIENT_CURRENT_SOURCE_MIGRATION_CHAIN;
   const currentNames = [...new Set([...names, ...Object.keys(currentSource.appendedMigrations)])].sort();
   if (names.length !== contract.migrationCount || new Set(names).size !== names.length
     || sha256(names.join("\n")) !== contract.migrationNamesSha256) {
     throw new Error(`reviewed-${application}-migration-name-contract-mismatch`);
   }
   if (rejectExtras) {
+    const directoryStat = lstatSync(fileURLToPath(directory));
+    if (!directoryStat.isDirectory() || directoryStat.isSymbolicLink()) throw new Error(`reviewed-${application}-migration-directory-invalid`);
     const physical = readdirSync(fileURLToPath(directory), { withFileTypes: true })
-      .filter(entry => /^\d{4}_.+\.sql$/.test(entry.name));
+      .filter(entry => /\.sql$/i.test(entry.name));
     const physicalNames = physical.map(entry => entry.name).sort();
     const expectedNames = currentNames;
-    if (physical.some(entry => !entry.isFile() || entry.isSymbolicLink())
+    if (physical.some(entry => !/^\d{4}_.+\.sql$/.test(entry.name) || !entry.isFile() || entry.isSymbolicLink())
       || JSON.stringify(physicalNames) !== JSON.stringify(expectedNames)) {
       throw new Error(`reviewed-${application}-migration-physical-inventory-mismatch`);
     }

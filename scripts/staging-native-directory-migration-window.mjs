@@ -16,7 +16,7 @@ import {
   quoteSqlIdentifier,
   reviewedSchemaDefinitions,
 } from "./staging-native-portal-149-194-migrations.mjs";
-import { OPERATIONS_CURRENT_SOURCE_MIGRATION_CHAIN } from "./staging-bootstrap.mjs";
+import { OPERATIONS_LATEST_SOURCE_MIGRATION_CHAIN } from "./staging-bootstrap.mjs";
 import { collectOrderedReadOnlySnapshot } from "./ordered-read-only-snapshot.mjs";
 import { readCompleteTableSnapshot } from "./read-complete-table-snapshot.mjs";
 
@@ -37,14 +37,14 @@ export const reviewedNativeDirectorySchemaDefinitions = sql => {
   return reviewedSchemaDefinitions(statements.join(";\n"));
 };
 // Shared lifecycle; window wrappers provide immutable reviewed specifications.
-export function createNativeDirectoryMigrationWindow(SPEC, sourceCiGate = null) {
+export function createNativeDirectoryMigrationWindow(SPEC, sourceCiGate = null, reconcile = null) {
   assert(SPEC.application === "operations" && SPEC.preservationPolicy === "strict"
     && SPEC.database === "78b34173-b168-4e3d-9832-bb9d245cc6b8" && SPEC.databaseName === "ltds-ops-staging" && SPEC.binding === "OPS_DB",
     "only the pinned Operations staging boundary is allowed");
   assert(SPEC.from === 196 && SPEC.to === 198 || SPEC.from === 198 && SPEC.to === 199
-    || SPEC.from === 200 && SPEC.to === 203,
+    || SPEC.from === 200 && SPEC.to === 203 || SPEC.from === 203 && SPEC.to === 204,
     "only reviewed native Directory migration windows are allowed");
-  if (SPEC.to === 199 || SPEC.to === 203)
+  if (SPEC.to === 199 || SPEC.to >= 203)
     assert.equal(typeof sourceCiGate, "function", `${String(SPEC.to).padStart(4, "0")} source CI execution gate required`);
   const window = `${SPEC.from}-${SPEC.to}`;
 
@@ -123,11 +123,14 @@ const schemaSql = "SELECT type,name,tbl_name,sql FROM sqlite_master WHERE type I
 function buildNativeDirectoryMigrationWindowPlan(base = root, label) {
   const artifactSet = safeLabel(label);
   const sourceDirectory = path.join(base, "apps/operations/migrations");
-  const entries = fs.readdirSync(sourceDirectory, { withFileTypes: true }).filter(entry => entry.name.endsWith(".sql"));
+  const directoryStat = fs.lstatSync(sourceDirectory);
+  assert(directoryStat.isDirectory() && !directoryStat.isSymbolicLink(), "regular migration directory required");
+  const entries = fs.readdirSync(sourceDirectory, { withFileTypes: true }).filter(entry => /\.sql$/i.test(entry.name));
+  assert(entries.every(entry => /^\d{4}_.+\.sql$/.test(entry.name)), "canonical migration names required");
   assert(entries.every(entry => entry.isFile() && !entry.isSymbolicLink()), "migration chain must contain regular files");
   const sourceNames = entries.map(entry => entry.name).sort();
-  const current = OPERATIONS_CURRENT_SOURCE_MIGRATION_CHAIN;
-  if (SPEC.to === 199 || SPEC.to === 203)
+  const current = OPERATIONS_LATEST_SOURCE_MIGRATION_CHAIN;
+  if (SPEC.to === 199 || SPEC.to >= 203)
     assert(sourceNames.length >= SPEC.to, `reviewed source chain must contain the exact ${String(SPEC.to).padStart(4, "0")} window`);
   assert.equal(sourceNames.length, current.count, "exact current Operations source inventory required");
   assert.equal(sha(sourceNames.join("\n")), current.namesSha256, "current Operations migration names drifted");
@@ -191,7 +194,7 @@ async function nativeDirectoryMigrationWindowReadOnlyQueries(token, spec, querie
   return body.result.map(result => {
     assert(result.success && Array.isArray(result.results), "read-only D1 result failed");
     assert.equal(result.meta.changed_db, false, "read query unexpectedly changed D1");
-    if (SPEC.to === 203) assert.equal(result.meta.served_by_primary, true, "0203 precondition read must be served by D1 primary");
+    if (SPEC.to >= 203) assert.equal(result.meta.served_by_primary, true, "current window precondition read must be served by D1 primary");
     return result.results;
   });
 }
@@ -267,7 +270,7 @@ async function runNativeDirectoryMigrationWindow(argv = process.argv.slice(2), d
     try { (dependencies.wrangler ?? pinnedWrangler)(token, plan, ["export", SPEC.databaseName, "--remote", "--output", plan.backup]); }
     catch (error) { throw Object.assign(Error("provider export outcome unavailable"), { stage: "provider-export", outcomeCode: error?.outcomeCode }); }
     try { restrictPrivate(plan.backup); regular(plan.backup, "backup"); assert(fs.statSync(plan.backup).size > 1000,
-      SPEC.to === 203 ? "nonempty D1 export required; independently verify restorability before apply" : "complete D1 export required"); }
+      SPEC.to >= 203 ? "nonempty D1 export required; independently verify restorability before apply" : "complete D1 export required"); }
     catch (error) { throw Object.assign(error, { stage: "export-verification" }); }
     privateFile(plan.evidence, JSON.stringify({ application: "operations", database: SPEC.database, ...(plan.artifactSet ? { artifactSet: plan.artifactSet } : {}),
       createdAt: new Date().toISOString(), ...(sourceCi ? { sourceCi } : {}), backupSha256: sha(fs.readFileSync(plan.backup)), migrations: plan.migrations, snapshot: current }));
@@ -276,7 +279,7 @@ async function runNativeDirectoryMigrationWindow(argv = process.argv.slice(2), d
 
   for (const file of [plan.config, plan.backup, plan.evidence]) {
     regular(file, "private release artifact");
-    if (SPEC.to === 203) (dependencies.assertPrivate ?? assertPrivate)(file);
+    if (SPEC.to >= 203) (dependencies.assertPrivate ?? assertPrivate)(file);
   }
   const saved = JSON.parse(fs.readFileSync(plan.evidence, "utf8"));
   assert.equal(saved.application, "operations");
@@ -302,7 +305,7 @@ async function runNativeDirectoryMigrationWindow(argv = process.argv.slice(2), d
   }
 
   regular(plan.marker, "apply attempt marker");
-  if (SPEC.to === 203) (dependencies.assertPrivate ?? assertPrivate)(plan.marker);
+  if (SPEC.to >= 203) (dependencies.assertPrivate ?? assertPrivate)(plan.marker);
   const marker = JSON.parse(fs.readFileSync(plan.marker, "utf8"));
   if (sourceCiGate) {
     const { sourceCi: attemptCi, ...identity } = marker;
@@ -313,8 +316,9 @@ async function runNativeDirectoryMigrationWindow(argv = process.argv.slice(2), d
     assert.deepEqual(attemptCi, saved.sourceCi, "attempt source CI must match backup");
   } else assertAttemptMarker(marker, plan);
   const sql = plan.migrations.map(item => fs.readFileSync(path.join(plan.directory, item.name), "utf8")).join("\n");
-  const definitions = SPEC.to === 203 ? reviewedNativeDirectorySchemaDefinitions(sql) : reviewedSchemaDefinitions(sql);
-  assertPreserved(saved.snapshot, current, definitions, "strict");
+  const definitions = SPEC.to >= 203 ? reviewedNativeDirectorySchemaDefinitions(sql) : reviewedSchemaDefinitions(sql);
+  if (reconcile) reconcile(saved.snapshot, current, sql);
+  else assertPreserved(saved.snapshot, current, definitions, "strict");
   return { application: "operations", mode, applied: SPEC.to, mutationsPerformed: false, retryAllowed: false };
 }
 

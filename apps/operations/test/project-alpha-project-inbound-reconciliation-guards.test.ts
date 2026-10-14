@@ -153,6 +153,8 @@ describe("PA-origin mapped project reconciliation guards", () => {
     expect(db.prepare("SELECT name FROM operations_shared_projects WHERE external_project_id=?").get(project)).toEqual({ name: "Ops name" });
   });
 
+  // This matrix builds six independent full-migration SQLite fixtures. Keep its
+  // integration budget separate from the default deadline for a single case.
   it("rejects malformed and duplicate scope structures on proposals and resolutions", () => {
     const invalidScopes = [
       "[{}]",
@@ -186,7 +188,7 @@ describe("PA-origin mapped project reconciliation guards", () => {
     }
     expect(() => resolveAccept(isolatedDb, isolatedProposalId, "30000000-0000-4000-8000-000000000021",
       malformedResolutionScopes)).toThrow(/project inbound scopes are malformed/);
-  });
+  }, 90_000);
 
   it("atomically appends accepted PA history without changing mapping, public-link, or financial rows", () => {
     const db = fixture(), proposalId = "20000000-0000-4000-8000-000000000001", resolutionId = "30000000-0000-4000-8000-000000000001";

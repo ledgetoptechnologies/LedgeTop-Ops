@@ -547,6 +547,7 @@ export const REQUIRED_STAGING_MIGRATION_SHA256 = Object.freeze({
     "0201_native_directory_lifecycle.sql": "7bdd6d02c5ab97ba705e9a6d32238917ffb9a0757f3aa49d4eb8dcf7795e2878",
     "0202_reviewed_import_enrollment.sql": "77388f0dfa96e3715ef9754dd2dc92a7b1ec18139be0b8bf4590b79a3a77cedf",
     "0203_effective_native_directory_enrollment_consumers.sql": "3e331b0de53c0e4ca0b22395b879ef0e799f66872c2f49afd4ef7f7a58be0008",
+    "0204_native_project_archive_restore.sql": "f74d721311f3c0b978a5ff246a99f8ef179c8b7a3d3c42940393ee9fd44b212b",
   }),
 });
 

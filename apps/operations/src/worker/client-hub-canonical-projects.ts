@@ -5,6 +5,7 @@ import { clientHubBusinessProjectOwnership } from "./client-hub-business-project
 import type { ClientHubBusinessProjectPolicy } from "./client-hub-project-policy";
 import { projectAlphaReadVisibleSql } from "./project-alpha-read-visibility";
 import type { Env } from "./types";
+import { nativeProjectLifecycleCanonicalProof } from "./native-project-lifecycle-canonical-proof";
 
 export interface CanonicalBusinessProjectRow extends Record<string, unknown> {
   id: string;
@@ -47,6 +48,8 @@ export async function canonicalBusinessProjectPredicate(env: Env, context: Clien
   const revisionColumns = await env.OPS_DB.prepare("PRAGMA table_info(operations_shared_project_revisions)").all<{ name: string }>();
   const hasInboundResolutionColumn = revisionColumns.results.some(column => column.name === "inbound_resolution_id");
   if (hasInboundResolutionEvidence !== hasInboundResolutionColumn) return null;
+  const lifecycleProof = await nativeProjectLifecycleCanonicalProof(env.OPS_DB, "s");
+  if (lifecycleProof === null) return null;
   const root = context.root;
   if (!root.pa_internal_id || !root.pa_public_id || !root.public_id) return null;
   const activeIdentities = await clientHubActiveDirectoryIdentities(env);
@@ -194,8 +197,8 @@ export async function canonicalBusinessProjectPredicate(env: Env, context: Clien
       AND EXISTS (SELECT 1 FROM operations_shared_project_revisions revision
         WHERE revision.external_project_id=s.external_project_id AND revision.version=s.current_version
           AND revision.pa_revision IS NULL AND revision.refresh_command_id IS NULL AND ${exactRevision}
-          AND ${settledRevisionProof})
-      AND ${activationProof}
+          AND (${settledRevisionProof} OR ${lifecycleProof}))
+      AND (${activationProof} OR ${lifecycleProof})
       AND ${noConflicts} AND ${observations}
       AND ${rootOwner}
       AND ${projectAlphaReadVisibleSql("s.source_id")} AND (${paVisibility})`,

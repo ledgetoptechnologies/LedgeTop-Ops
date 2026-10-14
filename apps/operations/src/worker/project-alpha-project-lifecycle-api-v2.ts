@@ -1,4 +1,4 @@
-import { advances, boundedJson, canonicalConnection, decimal, diagnostic, endpoint, isFailure, post, plain, exact, trusted, uuid, preflightFailure, runPreflight, publicId, type ProjectAlphaProjectFailure } from "./project-alpha-project-transport";
+import { advances, boundedJsonWithBytes, canonicalConnection, decimal, diagnostic, endpoint, isFailure, post, plain, exact, trusted, uuid, preflightFailure, runPreflight, publicId, type ProjectAlphaProjectFailure } from "./project-alpha-project-transport";
 import { withEnabledConfiguredProjectAlphaApiV2Connection, type ProjectAlphaApiV2ConnectionEnvironment } from "./project-alpha-api-v2-connections";
 import type { ProjectAlphaApiV2Connection } from "./project-alpha-api-v2";
 
@@ -6,11 +6,28 @@ export type ProjectAlphaProjectLifecycleAction = "complete" | "cancel" | "archiv
 export type ProjectAlphaProjectLifecycleCommand = Readonly<{ commandId: string; expectedRevision: string }>;
 export type ProjectAlphaProjectLifecycleSuccess = Readonly<{ apiVersion: "2"; sourceInstanceId: string; applicationId: string; historyEpoch: string; requestId: string; replayed: boolean; accepted: boolean; resource: Readonly<{ type: "project"; id: string; revision: string }>; result: Readonly<{ status: "not_started" | "active" | "completed" | "cancelled"; completedAt: string | null; archived: boolean; archivedAt: string | null; presentation: Readonly<{ portalPublished: boolean; publicLinkEnabled: boolean }> }> }>;
 export type ProjectAlphaProjectLifecycleOutcome = Readonly<{ status: "acknowledged"; httpStatus: 200; response: ProjectAlphaProjectLifecycleSuccess }> | ProjectAlphaProjectFailure;
+export type ValidatedProjectLifecycleReceipt = Readonly<{ action: ProjectAlphaProjectLifecycleAction; publicId: string; body: string; destinationOrigin: string; response: ProjectAlphaProjectLifecycleSuccess; responseSha256: string }>;
+const lifecycleReceipts = new WeakMap<object, ValidatedProjectLifecycleReceipt>();
+/** Transport-minted immutable evidence; structural clones are not receipts. */
+export function validatedProjectLifecycleReceipt(outcome: ProjectAlphaProjectLifecycleOutcome): ValidatedProjectLifecycleReceipt | null {
+  return lifecycleReceipts.get(outcome) ?? null;
+}
+function freezeReceipt<T>(value: T): T {
+  if (value && typeof value === "object") { for (const item of Object.values(value)) freezeReceipt(item); Object.freeze(value); }
+  return value;
+}
+async function bytesHash(bytes: Uint8Array): Promise<string> {
+  return Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", bytes.slice().buffer as ArrayBuffer)), x => x.toString(16).padStart(2, "0")).join("");
+}
 function command(value: unknown): value is ProjectAlphaProjectLifecycleCommand { return plain(value) && exact(value, ["commandId", "expectedRevision"]) && uuid(value.commandId) && decimal(value.expectedRevision, true); }
 function timestamp(value: unknown): value is string | null { if (value === null || typeof value !== "string" || !/^(?:\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z|\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.\d{6})?)$/.test(value)) return value === null; const normalized = value.includes(" ") ? `${value.replace(" ", "T").replace(/\.(\d{3})\d{3}$/, ".$1")}Z` : value; return Number.isFinite(new Date(normalized).valueOf()); }
 function valid(value: unknown, action: ProjectAlphaProjectLifecycleAction, id: string, input: ProjectAlphaProjectLifecycleCommand, connection: ProjectAlphaApiV2Connection, requestId: string | null): value is ProjectAlphaProjectLifecycleSuccess {
-  if (!plain(value) || !exact(value, ["apiVersion", "sourceInstanceId", "applicationId", "historyEpoch", "requestId", "replayed", "accepted", "resource", "result"]) || value.apiVersion !== "2" || value.sourceInstanceId !== connection.expectedSourceInstanceId || value.applicationId !== connection.expectedApplicationId || value.historyEpoch !== connection.expectedHistoryEpoch || !uuid(value.requestId) || value.requestId !== requestId || typeof value.replayed !== "boolean" || typeof value.accepted !== "boolean" || !plain(value.resource) || !exact(value.resource, ["type", "id", "revision"]) || value.resource.type !== "project" || value.resource.id !== id || !decimal(value.resource.revision, true) || !plain(value.result) || !exact(value.result, ["status", "completedAt", "archived", "archivedAt", "presentation"]) || !timestamp(value.result.completedAt) || typeof value.result.archived !== "boolean" || !timestamp(value.result.archivedAt) || !plain(value.result.presentation) || !exact(value.result.presentation, ["portalPublished", "publicLinkEnabled"]) || typeof value.result.presentation.portalPublished !== "boolean" || typeof value.result.presentation.publicLinkEnabled !== "boolean") return false;
-  if (action === "archive" && (!value.result.archived || value.result.archivedAt === null)) return false;
+  if (!plain(value) || !exact(value, ["apiVersion", "sourceInstanceId", "applicationId", "historyEpoch", "requestId", "replayed", "accepted", "resource", "result"]) || value.apiVersion !== "2" || value.sourceInstanceId !== connection.expectedSourceInstanceId || value.applicationId !== connection.expectedApplicationId || value.historyEpoch !== connection.expectedHistoryEpoch || !uuid(value.requestId) || value.requestId !== requestId || typeof value.replayed !== "boolean" || value.accepted !== true || !plain(value.resource) || !exact(value.resource, ["type", "id", "revision"]) || value.resource.type !== "project" || value.resource.id !== id || !decimal(value.resource.revision, true) || !plain(value.result) || !exact(value.result, ["status", "completedAt", "archived", "archivedAt", "presentation"]) || !timestamp(value.result.completedAt) || typeof value.result.archived !== "boolean" || !timestamp(value.result.archivedAt) || !plain(value.result.presentation) || !exact(value.result.presentation, ["portalPublished", "publicLinkEnabled"]) || typeof value.result.presentation.portalPublished !== "boolean" || typeof value.result.presentation.publicLinkEnabled !== "boolean") return false;
+  if (!["not_started", "active", "completed", "cancelled"].includes(value.result.status as string)
+    || (value.result.status === "completed") !== (value.result.completedAt !== null)
+    || value.result.archived !== (value.result.archivedAt !== null)) return false;
+  if (action === "archive" && (!value.result.archived || value.result.archivedAt === null
+    || value.result.presentation.portalPublished || value.result.presentation.publicLinkEnabled)) return false;
   if (action === "restore" && (value.result.archived || value.result.archivedAt !== null)) return false;
   if (action === "complete" && value.result.status !== "completed") return false;
   if (action === "cancel" && value.result.status !== "cancelled") return false;
@@ -22,9 +39,17 @@ export function sendProjectAlphaProjectLifecycleCommand(connectionInput: Project
 async function sendLifecycle(inputConnection: ProjectAlphaApiV2Connection, requestedPublicId: string, action: ProjectAlphaProjectLifecycleAction, inputCommand: ProjectAlphaProjectLifecycleCommand, fetcher: typeof fetch): Promise<ProjectAlphaProjectLifecycleOutcome> {
   const connection = canonicalConnection(inputConnection); if (!connection || !publicId(requestedPublicId) || !["complete", "cancel", "archive", "restore"].includes(action) || !command(inputCommand)) return { status: "rejected", reason: "invalid_command" };
   let body: string; try { const command = { commandId: inputCommand.commandId, expectedRevision: inputCommand.expectedRevision }; body = JSON.stringify(command); if (new TextEncoder().encode(body).byteLength > 8192) return { status: "rejected", reason: "request_limit" }; } catch { return { status: "rejected", reason: "invalid_command" }; }
-  const route = endpoint("POST", `/api/v2/projects/${requestedPublicId}/${action}/commands`, `projects.lifecycle.${action}`); const preflight = await runPreflight(connection, route, fetcher); if (preflight) return preflight;
+  const route = endpoint("POST", `/api/v2/projects/${requestedPublicId}/${action}/commands`, `projects.lifecycle.${action}`); const preflight = await runPreflight(connection, endpoint("POST", `/api/v2/projects/{publicId}/${action}/commands`, `projects.lifecycle.${action}`), fetcher); if (preflight) return preflight;
   const response = await post(connection, route, body, fetcher); if (isFailure(response)) return response; const info = diagnostic(response);
-  try { const parsed = await boundedJson(response); return valid(parsed, action, requestedPublicId, inputCommand, connection, response.headers.get("X-Request-ID")) ? { status: "acknowledged", httpStatus: 200, response: parsed } : { status: "uncertain", reason: "invalid_contract", ...info }; }
+  try {
+    const parsed = await boundedJsonWithBytes(response);
+    if (!valid(parsed.value, action, requestedPublicId, inputCommand, connection, response.headers.get("X-Request-ID")))
+      return { status: "uncertain", reason: "invalid_contract", ...info };
+    const outcome = { status: "acknowledged" as const, httpStatus: 200 as const, response: parsed.value };
+    lifecycleReceipts.set(outcome, freezeReceipt({ action, publicId: requestedPublicId, body, destinationOrigin: new URL(connection.baseUrl).origin,
+      response: JSON.parse(JSON.stringify(parsed.value)) as ProjectAlphaProjectLifecycleSuccess, responseSha256: await bytesHash(parsed.bytes) }));
+    return outcome;
+  }
   catch (error) { return { status: "uncertain", reason: error instanceof Error && error.message === "response_limit" ? "response_limit" : error instanceof Error && error.message === "transport" ? "transport" : "invalid_contract", ...info }; }
 }
 export async function sendConfiguredProjectAlphaProjectLifecycleCommand(env: ProjectAlphaApiV2ConnectionEnvironment, sourceId: string, requestedPublicId: string, action: ProjectAlphaProjectLifecycleAction, command: ProjectAlphaProjectLifecycleCommand, fetcher: typeof fetch = fetch): Promise<ProjectAlphaProjectLifecycleOutcome | Readonly<{ status: "disabled"; sourceId: string }>> {

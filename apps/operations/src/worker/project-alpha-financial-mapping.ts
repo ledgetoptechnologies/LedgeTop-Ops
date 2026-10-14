@@ -2,6 +2,7 @@ import type { Env } from "./types";
 import { resolveProjectAlphaApiV2Connection } from "./project-alpha-api-v2-connections";
 import { selectorFromTrustedFinancialMapping, type TrustedFinancialMapping } from "./project-alpha-financial-transport";
 import { externalId as validProjectExternalId } from "./project-alpha-project-transport";
+import { nativeProjectLifecycleCanonicalProof } from "./native-project-lifecycle-canonical-proof";
 
 export type NativeFinancialTarget =
   | Readonly<{ kind: "organization" | "client"; recordId: string; sourceId?: string }>
@@ -131,6 +132,8 @@ export async function resolveTrustedNativeFinancialMapping(
                 OR candidate.external_id=mapping.external_id OR candidate.project_alpha_public_id=mapping.project_alpha_public_id))=1
         ORDER BY mapping.source_id LIMIT 3`).bind(...values, target.kind).all<MappingRow>()).results;
     } else {
+      const lifecycleProof = await nativeProjectLifecycleCanonicalProof(env.OPS_DB, "project");
+      if (lifecycleProof === null) return null;
       rows = (await env.OPS_DB.withSession("first-primary").prepare(`SELECT mapping.source_id,mapping.source_instance_id,
         mapping.application_id,mapping.history_epoch_id,mapping.external_project_id external_id,
         mapping.project_alpha_public_id,project.pa_revision resource_revision,
@@ -172,7 +175,8 @@ export async function resolveTrustedNativeFinancialMapping(
                 AND inbound.resulting_local_version=project.current_version
                 AND EXISTS (SELECT 1 FROM project_alpha_project_v2_canonical_activation_receipts prior_activation
                   WHERE prior_activation.external_project_id=project.external_project_id
-                    AND prior_activation.resulting_local_version<=inbound.prior_local_version)))
+                    AND prior_activation.resulting_local_version<=inbound.prior_local_version))
+            OR ${lifecycleProof})
           AND NOT EXISTS (SELECT 1 FROM project_alpha_api_v2_inventory_conflicts conflict
             WHERE conflict.source_id=mapping.source_id AND conflict.source_instance_id=mapping.source_instance_id
               AND conflict.application_id=mapping.application_id AND conflict.history_epoch_id=mapping.history_epoch_id

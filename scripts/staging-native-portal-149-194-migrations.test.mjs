@@ -255,3 +255,42 @@ test("Wrangler command dependency must exactly match the selected application lo
   const mismatch=Error("private dependency details");mismatch.stage="provider-export";mismatch.outcomeCode="dependency-mismatch";
   assert.deepEqual(JSON.parse(safeFailure(mismatch)),{error:"staging migration boundary rejected; inspect private local evidence",stage:"provider-export",outcomeCode:"dependency-mismatch",retryAllowed:false});
 });
+
+
+test("paired current source inventory rejects uppercase, noncanonical and nonregular SQL",()=>{
+  for(const application of ["client","operations"]){
+    const temporary=fs.mkdtempSync(path.join(os.tmpdir(),"paired-inventory-"));
+    try{
+      const destination=path.join(temporary,`apps/${application}/migrations`);
+      fs.cpSync(path.join(root,`apps/${application}/migrations`),destination,{recursive:true});
+      for(const name of ["unreviewed.SQL","9999_unreviewed.SQL","unreviewed.sql"]){
+        const file=path.join(destination,name);
+        fs.writeFileSync(file,"SELECT 1;\n",{flag:"wx"});
+        assert.throws(()=>buildPairedMigrationPlan(application,temporary),/canonical migration names/);
+        fs.unlinkSync(file);
+      }
+      const directory=path.join(destination,"9999_directory.sql");
+      fs.mkdirSync(directory);
+      assert.throws(()=>buildPairedMigrationPlan(application,temporary),/migration chain must contain regular files/);
+      fs.rmdirSync(directory);
+      assert.doesNotThrow(()=>buildPairedMigrationPlan(application,temporary));
+    }finally{
+      assert(path.dirname(temporary)===path.resolve(os.tmpdir())&&path.basename(temporary).startsWith("paired-inventory-"));
+      fs.rmSync(temporary,{recursive:true,force:true});
+    }
+  }
+});
+
+test("paired current source inventory rejects a migration directory junction",()=>{
+  const temporary=fs.mkdtempSync(path.join(os.tmpdir(),"paired-directory-"));
+  try{
+    const parent=path.join(temporary,"apps/operations"), actual=path.join(temporary,"actual-migrations");
+    fs.mkdirSync(parent,{recursive:true});
+    fs.cpSync(path.join(root,"apps/operations/migrations"),actual,{recursive:true});
+    fs.symlinkSync(actual,path.join(parent,"migrations"),process.platform==="win32"?"junction":"dir");
+    assert.throws(()=>buildPairedMigrationPlan("operations",temporary),/regular migration directory/);
+  }finally{
+    assert(path.dirname(temporary)===path.resolve(os.tmpdir())&&path.basename(temporary).startsWith("paired-directory-"));
+    fs.rmSync(temporary,{recursive:true,force:true});
+  }
+});

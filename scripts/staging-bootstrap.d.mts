@@ -12,6 +12,8 @@ export const CLIENT_CURRENT_SOURCE_MIGRATION_CHAIN: Readonly<{
   contentsSha256: string;
   appendedMigrations: Readonly<Record<string, string>>;
 }>;
+export const OPERATIONS_CURRENT_SOURCE_MIGRATION_CHAIN: typeof CLIENT_CURRENT_SOURCE_MIGRATION_CHAIN;
+export const OPERATIONS_LATEST_SOURCE_MIGRATION_CHAIN: typeof CLIENT_CURRENT_SOURCE_MIGRATION_CHAIN;
 
 export type BootstrapMigration = Readonly<{
   name: string;

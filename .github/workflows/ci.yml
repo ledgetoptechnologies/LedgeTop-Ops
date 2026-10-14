@@ -37,8 +37,11 @@ jobs:
       - name: Verify credential-safe two-source staging connection profile
         run: node --test scripts/staging-ops-two-source-connection-profile-v1.test.mjs
 
-      - name: Verify current-schema paired staging authority and cleanup
+      - name: Verify frozen203 paired staging authority and cleanup
         run: node --test scripts/staging-pa-ops-authority-v203.test.mjs
+
+      - name: Verify exact204 project staging authority and migration preparation
+        run: node --test scripts/staging-project-authority-v204.test.mjs scripts/staging-native-project-203-204-migrations.test.mjs
 
       - name: Verify isolated staging receiver and connector profiles
         run: node --test scripts/staging-ops-sync-v203.test.mjs scripts/staging-pa-ops-connectors-v203.test.mjs

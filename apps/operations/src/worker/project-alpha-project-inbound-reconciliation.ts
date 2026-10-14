@@ -586,8 +586,14 @@ export async function resolveProjectAlphaInboundProjectEdit(env: InboundProjectE
       || currentActor.generation !== proposal.project_grant_generation || actor.staffId !== proposal.reviewer_staff_id
       || actor.accessSubject !== proposal.reviewer_access_subject || exactMapping !== 1) return { status: "blocked", reason: "authority" };
     const finalRemote = await remote(env, local, fetcher); if (!finalRemote) return { status: "blocked", reason: "remote" };
-    if (finalRemote.evidence.responseJson !== proposal.remote_snapshot_json
-      || finalRemote.evidence.responseSha256 !== proposal.remote_snapshot_sha256
+    // Each authenticated GET has its own requestId. Retain both exact raw
+    // envelopes and hashes, but require every semantic field to remain equal.
+    const proposedRemote = parseJson(proposal.remote_snapshot_json);
+    const proposedScopes = parseScopes(parseJson(proposal.normalized_scopes_json));
+    if (!proposedScopes || !parsedRemoteSnapshot(proposedRemote, proposal, proposedScopes)
+      || await sha256(proposal.remote_snapshot_json) !== proposal.remote_snapshot_sha256
+      || canonical({ ...proposedRemote as Record<string, unknown>, requestId: null })
+        !== canonical({ ...finalRemote.evidence.response, requestId: null })
       || finalRemote.evidence.response.resource.revision !== proposal.observed_remote_revision
       || finalRemote.evidence.response.resource.projectionSha256 !== proposal.observed_remote_projection_sha256
       || finalRemote.authorizationGeneration !== proposal.observed_authorization_generation)
