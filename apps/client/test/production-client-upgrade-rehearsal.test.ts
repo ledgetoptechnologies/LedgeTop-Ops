@@ -146,7 +146,7 @@ describe("local-only production Client migration upgrade rehearsal", () => {
 
   afterAll(async () => runtime?.dispose());
 
-  it("replays the exact 134-entry captured ledger then preserves synthetic state across 17 pending migrations", async () => {
+  it("replays the exact 134-entry captured ledger then preserves synthetic state across 18 pending candidate migrations", async () => {
     const baseline = capturedClientLedger();
     expect(baseline.slice(29, 34)).toEqual([
       "0111_thumbnail_render_provenance.sql",
@@ -182,10 +182,10 @@ describe("local-only production Client migration upgrade rehearsal", () => {
     expect((beforeUpgrade.backfills![0] as { rate_limit_per_minute: number }).rate_limit_per_minute).toBe(10);
 
     const pending = fs.readdirSync(migrationsDirectory)
-      .filter(name => /^(021[4-9]|022\d|0230)_.*\.sql$/.test(name)).sort();
-    expect(pending).toHaveLength(17);
+      .filter(name => /^(021[4-9]|022\d|023[01])_.*\.sql$/.test(name)).sort();
+    expect(pending).toHaveLength(18);
     expect(pending[0]).toBe("0214_ops_inventory_catalog_staging.sql");
-    expect(pending.at(-1)).toBe("0230_operations_portal_native_delivery_terminal_cancellations.sql");
+    expect(pending.at(-1)).toBe("0231_portal_primary_private_ingress_authority.sql");
     for (const name of pending) await applyMigration(database, name);
 
     const finalLedger = await rows<{ id: number; name: string }>(database,
@@ -196,6 +196,7 @@ describe("local-only production Client migration upgrade rehearsal", () => {
       { id: 32, name: "0113_thumbnail_backfill_controls.sql" },
     ]);
     expect(await syntheticState(database)).toEqual(beforeUpgrade);
+    expect(await rows(database, "SELECT * FROM pa_portal_primary_private_authority")).toEqual([]);
     expect(await rows(database, "PRAGMA foreign_key_check")).toEqual([]);
     await assertCapturedSchema(database);
   }, 300_000);

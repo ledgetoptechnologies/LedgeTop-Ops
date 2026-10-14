@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url";
 import { validateEvidence as validateEvidenceContract } from "./staging-evidence.mjs";
 import { validateFiles as validateStagingFiles } from "./staging-preflight.mjs";
 import { renderConfigs, writeRenderedConfigs } from "./staging-config-scaffold.mjs";
-import { BOOTSTRAP_APPS } from "./staging-bootstrap.mjs";
+import { BOOTSTRAP_APPS, CLIENT_CURRENT_SOURCE_MIGRATION_CHAIN, OPERATIONS_CURRENT_SOURCE_MIGRATION_CHAIN } from "./staging-bootstrap.mjs";
 import { FEATURE_FLAG_ACTIVATION_POLICIES, FEATURE_FLAG_DEPENDENCY_WINDOWS, PROJECT_ALPHA_STAGING, RELEASE_CANDIDATES, RELEASE_CONTRACT_FINALIZED, REQUIRED_DISABLED_FEATURE_FLAGS, REQUIRED_EXTERNAL_GATES, REQUIRED_EXTERNAL_GATE_PROOFS, REQUIRED_STAGING_MIGRATIONS, REQUIRED_STAGING_SECRETS, STAGING_ACCOUNT_ID, STAGING_CLIENT_PORTAL, STAGING_HOSTS, STAGING_INVENTORY, STAGING_STATIC_VARS, STAGING_VIEWER } from "./staging-requirements.mjs";
 
 const now = Date.parse("2026-07-30T12:30:00Z");
@@ -697,7 +697,7 @@ test("prior 140/151 schema-version-2 bootstrap evidence remains historical and c
   assert.equal(errors.filter(error => error.includes("ledger count and final migration")).length, 2, errors.join(" | "));
 });
 
-test("current bootstrap evidence contract matches the complete canonical generator and migration tails", () => {
+test("bootstrap evidence remains pinned to its authorized chains while current source candidates stay separate", () => {
   const repository = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
   for (const [app, source, finalMigration] of [
     ["delivery", "client", "0230_operations_portal_native_delivery_terminal_cancellations.sql"],
@@ -705,7 +705,10 @@ test("current bootstrap evidence contract matches the complete canonical generat
   ]) {
     let names = fs.readdirSync(path.join(repository, "apps", source, "migrations"))
       .filter(name => name.endsWith(".sql")).sort();
-    if (app === "operations") names = names.filter(name => !/^020[0-3]_/.test(name));
+    const candidate = app === "operations" ? OPERATIONS_CURRENT_SOURCE_MIGRATION_CHAIN : CLIENT_CURRENT_SOURCE_MIGRATION_CHAIN;
+    assert.equal(names.length, candidate.count, `${app} current candidate count`);
+    assert.equal(names.at(-1), candidate.finalMigration, `${app} current candidate tail`);
+    names = names.filter(name => !Object.hasOwn(candidate.appendedMigrations, name));
     assert.equal(names.length, BOOTSTRAP_APPS[app].migrationCount, `${app} canonical count`);
     assert.equal(names.at(-1), finalMigration, `${app} canonical final migration`);
   }

@@ -260,19 +260,27 @@ describe("Operations service home against explicit permission ledger", () => {
   });
 
   it("drops a result when the exact grant is revoked during the RPC", async () => {
-    const binding = realEnv(async () => {
-      await writeClientPortalAuthorityV2(writerEnv(), grant("revoke-two", "revoked", 1));
-      return response({ grantRevision: 1 });
-    });
-    await expect(readOperationsServiceHome(binding, principal, authorityId)).resolves.toEqual({ ok: false, code: "denied" });
-  });
+    // Exercise the real authority race independently of the RPC deadline.
+    // The separate hung-transport test advances and verifies that deadline.
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const binding = realEnv(async () => {
+        await writeClientPortalAuthorityV2(writerEnv(), grant("revoke-two", "revoked", 1));
+        return response({ grantRevision: 1 });
+      });
+      await expect(readOperationsServiceHome(binding, principal, authorityId)).resolves.toEqual({ ok: false, code: "denied" });
+    } finally { vi.useRealTimers(); }
+  }, 30_000);
 
   it("drops an old response when the grant is revoked and regranted during the RPC", async () => {
-    const binding = realEnv(async () => {
-      await writeClientPortalAuthorityV2(writerEnv(), grant("revoke-two", "revoked", 1));
-      await writeClientPortalAuthorityV3(writerEnv(), homeGrant("regrant-three", 2));
-      return response({ grantRevision: 1 });
-    });
-    await expect(readOperationsServiceHome(binding, principal, authorityId)).resolves.toEqual({ ok: false, code: "denied" });
-  });
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const binding = realEnv(async () => {
+        await writeClientPortalAuthorityV2(writerEnv(), grant("revoke-two", "revoked", 1));
+        await writeClientPortalAuthorityV3(writerEnv(), homeGrant("regrant-three", 2));
+        return response({ grantRevision: 1 });
+      });
+      await expect(readOperationsServiceHome(binding, principal, authorityId)).resolves.toEqual({ ok: false, code: "denied" });
+    } finally { vi.useRealTimers(); }
+  }, 30_000);
 });

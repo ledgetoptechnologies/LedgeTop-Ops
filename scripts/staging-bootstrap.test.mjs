@@ -12,6 +12,7 @@ const sourceOperations = fs.readFileSync(new URL("../apps/operations/migrations/
 const operationsLocalSuffix = ["0200_native_directory_active_binding_refresh_supersessions.sql",
   "0201_native_directory_lifecycle.sql", "0202_reviewed_import_enrollment.sql",
   "0203_effective_native_directory_enrollment_consumers.sql"];
+const clientLocalSuffix = ["0231_portal_primary_private_ingress_authority.sql"];
 
 function fixture() {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), "ltds-staging-bootstrap-"));
@@ -149,6 +150,18 @@ test("rejects drift in every reviewed local suffix migration and unknown 0204", 
   assert.throws(() => buildArtifacts(unknown, owner), /exact complete reviewed chain/);
 });
 
+test("validates Client 150 source while preserving the frozen 149 bootstrap and rejects append drift", () => {
+  const base = fixture();
+  const artifact = buildArtifacts(base, owner).delivery;
+  assert.equal(artifact.files.length, 149);
+  assert.equal(artifact.files.some(({ name }) => clientLocalSuffix.includes(name)), false);
+  fs.appendFileSync(path.join(base, "apps", "client", "migrations", clientLocalSuffix[0]), " ");
+  assert.throws(() => buildArtifacts(base, owner), /delivery canonical migration contents do not match the reviewed full-chain digest/);
+  const unknown = fixture();
+  fs.writeFileSync(path.join(unknown, "apps", "client", "migrations", "0232_unknown.sql"), "SELECT 1;\n");
+  assert.throws(() => buildArtifacts(unknown, owner), /exact complete reviewed chain/);
+});
+
 test("rejects one-byte content drift in either canonical seed before transformation", () => {
   for (const [source, seed, app] of [
     ["client", "0002_seed_initial_staff.sql", "delivery"],
@@ -250,7 +263,7 @@ test("preserves exact historical 0199 and 0196 chains and rejects an incomplete 
 test("preserves the exact previously reviewed 147/192 bootstrap chains", () => {
   const base = fixture();
   for (const name of ["0229_operations_portal_native_delivery_regrant.sql",
-    "0230_operations_portal_native_delivery_terminal_cancellations.sql"])
+    "0230_operations_portal_native_delivery_terminal_cancellations.sql", ...clientLocalSuffix])
     fs.rmSync(path.join(base, "apps", "client", "migrations", name));
   for (const name of ["0193_operations_portal_native_delivery_dead_conflict_recovery.sql",
     "0194_operations_portal_native_delivery_terminal_cancellations.sql",

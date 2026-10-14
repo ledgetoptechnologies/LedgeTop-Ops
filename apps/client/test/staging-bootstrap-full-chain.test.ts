@@ -1,10 +1,11 @@
 import { Miniflare } from "miniflare";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { buildArtifacts } from "../../../scripts/staging-bootstrap.mjs";
+import { buildArtifacts, CLIENT_CURRENT_SOURCE_MIGRATION_CHAIN } from "../../../scripts/staging-bootstrap.mjs";
 import { splitD1MigrationStatements } from "./helpers/d1-migrations";
 
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
@@ -239,5 +240,39 @@ describe("local-only complete staging bootstrap migration rehearsal", () => {
     expect([await count(delivery, "sqlite_schema"), await count(operations, "sqlite_schema")]).toEqual(before);
     expect(await rows(delivery, "PRAGMA foreign_key_check")).toEqual([]);
     expect(await rows(operations, "PRAGMA foreign_key_check")).toEqual([]);
+  }, 120_000);
+
+  it("applies the complete 150-entry Client source candidate to fresh local D1 without enrolling primary authority", async () => {
+    const candidateRuntime = new Miniflare({
+      compatibilityDate: "2026-08-06", modules: true,
+      script: "export default {fetch(){return new Response('local-client-source-candidate')}}",
+      d1Databases: ["CANDIDATE_DB"],
+    });
+    try {
+      const candidateDb = await candidateRuntime.getD1Database("CANDIDATE_DB") as unknown as D1Database;
+      const sourceDirectory = path.join(fixtureRoot, "apps/client/migrations");
+      const generated = new Map(artifacts.delivery.files.map(file => [file.name, file]));
+      const sourceNames = fs.readdirSync(sourceDirectory).filter(name => name.endsWith(".sql")).sort();
+      expect(sourceNames).toHaveLength(CLIENT_CURRENT_SOURCE_MIGRATION_CHAIN.count);
+      expect(sourceNames.at(-1)).toBe(CLIENT_CURRENT_SOURCE_MIGRATION_CHAIN.finalMigration);
+      // Existing transformed seed remains synthetic; every current source file,
+      // including the separately pinned append, participates in this fixture.
+      const candidate = { ...artifacts.delivery, files: sourceNames.map(name => {
+        const existing = generated.get(name);
+        if (existing) return existing;
+        const source = fs.readFileSync(path.join(sourceDirectory, name), "utf8");
+        const sourceSha256 = createHash("sha256").update(source).digest("hex");
+        expect(sourceSha256).toBe(CLIENT_CURRENT_SOURCE_MIGRATION_CHAIN.appendedMigrations[name]);
+        return { name, source, generated: source, sourceSha256, generatedSha256: sourceSha256, transformed: false };
+      }) };
+      expect(await applyPending(candidateDb, candidate)).toEqual(sourceNames);
+      expect((await rows<{ name: string }>(candidateDb, "SELECT name FROM d1_migrations ORDER BY id"))
+        .map(row => row.name)).toEqual(sourceNames);
+      expect(await count(candidateDb, "pa_portal_primary_private_authority")).toBe(0);
+      expect(await rows(candidateDb, "SELECT id,email FROM staff_users ORDER BY id"))
+        .toEqual([{ id: owner.clientStaffId, email: owner.email }]);
+      expect(await rows(candidateDb, "PRAGMA foreign_key_check")).toEqual([]);
+      expect(await applyPending(candidateDb, candidate)).toEqual([]);
+    } finally { await candidateRuntime.dispose(); }
   }, 120_000);
 });

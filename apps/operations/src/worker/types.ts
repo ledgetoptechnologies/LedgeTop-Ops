@@ -207,6 +207,8 @@ export type Env = Omit<
   /** HMAC secret for timestamped, replay-protected PA draft commands. */
   PROJECT_ALPHA_DRAFT_QUOTE_HMAC_SECRET?: string;
   PROJECT_ALPHA_PORTAL_APPLICATION_KEY?: string;
+  /** Match Client's private-ingress proof mode and application pin for portal consumers. */
+  PROJECT_ALPHA_PORTAL_DIRECT_HTTP_ENABLED?: string;
   PROJECT_ALPHA_PORTAL_HMAC_KEY_ID?: string;
   PROJECT_ALPHA_PORTAL_HMAC_SECRET?: string;
   PROJECT_ALPHA_PORTAL_PREVIOUS_HMAC_KEY_ID?: string;

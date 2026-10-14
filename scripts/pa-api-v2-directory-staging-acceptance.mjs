@@ -494,6 +494,11 @@ export async function runDirectoryAcceptance(config, { fetcher = fetch, uuid = r
   };
   await relationship("assign", organization, null, "clientOrganizationAssign"); await relationship("move", moveOrganization, organization.publicId, "clientOrganizationMove"); await relationship("remove", null, moveOrganization.publicId, "clientOrganizationRemove");
   outcome = await replay(fetcher, config, `/api/v2/directory/clients/${client.publicId}/archive/commands`, "client", "lifecycle", { commandId: commandId(), expectedRevision: client.revision, expectedAuthorizationGeneration: generation }, report, { publicId: client.publicId, action: "archive", stage: "clientArchive", priorRevision: client.revision, priorGeneration: generation }); client.revision = outcome.revision; generation = outcome.generation;
+  // PA retains the archived source row but marks its revision absent. The
+  // directory detail route reports that reconciliation boundary as 409.
+  const archivedRead = await api(fetcher, config, `/api/v2/directory/clients/${client.publicId}`, { identity: true });
+  if (archivedRead.status !== 409) fail("archived_directory_read_unexpected_status");
+  report.stages.clientArchivedRead = summary(archivedRead);
   const tombstone = await status(fetcher, config, "client", client, 410);
   outcome = await replay(fetcher, config, `/api/v2/directory/clients/${client.publicId}/restore/commands`, "client", "lifecycle", { commandId: commandId(), expectedRevision: client.revision, expectedAuthorizationGeneration: generation }, report, { publicId: client.publicId, action: "restore", stage: "clientRestore", priorRevision: client.revision, priorGeneration: generation }); client.revision = outcome.revision; generation = outcome.generation;
   const noAutoRebind = await status(fetcher, config, "client", client, 410); report.stages.lifecycleBinding = { tombstone, noAutoRebind };

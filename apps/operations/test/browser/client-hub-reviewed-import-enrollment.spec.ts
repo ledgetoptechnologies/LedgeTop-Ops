@@ -35,6 +35,23 @@ test("parent review uses the canonical local organization ID and never the Proje
   expect((await calls(page)).filter(call => call.method === "POST")).toEqual([]);
 });
 
+test("one reviewed imported customer can explicitly enroll both acquired PA sources", async ({ page }) => {
+  await render(page);
+  await page.getByRole("button", { name: "Review sync enrollment" }).click();
+  const review = page.getByRole("region", { name: "Reviewed import enrollment sources" });
+  await expect(review.getByRole("checkbox", { name: "project-alpha:primary" })).not.toBeChecked();
+  await expect(review.getByRole("checkbox", { name: "project-alpha:secondary" })).not.toBeChecked();
+  await review.getByRole("checkbox", { name: "project-alpha:primary" }).check();
+  await review.getByRole("checkbox", { name: "project-alpha:secondary" }).check();
+  await page.getByRole("button", { name: "Confirm reviewed enrollment" }).click();
+  await page.getByRole("dialog", { name: "Confirm action" }).getByRole("button", { name: "Confirm", exact: true }).click();
+  await expect(review).toHaveCount(0);
+  const post = (await calls(page)).find(call => call.method === "POST");
+  expect(post?.path).toBe("/api/native-directory/reviewed-import-enrollment/organizations/local-parent");
+  expect(post?.body.sourceIds).toEqual(["project-alpha:primary", "project-alpha:secondary"]);
+  expect(JSON.stringify(post?.body)).not.toMatch(/externalCanonicalId|sourceInstanceUUID|historyEpoch|origin/);
+});
+
 test("validated linked-child selection reviews the child's canonical local ID", async ({ page }) => {
   await render(page); await reviewChild(page);
   expect(await calls(page)).toEqual([{ path: "/api/native-directory/reviewed-import-enrollment/clients/local-child-one/review", method: "GET" }]);

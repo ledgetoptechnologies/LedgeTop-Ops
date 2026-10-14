@@ -111,6 +111,31 @@ describe("reviewed import enrollment HTTP adapter", () => {
       } });
   });
 
+  it("passes an explicitly reviewed two-source import through the HTTP writer boundary", async () => {
+    const secondary = { ...destination, sourceId: "project-alpha:secondary",
+      sourceInstanceUUID: "55555555-5555-4555-8555-555555555555",
+      applicationUUID: "66666666-6666-4666-8666-666666666666",
+      historyEpoch: "77777777-7777-4777-8777-777777777777",
+      origin: "https://pa-secondary.example.test", externalCanonicalId: "secondary-client" };
+    const selected = ["project-alpha:primary", "project-alpha:secondary"];
+    const destinations = [destination, secondary];
+    resolveDestinations.mockResolvedValueOnce({ status: "resolved", destinations });
+    write.mockResolvedValueOnce({ status: "written", replayed: false, recordId: "client-one",
+      enrollmentVersion: 1, destinations });
+    const csrf = await token(), result = await handleReviewedImportEnrollmentHttp(
+      request("clients/client-one", { ...input, sourceIds: selected }, { "X-CSRF-Token": csrf }), deps());
+    expect(result.status).toBe(201);
+    const responseBody = await result.json();
+    expect(responseBody).toEqual({ outcome: { status: "written", replayed: false,
+      recordId: "client-one", enrollmentVersion: 1, sourceIds: selected } });
+    expect(resolveDestinations).toHaveBeenCalledWith(expect.anything(), actor, {
+      recordId: "client-one", kind: "client", expectedRecordVersion: 4, expectedEnrollmentVersion: 0,
+      sourceIds: selected,
+    });
+    expect(write.mock.calls[0]?.[1]).toMatchObject({ recordId: "client-one", destinations });
+    expect(JSON.stringify(responseBody)).not.toMatch(/secondary-client|pa-secondary|sourceInstanceUUID|historyEpoch/);
+  });
+
   it("rejects provenance, grant, actor, owner, and destination injection before resolution", async () => {
     const csrf = await token();
     for (const extra of [{ destinations: [destination] }, { externalCanonicalId: "attacker" },

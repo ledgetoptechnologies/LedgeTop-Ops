@@ -168,12 +168,13 @@ describe("primary signed-native first-login eligibility", () => {
     await assertNoLegacyOrMail();
   }, 60_000);
 
+  // Includes a signed snapshot projection before checking the disabled gate.
   it.each(flags)("does not bind while %s is disabled", async flag => {
     const { actor, workspaceId } = await project(`gate-${flags.indexOf(flag)}`);
     const response = await request(actor, "/v2/workspaces", { ...env, [flag]: "false" });
     expect([403, 404]).toContain(response.status);
     await assertNoBinding(workspaceId);
-  });
+  }, 30_000);
 
   it("leaves an actively Client-authority-claimed workspace outside automatic PA enrollment", async () => {
     const { actor, workspaceId, principalId } = await project("client-authority-claimed");

@@ -9,6 +9,8 @@ import { resolveTrustedNativeFinancialMapping } from "../src/worker/project-alph
 import { persistProjectAlphaProjectInventoryPage } from "../src/worker/project-alpha-v2-sync";
 import { readClientPortalNativeFinancialCollections } from
   "../src/worker/client-portal-native-financial-entrypoint";
+import { createOperationsHomeRouter } from "../../client/src/worker/client-portal/operations-home-routes";
+import type { Env as ClientEnv } from "../../client/src/worker/types";
 
 type Row = Record<string, string | number | null>;
 const required = async (db: D1Database, sql: string, ...values: unknown[]) => {
@@ -29,7 +31,7 @@ const integer = (row: Row, key: string) => {
 const sha256 = async (value: string) => Array.from(new Uint8Array(await crypto.subtle.digest(
   "SHA-256", new TextEncoder().encode(value)))).map(byte => byte.toString(16).padStart(2, "0")).join("");
 
-async function proveProjectBillingLifecycle(context: CanonicalPortalAcceptanceContext) {
+async function proveProjectBillingLifecycle(context: CanonicalPortalAcceptanceContext, changeBinding = true) {
   const { operations: db, workspace, recipient, externalProject, id, owner } = context;
   if (!recipient.recipientBindingId) throw new Error("canonical recipient binding missing");
   const bindingId = recipient.recipientBindingId;
@@ -192,12 +194,47 @@ async function proveProjectBillingLifecycle(context: CanonicalPortalAcceptanceCo
   expect(collection).toMatchObject({ok:true,authorityId:workspace.clientAuthorityId,
     collections:[{status:"ok",grantId,revision:1,value:{documents:[{kind:"contract",status:"pending"}]}}]});
   expect(financialCalls).toBe(2);
-  await context.advanceProject();
-  await expect(readClientPortalNativeFinancialCollections(financialEnv,financialRequest,financialRemote as typeof fetch))
-    .resolves.toEqual({ok:false,protocolVersion:1,code:"denied"});
-  expect(financialCalls).toBe(2);
-  expect(await db.prepare(`SELECT native_entity_id FROM operations_portal_native_billing_live_authority
-    WHERE grant_id=?`).bind(grantId).first("native_entity_id")).toBeNull();
+  // Join the real Client D1 recipient reader, private Ops reader and PA transport.
+  // Only authentication and the remote PA HTTP boundary are adapted by this fixture.
+  const clientRouter = createOperationsHomeRouter({ resolvePrincipal: async () => ({
+    issuer: context.issuer, subject: context.subject, email: "recipient@example.test" }) });
+  const clientEnvironment = { DELIVERY_DB: context.client, CLIENT_PORTAL_ENABLED: "true",
+    CLIENT_PORTAL_ORIGIN: "https://client.example.test", CLIENT_PORTAL_OPERATIONS_SERVICE_HOME_ENABLED: "true",
+    CLIENT_PORTAL_NATIVE_RECIPIENT_SERVICE_HOME_ENABLED: "true", CLIENT_PORTAL_NATIVE_FINANCIAL_ENABLED: "true",
+    CLIENT_PORTAL_NATIVE_FINANCIAL_READER: { readFinancialDocuments: async (request: typeof financialRequest) =>
+      JSON.stringify(await readClientPortalNativeFinancialCollections(financialEnv, request, financialRemote as typeof fetch)) },
+  } as unknown as ClientEnv;
+  const routeRead = () => clientRouter.fetch(new Request(
+    `https://client.example.test/home/${workspace.clientAuthorityId}/financial`), clientEnvironment);
+  const firstRouteRead = await routeRead();
+  expect(firstRouteRead.status).toBe(200);
+  expect(firstRouteRead.headers.get("Cache-Control")).toBe("no-store");
+  expect(firstRouteRead.headers.get("Cloudflare-CDN-Cache-Control")).toBe("no-store");
+  expect(await firstRouteRead.json()).toMatchObject({ resourceMode: "operations_financial",
+    collections: [{ grantId, documents: [{ publicId: "80000000000000000000000000000001",
+      documentUrl: "https://pa.example.test/?page=public-doc&token=abcdefghijklmnop" }] }] });
+  expect(financialCalls).toBe(3);
+  if (changeBinding) {
+    await context.advanceProject();
+    await expect(readClientPortalNativeFinancialCollections(financialEnv,financialRequest,financialRemote as typeof fetch))
+      .resolves.toEqual({ok:false,protocolVersion:1,code:"denied"});
+    expect(financialCalls).toBe(3);
+    const afterBindingChange = await routeRead();
+    expect(afterBindingChange.status).toBe(403);
+    expect(await afterBindingChange.json()).toEqual({ error: "Client access is not provisioned" });
+    expect(afterBindingChange.headers.get("Cache-Control")).toBe("no-store");
+    expect(financialCalls).toBe(3);
+    expect(await db.prepare(`SELECT native_entity_id FROM operations_portal_native_billing_live_authority
+      WHERE grant_id=?`).bind(grantId).first("native_entity_id")).toBeNull();
+  } else {
+    // Keep the mapping current so the revoke assertion cannot pass because of
+    // an earlier binding change or an already-invalid billing grant.
+    expect(await db.prepare(`SELECT native_entity_id FROM operations_portal_native_billing_live_authority
+      WHERE grant_id=?`).bind(grantId).first("native_entity_id")).toBe(externalProject);
+    const beforeGrantRevoke = await routeRead();
+    expect(beforeGrantRevoke.status).toBe(200);
+    expect(financialCalls).toBe(4);
+  }
 
   const insertRevoke=async(nativeEntityId:string,actualOperationId=id())=>{
     const revokeCommand={...command,action:"billing.revoke",operationId:actualOperationId,
@@ -238,6 +275,10 @@ async function proveProjectBillingLifecycle(context: CanonicalPortalAcceptanceCo
     .bind(revoked.operationId,grantId).run();
   expect(await db.prepare("SELECT state FROM operations_portal_native_billing_authority_heads WHERE grant_id=?")
     .bind(grantId).first("state")).toBe("revoked");
+  const afterGrantRevoke = await routeRead();
+  expect(afterGrantRevoke.status).toBe(403);
+  expect(await afterGrantRevoke.json()).toEqual({ error: "Client access is not provisioned" });
+  expect(financialCalls).toBe(changeBinding ? 3 : 4);
   const secondOwnerId="billing-second-owner",secondOwnerSubject="access|billing-second-owner";
   await db.batch([
     db.prepare(`INSERT INTO staff_users(id,email,display_name,access_subject,status)
@@ -268,5 +309,9 @@ async function proveProjectBillingLifecycle(context: CanonicalPortalAcceptanceCo
 describe("native billing authority on the canonical 0001-0203 portal lifecycle", { timeout: 300_000 }, () => {
   it("grants an exact published project, denies it after canonical drift, and permits only frozen-lineage cleanup", async () => {
     await runCanonicalPortalResourceAcceptance(proveProjectBillingLifecycle,{stopAfterReady:true,operationsThroughMigration:"0203_effective_native_directory_enrollment_consumers.sql"});
+  });
+  it("immediately denies the Client route after a real billing revoke while its PA mapping remains current", async () => {
+    await runCanonicalPortalResourceAcceptance(context => proveProjectBillingLifecycle(context, false),
+      {stopAfterReady:true,operationsThroughMigration:"0203_effective_native_directory_enrollment_consumers.sql"});
   });
 });

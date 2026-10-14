@@ -150,7 +150,8 @@ function happyFetcher(options = {}) {
     if (init.method === "GET") {
       const match = parsed.pathname.match(/^\/api\/v2\/directory\/(clients|organizations)\/([0-9a-f]{32})$/);
       assert(match); const type = match[1] === "clients" ? "client" : "organization"; const item = resources.get(match[2]);
-      assert(item); assert.equal(item.type, type); assert.equal(item.present, true);
+      assert(item); assert.equal(item.type, type);
+      if (!item.present) return error(options.archivedReadStatus ?? 409);
       const readNullable = (value) => value === "" ? null : value;
       const data = { publicId: item.publicId, name: item.profile.name, email: readNullable(type === "client" ? item.profile.email : item.profile.generalEmail), phone: readNullable(type === "client" ? item.profile.phone : item.profile.generalPhone), address: { line1: item.profile.addressLine1, line2: readNullable(item.profile.addressLine2), city: item.profile.city, state: item.profile.state, postalCode: item.profile.postalCode, country: item.profile.country } };
       if (type === "client") { data.clientType = item.profile.clientType; data.organizationPublicId = item.organizationPublicId; }
@@ -222,6 +223,26 @@ test("runs the complete dynamic directory sequence with canonical request bodies
   assert.equal(report.stages.inventory.pages, 2);
   assert.deepEqual(report.stages.inventory.targetProjectionSha256, ["a".repeat(64), "a".repeat(64), "a".repeat(64)]);
   const evidence = JSON.stringify(report); assert.equal(evidence.includes("directory-test-secret"), false); assert.equal(evidence.includes(prefix), false); assert.equal(evidence.includes("Acceptance Client"), false);
+});
+
+test("requires archived directory detail 409 and fails closed for an invented 404 contract", async () => {
+  const accepted = await runDirectoryAcceptance(parseDirectoryAcceptanceConfig(environment()), {
+    fetcher: happyFetcher({ archivedReadStatus: 409 }), uuid: predictableUuid(),
+  });
+  assert.equal(accepted.stages.clientArchivedRead.status, 409);
+  assert.equal(accepted.stages.lifecycleBinding.tombstone.status, 410);
+  assert.equal(accepted.stages.clientReadAfterRestore.status, 200);
+
+  const source = happyFetcher({ archivedReadStatus: 404 });
+  let restorePosts = 0;
+  await assert.rejects(runDirectoryAcceptance(parseDirectoryAcceptanceConfig(environment()), {
+    fetcher: async (url, init) => {
+      if (init.method === "POST" && new URL(url).pathname.includes("/restore/commands")) restorePosts += 1;
+      return source(url, init);
+    },
+    uuid: predictableUuid(),
+  }), { code: "archived_directory_read_unexpected_status" });
+  assert.equal(restorePosts, 0);
 });
 
 test("accepts well-formed additive non-directory capabilities while pinning every Directory tuple", async () => {
