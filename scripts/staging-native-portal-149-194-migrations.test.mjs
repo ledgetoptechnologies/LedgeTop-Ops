@@ -41,6 +41,24 @@ test("frozen 194 plan validates the entire reviewed source and excludes later SQ
     fs.rmSync(temporary,{recursive:true,force:true});
   }
 });
+test("frozen Client149 window verifies Client150 source without applying primary private ingress candidate",()=>{
+  const plan=buildPairedMigrationPlan("client",root);
+  const candidate="0231_portal_primary_private_ingress_authority.sql";
+  assert(fs.existsSync(path.join(plan.sourceDirectory,candidate)));
+  assert.equal(plan.finalNames.length,149);
+  assert(!plan.finalNames.includes(candidate));
+  assert(!plan.migrations.some(item=>item.name===candidate));
+  const temporary=fs.mkdtempSync(path.join(os.tmpdir(),"paired-client-candidate-"));
+  try{
+    const destination=path.join(temporary,"apps/client/migrations");
+    fs.cpSync(plan.sourceDirectory,destination,{recursive:true});
+    fs.appendFileSync(path.join(destination,candidate),"\n-- unreviewed candidate drift\n");
+    assert.throws(()=>buildPairedMigrationPlan("client",temporary));
+  }finally{
+    assert(path.dirname(temporary)===path.resolve(os.tmpdir())&&path.basename(temporary).startsWith("paired-client-candidate-"));
+    fs.rmSync(temporary,{recursive:true,force:true});
+  }
+});
 test("exact ledgers and Client-first dependency fail closed",()=>{
   const client=buildPairedMigrationPlan("client",root);assert.doesNotThrow(()=>assertExactLedger(client.finalNames.map(name=>({name})),client.finalNames,"Client"));
   assert.throws(()=>assertExactLedger(client.finalNames.slice(0,-1).map(name=>({name})),client.finalNames,"Client"));

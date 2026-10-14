@@ -8,6 +8,17 @@ import { STAGING_ACCOUNT_ID, STAGING_INVENTORY } from "./staging-requirements.mj
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 export const BOOTSTRAP_SCHEMA_VERSION = 1;
 export const DISPOSABLE_REHEARSAL_SCHEMA_VERSION = 1;
+// Current source acceptance is separate from the frozen 149-entry bootstrap
+// and live evidence contract. An appended candidate does not prove deployment.
+export const CLIENT_CURRENT_SOURCE_MIGRATION_CHAIN = Object.freeze({
+  count: 150,
+  finalMigration: "0231_portal_primary_private_ingress_authority.sql",
+  namesSha256: "907beea8e42b719e769df0cf3a2d6484f880c886b92af452dbccd01f254b79f2",
+  contentsSha256: "181e831ee4a23ef8e5c9b756ebd664dbe8f578a162b44769f82c19647d3d27ca",
+  appendedMigrations: Object.freeze({
+    "0231_portal_primary_private_ingress_authority.sql": "b5582f703cf2e00567f49998922e9d1aaee86455c43c1fdc7a1326cd436e3353",
+  }),
+});
 export const OPERATIONS_CURRENT_SOURCE_MIGRATION_CHAIN = Object.freeze({
   count: 203,
   finalMigration: "0203_effective_native_directory_enrollment_consumers.sql",
@@ -252,7 +263,7 @@ export function buildArtifacts(base, owner, options = {}) {
       if (item.name.endsWith(".sql") && (!item.isFile() || item.isSymbolicLink())) throw new Error(`${app} canonical migration ${item.name} must be a regular non-symlink file`);
     }
     const repositoryNames = entries.filter((item) => item.isFile() && !item.isSymbolicLink() && item.name.endsWith(".sql")).map((item) => item.name).sort();
-    const currentSource = app === "operations" ? OPERATIONS_CURRENT_SOURCE_MIGRATION_CHAIN : null;
+    const currentSource = app === "operations" ? OPERATIONS_CURRENT_SOURCE_MIGRATION_CHAIN : CLIENT_CURRENT_SOURCE_MIGRATION_CHAIN;
     const appendedNames = currentSource ? Object.keys(currentSource.appendedMigrations) : [];
     const hasCurrentAppend = currentSource && appendedNames.every((name) => repositoryNames.includes(name));
     if (currentSource && repositoryNames.some((name) => appendedNames.includes(name)) && !hasCurrentAppend) {

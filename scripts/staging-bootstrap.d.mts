@@ -5,6 +5,14 @@ export type BootstrapOwner = Readonly<{
   operationsStaffId: string;
 }>;
 
+export const CLIENT_CURRENT_SOURCE_MIGRATION_CHAIN: Readonly<{
+  count: number;
+  finalMigration: string;
+  namesSha256: string;
+  contentsSha256: string;
+  appendedMigrations: Readonly<Record<string, string>>;
+}>;
+
 export type BootstrapMigration = Readonly<{
   name: string;
   source: string;

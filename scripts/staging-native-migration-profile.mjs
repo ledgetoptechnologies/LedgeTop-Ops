@@ -3,7 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { OPERATIONS_CURRENT_SOURCE_MIGRATION_CHAIN } from "./staging-bootstrap.mjs";
+import { CLIENT_CURRENT_SOURCE_MIGRATION_CHAIN, OPERATIONS_CURRENT_SOURCE_MIGRATION_CHAIN } from "./staging-bootstrap.mjs";
 
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -12,6 +12,7 @@ export const PROFILE_SCHEMA_VERSION = 1;
 
 export const NATIVE_MIGRATION_PROFILES = Object.freeze({
   client: Object.freeze({
+    currentRepositoryChain: CLIENT_CURRENT_SOURCE_MIGRATION_CHAIN,
     binding: "DELIVERY_DB",
     databaseName: "client-data-staging",
     databaseId: "b6f653ab-9acd-4421-9ad0-207754b59aeb",

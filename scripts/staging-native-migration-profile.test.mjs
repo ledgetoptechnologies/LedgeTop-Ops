@@ -110,7 +110,7 @@ test("rejects a wrong staging database name or ID", () => {
 test("rejects an extra SQL file and a changed native migration", () => {
   const extra = fixture();
   fs.writeFileSync(path.join(extra, "apps", "client", "migrations", "0229_unreviewed.sql"), "-- no\n");
-  assert.throws(() => buildProfiles(extra), /pinned base migration inventory changed/);
+  assert.throws(() => buildProfiles(extra), /current repository migration inventory changed/);
 
   const changed = fixture(199);
   fs.appendFileSync(path.join(changed, "apps", "operations", "migrations",
@@ -127,6 +127,7 @@ test("rejects an extra SQL file and a changed native migration", () => {
   }
   for (const [application, name] of [["client", "0229_operations_portal_native_delivery_regrant.sql"],
     ["client", "0230_operations_portal_native_delivery_terminal_cancellations.sql"],
+    ["client", "0231_portal_primary_private_ingress_authority.sql"],
     ["operations", "0193_operations_portal_native_delivery_dead_conflict_recovery.sql"],
     ["operations", "0194_operations_portal_native_delivery_terminal_cancellations.sql"],
     ["operations", "0195_client_hub_native_project_current_owner_observation.sql"],
@@ -136,7 +137,8 @@ test("rejects an extra SQL file and a changed native migration", () => {
     ["operations", "0199_native_directory_profile_binding_continuations.sql"]]) {
     const stableChanged = fixture(application === "operations" ? 199 : 200);
     fs.appendFileSync(path.join(stableChanged, "apps", application, "migrations", name), " ");
-    assert.throws(() => buildProfiles(stableChanged), new RegExp(`native candidate changed: ${name.slice(0, 4)}_`));
+    assert.throws(() => buildProfiles(stableChanged), application === "client"
+      ? /current repository migration inventory changed/ : new RegExp(`native candidate changed: ${name.slice(0, 4)}_`));
   }
   for (const name of ["0200_native_directory_active_binding_refresh_supersessions.sql", "0201_native_directory_lifecycle.sql",
     "0202_reviewed_import_enrollment.sql", "0203_effective_native_directory_enrollment_consumers.sql"]) {
@@ -241,7 +243,7 @@ test("accepts exact historical 0187, 0190, 0192, 0194, 0195, and 0196 chains but
 test("accepts the exact historical Client 147 chain", () => {
   const historical = fixture();
   for (const name of ["0229_operations_portal_native_delivery_regrant.sql",
-    "0230_operations_portal_native_delivery_terminal_cancellations.sql"])
+    "0230_operations_portal_native_delivery_terminal_cancellations.sql", "0231_portal_primary_private_ingress_authority.sql"])
     fs.rmSync(path.join(historical, "apps", "client", "migrations", name));
 
   const profile = buildProfiles(historical).client;
@@ -258,7 +260,7 @@ test("rejects a missing or changed pinned base migration", () => {
 
   const changed = fixture();
   fs.appendFileSync(path.join(changed, "apps", "client", "migrations", "0001_initial.sql"), " ");
-  assert.throws(() => buildProfiles(changed), /pinned base migration contents changed/);
+  assert.throws(() => buildProfiles(changed), /current repository migration inventory changed/);
 });
 
 test("writes deterministic ignored outputs and detects stale or extra output", () => {
