@@ -756,6 +756,71 @@ describe("native Directory profile routes", () => {
     }
   });
 
+  it("updates an organization across both enrolled sources and fails closed on source-tuple drift", async () => {
+    const secondaryInstance = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const secondaryApplication = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    const secondaryEpoch = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+    const sources = [sourceId, secondarySourceId];
+    const destination = (id: string) => id === sourceId
+      ? { sourceId, enabled: true, connection: { baseUrl: origin, expectedSourceInstanceId: ids.instance,
+        expectedApplicationId: ids.application, expectedHistoryEpoch: ids.epoch } }
+      : { sourceId: secondarySourceId, enabled: true, connection: { baseUrl: secondaryOrigin,
+        expectedSourceInstanceId: secondaryInstance, expectedApplicationId: secondaryApplication,
+        expectedHistoryEpoch: secondaryEpoch } };
+    const enrollment = [
+      { sourceId, sourceInstanceUUID: ids.instance, applicationUUID: ids.application, historyEpoch: ids.epoch,
+        origin, externalCanonicalId: ids.client },
+      { sourceId: secondarySourceId, sourceInstanceUUID: secondaryInstance, applicationUUID: secondaryApplication,
+        historyEpoch: secondaryEpoch, origin: secondaryOrigin, externalCanonicalId: ids.client },
+    ];
+    mocks.sourceIds.mockReturnValue(sources);
+    mocks.connection.mockImplementation((_env: unknown, id: string) => destination(id));
+    mocks.inventory.mockImplementation(async (_env: unknown, id: string) => {
+      const configured = destination(id);
+      return { status: "observed", inventory: { authoritative: false, sourceId: id,
+        sourceInstanceId: configured.connection.expectedSourceInstanceId,
+        applicationId: configured.connection.expectedApplicationId, historyEpoch: configured.connection.expectedHistoryEpoch,
+        requestId: "dddddddd-dddd-4ddd-8ddd-dddddddddddd", authorizationGeneration: "7", resources: [], nextCursor: null } };
+    });
+    mocks.remoteHead.mockImplementation(async (_db: unknown, _kind: unknown, _record: unknown, _version: unknown,
+      enrolled: { externalCanonicalId: string }) => ({ projectAlphaPublicId: "a".repeat(32),
+      externalCanonicalId: enrolled.externalCanonicalId, revision: "4" }));
+    mocks.bindingStatus.mockImplementation(async (_env: unknown, id: string, kind: string, externalId: string,
+      publicId: string) => {
+      const configured = destination(id);
+      return { status: "observed", observation: { authoritative: false, sourceId: id,
+        sourceInstanceId: configured.connection.expectedSourceInstanceId,
+        applicationId: configured.connection.expectedApplicationId, historyEpoch: configured.connection.expectedHistoryEpoch,
+        requestId: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee", authorizationGeneration: "7",
+        binding: { type: kind, externalId, publicId, createdAt: "2026-10-06T00:00:00.000Z" },
+        resource: { revision: "4", present: true } } };
+    });
+
+    const body = { mutationId: ids.mutation, expectedLocalVersion: 1, profile: organization };
+    const route = `${NATIVE_DIRECTORY_PROFILE_ROUTE}/organizations/${ids.client}`;
+    mocks.writer.mockResolvedValueOnce({ status: "written", replayed: false, mutationId: ids.mutation,
+      recordId: ids.client, kind: "organization", version: 2,
+      commandIds: [ids.command, "77777777-7777-4777-8777-777777777777"] });
+    const accepted = await fixture({ db: database({ enrollment, outboxState: "acknowledged" }) }).send(route, body, "PATCH");
+    expect(accepted.status).toBe(200);
+    await expect(accepted.json()).resolves.toMatchObject({ destinations: [
+      { sourceId, state: "acknowledged" }, { sourceId: secondarySourceId, state: "acknowledged" },
+    ] });
+    expect(mocks.writer).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ operation: "update",
+      recordId: ids.client, expectedLocalVersion: 1,
+      destinations: expect.arrayContaining([
+        expect.objectContaining({ ...enrollment[0], expectedAuthorizationGeneration: "7" }),
+        expect.objectContaining({ ...enrollment[1], expectedAuthorizationGeneration: "7" }),
+      ]) }));
+
+    mocks.writer.mockClear();
+    const driftedEnrollment = [enrollment[0], { ...enrollment[1], origin: "https://unexpected-pa.example.test" }];
+    const rejected = await fixture({ db: database({ enrollment: driftedEnrollment }) }).send(route, body, "PATCH");
+    expect(rejected.status).toBe(409);
+    await expect(rejected.json()).resolves.toEqual({ status: "conflict", reason: "source_authority_unavailable" });
+    expect(mocks.writer).not.toHaveBeenCalled();
+  });
+
   it("requires a live binding at the persisted generation and exact durable revision before update", async () => {
     const enrollment = [{ sourceId, sourceInstanceUUID: ids.instance, applicationUUID: ids.application,
       historyEpoch: ids.epoch, origin, externalCanonicalId: ids.client }];
