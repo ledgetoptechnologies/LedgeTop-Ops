@@ -21,6 +21,50 @@ function response(requestId: string, documents: unknown[], count: number, cursor
 }
 
 describe("bounded PA financial transport", () => {
+  it("keeps colliding public IDs source-local and never reuses links after a source is disabled", async () => {
+    const primary = JSON.parse(env.PROJECT_ALPHA_API_V2_CONNECTIONS).instances[mapping.sourceId];
+    const secondary = { ...primary, sourceId: "project-alpha:secondary", baseUrl: "https://pa-two.example.test",
+      apiKey: "second-private-key", sourceInstanceId: "750cb108-af37-4973-ab6e-f6d991a6e8c8" };
+    // Independent installations may share application/history IDs and PA-local resource IDs.
+    const instances = { [primary.sourceId]: primary, [secondary.sourceId]: secondary };
+    const configured = () => ({ PROJECT_ALPHA_API_V2_CONNECTIONS: JSON.stringify({ version: 1, instances }) });
+    const secondaryMapping = { ...mapping, sourceId: secondary.sourceId };
+    const send = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const connection = new URL(String(input)).origin === secondary.baseUrl ? secondary : primary;
+      const headers = new Headers(init?.headers);
+      expect(headers.get("Authorization")).toBe(`Bearer ${connection.apiKey}`);
+      expect(headers.get("X-PA-Source-Instance-ID")).toBe(connection.sourceInstanceId);
+      const original = response("450cb108-af37-4973-ab6e-f6d991a6e8c8", [document("d".repeat(32))], 1, null);
+      const body = await original.json() as Record<string, unknown>;
+      body.sourceInstanceId = connection.sourceInstanceId;
+      body.documents = [{ ...document("d".repeat(32)),
+        documentUrl: `${connection.baseUrl}/?page=public-doc&token=abcdefghijklmnop`,
+        actionUrl: `${connection.baseUrl}/?page=stripe-checkout&token=abcdefghijklmnop` }];
+      return new Response(JSON.stringify(body), { headers: original.headers });
+    });
+    const [one, two] = await Promise.all([
+      readConfiguredProjectAlphaFinancialDocuments(configured(), mapping, selector, send as typeof fetch),
+      readConfiguredProjectAlphaFinancialDocuments(configured(), secondaryMapping, selector, send as typeof fetch),
+    ]);
+    expect(one.status).toBe("ok"); expect(two.status).toBe("ok");
+    if (one.status !== "ok" || two.status !== "ok") throw new Error("source-local collections missing");
+    expect(one.value.documents[0]!.publicId).toBe(two.value.documents[0]!.publicId);
+    expect(new URL(one.value.documents[0]!.documentUrl!).origin).toBe(primary.baseUrl);
+    expect(new URL(two.value.documents[0]!.documentUrl!).origin).toBe(secondary.baseUrl);
+    const replayedPrimary = vi.fn(async () => response("450cb108-af37-4973-ab6e-f6d991a6e8c8",
+      [document("d".repeat(32))], 1, null));
+    expect(await readConfiguredProjectAlphaFinancialDocuments(configured(), secondaryMapping, selector,
+      replayedPrimary as typeof fetch)).toEqual({ status: "incompatible" });
+    expect(replayedPrimary).toHaveBeenCalledTimes(1);
+    secondary.enabled = false;
+    expect(await readConfiguredProjectAlphaFinancialDocuments(configured(), secondaryMapping, selector, send as typeof fetch))
+      .toEqual({ status: "disabled" });
+    expect(send).toHaveBeenCalledTimes(2);
+    expect((await readConfiguredProjectAlphaFinancialDocuments(configured(), mapping, selector, send as typeof fetch)).status)
+      .toBe("ok");
+    expect(send).toHaveBeenCalledTimes(3);
+  });
+
   it.each(["organization", "client", "project"] as const)("retains the complete trusted %s selector", async kind => {
     const selectedMapping = { ...mapping, kind };
     const selected = selectorFromTrustedFinancialMapping(selectedMapping)!;

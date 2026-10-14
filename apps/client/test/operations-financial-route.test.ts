@@ -31,6 +31,32 @@ describe("authenticated native financial route",()=>{
     mocks.homes.mockResolvedValue([]);
     expect((await router.fetch(new Request(`https://client.example.test/home/${authorityId}/financial`),env)).status).toBe(403);
   });
+  it("retains overlapping document IDs under separate grants in one home and drops removed-grant links on the next read",async()=>{
+    const secondGrant="30000000-0000-4000-8000-000000000003";
+    const first={status:"ok",grantId:"20000000-0000-4000-8000-000000000002",revision:1,
+      value:{selector:{},snapshotSha256:"a".repeat(64),documents:[document]}};
+    const secondDocument={...document,documentUrl:"https://pa-two.example.test/?page=public-doc&token=abcdefghijklmnop",
+      actionUrl:"https://pa-two.example.test/?page=public-doc&token=abcdefghijklmnop"};
+    const second={...first,grantId:secondGrant,value:{...first.value,documents:[secondDocument]}};
+    const envelope=(collections:unknown[])=>JSON.stringify({ok:true,protocolVersion:1,...home,collections});
+    rpc.mockResolvedValueOnce(envelope([first,second])).mockResolvedValueOnce(envelope([first]));
+    const router=createOperationsHomeRouter({resolvePrincipal:async()=>principal});
+    const read=()=>router.fetch(new Request(`https://client.example.test/home/${authorityId}/financial`),env);
+    const response=await read();
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({resourceMode:"operations_financial",collections:[
+      {grantId:first.grantId,revision:1,documents:[document]},
+      {grantId:secondGrant,revision:1,documents:[secondDocument]},
+    ]});
+    const after=await read();
+    expect(after.status).toBe(200);
+    expect(await after.json()).toEqual({resourceMode:"operations_financial",collections:[
+      {grantId:first.grantId,revision:1,documents:[document]},
+    ]});
+    expect(response.headers.get("Cache-Control")).toBe("no-store");
+    expect(after.headers.get("Cloudflare-CDN-Cache-Control")).toBe("no-store");
+    expect(rpc).toHaveBeenCalledTimes(2);
+  });
   it("maps an exact upstream denial to the non-provisioned response without leaking data",async()=>{
     rpc.mockResolvedValueOnce(JSON.stringify({ok:false,protocolVersion:1,code:"denied"}));
     const response=await createOperationsHomeRouter({resolvePrincipal:async()=>principal}).fetch(
