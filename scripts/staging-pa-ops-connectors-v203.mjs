@@ -7,6 +7,7 @@ import {OPERATIONS_CURRENT_SOURCE_MIGRATION_CHAIN} from './staging-bootstrap.mjs
 export const CONNECTOR_PROFILE203 = 'pa-ops-connectors-v203';
 export const CONNECTOR_MANIFEST203 = 'PROJECT_ALPHA_CONNECTOR_SOURCES';
 export const SNAPSHOT_SECRET203 = 'PROJECT_ALPHA_CONNECTOR_SNAPSHOT_CREDENTIALS';
+export const PRIMARY_SNAPSHOT_SECRET203 = 'PROJECT_ALPHA_API_KEY';
 const ORIGINS = ['https://pa-staging.ledgetoptechnologies.com','https://pa-stage-two.ledgetoptechnologies.com'];
 const ALIASES = ['project-alpha:staging','project-alpha:source-2-staging'];
 const SAFE = /^[A-Za-z0-9_-]{1,128}$/;
@@ -108,15 +109,15 @@ export function buildOpsConnectorConfig203(base,metadata,inventory) {
     if(base?.name!=='ledgetop-ops-staging'||base.account_id!=='846c924bf17bf4f3dd15c97a4c5d1d51'
       ||base.vars?.ENVIRONMENT!=='staging'||base.keep_vars!==false||base.vars.PROJECT_ALPHA_BASE_URL!==ORIGINS[0]
       ||base.vars.APPLICATION_KEY!=='ledgetop_ops_staging'||base.vars.STREAM_ACCOUNT_ID!==''||base.vars.STREAM_CUSTOMER_CODE!==''
-      ||base.vars.STAGING_DIRECTORY_PROFILE_VIEW_GRANT_ENABLED!=='false')fail();
+      ||base.vars.STAGING_DIRECTORY_PROFILE_VIEW_GRANT_ENABLED!=='false'||base.vars.VIEWER_WORKSPACE_RENEWAL_CORS_ENABLED!=='false')fail();
     if(Object.hasOwn(base.vars,'PROJECT_ALPHA_CONNECTOR_SOURCES_REQUIRED')
       &&!['false','true'].includes(base.vars.PROJECT_ALPHA_CONNECTOR_SOURCES_REQUIRED))fail();
     const db=base.d1_databases?.filter(x=>x.binding==='OPS_DB');
     if(db?.length!==1||db[0].database_id!=='78b34173-b168-4e3d-9832-bb9d245cc6b8')fail();
-    if(Object.hasOwn(base.vars,CONNECTOR_MANIFEST203)||Object.hasOwn(base.vars,SNAPSHOT_SECRET203)||!Array.isArray(inventory)||inventory.length!==151)fail();
+    if(Object.hasOwn(base.vars,CONNECTOR_MANIFEST203)||Object.hasOwn(base.vars,SNAPSHOT_SECRET203)||Object.hasOwn(base.vars,PRIMARY_SNAPSHOT_SECRET203)||!Array.isArray(inventory)||inventory.length!==151)fail();
     const observed=new Map();for(const row of inventory){exact(row,['name','type']);if(!text(row.name,128)||!text(row.type,64)||observed.has(row.name))fail();observed.set(row.name,row.type);}
     const plain=Object.keys(base.vars),secrets=inventory.filter(x=>x.type==='secret_text');
-    if(plain.length!==121||secrets.length!==7||observed.has(SNAPSHOT_SECRET203)||plain.some(x=>observed.get(x)!=='plain_text'))fail();
+    if(plain.length!==121||secrets.length!==7||observed.has(SNAPSHOT_SECRET203)||observed.has(PRIMARY_SNAPSHOT_SECRET203)||plain.some(x=>observed.get(x)!=='plain_text'))fail();
     const unsupported=['kv_namespaces','vectorize','hyperdrive','analytics_engine_datasets','dispatch_namespaces','mtls_certificates','pipelines','secrets_store_secrets','artifacts','worker_loaders','ratelimits'];
     if(unsupported.some(key=>base[key]?.length)||base.unsafe?.bindings?.length||base.ai?.binding||base.browser?.binding)fail();
     const resources=configResourceBindings(base);if(resources.length!==23||new Set(resources.map(x=>x[0])).size!==23||resources.some(([name,type])=>observed.get(name)!==type))fail();
@@ -126,12 +127,15 @@ export function buildOpsConnectorConfig203(base,metadata,inventory) {
     const primary=JSON.parse(manifest).sources[0];if(primary.revision.snapshotBasePath!=='/')fail();
     const config=structuredClone(base);delete config.vars.STREAM_ACCOUNT_ID;delete config.vars.STREAM_CUSTOMER_CODE;config.vars[CONNECTOR_MANIFEST203]=manifest;
     delete config.vars.STAGING_DIRECTORY_PROFILE_VIEW_GRANT_ENABLED;
+    delete config.vars.VIEWER_WORKSPACE_RENEWAL_CORS_ENABLED;
     config.vars.PROJECT_ALPHA_CONNECTOR_SOURCES_REQUIRED='true';
-    const plainAfter=Object.keys(config.vars).length,textAfter=plainAfter+secrets.length+1,providerAfter=resources.length+textAfter;
+    const plainAfter=Object.keys(config.vars).length,textAfter=plainAfter+secrets.length+2,providerAfter=resources.length+textAfter;
     if(textAfter>128||providerAfter>151)fail();
     const credentialTemplate={version:1,sets:Object.fromEntries(JSON.parse(manifest).sources.map(s=>[s.revision.credentialRef,{snapshotApiKey:null}]))};
     return {profile:CONNECTOR_PROFILE203,config,manifest,credentialSecretName:SNAPSHOT_SECRET203,credentialTemplate,
-      budget:{plain:plainAfter,secretsAfterSeparateInstallation:8,textBindings:textAfter,providerBindings:providerAfter},
+      additionalSecretNames:[SNAPSHOT_SECRET203,PRIMARY_SNAPSHOT_SECRET203],
+      primaryScalarCredentialBridge:{secretName:PRIMARY_SNAPSHOT_SECRET203,sameSnapshotCredentialRef:primary.revision.credentialRef,purpose:'existing primary snapshot ownership'},
+      budget:{plain:plainAfter,secretsAfterSeparateInstallation:9,textBindings:textAfter,providerBindings:providerAfter},
       sourceMigrationRequirement:structuredClone(OPERATIONS_CURRENT_SOURCE_MIGRATION_CHAIN),
       remoteActionsPerformed:false,registrationRequiresOfficialAttestation:true};
   }catch{return fail();}

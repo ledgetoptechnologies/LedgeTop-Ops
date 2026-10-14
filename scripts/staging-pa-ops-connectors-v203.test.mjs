@@ -19,7 +19,7 @@ function metadata() {
 function baseline() {
   const c={name:'ledgetop-ops-staging',account_id:'846c924bf17bf4f3dd15c97a4c5d1d51',keep_vars:false,
     main:'/synthetic/native-entrypoint.js',assets:{binding:'ASSETS',directory:'/synthetic/client'},vars:{ENVIRONMENT:'staging',APPLICATION_KEY:'ledgetop_ops_staging',
-      PROJECT_ALPHA_BASE_URL:'https://pa-staging.ledgetoptechnologies.com',STREAM_ACCOUNT_ID:'',STREAM_CUSTOMER_CODE:'',NATIVE_DIRECTORY_OUTBOX_DRAIN_ENABLED:'true',STAGING_DIRECTORY_PROFILE_VIEW_GRANT_ENABLED:'false'},
+      PROJECT_ALPHA_BASE_URL:'https://pa-staging.ledgetoptechnologies.com',STREAM_ACCOUNT_ID:'',STREAM_CUSTOMER_CODE:'',NATIVE_DIRECTORY_OUTBOX_DRAIN_ENABLED:'true',STAGING_DIRECTORY_PROFILE_VIEW_GRANT_ENABLED:'false',VIEWER_WORKSPACE_RENEWAL_CORS_ENABLED:'false'},
     routes:[{pattern:'ops-staging.example.test',custom_domain:true}],triggers:{crons:['1-56/5 * * * *']},
     containers:[{name:'synthetic-container',image:'registry.example.test/image@sha256:synthetic'}],
     services:Array.from({length:9},(_,i)=>({binding:`SERVICE_${i}`,service:`synthetic_${i}`})),
@@ -92,11 +92,14 @@ test('public metadata parser rejects duplicate declarations and pending-template
 });
 test('exact128 text/151 provider budget preserves full runtime flags/resources and separates snapshot placeholders',()=>{
   const {c,inventory}=baseline(),prior=structuredClone(c),plan=buildOpsConnectorConfig203(c,metadata(),inventory);
-  assert.deepEqual(c,prior);assert.equal(Object.keys(plan.config.vars).length,120);assert.equal(plan.budget.textBindings,128);assert.equal(plan.budget.providerBindings,151);
+  assert.deepEqual(c,prior);assert.equal(Object.keys(plan.config.vars).length,119);assert.equal(plan.budget.secretsAfterSeparateInstallation,9);assert.equal(plan.budget.textBindings,128);assert.equal(plan.budget.providerBindings,151);
   const restored=structuredClone(plan.config);delete restored.vars[CONNECTOR_MANIFEST203];restored.vars.STREAM_ACCOUNT_ID='';restored.vars.STREAM_CUSTOMER_CODE='';
-  restored.vars.STAGING_DIRECTORY_PROFILE_VIEW_GRANT_ENABLED='false';assert.equal(restored.vars.PROJECT_ALPHA_CONNECTOR_SOURCES_REQUIRED,'true');delete restored.vars.PROJECT_ALPHA_CONNECTOR_SOURCES_REQUIRED;assert.deepEqual(restored,c);
+  restored.vars.STAGING_DIRECTORY_PROFILE_VIEW_GRANT_ENABLED='false';restored.vars.VIEWER_WORKSPACE_RENEWAL_CORS_ENABLED='false';assert.equal(restored.vars.PROJECT_ALPHA_CONNECTOR_SOURCES_REQUIRED,'true');delete restored.vars.PROJECT_ALPHA_CONNECTOR_SOURCES_REQUIRED;assert.deepEqual(restored,c);
   assert.equal(plan.config.vars.NATIVE_DIRECTORY_OUTBOX_DRAIN_ENABLED,'true');assert.equal(plan.credentialSecretName,SNAPSHOT_SECRET203);
   assert.ok(Object.values(plan.credentialTemplate.sets).every(x=>x.snapshotApiKey===null));
+  assert.deepEqual(plan.additionalSecretNames,[SNAPSHOT_SECRET203,'PROJECT_ALPHA_API_KEY']);
+  assert.equal(plan.primaryScalarCredentialBridge.sameSnapshotCredentialRef,metadata().sources.stageOne.revision.credentialRef);
+  assert.ok(!Object.hasOwn(plan.config.vars,'PROJECT_ALPHA_API_KEY'));
   assert.ok(!Object.hasOwn(plan.config.vars,SNAPSHOT_SECRET203));assert.ok(!JSON.stringify(plan.config).includes('snapshotApiKey'));
   c.vars.NATIVE_DIRECTORY_OUTBOX_DRAIN_ENABLED='false';assert.equal(buildOpsConnectorConfig203(c,metadata(),inventory).config.vars.NATIVE_DIRECTORY_OUTBOX_DRAIN_ENABLED,'false');
 });
@@ -105,7 +108,9 @@ test('refuses nonempty Stream variables, wrong staging target, resource drift an
     x=>x.c.vars.PROJECT_ALPHA_BASE_URL='https://other.example.test',x=>x.c.keep_vars=true,x=>x.inventory[0].text='credential',
     x=>x.inventory.pop(),x=>x.c.services[0].binding='unreviewed',x=>x.c.vars.PROJECT_ALPHA_CONNECTOR_EVENT_CREDENTIALS='secret',
     x=>x.c.kv_namespaces=[{binding:'unreviewed'}],x=>x.c.vars.STAGING_DIRECTORY_PROFILE_VIEW_GRANT_ENABLED='true',
-    x=>delete x.c.vars.STAGING_DIRECTORY_PROFILE_VIEW_GRANT_ENABLED,x=>x.c.vars.PROJECT_ALPHA_CONNECTOR_SOURCES_REQUIRED='unknown']){
+    x=>delete x.c.vars.STAGING_DIRECTORY_PROFILE_VIEW_GRANT_ENABLED,x=>x.c.vars.PROJECT_ALPHA_CONNECTOR_SOURCES_REQUIRED='unknown',
+    x=>x.c.vars.VIEWER_WORKSPACE_RENEWAL_CORS_ENABLED='true',x=>delete x.c.vars.VIEWER_WORKSPACE_RENEWAL_CORS_ENABLED,
+    x=>x.c.vars.PROJECT_ALPHA_API_KEY='must-remain-private']){
     const x=baseline();mutate(x);assert.throws(()=>buildOpsConnectorConfig203(x.c,metadata(),x.inventory));
   }
 });

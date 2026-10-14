@@ -50,4 +50,19 @@ describe("current203 omission of exactly empty Stream bindings", () => {
       {waitUntil(){},passThroughOnException(){}} as unknown as ExecutionContext);
     expect(response.status).toBe(404);expect(await response.json()).toEqual({error:"Not found"});expect(prepare).not.toHaveBeenCalled();
   });
+  it.each([undefined,"false"])("disabled Viewer renewal flag %s retains404 for preflight and mutation without DB/auth/upstream",async flag=>{
+    const prepare=vi.fn(()=>{throw Error("disabled renewal must not touch DB");});
+    const send=vi.fn(()=>{throw Error("disabled renewal must not contact upstream");});vi.stubGlobal("fetch",send);
+    const env={ENVIRONMENT:"staging",EXPECTED_HOST:"ops-staging.ledgetopdroneservices.com",PUBLIC_BASE_URL:"https://ops-staging.ledgetopdroneservices.com",
+      VIEWER_PROCESSING_ENABLED:"true",VIEWER_INTEGRATION_ENABLED:"true",OPS_DB:{prepare}} as unknown as Env;
+    if(flag!==undefined)env.VIEWER_WORKSPACE_RENEWAL_CORS_ENABLED=flag;
+    const authBefore=mocks.authenticateStaff.mock.calls.length;
+    for(const method of ["OPTIONS","POST"]){
+      const response=await nativeWorker.fetch(new Request("https://ops-staging.ledgetopdroneservices.com/api/viewer/workspace/session-renewal",{
+        method,headers:{Origin:"https://viewer.example.test","Access-Control-Request-Method":"POST","Access-Control-Request-Headers":"Content-Type"}}),env,
+        {waitUntil(){},passThroughOnException(){}} as unknown as ExecutionContext);
+      expect(response.status).toBe(404);expect(await response.json()).toEqual({error:"Not found"});expect(response.headers.has("Access-Control-Allow-Origin")).toBe(false);
+    }
+    expect(mocks.authenticateStaff.mock.calls.length).toBe(authBefore);expect(prepare).not.toHaveBeenCalled();expect(send).not.toHaveBeenCalled();
+  });
 });
