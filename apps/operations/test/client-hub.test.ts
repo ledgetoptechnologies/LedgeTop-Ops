@@ -68,6 +68,7 @@ vi.mock("../src/worker/client-service-assignments", async importOriginal => ({
 }));
 
 import { registerClientHubRoutes } from "../src/worker/client-hub";
+import * as nativeDirectoryMetadata from "../src/worker/native-directory-profile-editor-record";
 import type { Env, StaffPrincipal } from "../src/worker/types";
 
 const active: Miniflare[] = [];
@@ -275,6 +276,26 @@ async function revokeRoot(app: Awaited<ReturnType<typeof fixture>>["app"], env: 
 }
 
 describe("Client Hub bounded detail collections", () => {
+  it("exposes reviewed-import record metadata only in its separate staging window, without enabling profile writes", async () => {
+    const { app, env } = await fixture();
+    const profile = vi.spyOn(nativeDirectoryMetadata, "nativeDirectoryProfileEditorRecord")
+      .mockResolvedValue({recordId:"native-org",kind:"organization"});
+    const linked = vi.spyOn(nativeDirectoryMetadata, "nativeDirectoryLinkedClientEditorRecords")
+      .mockResolvedValue([{recordId:"native-child",name:"Authorized linked client"}]);
+    try {
+      for (const [environment,flag,enabled] of [["staging","true",true],["production","true",false],
+        ["staging","TRUE",false],["staging","false",false]] as const) {
+        profile.mockClear();linked.mockClear();
+        const response=await app.request(organizationPath,{}, {...env,ENVIRONMENT:environment,
+          NATIVE_DIRECTORY_PROFILE_WRITES_ENABLED:"false",REVIEWED_IMPORT_ENROLLMENT_ENABLED:flag});
+        expect(response.status).toBe(200);
+        const body=await response.json() as {nativeDirectoryProfile:unknown;nativeDirectoryLinkedClients:unknown};
+        expect(body.nativeDirectoryProfile).toEqual(enabled?{recordId:"native-org",kind:"organization"}:null);
+        expect(body.nativeDirectoryLinkedClients).toEqual(enabled?[{recordId:"native-child",name:"Authorized linked client"}]:[]);
+        expect(profile).toHaveBeenCalledTimes(enabled?1:0);expect(linked).toHaveBeenCalledTimes(enabled?1:0);
+      }
+    } finally {profile.mockRestore();linked.mockRestore();}
+  },30_000);
   it("fences a portal-root revoke when team.view is denied after resolution but before commit", async () => {
     const { app, env, delivery } = await fixture(), current = await rootAccessContext(app, env);
     const raced = { ...env, DELIVERY_DB: interceptRootCommit(env.DELIVERY_DB, async () => {

@@ -91,6 +91,7 @@ interface Session {
     authenticatedDeliveryGrants?: AuthenticatedDeliveryCapability;
     clientFeedback?: { enabled: boolean };
     nativeDirectoryProfileWrites?: { enabled: boolean };
+    reviewedImportEnrollment?: { enabled: boolean };
     nativeDirectoryBindingRefresh?: { enabled: boolean; recoveryEnabled?: boolean };
     projectAlphaPrivateAdminTransport?: { enabled: boolean };
   };
@@ -832,6 +833,7 @@ function ClientHubSurface({ session }: { session: Session }) {
       feedbackEnabled={session.capabilities?.clientFeedback?.enabled === true} invitationAccess={session.invitationAdministration}
       canManagePortalSetup={session.user.isAdministrator && allowed(session.user, "operations.manage")}
       nativeDirectoryProfileWrites={session.capabilities?.nativeDirectoryProfileWrites?.enabled === true}
+      reviewedImportEnrollment={session.capabilities?.reviewedImportEnrollment?.enabled === true}
       nativeDirectoryBindingRefresh={session.capabilities?.nativeDirectoryBindingRefresh?.enabled === true}
       nativeDirectoryBindingRefreshRecovery={session.capabilities?.nativeDirectoryBindingRefresh?.recoveryEnabled === true} />}
     {selected === "feedback" && session.capabilities?.clientFeedback?.enabled === true && <OperationsFeedback />}

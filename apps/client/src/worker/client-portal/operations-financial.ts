@@ -23,10 +23,15 @@ function safeLink(value:unknown):value is string|null{if(value===null)return tru
     &&url.pathname==="/"&&keys.length===2&&keys.filter(key=>key==="page").length===1&&keys.filter(key=>key==="token").length===1
     &&(url.searchParams.get("page")==="public-doc"||url.searchParams.get("page")==="stripe-checkout")
     &&/^[A-Za-z0-9_-]{16,64}$/.test(url.searchParams.get("token")??"");}catch{return false;}}
-function decode(wire:unknown,request:ClientPortalServiceMetadataRequestV1):PortalFinancialCollection[]|null{
+type DecodedFinancialEnvelope=Readonly<{ok:true;collections:PortalFinancialCollection[]}>
+  |Readonly<{ok:false;code:"denied"}>;
+function decode(wire:unknown,request:ClientPortalServiceMetadataRequestV1):DecodedFinancialEnvelope|null{
   if(typeof wire!=="string"||new TextEncoder().encode(wire).byteLength>MAX_BYTES)return null;
   try{
-    const value:unknown=JSON.parse(wire);if(!plain(value)||!exact(value,["ok","protocolVersion","authorityId","workspaceId","ownershipEpoch","grantRevision","collections"])||value.ok!==true||value.protocolVersion!==1
+    const value:unknown=JSON.parse(wire);if(!plain(value))return null;
+    if(exact(value,["ok","protocolVersion","code"])&&value.ok===false&&value.protocolVersion===1&&value.code==="denied")
+      return{ok:false,code:"denied"};
+    if(!exact(value,["ok","protocolVersion","authorityId","workspaceId","ownershipEpoch","grantRevision","collections"])||value.ok!==true||value.protocolVersion!==1
       ||value.authorityId!==request.authorityId||value.workspaceId!==request.workspaceId
       ||value.ownershipEpoch!==request.ownershipEpoch||value.grantRevision!==request.grantRevision
       ||!Array.isArray(value.collections)||value.collections.length>20)return null;
@@ -48,7 +53,7 @@ function decode(wire:unknown,request:ClientPortalServiceMetadataRequestV1):Porta
         documents.push({publicId:item.publicId,kind:item.kind,status:item.status,currency:item.currency,total:item.total,
           amountPaid:item.amountPaid,balanceDue:item.balanceDue,documentUrl:item.documentUrl,actionUrl:item.actionUrl});}
       collections.push({grantId:candidate.grantId,revision:candidate.revision,documents});}
-    return collections;
+    return{ok:true,collections};
   }catch{return null;}
 }
 
@@ -67,11 +72,12 @@ export async function readPortalFinancialDocuments(env:OperationsFinancialEnv,
   try{
     const wire=await Promise.race([env.CLIENT_PORTAL_NATIVE_FINANCIAL_READER.readFinancialDocuments(request),
       new Promise<never>((_resolve,reject)=>{timer=setTimeout(()=>reject(Error("financial-rpc-timeout")),TIMEOUT_MS);})]);
-    const collections=decode(wire,request);if(!collections)return{ok:false,code:"unavailable"};
+    const decoded=decode(wire,request);if(!decoded)return{ok:false,code:"unavailable"};
+    if(!decoded.ok)return decoded;
     const after=await readNativeOperationsPortalHomes(env.DELIVERY_DB,principal,true);
     const current=after?.filter(candidate=>candidate.authorityId===authorityId)??[];
     if(current.length!==1||current[0]!.workspaceId!==home.workspaceId||current[0]!.ownershipEpoch!==home.ownershipEpoch
       ||current[0]!.grantRevision!==home.grantRevision)return{ok:false,code:"denied"};
-    return{ok:true,collections};
+    return{ok:true,collections:decoded.collections};
   }catch{return{ok:false,code:"unavailable"};}finally{if(timer!==undefined)clearTimeout(timer);}
 }

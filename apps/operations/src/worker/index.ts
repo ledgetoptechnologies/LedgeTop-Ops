@@ -87,6 +87,10 @@ import { handleWorkspaceBindingAdminHttp } from "./client-portal-workspace-bindi
 import { handleAuthorityV3OwnerHttp } from "./client-portal-authority-v3-owner-http";
 import { handleRecipientEnrollmentOwnerHttp } from "./client-portal-recipient-enrollment-owner-http";
 import { handleOperationsNativeRecipientOwnerHttp } from "./operations-portal-native-recipient-owner-http";
+import { handleOperationsNativeDirectoryLifecycleOwnerHttp,
+  OPERATIONS_NATIVE_DIRECTORY_LIFECYCLE_OWNER_BASE } from "./operations-portal-native-directory-lifecycle-owner-http";
+import { handleReviewedImportEnrollmentHttp, REVIEWED_IMPORT_ENROLLMENT_BASE } from "./reviewed-import-enrollment-http";
+import { readReviewedImportEnrollmentReview, resolveReviewedImportEnrollmentDestinations } from "./reviewed-import-enrollment-destinations";
 import { dispatchViewerWorkspaceRenewal } from "./viewer-workspace-renewal";
 import { consumeNativeStaffOnboardingRateLimit } from "./native-staff-onboarding-rate-limit";
 import {
@@ -541,6 +545,37 @@ async function dispatchOperationsNativeRecipientOwner(c: Context<{ Bindings: Env
 }
 app.use("/api/native-client-portal/operations-recipient-enrollment", dispatchOperationsNativeRecipientOwner);
 app.use("/api/native-client-portal/operations-recipient-enrollment/*", dispatchOperationsNativeRecipientOwner);
+async function dispatchOperationsNativeDirectoryLifecycle(c: Context<{ Bindings: Env; Variables: Variables }>) {
+  if (c.env.ENVIRONMENT !== "staging" || c.env.NATIVE_DIRECTORY_LIFECYCLE_ENABLED !== "true")
+    return c.json({ error: "Not found" }, 404);
+  return handleOperationsNativeDirectoryLifecycleOwnerHttp(c.req.raw, {
+    environment: c.env.ENVIRONMENT, enabledFlag: c.env.NATIVE_DIRECTORY_LIFECYCLE_ENABLED,
+    expectedHost: c.env.EXPECTED_HOST,
+    configuration: { enabled: true, issuer: c.env.TEAM_DOMAIN ?? "", staffAudience: c.env.OPERATIONS_AUD,
+      origin: c.env.PUBLIC_BASE_URL, csrfSecret: c.env.OPERATIONS_SESSION_SECRET },
+    database: c.env.OPS_DB,
+  });
+}
+app.use(OPERATIONS_NATIVE_DIRECTORY_LIFECYCLE_OWNER_BASE, dispatchOperationsNativeDirectoryLifecycle);
+app.use(`${OPERATIONS_NATIVE_DIRECTORY_LIFECYCLE_OWNER_BASE}/*`, dispatchOperationsNativeDirectoryLifecycle);
+// Imported-record management verifies native staff directly, independently of
+// legacy PA login admission. The handler owns exact Origin and actor-bound
+// CSRF checks and remains absent outside its explicit staging-only window.
+async function dispatchReviewedImportEnrollment(c: Context<{ Bindings: Env; Variables: Variables }>) {
+  if (c.env.ENVIRONMENT !== "staging" || c.env.REVIEWED_IMPORT_ENROLLMENT_ENABLED !== "true")
+    return c.json({ error: "Not found" }, 404);
+  return handleReviewedImportEnrollmentHttp(c.req.raw, {
+    environment: c.env.ENVIRONMENT ?? "", enabledFlag: c.env.REVIEWED_IMPORT_ENROLLMENT_ENABLED ?? "false",
+    expectedHost: c.env.EXPECTED_HOST,
+    configuration: { enabled: true, issuer: c.env.TEAM_DOMAIN ?? "", staffAudience: c.env.OPERATIONS_AUD,
+      origin: c.env.PUBLIC_BASE_URL, csrfSecret: c.env.OPERATIONS_SESSION_SECRET },
+    database: c.env.OPS_DB,
+    resolveDestinations: (_db, _actor, selection) => resolveReviewedImportEnrollmentDestinations(c.env, selection),
+    readReview: (_db, _actor, input) => readReviewedImportEnrollmentReview(c.env, input),
+  });
+}
+app.use(REVIEWED_IMPORT_ENROLLMENT_BASE, dispatchReviewedImportEnrollment);
+app.use(`${REVIEWED_IMPORT_ENROLLMENT_BASE}/*`, dispatchReviewedImportEnrollment);
 // This is intentionally before staff authentication. A disabled staging
 // fixture must be indistinguishable from an absent route, even to a request
 // without a valid Operations session.
@@ -960,6 +995,7 @@ app.get("/api/session", async (c) => {
           && integrationsManageScope.global && !integrationsManageScope.deniedGlobal,
       },
       nativeDirectoryProfileWrites: { enabled: nativeDirectoryProfileWritesEnabled(c.env) },
+      reviewedImportEnrollment: { enabled: c.env.ENVIRONMENT === "staging" && c.env.REVIEWED_IMPORT_ENROLLMENT_ENABLED === "true" },
       nativeDirectoryBindingRefresh: { enabled: directoryBindingRefreshEnabled(c.env) && principal.id===DIRECTORY_BINDING_REFRESH_PROTECTED_OWNER
         && administrator && integrationsManageScope.global && !integrationsManageScope.deniedGlobal,
         recoveryEnabled: directoryBindingRefreshRecoveryEnabled(c.env) && principal.id===DIRECTORY_BINDING_REFRESH_PROTECTED_OWNER

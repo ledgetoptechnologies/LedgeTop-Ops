@@ -1,4 +1,3 @@
-import { readFileSync } from "node:fs";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { Miniflare } from "miniflare";
 import { sha256OperationsPortalWorkspacePublication,
@@ -15,7 +14,6 @@ import { reserveOperationsPortalWorkspacePublicationInvocation } from
   "../src/worker/operations-portal-workspace-publication-invocations";
 import { cancelOperationsPortalWorkspacePublication as guardedCancel } from
   "../src/worker/operations-portal-workspace-publication-cancellations";
-import { splitD1MigrationStatements } from "../../client/test/helpers/d1-migrations";
 vi.mock("cloudflare:workers", () => ({ WorkerEntrypoint: class {} }));
 import { getOperationsPortalWorkspacePublicationStatusRpc, publishOperationsPortalWorkspaceRpc }
   from "../../client/src/worker/operations-portal-workspace-publication-entrypoint";
@@ -190,34 +188,7 @@ beforeAll(async () => {
   operations = await runtime.getD1Database("OPS_DB") as unknown as D1Database;
   client = await runtime.getD1Database("CLIENT_DB") as unknown as D1Database;
   expect(await applyCanonicalChain(operations, "operations",
-    "0153_operations_portal_workspace_publication_outbox.sql", true)).toHaveLength(153);
-  for (const name of ["0155_operations_portal_workspace_publication_cancellations.sql",
-    "0156_operations_portal_workspace_publication_invocations.sql"]) {
-    const sql = readFileSync(new URL(`../migrations/${name}`, import.meta.url), "utf8");
-    await operations.batch(splitD1MigrationStatements(sql).map(statement => operations.prepare(statement)));
-  }
-  // Current directory writers query the Ops record ID separately from PA's
-  // external ID; refresh the mapping view while preserving this focused legacy
-  // fixture lineage.
-  const mappingViewMigration = readFileSync(new URL(
-    "../migrations/0170_project_alpha_active_directory_project_guard.sql", import.meta.url), "utf8");
-  await operations.batch(splitD1MigrationStatements(mappingViewMigration)
-    .map(statement => operations.prepare(statement)));
-  // This is an explicit local proposal supplement, not canonical migration
-  // 0182. It keeps the historical portal chain while exercising the current
-  // normalized relationship-revision evidence contract used by the writer.
-  const relationshipProposal = readFileSync(new URL(
-    "../../../scripts/proposals/0182_project_alpha_directory_relationship_recovery_guard.sql", import.meta.url), "utf8");
-  const revisionMarker = "DROP VIEW project_alpha_directory_relationship_revision_evidence;";
-  const revisionOffset = relationshipProposal.indexOf(revisionMarker);
-  if (revisionOffset < 0) throw new Error("missing proposal revision-evidence replacement");
-  const revisionStatements = splitD1MigrationStatements(relationshipProposal.slice(revisionOffset)
-    .replaceAll("operations_directory_effective_materializations", "operations_directory_materializations")).slice(0, 2);
-  expect(revisionStatements).toHaveLength(2);
-  expect(revisionStatements[1]).toMatch(/CREATE VIEW project_alpha_directory_relationship_revision_evidence AS/);
-  // Only this view supplements the historical cutoff; later proposal objects
-  // depend on the complete recovery schema and are exercised in full-chain tests.
-  await operations.batch(revisionStatements.map(statement => operations.prepare(statement)));
+    "0203_effective_native_directory_enrollment_consumers.sql", true)).toHaveLength(203);
   expect(await applyCanonicalChain(client, "client", "0223_operations_portal_workspace_publications.sql")).toHaveLength(142);
   await seedManager();
   await operations.batch([
@@ -274,7 +245,7 @@ beforeAll(async () => {
 }, 240_000);
 afterAll(async () => runtime.dispose());
 
-describe("0153 native Operations workspace topology publication outbox with current 0170 mapping view", () => {
+describe("native Operations workspace topology publication outbox on the current canonical 0203 schema", () => {
   it("closes exact source checkpoints through Client and recovers a lost response without widening authority", async () => {
     const owner = actor(), workspace = workspaceInput();
     await reserveOperationsPortalWorkspace(operations, owner, workspace);

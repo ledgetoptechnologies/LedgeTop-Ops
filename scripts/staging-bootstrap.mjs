@@ -9,12 +9,16 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 export const BOOTSTRAP_SCHEMA_VERSION = 1;
 export const DISPOSABLE_REHEARSAL_SCHEMA_VERSION = 1;
 export const OPERATIONS_CURRENT_SOURCE_MIGRATION_CHAIN = Object.freeze({
-  count: 200,
-  finalMigration: "0200_native_directory_active_binding_refresh_supersessions.sql",
-  namesSha256: "33b6dbc6d8270cc82b7af0c315c5d874a5e8369ad0884185a60085218e75601f",
-  contentsSha256: "8544d12cba6a51f3ab909c85d02e5fb8b48c54f054f1ca30d426ea17be924138",
-  appendedMigration: "0200_native_directory_active_binding_refresh_supersessions.sql",
-  appendedSha256: "0e0ade02ba1088a8f3ef33d5d30d5be92441a879c984ccc822c15db6368ede5d",
+  count: 203,
+  finalMigration: "0203_effective_native_directory_enrollment_consumers.sql",
+  namesSha256: "47744a0f4ef2666f4a6d9aecbc17293f1349689561f5934d6ae2f1a2993f92aa",
+  contentsSha256: "3c0701679feb97f6a63afb86492ae827a982c5b739904c7d0468527264aed308",
+  appendedMigrations: Object.freeze({
+    "0200_native_directory_active_binding_refresh_supersessions.sql": "0e0ade02ba1088a8f3ef33d5d30d5be92441a879c984ccc822c15db6368ede5d",
+    "0201_native_directory_lifecycle.sql": "7bdd6d02c5ab97ba705e9a6d32238917ffb9a0757f3aa49d4eb8dcf7795e2878",
+    "0202_reviewed_import_enrollment.sql": "77388f0dfa96e3715ef9754dd2dc92a7b1ec18139be0b8bf4590b79a3a77cedf",
+    "0203_effective_native_directory_enrollment_consumers.sql": "3e331b0de53c0e4ca0b22395b879ef0e799f66872c2f49afd4ef7f7a58be0008",
+  }),
 });
 export const BOOTSTRAP_APPS = Object.freeze({
   delivery: Object.freeze({
@@ -249,7 +253,11 @@ export function buildArtifacts(base, owner, options = {}) {
     }
     const repositoryNames = entries.filter((item) => item.isFile() && !item.isSymbolicLink() && item.name.endsWith(".sql")).map((item) => item.name).sort();
     const currentSource = app === "operations" ? OPERATIONS_CURRENT_SOURCE_MIGRATION_CHAIN : null;
-    const hasCurrentAppend = currentSource && repositoryNames.includes(currentSource.appendedMigration);
+    const appendedNames = currentSource ? Object.keys(currentSource.appendedMigrations) : [];
+    const hasCurrentAppend = currentSource && appendedNames.every((name) => repositoryNames.includes(name));
+    if (currentSource && repositoryNames.some((name) => appendedNames.includes(name)) && !hasCurrentAppend) {
+      throw new Error(`${app} canonical migration inventory contains an incomplete reviewed suffix`);
+    }
     if (hasCurrentAppend) {
       if (repositoryNames.length !== currentSource.count || repositoryNames.at(-1) !== currentSource.finalMigration
         || sha256(repositoryNames.join("\n")) !== currentSource.namesSha256) {
@@ -261,12 +269,12 @@ export function buildArtifacts(base, owner, options = {}) {
         return `${name}\0${sha256(fs.readFileSync(sourcePath))}`;
       }).join("\n"));
       if (repositoryContentsSha256 !== currentSource.contentsSha256
-        || sha256(fs.readFileSync(path.join(sourceDir, currentSource.appendedMigration))) !== currentSource.appendedSha256) {
+        || appendedNames.some((name) => sha256(fs.readFileSync(path.join(sourceDir, name))) !== currentSource.appendedMigrations[name])) {
         throw new Error(`${app} canonical migration contents do not match the reviewed full-chain digest`);
       }
     }
     const names = hasCurrentAppend
-      ? repositoryNames.filter((name) => name !== currentSource.appendedMigration)
+      ? repositoryNames.filter((name) => !appendedNames.includes(name))
       : repositoryNames;
     const namesSha256 = sha256(names.join("\n"));
     const reviewedChains = [{ count: entry.migrationCount, namesSha256: entry.migrationNamesSha256,

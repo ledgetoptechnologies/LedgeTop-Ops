@@ -5,6 +5,7 @@ import { Miniflare } from "miniflare";
 const profileDispatch = vi.hoisted(() => vi.fn());
 const relationshipDispatch = vi.hoisted(() => vi.fn());
 const continuationDispatch = vi.hoisted(() => vi.fn());
+const lifecycleDispatch = vi.hoisted(() => vi.fn());
 const materializeClients = vi.hoisted(() => vi.fn());
 vi.mock("../src/worker/project-alpha-directory-profile-outbox-dispatcher", () => ({
   dispatchProjectAlphaDirectoryProfileOutboxCommand: profileDispatch,
@@ -20,6 +21,9 @@ vi.mock("../src/worker/native-directory-profile-binding-continuation", () => ({
     env.NATIVE_DIRECTORY_PROFILE_BINDING_CONTINUATION_ENABLED === "true"
       && ["local", "staging", "production"].includes(env.ENVIRONMENT ?? ""),
   dispatchNativeDirectoryProfileBindingContinuation: continuationDispatch,
+}));
+vi.mock("../src/worker/project-alpha-directory-lifecycle-outbox-dispatcher", () => ({
+  dispatchProjectAlphaDirectoryLifecycleCommand: lifecycleDispatch,
 }));
 
 import { drainNativeDirectoryOutboxes } from "../src/worker/native-directory-outbox-scheduler";
@@ -58,6 +62,13 @@ async function recoveryCommand(commandId: string, sourceId: string): Promise<voi
     .bind(commandId, sourceId, `2026-09-22T00:00:${commandId.slice(-2)}.000Z`).run();
 }
 
+async function lifecycleCommand(commandId: string, sourceId: string, mutationId = `mutation-${commandId}`,
+  state: "pending" | "terminal" = "pending"): Promise<void> {
+  await db.prepare(`INSERT INTO project_alpha_directory_lifecycle_outbox
+    (command_id,mutation_id,source_id,state,next_attempt_at,lease_expires_at,created_at) VALUES(?,?,?,?,0,NULL,?)`)
+    .bind(commandId, mutationId, sourceId, state, `2026-09-22T00:00:${commandId.slice(-2)}.000Z`).run();
+}
+
 beforeAll(async () => {
   runtime = new Miniflare({ modules: true, compatibilityDate: "2026-07-22",
     script: "export default {fetch(){return new Response('ok')}}", d1Databases: ["OPS_DB"] });
@@ -70,6 +81,9 @@ beforeAll(async () => {
     command_id TEXT PRIMARY KEY,source_id TEXT NOT NULL,created_at TEXT NOT NULL)`).run();
   await db.prepare(`CREATE TABLE native_directory_profile_binding_dispatch(
     command_id TEXT PRIMARY KEY,state TEXT NOT NULL,next_attempt_at INTEGER NOT NULL,lease_expires_at INTEGER)`).run();
+  await db.prepare(`CREATE TABLE project_alpha_directory_lifecycle_outbox(
+    command_id TEXT PRIMARY KEY,mutation_id TEXT NOT NULL,source_id TEXT NOT NULL,state TEXT NOT NULL,next_attempt_at INTEGER NOT NULL,
+    lease_expires_at INTEGER,created_at TEXT NOT NULL)`).run();
 });
 
 beforeEach(async () => {
@@ -79,10 +93,12 @@ beforeEach(async () => {
     db.prepare("DELETE FROM project_alpha_directory_relationship_recovery_outbox"),
     db.prepare("DELETE FROM native_directory_profile_binding_jobs"),
     db.prepare("DELETE FROM native_directory_profile_binding_dispatch"),
+    db.prepare("DELETE FROM project_alpha_directory_lifecycle_outbox"),
   ]);
   profileDispatch.mockReset().mockResolvedValue({ status: "acknowledged" });
   relationshipDispatch.mockReset().mockResolvedValue({ status: "acknowledged" });
   continuationDispatch.mockReset().mockResolvedValue({ status: "acknowledged" });
+  lifecycleDispatch.mockReset().mockResolvedValue({ status: "acknowledged" });
   materializeClients.mockReset().mockResolvedValue({ examined: 0, materialized: 0, blocked: 0 });
 });
 
@@ -118,6 +134,119 @@ describe("native Directory scheduled outbox drain", () => {
     expect(profileDispatch).not.toHaveBeenCalled();
     expect(relationshipDispatch).not.toHaveBeenCalled();
     expect(materializeClients).not.toHaveBeenCalled();
+  });
+
+  it("does not reference the lifecycle table unless the staging lifecycle flag is exactly true", async () => {
+    const sourceId = "project-alpha:staging";
+    await db.prepare("DROP TABLE project_alpha_directory_lifecycle_outbox").run();
+    try {
+      await command("profile", "profile-without-lifecycle-table", sourceId);
+      await expect(drainNativeDirectoryOutboxes({ ...environment([sourceId]), ENVIRONMENT: "staging" },
+        { now: () => dueAt, rotationTime: 0 })).resolves.toMatchObject({ attempted: 1, acknowledged: 1 });
+      expect(lifecycleDispatch).not.toHaveBeenCalled();
+    } finally {
+      await db.prepare(`CREATE TABLE project_alpha_directory_lifecycle_outbox(
+        command_id TEXT PRIMARY KEY,mutation_id TEXT NOT NULL,source_id TEXT NOT NULL,state TEXT NOT NULL,next_attempt_at INTEGER NOT NULL,
+        lease_expires_at INTEGER,created_at TEXT NOT NULL)`).run();
+    }
+  });
+
+  it("adds the lifecycle lane only under staging dual opt-in and maps the canonical flag", async () => {
+    const sourceId = "project-alpha:staging", commandId = uuid(92);
+    await lifecycleCommand(commandId, sourceId);
+    const enabled = { ...environment([sourceId]), ENVIRONMENT: "staging",
+      NATIVE_DIRECTORY_LIFECYCLE_ENABLED: "true" };
+    await expect(drainNativeDirectoryOutboxes(enabled, { now: () => dueAt, rotationTime: 0 }))
+      .resolves.toMatchObject({ attempted: 1, acknowledged: 1 });
+    expect(lifecycleDispatch).toHaveBeenCalledWith(expect.objectContaining({
+      ENVIRONMENT: "staging", PROJECT_ALPHA_DIRECTORY_LIFECYCLE_ENABLED: "true",
+    }), sourceId, commandId, expect.any(Function));
+
+    lifecycleDispatch.mockClear();
+    await db.prepare("UPDATE project_alpha_directory_lifecycle_outbox SET state='pending',next_attempt_at=0").run();
+    await drainNativeDirectoryOutboxes({ ...enabled, ENVIRONMENT: "production" }, { now: () => dueAt });
+    expect(lifecycleDispatch).not.toHaveBeenCalled();
+  });
+
+  it("excludes every destination for a lifecycle mutation with a terminal sibling", async () => {
+    const sourceId = "project-alpha:staging", mutationId = uuid(95);
+    await lifecycleCommand(uuid(96), sourceId, mutationId);
+    await lifecycleCommand(uuid(97), sourceId, mutationId, "terminal");
+    await expect(drainNativeDirectoryOutboxes({ ...environment([sourceId]), ENVIRONMENT: "staging",
+      NATIVE_DIRECTORY_LIFECYCLE_ENABLED: "true" }, { now: () => dueAt }))
+      .resolves.toMatchObject({ attempted: 0, acknowledged: 0 });
+    expect(lifecycleDispatch).not.toHaveBeenCalled();
+  });
+
+  it("preserves a dispatcher caller abort signal through the scheduler deadline wrapper", async () => {
+    const sourceId = "project-alpha:staging", commandId = uuid(93);
+    await lifecycleCommand(commandId, sourceId);
+    let observedSignal: AbortSignal | undefined;
+    const controlledFetch = vi.fn((_input: RequestInfo | URL, init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
+      observedSignal = init?.signal ?? undefined;
+      observedSignal?.addEventListener("abort", () => reject(new Error("caller aborted")), { once: true });
+    }));
+    lifecycleDispatch.mockImplementationOnce(async (_env, _source, _command, send: typeof fetch) => {
+      const caller = new AbortController();
+      const pending = send("https://directory.example.test/lifecycle", { signal: caller.signal });
+      caller.abort();
+      await expect(pending).rejects.toThrow("caller aborted");
+      return { status: "uncertain", reason: "transport" };
+    });
+    await expect(drainNativeDirectoryOutboxes({ ...environment([sourceId]), ENVIRONMENT: "staging",
+      NATIVE_DIRECTORY_LIFECYCLE_ENABLED: "true" }, { now: () => dueAt, send: controlledFetch as typeof fetch }))
+      .resolves.toMatchObject({ attempted: 1, uncertain: 1 });
+    expect(observedSignal?.aborted).toBe(true);
+  });
+
+  it("enforces the scheduler deadline on a stalled body after immediate response headers", async () => {
+    const sourceId = "project-alpha:staging", commandId = uuid(94);
+    await lifecycleCommand(commandId, sourceId);
+    const controlledFetch = vi.fn((_input: RequestInfo | URL, init?: RequestInit) => {
+      const signal = init?.signal;
+      return Promise.resolve(new Response(new ReadableStream<Uint8Array>({
+        start(controller) {
+          signal?.addEventListener("abort", () => controller.error(new Error("body deadline")), { once: true });
+        },
+      })));
+    });
+    lifecycleDispatch.mockImplementationOnce(async (_env, _source, _command, send: typeof fetch) => {
+      const caller = new AbortController();
+      const timer = setTimeout(() => caller.abort(), 10_000);
+      try {
+        const response = await send("https://directory.example.test/lifecycle", { signal: caller.signal });
+        await expect(response.text()).rejects.toThrow("body deadline");
+      } finally {
+        clearTimeout(timer);
+      }
+      return { status: "uncertain", reason: "transport" };
+    });
+    await expect(drainNativeDirectoryOutboxes({ ...environment([sourceId]), ENVIRONMENT: "staging",
+      NATIVE_DIRECTORY_LIFECYCLE_ENABLED: "true" }, { now: () => dueAt, maxRuntimeMs: 5,
+        send: controlledFetch as typeof fetch }))
+      .resolves.toMatchObject({ attempted: 1, uncertain: 1 });
+  });
+
+  it("propagates body cancellation and clears the scheduler deadline timer", async () => {
+    const sourceId = "project-alpha:staging", commandId = uuid(98);
+    await lifecycleCommand(commandId, sourceId);
+    const cancelled = vi.fn();
+    let observedSignal: AbortSignal | undefined;
+    const controlledFetch = vi.fn((_input: RequestInfo | URL, init?: RequestInit) => {
+      observedSignal = init?.signal ?? undefined;
+      return Promise.resolve(new Response(new ReadableStream<Uint8Array>({ cancel: cancelled })));
+    });
+    lifecycleDispatch.mockImplementationOnce(async (_env, _source, _command, send: typeof fetch) => {
+      const response = await send("https://directory.example.test/lifecycle");
+      await response.body?.cancel("not-needed");
+      await new Promise(resolve => setTimeout(resolve, 15));
+      return { status: "blocked", reason: "not_due" };
+    });
+    await expect(drainNativeDirectoryOutboxes({ ...environment([sourceId]), ENVIRONMENT: "staging",
+      NATIVE_DIRECTORY_LIFECYCLE_ENABLED: "true" }, { now: () => dueAt, maxRuntimeMs: 5,
+        send: controlledFetch as typeof fetch })).resolves.toMatchObject({ attempted: 1, blocked: 1 });
+    expect(cancelled).toHaveBeenCalledWith("not-needed");
+    expect(observedSignal?.aborted).toBe(false);
   });
 
   it("selects the continuation lane in production only under explicit dual opt-in", async () => {

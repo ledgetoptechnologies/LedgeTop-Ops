@@ -149,6 +149,10 @@ beforeAll(async () => {
       SELECT source_id,resource_type,record_id,external_id,project_alpha_public_id,source_instance_id,
         application_id,history_epoch_id,provenance_id,mapping_kind,created_at FROM writer_test_active_mapping_rows;`
     .replace(/\s*\n\s*/g, " "));
+  await db.prepare(`CREATE VIEW effective_native_directory_enrollments AS
+    SELECT record_id,destinations_json,0 enrollment_version,'native_create' enrollment_kind,
+      create_admission_id provenance_id,created_at
+    FROM native_directory_enrollments`).run();
   await db.batch([
     db.prepare(`INSERT INTO staff_users(id,email,display_name,access_subject,status) VALUES('owner','owner@example.test','Owner','access|owner','active')`),
     db.prepare(`INSERT INTO native_business_areas(id,name,active) VALUES('area','Area',1)`),

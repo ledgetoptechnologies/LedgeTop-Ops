@@ -18,7 +18,7 @@ type EnrollmentDestination = Readonly<{
   origin: string; externalCanonicalId: string;
 }>;
 
-function enrollment(value: unknown, recordId: string): EnrollmentDestination[] | null {
+function enrollment(value: unknown): EnrollmentDestination[] | null {
   let parsed: unknown;
   try { parsed = typeof value === "string" ? JSON.parse(value) : value; } catch { return null; }
   if (!Array.isArray(parsed) || parsed.length < 1 || parsed.length > 16) return null;
@@ -30,7 +30,8 @@ function enrollment(value: unknown, recordId: string): EnrollmentDestination[] |
       || typeof row.sourceInstanceUUID !== "string" || !UUID.test(row.sourceInstanceUUID)
       || typeof row.applicationUUID !== "string" || !UUID.test(row.applicationUUID)
       || typeof row.historyEpoch !== "string" || !UUID.test(row.historyEpoch)
-      || typeof row.origin !== "string" || row.externalCanonicalId !== recordId) return null;
+      || typeof row.origin !== "string" || typeof row.externalCanonicalId !== "string"
+      || row.externalCanonicalId.length < 1 || row.externalCanonicalId.length > 764) return null;
     try { if (new URL(row.origin).origin !== row.origin || !row.origin.startsWith("https://")) return null; } catch { return null; }
     const key = [row.sourceId, row.sourceInstanceUUID, row.applicationUUID, row.historyEpoch, row.origin].join("\0");
     if (seen.has(key)) return null;
@@ -48,7 +49,7 @@ export async function nativeDirectoryOrganizationChoices(env: Env): Promise<Nati
       record.current_version expectedVersion,revision.profile_json profileJson,enrollment.destinations_json destinationsJson
     FROM operations_directory_records record
     JOIN operations_directory_revisions revision ON revision.record_id=record.record_id AND revision.version=record.current_version
-    JOIN native_directory_enrollments enrollment ON enrollment.record_id=record.record_id
+    JOIN effective_native_directory_enrollments enrollment ON enrollment.record_id=record.record_id
     WHERE record.record_kind='organization' ORDER BY record.record_id LIMIT 101`).all<{
       recordId: string; expectedVersion: number; profileJson: string; destinationsJson: string;
     }>()).results;
@@ -64,7 +65,7 @@ export async function nativeDirectoryOrganizationChoices(env: Env): Promise<Nati
       ? (profile as Record<string, unknown>).name : null;
     const name = typeof profileName === "string" ? profileName.normalize("NFC").trim() : "";
     if (!name || Array.from(name).length > 150 || /\p{C}/u.test(name)) continue;
-    const destinations = enrollment(row.destinationsJson, row.recordId);
+    const destinations = enrollment(row.destinationsJson);
     if (!destinations) continue;
     let valid = true;
     for (const destination of destinations) {
@@ -78,10 +79,11 @@ export async function nativeDirectoryOrganizationChoices(env: Env): Promise<Nati
           || !await env.OPS_DB.withSession("first-primary").prepare(`SELECT 1 present
             FROM project_alpha_active_directory_mappings mapping
             WHERE mapping.source_id=? AND mapping.source_instance_id=? AND mapping.application_id=? AND mapping.history_epoch_id=?
-              AND mapping.resource_type='organization' AND mapping.record_id=?
+              AND mapping.resource_type='organization' AND mapping.record_id=? AND mapping.external_id=?
             GROUP BY mapping.source_id,mapping.source_instance_id,mapping.application_id,mapping.history_epoch_id,
               mapping.resource_type,mapping.record_id HAVING count(*)=1 LIMIT 1`).bind(destination.sourceId,
-              destination.sourceInstanceUUID, destination.applicationUUID, destination.historyEpoch, row.recordId).first()) {
+              destination.sourceInstanceUUID, destination.applicationUUID, destination.historyEpoch, row.recordId,
+              destination.externalCanonicalId).first()) {
           valid = false; break;
         }
       } catch { valid = false; break; }

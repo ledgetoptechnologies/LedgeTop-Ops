@@ -88,6 +88,8 @@ async function fullSchema(t){
   ]);
   const migrationDir=path.join(root,"apps/operations/migrations");
   const migrations=readdirSync(migrationDir).filter(name=>/^\d{4}_.+\.sql$/.test(name)&&name.slice(0,4)<="0184").sort();
+  const currentSuffix=readdirSync(migrationDir).filter(name=>/^\d{4}_.+\.sql$/.test(name)
+    &&name.slice(0,4)>="0185"&&name.slice(0,4)<="0203").sort();
   assert.equal(migrations.length,184);
   const acquiredOrg="77777777-7777-4777-8777-777777777777",acquiredClient="88888888-8888-4888-8888-888888888888";
   const acquiredDestination={sourceId:"project-alpha:primary",sourceInstanceUUID:"33333333-3333-4333-8333-333333333333",
@@ -143,6 +145,14 @@ async function fullSchema(t){
     const receipt=await db.prepare("SELECT * FROM project_alpha_existing_directory_binding_activation_receipts WHERE activation_id=?").bind(activation).first();
     assert.equal(mapping.provenance_id,activation);assert.equal(receipt.record_id,recordId);assert.equal(mapping.external_id,receipt.external_id);
   }
+  // Preserve the reviewed 0184 acquisition checkpoint above, then move the
+  // genuine database to 0203 before invoking the current relationship/profile writers.
+  for(const name of currentSuffix){
+    const sql=readFileSync(path.join(migrationDir,name),"utf8");
+    await db.batch(splitD1MigrationStatements(sql).map(statement=>db.prepare(statement)));
+  }
+  assert.equal(currentSuffix.at(-1),"0203_effective_native_directory_enrollment_consumers.sql");
+  assert.deepEqual((await db.prepare("PRAGMA foreign_key_check").all()).results,[]);
   const acquiredEnv={OPS_DB:db,PROJECT_ALPHA_API_V2_CONNECTIONS:JSON.stringify({version:1,instances:{[acquiredDestination.sourceId]:{
     sourceId:acquiredDestination.sourceId,enabled:true,baseUrl:acquiredDestination.origin,apiKey:"local-test-only",
     sourceInstanceId:acquiredDestination.sourceInstanceUUID,applicationId:acquiredDestination.applicationUUID,historyEpoch:acquiredDestination.historyEpoch}}})};
@@ -398,6 +408,6 @@ async function fullSchema(t){
   const drift=clone(settlement);drift.settled.outbox[1].destination_base_url="https://wrong.example.test";
   assert.throws(()=>validateAcknowledgedScalarUpdate(drift),/outbox identity/);
 }
-test("full 0001-0184 schema settles acquired linked-client and organization updates before exact grant cleanup",{timeout:240_000},async t=>{
+test("reviewed 0001-0184 acquisition checkpoint advances through canonical 0203 before HEAD writer settlement and cleanup",{timeout:240_000},async t=>{
   try{return await fullSchema(t)}catch(error){process.stderr.write(`${error?.stack??error}\n`);throw error}
 });

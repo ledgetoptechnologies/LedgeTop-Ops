@@ -41,6 +41,7 @@ const ids = { mutation: "11111111-1111-4111-8111-111111111111", client: "2222222
   instance: "33333333-3333-4333-8333-333333333333", application: "44444444-4444-4444-8444-444444444444",
   epoch: "55555555-5555-4555-8555-555555555555", command: "66666666-6666-4666-8666-666666666666" };
 const sourceId = "project-alpha:primary", origin = "https://pa.example.test";
+const secondarySourceId = "project-alpha:secondary", secondaryOrigin = "https://pa-secondary.example.test";
 const acquiredOrganizationId = "acquired:organization:west";
 const scopes = [{ businessAreaId: "drone", divisionId: null }];
 const organization = { name: "Example Org", generalEmail: "ops@example.test", generalPhone: "", addressLine1: "",
@@ -140,7 +141,8 @@ function database(options: { enrollment?: unknown; outboxState?: string; missing
           value = options.terminalPredecessor === undefined ? null : options.terminalPredecessor;
         else if (sql.includes("project_alpha_directory_relationship_outbox WHERE command_id")) value = options.outboxState ?? "pending";
         else if (sql.includes("project_alpha_directory_outbox WHERE command_id"))
-          value = options.missingProfileOutbox ? null : { source_id: sourceId, state: options.outboxState ?? "pending" };
+          value = options.missingProfileOutbox ? null : { source_id: values[0] === "77777777-7777-4777-8777-777777777777"
+            ? secondarySourceId : sourceId, state: options.outboxState ?? "pending" };
         if (column && value && typeof value === "object") return ((value as Row)[column] ?? null) as T | null;
         return value as T | null;
       },
@@ -203,9 +205,11 @@ describe("native Directory profile routes", () => {
     mocks.inventory.mockResolvedValue({ status: "observed", inventory: { authoritative: false, sourceId,
       sourceInstanceId: ids.instance, applicationId: ids.application, historyEpoch: ids.epoch,
       requestId: "77777777-7777-4777-8777-777777777777", authorizationGeneration: "7", resources: [], nextCursor: null } });
-    mocks.persistInventory.mockResolvedValue({ status: "persisted", itemCount: 0, conflictCount: 0, nextCursor: null,
-      continuationIdentity: { sourceInstanceId: ids.instance, applicationId: ids.application,
-        historyEpoch: ids.epoch, authorizationGeneration: "7" } });
+    mocks.persistInventory.mockImplementation(async (_db: unknown, inventory: { sourceInstanceId: string;
+      applicationId: string; historyEpoch: string; authorizationGeneration: string }) => ({ status: "persisted",
+      itemCount: 0, conflictCount: 0, nextCursor: null, continuationIdentity: {
+        sourceInstanceId: inventory.sourceInstanceId, applicationId: inventory.applicationId,
+        historyEpoch: inventory.historyEpoch, authorizationGeneration: inventory.authorizationGeneration } }));
     mocks.remoteHead.mockResolvedValue({ projectAlphaPublicId: "a".repeat(32), externalCanonicalId: ids.client, revision: "4" });
     mocks.bindingStatus.mockResolvedValue({ status: "observed", observation: { authoritative: false, sourceId,
       sourceInstanceId: ids.instance, applicationId: ids.application, historyEpoch: ids.epoch,
@@ -270,6 +274,116 @@ describe("native Directory profile routes", () => {
       scopes: [{ id: "drone", name: "Drone operations", divisions: [{ id: "survey", name: "Survey" }] }],
       organizations: [{ recordId: acquiredOrganizationId, expectedVersion: 3, name: "Acquired Organization",
         sourceIds: [sourceId, "project-alpha:secondary"] }] });
+  });
+
+  it("offers and creates against both configured PA sources while retaining one-to-one server authority", async () => {
+    const secondaryInstance = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const secondaryApplication = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    const secondaryEpoch = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+    const sources = [sourceId, secondarySourceId];
+    const destination = (id: string) => id === sourceId
+      ? { sourceId, enabled: true, connection: { baseUrl: origin, expectedSourceInstanceId: ids.instance,
+        expectedApplicationId: ids.application, expectedHistoryEpoch: ids.epoch } }
+      : { sourceId: secondarySourceId, enabled: true, connection: { baseUrl: secondaryOrigin,
+        expectedSourceInstanceId: secondaryInstance, expectedApplicationId: secondaryApplication,
+        expectedHistoryEpoch: secondaryEpoch } };
+    mocks.sourceIds.mockReturnValue(sources);
+    mocks.connection.mockImplementation((_env: unknown, id: string) => destination(id));
+    mocks.inventory.mockImplementation(async (_env: unknown, id: string) => {
+      const configured = destination(id);
+      return { status: "observed", inventory: { authoritative: false, sourceId: id,
+        sourceInstanceId: configured.connection.expectedSourceInstanceId,
+        applicationId: configured.connection.expectedApplicationId, historyEpoch: configured.connection.expectedHistoryEpoch,
+        requestId: "dddddddd-dddd-4ddd-8ddd-dddddddddddd", authorizationGeneration: "7", resources: [], nextCursor: null } };
+    });
+    const choices = await fixture().send(`${NATIVE_DIRECTORY_PROFILE_ROUTE}/create-options?kind=organization`, null, "GET");
+    expect(choices.status).toBe(200);
+    await expect(choices.json()).resolves.toMatchObject({ sources: [
+      { id: sourceId, name: "Project Alpha (primary)" },
+      { id: secondarySourceId, name: "Project Alpha (secondary)" },
+    ] });
+
+    const db = database(), app = fixture({ db });
+    const intent = { kind: "organization" as const, mutationId: ids.mutation, sourceIds: sources, scopes, profile: organization };
+    const admission = await app.send(`${NATIVE_DIRECTORY_PROFILE_ROUTE}/create-admissions`, intent);
+    expect(admission.status).toBe(200);
+    expect(JSON.parse(String(db.preparedAdmission()?.destinations_json))).toEqual([
+      { sourceId, sourceInstanceUUID: ids.instance, applicationUUID: ids.application, historyEpoch: ids.epoch,
+        origin, externalCanonicalId: ids.mutation },
+      { sourceId: secondarySourceId, sourceInstanceUUID: secondaryInstance, applicationUUID: secondaryApplication,
+        historyEpoch: secondaryEpoch, origin: secondaryOrigin, externalCanonicalId: ids.mutation },
+    ]);
+
+    mocks.writer.mockResolvedValueOnce({ status: "written", replayed: false, mutationId: ids.mutation,
+      recordId: ids.mutation, kind: "organization", version: 1,
+      commandIds: [ids.command, "77777777-7777-4777-8777-777777777777"] });
+    const response = await app.send(`${NATIVE_DIRECTORY_PROFILE_ROUTE}/organizations`, {
+      mutationId: ids.mutation, sourceIds: sources, scopes, profile: organization,
+    });
+    expect(response.status).toBe(202);
+    await expect(response.json()).resolves.toMatchObject({ destinations: [
+      { sourceId, state: "pending" }, { sourceId: secondarySourceId, state: "pending" },
+    ] });
+    expect(mocks.writer).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      createAdmissionId: `native-directory-create:${ids.mutation}`,
+      destinations: expect.arrayContaining([
+        expect.objectContaining({ sourceId, sourceInstanceUUID: ids.instance, expectedAuthorizationGeneration: "7" }),
+        expect.objectContaining({ sourceId: secondarySourceId, sourceInstanceUUID: secondaryInstance,
+          expectedAuthorizationGeneration: "7" }),
+      ]),
+    }));
+  });
+
+  it("prepares a standalone client create across both configured sources with an explicitly null relationship", async () => {
+    const secondaryInstance = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const secondaryApplication = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    const secondaryEpoch = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+    const clientMutationId = "99999999-9999-4999-8999-999999999999";
+    const sources = [sourceId, secondarySourceId];
+    const destination = (id: string) => id === sourceId
+      ? { sourceId, enabled: true, connection: { baseUrl: origin, expectedSourceInstanceId: ids.instance,
+        expectedApplicationId: ids.application, expectedHistoryEpoch: ids.epoch } }
+      : { sourceId: secondarySourceId, enabled: true, connection: { baseUrl: secondaryOrigin,
+        expectedSourceInstanceId: secondaryInstance, expectedApplicationId: secondaryApplication,
+        expectedHistoryEpoch: secondaryEpoch } };
+    mocks.sourceIds.mockReturnValue(sources);
+    mocks.connection.mockImplementation((_env: unknown, id: string) => destination(id));
+    mocks.inventory.mockImplementation(async (_env: unknown, id: string) => {
+      const configured = destination(id);
+      return { status: "observed", inventory: { authoritative: false, sourceId: id,
+        sourceInstanceId: configured.connection.expectedSourceInstanceId,
+        applicationId: configured.connection.expectedApplicationId, historyEpoch: configured.connection.expectedHistoryEpoch,
+        requestId: "dddddddd-dddd-4ddd-8ddd-dddddddddddd", authorizationGeneration: "7", resources: [], nextCursor: null } };
+    });
+    const db = database(), app = fixture({ db });
+    const intent = { kind: "client" as const, mutationId: clientMutationId, sourceIds: sources, scopes, profile: client,
+      relationship: { organizationRecordId: null, expectedOrganizationVersion: null } };
+    const admission = await app.send(`${NATIVE_DIRECTORY_PROFILE_ROUTE}/create-admissions`, intent, "POST", clientMutationId);
+    expect(admission.status).toBe(200);
+    expect(db.preparedAdmission()).toEqual(expect.objectContaining({ record_kind: "client", record_id: clientMutationId }));
+    expect(JSON.parse(String(db.preparedAdmission()?.destinations_json))).toHaveLength(2);
+    expect(db.preparedRelationship()).toEqual({ organization_record_id: null, organization_record_version: null });
+
+    mocks.writer.mockResolvedValueOnce({ status: "written", replayed: false, mutationId: clientMutationId,
+      recordId: clientMutationId, kind: "client", version: 1,
+      commandIds: [ids.command, "77777777-7777-4777-8777-777777777777"] });
+    const mutation = { mutationId: clientMutationId, sourceIds: sources, scopes, profile: client,
+      relationship: { organizationRecordId: null, expectedOrganizationVersion: null } };
+    const response = await app.send(`${NATIVE_DIRECTORY_PROFILE_ROUTE}/standalone-clients`, mutation, "POST", clientMutationId);
+    expect(response.status).toBe(202);
+    await expect(response.json()).resolves.toMatchObject({ destinations: [
+      { sourceId, state: "pending" }, { sourceId: secondarySourceId, state: "pending" },
+    ] });
+    expect(mocks.writer).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      kind: "client", createAdmissionId: `native-directory-create:${clientMutationId}`,
+      relationship: { organizationRecordId: null, expectedRelationshipVersion: 0 },
+      destinations: expect.arrayContaining([
+        expect.objectContaining({ sourceId, sourceInstanceUUID: ids.instance, expectedAuthorizationGeneration: "7" }),
+        expect.objectContaining({ sourceId: secondarySourceId, sourceInstanceUUID: secondaryInstance,
+          expectedAuthorizationGeneration: "7" }),
+      ]),
+      actor: expect.objectContaining({ selectedGrantId: "edit-grant", selectedIdentityGrantId: "identity-grant" }),
+    }));
   });
 
   it("does not offer choices when a required create permission is denied, a division is inactive, or the API-v2 source is disabled", async () => {
@@ -640,6 +754,71 @@ describe("native Directory profile routes", () => {
       expect(denied.status).toBe(409);
       await expect(denied.json()).resolves.toEqual({ status: "conflict", reason: "relationship_delivery_pending" });
     }
+  });
+
+  it("updates an organization across both enrolled sources and fails closed on source-tuple drift", async () => {
+    const secondaryInstance = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const secondaryApplication = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    const secondaryEpoch = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+    const sources = [sourceId, secondarySourceId];
+    const destination = (id: string) => id === sourceId
+      ? { sourceId, enabled: true, connection: { baseUrl: origin, expectedSourceInstanceId: ids.instance,
+        expectedApplicationId: ids.application, expectedHistoryEpoch: ids.epoch } }
+      : { sourceId: secondarySourceId, enabled: true, connection: { baseUrl: secondaryOrigin,
+        expectedSourceInstanceId: secondaryInstance, expectedApplicationId: secondaryApplication,
+        expectedHistoryEpoch: secondaryEpoch } };
+    const enrollment = [
+      { sourceId, sourceInstanceUUID: ids.instance, applicationUUID: ids.application, historyEpoch: ids.epoch,
+        origin, externalCanonicalId: ids.client },
+      { sourceId: secondarySourceId, sourceInstanceUUID: secondaryInstance, applicationUUID: secondaryApplication,
+        historyEpoch: secondaryEpoch, origin: secondaryOrigin, externalCanonicalId: ids.client },
+    ];
+    mocks.sourceIds.mockReturnValue(sources);
+    mocks.connection.mockImplementation((_env: unknown, id: string) => destination(id));
+    mocks.inventory.mockImplementation(async (_env: unknown, id: string) => {
+      const configured = destination(id);
+      return { status: "observed", inventory: { authoritative: false, sourceId: id,
+        sourceInstanceId: configured.connection.expectedSourceInstanceId,
+        applicationId: configured.connection.expectedApplicationId, historyEpoch: configured.connection.expectedHistoryEpoch,
+        requestId: "dddddddd-dddd-4ddd-8ddd-dddddddddddd", authorizationGeneration: "7", resources: [], nextCursor: null } };
+    });
+    mocks.remoteHead.mockImplementation(async (_db: unknown, _kind: unknown, _record: unknown, _version: unknown,
+      enrolled: { externalCanonicalId: string }) => ({ projectAlphaPublicId: "a".repeat(32),
+      externalCanonicalId: enrolled.externalCanonicalId, revision: "4" }));
+    mocks.bindingStatus.mockImplementation(async (_env: unknown, id: string, kind: string, externalId: string,
+      publicId: string) => {
+      const configured = destination(id);
+      return { status: "observed", observation: { authoritative: false, sourceId: id,
+        sourceInstanceId: configured.connection.expectedSourceInstanceId,
+        applicationId: configured.connection.expectedApplicationId, historyEpoch: configured.connection.expectedHistoryEpoch,
+        requestId: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee", authorizationGeneration: "7",
+        binding: { type: kind, externalId, publicId, createdAt: "2026-10-06T00:00:00.000Z" },
+        resource: { revision: "4", present: true } } };
+    });
+
+    const body = { mutationId: ids.mutation, expectedLocalVersion: 1, profile: organization };
+    const route = `${NATIVE_DIRECTORY_PROFILE_ROUTE}/organizations/${ids.client}`;
+    mocks.writer.mockResolvedValueOnce({ status: "written", replayed: false, mutationId: ids.mutation,
+      recordId: ids.client, kind: "organization", version: 2,
+      commandIds: [ids.command, "77777777-7777-4777-8777-777777777777"] });
+    const accepted = await fixture({ db: database({ enrollment, outboxState: "acknowledged" }) }).send(route, body, "PATCH");
+    expect(accepted.status).toBe(200);
+    await expect(accepted.json()).resolves.toMatchObject({ destinations: [
+      { sourceId, state: "acknowledged" }, { sourceId: secondarySourceId, state: "acknowledged" },
+    ] });
+    expect(mocks.writer).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ operation: "update",
+      recordId: ids.client, expectedLocalVersion: 1,
+      destinations: expect.arrayContaining([
+        expect.objectContaining({ ...enrollment[0], expectedAuthorizationGeneration: "7" }),
+        expect.objectContaining({ ...enrollment[1], expectedAuthorizationGeneration: "7" }),
+      ]) }));
+
+    mocks.writer.mockClear();
+    const driftedEnrollment = [enrollment[0], { ...enrollment[1], origin: "https://unexpected-pa.example.test" }];
+    const rejected = await fixture({ db: database({ enrollment: driftedEnrollment }) }).send(route, body, "PATCH");
+    expect(rejected.status).toBe(409);
+    await expect(rejected.json()).resolves.toEqual({ status: "conflict", reason: "source_authority_unavailable" });
+    expect(mocks.writer).not.toHaveBeenCalled();
   });
 
   it("requires a live binding at the persisted generation and exact durable revision before update", async () => {

@@ -9,6 +9,9 @@ const owner = Object.freeze({ email: "owner@staging.example.test", displayName: 
 const repositoryRoot = path.resolve(import.meta.dirname, "..");
 const sourceClient = fs.readFileSync(new URL("../apps/client/migrations/0002_seed_initial_staff.sql", import.meta.url), "utf8");
 const sourceOperations = fs.readFileSync(new URL("../apps/operations/migrations/0002_seed_acl.sql", import.meta.url), "utf8");
+const operationsLocalSuffix = ["0200_native_directory_active_binding_refresh_supersessions.sql",
+  "0201_native_directory_lifecycle.sql", "0202_reviewed_import_enrollment.sql",
+  "0203_effective_native_directory_enrollment_consumers.sql"];
 
 function fixture() {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), "ltds-staging-bootstrap-"));
@@ -135,6 +138,17 @@ test("rejects one-byte drift in each reviewed native project migration", () => {
   }
 });
 
+test("rejects drift in every reviewed local suffix migration and unknown 0204", () => {
+  for (const name of operationsLocalSuffix) {
+    const base = fixture();
+    fs.appendFileSync(path.join(base, "apps", "operations", "migrations", name), " ");
+    assert.throws(() => buildArtifacts(base, owner), /operations canonical migration contents do not match the reviewed full-chain digest/);
+  }
+  const unknown = fixture();
+  fs.writeFileSync(path.join(unknown, "apps", "operations", "migrations", "0204_unknown.sql"), "SELECT 1;\n");
+  assert.throws(() => buildArtifacts(unknown, owner), /exact complete reviewed chain/);
+});
+
 test("rejects one-byte content drift in either canonical seed before transformation", () => {
   for (const [source, seed, app] of [
     ["client", "0002_seed_initial_staff.sql", "delivery"],
@@ -207,8 +221,8 @@ test("validates the complete checked-in source and builds only the authorized Cl
   ]);
   assert.equal(artifacts.delivery.files.at(-1).name, "0230_operations_portal_native_delivery_terminal_cancellations.sql");
   assert.equal(artifacts.operations.files.at(-1).name, "0199_native_directory_profile_binding_continuations.sql");
-  assert.equal(artifacts.operations.files.some(({ name }) => name.startsWith("0200_")), false,
-    "the exact current repository append must not enter the bootstrap artifact");
+  assert.equal(artifacts.operations.files.some(({ name }) => /^020[0-3]_/.test(name)), false,
+    "the exact current repository suffix must not enter the bootstrap artifact");
   const literalPrefixGuard = artifacts.operations.files.find(({ name }) => name === "0187_operations_portal_native_delivery_literal_prefix_guard.sql");
   assert.equal(literalPrefixGuard.generatedSha256, literalPrefixGuard.sourceSha256,
     "bootstrap must preserve the literal-prefix guard migration byte-for-byte");
@@ -221,7 +235,7 @@ test("validates the complete checked-in source and builds only the authorized Cl
 test("preserves exact historical 0199 and 0196 chains and rejects an incomplete 0197 successor", () => {
   const base = fixture();
   const directory = path.join(base, "apps", "operations", "migrations");
-  fs.rmSync(path.join(directory, "0200_native_directory_active_binding_refresh_supersessions.sql"));
+  for (const name of operationsLocalSuffix) fs.rmSync(path.join(directory, name));
   assert.equal(buildArtifacts(base, owner).operations.files.length, 199);
   fs.rmSync(path.join(directory, "0199_native_directory_profile_binding_continuations.sql"));
   assert.equal(buildArtifacts(base, owner).operations.files.length, 198);
@@ -242,7 +256,7 @@ test("preserves the exact previously reviewed 147/192 bootstrap chains", () => {
     "0194_operations_portal_native_delivery_terminal_cancellations.sql",
     "0195_client_hub_native_project_current_owner_observation.sql", "0196_native_directory_maintenance_authority.sql",
     "0197_operations_portal_native_delivery_cancellation_checkpoint_scope.sql", "0198_native_directory_active_binding_revision_refresh.sql", "0199_native_directory_profile_binding_continuations.sql",
-    "0200_native_directory_active_binding_refresh_supersessions.sql"])
+    ...operationsLocalSuffix])
     fs.rmSync(path.join(base, "apps", "operations", "migrations", name));
   const artifacts = buildArtifacts(base, owner);
   assert.equal(artifacts.delivery.files.length, 147);
@@ -262,7 +276,7 @@ test("accepts exact historical 187 and 190 chains and rejects partial successors
     "0194_operations_portal_native_delivery_terminal_cancellations.sql",
     "0195_client_hub_native_project_current_owner_observation.sql", "0196_native_directory_maintenance_authority.sql",
     "0197_operations_portal_native_delivery_cancellation_checkpoint_scope.sql", "0198_native_directory_active_binding_revision_refresh.sql", "0199_native_directory_profile_binding_continuations.sql",
-    "0200_native_directory_active_binding_refresh_supersessions.sql"])
+    ...operationsLocalSuffix])
     fs.rmSync(path.join(historical, "apps", "operations", "migrations", name));
   const artifact = buildArtifacts(historical, owner).operations;
   assert.equal(artifact.files.length, 187);
@@ -274,7 +288,7 @@ test("accepts exact historical 187 and 190 chains and rejects partial successors
     "0193_operations_portal_native_delivery_dead_conflict_recovery.sql", "0194_operations_portal_native_delivery_terminal_cancellations.sql",
     "0195_client_hub_native_project_current_owner_observation.sql", "0196_native_directory_maintenance_authority.sql",
     "0197_operations_portal_native_delivery_cancellation_checkpoint_scope.sql", "0198_native_directory_active_binding_revision_refresh.sql", "0199_native_directory_profile_binding_continuations.sql",
-    "0200_native_directory_active_binding_refresh_supersessions.sql"])
+    ...operationsLocalSuffix])
     fs.rmSync(path.join(historical190, "apps", "operations", "migrations", name));
   const artifact190 = buildArtifacts(historical190, owner).operations;
   assert.equal(artifact190.files.length, 190);

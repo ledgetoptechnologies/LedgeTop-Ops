@@ -17,6 +17,39 @@ const response = {
 const financialPath = (authorityId: string) =>
   `/api/client/v2/operations/home/${encodeURIComponent(authorityId)}/financial`;
 
+test("a missing billing grant shows an empty financial state, not a connection failure", async ({ page }) => {
+  await page.route("**/api/client/**", route => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === "/api/client/v2/operations/home") return route.fulfill({ json: response });
+    if (path === financialPath(response.homes[0]!.authorityId)) return route.fulfill({
+      status: 403, json: { error: "Client access is not provisioned" },
+    });
+    if (path === "/api/client/session") return route.fulfill({ status: 401, json: { error: "Sign in required" } });
+    return route.fulfill({ status: 404, json: { error: "not found" } });
+  });
+  await page.goto("/portal");
+  const financial = page.getByRole("region", { name: "Invoices and contracts" });
+  await expect(financial.getByText("No invoices or contracts are currently available.")).toBeVisible();
+  await expect(financial.getByText("Financial information is temporarily unavailable.")).toHaveCount(0);
+  await expect(financial.getByRole("link")).toHaveCount(0);
+});
+
+test("a financial service failure remains unavailable", async ({ page }) => {
+  await page.route("**/api/client/**", route => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === "/api/client/v2/operations/home") return route.fulfill({ json: response });
+    if (path === financialPath(response.homes[0]!.authorityId)) return route.fulfill({
+      status: 503, json: { error: "Client financial information is temporarily unavailable" },
+    });
+    if (path === "/api/client/session") return route.fulfill({ status: 401, json: { error: "Sign in required" } });
+    return route.fulfill({ status: 404, json: { error: "not found" } });
+  });
+  await page.goto("/portal");
+  const financial = page.getByRole("region", { name: "Invoices and contracts" });
+  await expect(financial.getByText("Financial information is temporarily unavailable.")).toBeVisible();
+  await expect(financial.getByRole("link")).toHaveCount(0);
+});
+
 test("financial panel clears the prior authority synchronously while a replacement read is deferred", async ({ page }) => {
   const authorityB="22345678-1234-4123-8123-123456789abc";
   const authorityA=response.homes[0]!.authorityId;

@@ -12,6 +12,12 @@ import { AUTHORITY_MIGRATIONS_TABLE, buildAuthorityArtifacts } from "./productio
 const root = path.resolve(import.meta.dirname, "..");
 const migrationsDirectory = path.join(root, "apps", "operations", "migrations");
 const ledgerCapture = path.join(root, "docs", "staging", "production-migration-ledger-order-2026-10-12.md");
+const capturedBoundary = 124;
+const reviewedCurrentSuffix = Object.freeze([
+  Object.freeze({ name: "0201_native_directory_lifecycle.sql", sha256: "7bdd6d02c5ab97ba705e9a6d32238917ffb9a0757f3aa49d4eb8dcf7795e2878" }),
+  Object.freeze({ name: "0202_reviewed_import_enrollment.sql", sha256: "77388f0dfa96e3715ef9754dd2dc92a7b1ec18139be0b8bf4590b79a3a77cedf" }),
+  Object.freeze({ name: "0203_effective_native_directory_enrollment_consumers.sql", sha256: "3e331b0de53c0e4ca0b22395b879ef0e799f66872c2f49afd4ef7f7a58be0008" }),
+]);
 const owner = Object.freeze({
   staffId: "staff-structural-rehearsal-owner",
   email: "structural-rehearsal-owner@example.invalid",
@@ -139,29 +145,53 @@ function schema(db) {
     WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name`).all().map(row => ({ ...row }));
 }
 
-test("synthetic pinned-9000 authority survives the captured 0124-to-0200 structural upgrade", () => {
+test("synthetic pinned-9000 authority survives the captured 0124 boundary through the reviewed 0203 chain", () => {
   const captured = capturedOperationsLedger(), names = sourceMigrations();
-  assert.equal(captured.length, 124);
-  assert.deepEqual(captured.map(row => row.id), Array.from({ length: 124 }, (_, index) => index + 1));
-  assert.deepEqual(names.slice(0, 124), captured.map(row => row.name));
-  assert.equal(names.length, 200);
-  assert.match(names[124], /^0125_/);
-  assert.match(names.at(-1), /^0200_/);
+  assert.equal(captured.length, capturedBoundary);
+  assert.deepEqual(captured.map(row => row.id), Array.from({ length: capturedBoundary }, (_, index) => index + 1));
+  assert.deepEqual(names.slice(0, capturedBoundary), captured.map(row => row.name));
+  assert.equal(names.length, 203);
+  assert.match(names[capturedBoundary], /^0125_/);
+  assert.match(names[199], /^0200_/);
+  assert.deepEqual(names.slice(200), reviewedCurrentSuffix.map(row => row.name));
+  for (const row of reviewedCurrentSuffix) assert.equal(
+    createHash("sha256").update(fs.readFileSync(path.join(migrationsDirectory, row.name))).digest("hex"), row.sha256,
+    `${row.name} must remain the reviewed current-chain byte sequence`,
+  );
 
   const db = emptyDatabase();
-  for (const name of names.slice(0, 124)) applyMigration(db, name);
+  for (const name of names.slice(0, capturedBoundary)) applyMigration(db, name);
   seedReviewedOwner(db);
   createAuxiliaryLedger(db);
-  const artifact = buildAuthorityArtifacts(packetFixture(names.slice(0, 124)), packetInput(), "provision");
+  const artifact = buildAuthorityArtifacts(packetFixture(names.slice(0, capturedBoundary)), packetInput(), "provision");
   assert.equal(artifact.provision.name, "9000_production-authority-project-v2-001_provision.sql");
   applyMigration(db, artifact.provision.name, AUTHORITY_MIGRATIONS_TABLE, artifact.provision.sql);
 
   const before = snapshot(db);
-  for (const name of names.slice(124)) applyMigration(db, name);
+  for (const name of names.slice(capturedBoundary, 200)) applyMigration(db, name);
+  const through0200 = snapshot(db);
+  const nativeEnrollmentsThrough0200 = canonicalRows(db, "native_directory_enrollments");
+  const directoryRecordsThrough0200 = canonicalRows(db, "operations_directory_records");
+  for (const name of names.slice(200)) applyMigration(db, name);
   const after = snapshot(db);
   assert.deepEqual(after.value, before.value);
   assert(before.bytes.equals(after.bytes));
   assert.equal(after.sha256, before.sha256);
+  assert.deepEqual(after.value, through0200.value, "0201-0203 must preserve pinned production-authority rows");
+  assert.deepEqual(canonicalRows(db, "native_directory_enrollments"), nativeEnrollmentsThrough0200,
+    "0201-0203 must not rewrite the pre-existing native enrollment authority surface");
+  assert.deepEqual(canonicalRows(db, "operations_directory_records"), directoryRecordsThrough0200,
+    "0201-0203 must not rewrite pre-existing directory records");
+  assert.equal(db.prepare("SELECT count(*) AS count FROM reviewed_import_enrollment_admissions").get().count, 0);
+  assert.equal(db.prepare("SELECT count(*) AS count FROM reviewed_import_enrollment_receipts").get().count, 0);
+  assert.equal(db.prepare("SELECT count(*) AS count FROM operations_directory_lifecycle_state").get().count, 0,
+    "the current suffix must not synthesize lifecycle authority for historical rows");
+  assert.equal(db.prepare("SELECT count(*) AS count FROM effective_native_directory_enrollments").get().count,
+    nativeEnrollmentsThrough0200.length, "the effective view must preserve the native enrollment read surface");
+  const reviewedGuards = db.prepare(`SELECT name FROM sqlite_master WHERE type='trigger' AND name LIKE 'reviewed_import_enrollment_%' ORDER BY name`).all();
+  assert(reviewedGuards.some(row => row.name === "reviewed_import_enrollment_admissions_shape"));
+  assert(reviewedGuards.some(row => row.name === "reviewed_import_enrollment_receipts_guard"));
+  assert(reviewedGuards.some(row => row.name === "reviewed_import_enrollment_receipts_native_history_mapping_guard"));
 
   assert.deepEqual(db.prepare("SELECT id,name FROM d1_migrations ORDER BY id").all().map(row => ({ ...row })),
     names.map((name, index) => ({ id: index + 1, name })));

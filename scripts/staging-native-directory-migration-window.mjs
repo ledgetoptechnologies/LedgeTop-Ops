@@ -25,14 +25,27 @@ const require = createRequire(path.join(root, "apps/operations/package.json"));
 const { unstable_splitSqlQuery: splitSql } = require("wrangler");
 const account = "846c924bf17bf4f3dd15c97a4c5d1d51";
 const sha = value => crypto.createHash("sha256").update(value).digest("hex");
+// SQLite stores schema SQL without comments which precede CREATE. Normalize
+// each D1 statement the same way, and omit only the foreign_keys preamble, so
+// every reviewed object (including each migration's first table) is compared.
+export const reviewedNativeDirectorySchemaDefinitions = sql => {
+  const statements = splitSql(sql.replace(/\r\n/gu, "\n")).map(raw => {
+    const lines = raw.trim().split("\n");
+    while (lines.length && (!lines[0].trim() || lines[0].trim().startsWith("--"))) lines.shift();
+    return lines.join("\n").trim();
+  }).filter(statement => statement && !/^PRAGMA\s+foreign_keys\s*=\s*ON\s*;?$/iu.test(statement));
+  return reviewedSchemaDefinitions(statements.join(";\n"));
+};
 // Shared lifecycle; window wrappers provide immutable reviewed specifications.
 export function createNativeDirectoryMigrationWindow(SPEC, sourceCiGate = null) {
   assert(SPEC.application === "operations" && SPEC.preservationPolicy === "strict"
     && SPEC.database === "78b34173-b168-4e3d-9832-bb9d245cc6b8" && SPEC.databaseName === "ltds-ops-staging" && SPEC.binding === "OPS_DB",
     "only the pinned Operations staging boundary is allowed");
-  assert(SPEC.from === 196 && SPEC.to === 198 || SPEC.from === 198 && SPEC.to === 199,
+  assert(SPEC.from === 196 && SPEC.to === 198 || SPEC.from === 198 && SPEC.to === 199
+    || SPEC.from === 200 && SPEC.to === 203,
     "only reviewed native Directory migration windows are allowed");
-  if (SPEC.to === 199) assert.equal(typeof sourceCiGate, "function", "0199 source CI execution gate required");
+  if (SPEC.to === 199 || SPEC.to === 203)
+    assert.equal(typeof sourceCiGate, "function", `${String(SPEC.to).padStart(4, "0")} source CI execution gate required`);
   const window = `${SPEC.from}-${SPEC.to}`;
 
 const safeLabel = value => {
@@ -66,6 +79,39 @@ function restrictPrivate(file) {
   { windowsHide: true, encoding: "utf8", timeout: 30000 });
   assert.equal(result.status, 0, "private artifact ACL failed; no remote write attempted");
 }
+function assertPrivate(file) {
+  regular(file, "private artifact");
+  if (process.platform !== "win32") {
+    assert.equal(fs.statSync(file).mode & 0o077, 0, "private artifact permissions widened after creation");
+    return;
+  }
+  const script = String.raw`
+$ErrorActionPreference = 'Stop'
+Import-Module -Name "$PSHOME\Modules\Microsoft.PowerShell.Security\Microsoft.PowerShell.Security.psd1" -ErrorAction Stop
+$item = Get-Item -LiteralPath $env:CODEX_PRIVATE_ARTIFACT_FILE -Force
+if ($item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) { exit 1 }
+$acl = Get-Acl -LiteralPath $item.FullName
+$user = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+$allowed = @($user, 'S-1-5-18', 'S-1-5-32-544')
+if (-not $acl.AreAccessRulesProtected -or $acl.GetOwner([Security.Principal.SecurityIdentifier]).Value -ne $user) { exit 1 }
+$rules = @($acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]))
+if ($rules.Count -ne 3) { exit 1 }
+$seen = @{}
+foreach ($rule in $rules) {
+  $sid = $rule.IdentityReference.Value
+  if ($sid -notin $allowed -or $seen.ContainsKey($sid) -or $rule.IsInherited -or
+      $rule.AccessControlType -ne [Security.AccessControl.AccessControlType]::Allow -or
+      $rule.FileSystemRights -ne [Security.AccessControl.FileSystemRights]::FullControl -or
+      $rule.InheritanceFlags -ne [Security.AccessControl.InheritanceFlags]::None -or
+      $rule.PropagationFlags -ne [Security.AccessControl.PropagationFlags]::None) { exit 1 }
+  $seen[$sid] = $true
+}
+if ($seen.Count -ne 3) { exit 1 }
+`;
+  const result = spawnSync("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "RemoteSigned", "-Command", script],
+    { windowsHide: true, encoding: "utf8", timeout: 30000, env: { ...process.env, CODEX_PRIVATE_ARTIFACT_FILE: file } });
+  assert.equal(result.status, 0, "private artifact ACL widened after creation; no remote write attempted");
+}
 function privateFile(file, contents = "") {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.writeFileSync(file, "", { flag: "wx", ...(process.platform === "win32" ? {} : { mode: 0o600 }) });
@@ -74,7 +120,6 @@ function privateFile(file, contents = "") {
 }
 const canonicalRows = rows => [...rows].map(row => JSON.stringify(row)).sort();
 const schemaSql = "SELECT type,name,tbl_name,sql FROM sqlite_master WHERE type IN ('table','trigger','view','index') AND name NOT LIKE 'sqlite_%' ORDER BY type,name";
-
 function buildNativeDirectoryMigrationWindowPlan(base = root, label) {
   const artifactSet = safeLabel(label);
   const sourceDirectory = path.join(base, "apps/operations/migrations");
@@ -82,7 +127,8 @@ function buildNativeDirectoryMigrationWindowPlan(base = root, label) {
   assert(entries.every(entry => entry.isFile() && !entry.isSymbolicLink()), "migration chain must contain regular files");
   const sourceNames = entries.map(entry => entry.name).sort();
   const current = OPERATIONS_CURRENT_SOURCE_MIGRATION_CHAIN;
-  if (SPEC.to === 199) assert(sourceNames.length >= SPEC.to, "reviewed source chain must contain the exact 0199 window");
+  if (SPEC.to === 199 || SPEC.to === 203)
+    assert(sourceNames.length >= SPEC.to, `reviewed source chain must contain the exact ${String(SPEC.to).padStart(4, "0")} window`);
   assert.equal(sourceNames.length, current.count, "exact current Operations source inventory required");
   assert.equal(sha(sourceNames.join("\n")), current.namesSha256, "current Operations migration names drifted");
   assert.equal(sha(sourceNames.map(name => `${name}\0${sha(fs.readFileSync(path.join(sourceDirectory, name)))}`).join("\n")),
@@ -145,6 +191,7 @@ async function nativeDirectoryMigrationWindowReadOnlyQueries(token, spec, querie
   return body.result.map(result => {
     assert(result.success && Array.isArray(result.results), "read-only D1 result failed");
     assert.equal(result.meta.changed_db, false, "read query unexpectedly changed D1");
+    if (SPEC.to === 203) assert.equal(result.meta.served_by_primary, true, "0203 precondition read must be served by D1 primary");
     return result.results;
   });
 }
@@ -219,14 +266,18 @@ async function runNativeDirectoryMigrationWindow(argv = process.argv.slice(2), d
     privateFile(plan.backup);
     try { (dependencies.wrangler ?? pinnedWrangler)(token, plan, ["export", SPEC.databaseName, "--remote", "--output", plan.backup]); }
     catch (error) { throw Object.assign(Error("provider export outcome unavailable"), { stage: "provider-export", outcomeCode: error?.outcomeCode }); }
-    try { restrictPrivate(plan.backup); regular(plan.backup, "backup"); assert(fs.statSync(plan.backup).size > 1000, "complete D1 export required"); }
+    try { restrictPrivate(plan.backup); regular(plan.backup, "backup"); assert(fs.statSync(plan.backup).size > 1000,
+      SPEC.to === 203 ? "nonempty D1 export required; independently verify restorability before apply" : "complete D1 export required"); }
     catch (error) { throw Object.assign(error, { stage: "export-verification" }); }
     privateFile(plan.evidence, JSON.stringify({ application: "operations", database: SPEC.database, ...(plan.artifactSet ? { artifactSet: plan.artifactSet } : {}),
       createdAt: new Date().toISOString(), ...(sourceCi ? { sourceCi } : {}), backupSha256: sha(fs.readFileSync(plan.backup)), migrations: plan.migrations, snapshot: current }));
     return { application: "operations", mode, mutationsPerformed: false, backupBytes: fs.statSync(plan.backup).size };
   }
 
-  for (const file of [plan.config, plan.backup, plan.evidence]) regular(file, "private release artifact");
+  for (const file of [plan.config, plan.backup, plan.evidence]) {
+    regular(file, "private release artifact");
+    if (SPEC.to === 203) (dependencies.assertPrivate ?? assertPrivate)(file);
+  }
   const saved = JSON.parse(fs.readFileSync(plan.evidence, "utf8"));
   assert.equal(saved.application, "operations");
   assert.equal(saved.database, SPEC.database);
@@ -251,6 +302,7 @@ async function runNativeDirectoryMigrationWindow(argv = process.argv.slice(2), d
   }
 
   regular(plan.marker, "apply attempt marker");
+  if (SPEC.to === 203) (dependencies.assertPrivate ?? assertPrivate)(plan.marker);
   const marker = JSON.parse(fs.readFileSync(plan.marker, "utf8"));
   if (sourceCiGate) {
     const { sourceCi: attemptCi, ...identity } = marker;
@@ -261,7 +313,8 @@ async function runNativeDirectoryMigrationWindow(argv = process.argv.slice(2), d
     assert.deepEqual(attemptCi, saved.sourceCi, "attempt source CI must match backup");
   } else assertAttemptMarker(marker, plan);
   const sql = plan.migrations.map(item => fs.readFileSync(path.join(plan.directory, item.name), "utf8")).join("\n");
-  assertPreserved(saved.snapshot, current, reviewedSchemaDefinitions(sql), "strict");
+  const definitions = SPEC.to === 203 ? reviewedNativeDirectorySchemaDefinitions(sql) : reviewedSchemaDefinitions(sql);
+  assertPreserved(saved.snapshot, current, definitions, "strict");
   return { application: "operations", mode, applied: SPEC.to, mutationsPerformed: false, retryAllowed: false };
 }
 
@@ -269,7 +322,7 @@ const safeNativeDirectoryMigrationWindowFailure = () => JSON.stringify({
   error: "staging migration boundary rejected; inspect private local evidence",
   retryAllowed: false,
 });
-  return Object.freeze({ assertExactLedger: assertNativeDirectoryExactLedger,
+  return Object.freeze({ assertExactLedger: assertNativeDirectoryExactLedger, assertPrivate,
     buildPlan: buildNativeDirectoryMigrationWindowPlan, materialize: materializeNativeDirectoryMigrationWindow,
     readOnlyQueries: nativeDirectoryMigrationWindowReadOnlyQueries, run: runNativeDirectoryMigrationWindow,
     safeFailure: safeNativeDirectoryMigrationWindowFailure });

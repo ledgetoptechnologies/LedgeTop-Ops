@@ -1,20 +1,13 @@
 import { randomUUID } from 'node:crypto';
-import { readFileSync } from 'node:fs';
 import { expect, it } from 'vitest';
 import { runCanonicalPortalResourceAcceptance } from './helpers/operations-native-portal-resource-acceptance-fixture';
-import { splitD1MigrationStatements } from '../../client/test/helpers/d1-migrations';
 import { writeNativeDirectoryProfile } from '../src/worker/native-directory-profile-writer';
 import { dispatchProjectAlphaDirectoryProfileOutboxCommand } from '../src/worker/project-alpha-directory-profile-outbox-dispatcher';
 import { dispatchNativeDirectoryProfileBindingContinuation } from '../src/worker/native-directory-profile-binding-continuation';
 
-it('continues a genuinely acquired mapping with distinct native and external IDs through canonical 0199', async()=>{
+it('continues a genuinely acquired mapping with distinct native and external IDs through canonical 0203', async()=>{
   await runCanonicalPortalResourceAcceptance(async c=>{
     const db=c.operations;
-    for(const name of ['0197_operations_portal_native_delivery_cancellation_checkpoint_scope.sql',
-      '0198_native_directory_active_binding_revision_refresh.sql','0199_native_directory_profile_binding_continuations.sql']){
-      await db.batch([...splitD1MigrationStatements(readFileSync(new URL(`../migrations/${name}`,import.meta.url),'utf8')).map(sql=>db.prepare(sql)),
-        db.prepare('INSERT INTO d1_migrations(name) VALUES(?)').bind(name)]);
-    }
     const mapping=await db.prepare(`SELECT external_id,project_alpha_public_id public_id,mapping_kind,provenance_id
       FROM project_alpha_active_directory_mappings WHERE record_id=? AND source_id=?`).bind(c.organization,c.sourceId)
       .first<{external_id:string;public_id:string;mapping_kind:string;provenance_id:string}>();
@@ -72,5 +65,5 @@ it('continues a genuinely acquired mapping with distinct native and external IDs
       receipt:await db.prepare('SELECT * FROM native_directory_profile_binding_receipts WHERE job_command_id=?').bind(commandId).first()})).toEqual({status:'acknowledged'});
     expect(posts).toBe(1);expect(await db.prepare('SELECT state FROM native_directory_profile_binding_dispatch WHERE command_id=?').bind(commandId).first('state')).toBe('complete');
     expect((await db.prepare('PRAGMA foreign_key_check').all()).results).toEqual([]);
-  },{stopAfterReady:true});
+  },{stopAfterReady:true,operationsThroughMigration:"0203_effective_native_directory_enrollment_consumers.sql"});
 },240000);

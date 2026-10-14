@@ -1,8 +1,9 @@
 import { afterEach, expect, it } from "vitest";
-import { readFileSync, writeFileSync, unlinkSync } from "node:fs";
+import { readFileSync, writeFileSync, unlinkSync, readdirSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import { resolve } from "node:path";
 import { readLocalScalarSuccessorTuple } from "../src/worker/staging-directory-scalar-successor-head";
+import { splitD1MigrationStatements } from "../../client/test/helpers/d1-migrations";
 
 const root = resolve(import.meta.dirname, "../../..");
 const source = resolve(
@@ -20,18 +21,14 @@ afterEach(() => {
 });
 
 it(
-  "executes the production scalar successor tuple SELECT against the genuine full migration lifecycle",
+  "executes HEAD scalar successor SELECT after historical authority cleanup and canonical upgrade to 0203",
   { timeout: 240_000 },
   async () => {
     let text = readFileSync(source, "utf8");
     text = text
       .replace(
-        "async function lifecycle(t){",
-        "export async function lifecycle(t,successorHeadHook){",
-      )
-      .replace(
-        "assert.deepEqual(validateClosedRelationshipRecoveryLineageV184(recoveryLineage,{root}).grantIds,recoveryGrantIds);",
-        "assert.deepEqual(validateClosedRelationshipRecoveryLineageV184(recoveryLineage,{root}).grantIds,recoveryGrantIds);\n if(successorHeadHook) await successorHeadHook(db,recoveryTarget);",
+        "async function lifecycle(t,postHistoricalLifecycleHook){",
+        "export async function lifecycle(t,postHistoricalLifecycleHook){",
       )
       .replace(/\ntest\("full 0001-0184[\s\S]*$/u, "\n");
     writeFileSync(instrumented, text, "utf8");
@@ -48,6 +45,19 @@ it(
       await module.lifecycle(
         t,
         async (db: D1Database, target: Record<string, string>) => {
+          const migrationDirectory = resolve(root, "apps/operations/migrations");
+          const names = readdirSync(migrationDirectory).filter(name => /^\d{4}_.+\.sql$/u.test(name)).sort();
+          expect(names).toHaveLength(203);
+          expect(names.at(-1)).toBe("0203_effective_native_directory_enrollment_consumers.sql");
+          expect((await db.prepare("SELECT count(*) count FROM d1_migrations").first<{count:number}>())!.count).toBe(195);
+          // Frozen authority has been revoked under its exact 0195 ledger.
+          // Upgrade with actual statements and ledger writes, never fake views.
+          for (const name of names.slice(195)) await db.batch([
+            ...splitD1MigrationStatements(readFileSync(resolve(migrationDirectory, name), "utf8")).map(sql => db.prepare(sql)),
+            db.prepare("INSERT INTO d1_migrations(name) VALUES(?)").bind(name),
+          ]);
+          expect((await db.prepare("SELECT name FROM d1_migrations ORDER BY name").all<{name:string}>()).results.map(row => row.name)).toEqual(names);
+          expect((await db.prepare("PRAGMA foreign_key_check").all()).results).toEqual([]);
           const ack = await db
             .prepare(
               "SELECT revision FROM project_alpha_directory_validated_recovery_relationship_acknowledgements WHERE client_record_id=? AND identity_valid=1",

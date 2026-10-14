@@ -44,7 +44,7 @@ beforeAll(async()=>{
   }
   expect(await db.prepare("SELECT count(*) n FROM project_alpha_api_v2_inventory_conflicts WHERE source_id=? AND inventory_kind='directory' AND resource_type='source' AND conflict_kind='authorization_generation_regressed'").bind(sourceId).first('n')).toBe(1);
   const directory=new URL('../migrations/',import.meta.url);
-  for(const name of readdirSync(directory).filter(name=>/^\d{4}_.+\.sql$/.test(name)&&name.slice(0,4)>'0161'&&name.slice(0,4)<='0200').sort()){
+  for(const name of readdirSync(directory).filter(name=>/^\d{4}_.+\.sql$/.test(name)&&name.slice(0,4)>'0161'&&name.slice(0,4)<='0203').sort()){
     await db.batch([...splitD1MigrationStatements(readFileSync(new URL(name,directory),'utf8')).map(sql=>db.prepare(sql)),db.prepare('INSERT INTO d1_migrations(name) VALUES(?)').bind(name)]);
   }
   await db.batch([

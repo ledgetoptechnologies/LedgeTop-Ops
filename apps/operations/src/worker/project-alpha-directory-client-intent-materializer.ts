@@ -115,7 +115,7 @@ async function exactReservation(db: D1Database, row: Candidate): Promise<Readonl
     && destination.historyEpoch === row.expected_history_epoch_id && destination.origin === row.destination_origin
     && destination.externalCanonicalId === row.external_canonical_id);
   if (matching.length !== 1) return null;
-  const enrolled = (await db.prepare(`SELECT 1 ok FROM native_directory_enrollments enrollment,json_each(enrollment.destinations_json) destination
+  const enrolled = (await db.prepare(`SELECT 1 ok FROM effective_native_directory_enrollments enrollment,json_each(enrollment.destinations_json) destination
     WHERE enrollment.record_id=? AND json_extract(destination.value,'$.sourceId')=?
       AND json_extract(destination.value,'$.sourceInstanceUUID')=? AND json_extract(destination.value,'$.applicationUUID')=?
       AND json_extract(destination.value,'$.historyEpoch')=? AND json_extract(destination.value,'$.origin')=?

@@ -20,6 +20,7 @@ import { validateClosedRelationshipRecoveryLineageV184 } from "./staging-project
 import { validateAcknowledgedScalarUpdate, validatePairedGrantCleanup } from "./staging-directory-scalar-settlement.mjs";
 import { captureDirectoryScalarSnapshot } from "./staging-directory-scalar-evidence-capture.mjs";
 import { STAGING_TARGET } from "./staging-onboarding-native-only-authority-packet.mjs";
+import { loadHistorical0195ScalarWriter } from "./historical-0195-scalar-writer-fixture.mjs";
 
 const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),"..");
 const requireOperations=createRequire(path.join(root,"apps/operations/package.json"));
@@ -36,9 +37,9 @@ const z="0".repeat(64);
 const beforeProfile={name:"Client",email:"before@example.test",phone:"1",addressLine1:"",addressLine2:"",city:"",state:"IL",postalCode:"",country:"US"};
 const afterProfile={...beforeProfile,email:"after@example.test"};
 
-/** This is the reviewed 0001-0184 historical fixture ordering used by the
- * recovery full-schema tests. It preserves every production trigger and only
- * interleaves the minimum pre-existing rows at their historical schema point. */
+/** Historical-shape compatibility scaffolding, not evidence that enrollment
+ * could be admitted before the 0058 create guard. Current admission is covered
+ * separately by canonical guarded acquisition/import tests. */
 async function migrate(db){
  await db.prepare("PRAGMA foreign_keys=OFF").run();
  await db.prepare("CREATE TABLE d1_migrations(id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT UNIQUE NOT NULL,applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)").run();
@@ -173,13 +174,13 @@ async function rejectsAtomically(db,artifact,driftStatements,label){
  assert.deepEqual(await rollbackSnapshot(db),before,`${label} must roll back the drift and every authority write`);
 }
 
-async function lifecycle(t){
+async function lifecycle(t,postHistoricalLifecycleHook){
  const [{createServer}]=await Promise.all([import(viteUrl)]);
  const server=await createServer({root:path.join(root,"apps/operations"),configFile:false,server:{middlewareMode:true},appType:"custom",logLevel:"silent"});
  const runtime=new Miniflare({modules:true,compatibilityDate:"2026-08-06",script:"export default {fetch(){return new Response('ok')}}",d1Databases:{OPS_DB:`scalar-authority-${crypto.randomUUID()}`}});
  t.after(async()=>{try{await runtime.dispose()}finally{await server.close()}});
  const db=await runtime.getD1Database("OPS_DB");
- const [writer,profileRoutes,profileDispatcher,relationshipDispatcher]=await Promise.all([server.ssrLoadModule("/src/worker/native-directory-profile-writer.ts"),server.ssrLoadModule("/src/worker/native-directory-profile-routes.ts"),server.ssrLoadModule("/src/worker/project-alpha-directory-profile-outbox-dispatcher.ts"),server.ssrLoadModule("/src/worker/project-alpha-directory-relationship-outbox-dispatcher.ts")]);
+ const [writer,profileRoutes,profileDispatcher,relationshipDispatcher]=await Promise.all([loadHistorical0195ScalarWriter(),server.ssrLoadModule("/src/worker/native-directory-profile-routes.ts"),server.ssrLoadModule("/src/worker/project-alpha-directory-profile-outbox-dispatcher.ts"),server.ssrLoadModule("/src/worker/project-alpha-directory-relationship-outbox-dispatcher.ts")]);
  await migrate(db);assert.equal(migrationNames.length,CANONICAL_BOOTSTRAP_MIGRATION_COUNT);assert.equal(migrationNames.at(-1),CANONICAL_BOOTSTRAP_FINAL_MIGRATION);assert.deepEqual((await all(db,"SELECT name FROM d1_migrations ORDER BY name")).map(row=>row.name),migrationNames);assert.deepEqual((await all(db,"PRAGMA foreign_key_check")),[]);
  const recoveryGrantIds=await seedRecoveryGrants(db);
  const recoveryProvision=compileRelationshipRecoveryAuthorityV184(await recoveryInput(db,"provision",recoveryGrantIds));
@@ -254,6 +255,7 @@ async function lifecycle(t){
  assert.deepEqual(cleaned.grants.map(row=>row.active),[0,0]);
  assert.deepEqual(await all(db,"SELECT * FROM native_directory_grants WHERE id NOT IN (?,?) ORDER BY id",...grantIds),otherBefore);
  assert.equal((await first(db,"SELECT count(*) count FROM native_directory_grant_history WHERE staff_id=?",scalarTarget.staffId)).count,recoveryLineage.directoryGrantHistory.length+4);
+ if(postHistoricalLifecycleHook)await postHistoricalLifecycleHook(db,recoveryTarget);
 }
 
 test("full 0001-0184 scalar authority narrows closed mixed-scope recovery to two grants, settles a normal client update, and cleans up exactly",{timeout:240_000},async t=>{

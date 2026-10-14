@@ -31,4 +31,23 @@ describe("authenticated native financial route",()=>{
     mocks.homes.mockResolvedValue([]);
     expect((await router.fetch(new Request(`https://client.example.test/home/${authorityId}/financial`),env)).status).toBe(403);
   });
+  it("maps an exact upstream denial to the non-provisioned response without leaking data",async()=>{
+    rpc.mockResolvedValueOnce(JSON.stringify({ok:false,protocolVersion:1,code:"denied"}));
+    const response=await createOperationsHomeRouter({resolvePrincipal:async()=>principal}).fetch(
+      new Request(`https://client.example.test/home/${authorityId}/financial`),env);
+    expect(response.status).toBe(403);
+    expect(await response.json()).toEqual({error:"Client access is not provisioned"});
+  });
+  it("keeps malformed and non-denial upstream failures unavailable without leaking data",async()=>{
+    const router=createOperationsHomeRouter({resolvePrincipal:async()=>principal});
+    for(const upstream of [{ok:false,protocolVersion:1,code:"unavailable"},
+      {ok:false,protocolVersion:1,code:"denied",privateNote:"must-not-cross"}]){
+      rpc.mockResolvedValueOnce(JSON.stringify(upstream));
+      const response=await router.fetch(new Request(`https://client.example.test/home/${authorityId}/financial`),env);
+      expect(response.status).toBe(503);
+      const body=await response.text();
+      expect(body).toBe('{"error":"Client financial information is temporarily unavailable"}');
+      expect(body).not.toContain("must-not-cross");
+    }
+  });
 });

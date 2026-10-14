@@ -124,6 +124,6 @@ describe("billing permission HTTP with canonical real D1",{timeout:300_000},()=>
       const after=await handle(request("review",selected,headers),d);
       expect(await after.json()).toEqual({review:{...selected,generation:2,permissions:[]}});
       expect((await operations.prepare("PRAGMA foreign_key_check").all()).results).toEqual([]);
-    },{stopAfterReady:true});
+    },{stopAfterReady:true,operationsThroughMigration:"0203_effective_native_directory_enrollment_consumers.sql"});
   });
 });

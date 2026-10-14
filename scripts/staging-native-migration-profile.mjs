@@ -305,21 +305,23 @@ function validateSourceMigrations(base, application, contract) {
   const repositoryNames = entries.filter((entry) => entry.isFile() && !entry.isSymbolicLink() && entry.name.endsWith(".sql"))
     .map((entry) => entry.name).sort();
   const currentRepositoryChain = contract.currentRepositoryChain;
-  const hasCurrentAppend = currentRepositoryChain
-    && repositoryNames.includes(currentRepositoryChain.appendedMigration);
+  const appendedNames = currentRepositoryChain ? Object.keys(currentRepositoryChain.appendedMigrations) : [];
+  const hasCurrentAppend = currentRepositoryChain && appendedNames.every((name) => repositoryNames.includes(name));
+  if (currentRepositoryChain && repositoryNames.some((name) => appendedNames.includes(name)) && !hasCurrentAppend) {
+    throw new Error(`${application} current repository migration suffix is incomplete`);
+  }
   if (hasCurrentAppend) {
-    const appendedFile = path.join(directory, currentRepositoryChain.appendedMigration);
-    requireRegularFile(appendedFile, `${application} current repository append`);
+    for (const name of appendedNames) requireRegularFile(path.join(directory, name), `${application} current repository append ${name}`);
     if (repositoryNames.length !== currentRepositoryChain.count
       || repositoryNames.at(-1) !== currentRepositoryChain.finalMigration
       || sha256(repositoryNames.join("\n")) !== currentRepositoryChain.namesSha256
       || migrationChainDigest(directory, repositoryNames) !== currentRepositoryChain.contentsSha256
-      || sha256(fs.readFileSync(appendedFile)) !== currentRepositoryChain.appendedSha256) {
+      || appendedNames.some((name) => sha256(fs.readFileSync(path.join(directory, name))) !== currentRepositoryChain.appendedMigrations[name])) {
       throw new Error(`${application} current repository migration inventory changed`);
     }
   }
   const names = hasCurrentAppend
-    ? repositoryNames.filter((name) => name !== currentRepositoryChain.appendedMigration)
+    ? repositoryNames.filter((name) => !appendedNames.includes(name))
     : repositoryNames;
   const candidateNames = Object.keys(contract.candidates).sort();
   const candidateSet = new Set(candidateNames);

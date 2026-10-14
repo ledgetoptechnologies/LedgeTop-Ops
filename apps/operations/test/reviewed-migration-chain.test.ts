@@ -100,4 +100,22 @@ describe("reviewed release migration fixtures", () => {
       .toThrow("reviewed-operations-current-source-content-contract-mismatch");
     expect(reviewedOperationsMigrationNames(operations.url, { rejectExtras: false })).toHaveLength(199);
   });
+
+  it.each([
+    "0201_native_directory_lifecycle.sql",
+    "0202_reviewed_import_enrollment.sql",
+    "0203_effective_native_directory_enrollment_consumers.sql",
+  ])("rejects tampered or missing current suffix %s without expanding the release prefix", name => {
+    const tampered = copyMigrations("operations");
+    writeFileSync(join(tampered.directory, name), "-- changed reviewed suffix\n");
+    expect(() => reviewedOperationsMigrationNames(tampered.url))
+      .toThrow("reviewed-operations-current-source-content-contract-mismatch");
+    expect(reviewedOperationsMigrationNames(tampered.url, { rejectExtras: false })).toHaveLength(199);
+
+    const missing = copyMigrations("operations");
+    unlinkSync(join(missing.directory, name));
+    expect(() => reviewedOperationsMigrationNames(missing.url))
+      .toThrow("reviewed-operations-migration-physical-inventory-mismatch");
+    expect(reviewedOperationsMigrationNames(missing.url, { rejectExtras: false })).toHaveLength(199);
+  });
 });

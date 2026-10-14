@@ -10,7 +10,7 @@ import { parseRemoteLedgerJson, validateExactRemoteLedger, verifyLiveRemoteLedge
 const root = path.resolve(import.meta.dirname, "..");
 const temporary = [];
 
-function fixture(operationsCutoff = 200) {
+function fixture(operationsCutoff = 203) {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), "ltds-native-migration-profile-"));
   temporary.push(base);
   fs.writeFileSync(path.join(base, ".gitignore"), "apps/*/wrangler.staging.*.json\napps/*/.staging-bootstrap/\n");
@@ -82,8 +82,8 @@ test("builds only the exact migration suffixes and strips every deployment field
     "0199_native_directory_profile_binding_continuations.sql");
   assert.equal(profiles.operations.manifest.reviewedFinalChain.namesSha256,
     "7be05fcb2b54c3a345b76b1f37e3dbbf33c0f4278b6cabe8307a064549c33821");
-  assert.equal(profiles.operations.files.some(({ name }) => name.startsWith("0200_")), false,
-    "the current repository append is verified but never enters the staging migration-only profile");
+  assert.equal(profiles.operations.files.some(({ name }) => /^020[0-3]_/.test(name)), false,
+    "the exact current repository suffix is verified but never enters the staging migration-only profile");
   assert.equal(profiles.client.manifest.reviewedFinalChain.count, 149);
   assert.equal(profiles.client.manifest.reviewedFinalChain.finalMigration,
     "0230_operations_portal_native_delivery_terminal_cancellations.sql");
@@ -138,10 +138,15 @@ test("rejects an extra SQL file and a changed native migration", () => {
     fs.appendFileSync(path.join(stableChanged, "apps", application, "migrations", name), " ");
     assert.throws(() => buildProfiles(stableChanged), new RegExp(`native candidate changed: ${name.slice(0, 4)}_`));
   }
-  const currentAppendChanged = fixture();
-  fs.appendFileSync(path.join(currentAppendChanged, "apps", "operations", "migrations",
-    "0200_native_directory_active_binding_refresh_supersessions.sql"), " ");
-  assert.throws(() => buildProfiles(currentAppendChanged), /current repository migration inventory changed/);
+  for (const name of ["0200_native_directory_active_binding_refresh_supersessions.sql", "0201_native_directory_lifecycle.sql",
+    "0202_reviewed_import_enrollment.sql", "0203_effective_native_directory_enrollment_consumers.sql"]) {
+    const changed = fixture();
+    fs.appendFileSync(path.join(changed, "apps", "operations", "migrations", name), " ");
+    assert.throws(() => buildProfiles(changed), /current repository migration inventory changed/);
+  }
+  const unknown = fixture();
+  fs.writeFileSync(path.join(unknown, "apps", "operations", "migrations", "0204_unknown.sql"), "SELECT 1;\n");
+  assert.throws(() => buildProfiles(unknown), /current repository migration inventory changed/);
 });
 
 test("accepts exact historical 0187, 0190, 0192, 0194, 0195, and 0196 chains but rejects partial successors", () => {
