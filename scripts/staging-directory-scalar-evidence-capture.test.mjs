@@ -1,3 +1,4 @@
+import { reviewed204AuthorityTestRoot } from "./historical-0204-authority-test-source.mjs";
 import assert from "node:assert/strict";
 import test from "node:test";
 
@@ -74,7 +75,8 @@ test("reconstructs and validates closed recovery lineage from exact artifacts an
     if (sql.includes("native_directory_grant_generations")) return expected.directoryGrantGeneration;
     throw new Error(`unexpected query: ${sql}`);
   });
-  assert.deepEqual(await reconstructClosedRecoveryLineage(state.db, expected.provisionArtifact, expected.revokeArtifact), expected);
+  assert.deepEqual(await reconstructClosedRecoveryLineage(state.db, expected.provisionArtifact, expected.revokeArtifact,
+    { validatorOptions: { root: reviewed204AuthorityTestRoot() } }), expected);
   assert.equal(state.queries.length, 5);
 });
 
@@ -88,7 +90,8 @@ test("rejects incomplete or drifted recovery readback", async () => {
     if (sql.includes("native_directory_grant_generations")) return expected.directoryGrantGeneration;
     return [];
   });
-  await assert.rejects(reconstructClosedRecoveryLineage(state.db, expected.provisionArtifact, expected.revokeArtifact), /incomplete or ambiguous/);
+  await assert.rejects(reconstructClosedRecoveryLineage(state.db, expected.provisionArtifact, expected.revokeArtifact,
+    { validatorOptions: { root: reviewed204AuthorityTestRoot() } }), /incomplete or ambiguous/);
 });
 
 test("database stub proves non-SELECT statements are rejected at its boundary", () => {

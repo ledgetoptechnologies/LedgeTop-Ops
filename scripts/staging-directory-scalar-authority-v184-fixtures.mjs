@@ -1,16 +1,19 @@
+import { reviewed204AuthorityTestRoot } from "./historical-0204-authority-test-source.mjs";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { STAGING_TARGET } from "./staging-onboarding-native-only-authority-packet.mjs";
 import {
-  compileRelationshipRecoveryAuthorityV184,
+  compileRelationshipRecoveryAuthorityV184 as originalcompileRelationshipRecoveryAuthorityV184,
   RELATIONSHIP_RECOVERY_AUTHORITY_TARGET as recoveryTarget,
   RELATIONSHIP_RECOVERY_AUTHORITY_TARGET_V2 as recoveryTargetV2,
 } from "./staging-relationship-generation-recovery-authority-v184.mjs";
 import { DIRECTORY_SCALAR_AUTHORITY_V184_TARGET as scalarTarget } from "./staging-directory-scalar-authority-v184.mjs";
 
-const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const compileRelationshipRecoveryAuthorityV184=(input,options={})=>originalcompileRelationshipRecoveryAuthorityV184(input,{root:root,...options});
+
+const root = reviewed204AuthorityTestRoot();
 const reviewedAuthorityFinal = "0199_native_directory_profile_binding_continuations.sql";
 export const stamp = "2026-10-10T12:00:00.000Z";
 export const clone = value => structuredClone(value);

@@ -1,3 +1,4 @@
+import { reviewed204AuthorityTestRoot } from "./historical-0204-authority-test-source.mjs";
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
 import fs from "node:fs";
@@ -5,12 +6,14 @@ import path from "node:path";
 import test from "node:test";
 import {createRequire} from "node:module";
 import {fileURLToPath} from "node:url";
-import {applyRelationshipRecoveryAuthorityV184,compileRelationshipRecoveryAuthorityV184,RELATIONSHIP_RECOVERY_AUTHORITY_TARGET_V2 as target} from "./staging-relationship-generation-recovery-authority-v184.mjs";
+import {applyRelationshipRecoveryAuthorityV184,compileRelationshipRecoveryAuthorityV184 as originalcompileRelationshipRecoveryAuthorityV184,RELATIONSHIP_RECOVERY_AUTHORITY_TARGET_V2 as target} from "./staging-relationship-generation-recovery-authority-v184.mjs";
 import {STAGING_TARGET} from "./staging-onboarding-native-only-authority-packet.mjs";
 import {validateClosedRelationshipRecoveryLineageV184,compileProjectBusinessAreaAuthorityV184,PROJECT_BUSINESS_AREA_AUTHORITY_V184_PURPOSE as projectPurpose,PROJECT_BUSINESS_AREA_AUTHORITY_V184_TARGET as projectTarget} from "./staging-project-business-area-authority-v184.mjs";
 import {applyProjectBusinessAreaAuthorityV184,reconcileProjectBusinessAreaAuthorityV184} from "./staging-project-business-area-authority-v184-apply.mjs";
 
-const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),".."),requireOperations=createRequire(path.join(root,"apps/operations/package.json"));
+const compileRelationshipRecoveryAuthorityV184=(input,options={})=>originalcompileRelationshipRecoveryAuthorityV184(input,{root,...options});
+
+const repositoryRoot=path.resolve(path.dirname(fileURLToPath(import.meta.url)),".."),root=reviewed204AuthorityTestRoot(),requireOperations=createRequire(path.join(repositoryRoot,"apps/operations/package.json"));
 const {Miniflare}=requireOperations("miniflare"),{unstable_splitSqlQuery}=requireOperations("wrangler"),migrationDir=path.join(root,"apps/operations/migrations");
 const sourceMigrationNames=fs.readdirSync(migrationDir).filter(name=>/^\d{4}_.+\.sql$/.test(name)).sort();
 const authorityMigrationNames=sourceMigrationNames.filter(name=>name<="0199_native_directory_profile_binding_continuations.sql");

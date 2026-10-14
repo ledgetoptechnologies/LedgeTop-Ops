@@ -1,14 +1,17 @@
+import { reviewed204AuthorityTestRoot } from "./historical-0204-authority-test-source.mjs";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import test from "node:test";
 import {fileURLToPath} from "node:url";
-import {compileRelationshipRecoveryAuthorityV184,RELATIONSHIP_RECOVERY_AUTHORITY_TARGET as historicalTarget,RELATIONSHIP_RECOVERY_AUTHORITY_TARGET_V2 as target} from "./staging-relationship-generation-recovery-authority-v184.mjs";
+import {compileRelationshipRecoveryAuthorityV184 as originalcompileRelationshipRecoveryAuthorityV184,RELATIONSHIP_RECOVERY_AUTHORITY_TARGET as historicalTarget,RELATIONSHIP_RECOVERY_AUTHORITY_TARGET_V2 as target} from "./staging-relationship-generation-recovery-authority-v184.mjs";
 import {STAGING_TARGET} from "./staging-onboarding-native-only-authority-packet.mjs";
 import {validateClosedRelationshipRecoveryLineageV184,compileProjectBusinessAreaAuthorityV184,PROJECT_BUSINESS_AREA_AUTHORITY_V184_PURPOSE as projectPurpose,PROJECT_BUSINESS_AREA_AUTHORITY_V184_TARGET as projectTarget} from "./staging-project-business-area-authority-v184.mjs";
 import {validateAuthorityMigrationChainV185} from "./staging-authority-migration-chain-v185.mjs";
 
-const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),".."),stamp="2026-10-10T12:00:00.000Z",closeStamp="2026-10-10T12:10:00.000Z";
+const compileRelationshipRecoveryAuthorityV184=(input,options={})=>originalcompileRelationshipRecoveryAuthorityV184(input,{root:root,...options});
+
+const root=reviewed204AuthorityTestRoot(),stamp="2026-10-10T12:00:00.000Z",closeStamp="2026-10-10T12:10:00.000Z";
 const uuid=n=>`00000000-0000-4000-8000-${String(n).padStart(12,"0")}`;
 const currentMigrationNames=fs.readdirSync(path.join(root,"apps","operations","migrations")).filter(name=>/^\d{4}_.+\.sql$/.test(name)).sort();
 const migrationNames=currentMigrationNames.slice(0,196);

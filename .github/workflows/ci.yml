@@ -43,6 +43,9 @@ jobs:
       - name: Verify exact204 project staging authority and migration preparation
         run: node --test scripts/staging-project-authority-v204.test.mjs scripts/staging-native-project-203-204-migrations.test.mjs
 
+      - name: Verify exact205 native billing source migration preparation
+        run: node --test scripts/staging-native-billing-source-204-205-migrations.test.mjs
+
       - name: Verify isolated staging receiver and connector profiles
         run: node --test scripts/staging-ops-sync-v203.test.mjs scripts/staging-pa-ops-connectors-v203.test.mjs
 

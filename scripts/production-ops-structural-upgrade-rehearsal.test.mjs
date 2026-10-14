@@ -147,7 +147,9 @@ function schema(db) {
 }
 
 test("synthetic pinned-9000 authority survives the captured 0124 boundary through the reviewed 0204 chain", () => {
-  const captured = capturedOperationsLedger(), names = sourceMigrations();
+  // This immutable rehearsal remains bounded to its separately reviewed 0204 source.
+  const captured = capturedOperationsLedger(), names = sourceMigrations()
+    .filter(name => Number(name.slice(0, 4)) <= 204);
   assert.equal(captured.length, capturedBoundary);
   assert.deepEqual(captured.map(row => row.id), Array.from({ length: capturedBoundary }, (_, index) => index + 1));
   assert.deepEqual(names.slice(0, capturedBoundary), captured.map(row => row.name));

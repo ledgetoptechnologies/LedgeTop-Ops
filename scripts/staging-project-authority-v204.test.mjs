@@ -124,12 +124,12 @@ test("current204 project-only authority is exact, atomic and reverses only its s
       fs.writeFileSync(path.join(stray, "apps/operations/migrations/unreviewed.sql"), "SELECT 1;");
       assert.throws(() => compileBusinessAreaAuthorityPair204(candidateInput, { root: stray }), /canonical migration names/);
       await assert.rejects(applyBusinessAreaAuthorityPhase204(db, packet, "provision",
-        { target: { ...STAGING_TARGET, databaseId: uuid(88) } }), /trusted staging binding/);
+        { root: reviewedRoot, target: { ...STAGING_TARGET, databaseId: uuid(88) } }), /trusted staging binding/);
       assert.throws(() => compileBusinessAreaAuthorityPair204({ ...candidateInput,
-        generation: { ...candidateInput.generation, generation: Number.MAX_SAFE_INTEGER } }), /versions/);
+        generation: { ...candidateInput.generation, generation: Number.MAX_SAFE_INTEGER } }, { root: reviewedRoot }), /versions/);
       assert.throws(() => compileBusinessAreaAuthorityPair204({ ...candidateInput,
         grants: candidateInput.grants.map(row => row.id === projectGrantId
-          ? { ...row, version: Number.MAX_SAFE_INTEGER } : row) }), /exact inactive project area grant/);
+          ? { ...row, version: Number.MAX_SAFE_INTEGER } : row) }, { root: reviewedRoot }), /exact inactive project area grant/);
     });
     await t.test("full ledger membership rejects a renamed middle entry with unchanged count and maximum", async () => {
       await db.prepare("UPDATE d1_migrations SET name='0001_unknown.sql' WHERE name=?").bind(names[0]).run();
@@ -170,7 +170,7 @@ test("current204 project-only authority is exact, atomic and reverses only its s
       await applyBusinessAreaAuthorityPhase204(db, packet, "revoke", { root: reviewedRoot, target: STAGING_TARGET });
       await applyBusinessAreaAuthorityPhase204(db, packet, "provision", { root: reviewedRoot, target: STAGING_TARGET });
       assert.deepEqual(await state(db), closed, "receipt replay must never reopen a revoked grant");
-      assert.equal((await compileBusinessAreaAuthorityPair204(await input(db))).input.approval.grantId, projectGrantId);
+      assert.equal((await compileBusinessAreaAuthorityPair204(await input(db), { root: reviewedRoot })).input.approval.grantId, projectGrantId);
       assert.deepEqual((await db.prepare("PRAGMA foreign_key_check").all()).results, []);
     });
   } finally {

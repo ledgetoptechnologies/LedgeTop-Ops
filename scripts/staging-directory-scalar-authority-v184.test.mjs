@@ -1,8 +1,9 @@
+import { reviewed204AuthorityTestRoot } from "./historical-0204-authority-test-source.mjs";
 import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
-  compileDirectoryScalarAuthorityV184,
+  compileDirectoryScalarAuthorityV184 as originalcompileDirectoryScalarAuthorityV184,
   DIRECTORY_SCALAR_AUTHORITY_V184_TARGET as target,
 } from "./staging-directory-scalar-authority-v184.mjs";
 import {
@@ -11,8 +12,13 @@ import {
   makeScalarAuthorityInput,
   revokeFixture,
 } from "./staging-directory-scalar-authority-v184-fixtures.mjs";
-import { compileRelationshipRecoveryAuthorityV184, RELATIONSHIP_RECOVERY_AUTHORITY_TARGET_V2 as recoveryTargetV2 } from "./staging-relationship-generation-recovery-authority-v184.mjs";
+import { compileRelationshipRecoveryAuthorityV184 as originalcompileRelationshipRecoveryAuthorityV184, RELATIONSHIP_RECOVERY_AUTHORITY_TARGET_V2 as recoveryTargetV2 } from "./staging-relationship-generation-recovery-authority-v184.mjs";
 
+const compileDirectoryScalarAuthorityV184=(input,options={})=>originalcompileDirectoryScalarAuthorityV184(input,{root:root,...options});
+
+const compileRelationshipRecoveryAuthorityV184=(input,options={})=>originalcompileRelationshipRecoveryAuthorityV184(input,{root:root,...options});
+
+const root=reviewed204AuthorityTestRoot();
 const placeholders = sql => (sql.match(/\?/g) ?? []).length;
 const assertBoundStatements = artifact => {
   for (const [index, statement] of artifact.statements.entries()) {
