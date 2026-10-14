@@ -11,7 +11,8 @@ const sourceClient = fs.readFileSync(new URL("../apps/client/migrations/0002_see
 const sourceOperations = fs.readFileSync(new URL("../apps/operations/migrations/0002_seed_acl.sql", import.meta.url), "utf8");
 const operationsLocalSuffix = ["0200_native_directory_active_binding_refresh_supersessions.sql",
   "0201_native_directory_lifecycle.sql", "0202_reviewed_import_enrollment.sql",
-  "0203_effective_native_directory_enrollment_consumers.sql", "0204_native_project_archive_restore.sql"];
+  "0203_effective_native_directory_enrollment_consumers.sql", "0204_native_project_archive_restore.sql",
+  "0205_native_billing_source_authority.sql"];
 const clientLocalSuffix = ["0231_portal_primary_private_ingress_authority.sql"];
 
 function fixture() {
@@ -164,9 +165,17 @@ test("validates Client 150 source while preserving the frozen 149 bootstrap and 
 
 test("keeps the reviewed203 source fixture compatible without admitting an unknown successor", () => {
   const base = fixture();
+  fs.unlinkSync(path.join(base, "apps/operations/migrations/0205_native_billing_source_authority.sql"));
   fs.unlinkSync(path.join(base, "apps/operations/migrations/0204_native_project_archive_restore.sql"));
   assert.equal(buildArtifacts(base, owner).operations.files.length, 199);
   fs.writeFileSync(path.join(base, "apps/operations/migrations/0204_unknown.sql"), "SELECT 1;\n");
+  assert.throws(() => buildArtifacts(base, owner), /exact complete reviewed chain/);
+});
+test("keeps the exact reviewed204 source prefix compatible without its205 successor", () => {
+  const base = fixture();
+  fs.unlinkSync(path.join(base, "apps/operations/migrations/0205_native_billing_source_authority.sql"));
+  assert.equal(buildArtifacts(base, owner).operations.files.length, 199);
+  fs.writeFileSync(path.join(base, "apps/operations/migrations/0205_unknown.sql"), "SELECT 1;\n");
   assert.throws(() => buildArtifacts(base, owner), /exact complete reviewed chain/);
 });
 

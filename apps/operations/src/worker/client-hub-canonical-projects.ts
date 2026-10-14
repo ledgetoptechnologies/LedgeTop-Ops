@@ -3,7 +3,7 @@ import { clientHubActiveDirectoryIdentities, clientHubActiveDirectoryIdentitySql
   hasClientHubActiveDirectoryMappings } from "./client-hub-source";
 import { clientHubBusinessProjectOwnership } from "./client-hub-business-projects";
 import type { ClientHubBusinessProjectPolicy } from "./client-hub-project-policy";
-import { projectAlphaReadVisibleSql } from "./project-alpha-read-visibility";
+import { projectAlphaNativeMappingReadVisibleSql, projectAlphaReadVisibleSql } from "./project-alpha-read-visibility";
 import type { Env } from "./types";
 import { nativeProjectLifecycleCanonicalProof } from "./native-project-lifecycle-canonical-proof";
 
@@ -53,6 +53,9 @@ export async function canonicalBusinessProjectPredicate(env: Env, context: Clien
   const root = context.root;
   if (!root.pa_internal_id || !root.pa_public_id || !root.public_id) return null;
   const activeIdentities = await clientHubActiveDirectoryIdentities(env);
+  // Native API-v2 sources can lack a classic connector. The exact enabled
+  // tuple and unique canonical mapping below prove that fallback; an existing
+  // hidden connector still vetoes it. Project ACL and revision proofs remain separate.
   const currentRootIdentity = clientHubActiveDirectoryIdentitySql("current_root_mapping", activeIdentities ?? []);
   const owner = clientHubBusinessProjectOwnership(context);
   const ownerMappingProof = (alias: string, resourceType: "organization" | "client", recordId: string,
@@ -201,7 +204,7 @@ export async function canonicalBusinessProjectPredicate(env: Env, context: Clien
       AND (${activationProof} OR ${lifecycleProof})
       AND ${noConflicts} AND ${observations}
       AND ${rootOwner}
-      AND ${projectAlphaReadVisibleSql("s.source_id")} AND (${paVisibility})`,
+      AND ${projectAlphaNativeMappingReadVisibleSql("s.source_id", "s", activeIdentities ?? [])} AND (${paVisibility})`,
     values: [context.root.source_id, root.kind === "organization" ? "organization" : "client",
       root.public_id, root.pa_internal_id, root.pa_public_id, ...rootValues, ...ownerMappingValues,
       ...(policy.canViewUnprojectedCanonical ? [] : [...owner.values, ...policy.filter.values])],

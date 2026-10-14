@@ -8,10 +8,11 @@ export type NativeFinancialTarget =
   | Readonly<{ kind: "organization" | "client"; recordId: string; sourceId?: string }>
   | Readonly<{ kind: "project"; externalProjectId: string; sourceId?: string }>;
 
-type MappingRow = {
+export type NativeFinancialMappingRow = {
   source_id: string; source_instance_id: string; application_id: string; history_epoch_id: string;
   external_id: string; project_alpha_public_id: string; resource_revision: string;
   projection_sha256: string; authorization_generation: string;
+  mapping_kind:string;provenance_id:string;native_version:number;conflict_frontier:string;
 };
 
 const SOURCE = /^project-alpha:[a-z0-9][a-z0-9_-]{0,63}$/;
@@ -60,7 +61,7 @@ function historicalCrossSurfaceGenerationConflict(surface: "directory" | "projec
                 AND same_surface.authorization_generation>observed.authorization_generation)))`;
 }
 
-function currentConfiguredRow(env: Pick<Env, "PROJECT_ALPHA_API_V2_CONNECTIONS">, row: MappingRow): boolean {
+function currentConfiguredRow(env: Pick<Env, "PROJECT_ALPHA_API_V2_CONNECTIONS">, row: NativeFinancialMappingRow): boolean {
   try {
     const configured = resolveProjectAlphaApiV2Connection(env, row.source_id);
     return configured.enabled
@@ -70,7 +71,7 @@ function currentConfiguredRow(env: Pick<Env, "PROJECT_ALPHA_API_V2_CONNECTIONS">
   } catch { return false; }
 }
 
-function trusted(row: MappingRow, kind: NativeFinancialTarget["kind"]): TrustedFinancialMapping | null {
+function trusted(row: NativeFinancialMappingRow, kind: NativeFinancialTarget["kind"]): TrustedFinancialMapping | null {
   const mapping: TrustedFinancialMapping = Object.freeze({ sourceId: row.source_id, kind,
     externalId: row.external_id, publicId: row.project_alpha_public_id, revision: row.resource_revision,
     projectionSha256: row.projection_sha256, authorizationGeneration: row.authorization_generation });
@@ -81,20 +82,24 @@ function trusted(row: MappingRow, kind: NativeFinancialTarget["kind"]): TrustedF
  * The caller supplies a native record/project key, never a PA external/public
  * identity. Omitted sourceId is accepted only when exactly one currently
  * configured source proves the complete tuple. */
-export async function resolveTrustedNativeFinancialMapping(
+export async function prepareTrustedNativeFinancialMappingQuery(
   env: Pick<Env, "OPS_DB" | "PROJECT_ALPHA_API_V2_CONNECTIONS">,
   target: NativeFinancialTarget,
-): Promise<TrustedFinancialMapping | null> {
+): Promise<{sql:string;params:(string|number)[]} | null> {
   const nativeId = target.kind === "project" ? target.externalProjectId : target.recordId;
   if ((target.kind === "project" ? !validProjectExternalId(nativeId) : !LOCAL_ID.test(nativeId))
     || target.sourceId !== undefined && !SOURCE.test(target.sourceId)) return null;
   const sourceClause = target.sourceId === undefined ? "" : " AND mapping.source_id=?";
   const values = target.sourceId === undefined ? [nativeId] : [nativeId, target.sourceId];
-  let rows: MappingRow[];
+  let sql: string, params: (string|number)[];
   try {
     if (target.kind !== "project") {
-      rows = (await env.OPS_DB.withSession("first-primary").prepare(`SELECT mapping.source_id,mapping.source_instance_id,
+      sql = `SELECT mapping.source_id,mapping.source_instance_id,
         mapping.application_id,mapping.history_epoch_id,mapping.external_id,mapping.project_alpha_public_id,
+        mapping.mapping_kind,mapping.provenance_id,record.current_version native_version,
+        (SELECT CAST(coalesce(max(conflict_id),0) AS TEXT) FROM project_alpha_api_v2_inventory_conflicts frontier
+         WHERE frontier.source_id=mapping.source_id AND frontier.source_instance_id=mapping.source_instance_id
+          AND frontier.application_id=mapping.application_id AND frontier.history_epoch_id=mapping.history_epoch_id) conflict_frontier,
         observation.resource_revision,observation.projection_sha256,(SELECT generation.authorization_generation
           FROM project_alpha_api_v2_inventory_receipts generation WHERE generation.source_id=mapping.source_id
             AND generation.source_instance_id=mapping.source_instance_id AND generation.application_id=mapping.application_id
@@ -130,13 +135,18 @@ export async function resolveTrustedNativeFinancialMapping(
               AND candidate.application_id=mapping.application_id AND candidate.history_epoch_id=mapping.history_epoch_id
               AND candidate.resource_type=mapping.resource_type AND (candidate.record_id=mapping.record_id
                 OR candidate.external_id=mapping.external_id OR candidate.project_alpha_public_id=mapping.project_alpha_public_id))=1
-        ORDER BY mapping.source_id LIMIT 3`).bind(...values, target.kind).all<MappingRow>()).results;
+        ORDER BY mapping.source_id LIMIT 3`;params=[...values,target.kind];
     } else {
       const lifecycleProof = await nativeProjectLifecycleCanonicalProof(env.OPS_DB, "project");
       if (lifecycleProof === null) return null;
-      rows = (await env.OPS_DB.withSession("first-primary").prepare(`SELECT mapping.source_id,mapping.source_instance_id,
+      sql = `SELECT mapping.source_id,mapping.source_instance_id,
         mapping.application_id,mapping.history_epoch_id,mapping.external_project_id external_id,
-        mapping.project_alpha_public_id,project.pa_revision resource_revision,
+        mapping.project_alpha_public_id,mapping.establishment_kind mapping_kind,mapping.establishment_command_id provenance_id,
+        project.current_version native_version,
+        (SELECT CAST(coalesce(max(conflict_id),0) AS TEXT) FROM project_alpha_api_v2_inventory_conflicts frontier
+         WHERE frontier.source_id=mapping.source_id AND frontier.source_instance_id=mapping.source_instance_id
+          AND frontier.application_id=mapping.application_id AND frontier.history_epoch_id=mapping.history_epoch_id) conflict_frontier,
+        project.pa_revision resource_revision,
         project.canonical_projection_sha256 projection_sha256,(SELECT generation.authorization_generation
           FROM project_alpha_api_v2_inventory_receipts generation WHERE generation.source_id=mapping.source_id
             AND generation.source_instance_id=mapping.source_instance_id AND generation.application_id=mapping.application_id
@@ -189,9 +199,28 @@ export async function resolveTrustedNativeFinancialMapping(
               AND candidate.application_id=mapping.application_id AND candidate.history_epoch_id=mapping.history_epoch_id
               AND (candidate.external_project_id=mapping.external_project_id
                 OR candidate.project_alpha_public_id=mapping.project_alpha_public_id))=1
-        ORDER BY mapping.source_id LIMIT 3`).bind(...values).all<MappingRow>()).results;
+        ORDER BY mapping.source_id LIMIT 3`;params=values;
     }
   } catch { return null; }
-  const candidates = rows.filter(row => currentConfiguredRow(env, row)).map(row => trusted(row, target.kind)).filter((row): row is TrustedFinancialMapping => row !== null);
-  return candidates.length === 1 ? candidates[0]! : null;
+  return {sql,params};
+}
+export type NativeFinancialMappingEvidence=Readonly<{mapping:TrustedFinancialMapping;row:NativeFinancialMappingRow;origin:string}>;
+export function nativeFinancialMappingEvidenceFromRows(env:Pick<Env,"PROJECT_ALPHA_API_V2_CONNECTIONS">,
+ target:NativeFinancialTarget,rows:NativeFinancialMappingRow[]):NativeFinancialMappingEvidence|null{
+  const candidates=rows.filter(row=>currentConfiguredRow(env,row)).map(row=>({row,mapping:trusted(row,target.kind)}))
+    .filter((value):value is {row:NativeFinancialMappingRow;mapping:TrustedFinancialMapping}=>value.mapping!==null);
+  if(candidates.length!==1)return null;
+  const value=candidates[0]!;
+  return {...value,origin:resolveProjectAlphaApiV2Connection(env,value.row.source_id).connection.baseUrl};
+}
+export async function resolveTrustedNativeFinancialMappingEvidence(
+ env:Pick<Env,"OPS_DB"|"PROJECT_ALPHA_API_V2_CONNECTIONS">,target:NativeFinancialTarget):Promise<NativeFinancialMappingEvidence|null>{
+ const query=await prepareTrustedNativeFinancialMappingQuery(env,target);if(!query)return null;
+ try{const result=await env.OPS_DB.withSession("first-primary").prepare(query.sql).bind(...query.params).all<NativeFinancialMappingRow>();
+  return nativeFinancialMappingEvidenceFromRows(env,target,result.results);
+ }catch{return null;}
+}
+export async function resolveTrustedNativeFinancialMapping(
+ env:Pick<Env,"OPS_DB"|"PROJECT_ALPHA_API_V2_CONNECTIONS">,target:NativeFinancialTarget):Promise<TrustedFinancialMapping|null>{
+ return (await resolveTrustedNativeFinancialMappingEvidence(env,target))?.mapping??null;
 }

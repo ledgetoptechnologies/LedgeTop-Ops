@@ -1,4 +1,7 @@
 import type { Env } from "./types";
+import { handleOperationsPortalNativeBillingSourceAuthorityOwnerHttp } from "./operations-portal-native-billing-source-authority-owner-http";
+import { reviewNativeBillingSourceAuthority,grantNativeBillingSourceAuthority,revokeNativeBillingSourceAuthority,
+  readNativeBillingSourceAuthorityStatus } from "./operations-portal-native-billing-source-authority-issuer";
 import { configuredDeploymentOrigin } from "@ltds/shared/configured-deployment-origin";
 import { handleOperationsPortalNativeDeliveryAuthorityOwnerHttp } from "./operations-portal-native-delivery-authority-owner-http";
 import type { OperationsPortalNativeDeliveryAuthorityDispatchEnv } from "./operations-portal-native-delivery-authority-dispatch";
@@ -18,6 +21,7 @@ const DELIVERY_PAGE = "/administration/client-portal/operations-delivery-authori
 const WORKSPACE_API = "/api/native-client-portal/operations-workspaces";
 const WORKSPACE_PAGE = "/administration/client-portal/operations-workspaces";
 const BILLING_API = "/api/native-client-portal/operations-billing-authority";
+const BILLING_SOURCE_API = "/api/native-client-portal/operations-billing-source-authority";
 const BILLING_PAGE = "/administration/client-portal/operations-billing-authority";
 const BILLING_PERMISSION_PAGE = "/administration/client-portal/operations-billing-permissions";
 
@@ -41,7 +45,7 @@ export function isOperationsPortalNativeOwnerPath(pathname: string): boolean {
   return pathname === RECIPIENT_PAGE
     || family(pathname, DELIVERY_API) || pathname === DELIVERY_PAGE
     || family(pathname, WORKSPACE_API) || pathname === WORKSPACE_PAGE
-    || family(pathname, BILLING_API) || pathname === BILLING_PAGE
+    || family(pathname, BILLING_API) || family(pathname,BILLING_SOURCE_API) || pathname === BILLING_PAGE
     || family(pathname, OPERATIONS_NATIVE_BILLING_PERMISSION_OWNER_BASE) || pathname === BILLING_PERMISSION_PAGE;
 }
 
@@ -53,9 +57,10 @@ export async function dispatchOperationsPortalNativeOwnerRequest(request: Reques
   const delivery = family(pathname, DELIVERY_API) || pathname === DELIVERY_PAGE;
   const workspace = family(pathname, WORKSPACE_API) || pathname === WORKSPACE_PAGE;
   const billing = family(pathname, BILLING_API) || pathname === BILLING_PAGE;
+  const billingSource = family(pathname,BILLING_SOURCE_API);
   const billingPermission = family(pathname, OPERATIONS_NATIVE_BILLING_PERMISSION_OWNER_BASE)
     || pathname === BILLING_PERMISSION_PAGE;
-  if (!recipient && !delivery && !workspace && !billing && !billingPermission) return null;
+  if (!recipient && !delivery && !workspace && !billing && !billingPermission && !billingSource) return null;
 
   const origin = configuredDeploymentOrigin({ environment: env.ENVIRONMENT,
     origin: env.PUBLIC_BASE_URL, expectedHost: env.EXPECTED_HOST });
@@ -89,6 +94,11 @@ export async function dispatchOperationsPortalNativeOwnerRequest(request: Reques
       publication: env.OPERATIONS_PORTAL_WORKSPACE_PUBLICATION });
   }
   if (env.OPERATIONS_PORTAL_NATIVE_BILLING_OWNER_ENABLED !== "true") return notFound();
+  if(billingSource)return handleOperationsPortalNativeBillingSourceAuthorityOwnerHttp(request,{
+    environment:env.ENVIRONMENT,expectedHost:env.EXPECTED_HOST,lifecycleFlag:env.OPERATIONS_PORTAL_NATIVE_BILLING_OWNER_ENABLED,
+    configuration,database:env.OPS_DB,core:{review:(_db,a,i)=>reviewNativeBillingSourceAuthority(env,a,i),
+      grant:(_db,a,i)=>grantNativeBillingSourceAuthority(env,a,i),revoke:(_db,a,i)=>revokeNativeBillingSourceAuthority(env,a,i),
+      readStatus:(_db,a,id)=>readNativeBillingSourceAuthorityStatus(env,a,id)}});
   if (pathname === BILLING_PAGE || pathname === BILLING_PERMISSION_PAGE) return env.ASSETS.fetch(request);
   if (billingPermission) return handleOperationsPortalNativeBillingPermissionOwnerHttp(request, {
     environment: env.ENVIRONMENT, expectedHost: env.EXPECTED_HOST,

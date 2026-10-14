@@ -1,7 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks=vi.hoisted(()=>({resolve:vi.fn(),read:vi.fn(),selector:vi.fn()}));
-vi.mock("../src/worker/project-alpha-financial-mapping",()=>({resolveTrustedNativeFinancialMapping:mocks.resolve}));
+vi.mock("../src/worker/project-alpha-financial-mapping",()=>({resolveTrustedNativeFinancialMappingEvidence:async(...args:unknown[])=>{
+  const mapping=await mocks.resolve(...args);return mapping?{mapping,row:{},origin:"https://pa.example.test"}:null;
+}}));
 vi.mock("../src/worker/project-alpha-financial-transport",()=>({
   selectorFromTrustedFinancialMapping:mocks.selector,
   readConfiguredProjectAlphaFinancialDocuments:mocks.read,

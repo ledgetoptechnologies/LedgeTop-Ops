@@ -4,14 +4,26 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import test from "node:test";
+import test, { after } from "node:test";
 import { createNativeDirectoryMigrationWindow, applicationTableNames, assertPreserved,
   reviewedNativeDirectorySchemaDefinitions } from "./staging-native-directory-migration-window.mjs";
 import { SPEC, buildNativeProject203To204Plan, runNativeProject203To204,
   materializeNativeProject203To204, nativeProject203To204ReadOnlyQueries,
   assertNativeProject204Preserved, assertNativeProject204SourceCi, SOURCE_CI_JOBS } from "./staging-native-project-203-204-migrations.mjs";
 
-const root = path.resolve(import.meta.dirname, "..");
+const repositoryRoot = path.resolve(import.meta.dirname, "..");
+// Frozen204 tooling is rehearsed against its exact historical source prefix.
+// The separate205 suite proves that physical205 sources are rejected by it.
+const root = fs.mkdtempSync(path.join(os.tmpdir(), "native-project-frozen204-"));
+fs.mkdirSync(path.join(root, "apps/operations/migrations"), { recursive: true });
+for (const name of fs.readdirSync(path.join(repositoryRoot, "apps/operations/migrations")))
+  if (/^\d{4}_.+\.sql$/.test(name) && Number(name.slice(0, 4)) <= 204)
+    fs.copyFileSync(path.join(repositoryRoot, "apps/operations/migrations", name), path.join(root, "apps/operations/migrations", name));
+after(() => {
+  assert.equal(path.dirname(root), path.resolve(os.tmpdir()));
+  assert(path.basename(root).startsWith("native-project-frozen204-"));
+  fs.rmSync(root, { recursive: true, force: true });
+});
 const sha = value => crypto.createHash("sha256").update(value).digest("hex");
 function fixture() {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), "native-project-203-204-"));

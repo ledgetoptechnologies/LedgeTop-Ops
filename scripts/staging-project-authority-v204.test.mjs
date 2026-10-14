@@ -57,7 +57,14 @@ test("current204 project-only authority is exact, atomic and reverses only its s
     script: "export default {}", d1Databases: ["DB"] });
   try {
     const db = await runtime.getD1Database("DB"), staff = PINNED_OPERATOR.staffId;
-    const directory = path.join(root, "apps/operations/migrations");
+    // The immutable204 compiler intentionally rejects later physical source chains.
+    const reviewedRoot = path.join(temporary, "reviewed204");
+    const directory = path.join(reviewedRoot, "apps/operations/migrations");
+    fs.mkdirSync(directory, { recursive: true });
+    const sourceDirectory = path.join(root, "apps/operations/migrations");
+    for (const name of fs.readdirSync(sourceDirectory))
+      if (/^\d{4}_.+\.sql$/.test(name) && Number(name.slice(0, 4)) <= 204)
+        fs.copyFileSync(path.join(sourceDirectory, name), path.join(directory, name));
     const names = fs.readdirSync(directory).filter(name => /^\d{4}_.+\.sql$/.test(name)).sort();
     assert.equal(names.length, 204);
     await db.prepare("CREATE TABLE d1_migrations(id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT NOT NULL UNIQUE)").run();
@@ -84,7 +91,7 @@ test("current204 project-only authority is exact, atomic and reverses only its s
     ]);
     await db.batch([1, 0, 0].map(active => db.prepare(
       "UPDATE native_project_grants SET active=?,version=version+1 WHERE id=?").bind(active, projectGrantId)));
-    const candidateInput = await input(db), packet = compileBusinessAreaAuthorityPair204(candidateInput);
+    const candidateInput = await input(db), packet = compileBusinessAreaAuthorityPair204(candidateInput, { root: reviewedRoot });
     const baseline = await state(db);
     assert.equal(baseline.native_directory_grants.length, 2);
     assert.ok(baseline.native_directory_grant_history.length >= 2);
@@ -126,31 +133,31 @@ test("current204 project-only authority is exact, atomic and reverses only its s
     });
     await t.test("full ledger membership rejects a renamed middle entry with unchanged count and maximum", async () => {
       await db.prepare("UPDATE d1_migrations SET name='0001_unknown.sql' WHERE name=?").bind(names[0]).run();
-      await assert.rejects(applyBusinessAreaAuthorityPhase204(db, packet, "provision", { target: STAGING_TARGET }));
+      await assert.rejects(applyBusinessAreaAuthorityPhase204(db, packet, "provision", { root: reviewedRoot, target: STAGING_TARGET }));
       assert.deepEqual(await state(db), baseline);
       await db.prepare("UPDATE d1_migrations SET name=? WHERE name='0001_unknown.sql'").bind(names[0]).run();
     });
     await t.test("a late grant failure rolls back approval creation and every audit mutation", async () => {
       await db.prepare(`CREATE TRIGGER fail_project_authority_test BEFORE UPDATE ON native_project_grants
         WHEN NEW.id='${projectGrantId}' BEGIN SELECT RAISE(ABORT,'test late grant failure'); END`).run();
-      await assert.rejects(applyBusinessAreaAuthorityPhase204(db, packet, "provision", { target: STAGING_TARGET }));
+      await assert.rejects(applyBusinessAreaAuthorityPhase204(db, packet, "provision", { root: reviewedRoot, target: STAGING_TARGET }));
       assert.deepEqual(await state(db), baseline);
       await db.prepare("DROP TRIGGER fail_project_authority_test").run();
     });
     await t.test("reactivates one exact inactive ID then closes it monotonically without touching directory grants or denies", async () => {
-      assert.deepEqual(await applyBusinessAreaAuthorityPhase204(db, packet, "provision", { target: STAGING_TARGET }),
+      assert.deepEqual(await applyBusinessAreaAuthorityPhase204(db, packet, "provision", { root: reviewedRoot, target: STAGING_TARGET }),
         { replayed: false, phase: "provision" });
       assert.equal((await first(db, "SELECT version FROM native_project_grants WHERE id=?", projectGrantId)).version, 5);
       const active = await state(db);
-      assert.deepEqual(await applyBusinessAreaAuthorityPhase204(db, packet, "provision", { target: STAGING_TARGET }),
+      assert.deepEqual(await applyBusinessAreaAuthorityPhase204(db, packet, "provision", { root: reviewedRoot, target: STAGING_TARGET }),
         { replayed: true, phase: "provision" });
       assert.deepEqual(await state(db), active);
       await db.prepare(`CREATE TRIGGER fail_project_revoke_test BEFORE UPDATE ON native_project_grants
         WHEN NEW.id='${projectGrantId}' AND NEW.active=0 BEGIN SELECT RAISE(ABORT,'test late cleanup failure'); END`).run();
-      await assert.rejects(applyBusinessAreaAuthorityPhase204(db, packet, "revoke", { target: STAGING_TARGET }));
+      await assert.rejects(applyBusinessAreaAuthorityPhase204(db, packet, "revoke", { root: reviewedRoot, target: STAGING_TARGET }));
       assert.deepEqual(await state(db), active, "failed cleanup preserves the active grant and complete original audit lineage");
       await db.prepare("DROP TRIGGER fail_project_revoke_test").run();
-      await applyBusinessAreaAuthorityPhase204(db, packet, "revoke", { target: STAGING_TARGET });
+      await applyBusinessAreaAuthorityPhase204(db, packet, "revoke", { root: reviewedRoot, target: STAGING_TARGET });
       const closed = await state(db);
       assert.deepEqual(closed.native_project_grants.find(row => row.id === projectGrantId),
         { ...baseline.native_project_grants.find(row => row.id === projectGrantId), version: 6 });
@@ -160,8 +167,8 @@ test("current204 project-only authority is exact, atomic and reverses only its s
         assert.deepEqual(closed[table], baseline[table]);
       assert.equal(closed.native_project_grant_generations[0].generation,
         baseline.native_project_grant_generations[0].generation + 2);
-      await applyBusinessAreaAuthorityPhase204(db, packet, "revoke", { target: STAGING_TARGET });
-      await applyBusinessAreaAuthorityPhase204(db, packet, "provision", { target: STAGING_TARGET });
+      await applyBusinessAreaAuthorityPhase204(db, packet, "revoke", { root: reviewedRoot, target: STAGING_TARGET });
+      await applyBusinessAreaAuthorityPhase204(db, packet, "provision", { root: reviewedRoot, target: STAGING_TARGET });
       assert.deepEqual(await state(db), closed, "receipt replay must never reopen a revoked grant");
       assert.equal((await compileBusinessAreaAuthorityPair204(await input(db))).input.approval.grantId, projectGrantId);
       assert.deepEqual((await db.prepare("PRAGMA foreign_key_check").all()).results, []);

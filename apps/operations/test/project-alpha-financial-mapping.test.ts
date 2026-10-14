@@ -26,11 +26,12 @@ beforeAll(async () => {
       binding_external_id TEXT,binding_status TEXT,binding_resource_revision TEXT,has_conflict INTEGER);
     CREATE TABLE project_alpha_api_v2_project_observations_current(source_id TEXT,source_instance_id TEXT,application_id TEXT,history_epoch_id TEXT,
       request_id TEXT,external_project_id TEXT,project_alpha_public_id TEXT,resource_revision TEXT,projection_sha256 TEXT,archived INTEGER,has_conflict INTEGER);
-    CREATE TABLE project_alpha_api_v2_inventory_conflicts(source_id TEXT,source_instance_id TEXT,application_id TEXT,history_epoch_id TEXT,
+    CREATE TABLE project_alpha_api_v2_inventory_conflicts(conflict_id INTEGER PRIMARY KEY AUTOINCREMENT,source_id TEXT,source_instance_id TEXT,application_id TEXT,history_epoch_id TEXT,
       inventory_kind TEXT,resource_type TEXT,project_alpha_public_id TEXT,external_id TEXT,request_id TEXT,prior_reference TEXT,
       conflict_kind TEXT,observed_revision TEXT,details_json TEXT,created_at TEXT DEFAULT '2026-10-01T00:00:00.000Z');
     CREATE TABLE project_alpha_project_mappings(source_id TEXT,source_instance_id TEXT,application_id TEXT,history_epoch_id TEXT,
-      external_project_id TEXT,project_alpha_public_id TEXT);
+      external_project_id TEXT,project_alpha_public_id TEXT,establishment_kind TEXT NOT NULL DEFAULT 'create',
+      establishment_command_id TEXT NOT NULL DEFAULT 'financial-unit-establishment');
     CREATE TABLE operations_shared_projects(external_project_id TEXT,source_id TEXT,source_instance_id TEXT,application_id TEXT,history_epoch_id TEXT,
       project_alpha_public_id TEXT,pa_revision TEXT,current_version INTEGER,canonical_projection_sha256 TEXT,archived INTEGER);
     CREATE TABLE operations_shared_project_revisions(external_project_id TEXT,version INTEGER,read_json TEXT,inbound_resolution_id TEXT);
@@ -66,7 +67,7 @@ async function directory(kind: "organization" | "client", recordId: string, opti
 async function project(externalId = "project-1") {
   const publicId = "d".repeat(32), requestId = crypto.randomUUID(), hash = "e".repeat(64);
   await db.batch([
-    db.prepare("INSERT INTO project_alpha_project_mappings VALUES(?,?,?,?,?,?)").bind(source,instance,application,epoch,externalId,publicId),
+    db.prepare("INSERT INTO project_alpha_project_mappings(source_id,source_instance_id,application_id,history_epoch_id,external_project_id,project_alpha_public_id) VALUES(?,?,?,?,?,?)").bind(source,instance,application,epoch,externalId,publicId),
     db.prepare("INSERT INTO operations_shared_projects VALUES(?,?,?,?,?,?, '7',1,?,0)").bind(externalId,source,instance,application,epoch,publicId,hash),
     db.prepare("INSERT INTO operations_shared_project_revisions VALUES(?,1,?,NULL)").bind(externalId,JSON.stringify({ resource: { id: publicId, revision: "7", projectionSha256: hash } })),
     db.prepare("INSERT INTO project_alpha_project_v2_canonical_activation_receipts VALUES(?,1)").bind(externalId),
