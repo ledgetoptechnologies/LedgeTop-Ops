@@ -30,6 +30,7 @@ import { registerOrganizationOperationalContactRoutes } from "./organization-ope
 import { organizationOperationalContactsAvailable } from "./organization-operational-contacts";
 import { readClientHubProjectManagementAction } from "./project-alpha-project-management";
 import { prepareClientHubNativeProject, submitClientHubNativeProject } from "./client-hub-native-project-management";
+import { mutateClientHubNativeLifecycle, readClientHubNativeLifecycleStatus } from "./client-hub-native-project-lifecycle";
 import { proposeClientHubProjectInboundReview, readClientHubProjectInboundReview,
   resolveClientHubProjectInboundReview } from "./client-hub-project-inbound-review";
 import { exactBusinessProjectPublicId, listProjectAlphaContactRoles, projectAlphaContactRolesEnabled } from "./project-alpha-contact-roles";
@@ -405,6 +406,18 @@ export function registerClientHubRoutes(app: App): void {
       c.header("Cache-Control", "no-store");
       return c.json(result);
     });
+  for (const operation of ["prepare","submit","refresh-prepare","refresh-submit","activate","abandon-preparation","abandon-refresh-preparation","retire-for-inbound-review"] as const) app.post(
+    `/api/client-hub/sources/:sourceId/:rootNamespace/:kind/:publicId/project-management/native-project-lifecycle/${operation}`,async c=>{
+      const kind=routeKind(c.req.param("kind"));if(!kind)throw new HTTPException(404,{message:"Client not found"});const principal=c.get("principal");
+      const context=await resolveDetailContext(c.env,principal,kind,c.req.param("publicId"),c.req.param("sourceId"),c.req.param("rootNamespace"));
+      const body=await readBoundedJson(c.req.raw,8*1024,"Native project lifecycle");
+      const result=await mutateClientHubNativeLifecycle(c.env,c.req.raw,principal,context,operation,body,fetch,()=>verifyContext(c.env,principal,context));await verifyContext(c.env,principal,context);c.header("Cache-Control","no-store");return c.json(result);
+    });
+  app.get("/api/client-hub/sources/:sourceId/:rootNamespace/:kind/:publicId/project-management/native-project-lifecycle/:commandId",async c=>{
+    const kind=routeKind(c.req.param("kind"));if(!kind)throw new HTTPException(404,{message:"Client not found"});const principal=c.get("principal");
+    const context=await resolveDetailContext(c.env,principal,kind,c.req.param("publicId"),c.req.param("sourceId"),c.req.param("rootNamespace"));
+    const result=await readClientHubNativeLifecycleStatus(c.env,c.req.raw,principal,context,c.req.param("commandId"));await verifyContext(c.env,principal,context);c.header("Cache-Control","no-store");return c.json(result);
+  });
   app.get("/api/client-hub/sources/:sourceId/:rootNamespace/:kind/:publicId/timeline", async c => {
     const kind = routeKind(c.req.param("kind"));
     if (!kind) throw new HTTPException(404, { message: "Client not found" });

@@ -225,7 +225,7 @@ describe("dormant PA project v2 transport", () => {
     expect(validatedProjectAlphaProjectRead({ status: "read", httpStatus: 200, response: readBody } as never)).toBeNull();
   });
   it("uses separate lifecycle capability and exact reversible body", async () => {
-    const route = { method: "POST", path: `/api/v2/projects/${project}/archive/commands`, requiredCapability: "projects.lifecycle.archive", requiresSourceInstanceId: true, requiresApplicationId: true, requiresHistoryEpoch: true };
+    const route = { method: "POST", path: "/api/v2/projects/{publicId}/archive/commands", requiredCapability: "projects.lifecycle.archive", requiresSourceInstanceId: true, requiresApplicationId: true, requiresHistoryEpoch: true };
     const body = { apiVersion: "2", sourceInstanceId: source, applicationId: application, historyEpoch: epoch, requestId: request, replayed: false, accepted: true, resource: { type: "project", id: project, revision: "2" }, result: { status: "active", completedAt: null, archived: true, archivedAt: "2026-09-15T00:00:00.000Z", presentation: { portalPublished: false, publicLinkEnabled: false } } };
     const send = vi.fn<typeof fetch>(async (_url, init) => init?.method === "GET" ? json(metadata(route)) : json(body));
     await expect(sendProjectAlphaProjectLifecycleCommand(connection, project, "archive", { commandId: request, expectedRevision: "1" }, send)).resolves.toMatchObject({ status: "acknowledged", response: { result: { archived: true } } });
