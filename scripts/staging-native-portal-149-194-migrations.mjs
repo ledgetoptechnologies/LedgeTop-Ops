@@ -96,7 +96,10 @@ export function buildPairedMigrationPlan(application, base = root, label) {
   const artifactSet=artifactSetLabel(label);
   const spec = SPECS[application]; assert(spec, "window must be client, operations or project-guard");
   const sourceDirectory = path.join(base,`apps/${spec.application}/migrations`);
-  const entries=fs.readdirSync(sourceDirectory,{withFileTypes:true}).filter(entry=>entry.name.endsWith(".sql"));
+  const directoryStat=fs.lstatSync(sourceDirectory);
+  assert(directoryStat.isDirectory()&&!directoryStat.isSymbolicLink(),"regular migration directory required");
+  const entries=fs.readdirSync(sourceDirectory,{withFileTypes:true}).filter(entry=>/\.sql$/i.test(entry.name));
+  assert(entries.every(entry=>/^\d{4}_.+\.sql$/.test(entry.name)),"canonical migration names required");
   assert(entries.every(entry=>entry.isFile()&&!entry.isSymbolicLink()),"migration chain must contain regular files");
   const sourceNames=entries.map(entry=>entry.name).sort(),chain=application==="client"
     ? CLIENT_CURRENT_SOURCE_MIGRATION_CHAIN : OPERATIONS_LATEST_SOURCE_MIGRATION_CHAIN;
