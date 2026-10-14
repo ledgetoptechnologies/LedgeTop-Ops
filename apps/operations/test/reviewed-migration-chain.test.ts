@@ -71,6 +71,7 @@ describe("reviewed release migration fixtures", () => {
     expect(client).toContain("0224_operations_portal_native_recipient_authority.sql");
     expect(client).toContain("0227_operations_portal_native_delivery_authority.sql");
     expect(client).toContain("0229_operations_portal_native_delivery_regrant.sql");
+    expect(client).not.toContain("0231_portal_primary_private_ingress_authority.sql");
   });
 
   it("rejects changed or missing reviewed migration bytes", () => {
@@ -99,6 +100,24 @@ describe("reviewed release migration fixtures", () => {
     expect(() => reviewedOperationsMigrationNames(operations.url))
       .toThrow("reviewed-operations-current-source-content-contract-mismatch");
     expect(reviewedOperationsMigrationNames(operations.url, { rejectExtras: false })).toHaveLength(199);
+  });
+
+  it("validates appended Client 0231 bytes without granting the candidate frozen 149-entry authority", () => {
+    const candidate = "0231_portal_primary_private_ingress_authority.sql";
+    const tampered = copyMigrations("client");
+    writeFileSync(join(tampered.directory, candidate), "-- changed current Client source\n");
+    expect(() => reviewedClientMigrationNames(tampered.url))
+      .toThrow("reviewed-delivery-current-source-content-contract-mismatch");
+
+    const missing = copyMigrations("client");
+    unlinkSync(join(missing.directory, candidate));
+    expect(() => reviewedClientMigrationNames(missing.url))
+      .toThrow("reviewed-delivery-migration-physical-inventory-mismatch");
+
+    const unknown = copyMigrations("client");
+    writeFileSync(join(unknown.directory, "0232_unreviewed.sql"), "-- unreviewed\n");
+    expect(() => reviewedClientMigrationNames(unknown.url))
+      .toThrow("reviewed-delivery-migration-physical-inventory-mismatch");
   });
 
   it.each([

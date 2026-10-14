@@ -18,11 +18,14 @@ Read-only checks on October 14, 2026 confirmed HTTP 200 native-login pages at bo
 
 Provider inspection found Ops version `550120ea-da26-46ac-9027-b5574275695b` at 100 percent, deployment `d7afd38d-b393-42d2-979c-ee70f3fa32de`, and Client version `2dca4413-fe10-4112-94d4-ca4b5c5d31ef` at 100 percent, deployment `4cffdabc-de46-4367-b8e8-2f9de78ff40d`. Ops profile writes and binding continuation are enabled; outbox drain remains false. These deployed versions differ from earlier handoff observations. The new local changes have not been deployed.
 
-Wrangler's remote ledger reads failed with a network fetch error; the Cloudflare connector then verified Ops has 203 migrations through `0203_effective_native_directory_enrollment_consumers.sql` and Client has 149 through `0230_operations_portal_native_delivery_terminal_cancellations.sql`. Migration 0231 is pending. Recheck actual pending migrations before applying anything. PR 161 remains open and draft at `1a22c0c7541235f2855a645f0336309d39997299`, with all ten recorded CI jobs passing. Those checks predate this candidate.
+Initial ledger checks found Ops at 203 migrations through `0203_effective_native_directory_enrollment_consumers.sql` and Client at 149 through `0230_operations_portal_native_delivery_terminal_cancellations.sql`. After a full protected Client staging export was restored locally with integrity and foreign-key checks passing, migration 0231 was applied using an exact-account, exact-database configuration containing only that migration. Client now has 150 ledger entries, zero private-primary authority rows, no foreign-key violations, and no remaining migration in that isolated set. No Worker code deployment accompanied this migration.
+
+Draft successor PR 162 contains this candidate. Its initial CI run `38549810639` passed nine jobs; Operations failed because the reviewed test helper still rejected the appended Client migration. The helper now validates the full 150-entry source while returning the unchanged historical 149-entry fixture inventory. All five affected suites passed locally, 60 tests, before the correction was published for fresh CI. PR 161 remains draft and is the successor's base; its prior checks do not certify PR 162.
 
 ## Local candidate validation
 
 - Operations connection/configuration, reviewed-import HTTP and Viewer issuance: 94 tests passed across five files.
+- Corrected reviewed migration helper and four full-schema consumers: 60 tests passed across five additional Operations files.
 - Client private ingress, primary authority and existing portal projection: 33 tests passed across three files. Joined primary/secondary native authorization: seven tests passed.
 - Reviewed-import enrollment browser suite: seven desktop Edge and seven mobile Edge tests passed.
 - Repository layout and two-source profile: 36 tests passed. Bootstrap/native migration profiles: 36 passed, with five Windows symlink-policy skips. Frozen paired migration planner: 24 passed. Staging evidence: 58 passed.
