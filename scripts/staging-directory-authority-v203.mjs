@@ -139,7 +139,9 @@ function validate(raw) {
     exact(input.priorProvision,['approval','receipt'],'prior provision');
     exact(input.priorProvision.approval,APPROVAL,'prior approval'); exact(input.priorProvision.receipt,RECEIPT,'prior receipt');
   }
-  if (Buffer.byteLength(json(input))>240_000) fail('bounded packet bytes');
+  // Match the real bootstrap audit table's canonical-plan byte constraint.
+  // Current203 cleanup retains exact prior approval/receipt lineage.
+  if (Buffer.byteLength(json(input))>262_144) fail('bounded packet bytes');
   return input;
 }
 

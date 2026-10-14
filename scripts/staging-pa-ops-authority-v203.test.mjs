@@ -1,9 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import crypto from "node:crypto";
 import path from "node:path";
 import { createRequire } from "node:module";
-import { applyPaOpsAuthority203, compilePaOpsAuthority203, prepareAuthority203, runReviewedApply, STAFF } from "./staging-pa-ops-authority-v203.mjs";
+import { applyPaOpsAuthority203, compilePaOpsAuthority203, prepareAuthority203, readAuthorityPacket203, run as runAuthority203,
+  runReviewedApply, authorityArtifact203, MAX_AUTHORITY_ARTIFACT_BYTES, STAFF } from "./staging-pa-ops-authority-v203.mjs";
+import { createPrivateEvidenceDirectory } from "./staging-native-authority-packet-rehearsal.mjs";
 import { STAGING_TARGET } from "./staging-directory-authority-v203.mjs";
 import { PINNED_BUSINESS_AREA, PINNED_OPERATOR } from "./staging-project-authority-v203.mjs";
 import { PROFILE, INITIAL_READ_SCOPES, STAGING_ORIGINS } from "./staging-ops-two-source-connection-profile-v1.mjs";
@@ -59,6 +62,18 @@ test("current203 paired authority is atomic, source-bound, reversible and preser
     await db.prepare("INSERT INTO native_project_grants(id,staff_id,capability,effect,scope_kind,business_area_id,active,granted_by) VALUES(?,?,'project.shared.sync','allow','business_area',?,0,?)")
       .bind(id(91), STAFF, PINNED_BUSINESS_AREA.id, STAFF).run();
 
+    // Match the observed current staging directory input (74,412 bytes) with
+    // portable fixture identities and genuine immutable history triggers.
+    // This exercises the actual audit-table constraints during paired cleanup,
+    // rather than merely padding a file or raising a reader limit.
+    let sized = await prepareAuthority203(db, sources());
+    for (let count = 0; Buffer.byteLength(JSON.stringify(sized.input.directory)) < 74_412 && count < 20; count++) {
+      await db.batch(Array.from({ length: 25 }, () => db.prepare("UPDATE native_directory_grants SET active=1 WHERE id='original-view'")));
+      sized = await prepareAuthority203(db, sources());
+    }
+    assert.ok(Buffer.byteLength(JSON.stringify(sized.input.directory)) >= 74_412);
+    assert.ok(Buffer.byteLength(`${JSON.stringify(sized, null, 2)}\n`) > 2_000_000);
+
     await t.test("late project authority drift rolls back directory grants, history and approvals", async () => {
       const packet = await prepareAuthority203(db, sources());
       await db.prepare("UPDATE native_project_grants SET active=1,version=version+1 WHERE id='original-project-deny'").run();
@@ -89,6 +104,13 @@ test("current203 paired authority is atomic, source-bound, reversible and preser
 
     await t.test("revoke disables only the fresh four IDs and preserves original inactive denies", async () => {
       const revoke = await prepareAuthority203(db, sources(), packet);
+      const cleanupInputBytes = Buffer.byteLength(JSON.stringify(revoke.input.directory));
+      assert.ok(cleanupInputBytes > 240_000, "current-sized real lineage exceeds the historical compiler cap");
+      assert.ok(cleanupInputBytes <= 262_144, "canonical cleanup plan remains within the actual audit table constraint");
+      assert.ok(Buffer.byteLength(JSON.stringify(revoke.input)) < 500_000);
+      assert.ok(Buffer.byteLength(`${JSON.stringify(revoke, null, 2)}\n`) > MAX_AUTHORITY_ARTIFACT_BYTES,
+        "duplicated cleanup SQL must not be persisted as the review artifact");
+      assert.ok(Buffer.byteLength(`${JSON.stringify(authorityArtifact203(revoke), null, 2)}\n`) < MAX_AUTHORITY_ARTIFACT_BYTES);
       await db.prepare(`CREATE TRIGGER reject_test_project_cleanup BEFORE UPDATE ON native_project_grants
         WHEN OLD.id='${id(91)}' AND NEW.active=0 BEGIN SELECT RAISE(ABORT,'late cleanup rollback'); END`).run();
       const failedClosePrestate = await state(db);
@@ -128,6 +150,56 @@ test("current203 paired authority is atomic, source-bound, reversible and preser
       }; } }; }, async batch() { submitted = true; } };
       await assert.rejects(applyPaOpsAuthority203(partialReceiptDb, packet, "provision", { target: STAGING_TARGET }));
       assert.equal(submitted, false, "partial lineage never resubmits an unreviewed half-window");
+    });
+
+    await t.test("apply and cleanup readers accept legitimate >2MB prepared packets and enforce the same 4MB boundary before any connection", async () => {
+      let large, serialized;
+      for (let count = 25; count <= 300; count += 25) {
+        const input = structuredClone(packet.input), template = input.directory.history.find(row => row.grant_id === "original-view");
+        input.directory.history = [...input.directory.history.filter(row => row.grant_id !== "original-view"),
+          ...Array.from({ length: count }, (_, index) => ({ ...template, grant_version: index + 1, grant_generation: index + 1 }))];
+        input.directory.generation.generation = count;
+        large = compilePaOpsAuthority203(input);
+        serialized = `${JSON.stringify(large, null, 2)}\n`;
+        if (Buffer.byteLength(serialized) > 2_000_000) break;
+      }
+      assert.ok(Buffer.byteLength(serialized) > 2_000_000, "fixture reproduces the legitimate compiled SQL amplification");
+      assert.ok(Buffer.byteLength(JSON.stringify(large.input)) < 500_000, "input budget remains unchanged");
+      const evidence = createPrivateEvidenceDirectory(root, crypto.randomUUID());
+      const filename = evidence.provisionPath, sourceFile = path.join(evidence.evidenceDir, "sources.json"), backupFile = path.join(evidence.evidenceDir, "backup.sql");
+      const missingConfig = path.join(evidence.evidenceDir, "missing-binding.json");
+      try {
+        fs.writeFileSync(filename, serialized, { flag: "wx", mode: 0o600 });
+        fs.writeFileSync(sourceFile, JSON.stringify(sources()), { flag: "wx", mode: 0o600 });
+        const backup = "CREATE TABLE fixture(id TEXT);\n--" + "x".repeat(2000);
+        fs.writeFileSync(backupFile, backup, { flag: "wx", mode: 0o600 });
+        assert.deepEqual(readAuthorityPacket203(filename), large);
+        const applyArgs = ["apply", "--config", missingConfig, "--packet", filename, "--phase", "provision",
+          "--plan-sha256", large.planSha256, "--backup", backupFile, "--backup-sha256",
+          crypto.createHash("sha256").update(backup).digest("hex"), "--confirm-reviewed-staging-authority"];
+        // Missing config is checked synchronously before Wrangler/proxy startup.
+        // Seeing this error proves both CLI paths accepted the large artifact.
+        await assert.rejects(runReviewedApply(applyArgs), /config must be an existing regular file/);
+        await assert.rejects(runAuthority203(["prepare-revoke", "--config", missingConfig, "--sources", sourceFile,
+          "--prior", filename]), /config must be an existing regular file/);
+        fs.writeFileSync(filename, `${JSON.stringify(authorityArtifact203(large), null, 2)}\n`);
+        assert.deepEqual(readAuthorityPacket203(filename), large, "new compact preparation is locally recompiled");
+        await assert.rejects(runReviewedApply(applyArgs), /config must be an existing regular file/);
+        await assert.rejects(runAuthority203(["prepare-revoke", "--config", missingConfig, "--sources", sourceFile,
+          "--prior", filename]), /config must be an existing regular file/);
+        fs.writeFileSync(filename, serialized);
+        fs.appendFileSync(filename, " ".repeat(MAX_AUTHORITY_ARTIFACT_BYTES - Buffer.byteLength(serialized)));
+        assert.deepEqual(readAuthorityPacket203(filename), large, "exact boundary remains accepted");
+        fs.appendFileSync(filename, " ");
+        assert.throws(() => readAuthorityPacket203(filename), /validation failed/);
+        await assert.rejects(runReviewedApply(applyArgs), /validation failed/);
+        await assert.rejects(runAuthority203(["prepare-revoke", "--config", missingConfig, "--sources", sourceFile,
+          "--prior", filename]), /validation failed/);
+      } finally {
+        assert.equal(path.dirname(evidence.evidenceDir), path.join(root, ".backups/staging-native-authority"));
+        for (const file of [filename, sourceFile, backupFile]) if (fs.existsSync(file)) fs.unlinkSync(file);
+        fs.rmdirSync(evidence.evidenceDir);
+      }
     });
 
     await t.test("expired approval cannot open a new window", async () => {

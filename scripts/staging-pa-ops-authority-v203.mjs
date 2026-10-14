@@ -12,6 +12,10 @@ import { buildTwoSourceStagingConnectionPlan } from "./staging-ops-two-source-co
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 export const STAFF = "staff-beau-koltz";
+// Compiled SQL/audit metadata repeat the bounded input. New artifacts persist
+// only version/input/hash; the same 4MB reader budget also accepts earlier full
+// packets. Both apply and recovery recompile trusted source locally.
+export const MAX_AUTHORITY_ARTIFACT_BYTES = 4_000_000;
 const hash = value => crypto.createHash("sha256").update(value).digest("hex");
 const fail = () => { throw new Error("current203 authority validation failed"); };
 const all = async (db, sql, ...params) => (await db.prepare(sql).bind(...params).all()).results;
@@ -37,7 +41,13 @@ export function compilePaOpsAuthority203(input, { root = ROOT } = {}) {
   if (new Set(ids).size !== ids.length) fail();
   const serialized = JSON.stringify(input);
   if (Buffer.byteLength(serialized) > 500_000) fail();
-  return { version: 203, input: structuredClone(input), planSha256: hash(serialized), directory, project };
+  const packet = { version: 203, input: structuredClone(input), planSha256: hash(serialized), directory, project };
+  if (Buffer.byteLength(`${JSON.stringify(authorityArtifact203(packet), null, 2)}\n`) > MAX_AUTHORITY_ARTIFACT_BYTES) fail();
+  return packet;
+}
+
+export function authorityArtifact203(packet) {
+  return { version: packet.version, input: structuredClone(packet.input), planSha256: packet.planSha256 };
 }
 
 /** Trusted module-only write boundary. Call only after independent live binding
@@ -160,21 +170,31 @@ function privateFile(filename, maximum) {
   return absolute;
 }
 
+/** Shared local-only boundary: validates a persisted prepared packet without
+ * contacting D1, installing approvals, applying grants, or opening a proxy. */
+export function readAuthorityPacket203(filename) {
+  const packetPath = privateFile(filename, MAX_AUTHORITY_ARTIFACT_BYTES);
+  const packet = JSON.parse(fs.readFileSync(packetPath, "utf8"));
+  const checked = compilePaOpsAuthority203(packet.input);
+  const compact = Object.keys(packet).sort().join() === "input,planSha256,version";
+  if (!same(packet, compact ? authorityArtifact203(checked) : checked)) fail();
+  return checked;
+}
+
 export async function runReviewedApply(argv) {
   const [mode, c, config, p, packetFile, f, phase, h, planSha256, b, backupFile, s, backupSha256, confirmation] = argv;
   if (argv.length !== 14 || mode !== "apply" || c !== "--config" || p !== "--packet" || f !== "--phase"
     || h !== "--plan-sha256" || b !== "--backup" || s !== "--backup-sha256"
     || confirmation !== "--confirm-reviewed-staging-authority" || !["provision", "revoke"].includes(phase)
     || !/^[0-9a-f]{64}$/.test(planSha256) || !/^[0-9a-f]{64}$/.test(backupSha256)) fail();
-  const packetPath = privateFile(packetFile, 2_000_000), backupPath = privateFile(backupFile, 1000_000_000);
+  const packetPath = privateFile(packetFile, MAX_AUTHORITY_ARTIFACT_BYTES), backupPath = privateFile(backupFile, 1000_000_000);
   const backup = fs.readFileSync(backupPath), backupStat = fs.statSync(backupPath);
   // This binds the reviewed file bytes; the operator independently verifies
   // provider provenance, exact staging database and successful restoration.
   if (backup.length < 1024 || hash(backup) !== backupSha256 || !backup.includes(Buffer.from("CREATE TABLE"))
     || Date.now() - backupStat.mtimeMs > 4 * 3600_000) fail();
-  const packet = JSON.parse(fs.readFileSync(packetPath, "utf8"));
-  const checked = compilePaOpsAuthority203(packet.input);
-  if (!same(packet, checked) || checked.planSha256 !== planSha256 || checked.directory.input.phase !== phase) fail();
+  const checked = readAuthorityPacket203(packetPath);
+  if (checked.planSha256 !== planSha256 || checked.directory.input.phase !== phase) fail();
   const observed = await withStagingAuthorityBinding(config, async ({ db, target }) => ({
     result: await applyPaOpsAuthority203(db, checked, phase, { target }),
     readback: await captureAuthority203(db),
@@ -198,15 +218,13 @@ export async function run(argv = process.argv.slice(2)) {
   if (!["prepare", "prepare-revoke"].includes(mode) || configFlag !== "--config" || sourcesFlag !== "--sources"
     || mode === "prepare" && argv.length !== 5
     || mode === "prepare-revoke" && (argv.length !== 7 || priorFlag !== "--prior")) fail();
-  for (const filename of [sources, ...(prior ? [prior] : [])]) {
-    const stat = fs.lstatSync(filename);
-    if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 2_000_000) fail();
-  }
+  const sourceStat = fs.lstatSync(sources);
+  if (!sourceStat.isFile() || sourceStat.isSymbolicLink() || sourceStat.size > 2_000_000) fail();
   const sourceMetadata = JSON.parse(fs.readFileSync(sources, "utf8"));
-  const priorPacket = prior ? JSON.parse(fs.readFileSync(prior, "utf8")) : null;
+  const priorPacket = prior ? readAuthorityPacket203(prior) : null;
   const packet = await withStagingAuthorityBinding(config, ({ db }) => prepareAuthority203(db, sourceMetadata, priorPacket));
   const evidence = createPrivateEvidenceDirectory(ROOT, crypto.randomUUID());
-  const artifactPath = writePrivateEvidence(ROOT, evidence.evidenceDir, "provision.json", packet);
+  const artifactPath = writePrivateEvidence(ROOT, evidence.evidenceDir, "provision.json", authorityArtifact203(packet));
   protect(artifactPath);
   console.log(JSON.stringify({ status: "prepared-review-required", phase: packet.directory.input.phase,
     planSha256: packet.planSha256, artifactPath, mutationsPerformed: false, backupRequired: true,
