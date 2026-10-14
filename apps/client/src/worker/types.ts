@@ -39,6 +39,8 @@ export interface Env {
   CLIENT_PORTAL_NATIVE_RECIPIENT_ENROLLMENT_EXPECTED_HOST?: string;
   /** Dedicated native consent CSRF key; never reused for historical enrollment. */
   CLIENT_PORTAL_NATIVE_RECIPIENT_ENROLLMENT_CSRF_SECRET?: string;
+  /** Native authority RPC portal host; falls back to EXPECTED_HOST for existing single-host deployments. */
+  CLIENT_PORTAL_OPERATIONS_NATIVE_AUTHORITY_EXPECTED_HOST?: string;
   CLIENT_PORTAL_OPERATIONS_NATIVE_AUTHORITY_WRITER_ENABLED?: string;
   CLIENT_PORTAL_OPERATIONS_NATIVE_AUTHORITY_STATUS_ENABLED?: string;
   /** Staging-only native delivery command consumer. Persistence alone never grants byte access. */

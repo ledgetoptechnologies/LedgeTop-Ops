@@ -106,6 +106,56 @@ describe("Operations-native recipient authority consumer", () => {
     }
   });
 
+  it("applies and reads the exact D1 receipt on a separate configured Client host", async () => {
+    const operationId = id(14);
+    const separate = { ...env(db), EXPECTED_HOST: "delivery-staging.ledgetopdroneservices.com",
+      CLIENT_PORTAL_ORIGIN: "https://client-staging.ledgetopdroneservices.com",
+      CLIENT_PORTAL_OPERATIONS_NATIVE_AUTHORITY_EXPECTED_HOST: "client-staging.ledgetopdroneservices.com",
+      CLIENT_PORTAL_OPERATIONS_NATIVE_AUTHORITY_STATUS_ENABLED: "true" };
+    const wire = command(operationId, "recipient.grant", 0);
+    expect(JSON.parse(await applyOperationsPortalNativeRecipientAuthority(separate, wire)))
+      .toMatchObject({ ok: true, operationId, state: "active", replayed: false });
+    expect(JSON.parse(await readOperationsPortalNativeRecipientAuthorityStatus(separate,
+      JSON.stringify({ protocolVersion: 1, operationId }))))
+      .toMatchObject({ ok: true, status: "recorded", operationId, ownershipEpoch: 1, grantRevision: 1 });
+    expect(await readNativeOperationsPortalHomes(db, principal, true))
+      .toEqual([{ authorityId, workspaceId, targetId, recipientBindingId: recipientId, ownershipEpoch: 1, grantRevision: 1 }]);
+    expect(JSON.parse(await applyOperationsPortalNativeRecipientAuthority(separate, wire)))
+      .toMatchObject({ ok: true, status: "duplicate", replayed: true });
+    expect(await db.prepare("SELECT count(*) count FROM operations_portal_native_authority_receipts").first<number>("count")).toBe(1);
+    expect(separate.EXPECTED_HOST).toBe("delivery-staging.ledgetopdroneservices.com");
+  });
+
+  it("fails closed before persistence for missing, empty or mismatched dedicated portal host and disabled consumers", async () => {
+    const operationId = id(15);
+    const separate = { ...env(db), EXPECTED_HOST: "delivery-staging.ledgetopdroneservices.com",
+      CLIENT_PORTAL_ORIGIN: "https://client-staging.ledgetopdroneservices.com",
+      CLIENT_PORTAL_OPERATIONS_NATIVE_AUTHORITY_EXPECTED_HOST: "client-staging.ledgetopdroneservices.com",
+      CLIENT_PORTAL_OPERATIONS_NATIVE_AUTHORITY_STATUS_ENABLED: "true" };
+    for (const change of [
+      { CLIENT_PORTAL_OPERATIONS_NATIVE_AUTHORITY_EXPECTED_HOST: undefined },
+      { CLIENT_PORTAL_OPERATIONS_NATIVE_AUTHORITY_EXPECTED_HOST: "" },
+      { CLIENT_PORTAL_OPERATIONS_NATIVE_AUTHORITY_EXPECTED_HOST: "delivery-staging.ledgetopdroneservices.com" },
+      { CLIENT_PORTAL_OPERATIONS_NATIVE_AUTHORITY_EXPECTED_HOST: "CLIENT-STAGING.ledgetopdroneservices.com" },
+      { CLIENT_PORTAL_ORIGIN: "https://other-staging.ledgetopdroneservices.com" },
+      { CLIENT_PORTAL_ORIGIN: "https://client-staging.ledgetopdroneservices.com/path" },
+      { ENVIRONMENT: "development" },
+    ]) {
+      expect(JSON.parse(await applyOperationsPortalNativeRecipientAuthority({ ...separate, ...change },
+        command(operationId, "recipient.grant", 0)))).toMatchObject({ ok: false, code: "disabled" });
+      expect(JSON.parse(await readOperationsPortalNativeRecipientAuthorityStatus({ ...separate, ...change },
+        JSON.stringify({ protocolVersion: 1, operationId })))).toMatchObject({ ok: false, code: "disabled" });
+    }
+    expect(JSON.parse(await applyOperationsPortalNativeRecipientAuthority({ ...separate,
+      CLIENT_PORTAL_OPERATIONS_NATIVE_AUTHORITY_WRITER_ENABLED: "false" }, command(operationId, "recipient.grant", 0))))
+      .toMatchObject({ ok: false, code: "disabled" });
+    expect(JSON.parse(await readOperationsPortalNativeRecipientAuthorityStatus({ ...separate,
+      CLIENT_PORTAL_OPERATIONS_NATIVE_AUTHORITY_STATUS_ENABLED: "false" }, JSON.stringify({ protocolVersion: 1, operationId }))))
+      .toMatchObject({ ok: false, code: "disabled" });
+    expect(await db.prepare("SELECT count(*) count FROM operations_portal_native_authority_commands").first<number>("count")).toBe(0);
+    expect(await db.prepare("SELECT count(*) count FROM operations_portal_native_authority_receipts").first<number>("count")).toBe(0);
+  });
+
   it("fails closed for stale topology, same operation drift and stale CAS", async () => {
     const operation = id(10), wire = command(operation, "recipient.grant", 0);
     await db.prepare("UPDATE operations_portal_workspace_publication_heads SET target_revision=2 WHERE target_id=?").bind(targetId).run();
