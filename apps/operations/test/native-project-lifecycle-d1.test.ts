@@ -1,4 +1,7 @@
-import { readFileSync, readdirSync } from "node:fs";
+import { readFileSync, readdirSync, rmSync } from "node:fs";
+import { resolve } from "node:path";
+import { pathToFileURL } from "node:url";
+import { createReviewed204TestRoot } from "./helpers/reviewed-0204-test-source";
 import { reviewedOperationsMigrationNames } from "./helpers/reviewed-operations-migration-chain";
 import { Miniflare } from "miniflare";
 import {
@@ -42,6 +45,7 @@ import { dispatchProjectAlphaProjectV2PendingCommand } from "../src/worker/proje
 import { settleProjectAlphaProjectV2Read } from "../src/worker/project-alpha-project-read-settlement-adapter";
 import { activateProjectAlphaProjectV2Canonical } from "../src/worker/project-alpha-project-canonical-activation-adapter";
 
+let reviewed204Root: string;
 let runtime: Miniflare;
 let db: D1Database;
 const commandId = "10000000-0000-4000-8000-000000000001";
@@ -936,10 +940,13 @@ beforeAll(async () => {
     d1Databases: ["OPS_DB"],
   });
   db = (await runtime.getD1Database("OPS_DB")) as D1Database;
-  const directory = new URL("../migrations/", import.meta.url);
+  const sourceDirectory = new URL("../migrations/", import.meta.url);
+  reviewedOperationsMigrationNames(sourceDirectory);
+  reviewed204Root = createReviewed204TestRoot(resolve(import.meta.dirname, "../../.."));
+  const directory = pathToFileURL(resolve(reviewed204Root, "apps/operations/migrations") + "/");
   // Validate every reviewed source byte, then apply the full physical 0204 chain.
   // The helper deliberately returns the historical 0199 release prefix only.
-  reviewedOperationsMigrationNames(directory);
+  // Exact frozen204 prefix bytes are independently checked by the fixture helper.
   const names = readdirSync(directory)
     .filter((n) => /^\d{4}_.+\.sql$/.test(n))
     .sort();
@@ -2667,3 +2674,6 @@ describe("native archive/restore lifecycle on complete D1 schema", () => {
     );
   });
 });
+
+// Remove only this test-created fixture after all lifecycle cases complete.
+afterAll(() => { if (reviewed204Root) rmSync(reviewed204Root, { recursive: true, force: true }); });

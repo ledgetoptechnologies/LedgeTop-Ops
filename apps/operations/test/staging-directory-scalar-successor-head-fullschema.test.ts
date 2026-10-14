@@ -1,10 +1,12 @@
 import { afterEach, expect, it } from "vitest";
-import { readFileSync, writeFileSync, unlinkSync, readdirSync } from "node:fs";
+import { readFileSync, writeFileSync, unlinkSync, readdirSync, rmSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import { resolve } from "node:path";
+import { createReviewed204TestRoot } from "./helpers/reviewed-0204-test-source";
 import { readLocalScalarSuccessorTuple } from "../src/worker/staging-directory-scalar-successor-head";
 import { splitD1MigrationStatements } from "../../client/test/helpers/d1-migrations";
 
+let reviewed204Root: string | undefined;
 const root = resolve(import.meta.dirname, "../../..");
 const source = resolve(
   root,
@@ -15,6 +17,7 @@ const instrumented = resolve(
   "scripts/.scalar-successor-head-fullschema.instrumented.mjs",
 );
 afterEach(() => {
+  if (reviewed204Root) { rmSync(reviewed204Root, { recursive: true, force: true }); reviewed204Root = undefined; }
   try {
     unlinkSync(instrumented);
   } catch {}
@@ -24,7 +27,11 @@ it(
   "executes HEAD scalar successor SELECT after historical authority cleanup and canonical upgrade to 0203",
   { timeout: 240_000 },
   async () => {
+    reviewed204Root = createReviewed204TestRoot(root);
     let text = readFileSync(source, "utf8");
+    // Bind the historical compiler fixture without importing node:test lifecycle hooks.
+    text = text.replace(/import \{ reviewed204AuthorityTestRoot \} from "\.\/historical-0204-authority-test-source\.mjs";\r?\n/u, "")
+      .replace("root=reviewed204AuthorityTestRoot()", `root=${JSON.stringify(reviewed204Root)}`);
     text = text
       .replace(
         "async function lifecycle(t,postHistoricalLifecycleHook){",
