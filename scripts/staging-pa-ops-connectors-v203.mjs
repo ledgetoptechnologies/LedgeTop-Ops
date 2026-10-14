@@ -107,7 +107,10 @@ export function buildOpsConnectorConfig203(base,metadata,inventory) {
     const manifest=buildConnectorManifest203(metadata);
     if(base?.name!=='ledgetop-ops-staging'||base.account_id!=='846c924bf17bf4f3dd15c97a4c5d1d51'
       ||base.vars?.ENVIRONMENT!=='staging'||base.keep_vars!==false||base.vars.PROJECT_ALPHA_BASE_URL!==ORIGINS[0]
-      ||base.vars.APPLICATION_KEY!=='ledgetop_ops_staging'||base.vars.STREAM_ACCOUNT_ID!==''||base.vars.STREAM_CUSTOMER_CODE!=='')fail();
+      ||base.vars.APPLICATION_KEY!=='ledgetop_ops_staging'||base.vars.STREAM_ACCOUNT_ID!==''||base.vars.STREAM_CUSTOMER_CODE!==''
+      ||base.vars.STAGING_DIRECTORY_PROFILE_VIEW_GRANT_ENABLED!=='false')fail();
+    if(Object.hasOwn(base.vars,'PROJECT_ALPHA_CONNECTOR_SOURCES_REQUIRED')
+      &&!['false','true'].includes(base.vars.PROJECT_ALPHA_CONNECTOR_SOURCES_REQUIRED))fail();
     const db=base.d1_databases?.filter(x=>x.binding==='OPS_DB');
     if(db?.length!==1||db[0].database_id!=='78b34173-b168-4e3d-9832-bb9d245cc6b8')fail();
     if(Object.hasOwn(base.vars,CONNECTOR_MANIFEST203)||Object.hasOwn(base.vars,SNAPSHOT_SECRET203)||!Array.isArray(inventory)||inventory.length!==151)fail();
@@ -122,9 +125,13 @@ export function buildOpsConnectorConfig203(base,metadata,inventory) {
     for(const key of ['PROJECT_ALPHA_CONNECTOR_CREDENTIALS','PROJECT_ALPHA_CONNECTOR_EVENT_CREDENTIALS'])if(Object.hasOwn(base.vars,key))fail();
     const primary=JSON.parse(manifest).sources[0];if(primary.revision.snapshotBasePath!=='/')fail();
     const config=structuredClone(base);delete config.vars.STREAM_ACCOUNT_ID;delete config.vars.STREAM_CUSTOMER_CODE;config.vars[CONNECTOR_MANIFEST203]=manifest;
+    delete config.vars.STAGING_DIRECTORY_PROFILE_VIEW_GRANT_ENABLED;
+    config.vars.PROJECT_ALPHA_CONNECTOR_SOURCES_REQUIRED='true';
+    const plainAfter=Object.keys(config.vars).length,textAfter=plainAfter+secrets.length+1,providerAfter=resources.length+textAfter;
+    if(textAfter>128||providerAfter>151)fail();
     const credentialTemplate={version:1,sets:Object.fromEntries(JSON.parse(manifest).sources.map(s=>[s.revision.credentialRef,{snapshotApiKey:null}]))};
     return {profile:CONNECTOR_PROFILE203,config,manifest,credentialSecretName:SNAPSHOT_SECRET203,credentialTemplate,
-      budget:{plain:120,secretsAfterSeparateInstallation:8,textBindings:128,providerBindings:151},
+      budget:{plain:plainAfter,secretsAfterSeparateInstallation:8,textBindings:textAfter,providerBindings:providerAfter},
       sourceMigrationRequirement:structuredClone(OPERATIONS_CURRENT_SOURCE_MIGRATION_CHAIN),
       remoteActionsPerformed:false,registrationRequiresOfficialAttestation:true};
   }catch{return fail();}

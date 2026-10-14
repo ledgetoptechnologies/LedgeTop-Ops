@@ -13,6 +13,7 @@ vi.mock("../src/worker/delivery", async importOriginal => ({ ...await importOrig
 vi.mock("../src/worker/request-security", async importOriginal => ({ ...await importOriginal<object>(), requireMutationSecurity: vi.fn() }));
 import { refreshStreamStatuses } from "../src/worker/file-events";
 import worker from "../src/worker/index";
+import nativeWorker from "../src/worker/staging-native-authority-entrypoint";
 
 afterEach(() => vi.unstubAllGlobals());
 describe("current203 omission of exactly empty Stream bindings", () => {
@@ -38,5 +39,15 @@ describe("current203 omission of exactly empty Stream bindings", () => {
       { waitUntil() {}, passThroughOnException() {} } as unknown as ExecutionContext);
     expect(response.status).toBe(404);expect(await response.json()).toEqual({ error: "Video preview unavailable" });
     expect(first).toHaveBeenCalledOnce();expect(video).not.toHaveBeenCalled();expect(send).not.toHaveBeenCalled();
+  });
+  it.each([undefined,"false"])("obsolete owner-view fixture %s remains404 without any native/DB operation",async flag=>{
+    const prepare=vi.fn(()=>{throw Error("disabled staging fixture must not read or grant DB authority");});
+    const env={ENVIRONMENT:"staging",EXPECTED_HOST:"ops-staging.ledgetopdroneservices.com",PUBLIC_BASE_URL:"https://ops-staging.ledgetopdroneservices.com",
+      OPS_DB:{prepare}} as unknown as Env;
+    if(flag!==undefined)env.STAGING_DIRECTORY_PROFILE_VIEW_GRANT_ENABLED=flag;
+    const response=await nativeWorker.fetch(new Request("https://ops-staging.ledgetopdroneservices.com/api/admin/staging/directory/owner-profile-view-grant",{
+      method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({confirm:true})}),env,
+      {waitUntil(){},passThroughOnException(){}} as unknown as ExecutionContext);
+    expect(response.status).toBe(404);expect(await response.json()).toEqual({error:"Not found"});expect(prepare).not.toHaveBeenCalled();
   });
 });
