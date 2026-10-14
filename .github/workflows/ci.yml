@@ -37,6 +37,9 @@ jobs:
       - name: Verify credential-safe two-source staging connection profile
         run: node --test scripts/staging-ops-two-source-connection-profile-v1.test.mjs
 
+      - name: Verify current-schema paired staging authority and cleanup
+        run: node --test scripts/staging-pa-ops-authority-v203.test.mjs
+
       - name: Verify exact paired native portal migration release chains
         run: node --test scripts/staging-authority-migration-chain-v185.test.mjs scripts/staging-native-portal-149-194-migrations.test.mjs scripts/staging-native-directory-196-198-migrations.test.mjs scripts/staging-native-directory-198-199-migrations.test.mjs scripts/staging-native-directory-200-203-migrations.test.mjs scripts/restrict-private-authority-file.test.mjs scripts/ordered-read-only-snapshot.test.mjs scripts/read-complete-table-snapshot.test.mjs
 
