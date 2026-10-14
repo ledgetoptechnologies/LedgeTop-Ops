@@ -46,7 +46,11 @@ it(
         t,
         async (db: D1Database, target: Record<string, string>) => {
           const migrationDirectory = resolve(root, "apps/operations/migrations");
-          const names = readdirSync(migrationDirectory).filter(name => /^\d{4}_.+\.sql$/u.test(name)).sort();
+          // This fixture verifies the historical 0195-to-0203 upgrade. Later
+          // migrations have their own release-chain and full-schema coverage.
+          const names = readdirSync(migrationDirectory)
+            .filter(name => /^\d{4}_.+\.sql$/u.test(name) && Number(name.slice(0, 4)) <= 203)
+            .sort();
           expect(names).toHaveLength(203);
           expect(names.at(-1)).toBe("0203_effective_native_directory_enrollment_consumers.sql");
           expect((await db.prepare("SELECT count(*) count FROM d1_migrations").first<{count:number}>())!.count).toBe(195);
