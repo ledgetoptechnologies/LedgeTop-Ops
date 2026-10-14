@@ -319,7 +319,7 @@ export function ClientDirectory({ nativeDirectoryProfileWrites = false }: { nati
     </div>
     <p className="client-directory-status">Recent order uses business record updates you can access; synchronization and page views do not count.</p>
     {nativeDirectoryProfileWrites && <NativeDirectoryProfileCreate />}
-    <div className="client-directory-filters" role="group" aria-label="Client type">
+    <div className="client-directory-filters ltds-segmented" role="group" aria-label="Client type">
       {FILTERS.map(filter => <button key={filter.kind} type="button" className="button-ghost"
         aria-pressed={query.kind === filter.kind}
         onClick={() => changeQuery({ ...query, kind: filter.kind })}>{filter.label}</button>)}

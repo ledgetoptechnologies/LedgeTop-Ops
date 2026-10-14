@@ -43,11 +43,12 @@
   min-width: 0;
   width: 100%;
   padding: .7rem .8rem;
-  border: 1px solid var(--line);
-  border-radius: .65rem;
+  border: 1px solid var(--control-border);
+  border-radius: var(--radius-sm);
   background: #fff;
   color: var(--ink);
   font: inherit;
+  font-weight: 450;
 }
 
 .portal-address-book-notice,

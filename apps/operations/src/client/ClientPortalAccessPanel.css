@@ -6,9 +6,9 @@
 .portal-access-panel > button, .portal-access-page-actions > button { justify-self: start; }
 .portal-access-search > label { font-weight: 750; }
 .portal-access-search > div, .portal-access-tools { display: flex; flex-wrap: wrap; gap: .5rem; min-width: 0; }
-.portal-access-search input { flex: 1 1 15rem; min-width: 0; padding: .7rem .8rem; border: 1px solid var(--line); border-radius: 8px; font: inherit; }
+.portal-access-search input { flex: 1 1 15rem; min-width: 0; padding: .7rem .8rem; border: 1px solid var(--control-border); border-radius: 8px; font: inherit; font-weight: 450; }
 .portal-access-filters > label { display: grid; gap: .3rem; flex: 1 1 10rem; color: var(--muted); font-size: .85rem; }
-.portal-access-filters select { width: 100%; min-width: 0; padding: .6rem; border: 1px solid var(--line); border-radius: 8px; background: #fff; color: var(--ink); font: inherit; }
+.portal-access-filters select { width: 100%; min-width: 0; padding: .6rem; border: 1px solid var(--control-border); border-radius: 8px; background: #fff; color: var(--ink); font: inherit; font-weight: 450; }
 .portal-access-people { display: grid; gap: .85rem; min-width: 0; }
 .portal-access-person { padding: .9rem; border: 1px solid var(--line); border-radius: 10px; background: #f7f9fa; }
 .portal-access-person > header { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: flex-start; gap: .5rem; }

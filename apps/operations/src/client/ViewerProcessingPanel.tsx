@@ -308,7 +308,7 @@ export function ViewerProcessingPanel({ mapToken }: { mapToken: string | null })
             .then(() => load()).catch(caught => setError((caught as Error).message));
         }}><option value="imperial">Imperial</option><option value="metric">Metric</option></select></label>
       </div>
-      <nav className="viewer-processing-tabs" aria-label="Processing sections">
+      <nav className="viewer-processing-tabs ltds-segmented" aria-label="Processing sections">
         {(["projects","datasets","gcp","tasks","outputs","imports","providers","storage","shares","settings"] as Tab[]).map(value =>
           <button type="button" key={value} aria-current={tab === value ? "page" : undefined} onClick={() => { setProjectContext(null); setTab(value); }}>{value === "gcp" ? "Ground control" : value[0]!.toUpperCase() + value.slice(1)}</button>)}
       </nav>

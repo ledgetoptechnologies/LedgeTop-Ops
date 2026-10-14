@@ -825,7 +825,7 @@ function ClientHubSurface({ session }: { session: Session }) {
     setSection(selectedItem.id);
   }, [section, selectedItem?.href, selectedItem?.id]);
   return <>
-    {visible.length > 1 && <nav className="operations-subtabs" role="tablist" aria-label="Client Hub views">
+    {visible.length > 1 && <nav className="operations-subtabs ltds-segmented" role="tablist" aria-label="Client Hub views">
       {visible.map(item => <button key={item.id} role="tab" aria-selected={selected === item.id}
         className={selected === item.id ? "active" : ""} onClick={() => open(item)}>{item.label}</button>)}
     </nav>}
@@ -888,7 +888,7 @@ function OperationsHub({ session }: { session: Session }) {
   return (
     <>
       <nav
-        className="operations-subtabs"
+        className="operations-subtabs ltds-segmented"
         role="tablist"
         aria-label="Operations views"
       >
@@ -3905,7 +3905,7 @@ function DeliveryHub({ session }: { session: Session }) {
   return (
     <>
       <div
-        className="delivery-subtabs"
+        className="delivery-subtabs ltds-segmented"
         role="tablist"
         aria-label="Delivery tools"
       >
@@ -5511,7 +5511,7 @@ function ShareDialog({
           <span>{fileTarget ? "File" : "Folder"}</span>
           <code>{fileTarget ? displayName(folder) : folder.prefix}</code>
         </div>
-        {!fileTarget && <div className="share-mode-selector" role="tablist" aria-label="Sharing method">
+        {!fileTarget && <div className="share-mode-selector ltds-segmented" role="tablist" aria-label="Sharing method">
           <button
             ref={publicShareTab}
             id="share-mode-tab-public"

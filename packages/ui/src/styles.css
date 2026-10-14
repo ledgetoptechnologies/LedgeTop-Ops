@@ -46,6 +46,16 @@
 
   --surface-soft: #f7f9fa;
   --border: #e0e5e9;
+
+  /* Form controls and segmented controls share one vocabulary across apps. */
+  --control-border: #cfd6dc;
+  --control-border-hover: #aeb8c1;
+  --control-height: 2.75rem;
+  --control-placeholder: #8a949e;
+  --focus-ring: 0 0 0 3px rgba(238, 80, 7, .2);
+  --track: #e8edf1;
+  --disabled-bg: #e6eaed;
+  --disabled-ink: #7d8892;
 }
 
 /* ---------------------------------------------------------------------------
@@ -62,8 +72,17 @@ body {
   line-height: 1.5;
 }
 
-button, input, select, textarea {
+button {
   font: inherit;
+  color: inherit;
+}
+
+/* Field text never inherits a bold label weight. */
+input, select, textarea {
+  font-family: inherit;
+  font-size: inherit;
+  font-weight: 450;
+  line-height: 1.4;
   color: inherit;
 }
 
@@ -71,7 +90,8 @@ button, input, select, textarea {
    Buttons
    --------------------------------------------------------------------------- */
 
-button, .button {
+/* Links styled with a variant class but without .button still render as buttons. */
+button, .button, a:where(.button-orange, .button-ghost, .button-danger) {
   border: 0;
   border-radius: var(--radius-sm);
   padding: .65rem 1rem;
@@ -101,8 +121,21 @@ button:active, .button:active { transform: scale(.98); }
 
 .button-small { padding: .42rem .68rem; font-size: .83rem; }
 
-button:disabled { opacity: .5; cursor: not-allowed; transform: none; }
-button:disabled:hover { background: #14191f; }
+/* Keep link-buttons' own colors on hover instead of the generic link hover. */
+a:where(.button, .button-orange, .button-ghost, .button-danger):hover { text-decoration: none; }
+a.button, a.button-orange, a.button-danger,
+a.button:hover, a.button-orange:hover, a.button-danger:hover { color: #fff; }
+a.button-ghost { color: #26313a; }
+a.button-ghost:hover { color: #26313a; }
+
+/* One disabled look for every variant, instead of washed-out orange or red. */
+button:disabled, button:disabled:hover {
+  background: var(--disabled-bg);
+  color: var(--disabled-ink);
+  box-shadow: none;
+  cursor: not-allowed;
+  transform: none;
+}
 
 /* Keyboard-focus ring for all interactive elements */
 button:focus-visible, .button:focus-visible, a:focus-visible,
@@ -119,6 +152,93 @@ input:focus-visible, select:focus-visible, textarea:focus-visible {
 a { color: var(--blue); text-decoration: none; transition: color .15s ease; }
 a:hover { color: var(--blue-dark); text-decoration: underline; }
 a:active { color: var(--orange); }
+
+/* ---------------------------------------------------------------------------
+   Form controls
+   Zero-specificity defaults: any component rule still wins, but controls a
+   component forgot to style look like the rest of the product instead of
+   falling back to square browser defaults.
+   --------------------------------------------------------------------------- */
+
+:where(input:not([type=checkbox], [type=radio], [type=range], [type=color], [type=file], [type=hidden], [type=submit], [type=button]), select, textarea) {
+  min-height: var(--control-height);
+  padding: .62rem .8rem;
+  border: 1px solid var(--control-border);
+  border-radius: var(--radius-sm);
+  background-color: var(--paper);
+  color: var(--ink);
+  transition: border-color .15s ease, box-shadow .15s ease;
+}
+:where(textarea) { min-height: 6rem; resize: vertical; }
+:where(input, select, textarea):hover:not(:disabled, :focus) { border-color: var(--control-border-hover); }
+input:focus-visible, select:focus-visible, textarea:focus-visible {
+  outline: none;
+  border-color: var(--orange);
+  box-shadow: var(--focus-ring);
+}
+::placeholder { color: var(--control-placeholder); opacity: 1; }
+:where(input, select, textarea):disabled { background-color: var(--surface-soft); color: var(--muted); cursor: not-allowed; }
+
+input[type=checkbox], input[type=radio] { accent-color: var(--orange); }
+:where(input[type=checkbox], input[type=radio]) { width: 1.05rem; height: 1.05rem; flex: 0 0 auto; cursor: pointer; }
+input[type=checkbox]:focus-visible, input[type=radio]:focus-visible { outline: 3px solid #ee500752; outline-offset: 2px; box-shadow: none; }
+
+input[type=file] { max-width: 100%; color: var(--muted); font-size: .86rem; }
+input[type=file]::file-selector-button {
+  margin-right: .75rem;
+  padding: .55rem .9rem;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: #eef1f3;
+  color: #26313a;
+  font: inherit;
+  font-weight: 750;
+  cursor: pointer;
+  transition: background .15s ease;
+}
+input[type=file]::file-selector-button:hover { background: #e2e7eb; }
+
+:where(fieldset) { border: 1px solid var(--line); border-radius: var(--radius-md); padding: .9rem 1rem 1rem; }
+:where(legend) { padding: 0 .35rem; font-weight: 760; }
+
+/* ---------------------------------------------------------------------------
+   Segmented control
+   The house style for tabs, view switches and filter toggles. Apps group
+   their tab containers under these rules so every page switches views the
+   same way.
+   --------------------------------------------------------------------------- */
+
+.ltds-segmented {
+  display: flex;
+  gap: .25rem;
+  width: max-content;
+  max-width: 100%;
+  padding: .25rem;
+  overflow-x: auto;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--track);
+  scrollbar-width: none;
+}
+.ltds-segmented > button {
+  flex: 0 0 auto;
+  min-height: 2.5rem;
+  padding: .55rem 1rem;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: #4f5d69;
+  font-weight: 750;
+  box-shadow: none;
+  transition: background .15s ease, color .15s ease, box-shadow .15s ease;
+}
+.ltds-segmented > button:hover:not(:disabled, .active, [aria-selected="true"], [aria-pressed="true"], [aria-current="page"]) { background: rgba(255, 255, 255, .55); color: var(--ink); }
+.ltds-segmented > button:is(.active, [aria-selected="true"], [aria-pressed="true"], [aria-current="page"]) {
+  background: var(--paper);
+  color: var(--ink);
+  box-shadow: 0 1px 2px rgba(20, 32, 43, .08), 0 2px 8px rgba(20, 32, 43, .08);
+}
+.ltds-segmented > button:active { transform: none; }
 
 /* ---------------------------------------------------------------------------
    Brand

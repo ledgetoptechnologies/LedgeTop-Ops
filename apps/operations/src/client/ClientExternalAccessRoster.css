@@ -5,9 +5,9 @@
 .external-access-roster button[aria-disabled="true"] { cursor: default; opacity: .65; }
 .external-access-search > label { font-weight: 750; }
 .external-access-search > div { display: flex; flex-wrap: wrap; align-items: end; gap: .6rem; min-width: 0; }
-.external-access-search input { flex: 1 1 15rem; min-width: 0; padding: .7rem .8rem; border: 1px solid var(--line); border-radius: 8px; font: inherit; }
+.external-access-search input { flex: 1 1 15rem; min-width: 0; padding: .7rem .8rem; border: 1px solid var(--control-border); border-radius: 8px; font: inherit; font-weight: 450; }
 .external-access-search div > label { display: grid; gap: .3rem; flex: 1 1 11rem; color: var(--muted); font-size: .85rem; }
-.external-access-search select { width: 100%; min-width: 0; padding: .6rem; border: 1px solid var(--line); border-radius: 8px; background: #fff; color: var(--ink); font: inherit; }
+.external-access-search select { width: 100%; min-width: 0; padding: .6rem; border: 1px solid var(--control-border); border-radius: 8px; background: #fff; color: var(--ink); font: inherit; font-weight: 450; }
 .external-access-rows { display: grid; gap: .8rem; min-width: 0; }
 .external-access-rows article { display: grid; gap: .75rem; padding: .9rem; border: 1px solid var(--line); border-radius: 10px; background: #f7f9fa; min-width: 0; }
 .external-access-rows header { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: flex-start; gap: .5rem; }

@@ -6,9 +6,9 @@
 .client-service-assignment-warning { padding: .75rem; border-left: 4px solid #b15b00; background: #fff7e8; }
 .client-service-assignment-search > label { font-weight: 750; }
 .client-service-assignment-search > div { display: flex; flex-wrap: wrap; align-items: end; gap: .6rem; min-width: 0; }
-.client-service-assignment-search input { flex: 1 1 15rem; min-width: 0; padding: .7rem .8rem; border: 1px solid var(--line); border-radius: 8px; font: inherit; }
+.client-service-assignment-search input { flex: 1 1 15rem; min-width: 0; padding: .7rem .8rem; border: 1px solid var(--control-border); border-radius: 8px; font: inherit; font-weight: 450; }
 .client-service-assignment-search div > label { display: grid; gap: .3rem; flex: 1 1 11rem; color: var(--muted); font-size: .85rem; }
-.client-service-assignment-search select { width: 100%; min-width: 0; padding: .6rem; border: 1px solid var(--line); border-radius: 8px; background: #fff; color: var(--ink); font: inherit; }
+.client-service-assignment-search select { width: 100%; min-width: 0; padding: .6rem; border: 1px solid var(--control-border); border-radius: 8px; background: #fff; color: var(--ink); font: inherit; font-weight: 450; }
 .client-service-assignment-rows { display: grid; gap: .8rem; min-width: 0; }
 .client-service-assignment-rows article { display: grid; gap: .75rem; padding: .9rem; border: 1px solid var(--line); border-radius: 10px; background: #f7f9fa; min-width: 0; }
 .client-service-assignment-rows header { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: flex-start; gap: .5rem; }
