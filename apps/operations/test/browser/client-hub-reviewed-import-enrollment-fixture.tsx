@@ -15,7 +15,8 @@ window.fetch = async (input, init = {}) => {
     if (path.endsWith("/review")) {
       const recordId = decodeURIComponent(path.split("/").at(-2)!);
       return Response.json({ review: { recordId, kind: path.includes("/organizations/") ? "organization" : "client",
-        recordVersion: 7, enrollmentVersion: 3, sources: [{ sourceId, enrolled: false }] } });
+        recordVersion: 7, enrollmentVersion: 3, sources: [{ sourceId, enrolled: false },
+          { sourceId: "project-alpha:secondary", enrolled: false }] } });
     }
     const body = JSON.parse(String(init.body));
     return Response.json({ outcome: { status: "written", replayed: false,
