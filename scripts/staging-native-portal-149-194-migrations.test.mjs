@@ -4,15 +4,37 @@ import crypto from "node:crypto";
 import { createRequire } from "node:module";
 import path from "node:path";
 import os from "node:os";
-import test from "node:test";
+import test, { after } from "node:test";
 import { applicationTableNames, assertApplyReady, assertAttemptMarker, assertClientReadyForOperations, assertClientReconciliationDrift, assertExactLedger, assertPinnedWranglerVersion, assertPreserved, buildPairedMigrationPlan,
   normalizedSql, quoteSqlIdentifier, readOnlyQueries, reviewedSchemaDefinitions, runPairedMigration, safeFailure, SPECS } from "./staging-native-portal-149-194-migrations.mjs";
-import { transformSeed } from "./staging-bootstrap.mjs";
+import { transformSeed, OPERATIONS_LATEST_SOURCE_MIGRATION_CHAIN } from "./staging-bootstrap.mjs";
 
-const root=path.resolve(import.meta.dirname,"..");
-const require=createRequire(path.join(root,"apps/operations/package.json")),{Miniflare}=require("miniflare"),{unstable_splitSqlQuery}=require("wrangler");
+const repositoryRoot=path.resolve(import.meta.dirname,"..");
+// These older migration tools keep their exact205 source authority. Exercise
+// their positive contracts against that immutable prefix, not future206 SQL.
+const root=fs.mkdtempSync(path.join(os.tmpdir(),"paired-reviewed205-fixture-"));
+for(const application of ["client","operations"]){
+  const source=path.join(repositoryRoot,`apps/${application}/migrations`),destination=path.join(root,`apps/${application}/migrations`);
+  fs.mkdirSync(destination,{recursive:true});
+  for(const name of fs.readdirSync(source)){
+    if(application==="operations"&&/^\d{4}_/.test(name)&&Number(name.slice(0,4))>OPERATIONS_LATEST_SOURCE_MIGRATION_CHAIN.count)continue;
+    fs.copyFileSync(path.join(source,name),path.join(destination,name));
+  }
+}
+after(()=>{
+  assert.equal(path.dirname(root),path.resolve(os.tmpdir()));
+  assert(path.basename(root).startsWith("paired-reviewed205-fixture-"));
+  fs.rmSync(root,{recursive:true,force:true});
+});
+const require=createRequire(path.join(repositoryRoot,"apps/operations/package.json")),{Miniflare}=require("miniflare"),{unstable_splitSqlQuery}=require("wrangler");
 const syntheticOwner={email:"owner@staging.example.test",displayName:"Synthetic Staging Owner",clientStaffId:"staging-client-owner",operationsStaffId:"staging-operations-owner"};
 async function applyMigration(db,application,name){let sql=fs.readFileSync(path.join(root,"apps",application,"migrations",name),"utf8");if(name===(application==="client"?"0002_seed_initial_staff.sql":"0002_seed_acl.sql"))sql=transformSeed(application==="client"?"delivery":"operations",sql,syntheticOwner);const statements=unstable_splitSqlQuery(sql.replace(/\r\n/gu,"\n")).map(value=>value.trim()).filter(value=>value&&!/^PRAGMA\s+foreign_keys\s*=\s*ON/iu.test(value));await db.batch(statements.map(value=>db.prepare(value)));}
+test("frozen paired tools refuse actual206 source instead of broadening149/194 authority",()=>{
+  assert(fs.existsSync(path.join(repositoryRoot,"apps/operations/migrations/0206_native_directory_existing_import.sql")));
+  for(const application of ["operations","project-guard"])
+    assert.throws(()=>buildPairedMigrationPlan(application,repositoryRoot));
+});
+
 test("pins exact Client 147->149 and Ops 190->194 suffixes and targets",()=>{
   const client=buildPairedMigrationPlan("client",root),ops=buildPairedMigrationPlan("operations",root);
   assert.equal(client.priorNames.length,147);assert.equal(client.finalNames.length,149);assert.deepEqual(client.migrations.map(x=>x.name),SPECS.client.suffix);
