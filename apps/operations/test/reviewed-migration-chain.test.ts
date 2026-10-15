@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { cpSync, mkdtempSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import { cpSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -100,6 +100,22 @@ describe("reviewed release migration fixtures", () => {
     expect(() => reviewedOperationsMigrationNames(operations.url))
       .toThrow("reviewed-operations-current-source-content-contract-mismatch");
     expect(reviewedOperationsMigrationNames(operations.url, { rejectExtras: false })).toHaveLength(199);
+  });
+
+  it("validates206 separately while returning199 and rejects changed, missing or unknown successors", () => {
+    const successor = "0206_native_directory_existing_import.sql", valid = copyMigrations("operations");
+    expect(reviewedOperationsMigrationNames(valid.url)).toHaveLength(199);
+    expect(reviewedOperationsMigrationNames(valid.url)).not.toContain(successor);
+    const body = readFileSync(join(valid.directory,successor),"utf8").replace(/\r\n/g,"\n");
+    writeFileSync(join(valid.directory,successor),body.replace(/\n/g,"\r\n"));
+    expect(reviewedOperationsMigrationNames(valid.url)).toHaveLength(199);
+    writeFileSync(join(valid.directory,successor),body+"\n-- unreviewed change\n");
+    expect(()=>reviewedOperationsMigrationNames(valid.url)).toThrow("reviewed-operations-successor-content-contract-mismatch");
+    expect(reviewedOperationsMigrationNames(valid.url,{rejectExtras:false})).toHaveLength(199);
+    const missing = copyMigrations("operations");unlinkSync(join(missing.directory,successor));
+    expect(()=>reviewedOperationsMigrationNames(missing.url)).toThrow("reviewed-operations-migration-physical-inventory-mismatch");
+    const unknown = copyMigrations("operations");writeFileSync(join(unknown.directory,"0207_unreviewed.sql"),"SELECT 1;");
+    expect(()=>reviewedOperationsMigrationNames(unknown.url)).toThrow("reviewed-operations-migration-physical-inventory-mismatch");
   });
 
   it("validates appended Client 0231 bytes without granting the candidate frozen 149-entry authority", () => {

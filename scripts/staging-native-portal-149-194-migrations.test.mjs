@@ -4,9 +4,10 @@ import crypto from "node:crypto";
 import { createRequire } from "node:module";
 import path from "node:path";
 import os from "node:os";
+import { pathToFileURL } from "node:url";
 import test, { after } from "node:test";
 import { applicationTableNames, assertApplyReady, assertAttemptMarker, assertClientReadyForOperations, assertClientReconciliationDrift, assertExactLedger, assertPinnedWranglerVersion, assertPreserved, buildPairedMigrationPlan,
-  normalizedSql, quoteSqlIdentifier, readOnlyQueries, reviewedSchemaDefinitions, runPairedMigration, safeFailure, SPECS } from "./staging-native-portal-149-194-migrations.mjs";
+  normalizedSql, quoteSqlIdentifier, readOnlyQueries, reviewedSchemaDefinitions, safeFailure, SPECS } from "./staging-native-portal-149-194-migrations.mjs";
 import { transformSeed, OPERATIONS_LATEST_SOURCE_MIGRATION_CHAIN } from "./staging-bootstrap.mjs";
 
 const repositoryRoot=path.resolve(import.meta.dirname,"..");
@@ -21,6 +22,14 @@ for(const application of ["client","operations"]){
     fs.copyFileSync(path.join(source,name),path.join(destination,name));
   }
 }
+// The CLI derives its source root from import.meta.url. Copy its unchanged
+// scripts so mocked preflight calls exercise the same frozen fixture as plans.
+const fixtureScripts=path.join(root,"scripts");fs.mkdirSync(fixtureScripts);
+for(const name of fs.readdirSync(path.join(repositoryRoot,"scripts")))
+  if(name.endsWith(".mjs"))fs.copyFileSync(path.join(repositoryRoot,"scripts",name),path.join(fixtureScripts,name));
+fs.symlinkSync(path.join(repositoryRoot,"apps/operations/node_modules"),path.join(root,"apps/operations/node_modules"),process.platform==="win32"?"junction":"dir");
+assert.deepEqual(fs.readFileSync(path.join(fixtureScripts,"staging-native-portal-149-194-migrations.mjs")),fs.readFileSync(path.join(repositoryRoot,"scripts/staging-native-portal-149-194-migrations.mjs")));
+const {runPairedMigration}=await import(pathToFileURL(path.join(fixtureScripts,"staging-native-portal-149-194-migrations.mjs")).href);
 after(()=>{
   assert.equal(path.dirname(root),path.resolve(os.tmpdir()));
   assert(path.basename(root).startsWith("paired-reviewed205-fixture-"));

@@ -41,6 +41,12 @@ const initialClientMigrations = Object.freeze([
   "0095_trash_object_manifests.sql",
 ]);
 
+// A separately reviewed application successor is validated but never becomes
+// part of the frozen199 test/release inventory returned by this helper.
+const operationsSuccessors = Object.freeze({
+  "0206_native_directory_existing_import.sql": "0af4b3a078eda8a701fdfc1e898e5dc539831537e0d2a461f6acee124ce6b7c2",
+});
+
 function sha256(value: string | Uint8Array): string {
   return createHash("sha256").update(value).digest("hex");
 }
@@ -74,14 +80,16 @@ function reviewedMigrationNames(directory: URL, application: "delivery" | "opera
     const physical = readdirSync(fileURLToPath(directory), { withFileTypes: true })
       .filter(entry => /\.sql$/i.test(entry.name));
     const physicalNames = physical.map(entry => entry.name).sort();
-    const expectedNames = currentNames;
+    const successors = application === "operations" ? operationsSuccessors : {};
+    const expectedNames = [...currentNames, ...Object.keys(successors)].sort();
     if (physical.some(entry => !/^\d{4}_.+\.sql$/.test(entry.name) || !entry.isFile() || entry.isSymbolicLink())
       || JSON.stringify(physicalNames) !== JSON.stringify(expectedNames)) {
       throw new Error(`reviewed-${application}-migration-physical-inventory-mismatch`);
     }
-    if (physicalNames.length !== currentSource.count
-      || physicalNames.at(-1) !== currentSource.finalMigration
-      || sha256(physicalNames.join("\n")) !== currentSource.namesSha256) {
+    const reviewedPrefix = physicalNames.slice(0, currentSource.count);
+    if (reviewedPrefix.length !== currentSource.count
+      || reviewedPrefix.at(-1) !== currentSource.finalMigration
+      || sha256(reviewedPrefix.join("\n")) !== currentSource.namesSha256) {
       throw new Error(`reviewed-${application}-current-source-name-contract-mismatch`);
     }
   }
@@ -105,6 +113,12 @@ function reviewedMigrationNames(directory: URL, application: "delivery" | "opera
     });
     if (sha256(currentContents.join("\n")) !== currentSource.contentsSha256) {
       throw new Error(`reviewed-${application}-current-source-content-contract-mismatch`);
+    }
+    const successors = application === "operations" ? operationsSuccessors : {};
+    for (const [name, expectedHash] of Object.entries(successors)) {
+      // Canonical Git SQL is LF; accept the same bytes in a CRLF checkout.
+      const normalized = readFileSync(fileURLToPath(new URL(name, directory)), "utf8").replace(/\r\n/g, "\n");
+      if (sha256(normalized) !== expectedHash) throw new Error(`reviewed-${application}-successor-content-contract-mismatch`);
     }
   }
   return names;
