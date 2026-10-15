@@ -10,6 +10,7 @@ import { planProjectAlphaProjectV2Command, type ProjectAlphaProjectV2CommandProd
 import { dispatchProjectAlphaProjectV2PendingCommand } from "./project-alpha-project-v2-pending-dispatcher";
 import { settleProjectAlphaProjectV2Read } from "./project-alpha-project-read-settlement-adapter";
 import { activateProjectAlphaProjectV2Canonical } from "./project-alpha-project-canonical-activation-adapter";
+import { prepareProjectAlphaProjectV2Acceptance } from "./project-alpha-project-v2-acceptance-preparation";
 import type { Env, StaffPrincipal } from "./types";
 
 type Variables = { principal: StaffPrincipal; administrator: boolean };
@@ -17,6 +18,7 @@ type App = Hono<{ Bindings: Env; Variables: Variables }>;
 type AppContext = Context<{ Bindings: Env; Variables: Variables }>;
 
 export const PROJECT_ALPHA_PROJECT_V2_ACCEPTANCE_ROUTE = "/api/admin/project-alpha/projects/v2/commands";
+export const PROJECT_ALPHA_PROJECT_V2_PREPARATION_ROUTE = "/api/admin/staging/projects/v2/preparation";
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const SHA256 = /^[0-9a-f]{64}$/;
 const applicationId = z.string().regex(UUID);
@@ -37,6 +39,12 @@ const scopes = z.array(z.discriminatedUnion("scopeKind", [
 ])).max(128);
 const localExisting = z.object({ expectedLocalVersion: z.number().int().positive(), expectedLocalProjectionSha256: hash }).strict();
 const sourceId = z.string().regex(/^project-alpha:[a-z0-9][a-z0-9_-]{0,63}$/);
+const preparationSchema = z.discriminatedUnion("operation", [
+  z.object({ operation: z.literal("create"), sourceId, expectedApplicationId: applicationId, scopes,
+    externalProjectId: externalId, organizationRecordId: externalId, clientRecordId: externalId.nullable() }).strict(),
+  z.object({ operation: z.literal("update"), sourceId, expectedApplicationId: applicationId, scopes,
+    externalProjectId: externalId }).strict(),
+]);
 
 const requestSchema = z.discriminatedUnion("operation", [
   z.object({
@@ -118,9 +126,31 @@ async function response(c: AppContext, input: z.infer<typeof requestSchema>, sta
   return c.json({ sourceId: input.sourceId, expectedApplicationId: input.expectedApplicationId, stage, outcome });
 }
 
-/** One manually invoked, replayable joined-acceptance command. There is no UI,
- * GET route, scheduler, queue, service binding, or public/client route. */
+/** Manually invoked joined acceptance and advisory preparation. Neither route
+ * exposes a scheduler, queue, service binding, or public/client entry point. */
 export function registerProjectAlphaProjectV2AcceptanceRoutes(app: App): void {
+  app.post(PROJECT_ALPHA_PROJECT_V2_PREPARATION_ROUTE, async c => {
+    if (c.env.ENVIRONMENT !== "staging" || c.env.PROJECT_ALPHA_PROJECT_V2_ACTIVATION_ENABLED !== "true"
+      || c.env.EXPECTED_HOST !== "ops-staging.ledgetopdroneservices.com"
+      || new URL(c.req.url).origin !== "https://ops-staging.ledgetopdroneservices.com")
+      throw new HTTPException(404, { message: "Not found" });
+    if (!c.get("administrator")) throw new HTTPException(403, { message: "Administrator access required" });
+    const permission = await sqlScope(c.env, c.get("principal"), "integrations.manage");
+    if (!permission.global || permission.deniedGlobal)
+      throw new HTTPException(403, { message: "Global integrations.manage permission required" });
+    c.header("Cache-Control", "no-store");
+    const parsed = preparationSchema.safeParse(await readBoundedJson(c.req.raw, 24 * 1024, "Project-v2 preparation"));
+    if (!parsed.success) throw new HTTPException(400, { message: "Project-v2 preparation request is invalid" });
+    const input = parsed.data;
+    requireEnabledSelection(c.env, input.sourceId, input.expectedApplicationId);
+    const actor = await nativeActor(c);
+    const outcome = await prepareProjectAlphaProjectV2Acceptance(c.env,
+      { ...input, actor: { ...actor, scopes: input.scopes } });
+    await audit(c, "integration.project_v2_preparation_completed", input.externalProjectId,
+      input.sourceId, input.expectedApplicationId, input.operation, "prepare",
+      outcome.status === "blocked" ? { status: outcome.status, reason: outcome.reason } : { status: outcome.status });
+    return c.json(outcome);
+  });
   app.post(PROJECT_ALPHA_PROJECT_V2_ACCEPTANCE_ROUTE, async c => {
     if (c.env.ENVIRONMENT !== "staging" || c.env.PROJECT_ALPHA_PROJECT_V2_ACTIVATION_ENABLED !== "true")
       throw new HTTPException(404, { message: "Not found" });

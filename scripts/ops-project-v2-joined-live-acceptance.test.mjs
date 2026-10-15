@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { parseBrowserContextJoinedAcceptanceConfig, parseJoinedAcceptanceConfig, runJoinedAcceptance,
+import { acceptanceInputSha256, parseBrowserContextJoinedAcceptanceConfig, parseJoinedAcceptanceConfig, runJoinedAcceptance,
   runJoinedAcceptanceWithBrowserContext, JoinedAcceptanceError } from "./ops-project-v2-joined-live-acceptance.mjs";
 
 const identity = {
@@ -15,6 +15,10 @@ const identity = {
   OPS_ACCEPTANCE_ORGANIZATION_PUBLIC_ID: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
   OPS_ACCEPTANCE_ORGANIZATION_REVISION: "1",
   OPS_ACCEPTANCE_ORGANIZATION_PROJECTION_SHA256: "b".repeat(64),
+  OPS_ACCEPTANCE_CLIENT_RECORD_ID: "client-staging-001",
+  OPS_ACCEPTANCE_CLIENT_PUBLIC_ID: "cccccccccccccccccccccccccccccccc",
+  OPS_ACCEPTANCE_CLIENT_REVISION: "2",
+  OPS_ACCEPTANCE_CLIENT_PROJECTION_SHA256: "d".repeat(64),
   OPS_ACCEPTANCE_PUBLIC_LINK_URL: "https://delivery-staging.ledgetopdroneservices.com/s/test-token",
   OPS_SESSION_COOKIE: "CF_Authorization=redacted-test-cookie",
 };
@@ -44,6 +48,32 @@ test("joined mutation config accepts the canonical Project Alpha staging public-
   assert.equal(config.publicLinkUrl, publicLinkUrl);
 });
 
+test("joined release acceptance requires the complete client proof", async () => {
+  for (const name of ["OPS_ACCEPTANCE_CLIENT_RECORD_ID", "OPS_ACCEPTANCE_CLIENT_PUBLIC_ID",
+    "OPS_ACCEPTANCE_CLIENT_REVISION", "OPS_ACCEPTANCE_CLIENT_PROJECTION_SHA256"]) {
+    const incomplete = { ...identity };
+    delete incomplete[name];
+    await assert.rejects(() => parseJoinedAcceptanceConfig(incomplete), { code: `missing_${name.toLowerCase()}` });
+  }
+});
+
+test("joined acceptance input digest binds identity, scope, generation, and selected directory proofs only", async () => {
+  const config = await parseJoinedAcceptanceConfig(identity);
+  const baseline = acceptanceInputSha256(config);
+  assert.match(baseline, /^[a-f0-9]{64}$/);
+  const variants = [
+    { ...config, identity: { ...config.identity, sourceId: "project-alpha:other" } },
+    { ...config, identity: { ...config.identity, applicationId: "250cb108-af37-4973-ab6e-f6d991a6e8c8" } },
+    { ...config, scopes: [{ scopeKind: "division", businessAreaId: "drone", divisionId: "north" }] },
+    { ...config, authorizationGeneration: "8" },
+    { ...config, proof: { ...config.proof, organization: { ...config.proof.organization, expectedRevision: "2" } } },
+    { ...config, proof: { ...config.proof, client: { ...config.proof.client, hash: "e".repeat(64) } } },
+  ];
+  for (const variant of variants) assert.notEqual(acceptanceInputSha256(variant), baseline);
+  assert.equal(acceptanceInputSha256({ ...config, cookie: "CF_Authorization=different", accessAssertion: "different" }), baseline);
+  assert.equal(JSON.stringify({ inputBinding: { sha256: baseline, valuesExcluded: true } }).includes(identity.OPS_ACCEPTANCE_CLIENT_RECORD_ID), false);
+});
+
 test("joined runner performs disposable create, exact replay, changed-body conflict, and sanitized public-link evidence", async () => {
   const assertion = "header.payload.signature";
   const config = { ...(await parseJoinedAcceptanceConfig(identity)), accessAssertion: assertion };
@@ -60,6 +90,13 @@ test("joined runner performs disposable create, exact replay, changed-body confl
     const body = JSON.parse(init.body);
     assert.equal(body.command.expectedAuthorizationGeneration, identity.OPS_ACCEPTANCE_AUTHORIZATION_GENERATION);
     assert.deepEqual(body.scopes, JSON.parse(identity.OPS_ACCEPTANCE_SCOPES_JSON));
+    assert.equal(body.directory.clientRecordId, identity.OPS_ACCEPTANCE_CLIENT_RECORD_ID);
+    assert.deepEqual(body.command.client, {
+      externalId: identity.OPS_ACCEPTANCE_CLIENT_RECORD_ID,
+      expectedPublicId: identity.OPS_ACCEPTANCE_CLIENT_PUBLIC_ID,
+      expectedRevision: identity.OPS_ACCEPTANCE_CLIENT_REVISION,
+      expectedProjectionSha256: identity.OPS_ACCEPTANCE_CLIENT_PROJECTION_SHA256,
+    });
     assert.equal(init.headers.Cookie, identity.OPS_SESSION_COOKIE);
     assert.equal(init.headers.Origin, identity.OPS_BASE_URL);
     assert.equal(init.headers["Cf-Access-Jwt-Assertion"], assertion);
@@ -71,6 +108,8 @@ test("joined runner performs disposable create, exact replay, changed-body confl
     return response(409, { stage: "plan", outcome: { status: "conflict", reason: "command_id" } });
   };
   const report = await runJoinedAcceptance(config, { fetcher, now: Date.parse("2026-09-18T12:00:00Z") });
+  assert.deepEqual(report.inputBinding, { schemaVersion: 1, sha256: acceptanceInputSha256(config), valuesExcluded: true });
+  assert.deepEqual(Object.keys(report.inputBinding).sort(), ["schemaVersion", "sha256", "valuesExcluded"]);
   assert.equal(report.status, "passed");
   assert.equal(report.exactReplay.replay.outcome.replayed, true);
   assert.equal(report.changedBodyConflict.outcome.reason, "command_id");

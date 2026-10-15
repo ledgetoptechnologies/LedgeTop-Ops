@@ -3,13 +3,13 @@ import type { BusinessProjectDetail } from "../../src/client/BusinessProjectWork
 
 const clientPath = "/clients/sources/project-alpha%3Aprimary/business/organizations/42";
 const apiBase = `/api${clientPath.replace("/clients/", "/client-hub/")}`;
-const projectPath = `${clientPath}/projects/project-one`;
+const projectPath = `${clientPath}/projects/pa/project-one`;
 const apiPath = `${apiBase}/business-projects/project-one`;
 const filters = "?q=acme&kind=organization&business_status=completed&login_q=alex&login_link=unlinked&login_blocked=no&login_status=all";
 function detail(id = "project-one", name = "Church survey"): BusinessProjectDetail {
   return { canonicalRoot: { sourceId: "project-alpha:primary", rootNamespace: "business", kind: "organization", publicId: "42" },
     client: { display_name: "Acme Construction", detail_path: clientPath }, contextVersion: "project-context", refreshedAt: "2026-08-25T12:00:00Z",
-    project: { id, name, status: "completed", description: "Roof survey and site documentation.\nDeliver annotated inspection photos.", start_date: "2026-08-01", end_date: "2026-08-20",
+    project: { id, origin: "pa", name, status: "completed", description: "Roof survey and site documentation.\nDeliver annotated inspection photos.", start_date: "2026-08-01", end_date: "2026-08-20",
       created_at: "2026-07-15T12:00:00Z", manager: { id: "manager-one", display_name: "Morgan Manager" } },
     linkedContact: { id: "contact-one", display_name: "Bailey Contact", email: "bailey@example.test", phone: "+1 920 555 0123", sourceField: "project.client_id" },
     operationalWorkspaceAvailable: true, businessActivityAvailable: true, auditTimelineAvailable: true, feedbackHistoryAvailable: true,

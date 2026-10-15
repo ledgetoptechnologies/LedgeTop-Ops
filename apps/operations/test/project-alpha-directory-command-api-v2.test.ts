@@ -5,6 +5,7 @@ import {
   sendConfiguredProjectAlphaDirectoryBindingRevokeCommand,
   sendProjectAlphaDirectoryLifecycleCommand,
   sendProjectAlphaDirectoryOrganizationRelationshipCommand,
+  validatedProjectAlphaDirectoryRelationshipGenerationConflict,
   type ProjectAlphaDirectoryBindingRevokeCommand,
   type ProjectAlphaDirectoryLifecycleCommand,
   type ProjectAlphaDirectoryRelationshipCommand,
@@ -32,6 +33,83 @@ function json(value: unknown, status = 200, request = requestId) { return new Re
 const lifecycle = (action: "archive" | "restore") => ({ sourceInstanceId: source, applicationId: application, historyEpoch: epoch, requestId, replayed: false, result: { action, resource: { type: "client", publicId: client, revision: "2", present: action === "restore" }, authorizationGeneration: "0" } });
 
 describe("dormant PA directory command and inventory transport", () => {
+  const relationshipCommand: ProjectAlphaDirectoryRelationshipCommand = {
+    commandId: requestId, expectedClientRevision: "1", expectedAuthorizationGeneration: "0",
+    expectedCurrentOrganizationPublicId: null,
+    organization: { externalId: "org/exact", publicId: organization, expectedRevision: "1" },
+  };
+  const generationConflict = () => ({ apiVersion: "2", sourceInstanceId: source, applicationId: application,
+    historyEpoch: epoch, requestId, error: { code: "authorization_generation_conflict" } });
+  async function conflictOutcome(response: Response) {
+    const send = vi.fn<typeof fetch>(async url => String(url).endsWith("/capabilities")
+      ? json(capability(endpoints.relationship("assign"))) : response);
+    return sendProjectAlphaDirectoryOrganizationRelationshipCommand(connection, client, "assign", relationshipCommand, send);
+  }
+
+  it("retains private provenance only for the exact relationship generation-conflict contract", async () => {
+    const outcome = await conflictOutcome(json(generationConflict(), 409));
+    expect(outcome).toEqual({ status: "conflict", reason: "http_status", httpStatus: 409, requestId });
+    const proof = validatedProjectAlphaDirectoryRelationshipGenerationConflict(outcome);
+    expect(proof).toEqual({ command: relationshipCommand, response: generationConflict(), destinationOrigin: connection.baseUrl,
+      requestPath: `/api/v2/directory/clients/${client}/organization/assign/commands` });
+    expect(validatedProjectAlphaDirectoryRelationshipGenerationConflict({ ...outcome })).toBeNull();
+    expect(validatedProjectAlphaDirectoryRelationshipGenerationConflict(JSON.parse(JSON.stringify(outcome)))).toBeNull();
+    if (proof?.command.organization) Reflect.set(proof.command.organization, "externalId", "changed-copy");
+    expect(validatedProjectAlphaDirectoryRelationshipGenerationConflict(outcome)?.command).toEqual(relationshipCommand);
+  });
+
+  it.each([
+    ["generic", { error: "Conflict" }],
+    ["foreign source", { ...generationConflict(), sourceInstanceId: application }],
+    ["foreign application", { ...generationConflict(), applicationId: source }],
+    ["foreign epoch", { ...generationConflict(), historyEpoch: source }],
+    ["mismatched request", { ...generationConflict(), requestId: source }],
+    ["wrong version", { ...generationConflict(), apiVersion: "3" }],
+    ["wrong code", { ...generationConflict(), error: { code: "revision_conflict" } }],
+    ["private error field", { ...generationConflict(), error: { code: "authorization_generation_conflict", detail: "private" } }],
+    ["extra field", { ...generationConflict(), secret: "private" }],
+  ])("does not brand %s conflicts", async (_name, body) => {
+    const outcome = await conflictOutcome(json(body, 409));
+    expect(outcome).toMatchObject({ status: "conflict", httpStatus: 409 });
+    expect(validatedProjectAlphaDirectoryRelationshipGenerationConflict(outcome)).toBeNull();
+    expect(JSON.stringify(outcome)).not.toContain("private");
+  });
+
+  it.each(["Set-Cookie", "Location", "Cache-Control", "Content-Type", "X-Request-ID"])("does not brand untrusted %s headers", async header => {
+    const response = json(generationConflict(), 409);
+    if (header === "Set-Cookie" || header === "Location") response.headers.set(header, "private");
+    else response.headers.delete(header);
+    const outcome = await conflictOutcome(response);
+    expect(validatedProjectAlphaDirectoryRelationshipGenerationConflict(outcome)).toBeNull();
+  });
+
+  it("rejects duplicate JSON keys, invalid UTF-8 and oversized conflict bodies without exposing them", async () => {
+    const headers = { "Content-Type": "application/json", "Cache-Control": "no-store", "X-Request-ID": requestId };
+    for (const body of [JSON.stringify(generationConflict()).replace('"apiVersion":"2"', '"apiVersion":"2","apiVersion":"2"'),
+      new Uint8Array([0xff]), "private".repeat(12_000)]) {
+      const outcome = await conflictOutcome(new Response(body, { status: 409, headers }));
+      expect(validatedProjectAlphaDirectoryRelationshipGenerationConflict(outcome)).toBeNull();
+      expect(JSON.stringify(outcome)).not.toContain("private");
+    }
+  });
+
+  it("bounds a stalled conflict body even when stream cancellation never resolves", async () => {
+    vi.useFakeTimers();
+    try {
+      let cancelled = false;
+      const response = new Response(new ReadableStream<Uint8Array>({
+        start(controller) { controller.enqueue(new TextEncoder().encode('{"apiVersion":"2"')); },
+        cancel() { cancelled = true; return new Promise<void>(() => undefined); },
+      }), { status: 409, headers: { "Content-Type": "application/json", "Cache-Control": "no-store", "X-Request-ID": requestId } });
+      const pending = conflictOutcome(response);
+      await vi.advanceTimersByTimeAsync(10_001);
+      const outcome = await pending;
+      expect(cancelled).toBe(true);
+      expect(outcome).toMatchObject({ status: "conflict", httpStatus: 409 });
+      expect(validatedProjectAlphaDirectoryRelationshipGenerationConflict(outcome)).toBeNull();
+    } finally { vi.useRealTimers(); }
+  });
+
   it("is default-off before any capability or command fetch", async () => {
     const send = vi.fn<typeof fetch>();
     const disabled = { PROJECT_ALPHA_API_V2_CONNECTIONS: env.PROJECT_ALPHA_API_V2_CONNECTIONS!.replace('"enabled":true', '"enabled":false') };

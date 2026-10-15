@@ -5,6 +5,7 @@ export interface BusinessProjectRoute {
   rootNamespace: ClientRootNamespace;
   kind: "organizations" | "standalone";
   publicId: string;
+  projectOrigin: "pa" | "canonical";
   projectId: string;
 }
 const validId = (value: string) => value.length > 0 && value.length <= 512 && !/[\u0000-\u001f\u007f]/.test(value);
@@ -12,15 +13,19 @@ const validId = (value: string) => value.length > 0 && value.length <= 512 && !/
 export function readBusinessProjectRoute(pathname: string): BusinessProjectRoute | { invalid: true } | null {
   const parts = pathname.split("/").filter(Boolean);
   if (parts[0] !== "clients" || parts[1] !== "sources" || parts[6] !== "projects") return null;
-  if (parts.length !== 8 || parts[3] !== "business" || !["organizations", "standalone"].includes(parts[4] || "")) return { invalid: true };
+  if (![8, 9].includes(parts.length) || parts[3] !== "business" || !["organizations", "standalone"].includes(parts[4] || "")) return { invalid: true };
   try {
-    const sourceId = decodeURIComponent(parts[2]!), publicId = decodeURIComponent(parts[5]!), projectId = decodeURIComponent(parts[7]!);
+    const sourceId = decodeURIComponent(parts[2]!), publicId = decodeURIComponent(parts[5]!);
+    const projectOrigin = parts.length === 8 ? "pa" : decodeURIComponent(parts[7]!);
+    const projectId = decodeURIComponent(parts[parts.length - 1]!);
+    if (!(["pa", "canonical"] as string[]).includes(projectOrigin)) return { invalid: true };
     if (![sourceId, publicId, projectId].every(validId)) return { invalid: true };
-    return { sourceId, rootNamespace: parts[3] as ClientRootNamespace, kind: parts[4] as BusinessProjectRoute["kind"], publicId, projectId };
+    return { sourceId, rootNamespace: parts[3] as ClientRootNamespace, kind: parts[4] as BusinessProjectRoute["kind"], publicId,
+      projectOrigin: projectOrigin as BusinessProjectRoute["projectOrigin"], projectId };
   } catch { return { invalid: true }; }
 }
 
-export function businessProjectClientPath(route: Omit<BusinessProjectRoute, "projectId">): string {
+export function businessProjectClientPath(route: Omit<BusinessProjectRoute, "projectId" | "projectOrigin">): string {
   return `/clients/sources/${encodeURIComponent(route.sourceId)}/${route.rootNamespace}/${route.kind}/${encodeURIComponent(route.publicId)}`;
 }
 
@@ -42,7 +47,9 @@ export function clientWorkspaceFilters(search: string): string {
   return result.size ? `?${result}` : "";
 }
 
-export function businessProjectHref(client: ClientSummary, projectId: string, search = location.search): string | null {
-  if (!client.source_id || client.root_namespace !== "business" || !validId(projectId) || !validId(client.public_id) || !validId(client.source_id)) return null;
-  return `${businessProjectClientPath({ sourceId: client.source_id, rootNamespace: client.root_namespace, kind: client.route_kind, publicId: client.public_id })}/projects/${encodeURIComponent(projectId)}${clientWorkspaceFilters(search)}`;
+export function businessProjectHref(client: ClientSummary, projectId: string, projectOrigin: BusinessProjectRoute["projectOrigin"] = "pa",
+  search = location.search): string | null {
+  if (!client.source_id || client.root_namespace !== "business" || !(["pa", "canonical"] as string[]).includes(projectOrigin)
+    || !validId(projectId) || !validId(client.public_id) || !validId(client.source_id)) return null;
+  return `${businessProjectClientPath({ sourceId: client.source_id, rootNamespace: client.root_namespace, kind: client.route_kind, publicId: client.public_id })}/projects/${projectOrigin}/${encodeURIComponent(projectId)}${clientWorkspaceFilters(search)}`;
 }

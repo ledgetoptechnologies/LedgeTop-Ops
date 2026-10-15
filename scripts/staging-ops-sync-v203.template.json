@@ -1,0 +1,14 @@
+{
+  "profile": "staging-ops-sync-v203",
+  "version": 203,
+  "phase": "isolated-disabled",
+  "owner": null,
+  "primaryBootstrap": null,
+  "connectors": null,
+  "privateInputs": {
+    "snapshotApiKey": null,
+    "accessClientSecret": null,
+    "eventPrivateKey": null,
+    "hmacSecret": null
+  }
+}

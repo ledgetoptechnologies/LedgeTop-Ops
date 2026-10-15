@@ -8,6 +8,15 @@ import { matchesEtag } from "./prepared-images";
 import { serveAuthorizedThumbnail, thumbnailFieldsForObject, type ThumbnailJobRow } from "./thumbnails";
 import { recordFirstAccessNotification } from "./notifications";
 export { OpsSyncPortalProjectionIngress } from "./ops-sync-portal-entrypoint";
+export { OpsInventoryCatalogStagingIngress } from "./ops-inventory-catalog-staging";
+export { OpsInventoryCatalogPromotionCoordinator } from "./ops-inventory-catalog-promotion";
+export { OpsPortalAccessAuthorityIngress } from "./ops-portal-access-authority";
+export { ClientAuthorityWorkspaceBindingIngress } from "./client-authority-workspace-binding-entrypoint";
+export { ClientPortalAuthorityV2Ingress } from "./client-portal-authority-v2-entrypoint";
+export { VerifiedRecipientDeliveryAuthorityIngress } from "./verified-recipient-delivery-authority-entrypoint";
+export { OperationsPortalWorkspacePublicationIngress } from "./operations-portal-workspace-publication-entrypoint";
+export { OperationsPortalNativeRecipientAuthorityIngress } from "./operations-portal-native-recipient-authority-entrypoint";
+export { OperationsPortalNativeDeliveryAuthorityIngress } from "./operations-portal-native-delivery-authority-entrypoint";
 import { friendlyBulkFailure } from "./bulk-download-errors";
 import type { Env, ShareRow } from "./types";
 export { BulkDownloadWorkflow } from "./workflow";
@@ -24,11 +33,18 @@ import type { CloudProvider, CloudTransferEnv } from "./cloud-transfer/types";
 import { listDownloadableObjects, summarizeDownloadableObjects } from "./downloadable-files";
 import { listPublicShareLocations, resolvePublicShareLocation } from "./public-locations";
 import { createClientPortalRouter } from "./client-portal/routes";
+import { createOperationsHomeRouter } from "./client-portal/operations-home-routes";
+import { createOperationsNativeDeliveryRouter } from "./client-portal/operations-native-delivery-routes";
+import { handleRecipientEnrollmentHttp } from "./client-portal/recipient-enrollment-http";
+import { handleOperationsNativeRecipientEnrollmentHttp } from "./client-portal/operations-native-recipient-enrollment-http";
 import { acceptRequestAttachmentScanReceipt, cleanupExpiredRequestAttachments, readRequestAttachmentScanReceipt } from "./client-portal/request-attachments";
 import { createClientDelegatedPublicRouter } from "./client-delegated-public";
+import { clientOnboardingRecipientRouter } from "./client-onboarding-recipient";
 import { projectAlphaPricingHintProvider } from "./client-portal/project-alpha-pricing-hint";
 import { processInvitationEmailBatch } from "./client-portal/invitation-email";
 import { runClientDelegatedShareExpiryReconciliation } from "./client-portal/delegated-share-expiry-health";
+import { BULK_CACHE_EXPIRED_ROW_LIMIT, BULK_CACHE_ORPHAN_CLAIM_LIMIT, BULK_CACHE_PENDING_DELETE_LIMIT }
+  from "./bulk-cache-limits";
 import { clientPortalEntryOrigin, configuredPublicRequestOrigins, legacyClientRedirectLocation, malformedPortalLaunchRedirect, requestHostAllowed, requirePublicShareOrigin } from "./origin-policy";
 import {
   classifyPublicShareLifecycle,
@@ -52,14 +68,6 @@ const app = new Hono<{ Bindings: Env; Variables: Variables }>();
 const COOKIE_NAME = "__Host-ltds_delivery";
 const PUBLIC_DELIVERY_PAGE_SIZE=150;
 const PUBLIC_MEDIA_LOOKUP_CHUNK_SIZE=50;
-const BULK_CACHE_PENDING_DELETE_LIMIT=50;
-const BULK_CACHE_EXPIRED_ROW_LIMIT=50;
-const BULK_CACHE_ORPHAN_CLAIM_LIMIT=50;
-// Fixed statements (job expiry/reads, candidate reads, pruning) plus the
-// worst case of one finalize statement per pending intent and three statements
-// (two-statement claim + finalize) per newly claimed generation.
-export const BULK_CACHE_CLEANUP_MAX_D1_QUERIES=9+BULK_CACHE_PENDING_DELETE_LIMIT
-  +3*BULK_CACHE_EXPIRED_ROW_LIMIT+3*BULK_CACHE_ORPHAN_CLAIM_LIMIT+6;
 
 function cloudEnv(env:Env):CloudTransferEnv{if(!env.CLOUD_TRANSFER_TOKEN_SECRET)throw new HTTPException(503,{message:"Cloud copy is not configured"});return env as CloudTransferEnv;}
 function cloudProvider(value:string):CloudProvider{if(value==="dropbox")return"dropbox";if(value==="google"||value==="google-drive")return"google";throw new HTTPException(404,{message:"Cloud provider not found"});}
@@ -453,19 +461,27 @@ app.use("/api/public/shares/:publicId/*", async (c, next) => {
   };
   let usedBulkResume = false;
   let session: { shareId: string; shareVersion: number; expiresAt: number };
-  try {
+  const resumePath = (c.req.method === "GET" || c.req.method === "HEAD")
+    ? /^\/api\/public\/shares\/[^/]+\/bulk-download\/([^/]+)\/file$/.exec(c.req.path)
+    : null;
+  const resumeCookie = resumePath ? parseCookie(c.req.header("Cookie"), BULK_DOWNLOAD_RESUME_COOKIE) : null;
+  // Another open delivery can replace the host-wide session cookie. Prefer
+  // the archive's independently signed, path-scoped credential when present;
+  // the primary D1 share/version checks below still authorize every request.
+  if (resumePath && resumeCookie) {
+    try {
+      const resumed = await verifyRotatingBulkDownloadResumeCookie(resumeCookie, signingKeys.current, signingKeys.previous);
+      if (resumed.jobId !== resumePath[1]) throw new HTTPException(401, { message: "Invalid download resume authorization", cause: { code: "BULK_DOWNLOAD_RESUME_INVALID" } });
+      session = resumed;
+      usedBulkResume = true;
+    } catch (resumeError) {
+      // A stale resume cookie must not prevent a currently authorized session
+      // from downloading. With no session, preserve the resume denial.
+      if (!sessionCookie) throw resumeError;
+      session = await verifyRotatingSessionCookie(sessionCookie, signingKeys.current, signingKeys.previous);
+    }
+  } else {
     session = await verifyRotatingSessionCookie(sessionCookie, signingKeys.current, signingKeys.previous);
-  } catch (sessionError) {
-    const resumePath = /^\/api\/public\/shares\/[^/]+\/bulk-download\/([^/]+)\/file$/.exec(c.req.path);
-    if ((c.req.method !== "GET" && c.req.method !== "HEAD") || !resumePath) throw sessionError;
-    const resumed = await verifyRotatingBulkDownloadResumeCookie(
-      parseCookie(c.req.header("Cookie"), BULK_DOWNLOAD_RESUME_COOKIE),
-      signingKeys.current,
-      signingKeys.previous,
-    );
-    if (resumed.jobId !== resumePath[1]) throw new HTTPException(401, { message: "Invalid download resume authorization", cause: { code: "BULK_DOWNLOAD_RESUME_INVALID" } });
-    session = resumed;
-    usedBulkResume = true;
   }
   const share=await lifecycleShareQuery(c.env,lifecycleShareSql("s.id=? AND s.public_id=?"),[session.shareId,c.req.param("publicId")]);
   if(!share){
@@ -1078,7 +1094,36 @@ app.post("/api/internal/client-request-attachments/:attachmentId/scanned", async
   return c.json({ ok: true, status });
 });
 
+// Mount before legacy PA-backed admission; the independent router still
+// verifies client Access and an exact explicit Operations home permission.
+app.route("/api/client/v2/operations", createOperationsHomeRouter());
+// Native file access verifies the individual Access identity and current
+// authority in both Workers; historical PA admission is not its authority.
+app.route("/api/client/operations/data", createOperationsNativeDeliveryRouter());
+app.all("/api/client/v2/recipient-enrollment/*", c => handleRecipientEnrollmentHttp(c.req.raw, {
+  env: c.env,
+  enabled: c.env.CLIENT_PORTAL_ENABLED === "true" && c.env.CLIENT_PORTAL_RECIPIENT_ENROLLMENT_ENABLED === "true",
+  environment: c.env.ENVIRONMENT,
+  origin: c.env.CLIENT_PORTAL_ORIGIN ?? "",
+  csrfSecret: c.env.CLIENT_PORTAL_RECIPIENT_ENROLLMENT_CSRF_SECRET ?? "",
+  binding: c.env.CLIENT_PORTAL_RECIPIENT_ENROLLMENT_BRIDGE,
+}));
+// Native consent must not pass through historical PA-backed client admission.
+// The handler independently verifies Access identity, CSRF and staging scope.
+app.all("/api/client/operations/recipient-enrollment/*", c => handleOperationsNativeRecipientEnrollmentHttp(c.req.raw, {
+  env: c.env,
+  enabled: c.env.CLIENT_PORTAL_ENABLED === "true" && c.env.CLIENT_PORTAL_NATIVE_RECIPIENT_ENROLLMENT_ENABLED === "true",
+  environment: c.env.ENVIRONMENT,
+  expectedHost: c.env.CLIENT_PORTAL_NATIVE_RECIPIENT_ENROLLMENT_EXPECTED_HOST ?? c.env.EXPECTED_HOST,
+  origin: c.env.CLIENT_PORTAL_ORIGIN ?? "",
+  csrfSecret: c.env.CLIENT_PORTAL_NATIVE_RECIPIENT_ENROLLMENT_CSRF_SECRET ?? "",
+  binding: c.env.OPERATIONS_PORTAL_NATIVE_RECIPIENT_ENROLLMENT,
+}));
 app.route("/api/client", createClientPortalRouter({ pricingHintProvider: projectAlphaPricingHintProvider }));
+app.route("/api/client-onboarding", clientOnboardingRecipientRouter);
+app.on(["GET", "HEAD"], "/onboarding/:invitationId", c => c.env.CLIENT_ONBOARDING_RECIPIENT_BRIDGE_ENABLED === "true"
+  ? serveAppShell(c.req.raw, c.env.ASSETS)
+  : c.json({ error: "Not found" }, 404));
 app.on(["GET", "HEAD"], "/portal", c => serveAppShell(c.req.raw, c.env.ASSETS));
 app.on(["GET", "HEAD"], "/portal/*", c => serveAppShell(c.req.raw, c.env.ASSETS));
 app.on(["GET", "HEAD"], "/assets/*", c => {

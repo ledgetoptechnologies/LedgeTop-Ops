@@ -57,7 +57,7 @@ function context(): ClientHubCollectionContext {
 function primaryContext(): ClientHubCollectionContext {
   const value = context();
   value.root = { ...value.root, source_id: "project-alpha:primary", root_namespace: "business", kind: "organization",
-    public_id: "organization-one", workspace_id: "workspace-one", legacy_account_id: null };
+    public_id: "organization-one", pa_internal_id: "organization-one", workspace_id: "workspace-one", legacy_account_id: null };
   value.canonicalRoot = { sourceId: "project-alpha:primary", rootNamespace: "business", kind: "organization",
     publicId: "organization-one" };
   value.access = { directory: true, requests: true, delivery: true, viewer: true };

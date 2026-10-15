@@ -7,6 +7,8 @@ export interface PortalSourceAuthorityEnvironment {
   PROJECT_ALPHA_CONNECTOR_CREDENTIALS?: string;
   PROJECT_ALPHA_PORTAL_HMAC_SECRET?: string;
   PROJECT_ALPHA_PORTAL_PREVIOUS_HMAC_SECRET?: string;
+  PROJECT_ALPHA_PORTAL_DIRECT_HTTP_ENABLED?: string;
+  PROJECT_ALPHA_PORTAL_APPLICATION_KEY?: string;
 }
 /** Constructed by the existing Operations connector administration after ACL
  * and coordination-barrier checks. This is not an inbound authentication DTO. */
@@ -35,7 +37,13 @@ export interface PrimaryPortalSigningKeyProof {
   readonly sourceId: typeof PRIMARY_ALPHA_SOURCE_ID;
   readonly keyFingerprints: readonly string[];
 }
-export type PortalProjectionWriteProof = PortalSourceAuthorityProof | PrimaryPortalSigningKeyProof;
+export interface PrimaryPortalPrivateIngressProof {
+  readonly kind: "primary-private-ingress";
+  readonly sourceId: typeof PRIMARY_ALPHA_SOURCE_ID;
+  readonly applicationKey: string;
+  readonly version: number;
+}
+export type PortalProjectionWriteProof = PortalSourceAuthorityProof | PrimaryPortalSigningKeyProof | PrimaryPortalPrivateIngressProof;
 export class PortalSourceAuthorityError extends Error {
   constructor(readonly code: "invalid" | "unavailable" | "credentials_unavailable" | "conflict" | "changed", message = `portal-authority-${code}`) {
     super(message); this.name = "PortalSourceAuthorityError";
@@ -149,6 +157,9 @@ export async function readPortalSourceAuthorityProof(db: PortalAuthorityDatabase
 export async function readPortalProjectionSourceProof(env: PortalSourceAuthorityEnvironment,
   db: PortalAuthorityDatabase, sourceId: string): Promise<PortalProjectionWriteProof | null> {
   if (sourceId !== PRIMARY_ALPHA_SOURCE_ID) return readPortalSourceAuthorityProof(db, sourceId);
+  // Explicit private mode must never fall back to historical scalar key proof:
+  // doing so would bypass a suspended private authority or application drift.
+  if (env.PROJECT_ALPHA_PORTAL_DIRECT_HTTP_ENABLED === "false") return readPrimaryPortalPrivateIngressProof(env, db);
   const validKey = (value: unknown): value is string => typeof value === "string" && value === value.trim()
     && !/[\u0000-\u001f\u007f]/.test(value) && bytesLength(value) >= 32 && bytesLength(value) <= 8192;
   if (!validKey(env.PROJECT_ALPHA_PORTAL_HMAC_SECRET)) return null;
@@ -162,6 +173,45 @@ export async function readPortalProjectionSourceProof(env: PortalSourceAuthority
   return (await db.prepare(`SELECT ${guard.sql} ok`).bind(...guard.bindings).first<number>("ok")) === 1 ? value : null;
 }
 function bytesLength(value: string): number { return new TextEncoder().encode(value).byteLength; }
+function privateApplicationKey(env: PortalSourceAuthorityEnvironment): string | null {
+  const key = env.PROJECT_ALPHA_PORTAL_APPLICATION_KEY;
+  return env.PROJECT_ALPHA_PORTAL_DIRECT_HTTP_ENABLED === "false" && typeof key === "string"
+    && /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/.test(key) ? key : null;
+}
+async function primaryPrivateAuthorityReady(db: PortalAuthorityDatabase): Promise<boolean> {
+  return (await db.prepare("SELECT count(*) n FROM sqlite_master WHERE type='table' AND name='pa_portal_primary_private_authority'").first<number>("n")) === 1;
+}
+/** Browser/read paths only inspect an existing registration. The application
+ * pin comes from deployment configuration, never from a principal or request. */
+export async function readPrimaryPortalPrivateIngressProof(env: PortalSourceAuthorityEnvironment,
+  db: PortalAuthorityDatabase): Promise<PrimaryPortalPrivateIngressProof | null> {
+  const applicationKey = privateApplicationKey(env);
+  if (!applicationKey || !await primaryPrivateAuthorityReady(db)) return null;
+  const row = await db.prepare(`SELECT version FROM pa_portal_primary_private_authority
+    WHERE source_id=? AND application_key=? AND state='active'`).bind(PRIMARY_ALPHA_SOURCE_ID, applicationKey).first<{ version: number }>();
+  return row ? Object.freeze({ kind: "primary-private-ingress", sourceId: PRIMARY_ALPHA_SOURCE_ID, applicationKey, version: row.version }) : null;
+}
+/** Only the private Ops Sync ingress calls this, after exact inner schema and
+ * delivery-ID validation. No PA key is copied to Client. A repeat delivery may
+ * reuse a registration, but can never reactivate or replace it. */
+export async function reservePrimaryPortalPrivateIngress(env: PortalSourceAuthorityEnvironment): Promise<PrimaryPortalPrivateIngressProof> {
+  const applicationKey = privateApplicationKey(env), db = database(env);
+  if (!applicationKey || !await primaryPrivateAuthorityReady(db)) throw new PortalSourceAuthorityError("unavailable");
+  await db.prepare(`INSERT INTO pa_portal_primary_private_authority(source_id,application_key,state,version)
+    SELECT ?,?,'active',1 WHERE NOT EXISTS(SELECT 1 FROM pa_portal_primary_private_authority WHERE source_id=?)`)
+    .bind(PRIMARY_ALPHA_SOURCE_ID, applicationKey, PRIMARY_ALPHA_SOURCE_ID).run();
+  const value = await readPrimaryPortalPrivateIngressProof(env, db);
+  if (!value) throw new PortalSourceAuthorityError("unavailable");
+  return value;
+}
+function primaryPrivateIngressGuard(value: PrimaryPortalPrivateIngressProof): { sql: string; bindings: (string | number)[] } {
+  if (value.kind !== "primary-private-ingress" || value.sourceId !== PRIMARY_ALPHA_SOURCE_ID
+    || !/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/.test(value.applicationKey)
+    || !Number.isSafeInteger(value.version) || value.version < 1) return invalid();
+  return { sql: `EXISTS(SELECT 1 FROM pa_portal_primary_private_authority
+    WHERE source_id=? AND application_key=? AND state='active' AND version=?)`,
+  bindings: [PRIMARY_ALPHA_SOURCE_ID, value.applicationKey, value.version] };
+}
 export function portalSourceAuthorityGuard(value: PortalSourceAuthorityProof): { sql: string; bindings: (string | number)[] } {
   secondarySource(value.sourceId);
   if ([value.revision, value.version, value.connectorRevision, value.connectorVersion].some(n => !Number.isSafeInteger(n) || n < 1)) return invalid();
@@ -189,6 +239,7 @@ function primaryKeyGuard(value: PrimaryPortalSigningKeyProof) {
  * an independently registered secondary producer. Callers must never treat the
  * primary source as an unguarded special case. */
 export function portalProjectionSourceGuard(value: PortalProjectionWriteProof): { sql: string; bindings: (string | number)[] } {
+  if ("kind" in value) return primaryPrivateIngressGuard(value);
   return "keyFingerprints" in value ? primaryKeyGuard(value) : portalSourceAuthorityGuard(value);
 }
 export function portalProjectionSourceFence(db: PortalAuthorityDatabase, value: PortalProjectionWriteProof): D1PreparedStatement {

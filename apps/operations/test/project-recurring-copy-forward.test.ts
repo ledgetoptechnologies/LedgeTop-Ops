@@ -54,7 +54,7 @@ async function fixture(options: { sourceStatus?: string; destinationStatus?: str
         `destination-sync-${n}`, source),
   ]);
   return { rootId, contactId, secondContactId, sourceProjectId, destinationProjectId,
-    context: { root: { source_id: source as `project-alpha:${string}`, root_namespace: "business", kind: "organization", public_id: rootId,
+    context: { root: { source_id: source as `project-alpha:${string}`, root_namespace: "business", kind: "organization", public_id: rootId, pa_internal_id: rootId,
       pa_public_id: rootId, mapping_status: "mapped", display_name: `Copy Organization ${n}`, source_name: "Project Alpha",
       sort_name: `copy organization ${n}`, status: "active", portal_status: "none", workspace_id: null,
       legacy_account_id: null, account_count: 0, project_count: 2, request_count: 0, contact_count: 2,
@@ -364,7 +364,7 @@ describe("recurring project operational copy-forward", () => {
         .bind(reassignedRoot, item.sourceProjectId, item.destinationProjectId),
     ]);
     const reassignedContext: ClientHubCollectionContext = { ...item.context, root: { ...item.context.root,
-      public_id: reassignedRoot, pa_public_id: reassignedRoot, display_name: "Reassigned Organization",
+      public_id: reassignedRoot, pa_internal_id: reassignedRoot, pa_public_id: reassignedRoot, display_name: "Reassigned Organization",
       source_version: `reassigned-sync-${sequence}` }, canonicalRoot: { ...item.context.canonicalRoot, publicId: reassignedRoot } };
     await expect(commitRecurringProjectCopy(env, owner, reassignedContext, { ...input,
       previewFingerprint: preview.fingerprint, idempotencyKey })).rejects.toMatchObject({ status: 409 });

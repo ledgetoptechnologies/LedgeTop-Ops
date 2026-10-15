@@ -4,13 +4,15 @@ import { listClientBusinessActivity } from "./client-business-activity";
 import { listClientAuditTimeline, parseClientAuditTimelineFilters } from "./client-audit-timeline";
 import { sqlScope } from "./acl";
 import { clientHubDetailPath, clientHubRouteKind, findClientHubRoot, listClientHubRoots,
-  isClientHubRootNamespace, isClientHubSource, type ClientHubKind, type ClientHubRoot } from "./client-hub-directory";
-import { isAlphaPublicId, isBusinessProjectionSource, resolveClientHubSourceRoot, validatedUniquePublicIdExpression } from "./client-hub-source";
+  isClientHubRootNamespace, isClientHubSource, type ClientHubKind, type ClientHubReviewAuthority, type ClientHubRoot } from "./client-hub-directory";
+import { isAlphaPublicId, isBusinessProjectionSource, resolveClientHubSourceRoot,
+  resolveClientHubSourceRootByAlphaIdentity, resolveClientHubSourceRootByAlphaPublicId,
+  validatedUniquePublicIdExpression } from "./client-hub-source";
 import { resolveClientHubWorkspace, type ClientHubWorkspace } from "./client-hub-workspace";
 import { CLIENT_HUB_COLLECTIONS, createClientHubCollectionContext, isClientHubCollection, listClientHubCollection,
   type ClientHubCollectionContext, type ClientHubPermissions } from "./client-hub-collections";
 import { listClientHubBusinessProjects, BUSINESS_PROJECT_FILTERS, type BusinessProjectFilter } from "./client-hub-business-projects";
-import { readClientHubBusinessProjectDetail } from "./client-hub-business-project-detail";
+import { isClientHubBusinessProjectOrigin, readClientHubBusinessProjectDetail } from "./client-hub-business-project-detail";
 import { listClientHubFeedbackHistory, listClientHubProjectFeedbackHistory } from "./client-hub-project-feedback-history";
 import { isPortalIdentityCollection, listPortalIdentityCollection, listPortalIdentityPage, portalIdentityQuery } from "./client-portal-identity-read";
 import { registerClientInternalNoteRoutes } from "./client-internal-note-routes";
@@ -21,12 +23,24 @@ import { mutatePortalRootAccess, readPortalRootAccess } from "./client-portal-ro
 import { externalAccessQuery, listClientExternalAccess } from "./client-external-access";
 import { listClientServiceAssignments, serviceAssignmentQuery } from "./client-service-assignments";
 import type { Env, StaffPrincipal } from "./types";
-import { requireProjectAlphaReadVisibility } from "./project-alpha-read-visibility";
+import { requireProjectAlphaReadOrNativeMappingVisibility, requireProjectAlphaReadVisibility } from "./project-alpha-read-visibility";
 import { readBusinessPartyForRoot } from "./business-parties";
 import { registerProjectOperationalRoutes } from "./project-operational-routes";
 import { registerOrganizationOperationalContactRoutes } from "./organization-operational-contact-routes";
+import { organizationOperationalContactsAvailable } from "./organization-operational-contacts";
 import { readClientHubProjectManagementAction } from "./project-alpha-project-management";
+import { prepareClientHubNativeProject, submitClientHubNativeProject } from "./client-hub-native-project-management";
+import { mutateClientHubNativeLifecycle, readClientHubNativeLifecycleStatus } from "./client-hub-native-project-lifecycle";
+import { proposeClientHubProjectInboundReview, readClientHubProjectInboundReview,
+  resolveClientHubProjectInboundReview } from "./client-hub-project-inbound-review";
 import { exactBusinessProjectPublicId, listProjectAlphaContactRoles, projectAlphaContactRolesEnabled } from "./project-alpha-contact-roles";
+import { nativeDirectoryLinkedClientEditorRecords, nativeDirectoryProfileEditorRecord } from "./native-directory-profile-editor-record";
+import { nativeDirectoryProfileWritesEnabled } from "./native-directory-profile-routes";
+import { authenticateNativeStaffWithAdmissionVersion } from "./native-staff-auth";
+import {
+  projectAlphaProjectOperationalAdoptionEnabled,
+  registerProjectAlphaProjectOperationalAdoptionRoutes,
+} from "./project-alpha-project-adoption-operational-routes";
 
 type AppEnv = {
   Bindings: Env;
@@ -40,6 +54,23 @@ const DETAIL_COLLECTIONS = [...CLIENT_HUB_COLLECTIONS, "businessProjects"] as co
 
 function database(env: Env) {
   return env.DELIVERY_DB.withSession("first-primary");
+}
+
+async function currentClientHubReviewAuthority(request: Request, env: Env, principal: StaffPrincipal): Promise<ClientHubReviewAuthority | null> {
+  try {
+    const authenticated = await authenticateNativeStaffWithAdmissionVersion(request, env.OPS_DB, {
+      enabled: true, issuer: env.TEAM_DOMAIN ?? "", staffAudience: env.OPERATIONS_AUD,
+    });
+    const identity = authenticated.identity;
+    if (identity.staffId !== principal.id || identity.email !== principal.email
+      || identity.verifiedAccessSubject !== principal.accessSubject) return null;
+    const generation = await env.OPS_DB.withSession("first-primary").prepare(`SELECT generation
+      FROM native_directory_grant_generations WHERE staff_id=?`).bind(identity.staffId).first<{ generation: number }>();
+    if (!generation || !Number.isSafeInteger(generation.generation) || generation.generation < 1) return null;
+    return { staffId: identity.staffId, accessSubject: identity.verifiedAccessSubject,
+      admissionVersion: authenticated.admissionVersion, profileVersion: identity.profileVersion,
+      grantGeneration: generation.generation, verifiedUntil: authenticated.verifiedUntil };
+  } catch { return null; }
 }
 
 async function permissions(env: Env, principal: StaffPrincipal): Promise<ClientHubPermissions> {
@@ -91,14 +122,17 @@ function portalDirectoryRoot(portal: ClientHubWorkspace): WorkspaceRow {
 /** A retained portal URL can acquire a business alias only from current source
  * mapping/legacy provenance and the same exact verified workspace resolver. */
 async function businessAlias(env: Env, root: WorkspaceRow, portal: ClientHubWorkspace): Promise<WorkspaceRow | null> {
-  const candidates = new Set<string>();
+  const candidates = new Map<string, { internalId: string; expectedPublicId: string | null }>();
   const publicId = portal.root_type === "organization" ? portal.pa_organization_public_id : portal.pa_client_public_id;
   if (isAlphaPublicId(publicId)) {
+    const mappedSource = await resolveClientHubSourceRootByAlphaPublicId(env, root.kind, "project-alpha:primary", publicId);
+    if (mappedSource?.active && (root.kind !== "standalone_client" || mappedSource.organization_id === null))
+      candidates.set(JSON.stringify([mappedSource.pa_internal_id, publicId]), { internalId: mappedSource.pa_internal_id, expectedPublicId: publicId });
     const table = portal.root_type === "organization" ? "pa_organizations" : "pa_clients";
     const rows = await env.OPS_DB.withSession("first-primary").prepare(`SELECT source.id FROM ${table} source
       WHERE source.active=1 AND source.projection_source_id='project-alpha:primary' ${portal.root_type === "standalone_client" ? "AND source.organization_id IS NULL" : ""}
         AND ${validatedUniquePublicIdExpression(table, "source")}=? LIMIT 2`).bind(publicId).all<{ id: string }>();
-    for (const row of rows.results) candidates.add(row.id);
+    for (const row of rows.results) candidates.set(JSON.stringify([row.id, publicId]), { internalId: row.id, expectedPublicId: publicId });
   }
   if (portal.legacy_account_id) {
     const account = await database(env).prepare(`SELECT project_alpha_client_id,project_alpha_organization_id
@@ -106,25 +140,30 @@ async function businessAlias(env: Env, root: WorkspaceRow, portal: ClientHubWork
       .first<{ project_alpha_client_id: string | null; project_alpha_organization_id: string | null }>();
     const internalId = portal.root_type === "organization" ? account?.project_alpha_organization_id
       : account?.project_alpha_organization_id === null ? account.project_alpha_client_id : null;
-    if (internalId) candidates.add(internalId);
+    // Legacy workspace aliases store PA internal IDs in their root columns.
+    // Do not make that candidate pass a public-ID equality check.
+    if (internalId) candidates.set(JSON.stringify([internalId, null]), { internalId, expectedPublicId: null });
   }
-  const matches: WorkspaceRow[] = [];
-  for (const internalId of candidates) {
-    const source = await resolveClientHubSourceRoot(env, root.kind, internalId);
+  const matches = new Map<string, WorkspaceRow>();
+  for (const { internalId, expectedPublicId } of candidates.values()) {
+    const source = await resolveClientHubSourceRootByAlphaIdentity(env, root.kind, internalId,
+      "project-alpha:primary", expectedPublicId);
     if (!source?.active || (root.kind === "standalone_client" && source.organization_id !== null)) continue;
     const resolved = await resolveClientHubWorkspace(env, { key: internalId, source_id: "project-alpha:primary", kind: root.kind,
-      business_id: internalId, pa_public_id: source.pa_public_id, workspace_id: null });
+      business_id: source.pa_internal_id, pa_public_id: source.pa_public_id, workspace_id: null });
     if (resolved.status === "conflict") throw new HTTPException(409, { message: "This portal's business link needs review" });
-    if (resolved.workspace?.id === portal.id) matches.push({ ...root, root_namespace: "business", public_id: source.id,
-      pa_public_id: source.pa_public_id, mapping_status: source.mapping_status, display_name: source.display_name,
+    if (resolved.workspace?.id === portal.id) matches.set(source.id, { ...root, root_namespace: "business", public_id: source.id,
+      pa_internal_id: source.pa_internal_id, pa_public_id: source.pa_public_id, mapping_status: source.mapping_status, display_name: source.display_name,
       status: "active", workspace_id: portal.id, legacy_account_id: portal.legacy_account_id, portal_status: portal.status });
   }
-  if (matches.length > 1) throw new HTTPException(409, { message: "This portal's business link is ambiguous" });
-  return matches[0] ?? null;
+  if (matches.size > 1) throw new HTTPException(409, { message: "This portal's business link is ambiguous" });
+  return matches.values().next().value ?? null;
 }
 
 async function liveDetailRoot(env: Env, root: WorkspaceRow): Promise<WorkspaceRow> {
-  const visibility = await requireProjectAlphaReadVisibility(env, root.source_id);
+  const visibility = root.root_namespace === "business" && root.source_id.startsWith("project-alpha:")
+    ? await requireProjectAlphaReadOrNativeMappingVisibility(env, root.source_id, root.public_id, root.kind)
+    : await requireProjectAlphaReadVisibility(env, root.source_id);
   root = { ...root, source_name: visibility.display_name! };
   const db = database(env);
   if (root.root_namespace === "account" && root.source_id === "delivery:local") {
@@ -160,12 +199,12 @@ async function liveDetailRoot(env: Env, root: WorkspaceRow): Promise<WorkspaceRo
   // Business provenance is not a portal grant. Resolve only a same-source,
   // source-owned workspace; secondary sources can never use legacy bridges.
   const resolved = await resolveClientHubWorkspace(env, { key: root.public_id, source_id: root.source_id, kind: root.kind,
-    workspace_id: null, business_id: source.id, pa_public_id: source.pa_public_id });
+    workspace_id: null, business_id: source.pa_internal_id, pa_public_id: source.pa_public_id });
   const workspace = resolved.workspace;
   // The directory is eventually consistent. Never use its cached workspace or
   // account association to hydrate access after the live source was reassigned.
   return { ...root, display_name: source.display_name, status: "active",
-    pa_public_id: source.pa_public_id, mapping_status: source.mapping_status,
+    pa_internal_id: source.pa_internal_id, pa_public_id: source.pa_public_id, mapping_status: source.mapping_status,
     workspace_id: workspace?.id ?? null, legacy_account_id: root.source_id === "project-alpha:primary" ? workspace?.legacy_account_id ?? null : null,
     portal_status: workspace?.status ?? (resolved.status === "conflict" ? "mapping_conflict"
       : resolved.status === "pending" ? "projection_pending" : source.mapping_status !== "mapped" ? "mapping_unavailable"
@@ -179,11 +218,15 @@ async function resolveDetailContext(env: Env, principal: StaffPrincipal, kind: C
     || (sourceId !== undefined && !isClientHubSource(sourceId))
     || (rootNamespace !== undefined && !isClientHubRootNamespace(rootNamespace)))
     throw new HTTPException(404, { message: "Client not found" });
+  if (rootNamespace === "review")
+    throw new HTTPException(404, { message: "Review-only records are not client workspaces" });
   const access = await permissions(env, principal);
   requireHubAccess(access);
   if (!access.directory)
     throw new HTTPException(403, { message: "Global team.view permission required" });
-  if (sourceId) await requireProjectAlphaReadVisibility(env, sourceId);
+  if (sourceId) rootNamespace === "business"
+    ? await requireProjectAlphaReadOrNativeMappingVisibility(env, sourceId, publicId, kind)
+    : await requireProjectAlphaReadVisibility(env, sourceId);
   // Portal aliases outlive index folding into a business root. Resolve their
   // exact live workspace even after the old materialized portal row is swept.
   const portal = sourceId === "project-alpha:primary" && rootNamespace === "portal"
@@ -201,7 +244,7 @@ async function resolveDetailContext(env: Env, principal: StaffPrincipal, kind: C
     const source = await resolveClientHubSourceRoot(env, kind, publicId, sourceId);
     if (!source?.active || (kind === "standalone_client" && source.organization_id !== null)) throw error;
     indexed = { source_id: sourceId, root_namespace: "business", kind, public_id: source.id,
-      pa_public_id: source.pa_public_id, mapping_status: source.mapping_status, display_name: source.display_name,
+      pa_internal_id: source.pa_internal_id, pa_public_id: source.pa_public_id, mapping_status: source.mapping_status, display_name: source.display_name,
       sort_name: source.display_name, status: "active", portal_status: "not_provisioned", workspace_id: null,
       legacy_account_id: null, account_count: 0, project_count: 0, request_count: 0, contact_count: 0,
       meaningful_activity_at: null, source_version: null, indexed_at: "", scan_generation: 0 };
@@ -238,7 +281,8 @@ async function clientHubDetail(env: Env, principal: StaffPrincipal, kind: Client
   const context = await resolveDetailContext(env, principal, kind, publicId, sourceId, rootNamespace);
   const workspace = context.root, access = context.access;
   const contactRolesAvailable = projectAlphaContactRolesEnabled(env) && workspace.root_namespace === "business";
-  const [portalIdentities, portalRootAccess, externalAccess, serviceAssignments, collections, projectAlphaContactRoles] = await Promise.all([
+  const [portalIdentities, portalRootAccess, externalAccess, serviceAssignments, collections, projectAlphaContactRoles,
+    operationalContactsAvailable] = await Promise.all([
     listPortalIdentityPage(env, principal, { kind: "client", context }, { limit: 5 }),
     readPortalRootAccess(env, principal, context),
     listClientExternalAccess(env, context, { limit: 5 }),
@@ -247,6 +291,8 @@ async function clientHubDetail(env: Env, principal: StaffPrincipal, kind: Client
       result: collection === "businessProjects" ? await listClientHubBusinessProjects(env, principal, context, { initial: true, limit: 5 })
         : await listClientHubCollection(env, context, collection, { initial: true, limit: 5 }) }))),
     contactRolesAvailable ? listProjectAlphaContactRoles(env, context, { initial: true, limit: 5 }) : Promise.resolve(undefined),
+    workspace.root_namespace === "business" && workspace.kind === "organization"
+      ? organizationOperationalContactsAvailable(env, context) : Promise.resolve(false),
   ]);
   const items = (collection: typeof DETAIL_COLLECTIONS[number]) => collections.find(page => page.collection === collection)!.result.items;
   await verifyContext(env, principal, context);
@@ -258,9 +304,17 @@ async function clientHubDetail(env: Env, principal: StaffPrincipal, kind: Client
   // Cross-database reads are not an atomic snapshot; retain the source/authority
   // check around this final independently authorized metadata read.
   await verifyContext(env, principal, context);
+  const { pa_internal_id: _internalOnly, ...clientWorkspace } = workspace;
+  const profileWrites = nativeDirectoryProfileWritesEnabled(env);
+  const importReview = env.ENVIRONMENT === "staging" && env.REVIEWED_IMPORT_ENROLLMENT_ENABLED === "true";
+  const [nativeDirectoryProfile, nativeDirectoryLinkedClients] = await Promise.all([
+    profileWrites || importReview ? nativeDirectoryProfileEditorRecord(env, workspace) : Promise.resolve(null),
+    profileWrites || importReview ? nativeDirectoryLinkedClientEditorRecords(env, workspace, principal.id) : Promise.resolve([]),
+  ]);
+  await verifyContext(env, principal, context);
   return {
     ...party,
-    client: { ...workspace, route_kind: clientHubRouteKind(workspace.kind), detail_path: clientHubDetailPath(workspace) },
+    client: { ...clientWorkspace, route_kind: clientHubRouteKind(workspace.kind), detail_path: clientHubDetailPath(workspace) },
     contacts: items("businessContacts"),
     portalIdentities,
     portalRootAccess,
@@ -277,12 +331,16 @@ async function clientHubDetail(env: Env, principal: StaffPrincipal, kind: Client
     contextVersion: context.contextVersion,
     capabilities: access,
     internalNotesAvailable: true,
-    organizationOperationalContactsAvailable: workspace.root_namespace === "business" && workspace.kind === "organization",
+    organizationOperationalContactsAvailable: operationalContactsAvailable,
     projectAlphaContactRolesAvailable: contactRolesAvailable,
     projectAlphaContactRoles,
     projectManagementAvailable: workspace.root_namespace === "business",
+    projectAdoptionAvailable: workspace.root_namespace === "business"
+      && workspace.source_id.startsWith("project-alpha:") && projectAlphaProjectOperationalAdoptionEnabled(env),
     businessActivityAvailable: workspace.root_namespace === "business",
     auditTimelineAvailable: true,
+    nativeDirectoryProfile,
+    nativeDirectoryLinkedClients,
   };
 }
 
@@ -317,6 +375,7 @@ export function registerClientHubRoutes(app: App): void {
   registerClientInternalNoteRoutes(app, resolveDetailContext, verifyContext);
   registerProjectOperationalRoutes(app, resolveDetailContext, verifyContext);
   registerOrganizationOperationalContactRoutes(app, resolveDetailContext, verifyContext);
+  registerProjectAlphaProjectOperationalAdoptionRoutes(app, resolveDetailContext, verifyContext);
   app.get("/api/client-hub/sources/:sourceId/:rootNamespace/:kind/:publicId/project-management", async c => {
     const kind = routeKind(c.req.param("kind"));
     if (!kind) throw new HTTPException(404, { message: "Client not found" });
@@ -330,6 +389,34 @@ export function registerClientHubRoutes(app: App): void {
     await verifyContext(c.env, principal, context);
     c.header("Cache-Control", "no-store");
     return c.json(result);
+  });
+  for (const operation of ["prepare", "submit"] as const) app.post(
+    `/api/client-hub/sources/:sourceId/:rootNamespace/:kind/:publicId/project-management/native-projects/${operation}`,
+    async c => {
+      const kind = routeKind(c.req.param("kind"));
+      if (!kind) throw new HTTPException(404, { message: "Client not found" });
+      const principal = c.get("principal");
+      const context = await resolveDetailContext(c.env, principal, kind, c.req.param("publicId"),
+        c.req.param("sourceId"), c.req.param("rootNamespace"));
+      const body = await readBoundedJson(c.req.raw, 32 * 1024, `Client Hub native project ${operation}`);
+      const result = operation === "prepare"
+        ? await prepareClientHubNativeProject(c.env, c.req.raw, principal, context, body)
+        : await submitClientHubNativeProject(c.env, c.req.raw, principal, context, body);
+      await verifyContext(c.env, principal, context);
+      c.header("Cache-Control", "no-store");
+      return c.json(result);
+    });
+  for (const operation of ["prepare","submit","refresh-prepare","refresh-submit","activate","abandon-preparation","abandon-refresh-preparation","retire-for-inbound-review"] as const) app.post(
+    `/api/client-hub/sources/:sourceId/:rootNamespace/:kind/:publicId/project-management/native-project-lifecycle/${operation}`,async c=>{
+      const kind=routeKind(c.req.param("kind"));if(!kind)throw new HTTPException(404,{message:"Client not found"});const principal=c.get("principal");
+      const context=await resolveDetailContext(c.env,principal,kind,c.req.param("publicId"),c.req.param("sourceId"),c.req.param("rootNamespace"));
+      const body=await readBoundedJson(c.req.raw,8*1024,"Native project lifecycle");
+      const result=await mutateClientHubNativeLifecycle(c.env,c.req.raw,principal,context,operation,body,fetch,()=>verifyContext(c.env,principal,context));await verifyContext(c.env,principal,context);c.header("Cache-Control","no-store");return c.json(result);
+    });
+  app.get("/api/client-hub/sources/:sourceId/:rootNamespace/:kind/:publicId/project-management/native-project-lifecycle/:commandId",async c=>{
+    const kind=routeKind(c.req.param("kind"));if(!kind)throw new HTTPException(404,{message:"Client not found"});const principal=c.get("principal");
+    const context=await resolveDetailContext(c.env,principal,kind,c.req.param("publicId"),c.req.param("sourceId"),c.req.param("rootNamespace"));
+    const result=await readClientHubNativeLifecycleStatus(c.env,c.req.raw,principal,context,c.req.param("commandId"));await verifyContext(c.env,principal,context);c.header("Cache-Control","no-store");return c.json(result);
   });
   app.get("/api/client-hub/sources/:sourceId/:rootNamespace/:kind/:publicId/timeline", async c => {
     const kind = routeKind(c.req.param("kind"));
@@ -371,26 +458,64 @@ export function registerClientHubRoutes(app: App): void {
       throw new HTTPException(404, { message: "Business project not found" });
     const kind = routeKind(c.req.param("kind"));
     if (!kind) throw new HTTPException(404, { message: "Client not found" });
-    const principal = c.get("principal");
+    const principal = c.get("principal"), projectOrigin = c.req.query("origin") ?? "pa";
+    if (!isClientHubBusinessProjectOrigin(projectOrigin))
+      throw new HTTPException(400, { message: "Business project origin is invalid" });
     const context = await resolveDetailContext(c.env, principal, kind, c.req.param("publicId"), c.req.param("sourceId"), c.req.param("rootNamespace"));
     const projectId = c.req.param("projectId");
     const result = await readClientHubBusinessProjectDetail(c.env, principal, context, projectId,
-      { expectedContextVersion: c.req.query("expectedContextVersion") });
-    const contactRolesAvailable = projectAlphaContactRolesEnabled(c.env);
+      { expectedContextVersion: c.req.query("expectedContextVersion"), origin: projectOrigin });
+    const contactRolesAvailable = projectOrigin === "pa" && projectAlphaContactRolesEnabled(c.env);
     let projectAlphaContactRoles;
     if (contactRolesAvailable) {
       const projectPublicId = await exactBusinessProjectPublicId(c.env, context, projectId);
       projectAlphaContactRoles = await listProjectAlphaContactRoles(c.env, context,
         { initial: true, limit: 5, project: true, projectPublicId });
       await readClientHubBusinessProjectDetail(c.env, principal, context, projectId,
-        { expectedContextVersion: context.contextVersion });
+        { expectedContextVersion: context.contextVersion, origin: projectOrigin });
       const currentProjectPublicId = await exactBusinessProjectPublicId(c.env, context, projectId);
       if (currentProjectPublicId !== projectPublicId)
         throw new HTTPException(409, { message: "Project ownership or contact-role scope changed. Refresh to continue" });
     }
     await verifyContext(c.env, principal, context);
     c.header("Cache-Control", "no-store");
-    return c.json({ ...result, projectAlphaContactRolesAvailable: contactRolesAvailable, projectAlphaContactRoles });
+    return c.json({ ...result, projectAlphaContactRolesAvailable: contactRolesAvailable, projectAlphaContactRoles,
+      projectInboundReviewAvailable: projectOrigin === "canonical"
+        && c.env.PROJECT_ALPHA_PROJECT_INBOUND_RECONCILIATION_ENABLED === "true" });
+  });
+  const inboundBase = "/api/client-hub/sources/:sourceId/:rootNamespace/:kind/:publicId/business-projects/:projectId/inbound-review";
+  app.post(`${inboundBase}/propose`, async c => {
+    const kind = routeKind(c.req.param("kind"));
+    if (!kind) throw new HTTPException(404, { message: "Client not found" });
+    const principal = c.get("principal"), context = await resolveDetailContext(c.env, principal, kind,
+      c.req.param("publicId"), c.req.param("sourceId"), c.req.param("rootNamespace"));
+    await readClientHubBusinessProjectDetail(c.env, principal, context, c.req.param("projectId"),
+      { expectedContextVersion: context.contextVersion, origin: "canonical" });
+    const result = await proposeClientHubProjectInboundReview(c.env, c.req.raw, principal, context,
+      c.req.param("projectId"), await readBoundedJson(c.req.raw, 32 * 1024, "Project inbound review"));
+    await verifyContext(c.env, principal, context); c.header("Cache-Control", "no-store"); return c.json(result);
+  });
+  app.get(`${inboundBase}/proposals/:proposalId`, async c => {
+    const kind = routeKind(c.req.param("kind"));
+    if (!kind) throw new HTTPException(404, { message: "Client not found" });
+    const principal = c.get("principal"), context = await resolveDetailContext(c.env, principal, kind,
+      c.req.param("publicId"), c.req.param("sourceId"), c.req.param("rootNamespace"));
+    await readClientHubBusinessProjectDetail(c.env, principal, context, c.req.param("projectId"),
+      { expectedContextVersion: c.req.query("expectedContextVersion"), origin: "canonical" });
+    const result = await readClientHubProjectInboundReview(c.env, c.req.raw, principal, context,
+      c.req.param("projectId"), c.req.param("proposalId"), c.req.query("expectedContextVersion") ?? "");
+    await verifyContext(c.env, principal, context); c.header("Cache-Control", "no-store"); return c.json(result);
+  });
+  app.post(`${inboundBase}/resolve`, async c => {
+    const kind = routeKind(c.req.param("kind"));
+    if (!kind) throw new HTTPException(404, { message: "Client not found" });
+    const principal = c.get("principal"), context = await resolveDetailContext(c.env, principal, kind,
+      c.req.param("publicId"), c.req.param("sourceId"), c.req.param("rootNamespace"));
+    await readClientHubBusinessProjectDetail(c.env, principal, context, c.req.param("projectId"),
+      { expectedContextVersion: context.contextVersion, origin: "canonical" });
+    const result = await resolveClientHubProjectInboundReview(c.env, c.req.raw, principal, context,
+      c.req.param("projectId"), await readBoundedJson(c.req.raw, 32 * 1024, "Project inbound resolution"));
+    await verifyContext(c.env, principal, context); c.header("Cache-Control", "no-store"); return c.json(result);
   });
   app.get("/api/client-hub/sources/:sourceId/:rootNamespace/:kind/:publicId/project-alpha-contact-roles", async c => {
     if (!projectAlphaContactRolesEnabled(c.env))
@@ -588,12 +713,23 @@ export function registerClientHubRoutes(app: App): void {
     return c.json(result);
   });
   app.get("/api/client-hub", async c => {
-    const access = await permissions(c.env, c.get("principal"));
+    const principal = c.get("principal");
+    const access = await permissions(c.env, principal);
     requireHubAccess(access);
     const limit = c.req.query("limit");
-    const result = access.directory ? await listClientHubRoots(c.env, c.get("principal"), {
+    let reviewAuthority: ClientHubReviewAuthority | null = null;
+    if (access.directory && c.env.ENVIRONMENT === "staging"
+      && c.env.PROJECT_ALPHA_DIRECTORY_EXACT_ADOPTION_ENABLED === "true") {
+      try {
+        const reviewedRows = await c.env.OPS_DB.withSession("first-primary").prepare(`SELECT 1
+          FROM client_hub_roots WHERE root_namespace='review' LIMIT 1`).first();
+        if (reviewedRows) reviewAuthority = await currentClientHubReviewAuthority(c.req.raw, c.env, principal);
+      } catch { /* Review-only rows remain hidden when their authority store is unavailable. */ }
+    }
+    const result = access.directory ? await listClientHubRoots(c.env, principal, {
       q: c.req.query("q"), kind: c.req.query("kind"), source: c.req.query("source"), cursor: c.req.query("cursor"), grouping: c.req.query("grouping"), sort: c.req.query("sort"),
       limit: limit === undefined ? undefined : /^\d+$/.test(limit) ? Number(limit) : Number.NaN,
+      reviewAuthority,
     }) : { clients: [], nextCursor: null };
     return c.json({ ...result, capabilities: access });
   });

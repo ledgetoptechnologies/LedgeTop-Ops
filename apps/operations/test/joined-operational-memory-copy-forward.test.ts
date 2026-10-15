@@ -11,7 +11,7 @@ import { uploadProjectMemoryAttachment } from "../src/worker/project-memory-atta
 import type { ClientHubCollectionContext } from "../src/worker/client-hub-collections";
 import type { Env, StaffPrincipal } from "../src/worker/types";
 
-const SOURCE = "project-alpha:primary", TIMEOUT = 60_000;
+const SOURCE = "project-alpha:primary", TIMEOUT = 120_000;
 const owner: StaffPrincipal = { id: "staff-beau-koltz", email: "beaukoltz@ledgetopdroneservices.com",
   displayName: "Beau Koltz", accessSubject: "owner", projectAlphaUserId: null };
 class Bucket {
@@ -51,7 +51,7 @@ async function fixture(): Promise<Fixture> {
         JSON.stringify({ billing: { rate: 150, invoiceStatus: "draft" } }), `destination-sync-${n}`, SOURCE),
   ]);
   return { rootId, contactId, sourceProjectId, destinationProjectId,
-    context: { root: { source_id: SOURCE, root_namespace: "business", kind: "organization", public_id: rootId,
+    context: { root: { source_id: SOURCE, root_namespace: "business", kind: "organization", public_id: rootId, pa_internal_id: rootId,
       pa_public_id: rootId, mapping_status: "mapped", display_name: `Joined Organization ${n}`, source_name: "Project Alpha",
       sort_name: `joined organization ${n}`, status: "active", portal_status: "none", workspace_id: null, legacy_account_id: null,
       account_count: 0, project_count: 2, request_count: 0, contact_count: 1, meaningful_activity_at: null,

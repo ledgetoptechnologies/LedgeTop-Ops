@@ -6,6 +6,7 @@ export {
   sendProjectAlphaDirectoryRelationshipCommand,
   sendConfiguredProjectAlphaDirectoryRelationshipCommand,
   validatedProjectAlphaDirectoryCommandAcknowledgement,
+  validatedProjectAlphaDirectoryRelationshipGenerationConflict,
 } from "./project-alpha-directory-command-api-v2";
 export type {
   ProjectAlphaDirectoryRelationshipAction,
@@ -13,4 +14,5 @@ export type {
   ProjectAlphaDirectoryCommand,
   ProjectAlphaDirectoryRelationshipSuccess,
   ProjectAlphaDirectoryRelationshipOutcome,
+  ProjectAlphaDirectoryRelationshipGenerationConflict,
 } from "./project-alpha-directory-command-api-v2";

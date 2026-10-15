@@ -27,7 +27,10 @@ const recoverableSessionCodes=new Set(["DELIVERY_SESSION_REQUIRED","DELIVERY_SES
 
 function isRecoverableSessionFailure(caught:unknown):boolean{
   const value=caught as RequestError;
-  return value.status===401&&recoverableSessionCodes.has(value.body?.code||"");
+  // The shared session cookie can belong to another delivery opened in a tab.
+  // Re-exchanging the retained link secret still requires normal authorization.
+  return (value.status===401&&recoverableSessionCodes.has(value.body?.code||""))||
+    (value.status===404&&value.body?.code==="SHARE_INVALID");
 }
 
 function isProtectedDeliveryFailure(caught: unknown): boolean {
@@ -532,7 +535,7 @@ export function DeliveryApp({ namespace = "staff", initialRoute: consumedRoute }
       const statusUrl = body.statusUrl || body.progressUrl;
       setBulkProgress(bulkDownloadProgress(body));
       if (!body.downloadUrl && statusUrl) {
-        body = await pollBulkDownload(body, statusUrl, { onProgress: status => {
+        body = await pollBulkDownload(body, statusUrl, { requestStatus: url => protectedJson<BulkDownloadResponse>(url), onProgress: status => {
           setBulkProgress(bulkDownloadProgress(status));
         } });
       }

@@ -136,6 +136,8 @@ export interface PortalServiceRequest {
   } | null;
   /** A current Project Alpha draft exists; no commercial artifact is exposed. */
   projectAlphaDraftCreated?: boolean;
+  submittedServices?: PortalSubmittedServiceReview[];
+  submittedServiceDetailsAvailable?: boolean;
   acceptedQuote?: PortalAcceptedQuote | null;
   operationalEstimate?: PortalOperationalEstimate | null;
   status: PortalServiceRequestStatus;
@@ -194,6 +196,137 @@ export interface PortalServiceRequestInput {
 }
 
 export type PortalRequest = typeof requestJson;
+
+export interface PortalOperationsService {
+  serviceId: string;
+  providerId: string;
+  displayLabel: string;
+  revision: number;
+}
+
+export interface PortalSubmittedServiceReview {
+  publicId: string;
+  sourceVersion: string;
+  name: string;
+  summary: string | null;
+  category: string;
+  geometryRequirement: "none" | "optional" | "required";
+  answers: Array<{ questionId: string; label: string; displayValue: string }>;
+}
+
+export interface PortalOperationsHome {
+  authorityId: string;
+  workspaceId: string;
+  ownershipEpoch: number;
+  grantRevision: number;
+  services: PortalOperationsService[];
+}
+
+export interface PortalOperationsHomeResponse {
+  resourceMode: "operations_home";
+  homes: PortalOperationsHome[];
+}
+
+const operationsAuthorityIdPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+
+function exactDataObject(value: unknown, keys: readonly string[]): value is Record<string, unknown> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  try {
+    if (Object.getPrototypeOf(value) !== Object.prototype) return false;
+    const ownKeys = Reflect.ownKeys(value);
+    if (ownKeys.some(key => typeof key !== "string") || ownKeys.length !== keys.length) return false;
+    if (!keys.every(key => ownKeys.includes(key))) return false;
+    return ownKeys.every(key => {
+      const descriptor = Object.getOwnPropertyDescriptor(value, key);
+      return descriptor !== undefined && "value" in descriptor && descriptor.enumerable;
+    });
+  } catch {
+    return false;
+  }
+}
+
+function boundedTrimmedString(value: unknown, maximumLength: number): value is string {
+  return typeof value === "string" && value.length >= 1 && value.length <= maximumLength && value.trim() === value;
+}
+
+function positiveSafeInteger(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 1;
+}
+
+function parseOperationsHomeResponse(value: unknown): PortalOperationsHomeResponse | null {
+  if (!exactDataObject(value, ["resourceMode", "homes"])) return null;
+  const resourceMode = Object.getOwnPropertyDescriptor(value, "resourceMode")!.value;
+  const homesValue = Object.getOwnPropertyDescriptor(value, "homes")!.value;
+  if (resourceMode !== "operations_home" || !Array.isArray(homesValue) || homesValue.length > 20) return null;
+
+  const authorityIds = new Set<string>();
+  const tuples = new Set<string>();
+  const homes: PortalOperationsHome[] = [];
+  for (const item of homesValue) {
+    if (!exactDataObject(item, ["authorityId", "workspaceId", "ownershipEpoch", "grantRevision", "services"])) return null;
+    const authorityId = Object.getOwnPropertyDescriptor(item, "authorityId")!.value;
+    const workspaceId = Object.getOwnPropertyDescriptor(item, "workspaceId")!.value;
+    const ownershipEpoch = Object.getOwnPropertyDescriptor(item, "ownershipEpoch")!.value;
+    const grantRevision = Object.getOwnPropertyDescriptor(item, "grantRevision")!.value;
+    const servicesValue = Object.getOwnPropertyDescriptor(item, "services")!.value;
+    if (typeof authorityId !== "string" || !operationsAuthorityIdPattern.test(authorityId)
+      || !boundedTrimmedString(workspaceId, 200) || !positiveSafeInteger(ownershipEpoch)
+      || !positiveSafeInteger(grantRevision) || !Array.isArray(servicesValue) || servicesValue.length > 100) return null;
+    const tuple = `${authorityId}\0${workspaceId}\0${ownershipEpoch}\0${grantRevision}`;
+    if (authorityIds.has(authorityId) || tuples.has(tuple)) return null;
+    authorityIds.add(authorityId);
+    tuples.add(tuple);
+
+    const serviceIds = new Set<string>();
+    const services: PortalOperationsService[] = [];
+    for (const service of servicesValue) {
+      if (!exactDataObject(service, ["serviceId", "providerId", "displayLabel", "revision"])) return null;
+      const serviceId = Object.getOwnPropertyDescriptor(service, "serviceId")!.value;
+      const providerId = Object.getOwnPropertyDescriptor(service, "providerId")!.value;
+      const displayLabel = Object.getOwnPropertyDescriptor(service, "displayLabel")!.value;
+      const revision = Object.getOwnPropertyDescriptor(service, "revision")!.value;
+      if (!boundedTrimmedString(serviceId, 191) || !boundedTrimmedString(providerId, 128)
+        || !boundedTrimmedString(displayLabel, 160) || !positiveSafeInteger(revision) || serviceIds.has(serviceId)) return null;
+      serviceIds.add(serviceId);
+      services.push({ serviceId, providerId, displayLabel, revision });
+    }
+    homes.push({ authorityId, workspaceId, ownershipEpoch, grantRevision, services });
+  }
+  return { resourceMode: "operations_home", homes };
+}
+
+export async function loadOperationsHome(
+  request: PortalRequest = requestJson,
+  signal?: AbortSignal,
+): Promise<PortalOperationsHomeResponse> {
+  const response = await request<unknown>("/api/client/v2/operations/home", { signal, omitWorkspace: true });
+  const parsed = parseOperationsHomeResponse(response);
+  if (!parsed) throw Object.assign(new Error("The operations home response could not be verified."), { status: 503 });
+  return parsed;
+}
+
+export interface PortalFinancialDocument { scopeKey:string;publicId:string;kind:"invoice"|"contract"|"project_invoice";status:string;
+  currency:string;total:string;amountPaid:string|null;balanceDue:string|null;documentUrl:string|null;actionUrl:string|null }
+function portalFinancialLink(value:unknown){if(value===null)return true;if(typeof value!=="string"||value.length>2048)return false;
+  try{const url=new URL(value),keys=[...url.searchParams.keys()];return url.protocol==="https:"&&!url.username&&!url.password&&!url.hash
+    &&url.pathname==="/"&&keys.length===2&&keys.includes("page")&&keys.includes("token")
+    &&(url.searchParams.get("page")==="public-doc"||url.searchParams.get("page")==="stripe-checkout")
+    &&/^[A-Za-z0-9_-]{16,64}$/.test(url.searchParams.get("token")??"");}catch{return false;}}
+export async function loadOperationsFinancial(authorityId:string,request:PortalRequest=requestJson,signal?:AbortSignal){
+  if(!operationsAuthorityIdPattern.test(authorityId))throw Object.assign(new Error("Invalid Operations authority"),{status:403});
+  const value=await request<{resourceMode:string;collections:Array<{grantId:string;revision:number;documents:Array<Omit<PortalFinancialDocument,"scopeKey">>}>}>(
+    `/api/client/v2/operations/home/${encodeURIComponent(authorityId)}/financial`,{signal,omitWorkspace:true});
+  if(!value||value.resourceMode!=="operations_financial"||!Array.isArray(value.collections)||value.collections.length>20
+    ||value.collections.some(collection=>typeof collection.grantId!=="string"||!operationsAuthorityIdPattern.test(collection.grantId)
+      ||!positiveSafeInteger(collection.revision)||!Array.isArray(collection.documents)||collection.documents.length>10_000
+      ||collection.documents.some(document=>!document||typeof document.publicId!=="string"
+        ||!(document.kind==="invoice"||document.kind==="contract"||document.kind==="project_invoice")
+        ||typeof document.status!=="string"||!/^([A-Z]{3})$/.test(document.currency)||!/^(?:0|[1-9][0-9]{0,17})\.[0-9]{2}$/.test(document.total)
+        ||!portalFinancialLink(document.documentUrl)||!portalFinancialLink(document.actionUrl))))
+    throw Object.assign(new Error("The financial response could not be verified."),{status:503});
+  return value.collections.flatMap(collection=>collection.documents.map(document=>({...document,
+    scopeKey:`${authorityId}:${collection.grantId}:${collection.revision}`})));
+}
 
 export async function loadPortalBootstrap(
   requestApi: PortalRequest = requestJson,
@@ -936,6 +1069,11 @@ export async function loadPortalServiceRequests(
 ): Promise<PortalServiceRequest[]> {
   const response = await request<{ requests: PortalServiceRequest[] }>("/api/client/service-requests", { signal });
   return Array.isArray(response.requests) ? response.requests : [];
+}
+
+export async function loadPortalServiceRequest(requestId: string, request: PortalRequest = requestJson, signal?: AbortSignal): Promise<PortalServiceRequest> {
+  const response = await request<{ request: PortalServiceRequest }>(`/api/client/service-requests/${encodeURIComponent(requestId)}`, { signal });
+  return response.request;
 }
 
 export async function createPortalChangeRequest(

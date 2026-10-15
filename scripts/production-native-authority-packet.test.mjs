@@ -13,6 +13,7 @@ import {
 } from "./production-native-authority-packet.mjs";
 
 const repositoryRoot = path.resolve(import.meta.dirname, "..");
+const canonicalAuthorityFinalMigration = "0124_project_alpha_project_adoption_review_evidence.sql";
 const owner = Object.freeze({
   staffId: "staff-reviewed-owner",
   email: "reviewed-owner@example.invalid",
@@ -94,7 +95,11 @@ function fixture() {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), "ltds-production-native-authority-"));
   const app = path.join(base, "apps", "operations");
   fs.mkdirSync(app, { recursive: true });
-  fs.cpSync(path.join(repositoryRoot, "apps", "operations", "migrations"), path.join(app, "migrations"), { recursive: true });
+  const sourceMigrations = path.join(repositoryRoot, "apps", "operations", "migrations");
+  const targetMigrations = path.join(app, "migrations");
+  fs.mkdirSync(targetMigrations, { recursive: true });
+  for (const name of canonicalAuthorityMigrations(sourceMigrations))
+    fs.copyFileSync(path.join(sourceMigrations, name), path.join(targetMigrations, name));
   const config = JSON.parse(fs.readFileSync(path.join(repositoryRoot, "apps", "operations", "wrangler.jsonc"), "utf8"));
   config.name = production.worker.name;
   config.vars.ENVIRONMENT = production.worker.environment;
@@ -105,6 +110,13 @@ function fixture() {
   });
   fs.writeFileSync(path.join(app, "wrangler.jsonc"), JSON.stringify(config));
   return base;
+}
+
+function canonicalAuthorityMigrations(directory) {
+  const names = fs.readdirSync(directory).filter(name => name.endsWith(".sql")).sort();
+  const finalIndex = names.indexOf(canonicalAuthorityFinalMigration);
+  assert.notEqual(finalIndex, -1);
+  return names.slice(0, finalIndex + 1);
 }
 
 function queryOne(db, sql, ...values) {
@@ -128,7 +140,7 @@ function canonicalDatabase(overrides = permissionOverrides) {
   const db = new DatabaseSync(":memory:");
   db.exec("PRAGMA foreign_keys=ON; CREATE TABLE d1_migrations(id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT UNIQUE,applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL)");
   const directory = path.join(repositoryRoot, "apps", "operations", "migrations");
-  for (const name of fs.readdirSync(directory).filter(name => name.endsWith(".sql")).sort())
+  for (const name of canonicalAuthorityMigrations(directory))
     applyMigration(db, fs.readFileSync(path.join(directory, name), "utf8"), name);
   db.prepare(`INSERT INTO staff_users(id,email,display_name,access_subject,status,last_seen_at)
     VALUES(?,?,?,?,'active',datetime('now'))`).run(owner.staffId, owner.email, owner.displayName, subject);

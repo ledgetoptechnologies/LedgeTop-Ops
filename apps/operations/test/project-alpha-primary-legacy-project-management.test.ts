@@ -16,6 +16,7 @@ const root = {
   root_namespace: "business",
   kind: "standalone_client",
   public_id: "local-client-1",
+  pa_internal_id: "local-client-1",
 };
 const context = {
   root,
@@ -79,8 +80,8 @@ describe("primary legacy Project Alpha project-management compatibility", () => 
     for (const env of [environment({ configured: false }), environment({ mapped: false })]) {
       const result = await readClientHubProjectManagementAction(env, principal, context as never, "/refresh");
       expect(result).toMatchObject({
-        source: { sourceId: "project-alpha:primary", state: "unregistered" },
-        availability: { available: false, reason: "source_not_registered" },
+        source: { sourceId: "project-alpha:primary", state: "unavailable" },
+        availability: { available: false, reason: "native_destination_unavailable" },
         action: null,
         sync: { status: "not_configured", requestSync: null },
       });
@@ -92,8 +93,8 @@ describe("primary legacy Project Alpha project-management compatibility", () => 
       canonicalRoot: { ...context.canonicalRoot, sourceId: "project-alpha:secondary" } };
     const result = await readClientHubProjectManagementAction(environment(), principal, secondaryContext as never, "/refresh");
     expect(result).toMatchObject({
-      source: { sourceId: "project-alpha:secondary", state: "unregistered" },
-      availability: { available: false, reason: "source_not_registered" },
+      source: { sourceId: "project-alpha:secondary", state: "unavailable" },
+      availability: { available: false, reason: "native_destination_unavailable" },
       action: null,
       sync: { status: "not_configured", requestSync: null },
     });

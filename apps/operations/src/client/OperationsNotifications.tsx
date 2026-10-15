@@ -277,7 +277,7 @@ export function OperationsNotifications() {
         <p>Native delivery-ready notices may be staged; earlier direct-dispatch notices are read-only. Authenticated change summaries appear only for an active exact-person grant with an explicit opt-in policy. They do not change access or replace legacy subscriptions.</p>
         <p>Sent means accepted for delivery, not proof the recipient received or read the notice. Cancellation cannot recall email already accepted or inbox notices already published.</p>
       </details></div>
-    <div className="notification-view-switch" role="group" aria-label="Notification views">
+    <div className="notification-view-switch ltds-segmented" role="group" aria-label="Notification views">
       {(["pending", "history"] as const).map(view => <button key={view} type="button" className={!route.batchId && !route.invalid && route.view === view ? "button-orange" : "button-ghost"}
         aria-pressed={!route.batchId && !route.invalid && route.view === view} onClick={() => navigate(route.batchId || route.invalid ? { view, q: "", batchId: null, kind: "folder_changes", invalid: false } : { ...route, view })}>{view === "pending" ? "Pending" : "History"}</button>)}
     </div>

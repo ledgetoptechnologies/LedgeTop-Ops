@@ -1,0 +1,202 @@
+import type { AuthenticatedNativeStaffWithAdmissionVersion } from "./native-staff-auth";
+import { approveNativeOnlyClientOnboarding,
+  type NativeOnlyClientOnboardingApprovalOutcome } from "./native-directory-onboarding-write-composer";
+import type { NativeDirectoryDestinationAuthority, NativeDirectoryScope, NativeDirectoryWriterActor } from "./native-directory-profile-writer";
+import { readClientOnboardingSubmissionForReview } from "./client-onboarding-review";
+import { parseClientOnboardingEnrollmentSourceIds } from "./client-onboarding-enrollment-selection";
+import { resolveProjectAlphaApiV2Connection } from "./project-alpha-api-v2-connections";
+import { readConfiguredProjectAlphaDirectoryInventory } from "./project-alpha-directory-inventory-api-v2";
+
+export type ClientOnboardingApprovalReceipt = Extract<NativeOnlyClientOnboardingApprovalOutcome,
+  { status: "written" }>;
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const HEX = /^[0-9a-f]{64}$/;
+const REVISION = /^(?:0|[1-9][0-9]{0,18})$/;
+const encoder = new TextEncoder();
+const denied = (): never => { throw Error("client_onboarding_approval_denied"); };
+
+function hex(bytes: ArrayBuffer): string {
+  return [...new Uint8Array(bytes)].map(value => value.toString(16).padStart(2, "0")).join("");
+}
+async function sha256(value: string): Promise<string> {
+  return hex(await crypto.subtle.digest("SHA-256", encoder.encode(value)));
+}
+async function deterministicUuid(seed: string): Promise<string> {
+  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", encoder.encode(seed))).slice(0, 16);
+  digest[6] = (digest[6]! & 0x0f) | 0x40;
+  digest[8] = (digest[8]! & 0x3f) | 0x80;
+  const value = [...digest].map(byte => byte.toString(16).padStart(2, "0")).join("");
+  return `${value.slice(0, 8)}-${value.slice(8, 12)}-${value.slice(12, 16)}-${value.slice(16, 20)}-${value.slice(20)}`;
+}
+
+async function selectedCreateGrant(database: D1Database, staffId: string,
+  permission: "directory.profile.edit" | "directory.identity.link" | "directory.enrollment.manage", recordId: string,
+  scopes: readonly NativeDirectoryScope[]): Promise<string> {
+  const scopeJson = JSON.stringify(scopes);
+  const row = await database.withSession("first-primary").prepare(`SELECT grant.id
+    FROM native_directory_grants grant
+    WHERE grant.staff_id=? AND grant.permission=? AND grant.effect='allow' AND grant.active=1
+      AND (grant.scope_kind='global'
+        OR (grant.scope_kind='business_area' AND NOT EXISTS(SELECT 1 FROM json_each(?) scope
+          WHERE json_extract(scope.value,'$.businessAreaId')<>grant.business_area_id))
+        OR (grant.scope_kind='division' AND NOT EXISTS(SELECT 1 FROM json_each(?) scope
+          WHERE json_extract(scope.value,'$.divisionId') IS NULL
+            OR json_extract(scope.value,'$.divisionId')<>grant.division_id)))
+      AND NOT EXISTS(SELECT 1 FROM native_directory_grants deny
+        WHERE deny.staff_id=grant.staff_id AND deny.permission=grant.permission
+          AND deny.effect='deny' AND deny.active=1
+          AND (deny.scope_kind='global'
+            OR (deny.scope_kind='resource' AND deny.resource_id=?)
+            OR (deny.scope_kind='business_area' AND EXISTS(SELECT 1 FROM json_each(?) scope
+              WHERE json_extract(scope.value,'$.businessAreaId')=deny.business_area_id))
+            OR (deny.scope_kind='division' AND EXISTS(SELECT 1 FROM json_each(?) scope
+              WHERE json_extract(scope.value,'$.divisionId')=deny.division_id))))
+    ORDER BY CASE grant.scope_kind WHEN 'division' THEN 1 WHEN 'business_area' THEN 2 ELSE 3 END,grant.id
+    LIMIT 1`).bind(staffId, permission, scopeJson, scopeJson, recordId, scopeJson, scopeJson)
+    .first<{ id: string }>();
+  if (!row?.id) return denied();
+  return row.id;
+}
+
+async function currentEnrollmentDestinations(connectionJson: string | undefined,
+  sourceIds: readonly string[]): Promise<readonly Omit<NativeDirectoryDestinationAuthority, "externalCanonicalId">[]> {
+  const environment = { PROJECT_ALPHA_API_V2_CONNECTIONS: connectionJson };
+  const destinations: Omit<NativeDirectoryDestinationAuthority, "externalCanonicalId">[] = [];
+  for (const sourceId of sourceIds) {
+    const configured = resolveProjectAlphaApiV2Connection(environment, sourceId);
+    if (!configured.enabled || !configured.connection.expectedHistoryEpoch) return denied();
+    const inventory = await readConfiguredProjectAlphaDirectoryInventory(environment, sourceId,
+      { type: "all", limit: 1 });
+    if (inventory.status !== "observed" || !REVISION.test(inventory.inventory.authorizationGeneration))
+      return denied();
+    destinations.push({ sourceId,
+      sourceInstanceUUID: configured.connection.expectedSourceInstanceId,
+      applicationUUID: configured.connection.expectedApplicationId,
+      historyEpoch: configured.connection.expectedHistoryEpoch,
+      origin: configured.connection.baseUrl,
+      expectedAuthorizationGeneration: inventory.inventory.authorizationGeneration });
+  }
+  return destinations;
+}
+
+function approvalKind(fields: Awaited<ReturnType<typeof readClientOnboardingSubmissionForReview>>["fields"]): "consumer" | "business" | null {
+  const organizationValues = [fields.organizationName, fields.organizationEmail, fields.organizationPhone];
+  if (fields.clientType === "consumer" && organizationValues.every(value => value.trim() === "")) return "consumer";
+  if (fields.clientType === "business" && fields.organizationName.trim() !== "") return "business";
+  return null;
+}
+
+async function consumerSourceHasOrganizationFields(database: D1Database, submissionId: string,
+  fieldsSha256: string): Promise<boolean> {
+  const row = await database.withSession("first-primary").prepare(`SELECT fields_json FROM client_onboarding_submissions
+    WHERE submission_id=? AND fields_sha256=? LIMIT 1`).bind(submissionId, fieldsSha256).first<{ fields_json: string }>();
+  if (!row) return true;
+  const value: unknown = JSON.parse(row.fields_json);
+  if (!value || typeof value !== "object" || Array.isArray(value)) return true;
+  const fields = value as Record<string, unknown>;
+  return [fields.organizationName, fields.organizationEmail, fields.organizationPhone]
+    .some(item => typeof item !== "string" || item.trim() !== "");
+}
+
+/**
+ * Approves a new unlinked consumer client or a business organization and
+ * linked client/contact. Browser input can select canonical source IDs only;
+ * destination identity, authorization generation, scopes and grants are
+ * derived by the server after the composer's saved-decision replay check.
+ */
+export async function approveNewNativeOnlyClientOnboarding(database: D1Database,
+  authenticated: AuthenticatedNativeStaffWithAdmissionVersion,
+  submissionId: unknown, expectedFieldsSha256: unknown, rawSourceIds: unknown = [],
+  projectAlphaApiV2Connections?: string): Promise<ClientOnboardingApprovalReceipt> {
+  try {
+    const sourceIds = parseClientOnboardingEnrollmentSourceIds(rawSourceIds);
+    if (typeof submissionId !== "string" || !UUID.test(submissionId)
+      || typeof expectedFieldsSha256 !== "string" || !HEX.test(expectedFieldsSha256)
+      || sourceIds === null || Date.parse(authenticated.verifiedUntil) <= Date.now()) return denied();
+    const review = await readClientOnboardingSubmissionForReview(database, authenticated, submissionId);
+    const kind = approvalKind(review.fields);
+    if (review.targetClientRecordId !== null || review.fieldsSha256 !== expectedFieldsSha256 || kind === null
+      || (kind === "consumer" && await consumerSourceHasOrganizationFields(database, review.submissionId,
+        review.fieldsSha256))) return denied();
+    const issuance = await database.withSession("first-primary").prepare(`SELECT command.request_sha256
+      FROM client_onboarding_issuance_commands command
+      JOIN client_onboarding_invitations invitation ON invitation.invitation_id=command.invitation_id
+        AND invitation.state='submitted' AND invitation.version=2 AND invitation.target_client_record_id IS NULL
+      WHERE command.invitation_id=? LIMIT 1`).bind(review.invitationId).first<{ request_sha256: string }>();
+    if (!issuance || !HEX.test(issuance.request_sha256)) return denied();
+    const decisionId = await deterministicUuid(`client-onboarding-approval:v1:decision:${review.submissionId}`);
+    const mutationId = await deterministicUuid(`client-onboarding-approval:v1:profile:${review.submissionId}`);
+    const recordId = await deterministicUuid(`client-onboarding-approval:v1:record:${review.submissionId}`);
+    const organizationMutationId = kind === "business"
+      ? await deterministicUuid(`client-onboarding-approval:v1:organization-profile:${review.submissionId}`) : null;
+    const organizationRecordId = kind === "business"
+      ? await deterministicUuid(`client-onboarding-approval:v1:organization-record:${review.submissionId}`) : null;
+    const relationshipMutationId = await deterministicUuid(`${mutationId}\0client-relationship\0${organizationRecordId ?? "unlinked"}`);
+    const selectedGrantId = await selectedCreateGrant(database, authenticated.identity.staffId,
+      "directory.profile.edit", recordId, review.scopes);
+    const selectedIdentityGrantId = await selectedCreateGrant(database, authenticated.identity.staffId,
+      "directory.identity.link", recordId, review.scopes);
+    if (sourceIds.length > 0) await selectedCreateGrant(database, authenticated.identity.staffId,
+      "directory.enrollment.manage", recordId, review.scopes);
+    const actor: NativeDirectoryWriterActor = {
+      staffId: authenticated.identity.staffId,
+      accessSubject: authenticated.identity.verifiedAccessSubject,
+      admissionVersion: authenticated.admissionVersion,
+      selectedGrantId,
+      loginEmail: authenticated.identity.email,
+      profileVersion: authenticated.identity.profileVersion,
+      selectedIdentityGrantId,
+    };
+    const profile = {
+      name: review.fields.name,
+      email: review.fields.email,
+      phone: review.fields.phone,
+      clientType: review.fields.clientType,
+      addressLine1: review.fields.addressLine1,
+      addressLine2: review.fields.addressLine2,
+      city: review.fields.city,
+      state: review.fields.state,
+      postalCode: review.fields.postalCode,
+      country: review.fields.country,
+    } as const;
+    const reason = kind === "business"
+      ? sourceIds.length ? "Approved as a new organization and linked client/contact for explicit enrollment"
+        : "Approved as a new native-only organization with linked client/contact"
+      : sourceIds.length ? "Approved as a new unlinked client profile for explicit enrollment"
+        : "Approved as a new native-only, unlinked client profile";
+    const reviewedFieldsJson = JSON.stringify(review.fields);
+    const requestSha256 = await sha256(JSON.stringify(kind === "consumer"
+      ? [sourceIds.length ? "client-onboarding-explicit-enrollment-approval-v1" : "client-onboarding-native-only-approval-v1", decisionId, review.invitationId, review.submissionId,
+        review.fieldsSha256, issuance.request_sha256, reason, reviewedFieldsJson, review.scopes, recordId,
+        mutationId, relationshipMutationId, authenticated.identity.staffId,
+        authenticated.identity.verifiedAccessSubject, authenticated.admissionVersion,
+        authenticated.identity.profileVersion, ...(sourceIds.length ? [sourceIds] : [])]
+      : [sourceIds.length ? "client-onboarding-explicit-business-enrollment-approval-v1" : "client-onboarding-native-business-approval-v2", decisionId, review.invitationId, review.submissionId,
+        review.fieldsSha256, issuance.request_sha256, reason, reviewedFieldsJson, review.scopes, recordId,
+        mutationId, organizationRecordId, organizationMutationId, relationshipMutationId,
+        authenticated.identity.staffId, authenticated.identity.verifiedAccessSubject,
+        authenticated.admissionVersion, authenticated.identity.profileVersion,
+        ...(sourceIds.length ? [sourceIds] : [])]));
+    const outcome = await approveNativeOnlyClientOnboarding(database, {
+      decisionId, invitationId: review.invitationId, submissionId: review.submissionId,
+      fieldsSha256: review.fieldsSha256, requestSha256, reason, reviewedFieldsJson,
+      enrollmentSourceIds: sourceIds,
+      scopes: review.scopes, verifiedUntil: authenticated.verifiedUntil,
+      relationship: { mode: "change", expectedVersion: 0, mutationId: relationshipMutationId },
+      organizationProfile: kind === "business" ? { operation: "create", mutationId: organizationMutationId!,
+        recordId: organizationRecordId!, expectedLocalVersion: 0, kind: "organization",
+        createAdmissionId: `client-onboarding:${decisionId}:organization`, destinations: [], actor,
+        scopes: review.scopes, profile: { name: review.fields.organizationName,
+          generalEmail: review.fields.organizationEmail, generalPhone: review.fields.organizationPhone,
+          addressLine1: review.fields.addressLine1, addressLine2: review.fields.addressLine2,
+          city: review.fields.city, state: review.fields.state, postalCode: review.fields.postalCode,
+          country: review.fields.country } } : undefined,
+      profile: { operation: "create", mutationId, recordId, expectedLocalVersion: 0, kind: "client",
+        createAdmissionId: `client-onboarding:${decisionId}:client`, profile, scopes: review.scopes,
+        destinations: [], actor, relationship: { organizationRecordId, expectedRelationshipVersion: 0 } },
+    }, selected => currentEnrollmentDestinations(projectAlphaApiV2Connections, selected));
+    if (outcome.status !== "written") return denied();
+    return outcome;
+  } catch { return denied(); }
+}

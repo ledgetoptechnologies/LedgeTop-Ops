@@ -1,0 +1,2 @@
+# Historical fixture bytes are pinned to Git blob IDs; preserve LF on Windows.
+*.sql text eol=lf
