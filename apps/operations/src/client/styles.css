@@ -2810,3 +2810,7 @@ ul { color: var(--muted); }
 @media (min-width: 641px) {
   .job-brief-panel :is(.job-brief-item-editor, .job-brief-section, .job-brief-items, .job-brief-attachment-tools, .job-brief-sop-selector, form) > button { justify-self: start; }
 }
+
+/* Pop-up blocked: one notice that carries its own way forward. */
+.viewer-popup-fallback { align-items: center; justify-content: space-between; flex-wrap: wrap; margin-bottom: 1rem; }
+.viewer-popup-fallback > span { color: inherit; font-size: .9rem; flex: 1 1 18rem; }
