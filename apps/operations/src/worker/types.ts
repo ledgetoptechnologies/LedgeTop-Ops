@@ -174,6 +174,8 @@ export type Env = Omit<
   NATIVE_DIRECTORY_STAGING_EMPTY_ENROLLMENT_FIXTURE_BUSINESS_AREA_ID?: string;
   /** Default-off authenticated native Directory profile create/update routes. */
   NATIVE_DIRECTORY_PROFILE_WRITES_ENABLED?: string;
+  NATIVE_DIRECTORY_EXISTING_IMPORT_ENABLED?: string;
+  NATIVE_DIRECTORY_EXISTING_IMPORT_AREAS?: string;
   /** Default-off staging-only audited Operations service catalog and exact-client enrollment management. */
   OPS_SERVICE_MANAGEMENT_ENABLED?: string;
   /** Default-off bounded scheduled delivery for native Directory outboxes. */

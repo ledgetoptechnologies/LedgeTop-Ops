@@ -5,6 +5,7 @@ import { clientHubActiveDirectoryIdentities, clientHubActiveDirectoryIdentitySql
 import { resolveClientHubWorkspaces } from "./client-hub-workspace";
 import { clientHubReviewedDisplayIdentities, clientHubReviewedDisplayLiveSql } from "./client-hub-reviewed-display";
 import { clientHubClassicReadCtes, clientHubClassicReadIdentities } from "./client-hub-classic-read";
+import { nativeExistingImportClassicIdSql, nativeExistingImportTranslationsAvailable } from "./native-directory-existing-import-identity";
 
 // This is a rebuildable staff search index, never an identity/access authority.
 // A future connector must first isolate the authoritative projection producers.
@@ -179,10 +180,11 @@ async function rootPage(env: IndexEnv, phase: Phase, cursor: string, generation:
     const activeIdentities = await clientHubActiveDirectoryIdentities(env);
     const activeMappings = activeIdentities !== null;
     const classicIdentities = activeMappings ? await clientHubClassicReadIdentities(env) : [];
+    const classicMappingId = nativeExistingImportClassicIdSql("mapping", activeMappings && await nativeExistingImportTranslationsAvailable(env.OPS_DB));
     const currentMapping = clientHubActiveDirectoryIdentitySql("mapping", activeIdentities ?? []);
     const sources = activeMappings ? (await ops.prepare(`WITH ${clientHubClassicReadCtes(classicIdentities)} SELECT mapping.source_id,'business' root_namespace,
       '${organizations ? "organization" : "standalone_client"}' kind,
-      mapping.record_id public_id,mapping.external_id pa_internal_id,
+      mapping.record_id public_id,${classicMappingId} pa_internal_id,
       trim(json_extract(revision.profile_json,'$.name')) display_name,'active' status,
       mapping.source_id||char(31)||mapping.record_id cursor,'{}' payload_json,
       mapping.project_alpha_public_id pa_public_id,
@@ -402,13 +404,14 @@ async function searchPage(env: IndexEnv, phase: Phase, cursor: string, generatio
     const activeMappings = activeIdentities !== null;
     const classicIdentities = activeMappings ? await clientHubClassicReadIdentities(env) : [];
     const currentMapping = clientHubActiveDirectoryIdentitySql("mapping", activeIdentities ?? []);
+    const classicMappingId = nativeExistingImportClassicIdSql("mapping", activeMappings && await nativeExistingImportTranslationsAvailable(env.OPS_DB));
     const rows = (await env.OPS_DB.withSession("first-primary").prepare(`${activeMappings ? `WITH ${clientHubClassicReadCtes(classicIdentities)}` : ""} SELECT project.id,project.name,project.projection_source_id,
       COALESCE(project.organization_id,client.organization_id) organization_id,project.client_id,
       ${activeMappings ? `CASE WHEN COALESCE(project.organization_id,client.organization_id) IS NOT NULL THEN (
         SELECT mapping.record_id FROM project_alpha_active_directory_mappings mapping
-        JOIN pa_organizations org ON org.id=mapping.external_id AND org.projection_source_id=mapping.source_id
+        JOIN pa_organizations org ON org.id=${classicMappingId} AND org.projection_source_id=mapping.source_id
         WHERE mapping.source_id=project.projection_source_id AND mapping.resource_type='organization'
-          AND mapping.external_id=COALESCE(project.organization_id,client.organization_id)
+          AND ${classicMappingId}=COALESCE(project.organization_id,client.organization_id)
           AND mapping.project_alpha_public_id=${sourcePublicIdExpression("org")}
           AND ${currentMapping}
           AND (SELECT count(*) FROM project_alpha_active_directory_mappings candidate
@@ -419,9 +422,9 @@ async function searchPage(env: IndexEnv, phase: Phase, cursor: string, generatio
                 OR candidate.project_alpha_public_id=mapping.project_alpha_public_id))=1
       ) ELSE (
         SELECT mapping.record_id FROM project_alpha_active_directory_mappings mapping
-        JOIN pa_clients source_client ON source_client.id=mapping.external_id AND source_client.projection_source_id=mapping.source_id
+        JOIN pa_clients source_client ON source_client.id=${classicMappingId} AND source_client.projection_source_id=mapping.source_id
         WHERE mapping.source_id=project.projection_source_id AND mapping.resource_type='client'
-          AND mapping.external_id=project.client_id AND mapping.project_alpha_public_id=${sourcePublicIdExpression("source_client")}
+          AND ${classicMappingId}=project.client_id AND mapping.project_alpha_public_id=${sourcePublicIdExpression("source_client")}
           AND ${currentMapping}
           AND (SELECT count(*) FROM project_alpha_active_directory_mappings candidate
             WHERE candidate.source_id=mapping.source_id AND candidate.source_instance_id=mapping.source_instance_id

@@ -3,6 +3,7 @@ import { Card } from "@ltds/ui";
 import { api, ApiError } from "./api";
 import { projectAdoptionReviewFailureMessage } from "./project-adoption-review-message";
 import { DirectoryExistingRecordAdoptionPanel } from "./DirectoryExistingRecordAdoptionPanel";
+import { NativeDirectoryExistingImportPanel } from "./NativeDirectoryExistingImportPanel";
 
 const ENDPOINT = "/api/admin/integrations/project-alpha/connectors";
 const READ_ACCEPTANCE_ENDPOINT = "/api/admin/integrations/project-alpha/api-v2/read-acceptance";
@@ -28,7 +29,7 @@ type PortalStatus = { available: boolean; authorities: PortalAuthority[];
   recovery: { version: number; sourceId: string; action: string; startedAt: string } | null };
 type ProjectManagementRoute = { sourceId: string; version: number; revision: number; enabled: boolean; reviewedUrlTemplate: string | null };
 type Directory = { connectors: Connector[]; health: Health[]; legacyPrimary: boolean; recovery?: Recovery[] | null;
-  portal?: PortalStatus; projectManagement?: ProjectManagementRoute[] };
+  portal?: PortalStatus; projectManagement?: ProjectManagementRoute[]; existingImport?: { enabled: boolean } };
 type ReadAcceptancePart = { status: string; reason?: string; count?: number; exactIdentityMatch?: boolean; exactContractMatch?: boolean };
 type ReadAcceptance = { sourceId: string; readOnly: boolean; capabilities: ReadAcceptancePart;
   directory: ReadAcceptancePart; projects: ReadAcceptancePart; clientWrites?: {
@@ -928,6 +929,7 @@ export function ProjectAlphaConnections() {
     <ApiV2InventoryPanel disabled={loading || Boolean(syncing)} />
     <ApiV2OperatorPanel disabled={loading || Boolean(syncing)} />
     <DirectoryExistingRecordAdoptionPanel disabled={loading || Boolean(syncing)} />
+    {data?.existingImport?.enabled === true && <NativeDirectoryExistingImportPanel disabled={loading || Boolean(syncing)} sources={data.connectors} />}
     {data && <ProjectAdoptionPanel disabled={loading || Boolean(syncing)} />}
     {data?.portal?.recovery && <div className="notice" role="status"><p>A prior portal coordination operation is unfinished. Recovery cancels that uncertain update and pauses affected client portals; it never registers a source or retries activation.</p><button type="button" disabled={loading || Boolean(syncing)} onClick={() => void recoverPortalUpdate()}>Recover unfinished portal update</button></div>}
   </div></Card>;

@@ -179,6 +179,7 @@ import { registerTeamAssignedWorkRoutes } from "./team-assigned-work";
 import { registerClientHubRoutes } from "./client-hub";
 import { registerOpsServiceManagementRoutes } from "./ops-service-management-routes";
 import { NATIVE_DIRECTORY_PROFILE_ROUTE, nativeDirectoryProfileWritesEnabled, registerNativeDirectoryProfileRoutes } from "./native-directory-profile-routes";
+import { registerNativeDirectoryExistingImportRoutes } from "./native-directory-existing-import-routes";
 import { DIRECTORY_BINDING_REFRESH_ROUTE, DIRECTORY_BINDING_REFRESH_PROTECTED_OWNER, directoryBindingRefreshEnabled,
   directoryBindingRefreshRecoveryEnabled } from './native-directory-binding-refresh';
 import { registerNativeDirectoryBindingRefreshRoutes } from './native-directory-binding-refresh-routes';
@@ -1722,6 +1723,7 @@ registerWorkContextSopRoutes(app);
 registerClientRequestAttachmentRoutes(app);
 registerProjectAlphaDraftQuoteRoutes(app);
 registerTeamAssignedWorkRoutes(app);
+registerNativeDirectoryExistingImportRoutes(app);
 registerNativeDirectoryProfileRoutes(app);
 registerNativeDirectoryBindingRefreshRoutes(app);
 registerDirectoryRelationshipGenerationRecoveryRoutes(app);

@@ -2,6 +2,7 @@ import {
   resolveProjectAlphaApiV2Connection,
   type ProjectAlphaApiV2ConnectionEnvironment,
 } from "./project-alpha-api-v2-connections";
+import { nativeImportRenewalSql } from "./native-directory-existing-import-renewal";
 import {
   readConfiguredProjectAlphaDirectoryBindingStatus,
   readConfiguredProjectAlphaDirectoryProfile,
@@ -257,9 +258,10 @@ const APPLICABLE = `(grant_row.scope_kind='global'
     WHERE scope.record_id=review.record_id AND scope.active=1 AND scope.division_id=grant_row.division_id)))`;
 
 async function current(db: D1Database, value: Review): Promise<Current | null> {
+  const renewal = await nativeImportRenewalSql(db,"review");
   return db.prepare(`SELECT
       (review.reviewed_at<=strftime('%Y-%m-%dT%H:%M:%fZ','now')
-        AND review.reviewed_at>strftime('%Y-%m-%dT%H:%M:%fZ','now','-4 hours')) unexpired,
+        AND (review.reviewed_at>strftime('%Y-%m-%dT%H:%M:%fZ','now','-4 hours') OR ${renewal})) unexpired,
       EXISTS (SELECT 1 FROM operations_directory_records record WHERE record.record_id=review.record_id
         AND record.record_kind=review.resource_type AND record.current_version=review.reviewed_local_record_version) record_current,
       (EXISTS (SELECT 1 FROM native_staff_admissions admission
