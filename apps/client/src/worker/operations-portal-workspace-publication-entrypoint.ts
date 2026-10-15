@@ -1,3 +1,4 @@
+import { nativeDeliveryDeploymentEnabled, type NativeDeliveryDeploymentEnv } from './operations-native-delivery-deployment';
 import { WorkerEntrypoint } from "cloudflare:workers";
 import {
   OPERATIONS_PORTAL_WORKSPACE_PUBLICATION_RPC_RESPONSE_MAX_BYTES,
@@ -13,7 +14,7 @@ import { cancelOperationsPortalWorkspacePublication, getOperationsPortalWorkspac
   type OperationsPortalWorkspacePublicationDisposition } from "./operations-portal-workspace-publication-cancellations";
 import type { Env } from "./types";
 
-type Config = Pick<Env, "DELIVERY_DB" | "CLIENT_PORTAL_OPERATIONS_PUBLICATION_WRITER_ENABLED"> & {
+type Config = NativeDeliveryDeploymentEnv & Pick<Env, "DELIVERY_DB" | "CLIENT_PORTAL_OPERATIONS_PUBLICATION_WRITER_ENABLED"> & {
   ENVIRONMENT?: string;
   EXPECTED_HOST?: string;
 };
@@ -134,7 +135,7 @@ export async function publishOperationsPortalWorkspaceRpc(
 ): Promise<OperationsPortalWorkspacePublicationResult> {
   // Runtime fencing remains mandatory even if an account administrator creates
   // an unintended service binding. This method is not a public HTTP endpoint.
-  if (env.ENVIRONMENT !== "staging" || env.EXPECTED_HOST !== "delivery-staging.ledgetopdroneservices.com"
+  if (!nativeDeliveryDeploymentEnabled(env, "publication")
     || env.CLIENT_PORTAL_OPERATIONS_PUBLICATION_WRITER_ENABLED !== "true") return failure("disabled");
   try {
     const publication = await verifyOperationsPortalWorkspacePublication(input);
@@ -170,7 +171,7 @@ export async function publishOperationsPortalWorkspaceRpc(
 export async function getOperationsPortalWorkspacePublicationStatusRpc(
   env: Config, input: unknown,
 ): Promise<OperationsPortalWorkspacePublicationStatusResult> {
-  if (env.ENVIRONMENT !== "staging" || env.EXPECTED_HOST !== "delivery-staging.ledgetopdroneservices.com"
+  if (!nativeDeliveryDeploymentEnabled(env, "publication")
     || env.CLIENT_PORTAL_OPERATIONS_PUBLICATION_WRITER_ENABLED !== "true") return failure("disabled");
   try {
     const publication = await verifyOperationsPortalWorkspacePublication(input);
@@ -199,7 +200,7 @@ export async function getOperationsPortalWorkspacePublicationStatusRpc(
 export async function cancelOperationsPortalWorkspacePublicationRpc(
   env: Config, input: unknown,
 ): Promise<OperationsPortalWorkspacePublicationDispositionResult> {
-  if (env.ENVIRONMENT !== "staging" || env.EXPECTED_HOST !== "delivery-staging.ledgetopdroneservices.com"
+  if (!nativeDeliveryDeploymentEnabled(env, "publication")
     || env.CLIENT_PORTAL_OPERATIONS_PUBLICATION_WRITER_ENABLED !== "true") return failure("disabled");
   try {
     const publication = await verifyOperationsPortalWorkspacePublication(input);
@@ -220,7 +221,7 @@ export async function cancelOperationsPortalWorkspacePublicationRpc(
 export async function getOperationsPortalWorkspacePublicationDispositionRpc(
   env: Config, input: unknown,
 ): Promise<OperationsPortalWorkspacePublicationDispositionResult> {
-  if (env.ENVIRONMENT !== "staging" || env.EXPECTED_HOST !== "delivery-staging.ledgetopdroneservices.com"
+  if (!nativeDeliveryDeploymentEnabled(env, "publication")
     || env.CLIENT_PORTAL_OPERATIONS_PUBLICATION_WRITER_ENABLED !== "true") return failure("disabled");
   try {
     const publication = await verifyOperationsPortalWorkspacePublication(input);
