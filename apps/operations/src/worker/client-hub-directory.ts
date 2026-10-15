@@ -4,6 +4,7 @@ import { paProjectFilter } from "./visibility";
 import { sha256 } from "./crypto";
 import { clientHubActiveDirectoryIdentities, clientHubActiveDirectoryIdentitySql, isBusinessProjectionSource,
   sourcePublicIdExpression, validatedUniquePublicIdExpression, type ClientHubMappingStatus } from "./client-hub-source";
+import { clientHubClassicReadCtes, clientHubClassicReadIdentities } from "./client-hub-classic-read";
 import type { Env, StaffPrincipal } from "./types";
 import { projectAlphaNativeMappingReadVisibleSql, projectAlphaReadVisibleSql,
   requireProjectAlphaReadOrNativeMappingVisibility } from "./project-alpha-read-visibility";
@@ -231,6 +232,15 @@ const legacyCurrentMapping = `CASE WHEN root.root_namespace='business'
     FROM pa_organizations source WHERE source.id=root.public_id AND source.projection_source_id=root.source_id)
   ELSE (SELECT ${validatedUniquePublicIdExpression("pa_clients", "source")} FROM pa_clients source WHERE source.id=root.public_id AND source.projection_source_id=root.source_id) END
   ELSE root.pa_public_id END`;
+function classicBusinessPublicId(): string {
+  return `(CASE WHEN root.root_namespace='business' THEN CASE root.kind WHEN 'organization' THEN (
+    SELECT ${sourcePublicIdExpression("classic_source")} FROM classic_read_organizations classic_source
+    WHERE classic_source.id=root.public_id AND classic_source.projection_source_id=root.source_id
+      ) ELSE (
+    SELECT ${sourcePublicIdExpression("classic_source")} FROM classic_read_clients classic_source
+    WHERE classic_source.id=root.public_id AND classic_source.projection_source_id=root.source_id
+      AND classic_source.organization_id IS NULL) END END)`;
+}
 const activeTupleUnique = (alias: string) => `(SELECT count(*) FROM project_alpha_active_directory_mappings candidate
   WHERE candidate.source_id=${alias}.source_id AND candidate.source_instance_id=${alias}.source_instance_id
     AND candidate.application_id=${alias}.application_id AND candidate.history_epoch_id=${alias}.history_epoch_id
@@ -466,9 +476,10 @@ export async function listClientHubRoots(env: Env, principal: StaffPrincipal, op
   const asOf = cursor?.asOf ?? new Date().toISOString();
   const { filter, policy: projectPolicy } = await projectSearchAccess(env, principal);
   const activeIdentities = await clientHubActiveDirectoryIdentities(env);
+  const classicIdentities = activeIdentities === null ? [] : await clientHubClassicReadIdentities(env);
   const nativePolicyProof = (activeIdentities ?? []).map(identity => ({ ...identity,
     origin: resolveProjectAlphaApiV2Connection(env, identity.sourceId).connection.baseUrl }));
-  const policy = await sha256(JSON.stringify([projectPolicy, reviewPolicy, nativePolicyProof]));
+  const policy = await sha256(JSON.stringify([projectPolicy, reviewPolicy, nativePolicyProof, classicIdentities]));
   if (cursor && (cursor.q !== q || cursor.kind !== (kind ?? null) || cursor.source !== (source ?? null) || cursor.grouping !== grouping
     || cursor.sort !== sort || cursor.policy !== policy || cursor.portalProof !== portal.fingerprint))
     throw new HTTPException(400, { message: "Client directory cursor does not match this search" });
@@ -484,12 +495,21 @@ export async function listClientHubRoots(env: Env, principal: StaffPrincipal, op
   const activeMappings = activeIdentities !== null;
   const currentIdentity = clientHubActiveDirectoryIdentitySql("mapping", activeIdentities ?? []);
   const visibleSource = visibleSourceSql(activeMappings, currentIdentity);
-  const liveBusinessRoot = activeMappings ? activeLiveBusinessRoot(currentIdentity) : legacyLiveBusinessRoot;
-  const currentMapping = activeMappings
-    ? `CASE WHEN root.root_namespace='business' THEN ${activeBusinessMapping(currentIdentity)} ELSE root.pa_public_id END`
+  const classicPublicId = classicBusinessPublicId();
+  const liveBusinessRoot = activeMappings ? `(${activeLiveBusinessRoot(currentIdentity)} OR ${classicPublicId} IS NOT NULL)` : legacyLiveBusinessRoot;
+  const mappedPublicId = activeMappings
+    ? `CASE WHEN root.root_namespace='business' THEN COALESCE(${activeBusinessMapping(currentIdentity)},${classicPublicId}) ELSE root.pa_public_id END`
     : legacyCurrentMapping;
-  const currentExternalId = activeMappings ? activeBusinessExternalId(currentIdentity) : "root.public_id";
-  const clauses = [visibleRoot, visibleSource, liveBusinessRoot], values: unknown[] = [];
+  const mappedExternalId = activeMappings ? `COALESCE(${activeBusinessExternalId(currentIdentity)},CASE WHEN ${classicPublicId} IS NOT NULL THEN root.public_id END)` : "root.public_id";
+  // Resolve identity before deeply nested search/ACL predicates. Expanding
+  // native proofs inside each search branch exceeds D1's depth-100 limit.
+  const liveIdentities = `live_client_hub_identities AS MATERIALIZED (
+    SELECT root.source_id,root.root_namespace,root.kind,root.public_id,
+      ${mappedPublicId} current_public_id,${mappedExternalId} current_external_id
+    FROM client_hub_roots root WHERE ${visibleRoot} AND ${visibleSource} AND ${liveBusinessRoot})`;
+  const currentMapping = "resolved.current_public_id";
+  const currentExternalId = "resolved.current_external_id";
+  const clauses = ["1=1"], values: unknown[] = [];
   if (reviewEnabled) {
     clauses.push(`(root.root_namespace<>'review' OR (root.public_id IN (SELECT value FROM json_each(?))
       AND EXISTS(SELECT 1 FROM live_reviewed_displays display
@@ -510,7 +530,8 @@ export async function listClientHubRoots(env: Env, principal: StaffPrincipal, op
         AND ((search.root_namespace='business'
           AND (instr(search.normalized_value,?)>0${phone.length >= 3 ? " OR (search.field='phone' AND instr(search.normalized_value,?)>0)" : ""})
           AND ((search.record_type='pa_client' AND search.project_id IS NULL AND EXISTS (
-            SELECT 1 FROM pa_clients contact WHERE contact.id=search.record_id AND contact.projection_source_id=root.source_id AND contact.active=1 AND
+            SELECT 1 FROM pa_clients contact WHERE contact.id=search.record_id AND contact.projection_source_id=root.source_id AND contact.active=1
+              ${activeMappings ? "AND EXISTS(SELECT 1 FROM classic_read_clients classic_contact WHERE classic_contact.id=contact.id AND classic_contact.projection_source_id=contact.projection_source_id)" : ""} AND
               ((root.kind='organization' AND contact.organization_id=${currentExternalId}) OR
                (root.kind='standalone_client' AND contact.id=${currentExternalId} AND contact.organization_id IS NULL))))
           ${activeMappings ? `OR (search.record_type='operations_directory_client' AND search.project_id IS NULL AND EXISTS (
@@ -580,7 +601,7 @@ export async function listClientHubRoots(env: Env, principal: StaffPrincipal, op
       (SELECT revision FROM client_business_activity_state WHERE singleton=1) activity_revision,
       (SELECT read_revision FROM pa_connector_directory_state WHERE id='directory') source_read_revision
       FROM client_hub_directory_state WHERE id='directory'`),
-    db.prepare(`WITH ${activity.sql}, ${liveReviewedDisplays}, matching AS (
+    db.prepare(`WITH ${clientHubClassicReadCtes(classicIdentities)}, ${liveIdentities}, ${activity.sql}, ${liveReviewedDisplays}, matching AS (
       SELECT root.*,${currentMapping} live_pa_public_id,
         ${activeMappings ? activeBusinessProof(currentIdentity, "mapping_kind") : "NULL"} native_mapping_kind,
         ${activeMappings ? activeBusinessProof(currentIdentity, "provenance_id") : "NULL"} native_provenance_id,
@@ -597,6 +618,8 @@ export async function listClientHubRoots(env: Env, principal: StaffPrincipal, op
         CASE WHEN party.id IS NOT NULL THEN (SELECT count(*) FROM business_party_links members
           WHERE members.party_id=party.id AND members.unlinked_at IS NULL) END business_party_member_count
       FROM client_hub_roots root
+      JOIN live_client_hub_identities resolved ON resolved.source_id=root.source_id
+        AND resolved.root_namespace=root.root_namespace AND resolved.kind=root.kind AND resolved.public_id=root.public_id
       LEFT JOIN business_activity_roots activity ON root.root_namespace='business'
         AND activity.source_id=root.source_id AND activity.root_kind=root.kind AND activity.root_id=root.public_id
       LEFT JOIN business_party_links membership ON root.root_namespace='business'
@@ -652,12 +675,16 @@ export async function listClientHubRoots(env: Env, principal: StaffPrincipal, op
   if (currentPortal.fingerprint !== portal.fingerprint) changed();
   const currentNativePolicyProof = (currentNativeIdentities ?? []).map(identity => ({ ...identity,
     origin: resolveProjectAlphaApiV2Connection(env, identity.sourceId).connection.baseUrl }));
-  const currentPolicy = await sha256(JSON.stringify([currentProjectAccess.policy, currentReviewPolicy.policy, currentNativePolicyProof]));
+  const currentClassicIdentities = activeMappings ? await clientHubClassicReadIdentities(env) : [];
+  const currentPolicy = await sha256(JSON.stringify([currentProjectAccess.policy, currentReviewPolicy.policy, currentNativePolicyProof, currentClassicIdentities]));
   if (currentPolicy !== policy || currentState?.revision !== state.revision || currentState?.activity_revision !== state.activity_revision) changed();
   const roots = results[1]!.results.filter((row): row is LiveRoot => "root_namespace" in row);
   const page = roots.slice(0, limit);
   if (activeMappings) await Promise.all(page.map(async row => {
     if (row.root_namespace !== "business" || !row.source_id.startsWith("project-alpha:")) return [];
+    // Classic rows have no native proof. Recheck their explicit source and
+    // inventory eligibility together below, rather than one query per row.
+    if (row.native_external_id === null) return [];
     const visibility = await requireProjectAlphaReadOrNativeMappingVisibility(env, row.source_id, row.public_id, row.kind);
     if (!("nativeProof" in visibility)) return [];
     const proof = visibility.nativeProof;
@@ -666,6 +693,17 @@ export async function listClientHubRoots(env: Env, principal: StaffPrincipal, op
       || proof.recordVersion !== row.native_record_version) changed();
     return [];
   }));
+  const classicPage = activeMappings ? page.filter(row => row.root_namespace === "business" && row.native_external_id === null) : [];
+  if (classicPage.length) {
+    const count = await db.prepare(`WITH ${clientHubClassicReadCtes(currentClassicIdentities)}
+      SELECT count(*) count FROM client_hub_roots root JOIN json_each(?) requested
+        ON root.source_id=json_extract(requested.value,'$.source') AND root.kind=json_extract(requested.value,'$.kind')
+        AND root.public_id=json_extract(requested.value,'$.id') AND root.root_namespace='business'
+      WHERE ${classicBusinessPublicId()}=json_extract(requested.value,'$.publicId')`)
+      .bind(JSON.stringify(classicPage.map(row => ({ source: row.source_id, kind: row.kind, id: row.public_id, publicId: row.live_pa_public_id }))))
+      .first<number>("count");
+    if (count !== classicPage.length) changed();
+  }
   const last = page.at(-1);
   const clients = page.map(({ live_pa_public_id, native_mapping_kind: _mappingKind, native_provenance_id: _provenanceId,
     native_external_id: _externalId, native_record_version: _recordVersion,
@@ -702,11 +740,12 @@ export async function findClientHubRoot(env: Env, kind: ClientHubKind, publicId:
     throw new HTTPException(404, { message: "Client not found" });
   const db = env.OPS_DB.withSession("first-primary");
   const activeIdentities = await clientHubActiveDirectoryIdentities(env);
+  const classicIdentities = activeIdentities === null ? [] : await clientHubClassicReadIdentities(env);
   const activeMappings = activeIdentities !== null;
   const currentIdentity = clientHubActiveDirectoryIdentitySql("mapping", activeIdentities ?? []);
   const visibleSource = visibleSourceSql(activeMappings, currentIdentity);
-  const liveBusinessRoot = activeMappings ? activeLiveBusinessRoot(currentIdentity) : legacyLiveBusinessRoot;
-  const rootLookupSql = `SELECT root.* FROM client_hub_roots root
+  const liveBusinessRoot = activeMappings ? `(${activeLiveBusinessRoot(currentIdentity)} OR ${classicBusinessPublicId()} IS NOT NULL)` : legacyLiveBusinessRoot;
+  const rootLookupSql = `WITH ${clientHubClassicReadCtes(classicIdentities)} SELECT root.* FROM client_hub_roots root
     WHERE root.kind=? AND root.public_id=? AND root.root_namespace<>'review' AND ${visibleRoot} AND ${visibleSource} AND ${liveBusinessRoot}${sourceId === undefined ? "" : " AND root.source_id=?"}
       ${rootNamespace === undefined ? "" : " AND root.root_namespace=?"} LIMIT 2`;
   const rows = await db.prepare(rootLookupSql)

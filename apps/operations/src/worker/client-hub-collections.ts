@@ -10,6 +10,7 @@ import { clientHubActiveDirectoryIdentities, clientHubActiveDirectoryIdentitySql
 import type { ClientHubRoot } from "./client-hub-directory";
 import type { Env, StaffPrincipal } from "./types";
 import { projectAlphaReadVisibleSql, requireProjectAlphaReadOrNativeMappingVisibility, requireProjectAlphaReadVisibility } from "./project-alpha-read-visibility";
+import { clientHubClassicReadEligibleSql, clientHubClassicReadIdentities } from "./client-hub-classic-read";
 
 export const CLIENT_HUB_COLLECTIONS = ["businessContacts", "accounts", "projects", "requests", "deliveryGrants",
   "authenticatedDeliveryGrants", "viewerGrants"] as const;
@@ -174,6 +175,7 @@ function uniqueActiveDirectoryTuple(alias: string): string {
 async function canonicalBusinessContactsQuery(env: Env, context: ClientHubCollectionContext): Promise<Query> {
   const root = context.root;
   const identities = await clientHubActiveDirectoryIdentities(env);
+  const classicIdentities = await clientHubClassicReadIdentities(env);
   const currentContact = clientHubActiveDirectoryIdentitySql("contact_mapping", identities ?? []);
   const currentRoot = clientHubActiveDirectoryIdentitySql("root_mapping", identities ?? []);
   const rootEvidence = root.kind === "organization" ? `relationship.organization_record_id=? AND EXISTS (
@@ -211,9 +213,18 @@ async function canonicalBusinessContactsQuery(env: Env, context: ClientHubCollec
         AND length(trim(json_extract(revision.profile_json,'$.name'))) BETWEEN 1 AND 150
         AND length(contact_mapping.project_alpha_public_id)=32
         AND contact_mapping.project_alpha_public_id NOT GLOB '*[^0-9a-f]*'
-        AND ${rootEvidence}) canonical_contact`,
+        AND ${rootEvidence}
+      UNION ALL SELECT classic_contact.id,classic_contact.organization_id,classic_contact.name,classic_contact.payload_json
+      FROM pa_clients classic_contact
+      WHERE classic_contact.projection_source_id=? AND ${clientHubClassicReadEligibleSql("pa_clients", "classic_contact", classicIdentities)}
+        AND ${root.kind === "organization" ? `classic_contact.organization_id=? AND EXISTS (
+          SELECT 1 FROM pa_organizations classic_parent WHERE classic_parent.id=classic_contact.organization_id
+            AND classic_parent.projection_source_id=classic_contact.projection_source_id
+            AND ${clientHubClassicReadEligibleSql("pa_organizations", "classic_parent", classicIdentities)})`
+          : "classic_contact.id=? AND classic_contact.organization_id IS NULL"}) canonical_contact`,
     where: "1=1", values: root.kind === "organization"
-      ? [root.source_id, root.public_id, root.public_id] : [root.source_id, root.public_id],
+      ? [root.source_id, root.public_id, root.public_id, root.source_id, root.public_id]
+      : [root.source_id, root.public_id, root.source_id, root.public_id],
     order: ["id"], descending: false, keys: ["public_id"], business: true,
   };
 }

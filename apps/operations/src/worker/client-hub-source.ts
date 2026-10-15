@@ -3,6 +3,7 @@ import { PRIMARY_ALPHA_SOURCE_ID } from "@ltds/shared";
 import { projectAlphaNativeMappingReadVisibleSql, projectAlphaReadVisibleSql } from "./project-alpha-read-visibility";
 import { HTTPException } from "hono/http-exception";
 import { resolveProjectAlphaApiV2Connection } from "./project-alpha-api-v2-connections";
+import { clientHubClassicReadEligibleSql, clientHubClassicReadIdentities } from "./client-hub-classic-read";
 
 export function isBusinessProjectionSource(value: string): value is `project-alpha:${string}` {
   return /^project-alpha:[a-z0-9][a-z0-9_-]{0,63}$/.test(value);
@@ -137,6 +138,24 @@ export interface ClientHubSourceRoot {
   pa_public_id: string | null; mapping_status: ClientHubMappingStatus;
 }
 
+async function resolveClassicReadRoot(env: Pick<Env, "OPS_DB" | "PROJECT_ALPHA_API_V2_CONNECTIONS">,
+  kind: ClientHubSourceKind, sourceId: string, localId?: string, publicId?: string): Promise<ClientHubSourceRoot | null> {
+  const table = kind === "organization" ? "pa_organizations" : "pa_clients";
+  const identities = await clientHubClassicReadIdentities(env);
+  if (!identities.some(identity => identity.sourceId === sourceId)) return null;
+  const rows = await env.OPS_DB.withSession("first-primary").prepare(`SELECT source.id,source.id pa_internal_id,
+    source.name display_name,${kind === "organization" ? "NULL" : "source.organization_id"} organization_id,
+    source.active,${sourcePublicIdExpression("source")} pa_public_id,'mapped' mapping_status
+    FROM ${table} source WHERE source.projection_source_id=?
+      ${localId === undefined ? "" : "AND source.id=?"}
+      ${publicId === undefined ? "" : `AND ${sourcePublicIdExpression("source")}=?`}
+      ${kind === "standalone_client" ? "AND source.organization_id IS NULL" : ""}
+      AND ${clientHubClassicReadEligibleSql(table, "source", identities)} LIMIT 2`)
+    .bind(sourceId, ...(localId === undefined ? [] : [localId]), ...(publicId === undefined ? [] : [publicId]))
+    .all<ClientHubSourceRoot>();
+  return rows.results.length === 1 ? rows.results[0]! : null;
+}
+
 export async function resolveClientHubSourceRoot(
   env: Pick<Env, "OPS_DB" | "PROJECT_ALPHA_API_V2_CONNECTIONS">, kind: ClientHubSourceKind, internalId: string, sourceId: string = PRIMARY_ALPHA_SOURCE_ID,
 ): Promise<ClientHubSourceRoot | null> {
@@ -146,7 +165,7 @@ export async function resolveClientHubSourceRoot(
     const identities = await clientHubActiveDirectoryIdentities(env);
     const currentMapping = clientHubActiveDirectoryIdentitySql("mapping", identities ?? []);
     const resourceType = kind === "organization" ? "organization" : "client";
-    return env.OPS_DB.withSession("first-primary").prepare(`SELECT mapping.record_id id,mapping.external_id pa_internal_id,
+    const native = await env.OPS_DB.withSession("first-primary").prepare(`SELECT mapping.record_id id,mapping.external_id pa_internal_id,
       json_extract(revision.profile_json,'$.name') display_name,NULL organization_id,1 active,
       mapping.project_alpha_public_id pa_public_id,'mapped' mapping_status
       FROM project_alpha_active_directory_mappings mapping
@@ -166,6 +185,7 @@ export async function resolveClientHubSourceRoot(
             AND (candidate.record_id=mapping.record_id OR candidate.external_id=mapping.external_id
               OR candidate.project_alpha_public_id=mapping.project_alpha_public_id))=1
       LIMIT 1`).bind(internalId, sourceId).first<ClientHubSourceRoot>();
+    return native ?? resolveClassicReadRoot(env, kind, sourceId, internalId);
   }
   const row = await env.OPS_DB.withSession("first-primary").prepare(`SELECT source.id,source.id pa_internal_id,source.name display_name,
     ${kind === "organization" ? "NULL" : "source.organization_id"} organization_id,source.active,source.payload_json,
@@ -181,9 +201,9 @@ export async function resolveClientHubSourceRoot(
 }
 
 /** Resolve a Project Alpha-local identity without confusing it with the
- * Operations record ID used by Client Hub routes. Active mappings are the only
- * accepted bridge; when the mapping view is not installed, preserve the
- * existing legacy source-ID behavior. */
+ * Operations record ID used by Client Hub routes. Native mappings win; an
+ * unclaimed classic record can supply a read-only bridge only with exact
+ * current inventory/source proof. Older databases retain their legacy path. */
 export async function resolveClientHubSourceRootByAlphaIdentity(
   env: Pick<Env, "OPS_DB" | "PROJECT_ALPHA_API_V2_CONNECTIONS">, kind: ClientHubSourceKind, paInternalId: string,
   sourceId: string = PRIMARY_ALPHA_SOURCE_ID, paPublicId?: string | null,
@@ -207,15 +227,16 @@ export async function resolveClientHubSourceRootByAlphaIdentity(
           AND (candidate.record_id=mapping.record_id OR candidate.external_id=mapping.external_id
             OR candidate.project_alpha_public_id=mapping.project_alpha_public_id))=1
     ORDER BY mapping.record_id LIMIT 2`).bind(...values).all<{ record_id: string }>();
-  if (mappings.results.length !== 1) return null;
+  if (mappings.results.length !== 1) return resolveClassicReadRoot(env, kind, sourceId, paInternalId, paPublicId ?? undefined);
   const root = await resolveClientHubSourceRoot(env, kind, mappings.results[0]!.record_id, sourceId);
   return root?.pa_internal_id === paInternalId && (!paPublicId || root.pa_public_id === paPublicId) ? root : null;
 }
 
 /** Resolve a current Project Alpha public identity to its Operations root.
  * Native API-v2 enrollments may have no legacy `pa_organizations`/`pa_clients`
- * mirror, so the active mapping relation is authoritative whenever installed.
- * Ambiguous, stale, disabled, malformed, or wrong-type mappings fail closed. */
+ * mirror. Native claims remain authoritative, including historical claims
+ * that shadow classic display rows. Unclaimed classic rows require the shared
+ * current inventory/source proof; ambiguity or wrong identities fail closed. */
 export async function resolveClientHubSourceRootByAlphaPublicId(
   env: Pick<Env, "OPS_DB" | "PROJECT_ALPHA_API_V2_CONNECTIONS">, kind: ClientHubSourceKind,
   sourceId: string, paPublicId: string,
@@ -253,6 +274,6 @@ export async function resolveClientHubSourceRootByAlphaPublicId(
           AND (candidate.record_id=mapping.record_id OR candidate.external_id=mapping.external_id
             OR candidate.project_alpha_public_id=mapping.project_alpha_public_id))=1
     LIMIT 2`).bind(sourceId, resourceType, paPublicId).all<{ external_id: string }>();
-  if (rows.results.length !== 1) return null;
+  if (rows.results.length !== 1) return resolveClassicReadRoot(env, kind, sourceId, undefined, paPublicId);
   return resolveClientHubSourceRootByAlphaIdentity(env, kind, rows.results[0]!.external_id, sourceId, paPublicId);
 }
