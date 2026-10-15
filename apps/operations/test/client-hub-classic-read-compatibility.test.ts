@@ -238,6 +238,23 @@ describe("migrated Client Hub classic business read compatibility", { timeout: 6
     expect(await ops.prepare("SELECT count(*) n FROM project_alpha_active_directory_mappings").first("n")).toBe(0);
   });
 
+  it.each(["pa_clients", "pa_organizations"])("fails closed without %s storage while preserving valid native mappings", async table => {
+    const { ops, env } = await compatibilityFixture();
+    const id = await classic(ops, primary, 99);
+    await ops.prepare("INSERT INTO operations_directory_records VALUES('native-only','organization',1)").run();
+    await ops.prepare("INSERT INTO operations_directory_revisions VALUES('native-only',1,?)")
+      .bind(JSON.stringify({ name: "Native remains available" })).run();
+    await ops.prepare("INSERT INTO active_mapping_rows VALUES(?,?,?,?,?,?,?,?,1,'acquired','native-only-proof')")
+      .bind(primary, "organization", "native-only", "remote-org", publicId(100), identity.sourceInstanceId,
+        identity.applicationId, identity.historyEpoch).run();
+    await ops.prepare(`DROP TABLE ${table}`).run();
+    expect(await clientHubClassicReadIdentities(env)).toEqual([]);
+    expect(await resolveClientHubSourceRoot(env, "standalone_client", id, primary)).toBeNull();
+    expect(await resolveClientHubSourceRootByAlphaPublicId(env, "standalone_client", primary, publicId(99))).toBeNull();
+    expect(await resolveClientHubSourceRoot(env, "organization", "native-only", primary))
+      .toMatchObject({ id: "native-only", display_name: "Native remains available" });
+  });
+
   it("blocks malformed and inactive duplicate public IDs rather than guessing a classic identity", async () => {
     const { ops, env } = await compatibilityFixture();
     const id = await classic(ops, primary, 91);

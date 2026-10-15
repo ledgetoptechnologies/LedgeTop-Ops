@@ -142,6 +142,7 @@ async function resolveClassicReadRoot(env: Pick<Env, "OPS_DB" | "PROJECT_ALPHA_A
   kind: ClientHubSourceKind, sourceId: string, localId?: string, publicId?: string): Promise<ClientHubSourceRoot | null> {
   const table = kind === "organization" ? "pa_organizations" : "pa_clients";
   const identities = await clientHubClassicReadIdentities(env);
+  if (!identities.some(identity => identity.sourceId === sourceId)) return null;
   const rows = await env.OPS_DB.withSession("first-primary").prepare(`SELECT source.id,source.id pa_internal_id,
     source.name display_name,${kind === "organization" ? "NULL" : "source.organization_id"} organization_id,
     source.active,${sourcePublicIdExpression("source")} pa_public_id,'mapped' mapping_status

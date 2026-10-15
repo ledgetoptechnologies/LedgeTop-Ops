@@ -12,8 +12,9 @@ export async function clientHubClassicReadIdentities(env: Pick<Env, "OPS_DB" | "
   const relations = await env.OPS_DB.prepare(`SELECT name FROM sqlite_master WHERE name IN (
     'project_alpha_api_v2_directory_observations_current','project_alpha_acquired_canonical_mappings',
     'project_alpha_existing_directory_binding_acquired_mapping_receipts','operations_directory_records',
-    'project_alpha_directory_mappings','project_alpha_api_v2_inventory_conflicts')`).all<{ name: string }>();
-  if (relations.results.length !== 6) return [];
+    'project_alpha_directory_mappings','project_alpha_api_v2_inventory_conflicts',
+    'pa_clients','pa_organizations')`).all<{ name: string }>();
+  if (relations.results.length !== 8) return [];
   const sources = await env.OPS_DB.prepare(`SELECT DISTINCT source_id FROM project_alpha_api_v2_directory_observations_current ORDER BY source_id`).all<{ source_id: string }>();
   return sources.results.flatMap(({ source_id }) => {
     try {
