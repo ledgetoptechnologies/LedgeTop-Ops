@@ -453,19 +453,27 @@ app.use("/api/public/shares/:publicId/*", async (c, next) => {
   };
   let usedBulkResume = false;
   let session: { shareId: string; shareVersion: number; expiresAt: number };
-  try {
+  const resumePath = (c.req.method === "GET" || c.req.method === "HEAD")
+    ? /^\/api\/public\/shares\/[^/]+\/bulk-download\/([^/]+)\/file$/.exec(c.req.path)
+    : null;
+  const resumeCookie = resumePath ? parseCookie(c.req.header("Cookie"), BULK_DOWNLOAD_RESUME_COOKIE) : null;
+  // Another open delivery can replace the host-wide session cookie. Prefer
+  // the archive's independently signed, path-scoped credential when present;
+  // the primary D1 share/version checks below still authorize every request.
+  if (resumePath && resumeCookie) {
+    try {
+      const resumed = await verifyRotatingBulkDownloadResumeCookie(resumeCookie, signingKeys.current, signingKeys.previous);
+      if (resumed.jobId !== resumePath[1]) throw new HTTPException(401, { message: "Invalid download resume authorization", cause: { code: "BULK_DOWNLOAD_RESUME_INVALID" } });
+      session = resumed;
+      usedBulkResume = true;
+    } catch (resumeError) {
+      // A stale resume cookie must not prevent a currently authorized session
+      // from downloading. With no session, preserve the resume denial.
+      if (!sessionCookie) throw resumeError;
+      session = await verifyRotatingSessionCookie(sessionCookie, signingKeys.current, signingKeys.previous);
+    }
+  } else {
     session = await verifyRotatingSessionCookie(sessionCookie, signingKeys.current, signingKeys.previous);
-  } catch (sessionError) {
-    const resumePath = /^\/api\/public\/shares\/[^/]+\/bulk-download\/([^/]+)\/file$/.exec(c.req.path);
-    if ((c.req.method !== "GET" && c.req.method !== "HEAD") || !resumePath) throw sessionError;
-    const resumed = await verifyRotatingBulkDownloadResumeCookie(
-      parseCookie(c.req.header("Cookie"), BULK_DOWNLOAD_RESUME_COOKIE),
-      signingKeys.current,
-      signingKeys.previous,
-    );
-    if (resumed.jobId !== resumePath[1]) throw new HTTPException(401, { message: "Invalid download resume authorization", cause: { code: "BULK_DOWNLOAD_RESUME_INVALID" } });
-    session = resumed;
-    usedBulkResume = true;
   }
   const share=await lifecycleShareQuery(c.env,lifecycleShareSql("s.id=? AND s.public_id=?"),[session.shareId,c.req.param("publicId")]);
   if(!share){
