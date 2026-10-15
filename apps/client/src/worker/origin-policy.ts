@@ -73,7 +73,13 @@ export function configuredLegacyClientOrigins(env: OriginEnv): string[] | null {
   const exact = origins as string[];
   const primary = configuredClientPortalOrigin(env);
   const canonical = configuredClientPortalOrigins(env);
-  if (!primary || new Set(exact).size !== exact.length || exact.includes(primary) || (canonical !== null && exact.some(value => canonical.includes(value)))) return null;
+  // A legacy share host can become the primary authenticated portal while its
+  // existing public links stay valid. Other portal aliases must not acquire
+  // public-share access through an overlapping legacy configuration.
+  const promotedPrimary = primary !== configuredPublicShareOrigin(env) ? primary : null;
+  if (!primary || new Set(exact).size !== exact.length
+    || (exact.includes(primary) && primary !== promotedPrimary)
+    || (canonical !== null && exact.some(value => canonical.includes(value) && value !== promotedPrimary))) return null;
   return exact;
 }
 
@@ -154,6 +160,7 @@ export function legacyClientRedirectLocation(requestUrl: string, env: OriginEnv)
   if (request.pathname === "/health" || request.pathname.startsWith("/api/") || namespace === "public" || namespace === "assets" || namespace === "unknown") return null;
   const targetOrigin = configuredClientPortalOrigin(env);
   if (!targetOrigin) return null;
+  if (request.origin === targetOrigin) return null;
   const target = new URL(request.pathname === "/" ? "/portal" : `${request.pathname}${request.search}`, targetOrigin);
   return target.toString();
 }

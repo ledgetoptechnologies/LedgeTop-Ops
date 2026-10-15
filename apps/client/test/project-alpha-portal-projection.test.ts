@@ -41,7 +41,7 @@ const contact = { type: "contact", publicId: "pa-contact-primary", parentPublicI
 const project = { type: "project", publicId: "pa-project-north", parentPublicId: "pa-dept-field", displayName: "North Site", sourceVersion: "project-v1", active: true, primaryContact: false } as const;
 const projectedPrincipal = { publicId: "pa-principal-manager", emailHint: "manager@example.test", displayName: "Portal Manager", sourceVersion: "principal-v1", active: true } as const;
 
-function envelope(kind: string, deliveryId: string, sourceSequence: number, extra: Record<string, unknown>) {
+function envelope<T extends Record<string, unknown>>(kind: string, deliveryId: string, sourceSequence: number, extra: T) {
   return {
     schemaVersion: 2, applicationKey, deliveryId, occurredAt: "2026-08-13T18:00:00.000Z",
     sourceGeneration: "portal-2026-08-13", sourceSequence, workspaceId: workspace.publicId, kind, ...extra,
@@ -539,4 +539,111 @@ describe("Project Alpha portal hierarchy projection", () => {
       VALUES ('pa-workspace-cross','generation-one',10,?)`).bind(activeGenerationId).run()).rejects.toThrow();
     expect((await db.prepare("PRAGMA foreign_key_check").all()).results).toEqual([]);
   });
+
+  function standaloneSnapshot(tag: string, scopeType = "client", scopeId = `client-${tag}`) {
+    const id = `standalone-${tag}`;
+    const rootId = `client-${tag}`;
+    const grant = { ...portalFixture.valid.snapshotPage.entitlements[0]!, publicId: `allow-${tag}`,
+      principalPublicId: projectedPrincipal.publicId, capability: "delivery.view", scopeType, scopePublicId: scopeId };
+    const common = { schemaVersion: 3, workspaceId: id, sourceGeneration: `generation-${tag}`,
+      sourceSequence: 1, snapshotHash: "c".repeat(64), pageCount: 1, recordCount: 4 };
+    return {
+      page: envelope("snapshot.page", `page-${tag}`, 1, { ...common, pageNumber: 1,
+        workspace: { ...workspace, publicId: id, rootType: "standalone_client", rootPublicId: rootId, active: true as boolean },
+        entities: [{ type: "standalone_client", publicId: rootId, parentPublicId: null,
+          displayName: "Standalone client", sourceVersion: "root-v1", active: true, primaryContact: false }],
+        principals: [{ ...projectedPrincipal, active: true as boolean }], entitlements: [grant, { ...grant, publicId: `deny-${tag}`, effect: "deny" }],
+        relations: [], projectLifecycles: [] }),
+      activate: envelope("snapshot.activate", `activate-${tag}`, 1, common),
+    };
+  }
+
+  async function applyStandalone(sourceId: string, payload: Record<string, unknown>) {
+    return applyPortalProjectionDelivery({ ...env, CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED: "true" },
+      parsePortalProjectionDelivery(payload, applicationKey, true), await bodyHash(JSON.stringify(payload)),
+      createCatalogSourceContext(sourceId));
+  }
+
+  it("activates PA client-scoped standalone roots without changing deny intent or inferring identity grants", async () => {
+    const snapshot = standaloneSnapshot("wire-client");
+    const source = PRIMARY_ALPHA_SOURCE_ID;
+    await applyStandalone(source, snapshot.page);
+    expect(await db.prepare("SELECT COUNT(*) count FROM pa_portal_projection_checkpoints WHERE workspace_id=?")
+      .bind(snapshot.page.workspaceId).first("count")).toBe(0);
+    expect(await applyStandalone(source, snapshot.activate)).toBe("completed");
+    expect(await db.prepare("SELECT complete FROM pa_portal_projection_generations WHERE workspace_id=?")
+      .bind(snapshot.page.workspaceId).first("complete")).toBe(1);
+    expect((await db.prepare("SELECT effect,scope_type,scope_public_id,status FROM pa_portal_entitlement_intents WHERE workspace_id=? ORDER BY effect")
+      .bind(snapshot.page.workspaceId).all()).results).toEqual([
+      { effect: "allow", scope_type: "client", scope_public_id: "client-wire-client", status: "active" },
+      { effect: "deny", scope_type: "client", scope_public_id: "client-wire-client", status: "active" },
+    ]);
+    expect(await db.prepare("SELECT COUNT(*) count FROM portal_v2_entitlements WHERE workspace_id=?")
+      .bind(snapshot.page.workspaceId).first("count")).toBe(0);
+    expect(await authorizePortalWorkspaceCapability(env, principal, String(snapshot.page.workspaceId), "delivery.view",
+      { scopeType: "client", publicId: "client-wire-client" })).toBe(false);
+    const revoked = envelope("event", "standalone-principal-revoked", 2, {
+      schemaVersion: 3, workspaceId: snapshot.page.workspaceId, sourceGeneration: "generation-wire-client",
+      event: { resource: "principal", action: "tombstone", publicId: projectedPrincipal.publicId, sourceVersion: "revoked-v2" },
+    });
+    await applyStandalone(source, revoked);
+    expect(await db.prepare("SELECT COUNT(*) count FROM pa_portal_entitlement_intents WHERE workspace_id=? AND status='active'")
+      .bind(snapshot.page.workspaceId).first("count")).toBe(0);
+  });
+
+  it.each([
+    ["wrong-client-id", "client", "other-client"],
+    ["organization-alias", "organization", "client-organization-alias"],
+    ["project-alias", "project", "client-project-alias"],
+  ])("rejects standalone authorization scope %s atomically", async (tag, scopeType, scopeId) => {
+    const snapshot = standaloneSnapshot(tag, scopeType, scopeId);
+    await applyStandalone(PRIMARY_ALPHA_SOURCE_ID, snapshot.page);
+    await expect(applyStandalone(PRIMARY_ALPHA_SOURCE_ID, snapshot.activate)).rejects.toThrow("portal-entitlement-scope-invalid");
+    expect(await db.prepare("SELECT COUNT(*) count FROM pa_portal_projection_checkpoints WHERE workspace_id=?")
+      .bind(snapshot.page.workspaceId).first("count")).toBe(0);
+    expect(await db.prepare("SELECT complete FROM pa_portal_projection_generations WHERE workspace_id=?")
+      .bind(snapshot.page.workspaceId).first("complete")).toBe(0);
+    expect(await db.prepare("SELECT COUNT(*) count FROM pa_portal_entitlement_intents WHERE workspace_id=?")
+      .bind(snapshot.page.workspaceId).first("count")).toBe(0);
+  });
+
+  it("rejects the alias when its exact standalone root is inactive", async () => {
+    const snapshot = standaloneSnapshot("inactive-root");
+    snapshot.page.workspace.active = false;
+    snapshot.page.entities[0]!.active = false;
+    await applyStandalone(PRIMARY_ALPHA_SOURCE_ID, snapshot.page);
+    await expect(applyStandalone(PRIMARY_ALPHA_SOURCE_ID, snapshot.activate)).rejects.toThrow("portal-entitlement-scope-invalid");
+  });
+
+  it("does not alias an organization root to client scope", async () => {
+    const snapshot = standaloneSnapshot("organization-root");
+    snapshot.page.workspace.rootType = "organization";
+    snapshot.page.entities[0]!.type = "organization";
+    await applyStandalone(PRIMARY_ALPHA_SOURCE_ID, snapshot.page);
+    await expect(applyStandalone(PRIMARY_ALPHA_SOURCE_ID, snapshot.activate)).rejects.toThrow("portal-entitlement-scope-invalid");
+  });
+
+  it("still rejects active grants for a revoked standalone principal", async () => {
+    const snapshot = standaloneSnapshot("revoked-principal");
+    snapshot.page.principals = [{ ...projectedPrincipal, active: false }];
+    await applyStandalone(PRIMARY_ALPHA_SOURCE_ID, snapshot.page);
+    await expect(applyStandalone(PRIMARY_ALPHA_SOURCE_ID, snapshot.activate)).rejects.toThrow("portal-entitlement-principal-invalid");
+    expect(await db.prepare("SELECT COUNT(*) count FROM pa_portal_projection_checkpoints WHERE workspace_id=?")
+      .bind(snapshot.page.workspaceId).first("count")).toBe(0);
+  });
+
+  it("keeps the exact same standalone public ID isolated between projection sources", async () => {
+    const snapshot = standaloneSnapshot("source-isolation");
+    for (const source of [PRIMARY_ALPHA_SOURCE_ID, "project-alpha:standalone-secondary"]) {
+      await applyStandalone(source, snapshot.page);
+      expect(await applyStandalone(source, snapshot.activate)).toBe("completed");
+    }
+    const rows = (await db.prepare(`SELECT workspace_id,projection_source_id FROM pa_portal_workspace_sources
+      WHERE source_workspace_id=? ORDER BY projection_source_id`).bind(snapshot.page.workspaceId).all()).results;
+    expect(rows).toHaveLength(2);
+    expect(new Set(rows.map(row => row.workspace_id)).size).toBe(2);
+    expect(await db.prepare("SELECT COUNT(*) count FROM portal_v2_entitlements WHERE workspace_id IN (?,?)")
+      .bind(rows[0]!.workspace_id, rows[1]!.workspace_id).first("count")).toBe(0);
+  });
+
 });

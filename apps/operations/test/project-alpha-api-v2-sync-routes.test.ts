@@ -40,6 +40,7 @@ function fixture(enabled = true, administrator = true) {
   });
   registerProjectAlphaApiV2SyncRoutes(app);
   const env = {
+    PROJECT_ALPHA_API_V2_READ_ACCEPTANCE_ENABLED: "false",
     PROJECT_ALPHA_API_V2_SYNC_ENABLED: enabled ? "true" : "false",
     OPS_DB: { batch: mocks.batch },
     AUDIT_IP_SECRET: "audit-secret",
@@ -62,7 +63,8 @@ function fixture(enabled = true, administrator = true) {
     },
     env,
   );
-  return { send };
+  const sources = () => app.request("https://ops.example.test/api/admin/integrations/project-alpha/api-v2/sync-sources", {}, env);
+  return { send, sources, env };
 }
 
 beforeEach(() => {
@@ -78,6 +80,35 @@ beforeEach(() => {
 });
 
 describe("Project Alpha API-v2 bounded sync route", () => {
+  it("discovers only enabled source IDs with private read acceptance closed and no upstream request", async () => {
+    const response = await fixture().sources();
+    expect(response.status).toBe(200);
+    expect(response.headers.get("Cache-Control")).toBe("no-store");
+    expect(await response.json()).toEqual({ sources: [selectedSource] });
+    expect(mocks.run).not.toHaveBeenCalled();
+    expect(mocks.audit).not.toHaveBeenCalled();
+    expect((await fixture().send()).status).toBe(200);
+  });
+
+  it("keeps discovery default off and requires deny-aware global administrator permission", async () => {
+    expect((await fixture(false).sources()).status).toBe(404);
+    expect((await fixture(true, false).sources()).status).toBe(403);
+    for (const permission of [{ global: false, deniedGlobal: false }, { global: true, deniedGlobal: true }]) {
+      mocks.scope.mockResolvedValueOnce(permission);
+      expect((await fixture().sources()).status).toBe(403);
+    }
+    expect(mocks.run).not.toHaveBeenCalled();
+  });
+
+  it("rejects invalid connection manifests without returning configuration or credentials", async () => {
+    const value = fixture();
+    value.env.PROJECT_ALPHA_API_V2_CONNECTIONS = "private-invalid-secret";
+    const response = await value.sources();
+    expect(response.status).toBe(503);
+    expect(response.headers.get("Cache-Control")).toBe("no-store");
+    expect(await response.text()).not.toContain("private-invalid-secret");
+    expect(mocks.run).not.toHaveBeenCalled();
+  });
   it("is default-off before invoking the synchronization runner", async () => {
     expect((await fixture(false).send()).status).toBe(404);
     expect(mocks.run).not.toHaveBeenCalled();

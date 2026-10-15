@@ -629,6 +629,11 @@ function validateAuthorization(workspace: WorkspaceResource, entities: EntityRes
   const principalIds = new Set(principals.map(principal => principal.publicId));
   const activePrincipalIds = new Set(principals.filter(principal => principal.active).map(principal => principal.publicId));
   const entityScopes = new Set(entities.filter(entity => entity.active).map(entity => `${entity.type}:${entity.publicId}`));
+  // PA represents a standalone root as an entity of type standalone_client,
+  // while its entitlement wire contract names that exact client scope client.
+  if (workspace.rootType === "standalone_client" && entities.some(entity =>
+    entity.active && entity.type === "standalone_client" && entity.publicId === workspace.rootPublicId
+    && entity.parentPublicId === null)) entityScopes.add(`client:${workspace.rootPublicId}`);
   for (const entitlement of entitlements) {
     if (!principalIds.has(entitlement.principalPublicId)) throw new Error("portal-entitlement-principal-invalid");
     if (!entitlement.active) continue;
