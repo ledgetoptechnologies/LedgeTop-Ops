@@ -32,10 +32,11 @@ import {
 } from "../src/worker/client-hub-native-project-management";
 import { listClientHubBusinessProjects } from "../src/worker/client-hub-business-projects";
 import { canonicalBusinessProjectPredicate } from "../src/worker/client-hub-canonical-projects";
+import { nativeProjectLifecycleResolvedBindingStaleSql } from "../src/worker/native-project-lifecycle-conflict-proof";
 import { nativeProjectLifecycleCanonicalProof } from "../src/worker/native-project-lifecycle-canonical-proof";
 import { resolveTrustedNativeFinancialMapping } from "../src/worker/project-alpha-financial-mapping";
 import { readConfiguredProjectAlphaProjectInventory } from "../src/worker/project-alpha-project-inventory-api-v2";
-import { persistProjectAlphaProjectInventoryPage } from "../src/worker/project-alpha-v2-sync";
+import { persistProjectAlphaProjectBindingStale, persistProjectAlphaProjectInventoryPage } from "../src/worker/project-alpha-v2-sync";
 import { prepareProjectAlphaProjectV2Acceptance } from "../src/worker/project-alpha-project-v2-preparation";
 import {
   planProjectAlphaProjectV2Command,
@@ -2673,6 +2674,98 @@ describe("native archive/restore lifecycle on complete D1 schema", () => {
       },
     );
   });
+
+  it("supersedes only historical binding staleness after exact lifecycle repair and later clean inventory on full205", async () => {
+    // This case explicitly adds 205; the historical 204 fixture contract stays pinned.
+    for (const sql of splitD1MigrationStatements(readFileSync(resolve("migrations/0205_native_billing_source_authority.sql"), "utf8"))) {
+      await db.prepare(sql).run();
+    }
+    const canonicalCount = async (conflictProjection?: string) => {
+      const predicate = await canonicalBusinessProjectPredicate(env() as never, context, {
+        allowed: true, filter: { sql: "1=1", values: [] },
+        canViewUnprojectedCanonical: true, proof: "p".repeat(43),
+      } as never);
+      expect(predicate).not.toBeNull();
+      const sql = conflictProjection ? predicate!.sql.replace(
+        "FROM project_alpha_api_v2_inventory_conflicts conflict", `FROM (${conflictProjection}) conflict`,
+      ) : predicate!.sql;
+      return db.prepare(`SELECT count(*) n FROM operations_shared_projects s WHERE s.external_project_id=? AND ${sql}`)
+        .bind(lifecycleExternal, ...predicate!.values).first("n");
+    };
+    const inventory = async () => {
+      const observed = await readConfiguredProjectAlphaProjectInventory(env() as never, lifecycleOwner.sourceId, { limit: 1 }, lifecycleLive.send);
+      if (observed.status !== "observed") throw new Error("inventory unavailable");
+      expect(await persistProjectAlphaProjectInventoryPage(db, lifecycleOwner.sourceId, observed.response, null))
+        .toMatchObject({ status: "persisted", conflictCount: 0 });
+    };
+    const stale = async () => {
+      expect(await persistProjectAlphaProjectBindingStale(db, lifecycleOwner.sourceId, {
+        apiVersion: "2", sourceInstanceId, applicationId, historyEpoch: historyEpochId,
+        requestId: crypto.randomUUID(), error: { code: "binding_stale", externalId: lifecycleExternal },
+      })).toEqual({ status: "blocked", reason: "binding_stale" });
+    };
+    let historical: unknown;
+    for (const action of ["archive", "restore"] as const) {
+      const commandId = crypto.randomUUID(), refreshCommandId = crypto.randomUUID();
+      const parent = await prepareNativeProjectLifecycle(env() as never, lifecycleActor, lifecycleOwner,
+        { commandId, externalProjectId: lifecycleExternal, action }, lifecycleLive.send);
+      await submitNativeProjectLifecycle(env() as never, lifecycleActor, lifecycleOwner,
+        { commandId, reviewSha256: parent.reviewSha256, reconcile: false }, lifecycleLive.send);
+      if (action === "archive") {
+        await stale();
+        historical = (await db.prepare("SELECT * FROM project_alpha_api_v2_inventory_conflicts WHERE external_id=? ORDER BY conflict_id")
+          .bind(lifecycleExternal).all()).results;
+        expect(historical).toHaveLength(1);
+        expect(await canonicalCount()).toBe(0);
+      }
+      const child = await prepareNativeProjectLifecycleRefresh(env() as never, lifecycleActor, lifecycleOwner,
+        { commandId, refreshCommandId, reviewSha256: parent.reviewSha256 }, lifecycleLive.send);
+      await submitNativeProjectLifecycleRefresh(env() as never, lifecycleActor, lifecycleOwner,
+        { commandId, refreshCommandId, reviewSha256: child.reviewSha256, reconcile: false }, lifecycleLive.send);
+      await inventory(); // A clean observation before activation is insufficient.
+      await activateNativeProjectLifecycle(env() as never, lifecycleActor, lifecycleOwner,
+        { commandId, reviewSha256: parent.reviewSha256 }, lifecycleLive.send);
+    }
+    expect(await canonicalCount()).toBe(0);
+    await inventory();
+    expect(await canonicalCount()).toBe(1);
+    expect((await db.prepare("SELECT * FROM project_alpha_api_v2_inventory_conflicts WHERE external_id=? ORDER BY conflict_id")
+      .bind(lifecycleExternal).all()).results).toEqual(historical);
+    // Project alternate review evidence from the authentic immutable row. Each
+    // malformed shape is tested inside the complete canonical query, retaining
+    // its preceding ownership, source, revision and lineage guards.
+    const columns = (await db.prepare("PRAGMA table_info(project_alpha_api_v2_inventory_conflicts)").all<{ name: string }>()).results.map(row => row.name);
+    const alternate = (changes: Record<string, string | undefined>) => `SELECT ${columns.map(name => `${changes[name] ?? name} AS ${name}`).join(",")} FROM project_alpha_api_v2_inventory_conflicts WHERE external_id='${lifecycleExternal}'`;
+    for (const changes of [
+      { conflict_kind: "'binding_disappeared'" },
+      { external_id: "'wrong-project'", project_alpha_public_id: "(SELECT project_alpha_public_id FROM operations_shared_projects WHERE external_project_id='" + lifecycleExternal + "')" },
+      { project_alpha_public_id: "'wrong-public-id'" },
+      { observed_revision: "'3'" },
+      { prior_reference: "'wrong-prior-reference'" },
+      { details_json: "json_object('externalId',external_id,'extra',1)" },
+      { details_json: "json_object('externalId','wrong-project')" },
+      { details_json: "json_object('externalId',123)" },
+    ]) expect(await canonicalCount(alternate(changes))).toBe(0);
+    expect(await canonicalCount()).toBe(1);
+    for (const changes of [
+      { application_id: "'wrong-application'" },
+      { source_instance_id: "'wrong-source-instance'" },
+      { history_epoch_id: "'wrong-epoch'" },
+    ]) {
+      const projection = alternate(changes);
+      expect(await db.prepare(`SELECT count(*) n FROM operations_shared_projects s JOIN (${projection}) conflict WHERE s.external_project_id=? AND ${nativeProjectLifecycleResolvedBindingStaleSql("s", "conflict")}`)
+        .bind(lifecycleExternal).first("n")).toBe(0);
+      // Different source tuples cannot borrow the repair, or deny this source.
+      expect(await canonicalCount(projection)).toBe(1);
+    }
+    // New staleness after that repair must close the canonical route again.
+    await stale();
+    expect(await canonicalCount()).toBe(0);
+    expect((await db.prepare("SELECT * FROM project_alpha_api_v2_inventory_conflicts WHERE external_id=? ORDER BY conflict_id")
+      .bind(lifecycleExternal).all()).results).toEqual(expect.arrayContaining(historical as unknown[]));
+    expect((await db.prepare("PRAGMA foreign_key_check").all()).results).toEqual([]);
+  }, 180000);
+
 });
 
 // Remove only this test-created fixture after all lifecycle cases complete.
