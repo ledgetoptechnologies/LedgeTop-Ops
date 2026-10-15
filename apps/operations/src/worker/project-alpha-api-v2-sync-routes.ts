@@ -3,7 +3,7 @@ import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
 import { sqlScope } from "./acl";
 import { readBoundedJson } from "./bounded-json";
-import { resolveProjectAlphaApiV2Connection } from "./project-alpha-api-v2-connections";
+import { listEnabledProjectAlphaApiV2SourceIds, resolveProjectAlphaApiV2Connection } from "./project-alpha-api-v2-connections";
 import { decodeProjectAlphaApiV2SyncCursor, encodeProjectAlphaApiV2SyncCursor,
   type ProjectAlphaApiV2SyncSurface } from "./project-alpha-api-v2-sync-cursor";
 import {
@@ -91,6 +91,21 @@ function auditOutcome(value: Record<string, unknown>): Record<string, unknown> {
 /** Mounted after Operations' authenticated mutation middleware. That
  * middleware supplies same-origin and CSRF protection before this route runs. */
 export function registerProjectAlphaApiV2SyncRoutes(app: App): void {
+  app.get("/api/admin/integrations/project-alpha/api-v2/sync-sources", async c => {
+    c.header("Cache-Control", "no-store");
+    if (c.env.PROJECT_ALPHA_API_V2_SYNC_ENABLED !== "true")
+      throw new HTTPException(404, { message: "Not found" });
+    if (!c.get("administrator"))
+      throw new HTTPException(403, { message: "Administrator access required" });
+    const permission = await sqlScope(c.env, c.get("principal"), "integrations.manage");
+    if (!permission.global || permission.deniedGlobal)
+      throw new HTTPException(403, { message: "Global integrations.manage permission required" });
+    try {
+      return c.json({ sources: listEnabledProjectAlphaApiV2SourceIds(c.env) });
+    } catch {
+      throw new HTTPException(503, { message: "Project Alpha inventory configuration is unavailable" });
+    }
+  });
   app.post(PROJECT_ALPHA_API_V2_SYNC_ROUTE, async c => {
     if (c.env.PROJECT_ALPHA_API_V2_SYNC_ENABLED !== "true")
       throw new HTTPException(404, { message: "Not found" });

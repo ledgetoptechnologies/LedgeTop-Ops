@@ -242,13 +242,7 @@ function inventorySurfaceText(label: string, surface: InventoryRequestedSurface)
 }
 function valueCell(value: string | null) { return value === null ? <em>Not set</em> : value === "" ? <em>Empty string</em> : <code>{value}</code>; }
 
-const STAGING_DIRECTORY_OWNER_VIEW_GRANT_ENDPOINT = "/api/admin/staging/directory/owner-profile-view-grant";
-const STAGING_DIRECTORY_SCALAR_SUCCESSOR_HEAD_ENDPOINT = "/api/admin/staging/directory/scalar-successor-head";
-function ApiV2OperatorPanel({ disabled }: { disabled: boolean }) {
-  const [ownerViewGrantEnabled, setOwnerViewGrantEnabled] = useState(false);
-  const [ownerGrantBusy, setOwnerGrantBusy] = useState(false), [ownerGrantMessage, setOwnerGrantMessage] = useState("");
-  const [successorHeadBusy, setSuccessorHeadBusy] = useState(false), [successorHeadResult, setSuccessorHeadResult] = useState<Record<string, unknown> | null>(null), [successorHeadError, setSuccessorHeadError] = useState("");
-  const [available, setAvailable] = useState<boolean | null>(null), [sources, setSources] = useState<string[]>([]), [sourceError, setSourceError] = useState("");
+function BoundedInventoryPanel({ disabled, sources, staging = false }: { disabled: boolean; sources: string[]; staging?: boolean }) {
   const [inventorySource, setInventorySource] = useState("");
   const [inventoryBusy, setInventoryBusy] = useState<"initial" | "directory" | "projects" | null>(null);
   const [directoryInventory, setDirectoryInventory] = useState<InventoryDisplaySurface | null>(null);
@@ -257,39 +251,10 @@ function ApiV2OperatorPanel({ disabled }: { disabled: boolean }) {
   const [projectContinuationToken, setProjectContinuationToken] = useState("");
   const [inventoryStopped, setInventoryStopped] = useState({ directory: "", projects: "" });
   const [inventoryError, setInventoryError] = useState("");
-  const [reviewSource, setReviewSource] = useState(""), [resourceType, setResourceType] = useState<DirectoryResourceType>("client");
-  const [recordId, setRecordId] = useState(""), [localVersion, setLocalVersion] = useState("1");
-  const [candidates, setCandidates] = useState<DirectoryCandidate[]>([]), [candidateCursor, setCandidateCursor] = useState<string | null>(null);
-  const [selectedCandidate, setSelectedCandidate] = useState<DirectoryCandidate | null>(null);
-  const [candidateBusy, setCandidateBusy] = useState(false), [candidateError, setCandidateError] = useState("");
-  const [reviewId, setReviewId] = useState(""), [comparison, setComparison] = useState<FieldComparison | null>(null);
-  const reservationKey = useRef(""), finalizationKey = useRef("");
-  const [sealedReceiptId, setSealedReceiptId] = useState("");
-  const [decisions, setDecisions] = useState<Partial<Record<DirectoryField, DirectoryFieldDecision>>>({});
-  const [reviewBusy, setReviewBusy] = useState(false), [reviewError, setReviewError] = useState(""), [reviewMessage, setReviewMessage] = useState("");
-  useEffect(() => {
-    let live = true;
-    api<{ sources?: unknown; stagingDirectoryOwnerViewGrantEnabled?: boolean }>(API_V2_SOURCES_ENDPOINT).then(result => {
-      if (!live) return;
-      if (!Array.isArray(result.sources) || result.sources.some(source => typeof source !== "string"
-        || !/^project-alpha:[a-z0-9][a-z0-9_-]{0,63}$/.test(source))) throw new Error("invalid source list");
-      const listed = [...new Set(result.sources)].sort();
-      setAvailable(true);
-      setOwnerViewGrantEnabled(result.stagingDirectoryOwnerViewGrantEnabled === true);
-      setSources(listed);
-      setInventorySource(current => listed.includes(current) ? current : listed[0] ?? "");
-      setReviewSource(current => listed.includes(current) ? current : listed[0] ?? "");
-      setSourceError("");
-    }).catch(caught => {
-      if (live) {
-        const disabledOnDeployment = caught instanceof ApiError && caught.status === 404;
-        setAvailable(!disabledOnDeployment);
-        setSources([]);
-        setSourceError(disabledOnDeployment ? "" : operatorError(caught, "API-v2 source configuration could not be loaded."));
-      }
-    });
-    return () => { live = false; };
-  }, []);
+  useEffect(() => { setInventorySource(sources[0] ?? ""); clearInventory(); }, [sources]);
+  const inventoryErrorMessage = (caught: unknown, fallback: string) => staging ? operatorError(caught, fallback)
+    : caught instanceof ApiError && caught.status === 403 ? "Administrator access and global integrations.manage permission are required."
+      : caught instanceof ApiError && caught.status === 404 ? "Inventory refresh is disabled on this deployment." : fallback;
   const clearInventory = () => {
     setDirectoryInventory(null); setProjectInventory(null); setDirectoryContinuationToken(""); setProjectContinuationToken("");
     setInventoryStopped({ directory: "", projects: "" }); setInventoryError("");
@@ -327,7 +292,7 @@ function ApiV2OperatorPanel({ disabled }: { disabled: boolean }) {
       } else applyInventorySurface(continuation,
         (continuation === "directory" ? result.directory : result.projects) as InventoryRequestedSurface);
     } catch (caught) {
-      if (!continuation) setInventoryError(operatorError(caught, "The bounded inventory response could not be verified. No further page was requested."));
+      if (!continuation) setInventoryError(inventoryErrorMessage(caught, "The bounded inventory response could not be verified. No further page was requested."));
       else {
         if (continuation === "directory") setDirectoryContinuationToken(""); else setProjectContinuationToken("");
         const stale = caught instanceof ApiError && caught.status === 409;
@@ -335,6 +300,90 @@ function ApiV2OperatorPanel({ disabled }: { disabled: boolean }) {
       }
     } finally { setInventoryBusy(null); }
   };
+  return (
+    <section aria-label="Bounded API-v2 inventory"><h3>Bounded inventory evidence</h3>
+      <label>Deployment source<select value={inventorySource} disabled={disabled || Boolean(inventoryBusy)} onChange={event => { setInventorySource(event.target.value); clearInventory(); }}>
+        {sources.map(sourceId => <option key={sourceId} value={sourceId}>{sourceId}</option>)}</select></label>
+      <button type="button" className="button-ghost button-small" disabled={disabled || Boolean(inventoryBusy) || !inventorySource} onClick={() => void runInventory()}>{inventoryBusy === "initial" ? "Reading one bounded page…" : directoryInventory || projectInventory || inventoryStopped.directory || inventoryStopped.projects || inventoryError ? "Restart bounded inventory" : "Read one bounded inventory page"}</button>
+      <p>Continuation tokens stay in this browser session and are never displayed. Each button click requests at most one page; continuation is never automatic.</p>
+      {directoryInventory && <div className="notice" role={directoryInventory.status === "blocked" ? "alert" : "status"}><p>{inventorySurfaceText("Directory", directoryInventory)}</p>
+        {directoryContinuationToken && <button type="button" className="button-ghost button-small" disabled={disabled || Boolean(inventoryBusy)} onClick={() => void runInventory("directory")}>{inventoryBusy === "directory" ? "Continuing Directory…" : "Continue Directory"}</button>}
+      </div>}
+      {inventoryStopped.directory && <p role="alert" className="notice">{inventoryStopped.directory}</p>}
+      {projectInventory && <div className="notice" role={projectInventory.status === "blocked" ? "alert" : "status"}><p>{inventorySurfaceText("Projects", projectInventory)}</p>
+        {projectContinuationToken && <button type="button" className="button-ghost button-small" disabled={disabled || Boolean(inventoryBusy)} onClick={() => void runInventory("projects")}>{inventoryBusy === "projects" ? "Continuing Projects…" : "Continue Projects"}</button>}
+      </div>}
+      {inventoryStopped.projects && <p role="alert" className="notice">{inventoryStopped.projects}</p>}
+      {inventoryError && <p role="alert" className="notice">{inventoryError}</p>}
+    </section>
+  );
+}
+
+function ApiV2InventoryPanel({ disabled }: { disabled: boolean }) {
+  const [sources, setSources] = useState<string[] | null>(null);
+  const [error, setError] = useState("");
+  useEffect(() => {
+    let live = true;
+    api<{ sources?: unknown }>("/api/admin/integrations/project-alpha/api-v2/sync-sources").then(result => {
+      if (!Array.isArray(result.sources) || result.sources.some(source => typeof source !== "string"
+        || !/^project-alpha:[a-z0-9][a-z0-9_-]{0,63}$/.test(source))) throw new Error("invalid inventory sources");
+      if (live) setSources([...new Set(result.sources)].sort());
+    }).catch(caught => {
+      if (!live || caught instanceof ApiError && caught.status === 404) return;
+      setError(caught instanceof ApiError && caught.status === 403
+        ? "Administrator access and global integrations.manage permission are required."
+        : "Project Alpha inventory sources could not be loaded.");
+    });
+    return () => { live = false; };
+  }, []);
+  if (sources === null && !error) return null;
+  return <details className="alpha-connection"><summary>Refresh Project Alpha inventory</summary>
+    <p>Read one page from Project Alpha and store its inventory observations for review. Each continuation requires another click.</p>
+    {error && <p role="alert" className="notice">{error}</p>}
+    {sources && (sources.length ? <BoundedInventoryPanel disabled={disabled} sources={sources} />
+      : <p role="status">No enabled Project Alpha inventory sources are configured.</p>)}
+  </details>;
+}
+
+const STAGING_DIRECTORY_OWNER_VIEW_GRANT_ENDPOINT = "/api/admin/staging/directory/owner-profile-view-grant";
+const STAGING_DIRECTORY_SCALAR_SUCCESSOR_HEAD_ENDPOINT = "/api/admin/staging/directory/scalar-successor-head";
+function ApiV2OperatorPanel({ disabled }: { disabled: boolean }) {
+  const [ownerViewGrantEnabled, setOwnerViewGrantEnabled] = useState(false);
+  const [ownerGrantBusy, setOwnerGrantBusy] = useState(false), [ownerGrantMessage, setOwnerGrantMessage] = useState("");
+  const [successorHeadBusy, setSuccessorHeadBusy] = useState(false), [successorHeadResult, setSuccessorHeadResult] = useState<Record<string, unknown> | null>(null), [successorHeadError, setSuccessorHeadError] = useState("");
+  const [available, setAvailable] = useState<boolean | null>(null), [sources, setSources] = useState<string[]>([]), [sourceError, setSourceError] = useState("");
+  const [reviewSource, setReviewSource] = useState(""), [resourceType, setResourceType] = useState<DirectoryResourceType>("client");
+  const [recordId, setRecordId] = useState(""), [localVersion, setLocalVersion] = useState("1");
+  const [candidates, setCandidates] = useState<DirectoryCandidate[]>([]), [candidateCursor, setCandidateCursor] = useState<string | null>(null);
+  const [selectedCandidate, setSelectedCandidate] = useState<DirectoryCandidate | null>(null);
+  const [candidateBusy, setCandidateBusy] = useState(false), [candidateError, setCandidateError] = useState("");
+  const [reviewId, setReviewId] = useState(""), [comparison, setComparison] = useState<FieldComparison | null>(null);
+  const reservationKey = useRef(""), finalizationKey = useRef("");
+  const [sealedReceiptId, setSealedReceiptId] = useState("");
+  const [decisions, setDecisions] = useState<Partial<Record<DirectoryField, DirectoryFieldDecision>>>({});
+  const [reviewBusy, setReviewBusy] = useState(false), [reviewError, setReviewError] = useState(""), [reviewMessage, setReviewMessage] = useState("");
+  useEffect(() => {
+    let live = true;
+    api<{ sources?: unknown; stagingDirectoryOwnerViewGrantEnabled?: boolean }>(API_V2_SOURCES_ENDPOINT).then(result => {
+      if (!live) return;
+      if (!Array.isArray(result.sources) || result.sources.some(source => typeof source !== "string"
+        || !/^project-alpha:[a-z0-9][a-z0-9_-]{0,63}$/.test(source))) throw new Error("invalid source list");
+      const listed = [...new Set(result.sources)].sort();
+      setAvailable(true);
+      setOwnerViewGrantEnabled(result.stagingDirectoryOwnerViewGrantEnabled === true);
+      setSources(listed);
+      setReviewSource(current => listed.includes(current) ? current : listed[0] ?? "");
+      setSourceError("");
+    }).catch(caught => {
+      if (live) {
+        const disabledOnDeployment = caught instanceof ApiError && caught.status === 404;
+        setAvailable(!disabledOnDeployment);
+        setSources([]);
+        setSourceError(disabledOnDeployment ? "" : operatorError(caught, "API-v2 source configuration could not be loaded."));
+      }
+    });
+    return () => { live = false; };
+  }, []);
   const clearComparison = () => { setReviewId(""); setComparison(null); setDecisions({}); setReviewError(""); setReviewMessage(""); };
   const resetReview = () => { reservationKey.current = ""; finalizationKey.current = ""; setSealedReceiptId(""); clearComparison(); };
   const loadCandidates = async (cursor?: string | null, append = false) => {
@@ -478,21 +527,7 @@ function ApiV2OperatorPanel({ disabled }: { disabled: boolean }) {
     {sources.length === 0 ? <p role="status">No enabled API-v2 sources are available to review. Legacy connector records are not used to discover API-v2 connections.</p> : <>
     <ul aria-label="Enabled API-v2 sources">{sources.map(sourceId => <li key={sourceId}><strong>{sourceId}</strong>
       <ReadAcceptanceCheck connector={{ sourceId, state: "active" }} disabled={disabled} /></li>)}</ul>
-    <section aria-label="Bounded API-v2 inventory"><h3>Bounded inventory evidence</h3>
-      <label>Deployment source<select value={inventorySource} disabled={disabled || Boolean(inventoryBusy)} onChange={event => { setInventorySource(event.target.value); clearInventory(); }}>
-        {sources.map(sourceId => <option key={sourceId} value={sourceId}>{sourceId}</option>)}</select></label>
-      <button type="button" className="button-ghost button-small" disabled={disabled || Boolean(inventoryBusy) || !inventorySource} onClick={() => void runInventory()}>{inventoryBusy === "initial" ? "Reading one bounded page…" : directoryInventory || projectInventory || inventoryStopped.directory || inventoryStopped.projects || inventoryError ? "Restart bounded inventory" : "Read one bounded inventory page"}</button>
-      <p>Continuation tokens stay in this browser session and are never displayed. Each button click requests at most one page; continuation is never automatic.</p>
-      {directoryInventory && <div className="notice" role={directoryInventory.status === "blocked" ? "alert" : "status"}><p>{inventorySurfaceText("Directory", directoryInventory)}</p>
-        {directoryContinuationToken && <button type="button" className="button-ghost button-small" disabled={disabled || Boolean(inventoryBusy)} onClick={() => void runInventory("directory")}>{inventoryBusy === "directory" ? "Continuing Directory…" : "Continue Directory"}</button>}
-      </div>}
-      {inventoryStopped.directory && <p role="alert" className="notice">{inventoryStopped.directory}</p>}
-      {projectInventory && <div className="notice" role={projectInventory.status === "blocked" ? "alert" : "status"}><p>{inventorySurfaceText("Projects", projectInventory)}</p>
-        {projectContinuationToken && <button type="button" className="button-ghost button-small" disabled={disabled || Boolean(inventoryBusy)} onClick={() => void runInventory("projects")}>{inventoryBusy === "projects" ? "Continuing Projects…" : "Continue Projects"}</button>}
-      </div>}
-      {inventoryStopped.projects && <p role="alert" className="notice">{inventoryStopped.projects}</p>}
-      {inventoryError && <p role="alert" className="notice">{inventoryError}</p>}
-    </section>
+    <BoundedInventoryPanel disabled={disabled} sources={sources} staging />
     <section aria-label="Synthetic scalar successor evidence"><h3>Synthetic scalar successor evidence</h3>
       <p>This staging-only, default-off read collects the fixed synthetic client&apos;s canonical local tuple, bounded Project Alpha inventory, and binding observation. It does not update either system.</p>
       <button type="button" className="button-ghost button-small" disabled={disabled || successorHeadBusy} onClick={() => void readScalarSuccessorHead()}>{successorHeadBusy ? "Reading synthetic scalar head…" : "Read synthetic scalar head"}</button>
@@ -890,6 +925,7 @@ export function ProjectAlphaConnections() {
         <details><summary>Connection details</summary><dl><dt>Source</dt><dd>{connector.sourceId}</dd><dt>Producer</dt><dd>{connector.producerBindingId}</dd><dt>Destination</dt><dd>{connector.snapshotOrigin}{connector.snapshotBasePath}</dd><dt>Application</dt><dd>{connector.applicationKey}</dd><dt>Revision</dt><dd>{connector.activeRevision}</dd></dl><p>These values are read-only here. Change the reviewed deployment source manifest and deploy Operations; do not paste credentials into this page.</p></details>
       </section>;
     })}
+    <ApiV2InventoryPanel disabled={loading || Boolean(syncing)} />
     <ApiV2OperatorPanel disabled={loading || Boolean(syncing)} />
     <DirectoryExistingRecordAdoptionPanel disabled={loading || Boolean(syncing)} />
     {data && <ProjectAdoptionPanel disabled={loading || Boolean(syncing)} />}

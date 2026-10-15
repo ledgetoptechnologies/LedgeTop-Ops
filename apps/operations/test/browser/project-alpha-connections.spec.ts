@@ -19,6 +19,7 @@ const connector = (sourceId = secondary): Connector => ({ sourceId, displayName:
 type OperatorResponse = Record<string, unknown>;
 type MockResponse = { status?: number; json: unknown };
 type OperatorResponses = { inventory?: OperatorResponse | ((body: Record<string, unknown> | null, requestIndex: number) => OperatorResponse);
+  normalInventorySources?: MockResponse; privateReadDisabled?: boolean;
   operationalSources?: unknown; candidates?: unknown; reserve?: Record<string,unknown> | ((body:Record<string,unknown>|null,index:number)=>MockResponse);
   compare?: unknown; seal?: unknown; finalize?: Record<string,unknown> | ((body:Record<string,unknown>|null,index:number)=>MockResponse);
   captureIdempotency?: boolean };
@@ -31,7 +32,9 @@ async function fixture(page: Page, data: Directory, operator: OperatorResponses 
     if (path === "/api/admin/audit") return route.fulfill({ json: { events: [] } });
     if (path === "/api/admin/portal-workflow-readiness") return route.fulfill({ json: { ready: false, workflows: {} } });
     if (path === apiV2SourcesEndpoint && route.request().method() === "GET")
-      return route.fulfill({ json: { sources: [secondary] } });
+      return operator.privateReadDisabled ? route.fulfill({ status: 404, json: { error: "Not found" } }) : route.fulfill({ json: { sources: [secondary] } });
+    if (path === "/api/admin/integrations/project-alpha/api-v2/sync-sources")
+      return route.fulfill(operator.normalInventorySources ?? { status: 404, json: { error: "Not found" } });
     if (path === adoptionSourcesEndpoint && route.request().method() === "GET") {
       requests.push({ path, method: route.request().method(), body: null });
       return operator.operationalSources ? route.fulfill({ json: operator.operationalSources })
@@ -362,4 +365,47 @@ test("reuses frozen reservation and finalization keys after uncertain operationa
   expect(reservations[1]!.idempotencyKey).toBe(reservations[0]!.idempotencyKey);
   expect(finalizations).toHaveLength(2);expect(finalizations[0]!.idempotencyKey).toMatch(UUID_PATTERN);
   expect(finalizations[1]!.idempotencyKey).toBe(finalizations[0]!.idempotencyKey);
+});
+
+test("normal production inventory works with private read acceptance closed and stops invalid continuation", async ({ page }) => {
+  const responses = [
+    { status: "completed", directory: { status: "persisted", itemCount: 2, conflictCount: 0, hasMore: true, continuationToken: "private-normal-cursor" },
+      projects: { status: "persisted", itemCount: 1, conflictCount: 0, hasMore: false } },
+    { status: "completed", directory: { status: "persisted", itemCount: 3, conflictCount: 0, hasMore: false },
+      projects: { status: "persisted", itemCount: 1, conflictCount: 0, hasMore: false } },
+  ];
+  const requests = await fixture(page, { connectors: [], legacyPrimary: false, health: [] }, {
+    privateReadDisabled: true, normalInventorySources: { json: { sources: [secondary] } },
+    inventory: (_body, index) => responses[index]!,
+  });
+  await page.goto("/administration");
+  await expect(page.getByText("Staging API-v2 operator review")).toHaveCount(0);
+  await page.getByText("Refresh Project Alpha inventory", { exact: true }).click();
+  const panel = page.getByRole("region", { name: "Bounded API-v2 inventory" });
+  expect(requests.filter(request => request.method !== "GET")).toEqual([]);
+  await panel.getByRole("button", { name: "Read one bounded inventory page" }).click();
+  await expect(panel).toContainText("Directory: 2 observed");
+  await expect(panel.getByRole("button", { name: "Continue Directory" })).toBeVisible();
+  await expect(panel).not.toContainText("private-normal-cursor");
+  expect(requests.filter(request => request.method !== "GET")).toEqual([
+    { path: inventoryEndpoint, method: "POST", body: { sourceId: secondary, limit: 100 } },
+  ]);
+  await panel.getByRole("button", { name: "Continue Directory" }).click();
+  await expect(panel).toContainText("continuation stopped after an error");
+  await expect(panel.getByRole("button", { name: "Continue Directory" })).toHaveCount(0);
+  expect(requests.filter(request => request.method !== "GET")).toEqual([
+    { path: inventoryEndpoint, method: "POST", body: { sourceId: secondary, limit: 100 } },
+    { path: inventoryEndpoint, method: "POST", body: { sourceId: secondary, limit: 100, directoryContinuationToken: "private-normal-cursor" } },
+  ]);
+});
+
+test("normal inventory discovery permission failure exposes no sources or actions", async ({ page }) => {
+  const requests = await fixture(page, { connectors: [], legacyPrimary: false, health: [] }, {
+    privateReadDisabled: true, normalInventorySources: { status: 403, json: { error: "Forbidden" } },
+  });
+  await page.goto("/administration");
+  await page.getByText("Refresh Project Alpha inventory", { exact: true }).click();
+  await expect(page.getByRole("alert").filter({ hasText: "global integrations.manage permission" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Read one bounded inventory page" })).toHaveCount(0);
+  expect(requests.filter(request => request.method !== "GET")).toEqual([]);
 });
