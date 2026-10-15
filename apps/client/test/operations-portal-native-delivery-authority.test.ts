@@ -1,3 +1,4 @@
+import { NATIVE_DELIVERY_PRODUCTION_PROFILE } from '../src/worker/operations-native-delivery-deployment';
 import { readFileSync } from 'node:fs';
 import { Miniflare } from 'miniflare';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -40,9 +41,13 @@ function publication(): OperationsPortalWorkspacePublication {
       recipientAuthorityHeads: [], deliveryAuthorityHeads: [] }, actorProof: actor, observedAt: new Date().toISOString() };
 }
 
-describe('Operations-native delivery consumer with real forward schemas and producers', () => {
+describe.each(['staging', 'production'])('Operations-native delivery consumer with real forward schemas and producers: %s', environment => {
+  const portalOrigin = environment === 'production' ? 'https://client.ledgetopdroneservices.com' : 'https://client-staging.ledgetopdroneservices.com';
+  const deployment = environment === 'production' ? { EXPECTED_HOST: 'portal.ledgetopdroneservices.com',
+    PUBLIC_BASE_URL: 'https://portal.ledgetopdroneservices.com', PUBLIC_SHARE_ORIGIN: 'https://portal.ledgetopdroneservices.com',
+    CLIENT_PORTAL_ORIGIN: portalOrigin, CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_DEPLOYMENT_PROFILE: NATIVE_DELIVERY_PRODUCTION_PROFILE } : {};
   let runtime: Miniflare, db: D1Database, bucket: R2Bucket, published: OperationsPortalWorkspacePublication, homeFingerprint: string;
-  const env = () => ({ DELIVERY_DB: db, ENVIRONMENT: 'staging', CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_WRITER_ENABLED: 'true',
+  const env = () => ({ ...deployment, DELIVERY_DB: db, ENVIRONMENT: environment, CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_WRITER_ENABLED: 'true',
     CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_STATUS_ENABLED: 'true' });
   beforeAll(async () => {
     runtime = new Miniflare({ modules: true, compatibilityDate: '2026-08-06', script: 'export default {}',
@@ -162,13 +167,12 @@ describe('Operations-native delivery consumer with real forward schemas and prod
       return JSON.stringify({ ok: true, protocolVersion: 1, authorization: { ...pins,
         selectedR2Prefix: value.resource.selectedR2Prefix, expiresAt: value.expiresAt, features: value.features } });
     } };
-    const readEnv = { ...env(), CLIENT_PORTAL_ORIGIN: 'https://client-staging.ledgetopdroneservices.com',
+    const readEnv = { ...env(), CLIENT_PORTAL_ORIGIN: portalOrigin,
       CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_READ_ENABLED: 'true', OPERATIONS_PORTAL_NATIVE_DELIVERY_AUTHORIZATION_READER: reader };
     expect(await authorizeNativeOperationsDelivery(readEnv, { issuer, subject }, id(12), 'folder.list')).toMatchObject({ ok: true });
     const callsBeforeWrongPerson = privateReads;
     expect(await authorizeNativeOperationsDelivery(readEnv, { issuer, subject: 'another-person' }, id(12), 'folder.list')).toEqual({ ok: false, code: 'denied' });
     expect(privateReads).toBe(callsBeforeWrongPerson);
-    const portalOrigin = 'https://client-staging.ledgetopdroneservices.com';
     const portalEnv = { ...readEnv, CLIENT_PORTAL_ENABLED: 'true', CLIENT_PORTAL_ORIGIN: portalOrigin, DELIVERY_SESSION_SECRET: 's'.repeat(48),
       DATA_BUCKET: bucket, CLIENT_PORTAL_OPERATIONS_NATIVE_CONTENT_AUDIT_ENABLED: 'true',
       CLIENT_PORTAL_OPERATIONS_NATIVE_CONTENT_AUDIT_HMAC_SECRET: 'synthetic-separate-audit-key-32-bytes-minimum' };

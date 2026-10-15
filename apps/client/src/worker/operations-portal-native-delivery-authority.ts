@@ -6,7 +6,9 @@ import { canonicalOperationsPortalNativeDeliveryAuthorityCommand,
   parseOperationsPortalNativeDeliveryCancellationRequest, type OperationsPortalNativeDeliveryAuthorityCommand, type OperationsPortalNativeDeliveryAuthorityReceipt,
 } from '@ltds/shared/operations-portal-native-delivery-authority';
 
-type DeliveryWriterEnv = Readonly<{ DELIVERY_DB: D1Database; ENVIRONMENT?: string;
+import { nativeDeliveryDeploymentEnabled, type NativeDeliveryDeploymentEnv } from './operations-native-delivery-deployment';
+
+type DeliveryWriterEnv = NativeDeliveryDeploymentEnv & Readonly<{ DELIVERY_DB: D1Database; ENVIRONMENT?: string;
   CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_WRITER_ENABLED?: string;
   CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_STATUS_ENABLED?: string;
   CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_CANCELLATION_ENABLED?: string }>;
@@ -39,7 +41,7 @@ function parseCommand(raw: unknown): OperationsPortalNativeDeliveryAuthorityComm
 /** Atomic private consumer only. Persistence does not grant index/R2 access:
  * readers must verify current heads, home/publication and the live Ops proof. */
 export async function applyOperationsPortalNativeDeliveryAuthority(env: DeliveryWriterEnv, raw: unknown): Promise<string> {
-  if (env.ENVIRONMENT !== 'staging' || env.CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_WRITER_ENABLED !== 'true')
+  if (!nativeDeliveryDeploymentEnabled(env, 'rpc') || env.CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_WRITER_ENABLED !== 'true')
     return failure('disabled', true);
   const command = parseCommand(raw);
   if (!command) return failure('invalid');
@@ -120,7 +122,7 @@ export async function applyOperationsPortalNativeDeliveryAuthority(env: Delivery
 }
 
 export async function readOperationsPortalNativeDeliveryAuthorityStatus(env: DeliveryWriterEnv, raw: unknown): Promise<string> {
-  if (env.ENVIRONMENT !== 'staging' || env.CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_STATUS_ENABLED !== 'true')
+  if (!nativeDeliveryDeploymentEnabled(env, 'rpc') || env.CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_STATUS_ENABLED !== 'true')
     return failure('disabled', true);
   if (typeof raw !== 'string' || encoder.encode(raw).byteLength > 2048) return failure('invalid');
   let request;
@@ -136,7 +138,7 @@ export async function readOperationsPortalNativeDeliveryAuthorityStatus(env: Del
 }
 
 export async function readOperationsPortalNativeDeliveryAuthorityDisposition(env: DeliveryWriterEnv, raw: unknown): Promise<string> {
-  if (env.ENVIRONMENT !== 'staging' || env.CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_CANCELLATION_ENABLED !== 'true') return failure('disabled', true);
+  if (!nativeDeliveryDeploymentEnabled(env, 'rpc') || env.CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_CANCELLATION_ENABLED !== 'true') return failure('disabled', true);
   let request;
   try { request = parseOperationsPortalNativeDeliveryCancellationRequest(JSON.parse(String(raw)));
     if (!request || canonicalOperationsPortalNativeDeliveryCancellationRequest(request) !== raw) return failure('invalid'); }
@@ -155,7 +157,7 @@ export async function readOperationsPortalNativeDeliveryAuthorityDisposition(env
 }
 
 export async function cancelOperationsPortalNativeDeliveryAuthority(env: DeliveryWriterEnv, raw: unknown): Promise<string> {
-  if (env.ENVIRONMENT !== 'staging' || env.CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_CANCELLATION_ENABLED !== 'true') return failure('disabled', true);
+  if (!nativeDeliveryDeploymentEnabled(env, 'rpc') || env.CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_CANCELLATION_ENABLED !== 'true') return failure('disabled', true);
   let request;
   try { request = parseOperationsPortalNativeDeliveryCancellationRequest(JSON.parse(String(raw)));
     if (!request || canonicalOperationsPortalNativeDeliveryCancellationRequest(request) !== raw) return failure('invalid'); }

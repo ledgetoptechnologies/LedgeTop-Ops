@@ -1,3 +1,4 @@
+import { nativeDeliveryDeploymentEnabled, type NativeDeliveryDeploymentEnv } from '../operations-native-delivery-deployment';
 import { canonicalOperationsPortalNativeDeliveryAuthorityCommand,
   sha256OperationsPortalNativeDeliveryAuthorityCommand,
   type OperationsPortalNativeDeliveryFeature } from "@ltds/shared/operations-portal-native-delivery-authority";
@@ -14,7 +15,7 @@ const OBJECTS = ["operations_portal_native_content_start_timeline",
 const WINDOW_MS = 10 * 60 * 1000;
 const CANONICAL_TIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u;
 
-export type OperationsNativeContentAuditEnv = Readonly<{
+export type OperationsNativeContentAuditEnv = NativeDeliveryDeploymentEnv & Readonly<{
   DELIVERY_DB: D1Database;
   ENVIRONMENT?: string;
   CLIENT_PORTAL_ORIGIN?: string;
@@ -46,7 +47,7 @@ function bounded(value: unknown, maximum: number): value is string {
     && !/[\u0000-\u001f\u007f]/u.test(value);
 }
 async function ready(env: OperationsNativeContentAuditEnv) {
-  if (env.ENVIRONMENT !== "staging" || env.CLIENT_PORTAL_ORIGIN !== "https://client-staging.ledgetopdroneservices.com"
+  if (!nativeDeliveryDeploymentEnabled(env)
     || env.CLIENT_PORTAL_OPERATIONS_NATIVE_CONTENT_AUDIT_ENABLED !== "true") unavailable("disabled");
   if (!bounded(env.CLIENT_PORTAL_OPERATIONS_NATIVE_CONTENT_AUDIT_HMAC_SECRET, 4096)
     || env.CLIENT_PORTAL_OPERATIONS_NATIVE_CONTENT_AUDIT_HMAC_SECRET.length < 32) unavailable("configuration_invalid");

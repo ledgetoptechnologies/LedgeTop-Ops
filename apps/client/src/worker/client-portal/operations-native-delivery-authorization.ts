@@ -1,3 +1,4 @@
+import { nativeDeliveryDeploymentEnabled, type NativeDeliveryDeploymentEnv } from '../operations-native-delivery-deployment';
 import { canonicalOperationsPortalNativeDeliveryAuthorityCommand, parseOperationsPortalNativeDeliveryAuthorityCommand,
   sha256OperationsPortalNativeDeliveryAuthorityCommand, OPERATIONS_PORTAL_NATIVE_DELIVERY_AUTHORITY_MAX_BYTES,
   type OperationsPortalNativeDeliveryAuthorityCommand, type OperationsPortalNativeDeliveryFeature,
@@ -32,7 +33,7 @@ function authorizationRequest(command: OperationsPortalNativeDeliveryAuthorityCo
 
 export type NativeOperationsDeliveryAuthorizationRequest = OperationsPortalNativeDeliveryAuthorizationReadRequest;
 export type NativeOperationsDeliveryAuthorizationBinding = OperationsPortalNativeDeliveryAuthorizationReaderBinding;
-export type NativeOperationsDeliveryAuthorizationEnv = Readonly<{
+export type NativeOperationsDeliveryAuthorizationEnv = NativeDeliveryDeploymentEnv & Readonly<{
   DELIVERY_DB: D1Database; ENVIRONMENT?: string; CLIENT_PORTAL_ORIGIN?: string;
   CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_READ_ENABLED?: string;
   OPERATIONS_PORTAL_NATIVE_DELIVERY_AUTHORIZATION_READER?: NativeOperationsDeliveryAuthorizationBinding;
@@ -100,7 +101,7 @@ async function currentRow(env: NativeOperationsDeliveryAuthorizationEnv, princip
 export async function authorizeNativeOperationsDelivery(env: NativeOperationsDeliveryAuthorizationEnv,
   principal: Pick<VerifiedClientPrincipal, 'issuer' | 'subject'>, authorityId: string, feature: OperationsPortalNativeDeliveryFeature,
   handle?: OperationsNativeDeliveryHandle): Promise<NativeOperationsDeliveryAuthorizationResult> {
-  if (env.ENVIRONMENT !== 'staging' || env.CLIENT_PORTAL_ORIGIN !== 'https://client-staging.ledgetopdroneservices.com'
+  if (!nativeDeliveryDeploymentEnabled(env)
     || env.CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_READ_ENABLED !== 'true') return { ok: false, code: 'disabled' };
   if (!UUID.test(authorityId) || !principal.issuer || !principal.subject || principal.issuer.length > 512 || principal.subject.length > 512)
     return { ok: false, code: 'denied' };

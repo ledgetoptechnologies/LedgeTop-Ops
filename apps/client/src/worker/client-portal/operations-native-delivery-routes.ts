@@ -1,3 +1,4 @@
+import { nativeDeliveryDeploymentEnabled } from '../operations-native-delivery-deployment';
 import { Hono, type Context } from 'hono';
 import { HTTPException } from 'hono/http-exception';
 import { isMovedSourceMarker } from '@ltds/shared';
@@ -79,7 +80,7 @@ export function createOperationsNativeDeliveryRouter(dependencies: { resolvePrin
   router.use('*', async (c, next) => {
     c.header('Cache-Control', 'private, no-store'); c.header('Cloudflare-CDN-Cache-Control', 'no-store'); c.header('X-Content-Type-Options', 'nosniff');
     if (c.env.CLIENT_PORTAL_ENABLED !== 'true' || c.env.CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_READ_ENABLED !== 'true'
-      || c.env.ENVIRONMENT !== 'staging' || c.env.CLIENT_PORTAL_ORIGIN !== 'https://client-staging.ledgetopdroneservices.com') return c.json({ error: 'Not found' }, 404);
+      || !nativeDeliveryDeploymentEnabled(c.env)) return c.json({ error: 'Not found' }, 404);
     const origins = configuredClientPortalOrigins(c.env);
     if (!origins) return c.json({ error: 'Client portal is not configured' }, 503);
     // EXPECTED_HOST belongs to public delivery. Native bytes are confined to

@@ -43,9 +43,11 @@ export interface Env {
   CLIENT_PORTAL_OPERATIONS_NATIVE_AUTHORITY_EXPECTED_HOST?: string;
   CLIENT_PORTAL_OPERATIONS_NATIVE_AUTHORITY_WRITER_ENABLED?: string;
   CLIENT_PORTAL_OPERATIONS_NATIVE_AUTHORITY_STATUS_ENABLED?: string;
-  /** Staging-only native delivery command consumer. Persistence alone never grants byte access. */
+  /** Explicit production deployment assertion; verify physical bindings before activation. */
+  CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_DEPLOYMENT_PROFILE?: string;
+  /** Default-off native delivery command consumer. Persistence alone never grants byte access. */
   CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_WRITER_ENABLED?: string;
-  /** Staging-only exact-receipt recovery for the native delivery command consumer. */
+  /** Default-off exact-receipt recovery for the native delivery command consumer. */
   CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_STATUS_ENABLED?: string;
   /** Default-off native folder/index/media reads; requires a fresh private Operations proof. */
   CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_READ_ENABLED?: string;
@@ -53,7 +55,7 @@ export interface Env {
   CLIENT_PORTAL_OPERATIONS_NATIVE_CONTENT_AUDIT_ENABLED?: string;
   /** Dedicated HMAC key for native content/version fingerprints; configured as a secret, never a var. */
   CLIENT_PORTAL_OPERATIONS_NATIVE_CONTENT_AUDIT_HMAC_SECRET?: string;
-  /** Staging-only private proof reader; no public HTTP fallback. */
+  /** Private proof reader; no public HTTP fallback. */
   OPERATIONS_PORTAL_NATIVE_DELIVERY_AUTHORIZATION_READER?: Service & import("@ltds/shared/operations-portal-native-delivery-authority").OperationsPortalNativeDeliveryAuthorizationReaderBinding;
   /** Staging-only private consent binding, separate from historical PA enrollment. */
   OPERATIONS_PORTAL_NATIVE_RECIPIENT_ENROLLMENT?: Service & import("./client-portal/operations-native-recipient-enrollment-http").OperationsNativeRecipientEnrollmentBinding;
