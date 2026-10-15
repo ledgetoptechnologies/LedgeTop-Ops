@@ -5,6 +5,20 @@ export async function nativeProjectLifecycleCanonicalProof(
   db: D1Database,
   head: "s" | "project",
 ): Promise<string | null> {
+  const columns = await db
+    .prepare("PRAGMA table_info(operations_shared_project_revisions)")
+    .all<{ name: string }>();
+  return nativeProjectLifecycleCanonicalProofForRevisionSchema(db, head, columns.results);
+}
+
+/** Reuse only revision columns already read by the current composite proof.
+ * Lifecycle relations are still inspected here; no schema or authority state
+ * is cached across invocations or database bindings. */
+export async function nativeProjectLifecycleCanonicalProofForRevisionSchema(
+  db: D1Database,
+  head: "s" | "project",
+  revisionColumns: readonly { name: string }[],
+): Promise<string | null> {
   const tables = [
     "native_project_lifecycle_commands",
     "native_project_lifecycle_receipts",
@@ -29,10 +43,7 @@ export async function nativeProjectLifecycleCanonicalProof(
     )
     .bind(...names)
     .all<{ name: string; type: string }>();
-  const columns = await db
-    .prepare("PRAGMA table_info(operations_shared_project_revisions)")
-    .all<{ name: string }>();
-  const hasColumn = columns.results.some(
+  const hasColumn = revisionColumns.some(
     (column) => column.name === "lifecycle_settlement_id",
   );
   if (!hasColumn && relations.results.length === 0) return "0";
