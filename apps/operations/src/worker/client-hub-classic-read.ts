@@ -12,8 +12,8 @@ export async function clientHubClassicReadIdentities(env: Pick<Env, "OPS_DB" | "
   const relations = await env.OPS_DB.prepare(`SELECT name FROM sqlite_master WHERE name IN (
     'project_alpha_api_v2_directory_observations_current','project_alpha_acquired_canonical_mappings',
     'project_alpha_existing_directory_binding_acquired_mapping_receipts','operations_directory_records',
-    'project_alpha_directory_mappings')`).all<{ name: string }>();
-  if (relations.results.length !== 5) return [];
+    'project_alpha_directory_mappings','project_alpha_api_v2_inventory_conflicts')`).all<{ name: string }>();
+  if (relations.results.length !== 6) return [];
   const sources = await env.OPS_DB.prepare(`SELECT DISTINCT source_id FROM project_alpha_api_v2_directory_observations_current ORDER BY source_id`).all<{ source_id: string }>();
   return sources.results.flatMap(({ source_id }) => {
     try {
@@ -56,6 +56,9 @@ export function clientHubClassicReadEligibleSql(table: "pa_clients" | "pa_organi
         AND observation.binding_external_id IS NULL AND observation.binding_status IS NULL AND observation.has_conflict=0
         AND connector.read_visible=1 AND connector.state<>'retired' AND (${tuple}))
     AND NOT EXISTS (SELECT 1 FROM operations_directory_records classic_record WHERE classic_record.record_id=${alias}.id)
+    AND NOT EXISTS (SELECT 1 FROM project_alpha_api_v2_inventory_conflicts classic_source_conflict
+      WHERE classic_source_conflict.source_id=${alias}.projection_source_id
+        AND classic_source_conflict.inventory_kind='directory' AND classic_source_conflict.resource_type='source')
     AND ${claims})`;
 }
 

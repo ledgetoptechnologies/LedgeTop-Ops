@@ -211,6 +211,33 @@ describe("migrated Client Hub classic business read compatibility", { timeout: 6
     expect(await resolveClientHubSourceRootByAlphaPublicId(env, "standalone_client", primary, publicId(90))).toMatchObject({id:otherSourceRecord});
   });
 
+  it("vetoes source-wide directory conflicts independently of resource conflict flags and isolates other sources", async () => {
+    const { ops, env } = await compatibilityFixture();
+    const primaryId = await classic(ops, primary, 97);
+    const secondaryId = await classic(ops, secondary, 98);
+    expect(await reconcileClientHubIndex(env, 40)).toMatchObject({ status: "complete" });
+    expect((await listClientHubRoots(env, staff, { limit: 100 })).clients).toHaveLength(2);
+    const conflict = (surface: string) => ops.prepare(`INSERT INTO project_alpha_api_v2_inventory_conflicts
+      (source_id,source_instance_id,application_id,history_epoch_id,inventory_kind,resource_type,project_alpha_public_id,external_id)
+      VALUES(?,?,?,?,?,'source',NULL,NULL)`).bind(primary, identity.sourceInstanceId, identity.applicationId, identity.historyEpoch, surface).run();
+    await conflict("project");
+    expect(await resolveClientHubSourceRoot(env, "standalone_client", primaryId, primary)).not.toBeNull();
+    await conflict("directory");
+    // The current observation itself remains present, unbound and conflict-free.
+    // Only the independently recorded source-wide conflict vetoes its display.
+    expect(await ops.prepare(`SELECT has_conflict FROM project_alpha_api_v2_directory_observations_current
+      WHERE source_id=?`).bind(primary).first("has_conflict")).toBe(0);
+    expect(await resolveClientHubSourceRoot(env, "standalone_client", primaryId, primary)).toBeNull();
+    expect(await resolveClientHubSourceRootByAlphaPublicId(env, "standalone_client", primary, publicId(97))).toBeNull();
+    await expect(findClientHubRoot(env, "standalone_client", primaryId, primary, "business"))
+      .rejects.toMatchObject({ status: 404 });
+    expect((await listClientHubRoots(env, staff, { q: "Compatibility", limit: 100 })).clients.map(row => row.public_id))
+      .toEqual([secondaryId]);
+    expect(await resolveClientHubSourceRoot(env, "standalone_client", secondaryId, secondary)).not.toBeNull();
+    expect(await ops.prepare("SELECT count(*) n FROM operations_directory_records").first("n")).toBe(0);
+    expect(await ops.prepare("SELECT count(*) n FROM project_alpha_active_directory_mappings").first("n")).toBe(0);
+  });
+
   it("blocks malformed and inactive duplicate public IDs rather than guessing a classic identity", async () => {
     const { ops, env } = await compatibilityFixture();
     const id = await classic(ops, primary, 91);
