@@ -58,7 +58,7 @@ import { activateProjectAlphaProjectV2Canonical } from "../../src/worker/project
 
 let runtime: Miniflare, operations: D1Database, client: D1Database, bucket: R2Bucket, sequence = 1;
 const id = () => `e0000000-0000-4000-8000-${String(sequence++).padStart(12, "0")}`;
-const organization = "acceptance/organization/one", clientRecord = "acceptance/client/one";
+let organization = "acceptance/organization/one", clientRecord = "acceptance/client/one";
 const organizationExternalId = "pa/organization/existing-one";
 const organizationPublicId = "90000000000000000000000000000001";
 const projectPublicId = "90000000000000000000000000000003", projectProjectionSha256 = "a".repeat(64);
@@ -76,7 +76,8 @@ const projectAlphaConnections = JSON.stringify({ version: 1, instances: { [sourc
   sourceInstanceId, applicationId, historyEpoch: historyEpochId,
 } } });
 
-function existingOrganizationRemote() {
+export function existingOrganizationRemote(destination={sourceInstanceId,applicationId,historyEpochId,apiKey:"acceptance-private-key"}) {
+  const {sourceInstanceId,applicationId,historyEpochId,apiKey}=destination;
   let generation = "8", bound = true, request = 0;
   return vi.fn<typeof fetch>(async (input, init) => {
     const path = new URL(String(input)).pathname;
@@ -100,7 +101,7 @@ function existingOrganizationRemote() {
           requiresApplicationId: true, requiresHistoryEpoch: true, requiresExpectedPublicId: true,
           requiresExpectedRevision: true },
       ] });
-    if (headers.get("Authorization") !== "Bearer acceptance-private-key"
+    if (headers.get("Authorization") !== "Bearer "+apiKey
       || headers.get("X-PA-Source-Instance-ID") !== sourceInstanceId
       || headers.get("X-PA-Application-ID") !== applicationId
       || headers.get("X-PA-History-Epoch") !== historyEpochId) throw new Error("invalid PA identity boundary");
@@ -354,8 +355,10 @@ export type CanonicalPortalAcceptanceContext={runtime:Miniflare;operations:D1Dat
  advanceProject:()=>Promise<void>};
 
 export async function runCanonicalPortalResourceAcceptance(onReady?:(context:CanonicalPortalAcceptanceContext)=>Promise<void>,
-  options?:Readonly<{stopAfterReady?:boolean;operationsThroughMigration?:"0203_effective_native_directory_enrollment_consumers.sql"}>){
+  options?:Readonly<{stopAfterReady?:boolean;operationsThroughMigration?:"0203_effective_native_directory_enrollment_consumers.sql";nativeRecordIds?:Readonly<{organization:string;client:string}>}>){
 
+  organization=options?.nativeRecordIds?.organization??"acceptance/organization/one";
+  clientRecord=options?.nativeRecordIds?.client??"acceptance/client/one";
   runtime = new Miniflare({ modules: true, compatibilityDate: "2026-08-06", script: "export default {}",
     d1Databases: { OPS_DB: crypto.randomUUID(), CLIENT_DB: crypto.randomUUID() },
     r2Buckets: { DATA_BUCKET: crypto.randomUUID() } });

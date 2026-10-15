@@ -1,8 +1,11 @@
 import type { ClientPortalServiceMetadataRequestV1 } from "../../../../packages/shared/src/client-portal-service-metadata";
-import { resolveTrustedNativeFinancialMapping, type NativeFinancialTarget } from "./project-alpha-financial-mapping";
+import { resolveTrustedNativeFinancialMappingEvidence,prepareTrustedNativeFinancialMappingQuery,nativeFinancialMappingEvidenceFromRows,
+  type NativeFinancialMappingEvidence,type NativeFinancialMappingRow,type NativeFinancialTarget } from "./project-alpha-financial-mapping";
 import { readConfiguredProjectAlphaFinancialDocuments, selectorFromTrustedFinancialMapping,
-  type FinancialCollection, type TrustedFinancialMapping } from "./project-alpha-financial-transport";
+  type FinancialCollection } from "./project-alpha-financial-transport";
 import type { Env } from "./types";
+import type { NativeBillingSourceContext } from "../../../../packages/shared/src/operations-portal-native-billing-source-authority";
+import { sameNativeBillingSourceIdentity,nativeBillingSourceContextFromEvidence as context } from "./operations-portal-native-billing-source-context";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 type ReaderEnv = Pick<Env, "OPS_DB" | "PROJECT_ALPHA_API_V2_CONNECTIONS"> & {
@@ -13,7 +16,7 @@ export type NativeFinancialReadResult = Readonly<{ status: "ok"; grantId: string
   value: FinancialCollection }> | Readonly<{ status: "disabled" | "denied" | "unavailable" | "incompatible" }>;
 
 type Authority = { grant_id: string; revision: number; entity_kind: "organization" | "client" | "project";
-  native_entity_id: string };
+  native_entity_id: string; context_json?:string;parent_revision?:number;parent_finalization_id?:string };
 const KEYS = ["protocolVersion","authorityId","workspaceId","ownershipEpoch","grantRevision","issuer","subject","grantId"];
 
 function request(value: unknown): NativeFinancialReadRequest | null {
@@ -34,12 +37,24 @@ function request(value: unknown): NativeFinancialReadRequest | null {
 }
 
 async function authority(db:D1Database,input:NativeFinancialReadRequest):Promise<Authority|null>{
+  const source=(await db.withSession("first-primary").prepare(`SELECT child.grant_id,child.revision,live.entity_kind,live.native_entity_id,
+    child.context_json,child.parent_revision,child.parent_finalization_id
+    FROM operations_portal_native_billing_source_live_authority child
+    JOIN operations_portal_native_billing_live_authority live ON live.grant_id=child.parent_grant_id
+    JOIN operations_portal_native_recipient_authority_heads recipient ON recipient.recipient_binding_id=live.recipient_binding_id
+    JOIN operations_portal_native_workspace_authority_heads workspace ON workspace.target_id=recipient.target_id
+    WHERE child.grant_id=? AND workspace.client_authority_id=? AND workspace.workspace_id=?
+     AND workspace.ownership_epoch=? AND recipient.grant_revision=? AND recipient.issuer=? AND recipient.subject=? LIMIT 2`)
+    .bind(input.grantId,input.authorityId,input.workspaceId,input.ownershipEpoch,input.grantRevision,input.issuer,input.subject)
+    .all<Authority>()).results;
+  if(source.length)return source.length===1?source[0]!:null;
   const rows=(await db.withSession("first-primary").prepare(`SELECT live.grant_id,live.revision,live.entity_kind,live.native_entity_id
     FROM operations_portal_native_billing_live_authority live
     JOIN operations_portal_native_recipient_authority_heads recipient
       ON recipient.recipient_binding_id=live.recipient_binding_id
     JOIN operations_portal_native_workspace_authority_heads workspace ON workspace.target_id=recipient.target_id
-    WHERE live.grant_id=? AND workspace.client_authority_id=? AND workspace.workspace_id=?
+    WHERE live.grant_id=? AND NOT EXISTS(SELECT 1 FROM operations_portal_native_billing_source_commands history
+      WHERE history.parent_grant_id=live.grant_id) AND workspace.client_authority_id=? AND workspace.workspace_id=?
       AND workspace.ownership_epoch=? AND recipient.grant_revision=? AND recipient.issuer=? AND recipient.subject=?
     LIMIT 2`).bind(input.grantId,input.authorityId,input.workspaceId,input.ownershipEpoch,input.grantRevision,
       input.issuer,input.subject).all<Authority>()).results;
@@ -47,10 +62,23 @@ async function authority(db:D1Database,input:NativeFinancialReadRequest):Promise
 }
 
 function target(row:Authority):NativeFinancialTarget {
-  return row.entity_kind==="project" ? {kind:"project",externalProjectId:row.native_entity_id}
-    : {kind:row.entity_kind,recordId:row.native_entity_id};
+  const sourceId=row.context_json?(JSON.parse(row.context_json) as NativeBillingSourceContext).sourceId:undefined;
+  return row.entity_kind==="project" ? {kind:"project",externalProjectId:row.native_entity_id,...(sourceId?{sourceId}:{})}
+    : {kind:row.entity_kind,recordId:row.native_entity_id,...(sourceId?{sourceId}:{})};
 }
-const sameMapping=(a:TrustedFinancialMapping,b:TrustedFinancialMapping)=>JSON.stringify(a)===JSON.stringify(b);
+// Private local witnesses never become wire fields or cached bearer handles. Weak keys do not retain completed requests.
+const witnesses=new WeakMap<object,{target:NativeFinancialTarget;evidence:NativeFinancialMappingEvidence}>();
+/** The aggregate must batch ALL prepared witnesses and its final authority query together:
+ * repeated asynchronous local rechecks would recreate the sibling-fetch race. No PA call occurs here. */
+export async function prepareNativeFinancialReadWitness(env:ReaderEnv,result:Extract<NativeFinancialReadResult,{status:"ok"}>){
+ const witness=witnesses.get(result);if(!witness)return null;
+ const query=await prepareTrustedNativeFinancialMappingQuery(env,witness.target);if(!query)return null;
+ return {statement:env.OPS_DB.withSession("first-primary").prepare(query.sql).bind(...query.params),
+  matches:(rows:NativeFinancialMappingRow[])=>{
+   const current=nativeFinancialMappingEvidenceFromRows(env,witness.target,rows);
+   return current!==null&&JSON.stringify(current)===JSON.stringify(witness.evidence);
+  }};
+}
 
 /** Unmounted private composition. Browser values only identify an already-live recipient grant;
  * the current billing ledger and trusted native mapping independently derive all PA selectors. */
@@ -61,18 +89,19 @@ export async function readClientPortalNativeFinancialDocuments(env:ReaderEnv,inp
   if(env.CLIENT_PORTAL_NATIVE_FINANCIAL_RPC_ENABLED!=="true") return {status:"disabled"};
   const before=await authority(env.OPS_DB,input);
   if(!before) return {status:"denied"};
-  const mapping=await resolveTrustedNativeFinancialMapping(env,target(before));
+  const pinned=before.context_json?JSON.parse(before.context_json) as NativeBillingSourceContext:null;
+  const evidence=await resolveTrustedNativeFinancialMappingEvidence(env,target(before)),mapping=evidence?.mapping;
+  if(pinned&&(!evidence||!sameNativeBillingSourceIdentity(pinned,context(evidence))))return {status:"denied"};
   const selector=mapping && selectorFromTrustedFinancialMapping(mapping);
-  if(!mapping||!selector) return {status:"denied"};
+  if(!evidence||!mapping||!selector) return {status:"denied"};
   const result=await readConfiguredProjectAlphaFinancialDocuments(env,mapping,selector,send);
   if(result.status!=="ok") return {status:result.status==="unavailable"?"unavailable":"incompatible"};
   const after=await authority(env.OPS_DB,input);
-  const currentMapping=after && await resolveTrustedNativeFinancialMapping(env,target(after));
-  const finalAuthority=currentMapping && await authority(env.OPS_DB,input);
-  if(!after||!finalAuthority||after.grant_id!==before.grant_id||after.revision!==before.revision
-    ||after.entity_kind!==before.entity_kind||after.native_entity_id!==before.native_entity_id
-    ||finalAuthority.grant_id!==after.grant_id||finalAuthority.revision!==after.revision
-    ||finalAuthority.entity_kind!==after.entity_kind||finalAuthority.native_entity_id!==after.native_entity_id
-    ||!currentMapping||!sameMapping(mapping,currentMapping)) return {status:"denied"};
-  return {status:"ok",grantId:before.grant_id,revision:before.revision,value:result.value};
+  const current=after&&await resolveTrustedNativeFinancialMappingEvidence(env,target(after));
+  const finalAuthority=current&&await authority(env.OPS_DB,input);
+  if(!after||!current||!finalAuthority||JSON.stringify(before)!==JSON.stringify(after)
+    ||JSON.stringify(after)!==JSON.stringify(finalAuthority)||JSON.stringify(evidence)!==JSON.stringify(current))return {status:"denied"};
+  const output={status:"ok" as const,grantId:before.grant_id,revision:before.revision,value:result.value};
+  witnesses.set(output,{target:target(before),evidence});
+  return output;
 }

@@ -1,3 +1,4 @@
+import { reviewed204AuthorityTestRoot } from "./historical-0204-authority-test-source.mjs";
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
 import fs from "node:fs";
@@ -8,12 +9,12 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 import {
   applyRelationshipRecoveryAuthorityV184,
-  compileRelationshipRecoveryAuthorityV184,
+  compileRelationshipRecoveryAuthorityV184 as originalcompileRelationshipRecoveryAuthorityV184,
   RELATIONSHIP_RECOVERY_AUTHORITY_TARGET_V2 as recoveryTarget,
 } from "./staging-relationship-generation-recovery-authority-v184.mjs";
 import {
   applyDirectoryScalarAuthorityV184,
-  compileDirectoryScalarAuthorityV184,
+  compileDirectoryScalarAuthorityV184 as originalcompileDirectoryScalarAuthorityV184,
   DIRECTORY_SCALAR_AUTHORITY_V184_TARGET as scalarTarget,
 } from "./staging-directory-scalar-authority-v184.mjs";
 import { validateClosedRelationshipRecoveryLineageV184 } from "./staging-project-business-area-authority-v184.mjs";
@@ -22,14 +23,18 @@ import { captureDirectoryScalarSnapshot } from "./staging-directory-scalar-evide
 import { STAGING_TARGET } from "./staging-onboarding-native-only-authority-packet.mjs";
 import { loadHistorical0195ScalarWriter } from "./historical-0195-scalar-writer-fixture.mjs";
 
-const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),"..");
-const requireOperations=createRequire(path.join(root,"apps/operations/package.json"));
+const compileDirectoryScalarAuthorityV184=(input,options={})=>originalcompileDirectoryScalarAuthorityV184(input,{root,...options});
+
+const compileRelationshipRecoveryAuthorityV184=(input,options={})=>originalcompileRelationshipRecoveryAuthorityV184(input,{root,...options});
+
+const repositoryRoot=path.resolve(path.dirname(fileURLToPath(import.meta.url)),".."),root=reviewed204AuthorityTestRoot();
+const requireOperations=createRequire(path.join(repositoryRoot,"apps/operations/package.json"));
 const {Miniflare}=requireOperations("miniflare"),{unstable_splitSqlQuery}=requireOperations("wrangler");
 const migrationDir=path.join(root,"apps/operations/migrations");
 const migrationNames=fs.readdirSync(migrationDir).filter(name=>/^\d{4}_.+\.sql$/.test(name)&&name.slice(0,4)<="0195").sort();
 const CANONICAL_BOOTSTRAP_MIGRATION_COUNT=195;
 const CANONICAL_BOOTSTRAP_FINAL_MIGRATION="0195_client_hub_native_project_current_owner_observation.sql";
-const viteUrl=pathToFileURL(path.join(root,"apps/operations/node_modules/vite/dist/node/index.js")).href;
+const viteUrl=pathToFileURL(path.join(repositoryRoot,"apps/operations/node_modules/vite/dist/node/index.js")).href;
 const all=async(db,sql,...params)=>(await db.prepare(sql).bind(...params).all()).results;
 const first=(db,sql,...params)=>db.prepare(sql).bind(...params).first();
 const uuid=n=>`70000000-0000-4000-8000-${String(n).padStart(12,"0")}`;
@@ -176,7 +181,7 @@ async function rejectsAtomically(db,artifact,driftStatements,label){
 
 async function lifecycle(t,postHistoricalLifecycleHook){
  const [{createServer}]=await Promise.all([import(viteUrl)]);
- const server=await createServer({root:path.join(root,"apps/operations"),configFile:false,server:{middlewareMode:true},appType:"custom",logLevel:"silent"});
+ const server=await createServer({root:path.join(repositoryRoot,"apps/operations"),configFile:false,server:{middlewareMode:true},appType:"custom",logLevel:"silent"});
  const runtime=new Miniflare({modules:true,compatibilityDate:"2026-08-06",script:"export default {fetch(){return new Response('ok')}}",d1Databases:{OPS_DB:`scalar-authority-${crypto.randomUUID()}`}});
  t.after(async()=>{try{await runtime.dispose()}finally{await server.close()}});
  const db=await runtime.getD1Database("OPS_DB");

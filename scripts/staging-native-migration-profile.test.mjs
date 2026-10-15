@@ -10,7 +10,7 @@ import { parseRemoteLedgerJson, validateExactRemoteLedger, verifyLiveRemoteLedge
 const root = path.resolve(import.meta.dirname, "..");
 const temporary = [];
 
-function fixture(operationsCutoff = 204) {
+function fixture(operationsCutoff = 205) {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), "ltds-native-migration-profile-"));
   temporary.push(base);
   fs.writeFileSync(path.join(base, ".gitignore"), "apps/*/wrangler.staging.*.json\napps/*/.staging-bootstrap/\n");
@@ -82,7 +82,7 @@ test("builds only the exact migration suffixes and strips every deployment field
     "0199_native_directory_profile_binding_continuations.sql");
   assert.equal(profiles.operations.manifest.reviewedFinalChain.namesSha256,
     "7be05fcb2b54c3a345b76b1f37e3dbbf33c0f4278b6cabe8307a064549c33821");
-  assert.equal(profiles.operations.files.some(({ name }) => /^020[0-4]_/.test(name)), false,
+  assert.equal(profiles.operations.files.some(({ name }) => /^020[0-5]_/.test(name)), false,
     "the exact current repository suffix is verified but never enters the staging migration-only profile");
   assert.equal(profiles.client.manifest.reviewedFinalChain.count, 149);
   assert.equal(profiles.client.manifest.reviewedFinalChain.finalMigration,
@@ -141,14 +141,23 @@ test("rejects an extra SQL file and a changed native migration", () => {
       ? /current repository migration inventory changed/ : new RegExp(`native candidate changed: ${name.slice(0, 4)}_`));
   }
   for (const name of ["0200_native_directory_active_binding_refresh_supersessions.sql", "0201_native_directory_lifecycle.sql",
-    "0202_reviewed_import_enrollment.sql", "0203_effective_native_directory_enrollment_consumers.sql", "0204_native_project_archive_restore.sql"]) {
+    "0202_reviewed_import_enrollment.sql", "0203_effective_native_directory_enrollment_consumers.sql", "0204_native_project_archive_restore.sql",
+    "0205_native_billing_source_authority.sql"]) {
     const changed = fixture();
     fs.appendFileSync(path.join(changed, "apps", "operations", "migrations", name), " ");
     assert.throws(() => buildProfiles(changed), /current repository migration inventory changed/);
   }
   const unknown = fixture();
-  fs.writeFileSync(path.join(unknown, "apps", "operations", "migrations", "0205_unknown.sql"), "SELECT 1;\n");
+  fs.writeFileSync(path.join(unknown, "apps", "operations", "migrations", "0206_unknown.sql"), "SELECT 1;\n");
   assert.throws(() => buildProfiles(unknown), /current repository migration inventory changed/);
+});
+
+test("rejects a partial current 204/205 suffix without admitting an orphan tail", () => {
+  for (const name of ["0204_native_project_archive_restore.sql", "0205_native_billing_source_authority.sql"]) {
+    const partial = fixture();
+    fs.rmSync(path.join(partial, "apps", "operations", "migrations", name));
+    assert.throws(() => buildProfiles(partial), /current repository migration suffix is incomplete/);
+  }
 });
 
 test("accepts exact historical 0187, 0190, 0192, 0194, 0195, and 0196 chains but rejects partial successors", () => {

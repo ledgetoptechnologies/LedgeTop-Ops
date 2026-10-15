@@ -16,7 +16,9 @@ import {
   quoteSqlIdentifier,
   reviewedSchemaDefinitions,
 } from "./staging-native-portal-149-194-migrations.mjs";
-import { OPERATIONS_LATEST_SOURCE_MIGRATION_CHAIN } from "./staging-bootstrap.mjs";
+import { OPERATIONS_REVIEWED_SOURCE_MIGRATION_CHAIN_204 } from "./staging-bootstrap.mjs";
+import { OPERATIONS_SOURCE_CHAIN_204 } from "./staging-operations-source-v204.mjs";
+import { OPERATIONS_SOURCE_CHAIN_205 } from "./staging-operations-source-v205.mjs";
 import { collectOrderedReadOnlySnapshot } from "./ordered-read-only-snapshot.mjs";
 import { readCompleteTableSnapshot } from "./read-complete-table-snapshot.mjs";
 
@@ -37,12 +39,23 @@ export const reviewedNativeDirectorySchemaDefinitions = sql => {
   return reviewedSchemaDefinitions(statements.join(";\n"));
 };
 // Shared lifecycle; window wrappers provide immutable reviewed specifications.
-export function createNativeDirectoryMigrationWindow(SPEC, sourceCiGate = null, reconcile = null) {
+export function createNativeDirectoryMigrationWindow(SPEC, sourceCiGate = null, reconcile = null, profile = null) {
   assert(SPEC.application === "operations" && SPEC.preservationPolicy === "strict"
     && SPEC.database === "78b34173-b168-4e3d-9832-bb9d245cc6b8" && SPEC.databaseName === "ltds-ops-staging" && SPEC.binding === "OPS_DB",
     "only the pinned Operations staging boundary is allowed");
+  const billing205 = SPEC.from === 204 && SPEC.to === 205 && profile !== null;
+  if (profile !== null) {
+    assert(billing205, "only the explicit reviewed205 profile may override migration artifacts or source inventory");
+    assert.deepEqual(profile, { sourceChain: OPERATIONS_SOURCE_CHAIN_205, generatedArtifacts: "ignored-native-billing-205" },
+      "exact reviewed205 profile required");
+    assert.equal(SPEC.priorNamesSha256, OPERATIONS_SOURCE_CHAIN_204.namesSha256, "frozen204 names required");
+    assert.equal(SPEC.priorContentsSha256, OPERATIONS_SOURCE_CHAIN_204.contentsSha256, "frozen204 content required");
+    assert.deepEqual(SPEC.suffix, Object.entries(OPERATIONS_SOURCE_CHAIN_205.appendedMigrations)
+      .map(([name, sha256]) => ({ name, sha256 })), "exact reviewed205 suffix required");
+    assert.equal(reconcile, null, "205 requires unchanged generic strict preservation");
+  }
   assert(SPEC.from === 196 && SPEC.to === 198 || SPEC.from === 198 && SPEC.to === 199
-    || SPEC.from === 200 && SPEC.to === 203 || SPEC.from === 203 && SPEC.to === 204,
+    || SPEC.from === 200 && SPEC.to === 203 || SPEC.from === 203 && SPEC.to === 204 || billing205,
     "only reviewed native Directory migration windows are allowed");
   if (SPEC.to === 199 || SPEC.to >= 203)
     assert.equal(typeof sourceCiGate, "function", `${String(SPEC.to).padStart(4, "0")} source CI execution gate required`);
@@ -55,9 +68,10 @@ const safeLabel = value => {
 };
 const locations = (base, label) => {
   const suffix = label ? `-${label}` : "";
+  const generated = billing205 ? "apps/operations/.staging-native-authority" : "apps/operations/.tmp-checks";
   return {
-    directory: path.join(base, `apps/operations/.tmp-checks/native-directory-${window}-migrations${suffix}`),
-    config: path.join(base, `apps/operations/.tmp-checks/native-directory-${window}-config${suffix}.json`),
+    directory: path.join(base, `${generated}/native-directory-${window}-migrations${suffix}`),
+    config: path.join(base, `${generated}/native-directory-${window}-config${suffix}.json`),
     backup: path.join(base, `apps/operations/.backups/native-directory-before-${SPEC.to}${suffix}.sql`),
     evidence: path.join(base, `apps/operations/.backups/native-directory-before-${SPEC.to}${suffix}.json`),
     // Labels namespace evidence only. A possibly attempted apply is shared across this exact window.
@@ -129,7 +143,7 @@ function buildNativeDirectoryMigrationWindowPlan(base = root, label) {
   assert(entries.every(entry => /^\d{4}_.+\.sql$/.test(entry.name)), "canonical migration names required");
   assert(entries.every(entry => entry.isFile() && !entry.isSymbolicLink()), "migration chain must contain regular files");
   const sourceNames = entries.map(entry => entry.name).sort();
-  const current = OPERATIONS_LATEST_SOURCE_MIGRATION_CHAIN;
+  const current = billing205 ? OPERATIONS_SOURCE_CHAIN_205 : OPERATIONS_REVIEWED_SOURCE_MIGRATION_CHAIN_204;
   if (SPEC.to === 199 || SPEC.to >= 203)
     assert(sourceNames.length >= SPEC.to, `reviewed source chain must contain the exact ${String(SPEC.to).padStart(4, "0")} window`);
   assert.equal(sourceNames.length, current.count, "exact current Operations source inventory required");

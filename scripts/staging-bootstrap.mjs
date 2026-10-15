@@ -1,5 +1,6 @@
 import crypto from "node:crypto";
 import { OPERATIONS_SOURCE_CHAIN_204 } from "./staging-operations-source-v204.mjs";
+import { OPERATIONS_SOURCE_CHAIN_205 } from "./staging-operations-source-v205.mjs";
 import fs from "node:fs";
 import path from "node:path";
 import { isDeepStrictEqual } from "node:util";
@@ -34,11 +35,18 @@ export const OPERATIONS_CURRENT_SOURCE_MIGRATION_CHAIN = Object.freeze({
     "0203_effective_native_directory_enrollment_consumers.sql": "3e331b0de53c0e4ca0b22395b879ef0e799f66872c2f49afd4ef7f7a58be0008",
   }),
 });
-export const OPERATIONS_LATEST_SOURCE_MIGRATION_CHAIN = Object.freeze({
+export const OPERATIONS_REVIEWED_SOURCE_MIGRATION_CHAIN_204 = Object.freeze({
   ...OPERATIONS_SOURCE_CHAIN_204,
   appendedMigrations: Object.freeze({
     ...OPERATIONS_CURRENT_SOURCE_MIGRATION_CHAIN.appendedMigrations,
     ...OPERATIONS_SOURCE_CHAIN_204.appendedMigrations,
+  }),
+});
+export const OPERATIONS_LATEST_SOURCE_MIGRATION_CHAIN = Object.freeze({
+  ...OPERATIONS_SOURCE_CHAIN_205,
+  appendedMigrations: Object.freeze({
+    ...OPERATIONS_REVIEWED_SOURCE_MIGRATION_CHAIN_204.appendedMigrations,
+    ...OPERATIONS_SOURCE_CHAIN_205.appendedMigrations,
   }),
 });
 export const BOOTSTRAP_APPS = Object.freeze({
@@ -276,7 +284,9 @@ export function buildArtifacts(base, owner, options = {}) {
     const repositoryNames = entries.filter((item) => item.isFile() && !item.isSymbolicLink() && /\.sql$/i.test(item.name)).map((item) => item.name).sort();
     const currentSource = app === "operations"
       ? repositoryNames.includes(OPERATIONS_LATEST_SOURCE_MIGRATION_CHAIN.finalMigration)
-        ? OPERATIONS_LATEST_SOURCE_MIGRATION_CHAIN : OPERATIONS_CURRENT_SOURCE_MIGRATION_CHAIN
+        ? OPERATIONS_LATEST_SOURCE_MIGRATION_CHAIN
+        : repositoryNames.includes(OPERATIONS_REVIEWED_SOURCE_MIGRATION_CHAIN_204.finalMigration)
+          ? OPERATIONS_REVIEWED_SOURCE_MIGRATION_CHAIN_204 : OPERATIONS_CURRENT_SOURCE_MIGRATION_CHAIN
       : CLIENT_CURRENT_SOURCE_MIGRATION_CHAIN;
     const appendedNames = currentSource ? Object.keys(currentSource.appendedMigrations) : [];
     const hasCurrentAppend = currentSource && appendedNames.every((name) => repositoryNames.includes(name));

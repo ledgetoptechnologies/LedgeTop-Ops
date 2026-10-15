@@ -1,12 +1,15 @@
+import { reviewed204AuthorityTestRoot } from "./historical-0204-authority-test-source.mjs";
 import assert from "node:assert/strict";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import { compileRelationshipRecoveryAuthorityV184, RELATIONSHIP_RECOVERY_AUTHORITY_TARGET as target,
+import { compileRelationshipRecoveryAuthorityV184 as originalcompileRelationshipRecoveryAuthorityV184, RELATIONSHIP_RECOVERY_AUTHORITY_TARGET as target,
   RELATIONSHIP_RECOVERY_AUTHORITY_TARGET_V2 as targetV2 } from "./staging-relationship-generation-recovery-authority-v184.mjs";
 import { fixture, fixtureV2, grant, revokeFixture } from "./staging-directory-scalar-authority-v184-fixtures.mjs";
 
-const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),"..");
+const compileRelationshipRecoveryAuthorityV184=(input,options={})=>originalcompileRelationshipRecoveryAuthorityV184(input,{root:root,...options});
+
+const root=reviewed204AuthorityTestRoot();
 
 test("compiles the exact six-resource transition and eight-entry selection",()=>{
   const artifact=compileRelationshipRecoveryAuthorityV184(fixture());

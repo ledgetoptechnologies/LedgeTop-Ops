@@ -4,6 +4,7 @@ const mocks = vi.hoisted(() => ({ read: vi.fn() }));
 vi.mock("cloudflare:workers", () => ({ WorkerEntrypoint: class {} }));
 vi.mock("../src/worker/client-portal-native-financial-reader", () => ({
   readClientPortalNativeFinancialDocuments: mocks.read,
+  prepareNativeFinancialReadWitness:async()=>({statement:{},matches:()=>true}),
 }));
 
 import { ClientPortalNativeFinancialReader } from "../src/worker/client-portal-native-financial-entrypoint";
@@ -22,6 +23,8 @@ const grantId = "20000000-0000-4000-8000-000000000002";
 function database(grants = [grantId]): D1Database {
   return {
     withSession: () => ({
+      batch:async(statements:unknown[])=>statements.map((_,index)=>({success:true,
+        results:index===statements.length-1?grants.map(grant_id=>({grant_id})):[]})),
       prepare: () => ({
         bind: () => ({ all: async () => ({ results: grants.map(grant_id => ({ grant_id })) }) }),
       }),

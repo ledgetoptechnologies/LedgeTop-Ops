@@ -1,3 +1,6 @@
+import { reviewNativeBillingSourceAuthority, grantNativeBillingSourceAuthority, readNativeBillingSourceAuthorityStatus } from "../src/worker/operations-portal-native-billing-source-authority-issuer";
+import { readFileSync } from "node:fs";
+import { splitD1MigrationStatements } from "../../client/test/helpers/d1-migrations";
 import { describe, expect, it } from "vitest";
 import { runCanonicalPortalResourceAcceptance, type CanonicalPortalAcceptanceContext } from
   "./helpers/operations-native-portal-resource-acceptance-fixture";
@@ -33,6 +36,13 @@ const sha256 = async (value: string) => Array.from(new Uint8Array(await crypto.s
 
 async function proveProjectBillingLifecycle(context: CanonicalPortalAcceptanceContext, changeBinding = true) {
   const { operations: db, workspace, recipient, externalProject, id, owner } = context;
+  // Preserve the reviewed historical fixture; append only the new source-authority
+  // schema required by the current reader, with no historical descriptor rewriting.
+  const sourceMigration="0205_native_billing_source_authority.sql";
+  const sourceSql=readFileSync(new URL("../migrations/"+sourceMigration,import.meta.url),"utf8");
+  await db.batch([...splitD1MigrationStatements(sourceSql).map(sql=>db.prepare(sql)),
+    db.prepare("INSERT INTO d1_migrations(name) VALUES(?)").bind(sourceMigration)]);
+
   if (!recipient.recipientBindingId) throw new Error("canonical recipient binding missing");
   const bindingId = recipient.recipientBindingId;
   const workspaceHead = await required(db,
@@ -215,7 +225,16 @@ async function proveProjectBillingLifecycle(context: CanonicalPortalAcceptanceCo
       documentUrl: "https://pa.example.test/?page=public-doc&token=abcdefghijklmnop" }] }] });
   expect(financialCalls).toBe(3);
   if (changeBinding) {
+    // Exercise the genuine project establishment/head/observation SQL branch after the legacy read proof.
+    const sourceReview=await reviewNativeBillingSourceAuthority(financialEnv,owner,{parentGrantId:grantId,sourceId:context.sourceId});
+    const sourceGrantId=id();
+    await expect(grantNativeBillingSourceAuthority(financialEnv,owner,{parentGrantId:grantId,sourceId:context.sourceId,
+      operationId:id(),grantId:sourceGrantId,expectedRevision:sourceReview.expectedRevision,
+      reviewFingerprint:sourceReview.reviewFingerprint})).resolves.toMatchObject({status:"applied",authority:{live:true}});
+    await expect(readNativeBillingSourceAuthorityStatus(financialEnv,owner,sourceGrantId)).resolves.toMatchObject({
+      live:true,context:{kind:"project",sourceId:context.sourceId,externalId:externalProject}});
     await context.advanceProject();
+    await expect(readNativeBillingSourceAuthorityStatus(financialEnv,owner,sourceGrantId)).resolves.toMatchObject({live:false});
     await expect(readClientPortalNativeFinancialCollections(financialEnv,financialRequest,financialRemote as typeof fetch))
       .resolves.toEqual({ok:false,protocolVersion:1,code:"denied"});
     expect(financialCalls).toBe(3);

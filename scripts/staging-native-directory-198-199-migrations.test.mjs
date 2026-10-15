@@ -3,7 +3,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import test from "node:test";
+import test, { after } from "node:test";
 import { createRequire } from "node:module";
 import {
   applicationTableNames,
@@ -23,8 +23,19 @@ import {
 } from "./staging-native-directory-198-199-migrations.mjs";
 import { transformSeed } from "./staging-bootstrap.mjs";
 
-const root = path.resolve(import.meta.dirname, "..");
-const require = createRequire(path.join(root, "apps/operations/package.json"));
+const repositoryRoot = path.resolve(import.meta.dirname, "..");
+// Historical tools intentionally retain their reviewed204 physical inventory.
+const root = fs.mkdtempSync(path.join(os.tmpdir(), "native-directory-frozen204-"));
+fs.mkdirSync(path.join(root, "apps/operations/migrations"), { recursive: true });
+for (const name of fs.readdirSync(path.join(repositoryRoot, "apps/operations/migrations")))
+  if (/^\d{4}_.+\.sql$/.test(name) && Number(name.slice(0, 4)) <= 204)
+    fs.copyFileSync(path.join(repositoryRoot, "apps/operations/migrations", name), path.join(root, "apps/operations/migrations", name));
+after(() => {
+  assert.equal(path.dirname(root), path.resolve(os.tmpdir()));
+  assert(path.basename(root).startsWith("native-directory-frozen204-"));
+  fs.rmSync(root, { recursive: true, force: true });
+});
+const require = createRequire(path.join(repositoryRoot, "apps/operations/package.json"));
 const { Miniflare } = require("miniflare");
 const { unstable_splitSqlQuery } = require("wrangler");
 const syntheticOwner = { email: "owner@staging.example.test", displayName: "Synthetic Staging Owner",
@@ -61,7 +72,7 @@ test("source CI reader performs only injected git and gh reads and rejects check
 
 test("dry-run pins exact Ops staging 198-to-199 chain and performs no I/O", async () => {
   const plan = buildNativeDirectory198To199Plan(root);
-  const result = await runNativeDirectory198To199(["dry-run"], {
+  const result = await runNativeDirectory198To199(["dry-run"], { root,
     credential: () => assert.fail("dry-run must not read credentials"),
     remoteState: () => assert.fail("dry-run must not call provider"),
   });
@@ -85,7 +96,7 @@ test("dry-run pins exact Ops staging 198-to-199 chain and performs no I/O", asyn
 test("backup and apply fail closed at the source CI gate before credentials or provider I/O", async () => {
   for (const mode of ["backup", "apply"]) {
     let gates = 0;
-    await assert.rejects(runNativeDirectory198To199([mode, "ci-denied"], {
+    await assert.rejects(runNativeDirectory198To199([mode, "ci-denied"], { root,
       sourceCiGate: async () => { gates++; throw Error("exact candidate source CI unavailable"); },
       credential: () => assert.fail("CI rejection must precede credentials"),
       remoteState: () => assert.fail("CI rejection must precede remote reads"),
@@ -97,7 +108,7 @@ test("backup and apply fail closed at the source CI gate before credentials or p
 test("invalid injected CI grants cannot reach credentials or provider I/O", async () => {
   for(const value of [undefined,null,{}, {headSha:"bad",runId:"123"},{headSha:"a".repeat(40),runId:"0"}]){
     let reached=0;
-    await assert.rejects(runNativeDirectory198To199(["backup","invalid-ci"],{
+    await assert.rejects(runNativeDirectory198To199(["backup","invalid-ci"],{ root,
       sourceCiGate:async()=>value,credential:()=>{reached++;throw Error("invalid CI grant reached credentials");},
       remoteState:()=>assert.fail("invalid CI grant reached provider"),wrangler:()=>assert.fail("invalid CI grant reached export"),
     }));
@@ -132,7 +143,7 @@ test("wrong target, extra SQL, and source drift fail closed", async () => {
 
 test("preflight accepts only exact 198 ledger and zero FK violations", async () => {
   const plan = buildNativeDirectory198To199Plan(root);
-  const dependencies = { credential: () => "synthetic", remoteState: async () => current(plan), wrangler: () => assert.fail("preflight attempted a provider command") };
+  const dependencies = { root, credential: () => "synthetic", remoteState: async () => current(plan), wrangler: () => assert.fail("preflight attempted a provider command") };
   const result = await runNativeDirectory198To199(["preflight"], dependencies);
   assert.equal(result.mutationsPerformed, false);
   assert.deepEqual(result.pending.map(item => item.name), SPEC.suffix.map(item => item.name));
@@ -140,7 +151,7 @@ test("preflight accepts only exact 198 ledger and zero FK violations", async () 
     { ...current(plan), ledger: plan.finalNames.map(name => ({ name })) },
     { ...current(plan), ledger: plan.priorNames.slice(0, -1).map(name => ({ name })) },
     { ...current(plan), foreignKeys: [{ table: "bad" }] },
-  ]) await assert.rejects(runNativeDirectory198To199(["preflight"], { ...dependencies, remoteState: async () => bad }));
+  ]) await assert.rejects(runNativeDirectory198To199(["preflight"], { root, ...dependencies, remoteState: async () => bad }));
 });
 
 test("backup freshness, snapshot drift, and the shared attempt sentinel prevent apply or retry", () => {
@@ -210,9 +221,9 @@ test("an uncertain injected apply writes one durable shared sentinel and never r
       data:Object.fromEntries(applicationTableNames(schema).map(name=>[name,[]]))};
     const marker=JSON.parse(fs.readFileSync(plan.marker,"utf8"));
     fs.writeFileSync(plan.marker,JSON.stringify({...marker,sourceCi:{...marker.sourceCi,runId:"456"}}));
-    await assert.rejects(runNativeDirectory198To199(["reconcile","attempt-a"],{...dependencies,remoteState:async()=>after}),/attempt source CI must match backup/u);
+    await assert.rejects(runNativeDirectory198To199(["reconcile","attempt-a"],{ root,...dependencies,remoteState:async()=>after}),/attempt source CI must match backup/u);
     fs.writeFileSync(plan.marker,JSON.stringify(marker));
-    assert.deepEqual(await runNativeDirectory198To199(["reconcile","attempt-a"],{...dependencies,remoteState:async()=>after}),
+    assert.deepEqual(await runNativeDirectory198To199(["reconcile","attempt-a"],{ root,...dependencies,remoteState:async()=>after}),
       {application:"operations",mode:"reconcile",applied:199,mutationsPerformed:false,retryAllowed:false});
     assert.equal(providerCalls,1,"reconciliation must never retry or invoke provider commands");
   } finally {

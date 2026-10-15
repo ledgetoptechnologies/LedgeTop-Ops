@@ -1,3 +1,4 @@
+import { reviewed204AuthorityTestRoot } from "./historical-0204-authority-test-source.mjs";
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
 import fs from "node:fs";
@@ -5,13 +6,15 @@ import path from "node:path";
 import test from "node:test";
 import {createRequire} from "node:module";
 import {fileURLToPath} from "node:url";
-import {applyRelationshipRecoveryAuthorityV184,compileRelationshipRecoveryAuthorityV184,RELATIONSHIP_RECOVERY_AUTHORITY_TARGET_V2 as target} from "./staging-relationship-generation-recovery-authority-v184.mjs";
+import {applyRelationshipRecoveryAuthorityV184,compileRelationshipRecoveryAuthorityV184 as originalcompileRelationshipRecoveryAuthorityV184,RELATIONSHIP_RECOVERY_AUTHORITY_TARGET_V2 as target} from "./staging-relationship-generation-recovery-authority-v184.mjs";
 import {STAGING_TARGET} from "./staging-onboarding-native-only-authority-packet.mjs";
 import {validateClosedRelationshipRecoveryLineageV184,compileProjectOrganizationAuthorityV184,PROJECT_ORGANIZATION_AUTHORITY_V184_PURPOSE as projectPurpose,PROJECT_ORGANIZATION_AUTHORITY_V184_TARGET as projectTarget} from "./staging-project-organization-authority-v184.mjs";
 import {applyProjectOrganizationAuthorityV184,reconcileProjectOrganizationAuthorityV184} from "./staging-project-organization-authority-v184-apply.mjs";
 import {migrateProjectOrganizationFullSchema} from "./staging-project-organization-fullschema-migrations.mjs";
 
-const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),".."),requireOperations=createRequire(path.join(root,"apps/operations/package.json"));
+const compileRelationshipRecoveryAuthorityV184=(input,options={})=>originalcompileRelationshipRecoveryAuthorityV184(input,{root,...options});
+
+const repositoryRoot=path.resolve(path.dirname(fileURLToPath(import.meta.url)),".."),root=reviewed204AuthorityTestRoot(),requireOperations=createRequire(path.join(repositoryRoot,"apps/operations/package.json"));
 const {Miniflare}=requireOperations("miniflare"),migrationDir=path.join(root,"apps/operations/migrations");
 const migrationNames=fs.readdirSync(migrationDir).filter(name=>/^\d{4}_.+\.sql$/.test(name)&&name.slice(0,4)<="0195").sort();
 const CANONICAL_BOOTSTRAP_MIGRATION_COUNT=195;

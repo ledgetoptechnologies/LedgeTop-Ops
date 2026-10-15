@@ -15,6 +15,12 @@ function fixture() {
   const destination = path.join(base, "apps", "operations", "migrations");
   fs.mkdirSync(destination, { recursive: true });
   fs.cpSync(path.join(root, "apps", "operations", "migrations"), destination, { recursive: true });
+  // The frozen validator reviews an exact physical 203/204 repository, not later source.
+  for (const name of fs.readdirSync(destination)) {
+    if (/^\d{4}_.+\.sql$/.test(name) && Number(name.slice(0, 4)) > 204) {
+      fs.rmSync(path.join(destination, name));
+    }
+  }
   return base;
 }
 
@@ -28,19 +34,24 @@ test.afterEach(() => {
 });
 
 test("accepts only exact immutable reviewed artifact prefixes through 0199", () => {
-  const migrationNames = names();
+  const base = fixture(), migrationNames = names(base);
   for (const count of [184, 185, 186, 187, 190, 192, 194, 195, 196, 198, 199]) {
-    const chain = validateAuthorityMigrationChainV185(root, migrationNames.slice(0, count), fail);
+    const chain = validateAuthorityMigrationChainV185(base, migrationNames.slice(0, count), fail);
     assert.equal(chain.count, count);
     assert.equal(chain.final, migrationNames[count - 1]);
   }
   for (const count of [188, 189, 197]) assert.throws(() =>
-    validateAuthorityMigrationChainV185(root, migrationNames.slice(0, count), fail),
+    validateAuthorityMigrationChainV185(base, migrationNames.slice(0, count), fail),
     /exact authority artifact migration chain/);
-  assert.throws(() => validateAuthorityMigrationChainV185(root, migrationNames, fail),
+  assert.throws(() => validateAuthorityMigrationChainV185(base, migrationNames, fail),
     /exact authority artifact migration chain/, "0201-0204 must not broaden historical authority artifacts");
-  assert.throws(() => validateAuthorityMigrationChainV185(root,
+  assert.throws(() => validateAuthorityMigrationChainV185(base,
     [...migrationNames.slice(0, 185), "0186_unknown.sql"], fail), /exact authority artifact migration chain/);
+});
+
+test("frozen authority source review refuses the current 205 repository", () => {
+  assert.throws(() => validateAuthorityMigrationChainV185(root, names().slice(0, 199), fail),
+    /exact reviewed 0203 or 0204 migration chain/);
 });
 
 test("rejects altered reviewed migrations and an unknown repository suffix", () => {

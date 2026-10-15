@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { DatabaseSync } from "node:sqlite";
-import test from "node:test";
+import test, { after } from "node:test";
 import { createNativeDirectoryMigrationWindow } from "./staging-native-directory-migration-window.mjs";
 import {
   applicationTableNames, assertNativeDirectory200To203PrivateArtifact, assertNativeDirectory203SourceCi, assertPreserved,
@@ -15,7 +15,18 @@ import {
   SOURCE_CI_JOBS, SPEC, verifyNativeDirectory203SourceCi,
 } from "./staging-native-directory-200-203-migrations.mjs";
 
-const root = path.resolve(import.meta.dirname, "..");
+const repositoryRoot = path.resolve(import.meta.dirname, "..");
+// Historical tools intentionally retain their reviewed204 physical inventory.
+const root = fs.mkdtempSync(path.join(os.tmpdir(), "native-directory-frozen204-"));
+fs.mkdirSync(path.join(root, "apps/operations/migrations"), { recursive: true });
+for (const name of fs.readdirSync(path.join(repositoryRoot, "apps/operations/migrations")))
+  if (/^\d{4}_.+\.sql$/.test(name) && Number(name.slice(0, 4)) <= 204)
+    fs.copyFileSync(path.join(repositoryRoot, "apps/operations/migrations", name), path.join(root, "apps/operations/migrations", name));
+after(() => {
+  assert.equal(path.dirname(root), path.resolve(os.tmpdir()));
+  assert(path.basename(root).startsWith("native-directory-frozen204-"));
+  fs.rmSync(root, { recursive: true, force: true });
+});
 const sha = value => crypto.createHash("sha256").update(value).digest("hex");
 const successfulCi = (headSha = "a".repeat(40), now = Date.now()) => ({ workflowName: "CI", headSha,
   status: "completed", conclusion: "success", event: "push", updatedAt: new Date(now).toISOString(),
@@ -37,7 +48,7 @@ function cleanup(base) {
 function makePrivate(file) {
   if (process.platform !== "win32") { fs.chmodSync(file, 0o600); return; }
   const result = spawnSync("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "RemoteSigned", "-File",
-    path.join(root, "scripts/restrict-private-authority-file.ps1"), "-LiteralFile", file], { encoding: "utf8", windowsHide: true });
+    path.join(repositoryRoot, "scripts/restrict-private-authority-file.ps1"), "-LiteralFile", file], { encoding: "utf8", windowsHide: true });
   assert.equal(result.status, 0, result.stderr);
 }
 
@@ -95,7 +106,7 @@ test("plan freezes the exact prior 200 chain and three migration bytes", () => {
 test("backup and apply reject source CI before credentials or provider I/O", async () => {
   for (const mode of ["backup", "apply"]) {
     let gates = 0;
-    await assert.rejects(runNativeDirectory200To203([mode, "ci-red"], {
+    await assert.rejects(runNativeDirectory200To203([mode, "ci-red"], { root,
       sourceCiGate: async () => { gates++; throw Error("CI red"); },
       credential: () => assert.fail("credential reached"), remoteState: () => assert.fail("provider read reached"),
       wrangler: () => assert.fail("provider write reached"),
@@ -107,7 +118,7 @@ test("backup and apply reject source CI before credentials or provider I/O", asy
 test("preflight remains read-only diagnostic and does not claim source authorization", async () => {
   const plan = buildNativeDirectory200To203Plan(root);
   let gates = 0;
-  const result = await runNativeDirectory200To203(["preflight"], {
+  const result = await runNativeDirectory200To203(["preflight"], { root,
     sourceCiGate: async () => { gates++; throw Error("must not run"); }, credential: () => "synthetic",
     remoteState: async () => current(plan), wrangler: () => assert.fail("preflight must not invoke Wrangler"),
   });

@@ -3,7 +3,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import test from "node:test";
+import test, { after } from "node:test";
 import { createRequire } from "node:module";
 import {
   applicationTableNames,
@@ -22,8 +22,19 @@ import {
 } from "./staging-native-directory-196-198-migrations.mjs";
 import { transformSeed } from "./staging-bootstrap.mjs";
 
-const root = path.resolve(import.meta.dirname, "..");
-const require = createRequire(path.join(root, "apps/operations/package.json"));
+const repositoryRoot = path.resolve(import.meta.dirname, "..");
+// Historical tools intentionally retain their reviewed204 physical inventory.
+const root = fs.mkdtempSync(path.join(os.tmpdir(), "native-directory-frozen204-"));
+fs.mkdirSync(path.join(root, "apps/operations/migrations"), { recursive: true });
+for (const name of fs.readdirSync(path.join(repositoryRoot, "apps/operations/migrations")))
+  if (/^\d{4}_.+\.sql$/.test(name) && Number(name.slice(0, 4)) <= 204)
+    fs.copyFileSync(path.join(repositoryRoot, "apps/operations/migrations", name), path.join(root, "apps/operations/migrations", name));
+after(() => {
+  assert.equal(path.dirname(root), path.resolve(os.tmpdir()));
+  assert(path.basename(root).startsWith("native-directory-frozen204-"));
+  fs.rmSync(root, { recursive: true, force: true });
+});
+const require = createRequire(path.join(repositoryRoot, "apps/operations/package.json"));
 const { Miniflare } = require("miniflare");
 const { unstable_splitSqlQuery } = require("wrangler");
 const syntheticOwner = { email: "owner@staging.example.test", displayName: "Synthetic Staging Owner",
@@ -40,7 +51,7 @@ test("historical exact-ledger export remains compatible", () => {
 
 test("dry-run pins exact Ops staging 196-to-198 chain and performs no I/O", async () => {
   const plan = buildNativeDirectory196To198Plan(root);
-  const result = await runNativeDirectory196To198(["dry-run"], {
+  const result = await runNativeDirectory196To198(["dry-run"], { root,
     credential: () => assert.fail("dry-run must not read credentials"),
     remoteState: () => assert.fail("dry-run must not call provider"),
   });
@@ -83,7 +94,7 @@ test("wrong target, extra SQL, and source drift fail closed", async () => {
 
 test("preflight accepts only exact 196 ledger and zero FK violations", async () => {
   const plan = buildNativeDirectory196To198Plan(root);
-  const dependencies = { credential: () => "synthetic", remoteState: async () => current(plan), wrangler: () => assert.fail("preflight attempted a provider command") };
+  const dependencies = { root, credential: () => "synthetic", remoteState: async () => current(plan), wrangler: () => assert.fail("preflight attempted a provider command") };
   const result = await runNativeDirectory196To198(["preflight"], dependencies);
   assert.equal(result.mutationsPerformed, false);
   assert.deepEqual(result.pending.map(item => item.name), SPEC.suffix.map(item => item.name));
@@ -91,7 +102,7 @@ test("preflight accepts only exact 196 ledger and zero FK violations", async () 
     { ...current(plan), ledger: plan.finalNames.map(name => ({ name })) },
     { ...current(plan), ledger: plan.priorNames.slice(0, -1).map(name => ({ name })) },
     { ...current(plan), foreignKeys: [{ table: "bad" }] },
-  ]) await assert.rejects(runNativeDirectory196To198(["preflight"], { ...dependencies, remoteState: async () => bad }));
+  ]) await assert.rejects(runNativeDirectory196To198(["preflight"], { root, ...dependencies, remoteState: async () => bad }));
 });
 
 test("backup freshness, snapshot drift, and the shared attempt sentinel prevent apply or retry", () => {

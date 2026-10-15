@@ -3,9 +3,10 @@ import { clientHubActiveDirectoryIdentities, clientHubActiveDirectoryIdentitySql
   hasClientHubActiveDirectoryMappings } from "./client-hub-source";
 import { clientHubBusinessProjectOwnership } from "./client-hub-business-projects";
 import type { ClientHubBusinessProjectPolicy } from "./client-hub-project-policy";
-import { projectAlphaReadVisibleSql } from "./project-alpha-read-visibility";
+import { projectAlphaNativeMappingReadVisibleSql, projectAlphaReadVisibleSql } from "./project-alpha-read-visibility";
 import type { Env } from "./types";
 import { nativeProjectLifecycleCanonicalProof } from "./native-project-lifecycle-canonical-proof";
+import { nativeProjectLifecycleResolvedBindingStaleSql } from "./native-project-lifecycle-conflict-proof";
 
 export interface CanonicalBusinessProjectRow extends Record<string, unknown> {
   id: string;
@@ -53,6 +54,9 @@ export async function canonicalBusinessProjectPredicate(env: Env, context: Clien
   const root = context.root;
   if (!root.pa_internal_id || !root.pa_public_id || !root.public_id) return null;
   const activeIdentities = await clientHubActiveDirectoryIdentities(env);
+  // Native API-v2 sources can lack a classic connector. The exact enabled
+  // tuple and unique canonical mapping below prove that fallback; an existing
+  // hidden connector still vetoes it. Project ACL and revision proofs remain separate.
   const currentRootIdentity = clientHubActiveDirectoryIdentitySql("current_root_mapping", activeIdentities ?? []);
   const owner = clientHubBusinessProjectOwnership(context);
   const ownerMappingProof = (alias: string, resourceType: "organization" | "client", recordId: string,
@@ -146,11 +150,16 @@ export async function canonicalBusinessProjectPredicate(env: Env, context: Clien
           AND activation.resulting_local_version=s.current_version
           AND activation.organization_record_id IS s.organization_record_id
           AND activation.client_record_id IS s.client_record_id)`;
+  // Legacy schemas keep the original deny. Only an exact current activated
+  // lifecycle repair plus later clean inventory can resolve binding_stale.
+  const unresolvedConflict = lifecycleProof === "0" ? "1=1"
+    : `NOT ${nativeProjectLifecycleResolvedBindingStaleSql("s", "conflict")}`;
   const noConflicts = `NOT EXISTS (SELECT 1 FROM project_alpha_api_v2_inventory_conflicts conflict
     WHERE conflict.source_id=s.source_id AND conflict.source_instance_id=s.source_instance_id
       AND conflict.application_id=s.application_id AND conflict.history_epoch_id=s.history_epoch_id
       AND conflict.inventory_kind='project'
-      AND (conflict.project_alpha_public_id=s.project_alpha_public_id OR conflict.external_id=s.external_project_id))`;
+      AND (conflict.project_alpha_public_id=s.project_alpha_public_id OR conflict.external_id=s.external_project_id)
+      AND ${unresolvedConflict})`;
   const observations = `NOT EXISTS (SELECT 1 FROM project_alpha_api_v2_project_observations_current observation
     WHERE observation.source_id=s.source_id AND observation.source_instance_id=s.source_instance_id
       AND observation.application_id=s.application_id AND observation.history_epoch_id=s.history_epoch_id
@@ -201,7 +210,7 @@ export async function canonicalBusinessProjectPredicate(env: Env, context: Clien
       AND (${activationProof} OR ${lifecycleProof})
       AND ${noConflicts} AND ${observations}
       AND ${rootOwner}
-      AND ${projectAlphaReadVisibleSql("s.source_id")} AND (${paVisibility})`,
+      AND ${projectAlphaNativeMappingReadVisibleSql("s.source_id", "s", activeIdentities ?? [])} AND (${paVisibility})`,
     values: [context.root.source_id, root.kind === "organization" ? "organization" : "client",
       root.public_id, root.pa_internal_id, root.pa_public_id, ...rootValues, ...ownerMappingValues,
       ...(policy.canViewUnprojectedCanonical ? [] : [...owner.values, ...policy.filter.values])],
