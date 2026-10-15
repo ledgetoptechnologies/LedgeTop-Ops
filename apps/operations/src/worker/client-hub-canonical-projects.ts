@@ -1,11 +1,11 @@
 import type { ClientHubCollectionContext } from "./client-hub-collections";
-import { clientHubActiveDirectoryIdentities, clientHubActiveDirectoryIdentitySql,
-  hasClientHubActiveDirectoryMappings } from "./client-hub-source";
+import { clientHubActiveDirectoryIdentitySql,
+  readClientHubActiveDirectoryMappings } from "./client-hub-source";
 import { clientHubBusinessProjectOwnership } from "./client-hub-business-projects";
 import type { ClientHubBusinessProjectPolicy } from "./client-hub-project-policy";
 import { projectAlphaNativeMappingReadVisibleSql, projectAlphaReadVisibleSql } from "./project-alpha-read-visibility";
 import type { Env } from "./types";
-import { nativeProjectLifecycleCanonicalProof } from "./native-project-lifecycle-canonical-proof";
+import { nativeProjectLifecycleCanonicalProofForRevisionSchema } from "./native-project-lifecycle-canonical-proof";
 import { nativeProjectLifecycleResolvedBindingStaleSql } from "./native-project-lifecycle-conflict-proof";
 
 export interface CanonicalBusinessProjectRow extends Record<string, unknown> {
@@ -35,7 +35,8 @@ export interface CanonicalBusinessProjectRow extends Record<string, unknown> {
 export async function canonicalBusinessProjectPredicate(env: Env, context: ClientHubCollectionContext,
   policy: ClientHubBusinessProjectPolicy,
 ): Promise<{ sql: string; values: unknown[] } | null> {
-  if (!await hasClientHubActiveDirectoryMappings(env.OPS_DB)) return null;
+  const activeMappings = await readClientHubActiveDirectoryMappings(env);
+  if (!activeMappings) return null;
   const relations = await env.OPS_DB.prepare(`SELECT name,type FROM sqlite_master WHERE name IN (
     'operations_shared_projects','operations_shared_project_revisions','project_alpha_project_mappings',
     'project_alpha_project_v2_canonical_activation_receipts','project_alpha_api_v2_inventory_conflicts',
@@ -49,11 +50,11 @@ export async function canonicalBusinessProjectPredicate(env: Env, context: Clien
   const revisionColumns = await env.OPS_DB.prepare("PRAGMA table_info(operations_shared_project_revisions)").all<{ name: string }>();
   const hasInboundResolutionColumn = revisionColumns.results.some(column => column.name === "inbound_resolution_id");
   if (hasInboundResolutionEvidence !== hasInboundResolutionColumn) return null;
-  const lifecycleProof = await nativeProjectLifecycleCanonicalProof(env.OPS_DB, "s");
+  const lifecycleProof = await nativeProjectLifecycleCanonicalProofForRevisionSchema(env.OPS_DB, "s", revisionColumns.results);
   if (lifecycleProof === null) return null;
   const root = context.root;
   if (!root.pa_internal_id || !root.pa_public_id || !root.public_id) return null;
-  const activeIdentities = await clientHubActiveDirectoryIdentities(env);
+  const activeIdentities = await activeMappings.readIdentities();
   // Native API-v2 sources can lack a classic connector. The exact enabled
   // tuple and unique canonical mapping below prove that fallback; an existing
   // hidden connector still vetoes it. Project ACL and revision proofs remain separate.

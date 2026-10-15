@@ -50,20 +50,33 @@ export type ClientHubActiveDirectoryIdentity = Readonly<{
 export async function clientHubActiveDirectoryIdentities(
   env: Pick<Env, "OPS_DB" | "PROJECT_ALPHA_API_V2_CONNECTIONS">,
 ): Promise<readonly ClientHubActiveDirectoryIdentity[] | null> {
+  const mappings = await readClientHubActiveDirectoryMappings(env);
+  return mappings ? mappings.readIdentities() : null;
+}
+
+/** A reader for one invocation, created only after the mapping contract has
+ * been validated. It avoids repeating schema reads within a composite proof;
+ * identities remain fresh at the time they are read. Never retain it across
+ * requests, database bindings, or an authorization recheck. */
+export async function readClientHubActiveDirectoryMappings(
+  env: Pick<Env, "OPS_DB" | "PROJECT_ALPHA_API_V2_CONNECTIONS">,
+): Promise<{ readIdentities(): Promise<readonly ClientHubActiveDirectoryIdentity[]> } | null> {
   if (!(await hasClientHubActiveDirectoryMappings(env.OPS_DB))) return null;
-  const sources = await env.OPS_DB.prepare("SELECT DISTINCT source_id FROM project_alpha_active_directory_mappings ORDER BY source_id")
-    .all<{ source_id: string }>();
-  return sources.results.flatMap(({ source_id }) => {
-    try {
-      const configured = resolveProjectAlphaApiV2Connection(env, source_id);
-      const sourceInstanceId = configured.connection.expectedSourceInstanceId;
-      const applicationId = configured.connection.expectedApplicationId;
-      const historyEpochId = configured.connection.expectedHistoryEpoch;
-      if (!configured.enabled || typeof sourceInstanceId !== "string" || typeof applicationId !== "string"
-        || typeof historyEpochId !== "string") return [];
-      return [{ sourceId: configured.sourceId, sourceInstanceId, applicationId, historyEpochId }];
-    } catch { return []; }
-  });
+  return { readIdentities: async () => {
+    const sources = await env.OPS_DB.prepare("SELECT DISTINCT source_id FROM project_alpha_active_directory_mappings ORDER BY source_id")
+      .all<{ source_id: string }>();
+    return sources.results.flatMap(({ source_id }) => {
+      try {
+        const configured = resolveProjectAlphaApiV2Connection(env, source_id);
+        const sourceInstanceId = configured.connection.expectedSourceInstanceId;
+        const applicationId = configured.connection.expectedApplicationId;
+        const historyEpochId = configured.connection.expectedHistoryEpoch;
+        if (!configured.enabled || typeof sourceInstanceId !== "string" || typeof applicationId !== "string"
+          || typeof historyEpochId !== "string") return [];
+        return [{ sourceId: configured.sourceId, sourceInstanceId, applicationId, historyEpochId }];
+      } catch { return []; }
+    });
+  } };
 }
 
 /** Values are safe SQL literals because the existing connection parser admits

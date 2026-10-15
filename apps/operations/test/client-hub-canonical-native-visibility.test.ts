@@ -50,7 +50,7 @@ async function fixture(){
  const policy:ClientHubBusinessProjectPolicy={allowed:true,canViewUnprojectedCanonical:true,proof:"reviewed-global-project-access",filter:{sql:"1=1",values:[]}};
  const visible=async(value=env,permission=policy)=>{const p=await canonicalBusinessProjectPredicate(value,context,permission);if(!p)return[];
  return(await db.prepare("SELECT s.external_project_id FROM operations_shared_projects s WHERE "+p.sql).bind(...p.values).all()).results;};
- return{db,env,visible,connections,policy};
+ return{db,env,context,visible,connections,policy};
 }
 describe("canonical native API-v2 source visibility",()=>{
  it("opens an exact activated native source without a classic connector and preserves hidden veto and project ACL",async()=>{
@@ -72,4 +72,52 @@ describe("canonical native API-v2 source visibility",()=>{
   await f.db.prepare("UPDATE operations_shared_projects SET organization_record_id='native-org'").run();
   await f.db.prepare("UPDATE operations_shared_project_revisions SET read_json=json_set(read_json,'$.data.name','wrong-profile')").run();expect(await f.visible()).toEqual([]);
  },30_000);
+});
+
+describe("canonical proof invocation schema reads", () => {
+ it("reads each schema contract once and repeats validation for a later proof", async () => {
+  const f = await fixture();
+  const queries: string[] = [];
+  const database = new Proxy(f.db, {
+   get(target, property) {
+    if (property === "prepare") return (sql: string) => {
+     queries.push(sql);
+     return target.prepare(sql);
+    };
+    const value = Reflect.get(target, property);
+    return typeof value === "function" ? value.bind(target) : value;
+   },
+  });
+  const env = { ...f.env, OPS_DB: database };
+  const proof = await canonicalBusinessProjectPredicate(env, f.context, f.policy);
+  expect(proof).not.toBeNull();
+  // Five metadata reads plus one current source-identity query. These are
+  // real D1 statements, not mocked results that could hide a missing check.
+  expect(queries).toHaveLength(6);
+  expect(queries.filter(sql => sql.includes("PRAGMA table_info"))).toHaveLength(2);
+  expect(queries.filter(sql => sql.includes("sqlite_master"))).toHaveLength(3);
+  expect(queries.filter(sql => sql.includes("SELECT DISTINCT source_id"))).toHaveLength(1);
+  expect(await f.db.prepare("SELECT s.external_project_id FROM operations_shared_projects s WHERE " + proof!.sql)
+   .bind(...proof!.values).all()).toMatchObject({ results: [{ external_project_id: "native-project" }] });
+  const second = await canonicalBusinessProjectPredicate(env, f.context, f.policy);
+  expect(second).toEqual(proof);
+  expect(queries).toHaveLength(12);
+  // A later invocation must observe a newly partial lifecycle installation.
+  await f.db.prepare("CREATE TABLE native_project_lifecycle_commands(command_id TEXT)").run();
+  expect(await canonicalBusinessProjectPredicate(env, f.context, f.policy)).toBeNull();
+ }, 30_000);
+ it("preserves legacy absence and rejects incomplete current mapping schema", async () => {
+  const f = await fixture();
+  expect(await f.visible()).toHaveLength(1);
+  await f.db.prepare("DROP TABLE project_alpha_active_directory_mappings").run();
+  expect(await canonicalBusinessProjectPredicate(f.env, f.context, f.policy)).toBeNull();
+  await f.db.prepare("CREATE TABLE project_alpha_active_directory_mappings(source_id TEXT)").run();
+  await expect(canonicalBusinessProjectPredicate(f.env, f.context, f.policy))
+   .rejects.toThrow("client-hub-active-directory-mapping-schema-invalid");
+ }, 30_000);
+ it("rejects a revision column without its matching inbound evidence relation", async () => {
+  const f = await fixture();
+  await f.db.prepare("ALTER TABLE operations_shared_project_revisions ADD COLUMN inbound_resolution_id TEXT").run();
+  expect(await canonicalBusinessProjectPredicate(f.env, f.context, f.policy)).toBeNull();
+ }, 30_000);
 });
