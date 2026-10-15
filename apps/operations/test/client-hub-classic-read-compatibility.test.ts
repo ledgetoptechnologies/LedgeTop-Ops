@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { Miniflare } from "miniflare";
 import { afterEach, describe, expect, it } from "vitest";
 import { clientHubClassicReadIdentities, clientHubClassicReadEligibleSql } from "../src/worker/client-hub-classic-read";
@@ -152,6 +153,99 @@ async function classic(ops: D1Database, source: string, n: number, kind: "organi
 }
 
 describe("migrated Client Hub classic business read compatibility", { timeout: 60_000 }, () => {
+
+  it("compiles real mapping/activity views and index/list queries within production D1 expression depth100", async () => {
+    const { ops, env } = await compatibilityFixture();
+    // Use the actual production UNION view, not the fixture's shallow mapping view.
+    await ops.exec(sql(`ALTER TABLE project_alpha_directory_mappings ADD COLUMN history_epoch_id TEXT;
+      ALTER TABLE project_alpha_directory_mappings ADD COLUMN command_id TEXT;
+      ALTER TABLE project_alpha_directory_mappings ADD COLUMN created_at TEXT;
+      CREATE TABLE project_alpha_existing_directory_binding_activation_receipts(
+        source_id TEXT,resource_type TEXT,record_id TEXT,external_id TEXT,project_alpha_public_id TEXT,
+        source_instance_id TEXT,application_id TEXT,history_epoch_id TEXT,activation_id TEXT,activated_at TEXT);
+      DROP VIEW project_alpha_active_directory_mappings;`));
+    const mappingView = splitD1MigrationStatements(readFileSync(new URL(
+      "../migrations/0170_project_alpha_active_directory_project_guard.sql", import.meta.url), "utf8"))
+      .find(statement => /^CREATE VIEW project_alpha_active_directory_mappings\b/i.test(statement.trim()));
+    expect(mappingView).toBeDefined();
+    await ops.prepare(mappingView!).run();
+    const organization = await classic(ops, primary, 201, "organization");
+    await classic(ops, primary, 202, "client", organization);
+    await classic(ops, secondary, 203);
+    await ops.prepare("INSERT INTO role_permissions VALUES('directory','projects.view')").run();
+    await ops.prepare("INSERT INTO staff_role_assignments VALUES('staff-compat','role-owner','global',NULL)").run();
+    expect(await clientHubClassicReadIdentities(env)).toHaveLength(2);
+    const queries: Array<{sql: string; params: unknown[]}> = [];
+    const capture = <T extends D1Database | D1DatabaseSession>(database: T): T => new Proxy(database, {
+      get(target, key) {
+        if (key === "prepare") return (sql: string) => {
+          const query = { sql, params: [] as unknown[] }; queries.push(query);
+          const statement = target.prepare(sql);
+          return new Proxy(statement, { get(prepared, method) {
+            if (method === "bind") return (...params: unknown[]) => { query.params=params;return prepared.bind(...params); };
+            const value=Reflect.get(prepared,method);return typeof value === "function" ? value.bind(prepared) : value;
+          }});
+        };
+        if (key === "withSession" && "withSession" in target)
+          return (constraint?: D1SessionBookmark | D1SessionConstraint) => capture(target.withSession(constraint));
+        const value=Reflect.get(target,key);return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    const capturedEnv = { ...env, OPS_DB: capture(ops) };
+    await finishIndex(capturedEnv);
+    for (const options of [{}, { sort: "name" }, { q: "Compatibility 202" }, { q: "Compatibility", sort: "name", grouping: "records" }]) {
+      const listed = await listClientHubRoots(capturedEnv, staff, options);
+      expect(listed.clients.length).toBeGreaterThan(0);
+      expect(new Set(listed.clients.map(row=>row.public_id)).size).toBe(listed.clients.length);
+    }
+    expect(await findClientHubRoot(capturedEnv,"organization",organization,primary,"business")).toMatchObject({public_id:organization});
+    expect(await resolveClientHubSourceRoot(capturedEnv,"organization",organization,primary)).toMatchObject({id:organization});
+    expect(await resolveClientHubSourceRootByAlphaPublicId(capturedEnv,"organization",primary,publicId(201))).toMatchObject({id:organization});
+    const collectionRoot = await findClientHubRoot(capturedEnv,"organization",organization,primary,"business");
+    const context = await createClientHubCollectionContext(capturedEnv,staff,collectionRoot,{directory:true,requests:false,delivery:false,viewer:false});
+    expect((await listClientHubCollection(capturedEnv,context,"businessContacts")).items).toHaveLength(1);
+    expect((await listClientHubBusinessProjects(capturedEnv,staff,context)).items).toEqual([]);
+    const schema = await ops.prepare("SELECT sql FROM sqlite_master WHERE type IN ('table','view') AND name NOT LIKE 'sqlite_%' AND sql IS NOT NULL ORDER BY type,name").all<{sql:string}>();
+    // Miniflare's SQLite allows deeper expressions than hosted D1. Compile the
+    // real generated SQL with D1's depth100 limit; EXPLAIN executes no writes.
+    // The current observation is also a deep production view; a fake table
+    // misses the expression expansion that originally passed local tests.
+    const backing = splitD1MigrationStatements(readFileSync(new URL(
+      "../migrations/0161_project_alpha_api_v2_inventory_observations.sql", import.meta.url), "utf8"))
+      .filter(statement => /^CREATE TABLE project_alpha_api_v2_(inventory_receipts|directory_observations|inventory_conflicts)\b/i.test(statement.trim()));
+    const currentView = splitD1MigrationStatements(readFileSync(new URL(
+      "../migrations/0186_project_alpha_directory_conflict_evidence_binding.sql", import.meta.url), "utf8"))
+      .find(statement=>/^CREATE VIEW project_alpha_api_v2_directory_observations_current\b/i.test(statement.trim()));
+    expect(backing).toHaveLength(3);
+    expect(currentView).toBeDefined();
+    const productionSchema = schema.results.filter(row=>!/^CREATE TABLE project_alpha_api_v2_(inventory_receipts|inventory_conflicts|directory_observations_current)\b/i.test(row.sql))
+      .concat(backing.map(sql=>({sql})),[{sql:currentView!}]);
+    const result = execFileSync(process.platform === "win32" ? "python" : "python3", ["-c", `
+import json,sqlite3,sys
+packet=json.load(sys.stdin)
+db=sqlite3.connect(':memory:')
+for row in packet['schema']: db.execute(row['sql'])
+db.setlimit(sqlite3.SQLITE_LIMIT_EXPR_DEPTH,100)
+for query in packet['queries']:
+ try: db.execute('EXPLAIN '+query['sql'],query['params']).fetchall()
+ except Exception as error: raise RuntimeError(str(error)+' query='+query['sql'][:200]) from error
+print(len(packet['queries']))
+`], { input: JSON.stringify({schema:productionSchema,queries:queries.filter(query=>!/^PRAGMA/i.test(query.sql.trim()))}), encoding: "utf8", maxBuffer: 2_000_000 });
+    expect(Number(result.trim())).toBeGreaterThan(20);
+  });
+
+  it("does not treat malformed portal search rows as business-contact authority in legacy mode", async () => {
+    const { ops, env } = await compatibilityFixture();
+    const organization = await classic(ops,primary,204,"organization");
+    const child = await classic(ops,primary,205,"client",organization);
+    await ops.exec("DROP VIEW project_alpha_active_directory_mappings");
+    await finishIndex(env);
+    await ops.prepare(`INSERT INTO client_hub_roots(source_id,root_namespace,kind,public_id,display_name,sort_name,status)
+      VALUES(?,'portal','organization',?,'Unrelated portal','unrelated portal','active')`).bind(primary,organization).run();
+    await ops.prepare(`INSERT INTO client_hub_search_values(source_id,root_namespace,kind,root_public_id,record_type,record_id,field,normalized_value)
+      VALUES(?,'portal','organization',?,'pa_client',?,'contact','private sentinel')`).bind(primary,organization,child).run();
+    expect((await listClientHubRoots(env,staff,{q:"private sentinel"})).clients).toEqual([]);
+  });
   it("indexes and resolves all60 existing source-bound records with an empty native view, without native ownership", async () => {
     const { ops, delivery, env } = await compatibilityFixture();
     const ids: Array<{ source: string; id: string; n: number; kind: "organization" | "standalone_client"; parent: string | null }> = [];
