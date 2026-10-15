@@ -53,3 +53,13 @@
     flex: 0 0 auto;
   }
 }
+
+/* Back navigation matches the other Operations back links (ghost button). */
+.client-request-detail > .portal-back, .portal-back {
+  justify-self: start;
+  width: auto;
+  margin-bottom: 1rem;
+  background: #eef1f3;
+  color: #26313a;
+}
+.portal-back:hover { background: #e2e7eb; }
