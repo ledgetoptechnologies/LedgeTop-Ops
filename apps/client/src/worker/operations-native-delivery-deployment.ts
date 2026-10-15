@@ -25,9 +25,10 @@ export type NativeDeliveryDeploymentEnv = Readonly<{
 /** Existing staging RPC consumers retain their original admission. Browser
  * reads/audits additionally require the exact authenticated staging portal. */
 export function nativeDeliveryDeploymentEnabled(env: NativeDeliveryDeploymentEnv,
-  surface: "rpc" | "portal" = "portal"): boolean {
+  surface: "rpc" | "portal" | "publication" = "portal"): boolean {
   if (env.ENVIRONMENT === "staging") {
     if (env.CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_DEPLOYMENT_PROFILE) return false;
+    if (surface === "publication") return env.EXPECTED_HOST === "delivery-staging.ledgetopdroneservices.com";
     return surface === "rpc" || env.CLIENT_PORTAL_ORIGIN === "https://client-staging.ledgetopdroneservices.com";
   }
   return env.ENVIRONMENT === "production"

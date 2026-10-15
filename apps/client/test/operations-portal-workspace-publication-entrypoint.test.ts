@@ -1,3 +1,4 @@
+import { NATIVE_DELIVERY_PRODUCTION_PROFILE } from '../src/worker/operations-native-delivery-deployment';
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { OPERATIONS_PORTAL_WORKSPACE_PUBLICATION_RPC_RESPONSE_MAX_BYTES,
   parseOperationsPortalWorkspacePublicationRpcResponse,
@@ -24,7 +25,7 @@ import { getOperationsPortalWorkspacePublicationStatusRpc, publishOperationsPort
 const writer = vi.mocked(consumeOperationsPortalWorkspacePublication);
 const statusReader = vi.mocked(getOperationsPortalWorkspacePublicationDisposition);
 const id = (digit: string) => `${digit.repeat(8)}-${digit.repeat(4)}-4${digit.repeat(3)}-8${digit.repeat(3)}-${digit.repeat(12)}`;
-const env = { DELIVERY_DB: {} as D1Database, ENVIRONMENT: "staging",
+const stagingEnv = { DELIVERY_DB: {} as D1Database, ENVIRONMENT: "staging",
   EXPECTED_HOST: "delivery-staging.ledgetopdroneservices.com", CLIENT_PORTAL_OPERATIONS_PUBLICATION_WRITER_ENABLED: "true" };
 async function fixture() {
   const input = { protocol: "operations-portal-workspace-publication", protocolVersion: 1, action: "publish",
@@ -47,7 +48,11 @@ async function fixture() {
   return { input, receipt };
 }
 
-describe("private Ops-native publication ingress", () => {
+describe.each(["staging", "production"])("private Ops-native publication ingress: %s", environment => {
+  const env = environment === "staging" ? stagingEnv : { ...stagingEnv, ENVIRONMENT: "production",
+    EXPECTED_HOST: "portal.ledgetopdroneservices.com", PUBLIC_BASE_URL: "https://portal.ledgetopdroneservices.com",
+    PUBLIC_SHARE_ORIGIN: "https://portal.ledgetopdroneservices.com", CLIENT_PORTAL_ORIGIN: "https://client.ledgetopdroneservices.com",
+    CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_DEPLOYMENT_PROFILE: NATIVE_DELIVERY_PRODUCTION_PROFILE };
   beforeEach(() => { writer.mockReset(); statusReader.mockReset(); });
   it("decodes only bounded canonical primitive JSON RPC results without invoking caller hooks", () => {
     expect(parseOperationsPortalWorkspacePublicationRpcResponse('{"ok":false}')).toEqual({ ok: false });
@@ -66,7 +71,7 @@ describe("private Ops-native publication ingress", () => {
     const hostile = new Proxy({}, { getPrototypeOf() { throw new Error("must not inspect"); } });
     for (const candidate of [
       ...[undefined, "false", "TRUE", "1"].map(flag => ({ ...env, CLIENT_PORTAL_OPERATIONS_PUBLICATION_WRITER_ENABLED: flag })),
-      { ...env, ENVIRONMENT: "production" }, { ...env, ENVIRONMENT: undefined },
+      { ...env, ENVIRONMENT: "production", CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_DEPLOYMENT_PROFILE: undefined }, { ...env, ENVIRONMENT: undefined },
       { ...env, EXPECTED_HOST: undefined }, { ...env, EXPECTED_HOST: "delivery.ledgetopdroneservices.com" },
     ]) await expect(publishOperationsPortalWorkspaceRpc(candidate, hostile))
       .resolves.toMatchObject({ ok: false, code: "disabled", retryable: true });

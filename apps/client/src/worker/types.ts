@@ -63,7 +63,7 @@ export interface Env {
   CLIENT_PORTAL_RECIPIENT_ENROLLMENT_ENABLED?: string;
   CLIENT_PORTAL_VERIFIED_RECIPIENT_DELIVERY_AUTHORITY_WRITER_ENABLED?: string;
   CLIENT_PORTAL_VERIFIED_RECIPIENT_DELIVERY_AUTHORITY_STATUS_ENABLED?: string;
-  /** Data-only private Ops publication ingress; staging-only and default-off. */
+  /** Data-only private Ops publication ingress; explicitly admitted and default-off. */
   CLIENT_PORTAL_OPERATIONS_PUBLICATION_WRITER_ENABLED?: string;
   CLIENT_PORTAL_RECIPIENT_ENROLLMENT_CSRF_SECRET?: string;
   CLIENT_PORTAL_RECIPIENT_ENROLLMENT_BRIDGE?: Service & import("./client-portal/recipient-enrollment-http").RecipientEnrollmentBinding;

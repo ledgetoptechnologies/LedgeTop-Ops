@@ -1,3 +1,4 @@
+import { NATIVE_DELIVERY_PRODUCTION_PROFILE } from '../src/worker/operations-native-delivery-deployment';
 import { Miniflare } from "miniflare";
 import fs from "node:fs";
 import path from "node:path";
@@ -72,7 +73,7 @@ async function rawCommand(database: D1Database, input: Awaited<ReturnType<typeof
       input.snapshot.snapshotSha256, canonical, input.observedAt);
 }
 
-describe("Operations-native portal workspace publication consumer", () => {
+describe.each(["staging", "production"])("Operations-native portal workspace publication consumer: %s", environment => {
   let runtime: Miniflare, database: D1Database;
   beforeAll(async () => {
     runtime = new Miniflare({ compatibilityDate: "2026-08-06", modules: true,
@@ -84,7 +85,11 @@ describe("Operations-native portal workspace publication consumer", () => {
 
   it("commits one complete closed snapshot atomically and replays the exact receipt", async () => {
     const input = await publication();
-    const ingress = { DELIVERY_DB: database, ENVIRONMENT: "staging", EXPECTED_HOST: "delivery-staging.ledgetopdroneservices.com",
+    const ingress = { DELIVERY_DB: database, ENVIRONMENT: environment,
+      EXPECTED_HOST: environment === "staging" ? "delivery-staging.ledgetopdroneservices.com" : "portal.ledgetopdroneservices.com",
+      PUBLIC_BASE_URL: "https://portal.ledgetopdroneservices.com", PUBLIC_SHARE_ORIGIN: "https://portal.ledgetopdroneservices.com",
+      CLIENT_PORTAL_ORIGIN: "https://client.ledgetopdroneservices.com",
+      ...(environment === "production" ? { CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_DEPLOYMENT_PROFILE: NATIVE_DELIVERY_PRODUCTION_PROFILE } : {}),
       CLIENT_PORTAL_OPERATIONS_PUBLICATION_WRITER_ENABLED: "true" };
     const published = await publishOperationsPortalWorkspaceRpc(ingress, input);
     expect(published.ok).toBe(true);

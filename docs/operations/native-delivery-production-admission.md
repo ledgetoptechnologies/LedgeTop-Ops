@@ -1,7 +1,7 @@
 # Native delivery production admission
 
 The native delivery RPC writer/status/cancellation consumers, authenticated file
-routes, fresh Operations proof adapter and mandatory content-start audit share an
+routes, workspace publication RPC ingress, fresh Operations proof adapter and mandatory content-start audit share an
 explicit production deployment profile. All existing feature flags remain
 default-off. Existing staging behavior is preserved; staging acceptance and
 maintenance routes are not enabled in production by this change.

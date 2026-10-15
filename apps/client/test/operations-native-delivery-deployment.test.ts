@@ -8,6 +8,10 @@ import { authorizeNativeOperationsDelivery } from "../src/worker/client-portal/o
 import { appendOperationsNativeContentStart } from "../src/worker/client-portal/operations-native-content-audit";
 import { createOperationsNativeDeliveryRouter } from "../src/worker/client-portal/operations-native-delivery-routes";
 import type { Env } from "../src/worker/types";
+vi.mock("cloudflare:workers", () => ({ WorkerEntrypoint: class {} }));
+import { publishOperationsPortalWorkspaceRpc, getOperationsPortalWorkspacePublicationStatusRpc,
+  cancelOperationsPortalWorkspacePublicationRpc, getOperationsPortalWorkspacePublicationDispositionRpc }
+  from "../src/worker/operations-portal-workspace-publication-entrypoint";
 
 const deployment: NativeDeliveryDeploymentEnv = {
   ENVIRONMENT: "production", EXPECTED_HOST: "portal.ledgetopdroneservices.com",
@@ -23,6 +27,7 @@ const enabled = {
   CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_CANCELLATION_ENABLED: "true",
   CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_READ_ENABLED: "true",
   CLIENT_PORTAL_OPERATIONS_NATIVE_CONTENT_AUDIT_ENABLED: "true",
+  CLIENT_PORTAL_OPERATIONS_PUBLICATION_WRITER_ENABLED: "true",
 };
 const denied: NativeDeliveryDeploymentEnv[] = [
   { ENVIRONMENT: "local" }, { ENVIRONMENT: "staging" }, { ENVIRONMENT: undefined },
@@ -43,12 +48,16 @@ describe("explicit native delivery production deployment admission", () => {
   it("keeps staging admission and requires the exact versioned production profile", () => {
     expect(nativeDeliveryDeploymentEnabled(deployment)).toBe(true);
     expect(nativeDeliveryDeploymentEnabled(deployment, "rpc")).toBe(true);
+    expect(nativeDeliveryDeploymentEnabled(deployment, "publication")).toBe(true);
+    expect(nativeDeliveryDeploymentEnabled({ ENVIRONMENT: "staging", EXPECTED_HOST: "delivery-staging.ledgetopdroneservices.com" }, "publication")).toBe(true);
+    expect(nativeDeliveryDeploymentEnabled({ ENVIRONMENT: "staging", EXPECTED_HOST: "client-staging.ledgetopdroneservices.com" }, "publication")).toBe(false);
     expect(nativeDeliveryDeploymentEnabled({ ENVIRONMENT: "staging" }, "rpc")).toBe(true);
     expect(nativeDeliveryDeploymentEnabled({ ENVIRONMENT: "staging" })).toBe(false);
     expect(nativeDeliveryDeploymentEnabled({ ENVIRONMENT: "staging", CLIENT_PORTAL_ORIGIN: "https://client-staging.ledgetopdroneservices.com" })).toBe(true);
     for (const override of denied) {
       expect(nativeDeliveryDeploymentEnabled({ ...deployment, ...override })).toBe(false);
       expect(nativeDeliveryDeploymentEnabled({ ...deployment, ...override }, "rpc")).toBe(false);
+      expect(nativeDeliveryDeploymentEnabled({ ...deployment, ...override }, "publication")).toBe(false);
     }
   });
 
@@ -60,6 +69,10 @@ describe("explicit native delivery production deployment admission", () => {
       for (const method of [applyOperationsPortalNativeDeliveryAuthority, readOperationsPortalNativeDeliveryAuthorityStatus,
         readOperationsPortalNativeDeliveryAuthorityDisposition, cancelOperationsPortalNativeDeliveryAuthority]) {
         expect(JSON.parse(await method(env, "{}"))).toMatchObject({ ok: false, code: "disabled" });
+      }
+      for (const method of [publishOperationsPortalWorkspaceRpc, getOperationsPortalWorkspacePublicationStatusRpc,
+        cancelOperationsPortalWorkspacePublicationRpc, getOperationsPortalWorkspacePublicationDispositionRpc]) {
+        expect(await method(env, {})).toMatchObject({ ok: false, code: "disabled" });
       }
       expect(await authorizeNativeOperationsDelivery(env, { issuer: "test", subject: "test" }, "invalid", "folder.list"))
         .toEqual({ ok: false, code: "disabled" });
