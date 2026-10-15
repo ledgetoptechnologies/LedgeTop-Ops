@@ -1,4 +1,5 @@
 import type { ProjectAlphaApiV2Connection } from "./project-alpha-api-v2";
+import { parseProjectAlphaApiV2ConnectionConfigurations } from "./project-alpha-api-v2-connections";
 import { parseDuplicateFreeJson } from "./bounded-json";
 
 /**
@@ -7,11 +8,9 @@ import { parseDuplicateFreeJson } from "./bounded-json";
  */
 export const PROJECT_ALPHA_API_V2_CONNECTIONS = "PROJECT_ALPHA_API_V2_CONNECTIONS" as const;
 
-const MAX_CONNECTIONS = 16;
-const MAX_CONFIG_BYTES = 128 * 1024;
+const MAX_CONFIG_BYTES = 256 * 1024;
 const SOURCE_ID = /^project-alpha:[a-z0-9][a-z0-9_-]{0,63}$/;
 const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
-const HEADER_MAX = 8192;
 
 export type ProjectAlphaApiV2ConfiguredConnection = ProjectAlphaApiV2Connection & {
   readonly sourceId: string;
@@ -58,15 +57,6 @@ function exactKeys(value: Record<string, unknown>, required: readonly string[], 
     && keys.every(key => allowed.has(key)) && required.every(key => Object.hasOwn(value, key));
 }
 
-function headerValue(value: unknown): value is string {
-  if (typeof value !== "string" || value.length === 0 || value.length > HEADER_MAX || value !== value.trim()) return false;
-  for (const character of value) {
-    const codePoint = character.codePointAt(0) ?? 0;
-    if (codePoint <= 0x1f || codePoint === 0x7f || codePoint > 0xff) return false;
-  }
-  return true;
-}
-
 /** Snapshot data properties without invoking accessors or trusting a proxy. */
 function snapshotRecord(value: unknown): Record<string, unknown> | null {
   try {
@@ -94,91 +84,57 @@ function canonicalBaseUrl(value: unknown): value is string {
   } catch { return false; }
 }
 
-function validConnection(value: unknown): value is ProjectAlphaApiV2ConfiguredConnection {
-  if (!plainRecord(value) || !exactKeys(value,
-    ["sourceId", "applicationId", "baseUrl", "expectedSourceInstanceId", "expectedHistoryEpoch", "apiKey"],
-    ["accessClientId", "accessClientSecret", "enabled"])) return false;
-  if (typeof value.sourceId !== "string" || !SOURCE_ID.test(value.sourceId)
-    || typeof value.applicationId !== "string" || !UUID_V4.test(value.applicationId)
-    || typeof value.expectedSourceInstanceId !== "string" || !UUID_V4.test(value.expectedSourceInstanceId)
-    || typeof value.expectedHistoryEpoch !== "string" || !UUID_V4.test(value.expectedHistoryEpoch)
-    || !canonicalBaseUrl(value.baseUrl) || !headerValue(value.apiKey)
-    || (Object.hasOwn(value, "enabled") && typeof value.enabled !== "boolean")
-    || (Object.hasOwn(value, "accessClientId") !== Object.hasOwn(value, "accessClientSecret"))
-    || (Object.hasOwn(value, "accessClientId") && (!headerValue(value.accessClientId) || !headerValue(value.accessClientSecret)))) return false;
-  return true;
-}
-
-function detached(value: Record<string, unknown>): ProjectAlphaApiV2ConfiguredConnection {
-  const result = {
-    sourceId: value.sourceId as string,
-    applicationId: value.applicationId as string,
-    baseUrl: value.baseUrl as string,
-    expectedSourceInstanceId: value.expectedSourceInstanceId as string,
-    expectedApplicationId: value.applicationId as string,
-    expectedHistoryEpoch: value.expectedHistoryEpoch as string,
-    apiKey: value.apiKey as string,
-    // The historical monitor envelope had no per-instance switch. It meant
-    // enabled; the current `instances` envelope defaults false for safety.
-    enabled: value.enabled !== false,
-    ...(Object.hasOwn(value, "accessClientId") ? {
-      accessClientId: value.accessClientId as string,
-      accessClientSecret: value.accessClientSecret as string,
-    } : {}),
-  } satisfies ProjectAlphaApiV2ConfiguredConnection;
-  return Object.freeze(result);
-}
-
 /** Parse deployment-owned JSON without contacting PA, D1, or a legacy resolver. */
 export function parseProjectAlphaApiV2Connections(raw: string | undefined): readonly ProjectAlphaApiV2ConfiguredConnection[] {
   const input = typeof raw === "string" && raw.length > 0 && new TextEncoder().encode(raw).byteLength <= MAX_CONFIG_BYTES ? raw : invalid();
-  let value: unknown;
-  try { value = parseDuplicateFreeJson(input); } catch { invalid(); }
-  const object = plainRecord(value) ? value : invalid();
-  if (object.version !== 1 || !((exactKeys(object, ["version", "connections"]) && Array.isArray(object.connections))
-    || (exactKeys(object, ["version", "instances"]) && plainRecord(object.instances)))) invalid();
-  // `instances` is the current deployment-owned connection envelope used by
-  // all existing API-v2 callers. Retain `connections` only for the bounded
-  // monitor's historical fixtures while making the deployed shape canonical.
-  const connections: unknown[] = Array.isArray(object.connections) ? object.connections
-    : Object.entries(object.instances as Record<string, unknown>).map(([sourceId, instance]) => {
-      if (!plainRecord(instance) || instance.sourceId !== sourceId) return instance;
-      const base = instance.enabled === undefined
-        ? ["sourceId", "baseUrl", "apiKey", "sourceInstanceId", "applicationId", "historyEpoch"]
-        : ["sourceId", "enabled", "baseUrl", "apiKey", "sourceInstanceId", "applicationId", "historyEpoch"];
-      const access = instance.accessClientId !== undefined || instance.accessClientSecret !== undefined;
-      if (!exactKeys(instance, base, access ? ["accessClientId", "accessClientSecret"] : [])
-        || access !== (instance.accessClientId !== undefined && instance.accessClientSecret !== undefined)) return null;
-      return {
-        sourceId,
-        applicationId: instance.applicationId,
-        baseUrl: instance.baseUrl,
-        expectedSourceInstanceId: instance.sourceInstanceId,
-        expectedHistoryEpoch: instance.historyEpoch,
-        apiKey: instance.apiKey,
-        enabled: instance.enabled === true,
-        ...(instance.accessClientId === undefined ? {} : {
-          accessClientId: instance.accessClientId,
-          accessClientSecret: instance.accessClientSecret,
-        }),
-      };
-    });
-  if (connections.length > MAX_CONNECTIONS) invalid();
+  try {
+    const parsedEnvelope = parseDuplicateFreeJson(input);
+    const object = plainRecord(parsedEnvelope) ? parsedEnvelope : invalid();
+    if (object.version !== 1
+      || !((exactKeys(object, ["version", "connections"]) && Array.isArray(object.connections))
+        || (exactKeys(object, ["version", "instances"]) && plainRecord(object.instances)))) invalid();
 
-  const sourceIds = new Set<string>();
-  const sourceApplications = new Set<string>();
-  const result: ProjectAlphaApiV2ConfiguredConnection[] = [];
-  for (const candidate of connections) {
-    if (!validConnection(candidate)) invalid();
-    const connection = candidate as Record<string, unknown>;
-    if (connection.enabled !== undefined && typeof connection.enabled !== "boolean") invalid();
-    if (sourceIds.has(connection.sourceId as string)
-      || sourceApplications.has(`${connection.expectedSourceInstanceId as string}\u0000${connection.applicationId as string}`)) invalid();
-    sourceIds.add(connection.sourceId as string);
-    sourceApplications.add(`${connection.expectedSourceInstanceId as string}\u0000${connection.applicationId as string}`);
-    result.push(detached(connection));
-  }
-  return Object.freeze(result);
+    if (Array.isArray(object.connections) && object.connections.length === 0) return Object.freeze([]);
+
+    // Scheduler fixtures historically use a `connections` array with omitted
+    // enabled interpreted as active. Normalize that compatibility shape once,
+    // then send both formats through the same strict deployment parser used by
+    // routes and write transports.
+    let normalized = input;
+    if (Array.isArray(object.connections)) {
+      const instances: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
+      for (const candidate of object.connections) {
+        if (!plainRecord(candidate) || !exactKeys(candidate,
+          ["sourceId", "applicationId", "baseUrl", "expectedSourceInstanceId", "expectedHistoryEpoch", "apiKey"],
+          ["accessClientId", "accessClientSecret", "enabled"])) invalid();
+        const source = candidate.sourceId;
+        if (typeof source !== "string" || !SOURCE_ID.test(source) || Object.hasOwn(instances, source)) invalid();
+        if (Object.hasOwn(candidate, "accessClientId") !== Object.hasOwn(candidate, "accessClientSecret")) invalid();
+        const enabled = candidate.enabled === undefined ? true : candidate.enabled;
+        if (typeof enabled !== "boolean") invalid();
+        instances[source] = {
+          sourceId: source,
+          enabled,
+          baseUrl: candidate.baseUrl,
+          apiKey: candidate.apiKey,
+          sourceInstanceId: candidate.expectedSourceInstanceId,
+          applicationId: candidate.applicationId,
+          historyEpoch: candidate.expectedHistoryEpoch,
+          ...(candidate.accessClientId === undefined ? {} : {
+            accessClientId: candidate.accessClientId,
+            accessClientSecret: candidate.accessClientSecret,
+          }),
+        };
+      }
+      normalized = JSON.stringify({ version: 1, instances });
+    }
+
+    const configuredConnections = parseProjectAlphaApiV2ConnectionConfigurations({ PROJECT_ALPHA_API_V2_CONNECTIONS: normalized });
+    return Object.freeze(configuredConnections.map(connection => Object.freeze({
+      ...connection,
+      applicationId: connection.expectedApplicationId,
+    })));
+  } catch { return invalid(); }
 }
 
 /**

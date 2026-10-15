@@ -2,7 +2,7 @@ import { WorkerEntrypoint } from "cloudflare:workers";
 import { createCatalogSourceContext, PRIMARY_ALPHA_SOURCE_ID } from "@ltds/shared";
 import type { Env } from "./types";
 import { applyPortalProjectionDelivery, parsePortalProjectionDelivery } from "./project-alpha-portal";
-import { getPortalSourceAuthority, readPortalSourceAuthorityProof } from "./project-alpha-portal-authority";
+import { getPortalSourceAuthority, readPortalSourceAuthorityProof, reservePrimaryPortalPrivateIngress, type PortalProjectionWriteProof } from "./project-alpha-portal-authority";
 import { applyCatalogProjectionDelivery, parseCatalogProjectionDelivery } from "./project-alpha-catalog";
 import { applyServiceAssignmentProjectionFromOpsSync, parseServiceAssignmentProjectionDelivery } from "./project-alpha-service-assignments";
 
@@ -32,7 +32,7 @@ export async function ingestOpsSyncPortalProjection(env:Env,input:Input):Promise
   if(!enabled)return{ok:false,protocolVersion:1,code:"disabled",retryable:true};
   try{
     const source=createCatalogSourceContext(input.sourceId);
-    let proof;
+    let proof: PortalProjectionWriteProof | undefined;
     if(source.sourceId===PRIMARY_ALPHA_SOURCE_ID){
       if(!env.PROJECT_ALPHA_PORTAL_APPLICATION_KEY||input.applicationKey!==env.PROJECT_ALPHA_PORTAL_APPLICATION_KEY)
         return{ok:false,protocolVersion:1,code:"source-mismatch",retryable:false};
@@ -41,7 +41,7 @@ export async function ingestOpsSyncPortalProjection(env:Env,input:Input):Promise
       const authority=await getPortalSourceAuthority(db,source.sourceId);
       if(!authority||authority.state!=="active")return{ok:false,protocolVersion:1,code:"source-unavailable",retryable:true};
       if(authority.applicationKey!==input.applicationKey)return{ok:false,protocolVersion:1,code:"source-mismatch",retryable:false};
-      proof=await readPortalSourceAuthorityProof(db,source.sourceId);
+      proof=await readPortalSourceAuthorityProof(db,source.sourceId)??undefined;
       if(!proof)return{ok:false,protocolVersion:1,code:"source-unavailable",retryable:true};
     }
     let parsed:unknown;
@@ -51,14 +51,17 @@ export async function ingestOpsSyncPortalProjection(env:Env,input:Input):Promise
     if(input.projectionKind==="portal"){
       const delivery=parsePortalProjectionDelivery(parsed,input.applicationKey,env.CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED==="true");
       if(delivery.deliveryId!==input.deliveryId)return{ok:false,protocolVersion:1,code:"delivery-mismatch",retryable:false};
+      if(source.sourceId===PRIMARY_ALPHA_SOURCE_ID&&env.PROJECT_ALPHA_PORTAL_DIRECT_HTTP_ENABLED==="false")proof=await reservePrimaryPortalPrivateIngress(env);
       status=await applyPortalProjectionDelivery(env,delivery,bodyHash,source,proof);
     }else if(input.projectionKind==="catalog"){
       const delivery=parseCatalogProjectionDelivery(parsed,input.applicationKey);
       if(delivery.deliveryId!==input.deliveryId)return{ok:false,protocolVersion:1,code:"delivery-mismatch",retryable:false};
+      if(source.sourceId===PRIMARY_ALPHA_SOURCE_ID&&env.PROJECT_ALPHA_PORTAL_DIRECT_HTTP_ENABLED==="false")proof=await reservePrimaryPortalPrivateIngress(env);
       status=await applyCatalogProjectionDelivery(env,source,delivery,bodyHash,proof);
     }else{
       const delivery=parseServiceAssignmentProjectionDelivery(parsed,input.applicationKey);
       if(delivery.deliveryId!==input.deliveryId)return{ok:false,protocolVersion:1,code:"delivery-mismatch",retryable:false};
+      if(source.sourceId===PRIMARY_ALPHA_SOURCE_ID&&env.PROJECT_ALPHA_PORTAL_DIRECT_HTTP_ENABLED==="false")proof=await reservePrimaryPortalPrivateIngress(env);
       status=await applyServiceAssignmentProjectionFromOpsSync(env,source,proof??null,delivery,bodyHash);
     }
     return{ok:true,protocolVersion:1,status};

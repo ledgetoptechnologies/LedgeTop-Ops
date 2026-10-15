@@ -9,7 +9,7 @@
 .client-portal-bootstrap-stages span { color: var(--muted); font-size: .8rem; }
 .client-portal-bootstrap-form { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .client-portal-bootstrap-form > label { display: grid; gap: .35rem; min-width: 0; font-size: .85rem; color: var(--muted); }
-.client-portal-bootstrap-form select { min-width: 0; min-height: 44px; padding: .6rem; border: 1px solid var(--line); border-radius: 8px; background: #fff; color: var(--ink); font: inherit; }
+.client-portal-bootstrap-form select { min-width: 0; min-height: 44px; padding: .6rem; border: 1px solid var(--control-border); border-radius: 8px; background: #fff; color: var(--ink); font: inherit; font-weight: 450; }
 .client-portal-bootstrap-readiness, .client-portal-bootstrap-review, .client-portal-bootstrap-warning, .client-portal-bootstrap-error, .client-portal-bootstrap-success { grid-column: 1 / -1; padding: .85rem; border-radius: 10px; }
 .client-portal-bootstrap-readiness, .client-portal-bootstrap-review { border: 1px solid var(--line); background: #f7f9fa; }
 .client-portal-bootstrap-readiness > div { display: flex; justify-content: space-between; gap: .75rem; align-items: center; }

@@ -5,9 +5,15 @@ import {
   portalSourceReadableSql,
   readPortalProjectionSourceProof,
   portalSourceAuthoritiesReady,
+  type PortalAuthorityDatabase,
 } from '../project-alpha-portal-authority';
 import { portalAutomaticEligibilityEnabled } from './portal-automatic-eligibility';
 import { portalRootAccessAllowedSql } from './workspace-access-policy';
+
+async function clientAuthorityWorkspaceClaimTablePresent(db: PortalAuthorityDatabase): Promise<boolean> {
+  return (await db.prepare(`SELECT 1 present FROM sqlite_master
+    WHERE type='table' AND name='portal_client_authority_workspace_claims'`).first<number>('present')) === 1;
+}
 
 /** The existing opt-in PA principal policy, without a legacy account bridge.
  * Email selects an explicit signed principal, never a business contact. */
@@ -15,6 +21,10 @@ export async function bindNativePortalEligibility(env: PortalAuthorizationEnv, p
   if (!portalAutomaticEligibilityEnabled(env)
     || !await portalSourceAuthoritiesReady(env.DELIVERY_DB)) return;
   const db = env.DELIVERY_DB.withSession('first-primary');
+  const claimTablePresent = await clientAuthorityWorkspaceClaimTablePresent(db);
+  const candidateClaimGuard = claimTablePresent ? `AND NOT EXISTS (
+    SELECT 1 FROM portal_client_authority_workspace_claims claim
+    WHERE claim.workspace_id=p.workspace_id AND claim.state='active')` : '';
   const rows = await db.prepare(`SELECT p.workspace_id,p.public_id,p.source_version,w.project_alpha_source_id,
       checkpoint.active_generation_id,checkpoint.source_sequence
     FROM pa_portal_principals p JOIN portal_v2_workspaces w ON w.id=p.workspace_id
@@ -25,6 +35,7 @@ export async function bindNativePortalEligibility(env: PortalAuthorizationEnv, p
     WHERE w.status='active' AND ${portalRootAccessAllowedSql(env.CLIENT_PORTAL_ROOT_ACCESS_POLICY_ENABLED === 'true', 'w')}
       AND w.legacy_account_id IS NULL AND ${portalSourceReadableSql('w.project_alpha_source_id')}
       AND p.status='active' AND lower(p.email_hint)=?
+      ${candidateClaimGuard}
       AND (p.identity_id IS NULL OR p.identity_id=(SELECT id FROM portal_v2_identities WHERE issuer=? AND subject=?))
       AND NOT EXISTS(SELECT 1 FROM pa_portal_principals other WHERE other.workspace_id=p.workspace_id
         AND other.status='active' AND lower(other.email_hint)=lower(p.email_hint) AND other.public_id<>p.public_id)
@@ -50,6 +61,9 @@ export async function bindNativePortalEligibility(env: PortalAuthorizationEnv, p
     const identitySql = `SELECT id FROM portal_v2_identities WHERE issuer=? AND subject=? AND status='active'
       AND revoked_at IS NULL AND lower(verified_email)=?`;
     const identityArgs = [principal.issuer,principal.subject,email];
+    const liveClaimGuard = claimTablePresent ? `AND NOT EXISTS (
+      SELECT 1 FROM portal_client_authority_workspace_claims claim
+      WHERE claim.workspace_id=p.workspace_id AND claim.state='active')` : '';
     const live = `(${guard.sql}) AND EXISTS(SELECT 1 FROM pa_portal_principals p
       JOIN portal_v2_workspaces w ON w.id=p.workspace_id AND w.status='active'
         AND ${portalRootAccessAllowedSql(env.CLIENT_PORTAL_ROOT_ACCESS_POLICY_ENABLED === 'true', 'w')} AND w.legacy_account_id IS NULL
@@ -59,6 +73,7 @@ export async function bindNativePortalEligibility(env: PortalAuthorizationEnv, p
       JOIN portal_v2_directory_entities root ON root.workspace_id=w.id AND root.generation_id=g.id AND root.active=1
         AND root.entity_type=w.root_type AND root.public_id=COALESCE(w.pa_organization_public_id,w.pa_client_public_id)
       WHERE p.workspace_id=? AND p.public_id=? AND p.source_version=? AND p.status='active' AND lower(p.email_hint)=?
+        ${liveClaimGuard}
         AND w.project_alpha_source_id=? AND cp.active_generation_id=? AND cp.source_sequence=?
         AND (p.identity_id IS NULL OR p.identity_id=(${identitySql}))
         AND NOT EXISTS(SELECT 1 FROM pa_portal_principals other WHERE other.workspace_id=p.workspace_id

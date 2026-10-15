@@ -19,7 +19,7 @@ if (errors.length) {
   for (const error of errors) console.error(`- ${error}`);
   process.exit(1);
 }
-for (const script of ["staging:check:test", "staging:bootstrap:test", "staging:evidence:check:test", "staging:acceptance:test", "check", "test", "build", "test:browser"]) {
+for (const script of ["staging:check:test", "staging:bootstrap:test", "staging:evidence:check:test", "staging:acceptance:test", "staging:client-onboarding:test", "staging:client-onboarding:check", "staging:ops-project-v2:profile:test", "staging:ops-project-v2:profile:check", "staging:directory-writes-acceptance:check", "staging:native-migrations:check", "staging:paired-end-to-end-acceptance:cli:test", "check", "test", "build", "test:browser"]) {
   const result = spawnSync("npm", ["run", script], { shell: process.platform === "win32", stdio: "inherit" });
   if (result.status !== 0) {
     console.error(`Refusing release preparation because npm run ${script} failed.`);

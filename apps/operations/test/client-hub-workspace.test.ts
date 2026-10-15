@@ -131,6 +131,29 @@ describe("explicit Client Hub workspace provenance", () => {
     expect(await resolveClientHubWorkspace(env, lookup)).toEqual({ status: "missing", workspace: null });
   });
 
+  it("keeps Ops route, PA internal, and PA public IDs in separate namespaces", async () => {
+    const opsRecordId = "ops-record-9", paInternalId = "pa-internal-42";
+    await db.prepare("INSERT INTO client_accounts VALUES('legacy-account','active',?,NULL,'project-alpha:primary')")
+      .bind(paInternalId).run();
+    await db.prepare("INSERT INTO portal_v2_workspaces VALUES('legacy-workspace','organization','Legacy workspace','active','legacy-account',?,NULL,'project-alpha:primary')")
+      .bind(paInternalId).run();
+    await db.batch([
+      db.prepare("INSERT INTO portal_v2_directory_generations VALUES('legacy-generation','legacy-workspace','legacy-backfill',0,'active',1)"),
+      db.prepare("INSERT INTO portal_v2_directory_checkpoints VALUES('legacy-workspace','legacy-generation',0)"),
+      db.prepare("INSERT INTO portal_v2_directory_entities VALUES('legacy-workspace','legacy-generation','organization',?,NULL,1,'legacy-backfill')").bind(paInternalId),
+    ]);
+    await workspace("native-public-workspace", publicId);
+    const result = await resolveClientHubWorkspaces(env, [
+      { ...lookup, key: opsRecordId, business_id: paInternalId, pa_public_id: publicId },
+    ]);
+    expect(result.get(opsRecordId)).toEqual({ status: "conflict", workspace: null });
+    await db.prepare("UPDATE portal_v2_workspaces SET status='closed' WHERE id='legacy-workspace'").run();
+    expect(await resolveClientHubWorkspace(env, { ...lookup, key: opsRecordId, business_id: paInternalId, pa_public_id: publicId }))
+      .toMatchObject({ status: "mapped", workspace: { id: "native-public-workspace", legacy_account_id: null } });
+    expect(await db.prepare("SELECT project_alpha_organization_id FROM client_accounts WHERE id='legacy-account'").first("project_alpha_organization_id"))
+      .toBe(paInternalId);
+  });
+
   it("reports pending without hydrating an unproven exact candidate", async () => {
     await workspace("legacy", "101", true, false);
     expect(await resolveClientHubWorkspace(env, lookup)).toEqual({ status: "pending", workspace: null });

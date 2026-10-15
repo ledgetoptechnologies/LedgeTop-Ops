@@ -4,7 +4,6 @@ import deliveryWranglerConfig from "../wrangler.jsonc?raw";
 vi.mock("cloudflare:workers", () => ({ WorkflowEntrypoint: class {}, WorkerEntrypoint: class {} }));
 
 import deliveryWorker, {
-  BULK_CACHE_CLEANUP_MAX_D1_QUERIES,
   bulkQuotaRetryAfterSeconds,
   bulkDownloadResumeExpiresAt,
   bulkJobProgress,
@@ -13,6 +12,7 @@ import deliveryWorker, {
   friendlyBulkFailure,
   readyBulkJobIsExpired,
 } from "../src/worker/index";
+import { BULK_CACHE_CLEANUP_MAX_D1_QUERIES } from "../src/worker/bulk-cache-limits";
 import { encodeItemRef } from "../src/worker/files";
 import { BULK_DOWNLOAD_RESUME_COOKIE, createBulkDownloadResumeCookie, createSessionCookie } from "../src/worker/security";
 import {
@@ -378,6 +378,79 @@ describe("bulk-download browser resume", () => {
       { headers: { Cookie: resume, Range: "bytes=7-9" } },
     ), env, executionCtx);
     expect(wrongJob.status).toBe(401);
+  });
+
+  it.each(["GET", "HEAD"])("keeps an archive %s authorized when another link replaces the main session", async method => {
+    const { env, reads } = readyArchiveEnv();
+    const originalDb = env.DELIVERY_DB;
+    const otherShare = { ...share, id: "share-2", public_id: "other" };
+    let scopedShare = { ...share };
+    const database = {
+      prepare(query: string) {
+        if (query.includes("FROM shares s LEFT JOIN projects")) return {
+          bind(id: unknown, publicId?: unknown) { return {
+            async first() { return [scopedShare, otherShare].find(row => row.id === id &&
+              (publicId === undefined || row.public_id === publicId)) || null; },
+          }; },
+        };
+        return originalDb.prepare(query);
+      },
+      withSession() { return database; },
+    };
+    env.DELIVERY_DB = database as unknown as D1Database;
+    const main = (await createSessionCookie(env.DELIVERY_SESSION_SECRET, env.SESSION_KEY_ID,
+      otherShare.id, otherShare.share_version, Date.now() + 60_000)).split(";")[0]!;
+    const resume = (await createBulkDownloadResumeCookie({
+      secret: env.DELIVERY_SESSION_SECRET, keyId: env.SESSION_KEY_ID,
+      shareId: share.id, shareVersion: share.share_version, publicId: "public", jobId: "job-1",
+      expiresAt: Date.now() + 60_000,
+    })).split(";")[0]!;
+    const url = "https://delivery.example/api/public/shares/public/bulk-download/job-1/file";
+    const response = await deliveryWorker.fetch(new Request(url, {
+      method, headers: { Cookie: `${main}; ${resume}`, Range: "bytes=7-9" },
+    }), env, executionCtx);
+    expect(response.status).toBe(206);
+    expect(response.headers.get("Content-Length")).toBe("3");
+    expect(new Uint8Array(await response.arrayBuffer())).toEqual(method === "HEAD" ? new Uint8Array() : Uint8Array.from([7, 8, 9]));
+    expect(response.headers.get("Set-Cookie")).toBeNull();
+    const readCount = method === "HEAD" ? 0 : 1;
+    expect(reads).toHaveLength(readCount);
+    // The exact archive credential must not authorize other public routes.
+    const manifest = await deliveryWorker.fetch(new Request(
+      "https://delivery.example/api/public/shares/public/manifest", {
+        headers: { Cookie: `${main}; ${resume}` },
+      }), env, executionCtx);
+    expect(manifest.status).toBe(404);
+    const withoutResume = await deliveryWorker.fetch(new Request(url, {
+      headers: { Cookie: main },
+    }), env, executionCtx);
+    expect(withoutResume.status).toBe(404);
+    const wrongJob = await deliveryWorker.fetch(new Request(url.replace("job-1/file", "job-2/file"), {
+      headers: { Cookie: `${main}; ${resume}` },
+    }), env, executionCtx);
+    expect(wrongJob.status).toBe(404);
+    scopedShare = { ...share, share_version: share.share_version + 1 };
+    const stale = await deliveryWorker.fetch(new Request(url, {
+      headers: { Cookie: `${main}; ${resume}` },
+    }), env, executionCtx);
+    expect(stale.status).toBe(401);
+    scopedShare = { ...share, revoked_at: new Date().toISOString() };
+    const revoked = await deliveryWorker.fetch(new Request(url, {
+      headers: { Cookie: `${main}; ${resume}` },
+    }), env, executionCtx);
+    expect(revoked.status).toBe(410);
+    expect(reads).toHaveLength(readCount);
+  });
+
+  it("allows a current delivery session when an old archive resume cookie is invalid", async () => {
+    const { env } = readyArchiveEnv();
+    const main = await sessionCookie(env);
+    const response = await deliveryWorker.fetch(new Request(
+      "https://delivery.example/api/public/shares/public/bulk-download/job-1/file", {
+        headers: { Cookie: `${main}; ${BULK_DOWNLOAD_RESUME_COOKIE}=invalid` },
+      }), env, executionCtx);
+    expect(response.status).toBe(200);
+    expect(new Uint8Array(await response.arrayBuffer())).toHaveLength(10);
   });
 
   it("returns the whole stable archive for stale If-Range and 416 outside its bounds", async () => {

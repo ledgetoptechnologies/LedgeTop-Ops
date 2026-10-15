@@ -32,6 +32,7 @@ import { DropboxImportDialog } from "./DropboxImportDialog";
 import { ClientHubWorkspaceRouter } from "./BusinessProjectWorkspace";
 import { DeliveryLinksPage } from "./DeliveryLinksPage";
 import { ProjectAlphaConnections } from "./ProjectAlphaConnections";
+import { ProjectAlphaDirectoryReconciliationReview } from "./ProjectAlphaDirectoryReconciliationReview";
 import { PortalWorkflowReadiness } from "./PortalWorkflowReadiness";
 import { ProjectAlphaAccessTokenExpiry } from "./ProjectAlphaAccessTokenExpiry";
 import { DeliveryChangeRecoveryStatus } from "./DeliveryChangeRecoveryStatus";
@@ -89,6 +90,10 @@ interface Session {
     portalIdentityDenials?: { enabled: boolean };
     authenticatedDeliveryGrants?: AuthenticatedDeliveryCapability;
     clientFeedback?: { enabled: boolean };
+    nativeDirectoryProfileWrites?: { enabled: boolean };
+    reviewedImportEnrollment?: { enabled: boolean };
+    nativeDirectoryBindingRefresh?: { enabled: boolean; recoveryEnabled?: boolean };
+    projectAlphaPrivateAdminTransport?: { enabled: boolean };
   };
 }
 type AuthenticatedDeliveryReadinessReason =
@@ -820,13 +825,17 @@ function ClientHubSurface({ session }: { session: Session }) {
     setSection(selectedItem.id);
   }, [section, selectedItem?.href, selectedItem?.id]);
   return <>
-    {visible.length > 1 && <nav className="operations-subtabs" role="tablist" aria-label="Client Hub views">
+    {visible.length > 1 && <nav className="operations-subtabs ltds-segmented" role="tablist" aria-label="Client Hub views">
       {visible.map(item => <button key={item.id} role="tab" aria-selected={selected === item.id}
         className={selected === item.id ? "active" : ""} onClick={() => open(item)}>{item.label}</button>)}
     </nav>}
     {selected === "directory" && <ClientHubWorkspaceRouter mapToken={session.mapboxPublicToken} permissions={session.user.permissions}
       feedbackEnabled={session.capabilities?.clientFeedback?.enabled === true} invitationAccess={session.invitationAdministration}
-      canManagePortalSetup={session.user.isAdministrator && allowed(session.user, "operations.manage")} />}
+      canManagePortalSetup={session.user.isAdministrator && allowed(session.user, "operations.manage")}
+      nativeDirectoryProfileWrites={session.capabilities?.nativeDirectoryProfileWrites?.enabled === true}
+      reviewedImportEnrollment={session.capabilities?.reviewedImportEnrollment?.enabled === true}
+      nativeDirectoryBindingRefresh={session.capabilities?.nativeDirectoryBindingRefresh?.enabled === true}
+      nativeDirectoryBindingRefreshRecovery={session.capabilities?.nativeDirectoryBindingRefresh?.recoveryEnabled === true} />}
     {selected === "feedback" && session.capabilities?.clientFeedback?.enabled === true && <OperationsFeedback />}
     {selected === "feedback" && session.capabilities?.clientFeedback?.enabled !== true && <Card><EmptyState title="Client feedback unavailable" detail="Feedback-review access is required." /></Card>}
     {selected === "invitation-requests" && <InvitationApprovals access={invitationAccess} />}
@@ -879,7 +888,7 @@ function OperationsHub({ session }: { session: Session }) {
   return (
     <>
       <nav
-        className="operations-subtabs"
+        className="operations-subtabs ltds-segmented"
         role="tablist"
         aria-label="Operations views"
       >
@@ -3728,6 +3737,7 @@ function exactViewerWorkspaceMessage(
 function ViewerDataOverview({session}:{session:Session}) {
   const { data, error, reload } = useLoad<ViewerOverviewResponse>(() => api("/api/viewer/overview"), []);
   const [opening, setOpening] = useState(false), [actionError, setActionError] = useState("");
+  const [popupBlocked, setPopupBlocked] = useState(false);
   const reauthorizationState = new URLSearchParams(location.search).get("state");
   useEffect(() => {
     if (!data?.viewerBaseUrl || !reauthorizationState || !/^[A-Za-z0-9_-]{32,128}$/.test(reauthorizationState)) return;
@@ -3753,11 +3763,18 @@ function ViewerDataOverview({session}:{session:Session}) {
     void run();
     return () => { active = false; };
   }, [data?.viewerBaseUrl, reauthorizationState]);
-  const openWorkspace = async () => {
-    const popup = window.open("about:blank", "_blank");
-    if (!popup) { setActionError("Allow pop-ups for Operations, then try again."); return; }
-    popup.document.title = "Opening LTDS Viewer";
-    popup.document.body.textContent = "Opening the secure LTDS Viewer workspace…";
+  const openWorkspace = async (currentTab = false) => {
+    const popup = currentTab ? null : window.open("about:blank", "_blank");
+    if (!currentTab && !popup) {
+      setPopupBlocked(true);
+      setActionError("Your browser doesn't support pop-ups. Open the Viewer in this tab to continue.");
+      return;
+    }
+    if (popup) {
+      setPopupBlocked(false);
+      popup.document.title = "Opening LTDS Viewer";
+      popup.document.body.textContent = "Opening the secure LTDS Viewer workspace…";
+    }
     setOpening(true); setActionError("");
     try {
       const expected = data?.viewerBaseUrl ? new URL(data.viewerBaseUrl) : null;
@@ -3770,6 +3787,9 @@ function ViewerDataOverview({session}:{session:Session}) {
       const target = new URL(grant.workspaceUrl);
       if (target.origin !== expected.origin || target.pathname !== `/workspace/${encodeURIComponent(grant.grant)}` || target.search || target.hash)
         throw new Error("3D Viewer returned an invalid workspace link");
+
+      if (currentTab) { location.assign(target.href); return; }
+      if (!popup) throw new Error("Unable to open the Viewer workspace");
 
       let pinnedSessionId = "", pinnedSubject = "", closed = false;
       const handled = new Set<string>();
@@ -3823,7 +3843,7 @@ function ViewerDataOverview({session}:{session:Session}) {
       const closedTimer = window.setInterval(() => { if (popup.closed) cleanup(); }, 1_000);
       popup.location.replace(target.href);
     } catch (caught) {
-      popup.close(); setActionError((caught as Error).message);
+      popup?.close(); setActionError((caught as Error).message);
     } finally { setOpening(false); }
   };
   if (!data && !error) return <Card><PanelSkeleton /></Card>;
@@ -3833,6 +3853,7 @@ function ViewerDataOverview({session}:{session:Session}) {
   const value = data.overview;
   return <div className="viewer-overview">
     <ErrorLine error={actionError} />
+    {popupBlocked && <button type="button" className="button-ghost" disabled={opening} onClick={() => void openWorkspace(true)}>Open Viewer in this tab</button>}
     <div className="viewer-overview-actions">
       <div><h2>3D models</h2><p>Project management, imports, processing, review, sharing, and model interaction open on the dedicated Viewer domain.</p></div>
       <button type="button" className="button-orange" disabled={opening} onClick={() => void openWorkspace()}>{opening ? "Opening…" : "Open Viewer workspace"}</button>
@@ -3884,7 +3905,7 @@ function DeliveryHub({ session }: { session: Session }) {
   return (
     <>
       <div
-        className="delivery-subtabs"
+        className="delivery-subtabs ltds-segmented"
         role="tablist"
         aria-label="Delivery tools"
       >
@@ -5490,7 +5511,7 @@ function ShareDialog({
           <span>{fileTarget ? "File" : "Folder"}</span>
           <code>{fileTarget ? displayName(folder) : folder.prefix}</code>
         </div>
-        {!fileTarget && <div className="share-mode-selector" role="tablist" aria-label="Sharing method">
+        {!fileTarget && <div className="share-mode-selector ltds-segmented" role="tablist" aria-label="Sharing method">
           <button
             ref={publicShareTab}
             id="share-mode-tab-public"
@@ -7172,6 +7193,8 @@ function Administration({ session }: { session: Session }) {
       </section>
       <div className="administration-panels">
         {canManageConnections && <section id="project-alpha-connections" className="administration-panel administration-panel-wide"><ProjectAlphaConnections /></section>}
+        {canManageConnections && session.capabilities?.projectAlphaPrivateAdminTransport?.enabled === true
+          && <section id="project-alpha-reconciliation-review" className="administration-panel administration-panel-wide"><ProjectAlphaDirectoryReconciliationReview /></section>}
         {canManageConnections && <section className="administration-panel"><PortalWorkflowReadiness /></section>}
         {canManageConnections && <section className="administration-panel"><ProjectAlphaAccessTokenExpiry /></section>}
         {canManageConnections && <section className="administration-panel administration-panel-wide"><DeliveryChangeRecoveryStatus /></section>}
@@ -7190,10 +7213,12 @@ function Administration({ session }: { session: Session }) {
           </ul>
         </Card></section>
       </div>
-      {session.capabilities?.clientWorkspaceManagerRecovery?.enabled === true && allowed(session.user, "operations.manage") && <ClientWorkspaceManagerRecovery />}
-      {session.capabilities?.delegatedShareProvisioning?.enabled === true && session.user.isAdministrator && allowed(session.user, "delivery.share.audit") && <DelegatedShareAdministration />}
-      {session.capabilities?.portalIdentityDenials?.enabled === true && session.user.isAdministrator && <PortalIdentityDenyAdministration />}
-      {session.user.isAdministrator && allowed(session.user, "audit.view") && <AdminAuditHistory />}
+      <div className="administration-secondary-panels">
+        {session.capabilities?.clientWorkspaceManagerRecovery?.enabled === true && allowed(session.user, "operations.manage") && <section className="administration-panel"><ClientWorkspaceManagerRecovery /></section>}
+        {session.capabilities?.delegatedShareProvisioning?.enabled === true && session.user.isAdministrator && allowed(session.user, "delivery.share.audit") && <section className="administration-panel"><DelegatedShareAdministration /></section>}
+        {session.capabilities?.portalIdentityDenials?.enabled === true && session.user.isAdministrator && <section className="administration-panel"><PortalIdentityDenyAdministration /></section>}
+        {session.user.isAdministrator && allowed(session.user, "audit.view") && <section className="administration-panel"><AdminAuditHistory /></section>}
+      </div>
     </>
   );
 }

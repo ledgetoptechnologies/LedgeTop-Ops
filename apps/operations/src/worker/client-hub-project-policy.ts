@@ -3,7 +3,14 @@ import { sha256 } from "./crypto";
 import { paProjectFilter, type SqlFilter } from "./visibility";
 import type { Env, StaffPrincipal } from "./types";
 
-export interface ClientHubBusinessProjectPolicy { allowed: boolean; proof: string; filter: SqlFilter }
+export interface ClientHubBusinessProjectPolicy {
+  allowed: boolean;
+  /** Only trusted administrator/global-view authority may see a canonical project
+   * before Project Alpha exposes a uniquely linked projection for its ACL check. */
+  canViewUnprojectedCanonical: boolean;
+  proof: string;
+  filter: SqlFilter;
+}
 
 /** Same manager/assignment/all-work policy as the existing project API. A
  * directory permission is not a grant to read every business project. The proof
@@ -15,9 +22,12 @@ export async function readClientHubBusinessProjectPolicy(env: Env, principal: St
     hasLocalGlobalAllow(env, principal, "operations.view_all"),
   ]);
   const permitted = allowed && directory.global && !directory.deniedGlobal && !scope.deniedGlobal;
+  const canViewUnprojectedCanonical = permitted && (administrator || explicitAll);
   return {
     allowed: permitted,
-    proof: await sha256(JSON.stringify([principal.id, principal.projectAlphaUserId ?? null, permitted, scope, directory, administrator, explicitAll])),
+    canViewUnprojectedCanonical,
+    proof: await sha256(JSON.stringify([principal.id, principal.projectAlphaUserId ?? null, permitted,
+      canViewUnprojectedCanonical, scope, directory, administrator, explicitAll])),
     filter: permitted ? paProjectFilter(administrator ? scope : { ...scope, divisions: [] }, principal, administrator,
       administrator || explicitAll) : { sql: "0=1", values: [] },
   };

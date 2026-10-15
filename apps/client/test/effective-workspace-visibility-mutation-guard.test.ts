@@ -63,6 +63,7 @@ describe("effective workspace visibility mutation guard — migrated D1", { time
     // ordinary entitlement branch rather than the guard's intentional shell OR.
     await db.prepare("UPDATE portal_v2_identity_eligibility_legacy_bridges SET revoked_at=datetime('now') WHERE workspace_id=?").bind(workspaceId).run();
     const entitlementGuard = await guardFor();
+    expect(entitlementGuard.sql).toContain("portal_client_authority_workspace_claims");
     expect(await allows(entitlementGuard)).toBe(true);
     await db.prepare("UPDATE portal_v2_entitlements SET revoked_at=datetime('now') WHERE id='visibility-guard-view'").run();
     expect(await allows(entitlementGuard)).toBe(false);

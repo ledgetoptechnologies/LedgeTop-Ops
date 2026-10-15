@@ -1,0 +1,54 @@
+{
+  "profile": "pa-ops-connectors-v203",
+  "version": 203,
+  "sources": {
+    "stageOne": {
+      "apiV2SourceId": "project-alpha:staging",
+      "publicEventKey": null,
+      "sourceId": "project-alpha:primary",
+      "producerBindingId": null,
+      "snapshotOrigin": "https://pa-staging.ledgetoptechnologies.com",
+      "applicationKey": "ledgetop_ops_staging",
+      "profile": "primary_legacy",
+      "displayName": "PA Stage One",
+      "enabled": false,
+      "readVisible": true,
+      "revision": {
+        "credentialRef": null,
+        "snapshotBasePath": null,
+        "accessIssuer": null,
+        "accessAudience": null,
+        "accessSubject": null,
+        "eventCurrent": {
+          "keyId": null,
+          "algorithm": "ed25519",
+          "fingerprint": null
+        }
+      }
+    },
+    "stageTwo": {
+      "apiV2SourceId": "project-alpha:source-2-staging",
+      "publicEventKey": null,
+      "sourceId": "project-alpha:source-2-staging",
+      "producerBindingId": null,
+      "snapshotOrigin": "https://pa-stage-two.ledgetoptechnologies.com",
+      "applicationKey": null,
+      "profile": "business_data",
+      "displayName": "PA Stage Two",
+      "enabled": false,
+      "readVisible": false,
+      "revision": {
+        "credentialRef": null,
+        "snapshotBasePath": null,
+        "accessIssuer": null,
+        "accessAudience": null,
+        "accessSubject": null,
+        "eventCurrent": {
+          "keyId": null,
+          "algorithm": "ed25519",
+          "fingerprint": null
+        }
+      }
+    }
+  }
+}

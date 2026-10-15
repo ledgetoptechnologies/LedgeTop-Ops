@@ -97,11 +97,10 @@ function enabledConnection(connection: ParsedConfiguredConnection): Readonly<Pro
  * unconfigured source.  `enabled` is optional only to preserve default-off
  * deployment behavior.
  */
-function parseProjectAlphaApiV2Connection(
+function parseProjectAlphaApiV2ConnectionEntries(
   env: ProjectAlphaApiV2ConnectionEnvironment,
-  requestedSourceId: string,
-): ParsedConfiguredConnection {
-  if (!sourceId(requestedSourceId) || typeof env.PROJECT_ALPHA_API_V2_CONNECTIONS !== "string") invalid();
+): readonly ParsedConfiguredConnection[] {
+  if (typeof env.PROJECT_ALPHA_API_V2_CONNECTIONS !== "string") invalid();
   const raw = env.PROJECT_ALPHA_API_V2_CONNECTIONS;
   if (!raw.trim() || new TextEncoder().encode(raw).byteLength > MAX_SECRET_BYTES) invalid();
 
@@ -111,9 +110,8 @@ function parseProjectAlphaApiV2Connection(
   const entries = Object.entries(envelope.instances);
   if (entries.length === 0 || entries.length > MAX_CONNECTIONS) invalid();
 
-  const sourceIds = new Set<string>(), origins = new Set<string>(), sourceInstances = new Set<string>();
-  const applications = new Set<string>(), historyEpochs = new Set<string>();
-  let selected: ParsedConfiguredConnection | undefined;
+  const sourceIds = new Set<string>(), sourceApplications = new Set<string>();
+  const parsedEntries: ParsedConfiguredConnection[] = [];
   for (const [key, value] of entries) {
     if (!sourceId(key) || !plain(value) || !optionalEnabled(value)) invalid();
     const baseFields = value.enabled === undefined
@@ -128,16 +126,46 @@ function parseProjectAlphaApiV2Connection(
       || !uuid(value.sourceInstanceId) || !uuid(value.applicationId) || !uuid(value.historyEpoch)) invalid();
     const baseUrl = origin(value.baseUrl);
     const identity = [value.sourceInstanceId.toLowerCase(), value.applicationId.toLowerCase(), value.historyEpoch.toLowerCase()];
-    if (new Set(identity).size !== identity.length || sourceIds.has(value.sourceId) || origins.has(baseUrl)
-      || sourceInstances.has(identity[0]!) || applications.has(identity[1]!) || historyEpochs.has(identity[2]!)) invalid();
-    sourceIds.add(value.sourceId); origins.add(baseUrl); sourceInstances.add(identity[0]!); applications.add(identity[1]!); historyEpochs.add(identity[2]!);
+    // Origins can front several isolated PA instances, and UUIDs can coincide
+    // across independent installations. What must be unique is the durable
+    // PA source/application pair within Operations; history epoch remains an
+    // exact revision fence but is not the logical mapping key.
+    const sourceApplication = `${identity[0]}\u0000${identity[1]}`;
+    if (new Set(identity).size !== identity.length || sourceIds.has(value.sourceId)
+      || sourceApplications.has(sourceApplication)) invalid();
+    sourceIds.add(value.sourceId); sourceApplications.add(sourceApplication);
     const configured = Object.freeze({ sourceId: value.sourceId, enabled: value.enabled ?? false,
       connection: Object.freeze({ baseUrl, expectedSourceInstanceId: identity[0]!, expectedApplicationId: identity[1]!, expectedHistoryEpoch: identity[2]! }) });
     const parsed = Object.freeze({ resolved: configured, apiKey: value.apiKey,
       ...(access ?? {}) });
-    if (key === requestedSourceId) selected = parsed;
+    parsedEntries.push(parsed);
   }
-  return selected ?? invalid();
+  return Object.freeze(parsedEntries);
+}
+
+function parseProjectAlphaApiV2Connection(
+  env: ProjectAlphaApiV2ConnectionEnvironment,
+  requestedSourceId: string,
+): ParsedConfiguredConnection {
+  if (!sourceId(requestedSourceId)) invalid();
+  return parseProjectAlphaApiV2ConnectionEntries(env).find(entry => entry.resolved.sourceId === requestedSourceId) ?? invalid();
+}
+
+/**
+ * Canonical parser shared with the scheduler/monitor configuration adapter.
+ * This returns credentials only to server-side code that already owns the
+ * deployment secret; callers must never serialize the result into a response
+ * or log. Keeping one parser prevents monitors and write paths from accepting
+ * different identities for the same deployment envelope.
+ */
+export function parseProjectAlphaApiV2ConnectionConfigurations(
+  env: ProjectAlphaApiV2ConnectionEnvironment,
+): readonly (ProjectAlphaApiV2Connection & Readonly<{ sourceId: string; enabled: boolean }>)[] {
+  try {
+    return Object.freeze(parseProjectAlphaApiV2ConnectionEntries(env).map(entry => Object.freeze({
+      ...enabledConnection(entry), sourceId: entry.resolved.sourceId, enabled: entry.resolved.enabled,
+    })));
+  } catch { return invalid(); }
 }
 
 export function resolveProjectAlphaApiV2Connection(
@@ -146,6 +174,24 @@ export function resolveProjectAlphaApiV2Connection(
 ): ProjectAlphaApiV2ConfiguredConnection {
   try { return parseProjectAlphaApiV2Connection(env, requestedSourceId).resolved; }
   catch { return invalid(); }
+}
+
+/** A credential-free, deterministic inventory for authorized staff discovery.
+ * Parsing every entry through the normal resolver keeps this list subject to
+ * the same whole-envelope identity and duplicate checks as a write path. */
+export function listEnabledProjectAlphaApiV2SourceIds(
+  env: ProjectAlphaApiV2ConnectionEnvironment,
+): readonly string[] {
+  try {
+    const raw = env.PROJECT_ALPHA_API_V2_CONNECTIONS;
+    if (typeof raw !== "string" || !raw.trim() || new TextEncoder().encode(raw).byteLength > MAX_SECRET_BYTES) invalid();
+    const envelope = parseDuplicateFreeJson(raw);
+    if (!plain(envelope) || !exact(envelope, ["version", "instances"])
+      || envelope.version !== 1 || !plain(envelope.instances)) invalid();
+    const keys = Object.keys(envelope.instances);
+    if (keys.length === 0 || keys.length > MAX_CONNECTIONS) invalid();
+    return Object.freeze(keys.filter(key => parseProjectAlphaApiV2Connection(env, key).resolved.enabled).sort());
+  } catch { return invalid(); }
 }
 
 /** Explicit, one-shot probe bridge.  No scheduler or route calls this.  A

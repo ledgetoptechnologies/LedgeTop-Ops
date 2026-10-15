@@ -258,7 +258,7 @@ export function SopLibrary({ user }: { user: SopUser }) {
   return (
     <section className="sop-page">
       {canManage && !slug && (
-        <nav className="sop-workspace-tabs" role="tablist" aria-label="SOP library views">
+        <nav className="sop-workspace-tabs ltds-segmented" role="tablist" aria-label="SOP library views">
           <button
             role="tab"
             aria-selected={workspace === "library"}

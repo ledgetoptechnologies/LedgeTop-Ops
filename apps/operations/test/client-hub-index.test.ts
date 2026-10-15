@@ -5,6 +5,11 @@ import { reconcileClientHubIndex } from "../src/worker/client-hub-index";
 import { splitD1MigrationStatements } from "../../client/test/helpers/d1-migrations";
 
 const runtimes: Miniflare[] = [];
+const apiV2Identity = { sourceInstanceId: "00000000-0000-4000-8000-000000000001",
+  applicationId: "00000000-0000-4000-8000-000000000002", historyEpoch: "00000000-0000-4000-8000-000000000003" };
+const apiV2Connections = JSON.stringify({ version: 1, instances: { "project-alpha:primary": {
+  sourceId: "project-alpha:primary", enabled: true, baseUrl: "https://alpha.example.test/", apiKey: "test-key", ...apiV2Identity,
+} } });
 async function fixture() {
   const runtime = new Miniflare({ compatibilityDate: "2026-08-06", modules: true,
     script: "export default { fetch(){ return new Response('ok'); } }",
@@ -36,11 +41,11 @@ async function fixture() {
     CREATE TABLE pa_portal_source_authority_revisions(source_id TEXT,revision INTEGER);
     INSERT INTO portal_v2_workspace_memberships VALUES('membership','workspace','identity');
   `);
-  return { ops, delivery, env: { OPS_DB: ops, DELIVERY_DB: delivery } };
+  return { ops, delivery, env: { OPS_DB: ops, DELIVERY_DB: delivery, PROJECT_ALPHA_API_V2_CONNECTIONS: apiV2Connections } };
 }
 afterEach(async () => { await Promise.all(runtimes.splice(0).map(runtime => runtime.dispose())); });
 
-async function finish(env: { OPS_DB: D1Database; DELIVERY_DB: D1Database }) {
+async function finish(env: { OPS_DB: D1Database; DELIVERY_DB: D1Database; PROJECT_ALPHA_API_V2_CONNECTIONS?: string }) {
   for (let count = 0; count < 30; count++) {
     // Every prepared statement here is executed, including all batch entries.
     // The wrapper observes both direct queries and session-bound source reads.
@@ -54,7 +59,8 @@ async function finish(env: { OPS_DB: D1Database; DELIVERY_DB: D1Database }) {
         return typeof value === "function" ? value.bind(target) : value;
       },
     });
-    const result = await reconcileClientHubIndex({ OPS_DB: counted(env.OPS_DB), DELIVERY_DB: counted(env.DELIVERY_DB) }, 40);
+    const result = await reconcileClientHubIndex({ OPS_DB: counted(env.OPS_DB), DELIVERY_DB: counted(env.DELIVERY_DB),
+      PROJECT_ALPHA_API_V2_CONNECTIONS: env.PROJECT_ALPHA_API_V2_CONNECTIONS }, 40);
     expect(queries).toBeLessThanOrEqual(800);
     if (result.status === "complete") return;
     expect(result.status).toBe("progress");
@@ -76,6 +82,129 @@ async function projectWorkspace(delivery: D1Database, workspace: string, kind: s
 }
 
 describe("resumable Client Hub index", { timeout: 60_000 }, () => {
+  it("indexes only exact active mapping-view tuples and routes acquired rows by the unequal Ops ID", async () => {
+    const { ops, env } = await fixture(), paPublicId = "a".repeat(32);
+    await ops.exec(`CREATE TABLE operations_directory_records(record_id TEXT PRIMARY KEY,record_kind TEXT,current_version INTEGER);
+      CREATE TABLE operations_directory_revisions(record_id TEXT,version INTEGER,profile_json TEXT,PRIMARY KEY(record_id,version));
+      CREATE TABLE operations_directory_client_organizations(client_record_id TEXT PRIMARY KEY,organization_record_id TEXT);
+      CREATE TABLE active_mapping_rows(source_id TEXT,resource_type TEXT,record_id TEXT,external_id TEXT,
+        project_alpha_public_id TEXT,source_instance_id TEXT,application_id TEXT,history_epoch_id TEXT,active INTEGER);
+      CREATE VIEW project_alpha_active_directory_mappings AS SELECT source_id,resource_type,record_id,external_id,
+        project_alpha_public_id,source_instance_id,application_id,history_epoch_id FROM active_mapping_rows WHERE active=1;`
+      .replace(/\s*\n\s*/g, " "));
+    await ops.batch([
+      ops.prepare("INSERT INTO operations_directory_records VALUES('ops-record','organization',1),('ops-duplicate','organization',1),('ops-inactive','organization',1)"),
+      ops.prepare(`INSERT INTO operations_directory_revisions VALUES
+        ('ops-record',1,'{"name":"Canonical mapped"}'),('ops-duplicate',1,'{"name":"Duplicate"}'),('ops-inactive',1,'{"name":"Inactive"}')`),
+      ops.prepare(`INSERT INTO pa_organizations(id,name,active,payload_json) VALUES
+        ('pa-external','Mapped',1,?),('pa-duplicate','Duplicate',1,?),('pa-inactive','Inactive mapping',1,?)`)
+        .bind(JSON.stringify({ public_id: paPublicId }), JSON.stringify({ public_id: "b".repeat(32) }), JSON.stringify({ public_id: "c".repeat(32) })),
+      ops.prepare(`INSERT INTO active_mapping_rows VALUES
+        ('project-alpha:primary','organization','ops-record','pa-external',?,?,?,?,1),
+        ('project-alpha:primary','organization','ops-record','pa-external',?,?,?,?,1),
+        ('project-alpha:primary','organization','ops-duplicate','pa-duplicate',?,?,?,?,1),
+        ('project-alpha:primary','organization','ops-other','pa-duplicate',?,?,?,?,1),
+        ('project-alpha:primary','organization','ops-inactive','pa-inactive',?,?,?,?,0)`)
+        .bind(paPublicId, apiV2Identity.sourceInstanceId, apiV2Identity.applicationId, apiV2Identity.historyEpoch,
+          paPublicId, apiV2Identity.sourceInstanceId, apiV2Identity.applicationId, "00000000-0000-4000-8000-000000000004",
+          "b".repeat(32), apiV2Identity.sourceInstanceId, apiV2Identity.applicationId, apiV2Identity.historyEpoch,
+          "b".repeat(32), apiV2Identity.sourceInstanceId, apiV2Identity.applicationId, apiV2Identity.historyEpoch,
+          "c".repeat(32), apiV2Identity.sourceInstanceId, apiV2Identity.applicationId, apiV2Identity.historyEpoch),
+      ops.prepare("INSERT INTO operations_directory_records VALUES('ops-client','client',1)"),
+      ops.prepare("INSERT INTO operations_directory_revisions VALUES('ops-client',1,'{\"name\":\"Mapped contact\",\"email\":\"mapped@example.test\"}')"),
+      ops.prepare("INSERT INTO operations_directory_client_organizations VALUES('ops-client','ops-record')"),
+      ops.prepare("INSERT INTO active_mapping_rows VALUES('project-alpha:primary','client','ops-client','pa-client',?,?,?,?,1)")
+        .bind("d".repeat(32), apiV2Identity.sourceInstanceId, apiV2Identity.applicationId, apiV2Identity.historyEpoch),
+      ops.prepare("INSERT INTO pa_clients(id,name,organization_id,active,payload_json) VALUES('pa-client','Mapped contact','pa-external',1,?)")
+        .bind(JSON.stringify({ public_id: "d".repeat(32), email: "mapped@example.test" })),
+    ]);
+    await finish(env);
+    expect((await ops.prepare(`SELECT public_id,pa_public_id,mapping_status FROM client_hub_roots
+      WHERE root_namespace='business' ORDER BY public_id`).all()).results).toEqual([
+      { public_id: "ops-record", pa_public_id: paPublicId, mapping_status: "mapped" },
+    ]);
+    expect(await ops.prepare("SELECT count(*) count FROM client_hub_roots WHERE public_id='pa-external'").first("count")).toBe(0);
+    expect((await ops.prepare("SELECT root_public_id,record_type,record_id,field FROM client_hub_search_values WHERE source_id='project-alpha:primary' ORDER BY field").all()).results).toEqual([
+      { root_public_id: "ops-record", record_type: "operations_directory_client", record_id: "ops-client", field: "contact" },
+      { root_public_id: "ops-record", record_type: "operations_directory_client", record_id: "ops-client", field: "email" },
+    ]);
+  });
+
+  it("materializes only current unique canonical roots without legacy projection rows and groups mapped clients by the native relationship", async () => {
+    const { ops, env } = await fixture();
+    const current = apiV2Identity;
+    await ops.exec(`CREATE TABLE operations_directory_records(record_id TEXT PRIMARY KEY,record_kind TEXT,current_version INTEGER);
+      CREATE TABLE operations_directory_revisions(record_id TEXT,version INTEGER,profile_json TEXT,PRIMARY KEY(record_id,version));
+      CREATE TABLE operations_directory_client_organizations(client_record_id TEXT PRIMARY KEY,organization_record_id TEXT);
+      CREATE TABLE active_mapping_rows(source_id TEXT,resource_type TEXT,record_id TEXT,external_id TEXT,
+        project_alpha_public_id TEXT,source_instance_id TEXT,application_id TEXT,history_epoch_id TEXT,active INTEGER);
+      CREATE VIEW project_alpha_active_directory_mappings AS SELECT source_id,resource_type,record_id,external_id,
+        project_alpha_public_id,source_instance_id,application_id,history_epoch_id FROM active_mapping_rows WHERE active=1;`
+      .replace(/\s*\n\s*/g, " "));
+    await ops.batch([
+      ops.prepare(`INSERT INTO operations_directory_records VALUES
+        ('ops-org','organization',2),('ops-child','client',1),('ops-standalone','client',1),
+        ('ops-stale','organization',1),('ops-malformed','organization',1),
+        ('ops-ambiguous-a','organization',1),('ops-ambiguous-b','organization',1),
+        ('ops-stale-client','client',1),('ops-ambiguous-client-a','client',1),('ops-ambiguous-client-b','client',1)`),
+      ops.prepare(`INSERT INTO operations_directory_revisions VALUES
+        ('ops-org',1,'{"name":"Old canonical name"}'),('ops-org',2,'{"name":"Current canonical name"}'),
+        ('ops-child',1,'{"name":"Child contact","email":"child@example.test","phone":"(920) 555-0101"}'),
+        ('ops-standalone',1,'{"name":"Standalone canonical","email":"standalone@example.test","phone":"920-555-0102"}'),
+        ('ops-stale',1,'{"name":"Stale"}'),('ops-malformed',1,'{"name":"Malformed"}'),
+        ('ops-ambiguous-a',1,'{"name":"Ambiguous A"}'),('ops-ambiguous-b',1,'{"name":"Ambiguous B"}'),
+        ('ops-stale-client',1,'{"name":"Stale contact","email":"stale@example.test"}'),
+        ('ops-ambiguous-client-a',1,'{"name":"Ambiguous contact A","email":"ambiguous-a@example.test"}'),
+        ('ops-ambiguous-client-b',1,'{"name":"Ambiguous contact B","email":"ambiguous-b@example.test"}')`),
+      ops.prepare(`INSERT INTO operations_directory_client_organizations VALUES
+        ('ops-child','ops-org'),('ops-standalone',NULL),('ops-stale-client',NULL),
+        ('ops-ambiguous-client-a',NULL),('ops-ambiguous-client-b',NULL)`),
+      ops.prepare(`INSERT INTO active_mapping_rows VALUES
+        ('project-alpha:primary','organization','ops-org','pa-org',?,?,?,?,1),
+        ('project-alpha:primary','client','ops-child','pa-child',?,?,?,?,1),
+        ('project-alpha:primary','client','ops-standalone','pa-standalone',?,?,?,?,1),
+        ('project-alpha:primary','organization','ops-stale','pa-stale',?,?,?,?,1),
+        ('project-alpha:primary','organization','ops-malformed','pa-malformed','NOT-A-PUBLIC-ID',?,?,?,1),
+        ('project-alpha:primary','organization','ops-ambiguous-a','pa-ambiguous',?,?,?,?,1),
+        ('project-alpha:primary','organization','ops-ambiguous-b','pa-ambiguous',?,?,?,?,1),
+        ('project-alpha:primary','client','ops-stale-client','pa-stale-client',?,?,?,?,1),
+        ('project-alpha:primary','client','ops-ambiguous-client-a','pa-ambiguous-client',?,?,?,?,1),
+        ('project-alpha:primary','client','ops-ambiguous-client-b','pa-ambiguous-client',?,?,?,?,1)`)
+        .bind("a".repeat(32), current.sourceInstanceId, current.applicationId, current.historyEpoch,
+          "b".repeat(32), current.sourceInstanceId, current.applicationId, current.historyEpoch,
+          "c".repeat(32), current.sourceInstanceId, current.applicationId, current.historyEpoch,
+          "d".repeat(32), current.sourceInstanceId, current.applicationId, "00000000-0000-4000-8000-000000000099",
+          current.sourceInstanceId, current.applicationId, current.historyEpoch,
+          "e".repeat(32), current.sourceInstanceId, current.applicationId, current.historyEpoch,
+          "e".repeat(32), current.sourceInstanceId, current.applicationId, current.historyEpoch,
+          "f".repeat(32), current.sourceInstanceId, current.applicationId, "00000000-0000-4000-8000-000000000099",
+          "1".repeat(32), current.sourceInstanceId, current.applicationId, current.historyEpoch,
+          "1".repeat(32), current.sourceInstanceId, current.applicationId, current.historyEpoch),
+    ]);
+    await finish(env);
+    expect((await ops.prepare(`SELECT public_id,display_name,pa_public_id,contact_count
+      FROM client_hub_roots WHERE root_namespace='business' AND status='active' ORDER BY public_id`).all()).results).toEqual([
+      { public_id: "ops-org", display_name: "Current canonical name", pa_public_id: "a".repeat(32), contact_count: 1 },
+      { public_id: "ops-standalone", display_name: "Standalone canonical", pa_public_id: "c".repeat(32), contact_count: 1 },
+    ]);
+    expect(await ops.prepare("SELECT count(*) count FROM client_hub_roots WHERE public_id='ops-org'").first("count")).toBe(1);
+    expect(await ops.prepare("SELECT count(*) count FROM client_hub_roots WHERE public_id IN ('ops-child','ops-stale','ops-malformed','ops-ambiguous-a','ops-ambiguous-b')").first("count")).toBe(0);
+    expect((await ops.prepare(`SELECT root_public_id,record_type,record_id,field,normalized_value
+      FROM client_hub_search_values WHERE record_type='operations_directory_client'
+      ORDER BY root_public_id,record_id,field`).all()).results).toEqual([
+      { root_public_id: "ops-org", record_type: "operations_directory_client", record_id: "ops-child", field: "contact", normalized_value: "child contact" },
+      { root_public_id: "ops-org", record_type: "operations_directory_client", record_id: "ops-child", field: "email", normalized_value: "child@example.test" },
+      { root_public_id: "ops-org", record_type: "operations_directory_client", record_id: "ops-child", field: "phone", normalized_value: "9205550101" },
+      { root_public_id: "ops-standalone", record_type: "operations_directory_client", record_id: "ops-standalone", field: "contact", normalized_value: "standalone canonical" },
+      { root_public_id: "ops-standalone", record_type: "operations_directory_client", record_id: "ops-standalone", field: "email", normalized_value: "standalone@example.test" },
+      { root_public_id: "ops-standalone", record_type: "operations_directory_client", record_id: "ops-standalone", field: "phone", normalized_value: "9205550102" },
+    ]);
+    expect(await ops.prepare(`SELECT count(*) count FROM client_hub_search_values
+      WHERE record_id IN ('ops-stale-client','ops-ambiguous-client-a','ops-ambiguous-client-b')`).first("count")).toBe(0);
+    expect(await ops.prepare("SELECT count(*) count FROM pa_organizations").first("count")).toBe(0);
+    expect(await ops.prepare("SELECT count(*) count FROM pa_clients").first("count")).toBe(0);
+  });
+
   it("indexes an exactly authorized secondary portal without borrowing primary account associations", async () => {
     const { ops, delivery, env } = await fixture(), publicId = "a".repeat(32);
     await ops.prepare(`INSERT INTO pa_organizations(id,name,active,payload_json,projection_source_id)

@@ -37,7 +37,7 @@
 .project-memory-attachment-list article > div { display: grid; gap: .25rem; min-width: 0; overflow-wrap: anywhere; }
 .project-memory-attachment-list article a { flex: 0 0 auto; min-height: 44px; }
 .project-memory-attachment-upload { display: grid; gap: .7rem; min-width: 0; padding: .8rem; border: 1px solid var(--border); border-radius: .5rem; background: var(--surface-subtle, transparent); }
-.project-memory-attachment-upload input[type="file"] { width: 100%; max-width: 100%; min-height: 44px; padding: .45rem; border: 1px solid var(--border); border-radius: .4rem; font-weight: 500; }
+.project-memory-attachment-upload input[type="file"] { width: 100%; max-width: 100%; min-height: 44px; padding: .45rem; border: 1px solid var(--control-border); border-radius: .4rem; font-weight: 500; }
 .project-operational-workspace details { margin-top: .8rem; }
 .project-operational-workspace summary { display: flex; align-items: center; cursor: pointer; color: var(--accent); }
 .project-operational-revisions { margin: .35rem 0 0; padding-left: 1.4rem; }

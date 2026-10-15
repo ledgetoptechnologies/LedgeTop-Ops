@@ -39,6 +39,7 @@ import {
   cancelNativeServiceRequest,
   createNativeServiceRequestDraft,
   getNativeServiceRequest,
+  getNativeServiceRequestDetail,
   getNativeServiceRequestDraft,
   listNativeServiceCatalog,
   listNativeServiceRequestDrafts,
@@ -1584,6 +1585,16 @@ export const d1ClientPortalRepository: ClientPortalRepository = {
       WHERE r.id=? AND r.account_id=a.id ${requestAccessConstraint}`)
       .bind(session.accountId, session.identityId, requestId)
       .first<ServiceRequestRow>());
+    return row ? mapServiceRequest(row, session.canViewBilling) : null;
+  },
+
+  async getServiceRequestDetail(env, session, requestId) {
+    if (session.nativeSourceId) return getNativeServiceRequestDetail(env, session, requestId);
+    const row = await serviceRequestRead(env, (database, sql) => database.prepare(`
+      SELECT ${sql.columns} FROM client_service_requests r ${sessionJoin} ${sql.quoteJoin}
+      ${operationalEstimateJoin} ${sql.areaJoin}
+      WHERE r.id=? AND r.account_id=a.id ${requestAccessConstraint}`)
+      .bind(session.accountId, session.identityId, requestId).first<ServiceRequestRow>());
     return row ? mapServiceRequest(row, session.canViewBilling) : null;
   },
 

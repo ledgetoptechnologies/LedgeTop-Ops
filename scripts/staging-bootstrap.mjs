@@ -1,4 +1,6 @@
 import crypto from "node:crypto";
+import { OPERATIONS_SOURCE_CHAIN_204 } from "./staging-operations-source-v204.mjs";
+import { OPERATIONS_SOURCE_CHAIN_205 } from "./staging-operations-source-v205.mjs";
 import fs from "node:fs";
 import path from "node:path";
 import { isDeepStrictEqual } from "node:util";
@@ -7,6 +9,46 @@ import { STAGING_ACCOUNT_ID, STAGING_INVENTORY } from "./staging-requirements.mj
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 export const BOOTSTRAP_SCHEMA_VERSION = 1;
+export const DISPOSABLE_REHEARSAL_SCHEMA_VERSION = 1;
+// Current source acceptance is separate from the frozen 149-entry bootstrap
+// and live evidence contract. An appended candidate does not prove deployment.
+export const CLIENT_CURRENT_SOURCE_MIGRATION_CHAIN = Object.freeze({
+  count: 150,
+  finalMigration: "0231_portal_primary_private_ingress_authority.sql",
+  namesSha256: "907beea8e42b719e769df0cf3a2d6484f880c886b92af452dbccd01f254b79f2",
+  contentsSha256: "181e831ee4a23ef8e5c9b756ebd664dbe8f578a162b44769f82c19647d3d27ca",
+  appendedMigrations: Object.freeze({
+    "0231_portal_primary_private_ingress_authority.sql": "b5582f703cf2e00567f49998922e9d1aaee86455c43c1fdc7a1326cd436e3353",
+  }),
+});
+// Historical current203 alias: separately versioned203 authority tools retain
+// this exact contract. New source/release readers use LATEST below.
+export const OPERATIONS_CURRENT_SOURCE_MIGRATION_CHAIN = Object.freeze({
+  count: 203,
+  finalMigration: "0203_effective_native_directory_enrollment_consumers.sql",
+  namesSha256: "47744a0f4ef2666f4a6d9aecbc17293f1349689561f5934d6ae2f1a2993f92aa",
+  contentsSha256: "3c0701679feb97f6a63afb86492ae827a982c5b739904c7d0468527264aed308",
+  appendedMigrations: Object.freeze({
+    "0200_native_directory_active_binding_refresh_supersessions.sql": "0e0ade02ba1088a8f3ef33d5d30d5be92441a879c984ccc822c15db6368ede5d",
+    "0201_native_directory_lifecycle.sql": "7bdd6d02c5ab97ba705e9a6d32238917ffb9a0757f3aa49d4eb8dcf7795e2878",
+    "0202_reviewed_import_enrollment.sql": "77388f0dfa96e3715ef9754dd2dc92a7b1ec18139be0b8bf4590b79a3a77cedf",
+    "0203_effective_native_directory_enrollment_consumers.sql": "3e331b0de53c0e4ca0b22395b879ef0e799f66872c2f49afd4ef7f7a58be0008",
+  }),
+});
+export const OPERATIONS_REVIEWED_SOURCE_MIGRATION_CHAIN_204 = Object.freeze({
+  ...OPERATIONS_SOURCE_CHAIN_204,
+  appendedMigrations: Object.freeze({
+    ...OPERATIONS_CURRENT_SOURCE_MIGRATION_CHAIN.appendedMigrations,
+    ...OPERATIONS_SOURCE_CHAIN_204.appendedMigrations,
+  }),
+});
+export const OPERATIONS_LATEST_SOURCE_MIGRATION_CHAIN = Object.freeze({
+  ...OPERATIONS_SOURCE_CHAIN_205,
+  appendedMigrations: Object.freeze({
+    ...OPERATIONS_REVIEWED_SOURCE_MIGRATION_CHAIN_204.appendedMigrations,
+    ...OPERATIONS_SOURCE_CHAIN_205.appendedMigrations,
+  }),
+});
 export const BOOTSTRAP_APPS = Object.freeze({
   delivery: Object.freeze({
     source: "client",
@@ -14,9 +56,14 @@ export const BOOTSTRAP_APPS = Object.freeze({
     binding: "DELIVERY_DB",
     databaseName: "client-data-staging",
     seed: "0002_seed_initial_staff.sql",
-    migrationCount: 132,
-    migrationNamesSha256: "b81e6d679711da90f85ce9413e9627ee205f9b294173c70fdc0148376b158e4e",
-    migrationContentsSha256: "c5b6271f9edff677237c45734bbf1b6eeebaaf1c7256b6b561ea1e2c03adb4a0",
+    migrationCount: 149,
+    migrationNamesSha256: "adec3554555949068ac785d0720c6dcddc8813489c98b5c88e88c0afd23ee659",
+    migrationContentsSha256: "f0131c4467cbe6046c5da7c54f0bcd604cc39f743d9a98082d3ff59a7d34c1f1",
+    historicalMigrationChains: Object.freeze([Object.freeze({
+      count: 147,
+      namesSha256: "1adce32fb9cad385417f3f058664ecb105559c31a5efd8c87e9f642f97a45db9",
+      contentsSha256: "8a6cb183feae5ec6490cb4710f02a3289a05421786b9593e6392803a1e890f5c",
+    })]),
   }),
   operations: Object.freeze({
     source: "operations",
@@ -24,10 +71,54 @@ export const BOOTSTRAP_APPS = Object.freeze({
     binding: "OPS_DB",
     databaseName: "ltds-ops-staging",
     seed: "0002_seed_acl.sql",
-    migrationCount: 122,
-    migrationNamesSha256: "a4f9d709bfb3b1ba96bf3acadb370eac6465e2b5ec9fef7d8bb0db20792de71a",
-    migrationContentsSha256: "20f127ae3193884494a021ac2f1851f6c2db06834d6f94498850d315e02df5d7",
+    migrationCount: 199,
+    migrationNamesSha256: "7be05fcb2b54c3a345b76b1f37e3dbbf33c0f4278b6cabe8307a064549c33821",
+    migrationContentsSha256: "9fd14f1d7bb71719c532e11ed55963a05b962ae433fd1ead8be400752b550a53",
+    historicalMigrationChains: Object.freeze([Object.freeze({
+      count: 198,
+      namesSha256: "d88ba83a54c045e5eb416fb912324047d68160f9f198e6b56591f0f0909788f2",
+      contentsSha256: "47369a1c36e64853cf8e82c874af734ff0c2745bef416cca9c3a01cae16f8409",
+    }), Object.freeze({
+      count: 196,
+      namesSha256: "c8f55f7a543d1e51d69abce753c2ce54a4640c35fd93c2769c8e971bb8162106",
+      contentsSha256: "5dd50102b800eb3b49c9c5f41adb6f1ce44005425118b718ecc544e7f0b49c03",
+    }), Object.freeze({
+      count: 195,
+      namesSha256: "3aecb42400d7a5e95687cca3eb256e880aa306dd4184747c0171f6301ffb71fd",
+      contentsSha256: "46d06078251512d73faf9b96f277165d2a7a01e8c7d97d3e775dde0a167ef9da",
+    }), Object.freeze({
+      count: 194,
+      namesSha256: "21797f48e9c38621119a6e78eb431594609ae5520aea9036f1e5db288a984a10",
+      contentsSha256: "156c845b6185e89ae18533015055b0c0e09f6939348a165da68a1a3c10eabc25",
+    }), Object.freeze({
+      count: 187,
+      namesSha256: "ce00ad1a6b67cb8a7f0ed5e197ebd5fbdfabd2566dc3c402f1eee79302036951",
+      contentsSha256: "3e0f92864210aab88c97220e50649a46d4ec8d6367262ea8f42ca75ce17a8567",
+    }), Object.freeze({
+      count: 190,
+      namesSha256: "1c42cda3e4a770e59da42fecb2eaa9063abbe415eb500d5cde22b5755fc0ddbf",
+      contentsSha256: "7e6f75368c5aed14209b092e026458894c6509324c8fdbedcf96c8df2ac0f260",
+    }), Object.freeze({
+      count: 192,
+      namesSha256: "2ac701ff1485af80b9b2edfcd0ce1b8cb9a413a925bf799d6531069eabb1f78c",
+      contentsSha256: "148ff7d7b73ec90af81730f48520f2b7e4f0c1d80eebe32143c6a088d5f81e62",
+    })]),
   }),
+});
+export const PRODUCTION_DATABASE_IDENTITIES = Object.freeze([
+  Object.freeze({ databaseName: "client-data", databaseId: "7f40a7b7-c3ec-470e-a626-e798867f71f8" }),
+  Object.freeze({ databaseName: "ltds-ops", databaseId: "6ebf7514-d306-4615-ae56-ad869c874dbd" }),
+]);
+const PRODUCTION_CONFIG_DATABASES = Object.freeze({
+  client: Object.freeze([{ binding: "DELIVERY_DB", database_name: PRODUCTION_DATABASE_IDENTITIES[0].databaseName, database_id: PRODUCTION_DATABASE_IDENTITIES[0].databaseId }]),
+  operations: Object.freeze([
+    { binding: "DELIVERY_DB", database_name: PRODUCTION_DATABASE_IDENTITIES[0].databaseName, database_id: PRODUCTION_DATABASE_IDENTITIES[0].databaseId },
+    { binding: "OPS_DB", database_name: PRODUCTION_DATABASE_IDENTITIES[1].databaseName, database_id: PRODUCTION_DATABASE_IDENTITIES[1].databaseId },
+  ]),
+  "ops-sync": Object.freeze([
+    { binding: "DELIVERY_DB", database_name: PRODUCTION_DATABASE_IDENTITIES[0].databaseName, database_id: PRODUCTION_DATABASE_IDENTITIES[0].databaseId },
+    { binding: "OPS_DB", database_name: PRODUCTION_DATABASE_IDENTITIES[1].databaseName, database_id: PRODUCTION_DATABASE_IDENTITIES[1].databaseId },
+  ]),
 });
 
 const canonicalPeople = Object.freeze([
@@ -54,19 +145,20 @@ function requireRegularDirectory(directory, label) {
   if (!stat || !stat.isDirectory() || stat.isSymbolicLink()) throw new Error(`${label} must be a regular non-symlink directory`);
 }
 
-function validateOutputAncestors(base, target) {
+function validatePathAncestors(base, target, label) {
   const absoluteBase = path.resolve(base);
   const absoluteTarget = path.resolve(target);
   const relative = path.relative(absoluteBase, absoluteTarget);
-  if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) throw new Error(`generated output must remain below ${absoluteBase}`);
+  if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) throw new Error(`${label} must remain below ${absoluteBase}`);
   let current = absoluteBase;
   const parentParts = path.dirname(relative).split(path.sep).filter((part) => part && part !== ".");
   for (const part of parentParts) {
     current = path.join(current, part);
     const stat = lstat(current);
-    if (stat && (!stat.isDirectory() || stat.isSymbolicLink())) throw new Error(`generated output ancestor ${path.relative(base, current)} must be a regular non-symlink directory`);
+    if (stat && (!stat.isDirectory() || stat.isSymbolicLink())) throw new Error(`${label} ancestor ${path.relative(base, current)} must be a regular non-symlink directory`);
   }
 }
+const validateOutputAncestors = (base, target) => validatePathAncestors(base, target, "generated output");
 
 function databaseIdentities(config) {
   if (!Array.isArray(config?.d1_databases)) return [];
@@ -123,9 +215,52 @@ function database(config, entry) {
   return config?.d1_databases?.find((item) => item?.binding === entry.binding);
 }
 
-export function buildArtifacts(base, owner) {
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const RUN_ID = /^[a-z0-9](?:[a-z0-9-]{1,18}[a-z0-9])$/;
+const exactKeys = (value, keys) => value && typeof value === "object" && !Array.isArray(value)
+  && isDeepStrictEqual(Object.keys(value).sort(), [...keys].sort());
+
+function reservedDatabaseIdentities(base) {
+  const identities = [];
+  for (const inventory of Object.values(STAGING_INVENTORY)) identities.push(...databaseIdentities(inventory));
+  for (const source of ["client", "operations", "ops-sync"]) {
+    const file = path.join(base, "apps", source, "wrangler.jsonc");
+    requireRegularFile(file, `${source} production config`);
+    let config;
+    try { config = readJson(file); }
+    catch { throw new Error(`${source} production config must be strict JSON`); }
+    const databases = databaseIdentities(config);
+    if (!isDeepStrictEqual(databases, [...PRODUCTION_CONFIG_DATABASES[source]].sort((left, right) => left.binding.localeCompare(right.binding))))
+      throw new Error(`${source} production config D1 identities differ from the reviewed production inventory`);
+    identities.push(...databases);
+  }
+  return identities;
+}
+
+export function validateDisposableTargets(base, targets) {
+  if (!exactKeys(targets, ["runId", "applications"]) || !RUN_ID.test(targets.runId ?? "")
+    || !exactKeys(targets.applications, Object.keys(BOOTSTRAP_APPS))) throw new Error("disposable rehearsal targets require a strict runId and exactly delivery and operations applications");
+  const reserved = reservedDatabaseIdentities(base), seenNames = new Set(), seenIds = new Set();
+  for (const [app, entry] of Object.entries(BOOTSTRAP_APPS)) {
+    const target = targets.applications[app];
+    const expectedName = `${entry.databaseName}-rehearsal-${targets.runId}`;
+    if (!exactKeys(target, ["databaseName", "databaseId"]) || target.databaseName !== expectedName || !UUID.test(target.databaseId ?? "")) {
+      throw new Error(`${app} disposable rehearsal target must use exact name ${expectedName} and a lowercase UUIDv4 ID`);
+    }
+    if (seenNames.has(target.databaseName) || seenIds.has(target.databaseId)) throw new Error("disposable rehearsal database names and IDs must be distinct");
+    if (reserved.some(({ database_name, database_id }) => database_name === target.databaseName || database_id === target.databaseId)) {
+      throw new Error(`${app} disposable rehearsal target must not reuse a configured staging or production database identity`);
+    }
+    seenNames.add(target.databaseName); seenIds.add(target.databaseId);
+  }
+  return targets;
+}
+
+export function buildArtifacts(base, owner, options = {}) {
   const errors = validateOwner(owner);
   if (errors.length) throw new Error(errors.join("\n"));
+  if (!exactKeys(options, []) && !exactKeys(options, ["disposableTargets"])) throw new Error("unexpected bootstrap build option");
+  const requestedDisposable = options.disposableTargets ?? null;
   const artifacts = {};
   for (const [app, entry] of Object.entries(BOOTSTRAP_APPS)) {
     const appDir = path.join(base, "apps", entry.source);
@@ -143,10 +278,45 @@ export function buildArtifacts(base, owner) {
     requireRegularDirectory(sourceDir, `${app} canonical migration directory`);
     const entries = fs.readdirSync(sourceDir, { withFileTypes: true });
     for (const item of entries) {
-      if (item.name.endsWith(".sql") && (!item.isFile() || item.isSymbolicLink())) throw new Error(`${app} canonical migration ${item.name} must be a regular non-symlink file`);
+      if (/\.sql$/i.test(item.name) && !/^\d{4}_.+\.sql$/.test(item.name)) throw new Error("canonical migration names required");
+      if (/\.sql$/i.test(item.name) && (!item.isFile() || item.isSymbolicLink())) throw new Error(`${app} canonical migration ${item.name} must be a regular non-symlink file`);
     }
-    const names = entries.filter((item) => item.isFile() && !item.isSymbolicLink() && item.name.endsWith(".sql")).map((item) => item.name).sort();
-    if (names.length !== entry.migrationCount || sha256(names.join("\n")) !== entry.migrationNamesSha256) throw new Error(`${app} canonical migration inventory must be the exact complete ordered ${entry.migrationCount}-file chain`);
+    const repositoryNames = entries.filter((item) => item.isFile() && !item.isSymbolicLink() && /\.sql$/i.test(item.name)).map((item) => item.name).sort();
+    const currentSource = app === "operations"
+      ? repositoryNames.includes(OPERATIONS_LATEST_SOURCE_MIGRATION_CHAIN.finalMigration)
+        ? OPERATIONS_LATEST_SOURCE_MIGRATION_CHAIN
+        : repositoryNames.includes(OPERATIONS_REVIEWED_SOURCE_MIGRATION_CHAIN_204.finalMigration)
+          ? OPERATIONS_REVIEWED_SOURCE_MIGRATION_CHAIN_204 : OPERATIONS_CURRENT_SOURCE_MIGRATION_CHAIN
+      : CLIENT_CURRENT_SOURCE_MIGRATION_CHAIN;
+    const appendedNames = currentSource ? Object.keys(currentSource.appendedMigrations) : [];
+    const hasCurrentAppend = currentSource && appendedNames.every((name) => repositoryNames.includes(name));
+    if (currentSource && repositoryNames.some((name) => appendedNames.includes(name)) && !hasCurrentAppend) {
+      throw new Error(`${app} canonical migration inventory contains an incomplete reviewed suffix`);
+    }
+    if (hasCurrentAppend) {
+      if (repositoryNames.length !== currentSource.count || repositoryNames.at(-1) !== currentSource.finalMigration
+        || sha256(repositoryNames.join("\n")) !== currentSource.namesSha256) {
+        throw new Error(`${app} canonical migration inventory must be an exact complete reviewed chain`);
+      }
+      const repositoryContentsSha256 = sha256(repositoryNames.map((name) => {
+        const sourcePath = path.join(sourceDir, name);
+        requireRegularFile(sourcePath, `${app} canonical migration ${name}`);
+        return `${name}\0${sha256(fs.readFileSync(sourcePath))}`;
+      }).join("\n"));
+      if (repositoryContentsSha256 !== currentSource.contentsSha256
+        || appendedNames.some((name) => sha256(fs.readFileSync(path.join(sourceDir, name))) !== currentSource.appendedMigrations[name])) {
+        throw new Error(`${app} canonical migration contents do not match the reviewed full-chain digest`);
+      }
+    }
+    const names = hasCurrentAppend
+      ? repositoryNames.filter((name) => !appendedNames.includes(name))
+      : repositoryNames;
+    const namesSha256 = sha256(names.join("\n"));
+    const reviewedChains = [{ count: entry.migrationCount, namesSha256: entry.migrationNamesSha256,
+      contentsSha256: entry.migrationContentsSha256 }, ...(entry.historicalMigrationChains ?? [])];
+    const reviewedChain = reviewedChains.find(chain => names.length === chain.count && namesSha256 === chain.namesSha256);
+    if (!reviewedChain) throw new Error(`${app} canonical migration inventory must be an exact complete reviewed chain `
+      + `(found ${names.length} files, names sha256 ${namesSha256})`);
     if (!names.includes(entry.seed)) throw new Error(`${app} canonical seed ${entry.seed} is missing`);
     const canonicalFiles = names.map((name) => {
       const sourcePath = path.join(sourceDir, name);
@@ -155,14 +325,14 @@ export function buildArtifacts(base, owner) {
       return { name, source, sourceSha256: sha256(source) };
     });
     const sourceChainSha256 = sha256(canonicalFiles.map(({ name, sourceSha256 }) => `${name}\0${sourceSha256}`).join("\n"));
-    if (sourceChainSha256 !== entry.migrationContentsSha256) throw new Error(`${app} canonical migration contents do not match the reviewed full-chain digest`);
+    if (sourceChainSha256 !== reviewedChain.contentsSha256) throw new Error(`${app} canonical migration contents do not match the reviewed full-chain digest`);
     const files = canonicalFiles.map(({ name, source, sourceSha256 }) => {
       const generated = name === entry.seed ? transformSeed(app, source, owner) : source;
       return { name, source, generated, sourceSha256, generatedSha256: sha256(generated), transformed: source !== generated };
     });
     const changed = files.filter(({ transformed }) => transformed).map(({ name }) => name);
     if (!isDeepStrictEqual(changed, [entry.seed])) throw new Error(`${app} bootstrap must transform exactly ${entry.seed}`);
-    const outputConfig = structuredClone(config);
+    const runDirectory = ".staging-bootstrap", outputConfig = structuredClone(config);
     database(outputConfig, entry).migrations_dir = ".staging-bootstrap/migrations";
     const manifest = {
       schemaVersion: BOOTSTRAP_SCHEMA_VERSION, app, workerName: entry.workerName,
@@ -171,18 +341,41 @@ export function buildArtifacts(base, owner) {
       sourceMigrationDirectory: `apps/${entry.source}/migrations`, sourceChainSha256, transformedFiles: changed,
       migrations: files.map(({ name, sourceSha256, generatedSha256, transformed }) => ({ name, sourceSha256, generatedSha256, transformed })),
     };
-    artifacts[app] = { entry, files, config: outputConfig, manifest };
+    artifacts[app] = { entry, files, config: outputConfig, manifest, runDirectory,
+      configFilename: "wrangler.staging.bootstrap.json" };
+  }
+  // Validate every canonical source config and migration byte before a target
+  // identity can influence any generated artifact.
+  if (requestedDisposable) {
+    const disposable = validateDisposableTargets(base, requestedDisposable);
+    for (const [app, artifact] of Object.entries(artifacts)) {
+      const { entry } = artifact, target = disposable.applications[app];
+      artifact.runDirectory = `.staging-bootstrap/rehearsals/${disposable.runId}`;
+      artifact.configFilename = `wrangler.staging.bootstrap.${disposable.runId}.json`;
+      artifact.config = {
+        name: `${entry.workerName}-rehearsal-${disposable.runId}`,
+        account_id: STAGING_ACCOUNT_ID,
+        vars: { ENVIRONMENT: "staging" },
+        d1_databases: [{ binding: entry.binding, database_name: target.databaseName, database_id: target.databaseId,
+          migrations_dir: `${artifact.runDirectory}/migrations` }],
+      };
+      const { workerName, databaseName, databaseId, ...commonManifest } = artifact.manifest;
+      artifact.manifest = { ...commonManifest, schemaVersion: DISPOSABLE_REHEARSAL_SCHEMA_VERSION,
+        mode: "disposable-remote-rehearsal", runId: disposable.runId,
+        canonicalSource: { workerName, databaseName, databaseId },
+        disposableTarget: { workerName: artifact.config.name, databaseName: target.databaseName, databaseId: target.databaseId } };
+    }
   }
   return artifacts;
 }
 
 function expectedFiles(base, artifacts) {
   const files = new Map();
-  for (const { entry, files: migrations, config, manifest } of Object.values(artifacts)) {
-    const generatedDir = path.join(base, "apps", entry.source, ".staging-bootstrap");
+  for (const { entry, files: migrations, config, manifest, runDirectory, configFilename } of Object.values(artifacts)) {
+    const generatedDir = path.join(base, "apps", entry.source, runDirectory);
     for (const migration of migrations) files.set(path.join(generatedDir, "migrations", migration.name), migration.generated);
     files.set(path.join(generatedDir, "manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`);
-    files.set(path.join(base, "apps", entry.source, "wrangler.staging.bootstrap.json"), `${JSON.stringify(config, null, 2)}\n`);
+    files.set(path.join(base, "apps", entry.source, configFilename), `${JSON.stringify(config, null, 2)}\n`);
   }
   return files;
 }
@@ -198,14 +391,15 @@ export function validateGenerated(base, artifacts) {
     else if (!stat.isFile() || stat.isSymbolicLink()) errors.push(`${path.relative(base, file)} must be a regular non-symlink file`);
     else if (fs.readFileSync(file, "utf8") !== content) errors.push(`${path.relative(base, file)} is stale or was edited`);
   }
-  for (const { entry, files } of Object.values(artifacts)) {
-    const directory = path.join(base, "apps", entry.source, ".staging-bootstrap", "migrations");
+  for (const { entry, files, runDirectory } of Object.values(artifacts)) {
+    const directory = path.join(base, "apps", entry.source, runDirectory, "migrations");
     const stat = lstat(directory);
     if (stat) {
       if (!stat.isDirectory() || stat.isSymbolicLink()) { errors.push(`${path.relative(base, directory)} must be a regular non-symlink directory`); continue; }
       const entries = fs.readdirSync(directory, { withFileTypes: true });
-      for (const item of entries) if (item.name.endsWith(".sql") && (!item.isFile() || item.isSymbolicLink())) errors.push(`${path.relative(base, path.join(directory, item.name))} must be a regular non-symlink file`);
-      const actual = entries.filter((item) => item.isFile() && !item.isSymbolicLink() && item.name.endsWith(".sql")).map((item) => item.name).sort();
+      for (const item of entries) if (/\.sql$/i.test(item.name) && !/^\d{4}_.+\.sql$/.test(item.name)) errors.push("canonical migration names required");
+      for (const item of entries) if (/\.sql$/i.test(item.name) && (!item.isFile() || item.isSymbolicLink())) errors.push(`${path.relative(base, path.join(directory, item.name))} must be a regular non-symlink file`);
+      const actual = entries.filter((item) => item.isFile() && !item.isSymbolicLink() && /\.sql$/i.test(item.name)).map((item) => item.name).sort();
       const wanted = files.map(({ name }) => name);
       if (!isDeepStrictEqual(actual, wanted)) errors.push(`${path.relative(base, directory)} has missing or unexpected SQL files`);
     }
@@ -233,19 +427,31 @@ export function writeGenerated(base, artifacts) {
 function parseArguments(argv) {
   let mode = "";
   let valuesFile = "";
+  let targetsFile = "";
   for (let index = 0; index < argv.length; index += 1) {
     if (["--write", "--check"].includes(argv[index]) && !mode) mode = argv[index];
     else if (argv[index] === "--values" && argv[index + 1]) valuesFile = argv[++index];
+    else if (argv[index] === "--disposable-targets" && argv[index + 1]) targetsFile = argv[++index];
     else throw new Error(`unknown or incomplete argument ${argv[index]}`);
   }
-  if (!mode || !valuesFile) throw new Error("usage: node scripts/staging-bootstrap.mjs --write|--check --values <local-owner-json>");
-  return { mode, valuesFile };
+  if (!mode || !valuesFile) throw new Error("usage: node scripts/staging-bootstrap.mjs --write|--check --values <local-owner-json> [--disposable-targets <local-target-json>]");
+  return { mode, valuesFile, targetsFile };
+}
+
+function readLocalJson(base, filename, label) {
+  const resolvedBase = path.resolve(base), file = path.resolve(resolvedBase, filename), relative = path.relative(resolvedBase, file);
+  if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) throw new Error(`${label} must remain below the repository root`);
+  validatePathAncestors(resolvedBase, file, label);
+  requireRegularFile(file, label);
+  try { return readJson(file); }
+  catch { throw new Error(`${label} must be strict JSON`); }
 }
 
 export function run(argv = process.argv.slice(2), base = root) {
-  const { mode, valuesFile } = parseArguments(argv);
+  const { mode, valuesFile, targetsFile } = parseArguments(argv);
   const owner = readJson(path.resolve(base, valuesFile)).owner;
-  const artifacts = buildArtifacts(base, owner);
+  const disposableTargets = targetsFile ? readLocalJson(base, targetsFile, "disposable rehearsal target input") : undefined;
+  const artifacts = buildArtifacts(base, owner, disposableTargets ? { disposableTargets } : {});
   if (mode === "--check") {
     const errors = validateGenerated(base, artifacts);
     if (errors.length) throw new Error(`fresh-staging bootstrap artifacts are invalid:\n${errors.map((error) => `- ${error}`).join("\n")}`);

@@ -33,7 +33,8 @@ function sameGrant(target:NativeFeedbackTarget,grant:Grant){return JSON.stringif
 const visibleFile=`NOT EXISTS(SELECT 1 FROM delivery_tombstones tombstone WHERE tombstone.restored_at IS NULL
   AND (tombstone.physical_key=file.r2_key OR (tombstone.tombstone_kind='prefix' AND substr(file.r2_key,1,length(tombstone.physical_key))=tombstone.physical_key)))`;
 
-function authorizationGuard(env:Env,context:NativePortalReadContext,principal:VerifiedClientPrincipal,target:NativeFeedbackTarget,grant:Grant|null,available:boolean){
+function authorizationGuard(env:Env,context:NativePortalReadContext,principal:VerifiedClientPrincipal,target:NativeFeedbackTarget,grant:Grant|null,
+  available:boolean,claimTablePresent:boolean){
   // Workspace-scoped entitlements authorize every descendant. Keep the exact
   // target lineage as well so narrower denies still win in the same guard.
   const scopes=[...new Set([`workspace:${context.workspaceId}`,...target.scopeProof.map(row=>`${row.entityType}:${row.publicId}`)])];
@@ -41,6 +42,11 @@ function authorizationGuard(env:Env,context:NativePortalReadContext,principal:Ve
   const parts:string[]=[],bindings:(string|number|null)[]=[];
   const authority=portalProjectionSourceGuard(context.authority);
   parts.push(authority.sql);bindings.push(...authority.bindings);
+  if(claimTablePresent){
+    parts.push(`NOT EXISTS(SELECT 1 FROM portal_client_authority_workspace_claims claim
+      WHERE claim.workspace_id=? AND claim.state='active')`);
+    bindings.push(context.workspaceId);
+  }
   parts.push(`EXISTS(SELECT 1 FROM portal_v2_workspaces workspace
     JOIN pa_portal_workspace_sources source ON source.workspace_id=workspace.id AND source.projection_source_id=workspace.project_alpha_source_id
     JOIN pa_portal_source_authorities authority ON authority.source_id=workspace.project_alpha_source_id AND authority.state='active'
@@ -141,6 +147,8 @@ function authorizationGuard(env:Env,context:NativePortalReadContext,principal:Ve
 export async function resolveNativeFeedbackTarget(env:Env,principal:VerifiedClientPrincipal,context:NativePortalReadContext,
   requested:ClientFeedbackTargetInput,stored?:NativeFeedbackTarget):Promise<ResolvedNativeFeedbackTarget>{
   const parsed=nativeFeedbackTargetInputSchema.safeParse(requested);if(!parsed.success)return unavailable();const value=parsed.data;
+  const claimTablePresent=(await env.DELIVERY_DB.withSession('first-primary').prepare(`SELECT 1 present FROM sqlite_master
+    WHERE type='table' AND name='portal_client_authority_workspace_claims'`).first<number>('present'))===1;
   let scope:NativeTargetScopes|undefined,grant:Grant|null=null,relativePath:string|null=null,storageKey:string|null=null;
   let projectPublicId:string|null=value.projectId,label='',projectName:string|null=null,file:NativeFeedbackTarget['file']=null;
   if(value.kind==='project'){
@@ -173,7 +181,7 @@ export async function resolveNativeFeedbackTarget(env:Env,principal:VerifiedClie
       ||(grant&&!sameGrant(stored,grant)))return unavailable();}
   const canonical=stored??target,available=value.kind!=='file'||JSON.stringify(canonical.file)===JSON.stringify(target.file);
   return {context:{sourceId:context.sourceId,workspaceId:context.workspaceId,identityId:context.identityId,issuer:principal.issuer,subject:principal.subject},
-    target:canonical,guard:authorizationGuard(env,context,principal,canonical,grant,available),available,contextVersion:context.contextVersion,grant};
+    target:canonical,guard:authorizationGuard(env,context,principal,canonical,grant,available,claimTablePresent),available,contextVersion:context.contextVersion,grant};
 }
 
 export async function reauthorizeNativeFeedbackRecipient(env:Env,record:NativeFeedbackRecord):Promise<ResolvedNativeFeedbackTarget|null>{

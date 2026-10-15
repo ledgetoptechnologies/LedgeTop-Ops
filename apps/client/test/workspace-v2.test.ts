@@ -19,8 +19,10 @@ import {
   authorizePortalWorkspaceCapability,
   authorizeEffectiveWorkspaceNotification,
   authorizeEffectiveWorkspaceProject,
+  effectiveWorkspaceRequestMutationGuardSql,
   hashPortalInvitationToken,
   listPortalWorkspaces,
+  portalIdentityAccepted,
   readEffectiveWorkspaceRequestProof,
   resolveEffectivePortalWorkspaceContext,
 } from "../src/worker/client-portal/workspace-v2";
@@ -255,6 +257,77 @@ describe("client workspace hierarchy v2", () => {
       .replace(/\s*\n\s*/g, " "));
     expect(await db.prepare("SELECT COUNT(*) count FROM portal_v2_workspaces WHERE id='workspace-account-a'").first("count")).toBe(1);
     expect((await db.prepare("PRAGMA foreign_key_check").all()).results).toEqual([]);
+  });
+
+  it("denies historical PA access while its workspace has an active Operations claim", async () => {
+    const target = { scopeType: "project" as const, publicId: "pa-project-a" };
+    expect(await authorizePortalWorkspaceCapability(env, principal, "workspace-account-a", "request.create", target)).toBe(true);
+    expect((await listPortalWorkspaces(env, principal)).map(row => row.id)).toContain("workspace-account-a");
+    // This legacy fixture predates 0216. Exercise the read-side state switch
+    // without inventing a PA checkpoint or weakening the real migration guards.
+    await db.exec("CREATE TABLE portal_client_authority_workspace_claims (workspace_id TEXT PRIMARY KEY,state TEXT NOT NULL)");
+    try {
+      const proof = await readEffectiveWorkspaceRequestProof(env, principal, "workspace-account-a", "project-a");
+      expect(proof?.mutationProof.claimTablePresent).toBe(true);
+      const guard = effectiveWorkspaceRequestMutationGuardSql(proof!.mutationProof);
+      await db.prepare("INSERT INTO portal_client_authority_workspace_claims(workspace_id,state) VALUES('workspace-account-a','active')").run();
+      expect(await authorizePortalWorkspaceCapability(env, principal, "workspace-account-a", "request.create", target)).toBe(false);
+      expect((await listPortalWorkspaces(env, principal)).map(row => row.id)).not.toContain("workspace-account-a");
+      expect(await db.prepare(`SELECT 1 allowed WHERE ${guard.sql}`).bind(...guard.bindings).first("allowed")).toBeNull();
+      await db.prepare("UPDATE portal_client_authority_workspace_claims SET state='released' WHERE workspace_id='workspace-account-a'").run();
+      expect(await authorizePortalWorkspaceCapability(env, principal, "workspace-account-a", "request.create", target)).toBe(true);
+    } finally {
+      await db.exec("DROP TABLE portal_client_authority_workspace_claims");
+    }
+  });
+
+  it("does not repair PA eligibility or issue legacy rows after a workspace claim", async () => {
+    await db.exec(`
+      CREATE TABLE IF NOT EXISTS pa_portal_principals(workspace_id TEXT NOT NULL,public_id TEXT NOT NULL,identity_id TEXT,email_hint TEXT NOT NULL,display_name TEXT NOT NULL,source_version TEXT NOT NULL,status TEXT NOT NULL,PRIMARY KEY(workspace_id,public_id));
+      CREATE TABLE IF NOT EXISTS portal_v2_identity_eligibility_bindings(identity_id TEXT,workspace_id TEXT,principal_public_id TEXT,principal_source_version TEXT,verified_email TEXT);
+      CREATE TABLE IF NOT EXISTS portal_v2_identity_eligibility_legacy_bridges(workspace_id TEXT,identity_id TEXT,legacy_account_id TEXT,legacy_identity_id TEXT,status TEXT DEFAULT 'active',revoked_at TEXT);
+      CREATE TABLE IF NOT EXISTS portal_v2_identity_eligibility_blocks(status TEXT,valid_from TEXT,expires_at TEXT,match_type TEXT,issuer TEXT,subject TEXT,normalized_email TEXT);
+      CREATE TABLE portal_client_authority_workspace_claims (workspace_id TEXT PRIMARY KEY,state TEXT NOT NULL);
+    `.replace(/\s*\n\s*/g, " "));
+    const repairing = { issuer, subject: "claimed-repair", email: "claimed-repair@example.test" };
+    try {
+      await db.batch([
+        db.prepare(`INSERT INTO pa_portal_principals(workspace_id,public_id,email_hint,display_name,source_version,status)
+          VALUES('workspace-account-a','claimed-repair-principal',?,'Claimed repair', 'repair-v1','active')`).bind(repairing.email),
+        db.prepare("INSERT INTO portal_client_authority_workspace_claims(workspace_id,state) VALUES('workspace-account-a','active')"),
+      ]);
+      expect(await portalIdentityAccepted({ ...env, CLIENT_PORTAL_PA_IDENTITY_AUTO_ELIGIBILITY_ENABLED: "true" }, repairing)).toBe(false);
+      expect(await db.prepare("SELECT COUNT(*) count FROM portal_v2_identities WHERE subject='claimed-repair'").first("count")).toBe(0);
+      expect(await db.prepare("SELECT COUNT(*) count FROM client_identity_links WHERE id='eligibility-legacy:workspace-account-a:claimed-repair-principal'").first("count")).toBe(0);
+      expect(await db.prepare("SELECT COUNT(*) count FROM client_account_members WHERE identity_id='eligibility-legacy:workspace-account-a:claimed-repair-principal'").first("count")).toBe(0);
+    } finally {
+      await db.exec(`DROP TABLE portal_client_authority_workspace_claims;
+        DROP TABLE pa_portal_principals;
+        DROP TABLE portal_v2_identity_eligibility_bindings;
+        DROP TABLE portal_v2_identity_eligibility_legacy_bridges;
+        DROP TABLE portal_v2_identity_eligibility_blocks;`.replace(/\s*\n\s*/g, " "));
+    }
+  });
+
+  it("does not accept a primary invitation or create its legacy bridge after a workspace claim", async () => {
+    const token = "C".repeat(48), tokenHash = await hashPortalInvitationToken(token);
+    await db.exec("CREATE TABLE portal_client_authority_workspace_claims (workspace_id TEXT PRIMARY KEY,state TEXT NOT NULL)");
+    try {
+      await db.batch([
+        db.prepare(`INSERT INTO portal_v2_invitations(id,workspace_id,token_hash,invited_email,invited_by_identity_id,expires_at)
+          VALUES('claimed-invitation','workspace-account-a',?,'claimed-invite@example.test','identity-one','2099-01-01T00:00:00Z')`).bind(tokenHash),
+        db.prepare(`INSERT INTO portal_v2_invitation_entitlements(invitation_id,capability,scope_type,scope_public_id)
+          VALUES('claimed-invitation','workspace.view','workspace','workspace-account-a')`),
+        db.prepare("INSERT INTO portal_client_authority_workspace_claims(workspace_id,state) VALUES('workspace-account-a','active')"),
+      ]);
+      expect(await acceptPortalWorkspaceInvitation(env, { issuer, subject: "claimed-invite", email: "claimed-invite@example.test" }, token)).toBe("denied");
+      expect(await db.prepare("SELECT status FROM portal_v2_invitations WHERE id='claimed-invitation'").first("status")).toBe("pending");
+      expect(await db.prepare("SELECT COUNT(*) count FROM portal_v2_identities WHERE subject='claimed-invite'").first("count")).toBe(0);
+      expect(await db.prepare("SELECT COUNT(*) count FROM portal_v2_legacy_member_bridges WHERE invitation_id='claimed-invitation'").first("count")).toBe(0);
+    } finally {
+      await db.exec(`DROP TABLE portal_client_authority_workspace_claims;
+        DELETE FROM portal_v2_invitations WHERE id='claimed-invitation';`.replace(/\s*\n\s*/g, " "));
+    }
   });
 
   it("uses legacy hierarchy only for an explicitly missing pre-0129 contract table", async () => {

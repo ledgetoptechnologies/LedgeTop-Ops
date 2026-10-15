@@ -26,6 +26,7 @@ import { splitD1MigrationStatements } from "./helpers/d1-migrations";
 import {
   cancelNativeServiceRequest,
   createNativeServiceRequestDraft,
+  getNativeServiceRequestDetail,
   listNativeServiceCatalog,
   listNativeServiceRequests,
   submitNativeServiceRequestDraft,
@@ -40,6 +41,7 @@ import {
   listRequestAttachments,
 } from "../src/worker/client-portal/request-attachments";
 import {
+  ensureNativeRequestStorage,
   nativeRequestMutationGuardSql,
   resolveNativeRequestAuthority,
 } from "../src/worker/client-portal/native-request-authority";
@@ -78,7 +80,9 @@ describe("exact-target service-assignment request policy", { timeout: 60_000 }, 
       compatibilityDate: "2026-08-06",
       modules: true,
       script: "export default {fetch(){return new Response('ok')}}",
-      d1Databases: Object.fromEntries(Array.from({ length: 28 }, (_, index) =>
+      // Each test receives an isolated D1 binding; keep capacity above the
+      // current case count so new cases do not request an undeclared binding.
+      d1Databases: Object.fromEntries(Array.from({ length: 40 }, (_, index) =>
         [`POLICY_DB_${index}`, `service-assignment-policy-${index}`])),
     });
   });
@@ -740,6 +744,114 @@ describe("exact-target service-assignment request policy", { timeout: 60_000 }, 
       expect(response.status).toBe(501);
       expect(await response.json()).toMatchObject({ code: "native_operation_unavailable" });
     }
+  });
+
+  it("reads immutable native submitted services only for the exact current authority and source", async () => {
+    await seedSecondaryPolicyContext();
+    await enableSecondaryRequestPolicy();
+    const created = await d1ClientPortalRepository.createServiceRequest(env, secondarySession, {
+      idempotencyKey: "native-service-detail-readback", projectId: null, requestType: "service",
+      title: "Website care intake", details: "Preserve the reviewed service answers", location: null, preferredStartAt: null,
+      services: [{ publicId: "secondary-only", sourceVersion: "service-v1", answers: {} }],
+    });
+    if (!created || !("request" in created)) throw new Error("native request was not created");
+    const detail = await getNativeServiceRequestDetail(env, secondarySession, created.request.id);
+    expect(detail).toMatchObject({ id: created.request.id, submittedServiceDetailsAvailable: true,
+      submittedServices: [{ publicId: "secondary-only", sourceVersion: "service-v1" }] });
+    expect(await getNativeServiceRequestDetail(env, { ...secondarySession, workspaceId: workspaceId }, created.request.id)).toBeNull();
+    expect(await getNativeServiceRequestDetail(env, { ...secondarySession, nativePortalIdentityId: "wrong-identity" }, created.request.id)).toBeNull();
+    expect(await getNativeServiceRequestDetail(env, { ...secondarySession, nativeSourceId: sourceId }, created.request.id)).toBeNull();
+    await db.prepare(`UPDATE pa_service_catalog_items SET active=0,name='Renamed after submission' WHERE source_id=? AND public_id='secondary-only'`)
+      .bind(secondarySourceId).run();
+    expect(await getNativeServiceRequestDetail(env, secondarySession, created.request.id)).toMatchObject({
+      submittedServices: [{ name: "Secondary-only service" }],
+    });
+    let interleaved = false;
+    const wrapStatement = (statement: D1PreparedStatement): D1PreparedStatement => new Proxy(statement, {
+      get(target, property) {
+        if (property === "bind") return (...values: unknown[]) => wrapStatement(target.bind(...values));
+        if (property === "all") return async <T>() => {
+          const result = await target.all<T>();
+          if (!interleaved) {
+            interleaved = true;
+            await db.prepare(`UPDATE portal_v2_workspaces SET status='suspended' WHERE id=?`).bind(secondarySession.workspaceId!).run();
+          }
+          return result;
+        };
+        const value = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    let wrapped: D1Database;
+    wrapped = new Proxy(db, { get(target, property) {
+      if (property === "withSession") return () => wrapped;
+      if (property === "prepare") return (sql: string) => sql.includes("FROM client_service_request_services WHERE request_id")
+        ? wrapStatement(target.prepare(sql)) : target.prepare(sql);
+      const value = Reflect.get(target, property, target); return typeof value === "function" ? value.bind(target) : value;
+    } });
+    expect(await getNativeServiceRequestDetail({ ...env, DELIVERY_DB: wrapped }, secondarySession, created.request.id)).toBeNull();
+    expect(interleaved).toBe(true);
+    await db.prepare(`UPDATE portal_v2_workspaces SET status='active' WHERE id=?`).bind(secondarySession.workspaceId!).run();
+    await db.prepare(`UPDATE client_service_request_services SET answers_json='{"privatePrice":9000}' WHERE request_id=?`)
+      .bind(created.request.id).run();
+    expect(await getNativeServiceRequestDetail(env, secondarySession, created.request.id)).toBeNull();
+  });
+
+  it("leaves no native storage owner or binding when a workspace claim races the storage batch", async () => {
+    await seedSecondaryPolicyContext();
+    const secondaryWorkspaceId = secondarySession.workspaceId!;
+    await db.batch([
+      db.prepare(`INSERT INTO pa_portal_projection_generations
+        (id,workspace_id,source_generation,source_sequence,snapshot_hash,page_count,record_count,workspace_root_type,
+         workspace_root_public_id,workspace_display_name,workspace_source_version,workspace_active,status,complete,activated_at,projection_source_id)
+        VALUES ('secondary-claim-generation',?,'secondary-claim-generation',1,?,1,1,'organization','pa-org-policy',
+          'Secondary policy client','secondary-claim-v1',1,'active',1,datetime('now'),?)`)
+        .bind(secondaryWorkspaceId,"a".repeat(64),secondarySourceId),
+      db.prepare(`INSERT INTO pa_portal_projection_checkpoints
+        (workspace_id,source_generation,source_sequence,snapshot_generation_id)
+        VALUES (?,'secondary-claim-generation',1,'secondary-claim-generation')`).bind(secondaryWorkspaceId),
+    ]);
+    const proof = await resolveNativeRequestAuthority(env, secondarySession, null);
+    expect(proof?.claimTablePresent).toBe(true);
+    const before = {
+      accounts: await db.prepare(`SELECT count(*) n FROM client_accounts
+        WHERE project_alpha_source_id=? AND project_alpha_organization_id='pa-org-policy'`).bind(secondarySourceId).first<number>('n'),
+      identities: await db.prepare(`SELECT count(*) n FROM client_identity_links
+        WHERE issuer='urn:ltds:native-request-storage'`).first<number>('n'),
+      bindings: await db.prepare(`SELECT count(*) n FROM portal_native_request_storage_bindings
+        WHERE workspace_id=?`).bind(secondaryWorkspaceId).first<number>('n'),
+    };
+    let injected = false;
+    let racingDb: D1Database;
+    racingDb = new Proxy(db, { get(target, property) {
+      if (property === 'withSession') return () => racingDb;
+      if (property === 'batch') return async <T>(statements: D1PreparedStatement[]) => {
+        if (!injected) {
+          injected = true;
+          await db.prepare(`INSERT INTO portal_client_authority_workspace_claims
+            (client_authority_id,workspace_id,projection_source_id,source_workspace_id,state,ownership_epoch,
+             reconciliation_source_generation,reconciliation_source_sequence,reconciliation_snapshot_generation_id,last_operation_id)
+            SELECT ?,source.workspace_id,source.projection_source_id,source.source_workspace_id,'active',1,
+              checkpoint.source_generation,checkpoint.source_sequence,checkpoint.snapshot_generation_id,'native-storage-race-claim'
+            FROM pa_portal_workspace_sources source
+            JOIN pa_portal_projection_checkpoints checkpoint ON checkpoint.workspace_id=source.workspace_id
+            WHERE source.workspace_id=?`).bind(crypto.randomUUID(),secondaryWorkspaceId).run();
+        }
+        return target.batch<T>(statements);
+      };
+      const value=target[property as keyof D1Database];
+      return typeof value==='function'?value.bind(target):value;
+    }});
+    expect(await ensureNativeRequestStorage({...env,DELIVERY_DB:racingDb},proof!,'Racing storage owner')).toBeNull();
+    expect(injected).toBe(true);
+    expect({
+      accounts: await db.prepare(`SELECT count(*) n FROM client_accounts
+        WHERE project_alpha_source_id=? AND project_alpha_organization_id='pa-org-policy'`).bind(secondarySourceId).first<number>('n'),
+      identities: await db.prepare(`SELECT count(*) n FROM client_identity_links
+        WHERE issuer='urn:ltds:native-request-storage'`).first<number>('n'),
+      bindings: await db.prepare(`SELECT count(*) n FROM portal_native_request_storage_bindings
+        WHERE workspace_id=?`).bind(secondaryWorkspaceId).first<number>('n'),
+    }).toEqual(before);
   });
 
   it("invalidates one attachment authority proof across every native revocation and generation boundary", async () => {

@@ -1,7 +1,8 @@
-import { readFileSync, readdirSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { Miniflare } from "miniflare";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Env } from "../src/worker/types";
+import { reviewedClientMigrationNames } from "./helpers/reviewed-operations-migration-chain";
 
 const mocks = vi.hoisted(() => ({ send: vi.fn(), alert: vi.fn() }));
 vi.mock("../src/worker/mailer", () => ({ sendNotificationMail: mocks.send }));
@@ -38,7 +39,7 @@ describe("durable client folder notification batches", () => {
     });
     // Exercise the production upgrade chain, including pre-existing rows/FKs.
     const directory = new URL("../../client/migrations/", import.meta.url);
-    for (const name of readdirSync(directory).filter(name => name.endsWith(".sql")).sort()) {
+    for (const name of reviewedClientMigrationNames(directory)) {
       if (name === "0153_client_folder_notification_batches.sql") {
         // Populate the actual pre-upgrade schema before either new migration.
         await db.batch([

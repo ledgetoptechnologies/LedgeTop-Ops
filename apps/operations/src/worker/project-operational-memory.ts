@@ -4,6 +4,7 @@ import { businessContactChannels, businessContactChannelsSql } from "./client-bu
 import { clientHubBusinessProjectOwnership, clientHubBusinessProjectSourceProof } from "./client-hub-business-projects";
 import { readClientHubBusinessProjectPolicy, type ClientHubBusinessProjectPolicy } from "./client-hub-project-policy";
 import type { ClientHubCollectionContext } from "./client-hub-collections";
+import { clientHubAlphaInternalId } from "./client-hub-source";
 import { projectAlphaReadVisibleSql } from "./project-alpha-read-visibility";
 import type { Env, StaffPrincipal } from "./types";
 
@@ -133,7 +134,7 @@ async function rootRow(database: Database, context: ClientHubCollectionContext):
       active,last_sync_id FROM ${table} WHERE id=? AND projection_source_id=? AND active=1
       ${context.root.kind === "organization" ? "" : "AND organization_id IS NULL"}
       AND ${projectAlphaReadVisibleSql("projection_source_id")} LIMIT 1`)
-    .bind(context.root.public_id, context.root.source_id).first<RootRow>();
+    .bind(clientHubAlphaInternalId(context.root, context.paRootId), context.root.source_id).first<RootRow>();
 }
 export async function prepareProject(env: Environment, principal: StaffPrincipal, context: ClientHubCollectionContext,
   projectId: string, manage?: "project.contacts.manage" | "project.memory.manage", expectedContextVersion?: string): Promise<PreparedProject> {
@@ -281,7 +282,7 @@ export async function readProjectOperationalWorkspace(env: Environment, principa
         LEFT JOIN pa_clients contact ON contact.id=assignment.contact_id AND contact.projection_source_id=assignment.projection_source_id
           AND contact.active=1 AND ${context.root.kind === "organization" ? "contact.organization_id=?" : "contact.id=? AND contact.organization_id IS NULL"}
         WHERE assignment.projection_source_id=? AND assignment.project_id=? ORDER BY assignment.sort_order,assignment.id`)
-        .bind(context.root.public_id, source, projectId).all<ContactAssignmentRow>(),
+        .bind(clientHubAlphaInternalId(context.root, context.paRootId), source, projectId).all<ContactAssignmentRow>(),
       database.prepare(`SELECT version,root_record_kind,root_id,snapshot_json,updated_at FROM project_operational_memory WHERE projection_source_id=? AND project_id=?`)
         .bind(source, projectId).first<MemoryRow>(),
       database.prepare(`SELECT version,actor_id,created_at FROM project_operational_contact_revisions
@@ -403,7 +404,7 @@ export async function saveProjectOperationalContacts(env: Environment, principal
   if (contactIds.length) {
     const valid = await database.prepare(`SELECT count(*) count FROM pa_clients contact WHERE contact.projection_source_id=? AND contact.active=1
       AND ${context.root.kind === "organization" ? "contact.organization_id=?" : "contact.id=? AND contact.organization_id IS NULL"}
-      AND contact.id IN (${contactIds.map(() => "?").join(",")})`).bind(source, context.root.public_id, ...contactIds).first<number>("count");
+      AND contact.id IN (${contactIds.map(() => "?").join(",")})`).bind(source, clientHubAlphaInternalId(context.root, context.paRootId), ...contactIds).first<number>("count");
     if (valid !== contactIds.length) throw new HTTPException(409, { message: "One or more contacts moved or are unavailable. Refresh before saving." });
   }
   const version = input.expectedVersion + 1, ids = new Map(currentAssignments.map(row => [JSON.stringify([row.contact_id, row.role]), row.id]));

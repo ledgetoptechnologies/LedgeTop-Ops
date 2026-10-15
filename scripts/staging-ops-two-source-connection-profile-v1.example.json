@@ -1,0 +1,24 @@
+{
+  "profile": "ops-two-source-staging-read-v1",
+  "version": 1,
+  "sources": {
+    "stageOne": {
+      "sourceId": "project-alpha:staging",
+      "enabled": true,
+      "baseUrl": "https://pa-staging.ledgetoptechnologies.com",
+      "sourceInstanceId": null,
+      "applicationId": null,
+      "historyEpoch": null,
+      "scopes": ["api.capabilities.read", "directory.inventory.read", "projects.inventory.read"]
+    },
+    "stageTwo": {
+      "sourceId": null,
+      "enabled": true,
+      "baseUrl": "https://pa-stage-two.ledgetoptechnologies.com",
+      "sourceInstanceId": null,
+      "applicationId": null,
+      "historyEpoch": null,
+      "scopes": ["api.capabilities.read", "directory.inventory.read", "projects.inventory.read"]
+    }
+  }
+}

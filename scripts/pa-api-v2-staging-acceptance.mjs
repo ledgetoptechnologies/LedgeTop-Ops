@@ -291,48 +291,69 @@ async function requestPublic(fetcher, url) {
 }
 
 function advertised(capabilities) {
-  const endpointSet = new Set((capabilities.implementedEndpoints || []).map(endpoint => `${endpoint.method} ${endpoint.path}`));
+  const routes = new Map((capabilities.implementedEndpoints || []).map(endpoint => [`${endpoint.method} ${endpoint.path}`, endpoint]));
   const scopes = new Set((capabilities.grantedCapabilities || []).map(capability => capability?.name).filter(value => typeof value === "string"));
-  return { endpointSet, scopes };
+  return { routes, scopes };
 }
 
 function requireRoute(available, routeName) {
-  const [feature, scope, method, path] = FEATURE_ROUTES[routeName];
-  if (!available.features?.[feature] || !available.endpointSet.has(`${method} ${path}`) || !available.scopes.has(scope))
+  const [, scope, method, path] = FEATURE_ROUTES[routeName];
+  const descriptor = available.routes.get(`${method} ${path}`);
+  if (!descriptor || descriptor.requiredCapability !== scope || descriptor.requiresSourceInstanceId !== true
+      || descriptor.requiresApplicationId !== true || descriptor.requiresHistoryEpoch !== true
+      || !available.scopes.has(scope))
     throw new PaAcceptanceError(`missing_route_or_scope_${routeName}`);
 }
 
-function assertExactCapabilities(payload, routeNames) {
+const ENDPOINT_FIELDS = new Set([
+  "method", "path", "requiredCapability", "requiresSourceInstanceId", "requiresApplicationId",
+  "requiresUpdatePublicId", "requiresHistoryEpoch", "requiresExpectedPublicId",
+  "requiresExpectedRevision", "requiresExpectedProfileSha256",
+]);
+const CAPABILITY_NAME = /^[a-z][a-z0-9._-]{1,95}$/;
+const ENDPOINT_PATH = /^\/api\/v2\/[A-Za-z0-9/_.{}-]+$/;
+
+function validEndpointDescriptor(endpoint) {
+  return endpoint && typeof endpoint === "object" && !Array.isArray(endpoint)
+    && Object.keys(endpoint).every(key => ENDPOINT_FIELDS.has(key))
+    && ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD"].includes(endpoint.method)
+    && typeof endpoint.path === "string" && endpoint.path.length <= 256 && ENDPOINT_PATH.test(endpoint.path)
+    && !endpoint.path.split("/").some(segment => segment === "." || segment === "..")
+    && typeof endpoint.requiredCapability === "string" && CAPABILITY_NAME.test(endpoint.requiredCapability)
+    && Object.entries(endpoint).every(([key, value]) => !key.startsWith("requires") || typeof value === "boolean");
+}
+
+function assertRequiredCapabilities(payload, routeNames) {
   if (!exactKeyOrder(payload, ["apiVersion", "sourceInstanceId", "applicationId", "historyEpoch", "requestId", "grantedCapabilities", "implementedEndpoints"]) ||
       !Array.isArray(payload.grantedCapabilities) || !Array.isArray(payload.implementedEndpoints))
     throw new PaAcceptanceError("invalid_capabilities_payload");
-  const expectedEndpoints = new Set(["GET /api/v2/capabilities"]);
-  const expectedScopes = new Set(["api.capabilities.read"]);
-  for (const routeName of routeNames) {
-    const [, scope, method, path] = FEATURE_ROUTES[routeName];
-    expectedEndpoints.add(`${method} ${path}`);
-    expectedScopes.add(scope);
-  }
   const actual = advertised(payload);
   const endpointKeys = payload.implementedEndpoints.map(endpoint => `${endpoint?.method} ${endpoint?.path}`);
   const scopeNames = payload.grantedCapabilities.map(capability => capability?.name);
-  if (new Set(endpointKeys).size !== endpointKeys.length || new Set(scopeNames).size !== scopeNames.length ||
-      actual.endpointSet.size !== expectedEndpoints.size || actual.scopes.size !== expectedScopes.size ||
-      [...actual.endpointSet].some(route => !expectedEndpoints.has(route)) || [...actual.scopes].some(scope => !expectedScopes.has(scope)) ||
-      payload.grantedCapabilities.some(capability => !exactKeyOrder(capability, ["name"]) || typeof capability.name !== "string"))
+  if (new Set(endpointKeys).size !== endpointKeys.length || new Set(scopeNames).size !== scopeNames.length
+      || payload.grantedCapabilities.some(capability => !exactKeyOrder(capability, ["name"]) || !CAPABILITY_NAME.test(capability.name))
+      || payload.implementedEndpoints.some(endpoint => !validEndpointDescriptor(endpoint)))
     throw new PaAcceptanceError("unexpected_route_or_scope_advertised");
-  for (const endpoint of payload.implementedEndpoints) {
-    const key = `${endpoint.method} ${endpoint.path}`;
-    if (key === "GET /api/v2/capabilities") {
-      if (!exactKeyOrder(endpoint, ["method", "path", "requiredCapability"]) || endpoint.requiredCapability !== "api.capabilities.read")
-        throw new PaAcceptanceError("unexpected_route_or_scope_advertised");
-      continue;
-    }
-    const matching = Object.values(FEATURE_ROUTES).find(([, scope, method, path]) => `${method} ${path}` === key);
-    if (!matching || !exactKeyOrder(endpoint, ["method", "path", "requiredCapability", "requiresSourceInstanceId", "requiresApplicationId", "requiresHistoryEpoch"]) ||
-        endpoint.requiredCapability !== matching[1] || endpoint.requiresSourceInstanceId !== true || endpoint.requiresApplicationId !== true || endpoint.requiresHistoryEpoch !== true)
-      throw new PaAcceptanceError("unexpected_route_or_scope_advertised");
-  }
+  const capabilitiesEndpoint = actual.routes.get("GET /api/v2/capabilities");
+  if (!capabilitiesEndpoint || !exactKeyOrder(capabilitiesEndpoint, ["method", "path", "requiredCapability"])
+      || capabilitiesEndpoint.requiredCapability !== "api.capabilities.read" || !actual.scopes.has("api.capabilities.read"))
+    throw new PaAcceptanceError("unexpected_route_or_scope_advertised");
+  // Every advertised route must be backed by its granted scope, and every
+  // granted scope must describe at least one advertised route. This permits
+  // additive generic API-v2 surfaces without decoupling route authority.
+  if (payload.implementedEndpoints.some(endpoint => !actual.scopes.has(endpoint.requiredCapability))
+      || [...actual.scopes].some(scope => !payload.implementedEndpoints.some(endpoint => endpoint.requiredCapability === scope)))
+    throw new PaAcceptanceError("unexpected_route_or_scope_advertised");
+  const expectedProjectRoutes = new Set(routeNames.map(routeName => {
+    const [, , method, path] = FEATURE_ROUTES[routeName];
+    return `${method} ${path}`;
+  }));
+  const expectedProjectScopes = new Set(routeNames.map(routeName => FEATURE_ROUTES[routeName][1]));
+  if (payload.implementedEndpoints.some(endpoint => endpoint.path.startsWith("/api/v2/projects")
+      && !expectedProjectRoutes.has(`${endpoint.method} ${endpoint.path}`))
+      || [...actual.scopes].some(scope => scope.startsWith("projects.") && !expectedProjectScopes.has(scope)))
+    throw new PaAcceptanceError("unexpected_route_or_scope_advertised");
+  for (const routeName of routeNames) requireRoute(actual, routeName);
 }
 
 function assertResponse(response, expectedStatus, stage) {
@@ -575,17 +596,17 @@ export async function runPaApiV2StagingAcceptance(config, dependencies = {}) {
 
   if (!config.token) {
     const noKey = assertResponse(await requestApi(fetcher, config, "/api/v2/capabilities"), 401, "capabilities_no_key");
-    const defaultOff = assertResponse(await requestApi(fetcher, config, "/api/v2/projects/inventory?limit=1"), 404, "projects_default_off");
+    const protectedProject = await requestApi(fetcher, config, "/api/v2/projects/inventory?limit=1");
+    if (![401, 404].includes(protectedProject.status)) throw new PaAcceptanceError("unexpected_status_projects_unauthenticated");
     report.stages.capabilitiesNoKey = { status: noKey.status, requestId: noKey.requestId };
-    report.stages.projectsDefaultOff = { status: defaultOff.status, requestId: defaultOff.requestId };
+    report.stages.projectsUnauthenticated = { status: protectedProject.status, requestId: protectedProject.requestId };
     return report;
   }
 
   const capabilities = assertResponse(await requestApi(fetcher, config, "/api/v2/capabilities"), 200, "capabilities");
   const capabilityPayload = capabilities.payload;
   if (!capabilityPayload || capabilityPayload.apiVersion !== "2") throw new PaAcceptanceError("invalid_capabilities_payload");
-  const available = { ...advertised(capabilityPayload), features: Object.fromEntries(
-    Object.entries(FEATURE_ROUTES).map(([name, [feature]]) => [feature, (capabilityPayload.implementedEndpoints || []).some(endpoint => endpoint.path === FEATURE_ROUTES[name][3])])) };
+  const available = advertised(capabilityPayload);
   report.stages.capabilities = {
     status: capabilities.status, requestId: capabilities.requestId,
     apiVersion: capabilityPayload.apiVersion,
@@ -598,14 +619,14 @@ export async function runPaApiV2StagingAcceptance(config, dependencies = {}) {
   }
   assertResponseIdentity(capabilities, config.identity);
   const selectedRoutes = config.lifecycleOnly
-    ? ["create", "read", "write", "status", "inventory", "archive", "restore"]
+    ? ["read", "archive", "restore"]
     : ["create", "read", "write", "inventory"];
   if (!config.lifecycleOnly && config.exerciseStatus) selectedRoutes.push("status");
   if (!config.lifecycleOnly && config.bindCommand) selectedRoutes.push("bind");
   if (!config.lifecycleOnly && config.refreshCommand) selectedRoutes.push("refresh");
   if (!config.lifecycleOnly && config.lifecycleFixture) selectedRoutes.push("archive", "restore");
   for (const routeName of selectedRoutes) requireRoute(available, routeName);
-  assertExactCapabilities(capabilityPayload, selectedRoutes);
+  assertRequiredCapabilities(capabilityPayload, selectedRoutes);
 
   report.mutationsPerformed = true;
   if (config.lifecycleOnly) {

@@ -334,8 +334,9 @@ describe("request readiness against migrated D1 and real authorization", { timeo
     });
     expect(response.status).toBe(200);
     expect(queryCount).toBeGreaterThan(0);
-    // Includes full auth middleware, both fresh proofs, and both catalog reads.
-    expect(queryCount).toBeLessThanOrEqual(projectId ? 40 : 35);
+    // Includes full auth middleware, both fresh proofs, both catalog reads,
+    // and workspace-claim fences at the PA-derived authorization boundaries.
+    expect(queryCount).toBeLessThanOrEqual(projectId ? 47 : 45);
   });
 
   it("retains the fail-closed per-capability rule overflow limit in the shared proof", async () => {
