@@ -6,7 +6,17 @@ import { hashAccessCode } from "../../operations/src/worker/crypto";
 import { verifyAccessCode } from "../src/worker/security";
 import deliveryWorker, { cloudTransferResumeOrigin, ensurePublicId, framePolicyForPath, markUnavailableFolder, requestHostAllowed, requireSameOrigin, serveAppShell, sourceUrlForItem, streamItem } from "../src/worker/index";
 import { legacyClientRedirectLocation, malformedPortalLaunchRedirect } from "../src/worker/origin-policy";
-import type { ShareRow } from "../src/worker/types";
+import type { Env, ShareRow } from "../src/worker/types";
+
+const promotedClientHost = {
+  ENVIRONMENT: "production",
+  EXPECTED_HOST: "portal.drone.example",
+  PUBLIC_BASE_URL: "https://portal.drone.example",
+  PUBLIC_SHARE_ORIGIN: "https://portal.drone.example",
+  CLIENT_PORTAL_ORIGIN: "https://client.drone.example",
+  CLIENT_PORTAL_ORIGINS: "https://client.drone.example,https://portal.drone.example,https://portal.technology.example",
+  LEGACY_CLIENT_ORIGINS: "https://client.drone.example",
+} as const;
 
 describe("deployed host admission",()=>{
   it.each(["production","staging"] as const)("enforces the exact host and namespace matrix in %s",ENVIRONMENT=>{
@@ -80,6 +90,40 @@ describe("deployed host admission",()=>{
       "https://client.drone.example,",
     ]) expect(requestHostAllowed("https://portal.drone.example/portal",{...env,LEGACY_CLIENT_ORIGINS})).toBe(false);
   });
+  it.each(["production", "staging"] as const)("retains public links when the legacy client host becomes the primary portal in %s", ENVIRONMENT => {
+    const env = { ...promotedClientHost, ENVIRONMENT };
+    for (const origin of ["https://portal.drone.example", "https://client.drone.example"]) {
+      for (const path of ["/s/existing-link", "/client-share/existing-link", "/api/public/shares/existing-link/manifest"]) {
+        expect(requestHostAllowed(`${origin}${path}`, env)).toBe(true);
+      }
+      expect(() => requireSameOrigin(new Request(`${origin}/api/public/shares/existing-link/session`,
+        { method: "POST", headers: { Origin: origin } }), env as unknown as Env)).not.toThrow();
+    }
+    for (const origin of env.CLIENT_PORTAL_ORIGINS.split(",")) {
+      expect(requestHostAllowed(`${origin}/health`, env)).toBe(true);
+      expect(requestHostAllowed(`${origin}/portal`, env)).toBe(true);
+      expect(requestHostAllowed(`${origin}/assets/client.js`, env)).toBe(true);
+      expect(requestHostAllowed(`${origin}/api/internal/project-alpha/portal-v2`, env))
+        .toBe(origin === env.CLIENT_PORTAL_ORIGIN);
+    }
+    expect(requestHostAllowed("https://portal.technology.example/s/existing-link", env)).toBe(false);
+    expect(requestHostAllowed("https://evil.example/s/existing-link", env)).toBe(false);
+    expect(() => requireSameOrigin(new Request("https://client.drone.example/api/public/shares/existing-link/session",
+      { method: "POST", headers: { Origin: "https://portal.drone.example" } }), env as unknown as Env)).toThrow();
+    for (const path of ["/", "/portal", "/portal/projects", "/s/existing-link"]) {
+      expect(legacyClientRedirectLocation(`https://client.drone.example${path}`, env)).toBeNull();
+    }
+  });
+  it("does not promote secondary portal aliases or malformed legacy origins into public-share access", () => {
+    for (const LEGACY_CLIENT_ORIGINS of [
+      "https://portal.technology.example",
+      "https://client.drone.example,https://portal.drone.example",
+      "https://client.drone.example,https://client.drone.example",
+      "http://client.drone.example",
+    ]) {
+      expect(requestHostAllowed("https://portal.drone.example/health", { ...promotedClientHost, LEGACY_CLIENT_ORIGINS })).toBe(false);
+    }
+  });
   it("normalizes a literal Access wildcard without changing the selected portal host",()=>{
     const env={ENVIRONMENT:"production",EXPECTED_HOST:"portal.drone.example",PUBLIC_BASE_URL:"https://portal.drone.example",
       PUBLIC_SHARE_ORIGIN:"https://portal.drone.example",CLIENT_PORTAL_ORIGIN:"https://portal.drone.example",
@@ -149,6 +193,32 @@ describe("deployed host admission",()=>{
 });
 
 describe("delivery app shell",()=>{
+  it("serves health, old share paths and portal shells after canonical client-host promotion without redirect loops", async () => {
+    const assetFetch = vi.fn(async (input: RequestInfo | URL) =>
+      new Response(new URL(typeof input === "string" ? input : input instanceof URL ? input : input.url).pathname));
+    const env = { ...promotedClientHost, ASSETS: { fetch: assetFetch } } as unknown as Env;
+    const context = { waitUntil() {}, passThroughOnException() {} } as unknown as ExecutionContext;
+    for (const origin of promotedClientHost.CLIENT_PORTAL_ORIGINS.split(",")) {
+      const health = await deliveryWorker.fetch(new Request(`${origin}/health`), env, context);
+      expect(health.status).toBe(200);
+      await expect(health.json()).resolves.toEqual({ status: "ok", service: "ltds-delivery" });
+      const portal = await deliveryWorker.fetch(new Request(`${origin}/portal`), env, context);
+      expect(portal.status).toBe(200);
+      expect(portal.headers.get("Location")).toBeNull();
+    }
+    for (const origin of ["https://portal.drone.example", "https://client.drone.example"]) {
+      const response = await deliveryWorker.fetch(new Request(`${origin}/s/existing-link?folder=edited`), env, context);
+      expect(response.status).toBe(200);
+      expect(response.headers.get("Location")).toBeNull();
+      await expect(response.text()).resolves.toBe("/s/existing-link");
+    }
+    const root = await deliveryWorker.fetch(new Request("https://client.drone.example/"), env, context);
+    expect(root.status).toBe(302);
+    expect(root.headers.get("Location")).toBe("https://client.drone.example/portal");
+    const follow = await deliveryWorker.fetch(new Request(root.headers.get("Location")!), env, context);
+    expect(follow.status).toBe(200);
+    expect(follow.headers.get("Location")).toBeNull();
+  });
   it("preserves the public share path when requesting the SPA fallback",async()=>{let requestedPath="";const response=await serveAppShell(new Request("https://delivery.ledgetopdroneservices.com/s/public-id"),{fetch:async input=>{requestedPath=new URL(typeof input==="string"?input:input instanceof URL?input:input.url).pathname;return new Response("app shell",{status:200});}});expect(requestedPath).toBe("/s/public-id");expect(response.status).toBe(200);expect(response.headers.get("Location")).toBeNull();});
   it("runs the authenticated portal path through the Worker before the SPA fallback",async()=>{let requestedPath="";const env:any={ENVIRONMENT:"production",EXPECTED_HOST:"delivery.example",PUBLIC_BASE_URL:"https://delivery.example",PUBLIC_SHARE_ORIGIN:"https://delivery.example",CLIENT_PORTAL_ORIGIN:"https://client.example",ASSETS:{fetch:async(input:RequestInfo|URL)=>{requestedPath=new URL(typeof input==="string"?input:input instanceof URL?input:input.url).pathname;return new Response("portal shell");}}};const response=await deliveryWorker.fetch(new Request("https://client.example/portal/projects"),env,{waitUntil(){},passThroughOnException(){}} as unknown as ExecutionContext);expect(response.status).toBe(200);expect(await response.text()).toBe("portal shell");expect(requestedPath).toBe("/portal/projects");});
   it("serves onboarding shell only on configured portal hosts while the recipient bridge is enabled",async()=>{
@@ -230,6 +300,19 @@ describe("inline PDF routing",()=>{
     const executionCtx={waitUntil(promise:Promise<unknown>){pending.push(promise);},passThroughOnException(){}} as ExecutionContext;
     return{env,cookie,url,pending,executionCtx};
   }
+  it.each(["portal.drone.example", "client.drone.example"])("retains authenticated existing public file bytes on %s after portal promotion", async host => {
+    const value = await routeContext();
+    const url = new URL(value.url);
+    url.host = host;
+    const env = { ...value.env, ...promotedClientHost };
+    const response = await deliveryWorker.fetch(new Request(url, { headers: { Cookie: value.cookie } }), env, value.executionCtx);
+    expect(response.status).toBe(200);
+    expect(response.headers.get("Content-Length")).toBe("100");
+    expect((await response.arrayBuffer()).byteLength).toBe(100);
+    const unsigned = await deliveryWorker.fetch(new Request(url), env, value.executionCtx);
+    expect(unsigned.status).toBe(401);
+    await Promise.all(value.pending);
+  });
   it("serves authenticated PDF routes with inline framing headers",async()=>{
     const value=await routeContext();
     const response=await deliveryWorker.fetch(new Request(value.url,{headers:{Cookie:value.cookie}}),value.env,value.executionCtx);
