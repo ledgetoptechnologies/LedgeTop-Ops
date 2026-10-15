@@ -146,9 +146,15 @@ function buildNativeDirectoryMigrationWindowPlan(base = root, label) {
   const current = billing205 ? OPERATIONS_SOURCE_CHAIN_205 : OPERATIONS_REVIEWED_SOURCE_MIGRATION_CHAIN_204;
   if (SPEC.to === 199 || SPEC.to >= 203)
     assert(sourceNames.length >= SPEC.to, `reviewed source chain must contain the exact ${String(SPEC.to).padStart(4, "0")} window`);
-  assert.equal(sourceNames.length, current.count, "exact current Operations source inventory required");
-  assert.equal(sha(sourceNames.join("\n")), current.namesSha256, "current Operations migration names drifted");
-  assert.equal(sha(sourceNames.map(name => `${name}\0${sha(fs.readFileSync(path.join(sourceDirectory, name)))}`).join("\n")),
+  // Only the explicit205 profile may inspect a later source checkout. Its
+  // reviewed prefix remains byte-exact; later files are never copied/applied.
+  // Older frozen windows keep their original whole-inventory refusal.
+  const reviewedSourceNames = billing205 ? sourceNames.slice(0, current.count) : sourceNames;
+  assert.equal(reviewedSourceNames.length, current.count, "exact current Operations source inventory required");
+  if (billing205) assert(sourceNames.slice(current.count).every(name => Number(name.slice(0, 4)) > current.count),
+    "later source migrations must follow the exact reviewed205 prefix");
+  assert.equal(sha(reviewedSourceNames.join("\n")), current.namesSha256, "current Operations migration names drifted");
+  assert.equal(sha(reviewedSourceNames.map(name => `${name}\0${sha(fs.readFileSync(path.join(sourceDirectory, name)))}`).join("\n")),
     current.contentsSha256, "current Operations migration content drifted");
 
   const priorNames = sourceNames.slice(0, SPEC.from);

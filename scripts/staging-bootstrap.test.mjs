@@ -3,7 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { buildArtifacts, run, transformSeed, validateGenerated, validateOwner, writeGenerated } from "./staging-bootstrap.mjs";
+import { buildArtifacts, run, transformSeed, validateGenerated, validateOwner, writeGenerated, OPERATIONS_LATEST_SOURCE_MIGRATION_CHAIN } from "./staging-bootstrap.mjs";
 
 const owner = Object.freeze({ email: "owner@staging.example.test", displayName: "Synthetic Staging Owner", clientStaffId: "staging-client-owner", operationsStaffId: "staging-operations-owner" });
 const repositoryRoot = path.resolve(import.meta.dirname, "..");
@@ -26,7 +26,10 @@ function fixture() {
     const sourceMigrations = path.join(repositoryRoot, "apps", source, "migrations");
     const destinationMigrations = path.join(directory, "migrations");
     fs.mkdirSync(destinationMigrations);
-    for (const name of fs.readdirSync(sourceMigrations).filter(name => name.endsWith(".sql")))
+    // Bootstrap authority remains frozen at its reviewed205 source; later
+    // application migrations do not become part of historical fixtures.
+    for (const name of fs.readdirSync(sourceMigrations).filter(name => name.endsWith(".sql")
+      && (source !== "operations" || !/^\d{4}_/.test(name) || Number(name.slice(0, 4)) <= OPERATIONS_LATEST_SOURCE_MIGRATION_CHAIN.count)))
       fs.copyFileSync(path.join(sourceMigrations, name), path.join(destinationMigrations, name));
     fs.copyFileSync(path.join(repositoryRoot, "docs", "staging", example), path.join(directory, "wrangler.staging.json"));
   }
@@ -75,6 +78,13 @@ test("builds full isolated chains, changes exactly 0002, and preserves staging c
     assert.equal(artifact.config.name.endsWith("-staging"), true);
     assert.equal(artifact.config.d1_databases[0].migrations_dir, ".staging-bootstrap/migrations");
   }
+});
+
+test("frozen bootstrap still refuses physical source206 rather than including it in the199 artifact", () => {
+  const base = fixture();
+  const successor = "0206_native_directory_existing_import.sql";
+  fs.copyFileSync(path.join(repositoryRoot, "apps/operations/migrations", successor), path.join(base, "apps/operations/migrations", successor));
+  assert.throws(() => buildArtifacts(base, owner), /operations canonical migration inventory must be an exact complete reviewed chain/);
 });
 
 test("writes ignored artifacts idempotently, checks them, and rejects stale output", () => {
