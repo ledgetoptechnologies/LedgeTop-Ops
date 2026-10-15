@@ -12,6 +12,7 @@ import {
   type ProjectAlphaDirectoryReadKind,
 } from "./project-alpha-directory-read-api-v2";
 import { generation, nextGeneration } from "./project-alpha-project-transport";
+import { nativeImportCommandRenewed, nativeImportRenewalSql } from "./native-directory-existing-import-renewal";
 
 export type ProjectAlphaExistingDirectoryAcquisitionEnvironment = ProjectAlphaApiV2ConnectionEnvironment & Readonly<{ OPS_DB: D1Database }>;
 export type ProjectAlphaExistingDirectoryAcquisitionInput = Readonly<{
@@ -142,8 +143,10 @@ async function authority(db: D1Database, selected: ProjectAlphaExistingDirectory
   organizationPublicId: string | null, reviewedAt?: string): Promise<Authority | null> {
   const staff = selected.reviewer.staffId;
   const mappingRecordId = await activeDirectoryRecordIdColumn(db);
+  const importRenewed = reviewedAt !== undefined && Date.parse(reviewedAt) <= Date.now()
+    && await nativeImportCommandRenewed(db, selected.reviewId, selected.commandId);
   return db.prepare(`SELECT record.current_version=? record_current,
-      ${reviewedAt === undefined ? "1" : "(?<=strftime('%Y-%m-%dT%H:%M:%fZ','now') AND ?>strftime('%Y-%m-%dT%H:%M:%fZ','now','-4 hours'))"} unexpired,
+      ${reviewedAt === undefined || importRenewed ? "1" : "(?<=strftime('%Y-%m-%dT%H:%M:%fZ','now') AND ?>strftime('%Y-%m-%dT%H:%M:%fZ','now','-4 hours'))"} unexpired,
       (EXISTS(SELECT 1 FROM native_staff_admissions admission JOIN native_staff_profiles profile ON profile.staff_id=admission.staff_id
         JOIN native_directory_grant_generations generation ON generation.staff_id=admission.staff_id
         WHERE admission.staff_id=? AND admission.active=1 AND admission.bound_access_subject=?
@@ -166,7 +169,7 @@ async function authority(db: D1Database, selected: ProjectAlphaExistingDirectory
               AND parent.resource_type='organization' AND parent.${mappingRecordId}=relationship.organization_record_id
               AND parent.project_alpha_public_id=?))) relationship_current
     FROM operations_directory_records record WHERE record.record_id=? AND record.record_kind=?`)
-    .bind(selected.localRecordVersion, ...(reviewedAt === undefined ? [] : [reviewedAt, reviewedAt]),
+    .bind(selected.localRecordVersion, ...(reviewedAt === undefined || importRenewed ? [] : [reviewedAt, reviewedAt]),
       staff, selected.reviewer.accessSubject, selected.reviewer.admissionVersion, selected.reviewer.profileVersion,
       selected.reviewer.grantGeneration, staff, staff, staff, staff, staff,
       selected.resourceType, organizationPublicId, organizationPublicId, selected.sourceId, identity.sourceInstanceId,
@@ -330,18 +333,33 @@ export async function acquireProjectAlphaExistingDirectoryBinding(
     readConfiguredProjectAlphaDirectoryBindingStatus(env, selected.sourceId, selected.resourceType,
       selected.externalId, selected.projectAlphaPublicId, send),
   ]);
-  if (preRead.status !== "observed" || preBindingRead.status !== "observed") return preRead.status === "uncertain"
+  let reviewedUnboundImport = false;
+  if (preRead.status === "observed" && preBindingRead.status === "not_found" && reservedBefore.length === 1) {
+    const schema = await env.OPS_DB.prepare("SELECT 1 ok FROM sqlite_master WHERE name='native_directory_existing_import_binding_intents'").first("ok");
+    if (schema) reviewedUnboundImport = !!await env.OPS_DB.prepare(`SELECT 1 ok
+      FROM native_directory_existing_import_binding_intents intent
+      JOIN native_directory_existing_import_live_reviews review ON review.import_id=intent.import_id
+      WHERE intent.import_id=? AND intent.command_id=? AND intent.review_receipt_id=?
+        AND review.source_id=? AND review.record_kind=? AND json_extract(review.review_json,'$.nativeRecordId')=?
+        AND json_extract(review.review_json,'$.publicId')=?
+        AND json_extract(intent.command_json,'$.expectedAuthorizationGeneration')=?
+        AND json_extract(intent.command_json,'$.expectedRevision')=?`)
+      .bind(selected.reviewId, selected.commandId, reservedBefore[0]!.receipt_id,
+        selected.sourceId, selected.resourceType, selected.externalId, selected.projectAlphaPublicId,
+        preRead.observation.authorizationGeneration, preRead.observation.resource.revision).first("ok");
+  }
+  if (preRead.status !== "observed" || (preBindingRead.status !== "observed" && !reviewedUnboundImport)) return preRead.status === "uncertain"
     || preBindingRead.status === "uncertain"
     ? { status: "uncertain", reason: "transport" } : { status: "blocked", reason: "remote" };
-  const pre = preRead.observation, preBinding = preBindingRead.observation;
+  const pre = preRead.observation, preBinding = preBindingRead.status === "observed" ? preBindingRead.observation : null;
   if (pre.resource.revision !== selected.expectedProjectAlphaRevision
-    || preBinding.binding.externalId !== selected.externalId
+    || (preBinding && (preBinding.binding.externalId !== selected.externalId
     || preBinding.binding.publicId !== selected.projectAlphaPublicId
     || preBinding.binding.type !== selected.resourceType
     || preBinding.resource.revision !== selected.expectedProjectAlphaRevision
     || (preBinding.authorizationGeneration !== selected.expectedAuthorizationGeneration
       && (reservedBefore.length === 0
-        || preBinding.authorizationGeneration !== nextGeneration(selected.expectedAuthorizationGeneration)))
+        || preBinding.authorizationGeneration !== nextGeneration(selected.expectedAuthorizationGeneration)))))
     || (reservedBefore.length === 0 && pre.authorizationGeneration !== selected.expectedAuthorizationGeneration))
     return { status: "blocked", reason: "remote" };
   const parent = selected.resourceType === "client" ? pre.profile.organizationPublicId ?? null : null;
@@ -495,6 +513,7 @@ export async function acquireProjectAlphaExistingDirectoryBinding(
   const acquiredReceiptId = crypto.randomUUID(), claimId = crypto.randomUUID(), nativeOwnerEpochId = crypto.randomUUID();
   const profileHash = await digest(profileAfter.observation), bindingHash = await digest(bindingAfter.observation);
   const mappingRecordId = await activeDirectoryRecordIdColumn(env.OPS_DB);
+  const renewedReview = await nativeImportRenewalSql(env.OPS_DB, "review");
   try {
     await env.OPS_DB.batch([
       env.OPS_DB.prepare(`INSERT INTO project_alpha_existing_directory_binding_acquired_mapping_receipts(
@@ -509,7 +528,7 @@ export async function acquireProjectAlphaExistingDirectoryBinding(
         JOIN native_directory_grant_generations generation ON generation.staff_id=admission.staff_id AND generation.generation=?
         WHERE review.receipt_id=? AND record.current_version=review.reviewed_local_record_version
           AND review.reviewed_at<=strftime('%Y-%m-%dT%H:%M:%fZ','now')
-          AND review.reviewed_at>strftime('%Y-%m-%dT%H:%M:%fZ','now','-4 hours')
+          AND (review.reviewed_at>strftime('%Y-%m-%dT%H:%M:%fZ','now','-4 hours') OR ${renewedReview})
           AND EXISTS(SELECT 1 FROM staff_role_assignments role WHERE role.staff_id=review.reviewer_staff_id AND role.role_id='role-owner' AND role.scope='global')
           AND EXISTS(SELECT 1 FROM native_directory_grants grant_row WHERE grant_row.staff_id=review.reviewer_staff_id
             AND grant_row.permission='directory.identity.link' AND grant_row.effect='allow' AND grant_row.active=1 AND ${APPLICABLE_FINAL})

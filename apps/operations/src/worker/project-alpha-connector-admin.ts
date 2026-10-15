@@ -6,6 +6,7 @@ import { sqlScope } from "./acl";
 import { rebuildOperationAirspaceMatches } from "./airspace";
 import { auditStatement } from "./request-security";
 import { syncRegisteredProjectAlpha } from "./project-alpha";
+import { nativeExistingImportEnabled } from "./native-directory-existing-import-common";
 import { reconcileClientPortalWorkspaces } from "./client-portal-workspace-reconciliation";
 import { getProjectAlphaSnapshotRecoveryStatus } from "./project-alpha-snapshot-recovery";
 import {
@@ -128,7 +129,8 @@ export function registerProjectAlphaConnectorAdminRoutes(app: App): void {
     const recovery = await getProjectAlphaSnapshotRecoveryStatus(c.env.OPS_DB);
     const portal = await getConnectorPortalStatus(c.env);
     const projectManagement = await listProjectAlphaProjectManagementRoutes(c.env);
-    return c.json({ connectors, health: safeHealth, recovery, portal, projectManagement,
+    const existingImport = await nativeExistingImportEnabled(c.env) ? { enabled: true as const } : undefined;
+    return c.json({ connectors, health: safeHealth, recovery, portal, projectManagement, ...(existingImport ? { existingImport } : {}),
       legacyPrimary: !registeredPrimary || registeredPrimary.state === "pending" });
   });
   // This controls the portal purpose of an already deployment-owned source.

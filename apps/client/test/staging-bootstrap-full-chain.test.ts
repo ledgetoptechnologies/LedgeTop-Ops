@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { buildArtifacts, CLIENT_CURRENT_SOURCE_MIGRATION_CHAIN } from "../../../scripts/staging-bootstrap.mjs";
+import { buildArtifacts, CLIENT_CURRENT_SOURCE_MIGRATION_CHAIN, OPERATIONS_LATEST_SOURCE_MIGRATION_CHAIN } from "../../../scripts/staging-bootstrap.mjs";
 import { splitD1MigrationStatements } from "./helpers/d1-migrations";
 
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
@@ -27,7 +27,9 @@ function portableFixture(): string {
     const sourceMigrations = path.join(repositoryRoot, "apps", source, "migrations");
     const destinationMigrations = path.join(directory, "migrations");
     fs.mkdirSync(destinationMigrations);
-    for (const name of fs.readdirSync(sourceMigrations).filter(name => name.endsWith(".sql")))
+    // This historical bootstrap keeps its reviewed205 source and199 output.
+    for (const name of fs.readdirSync(sourceMigrations).filter(name => name.endsWith(".sql")
+      && (source !== "operations" || !/^\d{4}_/.test(name) || Number(name.slice(0, 4)) <= OPERATIONS_LATEST_SOURCE_MIGRATION_CHAIN.count)))
       fs.copyFileSync(path.join(sourceMigrations, name), path.join(destinationMigrations, name));
     fs.copyFileSync(path.join(repositoryRoot, "docs", "staging", example), path.join(directory, "wrangler.staging.json"));
   }
@@ -72,6 +74,14 @@ async function count(database: D1Database, table: string): Promise<number> {
   expect(Number.isSafeInteger(result)).toBe(true);
   return result!;
 }
+
+it("frozen bootstrap refuses source206 instead of adding it to the historical rehearsal", () => {
+  const base = portableFixture(), successor = "0206_native_directory_existing_import.sql";
+  try {
+    fs.copyFileSync(path.join(repositoryRoot,"apps/operations/migrations",successor),path.join(base,"apps/operations/migrations",successor));
+    expect(()=>buildArtifacts(base,owner)).toThrow("operations canonical migration inventory must be an exact complete reviewed chain");
+  } finally { removePortableFixture(base); }
+});
 
 describe("local-only complete staging bootstrap migration rehearsal", () => {
   let runtime: Miniflare;

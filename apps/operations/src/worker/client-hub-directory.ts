@@ -12,6 +12,7 @@ import { readableBusinessPartySql } from "./business-parties";
 import { resolveProjectAlphaApiV2Connection } from "./project-alpha-api-v2-connections";
 import { businessActivityRecencyCte } from "./client-business-activity";
 import { clientHubReviewedDisplayIdentities, clientHubReviewedDisplayLiveSql } from "./client-hub-reviewed-display";
+import { nativeExistingImportClassicIdSql, nativeExistingImportTranslationsAvailable } from "./native-directory-existing-import-identity";
 
 export const CLIENT_HUB_SOURCES = ["project-alpha:primary", "delivery:local"] as const;
 export type ClientHubSource = `project-alpha:${string}` | "delivery:local";
@@ -244,7 +245,7 @@ const activeBusinessMapping = (currentMapping: string) => `(SELECT mapping.proje
   WHERE mapping.record_id=root.public_id AND mapping.source_id=root.source_id
     AND mapping.resource_type=CASE root.kind WHEN 'organization' THEN 'organization' ELSE 'client' END
     AND ${currentMapping} AND ${activeTupleUnique("mapping")} LIMIT 1)`;
-const activeBusinessExternalId = (currentMapping: string) => `(SELECT mapping.external_id FROM project_alpha_active_directory_mappings mapping
+const activeBusinessExternalId = (currentMapping: string, translated = false) => `(SELECT ${nativeExistingImportClassicIdSql("mapping", translated)} FROM project_alpha_active_directory_mappings mapping
   WHERE mapping.record_id=root.public_id AND mapping.source_id=root.source_id
     AND mapping.resource_type=CASE root.kind WHEN 'organization' THEN 'organization' ELSE 'client' END
     AND ${currentMapping} AND ${activeTupleUnique("mapping")} LIMIT 1)`;
@@ -286,12 +287,12 @@ const visibleSourceSql = (activeMappings: boolean, currentIdentity: string) => {
     ${activeMappings ? `OR (${nativeVisibleRoot})` : ""})`;
 };
 /** Resolve current identity once for list, exact lookup, and final page recheck. */
-function liveClientHubIdentitiesSql(activeMappings: boolean, currentIdentity: string): string {
+function liveClientHubIdentitiesSql(activeMappings: boolean, currentIdentity: string, translated = false): string {
   const visibleSource = visibleSourceSql(activeMappings, currentIdentity);
   return activeMappings ? `native_client_hub_identities AS MATERIALIZED (
     SELECT root.source_id,root.root_namespace,root.kind,root.public_id,
       CASE WHEN root.root_namespace='business' THEN ${activeBusinessMapping(currentIdentity)} ELSE root.pa_public_id END current_public_id,
-      ${activeBusinessExternalId(currentIdentity)} current_external_id
+      ${activeBusinessExternalId(currentIdentity, translated)} current_external_id
     FROM client_hub_roots root WHERE ${visibleRoot} AND ${visibleSource} AND ${activeLiveBusinessRoot(currentIdentity)}),
     classic_client_hub_identities AS MATERIALIZED (
       SELECT root.source_id,root.root_namespace,root.kind,root.public_id,
@@ -513,7 +514,8 @@ export async function listClientHubRoots(env: Env, principal: StaffPrincipal, op
         SELECT NULL,NULL,NULL WHERE 0)`;
   const activeMappings = activeIdentities !== null;
   const currentIdentity = clientHubActiveDirectoryIdentitySql("mapping", activeIdentities ?? []);
-  const liveIdentities = liveClientHubIdentitiesSql(activeMappings, currentIdentity);
+  const translated = activeMappings && await nativeExistingImportTranslationsAvailable(env.OPS_DB);
+  const liveIdentities = liveClientHubIdentitiesSql(activeMappings, currentIdentity, translated);
   const currentMapping = "resolved.current_public_id";
   const currentExternalId = "resolved.current_external_id";
   const clauses = ["1=1"], values: unknown[] = [];
@@ -644,7 +646,7 @@ export async function listClientHubRoots(env: Env, principal: StaffPrincipal, op
       JOIN live_client_hub_identities resolved ON resolved.source_id=root.source_id
         AND resolved.root_namespace=root.root_namespace AND resolved.kind=root.kind AND resolved.public_id=root.public_id
       LEFT JOIN business_activity_roots activity ON root.root_namespace='business'
-        AND activity.source_id=root.source_id AND activity.root_kind=root.kind AND activity.root_id=root.public_id
+        AND activity.source_id=root.source_id AND activity.root_kind=root.kind AND activity.root_id=resolved.current_external_id
       LEFT JOIN business_party_links membership ON root.root_namespace='business'
         AND membership.source_id=root.source_id AND membership.record_id=root.public_id
         AND membership.record_kind=CASE root.kind WHEN 'organization' THEN 'organization' ELSE 'client' END
@@ -775,6 +777,35 @@ export async function findClientHubRoot(env: Env, kind: ClientHubKind, publicId:
       ${rootNamespace === undefined ? "" : " AND root.root_namespace=?"} LIMIT 2`;
   const rows = await db.prepare(rootLookupSql)
     .bind(kind, publicId, ...(sourceId === undefined ? [] : [sourceId]), ...(rootNamespace === undefined ? [] : [rootNamespace])).all<ClientHubRoot>();
+  if (activeMappings && (rootNamespace === undefined || rootNamespace === "business")
+    && await nativeExistingImportTranslationsAvailable(db)) {
+    // An immutable alias selects a candidate only. The ordinary live root
+    // lookup below still proves its current native mapping and visibility.
+    const aliases = await db.prepare(`SELECT translation.native_record_id,translation.source_id
+      FROM native_directory_existing_import_identity_translations translation
+      JOIN native_directory_existing_import_reviews reviewed ON reviewed.import_id=translation.import_id
+      JOIN project_alpha_active_directory_mappings mapping ON mapping.record_id=translation.native_record_id
+        AND mapping.source_id=translation.source_id AND mapping.resource_type=translation.record_kind
+        AND mapping.project_alpha_public_id=translation.public_id
+        AND mapping.source_instance_id=json_extract(reviewed.review_json,'$.sourceInstanceId')
+        AND mapping.application_id=json_extract(reviewed.review_json,'$.applicationId')
+        AND mapping.history_epoch_id=json_extract(reviewed.review_json,'$.historyEpoch')
+      WHERE translation.classic_record_id=? AND translation.record_kind=? AND ${currentIdentity}
+        ${sourceId === undefined ? "" : "AND translation.source_id=?"} LIMIT 2`)
+      .bind(publicId, kind === "organization" ? "organization" : "client", ...(sourceId === undefined ? [] : [sourceId]))
+      .all<{ native_record_id: string; source_id: string }>();
+    const aliasLookup = `WITH ${clientHubClassicReadCtes(classicIdentities)}, ${liveClientHubIdentitiesSql(activeMappings,currentIdentity)}
+      SELECT root.* FROM client_hub_roots root JOIN live_client_hub_identities resolved
+        ON resolved.source_id=root.source_id AND resolved.root_namespace=root.root_namespace
+        AND resolved.kind=root.kind AND resolved.public_id=root.public_id
+      WHERE root.kind=? AND root.public_id=? AND root.source_id=? AND root.root_namespace='business'
+        LIMIT 2`;
+    for (const alias of aliases.results) {
+      const resolved = await db.prepare(aliasLookup).bind(kind, alias.native_record_id, alias.source_id).all<ClientHubRoot>();
+      for (const value of resolved.results) if (!rows.results.some(row => row.source_id === value.source_id
+        && row.root_namespace === value.root_namespace && row.kind === value.kind && row.public_id === value.public_id)) rows.results.push(value);
+    }
+  }
   if (rows.results.length > 1)
     throw new HTTPException(409, { message: "This client link is ambiguous. Open the client from Client Hub" });
   if (rows.results[0]) return rows.results[0];

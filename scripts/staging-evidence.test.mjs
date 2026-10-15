@@ -706,6 +706,14 @@ test("bootstrap evidence remains pinned to its authorized chains while current s
     let names = fs.readdirSync(path.join(repository, "apps", source, "migrations"))
       .filter(name => name.endsWith(".sql")).sort();
     const candidate = app === "operations" ? OPERATIONS_LATEST_SOURCE_MIGRATION_CHAIN : CLIENT_CURRENT_SOURCE_MIGRATION_CHAIN;
+    if (app === "operations") {
+      assert(names.slice(candidate.count).every(name => /^\d{4}_.+\.sql$/.test(name) && Number(name.slice(0, 4)) > candidate.count),
+        "later application migrations must remain separate from reviewed bootstrap authority");
+      names = names.slice(0, candidate.count);
+      assert.equal(digest(names.join("\n")).toLowerCase(), candidate.namesSha256, "reviewed205 source names stay pinned");
+      assert.equal(digest(names.map(name => `${name}\0${digest(fs.readFileSync(path.join(repository, "apps", source, "migrations", name))).toLowerCase()}`).join("\n")).toLowerCase(),
+        candidate.contentsSha256, "reviewed205 source bytes stay pinned");
+    }
     assert.equal(names.length, candidate.count, `${app} current candidate count`);
     assert.equal(names.at(-1), candidate.finalMigration, `${app} current candidate tail`);
     names = names.filter(name => !Object.hasOwn(candidate.appendedMigrations, name));

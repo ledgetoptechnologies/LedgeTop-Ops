@@ -39,6 +39,37 @@ test("205 is exact staging204 prefix plus one reviewed migration; frozen204 refu
   assert.equal((await runNativeBilling204To205(["dry-run"], { root,
     credential: () => assert.fail("no credential"), remoteState: () => assert.fail("no connection") })).mutationsPerformed, false);
 });
+test("later source206 preserves the exact205 plan and copies only the approved205 suffix", () => {
+  const base = fixture();
+  try {
+    const directory = path.join(base, "apps/operations/migrations");
+    for (const name of fs.readdirSync(directory)) if (Number(name.slice(0, 4)) > 205) fs.unlinkSync(path.join(directory, name));
+    const frozen = buildNativeBilling204To205Plan(base);
+    fs.writeFileSync(path.join(directory, "0206_future_unapproved.sql"), "CREATE TABLE must_not_apply(id TEXT);\n");
+    const later = buildNativeBilling204To205Plan(base, "later-source");
+    assert.deepEqual(later.priorNames, frozen.priorNames);
+    assert.deepEqual(later.finalNames, frozen.finalNames);
+    assert.deepEqual(later.migrations, frozen.migrations);
+    materializeNativeBilling204To205(later);
+    assert.deepEqual(fs.readdirSync(later.directory), [SPEC.suffix[0].name]);
+    assert.equal(fs.readFileSync(path.join(later.directory, SPEC.suffix[0].name), "utf8"),
+      fs.readFileSync(path.join(directory, SPEC.suffix[0].name), "utf8"));
+    fs.writeFileSync(path.join(directory, "0205_unreviewed_duplicate.sql"), "SELECT 1;");
+    assert.throws(() => buildNativeBilling204To205Plan(base), /reviewed205 prefix|names drifted/);
+  } finally { cleanup(base); }
+});
+
+test("physical206 is rejected before any205 preflight, backup, apply or reconcile mutation", async () => {
+  const plan = buildNativeBilling204To205Plan(root);
+  const physical206 = [...plan.finalNames, "0206_native_directory_existing_import.sql"].map((name,index)=>({id:index+1,name}));
+  for (const mode of ["preflight", "backup", "apply", "reconcile"]) {
+    await assert.rejects(runNativeBilling204To205([mode], { root,
+      sourceCiGate: async()=>({headSha:"a".repeat(40),runId:"1"}), credential:()=>"synthetic-not-used",
+      remoteState:async()=>({foreignKeys:[],ledger:physical206}),
+      wrangler:()=>assert.fail("physical206 must never reach a mutation") }), /exact Operations (204|205) ledger required/);
+  }
+});
+
 test("205 inventory rejects altered prior or suffix bytes and uppercase hidden SQL", () => {
   for (const mutation of ["prefix", "suffix", "uppercase"]) {
     const base = fixture();

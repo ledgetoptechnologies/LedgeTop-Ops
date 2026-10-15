@@ -4,6 +4,7 @@ import { projectAlphaNativeMappingReadVisibleSql, projectAlphaReadVisibleSql } f
 import { HTTPException } from "hono/http-exception";
 import { resolveProjectAlphaApiV2Connection } from "./project-alpha-api-v2-connections";
 import { clientHubClassicReadEligibleSql, clientHubClassicReadIdentities } from "./client-hub-classic-read";
+import { nativeExistingImportClassicIdSql, nativeExistingImportTranslationsAvailable } from "./native-directory-existing-import-identity";
 
 export function isBusinessProjectionSource(value: string): value is `project-alpha:${string}` {
   return /^project-alpha:[a-z0-9][a-z0-9_-]{0,63}$/.test(value);
@@ -165,7 +166,10 @@ export async function resolveClientHubSourceRoot(
     const identities = await clientHubActiveDirectoryIdentities(env);
     const currentMapping = clientHubActiveDirectoryIdentitySql("mapping", identities ?? []);
     const resourceType = kind === "organization" ? "organization" : "client";
-    const native = await env.OPS_DB.withSession("first-primary").prepare(`SELECT mapping.record_id id,mapping.external_id pa_internal_id,
+    const translated = await nativeExistingImportTranslationsAvailable(env.OPS_DB);
+    const classicId = nativeExistingImportClassicIdSql("mapping", translated);
+    const classicAlias = nativeExistingImportClassicIdSql("mapping", translated, false);
+    const native = await env.OPS_DB.withSession("first-primary").prepare(`SELECT mapping.record_id id,${classicId} pa_internal_id,
       json_extract(revision.profile_json,'$.name') display_name,NULL organization_id,1 active,
       mapping.project_alpha_public_id pa_public_id,'mapped' mapping_status
       FROM project_alpha_active_directory_mappings mapping
@@ -173,7 +177,7 @@ export async function resolveClientHubSourceRoot(
       JOIN operations_directory_revisions revision ON revision.record_id=record.record_id AND revision.version=record.current_version
       ${kind === "organization" ? "" : `JOIN operations_directory_client_organizations relationship
         ON relationship.client_record_id=record.record_id AND relationship.organization_record_id IS NULL`}
-      WHERE mapping.record_id=? AND mapping.source_id=? AND mapping.resource_type='${resourceType}'
+      WHERE (mapping.record_id=? OR ${classicAlias}=?) AND mapping.source_id=? AND mapping.resource_type='${resourceType}'
         AND ${currentMapping} AND ${projectAlphaNativeMappingReadVisibleSql("mapping.source_id", "mapping", identities ?? [])}
         AND json_valid(revision.profile_json) AND json_type(revision.profile_json,'$.name')='text'
         AND length(trim(json_extract(revision.profile_json,'$.name'))) BETWEEN 1 AND 150
@@ -184,8 +188,9 @@ export async function resolveClientHubSourceRoot(
             AND candidate.resource_type=mapping.resource_type
             AND (candidate.record_id=mapping.record_id OR candidate.external_id=mapping.external_id
               OR candidate.project_alpha_public_id=mapping.project_alpha_public_id))=1
-      LIMIT 1`).bind(internalId, sourceId).first<ClientHubSourceRoot>();
-    return native ?? resolveClassicReadRoot(env, kind, sourceId, internalId);
+      LIMIT 2`).bind(internalId, internalId, sourceId).all<ClientHubSourceRoot>();
+    if (native.results.length > 1) return null;
+    return native.results[0] ?? resolveClassicReadRoot(env, kind, sourceId, internalId);
   }
   const row = await env.OPS_DB.withSession("first-primary").prepare(`SELECT source.id,source.id pa_internal_id,source.name display_name,
     ${kind === "organization" ? "NULL" : "source.organization_id"} organization_id,source.active,source.payload_json,
@@ -213,7 +218,8 @@ export async function resolveClientHubSourceRootByAlphaIdentity(
   const identities = await clientHubActiveDirectoryIdentities(env);
   const currentMapping = clientHubActiveDirectoryIdentitySql("mapping", identities ?? []);
   const resourceType = kind === "organization" ? "organization" : "client";
-  const clauses = ["mapping.external_id=?"];
+  const classicId = nativeExistingImportClassicIdSql("mapping", await nativeExistingImportTranslationsAvailable(env.OPS_DB));
+  const clauses = [`${classicId}=?`];
   const values: string[] = [sourceId, resourceType, paInternalId];
   if (paPublicId) { clauses.push("mapping.project_alpha_public_id=?"); values.push(paPublicId); }
   const mappings = await env.OPS_DB.withSession("first-primary").prepare(`SELECT mapping.record_id
@@ -255,7 +261,8 @@ export async function resolveClientHubSourceRootByAlphaPublicId(
   const identities = await clientHubActiveDirectoryIdentities(env);
   const currentMapping = clientHubActiveDirectoryIdentitySql("mapping", identities ?? []);
   const resourceType = kind === "organization" ? "organization" : "client";
-  const rows = await env.OPS_DB.withSession("first-primary").prepare(`SELECT mapping.external_id
+  const classicId = nativeExistingImportClassicIdSql("mapping", await nativeExistingImportTranslationsAvailable(env.OPS_DB));
+  const rows = await env.OPS_DB.withSession("first-primary").prepare(`SELECT ${classicId} external_id
     FROM project_alpha_active_directory_mappings mapping
     JOIN operations_directory_records record ON record.record_id=mapping.record_id AND record.record_kind=mapping.resource_type
     JOIN operations_directory_revisions revision ON revision.record_id=record.record_id AND revision.version=record.current_version
