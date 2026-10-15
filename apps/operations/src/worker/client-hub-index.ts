@@ -4,7 +4,7 @@ import { clientHubActiveDirectoryIdentities, clientHubActiveDirectoryIdentitySql
   type ClientHubMappingStatus } from "./client-hub-source";
 import { resolveClientHubWorkspaces } from "./client-hub-workspace";
 import { clientHubReviewedDisplayIdentities, clientHubReviewedDisplayLiveSql } from "./client-hub-reviewed-display";
-import { clientHubClassicReadEligibleSql, clientHubClassicReadIdentities } from "./client-hub-classic-read";
+import { clientHubClassicReadCtes, clientHubClassicReadIdentities } from "./client-hub-classic-read";
 
 // This is a rebuildable staff search index, never an identity/access authority.
 // A future connector must first isolate the authoritative projection producers.
@@ -180,7 +180,7 @@ async function rootPage(env: IndexEnv, phase: Phase, cursor: string, generation:
     const activeMappings = activeIdentities !== null;
     const classicIdentities = activeMappings ? await clientHubClassicReadIdentities(env) : [];
     const currentMapping = clientHubActiveDirectoryIdentitySql("mapping", activeIdentities ?? []);
-    const sources = activeMappings ? (await ops.prepare(`SELECT mapping.source_id,'business' root_namespace,
+    const sources = activeMappings ? (await ops.prepare(`WITH ${clientHubClassicReadCtes(classicIdentities)} SELECT mapping.source_id,'business' root_namespace,
       '${organizations ? "organization" : "standalone_client"}' kind,
       mapping.record_id public_id,mapping.external_id pa_internal_id,
       trim(json_extract(revision.profile_json,'$.name')) display_name,'active' status,
@@ -225,10 +225,10 @@ async function rootPage(env: IndexEnv, phase: Phase, cursor: string, generation:
         AND mapping.source_id||char(31)||mapping.record_id>?
       UNION ALL SELECT source.projection_source_id,'business','${organizations ? "organization" : "standalone_client"}',
         source.id,source.id,source.name,'active',source.projection_source_id||char(31)||source.id,source.payload_json,
-        ${validatedUniquePublicIdExpression(table, "source")},
-        ${organizations ? `(SELECT count(*) FROM pa_clients contact WHERE contact.projection_source_id=source.projection_source_id
-          AND contact.organization_id=source.id AND ${clientHubClassicReadEligibleSql("pa_clients", "contact", classicIdentities)})` : "1"}
-      FROM ${table} source WHERE ${clientHubClassicReadEligibleSql(table, "source", classicIdentities)}
+        ${sourcePublicIdExpression("source")},
+        ${organizations ? `(SELECT count(*) FROM classic_read_clients contact WHERE contact.projection_source_id=source.projection_source_id
+          AND contact.organization_id=source.id)` : "1"}
+      FROM ${organizations ? "classic_read_organizations" : "classic_read_clients"} source WHERE 1=1
         ${organizations ? "" : "AND source.organization_id IS NULL"}
         AND source.projection_source_id||char(31)||source.id>?
       ORDER BY cursor COLLATE BINARY LIMIT ?`)
@@ -296,7 +296,7 @@ async function searchPage(env: IndexEnv, phase: Phase, cursor: string, generatio
       projection_source_id: string; canonical_record_id: string | null; canonical_organization_id: string | null;
       cursor: string };
     const rows = activeMappings
-      ? (await env.OPS_DB.withSession("first-primary").prepare(`SELECT mapping.record_id id,
+      ? (await env.OPS_DB.withSession("first-primary").prepare(`WITH ${clientHubClassicReadCtes(classicIdentities)} SELECT mapping.record_id id,
           trim(json_extract(revision.profile_json,'$.name')) name,relationship.organization_record_id organization_id,
           revision.profile_json payload_json,mapping.source_id projection_source_id,mapping.record_id canonical_record_id,
           parent.record_id canonical_organization_id,mapping.source_id||char(31)||mapping.record_id cursor
@@ -330,10 +330,9 @@ async function searchPage(env: IndexEnv, phase: Phase, cursor: string, generatio
           AND mapping.source_id||char(31)||mapping.record_id>?
         UNION ALL SELECT client.id,client.name,client.organization_id,client.payload_json,client.projection_source_id,
           NULL,NULL,client.projection_source_id||char(31)||client.id
-        FROM pa_clients client WHERE ${clientHubClassicReadEligibleSql("pa_clients", "client", classicIdentities)}
-          AND (client.organization_id IS NULL OR EXISTS (SELECT 1 FROM pa_organizations classic_parent
-            WHERE classic_parent.id=client.organization_id AND classic_parent.projection_source_id=client.projection_source_id
-              AND ${clientHubClassicReadEligibleSql("pa_organizations", "classic_parent", classicIdentities)}))
+        FROM classic_read_clients client WHERE
+          (client.organization_id IS NULL OR EXISTS (SELECT 1 FROM classic_read_organizations classic_parent
+            WHERE classic_parent.id=client.organization_id AND classic_parent.projection_source_id=client.projection_source_id))
           AND client.projection_source_id||char(31)||client.id>?
         ORDER BY cursor COLLATE BINARY LIMIT ?`)
         .bind(cursor, cursor, PAGE_SIZE).all<ContactRow>()).results
@@ -403,7 +402,7 @@ async function searchPage(env: IndexEnv, phase: Phase, cursor: string, generatio
     const activeMappings = activeIdentities !== null;
     const classicIdentities = activeMappings ? await clientHubClassicReadIdentities(env) : [];
     const currentMapping = clientHubActiveDirectoryIdentitySql("mapping", activeIdentities ?? []);
-    const rows = (await env.OPS_DB.withSession("first-primary").prepare(`SELECT project.id,project.name,project.projection_source_id,
+    const rows = (await env.OPS_DB.withSession("first-primary").prepare(`${activeMappings ? `WITH ${clientHubClassicReadCtes(classicIdentities)}` : ""} SELECT project.id,project.name,project.projection_source_id,
       COALESCE(project.organization_id,client.organization_id) organization_id,project.client_id,
       ${activeMappings ? `CASE WHEN COALESCE(project.organization_id,client.organization_id) IS NOT NULL THEN (
         SELECT mapping.record_id FROM project_alpha_active_directory_mappings mapping
@@ -432,13 +431,11 @@ async function searchPage(env: IndexEnv, phase: Phase, cursor: string, generatio
                 OR candidate.project_alpha_public_id=mapping.project_alpha_public_id))=1
       ) END` : "NULL"} canonical_root_id,
       ${activeMappings ? `CASE WHEN COALESCE(project.organization_id,client.organization_id) IS NOT NULL THEN (
-        SELECT classic_owner.id FROM pa_organizations classic_owner
+        SELECT classic_owner.id FROM classic_read_organizations classic_owner
         WHERE classic_owner.id=COALESCE(project.organization_id,client.organization_id)
-          AND classic_owner.projection_source_id=project.projection_source_id
-          AND ${clientHubClassicReadEligibleSql("pa_organizations", "classic_owner", classicIdentities)}) ELSE (
-        SELECT classic_owner.id FROM pa_clients classic_owner WHERE classic_owner.id=project.client_id
-          AND classic_owner.projection_source_id=project.projection_source_id AND classic_owner.organization_id IS NULL
-          AND ${clientHubClassicReadEligibleSql("pa_clients", "classic_owner", classicIdentities)}) END` : "NULL"} classic_root_id
+          AND classic_owner.projection_source_id=project.projection_source_id) ELSE (
+        SELECT classic_owner.id FROM classic_read_clients classic_owner WHERE classic_owner.id=project.client_id
+          AND classic_owner.projection_source_id=project.projection_source_id AND classic_owner.organization_id IS NULL) END` : "NULL"} classic_root_id
       FROM pa_projects project LEFT JOIN pa_clients client ON client.id=project.client_id AND client.projection_source_id=project.projection_source_id AND client.active=1
       WHERE project.active=1 AND project.id>? ORDER BY project.id COLLATE BINARY LIMIT ?`)
       .bind(cursor, PAGE_SIZE).all<{ id: string; name: string; organization_id: string | null; client_id: string | null; projection_source_id: string; canonical_root_id: string | null; classic_root_id: string | null }>()).results;

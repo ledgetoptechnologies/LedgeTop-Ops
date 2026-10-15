@@ -10,7 +10,7 @@ import { clientHubActiveDirectoryIdentities, clientHubActiveDirectoryIdentitySql
 import type { ClientHubRoot } from "./client-hub-directory";
 import type { Env, StaffPrincipal } from "./types";
 import { projectAlphaReadVisibleSql, requireProjectAlphaReadOrNativeMappingVisibility, requireProjectAlphaReadVisibility } from "./project-alpha-read-visibility";
-import { clientHubClassicReadEligibleSql, clientHubClassicReadIdentities } from "./client-hub-classic-read";
+import { clientHubClassicReadCtes, clientHubClassicReadIdentities } from "./client-hub-classic-read";
 
 export const CLIENT_HUB_COLLECTIONS = ["businessContacts", "accounts", "projects", "requests", "deliveryGrants",
   "authenticatedDeliveryGrants", "viewerGrants"] as const;
@@ -41,7 +41,7 @@ export interface ClientHubCollectionResult {
 interface Cursor { v: 1; root: string[]; collection: ClientHubCollection; context: string; after: string[] }
 interface Query {
   select: string; from: string; where: string; values: string[]; order: string[]; descending: boolean;
-  keys: string[]; business?: boolean;
+  keys: string[]; business?: boolean; ctes?: string;
 }
 
 export function isClientHubCollection(value: string): value is ClientHubCollection {
@@ -196,6 +196,7 @@ async function canonicalBusinessContactsQuery(env: Env, context: ClientHubCollec
         AND root_mapping.project_alpha_public_id NOT GLOB '*[^0-9a-f]*')`
     : `contact_mapping.record_id=? AND relationship.organization_record_id IS NULL`;
   return {
+    ctes: clientHubClassicReadCtes(classicIdentities),
     select: `id public_id,organization_id,name display_name,${businessContactChannelsSql()}`,
     from: `(SELECT contact_mapping.record_id id,relationship.organization_record_id organization_id,
         trim(json_extract(revision.profile_json,'$.name')) name,revision.profile_json payload_json
@@ -215,12 +216,11 @@ async function canonicalBusinessContactsQuery(env: Env, context: ClientHubCollec
         AND contact_mapping.project_alpha_public_id NOT GLOB '*[^0-9a-f]*'
         AND ${rootEvidence}
       UNION ALL SELECT classic_contact.id,classic_contact.organization_id,classic_contact.name,classic_contact.payload_json
-      FROM pa_clients classic_contact
-      WHERE classic_contact.projection_source_id=? AND ${clientHubClassicReadEligibleSql("pa_clients", "classic_contact", classicIdentities)}
+      FROM classic_read_clients classic_contact
+      WHERE classic_contact.projection_source_id=?
         AND ${root.kind === "organization" ? `classic_contact.organization_id=? AND EXISTS (
-          SELECT 1 FROM pa_organizations classic_parent WHERE classic_parent.id=classic_contact.organization_id
-            AND classic_parent.projection_source_id=classic_contact.projection_source_id
-            AND ${clientHubClassicReadEligibleSql("pa_organizations", "classic_parent", classicIdentities)})`
+          SELECT 1 FROM classic_read_organizations classic_parent WHERE classic_parent.id=classic_contact.organization_id
+            AND classic_parent.projection_source_id=classic_contact.projection_source_id)`
           : "classic_contact.id=? AND classic_contact.organization_id IS NULL"}) canonical_contact`,
     where: "1=1", values: root.kind === "organization"
       ? [root.source_id, root.public_id, root.public_id, root.source_id, root.public_id]
@@ -289,7 +289,7 @@ export async function listClientHubCollection(env: Env, context: ClientHubCollec
   if (cursor && cursor.after.length !== query.order.length)
     throw new HTTPException(400, { message: "Client collection cursor is invalid" });
   const after = cursor ? ` AND (${query.order.join(",")}) ${query.descending ? "<" : ">"} (${query.order.map(() => "?").join(",")})` : "";
-  const sql = `SELECT ${query.select},${query.order.map((expression, index) => `${expression} __cursor_${index}`).join(",")}
+  const sql = `${query.ctes ? `WITH ${query.ctes} ` : ""}SELECT ${query.select},${query.order.map((expression, index) => `${expression} __cursor_${index}`).join(",")}
     FROM ${query.from} WHERE (${query.where})${after}
     ORDER BY ${query.order.map(expression => `${expression} ${query.descending ? "DESC" : "ASC"}`).join(",")} LIMIT ?`;
   const db = (query.business ? env.OPS_DB : env.DELIVERY_DB).withSession("first-primary");
