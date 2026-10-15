@@ -3737,6 +3737,7 @@ function exactViewerWorkspaceMessage(
 function ViewerDataOverview({session}:{session:Session}) {
   const { data, error, reload } = useLoad<ViewerOverviewResponse>(() => api("/api/viewer/overview"), []);
   const [opening, setOpening] = useState(false), [actionError, setActionError] = useState("");
+  const [popupBlocked, setPopupBlocked] = useState(false);
   const reauthorizationState = new URLSearchParams(location.search).get("state");
   useEffect(() => {
     if (!data?.viewerBaseUrl || !reauthorizationState || !/^[A-Za-z0-9_-]{32,128}$/.test(reauthorizationState)) return;
@@ -3762,11 +3763,18 @@ function ViewerDataOverview({session}:{session:Session}) {
     void run();
     return () => { active = false; };
   }, [data?.viewerBaseUrl, reauthorizationState]);
-  const openWorkspace = async () => {
-    const popup = window.open("about:blank", "_blank");
-    if (!popup) { setActionError("Allow pop-ups for Operations, then try again."); return; }
-    popup.document.title = "Opening LTDS Viewer";
-    popup.document.body.textContent = "Opening the secure LTDS Viewer workspace…";
+  const openWorkspace = async (currentTab = false) => {
+    const popup = currentTab ? null : window.open("about:blank", "_blank");
+    if (!currentTab && !popup) {
+      setPopupBlocked(true);
+      setActionError("Your browser doesn't support pop-ups. Open the Viewer in this tab to continue.");
+      return;
+    }
+    if (popup) {
+      setPopupBlocked(false);
+      popup.document.title = "Opening LTDS Viewer";
+      popup.document.body.textContent = "Opening the secure LTDS Viewer workspace…";
+    }
     setOpening(true); setActionError("");
     try {
       const expected = data?.viewerBaseUrl ? new URL(data.viewerBaseUrl) : null;
@@ -3779,6 +3787,9 @@ function ViewerDataOverview({session}:{session:Session}) {
       const target = new URL(grant.workspaceUrl);
       if (target.origin !== expected.origin || target.pathname !== `/workspace/${encodeURIComponent(grant.grant)}` || target.search || target.hash)
         throw new Error("3D Viewer returned an invalid workspace link");
+
+      if (currentTab) { location.assign(target.href); return; }
+      if (!popup) throw new Error("Unable to open the Viewer workspace");
 
       let pinnedSessionId = "", pinnedSubject = "", closed = false;
       const handled = new Set<string>();
@@ -3832,7 +3843,7 @@ function ViewerDataOverview({session}:{session:Session}) {
       const closedTimer = window.setInterval(() => { if (popup.closed) cleanup(); }, 1_000);
       popup.location.replace(target.href);
     } catch (caught) {
-      popup.close(); setActionError((caught as Error).message);
+      popup?.close(); setActionError((caught as Error).message);
     } finally { setOpening(false); }
   };
   if (!data && !error) return <Card><PanelSkeleton /></Card>;
@@ -3842,6 +3853,7 @@ function ViewerDataOverview({session}:{session:Session}) {
   const value = data.overview;
   return <div className="viewer-overview">
     <ErrorLine error={actionError} />
+    {popupBlocked && <button type="button" className="button-ghost" disabled={opening} onClick={() => void openWorkspace(true)}>Open Viewer in this tab</button>}
     <div className="viewer-overview-actions">
       <div><h2>3D models</h2><p>Project management, imports, processing, review, sharing, and model interaction open on the dedicated Viewer domain.</p></div>
       <button type="button" className="button-orange" disabled={opening} onClick={() => void openWorkspace()}>{opening ? "Opening…" : "Open Viewer workspace"}</button>

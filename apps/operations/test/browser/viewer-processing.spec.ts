@@ -167,3 +167,61 @@ test("an authenticated Viewer bounce issues one fixed-origin grant and returns t
   await page.waitForURL(`https://viewer.ledgetopdroneservices.com/workspace/${grant}#reauthorize=${state}`);
   expect(issued).toBe(1);
 });
+
+for (const invalidOrigin of [false, true]) {
+  test(`blocked Viewer pop-ups offer authenticated same-tab navigation${invalidOrigin ? " and reject an unexpected origin" : ""}`, async ({ page, context }) => {
+    const viewerOrigin = "https://viewer.ledgetopdroneservices.com";
+    const grant = "s".repeat(43);
+    let issued = 0;
+    await page.addInitScript(() => { window.open = () => null; });
+    await context.route(`${viewerOrigin}/workspace/**`, route =>
+      route.fulfill({ contentType: "text/html", body: "<!doctype html><title>Viewer same tab</title>" }));
+    await page.route("**/api/**", async route => {
+      const request = route.request(), path = new URL(request.url()).pathname;
+      if (path === "/api/session") return route.fulfill({ json: {
+        user: { id: "staff-one", email: "staff@example.test", displayName: "Staff", status: "Active",
+          profileType: "Administrator", isAdministrator: true, permissions: ["viewer.view"], divisions: [] },
+        csrfToken: "csrf-same-tab", timezone: "America/Chicago", mapStyleUrl: null, mapboxPublicToken: null,
+        units: { default: "imperial", resolved: "imperial" }, capabilities: {},
+      } });
+      if (path === "/api/viewer/overview") return route.fulfill({ json: {
+        enabled: true, viewerBaseUrl: viewerOrigin, overview: {
+          schemaVersion: 1, generatedAt: "2026-10-15T00:00:00.000Z",
+          projects: { active: 1, total: 1 }, models: { published: 1, total: 1, bytes: 0 },
+          jobs: { queued: 0, running: 0, reviewReady: 0, failed: 0 },
+          providers: { enabled: 1, healthy: 1, total: 1 }, storage: { usedBytes: 0, availableBytes: 1000 },
+          platform: { ready: true, workerLive: true, lifecycleBlocked: false },
+        },
+      } });
+      if (path === "/api/viewer/admin-grant" && request.method() === "POST") {
+        issued += 1;
+        expect(request.headers()["x-csrf-token"]).toBe("csrf-same-tab");
+        expect(request.headers()["idempotency-key"]).toMatch(/^[0-9a-f-]{36}$/);
+        return route.fulfill({ status: 201, json: {
+          grant, grantExpiresAt: new Date(Date.now() + 60_000).toISOString(), sessionTtlSeconds: 1800,
+          redeemUrl: `${viewerOrigin}/api/v1/admin-sessions/redeem`,
+          workspaceUrl: `${invalidOrigin ? "https://unexpected.example.test" : viewerOrigin}/workspace/${grant}`,
+        } });
+      }
+      return route.fulfill({ status: 404, json: { error: "Not found" } });
+    });
+
+    await page.goto("/operations/processing");
+    await expect(page.getByRole("button", { name: "Open Viewer in this tab" })).toHaveCount(0);
+    await page.getByRole("button", { name: "Open Viewer workspace" }).click();
+    await expect(page.getByText("Your browser doesn't support pop-ups. Open the Viewer in this tab to continue.")).toBeVisible();
+    expect(issued).toBe(0);
+    expect(context.pages()).toHaveLength(1);
+    await page.getByRole("button", { name: "Open Viewer in this tab" }).click();
+    if (invalidOrigin) {
+      await expect(page.getByText("3D Viewer returned an invalid workspace link")).toBeVisible();
+      await expect(page).toHaveURL(/\/operations\/processing$/);
+    } else {
+      await expect(page).toHaveURL(`${viewerOrigin}/workspace/${grant}`);
+      await expect(page).toHaveTitle("Viewer same tab");
+      expect(await page.evaluate(() => window.opener === null)).toBe(true);
+    }
+    expect(issued).toBe(1);
+    expect(context.pages()).toHaveLength(1);
+  });
+}
