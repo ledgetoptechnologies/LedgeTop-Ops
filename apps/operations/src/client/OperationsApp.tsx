@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent } from "react";
 import { createPortal } from "react-dom";
 import { type DeliveryLocationCollection, type Permission, type SessionUser, type ViewerAdminSessionGrant, type ViewerModelSummary, type ViewerPlatformOverview, type ViewerPublicShareSummary } from "@ltds/shared";
-import { AccountMenu, Brand, Card, EmptyState, Loading, LtMark, Skeleton, StatusPill, openViewerShell } from "@ltds/ui";
+import { AccountMenu, Brand, Card, EmptyState, Loading, LtMark, Skeleton, StatusPill, openViewerShell, requestChoice, requestText, type TextRequest } from "@ltds/ui";
 import { FinanceSummaryPanel } from "./FinanceSummaryPanel";
 import { ApiError, api, setCsrf } from "./api";
 import { operationsViewerShellPath } from "./OperationsViewerShell";
@@ -252,6 +252,20 @@ function bytes(value: number) {
   }
   return `${size.toFixed(size >= 10 ? 0 : 1)} ${units[index]}`;
 }
+const newFolderRequest = (prefix: string): TextRequest => ({
+  title: "New folder", label: "Folder name", confirmLabel: "Create folder",
+  description: `The folder is created in ${prefix ? prefix : "the top level"}.`,
+});
+const renameRequest = (current: string): TextRequest => ({
+  title: `Rename ${current}`, label: "New name", defaultValue: current, confirmLabel: "Rename",
+});
+const destinationRequest = (action: string, count: number, prefix: string): TextRequest => ({
+  title: `${action === "move" ? "Move" : "Copy"} ${count} item${count === 1 ? "" : "s"}`,
+  label: "Destination folder", defaultValue: prefix, required: false,
+  description: "Enter the folder path to place the selection in. Leave it empty for the top level.",
+  confirmLabel: action === "move" ? "Move" : "Copy",
+});
+
 export function OperationsApp() {
   const [session, setSession] = useState<Session | null>(null),
     [error, setError] = useState(""),
@@ -982,13 +996,10 @@ function ClientRequestQueue() {
     }
   };
   const linkQuote = async (request: ClientRequest) => {
-    const raw = prompt("Project Alpha draft quote ID");
+    const raw = await requestText({ title: "Link Project Alpha quote", label: "Project Alpha draft quote ID", confirmLabel: "Link quote",
+      validate: value => /^[1-9][0-9]*$/.test(value) ? null : "Enter a positive whole-number quote ID." });
     if (!raw) return;
     const artifactId = Number(raw);
-    if (!Number.isInteger(artifactId) || artifactId <= 0) {
-      alert("Enter a positive Project Alpha quote ID.");
-      return;
-    }
     setBusy(request.id);
     try {
       await api(
@@ -1768,7 +1779,7 @@ function Delivery({ session }: { session: Session }) {
         <FilePreview item={preview} close={() => setPreview(null)} />
       )}
       <TrashPanel />
-      <ShareHistory session={session} revision={shareRevision} />
+      <ShareHistory session={session} revision={shareRevision} changed={() => void reload()} />
     </>
   );
 }
@@ -2450,7 +2461,7 @@ function DeliveryWorkspace({ session }: { session: Session }) {
   const selectedItems = items.filter((item) =>
     selected.includes(itemRef(item)),
   );
-  const mutate = (action: string) => {
+  const mutate = async (action: string) => {
     if (!selected.length) return;
     if (
       action === "delete" &&
@@ -2461,7 +2472,7 @@ function DeliveryWorkspace({ session }: { session: Session }) {
       return;
     const target =
       action === "copy" || action === "move"
-        ? prompt(`Destination folder for ${action}`, prefix)
+        ? await requestText(destinationRequest(action, selected.length, prefix))
         : null;
     if ((action === "copy" || action === "move") && target === null) return;
     void run(
@@ -2472,10 +2483,10 @@ function DeliveryWorkspace({ session }: { session: Session }) {
       }),
     );
   };
-  const rename = () => {
+  const rename = async () => {
     const item = selectedItems[0];
     if (!item) return;
-    const next = prompt("New display name", displayName(item));
+    const next = await requestText(renameRequest(displayName(item)));
     if (next && next.trim() !== displayName(item))
       void run(
         deliveryOperations.mutate("rename", {
@@ -2485,8 +2496,8 @@ function DeliveryWorkspace({ session }: { session: Session }) {
         }),
       );
   };
-  const newFolder = () => {
-    const name = prompt("New folder name");
+  const newFolder = async () => {
+    const name = await requestText(newFolderRequest(prefix));
     if (name?.trim())
       void run(deliveryOperations.createFolder(prefix, name.trim()));
   };
@@ -3078,6 +3089,13 @@ function DeliveryWorkspaceV2({ session }: { session: Session }) {
         : [...current, ref],
     );
   };
+  // A revoked share also changes inherited badges in every folder beneath it,
+  // so drop every cached listing and reload whichever folder is open now.
+  const shareRevoked = useRef(() => {});
+  shareRevoked.current = () => {
+    invalidateDeliveryFolderCache();
+    void reload();
+  };
   const refresh = async () => {
     const requestedPrefix = prefix;
     if (requestedPrefix !== currentPrefixRef.current) return;
@@ -3154,18 +3172,12 @@ function DeliveryWorkspaceV2({ session }: { session: Session }) {
     } catch (caught) {
       if (!(caught as Error).message.toLowerCase().includes("destination"))
         throw caught;
-      const choice = prompt(
-        "An item already exists at the destination. Type replace to overwrite it, keep to keep both, or Cancel to stop.",
-        "keep",
-      );
-      if (choice === null) throw new Error("Operation cancelled.");
-      const conflict =
-        choice.trim().toLowerCase() === "replace"
-          ? "replace"
-          : choice.trim().toLowerCase() === "keep"
-            ? "rename"
-            : null;
-      if (!conflict) throw new Error("Choose replace or keep.");
+      const conflict = await requestChoice<"rename" | "replace">({
+        title: "An item with this name already exists",
+        description: `${displayName(item)} already exists at the destination. Keep both saves this one under a new name; Replace overwrites the existing item.`,
+        choices: [{ value: "rename", label: "Keep both" }, { value: "replace", label: "Replace", tone: "danger" }],
+      });
+      if (!conflict) throw new Error("Operation cancelled.");
       return deliveryOperations.mutate(
         action,
         itemKey(item),
@@ -3177,7 +3189,7 @@ function DeliveryWorkspaceV2({ session }: { session: Session }) {
   };
   const mutateMany = async (action: "copy" | "move") => {
     if (!selectedItems.length) return;
-    const target = prompt(`Destination folder for ${action}`, prefix);
+    const target = await requestText(destinationRequest(action, selectedItems.length, prefix));
     if (target === null) return;
     const sharePolicy =
       action === "move" ? shareChoice(selectedItems) : "revoke";
@@ -3187,10 +3199,10 @@ function DeliveryWorkspaceV2({ session }: { session: Session }) {
         mutationRequest(action, item, targetFor(item, target), sharePolicy),
       );
   };
-  const rename = () => {
+  const rename = async () => {
     const item = selectedItems[0];
     if (!item) return;
-    const next = prompt("New file or folder name", displayName(item));
+    const next = await requestText(renameRequest(displayName(item)));
     if (!next?.trim() || next.trim() === displayName(item)) return;
     const sharePolicy = shareChoice([item]);
     if (!sharePolicy) return;
@@ -3214,19 +3226,19 @@ function DeliveryWorkspaceV2({ session }: { session: Session }) {
     for (const item of selectedItems)
       await run(deliveryOperations.remove(item));
   };
-  const itemAction = (action: "rename" | "copy" | "move" | "delete", item: DeliveryItem) => {
+  const itemAction = async (action: "rename" | "copy" | "move" | "delete", item: DeliveryItem) => {
     if (action === "delete") {
       if (confirm(`Delete ${displayName(item)}? It can be restored for 7 days.`)) void run(deliveryOperations.remove(item));
       return;
     }
     if (action === "rename") {
-      const next = prompt("New file or folder name", displayName(item));
+      const next = await requestText(renameRequest(displayName(item)));
       if (!next?.trim() || next.trim() === displayName(item)) return;
       const sharePolicy = shareChoice([item]);
       if (sharePolicy) void run(mutationRequest("rename", item, targetFor(item, itemKey(item).replace(/[^/]+\/?$/, ""), next.trim()), sharePolicy));
       return;
     }
-    const target = prompt(`Destination folder for ${action}`, prefix);
+    const target = await requestText(destinationRequest(action, 1, prefix));
     if (target === null) return;
     const sharePolicy = action === "move" ? shareChoice([item]) : "revoke";
     if (sharePolicy) void run(mutationRequest(action, item, targetFor(item, target), sharePolicy));
@@ -3303,11 +3315,10 @@ function DeliveryWorkspaceV2({ session }: { session: Session }) {
           <button
             className="button-orange"
             disabled={!canCreate}
-            onClick={() => {
-              const name = prompt("New folder name");
+            onClick={() => void requestText(newFolderRequest(prefix)).then(name => {
               if (name?.trim())
                 void run(deliveryOperations.createFolder(prefix, name.trim()));
-            }}
+            })}
           >
             New folder
           </button>
@@ -3707,7 +3718,7 @@ function DeliveryWorkspaceV2({ session }: { session: Session }) {
         />
       )}
       <div className="delivery-support-panels">
-        <ShareHistory session={session} revision={shareRevision} prefix={prefix} />
+        <ShareHistory session={session} revision={shareRevision} prefix={prefix} changed={() => shareRevoked.current()} />
         {admin && canDelete && <TrashPanel />}
       </div>
       {showDropboxImport && session.capabilities?.dropboxImport?.enabled && (
@@ -4508,13 +4519,11 @@ function DeliveryMutationActions({ item }: { item: any }) {
       {renameUrl && (
         <button
           className="button-ghost button-small"
-          onClick={(event) => {
+          onClick={async (event) => {
             event.stopPropagation();
             const current = displayName(item);
-            const next = window.prompt(
-              `Display name for ${current}\nLeave blank to restore the original name.`,
-              current,
-            );
+            const next = await requestText({ title: `Rename ${current}`, label: "Display name", defaultValue: current,
+              required: false, description: "Leave it blank to restore the original name.", confirmLabel: "Save name" });
             if (next === null || next.trim() === current) return;
             const request = next.trim()
               ? api(renameUrl, {
@@ -4552,14 +4561,10 @@ async function confirmAndDelete(item: any, url: string) {
     });
     const summary = `Permanently delete ${impact.objectCount} object${impact.objectCount === 1 ? "" : "s"} (${bytes(impact.byteCount)})${impact.shareCount ? ` and revoke ${impact.shareCount} active share${impact.shareCount === 1 ? "" : "s"}` : ""}?\n\n${(impact.warnings || []).join("\n")}`;
     if (!window.confirm(summary)) return;
-    const typed = window.prompt(
-      `Type ${impact.typedName} to confirm permanent deletion`,
-    );
-    if (typed !== impact.typedName) {
-      if (typed !== null)
-        window.alert("The name did not match. Nothing was deleted.");
-      return;
-    }
+    const typed = await requestText({ title: "Confirm permanent deletion", label: `Type ${impact.typedName} to confirm`, exact: true,
+      description: "This cannot be undone.", confirmLabel: "Delete permanently",
+      validate: value => value === impact.typedName ? null : "The name does not match. Nothing will be deleted until it does." });
+    if (typed !== impact.typedName) return;
     await api(url, {
       method: "DELETE",
       body: JSON.stringify({ confirmation: typed }),
@@ -6357,9 +6362,9 @@ function OperationsPreviewPlaceholder({ item }: { item: DeliveryItem }) {
     </div>
   );
 }
-function ShareHistory({ session, revision, prefix }: { session: Session; revision: number; prefix?: string }) {
+function ShareHistory({ session, revision, prefix, changed }: { session: Session; revision: number; prefix?: string; changed?: () => void }) {
   if (!allowed(session.user, "delivery.share.audit")) return null;
-  return <RecentDeliveryLinks key={prefix || "all"} prefix={prefix} revision={revision} canRevoke={allowed(session.user, "delivery.share.revoke")} />;
+  return <RecentDeliveryLinks key={prefix || "all"} prefix={prefix} revision={revision} canRevoke={allowed(session.user, "delivery.share.revoke")} onRevoked={changed} />;
 }
 
 const STAFF_CONTROL_LABELS = {

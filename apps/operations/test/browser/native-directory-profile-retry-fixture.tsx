@@ -5,7 +5,8 @@ import { DirectoryRelationshipRecoveryReview } from "../../src/client/DirectoryR
 
 type Scenario = "create-lost-response" | "admission-400" | "write-400" | "record-switch" | "reload-failure" | "relationship-readonly"
   | "recovery-review" | "recovery-absent" | "recovery-malformed" | "recovery-reentry" | "recovery-invalidated"
-  | "recovery-revoked" | "recovery-org-switch" | "recovery-record-switch" | "prepared-update" | "prepared-lost-response";
+  | "recovery-revoked" | "recovery-org-switch" | "recovery-record-switch" | "prepared-update" | "prepared-lost-response"
+  | "profile-denied" | "profile-permission-readonly" | "profile-signed-out" | "profile-lost-then-denied" | "profile-lost-then-signed-out";
 type Call = { path: string; method: string; mutationId: string | null; body: string | null };
 const fixtureWindow = window as Window & { nativeDirectoryScenario?: Scenario; nativeDirectoryCalls?: Call[] };
 const scenario = fixtureWindow.nativeDirectoryScenario ?? "create-lost-response", calls: Call[] = [];
@@ -129,6 +130,8 @@ window.fetch = async (input, init) => {
     if (recordId === "record-one") recordOneReads += 1;
     if (scenario === "reload-failure" && recordId === "record-one" && recordOneReads > 1)
       return new Response(JSON.stringify({ error: "Reload failed" }), { status: 503 });
+    if (scenario === "profile-permission-readonly")
+      return Response.json({ ...snapshot(recordId), editing: { available: false, reason: "profile_permission_required" } });
     return Response.json(snapshot(recordId));
   }
   if (match && method === "PATCH") {
@@ -136,6 +139,12 @@ window.fetch = async (input, init) => {
     const parsed = JSON.parse(body!);
     if (scenario === "record-switch" && profileWriteCalls === 1)
       return new Response(JSON.stringify({ error: "Response lost after commit" }), { status: 503 });
+    if (scenario === "profile-denied" || (scenario === "profile-lost-then-denied" && profileWriteCalls === 2))
+      return new Response(JSON.stringify({ error: "Directory profile edit permission required" }), { status: 403 });
+    if (scenario === "profile-signed-out" || (scenario === "profile-lost-then-signed-out" && profileWriteCalls === 2))
+      return new Response(JSON.stringify({ error: "Sign in required" }), { status: 401 });
+    if ((scenario === "profile-lost-then-denied" || scenario === "profile-lost-then-signed-out") && profileWriteCalls === 1)
+      return new Response(JSON.stringify({ error: "Response lost after possible commit" }), { status: 503 });
     return Response.json({ status: "pending", recordId: match[1], kind: "organization",
       version: parsed.expectedLocalVersion + 1, replayed: false, destinations: [{ sourceId, state: "pending" }] });
   }

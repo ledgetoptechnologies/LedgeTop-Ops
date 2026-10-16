@@ -49,4 +49,19 @@ describe("finance summary panel", () => {
     // Internal identities, hashes and request IDs never reach the screen.
     expect(html).not.toMatch(/project-alpha:|\$0\.00|src-1|app-1|req-1|epoch-1|f{64}/);
   });
+
+  it("explains an upstream authorization refusal as a connection setup issue, not the viewer's access", () => {
+    const summary: AdminFinanceSummary = {
+      asOf: "2026-10-16T12:02:00.000Z", period, complete: false, combined: null,
+      sources: [
+        { sourceId: "project-alpha:primary", label: "x", status: "forbidden", summary: null },
+        { sourceId: "project-alpha:secondary", label: "x", status: "forbidden", summary: null },
+      ],
+    };
+    const html = renderToStaticMarkup(createElement(FinanceSummaryView, { summary }));
+    expect(html).toContain("Connection not authorized");
+    expect(html).toContain("Project Alpha connection isn&#x27;t authorized to share finance totals");
+    expect(html).toContain("grant the connection finance summary access");
+    expect(html).not.toMatch(/You don&#x27;t have|No access/);
+  });
 });

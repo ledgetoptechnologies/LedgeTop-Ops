@@ -133,7 +133,7 @@ test("operations metadata remains the only surface when the independent client b
   await expect(page.getByRole("heading", { name: "Your services" })).toBeVisible();
   await expect(page.getByText("Aerial operations", { exact: true })).toBeVisible();
   await expect(page.getByText("Infrastructure review", { exact: true })).toBeVisible();
-  await expect(page.getByRole("heading", { name: "Client resources unavailable" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Project workspace unavailable" })).toBeVisible();
   await expect(page.getByRole("navigation")).toHaveCount(0);
   await expect(page.getByRole("link", { name: /projects|files|billing/i })).toHaveCount(0);
   await expect(page.getByRole("heading", { name: /projects|files|billing/i })).toHaveCount(0);
@@ -170,7 +170,7 @@ test("native operations home does not label an absent optional Client workspace 
   await page.goto("/portal");
   await expect(page.getByRole("heading", { name: "Your services" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "No services available" })).toBeVisible();
-  await expect(page.getByRole("heading", { name: "Client resources unavailable" })).toHaveCount(0);
+  await expect(page.getByRole("heading", { name: "Project workspace unavailable" })).toHaveCount(0);
   await expect(page.getByRole("region", { name: "Shared deliveries" })).toBeVisible();
   await expect(page.getByRole("navigation")).toHaveCount(0);
   expect(calls.slice(0, 2)).toEqual(["/api/client/v2/operations/home", "/api/client/session"]);
@@ -333,12 +333,12 @@ test("invalid client workspace hint can recover through a fresh operations probe
     id: "authorized-workspace", rootType: "standalone_client", rootPublicId: "client-a", displayName: "Authorized resources",
   }] } }));
   await page.goto("/portal?workspace=not-authorized");
-  await expect(page.getByRole("heading", { name: "Client resources unavailable" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Project workspace unavailable" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Your services" })).toBeVisible();
   await expect(page.getByRole("navigation")).toHaveCount(0);
   await expect(page.getByRole("heading", { name: "Authorized Client" })).toHaveCount(0);
   expect(calls).not.toContain("/api/client/v2/workspaces/not-authorized/context");
-  await page.getByRole("button", { name: "Try available client workspaces" }).click();
+  await page.getByRole("button", { name: "Try my other workspaces" }).click();
   await expect(page).toHaveURL(/\/portal$/);
   await expect(page.getByRole("heading", { name: "Authorized Client" })).toBeVisible();
   await expectAuthorizedNavigation(page);
@@ -363,10 +363,10 @@ test("client recovery stops before client reads when the fresh operations probe 
     return route.fulfill({ status: 404, json: { error: "not found" } });
   });
   await page.goto("/portal?workspace=not-authorized");
-  await expect(page.getByRole("heading", { name: "Client resources unavailable" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Project workspace unavailable" })).toBeVisible();
   expect(calls.filter(path => path === "/api/client/session")).toHaveLength(1);
-  await page.getByRole("button", { name: "Try available client workspaces" }).click();
-  await expect(page.getByRole("heading", { name: "Service home access is not enabled" })).toBeVisible();
+  await page.getByRole("button", { name: "Try my other workspaces" }).click();
+  await expect(page.getByRole("heading", { name: "Service access not set up yet" })).toBeVisible();
   expect(calls.filter(path => path === "/api/client/v2/operations/home")).toHaveLength(2);
   expect(calls.filter(path => path === "/api/client/session")).toHaveLength(1);
 });
@@ -429,7 +429,7 @@ test("PA workspace Home navigation and reload stay independent of denied Operati
   expect(calls).toContain("/api/client/session");
 });
 
-for (const [status, heading] of [[401, "Sign in required"], [403, "Service home access is not enabled"], [503, "Service home unavailable"]] as const) {
+for (const [status, heading] of [[401, "Sign in required"], [403, "Service access not set up yet"], [503, "Client portal unavailable"]] as const) {
   test(`${status} never starts the legacy portal`, async ({ page }) => {
     const calls = await interceptClientApi(page, status, { error: "unavailable" });
     await page.goto("/portal");
@@ -441,7 +441,7 @@ for (const [status, heading] of [[401, "Sign in required"], [403, "Service home 
 test("malformed success never starts the legacy portal", async ({ page }) => {
   const calls = await interceptClientApi(page, 200, { resourceMode: "operations_home", homes: response.homes, extra: true });
   await page.goto("/portal");
-  await expect(page.getByRole("heading", { name: "Service home unavailable" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Client portal unavailable" })).toBeVisible();
   expect(calls).toEqual(["/api/client/v2/operations/home"]);
 });
 
@@ -455,7 +455,7 @@ test("network failure never starts the legacy portal", async ({ page }) => {
       : route.fulfill({ status: 500, json: { error: "unexpected legacy request" } });
   });
   await page.goto("/portal");
-  await expect(page.getByRole("heading", { name: "Service home unavailable" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Client portal unavailable" })).toBeVisible();
   expect(calls).toEqual(["/api/client/v2/operations/home"]);
 });
 
