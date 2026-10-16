@@ -113,7 +113,7 @@ import { NativeWorkspaceContent } from "./NativeWorkspaceContent";
 import { loadNativeViewerModels, type NativePortalBootstrap } from "./native-portal-api";
 import { invitationCapabilitiesLabel, invitationRequestSchema } from "./invitation-request-api";
 import { PortalInvitationRequests } from "./PortalInvitationRequests";
-import { isOptionalClientWorkspaceBootstrapAbsence } from "./portal-bootstrap-classification";
+import { isNoAuthorizedClientWorkspace, isOptionalClientWorkspaceBootstrapAbsence } from "./portal-bootstrap-classification";
 import { PortalAddressBook, PortalAddressBookPicker } from "./PortalAddressBook";
 import type { AddressBookContact } from "./address-book-api";
 
@@ -171,6 +171,14 @@ function blockedPortal(
       optionalClientWorkspaceAbsent,
       title: "Sign in required",
       detail: "Your session has ended. Sign in with the email address Ledge Top invited to continue.",
+    };
+  if (isNoAuthorizedClientWorkspace(caught))
+    return {
+      status: "blocked",
+      optionalClientWorkspaceAbsent,
+      title: "No client workspace yet",
+      detail:
+        "You're signed in, but no client workspace has been shared with this account yet. Contact your Ledge Top representative.",
     };
   if (error.status === 403)
     return {

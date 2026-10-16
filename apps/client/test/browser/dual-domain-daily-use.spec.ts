@@ -108,6 +108,16 @@ for (const invalidation of [
   await expect(page.getByRole("region", { name: "Connected client workspace" })).toHaveCount(0);
 });
 
+test("J7 a verified identity with no authorized workspace sees access setup, not an outage", async ({ page }) => {
+  const state: State = { session: 200, workspaces: [] };
+  const fixture = await installFixture(page, state);
+  await page.goto("/portal/dashboard");
+  await expect(page.getByText("No client workspace yet", { exact: true })).toBeVisible();
+  await expect(page.getByText("Portal temporarily unavailable", { exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Retry portal" })).toBeVisible();
+  expect(fixture.calls.some(call => /\/(context|deliveries|projects)$/.test(call.path))).toBe(false);
+});
+
 test("J7 unauthorized identity and cross-tenant workspace hints fail closed", async ({ page }) => {
   const state: State = { session: 403 };
   const fixture = await installFixture(page, state);
