@@ -339,7 +339,10 @@ test("the deployed Client Worker keeps reviewed resources, hosts, and portal ass
   // Native recipient/data transport flags are explicit and remain disabled;
   // their private production reader binding is present but all HTTP capabilities remain off.
   // Shared profile editing adds only this private Ops entrypoint binding.
-  assert.equal(normalizedSha256("apps/client/wrangler.jsonc"), "be748e594f6c68c10245425d3ba88051257164db13b933430f3f7ec797d11b66");
+  // Branding: the invitation sender name is fixed in code ("Ledge Top Client
+  // Portal"), so the CLIENT_PORTAL_INVITATION_FROM_NAME var is removed.
+  assert.equal(normalizedSha256("apps/client/wrangler.jsonc"), "39a22b9d5eef1bd9065d5ab3f220ec01d8b13104122445a90997370befe1d199");
+  assert.equal("CLIENT_PORTAL_INVITATION_FROM_NAME" in readJson("apps/client/wrangler.jsonc").vars, false);
   const config = readJson("apps/client/wrangler.jsonc");
   assert.deepEqual(config.services.filter(service => service.binding === "SHARED_PROFILE_PORTAL"), [{
     binding: "SHARED_PROFILE_PORTAL", service: "ledgetop-ops", entrypoint: "SharedProfilePortalIngress",

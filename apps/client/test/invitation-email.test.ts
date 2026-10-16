@@ -63,9 +63,9 @@ describe("workspace invitation email delivery", () => {
       CLIENT_PORTAL_INVITATION_FROM: "portal@ledgetopdroneservices.com",
       CLIENT_PORTAL_INVITATION_FROM_NAME: "LTDS Portal",
       CLIENT_PORTAL_ORIGIN: "https://client.example",
-      CLIENT_PORTAL_INVITATION_EMAIL: { send: async message => { sent.push(message as EmailMessageBuilder); return { messageId: `message-${sent.length}` }; } },
+      CLIENT_PORTAL_INVITATION_EMAIL: { send: async (message: unknown) => { sent.push(message as EmailMessageBuilder); return { messageId: `message-${sent.length}` }; } },
       ENVIRONMENT: "development",
-    } as Env;
+    } as unknown as Env;
   }, 30_000);
 
   afterEach(async () => miniflare.dispose());
@@ -187,6 +187,8 @@ describe("workspace invitation email delivery", () => {
     expect(sent).toHaveLength(1);
     const message = sent[0]!;
     expect(message.to).toBe("person@example.test");
+    // The sender name is fixed; a configured CLIENT_PORTAL_INVITATION_FROM_NAME is ignored.
+    expect(message.from).toEqual({ email: "portal@ledgetopdroneservices.com", name: "Ledge Top Client Portal" });
     expect(message.subject).toContain("Acme & Sons");
     expect(message.text).toContain("https://client.example/portal/invitations/accept#token=");
     expect(message.html).toContain("Acme &amp; Sons");

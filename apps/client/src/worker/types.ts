@@ -164,7 +164,6 @@ export interface Env {
   CLIENT_PORTAL_ACCESS_ENROLLMENT_READY?: string;
   CLIENT_PORTAL_INVITATION_EMAIL?: SendEmail;
   CLIENT_PORTAL_INVITATION_FROM?: string;
-  CLIENT_PORTAL_INVITATION_FROM_NAME?: string;
   /**
    * Client-delegated public links remain unavailable until an internal
    * Operations signer service binding is contract-tested. Never bind the
