@@ -2854,3 +2854,37 @@ ul { color: var(--muted); }
 .finance-notes { margin: 0; padding-left: 1.1rem; color: var(--amber); font-size: .8rem; }
 .finance-footnote { margin: 0; color: var(--muted); font-size: .75rem; line-height: 1.45; }
 @media (max-width: 640px) { .finance-sources { grid-template-columns: 1fr; } .finance-figures { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+
+/* ---------------------------------------------------------------------------
+   Readable profile and admin forms
+   Containers that wrap bare <label>Text<input/></label> pairs get the shared
+   field layout (label above control, two columns, one on phones), so create
+   and edit forms read the same everywhere, including PR178's shared editor.
+   --------------------------------------------------------------------------- */
+:is(.client-directory-profile-form, .shared-profile-merge, .shared-profile-review, .form-card) { display: grid; gap: 1rem; min-width: 0; }
+.client-directory-profile-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .9rem 1.1rem; }
+:is(.client-directory-profile-fields, .client-directory-profile-form, .shared-profile-merge, .shared-profile-review, .form-card) > label {
+  display: grid;
+  gap: .35rem;
+  min-width: 0;
+  font-size: .84rem;
+  font-weight: 750;
+}
+:is(.client-directory-profile-fields, .client-directory-profile-form, .shared-profile-merge, .shared-profile-review, .form-card) > label > :is(input, select, textarea) {
+  width: 100%;
+  min-width: 0;
+  font-size: .95rem;
+}
+:is(.client-directory-profile-fields, .client-directory-profile-form, .shared-profile-merge, .shared-profile-review, .form-card) > label > small { color: var(--muted); font-size: .78rem; font-weight: 450; }
+/* Name and street lines span the full width; city/state/postal/country pair up. */
+.client-directory-profile-fields > label:first-child,
+.client-directory-profile-fields > label:has(> input[id$="-addressLine1"]),
+.client-directory-profile-fields > label:has(> input[id$="-addressLine2"]) { grid-column: 1 / -1; }
+:is(.client-directory-profile-form, .shared-profile-merge, .shared-profile-review, .form-card) > button { justify-self: start; }
+.client-directory-profile-form > h3 { margin: .5rem 0 0; font-size: .95rem; }
+.client-directory-profile-form > p { margin: 0; color: var(--muted); }
+.client-directory-profile-form + .client-directory-profile-form { margin-top: 1.25rem; padding-top: 1.25rem; border-top: 1px solid var(--line); }
+@media (max-width: 760px) {
+  .client-directory-profile-fields { grid-template-columns: 1fr; }
+  :is(.client-directory-profile-form, .shared-profile-merge, .shared-profile-review, .form-card) > button { justify-self: stretch; min-height: 44px; }
+}
