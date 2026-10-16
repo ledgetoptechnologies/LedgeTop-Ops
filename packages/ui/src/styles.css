@@ -91,7 +91,7 @@ input, select, textarea {
    --------------------------------------------------------------------------- */
 
 /* Links styled with a variant class but without .button still render as buttons. */
-button, .button, a:where(.button-orange, .button-ghost, .button-danger) {
+button, .button, :is(a, span):where(.button-orange, .button-ghost, .button-danger) {
   border: 0;
   border-radius: var(--radius-sm);
   padding: .65rem 1rem;
@@ -123,7 +123,7 @@ button:active, .button:active { transform: scale(.98); }
 
 /* Keep link-buttons' own colors on hover instead of the generic link hover. */
 a:where(.button, .button-orange, .button-ghost, .button-danger):hover { text-decoration: none; }
-a.button, a.button-orange, a.button-danger,
+:is(a, span).button-orange, :is(a, span).button-danger, a.button,
 a.button:hover, a.button-orange:hover, a.button-danger:hover { color: #fff; }
 a.button-ghost { color: #26313a; }
 a.button-ghost:hover { color: #26313a; }
@@ -288,6 +288,7 @@ input[type=file]::file-selector-button:hover { background: #e2e7eb; }
    --------------------------------------------------------------------------- */
 
 .status-pill {
+  flex: none;
   display: inline-flex;
   align-items: center;
   border-radius: 999px;

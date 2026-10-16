@@ -3289,6 +3289,7 @@ function DeliveryWorkspaceV2({ session }: { session: Session }) {
             <input ref={searchInput} value={searchQuery} onChange={(event) => setSearchQuery(event.target.value)} placeholder="Search" aria-label="Search" />
             {searchQuery && <button type="button" className="delivery-search-clear" aria-label="Clear search" onClick={() => setSearchQuery("")}>×</button>}
           </label>
+          <div className="delivery-toolbar-group">
           <button
             className="button-orange"
             disabled={!canCreate}
@@ -3300,13 +3301,6 @@ function DeliveryWorkspaceV2({ session }: { session: Session }) {
           >
             New folder
           </button>
-          {!canUpload && allowed(session.user, "delivery.files.upload") && (
-            <span className="managed-badge">
-              {!admin
-                ? "Direct browser uploads require administrator access."
-                : "Direct browser uploads are disabled. Use an Incoming request link."}
-            </span>
-          )}
           <button
             className="button-ghost"
             disabled={!canUpload || uploading}
@@ -3351,6 +3345,13 @@ function DeliveryWorkspaceV2({ session }: { session: Session }) {
               event.currentTarget.value = "";
             }}
           />
+          </div>
+          <div className="delivery-toolbar-group delivery-toolbar-view">
+          {thumbnailQueue && (
+            <span className="thumbnail-queue-indicator" title={`${thumbnailQueue.pending} pending, ${thumbnailQueue.processing} processing`} aria-label={`Thumbnail queue: ${thumbnailQueue.total} outstanding`}>
+              Thumbnails: {thumbnailQueue.total}
+            </span>
+          )}
           <button
             className={selectionMode ? "active" : "button-ghost"}
             onClick={() => {
@@ -3363,24 +3364,31 @@ function DeliveryWorkspaceV2({ session }: { session: Session }) {
           <button className="button-ghost" onClick={() => void refresh()}>
             Refresh
           </button>
+          <div className="ltds-segmented delivery-view-toggle" role="group" aria-label="File layout">
           <button
             className={view === "grid" ? "active" : "button-ghost"}
+            aria-pressed={view === "grid"}
             onClick={() => setView("grid")}
           >
             Grid
           </button>
           <button
             className={view === "list" ? "active" : "button-ghost"}
+            aria-pressed={view === "list"}
             onClick={() => setView("list")}
           >
             List
           </button>
-          {thumbnailQueue && (
-            <span className="thumbnail-queue-indicator" title={`${thumbnailQueue.pending} pending, ${thumbnailQueue.processing} processing`} aria-label={`Thumbnail queue: ${thumbnailQueue.total} outstanding`}>
-              Thumbnails: {thumbnailQueue.total}
-            </span>
-          )}
+          </div>
+          </div>
         </div>
+        {!canUpload && allowed(session.user, "delivery.files.upload") && (
+          <p className="delivery-toolbar-note">
+            {!admin
+              ? "Direct browser uploads require administrator access."
+              : "Direct browser uploads are disabled. Use an Incoming request link."}
+          </p>
+        )}
         <div className="delivery-folder-bar">
           <nav className="delivery-crumbs" aria-label="Current delivery folder">
             {session.capabilities?.deliveryJobsRoot?.enabled ? (
@@ -3852,8 +3860,9 @@ function ViewerDataOverview({session}:{session:Session}) {
   if (!data?.enabled || !data.overview) return <Card><EmptyState title="3D Viewer overview is off" detail="The Viewer integration remains unavailable until its reviewed runtime flags are enabled." /></Card>;
   const value = data.overview;
   return <div className="viewer-overview">
-    <ErrorLine error={actionError} />
-    {popupBlocked && <button type="button" className="button-ghost" disabled={opening} onClick={() => void openWorkspace(true)}>Open Viewer in this tab</button>}
+    {popupBlocked
+      ? <div className="notice warning viewer-popup-fallback" role="alert"><span>{actionError}</span><button type="button" className="button-orange button-small" disabled={opening} onClick={() => void openWorkspace(true)}>Open Viewer in this tab</button></div>
+      : <ErrorLine error={actionError} />}
     <div className="viewer-overview-actions">
       <div><h2>3D models</h2><p>Project management, imports, processing, review, sharing, and model interaction open on the dedicated Viewer domain.</p></div>
       <button type="button" className="button-orange" disabled={opening} onClick={() => void openWorkspace()}>{opening ? "Opening…" : "Open Viewer workspace"}</button>
