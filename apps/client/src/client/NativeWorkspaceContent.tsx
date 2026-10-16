@@ -145,7 +145,7 @@ export function NativeWorkspaceContent({ context, page, projectId, feedbackId, o
     : page === "project" && params.get("tab") === "models" ? "models" : "serviceRequests";
 
   return <section className="native-workspace" aria-label="Connected client workspace">
-    <header className="portal-welcome"><span className="eyebrow">Connected workspace</span><h1>{context.workspace.displayName}</h1><p className="native-workspace-source">Source: {context.workspace.sourceId}</p></header>
+    <header className="portal-welcome"><span className="eyebrow">Connected workspace</span><h1>{context.workspace.displayName}</h1></header>
     {unsupportedRoute ? <><Card title="Feature unavailable"><p>{featureDetail(unavailableFeature, context.features)}</p></Card><FeatureReadiness features={context.features} /></> :
       ((page === "requests" || page === "request-new") || (page === "project" && projectTab === "requests")) && context.capabilities.requestV2 && renderRequests
         ? renderRequests(requestProjects, page === "project" ? projectId ?? undefined : undefined)
