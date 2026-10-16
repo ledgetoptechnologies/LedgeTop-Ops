@@ -874,8 +874,12 @@ async function profile(c: AppContext, kind: NativeDirectoryProfileKind) {
     ORDER BY business_area_id,coalesce(division_id,'')`).bind(record).all<{ businessAreaId: string; divisionId: string | null }>()).results;
   const currentScopes = scopes.safeParse(scopeRows);
   if (!currentScopes.success) throw new HTTPException(409, { message: "Directory profile is unavailable" });
+  const profileAuthorized = !!await selectGrant(c.env.OPS_DB, actor.staffId, "directory.profile.edit", record, [], false)
+    && (kind === "organization" || !!await selectGrant(c.env.OPS_DB, actor.staffId, "directory.identity.link", record, [], false));
   if (kind === "organization") return c.json({ recordId: record, kind, version: current.version,
-    profile: normalizeProfile(current.profile), scopes: currentScopes.data, editing: { available: true, reason: null } });
+    profile: normalizeProfile(current.profile), scopes: currentScopes.data,
+    editing: profileAuthorized ? { available: true, reason: null }
+      : { available: false, reason: "profile_permission_required" } });
   const relationship = await currentClientRelationship(c.env.OPS_DB, record), sourceIds = await enrollmentSourceIds(c.env, record);
   const representable = relationship && sourceIds ? (await nativeDirectoryOrganizationChoices(c.env))
     .filter(choice => sameSources(choice, sourceIds)) : [];
@@ -887,10 +891,7 @@ async function profile(c: AppContext, kind: NativeDirectoryProfileKind) {
   const recovery = relationship && sourceIds ? await relationshipRecoveryCapability(c, record,
     relationship.relationship_version, sourceIds, settled) : null;
   const available = !!relationship && !!sourceIds && settled && (relationship.organization_record_id === null || !!selected);
-  const relationshipAuthorized = !!relationship && await Promise.all(
-    (["directory.profile.edit", "directory.identity.link"] as const)
-      .map(permission => selectGrant(c.env.OPS_DB, actor.staffId, permission, record, [], false)))
-    .then(grants => grants.every(Boolean));
+  const relationshipAuthorized = !!relationship && profileAuthorized;
   return c.json({ recordId: record, kind, version: current.version, profile: normalizeProfile(current.profile),
     scopes: currentScopes.data, linkage: relationship?.organization_record_id ? "linked" : relationship ? "standalone" : "unavailable",
     relationship: relationship ? { version: relationship.relationship_version,
@@ -900,8 +901,9 @@ async function profile(c: AppContext, kind: NativeDirectoryProfileKind) {
       editing: available && relationshipAuthorized ? { available: true, reason: null }
         : { available: false, reason: !relationshipAuthorized ? "relationship_permission_required"
           : relationship && !settled ? "relationship_delivery_pending" : "relationship_state_unavailable" } } : null,
-    editing: available ? { available: true, reason: null } : { available: false,
-      reason: relationship && !settled ? "relationship_delivery_pending" : "relationship_state_unavailable" } });
+    editing: available && profileAuthorized ? { available: true, reason: null } : { available: false,
+      reason: !profileAuthorized ? "profile_permission_required"
+        : relationship && !settled ? "relationship_delivery_pending" : "relationship_state_unavailable" } });
 }
 
 async function recoverCreateGeneration(c: AppContext) {
