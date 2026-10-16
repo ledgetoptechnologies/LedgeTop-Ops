@@ -1,5 +1,6 @@
 import type {Hono} from 'hono';
 import {HTTPException} from 'hono/http-exception';
+import {projectAlphaSourceName} from '@ltds/shared';
 import type {AdminFinanceSummary,FinancePeriod,FinanceSourceSummary} from '../../../../packages/shared/src/admin-finance-summary';
 import type {Env,StaffPrincipal} from './types';
 import {readFinanceSummaryAuthority,financeSummaryAuthorityStillCurrent} from './admin-finance-summary-authority';
@@ -28,7 +29,7 @@ export function registerAdminFinanceSummaryRoutes(app:Hono<{Bindings:Env;Variabl
     if(sourceIds.length>4)throw new HTTPException(503,{message:'Financial source count requires a reviewed aggregation budget'});
     const period=currentFinancePeriod(c.env.DISPLAY_TIMEZONE||'America/Chicago');
     const sources:FinanceSourceSummary[]=await Promise.all(sourceIds.map(async sourceId=>({sourceId,
-      label:sourceId==='project-alpha:primary'?'Ledge Top Drone Services':sourceId==='project-alpha:secondary'?'Ledge Top Technologies':'Project Alpha ('+sourceId.slice('project-alpha:'.length)+')',
+      label:projectAlphaSourceName(sourceId),
       ...await readConfiguredCompanyFinanceSummary({PROJECT_ALPHA_API_V2_CONNECTIONS:connectionSnapshot},sourceId,period,send)})));
     if(connectionSnapshot!==c.env.PROJECT_ALPHA_API_V2_CONNECTIONS
       ||!await financeSummaryAuthorityStillCurrent(c.env.OPS_DB,authority,principal))

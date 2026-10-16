@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
-import { Card } from "@ltds/ui";
+import { Card, Skeleton } from "@ltds/ui";
 import { api, ApiError } from "./api";
 import { projectAdoptionReviewFailureMessage } from "./project-adoption-review-message";
 import { DirectoryExistingRecordAdoptionPanel } from "./DirectoryExistingRecordAdoptionPanel";
@@ -813,7 +813,7 @@ function ProjectAdoptionPanel({ disabled }: { disabled: boolean }) {
     </select>
     <button type="button" className="button-ghost button-small" disabled={busy || disabled || frozen || sourcesLoading || Boolean(sourceError) || !sourceReady}
       onClick={() => void discover()}>{busy ? "Checking…" : "Find authorized unbound Projects"}</button>
-    {sourcesLoading && <p role="status">Loading enabled API-v2 Project sources…</p>}
+    {sourcesLoading && <Skeleton variant="list" rows={3} label="Loading enabled API-v2 Project sources…" />}
     {!sourcesLoading && !sourceError && sources.length === 0 && <p role="status">No enabled API-v2 sources are available for Project adoption.</p>}
     {sourceError && <p role="alert" className="notice">{sourceError}</p>}
     {nextCursor && <button type="button" className="button-ghost button-small" disabled={busy || disabled || frozen}
@@ -910,7 +910,7 @@ export function ProjectAlphaConnections() {
   const legacy: Connector = { sourceId: PRIMARY, displayName: "Primary connection", producerBindingId: "legacy", snapshotOrigin: "", snapshotBasePath: "", applicationKey: "", profile: "primary_legacy", state: "active", readVisible: true, activeRevision: 0, version: 0 };
   return <Card title="Project Alpha connections"><div className="alpha-connections">
     <p>Connection identities, destinations, and credentials are managed as deployment configuration. Operations can show status and request a sync, but cannot register, alter, or retire a source from the browser.</p>
-    {error && <p role="alert" className="notice">{error}</p>}{message && <p role="status" className="notice">{message}</p>}{!data && !error && <p role="status">Loading connections…</p>}
+    {error && <p role="alert" className="notice">{error}</p>}{message && <p role="status" className="notice">{message}</p>}{!data && !error && <Skeleton variant="list" rows={3} label="Loading connections…" />}
     <button type="button" className="button-ghost button-small" disabled={loading || Boolean(syncing)} onClick={refresh}>Refresh connection status</button>
     {data?.legacyPrimary && <section className="alpha-connection" aria-label="Primary connection"><h3>Primary connection</h3><p><strong>Business record sync</strong> · Using the original deployment configuration. Add it to the deployment source manifest to migrate it to the same exact-source registry as additional Project Alpha instances.</p><SyncHealth health={data.health.find(row => row.sourceId === PRIMARY)} /><button type="button" disabled={loading || Boolean(syncing)} onClick={() => void sync(legacy)}>{syncing === PRIMARY ? "Synchronizing…" : "Sync primary now"}</button></section>}
     {data?.connectors.map(connector => {

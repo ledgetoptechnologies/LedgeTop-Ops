@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { Card, EmptyState, Loading, StatusPill } from "@ltds/ui";
+import { Card, EmptyState, Loading, StatusPill, Skeleton } from "@ltds/ui";
 import type { Permission } from "@ltds/shared";
 import { api, ApiError } from "./api";
 import { ClientRequestWorkflow } from "./ClientRequestWorkflow";
@@ -317,7 +317,7 @@ function ProjectManagementRouting({ client, contextVersion, contextSignal, onInv
     finally { setState(value => ({ ...value, syncBusy: false })); }
   };
   return <section className="client-project-management" aria-label="Project creation" aria-busy={state.busy || state.syncBusy}>
-    {state.busy && <p role="status">Loading Project Alpha project creation…</p>}
+    {state.busy && <Skeleton variant="list" rows={3} label="Loading Project Alpha project creation…" />}
     {state.error && <div role="alert"><p>{state.error}</p><button type="button" className="button-ghost" onClick={() => void load(endpoint)}>Retry project creation status</button></div>}
     {result && <>
       <div className="client-project-management-summary"><div><strong>Project creation</strong><p>{result.availability.explanation}</p></div>
@@ -519,7 +519,7 @@ function BusinessProjects({ initial, page, client, contextVersion, contextSignal
     {page?.available !== false && <label className="client-hub-business-filter">Project status<select value={filter} onChange={event => selectFilter(event.target.value)}>
       <option value="all">All projects</option><option value="current">Current projects</option><option value="completed">Completed</option><option value="cancelled">Cancelled</option>
     </select></label>}
-    {state.busy || (page?.available !== false && state.filter !== filter) ? <p role="status">Loading business projects…</p> : state.error ? <div role="alert"><p>{state.error}</p><button className="button-ghost" type="button" onClick={() => void load(filter)}>Retry business projects</button></div>
+    {state.busy || (page?.available !== false && state.filter !== filter) ? <Skeleton variant="list" rows={3} label="Loading business projects…" /> : state.error ? <div role="alert"><p>{state.error}</p><button className="button-ghost" type="button" onClick={() => void load(filter)}>Retry business projects</button></div>
       : <ClientCollection key={`${state.filter}:${state.revision}`} collection="businessProjects" label="Business projects" initial={state.items} page={state.page}
         client={client} contextVersion={contextVersion} contextSignal={contextSignal} onInvalidated={onInvalidated} requestParams={{ filter }}
         emptyTitle="No matching business projects" emptyDetail="Try another status. Shared work and portal access are listed separately.">

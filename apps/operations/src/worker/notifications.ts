@@ -412,7 +412,7 @@ export async function processDeliveryNotifications(env: Env): Promise<number> {
           throw new HTTPException(409,{message:"Delivery recipient is no longer eligible"});
       }
       const rendered = renderNotification(row.kind, await materializeNotificationPayload(env, row));
-      await sendNotificationMail(env, { to: row.recipient_email, fromName: "LTDS Client Delivery", subject: rendered.subject, text: rendered.text, html: rendered.html, messageIdKey: row.id });
+      await sendNotificationMail(env, { to: row.recipient_email, fromName: "Ledge Top Client Delivery", subject: rendered.subject, text: rendered.text, html: rendered.html, messageIdKey: row.id });
       const sent=await env.DELIVERY_DB.prepare("UPDATE delivery_notifications SET status='sent',sent_at=datetime('now'),lease_until=NULL,updated_at=datetime('now') WHERE id=? AND status='sending'").bind(row.id).run();
       if(sent.meta.changes===1){
         await auditNotification(env, "notification.sent", row, { attempt });
@@ -606,10 +606,10 @@ export async function processProjectAlphaDeliveryPortalNotifications(env:Env):Pr
         AND ${bindingGuard.sql} AND ${principalGuard.sql}`)
         .bind(row.id,claimedAttempt,row.grant_version,...bindingGuard.bindings,...principalGuard.bindings).run();
       if(publication.meta.changes!==1)throw new HTTPException(409,{message:"Delivery publication authority changed"});
-      await sendNotificationMail(env,{to:recipientEmail,fromName:"LTDS Client Delivery",
+      await sendNotificationMail(env,{to:recipientEmail,fromName:"Ledge Top Client Delivery",
         subject:granted?"Delivery available in your portal":"Portal delivery access revoked",
-        text:granted?`A delivery is available in your LTDS portal.\n\nOpen the portal: ${url}`:"Access to a delivery in your LTDS portal was revoked.",
-        html:granted?`<p>A delivery is available in your LTDS portal.</p><p><a href="${escapeHtml(url)}">Open the portal</a></p>`:"<p>Access to a delivery in your LTDS portal was revoked.</p>",messageIdKey:row.id});
+        text:granted?`A delivery is available in your Ledge Top portal.\n\nOpen the portal: ${url}`:"Access to a delivery in your Ledge Top portal was revoked.",
+        html:granted?`<p>A delivery is available in your Ledge Top portal.</p><p><a href="${escapeHtml(url)}">Open the portal</a></p>`:"<p>Access to a delivery in your Ledge Top portal was revoked.</p>",messageIdKey:row.id});
       await env.DELIVERY_DB.prepare(`UPDATE project_alpha_delivery_portal_notification_outbox SET status='sent',delivered_at=datetime('now'),lease_expires_at=NULL,updated_at=datetime('now')
         WHERE id=? AND status='processing' AND attempt_count=? AND datetime(lease_expires_at)>datetime('now')`).bind(row.id,claimedAttempt).run();
     }catch(error){if(error instanceof HTTPException){await env.DELIVERY_DB.prepare(`UPDATE project_alpha_delivery_portal_notification_outbox SET status='suppressed',lease_expires_at=NULL,last_error='recipient-no-longer-eligible',updated_at=datetime('now')
@@ -873,7 +873,7 @@ export async function processClientPortalRequestNotifications(env: Env): Promise
             (workArea && snapshot.changeSummary ? snapshot.changeSummary : lifecyclePresentation[snapshot.lifecycle].introduction).slice(0, 500),
             "/portal/requests").run();
       }
-      if(!native) await sendNotificationMail(env, { to: recipient, fromName: "LTDS Client Portal", subject: rendered.subject, text: rendered.text, html: rendered.html, messageIdKey: row.id });
+      if(!native) await sendNotificationMail(env, { to: recipient, fromName: "Ledge Top Client Portal", subject: rendered.subject, text: rendered.text, html: rendered.html, messageIdKey: row.id });
       const sent = await env.DELIVERY_DB.prepare("UPDATE client_portal_notification_outbox SET status='sent',delivered_at=datetime('now'),lease_expires_at=NULL,updated_at=datetime('now') WHERE id=? AND status='processing' AND attempt_count=? AND datetime(lease_expires_at)>datetime('now')").bind(row.id, attempt).run();
       if (sent.meta.changes) await auditClientRequestNotification(env, "client_request_notification.sent", row, { attempt });
     } catch (error) {

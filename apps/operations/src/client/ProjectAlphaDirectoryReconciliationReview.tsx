@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Card } from "@ltds/ui";
+import { Card, Skeleton } from "@ltds/ui";
 import { api, ApiError } from "./api";
 
 const ROOT = "/api/admin/project-alpha/private/directory/reconciliation";
@@ -161,7 +161,7 @@ function RecordSelection({ finding, onAcquired }: { finding: Finding; onAcquired
         {submitting ? "Checking and acquiring…" : "Acquire as inactive mapping"}
       </button>
     </div>
-    {loading && records.length === 0 && <p role="status">Loading matching record IDs…</p>}
+    {loading && records.length === 0 && <Skeleton variant="list" rows={3} label="Loading matching record IDs…" />}
     {!loading && records.length === 0 && !error && <p>No authorized records with valid display context are available on this page.{nextCursor ? " Load the next exact-ID page to continue." : ""}</p>}
     {error && <p className="notice" role="alert">{error}</p>}
     {message && <p className="notice" role="status">{message}</p>}
@@ -209,7 +209,7 @@ export function ProjectAlphaDirectoryReconciliationReview() {
     <div className="reconciliation-review">
       <p>Review stable findings from the latest complete configured source snapshots. Acquiring an exact existing Operations record creates only an inactive mapping; activation remains a separate workflow.</p>
       {error && <p className="notice" role="alert">{error}</p>}
-      {loading && items.length === 0 && <p role="status">Loading reconciliation findings…</p>}
+      {loading && items.length === 0 && <Skeleton variant="list" rows={3} label="Loading reconciliation findings…" />}
       {!loading && !error && items.length === 0 && <p>No findings are present in the current complete snapshots.</p>}
       <div className="reconciliation-findings">
         {items.map(finding => {

@@ -362,8 +362,8 @@ function renderClientFolderGrant(accountName: string, actionUrl: string) {
   const escape = (value: string) => value.replace(/[&<>"']/g, character => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[character]!);
   return {
     subject: `New files shared with ${accountName}`,
-    text: `New files are available in your authenticated LTDS client workspace.\n\nOpen client deliveries: ${actionUrl}`,
-    html: `<p>New files are available in your authenticated LTDS client workspace.</p><p><a href="${escape(actionUrl)}">Open client deliveries</a></p>`,
+    text: `New files are available in your authenticated Ledge Top client workspace.\n\nOpen client deliveries: ${actionUrl}`,
+    html: `<p>New files are available in your authenticated Ledge Top client workspace.</p><p><a href="${escape(actionUrl)}">Open client deliveries</a></p>`,
   };
 }
 
@@ -432,7 +432,7 @@ export async function processClientFolderGrantNotifications(env: Env): Promise<n
     try {
       const actionUrl = new URL("/portal/deliveries", env.DELIVERY_BASE_URL).toString();
       const rendered = renderClientFolderGrant(context.account_name, actionUrl);
-      await sendNotificationMail(env, { to: context.recipient_email, fromName: "LTDS Client Portal", subject: rendered.subject, text: rendered.text, html: rendered.html, messageIdKey: row.id });
+      await sendNotificationMail(env, { to: context.recipient_email, fromName: "Ledge Top Client Portal", subject: rendered.subject, text: rendered.text, html: rendered.html, messageIdKey: row.id });
       await env.DELIVERY_DB.batch([
         env.DELIVERY_DB.prepare("UPDATE client_folder_grant_notifications SET status='sent',delivered_at=datetime('now'),lease_expires_at=NULL,updated_at=datetime('now') WHERE id=? AND status='processing'").bind(row.id),
         env.DELIVERY_DB.prepare("INSERT INTO audit_log(actor_type,actor_id,action,entity_type,entity_id,details_json) VALUES('system','client-folder-notifications','client.folder.notification.sent','client_folder_grant',?,?)")
@@ -553,7 +553,7 @@ export async function processClientFolderChangeNotifications(env: Env): Promise<
         (id,account_id,recipient_identity_id,event_type,source_type,source_id,dedupe_key,title,body,action_path)
         VALUES (?,?,?,?,?,?,?,?,?,?)`).bind(crypto.randomUUID(), row.account_id, row.recipient_identity_id,
           wanted === "added" ? "files_added" : "files_removed", "folder_grant", row.logical_grant_id, `folder-change:${row.id}`, title, body, actionPath).run();
-      await sendNotificationMail(env, { to: context.recipient_email, fromName: "LTDS Client Portal", ...rendered, messageIdKey: row.id });
+      await sendNotificationMail(env, { to: context.recipient_email, fromName: "Ledge Top Client Portal", ...rendered, messageIdKey: row.id });
       await env.DELIVERY_DB.batch([
         env.DELIVERY_DB.prepare("UPDATE client_folder_change_notifications SET status='sent',delivered_at=datetime('now'),lease_expires_at=NULL,updated_at=datetime('now') WHERE id=? AND status='processing'").bind(row.id),
       ]);

@@ -1,3 +1,4 @@
+import { Skeleton } from "@ltds/ui";
 import { useEffect, useRef, useState } from "react";
 import { loadPortalRequestReadiness, type PortalProject, type PortalRequestReadiness, type PortalRequestReadinessReason } from "./portal-api";
 
@@ -38,7 +39,7 @@ export function requestUnavailableReason(reason?: PortalRequestReadinessReason):
   return "New requests are temporarily unavailable. Your existing requests and saved drafts are unchanged.";
 }
 export function RequestAvailabilityMessage({ availability }: { availability: RequestAvailability }) {
-  if (availability.state === "loading") return <p role="status">Checking request availability…</p>;
+  if (availability.state === "loading") return <Skeleton variant="text" lines={2} label="Checking request availability…" />;
   if (availability.state === "error") return <div className="portal-inline-error" role="alert"><p>Request availability could not be verified. No new request was started.</p><button type="button" className="button-ghost" onClick={availability.retry}>Retry request availability</button></div>;
   return <div className="portal-inline-error" role="status"><p>{requestUnavailableReason(availability.data?.reason)}</p><button type="button" className="button-ghost" onClick={availability.retry}>Check availability again</button></div>;
 }

@@ -18,6 +18,12 @@ test.beforeEach(async ({ page }) => {
   });
 });
 
+test.afterEach(async ({ page }) => {
+  // Finish document/asset route.fetch -> fulfill handlers before Playwright
+  // disposes their API responses with the test's browser context.
+  await page.unrouteAll({ behavior: "wait" });
+});
+
 test("native consent uses only the native API and exact target revision, remaining pending review", async ({ page }) => {
   const calls: Array<{ path: string; body: Record<string, unknown> | null; headers: Record<string, string>; url: string }> = [];
   let legacyCalls = 0;

@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useId, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent } from "react";
 import { createPortal } from "react-dom";
-import { BRAND, type DeliveryLocationCollection, type Permission, type SessionUser, type ViewerAdminSessionGrant, type ViewerModelSummary, type ViewerPlatformOverview, type ViewerPublicShareSummary } from "@ltds/shared";
-import { AccountMenu, Brand, Card, EmptyState, Loading, StatusPill, openViewerShell } from "@ltds/ui";
+import { type DeliveryLocationCollection, type Permission, type SessionUser, type ViewerAdminSessionGrant, type ViewerModelSummary, type ViewerPlatformOverview, type ViewerPublicShareSummary } from "@ltds/shared";
+import { AccountMenu, Brand, Card, EmptyState, Loading, LtMark, Skeleton, StatusPill, openViewerShell } from "@ltds/ui";
+import { FinanceSummaryPanel } from "./FinanceSummaryPanel";
 import { ApiError, api, setCsrf } from "./api";
 import { operationsViewerShellPath } from "./OperationsViewerShell";
 import { generateSecureAccessCode } from "./access-code";
@@ -90,6 +91,7 @@ interface Session {
     portalIdentityDenials?: { enabled: boolean };
     authenticatedDeliveryGrants?: AuthenticatedDeliveryCapability;
     clientFeedback?: { enabled: boolean };
+    financeSummary?: { enabled: boolean };
     nativeDirectoryProfileWrites?: { enabled: boolean };
     nativeDirectorySharedProfiles?: { enabled: boolean };
     reviewedImportEnrollment?: { enabled: boolean };
@@ -435,8 +437,8 @@ export function OperationsApp() {
         </div>
       </div>}
       <main className="ops-main">
-        <PageHeading page={page} />
-        {page === "dashboard" && <Dashboard {...props} />}{" "}
+        <PageHeading page={page} displayName={session.user.displayName} />
+        {page === "dashboard" && <Dashboard {...props} onNavigate={navigate} />}{" "}
         {page === "operations" && <OperationsHub {...props} />}{" "}
         {page === "clients" && (allowed(session.user, "team.view") || allowed(session.user, "operations.manage") || session.capabilities?.clientFeedback?.enabled === true || invitationReview) && (
           <ClientHubSurface session={session} />
@@ -461,7 +463,11 @@ export function OperationsApp() {
   );
 }
 
-function PageHeading({ page }: { page: Page }) {
+function greeting(displayName: string, now = new Date()): string {
+  const first = displayName.trim().split(/\s+/)[0] || "there", hour = now.getHours();
+  return `${hour < 12 ? "Good morning" : hour < 17 ? "Good afternoon" : "Good evening"}, ${first}`;
+}
+function PageHeading({ page, displayName }: { page: Page; displayName: string }) {
   const copy: Record<Page, [string, string]> = {
     dashboard: [
       "Operations dashboard",
@@ -502,9 +508,11 @@ function PageHeading({ page }: { page: Page }) {
   };
   return (
     <div className="page-heading">
-      <span className="eyebrow">Ledge Top Operations</span>
+      <span className="eyebrow">{page === "dashboard"
+        ? new Date().toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric" })
+        : "Ledge Top Operations"}</span>
       <h1>{copy[page][0]}</h1>
-      <p>{copy[page][1]}</p>
+      <p>{page === "dashboard" ? `${greeting(displayName)}. Here's what needs attention today.` : copy[page][1]}</p>
     </div>
   );
 }
@@ -605,7 +613,7 @@ function ManagedNotice({
   );
 }
 
-function Dashboard({ session }: { session: Session }) {
+function Dashboard({ session, onNavigate }: { session: Session; onNavigate: (page: Page, href?: string) => void }) {
   const { data, error } = useLoad(() => api<any>("/api/dashboard"), []);
   const pending = useLoad(
     () =>
@@ -614,7 +622,10 @@ function Dashboard({ session }: { session: Session }) {
         : Promise.resolve({ count: 0 }),
     [],
   );
-  if (!data && !error) return <Loading />;
+  if (!data && !error) return <div className="dashboard">
+    <Skeleton variant="stats" columns={4} label="Loading dashboard…" />
+    <div className="dashboard-grid"><Skeleton variant="card" /><Skeleton variant="card" /></div>
+  </div>;
   const integrations = data?.integrations || [];
   const connections = data?.connections || [];
   const projectAlpha = integrations.find(
@@ -630,44 +641,35 @@ function Dashboard({ session }: { session: Session }) {
   );
   const activeTfrs = data?.airspace?.activeTfrs ?? 0;
   const scheduledTfrs = data?.airspace?.scheduledTfrs ?? 0;
+  const canManage = allowed(session.user, "operations.manage"), pendingCount = pending.data?.count ?? 0;
+  const financeEnabled = session.capabilities?.financeSummary?.enabled === true;
+  const go = (target: Page, href: string) => (event: ReactMouseEvent<HTMLAnchorElement>) => {
+    if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+    event.preventDefault(); onNavigate(target, href);
+  };
+  const attention = [
+    canManage && pendingCount > 0 && <a key="requests" className="dashboard-alert accent" href="/clients" onClick={go("clients", "/clients")}>
+      <strong>{pendingCount} service request{pendingCount === 1 ? "" : "s"}</strong><span>waiting for staff review</span><span aria-hidden="true">→</span></a>,
+    stale && <div key="stale" className="dashboard-alert warning" role="status">
+      <strong>Project Alpha data may be out of date.</strong><span>Cached information stays available read-only while synchronization recovers.</span></div>,
+    activeTfrs > 0 && <a key="tfr" className="dashboard-alert danger" href="/airspace" onClick={go("airspace", "/airspace")}>
+      <strong>{activeTfrs} active TFR{activeTfrs === 1 ? "" : "s"}</strong><span>check airspace before flying</span><span aria-hidden="true">→</span></a>,
+  ].filter(Boolean);
+  const tile = (value: number, label: string, target: Page, href: string) =>
+    <a className="dashboard-stat" href={href} onClick={go(target, href)}><strong>{value}</strong><span>{label}</span></a>;
   return (
-    <>
+    <div className="dashboard">
       <ErrorLine error={error} />
-      {stale && (
-        <div className="notice stale-notice">
-          <strong>Project Alpha data may be out of date.</strong>
-          <span>
-            Cached information remains available in read-only mode while
-            synchronization recovers.
-          </span>
-        </div>
-      )}
-      {allowed(session.user, "operations.manage") && (
-        <a className="pending-request-card ltds-card" href="/clients">
-          <span>Client service requests</span>
-          <strong>{pending.data?.count ?? "—"}</strong>
-          <p>Awaiting staff review</p>
-          <span className="button-orange button-small">Open review queue</span>
-        </a>
-      )}
-      <div className="stats">
-        <Card>
-          <strong>{data?.operations.length || 0}</strong>
-          <span>Open operations</span>
-        </Card>
-        <Card>
-          <strong>{data?.tasks.length || 0}</strong>
-          <span>Open tasks</span>
-        </Card>
-        <Card>
-          <strong>{activeTfrs}</strong>
-          <span>Active TFRs</span>
-        </Card>
-        <Card>
-          <strong>{scheduledTfrs}</strong>
-          <span>Scheduled TFRs</span>
-        </Card>
+      <section className="dashboard-attention" aria-label="Needs attention">
+        {attention.length ? attention : <div className="dashboard-alert ok" role="status"><strong>All clear.</strong><span>Nothing needs your attention right now.</span></div>}
+      </section>
+      <div className="dashboard-stats">
+        {tile(data?.operations.length || 0, "Open operations", "operations", "/operations")}
+        {tile(data?.tasks.length || 0, "Open tasks", "operations", "/operations")}
+        {tile(activeTfrs, "Active TFRs", "airspace", "/airspace")}
+        {tile(scheduledTfrs, "Scheduled TFRs", "airspace", "/airspace")}
       </div>
+      <FinanceSummaryPanel enabled={financeEnabled} />
       <div className="dashboard-grid">
         <Card title="Upcoming operations">
           {data?.operations.length ? (
@@ -752,7 +754,7 @@ function Dashboard({ session }: { session: Session }) {
           </Card>
         )}
       </div>
-    </>
+    </div>
   );
 }
 function SimpleRows({
@@ -3782,7 +3784,7 @@ function ViewerDataOverview({session}:{session:Session}) {
     }
     if (popup) {
       setPopupBlocked(false);
-      popup.document.title = "Opening LTDS Viewer";
+      popup.document.title = "Opening Ledge Top Viewer";
       popup.document.body.textContent = "Opening the secure LTDS Viewer workspace…";
     }
     setOpening(true); setActionError("");
@@ -6257,7 +6259,7 @@ function OperationsPreviewPlaceholder({ item }: { item: DeliveryItem }) {
   const isRaw = rawExts.has(ext);
   return (
     <div className="ops-preview-empty">
-      <img src={BRAND.logoUrl} alt={BRAND.shortName} />
+      <LtMark />
       <strong>{isRaw ? "This file type cannot be viewed in the browser" : "This file could not be displayed"}</strong>
       <p>
         {isRaw

@@ -1,3 +1,4 @@
+import { Skeleton } from "@ltds/ui";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { PortalServiceCatalogItem } from "./portal-api";
 import "./ServiceLibrary.css";
@@ -67,7 +68,7 @@ export function ServiceLibrary({ catalog, selected, state, complete, legacy, has
       <header><h4 ref={resultsHeading} tabIndex={-1}>{browsingCategories ? "Choose a category" : browse.q ? `Results for “${browse.q}”` : categoryLabel(browse.category || "")}</h4>
         {!browsingCategories && <button type="button" className="button-ghost" onClick={() => navigate({ category: null, q: "" })}>All categories</button>}
         <button type="button" className="button-ghost" disabled={state === "loading"} onClick={onRetry}>Refresh service library</button></header>
-      {state === "loading" && <p role="status">Loading service library…</p>}
+      {state === "loading" && <Skeleton variant="list" rows={3} label="Loading service library…" />}
       {state === "error" && <div className="portal-inline-error" role="alert"><p>The service library could not be loaded. Your selections and answers are still shown below.</p><button type="button" className="button-ghost" onClick={onRetry}>Retry service library</button></div>}
       {state === "ready" && legacy && <p>Showing available legacy services (up to 500); synchronized browsing is not ready. Search and category counts cover this loaded list only.</p>}
       {state === "ready" && !legacy && !complete && <p>{catalog.length} services loaded. Search and category counts cover loaded services only; load more to browse the rest.</p>}

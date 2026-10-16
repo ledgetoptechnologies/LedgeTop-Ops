@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Card, StatusPill } from "@ltds/ui";
+import { Card, StatusPill, Skeleton } from "@ltds/ui";
 import { CLIENT_FEEDBACK_MESSAGE_LIMIT, type ClientFeedbackDetail, type ClientFeedbackHistoryItem, type ClientFeedbackItem, type ClientFeedbackTargetInput } from "@ltds/shared";
 import type { RequestError } from "./bulk-download";
 import { feedbackPath, feedbackStatusLabel, loadFeedback, loadFeedbackDetail, safeFeedbackTargetPath, submitFeedback } from "./feedback-api";
@@ -75,7 +75,7 @@ export function PortalFeedback({ id, nativeWorkspaceId = null }: { id?: string |
   return <div className="portal-feedback-page">
     <header><div><span className="eyebrow">Your feedback</span><h1>{id ? "Feedback details" : "Feedback"}</h1><p>Feedback you submitted in this workspace. Your team decides how best to handle it.</p></div>{id && <a className="button button-ghost" href={feedbackPath()}>All feedback</a>}</header>
     {error && <div className="portal-inline-error" role="alert"><p>{error}</p><button className="button-ghost" onClick={() => void load(retryCursor.current)}>Retry feedback</button></div>}
-    {loading && <p role="status">Loading feedback…</p>}
+    {loading && <Skeleton variant="list" rows={3} label="Loading feedback…" />}
     {detail && <Card title={detail.feedback.target.label}><FeedbackSummary item={detail.feedback} /><section className="portal-feedback-history" aria-label="Feedback history"><h3>Updates</h3>{detail.events.map(event => <article key={event.revision}><strong>{feedbackStatusLabel(event.status)}</strong><small>{new Date(event.createdAt).toLocaleString()} · {event.actor === "staff" ? "Your team" : "You"}</small>{event.note && <p>{event.note}</p>}</article>)}</section></Card>}
     {!id && <><div className="portal-feedback-list">{items.map(item => <Card key={item.feedbackId}><a href={item.detailPath}><h2>{item.target.label}</h2></a><HistorySummary item={item} /></Card>)}</div>{!loading && !error && !items.length && <p>{cursor ? "No available feedback in this page. Continue to check more records." : "No feedback submitted yet. Use Leave Feedback on a project, folder, or file."}</p>}{cursor && <button className="button-ghost" disabled={loading} onClick={() => void load(cursor)}>Load more feedback</button>}</>}
   </div>;

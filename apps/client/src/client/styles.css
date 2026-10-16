@@ -719,27 +719,9 @@
 
 .client-portal, .client-portal-boundary { min-height: 100vh; background: #f4f6f8; }
 
-/* The portal is a shared Ledge Top surface, but its selected PA source still
-   needs an unambiguous division label. Keep that distinction in the brand
-   lockup instead of implying that the two legal entities are one company. */
+/* One generic Ledge Top lockup on every portal domain. */
 .portal-brand-copy { display: grid; gap: .12rem; }
 .portal-brand-copy > strong { color: #fff; font: inherit; }
-.portal-brand-mark {
-  display: grid;
-  place-items: center;
-  width: 48px;
-  height: 48px;
-  flex: 0 0 48px;
-  border: 1px solid color-mix(in srgb, var(--orange), #fff 22%);
-  border-radius: 12px;
-  background: linear-gradient(145deg, #1d2632, #0b0d11);
-  color: #fff;
-  font-size: .9rem;
-  font-weight: 850;
-  letter-spacing: .05em;
-}
-.portal-brand[data-portal-division="technologies"] small { color: #8bc7ff; }
-.portal-brand[data-portal-division="generic"] small { color: #d6a98f; }
 
 .client-portal-header,
 .client-portal-gate-header {
@@ -1862,12 +1844,11 @@
 @media (max-width: 390px) {
   .client-portal-header { padding-left: .65rem; padding-right: .65rem; }
   .client-portal-header .ltds-brand { gap: .45rem; font-size: .84rem; }
-  .client-portal-header .ltds-brand img { width: 40px; height: 40px; }
+  .client-portal-header .ltds-brand :is(img, .ltds-mark) { width: 40px; height: 40px; }
   .client-portal-header .ltds-brand small { font-size: .58rem; letter-spacing: .09em; }
   /* The source-aware mark remains visible and the full accessible name stays
      on the lockup, while the redundant copy yields space to header actions. */
   .client-portal-header .portal-brand-copy { display: none; }
-  .client-portal-header .portal-brand-mark { width: 40px; height: 40px; flex-basis: 40px; }
   .portal-workspace-switcher > span { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
 }
 
@@ -1923,7 +1904,7 @@
 
 @media (max-width: 560px) {
   .client-portal-header, .client-portal-gate-header { min-height: 68px; }
-  .client-portal-header .ltds-brand img, .client-portal-gate-header .ltds-brand img { width: 42px; height: 42px; }
+  .client-portal-header .ltds-brand :is(img, .ltds-mark), .client-portal-gate-header .ltds-brand :is(img, .ltds-mark) { width: 42px; height: 42px; }
   .portal-account-name { font-size: .78rem; }
   .client-portal-main { padding: 1.25rem .75rem 3rem; }
   .portal-form-actions { align-items: stretch; flex-direction: column; }

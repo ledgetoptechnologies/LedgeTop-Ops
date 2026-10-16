@@ -543,8 +543,8 @@ binding restricted to the one reviewed sender:
 }]
 ```
 
-Set `CLIENT_PORTAL_INVITATION_FROM` to that exact address and optionally set
-`CLIENT_PORTAL_INVITATION_FROM_NAME`. Keep
+Set `CLIENT_PORTAL_INVITATION_FROM` to that exact address. The sender name is
+fixed in code as "Ledge Top Client Portal". Keep
 `CLIENT_PORTAL_INVITATION_EMAIL_ENABLED=false` and
 `CLIENT_PORTAL_ACCESS_ENROLLMENT_READY=false` until a controlled staging
 invite proves delivery, Access login with the invited email, immediate URL

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Card, EmptyState, StatusPill } from "@ltds/ui";
+import { Card, EmptyState, StatusPill, Skeleton } from "@ltds/ui";
 import { api } from "./api";
 import "./ClientPortalBootstrap.css";
 
@@ -143,7 +143,7 @@ export function ClientPortalBootstrap({ onChanged }: { onChanged?: () => void })
           onClick={() => setOpened(value => !value)}>{opened ? "Close exceptions" : "Review legacy exceptions"}</button>
       </div>
       {opened && <div id="client-portal-bootstrap-workflow" className="client-portal-bootstrap-workflow" aria-busy={loading || busy}>
-        {loading && !state && <p role="status">Checking portal setup readiness…</p>}
+        {loading && !state && <Skeleton variant="text" lines={2} label="Checking portal setup readiness…" />}
         {error && <div className="client-portal-bootstrap-error" role="alert"><p>{error}</p>
           <button type="button" className="button-ghost" disabled={loading || busy} onClick={() => void load()}>Refresh setup status</button></div>}
         {state && <>

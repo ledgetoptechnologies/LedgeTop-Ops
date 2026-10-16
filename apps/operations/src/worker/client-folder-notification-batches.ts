@@ -1,3 +1,4 @@
+import { selectSealedNotificationMail } from './sealed-notification-mail';
 import { sendAdminAlert } from "./alerts";
 import { normalizePrefix } from "./delivery";
 import { sendNotificationMail } from "./mailer";
@@ -308,12 +309,13 @@ export async function processClientFolderNotificationBatches(env: Env): Promise<
       const body = `${counts.added} ${counts.added === 1 ? "file added" : "files added"}; ${counts.removed} ${counts.removed === 1 ? "file removed" : "files removed"} in your client workspace.`;
       const actionPath = "/portal/deliveries";
       const link = new URL(actionPath, env.DELIVERY_BASE_URL).toString();
-      const mail = { to: current.recipientEmail, fromName: "LTDS Client Portal", subject: `${title} — ${current.accountName}`,
+      const currentMail = { to: current.recipientEmail, fromName: "Ledge Top Client Portal", subject: `${title} — ${current.accountName}`,
         text: `${body}\n\nOpen client deliveries: ${link}`, html: `<p>${escapeHtml(body)}</p><p><a href="${escapeHtml(link)}">Open client deliveries</a></p>`, messageIdKey: row.id };
-      const dispatchFingerprint = await fingerprint(JSON.stringify({ context: current, counts, mail }));
-      if (row.dispatch_fingerprint && row.dispatch_fingerprint !== dispatchFingerprint) {
-        await suppress(env, row, "published-summary-no-longer-current"); continue;
-      }
+      const selectedMail = await selectSealedNotificationMail(currentMail,
+        () => ({ ...currentMail, fromName: "LTDS Client Portal" }), row.dispatch_fingerprint,
+        mail => fingerprint(JSON.stringify({ context: current, counts, mail })));
+      if (!selectedMail) { await suppress(env, row, "published-summary-no-longer-current"); continue; }
+      const { mail, fingerprint: dispatchFingerprint } = selectedMail;
       const publication = await env.DELIVERY_DB.batch([
         env.DELIVERY_DB.prepare(`UPDATE client_folder_notification_batches SET added_count=?,removed_count=?,
           dispatch_fingerprint=COALESCE(dispatch_fingerprint,?),published_at=COALESCE(published_at,datetime('now')),updated_at=datetime('now')

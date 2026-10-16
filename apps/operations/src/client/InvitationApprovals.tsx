@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
-import { Card } from "@ltds/ui";
+import { Card, Skeleton } from "@ltds/ui";
 import { api, ApiError } from "./api";
 import { decideInvitationRequest, invitationAdministrationPath, invitationCapabilitiesLabel, invitationRequestHref, invitationRequestPage, invitationRequestStatus, invitationTermsLabel, loadInvitationRequestDetail, type InvitationAdministrationAccess, type InvitationRequest, type InvitationRequestDetail } from "./invitation-administration-api";
 import "./InvitationAdministration.css";
@@ -66,7 +66,7 @@ function ApprovalView({route, navigate}: {route: Route; navigate: (route: Route)
   return <section className="invitation-administration" aria-label="Invitation approvals"><header><div><h2>{route.id ? "Review invitation request" : "Invitation approvals"}</h2><p>Review the exact proposed access. Approval requests are not invitations or memberships.</p></div><a className="button button-ghost" href={route.id ? listPath(route) : "/clients"}>{route.id ? "Back to invitation approvals" : "Back to Client Hub"}</a></header>
     {!route.id && <form className="invitation-administration-search" onSubmit={search}><label>Search invitation requests<input value={draft} maxLength={100} onChange={event => setDraft(event.target.value)} /></label><label>Request status<select value={route.status} onChange={event => navigate({...route, status: event.target.value})}>{["open", "pending", "approving", "approved", "rejected", "cancelled", "stale", "all"].map(status => <option key={status} value={status}>{status === "open" ? "Needs review" : status === "all" ? "All" : invitationRequestStatus(status as InvitationRequest["status"])}</option>)}</select></label><button className="button-orange">Search</button></form>}
     <button className="button-ghost" disabled={loading || busy || uncertain} onClick={() => void load()}>Refresh invitation requests</button>
-    {loading && <p role="status">Loading invitation requests…</p>}{notice && <p role="status">{notice}</p>}
+    {loading && <Skeleton variant="list" rows={3} label="Loading invitation requests…" />}{notice && <p role="status">{notice}</p>}
     {error && <div role="alert"><p>{error}</p>{!uncertain && <button className="button-ghost" disabled={loading || busy} onClick={() => void load(retry.current)}>Retry invitation requests</button>}</div>}
     {!route.id && <><div className="invitation-administration-list">{rows.map(row => <Card key={row.id}><a href={invitationRequestHref(row)}><h3>{row.email}</h3></a><RequestFacts row={row} /></Card>)}</div>{!loading && !error && !rows.length && <p>{cursor ? "No matching requests in this page. Load more to continue checking." : "No invitation requests match this view."}</p>}{cursor && <button className="button-ghost" disabled={loading || Boolean(error)} onClick={() => void load(cursor)}>Load more invitation requests</button>}</>}
     {detail && <Card><RequestFacts row={detail.request} />{detail.unavailableReason && <p role="status">Review unavailable: {detail.unavailableReason}</p>}

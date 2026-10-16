@@ -1,50 +1,25 @@
 import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
-import { resolvePortalBrand } from "../src/client/portal-brand";
 
-describe("shared portal brand context", () => {
-  it("uses the Drone Services division on the primary portal host", () => {
-    expect(resolvePortalBrand("portal.ledgetopdroneservices.com")).toMatchObject({
-      key: "drone-services", division: "Drone Services", shortName: "LTDS",
-    });
+const read = (name: string) => readFileSync(new URL(`../src/client/${name}`, import.meta.url), "utf8");
+
+describe("shared portal brand", () => {
+  it("shows one generic Ledge Top identity regardless of domain or workspace source", () => {
+    const portal = read("ClientPortalApp.tsx");
+    expect(portal).toContain('data-portal-division="generic"');
+    expect(portal).toContain("<LtMark />");
+    expect(portal).not.toMatch(/resolvePortalBrand|from "\.\/portal-brand"|BRAND\.logoUrl/);
+    expect(portal).not.toMatch(/Drone Services|Technologies/);
   });
 
-  it("uses the Technologies division on the alternate portal host", () => {
-    expect(resolvePortalBrand("PORTAL.LEDGETOPTECHNOLOGIES.COM")).toMatchObject({
-      key: "technologies", division: "Technologies", shortName: "LTT",
-    });
-  });
-
-  it("lets the selected source override a mismatched host", () => {
-    expect(resolvePortalBrand("portal.ledgetoptechnologies.com", "project-alpha:primary")).toMatchObject({
-      key: "drone-services", division: "Drone Services", sourceId: "project-alpha:primary",
-    });
-    expect(resolvePortalBrand("portal.ledgetopdroneservices.com", "project-alpha:secondary")).toMatchObject({
-      key: "technologies", division: "Technologies", sourceId: "project-alpha:secondary",
-    });
-  });
-
-  it("does not guess a legal division for an unknown source or host", () => {
-    expect(resolvePortalBrand("portal.example.test", "project-alpha:future")).toMatchObject({
-      key: "generic", division: "Workspace", shortName: "Ledge Top", sourceId: null,
-    });
-    expect(resolvePortalBrand("portal.ledgetopdroneservices.com", "project-alpha:future")).toMatchObject({
-      key: "generic", division: "Workspace", shortName: "Ledge Top", sourceId: null,
-    });
-  });
-
-  it("keeps shared portal copy neutral while retaining explicit source divisions", () => {
-    const sharedCopy = ["ClientPortalApp.tsx", "main.tsx"]
-      .map(name => readFileSync(new URL(`../src/client/${name}`, import.meta.url), "utf8"))
-      .join("\n");
+  it("keeps shared portal copy neutral", () => {
+    const sharedCopy = ["ClientPortalApp.tsx", "main.tsx"].map(read).join("\n");
     expect(sharedCopy).not.toMatch(/\bLTDS\b|Loading LedgeTop/);
     expect(sharedCopy).toContain("Ledge Top");
-    expect(resolvePortalBrand("portal.ledgetopdroneservices.com").shortName).toBe("LTDS");
-    expect(resolvePortalBrand("portal.ledgetoptechnologies.com").shortName).toBe("LTT");
   });
 
   it("presents the account as customer context without claiming a verified person name", () => {
-    const portal = readFileSync(new URL("../src/client/ClientPortalApp.tsx", import.meta.url), "utf8");
+    const portal = read("ClientPortalApp.tsx");
     expect(portal).toContain("<h1>{account!.displayName}</h1>");
     expect(portal).toContain("Welcome to the client portal.");
     expect(portal).not.toContain("Hello, {account!.displayName}");

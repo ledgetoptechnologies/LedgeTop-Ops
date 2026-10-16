@@ -233,7 +233,8 @@ export async function processInvitationEmailBatch(
     const link = new URL("/portal/invitations/accept", env.CLIENT_PORTAL_ORIGIN);
     link.hash = `token=${encodeURIComponent(payload.token)}`;
     const workspaceName = row.workspace_name.trim().slice(0, 160) || "your client workspace";
-    const fromName = (env.CLIENT_PORTAL_INVITATION_FROM_NAME || "LTDS Client Portal").trim().slice(0, 80) || "LTDS Client Portal";
+    // Fixed brand, not configurable: every domain uses the same generic Ledge Top identity.
+    const fromName = "Ledge Top Client Portal";
     const expiryText = new Date(payload.expiresAt).toLocaleString("en-US", { timeZone: "UTC", timeZoneName: "short" });
     try {
       // Recheck immediately before handing the message to the external service.
@@ -247,8 +248,8 @@ export async function processInvitationEmailBatch(
         to: recipient,
         from: { email: normalizeEmail(env.CLIENT_PORTAL_INVITATION_FROM!)!, name: fromName },
         subject: `You were invited to ${workspaceName}`.slice(0, 200),
-        text: `You were invited to ${workspaceName} in the LTDS Client Portal.\n\nAccept invitation: ${link.toString()}\n\nThis invitation expires ${expiryText}. If you were not expecting it, you can ignore this email.`,
-        html: `<p>You were invited to <strong>${htmlEscape(workspaceName)}</strong> in the LTDS Client Portal.</p><p><a href="${htmlEscape(link.toString())}">Accept invitation</a></p><p>This invitation expires ${htmlEscape(expiryText)}. If you were not expecting it, you can ignore this email.</p>`,
+        text: `You were invited to ${workspaceName} in the Ledge Top Client Portal.\n\nAccept invitation: ${link.toString()}\n\nThis invitation expires ${expiryText}. If you were not expecting it, you can ignore this email.`,
+        html: `<p>You were invited to <strong>${htmlEscape(workspaceName)}</strong> in the Ledge Top Client Portal.</p><p><a href="${htmlEscape(link.toString())}">Accept invitation</a></p><p>This invitation expires ${htmlEscape(expiryText)}. If you were not expecting it, you can ignore this email.</p>`,
       });
       const changed = await env.DELIVERY_DB.prepare(`UPDATE portal_v2_invitation_email_outbox SET
         status='sent',payload_json=?,sent_at=datetime(?),lease_expires_at=NULL,last_error_code=NULL,updated_at=datetime(?)

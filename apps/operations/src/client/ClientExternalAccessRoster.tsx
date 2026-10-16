@@ -1,5 +1,5 @@
 import { useEffect, useId, useRef, useState, type FormEvent } from "react";
-import { Card, EmptyState, StatusPill } from "@ltds/ui";
+import { Card, EmptyState, StatusPill, Skeleton } from "@ltds/ui";
 import { api, ApiError } from "./api";
 import "./ClientExternalAccessRoster.css";
 
@@ -153,7 +153,7 @@ export function ClientExternalAccessRoster({ initialPage, basePath, contextVersi
           {filtered && <button type="button" className="button-ghost" onClick={() => search({ q: "", status: "current" })}>Clear access filters</button>}
         </div>
       </form>
-      {!value && state.busy && <p role="status">Loading external access…</p>}
+      {!value && state.busy && <Skeleton variant="list" rows={3} label="Loading external access…" />}
       {value?.items.length === 0 && <EmptyState title={filtered ? "No matching external access" : "No external access"}
         detail={filtered ? "Try another name or access status." : "No current membership or pending invitation records are available for this client workspace."} />}
       <div className="external-access-rows">{value?.items.map(row => <article key={row.row_key} aria-label={`External access for ${row.display_name}`}>

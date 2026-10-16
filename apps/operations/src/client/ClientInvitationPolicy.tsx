@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Card } from "@ltds/ui";
+import { Card, Skeleton } from "@ltds/ui";
 import { ApiError } from "./api";
 import { loadInvitationPolicy, policyLabels, saveInvitationPolicy, type InvitationPolicy } from "./invitation-administration-api";
 import "./InvitationAdministration.css";
@@ -39,7 +39,7 @@ export function ClientInvitationPolicy({workspaceId, sourceId, contextSignal, on
   return <Card title="Invitation policy" className="invitation-administration">
     <p>Control new collaborator invitations for this exact portal workspace. Business records and accepted memberships are separate.</p>
     {!opened ? <button className="button-ghost" onClick={() => void load()}>Show invitation policy</button> : <>
-      {loading && <p role="status">Loading invitation policy…</p>}{notice && <p role="status">{notice}</p>}{error && <p role="alert">{error}</p>}
+      {loading && <Skeleton variant="list" rows={3} label="Loading invitation policy…" />}{notice && <p role="status">{notice}</p>}{error && <p role="alert">{error}</p>}
       {!uncertain && <button className="button-ghost" disabled={loading || busy} onClick={() => void load()}>Refresh invitation policy</button>}
       {value && <><p><strong>{value.workspaceName}</strong> · {value.sourceId}</p><p>Current policy: <strong>{policyLabels[value.policy]}</strong></p>
         {value.capabilities.canManagePolicy ? <><label>Invitation policy<select value={selected} disabled={busy || uncertain || review} onChange={event => {setSelected(event.target.value as InvitationPolicy["policy"]); setNotice("");}}>{Object.entries(policyLabels).map(([key, label]) => <option key={key} value={key}>{label}</option>)}</select></label>

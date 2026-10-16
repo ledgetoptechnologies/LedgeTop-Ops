@@ -237,12 +237,40 @@ describe('native delivery staging, exact authority and controls — migrated D1'
   it('sends after eligibility once, seals content, and never invents file counts',async()=>{
     const f=await fixture('dispatch');await create(f);await processPortalDeliveryNotificationBatches(env);
     expect(mailer.sendNotificationMail).not.toHaveBeenCalled();await due(f);await processPortalDeliveryNotificationBatches(env);
-    expect(mailer.sendNotificationMail).toHaveBeenCalledTimes(1);expect(vi.mocked(mailer.sendNotificationMail).mock.calls[0]?.[1]).toMatchObject({to:'dispatch@example.test',subject:'Delivery available in your portal'});
+    expect(mailer.sendNotificationMail).toHaveBeenCalledTimes(1);expect(vi.mocked(mailer.sendNotificationMail).mock.calls[0]?.[1]).toMatchObject({to:'dispatch@example.test',fromName:'Ledge Top Client Delivery',subject:'Delivery available in your portal'});
     expect(vi.mocked(mailer.sendNotificationMail).mock.calls[0]?.[1].text).toContain(`workspace=${f.workspace}`);
+    expect(vi.mocked(mailer.sendNotificationMail).mock.calls[0]![1].text).toContain('your Ledge Top portal');
     const row=await batch(f);expect(row).toMatchObject({status:'sent',attempt_count:1});expect(row.dispatch_fingerprint).toMatch(/^[a-f0-9]{64}$/);
     await processPortalDeliveryNotificationBatches(env);expect(mailer.sendNotificationMail).toHaveBeenCalledTimes(1);
     const result=await readNativeDeliveryNotification(env,`nb_${row.id}`,staff);expect(result.item).toMatchObject({kind:'portal_delivery',workspaceName:'Workspace dispatch',canCancel:false,canSendNow:false});
     expect(result.item).not.toHaveProperty('addedCount');expect(JSON.stringify(result)).not.toContain('r2_prefix');
+  });
+
+  async function sealedLegacyBatch(name:string){
+    const f=await fixture(name);await create(f);await due(f);const row=await batch(f);
+    const auth=await authorizePortalDeliveryNotificationBatch(env,row);if(!auth)throw Error('legacy fixture authority missing');
+    const url=`https://client.example.test/portal/deliveries?workspace=${f.workspace}`;
+    const mail={to:`${name}@example.test`,fromName:'LTDS Client Delivery',subject:'Delivery available in your portal',
+      text:`A delivery is available in your LTDS portal.\n\nOpen the portal: ${url}`,
+      html:`<p>A delivery is available in your LTDS portal.</p><p><a href="${url}">Open the portal</a></p>`,messageIdKey:`native-batch-${row.id}`};
+    const hash=fingerprint([auth.authorityFingerprint,mail]);
+    await db.prepare("UPDATE portal_delivery_notification_batches SET dispatch_fingerprint=?,published_recipient_email=?,published_at=datetime('now'),sealed_at=datetime('now'),attempt_count=1 WHERE id=?")
+      .bind(hash,auth.recipientEmail,row.id).run();return{f,mail,hash};
+  }
+  it('retries a pre-upgrade sealed email with byte-identical legacy copy and immutable fingerprint',async()=>{
+    const {f,mail,hash}=await sealedLegacyBatch('legacy-copy-retry');
+    vi.mocked(mailer.sendNotificationMail).mockRejectedValueOnce(new Error('provider acceptance uncertain'));
+    await processPortalDeliveryNotificationBatches(env);expect(vi.mocked(mailer.sendNotificationMail).mock.calls[0]![1]).toEqual(mail);
+    await due(f);await processPortalDeliveryNotificationBatches(env);
+    expect(mailer.sendNotificationMail).toHaveBeenCalledTimes(2);expect(vi.mocked(mailer.sendNotificationMail).mock.calls[1]![1]).toEqual(mail);
+    expect(await batch(f)).toMatchObject({status:'sent',dispatch_fingerprint:hash,attempt_count:3});
+  });
+  it.each(['recipient','link','authority'] as const)('suppresses sealed legacy email after %s changes',async change=>{
+    const {f,hash}=await sealedLegacyBatch(`legacy-${change}-change`);
+    if(change==='recipient')await db.prepare("UPDATE pa_portal_principals SET email_hint='different@example.test' WHERE workspace_id=?").bind(f.workspace).run();
+    if(change==='authority')await db.prepare("UPDATE portal_v2_folder_bindings SET status='revoked',revoked_at=datetime('now') WHERE id=?").bind(f.binding).run();
+    await processPortalDeliveryNotificationBatches(change==='link'?{...env,DELIVERY_BASE_URL:'https://changed.example.test'}:env);
+    expect(mailer.sendNotificationMail).not.toHaveBeenCalled();expect(await batch(f)).toMatchObject({status:'suppressed',dispatch_fingerprint:hash});
   });
 
   it('suppresses a queued notification when the client root is revoked before publication',async()=>{

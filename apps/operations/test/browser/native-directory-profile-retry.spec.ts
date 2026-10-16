@@ -22,20 +22,30 @@ async function calls(page: Page): Promise<Call[]> {
   return page.evaluate(() => (window as Window & { nativeDirectoryCalls?: Call[] }).nativeDirectoryCalls ?? []);
 }
 
+async function openCreate(page: Page) {
+  if (await page.getByRole("dialog", { name: "Add client profile" }).isVisible()) return;
+  await page.getByRole("button", { name: "Add client profile" }).click();
+  await expect(page.getByRole("dialog", { name: "Add client profile" })).toBeVisible();
+}
+
 async function fillCreate(page: Page, name: string) {
-  await page.getByLabel("Project Alpha destinations").selectOption("project-alpha:primary");
+  await openCreate(page);
+  await page.getByRole("checkbox", { name: "Ledge Top Drone Services" }).check();
   await page.getByLabel("Business scope").selectOption({ label: "Area One" });
   await page.getByLabel("Organization name").fill(name);
 }
 
 test("a lost create response retries the same write without preparing admission again", async ({ page }) => {
   await render(page, "create-lost-response");
+  await openCreate(page);
   await page.getByLabel("Profile type").selectOption("organization");
   await fillCreate(page, "Frozen Organization");
   await page.getByRole("button", { name: "Create organization" }).click();
   await expect(page.getByRole("button", { name: "Retry same profile creation" })).toBeVisible();
   await page.getByRole("button", { name: "Retry same profile creation" }).click();
   await expect(page.getByText("Saved in Client Hub and queued for Project Alpha delivery.")).toBeVisible();
+  await expect(page.getByRole("status").filter({ hasText: "Frozen Organization:" })).toContainText("Sending to Ledge Top Drone Services");
+  await expect(page.getByRole("dialog", { name: "Add client profile" })).toBeHidden();
 
   const observed = await calls(page), admissions = observed.filter(call => call.path.endsWith("/create-admissions"));
   const writes = observed.filter(call => call.path.endsWith("/organizations") && call.method === "POST");

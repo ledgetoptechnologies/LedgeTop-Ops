@@ -1,3 +1,4 @@
+import { Skeleton } from "@ltds/ui";
 import {useEffect,useRef,useState} from 'react';
 import type {PortalNotificationHistoryItem,PortalNotificationHistoryPage} from '@ltds/shared';
 import {requestJson,type RequestError} from './bulk-download';
@@ -53,7 +54,7 @@ export function PortalNotifications(){
   const unread=items.filter(item=>!item.readAt).length;
   return <div className="portal-notification-center" ref={root}><button className="portal-notification-bell" aria-label={`Notifications${unread?`, ${unread} unread update${unread===1?'':'s'}`:''}`} aria-expanded={open} aria-controls="portal-notification-panel" onClick={()=>setOpen(value=>!value)}><span aria-hidden="true">🔔</span>{unread>0&&<span className="portal-notification-count">{unread>99?'99+':unread}</span>}</button>
     {open&&<section id="portal-notification-panel" className="portal-notification-panel" aria-label="Notifications"><header><strong>Notifications</strong><button className="button-ghost button-small" onClick={()=>setOpen(false)} aria-label="Close notifications">Close</button></header>
-      {loading&&<p role="status">Loading notifications…</p>}{error&&<div role="alert"><p>{error}</p><button className="button-ghost button-small" onClick={()=>void load(cursor)}>Retry notifications</button></div>}
+      {loading&&<Skeleton variant="list" rows={3} label="Loading notifications…" />}{error&&<div role="alert"><p>{error}</p><button className="button-ghost button-small" onClick={()=>void load(cursor)}>Retry notifications</button></div>}
       {!loading&&!error&&!items.length&&<p className="portal-notification-empty">{cursor?'Continue to check more updates.':'You’re all caught up.'}</p>}
       <div className="portal-notification-list">{items.map(item=>{const actionPath=safeFeedbackTargetPath(item.actionPath);return <article key={`${item.kind}:${item.id}`} className={item.readAt?'':'is-unread'}>
         {actionPath?<a href={actionPath} onClick={event=>{if(event.button!==0||event.metaKey||event.ctrlKey||event.shiftKey||event.altKey)return;event.preventDefault();const run=generation.current;void mutate(item,'read').then(updated=>{if(updated&&run===generation.current)window.location.assign(actionPath);});}}><strong>{item.title}</strong></a>:<strong>{item.title}</strong>}

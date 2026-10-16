@@ -1,3 +1,4 @@
+import { Skeleton } from "@ltds/ui";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   loadOperationsNativeData,
@@ -167,7 +168,7 @@ export function OperationsNativeDataBrowser() {
       <p>Browse files shared through your current Operations access.</p>
       <button type="button" className="button-orange" onClick={begin}>Browse shared deliveries</button>
     </>}
-    {phase === "loading" && <p role="status" aria-live="polite">Checking your current delivery access…</p>}
+    {phase === "loading" && <Skeleton variant="text" lines={2} label="Checking your current delivery access…" />}
     {phase === "denied" && <div className="portal-inline-error" role="alert">
       <p>Your shared delivery access could not be verified. Sign in again or refresh access.</p>
       <button type="button" className="button-ghost" onClick={begin}>Refresh access</button>

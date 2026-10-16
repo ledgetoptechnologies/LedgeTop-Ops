@@ -13,8 +13,10 @@ describe("Operations umbrella display brand", () => {
     expect(html).toContain("Ledge Top<small>Operations</small>");
     expect(html).not.toContain("Ledge Top Drone Services");
   });
-  it("preserves existing branding when no override is supplied", () => {
+  it("defaults to the generic Ledge Top identity with the shared LT mark", () => {
     const html = renderToStaticMarkup(createElement(Brand, { product: "Client Delivery" }));
-    expect(html).toContain("Ledge Top Drone Services<small>Client Delivery</small>");
+    expect(html).toContain("Ledge Top<small>Client Delivery</small>");
+    expect(html).toContain('class="ltds-mark"');
+    expect(html).not.toMatch(/Drone Services|<img/);
   });
 });

@@ -1,3 +1,4 @@
+import { selectSealedNotificationMail } from './sealed-notification-mail';
 import { HTTPException } from "hono/http-exception";
 import { createCatalogSourceContext, PRIMARY_ALPHA_SOURCE_ID } from "@ltds/shared";
 import { d1TablesPresent } from "./schema-readiness";
@@ -266,11 +267,15 @@ export async function processPortalDeliveryNotificationBatches(env:Env):Promise<
       const auth=await authorizePortalDeliveryNotificationBatch(env,row);
       if(!auth){await finish(env,row,'suppressed','no-longer-eligible');continue;}
       const url=new URL('/portal/deliveries',env.DELIVERY_BASE_URL);url.searchParams.set('workspace',row.workspace_id);
-      const mail={to:auth.recipientEmail,fromName:'LTDS Client Delivery',subject:'Delivery available in your portal',
+      const currentMail={to:auth.recipientEmail,fromName:'Ledge Top Client Delivery',subject:'Delivery available in your portal',
+        text:`A delivery is available in your Ledge Top portal.\n\nOpen the portal: ${url.href}`,
+        html:`<p>A delivery is available in your Ledge Top portal.</p><p><a href="${escapeHtml(url.href)}">Open the portal</a></p>`,messageIdKey:`native-batch-${row.id}`};
+      const selectedMail=await selectSealedNotificationMail(currentMail,()=>({...currentMail,fromName:'LTDS Client Delivery',
         text:`A delivery is available in your LTDS portal.\n\nOpen the portal: ${url.href}`,
-        html:`<p>A delivery is available in your LTDS portal.</p><p><a href="${escapeHtml(url.href)}">Open the portal</a></p>`,messageIdKey:`native-batch-${row.id}`};
-      const fingerprint=await nativeNotificationHash(JSON.stringify([auth.authorityFingerprint,mail]));
-      if(row.dispatch_fingerprint&&row.dispatch_fingerprint!==fingerprint){await finish(env,row,'suppressed','publication-context-changed');continue;}
+        html:`<p>A delivery is available in your LTDS portal.</p><p><a href="${escapeHtml(url.href)}">Open the portal</a></p>`}),row.dispatch_fingerprint,
+        mail=>nativeNotificationHash(JSON.stringify([auth.authorityFingerprint,mail])));
+      if(!selectedMail){await finish(env,row,'suppressed','publication-context-changed');continue;}
+      const {mail,fingerprint}=selectedMail;
       const publish=await env.DELIVERY_DB.prepare(`UPDATE portal_delivery_notification_batches
         SET dispatch_fingerprint=COALESCE(dispatch_fingerprint,?),published_recipient_email=COALESCE(published_recipient_email,?),published_at=COALESCE(published_at,datetime('now')),updated_at=datetime('now')
         WHERE id=? AND status='processing' AND lease_token=? AND datetime(lease_expires_at)>datetime('now')
