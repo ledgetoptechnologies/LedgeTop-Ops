@@ -149,7 +149,9 @@ function explicitTarget(overrides: Record<string, unknown> = {}) {
     rootLabel: "Coldwell", ownerScopeType: "client", ownerPublicId: "client-lori", ownerName: "Lori Koschnick", projectPublicId: null, projectName: null,
     sourceId: "project-alpha:primary", contextVersion: "c".repeat(64), ownershipMode: "explicit_workspace", divisionId: "division-north", ...overrides};
 }
-async function mockExplicit(page: Page, options: {divisions?: unknown; targets?: (divisionId: string) => unknown[]; binding?: (body: Record<string, unknown>) => unknown} = {}) {
+async function mockExplicit(page: Page, options: {divisions?: unknown; targets?: (divisionId: string) => unknown[]; binding?: (body: Record<string, unknown>) => unknown;
+  onPost?: (route: Route, attempt: number) => Promise<unknown> | undefined} = {}) {
+  let posts = 0;
   let bound = false;
   const searches: string[] = [];
   const calls = await mockPrimary(page, (route, call) => {
@@ -163,6 +165,8 @@ async function mockExplicit(page: Page, options: {divisions?: unknown; targets?:
         explicitTarget({divisionId, ownerScopeType: "organization", ownerPublicId: "org-coldwell", ownerName: "Coldwell", contextVersion: "d".repeat(64)})]}});
     }
     if (call.path === "/api/delivery/authenticated-grants/bindings" && call.method === "POST") {
+      const custom = options.onPost?.(route, ++posts);
+      if (custom) return custom;
       bound = true;
       const body = call.body as Record<string, unknown>;
       const fallback = {bindingId: "binding-lori", folderPrefix: "Jobs/Clients/Acme/", state: "active", version: 1, ...explicitTarget({divisionId: body.divisionId})};
@@ -261,8 +265,8 @@ for (const [label, binding] of [
     ...explicitTarget({divisionId: body.divisionId, ownerScopeType: "organization", ownerPublicId: "org-coldwell"})})],
   ["changes the division", (body: Record<string, unknown>) => ({bindingId: "binding-lori", folderPrefix: "Jobs/Clients/Acme/", state: "active", version: 1,
     ...explicitTarget({divisionId: body.divisionId === "division-north" ? "division-south" : "division-north"})})],
-] as const) test(`a link response that ${label} is not reported as linked`, async ({page}) => {
-  await mockExplicit(page, {binding});
+] as const) test(`a link response that ${label} is an unknown outcome kept for exact retry`, async ({page}) => {
+  const {calls} = await mockExplicit(page, {binding});
   await openClientWorkspaceTab(page);
   await page.getByRole("combobox", {name: "Business division"}).selectOption("division-north");
   await page.getByRole("option", {name: /Client: Lori Koschnick/}).click();
@@ -270,6 +274,54 @@ for (const [label, binding] of [
   await page.getByRole("button", {name: "Link folder to workspace"}).click();
   await expect(page.getByRole("alert").filter({hasText: "The workspace link outcome could not be verified."})).toBeVisible();
   await expect(page.getByRole("status").filter({hasText: "Folder linked to the selected Client Workspace"})).toHaveCount(0);
+  // The server answered 2xx, so the link may exist: selection and containers stay locked.
+  await expect(page.getByRole("combobox", {name: "Business division"})).toBeDisabled();
+  await expect(page.getByRole("button", {name: "Link folder to workspace"})).toBeDisabled();
+  await expect(page.getByRole("combobox", {name: "Portal connection"})).toBeDisabled();
+  await expect(page.getByRole("button", {name: "Close", exact: true})).toBeDisabled();
+  await page.getByRole("button", {name: "Retry same folder link"}).click();
+  await expect.poll(() => calls.filter(call => call.path === "/api/delivery/authenticated-grants/bindings").length).toBe(2);
+  const [first, second] = calls.filter(call => call.path === "/api/delivery/authenticated-grants/bindings");
+  expect(second!.body).toEqual(first!.body);
+  expect(second!.key).toBe(first!.key);
+  await expect(page.getByRole("status").filter({hasText: "Folder linked to the selected Client Workspace"})).toHaveCount(0);
+});
+
+test("an in-flight or failed link keeps the Share dialog and connection locked until the same operation is confirmed", async ({page}) => {
+  let releaseFirst: (() => void) | undefined;
+  const {calls} = await mockExplicit(page, {onPost: (route, attempt) => attempt === 1
+    ? new Promise<void>(resolve => { releaseFirst = resolve; }).then(() => route.abort("connectionfailed"))
+    : undefined});
+  await openClientWorkspaceTab(page);
+  await page.getByRole("combobox", {name: "Business division"}).selectOption("division-north");
+  await page.getByRole("option", {name: /Client: Lori Koschnick/}).click();
+  await page.getByRole("button", {name: "Review workspace link"}).click();
+  await page.getByRole("button", {name: "Link folder to workspace"}).click();
+  await expect(page.getByRole("button", {name: "Linking…"})).toBeDisabled();
+
+  // In flight: neither containing surface can unmount the pending operation.
+  await expect(page.getByRole("button", {name: "Close", exact: true})).toBeDisabled();
+  await expect(page.getByRole("tab", {name: "Public link"})).toBeDisabled();
+  await expect(page.getByRole("combobox", {name: "Portal connection"})).toBeDisabled();
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("dialog", {name: "Share folder"})).toBeVisible();
+
+  releaseFirst!();
+  await expect(page.getByRole("alert").filter({hasText: "The workspace link outcome is not confirmed."})).toBeVisible();
+  await expect(page.getByRole("button", {name: "Close", exact: true})).toBeDisabled();
+  await expect(page.getByRole("combobox", {name: "Portal connection"})).toBeDisabled();
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("dialog", {name: "Share folder"})).toBeVisible();
+
+  await page.getByRole("button", {name: "Retry same folder link"}).click();
+  await expect(page.getByRole("button", {name: "Refresh authenticated access"})).toBeEnabled();
+  await expect(page.getByRole("region", {name: "Link folder to a Client Workspace"})).toHaveCount(0);
+  const posts = calls.filter(call => call.path === "/api/delivery/authenticated-grants/bindings");
+  expect(posts).toHaveLength(2);
+  expect(posts[1]!.body).toEqual(posts[0]!.body);
+  expect(posts[1]!.key).toBe(posts[0]!.key);
+  await expect(page.getByRole("button", {name: "Close", exact: true})).toBeEnabled();
+  await expect(page.getByRole("combobox", {name: "Portal connection"})).toBeEnabled();
 });
 
 test("an administrator without revoke permission can review primary grants but has no forbidden revoke action", async ({page}) => {

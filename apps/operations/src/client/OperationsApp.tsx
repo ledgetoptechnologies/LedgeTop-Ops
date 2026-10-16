@@ -4881,10 +4881,12 @@ type AuthenticatedGrant = {
   updatedAt: string;
 };
 
-function AuthenticatedDeliveryGrantPanel({ folder, canRevoke, creationEnabled, embedded = false }: { folder: { id: string }; canRevoke: boolean; creationEnabled: boolean; embedded?: boolean }) {
+function AuthenticatedDeliveryGrantPanel({ folder, canRevoke, creationEnabled, embedded = false, onBusyChange }: { folder: { id: string }; canRevoke: boolean; creationEnabled: boolean; embedded?: boolean; onBusyChange?: (busy: boolean) => void }) {
   const [expanded, setExpanded] = useState(embedded);
   const [mode, setMode] = useState<"primary" | "native">("primary");
   const [nativeBusy, setNativeBusy] = useState(false);
+  // The containing Share dialog must not close over an in-flight grant or link.
+  useEffect(() => { onBusyChange?.(nativeBusy); return () => onBusyChange?.(false); }, [nativeBusy, onBusyChange]);
   return <section className="client-workspace-grant authenticated-grant-panel">
     {!embedded && <button type="button" className="button-ghost button-small" aria-expanded={expanded} disabled={nativeBusy} onClick={() => setExpanded(value => !value)}>{expanded ? "Close authenticated portal grants" : "Grant to Client Portal"}</button>}
     {expanded && <div className="client-workspace-grant-panel">
@@ -5021,7 +5023,7 @@ function validPrimaryWorkspaceBindingDivisions(value:unknown):value is PrimaryWo
 function bindingOwnerKind(target:PrimaryWorkspaceBindingTarget):string{
   return target.ownerScopeType==="organization"?"whole organization":target.ownerScopeType==="client"?"client":"project";
 }
-function PrimaryWorkspaceBindingSetup({folder,onLinked}:{folder:{id:string};onLinked:()=>void}){
+function PrimaryWorkspaceBindingSetup({folder,onLinked,onBusyChange}:{folder:{id:string};onLinked:()=>void;onBusyChange?:(busy:boolean)=>void}){
   const [query,setQuery]=useState(""),[targets,setTargets]=useState<PrimaryWorkspaceBindingTarget[]>([]);
   const [selected,setSelected]=useState<PrimaryWorkspaceBindingTarget|null>(null),[reviewing,setReviewing]=useState(false);
   const [loading,setLoading]=useState(false),[busy,setBusy]=useState(false),[uncertain,setUncertain]=useState(false);
@@ -5032,6 +5034,8 @@ function PrimaryWorkspaceBindingSetup({folder,onLinked}:{folder:{id:string};onLi
   const reviewTitle=useRef<HTMLHeadingElement|null>(null);
   const explicit=divisions!==null,division=divisions?.find(item=>item.divisionId===divisionId)??null;
   useEffect(()=>{if(reviewing)reviewTitle.current?.focus();},[reviewing]);
+  // An in-flight or unconfirmed link must not be discarded by a parent unmount.
+  useEffect(()=>{onBusyChange?.(busy||uncertain);return()=>onBusyChange?.(false);},[busy,uncertain,onBusyChange]);
   const search=useCallback((value:string,chosenDivision:string)=>{
     searchController.current?.abort();const controller=new AbortController();searchController.current=controller;
     setLoading(true);setError("");setStatus("");
@@ -5067,16 +5071,20 @@ function PrimaryWorkspaceBindingSetup({folder,onLinked}:{folder:{id:string};onLi
     try{
       const response=await api<{binding:PrimaryWorkspaceBindingTarget&{bindingId:string;folderPrefix:string;version:number;state:string};replayed:boolean}>("/api/delivery/authenticated-grants/bindings",{method:"POST",headers:{"Idempotency-Key":operation.key},body:operation.body});
       const binding=response?.binding,target=operation.target;
+      // The server answered 2xx, so the link may already be committed. A local
+      // echo mismatch is an unknown outcome: keep the exact operation for retry.
+      const unverified=()=>{throw Object.assign(new Error("The workspace link outcome could not be verified."),{unverifiedOutcome:true});};
       if(!binding||typeof binding.bindingId!=="string"||!binding.bindingId||binding.workspaceId!==target.workspaceId
         ||binding.state!=="active"||binding.version!==1||binding.sourceId!=="project-alpha:primary"
         ||binding.rootType!==target.rootType||binding.rootPublicId!==target.rootPublicId
         ||binding.ownerScopeType!==target.ownerScopeType||binding.ownerPublicId!==target.ownerPublicId
         ||binding.projectPublicId!==target.projectPublicId||binding.contextVersion!==target.contextVersion
         ||binding.ownershipMode!==target.ownershipMode||binding.divisionId!==target.divisionId
-        ||typeof binding.folderPrefix!=="string"||typeof response.replayed!=="boolean")throw new ApiError("The workspace link outcome could not be verified.",409,{});
+        ||typeof binding.folderPrefix!=="string"||typeof response.replayed!=="boolean")unverified();
       pending.current=null;setUncertain(false);setStatus("Folder linked to the selected Client Workspace. No client access was granted.");onLinked();
     }catch(caught){
-      if(caught instanceof ApiError&&caught.status<500&&caught.status!==429){pending.current=null;setUncertain(false);setError(caught.message);}
+      if((caught as {unverifiedOutcome?:boolean}).unverifiedOutcome){setUncertain(true);setError("The workspace link outcome could not be verified. Retry the same folder link to confirm it; do not select another workspace.");}
+      else if(caught instanceof ApiError&&caught.status<500&&caught.status!==429){pending.current=null;setUncertain(false);setError(caught.message);}
       else{setUncertain(true);setError("The workspace link outcome is not confirmed. Retry the same operation safely; do not select another workspace.");}
     }finally{setBusy(false);}
   };
@@ -5150,6 +5158,7 @@ function PrimaryAuthenticatedDeliveryGrantPanel({ folder, canRevoke, creationEna
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   const [portalSetupNeeded, setPortalSetupNeeded] = useState(false);
+  const [bindingBusy, setBindingBusy] = useState(false);
   const alive = useRef(false), epoch = useRef(0), mutationBusy = useRef(false), pending = useRef<Pending | null>(null);
   const readController = useRef<AbortController | null>(null), searchController = useRef<AbortController | null>(null), previewController = useRef<AbortController | null>(null), mutationController = useRef<AbortController | null>(null), reviewTitle = useRef<HTMLHeadingElement>(null);
   const text = (value: unknown): value is string => typeof value === "string" && value.length > 0 && value.length <= 4096;
@@ -5174,7 +5183,7 @@ function PrimaryAuthenticatedDeliveryGrantPanel({ folder, canRevoke, creationEna
     setError((caught as Error).message || "Authenticated access could not be loaded.");
   }, [clearContext]);
   useEffect(() => { alive.current = true; return () => { alive.current = false; epoch.current++; abortReads(); mutationController.current?.abort(); }; }, [folder.id, abortReads]);
-  useEffect(() => { onBusyChange?.(busy || uncertain); return () => onBusyChange?.(false); }, [busy, uncertain, onBusyChange]);
+  useEffect(() => { onBusyChange?.(busy || uncertain || bindingBusy); return () => onBusyChange?.(false); }, [busy, uncertain, bindingBusy, onBusyChange]);
   useEffect(() => { if (preview) reviewTitle.current?.focus(); }, [preview]);
   const resetTerms = () => { setAccessKind(""); setAccessMode(""); setExpiresAt(""); };
   const clearReview = () => { epoch.current++; previewController.current?.abort(); setPreview(null); setError(""); setMessage(""); };
@@ -5283,7 +5292,7 @@ function PrimaryAuthenticatedDeliveryGrantPanel({ folder, canRevoke, creationEna
   return <div className="client-workspace-grant-panel primary-authenticated-grant-panel">
       <strong>Authenticated Client Portal access</strong>
       <small>This permission covers this folder and everything underneath it. It is checked against current verified identity, workspace membership, hierarchy, deny policy, and folder source version. It never creates a bearer link.</small>
-      <button type="button" className="button-ghost button-small" disabled={busy || loading} onClick={() => { if (!uncertain) { clearContext(); resetTerms(); } void load(); }}>Refresh authenticated access</button>
+      <button type="button" className="button-ghost button-small" disabled={busy || loading || bindingBusy} onClick={() => { if (!uncertain) { clearContext(); resetTerms(); } void load(); }}>Refresh authenticated access</button>
       {loading && <Loading />}
       {context && <>
         {!creationEnabled && <div className="notice" role="status">New Client Workspace access and restores are paused. Existing access can still be reviewed and revoked.</div>}
@@ -5338,7 +5347,7 @@ function PrimaryAuthenticatedDeliveryGrantPanel({ folder, canRevoke, creationEna
         {preview && <section className="primary-authenticated-grant-review" aria-label="Review authenticated portal access"><h4 ref={reviewTitle} tabIndex={-1}>Confirm authenticated access</h4><dl>{[["Workspace", preview.workspaceLabel], ["Project", preview.projectName ?? "No project-specific access terms"], ["Recipient", preview.audienceLabel], ["Target type", selected ? AUTHENTICATED_GRANT_AUDIENCE_LABEL[selected.type] : "Unknown"], ["Recipient rule", selected?.type === "principal" ? "This exact verified person only" : "Current authorized members; membership is rechecked"], ["Recipient preview", selected?.type === "principal" ? `${preview.recipientCount} exact verified person` : preview.recipientCount > 0 ? `${preview.recipientPreview?.truncated ? "At least " : "Up to "}${preview.recipientCount} currently eligible people; final membership is checked when opened` : "Dynamic membership; final recipients are checked when opened"], ["Access terms", termsLabel(preview.accessTerms)], ["Access ends", preview.effectiveAccessExpiresAt ? date(preview.effectiveAccessExpiresAt) : preview.accessTerms?.mode === "project_end" ? "Awaiting verified project completion, then 7 days" : "When revoked"]].map(([label, value]) => <div key={label}><dt>{label}</dt><dd>{value}</dd></div>)}</dl>{preview.accessTerms?.mode === "project_end" && <p>Reopening does not renew expired access.</p>}<p>Confirm this recipient and scope. This grants only the reviewed folder access; it never widens an individual to their organization and creates no public link.</p><div className="actions"><button type="button" className="button-orange" disabled={disabled || !creationEnabled} onClick={create}>{restoreTarget ? "Restore authenticated access" : "Grant authenticated access"}</button><button type="button" className="button-ghost" disabled={busy || uncertain} onClick={() => setPreview(null)}>Cancel review</button></div></section>}
       </>}
       {error && <small className="error" role="alert">{error}{portalSetupNeeded && <> <a href="/clients#client-portal-setup">Open Client Hub portal setup</a> to review the exact client account, workspace, and verified membership.</>}</small>}
-      {portalSetupNeeded&&creationEnabled&&<PrimaryWorkspaceBindingSetup folder={folder} onLinked={()=>{setPortalSetupNeeded(false);setError("");void load();}}/>}
+      {portalSetupNeeded&&creationEnabled&&<PrimaryWorkspaceBindingSetup folder={folder} onBusyChange={setBindingBusy} onLinked={()=>{setPortalSetupNeeded(false);setError("");void load();}}/>}
       {message && <small role="status">{message}</small>}
       {uncertain && pending.current && <button type="button" className="button-orange" disabled={busy || loading || !context || (pending.current.action === "revoke" ? !canRevoke : !creationEnabled)} onClick={() => void execute(pending.current!)}>Retry same access operation</button>}
       {grants.length > 0 && <div className="authenticated-grant-list" aria-label="Authenticated portal grant history">
@@ -5419,9 +5428,11 @@ function ShareDialog({
   const workspaceShareTab = useRef<HTMLButtonElement>(null);
   const opener = useRef<HTMLElement | null>(null);
   const closeRef = useRef(close);
-  const busyRef = useRef(busy);
+  const [grantBusy, setGrantBusy] = useState(false);
+  const locked = busy || grantBusy;
+  const busyRef = useRef(locked);
   closeRef.current = close;
-  busyRef.current = busy;
+  busyRef.current = locked;
 
   useEffect(() => {
     opener.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
@@ -5454,6 +5465,7 @@ function ShareDialog({
   const handleShareModeKeyDown = (event: ReactKeyboardEvent<HTMLButtonElement>) => {
     if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
     event.preventDefault();
+    if (busyRef.current) return;
     const tabs = authenticatedGrantsEnabled
       ? [{ mode: "public" as const, ref: publicShareTab }, { mode: "workspace" as const, ref: workspaceShareTab }]
       : [{ mode: "public" as const, ref: publicShareTab }];
@@ -5587,7 +5599,7 @@ function ShareDialog({
             ref={closeButton}
             className="button-ghost button-small"
             onClick={close}
-            disabled={busy}
+            disabled={locked}
           >
             Close
           </button>
@@ -5609,7 +5621,7 @@ function ShareDialog({
             className={shareMode === "public" ? "active" : "button-ghost"}
             onClick={() => setShareMode("public")}
             onKeyDown={handleShareModeKeyDown}
-            disabled={busy}
+            disabled={locked}
           >Public link</button>
           <button
             ref={workspaceShareTab}
@@ -5622,7 +5634,7 @@ function ShareDialog({
             className={shareMode === "workspace" ? "active" : "button-ghost"}
             onClick={() => setShareMode("workspace")}
             onKeyDown={handleShareModeKeyDown}
-            disabled={busy || !authenticatedGrantsEnabled}
+            disabled={locked || !authenticatedGrantsEnabled}
             title={!authenticatedGrantsEnabled ? authenticatedGrantReadinessMessage : undefined}
           >Client Workspace</button>
         </div>}
@@ -5635,7 +5647,7 @@ function ShareDialog({
             </header>
             {authenticatedGrantsEnabled
               ? canManageAuthenticatedGrants
-                ? <AuthenticatedDeliveryGrantPanel folder={folder} canRevoke={canRevoke} creationEnabled={authenticatedGrantCreationEnabled} embedded />
+                ? <AuthenticatedDeliveryGrantPanel folder={folder} canRevoke={canRevoke} creationEnabled={authenticatedGrantCreationEnabled} embedded onBusyChange={setGrantBusy} />
                 : <div className="notice" role="status">Administrator access is required to manage Client Workspace grants. Existing public-link sharing remains available.</div>
               : <div className="notice" role="status">{authenticatedGrantReadinessMessage} <a href="/clients#client-portal-setup">Open Client Hub portal setup</a> to check readiness.</div>}
             {canProvisionDelegated && <details className="workspace-sharing-advanced">
