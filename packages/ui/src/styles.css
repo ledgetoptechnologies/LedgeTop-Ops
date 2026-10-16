@@ -290,6 +290,7 @@ input[type=file]::file-selector-button:hover { background: #e2e7eb; }
 
 .status-pill {
   flex: none;
+  justify-self: start;
   display: inline-flex;
   align-items: center;
   border-radius: 999px;

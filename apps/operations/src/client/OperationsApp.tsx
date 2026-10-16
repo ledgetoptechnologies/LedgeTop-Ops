@@ -463,6 +463,12 @@ export function OperationsApp() {
   );
 }
 
+/** Eyebrow above each page title: the area the page belongs to, not the brand (already in the header). */
+const SECTION_GROUP: Record<Page, string> = {
+  dashboard: "Overview", operations: "Field work", clients: "Clients", notifications: "Delivery",
+  airspace: "Flight safety", delivery: "Files and delivery", viewer: "3D models", team: "Administration",
+  administration: "Administration",
+};
 function greeting(displayName: string, now = new Date()): string {
   const first = displayName.trim().split(/\s+/)[0] || "there", hour = now.getHours();
   return `${hour < 12 ? "Good morning" : hour < 17 ? "Good afternoon" : "Good evening"}, ${first}`;
@@ -510,7 +516,7 @@ function PageHeading({ page, displayName }: { page: Page; displayName: string })
     <div className="page-heading">
       <span className="eyebrow">{page === "dashboard"
         ? new Date().toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric" })
-        : "Ledge Top Operations"}</span>
+        : SECTION_GROUP[page]}</span>
       <h1>{copy[page][0]}</h1>
       <p>{page === "dashboard" ? `${greeting(displayName)}. Here's what needs attention today.` : copy[page][1]}</p>
     </div>

@@ -1,3 +1,4 @@
+import { projectAlphaSourceName } from "@ltds/shared";
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { Card, Skeleton } from "@ltds/ui";
 import { api, ApiError } from "./api";
@@ -809,7 +810,7 @@ function ProjectAdoptionPanel({ disabled }: { disabled: boolean }) {
     <select id="project-adoption-source" value={sourceId}
       disabled={busy || disabled || frozen || sourcesLoading || Boolean(sourceError) || !sourceReady}
       onChange={event => { setSourceId(event.target.value); setProjects([]); setSelected(""); setNextCursor(null); setMessage(""); setError(""); }}>
-      {sources.map(source => <option key={source} value={source}>{source}</option>)}
+      {sources.map(source => <option key={source} value={source}>{projectAlphaSourceName(source)}</option>)}
     </select>
     <button type="button" className="button-ghost button-small" disabled={busy || disabled || frozen || sourcesLoading || Boolean(sourceError) || !sourceReady}
       onClick={() => void discover()}>{busy ? "Checking…" : "Find authorized unbound Projects"}</button>
