@@ -273,9 +273,13 @@ test("server search finds unloaded clients and preserves query and kind through 
   await page.goto("/clients");
   await expect(page.getByText("Directory refreshed periodically.", { exact: false })).toBeVisible();
   await page.getByRole("button", { name: "Organizations", exact: true }).click();
+  // Exercise explicit submission before the separate debounced-search behavior.
+  await page.clock.install({ time: new Date("2034-01-01T00:00:00Z") });
+  await page.clock.pauseAt(new Date("2034-01-01T00:00:01Z"));
   await page.getByRole("searchbox", { name: "Search clients" }).fill("unloaded@example.test");
   await page.getByRole("button", { name: "Search", exact: true }).click();
   await expect(page.getByRole("link", { name: "Open Hidden customer client workspace" })).toBeVisible();
+  await page.clock.resume();
   await expect(page.getByRole("link", { name: "Open Initial customer client workspace" })).toHaveCount(0);
   expect(requested.some(url => url.searchParams.get("q") === "unloaded@example.test" && url.searchParams.get("kind") === "organization")).toBe(true);
   const selectedUrl = page.url();

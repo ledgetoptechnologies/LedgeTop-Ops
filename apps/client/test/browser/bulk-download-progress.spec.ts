@@ -12,6 +12,10 @@ for (const { failureCode, recoveryDenied } of [
     let exchanges = 0;
     let starts = 0;
     let polls = 0;
+    if (replacedSession) {
+      // Poll only after the other tab has replaced the shared session cookie.
+      await page.clock.install({ time: new Date("2034-01-01T00:00:00Z") });
+    }
     await page.route("**/api/public/shares/public/session", route => {
       exchanges += 1;
       expect(route.request().postDataJSON()).toEqual({ secret: "fragment-secret-that-is-long-enough-for-a-share" });
@@ -41,6 +45,7 @@ for (const { failureCode, recoveryDenied } of [
     await page.route("**/session-fixture.zip", route => route.fulfill({ contentType: "application/zip", body: "fixture", headers: { "Content-Disposition": "attachment; filename=fixture.zip" } }));
     await page.goto("/s/public#fragment-secret-that-is-long-enough-for-a-share");
     await expect(page.getByRole("button", { name: /Download all/ })).toBeVisible();
+    if (replacedSession) await page.clock.pauseAt(await page.evaluate(() => Date.now() + 1000));
     const download = sessionExpired && !recoveryDenied ? page.waitForEvent("download") : null;
     await page.getByRole("button", { name: /Download all/ }).click();
     if (replacedSession) {
@@ -50,6 +55,7 @@ for (const { failureCode, recoveryDenied } of [
       await other.goto("/other-tab-fixture");
       await other.evaluate(() => fetch("/api/public/shares/other/session", { method: "POST" }));
       await other.close();
+      await page.clock.resume();
     }
     if (sessionExpired && !recoveryDenied) {
       await expect(page.locator(".bulk-progress")).toContainText("Download ready");
