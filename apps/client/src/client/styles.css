@@ -843,6 +843,12 @@
 .client-portal-main > * + * { margin-top: 1.2rem; }
 
 .client-portal-gate-main { width: min(620px, calc(100% - 2rem)); margin: clamp(3rem, 12vh, 8rem) auto; }
+.portal-gate-card { display: grid; gap: .6rem; }
+.portal-gate-card > h1 { margin: 0; font-size: clamp(1.4rem, 3vw, 1.75rem); }
+.portal-gate-card > p { margin: 0; color: #4c5963; line-height: 1.55; }
+.portal-gate-actions { display: flex; flex-wrap: wrap; gap: .6rem; margin-top: .9rem; }
+.portal-workspace-status { border-left: 4px solid #ee5007; }
+.portal-workspace-status > button { margin-top: .5rem; }
 
 /* ---------------------------------------------------------------------------
    Portal headings (match operations page-heading pattern)

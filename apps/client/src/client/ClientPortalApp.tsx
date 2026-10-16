@@ -7,7 +7,8 @@ import {
   type FormEvent,
   type ReactNode,
 } from "react";
-import { AccountMenu, Card, EmptyState, Loading, LtMark, StatusPill, openViewerShell, Skeleton } from "@ltds/ui";
+import { AccountMenu, Card, EmptyState, Loading, StatusPill, openViewerShell, Skeleton } from "@ltds/ui";
+import { PortalBoundary, PortalBrand } from "./PortalShell";
 import type { DeliveryLocationCollection } from "@ltds/shared";
 import type { RequestError } from "./bulk-download";
 import {
@@ -169,22 +170,22 @@ function blockedPortal(
       status: "blocked",
       optionalClientWorkspaceAbsent,
       title: "Sign in required",
-      detail: "Sign in with the client identity provided by Ledge Top to continue.",
+      detail: "Your session has ended. Sign in with the email address Ledge Top invited to continue.",
     };
   if (error.status === 403)
     return {
       status: "blocked",
       optionalClientWorkspaceAbsent,
-      title: "Access not provisioned",
+      title: "Workspace access not set up yet",
       detail:
-        "This workspace is not available to your verified identity. Contact your Ledge Top representative.",
+        "You're signed in, but this account doesn't have access to this client workspace. Contact your Ledge Top representative.",
     };
   if (error.status === 503)
     return {
       status: "blocked",
       optionalClientWorkspaceAbsent,
       title: "Portal configuration incomplete",
-      detail: "Client portal access is not ready on this site.",
+      detail: "Client portal access is not ready on this site yet. Please try again later.",
     };
   return {
     status: "blocked",
@@ -247,24 +248,6 @@ function projectStatusLabel(status: string | null): string {
     .replace(/\b\w/g, (character) => character.toUpperCase());
 }
 
-/** One generic Ledge Top identity on every portal domain and workspace. */
-function PortalBrand({ product }: { product: string }) {
-  return <div className="ltds-brand portal-brand" data-portal-division="generic" aria-label={`Ledge Top ${product}`}>
-    <LtMark />
-    <span className="portal-brand-copy"><strong>Ledge Top</strong><small>{product}</small></span>
-  </div>;
-}
-
-function PortalBoundary({ children }: { children: ReactNode }) {
-  return (
-    <div className="client-portal-boundary">
-      <header className="client-portal-gate-header">
-        <PortalBrand product="Client portal" />
-      </header>
-      <main className="client-portal-gate-main">{children}</main>
-    </div>
-  );
-}
 
 function FileBrowser({
   load,
@@ -3041,16 +3024,18 @@ export function ClientPortalApp({
       <PortalBoundary>
         <Card>
           <EmptyState title={gate.title} detail={gate.detail} />
-          <button
-            type="button"
-            className="button-orange"
-            onClick={() => {
-              setGate({ status: "loading" });
-              setBootstrapRevision(value => value + 1);
-            }}
-          >
-            Retry portal
-          </button>
+          <div className="portal-gate-actions">
+            <button
+              type="button"
+              className="button-orange"
+              onClick={() => {
+                setGate({ status: "loading" });
+                setBootstrapRevision(value => value + 1);
+              }}
+            >
+              Retry portal
+            </button>
+          </div>
         </Card>
       </PortalBoundary>
     );

@@ -1,5 +1,6 @@
 import { lazy, useEffect, useState } from "react";
 import { loadOperationsHome, type PortalOperationsHomeResponse } from "./portal-api";
+import { PortalBoundary } from "./PortalShell";
 
 type BootstrapState =
   | { kind: "loading" }
@@ -27,9 +28,9 @@ export function operationsBootstrapOutcome(error: unknown): "legacy" | "blocked"
 }
 
 function blockedCopy(status?: number): { heading: string; detail: string } {
-  if (status === 401) return { heading: "Sign in required", detail: "Sign in through the authorized LedgeTop portal to continue." };
-  if (status === 403) return { heading: "Service home access is not enabled", detail: "Your account does not currently have permission to view this service home." };
-  return { heading: "Service home unavailable", detail: "The service home could not be verified. Please try again later." };
+  if (status === 401) return { heading: "Sign in required", detail: "Your session has ended. Sign in with the email address Ledge Top invited to continue." };
+  if (status === 403) return { heading: "Service access not set up yet", detail: "You're signed in, but this account doesn't have Ledge Top service access yet. Contact your Ledge Top representative." };
+  return { heading: "Client portal unavailable", detail: "Your client portal could not be verified right now. Please try again in a minute." };
 }
 
 export function PortalBootstrapApp() {
@@ -58,7 +59,8 @@ export function PortalBootstrapApp() {
 
   if (state.kind === "legacy") return <LegacyClientPortalApp initialPage="dashboard" />;
   if (state.kind === "operations") return <LegacyClientPortalApp initialPage="dashboard" operationsHomeResponse={state.response} />;
-  if (state.kind === "loading") return <main className="portal-loading-shell" aria-busy="true" aria-label="Loading LedgeTop client portal" />;
+  if (state.kind === "loading") return <main className="portal-loading-shell" aria-busy="true" aria-label="Loading Ledge Top client portal" />;
   const copy = blockedCopy(state.status);
-  return <div className="client-portal"><main className="portal-main"><section className="portal-card" role="alert"><h1>{copy.heading}</h1><p>{copy.detail}</p></section></main></div>;
+  return <PortalBoundary><section className="portal-card portal-gate-card" role="alert"><h1>{copy.heading}</h1><p>{copy.detail}</p>
+  </section></PortalBoundary>;
 }
