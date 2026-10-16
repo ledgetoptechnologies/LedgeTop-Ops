@@ -28,7 +28,7 @@ export function operationsBootstrapOutcome(error: unknown): "legacy" | "blocked"
 }
 
 function blockedCopy(status?: number): { heading: string; detail: string } {
-  if (status === 401) return { heading: "Sign in required", detail: "Your session has ended. Sign in with the email address Ledge Top invited to continue." };
+  if (status === 401) return { heading: "Sign in required", detail: "Your session has ended. Sign in with the email address registered with Ledge Top to continue." };
   if (status === 403) return { heading: "Service access not set up yet", detail: "You're signed in, but this account doesn't have Ledge Top service access yet. Contact your Ledge Top representative." };
   return { heading: "Client portal unavailable", detail: "Your client portal could not be verified right now. Please try again in a minute." };
 }

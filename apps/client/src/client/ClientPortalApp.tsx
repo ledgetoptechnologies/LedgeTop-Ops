@@ -170,7 +170,7 @@ function blockedPortal(
       status: "blocked",
       optionalClientWorkspaceAbsent,
       title: "Sign in required",
-      detail: "Your session has ended. Sign in with the email address Ledge Top invited to continue.",
+      detail: "Your session has ended. Sign in with the email address registered with Ledge Top to continue.",
     };
   if (isNoAuthorizedClientWorkspace(caught))
     return {
