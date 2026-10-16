@@ -72,7 +72,7 @@ function Figure({ label, value, tone, hint }: { label: string; value: string; to
   </div>;
 }
 
-function CurrencyFigures({ bucket, expenseCurrencyKnown }: { bucket: FinanceMoneyBucket; expenseCurrencyKnown: boolean }) {
+function CurrencyFigures({ bucket, expenseCurrencyKnown, showUnavailableResult = true }: { bucket: FinanceMoneyBucket; expenseCurrencyKnown: boolean; showUnavailableResult?: boolean }) {
   const c = bucket.currency;
   const overdue = bucket.receivables.overdue !== "0.00" && bucket.receivables.overdue !== "0";
   return <div className="finance-figures">
@@ -85,7 +85,7 @@ function CurrencyFigures({ bucket, expenseCurrencyKnown }: { bucket: FinanceMone
     {expenseCurrencyKnown && bucket.recordedOperatingResult !== null
       ? <Figure label="Recorded operating result" value={formatAmount(bucket.recordedOperatingResult, c)}
         hint={`Expenses ${formatAmount(bucket.expenses.total, c)}${bucket.expenses.pending ? ` · ${formatAmount(bucket.expenses.pending, c)} pending` : ""}`} />
-      : <Figure label="Recorded operating result" value="Not available" tone="muted" hint="Expense currency isn't configured in Project Alpha." />}
+      : showUnavailableResult && <Figure label="Recorded operating result" value="Not available" tone="muted" hint="Expense currency isn't configured in Project Alpha." />}
   </div>;
 }
 
@@ -112,7 +112,7 @@ function SourceCard({ source }: { source: FinanceSourceSummary }) {
     <header><h3>{name}</h3><StatusPill tone={coverage.complete ? "success" : "warning"}>{coverage.complete ? "Complete" : "Partial"}</StatusPill></header>
     {currencies.length ? currencies.map(bucket => <div key={bucket.currency} className="finance-currency">
       {currencies.length > 1 && <span className="finance-currency-code">{bucket.currency}</span>}
-      <CurrencyFigures bucket={bucket} expenseCurrencyKnown={coverage.expenseCurrencyKnown} />
+      <CurrencyFigures bucket={bucket} expenseCurrencyKnown={coverage.expenseCurrencyKnown} showUnavailableResult={false} />
     </div>) : <p className="finance-empty">No payments or open invoices this period.</p>}
     {expenses.total > 0 && <p className="finance-meta">{expenses.total} expense{expenses.total === 1 ? "" : "s"} recorded · {expenses.pending} pending · {expenses.confirmed} confirmed · {expenses.reimbursed} reimbursed</p>}
     {notes.length > 0 && <ul className="finance-notes">{notes.map(note => <li key={note}>{note}</li>)}</ul>}
