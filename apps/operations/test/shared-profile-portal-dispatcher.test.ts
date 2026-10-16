@@ -8,6 +8,7 @@ import {writeNativeDirectoryProfile,writeNativeDirectorySharedPortalProfiles,typ
 import {sharedProfileCreationFence} from '../src/worker/native-directory-shared-profile-routes';
 import {prepareSharedProfilePortalWrite,normalizePortalBusinessProfile} from '../src/worker/shared-profile-portal-authority';
 import {dispatchProjectAlphaDirectoryProfileOutboxCommand} from '../src/worker/project-alpha-directory-profile-outbox-dispatcher';
+import {drainNativeDirectoryOutboxes} from '../src/worker/native-directory-outbox-scheduler';
 import {PROJECT_ALPHA_DIRECTORY_CLIENT_CONTACT_PROFILE_ENDPOINT} from '../src/worker/project-alpha-directory-profile-api-v2';
 import {dispatchNativeDirectoryProfileBindingContinuation} from '../src/worker/native-directory-profile-binding-continuation';
 let runtime: Miniflare;
@@ -222,4 +223,22 @@ it('does not persist an ACK after authority is revoked during the remote mutatio
  expect(await dispatchProjectAlphaDirectoryProfileOutboxCommand(f.configuredFor(c.source_id),c.source_id,c.command_id,f.send)).toMatchObject({status:'blocked',reason:'authority'});expect(f.posts).toHaveLength(1);
  expect(await db.prepare('SELECT state FROM project_alpha_directory_outbox WHERE command_id=?').bind(c.command_id).first('state')).toBe('pending');
  expect(await db.prepare('SELECT count(*) n FROM native_directory_profile_binding_jobs WHERE command_id=?').bind(c.command_id).first('n')).toBe(0);
+});
+
+it('carries the private Client reader through the real scheduler and fails closed when it is absent',async()=>{
+ for(const withBinding of [true,false]){
+  const f=await pendingPortal(),c=f.commands.find(command=>command.source_id==='project-alpha:primary')!;
+  // Other cases deliberately leave denied commands pending. Isolate this real
+  // scheduler candidate without replacing dispatch, authority, or SQL guards.
+  await db.prepare("UPDATE project_alpha_directory_outbox SET next_attempt_at=? WHERE state='pending' AND command_id<>?")
+   .bind(Date.now()+60_000,c.command_id).run();
+  const configured=f.configuredFor(c.source_id),{SHARED_PROFILE_PORTAL_AUTHORITY:_,...withoutBinding}=configured;
+  const result=await drainNativeDirectoryOutboxes({...withBinding?configured:withoutBinding,NATIVE_DIRECTORY_OUTBOX_DRAIN_ENABLED:'true'},
+   {maxCommands:1,rotationTime:0,send:f.send});
+  expect(result).toMatchObject({status:'drained',attempted:1,acknowledged:withBinding?1:0,blocked:withBinding?0:1,failed:0});
+  expect(await db.prepare('SELECT state FROM project_alpha_directory_outbox WHERE command_id=?').bind(c.command_id).first('state'))
+   .toBe(withBinding?'acknowledged':'pending');
+  if(withBinding){expect(f.proofReader.mock.calls.length).toBeGreaterThanOrEqual(4);expect(f.posts).toHaveLength(1);}
+  else{expect(f.proofReader).not.toHaveBeenCalled();expect(f.send).not.toHaveBeenCalled();}
+ }
 });

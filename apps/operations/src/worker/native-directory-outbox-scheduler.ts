@@ -8,6 +8,7 @@ import { dispatchProjectAlphaDirectoryRelationshipCommand } from "./project-alph
 import { materializeResolvedProjectAlphaDirectoryClientIntents } from "./project-alpha-directory-client-intent-materializer";
 import { dispatchNativeDirectoryProfileBindingContinuation, profileBindingContinuationEnabled } from './native-directory-profile-binding-continuation';
 import { dispatchProjectAlphaDirectoryLifecycleCommand } from "./project-alpha-directory-lifecycle-outbox-dispatcher";
+import type { SharedProfilePortalAuthorityBinding } from "../../../../packages/shared/src/shared-business-profile";
 
 const MAX_CONNECTION_BYTES = 256 * 1024;
 const MAX_SOURCES = 64;
@@ -24,6 +25,7 @@ type Environment = ProjectAlphaApiV2ConnectionEnvironment & Readonly<{
   ENVIRONMENT?: string;
   NATIVE_DIRECTORY_PROFILE_BINDING_CONTINUATION_ENABLED?: string;
   NATIVE_DIRECTORY_LIFECYCLE_ENABLED?: string;
+  SHARED_PROFILE_PORTAL_AUTHORITY?: SharedProfilePortalAuthorityBinding;
 }>;
 type QueueKind = "profile" | "relationship" | "binding_continuation" | "lifecycle";
 type Candidate = Readonly<{
@@ -234,6 +236,7 @@ export async function drainNativeDirectoryOutboxes(env: Environment,
   const connections = env.PROJECT_ALPHA_API_V2_CONNECTIONS;
   const createGenerationRecovery = env.PROJECT_ALPHA_DIRECTORY_CREATE_GENERATION_RECOVERY_ENABLED;
   const relationshipGenerationRecovery = env.PROJECT_ALPHA_DIRECTORY_RELATIONSHIP_GENERATION_RECOVERY_ENABLED;
+  const portalAuthority = env.SHARED_PROFILE_PORTAL_AUTHORITY;
   const continuationPolicy = { ENVIRONMENT:env.ENVIRONMENT,
     NATIVE_DIRECTORY_PROFILE_BINDING_CONTINUATION_ENABLED:env.NATIVE_DIRECTORY_PROFILE_BINDING_CONTINUATION_ENABLED };
   const lifecycleEnabled = env.ENVIRONMENT === "staging" && env.NATIVE_DIRECTORY_LIFECYCLE_ENABLED === "true";
@@ -254,6 +257,7 @@ export async function drainNativeDirectoryOutboxes(env: Environment,
   const selected = fairOrder(candidates, sourceIds, rotationTime, maxCommands);
   const send = deadlineFetch(options.send ?? fetch, deadline, now);
   const dispatchEnvironment = { OPS_DB: env.OPS_DB, PROJECT_ALPHA_API_V2_CONNECTIONS: connections,
+    SHARED_PROFILE_PORTAL_AUTHORITY: portalAuthority,
     PROJECT_ALPHA_DIRECTORY_CREATE_GENERATION_RECOVERY_ENABLED: createGenerationRecovery,
     PROJECT_ALPHA_DIRECTORY_RELATIONSHIP_GENERATION_RECOVERY_ENABLED: relationshipGenerationRecovery, ...continuationPolicy,
     ...(lifecycleEnabled ? { PROJECT_ALPHA_DIRECTORY_LIFECYCLE_ENABLED: "true" } : {}) };

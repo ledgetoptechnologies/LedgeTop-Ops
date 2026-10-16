@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { Miniflare } from "miniflare";
+import type {SharedProfilePortalAuthorityBinding} from '../../../packages/shared/src/shared-business-profile';
 
 const profileDispatch = vi.hoisted(() => vi.fn());
 const relationshipDispatch = vi.hoisted(() => vi.fn());
@@ -103,6 +104,22 @@ beforeEach(async () => {
 });
 
 afterAll(async () => runtime.dispose());
+
+it('pins the exact private portal authority reader before asynchronous scheduler work',async()=>{
+  const sourceId='project-alpha:primary';await command('profile','portal-profile',sourceId);
+  const reader={readAuthority:vi.fn(async()=>({ok:false as const,code:'denied' as const}))};
+  const replacement={readAuthority:vi.fn(async()=>({ok:false as const,code:'unavailable' as const}))};
+  const env:ReturnType<typeof environment>&{SHARED_PROFILE_PORTAL_AUTHORITY:SharedProfilePortalAuthorityBinding}={...environment([sourceId]),SHARED_PROFILE_PORTAL_AUTHORITY:reader};
+  materializeClients.mockImplementationOnce(async()=>{env.SHARED_PROFILE_PORTAL_AUTHORITY=replacement;return{examined:0,materialized:0,blocked:0};});
+  profileDispatch.mockImplementationOnce(async dispatchEnv=>{
+    expect(dispatchEnv.SHARED_PROFILE_PORTAL_AUTHORITY).toBe(reader);
+    await dispatchEnv.SHARED_PROFILE_PORTAL_AUTHORITY.readAuthority({protocolVersion:1,workspaceId:'workspace',sourceId,
+      issuer:'https://access.example.test',subject:'portal-user',principalPublicId:'principal',scopeType:'client',publicId:'client'});
+    return{status:'blocked',reason:'authority'};
+  });
+  expect(await drainNativeDirectoryOutboxes(env,{now:()=>dueAt,rotationTime:0,maxCommands:1})).toMatchObject({attempted:1,blocked:1,acknowledged:0});
+  expect(reader.readAuthority).toHaveBeenCalledOnce();expect(replacement.readAuthority).not.toHaveBeenCalled();
+});
 
 describe("native Directory scheduled outbox drain", () => {
   it.each([undefined, "false", "true"])("pins and forwards the default-off create recovery flag (%s)", async flag => {
