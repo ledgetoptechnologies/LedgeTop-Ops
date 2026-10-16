@@ -21,6 +21,18 @@ export const CLIENT_CURRENT_SOURCE_MIGRATION_CHAIN = Object.freeze({
     "0231_portal_primary_private_ingress_authority.sql": "b5582f703cf2e00567f49998922e9d1aaee86455c43c1fdc7a1326cd436e3353",
   }),
 });
+// Latest source inventory is distinct from frozen historical acceptance chains.
+export const CLIENT_LATEST_SOURCE_MIGRATION_CHAIN = Object.freeze({
+  count: 152,
+  finalMigration: "0233_explicit_primary_workspace_folder_ownership.sql",
+  namesSha256: "a9994988f30f8abb8d56a8eb9da3c426bb77cb977a82c75cceef237e6ebb04a0",
+  contentsSha256: "bf1025522dc598f68a7987b5b607187259af35b1f28b97cc1d3d6a96212704e4",
+  appendedMigrations: Object.freeze({
+    ...CLIENT_CURRENT_SOURCE_MIGRATION_CHAIN.appendedMigrations,
+    "0232_shared_profile_edit_authority.sql": "3c2b3ddbdb920739c8f4ab8f437808749f5f83581b098518c5efd41c2e0b0073",
+    "0233_explicit_primary_workspace_folder_ownership.sql": "7d419b99aab73086c60571cd854d49b62351d5c43ad4347e5da1a1e2fb18878a",
+  }),
+});
 // Historical current203 alias: separately versioned203 authority tools retain
 // this exact contract. New source/release readers use LATEST below.
 export const OPERATIONS_CURRENT_SOURCE_MIGRATION_CHAIN = Object.freeze({
@@ -287,7 +299,8 @@ export function buildArtifacts(base, owner, options = {}) {
         ? OPERATIONS_LATEST_SOURCE_MIGRATION_CHAIN
         : repositoryNames.includes(OPERATIONS_REVIEWED_SOURCE_MIGRATION_CHAIN_204.finalMigration)
           ? OPERATIONS_REVIEWED_SOURCE_MIGRATION_CHAIN_204 : OPERATIONS_CURRENT_SOURCE_MIGRATION_CHAIN
-      : CLIENT_CURRENT_SOURCE_MIGRATION_CHAIN;
+      : repositoryNames.includes(CLIENT_LATEST_SOURCE_MIGRATION_CHAIN.finalMigration)
+        ? CLIENT_LATEST_SOURCE_MIGRATION_CHAIN : CLIENT_CURRENT_SOURCE_MIGRATION_CHAIN;
     const appendedNames = currentSource ? Object.keys(currentSource.appendedMigrations) : [];
     const hasCurrentAppend = currentSource && appendedNames.every((name) => repositoryNames.includes(name));
     if (currentSource && repositoryNames.some((name) => appendedNames.includes(name)) && !hasCurrentAppend) {

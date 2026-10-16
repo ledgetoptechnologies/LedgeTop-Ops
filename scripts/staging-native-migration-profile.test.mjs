@@ -47,6 +47,16 @@ test.afterEach(() => {
   }
 });
 
+test("accepts the exact latest Client source suffix without changing the frozen rollout window", () => {
+  const base=fixture();
+  for(const name of ['0232_shared_profile_edit_authority.sql','0233_explicit_primary_workspace_folder_ownership.sql'])
+    fs.copyFileSync(path.join(root,'apps','client','migrations',name),path.join(base,'apps','client','migrations',name));
+  const profiles=buildProfiles(base);
+  assert.deepEqual(profiles.client.files.map(({name})=>name),['0229_operations_portal_native_delivery_regrant.sql','0230_operations_portal_native_delivery_terminal_cancellations.sql']);
+  fs.appendFileSync(path.join(base,'apps','client','migrations','0233_explicit_primary_workspace_folder_ownership.sql'),'\n-- changed\n');
+  assert.throws(()=>buildProfiles(base),/current repository migration inventory changed/);
+});
+
 test("builds only the exact migration suffixes and strips every deployment field", () => {
   const profiles = buildProfiles(fixture());
   assert.deepEqual(profiles.operations.files.map(({ name }) => name),

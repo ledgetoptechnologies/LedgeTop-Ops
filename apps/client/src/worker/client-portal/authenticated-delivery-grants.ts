@@ -1,3 +1,4 @@
+import { folderOwnerEntityType,folderOwnerEntityTypeSql } from '../../../../../packages/shared/src/folder-owner-entity';
 import type { Env as ClientEnv } from "../types";
 import { primaryWorkspaceAccount } from "./project-alpha-source";
 import type { PortalAuthorizationEnv } from "./workspace-v2";
@@ -138,7 +139,7 @@ async function candidates(
     JOIN portal_v2_directory_generations generation ON generation.id=checkpoint.active_generation_id
       AND generation.workspace_id=checkpoint.workspace_id AND generation.status='active' AND generation.complete=1
     JOIN portal_v2_directory_entities owner ON owner.workspace_id=binding.workspace_id
-      AND owner.generation_id=checkpoint.active_generation_id AND owner.entity_type=binding.owner_scope_type
+      AND owner.generation_id=checkpoint.active_generation_id AND owner.entity_type=${folderOwnerEntityTypeSql('binding.owner_scope_type','binding.owner_public_id',"(SELECT root_type FROM portal_v2_workspaces owner_workspace WHERE owner_workspace.id=binding.workspace_id)","(SELECT pa_client_public_id FROM portal_v2_workspaces owner_workspace WHERE owner_workspace.id=binding.workspace_id)")}
       AND owner.public_id=binding.owner_public_id AND owner.source_version=binding.source_version AND owner.active=1
     LEFT JOIN pa_portal_principals principal_record ON principal_record.workspace_id=membership.workspace_id
       AND principal_record.public_id=grant_record.audience_public_id
@@ -250,6 +251,9 @@ export async function readNativeAuthenticatedDeliveryPage(env:Env,principal:Veri
 async function integrationDenied(env:Env,principal:VerifiedClientPrincipal,workspaceId:string,row:GrantCandidate):Promise<boolean>{
   if(await activeClientAuthorityWorkspaceClaim(env.DELIVERY_DB,workspaceId))return true;
   if(env.CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED!=="true")return false;
+  const root=await portalDb(env).prepare('SELECT root_type,COALESCE(pa_organization_public_id,pa_client_public_id) public_id FROM portal_v2_workspaces WHERE id=?')
+    .bind(workspaceId).first<{root_type:string;public_id:string}>();
+  if(!root)return true;
   const denied=await portalDb(env).prepare(`WITH RECURSIVE lineage(entity_type,public_id,parent_public_id,depth) AS (
     SELECT entity.entity_type,entity.public_id,entity.parent_public_id,0
     FROM portal_v2_directory_checkpoints checkpoint JOIN portal_v2_directory_entities entity
@@ -268,7 +272,7 @@ async function integrationDenied(env:Env,principal:VerifiedClientPrincipal,works
         ((denial.scope_type='workspace' AND denial.scope_public_id=?) OR
          (denial.scope_type='folder' AND denial.scope_public_id=?) OR
          EXISTS(SELECT 1 FROM lineage WHERE entity_type=denial.scope_type AND public_id=denial.scope_public_id)))) LIMIT 1`)
-    .bind(row.owner_scope_type,row.owner_public_id,workspaceId,workspaceId,principal.issuer,principal.subject,
+    .bind(folderOwnerEntityType(row.owner_scope_type,row.owner_public_id,root.root_type,root.public_id),row.owner_public_id,workspaceId,workspaceId,principal.issuer,principal.subject,
       workspaceId,workspaceId,row.folder_binding_id).first("ok");
   return denied!==null;
 }
@@ -280,6 +284,9 @@ async function audienceLiveAndContained(env: Env, workspaceId: string, row: Gran
       .bind(workspaceId, row.audience_public_id, row.audience_source_version).first("ok");
     return active !== null;
   }
+  const root=await portalDb(env).prepare('SELECT root_type,COALESCE(pa_organization_public_id,pa_client_public_id) public_id FROM portal_v2_workspaces WHERE id=?')
+    .bind(workspaceId).first<{root_type:string;public_id:string}>();
+  if(!root)return false;
   const active = await portalDb(env).prepare(`WITH RECURSIVE ancestry(entity_type,public_id,parent_public_id,source_version,depth) AS (
       SELECT owner.entity_type,owner.public_id,owner.parent_public_id,owner.source_version,0
       FROM portal_v2_directory_checkpoints checkpoint
@@ -311,8 +318,8 @@ async function audienceLiveAndContained(env: Env, workspaceId: string, row: Gran
         AND parent.entity_type=relation.from_type AND parent.public_id=relation.from_public_id AND parent.active=1
       WHERE ancestry.depth<12
     ) SELECT 1 ok FROM ancestry WHERE entity_type=? AND public_id=? AND source_version=? LIMIT 1`)
-    .bind(row.owner_scope_type, row.owner_public_id, workspaceId, workspaceId, workspaceId,
-      row.audience_type, row.audience_public_id, row.audience_source_version).first("ok");
+    .bind(folderOwnerEntityType(row.owner_scope_type,row.owner_public_id,root.root_type,root.public_id), row.owner_public_id, workspaceId, workspaceId, workspaceId,
+      folderOwnerEntityType(row.audience_type,row.audience_public_id,root.root_type,root.public_id), row.audience_public_id, row.audience_source_version).first("ok");
   return active !== null;
 }
 
@@ -413,7 +420,7 @@ export async function listAuthorizedAuthenticatedDeliveryPrefixes(
         AND generation.status='active' AND generation.complete=1
       JOIN portal_v2_directory_entities owner
         ON owner.workspace_id=workspace.id AND owner.generation_id=checkpoint.active_generation_id
-        AND owner.entity_type=binding.owner_scope_type AND owner.public_id=binding.owner_public_id
+        AND owner.entity_type=${folderOwnerEntityTypeSql('binding.owner_scope_type','binding.owner_public_id',"(SELECT root_type FROM portal_v2_workspaces owner_workspace WHERE owner_workspace.id=binding.workspace_id)","(SELECT pa_client_public_id FROM portal_v2_workspaces owner_workspace WHERE owner_workspace.id=binding.workspace_id)")} AND owner.public_id=binding.owner_public_id
         AND owner.active=1
       LEFT JOIN portal_v2_authenticated_delivery_grant_recipients recipient
         ON grant_record.audience_type='principal' AND recipient.grant_id=grant_record.id

@@ -3,7 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { CLIENT_CURRENT_SOURCE_MIGRATION_CHAIN, OPERATIONS_LATEST_SOURCE_MIGRATION_CHAIN } from "./staging-bootstrap.mjs";
+import { CLIENT_CURRENT_SOURCE_MIGRATION_CHAIN, CLIENT_LATEST_SOURCE_MIGRATION_CHAIN, OPERATIONS_LATEST_SOURCE_MIGRATION_CHAIN } from "./staging-bootstrap.mjs";
 
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -306,7 +306,8 @@ function validateSourceMigrations(base, application, contract) {
   }
   const repositoryNames = entries.filter((entry) => entry.isFile() && !entry.isSymbolicLink() && /\.sql$/i.test(entry.name))
     .map((entry) => entry.name).sort();
-  const currentRepositoryChain = contract.currentRepositoryChain;
+  const currentRepositoryChain = application === 'client' && repositoryNames.includes(CLIENT_LATEST_SOURCE_MIGRATION_CHAIN.finalMigration)
+    ? CLIENT_LATEST_SOURCE_MIGRATION_CHAIN : contract.currentRepositoryChain;
   const appendedNames = currentRepositoryChain ? Object.keys(currentRepositoryChain.appendedMigrations) : [];
   const hasCurrentAppend = currentRepositoryChain && appendedNames.every((name) => repositoryNames.includes(name));
   if (currentRepositoryChain && repositoryNames.some((name) => appendedNames.includes(name)) && !hasCurrentAppend) {
