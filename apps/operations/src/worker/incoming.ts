@@ -1036,7 +1036,7 @@ async function createReusableLink(
 }
 
 const linkSchema = z.object({
-  title: z.string().trim().min(1).max(160).default("Send files to Ledge Top Drone Services"),
+  title: z.string().trim().min(1).max(160).default("Send files to Ledge Top"),
   accessCode: z.string().min(8).max(128).optional(),
   maxFiles: z.number().int().min(1).max(500).default(500),
   maxBytes: z.number().int().min(1).max(2 * 1024 ** 4).default(2 * 1024 ** 4),
