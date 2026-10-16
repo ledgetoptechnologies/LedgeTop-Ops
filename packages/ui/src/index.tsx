@@ -33,6 +33,75 @@ export function Loading() {
   return <div className="loading-state skeleton-loading" role="status" aria-label="Loading"><span /><span /><span /><span /></div>;
 }
 
+type SkeletonVariant = "text" | "card" | "stats" | "table" | "list" | "form";
+
+/**
+ * Shape-matched placeholder while content loads. Announced once to assistive
+ * technology through the visually hidden label; the shimmer bars are hidden.
+ */
+export function Skeleton({ variant = "text", lines = 3, rows = 4, columns = 4, label = "Loading…", className = "" }: {
+  variant?: SkeletonVariant; lines?: number; rows?: number; columns?: number; label?: string; className?: string;
+}) {
+  const bar = (key: number | string, width?: string) => <span key={key} className="ltds-skeleton-bar" style={width ? { width } : undefined} />;
+  const widths = ["92%", "76%", "84%", "62%", "70%", "88%"];
+  const body = (() => {
+    switch (variant) {
+      case "card": return <div className="ltds-skeleton-card">{bar("t", "38%")}{Array.from({ length: lines }, (_, i) => bar(i, widths[i % widths.length]))}</div>;
+      case "stats": return <div className="ltds-skeleton-stats">{Array.from({ length: columns }, (_, i) =>
+        <div key={i} className="ltds-skeleton-stat">{bar("v", "42%")}{bar("l", "68%")}</div>)}</div>;
+      case "table": return <div className="ltds-skeleton-table" style={{ ["--skeleton-columns" as string]: String(columns) }}>
+        {Array.from({ length: columns }, (_, i) => <span key={`h${i}`} className="ltds-skeleton-bar ltds-skeleton-head" />)}
+        {Array.from({ length: rows * columns }, (_, i) => bar(i, widths[i % widths.length]))}</div>;
+      case "list": return <div className="ltds-skeleton-list">{Array.from({ length: rows }, (_, i) =>
+        <div key={i} className="ltds-skeleton-row"><span className="ltds-skeleton-avatar" /><div>{bar("a", widths[i % widths.length])}{bar("b", "46%")}</div></div>)}</div>;
+      case "form": return <div className="ltds-skeleton-form">{Array.from({ length: rows }, (_, i) =>
+        <div key={i}>{bar("l", "34%")}<span className="ltds-skeleton-field" /></div>)}</div>;
+      default: return <div className="ltds-skeleton-text">{Array.from({ length: lines }, (_, i) => bar(i, widths[i % widths.length]))}</div>;
+    }
+  })();
+  return <div className={`ltds-skeleton ${className}`.trim()} role="status" aria-live="polite" aria-busy="true">
+    <span className="visually-hidden">{label}</span><div aria-hidden="true">{body}</div>
+  </div>;
+}
+
+/**
+ * In-app modal dialog on the native <dialog> element: the browser traps focus,
+ * Escape closes it, and focus returns to the opener. Children stay mounted while
+ * closed, so form state and in-flight retry state survive close and reopen.
+ */
+export function Dialog({ open, onClose, title, description, children, footer, size = "md", dismissible = true }: PropsWithChildren<{
+  open: boolean; onClose: () => void; title: string; description?: ReactNode; footer?: ReactNode;
+  size?: "sm" | "md" | "lg"; dismissible?: boolean;
+}>) {
+  const ref = useRef<HTMLDialogElement>(null), opener = useRef<HTMLElement | null>(null);
+  const titleId = useId(), descriptionId = useId();
+  useEffect(() => {
+    const dialog = ref.current;
+    if (!dialog) return;
+    if (open && !dialog.open) {
+      opener.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+      if (typeof dialog.showModal === "function") dialog.showModal(); else dialog.setAttribute("open", "");
+    } else if (!open && dialog.open) {
+      dialog.close();
+      opener.current?.focus();
+    }
+  }, [open]);
+  useEffect(() => () => { if (ref.current?.open) ref.current.close(); }, []);
+  return <dialog ref={ref} className={`ltds-dialog ltds-dialog-${size}`} aria-labelledby={titleId}
+    aria-describedby={description ? descriptionId : undefined}
+    onCancel={event => { event.preventDefault(); if (dismissible) onClose(); }}
+    onMouseDown={event => { if (dismissible && event.target === event.currentTarget) onClose(); }}>
+    <div className="ltds-dialog-panel">
+      <header className="ltds-dialog-header">
+        <div><h2 id={titleId}>{title}</h2>{description && <p id={descriptionId}>{description}</p>}</div>
+        <button type="button" className="ltds-dialog-close" aria-label="Close" disabled={!dismissible} onClick={onClose}>×</button>
+      </header>
+      <div className="ltds-dialog-body">{children}</div>
+      {footer && <footer className="ltds-dialog-footer">{footer}</footer>}
+    </div>
+  </dialog>;
+}
+
 export function AccountMenu({
   displayName,
   avatar,

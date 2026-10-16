@@ -1,5 +1,6 @@
 import { useEffect, useId, useState, type FormEvent } from "react";
-import { Card } from "@ltds/ui";
+import { Card, Dialog, Skeleton } from "@ltds/ui";
+import { projectAlphaSourceName } from "@ltds/shared";
 import { api, ApiError } from "./api";
 import { executeCreateAttempt, executeProfileAttempt, executeRelationshipAttempt,
   type FrozenCreateAttempt, type FrozenDirectoryRequest } from "./NativeDirectoryProfileAttempts";
@@ -76,17 +77,18 @@ function usableSnapshot(value: unknown, kind: Kind, recordId: string): value is 
 
 function ProfileFields({ kind, value, onChange, prefix, creating, disabled = false }: { kind: Kind; value: ProfileForm;
   onChange: (field: keyof ProfileForm, value: string) => void; prefix: string; creating: boolean; disabled?: boolean }) {
-  const field = (key: keyof ProfileForm, label: string, maxLength: number, required = false) => <label htmlFor={`${prefix}-${key}`}>{label}
+  const field = (key: keyof ProfileForm, label: string, maxLength: number, required = false, wide = false) =>
+    <label htmlFor={`${prefix}-${key}`} className={`ltds-field${wide ? " ltds-span-2" : ""}`}>{label}
     <input id={`${prefix}-${key}`} maxLength={maxLength} required={required} value={value[key]} disabled={disabled}
       onChange={event => onChange(key, event.target.value)} /></label>;
-  return <div className="client-directory-profile-fields">
-    {field("name", kind === "organization" ? "Organization name" : "Client name", 150, true)}
+  return <div className="client-directory-profile-fields ltds-form-grid">
+    {field("name", kind === "organization" ? "Organization name" : "Client name", 150, true, true)}
     {kind === "organization" ? <>{field("generalEmail", "General email", 255)}{field("generalPhone", "General phone", 50)}</>
-      : <>{field("email", "Email", 255)}{field("phone", "Phone", 50)}{creating && <label htmlFor={`${prefix}-clientType`}>Client type
+      : <>{field("email", "Email", 255)}{field("phone", "Phone", 50)}{creating && <label htmlFor={`${prefix}-clientType`} className="ltds-field">Client type
         <select id={`${prefix}-clientType`} value={value.clientType} disabled={disabled} onChange={event => onChange("clientType", event.target.value)}>
           <option value="unknown">Unknown</option><option value="business">Business</option><option value="consumer">Consumer</option>
         </select></label>}</>}
-    {field("addressLine1", "Address line 1", 255)}{field("addressLine2", "Address line 2", 255)}
+    {field("addressLine1", "Address line 1", 255, false, true)}{field("addressLine2", "Address line 2", 255, false, true)}
     {field("city", "City", 100)}{field("state", "State", kind === "client" ? 2 : 100)}
     {field("postalCode", "Postal code", kind === "client" ? 20 : 32)}{field("country", "Country", 100)}
   </div>;
@@ -102,6 +104,7 @@ export function NativeDirectoryProfileCreate() {
   const [organizationId, setOrganizationId] = useState("");
   const [attempt, setAttempt] = useState<FrozenCreateAttempt | null>(null);
   const [optionsError, setOptionsError] = useState(""), [busy, setBusy] = useState(false), [error, setError] = useState(""), [success, setSuccess] = useState("");
+  const [open, setOpen] = useState(false);
   useEffect(() => {
     let active = true; setOptions(null); setOptionsError(""); setSourceIds([]); setSelectedScope(""); setOrganizationId("");
     void api<unknown>(`/api/client-hub/directory/create-options?kind=${kind}`).then(value => {
@@ -143,7 +146,7 @@ export function NativeDirectoryProfileCreate() {
       { recordId: frozen.mutationId, kind, version: 1, sourceIds: frozen.sourceIds }, value => {
         reachedWrite = true; setAttempt(value);
       });
-      setAttempt(null); setSuccess(status(result as { status?: unknown })); setFields(EMPTY); setSourceIds([]); setSelectedScope("");
+      setAttempt(null); setSuccess(status(result as { status?: unknown })); setFields(EMPTY); setSourceIds([]); setSelectedScope(""); setOpen(false);
     } catch (caught) {
       const invalidAdmission = !reachedWrite && caught instanceof ApiError && caught.status === 400;
       if (invalidAdmission) setAttempt(null);
@@ -157,31 +160,65 @@ export function NativeDirectoryProfileCreate() {
     ...area.divisions.map(division => ({ value: `${area.id}\0${division.id}`, label: `${area.name} · ${division.name}` }))]) ?? [];
   const selectedOrganization = options?.organizations.find(value => value.recordId === organizationId), availableSources = selectedOrganization
     ? options?.sources.filter(source => selectedOrganization.sourceIds.includes(source.id)) ?? [] : options?.sources ?? [];
-  return <Card title="Add client profile"><p>Create a Project Alpha-backed organization or client. Client Hub derives source authority on the server; this form records the selected destination, business scope, profile, and optional organization relationship.</p>
-    {optionsError && <p role="alert">{optionsError}</p>}{!options && !optionsError && <p role="status">Loading client profile choices…</p>}
-    {options && (!options.sources.length || !scopeOptions.length) ? <p role="status">No permitted Project Alpha destinations and business scopes are available for a new client profile.</p> : options && <form onSubmit={event => void submit(event)} className="client-directory-profile-form">
-      <label htmlFor={`${id}-kind`}>Profile type<select id={`${id}-kind`} value={kind} disabled={Boolean(attempt)} onChange={event => setKind(event.target.value === "client" ? "client" : "organization")}>
-        <option value="organization">Organization</option><option value="client">Client</option>
-      </select></label>
-      {kind === "client" && <label htmlFor={`${id}-organization`}>Organization relationship<select id={`${id}-organization`} value={organizationId} disabled={Boolean(attempt)}
-        onChange={event => { setOrganizationId(event.target.value); setSourceIds(previous => {
-          const next = options.organizations.find(value => value.recordId === event.target.value);
-          return next ? previous.filter(sourceId => next.sourceIds.includes(sourceId)) : previous;
-        }); }}>
-        <option value="">No organization (standalone client)</option>
-        {options.organizations.map(organization => <option key={organization.recordId} value={organization.recordId}>{organization.name}</option>)}
-      </select><small>Choose an organization to create a linked client, or leave this standalone.</small></label>}
-      <label htmlFor={`${id}-sources`}>Project Alpha destinations<select id={`${id}-sources`} multiple required value={sourceIds} disabled={Boolean(attempt)}
-        onChange={event => setSourceIds([...event.currentTarget.selectedOptions].map(option => option.value))}>
-        {availableSources.map(source => <option key={source.id} value={source.id}>{source.name}</option>)}
-      </select><small>Choose every Project Alpha destination that should receive this profile.</small></label>
-      <label htmlFor={`${id}-scope`}>Business scope<select id={`${id}-scope`} required value={selectedScope} disabled={Boolean(attempt)} onChange={event => setSelectedScope(event.target.value)}>
-        <option value="">Choose a business scope</option>{scopeOptions.map(scope => <option key={scope.value} value={scope.value}>{scope.label}</option>)}</select></label>
-      <ProfileFields kind={kind} value={fields} onChange={change} prefix={id} creating disabled={Boolean(attempt)} />
-      {error && <p role="alert">{error}</p>}{success && <p role="status">{success}</p>}
-      <button className="button-orange" disabled={busy || (!attempt && (!sourceIds.length || !selectedScope))}>{busy ? "Saving profile…" : attempt ? "Retry same profile creation" : `Create ${kind === "organization" ? "organization" : "client"}`}</button>
-    </form>}
-  </Card>;
+  const kindLabel = kind === "organization" ? "organization" : "client";
+  const toggleSource = (sourceId: string, checked: boolean) => setSourceIds(previous =>
+    checked ? [...new Set([...previous, sourceId])] : previous.filter(value => value !== sourceId));
+  const formId = `${id}-create-form`;
+  return <div className="client-directory-create">
+    <div className="client-directory-create-bar">
+      <button type="button" className="button-orange" onClick={() => { setSuccess(""); setOpen(true); }}>
+        {attempt ? "Resume client profile" : "Add client profile"}
+      </button>
+      {success && <p role="status" className="notice ok">{success}</p>}
+    </div>
+    <Dialog open={open} onClose={() => { if (!busy) setOpen(false); }} dismissible={!busy} size="lg" title="Add client profile"
+      description="Create an organization or client in Client Hub and send it to the Project Alpha destinations you choose."
+      footer={options && options.sources.length > 0 && scopeOptions.length > 0 ? <>
+        <button type="button" className="button-ghost" disabled={busy} onClick={() => setOpen(false)}>Cancel</button>
+        <button type="submit" form={formId} className="button-orange" disabled={busy || (!attempt && (!sourceIds.length || !selectedScope))}>
+          {busy ? "Saving profile…" : attempt ? "Retry same profile creation" : `Create ${kindLabel}`}</button>
+      </> : undefined}>
+      {optionsError && <p role="alert" className="notice error">{optionsError}</p>}
+      {!options && !optionsError && <Skeleton variant="form" rows={6} label="Loading client profile choices…" />}
+      {options && (!options.sources.length || !scopeOptions.length)
+        ? <p role="status" className="notice">No permitted Project Alpha destinations and business scopes are available for a new client profile.</p>
+        : options && <form id={formId} onSubmit={event => void submit(event)} className="client-directory-profile-form ltds-form">
+        {attempt && <p role="status" className="notice warning">This profile is waiting to be retried. Its details are locked so the retry sends exactly the same request.</p>}
+        <section className="ltds-form-section" aria-label="Destination">
+          <h3>Destination</h3>
+          <div className="ltds-form-grid">
+            <label htmlFor={`${id}-kind`} className="ltds-field">Profile type<select id={`${id}-kind`} value={kind} disabled={Boolean(attempt)} onChange={event => setKind(event.target.value === "client" ? "client" : "organization")}>
+              <option value="organization">Organization</option><option value="client">Client</option>
+            </select></label>
+            <label htmlFor={`${id}-scope`} className="ltds-field">Business scope<select id={`${id}-scope`} required value={selectedScope} disabled={Boolean(attempt)} onChange={event => setSelectedScope(event.target.value)}>
+              <option value="">Choose a business scope</option>{scopeOptions.map(scope => <option key={scope.value} value={scope.value}>{scope.label}</option>)}</select></label>
+            {kind === "client" && <label htmlFor={`${id}-organization`} className="ltds-field ltds-span-2">Organization relationship<select id={`${id}-organization`} value={organizationId} disabled={Boolean(attempt)}
+              onChange={event => { setOrganizationId(event.target.value); setSourceIds(previous => {
+                const next = options.organizations.find(value => value.recordId === event.target.value);
+                return next ? previous.filter(sourceId => next.sourceIds.includes(sourceId)) : previous;
+              }); }}>
+              <option value="">No organization (standalone client)</option>
+              {options.organizations.map(organization => <option key={organization.recordId} value={organization.recordId}>{organization.name}</option>)}
+            </select><small>Choose an organization to create a linked client, or leave this standalone.</small></label>}
+            <fieldset className="ltds-check-list ltds-span-2">
+              <legend>Project Alpha destinations</legend>
+              {availableSources.map(source => <label key={source.id} className="ltds-check-option">
+                <input type="checkbox" value={source.id} checked={sourceIds.includes(source.id)} disabled={Boolean(attempt)}
+                  onChange={event => toggleSource(source.id, event.target.checked)} />
+                <span>{projectAlphaSourceName(source.id)}</span>
+              </label>)}
+              <small className="ltds-field-hint">Choose every destination that should receive this profile.</small>
+            </fieldset>
+          </div>
+        </section>
+        <section className="ltds-form-section" aria-label="Profile details">
+          <h3>{kind === "organization" ? "Organization details" : "Client details"}</h3>
+          <ProfileFields kind={kind} value={fields} onChange={change} prefix={id} creating disabled={Boolean(attempt)} />
+        </section>
+        {error && <p role="alert" className="notice error">{error}</p>}
+      </form>}
+    </Dialog>
+  </div>;
 }
 
 export function NativeDirectoryProfileEdit({ kind, recordId, allowPreparedAttempt = false }: { kind: Kind; recordId: string; allowPreparedAttempt?: boolean }) {
@@ -265,7 +302,7 @@ function NativeDirectoryProfileEditBound({ kind, recordId, allowPreparedAttempt 
     finally { setRelationshipBusy(false); }
   };
   if (missing) return null;
-  if (loading) return <Card title="Client profile"><p role="status">Loading client profile…</p></Card>;
+  if (loading) return <Card title="Client profile"><Skeleton variant="form" rows={6} label="Loading client profile…" /></Card>;
   if (error && !snapshot) return <Card title="Client profile"><p role="alert">{error}</p><button type="button" className="button-ghost" onClick={() => void load()}>Retry profile</button></Card>;
   if (!snapshot) return null;
   const recovery = kind === "client" && usableRelationshipRecoveryCapability(snapshot.relationship?.recovery)
