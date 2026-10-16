@@ -91,6 +91,7 @@ interface Session {
     portalIdentityDenials?: { enabled: boolean };
     authenticatedDeliveryGrants?: AuthenticatedDeliveryCapability;
     clientFeedback?: { enabled: boolean };
+    financeSummary?: { enabled: boolean };
     nativeDirectoryProfileWrites?: { enabled: boolean };
     nativeDirectorySharedProfiles?: { enabled: boolean };
     reviewedImportEnrollment?: { enabled: boolean };
@@ -641,7 +642,7 @@ function Dashboard({ session, onNavigate }: { session: Session; onNavigate: (pag
   const activeTfrs = data?.airspace?.activeTfrs ?? 0;
   const scheduledTfrs = data?.airspace?.scheduledTfrs ?? 0;
   const canManage = allowed(session.user, "operations.manage"), pendingCount = pending.data?.count ?? 0;
-  const financeEnabled = (session.capabilities as { financeSummary?: { enabled?: boolean } } | undefined)?.financeSummary?.enabled === true;
+  const financeEnabled = session.capabilities?.financeSummary?.enabled === true;
   const go = (target: Page, href: string) => (event: ReactMouseEvent<HTMLAnchorElement>) => {
     if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
     event.preventDefault(); onNavigate(target, href);

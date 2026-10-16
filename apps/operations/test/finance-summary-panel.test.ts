@@ -11,7 +11,7 @@ const bucket = (overrides: Partial<FinanceMoneyBucket> = {}): FinanceMoneyBucket
   receivables: { count: 4, outstanding: "31400.00", overdue: "6900.00" },
   ...overrides,
 });
-const coverage = { complete: true, baseCurrency: null, unknownPaymentCurrencyCount: 0, unknownReceivableCurrencyCount: 2, unallocatedProjectPaymentCount: 0,
+const coverage = { complete: true, currencyPolicy: "linked-document-currency-only" as const, baseCurrency: null, unknownPaymentCurrencyCount: 0, unknownReceivableCurrencyCount: 2, unallocatedProjectPaymentCount: 0,
   expenseCurrencyKnown: false, processorFeeEstimateCount: 1, recordedExpenseCounts: { total: 2, pending: 1, confirmed: 1, reimbursed: 0, other: 0 } };
 const period = { from: "2026-10-01", to: "2026-10-31", dateBasis: "stored-calendar-date" as const };
 
@@ -32,7 +32,9 @@ describe("finance summary panel", () => {
       asOf: "2026-10-16T12:02:00.000Z", period, complete: false,
       combined: { currencies: [bucket()], coverageComplete: false },
       sources: [
-        { sourceId: "project-alpha:primary", label: "x", status: "ok", summary: { asOf: "2026-10-16T12:02:00.000Z", period, coverage, currencies: [bucket()] } },
+        { sourceId: "project-alpha:primary", label: "x", status: "ok", summary: { apiVersion: "2", sourceInstanceId: "src-1", applicationId: "app-1",
+          historyEpoch: "epoch-1", requestId: "req-1", asOf: "2026-10-16T12:02:00.000Z", period, snapshotSha256: "f".repeat(64), scope: "company",
+          accountingBasis: "payment-date-current-adjustments-and-recorded-expense-date", coverage, currencies: [bucket()] } },
         { sourceId: "project-alpha:secondary", label: "x", status: "unavailable", summary: null },
       ],
     };
@@ -44,6 +46,7 @@ describe("finance summary panel", () => {
     expect(html).toContain("Expense currency isn&#x27;t configured in Project Alpha.");
     expect(html).toContain("$6,900.00");
     expect(html).toContain("2 open invoices have no currency");
-    expect(html).not.toMatch(/project-alpha:|\$0\.00/);
+    // Internal identities, hashes and request IDs never reach the screen.
+    expect(html).not.toMatch(/project-alpha:|\$0\.00|src-1|app-1|req-1|epoch-1|f{64}/);
   });
 });

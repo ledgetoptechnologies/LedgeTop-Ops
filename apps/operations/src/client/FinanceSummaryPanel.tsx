@@ -1,35 +1,13 @@
 import { useEffect, useState } from "react";
 import { Card, Skeleton, StatusPill } from "@ltds/ui";
-import { projectAlphaSourceName } from "@ltds/shared";
+import { projectAlphaSourceName, type AdminFinanceSummary, type CompanyFinanceSummary, type FinanceMoneyBucket } from "@ltds/shared";
 import { api, ApiError } from "./api";
 
-// Mirrors packages/shared/src/admin-finance-summary.ts on Codex's
-// codex/admin-finance-summary-20261016 branch. Replace with that import once it
-// is exported from @ltds/shared.
-type FinanceAmount = string;
-type FinancePeriod = Readonly<{ from: string; to: string; dateBasis: "stored-calendar-date" }>;
-export type FinanceMoneyBucket = Readonly<{
-  currency: string;
-  decimalScale: 2;
-  payments: Readonly<{ count: number; received: FinanceAmount | null; adjustedNetIncome: FinanceAmount | null;
-    processorFeeQuality: Readonly<{ actual: number; estimated: number; unknown: number }> }>;
-  expenses: Readonly<{ count: number | null; total: FinanceAmount | null; pending: FinanceAmount | null;
-    confirmed: FinanceAmount | null; reimbursed: FinanceAmount | null }>;
-  recordedOperatingResult: FinanceAmount | null;
-  receivables: Readonly<{ count: number; outstanding: FinanceAmount; overdue: FinanceAmount }>;
-}>;
-type CompanyCoverage = Readonly<{
-  complete: boolean; baseCurrency: string | null; unknownPaymentCurrencyCount: number; unknownReceivableCurrencyCount: number;
-  unallocatedProjectPaymentCount: number; expenseCurrencyKnown: boolean; processorFeeEstimateCount: number;
-  recordedExpenseCounts: Readonly<{ total: number; pending: number; confirmed: number; reimbursed: number; other: number }>;
-}>;
-type CompanyFinanceSummary = Readonly<{ asOf: string; period: FinancePeriod; coverage: CompanyCoverage;
-  currencies: readonly FinanceMoneyBucket[] }>;
-type FinanceSourceSummary = Readonly<{ sourceId: string; label: string;
-  status: "ok" | "unavailable" | "incompatible" | "forbidden"; summary: CompanyFinanceSummary | null }>;
-export type AdminFinanceSummary = Readonly<{ asOf: string; period: FinancePeriod; complete: boolean;
-  sources: readonly FinanceSourceSummary[];
-  combined: Readonly<{ currencies: readonly FinanceMoneyBucket[]; coverageComplete: boolean }> | null }>;
+type FinanceAmount = FinanceMoneyBucket["receivables"]["outstanding"];
+type FinancePeriod = AdminFinanceSummary["period"];
+type FinanceSourceSummary = AdminFinanceSummary["sources"][number];
+type CompanyCoverage = CompanyFinanceSummary["coverage"];
+export type { AdminFinanceSummary, FinanceMoneyBucket };
 
 const DECIMAL = /^-?\d+(\.\d{1,2})?$/;
 
