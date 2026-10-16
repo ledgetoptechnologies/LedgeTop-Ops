@@ -817,6 +817,9 @@ test("authenticated delivery controls are session-gated by the read-only pilot p
     "projectAccessAuthorityMutationsEnabled", "portal_primary_staff_bindings", "pa_portal_projection_checkpoints",
     "unreceipted_bindings", "primary_projection_unavailable", "readiness_check_unavailable",
   ]) assert(readiness.includes(prerequisite), `${prerequisite} is missing from authenticated delivery readiness`);
-  assert(ui.includes("disabled={busy || !authenticatedGrantsEnabled}"));
+  assert(ui.includes("disabled={locked || !authenticatedGrantsEnabled}"));
+  // The workspace tab, Close and Escape also lock while an embedded grant or folder link is in flight or unconfirmed.
+  assert(ui.includes("const locked = busy || grantBusy;"));
+  assert(ui.includes("embedded onBusyChange={setGrantBusy}"));
   assert(ui.includes("existing folder link${unreceiptedCount === 1 ? \"\" : \"s\"} require migration review"));
 });
