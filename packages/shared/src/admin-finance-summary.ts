@@ -16,7 +16,7 @@ export type CompanyFinanceSummary = Readonly<{
   asOf:string;period:FinancePeriod;snapshotSha256:string;scope:'company';
   accountingBasis:'payment-date-current-adjustments-and-recorded-expense-date';
   coverage:Readonly<{
-    complete:boolean;currencyPolicy:'linked-document-currency-only';
+    complete:boolean;currencyPolicy:'linked-document-currency-only'|'explicit-company-base-and-linked-document-currency';
     baseCurrency:string|null;unknownPaymentCurrencyCount:number;unknownReceivableCurrencyCount:number;unallocatedProjectPaymentCount:number;
     expenseCurrencyKnown:boolean;processorFeeEstimateCount:number;
     recordedExpenseCounts:Readonly<{total:number;pending:number;confirmed:number;reimbursed:number;other:number}>;
