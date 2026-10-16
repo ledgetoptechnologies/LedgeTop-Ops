@@ -13,6 +13,7 @@ import type {
 
 export const PERMISSIONS = [
   "dashboard.view",
+  "finance.summary.view",
   "operations.view",
   "operations.view_all",
   "operations.manage",
@@ -64,6 +65,7 @@ export * from "./notification-migration-maintenance";
 export * from "./client-audit-timeline";
 export * from "./service-assignments";
 export * from "./native-portal-scopes";
+export * from "./admin-finance-summary";
 export * from "./api-v2-portal-publication-proof";
 
 export type Permission = (typeof PERMISSIONS)[number];
