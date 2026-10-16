@@ -2949,3 +2949,10 @@ a.dashboard-alert:hover > span[aria-hidden] { transform: translateX(3px); }
 .business-party-section-nav a:hover, .business-party-section-nav a:focus-visible { background: var(--paper); color: var(--ink); text-decoration: none; box-shadow: var(--shadow-sm); }
 .business-party-workspace > :is(button, a.button) { justify-self: start; }
 @media (max-width: 760px) { .business-party-section-nav a { min-height: 44px; } }
+
+/* Administration: three panels share one row on wide screens; the PA source
+   picker gets room for company names. */
+@media (min-width: 1100px) {
+  .administration-panels:has(> :nth-child(3):last-child) { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}
+#project-adoption-source { display: block; width: min(100%, 22rem); margin: .35rem 0 .6rem; }

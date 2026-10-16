@@ -74,7 +74,8 @@ test("operator explicitly reviews, reserves, and queues an unbound Project with 
   const panel = page.getByRole("region", { name: "PA-created Project adoption review" });
   await expect(panel).toBeVisible();
   await expect(panel.getByLabel("Project Alpha source")).toHaveValue(sourceId);
-  await expect(panel.getByLabel("Project Alpha source").locator("option:checked")).toHaveText(sourceId);
+  // The option keeps the exact source ID as its value but shows a readable source name.
+  await expect(panel.getByLabel("Project Alpha source").locator("option:checked")).toHaveText("Project Alpha (staging)");
 
   await panel.getByRole("button", { name: "Find authorized unbound Projects" }).click();
   await expect(panel.getByText("First candidate")).toBeVisible();
