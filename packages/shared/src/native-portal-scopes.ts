@@ -1,3 +1,4 @@
+import { folderOwnerEntityTypeSql } from './folder-owner-entity';
 /**
  * Fixed, parameterized native portal scope proof. Parameters are targets JSON,
  * workspace id, generation id, relation mode, and the recursive row limit.
@@ -16,11 +17,11 @@ export const NATIVE_PORTAL_TARGET_SCOPES_SQL=`WITH RECURSIVE
     ), roots AS (
       SELECT r.target_type,r.target_id,e.entity_type,e.public_id,e.parent_public_id,e.source_version,
         substr(e.display_name,1,500) display_name,b.source_version binding_version
-      FROM requested r JOIN current_generation g
+      FROM requested r JOIN current_generation g JOIN portal_v2_workspaces owner_workspace ON owner_workspace.id=g.workspace_id
       LEFT JOIN portal_v2_folder_bindings b ON r.target_type='folder' AND b.id=r.target_id AND b.workspace_id=g.workspace_id
         AND b.status='active' AND b.revoked_at IS NULL
       JOIN portal_v2_directory_entities e ON e.workspace_id=g.workspace_id AND e.generation_id=g.generation_id AND e.active=1
-        AND e.entity_type=CASE WHEN r.target_type='folder' THEN b.owner_scope_type ELSE r.target_type END
+        AND e.entity_type=CASE WHEN r.target_type='folder' THEN ${folderOwnerEntityTypeSql('b.owner_scope_type','b.owner_public_id','owner_workspace.root_type','owner_workspace.pa_client_public_id')} ELSE r.target_type END
         AND e.public_id=CASE WHEN r.target_type='folder' THEN b.owner_public_id ELSE r.target_id END
         AND (r.target_type<>'folder' OR e.source_version=b.source_version)
     ), lineage(target_type,target_id,entity_type,public_id,parent_public_id,source_version,depth) AS (

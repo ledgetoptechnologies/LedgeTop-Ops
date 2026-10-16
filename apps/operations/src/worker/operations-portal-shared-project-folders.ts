@@ -1,5 +1,8 @@
 import { parseOperationsPortalWorkspaceFolderPrefix } from "@ltds/shared/operations-portal-workspace-publication";
 import type { AuthenticatedNativeStaffWithAdmissionVersion } from "./native-staff-auth";
+import type { Env,StaffPrincipal } from './types';
+import { reservePrimaryFolderMutation,attemptPrimaryFolderMutation,completePrimaryFolderMutation } from './primary-folder-authority-mutations';
+import { suspendPrimaryWorkspaceBindingsForFolderReassignment } from './primary-delivery-workspace-bindings';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 const MATCH_METHODS = new Set(["manual", "unique_rule", "project_alpha"]);
@@ -271,6 +274,7 @@ async function confirmationContext(database: D1DatabaseSession, actor: Authentic
 
 export async function confirmOperationsPortalSharedProjectFolder(database: D1Database,
   actor: AuthenticatedNativeStaffWithAdmissionVersion, input: ConfirmOperationsPortalSharedProjectFolder,
+  folderAuthority?:Env,
 ): Promise<OperationsPortalSharedProjectFolder> {
   if (!actorValid(actor)) fail("denied");
   if (!inputValid(input) || !positiveInteger(input.expectedProjectVersion)
@@ -282,6 +286,16 @@ export async function confirmOperationsPortalSharedProjectFolder(database: D1Dat
   const current = association(context);
   if (desiredAlreadyConfirmed(current, actor, input)) return result(context);
   if (!sameAssociation(current, input.expectedAssociation)) fail("conflict");
+
+  const ownershipMutation=folderAuthority?await reservePrimaryFolderMutation(folderAuthority,actor.identity.staffId,'project_folder',{
+    projectId:input.externalProjectId,previous:current?{divisionId:current.opsDivisionId,r2Prefix:current.baseR2Prefix}:null,
+    next:{divisionId:input.opsDivisionId,r2Prefix:input.baseR2Prefix},confirmedBy:actor.identity.staffId}):null;
+  if(folderAuthority){
+    await suspendPrimaryWorkspaceBindingsForFolderReassignment(folderAuthority,{id:actor.identity.staffId} as StaffPrincipal,{
+      opsProjectId:input.externalProjectId,previousPrefix:current?.baseR2Prefix??null,nextPrefix:input.baseR2Prefix,
+      previousDivisionId:current?.opsDivisionId??null,nextDivisionId:input.opsDivisionId});
+    await attemptPrimaryFolderMutation(folderAuthority,ownershipMutation);
+  }
 
   try {
     let written: AssociationRow | null;
@@ -322,6 +336,7 @@ export async function confirmOperationsPortalSharedProjectFolder(database: D1Dat
           current.baseConfirmedAt, input.opsDivisionId, input.baseR2Prefix, actor.identity.staffId,
           actor.identity.staffId, ...mutationAuthorityBindings(actor, input)).first<AssociationRow>();
     }
+    if(folderAuthority)await completePrimaryFolderMutation(folderAuthority,ownershipMutation,!written);
     if (!written) fail("conflict");
     return Object.freeze({ targetId: context.target_id, externalProjectId: context.external_project_id,
       projectName: context.name, projectVersion: context.current_version, association: association(written) });

@@ -91,7 +91,7 @@ export async function dispatchOperationsPortalNativeOwnerRequest(request: Reques
     if (pathname === WORKSPACE_PAGE) return env.ASSETS.fetch(request);
     return handleOperationsPortalWorkspaceOwnerHttp(request, { environment: env.ENVIRONMENT,
       expectedHost: env.EXPECTED_HOST, configuration, database: env.OPS_DB,
-      publication: env.OPERATIONS_PORTAL_WORKSPACE_PUBLICATION });
+      publication: env.OPERATIONS_PORTAL_WORKSPACE_PUBLICATION,folderAuthority:env });
   }
   if (env.OPERATIONS_PORTAL_NATIVE_BILLING_OWNER_ENABLED !== "true") return notFound();
   if(billingSource)return handleOperationsPortalNativeBillingSourceAuthorityOwnerHttp(request,{

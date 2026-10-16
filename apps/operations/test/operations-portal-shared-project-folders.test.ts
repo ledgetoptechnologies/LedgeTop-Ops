@@ -1,5 +1,7 @@
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { readFileSync, readdirSync } from "node:fs";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { Miniflare } from "miniflare";
+import { splitD1MigrationStatements } from "../../client/test/helpers/d1-migrations";
 import { applyReviewedOperationsMigrationChain } from "./helpers/apply-reviewed-operations-migration-chain";
 import { writeNativeDirectoryProfile, type NativeDirectoryCreateWrite } from "../src/worker/native-directory-profile-writer";
 import { reserveOperationsPortalFolder, reserveOperationsPortalWorkspace } from "../src/worker/operations-portal-workspace-reservations";
@@ -7,6 +9,11 @@ import { confirmOperationsPortalSharedProjectFolder, lookupOperationsPortalShare
   type ConfirmOperationsPortalSharedProjectFolder, type OperationsPortalSharedProjectFolderAssociation }
   from "../src/worker/operations-portal-shared-project-folders";
 import type { AuthenticatedNativeStaffWithAdmissionVersion } from "../src/worker/native-staff-auth";
+import { createPrimaryWorkspaceBinding, searchPrimaryWorkspaceBindingTargets } from "../src/worker/primary-delivery-workspace-bindings";
+import { reconcilePrimaryFolderMutation } from "../src/worker/primary-folder-authority-mutations";
+import type { Env, StaffPrincipal } from "../src/worker/types";
+
+vi.mock("cloudflare:workers", () => ({ WorkflowEntrypoint: class {}, WorkerEntrypoint: class {}, DurableObject: class {} }));
 
 const staffId = "native-folder-owner";
 const rootRecordId = "ops/organization/native-folder-root";
@@ -23,6 +30,46 @@ const uid = () => `a0000000-0000-4000-8000-${String(sequence++).padStart(12, "0"
 
 let runtime: Miniflare;
 let db: D1Database;
+let delivery: D1Database;
+let folderAuthority: Env;
+const signedWorkspaceId = "signed-native-folder-guard-workspace";
+const signedRootPublicId = "9".repeat(32);
+const staff: StaffPrincipal = { id: staffId, email: `${staffId}@example.test`, displayName: "Native Folder Owner",
+  accessSubject: `access|${staffId}`, projectAlphaUserId: null };
+
+/** Intercept the actual second writer's prepared CAS, without a production test hook. */
+function interceptAssociationWrite(beforeDispatch: (dispatch: () => Promise<unknown>) => Promise<unknown>): D1Database {
+  const wrap = (database: D1Database | D1DatabaseSession): D1Database => new Proxy(database, {
+    get(target, property) {
+      if (property === "withSession") return (...args: Parameters<D1Database["withSession"]>) =>
+        wrap((target as D1Database).withSession(...args));
+      if (property === "prepare") return (sql: string) => {
+        const statement = (prepared: D1PreparedStatement): D1PreparedStatement => new Proxy(prepared, {
+          get(bound, method) {
+            if (method === "bind") return (...values: unknown[]) => statement(bound.bind(...values));
+            if (method === "first" && /(?:INSERT INTO project_folders|UPDATE project_folders AS folder)/.test(sql))
+              return (...args: Parameters<D1PreparedStatement["first"]>) => beforeDispatch(() => bound.first(...args));
+            const value = Reflect.get(bound, method, bound);
+            return typeof value === "function" ? value.bind(bound) : value;
+          },
+        });
+        return statement(target.prepare(sql));
+      };
+      const value = Reflect.get(target, property, target);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  }) as D1Database;
+  return wrap(db);
+}
+
+async function reviewedExplicitBinding(prefix: string) {
+  const { targets } = await searchPrimaryWorkspaceBindingTargets(folderAuthority, staff, prefix, "Signed guard", { divisionId: divisionA });
+  const selected = targets.find(target => target.workspaceId === signedWorkspaceId && target.ownerPublicId === signedRootPublicId);
+  expect(selected).toBeDefined();
+  return { folderRef: "folder-guard-reference", workspaceId: signedWorkspaceId, reasonCode: "second-writer-guard-test",
+    expectedContextVersion: selected!.contextVersion, ownershipMode: "explicit_workspace", divisionId: divisionA,
+    ownerScopeType: "organization", ownerPublicId: signedRootPublicId };
+}
 
 function actor(overrides: Partial<AuthenticatedNativeStaffWithAdmissionVersion> = {}): AuthenticatedNativeStaffWithAdmissionVersion {
   return { identity: { kind: "native", staffId, verifiedAccessSubject: `access|${staffId}`,
@@ -88,8 +135,17 @@ function confirmation(externalProjectId: string, prefix: string, expectedAssocia
 
 beforeAll(async () => {
   runtime = new Miniflare({ modules: true, compatibilityDate: "2026-08-06", script: "export default {}",
-    d1Databases: { OPS_DB: crypto.randomUUID() } });
+    d1Databases: { OPS_DB: crypto.randomUUID(), DELIVERY_DB: crypto.randomUUID() } });
   db = await runtime.getD1Database("OPS_DB");
+  delivery = await runtime.getD1Database("DELIVERY_DB");
+  const clientMigrations = new URL("../../client/migrations/", import.meta.url);
+  for (const name of readdirSync(clientMigrations).filter(name => /^\d{4}_.*\.sql$/.test(name) && name.slice(0, 4) <= "0189").sort())
+    await delivery.batch(splitD1MigrationStatements(readFileSync(new URL(name, clientMigrations), "utf8")).map(sql => delivery.prepare(sql)));
+  await delivery.batch(splitD1MigrationStatements(readFileSync(new URL("0233_explicit_primary_workspace_folder_ownership.sql", clientMigrations), "utf8"))
+    .map(sql => delivery.prepare(sql)));
+  folderAuthority = { OPS_DB: db, DELIVERY_DB: delivery, CLIENT_PORTAL_HIERARCHY_V2_ENABLED: "true",
+    CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED: "true", AUTHENTICATED_DELIVERY_GRANTS_ENABLED: "true",
+    AUTHENTICATED_DELIVERY_CREATION_ENABLED: "true", PROJECT_ACCESS_AUTHORITY_MUTATIONS_ENABLED: "true" } as Env;
   const migrationNames = await applyReviewedOperationsMigrationChain(db, "0196_native_directory_maintenance_authority.sql");
   expect(migrationNames).toHaveLength(196);
   expect(migrationNames.at(-1)).toBe("0196_native_directory_maintenance_authority.sql");
@@ -110,11 +166,95 @@ beforeAll(async () => {
   await reserveOperationsPortalWorkspace(db, actor(), { operationId: uid(), targetId: workspaceTargetId,
     clientAuthorityId: uid(), workspaceId, rootKind: "organization", rootRecordId, rootRecordVersion: 1,
     relationshipVersion: null, expectedRevision: 0, reason: "Native shared-project folder test workspace" });
+  await delivery.batch([
+    delivery.prepare(`INSERT INTO portal_v2_workspaces(id,root_type,pa_organization_public_id,display_name,status,project_alpha_source_id)
+      VALUES(?,'organization',?,'Signed guard workspace','active','project-alpha:primary')`).bind(signedWorkspaceId, signedRootPublicId),
+    delivery.prepare(`INSERT INTO pa_portal_projection_generations
+      (id,workspace_id,source_generation,source_sequence,snapshot_hash,page_count,record_count,workspace_root_type,
+       workspace_root_public_id,workspace_display_name,workspace_source_version,workspace_active,status,complete,projection_source_id)
+      VALUES('guard-snapshot',?,'guard-source',1,?,1,1,'organization',?,'Signed guard workspace','workspace-v1',1,'active',1,'project-alpha:primary')`)
+      .bind(signedWorkspaceId, "a".repeat(64), signedRootPublicId),
+    delivery.prepare(`INSERT INTO portal_v2_directory_generations(id,workspace_id,source_generation,source_sequence,status,complete)
+      VALUES('guard-directory',?,'guard-source',1,'active',1)`).bind(signedWorkspaceId),
+    delivery.prepare(`INSERT INTO portal_v2_directory_entities(workspace_id,generation_id,entity_type,public_id,parent_public_id,display_name,source_version,active)
+      VALUES(?,'guard-directory','organization',?,NULL,'Signed guard organization','org-v1',1)`).bind(signedWorkspaceId, signedRootPublicId),
+    delivery.prepare(`INSERT INTO portal_v2_directory_checkpoints(workspace_id,active_generation_id,source_sequence)
+      VALUES(?,'guard-directory',1)`).bind(signedWorkspaceId),
+    delivery.prepare(`INSERT INTO pa_portal_projection_checkpoints(workspace_id,source_generation,source_sequence,snapshot_generation_id)
+      VALUES(?,'guard-source',1,'guard-snapshot')`).bind(signedWorkspaceId),
+  ]);
 }, 240_000);
 
 afterAll(async () => { await runtime.dispose(); });
 
 describe("native Operations shared-project folder confirmation", { timeout: 120_000, concurrent: false }, () => {
+  it("holds the second writer reservation across deny and OPS CAS so a reviewed explicit binding cannot race publication", async () => {
+    const externalProjectId = "ops/project/second-writer-publication-race";
+    const prefix = "Jobs/Clients/Second writer race/";
+    await seedProject(externalProjectId);
+    const bindingInput = await reviewedExplicitBinding(prefix);
+    let reached!: () => void, release!: () => void;
+    const atCas = new Promise<void>(resolve => { reached = resolve; });
+    const proceed = new Promise<void>(resolve => { release = resolve; });
+    let dispatches = 0;
+    const gated = interceptAssociationWrite(async dispatch => { dispatches++; reached(); await proceed; return dispatch(); });
+    const pending = confirmOperationsPortalSharedProjectFolder(gated, actor(), confirmation(externalProjectId, `${prefix}Project/`), folderAuthority);
+    try {
+      await Promise.race([atCas, pending.then(() => { throw new Error("Writer completed before its controlled CAS boundary"); })]);
+      expect(await db.prepare("SELECT count(*) n FROM project_folders WHERE project_id=?").bind(externalProjectId).first("n")).toBe(0);
+      const reservation = await delivery.prepare("SELECT operation_id,phase FROM portal_primary_folder_authority_mutations WHERE phase<>'completed'")
+        .first<{ operation_id: string; phase: string }>();
+      expect(reservation?.phase).toBe("attempted");
+      await expect(createPrimaryWorkspaceBinding(folderAuthority, staff, prefix, bindingInput, `binding-race-${uid()}`))
+        .rejects.toThrow("primary-folder-authority-publication-conflict");
+      expect(await delivery.prepare("SELECT count(*) n FROM portal_v2_folder_bindings WHERE r2_prefix=?").bind(prefix).first("n")).toBe(0);
+      expect(await delivery.prepare("SELECT count(*) n FROM portal_primary_staff_bindings WHERE r2_prefix=?").bind(prefix).first("n")).toBe(0);
+      release();
+      await expect(pending).resolves.toMatchObject({ association: { baseR2Prefix: `${prefix}Project/` } });
+      expect(dispatches).toBe(1);
+      expect(await delivery.prepare("SELECT phase FROM portal_primary_folder_authority_mutations WHERE operation_id=?")
+        .bind(reservation!.operation_id).first("phase")).toBe("completed");
+      await expect(createPrimaryWorkspaceBinding(folderAuthority, staff, prefix, bindingInput, `binding-overlap-${uid()}`))
+        .rejects.toThrow("overlaps a project mapping");
+    } finally { release(); await pending.catch(() => undefined); }
+  });
+
+  it("keeps an unknown second-writer attempt closed until read-only reconciliation proves its original late write", async () => {
+    const externalProjectId = "ops/project/second-writer-unknown";
+    const prefix = "Jobs/Clients/Second writer unknown/";
+    await seedProject(externalProjectId);
+    const bindingInput = await reviewedExplicitBinding(prefix);
+    let lateOriginalDispatch: (() => Promise<unknown>) | undefined;
+    let dispatches = 0;
+    const unavailable = interceptAssociationWrite(async dispatch => {
+      dispatches++; lateOriginalDispatch = dispatch;
+      throw new Error("Simulated transport response loss before the original provider write finishes");
+    });
+    await expect(confirmOperationsPortalSharedProjectFolder(unavailable, actor(), confirmation(externalProjectId, `${prefix}Project/`), folderAuthority))
+      .rejects.toThrow("operations_portal_shared_project_folder_conflict");
+    const pending = await delivery.prepare("SELECT operation_id,phase FROM portal_primary_folder_authority_mutations WHERE phase<>'completed'")
+      .first<{ operation_id: string; phase: string }>();
+    expect(pending?.phase).toBe("attempted");
+    await expect(reconcilePrimaryFolderMutation(folderAuthority, pending!.operation_id, "cancel_reserved"))
+      .rejects.toThrow("attempted write cannot be cancelled");
+    await expect(reconcilePrimaryFolderMutation(folderAuthority, pending!.operation_id, "reconcile"))
+      .rejects.toThrow("outcome is still unresolved");
+    await expect(createPrimaryWorkspaceBinding(folderAuthority, staff, prefix, bindingInput, `binding-unknown-${uid()}`))
+      .rejects.toThrow("primary-folder-authority-publication-conflict");
+    expect(await delivery.prepare("SELECT count(*) n FROM portal_v2_folder_bindings WHERE r2_prefix=?").bind(prefix).first("n")).toBe(0);
+    expect(dispatches).toBe(1);
+    // Finish the captured original request; recovery itself must not dispatch it.
+    expect(lateOriginalDispatch).toBeTypeOf("function");
+    await lateOriginalDispatch!();
+    await expect(reconcilePrimaryFolderMutation(folderAuthority, pending!.operation_id, "reconcile"))
+      .resolves.toMatchObject({ state: "completed", replayed: false });
+    await expect(reconcilePrimaryFolderMutation(folderAuthority, pending!.operation_id, "reconcile"))
+      .resolves.toMatchObject({ state: "completed", replayed: true });
+    expect(dispatches).toBe(1);
+    await expect(createPrimaryWorkspaceBinding(folderAuthority, staff, prefix, bindingInput, `binding-late-${uid()}`))
+      .rejects.toThrow("overlaps a project mapping");
+  });
+
   it("looks up and confirms a native project without PA or legacy portal rows and preserves an exact no-op retry", async () => {
     const externalProjectId = "ops/project/native-folder-positive";
     const prefix = "projects/native-folder-positive/";

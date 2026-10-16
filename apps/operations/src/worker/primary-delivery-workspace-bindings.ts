@@ -1,23 +1,28 @@
+import { folderOwnerEntityType,folderOwnerEntityTypeSql } from '../../../../packages/shared/src/folder-owner-entity';
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
-import { requirePermission } from "./acl";
+import { requirePermission,hasPermission,sqlScope } from "./acl";
 import { normalizePrefix, resolveDivisionAssociation } from "./delivery";
 import { projectAlphaReadVisibleSql } from "./project-alpha-read-visibility";
 import type { Env, StaffPrincipal } from "./types";
 import { requireAuthenticatedDeliveryCreation } from "./authenticated-delivery-creation-gate";
 import { requireProjectAccessAuthorityMutations } from "./project-access-mutation-gate";
+import { d1ColumnPresent } from "../../../client/src/worker/schema-readiness";
 
 const PRIMARY = "project-alpha:primary" as const;
 const OPAQUE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
 const IDEMPOTENCY = /^[A-Za-z0-9][A-Za-z0-9._:-]{15,127}$/;
 const REASON = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,79}$/;
 
-export const primaryWorkspaceBindingInputSchema = z.object({
+const primaryWorkspaceBindingBase = z.object({
   folderRef: z.string().regex(/^[A-Za-z0-9_-]{2,1400}$/),
   workspaceId: z.string().regex(OPAQUE),
   reasonCode: z.string().regex(REASON),
   expectedContextVersion: z.string().regex(/^[a-f0-9]{64}$/),
 }).strict();
+export const primaryWorkspaceBindingInputSchema = z.union([primaryWorkspaceBindingBase,
+  primaryWorkspaceBindingBase.extend({ownershipMode:z.literal('explicit_workspace'),divisionId:z.string().regex(OPAQUE),
+    ownerScopeType:z.enum(['client','organization']),ownerPublicId:z.string().regex(OPAQUE)}).strict()]);
 export const primaryWorkspaceBindingRevokeSchema = z.object({
   folderRef: z.string().regex(/^[A-Za-z0-9_-]{2,1400}$/),
   expectedVersion: z.number().int().positive(),
@@ -31,6 +36,7 @@ interface OpsFolderProof {
   projectId:string|null;projectPublicId:string|null;projectName:string|null;divisionId:string;
   rootType:RootType;rootPublicId:string;rootName:string;projectUpdatedAt:string;projectSyncId:string;
   folderConfirmedAt:string;folderConfirmedBy:string;rootEvidence:Array<{projectId:string;projectPublicId:string;updatedAt:string;syncId:string;prefix:string}>;
+  ownershipMode?:'explicit_workspace';
 }
 interface ProjectionProof {
   workspaceId:string;workspaceLabel:string;rootType:RootType;rootPublicId:string;
@@ -41,6 +47,7 @@ export interface PrimaryWorkspaceBindingTarget {
   workspaceId:string;workspaceLabel:string;rootType:RootType;rootPublicId:string;rootLabel:string;
   ownerScopeType:"organization"|"client"|"project";ownerPublicId:string;ownerName:string;
   projectPublicId:string|null;projectName:string|null;sourceId:typeof PRIMARY;contextVersion:string;
+  ownershipMode?:'explicit_workspace';divisionId?:string;
 }
 export interface PrimaryWorkspaceBindingView extends PrimaryWorkspaceBindingTarget {
   bindingId:string;folderPrefix:string;version:number;state:"active"|"suspended"|"revoked";
@@ -89,14 +96,17 @@ function ancestors(prefix:string):string[]{const parts=prefix.slice(0,-1).split(
 export async function suspendPrimaryWorkspaceBindingsForFolderReassignment(
   env:Env,principal:StaffPrincipal,input:PrimaryWorkspaceFolderReassignment,
 ):Promise<{bindingIds:string[]}> {
-  await ready(env);const database=db(env);
-  if(!await tables(database,["portal_v2_folder_bindings","portal_v2_workspaces","audit_log"]))
-    fail(503,"Client Workspace folder reassignment is awaiting a database update");
+  const database=db(env);
+  if(!await tables(database,["portal_primary_staff_bindings","portal_v2_folder_bindings","portal_v2_workspaces","audit_log"])){
+    if(await tables(database,['portal_v2_folder_bindings'])&&Number(await database.prepare(`SELECT count(*) n FROM portal_v2_folder_bindings WHERE status='active' AND revoked_at IS NULL`).first<number>('n'))>0)
+      fail(503,'Client Workspace folder reassignment is awaiting a database update');
+    return {bindingIds:[]};
+  }
   const affected=[input.previousPrefix,input.nextPrefix].filter((value):value is string=>!!value).map(normalizePrefix);
   const rows=await database.prepare(`SELECT binding.id binding_id,receipt.version receipt_version
     FROM portal_v2_folder_bindings binding
     JOIN portal_v2_workspaces workspace ON workspace.id=binding.workspace_id
-      AND workspace.project_alpha_source_id='project-alpha:primary' AND workspace.status='active'
+      AND workspace.project_alpha_source_id='project-alpha:primary'
     JOIN portal_primary_staff_bindings receipt ON receipt.binding_id=binding.id
       AND receipt.workspace_id=binding.workspace_id AND receipt.source_id='project-alpha:primary' AND receipt.state='active'
     WHERE binding.source_type='operations' AND binding.status='active' AND binding.revoked_at IS NULL
@@ -248,7 +258,7 @@ async function projectionProof(env:Env,owner:OpsFolderProof,workspaceId:string):
     JOIN portal_v2_directory_entities root_entity
       ON root_entity.workspace_id=workspace.id AND root_entity.generation_id=directory_generation.id
       AND root_entity.entity_type=workspace.root_type
-      AND root_entity.public_id=COALESCE(workspace.pa_organization_public_id,workspace.pa_client_public_id) AND root_entity.active=1
+      AND root_entity.public_id=COALESCE(workspace.pa_organization_public_id,workspace.pa_client_public_id) AND root_entity.active=1 AND root_entity.parent_public_id IS NULL
     JOIN portal_v2_directory_entities owner_entity
       ON owner_entity.workspace_id=workspace.id AND owner_entity.generation_id=directory_generation.id
       AND owner_entity.entity_type=? AND owner_entity.public_id=? AND owner_entity.active=1
@@ -258,7 +268,7 @@ async function projectionProof(env:Env,owner:OpsFolderProof,workspaceId:string):
     WHERE workspace.id=? AND workspace.project_alpha_source_id='project-alpha:primary'
       AND workspace.legacy_account_id IS NULL AND workspace.status='active'
       AND workspace.root_type=? AND COALESCE(workspace.pa_organization_public_id,workspace.pa_client_public_id)=?
-    LIMIT 2`).bind(owner.ownerScopeType,owner.ownerPublicId,owner.projectPublicId,workspaceId,owner.rootType,owner.rootPublicId).all<{
+    LIMIT 2`).bind(folderOwnerEntityType(owner.ownerScopeType,owner.ownerPublicId,owner.rootType,owner.rootPublicId),owner.ownerPublicId,owner.projectPublicId,workspaceId,owner.rootType,owner.rootPublicId).all<{
       workspace_id:string;workspace_label:string;root_type:RootType;root_public_id:string;directory_generation_id:string;
       snapshot_generation_id:string;source_sequence:number;root_source_version:string;owner_source_version:string;
       project_source_version:string|null;owner_name:string;project_name:string|null;
@@ -281,6 +291,25 @@ async function projectionProof(env:Env,owner:OpsFolderProof,workspaceId:string):
     .bind(workspaceId,row.directory_generation_id,owner.projectPublicId!,workspaceId,row.directory_generation_id,owner.rootType,owner.rootPublicId)
     .first<number>("n");
   if(lineage!==1)fail(404,"The projected project is not inside the selected workspace root");
+  if(owner.ownershipMode==='explicit_workspace'&&owner.ownerScopeType==='client'){
+    const lineage=await db(env).prepare(`WITH RECURSIVE lineage(entity_type,public_id,parent_public_id,depth,path) AS(
+      SELECT entity_type,public_id,parent_public_id,0,'|'||entity_type||':'||public_id||'|'
+      FROM portal_v2_directory_entities WHERE workspace_id=? AND generation_id=? AND entity_type=? AND public_id=? AND active=1
+      UNION ALL SELECT parent.entity_type,parent.public_id,parent.parent_public_id,lineage.depth+1,lineage.path||parent.entity_type||':'||parent.public_id||'|'
+      FROM lineage JOIN portal_v2_directory_entities parent ON parent.workspace_id=? AND parent.generation_id=?
+        AND parent.public_id=lineage.parent_public_id AND parent.active=1
+      WHERE lineage.depth<64 AND instr(lineage.path,'|'||parent.entity_type||':'||parent.public_id||'|')=0
+    ) SELECT sum(CASE WHEN entity_type=? AND public_id=? THEN 1 ELSE 0 END) n,
+      sum(CASE WHEN depth>=64 THEN 1 WHEN parent_public_id IS NULL THEN 0
+        WHEN (SELECT count(*) FROM portal_v2_directory_entities parent WHERE parent.workspace_id=? AND parent.generation_id=?
+          AND parent.public_id=lineage.parent_public_id AND parent.active=1)<>1 THEN 1
+        WHEN EXISTS(SELECT 1 FROM portal_v2_directory_entities parent WHERE parent.workspace_id=? AND parent.generation_id=?
+          AND parent.public_id=lineage.parent_public_id AND parent.active=1
+          AND instr(lineage.path,'|'||parent.entity_type||':'||parent.public_id||'|')>0) THEN 1 ELSE 0 END) bad FROM lineage`)
+      .bind(workspaceId,row.directory_generation_id,folderOwnerEntityType(owner.ownerScopeType,owner.ownerPublicId,owner.rootType,owner.rootPublicId),owner.ownerPublicId,
+        workspaceId,row.directory_generation_id,owner.rootType,owner.rootPublicId,workspaceId,row.directory_generation_id,workspaceId,row.directory_generation_id).first<{n:number;bad:number}>();
+    if(lineage?.n!==1||lineage.bad!==0)fail(404,'The selected client is not inside this workspace root');
+  }
   return {workspaceId:row.workspace_id,workspaceLabel:row.workspace_label,rootType:row.root_type,rootPublicId:row.root_public_id,
     directoryGenerationId:row.directory_generation_id,snapshotGenerationId:row.snapshot_generation_id,sourceSequence:row.source_sequence,
     rootSourceVersion:row.root_source_version,ownerSourceVersion:row.owner_source_version,projectSourceVersion:row.project_source_version,
@@ -291,10 +320,88 @@ function target(owner:OpsFolderProof,projection:ProjectionProof,version:string):
   workspaceId:projection.workspaceId,workspaceLabel:projection.workspaceLabel,rootType:projection.rootType,rootPublicId:projection.rootPublicId,
   rootLabel:owner.rootName,ownerScopeType:owner.ownerScopeType,ownerPublicId:owner.ownerPublicId,ownerName:projection.ownerName,
   projectPublicId:owner.projectPublicId,projectName:projection.projectName,sourceId:PRIMARY,contextVersion:version,
+  ...(owner.ownershipMode?{ownershipMode:owner.ownershipMode,divisionId:owner.divisionId}:{}),
 };}
 
-export async function searchPrimaryWorkspaceBindingTargets(env:Env,principal:StaffPrincipal,folderKey:string,q:string):Promise<{targets:PrimaryWorkspaceBindingTarget[]}> {
+async function explicitFolderBaseline(env:Env,principal:StaffPrincipal|null,folderKey:string,divisionId:string):Promise<string>{
+  if(!await d1ColumnPresent(env.DELIVERY_DB,'portal_primary_staff_bindings','ownership_kind'))fail(503,'Explicit folder ownership is awaiting a database update');
+  const prefix=normalizePrefix(folderKey);
+  const visible=await env.OPS_DB.withSession('first-primary').prepare(`SELECT ${projectAlphaReadVisibleSql('source.source_id')} visible FROM (SELECT 'project-alpha:primary' source_id) source`).first<number>('visible');
+  if(visible!==1)fail(404,'Client source is unavailable');
+  // Raw rows deliberately include inactive, secondary and incomplete PA maps.
+  // None may be silently hidden by a join and then replaced by a staff claim.
+  const overlaps=await rawFolderOverlapCount(env,prefix);
+  if(overlaps!==0)fail(409,'This folder overlaps a project mapping; review its existing ownership instead');
+  const active=await env.OPS_DB.withSession('first-primary').prepare('SELECT id FROM divisions WHERE id=? AND active=1').bind(divisionId).first();
+  if(!active)fail(404,'Active folder division not found');
+  if(principal){await requireExplicitOwnershipSetup(env,principal);await requirePermission(env,principal,'delivery.share.create',{divisionId:divisionId},true);}
+  return prefix;
+}
+async function explicitFolderProof(env:Env,principal:StaffPrincipal|null,folderKey:string,input:{workspaceId:string;divisionId:string;ownerScopeType:'client'|'organization';ownerPublicId:string},previewPrefix?:string):Promise<OpsFolderProof>{
+  // Only search passes its request-local verified baseline. Submit/readback
+  // always re-read the complete independent authority proof.
+  const prefix=previewPrefix??await explicitFolderBaseline(env,principal,folderKey,input.divisionId);
+  const root=await db(env).prepare(`SELECT root_type,COALESCE(pa_organization_public_id,pa_client_public_id) public_id,display_name
+    FROM portal_v2_workspaces WHERE id=? AND project_alpha_source_id='project-alpha:primary' AND legacy_account_id IS NULL AND status='active'`)
+    .bind(input.workspaceId).first<{root_type:RootType;public_id:string;display_name:string}>();
+  if(!root)return fail(404,'Exact projected workspace owner not found');
+  if(input.ownerScopeType==='organization'&&(root.root_type!=='organization'||input.ownerPublicId!==root.public_id))fail(404,'Exact projected workspace owner not found');
+  return {folderPrefix:prefix,ownerScopeType:input.ownerScopeType,ownerPublicId:input.ownerPublicId,ownerName:root.display_name,
+    projectId:null,projectPublicId:null,projectName:null,divisionId:input.divisionId,rootType:root.root_type,rootPublicId:root.public_id,
+    rootName:root.display_name,projectUpdatedAt:'explicit',projectSyncId:'explicit',folderConfirmedAt:'explicit',folderConfirmedBy:'explicit',
+    rootEvidence:[],ownershipMode:'explicit_workspace'};
+}
+async function requireExplicitOwnershipSetup(env:Env,principal:StaffPrincipal):Promise<void>{
+  const scope=await sqlScope(env,principal,'delivery.share.create');
+  if(!scope.global||scope.deniedGlobal)fail(404,'Unmapped folder ownership requires global sharing authority');
+}
+
+async function ownerForInput(env:Env,principal:StaffPrincipal|null,folderKey:string,input:PrimaryWorkspaceBindingInput):Promise<OpsFolderProof>{
+  return 'ownershipMode' in input?explicitFolderProof(env,principal,folderKey,input):opsFolderProof(env,principal,folderKey);
+}
+async function rawFolderOverlapCount(env:Env,folderKey:string):Promise<number>{
+  const prefix=normalizePrefix(folderKey);
+  const rows=await env.OPS_DB.withSession('first-primary').prepare('SELECT r2_prefix FROM project_folders ORDER BY project_id LIMIT 1001').all<{r2_prefix:string}>();
+  if(rows.results.length>1000)fail(503,'Folder ownership exceeds the bounded review capacity');
+  // Use the exact trusted path canonicalizer on raw historical rows, including
+  // duplicate slashes, leading slashes and backslashes. SQL join filters or a
+  // trailing-slash-only comparison must not hide contradictory ownership.
+  return rows.results.filter(row=>{const other=normalizePrefix(row.r2_prefix);return prefix.startsWith(other)||other.startsWith(prefix);}).length;
+}
+export interface PrimaryWorkspaceBindingSearchResponse {targets:PrimaryWorkspaceBindingTarget[];
+  divisionsRequired?:true;divisions?:Array<{divisionId:string;label:string}>}
+
+export async function searchPrimaryWorkspaceBindingTargets(env:Env,principal:StaffPrincipal,folderKey:string,q:string,explicit?:{divisionId:string}):Promise<PrimaryWorkspaceBindingSearchResponse> {
   await ready(env);if(q.length>200)fail(400,"Workspace search is invalid");
+  if(!explicit&&await rawFolderOverlapCount(env,folderKey)===0){
+    await requireExplicitOwnershipSetup(env,principal);
+    if(!await d1ColumnPresent(env.DELIVERY_DB,'portal_primary_staff_bindings','ownership_kind'))fail(503,'Explicit folder ownership is awaiting a database update');
+    const rows=await env.OPS_DB.withSession('first-primary').prepare('SELECT id,name FROM divisions WHERE active=1 ORDER BY name,id LIMIT 101').all<{id:string;name:string}>();
+    if(rows.results.length>100)fail(503,'Too many divisions require an explicit administrator review');
+    const divisions=[];
+    for(const row of rows.results)if(await hasPermission(env,principal,'delivery.share.create',{divisionId:row.id}))divisions.push({divisionId:row.id,label:row.name});
+    return {targets:[],divisionsRequired:true,divisions};
+  }
+  if(explicit){
+    if(!OPAQUE.test(explicit.divisionId))fail(400,'Folder division is invalid');
+    const previewPrefix=await explicitFolderBaseline(env,principal,folderKey,explicit.divisionId);
+    const candidates=await db(env).prepare(`SELECT workspace.id,owner.entity_type,owner.public_id
+      FROM portal_v2_workspaces workspace JOIN portal_v2_directory_checkpoints checkpoint ON checkpoint.workspace_id=workspace.id
+      JOIN portal_v2_directory_entities owner ON owner.workspace_id=workspace.id AND owner.generation_id=checkpoint.active_generation_id
+        AND owner.entity_type IN ('client','organization','standalone_client') AND owner.active=1
+      WHERE workspace.project_alpha_source_id='project-alpha:primary' AND workspace.legacy_account_id IS NULL AND workspace.status='active'
+        AND (owner.display_name LIKE ? ESCAPE '\\' OR workspace.display_name LIKE ? ESCAPE '\\')
+      ORDER BY owner.display_name,workspace.id,owner.public_id LIMIT 21`)
+      .bind(`%${q.trim().replace(/[\\%_]/g,value=>'\\'+value)}%`,`%${q.trim().replace(/[\\%_]/g,value=>'\\'+value)}%`)
+      .all<{id:string;entity_type:'client'|'organization'|'standalone_client';public_id:string}>();
+    const targets:PrimaryWorkspaceBindingTarget[]=[];
+    for(const row of candidates.results.slice(0,20)){
+      const owner=await explicitFolderProof(env,principal,folderKey,{workspaceId:row.id,divisionId:explicit.divisionId,ownerScopeType:row.entity_type==='standalone_client'?'client':row.entity_type,ownerPublicId:row.public_id},previewPrefix);
+      const projection=await projectionProof(env,owner,row.id);
+      targets.push(target(owner,projection,await contextVersion(owner,projection)));
+    }
+    return {targets};
+  }
   const owner=await opsFolderProof(env,principal,folderKey);
   const rows=await db(env).prepare(`SELECT workspace.id FROM portal_v2_workspaces workspace
     JOIN pa_portal_workspace_sources source ON source.workspace_id=workspace.id AND source.projection_source_id='project-alpha:primary'
@@ -318,16 +425,18 @@ function bindingView(row:{binding_id:string;workspace_id:string;display_name:str
   ownerName:row.owner_name,projectPublicId:row.project_public_id,projectName:row.project_name,
   sourceId:PRIMARY,contextVersion:row.ops_context_version,folderPrefix:row.r2_prefix,version:row.version,state:row.state,
   createdAt:row.created_at,updatedAt:row.updated_at,
+  ...((row as any).ownership_kind==='explicit_workspace'?{ownershipMode:'explicit_workspace' as const,divisionId:(row as any).ops_division_id}:{}),
 };}
 async function readBinding(env:Env,bindingId:string):Promise<PrimaryWorkspaceBindingView|null>{
+  const explicit=await d1ColumnPresent(env.DELIVERY_DB,'portal_primary_staff_bindings','ownership_kind');
   const row=await db(env).prepare(`SELECT receipt.binding_id,receipt.workspace_id,workspace.display_name,receipt.root_type,
       receipt.root_public_id,receipt.owner_scope_type,receipt.owner_public_id,owner.display_name owner_name,
       receipt.project_public_id,project.display_name project_name,receipt.r2_prefix,receipt.version,
-      receipt.state,receipt.created_at,receipt.updated_at,receipt.ops_context_version
+      receipt.state,receipt.created_at,receipt.updated_at,receipt.ops_context_version${explicit?',receipt.ownership_kind,receipt.ops_division_id':''}
     FROM portal_primary_staff_bindings receipt JOIN portal_v2_workspaces workspace ON workspace.id=receipt.workspace_id
     LEFT JOIN portal_v2_directory_checkpoints checkpoint ON checkpoint.workspace_id=receipt.workspace_id
     LEFT JOIN portal_v2_directory_entities owner ON owner.workspace_id=receipt.workspace_id
-      AND owner.generation_id=checkpoint.active_generation_id AND owner.entity_type=receipt.owner_scope_type AND owner.public_id=receipt.owner_public_id
+      AND owner.generation_id=checkpoint.active_generation_id AND owner.entity_type=${folderOwnerEntityTypeSql('receipt.owner_scope_type','receipt.owner_public_id','workspace.root_type','workspace.pa_client_public_id')} AND owner.public_id=receipt.owner_public_id
     LEFT JOIN portal_v2_directory_entities project ON project.workspace_id=receipt.workspace_id
       AND project.generation_id=checkpoint.active_generation_id AND project.entity_type='project' AND project.public_id=receipt.project_public_id
     WHERE receipt.binding_id=?`).bind(bindingId).first<any>();
@@ -338,7 +447,7 @@ async function readBinding(env:Env,bindingId:string):Promise<PrimaryWorkspaceBin
  * The signed Delivery projection and the independent Operations ownership
  * proof are re-read. A changed proof suspends the receipt and folder route so
  * a later grant insert cannot race against stale authority. */
-export async function requireActivePrimaryWorkspaceBindingReceipt(env:Env,bindingId:string,folderKey:string):Promise<void>{
+export async function requireActivePrimaryWorkspaceBindingReceipt(env:Env,bindingId:string,folderKey:string):Promise<{ownershipMode:'explicit_workspace';divisionId:string}|null>{
   await ready(env);
   const receipt=await db(env).prepare(`SELECT receipt.*,binding.source_version,binding.status binding_status,binding.revoked_at
     FROM portal_primary_staff_bindings receipt JOIN portal_v2_folder_bindings binding ON binding.id=receipt.binding_id
@@ -350,7 +459,10 @@ export async function requireActivePrimaryWorkspaceBindingReceipt(env:Env,bindin
     fail(409,"The primary Client Workspace folder link is not active");
   let currentOwner:OpsFolderProof|null=null,currentProjection:ProjectionProof|null=null,currentVersion="";
   try{
-    currentOwner=await opsFolderProof(env,null,folderKey);
+    currentOwner=receipt.ownership_kind==='explicit_workspace'
+      ?await explicitFolderProof(env,null,folderKey,{workspaceId:receipt.workspace_id,divisionId:receipt.ops_division_id,
+        ownerScopeType:receipt.owner_scope_type,ownerPublicId:receipt.owner_public_id})
+      :await opsFolderProof(env,null,folderKey);
     currentProjection=await projectionProof(env,currentOwner,receipt.workspace_id);
     currentVersion=await contextVersion(currentOwner,currentProjection);
   }catch{currentOwner=null;currentProjection=null;}
@@ -366,7 +478,7 @@ export async function requireActivePrimaryWorkspaceBindingReceipt(env:Env,bindin
     &&currentProjection.rootSourceVersion===receipt.root_source_version
     &&currentProjection.projectSourceVersion===receipt.project_source_version;
   const compatible=receipt.reason_code==="migration_0189_legacy_compat"?structural:structural&&currentVersion===receipt.ops_context_version;
-  if(compatible)return;
+  if(compatible)return currentOwner?.ownershipMode?{ownershipMode:'explicit_workspace',divisionId:currentOwner.divisionId}:null;
   const next=Number(receipt.version)+1;
   try{await db(env).batch([
     db(env).prepare(`UPDATE portal_primary_staff_bindings SET state='suspended',version=?,updated_at=datetime('now')
@@ -377,7 +489,7 @@ export async function requireActivePrimaryWorkspaceBindingReceipt(env:Env,bindin
       VALUES(?,?,?,'binding.suspended','system:context-revalidation',?)`).bind(crypto.randomUUID(),bindingId,next,
         JSON.stringify({reasonCode:"authority_context_changed"})),
   ]);}catch{/* A concurrent request may already have suspended this receipt. */}
-  fail(409,"The primary folder or signed Project Alpha context changed. The Client Workspace link was suspended; review and relink it before managing access");
+  return fail(409,"The primary folder or signed Project Alpha context changed. The Client Workspace link was suspended; review and relink it before managing access");
 }
 function key(value:string):string{if(!IDEMPOTENCY.test(value))fail(400,"Idempotency-Key is invalid");return value;}
 async function replay(env:Env,principal:StaffPrincipal,idempotencyKey:string,action:string,fingerprint:string){
@@ -391,10 +503,11 @@ export async function createPrimaryWorkspaceBinding(env:Env,principal:StaffPrinc
   await ready(env);requireProjectAccessAuthorityMutations(env);requireAuthenticatedDeliveryCreation(env);
   const parsed=primaryWorkspaceBindingInputSchema.safeParse(inputValue);
   const input:PrimaryWorkspaceBindingInput=parsed.success?parsed.data:fail(400,"Workspace folder link is invalid");
-  const idempotencyKey=key(idempotencyValue),owner=await opsFolderProof(env,principal,folderKey);
+  const idempotencyKey=key(idempotencyValue),owner=await ownerForInput(env,principal,folderKey,input);
   const projection=await projectionProof(env,owner,input.workspaceId),currentContext=await contextVersion(owner,projection);
   if(currentContext!==input.expectedContextVersion)fail(409,"Workspace or folder context changed; review the link again");
-  const fingerprint=await digest({action:"binding.create",folderPrefix:owner.folderPrefix,workspaceId:input.workspaceId,reasonCode:input.reasonCode,expectedContextVersion:input.expectedContextVersion});
+  const fingerprint=await digest({action:"binding.create",folderPrefix:owner.folderPrefix,workspaceId:input.workspaceId,reasonCode:input.reasonCode,expectedContextVersion:input.expectedContextVersion,
+    ...(owner.ownershipMode?{ownershipMode:owner.ownershipMode,divisionId:owner.divisionId,ownerScopeType:owner.ownerScopeType,ownerPublicId:owner.ownerPublicId}:{})});
   const previous=await replay(env,principal,idempotencyKey,"binding.create",fingerprint);if(previous)return previous;
   const existing=await db(env).prepare(`SELECT binding.id FROM portal_v2_folder_bindings binding
     JOIN portal_v2_workspaces workspace ON workspace.id=binding.workspace_id
@@ -407,6 +520,7 @@ export async function createPrimaryWorkspaceBinding(env:Env,principal:StaffPrinc
   // broader generation proof; source_version must remain the owner's signed
   // entity version rather than an unrelated digest.
   const bindingId=crypto.randomUUID(),auditId=crypto.randomUUID(),sourceVersion=projection.ownerSourceVersion;
+  const explicitSchema=await d1ColumnPresent(env.DELIVERY_DB,'portal_primary_staff_bindings','ownership_kind');
   await db(env).batch([
     db(env).prepare(`INSERT INTO portal_v2_folder_bindings
       (id,workspace_id,owner_scope_type,owner_public_id,r2_prefix,source_type,source_version)
@@ -414,11 +528,12 @@ export async function createPrimaryWorkspaceBinding(env:Env,principal:StaffPrinc
     db(env).prepare(`INSERT INTO portal_primary_staff_bindings
       (binding_id,workspace_id,source_id,root_type,root_public_id,owner_scope_type,owner_public_id,project_public_id,directory_generation_id,
        snapshot_generation_id,source_sequence,root_source_version,project_source_version,r2_prefix,ops_project_id,
-       ops_context_version,created_by_staff_id,reason_code,state)
-      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+       ops_context_version,created_by_staff_id,reason_code,state${explicitSchema?',ownership_kind,ops_division_id':''})
+      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?${explicitSchema?',?,?':''})`)
       .bind(bindingId,projection.workspaceId,PRIMARY,owner.rootType,owner.rootPublicId,owner.ownerScopeType,owner.ownerPublicId,owner.projectPublicId,projection.directoryGenerationId,
         projection.snapshotGenerationId,projection.sourceSequence,projection.rootSourceVersion,projection.projectSourceVersion,
-        owner.folderPrefix,owner.projectId,currentContext,principal.id,input.reasonCode,"active"),
+        owner.folderPrefix,owner.projectId,currentContext,principal.id,input.reasonCode,"active",
+        ...(explicitSchema?[owner.ownershipMode??'project_mapping',owner.ownershipMode?owner.divisionId:null]:[])),
     db(env).prepare(`INSERT INTO portal_primary_staff_binding_mutations
       (actor_staff_id,idempotency_key,action,request_fingerprint,binding_id,binding_version)
       VALUES(?,?,'binding.create',?,?,1)`).bind(principal.id,idempotencyKey,fingerprint,bindingId),
@@ -436,7 +551,7 @@ export async function createPrimaryWorkspaceBinding(env:Env,principal:StaffPrinc
   // D1 bindings cannot transact with OPS_DB. Re-read the complete Operations
   // proof after publication and fail closed by suspending this exact receipt.
   let stable=false;try{
-    const afterOwner=await opsFolderProof(env,principal,folderKey),afterProjection=await projectionProof(env,afterOwner,input.workspaceId);
+    const afterOwner=await ownerForInput(env,principal,folderKey,input),afterProjection=await projectionProof(env,afterOwner,input.workspaceId);
     stable=await contextVersion(afterOwner,afterProjection)===currentContext;
   }catch{stable=false;}
   if(!stable){
@@ -455,14 +570,17 @@ export async function revokePrimaryWorkspaceBinding(env:Env,principal:StaffPrinc
   await ready(env);requireProjectAccessAuthorityMutations(env);if(!OPAQUE.test(bindingId))fail(404,"Workspace folder link not found");
   const parsed=primaryWorkspaceBindingRevokeSchema.safeParse(inputValue);
   const input:z.infer<typeof primaryWorkspaceBindingRevokeSchema>=parsed.success?parsed.data:fail(400,"Workspace folder unlink is invalid");
-  const idempotencyKey=key(idempotencyValue),owner=await opsFolderProof(env,principal,folderKey);
+  const stored=await db(env).prepare('SELECT * FROM portal_primary_staff_bindings WHERE binding_id=?').bind(bindingId).first<any>();
+  const explicit=stored?.ownership_kind==='explicit_workspace';
+  const idempotencyKey=key(idempotencyValue),owner=explicit?{divisionId:stored.ops_division_id,folderPrefix:normalizePrefix(folderKey),ownerScopeType:stored.owner_scope_type,ownerPublicId:stored.owner_public_id}
+    :await opsFolderProof(env,principal,folderKey);
   await requirePermission(env,principal,"delivery.share.revoke",{divisionId:owner.divisionId},true);
   const fingerprint=await digest({action:"binding.revoke",bindingId,folderPrefix:owner.folderPrefix,expectedVersion:input.expectedVersion,reasonCode:input.reasonCode});
   const previous=await replay(env,principal,idempotencyKey,"binding.revoke",fingerprint);if(previous)return previous;
   const current=await db(env).prepare(`SELECT receipt.*,binding.owner_public_id,binding.r2_prefix,binding.status binding_status
     FROM portal_primary_staff_bindings receipt JOIN portal_v2_folder_bindings binding ON binding.id=receipt.binding_id
     WHERE receipt.binding_id=?`).bind(bindingId).first<any>();
-  if(!current||current.state!=="active"||current.binding_status!=="active"||current.version!==input.expectedVersion
+  if(!current||!['active',...(explicit?['suspended']:[])].includes(current.state)||!['active',...(explicit?['suspended']:[])].includes(current.binding_status)||current.version!==input.expectedVersion
     ||current.owner_scope_type!==owner.ownerScopeType||current.owner_public_id!==owner.ownerPublicId
     ||normalizePrefix(current.r2_prefix)!==owner.folderPrefix)fail(409,"Workspace folder link changed; refresh before unlinking");
   const active=await db(env).prepare(`SELECT count(*) n FROM portal_v2_authenticated_delivery_grants
@@ -472,9 +590,9 @@ export async function revokePrimaryWorkspaceBinding(env:Env,principal:StaffPrinc
   const next=input.expectedVersion+1;
   await db(env).batch([
     db(env).prepare(`UPDATE portal_primary_staff_bindings SET state='revoked',version=?,updated_at=datetime('now')
-      WHERE binding_id=? AND state='active' AND version=?`).bind(next,bindingId,input.expectedVersion),
+      WHERE binding_id=? AND state IN ('active','suspended') AND version=?`).bind(next,bindingId,input.expectedVersion),
     db(env).prepare(`UPDATE portal_v2_folder_bindings SET status='revoked',revoked_at=datetime('now'),updated_at=datetime('now')
-      WHERE id=? AND status='active' AND revoked_at IS NULL`).bind(bindingId),
+      WHERE id=? AND status IN ('active','suspended') AND revoked_at IS NULL`).bind(bindingId),
     db(env).prepare(`INSERT INTO portal_primary_staff_binding_mutations
       (actor_staff_id,idempotency_key,action,request_fingerprint,binding_id,binding_version)
       VALUES(?,?,'binding.revoke',?,?,?)`).bind(principal.id,idempotencyKey,fingerprint,bindingId,next),

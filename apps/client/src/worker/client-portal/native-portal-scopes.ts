@@ -1,4 +1,5 @@
 import { HTTPException } from 'hono/http-exception';
+import { addExactStandaloneClientScope } from '../../../../../packages/shared/src/folder-owner-entity';
 import { NATIVE_PORTAL_TARGET_SCOPES_SQL } from '@ltds/shared';
 export { NATIVE_PORTAL_TARGET_SCOPES_SQL } from '@ltds/shared';
 import type { NativePortalReadContext, PortalAuthorizationEnv, PortalWorkspaceTarget } from './workspace-v2';
@@ -73,7 +74,9 @@ export async function readNativeTargetScopes(env:Pick<PortalAuthorizationEnv,'DE
     if(!relations&&scopes.size!==group.length)continue; // Revisited ancestor: cycle, not a second valid scope.
     if(!scopes.has(`${context.rootType}:${context.rootPublicId}`))continue;
     scopes.add(`workspace:${context.workspaceId}`);scopes.add(key);
-    result.set(key,{scopes,versions:new Map(group.map(r=>[`${r.entity_type}:${r.public_id}`,r.source_version])),
+    const versions=new Map(group.map(r=>[`${r.entity_type}:${r.public_id}`,r.source_version]));
+    addExactStandaloneClientScope(scopes,context.rootType,context.rootPublicId,versions);
+    result.set(key,{scopes,versions,
       name:group[0]!.display_name,bindingVersion:group[0]!.binding_version,
       proofRows:group.map(r=>({target_type:r.target_type,target_id:r.target_id,entity_type:r.entity_type,public_id:r.public_id,
         parent_public_id:r.parent_public_id,source_version:r.source_version,depth:r.depth,display_name:r.display_name,

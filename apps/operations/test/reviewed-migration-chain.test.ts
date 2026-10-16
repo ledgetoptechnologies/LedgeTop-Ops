@@ -125,6 +125,7 @@ describe("reviewed release migration fixtures", () => {
     ["operations", "0210_admin_finance_summary_permission.sql"],
     ["operations", "0211_native_directory_create_observations.sql"],
     ["client", "0232_shared_profile_edit_authority.sql"],
+    ["client", "0233_explicit_primary_workspace_folder_ownership.sql"],
   ] as const)("validates exact %s successor %s without expanding historical authority", (application, name) => {
     const fixture=copyMigrations(application);
     const reviewed=()=>application==="operations"?reviewedOperationsMigrationNames(fixture.url):reviewedClientMigrationNames(fixture.url);

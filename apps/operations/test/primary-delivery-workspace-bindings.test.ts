@@ -6,9 +6,10 @@ import {
   compareAndSwapProjectFolderAssociation,createPrimaryWorkspaceBinding,primaryWorkspaceBindingsReady,revokePrimaryWorkspaceBinding,
   searchPrimaryWorkspaceBindingTargets,suspendPrimaryWorkspaceBindingsForFolderReassignment,
 } from "../src/worker/primary-delivery-workspace-bindings";
-import { searchAuthenticatedDeliveryGrantAudiences } from "../src/worker/authenticated-delivery-grants";
+import { searchAuthenticatedDeliveryGrantAudiences,previewAuthenticatedDeliveryGrant,createAuthenticatedDeliveryGrant,revokeAuthenticatedDeliveryGrant } from "../src/worker/authenticated-delivery-grants";
 import { listAuthorizedAuthenticatedDeliveryPrefixes } from "../../client/src/worker/client-portal/authenticated-delivery-grants";
 import type { Env,StaffPrincipal } from "../src/worker/types";
+import { reservePrimaryFolderMutation,attemptPrimaryFolderMutation,completePrimaryFolderMutation,reconcilePrimaryFolderMutation,primaryDivisionDeactivationStatement,readPrimaryFolderMutationReview,retryPrimaryDivisionMutation,suspendExplicitBindingsForDivisionDeactivation } from '../src/worker/primary-folder-authority-mutations';
 vi.mock("cloudflare:workers",()=>({WorkflowEntrypoint:class{},WorkerEntrypoint:class{},DurableObject:class{}}));
 
 const staff:StaffPrincipal={id:"primary-binding-staff",email:"staff@example.test",displayName:"Staff",accessSubject:"staff-subject",projectAlphaUserId:null};
@@ -53,6 +54,27 @@ async function signedWorkspace(){
       VALUES('project-alpha:primary','signed-primary-one',?,'snapshot_activate',?,1,'completed')`).bind(workspace,"b".repeat(64)),
   ]);
 }
+async function signedStandaloneWorkspace(id:string,clientPublicId:string){
+  const directory='directory-'+id,snapshot='snapshot-'+id;
+  await delivery.batch([
+    delivery.prepare(`INSERT INTO portal_v2_workspaces(id,root_type,pa_client_public_id,display_name,status,project_alpha_source_id)
+      VALUES(?,'standalone_client',?,'Standalone Owner','active','project-alpha:primary')`).bind(id,clientPublicId),
+    delivery.prepare(`INSERT INTO pa_portal_projection_generations(id,workspace_id,source_generation,source_sequence,snapshot_hash,page_count,record_count,
+      workspace_root_type,workspace_root_public_id,workspace_display_name,workspace_source_version,workspace_active,status,complete,projection_source_id)
+      VALUES(?,?,'standalone-source',1,?,1,1,'standalone_client',?,'Standalone Owner','standalone-v1',1,'active',1,'project-alpha:primary')`)
+      .bind(snapshot,id,'c'.repeat(64),clientPublicId),
+    delivery.prepare(`INSERT INTO portal_v2_directory_generations(id,workspace_id,source_generation,source_sequence,status,complete)
+      VALUES(?,?,'standalone-source',1,'active',1)`).bind(directory,id),
+    delivery.prepare(`INSERT INTO portal_v2_directory_entities(workspace_id,generation_id,entity_type,public_id,parent_public_id,display_name,source_version,active)
+      VALUES(?,?,'standalone_client',?,NULL,'Standalone Owner','standalone-v1',1)`).bind(id,directory,clientPublicId),
+    delivery.prepare(`INSERT INTO portal_v2_directory_generation_contracts(generation_id,workspace_id,schema_version) VALUES(?,?,3)`).bind(directory,id),
+    delivery.prepare(`INSERT INTO portal_v2_directory_checkpoints(workspace_id,active_generation_id,source_sequence) VALUES(?,?,1)`).bind(id,directory),
+    delivery.prepare(`INSERT INTO pa_portal_projection_checkpoints(workspace_id,source_generation,source_sequence,snapshot_generation_id)
+      VALUES(?,'standalone-source',1,?)`).bind(id,snapshot),
+    delivery.prepare(`INSERT INTO pa_portal_projection_receipts(projection_source_id,delivery_id,workspace_id,delivery_kind,payload_hash,source_sequence,status)
+      VALUES('project-alpha:primary',?,?,'snapshot_activate',?,1,'completed')`).bind('signed-'+id,id,'d'.repeat(64)),
+  ]);
+}
 
 describe("primary signed workspace folder binding",{timeout:60_000,concurrent:false},()=>{
   beforeAll(async()=>{
@@ -60,6 +82,7 @@ describe("primary signed workspace folder binding",{timeout:60_000,concurrent:fa
     ops=await runtime.getD1Database("OPS") as D1Database;delivery=await runtime.getD1Database("DELIVERY") as D1Database;
     await migrate(ops,new URL("../migrations/",import.meta.url),"0050");
     await migrate(delivery,new URL("../../client/migrations/",import.meta.url),"0189");
+    await delivery.batch(splitD1MigrationStatements(readFileSync(new URL('../../client/migrations/0233_explicit_primary_workspace_folder_ownership.sql',import.meta.url),'utf8')).map(sql=>delivery.prepare(sql)));
     env={OPS_DB:ops,DELIVERY_DB:delivery,CLIENT_PORTAL_HIERARCHY_V2_ENABLED:"true",CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED:"true",
       AUTHENTICATED_DELIVERY_GRANTS_ENABLED:"true",PROJECT_ACCESS_AUTHORITY_MUTATIONS_ENABLED:"true",AUTHENTICATED_DELIVERY_CREATION_ENABLED:"true"} as Env;
     await ops.batch([
@@ -78,7 +101,228 @@ describe("primary signed workspace folder binding",{timeout:60_000,concurrent:fa
   },180_000);
   afterAll(async()=>runtime.dispose());
 
+  it("explicitly links an unmapped folder to a reviewed signed workspace without creating client access",async()=>{
+    const folder="Jobs/Clients/Lori Koschnick/";
+    const targets=await searchPrimaryWorkspaceBindingTargets(env,staff,folder,"Acme",{divisionId:"division-one"});
+    expect(targets.targets).toHaveLength(1);
+    const selected=targets.targets[0]!;
+    expect(selected).toMatchObject({workspaceId:workspace,ownershipMode:"explicit_workspace",divisionId:"division-one",ownerScopeType:"organization",projectPublicId:null});
+    const input={folderRef:"explicit-folder-ref",workspaceId:workspace,ownershipMode:"explicit_workspace",divisionId:"division-one",ownerScopeType:'organization',ownerPublicId:organizationPublic,
+      reasonCode:"reviewed_client_folder",expectedContextVersion:selected.contextVersion};
+    const first=await createPrimaryWorkspaceBinding(env,staff,folder,input,"explicit-primary-folder-one");
+    expect(first.binding).toMatchObject({state:"active",ownershipMode:"explicit_workspace",divisionId:"division-one",folderPrefix:folder});
+    expect(await createPrimaryWorkspaceBinding(env,staff,folder,input,"explicit-primary-folder-one")).toEqual({...first,replayed:true});
+    expect(await delivery.prepare("SELECT count(*) n FROM portal_v2_authenticated_delivery_grants").first<number>("n")).toBe(0);
+    expect(await delivery.prepare("SELECT count(*) n FROM portal_v2_workspace_memberships").first<number>("n")).toBe(0);
+    const audience=await searchAuthenticatedDeliveryGrantAudiences(env,staff,first.binding!.bindingId,"Acme","organization");
+    expect(audience.audiences).toContainEqual(expect.objectContaining({type:"organization",publicId:organizationPublic}));
+    await expect(createPrimaryWorkspaceBinding(env,staff,folder,{...input,reasonCode:'changed_body'},"explicit-primary-folder-one")).rejects.toMatchObject({status:409});
+    await expect(delivery.prepare("UPDATE portal_primary_staff_bindings SET ops_division_id='other-division' WHERE binding_id=?")
+      .bind(first.binding!.bindingId).run()).rejects.toThrow(/primary-explicit-binding-immutable/);
+  });
+
+  it("rejects raw ancestor and descendant mappings even when PA joins would hide them",async()=>{
+    for(const [projectId,prefix] of [['unjoined-project','Jobs/Raw/Missing/Child/'],['secondary-inactive-project','Jobs/Raw/Secondary/'],['malformed-raw-project','/Jobs//Raw/Malformed\\Child/']] as const){
+      await ops.prepare(`INSERT INTO project_folders(project_id,division_id,r2_prefix,match_method,confirmed_by) VALUES(?,'division-one',?,'manual',?)`)
+        .bind(projectId,prefix,staff.id).run();
+    }
+    await ops.prepare(`INSERT INTO pa_projection_record_ids(projection_source_id,record_kind,external_id,local_id)
+      VALUES('project-alpha:secondary','project','secondary-external-project','secondary-inactive-project')`).run();
+    await ops.prepare(`INSERT INTO pa_projects(id,name,active,payload_json,last_sync_id,projection_source_id)
+      VALUES('secondary-inactive-project','Other source',0,'{}','raw-test','project-alpha:secondary')`).run();
+    for(const folder of ['Jobs/Raw/Missing/','Jobs/Raw/Secondary/Child/','Jobs/Raw/Malformed/'])
+      await expect(searchPrimaryWorkspaceBindingTargets(env,staff,folder,'Acme',{divisionId:'division-one'})).rejects.toMatchObject({status:409});
+  });
+
+  it("serializes binding publication against an ownership writer paused after its deny phase and reconciles the same operation",async()=>{
+    const folder='Jobs/Fence/Unmapped/',targets=await searchPrimaryWorkspaceBindingTargets(env,staff,folder,'Acme',{divisionId:'division-one'});
+    const op=await reservePrimaryFolderMutation(env,staff.id,'project_folder',{projectId:'fenced-project',previous:null,
+      next:{divisionId:'division-one',r2Prefix:folder+'Child/'},confirmedBy:staff.id});
+    expect(op).not.toBeNull();
+    await suspendPrimaryWorkspaceBindingsForFolderReassignment(env,staff,{opsProjectId:'fenced-project',previousPrefix:null,
+      nextPrefix:folder+'Child/',previousDivisionId:null,nextDivisionId:'division-one'});
+    await attemptPrimaryFolderMutation(env,op);
+    await expect(createPrimaryWorkspaceBinding(env,staff,folder,{folderRef:'fence-folder',workspaceId:workspace,ownershipMode:'explicit_workspace',
+      divisionId:'division-one',ownerScopeType:'organization',ownerPublicId:organizationPublic,reasonCode:'reviewed_folder',expectedContextVersion:targets.targets[0]!.contextVersion},'fenced-binding-create'))
+      .rejects.toThrow(/primary-folder-authority-publication-conflict/);
+    expect(await delivery.prepare("SELECT count(*) n FROM portal_v2_folder_bindings WHERE r2_prefix=?").bind(folder).first('n')).toBe(0);
+    await expect(reconcilePrimaryFolderMutation(env,op!.operationId,'cancel_reserved')).rejects.toMatchObject({status:409});
+    await expect(reconcilePrimaryFolderMutation(env,op!.operationId,'reconcile')).rejects.toMatchObject({status:409});
+    await compareAndSwapProjectFolderAssociation(env,{projectId:'fenced-project',previous:null,next:{divisionId:'division-one',r2Prefix:folder+'Child/'},confirmedBy:staff.id});
+    expect(await reconcilePrimaryFolderMutation(env,op!.operationId,'reconcile')).toMatchObject({state:'completed',replayed:false});
+    expect(await reconcilePrimaryFolderMutation(env,op!.operationId,'reconcile')).toMatchObject({state:'completed',replayed:true});
+    await expect(searchPrimaryWorkspaceBindingTargets(env,staff,folder,'Acme',{divisionId:'division-one'})).rejects.toMatchObject({status:409});
+    const reserved=await reservePrimaryFolderMutation(env,staff.id,'project_folder',{projectId:'never-attempted',previous:null,
+      next:{divisionId:'division-one',r2Prefix:'Jobs/Never/'},confirmedBy:staff.id});
+    expect(await reconcilePrimaryFolderMutation(env,reserved!.operationId,'cancel_reserved')).toMatchObject({state:'completed'});
+    await expect(attemptPrimaryFolderMutation(env,reserved)).rejects.toMatchObject({status:409});
+  });
+
+  it("rejects overlapping explicit bindings and division permission or context drift without publishing",async()=>{
+    const folder='Jobs/Clients/Lori Koschnick/Child/',targets=await searchPrimaryWorkspaceBindingTargets(env,staff,folder,'Acme',{divisionId:'division-one'});
+    const input={folderRef:'overlap-ref',workspaceId:workspace,ownershipMode:'explicit_workspace',divisionId:'division-one',
+      ownerScopeType:'organization',ownerPublicId:organizationPublic,reasonCode:'reviewed_folder',expectedContextVersion:targets.targets[0]!.contextVersion};
+    await expect(createPrimaryWorkspaceBinding(env,staff,folder,input,'explicit-overlapping-binding')).rejects.toThrow(/primary-folder-authority-publication-conflict/);
+    await ops.prepare(`INSERT INTO staff_permission_overrides(id,staff_id,permission_key,effect,scope,division_id,scope_key,created_by)
+      VALUES('explicit-division-deny',?,'delivery.share.create','deny','division','division-one','division-one',?)`).bind(staff.id,staff.id).run();
+    try{await expect(searchPrimaryWorkspaceBindingTargets(env,staff,'Jobs/NoPermission/','Acme',{divisionId:'division-one'})).rejects.toMatchObject({status:404});}
+    finally{await ops.prepare("DELETE FROM staff_permission_overrides WHERE id='explicit-division-deny'").run();}
+    await expect(createPrimaryWorkspaceBinding(env,staff,'Jobs/StaleContext/',{...input,expectedContextVersion:'f'.repeat(64)},'explicit-stale-binding')).rejects.toMatchObject({status:409});
+  });
+
+  it("offers current permitted divisions but denies first ownership classification to a scoped-only sharer",async()=>{
+    expect(await searchPrimaryWorkspaceBindingTargets(env,staff,'Jobs/UnmappedChoices/','')).toEqual({targets:[],divisionsRequired:true,
+      divisions:[{divisionId:'division-chippewa-falls',label:'Chippewa Falls'},{divisionId:'division-one',label:'Division one'}]});
+    await ops.prepare("DELETE FROM staff_permission_overrides WHERE id='allow-delivery.share.create'").run();
+    await ops.batch([
+      ops.prepare(`INSERT INTO staff_permission_overrides(id,staff_id,permission_key,effect,scope,division_id,scope_key,created_by)
+        VALUES('scoped-only-create',?,'delivery.share.create','allow','division','division-one','division-one',?)`).bind(staff.id,staff.id),
+      ops.prepare(`INSERT INTO staff_permission_overrides(id,staff_id,permission_key,effect,scope,scope_key,created_by)
+        VALUES('scoped-global-browse',?,'delivery.browse','allow','global','global',?)`).bind(staff.id,staff.id),
+    ]);
+    try{
+      await expect(searchPrimaryWorkspaceBindingTargets(env,staff,'Jobs/ScopedClaim/','')).rejects.toMatchObject({status:404});
+      await expect(searchPrimaryWorkspaceBindingTargets(env,staff,'Jobs/ScopedClaim/','Acme',{divisionId:'division-one'})).rejects.toMatchObject({status:404});
+      await expect(createPrimaryWorkspaceBinding(env,staff,'Jobs/ScopedClaim/',{folderRef:'scoped-ref',workspaceId:workspace,ownershipMode:'explicit_workspace',
+        divisionId:'division-one',ownerScopeType:'organization',ownerPublicId:organizationPublic,reasonCode:'scoped_claim',expectedContextVersion:'a'.repeat(64)},'scoped-claim-valid-key')).rejects.toMatchObject({status:404});
+      // Existing project-derived classification keeps its division-scoped ACL.
+      expect((await searchPrimaryWorkspaceBindingTargets(env,staff,'Jobs/Clients/Acme/Survey/Scoped/','')).targets).toHaveLength(1);
+    }finally{
+      await ops.prepare("DELETE FROM staff_permission_overrides WHERE id IN ('scoped-only-create','scoped-global-browse')").run();
+      await ops.prepare(`INSERT INTO staff_permission_overrides(id,staff_id,permission_key,effect,scope,scope_key,created_by)
+        VALUES('allow-delivery.share.create',?,'delivery.share.create','allow','global','global',?)`).bind(staff.id,staff.id).run();
+    }
+  });
+
+  it("uses the exact client owner under its organization root and intersects an own-client PA entitlement with a separate principal grant",async()=>{
+    const ownerId='3'.repeat(32),siblingId='4'.repeat(32),folder='Jobs/ClientOnlyOwner/';
+    for(const [id,name] of [[ownerId,'ClientOnly Owner'],[siblingId,'Sibling Owner']])await delivery.batch([
+      delivery.prepare(`INSERT INTO portal_v2_directory_entities(workspace_id,generation_id,entity_type,public_id,parent_public_id,display_name,source_version,active)
+        VALUES(?,'directory-primary-one','client',?,?,?,'client-v1',1)`).bind(workspace,id,organizationPublic,name),
+      delivery.prepare(`INSERT INTO portal_v2_directory_relations(workspace_id,generation_id,public_id,relation_type,from_type,from_public_id,to_type,to_public_id,source_version,active)
+        VALUES(?,'directory-primary-one',?,'contains','organization',?,'client',?,'relation-client-v1',1)`)
+        .bind(workspace,'relation-'+id,organizationPublic,id),
+    ]);
+    for(const [id,clientId] of [['own-client',ownerId],['sibling-client',siblingId]])await delivery.batch([
+      delivery.prepare(`INSERT INTO portal_v2_identities(id,issuer,subject,verified_email,status) VALUES(?,?,?,?,'active')`)
+        .bind(id,issuer,id,id+'@example.test'),
+      delivery.prepare(`INSERT INTO portal_v2_workspace_memberships(id,workspace_id,identity_id,source_type,source_version,status)
+        VALUES(?,?,?,'project_alpha','person-v1','active')`).bind('member-'+id,workspace,id),
+      delivery.prepare(`INSERT INTO pa_portal_principals(workspace_id,public_id,identity_id,email_hint,display_name,source_version,status)
+        VALUES(?,?,?,?,?,'person-v1','active')`).bind(workspace,'person-'+id,id,id+'@example.test',id),
+      ...['workspace.view','directory.read','delivery.view'].map(capability=>delivery.prepare(`INSERT INTO portal_v2_entitlements
+        (id,workspace_id,identity_id,capability,effect,scope_type,scope_public_id,source_type,source_version,status)
+        VALUES(?,?,?,?,'allow',?,?,'project_alpha','own-client-v1','active')`)
+        .bind(capability+'-'+id,workspace,id,capability,capability==='workspace.view'?'workspace':'client',capability==='workspace.view'?workspace:clientId)),
+    ]);
+    const target=(await searchPrimaryWorkspaceBindingTargets(env,staff,folder,'ClientOnly',{divisionId:'division-one'})).targets[0]!;
+    expect(target).toMatchObject({rootPublicId:organizationPublic,ownerScopeType:'client',ownerPublicId:ownerId,projectPublicId:null});
+    const linked=await createPrimaryWorkspaceBinding(env,staff,folder,{folderRef:'client-owned-ref',workspaceId:workspace,
+      ownershipMode:'explicit_workspace',divisionId:'division-one',ownerScopeType:'client',ownerPublicId:ownerId,
+      reasonCode:'client_owned_folder',expectedContextVersion:target.contextVersion},'explicit-client-owner-bind');
+    const own={issuer,subject:'own-client',email:'own-client@example.test'},sibling={issuer,subject:'sibling-client',email:'sibling-client@example.test'};
+    expect(await listAuthorizedAuthenticatedDeliveryPrefixes(env as any,own,workspace)).not.toContain(folder);
+    const operation={folderBindingId:linked.binding!.bindingId,audienceType:'principal' as const,audiencePublicId:'person-own-client',reasonCode:'reviewed_client_delivery'};
+    const preview=await previewAuthenticatedDeliveryGrant(env,staff,operation);
+    expect(preview).toMatchObject({recipientCount:1,projectName:null,dynamicAudience:false});
+    const granted=await createAuthenticatedDeliveryGrant(env,staff,{...operation,expectedContextVersion:preview.contextVersion},'explicit-client-owner-grant');
+    expect(await listAuthorizedAuthenticatedDeliveryPrefixes(env as any,own,workspace)).toContain(folder);
+    expect(await listAuthorizedAuthenticatedDeliveryPrefixes(env as any,sibling,workspace)).not.toContain(folder);
+    await expect(previewAuthenticatedDeliveryGrant(env,staff,{...operation,audiencePublicId:'person-sibling-client'})).rejects.toMatchObject({status:404});
+    const mutation=await reservePrimaryFolderMutation(env,staff.id,'project_folder',{projectId:'client-owner-reassigned',previous:null,
+      next:{divisionId:'division-one',r2Prefix:folder+'Child/'},confirmedBy:staff.id});
+    // Workspace status cannot hide an ownership link from the deny phase.
+    await delivery.prepare("UPDATE portal_v2_workspaces SET status='suspended' WHERE id=?").bind(workspace).run();
+    await suspendPrimaryWorkspaceBindingsForFolderReassignment(env,staff,{opsProjectId:'client-owner-reassigned',previousPrefix:null,
+      nextPrefix:folder+'Child/',previousDivisionId:null,nextDivisionId:'division-one'});
+    await delivery.prepare("UPDATE portal_v2_workspaces SET status='active' WHERE id=?").bind(workspace).run();
+    expect(await listAuthorizedAuthenticatedDeliveryPrefixes(env as any,own,workspace)).not.toContain(folder);
+    await attemptPrimaryFolderMutation(env,mutation);
+    await compareAndSwapProjectFolderAssociation(env,{projectId:'client-owner-reassigned',previous:null,next:{divisionId:'division-one',r2Prefix:folder+'Child/'},confirmedBy:staff.id});
+    await completePrimaryFolderMutation(env,mutation);
+    await expect(revokePrimaryWorkspaceBinding(env,staff,linked.binding!.bindingId,folder,{folderRef:'client-owned-ref',expectedVersion:2,reasonCode:'cleanup'},'explicit-client-unlink-before-revoke')).rejects.toMatchObject({status:409});
+    await revokeAuthenticatedDeliveryGrant(env,staff,granted.grant.grantId,1,'cleanup','explicit-client-grant-revoke');
+    const unlinked=await revokePrimaryWorkspaceBinding(env,staff,linked.binding!.bindingId,folder,{folderRef:'client-owned-ref',expectedVersion:2,reasonCode:'cleanup'},'explicit-client-unlink');
+    expect(unlinked.binding).toMatchObject({state:'revoked',version:3});
+  });
+
+  it("normalizes only the exact standalone root client without creating aliases or widening another client's scope",async()=>{
+    const ownWorkspace='standalone-own-workspace',otherWorkspace='standalone-other-workspace',ownId='5'.repeat(32),otherId='6'.repeat(32),folder='Jobs/StandaloneOwner/';
+    await signedStandaloneWorkspace(ownWorkspace,ownId);await signedStandaloneWorkspace(otherWorkspace,otherId);
+    expect(await delivery.prepare("SELECT count(*) n FROM portal_v2_directory_entities WHERE workspace_id=? AND entity_type='client'").bind(ownWorkspace).first('n')).toBe(0);
+    const targets=await searchPrimaryWorkspaceBindingTargets(env,staff,folder,'Standalone',{divisionId:'division-one'});
+    const selected=targets.targets.find(target=>target.workspaceId===ownWorkspace)!;
+    expect(selected).toMatchObject({ownerScopeType:'client',ownerPublicId:ownId,rootType:'standalone_client',rootPublicId:ownId});
+    const input={folderRef:'standalone-ref',workspaceId:ownWorkspace,ownershipMode:'explicit_workspace',divisionId:'division-one',
+      ownerScopeType:'client',ownerPublicId:ownId,reasonCode:'standalone_owner',expectedContextVersion:selected.contextVersion};
+    await expect(createPrimaryWorkspaceBinding(env,staff,folder,{...input,ownerPublicId:otherId},'standalone-wrong-owner')).rejects.toMatchObject({status:404});
+    const linked=await createPrimaryWorkspaceBinding(env,staff,folder,input,'standalone-exact-owner');
+    for(const [id,rootId] of [['standalone-own',ownId],['standalone-wrong',otherId]])await delivery.batch([
+      delivery.prepare(`INSERT INTO portal_v2_identities(id,issuer,subject,verified_email,status) VALUES(?,?,?,?,'active')`).bind(id,issuer,id,id+'@example.test'),
+      delivery.prepare(`INSERT INTO portal_v2_workspace_memberships(id,workspace_id,identity_id,source_type,source_version,status)
+        VALUES(?,?,?,'project_alpha','person-v1','active')`).bind('membership-'+id,ownWorkspace,id),
+      delivery.prepare(`INSERT INTO pa_portal_principals(workspace_id,public_id,identity_id,email_hint,display_name,source_version,status)
+        VALUES(?,?,?,?,?,'person-v1','active')`).bind(ownWorkspace,'person-'+id,id,id+'@example.test',id),
+      ...['workspace.view','directory.read','delivery.view'].map(capability=>delivery.prepare(`INSERT INTO portal_v2_entitlements
+        (id,workspace_id,identity_id,capability,effect,scope_type,scope_public_id,source_type,source_version,status)
+        VALUES(?,?,?,?,'allow',?,?,'project_alpha','standalone-entitlement-v1','active')`).bind(id+'-'+capability,ownWorkspace,id,capability,
+          capability==='workspace.view'?'workspace':'client',capability==='workspace.view'?ownWorkspace:rootId)),
+    ]);
+    const operation={folderBindingId:linked.binding!.bindingId,audienceType:'principal' as const,audiencePublicId:'person-standalone-own',reasonCode:'standalone_delivery'};
+    const preview=await previewAuthenticatedDeliveryGrant(env,staff,operation);expect(preview.recipientCount).toBe(1);
+    await createAuthenticatedDeliveryGrant(env,staff,{...operation,expectedContextVersion:preview.contextVersion},'standalone-principal-grant');
+    expect(await listAuthorizedAuthenticatedDeliveryPrefixes(env as any,{issuer,subject:'standalone-own',email:'standalone-own@example.test'},ownWorkspace)).toContain(folder);
+    expect(await listAuthorizedAuthenticatedDeliveryPrefixes(env as any,{issuer,subject:'standalone-wrong',email:'standalone-wrong@example.test'},ownWorkspace)).not.toContain(folder);
+    await expect(previewAuthenticatedDeliveryGrant(env,staff,{...operation,audiencePublicId:'person-standalone-wrong'})).rejects.toMatchObject({status:404});
+  });
+
+  it("rejects a projected root with a parent even when the selected client reaches that root",async()=>{
+    await delivery.prepare("UPDATE portal_v2_directory_entities SET parent_public_id=? WHERE workspace_id=? AND entity_type='organization' AND public_id=?")
+      .bind('unexpected-parent',workspace,organizationPublic).run();
+    try{
+      await expect(searchPrimaryWorkspaceBindingTargets(env,staff,'Jobs/RootParentMalformed/','Acme',{divisionId:'division-one'})).rejects.toMatchObject({status:404});
+    }finally{
+      await delivery.prepare("UPDATE portal_v2_directory_entities SET parent_public_id=NULL WHERE workspace_id=? AND entity_type='organization' AND public_id=?")
+        .bind(workspace,organizationPublic).run();
+    }
+  });
+
+  it("retries only the reviewed original division operation and fences its late original command after reactivation",async()=>{
+    const ids=['retry-division-a','retry-division-b'];
+    await ops.batch(ids.map(id=>ops.prepare("INSERT INTO divisions(id,name,code,active,project_alpha_business_unit_id,updated_at) VALUES(?,?,?,1,?,'2026-10-16 00:00:00')").bind(id,id,id,id)));
+    await ops.prepare("INSERT INTO pa_projection_entity_leases(projection_source_id,entity_type,entity_id,owner_event_id,lease_until) VALUES('project-alpha:primary','integration_projection','project-alpha','snapshot:retry-original',datetime('now','+1 hour'))").run();
+    const expectedRows=(await ops.prepare("SELECT id,active,project_alpha_business_unit_id,updated_at FROM divisions WHERE id IN(?,?) ORDER BY id").bind(...ids).all<{id:string;active:number;project_alpha_business_unit_id:string|null;updated_at:string}>()).results;
+    const witness={divisionIds:ids,sourceId:'project-alpha:primary',leaseOwner:'snapshot:retry-original',expectedRows};
+    const mutation=await reservePrimaryFolderMutation(env,staff.id,'division_deactivation',witness);
+    await attemptPrimaryFolderMutation(env,mutation);
+    const delayedOriginal=primaryDivisionDeactivationStatement(env,witness);
+    await expect(reconcilePrimaryFolderMutation(env,mutation!.operationId,'reconcile')).rejects.toMatchObject({status:409});
+    const review=await readPrimaryFolderMutationReview(env,mutation!.operationId);
+    await expect(retryPrimaryDivisionMutation(env,mutation!.operationId,'0'.repeat(64))).rejects.toMatchObject({status:409});
+    expect(await retryPrimaryDivisionMutation(env,mutation!.operationId,review.contextVersion)).toMatchObject({state:'completed'});
+    expect((await ops.prepare("SELECT active FROM divisions WHERE id IN(?,?)").bind(...ids).all<{active:number}>()).results).toEqual([{active:0},{active:0}]);
+    // A later legitimate snapshot may reactivate both divisions. The old
+    // command must remain incapable of deactivating either one afterwards.
+    await ops.batch([
+      ops.prepare("UPDATE divisions SET active=1,updated_at='2026-10-16 01:00:00' WHERE id IN(?,?)").bind(...ids),
+      ops.prepare("INSERT INTO pa_projection_entity_leases(projection_source_id,entity_type,entity_id,owner_event_id,lease_until) VALUES('project-alpha:primary','integration_projection','project-alpha','snapshot:newer',datetime('now','+1 hour'))"),
+    ]);
+    expect(Number((await delayedOriginal.run()).meta.changes)).toBe(0);
+    const target=(await searchPrimaryWorkspaceBindingTargets(env,staff,'Jobs/AfterDivisionRetry/','Acme',{divisionId:ids[0]!})).targets[0]!;
+    const linked=await createPrimaryWorkspaceBinding(env,staff,'Jobs/AfterDivisionRetry/',{folderRef:'after-retry',workspaceId:workspace,ownershipMode:'explicit_workspace',divisionId:ids[0]!,ownerScopeType:'organization',ownerPublicId:organizationPublic,reasonCode:'reviewed_client_folder',expectedContextVersion:target.contextVersion},'after-division-retry');
+    expect(linked.binding?.state).toBe('active');
+    expect(Number((await delayedOriginal.run()).meta.changes)).toBe(0);
+    expect(await ops.prepare("SELECT count(*) n FROM divisions WHERE id IN(?,?) AND active=1").bind(...ids).first<number>('n')).toBe(2);
+    await suspendExplicitBindingsForDivisionDeactivation(env,ids);
+    expect(await delivery.prepare("SELECT state FROM portal_primary_staff_bindings WHERE binding_id=?").bind(linked.binding!.bindingId).first<string>('state')).toBe('suspended');
+    expect(await delivery.prepare("SELECT status FROM portal_v2_folder_bindings WHERE id=?").bind(linked.binding!.bindingId).first<string>('status')).toBe('suspended');
+    await ops.prepare("DELETE FROM pa_projection_entity_leases WHERE owner_event_id='snapshot:newer'").run();
+    await ops.prepare("UPDATE divisions SET active=0 WHERE id IN(?,?)").bind(...ids).run();
+  });
+
   it("lists only the exact signed primary project workspace and creates no access",async()=>{
+    const grantsBefore=(await delivery.prepare('SELECT * FROM portal_v2_authenticated_delivery_grants ORDER BY id').all()).results;
+    const membershipsBefore=(await delivery.prepare('SELECT * FROM portal_v2_workspace_memberships ORDER BY id').all()).results;
     expect(await primaryWorkspaceBindingsReady(env)).toBe(true);
     const result=await searchPrimaryWorkspaceBindingTargets(env,staff,"Jobs/Clients/Acme/Survey/Deliverables/","Acme");
     expect(result.targets).toHaveLength(1);expect(result.targets[0]).toMatchObject({workspaceId:workspace,sourceId:"project-alpha:primary",
@@ -91,8 +335,8 @@ describe("primary signed workspace folder binding",{timeout:60_000,concurrent:fa
     projectBindingId=first.binding.bindingId;
     projectBindingSourceVersion=(await delivery.prepare("SELECT source_version FROM portal_v2_folder_bindings WHERE id=?")
       .bind(projectBindingId).first<string>("source_version"))!;
-    expect(await delivery.prepare("SELECT count(*) n FROM portal_v2_authenticated_delivery_grants").first<number>("n")).toBe(0);
-    expect(await delivery.prepare("SELECT count(*) n FROM portal_v2_workspace_memberships").first<number>("n")).toBe(0);
+    expect((await delivery.prepare('SELECT * FROM portal_v2_authenticated_delivery_grants ORDER BY id').all()).results).toEqual(grantsBefore);
+    expect((await delivery.prepare('SELECT * FROM portal_v2_workspace_memberships ORDER BY id').all()).results).toEqual(membershipsBefore);
     const audiences=await searchAuthenticatedDeliveryGrantAudiences(env,staff,first.binding.bindingId,"Acme","organization");
     expect(audiences.audiences).toContainEqual(expect.objectContaining({type:"organization",publicId:organizationPublic,recipientMode:"dynamic"}));
   });
@@ -312,5 +556,28 @@ it("migration 0189 backfills a coherent populated primary Operations binding",{t
       LEFT JOIN portal_primary_staff_bindings receipt ON receipt.binding_id=binding.id AND receipt.state='active'
       WHERE binding.source_type='operations' AND binding.status='active' AND binding.revoked_at IS NULL
         AND workspace.project_alpha_source_id='project-alpha:primary' AND receipt.binding_id IS NULL`).first<number>("n")).toBe(0);
+    // Exercise the populated current-chain upgrade; prior ownership receipts
+    // and public tokens must survive the additive ownership fence migration.
+    const directory=new URL('../../client/migrations/',import.meta.url);
+    for(const name of readdirSync(directory).filter(name=>/^\d{4}_.*\.sql$/.test(name)&&name.slice(0,4)>'0189'&&name.slice(0,4)<='0232').sort())
+      await database.batch(splitD1MigrationStatements(readFileSync(new URL(name,directory),'utf8')).map(sql=>database.prepare(sql)));
+    await database.prepare("INSERT INTO projects(id,client_name,project_name,r2_prefix) VALUES('upgrade-public-project','Legacy','Legacy','Jobs/Legacy/')").run();
+    await database.prepare("INSERT INTO shares(id,project_id,token_hash,created_by_type,created_by_id) VALUES('upgrade-public-link','upgrade-public-project','preserved-public-token-hash','staff','legacy-staff')").run();
+    const receiptBefore=await database.prepare("SELECT * FROM portal_primary_staff_bindings WHERE binding_id='upgrade-binding'").first<Record<string,unknown>>();
+    const publicBefore=await database.prepare("SELECT * FROM shares WHERE id='upgrade-public-link'").first();
+    await database.batch(splitD1MigrationStatements(readFileSync(new URL('0233_explicit_primary_workspace_folder_ownership.sql',directory),'utf8')).map(sql=>database.prepare(sql)));
+    expect(await database.prepare("SELECT * FROM portal_primary_staff_bindings WHERE binding_id='upgrade-binding'").first()).toEqual({...receiptBefore,ownership_kind:'project_mapping',ops_division_id:null});
+    expect(await database.prepare("SELECT * FROM shares WHERE id='upgrade-public-link'").first()).toEqual(publicBefore);
+    expect((await database.prepare('PRAGMA foreign_key_check').all()).results).toEqual([]);
   }finally{await upgrade.dispose();}
+});
+
+it("fresh Client install accepts the full canonical migration chain including explicit ownership",{timeout:180_000},async()=>{
+  const fresh=new Miniflare({modules:true,compatibilityDate:'2026-07-22',script:"export default {fetch(){return new Response('ok')}}",d1Databases:['FRESH']});
+  try{
+    const database=await fresh.getD1Database('FRESH') as D1Database;
+    await migrate(database,new URL('../../client/migrations/',import.meta.url),'0233');
+    expect(await database.prepare("SELECT name FROM sqlite_master WHERE name='portal_primary_folder_authority_mutations'").first<string>('name')).toBe('portal_primary_folder_authority_mutations');
+    expect((await database.prepare('PRAGMA foreign_key_check').all()).results).toEqual([]);
+  }finally{await fresh.dispose();}
 });

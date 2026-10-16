@@ -1,3 +1,4 @@
+import { folderOwnerEntityType,folderOwnerEntityTypeSql } from '../../../../packages/shared/src/folder-owner-entity';
 import { HTTPException } from "hono/http-exception";
 import { projectAccessCapacitySql } from '../../../client/src/worker/client-portal/project-access-capacity';
 import { requirePermission } from "./acl";
@@ -13,6 +14,7 @@ import { NATIVE_PORTAL_TARGET_SCOPES_SQL,readNativeTargetScopes } from '../../..
 import { authorizePortalWorkspaceCapability } from '../../../client/src/worker/client-portal/workspace-v2';
 import {requireProjectAccessAuthorityMutations} from './project-access-mutation-gate';
 import {requireActivePrimaryWorkspaceBindingReceipt} from './primary-delivery-workspace-bindings';
+import { d1ColumnPresent } from '../../../client/src/worker/schema-readiness';
 import { portalRootAccessAllowedSql } from './client-portal-root-access';
 import { requireAuthenticatedDeliveryCreation } from './authenticated-delivery-creation-gate';
 
@@ -147,7 +149,7 @@ async function bindingContext(env: Env, bindingId: string): Promise<BindingConte
       AND generation.status='active' AND generation.complete=1
     JOIN portal_v2_directory_entities owner
       ON owner.workspace_id=binding.workspace_id AND owner.generation_id=checkpoint.active_generation_id
-      AND owner.entity_type=binding.owner_scope_type AND owner.public_id=binding.owner_public_id AND owner.active=1
+      AND owner.entity_type=${folderOwnerEntityTypeSql('binding.owner_scope_type','binding.owner_public_id','workspace.root_type','workspace.pa_client_public_id')} AND owner.public_id=binding.owner_public_id AND owner.active=1
     WHERE binding.id=? AND binding.status='active' AND binding.revoked_at IS NULL
       AND binding.source_version IS NOT NULL AND ${portalRootAccessAllowedSql(env, 'workspace')}`).bind(bindingId).first<{
       id: string; workspace_id: string; owner_scope_type: BindingContext["ownerType"];
@@ -156,7 +158,10 @@ async function bindingContext(env: Env, bindingId: string): Promise<BindingConte
     }>();
   if (!row) throw new HTTPException(404, { message: "Folder binding not found" });
   const prefix = normalizePrefix(row.r2_prefix);
-  if(row.source_type==='operations')await requireActivePrimaryWorkspaceBindingReceipt(env,row.id,prefix);
+  const explicit=row.source_type==='operations'?await requireActivePrimaryWorkspaceBindingReceipt(env,row.id,prefix):null;
+  if(explicit)return { id:row.id,workspaceId:row.workspace_id,sourceVersion:row.source_version,
+    ownerType:row.owner_scope_type,ownerPublicId:row.owner_public_id,prefix,generationId:row.active_generation_id,
+    divisionId:explicit.divisionId,workspaceLabel:row.workspace_label,ownerName:row.owner_name,rootType:row.root_type,rootPublicId:row.root_public_id };
   const candidates = await env.OPS_DB.withSession("first-primary").prepare(`SELECT project_folders.division_id,project_folders.r2_prefix
     FROM project_folders JOIN pa_projects ON pa_projects.id=project_folders.project_id AND pa_projects.active=1 AND pa_projects.projection_source_id='project-alpha:primary'
     WHERE substr(?,1,length(project_folders.r2_prefix))=project_folders.r2_prefix
@@ -390,12 +395,16 @@ function ancestrySql(): string {
         ON parent.workspace_id=relation.workspace_id AND parent.generation_id=relation.generation_id
         AND parent.entity_type=relation.from_type AND parent.public_id=relation.from_public_id AND parent.active=1
       WHERE ancestry.depth<12
+  ), scope_ancestry AS(
+    SELECT * FROM ancestry UNION SELECT 'client',public_id,source_version,depth FROM ancestry
+    WHERE entity_type='standalone_client' AND EXISTS(SELECT 1 FROM portal_v2_workspaces exact_workspace
+      WHERE exact_workspace.id=? AND exact_workspace.root_type='standalone_client' AND exact_workspace.pa_client_public_id=ancestry.public_id)
   )`;
 }
 
 function ancestryBindings(context: BindingContext): unknown[] {
-  return [context.workspaceId, context.generationId, context.ownerType, context.ownerPublicId,
-    context.workspaceId, context.generationId, context.workspaceId, context.generationId];
+  return [context.workspaceId, context.generationId, folderOwnerEntityType(context.ownerType,context.ownerPublicId,context.rootType,context.rootPublicId), context.ownerPublicId,
+    context.workspaceId, context.generationId, context.workspaceId, context.generationId,context.workspaceId];
 }
 
 async function audience(env: Env, context: BindingContext, type: AuthenticatedGrantAudienceType, publicId: string): Promise<{ sourceVersion: string; displayName: string }> {
@@ -414,8 +423,8 @@ async function audience(env: Env, context: BindingContext, type: AuthenticatedGr
     return { sourceVersion: row.source_version, displayName: row.display_name };
   }
   const row = await db.prepare(`${ancestrySql()} SELECT source_version,display_name FROM (
-      SELECT ancestry.source_version,entity.display_name FROM ancestry JOIN portal_v2_directory_entities entity
-        ON entity.workspace_id=? AND entity.generation_id=? AND entity.entity_type=ancestry.entity_type
+      SELECT ancestry.source_version,entity.display_name FROM scope_ancestry ancestry JOIN portal_v2_directory_entities entity
+        ON entity.workspace_id=? AND entity.generation_id=? AND (entity.entity_type=ancestry.entity_type OR (entity.entity_type='standalone_client' AND ancestry.entity_type='client'))
         AND entity.public_id=ancestry.public_id
       WHERE ancestry.entity_type=? AND ancestry.public_id=? LIMIT 1
     )`).bind(...ancestryBindings(context), context.workspaceId, context.generationId, type, publicId)
@@ -455,7 +464,7 @@ async function recipients(env: Env, context: BindingContext, type: Authenticated
           AND datetime(allow_record.valid_from)<=datetime('now')
           AND (allow_record.expires_at IS NULL OR datetime(allow_record.expires_at)>datetime('now'))
           AND ((allow_record.scope_type='workspace' AND allow_record.scope_public_id=?) OR
-            EXISTS (SELECT 1 FROM ancestry WHERE entity_type=allow_record.scope_type AND public_id=allow_record.scope_public_id)))
+            EXISTS (SELECT 1 FROM scope_ancestry WHERE entity_type=allow_record.scope_type AND public_id=allow_record.scope_public_id)))
       AND NOT EXISTS (SELECT 1 FROM portal_v2_entitlements deny_record
         WHERE deny_record.workspace_id=? AND deny_record.identity_id=?
           AND deny_record.capability='delivery.view' AND deny_record.effect='deny'
@@ -463,14 +472,14 @@ async function recipients(env: Env, context: BindingContext, type: Authenticated
           AND datetime(deny_record.valid_from)<=datetime('now')
           AND (deny_record.expires_at IS NULL OR datetime(deny_record.expires_at)>datetime('now'))
           AND ((deny_record.scope_type='workspace' AND deny_record.scope_public_id=?) OR
-            EXISTS (SELECT 1 FROM ancestry WHERE entity_type=deny_record.scope_type AND public_id=deny_record.scope_public_id)))
+            EXISTS (SELECT 1 FROM scope_ancestry WHERE entity_type=deny_record.scope_type AND public_id=deny_record.scope_public_id)))
       AND (?<>'true' OR NOT EXISTS (SELECT 1 FROM portal_v2_identity_denials active_denial
         WHERE active_denial.identity_id=? AND active_denial.status='active' AND active_denial.revoked_at IS NULL
           AND datetime(active_denial.valid_from)<=datetime('now')
           AND (active_denial.expires_at IS NULL OR datetime(active_denial.expires_at)>datetime('now'))
           AND (active_denial.scope_type='global' OR (active_denial.workspace_id=? AND
             ((active_denial.scope_type='workspace' AND active_denial.scope_public_id=?) OR
-             EXISTS (SELECT 1 FROM ancestry WHERE entity_type=active_denial.scope_type AND public_id=active_denial.scope_public_id))))))`)
+             EXISTS (SELECT 1 FROM scope_ancestry WHERE entity_type=active_denial.scope_type AND public_id=active_denial.scope_public_id))))))`)
       .bind(...ancestryBindings(context), context.workspaceId, principal.identity_id, context.workspaceId,
         context.workspaceId, principal.identity_id, context.workspaceId,
         env.CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED ?? "false", principal.identity_id,
@@ -555,8 +564,8 @@ export async function searchAuthenticatedDeliveryGrantAudiences(env: Env, princi
   const db = deliveryDb(env);
   const [entities, principals] = await Promise.all([
     db.prepare(`${ancestrySql()} SELECT ancestry.entity_type,ancestry.public_id,entity.display_name
-      FROM ancestry JOIN portal_v2_directory_entities entity
-        ON entity.workspace_id=? AND entity.generation_id=? AND entity.entity_type=ancestry.entity_type
+      FROM scope_ancestry ancestry JOIN portal_v2_directory_entities entity
+        ON entity.workspace_id=? AND entity.generation_id=? AND (entity.entity_type=ancestry.entity_type OR (entity.entity_type='standalone_client' AND ancestry.entity_type='client'))
         AND entity.public_id=ancestry.public_id
       WHERE ancestry.entity_type IN ('organization','department','client','project')
         AND lower(entity.display_name) LIKE ? ESCAPE '\\'
@@ -580,7 +589,7 @@ export async function searchAuthenticatedDeliveryGrantAudiences(env: Env, princi
             AND datetime(allow_record.valid_from)<=datetime('now')
             AND (allow_record.expires_at IS NULL OR datetime(allow_record.expires_at)>datetime('now'))
             AND ((allow_record.scope_type='workspace' AND allow_record.scope_public_id=?) OR
-              EXISTS (SELECT 1 FROM ancestry WHERE entity_type=allow_record.scope_type AND public_id=allow_record.scope_public_id)))
+              EXISTS (SELECT 1 FROM scope_ancestry WHERE entity_type=allow_record.scope_type AND public_id=allow_record.scope_public_id)))
         AND NOT EXISTS (SELECT 1 FROM portal_v2_entitlements deny_record
           WHERE deny_record.workspace_id=? AND deny_record.identity_id=identity.id
             AND deny_record.capability='delivery.view' AND deny_record.effect='deny'
@@ -588,14 +597,14 @@ export async function searchAuthenticatedDeliveryGrantAudiences(env: Env, princi
             AND datetime(deny_record.valid_from)<=datetime('now')
             AND (deny_record.expires_at IS NULL OR datetime(deny_record.expires_at)>datetime('now'))
             AND ((deny_record.scope_type='workspace' AND deny_record.scope_public_id=?) OR
-              EXISTS (SELECT 1 FROM ancestry WHERE entity_type=deny_record.scope_type AND public_id=deny_record.scope_public_id)))
+              EXISTS (SELECT 1 FROM scope_ancestry WHERE entity_type=deny_record.scope_type AND public_id=deny_record.scope_public_id)))
         AND (?<>'true' OR NOT EXISTS (SELECT 1 FROM portal_v2_identity_denials active_denial
           WHERE active_denial.identity_id=identity.id AND active_denial.status='active'
             AND active_denial.revoked_at IS NULL AND datetime(active_denial.valid_from)<=datetime('now')
             AND (active_denial.expires_at IS NULL OR datetime(active_denial.expires_at)>datetime('now'))
             AND (active_denial.scope_type='global' OR (active_denial.workspace_id=? AND
               ((active_denial.scope_type='workspace' AND active_denial.scope_public_id=?) OR
-               EXISTS (SELECT 1 FROM ancestry WHERE entity_type=active_denial.scope_type AND public_id=active_denial.scope_public_id))))))
+               EXISTS (SELECT 1 FROM scope_ancestry WHERE entity_type=active_denial.scope_type AND public_id=active_denial.scope_public_id))))))
       ORDER BY lower(principal.display_name),principal.public_id LIMIT ?`)
       .bind(...ancestryBindings(context), context.workspaceId, like, like,
         context.workspaceId, context.workspaceId, context.workspaceId, context.workspaceId,
@@ -817,6 +826,19 @@ export async function createAuthenticatedDeliveryGrant(env: Env, principal: Staf
   }
 }
 
+async function revocationDivision(env:Env,bindingId:string):Promise<string>{
+  if(await d1ColumnPresent(env.DELIVERY_DB,'portal_primary_staff_bindings','ownership_kind')){
+    const row=await deliveryDb(env).prepare(`SELECT receipt.ops_division_id FROM portal_primary_staff_bindings receipt
+      JOIN portal_v2_folder_bindings binding ON binding.id=receipt.binding_id AND binding.workspace_id=receipt.workspace_id
+        AND binding.r2_prefix=receipt.r2_prefix AND binding.owner_scope_type=receipt.owner_scope_type AND binding.owner_public_id=receipt.owner_public_id
+      WHERE receipt.binding_id=? AND receipt.ownership_kind='explicit_workspace' AND receipt.source_id='project-alpha:primary'
+        AND receipt.state IN ('active','suspended','revoked') AND receipt.ops_division_id IS NOT NULL`)
+      .bind(bindingId).first<{ops_division_id:string}>();
+    if(row)return row.ops_division_id;
+  }
+  return (await bindingContext(env,bindingId)).divisionId;
+}
+
 export async function revokeAuthenticatedDeliveryGrant(env: Env, principal: StaffPrincipal,
   logicalGrantId: string, expectedVersion: number, reasonCode: string, idempotencyKey: string,
 ): Promise<{ grant: AuthenticatedDeliveryGrantView; replayed: boolean }> {
@@ -827,8 +849,8 @@ export async function revokeAuthenticatedDeliveryGrant(env: Env, principal: Staf
     throw new HTTPException(400, { message: "Grant revocation request is invalid" });
   const fingerprint = await hash(JSON.stringify({ logicalGrantId, expectedVersion, reasonCode }));
   const prior = await replay(env, principal, idempotencyKey, "grant.revoke", fingerprint);
-  if (prior) {const scope=await bindingContext(env,prior.folderBindingId);
-    await requirePermission(env,principal,'delivery.share.revoke',{divisionId:scope.divisionId},true);
+  if (prior) {
+    await requirePermission(env,principal,'delivery.share.revoke',{divisionId:await revocationDivision(env,prior.folderBindingId)},true);
     return { grant: prior, replayed: true };}
   const db = deliveryDb(env);
   const historyReady=await projectAccessAuthorityHistoryReady(db),auditId=crypto.randomUUID();
@@ -837,8 +859,7 @@ export async function revokeAuthenticatedDeliveryGrant(env: Env, principal: Staf
       AND (expires_at IS NULL OR datetime(expires_at)>datetime('now'))`)
     .bind(logicalGrantId, expectedVersion).first<{ id: string; folder_binding_id: string }>();
   if (!current) throw new HTTPException(409, { message: "Grant changed; refresh and try again" });
-  const context = await bindingContext(env, current.folder_binding_id);
-  await requirePermission(env, principal, "delivery.share.revoke", { divisionId: context.divisionId }, true);
+  await requirePermission(env, principal, "delivery.share.revoke", { divisionId: await revocationDivision(env,current.folder_binding_id) }, true);
   try{await db.batch([
     db.prepare(`UPDATE portal_v2_authenticated_delivery_grants SET status='revoked',revoked_at=datetime('now'),
       revoked_by_staff_id=?,revoke_reason_code=?,updated_at=datetime('now')
@@ -862,8 +883,8 @@ export async function revokeAuthenticatedDeliveryGrant(env: Env, principal: Staf
       producerEventKey:`authenticated-grant-audit:${auditId}`,actor:{type:'staff',id:principal.id},requiredGrantAuditId:auditId})]:[]),
   ]);}catch(cause){
     const raced=await replay(env,principal,idempotencyKey,'grant.revoke',fingerprint);
-    if(raced){const scope=await bindingContext(env,raced.folderBindingId);
-      await requirePermission(env,principal,'delivery.share.revoke',{divisionId:scope.divisionId},true);
+    if(raced){
+      await requirePermission(env,principal,'delivery.share.revoke',{divisionId:await revocationDivision(env,raced.folderBindingId)},true);
       return {grant:raced,replayed:true};}
     const status=await db.prepare(`SELECT status FROM portal_v2_authenticated_delivery_grants WHERE id=?`).bind(current.id).first<string>('status');
     if(status!=='active')throw new HTTPException(409,{message:'Grant changed; refresh and try again'});

@@ -1,4 +1,5 @@
 import { readBoundedJson } from "./bounded-json";
+import type { Env } from './types';
 import { HTTPException } from "hono/http-exception";
 import { authenticateNativeStaffWithAdmissionVersion, type NativeStaffAccessConfiguration,
   type AuthenticatedNativeStaffWithAdmissionVersion } from "./native-staff-auth";
@@ -23,6 +24,7 @@ type Configuration = NativeStaffAccessConfiguration & Readonly<{ origin: string;
 export type OperationsPortalWorkspaceOwnerHttpDependencies = Readonly<{
   environment: string; expectedHost: string; configuration: Configuration; database: D1Database;
   publication: OperationsPortalWorkspacePublicationBinding;
+  folderAuthority?:Env;
 }>;
 
 class Failure extends Error { constructor(readonly status: number, readonly code: string) { super(code); } }
@@ -192,7 +194,7 @@ export async function handleOperationsPortalWorkspaceOwnerHttp(request: Request,
     if (url.pathname === `${BASE}/confirm-project-folder`) {
       const input = confirmProjectFolderInput(await readBoundedJson(request, 4096, "operations native project folder confirmation"));
       if (!input) throw new Failure(400, "invalid_request");
-      return response(200, await confirmOperationsPortalSharedProjectFolder(dependencies.database, actor, input));
+      return response(200, await confirmOperationsPortalSharedProjectFolder(dependencies.database, actor, input,dependencies.folderAuthority));
     }
     if (url.pathname === `${BASE}/recover-publication`) {
       const body = exact(await readBoundedJson(request, 2048, "operations workspace publication recovery"),

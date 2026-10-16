@@ -1,4 +1,5 @@
 import { Hono, type Context } from "hono";
+import { reservePrimaryFolderMutation,attemptPrimaryFolderMutation,completePrimaryFolderMutation,reconcilePrimaryFolderMutation,readPrimaryFolderMutationReview,retryPrimaryDivisionMutation,type DivisionMutationWitness } from './primary-folder-authority-mutations';
 import { backfillIncomingRcloneOutbox, drainIncomingRcloneOutbox } from "./incoming-rclone-outbox";
 import { reconcileIncomingRcloneDispatched } from "./incoming-rclone-reconcile";
 import { runIncomingRcloneRetention } from "./incoming-rclone-retention";
@@ -1407,6 +1408,33 @@ app.post("/api/team/clients/eligibility-blocks/:blockId/revoke", async c => {
   return c.json(await revokeEligibilityBlock(c.env, c.get("principal"), c.req.param("blockId"),
     input.reasonCode, c.req.header("Idempotency-Key") || ""));
 });
+app.get('/api/delivery/folder-authority-mutations',async c=>{
+  await requireGlobal(c.env,c.get('principal'),'delivery.share.revoke');
+  const rows=await c.env.DELIVERY_DB.withSession('first-primary').prepare(`SELECT operation_id,kind,actor_id,witness_json,phase,created_at,updated_at
+    FROM portal_primary_folder_authority_mutations WHERE phase<>'completed' ORDER BY created_at LIMIT 2`).all();
+  return c.json({operations:rows.results});
+});
+app.post('/api/delivery/folder-authority-mutations/:operationId/reconcile',async c=>{
+  await requireGlobal(c.env,c.get('principal'),'delivery.share.revoke');
+  const input=await body(c,z.union([z.object({action:z.enum(['reconcile','cancel_reserved'])}).strict(),
+    z.object({action:z.literal('retry_same_operation'),expectedContextVersion:z.string().regex(/^[a-f0-9]{64}$/)}).strict()]));
+  if(input.action==='retry_same_operation'){
+    await requireGlobal(c.env,c.get('principal'),'operations.manage');
+    await requireGlobal(c.env,c.get('principal'),'delivery.share.create');
+    const review=await readPrimaryFolderMutationReview(c.env,c.req.param('operationId'));
+    if(review.kind!=='division_deactivation')throw new HTTPException(409,{message:'Project folder recovery never redispatches a generic write'});
+    for(const divisionId of (review.witness as DivisionMutationWitness).divisionIds){
+      await requirePermission(c.env,c.get('principal'),'delivery.share.create',{divisionId},true);
+      await requirePermission(c.env,c.get('principal'),'delivery.share.revoke',{divisionId},true);
+    }
+    return c.json(await retryPrimaryDivisionMutation(c.env,c.req.param('operationId'),input.expectedContextVersion));
+  }
+  return c.json(await reconcilePrimaryFolderMutation(c.env,c.req.param('operationId'),input.action));
+});
+app.get('/api/delivery/folder-authority-mutations/:operationId',async c=>{
+  await requireGlobal(c.env,c.get('principal'),'delivery.share.revoke');
+  return c.json(await readPrimaryFolderMutationReview(c.env,c.req.param('operationId')));
+});
 app.get("/api/delivery/authenticated-grants/audiences", async (c) => c.json(
   await searchAuthenticatedDeliveryGrantAudiences(
     c.env, c.get("principal"), c.req.query("folderBindingId") || "", c.req.query("q") || "",
@@ -1417,7 +1445,8 @@ app.get("/api/delivery/authenticated-grants/binding-targets", async c => {
   const folderRef=c.req.query("folderRef")||"",q=c.req.query("q")||"";
   if(!/^[A-Za-z0-9_-]{2,1400}$/.test(folderRef))throw new HTTPException(400,{message:"Folder reference is invalid"});
   const folderKey=await authorizeItem(c.env,c.get("principal"),folderRef);
-  return c.json(await searchPrimaryWorkspaceBindingTargets(c.env,c.get("principal"),folderKey,q));
+  const divisionId=c.req.query('divisionId');
+  return c.json(await searchPrimaryWorkspaceBindingTargets(c.env,c.get("principal"),folderKey,q,divisionId?{divisionId}:undefined));
 });
 app.post("/api/delivery/authenticated-grants/bindings",async c=>{
   const input=await body(c,primaryWorkspaceBindingInputSchema),folderKey=await authorizeItem(c.env,c.get("principal"),input.folderRef);
@@ -1664,6 +1693,9 @@ app.post("/api/projects/:id/folder", async (c) => {
     await requirePermission(c.env, principal, "delivery.share.revoke", { divisionId: previous.division_id }, true);
   const link = links.results[0]!,
     associationId = crypto.randomUUID();
+  const ownershipMutation=associationChanged?await reservePrimaryFolderMutation(c.env,principal.id,'project_folder',{
+    projectId:c.req.param('id'),previous:previous?{divisionId:previous.division_id,r2Prefix:previous.r2_prefix}:null,
+    next:{divisionId:value.divisionId,r2Prefix:normalized},confirmedBy:principal.id}):null;
   const suspended = associationChanged
     ? await suspendPrimaryWorkspaceBindingsForFolderReassignment(c.env,principal,{
       opsProjectId:c.req.param("id"),previousPrefix:previous?.r2_prefix??null,nextPrefix:normalized,
@@ -1671,11 +1703,13 @@ app.post("/api/projects/:id/folder", async (c) => {
     })
     : {bindingIds:[]};
   try{
+    await attemptPrimaryFolderMutation(c.env,ownershipMutation);
     await compareAndSwapProjectFolderAssociation(c.env,{
       projectId:c.req.param("id"),
       previous:previous?{divisionId:previous.division_id,r2Prefix:previous.r2_prefix}:null,
       next:{divisionId:value.divisionId,r2Prefix:normalized},confirmedBy:principal.id,
     });
+    await completePrimaryFolderMutation(c.env,ownershipMutation);
     await (await auditStatement(c.env,c.req.raw,principal,"project.folder.confirmed","project",c.req.param("id"),value.divisionId,
       {r2Prefix:normalized,accountId:link.account_id,suspendedWorkspaceBindingIds:suspended.bindingIds})).run();
     await db.batch([

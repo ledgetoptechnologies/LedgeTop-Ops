@@ -1,3 +1,4 @@
+import { folderOwnerEntityType,addExactStandaloneClientScope } from '../../../../../packages/shared/src/folder-owner-entity';
 import type { Env as ClientEnv } from "../types";
 import { blockBusinessProfileWorkspace,businessProfileAuthorityBatch } from './business-profile-fences';
 import {invitationPublicationAllowed,invitationRequestsReady} from './invitation-approval-policy';
@@ -791,7 +792,7 @@ async function targetScopes(
       .first<{ owner_scope_type: Exclude<PortalWorkspaceScopeType, "workspace" | "folder">; owner_public_id: string }>();
     if (!binding) return null;
     scopes.add(`folder:${target.publicId}`);
-    targetType = binding.owner_scope_type;
+    targetType = folderOwnerEntityType(binding.owner_scope_type,binding.owner_public_id,workspace.root_type,workspace.pa_organization_public_id??workspace.pa_client_public_id!);
     targetPublicId = binding.owner_public_id;
   }
 
@@ -822,6 +823,7 @@ async function targetScopes(
   // A live target whose active ancestor chain does not reach the workspace's
   // exact PA root is orphaned/reparented and cannot be authorized.
   if (!scopes.has(`${workspace.root_type}:${rootId}`)) return null;
+  addExactStandaloneClientScope(scopes,workspace.root_type,rootId!);
   return scopes;
 }
 

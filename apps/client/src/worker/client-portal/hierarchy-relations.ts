@@ -1,3 +1,4 @@
+import { folderOwnerEntityType,addExactStandaloneClientScope } from '../../../../../packages/shared/src/folder-owner-entity';
 import type { Env as ClientEnv } from "../types";
 import { projectAccessTermsReady, projectAccessTermsSql } from './project-access-terms';
 import { projectAccessCapacitySql } from './project-access-capacity';
@@ -42,7 +43,7 @@ export async function resolvePortalRelationTargetScopes(
       .first<{ owner_scope_type: "organization" | "department" | "client" | "project"; owner_public_id: string }>();
     if (!binding) return null;
     scopes.add(`folder:${target.publicId}`);
-    targetType = binding.owner_scope_type;
+    targetType = folderOwnerEntityType(binding.owner_scope_type,binding.owner_public_id,workspace.rootType,workspace.rootPublicId);
     targetPublicId = binding.owner_public_id;
   }
 
@@ -88,6 +89,7 @@ export async function resolvePortalRelationTargetScopes(
     if (retained !== projectIds.length) return null;
   }
   for (const row of result.results) scopes.add(`${row.entity_type}:${row.public_id}`);
+  addExactStandaloneClientScope(scopes,workspace.rootType,workspace.rootPublicId);
   return scopes.has(`${workspace.rootType}:${workspace.rootPublicId}`) ? scopes : null;
 }
 

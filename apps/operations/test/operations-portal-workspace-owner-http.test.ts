@@ -88,7 +88,11 @@ describe("operations portal workspace owner HTTP", () => {
     });
 
   it("confirmation requires CSRF and sends only the exact full prior proof to the native service", async () => {
-    const d = deps(), token = await csrf(d), body = { targetId: id(2), externalProjectId: "project-1", expectedProjectVersion: 7,
+    // The supported writer must receive the same database authority needed
+    // to reserve and deny before its Ops compare-and-swap.
+    const initial = deps();
+    const d:Dependencies={...initial,folderAuthority:{OPS_DB:initial.database,DELIVERY_DB:{} as D1Database} as NonNullable<Dependencies['folderAuthority']>};
+    const token = await csrf(d), body = { targetId: id(2), externalProjectId: "project-1", expectedProjectVersion: 7,
       expectedAssociation: null, opsDivisionId: "division-1", baseR2Prefix: "synthetic/project/" };
     expect((await handle(post("confirm-project-folder", body, "", id(31)), d)).status).toBe(403);
     expect(calls.confirmProjectFolder).not.toHaveBeenCalled();
@@ -96,7 +100,7 @@ describe("operations portal workspace owner HTTP", () => {
     expect((await handle(post("confirm-project-folder", { ...body, expectedAssociation: {} }, token, id(31)), d)).status).toBe(400);
     const response = await handle(post("confirm-project-folder", body, token, id(31)), d);
     expect(response.status).toBe(200);
-    expect(calls.confirmProjectFolder).toHaveBeenCalledWith(d.database, actor, body);
+    expect(calls.confirmProjectFolder).toHaveBeenCalledWith(d.database, actor, body, d.folderAuthority);
     expect(calls.dispatch).not.toHaveBeenCalled();
   });
 
