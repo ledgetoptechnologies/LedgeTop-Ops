@@ -4,6 +4,7 @@ import type { ClientHubCollectionContext } from "./client-hub-collections";
 import { clientHubAlphaInternalId, hasClientHubActiveDirectoryMappings, resolveClientHubSourceRoot } from "./client-hub-source";
 import { projectAlphaReadVisibleSql, requireProjectAlphaReadOrNativeMappingVisibility } from "./project-alpha-read-visibility";
 import { resolveProjectAlphaApiV2Connection } from "./project-alpha-api-v2-connections";
+import { nativeExistingImportClassicIdSql, nativeExistingImportTranslationsAvailable } from "./native-directory-existing-import-identity";
 import type { Env, StaffPrincipal } from "./types";
 
 type Environment = Pick<Env, "OPS_DB" | "DELIVERY_DB"> & Partial<Pick<Env, "PROJECT_ALPHA_API_V2_CONNECTIONS">>;
@@ -92,8 +93,10 @@ async function rootProof(env: Environment, context: ClientHubCollectionContext):
       if (!configured.enabled || !configured.connection.expectedHistoryEpoch)
         throw new HTTPException(404, { message: "Client workspace is unavailable" });
       const resourceType = root.kind === "organization" ? "organization" : "client";
+      const projectionIdentity = nativeExistingImportClassicIdSql("mapping", await nativeExistingImportTranslationsAvailable(env.OPS_DB));
       const tupleProof = await db(env).prepare(`SELECT mapping.source_id,mapping.source_instance_id,mapping.application_id,
           mapping.history_epoch_id,mapping.resource_type,mapping.record_id,mapping.external_id,
+          ${projectionIdentity} pa_internal_id,
           mapping.project_alpha_public_id,mapping.mapping_kind,mapping.provenance_id,record.current_version,
           revision.profile_json,relationship.organization_record_id,relationship.relationship_version
         FROM project_alpha_active_directory_mappings mapping
@@ -119,10 +122,10 @@ async function rootProof(env: Environment, context: ClientHubCollectionContext):
           configured.connection.expectedApplicationId, configured.connection.expectedHistoryEpoch)
         .all<Record<string, unknown>>();
       if (tupleProof.results.length !== 1
-        || tupleProof.results[0]!.external_id !== resolved.pa_internal_id
+        || tupleProof.results[0]!.pa_internal_id !== resolved.pa_internal_id
         || tupleProof.results[0]!.project_alpha_public_id !== resolved.pa_public_id
         || (nativeProof && (nativeProof.recordId !== root.public_id
-          || nativeProof.externalId !== resolved.pa_internal_id
+          || nativeProof.externalId !== tupleProof.results[0]!.external_id
           || nativeProof.publicId !== resolved.pa_public_id
           || nativeProof.recordVersion !== tupleProof.results[0]!.current_version)))
         throw new HTTPException(404, { message: "Client workspace is unavailable" });

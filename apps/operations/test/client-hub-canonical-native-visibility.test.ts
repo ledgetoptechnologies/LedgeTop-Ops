@@ -91,17 +91,17 @@ describe("canonical proof invocation schema reads", () => {
   const env = { ...f.env, OPS_DB: database };
   const proof = await canonicalBusinessProjectPredicate(env, f.context, f.policy);
   expect(proof).not.toBeNull();
-  // Five metadata reads plus one current source-identity query. These are
+  // Six metadata reads plus one current source-identity query. These are
   // real D1 statements, not mocked results that could hide a missing check.
-  expect(queries).toHaveLength(6);
+  expect(queries).toHaveLength(7);
   expect(queries.filter(sql => sql.includes("PRAGMA table_info"))).toHaveLength(2);
-  expect(queries.filter(sql => sql.includes("sqlite_master"))).toHaveLength(3);
+  expect(queries.filter(sql => sql.includes("sqlite_master"))).toHaveLength(4);
   expect(queries.filter(sql => sql.includes("SELECT DISTINCT source_id"))).toHaveLength(1);
   expect(await f.db.prepare("SELECT s.external_project_id FROM operations_shared_projects s WHERE " + proof!.sql)
    .bind(...proof!.values).all()).toMatchObject({ results: [{ external_project_id: "native-project" }] });
   const second = await canonicalBusinessProjectPredicate(env, f.context, f.policy);
   expect(second).toEqual(proof);
-  expect(queries).toHaveLength(12);
+  expect(queries).toHaveLength(14);
   // A later invocation must observe a newly partial lifecycle installation.
   await f.db.prepare("CREATE TABLE native_project_lifecycle_commands(command_id TEXT)").run();
   expect(await canonicalBusinessProjectPredicate(env, f.context, f.policy)).toBeNull();
@@ -120,4 +120,48 @@ describe("canonical proof invocation schema reads", () => {
   await f.db.prepare("ALTER TABLE operations_shared_project_revisions ADD COLUMN inbound_resolution_id TEXT").run();
   expect(await canonicalBusinessProjectPredicate(f.env, f.context, f.policy)).toBeNull();
  }, 30_000);
+});
+
+async function importedFixture() {
+ const f=await fixture(),classic="classic-org",native=`pa-import:${source}:organization:${classic}`;
+ f.context.root.public_id=native;f.context.root.pa_internal_id=classic;f.context.canonicalRoot.publicId=native;
+ await f.db.batch([
+  f.db.prepare("UPDATE operations_directory_records SET record_id=? WHERE record_id='native-org'").bind(native),
+  f.db.prepare("UPDATE project_alpha_active_directory_mappings SET record_id=?,external_id=? WHERE record_id='native-org'").bind(native,native),
+  f.db.prepare("UPDATE operations_shared_projects SET organization_record_id=?").bind(native),
+  f.db.prepare("UPDATE project_alpha_project_v2_canonical_activation_receipts SET organization_record_id=?").bind(native),
+  f.db.prepare("CREATE TABLE native_directory_existing_import_identity_translations(import_id TEXT,native_record_id TEXT,source_id TEXT,record_kind TEXT,classic_record_id TEXT,public_id TEXT)"),
+  f.db.prepare("CREATE TABLE native_directory_existing_import_reviews(import_id TEXT,review_json TEXT)"),
+  f.db.prepare("INSERT INTO native_directory_existing_import_identity_translations VALUES('import',?,?,'organization',?,?)").bind(native,source,classic,rootPublic),
+  f.db.prepare("INSERT INTO native_directory_existing_import_reviews VALUES('import',?)").bind(JSON.stringify({sourceInstanceId:instance,applicationId:application,historyEpoch:epoch})),
+ ]);
+ return {...f,native,classic};
+}
+
+describe("canonical projects for exactly translated existing imports",()=>{
+ it("keeps the native project visible while classic projection identity differs from binding identity",async()=>{
+  const f=await importedFixture();
+  expect(await f.visible()).toEqual([{external_project_id:"native-project"}]);
+  expect(await f.visible(f.env,{...f.policy,canViewUnprojectedCanonical:false,filter:{sql:"0=1",values:[]}})).toEqual([]);
+  await f.db.prepare("INSERT INTO pa_connectors VALUES(?,0)").bind(source).run();
+  expect(await f.visible()).toEqual([]);
+ },30_000);
+ it.each(["source","instance","application","history","public","record","kind","classic","missing"])("rejects %s translation drift",async drift=>{
+  const f=await importedFixture();expect(await f.visible()).toHaveLength(1);
+  if(drift==="missing")await f.db.prepare("DELETE FROM native_directory_existing_import_identity_translations").run();
+  else if(["instance","application","history"].includes(drift)){
+   const key={instance:"sourceInstanceId",application:"applicationId",history:"historyEpoch"}[drift as "instance"|"application"|"history"];
+   await f.db.prepare("UPDATE native_directory_existing_import_reviews SET review_json=json_set(review_json,?,?)").bind(`$.${key}`,"44444444-4444-4444-8444-444444444444").run();
+  }else{
+   const column={source:"source_id",public:"public_id",record:"native_record_id",kind:"record_kind",classic:"classic_record_id"}[drift as "source"|"public"|"record"|"kind"|"classic"];
+   await f.db.prepare(`UPDATE native_directory_existing_import_identity_translations SET ${column}=?`).bind("foreign-identity").run();
+  }
+  expect(await f.visible()).toEqual([]);
+ },30_000);
+ it("does not use translation when migration206 relations are absent",async()=>{
+  const f=await importedFixture();expect(await f.visible()).toHaveLength(1);
+  await f.db.prepare("DROP TABLE native_directory_existing_import_identity_translations").run();
+  await f.db.prepare("DROP TABLE native_directory_existing_import_reviews").run();
+  expect(await f.visible()).toEqual([]);
+ },30_000);
 });

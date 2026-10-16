@@ -30,6 +30,9 @@ CREATE TABLE operations_directory_revisions(record_id TEXT,version INTEGER,profi
 CREATE TABLE operations_directory_client_organizations(client_record_id TEXT PRIMARY KEY,organization_record_id TEXT,relationship_version INTEGER);
 CREATE TABLE project_alpha_active_directory_mappings(source_id TEXT,source_instance_id TEXT,application_id TEXT,history_epoch_id TEXT,
   resource_type TEXT,record_id TEXT,external_id TEXT,project_alpha_public_id TEXT,mapping_kind TEXT,provenance_id TEXT);
+CREATE TABLE native_directory_existing_import_reviews(import_id TEXT PRIMARY KEY,review_json TEXT);
+CREATE TABLE native_directory_existing_import_identity_translations(native_record_id TEXT PRIMARY KEY,source_id TEXT,record_kind TEXT,
+  public_id TEXT,classic_record_id TEXT,import_id TEXT);
 CREATE TABLE client_internal_notes(id TEXT PRIMARY KEY,source_id TEXT,root_namespace TEXT,root_kind TEXT,root_id TEXT,version INTEGER,
   title TEXT,body TEXT,created_by TEXT,updated_by TEXT,created_at TEXT DEFAULT CURRENT_TIMESTAMP,updated_at TEXT DEFAULT CURRENT_TIMESTAMP,deleted_at TEXT);
 CREATE TABLE client_internal_note_revisions(id TEXT PRIMARY KEY,note_id TEXT,source_id TEXT,root_namespace TEXT,root_kind TEXT,root_id TEXT,
@@ -54,6 +57,7 @@ function context(overrides: Partial<ClientHubCollectionContext["root"]> = {}): C
 async function resetFixture(options: { connector?: "visible" | "hidden" | "absent"; parent?: string | null; mapping?: boolean;
   active?: boolean; collision?: boolean } = {}) {
   for (const table of ["client_internal_note_mutations", "client_internal_note_revisions", "client_internal_notes",
+    "native_directory_existing_import_identity_translations", "native_directory_existing_import_reviews",
     "project_alpha_active_directory_mappings", "operations_directory_client_organizations", "operations_directory_revisions",
     "operations_directory_records", "pa_connectors", "staff_permission_overrides", "staff_users"])
     await db.prepare(`DELETE FROM ${table}`).run();
@@ -91,6 +95,72 @@ afterEach(async () => resetFixture());
 afterAll(async () => runtime?.dispose());
 
 describe("native Client Hub internal-note materialized mapping contract", () => {
+  async function imported(kind: "organization" | "standalone_client", connector: "visible" | "absent") {
+    await resetFixture({ connector });
+    const classicId = "7", resourceType = kind === "organization" ? "organization" : "client";
+    const nativeId = `pa-import:${sourceId}:${resourceType}:${classicId}`;
+    await db.batch([
+      db.prepare("UPDATE operations_directory_records SET record_id=?,record_kind=? WHERE record_id=?").bind(nativeId, resourceType, recordId),
+      db.prepare("UPDATE operations_directory_revisions SET record_id=? WHERE record_id=?").bind(nativeId, recordId),
+      db.prepare("UPDATE operations_directory_client_organizations SET client_record_id=? WHERE client_record_id=?").bind(nativeId, recordId),
+      db.prepare("UPDATE project_alpha_active_directory_mappings SET resource_type=?,record_id=?,external_id=? WHERE record_id=?")
+        .bind(resourceType, nativeId, nativeId, recordId),
+      db.prepare("INSERT INTO native_directory_existing_import_reviews VALUES('import-proof',?)")
+        .bind(JSON.stringify({ sourceInstanceId, applicationId, historyEpoch: historyEpochId })),
+      db.prepare("INSERT INTO native_directory_existing_import_identity_translations VALUES(?,?,?,?,?,'import-proof')")
+        .bind(nativeId, sourceId, resourceType, publicId, classicId),
+    ]);
+    if (kind === "organization") await db.prepare("DELETE FROM operations_directory_client_organizations WHERE client_record_id=?").bind(nativeId).run();
+    const importedContext = context({ kind, public_id: nativeId, pa_internal_id: classicId });
+    importedContext.canonicalRoot = { sourceId, rootNamespace: "business", kind, publicId: nativeId };
+    return { importedContext, nativeId, classicId };
+  }
+
+  it.each(["visible", "absent"] as const)("reads imported organization and standalone notes with a %s connector", async connector => {
+    for (const kind of ["organization", "standalone_client"] as const) {
+      const { importedContext, nativeId, classicId } = await imported(kind, connector);
+      const { resolveClientHubSourceRoot } = await import("../src/worker/client-hub-source");
+      await expect(resolveClientHubSourceRoot(env(), kind, classicId, sourceId))
+        .resolves.toMatchObject({ id: nativeId, pa_internal_id: classicId, pa_public_id: publicId });
+      await expect(readClientInternalNotes(env(), actor, importedContext)).resolves.toMatchObject({ notes: [],
+        canonicalRoot: { kind, publicId: nativeId }, capabilities: { canManageNotes: true } });
+    }
+  });
+
+  it("preserves imported note writes, denies, and exact classic URL resolution", async () => {
+    const { importedContext, nativeId, classicId } = await imported("standalone_client", "visible");
+    const { resolveClientHubSourceRoot } = await import("../src/worker/client-hub-source");
+    await expect(resolveClientHubSourceRoot(env(), "standalone_client", classicId, sourceId))
+      .resolves.toMatchObject({ id: nativeId, pa_internal_id: classicId, pa_public_id: publicId });
+    await expect(createClientInternalNote(env(), actor, importedContext,
+      { expectedContextVersion: "c".repeat(43), title: "Imported note", body: "Local note" }, "imported_note_create"))
+      .resolves.toBeDefined();
+    await expect(readClientInternalNotes(env(), actor, importedContext)).resolves.toMatchObject({ notes: [{ title: "Imported note" }] });
+    await db.prepare("INSERT INTO staff_permission_overrides VALUES(?,?,'team.view','deny','global','global',?)")
+      .bind(crypto.randomUUID(), actor.id, actor.id).run();
+    await expect(readClientInternalNotes(env(), actor, importedContext)).rejects.toMatchObject({ status: 403 });
+  });
+
+  it.each(["source_id", "record_kind", "public_id", "sourceInstanceId", "applicationId", "historyEpoch", "missing"] as const)
+    ("rejects an imported projection translation with wrong %s", async field => {
+      const { importedContext } = await imported("organization", "visible");
+      if (field === "missing") await db.prepare("DELETE FROM native_directory_existing_import_identity_translations").run();
+      else if (field === "sourceInstanceId" || field === "applicationId" || field === "historyEpoch")
+        await db.prepare("UPDATE native_directory_existing_import_reviews SET review_json=?")
+          .bind(JSON.stringify({ sourceInstanceId, applicationId, historyEpoch: historyEpochId,
+            [field]: "44444444-4444-4444-8444-444444444444" })).run();
+      else await db.prepare(`UPDATE native_directory_existing_import_identity_translations SET ${field}=?`)
+        .bind(field === "record_kind" ? "client" : "wrong").run();
+      await expect(readClientInternalNotes(env(), actor, importedContext)).rejects.toMatchObject({ status: 404 });
+    });
+
+  it("keeps an imported nested client out of the standalone notes namespace", async () => {
+    const { importedContext, nativeId } = await imported("standalone_client", "visible");
+    await db.prepare("UPDATE operations_directory_client_organizations SET organization_record_id='native-parent' WHERE client_record_id=?")
+      .bind(nativeId).run();
+    await expect(readClientInternalNotes(env(), actor, importedContext)).rejects.toMatchObject({ status: 404 });
+  });
+
   it.each(["visible", "absent"] as const)("accepts unequal IDs with a %s connector", async connector => {
     await resetFixture({ connector });
     await expect(readClientInternalNotes(env(), actor, context())).resolves.toMatchObject({ notes: [],
