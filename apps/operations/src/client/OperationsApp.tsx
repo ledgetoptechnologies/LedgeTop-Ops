@@ -4881,10 +4881,12 @@ type AuthenticatedGrant = {
   updatedAt: string;
 };
 
-function AuthenticatedDeliveryGrantPanel({ folder, canRevoke, creationEnabled, embedded = false }: { folder: { id: string }; canRevoke: boolean; creationEnabled: boolean; embedded?: boolean }) {
+function AuthenticatedDeliveryGrantPanel({ folder, canRevoke, creationEnabled, embedded = false, onBusyChange }: { folder: { id: string }; canRevoke: boolean; creationEnabled: boolean; embedded?: boolean; onBusyChange?: (busy: boolean) => void }) {
   const [expanded, setExpanded] = useState(embedded);
   const [mode, setMode] = useState<"primary" | "native">("primary");
   const [nativeBusy, setNativeBusy] = useState(false);
+  // The containing Share dialog must not close over an in-flight grant or link.
+  useEffect(() => { onBusyChange?.(nativeBusy); return () => onBusyChange?.(false); }, [nativeBusy, onBusyChange]);
   return <section className="client-workspace-grant authenticated-grant-panel">
     {!embedded && <button type="button" className="button-ghost button-small" aria-expanded={expanded} disabled={nativeBusy} onClick={() => setExpanded(value => !value)}>{expanded ? "Close authenticated portal grants" : "Grant to Client Portal"}</button>}
     {expanded && <div className="client-workspace-grant-panel">
@@ -4993,69 +4995,142 @@ type PrimaryWorkspaceBindingTarget = {
   workspaceId:string;workspaceLabel:string;rootType:"organization"|"standalone_client";rootPublicId:string;
   rootLabel:string;ownerScopeType:"organization"|"client"|"project";ownerPublicId:string;ownerName:string;
   projectPublicId:string|null;projectName:string|null;sourceId:"project-alpha:primary";contextVersion:string;
+  ownershipMode?:"explicit_workspace";divisionId?:string;
 };
-function PrimaryWorkspaceBindingSetup({folder,onLinked}:{folder:{id:string};onLinked:()=>void}){
+type PrimaryWorkspaceBindingDivision = { divisionId:string;label:string };
+const BINDING_OPAQUE_ID=/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
+/** Strict shape check for a binding target. With `divisionId`, only an
+ * explicit client/organization target in exactly that division is valid;
+ * without it, only a derived (project-mapped) target with no explicit fields. */
+function validPrimaryWorkspaceBindingTarget(value:unknown,divisionId:string|null):value is PrimaryWorkspaceBindingTarget{
+  if(!value||typeof value!=="object")return false;const row=value as Record<string,unknown>;
+  const base=typeof row.workspaceId==="string"&&typeof row.workspaceLabel==="string"&&["organization","standalone_client"].includes(String(row.rootType))
+    &&typeof row.rootPublicId==="string"&&typeof row.rootLabel==="string"&&["organization","client","project"].includes(String(row.ownerScopeType))
+    &&typeof row.ownerPublicId==="string"&&typeof row.ownerName==="string"
+    &&(row.projectPublicId===null||typeof row.projectPublicId==="string")&&(row.projectName===null||typeof row.projectName==="string")
+    &&row.sourceId==="project-alpha:primary"&&typeof row.contextVersion==="string"&&/^[a-f0-9]{64}$/.test(row.contextVersion);
+  if(!base)return false;
+  if(divisionId===null)return row.ownershipMode===undefined&&row.divisionId===undefined;
+  return row.ownershipMode==="explicit_workspace"&&row.divisionId===divisionId&&["client","organization"].includes(String(row.ownerScopeType))
+    &&BINDING_OPAQUE_ID.test(String(row.ownerPublicId))&&row.projectPublicId===null;
+}
+function validPrimaryWorkspaceBindingDivisions(value:unknown):value is PrimaryWorkspaceBindingDivision[]{
+  if(!Array.isArray(value)||value.length>100)return false;const seen=new Set<string>();
+  return value.every(item=>{if(!item||typeof item!=="object")return false;const row=item as Record<string,unknown>;
+    if(typeof row.divisionId!=="string"||!BINDING_OPAQUE_ID.test(row.divisionId)||typeof row.label!=="string"||!row.label.trim()||seen.has(row.divisionId))return false;
+    seen.add(row.divisionId);return Object.keys(row).every(key=>key==="divisionId"||key==="label");});
+}
+function bindingOwnerKind(target:PrimaryWorkspaceBindingTarget):string{
+  return target.ownerScopeType==="organization"?"whole organization":target.ownerScopeType==="client"?"client":"project";
+}
+function PrimaryWorkspaceBindingSetup({folder,onLinked,onBusyChange}:{folder:{id:string};onLinked:()=>void;onBusyChange?:(busy:boolean)=>void}){
   const [query,setQuery]=useState(""),[targets,setTargets]=useState<PrimaryWorkspaceBindingTarget[]>([]);
   const [selected,setSelected]=useState<PrimaryWorkspaceBindingTarget|null>(null),[reviewing,setReviewing]=useState(false);
   const [loading,setLoading]=useState(false),[busy,setBusy]=useState(false),[uncertain,setUncertain]=useState(false);
   const [error,setError]=useState(""),[status,setStatus]=useState("");
+  // null until the server says this unmapped folder needs an explicit division.
+  const [divisions,setDivisions]=useState<PrimaryWorkspaceBindingDivision[]|null>(null),[divisionId,setDivisionId]=useState("");
   const searchController=useRef<AbortController|null>(null),pending=useRef<{key:string;body:string;target:PrimaryWorkspaceBindingTarget}|null>(null);
   const reviewTitle=useRef<HTMLHeadingElement|null>(null);
-  const valid=(value:unknown):value is PrimaryWorkspaceBindingTarget=>{
-    if(!value||typeof value!=="object")return false;const row=value as Record<string,unknown>;
-    return typeof row.workspaceId==="string"&&typeof row.workspaceLabel==="string"&&["organization","standalone_client"].includes(String(row.rootType))
-      &&typeof row.rootPublicId==="string"&&typeof row.rootLabel==="string"&&["organization","client","project"].includes(String(row.ownerScopeType))
-      &&typeof row.ownerPublicId==="string"&&typeof row.ownerName==="string"
-      &&(row.projectPublicId===null||typeof row.projectPublicId==="string")&&(row.projectName===null||typeof row.projectName==="string")
-      &&row.sourceId==="project-alpha:primary"&&typeof row.contextVersion==="string"&&/^[a-f0-9]{64}$/.test(row.contextVersion);
-  };
+  const explicit=divisions!==null,division=divisions?.find(item=>item.divisionId===divisionId)??null;
   useEffect(()=>{if(reviewing)reviewTitle.current?.focus();},[reviewing]);
-  const search=useCallback((value:string)=>{
+  // An in-flight or unconfirmed link must not be discarded by a parent unmount.
+  useEffect(()=>{onBusyChange?.(busy||uncertain);return()=>onBusyChange?.(false);},[busy,uncertain,onBusyChange]);
+  const search=useCallback((value:string,chosenDivision:string)=>{
     searchController.current?.abort();const controller=new AbortController();searchController.current=controller;
     setLoading(true);setError("");setStatus("");
-    api<{targets:unknown[]}>(`/api/delivery/authenticated-grants/binding-targets?folderRef=${encodeURIComponent(folder.id)}&q=${encodeURIComponent(value.trim())}`,{signal:controller.signal})
+    const divisionParam=chosenDivision?`&divisionId=${encodeURIComponent(chosenDivision)}`:"";
+    api<{targets:unknown[];divisionsRequired?:unknown;divisions?:unknown}>(`/api/delivery/authenticated-grants/binding-targets?folderRef=${encodeURIComponent(folder.id)}&q=${encodeURIComponent(value.trim())}${divisionParam}`,{signal:controller.signal})
       .then(response=>{if(controller.signal.aborted)return;if(!Array.isArray(response.targets))throw new ApiError("Projected workspace choices could not be verified.",409,{});
-        const verified=response.targets.filter(valid);if(verified.length!==response.targets.length)throw new ApiError("Projected workspace choices could not be verified.",409,{});
-        setTargets(verified);setStatus(verified.length?"Select the exact projected workspace below.":"No signed primary Project Alpha workspace contains this folder's project or client root yet. Project Alpha must publish and activate that workspace before it can be linked.");})
+        if(response.divisionsRequired!==undefined){
+          if(chosenDivision||response.divisionsRequired!==true||response.targets.length!==0||!validPrimaryWorkspaceBindingDivisions(response.divisions))
+            throw new ApiError("Folder division choices could not be verified.",409,{});
+          const choices=response.divisions;setDivisions(choices);setTargets([]);
+          if(choices.length===1)setDivisionId(choices[0]!.divisionId);
+          setStatus(choices.length===0?"You don't have an active division that can link this folder.":choices.length===1?"":"Choose the business division this folder belongs to.");
+          return;
+        }
+        if(response.divisions!==undefined)throw new ApiError("Projected workspace choices could not be verified.",409,{});
+        const verified=response.targets.filter(item=>validPrimaryWorkspaceBindingTarget(item,chosenDivision||null));
+        if(verified.length!==response.targets.length)throw new ApiError("Projected workspace choices could not be verified.",409,{});
+        setTargets(verified);
+        const divisionLabel=divisions?.find(item=>item.divisionId===chosenDivision)?.label;
+        setStatus(verified.length?(chosenDivision?"Select the exact client workspace below.":"Select the exact projected workspace below.")
+          :chosenDivision?`No signed client workspace in ${divisionLabel??"this division"} matches. Project Alpha must publish that client before this folder can be linked.`
+            :"No signed primary Project Alpha workspace contains this folder's project or client root yet. Project Alpha must publish and activate that workspace before it can be linked.");})
       .catch(caught=>{if((caught as Error).name!=="AbortError")setError((caught as Error).message||"Projected workspaces could not be loaded.");})
       .finally(()=>{if(!controller.signal.aborted)setLoading(false);});
-  },[folder.id]);
-  useEffect(()=>{const timer=window.setTimeout(()=>search(query),query.trim()?250:0);return()=>{window.clearTimeout(timer);searchController.current?.abort();};},[query,search]);
+  },[folder.id,divisions]);
+  useEffect(()=>{
+    // An unmapped folder searches only after an authorized division is chosen.
+    if(explicit&&!divisionId){searchController.current?.abort();setLoading(false);return;}
+    const timer=window.setTimeout(()=>search(query,divisionId),query.trim()?250:0);return()=>{window.clearTimeout(timer);searchController.current?.abort();};
+  },[query,divisionId,explicit,search]);
   const submit=async(operation=pending.current)=>{
     if(!operation||busy)return;setBusy(true);setError("");setStatus("");
     try{
       const response=await api<{binding:PrimaryWorkspaceBindingTarget&{bindingId:string;folderPrefix:string;version:number;state:string};replayed:boolean}>("/api/delivery/authenticated-grants/bindings",{method:"POST",headers:{"Idempotency-Key":operation.key},body:operation.body});
-      const binding=response?.binding;
-      if(!binding||typeof binding.bindingId!=="string"||!binding.bindingId||binding.workspaceId!==operation.target.workspaceId
+      const binding=response?.binding,target=operation.target;
+      // The server answered 2xx, so the link may already be committed. A local
+      // echo mismatch is an unknown outcome: keep the exact operation for retry.
+      const unverified=()=>{throw Object.assign(new Error("The workspace link outcome could not be verified."),{unverifiedOutcome:true});};
+      if(!binding||typeof binding.bindingId!=="string"||!binding.bindingId||binding.workspaceId!==target.workspaceId
         ||binding.state!=="active"||binding.version!==1||binding.sourceId!=="project-alpha:primary"
-        ||binding.rootType!==operation.target.rootType||binding.rootPublicId!==operation.target.rootPublicId
-        ||binding.ownerScopeType!==operation.target.ownerScopeType||binding.ownerPublicId!==operation.target.ownerPublicId
-        ||binding.projectPublicId!==operation.target.projectPublicId||binding.contextVersion!==operation.target.contextVersion
-        ||typeof binding.folderPrefix!=="string"||typeof response.replayed!=="boolean")throw new ApiError("The workspace link outcome could not be verified.",409,{});
+        ||binding.rootType!==target.rootType||binding.rootPublicId!==target.rootPublicId
+        ||binding.ownerScopeType!==target.ownerScopeType||binding.ownerPublicId!==target.ownerPublicId
+        ||binding.projectPublicId!==target.projectPublicId||binding.contextVersion!==target.contextVersion
+        ||binding.ownershipMode!==target.ownershipMode||binding.divisionId!==target.divisionId
+        ||typeof binding.folderPrefix!=="string"||typeof response.replayed!=="boolean")unverified();
       pending.current=null;setUncertain(false);setStatus("Folder linked to the selected Client Workspace. No client access was granted.");onLinked();
     }catch(caught){
-      if(caught instanceof ApiError&&caught.status<500&&caught.status!==429){pending.current=null;setUncertain(false);setError(caught.message);}
+      if((caught as {unverifiedOutcome?:boolean}).unverifiedOutcome){setUncertain(true);setError("The workspace link outcome could not be verified. Retry the same folder link to confirm it; do not select another workspace.");}
+      else if(caught instanceof ApiError&&caught.status<500&&caught.status!==429){pending.current=null;setUncertain(false);setError(caught.message);}
       else{setUncertain(true);setError("The workspace link outcome is not confirmed. Retry the same operation safely; do not select another workspace.");}
     }finally{setBusy(false);}
   };
-  const confirmLink=()=>{if(!selected||busy)return;const operation={key:crypto.randomUUID(),target:selected,body:JSON.stringify({folderRef:folder.id,workspaceId:selected.workspaceId,reasonCode:"client_workspace_link",expectedContextVersion:selected.contextVersion})};pending.current=operation;void submit(operation);};
+  const confirmLink=()=>{
+    if(!selected||busy)return;
+    const base={folderRef:folder.id,workspaceId:selected.workspaceId,reasonCode:"client_workspace_link",expectedContextVersion:selected.contextVersion};
+    const body=selected.ownershipMode==="explicit_workspace"
+      ?{...base,ownershipMode:selected.ownershipMode,divisionId:selected.divisionId,ownerScopeType:selected.ownerScopeType,ownerPublicId:selected.ownerPublicId}:base;
+    const operation={key:crypto.randomUUID(),target:selected,body:JSON.stringify(body)};pending.current=operation;void submit(operation);
+  };
+  const resetChoice=()=>{setSelected(null);setReviewing(false);setTargets([]);setStatus("");setError("");};
+  const ownerLabel=(item:PrimaryWorkspaceBindingTarget)=>item.ownershipMode==="explicit_workspace"
+    ?(item.ownerScopeType==="organization"?`${item.rootLabel} · Whole organization`:`${item.rootLabel} · Client: ${item.ownerName}`)
+    :`${item.rootLabel} · ${item.projectName??`${item.ownerName} root`} · primary signed projection`;
+  const searchLabel=explicit?"Client workspace or client":"Projected workspace or project";
   return <section className="primary-workspace-binding-setup" aria-label="Link folder to a Client Workspace">
     <h4>Link this folder to a Client Workspace</h4>
-    <p>This folder has no authenticated workspace link. Choose the exact workspace projected and signed by the primary Project Alpha connection. Linking is routing metadata only: it does not create a login, membership, grant, or public link.</p>
-    <label htmlFor="primary-workspace-binding-search">Projected workspace or project</label>
-    <input id="primary-workspace-binding-search" type="search" role="combobox" aria-autocomplete="list" aria-expanded={targets.length>0}
-      aria-controls="primary-workspace-binding-options" value={query} disabled={busy||uncertain} autoComplete="off"
-      placeholder="Search the projected workspace, client, or project" onKeyDown={focusFirstTypeaheadOption}
-      onChange={event=>{setQuery(event.target.value);setSelected(null);setReviewing(false);setTargets([]);setStatus("");setError("");}} />
+    {explicit
+      ?<p>This folder isn't part of a Project Alpha project. Choose the business division it belongs to, then the exact client workspace. Linking is routing metadata only: it does not create a login, membership, grant, or public link.</p>
+      :<p>This folder has no authenticated workspace link. Choose the exact workspace projected and signed by the primary Project Alpha connection. Linking is routing metadata only: it does not create a login, membership, grant, or public link.</p>}
+    {divisions&&divisions.length>1&&<label>Business division<select value={divisionId} disabled={busy||uncertain}
+      onChange={event=>{setDivisionId(event.target.value);setQuery("");resetChoice();}}>
+      <option value="">Choose a division</option>
+      {divisions.map(item=><option key={item.divisionId} value={item.divisionId}>{item.label}</option>)}
+    </select></label>}
+    {divisions?.length===1&&division&&<p className="primary-workspace-binding-division"><strong>Business division</strong> {division.label}</p>}
+    {(!explicit||divisionId)&&<>
+      <label htmlFor="primary-workspace-binding-search">{searchLabel}</label>
+      <input id="primary-workspace-binding-search" type="search" role="combobox" aria-autocomplete="list" aria-expanded={targets.length>0}
+        aria-controls="primary-workspace-binding-options" value={query} disabled={busy||uncertain} autoComplete="off"
+        placeholder={explicit?"Search the client or workspace name":"Search the projected workspace, client, or project"} onKeyDown={focusFirstTypeaheadOption}
+        onChange={event=>{setQuery(event.target.value);resetChoice();}} />
+    </>}
     {loading&&<small role="status">Checking signed Project Alpha workspaces…</small>}
     {targets.length>0&&<div id="primary-workspace-binding-options" className="client-workspace-typeahead" role="listbox" aria-label="Projected Client Workspaces">{targets.map(item=><button
-      type="button" role="option" aria-selected={selected?.workspaceId===item.workspaceId} key={item.workspaceId} disabled={busy||uncertain}
+      type="button" role="option" aria-selected={selected?.workspaceId===item.workspaceId&&selected.ownerPublicId===item.ownerPublicId} key={`${item.workspaceId}:${item.ownerScopeType}:${item.ownerPublicId}`} disabled={busy||uncertain}
       onKeyDown={event=>moveTypeaheadOption(event,"primary-workspace-binding-search")}
-      onClick={()=>{setSelected(item);setReviewing(false);setError("");setStatus("");}}><strong>{item.workspaceLabel}</strong><small>{item.rootLabel} · {item.projectName??`${item.ownerName} root`} · primary signed projection</small></button>)}</div>}
-    {selected&&!reviewing&&<><small className="selected-audience-note">Selected: {selected.workspaceLabel}. Folder owner: {selected.projectName??selected.ownerName}. This selection cannot widen access.</small><button
+      onClick={()=>{setSelected(item);setReviewing(false);setError("");setStatus("");}}><strong>{item.workspaceLabel}</strong><small>{ownerLabel(item)}</small></button>)}</div>}
+    {selected&&!reviewing&&<><small className="selected-audience-note">Selected: {selected.workspaceLabel}. Folder owner: {selected.projectName??selected.ownerName} ({bindingOwnerKind(selected)}). This selection cannot widen access.</small><button
       type="button" className="button-orange button-small" disabled={busy||uncertain} onClick={()=>setReviewing(true)}>Review workspace link</button></>}
     {selected&&reviewing&&<section className="primary-authenticated-grant-review" role="region" aria-label="Review Client Workspace folder link"><h4 ref={reviewTitle} tabIndex={-1}>Confirm folder link</h4><dl>
-      <div><dt>Workspace</dt><dd>{selected.workspaceLabel}</dd></div><div><dt>Client root</dt><dd>{selected.rootLabel}</dd></div><div><dt>Folder owner</dt><dd>{selected.projectName??selected.ownerName}</dd></div><div><dt>Access created</dt><dd>None</dd></div>
+      {selected.ownershipMode==="explicit_workspace"&&<div><dt>Business division</dt><dd>{division?.label??selected.divisionId}</dd></div>}
+      <div><dt>Workspace</dt><dd>{selected.workspaceLabel}</dd></div><div><dt>Client root</dt><dd>{selected.rootLabel}</dd></div>
+      <div><dt>Folder owner</dt><dd>{selected.projectName??selected.ownerName} <small>({bindingOwnerKind(selected)})</small></dd></div>
+      {selected.ownershipMode==="explicit_workspace"&&<div><dt>Link type</dt><dd>Explicit folder link</dd></div>}
+      <div><dt>Access created</dt><dd>None</dd></div>
     </dl><p>Recipients remain unavailable until this link is saved and an exact verified person or explicit dynamic group grant is reviewed separately.</p><div className="actions"><button type="button" className="button-orange" disabled={busy||uncertain} onClick={confirmLink}>{busy?"Linking…":"Link folder to workspace"}</button><button type="button" className="button-ghost" disabled={busy||uncertain} onClick={()=>setReviewing(false)}>Cancel review</button></div></section>}
     {status&&<small role="status">{status}</small>}{error&&<small className="error" role="alert">{error}</small>}
     {uncertain&&pending.current&&<button type="button" className="button-orange button-small" disabled={busy} onClick={()=>void submit()}>Retry same folder link</button>}
@@ -5083,6 +5158,7 @@ function PrimaryAuthenticatedDeliveryGrantPanel({ folder, canRevoke, creationEna
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   const [portalSetupNeeded, setPortalSetupNeeded] = useState(false);
+  const [bindingBusy, setBindingBusy] = useState(false);
   const alive = useRef(false), epoch = useRef(0), mutationBusy = useRef(false), pending = useRef<Pending | null>(null);
   const readController = useRef<AbortController | null>(null), searchController = useRef<AbortController | null>(null), previewController = useRef<AbortController | null>(null), mutationController = useRef<AbortController | null>(null), reviewTitle = useRef<HTMLHeadingElement>(null);
   const text = (value: unknown): value is string => typeof value === "string" && value.length > 0 && value.length <= 4096;
@@ -5107,7 +5183,7 @@ function PrimaryAuthenticatedDeliveryGrantPanel({ folder, canRevoke, creationEna
     setError((caught as Error).message || "Authenticated access could not be loaded.");
   }, [clearContext]);
   useEffect(() => { alive.current = true; return () => { alive.current = false; epoch.current++; abortReads(); mutationController.current?.abort(); }; }, [folder.id, abortReads]);
-  useEffect(() => { onBusyChange?.(busy || uncertain); return () => onBusyChange?.(false); }, [busy, uncertain, onBusyChange]);
+  useEffect(() => { onBusyChange?.(busy || uncertain || bindingBusy); return () => onBusyChange?.(false); }, [busy, uncertain, bindingBusy, onBusyChange]);
   useEffect(() => { if (preview) reviewTitle.current?.focus(); }, [preview]);
   const resetTerms = () => { setAccessKind(""); setAccessMode(""); setExpiresAt(""); };
   const clearReview = () => { epoch.current++; previewController.current?.abort(); setPreview(null); setError(""); setMessage(""); };
@@ -5216,7 +5292,7 @@ function PrimaryAuthenticatedDeliveryGrantPanel({ folder, canRevoke, creationEna
   return <div className="client-workspace-grant-panel primary-authenticated-grant-panel">
       <strong>Authenticated Client Portal access</strong>
       <small>This permission covers this folder and everything underneath it. It is checked against current verified identity, workspace membership, hierarchy, deny policy, and folder source version. It never creates a bearer link.</small>
-      <button type="button" className="button-ghost button-small" disabled={busy || loading} onClick={() => { if (!uncertain) { clearContext(); resetTerms(); } void load(); }}>Refresh authenticated access</button>
+      <button type="button" className="button-ghost button-small" disabled={busy || loading || bindingBusy} onClick={() => { if (!uncertain) { clearContext(); resetTerms(); } void load(); }}>Refresh authenticated access</button>
       {loading && <Loading />}
       {context && <>
         {!creationEnabled && <div className="notice" role="status">New Client Workspace access and restores are paused. Existing access can still be reviewed and revoked.</div>}
@@ -5271,7 +5347,7 @@ function PrimaryAuthenticatedDeliveryGrantPanel({ folder, canRevoke, creationEna
         {preview && <section className="primary-authenticated-grant-review" aria-label="Review authenticated portal access"><h4 ref={reviewTitle} tabIndex={-1}>Confirm authenticated access</h4><dl>{[["Workspace", preview.workspaceLabel], ["Project", preview.projectName ?? "No project-specific access terms"], ["Recipient", preview.audienceLabel], ["Target type", selected ? AUTHENTICATED_GRANT_AUDIENCE_LABEL[selected.type] : "Unknown"], ["Recipient rule", selected?.type === "principal" ? "This exact verified person only" : "Current authorized members; membership is rechecked"], ["Recipient preview", selected?.type === "principal" ? `${preview.recipientCount} exact verified person` : preview.recipientCount > 0 ? `${preview.recipientPreview?.truncated ? "At least " : "Up to "}${preview.recipientCount} currently eligible people; final membership is checked when opened` : "Dynamic membership; final recipients are checked when opened"], ["Access terms", termsLabel(preview.accessTerms)], ["Access ends", preview.effectiveAccessExpiresAt ? date(preview.effectiveAccessExpiresAt) : preview.accessTerms?.mode === "project_end" ? "Awaiting verified project completion, then 7 days" : "When revoked"]].map(([label, value]) => <div key={label}><dt>{label}</dt><dd>{value}</dd></div>)}</dl>{preview.accessTerms?.mode === "project_end" && <p>Reopening does not renew expired access.</p>}<p>Confirm this recipient and scope. This grants only the reviewed folder access; it never widens an individual to their organization and creates no public link.</p><div className="actions"><button type="button" className="button-orange" disabled={disabled || !creationEnabled} onClick={create}>{restoreTarget ? "Restore authenticated access" : "Grant authenticated access"}</button><button type="button" className="button-ghost" disabled={busy || uncertain} onClick={() => setPreview(null)}>Cancel review</button></div></section>}
       </>}
       {error && <small className="error" role="alert">{error}{portalSetupNeeded && <> <a href="/clients#client-portal-setup">Open Client Hub portal setup</a> to review the exact client account, workspace, and verified membership.</>}</small>}
-      {portalSetupNeeded&&creationEnabled&&<PrimaryWorkspaceBindingSetup folder={folder} onLinked={()=>{setPortalSetupNeeded(false);setError("");void load();}}/>}
+      {portalSetupNeeded&&creationEnabled&&<PrimaryWorkspaceBindingSetup folder={folder} onBusyChange={setBindingBusy} onLinked={()=>{setPortalSetupNeeded(false);setError("");void load();}}/>}
       {message && <small role="status">{message}</small>}
       {uncertain && pending.current && <button type="button" className="button-orange" disabled={busy || loading || !context || (pending.current.action === "revoke" ? !canRevoke : !creationEnabled)} onClick={() => void execute(pending.current!)}>Retry same access operation</button>}
       {grants.length > 0 && <div className="authenticated-grant-list" aria-label="Authenticated portal grant history">
@@ -5352,9 +5428,11 @@ function ShareDialog({
   const workspaceShareTab = useRef<HTMLButtonElement>(null);
   const opener = useRef<HTMLElement | null>(null);
   const closeRef = useRef(close);
-  const busyRef = useRef(busy);
+  const [grantBusy, setGrantBusy] = useState(false);
+  const locked = busy || grantBusy;
+  const busyRef = useRef(locked);
   closeRef.current = close;
-  busyRef.current = busy;
+  busyRef.current = locked;
 
   useEffect(() => {
     opener.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
@@ -5387,6 +5465,7 @@ function ShareDialog({
   const handleShareModeKeyDown = (event: ReactKeyboardEvent<HTMLButtonElement>) => {
     if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
     event.preventDefault();
+    if (busyRef.current) return;
     const tabs = authenticatedGrantsEnabled
       ? [{ mode: "public" as const, ref: publicShareTab }, { mode: "workspace" as const, ref: workspaceShareTab }]
       : [{ mode: "public" as const, ref: publicShareTab }];
@@ -5520,7 +5599,7 @@ function ShareDialog({
             ref={closeButton}
             className="button-ghost button-small"
             onClick={close}
-            disabled={busy}
+            disabled={locked}
           >
             Close
           </button>
@@ -5542,7 +5621,7 @@ function ShareDialog({
             className={shareMode === "public" ? "active" : "button-ghost"}
             onClick={() => setShareMode("public")}
             onKeyDown={handleShareModeKeyDown}
-            disabled={busy}
+            disabled={locked}
           >Public link</button>
           <button
             ref={workspaceShareTab}
@@ -5555,7 +5634,7 @@ function ShareDialog({
             className={shareMode === "workspace" ? "active" : "button-ghost"}
             onClick={() => setShareMode("workspace")}
             onKeyDown={handleShareModeKeyDown}
-            disabled={busy || !authenticatedGrantsEnabled}
+            disabled={locked || !authenticatedGrantsEnabled}
             title={!authenticatedGrantsEnabled ? authenticatedGrantReadinessMessage : undefined}
           >Client Workspace</button>
         </div>}
@@ -5568,7 +5647,7 @@ function ShareDialog({
             </header>
             {authenticatedGrantsEnabled
               ? canManageAuthenticatedGrants
-                ? <AuthenticatedDeliveryGrantPanel folder={folder} canRevoke={canRevoke} creationEnabled={authenticatedGrantCreationEnabled} embedded />
+                ? <AuthenticatedDeliveryGrantPanel folder={folder} canRevoke={canRevoke} creationEnabled={authenticatedGrantCreationEnabled} embedded onBusyChange={setGrantBusy} />
                 : <div className="notice" role="status">Administrator access is required to manage Client Workspace grants. Existing public-link sharing remains available.</div>
               : <div className="notice" role="status">{authenticatedGrantReadinessMessage} <a href="/clients#client-portal-setup">Open Client Hub portal setup</a> to check readiness.</div>}
             {canProvisionDelegated && <details className="workspace-sharing-advanced">

@@ -143,6 +143,187 @@ test("an unbound folder can be linked only to its exact signed primary workspace
   expect(calls.some(call => call.path === "/api/delivery/authenticated-grants" && call.method === "POST")).toBe(false);
 });
 
+const explicitDivisions = [{divisionId: "division-north", label: "North Division"}, {divisionId: "division-south", label: "South Division"}];
+function explicitTarget(overrides: Record<string, unknown> = {}) {
+  return {workspaceId: "workspace-coldwell", workspaceLabel: "Coldwell Client Workspace", rootType: "organization", rootPublicId: "org-coldwell",
+    rootLabel: "Coldwell", ownerScopeType: "client", ownerPublicId: "client-lori", ownerName: "Lori Koschnick", projectPublicId: null, projectName: null,
+    sourceId: "project-alpha:primary", contextVersion: "c".repeat(64), ownershipMode: "explicit_workspace", divisionId: "division-north", ...overrides};
+}
+async function mockExplicit(page: Page, options: {divisions?: unknown; targets?: (divisionId: string) => unknown[]; binding?: (body: Record<string, unknown>) => unknown;
+  onPost?: (route: Route, attempt: number) => Promise<unknown> | undefined} = {}) {
+  let posts = 0;
+  let bound = false;
+  const searches: string[] = [];
+  const calls = await mockPrimary(page, (route, call) => {
+    if (call.path === "/api/delivery/authenticated-grants" && call.method === "GET") return bound
+      ? route.fulfill({json: {...primaryContext, grants: []}}) : route.fulfill({status: 404, json: {error: "Folder is not linked"}});
+    if (call.path === "/api/delivery/authenticated-grants/binding-targets" && call.method === "GET") {
+      const divisionId = new URL(route.request().url()).searchParams.get("divisionId");
+      searches.push(divisionId ?? "");
+      if (!divisionId) return route.fulfill({json: {targets: [], divisionsRequired: true, divisions: options.divisions ?? explicitDivisions}});
+      return route.fulfill({json: {targets: options.targets ? options.targets(divisionId) : [explicitTarget({divisionId}),
+        explicitTarget({divisionId, ownerScopeType: "organization", ownerPublicId: "org-coldwell", ownerName: "Coldwell", contextVersion: "d".repeat(64)})]}});
+    }
+    if (call.path === "/api/delivery/authenticated-grants/bindings" && call.method === "POST") {
+      const custom = options.onPost?.(route, ++posts);
+      if (custom) return custom;
+      bound = true;
+      const body = call.body as Record<string, unknown>;
+      const fallback = {bindingId: "binding-lori", folderPrefix: "Jobs/Clients/Acme/", state: "active", version: 1, ...explicitTarget({divisionId: body.divisionId})};
+      return route.fulfill({status: 201, json: {binding: options.binding ? options.binding(body) : fallback, replayed: false}});
+    }
+    return undefined;
+  });
+  return {calls, searches};
+}
+async function openClientWorkspaceTab(page: Page) {
+  await page.goto("/delivery");
+  await page.getByRole("button", {name: "Actions for Acme"}).click();
+  await page.getByRole("menuitem", {name: "Share", exact: true}).click();
+  await page.getByRole("tab", {name: "Client Workspace"}).click();
+  await expect(page.getByRole("region", {name: "Link folder to a Client Workspace"})).toBeVisible();
+}
+
+test("an unmapped folder links to an exact client in an authorized division without granting access", async ({page}) => {
+  const {calls, searches} = await mockExplicit(page);
+  await openClientWorkspaceTab(page);
+  await expect(page.getByText("This folder isn't part of a Project Alpha project", {exact: false})).toBeVisible();
+  const division = page.getByRole("combobox", {name: "Business division"});
+  await expect(division).toBeVisible();
+  await expect(page.getByRole("combobox", {name: "Client workspace or client"})).toHaveCount(0);
+  expect(searches.every(value => value === "")).toBe(true);
+
+  await division.selectOption("division-north");
+  await expect(page.getByRole("option", {name: /Client: Lori Koschnick/})).toBeVisible();
+  await expect(page.getByRole("option", {name: /Whole organization/})).toBeVisible();
+  expect(searches.at(-1)).toBe("division-north");
+  await page.getByRole("option", {name: /Client: Lori Koschnick/}).click();
+  await expect(page.getByText("Folder owner: Lori Koschnick (client)", {exact: false})).toBeVisible();
+
+  // Changing the division discards the selected client and its review.
+  await division.selectOption("division-south");
+  await expect(page.getByRole("button", {name: "Review workspace link"})).toHaveCount(0);
+  await division.selectOption("division-north");
+  await page.getByRole("option", {name: /Client: Lori Koschnick/}).click();
+  await page.getByRole("button", {name: "Review workspace link"}).click();
+  const review = page.getByRole("region", {name: "Review Client Workspace folder link"});
+  await expect(page.getByRole("heading", {name: "Confirm folder link"})).toBeFocused();
+  await expect(review).toContainText("North Division");
+  await expect(review).toContainText("Explicit folder link");
+  await expect(review).toContainText("Lori Koschnick");
+  await expect(review).toContainText("None");
+  await page.getByRole("button", {name: "Link folder to workspace"}).click();
+  await expect(page.getByRole("button", {name: "Refresh authenticated access"})).toBeEnabled();
+
+  const bind = calls.find(call => call.path === "/api/delivery/authenticated-grants/bindings" && call.method === "POST");
+  expect(bind?.body).toEqual({folderRef: "folder-acme", workspaceId: "workspace-coldwell", reasonCode: "client_workspace_link",
+    expectedContextVersion: "c".repeat(64), ownershipMode: "explicit_workspace", divisionId: "division-north", ownerScopeType: "client", ownerPublicId: "client-lori"});
+  expect(bind?.key).toBeTruthy();
+  expect(calls.some(call => call.path === "/api/delivery/shares" && call.method === "POST")).toBe(false);
+  expect(calls.some(call => call.path === "/api/delivery/authenticated-grants" && call.method === "POST")).toBe(false);
+});
+
+test("a single authorized division is shown as visible text and searched directly", async ({page}) => {
+  const {searches} = await mockExplicit(page, {divisions: [explicitDivisions[0]]});
+  await openClientWorkspaceTab(page);
+  await expect(page.getByRole("combobox", {name: "Business division"})).toHaveCount(0);
+  await expect(page.getByRole("region", {name: "Link folder to a Client Workspace"})).toContainText("Business division North Division");
+  await expect(page.getByRole("combobox", {name: "Client workspace or client"})).toBeVisible();
+  await expect(page.getByRole("option", {name: /Client: Lori Koschnick/})).toBeVisible();
+  expect(searches.at(-1)).toBe("division-north");
+});
+
+test("no authorized division offers no search and no link", async ({page}) => {
+  const {calls, searches} = await mockExplicit(page, {divisions: []});
+  await openClientWorkspaceTab(page);
+  await expect(page.getByText("You don't have an active division that can link this folder.", {exact: true})).toBeVisible();
+  await expect(page.getByRole("combobox", {name: "Client workspace or client"})).toHaveCount(0);
+  expect(searches.every(value => value === "")).toBe(true);
+  expect(calls.some(call => call.path === "/api/delivery/authenticated-grants/bindings")).toBe(false);
+});
+
+for (const [label, divisions, targets] of [
+  ["a target from another division", explicitDivisions, (divisionId: string) => [explicitTarget({divisionId: divisionId === "division-north" ? "division-south" : "division-north"})]],
+  ["a target without the explicit discriminant", explicitDivisions, (divisionId: string) => [explicitTarget({divisionId, ownershipMode: undefined})]],
+  ["a project-scoped explicit target", explicitDivisions, (divisionId: string) => [explicitTarget({divisionId, ownerScopeType: "project"})]],
+  ["a duplicated division choice", [explicitDivisions[0], explicitDivisions[0]], undefined],
+] as const) test(`binding search rejects ${label}`, async ({page}) => {
+  const {calls} = await mockExplicit(page, {divisions, targets});
+  await openClientWorkspaceTab(page);
+  const division = page.getByRole("combobox", {name: "Business division"});
+  if (await division.count()) await division.selectOption("division-north");
+  await expect(page.getByRole("alert").filter({hasText: /choices could not be verified/})).toBeVisible();
+  await expect(page.getByRole("listbox", {name: "Projected Client Workspaces"})).toHaveCount(0);
+  await expect(page.getByRole("button", {name: "Review workspace link"})).toHaveCount(0);
+  expect(calls.some(call => call.path === "/api/delivery/authenticated-grants/bindings")).toBe(false);
+});
+
+for (const [label, binding] of [
+  ["drops the explicit discriminant", (body: Record<string, unknown>) => ({bindingId: "binding-lori", folderPrefix: "Jobs/Clients/Acme/", state: "active", version: 1,
+    ...explicitTarget({divisionId: body.divisionId}), ownershipMode: undefined, divisionId: undefined})],
+  ["widens the owner to the organization", (body: Record<string, unknown>) => ({bindingId: "binding-lori", folderPrefix: "Jobs/Clients/Acme/", state: "active", version: 1,
+    ...explicitTarget({divisionId: body.divisionId, ownerScopeType: "organization", ownerPublicId: "org-coldwell"})})],
+  ["changes the division", (body: Record<string, unknown>) => ({bindingId: "binding-lori", folderPrefix: "Jobs/Clients/Acme/", state: "active", version: 1,
+    ...explicitTarget({divisionId: body.divisionId === "division-north" ? "division-south" : "division-north"})})],
+] as const) test(`a link response that ${label} is an unknown outcome kept for exact retry`, async ({page}) => {
+  const {calls} = await mockExplicit(page, {binding});
+  await openClientWorkspaceTab(page);
+  await page.getByRole("combobox", {name: "Business division"}).selectOption("division-north");
+  await page.getByRole("option", {name: /Client: Lori Koschnick/}).click();
+  await page.getByRole("button", {name: "Review workspace link"}).click();
+  await page.getByRole("button", {name: "Link folder to workspace"}).click();
+  await expect(page.getByRole("alert").filter({hasText: "The workspace link outcome could not be verified."})).toBeVisible();
+  await expect(page.getByRole("status").filter({hasText: "Folder linked to the selected Client Workspace"})).toHaveCount(0);
+  // The server answered 2xx, so the link may exist: selection and containers stay locked.
+  await expect(page.getByRole("combobox", {name: "Business division"})).toBeDisabled();
+  await expect(page.getByRole("button", {name: "Link folder to workspace"})).toBeDisabled();
+  await expect(page.getByRole("combobox", {name: "Portal connection"})).toBeDisabled();
+  await expect(page.getByRole("button", {name: "Close", exact: true})).toBeDisabled();
+  await page.getByRole("button", {name: "Retry same folder link"}).click();
+  await expect.poll(() => calls.filter(call => call.path === "/api/delivery/authenticated-grants/bindings").length).toBe(2);
+  const [first, second] = calls.filter(call => call.path === "/api/delivery/authenticated-grants/bindings");
+  expect(second!.body).toEqual(first!.body);
+  expect(second!.key).toBe(first!.key);
+  await expect(page.getByRole("status").filter({hasText: "Folder linked to the selected Client Workspace"})).toHaveCount(0);
+});
+
+test("an in-flight or failed link keeps the Share dialog and connection locked until the same operation is confirmed", async ({page}) => {
+  let releaseFirst: (() => void) | undefined;
+  const {calls} = await mockExplicit(page, {onPost: (route, attempt) => attempt === 1
+    ? new Promise<void>(resolve => { releaseFirst = resolve; }).then(() => route.abort("connectionfailed"))
+    : undefined});
+  await openClientWorkspaceTab(page);
+  await page.getByRole("combobox", {name: "Business division"}).selectOption("division-north");
+  await page.getByRole("option", {name: /Client: Lori Koschnick/}).click();
+  await page.getByRole("button", {name: "Review workspace link"}).click();
+  await page.getByRole("button", {name: "Link folder to workspace"}).click();
+  await expect(page.getByRole("button", {name: "Linking…"})).toBeDisabled();
+
+  // In flight: neither containing surface can unmount the pending operation.
+  await expect(page.getByRole("button", {name: "Close", exact: true})).toBeDisabled();
+  await expect(page.getByRole("tab", {name: "Public link"})).toBeDisabled();
+  await expect(page.getByRole("combobox", {name: "Portal connection"})).toBeDisabled();
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("dialog", {name: "Share folder"})).toBeVisible();
+
+  releaseFirst!();
+  await expect(page.getByRole("alert").filter({hasText: "The workspace link outcome is not confirmed."})).toBeVisible();
+  await expect(page.getByRole("button", {name: "Close", exact: true})).toBeDisabled();
+  await expect(page.getByRole("combobox", {name: "Portal connection"})).toBeDisabled();
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("dialog", {name: "Share folder"})).toBeVisible();
+
+  await page.getByRole("button", {name: "Retry same folder link"}).click();
+  await expect(page.getByRole("button", {name: "Refresh authenticated access"})).toBeEnabled();
+  await expect(page.getByRole("region", {name: "Link folder to a Client Workspace"})).toHaveCount(0);
+  const posts = calls.filter(call => call.path === "/api/delivery/authenticated-grants/bindings");
+  expect(posts).toHaveLength(2);
+  expect(posts[1]!.body).toEqual(posts[0]!.body);
+  expect(posts[1]!.key).toBe(posts[0]!.key);
+  await expect(page.getByRole("button", {name: "Close", exact: true})).toBeEnabled();
+  await expect(page.getByRole("combobox", {name: "Portal connection"})).toBeEnabled();
+});
+
 test("an administrator without revoke permission can review primary grants but has no forbidden revoke action", async ({page}) => {
   const calls = await mockPrimary(page, (route, call) => {
     // Session permission keys omit a permission when a global explicit deny applies.
