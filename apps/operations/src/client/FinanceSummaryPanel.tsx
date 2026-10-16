@@ -19,7 +19,7 @@ export type FinanceMoneyBucket = Readonly<{
   receivables: Readonly<{ count: number; outstanding: FinanceAmount; overdue: FinanceAmount }>;
 }>;
 type CompanyCoverage = Readonly<{
-  complete: boolean; baseCurrency: string | null; unknownPaymentCurrencyCount: number;
+  complete: boolean; baseCurrency: string | null; unknownPaymentCurrencyCount: number; unknownReceivableCurrencyCount: number;
   unallocatedProjectPaymentCount: number; expenseCurrencyKnown: boolean; processorFeeEstimateCount: number;
   recordedExpenseCounts: Readonly<{ total: number; pending: number; confirmed: number; reimbursed: number; other: number }>;
 }>;
@@ -92,6 +92,7 @@ function CurrencyFigures({ bucket, expenseCurrencyKnown }: { bucket: FinanceMone
 function coverageWarnings(coverage: CompanyCoverage): string[] {
   const notes: string[] = [];
   if (coverage.unknownPaymentCurrencyCount) notes.push(`${coverage.unknownPaymentCurrencyCount} payment${coverage.unknownPaymentCurrencyCount === 1 ? " has" : "s have"} no currency and ${coverage.unknownPaymentCurrencyCount === 1 ? "isn't" : "aren't"} counted.`);
+  if (coverage.unknownReceivableCurrencyCount) notes.push(`${coverage.unknownReceivableCurrencyCount} open invoice${coverage.unknownReceivableCurrencyCount === 1 ? " has" : "s have"} no currency and ${coverage.unknownReceivableCurrencyCount === 1 ? "isn't" : "aren't"} counted.`);
   if (coverage.unallocatedProjectPaymentCount) notes.push(`${coverage.unallocatedProjectPaymentCount} payment${coverage.unallocatedProjectPaymentCount === 1 ? " isn't" : "s aren't"} linked to a project.`);
   if (coverage.processorFeeEstimateCount) notes.push(`${coverage.processorFeeEstimateCount} processor fee${coverage.processorFeeEstimateCount === 1 ? " is" : "s are"} estimated.`);
   if (!coverage.expenseCurrencyKnown) notes.push("Expense totals are hidden until an expense currency is configured.");

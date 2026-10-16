@@ -11,7 +11,7 @@ const bucket = (overrides: Partial<FinanceMoneyBucket> = {}): FinanceMoneyBucket
   receivables: { count: 4, outstanding: "31400.00", overdue: "6900.00" },
   ...overrides,
 });
-const coverage = { complete: true, baseCurrency: "USD", unknownPaymentCurrencyCount: 0, unallocatedProjectPaymentCount: 0,
+const coverage = { complete: true, baseCurrency: null, unknownPaymentCurrencyCount: 0, unknownReceivableCurrencyCount: 2, unallocatedProjectPaymentCount: 0,
   expenseCurrencyKnown: false, processorFeeEstimateCount: 1, recordedExpenseCounts: { total: 2, pending: 1, confirmed: 1, reimbursed: 0, other: 0 } };
 const period = { from: "2026-10-01", to: "2026-10-31", dateBasis: "stored-calendar-date" as const };
 
@@ -43,6 +43,7 @@ describe("finance summary panel", () => {
     expect(html).toContain("Combined (partial)");
     expect(html).toContain("Expense currency isn&#x27;t configured in Project Alpha.");
     expect(html).toContain("$6,900.00");
+    expect(html).toContain("2 open invoices have no currency");
     expect(html).not.toMatch(/project-alpha:|\$0\.00/);
   });
 });
