@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { Miniflare } from "miniflare";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
@@ -120,7 +121,7 @@ describe("durable client folder notification batches", () => {
     await due();
     expect(await processClientFolderNotificationBatches(env)).toBe(1);
     expect(mocks.send).toHaveBeenCalledTimes(1);
-    expect(mocks.send.mock.calls[0]![1]).toMatchObject({ to: "recipient@example.test", text: expect.stringContaining("40 files added") });
+    expect(mocks.send.mock.calls[0]![1]).toMatchObject({ to: "recipient@example.test", fromName:"Ledge Top Client Portal", text: expect.stringContaining("40 files added") });
     expect(await db.prepare("SELECT COUNT(*) FROM client_portal_notifications").first("COUNT(*)")).toBe(1);
     expect(await row()).toMatchObject({ status: "sent", attempt_count: 1 });
   }, 30_000);
@@ -174,6 +175,38 @@ describe("durable client folder notification batches", () => {
     expect(await db.prepare("SELECT COUNT(*) FROM client_folder_notification_batches").first("COUNT(*)")).toBe(2);
     await due(); await processClientFolderNotificationBatches(env);
     expect(await db.prepare("SELECT COUNT(*) FROM client_portal_notifications").first("COUNT(*)")).toBe(2);
+  });
+
+  async function sealedLegacyBatch() {
+    await event("legacy.jpg");await due();const batch=await row();
+    const context=await authorizeClientFolderNotificationBatch(env,{...identity,id:String(batch!.id)});
+    if(!context)throw Error('legacy fixture authority missing');
+    const body='1 file added; 0 files removed in your client workspace.',link='https://client.example.test/portal/deliveries';
+    const mail={to:'recipient@example.test',fromName:'LTDS Client Portal',subject:'New files available \u2014 Acme',
+      text:`${body}\n\nOpen client deliveries: ${link}`,html:`<p>${body}</p><p><a href="${link}">Open client deliveries</a></p>`,messageIdKey:String(batch!.id)};
+    const fingerprint=createHash('sha256').update('client-folder-object:'+JSON.stringify({context,counts:{added:1,removed:0},mail})).digest('hex');
+    await db.prepare("UPDATE client_folder_notification_batches SET dispatch_fingerprint=?,sealed_at=datetime('now'),published_at=datetime('now'),attempt_count=1 WHERE id=?")
+      .bind(fingerprint,batch!.id).run();
+    await db.prepare(`INSERT INTO client_portal_notifications
+      (id,account_id,recipient_identity_id,event_type,source_type,source_id,dedupe_key,title,body,action_path)
+      VALUES(?,'a','i','files_added','folder_grant','g',?,'New files available',?,'/portal/deliveries')`)
+      .bind('legacy-inbox',`folder-batch:${batch!.id}`,body).run();
+    return{mail,fingerprint};
+  }
+  it("retries a pre-upgrade sealed email with byte-identical legacy copy and unchanged fingerprint",async()=>{
+    const legacy=await sealedLegacyBatch();mocks.send.mockRejectedValueOnce(new Error('provider acceptance uncertain'));
+    await processClientFolderNotificationBatches(env);expect(mocks.send.mock.calls[0]![1]).toEqual(legacy.mail);
+    await due();await processClientFolderNotificationBatches(env);
+    expect(mocks.send).toHaveBeenCalledTimes(2);expect(mocks.send.mock.calls[1]![1]).toEqual(legacy.mail);
+    expect(await row()).toMatchObject({status:'sent',dispatch_fingerprint:legacy.fingerprint,attempt_count:3});
+    expect(await db.prepare('SELECT count(*) n FROM client_portal_notifications').first('n')).toBe(1);
+  });
+  it.each(['recipient','link','authority'] as const)("suppresses sealed legacy email when %s changes",async change=>{
+    const legacy=await sealedLegacyBatch();
+    if(change==='recipient')await db.prepare("UPDATE client_identity_links SET email='different@example.test' WHERE id='i'").run();
+    if(change==='authority')await ops.prepare("UPDATE pa_projects SET client_id='other-client'").run();
+    await processClientFolderNotificationBatches(change==='link'?{...env,DELIVERY_BASE_URL:'https://changed.example.test'}:env);
+    expect(mocks.send).not.toHaveBeenCalled();expect(await row()).toMatchObject({status:'suppressed',dispatch_fingerprint:legacy.fingerprint});
   });
 
   it("does not send different content under the same message ID after an uncertain failure", async () => {
