@@ -3078,6 +3078,13 @@ function DeliveryWorkspaceV2({ session }: { session: Session }) {
         : [...current, ref],
     );
   };
+  // A revoked share also changes inherited badges in every folder beneath it,
+  // so drop every cached listing and reload whichever folder is open now.
+  const shareRevoked = useRef(() => {});
+  shareRevoked.current = () => {
+    invalidateDeliveryFolderCache();
+    void reload();
+  };
   const refresh = async () => {
     const requestedPrefix = prefix;
     if (requestedPrefix !== currentPrefixRef.current) return;
@@ -3707,10 +3714,7 @@ function DeliveryWorkspaceV2({ session }: { session: Session }) {
         />
       )}
       <div className="delivery-support-panels">
-        <ShareHistory session={session} revision={shareRevision} prefix={prefix} changed={() => {
-          invalidateDeliveryFolderCache(prefix);
-          void reload();
-        }} />
+        <ShareHistory session={session} revision={shareRevision} prefix={prefix} changed={() => shareRevoked.current()} />
         {admin && canDelete && <TrashPanel />}
       </div>
       {showDropboxImport && session.capabilities?.dropboxImport?.enabled && (

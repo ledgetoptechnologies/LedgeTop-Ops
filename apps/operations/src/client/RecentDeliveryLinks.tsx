@@ -37,6 +37,10 @@ export function RecentDeliveryLinks({ prefix, revision, canRevoke, onRevoked }: 
   const mounted = useRef(true);
   const currentPrefix = useRef(prefix);
   currentPrefix.current = prefix;
+  // Call the newest handler, not the one captured when Unshare was clicked:
+  // the user may have opened another folder while the DELETE was in flight.
+  const revoked = useRef(onRevoked);
+  revoked.current = onRevoked;
   const load = useCallback(async () => {
     request.current?.abort();
     const controller = new AbortController();
@@ -64,7 +68,7 @@ export function RecentDeliveryLinks({ prefix, revision, canRevoke, onRevoked }: 
       await api(`/api/delivery/shares/${encodeURIComponent(row.id)}`, { method: "DELETE" });
       // The revocation is confirmed, so the file cards' "Shared" badges are stale
       // even if this panel has since moved to another folder.
-      onRevoked?.();
+      revoked.current?.();
       if (mounted.current && currentPrefix.current === prefix) await load();
     } catch (error) {
       if (mounted.current && currentPrefix.current === prefix) setActionError(error instanceof Error ? error.message : "The link could not be revoked.");
