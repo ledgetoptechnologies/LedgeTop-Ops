@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { createPortal } from "react-dom";
-import { BRAND, type DeliveryLocationCollection, type Permission, type SessionUser, type ViewerAdminSessionGrant, type ViewerModelSummary, type ViewerPlatformOverview, type ViewerPublicShareSummary } from "@ltds/shared";
-import { AccountMenu, Brand, Card, EmptyState, Loading, StatusPill, openViewerShell } from "@ltds/ui";
+import { type DeliveryLocationCollection, type Permission, type SessionUser, type ViewerAdminSessionGrant, type ViewerModelSummary, type ViewerPlatformOverview, type ViewerPublicShareSummary } from "@ltds/shared";
+import { AccountMenu, Brand, Card, EmptyState, Loading, LtMark, StatusPill, openViewerShell } from "@ltds/ui";
 import { ApiError, api, setCsrf } from "./api";
 import { operationsViewerShellPath } from "./OperationsViewerShell";
 import { generateSecureAccessCode } from "./access-code";
@@ -3782,7 +3782,7 @@ function ViewerDataOverview({session}:{session:Session}) {
     }
     if (popup) {
       setPopupBlocked(false);
-      popup.document.title = "Opening LTDS Viewer";
+      popup.document.title = "Opening Ledge Top Viewer";
       popup.document.body.textContent = "Opening the secure LTDS Viewer workspace…";
     }
     setOpening(true); setActionError("");
@@ -6257,7 +6257,7 @@ function OperationsPreviewPlaceholder({ item }: { item: DeliveryItem }) {
   const isRaw = rawExts.has(ext);
   return (
     <div className="ops-preview-empty">
-      <img src={BRAND.logoUrl} alt={BRAND.shortName} />
+      <LtMark />
       <strong>{isRaw ? "This file type cannot be viewed in the browser" : "This file could not be displayed"}</strong>
       <p>
         {isRaw

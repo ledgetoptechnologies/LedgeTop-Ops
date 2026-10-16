@@ -32,7 +32,7 @@
 .ops-inbox-link svg { width: 21px; height: 21px; }
 .ops-header > .ltds-brand { min-width: 0; }
 .ops-header > .ltds-brand > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.ops-header > .ltds-brand > img, .ops-header > .ops-nav-trigger { flex-shrink: 0; }
+.ops-header > .ltds-brand > :is(img, .ltds-mark), .ops-header > .ops-nav-trigger { flex-shrink: 0; }
 #project-alpha-connections { scroll-margin-top: 90px; min-width: 0; }
 @media (max-width: 800px) { .staff-inbox-grid { grid-template-columns: minmax(0, 1fr); } }
 @media (max-width: 520px) { .staff-inbox-heading { flex-direction: column; } .staff-inbox-section { padding: .85rem; } .staff-inbox-items article { padding: .8rem; } }

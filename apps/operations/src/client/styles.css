@@ -1107,7 +1107,7 @@ tbody tr:last-child td { border: 0; }
   text-align: center;
   color: #fff;
 }
-.ops-preview-empty img { width: 82px; height: 82px; object-fit: contain; }
+.ops-preview-empty :is(img, .ltds-mark) { width: 82px; height: 82px; object-fit: contain; }
 .ops-preview-empty strong { font-size: 1.15rem; }
 .ops-preview-empty p { margin: 0; color: #c7d0d7; line-height: 1.5; }
 .ops-preview-empty a { text-decoration: none; }
@@ -2655,7 +2655,7 @@ ul { color: var(--muted); }
 @media (max-width: 390px) {
   .ops-header { padding-left: .65rem; padding-right: .65rem; }
   .ops-header .ltds-brand { gap: .45rem; font-size: .84rem; }
-  .ops-header .ltds-brand img { width: 40px; height: 40px; }
+  .ops-header .ltds-brand :is(img, .ltds-mark) { width: 40px; height: 40px; }
   .ops-header .ltds-brand small { font-size: .58rem; letter-spacing: .09em; }
 }
 

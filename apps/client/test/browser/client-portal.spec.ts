@@ -527,7 +527,7 @@ test("a late submitted-service detail cannot repopulate cache after the request 
   await expect(page.getByText("Preferred resolution", { exact: true })).toHaveCount(0);
 });
 
-test("native workspace branding identifies the selected source across compact viewports", async ({ page }) => {
+test("native workspace branding stays generic Ledge Top for every source across compact viewports", async ({ page }) => {
   const workspace = {
     id: "workspace-ltt",
     rootType: "organization",
@@ -584,12 +584,13 @@ test("native workspace branding identifies the selected source across compact vi
     await page.goto("/portal");
     const brand = page.locator(".client-portal-header .portal-brand");
     await expect(brand).toBeVisible();
-    await expect(brand).toHaveAttribute("data-portal-division", "technologies");
-    await expect(brand).toHaveAttribute("aria-label", "Ledge Top Technologies Client portal");
+    await expect(brand).toHaveAttribute("data-portal-division", "generic");
+    await expect(brand).toHaveAttribute("aria-label", "Ledge Top Client portal");
     await expect(brand).toContainText("Ledge Top");
-    await expect(brand).toContainText("Technologies · Client portal");
+    await expect(brand).not.toContainText("Technologies");
+    await expect(brand).not.toContainText("Drone Services");
     await expect(brand.locator("img")).toHaveCount(0);
-    await expect(brand.locator(".portal-brand-mark")).toHaveText("LTT");
+    await expect(brand.locator(".ltds-mark")).toHaveCount(1);
     const box = await brand.boundingBox();
     expect(box && box.x >= 0 && box.x + box.width <= width).toBeTruthy();
     expect(await page.evaluate(() => ({

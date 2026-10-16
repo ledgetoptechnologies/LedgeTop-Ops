@@ -1,11 +1,20 @@
 import { useCallback, useEffect, useId, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type PropsWithChildren, type ReactNode } from "react";
-import { BRAND } from "@ltds/shared";
 import type { ViewerSessionGrant, ViewerShellSessionGrant } from "@ltds/shared";
 import { CLOUDFLARE_ACCESS_LOGOUT_PATH } from "./access";
 export { CLOUDFLARE_ACCESS_LOGOUT_PATH } from "./access";
 
-export function Brand({ product, name = BRAND.name }: { product: string; name?: string }) {
-  return <div className="ltds-brand"><img src={BRAND.logoUrl} alt="" /><span>{name}<small>{product}</small></span></div>;
+/** Generic Ledge Top mark, identical on every domain and product. */
+export const LT_MARK_SVG = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 40"><rect x="1" y="1" width="38" height="38" rx="9" fill="#151b22" stroke="#ee5007" stroke-width="2"/><text x="20" y="26" text-anchor="middle" font-family="Outfit,Inter,Segoe UI,Arial,sans-serif" font-weight="800" font-size="16" letter-spacing=".5" fill="#fff">LT</text></svg>';
+
+export function LtMark({ className = "" }: { className?: string }) {
+  return <svg className={`ltds-mark ${className}`.trim()} viewBox="0 0 40 40" aria-hidden="true" focusable="false">
+    <rect x="1" y="1" width="38" height="38" rx="9" fill="#151b22" stroke="#ee5007" strokeWidth="2" />
+    <text x="20" y="26" textAnchor="middle" fontFamily="Outfit,Inter,Segoe UI,Arial,sans-serif" fontWeight="800" fontSize="16" letterSpacing=".5" fill="#fff">LT</text>
+  </svg>;
+}
+
+export function Brand({ product, name = "Ledge Top" }: { product: string; name?: string }) {
+  return <div className="ltds-brand"><LtMark /><span>{name}<small>{product}</small></span></div>;
 }
 
 export function Card({ title, action, children, className = "" }: PropsWithChildren<{ title?: string; action?: ReactNode; className?: string }>) {

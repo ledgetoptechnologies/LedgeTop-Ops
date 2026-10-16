@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { BRAND, type DeliveryItem, type DeliveryLocationCollection, type DeliveryManifest } from "@ltds/shared";
-import { Brand, EmptyState, Loading } from "@ltds/ui";
+import { type DeliveryItem, type DeliveryLocationCollection, type DeliveryManifest } from "@ltds/shared";
+import { Brand, EmptyState, Loading, LtMark } from "@ltds/ui";
 import {
   bulkDownloadProgress,
   pollBulkDownload,
@@ -19,7 +19,7 @@ type ErrorView = "unavailable" | "invalid-link" | "expired" | "revoked" | "inact
 type DownloadSummaryState = { status: "loading" | "ready" | "unavailable"; fileCount?: number; totalBytes?: number | null; knownBytes?: number; unknownSizeCount?: number };
 type MediaPatch = Partial<Pick<DeliveryItem, "thumbnailUrl" | "thumbnailState" | "thumbnailFallbackKind" | "previewStatus">> & { id: string };
 
-const invalidLinkDetail = "This folder has been moved, removed, or is no longer being shared. Contact your Ledge Top Drone Services representative for a current delivery link.";
+const invalidLinkDetail = "This folder has been moved, removed, or is no longer being shared. Contact your Ledge Top representative for a current delivery link.";
 const DELIVERY_RENDER_WINDOW = 450;
 const DELIVERY_RENDER_STEP = 150;
 
@@ -157,11 +157,11 @@ export function DeliveryApp({ namespace = "staff", initialRoute: consumedRoute }
   const showRequestError = useCallback((caught: unknown) => {
     const value = caught as RequestError;
     if(value.body?.code==="SHARE_EXPIRED"){
-      setErrorView("expired");setError("This delivery link has expired. Contact your Ledge Top Drone Services representative if you need renewed access.");
+      setErrorView("expired");setError("This delivery link has expired. Contact your Ledge Top representative if you need renewed access.");
     }else if(value.body?.code==="SHARE_REVOKED"){
-      setErrorView("revoked");setError("This delivery link was revoked. Contact your Ledge Top Drone Services representative for a current link.");
+      setErrorView("revoked");setError("This delivery link was revoked. Contact your Ledge Top representative for a current link.");
     }else if(value.body?.code==="SHARE_PROJECT_INACTIVE"){
-      setErrorView("inactive");setError("This delivery project is no longer active. Contact your Ledge Top Drone Services representative if you still need access.");
+      setErrorView("inactive");setError("This delivery project is no longer active. Contact your Ledge Top representative if you still need access.");
     }else if(value.body?.code==="SHARE_INVALID"){
       setErrorView("invalid-link");setError("This delivery link is not valid. Check that you opened the complete link, including its private fragment.");
     }else if (value.status === 410 || value.body?.code === "SHARED_FOLDER_UNAVAILABLE" || value.body?.code==="SHARE_RESOURCE_REMOVED") {
@@ -642,12 +642,12 @@ function DeliveryLanding() {
     <span className="eyebrow">Secure client delivery</span>
     <h1>Open your delivery from the link we sent you.</h1>
     <p>Each client delivery has a private, unique link. Use that link to view, preview, and download your files.</p>
-    <small>If your link has expired or is not opening, contact your Ledge Top Drone Services project representative.</small>
+    <small>If your link has expired or is not opening, contact your Ledge Top project representative.</small>
   </section>;
 }
 
 function PublicFrame({ children }: { children: React.ReactNode }) {
-  return <><header className="public-header"><Brand product="Client Delivery" /></header><main className="delivery-main">{children}</main><footer className="public-footer">Secure delivery by Ledge Top Drone Services</footer></>;
+  return <><header className="public-header"><Brand product="Client Delivery" /></header><main className="delivery-main">{children}</main><footer className="public-footer">Secure delivery by Ledge Top</footer></>;
 }
 
 function DeliveryLoadingSkeleton() {
@@ -661,7 +661,7 @@ function BulkProgress({ progress }: { progress: { status: string; percent: numbe
 function AccessCodeForm({ onSubmit, error }: { onSubmit: (code: string) => Promise<void>; error: string }) {
   const [code, setCode] = useState(""); const [busy, setBusy] = useState(false);
   return <form className="code-gate" onSubmit={async event => { event.preventDefault(); setBusy(true); await onSubmit(code); setBusy(false); }}>
-    <span className="eyebrow">Confidential delivery</span><h1>Enter your access code</h1><p>This delivery requires the code supplied by Ledge Top Drone Services.</p>
+    <span className="eyebrow">Confidential delivery</span><h1>Enter your access code</h1><p>This delivery requires the code supplied by Ledge Top.</p>
     <label htmlFor="access-code">Access code</label><input id="access-code" autoComplete="one-time-code" minLength={8} required value={code} onChange={event => setCode(event.target.value)} />
     {error && <p className="form-error">{error}</p>}<button className="button-orange" disabled={busy}>{busy ? "Checking…" : "Open delivery"}</button>
   </form>;
@@ -793,7 +793,7 @@ function PreparedPlaceholder({ item }: { item: DeliveryItem }) {
   const rawExts = new Set(["dng","arw","cr2","cr3","crw","nef","raf","rw2","orf","pef","srw","3fr","rwl","srf","sr2","x3f"]);
   const ext = (item.name || "").split(".").pop()?.toLowerCase() || "";
   const isRaw = rawExts.has(ext);
-  return <div className="prepared-placeholder"><img className="preview-brand-logo" src={BRAND.logoUrl} alt={BRAND.shortName} /><strong>{isRaw ? "This file type cannot be viewed in the browser" : "This file could not be displayed"}</strong><p>{isRaw ? "RAW photo files (DNG, ARW, etc.) require specialized software to view. Please download the file to open it." : "Your browser may not support this file format. The original file is still available to download."}</p><DownloadOriginal item={item} /></div>;
+  return <div className="prepared-placeholder"><LtMark className="preview-brand-logo" /><strong>{isRaw ? "This file type cannot be viewed in the browser" : "This file could not be displayed"}</strong><p>{isRaw ? "RAW photo files (DNG, ARW, etc.) require specialized software to view. Please download the file to open it." : "Your browser may not support this file format. The original file is still available to download."}</p><DownloadOriginal item={item} /></div>;
 }
 
 function VideoPreview({ item, publicId, namespace }: { item: DeliveryItem; publicId: string; namespace: DeliveryNamespace }) {
