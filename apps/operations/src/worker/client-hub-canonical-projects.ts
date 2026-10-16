@@ -5,6 +5,7 @@ import { clientHubBusinessProjectOwnership } from "./client-hub-business-project
 import type { ClientHubBusinessProjectPolicy } from "./client-hub-project-policy";
 import { projectAlphaNativeMappingReadVisibleSql, projectAlphaReadVisibleSql } from "./project-alpha-read-visibility";
 import type { Env } from "./types";
+import { nativeExistingImportClassicIdSql, nativeExistingImportTranslationsAvailable } from "./native-directory-existing-import-identity";
 import { nativeProjectLifecycleCanonicalProofForRevisionSchema } from "./native-project-lifecycle-canonical-proof";
 import { nativeProjectLifecycleResolvedBindingStaleSql } from "./native-project-lifecycle-conflict-proof";
 
@@ -59,6 +60,10 @@ export async function canonicalBusinessProjectPredicate(env: Env, context: Clien
   // tuple and unique canonical mapping below prove that fallback; an existing
   // hidden connector still vetoes it. Project ACL and revision proofs remain separate.
   const currentRootIdentity = clientHubActiveDirectoryIdentitySql("current_root_mapping", activeIdentities ?? []);
+  // Classic projection IDs remain distinct from native binding external IDs.
+  // Only the exact immutable source/application/history translation may connect them.
+  const currentRootClassicId = nativeExistingImportClassicIdSql("current_root_mapping",
+    await nativeExistingImportTranslationsAvailable(env.OPS_DB));
   const owner = clientHubBusinessProjectOwnership(context);
   const ownerMappingProof = (alias: string, resourceType: "organization" | "client", recordId: string,
     publicId: string): string => {
@@ -198,7 +203,7 @@ export async function canonicalBusinessProjectPredicate(env: Env, context: Clien
           AND current_root_mapping.application_id=s.application_id
           AND current_root_mapping.history_epoch_id=s.history_epoch_id
           AND current_root_mapping.resource_type=? AND current_root_mapping.record_id=?
-          AND current_root_mapping.external_id=? AND current_root_mapping.project_alpha_public_id=?)
+          AND ${currentRootClassicId}=? AND current_root_mapping.project_alpha_public_id=?)
       AND (SELECT count(*) FROM project_alpha_project_mappings unique_project_mapping
         WHERE unique_project_mapping.source_id=s.source_id AND unique_project_mapping.source_instance_id=s.source_instance_id
           AND unique_project_mapping.application_id=s.application_id AND unique_project_mapping.history_epoch_id=s.history_epoch_id
