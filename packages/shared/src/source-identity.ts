@@ -15,7 +15,8 @@ export function createCatalogSourceContext(sourceId: unknown): CatalogSourceCont
 export const PRIMARY_CATALOG_SOURCE = createCatalogSourceContext(PRIMARY_ALPHA_SOURCE_ID);
 
 /** Staff-facing name for a Project Alpha source. Display only; never an identity or authority input. */
-export function projectAlphaSourceName(sourceId: string): string {
+export function projectAlphaSourceName(sourceId: string | null | undefined): string {
+  if (!sourceId) return "Unknown Project Alpha source";
   if (sourceId === "project-alpha:primary") return "Ledge Top Drone Services";
   if (sourceId === "project-alpha:secondary") return "Ledge Top Technologies";
   const suffix = /^project-alpha:([a-z0-9][a-z0-9_-]{0,63})$/.exec(sourceId)?.[1];

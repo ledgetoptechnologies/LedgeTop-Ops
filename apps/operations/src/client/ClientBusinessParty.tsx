@@ -1,3 +1,4 @@
+import { projectAlphaSourceName } from "@ltds/shared";
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { Card, StatusPill, Skeleton } from "@ltds/ui";
 import { api, ApiError } from "./api";
@@ -138,7 +139,7 @@ function goToParty(id: string, _status: "active" | "archived") {
 }
 function MemberList({ members, removing = false }: { members: PartyMember[]; removing?: boolean }) {
   return <ul className="business-party-member-list">{members.map(member => <li key={rootKey(member.root)}>
-    <strong>{member.displayName}</strong><span>{member.sourceName}</span><small>{member.root.sourceId} · Record {member.root.recordId}</small>
+    <strong>{member.displayName}</strong><span>{member.sourceName}</span><small>{projectAlphaSourceName(member.root.sourceId)} · Record {member.root.recordId}</small>
     {member.availability === "unavailable" && <small>{removing ? "The original record is unavailable. Only its reviewed link will be removed." : "The original record is unavailable. It remains linked until separately reviewed and unlinked."}</small>}
   </li>)}</ul>;
 }
@@ -281,7 +282,7 @@ function RecordPicker({ kind, excludedSources, initialQuery, contextSignal, onSe
       const reason = row.root_namespace !== "business" || row.kind !== kind ? "Not a matching business-record type"
         : row.business_party_id ? "Already part of a linked customer" : excludedSources.includes(row.source_id || "") ? "This source is already represented" : null;
       return <li key={JSON.stringify([row.source_id, row.root_namespace, row.kind, row.public_id])}><strong>{row.display_name}</strong>
-        <span>{row.source_name || row.source_id}</span><small>{row.source_id} · Record {row.public_id}</small>
+        <span>{row.source_name || row.source_id}</span><small>{projectAlphaSourceName(row.source_id)} · Record {row.public_id}</small>
         {reason ? <small>{reason}</small> : <button type="button" className="button-ghost" disabled={busy} onClick={() => { if (!contextSignal.aborted) onSelect(row); }}>Choose {row.display_name}</button>}
       </li>;
     })}</ul>
@@ -311,7 +312,7 @@ function LinkEditor({ anchor, party, contextSignal, onCancel, onInvalidated, onS
       initialQuery={party?.displayName || anchor?.display_name || ""}
       contextSignal={contextSignal} onSelect={setSelected} onInvalidated={onInvalidated} /> : <form onSubmit={review}>
       <p>Selected: <strong>{selected.display_name}</strong> · {selected.source_name || selected.source_id}</p>
-      <small>{selected.source_id} · Record {selected.public_id}</small>
+      <small>{projectAlphaSourceName(selected.source_id)} · Record {selected.public_id}</small>
       {!party && <label>Linked customer name<input value={name} required maxLength={160} onChange={event => setName(event.target.value)} />
         <small>This names the Client Hub grouping; it does not rename either source record.</small></label>}
       <div className="business-party-actions"><button type="submit" className="button-orange">Preview link</button>
@@ -410,7 +411,7 @@ export function ClientBusinessParty({ partyId }: { partyId: string }) {
           <p>Names and record identifiers stay source-qualified. An unavailable record is never silently replaced or inferred from another source.</p>
           <div className="business-party-sources">{party.members.map(member => <Card key={member.linkId}>
             <article aria-label={`${member.sourceName} business record`}><h3>{member.displayName}</h3><p>{member.sourceName}</p>
-              <small>{member.root.sourceId} · Record {member.root.recordId}</small>
+              <small>{projectAlphaSourceName(member.root.sourceId)} · Record {member.root.recordId}</small>
               <StatusPill tone={member.availability === "available" ? "success" : "warning"}>{member.availability === "available" ? "Available" : "Needs review"}</StatusPill>
               {member.availability === "unavailable" && <p>The original record is unavailable. Its reviewed link remains visible to an administrator for repair; no source data was deleted here.</p>}
               <div className="business-party-actions">{member.availability !== "unavailable" && member.detailPath && <a className="button button-orange" href={`${sourcePath(member)}${directoryFilters()}`}>Open {member.sourceName} workspace</a>}

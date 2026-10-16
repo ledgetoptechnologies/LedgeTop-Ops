@@ -2934,3 +2934,18 @@ a.dashboard-alert:hover > span[aria-hidden] { transform: translateX(3px); }
 }
 /* The dashboard greeting includes the user's name; never let it widen the page. */
 .page-heading p { overflow-wrap: anywhere; }
+
+/* ---------------------------------------------------------------------------
+   Client Hub polish
+   --------------------------------------------------------------------------- */
+/* Directory cards: type label, status pill and its note stack on the left
+   instead of a long note squeezed against the right edge. */
+.client-directory-card-header { display: grid; justify-content: stretch; gap: .4rem; }
+.client-directory-portal-state { display: grid; justify-items: start; gap: .3rem; }
+.client-directory-portal-state > small { color: var(--muted); font-size: .76rem; line-height: 1.4; text-align: left; }
+/* Customer workspace section links read as tabs. */
+.business-party-section-nav { gap: .25rem; padding: .25rem; border-radius: var(--radius-md); background: var(--track); }
+.business-party-section-nav a { min-height: 2.5rem; padding: .5rem .9rem; color: #4f5d69; font-weight: 750; text-decoration: none; }
+.business-party-section-nav a:hover, .business-party-section-nav a:focus-visible { background: var(--paper); color: var(--ink); text-decoration: none; box-shadow: var(--shadow-sm); }
+.business-party-workspace > :is(button, a.button) { justify-self: start; }
+@media (max-width: 760px) { .business-party-section-nav a { min-height: 44px; } }
