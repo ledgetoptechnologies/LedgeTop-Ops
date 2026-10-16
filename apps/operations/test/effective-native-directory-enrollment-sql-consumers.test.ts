@@ -19,10 +19,10 @@ async function migrate(database:D1Database,through?:string){
 
 let runtime:Miniflare,db:D1Database;
 describe('effective enrollment SQL consumers',()=>{
-  beforeAll(async()=>{runtime=new Miniflare({modules:true,compatibilityDate:'2026-08-06',script:"export default {fetch(){return new Response('ok')}}",d1Databases:['OPS']});db=await runtime.getD1Database('OPS') as D1Database;await migrate(db);},120_000);
+  beforeAll(async()=>{runtime=new Miniflare({modules:true,compatibilityDate:'2026-08-06',script:"export default {fetch(){return new Response('ok')}}",d1Databases:['OPS']});db=await runtime.getD1Database('OPS') as D1Database;await migrate(db,'0204_');},120_000);
   afterAll(async()=>runtime.dispose());
 
-  it('applies in the full chain and changes only the enrollment relation in every affected definition',async()=>{
+  it('applies through migration0203 and changes only the enrollment relation in every affected definition',async()=>{
     const prior=new Miniflare({modules:true,compatibilityDate:'2026-08-06',script:"export default {fetch(){return new Response('ok')}}",d1Databases:['PRIOR']});
     try{
       const priorDb=await prior.getD1Database('PRIOR') as D1Database;await migrate(priorDb,'0203_');

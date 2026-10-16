@@ -56,7 +56,11 @@ it('uses an exact portal organization ACK as acquired parent revision for a nest
   expect(await writeNativeDirectoryProfile(db,write)).toMatchObject({status:'blocked',reason:'authority_or_atomic_write'});
   expect(await db.prepare('SELECT record_id FROM operations_directory_records WHERE record_id=?').bind(nestedId).first()).toBeNull();
   const additive=readFileSync(new URL('0209_shared_profile_portal_native_writes.sql',directory),'utf8');
-  await db.batch(splitD1MigrationStatements(additive.slice(additive.lastIndexOf('DROP TRIGGER '+triggerName))).map(sql=>db.prepare(sql)));
+  const restoredFrom=additive.indexOf('CREATE TRIGGER '+triggerName),restoredEnd=additive.indexOf(terminator,restoredFrom);
+  expect(restoredFrom).toBeGreaterThanOrEqual(0);expect(restoredEnd).toBeGreaterThan(restoredFrom);
+  const restoredTrigger=additive.slice(restoredFrom,restoredEnd+terminator.length);
+  expect(restoredTrigger).not.toContain('CREATE TABLE');
+  await db.batch([db.prepare('DROP TRIGGER '+triggerName),db.prepare(restoredTrigger)]);
   const batchErrors:string[]=[];const diagnosed=new Proxy(db,{get(target,key){if(key==='batch')return async(statements:D1PreparedStatement[])=>{try{return await target.batch(statements);}catch(error){batchErrors.push(String(error));throw error;}};const member=Reflect.get(target,key);return typeof member==='function'?member.bind(target):member;}});
   const created=await writeNativeDirectoryProfile(diagnosed,write);expect(created,JSON.stringify({created,batchErrors})).toMatchObject({status:'written'});if(created.status!=='written')throw Error(JSON.stringify(created));
   const dispatched=await dispatchProjectAlphaDirectoryProfileOutboxCommand(env,c.sourceId,created.commandIds[0]!,send);expect(dispatched,JSON.stringify({dispatched,posted})).toMatchObject({status:'acknowledged'});expect(posted).toHaveLength(1);expect((posted[0] as {organization:unknown}).organization).toEqual({externalId:mapping!.external_id,expectedRevision:'8'});
