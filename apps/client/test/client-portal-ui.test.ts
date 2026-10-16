@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { isNoAuthorizedClientWorkspace, isOptionalClientWorkspaceBootstrapAbsence, NO_AUTHORIZED_CLIENT_WORKSPACE } from "../src/client/portal-bootstrap-classification";
 import {
   cancelPortalServiceRequest,
   createPortalChangeRequest,
@@ -202,6 +203,32 @@ describe("client portal browser API boundary", () => {
     });
     expect(body).not.toHaveProperty("organizationWide");
     expect(body).not.toHaveProperty("projectPublicId");
+  });
+
+  it("classifies an identity with no authorized v2 workspace as access setup, not an outage", async () => {
+    const values = new Map<string, string>();
+    vi.stubGlobal("window", { sessionStorage: { getItem: (key: string) => values.get(key) ?? null, setItem: (key: string, value: string) => values.set(key, value), removeItem: (key: string) => values.delete(key) } });
+    const calls: string[] = [];
+    const request = vi.fn(async <T>(url: string): Promise<T> => {
+      calls.push(url);
+      if (url === "/api/client/session") return { account: { id: "", displayName: "" }, capabilities: { workspaceHierarchyV2: true } } as T;
+      if (url === "/api/client/v2/workspaces") return { workspaces: [] } as T;
+      throw new Error(`unexpected ${url}`);
+    }) as PortalRequest;
+    const caught = await loadPortalBootstrap(request).catch((error: unknown) => error);
+    expect(caught).toMatchObject({ status: 403, body: { code: NO_AUTHORIZED_CLIENT_WORKSPACE } });
+    expect(isNoAuthorizedClientWorkspace(caught)).toBe(true);
+    expect(isOptionalClientWorkspaceBootstrapAbsence(caught, null)).toBe(false);
+    expect(calls).toEqual(["/api/client/session", "/api/client/v2/workspaces"]);
+  });
+
+  it("keeps real failures and other denials out of the no-workspace classification", () => {
+    expect(isNoAuthorizedClientWorkspace(Object.assign(new Error("x"), { status: 403, body: { error: "Client access is not provisioned" } }))).toBe(false);
+    expect(isNoAuthorizedClientWorkspace(Object.assign(new Error("x"), { status: 403, body: { error: "Select an authorized client workspace" } }))).toBe(false);
+    expect(isNoAuthorizedClientWorkspace(Object.assign(new Error("x"), { status: 503, body: { code: NO_AUTHORIZED_CLIENT_WORKSPACE } }))).toBe(false);
+    expect(isNoAuthorizedClientWorkspace(Object.assign(new Error("x"), { status: 400, body: { code: NO_AUTHORIZED_CLIENT_WORKSPACE } }))).toBe(false);
+    expect(isNoAuthorizedClientWorkspace(new TypeError("Failed to fetch"))).toBe(false);
+    expect(isNoAuthorizedClientWorkspace(null)).toBe(false);
   });
 
   it("selects one authorized v2 workspace before loading scoped portal resources", async () => {

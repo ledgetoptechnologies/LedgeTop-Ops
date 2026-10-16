@@ -531,8 +531,10 @@ test("an operation completed in an old prefix cannot abort or replace the curren
   await page.goto("/delivery/Acme/Current");
   await expect(page.getByText("This folder is empty", { exact: true })).toBeVisible();
 
-  page.once("dialog", dialog => dialog.accept("Synthetic folder"));
   await page.getByRole("button", { name: "New folder" }).click();
+  const newFolder = page.getByRole("dialog", { name: "New folder" });
+  await newFolder.getByRole("textbox", { name: "Folder name" }).fill("Synthetic folder");
+  await newFolder.getByRole("button", { name: "Create folder" }).click();
   await race.operationRequested.promise;
   await page
     .getByRole("navigation", { name: "Current delivery folder" })

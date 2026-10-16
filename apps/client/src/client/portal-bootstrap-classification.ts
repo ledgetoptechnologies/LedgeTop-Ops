@@ -14,3 +14,13 @@ export function isOptionalClientWorkspaceBootstrapAbsence(
   const error = caught as RequestError;
   return error.status === 403 && error.body?.error === "Client access is not provisioned";
 }
+
+export const NO_AUTHORIZED_CLIENT_WORKSPACE = "no_authorized_client_workspace";
+
+/** A verified identity whose workspace list is empty: an access-setup state,
+ * not a service outage. Only the exact client-side code qualifies, so
+ * transport and server failures keep their own classification. */
+export function isNoAuthorizedClientWorkspace(caught: unknown): boolean {
+  const error = caught as RequestError;
+  return error?.status === 403 && error.body?.code === NO_AUTHORIZED_CLIENT_WORKSPACE;
+}
