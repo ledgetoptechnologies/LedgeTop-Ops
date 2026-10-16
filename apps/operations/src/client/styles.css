@@ -24,6 +24,14 @@
   border-bottom: 1px solid #262626;
 }
 
+/* The brand never shrinks into the menu. Between the mobile breakpoint and
+   ~1200px the full desktop menu needs the room, so only the LT mark shows
+   there (the name stays available to assistive technology). */
+.ops-header .ltds-brand { flex: none; }
+@media (min-width: 961px) and (max-width: 1200px) {
+  .ops-header .ltds-brand > span { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap; }
+}
+
 .ops-header > nav {
   align-self: stretch;
   display: flex;
