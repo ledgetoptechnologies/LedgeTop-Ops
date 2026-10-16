@@ -2956,3 +2956,21 @@ a.dashboard-alert:hover > span[aria-hidden] { transform: translateX(3px); }
   .administration-panels:has(> :nth-child(3):last-child) { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 }
 #project-adoption-source { display: block; width: min(100%, 22rem); margin: .35rem 0 .6rem; }
+
+/* Data > Client links: a section under the Data page title, not a second page title. */
+.delivery-links-page > .page-heading { margin-bottom: 0; }
+.delivery-links-page > .page-heading h2 { margin: .1rem 0 .2rem; font-size: 1.45rem; line-height: 1.25; }
+.delivery-links-page > .page-heading p { margin: 0; }
+
+/* Data list view: the open button holds an optional checkbox, the icon, the
+   name, an optional shared badge and the size. A fixed five-column grid put
+   the name into the icon column whenever selection mode was off, truncating
+   it to a couple of characters; flex lets the name take the free space. */
+.delivery-list-open { display: flex; align-items: center; gap: .65rem; }
+.delivery-list-open > span:not([class]) { flex: 0 0 1.3rem; text-align: center; }
+.delivery-list-open > .select-checkbox { flex: 0 0 auto; }
+.delivery-list-open > strong { flex: 1 1 auto; min-width: 0; }
+.delivery-list-open > small { flex: none; margin-left: auto; color: var(--muted); }
+/* A view switcher with a single option is a label, not a control. */
+.ltds-segmented:has(> button:only-child) { padding: 0; border-color: transparent; background: transparent; }
+.ltds-segmented > button:only-child { padding-left: 0; background: transparent; box-shadow: none; cursor: default; }

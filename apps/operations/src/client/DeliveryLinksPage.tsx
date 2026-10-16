@@ -153,7 +153,7 @@ export function DeliveryLinksPage({canRevoke,onChanged}:{canRevoke:boolean;onCha
 
   return <div className="page-stack delivery-links-page">
     <div className="page-heading">
-      <div><span className="eyebrow">Client delivery</span><h1>Client links</h1><p>Search and manage links without loading the complete history at once.</p></div>
+      <div><span className="eyebrow">Client delivery</span><h2>Client links</h2><p>Search and manage links without loading the complete history at once.</p></div>
       <a className="button button-ghost" href={prefix?deliveryPathFromPrefix(prefix):"/delivery"}>{prefix?"Back to folder":"Back to Data"}</a>
     </div>
     {prefix&&<div className="delivery-links-scope" role="region" aria-label="Link history scope">
