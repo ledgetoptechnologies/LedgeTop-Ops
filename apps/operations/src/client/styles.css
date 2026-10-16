@@ -2974,3 +2974,7 @@ a.dashboard-alert:hover > span[aria-hidden] { transform: translateX(3px); }
 /* A view switcher with a single option is a label, not a control. */
 .ltds-segmented:has(> button:only-child) { padding: 0; border-color: transparent; background: transparent; }
 .ltds-segmented > button:only-child { padding-left: 0; background: transparent; box-shadow: none; cursor: default; }
+
+/* Fields inside small-caps labels inherited the .78rem label size; the value
+   a person types should be as readable as every other form. */
+:is(.form-grid, .sop-template-controls) label > :is(input, select, textarea) { font-size: .95rem; }
