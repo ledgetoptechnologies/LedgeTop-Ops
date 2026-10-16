@@ -37,7 +37,7 @@ export async function writeNativeExistingDirectoryImport(env: NativeExistingImpo
     parentVersion = parent.results[0]!.current_version;
   }
   const executionId = crypto.randomUUID(), now = new Date().toISOString();
-  const deadline = new Date(Math.min(Date.parse(actor.verifiedUntil), Date.now() + 15 * 60_000)).toISOString();
+  const deadline = new Date(Math.min(Date.parse(actor.verifiedUntil), Date.parse(now) + 15 * 60_000)).toISOString();
   const admissionId = `existing-import:${review.importId}`, profile = JSON.stringify(review.profile);
   const scopes = JSON.stringify([{ businessAreaId: review.businessAreaId, divisionId: null }]);
   const destinations = JSON.stringify([importDestination(review)]);

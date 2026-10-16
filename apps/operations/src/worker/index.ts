@@ -179,6 +179,7 @@ import { registerTeamAssignedWorkRoutes } from "./team-assigned-work";
 import { registerClientHubRoutes } from "./client-hub";
 import { registerOpsServiceManagementRoutes } from "./ops-service-management-routes";
 import { NATIVE_DIRECTORY_PROFILE_ROUTE, nativeDirectoryProfileWritesEnabled, registerNativeDirectoryProfileRoutes } from "./native-directory-profile-routes";
+import { registerNativeDirectorySharedProfileRoutes } from "./native-directory-shared-profile-routes";
 import { registerNativeDirectoryExistingImportRoutes } from "./native-directory-existing-import-routes";
 import { DIRECTORY_BINDING_REFRESH_ROUTE, DIRECTORY_BINDING_REFRESH_PROTECTED_OWNER, directoryBindingRefreshEnabled,
   directoryBindingRefreshRecoveryEnabled } from './native-directory-binding-refresh';
@@ -996,6 +997,7 @@ app.get("/api/session", async (c) => {
           && integrationsManageScope.global && !integrationsManageScope.deniedGlobal,
       },
       nativeDirectoryProfileWrites: { enabled: nativeDirectoryProfileWritesEnabled(c.env) },
+      nativeDirectorySharedProfiles: { enabled: nativeDirectoryProfileWritesEnabled(c.env) },
       reviewedImportEnrollment: { enabled: c.env.ENVIRONMENT === "staging" && c.env.REVIEWED_IMPORT_ENROLLMENT_ENABLED === "true" },
       nativeDirectoryBindingRefresh: { enabled: directoryBindingRefreshEnabled(c.env) && principal.id===DIRECTORY_BINDING_REFRESH_PROTECTED_OWNER
         && administrator && integrationsManageScope.global && !integrationsManageScope.deniedGlobal,
@@ -1725,6 +1727,7 @@ registerProjectAlphaDraftQuoteRoutes(app);
 registerTeamAssignedWorkRoutes(app);
 registerNativeDirectoryExistingImportRoutes(app);
 registerNativeDirectoryProfileRoutes(app);
+registerNativeDirectorySharedProfileRoutes(app);
 registerNativeDirectoryBindingRefreshRoutes(app);
 registerDirectoryRelationshipGenerationRecoveryRoutes(app);
 registerClientHubRoutes(app);
@@ -3698,3 +3701,4 @@ export { ClientPortalNativeFinancialReader } from "./client-portal-native-financ
 export { OperationsPortalNativeDeliveryAuthorizationReader } from "./operations-portal-native-delivery-authorization-entrypoint";
 export { ProjectAlphaDeliveryIntentIngress } from "./project-alpha-delivery-intent-entrypoint";
 export { ProjectAlphaCatalogPromotionWorkflow } from "./project-alpha-catalog-promotion-workflow";
+export { SharedProfilePortalIngress } from './shared-profile-portal-entrypoint';

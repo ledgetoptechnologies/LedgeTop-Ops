@@ -63,6 +63,15 @@ describe("coordinated client-portal purposes on existing Alpha connections", { t
       .map(sql => delivery.prepare(sql)));
     await delivery.batch(splitD1MigrationStatements(readFileSync(new URL("../../client/migrations/0203_primary_delivery_authority.sql", import.meta.url), "utf8"))
       .map(sql => delivery.prepare(sql)));
+    // Use the actual paired profile-authority schema. The Ops transition adapter
+    // only touches its head table; its DDL is taken from the shipped migration.
+    const opsHead=splitD1MigrationStatements(readFileSync(new URL('../migrations/0208_shared_profile_portal_authority.sql',import.meta.url),'utf8'))
+      .find(sql=>sql.includes('CREATE TABLE shared_profile_portal_authority_heads('));
+    if(!opsHead)throw new Error('missing-real-profile-head-migration');
+    await db.prepare(opsHead).run();
+    await delivery.batch(splitD1MigrationStatements(readFileSync(new URL('../../client/migrations/0232_shared_profile_edit_authority.sql',import.meta.url),'utf8'))
+      .map(sql=>delivery.prepare(sql)));
+    await delivery.prepare('UPDATE portal_shared_profile_runtime SET hooks_ready=1 WHERE id=1').run();
     env = { OPS_DB: db, DELIVERY_DB: delivery, PROJECT_ALPHA_BASE_URL: "https://primary.example.test/",
       PROJECT_ALPHA_API_KEY: primaryCredential.snapshotApiKey, APPLICATION_KEY: "ltds_ops",
       PROJECT_ALPHA_WEBHOOK_ED25519_PUBLIC_KEY: publicKey(1), PROJECT_ALPHA_PORTAL_HMAC_SECRET: "scalar-primary-portal-secret-thirty-two-characters" };
@@ -136,6 +145,39 @@ describe("coordinated client-portal purposes on existing Alpha connections", { t
     await setCoordinatedProjectAlphaConnectorState(env, fixture.id, { expectedVersion: suspended.version, state: "active" }, actor);
     expect((await authority.getPortalSourceAuthority(delivery, fixture.id))?.state).toBe("suspended");
     expect(await db.prepare("SELECT count(*) n FROM pa_connector_portal_write_permits").first("n")).toBe(0);
+  });
+
+  it.each(['suspend','revision'] as const)('fences existing shared-profile heads through the local Ops adapter during source %s and atomically releases pending ownership',async(action)=>{
+    const fixture=await active(),workspaceId=crypto.randomUUID(),initialOperation=crypto.randomUUID();
+    await db.prepare("INSERT INTO shared_profile_portal_authority_heads(workspace_id,source_id,revision,state,operation_id) VALUES(?,?,3,'active',?)")
+      .bind(workspaceId,fixture.id,initialOperation).run();
+    await delivery.prepare("INSERT INTO portal_shared_profile_authority_heads(workspace_id,source_id,revision,state,operation_id) VALUES(?,?,3,'active',?)")
+      .bind(workspaceId,fixture.id,initialOperation).run();
+    // A real SQL guard on the source write requires both profile fences to be
+    // pending at that instant. The end-state below must release them together.
+    const guardName=`coordination_profile_fence_${sequence}`;
+    await delivery.prepare(`CREATE TRIGGER ${guardName} BEFORE UPDATE ON pa_portal_source_authorities
+      WHEN NEW.source_id='${fixture.id}' AND NEW.state='suspended'
+      AND NOT EXISTS(SELECT 1 FROM portal_shared_profile_authority_heads h
+        JOIN portal_shared_profile_bulk_latch latch ON latch.id=1
+        WHERE h.workspace_id='${workspaceId}' AND h.source_id=NEW.source_id AND h.revision=4 AND h.state='blocked'
+        AND h.pending_operation_id=h.operation_id AND latch.operation_id IS NOT NULL)
+      BEGIN SELECT RAISE(ABORT,'source-write-missing-shared-profile-fence'); END`).run();
+    try{
+      if(action==='suspend')await setCoordinatedProjectAlphaConnectorState(env,fixture.id,{expectedVersion:fixture.connector.version,state:'suspended'},actor);
+      else{
+        const ref=`profile-rotated-${++sequence}`;credentials[ref]=credential(sequence);setCredentials();
+        await reviseCoordinatedProjectAlphaConnector(env,fixture.id,fixture.connector.version,revision(ref),actor);
+      }
+      const opsHead=await db.prepare('SELECT source_id,revision,state,operation_id FROM shared_profile_portal_authority_heads WHERE workspace_id=?').bind(workspaceId).first();
+      const deliveryHead=await delivery.prepare('SELECT source_id,revision,state,operation_id,pending_operation_id FROM portal_shared_profile_authority_heads WHERE workspace_id=?').bind(workspaceId).first();
+      expect(opsHead).toMatchObject({source_id:fixture.id,revision:4,state:'blocked'});
+      expect(deliveryHead).toEqual({...opsHead,pending_operation_id:null});
+      expect(opsHead?.operation_id).not.toBe(initialOperation);
+      expect(await delivery.prepare('SELECT operation_id FROM portal_shared_profile_bulk_latch WHERE id=1').first('operation_id')).toBeNull();
+      expect((await authority.getPortalSourceAuthority(delivery,fixture.id))?.state).toBe('suspended');
+      expect((await getConnectorPortalStatus(env)).recovery).toBeNull();
+    }finally{await delivery.prepare(`DROP TRIGGER ${guardName}`).run();}
   });
 
   it("keeps source labels and staff visibility independent from client permission", async () => {

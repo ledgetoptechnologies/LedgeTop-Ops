@@ -20,10 +20,10 @@ function fixture(operationsCutoff = 205) {
     const app = path.join(base, "apps", application);
     fs.mkdirSync(app, { recursive: true });
     fs.cpSync(path.join(root, "apps", application, "migrations"), path.join(app, "migrations"), { recursive: true });
-    if (application === "operations") {
-      for (const name of fs.readdirSync(path.join(app, "migrations"))) {
-        if (Number(name.slice(0, 4)) > operationsCutoff) fs.rmSync(path.join(app, "migrations", name));
-      }
+    // This fixture rehearses only the frozen Client150/Operations205 contract.
+    for (const name of fs.readdirSync(path.join(app, "migrations"))) {
+      if (Number(name.slice(0, 4)) > (application === "operations" ? operationsCutoff : 231))
+        fs.rmSync(path.join(app, "migrations", name));
     }
     fs.writeFileSync(path.join(app, "wrangler.staging.json"), JSON.stringify({
       name: contract.workerName,

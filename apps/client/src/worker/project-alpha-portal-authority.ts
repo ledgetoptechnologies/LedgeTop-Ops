@@ -1,9 +1,11 @@
 import { z } from "zod";
+import { blockBusinessProfileSource,businessProfileAuthorityBatch,type BusinessProfileAuthorityBinding } from './client-portal/business-profile-fences';
 import { createCatalogSourceContext, PRIMARY_ALPHA_SOURCE_ID } from "@ltds/shared";
 
 export type PortalAuthorityDatabase = Pick<D1Database, "prepare" | "batch">;
 export interface PortalSourceAuthorityEnvironment {
   DELIVERY_DB: D1Database;
+  SHARED_PROFILE_PORTAL?:BusinessProfileAuthorityBinding;
   PROJECT_ALPHA_CONNECTOR_CREDENTIALS?: string;
   PROJECT_ALPHA_PORTAL_HMAC_SECRET?: string;
   PROJECT_ALPHA_PORTAL_PREVIOUS_HMAC_SECRET?: string;
@@ -340,7 +342,8 @@ export async function provisionPortalSourceAuthority(env: PortalSourceAuthorityE
     connector_revision=?,connector_version=?,updated_at=datetime('now') WHERE source_id=? AND version=?`)
     .bind(revision, version, connector.revision, connector.version, connector.sourceId, old.version));
   statements.push(audit(db, connector.sourceId, version, revision, "provision", actorId));
-  try { await db.batch(statements); } catch (error) { changed(error); }
+  const profileFences=old?await blockBusinessProfileSource(env,connector.sourceId,JSON.stringify(['source-provision',connector,old.version,input])):{receipts:[],latch:null};
+  try { await businessProfileAuthorityBatch(db,profileFences.receipts,statements,profileFences.latch); } catch (error) { changed(error); }
   const current = await readRow(db, connector.sourceId);
   if (!current || current.version !== version) throw new PortalSourceAuthorityError("changed");
   return summary(current);
@@ -358,12 +361,13 @@ export async function setPortalSourceAuthorityState(env: PortalSourceAuthorityEn
     if (!revision) throw new PortalSourceAuthorityError("unavailable");
   }
   const version = old.version + 1;
-  try { await db.batch([
+  const profileFences=await blockBusinessProfileSource(env,connector.sourceId,JSON.stringify(['source-state',connector,expectedVersion,state]));
+  try { await businessProfileAuthorityBatch(db,profileFences.receipts,[
     fence(db, connector.sourceId, "EXISTS(SELECT 1 FROM pa_portal_source_authorities WHERE source_id=? AND version=? AND state<>'retired')", [connector.sourceId, expectedVersion]),
     db.prepare(`UPDATE pa_portal_source_authorities SET state=?,version=?,connector_revision=?,connector_version=?,updated_at=datetime('now')
       WHERE source_id=? AND version=?`).bind(state, version, old.connector_revision, connector.version, connector.sourceId, expectedVersion),
     audit(db, connector.sourceId, version, old.active_revision, state, actorId),
-  ]); } catch (error) { changed(error); }
+  ],profileFences.latch); } catch (error) { changed(error); }
   const current = await readRow(db, connector.sourceId);
   if (!current || current.version !== version) throw new PortalSourceAuthorityError("changed");
   return summary(current);

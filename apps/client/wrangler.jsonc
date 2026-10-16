@@ -176,6 +176,7 @@
     }
   ],
   "services": [
+    { "binding": "SHARED_PROFILE_PORTAL", "service": "ledgetop-ops", "entrypoint": "SharedProfilePortalIngress" },
     {
       "binding": "CLIENT_PORTAL_RECIPIENT_ENROLLMENT_BRIDGE",
       "service": "ledgetop-ops",

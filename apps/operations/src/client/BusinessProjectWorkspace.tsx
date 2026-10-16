@@ -154,7 +154,7 @@ function ProjectWorkspace({ route, feedbackEnabled }: { route: BusinessProjectRo
 }
 
 /** Project routes live inside Client Hub without expanding a client card inline. */
-export function ClientHubWorkspaceRouter({ mapToken, permissions, feedbackEnabled=false, invitationAccess, canManagePortalSetup=false, nativeDirectoryProfileWrites=false, reviewedImportEnrollment=false, nativeDirectoryBindingRefresh=false,nativeDirectoryBindingRefreshRecovery=false }: { mapToken: string | null; permissions: Permission[]; feedbackEnabled?: boolean; invitationAccess?: InvitationAdministrationAccess; canManagePortalSetup?: boolean; nativeDirectoryProfileWrites?: boolean; reviewedImportEnrollment?: boolean; nativeDirectoryBindingRefresh?: boolean;nativeDirectoryBindingRefreshRecovery?:boolean }) {
+export function ClientHubWorkspaceRouter({ mapToken, permissions, feedbackEnabled=false, invitationAccess, canManagePortalSetup=false, nativeDirectoryProfileWrites=false, nativeDirectorySharedProfiles=false, reviewedImportEnrollment=false, nativeDirectoryBindingRefresh=false,nativeDirectoryBindingRefreshRecovery=false }: { mapToken: string | null; permissions: Permission[]; feedbackEnabled?: boolean; invitationAccess?: InvitationAdministrationAccess; canManagePortalSetup?: boolean; nativeDirectoryProfileWrites?: boolean; nativeDirectorySharedProfiles?: boolean; reviewedImportEnrollment?: boolean; nativeDirectoryBindingRefresh?: boolean;nativeDirectoryBindingRefreshRecovery?:boolean }) {
   const [, setLocationRevision] = useState(0);
   useEffect(() => {
     const sync = () => setLocationRevision(value => value + 1);
@@ -162,7 +162,7 @@ export function ClientHubWorkspaceRouter({ mapToken, permissions, feedbackEnable
     return () => removeEventListener("popstate", sync);
   }, []);
   const route = readBusinessProjectRoute(location.pathname);
-  if (!route) return <ClientHub mapToken={mapToken} permissions={permissions} feedbackEnabled={feedbackEnabled} invitationAccess={invitationAccess} canManagePortalSetup={canManagePortalSetup} nativeDirectoryProfileWrites={nativeDirectoryProfileWrites} reviewedImportEnrollment={reviewedImportEnrollment} nativeDirectoryBindingRefresh={nativeDirectoryBindingRefresh} nativeDirectoryBindingRefreshRecovery={nativeDirectoryBindingRefreshRecovery} />;
+  if (!route) return <ClientHub mapToken={mapToken} permissions={permissions} feedbackEnabled={feedbackEnabled} invitationAccess={invitationAccess} canManagePortalSetup={canManagePortalSetup} nativeDirectoryProfileWrites={nativeDirectoryProfileWrites} nativeDirectorySharedProfiles={nativeDirectorySharedProfiles} reviewedImportEnrollment={reviewedImportEnrollment} nativeDirectoryBindingRefresh={nativeDirectoryBindingRefresh} nativeDirectoryBindingRefreshRecovery={nativeDirectoryBindingRefreshRecovery} />;
   if ("invalid" in route) return <Card><EmptyState title="Project link unavailable" detail="This project link is invalid." /><a href={clientDirectoryReturnPath()}>Back to Client Hub</a></Card>;
   if (!permissions.includes("team.view")) return <Card><EmptyState title="Project unavailable" detail="Client-directory access is required." /><a href={clientDirectoryReturnPath()}>Back to Client Hub</a></Card>;
   return <ProjectWorkspace key={JSON.stringify(route)} route={route} feedbackEnabled={feedbackEnabled} />;

@@ -1,5 +1,6 @@
 import { HTTPException } from "hono/http-exception";
 import type { Env, StaffPrincipal } from "./types";
+import { blockOpsSharedProfileWorkspace,assertOpsSharedProfileFences,releaseOpsSharedProfileFences } from './shared-profile-delivery-authority-fences';
 
 const OPAQUE_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
 
@@ -296,7 +297,8 @@ export async function transferClientWorkspaceManager(
         ? [workspaceId, input.previousManagerIdentityId]
         : []),
     ));
-  await database.batch(statements);
+  const editFences=await blockOpsSharedProfileWorkspace(env,workspaceId,JSON.stringify(['manager-transfer',principal.id,input]));
+  await database.batch([...assertOpsSharedProfileFences(env,editFences),...statements,...releaseOpsSharedProfileFences(env,editFences)]);
   const targetEffective = await hasEffectiveWorkspaceCapability(
     database, workspaceId, input.targetIdentityId, "workspace.view",
   ) && await hasEffectiveWorkspaceCapability(

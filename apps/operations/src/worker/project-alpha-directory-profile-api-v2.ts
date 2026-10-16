@@ -60,6 +60,12 @@ export type ProjectAlphaDirectoryProfileUpdateCommand = Readonly<{
   expectedAuthorizationGeneration: string;
   profile: ProjectAlphaDirectoryProfile;
 }>;
+export type ProjectAlphaDirectoryClientContactProfileUpdateCommand = Omit<ProjectAlphaDirectoryProfileUpdateCommand, "profile">
+  & Readonly<{ profile: ProjectAlphaDirectoryClientUpdateProfile }>;
+export const PROJECT_ALPHA_DIRECTORY_CLIENT_CONTACT_PROFILE_ENDPOINT: Readonly<ProjectAlphaApiV2Endpoint> = Object.freeze({
+  method: "POST", path: "/api/v2/directory/clients/{publicId}/contact-profile/commands", requiredCapability: "directory.clients.write",
+  requiresSourceInstanceId: true, requiresApplicationId: true, requiresHistoryEpoch: true, requiresExpectedRevision: true,
+});
 export type ProjectAlphaDirectoryClientCreateCommand = Readonly<{
   commandId: string;
   externalId: string;
@@ -194,14 +200,18 @@ function trusted(response: Response): boolean {
     && !response.headers.has("Set-Cookie") && !response.headers.has("Location")
     && /^application\/json(?:\s*;|$)/i.test(response.headers.get("Content-Type") ?? "");
 }
-async function boundedJson(response: Response): Promise<unknown> {
+async function boundedJson(response: Response, timeoutMs?: number): Promise<unknown> {
   const declared = response.headers.get("Content-Length");
   if (declared !== null && (!/^\d+$/.test(declared) || !Number.isSafeInteger(Number(declared)) || Number(declared) > RESPONSE_LIMIT)) { await response.body?.cancel(); throw new Error("response_limit"); }
   const reader = response.body?.getReader(); if (!reader) throw new Error("invalid_contract");
+  let timedOut = false;
+  const timer = timeoutMs === undefined ? undefined : setTimeout(() => {
+    timedOut = true; void reader.cancel().catch(() => undefined);
+  }, timeoutMs);
   const chunks: Uint8Array[] = []; let size = 0;
   try {
-    for (;;) { let part: ReadableStreamReadResult<Uint8Array>; try { part = await reader.read(); } catch { throw new Error("transport"); } if (part.done) break; size += part.value.byteLength; if (size > RESPONSE_LIMIT) { await reader.cancel(); throw new Error("response_limit"); } chunks.push(part.value); }
-  } finally { reader.releaseLock(); }
+    for (;;) { let part: ReadableStreamReadResult<Uint8Array>; try { part = await reader.read(); } catch { throw new Error(timedOut ? "timeout" : "transport"); } if (timedOut) throw new Error("timeout"); if (part.done) break; size += part.value.byteLength; if (size > RESPONSE_LIMIT) { await reader.cancel(); throw new Error("response_limit"); } chunks.push(part.value); }
+  } finally { if (timer !== undefined) clearTimeout(timer); reader.releaseLock(); }
   const bytes = new Uint8Array(size); let offset = 0; for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
   try { return parseDuplicateFreeJson(new TextDecoder("utf-8", { fatal: true }).decode(bytes)); } catch { throw new Error("invalid_contract"); }
 }
@@ -279,7 +289,7 @@ async function post(connection: ProjectAlphaApiV2Connection, path: string, body:
   } catch { return { status: "uncertain", reason: controller.signal.aborted ? "timeout" : "transport" }; }
   finally { clearTimeout(timer); }
 }
-type Evidence = Readonly<{ commandJson: string; responseJson: string; destinationOrigin: string }>;
+type Evidence = Readonly<{ commandJson: string; responseJson: string; destinationOrigin: string; identitySafeContactProfile?: true }>;
 const acknowledgements = new WeakMap<object, Evidence>();
 export function validatedProjectAlphaDirectoryProfileAcknowledgement<T extends ProjectAlphaDirectoryProfileSuccess | ProjectAlphaDirectoryCreateSuccess>(outcome: unknown): Readonly<{ response: T; command: ProjectAlphaDirectoryProfileUpdateCommand | ProjectAlphaDirectoryCreateCommand; destinationOrigin: string }> | null {
   if (!outcome || typeof outcome !== "object") return null;
@@ -287,21 +297,61 @@ export function validatedProjectAlphaDirectoryProfileAcknowledgement<T extends P
   return evidence ? { response: JSON.parse(evidence.responseJson) as T, command: JSON.parse(evidence.commandJson), destinationOrigin: evidence.destinationOrigin } : null;
 }
 
+/** A generic/legacy profile acknowledgement is never neutral-path evidence. */
+export function validatedProjectAlphaDirectoryClientContactProfileAcknowledgement(outcome: unknown) {
+  if (!outcome || typeof outcome !== "object" || acknowledgements.get(outcome)?.identitySafeContactProfile !== true) return null;
+  return validatedProjectAlphaDirectoryProfileAcknowledgement<ProjectAlphaDirectoryProfileSuccess>(outcome);
+}
+
 export function isProjectAlphaDirectoryProfileUpdateCommand(kind: ProjectAlphaDirectoryProfileKind, value: unknown): value is ProjectAlphaDirectoryProfileUpdateCommand { return updateCommand(kind, value); }
 export function isProjectAlphaDirectoryCreateCommand(kind: ProjectAlphaDirectoryProfileKind, value: unknown): value is ProjectAlphaDirectoryCreateCommand { return createCommand(kind, value); }
 
 export async function sendProjectAlphaDirectoryProfileUpdate(connectionInput: ProjectAlphaApiV2Connection, kind: ProjectAlphaDirectoryProfileKind, publicIdValue: string, inputCommand: ProjectAlphaDirectoryProfileUpdateCommand, send: typeof fetch = fetch): Promise<ProjectAlphaDirectoryProfileOutcome> {
+  return sendDirectoryProfileUpdateToEndpoint(connectionInput, kind, publicIdValue, inputCommand, endpoint(kind, "update"), false, send);
+}
+
+async function sendDirectoryProfileUpdateToEndpoint(connectionInput: ProjectAlphaApiV2Connection, kind: ProjectAlphaDirectoryProfileKind,
+  publicIdValue: string, inputCommand: ProjectAlphaDirectoryProfileUpdateCommand, required: Readonly<ProjectAlphaApiV2Endpoint>,
+  identitySafeContactProfile: boolean, send: typeof fetch): Promise<ProjectAlphaDirectoryProfileOutcome> {
   try {
     const connection = normalized(connectionInput);
     if ((kind !== "client" && kind !== "organization") || !publicId(publicIdValue) || !updateCommand(kind, inputCommand)) return { status: "rejected", reason: "invalid_command" };
     const body = requestBody(inputCommand); if (body === null) return { status: "rejected", reason: "request_limit" };
     if (typeof connection.expectedHistoryEpoch !== "string" || !uuid(connection.expectedHistoryEpoch)) return { status: "blocked", reason: "preflight", preflight: { status: "misconfigured", reason: "configuration" } };
-    const required = endpoint(kind, "update"); const preflight = await probeProjectAlphaApiV2(connection, [], send, [required]); if (preflight.status !== "verified") return preflightFailure(preflight);
+    const preflight = await probeProjectAlphaApiV2(connection, [], send, [required]); if (preflight.status !== "verified") return preflightFailure(preflight);
     const posted = await post(connection, required.path.replace("{publicId}", publicIdValue), body, 200, send); if (!(posted instanceof Response)) return posted;
     const info = diagnostic(posted);
-    try { const parsed = await boundedJson(posted); if (!profileSuccess(parsed, kind, publicIdValue, inputCommand, connection, info.requestId)) return { status: "uncertain", reason: "invalid_contract", ...info }; const outcome = { status: "acknowledged" as const, httpStatus: 200 as const, response: parsed }; acknowledgements.set(outcome, { commandJson: body, responseJson: JSON.stringify(parsed), destinationOrigin: new URL(connection.baseUrl).origin }); return outcome; }
-    catch (error) { return { status: "uncertain", reason: error instanceof Error && error.message === "response_limit" ? "response_limit" : error instanceof Error && error.message === "transport" ? "transport" : "invalid_contract", ...info }; }
+    try { const parsed = await boundedJson(posted, identitySafeContactProfile ? TIMEOUT_MS : undefined); if (!profileSuccess(parsed, kind, publicIdValue, inputCommand, connection, info.requestId)) return { status: "uncertain", reason: "invalid_contract", ...info }; const outcome = { status: "acknowledged" as const, httpStatus: 200 as const, response: parsed }; acknowledgements.set(outcome, { commandJson: body, responseJson: JSON.stringify(parsed), destinationOrigin: new URL(connection.baseUrl).origin, ...(identitySafeContactProfile ? { identitySafeContactProfile: true as const } : {}) }); return outcome; }
+    catch (error) { return { status: "uncertain", reason: error instanceof Error && error.message === "response_limit" ? "response_limit" : error instanceof Error && error.message === "transport" ? "transport" : error instanceof Error && error.message === "timeout" ? "timeout" : "invalid_contract", ...info }; }
   } catch { return { status: "rejected", reason: "invalid_command" }; }
+}
+
+/** Neutral writes require the exact new endpoint. Missing support never falls
+ * back to the legacy route, even for a name/phone-only shared profile change. */
+export function sendProjectAlphaDirectoryClientContactProfileUpdate(connection: ProjectAlphaApiV2Connection, publicIdValue: string,
+  command: ProjectAlphaDirectoryClientContactProfileUpdateCommand, send: typeof fetch = fetch): Promise<ProjectAlphaDirectoryProfileOutcome> {
+  return sendDirectoryProfileUpdateToEndpoint(connection, "client", publicIdValue, command,
+    PROJECT_ALPHA_DIRECTORY_CLIENT_CONTACT_PROFILE_ENDPOINT, true, send);
+}
+
+export async function sendConfiguredProjectAlphaDirectoryClientContactProfileUpdate(env: ProjectAlphaApiV2ConnectionEnvironment,
+  sourceId: string, publicIdValue: string, command: ProjectAlphaDirectoryClientContactProfileUpdateCommand, send: typeof fetch = fetch
+): Promise<ProjectAlphaDirectoryProfileOutcome | Readonly<{ status: "disabled"; sourceId: string }>> {
+  const configured = await withEnabledConfiguredProjectAlphaApiV2Connection(env, sourceId,
+    connection => sendProjectAlphaDirectoryClientContactProfileUpdate(connection, publicIdValue, command, send));
+  return configured.status === "enabled" ? configured.value : configured.status === "disabled" ? configured
+    : { status: "blocked", reason: "preflight", preflight: { status: "misconfigured", reason: "configuration" } };
+}
+
+/** Read-only capability readiness, never an edit grant or PA binding proof. */
+export async function probeConfiguredProjectAlphaDirectoryClientContactProfile(env: ProjectAlphaApiV2ConnectionEnvironment,
+  sourceId: string, send: typeof fetch = fetch): Promise<ProjectAlphaApiV2Probe | Readonly<{ status: "disabled"; sourceId: string }>> {
+  const configured = await withEnabledConfiguredProjectAlphaApiV2Connection(env, sourceId, connection => {
+    if (!uuid(connection.expectedHistoryEpoch)) return { status: "misconfigured" as const, reason: "configuration" as const };
+    return probeProjectAlphaApiV2(normalized(connection), [], send, [PROJECT_ALPHA_DIRECTORY_CLIENT_CONTACT_PROFILE_ENDPOINT]);
+  });
+  return configured.status === "enabled" ? configured.value : configured.status === "disabled" ? configured
+    : { status: "misconfigured", reason: "configuration" };
 }
 export async function sendConfiguredProjectAlphaDirectoryProfileUpdate(env: ProjectAlphaApiV2ConnectionEnvironment, sourceId: string, kind: ProjectAlphaDirectoryProfileKind, publicIdValue: string, command: ProjectAlphaDirectoryProfileUpdateCommand, send: typeof fetch = fetch): Promise<ProjectAlphaDirectoryProfileOutcome | Readonly<{ status: "disabled"; sourceId: string }>> {
   const configured = await withEnabledConfiguredProjectAlphaApiV2Connection(env, sourceId, connection => sendProjectAlphaDirectoryProfileUpdate(connection, kind, publicIdValue, command, send));

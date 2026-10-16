@@ -31,6 +31,15 @@ export type NativeDirectoryWriterActor = Readonly<{
   staffId: string; accessSubject: string; admissionVersion: number; selectedGrantId: string;
   loginEmail: string; profileVersion: number; selectedIdentityGrantId: string;
 }>;
+/** An explicit portal actor is never converted into a staff admission. */
+export type NativeDirectoryPortalWriterActor = Readonly<{
+  kind: "portal"; actorId: string; issuer: string; subject: string; grantId: string; grantRevision: number;
+  workspaceId: string; sourceId: string; groupId: string; groupVersion: number; sharedMutationId: string;
+  authorityRevision: number; contextVersion: string; verifiedUntil: string;
+}>;
+type WriterActor = NativeDirectoryWriterActor | NativeDirectoryPortalWriterActor;
+type PortalUpdate<T> = T extends NativeDirectoryUpdateWrite ? Omit<T, "actor"> & Readonly<{ actor: NativeDirectoryPortalWriterActor }> : never;
+export type NativeDirectoryPortalUpdateWrite = PortalUpdate<NativeDirectoryUpdateWrite>;
 type CommonWrite = Readonly<{
   mutationId: string; recordId: string; actor: NativeDirectoryWriterActor;
   destinations: readonly NativeDirectoryDestinationAuthority[];
@@ -71,9 +80,10 @@ export const STAGING_EMPTY_ENROLLMENT_FIXTURE_ADMISSION_ID = `${STAGING_EMPTY_EN
 
 type NormalizedWrite = Readonly<{
   operation: "create" | "update"; mutationId: string; recordId: string; kind: NativeDirectoryProfileKind;
-  expectedLocalVersion: number; actor: NativeDirectoryWriterActor; profile: Record<string, string>;
+  expectedLocalVersion: number; actor: WriterActor; profile: Record<string, string>;
   scopes: readonly NativeDirectoryScope[]; destinations: readonly NativeDirectoryDestinationAuthority[];
   createAdmissionId: string | null; relationship: NativeDirectoryClientRelationship | null;
+  sharedContactProfile?: Readonly<{ groupId: string; mutationId: string }>;
 }>;
 type DirectoryWriteD1 = Pick<D1Database, "prepare" | "batch">;
 type DestinationIdentity = Omit<NativeDirectoryDestinationAuthority, "expectedAuthorizationGeneration">;
@@ -86,6 +96,31 @@ function plain(value: unknown): value is Record<string, unknown> {
 function exact(value: Record<string, unknown>, fields: readonly string[]): boolean {
   try { return Object.keys(value).length === fields.length && fields.every(field => Object.hasOwn(value, field)); }
   catch { return false; }
+}
+function portalActor(actor: WriterActor): actor is NativeDirectoryPortalWriterActor { return "kind" in actor && actor.kind === "portal"; }
+function writerActorId(actor: WriterActor): string { return portalActor(actor) ? actor.actorId : actor.staffId; }
+function writerSubject(actor: WriterActor): string { return portalActor(actor) ? actor.subject : actor.accessSubject; }
+function identityGrantId(actor: WriterActor): string { return portalActor(actor) ? actor.grantId : actor.selectedIdentityGrantId; }
+function validWriterActor(value: unknown, allowPortal: boolean): value is WriterActor {
+  if (!plain(value)) return false;
+  if (value.kind === "portal") {
+    const fields = ["kind", "actorId", "issuer", "subject", "grantId", "grantRevision", "workspaceId", "sourceId", "groupId",
+      "groupVersion", "sharedMutationId", "authorityRevision", "contextVersion", "verifiedUntil"];
+    return allowPortal && exact(value, fields) && typeof value.grantId === "string" && UUID.test(value.grantId)
+      && value.actorId === `portal:${value.grantId}` && boundedText(value.issuer, 512, true) && boundedText(value.subject, 512, true)
+      && boundedText(value.workspaceId, 512, true) && typeof value.sourceId === "string" && SOURCE_ID.test(value.sourceId)
+      && typeof value.groupId === "string" && UUID.test(value.groupId) && typeof value.sharedMutationId === "string" && UUID.test(value.sharedMutationId)
+      && [value.grantRevision, value.groupVersion, value.authorityRevision].every(v => typeof v === "number" && Number.isSafeInteger(v) && v >= 1)
+      && typeof value.contextVersion === "string" && /^[a-f0-9]{64}$/.test(value.contextVersion)
+      && typeof value.verifiedUntil === "string" && Number.isFinite(Date.parse(value.verifiedUntil))
+      && Date.parse(value.verifiedUntil) > Date.now() && Date.parse(value.verifiedUntil) <= Date.now() + 60_000;
+  }
+  return exact(value, ["staffId", "accessSubject", "admissionVersion", "selectedGrantId", "loginEmail", "profileVersion", "selectedIdentityGrantId"])
+    && boundedText(value.staffId, 191, true) && boundedText(value.accessSubject, 191, true)
+    && boundedText(value.selectedGrantId, 191, true) && typeof value.admissionVersion === "number" && Number.isSafeInteger(value.admissionVersion) && value.admissionVersion >= 1
+    && boundedText(value.loginEmail, 254, true) && value.loginEmail === value.loginEmail.trim().toLowerCase()
+    && typeof value.profileVersion === "number" && Number.isSafeInteger(value.profileVersion) && value.profileVersion >= 1
+    && boundedText(value.selectedIdentityGrantId, 191, true);
 }
 function boundedText(value: unknown, maximum: number, nonempty = false): value is string {
   if (typeof value !== "string" || (nonempty && value.length === 0) || Array.from(value).length > maximum || /\p{C}/u.test(value)) return false;
@@ -127,7 +162,7 @@ function destination(value: unknown, recordId: string, operation: "create" | "up
     && canonicalOrigin(value.origin) && externalId(value.externalCanonicalId)
     && (operation === "update" || value.externalCanonicalId === recordId) && revision(value.expectedAuthorizationGeneration);
 }
-function normalize(input: NativeDirectoryProfileWrite, allowEmptyDestinations = false): NormalizedWrite | null {
+function normalize(input: NativeDirectoryProfileWrite | NativeDirectoryPortalUpdateWrite, allowEmptyDestinations = false, allowPortal = false): NormalizedWrite | null {
   const normalizedProfile = plain(input.profile) ? Object.fromEntries(Object.entries(input.profile).map(([field, value]) => {
     const normalized = typeof value === "string" ? value.normalize("NFC").trim() : value;
     return [field, (field === "email" || field === "generalEmail") && typeof normalized === "string" ? normalized.toLowerCase() : normalized];
@@ -136,11 +171,7 @@ function normalize(input: NativeDirectoryProfileWrite, allowEmptyDestinations = 
     || (input.operation !== "create" && input.operation !== "update") || !Number.isSafeInteger(input.expectedLocalVersion)
     || input.expectedLocalVersion < 0 || (input.operation === "create") !== (input.expectedLocalVersion === 0)
     || (input.operation === "create" && !boundedText(input.createAdmissionId, 191, true))
-    || !plain(input.actor) || !exact(input.actor, ["staffId", "accessSubject", "admissionVersion", "selectedGrantId", "loginEmail", "profileVersion", "selectedIdentityGrantId"])
-    || !boundedText(input.actor.staffId, 191, true) || !boundedText(input.actor.accessSubject, 191, true)
-    || !boundedText(input.actor.selectedGrantId, 191, true) || !Number.isSafeInteger(input.actor.admissionVersion) || input.actor.admissionVersion < 1
-    || !boundedText(input.actor.loginEmail, 254, true) || input.actor.loginEmail !== input.actor.loginEmail.trim().toLowerCase()
-    || !Number.isSafeInteger(input.actor.profileVersion) || input.actor.profileVersion < 1 || !boundedText(input.actor.selectedIdentityGrantId, 191, true)
+    || !validWriterActor(input.actor, allowPortal) || (portalActor(input.actor) && input.operation !== "update")
     || (input.kind === "client" && (!externalId(input.recordId) || !plain(input.relationship)
       || !exact(input.relationship, ["organizationRecordId", "expectedRelationshipVersion"])
       || (input.relationship.organizationRecordId !== null && !externalId(input.relationship.organizationRecordId))
@@ -185,7 +216,28 @@ function applies(grant: GrantRow, write: NormalizedWrite, scopes: readonly Nativ
     || (grant.scope_kind === "business_area" && scopes.some(scope => scope.businessAreaId === grant.business_area_id))
     || (grant.scope_kind === "division" && scopes.some(scope => scope.divisionId === grant.division_id));
 }
-async function authority(db: DirectoryWriteD1, write: NormalizedWrite, permission = "directory.profile.edit", grantId = write.actor.selectedGrantId): Promise<boolean> {
+async function portalWriteAuthority(db: DirectoryWriteD1, write: NormalizedWrite, actor: NativeDirectoryPortalWriterActor): Promise<boolean> {
+  if (write.operation !== "update" || !validWriterActor(actor, true)) return false;
+  const row = await db.prepare(`SELECT 1 ok FROM shared_profile_portal_grants grant_row
+    JOIN shared_profile_portal_authority_heads head ON head.workspace_id=grant_row.workspace_id AND head.source_id=grant_row.source_id
+    JOIN native_directory_shared_profiles profile ON profile.id=grant_row.group_id
+    JOIN native_directory_shared_profile_members member ON member.group_id=profile.id AND member.record_id=?
+    JOIN operations_directory_records record ON record.record_id=member.record_id AND record.record_kind=profile.kind
+    JOIN project_alpha_active_directory_mappings mapping ON mapping.record_id=grant_row.record_id AND mapping.source_id=grant_row.source_id
+    WHERE grant_row.id=? AND grant_row.state='active' AND grant_row.revision=? AND grant_row.issuer=? AND grant_row.subject=?
+      AND grant_row.workspace_id=? AND grant_row.source_id=? AND grant_row.group_id=? AND profile.version=? AND profile.kind=?
+      AND record.current_version=? AND json(profile.membership_json)=json(grant_row.group_membership_json)
+      AND mapping.project_alpha_public_id=grant_row.target_public_id AND mapping.resource_type=grant_row.target_type
+      AND mapping.source_instance_id=grant_row.source_instance_id AND mapping.application_id=grant_row.application_id
+      AND mapping.history_epoch_id=grant_row.history_epoch_id AND head.state='active' AND head.revision=?`)
+    .bind(write.recordId, actor.grantId, actor.grantRevision, actor.issuer, actor.subject, actor.workspaceId, actor.sourceId,
+      actor.groupId, actor.groupVersion, write.kind, write.expectedLocalVersion, actor.authorityRevision).first();
+  return !!row;
+}
+async function authority(db: DirectoryWriteD1, write: NormalizedWrite, permission = "directory.profile.edit", selectedGrant?: string): Promise<boolean> {
+  if (portalActor(write.actor)) return ["directory.profile.edit", "directory.identity.link"].includes(permission)
+    && await portalWriteAuthority(db, write, write.actor);
+  const grantId = selectedGrant ?? write.actor.selectedGrantId;
   const selected = await db.prepare(`SELECT grant.id,grant.effect,grant.scope_kind,grant.business_area_id,grant.division_id,grant.resource_id
     FROM native_directory_grants grant JOIN native_staff_admissions admission ON admission.staff_id=grant.staff_id
     JOIN staff_users actor ON actor.id=grant.staff_id JOIN native_staff_profiles profile ON profile.staff_id=grant.staff_id
@@ -207,7 +259,8 @@ function auditCommand(write: NormalizedWrite): string {
   return JSON.stringify({ operation: write.operation, mutationId: write.mutationId, resourceType: write.kind, recordId: write.recordId,
     expectedLocalVersion: write.expectedLocalVersion, actor: write.actor, fields: write.profile,
     scopes: write.operation === "create" ? write.scopes : null, destinations: write.destinations,
-    createAdmissionId: write.createAdmissionId, relationship: write.kind === "client" ? write.relationship : null });
+    createAdmissionId: write.createAdmissionId, relationship: write.kind === "client" ? write.relationship : null,
+    ...(write.sharedContactProfile ? { sharedContactProfile: write.sharedContactProfile } : {}) });
 }
 type RemoteState = Readonly<{ externalId: string; projectAlphaPublicId: string; revision: string;
   authorizationGeneration: string; mappingKind: "legacy" | "acquired" }>;
@@ -651,11 +704,22 @@ export async function readNativeDirectoryDurableRemoteHead(db: DirectoryWriteD1,
  * legacy-mapping, or acquired-mapping evidence. Relationship fields remain
  * transport-only and never enter the canonical profile revision.
  */
-async function planNativeDirectoryProfileWriteInternal(db: DirectoryWriteD1, input: NativeDirectoryProfileWrite,
+async function planNativeDirectoryProfileWriteInternal(db: DirectoryWriteD1, input: NativeDirectoryProfileWrite | NativeDirectoryPortalUpdateWrite,
   allowEmptyDestinations = false, stagedOnboardingDecisionId: string | null = null,
   stagedOrganization: StagedOrganization | null = null,
-  relationshipRecoveryEnabled = false): Promise<NativeDirectoryProfileWritePlanningResult> {
-  const write = normalize(input, allowEmptyDestinations); if (!write) return { status: "rejected", reason: "invalid_write" };
+  relationshipRecoveryEnabled = false,
+  sharedContext?: Readonly<{ groupId: string; mutationId: string; identitySafeContactProfile: boolean; allowPortal: boolean }>): Promise<NativeDirectoryProfileWritePlanningResult> {
+  const normalized = normalize(input, allowEmptyDestinations, sharedContext?.allowPortal === true);
+  if (!normalized) return { status: "rejected", reason: "invalid_write" };
+  const write: NormalizedWrite = sharedContext?.identitySafeContactProfile && normalized.kind === "client"
+    ? { ...normalized, sharedContactProfile: { groupId: sharedContext.groupId, mutationId: sharedContext.mutationId } } : normalized;
+  const currentPortalActor = portalActor(write.actor) ? write.actor : null;
+  const staffActor = portalActor(write.actor) ? null : write.actor, isPortal = currentPortalActor !== null;
+  if (currentPortalActor && (write.operation !== "update" || !sharedContext?.allowPortal
+    || sharedContext.groupId !== currentPortalActor.groupId || sharedContext.mutationId !== currentPortalActor.sharedMutationId
+    || (write.kind === "client" && !sharedContext.identitySafeContactProfile))) return { status: "rejected", reason: "invalid_portal_write" };
+  const actorId = writerActorId(write.actor), actorSubject = writerSubject(write.actor);
+  const fenceTable = isPortal ? "operations_directory_portal_write_fences" : "operations_directory_write_fences";
   const auditJson = auditCommand(write);
   const replay = await db.prepare(`SELECT audit.command_json,audit.actor_id,audit.original_verified_access_subject,revision.record_id,
       revision.version,record.record_kind FROM operations_directory_audit audit
@@ -663,11 +727,11 @@ async function planNativeDirectoryProfileWriteInternal(db: DirectoryWriteD1, inp
     JOIN operations_directory_records record ON record.record_id=revision.record_id WHERE audit.mutation_id=?`).bind(write.mutationId)
     .first<Record<string, unknown>>();
   if (replay) {
-    if (replay.command_json !== auditJson || replay.actor_id !== write.actor.staffId || replay.original_verified_access_subject !== write.actor.accessSubject
+    if (replay.command_json !== auditJson || replay.actor_id !== actorId || replay.original_verified_access_subject !== actorSubject
       || replay.record_id !== write.recordId || replay.record_kind !== write.kind || typeof replay.version !== "number")
       return { status: "conflict", reason: "idempotency_body_conflict" };
     if (stagedOnboardingDecisionId !== null && (!await authority(db, write)
-      || !await authority(db, write, "directory.identity.link", write.actor.selectedIdentityGrantId)))
+      || !await authority(db, write, "directory.identity.link", identityGrantId(write.actor))))
       return { status: "blocked", reason: "native_directory_authority" };
     const ids = await Promise.all(write.destinations.map(value => commandId(write.mutationId, value)));
     return { status: "written", replayed: true, mutationId: write.mutationId, recordId: write.recordId, kind: write.kind, version: replay.version, commandIds: ids };
@@ -690,13 +754,13 @@ async function planNativeDirectoryProfileWriteInternal(db: DirectoryWriteD1, inp
             SELECT 1 FROM operations_directory_records organization
             WHERE organization.record_id=relationship.organization_record_id AND organization.record_kind='organization'
               AND organization.current_version=relationship.organization_record_version))))`).bind(write.createAdmissionId,
-      write.actor.staffId, write.actor.accessSubject, write.recordId, write.kind, scopesJson, profileJson,
+      actorId, actorSubject, write.recordId, write.kind, scopesJson, profileJson,
       JSON.stringify(write.destinations.map(identity)), write.kind, write.createAdmissionId, write.recordId,
       write.relationship?.organizationRecordId ?? null).first("ok"))
     return { status: "blocked", reason: "create_admission" };
   let relationshipState: RelationshipState | null = null;
   if (write.kind === "client") {
-    if (!await authority(db, write, "directory.identity.link", write.actor.selectedIdentityGrantId))
+    if (!await authority(db, write, "directory.identity.link", identityGrantId(write.actor)))
       return { status: "blocked", reason: "native_directory_identity_authority" };
     if (write.operation === "create") {
       const organizationRecordId = write.relationship!.organizationRecordId;
@@ -772,19 +836,19 @@ async function planNativeDirectoryProfileWriteInternal(db: DirectoryWriteD1, inp
   const nextVersion = write.expectedLocalVersion + 1, destinationsJson = JSON.stringify(enrolled);
   const commandIds = await Promise.all(write.destinations.map(value => commandId(write.mutationId, value)));
   const statements: D1PreparedStatement[] = [];
-  statements.push(db.prepare(`INSERT INTO operations_directory_write_fences
+  statements.push(db.prepare(`INSERT INTO ${fenceTable}
     (mutation_id,operation_kind,actor_id,bound_access_subject,actor_admission_version,permission,record_id,record_kind,expected_version,
       create_admission_id,selected_grant_id,scopes_json,profile_json,command_json,destinations_json,intent_writes)
-    VALUES(?,?,?,?,?,'directory.profile.edit',?,?,?,?,?,?,?,?,?,?)`).bind(write.mutationId, write.operation, write.actor.staffId,
-      write.actor.accessSubject, write.actor.admissionVersion, write.recordId, write.kind, write.expectedLocalVersion,
-      write.createAdmissionId, write.actor.selectedGrantId, scopesJson, profileJson, auditJson, destinationsJson, write.destinations.length));
+    VALUES(?,?,?,?,?,'directory.profile.edit',?,?,?,?,?,?,?,?,?,?)`).bind(write.mutationId, write.operation, actorId,
+      actorSubject, (staffActor?.admissionVersion ?? 0), write.recordId, write.kind, write.expectedLocalVersion,
+      write.createAdmissionId, (currentPortalActor?.grantId ?? staffActor!.selectedGrantId), scopesJson, profileJson, auditJson, destinationsJson, write.destinations.length));
   statements.push(write.operation === "create"
     ? db.prepare(`INSERT INTO operations_directory_records(record_id,record_kind,current_version) VALUES(?,?,1)`).bind(write.recordId, write.kind)
     : db.prepare(`UPDATE operations_directory_records SET current_version=?,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE record_id=? AND current_version=?`)
       .bind(nextVersion, write.recordId, write.expectedLocalVersion));
   statements.push(db.prepare(`INSERT INTO operations_directory_revisions(record_id,version,mutation_id,profile_json) VALUES(?,?,?,?)`).bind(write.recordId, nextVersion, write.mutationId, profileJson));
   statements.push(db.prepare(`INSERT INTO operations_directory_audit(audit_id,mutation_id,record_id,record_version,actor_type,actor_id,command_json,original_verified_access_subject)
-    VALUES(?,?,?,?, 'staff',?,?,?)`).bind(`${write.mutationId}:audit`, write.mutationId, write.recordId, nextVersion, write.actor.staffId, auditJson, write.actor.accessSubject));
+    VALUES(?,?,?,?,?,?,?,?)`).bind(`${write.mutationId}:audit`, write.mutationId, write.recordId, nextVersion, isPortal ? "system" : "staff", actorId, auditJson, actorSubject));
   const materializations: D1PreparedStatement[] = [];
   write.destinations.forEach((value, index) => {
     const intentId = `${write.mutationId}:intent:${index}`, state = remote.get(destinationKey(value));
@@ -807,7 +871,7 @@ async function planNativeDirectoryProfileWriteInternal(db: DirectoryWriteD1, inp
       materializations.push(db.prepare(`UPDATE operations_directory_intents SET state='ready' WHERE intent_id=? AND state='waiting'`).bind(intentId));
       materializations.push(db.prepare(`INSERT INTO operations_directory_materializations(intent_id,command_id,command_json,origin_snapshot_json,disposition_json,next_attempt_at,history_epoch_id)
         VALUES(?,?,?,?,?,?,?)`).bind(intentId, commandIds[index], JSON.stringify(materialized),
-        JSON.stringify({ actorId: write.actor.staffId, authorityRevision: String(nextVersion), actorSubject: write.actor.accessSubject }),
+        JSON.stringify({ actorId: actorId, authorityRevision: String(nextVersion), actorSubject: actorSubject }),
         JSON.stringify(disposition), Date.now(), value.historyEpoch));
     }
   });
@@ -819,8 +883,8 @@ async function planNativeDirectoryProfileWriteInternal(db: DirectoryWriteD1, inp
         previous_organization_record_version,organization_record_version,actor_staff_id,actor_access_subject,actor_email,
         actor_admission_version,actor_profile_version,verified_until) VALUES(?,?,0,NULL,?,1,NULL,?,?,?,?,?,?,?)`)
         .bind(relationshipState!.relationshipMutationId, write.recordId, relationshipState!.organizationRecordId,
-          relationshipState!.organizationRecordVersion, write.actor.staffId, write.actor.accessSubject, write.actor.loginEmail,
-          write.actor.admissionVersion, write.actor.profileVersion, verifiedUntil));
+          relationshipState!.organizationRecordVersion, actorId, actorSubject, staffActor!.loginEmail,
+          (staffActor?.admissionVersion ?? 0), staffActor!.profileVersion, verifiedUntil));
       statements.push(db.prepare(`INSERT INTO operations_directory_client_organizations(client_record_id,organization_record_id,relationship_version)
         VALUES(?,?,1)`).bind(write.recordId, relationshipState!.organizationRecordId));
       statements.push(db.prepare(`DELETE FROM operations_directory_relationship_write_fences WHERE mutation_id=?`).bind(relationshipState!.relationshipMutationId));
@@ -841,7 +905,7 @@ async function planNativeDirectoryProfileWriteInternal(db: DirectoryWriteD1, inp
     });
   }
   statements.push(...materializations);
-  statements.push(db.prepare(`DELETE FROM operations_directory_write_fences WHERE mutation_id=?`).bind(write.mutationId));
+  statements.push(db.prepare(`DELETE FROM ${fenceTable} WHERE mutation_id=?`).bind(write.mutationId));
   return { status: "planned", outcome: { status: "written", replayed: false,
     mutationId: write.mutationId, recordId: write.recordId, kind: write.kind, version: nextVersion, commandIds }, statements };
 }
@@ -862,6 +926,121 @@ async function executeNativeDirectoryProfileWrite(db: DirectoryWriteD1, input: N
 export async function writeNativeDirectoryProfile(db: D1Database, input: NativeDirectoryProfileWrite,
   relationshipRecoveryEnabled = false): Promise<NativeDirectoryProfileWriteOutcome> {
   return executeNativeDirectoryProfileWrite(db, input, false, null, null, relationshipRecoveryEnabled);
+}
+
+export type NativeDirectorySharedProfileWrite = Readonly<{
+  groupId: string; mutationId: string; expectedVersion: number; requestSha256: string;
+  profile: Record<string, string>; writes: readonly NativeDirectoryUpdateWrite[]; identitySafeContactProfile?: boolean;
+}>;
+export type NativeDirectorySharedProfileWriteOutcome =
+  | Readonly<{ status: "written"; replayed: boolean; version: number }>
+  | Readonly<{ status: "blocked" | "conflict" | "rejected"; reason: string }>;
+
+/** Both canonical member revisions and their PA intents commit with one shared
+ * revision. Existing source identity, relationship and staff authority guards
+ * remain in force for each private plan. No prepared statements escape. */
+export async function writeNativeDirectorySharedProfiles(db: D1Database, input: NativeDirectorySharedProfileWrite,
+  relationshipRecoveryEnabled = false): Promise<NativeDirectorySharedProfileWriteOutcome> {
+  const writes = [...input.writes].sort((a, b) => a.recordId.localeCompare(b.recordId));
+  if (writes.length < 1 || writes.length > 2 || new Set(writes.map(w => w.recordId)).size !== writes.length
+    || writes.some(w => w.kind !== writes[0]!.kind || w.operation !== "update"
+      || JSON.stringify(w.profile) !== JSON.stringify(input.profile)
+      || w.actor.staffId !== writes[0]!.actor.staffId || w.actor.accessSubject !== writes[0]!.actor.accessSubject)
+    || !/^[a-f0-9]{64}$/.test(input.requestSha256)) return { status: "rejected", reason: "shared_write_shape" };
+  const session = db.withSession("first-primary");
+  for (const write of writes) {
+    const checked = normalize(write);
+    if (!checked || !await authority(session, checked)
+      || (checked.kind === "client" && !await authority(session, checked, "directory.identity.link", identityGrantId(checked.actor))))
+      return { status: "blocked", reason: "shared_member_authority" };
+  }
+  const prior = await session.prepare(`SELECT request_sha256,expected_version,actor_id FROM native_directory_shared_profile_commands
+    WHERE mutation_id=? AND group_id=?`).bind(input.mutationId, input.groupId)
+    .first<{ request_sha256: string; expected_version: number; actor_id: string }>();
+  if (prior) return prior.request_sha256 === input.requestSha256 && prior.expected_version === input.expectedVersion
+    && prior.actor_id === writes[0]!.actor.staffId
+    ? { status: "written", replayed: true, version: prior.expected_version + 1 }
+    : { status: "conflict", reason: "idempotency_body_conflict" };
+  const group = await session.prepare("SELECT kind,version,membership_json,profile_json FROM native_directory_shared_profiles WHERE id=?")
+    .bind(input.groupId).first<{ kind: string; version: number; membership_json: string; profile_json: string }>();
+  if (!group || group.version !== input.expectedVersion || group.kind !== writes[0]!.kind
+    || group.membership_json !== JSON.stringify(writes.map(w => w.recordId)))
+    return { status: "conflict", reason: "shared_profile_changed" };
+  // PA's current profile command reconciles client login eligibility from the
+  // contact email. Preserve identity/access until PA advertises a neutral path.
+  if (group.kind === "client" && input.identitySafeContactProfile !== true && JSON.parse(group.profile_json).email !== input.profile.email)
+    return { status: "blocked", reason: "client_contact_email_change_requires_identity_safe_pa" };
+  const plans: NativeDirectoryProfileWritePlan[] = [];
+  for (const write of writes) {
+    const plan = await planNativeDirectoryProfileWriteInternal(session, write, false, null, null, relationshipRecoveryEnabled,
+      { groupId: input.groupId, mutationId: input.mutationId, identitySafeContactProfile: input.identitySafeContactProfile === true, allowPortal: false });
+    if (plan.status !== "planned") return plan.status === "written"
+      ? { status: "conflict", reason: "shared_member_replay_without_group" } : plan;
+    plans.push(plan);
+  }
+  const profileJson = JSON.stringify(input.profile), membersJson = JSON.stringify(writes.map(w => ({
+    recordId: w.recordId, version: w.expectedLocalVersion, mutationId: w.mutationId })));
+  try { await session.batch([
+    session.prepare(`INSERT INTO native_directory_shared_profile_commands
+      (mutation_id,group_id,expected_version,request_sha256,profile_json,members_json,actor_id,identity_safe_contact_profile) VALUES(?,?,?,?,?,?,?,?)`)
+      .bind(input.mutationId, input.groupId, input.expectedVersion, input.requestSha256, profileJson, membersJson, writes[0]!.actor.staffId,
+        input.identitySafeContactProfile === true ? 1 : 0),
+    session.prepare("UPDATE native_directory_shared_profiles SET version=version+1,profile_json=? WHERE id=? AND version=?")
+      .bind(profileJson, input.groupId, input.expectedVersion),
+    session.prepare("INSERT INTO native_directory_shared_profile_revisions(group_id,version,mutation_id,profile_json) VALUES(?,?,?,?)")
+      .bind(input.groupId, input.expectedVersion + 1, input.mutationId, profileJson),
+    ...plans.flatMap(p => [...p.statements]),
+  ]); } catch { return { status: "blocked", reason: "shared_authority_or_atomic_write" }; }
+  return { status: "written", replayed: false, version: input.expectedVersion + 1 };
+}
+
+/** Private portal composer. The verified portal fence and every member revision
+ * are committed in the same transaction; portal actors never acquire staff grants. */
+export async function writeNativeDirectorySharedPortalProfiles(db: D1Database, input: Readonly<{
+  groupId: string; mutationId: string; expectedVersion: number; requestSha256: string;
+  profile: Record<string, string>; writes: readonly NativeDirectoryPortalUpdateWrite[];
+  authorityFence: D1PreparedStatement;
+}>, relationshipRecoveryEnabled = false): Promise<NativeDirectorySharedProfileWriteOutcome> {
+  const writes = [...input.writes].sort((a,b) => a.recordId.localeCompare(b.recordId));
+  const first = writes[0];
+  if (!UUID.test(input.groupId) || !UUID.test(input.mutationId) || !first || writes.length > 2
+    || new Set(writes.map(w => w.recordId)).size !== writes.length || !/^[a-f0-9]{64}$/.test(input.requestSha256)
+    || writes.some(w => w.kind !== first.kind || JSON.stringify(w.profile) !== JSON.stringify(input.profile)
+      || JSON.stringify(w.actor) !== JSON.stringify(first.actor) || w.actor.groupId !== input.groupId
+      || w.actor.sharedMutationId !== input.mutationId || w.actor.groupVersion !== input.expectedVersion))
+    return {status:"rejected",reason:"shared_portal_write_shape"};
+  const session=db.withSession("first-primary");
+  const group=await session.prepare("SELECT kind,version,membership_json FROM native_directory_shared_profiles WHERE id=?")
+    .bind(input.groupId).first<{kind:string;version:number;membership_json:string}>();
+  if (!group || group.version!==input.expectedVersion || group.kind!==first.kind
+    || group.membership_json!==JSON.stringify(writes.map(w=>w.recordId)))
+    return {status:"conflict",reason:"shared_profile_changed"};
+  const plans: NativeDirectoryProfileWritePlan[]=[];
+  for(const write of writes){
+    const plan=await planNativeDirectoryProfileWriteInternal(session,write,false,null,null,relationshipRecoveryEnabled,
+      {groupId:input.groupId,mutationId:input.mutationId,identitySafeContactProfile:write.kind==="client",allowPortal:true});
+    if(plan.status!=="planned")return plan.status==="written"
+      ? {status:"conflict",reason:"shared_member_replay_without_group"}:plan;
+    plans.push(plan);
+  }
+  const profileJson=JSON.stringify(input.profile),membersJson=JSON.stringify(writes.map(w=>({recordId:w.recordId,version:w.expectedLocalVersion,mutationId:w.mutationId})));
+  try{await session.batch([
+    input.authorityFence,
+    session.prepare(`INSERT INTO native_directory_shared_profile_commands
+      (mutation_id,group_id,expected_version,request_sha256,profile_json,members_json,actor_kind,actor_id,identity_safe_contact_profile)
+      VALUES(?,?,?,?,?,?,'portal',?,?)`).bind(input.mutationId,input.groupId,input.expectedVersion,input.requestSha256,
+        profileJson,membersJson,first.actor.actorId,first.kind==="client"?1:0),
+    session.prepare("UPDATE native_directory_shared_profiles SET version=version+1,profile_json=? WHERE id=? AND version=?")
+      .bind(profileJson,input.groupId,input.expectedVersion),
+    session.prepare("INSERT INTO native_directory_shared_profile_revisions(group_id,version,mutation_id,profile_json) VALUES(?,?,?,?)")
+      .bind(input.groupId,input.expectedVersion+1,input.mutationId,profileJson),
+    ...plans.flatMap(p=>[...p.statements]),
+    session.prepare(`INSERT INTO shared_profile_portal_audit(operation_id,grant_id,workspace_id,action,actor_kind,actor_id,detail_json)
+      VALUES(?,?,?,'profile.updated','portal',?,?)`).bind(input.mutationId,first.actor.grantId,first.actor.workspaceId,
+        first.actor.actorId,JSON.stringify({issuer:first.actor.issuer,subject:first.actor.subject,groupId:input.groupId,
+          version:input.expectedVersion+1,requestSha256:input.requestSha256})),
+  ]);}catch{return{status:"blocked",reason:"shared_portal_authority_or_atomic_write"};}
+  return{status:"written",replayed:false,version:input.expectedVersion+1};
 }
 
 /**

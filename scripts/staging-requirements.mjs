@@ -1258,6 +1258,7 @@ export const STAGING_INVENTORY = Object.freeze({
       { name: "ltds-cloud-transfer-staging", binding: "CLOUD_TRANSFER_WORKFLOW", class_name: "CloudTransferWorkflow" },
     ],
     services: [
+      { binding: "SHARED_PROFILE_PORTAL", service: "ledgetop-ops-staging", entrypoint: "SharedProfilePortalIngress" },
       { binding: "CLIENT_PORTAL_SERVICE_METADATA_READER", service: "ledgetop-ops-staging", entrypoint: "ClientPortalServiceMetadataReader" },
       { binding: "CLIENT_PORTAL_NATIVE_FINANCIAL_READER", service: "ledgetop-ops-staging", entrypoint: "ClientPortalNativeFinancialReader" },
       { binding: "CLIENT_DELEGATED_SHARE_SIGNER", service: "ledgetop-ops-staging", entrypoint: "ClientDelegatedShareSigner" },
@@ -1306,6 +1307,7 @@ export const STAGING_INVENTORY = Object.freeze({
       { name: "ledgetop-ops-catalog-promotion-staging", binding: "OPS_CATALOG_PROMOTION_WORKFLOW", class_name: "ProjectAlphaCatalogPromotionWorkflow" },
     ],
     services: [
+      { binding: "SHARED_PROFILE_PORTAL_AUTHORITY", service: "ledgetop-clients-staging", entrypoint: "SharedProfilePortalAuthorityReader" },
       { binding: "VERIFIED_RECIPIENT_DELIVERY_AUTHORITY", service: "ledgetop-clients-staging", entrypoint: "VerifiedRecipientDeliveryAuthorityIngress" },
       { binding: "CLIENT_AUTHORITY_WORKSPACE_BINDING", service: "ledgetop-clients-staging", entrypoint: "ClientAuthorityWorkspaceBindingIngress" },
       { binding: "CLIENT_PORTAL_ACCESS_AUTHORITY", service: "ledgetop-clients-staging", entrypoint: "OpsPortalAccessAuthorityIngress" },

@@ -4,6 +4,7 @@ import { portalDenyPolicyManagementEnabled } from "./client-portal-deny-policies
 import type { ClientHubCollectionContext } from "./client-hub-collections";
 import { isBusinessProjectionSource } from "./client-hub-source";
 import type { Env, StaffPrincipal } from "./types";
+import { blockOpsSharedProfileRoot,assertOpsSharedProfileFences,releaseOpsSharedProfileFences } from './shared-profile-delivery-authority-fences';
 
 const IDEMPOTENCY = /^[A-Za-z0-9][A-Za-z0-9._:-]{15,127}$/;
 const REASON = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,79}$/;
@@ -115,8 +116,10 @@ export async function mutatePortalRootAccess(env: Env, actor: StaffPrincipal,
   // post-write verification could only detect an unauthorized mutation after
   // its audit and idempotency receipt had already become durable.
   await assertLiveContext();
+  const editFences=await blockOpsSharedProfileRoot(env,root,JSON.stringify(['root-access',actor.id,idempotencyKey,requestFingerprint]));
   try {
     await db.batch([
+      ...assertOpsSharedProfileFences(env,editFences),
       db.prepare(`UPDATE portal_v2_root_access_policy_lock SET version=version+1,operation_id=?,updated_at=datetime('now')
         WHERE id=1 AND version=?`).bind(operationId, lock),
       db.prepare(`INSERT INTO portal_v2_root_access_policies
@@ -144,6 +147,7 @@ export async function mutatePortalRootAccess(env: Env, actor: StaffPrincipal,
         SELECT ?,?,?,?,?,?,?,? WHERE EXISTS(SELECT 1 FROM portal_v2_root_access_policy_audit WHERE operation_id=?)`)
         .bind(actor.id, idempotencyKey, action, requestFingerprint, root.sourceId, root.rootType, root.rootPublicId,
           resultVersion, operationId),
+      ...releaseOpsSharedProfileFences(env,editFences),
     ]);
   } catch (error) {
     if (/UNIQUE|constraint/i.test(String(error)))

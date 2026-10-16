@@ -105,6 +105,7 @@ import { readEffectiveWorkspaceIdentityMutationGuard } from "./effective-workspa
 import { readEffectiveWorkspaceVisibilityMutationGuard } from "./effective-workspace-visibility-mutation-guard";
 import { readClientRequestReadiness } from "./request-readiness";
 import { createNativePortalWorkspaceRouter } from "./native-portal-resources";
+import { createBusinessProfileRouter } from './business-profile';
 import {createWorkspaceAddressContact,deleteWorkspaceAddressContact,listWorkspaceAddressContacts,readWorkspaceAddressContact,
   updateWorkspaceAddressContact,workspaceAddressBookAvailable} from './workspace-address-book';
 
@@ -513,6 +514,7 @@ export function createClientPortalRouter(
   // Native resources use the verified global principal and their own exact
   // workspace context. They must never manufacture a legacy account session.
   router.route("/v2/workspaces", createNativePortalWorkspaceRouter());
+  router.route("/v2/workspaces", createBusinessProfileRouter());
   router.route("/authenticated-deliveries",createAuthenticatedDeliveryResourceRouter());
 
   router.get("/session", async (c) => {

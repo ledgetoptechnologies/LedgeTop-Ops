@@ -1,6 +1,7 @@
 import { HTTPException } from "hono/http-exception";
 import { isAdministrator } from "./acl";
 import type { Env, StaffPrincipal } from "./types";
+import { blockOpsSharedProfileIdentity,assertOpsSharedProfileFences,releaseOpsSharedProfileFences } from './shared-profile-delivery-authority-fences';
 
 const OPAQUE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
 const IDEMPOTENCY = /^[A-Za-z0-9][A-Za-z0-9._:-]{15,127}$/;
@@ -419,9 +420,12 @@ export async function createPortalIdentityDenial(env: Env, principal: StaffPrinc
     if (!lock || !Number.isSafeInteger(lock.version))
       throw new HTTPException(503, { message: "Portal denial safety state is unavailable" });
     await protectLastEffectiveManager(db, input.identityId, normalized);
+    const {fences:editFences,latch:editLatch}=await blockOpsSharedProfileIdentity(env,input.identityId,normalized.workspaceId,JSON.stringify(['identity-denial',principal.id,idempotencyKey,fingerprint]));
+    const editAssertions=assertOpsSharedProfileFences(env,editFences,editLatch);
     const denialId = crypto.randomUUID();
     try {
       const results = await db.batch([
+        ...editAssertions,
         db.prepare(`UPDATE portal_v2_identity_denial_invariant_lock
           SET version=version+1,updated_at=datetime('now') WHERE id=1 AND version=?`).bind(lock.version),
         db.prepare(`INSERT INTO portal_v2_identity_denials
@@ -435,8 +439,9 @@ export async function createPortalIdentityDenial(env: Env, principal: StaffPrinc
           SELECT ?,?,'denial.create',?,?,? WHERE changes()=1`).bind(principal.id, idempotencyKey,
           fingerprint, denialId, JSON.stringify({ reasonCode: normalized.reasonCode,
             expiresAt: normalized.expiresAt })),
+        ...releaseOpsSharedProfileFences(env,editFences,editLatch),
       ]);
-      if (results[0]?.meta.changes === 1 && results[1]?.meta.changes === 1)
+      if (results[editAssertions.length]?.meta.changes === 1 && results[editAssertions.length+1]?.meta.changes === 1)
         return { denial: (await denialView(db, denialId))!, replayed: false };
       const raced = await replay(db, principal.id, idempotencyKey, "denial.create", fingerprint);
       if (raced) return { denial: raced, replayed: true };

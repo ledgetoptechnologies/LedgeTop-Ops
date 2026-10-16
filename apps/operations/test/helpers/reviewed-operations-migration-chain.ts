@@ -41,10 +41,17 @@ const initialClientMigrations = Object.freeze([
   "0095_trash_object_manifests.sql",
 ]);
 
-// A separately reviewed application successor is validated but never becomes
-// part of the frozen199 test/release inventory returned by this helper.
+// Separately reviewed application successors are byte-validated, but never
+// enter the frozen Operations199/Client149 inventories returned by this helper.
 const operationsSuccessors = Object.freeze({
   "0206_native_directory_existing_import.sql": "0af4b3a078eda8a701fdfc1e898e5dc539831537e0d2a461f6acee124ce6b7c2",
+  "0207_shared_directory_profiles.sql": "cdd4947b8bf5ab672184ed3e4f8f3fb0b4afbd0edd0707e1772569f66f4f3d49",
+  "0208_shared_profile_portal_authority.sql": "a00f580d85f8e857399a2520437836e3a1f09e7bddba1b4a6b27a6b66f3e9688",
+  "0209_shared_profile_portal_native_writes.sql": "635ee4f206e95ca584097159b1bd9a8489ea77cb900aa5c1106832d42b7e0f8f",
+});
+
+const clientSuccessors = Object.freeze({
+  "0232_shared_profile_edit_authority.sql": "3c2b3ddbdb920739c8f4ab8f437808749f5f83581b098518c5efd41c2e0b0073",
 });
 
 function sha256(value: string | Uint8Array): string {
@@ -80,7 +87,7 @@ function reviewedMigrationNames(directory: URL, application: "delivery" | "opera
     const physical = readdirSync(fileURLToPath(directory), { withFileTypes: true })
       .filter(entry => /\.sql$/i.test(entry.name));
     const physicalNames = physical.map(entry => entry.name).sort();
-    const successors = application === "operations" ? operationsSuccessors : {};
+    const successors = application === "operations" ? operationsSuccessors : clientSuccessors;
     const expectedNames = [...currentNames, ...Object.keys(successors)].sort();
     if (physical.some(entry => !/^\d{4}_.+\.sql$/.test(entry.name) || !entry.isFile() || entry.isSymbolicLink())
       || JSON.stringify(physicalNames) !== JSON.stringify(expectedNames)) {
@@ -114,7 +121,7 @@ function reviewedMigrationNames(directory: URL, application: "delivery" | "opera
     if (sha256(currentContents.join("\n")) !== currentSource.contentsSha256) {
       throw new Error(`reviewed-${application}-current-source-content-contract-mismatch`);
     }
-    const successors = application === "operations" ? operationsSuccessors : {};
+    const successors = application === "operations" ? operationsSuccessors : clientSuccessors;
     for (const [name, expectedHash] of Object.entries(successors)) {
       // Canonical Git SQL is LF; accept the same bytes in a CRLF checkout.
       const normalized = readFileSync(fileURLToPath(new URL(name, directory)), "utf8").replace(/\r\n/g, "\n");

@@ -1,5 +1,6 @@
 import type { PortalAuthorizationEnv as Env } from './workspace-v2';
 import type {Env as ClientEnv} from '../types';
+import { blockBusinessProfileWorkspace,businessProfileAuthorityBatch } from './business-profile-fences';
 import { invitationRecipientEmailHash } from "./access-enrollment-receipts";
 import type { VerifiedClientPrincipal } from "./types";
 import {
@@ -901,7 +902,8 @@ export async function changeWorkspacePeerAdministrator(env:AddressBookAccessEnv,
     (id,workspace_id,actor_identity_id,target_identity_id,action,target_version,details_json)
     VALUES(?,?,?,?,?,?,?)`).bind(auditId,workspaceId,actor.id,identityId,input.manager?'manager.promoted':'manager.demoted',nextVersion,
       JSON.stringify({authority:'client_peer_admin',membershipPreserved:true})));
-  try{await database.batch(statements);}catch{
+  const profileFence=await blockBusinessProfileWorkspace(env,workspaceId,JSON.stringify(['peer-admin',actor.id,idempotencyKey,hash]));
+  try{await businessProfileAuthorityBatch(database,[profileFence],statements);}catch{
     const raced=await replayPeerAdminCommand(database,workspaceId,actor.id,idempotencyKey,hash);if(raced)return raced;
     const current=await peerAdminTargetState(database,workspaceId,identityId,termsReady,principalsReady,identityDenialsEnabled);
     if(!current)return {outcome:'not_found'};if(current.source==='project_alpha')return {outcome:'managed_source'};
@@ -989,7 +991,8 @@ export async function suspendWorkspaceMember(env: Env, principal: VerifiedClient
   if(secondary){try{secondaryDelegation=await captureWorkspaceInvitationDelegation(env,{workspaceId,
     target:{scopeType:'workspace',publicId:workspaceId},identityId:actor.id,issuer:principal.issuer,
     subject:principal.subject,email:principal.email.trim().toLowerCase()},[],null);}catch{return 'denied';}}
-  await database.batch([
+  const profileFence=await blockBusinessProfileWorkspace(env,workspaceId,JSON.stringify(['membership-suspend',actor.id,identityId]));
+  await businessProfileAuthorityBatch(database,[profileFence],[
     ...(secondary?[secondaryFreshFence(database,secondary,principal,workspaceId,`secondary-suspend-${crypto.randomUUID()}`),
       secondaryDelegation!.fence(`secondary-suspend-delegation-${crypto.randomUUID()}`)]:[]),
     database.prepare(`UPDATE portal_v2_workspace_memberships AS target SET status='suspended',updated_at=datetime('now')

@@ -1,5 +1,6 @@
 import { createRemoteJWKSet, jwtVerify, type JWTVerifyGetKey } from "jose";
 import type { Env } from "./types";
+import { blockBusinessProfileWorkspace,businessProfileAuthorityBatch } from './client-portal/business-profile-fences';
 import { PRIMARY_PORTAL_PROJECTION_SOURCE, resolvePortalWorkspaceSource, type PortalProjectionSource, type PortalWorkspaceSource } from "./project-alpha-portal-source";
 import { assertPortalProjectionSourceProof, portalProjectionSourceFence, reservePrimaryPortalSigningKeys, PortalSourceAuthorityError, type PortalProjectionWriteProof, type PortalAuthorityDatabase } from "./project-alpha-portal-authority";
 
@@ -1278,8 +1279,10 @@ async function processDelivery(env: Env, delivery: PortalProjectionDelivery, pay
   if (duplicate) return duplicate;
   try {
     if (delivery.kind === "snapshot.page") return await stageSnapshotPage(env, delivery, payloadHash, source, db);
-    if (delivery.kind === "snapshot.activate") return await activateSnapshot(env, delivery, payloadHash, source, db);
-    return await applyEvent(env, delivery, payloadHash, source, db);
+    const profileFence=await blockBusinessProfileWorkspace(env,delivery.workspaceId,JSON.stringify(['projection',source.sourceId,delivery.deliveryId,payloadHash]));
+    const mutationDb:PortalAuthorityDatabase={prepare:sql=>db.prepare(sql),batch:<T>(statements:D1PreparedStatement[])=>businessProfileAuthorityBatch<T>(db,[profileFence],statements)};
+    if (delivery.kind === "snapshot.activate") return await activateSnapshot(env, delivery, payloadHash, source, mutationDb);
+    return await applyEvent(env, delivery, payloadHash, source, mutationDb);
   } catch (error) {
     // A losing idempotent writer may be using a session whose bookmark
     // predates the winning request. Start a fresh primary session before
