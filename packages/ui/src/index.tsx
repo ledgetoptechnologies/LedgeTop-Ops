@@ -2,6 +2,7 @@ import { useCallback, useEffect, useId, useRef, useState, type KeyboardEvent as 
 import type { ViewerSessionGrant, ViewerShellSessionGrant } from "@ltds/shared";
 import { CLOUDFLARE_ACCESS_LOGOUT_PATH } from "./access";
 export { CLOUDFLARE_ACCESS_LOGOUT_PATH } from "./access";
+export { AppDialogHost, requestChoice, requestText, type ChoiceRequest, type TextRequest } from "./app-dialogs";
 
 /** Generic Ledge Top mark, identical on every domain and product. */
 export const LT_MARK_SVG = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 40"><rect x="1" y="1" width="38" height="38" rx="9" fill="#151b22" stroke="#ee5007" stroke-width="2"/><text x="20" y="26" text-anchor="middle" font-family="Outfit,Inter,Segoe UI,Arial,sans-serif" font-weight="800" font-size="16" letter-spacing=".5" fill="#fff">LT</text></svg>';
@@ -86,7 +87,16 @@ export function Dialog({ open, onClose, title, description, children, footer, si
       opener.current?.focus();
     }
   }, [open]);
-  useEffect(() => () => { if (ref.current?.open) ref.current.close(); }, []);
+  // Unmounting while open (e.g. a dismissed AppDialogHost request) still returns
+  // focus to the opener, like a normal close.
+  useEffect(() => {
+    // Refs are detached before unmount cleanup runs, so keep the element here.
+    const dialog = ref.current;
+    return () => {
+      const target = opener.current;
+      if (dialog?.open) { dialog.close(); if (target?.isConnected) target.focus(); }
+    };
+  }, []);
   return <dialog ref={ref} className={`ltds-dialog ltds-dialog-${size}`} aria-labelledby={titleId}
     aria-describedby={description ? descriptionId : undefined}
     onCancel={event => { event.preventDefault(); if (dismissible) onClose(); }}
