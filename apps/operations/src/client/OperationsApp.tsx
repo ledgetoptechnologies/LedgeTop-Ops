@@ -1779,7 +1779,7 @@ function Delivery({ session }: { session: Session }) {
         <FilePreview item={preview} close={() => setPreview(null)} />
       )}
       <TrashPanel />
-      <ShareHistory session={session} revision={shareRevision} />
+      <ShareHistory session={session} revision={shareRevision} changed={() => void reload()} />
     </>
   );
 }
@@ -3089,6 +3089,13 @@ function DeliveryWorkspaceV2({ session }: { session: Session }) {
         : [...current, ref],
     );
   };
+  // A revoked share also changes inherited badges in every folder beneath it,
+  // so drop every cached listing and reload whichever folder is open now.
+  const shareRevoked = useRef(() => {});
+  shareRevoked.current = () => {
+    invalidateDeliveryFolderCache();
+    void reload();
+  };
   const refresh = async () => {
     const requestedPrefix = prefix;
     if (requestedPrefix !== currentPrefixRef.current) return;
@@ -3711,7 +3718,7 @@ function DeliveryWorkspaceV2({ session }: { session: Session }) {
         />
       )}
       <div className="delivery-support-panels">
-        <ShareHistory session={session} revision={shareRevision} prefix={prefix} />
+        <ShareHistory session={session} revision={shareRevision} prefix={prefix} changed={() => shareRevoked.current()} />
         {admin && canDelete && <TrashPanel />}
       </div>
       {showDropboxImport && session.capabilities?.dropboxImport?.enabled && (
@@ -6355,9 +6362,9 @@ function OperationsPreviewPlaceholder({ item }: { item: DeliveryItem }) {
     </div>
   );
 }
-function ShareHistory({ session, revision, prefix }: { session: Session; revision: number; prefix?: string }) {
+function ShareHistory({ session, revision, prefix, changed }: { session: Session; revision: number; prefix?: string; changed?: () => void }) {
   if (!allowed(session.user, "delivery.share.audit")) return null;
-  return <RecentDeliveryLinks key={prefix || "all"} prefix={prefix} revision={revision} canRevoke={allowed(session.user, "delivery.share.revoke")} />;
+  return <RecentDeliveryLinks key={prefix || "all"} prefix={prefix} revision={revision} canRevoke={allowed(session.user, "delivery.share.revoke")} onRevoked={changed} />;
 }
 
 const STAFF_CONTROL_LABELS = {
