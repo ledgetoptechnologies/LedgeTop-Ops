@@ -27,9 +27,10 @@ function portableFixture(): string {
     const sourceMigrations = path.join(repositoryRoot, "apps", source, "migrations");
     const destinationMigrations = path.join(directory, "migrations");
     fs.mkdirSync(destinationMigrations);
-    // This historical bootstrap keeps its reviewed205 source and199 output.
+    // Historical authority stays at Client150/Operations205 source and149/199 output.
     for (const name of fs.readdirSync(sourceMigrations).filter(name => name.endsWith(".sql")
-      && (source !== "operations" || !/^\d{4}_/.test(name) || Number(name.slice(0, 4)) <= OPERATIONS_LATEST_SOURCE_MIGRATION_CHAIN.count)))
+      && (!/^\d{4}_/.test(name) || Number(name.slice(0, 4)) <= (source === "operations"
+        ? OPERATIONS_LATEST_SOURCE_MIGRATION_CHAIN.count : Number(CLIENT_CURRENT_SOURCE_MIGRATION_CHAIN.finalMigration.slice(0, 4))))))
       fs.copyFileSync(path.join(sourceMigrations, name), path.join(destinationMigrations, name));
     fs.copyFileSync(path.join(repositoryRoot, "docs", "staging", example), path.join(directory, "wrangler.staging.json"));
   }
@@ -80,6 +81,14 @@ it("frozen bootstrap refuses source206 instead of adding it to the historical re
   try {
     fs.copyFileSync(path.join(repositoryRoot,"apps/operations/migrations",successor),path.join(base,"apps/operations/migrations",successor));
     expect(()=>buildArtifacts(base,owner)).toThrow("operations canonical migration inventory must be an exact complete reviewed chain");
+  } finally { removePortableFixture(base); }
+});
+
+it("frozen bootstrap refuses Client0232 rather than broadening its historical149 migration authority", () => {
+  const base = portableFixture(), successor = "0232_shared_profile_edit_authority.sql";
+  try {
+    fs.copyFileSync(path.join(repositoryRoot,"apps/client/migrations",successor),path.join(base,"apps/client/migrations",successor));
+    expect(()=>buildArtifacts(base,owner)).toThrow("delivery canonical migration inventory must be an exact complete reviewed chain");
   } finally { removePortableFixture(base); }
 });
 
