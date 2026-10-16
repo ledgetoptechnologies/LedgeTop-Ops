@@ -1,3 +1,4 @@
+import { enqueueNativeDirectoryCreateObservations, dispatchNativeDirectoryCreateObservation } from './native-directory-create-observations';
 import { parseDuplicateFreeJson } from "./bounded-json";
 import {
   resolveProjectAlphaApiV2Connection,
@@ -27,7 +28,7 @@ type Environment = ProjectAlphaApiV2ConnectionEnvironment & Readonly<{
   NATIVE_DIRECTORY_LIFECYCLE_ENABLED?: string;
   SHARED_PROFILE_PORTAL_AUTHORITY?: SharedProfilePortalAuthorityBinding;
 }>;
-type QueueKind = "profile" | "relationship" | "binding_continuation" | "lifecycle";
+type QueueKind = "profile" | "relationship" | "binding_continuation" | "lifecycle" | "create_observation";
 type Candidate = Readonly<{
   queue_kind: QueueKind;
   command_kind: "normal" | "generation_recovery";
@@ -95,7 +96,7 @@ async function eligibleCandidates(db: D1Database, sourceIds: readonly string[], 
   lifecycleEnabled: boolean): Promise<readonly Candidate[]> {
   if (sourceIds.length === 0) return [];
   const placeholders = sourceIds.map(() => "?").join(",");
-  const maximumCandidates = MAX_SOURCES * 5 * maxCommands;
+  const maximumCandidates = MAX_SOURCES * 6 * maxCommands;
   const bindingArm = bindingContinuationEnabled ? `
       UNION ALL
       SELECT 'binding_continuation','normal',j.command_id,j.source_id,
@@ -126,6 +127,10 @@ async function eligibleCandidates(db: D1Database, sourceIds: readonly string[], 
         CASE state WHEN 'leased' THEN lease_expires_at ELSE next_attempt_at END,created_at
       FROM project_alpha_directory_relationship_outbox
       WHERE (state='pending' AND next_attempt_at<=?) OR (state='leased' AND lease_expires_at<=?)${recoveryArm}${bindingArm}${lifecycleArm}
+      UNION ALL SELECT 'create_observation','normal',j.command_id,j.source_id,
+        CASE d.state WHEN 'leased' THEN d.lease_expires_at ELSE d.next_attempt_at END,j.created_at
+      FROM native_directory_create_observation_jobs j JOIN native_directory_create_observation_dispatch d ON d.command_id=j.command_id
+      WHERE (d.state IN('pending','uncertain') AND d.next_attempt_at<=?) OR (d.state='leased' AND d.lease_expires_at<=?)
     ), ranked AS (
       SELECT queue_kind,command_kind,command_id,source_id,
         row_number() OVER(PARTITION BY source_id,queue_kind,command_kind ORDER BY eligible_at,created_at,command_id) position
@@ -134,13 +139,13 @@ async function eligibleCandidates(db: D1Database, sourceIds: readonly string[], 
     SELECT queue_kind,command_kind,command_id,source_id,position FROM ranked
     WHERE position<=? ORDER BY position,source_id,queue_kind LIMIT ?`;
   const session = db.withSession("first-primary");
-  const timing = Array(4 + (relationshipRecoveryEnabled ? 2 : 0) + (bindingContinuationEnabled ? 2 : 0)
+  const timing = Array(6 + (relationshipRecoveryEnabled ? 2 : 0) + (bindingContinuationEnabled ? 2 : 0)
     + (lifecycleEnabled ? 2 : 0)).fill(now);
   const rows = (await session.prepare(query)
     .bind(...timing, ...sourceIds, maxCommands, maximumCandidates)
     .all<Candidate>()).results;
   return rows.filter(row => (row.queue_kind === "profile" || row.queue_kind === "relationship"
-      || row.queue_kind === 'binding_continuation' || row.queue_kind === "lifecycle")
+      || row.queue_kind === 'binding_continuation' || row.queue_kind === "lifecycle" || row.queue_kind === "create_observation")
     && (row.command_kind === "normal" || row.command_kind === "generation_recovery")
     && (row.queue_kind === "relationship" || row.command_kind === "normal")
     && typeof row.command_id === "string" && row.command_id.length > 0
@@ -163,8 +168,8 @@ function fairOrder(candidates: readonly Candidate[], sourceIds: readonly string[
   const queues: readonly Readonly<{ queue: QueueKind; command: Candidate["command_kind"] }>[] = tick % 2 === 0
     ? [{ queue: "profile", command: "normal" }, { queue: "relationship", command: "normal" },
       { queue: "relationship", command: "generation_recovery" }, { queue:'binding_continuation',command:'normal' },
-      { queue: "lifecycle", command: "normal" }]
-    : [{ queue: "lifecycle", command: "normal" }, { queue:'binding_continuation',command:'normal' }, { queue: "relationship", command: "normal" }, { queue: "relationship", command: "generation_recovery" },
+      { queue: "lifecycle", command: "normal" }, {queue:"create_observation",command:"normal"}]
+    : [{queue:"create_observation",command:"normal"}, { queue: "lifecycle", command: "normal" }, { queue:'binding_continuation',command:'normal' }, { queue: "relationship", command: "normal" }, { queue: "relationship", command: "generation_recovery" },
       { queue: "profile", command: "normal" }];
   const ordered: Candidate[] = [];
   for (let position = 1; position <= maxCommands && ordered.length < maxCommands; position += 1) {
@@ -252,6 +257,7 @@ export async function drainNativeDirectoryOutboxes(env: Environment,
   // pinned parent intent is acknowledged. Materialization is local, bounded,
   // and guarded transactionally by the existing 0132 relationship triggers.
   await materializeResolvedProjectAlphaDirectoryClientIntents(env.OPS_DB, sourceIds, maxCommands, startedAt);
+  await enqueueNativeDirectoryCreateObservations(env.OPS_DB,sourceIds,maxCommands);
   const candidates = await eligibleCandidates(env.OPS_DB, sourceIds, startedAt, maxCommands,
     relationshipGenerationRecovery === "true", profileBindingContinuationEnabled(continuationPolicy), lifecycleEnabled);
   const selected = fairOrder(candidates, sourceIds, rotationTime, maxCommands);
@@ -266,7 +272,9 @@ export async function drainNativeDirectoryOutboxes(env: Environment,
     if (result.attempted >= maxCommands || now() >= deadline) break;
     result.attempted += 1;
     try {
-      const outcome = candidate.queue_kind === "lifecycle"
+      const outcome = candidate.queue_kind === "create_observation"
+        ? await dispatchNativeDirectoryCreateObservation(dispatchEnvironment,candidate.source_id,candidate.command_id,send)
+        : candidate.queue_kind === "lifecycle"
         ? await dispatchProjectAlphaDirectoryLifecycleCommand(dispatchEnvironment, candidate.source_id,
           candidate.command_id, send)
         : candidate.queue_kind === 'binding_continuation'

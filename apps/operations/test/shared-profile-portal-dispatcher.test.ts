@@ -95,6 +95,8 @@ beforeAll(async () => {
   const directory = new URL("../migrations/", import.meta.url);
   const migrations = readdirSync(directory).filter(name => /^\d{4}_.+\.sql$/.test(name) && name.slice(0, 4) <= "0209").sort();
   for (const migration of migrations) await db.batch(splitD1MigrationStatements(readFileSync(new URL(migration, directory), "utf8")).map(sql => db.prepare(sql)));
+  await db.batch(splitD1MigrationStatements(readFileSync(new URL('0211_native_directory_create_observations.sql', directory),'utf8')).map(sql=>db.prepare(sql)));
+
   await db.batch([
     db.prepare(`INSERT INTO staff_users(id,email,display_name,access_subject,status) VALUES('owner','owner@example.test','Owner','access|owner','active')`),
     db.prepare(`INSERT INTO native_business_areas(id,name,active) VALUES('area','Area',1)`),

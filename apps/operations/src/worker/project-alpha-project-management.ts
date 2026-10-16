@@ -18,7 +18,7 @@ const mutationSchema = z.object({
 
 export type ProjectManagementAvailabilityReason = "available" | "not_applicable" | "source_not_registered"
   | "source_inactive" | "route_not_configured" | "route_disabled" | "source_mapping_unavailable"
-  | "native_authority_required" | "native_destination_unavailable";
+  | "native_authority_required" | "native_destination_unavailable" | "source_ack_pending" | "source_observation_pending" | "source_binding_unavailable";
 export interface ProjectManagementRouteSummary {
   sourceId: string;
   version: number;
@@ -248,6 +248,9 @@ function explanation(reason: ProjectManagementAvailabilityReason, sourceName: st
   if (reason === "source_inactive") return `${sourceName} is not active. Project creation is unavailable until an administrator restores the source connection.`;
   if (reason === "route_disabled") return `Project creation links are disabled for ${sourceName}.`;
   if (reason === "route_not_configured") return `An administrator has not reviewed a Project Alpha project-management link for ${sourceName}.`;
+  if (reason === "source_ack_pending") return `Project Alpha has not yet acknowledged this client. Project creation requires completed synchronization.`;
+  if (reason === "source_observation_pending") return `Project Alpha acknowledged this client. Operations is verifying its current binding. Refresh after synchronization completes.`;
+  if (reason === "source_binding_unavailable") return `The current Project Alpha binding is not ready for project creation. Review synchronization status.`;
   if (reason === "source_mapping_unavailable") return `The exact ${sourceName} client identifier is unavailable. Refresh after source synchronization completes.`;
   if (reason === "source_not_registered") return `This Project Alpha source is not registered for project management.`;
   if (reason === "native_authority_required") return `Your current native Project authority does not permit project creation for this organization.`;
@@ -296,8 +299,8 @@ export async function readClientHubProjectManagementAction(env: Env, principal: 
     ? await readClientHubNativeProjectCapability(env, principal, context) : null;
   const sourceName = row?.display_name ?? root.source_name ?? "Project Alpha";
   let reason: ProjectManagementAvailabilityReason = root.root_namespace !== "business" || !isBusinessProjectionSource(root.source_id)
-    ? "not_applicable" : native?.available ? "available" : native?.reason === "native_authority_required"
-      ? "native_authority_required" : !row?.source_id ? native?.reason ?? "source_not_registered" : row.state !== "active" || row.read_visible !== 1
+    ? "not_applicable" : native?.available ? "available" : native && native.reason !== "native_destination_unavailable"
+      ? native.reason : !row?.source_id ? native?.reason ?? "source_not_registered" : row.state !== "active" || row.read_visible !== 1
       ? "source_inactive" : row.route_version === null ? "route_not_configured" : row.enabled !== 1 || !row.reviewed_url_template
         ? "route_disabled" : !row.external_id ? "source_mapping_unavailable" : "available";
   let href: string | null = null;

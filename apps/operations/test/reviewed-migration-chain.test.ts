@@ -123,6 +123,7 @@ describe("reviewed release migration fixtures", () => {
     ["operations", "0208_shared_profile_portal_authority.sql"],
     ["operations", "0209_shared_profile_portal_native_writes.sql"],
     ["operations", "0210_admin_finance_summary_permission.sql"],
+    ["operations", "0211_native_directory_create_observations.sql"],
     ["client", "0232_shared_profile_edit_authority.sql"],
   ] as const)("validates exact %s successor %s without expanding historical authority", (application, name) => {
     const fixture=copyMigrations(application);

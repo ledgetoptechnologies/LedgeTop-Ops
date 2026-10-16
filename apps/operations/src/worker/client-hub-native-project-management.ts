@@ -110,8 +110,24 @@ export async function readClientHubNativeProjectCapability(env: Env, principal: 
       WHERE staff_id=? AND capability='project.shared.sync' AND active=1
       ORDER BY effect,scope_kind,ifnull(business_area_id,''),ifnull(division_id,'')`).bind(principal.id).all<GrantRow>(),
   ]);
-  if (mappingRows.results.length !== 1)
-    return { available: false as const, reason: "source_mapping_unavailable" as const, scopes: [] };
+  if (mappingRows.results.length !== 1) {
+    const evidence=await db.prepare(`SELECT m.record_id,
+      EXISTS(SELECT 1 FROM project_alpha_api_v2_directory_observations_current o WHERE o.source_id=m.source_id
+        AND o.source_instance_id=m.source_instance_id AND o.application_id=m.application_id AND o.history_epoch_id=m.history_epoch_id
+        AND o.resource_type=m.resource_type AND o.project_alpha_public_id=m.project_alpha_public_id) observed
+      FROM project_alpha_active_directory_mappings m WHERE m.record_id=? AND m.source_id=? AND m.source_instance_id=?
+        AND m.application_id=? AND m.history_epoch_id=? AND m.resource_type=? LIMIT 2`)
+      .bind(context.root.public_id,context.root.source_id,selected.connection.expectedSourceInstanceId,
+        selected.connection.expectedApplicationId,selected.connection.expectedHistoryEpoch,context.root.kind==='organization'?'organization':'client')
+      .all<{record_id:string;observed:number}>();
+    if(evidence.results.length===1)return {available:false as const,
+      reason:evidence.results[0]!.observed ? 'source_binding_unavailable' as const : 'source_observation_pending' as const,scopes:[]};
+    const pending=await db.prepare(`SELECT 1 pending FROM operations_directory_intents WHERE record_id=? AND source_id=?
+      AND source_instance_uuid=? AND application_uuid=? AND expected_history_epoch_id=? AND state IN('waiting','ready','materialized') LIMIT 1`)
+      .bind(context.root.public_id,context.root.source_id,selected.connection.expectedSourceInstanceId,
+        selected.connection.expectedApplicationId,selected.connection.expectedHistoryEpoch).first();
+    return { available: false as const, reason: pending ? 'source_ack_pending' as const : 'source_mapping_unavailable' as const, scopes: [] };
+  }
   if (!actorRow) return { available: false as const, reason: "native_authority_required" as const, scopes: [] };
   const rows = grants.results;
   if (rows.some(row => row.effect === "deny" && row.scope_kind === "global"))
