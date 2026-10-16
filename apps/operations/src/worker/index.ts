@@ -179,6 +179,8 @@ import { registerTeamAssignedWorkRoutes } from "./team-assigned-work";
 import { registerClientHubRoutes } from "./client-hub";
 import { registerOpsServiceManagementRoutes } from "./ops-service-management-routes";
 import { NATIVE_DIRECTORY_PROFILE_ROUTE, nativeDirectoryProfileWritesEnabled, registerNativeDirectoryProfileRoutes } from "./native-directory-profile-routes";
+import { registerAdminFinanceSummaryRoutes } from './admin-finance-summary-routes';
+import { readFinanceSummaryAuthority } from './admin-finance-summary-authority';
 import { registerNativeDirectorySharedProfileRoutes } from "./native-directory-shared-profile-routes";
 import { registerNativeDirectoryExistingImportRoutes } from "./native-directory-existing-import-routes";
 import { DIRECTORY_BINDING_REFRESH_ROUTE, DIRECTORY_BINDING_REFRESH_PROTECTED_OWNER, directoryBindingRefreshEnabled,
@@ -957,13 +959,14 @@ app.get("/health", (c) => c.json({ status: "ok", service: "ltds-ops" }));
 app.get("/api/session", async (c) => {
   const principal = c.get("principal"),
     administrator = c.get("administrator");
-  const [permissions, globalScope, deliveryBrowseScope, integrationsManageScope, displayUnits, clientFeedbackEnabled] = await Promise.all([
+  const [permissions, globalScope, deliveryBrowseScope, integrationsManageScope, displayUnits, clientFeedbackEnabled, financeSummaryAuthority] = await Promise.all([
     permissionKeys(c.env, principal),
     sqlScope(c.env, principal, "dashboard.view"),
     sqlScope(c.env, principal, "delivery.browse"),
     sqlScope(c.env, principal, "integrations.manage"),
     resolveViewerUnits(c.env, principal.id),
     staffFeedbackEntryEnabled(c.env, principal),
+    readFinanceSummaryAuthority(c.env.OPS_DB, principal),
   ]);
   const divisions =
     administrator && globalScope.global
@@ -992,6 +995,7 @@ app.get("/api/session", async (c) => {
     mapboxPublicToken: c.env.MAPBOX_PUBLIC_TOKEN || null,
     units: { default: defaultViewerUnits(c.env), resolved: displayUnits },
     capabilities: {
+      financeSummary: { enabled: financeSummaryAuthority !== null },
       projectAlphaPrivateAdminTransport: {
         enabled: c.env.PROJECT_ALPHA_PRIVATE_ADMIN_TRANSPORT_ENABLED === "true" && administrator
           && integrationsManageScope.global && !integrationsManageScope.deniedGlobal,
@@ -1727,6 +1731,7 @@ registerProjectAlphaDraftQuoteRoutes(app);
 registerTeamAssignedWorkRoutes(app);
 registerNativeDirectoryExistingImportRoutes(app);
 registerNativeDirectoryProfileRoutes(app);
+registerAdminFinanceSummaryRoutes(app);
 registerNativeDirectorySharedProfileRoutes(app);
 registerNativeDirectoryBindingRefreshRoutes(app);
 registerDirectoryRelationshipGenerationRecoveryRoutes(app);

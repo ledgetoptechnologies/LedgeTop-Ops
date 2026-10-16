@@ -48,6 +48,7 @@ const operationsSuccessors = Object.freeze({
   "0207_shared_directory_profiles.sql": "cdd4947b8bf5ab672184ed3e4f8f3fb0b4afbd0edd0707e1772569f66f4f3d49",
   "0208_shared_profile_portal_authority.sql": "a00f580d85f8e857399a2520437836e3a1f09e7bddba1b4a6b27a6b66f3e9688",
   "0209_shared_profile_portal_native_writes.sql": "635ee4f206e95ca584097159b1bd9a8489ea77cb900aa5c1106832d42b7e0f8f",
+  "0210_admin_finance_summary_permission.sql": "723c8c17880a9a8909422422b55275a8aadcf424ff7ba3bcc93f92c52917fe9d",
 });
 
 const clientSuccessors = Object.freeze({
