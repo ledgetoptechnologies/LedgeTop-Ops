@@ -12,7 +12,7 @@ test("authenticated invitation acceptance immediately removes the secret from UR
   await page.goto(`/portal/invitations/accept#token=${token}`);
   await expect(page).toHaveURL("http://127.0.0.1:4173/portal/invitations/accept");
   await expect(page.getByRole("heading", { name: "Workspace access ready" })).toBeVisible();
-  await expect(page.getByRole("link", { name: "Open client portal" })).toBeVisible();
+  await expect(page.getByRole("link", { name: "Open client portal" })).toHaveAttribute("href", "/portal/dashboard");
   expect(requestUrl).toBe("http://127.0.0.1:4173/api/client/v2/invitations/accept");
   expect(requestUrl).not.toContain(token);
   expect(requestBody).toEqual({ token });
@@ -26,6 +26,6 @@ test("invitation acceptance presents a safe email-mismatch error on desktop and 
   await expect(page).toHaveURL("http://127.0.0.1:4173/portal/invitations/accept");
   await expect(page.getByRole("heading", { name: "Invitation unavailable" })).toBeVisible();
   await expect(page.getByRole("alert")).toContainText("invalid, expired, revoked, or belongs to a different email address");
-  await expect(page.getByRole("link", { name: "Go to client portal" })).toBeVisible();
+  await expect(page.getByRole("link", { name: "Go to client portal" })).toHaveAttribute("href", "/portal/dashboard");
   await expect(page.locator("body")).not.toContainText(token);
 });

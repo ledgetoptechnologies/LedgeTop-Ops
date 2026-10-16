@@ -986,11 +986,12 @@ test("Share dialog replaces a failed lookup with an explicit retry state", async
   await expect(page.getByRole("button", { name: "Create link" })).toHaveCount(0);
   await page.getByRole("button", { name: "Retry" }).click();
   await expect(page.getByRole("button", { name: "Create link" })).toBeVisible();
-  await expect(page.getByRole("checkbox", { name: /Show photo locations on this client share/ })).toBeChecked();
+  await expect(page.getByRole("checkbox", { name: /Show photo locations on this client share/ })).not.toBeChecked();
   expect(activeRequests).toBe(2); expect(shareWrites).toBe(0);
 });
 
-test("Share dialog preserves the stored map setting for an existing share", async ({ page }) => {
+for (const enabled of [false, true]) {
+test(`Share dialog preserves the stored map setting ${enabled} for an existing share`, async ({ page }) => {
   await page.route("**/api/**", async route => {
     const url = new URL(route.request().url());
     if (url.pathname === "/api/session") return route.fulfill({ json: { user: { id: "staff-existing-share", email: "staff-existing-share@example.test", displayName: "Existing Share Staff", status: "Active", profileType: "Administrator", isAdministrator: true, permissions: ["delivery.browse", "delivery.share.create", "delivery.share.revoke"], divisions: [] }, csrfToken: "csrf-existing-share", timezone: "America/Chicago", mapStyleUrl: null, mapboxPublicToken: null, capabilities: { deliveryJobsRoot: { enabled: true } } } });
@@ -999,7 +1000,7 @@ test("Share dialog preserves the stored map setting for an existing share", asyn
       return route.fulfill({ json: { prefix, folders: [{ id: "folder-existing", prefix: "Jobs/Clients/Existing/", physicalKey: "Jobs/Clients/Existing/", name: "Existing", displayName: "Existing", kind: "folder", isShared: true }], files: [], nextCursor: null } });
     }
     if (url.pathname === "/api/delivery/folders/locations") return route.fulfill({ json: { points: [], imageCount: 0, truncated: false } });
-    if (url.pathname === "/api/delivery/shares/active") return route.fulfill({ json: { share: { id: "share-existing", shareUrl: "https://client.example.test/d/existing", passwordProtected: false, expiresAt: null, recoverable: true, recipientEmail: null, imageLocationMapEnabled: false } } });
+    if (url.pathname === "/api/delivery/shares/active") return route.fulfill({ json: { share: { id: "share-existing", shareUrl: "https://client.example.test/d/existing", passwordProtected: false, expiresAt: null, recoverable: true, recipientEmail: null, imageLocationMapEnabled: enabled } } });
     if (url.pathname === "/api/delivery/shares") return route.fulfill({ json: { shares: [] } });
     return route.fulfill({ status: 404, json: { error: "Not found" } });
   });
@@ -1008,9 +1009,10 @@ test("Share dialog preserves the stored map setting for an existing share", asyn
   await page.getByRole("button", { name: "Actions for Existing" }).click();
   await page.getByRole("menuitem", { name: "Share" }).click();
   await expect(page.getByText("Already shared", { exact: true })).toBeVisible();
-  await expect(page.getByRole("checkbox", { name: /Show photo locations on this client share/ })).not.toBeChecked();
-  await expect(page.getByText(/On by default for a new share/)).toBeVisible();
+  await expect(page.getByRole("checkbox", { name: /Show photo locations on this client share/ })).toBeChecked({ checked: enabled });
+  await expect(page.getByText(/Off by default for a new share/)).toBeVisible();
 });
+}
 
 test("Share dialog selects a scoped directory recipient without presenting it as link authorization", async ({ page }) => {
   let posted: Record<string, unknown> | null = null;

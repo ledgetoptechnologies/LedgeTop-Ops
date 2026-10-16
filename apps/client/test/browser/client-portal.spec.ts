@@ -220,7 +220,7 @@ test("effective authenticated-delivery folders use only AD1 scoped reads and pre
   await page.getByRole("button", {name: "Effective deliverables"}).click();
   await expect.poll(() => new URL(page.url()).searchParams.get("folder")).toBe(ad1Root);
   await page.getByRole("combobox", {name: "Client workspace"}).selectOption(otherEffectiveWorkspace.id);
-  await expect(page).toHaveURL(new RegExp(`/portal\\?workspace=${otherEffectiveWorkspace.id}$`));
+  await expect(page).toHaveURL(new RegExp(`/portal/dashboard\\?workspace=${otherEffectiveWorkspace.id}$`));
   await expect(page.getByRole("heading", {name: "Shared delivery folder"})).toHaveCount(0);
   expect(calls.filter(call => call.path === "/api/client/authenticated-deliveries/files").map(call => call.query.get("folder"))).toEqual([ad1Root, ad1Child, ad1Root]);
   expect(calls.some(call => call.path === "/api/client/past-deliveries" || call.path === "/api/client/past-delivery-locations")).toBe(false);
@@ -443,7 +443,7 @@ test("workspace-v2 selection scopes every authenticated resource request and swi
   await expect(page.getByRole("heading", { name: "Beta" })).toBeVisible();
   await expect(page.getByText("Beta Site")).toBeVisible();
   expect(observed.filter(item => item.path === "/api/client/projects").at(-1)?.workspace).toBe("workspace-b");
-  await expect(page).toHaveURL(/\/portal\?workspace=workspace-b$/);
+  await expect(page).toHaveURL(/\/portal\/dashboard\?workspace=workspace-b$/);
 });
 
 test("authorized portal supports project, delivery, and request workflows", async ({ page }) => {

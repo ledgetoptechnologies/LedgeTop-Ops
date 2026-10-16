@@ -74,7 +74,7 @@ describe("client portal browser routing", () => {
   });
 
   it("builds stable same-origin paths", () => {
-    expect(clientPortalPath("dashboard")).toBe("/portal");
+    expect(clientPortalPath("dashboard")).toBe("/portal/dashboard");
     expect(clientPortalPath("requests")).toBe("/portal/requests");
     expect(clientRequestNewPath()).toBe("/portal/requests/new");
     expect(clientProjectPath("project a")).toBe("/portal/projects/project%20a");

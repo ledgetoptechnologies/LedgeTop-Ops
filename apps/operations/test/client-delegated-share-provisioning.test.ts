@@ -94,6 +94,26 @@ async function fixture(): Promise<{ db: D1Database; env: Env }> {
 afterEach(async () => Promise.all(active.splice(0).map(instance => instance.dispose())));
 
 describe("Operations client-delegated share provisioning", () => {
+  it.each([undefined, false, true])("persists photo-location policy only with explicit opt-in (%s)", async (mapChoice) => {
+    const { db, env } = await fixture();
+    const root = await createDelegatedShareTarget(env, principal, {
+      workspaceId, folderBindingId: bindingId,
+      folderRef: encodeRef("clients/private/project/deliverables"),
+      displayName: "Deliverables", exactRootApproved: true,
+    }, "target-map-policy-0001");
+    const delegation = await createDelegatedShareDelegation(env, principal, {
+      workspaceId, identityId: firstIdentity, entitlementId: firstEntitlement,
+      rootTargetId: root.id, allowExactRoot: false, requirePassword: false,
+      ...(mapChoice === undefined ? {} : { imageLocationMapEnabled: mapChoice }),
+      maximumLinkLifetimeSeconds: 86400,
+      expiresAt: new Date(Date.now() + 7 * 86400_000).toISOString(),
+    }, "delegation-map-policy-0001");
+    expect(await db.prepare("SELECT image_location_map_enabled FROM client_share_delegation_policies WHERE delegation_id=?")
+      .bind(delegation.id).first("image_location_map_enabled")).toBe(mapChoice === true ? 1 : 0);
+    expect((await listDelegatedShareProvisioning(env)).delegations).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: delegation.id, imageLocationMapEnabled: mapChoice === true }),
+    ]));
+  });
   it("provisions opaque targets/delegations, transfers recovery authority, and revokes live policy", async () => {
     const { db, env } = await fixture();
     const root = await createDelegatedShareTarget(env, principal, {

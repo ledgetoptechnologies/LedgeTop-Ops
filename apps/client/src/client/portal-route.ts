@@ -30,7 +30,9 @@ export function parseClientPortalRoute(pathname: string): ClientPortalRoute {
 }
 
 export function clientPortalPath(page: Exclude<ClientPortalPage, "not-found" | "project" | "request-new">): string {
-  return page === "dashboard" ? "/portal" : `/portal/${page}`;
+  // The bare /portal route independently authorizes the Operations service
+  // home. PA workspace navigation must keep its own bootstrap on a full load.
+  return `/portal/${page}`;
 }
 
 export function clientProjectPath(projectId: string): string {

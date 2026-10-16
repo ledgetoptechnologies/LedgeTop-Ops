@@ -4694,7 +4694,7 @@ function ClientDelegatedFolderProvisioning({ folder }: { folder: { id: string; n
   const [displayName, setDisplayName] = useState(folder.name || "Shared folder");
   const [allowExactRoot, setAllowExactRoot] = useState(false);
   const [requirePassword, setRequirePassword] = useState(false);
-  const [imageLocationMapEnabled, setImageLocationMapEnabled] = useState(true);
+  const [imageLocationMapEnabled, setImageLocationMapEnabled] = useState(false);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
 
@@ -5418,10 +5418,10 @@ function ShareDialog({
           ? `${value.share.audience.displayName}${value.share.audience.email ? ` (${value.share.audience.email})` : ""}`
           : value.share?.recipientEmail || "");
         // Wait for the authoritative active-share lookup before choosing a
-        // default. New shares start with the map visible in the form, while an
+        // default. New shares start with the map off in the form, while an
         // existing share always preserves its stored value (including false).
         setImageLocationMapEnabled(
-          value.share === null ? true : value.share.imageLocationMapEnabled === true,
+          value.share?.imageLocationMapEnabled === true,
         );
         if (value.share?.expiresAt) {
           setExpirationMode("custom");
@@ -5774,7 +5774,7 @@ function ShareDialog({
                   onChange={(event) => { setImageLocationMapEnabled(event.target.checked); markDirty(); }}
                 />{" "}
                 Show photo locations on this client share
-                <small>On by default for a new share. Turn this off to hide validated GPS coordinates for photos inside the shared folder. Existing shares keep their current setting.</small>
+                <small>Off by default for a new share. Turn this on to show validated GPS coordinates for photos inside the shared folder. Existing shares keep their current setting.</small>
               </label>}
               <label className="full">
                 Access code
