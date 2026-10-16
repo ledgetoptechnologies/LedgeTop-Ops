@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Card, EmptyState, Loading, StatusPill } from "@ltds/ui";
+import { Card, EmptyState, Loading, StatusPill, requestText } from "@ltds/ui";
 import { api, ApiError } from "./api";
 import { RequestMapViewer } from "./RequestMapViewer";
 import { RequestMapEditor, type EditableRequestArea, type EditableRequestPoi } from "./RequestMapEditor";
@@ -485,8 +485,9 @@ function ClientRequestDetail({
         },
       ),
     );
-  const linkQuote = () => {
-    const raw = prompt("Project Alpha draft quote ID");
+  const linkQuote = async () => {
+    const raw = await requestText({ title: "Link Project Alpha quote", label: "Project Alpha draft quote ID", confirmLabel: "Link quote",
+      validate: value => /^[1-9][0-9]*$/.test(value) ? null : "Enter a positive whole-number quote ID." });
     if (!raw) return;
     return run(() =>
       api(
