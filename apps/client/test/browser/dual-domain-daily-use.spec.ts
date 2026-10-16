@@ -94,7 +94,7 @@ test("J7 daily-use navigation survives direct links, refresh, history, and keybo
 
 for (const invalidation of [
   { status: 401 as const, title: "Sign in required", label: "session expiry" },
-  { status: 403 as const, title: "Access not provisioned", label: "access revocation" },
+  { status: 403 as const, title: "Workspace access not set up yet", label: "access revocation" },
 ]) test(`J7 ${invalidation.label} removes protected content and a late active read cannot restore it`, async ({ page }) => {
   const state: State = { session: 200, delayDeliveries: true };
   const fixture = await installFixture(page, state);
@@ -108,11 +108,21 @@ for (const invalidation of [
   await expect(page.getByRole("region", { name: "Connected client workspace" })).toHaveCount(0);
 });
 
+test("J7 a verified identity with no authorized workspace sees access setup, not an outage", async ({ page }) => {
+  const state: State = { session: 200, workspaces: [] };
+  const fixture = await installFixture(page, state);
+  await page.goto("/portal/dashboard");
+  await expect(page.getByText("No client workspace yet", { exact: true })).toBeVisible();
+  await expect(page.getByText("Portal temporarily unavailable", { exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Retry portal" })).toBeVisible();
+  expect(fixture.calls.some(call => /\/(context|deliveries|projects)$/.test(call.path))).toBe(false);
+});
+
 test("J7 unauthorized identity and cross-tenant workspace hints fail closed", async ({ page }) => {
   const state: State = { session: 403 };
   const fixture = await installFixture(page, state);
   await page.goto("/portal?workspace=workspace-one");
-  await expect(page.getByText("Access not provisioned", { exact: true })).toBeVisible();
+  await expect(page.getByText("Workspace access not set up yet", { exact: true })).toBeVisible();
   // The disabled Operations home returns its own 404 before the legacy
   // session denial. Neither probe authorizes account or tenant data reads.
   expect(fixture.calls.map(call => call.path)).toEqual([
@@ -122,7 +132,7 @@ test("J7 unauthorized identity and cross-tenant workspace hints fail closed", as
   state.session = 200;
   state.workspaces = [workspace];
   await page.goto("/portal/deliveries?workspace=another-tenant");
-  await expect(page.getByText("Access not provisioned", { exact: true })).toBeVisible();
+  await expect(page.getByText("Workspace access not set up yet", { exact: true })).toBeVisible();
   expect(fixture.calls.some(call => call.path.includes("another-tenant/context") || call.path.includes("another-tenant/deliveries"))).toBe(false);
   await expect(page.getByText("Final deliverables", { exact: true })).toHaveCount(0);
 });

@@ -2,6 +2,7 @@ import { useEffect,useState } from "react";
 import { loadOperationsFinancial,type PortalFinancialDocument,type PortalOperationsHomeResponse } from "./portal-api";
 import { OperationsNativeDataBrowser } from "./OperationsNativeDataBrowser";
 import { AccountMenu } from "@ltds/ui";
+import { PortalBrand } from "./PortalShell";
 
 export function OperationsServiceSummary({ response, embedded = false }: {
   response: PortalOperationsHomeResponse;
@@ -70,20 +71,20 @@ export function OperationsHomeApp({ response, clientUnavailable = false, onRetry
   onRetryClient?: () => void;
 }) {
   return <div className="client-portal operations-home">
-    <header className="client-portal-header">
-      <div className="ltds-brand" aria-label="LedgeTop client portal">LedgeTop</div>
+    <header className="client-portal-gate-header">
+      <PortalBrand product="Client portal" />
       <AccountMenu className="portal-account-menu" displayName="Client portal" avatar="LT" />
     </header>
     <main className="portal-main">
       <section className="portal-welcome">
-        <p className="portal-eyebrow">LedgeTop client portal</p>
+        <p className="portal-eyebrow">Ledge Top client portal</p>
         <h1>Your services</h1>
-        <p>Services currently available to you from LedgeTop operations providers.</p>
+        <p>Services, invoices and files Ledge Top currently shares with you.</p>
       </section>
-      {clientUnavailable && <section className="portal-card" role="status">
-        <h2>Client resources unavailable</h2>
-        <p>Your Operations service summary is still available. You can retry without the unavailable workspace selection.</p>
-        {onRetryClient && <button type="button" className="button-ghost" onClick={onRetryClient}>Try available client workspaces</button>}
+      {clientUnavailable && <section className="portal-card portal-workspace-status" role="status">
+        <h2>Project workspace unavailable</h2>
+        <p>Your projects and requests could not be opened for the selected workspace. Your services, invoices and files below are still available.</p>
+        {onRetryClient && <button type="button" className="button-orange" onClick={onRetryClient}>Try my other workspaces</button>}
       </section>}
       <OperationsNativeServicePanel response={response} />
     </main>
