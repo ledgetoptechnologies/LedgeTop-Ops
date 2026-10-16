@@ -33,7 +33,10 @@ export function periodLabel(period: FinancePeriod): string {
 const STATUS_COPY: Record<Exclude<FinanceSourceSummary["status"], "ok">, string> = {
   unavailable: "Project Alpha did not return figures for this company. Nothing is counted for it.",
   incompatible: "This company's Project Alpha version can't report finances yet. Nothing is counted for it.",
-  forbidden: "You don't have finance access for this company.",
+  // "forbidden" comes from the Project Alpha connection (401/403 upstream, or the
+  // connection's finance read is disabled), never from the viewer's Ops access:
+  // a viewer without Ops finance access never sees this card at all.
+  forbidden: "This company's Project Alpha connection isn't authorized to share finance totals yet. An administrator needs to grant the connection finance summary access. Nothing is counted for it.",
 };
 
 function usableSummary(value: unknown): value is AdminFinanceSummary {
@@ -81,7 +84,7 @@ function SourceCard({ source }: { source: FinanceSourceSummary }) {
   const name = projectAlphaSourceName(source.sourceId);
   if (source.status !== "ok" || !source.summary) return <section className="finance-source unavailable" aria-label={name}>
     <header><h3>{name}</h3><StatusPill tone={source.status === "forbidden" ? "neutral" : "warning"}>
-      {source.status === "forbidden" ? "No access" : source.status === "incompatible" ? "Not supported" : "Unavailable"}</StatusPill></header>
+      {source.status === "forbidden" ? "Connection not authorized" : source.status === "incompatible" ? "Not supported" : "Unavailable"}</StatusPill></header>
     <p>{STATUS_COPY[source.status === "ok" ? "unavailable" : source.status]}</p>
   </section>;
   const { coverage, currencies } = source.summary, notes = coverageWarnings(coverage);
