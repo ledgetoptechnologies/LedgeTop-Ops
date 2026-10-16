@@ -4,7 +4,8 @@ import { expect, test, type Page } from "@playwright/test";
 
 type Scenario = "create-lost-response" | "admission-400" | "write-400" | "record-switch" | "reload-failure" | "relationship-readonly"
   | "recovery-review" | "recovery-absent" | "recovery-malformed" | "recovery-reentry" | "recovery-invalidated"
-  | "recovery-revoked" | "recovery-org-switch" | "recovery-record-switch" | "prepared-update" | "prepared-lost-response";
+  | "recovery-revoked" | "recovery-org-switch" | "recovery-record-switch" | "prepared-update" | "prepared-lost-response"
+  | "profile-denied" | "profile-permission-readonly" | "profile-signed-out" | "profile-lost-then-denied" | "profile-lost-then-signed-out";
 type Call = { path: string; method: string; mutationId: string | null; body: string | null };
 const fixture = new URL("./native-directory-profile-retry-fixture.tsx", import.meta.url);
 const bundle = buildSync({ entryPoints: [fileURLToPath(fixture)], bundle: true, format: "iife", platform: "browser", write: false,
@@ -171,6 +172,61 @@ test("a prepared client update keeps its exact request after a possibly committe
   expect(patches[0]!.mutationId).toBe("11111111-1111-4111-8111-000000000001");
   expect(JSON.parse(patches[0]!.body!)).toMatchObject({ mutationId: patches[0]!.mutationId, expectedLocalVersion: 1,
     profile: { email: "prepared-client@example.test" } });
+});
+
+test("a profile permission denial is final: no retry, nothing saved, editing locked", async ({ page }) => {
+  await render(page, "profile-denied");
+  await expect(page.getByLabel("Organization name")).toHaveValue("Record One");
+  await page.getByLabel("Organization name").fill("Record One Renamed");
+  await page.getByRole("button", { name: "Save client profile" }).click();
+
+  await expect(page.getByRole("alert")).toContainText("Directory profile edit permission required");
+  await expect(page.getByRole("alert")).toContainText("No change was saved");
+  await expect(page.getByRole("alert")).not.toContainText("Retry sends the same frozen operation");
+  await expect(page.getByRole("button", { name: "Retry same profile update" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Save client profile" })).toBeDisabled();
+  await expect(page.getByLabel("Organization name")).toBeDisabled();
+  expect((await calls(page)).filter(call => call.method === "PATCH")).toHaveLength(1);
+});
+
+test("a first-send sign-out is final and asks for sign-in, not edit access", async ({ page }) => {
+  await render(page, "profile-signed-out");
+  await expect(page.getByLabel("Organization name")).toHaveValue("Record One");
+  await page.getByLabel("Organization name").fill("Record One Renamed");
+  await page.getByRole("button", { name: "Save client profile" }).click();
+  await expect(page.getByRole("alert")).toContainText("Sign in again");
+  await expect(page.getByRole("alert")).toContainText("No change was saved");
+  await expect(page.getByRole("alert")).not.toContainText("edit access");
+  await expect(page.getByRole("button", { name: "Retry same profile update" })).toHaveCount(0);
+  expect((await calls(page)).filter(call => call.method === "PATCH")).toHaveLength(1);
+});
+
+for (const [scenario, expected] of [["profile-lost-then-denied", "Once your access is restored"], ["profile-lost-then-signed-out", "Sign in again"]] as const)
+  test(`${scenario}: a denial after an unknown outcome keeps the exact update and never claims no change`, async ({ page }) => {
+    await render(page, scenario);
+    await expect(page.getByLabel("Organization name")).toHaveValue("Record One");
+    await page.getByLabel("Organization name").fill("Record One Renamed");
+    await page.getByRole("button", { name: "Save client profile" }).click();
+    const retry = page.getByRole("button", { name: "Retry same profile update" });
+    await expect(retry).toBeVisible();
+    await retry.click();
+
+    const alert = page.getByRole("alert");
+    await expect(alert).toContainText("outcome is still unknown");
+    await expect(alert).toContainText(expected);
+    await expect(alert).not.toContainText("No change was saved");
+    await expect(retry).toBeEnabled();
+    await expect(page.getByLabel("Organization name")).toBeDisabled();
+    const patches = (await calls(page)).filter(call => call.method === "PATCH");
+    expect(patches).toHaveLength(2);
+    expect(patches[1]).toEqual(patches[0]);
+  });
+
+test("a server-reported missing profile permission renders read-only with the reason", async ({ page }) => {
+  await render(page, "profile-permission-readonly");
+  await expect(page.getByText("your account does not have client profile edit access")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Save client profile" })).toHaveCount(0);
+  expect((await calls(page)).filter(call => call.method === "PATCH")).toHaveLength(0);
 });
 
 test("missing relationship authority leaves profile editing mounted but hides relationship mutation controls", async ({ page }) => {
