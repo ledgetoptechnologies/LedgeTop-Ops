@@ -118,6 +118,25 @@ describe("reviewed release migration fixtures", () => {
     expect(()=>reviewedOperationsMigrationNames(unknown.url)).toThrow("reviewed-operations-migration-physical-inventory-mismatch");
   });
 
+  it.each([
+    ["operations", "0207_shared_directory_profiles.sql"],
+    ["operations", "0208_shared_profile_portal_authority.sql"],
+    ["operations", "0209_shared_profile_portal_native_writes.sql"],
+    ["client", "0232_shared_profile_edit_authority.sql"],
+  ] as const)("validates exact %s successor %s without expanding historical authority", (application, name) => {
+    const fixture=copyMigrations(application);
+    const reviewed=()=>application==="operations"?reviewedOperationsMigrationNames(fixture.url):reviewedClientMigrationNames(fixture.url);
+    expect(reviewed()).toHaveLength(application==="operations"?199:149);
+    expect(reviewed()).not.toContain(name);
+    const original=readFileSync(join(fixture.directory,name),"utf8").replace(/\r\n/g,"\n");
+    writeFileSync(join(fixture.directory,name),original.replace(/\n/g,"\r\n"));
+    expect(reviewed()).toHaveLength(application==="operations"?199:149);
+    writeFileSync(join(fixture.directory,name),original+"\n-- unreviewed successor drift\n");
+    expect(reviewed).toThrow(`reviewed-${application==="operations"?"operations":"delivery"}-successor-content-contract-mismatch`);
+    unlinkSync(join(fixture.directory,name));
+    expect(reviewed).toThrow(`reviewed-${application==="operations"?"operations":"delivery"}-migration-physical-inventory-mismatch`);
+  });
+
   it("validates appended Client 0231 bytes without granting the candidate frozen 149-entry authority", () => {
     const candidate = "0231_portal_primary_private_ingress_authority.sql";
     const tampered = copyMigrations("client");
