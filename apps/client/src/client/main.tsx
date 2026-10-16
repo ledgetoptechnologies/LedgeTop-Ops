@@ -1,5 +1,6 @@
 import { lazy, StrictMode, Suspense } from "react";
 import { createRoot } from "react-dom/client";
+import { AppDialogHost } from "@ltds/ui";
 import "@ltds/ui/styles.css";
 import "mapbox-gl/dist/mapbox-gl.css";
 import "./styles.css";
@@ -69,6 +70,7 @@ if (!handoffLegacyPublicShare(window.location, url => window.location.replace(ur
             ? <DeliveryApp namespace="client-delegated" initialRoute={deliveryRoute ?? undefined} />
             : <DeliveryApp initialRoute={deliveryRoute ?? undefined} />}
       </Suspense>
+      <AppDialogHost />
     </StrictMode>,
   );
 }

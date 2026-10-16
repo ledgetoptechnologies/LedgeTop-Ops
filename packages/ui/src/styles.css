@@ -522,6 +522,11 @@ html:has(.ltds-dialog[open]) { overflow: hidden; }
 .ltds-form-section > h3 { margin: 0; font-size: .78rem; font-weight: 800; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
 .ltds-form-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .9rem 1.1rem; }
 .ltds-form-grid > .ltds-span-2 { grid-column: 1 / -1; }
+/* In-app replacements for window.prompt (AppDialogHost). */
+.ltds-app-dialog-form { display: grid; gap: .75rem; }
+.ltds-app-dialog-error { margin: 0; color: var(--red); font-size: .84rem; }
+.ltds-app-dialog-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: .5rem; margin-top: .25rem; }
+@media (max-width: 520px) { .ltds-app-dialog-actions > button { flex: 1 1 auto; min-height: 44px; } }
 .ltds-field { display: grid; gap: .35rem; min-width: 0; font-size: .84rem; font-weight: 750; color: var(--ink); }
 .ltds-field > :is(input, select, textarea) { width: 100%; min-width: 0; font-size: .95rem; }
 .ltds-field > small, .ltds-field-hint { color: var(--muted); font-size: .78rem; font-weight: 450; line-height: 1.4; }

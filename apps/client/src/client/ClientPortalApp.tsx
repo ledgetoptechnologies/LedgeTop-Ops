@@ -7,7 +7,7 @@ import {
   type FormEvent,
   type ReactNode,
 } from "react";
-import { AccountMenu, Card, EmptyState, Loading, LtMark, StatusPill, openViewerShell, Skeleton } from "@ltds/ui";
+import { AccountMenu, Card, EmptyState, Loading, LtMark, StatusPill, openViewerShell, requestText, Skeleton } from "@ltds/ui";
 import type { DeliveryLocationCollection } from "@ltds/shared";
 import type { RequestError } from "./bulk-download";
 import {
@@ -3101,9 +3101,8 @@ export function ClientPortalApp({
   ) => {
     const note =
       response === "request_change"
-        ? window.prompt(
-            "Describe what should change in the operational estimate",
-          )
+        ? await requestText({ title: "Request a change", label: "What should change in the operational estimate?",
+            multiline: true, confirmLabel: "Send change request" })
         : null;
     if (response === "request_change" && !note?.trim()) return;
     if (
