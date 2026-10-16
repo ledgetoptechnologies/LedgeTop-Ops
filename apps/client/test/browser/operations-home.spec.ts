@@ -398,6 +398,37 @@ test("unified portal accepts server metadata boundaries and opaque slash IDs", a
   ]);
 });
 
+test("PA workspace Home navigation and reload stay independent of denied Operations home", async ({ page }) => {
+  const calls = await interceptClientApi(page, 403, { error: "service home access denied" }, {
+    account: { id: "pa-account", displayName: "PA client workspace" }, capabilities: {},
+  });
+  await page.goto("/portal/dashboard");
+  await expect(page.getByRole("heading", { name: "PA client workspace", exact: true })).toBeVisible();
+  const navigation = async () => {
+    const mobile = page.getByRole("button", { name: "Open navigation", exact: true });
+    if (await mobile.isVisible()) {
+      await mobile.click();
+      return page.getByRole("navigation", { name: "Mobile client portal navigation", exact: true });
+    }
+    return page.getByRole("navigation", { name: "Client portal", exact: true });
+  };
+  let nav = await navigation();
+  await expect(nav.getByRole("link", { name: "Home", exact: true })).toHaveAttribute("href", "/portal/dashboard");
+  await nav.getByRole("link", { name: "Projects", exact: true }).click();
+  await expect(page).toHaveURL(/\/portal\/projects$/);
+  nav = await navigation();
+  await nav.getByRole("link", { name: "Home", exact: true }).click();
+  await expect(page).toHaveURL(/\/portal\/dashboard$/);
+  await page.reload();
+  await expect(page.getByRole("heading", { name: "PA client workspace", exact: true })).toBeVisible();
+  await page.goBack();
+  await expect(page).toHaveURL(/\/portal\/projects$/);
+  await page.goForward();
+  await expect(page).toHaveURL(/\/portal\/dashboard$/);
+  expect(calls).not.toContain("/api/client/v2/operations/home");
+  expect(calls).toContain("/api/client/session");
+});
+
 for (const [status, heading] of [[401, "Sign in required"], [403, "Service home access is not enabled"], [503, "Service home unavailable"]] as const) {
   test(`${status} never starts the legacy portal`, async ({ page }) => {
     const calls = await interceptClientApi(page, status, { error: "unavailable" });

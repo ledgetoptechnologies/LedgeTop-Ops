@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { Brand, Card, Loading } from "@ltds/ui";
+import { clientPortalPath } from "./portal-route";
 
 type AcceptanceState =
   | { status: "submitting" }
@@ -44,8 +45,8 @@ export function InvitationAcceptanceApp({ token }: { token: string | null }) {
     <main className="client-portal-gate-main" aria-live="polite">
       <Card>
         {state.status === "submitting" && <><h1>Accepting invitation</h1><p className="portal-copy">Confirming your secure workspace access…</p><Loading /></>}
-        {state.status === "accepted" && <><h1>Workspace access ready</h1><p className="portal-copy">{state.replayed ? "This invitation was already accepted by your signed-in account." : "Your invitation was accepted."}</p><a className="button-primary portal-invitation-continue" href="/portal">Open client portal</a></>}
-        {state.status === "error" && <><h1>Invitation unavailable</h1><p className="portal-form-error" role="alert">{state.message}</p><a className="button-ghost portal-invitation-continue" href="/portal">Go to client portal</a></>}
+        {state.status === "accepted" && <><h1>Workspace access ready</h1><p className="portal-copy">{state.replayed ? "This invitation was already accepted by your signed-in account." : "Your invitation was accepted."}</p><a className="button-primary portal-invitation-continue" href={clientPortalPath("dashboard")}>Open client portal</a></>}
+        {state.status === "error" && <><h1>Invitation unavailable</h1><p className="portal-form-error" role="alert">{state.message}</p><a className="button-ghost portal-invitation-continue" href={clientPortalPath("dashboard")}>Go to client portal</a></>}
       </Card>
     </main>
   </div>;
