@@ -59,14 +59,14 @@ function CurrencyFigures({ bucket, expenseCurrencyKnown, showUnavailableResult =
   return <div className="finance-figures">
     <Figure label="Adjusted income" value={formatAmount(bucket.payments.adjustedNetIncome, c)}
       hint={`${bucket.payments.count} payment${bucket.payments.count === 1 ? "" : "s"} · after refunds and fees`} />
-    <Figure label="Payments received" value={formatAmount(bucket.payments.received, c)} />
+    <Figure label="Payments received" value={formatAmount(bucket.payments.received, c)} hint="Before refunds and fees" />
     <Figure label="Outstanding" value={formatAmount(bucket.receivables.outstanding, c)}
       hint={`${bucket.receivables.count} open invoice${bucket.receivables.count === 1 ? "" : "s"}, all time`} />
     <Figure label="Overdue" value={formatAmount(bucket.receivables.overdue, c)} tone={overdue ? "danger" : undefined} hint="All time" />
     {expenseCurrencyKnown && bucket.recordedOperatingResult !== null
-      ? <Figure label="Recorded operating result" value={formatAmount(bucket.recordedOperatingResult, c)}
-        hint={`Expenses ${formatAmount(bucket.expenses.total, c)}${bucket.expenses.pending ? ` · ${formatAmount(bucket.expenses.pending, c)} pending` : ""}`} />
-      : showUnavailableResult && <Figure label="Recorded operating result" value="Not available" tone="muted" hint="Expense currency isn't configured in Project Alpha." />}
+      ? <Figure label="Operating result" value={formatAmount(bucket.recordedOperatingResult, c)}
+        hint={`After ${formatAmount(bucket.expenses.total, c)} recorded expenses${bucket.expenses.pending ? ` · ${formatAmount(bucket.expenses.pending, c)} pending` : ""}`} />
+      : showUnavailableResult && <Figure label="Operating result" value="Not available" tone="muted" hint="Expense currency isn't configured in Project Alpha." />}
   </div>;
 }
 
