@@ -1,5 +1,6 @@
 import { HTTPException } from 'hono/http-exception';
 import { d1TablesPresent } from './schema-readiness';
+import { d1ColumnPresent } from '../../../client/src/worker/schema-readiness';
 import type { Env } from './types';
 
 type Databases=Pick<Env,'OPS_DB'|'DELIVERY_DB'>;
@@ -117,4 +118,21 @@ export async function reconcilePrimaryFolderMutation(env:Databases,operationId:s
     .bind(operationId,row.phase).run();
   if(Number(changed.meta.changes)!==1)conflict('Folder authority operation changed during review');
   return {operationId,state:'completed' as const,replayed:false};
+}
+
+/** Explicit ownership has an independently selected division. Disable its
+ * Delivery route before the supported sync can deactivate that division. */
+export async function suspendExplicitBindingsForDivisionDeactivation(env:Databases,divisionIds:string[]):Promise<void>{
+  if(!divisionIds.length||!await d1ColumnPresent(env.DELIVERY_DB,'portal_primary_staff_bindings','ops_division_id'))return;
+  const database=env.DELIVERY_DB.withSession('first-primary');
+  const rows=await database.prepare(`SELECT binding_id,version FROM portal_primary_staff_bindings
+    WHERE ownership_kind='explicit_workspace' AND state='active' AND ops_division_id IN(SELECT value FROM json_each(?)) LIMIT 101`)
+    .bind(JSON.stringify(divisionIds)).all<{binding_id:string;version:number}>();
+  if(rows.results.length>100)conflict('Too many explicit folder links require division review');
+  for(const row of rows.results)await database.batch([
+    database.prepare(`UPDATE portal_primary_staff_bindings SET state='suspended',version=version+1,updated_at=datetime('now') WHERE binding_id=? AND state='active' AND version=?`).bind(row.binding_id,row.version),
+    database.prepare(`UPDATE portal_v2_folder_bindings SET status='suspended',updated_at=datetime('now') WHERE id=? AND status='active'`).bind(row.binding_id),
+    database.prepare(`INSERT INTO portal_primary_staff_binding_audit(id,binding_id,binding_version,action,actor_staff_id,details_json)
+      VALUES(?,?,?,'binding.suspended','system:division-deactivation',?)`).bind(crypto.randomUUID(),row.binding_id,row.version+1,JSON.stringify({reasonCode:'division_deactivated'})),
+  ]);
 }

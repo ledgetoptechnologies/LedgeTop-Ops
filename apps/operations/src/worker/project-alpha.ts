@@ -1,6 +1,5 @@
 import type { Env } from "./types";
-import { reservePrimaryFolderMutation,attemptPrimaryFolderMutation,completePrimaryFolderMutation,primaryDivisionDeactivationStatement,type DivisionMutationWitness } from './primary-folder-authority-mutations';
-import { suspendExplicitBindingsForDivisionDeactivation } from './primary-delivery-workspace-bindings';
+import { reservePrimaryFolderMutation,attemptPrimaryFolderMutation,completePrimaryFolderMutation,primaryDivisionDeactivationStatement,suspendExplicitBindingsForDivisionDeactivation,type DivisionMutationWitness } from './primary-folder-authority-mutations';
 import { businessActivityObservationStatement } from "./client-business-activity";
 import { assertProjectAlphaConnectorProof, connectorFenceStatement, resolveProjectAlphaConnector,
   type ProjectAlphaConnectorProof } from "./project-alpha-connectors";

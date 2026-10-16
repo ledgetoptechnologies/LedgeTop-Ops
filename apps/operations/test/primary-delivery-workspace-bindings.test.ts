@@ -9,7 +9,7 @@ import {
 import { searchAuthenticatedDeliveryGrantAudiences,previewAuthenticatedDeliveryGrant,createAuthenticatedDeliveryGrant,revokeAuthenticatedDeliveryGrant } from "../src/worker/authenticated-delivery-grants";
 import { listAuthorizedAuthenticatedDeliveryPrefixes } from "../../client/src/worker/client-portal/authenticated-delivery-grants";
 import type { Env,StaffPrincipal } from "../src/worker/types";
-import { reservePrimaryFolderMutation,attemptPrimaryFolderMutation,completePrimaryFolderMutation,reconcilePrimaryFolderMutation,primaryDivisionDeactivationStatement,readPrimaryFolderMutationReview,retryPrimaryDivisionMutation } from '../src/worker/primary-folder-authority-mutations';
+import { reservePrimaryFolderMutation,attemptPrimaryFolderMutation,completePrimaryFolderMutation,reconcilePrimaryFolderMutation,primaryDivisionDeactivationStatement,readPrimaryFolderMutationReview,retryPrimaryDivisionMutation,suspendExplicitBindingsForDivisionDeactivation } from '../src/worker/primary-folder-authority-mutations';
 vi.mock("cloudflare:workers",()=>({WorkflowEntrypoint:class{},WorkerEntrypoint:class{},DurableObject:class{}}));
 
 const staff:StaffPrincipal={id:"primary-binding-staff",email:"staff@example.test",displayName:"Staff",accessSubject:"staff-subject",projectAlphaUserId:null};
@@ -313,6 +313,9 @@ describe("primary signed workspace folder binding",{timeout:60_000,concurrent:fa
     expect(linked.binding?.state).toBe('active');
     expect(Number((await delayedOriginal.run()).meta.changes)).toBe(0);
     expect(await ops.prepare("SELECT count(*) n FROM divisions WHERE id IN(?,?) AND active=1").bind(...ids).first<number>('n')).toBe(2);
+    await suspendExplicitBindingsForDivisionDeactivation(env,ids);
+    expect(await delivery.prepare("SELECT state FROM portal_primary_staff_bindings WHERE binding_id=?").bind(linked.binding!.bindingId).first<string>('state')).toBe('suspended');
+    expect(await delivery.prepare("SELECT status FROM portal_v2_folder_bindings WHERE id=?").bind(linked.binding!.bindingId).first<string>('status')).toBe('suspended');
     await ops.prepare("DELETE FROM pa_projection_entity_leases WHERE owner_event_id='snapshot:newer'").run();
     await ops.prepare("UPDATE divisions SET active=0 WHERE id IN(?,?)").bind(...ids).run();
   });

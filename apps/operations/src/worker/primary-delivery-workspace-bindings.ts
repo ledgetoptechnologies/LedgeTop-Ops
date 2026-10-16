@@ -155,22 +155,6 @@ export async function compareAndSwapProjectFolderAssociation(env:Env,input:Proje
   if(Number(changed.meta.changes)!==1)fail(409,"Project folder association changed; refresh and try again");
 }
 
-/** Explicit ownership has an independently selected division. Disable its
- * Delivery route before the supported sync can deactivate that division. */
-export async function suspendExplicitBindingsForDivisionDeactivation(env:Env,divisionIds:string[]):Promise<void>{
-  if(!divisionIds.length||!await d1ColumnPresent(env.DELIVERY_DB,'portal_primary_staff_bindings','ops_division_id'))return;
-  const rows=await db(env).prepare(`SELECT binding_id,version FROM portal_primary_staff_bindings
-    WHERE ownership_kind='explicit_workspace' AND state='active' AND ops_division_id IN(SELECT value FROM json_each(?)) LIMIT 101`)
-    .bind(JSON.stringify(divisionIds)).all<{binding_id:string;version:number}>();
-  if(rows.results.length>100)fail(409,'Too many explicit folder links require division review');
-  for(const row of rows.results)await db(env).batch([
-    db(env).prepare(`UPDATE portal_primary_staff_bindings SET state='suspended',version=version+1,updated_at=datetime('now') WHERE binding_id=? AND state='active' AND version=?`).bind(row.binding_id,row.version),
-    db(env).prepare(`UPDATE portal_v2_folder_bindings SET status='suspended',updated_at=datetime('now') WHERE id=? AND status='active'`).bind(row.binding_id),
-    db(env).prepare(`INSERT INTO portal_primary_staff_binding_audit(id,binding_id,binding_version,action,actor_staff_id,details_json)
-      VALUES(?,?,?,'binding.suspended','system:division-deactivation',?)`).bind(crypto.randomUUID(),row.binding_id,row.version+1,JSON.stringify({reasonCode:'division_deactivated'})),
-  ]);
-}
-
 async function opsFolderProof(env:Env,principal:StaffPrincipal|null,folderKey:string):Promise<OpsFolderProof>{
   const prefix=normalizePrefix(folderKey),rows=await env.OPS_DB.withSession("first-primary").prepare(`WITH matching AS(
       SELECT folder.*,length(rtrim(folder.r2_prefix,'/')||'/') prefix_length
