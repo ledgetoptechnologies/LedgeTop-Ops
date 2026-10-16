@@ -242,6 +242,8 @@ function NativeDirectoryProfileEditBound({ kind, recordId, allowPreparedAttempt 
   const [relationshipOrganizationId, setRelationshipOrganizationId] = useState(""), [relationshipBusy, setRelationshipBusy] = useState(false);
   const [profileAttempt, setProfileAttempt] = useState<{ request: FrozenDirectoryRequest; expectedVersion: number; intendedProfile: ReturnType<typeof serializeNativeDirectoryProfile> } | null>(null);
   const [profileAttemptTransmitted, setProfileAttemptTransmitted] = useState(false);
+  // A server permission denial is definite: there is nothing to retry until access changes.
+  const [profileDenied, setProfileDenied] = useState("");
   const [relationshipAttempt, setRelationshipAttempt] = useState<{ request: FrozenDirectoryRequest; expectedVersion: number } | null>(null);
   const load = async (): Promise<boolean> => {
     setLoading(true); setError("");
@@ -279,6 +281,9 @@ function NativeDirectoryProfileEditBound({ kind, recordId, allowPreparedAttempt 
     const frozen = profileAttempt ?? freezeProfileAttempt();
     if (!frozen) return;
     if (!profileAttempt) setProfileAttempt(frozen);
+    // A retry follows a send whose outcome is unknown, so a later denial cannot
+    // prove the original operation never committed.
+    const earlierOutcomeUnknown = profileAttemptTransmitted;
     setProfileAttemptTransmitted(true);
     setBusy(true); setError(""); setSuccess("");
     try {
@@ -286,7 +291,22 @@ function NativeDirectoryProfileEditBound({ kind, recordId, allowPreparedAttempt 
         headers: { "Idempotency-Key": request.mutationId }, body: request.body }),
       { recordId, kind, version: frozen.expectedVersion });
       if (await load()) { setProfileAttempt(null); setProfileAttemptTransmitted(false); setSuccess(status(result as { status?: unknown })); }
-    } catch (caught) { setError(`${message(caught, "The client profile could not be updated.")} Retry sends the same frozen operation. Reload this page to abandon it and review current state before starting another mutation.`); }
+    } catch (caught) {
+      const denied = caught instanceof ApiError && (caught.status === 401 || caught.status === 403);
+      const signedOut = caught instanceof ApiError && caught.status === 401;
+      if (denied && !earlierOutcomeUnknown) {
+        // First send denied: nothing was transmitted before, so nothing can have
+        // committed. Release the operation instead of offering a futile retry.
+        setProfileAttempt(null); setProfileAttemptTransmitted(false);
+        setProfileDenied(signedOut
+          ? `${message(caught, "Your session has ended.")} No change was saved. Sign in again, then reload this page.`
+          : `${message(caught, "You do not have permission to edit this client profile.")} No change was saved. Ask an administrator for client profile edit access, then reload this page.`);
+      } else if (denied) {
+        // An earlier send may still have committed: keep the exact operation and
+        // ask for sign-in or access plus a read-back, never a new mutation.
+        setError(`${message(caught, signedOut ? "Your session has ended." : "Client profile edit access was denied.")} The earlier attempt's outcome is still unknown, so this exact update is kept. ${signedOut ? "Sign in again" : "Once your access is restored"}, retry the same update, or reload this page to read back the current profile before making any other change.`);
+      } else setError(`${message(caught, "The client profile could not be updated.")} Retry sends the same frozen operation. Reload this page to abandon it and review current state before starting another mutation.`);
+    }
     finally { setBusy(false); }
   };
   const submitRelationship = async (event: FormEvent<HTMLFormElement>) => {
@@ -319,12 +339,14 @@ function NativeDirectoryProfileEditBound({ kind, recordId, allowPreparedAttempt 
   const recovery = kind === "client" && usableRelationshipRecoveryCapability(snapshot.relationship?.recovery)
     && snapshot.relationship?.organization ? snapshot.relationship.recovery : null;
   const recoveryTarget = kind === "client" ? snapshot.relationship?.organization ?? null : null;
-  if (!snapshot.editing.available) return <Card title="Client profile"><p>This client profile is read-only because its current relationship or destination evidence is unavailable.</p>
+  if (!snapshot.editing.available) return <Card title="Client profile"><p>{snapshot.editing.reason === "profile_permission_required"
+    ? "This client profile is read-only because your account does not have client profile edit access."
+    : "This client profile is read-only because its current relationship or destination evidence is unavailable."}</p>
     {recoveryTarget && <DirectoryRelationshipRecoveryReview recordId={recordId}
       intendedOrganizationName={recoveryTarget.name}
       intendedOrganizationRecordId={recoveryTarget.recordId} capability={recovery} />}</Card>;
   return <Card title="Edit client profile"><p>Editing version {snapshot.version}. The current server-owned profile is loaded before any change is submitted.</p>
-    <form onSubmit={event => void submit(event)} className="client-directory-profile-form"><ProfileFields kind={kind} value={fields} onChange={change} prefix={id} creating={false} disabled={Boolean(profileAttempt || relationshipAttempt)} />
+    <form onSubmit={event => void submit(event)} className="client-directory-profile-form"><ProfileFields kind={kind} value={fields} onChange={change} prefix={id} creating={false} disabled={Boolean(profileAttempt || relationshipAttempt || profileDenied)} />
       {allowPreparedAttempt && !profileAttempt && <button type="button" className="button-ghost" disabled={busy || Boolean(relationshipAttempt)}
         onClick={prepareProfileAttempt}>Prepare update reference</button>}
       {profileAttempt && !profileAttemptTransmitted && <section aria-label="Prepared profile update"><p>This local staging preparation has not sent a request.</p>
@@ -332,8 +354,9 @@ function NativeDirectoryProfileEditBound({ kind, recordId, allowPreparedAttempt 
           <dd><pre>{JSON.stringify(profileAttempt.intendedProfile, null, 2)}</pre></dd></dl>
         <button type="button" className="button-ghost" disabled={busy} onClick={cancelPreparedProfileAttempt}>Cancel prepared update</button>
       </section>}
+      {profileDenied && <p role="alert">{profileDenied}</p>}
       {error && <p role="alert">{error}</p>}{success && <p role="status">{success}</p>}
-      <button className="button-orange" disabled={busy || Boolean(relationshipAttempt)}>{busy ? "Saving profile…" : profileAttempt
+      <button className="button-orange" disabled={busy || Boolean(relationshipAttempt) || Boolean(profileDenied)}>{busy ? "Saving profile…" : profileAttempt
         ? profileAttemptTransmitted ? "Retry same profile update" : "Submit prepared profile update" : "Save client profile"}</button>
     </form>
     {kind === "client" && snapshot.relationship && (snapshot.relationship.editing.available
