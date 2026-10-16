@@ -150,7 +150,7 @@ function explicitTarget(overrides: Record<string, unknown> = {}) {
     sourceId: "project-alpha:primary", contextVersion: "c".repeat(64), ownershipMode: "explicit_workspace", divisionId: "division-north", ...overrides};
 }
 async function mockExplicit(page: Page, options: {divisions?: unknown; targets?: (divisionId: string) => unknown[]; binding?: (body: Record<string, unknown>) => unknown;
-  onPost?: (route: Route, attempt: number) => Promise<unknown> | undefined} = {}) {
+  onPost?: (route: Route, attempt: number) => Promise<unknown> | undefined; divisionsDelayMs?: number} = {}) {
   let posts = 0;
   let bound = false;
   const searches: string[] = [];
@@ -160,7 +160,11 @@ async function mockExplicit(page: Page, options: {divisions?: unknown; targets?:
     if (call.path === "/api/delivery/authenticated-grants/binding-targets" && call.method === "GET") {
       const divisionId = new URL(route.request().url()).searchParams.get("divisionId");
       searches.push(divisionId ?? "");
-      if (!divisionId) return route.fulfill({json: {targets: [], divisionsRequired: true, divisions: options.divisions ?? explicitDivisions}});
+      if (!divisionId) {
+        // A slow division response must not change what the UI (or the test) does.
+        const respond = () => route.fulfill({json: {targets: [], divisionsRequired: true, divisions: options.divisions ?? explicitDivisions}});
+        return options.divisionsDelayMs ? new Promise(resolve => setTimeout(resolve, options.divisionsDelayMs)).then(respond) : respond();
+      }
       return route.fulfill({json: {targets: options.targets ? options.targets(divisionId) : [explicitTarget({divisionId}),
         explicitTarget({divisionId, ownerScopeType: "organization", ownerPublicId: "org-coldwell", ownerName: "Coldwell", contextVersion: "d".repeat(64)})]}});
     }
@@ -248,11 +252,14 @@ for (const [label, divisions, targets] of [
   ["a project-scoped explicit target", explicitDivisions, (divisionId: string) => [explicitTarget({divisionId, ownerScopeType: "project"})]],
   ["a duplicated division choice", [explicitDivisions[0], explicitDivisions[0]], undefined],
 ] as const) test(`binding search rejects ${label}`, async ({page}) => {
-  const {calls} = await mockExplicit(page, {divisions, targets});
+  const {calls} = await mockExplicit(page, {divisions, targets, divisionsDelayMs: 400});
   await openClientWorkspaceTab(page);
   const division = page.getByRole("combobox", {name: "Business division"});
-  if (await division.count()) await division.selectOption("division-north");
-  await expect(page.getByRole("alert").filter({hasText: /choices could not be verified/})).toBeVisible();
+  const rejected = page.getByRole("alert").filter({hasText: /choices could not be verified/});
+  // Wait for whichever settles first; a one-shot count() raced the division response.
+  await expect(division.or(rejected)).toBeVisible();
+  if (await division.isVisible()) await division.selectOption("division-north");
+  await expect(rejected).toBeVisible();
   await expect(page.getByRole("listbox", {name: "Projected Client Workspaces"})).toHaveCount(0);
   await expect(page.getByRole("button", {name: "Review workspace link"})).toHaveCount(0);
   expect(calls.some(call => call.path === "/api/delivery/authenticated-grants/bindings")).toBe(false);
