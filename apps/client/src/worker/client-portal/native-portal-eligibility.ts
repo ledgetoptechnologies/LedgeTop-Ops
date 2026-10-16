@@ -1,4 +1,5 @@
 import type { PortalAuthorizationEnv } from './workspace-v2';
+import { blockBusinessProfileWorkspace,businessProfileAuthorityBatch } from './business-profile-fences';
 import type { VerifiedClientPrincipal } from './types';
 import {
   portalProjectionSourceGuard,
@@ -90,7 +91,8 @@ export async function bindNativePortalEligibility(env: PortalAuthorizationEnv, p
     const args = [...guard.bindings,row.workspace_id,row.public_id,row.source_version,email,row.project_alpha_source_id,
       row.active_generation_id,row.source_sequence,...identityArgs,email,...identityArgs,...identityArgs,
       ...(env.CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED==='true'?[principal.issuer,principal.subject,row.workspace_id,row.workspace_id]:[])];
-    try { await db.batch([
+    const profileFence=await blockBusinessProfileWorkspace(env,row.workspace_id,JSON.stringify(['native-eligibility',principal.issuer,principal.subject,row.public_id,row.source_version,row.source_sequence]));
+    try { await businessProfileAuthorityBatch(db,[profileFence],[
       db.prepare(`INSERT INTO pa_portal_source_write_fences(source_id,write_guard) VALUES(?,CASE WHEN ${live} THEN 1 ELSE 0 END)
         ON CONFLICT(source_id) DO UPDATE SET write_guard=excluded.write_guard`).bind(row.project_alpha_source_id,...args),
       db.prepare(`INSERT OR IGNORE INTO portal_v2_identities(id,issuer,subject,verified_email,status) VALUES(?,?,?,?,'active')`)

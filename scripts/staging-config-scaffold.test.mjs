@@ -156,3 +156,23 @@ test("writes only absent ignored targets and refuses replacement", () => {
   for (const file of written) assert.equal(fs.existsSync(path.join(base, file)), true);
   assert.throws(() => writeRenderedConfigs(base, configs), /already exists/);
 });
+
+// The additive profile RPC bindings retain every existing staging resource and
+// must resolve to the paired staging workers and exact named entrypoints.
+test("shared profile private bindings stay paired and reject production, wrong-entrypoint and duplicate substitutions", () => {
+  const expected = [
+    ["delivery", "SHARED_PROFILE_PORTAL", "ledgetop-ops-staging", "SharedProfilePortalIngress"],
+    ["operations", "SHARED_PROFILE_PORTAL_AUTHORITY", "ledgetop-clients-staging", "SharedProfilePortalAuthorityReader"],
+  ];
+  for (const [app,binding,service,entrypoint] of expected) {
+    const baseline=renderConfigs(root,values);
+    assert.deepEqual(baseline[app].services.filter(item=>item.binding===binding),[{binding,service,entrypoint}]);
+    for(const mutation of ["production","entrypoint","duplicate"]) {
+      const configs=structuredClone(baseline),entry=configs[app].services.find(item=>item.binding===binding);
+      if(mutation==="production")entry.service=service.replace(/-staging$/,"");
+      else if(mutation==="entrypoint")entry.entrypoint="WrongProfileEntrypoint";
+      else configs[app].services.push({...entry});
+      assert(validateRenderedConfigs(root,configs).length>0,`${app} ${mutation} must fail closed`);
+    }
+  }
+});

@@ -6,6 +6,7 @@ import type { ClientPortalPage } from "./portal-route";
 import { clientProjectPath } from "./portal-route";
 import { loadNativeDeliveries, loadNativeFile, loadNativeFolder, loadNativeHierarchy, type NativeDeliveryTarget, type NativeHierarchy, type NativePortalBootstrap, type NativeWorkspaceFeatureKey, type NativeWorkspaceFeatureReadiness, type NativeWorkspaceFeatureState } from "./native-portal-api";
 import { LeaveFeedback,PortalFeedback } from './PortalFeedback';
+import { BusinessProfile } from './BusinessProfile';
 import "./NativeWorkspaceContent.css";
 
 export interface NativeFileBrowserOptions {
@@ -149,7 +150,7 @@ export function NativeWorkspaceContent({ context, page, projectId, feedbackId, o
       ((page === "requests" || page === "request-new") || (page === "project" && projectTab === "requests")) && context.capabilities.requestV2 && renderRequests
         ? renderRequests(requestProjects, page === "project" ? projectId ?? undefined : undefined)
         : page === "project" && projectTab === "models" && projectId && context.capabilities.viewer && renderModels ? renderModels(projectId)
-        : page === "feedback" ? <PortalFeedback nativeWorkspaceId={context.workspace.id} id={feedbackId} /> : page === "account" ? <><Card title="Workspace access"><p>You are viewing resources shared with your signed-in identity in this workspace. Access is evaluated from the current Project Alpha source and workspace authorization.</p></Card>{renderTeam?.()}<FeatureReadiness features={context.features} /></> : page === "not-found" ? <Card title="Page unavailable"><p>This page is not available in this workspace.</p></Card> : relevantHierarchy ? <>
+        : page === "feedback" ? <PortalFeedback nativeWorkspaceId={context.workspace.id} id={feedbackId} /> : page === "account" ? <><Card title="Workspace access"><p>You are viewing resources shared with your signed-in identity in this workspace. Access is evaluated from the current Project Alpha source and workspace authorization.</p></Card><BusinessProfile workspaceId={context.workspace.id}/>{renderTeam?.()}<FeatureReadiness features={context.features} /></> : page === "not-found" ? <Card title="Page unavailable"><p>This page is not available in this workspace.</p></Card> : relevantHierarchy ? <>
       <Card title={page === "dashboard" ? "Workspace directory" : page === "project" ? "Project" : "Projects"}>
         {!context.capabilities.directoryRead ? <p>The directory is not included in your current workspace access.</p> : <>
           {hierarchyError && <div role="alert"><p>{hierarchyError}</p><button className="button-ghost" onClick={() => hierarchyCursor ? void fetchHierarchy(hierarchyCursor) : setHierarchyRetry(value => value + 1)}>Retry directory</button></div>}

@@ -2,6 +2,7 @@ import { HTTPException } from "hono/http-exception";
 import { isAdministrator } from "./acl";
 import { sha256 } from "./crypto";
 import type { Env, StaffPrincipal } from "./types";
+import { blockOpsSharedProfileEligibility,assertOpsSharedProfileFences,releaseOpsSharedProfileFences } from './shared-profile-delivery-authority-fences';
 
 export interface EligibilityBlockInput { matchType: "issuer_subject" | "email"; issuer?: string; subject?: string; email?: string; reasonCode: string; expiresAt?: string | null }
 
@@ -115,7 +116,9 @@ export async function createEligibilityBlock(env: Env, principal: StaffPrincipal
     return { id: prior.block_id, replayed: true };
   }
   const id = crypto.randomUUID();
+  const {fences:editFences,latch:editLatch}=await blockOpsSharedProfileEligibility(env,{issuer:issuer??null,subject:subject??null,normalizedEmail},JSON.stringify(['eligibility-block',principal.id,key,fingerprint]));
   await db(env).batch([
+    ...assertOpsSharedProfileFences(env,editFences,editLatch),
     db(env).prepare(`INSERT INTO portal_v2_identity_eligibility_blocks
       (id,match_type,issuer,subject,normalized_email,reason_code,expires_at,created_by_actor_type,created_by_actor_id)
       VALUES(?,?,?,?,?,?,?,'staff',?)`).bind(id, input.matchType, issuer, subject, normalizedEmail, input.reasonCode, expiresAt, principal.id),
@@ -124,6 +127,7 @@ export async function createEligibilityBlock(env: Env, principal: StaffPrincipal
       .bind(principal.id, key, fingerprint, id),
     db(env).prepare(`INSERT INTO portal_v2_identity_eligibility_block_audit(block_id,action,actor_staff_id,details_json)
       VALUES(?,'block.created',?,?)`).bind(id, principal.id, JSON.stringify(stable)),
+    ...releaseOpsSharedProfileFences(env,editFences,editLatch),
   ]);
   return { id, replayed: false };
 }

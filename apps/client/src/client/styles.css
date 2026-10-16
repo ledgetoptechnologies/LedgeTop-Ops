@@ -1978,3 +1978,6 @@
 @media (min-width: 641px) {
   .portal-team-panel > button, .portal-team-invite-form > button { justify-self: start; min-width: 12rem; }
 }
+.portal-business-profile fieldset { display: grid; grid-template-columns: repeat(auto-fit,minmax(min(100%,16rem),1fr)); gap: 1rem; min-width: 0; }
+.portal-business-profile label { display: grid; gap: .35rem; min-width: 0; }
+.portal-business-profile input { width: 100%; min-width: 0; box-sizing: border-box; }

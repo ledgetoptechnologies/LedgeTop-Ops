@@ -1,4 +1,5 @@
 import type { Env as ClientEnv } from "../types";
+import { blockBusinessProfileWorkspace,businessProfileAuthorityBatch } from './business-profile-fences';
 import {invitationPublicationAllowed,invitationRequestsReady} from './invitation-approval-policy';
 import { HTTPException } from 'hono/http-exception';
 import { readPortalProjectionSourceProof, portalSourceReadableSql, portalSourceAuthoritiesReady, type PortalProjectionWriteProof } from "../project-alpha-portal-authority";
@@ -393,7 +394,8 @@ async function resolveGlobalIdentity(
       // before the PA repair batch begins.
       const repairBatchClaimGuard = claimTablePresent ? `WHERE NOT EXISTS(SELECT 1 FROM portal_client_authority_workspace_claims claim
         WHERE claim.workspace_id IN (${shells.map(() => "?").join(",")}) AND claim.state='active')` : "";
-      await portalDb(env).batch([
+      const profileFences=await Promise.all(shells.map(shell=>blockBusinessProfileWorkspace(env,shell.workspace_id,JSON.stringify(['legacy-eligibility',principal.issuer,principal.subject,shell.public_id,shell.source_version]))));
+      await businessProfileAuthorityBatch(portalDb(env),profileFences,[
         portalDb(env).prepare(`INSERT OR IGNORE INTO portal_v2_identities
           (id,issuer,subject,verified_email,status) SELECT ?,?,?,?,'active' ${repairBatchClaimGuard}`)
           .bind(identityId, principal.issuer, principal.subject, email,...(claimTablePresent?shells.map(row=>row.workspace_id):[])),

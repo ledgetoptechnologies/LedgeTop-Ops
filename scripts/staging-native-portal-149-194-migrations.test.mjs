@@ -18,7 +18,7 @@ for(const application of ["client","operations"]){
   const source=path.join(repositoryRoot,`apps/${application}/migrations`),destination=path.join(root,`apps/${application}/migrations`);
   fs.mkdirSync(destination,{recursive:true});
   for(const name of fs.readdirSync(source)){
-    if(application==="operations"&&/^\d{4}_/.test(name)&&Number(name.slice(0,4))>OPERATIONS_LATEST_SOURCE_MIGRATION_CHAIN.count)continue;
+    if(/^\d{4}_/.test(name)&&Number(name.slice(0,4))>(application==="operations"?OPERATIONS_LATEST_SOURCE_MIGRATION_CHAIN.count:231))continue;
     fs.copyFileSync(path.join(source,name),path.join(destination,name));
   }
 }

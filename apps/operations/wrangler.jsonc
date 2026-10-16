@@ -196,6 +196,7 @@
   },
   "stream": { "binding": "STREAM" },
   "services": [
+    { "binding": "SHARED_PROFILE_PORTAL_AUTHORITY", "service": "ledgetop-clients", "entrypoint": "SharedProfilePortalAuthorityReader" },
     {
       "binding": "CLIENT_AUTHORITY_WORKSPACE_BINDING",
       "service": "ledgetop-clients",

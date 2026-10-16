@@ -1,4 +1,5 @@
 import { PRIMARY_ALPHA_SOURCE_ID } from "@ltds/shared";
+import { transitionSharedProfilePortalAuthority } from './shared-profile-portal-authority';
 import {
   getPortalSourceAuthority, portalSourceAuthoritiesReady, PortalSourceAuthorityError,
   provisionPortalSourceAuthority, setPortalSourceAuthorityState,
@@ -15,6 +16,10 @@ import {
 } from "./project-alpha-primary-delivery-authority";
 export type ConnectorPortalEnvironment = ProjectAlphaConnectorEnvironment & PortalSourceAuthorityEnvironment;
 type Env = ConnectorPortalEnvironment;
+const portalAuthorityEnvironment = (env: Env): PortalSourceAuthorityEnvironment => ({
+  ...env,
+  SHARED_PROFILE_PORTAL: { transitionAuthority: input => transitionSharedProfilePortalAuthority(env, input) },
+});
 
 type Action = "prepare" | "activate" | "suspend" | "state" | "revision" | "recover";
 interface CoordinationRow {
@@ -193,7 +198,7 @@ async function disable(env: Env, sourceId: string, operation: Coordination): Pro
     if (!current || current.state === "retired") return;
     const connector = identity(await source(env, sourceId));
     try {
-      await setPortalSourceAuthorityState(env, connector, current.version, "suspended", operation.actorId);
+      await setPortalSourceAuthorityState(portalAuthorityEnvironment(env), connector, current.version, "suspended", operation.actorId);
       await assertCurrent(env, operation);
       return;
     } catch (error) {
@@ -232,7 +237,7 @@ export async function configureConnectorPortal(env: Env, sourceId: string, expec
   if ((revision.previousKeyId === null) !== (revision.previousKeyFingerprint === null))
     return unavailable("The current connection event commitment is unavailable");
   await assertCurrent(env, operation);
-  const result = await provisionPortalSourceAuthority(env, trusted, {
+  const result = await provisionPortalSourceAuthority(portalAuthorityEnvironment(env), trusted, {
     credentialRef: revision.credentialRef, accessIssuer: revision.accessIssuer,
     accessAudience: revision.accessAudience, accessSubject: revision.accessSubject,
     eventCurrent: { keyId: revision.currentKeyId, fingerprint: revision.currentKeyFingerprint },
@@ -283,7 +288,7 @@ export async function changeConnectorPortal(env: Env, sourceId: string, expected
   // A later race still fails the Delivery CAS and retains the durable barrier.
   const operation = await begin(env, connector, expectedVersion, state === "active" ? "activate" : "suspend", actorId);
   await assertCurrent(env, operation);
-  const result = await setPortalSourceAuthorityState(env, trusted, expectedPortalVersion, state, actorId);
+  const result = await setPortalSourceAuthorityState(portalAuthorityEnvironment(env), trusted, expectedPortalVersion, state, actorId);
   await finish(env, operation);
   return result;
 }

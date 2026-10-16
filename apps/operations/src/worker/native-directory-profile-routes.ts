@@ -773,6 +773,9 @@ async function update(c: AppContext, kind: NativeDirectoryProfileKind) {
   if (!checkedRecordId.success) throw new HTTPException(404, { message: "Directory record not found" });
   const localRecordId = checkedRecordId.data;
   const baseActor = await nativeActor(c), normalizedProfile = normalizeProfile(input.profile);
+  if (await c.env.OPS_DB.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='native_directory_shared_profile_members'").first()
+    && await c.env.OPS_DB.prepare("SELECT 1 FROM native_directory_shared_profile_members WHERE record_id=?").bind(localRecordId).first())
+    return c.json({ status: "conflict", reason: "shared_profile_required" }, 409);
   const replay = await committedReplay(c.env, baseActor, { operation: "update", mutationId: input.mutationId,
     recordId: localRecordId, expectedLocalVersion: input.expectedLocalVersion, kind, profile: normalizedProfile });
   if (replay) return publicResult(c, replay);
@@ -795,6 +798,11 @@ async function update(c: AppContext, kind: NativeDirectoryProfileKind) {
     : { ...common, kind: "organization", profile: normalizedProfile as NativeDirectoryOrganizationProfile };
   return publicResult(c, await writeProfile(c, write));
 }
+
+// Shared-profile owner routes reuse the exact staff, scope, remote binding and
+// relationship checks; callers cannot supply source credentials or actors.
+export { nativeActor, actorWithGrants, updateDestinations, currentClientRelationship,
+  enrollmentSourceIds, normalizeProfile, organizationProfile, clientUpdateProfile, canonicalRecordId, mutationId };
 
 /** Server-owned choices for a create intent.  These are advisory UI choices;
  * the admission and write paths still re-check every selected value. */

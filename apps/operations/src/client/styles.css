@@ -2539,6 +2539,14 @@ tbody tr:last-child td { border: 0; }
 
 code { background: #eef1f3; padding: .18rem .35rem; border-radius: 5px; overflow-wrap: anywhere; }
 ul { color: var(--muted); }
+.client-directory-profile-fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 15rem), 1fr)); gap: .8rem; margin: 1rem 0; }
+.client-directory-profile-fields > label, .shared-profile-merge > label { display: grid; gap: .35rem; min-width: 0; }
+.client-directory-profile-fields input, .client-directory-profile-fields select { width: 100%; min-width: 0; }
+.shared-profile-merge { display: grid; grid-template-columns: minmax(0, 1fr); gap: .8rem; min-width: 0; }
+.shared-profile-merge :is(input, select) { width: 100%; max-width: 100%; min-width: 0; }
+.shared-profile-review { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 14rem), 1fr)); gap: .6rem; }
+.shared-profile-review dt { color: var(--muted); font-size: .85rem; }
+.shared-profile-review dd { margin: .2rem 0 0; overflow-wrap: anywhere; }
 
 /* ---------------------------------------------------------------------------
    Client request actions (request review queue)

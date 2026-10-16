@@ -1,6 +1,7 @@
 import type { ClientDelegatedShareSignerBinding, ClientOnboardingRecipientBinding, ViewerSessionIssuerBinding } from "@ltds/shared";
 
 export interface Env {
+  SHARED_PROFILE_PORTAL?: import('../../../../packages/shared/src/shared-business-profile').SharedProfilePortalBinding;
   DELIVERY_DB: D1Database;
   DATA_BUCKET: R2Bucket;
   ASSETS: Fetcher;

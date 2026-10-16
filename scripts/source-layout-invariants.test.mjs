@@ -338,8 +338,12 @@ test("the deployed Client Worker keeps reviewed resources, hosts, and portal ass
   // Reviewed recipient-delivery authority adds only explicit disabled flags.
   // Native recipient/data transport flags are explicit and remain disabled;
   // their private production reader binding is present but all HTTP capabilities remain off.
-  assert.equal(normalizedSha256("apps/client/wrangler.jsonc"), "3d39a25dc08680dd6e4d8db4d614bab112a65672597be6355118c49be09d3f5a");
+  // Shared profile editing adds only this private Ops entrypoint binding.
+  assert.equal(normalizedSha256("apps/client/wrangler.jsonc"), "be748e594f6c68c10245425d3ba88051257164db13b933430f3f7ec797d11b66");
   const config = readJson("apps/client/wrangler.jsonc");
+  assert.deepEqual(config.services.filter(service => service.binding === "SHARED_PROFILE_PORTAL"), [{
+    binding: "SHARED_PROFILE_PORTAL", service: "ledgetop-ops", entrypoint: "SharedProfilePortalIngress",
+  }]);
   for (const flag of ["CLIENT_PORTAL_NATIVE_RECIPIENT_SERVICE_HOME_ENABLED",
     "CLIENT_PORTAL_NATIVE_FINANCIAL_ENABLED",
     "CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_WRITER_ENABLED", "CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_STATUS_ENABLED",
@@ -447,6 +451,7 @@ test("the deployed Client Worker keeps reviewed resources, hosts, and portal ass
     migrations_dir: "migrations",
   }]);
   assert.deepEqual(config.services, [
+    { binding: "SHARED_PROFILE_PORTAL", service: "ledgetop-ops", entrypoint: "SharedProfilePortalIngress" },
     {
       binding: "CLIENT_PORTAL_RECIPIENT_ENROLLMENT_BRIDGE",
       service: "ledgetop-ops",
@@ -494,8 +499,12 @@ test("the deployed Client Worker keeps reviewed resources, hosts, and portal ass
 
 test("the deployed Operations Worker keeps catalog and inactive binding transport private and default-off", () => {
   // Newly mounted PA adoption and binding-refresh routes remain disabled in production by default.
-  assert.equal(normalizedSha256("apps/operations/wrangler.jsonc"), "7e18fa494f2e4ccc72331dea6938daf169de8cb7167b641c934c4164cafa6fd7");
+  // Shared profile dispatch adds only this private Client authority reader.
+  assert.equal(normalizedSha256("apps/operations/wrangler.jsonc"), "d19df2f147214b05aa2e8f170a96a92441d516bb83d5259b476f600d6e75fed8");
   const config = readJson("apps/operations/wrangler.jsonc");
+  assert.deepEqual(config.services.filter(service => service.binding === "SHARED_PROFILE_PORTAL_AUTHORITY"), [{
+    binding: "SHARED_PROFILE_PORTAL_AUTHORITY", service: "ledgetop-clients", entrypoint: "SharedProfilePortalAuthorityReader",
+  }]);
   for (const flag of ["PROJECT_ALPHA_API_V2_SYNC_ENABLED", "PROJECT_ALPHA_DIRECTORY_EXACT_ADOPTION_ENABLED", "PROJECT_ALPHA_PROJECT_V2_RECOVERY_ENABLED", "PROJECT_ALPHA_DIRECTORY_EXISTING_RECORD_ADOPTION_ENABLED", "PROJECT_ALPHA_PROJECT_ADOPTION_OPERATIONAL_ENABLED"]) {
     assert.equal([...read("apps/operations/wrangler.jsonc").matchAll(new RegExp(`"${flag}"\\s*:`, "g"))].length, 1);
   }

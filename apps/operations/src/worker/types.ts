@@ -84,6 +84,7 @@ export type Env = Omit<
   | "OPERATIONS_PORTAL_WORKSPACE_PUBLICATION_DISPATCH_ENABLED"
   | "OPERATIONS_PORTAL_WORKSPACE_PUBLICATION"
 > & {
+  SHARED_PROFILE_PORTAL_AUTHORITY?: import('../../../../packages/shared/src/shared-business-profile').SharedProfilePortalAuthorityBinding;
   /** Explicit because Operations modules are also type-checked from sibling Worker projects with narrower generated Env types. */
   ENVIRONMENT?: string;
   /** Default-off explicit active Directory binding revision refresh; local/staging only. */

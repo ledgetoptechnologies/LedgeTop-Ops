@@ -26,10 +26,10 @@ function fixture() {
     const sourceMigrations = path.join(repositoryRoot, "apps", source, "migrations");
     const destinationMigrations = path.join(directory, "migrations");
     fs.mkdirSync(destinationMigrations);
-    // Bootstrap authority remains frozen at its reviewed205 source; later
-    // application migrations do not become part of historical fixtures.
+    // Bootstrap authority remains frozen at reviewed Client150/Operations205;
+    // later application migrations do not enter these historical fixtures.
     for (const name of fs.readdirSync(sourceMigrations).filter(name => name.endsWith(".sql")
-      && (source !== "operations" || !/^\d{4}_/.test(name) || Number(name.slice(0, 4)) <= OPERATIONS_LATEST_SOURCE_MIGRATION_CHAIN.count)))
+      && (!/^\d{4}_/.test(name) || Number(name.slice(0, 4)) <= (source === "operations" ? OPERATIONS_LATEST_SOURCE_MIGRATION_CHAIN.count : 231))))
       fs.copyFileSync(path.join(sourceMigrations, name), path.join(destinationMigrations, name));
     fs.copyFileSync(path.join(repositoryRoot, "docs", "staging", example), path.join(directory, "wrangler.staging.json"));
   }
