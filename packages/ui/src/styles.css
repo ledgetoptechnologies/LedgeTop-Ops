@@ -283,6 +283,9 @@ input[type=file]::file-selector-button:hover { background: #e2e7eb; }
   margin-bottom: 1rem;
 }
 .ltds-card h2 { font-size: 1.05rem; margin: 0; }
+/* The header already spaces the body; don't stack a paragraph's top margin on it. */
+.ltds-card > header + :is(p, ul, ol, dl, h3) { margin-top: 0; }
+.ltds-card > header:only-child { margin-bottom: 0; }
 
 /* ---------------------------------------------------------------------------
    Status pills

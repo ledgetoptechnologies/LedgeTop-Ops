@@ -13,13 +13,17 @@
 .native-feature-list li:first-child { border-top: 0; }
 .native-feature-list li > div { display: grid; gap: .3rem; min-width: 0; }
 .native-feature-list small { color: var(--muted); line-height: 1.45; overflow-wrap: anywhere; }
-.native-feature-status { border: 1px solid var(--border); border-radius: 999px; font-size: .78rem; font-weight: 700; padding: .35rem .65rem; white-space: nowrap; }
-.native-feature-status-available { border-color: color-mix(in srgb, var(--success, #2e9d61) 50%, var(--border)); color: var(--success, #2e9d61); }
-.native-feature-status-not_in_access, .native-feature-status-not_supported { color: var(--muted); }
-.native-feature-status-temporarily_unavailable { border-color: color-mix(in srgb, var(--warning, #d88916) 50%, var(--border)); color: var(--warning, #d88916); }
+/* Same filled pills as the shared StatusPill so status reads the same everywhere. */
+.native-feature-status { display: inline-flex; align-items: center; border: 0; border-radius: 999px; background: #edf0f2; color: #46515c; font-size: .75rem; font-weight: 800; padding: .25rem .58rem; white-space: nowrap; }
+.native-feature-status-available { background: var(--green-soft); color: var(--green); }
+.native-feature-status-not_in_access, .native-feature-status-not_supported { background: #edf0f2; color: #46515c; }
+.native-feature-status-temporarily_unavailable { background: var(--amber-soft); color: var(--amber); }
 @media (max-width: 640px) {
   .native-workspace-list li { align-items: stretch; flex-direction: column; }
   .native-workspace-list li > .button, .native-workspace-list li > button { align-self: flex-start; max-width: 100%; white-space: normal; }
   .native-feature-list li { grid-template-columns: minmax(0, 1fr); }
   .native-feature-status { justify-self: start; }
 }
+/* Grid cards already space children with gap; margins would double it. */
+.native-workspace .ltds-card > header { margin-bottom: 0; }
+.native-workspace .ltds-card > p { margin: 0; }
