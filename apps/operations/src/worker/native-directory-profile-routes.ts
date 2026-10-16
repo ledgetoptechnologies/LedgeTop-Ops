@@ -1,6 +1,7 @@
 import { Hono, type Context } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
+import { projectAlphaSourceName } from "@ltds/shared";
 import { readBoundedJson } from "./bounded-json";
 import { authenticateNativeStaffWithAdmissionVersion } from "./native-staff-auth";
 import { directoryMaterializationReadSource } from "./project-alpha-directory-materialization-read-source";
@@ -834,7 +835,7 @@ async function createOptions(c: AppContext) {
   const sources: Array<{ id: string; name: string }> = [];
   for (const sourceId of listEnabledProjectAlphaApiV2SourceIds(c.env))
     if (SOURCE_ID.test(sourceId) && await configuredDestination(c.env, sourceId, "create-options"))
-      sources.push({ id: sourceId, name: `Project Alpha (${sourceId.slice("project-alpha:".length)})` });
+      sources.push({ id: sourceId, name: projectAlphaSourceName(sourceId) });
   const organizations = kind === "client" ? (await organizationChoicesForActor(c, actor))
     .map(choice => ({ recordId: choice.recordId, expectedVersion: choice.expectedVersion, name: choice.name,
       sourceIds: choice.sourceIds })) : [];

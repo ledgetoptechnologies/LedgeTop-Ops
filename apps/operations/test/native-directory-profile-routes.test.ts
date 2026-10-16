@@ -270,7 +270,7 @@ describe("native Directory profile routes", () => {
   it("offers only server-derived source and effective scope choices for the create editor", async () => {
     const response = await fixture().send(`${NATIVE_DIRECTORY_PROFILE_ROUTE}/create-options?kind=client`, null, "GET");
     expect(response.status).toBe(200);
-    await expect(response.json()).resolves.toEqual({ kind: "client", sources: [{ id: sourceId, name: "Project Alpha (primary)" }],
+    await expect(response.json()).resolves.toEqual({ kind: "client", sources: [{ id: sourceId, name: "Ledge Top Drone Services" }],
       scopes: [{ id: "drone", name: "Drone operations", divisions: [{ id: "survey", name: "Survey" }] }],
       organizations: [{ recordId: acquiredOrganizationId, expectedVersion: 3, name: "Acquired Organization",
         sourceIds: [sourceId, "project-alpha:secondary"] }] });
@@ -299,8 +299,8 @@ describe("native Directory profile routes", () => {
     const choices = await fixture().send(`${NATIVE_DIRECTORY_PROFILE_ROUTE}/create-options?kind=organization`, null, "GET");
     expect(choices.status).toBe(200);
     await expect(choices.json()).resolves.toMatchObject({ sources: [
-      { id: sourceId, name: "Project Alpha (primary)" },
-      { id: secondarySourceId, name: "Project Alpha (secondary)" },
+      { id: sourceId, name: "Ledge Top Drone Services" },
+      { id: secondarySourceId, name: "Ledge Top Technologies" },
     ] });
 
     const db = database(), app = fixture({ db });
@@ -388,9 +388,9 @@ describe("native Directory profile routes", () => {
 
   it("does not offer choices when a required create permission is denied, a division is inactive, or the API-v2 source is disabled", async () => {
     const denied = await fixture({ db: database({ deny: "directory.identity.link" }) }).send(`${NATIVE_DIRECTORY_PROFILE_ROUTE}/create-options?kind=client`, null, "GET");
-    await expect(denied.json()).resolves.toEqual({ kind: "client", sources: [{ id: sourceId, name: "Project Alpha (primary)" }], scopes: [], organizations: [] });
+    await expect(denied.json()).resolves.toEqual({ kind: "client", sources: [{ id: sourceId, name: "Ledge Top Drone Services" }], scopes: [], organizations: [] });
     const inactiveDivision = await fixture({ db: database({ inactiveDivision: true }) }).send(`${NATIVE_DIRECTORY_PROFILE_ROUTE}/create-options`, null, "GET");
-    await expect(inactiveDivision.json()).resolves.toEqual({ kind: "organization", sources: [{ id: sourceId, name: "Project Alpha (primary)" }],
+    await expect(inactiveDivision.json()).resolves.toEqual({ kind: "organization", sources: [{ id: sourceId, name: "Ledge Top Drone Services" }],
       scopes: [{ id: "drone", name: "Drone operations", divisions: [] }], organizations: [] });
     mocks.sourceIds.mockReturnValueOnce([]);
     const sourceDisabled = await fixture().send(`${NATIVE_DIRECTORY_PROFILE_ROUTE}/create-options`, null, "GET");
