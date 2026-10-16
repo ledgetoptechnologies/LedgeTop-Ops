@@ -22,7 +22,7 @@ const bucket=z.object({currency,decimalScale:z.literal(2),
 const summary=z.object({apiVersion:z.literal('2'),sourceInstanceId:z.uuid(),applicationId:z.uuid(),historyEpoch:z.uuid(),requestId:z.uuid(),
   asOf:z.iso.datetime(),period,snapshotSha256:z.string().regex(/^[a-f0-9]{64}$/),scope:z.literal('company'),
   accountingBasis:z.literal('payment-date-current-adjustments-and-recorded-expense-date'),
-  coverage:z.object({complete:z.boolean(),currencyPolicy:z.literal('linked-document-currency-only'),
+  coverage:z.object({complete:z.boolean(),currencyPolicy:z.enum(['linked-document-currency-only','explicit-company-base-and-linked-document-currency']),
     baseCurrency:currency.nullable(),unknownPaymentCurrencyCount:count,unknownReceivableCurrencyCount:count,unallocatedProjectPaymentCount:count,
     expenseCurrencyKnown:z.boolean(),processorFeeEstimateCount:count,
     recordedExpenseCounts:z.object({total:count,pending:count,confirmed:count,reimbursed:count,other:count}).strict(),
@@ -42,6 +42,9 @@ export function decodeCompanyFinanceSummary(bytes:Uint8Array,expected:{sourceIns
     ||Date.parse(value.asOf)>now+60_000||Date.parse(value.asOf)<now-300_000
     ||new Set(value.currencies.map(row=>row.currency)).size!==value.currencies.length)return null;
   const coverage=value.coverage,expenses=coverage.recordedExpenseCounts;
+  const configured=coverage.currencyPolicy==='explicit-company-base-and-linked-document-currency';
+  if(configured!==coverage.expenseCurrencyKnown||configured!==(coverage.baseCurrency!==null)
+    ||configured&&!value.currencies.some(row=>row.currency===coverage.baseCurrency))return null;
   if(expenses.total!==expenses.pending+expenses.confirmed+expenses.reimbursed+expenses.other
     ||coverage.complete&&(coverage.unknownPaymentCurrencyCount>0||coverage.unknownReceivableCurrencyCount>0||coverage.unallocatedProjectPaymentCount>0
       ||!coverage.expenseCurrencyKnown&&expenses.total>0))return null;
@@ -52,6 +55,15 @@ export function decodeCompanyFinanceSummary(bytes:Uint8Array,expected:{sourceIns
         ||row.expenses.pending!==null||row.expenses.confirmed!==null||row.expenses.reimbursed!==null
         ||row.recordedOperatingResult!==null)
       ||atomic(row.receivables.overdue)>atomic(row.receivables.outstanding))return null;
+    if(configured){
+      if(row.expenses.count===null||row.expenses.total===null||row.expenses.pending===null
+        ||row.expenses.confirmed===null||row.expenses.reimbursed===null)return null;
+      if(row.currency!==coverage.baseCurrency&&(row.expenses.count!==0||atomic(row.expenses.total)!==0n
+        ||atomic(row.expenses.pending)!==0n||atomic(row.expenses.confirmed)!==0n||atomic(row.expenses.reimbursed)!==0n))return null;
+      if(row.currency===coverage.baseCurrency&&row.expenses.count!==expenses.total)return null;
+      if(row.payments.adjustedNetIncome===null?row.recordedOperatingResult!==null:
+        row.recordedOperatingResult===null||atomic(row.recordedOperatingResult)!==atomic(row.payments.adjustedNetIncome)-atomic(row.expenses.total))return null;
+    }
   }
   return value;
 }

@@ -42,6 +42,16 @@ describe('exact aggregate boundary',()=>{
   it('uses the configured business calendar across UTC month boundaries',()=>{
     expect(currentFinancePeriod('America/Chicago',new Date('2026-11-01T03:00:00Z'))).toEqual({from:'2026-10-01',to:'2026-10-31',dateBasis:'stored-calendar-date'});
   });
+  it('accepts explicit USD expense reporting without assigning those expenses to CAD',()=>{
+    const usd:FinanceMoneyBucket={...bucket('USD','300.00'),expenses:{count:2,total:'100.00',pending:'25.00',confirmed:'75.00',reimbursed:'0.00'},recordedOperatingResult:'200.00'};
+    const cad:FinanceMoneyBucket={...bucket('CAD','20.00'),expenses:{count:0,total:'0.00',pending:'0.00',confirmed:'0.00',reimbursed:'0.00'},recordedOperatingResult:'20.00'};
+    const value={...payload([usd,cad]),coverage:{...payload().coverage,complete:true,currencyPolicy:'explicit-company-base-and-linked-document-currency' as const,
+      baseCurrency:'USD',expenseCurrencyKnown:true,recordedExpenseCounts:{total:2,pending:1,confirmed:1,reimbursed:0,other:0}}};
+    expect(decodeCompanyFinanceSummary(encode(value),expected)).toEqual(value);
+    expect(decodeCompanyFinanceSummary(encode({...value,currencies:[usd,{...cad,expenses:usd.expenses}]}),expected)).toBeNull();
+    expect(decodeCompanyFinanceSummary(encode({...value,coverage:{...value.coverage,baseCurrency:null}}),expected)).toBeNull();
+    expect(decodeCompanyFinanceSummary(encode({...value,currencies:[{...usd,recordedOperatingResult:'201.00'},cad]}),expected)).toBeNull();
+  });
 });
 
 describe('bounded credential transport',()=>{
