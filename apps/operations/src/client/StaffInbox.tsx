@@ -1,3 +1,4 @@
+import { Skeleton } from "@ltds/ui";
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { ApiError, api } from "./api";
 import { inboxDate, inboxEndpoint, inboxLabels, inboxSources, parseInboxPage, type InboxAccess, type InboxItem, type InboxSource } from "./staff-inbox";
@@ -74,7 +75,7 @@ function InboxSection({ source, q, onSignedOut }: { source: InboxSource; q: stri
   return <section className="staff-inbox-section" aria-label={label.title}>
     <header><h3>{label.title}</h3><p>{label.description}</p></header>
     {error && <div className="staff-inbox-error" role="alert"><p>{error}</p><button className="button-ghost" disabled={loading} onClick={() => void load(retry.current)}>Retry {label.title.toLowerCase()}</button></div>}
-    {loading && <p role="status">Loading {label.title.toLowerCase()}…</p>}
+    {loading && <Skeleton variant="list" rows={3} label={`Loading ${label.title.toLowerCase()}…`} />}
     {notice && <p role="status">{notice}</p>}
     {updated && <p className="staff-inbox-freshness">{rows.length.toLocaleString("en-US")} shown{cursor ? " · More available" : ""} · Updated {updated}{error ? " · Not refreshed" : ""}</p>}
     <div className="staff-inbox-items">{rows.map(item => <article key={item.id}>

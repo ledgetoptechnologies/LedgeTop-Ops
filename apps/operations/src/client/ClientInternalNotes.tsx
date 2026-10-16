@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Card, EmptyState } from "@ltds/ui";
+import { Card, EmptyState, Skeleton } from "@ltds/ui";
 import { api, ApiError } from "./api";
 import "./ClientInternalNotes.css";
 
@@ -93,7 +93,7 @@ export function ClientInternalNotes({ root, contextVersion, contextSignal, onInv
   return <Card title="Internal notes">
     <section className="client-internal-notes" aria-label={`Internal ${subject} notes`} aria-busy={state.busy}>
       <p className="client-internal-notes-private">Operations staff only. These notes are never shown in the client portal or synchronized to Project Alpha.</p>
-      {!data && state.busy && <p role="status">Loading internal notes…</p>}
+      {!data && state.busy && <Skeleton variant="list" rows={3} label="Loading internal notes…" />}
       {!data && state.error && <><div role="alert"><EmptyState title="Internal notes unavailable" detail={state.error} /></div>
         <button type="button" className="button-ghost" onClick={refresh}>Retry notes</button></>}
       {data && <>

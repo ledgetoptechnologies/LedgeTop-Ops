@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
-import { Card, StatusPill } from "@ltds/ui";
+import { Card, StatusPill, Skeleton } from "@ltds/ui";
 import { CLIENT_FEEDBACK_NOTE_LIMIT, type ClientFeedbackEvent, type ClientFeedbackStatus, type StaffClientFeedbackItem } from "@ltds/shared";
 import { api, ApiError } from "./api";
 import "./OperationsFeedback.css";
@@ -124,7 +124,7 @@ export function OperationsFeedback() {
       {route.accountId && <p>Showing feedback for this client account. <a href={path({ ...route, accountId: null })}>Show all clients</a></p>}</>}
     {notice && <p role="status">{notice}</p>}
     {error && <div role="alert"><p>{error}</p>{!route.invalid && <button className="button-ghost" onClick={() => void load(retryCursor.current)}>Retry feedback</button>}</div>}
-    {loading && <p role="status">Loading feedback…</p>}
+    {loading && <Skeleton variant="list" rows={3} label="Loading feedback…" />}
     {!route.id && <><div className="operations-feedback-list">{items.map(item => <Card key={item.id}><a href={path(route, item.id)}><h3>{item.target.label}</h3></a><FeedbackContent item={item} /></Card>)}</div>
       {!loading && !error && !items.length && <p>{cursor ? "No matching feedback in this page. Continue to check more records." : "No feedback matches this view."}</p>}
       {cursor && <button className="button-ghost" disabled={loading} onClick={() => void load(cursor)}>Load more feedback</button>}</>}

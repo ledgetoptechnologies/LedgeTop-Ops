@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type MutableRefObject } from "react";
-import { Card, EmptyState, StatusPill } from "@ltds/ui";
+import { Card, EmptyState, StatusPill, Skeleton } from "@ltds/ui";
 import { api, ApiError } from "./api";
 import "./OrganizationOperationalContacts.css";
 
@@ -253,7 +253,7 @@ export function OrganizationOperationalContacts({ root, contextVersion, contextS
   return <Card title="Organization contacts">
     <section className="organization-operational-contacts" aria-label="Organization operational contacts" aria-busy={state.busy || saving || optionsBusy}>
       <p>These contacts are operational reference roles only. They do not grant portal access, delivery access, billing authority, or notification authority.</p>
-      {!data && state.busy && <p role="status">Loading organization contacts…</p>}
+      {!data && state.busy && <Skeleton variant="list" rows={3} label="Loading organization contacts…" />}
       {!data && state.error && <><div role="alert"><EmptyState title="Organization contacts unavailable" detail={state.error} /></div>
         <button type="button" className="button-ghost" onClick={refresh}>Retry organization contacts</button></>}
       {data && <>

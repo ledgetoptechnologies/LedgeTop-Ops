@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
-import { Brand, Card, Loading } from "@ltds/ui";
+import { Brand, Card, Loading, Skeleton } from "@ltds/ui";
 import "./ClientOnboardingStaff.css";
 
 type StaffSession = { csrfToken: string; verifiedUntil: string };
@@ -272,7 +272,7 @@ function ClientOnboardingReview({ session }: { session: StaffSession }) {
     {review && nativeOnlyEligible && !approval && <div className="onboarding-approval-action"><p>{review.fields.clientType === "business"
       ? "This atomically creates one native Operations organization and one linked client/contact."
       : "This creates one native Operations client record with no organization."} PA enrollment is optional and explicit; this action never grants portal or public-link access.</p>
-      {availableSources === null ? <p role="status">Checking PA enrollment choices…</p>
+      {availableSources === null ? <Skeleton variant="text" lines={2} label="Checking PA enrollment choices…" />
         : <fieldset><legend>Project Alpha enrollment</legend>
           {availableSources.length === 0 && <p>No eligible PA destinations are currently available.</p>}
           {availableSources.map(sourceId => <label key={sourceId}><input type="checkbox"

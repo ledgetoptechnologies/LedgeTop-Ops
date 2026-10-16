@@ -1,3 +1,4 @@
+import { Skeleton } from "@ltds/ui";
 import { useEffect, useRef, useState } from "react";
 
 export type ArchiveEntry = { path: string; name: string; kind: "folder" | "file"; size?: number };
@@ -26,7 +27,7 @@ export function IncomingArchiveBrowser({ uploadId, active, loader }: { uploadId:
     <h3>Archive contents</h3><p className="muted">Names and sizes only. Download the archive to open its files. Listing contents is not a malware scan.</p>
     <nav aria-label="Archive breadcrumb"><button type="button" className="button-ghost button-small" onClick={() => setPath("")}>Root</button>{crumbs.map((crumb, index) => <span key={`${crumb}-${index}`}> / <button type="button" className="button-ghost button-small" onClick={() => setPath(crumbs.slice(0, index + 1).join("/"))}>{crumb}</button></span>)}</nav>
     <label style={{ display: "grid", gap: "0.5rem", marginBlock: "1rem" }}>Search archive names <input value={query} maxLength={100} onChange={event => setQuery(event.target.value)} /></label>
-    {page.status === "pending" && <p role="status">Loading archive…</p>}{page.status === "failed" && <p role="alert">Archive could not be loaded.</p>}
+    {page.status === "pending" && <Skeleton variant="list" rows={3} label="Loading archive…" />}{page.status === "failed" && <p role="alert">Archive could not be loaded.</p>}
     {page.status === "ready" && <><p role="status">{page.entries.length} items shown in this folder{page.nextCursor ? " · more available" : ""}</p><ul>{page.entries.map(entry => <li key={entry.path} style={{ overflowWrap: "anywhere" }}>{entry.kind === "folder" ? <button type="button" className="button-ghost button-small" onClick={() => setPath(entry.path.replace(/\/$/, ""))}>{entry.name}/</button> : <span>{entry.name}{entry.size === undefined ? "" : ` (${entry.size} bytes)`}</span>}</li>)}</ul>{page.nextCursor && <button type="button" className="button-ghost" onClick={more} disabled={loadingMore}>{loadingMore ? "Loading…" : "Load more"}</button>}</>}
   </section>;
 }

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type MutableRefObject } from "react";
-import { Card, EmptyState } from "@ltds/ui";
+import { Card, EmptyState, Skeleton } from "@ltds/ui";
 import { api, ApiError } from "./api";
 import type { BusinessProjectDetail } from "./BusinessProjectWorkspace";
 import "./RecurringProjectCopyForward.css";
@@ -234,7 +234,7 @@ export function RecurringProjectCopyForward({ root, projectId, projectStatus, co
     <p>Reuse selected operational contacts and project memory from another project for this exact client. This does not create a project or copy portal access, files, billing, invitations, or notifications.</p>
     <label>Previous project<select value={sourceId} onChange={event => { clearPreview(); setSourceId(event.target.value); }} disabled={Boolean(busy)}>
       <option value="">Choose a previous project</option>{projects.map(project => <option key={project.id} value={project.id}>{project.name} · {project.status?.replaceAll("_", " ") || "status not recorded"}</option>)}</select></label>
-    {busy === "projects" && !projects.length && <p role="status">Loading previous projects…</p>}
+    {busy === "projects" && !projects.length && <Skeleton variant="list" rows={3} label="Loading previous projects…" />}
     {projectsFailed && <button type="button" className="button-ghost" disabled={Boolean(busy)} onClick={() => void loadProjects(Boolean(page?.hasMore))}>Retry loading previous projects</button>}
     {page?.hasMore && <button type="button" className="button-ghost" disabled={Boolean(busy)} onClick={() => void loadProjects(true)}>{busy === "projects" ? "Loading projects…" : "Load more previous projects"}</button>}
     <div className="recurring-project-copy-options">

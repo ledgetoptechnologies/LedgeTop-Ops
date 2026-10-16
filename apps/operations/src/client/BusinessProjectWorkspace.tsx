@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Card, EmptyState, StatusPill } from "@ltds/ui";
+import { Card, EmptyState, StatusPill, Skeleton } from "@ltds/ui";
 import type { Permission } from "@ltds/shared";
 import { api, ApiError } from "./api";
 import { ClientHub } from "./ClientHub";
@@ -105,7 +105,7 @@ function ProjectWorkspace({ route, feedbackEnabled }: { route: BusinessProjectRo
     </nav>
     <div className="business-project-heading"><div><small>Business project</small><h2>{project?.name || "Project workspace"}</h2></div>
       <button type="button" className="button-ghost" aria-disabled={state.busy} onClick={refresh}>{state.busy ? "Loading project…" : "Refresh project"}</button></div>
-    {state.busy && <p role="status">Loading the project and its linked contact…</p>}
+    {state.busy && <Skeleton variant="list" rows={3} label="Loading the project and its linked contact…" />}
     {state.error && <Card><div role="alert"><EmptyState title={state.status === 403 ? "Project access required" : state.status === 404 ? "Project unavailable" : state.status === 409 ? "Project workspace needs refreshing" : "Project could not be loaded"}
       detail={state.error} /></div><div className="business-project-recovery">
         <button type="button" className="button-orange" onClick={refresh}>{state.status === 409 ? "Reload project workspace" : "Retry project"}</button>

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
-import { Card, StatusPill } from "@ltds/ui";
+import { Card, StatusPill, Skeleton } from "@ltds/ui";
 import { api, ApiError } from "./api";
 import { clientDirectoryReturnPath, type ClientKind, type ClientSummary } from "./ClientDirectory";
 import type { ClientServiceAssignmentResult } from "./ClientServiceAssignments";
@@ -381,7 +381,7 @@ export function ClientBusinessParty({ partyId }: { partyId: string }) {
   const sectionHref = (section: string) => `${location.pathname}${location.search}#${section}`;
   return <section className="business-party-workspace" aria-label="Linked customer workspace">
     <a className="button button-ghost client-hub-back" href={clientDirectoryReturnPath()}>← Client Hub</a>
-    {!party && !error && <p role="status">Loading linked customer…</p>}
+    {!party && !error && <Skeleton variant="list" rows={3} label="Loading linked customer…" />}
     {error && <Card><div role="alert"><h2>Linked customer unavailable</h2><p>{error}</p></div>
       <button type="button" className="button-orange" onClick={refresh}>Refresh linked customer</button></Card>}
     {party && <>
@@ -424,7 +424,7 @@ export function ClientBusinessParty({ partyId }: { partyId: string }) {
               const state = member.linkId ? sourceStates[member.linkId] : undefined;
               return <Card key={`projects:${member.linkId}`} title={member.sourceName}>
                 {member.availability === "unavailable" ? <p>Project history is unavailable until this source link is reviewed.</p>
-                  : state?.busy ? <p role="status">Loading {member.sourceName} projects…</p>
+                  : state?.busy ? <Skeleton variant="list" rows={3} label={`Loading ${member.sourceName} projects…`} />
                     : state?.error ? <div role="alert"><p>{state.error}</p><button type="button" className="button-ghost" onClick={() => setSourceRevision(value => value + 1)}>Retry source details</button></div>
                       : state?.data ? unavailablePageMessage(state.data.projects.page, "Projects")
                         ? <p>{unavailablePageMessage(state.data.projects.page, "Projects")}</p>
@@ -442,7 +442,7 @@ export function ClientBusinessParty({ partyId }: { partyId: string }) {
               const state = member.linkId ? sourceStates[member.linkId] : undefined;
               return <Card key={`contacts:${member.linkId}`} title={member.sourceName}>
                 {member.availability === "unavailable" ? <p>Contacts are unavailable until this source link is reviewed.</p>
-                  : state?.busy ? <p role="status">Loading {member.sourceName} contacts…</p>
+                  : state?.busy ? <Skeleton variant="list" rows={3} label={`Loading ${member.sourceName} contacts…`} />
                     : state?.error ? <p role="alert">{state.error}</p>
                     : state?.data ? unavailablePageMessage(state.data.contacts.page, "Contacts")
                       ? <p>{unavailablePageMessage(state.data.contacts.page, "Contacts")}</p>
@@ -459,7 +459,7 @@ export function ClientBusinessParty({ partyId }: { partyId: string }) {
               const state = member.linkId ? sourceStates[member.linkId] : undefined;
               return <Card key={`services:${member.linkId}`} title={member.sourceName}>
                 {member.availability === "unavailable" ? <p>Service assignments are unavailable until this source link is reviewed.</p>
-                  : state?.busy ? <p role="status">Loading {member.sourceName} service assignments…</p>
+                  : state?.busy ? <Skeleton variant="list" rows={3} label={`Loading ${member.sourceName} service assignments…`} />
                     : state?.error ? <div role="alert"><p>{state.error}</p><button type="button" className="button-ghost" onClick={() => setSourceRevision(value => value + 1)}>Refresh source services</button></div>
                       : state?.data ? <>{serviceAssignmentMessage(state.data.serviceAssignments)
                         ? <><p>{serviceAssignmentMessage(state.data.serviceAssignments)}</p><button type="button" className="button-ghost" onClick={() => setSourceRevision(value => value + 1)}>Refresh source services</button></>
@@ -477,7 +477,7 @@ export function ClientBusinessParty({ partyId }: { partyId: string }) {
               const state = member.linkId ? sourceStates[member.linkId] : undefined;
               return <Card key={`access:${member.linkId}`} title={member.sourceName}>
                 {member.availability === "unavailable" ? <p>Access details are unavailable until this source link is reviewed.</p>
-                  : state?.busy ? <p role="status">Loading {member.sourceName} access entry points…</p>
+                  : state?.busy ? <Skeleton variant="list" rows={3} label={`Loading ${member.sourceName} access entry points…`} />
                     : state?.error ? <p role="alert">{state.error}</p>
                       : state?.data ? <><div className="business-party-access-status"><span>Portal mapping</span><StatusPill tone={sourceStatus(state.data.source.portalStatus)}>{state.data.source.portalStatus.replaceAll("_", " ")}</StatusPill></div>
                         <div className="business-party-actions"><a className="button button-ghost" href={sourceEntryPath(state.data.entryPoints.access)}>Portal and access</a>

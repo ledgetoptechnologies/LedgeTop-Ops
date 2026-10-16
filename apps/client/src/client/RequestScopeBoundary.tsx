@@ -1,3 +1,4 @@
+import { Skeleton } from "@ltds/ui";
 import { useEffect, useState, type ReactNode } from "react";
 import { loadPortalServiceDraft, type PortalProject, type PortalServiceDraft } from "./portal-api";
 import { canBeginRequest, RequestAvailabilityMessage, useRequestAvailability, type RequestAvailability } from "./RequestAvailability";
@@ -54,7 +55,7 @@ export function RequestScopeBoundary({ contextKey, workspaceId, availability, pr
   const project = target ? projects.find(item => item.id === target && item.canRequestService) : null;
   const targetKnown = target === "" ? availability.data?.root.canStartRequest === true : Boolean(project);
   const exact = useRequestAvailability(target !== null && targetKnown && availability.state === "ready" ? contextKey : null, workspaceId, target || null);
-  if (draftState === "loading") return <p role="status">Checking the saved request context…</p>;
+  if (draftState === "loading") return <Skeleton variant="text" lines={2} label="Checking the saved request context…" />;
   if (draftState === "error") return <div className="portal-inline-error" role="alert"><p>This saved draft could not be opened. It has not been moved or replaced.</p><button type="button" className="button-ghost" onClick={() => setDraftRevision(value => value + 1)}>Retry saved draft</button></div>;
   if (availability.state !== "ready" || !canBeginRequest(availability, projects)) return <><RequestAvailabilityMessage availability={availability} />{savedSnapshot && allowsReadOnlySnapshot(availability) && <SavedDraftSummary draft={savedSnapshot} />}</>;
   if (started && !targetKnown) return <div className="portal-inline-error" role="alert"><p>This request context is no longer available in your current access. Saved drafts have not been moved to another project.</p></div>;

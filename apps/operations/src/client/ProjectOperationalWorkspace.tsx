@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type MutableRefObject } from "react";
-import { Card, EmptyState, StatusPill } from "@ltds/ui";
+import { Card, EmptyState, StatusPill, Skeleton } from "@ltds/ui";
 import { api, ApiError } from "./api";
 import type { BusinessProjectDetail } from "./BusinessProjectWorkspace";
 import { RecurringProjectCopyForward } from "./RecurringProjectCopyForward";
@@ -432,7 +432,7 @@ export function ProjectOperationalWorkspace({ root, projectId, contextVersion, c
       setRecoveryError(message);
     } finally { setRecoveryBusy(false); }
   };
-  if (!data && state.busy) return <Card title="Operational project details"><p role="status">Loading operational contacts and project memory…</p></Card>;
+  if (!data && state.busy) return <Card title="Operational project details"><Skeleton variant="list" rows={3} label="Loading operational contacts and project memory…" /></Card>;
   if (!data && recoveryRequired && !canRecover) return <section className="project-operational-workspace" aria-label="Operational project details"><Card title="Operational details awaiting review"><div className="project-operational-recovery">
     <p role="alert">This project moved to a different client. Stored operational details remain protected.</p>
     <p>Contact an Operations administrator to review the reassignment. No contacts, memory, or historical attachments are visible until recovery is completed.</p>
@@ -538,7 +538,7 @@ export function ProjectOperationalWorkspace({ root, projectId, contextVersion, c
           if (event.currentTarget.open) void loadMemoryRevision(item.version);
         }}><summary><span>Version {item.version} · {item.changeKind === "post_completion_amendment" ? "Post-completion amendment" : "Saved"} · {displayDate(item.createdAt)}
           {item.amendmentReason && <span> — {item.amendmentReason}</span>}</span></summary>
-          {memoryRevisionBusy[item.version] && <p role="status">Loading version {item.version}…</p>}
+          {memoryRevisionBusy[item.version] && <Skeleton variant="list" rows={3} label={`Loading version ${item.version}…`} />}
           {memoryRevisionErrors[item.version] && <div className="project-operational-banner" role="alert"><span>{memoryRevisionErrors[item.version]}</span>
             <button type="button" className="button-ghost" onClick={() => void loadMemoryRevision(item.version)}>Retry version {item.version}</button></div>}
           {memoryRevisionDetails[item.version] && <div className="project-memory-read project-memory-revision-snapshot" role="region" aria-label={`Project memory version ${item.version}`}>

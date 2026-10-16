@@ -1,3 +1,4 @@
+import { Skeleton } from "@ltds/ui";
 import { useEffect, useRef, useState } from "react";
 import type { RequestError } from "./bulk-download";
 import { cancelInvitationRequest, invitationCapabilitiesLabel, invitationRequestStatus, invitationTermsLabel, loadInvitationRequests, type PortalInvitationRequest } from "./invitation-request-api";
@@ -46,7 +47,7 @@ export function PortalInvitationRequests({workspaceId, sourceId, supported, lock
   return <section className="portal-invitation-requests" aria-label="Your invitation requests"><header><h3>Your invitation requests</h3>{supported && <button className="button-ghost" disabled={loading || busy || uncertain || locked} onClick={() => void load()}>Refresh invitation requests</button>}</header>
     <p>Requests are separate from invitations and access. Only your requests in this workspace are shown.</p>
     {!supported ? <p role="status">Invitation request history is unavailable until its database update is ready.</p> : <>
-      {loading && <p role="status">Loading invitation requests…</p>}{notice && <p role="status">{notice}</p>}
+      {loading && <Skeleton variant="list" rows={3} label="Loading invitation requests…" />}{notice && <p role="status">{notice}</p>}
       {error && <div role="alert"><p>{error}</p>{!uncertain && <button className="button-ghost" disabled={loading || locked} onClick={() => void load(retry.current)}>Retry invitation requests</button>}</div>}
       <div className="portal-invitation-request-list">{rows.map(row => <article key={row.id}><h4>{row.email}</h4><strong>{invitationRequestStatus(row.status)}</strong>
         <p>{row.workspaceName} · {row.sourceName} · {row.scope.type} <span>{row.scope.publicId}</span></p><p>{invitationTermsLabel(row.accessTerms)}</p>

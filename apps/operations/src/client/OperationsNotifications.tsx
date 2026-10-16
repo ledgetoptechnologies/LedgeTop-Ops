@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
-import { Card, EmptyState, StatusPill } from "@ltds/ui";
+import { Card, EmptyState, StatusPill, Skeleton } from "@ltds/ui";
 import { api, ApiError } from "./api";
 import "./OperationsNotifications.css";
 
@@ -298,7 +298,7 @@ export function OperationsNotifications() {
         {route.view === "pending" && pageCount > 1 ? " Refresh to check for new changes." : ""}</p>}
       {error && <div className="notification-error" role="alert"><span>{error.message}</span><button type="button" className="button-ghost"
         aria-disabled={loading || loadingMore} onClick={() => { if (!pending.current) void load(error.cursor); }}>Retry notifications</button></div>}
-      {loading && <p role="status">Loading notifications…</p>}
+      {loading && <Skeleton variant="list" rows={3} label="Loading notifications…" />}
       <div className="notification-batch-list">
         {rows.map(row => <article key={notificationKey(row)} className="notification-batch" aria-label={`${notificationName(row)} · ${row.folderLabel}`} data-notification-kind={row.kind}>
           <header><div><h3>{notificationName(row)}</h3><p>{row.folderLabel}</p><small className="notification-kind">{row.kind === "folder_changes" ? "Folder changes" : row.kind === "portal_delivery" ? "Portal delivery" : "Authenticated recipient changes"}</small></div>

@@ -1,5 +1,5 @@
 import { useEffect, useId, useRef, useState, type FormEvent } from "react";
-import { Card, EmptyState, StatusPill } from "@ltds/ui";
+import { Card, EmptyState, StatusPill, Skeleton } from "@ltds/ui";
 import { api, ApiError } from "./api";
 import "./ClientServiceAssignments.css";
 
@@ -169,7 +169,7 @@ export function ClientServiceAssignments({ initialPage, basePath, contextVersion
           {filtered && <button type="button" className="button-ghost" onClick={() => search({ q: "", status: "current" })}>Clear service filters</button>}
         </div>
       </form>
-      {!value && state.busy && <p role="status">Loading service assignments…</p>}
+      {!value && state.busy && <Skeleton variant="list" rows={3} label="Loading service assignments…" />}
       {value?.items.length === 0 && <EmptyState title={filtered ? "No matching service assignments" : "No service assignments"}
         detail={filtered ? "Try another service name, ID, or effective status." : "No current assignments target this exact client subject."} />}
       <div className="client-service-assignment-rows">{value?.items.map(row => <article key={row.row_key}

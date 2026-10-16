@@ -7,7 +7,7 @@ import {
   type FormEvent,
   type ReactNode,
 } from "react";
-import { AccountMenu, Card, EmptyState, Loading, LtMark, StatusPill, openViewerShell } from "@ltds/ui";
+import { AccountMenu, Card, EmptyState, Loading, LtMark, StatusPill, openViewerShell, Skeleton } from "@ltds/ui";
 import type { DeliveryLocationCollection } from "@ltds/shared";
 import type { RequestError } from "./bulk-download";
 import {
@@ -1660,7 +1660,7 @@ function NewServiceRequestWizard({
 
 function ServiceRequestForm(props: Parameters<typeof NewServiceRequestWizard>[0] & { initial?: PortalServiceRequest; changeOf?: PortalServiceRequest; requestV2?: boolean; requestAvailability?: RequestAvailability; requestContextKey?: string; requestWorkspaceId?: string | null }) {
   if (props.initial || props.changeOf) return <LegacyServiceRequestForm {...props} />;
-  if (!props.requestAvailability || !props.requestContextKey) return <p role="status">Checking request availability…</p>;
+  if (!props.requestAvailability || !props.requestContextKey) return <Skeleton variant="text" lines={2} label="Checking request availability…" />;
   return <RequestScopeBoundary key={`${props.requestContextKey}:${props.initialDraftId || "new"}:${props.projectId || "root"}`}
     contextKey={props.requestContextKey} workspaceId={props.requestWorkspaceId ?? null} availability={props.requestAvailability}
     projects={props.projects} fixedProjectId={props.projectId} draftId={props.initialDraftId}>
