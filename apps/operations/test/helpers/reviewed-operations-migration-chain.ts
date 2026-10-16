@@ -54,6 +54,7 @@ const operationsSuccessors = Object.freeze({
 
 const clientSuccessors = Object.freeze({
   "0232_shared_profile_edit_authority.sql": "3c2b3ddbdb920739c8f4ab8f437808749f5f83581b098518c5efd41c2e0b0073",
+  "0233_explicit_primary_workspace_folder_ownership.sql": "7d419b99aab73086c60571cd854d49b62351d5c43ad4347e5da1a1e2fb18878a",
 });
 
 function sha256(value: string | Uint8Array): string {
