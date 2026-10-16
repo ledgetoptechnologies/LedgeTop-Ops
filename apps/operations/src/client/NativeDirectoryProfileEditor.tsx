@@ -98,6 +98,17 @@ function status(result: { status?: unknown }): string {
   return result.status === "written" ? "Saved in Client Hub." : "Saved in Client Hub and queued for Project Alpha delivery.";
 }
 
+/** Names the saved profile and its destinations; Client Hub search catches up after Project Alpha acknowledges. */
+function createdMessage(attempt: FrozenCreateAttempt, result: { status?: unknown }): string {
+  let name = "";
+  try { const body = JSON.parse(attempt.write.body) as { profile?: { name?: unknown } }; if (typeof body.profile?.name === "string") name = body.profile.name.trim(); }
+  catch { /* fall back to the generic message */ }
+  const destinations = attempt.sourceIds.map(projectAlphaSourceName).join(" and ");
+  const lead = name ? `${name}: ` : "";
+  return result.status === "written" ? `${lead}${status(result)}`
+    : `${lead}${status(result)} Sending to ${destinations}. It can take a few minutes to appear in client search, so there's no need to create it again.`;
+}
+
 export function NativeDirectoryProfileCreate() {
   const id = useId(), [kind, setKind] = useState<Kind>("organization"), [fields, setFields] = useState<ProfileForm>(EMPTY);
   const [sourceIds, setSourceIds] = useState<string[]>([]), [selectedScope, setSelectedScope] = useState(""), [options, setOptions] = useState<CreateOptions | null>(null);
@@ -146,7 +157,7 @@ export function NativeDirectoryProfileCreate() {
       { recordId: frozen.mutationId, kind, version: 1, sourceIds: frozen.sourceIds }, value => {
         reachedWrite = true; setAttempt(value);
       });
-      setAttempt(null); setSuccess(status(result as { status?: unknown })); setFields(EMPTY); setSourceIds([]); setSelectedScope(""); setOpen(false);
+      setAttempt(null); setSuccess(createdMessage(frozen, result as { status?: unknown })); setFields(EMPTY); setSourceIds([]); setSelectedScope(""); setOpen(false);
     } catch (caught) {
       const invalidAdmission = !reachedWrite && caught instanceof ApiError && caught.status === 400;
       if (invalidAdmission) setAttempt(null);

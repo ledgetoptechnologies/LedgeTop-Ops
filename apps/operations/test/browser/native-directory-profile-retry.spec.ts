@@ -44,6 +44,8 @@ test("a lost create response retries the same write without preparing admission 
   await expect(page.getByRole("button", { name: "Retry same profile creation" })).toBeVisible();
   await page.getByRole("button", { name: "Retry same profile creation" }).click();
   await expect(page.getByText("Saved in Client Hub and queued for Project Alpha delivery.")).toBeVisible();
+  await expect(page.getByRole("status").filter({ hasText: "Frozen Organization:" })).toContainText("Sending to Ledge Top Drone Services");
+  await expect(page.getByRole("dialog", { name: "Add client profile" })).toBeHidden();
 
   const observed = await calls(page), admissions = observed.filter(call => call.path.endsWith("/create-admissions"));
   const writes = observed.filter(call => call.path.endsWith("/organizations") && call.method === "POST");
