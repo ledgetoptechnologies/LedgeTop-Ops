@@ -144,6 +144,7 @@ beforeAll(async () => {
     .toBe("0203_effective_native_directory_enrollment_consumers.sql");
   expect(await db.prepare("SELECT count(*) FROM d1_migrations").first("count(*)")).toBe(203);
   expect((await db.prepare("PRAGMA foreign_key_check").all()).results).toEqual([]);
+  await db.batch(splitD1MigrationStatements(readFileSync(new URL('0211_native_directory_create_observations.sql', directory),'utf8')).map(sql=>db.prepare(sql)));
   await db.batch([
     db.prepare("INSERT INTO staff_users(id,email,display_name,access_subject,status) VALUES('owner','owner@example.test','Owner','access|owner','active')"),
     db.prepare("INSERT INTO native_business_areas(id,name,active) VALUES('area','Area',1)"),
@@ -225,7 +226,7 @@ describe("native Directory profile outbox dispatcher", () => {
     });
 
     await expect(drainNativeDirectoryOutboxes({ ...env(), NATIVE_DIRECTORY_OUTBOX_DRAIN_ENABLED: "true" }, {
-      rotationTime: 0, send: transport(publicId, "1", posts),
+      maxCommands:1, rotationTime: 0, send: transport(publicId, "1", posts),
     })).resolves.toMatchObject({ status: "drained", attempted: 1, acknowledged: 1, failed: 0 });
 
     expect(posts).toEqual([{ commandId: value.commandId, externalId: value.input.recordId,
@@ -245,7 +246,7 @@ describe("native Directory profile outbox dispatcher", () => {
     await db.prepare("UPDATE native_directory_grants SET active=0 WHERE id=?").bind(value.staff.selectedGrantId).run();
 
     await expect(drainNativeDirectoryOutboxes({ ...env(), NATIVE_DIRECTORY_OUTBOX_DRAIN_ENABLED: "true" }, {
-      rotationTime: 0, send,
+      maxCommands:1, rotationTime: 0, send,
     })).resolves.toMatchObject({ status: "drained", attempted: 1, acknowledged: 0, blocked: 1, failed: 0 });
 
     expect(send).not.toHaveBeenCalled();
@@ -258,7 +259,7 @@ describe("native Directory profile outbox dispatcher", () => {
     // not leave eligible scheduler work behind for later cases.
     await db.prepare("UPDATE native_directory_grants SET active=1 WHERE id=?").bind(value.staff.selectedGrantId).run();
     await expect(drainNativeDirectoryOutboxes({ ...env(), NATIVE_DIRECTORY_OUTBOX_DRAIN_ENABLED: "true" }, {
-      rotationTime: 0, send: transport(publicId, "1", []),
+      maxCommands:1, rotationTime: 0, send: transport(publicId, "1", []),
     })).resolves.toMatchObject({ attempted: 1, acknowledged: 1, blocked: 0 });
   });
 

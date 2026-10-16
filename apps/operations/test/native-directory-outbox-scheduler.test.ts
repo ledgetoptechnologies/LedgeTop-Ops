@@ -3,6 +3,8 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vites
 import { Miniflare } from "miniflare";
 import type {SharedProfilePortalAuthorityBinding} from '../../../packages/shared/src/shared-business-profile';
 
+const observationDispatch = vi.hoisted(() => vi.fn().mockResolvedValue({status:'acknowledged'}));
+vi.mock('../src/worker/native-directory-create-observations',()=>({enqueueNativeDirectoryCreateObservations:vi.fn(),dispatchNativeDirectoryCreateObservation:observationDispatch}));
 const profileDispatch = vi.hoisted(() => vi.fn());
 const relationshipDispatch = vi.hoisted(() => vi.fn());
 const continuationDispatch = vi.hoisted(() => vi.fn());
@@ -74,6 +76,8 @@ beforeAll(async () => {
   runtime = new Miniflare({ modules: true, compatibilityDate: "2026-07-22",
     script: "export default {fetch(){return new Response('ok')}}", d1Databases: ["OPS_DB"] });
   db = await runtime.getD1Database("OPS_DB") as D1Database;
+  await db.prepare('CREATE TABLE native_directory_create_observation_jobs(command_id TEXT PRIMARY KEY,source_id TEXT,created_at TEXT)').run();
+  await db.prepare('CREATE TABLE native_directory_create_observation_dispatch(command_id TEXT PRIMARY KEY,state TEXT,next_attempt_at INTEGER,lease_expires_at INTEGER)').run();
   for (const table of ["project_alpha_directory_outbox", "project_alpha_directory_relationship_outbox",
     "project_alpha_directory_relationship_recovery_outbox"])
     await db.prepare(`CREATE TABLE ${table}(command_id TEXT PRIMARY KEY,source_id TEXT NOT NULL,state TEXT NOT NULL,
@@ -89,6 +93,7 @@ beforeAll(async () => {
 
 beforeEach(async () => {
   await db.batch([
+    db.prepare('DELETE FROM native_directory_create_observation_dispatch'),db.prepare('DELETE FROM native_directory_create_observation_jobs'),
     db.prepare("DELETE FROM project_alpha_directory_outbox"),
     db.prepare("DELETE FROM project_alpha_directory_relationship_outbox"),
     db.prepare("DELETE FROM project_alpha_directory_relationship_recovery_outbox"),
@@ -96,6 +101,7 @@ beforeEach(async () => {
     db.prepare("DELETE FROM native_directory_profile_binding_dispatch"),
     db.prepare("DELETE FROM project_alpha_directory_lifecycle_outbox"),
   ]);
+  observationDispatch.mockReset().mockResolvedValue({status:'acknowledged'});
   profileDispatch.mockReset().mockResolvedValue({ status: "acknowledged" });
   relationshipDispatch.mockReset().mockResolvedValue({ status: "acknowledged" });
   continuationDispatch.mockReset().mockResolvedValue({ status: "acknowledged" });
@@ -452,4 +458,15 @@ describe("native Directory scheduled outbox drain", () => {
     await expect(drainNativeDirectoryOutboxes(environment([sourceId]), { now: () => dueAt, rotationTime: 0 }))
       .resolves.toMatchObject({ attempted: 1, acknowledged: 1, failed: 0 });
   });
+});
+
+it('rotates bounded read-only create observation work ahead of a busy write lane',async()=>{
+  const sourceId='project-alpha:primary';await command('profile','queued-write',sourceId);
+  await db.batch([
+    db.prepare("INSERT INTO native_directory_create_observation_jobs(command_id,source_id,created_at) VALUES('acked-create',?,'2026-01-01T00:00:00Z')").bind(sourceId),
+    db.prepare("INSERT INTO native_directory_create_observation_dispatch(command_id,state,next_attempt_at) VALUES('acked-create','pending',0)"),
+  ]);
+  expect(await drainNativeDirectoryOutboxes(environment([sourceId]),{now:()=>dueAt,rotationTime:300000,maxCommands:1})).toMatchObject({attempted:1,acknowledged:1});
+  expect(observationDispatch).toHaveBeenCalledOnce();expect(observationDispatch.mock.calls[0]![1]).toBe(sourceId);
+  expect(profileDispatch).not.toHaveBeenCalled();
 });

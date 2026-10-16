@@ -83,4 +83,12 @@ describe("native project management action presentation", () => {
     expect(result.action).toBeNull();
     expect(currentRoute).not.toHaveBeenCalled();
   });
+  it.each(['source_ack_pending','source_observation_pending','source_binding_unavailable','source_mapping_unavailable'] as const)('preserves native readiness %s rather than claiming a missing legacy route',async reason=>{
+    native.readClientHubNativeProjectCapability.mockResolvedValue({available:false,reason,scopes:[]});
+    const result=await readClientHubProjectManagementAction(environment('legacy').env,principal,context as never,'/project-management');
+    expect(result.availability).toMatchObject({available:false,reason});
+    expect(result.availability.explanation).not.toContain('administrator has not reviewed');
+    expect(result.action).toBeNull();
+  });
+
 });

@@ -47,6 +47,7 @@ beforeAll(async()=>{
   for(const name of readdirSync(directory).filter(name=>/^\d{4}_.+\.sql$/.test(name)&&name.slice(0,4)>'0161'&&name.slice(0,4)<='0203').sort()){
     await db.batch([...splitD1MigrationStatements(readFileSync(new URL(name,directory),'utf8')).map(sql=>db.prepare(sql)),db.prepare('INSERT INTO d1_migrations(name) VALUES(?)').bind(name)]);
   }
+  await db.batch(splitD1MigrationStatements(readFileSync(new URL('0211_native_directory_create_observations.sql', directory),'utf8')).map(sql=>db.prepare(sql)));
   await db.batch([
     db.prepare("INSERT INTO native_business_areas(id,name,active) VALUES('refresh-area','Refresh fixtures',1)"),
     ...['directory.profile.edit','directory.identity.link'].map((permission,index)=>db.prepare("INSERT INTO native_directory_grants(id,staff_id,permission,effect,scope_kind,granted_by) VALUES(?,?,?,'allow','global',?)").bind(`refresh-global-${index}`,staffId,permission,staffId)),
@@ -358,7 +359,7 @@ for(const interruption of ['503','scheduler_deadline'] as const)it(`checkpoints 
     return json({...body,nextCursor:null});
   });
   const result=await drainNativeDirectoryOutboxes({...automaticEnv(),NATIVE_DIRECTORY_OUTBOX_DRAIN_ENABLED:'true'},
-    {send,rotationTime:300_000,maxCommands:1,now:()=>now});
+    {send,rotationTime:0,maxCommands:1,now:()=>now});
   expect(result.uncertain).toBe(1);expect(f.posts).toHaveLength(0);
   expect(await db.prepare('SELECT inventory_cursor FROM native_directory_profile_binding_dispatch WHERE command_id=?').bind(f.commandId).first('inventory_cursor')).toBe(checkpoint);
   const prior=cursors.length;await db.prepare('UPDATE native_directory_profile_binding_dispatch SET next_attempt_at=0 WHERE command_id=?').bind(f.commandId).run();
