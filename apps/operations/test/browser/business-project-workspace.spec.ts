@@ -660,6 +660,9 @@ test("project workspace layout supports mobile, narrow, laptop and ultrawide wit
   const operations = workspace(page).getByRole("region", { name: "Operational project details", exact: true });
   await operations.getByRole("button", { name: "Edit operational contacts", exact: true }).click();
   await operations.getByRole("button", { name: "Edit project memory", exact: true }).click();
+  // Measure the nested revision control in its available state, not inside closed history.
+  await operations.locator("summary").filter({ hasText: /^Project-memory history$/ }).click();
+  await expect(operations.locator(".project-memory-revision > summary")).toBeVisible();
   for (const width of [375, 640, 1280, 3440]) {
     await page.setViewportSize({ width, height: 960 });
     await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
