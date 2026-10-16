@@ -64,6 +64,21 @@ describe("reviewed existing PA Directory import with full native D1 guards", { t
     await absentNative(f);
   });
 
+  it("derives its execution deadline from the exact admission creation timestamp when a later clock read advances", async () => {
+    const f=await importCase(databases.db);install(f);const review=await reviewed(f);
+    // Simulate the second clock sample advancing. The admission's new Date()
+    // remains real, so the unchanged SQL maximum-lifetime guard catches drift.
+    const laterClock=vi.spyOn(Date,"now").mockReturnValue(Date.now()+60_000);
+    try {
+      const outcome=await writeNativeExistingDirectoryImport(f.env,review,f.actor);
+      expect(outcome,JSON.stringify(outcome)).toMatchObject({status:"imported"});
+      const admission=await databases.db.prepare('SELECT created_at,verified_until FROM native_directory_existing_import_execution_admissions WHERE import_id=?')
+        .bind(review.importId).first<{created_at:string;verified_until:string}>();
+      expect(admission).not.toBeNull();
+      expect(Date.parse(admission!.verified_until)-Date.parse(admission!.created_at)).toBe(15*60_000);
+    } finally { laterClock.mockRestore(); }
+  });
+
   it("renews only the original current admitted actor and rejects forged completion receipts", async () => {
     const f = await importCase(databases.db); install(f); const review = await reviewed(f);
     expect(await renewNativeExistingDirectoryImport(f.env,review.importId,f.actor)).toMatchObject({status:"reviewed",review:{importId:review.importId,nativeRecordId:review.nativeRecordId}});
@@ -240,8 +255,10 @@ describe("reviewed existing PA Directory import with full native D1 guards", { t
   it("keeps identical PA public IDs and email addresses in different sources distinct", async () => {
     const a = await importCase(databases.db), b = await importCase(databases.db, "organization", { publicId: a.publicId, area: "business-area-ltt" });
     const transport = install(a, b), ar = await reviewed(a), br = await reviewed(b);
-    expect(await executeNativeExistingDirectoryImport(a.env, { importId: ar.importId }, a.actor)).toMatchObject({ status: "activated", recordId: ar.nativeRecordId });
-    expect(await executeNativeExistingDirectoryImport(b.env, { importId: br.importId }, b.actor)).toMatchObject({ status: "activated", recordId: br.nativeRecordId });
+    const activatedA=await executeNativeExistingDirectoryImport(a.env, { importId: ar.importId }, a.actor);
+    expect(activatedA,JSON.stringify(activatedA)).toMatchObject({ status: "activated", recordId: ar.nativeRecordId });
+    const activatedB=await executeNativeExistingDirectoryImport(b.env, { importId: br.importId }, b.actor);
+    expect(activatedB,JSON.stringify(activatedB)).toMatchObject({ status: "activated", recordId: br.nativeRecordId });
     expect(await resolveClientHubSourceRootByAlphaPublicId(a.env, "organization", a.selection.sourceId, a.publicId)).toMatchObject({ id: ar.nativeRecordId });
     expect(await resolveClientHubSourceRootByAlphaPublicId(b.env, "organization", b.selection.sourceId, b.publicId)).toMatchObject({ id: br.nativeRecordId });
     expect(a.selection.recordId).not.toBe(b.selection.recordId); expect(transport.posts()).toHaveLength(2);
@@ -253,7 +270,8 @@ describe("reviewed existing PA Directory import with full native D1 guards", { t
     const transport = install(parent, child), pr = await reviewed(parent), cr = await reviewed(child);
     expect(await writeNativeExistingDirectoryImport(child.env, cr, child.actor)).toMatchObject({ status: expect.stringMatching(/blocked|conflict/) });
     await absentNative(child);
-    expect(await executeNativeExistingDirectoryImport(parent.env, { importId: pr.importId }, parent.actor)).toMatchObject({ status: "activated" });
+    const activatedParent=await executeNativeExistingDirectoryImport(parent.env, { importId: pr.importId }, parent.actor);
+    expect(activatedParent,JSON.stringify(activatedParent)).toMatchObject({ status: "activated" });
     // Ordinary inventory refresh after our parent's own ACK advances to G6.
     // The child's reviewed object/revision remains unchanged and must resume.
     const refreshedRequest = uuid(920_001);
