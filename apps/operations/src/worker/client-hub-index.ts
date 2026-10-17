@@ -132,7 +132,10 @@ async function writeRoots(env: IndexEnv, roots: Root[], generation: number, toke
     const fact = facts.find(row => row.source_id === root.source_id && row.root_namespace === root.root_namespace && row.kind === root.kind && row.public_id === root.public_id);
     if (!fact) throw new Error("client-hub-index-missing-facts");
     const record = { ...root, ...fact, portal_status: fact.portal_status || "not_provisioned",
-      contact_count: root.contact_count + fact.principal_count, sort_name: normalize(root.display_name) };
+      // PA contacts and portal sign-in principals are different record kinds.
+      // A business contact can also have a principal; adding both double-counts it.
+      contact_count: root.root_namespace === "portal" ? fact.principal_count : root.contact_count,
+      sort_name: normalize(root.display_name) };
     const version = await digest(record);
     statements.push(env.OPS_DB.prepare(`INSERT INTO client_hub_roots
       (source_id,root_namespace,kind,public_id,pa_public_id,mapping_status,display_name,sort_name,status,portal_status,workspace_id,legacy_account_id,
