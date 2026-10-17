@@ -13,12 +13,12 @@ test("native delivery routes precede PA admission without replacing public links
   assert.match(worker, /app\.post\("\/api\/public\/shares\/:routeId\/session"/);
 });
 
-test("native delivery production configuration remains off with the exact private reader binding and no audit secret", () => {
+test("native delivery production configuration preserves enabled native delivery with the exact private reader binding and no audit secret", () => {
   const config = JSON.parse(readFileSync(new URL("../apps/client/wrangler.jsonc", import.meta.url), "utf8"));
   for (const name of ["CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_WRITER_ENABLED",
     "CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_STATUS_ENABLED", "CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_READ_ENABLED",
     "CLIENT_PORTAL_OPERATIONS_NATIVE_CONTENT_AUDIT_ENABLED"]) {
-    assert.equal(config.vars[name], "false");
+    assert.equal(config.vars[name], "true");
   }
   assert.equal(config.vars.CLIENT_PORTAL_OPERATIONS_NATIVE_CONTENT_AUDIT_HMAC_SECRET, undefined);
   assert.deepEqual(config.services.find(binding => binding.binding === "OPERATIONS_PORTAL_NATIVE_DELIVERY_AUTHORIZATION_READER"), {

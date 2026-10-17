@@ -93,6 +93,8 @@ test("native refresh discovers identity without the selected workspace header an
 test("primary compatibility and native workspace switching preserve independent projects and Back/Forward", async ({page}) => {
   const calls = await mock(page); await page.goto("/portal?workspace=workspace-a");
   await expect(page.getByText("Primary-only project", {exact: true})).toBeVisible();
+  await expect(page.getByRole("combobox", {name: "Client workspace"}).locator("option")).toHaveText(workspaces.map(item => item.displayName));
+  await expect(page.locator(".client-portal-header")).not.toContainText("project-alpha:");
   await page.getByRole("combobox", {name: "Client workspace"}).selectOption("workspace-b");
   await expect(page.getByText("Coastal seawall construction documentation", {exact: true})).toBeVisible();
   await expect(page.getByText("Primary-only project", {exact: true})).toHaveCount(0);

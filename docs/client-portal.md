@@ -332,21 +332,21 @@ fails immediately. Revocation is terminal history; restore creates a new grant
 version after repeating every current check. A descendant client-created
 `/client-share/` link also rechecks this parent grant on every bearer request.
 
-The staff management API and Client enforcement are independently present but
-ship disabled through `CLIENT_PORTAL_DENY_POLICY_MANAGEMENT_ENABLED`,
+The staff management API and Client enforcement have independent gates:
+`CLIENT_PORTAL_DENY_POLICY_MANAGEMENT_ENABLED`,
 `CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED`, and
 `AUTHENTICATED_DELIVERY_GRANTS_ENABLED`. New grant, restore, and workspace-
 binding writes have the additional independent
 `AUTHENTICATED_DELIVERY_CREATION_ENABLED` kill switch. With creation off,
 existing reads, audits, and revokes remain available under the broader grant
-and mutation flags. The reviewed `primary-authenticated-delivery` profile also
-requires `CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED` parity in Client and
+and mutation flags. The historical full `primary-authenticated-delivery`
+profile also requires `CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED` parity in Client and
 Operations. It may be selected only after migration `0137`, Project Alpha
 projection parity, and end-to-end staging create/restore/revoke/deny and
 kill-switch evidence are recorded. Notification/email, Project Alpha delivery-
 intent/guest, membership, peer-admin, and address-book mutations remain off.
-The companion `primary-authenticated-delivery-paused` profile keeps hierarchy
-relations, grant enforcement, authority-history writes, reads, audits, and
+For that full profile only, the companion `primary-authenticated-delivery-paused`
+profile keeps hierarchy relations, grant enforcement, authority-history writes, reads, audits, and
 revokes active while requiring `AUTHENTICATED_DELIVERY_CREATION_ENABLED=false`
 in both Workers. Use it as the source-controlled first rollback step; it does
 not revoke an existing grant or disable Project Alpha projection ingestion.
@@ -585,10 +585,13 @@ allow/deny entitlements. Complete PA directory generations, opaque folder
 bindings, and hashed/expiring/revocable invitation records are separate from
 the legacy account and project-grant tables.
 
-The checked-in `default-on-eligibility` release profile enables
-`CLIENT_PORTAL_HIERARCHY_V2_ENABLED`, automatic Project Alpha identity
-eligibility, denylist enforcement, and deny-policy management together in both
-Workers. The endpoints remain fail-closed: they require a verified Access issuer/subject, active global
+The checked-in `primary-explicit-folder-delivery` release profile retains
+`CLIENT_PORTAL_HIERARCHY_V2_ENABLED`, automatic PA identity eligibility, denylist
+enforcement, and deny-policy management in both Workers. It enables staff folder
+creation and Client grant enforcement without Client authority creation or
+Operations relation inheritance. See the [current source-contract note](operations/project-alpha-portal-activation.md#current-source-contract)
+for exact gates, historical tooling, and rollback boundaries. This source intent
+is not deployed acceptance. The endpoints remain fail-closed: they require a verified Access issuer/subject, active global
 identity, active workspace membership, a complete active directory generation,
 an active source entity, and an explicit capability. A matching deny wins.
 Email and `primary_contact` are presentation data and never grant access.

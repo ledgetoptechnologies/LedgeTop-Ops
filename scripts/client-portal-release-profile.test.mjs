@@ -9,6 +9,7 @@ const receiver = { schemaVersion: 1, profile: "receiver-only" };
 const activation = { schemaVersion: 1, profile: "default-on-eligibility" };
 const authenticated = { schemaVersion: 1, profile: "primary-authenticated-delivery" };
 const authenticatedPaused = { schemaVersion: 1, profile: "primary-authenticated-delivery-paused" };
+const explicitFolder = { schemaVersion: 1, profile: "primary-explicit-folder-delivery" };
 function configs(profile) {
   const pair = [structuredClone(client), structuredClone(operations)];
   for (const config of pair) {
@@ -20,6 +21,11 @@ function configs(profile) {
         : (authenticatedEnabled ? "true" : "false");
     }
     config.vars.CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED = config === pair[0] || authenticatedEnabled ? "true" : "false";
+    if (profile === explicitFolder) {
+      config.vars.AUTHENTICATED_DELIVERY_GRANTS_ENABLED = "true";
+      config.vars.PROJECT_ACCESS_AUTHORITY_MUTATIONS_ENABLED = config === pair[1] ? "true" : "false";
+      config.vars.AUTHENTICATED_DELIVERY_CREATION_ENABLED = config === pair[1] ? "true" : "false";
+    }
   }
   return pair;
 }
@@ -39,7 +45,7 @@ test("missing, malformed, unknown, and extra-field profiles never infer activati
   }
 });
 
-for (const declaration of [receiver, activation, authenticated, authenticatedPaused]) {
+for (const declaration of [receiver, activation, authenticated, authenticatedPaused, explicitFolder]) {
   test(`${declaration.profile} requires a complete exact bundle on each Worker`, () => {
     assert.deepEqual(validatePortalReleaseProfile(declaration, ...configs(declaration)), []);
     for (const index of [0, 1]) for (const flag of eligibilityFlags) {
@@ -80,9 +86,42 @@ for (const declaration of [receiver, activation, authenticated, authenticatedPau
 test("one Worker cannot declare activation while the other remains receiver-only", () => {
   const enabled = configs(activation);
   const disabled = configs(receiver);
-for (const declaration of [receiver, activation, authenticated, authenticatedPaused]) {
+for (const declaration of [receiver, activation, authenticated, authenticatedPaused, explicitFolder]) {
     assert.ok(validatePortalReleaseProfile(declaration, enabled[0], disabled[1]).length);
     assert.ok(validatePortalReleaseProfile(declaration, disabled[0], enabled[1]).length);
+  }
+});
+
+test("explicit folder delivery rejects staging targets and malformed variable-preservation intent", () => {
+  for (const index of [0, 1]) {
+    for (const change of [
+      config => { config.vars.ENVIRONMENT = "staging"; },
+      config => { config.name += "-staging"; },
+      config => { config.keep_vars = false; },
+      config => { config.keep_vars = "true"; },
+      config => { delete config.keep_vars; },
+    ]) {
+      const pair = configs(explicitFolder);
+      change(pair[index]);
+      assert.ok(validatePortalReleaseProfile(explicitFolder, ...pair).length);
+    }
+  }
+  assert.ok(validatePortalReleaseProfile({ ...explicitFolder, profile: "primary-explicit-folder-delivery-staging" }, ...configs(explicitFolder)).length);
+  assert.ok(validatePortalReleaseProfile({ ...explicitFolder, allowStaging: true }, ...configs(explicitFolder)).length);
+});
+
+test("explicit folder delivery preserves exact staff-only creation without broader authenticated-delivery activation", () => {
+  const pair = configs(explicitFolder);
+  assert.deepEqual(validatePortalReleaseProfile(explicitFolder, ...pair), []);
+  assert.equal(pair[1].vars.CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED, "false");
+  assert.equal(pair[0].vars.PROJECT_ACCESS_AUTHORITY_MUTATIONS_ENABLED, "false");
+  assert.equal(pair[0].vars.AUTHENTICATED_DELIVERY_CREATION_ENABLED, "false");
+  assert.ok(validatePortalReleaseProfile(authenticated, ...pair).length);
+  assert.ok(validatePortalReleaseProfile(explicitFolder, ...configs(authenticated)).length);
+  for (const index of [0, 1]) for (const flag of ["CLIENT_PORTAL_MEMBERSHIP_MANAGEMENT_ENABLED", index === 0 ? "CLIENT_PORTAL_ADDRESS_BOOK_ENABLED" : "PROJECT_ALPHA_DELIVERY_INTENTS_ENABLED"]) {
+    const changed = configs(explicitFolder);
+    changed[index].vars[flag] = "true";
+    assert.ok(validatePortalReleaseProfile(explicitFolder, ...changed).some(error => error.includes(flag)));
   }
 });
 

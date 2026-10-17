@@ -842,7 +842,24 @@
 }
 .client-portal-main > * + * { margin-top: 1.2rem; }
 
+/* Operations-home and status pages render outside ClientPortalApp's shell with
+   their own portal-* classes; give them the same page width, rhythm and cards. */
+.portal-main { width: min(1160px, calc(100% - 2rem)); margin: 0 auto; padding: clamp(2rem, 5vw, 4rem) 0 5rem; min-width: 0; box-sizing: border-box; }
+.portal-main > * + * { margin-top: 1.2rem; }
+.portal-eyebrow, .portal-welcome .portal-eyebrow { margin: 0; color: var(--orange); font-weight: 850; font-size: .75rem; letter-spacing: .13em; text-transform: uppercase; }
+.portal-card { background: var(--paper); border: 1px solid var(--line); border-radius: var(--radius-lg); padding: 1.3rem; box-shadow: var(--shadow-md); min-width: 0; }
+.portal-card > h2 { margin: 0 0 .5rem; font-size: 1.1rem; }
+.portal-card > p { margin: 0; color: var(--muted); line-height: 1.55; }
+.portal-card > p + p, .portal-card > p + button, .portal-card > p + a, .portal-card > ul + button { margin-top: .9rem; }
+.operations-home-services { margin: .25rem 0 0; padding-left: 1.1rem; display: grid; gap: .35rem; }
+
 .client-portal-gate-main { width: min(620px, calc(100% - 2rem)); margin: clamp(3rem, 12vh, 8rem) auto; }
+.portal-gate-card { display: grid; gap: .6rem; }
+.portal-gate-card > h1 { margin: 0; font-size: clamp(1.4rem, 3vw, 1.75rem); }
+.portal-gate-card > p { margin: 0; color: #4c5963; line-height: 1.55; }
+.portal-gate-actions { display: flex; flex-wrap: wrap; gap: .6rem; margin-top: .9rem; }
+.portal-workspace-status { border-left: 4px solid #ee5007; }
+.portal-workspace-status > button { margin-top: .5rem; }
 
 /* ---------------------------------------------------------------------------
    Portal headings (match operations page-heading pattern)

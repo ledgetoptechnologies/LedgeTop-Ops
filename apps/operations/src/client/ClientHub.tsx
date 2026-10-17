@@ -24,6 +24,7 @@ import { ReviewedImportEnrollment } from "./ReviewedImportEnrollment";
 import { NativeDirectoryBindingRefresh } from "./NativeDirectoryBindingRefresh";
 import { OpsServiceManagement } from "./OpsServiceManagement";
 import { ProjectAlphaOperationalProjectAdoption } from "./ProjectAlphaOperationalProjectAdoption";
+import { sourceDisplayName } from "./source-label";
 
 interface CollectionItem { row_key?: string }
 interface ClientContact extends CollectionItem {
@@ -584,7 +585,7 @@ function ClientWorkspace({ route, canReviewFeedback, invitationAccess, nativeDir
     <a className="button-ghost button-small client-hub-back" href={clientDirectoryReturnPath()}>← Client Hub</a>
     <div className="client-hub-title">
       <div><small>{data.client.kind === "organization" ? "Organization" : "Standalone client"}</small><h2>{data.client.display_name}</h2>
-        {data.client.source_name && <p>{data.client.source_name}</p>}
+        {data.client.source_name && <p>{sourceDisplayName(data.client.source_name, data.client.source_id)}</p>}
         {data.client.root_namespace === "portal" && <p>Portal workspace · business link pending</p>}</div>
       <div className="client-hub-title-status"><StatusPill tone={portalStatus.tone}>{portalStatus.label}</StatusPill>
         {portalStatus.description && <small>{portalStatus.description}</small>}</div>

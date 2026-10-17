@@ -39,16 +39,24 @@ const dormantOperationsMutations = Object.freeze([
 export function validatePortalReleaseProfile(declaration, clientConfig, operationsConfig) {
   if (!declaration || typeof declaration !== "object" || Array.isArray(declaration) ||
       declaration.schemaVersion !== 1 ||
-      !["receiver-only", "default-on-eligibility", "primary-authenticated-delivery", "primary-authenticated-delivery-paused"].includes(declaration.profile) ||
+      !["receiver-only", "default-on-eligibility", "primary-authenticated-delivery", "primary-authenticated-delivery-paused", "primary-explicit-folder-delivery"].includes(declaration.profile) ||
       Object.keys(declaration).some(key => !["schemaVersion", "profile"].includes(key))) {
-    return ["Portal release profile must declare schemaVersion 1 and an explicit receiver-only, default-on-eligibility, primary-authenticated-delivery, or primary-authenticated-delivery-paused profile, with no extra fields"];
+    return ["Portal release profile must declare schemaVersion 1 and an explicit receiver-only, default-on-eligibility, primary-authenticated-delivery, primary-authenticated-delivery-paused, or primary-explicit-folder-delivery profile, with no extra fields"];
   }
   const errors = [];
+  const explicitFolderDelivery = declaration.profile === "primary-explicit-folder-delivery";
   const expected = declaration.profile === "receiver-only" ? "false" : "true";
   for (const [label, config] of [["Client", clientConfig], ["Operations", operationsConfig]]) {
     if (!config?.vars || typeof config.vars !== "object" || Array.isArray(config.vars)) {
       errors.push(`${label} Wrangler config is missing vars`);
       continue;
+    }
+    if (explicitFolderDelivery) {
+      const worker = label === "Client" ? "ledgetop-clients" : "ledgetop-ops";
+      if (config.name !== worker || config.vars.ENVIRONMENT !== "production") {
+        errors.push(`${label} primary-explicit-folder-delivery requires the exact production Worker and environment`);
+      }
+      if (config.keep_vars !== true) errors.push(`${label} keep_vars must be exactly true to preserve operator-managed production variables`);
     }
     for (const flag of eligibilityFlags) {
       const value = config.vars[flag];
@@ -62,7 +70,14 @@ export function validatePortalReleaseProfile(declaration, clientConfig, operatio
       // The Client receiver must always ingest the schema-v3 relationship
       // projection. Operations only consumes those relations when the paired
       // authenticated-delivery profile is explicitly active.
-      const flagExpected = flag === "CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED"
+      // Explicit folder ownership needs staff-side creation/revocation and
+      // Client enforcement. It does not enable relationship inheritance or
+      // Client-side authority creation.
+      const flagExpected = explicitFolderDelivery
+        ? (flag === "CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED"
+          ? (label === "Client" ? "true" : "false")
+          : (flag === "AUTHENTICATED_DELIVERY_GRANTS_ENABLED" || label === "Operations" ? "true" : "false"))
+        : flag === "CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED"
         ? (label === "Client" || authenticatedEnabled ? "true" : "false")
         : flag === "AUTHENTICATED_DELIVERY_CREATION_ENABLED"
           ? (declaration.profile === "primary-authenticated-delivery" ? "true" : "false")

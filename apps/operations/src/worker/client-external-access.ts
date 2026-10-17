@@ -1,3 +1,4 @@
+import { projectedPrincipalIdentitySql } from '../../../../packages/shared/src/projected-principal-identity';
 import { HTTPException } from "hono/http-exception";
 import type { ClientHubCollectionContext } from "./client-hub-collections";
 import { sha256 } from "./crypto";
@@ -146,12 +147,17 @@ export async function listClientExternalAccess(env: Pick<Env, "DELIVERY_DB">, co
     values.push(...cursor.after);
   }
 
-  const result = await env.DELIVERY_DB.withSession("first-primary").prepare(`WITH membership_rows AS (
+  const db = env.DELIVERY_DB.withSession("first-primary");
+  // Older portal schemas retain their direct identity contract. Reenrolled
+  // principals use only the unique, current verified eligibility witness.
+  const eligibilityPresent = await db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='portal_v2_identity_eligibility_bindings'").first();
+  const principalIdentity = (alias: string) => eligibilityPresent ? projectedPrincipalIdentitySql(alias) : `${alias}.identity_id`;
+  const result = await db.prepare(`WITH membership_rows AS (
     SELECT 'membership' kind,membership.id,
       CASE WHEN (SELECT count(*) FROM pa_portal_principals principal
-        WHERE principal.workspace_id=membership.workspace_id AND principal.identity_id=membership.identity_id)=1
+        WHERE principal.workspace_id=membership.workspace_id AND ${principalIdentity("principal")}=membership.identity_id)=1
         THEN (SELECT principal.display_name FROM pa_portal_principals principal
-          WHERE principal.workspace_id=membership.workspace_id AND principal.identity_id=membership.identity_id LIMIT 1)
+          WHERE principal.workspace_id=membership.workspace_id AND ${principalIdentity("principal")}=membership.identity_id LIMIT 1)
         ELSE COALESCE(NULLIF(trim(identity.verified_email),''),'Portal member') END display_name,
       lower(trim(identity.verified_email)) email_hint,membership.source_type,membership.expires_at,membership.revoked_at,membership.created_at,
       (SELECT count(*) FROM portal_v2_entitlements entitlement WHERE entitlement.workspace_id=membership.workspace_id
@@ -163,13 +169,13 @@ export async function listClientExternalAccess(env: Pick<Env, "DELIVERY_DB">, co
           OR (block.match_type='issuer_subject' AND block.issuer=identity.issuer AND block.subject=identity.subject))) THEN 1 ELSE 0 END blocked,
       membership.status stored_status,identity.status identity_status,identity.revoked_at identity_revoked_at,workspace.status workspace_status,
       CASE WHEN membership.source_type<>'project_alpha' OR EXISTS(SELECT 1 FROM pa_portal_principals current_principal
-        WHERE current_principal.workspace_id=membership.workspace_id AND current_principal.identity_id=membership.identity_id
+        WHERE current_principal.workspace_id=membership.workspace_id AND ${principalIdentity("current_principal")}=membership.identity_id
           AND current_principal.status='active' AND current_principal.source_version=membership.source_version) THEN 1 ELSE 0 END source_current,
       CASE WHEN membership.source_type='project_alpha' AND EXISTS(SELECT 1 FROM pa_portal_principals current_principal
-        WHERE current_principal.workspace_id=membership.workspace_id AND current_principal.identity_id=membership.identity_id
+        WHERE current_principal.workspace_id=membership.workspace_id AND ${principalIdentity("current_principal")}=membership.identity_id
           AND current_principal.source_version=membership.source_version AND current_principal.status='suspended') THEN 1 ELSE 0 END source_suspended,
       CASE WHEN membership.source_type='project_alpha' AND EXISTS(SELECT 1 FROM pa_portal_principals current_principal
-        WHERE current_principal.workspace_id=membership.workspace_id AND current_principal.identity_id=membership.identity_id
+        WHERE current_principal.workspace_id=membership.workspace_id AND ${principalIdentity("current_principal")}=membership.identity_id
           AND current_principal.source_version=membership.source_version AND current_principal.status='revoked') THEN 1 ELSE 0 END source_revoked
     FROM portal_v2_workspace_memberships membership
     JOIN portal_v2_identities identity ON identity.id=membership.identity_id

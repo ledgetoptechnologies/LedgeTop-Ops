@@ -44,6 +44,7 @@ const initialClientMigrations = Object.freeze([
 // Separately reviewed application successors are byte-validated, but never
 // enter the frozen Operations199/Client149 inventories returned by this helper.
 const operationsSuccessors = Object.freeze({
+  "0212_primary_portal_directory_correspondence.sql": "3ac44b2cda2182a1bff154da4e6909d7ace02ba7ac17f1cbc4fc734796935d6f",
   "0211_native_directory_create_observations.sql": "cb5ef5f3f0986e71f4a4f5ea7736306e1ef23ddf97e509d2a2566f1b52dbbca7",
   "0206_native_directory_existing_import.sql": "0af4b3a078eda8a701fdfc1e898e5dc539831537e0d2a461f6acee124ce6b7c2",
   "0207_shared_directory_profiles.sql": "cdd4947b8bf5ab672184ed3e4f8f3fb0b4afbd0edd0707e1772569f66f4f3d49",
@@ -55,6 +56,9 @@ const operationsSuccessors = Object.freeze({
 const clientSuccessors = Object.freeze({
   "0232_shared_profile_edit_authority.sql": "3c2b3ddbdb920739c8f4ab8f437808749f5f83581b098518c5efd41c2e0b0073",
   "0233_explicit_primary_workspace_folder_ownership.sql": "7d419b99aab73086c60571cd854d49b62351d5c43ad4347e5da1a1e2fb18878a",
+  // Reviewed reenrollment receipts preserve revoked identity history and fence
+  // secondary membership changes; this never expands the frozen Client149 prefix.
+  "0234_pa_principal_reenrollment.sql": "40d6e811b19ade969ecfd68a6ea223e80cf67e8adadf818e7b1f885befa1a49b",
 });
 
 function sha256(value: string | Uint8Array): string {

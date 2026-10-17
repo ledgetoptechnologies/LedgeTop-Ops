@@ -18,7 +18,7 @@ import type {
   ViewerStorageSummary,
   ViewerTaskStorageResponse,
 } from "@ltds/shared";
-import { Card, EmptyState, Loading, StatusPill, openViewerWindow, type ViewerWindowHandle } from "@ltds/ui";
+import { Card, EmptyState, Loading, StatusPill, openViewerWindow, requestText, type ViewerWindowHandle } from "@ltds/ui";
 import { api } from "./api";
 import { hashFileOffThread } from "./file-hash";
 import {
@@ -951,7 +951,7 @@ function Storage({ summary, canPurge, busy, mutate, loadMore }: { summary: Viewe
   </div><p>Dataset and output trash is recoverable until its purge date. Restore and permanent purge require owner-only storage permission; permanent purge also requires typing the stable entity ID.</p><p>{summary.trash.totalCount} trashed item{summary.trash.totalCount === 1 ? "" : "s"} · {formatBytes(summary.trash.totalBytes)}</p>
   {!summary.trash.items.length ? <EmptyState title="Trash is empty" detail="Archived data remains cataloged; trashed data appears here for restore or explicit purge." /> : <div className="viewer-processing-list">{summary.trash.items.filter(item => !item.permanentlyDeletedAt).map(item => <article key={item.id}><div><h3>{item.entityType === "output" ? "Model output" : "Dataset"} {item.entityId}</h3><p>{formatBytes(item.byteSize)} · purge after {new Date(item.purgeAfter).toLocaleString()}</p></div><div>
     {canPurge && <button type="button" className="button-ghost button-small" disabled={busy} onClick={() => void mutate(client => client.request(`/api/v1/storage/trash/${encodeURIComponent(item.id)}/restore`, { method: "POST", headers: { "Idempotency-Key": crypto.randomUUID() }, body: "{}" }), `${item.entityType === "output" ? "Model output" : "Dataset"} restored from trash.`)}>Restore</button>}
-    {canPurge && <button type="button" className="button-danger button-small" disabled={busy} onClick={() => { const typedId = window.prompt(`Permanent deletion cannot be undone. Type ${item.entityType} ID ${item.entityId} to continue.`); if (typedId === item.entityId) void mutate(client => client.request(`/api/v1/storage/trash/${encodeURIComponent(item.id)}`, { method: "DELETE", headers: { "Idempotency-Key": crypto.randomUUID() }, body: JSON.stringify({ typedId }) }), `${item.entityType === "output" ? "Model output" : "Dataset"} permanently purged.`); }}>Permanently purge</button>}
+    {canPurge && <button type="button" className="button-danger button-small" disabled={busy} onClick={async () => { const typedId = await requestText({ title: "Permanently purge", description: "Permanent deletion cannot be undone.", exact: true, label: `Type ${item.entityType} ID ${item.entityId} to continue`, confirmLabel: "Permanently purge", validate: value => value === item.entityId ? null : "The ID does not match. Nothing will be purged until it does." }); if (typedId === item.entityId) void mutate(client => client.request(`/api/v1/storage/trash/${encodeURIComponent(item.id)}`, { method: "DELETE", headers: { "Idempotency-Key": crypto.randomUUID() }, body: JSON.stringify({ typedId }) }), `${item.entityType === "output" ? "Model output" : "Dataset"} permanently purged.`); }}>Permanently purge</button>}
   </div></article>)}</div>}<Pager nextCursor={summary.trash.nextCursor} busy={busy} loadMore={loadMore} />
   </Card>;
 }

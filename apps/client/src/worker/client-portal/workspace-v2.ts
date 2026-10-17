@@ -1,3 +1,4 @@
+import {projectedPrincipalIdentitySql,noOtherProjectedIdentitySql,projectedReenrollmentSchemaReady,noHistoricalProjectedIdentitySql} from './projected-principal-identity';
 import { folderOwnerEntityType,addExactStandaloneClientScope } from '../../../../../packages/shared/src/folder-owner-entity';
 import type { Env as ClientEnv } from "../types";
 import { blockBusinessProfileWorkspace,businessProfileAuthorityBatch } from './business-profile-fences';
@@ -261,7 +262,7 @@ const secondaryInvitationInviterIsCurrent = `EXISTS(SELECT 1
     AND inviter_membership.source_type='project_alpha' AND inviter_membership.status='active'
     AND inviter_membership.revoked_at IS NULL AND inviter_membership.expires_at IS NULL
   JOIN pa_portal_principals inviter_principal
-    ON inviter_principal.workspace_id=workspace.id AND inviter_principal.identity_id=inviter.id
+    ON inviter_principal.workspace_id=workspace.id AND ${projectedPrincipalIdentitySql('inviter_principal')}=inviter.id
     AND inviter_principal.status='active' AND inviter_principal.source_version=inviter_membership.source_version
     AND lower(inviter_principal.email_hint)=lower(inviter.verified_email)
   JOIN portal_v2_directory_entities inviter_root
@@ -346,6 +347,7 @@ async function resolveGlobalIdentity(
       // historical identity, membership, bridge, or entitlement may be
       // recreated from PA.
       const claimTablePresent = await d1TablesPresent(env.DELIVERY_DB, ["portal_client_authority_workspace_claims"]);
+      const reenrollmentReady=await projectedReenrollmentSchemaReady(portalDb(env));
       const claimGuard = claimTablePresent ? `AND NOT EXISTS(SELECT 1 FROM portal_client_authority_workspace_claims claim
         WHERE claim.workspace_id=principal.workspace_id AND claim.state='active')` : "";
       const identityIdForRepair = identity?.id ?? "";
@@ -366,6 +368,8 @@ async function resolveGlobalIdentity(
         JOIN client_accounts account ON account.id=workspace.legacy_account_id AND account.status='active'
           AND ${primaryAlphaReference("account")}
           WHERE principal.status='active' AND (principal.identity_id IS NULL OR principal.identity_id=?) AND lower(principal.email_hint)=?
+          AND ${noOtherProjectedIdentitySql('principal')}
+          ${reenrollmentReady?'':`AND ${noHistoricalProjectedIdentitySql('principal')}`}
           ${claimGuard}
           AND (principal.identity_id IS NULL
             OR NOT EXISTS(SELECT 1 FROM portal_v2_identity_eligibility_bindings eligibility
@@ -383,7 +387,7 @@ async function resolveGlobalIdentity(
                 AND bridge.status='active' AND bridge.revoked_at IS NULL)
             ${authorityRepair})
         ORDER BY principal.workspace_id,principal.public_id LIMIT 101`)
-        .bind(identityIdForRepair,email,identityIdForRepair,identityIdForRepair,identityIdForRepair,
+        .bind(identityIdForRepair,email,principal.issuer,principal.subject,...(reenrollmentReady?[]:[principal.issuer,principal.subject]),identityIdForRepair,identityIdForRepair,identityIdForRepair,
           ...(authorityTablesReady ? [identityIdForRepair] : []))
         .all<{ workspace_id: string; public_id: string; source_version: string; legacy_account_id: string }>();
       if (eligible.results.length === 0) return identity;
@@ -404,15 +408,24 @@ async function resolveGlobalIdentity(
           (identity_id,workspace_id,principal_public_id,principal_source_version,verified_email)
           SELECT id,?,?,?,? FROM portal_v2_identities WHERE issuer=? AND subject=?
             AND status='active' AND revoked_at IS NULL AND lower(verified_email)=?
+            AND EXISTS(SELECT 1 FROM pa_portal_principals p WHERE p.workspace_id=? AND p.public_id=?
+              AND ${noOtherProjectedIdentitySql('p','portal_v2_identities.issuer','portal_v2_identities.subject')}
+              ${reenrollmentReady?'':`AND ${noHistoricalProjectedIdentitySql('p','portal_v2_identities.issuer','portal_v2_identities.subject')}`})
             ${claimTablePresent ? `AND NOT EXISTS(SELECT 1 FROM portal_client_authority_workspace_claims claim WHERE claim.workspace_id=? AND claim.state='active')` : ""}`)
           .bind(row.workspace_id, row.public_id, row.source_version, email,
-            principal.issuer, principal.subject, email,...(claimTablePresent?[row.workspace_id]:[]))),
+            principal.issuer, principal.subject, email,row.workspace_id,row.public_id,...(claimTablePresent?[row.workspace_id]:[]))),
         ...shells.map(row => portalDb(env).prepare(`UPDATE pa_portal_principals SET identity_id=(SELECT id FROM portal_v2_identities
             WHERE issuer=? AND subject=? AND status='active' AND revoked_at IS NULL AND lower(verified_email)=?)
           WHERE workspace_id=? AND public_id=? AND source_version=? AND status='active'
             AND (identity_id IS NULL OR identity_id=(SELECT id FROM portal_v2_identities WHERE issuer=? AND subject=?))
+            AND NOT EXISTS(SELECT 1 FROM pa_portal_principals occupied WHERE occupied.workspace_id=pa_portal_principals.workspace_id
+              AND occupied.public_id<>pa_portal_principals.public_id AND occupied.identity_id=(SELECT id FROM portal_v2_identities WHERE issuer=? AND subject=?))
+            AND EXISTS(SELECT 1 FROM portal_v2_identity_eligibility_bindings own
+              JOIN portal_v2_identities person ON person.id=own.identity_id
+              WHERE own.workspace_id=pa_portal_principals.workspace_id AND own.principal_public_id=pa_portal_principals.public_id
+                AND own.principal_source_version=pa_portal_principals.source_version AND person.issuer=? AND person.subject=?)
             ${claimTablePresent ? `AND NOT EXISTS(SELECT 1 FROM portal_client_authority_workspace_claims claim WHERE claim.workspace_id=? AND claim.state='active')` : ""}`)
-          .bind(principal.issuer,principal.subject,email,row.workspace_id,row.public_id,row.source_version,principal.issuer,principal.subject,...(claimTablePresent?[row.workspace_id]:[]))),
+          .bind(principal.issuer,principal.subject,email,row.workspace_id,row.public_id,row.source_version,principal.issuer,principal.subject,principal.issuer,principal.subject,principal.issuer,principal.subject,...(claimTablePresent?[row.workspace_id]:[]))),
         ...shells.map(row => portalDb(env).prepare(`UPDATE portal_v2_workspace_memberships SET source_type='project_alpha',
             source_version=?,status='active',revoked_at=NULL,updated_at=datetime('now')
           WHERE workspace_id=? AND identity_id=(SELECT id FROM portal_v2_identities WHERE issuer=? AND subject=?)
@@ -423,7 +436,7 @@ async function resolveGlobalIdentity(
           (id,workspace_id,identity_id,source_type,status,source_version)
           SELECT 'pa-membership:' || projected.workspace_id || ':' || projected.public_id,projected.workspace_id,identity.id,
             'project_alpha','active',projected.source_version
-          FROM pa_portal_principals projected JOIN portal_v2_identities identity ON identity.id=projected.identity_id
+          FROM pa_portal_principals projected JOIN portal_v2_identities identity ON identity.id=${reenrollmentReady?projectedPrincipalIdentitySql('projected'):'projected.identity_id'}
           WHERE projected.workspace_id=? AND projected.public_id=? AND projected.source_version=? AND projected.status='active'
             AND identity.issuer=? AND identity.subject=? AND identity.status='active' AND identity.revoked_at IS NULL
             ${claimTablePresent ? `AND NOT EXISTS(SELECT 1 FROM portal_client_authority_workspace_claims claim WHERE claim.workspace_id=projected.workspace_id AND claim.state='active')` : ""}
@@ -438,28 +451,35 @@ async function resolveGlobalIdentity(
           .bind(`eligibility-legacy:${row.workspace_id}:${row.public_id}`,row.legacy_account_id,
             `ltds-eligibility:${row.workspace_id}`.slice(0,512),email,principal.issuer,principal.subject,...(claimTablePresent?[row.workspace_id]:[]))),
         ...shells.map(row => portalDb(env).prepare(`INSERT OR IGNORE INTO client_account_members
-          (account_id,identity_id,role,can_view_billing) SELECT ?,?,'member',0
-          ${claimTablePresent ? `WHERE NOT EXISTS(SELECT 1 FROM portal_client_authority_workspace_claims claim WHERE claim.workspace_id=? AND claim.state='active')` : ""}`)
-          .bind(row.legacy_account_id,`eligibility-legacy:${row.workspace_id}:${row.public_id}`,...(claimTablePresent?[row.workspace_id]:[]))),
+          (account_id,identity_id,role,can_view_billing)
+          SELECT link.account_id,link.id,'member',0 FROM client_identity_links link
+          JOIN portal_v2_identities person ON person.id=link.subject AND person.issuer=? AND person.subject=?
+            AND person.status='active' AND person.revoked_at IS NULL
+          WHERE link.account_id=? AND link.issuer=? AND link.revoked_at IS NULL AND lower(link.email)=lower(person.verified_email)
+            ${claimTablePresent ? `AND NOT EXISTS(SELECT 1 FROM portal_client_authority_workspace_claims claim WHERE claim.workspace_id=? AND claim.state='active')` : ""}`)
+          .bind(principal.issuer,principal.subject,row.legacy_account_id,`ltds-eligibility:${row.workspace_id}`.slice(0,512),...(claimTablePresent?[row.workspace_id]:[]))),
         ...shells.map(row => portalDb(env).prepare(`INSERT OR IGNORE INTO portal_v2_identity_eligibility_legacy_bridges
           (workspace_id,identity_id,legacy_account_id,legacy_identity_id)
-          SELECT ?,id,?,? FROM portal_v2_identities WHERE issuer=? AND subject=? AND status='active' AND revoked_at IS NULL
+          SELECT ?,person.id,link.account_id,link.id FROM portal_v2_identities person
+          JOIN client_identity_links link ON link.subject=person.id AND link.account_id=? AND link.issuer=?
+            AND link.revoked_at IS NULL AND lower(link.email)=lower(person.verified_email)
+          WHERE person.issuer=? AND person.subject=? AND person.status='active' AND person.revoked_at IS NULL
             ${claimTablePresent ? `AND NOT EXISTS(SELECT 1 FROM portal_client_authority_workspace_claims claim WHERE claim.workspace_id=? AND claim.state='active')` : ""}`)
-          .bind(row.workspace_id,row.legacy_account_id,`eligibility-legacy:${row.workspace_id}:${row.public_id}`,principal.issuer,principal.subject,...(claimTablePresent?[row.workspace_id]:[]))),
+          .bind(row.workspace_id,row.legacy_account_id,`ltds-eligibility:${row.workspace_id}`.slice(0,512),principal.issuer,principal.subject,...(claimTablePresent?[row.workspace_id]:[]))),
         ...(authorityTablesReady ? shells.map(row => portalDb(env).prepare(`INSERT INTO portal_v2_entitlements
           (id,workspace_id,identity_id,capability,effect,scope_type,scope_public_id,entitlement_version,
            source_type,source_version,status,valid_from,expires_at)
-          SELECT 'pa-entitlement:' || intent.workspace_id || ':' || intent.public_id,intent.workspace_id,projected.identity_id,
+          SELECT 'pa-entitlement:' || intent.workspace_id || ':' || intent.public_id,intent.workspace_id,${reenrollmentReady?projectedPrincipalIdentitySql('projected'):'projected.identity_id'},
             intent.capability,intent.effect,intent.scope_type,intent.scope_public_id,
             generation.source_sequence,'project_alpha',intent.source_version,'active',intent.valid_from,intent.expires_at
           FROM pa_portal_entitlement_intents intent
           JOIN pa_portal_principals projected ON projected.workspace_id=intent.workspace_id
-            AND projected.public_id=intent.principal_public_id AND projected.status='active' AND projected.identity_id IS NOT NULL
+            AND projected.public_id=intent.principal_public_id AND projected.status='active' AND ${reenrollmentReady?projectedPrincipalIdentitySql('projected'):'projected.identity_id'} IS NOT NULL
           JOIN portal_v2_directory_checkpoints checkpoint ON checkpoint.workspace_id=intent.workspace_id
           JOIN portal_v2_directory_generations generation ON generation.id=checkpoint.active_generation_id
             AND generation.workspace_id=checkpoint.workspace_id AND generation.status='active' AND generation.complete=1
           JOIN portal_v2_workspace_memberships membership ON membership.workspace_id=intent.workspace_id
-            AND membership.identity_id=projected.identity_id AND membership.status='active' AND membership.source_type='project_alpha'
+            AND membership.identity_id=${reenrollmentReady?projectedPrincipalIdentitySql('projected'):'projected.identity_id'} AND membership.status='active' AND membership.source_type='project_alpha'
           WHERE intent.workspace_id=? AND intent.principal_public_id=? AND intent.status='active'
             ${claimTablePresent ? `AND NOT EXISTS(SELECT 1 FROM portal_client_authority_workspace_claims claim WHERE claim.workspace_id=intent.workspace_id AND claim.state='active')` : ""}
           ON CONFLICT(id) DO UPDATE SET identity_id=excluded.identity_id,capability=excluded.capability,effect=excluded.effect,

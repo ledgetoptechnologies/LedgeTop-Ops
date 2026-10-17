@@ -1,3 +1,4 @@
+import { projectedPrincipalIdentitySql } from './projected-principal-identity';
 /**
  * Exact native staff-publication proof for a secondary workspace.  The four
  * expressions are trusted SQL aliases from the fixed query templates below;
@@ -119,7 +120,7 @@ export function authenticatedDeliveryChangeAuthoritySql(
       AND binding.owner_public_id=batch.owner_public_id AND binding.r2_prefix=batch.r2_prefix
       AND binding.status='active' AND binding.revoked_at IS NULL
     JOIN pa_portal_principals principal ON principal.workspace_id=batch.workspace_id AND principal.public_id=batch.principal_public_id
-      AND principal.identity_id=batch.identity_id AND principal.source_version=batch.principal_source_version AND principal.status='active'
+      AND ${projectedPrincipalIdentitySql('principal')}=batch.identity_id AND principal.source_version=batch.principal_source_version AND principal.status='active'
     JOIN portal_v2_identities identity ON identity.id=batch.identity_id AND identity.status='active'
       AND identity.revoked_at IS NULL AND identity.verified_email IS NOT NULL
     JOIN portal_v2_workspace_memberships membership ON membership.workspace_id=batch.workspace_id AND membership.identity_id=batch.identity_id

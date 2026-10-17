@@ -5,16 +5,20 @@ const read = (name: string) => readFileSync(new URL(`../src/client/${name}`, imp
 
 describe("shared portal brand", () => {
   it("shows one generic Ledge Top identity regardless of domain or workspace source", () => {
-    const portal = read("ClientPortalApp.tsx");
-    expect(portal).toContain('data-portal-division="generic"');
-    expect(portal).toContain("<LtMark />");
-    expect(portal).not.toMatch(/resolvePortalBrand|from "\.\/portal-brand"|BRAND\.logoUrl/);
-    expect(portal).not.toMatch(/Drone Services|Technologies/);
+    const shell = read("PortalShell.tsx");
+    expect(shell).toContain('data-portal-division="generic"');
+    expect(shell).toContain("<LtMark />");
+    for (const name of ["ClientPortalApp.tsx", "OperationsHomeApp.tsx", "PortalBootstrapApp.tsx"]) {
+      const source = read(name);
+      expect(source, name).toContain('from "./PortalShell"');
+      expect(source, name).not.toMatch(/resolvePortalBrand|from "\.\/portal-brand"|BRAND\.logoUrl/);
+      expect(source, name).not.toMatch(/Drone Services|Technologies/);
+    }
   });
 
   it("keeps shared portal copy neutral", () => {
-    const sharedCopy = ["ClientPortalApp.tsx", "main.tsx"].map(read).join("\n");
-    expect(sharedCopy).not.toMatch(/\bLTDS\b|Loading LedgeTop/);
+    const sharedCopy = ["ClientPortalApp.tsx", "main.tsx", "OperationsHomeApp.tsx", "PortalBootstrapApp.tsx", "PortalShell.tsx"].map(read).join("\n");
+    expect(sharedCopy).not.toMatch(/\bLTDS\b|LedgeTop/);
     expect(sharedCopy).toContain("Ledge Top");
   });
 

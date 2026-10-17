@@ -603,6 +603,7 @@ test("native workspace branding stays generic Ledge Top for every source across 
 
     if (width >= 961) {
       await expect(page.getByRole("combobox", { name: "Client workspace" })).toBeVisible();
+      await expect(page.getByRole("combobox", { name: "Client workspace" }).locator("option")).toHaveText(["LTT Client", "LTDS Client"]);
       const labelStyles = await brand.locator("small").evaluate(element => {
         const style = getComputedStyle(element);
         return { whiteSpace: style.whiteSpace, textOverflow: style.textOverflow, overflow: style.overflow };
@@ -2052,6 +2053,41 @@ test("client can edit before review, create a child change, and answer an estima
   await page.getByRole("button", { name: "Accept estimate" }).click();
   await expect.poll(() => workflowEvents.estimateAccepted).toBe(true);
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+});
+
+test("estimate change requests use an in-app text dialog, not the unsupported native prompt", async ({ page }) => {
+  const nativeDialogs: string[] = [];
+  page.on("dialog", dialog => { nativeDialogs.push(dialog.type()); void dialog.dismiss(); });
+  await page.addInitScript(() => { window.prompt = () => { throw new Error("prompt() is not supported."); }; });
+  const baseRequest = requests[0]!;
+  const estimateRequest: PortalServiceRequest = {
+    ...baseRequest, id: "request-b", requestType: "service" as const, title: "Reviewed model update",
+    details: "Update the reviewed site model.", status: "under_review" as const,
+    operationalEstimate: { id: "estimate-b", version: 1, scope: "Model update and contours", amount: 1250, currency: "USD", status: "ready" as const, proposedFields: null, clientResponseNote: null, updatedAt: "2026-08-01T12:30:00.000Z" },
+  };
+  await mockAuthorizedPortal(page, null, [estimateRequest], {});
+  const responses: unknown[] = [];
+  await page.route("**/api/client/service-requests/request-b/estimate-response", async route => {
+    responses.push(route.request().postDataJSON());
+    await route.fulfill({ json: { request: { ...estimateRequest, operationalEstimate: { ...estimateRequest.operationalEstimate!, status: "changes_requested" } } } });
+  });
+  await page.goto("/portal/requests");
+
+  const requestChanges = page.getByRole("button", { name: "Request changes" });
+  await requestChanges.click();
+  const dialog = page.getByRole("dialog", { name: "Request a change" });
+  const note = dialog.getByRole("textbox", { name: "What should change in the operational estimate?" });
+  await expect(note).toBeFocused();
+  await dialog.getByRole("button", { name: "Cancel" }).click();
+  await expect(dialog).toHaveCount(0);
+  expect(responses).toHaveLength(0);
+
+  await requestChanges.click();
+  await note.fill("Add contours for the east parcel.");
+  await dialog.getByRole("button", { name: "Send change request" }).click();
+  await expect.poll(() => responses.length).toBe(1);
+  expect(responses[0]).toMatchObject({ estimateId: "estimate-b", response: "request_change", note: "Add contours for the east parcel." });
+  expect(nativeDialogs).toEqual([]);
 });
 
 test("client can cancel pre-work requests and sees PA draft creation without an acceptance claim", async ({ page }) => {

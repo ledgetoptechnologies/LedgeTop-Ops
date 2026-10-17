@@ -2,6 +2,7 @@ import { projectAlphaSourceName } from "@ltds/shared";
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { Card, StatusPill, Skeleton } from "@ltds/ui";
 import { api, ApiError } from "./api";
+import { sourceDisplayName } from "./source-label";
 import { clientDirectoryReturnPath, type ClientKind, type ClientSummary } from "./ClientDirectory";
 import type { ClientServiceAssignmentResult } from "./ClientServiceAssignments";
 
@@ -271,7 +272,7 @@ function RecordPicker({ kind, excludedSources, initialQuery, contextSignal, onSe
   return <section className="business-party-picker" aria-label="Find source record" aria-busy={busy}>
     {sources && !sources.length && <p>No other visible business source is available for linking. This action does not connect or activate another source.</p>}
     {sources && sources.length > 0 && <label className="business-party-source-select">Business source<select value={source} onChange={event => setSource(event.target.value)}>
-      {sources.map(row => <option key={row.source_id} value={row.source_id}>{row.display_name}</option>)}
+      {sources.map(row => <option key={row.source_id} value={row.source_id}>{sourceDisplayName(row.display_name, row.source_id)}</option>)}
     </select></label>}
     <form onSubmit={search} className="business-party-search"><label htmlFor="business-party-search">Find another business record</label>
       <div><input id="business-party-search" type="search" maxLength={200} value={draft} onChange={event => setDraft(event.target.value)} placeholder="Client name, contact, or permitted project" />
@@ -282,7 +283,7 @@ function RecordPicker({ kind, excludedSources, initialQuery, contextSignal, onSe
       const reason = row.root_namespace !== "business" || row.kind !== kind ? "Not a matching business-record type"
         : row.business_party_id ? "Already part of a linked customer" : excludedSources.includes(row.source_id || "") ? "This source is already represented" : null;
       return <li key={JSON.stringify([row.source_id, row.root_namespace, row.kind, row.public_id])}><strong>{row.display_name}</strong>
-        <span>{row.source_name || row.source_id}</span><small>{projectAlphaSourceName(row.source_id)} · Record {row.public_id}</small>
+        <span>{sourceDisplayName(row.source_name, row.source_id)}</span><small>{projectAlphaSourceName(row.source_id)} · Record {row.public_id}</small>
         {reason ? <small>{reason}</small> : <button type="button" className="button-ghost" disabled={busy} onClick={() => { if (!contextSignal.aborted) onSelect(row); }}>Choose {row.display_name}</button>}
       </li>;
     })}</ul>
@@ -311,7 +312,7 @@ function LinkEditor({ anchor, party, contextSignal, onCancel, onInvalidated, onS
     {!selected ? <RecordPicker kind={kind} excludedSources={party?.members.map(member => member.root.sourceId) || [anchor?.source_id || ""]}
       initialQuery={party?.displayName || anchor?.display_name || ""}
       contextSignal={contextSignal} onSelect={setSelected} onInvalidated={onInvalidated} /> : <form onSubmit={review}>
-      <p>Selected: <strong>{selected.display_name}</strong> · {selected.source_name || selected.source_id}</p>
+      <p>Selected: <strong>{selected.display_name}</strong> · {sourceDisplayName(selected.source_name, selected.source_id)}</p>
       <small>{projectAlphaSourceName(selected.source_id)} · Record {selected.public_id}</small>
       {!party && <label>Linked customer name<input value={name} required maxLength={160} onChange={event => setName(event.target.value)} />
         <small>This names the Client Hub grouping; it does not rename either source record.</small></label>}

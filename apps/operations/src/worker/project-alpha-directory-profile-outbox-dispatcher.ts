@@ -1,3 +1,4 @@
+import { correspondenceGrantSql } from './portal-directory-correspondence';
 import {
   isProjectAlphaDirectoryCreateCommand,
   isProjectAlphaDirectoryProfileUpdateCommand,
@@ -19,11 +20,11 @@ import { directoryMaterializationReadSource } from "./project-alpha-directory-ma
 import { validateDirectoryCreateRecoveryReservation } from "./project-alpha-directory-create-generation-recovery";
 import type { NativeDirectoryPortalWriterActor } from "./native-directory-profile-writer";
 import type { SharedProfilePortalAuthorityBinding, SharedProfilePortalProof } from "../../../../packages/shared/src/shared-business-profile";
-import { portalProofSchema, stablePortalRequestFingerprint, type SharedProfilePortalGrant } from "./shared-profile-portal-authority";
+import { portalProofSchema, stablePortalRequestFingerprint, sharedProfileCorrespondenceColumns, sharedProfileGrantSourceCurrent, type SharedProfilePortalGrant } from "./shared-profile-portal-authority";
 
 const LEASE_MS = 5 * 60_000;
 const MAX_RETRY_MS = 60 * 60_000;
-type Environment = ProjectAlphaApiV2ConnectionEnvironment & Readonly<{ OPS_DB: D1Database;
+type Environment = ProjectAlphaApiV2ConnectionEnvironment & Readonly<{ OPS_DB: D1Database; DELIVERY_DB?: D1Database;
   PROJECT_ALPHA_DIRECTORY_CREATE_GENERATION_RECOVERY_ENABLED?: string;
   SHARED_PROFILE_PORTAL_AUTHORITY?: SharedProfilePortalAuthorityBinding }>;
 type Row = Readonly<Record<string, unknown> & {
@@ -100,9 +101,24 @@ function isPortalActor(value: Actor | NativeDirectoryPortalWriterActor): value i
   return "kind" in value && value.kind==="portal";
 }
 
+/** A fresh private witness is awaited at every authorization boundary. Timeout
+ * never grants authority and does not imply the remote RPC was cancelled.
+ * Scheduled cross-service latency can exceed five seconds; the returned proof
+ * still has its original Client-generated thirty-second validity and is checked
+ * freshly at every existing boundary, independently of this wait budget. */
+export async function readPortalAuthorityWithinBudget(binding:SharedProfilePortalAuthorityBinding,
+ input:Parameters<SharedProfilePortalAuthorityBinding['readAuthority']>[0]) {
+ let timeout:ReturnType<typeof setTimeout>|undefined;
+ try{return await Promise.race([binding.readAuthority(input),
+  new Promise<null>(resolve=>{timeout=setTimeout(()=>resolve(null),30_000);})]);}
+ finally{if(timeout!==undefined)clearTimeout(timeout);}
+}
 async function livePortalReservation(db:D1Database,row:Row,value:NativeDirectoryPortalWriterActor,
-  binding:SharedProfilePortalAuthorityBinding|undefined):Promise<NonNullable<Internal["portalAuthority"]>|null>{
-  if(!binding||row.recovery_authorization_id!==null)return null;
+  environment:Environment|undefined):Promise<NonNullable<Internal["portalAuthority"]>|null>{
+  const binding=environment?.SHARED_PROFILE_PORTAL_AUTHORITY;
+  if(!environment||!binding||row.recovery_authorization_id!==null)return null;
+  const bridgeColumns=await sharedProfileCorrespondenceColumns(db);
+  const correspondence=bridgeColumns?correspondenceGrantSql("grant_row"):"1=1";
   const grant=await db.prepare(`SELECT grant_row.*,g.kind,g.version,g.profile_json,c.request_sha256
     FROM shared_profile_portal_grants grant_row
     JOIN shared_profile_portal_authority_heads head ON head.workspace_id=grant_row.workspace_id AND head.source_id=grant_row.source_id
@@ -112,8 +128,8 @@ async function livePortalReservation(db:D1Database,row:Row,value:NativeDirectory
     JOIN native_directory_shared_profile_members member ON member.group_id=g.id AND member.record_id=?
     JOIN json_each(c.members_json) expected_member ON json_extract(expected_member.value,'$.recordId')=member.record_id
     JOIN native_directory_shared_profile_members owner_member ON owner_member.group_id=g.id AND owner_member.record_id=grant_row.record_id
-    JOIN project_alpha_active_directory_mappings owner_mapping ON owner_mapping.record_id=owner_member.record_id AND owner_mapping.source_id=grant_row.source_id
-    WHERE grant_row.id=? AND grant_row.state='active' AND grant_row.revision=? AND grant_row.issuer=? AND grant_row.subject=?
+    JOIN project_alpha_active_directory_mappings owner_mapping ON owner_mapping.record_id=owner_member.record_id AND owner_mapping.source_id=${bridgeColumns?"COALESCE(grant_row.directory_source_id,grant_row.source_id)":"grant_row.source_id"}
+    WHERE ${correspondence} AND grant_row.id=? AND grant_row.state='active' AND grant_row.revision=? AND grant_row.issuer=? AND grant_row.subject=?
     AND grant_row.workspace_id=? AND grant_row.source_id=? AND grant_row.group_id=? AND head.state='active'
     AND owner_mapping.resource_type=grant_row.target_type AND owner_mapping.project_alpha_public_id=grant_row.target_public_id
     AND owner_mapping.source_instance_id=grant_row.source_instance_id AND owner_mapping.application_id=grant_row.application_id
@@ -135,18 +151,16 @@ async function livePortalReservation(db:D1Database,row:Row,value:NativeDirectory
       value.workspaceId,value.sourceId,value.groupId,value.actorId,row.resource_type,row.revision_profile_json,row.mutation_id,row.record_version-1,
       value.issuer,value.subject,value.authorityRevision,value.contextVersion,value.verifiedUntil)
     .first<SharedProfilePortalGrant & {request_sha256:string}>();
-  if(!grant)return null;
+  if(!grant||!await sharedProfileGrantSourceCurrent({...environment,OPS_DB:db},grant))return null;
   const fields=parse(row.revision_profile_json);if(!fields||Object.values(fields).some(v=>typeof v!=="string"))return null;
   const fingerprint=await stablePortalRequestFingerprint({protocolVersion:1,workspaceId:value.workspaceId,sourceId:value.sourceId,
     issuer:value.issuer,subject:value.subject,authorityRevision:value.authorityRevision,contextVersion:value.contextVersion,
     verifiedUntil:value.verifiedUntil,targets:[],grantId:value.grantId,expectedVersion:value.groupVersion,mutationId:value.sharedMutationId,
     profile:fields as Record<string,string>},grant);
   if(fingerprint!==grant.request_sha256)return null;
-  let timeout:ReturnType<typeof setTimeout>|undefined;
   try{
-    const answer=await Promise.race([binding.readAuthority({protocolVersion:1,workspaceId:grant.workspace_id,sourceId:grant.source_id,
-      issuer:value.issuer,subject:value.subject,principalPublicId:grant.principal_public_id,scopeType:grant.target_type,publicId:grant.target_public_id}),
-      new Promise<null>(resolve=>{timeout=setTimeout(()=>resolve(null),5_000);})]);
+    const answer=await readPortalAuthorityWithinBudget(binding,{protocolVersion:1,workspaceId:grant.workspace_id,sourceId:grant.source_id,
+      issuer:value.issuer,subject:value.subject,principalPublicId:grant.principal_public_id,scopeType:grant.target_type,publicId:grant.target_public_id});
     if(!answer||!answer.ok)return null;
     const parsed=portalProofSchema.safeParse(answer.proof);if(!parsed.success)return null;const proof=parsed.data,now=Date.now();
     if(proof.workspaceId!==grant.workspace_id||proof.sourceId!==grant.source_id||proof.issuer!==value.issuer||proof.subject!==value.subject
@@ -155,12 +169,12 @@ async function livePortalReservation(db:D1Database,row:Row,value:NativeDirectory
     const current=await db.prepare(`SELECT 1 ok FROM shared_profile_portal_grants grant_row
       JOIN shared_profile_portal_authority_heads head ON head.workspace_id=grant_row.workspace_id AND head.source_id=grant_row.source_id
       JOIN native_directory_shared_profiles g ON g.id=grant_row.group_id
-      WHERE grant_row.id=? AND grant_row.state='active' AND grant_row.revision=? AND grant_row.issuer=? AND grant_row.subject=?
+      WHERE ${correspondence} AND grant_row.id=? AND grant_row.state='active' AND grant_row.revision=? AND grant_row.issuer=? AND grant_row.subject=?
       AND g.id=? AND g.version=? AND json(g.membership_json)=json(grant_row.group_membership_json)
       AND head.state='active' AND head.revision=? AND datetime(?)>datetime('now')`)
       .bind(grant.id,grant.revision,value.issuer,value.subject,grant.group_id,value.groupVersion+1,proof.authorityRevision,proof.verifiedUntil).first();
-    return current?{proof,grant,requestSha256:fingerprint}:null;
-  }catch{return null;}finally{if(timeout!==undefined)clearTimeout(timeout);}
+    return current&&await sharedProfileGrantSourceCurrent({...environment,OPS_DB:db},grant)?{proof,grant,requestSha256:fingerprint}:null;
+  }catch{return null;}
 }
 function sameDestination(row: Row, connection: ProjectAlphaApiV2Connection): boolean {
   return row.application_id === connection.expectedApplicationId && row.expected_source_instance_id === connection.expectedSourceInstanceId
@@ -539,7 +553,7 @@ async function currentParentRevision(db: D1Database, row: Row, dependency: Relat
   return candidates.length === 1 && /^[1-9][0-9]{0,18}$/.test(candidates[0]!.revision) ? candidates[0]!.revision : null;
 }
 async function exactReservation(db: D1Database, row: Row, connection: ProjectAlphaApiV2Connection,
-  portalBinding?:SharedProfilePortalAuthorityBinding): Promise<Internal | "destination" | "command" | "authority"> {
+  portalEnvironment?:Environment): Promise<Internal | "destination" | "command" | "authority"> {
   if (!sameDestination(row, connection)) return "destination";
   if (row.intent_state !== "materialized" || row.command_json !== row.materialization_command_json
     || row.external_id !== row.external_canonical_id || row.record_kind !== row.resource_type || row.current_version !== row.record_version
@@ -573,7 +587,7 @@ async function exactReservation(db: D1Database, row: Row, connection: ProjectAlp
     && value.applicationUUID === row.application_id && value.historyEpoch === row.expected_history_epoch_id
     && value.origin === row.destination_base_url && value.externalCanonicalId === row.external_id
     && value.expectedAuthorizationGeneration === rootCommand.expectedAuthorizationGeneration)) return "command";
-  const portalAuthority=portal?await livePortalReservation(db,row,originalActor,portalBinding):undefined;
+  const portalAuthority=portal?await livePortalReservation(db,row,originalActor,portalEnvironment):undefined;
   if(portal&&!portalAuthority)return "authority";
   if (!portal&&(!await permitted(db, row, originalActor, "directory.profile.edit", recovery?.profileGrantId ?? originalActor.selectedGrantId)
     || (row.resource_type === "client" && !await permitted(db, row, originalActor, "directory.identity.link", recovery?.identityGrantId ?? originalActor.selectedIdentityGrantId))
@@ -709,7 +723,7 @@ export async function dispatchProjectAlphaDirectoryProfileOutboxCommand(env: Env
   if (initial.recovery_authorization_id !== null && env.PROJECT_ALPHA_DIRECTORY_CREATE_GENERATION_RECOVERY_ENABLED !== "true")
     return { status: "blocked", reason: "authority" };
   const selected = await withEnabledConfiguredProjectAlphaApiV2Connection(env, sourceId, async connection => {
-    const checked = await exactReservation(env.OPS_DB, initial, connection,env.SHARED_PROFILE_PORTAL_AUTHORITY);
+    const checked = await exactReservation(env.OPS_DB, initial, connection,env);
     if (typeof checked === "string") return { phase: "invalid" as const, reason: checked };
     const now = Date.now();
     if (initial.state === "pending" && initial.next_attempt_at > now) return { phase: "blocked" as const, reason: "not_due" as const };
@@ -723,7 +737,7 @@ export async function dispatchProjectAlphaDirectoryProfileOutboxCommand(env: Env
     if (claim.meta.changes !== 1) return { phase: "blocked" as const, reason: "in_progress" as const };
     const leased = await row(env.OPS_DB, commandId);
     if (!leased) return { phase: "invalid" as const, reason: "command" as const };
-    const current = await exactReservation(env.OPS_DB, leased, connection,env.SHARED_PROFILE_PORTAL_AUTHORITY);
+    const current = await exactReservation(env.OPS_DB, leased, connection,env);
     if (typeof current === "string") {
       await release(env.OPS_DB, leased, token, Date.now(), "pre_send_validation");
       return { phase: "invalid" as const, reason: current };
@@ -731,19 +745,17 @@ export async function dispatchProjectAlphaDirectoryProfileOutboxCommand(env: Env
     let postAuthorityRejected=false;
     // Transport capability probing can await network I/O. Reauthorize portal
     // scope immediately before the actual POST, after that probe completes.
-    const guardedSend:typeof fetch=current.portalAuthority?async(input,init)=>{
-      if(init?.method==="POST"){
-        const live=await exactReservation(env.OPS_DB,leased,connection,env.SHARED_PROFILE_PORTAL_AUTHORITY);
-        if(typeof live==="string"||!live.portalAuthority||JSON.stringify(live.transport)!==String(init.body)){
-          postAuthorityRejected=true;throw new Error("portal authority changed");
-        }
-      }return send(input,init);
-    }:send;
+    const beforePost=current.portalAuthority?async(body:string)=>{
+      const live=await exactReservation(env.OPS_DB,leased,connection,env);
+      if(typeof live==="string"||!live.portalAuthority||JSON.stringify(live.transport)!==body){
+        postAuthorityRejected=true;throw new Error("portal authority changed");
+      }
+    }:undefined;
     const outcome = current.operation === "create"
-      ? await sendProjectAlphaDirectoryCreate(connection, leased.resource_type, current.transport as ProjectAlphaDirectoryCreateCommand, guardedSend)
+      ? await sendProjectAlphaDirectoryCreate(connection, leased.resource_type, current.transport as ProjectAlphaDirectoryCreateCommand, send)
       : current.identitySafeContactProfile
-        ? await sendProjectAlphaDirectoryClientContactProfileUpdate(connection,current.publicId!,current.transport as ProjectAlphaDirectoryClientContactProfileUpdateCommand,guardedSend)
-        : await sendProjectAlphaDirectoryProfileUpdate(connection, leased.resource_type, current.publicId!, current.transport as ProjectAlphaDirectoryProfileUpdateCommand, guardedSend);
+        ? await sendProjectAlphaDirectoryClientContactProfileUpdate(connection,current.publicId!,current.transport as ProjectAlphaDirectoryClientContactProfileUpdateCommand,send,beforePost)
+        : await sendProjectAlphaDirectoryProfileUpdate(connection, leased.resource_type, current.publicId!, current.transport as ProjectAlphaDirectoryProfileUpdateCommand, send,beforePost);
     if(postAuthorityRejected){await release(env.OPS_DB,leased,token,Date.now(),"portal_pre_post_authority");return{phase:"invalid" as const,reason:"authority" as const};}
     if (outcome.status !== "acknowledged") {
       if (outcome.status === "conflict") {
@@ -766,7 +778,7 @@ export async function dispatchProjectAlphaDirectoryProfileOutboxCommand(env: Env
       await release(env.OPS_DB, leased, token, Date.now(), "evidence");
       return { phase: "uncertain" as const, reason: "evidence" };
     }
-    const after = await exactReservation(env.OPS_DB, leased, connection,env.SHARED_PROFILE_PORTAL_AUTHORITY);
+    const after = await exactReservation(env.OPS_DB, leased, connection,env);
     if (typeof after === "string") {
       await release(env.OPS_DB, leased, token, Date.now(), "post_send_validation");
       return { phase: "invalid" as const, reason: after };
@@ -783,11 +795,12 @@ export async function dispatchProjectAlphaDirectoryProfileOutboxCommand(env: Env
     const outcomeJson = JSON.stringify({ status: "acknowledged", response: persistedResponse });
     const statements: D1PreparedStatement[] = [];
     const portal=after.portalAuthority;
+    const correspondence=portal&&await sharedProfileCorrespondenceColumns(env.OPS_DB)?correspondenceGrantSql("grant_row"):"1=1";
     const portalGuard=portal?` AND EXISTS(SELECT 1 FROM shared_profile_portal_grants grant_row
       JOIN shared_profile_portal_authority_heads head ON head.workspace_id=grant_row.workspace_id AND head.source_id=grant_row.source_id
       JOIN native_directory_shared_profiles g ON g.id=grant_row.group_id
       JOIN native_directory_shared_profile_commands c ON c.group_id=g.id AND c.mutation_id=?
-      WHERE grant_row.id=? AND grant_row.state='active' AND grant_row.revision=? AND grant_row.issuer=? AND grant_row.subject=?
+      WHERE ${correspondence} AND grant_row.id=? AND grant_row.state='active' AND grant_row.revision=? AND grant_row.issuer=? AND grant_row.subject=?
       AND head.state='active' AND head.revision=? AND datetime(?)>datetime('now')
       AND g.version=c.expected_version+1 AND json(g.membership_json)=json(grant_row.group_membership_json)
       AND c.actor_kind='portal' AND c.actor_id=? AND c.request_sha256=? AND json(g.profile_json)=json(c.profile_json))`:"";

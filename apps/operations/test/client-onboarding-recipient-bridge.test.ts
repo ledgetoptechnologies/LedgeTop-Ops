@@ -21,10 +21,10 @@ describe("private client onboarding recipient bridge", () => {
       .resolves.toEqual({ ok: false, protocolVersion: 1, code: "unavailable" });
   });
 
-  it("keeps both deployment gates off and avoids a public Operations route", () => {
+  it("keeps onboarding disabled and its private bridge staged without a production binding", () => {
     expect(config("apps/client/wrangler.jsonc")).toContain('"CLIENT_ONBOARDING_RECIPIENT_BRIDGE_ENABLED": "false"');
     expect(config("apps/operations/wrangler.jsonc")).toContain('"CLIENT_ONBOARDING_RECIPIENT_BRIDGE_ENABLED": "false"');
-    expect(config("apps/client/wrangler.jsonc")).toContain('"entrypoint": "ClientOnboardingRecipientBridge"');
+    expect(config("apps/client/wrangler.jsonc")).not.toContain('"entrypoint": "ClientOnboardingRecipientBridge"');
     expect(config("docs/staging/delivery.wrangler.json.example")).toContain('"entrypoint": "ClientOnboardingRecipientBridge"');
     expect(config("docs/staging/operations.wrangler.json.example")).toContain('"CLIENT_ONBOARDING_RECIPIENT_BRIDGE_ENABLED": "false"');
     expect(config("apps/client/src/worker/index.ts")).toContain('"/api/client-onboarding"');

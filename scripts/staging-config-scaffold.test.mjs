@@ -2,10 +2,22 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import test from "node:test";
+import test, { after } from "node:test";
+import { historicalDefaultOffProduction } from "./test-fixtures/historical-default-off-production.mjs";
 import { renderConfigs, REQUIRED_STAGING_CONFIG_VALUES, validateRenderedConfigs, validateValues, writeRenderedConfigs } from "./staging-config-scaffold.mjs";
 
 const root = path.resolve(import.meta.dirname, "..");
+// Validate the historical template contract independently of today's enabled production.
+const historicalRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ltds-historical-scaffold-"));
+after(() => fs.rmSync(historicalRoot, { recursive: true, force: true }));
+for (const app of ["client", "operations", "ops-sync"]) {
+  const production = JSON.parse(fs.readFileSync(path.join(root, `apps/${app}/wrangler.jsonc`), "utf8"));
+  const historical = app === "ops-sync" ? production : historicalDefaultOffProduction(production);
+  const target = path.join(historicalRoot, `apps/${app}/wrangler.jsonc`);
+  fs.mkdirSync(path.dirname(target), { recursive: true });
+  fs.writeFileSync(target, JSON.stringify(historical));
+}
+
 const operationsWorkspacePage = "/administration/client-portal/operations-workspaces";
 const productionOwnerPages = [
   "/administration/client-portal/operations-recipients",
@@ -33,7 +45,7 @@ const values = Object.freeze({
 test("renders all three exact staging configs without placeholders", () => {
   assert.deepEqual(validateValues(values), []);
   const configs = renderConfigs(root, values);
-  assert.deepEqual(validateRenderedConfigs(root, configs), []);
+  assert.deepEqual(validateRenderedConfigs(historicalRoot, configs), []);
   assert.equal(configs.delivery.vars.CLIENT_ACCESS_AUD, values.DEDICATED_CLIENT_PORTAL_STAGING_ACCESS_AUD);
   assert.equal(configs.delivery.vars.CLIENT_PORTAL_NATIVE_RECIPIENT_ENROLLMENT_ENABLED, "true");
   assert(configs.delivery.services.some(({ binding, entrypoint }) => binding === "OPERATIONS_PORTAL_NATIVE_DELIVERY_AUTHORIZATION_READER"
@@ -49,8 +61,11 @@ test("renders all three exact staging configs without placeholders", () => {
   assert.equal(configs.operations.vars.CLIENT_REQUEST_TRIAGE_TO, values.STAGING_TRIAGE_EMAIL);
   assert.equal(configs.operations.main, "src/worker/staging-native-authority-entrypoint.ts");
   assert.deepEqual(configs.operations.triggers?.crons,
-    JSON.parse(fs.readFileSync(path.join(root, "apps/operations/wrangler.jsonc"), "utf8")).triggers.crons,
-    "staging must preserve every Operations cron handler, including API-v2, outbox, and reconciliation schedules");
+    ["*/15 * * * *", "*/5 * * * *", "2-57/5 * * * *", "17 * * * *", "4-59/15 * * * *", "3-58/5 * * * *", "1-56/5 * * * *", "6-51/15 * * * *"],
+    "the isolated staging template retains its dormant reconciliation schedule");
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(root, "apps/operations/wrangler.jsonc"), "utf8")).triggers.crons,
+    configs.operations.triggers.crons.filter(cron => cron !== "6-51/15 * * * *"),
+    "production retains only its seven deployed schedules");
   assert.equal(configs.operations.vars.OPERATIONS_PORTAL_NATIVE_DELIVERY_OWNER_ENABLED, "true");
   assert.equal(configs.operations.vars.OPERATIONS_PORTAL_WORKSPACE_OWNER_ENABLED, "false");
   assert.equal(configs.operations.vars.OPERATIONS_PORTAL_WORKSPACE_PUBLICATION_DISPATCH_ENABLED, "false");
@@ -77,36 +92,40 @@ test("relationship recovery stays explicitly off in rendered baselines and rejec
     const flag = "PROJECT_ALPHA_DIRECTORY_RELATIONSHIP_GENERATION_RECOVERY_ENABLED";
     if (value === undefined) delete configs.operations.vars[flag];
     else configs.operations.vars[flag] = value;
-    assert(validateRenderedConfigs(root, configs).some(error => error.includes(flag)));
+    assert(validateRenderedConfigs(historicalRoot, configs).some(error => error.includes(flag)));
   }
 });
 
-test("keeps production native authority registrations exact and default-off", () => {
+test("keeps production native authority registrations exact and explicitly enabled", () => {
   const client = JSON.parse(fs.readFileSync(path.join(root, "apps/client/wrangler.jsonc"), "utf8"));
   const operations = JSON.parse(fs.readFileSync(path.join(root, "apps/operations/wrangler.jsonc"), "utf8"));
   for (const page of productionOwnerPages)
     assert.equal(operations.assets?.run_worker_first?.filter(route => route === page).length, 1,
-      `operations production must route ${page} through the default-off Worker boundary exactly once`);
+      `operations production must route ${page} through the Worker boundary exactly once`);
   for (const flag of ["CLIENT_PORTAL_NATIVE_RECIPIENT_ENROLLMENT_ENABLED",
     "CLIENT_PORTAL_OPERATIONS_NATIVE_AUTHORITY_WRITER_ENABLED", "CLIENT_PORTAL_OPERATIONS_NATIVE_AUTHORITY_STATUS_ENABLED"])
-    assert.equal(Object.hasOwn(client.vars ?? {}, flag), false, `client production must omit ${flag}`);
+    assert.equal(client.vars?.[flag], "true", `client production must preserve ${flag}=true`);
   for (const flag of ["CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_WRITER_ENABLED",
     "CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_STATUS_ENABLED", "CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_READ_ENABLED",
     "CLIENT_PORTAL_OPERATIONS_NATIVE_CONTENT_AUDIT_ENABLED"])
-    assert.equal(client.vars?.[flag], "false", `client production must preserve ${flag}=false`);
+    assert.equal(client.vars?.[flag], "true", `client production must preserve ${flag}=true`);
   for (const flag of ["CLIENT_PORTAL_NATIVE_RECIPIENT_OWNER_ENABLED",
     "OPERATIONS_PORTAL_NATIVE_RECIPIENT_AUTHORITY_DISPATCH_ENABLED"])
-    assert.equal(Object.hasOwn(operations.vars ?? {}, flag), false, `operations production must omit ${flag}`);
+    assert.equal(operations.vars?.[flag], "true", `operations production must preserve ${flag}=true`);
   for (const flag of ["OPERATIONS_PORTAL_NATIVE_DELIVERY_OWNER_ENABLED",
     "OPERATIONS_PORTAL_NATIVE_DELIVERY_AUTHORITY_DISPATCH_ENABLED", "OPERATIONS_PORTAL_NATIVE_DELIVERY_READER_ENABLED",
     "OPERATIONS_PORTAL_NATIVE_DELIVERY_CANCELLATION_ENABLED", "OPERATIONS_PORTAL_NATIVE_BILLING_OWNER_ENABLED",
     "OPERATIONS_PORTAL_WORKSPACE_OWNER_ENABLED", "OPERATIONS_PORTAL_WORKSPACE_PUBLICATION_DISPATCH_ENABLED"])
-    assert.equal(operations.vars?.[flag], "false", `operations production must preserve ${flag}=false`);
-  assert.equal((client.services ?? []).some(service => service.binding === "OPERATIONS_PORTAL_NATIVE_RECIPIENT_ENROLLMENT"), false);
+    assert.equal(operations.vars?.[flag], "true", `operations production must preserve ${flag}=true`);
+  assert.deepEqual(client.services.find(service => service.binding === "OPERATIONS_PORTAL_NATIVE_RECIPIENT_ENROLLMENT"),
+    { binding: "OPERATIONS_PORTAL_NATIVE_RECIPIENT_ENROLLMENT", service: "ledgetop-ops",
+      entrypoint: "OperationsPortalNativeRecipientEnrollmentIngress" });
   assert.deepEqual(client.services.find(service => service.binding === "OPERATIONS_PORTAL_NATIVE_DELIVERY_AUTHORIZATION_READER"),
     { binding: "OPERATIONS_PORTAL_NATIVE_DELIVERY_AUTHORIZATION_READER", service: "ledgetop-ops",
       entrypoint: "OperationsPortalNativeDeliveryAuthorizationReader" });
-  assert.equal((operations.services ?? []).some(service => service.binding === "OPERATIONS_PORTAL_NATIVE_RECIPIENT_AUTHORITY"), false);
+  assert.deepEqual(operations.services.find(service => service.binding === "OPERATIONS_PORTAL_NATIVE_RECIPIENT_AUTHORITY"),
+    { binding: "OPERATIONS_PORTAL_NATIVE_RECIPIENT_AUTHORITY", service: "ledgetop-clients",
+      entrypoint: "OperationsPortalNativeRecipientAuthorityIngress" });
   assert.deepEqual(operations.services.find(service => service.binding === "OPERATIONS_PORTAL_NATIVE_DELIVERY_AUTHORITY"),
     { binding: "OPERATIONS_PORTAL_NATIVE_DELIVERY_AUTHORITY", service: "ledgetop-clients",
       entrypoint: "OperationsPortalNativeDeliveryAuthorityIngress" });
@@ -139,7 +158,7 @@ test("allows an explicit Mapbox staging deferral only with both rendered tokens 
   assert.equal(configs.operations.vars.MAPBOX_PUBLIC_TOKEN, "");
   assert.equal(configs.delivery.vars.MAPBOX_STAGING_ACCEPTANCE_DEFERRED, "true");
   assert.equal(configs.operations.vars.MAPBOX_STAGING_ACCEPTANCE_DEFERRED, "true");
-  assert.deepEqual(validateRenderedConfigs(root, configs), []);
+  assert.deepEqual(validateRenderedConfigs(historicalRoot, configs), []);
 
   const mixed = { ...deferred, CLIENT_STAGING_RESTRICTED_MAPBOX_PUBLIC_TOKEN: "pk.must-not-be-rendered" };
   assert(validateValues(mixed).some((error) => error.includes("empty string")));
@@ -172,7 +191,13 @@ test("shared profile private bindings stay paired and reject production, wrong-e
       if(mutation==="production")entry.service=service.replace(/-staging$/,"");
       else if(mutation==="entrypoint")entry.entrypoint="WrongProfileEntrypoint";
       else configs[app].services.push({...entry});
-      assert(validateRenderedConfigs(root,configs).length>0,`${app} ${mutation} must fail closed`);
+      assert(validateRenderedConfigs(historicalRoot,configs).length>0,`${app} ${mutation} must fail closed`);
     }
   }
+});
+
+test("historical staging templates fail closed against current production host requirements", () => {
+  const errors = validateRenderedConfigs(root, renderConfigs(root, values));
+  for (const flag of ["CLIENT_PORTAL_NATIVE_RECIPIENT_ENROLLMENT_EXPECTED_HOST", "CLIENT_PORTAL_OPERATIONS_NATIVE_AUTHORITY_EXPECTED_HOST"])
+    assert(errors.some(error => error.includes(flag)), errors.join(" | "));
 });

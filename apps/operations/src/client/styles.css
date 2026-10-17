@@ -24,6 +24,14 @@
   border-bottom: 1px solid #262626;
 }
 
+/* The brand never shrinks into the menu. Between the mobile breakpoint and
+   ~1200px the full desktop menu needs the room, so only the LT mark shows
+   there (the name stays available to assistive technology). */
+.ops-header .ltds-brand { flex: none; }
+@media (min-width: 961px) and (max-width: 1200px) {
+  .ops-header .ltds-brand > span { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap; }
+}
+
 .ops-header > nav {
   align-self: stretch;
   display: flex;
@@ -1658,6 +1666,8 @@ tbody tr:last-child td { border: 0; }
 .client-directory-workspace button { min-height: 44px; }
 .client-directory-grid { display: grid; grid-template-columns: repeat(auto-fit,minmax(min(100%,17.5rem),1fr)); gap: 1rem; min-width: 0; }
 .client-directory-card { display: flex; flex-direction: column; gap: .85rem; min-width: 0; padding: 1.1rem; border: 1px solid var(--line); border-radius: 14px; background: #fff; color: var(--ink); text-decoration: none; overflow-wrap: anywhere; box-shadow: 0 2px 8px rgb(23 43 58 / .03); }
+.client-directory-skeleton { min-width: 0; }
+.client-directory-skeleton .ltds-skeleton-card { min-height: 10.5rem; padding: 1.1rem; border-radius: 14px; background: #fff; }
 .client-directory-card:hover { border-color: #b5c5d1; box-shadow: 0 6px 18px rgb(23 43 58 / .08); }
 .client-directory-card:focus-visible { outline: 3px solid var(--accent); outline-offset: 3px; }
 .client-directory-card h3 { margin: 0; font-size: 1.1rem; line-height: 1.4; }
@@ -2974,3 +2984,38 @@ a.dashboard-alert:hover > span[aria-hidden] { transform: translateX(3px); }
 /* A view switcher with a single option is a label, not a control. */
 .ltds-segmented:has(> button:only-child) { padding: 0; border-color: transparent; background: transparent; }
 .ltds-segmented > button:only-child { padding-left: 0; background: transparent; box-shadow: none; cursor: default; }
+
+/* Fields inside small-caps labels inherited the .78rem label size; the value
+   a person types should be as readable as every other form. */
+:is(.form-grid, .sop-template-controls) label > :is(input, select, textarea) { font-size: .95rem; }
+
+/* Client workspace connection (cross-source portal correspondence review). */
+.alpha-correspondence { display: grid; gap: .7rem; min-width: 0; margin-top: .25rem; padding: 1rem 1.1rem; border: 1px solid var(--line); border-left: 4px solid var(--orange); border-radius: var(--radius-md); background: var(--paper); box-shadow: var(--shadow-sm); overflow-wrap: anywhere; }
+.alpha-correspondence > header { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: .5rem .75rem; }
+.alpha-correspondence h3 { margin: 0; font-size: 1.02rem; }
+.alpha-correspondence p { margin: 0; line-height: 1.5; }
+.alpha-correspondence-state { padding: .2rem .65rem; border-radius: 999px; font-size: .74rem; font-weight: 800; letter-spacing: .02em; background: #eef1f4; color: #3d4a55; white-space: nowrap; }
+.alpha-correspondence-state.is-on { background: var(--green-soft); color: var(--green); }
+.alpha-correspondence-state.is-review { background: var(--amber-soft); color: var(--amber); }
+.alpha-correspondence-pair { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); align-items: center; gap: .6rem; }
+.alpha-correspondence-side { display: grid; gap: .15rem; padding: .65rem .75rem; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--surface-soft); min-width: 0; }
+.alpha-correspondence-side small { color: var(--muted); font-size: .74rem; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; }
+.alpha-correspondence-side strong { font-size: .95rem; }
+.alpha-correspondence-link { color: var(--muted); font-size: 1.2rem; font-weight: 800; text-align: center; }
+.alpha-correspondence-scope, .alpha-correspondence-source { color: var(--muted); font-size: .86rem; }
+.alpha-correspondence-current { display: grid; grid-template-columns: repeat(auto-fit, minmax(10rem, 1fr)); gap: .5rem; margin: 0; }
+.alpha-correspondence-current > div { display: grid; gap: .1rem; }
+.alpha-correspondence-current dt { color: var(--muted); font-size: .76rem; font-weight: 760; }
+.alpha-correspondence-current dd { margin: 0; font-weight: 700; }
+.alpha-correspondence .alpha-connection-actions { margin: .1rem 0 0; }
+.alpha-correspondence .notice { margin: 0; }
+.alpha-correspondence-details { margin-top: 0 !important; }
+.alpha-correspondence-details dl { display: grid; grid-template-columns: minmax(9rem, max-content) minmax(0, 1fr); gap: .35rem .9rem; margin: .4rem 0 0; }
+.alpha-correspondence-details dd { margin: 0; min-width: 0; }
+@media (max-width: 640px) {
+  .alpha-correspondence { padding: .9rem; }
+  .alpha-correspondence-pair { grid-template-columns: minmax(0, 1fr); }
+  .alpha-correspondence-link { transform: rotate(90deg); line-height: 1; }
+  .alpha-correspondence .alpha-connection-actions > button { flex: 1 1 auto; min-height: 44px; }
+  .alpha-correspondence-details dl { grid-template-columns: minmax(0, 1fr); }
+}

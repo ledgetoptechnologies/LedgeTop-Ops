@@ -101,6 +101,9 @@ describe("joined primary and secondary portal acceptance through Ops Sync", () =
   it("isolates explicitly bound native memberships and read grants without copied PA HMAC credentials", async () => {
     for (const [source, workspaceId, identity] of [[primary, upstreamWorkspace, "primary-person"], [secondary, localSecondary, "secondary-person"]]) {
       await db.prepare("UPDATE pa_portal_principals SET identity_id=? WHERE workspace_id=? AND public_id=?").bind(identity, workspaceId, manager.publicId).run();
+      // An explicit existing principal link remains authoritative without an auto-eligibility witness.
+      expect(await db.prepare("SELECT count(*) n FROM portal_v2_identity_eligibility_bindings WHERE workspace_id=?")
+        .bind(workspaceId).first("n")).toBe(0);
       await refresh(source!, 21);
       const own = await context(identity!, workspaceId!);
       expect(own).toMatchObject({ workspaceId, sourceId: source, identityId: identity });

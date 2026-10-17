@@ -6,6 +6,7 @@
   "compatibility_flags": ["nodejs_compat"],
   "workers_dev": false,
   "preview_urls": false,
+  "keep_vars": true,
   "routes": [
     { "pattern": "ops.ledgetopdroneservices.com", "custom_domain": true },
     { "pattern": "ops.ledgetoptechnologies.com", "custom_domain": true },
@@ -37,7 +38,7 @@
     "ENVIRONMENT": "production",
     "TEAM_DOMAIN": "https://ledgetoptechnologies.cloudflareaccess.com",
     "OPERATIONS_AUD": "d09e298c864b9c8f4491b4b42a4dbe2ecbf558b5868d18258443740e56032407",
-    "DELIVERY_BASE_URL": "https://portal.ledgetopdroneservices.com",
+    "DELIVERY_BASE_URL": "https://client.ledgetopdroneservices.com",
     "CLIENT_PORTAL_ORIGINS": "https://portal.ledgetopdroneservices.com,https://portal.ledgetoptechnologies.com,https://client.ledgetopdroneservices.com",
     "PUBLIC_SHARE_ORIGIN": "https://portal.ledgetopdroneservices.com",
     "PROJECT_ALPHA_BASE_URL": "https://project-alpha.ledgetopdroneservices.com",
@@ -53,9 +54,9 @@
     "PROJECT_ALPHA_DIRECTORY_RECONCILIATION_ENABLED": "false",
     "PROJECT_ALPHA_API_V2_MONITOR_RECIPIENT": "",
     "PROJECT_ALPHA_API_V2_READ_ACCEPTANCE_ENABLED": "false",
-    "PROJECT_ALPHA_API_V2_SYNC_ENABLED": "false",
+    "PROJECT_ALPHA_API_V2_SYNC_ENABLED": "true",
     "PROJECT_ALPHA_DIRECTORY_EXACT_ADOPTION_ENABLED": "false",
-    "PROJECT_ALPHA_DIRECTORY_EXISTING_RECORD_ADOPTION_ENABLED": "false",
+    "PROJECT_ALPHA_DIRECTORY_EXISTING_RECORD_ADOPTION_ENABLED": "true",
     "PROJECT_ALPHA_CATALOG_STAGING_COORDINATOR_ENABLED": "false",
     "PROJECT_ALPHA_CATALOG_PROMOTION_COORDINATOR_ENABLED": "false",
     "CLIENT_PORTAL_ACCESS_AUTHORITY_OUTBOX_ENABLED": "false",
@@ -73,10 +74,10 @@
     "PROJECT_ALPHA_PROJECT_V2_RECOVERY_ENABLED": "false",
     "PROJECT_ALPHA_DIRECTORY_CREATE_GENERATION_RECOVERY_ENABLED": "false",
     "PROJECT_ALPHA_DIRECTORY_RELATIONSHIP_GENERATION_RECOVERY_ENABLED": "false",
-    "PROJECT_ALPHA_PRIVATE_ADMIN_TRANSPORT_ENABLED": "false",
-    "NATIVE_DIRECTORY_PROFILE_WRITES_ENABLED": "false",
-    "NATIVE_DIRECTORY_OUTBOX_DRAIN_ENABLED": "false",
-    "NATIVE_DIRECTORY_PROFILE_BINDING_CONTINUATION_ENABLED": "false",
+    "PROJECT_ALPHA_PRIVATE_ADMIN_TRANSPORT_ENABLED": "true",
+    "NATIVE_DIRECTORY_PROFILE_WRITES_ENABLED": "true",
+    "NATIVE_DIRECTORY_OUTBOX_DRAIN_ENABLED": "true",
+    "NATIVE_DIRECTORY_PROFILE_BINDING_CONTINUATION_ENABLED": "true",
     "NATIVE_INTEGRATION_CONTROL_ENABLED": "false",
     "CLIENT_ONBOARDING_ADMIN_ENABLED": "false",
     "CLIENT_ONBOARDING_ADMIN_ORIGIN": "",
@@ -85,27 +86,27 @@
     "DELIVERY_SHARE_DIRECTORY_RECIPIENTS_ENABLED": "false",
     "CLIENT_DELEGATED_SHARE_SIGNER_ENABLED": "false",
     "CLIENT_ONBOARDING_RECIPIENT_BRIDGE_ENABLED": "false",
-    "CLIENT_PORTAL_SERVICE_METADATA_RPC_ENABLED": "false",
-    "CLIENT_PORTAL_NATIVE_RECIPIENT_SERVICE_HOME_ENABLED": "false",
-    "CLIENT_PORTAL_NATIVE_FINANCIAL_RPC_ENABLED": "false",
-    "OPERATIONS_PORTAL_NATIVE_DELIVERY_OWNER_ENABLED": "false",
-    "OPERATIONS_PORTAL_NATIVE_DELIVERY_AUTHORITY_DISPATCH_ENABLED": "false",
-    "OPERATIONS_PORTAL_NATIVE_DELIVERY_READER_ENABLED": "false",
-    "OPERATIONS_PORTAL_NATIVE_DELIVERY_CANCELLATION_ENABLED": "false",
-    "OPERATIONS_PORTAL_NATIVE_BILLING_OWNER_ENABLED": "false",
-    "OPERATIONS_PORTAL_WORKSPACE_OWNER_ENABLED": "false",
-    "OPERATIONS_PORTAL_WORKSPACE_PUBLICATION_DISPATCH_ENABLED": "false",
+    "CLIENT_PORTAL_SERVICE_METADATA_RPC_ENABLED": "true",
+    "CLIENT_PORTAL_NATIVE_RECIPIENT_SERVICE_HOME_ENABLED": "true",
+    "CLIENT_PORTAL_NATIVE_FINANCIAL_RPC_ENABLED": "true",
+    "OPERATIONS_PORTAL_NATIVE_DELIVERY_OWNER_ENABLED": "true",
+    "OPERATIONS_PORTAL_NATIVE_DELIVERY_AUTHORITY_DISPATCH_ENABLED": "true",
+    "OPERATIONS_PORTAL_NATIVE_DELIVERY_READER_ENABLED": "true",
+    "OPERATIONS_PORTAL_NATIVE_DELIVERY_CANCELLATION_ENABLED": "true",
+    "OPERATIONS_PORTAL_NATIVE_BILLING_OWNER_ENABLED": "true",
+    "OPERATIONS_PORTAL_WORKSPACE_OWNER_ENABLED": "true",
+    "OPERATIONS_PORTAL_WORKSPACE_PUBLICATION_DISPATCH_ENABLED": "true",
     "CLIENT_PORTAL_HIERARCHY_V2_ENABLED": "true",
     "CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED": "false",
     "CLIENT_PORTAL_MEMBERSHIP_MANAGEMENT_ENABLED": "false",
-    "PROJECT_ACCESS_AUTHORITY_MUTATIONS_ENABLED": "false",
+    "PROJECT_ACCESS_AUTHORITY_MUTATIONS_ENABLED": "true",
     "CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED": "true",
     "CLIENT_PORTAL_DENY_POLICY_MANAGEMENT_ENABLED": "true",
     "CLIENT_PORTAL_ROOT_ACCESS_POLICY_ENABLED": "true",
     "CLIENT_PORTAL_OPERATIONS_MANAGEMENT_ENABLED": "false",
     "PROJECT_ACCESS_EXPIRY_NOTIFICATIONS_ENABLED": "false",
-    "AUTHENTICATED_DELIVERY_GRANTS_ENABLED": "false",
-    "AUTHENTICATED_DELIVERY_CREATION_ENABLED": "false",
+    "AUTHENTICATED_DELIVERY_GRANTS_ENABLED": "true",
+    "AUTHENTICATED_DELIVERY_CREATION_ENABLED": "true",
     "AUTHENTICATED_DELIVERY_NOTIFICATIONS_ENABLED": "false",
     "VIEWER_INTEGRATION_ENABLED": "true",
     "VIEWER_PROCESSING_ENABLED": "true",
@@ -150,11 +151,16 @@
     "SMTP_USERNAME": "no-reply@ledgetoptechnologies.com",
     "CLIENT_REQUEST_TRIAGE_TO": "beaukoltz@ledgetopdroneservices.com",
     "DROPBOX_IMPORT_ENABLED": "false",
-    "DROPBOX_CLIENT_ID": ""
+    "DROPBOX_CLIENT_ID": "",
+    "CLIENT_PORTAL_NATIVE_RECIPIENT_ENROLLMENT_ENABLED": "true",
+    "CLIENT_PORTAL_NATIVE_RECIPIENT_OWNER_ENABLED": "true",
+    "NATIVE_DIRECTORY_EXISTING_IMPORT_ENABLED": "false",
+    "OPERATIONS_PORTAL_NATIVE_RECIPIENT_AUTHORITY_DISPATCH_ENABLED": "true",
+    "PROJECT_ALPHA_DIRECTORY_LOCAL_PROFILE_ADOPTION_ENABLED": "true"
   },
   "send_email": [{ "name": "NOTIFICATION_EMAIL", "allowed_sender_addresses": ["delivery@ledgetopdroneservices.com"] }],
   "observability": { "enabled": true, "head_sampling_rate": 1 },
-  "triggers": { "crons": ["*/15 * * * *", "*/5 * * * *", "2-57/5 * * * *", "17 * * * *", "4-59/15 * * * *", "3-58/5 * * * *", "1-56/5 * * * *", "6-51/15 * * * *"] },
+  "triggers": { "crons": ["*/15 * * * *", "*/5 * * * *", "2-57/5 * * * *", "17 * * * *", "4-59/15 * * * *", "3-58/5 * * * *", "1-56/5 * * * *"] },
   "r2_buckets": [
     { "binding": "DATA_BUCKET", "bucket_name": "client-data" },
     { "binding": "INCOMING_BUCKET", "bucket_name": "ltds-incoming" }
@@ -196,31 +202,10 @@
   },
   "stream": { "binding": "STREAM" },
   "services": [
-    { "binding": "SHARED_PROFILE_PORTAL_AUTHORITY", "service": "ledgetop-clients", "entrypoint": "SharedProfilePortalAuthorityReader" },
     {
-      "binding": "CLIENT_AUTHORITY_WORKSPACE_BINDING",
+      "binding": "SHARED_PROFILE_PORTAL_AUTHORITY",
       "service": "ledgetop-clients",
-      "entrypoint": "ClientAuthorityWorkspaceBindingIngress"
-    },
-    {
-      "binding": "OPS_INVENTORY_CATALOG_STAGING",
-      "service": "ledgetop-clients",
-      "entrypoint": "OpsInventoryCatalogStagingIngress"
-    },
-    {
-      "binding": "OPS_INVENTORY_CATALOG_PROMOTION",
-      "service": "ledgetop-clients",
-      "entrypoint": "OpsInventoryCatalogPromotionCoordinator"
-    },
-    {
-      "binding": "CLIENT_PORTAL_ACCESS_AUTHORITY",
-      "service": "ledgetop-clients",
-      "entrypoint": "OpsPortalAccessAuthorityIngress"
-    },
-    {
-      "binding": "CLIENT_PORTAL_AUTHORITY_V2",
-      "service": "ledgetop-clients",
-      "entrypoint": "ClientPortalAuthorityV2Ingress"
+      "entrypoint": "SharedProfilePortalAuthorityReader"
     },
     {
       "binding": "OPERATIONS_PORTAL_NATIVE_DELIVERY_AUTHORITY",
@@ -231,6 +216,11 @@
       "binding": "OPERATIONS_PORTAL_WORKSPACE_PUBLICATION",
       "service": "ledgetop-clients",
       "entrypoint": "OperationsPortalWorkspacePublicationIngress"
+    },
+    {
+      "binding": "OPERATIONS_PORTAL_NATIVE_RECIPIENT_AUTHORITY",
+      "service": "ledgetop-clients",
+      "entrypoint": "OperationsPortalNativeRecipientAuthorityIngress"
     }
   ],
   "durable_objects": {
@@ -272,11 +262,6 @@
       "name": "ltds-dropbox-import",
       "binding": "DROPBOX_IMPORT_WORKFLOW",
       "class_name": "DropboxImportWorkflow"
-    },
-    {
-      "name": "ledgetop-ops-catalog-promotion",
-      "binding": "OPS_CATALOG_PROMOTION_WORKFLOW",
-      "class_name": "ProjectAlphaCatalogPromotionWorkflow"
     }
   ]
 }

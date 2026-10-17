@@ -31,14 +31,14 @@ const ctx = { waitUntil: vi.fn(), passThroughOnException: vi.fn(), props: {} } a
 const send = (path: string, env: Env, headers?: HeadersInit) => worker.fetch!(new Request(`${origin}${path}`, { headers }), env, ctx);
 
 describe("standard production native owner entrypoint", () => {
-  it("checks in only default-off flags and exact production named RPC bindings", () => {
+  it("checks in approved native owner flags and exact production named RPC bindings", () => {
     const operations = JSON.parse(readFileSync(resolve(process.cwd(), "wrangler.jsonc"), "utf8"));
     const client = JSON.parse(readFileSync(resolve(process.cwd(), "../client/wrangler.jsonc"), "utf8"));
     for (const flag of ["OPERATIONS_PORTAL_NATIVE_DELIVERY_OWNER_ENABLED",
       "OPERATIONS_PORTAL_NATIVE_DELIVERY_AUTHORITY_DISPATCH_ENABLED", "OPERATIONS_PORTAL_NATIVE_DELIVERY_READER_ENABLED",
       "OPERATIONS_PORTAL_NATIVE_DELIVERY_CANCELLATION_ENABLED", "OPERATIONS_PORTAL_NATIVE_BILLING_OWNER_ENABLED",
       "OPERATIONS_PORTAL_WORKSPACE_OWNER_ENABLED", "OPERATIONS_PORTAL_WORKSPACE_PUBLICATION_DISPATCH_ENABLED"])
-      expect(operations.vars[flag]).toBe("false");
+      expect(operations.vars[flag]).toBe("true");
     expect(operations.services).toEqual(expect.arrayContaining([
       { binding: "OPERATIONS_PORTAL_NATIVE_DELIVERY_AUTHORITY", service: "ledgetop-clients",
         entrypoint: "OperationsPortalNativeDeliveryAuthorityIngress" },

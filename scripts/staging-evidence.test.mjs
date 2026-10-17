@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { historicalDefaultOffProduction } from "./test-fixtures/historical-default-off-production.mjs";
 import { validateEvidence as validateEvidenceContract } from "./staging-evidence.mjs";
 import { validateFiles as validateStagingFiles } from "./staging-preflight.mjs";
 import { renderConfigs, writeRenderedConfigs } from "./staging-config-scaffold.mjs";
@@ -398,7 +399,10 @@ test("the same rendered checked-in staging templates satisfy preflight and staff
     for (const [app, sourceDir] of Object.entries(sourceDirs)) {
       const appDir = path.join(base, "apps", sourceDir);
       fs.mkdirSync(appDir, { recursive: true });
-      fs.copyFileSync(path.join(repositoryRoot, "apps", sourceDir, "wrangler.jsonc"), path.join(appDir, "wrangler.jsonc"));
+      const production = JSON.parse(fs.readFileSync(path.join(repositoryRoot, "apps", sourceDir, "wrangler.jsonc"), "utf8"));
+      // This evidence fixture exercises the historical staging/preflight contract.
+      const historical = app === "ops-sync" ? production : historicalDefaultOffProduction(production);
+      fs.writeFileSync(path.join(appDir, "wrangler.jsonc"), JSON.stringify(historical));
       for (const migration of REQUIRED_STAGING_MIGRATIONS[app] ?? []) {
         const migrationsDir = path.join(appDir, "migrations");
         fs.mkdirSync(migrationsDir, { recursive: true });

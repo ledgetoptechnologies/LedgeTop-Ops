@@ -287,7 +287,9 @@ export function projectAlphaDeliveryMachineHostRequest(urlValue:string,method:st
 function decode(raw:Uint8Array):unknown{try{return JSON.parse(new TextDecoder("utf-8",{fatal:true}).decode(raw));}catch{throw new HTTPException(400,{message:"Delivery intent JSON is invalid"});}}
 async function rate(env:Env,source:CatalogSourceContext,scope:"attempt_preflight"|"attempt_intent"|"preflight"|"intent",maximum:number):Promise<void>{
   let count:number|null;
-  if(source.sourceId===PRIMARY_ALPHA_SOURCE_ID){
+  // The legacy primary table accepts only these two established buckets.
+  // RPC attempt budgets use the source-qualified table for every source.
+  if(source.sourceId===PRIMARY_ALPHA_SOURCE_ID&&(scope==="preflight"||scope==="intent")){
     count=await env.OPS_DB.prepare(`INSERT INTO project_alpha_delivery_intent_rate_limits(scope,window_start,request_count)
       VALUES(?,strftime('%Y-%m-%dT%H:%M:00Z','now'),1) ON CONFLICT(scope,window_start)
       DO UPDATE SET request_count=request_count+1 WHERE request_count<? RETURNING request_count`)

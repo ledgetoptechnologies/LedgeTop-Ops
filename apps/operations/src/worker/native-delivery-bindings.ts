@@ -1,3 +1,4 @@
+import { projectedPrincipalIdentitySql } from '../../../../packages/shared/src/projected-principal-identity';
 import { PRIMARY_ALPHA_SOURCE_ID } from '@ltds/shared';
 import { HTTPException } from 'hono/http-exception';
 import { z } from 'zod';
@@ -208,7 +209,7 @@ JOIN portal_v2_directory_generations generation ON generation.id=cp.active_gener
 JOIN portal_v2_directory_entities owner ON owner.workspace_id=w.id AND owner.generation_id=generation.id AND owner.entity_type='project'
  AND owner.public_id=json_extract(v,'$.projectPublicId') AND owner.active=1
 JOIN pa_portal_principals recipient ON recipient.workspace_id=w.id AND recipient.public_id=json_extract(v,'$.principalPublicId') AND recipient.status='active'
-JOIN portal_v2_identities identity ON identity.id=recipient.identity_id AND identity.status='active' AND identity.revoked_at IS NULL
+JOIN portal_v2_identities identity ON identity.id=${projectedPrincipalIdentitySql('recipient')} AND identity.status='active' AND identity.revoked_at IS NULL
 JOIN portal_v2_workspace_memberships membership ON membership.workspace_id=w.id AND membership.identity_id=identity.id
  AND membership.status='active' AND membership.revoked_at IS NULL AND (membership.expires_at IS NULL OR datetime(membership.expires_at)>datetime('now'))
  AND (membership.source_type<>'project_alpha' OR (membership.source_version=recipient.source_version
@@ -568,8 +569,8 @@ export async function searchNativeDeliveryRecipients(env:Env,principal:StaffPrin
   await ready(env);await activeStaff(env,principal);const query=value.q.normalize('NFC').trim();if(query.length<2||query.length>100)return error(400,'native_delivery_query_invalid');
   const prefix=normalizePrefix(await authorizeItem(env,principal,value.folderRef));
   await opsProof(env,principal,prefix,value.sourceId,value.projectId,'create');
-  const pattern='%'+query.replace(/[\\%_]/g,'\\$&')+'%';const rows=await primary(env.DELIVERY_DB).prepare(`SELECT public_id FROM pa_portal_principals
-    WHERE workspace_id=? AND status='active' AND identity_id IS NOT NULL AND (display_name LIKE ? ESCAPE '\\' OR email_hint LIKE ? ESCAPE '\\')
+  const pattern='%'+query.replace(/[\\%_]/g,'\\$&')+'%';const rows=await primary(env.DELIVERY_DB).prepare(`SELECT public_id FROM pa_portal_principals principal
+    WHERE workspace_id=? AND status='active' AND ${projectedPrincipalIdentitySql('principal')} IS NOT NULL AND (display_name LIKE ? ESCAPE '\\' OR email_hint LIKE ? ESCAPE '\\')
     ORDER BY display_name COLLATE NOCASE,public_id LIMIT 51`).bind(value.workspaceId,pattern,pattern).all<{public_id:string}>();
   const recipients:Array<{principalPublicId:string;displayName:string;email:string|null}>=[],proofs:Prepared[]=[];
   // Candidate discovery does not grant access or classify anyone. Retained

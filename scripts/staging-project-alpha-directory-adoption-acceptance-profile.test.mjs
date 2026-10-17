@@ -1,3 +1,4 @@
+import { historicalDefaultOffProduction } from "./test-fixtures/historical-default-off-production.mjs";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -22,7 +23,7 @@ const values = Object.freeze({ DELIVERY_STAGING_ACCESS_AUD: "a".repeat(64), OPER
   STAGING_ACCESS_GROUP_ID: "11111111-1111-4111-8111-111111111111", STAGING_ACCESS_GROUP_NAME: "LTDS staging operators" });
 function state() {
   const source = renderConfigs(root, values).operations;
-  const production = JSON.parse(fs.readFileSync(path.join(root, DIRECTORY_ADOPTION_ACCEPTANCE_CONFIG.production), "utf8"));
+  const production = historicalDefaultOffProduction(JSON.parse(fs.readFileSync(path.join(root, DIRECTORY_ADOPTION_ACCEPTANCE_CONFIG.production), "utf8")));
   return { source, production, secretNames: { names: [...VIEWER_ACCEPTANCE_SECRET_NAMES] } };
 }
 

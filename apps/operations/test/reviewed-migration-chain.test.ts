@@ -126,18 +126,44 @@ describe("reviewed release migration fixtures", () => {
     ["operations", "0211_native_directory_create_observations.sql"],
     ["client", "0232_shared_profile_edit_authority.sql"],
     ["client", "0233_explicit_primary_workspace_folder_ownership.sql"],
+    ["client", "0234_pa_principal_reenrollment.sql"],
   ] as const)("validates exact %s successor %s without expanding historical authority", (application, name) => {
     const fixture=copyMigrations(application);
     const reviewed=()=>application==="operations"?reviewedOperationsMigrationNames(fixture.url):reviewedClientMigrationNames(fixture.url);
     expect(reviewed()).toHaveLength(application==="operations"?199:149);
     expect(reviewed()).not.toContain(name);
     const original=readFileSync(join(fixture.directory,name),"utf8").replace(/\r\n/g,"\n");
+    writeFileSync(join(fixture.directory,name),original);
+    expect(reviewed()).toHaveLength(application==="operations"?199:149);
     writeFileSync(join(fixture.directory,name),original.replace(/\n/g,"\r\n"));
     expect(reviewed()).toHaveLength(application==="operations"?199:149);
     writeFileSync(join(fixture.directory,name),original+"\n-- unreviewed successor drift\n");
     expect(reviewed).toThrow(`reviewed-${application==="operations"?"operations":"delivery"}-successor-content-contract-mismatch`);
     unlinkSync(join(fixture.directory,name));
     expect(reviewed).toThrow(`reviewed-${application==="operations"?"operations":"delivery"}-migration-physical-inventory-mismatch`);
+  });
+
+  it("keeps reenrollment a receipt-guarded successor without rewriting the historical identity inventory", () => {
+    const fixture = copyMigrations("client"), name = "0234_pa_principal_reenrollment.sql";
+    const reviewed = reviewedClientMigrationNames(fixture.url);
+    expect(reviewed).toHaveLength(149);
+    expect(reviewed.at(-1)).toBe("0230_operations_portal_native_delivery_terminal_cancellations.sql");
+    expect(reviewed).not.toContain(name);
+    const sql = readFileSync(join(fixture.directory, name), "utf8");
+    expect([...sql.matchAll(/CREATE TABLE (\w+)/g)].map(match => match[1]))
+      .toEqual(["portal_pa_membership_reenrollment_receipts"]);
+    expect([...sql.matchAll(/DROP TRIGGER (\w+)/g)].map(match => match[1])).toEqual([
+      "portal_secondary_membership_authority_update", "portal_secondary_invitation_authority_insert", "portal_secondary_invitation_accept",
+    ]);
+    expect(sql).not.toMatch(/(?:DROP|ALTER) TABLE\s+(?:pa_portal_principals|portal_v2_identity_eligibility_bindings)/i);
+    expect(sql).toContain("PA membership reenrollment witness is not current");
+    expect(sql).toContain("secondary membership authority is immutable");
+    expect(sql).toContain("PA reenrollment receipt is immutable");
+    expect(sql).toContain("PA reenrollment receipt is retained");
+    const unknown = "0235_unreviewed_reenrollment.sql";
+    writeFileSync(join(fixture.directory, unknown), sql);
+    expect(() => reviewedClientMigrationNames(fixture.url))
+      .toThrow("reviewed-delivery-migration-physical-inventory-mismatch");
   });
 
   it("validates appended Client 0231 bytes without granting the candidate frozen 149-entry authority", () => {

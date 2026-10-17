@@ -1,5 +1,6 @@
 import { Hono } from "hono";
 import { readFileSync } from "node:fs";
+import { DatabaseSync, type SQLInputValue } from "node:sqlite";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Env, StaffPrincipal } from "../src/worker/types";
 
@@ -50,7 +51,7 @@ const client = { name: "Example Client", email: "client@example.test", phone: ""
   addressLine1: "", addressLine2: "", city: "", state: "WI", postalCode: "", country: "" };
 
 type Row = Record<string, unknown>;
-function database(options: { enrollment?: unknown; outboxState?: string; missingProfileOutbox?: boolean; deny?: string; missingGeneration?: boolean;
+function database(options: { grantLookup?: (sql: string, values: unknown[]) => unknown; enrollment?: unknown; outboxState?: string; missingProfileOutbox?: boolean; deny?: string; missingGeneration?: boolean;
   admission?: false; replay?: "exact" | "conflict" | "client"; linked?: boolean;
   insertRace?: "exact" | "conflict"; profile?: "organization" | "client"; inactiveDivision?: boolean;
   relationshipReplay?: { organization: { recordId: string; expectedRecordVersion: number } | null;
@@ -101,7 +102,8 @@ function database(options: { enrollment?: unknown; outboxState?: string; missing
       },
       async first<T>(column?: string): Promise<T | null> {
         let value: unknown = null;
-        if (sql.includes("SELECT grant.id")) value = options.deny === String(values[1])
+        if (sql.includes("SELECT grant.id") && options.grantLookup) value = options.grantLookup(sql, values);
+        else if (sql.includes("SELECT grant.id")) value = options.deny === String(values[1])
           || (options.missingGrantResource === values[2] && values[1] !== "directory.profile.view") ? null
           : { id: String(values[1]) === "directory.identity.link" ? "identity-grant" : "edit-grant" };
         else if (sql.includes("SELECT record.current_version version,revision.profile_json")) value = {
@@ -398,10 +400,10 @@ describe("native Directory profile routes", () => {
       scopes: [{ id: "drone", name: "Drone operations", divisions: [{ id: "survey", name: "Survey" }] }], organizations: [] });
   });
 
-  it("publishes the default-off session capability without enabling the route", () => {
+  it("publishes the session capability and checks in approved production profile writes", () => {
     const source = readFileSync(new URL("../src/worker/index.ts", import.meta.url), "utf8");
     expect(source).toContain("nativeDirectoryProfileWrites: { enabled: nativeDirectoryProfileWritesEnabled(c.env) }");
-    expect(readFileSync(new URL("../wrangler.jsonc", import.meta.url), "utf8")).toContain('"NATIVE_DIRECTORY_PROFILE_WRITES_ENABLED": "false"');
+    expect(readFileSync(new URL("../wrangler.jsonc", import.meta.url), "utf8")).toContain('"NATIVE_DIRECTORY_PROFILE_WRITES_ENABLED": "true"');
   });
 
   it("registers specific native directory routes before the generic Client Hub route family", () => {
@@ -469,7 +471,7 @@ describe("native Directory profile routes", () => {
     }) }));
   });
 
-  it("keeps profile editing available but marks relationship editing unavailable without client relationship grants", async () => {
+  it("keeps a readable client profile but disables both edit surfaces without client grants", async () => {
     const enrollment = [{ sourceId, sourceInstanceUUID: ids.instance, applicationUUID: ids.application,
       historyEpoch: ids.epoch, origin, externalCanonicalId: "acquired:client:one" }];
     mocks.organizationChoices.mockResolvedValueOnce([
@@ -480,9 +482,52 @@ describe("native Directory profile routes", () => {
       `${NATIVE_DIRECTORY_PROFILE_ROUTE}/standalone-clients/acquired%3Aclient%3Aone`, null, "GET");
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toEqual(expect.objectContaining({
-      editing: { available: true, reason: null },
+      editing: { available: false, reason: "profile_permission_required" },
       relationship: expect.objectContaining({ editing: { available: false, reason: "relationship_permission_required" } }),
     }));
+  });
+
+  it.each([
+    { label: "organization view only", kind: "organization", edit: false, identity: false, available: false },
+    { label: "organization edit without identity", kind: "organization", edit: true, identity: false, available: true },
+    { label: "client edit without identity", kind: "client", edit: true, identity: false, available: false },
+    { label: "client identity without edit", kind: "client", edit: false, identity: true, available: false },
+    { label: "client scoped edit and identity", kind: "client", edit: true, identity: true, scope: "business_area", area: "drone", available: true },
+    { label: "client wrong area", kind: "client", edit: true, identity: true, scope: "business_area", area: "other", available: false },
+    { label: "client exact resource", kind: "client", edit: true, identity: true, scope: "resource", available: true },
+    { label: "client applicable edit deny", kind: "client", edit: true, identity: true, deny: "directory.profile.edit", available: false },
+    { label: "client applicable identity deny", kind: "client", edit: true, identity: true, deny: "directory.identity.link", available: false },
+    { label: "organization edit deny", kind: "organization", edit: true, identity: false, deny: "directory.profile.edit", available: false },
+  ])("reports PATCH-equivalent profile editing authority: $label", async scenario => {
+    // Execute the real grant selector SQL, rather than teaching the route mock
+    // which scope/deny result the new availability check ought to return.
+    const grantDb = new DatabaseSync(":memory:");
+    grantDb.exec(`CREATE TABLE native_directory_grants(id TEXT,staff_id TEXT,permission TEXT,effect TEXT,active INTEGER,
+      scope_kind TEXT,business_area_id TEXT,division_id TEXT,resource_id TEXT);
+      CREATE TABLE native_directory_assignments(record_id TEXT,staff_id TEXT,active INTEGER);
+      CREATE TABLE native_directory_resource_scopes(record_id TEXT,business_area_id TEXT,division_id TEXT,active INTEGER);`);
+    const record = scenario.kind === "client" ? "acquired:client:one" : ids.mutation;
+    grantDb.prepare("INSERT INTO native_directory_resource_scopes VALUES(?,?,NULL,1)").run(record, "drone");
+    const add = (id: string, permission: string, effect = "allow", scope = "global", area: string | null = null) =>
+      grantDb.prepare("INSERT INTO native_directory_grants VALUES(?,?,?,?,1,?,?,NULL,?)")
+        .run(id, principal.id, permission, effect, scope, area, scope === "resource" ? record : null);
+    add("view", "directory.profile.view");
+    if (scenario.edit) add("edit", "directory.profile.edit", "allow", scenario.scope, scenario.area);
+    if (scenario.identity) add("identity", "directory.identity.link", "allow", scenario.scope, scenario.area);
+    if (scenario.deny) add("deny", scenario.deny, "deny", "resource");
+    const enrollment = [{ sourceId, sourceInstanceUUID: ids.instance, applicationUUID: ids.application,
+      historyEpoch: ids.epoch, origin, externalCanonicalId: record }];
+    const db = database({ profile: scenario.kind as "client" | "organization", enrollment,
+      grantLookup: (sql, values) => grantDb.prepare(sql).get(...values as SQLInputValue[]) ?? null });
+    try {
+      const response = await fixture({ db }).send(`${NATIVE_DIRECTORY_PROFILE_ROUTE}/${scenario.kind === "client" ? "standalone-clients" : "organizations"}/${encodeURIComponent(record)}`, null, "GET");
+      expect(response.status).toBe(200);
+      await expect(response.json()).resolves.toMatchObject({ profile: scenario.kind === "client" ? client : organization,
+        editing: scenario.available ? { available: true, reason: null }
+          : { available: false, reason: "profile_permission_required" } });
+      expect(mocks.writer).not.toHaveBeenCalled();
+      expect(mocks.relationshipWriter).not.toHaveBeenCalled();
+    } finally { grantDb.close(); }
   });
 
   it("prepares and exactly replays a deterministic server-derived create admission", async () => {

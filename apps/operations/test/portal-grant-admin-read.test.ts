@@ -165,6 +165,20 @@ describe("bounded staff grant and denial reads", () => {
     expect(person.audiences.some(item=>item.type==='organization')).toBe(false);
   });
 
+  it('keeps legacy exact identity links without inferring a replacement from its matching email',async()=>{
+    expect(await db.prepare("SELECT count(*) n FROM sqlite_master WHERE type='table' AND name='portal_v2_identity_eligibility_bindings'").first('n')).toBe(0);
+    const prior=await db.prepare("SELECT * FROM pa_portal_principals WHERE workspace_id='workspace-a' AND public_id='principal-a'").first();
+    await db.prepare(`INSERT INTO pa_portal_principals(workspace_id,public_id,identity_id,email_hint,display_name,source_version,status)
+      VALUES('workspace-a','principal-replacement',NULL,'person@example.test','Replacement Alex','replacement-v1','active')`).run();
+    try{
+      const legacyEnv={...env,CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED:'false'};
+      expect((await searchAuthenticatedDeliveryGrantAudiences(legacyEnv,principal,'binding-a','Replacement','principal')).audiences).toEqual([]);
+      expect((await searchAuthenticatedDeliveryGrantAudiences(legacyEnv,principal,'binding-a','Alex','principal')).audiences)
+        .toEqual([expect.objectContaining({publicId:'principal-a',email:'person@example.test',currentAuthorizedRecipientCount:1})]);
+      expect(await db.prepare("SELECT * FROM pa_portal_principals WHERE workspace_id='workspace-a' AND public_id='principal-a'").first()).toEqual(prior);
+    }finally{await db.prepare("DELETE FROM pa_portal_principals WHERE public_id='principal-replacement'").run();}
+  });
+
   it("lists denial history with display-only identity and scope labels", async () => {
     const result = await listPortalIdentityDenials(env, principal);
     expect(result.denials[0]).toMatchObject({ id: "denial-a", identityId: "identity-a",

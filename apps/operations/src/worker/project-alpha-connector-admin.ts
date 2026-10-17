@@ -1,3 +1,4 @@
+import { discoverPortalDirectoryCorrespondence } from './portal-directory-correspondence';
 import { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
@@ -131,6 +132,7 @@ export function registerProjectAlphaConnectorAdminRoutes(app: App): void {
     const projectManagement = await listProjectAlphaProjectManagementRoutes(c.env);
     const existingImport = await nativeExistingImportEnabled(c.env) ? { enabled: true as const } : undefined;
     return c.json({ connectors, health: safeHealth, recovery, portal, projectManagement, ...(existingImport ? { existingImport } : {}),
+      portalDirectoryCorrespondence: await discoverPortalDirectoryCorrespondence(c.env),
       legacyPrimary: !registeredPrimary || registeredPrimary.state === "pending" });
   });
   // This controls the portal purpose of an already deployment-owned source.

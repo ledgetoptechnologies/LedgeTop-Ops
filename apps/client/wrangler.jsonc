@@ -6,6 +6,7 @@
   "compatibility_flags": ["nodejs_compat"],
   "workers_dev": false,
   "preview_urls": false,
+  "keep_vars": true,
   "routes": [
     {
       "pattern": "client.ledgetopdroneservices.com",
@@ -45,14 +46,14 @@
     "CLIENT_PORTAL_AUTHORITY_V2_WRITER_ENABLED": "false",
     "CLIENT_PORTAL_AUTHORITY_V2_STATUS_ENABLED": "false",
     "CLIENT_PORTAL_AUTHORITY_V2_ENROLLMENT_STATUS_ENABLED": "false",
-    "CLIENT_PORTAL_OPERATIONS_SERVICE_HOME_ENABLED": "false",
-    "CLIENT_PORTAL_NATIVE_RECIPIENT_SERVICE_HOME_ENABLED": "false",
-    "CLIENT_PORTAL_NATIVE_FINANCIAL_ENABLED": "false",
-    "CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_WRITER_ENABLED": "false",
-    "CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_STATUS_ENABLED": "false",
-    "CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_READ_ENABLED": "false",
-    "CLIENT_PORTAL_OPERATIONS_NATIVE_CONTENT_AUDIT_ENABLED": "false",
-    "CLIENT_PORTAL_OPERATIONS_PUBLICATION_WRITER_ENABLED": "false",
+    "CLIENT_PORTAL_OPERATIONS_SERVICE_HOME_ENABLED": "true",
+    "CLIENT_PORTAL_NATIVE_RECIPIENT_SERVICE_HOME_ENABLED": "true",
+    "CLIENT_PORTAL_NATIVE_FINANCIAL_ENABLED": "true",
+    "CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_WRITER_ENABLED": "true",
+    "CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_STATUS_ENABLED": "true",
+    "CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_READ_ENABLED": "true",
+    "CLIENT_PORTAL_OPERATIONS_NATIVE_CONTENT_AUDIT_ENABLED": "true",
+    "CLIENT_PORTAL_OPERATIONS_PUBLICATION_WRITER_ENABLED": "true",
     "CLIENT_PORTAL_RECIPIENT_ENROLLMENT_ENABLED": "false",
     "CLIENT_PORTAL_VERIFIED_RECIPIENT_DELIVERY_AUTHORITY_WRITER_ENABLED": "false",
     "CLIENT_PORTAL_VERIFIED_RECIPIENT_DELIVERY_AUTHORITY_STATUS_ENABLED": "false",
@@ -84,7 +85,7 @@
     "CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED": "true",
     "CLIENT_PORTAL_DENY_POLICY_MANAGEMENT_ENABLED": "true",
     "CLIENT_PORTAL_ROOT_ACCESS_POLICY_ENABLED": "true",
-    "AUTHENTICATED_DELIVERY_GRANTS_ENABLED": "false",
+    "AUTHENTICATED_DELIVERY_GRANTS_ENABLED": "true",
     "AUTHENTICATED_DELIVERY_CREATION_ENABLED": "false",
     "CLIENT_VIEWER_ENABLED": "false",
     "CLIENT_VIEWER_SHARES_ENABLED": "false",
@@ -99,8 +100,8 @@
     "CLIENT_DELEGATED_SHARES_ENABLED": "false",
     "CLIENT_ONBOARDING_RECIPIENT_BRIDGE_ENABLED": "false",
     "CLIENT_DELEGATED_SHARE_KEY_ID": "v1",
-    "CLIENT_PORTAL_ORIGIN": "https://portal.ledgetopdroneservices.com",
-    "CLIENT_PORTAL_ORIGINS": "https://portal.ledgetopdroneservices.com,https://portal.ledgetoptechnologies.com",
+    "CLIENT_PORTAL_ORIGIN": "https://client.ledgetopdroneservices.com",
+    "CLIENT_PORTAL_ORIGINS": "https://client.ledgetopdroneservices.com,https://portal.ledgetopdroneservices.com,https://portal.ledgetoptechnologies.com",
     "LEGACY_CLIENT_ORIGINS": "https://client.ledgetopdroneservices.com",
     "CLIENT_ACCESS_TEAM_DOMAIN": "https://ledgetoptechnologies.cloudflareaccess.com",
     "CLIENT_ACCESS_AUD": "0fa9c4453634e4c74d4522e2d44407a49701320b06d8f21d8a58efa21e5f947f",
@@ -118,7 +119,14 @@
     "DROPBOX_CLIENT_ID": "",
     "GOOGLE_CLIENT_ID": "",
     "GOOGLE_PICKER_API_KEY": "",
-    "GOOGLE_CLOUD_PROJECT_NUMBER": ""
+    "GOOGLE_CLOUD_PROJECT_NUMBER": "",
+    "CLIENT_PORTAL_NATIVE_RECIPIENT_ENROLLMENT_ENABLED": "true",
+    "CLIENT_PORTAL_NATIVE_RECIPIENT_ENROLLMENT_EXPECTED_HOST": "client.ledgetopdroneservices.com",
+    "CLIENT_PORTAL_OPERATIONS_NATIVE_AUTHORITY_EXPECTED_HOST": "client.ledgetopdroneservices.com",
+    "CLIENT_PORTAL_OPERATIONS_NATIVE_AUTHORITY_STATUS_ENABLED": "true",
+    "CLIENT_PORTAL_OPERATIONS_NATIVE_AUTHORITY_WRITER_ENABLED": "true",
+    "CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_CANCELLATION_ENABLED": "true",
+    "CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_DEPLOYMENT_PROFILE": "{\"version\":1,\"accountId\":\"846c924bf17bf4f3dd15c97a4c5d1d51\",\"workerName\":\"ledgetop-clients\",\"databaseBinding\":\"DELIVERY_DB\",\"databaseId\":\"7f40a7b7-c3ec-470e-a626-e798867f71f8\",\"portalOrigin\":\"https://client.ledgetopdroneservices.com\",\"publicShareOrigin\":\"https://portal.ledgetopdroneservices.com\"}"
   },
   "observability": { "enabled": true, "head_sampling_rate": 1 },
   "ratelimits": [
@@ -175,11 +183,10 @@
     }
   ],
   "services": [
-    { "binding": "SHARED_PROFILE_PORTAL", "service": "ledgetop-ops", "entrypoint": "SharedProfilePortalIngress" },
     {
-      "binding": "CLIENT_PORTAL_RECIPIENT_ENROLLMENT_BRIDGE",
+      "binding": "SHARED_PROFILE_PORTAL",
       "service": "ledgetop-ops",
-      "entrypoint": "ClientPortalRecipientEnrollmentBridge"
+      "entrypoint": "SharedProfilePortalIngress"
     },
     {
       "binding": "CLIENT_PORTAL_SERVICE_METADATA_READER",
@@ -197,11 +204,6 @@
       "entrypoint": "ViewerSessionIssuer"
     },
     {
-      "binding": "CLIENT_ONBOARDING_RECIPIENT_BRIDGE",
-      "service": "ledgetop-ops",
-      "entrypoint": "ClientOnboardingRecipientBridge"
-    },
-    {
       "binding": "CLIENT_PORTAL_NATIVE_FINANCIAL_READER",
       "service": "ledgetop-ops",
       "entrypoint": "ClientPortalNativeFinancialReader"
@@ -210,6 +212,11 @@
       "binding": "OPERATIONS_PORTAL_NATIVE_DELIVERY_AUTHORIZATION_READER",
       "service": "ledgetop-ops",
       "entrypoint": "OperationsPortalNativeDeliveryAuthorizationReader"
+    },
+    {
+      "binding": "OPERATIONS_PORTAL_NATIVE_RECIPIENT_ENROLLMENT",
+      "service": "ledgetop-ops",
+      "entrypoint": "OperationsPortalNativeRecipientEnrollmentIngress"
     }
   ],
   "stream": { "binding": "STREAM" }

@@ -49,9 +49,9 @@ Record without secrets:
 ## Capability map and release profile
 
 The current checked-in `scripts/client-portal-release-profile.json` selects
-`default-on-eligibility`. In that profile, hierarchy, automatic eligibility,
-and deny enforcement/management are enabled together. The earlier dormant
-hierarchy state below describes the receiver-only baseline, not a rollback
+`primary-explicit-folder-delivery`: existing eligibility and deny enforcement
+remain enabled, with staff-side folder creation and Client-side enforcement.
+Client authority creation and Operations relation inheritance remain off. The earlier dormant hierarchy state below describes the receiver-only baseline, not a rollback
 instruction. Use the profile-aware preflight and
 [activation runbook](project-alpha-portal-activation.md) for current release
 settings; verify production separately. Other capability families remain
@@ -173,20 +173,22 @@ to unshared folders.
 
 The repository-owned deployment gate reads the fixed, committed
 `scripts/client-portal-release-profile.json`. The current
-`default-on-eligibility` profile explicitly selects the reviewed activation
-state with `schemaVersion: 1` and sets the five flags above exactly true in
-both Worker configurations. The gate
+`primary-explicit-folder-delivery` profile uses `schemaVersion: 1` and retains
+the five eligibility flags above exactly true in both Worker configurations.
+See the [current source-contract note](project-alpha-portal-activation.md#current-source-contract)
+for its narrower per-Worker delivery gates and historical-tool boundary. The gate
 rejects partial/mixed bundles and keeps invitation, authenticated-delivery, and
 project-access-expiry mail disabled. It retains all receiver secret, ingress,
 and unrelated Client capability checks. Root Node tests enforce the same
 profile rather than silently removing dormant-flag checks.
 
-Authenticated delivery has its own reviewed `primary-authenticated-delivery`
-profile. It requires the hierarchy-relations, grant-management, authority-
-mutation, and creation switches to match in Client and Operations. Email and
+The separate historical full authenticated-delivery contract is named
+`primary-authenticated-delivery`; it is not the current narrow profile. It requires the hierarchy-relations,
+grant-management, authority-mutation, and creation switches to match in Client and Operations. Email and
 notification flags, Project Alpha delivery intents/guests, membership, peer-
 admin, and address-book mutations remain off. Roll back creation first by
-selecting `primary-authenticated-delivery-paused`, which requires
+selecting `primary-authenticated-delivery-paused` only for that full
+profile, which requires
 `AUTHENTICATED_DELIVERY_CREATION_ENABLED=false` in both Workers while keeping
 hierarchy relations, grant enforcement, authority mutations, reads, audits, and
 revokes on. Only disable the broader grant-management switch after active grants

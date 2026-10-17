@@ -1,3 +1,4 @@
+import { historicalDefaultOffProduction } from "./test-fixtures/historical-default-off-production.mjs";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
@@ -21,8 +22,8 @@ const values = Object.freeze({ DELIVERY_STAGING_ACCESS_AUD: "a".repeat(64), OPER
 function state() {
   const rendered = renderConfigs(root, values);
   return { sources: { delivery: rendered.delivery, operations: rendered.operations }, production: {
-    delivery: JSON.parse(fs.readFileSync(path.join(root, "apps/client/wrangler.jsonc"), "utf8")),
-    operations: JSON.parse(fs.readFileSync(path.join(root, "apps/operations/wrangler.jsonc"), "utf8")),
+    delivery: historicalDefaultOffProduction(JSON.parse(fs.readFileSync(path.join(root, "apps/client/wrangler.jsonc"), "utf8"))),
+    operations: historicalDefaultOffProduction(JSON.parse(fs.readFileSync(path.join(root, "apps/operations/wrangler.jsonc"), "utf8"))),
   }, secretNames: { names: [...VIEWER_ACCEPTANCE_SECRET_NAMES] } };
 }
 const deltas = (app) => ({
@@ -94,4 +95,47 @@ test("requires the approved names-only Viewer inventory", () => {
 test("rejects conflicting exported constituent deltas", () => {
   assert.deepEqual(mergeAcceptanceDeltas({ A: "true" }, { A: "true", B: "false" }), { A: "true", B: "false" });
   assert.throws(() => mergeAcceptanceDeltas({ A: "true" }, { A: "false" }), /profiles conflict on A/);
+});
+
+// Today's enabled production is deliberately NOT supported by these historical
+// activation tools. Only test constructors use the explicit historical fixture.
+test("historical activation builders reject actual enabled production without mutating it", async () => {
+  const production = {
+    delivery: JSON.parse(fs.readFileSync(path.join(root, "apps/client/wrangler.jsonc"), "utf8")),
+    operations: JSON.parse(fs.readFileSync(path.join(root, "apps/operations/wrangler.jsonc"), "utf8")),
+  };
+  const before = structuredClone(production);
+  const { sources, secretNames } = state();
+  const { buildDirectoryWritesAcceptanceConfig } = await import("./staging-directory-writes-acceptance-profile.mjs");
+  const { buildProjectAlphaApiV2AcceptanceConfig } = await import("./staging-project-alpha-api-v2-acceptance-profile.mjs");
+  const { buildDirectoryAdoptionAcceptanceConfig } = await import("./staging-project-alpha-directory-adoption-acceptance-profile.mjs");
+  const { buildProjectAdoptionFinalizationAcceptanceConfig } = await import("./staging-project-alpha-project-adoption-finalization-acceptance-profile.mjs");
+  const { buildNativeWorkspaceAcceptanceConfigs } = await import("./staging-native-workspace-acceptance-profile.mjs");
+  const { buildNativePortalAcceptanceConfigs } = await import("./staging-native-portal-acceptance-profile.mjs");
+  const { buildPaNativePortalAcceptanceConfigs } = await import("./staging-pa-native-portal-acceptance-profile.mjs");
+  for (const attempt of [
+    () => buildDirectoryWritesAcceptanceConfig(sources.operations, production.operations),
+    () => buildProjectAlphaApiV2AcceptanceConfig(sources.operations, production.operations),
+    () => buildDirectoryAdoptionAcceptanceConfig(sources.operations, production.operations, secretNames),
+    () => buildProjectAdoptionFinalizationAcceptanceConfig(sources.operations, production.operations),
+    () => buildNativeWorkspaceAcceptanceConfigs(sources, production),
+    () => buildNativePortalAcceptanceConfigs(sources, production),
+    () => buildPaNativePortalAcceptanceConfigs(sources, production),
+    () => build(sources, production, secretNames),
+  ]) assert.throws(attempt, /production (?:config must|must).*false/);
+  assert.deepEqual(production, before);
+  const historical = {
+    delivery: historicalDefaultOffProduction(production.delivery),
+    operations: historicalDefaultOffProduction(production.operations),
+  };
+  // No resource, namespace, origin, mail, or unrelated flag is rewritten.
+  for (const app of ["delivery", "operations"]) {
+    const { vars: actualVars, ...actualResources } = production[app];
+    const { vars: historicalVars, ...historicalResources } = historical[app];
+    assert.deepEqual(historicalResources, actualResources);
+    for (const name of ["AUTHENTICATED_DELIVERY_GRANTS_ENABLED", "CLIENT_PORTAL_INVITATION_EMAIL_ENABLED",
+      "AUTHENTICATED_DELIVERY_NOTIFICATIONS_ENABLED", "ENVIRONMENT", "CLIENT_PORTAL_ORIGIN"])
+      assert.equal(historicalVars[name], actualVars[name], name);
+  }
+  assert.throws(() => historicalDefaultOffProduction({ name: "unreviewed-worker", vars: {} }), /exact production Worker/);
 });

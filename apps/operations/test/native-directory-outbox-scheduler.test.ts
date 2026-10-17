@@ -141,11 +141,11 @@ describe("native Directory scheduled outbox drain", () => {
     expect(profileDispatch.mock.calls[0]![0].PROJECT_ALPHA_DIRECTORY_CREATE_GENERATION_RECOVERY_ENABLED).toBe(flag);
   });
 
-  it("is default-off and returns before touching database or connection configuration", async () => {
+  it("checks in the approved production drain flags but does zero work when explicitly disabled", async () => {
     const config = readFileSync(new URL("../wrangler.jsonc", import.meta.url), "utf8");
     const entrypoint = readFileSync(new URL("../src/worker/index.ts", import.meta.url), "utf8");
-    expect(config).toMatch(/"NATIVE_DIRECTORY_OUTBOX_DRAIN_ENABLED"\s*:\s*"false"/);
-    expect(config).toMatch(/"NATIVE_DIRECTORY_PROFILE_BINDING_CONTINUATION_ENABLED"\s*:\s*"false"/);
+    expect(config).toMatch(/"NATIVE_DIRECTORY_OUTBOX_DRAIN_ENABLED"\s*:\s*"true"/);
+    expect(config).toMatch(/"NATIVE_DIRECTORY_PROFILE_BINDING_CONTINUATION_ENABLED"\s*:\s*"true"/);
     expect(config.match(/"1-56\/5 \* \* \* \*"/g)).toHaveLength(1);
     expect(entrypoint).toContain("drainNativeDirectoryOutboxes(env, { rotationTime: event.scheduledTime })");
     const disabled = new Proxy({ NATIVE_DIRECTORY_OUTBOX_DRAIN_ENABLED: "false" }, { get(target, key) {
@@ -469,4 +469,19 @@ it('rotates bounded read-only create observation work ahead of a busy write lane
   expect(await drainNativeDirectoryOutboxes(environment([sourceId]),{now:()=>dueAt,rotationTime:300000,maxCommands:1})).toMatchObject({attempted:1,acknowledged:1});
   expect(observationDispatch).toHaveBeenCalledOnce();expect(observationDispatch.mock.calls[0]![1]).toBe(sourceId);
   expect(profileDispatch).not.toHaveBeenCalled();
+});
+
+it('admits successive slow but bounded dispatches within the three-minute soft budget',async()=>{
+ const sourceId='project-alpha:latency';await command('profile','slow-profile-one',sourceId);await command('profile','slow-profile-two',sourceId);
+ let now=dueAt;profileDispatch.mockImplementation(async()=>{now+=70_000;return{status:'acknowledged'};});
+ const result=await drainNativeDirectoryOutboxes(environment([sourceId]),{now:()=>now,rotationTime:0});
+ expect(result).toMatchObject({status:'drained',attempted:2,acknowledged:2,exhausted:false});expect(profileDispatch).toHaveBeenCalledTimes(2);
+});
+
+it('caps an oversized requested budget while allowing only the already-started dispatch to overshoot',async()=>{
+ const sourceId='project-alpha:budget-cap';for(let n=1;n<=4;n++)await command('profile',`budget-cap-${n}`,sourceId);
+ let now=dueAt;profileDispatch.mockImplementation(async()=>{now+=70_000;return{status:'acknowledged'};});
+ const result=await drainNativeDirectoryOutboxes(environment([sourceId]),{now:()=>now,rotationTime:0,maxRuntimeMs:999_999});
+ expect(result).toMatchObject({attempted:3,acknowledged:3,exhausted:true});expect(profileDispatch).toHaveBeenCalledTimes(3);
+ expect(profileDispatch.mock.calls.map(call=>call[2])).not.toContain('budget-cap-4');expect(now-dueAt).toBe(210_000);
 });

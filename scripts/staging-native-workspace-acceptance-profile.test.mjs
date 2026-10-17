@@ -1,3 +1,4 @@
+import { historicalDefaultOffProduction } from "./test-fixtures/historical-default-off-production.mjs";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
@@ -18,8 +19,8 @@ function state() {
     STAGING_TRIAGE_EMAIL: "triage@staging.example.test", STAGING_ACCESS_GROUP_ID: "staging-group", STAGING_ACCESS_GROUP_NAME: "Staging testers",
   });
   return { sources: { delivery: configs.delivery, operations: configs.operations }, production: {
-    delivery: JSON.parse(fs.readFileSync(path.join(root, "apps/client/wrangler.jsonc"), "utf8")),
-    operations: JSON.parse(fs.readFileSync(path.join(root, "apps/operations/wrangler.jsonc"), "utf8")),
+    delivery: historicalDefaultOffProduction(JSON.parse(fs.readFileSync(path.join(root, "apps/client/wrangler.jsonc"), "utf8"))),
+    operations: historicalDefaultOffProduction(JSON.parse(fs.readFileSync(path.join(root, "apps/operations/wrangler.jsonc"), "utf8"))),
   } };
 }
 

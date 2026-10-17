@@ -1,3 +1,4 @@
+import { historicalDefaultOffProduction } from "./test-fixtures/historical-default-off-production.mjs";
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
@@ -14,7 +15,7 @@ const root = path.resolve(import.meta.dirname, "..");
 const ov = "5f0ad270-0092-4f51-9534-34efc6ee2957";
 const cv = "8bf70f8c-c3c5-494d-8c4b-474427f86350";
 const values={DELIVERY_STAGING_ACCESS_AUD:"a".repeat(64),OPERATIONS_STAGING_ACCESS_AUD:"b".repeat(64),PROJECT_ALPHA_OPS_SYNC_STAGING_ACCESS_AUD:"c".repeat(64),DEDICATED_CLIENT_PORTAL_STAGING_ACCESS_AUD:"d".repeat(64),STAGING_PROJECT_ALPHA_SOURCE_ID:"project-alpha:staging",STAGING_PROJECT_ALPHA_HTTPS_ORIGIN:"https://pa-staging.ledgetoptechnologies.com",CLIENT_STAGING_RESTRICTED_MAPBOX_PUBLIC_TOKEN:"pk.client-staging",OPERATIONS_STAGING_RESTRICTED_MAPBOX_PUBLIC_TOKEN:"pk.operations-staging",MAPBOX_STAGING_ACCEPTANCE_DEFERRED:"false",STAGING_EMAIL_DOMAIN:"staging.example.test",STAGING_TRIAGE_EMAIL:"triage@staging.example.test",STAGING_ACCESS_GROUP_ID:"11111111-1111-4111-8111-111111111111",STAGING_ACCESS_GROUP_NAME:"LTDS staging operators"};
-function fixture(){const r=renderConfigs(root,values),f={sources:{delivery:r.delivery,operations:r.operations},production:{delivery:JSON.parse(fs.readFileSync(path.join(root,"apps/client/wrangler.jsonc"),"utf8")),operations:JSON.parse(fs.readFileSync(path.join(root,"apps/operations/wrangler.jsonc"),"utf8"))},secretNames:{names:[...VIEWER_ACCEPTANCE_SECRET_NAMES]}};return{...f,pair:buildPairedEndToEndAcceptanceConfigs(f.sources,f.production,f.secretNames)}}
+function fixture(){const r=renderConfigs(root,values),f={sources:{delivery:r.delivery,operations:r.operations},production:{delivery:historicalDefaultOffProduction(JSON.parse(fs.readFileSync(path.join(root,"apps/client/wrangler.jsonc"),"utf8"))),operations:historicalDefaultOffProduction(JSON.parse(fs.readFileSync(path.join(root,"apps/operations/wrangler.jsonc"),"utf8")))},secretNames:{names:[...VIEWER_ACCEPTANCE_SECRET_NAMES]}};return{...f,pair:buildPairedEndToEndAcceptanceConfigs(f.sources,f.production,f.secretNames)}}
 const preflight=()=>({operations:{workerName:"ledgetop-ops-staging",activeVersionId:ov},delivery:{workerName:"ledgetop-clients-staging",activeVersionId:cv}});
 const snapshot=()=>({schemaVersion:1,environment:"staging",worker:{operations:{name:"ledgetop-ops-staging",versionId:ov},delivery:{name:"ledgetop-clients-staging",versionId:cv}},settings:{operations:{VIEWER_PUBLIC_SHARES_ENABLED:"true",CLIENT_VIEWER_SESSION_ISSUER_ENABLED:"true",CLIENT_VIEWER_SHARES_ENABLED:"true"},delivery:{CLIENT_VIEWER_ENABLED:"false",CLIENT_VIEWER_SHARES_ENABLED:"false"}}});
 const build=(f,s=snapshot(),p=preflight())=>overlay(f.sources,f.pair,f.production,f.secretNames,s,p);

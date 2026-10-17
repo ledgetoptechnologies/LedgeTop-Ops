@@ -1,3 +1,4 @@
+import { historicalDefaultOffProduction } from "./test-fixtures/historical-default-off-production.mjs";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -38,7 +39,7 @@ function pair() {
   const rendered = renderConfigs(root, values);
   const sources = { delivery: rendered.delivery, operations: rendered.operations };
   const productionConfigs = Object.fromEntries(Object.entries(NATIVE_PORTAL_ACCEPTANCE_CONFIGS)
-    .map(([app, files]) => [app, JSON.parse(fs.readFileSync(path.join(root, files.production), "utf8"))]));
+    .map(([app, files]) => [app, historicalDefaultOffProduction(JSON.parse(fs.readFileSync(path.join(root, files.production), "utf8")))]));
   return { sources, productionConfigs };
 }
 

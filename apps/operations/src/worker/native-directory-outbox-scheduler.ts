@@ -14,12 +14,16 @@ import type { SharedProfilePortalAuthorityBinding } from "../../../../packages/s
 const MAX_CONNECTION_BYTES = 256 * 1024;
 const MAX_SOURCES = 64;
 const MAX_COMMANDS = 12;
-const MAX_RUNTIME_MS = 20_000;
+// Soft admission/transport budget: stop starting commands at this deadline.
+// An already-started dispatch finishes its bounded fresh authority rechecks;
+// this does not cancel an RPC or extend its proof lifetime/five-minute lease.
+const MAX_RUNTIME_MS = 180_000;
 const ROTATION_INTERVAL_MS = 5 * 60_000;
 const SOURCE_ID = /^project-alpha:[a-z0-9][a-z0-9_-]{0,63}$/;
 
 type Environment = ProjectAlphaApiV2ConnectionEnvironment & Readonly<{
   OPS_DB: D1Database;
+  DELIVERY_DB?: D1Database;
   NATIVE_DIRECTORY_OUTBOX_DRAIN_ENABLED?: string;
   PROJECT_ALPHA_DIRECTORY_CREATE_GENERATION_RECOVERY_ENABLED?: string;
   PROJECT_ALPHA_DIRECTORY_RELATIONSHIP_GENERATION_RECOVERY_ENABLED?: string;
@@ -262,7 +266,7 @@ export async function drainNativeDirectoryOutboxes(env: Environment,
     relationshipGenerationRecovery === "true", profileBindingContinuationEnabled(continuationPolicy), lifecycleEnabled);
   const selected = fairOrder(candidates, sourceIds, rotationTime, maxCommands);
   const send = deadlineFetch(options.send ?? fetch, deadline, now);
-  const dispatchEnvironment = { OPS_DB: env.OPS_DB, PROJECT_ALPHA_API_V2_CONNECTIONS: connections,
+  const dispatchEnvironment = { OPS_DB: env.OPS_DB, DELIVERY_DB: env.DELIVERY_DB, PROJECT_ALPHA_API_V2_CONNECTIONS: connections,
     SHARED_PROFILE_PORTAL_AUTHORITY: portalAuthority,
     PROJECT_ALPHA_DIRECTORY_CREATE_GENERATION_RECOVERY_ENABLED: createGenerationRecovery,
     PROJECT_ALPHA_DIRECTORY_RELATIONSHIP_GENERATION_RECOVERY_ENABLED: relationshipGenerationRecovery, ...continuationPolicy,

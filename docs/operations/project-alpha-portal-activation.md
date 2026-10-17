@@ -46,17 +46,29 @@ The Client Worker does not mount the former direct portal-v2 HTTP writers.
 defense if an obsolete handler is accidentally remounted. Existing public
 share, download, authenticated portal, and legacy redirect routes are unchanged.
 
-The checked-in production configuration is the reviewed default-on eligibility
-state: portal sync, hierarchy reads, automatic identity eligibility, denylist
-enforcement, and deny-policy management are enabled together. Content grants,
-requests, notifications, membership management, invitations, and delegated
-sharing remain independently disabled. The committed
-`scripts/client-portal-release-profile.json` explicitly selects
-`default-on-eligibility`. It is a versioned release-intent declaration, not
-production evidence. Repository-owned release checks must verify
-the exact Ops Sync-to-Client service binding and named entrypoint before either
-Worker is deployed. A missing or mismatched binding must fail closed without
-acknowledging the Project Alpha event.
+### Current source contract
+
+The committed `scripts/client-portal-release-profile.json` now selects
+`primary-explicit-folder-delivery`. This is current source intent, not evidence
+that production is deployed or that any client has access. Both Workers retain
+the five eligibility, deny, and root-policy gates. Operations enables grant
+reads, authority mutations, and creation while hierarchy relations remain off.
+Client enables grant reads, retains hierarchy relations, and leaves authority
+mutations and creation off. Mail and unrelated mutation gates remain off.
+`keep_vars=true` preserves operator-managed variables; it does not replace
+explicit configuration or service-binding review.
+
+The receiver-only, `default-on-eligibility`, and full authenticated-delivery
+profiles described elsewhere are separate historical contracts. Do not select
+`primary-authenticated-delivery` or its `-paused` companion as a rollback for
+this narrow profile: they require broader relation and Client mutation gates.
+Review a narrow rollback separately. Historical staging activation tools
+intentionally reject enabled production inputs; their tests use explicit
+historical inputs rather than relaxing namespace, no-email, or scope guards.
+
+Repository-owned release checks must still verify the exact Ops Sync-to-Client
+service binding and named entrypoint before either Worker is deployed. A missing
+or mismatched binding must fail closed without acknowledging the PA event.
 
 ## Runtime gates
 
