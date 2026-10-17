@@ -308,7 +308,7 @@ export function ClientDirectory({ nativeDirectoryProfileWrites = false }: { nati
           onChange={event => changeQuery({ ...query, source: event.target.value })}>
           <option value="">All available sources</option>
           {query.source && !sources.some(source => source.source_id === query.source) && <option value={query.source} disabled>Unavailable source</option>}
-          {sources.map(source => <option key={source.source_id} value={source.source_id}>{source.display_name}</option>)}
+          {sources.map(source => <option key={source.source_id} value={source.source_id}>{sourceDisplayName(source.display_name, source.source_id)}</option>)}
         </select>
       </label>}
         <label className="client-directory-sort" htmlFor="client-directory-sort">Sort clients

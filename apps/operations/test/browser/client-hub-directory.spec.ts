@@ -610,3 +610,17 @@ test("client detail header uses business names for raw and generic Project Alpha
   await expect(page.locator(".client-hub-title p", { hasText: /^Project Alpha$/ })).toHaveCount(0);
   await expect(page.locator(".client-hub-title")).not.toContainText("project-alpha:");
 });
+
+test("client source filter shows readable source names while keeping raw option values", async ({ page }) => {
+  const sources = [{ source_id: "delivery:local", display_name: "Local delivery" }, { source_id: "project-alpha:stage-one", display_name: "PA Stage One" },
+    { source_id: "project-alpha:primary", display_name: "Project Alpha" }, { source_id: "project-alpha:staging", display_name: "project-alpha:staging" }];
+  const requested = await mock(page, route => route.fulfill({ json: { clients: [client("org-a", "Acme")], sources, nextCursor: null, capabilities } }));
+  await page.goto("/clients");
+  const filter = page.getByRole("combobox", { name: "Client source" });
+  await expect(filter.locator("option")).toHaveText(["All available sources", "Local delivery", "PA Stage One", "Ledge Top Drone Services", "Project Alpha (staging)"]);
+  expect(await filter.locator("option").evaluateAll(options => options.map(option => (option as HTMLOptionElement).value)))
+    .toEqual(["", ...sources.map(source => source.source_id)]);
+  await filter.selectOption("project-alpha:staging");
+  await expect(page).toHaveURL(/source=project-alpha%3Astaging$/);
+  await expect.poll(() => requested.some(url => url.pathname === "/api/client-hub" && url.searchParams.get("source") === "project-alpha:staging")).toBe(true);
+});
