@@ -272,7 +272,7 @@ function RecordPicker({ kind, excludedSources, initialQuery, contextSignal, onSe
   return <section className="business-party-picker" aria-label="Find source record" aria-busy={busy}>
     {sources && !sources.length && <p>No other visible business source is available for linking. This action does not connect or activate another source.</p>}
     {sources && sources.length > 0 && <label className="business-party-source-select">Business source<select value={source} onChange={event => setSource(event.target.value)}>
-      {sources.map(row => <option key={row.source_id} value={row.source_id}>{row.display_name}</option>)}
+      {sources.map(row => <option key={row.source_id} value={row.source_id}>{sourceDisplayName(row.display_name, row.source_id)}</option>)}
     </select></label>}
     <form onSubmit={search} className="business-party-search"><label htmlFor="business-party-search">Find another business record</label>
       <div><input id="business-party-search" type="search" maxLength={200} value={draft} onChange={event => setDraft(event.target.value)} placeholder="Client name, contact, or permitted project" />

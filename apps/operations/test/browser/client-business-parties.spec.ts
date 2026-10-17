@@ -19,7 +19,7 @@ const summary = (root: Root) => ({ workspace_id: null, kind: root.kind, route_ki
   root_namespace: "business", pa_public_id: null });
 type Call = { path: string; query: URLSearchParams; method: string; body: Record<string, unknown> | null; csrf?: string };
 type Handler = (route: Route, call: Call) => Promise<boolean>;
-async function fixture(page: Page, options: { linked?: number; manage?: boolean; handler?: Handler; label?: string; rootCount?: number;
+async function fixture(page: Page, options: { linked?: number; manage?: boolean; handler?: Handler; label?: string; rootCount?: number; rawSourceNames?: boolean;
   contactsPage?: boolean; projectsUnavailableSource?: string; invalidServiceSource?: string;
   archived?: "source_unavailable" | "operator_closed" } = {}) {
   const state = { members: roots.slice(0, options.linked || 0).map(root => member(root)), version: 1,
@@ -83,7 +83,7 @@ async function fixture(page: Page, options: { linked?: number; manage?: boolean;
         clients = clients.filter(row => !("business_party_id" in row));
         if (matching) clients.unshift({ ...matching, detail_path: `/clients/parties/${partyId}` });
       }
-      return route.fulfill({ json: { clients, nextCursor: null, capabilities, sources: activeRoots.map(root => ({ source_id: root.sourceId, display_name: sourceName(root.sourceId) })) } });
+      return route.fulfill({ json: { clients, nextCursor: null, capabilities, sources: activeRoots.map(root => ({ source_id: root.sourceId, display_name: options.rawSourceNames ? root.sourceId : sourceName(root.sourceId) })) } });
     }
     if (path.endsWith("/organization-operational-contacts")) {
       const root = roots.find(row => `/api/client-hub${sourcePath(row).slice("/clients".length)}/organization-operational-contacts` === path);
@@ -185,6 +185,16 @@ test("opening the link picker suggests same-name records from another source wit
       { q: "Acme aerial customer", source: secondary },
     ]);
   expect(state.calls.filter(call => call.path === `${apiBase}/preview` || (call.path === apiBase && call.method === "POST"))).toHaveLength(0);
+});
+
+test("the link picker source select shows readable names for raw source labels and keeps raw values", async ({ page }) => {
+  await fixture(page, { rawSourceNames: true });
+  await page.goto(sourcePath(roots[0]!));
+  await page.getByRole("button", { name: "Link another source record", exact: true }).click();
+  const select = page.getByRole("combobox", { name: "Business source" });
+  await expect(select.locator("option")).toHaveText(["Project Alpha (business_b)", "Project Alpha (third)"]);
+  expect(await select.locator("option").evaluateAll(options => options.map(option => (option as HTMLOptionElement).value))).toEqual([secondary, third]);
+  await expect(page.locator(".business-party-picker")).not.toContainText("project-alpha:");
 });
 
 test("source workspaces, party links and directory filters survive refresh and browser history", async ({ page }) => {
