@@ -10,6 +10,7 @@ const ENDPOINT = "/api/admin/integrations/project-alpha/connectors";
 const PORTAL_SOURCE = "project-alpha:primary";
 const SOURCE = /^project-alpha:[a-z0-9][a-z0-9_-]{0,63}$/;
 const SHA256 = /^[0-9a-f]{64}$/;
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 type ConnectorLabel = { sourceId: string; displayName: string; snapshotOrigin: string };
 type Frozen = { directorySourceId: string; command: PortalDirectoryCorrespondenceCommand; body: string;
@@ -22,23 +23,32 @@ const frozenByDirectorySource = new Map<string, Frozen>();
 const record = (value: unknown): value is Record<string, unknown> => !!value && typeof value === "object" && !Array.isArray(value);
 const text = (value: unknown, max = 512): value is string => typeof value === "string" && value.length > 0 && value.length <= max;
 const count = (value: unknown): value is number => typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+const positive = (value: unknown): value is number => count(value) && value > 0;
+const uuid = (value: unknown): value is string => typeof value === "string" && UUID.test(value);
+/** A canonical HTTPS origin: no path, query, credentials or trailing slash. */
+function httpsOrigin(value: unknown): value is string {
+  if (typeof value !== "string" || value.length > 2048) return false;
+  try { const url = new URL(value); return url.protocol === "https:" && url.origin === value; } catch { return false; }
+}
 
 function validProof(value: unknown, directorySourceId: string): boolean {
   if (!record(value)) return false;
   return value.directorySourceId === directorySourceId && value.portalSourceId === PORTAL_SOURCE
-    && ["sourceInstanceId", "applicationId", "historyEpochId", "baseUrl", "producerBindingId", "applicationKey", "currentKeyFingerprint"]
-      .every(field => text(value[field], 2048))
-    && count(value.connectorRevision) && count(value.connectorVersion) && count(value.primaryAuthorityVersion);
+    && uuid(value.sourceInstanceId) && uuid(value.applicationId) && uuid(value.historyEpochId)
+    && httpsOrigin(value.baseUrl) && text(value.producerBindingId, 128) && text(value.applicationKey, 128)
+    && typeof value.currentKeyFingerprint === "string" && SHA256.test(value.currentKeyFingerprint)
+    && positive(value.connectorRevision) && positive(value.connectorVersion) && positive(value.primaryAuthorityVersion);
 }
 
 export function validCorrespondenceStatus(value: unknown, directorySourceId: string): value is PortalDirectoryCorrespondenceStatus {
   if (!record(value) || !["not_required", "ready", "unavailable", "suspended"].includes(String(value.status))) return false;
   if (value.reason !== undefined && !["schema", "configuration", "producer", "authority", "changed"].includes(String(value.reason))) return false;
   const current = value.current, preview = value.preview;
-  if (current !== null && !(record(current) && count(current.version) && current.version > 0
-    && (current.state === "active" || current.state === "revoked") && text(current.revisionId, 128)
+  if (current !== null && !(record(current) && positive(current.version)
+    && (current.state === "active" || current.state === "revoked") && uuid(current.revisionId)
     && typeof current.revocationProofSha256 === "string" && SHA256.test(current.revocationProofSha256)
-    && text(current.approvedByStaffId, 256) && text(current.approvedAt, 64))) return false;
+    && text(current.approvedByStaffId, 256) && typeof current.approvedAt === "string" && current.approvedAt.length <= 64
+    && !Number.isNaN(Date.parse(current.approvedAt)))) return false;
   if (preview !== null && !(record(preview) && typeof preview.proofSha256 === "string" && SHA256.test(preview.proofSha256)
     && validProof(preview.proof, directorySourceId))) return false;
   return true;
@@ -66,9 +76,12 @@ function host(origin: string | undefined): string | null {
   try { return new URL(origin).hostname || null; } catch { return null; }
 }
 
-function directoryLabel(directorySourceId: string, connectors: readonly ConnectorLabel[]): { name: string; domain: string | null } {
-  const connector = connectors.find(row => row.sourceId === directorySourceId);
-  return { name: connector?.displayName || projectAlphaSourceName(directorySourceId), domain: host(connector?.snapshotOrigin) };
+/** Business identity for the records side: the logical source's own connector when
+ * configured, otherwise the physical primary connector it corresponds to. */
+function directoryLabel(directorySourceId: string, connectors: readonly ConnectorLabel[]): string {
+  const own = connectors.find(row => row.sourceId === directorySourceId);
+  const primary = connectors.find(row => row.sourceId === PORTAL_SOURCE);
+  return own?.displayName || primary?.displayName || projectAlphaSourceName(PORTAL_SOURCE);
 }
 
 function reasonText(status: PortalDirectoryCorrespondenceStatus): string | null {
@@ -138,7 +151,7 @@ function PortalCorrespondenceCard({ directorySourceId, initial, connectors, onCh
       const { command } = sent;
       const valid = record(result) && result.ok === true && result.operationId === command.operationId && result.action === command.action
         && result.directorySourceId === sent.directorySourceId && typeof result.replayed === "boolean"
-        && count(result.version) && result.version === command.expectedVersion + 1 && text(result.revisionId, 128)
+        && positive(result.version) && result.version === command.expectedVersion + 1 && uuid(result.revisionId)
         && (command.action === "approve" || result.revisionId === sent.expectedRevisionId)
         && typeof result.requestSha256 === "string" && result.requestSha256 === await requestSha256(sent.directorySourceId, command);
       if (!valid) throw new Error("The client workspace connection response could not be verified.");
@@ -189,9 +202,11 @@ function PortalCorrespondenceCard({ directorySourceId, initial, connectors, onCh
       expectedRevisionId: action === "revoke" ? current!.revisionId : null, transmitted: false });
   };
 
-  const directory = directoryLabel(directorySourceId, connectors);
+  const directoryName = directoryLabel(directorySourceId, connectors);
   const portalName = projectAlphaSourceName(PORTAL_SOURCE);
-  const portalDomain = host(status?.preview?.proof.baseUrl);
+  // The proof's baseUrl is the Project Alpha server being linked, not the client
+  // portal's hostname, so it is labelled as the source it is.
+  const sourceHost = host(status?.preview?.proof.baseUrl);
   const active = status?.current?.state === "active";
   const canApprove = !!status?.preview && (status.status === "ready" || status.status === "suspended") && !(active && status.status === "ready");
   const locked = busy || loading || Boolean(frozen);
@@ -201,13 +216,17 @@ function PortalCorrespondenceCard({ directorySourceId, initial, connectors, onCh
     <header><h3>Client workspace connection</h3>
       <span className={`alpha-correspondence-state ${active ? (status?.status === "suspended" ? "is-review" : "is-on") : "is-off"}`}>
         {!status ? "Checking" : active ? (status.status === "suspended" ? "Needs review" : "Connected") : "Not connected"}</span></header>
-    <p className="alpha-correspondence-pair"><strong>{directory.name}</strong> business records{directory.domain && <small> ({directory.domain})</small>}
-      {" ↔ "}<strong>{portalName}</strong> client portal{portalDomain && <small> ({portalDomain})</small>}</p>
+    <div className="alpha-correspondence-pair" role="group" aria-label="Connected sides">
+      <div className="alpha-correspondence-side"><small>Business records</small><strong>{directoryName}</strong></div>
+      <span className="alpha-correspondence-link" aria-hidden="true">↔</span>
+      <div className="alpha-correspondence-side"><small>Client workspaces</small><strong>{portalName} client portal</strong></div>
+    </div>
+    {sourceHost && <p className="alpha-correspondence-source">Project Alpha source: {sourceHost}</p>}
     <p className="alpha-correspondence-scope">This only lets client workspaces find their existing records across the two connections. It does not add anyone to a workspace or grant access to files.</p>
     {loading && !busy ? <Skeleton variant="text" lines={2} label="Checking the client workspace connection…" /> : status && <>
       {reason && <p role="status" className="notice">{reason}</p>}
       {status.current && <dl className="alpha-correspondence-current">
-        <div><dt>Status</dt><dd>{status.current.state === "active" ? "Connected" : "Disconnected"}</dd></div>
+        <div><dt>Status</dt><dd>{status.current.state !== "active" ? "Disconnected" : status.status === "suspended" ? "Paused for review" : "Connected"}</dd></div>
         <div><dt>Approved</dt><dd>{new Date(status.current.approvedAt).toLocaleString()}</dd></div>
       </dl>}
       {!status.preview && !active && !reason && <p role="status">No connection is ready for review yet.</p>}
@@ -229,7 +248,8 @@ function PortalCorrespondenceCard({ directorySourceId, initial, connectors, onCh
     <details className="alpha-correspondence-details"><summary>Technical details</summary><dl>
       <dt>Business records source</dt><dd><code>{directorySourceId}</code></dd>
       <dt>Client portal source</dt><dd><code>{PORTAL_SOURCE}</code></dd>
-      {status?.current && <><dt>Link revision</dt><dd><code>{status.current.revisionId}</code></dd></>}
+      {status?.current && <><dt>Link revision</dt><dd><code>{status.current.revisionId}</code></dd>
+        <dt>Approved by (staff ID)</dt><dd><code>{status.current.approvedByStaffId}</code></dd></>}
       {status?.preview && <><dt>Preview proof</dt><dd><code>{status.preview.proofSha256}</code></dd></>}
     </dl></details>
   </section>;

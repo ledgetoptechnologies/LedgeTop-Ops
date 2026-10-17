@@ -9,9 +9,10 @@ const PROOF_SHA = "a".repeat(64), REVOKE_SHA = "b".repeat(64), REVISION = "11111
 const connector = (sourceId: string, displayName: string, origin: string, profile: "primary_legacy" | "business_data") => ({
   sourceId, displayName, producerBindingId: sourceId, snapshotOrigin: origin, snapshotBasePath: "/", applicationKey: "ltds_ops",
   profile, state: "active", readVisible: true, activeRevision: 1, version: 2 });
-const proof = () => ({ directorySourceId: staging, portalSourceId: primary, sourceInstanceId: "instance-1", applicationId: "app-1",
-  historyEpochId: "epoch-1", baseUrl: "https://portal-staging.example.test", producerBindingId: "ltds-staging", applicationKey: "ltds_ops",
-  connectorRevision: 3, connectorVersion: 4, currentKeyFingerprint: "fp-1", primaryAuthorityVersion: 5 });
+const proof = (overrides: Record<string, unknown> = {}) => ({ directorySourceId: staging, portalSourceId: primary,
+  sourceInstanceId: "0f1e2d3c-4b5a-4968-8776-655443322110", applicationId: "1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d",
+  historyEpochId: "2b3c4d5e-6f7a-4b8c-9d0e-1f2a3b4c5d6e", baseUrl: "https://pa-staging.example.test", producerBindingId: "ltds-staging",
+  applicationKey: "ltds_ops", connectorRevision: 3, connectorVersion: 4, currentKeyFingerprint: "d".repeat(64), primaryAuthorityVersion: 5, ...overrides });
 const readyStatus = () => ({ status: "ready", current: null, preview: { proof: proof(), proofSha256: PROOF_SHA } });
 const activeStatus = (status = "ready", preview: unknown = null) => ({ status, current: { version: 1, state: "active", revisionId: REVISION,
   revocationProofSha256: REVOKE_SHA, approvedByStaffId: "admin", approvedAt: "2026-10-17T07:00:00.000Z" }, preview });
@@ -29,7 +30,8 @@ async function fixture(page: Page, options: { discovery: unknown; status?: () =>
       profileType: "Administrator", isAdministrator: true, permissions: ["administration.view", "integrations.manage"], divisions: [] },
       csrfToken: "csrf", timezone: "America/Chicago", mapStyleUrl: null, mapboxPublicToken: null, capabilities: {} } });
     if (path === endpoint && request.method() === "GET") return route.fulfill({ json: {
-      connectors: [connector(staging, "LTDS staging business records", "https://alpha-staging.example.test", "business_data")],
+      // The real connector map holds the physical primary connector, not the logical staging source.
+      connectors: [connector(primary, "LTDS Project Alpha", "https://pa-staging.example.test", "primary_legacy")],
       legacyPrimary: true, health: [], portalDirectoryCorrespondence: options.discovery } });
     if (path === correspondencePath && request.method() === "GET") { gets += 1; return route.fulfill({ json: options.status ? options.status() : readyStatus() }); }
     if (path === correspondencePath && request.method() === "POST") {
@@ -49,7 +51,7 @@ const card = (page: Page) => page.getByRole("region", { name: "Client workspace 
 test("same-source production shows no card and makes no correspondence request", async ({ page }) => {
   const calls = await fixture(page, { discovery: { status: "not_required", candidates: [] } });
   await page.goto("/administration");
-  await expect(page.getByRole("region", { name: "LTDS staging business records connection" })).toBeVisible();
+  await expect(page.getByRole("region", { name: "LTDS Project Alpha connection" })).toBeVisible();
   await expect(card(page)).toHaveCount(0);
   expect(calls.gets()).toBe(0);
 });
@@ -57,10 +59,13 @@ test("same-source production shows no card and makes no correspondence request",
 test("connecting sends the exact frozen command and names both sides by business and domain", async ({ page }) => {
   const calls = await fixture(page, { discovery: { status: "review", candidates: [{ directorySourceId: staging, review: readyStatus() }] } });
   await page.goto("/administration");
-  await expect(card(page)).toContainText("LTDS staging business records");
-  await expect(card(page)).toContainText("alpha-staging.example.test");
-  await expect(card(page)).toContainText("Ledge Top Drone Services");
-  await expect(card(page)).toContainText("portal-staging.example.test");
+  const sides = card(page).getByRole("group", { name: "Connected sides" });
+  await expect(sides).toContainText("Business records");
+  await expect(sides).toContainText("LTDS Project Alpha");
+  await expect(sides).toContainText("Ledge Top Drone Services client portal");
+  // The proof base URL is the Project Alpha server, never presented as the portal's domain.
+  await expect(sides).not.toContainText("pa-staging.example.test");
+  await expect(card(page)).toContainText("Project Alpha source: pa-staging.example.test");
   await expect(card(page)).toContainText("does not add anyone to a workspace or grant access to files");
   // Opaque source IDs stay inside the collapsed technical details.
   await expect(card(page).getByText(staging, { exact: true })).toBeHidden();
@@ -132,6 +137,19 @@ test("a changed connection is shown as needing review with a reconnect action", 
   await expect(card(page)).toContainText("changed since this link was approved");
   await expect(card(page).getByRole("button", { name: "Review and reconnect" })).toBeVisible();
   await expect(card(page).getByRole("button", { name: "Disconnect" })).toBeVisible();
+});
+
+for (const [label, bad] of [
+  ["a non-UUID source instance", { sourceInstanceId: "instance-1" }],
+  ["a non-hex key fingerprint", { currentKeyFingerprint: "fp-1" }],
+  ["a non-HTTPS or non-canonical origin", { baseUrl: "http://pa-staging.example.test/" }],
+  ["a zero connector version", { connectorVersion: 0 }],
+] as const) test(`a preview proof with ${label} is rejected as unverifiable`, async ({ page }) => {
+  await fixture(page, { discovery: { status: "review", candidates: [{ directorySourceId: staging,
+    review: { status: "ready", current: null, preview: { proof: proof(bad), proofSha256: PROOF_SHA } } }] } });
+  await page.goto("/administration");
+  await expect(card(page).getByRole("alert")).toContainText("could not be verified");
+  await expect(card(page).getByRole("button", { name: "Connect client workspaces" })).toHaveCount(0);
 });
 
 test("an unverifiable discovery payload surfaces an error instead of hiding the card", async ({ page }) => {
