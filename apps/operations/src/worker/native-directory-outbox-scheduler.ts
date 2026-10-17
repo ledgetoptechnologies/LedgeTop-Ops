@@ -14,7 +14,10 @@ import type { SharedProfilePortalAuthorityBinding } from "../../../../packages/s
 const MAX_CONNECTION_BYTES = 256 * 1024;
 const MAX_SOURCES = 64;
 const MAX_COMMANDS = 12;
-const MAX_RUNTIME_MS = 20_000;
+// Soft admission/transport budget: stop starting commands at this deadline.
+// An already-started dispatch finishes its bounded fresh authority rechecks;
+// this does not cancel an RPC or extend its proof lifetime/five-minute lease.
+const MAX_RUNTIME_MS = 180_000;
 const ROTATION_INTERVAL_MS = 5 * 60_000;
 const SOURCE_ID = /^project-alpha:[a-z0-9][a-z0-9_-]{0,63}$/;
 

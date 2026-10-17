@@ -470,3 +470,18 @@ it('rotates bounded read-only create observation work ahead of a busy write lane
   expect(observationDispatch).toHaveBeenCalledOnce();expect(observationDispatch.mock.calls[0]![1]).toBe(sourceId);
   expect(profileDispatch).not.toHaveBeenCalled();
 });
+
+it('admits successive slow but bounded dispatches within the three-minute soft budget',async()=>{
+ const sourceId='project-alpha:latency';await command('profile','slow-profile-one',sourceId);await command('profile','slow-profile-two',sourceId);
+ let now=dueAt;profileDispatch.mockImplementation(async()=>{now+=70_000;return{status:'acknowledged'};});
+ const result=await drainNativeDirectoryOutboxes(environment([sourceId]),{now:()=>now,rotationTime:0});
+ expect(result).toMatchObject({status:'drained',attempted:2,acknowledged:2,exhausted:false});expect(profileDispatch).toHaveBeenCalledTimes(2);
+});
+
+it('caps an oversized requested budget while allowing only the already-started dispatch to overshoot',async()=>{
+ const sourceId='project-alpha:budget-cap';for(let n=1;n<=4;n++)await command('profile',`budget-cap-${n}`,sourceId);
+ let now=dueAt;profileDispatch.mockImplementation(async()=>{now+=70_000;return{status:'acknowledged'};});
+ const result=await drainNativeDirectoryOutboxes(environment([sourceId]),{now:()=>now,rotationTime:0,maxRuntimeMs:999_999});
+ expect(result).toMatchObject({attempted:3,acknowledged:3,exhausted:true});expect(profileDispatch).toHaveBeenCalledTimes(3);
+ expect(profileDispatch.mock.calls.map(call=>call[2])).not.toContain('budget-cap-4');expect(now-dueAt).toBe(210_000);
+});

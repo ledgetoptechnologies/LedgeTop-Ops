@@ -47,3 +47,9 @@ it('rechecks correspondence after capability awaits and before the PA POST',asyn
 it('denies acknowledgement after correspondence is revoked during the PA POST',async()=>{
  const f=await pending(),c=f.commands[0]!;f.setPost(f.revoke);expect(await dispatchProjectAlphaDirectoryProfileOutboxCommand(f.configured,c.source_id,c.command_id,f.send)).toMatchObject({status:'blocked',reason:'authority'});expect(f.posts).toHaveLength(1);expect(await f.db.prepare('SELECT state FROM project_alpha_directory_outbox WHERE command_id=?').bind(c.command_id).first('state')).not.toBe('acknowledged');
 },120_000);
+
+it('rejects an expired live authority proof before claiming or sending a portal command',async()=>{
+ const f=await pending(),c=f.commands[0]!;f.configured.SHARED_PROFILE_PORTAL_AUTHORITY.readAuthority.mockResolvedValue({ok:true,proof:{...f.proof,contextVersion:'b'.repeat(64),verifiedUntil:new Date(Date.now()-1000).toISOString()}});
+ expect(await dispatchProjectAlphaDirectoryProfileOutboxCommand(f.configured,c.source_id,c.command_id,f.send)).toMatchObject({status:'blocked',reason:'authority'});
+ expect(f.send).not.toHaveBeenCalled();expect(await f.db.prepare('SELECT attempts FROM project_alpha_directory_outbox WHERE command_id=?').bind(c.command_id).first('attempts')).toBe(0);
+},120_000);

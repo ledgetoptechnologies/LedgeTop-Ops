@@ -101,6 +101,18 @@ function isPortalActor(value: Actor | NativeDirectoryPortalWriterActor): value i
   return "kind" in value && value.kind==="portal";
 }
 
+/** A fresh private witness is awaited at every authorization boundary. Timeout
+ * never grants authority and does not imply the remote RPC was cancelled.
+ * Scheduled cross-service latency can exceed five seconds; the returned proof
+ * still has its original Client-generated thirty-second validity and is checked
+ * freshly at every existing boundary, independently of this wait budget. */
+export async function readPortalAuthorityWithinBudget(binding:SharedProfilePortalAuthorityBinding,
+ input:Parameters<SharedProfilePortalAuthorityBinding['readAuthority']>[0]) {
+ let timeout:ReturnType<typeof setTimeout>|undefined;
+ try{return await Promise.race([binding.readAuthority(input),
+  new Promise<null>(resolve=>{timeout=setTimeout(()=>resolve(null),30_000);})]);}
+ finally{if(timeout!==undefined)clearTimeout(timeout);}
+}
 async function livePortalReservation(db:D1Database,row:Row,value:NativeDirectoryPortalWriterActor,
   environment:Environment|undefined):Promise<NonNullable<Internal["portalAuthority"]>|null>{
   const binding=environment?.SHARED_PROFILE_PORTAL_AUTHORITY;
@@ -146,11 +158,9 @@ async function livePortalReservation(db:D1Database,row:Row,value:NativeDirectory
     verifiedUntil:value.verifiedUntil,targets:[],grantId:value.grantId,expectedVersion:value.groupVersion,mutationId:value.sharedMutationId,
     profile:fields as Record<string,string>},grant);
   if(fingerprint!==grant.request_sha256)return null;
-  let timeout:ReturnType<typeof setTimeout>|undefined;
   try{
-    const answer=await Promise.race([binding.readAuthority({protocolVersion:1,workspaceId:grant.workspace_id,sourceId:grant.source_id,
-      issuer:value.issuer,subject:value.subject,principalPublicId:grant.principal_public_id,scopeType:grant.target_type,publicId:grant.target_public_id}),
-      new Promise<null>(resolve=>{timeout=setTimeout(()=>resolve(null),5_000);})]);
+    const answer=await readPortalAuthorityWithinBudget(binding,{protocolVersion:1,workspaceId:grant.workspace_id,sourceId:grant.source_id,
+      issuer:value.issuer,subject:value.subject,principalPublicId:grant.principal_public_id,scopeType:grant.target_type,publicId:grant.target_public_id});
     if(!answer||!answer.ok)return null;
     const parsed=portalProofSchema.safeParse(answer.proof);if(!parsed.success)return null;const proof=parsed.data,now=Date.now();
     if(proof.workspaceId!==grant.workspace_id||proof.sourceId!==grant.source_id||proof.issuer!==value.issuer||proof.subject!==value.subject
@@ -164,7 +174,7 @@ async function livePortalReservation(db:D1Database,row:Row,value:NativeDirectory
       AND head.state='active' AND head.revision=? AND datetime(?)>datetime('now')`)
       .bind(grant.id,grant.revision,value.issuer,value.subject,grant.group_id,value.groupVersion+1,proof.authorityRevision,proof.verifiedUntil).first();
     return current&&await sharedProfileGrantSourceCurrent({...environment,OPS_DB:db},grant)?{proof,grant,requestSha256:fingerprint}:null;
-  }catch{return null;}finally{if(timeout!==undefined)clearTimeout(timeout);}
+  }catch{return null;}
 }
 function sameDestination(row: Row, connection: ProjectAlphaApiV2Connection): boolean {
   return row.application_id === connection.expectedApplicationId && row.expected_source_instance_id === connection.expectedSourceInstanceId
