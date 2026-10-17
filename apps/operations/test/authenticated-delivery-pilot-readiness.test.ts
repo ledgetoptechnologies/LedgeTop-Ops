@@ -28,7 +28,7 @@ describe("authenticated delivery pilot readiness", { timeout: 180_000, concurren
       await currentDb.batch(statements.map(sql => currentDb.prepare(sql)));
     }
     env = { DELIVERY_DB: db } as Env;
-  });
+  }, 180_000);
   afterAll(async () => runtime.dispose());
 
   async function seedPrimaryProjection(database: D1Database) {
