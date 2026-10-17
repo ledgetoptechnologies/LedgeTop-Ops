@@ -25,6 +25,10 @@ export async function bindNativePortalEligibility(env: PortalAuthorizationEnv, p
   const db = env.DELIVERY_DB.withSession('first-primary');
   const claimTablePresent = await clientAuthorityWorkspaceClaimTablePresent(db);
   const reenrollmentReady=await projectedReenrollmentSchemaReady(db);
+  // A replacement principal retains NULL identity_id when its revoked
+  // predecessor owns the historical unique slot. Repair only missing current
+  // authority, using the same exact eligibility witness as the repair writes.
+  const effectiveIdentity=reenrollmentReady?projectedPrincipalIdentitySql('p'):'p.identity_id';
   const candidateClaimGuard = claimTablePresent ? `AND NOT EXISTS (
     SELECT 1 FROM portal_client_authority_workspace_claims claim
     WHERE claim.workspace_id=p.workspace_id AND claim.state='active')` : '';
@@ -44,15 +48,15 @@ export async function bindNativePortalEligibility(env: PortalAuthorizationEnv, p
       ${reenrollmentReady?'':`AND ${noHistoricalProjectedIdentitySql('p')}`}
       AND NOT EXISTS(SELECT 1 FROM pa_portal_principals other WHERE other.workspace_id=p.workspace_id
         AND other.status='active' AND lower(other.email_hint)=lower(p.email_hint) AND other.public_id<>p.public_id)
-      AND (p.identity_id IS NULL OR NOT EXISTS(SELECT 1 FROM portal_v2_identity_eligibility_bindings e
+      AND (${effectiveIdentity} IS NULL OR NOT EXISTS(SELECT 1 FROM portal_v2_identity_eligibility_bindings e
         JOIN portal_v2_workspace_memberships m ON m.identity_id=e.identity_id AND m.workspace_id=e.workspace_id
-        WHERE e.identity_id=p.identity_id AND e.workspace_id=p.workspace_id AND e.principal_public_id=p.public_id
+        WHERE e.identity_id=${effectiveIdentity} AND e.workspace_id=p.workspace_id AND e.principal_public_id=p.public_id
           AND e.principal_source_version=p.source_version AND lower(e.verified_email)=lower(p.email_hint)
           AND m.status='active' AND m.revoked_at IS NULL AND m.source_version=p.source_version
           AND (m.expires_at IS NULL OR datetime(m.expires_at)>datetime('now')))
         OR EXISTS(SELECT 1 FROM pa_portal_entitlement_intents i WHERE i.workspace_id=p.workspace_id
           AND i.principal_public_id=p.public_id AND i.status='active' AND NOT EXISTS(SELECT 1 FROM portal_v2_entitlements e
-            WHERE e.id='pa-entitlement:'||i.workspace_id||':'||i.public_id AND e.identity_id=p.identity_id
+            WHERE e.id='pa-entitlement:'||i.workspace_id||':'||i.public_id AND e.identity_id=${effectiveIdentity}
               AND e.source_version=i.source_version AND e.status='active' AND e.revoked_at IS NULL)))
     ORDER BY p.workspace_id,p.public_id LIMIT 33`).bind(email,principal.issuer,principal.subject,principal.issuer,principal.subject,...(reenrollmentReady?[]:[principal.issuer,principal.subject])).all<{
       workspace_id:string;public_id:string;source_version:string;project_alpha_source_id:string;active_generation_id:string;source_sequence:number;

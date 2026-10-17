@@ -7,6 +7,7 @@ import {createClientPortalRouter} from '../src/worker/client-portal/routes';
 import {createWorkspaceInvitation} from '../src/worker/client-portal/workspace-memberships';
 import {acceptPortalWorkspaceInvitation} from '../src/worker/client-portal/workspace-v2';
 import {d1ClientPortalRepository} from '../src/worker/client-portal/repository';
+import {bindNativePortalEligibility} from '../src/worker/client-portal/native-portal-eligibility';
 import type {Env} from '../src/worker/types';
 import {splitD1MigrationStatements} from './helpers/d1-migrations';
 
@@ -98,6 +99,44 @@ describe('current PA principal replaces revoked eligibility without rewriting hi
   for(const [i,grant] of grants.entries())await ingest({...common,sourceSequence:5+i,kind:'event',deliveryId:`grant-${tag}-${i}`,event:{resource:'entitlement',action:'upsert',entitlement:{...grant,principalPublicId:current,sourceVersion:'new-grant-v1'}}});
   expect((await session()).status).toBe(200);
   expect((await session()).status).toBe(200);
+  if(sourceCase!=='legacy-primary'){
+   // The current principal cannot take its revoked predecessor's unique identity
+   // slot. A complete eligibility witness is already its effective identity.
+   expect(await db.prepare('SELECT identity_id FROM pa_portal_principals WHERE workspace_id=? AND public_id=?').bind(workspace,current).first('identity_id')).toBeNull();
+   const transitionAuthority=vi.fn(async()=>({ok:true}));
+   env.SHARED_PROFILE_PORTAL={transitionAuthority} as unknown as Env['SHARED_PROFILE_PORTAL'];
+   await db.prepare('UPDATE portal_shared_profile_runtime SET hooks_ready=1 WHERE id=1').run();
+   try{
+    const heads=await db.prepare('SELECT * FROM portal_shared_profile_authority_heads WHERE workspace_id=?').bind(workspace).all();
+    await Promise.all(Array.from({length:3},()=>bindNativePortalEligibility(env,actor,actor.email)));
+    expect(transitionAuthority).not.toHaveBeenCalled();
+    expect((await db.prepare('SELECT * FROM portal_shared_profile_authority_heads WHERE workspace_id=?').bind(workspace).all()).results).toEqual(heads.results);
+    // Missing/stale witnesses and a revoked derived entitlement still require
+    // the normal fenced repair, rather than a blanket NULL-principal skip.
+    await db.prepare('DELETE FROM portal_v2_identity_eligibility_bindings WHERE workspace_id=? AND principal_public_id=?').bind(workspace,current).run();
+    await bindNativePortalEligibility(env,actor,actor.email);
+    expect(transitionAuthority).toHaveBeenCalled();transitionAuthority.mockClear();
+    expect(await db.prepare('SELECT count(*) n FROM portal_v2_identity_eligibility_bindings WHERE workspace_id=? AND principal_public_id=?').bind(workspace,current).first('n')).toBe(1);
+    await db.prepare("UPDATE portal_v2_identity_eligibility_bindings SET principal_source_version='stale' WHERE workspace_id=? AND principal_public_id=?").bind(workspace,current).run();
+    await bindNativePortalEligibility(env,actor,actor.email);
+    expect(transitionAuthority).toHaveBeenCalled();transitionAuthority.mockClear();
+    expect(await db.prepare('SELECT principal_source_version FROM portal_v2_identity_eligibility_bindings WHERE workspace_id=? AND principal_public_id=?').bind(workspace,current).first('principal_source_version')).toBe('replacement-v1');
+    await db.prepare("UPDATE portal_v2_workspace_memberships SET status='suspended' WHERE workspace_id=? AND source_type='project_alpha'").bind(workspace).run();
+    await bindNativePortalEligibility(env,actor,actor.email);
+    expect(transitionAuthority).toHaveBeenCalled();transitionAuthority.mockClear();
+    expect(await db.prepare("SELECT count(*) n FROM portal_v2_workspace_memberships WHERE workspace_id=? AND source_type='project_alpha' AND status='active' AND revoked_at IS NULL").bind(workspace).first('n')).toBe(1);
+    await db.prepare("UPDATE portal_v2_entitlements SET status='revoked',revoked_at=datetime('now') WHERE workspace_id=? AND capability='directory.read'").bind(workspace).run();
+    await bindNativePortalEligibility(env,actor,actor.email);
+    expect(transitionAuthority).toHaveBeenCalled();transitionAuthority.mockClear();
+    expect(await db.prepare("SELECT count(*) n FROM portal_v2_entitlements WHERE workspace_id=? AND capability='directory.read' AND status='active' AND revoked_at IS NULL").bind(workspace).first('n')).toBe(1);
+    await bindNativePortalEligibility(env,{...actor,subject:'different-historical-identity'},actor.email);
+    expect(transitionAuthority).not.toHaveBeenCalled();
+    const identitiesBefore=await db.prepare('SELECT count(*) n FROM portal_v2_identities').first('n');
+    expect((await createClientPortalRouter({resolvePrincipal:async()=>({...actor,subject:'different-historical-identity'}),repository:d1ClientPortalRepository}).request('https://client.test/session',{},env)).status).toBe(403);
+    expect(await db.prepare('SELECT count(*) n FROM portal_v2_identities').first('n')).toBe(identitiesBefore);
+    expect(transitionAuthority).not.toHaveBeenCalled();
+   }finally{await db.prepare('UPDATE portal_shared_profile_runtime SET hooks_ready=0 WHERE id=1').run();}
+  }
   const list=await router.request('https://client.test/v2/workspaces',{},env);
   expect(list.status).toBe(200);expect(await list.json()).toMatchObject({workspaces:[expect.objectContaining({id:workspace})]});
   expect(await db.prepare('SELECT * FROM pa_portal_principals WHERE workspace_id=? AND public_id=?').bind(workspace,old).first()).toEqual(oldRow);
@@ -151,5 +190,5 @@ describe('current PA principal replaces revoked eligibility without rewriting hi
   expect(await db.prepare("SELECT count(*) n FROM portal_v2_workspace_memberships WHERE workspace_id=? AND source_type='project_alpha' AND status='active'").bind(workspace).first('n')).toBe(0);
   expect(await db.prepare("SELECT count(*) n FROM portal_v2_entitlements WHERE workspace_id=? AND source_type='project_alpha' AND status='active'").bind(workspace).first('n')).toBe(0);
   expect((await db.prepare('PRAGMA foreign_key_check').all()).results).toEqual([]);
- },120_000);
+ },180_000);
 });
