@@ -172,3 +172,26 @@ for(const scenario of ['bootstrap-positive','bootstrap-lost-response'] as const)
   if(writes.length===2)expect(writes[1]).toEqual(writes[0]);
   expect(JSON.parse(writes[0]!.body!)).toEqual({recordId:'record-one',mutationId:writes[0]!.mutationId});
 });
+test('unavailable portal setup explains the account limitation instead of implying the client is not set up',async({page})=>{
+  await render(page,'owner-setup-unavailable');
+  await expect(page.getByRole('heading',{name:'Portal profile editing',exact:true})).toBeVisible();
+  await expect(page.getByRole('status').filter({hasText:'Portal profile setup isn’t available from this account right now.'})).toBeVisible();
+  await expect(page.getByText('No eligible own-client portal identity is available yet.',{exact:true})).toHaveCount(0);
+  await expect(page.getByRole('button',{name:'Enable portal profile editing',exact:true})).toHaveCount(0);
+  expect(mutations(await calls(page))).toEqual([]);
+});
+test('unavailable portal setup keeps listed identities read-only with the same explanation',async({page})=>{
+  await render(page,'owner-setup-unavailable-listed');
+  await expect(page.getByText('Synthetic Shared Client',{exact:true})).toBeVisible();
+  await expect(page.getByRole('status').filter({hasText:'Portal profile setup isn’t available from this account right now.'})).toBeVisible();
+  await expect(page.getByRole('button',{name:'Enable portal profile editing',exact:true})).toBeDisabled();
+  expect(mutations(await calls(page))).toEqual([]);
+});
+test('available portal setup with no eligible identity says so without an account warning',async({page})=>{
+  await render(page,'owner-no-candidates');
+  await expect(page.getByRole('heading',{name:'Portal profile editing',exact:true})).toBeVisible();
+  await expect(page.getByText('No eligible own-client portal identity is available yet.',{exact:true})).toBeVisible();
+  await expect(page.getByText('Portal profile setup isn’t available from this account right now.',{exact:false})).toHaveCount(0);
+  await expect(page.getByRole('button',{name:'Enable portal profile editing',exact:true})).toHaveCount(0);
+  expect(mutations(await calls(page))).toEqual([]);
+});
