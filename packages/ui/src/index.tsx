@@ -5,12 +5,18 @@ export { CLOUDFLARE_ACCESS_LOGOUT_PATH } from "./access";
 export { AppDialogHost, requestChoice, requestText, type ChoiceRequest, type TextRequest } from "./app-dialogs";
 
 /** Generic Ledge Top mark, identical on every domain and product. */
-export const LT_MARK_SVG = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 40"><rect x="1" y="1" width="38" height="38" rx="9" fill="#151b22" stroke="#ee5007" stroke-width="2"/><text x="20" y="26" text-anchor="middle" font-family="Outfit,Inter,Segoe UI,Arial,sans-serif" font-weight="800" font-size="16" letter-spacing=".5" fill="#fff">LT</text></svg>';
+const LT_MARK_BOX = "238.5 226 776 776", LT_MARK_WHITE = "#f5f3ef", LT_MARK_ORANGE = "#ee5007";
+const LT_MARK_FRAME = "M273.5 655V370.5a99 99 0 0 1 99-99H605M979.5 583v274.5a99 99 0 0 1-99 99H650M605 956.5H372.5a99 99 0 0 1-99-99V703";
+const LT_MARK_ACCENT = "M650 271.5h230.5a99 99 0 0 1 99 99V538";
+const LT_MARK_LETTERS = "M365 370l93 92v244h135l66 94H418l-53-54zM503 453h349l54 88H780v332l-96-100V541H563z";
+
+/** Approved LT monogram (segmented frame, orange upper-right corner) as standalone SVG markup; transparent for dark surfaces. */
+export const LT_MARK_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="${LT_MARK_BOX}"><g fill="none" stroke-width="56"><path stroke="${LT_MARK_WHITE}" d="${LT_MARK_FRAME}"/><path stroke="${LT_MARK_ORANGE}" d="${LT_MARK_ACCENT}"/></g><path fill="${LT_MARK_WHITE}" d="${LT_MARK_LETTERS}"/></svg>`;
 
 export function LtMark({ className = "" }: { className?: string }) {
-  return <svg className={`ltds-mark ${className}`.trim()} viewBox="0 0 40 40" aria-hidden="true" focusable="false">
-    <rect x="1" y="1" width="38" height="38" rx="9" fill="#151b22" stroke="#ee5007" strokeWidth="2" />
-    <text x="20" y="26" textAnchor="middle" fontFamily="Outfit,Inter,Segoe UI,Arial,sans-serif" fontWeight="800" fontSize="16" letterSpacing=".5" fill="#fff">LT</text>
+  return <svg className={`ltds-mark ${className}`.trim()} viewBox={LT_MARK_BOX} aria-hidden="true" focusable="false">
+    <g fill="none" strokeWidth="56"><path stroke={LT_MARK_WHITE} d={LT_MARK_FRAME} /><path stroke={LT_MARK_ORANGE} d={LT_MARK_ACCENT} /></g>
+    <path fill={LT_MARK_WHITE} d={LT_MARK_LETTERS} />
   </svg>;
 }
 
