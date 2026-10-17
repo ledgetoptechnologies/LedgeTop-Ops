@@ -116,7 +116,7 @@ test("disconnect stays available when the upstream connection is unavailable, af
   const calls = await fixture(page, { discovery: { status: "review", candidates: [{ directorySourceId: staging, review: unavailable }] },
     status: () => unavailable });
   await page.goto("/administration");
-  await expect(card(page)).toContainText("Project Alpha did not confirm the connection details");
+  await expect(card(page)).toContainText("The configured client portal connection could not be confirmed. Nothing was changed.");
   await expect(card(page).getByRole("button", { name: "Connect client workspaces" })).toHaveCount(0);
   await card(page).getByRole("button", { name: "Disconnect" }).click();
   const confirm = page.getByRole("dialog", { name: "Disconnect client workspaces?" });

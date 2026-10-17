@@ -95,7 +95,7 @@ function reasonText(status: PortalDirectoryCorrespondenceStatus): string | null 
     case "changed": return "The Project Alpha connection changed since this link was approved. Review it before client workspaces use it again.";
     case "schema": return "The connection link needs a database update before it can be reviewed.";
     case "configuration": return "The two Project Alpha connections are not configured for a link yet.";
-    case "producer": return "Project Alpha did not confirm the connection details. Nothing was changed.";
+    case "producer": return "The configured client portal connection could not be confirmed. Nothing was changed.";
     case "authority": return "The client portal connection is not active, so a link can't be approved right now.";
     default: return null;
   }
