@@ -624,3 +624,28 @@ test("client source filter shows readable source names while keeping raw option 
   await expect(page).toHaveURL(/source=project-alpha%3Astaging$/);
   await expect.poll(() => requested.some(url => url.pathname === "/api/client-hub" && url.searchParams.get("source") === "project-alpha:staging")).toBe(true);
 });
+
+for (const width of [375, 1280]) test(`initial directory load shows decorative card skeletons that fit ${width}px and respect reduced motion`, async ({ page }) => {
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  await page.setViewportSize({ width, height: 900 });
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await mock(page, async route => { await gate; return route.fulfill({ json: { clients: [client("org-a", "Acme")], nextCursor: null, capabilities } }); });
+  await page.goto("/clients");
+  const skeletons = page.locator(".client-directory-grid .client-directory-skeleton");
+  await expect(skeletons).toHaveCount(3);
+  await expect(page.locator(".client-directory-status[role=status]")).toHaveText("Loading clients…");
+  await expect(page.locator(".client-directory-grid")).toHaveAttribute("aria-busy", "true");
+  expect(await skeletons.evaluateAll(nodes => nodes.every(node => node.getAttribute("aria-hidden") === "true"))).toBe(true);
+  await expect(page.getByRole("status").filter({ hasText: "Loading clients…" })).toHaveCount(1);
+  await expect(page.getByText("No clients yet")).toHaveCount(0);
+  expect(await page.evaluate(() => ({
+    fits: document.documentElement.scrollWidth <= window.innerWidth,
+    iterations: getComputedStyle(document.querySelector(".client-directory-skeleton .ltds-skeleton-bar")!).animationIterationCount,
+    columns: getComputedStyle(document.querySelector(".client-directory-grid")!).gridTemplateColumns.split(" ").length,
+  }))).toEqual({ fits: true, iterations: "1", columns: width < 600 ? 1 : expect.any(Number) });
+  release();
+  await expect(page.getByRole("link", { name: "Open Acme client workspace" })).toBeVisible();
+  await expect(skeletons).toHaveCount(0);
+  await expect(page.locator(".client-directory-grid")).toHaveAttribute("aria-busy", "false");
+});

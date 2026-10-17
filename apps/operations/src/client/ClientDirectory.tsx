@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
-import { Card, EmptyState, StatusPill } from "@ltds/ui";
+import { Card, EmptyState, Skeleton, StatusPill } from "@ltds/ui";
 import { api, ApiError } from "./api";
 import { sourceDisplayName } from "./source-label";
 import { NativeDirectoryProfileCreate } from "./NativeDirectoryProfileEditor";
@@ -339,6 +339,9 @@ export function ClientDirectory({ nativeDirectoryProfileWrites = false }: { nati
         onClick={() => void load(query, failedCursor.current)}>{staleCursor ? "Refresh clients" : "Retry clients"}</button>
     </Card>}
     <div className="client-directory-grid" aria-busy={Boolean(loading)}>
+      {loading === "initial" && !clients.length && Array.from({ length: 3 }, (_, index) =>
+        <div key={`skeleton-${index}`} className="client-directory-skeleton" aria-hidden="true">
+          <Skeleton variant="card" lines={3} label="Loading clients…" /></div>)}
       {clients.map(client => client.root_namespace === "review" ? <div className="client-directory-card" key={clientKey(client)}
         aria-label={`${client.display_name} reviewed Project Alpha record`}>
         <div className="client-directory-card-header"><small>Individual client · review only</small><ClientPortalStatusPill client={client} /></div>

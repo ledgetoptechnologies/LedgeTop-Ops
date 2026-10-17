@@ -1666,6 +1666,8 @@ tbody tr:last-child td { border: 0; }
 .client-directory-workspace button { min-height: 44px; }
 .client-directory-grid { display: grid; grid-template-columns: repeat(auto-fit,minmax(min(100%,17.5rem),1fr)); gap: 1rem; min-width: 0; }
 .client-directory-card { display: flex; flex-direction: column; gap: .85rem; min-width: 0; padding: 1.1rem; border: 1px solid var(--line); border-radius: 14px; background: #fff; color: var(--ink); text-decoration: none; overflow-wrap: anywhere; box-shadow: 0 2px 8px rgb(23 43 58 / .03); }
+.client-directory-skeleton { min-width: 0; }
+.client-directory-skeleton .ltds-skeleton-card { min-height: 10.5rem; padding: 1.1rem; border-radius: 14px; background: #fff; }
 .client-directory-card:hover { border-color: #b5c5d1; box-shadow: 0 6px 18px rgb(23 43 58 / .08); }
 .client-directory-card:focus-visible { outline: 3px solid var(--accent); outline-offset: 3px; }
 .client-directory-card h3 { margin: 0; font-size: 1.1rem; line-height: 1.4; }
