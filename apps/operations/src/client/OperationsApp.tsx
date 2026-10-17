@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent } from "react";
 import { createPortal } from "react-dom";
-import { type DeliveryLocationCollection, type Permission, type SessionUser, type ViewerAdminSessionGrant, type ViewerModelSummary, type ViewerPlatformOverview, type ViewerPublicShareSummary } from "@ltds/shared";
+import { projectAlphaSourceName, type DeliveryLocationCollection, type Permission, type SessionUser, type ViewerAdminSessionGrant, type ViewerModelSummary, type ViewerPlatformOverview, type ViewerPublicShareSummary } from "@ltds/shared";
 import { AccountMenu, Brand, Card, EmptyState, Loading, LtMark, Skeleton, StatusPill, openViewerShell, requestChoice, requestText, type TextRequest } from "@ltds/ui";
 import { FinanceSummaryPanel } from "./FinanceSummaryPanel";
 import { ApiError, api, setCsrf } from "./api";
@@ -4895,7 +4895,7 @@ function AuthenticatedDeliveryGrantPanel({ folder, canRevoke, creationEnabled, e
   return <section className="client-workspace-grant authenticated-grant-panel">
     {!embedded && <button type="button" className="button-ghost button-small" aria-expanded={expanded} disabled={nativeBusy} onClick={() => setExpanded(value => !value)}>{expanded ? "Close authenticated portal grants" : "Grant to Client Portal"}</button>}
     {expanded && <div className="client-workspace-grant-panel">
-      <div className="form-grid native-grant-connection"><label className="full">Portal connection<select value={mode} disabled={nativeBusy} onChange={event => setMode(event.target.value as "primary" | "native")}><option value="primary">Primary portal</option><option value="native">Connected workspace</option></select></label></div>
+      <div className="form-grid native-grant-connection"><label className="full">Portal connection<select value={mode} disabled={nativeBusy} onChange={event => setMode(event.target.value as "primary" | "native")}><option value="primary">{projectAlphaSourceName("project-alpha:primary")} portal</option><option value="native">Connected workspace</option></select></label></div>
       {mode === "native" ? <NativeDeliveryGrantPanel key={folder.id} folder={folder} creationEnabled={creationEnabled} onBusyChange={setNativeBusy} /> : <PrimaryAuthenticatedDeliveryGrantPanel key={folder.id} folder={folder} canRevoke={canRevoke} creationEnabled={creationEnabled} onBusyChange={setNativeBusy} />}
     </div>}
   </section>;
@@ -5062,7 +5062,7 @@ function PrimaryWorkspaceBindingSetup({folder,onLinked,onBusyChange}:{folder:{id
         const divisionLabel=divisions?.find(item=>item.divisionId===chosenDivision)?.label;
         setStatus(verified.length?(chosenDivision?"Select the exact client workspace below.":"Select the exact projected workspace below.")
           :chosenDivision?`No signed client workspace in ${divisionLabel??"this division"} matches. Project Alpha must publish that client before this folder can be linked.`
-            :"No signed primary Project Alpha workspace contains this folder's project or client root yet. Project Alpha must publish and activate that workspace before it can be linked.");})
+            :`No signed ${projectAlphaSourceName("project-alpha:primary")} Project Alpha workspace contains this folder's project or client root yet. Project Alpha must publish and activate that workspace before it can be linked.`);})
       .catch(caught=>{if((caught as Error).name!=="AbortError")setError((caught as Error).message||"Projected workspaces could not be loaded.");})
       .finally(()=>{if(!controller.signal.aborted)setLoading(false);});
   },[folder.id,divisions]);
@@ -5103,13 +5103,13 @@ function PrimaryWorkspaceBindingSetup({folder,onLinked,onBusyChange}:{folder:{id
   const resetChoice=()=>{setSelected(null);setReviewing(false);setTargets([]);setStatus("");setError("");};
   const ownerLabel=(item:PrimaryWorkspaceBindingTarget)=>item.ownershipMode==="explicit_workspace"
     ?(item.ownerScopeType==="organization"?`${item.rootLabel} · Whole organization`:`${item.rootLabel} · Client: ${item.ownerName}`)
-    :`${item.rootLabel} · ${item.projectName??`${item.ownerName} root`} · primary signed projection`;
+    :`${item.rootLabel} · ${item.projectName??`${item.ownerName} root`} · signed Project Alpha workspace`;
   const searchLabel=explicit?"Client workspace or client":"Projected workspace or project";
   return <section className="primary-workspace-binding-setup" aria-label="Link folder to a Client Workspace">
     <h4>Link this folder to a Client Workspace</h4>
     {explicit
       ?<p>This folder isn't part of a Project Alpha project. Choose the business division it belongs to, then the exact client workspace. Linking is routing metadata only: it does not create a login, membership, grant, or public link.</p>
-      :<p>This folder has no authenticated workspace link. Choose the exact workspace projected and signed by the primary Project Alpha connection. Linking is routing metadata only: it does not create a login, membership, grant, or public link.</p>}
+      :<p>This folder has no authenticated workspace link. Choose the exact workspace projected and signed by the {projectAlphaSourceName("project-alpha:primary")} Project Alpha connection. Linking is routing metadata only: it does not create a login, membership, grant, or public link.</p>}
     {divisions&&divisions.length>1&&<label>Business division<select value={divisionId} disabled={busy||uncertain}
       onChange={event=>{setDivisionId(event.target.value);setQuery("");resetChoice();}}>
       <option value="">Choose a division</option>
