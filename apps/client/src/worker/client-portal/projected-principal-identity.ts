@@ -38,11 +38,12 @@ export function projectedPrincipalActivationSql(principal:string,person:string):
     JOIN portal_v2_directory_generations gen ON gen.workspace_id=current_workspace.id AND gen.id=cp.active_generation_id AND gen.status='active' AND gen.complete=1
     JOIN portal_v2_directory_entities root ON root.workspace_id=current_workspace.id AND root.generation_id=gen.id AND root.active=1
       AND root.entity_type=current_workspace.root_type AND root.public_id=COALESCE(current_workspace.pa_organization_public_id,current_workspace.pa_client_public_id)
-    JOIN portal_v2_identity_eligibility_bindings eligible ON eligible.workspace_id=current_workspace.id
-      AND eligible.principal_public_id=${principal}.public_id AND eligible.identity_id=${person}.id
-      AND eligible.principal_source_version=${principal}.source_version AND lower(eligible.verified_email)=lower(${principal}.email_hint)
     WHERE current_workspace.id=${principal}.workspace_id AND current_workspace.status='active'
-      AND lower(${person}.verified_email)=lower(eligible.verified_email)
+      AND (${principal}.identity_id=${person}.id OR EXISTS(
+        SELECT 1 FROM portal_v2_identity_eligibility_bindings eligible WHERE eligible.workspace_id=current_workspace.id
+          AND eligible.principal_public_id=${principal}.public_id AND eligible.identity_id=${person}.id
+          AND eligible.principal_source_version=${principal}.source_version AND lower(eligible.verified_email)=lower(${principal}.email_hint)
+          AND lower(${person}.verified_email)=lower(eligible.verified_email)))
       AND NOT EXISTS(SELECT 1 FROM pa_portal_principals other WHERE other.workspace_id=current_workspace.id AND other.status='active' AND lower(other.email_hint)=lower(${principal}.email_hint) AND other.public_id<>${principal}.public_id)
       AND NOT EXISTS(SELECT 1 FROM portal_client_authority_workspace_claims claim WHERE claim.workspace_id=current_workspace.id AND claim.state='active')
       AND NOT EXISTS(SELECT 1 FROM portal_v2_root_access_policies policy WHERE policy.projection_source_id=current_workspace.project_alpha_source_id AND policy.root_type=current_workspace.root_type AND policy.root_public_id=root.public_id AND policy.state='revoked')

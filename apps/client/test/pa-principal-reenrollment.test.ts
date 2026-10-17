@@ -110,8 +110,9 @@ describe('current PA principal replaces revoked eligibility without rewriting hi
   expect(await db.prepare('SELECT count(*) n FROM portal_v2_identity_eligibility_bindings WHERE workspace_id=?').bind(workspace).first('n')).toBe(2);
   expect((await session()).status).toBe(200);
   await ingest({...common,sourceSequence:8,kind:'event',deliveryId:`refresh-${tag}`,event:{resource:'principal',action:'upsert',principal:{publicId:current,emailHint:actor.email,displayName:'Person',sourceVersion:'replacement-v2',active:true}}});
-  expect((await session()).status).toBe(200);
+  // Signed projection refresh must keep current authority without relying on a subsequent session repair.
   expect(await db.prepare("SELECT source_version FROM portal_v2_workspace_memberships WHERE workspace_id=? AND status='active'").bind(workspace).first('source_version')).toBe('replacement-v2');
+  expect((await session()).status).toBe(200);
   // A new signed generation must preserve the old revoked row, not silently
   // convert it to suspended or drop its historical eligibility witness.
   const latestGrants=grants.map(g=>({...g,principalPublicId:current,sourceVersion:'replacement-v2'}));

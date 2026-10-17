@@ -1262,11 +1262,12 @@ async function applyEvent(env: Env, delivery: EventDelivery, payloadHash: string
   }
   if (event.action === "tombstone" && event.resource === "principal") statements.push(db.prepare("UPDATE pa_portal_entitlement_intents SET status='suspended',updated_at=datetime('now') WHERE workspace_id=? AND principal_public_id=?").bind(delivery.workspaceId, event.publicId));
   statements.push(
-    ...authorizationRefreshStatements(db, delivery.workspaceId, delivery.sourceSequence, claimTablePresent,await projectedReenrollmentSchemaReady(db)),
     db.prepare(`UPDATE portal_v2_directory_checkpoints SET active_generation_id=?,source_sequence=?,updated_at=datetime('now') WHERE workspace_id=? AND source_sequence=?`)
       .bind(directoryGenerationId, delivery.sourceSequence, delivery.workspaceId, checkpoint.source_sequence),
     db.prepare("UPDATE pa_portal_projection_checkpoints SET source_sequence=?,updated_at=datetime('now') WHERE workspace_id=? AND source_generation=? AND source_sequence=?")
       .bind(delivery.sourceSequence, delivery.workspaceId, delivery.sourceGeneration, checkpoint.source_sequence),
+    // Authorization and reenrollment receipts must prove the new active event generation.
+    ...authorizationRefreshStatements(db, delivery.workspaceId, delivery.sourceSequence, claimTablePresent,await projectedReenrollmentSchemaReady(db)),
     auditStatement(db, delivery, event.action === "upsert" ? "event_upserted" : "event_tombstoned", { resource: event.resource }),
   );
   statements.unshift(receiptStatement(db, delivery, source, payloadHash, "event", { checkpoint, directoryGenerationId: current.directoryGenerationId }));
