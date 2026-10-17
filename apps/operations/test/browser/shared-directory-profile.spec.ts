@@ -195,3 +195,64 @@ test('available portal setup with no eligible identity says so without an accoun
   await expect(page.getByRole('button',{name:'Enable portal profile editing',exact:true})).toHaveCount(0);
   expect(mutations(await calls(page))).toEqual([]);
 });
+const revokeWrites=(observed:Call[])=>mutations(observed).filter(call=>call.path==='/api/client-hub/shared-profiles/portal-grants');
+test('enabled portal profile editing can be turned off only after an in-app confirmation with the exact current grant',async({page})=>{
+  const nativeDialogs:string[]=[];page.on('dialog',dialog=>{nativeDialogs.push(dialog.message());void dialog.dismiss();});
+  await render(page,'owner-revoke');
+  await expect(page.getByText('Profile editing enabled for verified sign-in.',{exact:true})).toBeVisible();
+  const turnOff=page.getByRole('button',{name:'Turn off portal profile editing',exact:true});
+  const confirmDialog=page.getByRole('dialog',{name:'Turn off portal profile editing?'});
+  await turnOff.click();
+  await expect(confirmDialog).toContainText('Synthetic Shared Client will no longer be able to edit their own profile from the client portal.');
+  await confirmDialog.getByRole('button',{name:'Cancel',exact:true}).click();
+  await expect(confirmDialog).toHaveCount(0);
+  await turnOff.click();await page.keyboard.press('Escape');await expect(confirmDialog).toHaveCount(0);
+  expect(revokeWrites(await calls(page))).toEqual([]);
+  await turnOff.click();await turnOff.dispatchEvent('click');await expect(confirmDialog).toHaveCount(1);
+  await confirmDialog.getByRole('button',{name:'Turn off editing',exact:true}).click();
+  await expect(page.getByText('Portal profile editing turned off.',{exact:true})).toBeVisible();
+  await expect(page.getByText('Portal profile editing permission is revoked.',{exact:true})).toBeVisible();
+  await expect(turnOff).toHaveCount(0);
+  const writes=revokeWrites(await calls(page));expect(writes).toHaveLength(1);
+  const body=JSON.parse(writes[0]!.body!);
+  expect(writes[0]!.mutationId).toBe(body.operationId);
+  expect(body).toEqual({operationId:body.operationId,id:'22222222-3333-4444-8555-666666666666',workspaceId:'workspace-one',sourceId:'project-alpha:primary',
+    recipientMode:'first_verified_identity',issuer:null,subject:null,principalPublicId:'principal-one',targetType:'client',targetPublicId:'target-one',
+    recordId:'record-one',groupId:'shared-one',expectedRevision:3,state:'revoked'});
+  expect(nativeDialogs).toEqual([]);
+});
+test('an unconfirmed turn-off retries the identical request without asking again',async({page})=>{
+  await render(page,'owner-revoke-lost-response');
+  await page.getByRole('button',{name:'Turn off portal profile editing',exact:true}).click();
+  await page.getByRole('dialog',{name:'Turn off portal profile editing?'}).getByRole('button',{name:'Turn off editing',exact:true}).click();
+  const retry=page.getByRole('button',{name:'Retry same turn-off',exact:true});
+  await expect(retry).toBeVisible();
+  await expect(page.getByRole('button',{name:'Save shared profile',exact:true})).toBeDisabled();
+  await retry.click();
+  await expect(page.getByRole('dialog',{name:'Turn off portal profile editing?'})).toHaveCount(0);
+  await expect(page.getByText('Portal profile editing turned off.',{exact:true})).toBeVisible();
+  const writes=revokeWrites(await calls(page));expect(writes).toHaveLength(2);
+  expect(writes[1]!.body).toBe(writes[0]!.body);expect(writes[1]!.mutationId).toBe(writes[0]!.mutationId);
+});
+test('a rejected turn-off releases the request and leaves editing enabled',async({page})=>{
+  await render(page,'owner-revoke-conflict');
+  await page.getByRole('button',{name:'Turn off portal profile editing',exact:true}).click();
+  await page.getByRole('dialog',{name:'Turn off portal profile editing?'}).getByRole('button',{name:'Turn off editing',exact:true}).click();
+  await expect(page.getByText(/Nothing was changed\. Refresh to review the current permission\./)).toBeVisible();
+  await expect(page.getByRole('button',{name:'Retry same turn-off',exact:true})).toHaveCount(0);
+  await expect(page.getByRole('button',{name:'Turn off portal profile editing',exact:true})).toBeEnabled();
+  await expect(page.getByText('Profile editing enabled for verified sign-in.',{exact:true})).toBeVisible();
+  expect(revokeWrites(await calls(page))).toHaveLength(1);
+});
+test('a paused portal permission can also be turned off explicitly',async({page})=>{
+  await render(page,'owner-revoke-suspended');
+  await expect(page.getByText(/^Paused for review/)).toBeVisible();
+  await page.getByRole('button',{name:'Turn off portal profile editing',exact:true}).click();
+  await page.getByRole('dialog',{name:'Turn off portal profile editing?'}).getByRole('button',{name:'Turn off editing',exact:true}).click();
+  await expect(page.getByText('Portal profile editing permission is revoked.',{exact:true})).toBeVisible();
+  expect(JSON.parse(revokeWrites(await calls(page))[0]!.body!)).toMatchObject({state:'revoked',expectedRevision:3});
+});
+test('turn-off is not offered while portal setup is unavailable from this account',async({page})=>{
+  await render(page,'owner-setup-unavailable-listed');
+  await expect(page.getByRole('button',{name:'Turn off portal profile editing',exact:true})).toHaveCount(0);
+});
