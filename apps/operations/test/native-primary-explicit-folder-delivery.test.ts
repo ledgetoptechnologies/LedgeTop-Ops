@@ -51,7 +51,7 @@ describe('native primary explicit workspace folder delivery',()=>{
    }});
    env.DELIVERY_DB=capture(db);
   }
-  opsEnv={OPS_DB:ops,DELIVERY_DB:db,CLIENT_PORTAL_HIERARCHY_V2_ENABLED:'true',CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED:'true',AUTHENTICATED_DELIVERY_GRANTS_ENABLED:'true',PROJECT_ACCESS_AUTHORITY_MUTATIONS_ENABLED:'true',AUTHENTICATED_DELIVERY_CREATION_ENABLED:'true'} as OpsEnv;
+  opsEnv={OPS_DB:ops,DELIVERY_DB:db,CLIENT_PORTAL_HIERARCHY_V2_ENABLED:'true',CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED:JSON.parse(readFileSync(new URL('../wrangler.jsonc',import.meta.url),'utf8')).vars.CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED,AUTHENTICATED_DELIVERY_GRANTS_ENABLED:'true',PROJECT_ACCESS_AUTHORITY_MUTATIONS_ENABLED:'true',AUTHENTICATED_DELIVERY_CREATION_ENABLED:'true'} as OpsEnv;
   await ops.batch([
    ops.prepare("INSERT INTO staff_users(id,email,display_name,access_subject,status) VALUES(?,?,?,?,'active')").bind(staff.id,staff.email,staff.displayName,staff.accessSubject),
    ops.prepare("INSERT INTO divisions(id,name,code,active) VALUES('explicit-division','Explicit division','EXPLICIT',1)"),
