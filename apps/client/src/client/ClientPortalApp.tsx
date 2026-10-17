@@ -106,6 +106,7 @@ import { ImageLocationMap } from "./ImageLocationMap";
 import { ServiceLibrary } from "./ServiceLibrary";
 import { canBeginRequest, RequestAvailabilityMessage, useRequestAvailability, type RequestAvailability } from "./RequestAvailability";
 import { RequestScopeBoundary } from "./RequestScopeBoundary";
+import { workspaceSwitcherLabels } from "./workspace-labels";
 import { LeaveFeedback, PortalFeedback } from "./PortalFeedback";
 import { PortalNotifications } from "./PortalNotifications";
 import { loadFeedbackFile, withPortalWorkspace } from "./feedback-api";
@@ -3056,6 +3057,7 @@ export function ClientPortalApp({
   const mapboxPublicToken = gate.data.resourceMode === "native" ? null : gate.data.mapboxPublicToken;
   const shellDisplayName = native ? native.workspace.displayName : account!.displayName;
   const workspaces = gate.data.workspaces ?? [];
+  const workspaceLabels = workspaceSwitcherLabels(workspaces);
   const selectedWorkspaceId = gate.data.selectedWorkspaceId ?? null;
   const switchWorkspace = async (workspaceId: string) => {
     if (workspaceId === selectedWorkspaceId) return;
@@ -3586,7 +3588,7 @@ export function ClientPortalApp({
               disabled={switchingWorkspace}
               onChange={event => void switchWorkspace(event.target.value)}
             >
-              {workspaces.map(workspace => <option key={workspace.id} value={workspace.id}>{workspace.displayName}{workspace.resourceMode === "native" ? ` — ${workspace.sourceId}` : ""}</option>)}
+              {workspaces.map(workspace => <option key={workspace.id} value={workspace.id}>{workspaceLabels.get(workspace.id) ?? workspace.displayName}</option>)}
             </select>
           </label>
         )}

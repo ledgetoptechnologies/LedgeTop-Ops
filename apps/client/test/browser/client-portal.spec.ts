@@ -603,6 +603,7 @@ test("native workspace branding stays generic Ledge Top for every source across 
 
     if (width >= 961) {
       await expect(page.getByRole("combobox", { name: "Client workspace" })).toBeVisible();
+      await expect(page.getByRole("combobox", { name: "Client workspace" }).locator("option")).toHaveText(["LTT Client", "LTDS Client"]);
       const labelStyles = await brand.locator("small").evaluate(element => {
         const style = getComputedStyle(element);
         return { whiteSpace: style.whiteSpace, textOverflow: style.textOverflow, overflow: style.overflow };

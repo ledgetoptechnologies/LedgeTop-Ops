@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import { Card, EmptyState, StatusPill } from "@ltds/ui";
 import { api, ApiError } from "./api";
+import { sourceDisplayName } from "./source-label";
 import { NativeDirectoryProfileCreate } from "./NativeDirectoryProfileEditor";
 
 export type ClientKind = "organization" | "standalone_client";
@@ -341,7 +342,7 @@ export function ClientDirectory({ nativeDirectoryProfileWrites = false }: { nati
       {clients.map(client => client.root_namespace === "review" ? <div className="client-directory-card" key={clientKey(client)}
         aria-label={`${client.display_name} reviewed Project Alpha record`}>
         <div className="client-directory-card-header"><small>Individual client · review only</small><ClientPortalStatusPill client={client} /></div>
-        <h3>{client.display_name}</h3>{client.source_name && <small>{client.source_name}</small>}
+        <h3>{client.display_name}</h3>{client.source_name && <small>{sourceDisplayName(client.source_name, client.source_id)}</small>}
         <p className="client-directory-status">Display-only staging projection. No client workspace or access has been created.</p>
       </div> : <a className="client-directory-card" key={clientKey(client)}
         href={detailPath(client, query)} aria-label={`Open ${client.business_party_name || client.display_name} client workspace`}>
@@ -350,7 +351,7 @@ export function ClientDirectory({ nativeDirectoryProfileWrites = false }: { nati
         <h3>{client.business_party_name || client.display_name}</h3>
         {client.business_party_id ? <><small>Linked customer · {number(client.business_party_member_count || 0)} business records</small>
           <p className="client-directory-status">Open each source workspace for its contacts, history and access.</p></>
-          : client.source_name && <small>{client.source_name}</small>}
+          : client.source_name && <small>{sourceDisplayName(client.source_name, client.source_id)}</small>}
         {!client.business_party_id && client.root_namespace === "portal" && <small>Portal workspace · business link pending</small>}
         <ClientBusinessUpdate value={client.meaningful_activity_at} asOf={activityAsOf} />
         {!client.business_party_id && <dl className="client-directory-card-counts">

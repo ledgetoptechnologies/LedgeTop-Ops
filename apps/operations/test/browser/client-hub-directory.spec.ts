@@ -186,7 +186,8 @@ test("matching business IDs from two producers retain source labels, contacts an
   await page.goto("/clients");
   await expect(page.locator(".client-directory-card")).toHaveCount(2);
   await expect(page.getByRole("link", { name: "Open Primary business client workspace" })).toContainText("Project Alpha");
-  await expect(page.getByRole("link", { name: "Open Secondary business client workspace" })).toContainText("project-alpha:secondary");
+  await expect(page.getByRole("link", { name: "Open Secondary business client workspace" })).toContainText("Ledge Top Technologies");
+  await expect(page.locator(".client-directory-grid")).not.toContainText("project-alpha:");
   await expect(page.getByRole("link", { name: "Open Secondary business client workspace" })).toContainText("Portal ready");
   await page.getByRole("link", { name: "Open Primary business client workspace" }).click();
   await expect(page.getByText("Primary contact", { exact: true })).toBeVisible();
@@ -194,6 +195,8 @@ test("matching business IDs from two producers retain source labels, contacts an
   await page.goBack();
   await page.getByRole("link", { name: "Open Secondary business client workspace" }).click();
   await expect(page.getByText("Secondary contact", { exact: true })).toBeVisible();
+  await expect(page.locator(".client-hub-title")).toContainText("Ledge Top Technologies");
+  await expect(page.locator(".client-hub-title")).not.toContainText("project-alpha:");
   await expect(page.getByText("Secondary portal login", { exact: true })).toBeVisible();
   await expect(page.getByText("secondary-login@example.test", { exact: true })).toBeVisible();
   await expect(page.getByText("Primary contact", { exact: true })).toHaveCount(0);
@@ -593,4 +596,17 @@ test("malformed client identifiers show an error instead of crashing or double-d
   }
   expect(requested.some(url => url.pathname.startsWith("/api/client-hub/"))).toBe(false);
   expect(errors).toEqual([]);
+});
+
+test("client detail header uses business names for raw Project Alpha source labels and keeps meaningful server names", async ({ page }) => {
+  await mock(page, route => route.fulfill({ json: { clients: [], nextCursor: null, capabilities } }));
+  await page.goto("/clients/sources/project-alpha%3Astaging/business/organizations/org-staging");
+  await expect(page.getByRole("heading", { name: "Hidden customer", exact: true })).toBeVisible();
+  await expect(page.locator(".client-hub-title")).toContainText("Project Alpha (staging)");
+  await expect(page.locator(".client-hub-title")).not.toContainText("project-alpha:");
+  await page.goto("/clients/sources/project-alpha%3Aprimary/business/organizations/org-primary");
+  await expect(page.getByRole("heading", { name: "Hidden customer", exact: true })).toBeVisible();
+  await expect(page.locator(".client-hub-title")).toContainText("Project Alpha");
+  await expect(page.locator(".client-hub-title")).not.toContainText("Ledge Top Drone Services");
+  await expect(page.locator(".client-hub-title")).not.toContainText("project-alpha:");
 });
