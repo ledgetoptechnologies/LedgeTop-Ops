@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { historicalDefaultOffProduction } from "./test-fixtures/historical-default-off-production.mjs";
 
 import { renderConfigs } from "./staging-config-scaffold.mjs";
 import {
@@ -40,7 +41,7 @@ function pair() {
   const sources = { delivery: rendered.delivery, operations: rendered.operations };
   const productionConfigs = Object.fromEntries(
     Object.entries(NATIVE_CLIENT_ONBOARDING_ACCEPTANCE_CONFIGS).map(([app, files]) => [
-      app, JSON.parse(fs.readFileSync(path.join(root, files.production), "utf8")),
+      app, historicalDefaultOffProduction(JSON.parse(fs.readFileSync(path.join(root, files.production), "utf8"))),
     ]),
   );
   return { sources, productionConfigs };

@@ -4,6 +4,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { handleProjectAlphaPortalProjectionRequest } from "../src/worker/project-alpha-portal";
 import { createClientPortalRouter } from "../src/worker/client-portal/routes";
 import { d1ClientPortalRepository } from "../src/worker/client-portal/repository";
+import { verifiedClientPrincipalFromAccessPayload } from "../src/worker/client-portal/access-identity";
 import { PORTAL_WORKSPACE_HEADER, resolveEffectivePortalWorkspaceContext } from "../src/worker/client-portal/workspace-v2";
 import type { VerifiedClientPrincipal } from "../src/worker/client-portal/types";
 import type { Env } from "../src/worker/types";
@@ -165,6 +166,51 @@ describe("primary signed-native first-login eligibility", () => {
       expect(generic.status).toBe(403);
       expect(legacyProjects).not.toHaveBeenCalled();
     } finally { legacyProjects.mockRestore(); }
+    await assertNoLegacyOrMail();
+  }, 60_000);
+
+  it("denies a valid Access identity with an unknown email without native authority or data side effects", async () => {
+    const { actor, workspaceId, rootId } = await project("unknown-verified-email");
+    for (const flag of flags) expect(env[flag]).toBe("true");
+    // The existing router seam starts after Access JWT verification. Exercise
+    // its real post-verification claim mapper; crypto failures have separate Access tests.
+    // This is local synthetic input, never a live token or login attempt.
+    const configuration = { issuer: actor.issuer, audiences: ["native-unknown-test-audience"] };
+    const unknown = verifiedClientPrincipalFromAccessPayload({ iss: actor.issuer,
+      aud: configuration.audiences[0], type: "app", sub: "unknown-access-subject",
+      email: "unmatched-verified@example.test", exp: Math.floor(Date.now() / 1000) + 300 }, configuration);
+    expect(unknown).not.toBeNull();
+    const footprint = async () => {
+      const tables = await db.prepare(`SELECT name FROM sqlite_master WHERE type='table'
+        AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '_cf_%' ORDER BY name`).all<{ name: string }>();
+      const results = await db.batch(tables.results.map(({ name }) =>
+        db.prepare('SELECT * FROM "' + name.replaceAll('"', '""') + '"')));
+      return results.map((result, index) => ({ table: tables.results[index]!.name,
+        rows: result.results.map(row => JSON.stringify(row)).sort() }));
+    };
+    const denyUnknown = async () => {
+      const before = await footprint();
+      for (const path of ["/session", "/v2/workspaces", `/v2/workspaces/${workspaceId}/hierarchy`]) {
+        const response = await request(unknown!, path);
+        expect(response.status).toBe(403);
+        expect(await response.text()).toBe("Client access is not provisioned");
+      }
+      // Exact full-schema rows include identities, memberships, eligibility,
+      // grants/entitlements, profile fences, projected data and all outboxes.
+      expect(await footprint()).toEqual(before);
+      expect(await db.prepare("SELECT count(*) n FROM portal_v2_identities WHERE issuer=? AND subject=?")
+        .bind(unknown!.issuer, unknown!.subject).first("n")).toBe(0);
+    };
+    await denyUnknown();
+    await assertNoBinding(workspaceId);
+    // Positive control uses the same signed projection and current flags.
+    expect((await request(actor, "/session")).status).toBe(200);
+    const hierarchy = await request(actor, `/v2/workspaces/${workspaceId}/hierarchy`);
+    expect(hierarchy.status).toBe(200);
+    expect(await hierarchy.json()).toMatchObject({ entries: [expect.objectContaining({ publicId: rootId })] });
+    // A known person's enrollment must not make their data visible to the
+    // unmatched human who has independently passed the Access boundary.
+    await denyUnknown();
     await assertNoLegacyOrMail();
   }, 60_000);
 

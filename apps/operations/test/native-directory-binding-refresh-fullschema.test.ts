@@ -353,7 +353,7 @@ for(const interruption of ['503','scheduler_deadline'] as const)it(`checkpoints 
     if(!interrupted&&inventoryCalls===2&&interruption==='503'){interrupted=true;return new Response(null,{status:503});}
     const response=await f.send(url,init),body=await response.json() as {resources:unknown[]};
     if(!cursor){
-      if(!interrupted&&interruption==='scheduler_deadline'){interrupted=true;now=started+20_001;}
+      if(!interrupted&&interruption==='scheduler_deadline'){interrupted=true;now=started+180_001;}
       return json({...body,resources:[{type:'organization',publicId:prefix,revision:'1',present:true,lastAction:'upsert',projectionSha256:'b'.repeat(64),binding:null}],nextCursor:checkpoint});
     }
     return json({...body,nextCursor:null});
