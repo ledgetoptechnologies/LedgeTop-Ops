@@ -1,3 +1,4 @@
+import {correspondenceGrantSql} from './portal-directory-correspondence';
 import { directoryMaterializationReadSource, projectAlphaDirectoryUnsettledReadSource }
   from "./project-alpha-directory-materialization-read-source";
 
@@ -218,13 +219,14 @@ function applies(grant: GrantRow, write: NormalizedWrite, scopes: readonly Nativ
 }
 async function portalWriteAuthority(db: DirectoryWriteD1, write: NormalizedWrite, actor: NativeDirectoryPortalWriterActor): Promise<boolean> {
   if (write.operation !== "update" || !validWriterActor(actor, true)) return false;
+  const bridgeColumns = await db.prepare("SELECT COUNT(*) FROM pragma_table_info('shared_profile_portal_grants') WHERE name IN('directory_source_id','correspondence_revision_id')").first<number>("COUNT(*)") === 2;
   const row = await db.prepare(`SELECT 1 ok FROM shared_profile_portal_grants grant_row
     JOIN shared_profile_portal_authority_heads head ON head.workspace_id=grant_row.workspace_id AND head.source_id=grant_row.source_id
     JOIN native_directory_shared_profiles profile ON profile.id=grant_row.group_id
     JOIN native_directory_shared_profile_members member ON member.group_id=profile.id AND member.record_id=?
     JOIN operations_directory_records record ON record.record_id=member.record_id AND record.record_kind=profile.kind
-    JOIN project_alpha_active_directory_mappings mapping ON mapping.record_id=grant_row.record_id AND mapping.source_id=grant_row.source_id
-    WHERE grant_row.id=? AND grant_row.state='active' AND grant_row.revision=? AND grant_row.issuer=? AND grant_row.subject=?
+    JOIN project_alpha_active_directory_mappings mapping ON mapping.record_id=grant_row.record_id AND mapping.source_id=${bridgeColumns?'COALESCE(grant_row.directory_source_id,grant_row.source_id)':'grant_row.source_id'}
+    WHERE ${bridgeColumns?correspondenceGrantSql('grant_row'):'1=1'} AND grant_row.id=? AND grant_row.state='active' AND grant_row.revision=? AND grant_row.issuer=? AND grant_row.subject=?
       AND grant_row.workspace_id=? AND grant_row.source_id=? AND grant_row.group_id=? AND profile.version=? AND profile.kind=?
       AND record.current_version=? AND json(profile.membership_json)=json(grant_row.group_membership_json)
       AND mapping.project_alpha_public_id=grant_row.target_public_id AND mapping.resource_type=grant_row.target_type

@@ -1,7 +1,7 @@
 import type { Env } from './types';
 import type { SharedProfilePortalProof,SharedProfilePortalUpdate,SharedProfilePortalResult } from '../../../../packages/shared/src/shared-business-profile';
 import { authorizedSharedProfilePortalGrants,portalUpdateSchema,prepareSharedProfilePortalWrite,stablePortalRequestFingerprint,
-  normalizePortalBusinessProfile,type SharedProfilePortalGrant } from './shared-profile-portal-authority';
+  normalizePortalBusinessProfile,sharedProfileGrantSourceCurrent,type SharedProfilePortalGrant } from './shared-profile-portal-authority';
 import { clientUpdateProfile,organizationProfile,updateDestinations,currentClientRelationship } from './native-directory-profile-routes';
 import { nativeDirectorySharedProfileDelivery } from './native-directory-shared-profile-routes';
 import { probeConfiguredProjectAlphaDirectoryClientContactProfile } from './project-alpha-directory-profile-api-v2';
@@ -65,12 +65,15 @@ export async function updateSharedPortalProfile(env:Env,raw:SharedProfilePortalU
         .bind(recordId).first<{record_kind:string;current_version:number}>();
       if(!record||record.record_kind!==grant.kind)return{ok:false,code:'conflict'};
       const destinations=await updateDestinations(env,grant.kind,recordId,record.current_version);if(!destinations)return{ok:false,code:'unavailable'};
+      if(recordId===grant.record_id&&!destinations.some(d=>d.sourceId===(grant.directory_source_id??grant.source_id)
+        &&d.sourceInstanceUUID===grant.source_instance_id&&d.applicationUUID===grant.application_id&&d.historyEpoch===grant.history_epoch_id))return{ok:false,code:'denied'};
       const base={operation:'update' as const,mutationId:await memberMutation(mutationId,recordId),recordId,expectedLocalVersion:record.current_version,actor,destinations};
       if(grant.kind==='client'){
         const relation=await currentClientRelationship(env.OPS_DB,recordId);if(!relation)return{ok:false,code:'unavailable'};
         writes.push({...base,kind:'client',profile:normalized as NativeDirectoryPortalUpdateWrite['profile'],relationship:{organizationRecordId:relation.organization_record_id,expectedRelationshipVersion:relation.relationship_version}} as NativeDirectoryPortalUpdateWrite);
       }else writes.push({...base,kind:'organization',profile:normalized as NativeDirectoryPortalUpdateWrite['profile']} as NativeDirectoryPortalUpdateWrite);
     }
+    if(!await sharedProfileGrantSourceCurrent(env,grant))return{ok:false,code:'denied'};
     const result=await writeNativeDirectorySharedPortalProfiles(env.OPS_DB,{groupId:grant.group_id,mutationId,expectedVersion,requestSha256,
       profile:normalized,writes,authorityFence:prepared.statement},env.PROJECT_ALPHA_DIRECTORY_RELATIONSHIP_GENERATION_RECOVERY_ENABLED==='true');
     if(result.status!=='written')return{ok:false,code:result.status==='conflict'?'conflict':'unavailable'};
