@@ -1,3 +1,4 @@
+import {projectedPrincipalIdentitySql} from './projected-principal-identity';
 import type { PortalAuthorizationEnv as Env } from './workspace-v2';
 import type {Env as ClientEnv} from '../types';
 import { blockBusinessProfileWorkspace,businessProfileAuthorityBatch } from './business-profile-fences';
@@ -129,7 +130,7 @@ async function secondaryManagerContext(env:Env,principal:VerifiedClientPrincipal
     JOIN portal_v2_workspaces workspace ON workspace.id=membership.workspace_id AND workspace.status='active'
       AND workspace.legacy_account_id IS NULL AND workspace.project_alpha_source_id<>'project-alpha:primary'
     JOIN pa_portal_workspace_sources owner ON owner.workspace_id=workspace.id AND owner.projection_source_id=workspace.project_alpha_source_id
-    JOIN pa_portal_principals projected ON projected.workspace_id=workspace.id AND projected.identity_id=identity.id
+    JOIN pa_portal_principals projected ON projected.workspace_id=workspace.id AND ${projectedPrincipalIdentitySql('projected')}=identity.id
       AND projected.status='active' AND projected.source_version=membership.source_version
       AND lower(projected.email_hint)=lower(identity.verified_email)
     JOIN portal_v2_directory_checkpoints checkpoint ON checkpoint.workspace_id=workspace.id
@@ -214,7 +215,7 @@ function secondaryFreshFence(database:D1Database,context:SecondaryManagerContext
         AND root.entity_type=? AND root.public_id=? AND root.active=1
       JOIN portal_v2_identities identity ON identity.id=? AND identity.issuer=? AND identity.subject=?
         AND lower(identity.verified_email)=? AND identity.status='active' AND identity.revoked_at IS NULL
-      JOIN pa_portal_principals projected ON projected.workspace_id=workspace.id AND projected.identity_id=identity.id
+      JOIN pa_portal_principals projected ON projected.workspace_id=workspace.id AND ${projectedPrincipalIdentitySql('projected')}=identity.id
         AND projected.status='active' AND projected.source_version=? AND lower(projected.email_hint)=lower(identity.verified_email)
       JOIN portal_v2_workspace_memberships membership ON membership.workspace_id=workspace.id AND membership.identity_id=identity.id
         AND membership.source_type='project_alpha' AND membership.source_version=? AND membership.status='active'
@@ -267,7 +268,7 @@ function unlimitedWorkspaceCapabilitySql(capability: "workspace.view" | "member.
       AND effective_membership.status='active' AND effective_membership.revoked_at IS NULL
       AND effective_membership.expires_at IS NULL
       ${principalsReady?`AND (effective_membership.source_type<>'project_alpha' OR EXISTS(SELECT 1 FROM pa_portal_principals current_principal
-        WHERE current_principal.workspace_id=effective_membership.workspace_id AND current_principal.identity_id=effective_membership.identity_id
+        WHERE current_principal.workspace_id=effective_membership.workspace_id AND ${projectedPrincipalIdentitySql('current_principal')}=effective_membership.identity_id
           AND current_principal.status='active' AND current_principal.source_version=effective_membership.source_version))`:''}
       AND effective_allow.capability='${capability}' AND effective_allow.effect='allow'
       AND effective_allow.scope_type='workspace' AND effective_allow.scope_public_id=effective_membership.workspace_id

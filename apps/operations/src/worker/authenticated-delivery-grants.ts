@@ -1,3 +1,4 @@
+import { projectedPrincipalIdentitySql } from '../../../../packages/shared/src/projected-principal-identity';
 import { folderOwnerEntityType,folderOwnerEntityTypeSql } from '../../../../packages/shared/src/folder-owner-entity';
 import { HTTPException } from "hono/http-exception";
 import { projectAccessCapacitySql } from '../../../client/src/worker/client-portal/project-access-capacity';
@@ -245,9 +246,9 @@ export async function authenticatedDeliveryGrantNotificationRecipientUsable(
 ):Promise<boolean>{
   if(!target.active)return false;
   const person=await deliveryDb(env).prepare(`SELECT identity.issuer,identity.subject,identity.verified_email email
-    FROM pa_portal_principals principal JOIN portal_v2_identities identity ON identity.id=principal.identity_id
+    FROM pa_portal_principals principal JOIN portal_v2_identities identity ON identity.id=${projectedPrincipalIdentitySql('principal')}
     JOIN portal_v2_workspace_memberships membership ON membership.workspace_id=principal.workspace_id AND membership.identity_id=identity.id
-    WHERE principal.workspace_id=? AND principal.public_id=? AND principal.identity_id=? AND principal.source_version=?
+    WHERE principal.workspace_id=? AND principal.public_id=? AND ${projectedPrincipalIdentitySql('principal')}=? AND principal.source_version=?
       AND principal.status='active' AND identity.status='active' AND identity.revoked_at IS NULL AND identity.verified_email IS NOT NULL
       AND membership.status='active' AND membership.revoked_at IS NULL
       AND (membership.expires_at IS NULL OR datetime(membership.expires_at)>datetime('now'))`)
@@ -412,7 +413,7 @@ async function audience(env: Env, context: BindingContext, type: AuthenticatedGr
   if (type === "principal") {
     const row = await db.prepare(`SELECT principal.source_version,principal.display_name
       FROM pa_portal_principals principal JOIN portal_v2_identities identity
-        ON identity.id=principal.identity_id AND identity.status='active' AND identity.revoked_at IS NULL
+        ON identity.id=${projectedPrincipalIdentitySql('principal')} AND identity.status='active' AND identity.revoked_at IS NULL
       JOIN portal_v2_workspace_memberships membership
         ON membership.workspace_id=principal.workspace_id AND membership.identity_id=identity.id
         AND membership.status='active' AND membership.revoked_at IS NULL
@@ -441,9 +442,9 @@ async function recipients(env: Env, context: BindingContext, type: Authenticated
   // Only an exact-principal grant snapshots a principal/identity binding.
   if (type !== "principal") return [];
   const db = deliveryDb(env);
-  const principals = await db.prepare(`SELECT principal.public_id,principal.identity_id,principal.source_version
+  const principals = await db.prepare(`SELECT principal.public_id,${projectedPrincipalIdentitySql('principal')} AS identity_id,principal.source_version
     FROM pa_portal_principals principal
-    JOIN portal_v2_identities identity ON identity.id=principal.identity_id
+    JOIN portal_v2_identities identity ON identity.id=${projectedPrincipalIdentitySql('principal')}
       AND identity.status='active' AND identity.revoked_at IS NULL
     JOIN portal_v2_workspace_memberships membership
       ON membership.workspace_id=principal.workspace_id AND membership.identity_id=identity.id
@@ -575,7 +576,7 @@ export async function searchAuthenticatedDeliveryGrantAudiences(env: Env, princi
       .all<{ entity_type: Exclude<AuthenticatedGrantAudienceType, "principal">; public_id: string; display_name: string }>(),
     db.prepare(`${ancestrySql()} SELECT principal.public_id,principal.display_name,identity.verified_email
       FROM pa_portal_principals principal JOIN portal_v2_identities identity
-        ON identity.id=principal.identity_id AND identity.status='active' AND identity.revoked_at IS NULL
+        ON identity.id=${projectedPrincipalIdentitySql('principal')} AND identity.status='active' AND identity.revoked_at IS NULL
       JOIN portal_v2_workspace_memberships membership
         ON membership.workspace_id=principal.workspace_id AND membership.identity_id=identity.id
         AND membership.status='active' AND membership.revoked_at IS NULL

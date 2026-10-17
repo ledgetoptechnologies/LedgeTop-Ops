@@ -1,3 +1,4 @@
+import {projectedPrincipalIdentitySql} from './projected-principal-identity';
 import { HTTPException } from 'hono/http-exception';
 import { z } from 'zod';
 import type { ClientFeedbackTargetInput } from '@ltds/shared';
@@ -112,7 +113,7 @@ function authorizationGuard(env:Env,context:NativePortalReadContext,principal:Ve
     if(grant.audience_type==='principal'){
       parts.push(`EXISTS(SELECT 1 FROM portal_v2_authenticated_delivery_grant_recipients recipient
         JOIN pa_portal_principals principal_record ON principal_record.workspace_id=recipient.workspace_id
-          AND principal_record.public_id=recipient.principal_public_id AND principal_record.identity_id=recipient.identity_id
+          AND principal_record.public_id=recipient.principal_public_id AND ${projectedPrincipalIdentitySql('principal_record')}=recipient.identity_id
           AND principal_record.status='active' AND principal_record.source_version=recipient.principal_source_version
         WHERE recipient.workspace_id=? AND recipient.identity_id=? AND recipient.grant_id=?
           AND recipient.principal_public_id=? AND recipient.principal_source_version=?)`);

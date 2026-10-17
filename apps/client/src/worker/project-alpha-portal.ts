@@ -1,3 +1,4 @@
+import {projectedPrincipalIdentitySql,projectedMembershipReenrollmentReceipt,projectedPrincipalActivationSql} from './client-portal/projected-principal-identity';
 import { createRemoteJWKSet, jwtVerify, type JWTVerifyGetKey } from "jose";
 import type { Env } from "./types";
 import { blockBusinessProfileWorkspace,businessProfileAuthorityBatch } from './client-portal/business-profile-fences';
@@ -785,22 +786,23 @@ function authorizationRefreshStatements(db: PortalAuthorityDatabase, workspaceId
     db.prepare(`UPDATE portal_v2_workspace_memberships SET status='suspended',updated_at=datetime('now')
       WHERE workspace_id=? AND source_type='project_alpha'
         ${membershipClaimGuard}`).bind(workspaceId),
+    projectedMembershipReenrollmentReceipt(db,workspaceId),
     db.prepare(`INSERT INTO portal_v2_workspace_memberships(id,workspace_id,identity_id,source_type,status,source_version)
-      SELECT 'pa-membership:' || p.workspace_id || ':' || p.public_id,p.workspace_id,p.identity_id,'project_alpha','active',p.source_version
-      FROM pa_portal_principals p JOIN portal_v2_identities i ON i.id=p.identity_id AND i.status='active' AND i.revoked_at IS NULL AND lower(i.verified_email)=lower(p.email_hint)
-      WHERE p.workspace_id=? AND p.status='active' AND p.identity_id IS NOT NULL
-        ${principalClaimGuard}
+      SELECT 'pa-membership:' || p.workspace_id || ':' || p.public_id,p.workspace_id,${projectedPrincipalIdentitySql('p')},'project_alpha','active',p.source_version
+      FROM pa_portal_principals p JOIN portal_v2_identities i ON i.id=${projectedPrincipalIdentitySql('p')} AND i.status='active' AND i.revoked_at IS NULL AND lower(i.verified_email)=lower(p.email_hint)
+      WHERE p.workspace_id=? AND p.status='active' AND ${projectedPrincipalIdentitySql('p')} IS NOT NULL
+        ${principalClaimGuard} AND ${projectedPrincipalActivationSql('p','i')}
       ON CONFLICT(workspace_id,identity_id) DO UPDATE SET status='active',source_version=excluded.source_version,revoked_at=NULL,updated_at=datetime('now') WHERE portal_v2_workspace_memberships.source_type='project_alpha'`).bind(workspaceId),
     db.prepare(`UPDATE portal_v2_entitlements SET status='revoked',revoked_at=datetime('now')
       WHERE workspace_id=? AND source_type='project_alpha' AND status<>'revoked'
         ${entitlementClaimGuard}`).bind(workspaceId),
     db.prepare(`INSERT INTO portal_v2_entitlements
       (id,workspace_id,identity_id,capability,effect,scope_type,scope_public_id,entitlement_version,source_type,source_version,status,valid_from,expires_at)
-      SELECT 'pa-entitlement:' || intent.workspace_id || ':' || intent.public_id,intent.workspace_id,principal.identity_id,intent.capability,intent.effect,intent.scope_type,intent.scope_public_id,?,'project_alpha',intent.source_version,'active',intent.valid_from,intent.expires_at
+      SELECT 'pa-entitlement:' || intent.workspace_id || ':' || intent.public_id,intent.workspace_id,${projectedPrincipalIdentitySql('principal')},intent.capability,intent.effect,intent.scope_type,intent.scope_public_id,?,'project_alpha',intent.source_version,'active',intent.valid_from,intent.expires_at
       FROM pa_portal_entitlement_intents intent
-      JOIN pa_portal_principals principal ON principal.workspace_id=intent.workspace_id AND principal.public_id=intent.principal_public_id AND principal.status='active' AND principal.identity_id IS NOT NULL
-      JOIN portal_v2_identities identity ON identity.id=principal.identity_id AND identity.status='active' AND identity.revoked_at IS NULL AND lower(identity.verified_email)=lower(principal.email_hint)
-      JOIN portal_v2_workspace_memberships membership ON membership.workspace_id=intent.workspace_id AND membership.identity_id=principal.identity_id AND membership.status='active' AND membership.source_type='project_alpha'
+      JOIN pa_portal_principals principal ON principal.workspace_id=intent.workspace_id AND principal.public_id=intent.principal_public_id AND principal.status='active' AND ${projectedPrincipalIdentitySql('principal')} IS NOT NULL
+      JOIN portal_v2_identities identity ON identity.id=${projectedPrincipalIdentitySql('principal')} AND identity.status='active' AND identity.revoked_at IS NULL AND lower(identity.verified_email)=lower(principal.email_hint)
+      JOIN portal_v2_workspace_memberships membership ON membership.workspace_id=intent.workspace_id AND membership.identity_id=${projectedPrincipalIdentitySql('principal')} AND membership.status='active' AND membership.source_type='project_alpha'
       WHERE intent.workspace_id=? AND intent.status='active'
         ${intentClaimGuard}
       ON CONFLICT(id) DO UPDATE SET identity_id=excluded.identity_id,capability=excluded.capability,effect=excluded.effect,scope_type=excluded.scope_type,scope_public_id=excluded.scope_public_id,entitlement_version=excluded.entitlement_version,source_version=excluded.source_version,status='active',valid_from=excluded.valid_from,expires_at=excluded.expires_at,revoked_at=NULL`).bind(sourceSequence, workspaceId),
@@ -878,7 +880,7 @@ async function activateSnapshot(env: Env, delivery: SnapshotActivateDelivery, pa
     db.prepare(`INSERT INTO portal_v2_directory_checkpoints(workspace_id,active_generation_id,source_sequence) VALUES(?,?,?)
       ON CONFLICT(workspace_id) DO UPDATE SET active_generation_id=excluded.active_generation_id,source_sequence=excluded.source_sequence,updated_at=datetime('now')`)
       .bind(workspace.publicId, directoryGenerationId, delivery.sourceSequence),
-    db.prepare("UPDATE pa_portal_principals SET status='suspended',updated_at=datetime('now') WHERE workspace_id=?").bind(workspace.publicId),
+    db.prepare("UPDATE pa_portal_principals SET status='suspended',updated_at=datetime('now') WHERE workspace_id=? AND status<>'revoked'").bind(workspace.publicId),
     db.prepare(`INSERT INTO pa_portal_principals(workspace_id,public_id,email_hint,display_name,source_version,status)
       SELECT ?,public_id,email_hint,display_name,source_version,CASE active WHEN 1 THEN 'active' ELSE 'suspended' END FROM pa_portal_projection_principals WHERE generation_id=?
       ON CONFLICT(workspace_id,public_id) DO UPDATE SET email_hint=excluded.email_hint,display_name=excluded.display_name,source_version=excluded.source_version,status=excluded.status,updated_at=datetime('now')`)

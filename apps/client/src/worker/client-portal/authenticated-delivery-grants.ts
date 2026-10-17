@@ -1,3 +1,4 @@
+import { projectedPrincipalIdentitySql } from './projected-principal-identity';
 import { folderOwnerEntityType,folderOwnerEntityTypeSql } from '../../../../../packages/shared/src/folder-owner-entity';
 import type { Env as ClientEnv } from "../types";
 import { primaryWorkspaceAccount } from "./project-alpha-source";
@@ -96,7 +97,7 @@ async function candidates(
     LEFT JOIN pa_portal_principals principal_record
       ON principal_record.workspace_id=recipient.workspace_id
       AND principal_record.public_id=recipient.principal_public_id
-      AND principal_record.identity_id=recipient.identity_id AND principal_record.status='active'
+      AND ${projectedPrincipalIdentitySql('principal_record')}=recipient.identity_id AND principal_record.status='active'
       AND principal_record.source_version=recipient.principal_source_version
     WHERE identity.issuer=? AND identity.subject=? AND identity.status='active' AND identity.revoked_at IS NULL
       AND EXISTS(SELECT 1 FROM portal_v2_workspaces workspace WHERE workspace.id=membership.workspace_id
@@ -429,7 +430,7 @@ export async function listAuthorizedAuthenticatedDeliveryPrefixes(
       LEFT JOIN pa_portal_principals principal_record
         ON principal_record.workspace_id=recipient.workspace_id
         AND principal_record.public_id=recipient.principal_public_id
-        AND principal_record.identity_id=recipient.identity_id AND principal_record.status='active'
+        AND ${projectedPrincipalIdentitySql('principal_record')}=recipient.identity_id AND principal_record.status='active'
         AND principal_record.source_version=recipient.principal_source_version
       WHERE identity.issuer=? AND identity.subject=? AND identity.status='active' AND identity.revoked_at IS NULL
         AND ${primaryReceiptSql}

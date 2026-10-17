@@ -1,3 +1,4 @@
+import {projectedPrincipalIdentitySql} from './projected-principal-identity';
 import { portalProjectionSourceGuard, type PortalProjectionWriteProof } from "../project-alpha-portal-authority";
 import { sha256 } from "../security";
 import type { Env } from "../types";
@@ -228,7 +229,7 @@ export function nativeRequestMutationGuardSql(proof: NativeRequestAuthorityProof
         AND (membership.source_type<>'project_alpha' OR EXISTS(
           SELECT 1 FROM pa_portal_principals current_principal
           WHERE current_principal.workspace_id=workspace.id
-            AND current_principal.identity_id=identity.id
+            AND ${projectedPrincipalIdentitySql('current_principal')}=identity.id
             AND current_principal.status='active'
             AND current_principal.source_version=membership.source_version
             AND lower(current_principal.email_hint)=lower(identity.verified_email)))
