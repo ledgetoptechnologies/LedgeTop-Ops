@@ -90,7 +90,8 @@ function SharedDirectoryProfileEditBound({ kind, recordId, allowPreparedAttempt 
   const [selected, setSelected] = useState(""), [preview, setPreview] = useState<Preview | null>(null);
   const [attempt, setAttempt] = useState<FrozenRequest | null>(null);
   const [ownerAttempt,setOwnerAttempt]=useState<{kind:'bootstrap'|'grant'|'revoke';key:string;request:FrozenRequest;expectedRevision?:number}|null>(null);
-  const confirmingRevoke=useRef(false);
+  const confirmingRevoke=useRef(false),mounted=useRef(true);
+  useEffect(()=>{mounted.current=true;return()=>{mounted.current=false;};},[]);
   const load = async () => {
     const value = await api<ProfileResponse>(`${ENDPOINT}/records/${encodeURIComponent(recordId)}`);
     if (!value || !Object.hasOwn(value, "sharedProfile") || (value.sharedProfile !== null && !validProfile(value.sharedProfile, kind, recordId)))
@@ -201,7 +202,8 @@ function SharedDirectoryProfileEditBound({ kind, recordId, allowPreparedAttempt 
       const choice=await requestChoice({title:'Turn off portal profile editing?',
         description:`${candidate.clientName} will no longer be able to edit their own profile from the client portal. Their profile, records and other access are unchanged.`,
         choices:[{value:'revoke',label:'Turn off editing',tone:'danger'}]}).finally(()=>{confirmingRevoke.current=false;});
-      if(choice!=='revoke')return;
+      // The editor is keyed by record, so a context change unmounts it; never submit from an obsolete editor.
+      if(choice!=='revoke'||!mounted.current)return;
     }
     const expectedRevision=frozen?.expectedRevision??candidate.currentGrantRevision!,operationId=frozen?.request.mutationId??crypto.randomUUID();
     const current=frozen??{kind:'revoke' as const,key,expectedRevision,request:{path:`${ENDPOINT}/portal-grants`,method:'POST' as const,mutationId:operationId,
@@ -213,7 +215,7 @@ function SharedDirectoryProfileEditBound({ kind, recordId, allowPreparedAttempt 
     try{const result=await transmit(current.request) as {ok?:boolean;revision?:number};if(result?.ok!==true||result.revision!==expectedRevision+1)throw new Error('The portal editing change could not be verified.');
       await load();setOwnerAttempt(null);setSuccess('Portal profile editing turned off.');}
     catch(caught){
-      if(caught instanceof ApiError&&caught.status>=400&&caught.status<500&&caught.status!==429){setOwnerAttempt(null);setError(`${errorText(caught)} Nothing was changed. Refresh to review the current permission.`);}
+      if(caught instanceof ApiError&&caught.status>=400&&caught.status<500&&caught.status!==429){setOwnerAttempt(null);setError(`${errorText(caught)} The current portal editing permission could not be confirmed. Refresh to review it.`);}
       else setError(`${errorText(caught)} Retry keeps the same turn-off request.`);}
     finally{setBusy(false);}
   };

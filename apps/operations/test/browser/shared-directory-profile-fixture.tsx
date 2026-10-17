@@ -8,7 +8,7 @@ export type Scenario = "update-lost-response" | "update-reload-failure" | "pendi
   | "stale" | "merge" | "merge-denied" | "merge-differences" | "merge-lost-response" | "merge-malformed"
   | "owner-positive" | "owner-lost-response" | "bootstrap-positive" | "bootstrap-lost-response"
   | "owner-alias" | "owner-half-pair" | "owner-suspended" | "owner-setup-unavailable" | "owner-setup-unavailable-listed" | "owner-no-candidates"
-  | "owner-revoke" | "owner-revoke-lost-response" | "owner-revoke-conflict" | "owner-revoke-suspended";
+  | "owner-revoke" | "owner-revoke-lost-response" | "owner-revoke-conflict" | "owner-revoke-suspended" | "owner-revoke-lost-then-conflict";
 export type Call = { path: string; method: string; mutationId: string | null; body: string | null };
 const fixtureWindow = window as Window & { sharedProfileScenario?: Scenario; sharedProfileCalls?: Call[] };
 const scenario = fixtureWindow.sharedProfileScenario ?? "pending", calls: Call[] = [];
@@ -72,6 +72,7 @@ window.fetch = async (input, init) => {
     if(revokeScenario){
       if(scenario==='owner-revoke-lost-response'&&ownerWrites===1){ownerRevoked=true;return Response.json({error:'Portal permission response lost after commit'},{status:503});}
       if(scenario==='owner-revoke-conflict')return Response.json({ok:false},{status:409});
+      if(scenario==='owner-revoke-lost-then-conflict'){if(ownerWrites===1){ownerRevoked=true;return Response.json({error:'Portal permission response lost after commit'},{status:503});}return Response.json({error:'Portal permission changed'},{status:409});}
       ownerRevoked=true;return Response.json({ok:true,revision:4});
     }
     ownerEnabled=true;
@@ -86,4 +87,7 @@ window.fetch = async (input, init) => {
       scopes: [{ businessAreaId: "area-one", divisionId: null }], editing: { available: true, reason: null } });
   return Response.json({ error: "Unexpected fixture request" }, { status: 404 });
 };
-createRoot(document.getElementById("root")!).render(<><SharedDirectoryProfileEdit kind={isClient?'client':"organization"} recordId="record-one" /><AppDialogHost /></>);
+const root=createRoot(document.getElementById("root")!);
+const mount=(recordId:string|null)=>root.render(<>{recordId&&<SharedDirectoryProfileEdit kind={isClient?'client':"organization"} recordId={recordId} />}<AppDialogHost /></>);
+(window as Window&{sharedProfileMount?:typeof mount}).sharedProfileMount=mount;
+mount("record-one");

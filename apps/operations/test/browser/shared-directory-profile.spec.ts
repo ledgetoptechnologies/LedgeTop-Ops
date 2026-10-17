@@ -238,7 +238,7 @@ test('a rejected turn-off releases the request and leaves editing enabled',async
   await render(page,'owner-revoke-conflict');
   await page.getByRole('button',{name:'Turn off portal profile editing',exact:true}).click();
   await page.getByRole('dialog',{name:'Turn off portal profile editing?'}).getByRole('button',{name:'Turn off editing',exact:true}).click();
-  await expect(page.getByText(/Nothing was changed\. Refresh to review the current permission\./)).toBeVisible();
+  await expect(page.getByText(/The current portal editing permission could not be confirmed\. Refresh to review it\./)).toBeVisible();
   await expect(page.getByRole('button',{name:'Retry same turn-off',exact:true})).toHaveCount(0);
   await expect(page.getByRole('button',{name:'Turn off portal profile editing',exact:true})).toBeEnabled();
   await expect(page.getByText('Profile editing enabled for verified sign-in.',{exact:true})).toBeVisible();
@@ -255,4 +255,27 @@ test('a paused portal permission can also be turned off explicitly',async({page}
 test('turn-off is not offered while portal setup is unavailable from this account',async({page})=>{
   await render(page,'owner-setup-unavailable-listed');
   await expect(page.getByRole('button',{name:'Turn off portal profile editing',exact:true})).toHaveCount(0);
+});
+for(const change of ['unmount','switch'] as const)test(`a turn-off confirmed after the editor ${change==='unmount'?'closes':'switches records'} sends nothing`,async({page})=>{
+  await render(page,'owner-revoke');
+  await page.getByRole('button',{name:'Turn off portal profile editing',exact:true}).click();
+  const confirmDialog=page.getByRole('dialog',{name:'Turn off portal profile editing?'});
+  await expect(confirmDialog).toBeVisible();
+  await page.evaluate(next=>(window as Window&{sharedProfileMount?:(recordId:string|null)=>void}).sharedProfileMount!(next),change==='unmount'?null:'record-two');
+  await expect(confirmDialog).toBeVisible();
+  await confirmDialog.getByRole('button',{name:'Turn off editing',exact:true}).click();
+  await expect(confirmDialog).toHaveCount(0);
+  await page.evaluate(()=>new Promise(resolve=>setTimeout(resolve,250)));
+  expect(revokeWrites(await calls(page))).toEqual([]);
+});
+test('a rejected retry after an unconfirmed turn-off does not claim that nothing changed',async({page})=>{
+  await render(page,'owner-revoke-lost-then-conflict');
+  await page.getByRole('button',{name:'Turn off portal profile editing',exact:true}).click();
+  await page.getByRole('dialog',{name:'Turn off portal profile editing?'}).getByRole('button',{name:'Turn off editing',exact:true}).click();
+  await page.getByRole('button',{name:'Retry same turn-off',exact:true}).click();
+  await expect(page.getByText(/The current portal editing permission could not be confirmed\. Refresh to review it\./)).toBeVisible();
+  await expect(page.getByText(/Nothing was changed/)).toHaveCount(0);
+  await expect(page.getByRole('button',{name:'Retry same turn-off',exact:true})).toHaveCount(0);
+  const writes=revokeWrites(await calls(page));expect(writes).toHaveLength(2);
+  expect(writes[1]!.body).toBe(writes[0]!.body);expect(writes[1]!.mutationId).toBe(writes[0]!.mutationId);
 });
