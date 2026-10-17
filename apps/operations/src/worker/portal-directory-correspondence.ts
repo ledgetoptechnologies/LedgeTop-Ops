@@ -115,6 +115,8 @@ export async function resolveDirectoryPortalSource(env:CorrespondenceEnv,id:stri
 /** Alias-only native workspace witness. Callers retain their original same-ID compatibility guards. */
 export function aliasWorkspaceWitnessSql(workspaceAlias:string):string{
  if(!/^[a-z_]+$/i.test(workspaceAlias))throw Error('Invalid alias workspace SQL identifier');
+ // Workspace headers and root entities are independently versioned resources.
+ // Signed events retain the selected snapshot while advancing both checkpoints.
  return `(${workspaceAlias}.legacy_account_id IS NULL AND EXISTS(
  SELECT 1 FROM pa_portal_workspace_sources reservation
  JOIN portal_v2_directory_checkpoints checkpoint ON checkpoint.workspace_id=reservation.workspace_id
@@ -129,7 +131,23 @@ export function aliasWorkspaceWitnessSql(workspaceAlias:string):string{
  WHERE reservation.workspace_id=${workspaceAlias}.id AND reservation.projection_source_id=${workspaceAlias}.project_alpha_source_id
  AND reservation.source_workspace_id=${workspaceAlias}.id AND snapshot.workspace_root_type=${workspaceAlias}.root_type
  AND snapshot.workspace_root_public_id=COALESCE(${workspaceAlias}.pa_organization_public_id,${workspaceAlias}.pa_client_public_id)
- AND root.source_version=snapshot.workspace_source_version AND root.source_version<>'legacy-backfill'
+ AND projected.source_generation=snapshot.source_generation AND snapshot.source_sequence<=projected.source_sequence
+ AND root.source_version<>'legacy-backfill'
+ AND EXISTS(SELECT 1 FROM pa_portal_projection_entities snapshot_root
+  WHERE snapshot_root.generation_id=snapshot.id AND snapshot_root.public_id=snapshot.workspace_root_public_id
+   AND snapshot_root.parent_public_id IS NULL AND snapshot_root.active=1
+   AND ((${workspaceAlias}.root_type='organization' AND snapshot_root.entity_type='organization')
+    OR (${workspaceAlias}.root_type='standalone_client' AND snapshot_root.entity_type IN('client','standalone_client')))
+   AND ((generation.source_generation=snapshot.source_generation AND generation.source_sequence=snapshot.source_sequence
+     AND root.source_version=snapshot_root.source_version)
+    OR (generation.source_sequence>snapshot.source_sequence AND EXISTS(
+     SELECT 1 FROM pa_portal_projection_receipts receipt JOIN pa_portal_projection_audit event_audit
+      ON event_audit.workspace_id=receipt.workspace_id AND event_audit.delivery_id=receipt.delivery_id
+       AND event_audit.source_sequence=receipt.source_sequence AND event_audit.source_generation=projected.source_generation
+       AND event_audit.action IN('event_upserted','event_tombstoned')
+     WHERE receipt.projection_source_id=reservation.projection_source_id AND receipt.workspace_id=reservation.workspace_id
+      AND receipt.delivery_kind='event' AND receipt.status='completed' AND receipt.write_guard=1
+      AND receipt.source_sequence=projected.source_sequence AND generation.source_generation='event-'||receipt.delivery_id))))
  AND root.public_id=snapshot.workspace_root_public_id
  AND ((${workspaceAlias}.root_type='organization' AND root.entity_type='organization')
   OR (${workspaceAlias}.root_type='standalone_client' AND root.entity_type IN('client','standalone_client')))))`;
