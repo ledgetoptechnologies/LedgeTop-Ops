@@ -22,6 +22,12 @@ import { requireAuthenticatedDeliveryCreation } from './authenticated-delivery-c
 const OPAQUE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
 const IDEMPOTENCY = /^[A-Za-z0-9][A-Za-z0-9._:-]{15,127}$/;
 const REASON = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,79}$/;
+// Pre-0145 databases retain only their existing exact identity links; replacement principals need the eligibility contract.
+async function grantPrincipalIdentitySql(db:Pick<D1Database,'prepare'>):Promise<string>{
+  const present=await db.prepare("SELECT 1 present FROM sqlite_master WHERE type='table' AND name='portal_v2_identity_eligibility_bindings'").first('present');
+  return present!==null?projectedPrincipalIdentitySql('principal'):'principal.identity_id';
+}
+
 const SEARCH_LIMIT = 20;
 const RECIPIENT_LIMIT = 200;
 export type AuthenticatedGrantAudienceType = "organization" | "department" | "client" | "project" | "principal";
@@ -245,10 +251,11 @@ export async function authenticatedDeliveryGrantNotificationRecipientUsable(
   target:AuthenticatedDeliveryGrantNotificationTarget,
 ):Promise<boolean>{
   if(!target.active)return false;
-  const person=await deliveryDb(env).prepare(`SELECT identity.issuer,identity.subject,identity.verified_email email
-    FROM pa_portal_principals principal JOIN portal_v2_identities identity ON identity.id=${projectedPrincipalIdentitySql('principal')}
+  const db=deliveryDb(env),identitySql=await grantPrincipalIdentitySql(db);
+  const person=await db.prepare(`SELECT identity.issuer,identity.subject,identity.verified_email email
+    FROM pa_portal_principals principal JOIN portal_v2_identities identity ON identity.id=${identitySql}
     JOIN portal_v2_workspace_memberships membership ON membership.workspace_id=principal.workspace_id AND membership.identity_id=identity.id
-    WHERE principal.workspace_id=? AND principal.public_id=? AND ${projectedPrincipalIdentitySql('principal')}=? AND principal.source_version=?
+    WHERE principal.workspace_id=? AND principal.public_id=? AND ${identitySql}=? AND principal.source_version=?
       AND principal.status='active' AND identity.status='active' AND identity.revoked_at IS NULL AND identity.verified_email IS NOT NULL
       AND membership.status='active' AND membership.revoked_at IS NULL
       AND (membership.expires_at IS NULL OR datetime(membership.expires_at)>datetime('now'))`)
@@ -411,9 +418,10 @@ function ancestryBindings(context: BindingContext): unknown[] {
 async function audience(env: Env, context: BindingContext, type: AuthenticatedGrantAudienceType, publicId: string): Promise<{ sourceVersion: string; displayName: string }> {
   const db = deliveryDb(env);
   if (type === "principal") {
+    const identitySql=await grantPrincipalIdentitySql(db);
     const row = await db.prepare(`SELECT principal.source_version,principal.display_name
       FROM pa_portal_principals principal JOIN portal_v2_identities identity
-        ON identity.id=${projectedPrincipalIdentitySql('principal')} AND identity.status='active' AND identity.revoked_at IS NULL
+        ON identity.id=${identitySql} AND identity.status='active' AND identity.revoked_at IS NULL
       JOIN portal_v2_workspace_memberships membership
         ON membership.workspace_id=principal.workspace_id AND membership.identity_id=identity.id
         AND membership.status='active' AND membership.revoked_at IS NULL
@@ -442,9 +450,10 @@ async function recipients(env: Env, context: BindingContext, type: Authenticated
   // Only an exact-principal grant snapshots a principal/identity binding.
   if (type !== "principal") return [];
   const db = deliveryDb(env);
-  const principals = await db.prepare(`SELECT principal.public_id,${projectedPrincipalIdentitySql('principal')} AS identity_id,principal.source_version
+  const identitySql=await grantPrincipalIdentitySql(db);
+  const principals = await db.prepare(`SELECT principal.public_id,${identitySql} AS identity_id,principal.source_version
     FROM pa_portal_principals principal
-    JOIN portal_v2_identities identity ON identity.id=${projectedPrincipalIdentitySql('principal')}
+    JOIN portal_v2_identities identity ON identity.id=${identitySql}
       AND identity.status='active' AND identity.revoked_at IS NULL
     JOIN portal_v2_workspace_memberships membership
       ON membership.workspace_id=principal.workspace_id AND membership.identity_id=identity.id
@@ -563,6 +572,7 @@ export async function searchAuthenticatedDeliveryGrantAudiences(env: Env, princi
     throw new HTTPException(400,{message:'Audience type is invalid'});
   const like = `%${query.replace(/[\\%_]/g, value => `\\${value}`)}%`;
   const db = deliveryDb(env);
+  const identitySql=await grantPrincipalIdentitySql(db);
   const [entities, principals] = await Promise.all([
     db.prepare(`${ancestrySql()} SELECT ancestry.entity_type,ancestry.public_id,entity.display_name
       FROM scope_ancestry ancestry JOIN portal_v2_directory_entities entity
@@ -576,7 +586,7 @@ export async function searchAuthenticatedDeliveryGrantAudiences(env: Env, princi
       .all<{ entity_type: Exclude<AuthenticatedGrantAudienceType, "principal">; public_id: string; display_name: string }>(),
     db.prepare(`${ancestrySql()} SELECT principal.public_id,principal.display_name,identity.verified_email
       FROM pa_portal_principals principal JOIN portal_v2_identities identity
-        ON identity.id=${projectedPrincipalIdentitySql('principal')} AND identity.status='active' AND identity.revoked_at IS NULL
+        ON identity.id=${identitySql} AND identity.status='active' AND identity.revoked_at IS NULL
       JOIN portal_v2_workspace_memberships membership
         ON membership.workspace_id=principal.workspace_id AND membership.identity_id=identity.id
         AND membership.status='active' AND membership.revoked_at IS NULL
