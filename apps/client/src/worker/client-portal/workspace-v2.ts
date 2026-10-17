@@ -1,4 +1,4 @@
-import {projectedPrincipalIdentitySql,noOtherProjectedIdentitySql} from './projected-principal-identity';
+import {projectedPrincipalIdentitySql,noOtherProjectedIdentitySql,projectedReenrollmentSchemaReady,noHistoricalProjectedIdentitySql} from './projected-principal-identity';
 import { folderOwnerEntityType,addExactStandaloneClientScope } from '../../../../../packages/shared/src/folder-owner-entity';
 import type { Env as ClientEnv } from "../types";
 import { blockBusinessProfileWorkspace,businessProfileAuthorityBatch } from './business-profile-fences';
@@ -347,6 +347,7 @@ async function resolveGlobalIdentity(
       // historical identity, membership, bridge, or entitlement may be
       // recreated from PA.
       const claimTablePresent = await d1TablesPresent(env.DELIVERY_DB, ["portal_client_authority_workspace_claims"]);
+      const reenrollmentReady=await projectedReenrollmentSchemaReady(portalDb(env));
       const claimGuard = claimTablePresent ? `AND NOT EXISTS(SELECT 1 FROM portal_client_authority_workspace_claims claim
         WHERE claim.workspace_id=principal.workspace_id AND claim.state='active')` : "";
       const identityIdForRepair = identity?.id ?? "";
@@ -368,6 +369,7 @@ async function resolveGlobalIdentity(
           AND ${primaryAlphaReference("account")}
           WHERE principal.status='active' AND (principal.identity_id IS NULL OR principal.identity_id=?) AND lower(principal.email_hint)=?
           AND ${noOtherProjectedIdentitySql('principal')}
+          ${reenrollmentReady?'':`AND ${noHistoricalProjectedIdentitySql('principal')}`}
           ${claimGuard}
           AND (principal.identity_id IS NULL
             OR NOT EXISTS(SELECT 1 FROM portal_v2_identity_eligibility_bindings eligibility
@@ -385,7 +387,7 @@ async function resolveGlobalIdentity(
                 AND bridge.status='active' AND bridge.revoked_at IS NULL)
             ${authorityRepair})
         ORDER BY principal.workspace_id,principal.public_id LIMIT 101`)
-        .bind(identityIdForRepair,email,principal.issuer,principal.subject,identityIdForRepair,identityIdForRepair,identityIdForRepair,
+        .bind(identityIdForRepair,email,principal.issuer,principal.subject,...(reenrollmentReady?[]:[principal.issuer,principal.subject]),identityIdForRepair,identityIdForRepair,identityIdForRepair,
           ...(authorityTablesReady ? [identityIdForRepair] : []))
         .all<{ workspace_id: string; public_id: string; source_version: string; legacy_account_id: string }>();
       if (eligible.results.length === 0) return identity;
@@ -407,7 +409,8 @@ async function resolveGlobalIdentity(
           SELECT id,?,?,?,? FROM portal_v2_identities WHERE issuer=? AND subject=?
             AND status='active' AND revoked_at IS NULL AND lower(verified_email)=?
             AND EXISTS(SELECT 1 FROM pa_portal_principals p WHERE p.workspace_id=? AND p.public_id=?
-              AND ${noOtherProjectedIdentitySql('p','portal_v2_identities.issuer','portal_v2_identities.subject')})
+              AND ${noOtherProjectedIdentitySql('p','portal_v2_identities.issuer','portal_v2_identities.subject')}
+              ${reenrollmentReady?'':`AND ${noHistoricalProjectedIdentitySql('p','portal_v2_identities.issuer','portal_v2_identities.subject')}`})
             ${claimTablePresent ? `AND NOT EXISTS(SELECT 1 FROM portal_client_authority_workspace_claims claim WHERE claim.workspace_id=? AND claim.state='active')` : ""}`)
           .bind(row.workspace_id, row.public_id, row.source_version, email,
             principal.issuer, principal.subject, email,row.workspace_id,row.public_id,...(claimTablePresent?[row.workspace_id]:[]))),
@@ -433,7 +436,7 @@ async function resolveGlobalIdentity(
           (id,workspace_id,identity_id,source_type,status,source_version)
           SELECT 'pa-membership:' || projected.workspace_id || ':' || projected.public_id,projected.workspace_id,identity.id,
             'project_alpha','active',projected.source_version
-          FROM pa_portal_principals projected JOIN portal_v2_identities identity ON identity.id=${projectedPrincipalIdentitySql('projected')}
+          FROM pa_portal_principals projected JOIN portal_v2_identities identity ON identity.id=${reenrollmentReady?projectedPrincipalIdentitySql('projected'):'projected.identity_id'}
           WHERE projected.workspace_id=? AND projected.public_id=? AND projected.source_version=? AND projected.status='active'
             AND identity.issuer=? AND identity.subject=? AND identity.status='active' AND identity.revoked_at IS NULL
             ${claimTablePresent ? `AND NOT EXISTS(SELECT 1 FROM portal_client_authority_workspace_claims claim WHERE claim.workspace_id=projected.workspace_id AND claim.state='active')` : ""}
@@ -466,17 +469,17 @@ async function resolveGlobalIdentity(
         ...(authorityTablesReady ? shells.map(row => portalDb(env).prepare(`INSERT INTO portal_v2_entitlements
           (id,workspace_id,identity_id,capability,effect,scope_type,scope_public_id,entitlement_version,
            source_type,source_version,status,valid_from,expires_at)
-          SELECT 'pa-entitlement:' || intent.workspace_id || ':' || intent.public_id,intent.workspace_id,${projectedPrincipalIdentitySql('projected')},
+          SELECT 'pa-entitlement:' || intent.workspace_id || ':' || intent.public_id,intent.workspace_id,${reenrollmentReady?projectedPrincipalIdentitySql('projected'):'projected.identity_id'},
             intent.capability,intent.effect,intent.scope_type,intent.scope_public_id,
             generation.source_sequence,'project_alpha',intent.source_version,'active',intent.valid_from,intent.expires_at
           FROM pa_portal_entitlement_intents intent
           JOIN pa_portal_principals projected ON projected.workspace_id=intent.workspace_id
-            AND projected.public_id=intent.principal_public_id AND projected.status='active' AND ${projectedPrincipalIdentitySql('projected')} IS NOT NULL
+            AND projected.public_id=intent.principal_public_id AND projected.status='active' AND ${reenrollmentReady?projectedPrincipalIdentitySql('projected'):'projected.identity_id'} IS NOT NULL
           JOIN portal_v2_directory_checkpoints checkpoint ON checkpoint.workspace_id=intent.workspace_id
           JOIN portal_v2_directory_generations generation ON generation.id=checkpoint.active_generation_id
             AND generation.workspace_id=checkpoint.workspace_id AND generation.status='active' AND generation.complete=1
           JOIN portal_v2_workspace_memberships membership ON membership.workspace_id=intent.workspace_id
-            AND membership.identity_id=${projectedPrincipalIdentitySql('projected')} AND membership.status='active' AND membership.source_type='project_alpha'
+            AND membership.identity_id=${reenrollmentReady?projectedPrincipalIdentitySql('projected'):'projected.identity_id'} AND membership.status='active' AND membership.source_type='project_alpha'
           WHERE intent.workspace_id=? AND intent.principal_public_id=? AND intent.status='active'
             ${claimTablePresent ? `AND NOT EXISTS(SELECT 1 FROM portal_client_authority_workspace_claims claim WHERE claim.workspace_id=intent.workspace_id AND claim.state='active')` : ""}
           ON CONFLICT(id) DO UPDATE SET identity_id=excluded.identity_id,capability=excluded.capability,effect=excluded.effect,

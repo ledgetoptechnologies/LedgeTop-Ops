@@ -206,6 +206,8 @@ export function nativeRequestMutationGuardSql(proof: NativeRequestAuthorityProof
   const claimSql = proof.claimTablePresent ? `AND NOT EXISTS(
     SELECT 1 FROM portal_client_authority_workspace_claims claim
     WHERE claim.workspace_id=workspace.id AND claim.state='active')` : "";
+  // Balance the conjunctions: callers embed this guard inside attachment and
+  // notification writes, which must stay within D1's expression-depth limit.
   return {
     sql: `EXISTS(
       SELECT 1 FROM portal_v2_workspaces workspace
@@ -222,11 +224,11 @@ export function nativeRequestMutationGuardSql(proof: NativeRequestAuthorityProof
       JOIN portal_v2_directory_entities root ON root.workspace_id=workspace.id
         AND root.generation_id=checkpoint.active_generation_id AND root.entity_type=?
         AND root.public_id=? AND root.active=1
-      WHERE workspace.id=? AND workspace.status='active' AND workspace.legacy_account_id IS NULL
-        ${claimSql}
-        AND ${portalRootAccessAllowedSql(proof.rootAccessPolicyEnabled,"workspace")}
-        AND workspace.project_alpha_source_id=? AND ${authority.sql}
-        AND (membership.source_type<>'project_alpha' OR EXISTS(
+      WHERE ((workspace.id=? AND workspace.status='active' AND workspace.legacy_account_id IS NULL
+        ${claimSql})
+        AND (${portalRootAccessAllowedSql(proof.rootAccessPolicyEnabled,"workspace")}
+        AND workspace.project_alpha_source_id=? AND ${authority.sql}))
+        AND (((membership.source_type<>'project_alpha' OR EXISTS(
           SELECT 1 FROM pa_portal_principals current_principal
           WHERE current_principal.workspace_id=workspace.id
             AND ${projectedPrincipalIdentitySql('current_principal')}=identity.id
@@ -235,8 +237,8 @@ export function nativeRequestMutationGuardSql(proof: NativeRequestAuthorityProof
             AND lower(current_principal.email_hint)=lower(identity.verified_email)))
         AND datetime(?)<=datetime('now') AND datetime(?)>datetime('now')
         AND ${targetSql}
-        ${denialSql}
-        AND (SELECT COUNT(*) FROM portal_v2_entitlements counted
+        ${denialSql})
+        AND ((SELECT COUNT(*) FROM portal_v2_entitlements counted
           WHERE counted.workspace_id=workspace.id AND counted.identity_id=identity.id
             AND counted.capability='request.create' AND counted.status='active' AND counted.revoked_at IS NULL
             AND datetime(counted.valid_from)<=datetime('now')
@@ -255,7 +257,7 @@ export function nativeRequestMutationGuardSql(proof: NativeRequestAuthorityProof
             AND datetime(entitlement.valid_from)<=datetime('now')
             AND (entitlement.expires_at IS NULL OR datetime(entitlement.expires_at)>datetime('now'))
             AND (entitlement.scope_type || ':' || entitlement.scope_public_id) IN (SELECT value FROM json_each(?))
-            AND entitlement.id IN (SELECT value FROM json_each(?))))`,
+            AND entitlement.id IN (SELECT value FROM json_each(?))))))`,
     bindings: [
       proof.identityId, proof.generationId, proof.sourceSequence, proof.rootType, proof.rootPublicId,
       proof.workspaceId, proof.sourceId, ...authority.bindings, proof.evaluatedAt, proof.expiresAt,

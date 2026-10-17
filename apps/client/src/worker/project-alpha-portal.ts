@@ -1,4 +1,4 @@
-import {projectedPrincipalIdentitySql,projectedMembershipReenrollmentReceipt,projectedPrincipalActivationSql} from './client-portal/projected-principal-identity';
+import {projectedPrincipalIdentitySql,projectedMembershipReenrollmentReceipt,projectedPrincipalActivationSql,projectedReenrollmentSchemaReady} from './client-portal/projected-principal-identity';
 import { createRemoteJWKSet, jwtVerify, type JWTVerifyGetKey } from "jose";
 import type { Env } from "./types";
 import { blockBusinessProfileWorkspace,businessProfileAuthorityBatch } from './client-portal/business-profile-fences';
@@ -757,7 +757,7 @@ async function stagedResources(db: PortalAuthorityDatabase, generationId: string
 }
 
 function authorizationRefreshStatements(db: PortalAuthorityDatabase, workspaceId: string, sourceSequence: number,
-  claimTablePresent: boolean): D1PreparedStatement[] {
+  claimTablePresent: boolean,reenrollmentReady:boolean): D1PreparedStatement[] {
   const membershipClaimGuard = claimTablePresent ? `AND NOT EXISTS (
     SELECT 1 FROM portal_client_authority_workspace_claims claim
     WHERE claim.workspace_id=portal_v2_workspace_memberships.workspace_id AND claim.state='active')` : "";
@@ -786,23 +786,23 @@ function authorizationRefreshStatements(db: PortalAuthorityDatabase, workspaceId
     db.prepare(`UPDATE portal_v2_workspace_memberships SET status='suspended',updated_at=datetime('now')
       WHERE workspace_id=? AND source_type='project_alpha'
         ${membershipClaimGuard}`).bind(workspaceId),
-    projectedMembershipReenrollmentReceipt(db,workspaceId),
+    ...(reenrollmentReady?[projectedMembershipReenrollmentReceipt(db,workspaceId)]:[]),
     db.prepare(`INSERT INTO portal_v2_workspace_memberships(id,workspace_id,identity_id,source_type,status,source_version)
-      SELECT 'pa-membership:' || p.workspace_id || ':' || p.public_id,p.workspace_id,${projectedPrincipalIdentitySql('p')},'project_alpha','active',p.source_version
-      FROM pa_portal_principals p JOIN portal_v2_identities i ON i.id=${projectedPrincipalIdentitySql('p')} AND i.status='active' AND i.revoked_at IS NULL AND lower(i.verified_email)=lower(p.email_hint)
-      WHERE p.workspace_id=? AND p.status='active' AND ${projectedPrincipalIdentitySql('p')} IS NOT NULL
-        ${principalClaimGuard} AND ${projectedPrincipalActivationSql('p','i')}
+      SELECT 'pa-membership:' || p.workspace_id || ':' || p.public_id,p.workspace_id,${reenrollmentReady?projectedPrincipalIdentitySql('p'):'p.identity_id'},'project_alpha','active',p.source_version
+      FROM pa_portal_principals p JOIN portal_v2_identities i ON i.id=${reenrollmentReady?projectedPrincipalIdentitySql('p'):'p.identity_id'} AND i.status='active' AND i.revoked_at IS NULL AND lower(i.verified_email)=lower(p.email_hint)
+      WHERE p.workspace_id=? AND p.status='active' AND ${reenrollmentReady?projectedPrincipalIdentitySql('p'):'p.identity_id'} IS NOT NULL
+        ${principalClaimGuard} ${reenrollmentReady?`AND ${projectedPrincipalActivationSql('p','i')}`:''}
       ON CONFLICT(workspace_id,identity_id) DO UPDATE SET status='active',source_version=excluded.source_version,revoked_at=NULL,updated_at=datetime('now') WHERE portal_v2_workspace_memberships.source_type='project_alpha'`).bind(workspaceId),
     db.prepare(`UPDATE portal_v2_entitlements SET status='revoked',revoked_at=datetime('now')
       WHERE workspace_id=? AND source_type='project_alpha' AND status<>'revoked'
         ${entitlementClaimGuard}`).bind(workspaceId),
     db.prepare(`INSERT INTO portal_v2_entitlements
       (id,workspace_id,identity_id,capability,effect,scope_type,scope_public_id,entitlement_version,source_type,source_version,status,valid_from,expires_at)
-      SELECT 'pa-entitlement:' || intent.workspace_id || ':' || intent.public_id,intent.workspace_id,${projectedPrincipalIdentitySql('principal')},intent.capability,intent.effect,intent.scope_type,intent.scope_public_id,?,'project_alpha',intent.source_version,'active',intent.valid_from,intent.expires_at
+      SELECT 'pa-entitlement:' || intent.workspace_id || ':' || intent.public_id,intent.workspace_id,${reenrollmentReady?projectedPrincipalIdentitySql('principal'):'principal.identity_id'},intent.capability,intent.effect,intent.scope_type,intent.scope_public_id,?,'project_alpha',intent.source_version,'active',intent.valid_from,intent.expires_at
       FROM pa_portal_entitlement_intents intent
-      JOIN pa_portal_principals principal ON principal.workspace_id=intent.workspace_id AND principal.public_id=intent.principal_public_id AND principal.status='active' AND ${projectedPrincipalIdentitySql('principal')} IS NOT NULL
-      JOIN portal_v2_identities identity ON identity.id=${projectedPrincipalIdentitySql('principal')} AND identity.status='active' AND identity.revoked_at IS NULL AND lower(identity.verified_email)=lower(principal.email_hint)
-      JOIN portal_v2_workspace_memberships membership ON membership.workspace_id=intent.workspace_id AND membership.identity_id=${projectedPrincipalIdentitySql('principal')} AND membership.status='active' AND membership.source_type='project_alpha'
+      JOIN pa_portal_principals principal ON principal.workspace_id=intent.workspace_id AND principal.public_id=intent.principal_public_id AND principal.status='active' AND ${reenrollmentReady?projectedPrincipalIdentitySql('principal'):'principal.identity_id'} IS NOT NULL
+      JOIN portal_v2_identities identity ON identity.id=${reenrollmentReady?projectedPrincipalIdentitySql('principal'):'principal.identity_id'} AND identity.status='active' AND identity.revoked_at IS NULL AND lower(identity.verified_email)=lower(principal.email_hint)
+      JOIN portal_v2_workspace_memberships membership ON membership.workspace_id=intent.workspace_id AND membership.identity_id=${reenrollmentReady?projectedPrincipalIdentitySql('principal'):'principal.identity_id'} AND membership.status='active' AND membership.source_type='project_alpha'
       WHERE intent.workspace_id=? AND intent.status='active'
         ${intentClaimGuard}
       ON CONFLICT(id) DO UPDATE SET identity_id=excluded.identity_id,capability=excluded.capability,effect=excluded.effect,scope_type=excluded.scope_type,scope_public_id=excluded.scope_public_id,entitlement_version=excluded.entitlement_version,source_version=excluded.source_version,status='active',valid_from=excluded.valid_from,expires_at=excluded.expires_at,revoked_at=NULL`).bind(sourceSequence, workspaceId),
@@ -890,7 +890,7 @@ async function activateSnapshot(env: Env, delivery: SnapshotActivateDelivery, pa
       SELECT ?,public_id,principal_public_id,capability,effect,scope_type,scope_public_id,source_version,CASE active WHEN 1 THEN 'active' ELSE 'suspended' END,valid_from,expires_at FROM pa_portal_projection_entitlements WHERE generation_id=?
       ON CONFLICT(workspace_id,public_id) DO UPDATE SET principal_public_id=excluded.principal_public_id,capability=excluded.capability,effect=excluded.effect,scope_type=excluded.scope_type,scope_public_id=excluded.scope_public_id,source_version=excluded.source_version,status=excluded.status,valid_from=excluded.valid_from,expires_at=excluded.expires_at,updated_at=datetime('now')`)
       .bind(workspace.publicId, generation.id),
-    ...authorizationRefreshStatements(db, workspace.publicId, delivery.sourceSequence, claimTablePresent),
+    ...authorizationRefreshStatements(db, workspace.publicId, delivery.sourceSequence, claimTablePresent,await projectedReenrollmentSchemaReady(db)),
     db.prepare("UPDATE pa_portal_projection_generations SET status='superseded' WHERE workspace_id=? AND status='active' AND id<>?").bind(workspace.publicId, generation.id),
     db.prepare("UPDATE pa_portal_projection_generations SET status='active',complete=1,activated_at=datetime('now') WHERE id=? AND status='staging'").bind(generation.id),
     db.prepare(`INSERT INTO pa_portal_projection_checkpoints(workspace_id,source_generation,source_sequence,snapshot_generation_id) VALUES(?,?,?,?)
@@ -1262,7 +1262,7 @@ async function applyEvent(env: Env, delivery: EventDelivery, payloadHash: string
   }
   if (event.action === "tombstone" && event.resource === "principal") statements.push(db.prepare("UPDATE pa_portal_entitlement_intents SET status='suspended',updated_at=datetime('now') WHERE workspace_id=? AND principal_public_id=?").bind(delivery.workspaceId, event.publicId));
   statements.push(
-    ...authorizationRefreshStatements(db, delivery.workspaceId, delivery.sourceSequence, claimTablePresent),
+    ...authorizationRefreshStatements(db, delivery.workspaceId, delivery.sourceSequence, claimTablePresent,await projectedReenrollmentSchemaReady(db)),
     db.prepare(`UPDATE portal_v2_directory_checkpoints SET active_generation_id=?,source_sequence=?,updated_at=datetime('now') WHERE workspace_id=? AND source_sequence=?`)
       .bind(directoryGenerationId, delivery.sourceSequence, delivery.workspaceId, checkpoint.source_sequence),
     db.prepare("UPDATE pa_portal_projection_checkpoints SET source_sequence=?,updated_at=datetime('now') WHERE workspace_id=? AND source_generation=? AND source_sequence=?")

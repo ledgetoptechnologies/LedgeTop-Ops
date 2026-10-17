@@ -1,6 +1,24 @@
 import { projectedPrincipalIdentitySql } from '../../../../../packages/shared/src/projected-principal-identity';
 export { projectedPrincipalIdentitySql } from '../../../../../packages/shared/src/projected-principal-identity';
 
+/** Ordinary pre-0234 projection remains supported; replacement binding requires the complete receipt contract. */
+export async function projectedReenrollmentSchemaReady(db:Pick<D1Database,'prepare'>):Promise<boolean>{
+  return (await db.prepare(`SELECT COUNT(*) count FROM sqlite_master WHERE
+    (type='table' AND name='portal_pa_membership_reenrollment_receipts') OR
+    (type='trigger' AND name IN ('portal_pa_membership_reenrollment_receipt_guard','portal_pa_membership_reenrollment_consume',
+      'portal_pa_membership_reenrollment_immutable','portal_pa_membership_reenrollment_no_delete')) OR
+    (type='trigger' AND name='portal_secondary_membership_authority_update' AND instr(sql,'portal_pa_membership_reenrollment_receipts')>0)`)
+    .first<number>('count'))===6;
+}
+
+export function noHistoricalProjectedIdentitySql(alias:string,issuer='?',subject='?'):string{
+  if(!/^[a-z_]+$/i.test(alias))throw new Error('Invalid principal alias');
+  return `NOT EXISTS(SELECT 1 FROM pa_portal_principals occupied
+    JOIN portal_v2_identities previous_person ON previous_person.id=occupied.identity_id
+    WHERE occupied.workspace_id=${alias}.workspace_id AND occupied.public_id<>${alias}.public_id
+      AND previous_person.issuer=${issuer} AND previous_person.subject=${subject})`;
+}
+
 export function noOtherProjectedIdentitySql(alias:string,issuer='?',subject='?'):string {
   if (!/^[a-z_]+$/i.test(alias)) throw new Error('Invalid principal alias');
   return `NOT EXISTS(SELECT 1 FROM portal_v2_identity_eligibility_bindings witness

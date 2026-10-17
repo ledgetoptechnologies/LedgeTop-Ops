@@ -31,6 +31,35 @@ describe('current PA principal replaces revoked eligibility without rewriting hi
   ]);
  },90_000);
  afterAll(async()=>mf?.dispose());
+ it('keeps ordinary pre-0234 sign-in working but defers replacement binding until the receipt contract exists',async()=>{
+  const oldRuntime=new Miniflare({modules:true,compatibilityDate:'2026-08-06',script:"export default {fetch(){return new Response('ok')}}",d1Databases:{DELIVERY_DB:'pre-reenrollment'}});
+  try{
+   const database=await oldRuntime.getD1Database('DELIVERY_DB') as unknown as D1Database;
+   const directory=new URL('../migrations/',import.meta.url),names=readdirSync(directory).filter(n=>/^\d+.*\.sql$/.test(n)).sort();
+   for(const name of names.filter(n=>n<'0234_'))await database.batch(splitD1MigrationStatements(readFileSync(new URL(name,directory),'utf8')).map(sql=>database.prepare(sql)));
+   const target={...env,DELIVERY_DB:database},actor={issuer:'https://team.test',subject:'rolling-person',email:'rolling@example.test'};
+   const upstream='rolling-workspace',root='rolling-root',common={schemaVersion:2,applicationKey,occurredAt:'2026-10-01T00:00:00.000Z',sourceGeneration:'rolling-generation',workspaceId:upstream};
+   const ingest=async(payload:Record<string,unknown>)=>expect(await ingestOpsSyncPortalProjection(target,{protocolVersion:1,sourceId:primary,applicationKey,deliveryId:String(payload.deliveryId),projectionKind:'portal',body:JSON.stringify(payload)})).toMatchObject({ok:true,status:'completed'});
+   const grants=['workspace.view','directory.read'].map((capability,index)=>({publicId:`rolling-grant-${index}`,principalPublicId:'rolling-old',capability,effect:'allow',scopeType:'workspace',scopePublicId:upstream,sourceVersion:'grant-v1',active:true,validFrom:'2026-01-01T00:00:00.000Z',expiresAt:null}));
+   await ingest({...common,sourceSequence:1,kind:'snapshot.page',deliveryId:'rolling-page',snapshotHash:'d'.repeat(64),pageCount:1,recordCount:4,pageNumber:1,workspace:{publicId:upstream,rootType:'organization',rootPublicId:root,displayName:'Rolling',sourceVersion:'root-v1',active:true},entities:[{type:'organization',publicId:root,parentPublicId:null,displayName:'Rolling',sourceVersion:'root-v1',active:true,primaryContact:false}],principals:[{publicId:'rolling-old',emailHint:actor.email,displayName:'Person',sourceVersion:'old-v1',active:true}],entitlements:grants});
+   await ingest({...common,sourceSequence:1,kind:'snapshot.activate',deliveryId:'rolling-activate',snapshotHash:'d'.repeat(64),pageCount:1,recordCount:4});
+   const workspace=await database.prepare('SELECT workspace_id FROM pa_portal_workspace_sources WHERE projection_source_id=? AND source_workspace_id=?').bind(primary,upstream).first<string>('workspace_id');
+   const router=createClientPortalRouter({resolvePrincipal:async()=>actor,repository:d1ClientPortalRepository});
+   expect((await router.request('https://client.test/session',{},target)).status).toBe(200);
+   await ingest({...common,sourceSequence:2,kind:'event',deliveryId:'rolling-revoke',event:{resource:'principal',action:'tombstone',publicId:'rolling-old',sourceVersion:'revoked-v2'}});
+   const old=await database.prepare("SELECT * FROM pa_portal_principals WHERE workspace_id=? AND public_id='rolling-old'").bind(workspace).first();
+   await ingest({...common,sourceSequence:3,kind:'event',deliveryId:'rolling-new',event:{resource:'principal',action:'upsert',principal:{publicId:'rolling-new',emailHint:actor.email,displayName:'Person',sourceVersion:'new-v1',active:true}}});
+   for(const [index,grant] of grants.entries())await ingest({...common,sourceSequence:4+index,kind:'event',deliveryId:`rolling-grant-update-${index}`,event:{resource:'entitlement',action:'upsert',entitlement:{...grant,principalPublicId:'rolling-new',sourceVersion:'new-grant-v1'}}});
+   expect((await router.request('https://client.test/session',{},target)).status).toBe(200);
+   expect(await database.prepare("SELECT count(*) n FROM portal_v2_identity_eligibility_bindings WHERE workspace_id=? AND principal_public_id='rolling-new'").bind(workspace).first('n')).toBe(0);
+   expect(await (await router.request('https://client.test/v2/workspaces',{},target)).json()).toEqual({workspaces:[]});
+   await database.batch(splitD1MigrationStatements(readFileSync(new URL('0234_pa_principal_reenrollment.sql',directory),'utf8')).map(sql=>database.prepare(sql)));
+   expect((await router.request('https://client.test/session',{},target)).status).toBe(200);
+   expect(await (await router.request('https://client.test/v2/workspaces',{},target)).json()).toMatchObject({workspaces:[expect.objectContaining({id:workspace})]});
+   expect(await database.prepare("SELECT * FROM pa_portal_principals WHERE workspace_id=? AND public_id='rolling-old'").bind(workspace).first()).toEqual(old);
+   expect((await database.prepare('PRAGMA foreign_key_check').all()).results).toEqual([]);
+  }finally{await oldRuntime.dispose();}
+ },180_000);
  it.each([primary,secondary,'legacy-primary'])('reenrolls exact verified identity in %s and preserves revoked rows',async sourceCase=>{
   const source=sourceCase==='legacy-primary'?primary:sourceCase;
   const tag=sourceCase==='legacy-primary'?'legacy':source===primary?'primary':'secondary',upstream=`reenrollment-${tag}`,root=`root-${tag}`;

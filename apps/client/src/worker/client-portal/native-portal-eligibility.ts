@@ -1,4 +1,4 @@
-import {projectedPrincipalIdentitySql,projectedMembershipReenrollmentReceipt,noOtherProjectedIdentitySql} from './projected-principal-identity';
+import {projectedPrincipalIdentitySql,projectedMembershipReenrollmentReceipt,noOtherProjectedIdentitySql,projectedReenrollmentSchemaReady,noHistoricalProjectedIdentitySql} from './projected-principal-identity';
 import type { PortalAuthorizationEnv } from './workspace-v2';
 import { blockBusinessProfileWorkspace,businessProfileAuthorityBatch } from './business-profile-fences';
 import type { VerifiedClientPrincipal } from './types';
@@ -24,6 +24,7 @@ export async function bindNativePortalEligibility(env: PortalAuthorizationEnv, p
     || !await portalSourceAuthoritiesReady(env.DELIVERY_DB)) return;
   const db = env.DELIVERY_DB.withSession('first-primary');
   const claimTablePresent = await clientAuthorityWorkspaceClaimTablePresent(db);
+  const reenrollmentReady=await projectedReenrollmentSchemaReady(db);
   const candidateClaimGuard = claimTablePresent ? `AND NOT EXISTS (
     SELECT 1 FROM portal_client_authority_workspace_claims claim
     WHERE claim.workspace_id=p.workspace_id AND claim.state='active')` : '';
@@ -40,6 +41,7 @@ export async function bindNativePortalEligibility(env: PortalAuthorizationEnv, p
       ${candidateClaimGuard}
       AND (p.identity_id IS NULL OR p.identity_id=(SELECT id FROM portal_v2_identities WHERE issuer=? AND subject=?))
       AND ${noOtherProjectedIdentitySql('p')}
+      ${reenrollmentReady?'':`AND ${noHistoricalProjectedIdentitySql('p')}`}
       AND NOT EXISTS(SELECT 1 FROM pa_portal_principals other WHERE other.workspace_id=p.workspace_id
         AND other.status='active' AND lower(other.email_hint)=lower(p.email_hint) AND other.public_id<>p.public_id)
       AND (p.identity_id IS NULL OR NOT EXISTS(SELECT 1 FROM portal_v2_identity_eligibility_bindings e
@@ -52,7 +54,7 @@ export async function bindNativePortalEligibility(env: PortalAuthorizationEnv, p
           AND i.principal_public_id=p.public_id AND i.status='active' AND NOT EXISTS(SELECT 1 FROM portal_v2_entitlements e
             WHERE e.id='pa-entitlement:'||i.workspace_id||':'||i.public_id AND e.identity_id=p.identity_id
               AND e.source_version=i.source_version AND e.status='active' AND e.revoked_at IS NULL)))
-    ORDER BY p.workspace_id,p.public_id LIMIT 33`).bind(email,principal.issuer,principal.subject,principal.issuer,principal.subject).all<{
+    ORDER BY p.workspace_id,p.public_id LIMIT 33`).bind(email,principal.issuer,principal.subject,principal.issuer,principal.subject,...(reenrollmentReady?[]:[principal.issuer,principal.subject])).all<{
       workspace_id:string;public_id:string;source_version:string;project_alpha_source_id:string;active_generation_id:string;source_sequence:number;
     }>();
   // Do not partially auto-enrol an overflowing/ambiguous candidate set.
@@ -80,6 +82,7 @@ export async function bindNativePortalEligibility(env: PortalAuthorizationEnv, p
         AND w.project_alpha_source_id=? AND cp.active_generation_id=? AND cp.source_sequence=?
         AND (p.identity_id IS NULL OR p.identity_id=(${identitySql}))
         AND ${noOtherProjectedIdentitySql('p')}
+        ${reenrollmentReady?'':`AND ${noHistoricalProjectedIdentitySql('p')}`}
         AND NOT EXISTS(SELECT 1 FROM pa_portal_principals other WHERE other.workspace_id=p.workspace_id
           AND other.status='active' AND lower(other.email_hint)=? AND other.public_id<>p.public_id))
       AND NOT EXISTS(SELECT 1 FROM portal_v2_identity_eligibility_blocks b WHERE b.status='active'
@@ -92,7 +95,7 @@ export async function bindNativePortalEligibility(env: PortalAuthorizationEnv, p
           AND datetime(d.valid_from)<=datetime('now') AND (d.expires_at IS NULL OR datetime(d.expires_at)>datetime('now'))
           AND (d.scope_type='global' OR (d.workspace_id=? AND d.scope_type='workspace' AND d.scope_public_id=?)))`:''}`;
     const args = [...guard.bindings,row.workspace_id,row.public_id,row.source_version,email,row.project_alpha_source_id,
-      row.active_generation_id,row.source_sequence,...identityArgs,principal.issuer,principal.subject,email,...identityArgs,...identityArgs,
+      row.active_generation_id,row.source_sequence,...identityArgs,principal.issuer,principal.subject,...(reenrollmentReady?[]:[principal.issuer,principal.subject]),email,...identityArgs,...identityArgs,
       ...(env.CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED==='true'?[principal.issuer,principal.subject,row.workspace_id,row.workspace_id]:[])];
     const profileFence=await blockBusinessProfileWorkspace(env,row.workspace_id,JSON.stringify(['native-eligibility',principal.issuer,principal.subject,row.public_id,row.source_version,row.source_sequence]));
     try { await businessProfileAuthorityBatch(db,[profileFence],[
@@ -110,19 +113,19 @@ export async function bindNativePortalEligibility(env: PortalAuthorizationEnv, p
           AND NOT EXISTS(SELECT 1 FROM pa_portal_principals occupied WHERE occupied.workspace_id=pa_portal_principals.workspace_id
             AND occupied.public_id<>pa_portal_principals.public_id AND occupied.identity_id=(${identitySql}))`)
         .bind(...identityArgs,row.workspace_id,row.public_id,row.source_version,...identityArgs),
-      projectedMembershipReenrollmentReceipt(db,row.workspace_id),
+      ...(reenrollmentReady?[projectedMembershipReenrollmentReceipt(db,row.workspace_id)]:[]),
       db.prepare(`INSERT INTO portal_v2_workspace_memberships(id,workspace_id,identity_id,source_type,status,source_version)
-        SELECT 'pa-membership:'||p.workspace_id||':'||p.public_id,p.workspace_id,${projectedPrincipalIdentitySql('p')},'project_alpha','active',p.source_version
-        FROM pa_portal_principals p WHERE p.workspace_id=? AND p.public_id=? AND ${projectedPrincipalIdentitySql('p')} IS NOT NULL
+        SELECT 'pa-membership:'||p.workspace_id||':'||p.public_id,p.workspace_id,${reenrollmentReady?projectedPrincipalIdentitySql('p'):'p.identity_id'},'project_alpha','active',p.source_version
+        FROM pa_portal_principals p WHERE p.workspace_id=? AND p.public_id=? AND ${reenrollmentReady?projectedPrincipalIdentitySql('p'):'p.identity_id'} IS NOT NULL
         ON CONFLICT(workspace_id,identity_id) DO UPDATE SET status='active',source_version=excluded.source_version,revoked_at=NULL,
           updated_at=datetime('now') WHERE portal_v2_workspace_memberships.source_type='project_alpha'`)
         .bind(row.workspace_id,row.public_id),
       db.prepare(`INSERT INTO portal_v2_entitlements(id,workspace_id,identity_id,capability,effect,scope_type,scope_public_id,
           entitlement_version,source_type,source_version,status,valid_from,expires_at)
-        SELECT 'pa-entitlement:'||i.workspace_id||':'||i.public_id,i.workspace_id,${projectedPrincipalIdentitySql('p')},i.capability,i.effect,i.scope_type,
+        SELECT 'pa-entitlement:'||i.workspace_id||':'||i.public_id,i.workspace_id,${reenrollmentReady?projectedPrincipalIdentitySql('p'):'p.identity_id'},i.capability,i.effect,i.scope_type,
           i.scope_public_id,?,'project_alpha',i.source_version,'active',i.valid_from,i.expires_at
         FROM pa_portal_entitlement_intents i JOIN pa_portal_principals p ON p.workspace_id=i.workspace_id AND p.public_id=i.principal_public_id
-        JOIN portal_v2_workspace_memberships m ON m.workspace_id=p.workspace_id AND m.identity_id=${projectedPrincipalIdentitySql('p')}
+        JOIN portal_v2_workspace_memberships m ON m.workspace_id=p.workspace_id AND m.identity_id=${reenrollmentReady?projectedPrincipalIdentitySql('p'):'p.identity_id'}
           AND m.source_type='project_alpha' AND m.status='active' AND m.revoked_at IS NULL
         WHERE i.workspace_id=? AND i.principal_public_id=? AND i.status='active'
         ON CONFLICT(id) DO UPDATE SET identity_id=excluded.identity_id,capability=excluded.capability,effect=excluded.effect,
