@@ -175,7 +175,7 @@ for(const scenario of ['bootstrap-positive','bootstrap-lost-response'] as const)
 test('unavailable portal setup explains the account limitation instead of implying the client is not set up',async({page})=>{
   await render(page,'owner-setup-unavailable');
   await expect(page.getByRole('heading',{name:'Portal profile editing',exact:true})).toBeVisible();
-  await expect(page.getByRole('status').filter({hasText:'Portal profile setup isn’t available from this account right now.'})).toBeVisible();
+  await expect(page.getByRole('status').filter({hasText:'Portal profile setup isn’t available from this account right now.'})).toHaveText('Portal profile setup isn’t available from this account right now. Staff with client portal setup access can review it.');
   await expect(page.getByText('No eligible own-client portal identity is available yet.',{exact:true})).toHaveCount(0);
   await expect(page.getByRole('button',{name:'Enable portal profile editing',exact:true})).toHaveCount(0);
   expect(mutations(await calls(page))).toEqual([]);

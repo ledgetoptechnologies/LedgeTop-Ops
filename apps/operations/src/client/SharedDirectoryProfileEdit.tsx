@@ -218,7 +218,7 @@ function SharedDirectoryProfileEditBound({ kind, recordId, allowPreparedAttempt 
     {!shared&&kind==='client'&&response.canBootstrap&&<Card title="Portal profile setup"><p>Use this client’s profile for portal editing. Merge a duplicate in the other PA first.</p>
       <button type="button" className="button-orange" disabled={busy||!!attempt||ownerAttempt?.kind==='grant'} onClick={()=>void bootstrap()}>{ownerAttempt?.kind==='bootstrap'?'Retry same profile setup':'Enable shared profile'}</button></Card>}
     {shared?.kind==='client'&&shared.portalSetup&&<Card title="Portal profile editing"><p>Enable each client’s own profile for their verified portal sign-in.</p>
-      {!shared.portalSetup.available&&<p role="status">Portal profile setup isn’t available from this account right now. Staff with client portal setup access can enable it; nothing about this client was changed.</p>}
+      {!shared.portalSetup.available&&<p role="status">Portal profile setup isn’t available from this account right now. Staff with client portal setup access can review it.</p>}
       {shared.portalSetup.candidates.length===0?shared.portalSetup.available&&<p>No eligible own-client portal identity is available yet.</p>:shared.portalSetup.candidates.map(candidate=><div key={candidateKey(candidate)}>
         <p><strong>{candidate.clientName}</strong> · {sourceLabel(candidate.sourceId)}</p>
         {candidate.state==='available'?<button type="button" className="button-orange" disabled={busy||!!attempt||!shared.portalSetup?.available||!!ownerAttempt&&ownerAttempt.key!==candidateKey(candidate)} onClick={()=>void enablePortal(candidate)}>
