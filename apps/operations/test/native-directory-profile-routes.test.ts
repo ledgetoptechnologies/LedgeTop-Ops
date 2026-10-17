@@ -400,10 +400,10 @@ describe("native Directory profile routes", () => {
       scopes: [{ id: "drone", name: "Drone operations", divisions: [{ id: "survey", name: "Survey" }] }], organizations: [] });
   });
 
-  it("publishes the default-off session capability without enabling the route", () => {
+  it("publishes the session capability and checks in approved production profile writes", () => {
     const source = readFileSync(new URL("../src/worker/index.ts", import.meta.url), "utf8");
     expect(source).toContain("nativeDirectoryProfileWrites: { enabled: nativeDirectoryProfileWritesEnabled(c.env) }");
-    expect(readFileSync(new URL("../wrangler.jsonc", import.meta.url), "utf8")).toContain('"NATIVE_DIRECTORY_PROFILE_WRITES_ENABLED": "false"');
+    expect(readFileSync(new URL("../wrangler.jsonc", import.meta.url), "utf8")).toContain('"NATIVE_DIRECTORY_PROFILE_WRITES_ENABLED": "true"');
   });
 
   it("registers specific native directory routes before the generic Client Hub route family", () => {

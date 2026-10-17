@@ -141,11 +141,11 @@ describe("native Directory scheduled outbox drain", () => {
     expect(profileDispatch.mock.calls[0]![0].PROJECT_ALPHA_DIRECTORY_CREATE_GENERATION_RECOVERY_ENABLED).toBe(flag);
   });
 
-  it("is default-off and returns before touching database or connection configuration", async () => {
+  it("checks in the approved production drain flags but does zero work when explicitly disabled", async () => {
     const config = readFileSync(new URL("../wrangler.jsonc", import.meta.url), "utf8");
     const entrypoint = readFileSync(new URL("../src/worker/index.ts", import.meta.url), "utf8");
-    expect(config).toMatch(/"NATIVE_DIRECTORY_OUTBOX_DRAIN_ENABLED"\s*:\s*"false"/);
-    expect(config).toMatch(/"NATIVE_DIRECTORY_PROFILE_BINDING_CONTINUATION_ENABLED"\s*:\s*"false"/);
+    expect(config).toMatch(/"NATIVE_DIRECTORY_OUTBOX_DRAIN_ENABLED"\s*:\s*"true"/);
+    expect(config).toMatch(/"NATIVE_DIRECTORY_PROFILE_BINDING_CONTINUATION_ENABLED"\s*:\s*"true"/);
     expect(config.match(/"1-56\/5 \* \* \* \*"/g)).toHaveLength(1);
     expect(entrypoint).toContain("drainNativeDirectoryOutboxes(env, { rotationTime: event.scheduledTime })");
     const disabled = new Proxy({ NATIVE_DIRECTORY_OUTBOX_DRAIN_ENABLED: "false" }, { get(target, key) {

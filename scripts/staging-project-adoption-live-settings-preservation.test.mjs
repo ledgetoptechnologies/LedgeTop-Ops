@@ -1,3 +1,4 @@
+import { historicalDefaultOffProduction } from "./test-fixtures/historical-default-off-production.mjs";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
@@ -32,7 +33,7 @@ const values = Object.freeze({
 
 function fixture() {
   const source = renderConfigs(root, values).operations;
-  const production = JSON.parse(fs.readFileSync(path.join(root, "apps/operations/wrangler.jsonc"), "utf8"));
+  const production = historicalDefaultOffProduction(JSON.parse(fs.readFileSync(path.join(root, "apps/operations/wrangler.jsonc"), "utf8")));
   const baseline = buildProjectAdoptionFinalizationAcceptanceConfig(source, production);
   return { source, production, baseline };
 }

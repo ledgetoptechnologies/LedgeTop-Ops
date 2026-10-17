@@ -1,3 +1,4 @@
+import { historicalDefaultOffProduction } from "./test-fixtures/historical-default-off-production.mjs";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -72,7 +73,7 @@ function fixture(ignore = ["apps/operations/wrangler.staging.*.json", ".live-set
   fs.writeFileSync(path.join(base, ".gitignore"), `${ignore.join("\n")}\n`);
 
   const rendered = renderConfigs(root, values).operations;
-  const production = JSON.parse(fs.readFileSync(path.join(root, "apps/operations/wrangler.jsonc"), "utf8"));
+  const production = historicalDefaultOffProduction(JSON.parse(fs.readFileSync(path.join(root, "apps/operations/wrangler.jsonc"), "utf8")));
   const baseline = buildProjectAdoptionFinalizationAcceptanceConfig(rendered, production);
   json(path.join(base, PROJECT_ADOPTION_FINALIZATION_ACCEPTANCE_CONFIG.source), rendered);
   json(path.join(base, PROJECT_ADOPTION_FINALIZATION_ACCEPTANCE_CONFIG.production), production);

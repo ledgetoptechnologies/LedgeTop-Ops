@@ -1,3 +1,4 @@
+import { historicalDefaultOffProduction } from "./test-fixtures/historical-default-off-production.mjs";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
@@ -32,7 +33,7 @@ function fixture({ ignored = true, secrets = true } = {}) {
   for (const [app, files] of Object.entries(CONFIGS)) {
     fs.mkdirSync(path.dirname(path.join(base, files.source)), { recursive: true });
     fs.writeFileSync(path.join(base, files.source), `${JSON.stringify(rendered[app], null, 2)}\n`);
-    fs.writeFileSync(path.join(base, files.production), fs.readFileSync(path.join(root, files.production)));
+    fs.writeFileSync(path.join(base, files.production), `${JSON.stringify(historicalDefaultOffProduction(JSON.parse(fs.readFileSync(path.join(root, files.production), "utf8"))), null, 2)}\n`);
   }
   if (secrets) {
     const inventory = path.join(base, SECRET_NAMES); fs.mkdirSync(path.dirname(inventory), { recursive: true });

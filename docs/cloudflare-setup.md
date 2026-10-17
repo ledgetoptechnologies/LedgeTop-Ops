@@ -501,15 +501,18 @@ The historical receiver-only staging configuration set
 tests pass. The repository-owned release checks must verify that the Ops Sync
 service binding targets the reviewed Client Worker named entrypoint and that no
 direct Project Alpha portal credential is required. Opening the internal
-entrypoint does not itself enable client hierarchy reads. The current reviewed
-`default-on-eligibility` profile enables hierarchy reads, automatic eligibility,
-denylist enforcement, and deny-policy management together in both Workers only
+entrypoint does not itself enable client hierarchy reads. The current
+`primary-explicit-folder-delivery` profile retains hierarchy reads, automatic
+eligibility, denylist enforcement, and deny-policy management in both Workers only
 after that shadow parity gate. Never reuse the catalog application key,
 audience, or HMAC secret. Project Alpha retains only the Ops Sync machine
 credentials; Operations owns the private Client Worker binding.
 
-Authenticated delivery is a separate reviewed release profile, not part of the
-default eligibility rollout. `primary-authenticated-delivery` requires exact
+The [current source-contract note](operations/project-alpha-portal-activation.md#current-source-contract)
+specifies the narrow explicit-folder profile; source intent is not deployed
+acceptance. The following full authenticated-delivery profiles are separate
+historical contracts, not rollback instructions for the narrow profile.
+`primary-authenticated-delivery` requires exact
 Client/Operations parity for hierarchy relations, grant management, authority
 mutations, and `AUTHENTICATED_DELIVERY_CREATION_ENABLED`. Keep the creation flag
 off in production until staging evidence is approved. Turning it off later
@@ -517,7 +520,8 @@ stops new grants, restores, and bindings without disabling reads, audits, or
 revokes. Portal emails/notifications and unrelated Project Alpha or membership
 mutation flags stay off.
 
-Select `primary-authenticated-delivery-paused` for that creation-off state. It
+For the full authenticated-delivery profile only, select
+`primary-authenticated-delivery-paused` for that creation-off state. It
 requires hierarchy relations, grant management, and authority mutations to stay
 on in both Workers while requiring creation off. This is the normal first
 rollback artifact after authenticated delivery has been activated; do not use

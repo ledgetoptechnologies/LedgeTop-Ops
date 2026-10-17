@@ -1,3 +1,4 @@
+import { historicalDefaultOffProduction } from "./test-fixtures/historical-default-off-production.mjs";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -47,7 +48,7 @@ function fixture(ignore = outputPatterns) {
   for (const app of apps) {
     const config = NATIVE_PORTAL_ACCEPTANCE_CONFIGS[app];
     sources[app] = rendered[app];
-    production[app] = JSON.parse(fs.readFileSync(path.join(root, config.production), "utf8"));
+    production[app] = historicalDefaultOffProduction(JSON.parse(fs.readFileSync(path.join(root, config.production), "utf8")));
     write(path.join(base, config.source), sources[app]);
     write(path.join(base, config.production), production[app]);
   }

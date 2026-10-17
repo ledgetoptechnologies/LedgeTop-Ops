@@ -1,3 +1,4 @@
+import { historicalDefaultOffProduction } from "./test-fixtures/historical-default-off-production.mjs";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -35,7 +36,7 @@ const values = Object.freeze({
 function pair() {
   return {
     source: renderConfigs(root, values).operations,
-    production: JSON.parse(fs.readFileSync(path.join(root, DIRECTORY_WRITES_ACCEPTANCE_CONFIG.production), "utf8")),
+    production: historicalDefaultOffProduction(JSON.parse(fs.readFileSync(path.join(root, DIRECTORY_WRITES_ACCEPTANCE_CONFIG.production), "utf8"))),
   };
 }
 

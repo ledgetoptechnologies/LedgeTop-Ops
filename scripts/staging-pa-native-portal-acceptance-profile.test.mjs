@@ -1,3 +1,4 @@
+import { historicalDefaultOffProduction } from "./test-fixtures/historical-default-off-production.mjs";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
@@ -42,8 +43,8 @@ function state() {
       operations: rendered.operations,
     },
     production: {
-      delivery: read("apps/client/wrangler.jsonc"),
-      operations: read("apps/operations/wrangler.jsonc"),
+      delivery: historicalDefaultOffProduction(read("apps/client/wrangler.jsonc")),
+      operations: historicalDefaultOffProduction(read("apps/operations/wrangler.jsonc")),
     },
   };
 }

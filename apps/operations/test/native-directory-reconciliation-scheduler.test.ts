@@ -89,13 +89,13 @@ beforeEach(async () => {
 afterAll(async () => runtime.dispose());
 
 describe("default-off native Directory reconciliation scheduler", () => {
-  it("does zero work while disabled and uses a unique 15-minute checked-in cron", async () => {
+  it("keeps production reconciliation unscheduled and does zero work while explicitly disabled", async () => {
     const config = readFileSync(new URL("../wrangler.jsonc", import.meta.url), "utf8");
     const entrypoint = readFileSync(new URL("../src/worker/index.ts", import.meta.url), "utf8");
     const reconciliationCron = "6-51/15 * * * *";
     expect(config).toMatch(/"PROJECT_ALPHA_DIRECTORY_RECONCILIATION_ENABLED"\s*:\s*"false"/);
-    expect(configuredCrons(config)).toContain(reconciliationCron);
-    expect(configuredCrons(config).filter((candidate) => candidate === reconciliationCron)).toHaveLength(1);
+    expect(configuredCrons(config)).not.toContain(reconciliationCron);
+    expect(configuredCrons(config).filter((candidate) => candidate === reconciliationCron)).toHaveLength(0);
     expect(scheduledMinutes(reconciliationCron)).toEqual([6, 21, 36, 51]);
     for (const cron of configuredCrons(config).filter((candidate) => candidate !== reconciliationCron)) {
       expect(scheduledMinutes(cron)).not.toEqual(scheduledMinutes(reconciliationCron));

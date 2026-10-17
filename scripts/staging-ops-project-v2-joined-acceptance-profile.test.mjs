@@ -98,8 +98,9 @@ test("rejects a wrong environment and production identifiers, routes, resources,
         state.production.r2_buckets.find(row => row.binding === "DATA_BUCKET").bucket_name;
     },
     state => {
+      assert.equal(state.production.name, "ledgetop-ops");
       state.source.services.find(row => row.binding === "CLIENT_AUTHORITY_WORKSPACE_BINDING").service =
-        state.production.services.find(row => row.binding === "CLIENT_AUTHORITY_WORKSPACE_BINDING").service;
+        "ledgetop-clients";
     },
   ];
   for (const mutate of mutations) {
