@@ -82,8 +82,8 @@ test("a creation pause preserves grant history and revoke while disabling new ac
   await expect(page.getByRole("button", {name: "Organization", exact: true})).toBeDisabled();
   await expect(page.getByRole("button", {name: "Restore as new version"})).toBeDisabled();
   await expect(page.getByRole("button", {name: "Revoke", exact: true})).toBeEnabled();
-  page.once("dialog", dialog => dialog.accept());
   await page.getByRole("button", {name: "Revoke", exact: true}).click();
+  await page.getByRole("dialog", {name: "Revoke portal access?"}).getByRole("button", {name: "Revoke access", exact: true}).click();
   await expect(page.getByRole("status").filter({hasText: "Authenticated portal access revoked"})).toBeVisible();
   expect(calls.some(call => call.path.endsWith("/grant-logical/revoke") && call.method === "POST")).toBe(true);
   expect(calls.some(call => call.path === "/api/delivery/authenticated-grants" && call.method === "POST")).toBe(false);
@@ -611,11 +611,10 @@ test("client audiences can be searched, reviewed, granted, revoked, and restored
   expect(created?.body).toMatchObject({audienceType: "client", audiencePublicId: "client-acme",
     accessTerms: {kind: "customer", mode: "until_revoked", expiresAt: null}});
 
-  page.once("dialog", async dialog => {
-    expect(dialog.message()).toContain("Revoke authenticated portal access for Acme Client?");
-    await dialog.accept();
-  });
   await page.getByRole("button", {name: "Revoke", exact: true}).click();
+  const revokeDialog = page.getByRole("dialog", {name: "Revoke portal access?"});
+  await expect(revokeDialog).toContainText("Revoke authenticated portal access for Acme Client?");
+  await revokeDialog.getByRole("button", {name: "Revoke access", exact: true}).click();
   await expect(page.getByRole("status").filter({hasText: "Authenticated portal access revoked"})).toBeVisible();
   await expect(page.getByLabel("Authenticated portal grant history")).toContainText("Acme Workspace · Client · revoked · version 1");
   expect(calls.find(call => call.path.endsWith("/grant-logical/revoke"))?.body).toEqual({expectedVersion: 1, reasonCode: "client_delivery_access"});
@@ -694,8 +693,8 @@ test("department audiences require an explicit reviewed grant and reviewed resto
     accessTerms: {kind: "customer", mode: "until_revoked", expiresAt: null},
   });
 
-  page.once("dialog", dialog => dialog.accept());
   await page.getByRole("button", {name: "Revoke", exact: true}).click();
+  await page.getByRole("dialog", {name: "Revoke portal access?"}).getByRole("button", {name: "Revoke access", exact: true}).click();
   await expect(page.getByRole("status").filter({hasText: "Authenticated portal access revoked"})).toBeVisible();
   expect(calls.find(call => call.path.endsWith("/grant-logical/revoke"))?.body).toEqual({expectedVersion: 1, reasonCode: "client_delivery_access"});
 
@@ -824,4 +823,47 @@ test("denylist controls remain hidden while the default-off capability is false"
   });
   await page.goto("/administration");
   await expect(page.getByText("Client Portal identity denylist")).toHaveCount(0);
+});
+
+test("revoking authenticated access uses an in-app confirmation that cancels without network and sends one exact revoke", async ({page}) => {
+  const nativeDialogs: string[] = [];
+  page.on("dialog", dialog => { nativeDialogs.push(dialog.message()); void dialog.dismiss(); });
+  let release!: () => void; const gate = new Promise<void>(resolve => { release = resolve; });
+  const active = primaryGrant();
+  const calls = await mockPrimary(page, (route, call) => {
+    if (call.path === "/api/delivery/authenticated-grants" && call.method === "GET") return route.fulfill({json: {...primaryContext, grants: [active]}});
+    if (call.path.endsWith("/grant-logical/revoke")) return gate.then(() => route.fulfill({json: {grant: primaryGrant({status: "revoked"}), replayed: false}}));
+    return undefined;
+  });
+  const revokes = () => calls.filter(call => call.path.endsWith("/grant-logical/revoke"));
+  await openPrimary(page);
+  const revoke = page.getByRole("button", {name: "Revoke", exact: true});
+  const confirmDialog = page.getByRole("dialog", {name: "Revoke portal access?"});
+
+  await revoke.click();
+  await expect(confirmDialog).toContainText("Revoke authenticated portal access for Acme Organization? Files and other grants will not change.");
+  await confirmDialog.getByRole("button", {name: "Cancel", exact: true}).click();
+  await expect(confirmDialog).toHaveCount(0);
+  await revoke.click();
+  await expect(confirmDialog).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(confirmDialog).toHaveCount(0);
+  expect(revokes()).toHaveLength(0);
+  await expect(page.getByRole("dialog", {name: "Share folder"})).toBeVisible();
+
+  await revoke.click();
+  await revoke.dispatchEvent("click");
+  await expect(confirmDialog).toHaveCount(1);
+  await confirmDialog.getByRole("button", {name: "Revoke access", exact: true}).click();
+  await expect(confirmDialog).toHaveCount(0);
+  await expect.poll(() => revokes().length).toBe(1);
+  await expect(revoke).toBeDisabled();
+  await revoke.dispatchEvent("click");
+  await expect(confirmDialog).toHaveCount(0);
+  release();
+  await expect(page.getByRole("status").filter({hasText: "Authenticated portal access revoked"})).toBeVisible();
+  expect(revokes()).toHaveLength(1);
+  expect(revokes()[0]).toMatchObject({method: "POST", body: {expectedVersion: 1, reasonCode: "client_delivery_access"}});
+  expect(revokes()[0]!.key).toMatch(/^[0-9a-f-]{36}$/);
+  expect(nativeDialogs).toEqual([]);
 });

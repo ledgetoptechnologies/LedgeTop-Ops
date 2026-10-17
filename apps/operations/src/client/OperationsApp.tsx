@@ -5164,7 +5164,7 @@ function PrimaryAuthenticatedDeliveryGrantPanel({ folder, canRevoke, creationEna
   const [error, setError] = useState("");
   const [portalSetupNeeded, setPortalSetupNeeded] = useState(false);
   const [bindingBusy, setBindingBusy] = useState(false);
-  const alive = useRef(false), epoch = useRef(0), mutationBusy = useRef(false), pending = useRef<Pending | null>(null);
+  const alive = useRef(false), epoch = useRef(0), mutationBusy = useRef(false), pending = useRef<Pending | null>(null), confirmingRevoke = useRef(false);
   const readController = useRef<AbortController | null>(null), searchController = useRef<AbortController | null>(null), previewController = useRef<AbortController | null>(null), mutationController = useRef<AbortController | null>(null), reviewTitle = useRef<HTMLHeadingElement>(null);
   const text = (value: unknown): value is string => typeof value === "string" && value.length > 0 && value.length <= 4096;
   const dateValue = (value: unknown) => typeof value === "string" && Number.isFinite(Date.parse(value));
@@ -5285,8 +5285,14 @@ function PrimaryAuthenticatedDeliveryGrantPanel({ folder, canRevoke, creationEna
     if (busy || uncertain || loading || !context || action === "revoke" && !canRevoke) return;
     if (action === "restore") { clearReview(); resetTerms(); setTargetType(grant.audience.type); setRestoreTarget(grant); setSelected({...grant.audience, displayName: grant.audienceLabel}); setQuery(grant.audienceLabel); setOptions([]); return; }
     const reason = reasonCode.trim(); if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,79}$/.test(reason)) { setError("Enter a valid reason code before revoking access."); return; }
-    if (!confirm(`Revoke authenticated portal access for ${grant.audienceLabel}? Files and other grants will not change.`)) return;
-    void execute({path: `/api/delivery/authenticated-grants/${encodeURIComponent(grant.grantId)}/revoke`, body: JSON.stringify({expectedVersion: grant.version, reasonCode: reason}), key: crypto.randomUUID(), action, context, audience: grant.audience, terms: grant.accessTerms, version: grant.version, grantId: grant.grantId});
+    if (confirmingRevoke.current) return;
+    confirmingRevoke.current = true; const generation = epoch.current;
+    void requestChoice({title: "Revoke portal access?", description: `Revoke authenticated portal access for ${grant.audienceLabel}? Files and other grants will not change.`,
+      choices: [{value: "revoke", label: "Revoke access", tone: "danger"}]}).then(choice => {
+      confirmingRevoke.current = false;
+      if (choice !== "revoke" || !alive.current || generation !== epoch.current || mutationBusy.current) return;
+      void execute({path: `/api/delivery/authenticated-grants/${encodeURIComponent(grant.grantId)}/revoke`, body: JSON.stringify({expectedVersion: grant.version, reasonCode: reason}), key: crypto.randomUUID(), action, context, audience: grant.audience, terms: grant.accessTerms, version: grant.version, grantId: grant.grantId});
+    });
   };
   const termsLabel = (terms: PrimaryGrantTerms | null) => !terms ? "Existing access rules — unclassified" : terms.kind === "customer" ? "Customer — retained project history until revoked" : terms.mode === "project_end" ? "Collaborator — project completion + 7 days" : terms.mode === "specific_date" ? "Collaborator — specific expiry date" : "Collaborator — until revoked";
   const disabled = busy || uncertain || loading || !context;
