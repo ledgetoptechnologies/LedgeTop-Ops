@@ -329,19 +329,11 @@ test("production Worker releases use repository-owned deploy wrappers", () => {
 });
 
 test("the deployed Client Worker keeps reviewed resources, hosts, and portal asset routing", () => {
-  // The digest intentionally moved with the reviewed canonical portal hosts
-  // and explicit legacy compatibility origin. Keep the field assertions so a future config change
-  // cannot hide behind a digest refresh.
-  // Reviewed additions: catalog coordination, portal authority, inactive
-  // workspace-binding writers, and the non-content enrollment reader remain off.
-  // Approved staging-only recipient bridge is present but remains default-off.
-  // Reviewed recipient-delivery authority adds only explicit disabled flags.
-  // Native recipient/data transport flags are explicit and remain disabled;
-  // their private production reader binding is present but all HTTP capabilities remain off.
-  // Shared profile editing adds only this private Ops entrypoint binding.
-  // Branding: the invitation sender name is fixed in code ("Ledge Top Client
-  // Portal"), so the CLIENT_PORTAL_INVITATION_FROM_NAME var is removed.
-  assert.equal(normalizedSha256("apps/client/wrangler.jsonc"), "39a22b9d5eef1bd9065d5ab3f220ec01d8b13104122445a90997370befe1d199");
+  // The reviewed production contract retains existing native transports and
+  // enables explicit folder enforcement only. Receiver-only/future authority
+  // gates, route namespaces, no-email guards and resource checks stay exact.
+  // Operator-owned variables survive deployment without copying their values.
+  assert.equal(normalizedSha256("apps/client/wrangler.jsonc"), "2517a084f3d84f8ddd3cf138cfbc7de770c4d6f660d02c50da7101665e6892a1");
   assert.equal("CLIENT_PORTAL_INVITATION_FROM_NAME" in readJson("apps/client/wrangler.jsonc").vars, false);
   const config = readJson("apps/client/wrangler.jsonc");
   assert.deepEqual(config.services.filter(service => service.binding === "SHARED_PROFILE_PORTAL"), [{
@@ -351,7 +343,7 @@ test("the deployed Client Worker keeps reviewed resources, hosts, and portal ass
     "CLIENT_PORTAL_NATIVE_FINANCIAL_ENABLED",
     "CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_WRITER_ENABLED", "CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_STATUS_ENABLED",
     "CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_READ_ENABLED", "CLIENT_PORTAL_OPERATIONS_NATIVE_CONTENT_AUDIT_ENABLED"])
-    assert.equal(config.vars[flag], "false");
+    assert.equal(config.vars[flag], "true");
   assert.equal(config.vars.CLIENT_PORTAL_OPERATIONS_NATIVE_CONTENT_AUDIT_HMAC_SECRET, undefined);
   assert.deepEqual(config.services?.find(service => service.binding === "OPERATIONS_PORTAL_NATIVE_DELIVERY_AUTHORIZATION_READER"), {
     binding: "OPERATIONS_PORTAL_NATIVE_DELIVERY_AUTHORIZATION_READER", service: "ledgetop-ops",
@@ -382,8 +374,8 @@ test("the deployed Client Worker keeps reviewed resources, hosts, and portal ass
   assert.equal(config.vars.PUBLIC_BASE_URL, "https://portal.ledgetopdroneservices.com");
   assert.equal(config.vars.PUBLIC_SHARE_ORIGIN, "https://portal.ledgetopdroneservices.com");
   assert.equal(config.vars.EXPECTED_HOST, "portal.ledgetopdroneservices.com");
-  assert.equal(config.vars.CLIENT_PORTAL_ORIGIN, "https://portal.ledgetopdroneservices.com");
-  assert.equal(config.vars.CLIENT_PORTAL_ORIGINS, "https://portal.ledgetopdroneservices.com,https://portal.ledgetoptechnologies.com");
+  assert.equal(config.vars.CLIENT_PORTAL_ORIGIN, "https://client.ledgetopdroneservices.com");
+  assert.equal(config.vars.CLIENT_PORTAL_ORIGINS, "https://client.ledgetopdroneservices.com,https://portal.ledgetopdroneservices.com,https://portal.ledgetoptechnologies.com");
   assert.equal(config.vars.LEGACY_CLIENT_ORIGINS, "https://client.ledgetopdroneservices.com");
   assert.equal(config.vars.CLIENT_ACCESS_AUDS, `${config.vars.CLIENT_ACCESS_AUD},3bc9637846ccf4e1343b969cc8f14ed2cb0628956293463cf164c4080fa47e57`);
   assert.equal(config.vars.CLIENT_PORTAL_ENABLED, "true");
@@ -393,13 +385,13 @@ test("the deployed Client Worker keeps reviewed resources, hosts, and portal ass
   assert.equal(config.vars.CLIENT_PORTAL_AUTHORITY_V2_WRITER_ENABLED, "false");
   assert.equal(config.vars.CLIENT_PORTAL_AUTHORITY_V2_STATUS_ENABLED, "false");
   assert.equal(config.vars.CLIENT_PORTAL_AUTHORITY_V2_ENROLLMENT_STATUS_ENABLED, "false");
-  assert.equal(config.vars.CLIENT_PORTAL_OPERATIONS_SERVICE_HOME_ENABLED, "false");
-  assert.equal(config.vars.CLIENT_PORTAL_NATIVE_FINANCIAL_ENABLED, "false");
+  assert.equal(config.vars.CLIENT_PORTAL_OPERATIONS_SERVICE_HOME_ENABLED, "true");
+  assert.equal(config.vars.CLIENT_PORTAL_NATIVE_FINANCIAL_ENABLED, "true");
   assert.deepEqual(config.services?.find(service => service.binding === "CLIENT_PORTAL_NATIVE_FINANCIAL_READER"), {
     binding: "CLIENT_PORTAL_NATIVE_FINANCIAL_READER", service: "ledgetop-ops",
     entrypoint: "ClientPortalNativeFinancialReader",
   });
-  assert.equal(config.vars.CLIENT_PORTAL_OPERATIONS_PUBLICATION_WRITER_ENABLED, "false");
+  assert.equal(config.vars.CLIENT_PORTAL_OPERATIONS_PUBLICATION_WRITER_ENABLED, "true");
   assert.equal(config.vars.OPS_PORTAL_ACCESS_AUTHORITY_SHADOW_ENABLED, "false");
   assert.equal(config.vars.CLIENT_PORTAL_CONTENT_AUDIT_ENABLED, "false");
   assert.equal(config.vars.CLIENT_PORTAL_NOTIFICATION_MIGRATION_MAINTENANCE, "false");
@@ -422,7 +414,7 @@ test("the deployed Client Worker keeps reviewed resources, hosts, and portal ass
   assert.equal(config.vars.CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED, "true");
   assert.equal(config.vars.CLIENT_PORTAL_DENY_POLICY_MANAGEMENT_ENABLED, "true");
   assert.equal(config.vars.CLIENT_PORTAL_ROOT_ACCESS_POLICY_ENABLED, "true");
-  assert.equal(config.vars.AUTHENTICATED_DELIVERY_GRANTS_ENABLED, "false");
+  assert.equal(config.vars.AUTHENTICATED_DELIVERY_GRANTS_ENABLED, "true");
   assert.equal(config.vars.AUTHENTICATED_DELIVERY_CREATION_ENABLED, "false");
   assert.equal(config.vars.CLIENT_VIEWER_ENABLED, "false");
   assert.equal(config.vars.CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED, "true");
@@ -456,11 +448,6 @@ test("the deployed Client Worker keeps reviewed resources, hosts, and portal ass
   assert.deepEqual(config.services, [
     { binding: "SHARED_PROFILE_PORTAL", service: "ledgetop-ops", entrypoint: "SharedProfilePortalIngress" },
     {
-      binding: "CLIENT_PORTAL_RECIPIENT_ENROLLMENT_BRIDGE",
-      service: "ledgetop-ops",
-      entrypoint: "ClientPortalRecipientEnrollmentBridge",
-    },
-    {
       binding: "CLIENT_PORTAL_SERVICE_METADATA_READER",
       service: "ledgetop-ops",
       entrypoint: "ClientPortalServiceMetadataReader",
@@ -476,11 +463,6 @@ test("the deployed Client Worker keeps reviewed resources, hosts, and portal ass
       entrypoint: "ViewerSessionIssuer",
     },
     {
-      binding: "CLIENT_ONBOARDING_RECIPIENT_BRIDGE",
-      service: "ledgetop-ops",
-      entrypoint: "ClientOnboardingRecipientBridge",
-    },
-    {
       binding: "CLIENT_PORTAL_NATIVE_FINANCIAL_READER",
       service: "ledgetop-ops",
       entrypoint: "ClientPortalNativeFinancialReader",
@@ -490,7 +472,17 @@ test("the deployed Client Worker keeps reviewed resources, hosts, and portal ass
       service: "ledgetop-ops",
       entrypoint: "OperationsPortalNativeDeliveryAuthorizationReader",
     },
+    {
+      binding: "OPERATIONS_PORTAL_NATIVE_RECIPIENT_ENROLLMENT",
+      service: "ledgetop-ops",
+      entrypoint: "OperationsPortalNativeRecipientEnrollmentIngress",
+    },
   ]);
+  assert.equal(config.keep_vars, true);
+  assert.equal(readJson("scripts/client-portal-release-profile.json").profile, "primary-explicit-folder-delivery");
+  for (const flag of ["CLIENT_PORTAL_NATIVE_RECIPIENT_ENROLLMENT_ENABLED", "CLIENT_PORTAL_OPERATIONS_NATIVE_AUTHORITY_WRITER_ENABLED",
+    "CLIENT_PORTAL_OPERATIONS_NATIVE_AUTHORITY_STATUS_ENABLED", "CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_CANCELLATION_ENABLED"])
+    assert.equal(config.vars[flag], "true");
   assert.equal(config.images, undefined);
   assert.deepEqual(config.stream, { binding: "STREAM" });
   assert.deepEqual(config.workflows, [
@@ -500,10 +492,10 @@ test("the deployed Client Worker keeps reviewed resources, hosts, and portal ass
   assert.deepEqual(config.ratelimits.map((item) => [item.name, item.namespace_id, item.simple.limit]), expectedRateLimits);
 });
 
-test("the deployed Operations Worker keeps catalog and inactive binding transport private and default-off", () => {
-  // Newly mounted PA adoption and binding-refresh routes remain disabled in production by default.
-  // Shared profile dispatch adds only this private Client authority reader.
-  assert.equal(normalizedSha256("apps/operations/wrangler.jsonc"), "d19df2f147214b05aa2e8f170a96a92441d516bb83d5259b476f600d6e75fed8");
+test("the deployed Operations Worker preserves native production transport and explicit folder authority", () => {
+  // Preserve the current native production transport. Deferred catalog/legacy
+  // mutation paths stay disabled and have no production service/workflow binding.
+  assert.equal(normalizedSha256("apps/operations/wrangler.jsonc"), "f9d0ba73c8a8a218352d34e9054e40eabdafb1b98b71bbb253bc8004b9ecb30b");
   const config = readJson("apps/operations/wrangler.jsonc");
   assert.deepEqual(config.services.filter(service => service.binding === "SHARED_PROFILE_PORTAL_AUTHORITY"), [{
     binding: "SHARED_PROFILE_PORTAL_AUTHORITY", service: "ledgetop-clients", entrypoint: "SharedProfilePortalAuthorityReader",
@@ -511,15 +503,15 @@ test("the deployed Operations Worker keeps catalog and inactive binding transpor
   for (const flag of ["PROJECT_ALPHA_API_V2_SYNC_ENABLED", "PROJECT_ALPHA_DIRECTORY_EXACT_ADOPTION_ENABLED", "PROJECT_ALPHA_PROJECT_V2_RECOVERY_ENABLED", "PROJECT_ALPHA_DIRECTORY_EXISTING_RECORD_ADOPTION_ENABLED", "PROJECT_ALPHA_PROJECT_ADOPTION_OPERATIONAL_ENABLED"]) {
     assert.equal([...read("apps/operations/wrangler.jsonc").matchAll(new RegExp(`"${flag}"\\s*:`, "g"))].length, 1);
   }
-  assert.equal(config.vars.PROJECT_ALPHA_API_V2_SYNC_ENABLED, "false");
+  assert.equal(config.vars.PROJECT_ALPHA_API_V2_SYNC_ENABLED, "true");
   assert.equal(config.vars.PROJECT_ALPHA_DIRECTORY_EXACT_ADOPTION_ENABLED, "false");
-  assert.equal(config.vars.PROJECT_ALPHA_DIRECTORY_EXISTING_RECORD_ADOPTION_ENABLED, "false");
+  assert.equal(config.vars.PROJECT_ALPHA_DIRECTORY_EXISTING_RECORD_ADOPTION_ENABLED, "true");
   assert.equal(config.vars.PROJECT_ALPHA_PROJECT_V2_RECOVERY_ENABLED, "false");
   assert.equal(config.vars.PROJECT_ALPHA_DIRECTORY_CREATE_GENERATION_RECOVERY_ENABLED, "false");
   assert.equal(config.vars.PROJECT_ALPHA_DIRECTORY_RELATIONSHIP_GENERATION_RECOVERY_ENABLED, "false");
   assert.equal([...read("apps/operations/wrangler.jsonc").matchAll(/"PROJECT_ALPHA_DIRECTORY_RELATIONSHIP_GENERATION_RECOVERY_ENABLED"\s*:/g)].length, 1);
   assert.equal([...read("apps/operations/wrangler.jsonc").matchAll(/"PROJECT_ALPHA_DIRECTORY_CREATE_GENERATION_RECOVERY_ENABLED"\s*:/g)].length, 1);
-  assert.equal(config.vars.CLIENT_PORTAL_NATIVE_RECIPIENT_SERVICE_HOME_ENABLED, "false");
+  assert.equal(config.vars.CLIENT_PORTAL_NATIVE_RECIPIENT_SERVICE_HOME_ENABLED, "true");
   assert.deepEqual(config.services?.find(service => service.binding === "OPERATIONS_PORTAL_NATIVE_DELIVERY_AUTHORITY"), {
     binding: "OPERATIONS_PORTAL_NATIVE_DELIVERY_AUTHORITY", service: "ledgetop-clients",
     entrypoint: "OperationsPortalNativeDeliveryAuthorityIngress",
@@ -531,8 +523,8 @@ test("the deployed Operations Worker keeps catalog and inactive binding transpor
   assert.equal(config.vars.CLIENT_PORTAL_RECIPIENT_ENROLLMENT_OWNER_ORIGIN, "");
   assert.equal(config.vars.CLIENT_ONBOARDING_ADMIN_ENABLED, "false");
   assert.equal(config.vars.CLIENT_ONBOARDING_RECIPIENT_BRIDGE_ENABLED, "false");
-  assert.equal(config.vars.CLIENT_PORTAL_SERVICE_METADATA_RPC_ENABLED, "false");
-  assert.equal(config.vars.CLIENT_PORTAL_NATIVE_FINANCIAL_RPC_ENABLED, "false");
+  assert.equal(config.vars.CLIENT_PORTAL_SERVICE_METADATA_RPC_ENABLED, "true");
+  assert.equal(config.vars.CLIENT_PORTAL_NATIVE_FINANCIAL_RPC_ENABLED, "true");
   assert.equal(config.vars.PROJECT_ALPHA_CATALOG_STAGING_COORDINATOR_ENABLED, "false");
   assert.equal(config.vars.PROJECT_ALPHA_PROJECT_ADOPTION_REVIEW_ENABLED, "false");
   assert.equal(config.vars.PROJECT_ALPHA_PROJECT_ADOPTION_OPERATIONAL_ENABLED, "false");
@@ -546,36 +538,29 @@ test("the deployed Operations Worker keeps catalog and inactive binding transpor
   assert.equal(config.vars.CLIENT_PORTAL_WORKSPACE_BINDING_ADMIN_ORIGIN, "");
   assert.equal(config.vars.CLIENT_PORTAL_AUTHORITY_V3_OWNER_ENABLED, "false");
   assert.equal(config.vars.CLIENT_PORTAL_AUTHORITY_V3_OWNER_ORIGIN, "");
-  assert.deepEqual(config.services?.find((service) => service.binding === "CLIENT_AUTHORITY_WORKSPACE_BINDING"), {
-    binding: "CLIENT_AUTHORITY_WORKSPACE_BINDING",
-    service: "ledgetop-clients",
-    entrypoint: "ClientAuthorityWorkspaceBindingIngress",
-  });
-  assert.deepEqual(config.services?.find((service) => service.binding === "CLIENT_PORTAL_AUTHORITY_V2"), {
-    binding: "CLIENT_PORTAL_AUTHORITY_V2", service: "ledgetop-clients", entrypoint: "ClientPortalAuthorityV2Ingress",
-  });
-  assert.deepEqual(config.services?.find((service) => service.binding === "OPS_INVENTORY_CATALOG_STAGING"), {
-    binding: "OPS_INVENTORY_CATALOG_STAGING",
-    service: "ledgetop-clients",
-    entrypoint: "OpsInventoryCatalogStagingIngress",
-  });
-  assert.deepEqual(config.services?.find((service) => service.binding === "OPS_INVENTORY_CATALOG_PROMOTION"), {
-    binding: "OPS_INVENTORY_CATALOG_PROMOTION",
-    service: "ledgetop-clients",
-    entrypoint: "OpsInventoryCatalogPromotionCoordinator",
-  });
-  assert.deepEqual(config.services?.find((service) => service.binding === "CLIENT_PORTAL_ACCESS_AUTHORITY"), {
-    binding: "CLIENT_PORTAL_ACCESS_AUTHORITY",
-    service: "ledgetop-clients",
-    entrypoint: "OpsPortalAccessAuthorityIngress",
-  });
-  assert.deepEqual(config.workflows?.find((workflow) => workflow.binding === "OPS_CATALOG_PROMOTION_WORKFLOW"), {
-    name: "ledgetop-ops-catalog-promotion",
-    binding: "OPS_CATALOG_PROMOTION_WORKFLOW",
-    class_name: "ProjectAlphaCatalogPromotionWorkflow",
-  });
+  assert.deepEqual(config.services, [
+    { binding: "SHARED_PROFILE_PORTAL_AUTHORITY", service: "ledgetop-clients", entrypoint: "SharedProfilePortalAuthorityReader" },
+    { binding: "OPERATIONS_PORTAL_NATIVE_DELIVERY_AUTHORITY", service: "ledgetop-clients", entrypoint: "OperationsPortalNativeDeliveryAuthorityIngress" },
+    { binding: "OPERATIONS_PORTAL_WORKSPACE_PUBLICATION", service: "ledgetop-clients", entrypoint: "OperationsPortalWorkspacePublicationIngress" },
+    { binding: "OPERATIONS_PORTAL_NATIVE_RECIPIENT_AUTHORITY", service: "ledgetop-clients", entrypoint: "OperationsPortalNativeRecipientAuthorityIngress" },
+  ]);
+  assert.equal(config.workflows?.find(workflow => workflow.binding === "OPS_CATALOG_PROMOTION_WORKFLOW"), undefined);
   assert.equal(config.workflows?.find((workflow) => workflow.binding === "OPS_CATALOG_PROMOTION_WORKFLOW")?.schedules, undefined);
   assert(!config.triggers.crons.some((cron) => /catalog/i.test(cron)));
+  assert.deepEqual(config.triggers.crons, ["*/15 * * * *", "*/5 * * * *", "2-57/5 * * * *", "17 * * * *", "4-59/15 * * * *", "3-58/5 * * * *", "1-56/5 * * * *"]);
+  assert.equal(config.keep_vars, true);
+  assert.equal(config.vars.NATIVE_DIRECTORY_EXISTING_IMPORT_ENABLED, "false");
+  assert.equal(config.vars.NATIVE_DIRECTORY_EXISTING_IMPORT_AREAS, undefined);
+  for (const flag of ["NATIVE_DIRECTORY_PROFILE_WRITES_ENABLED", "NATIVE_DIRECTORY_OUTBOX_DRAIN_ENABLED", "NATIVE_DIRECTORY_PROFILE_BINDING_CONTINUATION_ENABLED",
+    "OPERATIONS_PORTAL_NATIVE_DELIVERY_OWNER_ENABLED", "OPERATIONS_PORTAL_NATIVE_DELIVERY_AUTHORITY_DISPATCH_ENABLED", "OPERATIONS_PORTAL_NATIVE_DELIVERY_READER_ENABLED",
+    "OPERATIONS_PORTAL_NATIVE_DELIVERY_CANCELLATION_ENABLED", "OPERATIONS_PORTAL_NATIVE_BILLING_OWNER_ENABLED", "OPERATIONS_PORTAL_WORKSPACE_OWNER_ENABLED",
+    "OPERATIONS_PORTAL_WORKSPACE_PUBLICATION_DISPATCH_ENABLED", "CLIENT_PORTAL_NATIVE_RECIPIENT_ENROLLMENT_ENABLED", "CLIENT_PORTAL_NATIVE_RECIPIENT_OWNER_ENABLED",
+    "OPERATIONS_PORTAL_NATIVE_RECIPIENT_AUTHORITY_DISPATCH_ENABLED", "PROJECT_ALPHA_DIRECTORY_LOCAL_PROFILE_ADOPTION_ENABLED", "PROJECT_ALPHA_PRIVATE_ADMIN_TRANSPORT_ENABLED"])
+    assert.equal(config.vars[flag], "true");
+  assert.deepEqual(Object.fromEntries(["CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED", "AUTHENTICATED_DELIVERY_GRANTS_ENABLED", "PROJECT_ACCESS_AUTHORITY_MUTATIONS_ENABLED", "AUTHENTICATED_DELIVERY_CREATION_ENABLED"].map(flag => [flag, config.vars[flag]])), {
+    CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED: "false", AUTHENTICATED_DELIVERY_GRANTS_ENABLED: "true",
+    PROJECT_ACCESS_AUTHORITY_MUTATIONS_ENABLED: "true", AUTHENTICATED_DELIVERY_CREATION_ENABLED: "true",
+  });
 });
 
 test("public route, host-namespace guard, health, and isolated cookie contracts remain reviewed", () => {

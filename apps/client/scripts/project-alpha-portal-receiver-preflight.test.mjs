@@ -14,6 +14,7 @@ const declaration = JSON.parse(fs.readFileSync(path.resolve(appDirectory, "../..
 function receiverConfig() {
   const result = structuredClone(config);
   for (const flag of eligibilityFlags) result.vars[flag] = "false";
+  for (const flag of ["AUTHENTICATED_DELIVERY_GRANTS_ENABLED", "PROJECT_ACCESS_AUTHORITY_MUTATIONS_ENABLED", "AUTHENTICATED_DELIVERY_CREATION_ENABLED"]) result.vars[flag] = "false";
   return result;
 }
 
@@ -68,6 +69,7 @@ for (const profile of ["receiver-only", "default-on-eligibility"]) {
   test(`${profile} preserves every adjacent receiver gate and ingress credential check`, () => {
     const client = receiverConfig();
     const ops = structuredClone(operations);
+    for (const flag of ["AUTHENTICATED_DELIVERY_GRANTS_ENABLED", "PROJECT_ACCESS_AUTHORITY_MUTATIONS_ENABLED", "AUTHENTICATED_DELIVERY_CREATION_ENABLED"]) ops.vars[flag] = "false";
     for (const item of [client, ops]) for (const flag of eligibilityFlags) item.vars[flag] = profile === "receiver-only" ? "false" : "true";
     const intent = { schemaVersion: 1, profile };
     const check = (candidate, secrets = current) => validatePortalReleasePreflight(candidate, ops, intent, secrets);
@@ -98,4 +100,29 @@ test("Wrangler secret inventory parser accepts only named JSON entries", () => {
   assert.deepEqual([...parseSecretNames([{ name: "PROJECT_ALPHA_PORTAL_HMAC_SECRET", type: "secret_text" }])], ["PROJECT_ALPHA_PORTAL_HMAC_SECRET"]);
   assert.throws(() => parseSecretNames([{ type: "secret_text" }]));
   assert.throws(() => parseSecretNames({ name: "PROJECT_ALPHA_PORTAL_HMAC_SECRET" }));
+});
+
+test("explicit production folder preflight preserves physical deployment admission and native recipient services", () => {
+  assert.equal(declaration.profile, "primary-explicit-folder-delivery");
+  assert.deepEqual(validatePortalReleasePreflight(config, operations, declaration, current), []);
+  const profile = JSON.parse(config.vars.CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_DEPLOYMENT_PROFILE);
+  assert.deepEqual(profile, {
+    version: 1,
+    accountId: "846c924bf17bf4f3dd15c97a4c5d1d51",
+    workerName: config.name,
+    databaseBinding: "DELIVERY_DB",
+    databaseId: config.d1_databases.find(binding => binding.binding === "DELIVERY_DB").database_id,
+    portalOrigin: config.vars.CLIENT_PORTAL_ORIGIN,
+    publicShareOrigin: config.vars.PUBLIC_SHARE_ORIGIN,
+  });
+  assert.deepEqual(operations.services.find(binding => binding.binding === "OPERATIONS_PORTAL_NATIVE_RECIPIENT_AUTHORITY"), {
+    binding: "OPERATIONS_PORTAL_NATIVE_RECIPIENT_AUTHORITY", service: config.name, entrypoint: "OperationsPortalNativeRecipientAuthorityIngress",
+  });
+  assert.deepEqual(config.services.find(binding => binding.binding === "OPERATIONS_PORTAL_NATIVE_RECIPIENT_ENROLLMENT"), {
+    binding: "OPERATIONS_PORTAL_NATIVE_RECIPIENT_ENROLLMENT", service: operations.name, entrypoint: "OperationsPortalNativeRecipientEnrollmentIngress",
+  });
+  const staging = structuredClone(config);
+  staging.vars.ENVIRONMENT = "staging";
+  staging.name = "ledgetop-clients-staging";
+  assert.ok(validatePortalReleasePreflight(staging, operations, declaration, current).some(error => error.includes("exact production Worker")));
 });
