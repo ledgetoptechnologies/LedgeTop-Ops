@@ -1,5 +1,6 @@
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
+import { AppDialogHost } from "@ltds/ui";
 import "@ltds/ui/styles.css";
 import "mapbox-gl/dist/mapbox-gl.css";
 import "./styles.css";
@@ -54,4 +55,4 @@ createRoot(document.getElementById("root")!).render(<StrictMode>{projectReplayAc
   ? <ClientOnboardingStaff />
   : viewerShellRoute
   ? <OperationsViewerShell route={viewerShellRoute} />
-  : <OperationsApp />}</StrictMode>);
+  : <OperationsApp />}<AppDialogHost /></StrictMode>);

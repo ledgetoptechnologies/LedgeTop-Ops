@@ -3,7 +3,7 @@ import {Miniflare} from 'miniflare';
 import {afterAll,beforeAll,beforeEach,describe,expect,it,vi} from 'vitest';
 import {splitD1MigrationStatements} from '../../client/test/helpers/d1-migrations';
 import {createAuthenticatedDeliveryGrant,previewAuthenticatedDeliveryGrant,listAuthenticatedDeliveryGrants,revokeAuthenticatedDeliveryGrant,
-  restoreAuthenticatedDeliveryGrant,type AuthenticatedDeliveryGrantInput} from '../src/worker/authenticated-delivery-grants';
+  restoreAuthenticatedDeliveryGrant,searchAuthenticatedDeliveryGrantAudiences,type AuthenticatedDeliveryGrantInput} from '../src/worker/authenticated-delivery-grants';
 import {authorizeAuthenticatedDeliveryGrant,listAuthorizedAuthenticatedDeliveryPrefixes} from '../../client/src/worker/client-portal/authenticated-delivery-grants';
 import {authorizeEffectiveWorkspaceProject,listPortalWorkspaceHierarchy} from '../../client/src/worker/client-portal/workspace-v2';
 import type {Env,StaffPrincipal} from '../src/worker/types';
@@ -118,6 +118,35 @@ describe('primary staff project access terms and real customer history',{timeout
   },180_000);
   beforeEach(async()=>{await ops.prepare(`DELETE FROM staff_permission_overrides WHERE staff_id=? AND effect='deny'`).bind(staff.id).run();});
   afterAll(async()=>runtime.dispose());
+  it('shares with the exact reenrolled principal through staff search, preview, create and revoke',async()=>{
+    const f=await fixture();
+    await delivery.prepare(`INSERT INTO portal_v2_identity_eligibility_bindings(identity_id,workspace_id,principal_public_id,principal_source_version,verified_email) VALUES(?,?,'exact-person','person-v1',?)`).bind(f.identity,f.workspace,f.person.email).run();
+    await delivery.prepare("UPDATE pa_portal_principals SET status='revoked' WHERE workspace_id=? AND public_id='exact-person'").bind(f.workspace).run();
+    const old=await delivery.prepare("SELECT * FROM pa_portal_principals WHERE workspace_id=? AND public_id='exact-person'").bind(f.workspace).first();
+    const history=(await delivery.prepare("SELECT * FROM portal_v2_identity_eligibility_bindings WHERE workspace_id=? AND principal_public_id='exact-person'").bind(f.workspace).all()).results;
+    await delivery.batch([
+      delivery.prepare(`INSERT INTO pa_portal_principals(workspace_id,public_id,email_hint,display_name,source_version,status) VALUES(?,'replacement-person',?,'Replacement recipient','person-v2','active')`).bind(f.workspace,f.person.email),
+      delivery.prepare(`INSERT INTO portal_v2_identity_eligibility_bindings(identity_id,workspace_id,principal_public_id,principal_source_version,verified_email) VALUES(?,?,'replacement-person','person-v2',?)`).bind(f.identity,f.workspace,f.person.email),
+      delivery.prepare("UPDATE portal_v2_workspace_memberships SET source_version='person-v2' WHERE workspace_id=? AND identity_id=?").bind(f.workspace,f.identity),
+    ]);
+    const search=await searchAuthenticatedDeliveryGrantAudiences(env,staff,f.binding,'Replacement','principal');
+    expect(search.audiences).toEqual([expect.objectContaining({publicId:'replacement-person',currentAuthorizedRecipientCount:1})]);
+    const operation={...f.operation,audiencePublicId:'replacement-person'};
+    const preview=await previewAuthenticatedDeliveryGrant(env,staff,operation);
+    const created=await createAuthenticatedDeliveryGrant(env,staff,{...operation,expectedContextVersion:preview.contextVersion},`reenrolled-create-${f.n}`);
+    expect((await delivery.prepare(`SELECT identity_id,principal_public_id FROM portal_v2_authenticated_delivery_grant_recipients WHERE grant_id=(SELECT id FROM portal_v2_authenticated_delivery_grants WHERE logical_grant_id=?)`).bind(created.grant.grantId).all()).results).toEqual([{identity_id:f.identity,principal_public_id:'replacement-person'}]);
+    expect(await authorizeAuthenticatedDeliveryGrant(env,f.person,f.workspace,f.binding)).toBe(true);
+    await delivery.prepare("UPDATE portal_v2_identity_eligibility_bindings SET principal_source_version='stale' WHERE workspace_id=? AND principal_public_id='replacement-person'").bind(f.workspace).run();
+    expect((await searchAuthenticatedDeliveryGrantAudiences(env,staff,f.binding,'Replacement','principal')).audiences).toEqual([]);
+    await expect(previewAuthenticatedDeliveryGrant(env,staff,operation)).rejects.toMatchObject({status:404});
+    expect(await authorizeAuthenticatedDeliveryGrant(env,f.person,f.workspace,f.binding)).toBe(false);
+    await delivery.prepare("UPDATE portal_v2_identity_eligibility_bindings SET principal_source_version='person-v2' WHERE workspace_id=? AND principal_public_id='replacement-person'").bind(f.workspace).run();
+    await revokeAuthenticatedDeliveryGrant(env,staff,created.grant.grantId,1,'reenrollment_test',`reenrolled-revoke-${f.n}`);
+    expect(await authorizeAuthenticatedDeliveryGrant(env,f.person,f.workspace,f.binding)).toBe(false);
+    expect(await delivery.prepare("SELECT * FROM pa_portal_principals WHERE workspace_id=? AND public_id='exact-person'").bind(f.workspace).first()).toEqual(old);
+    expect((await delivery.prepare("SELECT * FROM portal_v2_identity_eligibility_bindings WHERE workspace_id=? AND principal_public_id='exact-person'").bind(f.workspace).all()).results).toEqual(history);
+    expect((await delivery.prepare('PRAGMA foreign_key_check').all()).results).toEqual([]);
+  });
   it('uses the same directory label in list/review and creates one immutable reviewed term',async()=>{
     const f=await fixture(),list=await listAuthenticatedDeliveryGrants(env,staff,f.prefix),preview=await previewAuthenticatedDeliveryGrant(env,staff,f.operation);
     expect(list).toMatchObject({projectName:`Delivery label ${f.n}`,accessTermsSupported:true,projectEndSupported:false});

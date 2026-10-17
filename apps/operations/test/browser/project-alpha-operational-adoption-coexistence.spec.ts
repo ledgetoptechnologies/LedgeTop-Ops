@@ -131,6 +131,7 @@ test("PA-first adoption coexists with native management and transitions to canon
   await expect(projectLink).toHaveAttribute("href", projectPath);
   await projectLink.click();
   await expect(page).toHaveURL(new RegExp(`${projectPath}$`));
+  await page.waitForLoadState("domcontentloaded");
   const workspace = page.getByRole("region", { name: "Business project workspace", exact: true });
   await expect(workspace.getByRole("heading", { name: "Adopted roof survey", exact: true })).toBeVisible();
   await expect(workspace.getByRole("heading", { name: "Project Alpha inbound review", exact: true })).toBeVisible();

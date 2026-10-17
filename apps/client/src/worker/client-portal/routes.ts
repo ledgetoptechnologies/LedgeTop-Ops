@@ -467,11 +467,14 @@ export function createClientPortalRouter(
           const nativeRequestPath = /^(?:\/api\/client)?\/(?:request-readiness|service-catalog(?:\/page)?|service-request-drafts|service-requests|notifications|notification-history)(?:\/|$)/
             .test(c.req.path);
           const notificationHistoryRequest=/^(?:\/api\/client)?\/notification-history(?:\/authenticated-delivery\/[A-Za-z0-9_-]+)?$/.test(c.req.path);
-          const native = selectedWorkspace && nativeRequestPath && (notificationHistoryRequest||nativeServiceRequestsEnabled(c.env))
+          // Only an already decoded resource coordinate can select a native
+          // delivery workspace; the resource router still proves the live grant.
+          const nativeDeliveryResource=Boolean(deliveryResource)&&['GET','HEAD'].includes(c.req.method);
+          const native = selectedWorkspace && (nativeDeliveryResource || nativeRequestPath && (notificationHistoryRequest||nativeServiceRequestsEnabled(c.env)))
             ? await resolveNativePortalWorkspaceReadContext(c.env, principal, selectedWorkspace)
             : null;
           if (!native) throw new HTTPException(403, { message: "Select an authorized client workspace" });
-          if (!notificationHistoryRequest&&!await nativeRequestSchemaReady(c.env) && !c.req.path.endsWith("/request-readiness"))
+          if (!notificationHistoryRequest&&!nativeDeliveryResource&&!await nativeRequestSchemaReady(c.env) && !c.req.path.endsWith("/request-readiness"))
             throw new HTTPException(503, { res: Response.json({
               error: "Native service requests are temporarily unavailable until storage migration is ready.",
               code: "request_unavailable",

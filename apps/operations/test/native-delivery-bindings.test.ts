@@ -144,6 +144,37 @@ describe('real D1 native staff folder binding and exact principal delegation',{t
   });
   afterAll(async()=>runtime.dispose());
 
+  it('issues a native secondary share for the exact reenrolled principal without a legacy bridge',async()=>{
+    const f=await fixture(),workspace=f.operation.workspaceId;
+    const email=await delivery.prepare('SELECT verified_email FROM portal_v2_identities WHERE id=?').bind(f.identity).first<string>('verified_email');
+    await delivery.prepare(`INSERT INTO portal_v2_identity_eligibility_bindings(identity_id,workspace_id,principal_public_id,principal_source_version,verified_email) VALUES(?,?,'exact-person','person-v1',?)`).bind(f.identity,workspace,email).run();
+    await delivery.prepare("UPDATE pa_portal_principals SET status='revoked' WHERE workspace_id=? AND public_id='exact-person'").bind(workspace).run();
+    const old=await delivery.prepare("SELECT * FROM pa_portal_principals WHERE workspace_id=? AND public_id='exact-person'").bind(workspace).first();
+    const history=(await delivery.prepare("SELECT * FROM portal_v2_identity_eligibility_bindings WHERE workspace_id=? AND principal_public_id='exact-person'").bind(workspace).all()).results;
+    await delivery.batch([
+      delivery.prepare(`INSERT INTO pa_portal_principals(workspace_id,public_id,email_hint,display_name,source_version,status) VALUES(?,'rebound-person',?,'Rebound recipient','person-v1','active')`).bind(workspace,email),
+      delivery.prepare(`INSERT INTO portal_v2_identity_eligibility_bindings(identity_id,workspace_id,principal_public_id,principal_source_version,verified_email) VALUES(?,?,'rebound-person','person-v1',?)`).bind(f.identity,workspace,email),
+    ]);
+    expect(await delivery.prepare('SELECT legacy_account_id FROM portal_v2_workspaces WHERE id=?').bind(workspace).first('legacy_account_id')).toBeNull();
+    const before=await delivery.prepare('SELECT count(*) n FROM client_accounts').first('n');
+    const operation={...f.operation,principalPublicId:'rebound-person'};
+    const recipients=await searchNativeDeliveryRecipients(env,principal,{...operation,q:'Rebound'});
+    expect(recipients.recipients).toEqual([expect.objectContaining({principalPublicId:'rebound-person'})]);
+    const preview=await previewNativeDeliveryGrant(env,principal,operation);
+    const created=await createNativeDeliveryGrant(env,principal,{...operation,expectedContextVersion:preview.contextVersion},`rebound-native-create-${counter}`);
+    expect((await delivery.prepare('SELECT identity_id,principal_public_id FROM portal_v2_authenticated_delivery_grant_recipients WHERE grant_id=?').bind(created.grant.id).all()).results).toEqual([{identity_id:f.identity,principal_public_id:'rebound-person'}]);
+    expect((await readable(f)).map(g=>g.grant_id)).toEqual([created.grant.id]);
+    await delivery.prepare("UPDATE portal_v2_identity_eligibility_bindings SET principal_source_version='stale' WHERE workspace_id=? AND principal_public_id='rebound-person'").bind(workspace).run();
+    expect((await searchNativeDeliveryRecipients(env,principal,{...operation,q:'Rebound'})).recipients).toEqual([]);
+    await expect(previewNativeDeliveryGrant(env,principal,operation)).rejects.toMatchObject({status:404});
+    await delivery.prepare("UPDATE portal_v2_identity_eligibility_bindings SET principal_source_version='person-v1' WHERE workspace_id=? AND principal_public_id='rebound-person'").bind(workspace).run();
+    await revokeNativeDeliveryGrant(env,principal,created.grant.id,{folderRef:operation.folderRef,expectedVersion:1,reasonCode:'revoke'},`rebound-native-revoke-${counter}`);
+    expect(await readable(f)).toEqual([]);
+    expect(await delivery.prepare('SELECT count(*) n FROM client_accounts').first('n')).toBe(before);
+    expect(await delivery.prepare("SELECT * FROM pa_portal_principals WHERE workspace_id=? AND public_id='exact-person'").bind(workspace).first()).toEqual(old);
+    expect((await delivery.prepare("SELECT * FROM portal_v2_identity_eligibility_bindings WHERE workspace_id=? AND principal_public_id='exact-person'").bind(workspace).all()).results).toEqual(history);
+    expect((await delivery.prepare('PRAGMA foreign_key_check').all()).results).toEqual([]);
+  },120_000);
   it('uses real explicit target/principal selections and exact preview echoes',async()=>{
     const f=await fixture(),targets=await searchNativeDeliveryTargets(env,principal,f.operation.folderRef,`Project ${counter}`);
     expect(targets.targets).toContainEqual({sourceId,sourceName:'Secondary Alpha',workspaceId:f.operation.workspaceId,workspaceName:`Workspace ${counter}`,projectId:f.project,projectName:`Native Project ${counter}`,projectEndSupported:false});

@@ -1,3 +1,5 @@
+import {projectedPrincipalIdentitySql} from '../../../../packages/shared/src/projected-principal-identity';
+import {aliasWorkspaceWitnessSql,correspondenceGrantSql,resolveDirectoryPortalSource,type CorrespondenceEnv} from './portal-directory-correspondence';
 import { z } from 'zod';
 import { isAdministrator } from './acl';
 import type { Env,StaffPrincipal } from './types';
@@ -12,13 +14,34 @@ export const portalUpdateSchema=portalProofSchema.extend({grantId:z.string().uui
  profile:z.record(z.string(),z.string().max(1000)).refine(value=>Object.keys(value).length<=10)}).strict();
 const transitionSchema=z.object({protocolVersion:z.literal(1),operationId:z.string().uuid(),workspaceId:text,sourceId:source,
  expectedRevision:z.number().int().nonnegative(),revision:z.number().int().positive(),state:z.enum(['active','blocked'])}).strict();
-export const portalGrantSchema=z.object({operationId:z.string().uuid(),id:z.string().uuid(),workspaceId:text,sourceId:source,
+export const portalGrantSchema=z.object({operationId:z.string().uuid(),id:z.string().uuid(),workspaceId:text,sourceId:source,portalSourceId:source.optional(),correspondenceRevisionId:z.string().uuid().optional(),
  recipientMode:z.enum(['verified_identity','first_verified_identity']).default('verified_identity'),issuer:text.nullable(),subject:text.nullable(),principalPublicId:text,targetType:z.enum(['client','organization']),targetPublicId:text,
  recordId:text,groupId:z.string().uuid(),expectedRevision:z.number().int().nonnegative(),state:z.enum(['active','revoked'])}).strict()
- .refine(v=>v.recipientMode==='verified_identity'?v.issuer!==null&&v.subject!==null:v.issuer===null&&v.subject===null&&v.targetType==='client');
+ .refine(v=>v.recipientMode==='verified_identity'?v.issuer!==null&&v.subject!==null:v.issuer===null&&v.subject===null&&v.targetType==='client')
+ .refine(v=>(v.portalSourceId===undefined)===(v.correspondenceRevisionId===undefined)&&(!v.portalSourceId||v.portalSourceId!==v.sourceId));
 export type SharedProfilePortalGrant={id:string;workspace_id:string;source_id:string;source_instance_id:string;application_id:string;history_epoch_id:string;issuer:string;subject:string;principal_public_id:string;
- target_type:'client'|'organization';target_public_id:string;record_id:string;group_id:string;revision:number;profile_json:string;version:number;kind:'client'|'organization';group_membership_json:string};
+ target_type:'client'|'organization';target_public_id:string;record_id:string;group_id:string;revision:number;profile_json:string;version:number;kind:'client'|'organization';group_membership_json:string;directory_source_id?:string|null;correspondence_revision_id?:string|null};
 type Grant=SharedProfilePortalGrant;
+
+export type SharedProfilePortalEnvironment=Pick<Env,'OPS_DB'>&Partial<Pick<Env,'DELIVERY_DB'|'PROJECT_ALPHA_API_V2_CONNECTIONS'>>;
+export async function sharedProfileCorrespondenceColumns(db:Pick<D1Database,'prepare'>):Promise<boolean>{
+ const row=await db.prepare("SELECT COUNT(*) n FROM pragma_table_info('shared_profile_portal_grants') WHERE name IN('directory_source_id','correspondence_revision_id')").first<number>('n');return row===2;
+}
+export async function sharedProfileGrantSourceCurrent(env:SharedProfilePortalEnvironment,grant:Pick<Grant,'source_id'|'source_instance_id'|'application_id'|'history_epoch_id'|'directory_source_id'|'correspondence_revision_id'|'record_id'|'target_type'|'target_public_id'|'workspace_id'>):Promise<boolean>{
+ const mapping=await env.OPS_DB.withSession('first-primary').prepare(`SELECT 1 FROM project_alpha_active_directory_mappings
+  WHERE record_id=? AND source_id=? AND resource_type=? AND project_alpha_public_id=? AND source_instance_id=? AND application_id=? AND history_epoch_id=?`)
+  .bind(grant.record_id,grant.directory_source_id??grant.source_id,grant.target_type,grant.target_public_id,grant.source_instance_id,grant.application_id,grant.history_epoch_id).first();
+ if(!mapping)return false;
+ if(grant.directory_source_id==null&&grant.correspondence_revision_id==null)return true;
+ if(!grant.directory_source_id||!grant.correspondence_revision_id||grant.directory_source_id===grant.source_id||!env.DELIVERY_DB)return false;
+ const resolved=await resolveDirectoryPortalSource(env as CorrespondenceEnv,grant.directory_source_id,
+  {sourceInstanceId:grant.source_instance_id,applicationId:grant.application_id,historyEpochId:grant.history_epoch_id},grant.correspondence_revision_id);
+ if(!resolved||resolved.portalSourceId!==grant.source_id||resolved.correspondenceRevisionId!==grant.correspondence_revision_id)return false;
+ return !!await env.DELIVERY_DB.withSession('first-primary').prepare(`SELECT 1 FROM portal_v2_workspaces w
+  WHERE w.id=? AND w.project_alpha_source_id=? AND w.status='active' AND ${aliasWorkspaceWitnessSql('w')}`)
+  .bind(grant.workspace_id,grant.source_id).first();
+}
+
 
 /** Private Client service binding only. A monotonic block must precede Delivery authority changes. */
 export async function transitionSharedProfilePortalAuthority(env:Pick<Env,'OPS_DB'>,raw:SharedProfileAuthorityTransition):Promise<{ok:boolean;revision?:number}>{
@@ -35,9 +58,38 @@ export async function transitionSharedProfilePortalAuthority(env:Pick<Env,'OPS_D
  }catch{return{ok:false};}
 }
 
+
+async function portalGrantOwnerCurrent(env:Env,v:z.infer<typeof portalGrantSchema>,portalSourceId:string):Promise<boolean>{
+  const clientDb=env.DELIVERY_DB.withSession('first-primary');
+  const eligibility=!!await clientDb.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='portal_v2_identity_eligibility_bindings'").first();
+  return !!await clientDb.prepare(`SELECT 1 ok FROM portal_v2_workspaces w
+   JOIN pa_portal_workspace_sources s ON s.workspace_id=w.id AND s.projection_source_id=w.project_alpha_source_id
+   JOIN portal_v2_directory_checkpoints c ON c.workspace_id=w.id
+   JOIN portal_v2_directory_generations g ON g.id=c.active_generation_id AND g.workspace_id=w.id AND g.status='active' AND g.complete=1
+   ${v.portalSourceId?`JOIN portal_v2_directory_entities root ON root.workspace_id=w.id AND root.generation_id=g.id AND root.active=1 AND root.parent_public_id IS NULL
+    AND ((w.root_type='organization' AND root.entity_type='organization' AND root.public_id=w.pa_organization_public_id)
+      OR (w.root_type='standalone_client' AND root.entity_type IN('client','standalone_client') AND root.public_id=w.pa_client_public_id))`:''}
+   JOIN pa_portal_principals p ON p.workspace_id=w.id AND p.public_id=? AND p.status='active'
+   LEFT JOIN portal_v2_identities i ON i.id=${eligibility?projectedPrincipalIdentitySql('p'):'p.identity_id'} AND i.status='active' AND i.revoked_at IS NULL
+   LEFT JOIN portal_v2_workspace_memberships m ON m.workspace_id=w.id AND m.identity_id=i.id AND m.status='active' AND m.revoked_at IS NULL
+   JOIN portal_v2_directory_entities e ON e.workspace_id=w.id AND e.generation_id=g.id AND e.public_id=? AND e.active=1
+   WHERE w.id=? AND w.project_alpha_source_id=? AND w.status='active' ${v.portalSourceId?`AND ${aliasWorkspaceWitnessSql('w')}`:''}
+   AND (?='first_verified_identity' OR (i.issuer=? AND i.subject=? AND m.id IS NOT NULL))
+   AND ((?='organization' AND e.entity_type='organization' AND e.parent_public_id IS NULL AND w.pa_organization_public_id=e.public_id)
+     OR (?='client' AND e.entity_type IN('client','standalone_client')
+      ${v.portalSourceId?"AND ((w.root_type='organization' AND e.parent_public_id=root.public_id) OR (w.root_type='standalone_client' AND e.public_id=root.public_id AND e.parent_public_id IS NULL))":''}))
+   AND (?='organization' OR EXISTS(SELECT 1 FROM pa_portal_entitlement_intents intent WHERE intent.workspace_id=w.id
+     AND intent.principal_public_id=p.public_id AND intent.scope_type='client' AND intent.scope_public_id=e.public_id
+     AND intent.effect='allow' AND intent.capability='directory.read' AND intent.status='active'
+     AND (intent.valid_from IS NULL OR datetime(intent.valid_from)<=datetime('now'))
+     AND (intent.expires_at IS NULL OR datetime(intent.expires_at)>datetime('now'))))
+   LIMIT 1`).bind(v.principalPublicId,v.targetPublicId,v.workspaceId,portalSourceId,v.recipientMode,v.issuer,v.subject,v.targetType,v.targetType,v.targetType).first();
+
+}
+
 /** Explicit owner action. The source/workspace/principal/client tuple is verified without email matching. */
 export async function manageSharedProfilePortalGrant(env:Env,actor:StaffPrincipal,raw:unknown):Promise<{ok:boolean;revision?:number}>{
- const parsed=portalGrantSchema.safeParse(raw);if(!parsed.success||!await isAdministrator(env,actor))return{ok:false};const v=parsed.data;
+ const parsed=portalGrantSchema.safeParse(raw);if(!parsed.success||!await isAdministrator(env,actor))return{ok:false};const v=parsed.data,portalSourceId=v.portalSourceId??v.sourceId;
  const db=env.OPS_DB.withSession('first-primary');
  try{
   const nativeOwner=await db.prepare(`SELECT admission.version admission_version,profile.version profile_version
@@ -60,85 +112,87 @@ export async function manageSharedProfilePortalGrant(env:Env,actor:StaffPrincipa
   const requestSha256=[...new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(JSON.stringify(v))))].map(n=>n.toString(16).padStart(2,'0')).join('');
   const receipt=await db.prepare('SELECT grant_id,actor_kind,actor_id,detail_json FROM shared_profile_portal_audit WHERE operation_id=?')
    .bind(v.operationId).first<{grant_id:string;actor_kind:string;actor_id:string;detail_json:string}>();
-  if(receipt){const detail=JSON.parse(receipt.detail_json) as {requestSha256?:string;revision?:number};return{ok:receipt.grant_id===v.id
-   &&receipt.actor_kind==='staff'&&receipt.actor_id===actor.id&&detail.requestSha256===requestSha256,revision:detail.revision};}
+  if(receipt){const detail=JSON.parse(receipt.detail_json) as {requestSha256?:string;revision?:number};
+   if(receipt.grant_id!==v.id||receipt.actor_kind!=='staff'||receipt.actor_id!==actor.id||detail.requestSha256!==requestSha256)return{ok:false};
+   const current=await db.prepare('SELECT * FROM shared_profile_portal_grants WHERE id=?').bind(v.id).first<Grant&{state:string}>();
+   if(!current||current.revision!==detail.revision||current.state!==v.state)return{ok:false};
+   return{ok:v.state==='revoked'||(await sharedProfileGrantSourceCurrent(env,current)&&await portalGrantOwnerCurrent(env,v,portalSourceId)),revision:detail.revision};}
+
   const prior=await db.prepare('SELECT * FROM shared_profile_portal_grants WHERE id=?').bind(v.id).first<Record<string,unknown>>();
   if(v.state==='revoked'){
-   if(!prior||prior.revision!==v.expectedRevision)return{ok:false};
+   if(!prior||prior.revision!==v.expectedRevision||prior.workspace_id!==v.workspaceId||prior.source_id!==portalSourceId
+    ||(prior.directory_source_id??null)!==(v.portalSourceId?v.sourceId:null)||(prior.correspondence_revision_id??null)!==(v.correspondenceRevisionId??null)
+    ||prior.principal_public_id!==v.principalPublicId||prior.target_type!==v.targetType||prior.target_public_id!==v.targetPublicId
+    ||prior.record_id!==v.recordId||prior.group_id!==v.groupId||prior.recipient_mode!==v.recipientMode)return{ok:false};
    const result=await db.batch([db.prepare(`UPDATE shared_profile_portal_grants SET state='revoked',revision=revision+1 WHERE id=? AND revision=?
     AND EXISTS(${ownerAuthority})`).bind(v.id,v.expectedRevision,...ownerParameters),
     db.prepare("INSERT INTO shared_profile_portal_audit(operation_id,grant_id,workspace_id,action,actor_kind,actor_id,detail_json) SELECT ?,?,?, 'grant.revoked','staff',?,? WHERE changes()=1").bind(v.operationId,v.id,String(prior.workspace_id),actor.id,JSON.stringify({revision:v.expectedRevision+1,requestSha256}))]);
    return{ok:result[0]!.meta.changes===1,revision:v.expectedRevision+1};
   }
   if(prior||v.expectedRevision!==0)return{ok:false};
-  const owner=await env.DELIVERY_DB.withSession('first-primary').prepare(`SELECT 1 ok FROM portal_v2_workspaces w
-   JOIN pa_portal_workspace_sources s ON s.workspace_id=w.id AND s.projection_source_id=w.project_alpha_source_id
-   JOIN portal_v2_directory_checkpoints c ON c.workspace_id=w.id
-   JOIN portal_v2_directory_generations g ON g.id=c.active_generation_id AND g.workspace_id=w.id AND g.status='active' AND g.complete=1
-   JOIN pa_portal_principals p ON p.workspace_id=w.id AND p.public_id=? AND p.status='active'
-   LEFT JOIN portal_v2_identities i ON i.id=p.identity_id AND i.status='active' AND i.revoked_at IS NULL
-   LEFT JOIN portal_v2_workspace_memberships m ON m.workspace_id=w.id AND m.identity_id=i.id AND m.status='active' AND m.revoked_at IS NULL
-   JOIN portal_v2_directory_entities e ON e.workspace_id=w.id AND e.generation_id=g.id AND e.public_id=? AND e.active=1
-   WHERE w.id=? AND w.project_alpha_source_id=? AND w.status='active'
-   AND (?='first_verified_identity' OR (i.issuer=? AND i.subject=? AND m.id IS NOT NULL))
-   AND ((?='organization' AND e.entity_type='organization' AND e.parent_public_id IS NULL AND w.pa_organization_public_id=e.public_id)
-     OR (?='client' AND e.entity_type IN('client','standalone_client')))
-   AND (?='organization' OR EXISTS(SELECT 1 FROM pa_portal_entitlement_intents intent WHERE intent.workspace_id=w.id
-     AND intent.principal_public_id=p.public_id AND intent.scope_type='client' AND intent.scope_public_id=e.public_id
-     AND intent.effect='allow' AND intent.capability='directory.read' AND intent.status='active'
-     AND (intent.valid_from IS NULL OR datetime(intent.valid_from)<=datetime('now'))
-     AND (intent.expires_at IS NULL OR datetime(intent.expires_at)>datetime('now'))))
-   LIMIT 1`).bind(v.principalPublicId,v.targetPublicId,v.workspaceId,v.sourceId,v.recipientMode,v.issuer,v.subject,v.targetType,v.targetType,v.targetType).first();
-  if(!owner)return{ok:false};
+  if(!await portalGrantOwnerCurrent(env,v,portalSourceId))return{ok:false};
   const membership=await db.prepare(`SELECT p.membership_json,mapping.source_instance_id,mapping.application_id,mapping.history_epoch_id FROM native_directory_shared_profiles p
    JOIN native_directory_shared_profile_members member ON member.group_id=p.id AND member.record_id=?
    JOIN project_alpha_active_directory_mappings mapping ON mapping.record_id=member.record_id AND mapping.source_id=?
    WHERE p.id=? AND mapping.project_alpha_public_id=? AND mapping.resource_type=?
    AND EXISTS(SELECT 1 FROM staff_users staff WHERE staff.id=? AND staff.access_subject=? AND staff.status='active')`).bind(v.recordId,v.sourceId,v.groupId,v.targetPublicId,v.targetType,actor.id,actor.accessSubject).first<{membership_json:string;source_instance_id:string;application_id:string;history_epoch_id:string}>();
   if(!membership)return{ok:false};
+  const bridgeColumns=await sharedProfileCorrespondenceColumns(db);
+  if(v.portalSourceId){
+   if(!bridgeColumns)return{ok:false};
+   const bridge=await resolveDirectoryPortalSource(env,v.sourceId,{sourceInstanceId:membership.source_instance_id,applicationId:membership.application_id,historyEpochId:membership.history_epoch_id},v.correspondenceRevisionId);
+   if(!bridge||bridge.portalSourceId!==portalSourceId||bridge.correspondenceRevisionId!==v.correspondenceRevisionId)return{ok:false};
+  }
+
   const results=await db.batch([db.prepare(`INSERT INTO shared_profile_portal_authority_heads(workspace_id,source_id,revision,state,operation_id)
    SELECT ?,?,1,'blocked',? WHERE EXISTS(${ownerAuthority})
-   ON CONFLICT(workspace_id) DO NOTHING`).bind(v.workspaceId,v.sourceId,v.operationId,...ownerParameters),db.prepare(`INSERT INTO shared_profile_portal_grants
-   (id,workspace_id,source_id,source_instance_id,application_id,history_epoch_id,recipient_mode,issuer,subject,principal_public_id,target_type,target_public_id,record_id,group_id,group_membership_json,revision,state,issued_by)
-   SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,'active',? WHERE EXISTS(SELECT 1 FROM shared_profile_portal_authority_heads WHERE workspace_id=? AND source_id=?)
+   ON CONFLICT(workspace_id) DO NOTHING`).bind(v.workspaceId,portalSourceId,v.operationId,...ownerParameters),db.prepare(`INSERT INTO shared_profile_portal_grants
+   (id,workspace_id,source_id${bridgeColumns?',directory_source_id,correspondence_revision_id':''},source_instance_id,application_id,history_epoch_id,recipient_mode,issuer,subject,principal_public_id,target_type,target_public_id,record_id,group_id,group_membership_json,revision,state,issued_by)
+   SELECT candidate_grant.* FROM (SELECT ? id,? workspace_id,? source_id${bridgeColumns?',? directory_source_id,? correspondence_revision_id':''},? source_instance_id,? application_id,? history_epoch_id,? recipient_mode,? issuer,? subject,? principal_public_id,? target_type,? target_public_id,? record_id,? group_id,? group_membership_json,1 revision,'active' state,? issued_by) candidate_grant WHERE ${bridgeColumns?correspondenceGrantSql('candidate_grant'):'1=1'} AND EXISTS(SELECT 1 FROM shared_profile_portal_authority_heads WHERE workspace_id=? AND source_id=?)
    AND EXISTS(${ownerAuthority})
    AND EXISTS(SELECT 1 FROM project_alpha_active_directory_mappings mapping
     JOIN native_directory_shared_profile_members member ON member.record_id=mapping.record_id
     JOIN native_directory_shared_profiles p ON p.id=member.group_id
     WHERE mapping.record_id=? AND mapping.source_id=? AND mapping.resource_type=? AND mapping.project_alpha_public_id=?
     AND mapping.source_instance_id=? AND mapping.application_id=? AND mapping.history_epoch_id=? AND p.id=? AND json(p.membership_json)=json(?))`)
-   .bind(v.id,v.workspaceId,v.sourceId,membership.source_instance_id,membership.application_id,membership.history_epoch_id,v.recipientMode,v.issuer,v.subject,v.principalPublicId,v.targetType,v.targetPublicId,v.recordId,v.groupId,membership.membership_json,actor.id,v.workspaceId,v.sourceId,...ownerParameters,
+   .bind(v.id,v.workspaceId,portalSourceId,...(bridgeColumns?[v.portalSourceId?v.sourceId:null,v.correspondenceRevisionId??null]:[]),membership.source_instance_id,membership.application_id,membership.history_epoch_id,v.recipientMode,v.issuer,v.subject,v.principalPublicId,v.targetType,v.targetPublicId,v.recordId,v.groupId,membership.membership_json,actor.id,v.workspaceId,portalSourceId,...ownerParameters,
     v.recordId,v.sourceId,v.targetType,v.targetPublicId,membership.source_instance_id,membership.application_id,membership.history_epoch_id,v.groupId,membership.membership_json),
    db.prepare("INSERT INTO shared_profile_portal_audit(operation_id,grant_id,workspace_id,action,actor_kind,actor_id,detail_json) SELECT ?,?,?, 'grant.issued','staff',?,? WHERE changes()=1").bind(v.operationId,v.id,v.workspaceId,actor.id,JSON.stringify({scope:v.targetType,groupId:v.groupId,revision:1,requestSha256}))]);
-  return{ok:results[1]!.meta.changes===1,revision:1};
+  const written=results[1]!.meta.changes===1;
+  if(written&&v.portalSourceId&&!await sharedProfileGrantSourceCurrent(env,{source_id:portalSourceId,directory_source_id:v.sourceId,
+    correspondence_revision_id:v.correspondenceRevisionId!,workspace_id:v.workspaceId,record_id:v.recordId,target_type:v.targetType,target_public_id:v.targetPublicId,source_instance_id:membership.source_instance_id,application_id:membership.application_id,history_epoch_id:membership.history_epoch_id}))return{ok:false};
+  return{ok:written&&await portalGrantOwnerCurrent(env,v,portalSourceId),revision:1};
  }catch{return{ok:false};}
 }
 
 /** Bind a reviewed own-client template exactly once to an already verified identity.
  * Client supplies trusted principal/client scope witnesses; no email lookup is performed.
  */
-export async function bindSharedProfilePortalIdentity(env:Pick<Env,'OPS_DB'>,raw:SharedProfilePortalProof):Promise<{ok:boolean;bound?:number}>{
+export async function bindSharedProfilePortalIdentity(env:SharedProfilePortalEnvironment,raw:SharedProfilePortalProof):Promise<{ok:boolean;bound?:number}>{
  const parsed=portalProofSchema.safeParse(raw);if(!parsed.success)return{ok:false};const v=parsed.data,db=env.OPS_DB.withSession('first-primary');
  if(!fresh(v.verifiedUntil))return{ok:false};
  try{
-  const rows=(await db.prepare(`SELECT grant_row.id,grant_row.revision,grant_row.principal_public_id,grant_row.target_public_id
+  const bridgeColumns=await sharedProfileCorrespondenceColumns(db);
+  const rows=(await db.prepare(`SELECT grant_row.*
    FROM shared_profile_portal_grants grant_row JOIN shared_profile_portal_authority_heads h ON h.workspace_id=grant_row.workspace_id AND h.source_id=grant_row.source_id
    WHERE grant_row.workspace_id=? AND grant_row.source_id=? AND grant_row.state='active' AND grant_row.recipient_mode='first_verified_identity'
    AND grant_row.issuer IS NULL AND grant_row.subject IS NULL AND grant_row.target_type='client' AND h.state='active' AND h.revision=? LIMIT 65`)
-   .bind(v.workspaceId,v.sourceId,v.authorityRevision).all<{id:string;revision:number;principal_public_id:string;target_public_id:string}>()).results;
+   .bind(v.workspaceId,v.sourceId,v.authorityRevision).all<Grant>()).results;
   if(rows.length>64)return{ok:false};let bound=0;
   for(const row of rows){
+   if(!await sharedProfileGrantSourceCurrent(env,row))continue;
    if(!v.targets.some(target=>target.scopeType==='client'&&target.principalPublicId===row.principal_public_id&&target.publicId===row.target_public_id))continue;
    const operationId=crypto.randomUUID();
    const results=await db.batch([db.prepare(`UPDATE shared_profile_portal_grants SET issuer=?,subject=?,revision=revision+1
-    WHERE id=? AND revision=? AND state='active' AND recipient_mode='first_verified_identity' AND issuer IS NULL AND subject IS NULL
+    WHERE id=? AND revision=? AND state='active' AND recipient_mode='first_verified_identity'
+    ${bridgeColumns?`AND ${correspondenceGrantSql('shared_profile_portal_grants')}`:''} AND issuer IS NULL AND subject IS NULL
     AND datetime(?)>datetime('now') AND datetime(?)<=datetime('now','+60 seconds')
     AND EXISTS(SELECT 1 FROM shared_profile_portal_authority_heads h WHERE h.workspace_id=shared_profile_portal_grants.workspace_id
       AND h.source_id=shared_profile_portal_grants.source_id AND h.state='active' AND h.revision=?)
     AND EXISTS(SELECT 1 FROM project_alpha_active_directory_mappings mapping
       JOIN native_directory_shared_profile_members member ON member.record_id=mapping.record_id
       JOIN native_directory_shared_profiles p ON p.id=member.group_id
-      WHERE mapping.record_id=shared_profile_portal_grants.record_id AND mapping.source_id=shared_profile_portal_grants.source_id
+      WHERE mapping.record_id=shared_profile_portal_grants.record_id AND mapping.source_id=${bridgeColumns?'COALESCE(shared_profile_portal_grants.directory_source_id,shared_profile_portal_grants.source_id)':'shared_profile_portal_grants.source_id'}
       AND mapping.resource_type='client' AND mapping.project_alpha_public_id=shared_profile_portal_grants.target_public_id
       AND mapping.source_instance_id=shared_profile_portal_grants.source_instance_id AND mapping.application_id=shared_profile_portal_grants.application_id
       AND mapping.history_epoch_id=shared_profile_portal_grants.history_epoch_id AND p.id=shared_profile_portal_grants.group_id
@@ -146,34 +200,38 @@ export async function bindSharedProfilePortalIdentity(env:Pick<Env,'OPS_DB'>,raw
     .bind(v.issuer,v.subject,row.id,row.revision,v.verifiedUntil,v.verifiedUntil,v.authorityRevision),
     db.prepare(`INSERT INTO shared_profile_portal_audit(operation_id,grant_id,workspace_id,action,actor_kind,actor_id,detail_json)
      SELECT ?,?,?,'identity.bound','portal',?,? WHERE changes()=1`).bind(operationId,row.id,v.workspaceId,JSON.stringify([v.issuer,v.subject]),JSON.stringify({principalPublicId:row.principal_public_id,targetPublicId:row.target_public_id,revision:row.revision+1}))]);
+   if(results[0]!.meta.changes&&!await sharedProfileGrantSourceCurrent(env,row))return{ok:false};
    bound+=results[0]!.meta.changes;
   }return{ok:true,bound};
  }catch{return{ok:false};}
 }
 
-export async function authorizedSharedProfilePortalGrants(env:Pick<Env,'OPS_DB'>,raw:SharedProfilePortalProof):Promise<Grant[]|null>{
+export async function authorizedSharedProfilePortalGrants(env:SharedProfilePortalEnvironment,raw:SharedProfilePortalProof):Promise<Grant[]|null>{
  const parsed=portalProofSchema.safeParse(raw);if(!parsed.success)return null;const v=parsed.data;
  if(!fresh(v.verifiedUntil))return null;
  try{
-  const rows=(await env.OPS_DB.withSession('first-primary').prepare(`SELECT grant_row.*,p.profile_json,p.version,p.kind FROM shared_profile_portal_grants grant_row
+  const db=env.OPS_DB.withSession('first-primary'),bridgeColumns=await sharedProfileCorrespondenceColumns(db);
+  const rows=(await db.prepare(`SELECT grant_row.*,p.profile_json,p.version,p.kind FROM shared_profile_portal_grants grant_row
    JOIN shared_profile_portal_authority_heads h ON h.workspace_id=grant_row.workspace_id AND h.source_id=grant_row.source_id
    JOIN native_directory_shared_profiles p ON p.id=grant_row.group_id AND json(p.membership_json)=json(grant_row.group_membership_json)
    JOIN native_directory_shared_profile_members member ON member.group_id=p.id AND member.record_id=grant_row.record_id
-   JOIN project_alpha_active_directory_mappings mapping ON mapping.record_id=member.record_id AND mapping.source_id=grant_row.source_id
+   JOIN project_alpha_active_directory_mappings mapping ON mapping.record_id=member.record_id AND mapping.source_id=${bridgeColumns?'COALESCE(grant_row.directory_source_id,grant_row.source_id)':'grant_row.source_id'}
      AND mapping.project_alpha_public_id=grant_row.target_public_id AND mapping.resource_type=grant_row.target_type
      AND mapping.source_instance_id=grant_row.source_instance_id AND mapping.application_id=grant_row.application_id AND mapping.history_epoch_id=grant_row.history_epoch_id
    WHERE grant_row.workspace_id=? AND grant_row.source_id=? AND grant_row.issuer=? AND grant_row.subject=? AND grant_row.state='active'
-   AND h.state='active' AND h.revision=? AND datetime(?)>datetime('now') ORDER BY grant_row.id LIMIT 65`).bind(v.workspaceId,v.sourceId,v.issuer,v.subject,v.authorityRevision,v.verifiedUntil).all<Grant>()).results;
+   AND h.state='active' AND h.revision=? AND datetime(?)>datetime('now') ${bridgeColumns?`AND ${correspondenceGrantSql('grant_row')}`:''} ORDER BY grant_row.id LIMIT 65`).bind(v.workspaceId,v.sourceId,v.issuer,v.subject,v.authorityRevision,v.verifiedUntil).all<Grant>()).results;
   if(rows.length>64||new Set(rows.map(row=>row.id)).size!==rows.length)return null;
-  return rows.filter(row=>v.targets.some(t=>t.principalPublicId===row.principal_public_id&&t.scopeType===row.target_type&&t.publicId===row.target_public_id));
+  const current:Grant[]=[];for(const row of rows){if(!await sharedProfileGrantSourceCurrent(env,row))return null;
+   if(v.targets.some(t=>t.principalPublicId===row.principal_public_id&&t.scopeType===row.target_type&&t.publicId===row.target_public_id))current.push(row);}
+  return current;
  }catch{return null;}
 }
-export async function readSharedProfilePortalProfiles(env:Pick<Env,'OPS_DB'>,input:SharedProfilePortalProof):Promise<SharedProfilePortalResult>{
+export async function readSharedProfilePortalProfiles(env:SharedProfilePortalEnvironment,input:SharedProfilePortalProof):Promise<SharedProfilePortalResult>{
  const grants=await authorizedSharedProfilePortalGrants(env,input);if(!grants)return{ok:false,code:'unavailable'};
  return{ok:true,profiles:grants.map(row=>({grantId:row.id,kind:row.kind,version:row.version,profile:JSON.parse(row.profile_json),editable:false}))};
 }
 /** The portal composer must add this guard to its SAME atomic batch as canonical revision + every PA outbox. */
-export async function prepareSharedProfilePortalWrite(env:Pick<Env,'OPS_DB'>,raw:SharedProfilePortalUpdate){
+export async function prepareSharedProfilePortalWrite(env:SharedProfilePortalEnvironment,raw:SharedProfilePortalUpdate){
  const parsed=portalUpdateSchema.safeParse(raw);if(!parsed.success)return null;const v=parsed.data;
  const {grantId,expectedVersion,mutationId,profile,...proof}=v;
  const grants=await authorizedSharedProfilePortalGrants(env,proof);const grant=grants?.find(g=>g.id===grantId&&g.version===expectedVersion);if(!grant)return null;
@@ -195,6 +253,6 @@ export async function stablePortalRequestFingerprint(input:SharedProfilePortalUp
  if(!Array.isArray(members)||members.some(member=>typeof member!=='string'))throw new Error('shared-profile-membership-invalid');
  const value={schemaVersion:1,groupId:grant.group_id,grantId:grant.id,grantRevision:grant.revision,actor:[input.issuer,input.subject],expectedVersion:input.expectedVersion,
   ownScope:[grant.workspace_id,grant.source_id,grant.source_instance_id,grant.application_id,grant.history_epoch_id,grant.principal_public_id,grant.target_type,grant.target_public_id,grant.record_id],
-  members:[...members].sort(),profile:normalizePortalBusinessProfile(input.profile)};
+  ...(grant.directory_source_id?{correspondence:[grant.directory_source_id,grant.correspondence_revision_id]}:{}),members:[...members].sort(),profile:normalizePortalBusinessProfile(input.profile)};
  return[...new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(JSON.stringify(value))))].map(n=>n.toString(16).padStart(2,'0')).join('');
 }

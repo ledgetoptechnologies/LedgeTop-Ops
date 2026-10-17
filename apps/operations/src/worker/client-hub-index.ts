@@ -20,8 +20,8 @@ type Phase = typeof PHASES[number];
 const PAGE_QUERY_COST: Record<Phase, number> = {
   // Source-backed pages also inspect the active mapping relation, its columns,
   // and its configured source identities, plus two classic inventory reads.
-  organizations: 50, standalone: 50, workspaces: 46, accounts: 45,
-  reviewed: 45, contacts: 128, reviewed_contacts: 85, principals: 84, projects: 48, sweep: 4,
+  organizations: 140, standalone: 140, workspaces: 140, accounts: 45,
+  reviewed: 45, contacts: 128, reviewed_contacts: 85, principals: 180, projects: 48, sweep: 4,
 };
 type Kind = "organization" | "standalone_client";
 type Namespace = "business" | "portal" | "account" | "review";
@@ -66,6 +66,17 @@ function contactFields(payload: string): { email?: string; phone?: string } {
   const phone = typeof rawPhone === "string" && rawPhone.length <= 80 ? rawPhone.replace(/\D/g, "") : undefined;
   return { email, phone };
 }
+
+interface IndexedWorkspaceRoot {source_id:string;root_namespace:Namespace;kind:Kind;public_id:string;pa_public_id:string|null;workspace_id:string}
+/** Cached logical ownership is reusable only after a fresh authoritative bulk proof. */
+async function currentIndexedWorkspaceAliases(env:IndexEnv,roots:IndexedWorkspaceRoot[]):Promise<Set<string>>{
+ const key=(r:IndexedWorkspaceRoot)=>JSON.stringify([r.source_id,r.kind,r.public_id,r.workspace_id]);
+ const aliases=roots.filter(r=>r.root_namespace==='business'&&r.source_id!==PA);
+ const linked=await resolveClientHubWorkspaces(env,aliases.map(r=>({key:key(r),source_id:r.source_id,kind:r.kind,
+  business_id:r.public_id,pa_public_id:r.pa_public_id,workspace_id:null})));
+ return new Set(aliases.filter(r=>{const ws=linked.get(key(r))?.workspace;return ws?.id===r.workspace_id&&ws.project_alpha_source_id===PA;}).map(key));
+}
+const indexedWorkspaceKey=(r:IndexedWorkspaceRoot)=>JSON.stringify([r.source_id,r.kind,r.public_id,r.workspace_id]);
 
 async function rootFacts(env: IndexEnv, roots: Root[]): Promise<Facts[]> {
   if (!roots.length) return [];
@@ -121,7 +132,10 @@ async function writeRoots(env: IndexEnv, roots: Root[], generation: number, toke
     const fact = facts.find(row => row.source_id === root.source_id && row.root_namespace === root.root_namespace && row.kind === root.kind && row.public_id === root.public_id);
     if (!fact) throw new Error("client-hub-index-missing-facts");
     const record = { ...root, ...fact, portal_status: fact.portal_status || "not_provisioned",
-      contact_count: root.contact_count + fact.principal_count, sort_name: normalize(root.display_name) };
+      // PA contacts and portal sign-in principals are different record kinds.
+      // A business contact can also have a principal; adding both double-counts it.
+      contact_count: root.root_namespace === "portal" ? fact.principal_count : root.contact_count,
+      sort_name: normalize(root.display_name) };
     const version = await digest(record);
     statements.push(env.OPS_DB.prepare(`INSERT INTO client_hub_roots
       (source_id,root_namespace,kind,public_id,pa_public_id,mapping_status,display_name,sort_name,status,portal_status,workspace_id,legacy_account_id,
@@ -273,11 +287,13 @@ async function rootPage(env: IndexEnv, phase: Phase, cursor: string, generation:
     if (rows.length) {
       // Fold only verified current-generation associations. A portal root with
       // no proven business link remains visible in its own explicit namespace.
-      const facts = await ops.prepare(`SELECT workspace_id FROM client_hub_roots
-        WHERE source_id=? AND root_namespace='business' AND scan_generation=? AND status='active'
+      const facts = await ops.prepare(`SELECT source_id,root_namespace,kind,public_id,pa_public_id,workspace_id FROM client_hub_roots
+        WHERE root_namespace='business' AND scan_generation=? AND status='active'
           AND workspace_id IN (${rows.map(() => "?").join(",")})`)
-        .bind(PA, generation, ...rows.map(row => row.public_id)).all<{ workspace_id: string }>();
-      const fallback = rows.filter(row => !facts.results.some(fact => fact.workspace_id === row.public_id));
+        .bind(generation, ...rows.map(row => row.public_id)).all<IndexedWorkspaceRoot>();
+      const aliases=await currentIndexedWorkspaceAliases(env,facts.results);
+      const fallback = rows.filter(row => !facts.results.some(fact => fact.workspace_id === row.public_id
+        && (fact.source_id===PA||aliases.has(indexedWorkspaceKey(fact)))));
       await writeRoots(env, fallback, generation, token);
       return { count: rows.length, cursor: rows.at(-1)?.cursor || cursor };
     }
@@ -383,13 +399,14 @@ async function searchPage(env: IndexEnv, phase: Phase, cursor: string, generatio
     count = rows.length;
     if (rows.length) next = JSON.stringify([rows.at(-1)!.workspace_id, rows.at(-1)!.public_id]);
     const roots = rows.length ? (await env.OPS_DB.withSession("first-primary").prepare(`
-      SELECT source_id,root_namespace,kind,public_id,workspace_id FROM client_hub_roots
+      SELECT source_id,root_namespace,kind,public_id,pa_public_id,workspace_id FROM client_hub_roots
       WHERE status='active' AND scan_generation=?
-        AND (${rows.map(() => "(source_id=? AND workspace_id=?)").join(" OR ")})`)
-      .bind(generation, ...rows.flatMap(row => [row.source_id, row.workspace_id]))
-      .all<{ source_id: string; root_namespace: Namespace; kind: Kind; public_id: string; workspace_id: string }>()).results : [];
+        AND workspace_id IN (${rows.map(() => "?").join(",")})`)
+      .bind(generation, ...rows.map(row => row.workspace_id))
+      .all<IndexedWorkspaceRoot>()).results : [];
+    const currentAliases=await currentIndexedWorkspaceAliases(env,roots);
     for (const row of rows) {
-      const matches = roots.filter(root => root.source_id === row.source_id && root.workspace_id === row.workspace_id && root.kind === row.kind);
+      const matches = roots.filter(root => (root.source_id === row.source_id || (row.source_id===PA&&currentAliases.has(indexedWorkspaceKey(root)))) && root.workspace_id === row.workspace_id && root.kind === row.kind);
       // No principals from pending/ambiguous projection mappings enter search.
       if (matches.length !== 1) continue;
       const root = matches[0];

@@ -1,3 +1,5 @@
+import { authenticatedDeliveryNativeStaffPublicationSql } from '../../../../../packages/shared/src/authenticated-delivery-authority';
+import { projectedPrincipalIdentitySql } from './projected-principal-identity';
 import { folderOwnerEntityType,folderOwnerEntityTypeSql } from '../../../../../packages/shared/src/folder-owner-entity';
 import type { Env as ClientEnv } from "../types";
 import { primaryWorkspaceAccount } from "./project-alpha-source";
@@ -96,7 +98,7 @@ async function candidates(
     LEFT JOIN pa_portal_principals principal_record
       ON principal_record.workspace_id=recipient.workspace_id
       AND principal_record.public_id=recipient.principal_public_id
-      AND principal_record.identity_id=recipient.identity_id AND principal_record.status='active'
+      AND ${projectedPrincipalIdentitySql('principal_record')}=recipient.identity_id AND principal_record.status='active'
       AND principal_record.source_version=recipient.principal_source_version
     WHERE identity.issuer=? AND identity.subject=? AND identity.status='active' AND identity.revoked_at IS NULL
       AND EXISTS(SELECT 1 FROM portal_v2_workspaces workspace WHERE workspace.id=membership.workspace_id
@@ -105,11 +107,9 @@ async function candidates(
       ${termsReady?`AND ${projectAccessTermsSql({termsId:'grant_record.access_terms_id',workspaceId:'grant_record.workspace_id',projectId:'binding.owner_public_id',legacyRetained:'1'})}`:''}
       ${native ? `AND (grant_record.audience_type<>'principal' OR (recipient.principal_public_id=grant_record.audience_public_id
         AND recipient.principal_source_version=grant_record.audience_source_version))
-        AND EXISTS(SELECT 1 FROM portal_native_staff_grants publication JOIN portal_native_staff_bindings ownership
-          ON ownership.binding_id=publication.binding_id AND ownership.source_id=publication.source_id
-          WHERE publication.grant_id=grant_record.id AND publication.binding_id=binding.id AND publication.state='active'
-            AND publication.source_id=? AND ownership.workspace_id=grant_record.workspace_id
-            AND ownership.r2_prefix=binding.r2_prefix AND ownership.project_public_id=binding.owner_public_id AND binding.owner_scope_type='project')
+        AND EXISTS(SELECT 1 FROM portal_v2_workspaces publication_workspace
+          WHERE publication_workspace.id=binding.workspace_id
+            AND ${authenticatedDeliveryNativeStaffPublicationSql('publication_workspace','?','grant_record','binding')})
         AND (? IS NULL OR binding.id IN (SELECT value FROM json_each(?))) AND (? IS NULL OR grant_record.id=?)
         AND (? IS NULL OR (binding.owner_scope_type='project' AND binding.owner_public_id IN (SELECT value FROM json_each(?))))` : ''}
       ${!native&&selection?.projectIds?`AND binding.owner_scope_type='project' AND binding.owner_public_id IN(SELECT value FROM json_each(?))`:''}
@@ -429,7 +429,7 @@ export async function listAuthorizedAuthenticatedDeliveryPrefixes(
       LEFT JOIN pa_portal_principals principal_record
         ON principal_record.workspace_id=recipient.workspace_id
         AND principal_record.public_id=recipient.principal_public_id
-        AND principal_record.identity_id=recipient.identity_id AND principal_record.status='active'
+        AND ${projectedPrincipalIdentitySql('principal_record')}=recipient.identity_id AND principal_record.status='active'
         AND principal_record.source_version=recipient.principal_source_version
       WHERE identity.issuer=? AND identity.subject=? AND identity.status='active' AND identity.revoked_at IS NULL
         AND ${primaryReceiptSql}

@@ -1,12 +1,16 @@
-import { useEffect, useId, useState, type FormEvent } from "react";
-import { Card, StatusPill } from "@ltds/ui";
-import { api } from "./api";
+import { useEffect, useId, useRef, useState, type FormEvent } from "react";
+import { Card, StatusPill, requestChoice } from "@ltds/ui";
+import { api, ApiError } from "./api";
 import { SharedProfileAuthorityRecovery } from "./SharedProfileAuthorityRecovery";
 import { NativeDirectoryProfileEdit, serializeNativeDirectoryProfile, type ProfileForm } from "./NativeDirectoryProfileEditor";
 
 type Kind = "organization" | "client";
 type Member = { recordId: string; version: number; sourceIds: string[]; sourceNames?: string[] };
-type PortalCandidate={workspaceId:string;sourceId:string;principalPublicId:string;targetPublicId:string;recordId:string;groupId:string;clientName:string;state:'available'|'enabled'|'revoked'};
+// sourceId is the logical business-records source. When the client portal uses a
+// different source, the server pairs portalSourceId with the approved
+// correspondence revision; the two travel together or not at all.
+type PortalCandidate={workspaceId:string;sourceId:string;portalSourceId?:string;correspondenceRevisionId?:string;principalPublicId:string;targetPublicId:string;recordId:string;groupId:string;clientName:string;
+  state:'available'|'enabled'|'revoked'|'suspended';currentGrantId?:string;currentGrantRevision?:number};
 type SharedProfile = { id: string; kind: Kind; version: number; profile: Record<string, string>; members: Member[];
   delivery: { state: "acknowledged" | "pending" | "conflict"; destinations?: unknown[] }; editing?: { available: boolean; reason?: string | null };
   emailEditing?: boolean; emailEditingReason?: string | null;portalSetup?:{available:boolean;candidates:PortalCandidate[]} };
@@ -42,13 +46,25 @@ function validProfile(value: SharedProfile, kind: Kind, recordId: string): boole
     && !!value.delivery && ["acknowledged", "pending", "conflict"].includes(value.delivery.state)
     && (value.portalSetup===undefined||validPortalSetup(value));
 }
-const candidateKey=(candidate:PortalCandidate)=>JSON.stringify([candidate.workspaceId,candidate.sourceId,candidate.principalPublicId,candidate.targetPublicId,candidate.recordId]);
+const candidateKey=(candidate:PortalCandidate)=>JSON.stringify([candidate.workspaceId,candidate.sourceId,candidate.portalSourceId??null,candidate.correspondenceRevisionId??null,candidate.principalPublicId,candidate.targetPublicId,candidate.recordId]);
+const PORTAL_SOURCE_PATTERN=/^project-alpha:[a-z0-9][a-z0-9_-]{0,63}$/,REVISION_PATTERN=/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+function validCorrespondencePair(candidate:PortalCandidate):boolean{
+  if(candidate.portalSourceId===undefined&&candidate.correspondenceRevisionId===undefined)return true;
+  return typeof candidate.portalSourceId==='string'&&PORTAL_SOURCE_PATTERN.test(candidate.portalSourceId)&&candidate.portalSourceId!==candidate.sourceId
+    &&typeof candidate.correspondenceRevisionId==='string'&&REVISION_PATTERN.test(candidate.correspondenceRevisionId);
+}
+function validCurrentGrant(candidate:PortalCandidate):boolean{
+  if(candidate.currentGrantId===undefined&&candidate.currentGrantRevision===undefined)return candidate.state!=='suspended';
+  return typeof candidate.currentGrantId==='string'&&candidate.currentGrantId.length>0&&candidate.currentGrantId.length<=128
+    &&Number.isSafeInteger(candidate.currentGrantRevision)&&(candidate.currentGrantRevision as number)>0;
+}
 function validPortalSetup(value:SharedProfile):boolean{
   const setup=value.portalSetup;
   return !!setup&&typeof setup.available==='boolean'&&Array.isArray(setup.candidates)&&setup.candidates.length<=64
     && setup.candidates.every(candidate=>!!candidate&&['workspaceId','sourceId','principalPublicId','targetPublicId','recordId','groupId','clientName'].every(field=>
-      typeof candidate[field as keyof PortalCandidate]==='string'&&candidate[field as keyof PortalCandidate].length>0&&candidate[field as keyof PortalCandidate].length<=512)
-      && candidate.groupId===value.id&&['available','enabled','revoked'].includes(candidate.state)
+      typeof (candidate as Record<string,unknown>)[field]==='string'&&((candidate as Record<string,unknown>)[field] as string).length>0&&((candidate as Record<string,unknown>)[field] as string).length<=512)
+      && candidate.groupId===value.id&&['available','enabled','revoked','suspended'].includes(candidate.state)
+      && validCorrespondencePair(candidate)&&validCurrentGrant(candidate)
       && value.members.some(member=>member.recordId===candidate.recordId&&member.sourceIds.includes(candidate.sourceId)))
     && new Set(setup.candidates.map(candidateKey)).size===setup.candidates.length;
 }
@@ -73,7 +89,9 @@ function SharedDirectoryProfileEditBound({ kind, recordId, allowPreparedAttempt 
   const [merging, setMerging] = useState(false), [query, setQuery] = useState(""), [candidates, setCandidates] = useState<Candidate[]>([]);
   const [selected, setSelected] = useState(""), [preview, setPreview] = useState<Preview | null>(null);
   const [attempt, setAttempt] = useState<FrozenRequest | null>(null);
-  const [ownerAttempt,setOwnerAttempt]=useState<{kind:'bootstrap'|'grant';key:string;request:FrozenRequest}|null>(null);
+  const [ownerAttempt,setOwnerAttempt]=useState<{kind:'bootstrap'|'grant'|'revoke';key:string;request:FrozenRequest;expectedRevision?:number}|null>(null);
+  const confirmingRevoke=useRef(false),mounted=useRef(true);
+  useEffect(()=>{mounted.current=true;return()=>{mounted.current=false;};},[]);
   const load = async () => {
     const value = await api<ProfileResponse>(`${ENDPOINT}/records/${encodeURIComponent(recordId)}`);
     if (!value || !Object.hasOwn(value, "sharedProfile") || (value.sharedProfile !== null && !validProfile(value.sharedProfile, kind, recordId)))
@@ -151,7 +169,7 @@ function SharedDirectoryProfileEditBound({ kind, recordId, allowPreparedAttempt 
     finally { setBusy(false); }
   };
   const bootstrap=async()=>{
-    if(busy||attempt||(!ownerAttempt&&!response?.canBootstrap)||ownerAttempt?.kind==='grant')return;
+    if(busy||attempt||(!ownerAttempt&&!response?.canBootstrap)||ownerAttempt&&ownerAttempt.kind!=='bootstrap')return;
     const mutationId=ownerAttempt?.request.mutationId??crypto.randomUUID();
     const current=ownerAttempt??{kind:'bootstrap' as const,key:recordId,request:{path:`${ENDPOINT}/bootstrap`,method:'POST' as const,mutationId,body:JSON.stringify({recordId,mutationId})}};
     setOwnerAttempt(current);setBusy(true);setError('');setSuccess('');
@@ -165,12 +183,41 @@ function SharedDirectoryProfileEditBound({ kind, recordId, allowPreparedAttempt 
       ||!ownerAttempt&&(!response?.sharedProfile?.portalSetup?.available||candidate.state!=='available'))return;
     const operationId=ownerAttempt?.request.mutationId??crypto.randomUUID(),grantId=ownerAttempt?null:crypto.randomUUID();
     const current=ownerAttempt??{kind:'grant' as const,key,request:{path:`${ENDPOINT}/portal-grants`,method:'POST' as const,mutationId:operationId,
-      body:JSON.stringify({operationId,id:grantId,workspaceId:candidate.workspaceId,sourceId:candidate.sourceId,recipientMode:'first_verified_identity',issuer:null,subject:null,
+      body:JSON.stringify({operationId,id:grantId,workspaceId:candidate.workspaceId,sourceId:candidate.sourceId,
+        ...(candidate.portalSourceId?{portalSourceId:candidate.portalSourceId,correspondenceRevisionId:candidate.correspondenceRevisionId}:{}),
+        recipientMode:'first_verified_identity',issuer:null,subject:null,
         principalPublicId:candidate.principalPublicId,targetType:'client',targetPublicId:candidate.targetPublicId,recordId:candidate.recordId,groupId:candidate.groupId,expectedRevision:0,state:'active'})}};
     setOwnerAttempt(current);setBusy(true);setError('');setSuccess('');
     try{const result=await transmit(current.request) as {ok?:boolean;revision?:number};if(result?.ok!==true||result.revision!==1)throw new Error('The portal editing acknowledgement could not be verified.');
       await load();setOwnerAttempt(null);setSuccess('Portal profile editing permission saved.');}
     catch(caught){setError(`${errorText(caught)} Retry keeps the same portal permission request.`);}finally{setBusy(false);}
+  };
+  const revokePortal=async(candidate:PortalCandidate)=>{
+    const key=candidateKey(candidate),frozen=ownerAttempt?.kind==='revoke'&&ownerAttempt.key===key?ownerAttempt:null;
+    if(busy||attempt||confirmingRevoke.current||ownerAttempt&&!frozen)return;
+    if(!frozen){
+      if(!response?.sharedProfile?.portalSetup?.available||(candidate.state!=='enabled'&&candidate.state!=='suspended')
+        ||!candidate.currentGrantId||!Number.isSafeInteger(candidate.currentGrantRevision)||candidate.currentGrantRevision!<1)return;
+      confirmingRevoke.current=true;
+      const choice=await requestChoice({title:'Turn off portal profile editing?',
+        description:`${candidate.clientName} will no longer be able to edit their own profile from the client portal. Their profile, records and other access are unchanged.`,
+        choices:[{value:'revoke',label:'Turn off editing',tone:'danger'}]}).finally(()=>{confirmingRevoke.current=false;});
+      // The editor is keyed by record, so a context change unmounts it; never submit from an obsolete editor.
+      if(choice!=='revoke'||!mounted.current)return;
+    }
+    const expectedRevision=frozen?.expectedRevision??candidate.currentGrantRevision!,operationId=frozen?.request.mutationId??crypto.randomUUID();
+    const current=frozen??{kind:'revoke' as const,key,expectedRevision,request:{path:`${ENDPOINT}/portal-grants`,method:'POST' as const,mutationId:operationId,
+      body:JSON.stringify({operationId,id:candidate.currentGrantId,workspaceId:candidate.workspaceId,sourceId:candidate.sourceId,
+        ...(candidate.portalSourceId?{portalSourceId:candidate.portalSourceId,correspondenceRevisionId:candidate.correspondenceRevisionId}:{}),
+        recipientMode:'first_verified_identity',issuer:null,subject:null,
+        principalPublicId:candidate.principalPublicId,targetType:'client',targetPublicId:candidate.targetPublicId,recordId:candidate.recordId,groupId:candidate.groupId,expectedRevision,state:'revoked'})}};
+    setOwnerAttempt(current);setBusy(true);setError('');setSuccess('');
+    try{const result=await transmit(current.request) as {ok?:boolean;revision?:number};if(result?.ok!==true||result.revision!==expectedRevision+1)throw new Error('The portal editing change could not be verified.');
+      await load();setOwnerAttempt(null);setSuccess('Portal profile editing turned off.');}
+    catch(caught){
+      if(caught instanceof ApiError&&caught.status>=400&&caught.status<500&&caught.status!==429){setOwnerAttempt(null);setError(`${errorText(caught)} The current portal editing permission could not be confirmed. Refresh to review it.`);}
+      else setError(`${errorText(caught)} Retry keeps the same turn-off request.`);}
+    finally{setBusy(false);}
   };
   if (!response) return <Card title="Client profile"><p role={error ? "alert" : "status"}>{error || "Loading profile…"}</p>
     {error && <button type="button" disabled={busy} onClick={() => void refresh()}>Refresh profile</button>}</Card>;
@@ -198,13 +245,19 @@ function SharedDirectoryProfileEditBound({ kind, recordId, allowPreparedAttempt 
       <button type="button" className="button-ghost" disabled={busy||!!ownerAttempt} onClick={() => void refresh()}>Refresh synchronization status</button>
     </Card>}
     {!shared&&kind==='client'&&response.canBootstrap&&<Card title="Portal profile setup"><p>Use this client’s profile for portal editing. Merge a duplicate in the other PA first.</p>
-      <button type="button" className="button-orange" disabled={busy||!!attempt||ownerAttempt?.kind==='grant'} onClick={()=>void bootstrap()}>{ownerAttempt?.kind==='bootstrap'?'Retry same profile setup':'Enable shared profile'}</button></Card>}
+      <button type="button" className="button-orange" disabled={busy||!!attempt||!!ownerAttempt&&ownerAttempt.kind!=='bootstrap'} onClick={()=>void bootstrap()}>{ownerAttempt?.kind==='bootstrap'?'Retry same profile setup':'Enable shared profile'}</button></Card>}
     {shared?.kind==='client'&&shared.portalSetup&&<Card title="Portal profile editing"><p>Enable each client’s own profile for their verified portal sign-in.</p>
-      {shared.portalSetup.candidates.length===0?<p>No eligible own-client portal identity is available yet.</p>:shared.portalSetup.candidates.map(candidate=><div key={candidateKey(candidate)}>
+      {!shared.portalSetup.available&&<p role="status">Portal profile setup isn’t available from this account right now. Staff with client portal setup access can review it.</p>}
+      {shared.portalSetup.candidates.length===0?shared.portalSetup.available&&<p>No eligible own-client portal identity is available yet.</p>:shared.portalSetup.candidates.map(candidate=><div key={candidateKey(candidate)}>
         <p><strong>{candidate.clientName}</strong> · {sourceLabel(candidate.sourceId)}</p>
         {candidate.state==='available'?<button type="button" className="button-orange" disabled={busy||!!attempt||!shared.portalSetup?.available||!!ownerAttempt&&ownerAttempt.key!==candidateKey(candidate)} onClick={()=>void enablePortal(candidate)}>
           {ownerAttempt?.kind==='grant'&&ownerAttempt.key===candidateKey(candidate)?'Retry same portal permission':'Enable portal profile editing'}</button>
-          :<p role="status">{candidate.state==='enabled'?'Profile editing enabled for verified sign-in.':'Portal profile editing permission is revoked.'}</p>}
+          :<p role="status">{candidate.state==='enabled'?'Profile editing enabled for verified sign-in.'
+            :candidate.state==='suspended'?'Paused for review: the client workspace connection changed. Review it on the Project Alpha connections page before portal editing can resume.'
+            :'Portal profile editing permission is revoked.'}</p>}
+        {(candidate.state==='enabled'||candidate.state==='suspended')&&candidate.currentGrantId&&<button type="button" className="button-ghost"
+          disabled={busy||!!attempt||!shared.portalSetup?.available||!!ownerAttempt&&!(ownerAttempt.kind==='revoke'&&ownerAttempt.key===candidateKey(candidate))}
+          onClick={()=>void revokePortal(candidate)}>{ownerAttempt?.kind==='revoke'&&ownerAttempt.key===candidateKey(candidate)?'Retry same turn-off':'Turn off portal profile editing'}</button>}
       </div>)}
     </Card>}
     {!shared && response.canMerge && <Card title="Shared profile"><p>Merge this profile with its reviewed copy in another Project Alpha.</p>

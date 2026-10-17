@@ -1,16 +1,21 @@
 import { createRoot } from "react-dom/client";
+import { AppDialogHost } from "@ltds/ui";
 import { SharedDirectoryProfileEdit } from "../../src/client/SharedDirectoryProfileEdit";
 import "../../../../packages/ui/src/styles.css";
 import "../../src/client/styles.css";
 
 export type Scenario = "update-lost-response" | "update-reload-failure" | "pending" | "conflict" | "readonly" | "protected"
   | "stale" | "merge" | "merge-denied" | "merge-differences" | "merge-lost-response" | "merge-malformed"
-  | "owner-positive" | "owner-lost-response" | "bootstrap-positive" | "bootstrap-lost-response";
+  | "owner-positive" | "owner-lost-response" | "bootstrap-positive" | "bootstrap-lost-response"
+  | "owner-alias" | "owner-half-pair" | "owner-suspended" | "owner-setup-unavailable" | "owner-setup-unavailable-listed" | "owner-no-candidates"
+  | "owner-revoke" | "owner-revoke-lost-response" | "owner-revoke-conflict" | "owner-revoke-suspended" | "owner-revoke-lost-then-conflict";
 export type Call = { path: string; method: string; mutationId: string | null; body: string | null };
 const fixtureWindow = window as Window & { sharedProfileScenario?: Scenario; sharedProfileCalls?: Call[] };
 const scenario = fixtureWindow.sharedProfileScenario ?? "pending", calls: Call[] = [];
+const aliasScenario = scenario === "owner-alias" || scenario === "owner-half-pair" || scenario === "owner-suspended";
 fixtureWindow.sharedProfileCalls = calls;
-let sequence = 0, updates = 0, confirms = 0, postUpdateReads = 0, merged = false,ownerWrites=0,bootstrapWrites=0,ownerEnabled=false,bootstrapped=false;
+let sequence = 0, updates = 0, confirms = 0, postUpdateReads = 0, merged = false,ownerWrites=0,bootstrapWrites=0,ownerEnabled=false,bootstrapped=false,ownerRevoked=false;
+const revokeScenario=scenario.startsWith("owner-revoke");
 Object.defineProperty(window.crypto, "randomUUID", { configurable: true,
   value: () => `11111111-1111-4111-8111-${String(++sequence).padStart(12, "0")}` });
 const members = [
@@ -33,8 +38,12 @@ window.fetch = async (input, init) => {
     if (isMerge && !merged) return Response.json({ sharedProfile: null, canMerge: true });
     if(scenario.startsWith('bootstrap-')&&!bootstrapped)return Response.json({sharedProfile:null,canMerge:false,canBootstrap:true});
     return Response.json({ sharedProfile: { id: "shared-one", kind: isClient?'client':"organization", version: scenario === "stale" ? 0 : updates ? 3 : 2,
-      profile: updatedProfile, members:isClient?[members[0]]:members, delivery: { state: scenario === "conflict" ? "conflict" : scenario === "pending" || updates ? "pending" : "acknowledged" },
-      ...(isClient?{portalSetup:{available:true,candidates:[{workspaceId:'workspace-one',sourceId:'project-alpha:primary',principalPublicId:'principal-one',targetPublicId:'target-one',recordId:'record-one',groupId:'shared-one',clientName:'Synthetic Shared Client',state:ownerEnabled?'enabled':'available'}]}}:{}),
+      profile: updatedProfile, members:isClient?[aliasScenario?{...members[0],sourceIds:['project-alpha:staging']}:members[0]]:members, delivery: { state: scenario === "conflict" ? "conflict" : scenario === "pending" || updates ? "pending" : "acknowledged" },
+      ...(isClient?{portalSetup:{available:scenario!=='owner-setup-unavailable'&&scenario!=='owner-setup-unavailable-listed',candidates:scenario==='owner-setup-unavailable'||scenario==='owner-no-candidates'?[]:[{workspaceId:'workspace-one',sourceId:aliasScenario?'project-alpha:staging':'project-alpha:primary',
+        ...(scenario==='owner-alias'||scenario==='owner-suspended'?{portalSourceId:'project-alpha:primary',correspondenceRevisionId:'11111111-2222-4333-8444-555555555555'}:{}),
+        ...(scenario==='owner-half-pair'?{portalSourceId:'project-alpha:primary'}:{}),
+        principalPublicId:'principal-one',targetPublicId:'target-one',recordId:'record-one',groupId:'shared-one',clientName:'Synthetic Shared Client',
+        ...(scenario==='owner-suspended'?{state:'suspended',currentGrantId:'grant-one',currentGrantRevision:2}:revokeScenario?{state:ownerRevoked?'revoked':scenario==='owner-revoke-suspended'?'suspended':'enabled',currentGrantId:'22222222-3333-4444-8555-666666666666',currentGrantRevision:ownerRevoked?4:3}:{state:ownerEnabled?'enabled':'available'})}]}}:{}),
       editing: { available: scenario !== "readonly", reason: scenario === "readonly" ? "permission_required" : null } } });
   }
   if (path.startsWith("/api/client-hub/shared-profiles/candidates?"))
@@ -59,7 +68,14 @@ window.fetch = async (input, init) => {
     return Response.json({replayed:bootstrapWrites>1});
   }
   if(path==='/api/client-hub/shared-profiles/portal-grants'&&method==='POST'){
-    ownerWrites+=1;ownerEnabled=true;
+    ownerWrites+=1;
+    if(revokeScenario){
+      if(scenario==='owner-revoke-lost-response'&&ownerWrites===1){ownerRevoked=true;return Response.json({error:'Portal permission response lost after commit'},{status:503});}
+      if(scenario==='owner-revoke-conflict')return Response.json({ok:false},{status:409});
+      if(scenario==='owner-revoke-lost-then-conflict'){if(ownerWrites===1){ownerRevoked=true;return Response.json({error:'Portal permission response lost after commit'},{status:503});}return Response.json({error:'Portal permission changed'},{status:409});}
+      ownerRevoked=true;return Response.json({ok:true,revision:4});
+    }
+    ownerEnabled=true;
     if(scenario==='owner-lost-response'&&ownerWrites===1)return Response.json({error:'Portal permission response lost after commit'},{status:503});
     return Response.json({ok:true,revision:1});
   }
@@ -71,4 +87,7 @@ window.fetch = async (input, init) => {
       scopes: [{ businessAreaId: "area-one", divisionId: null }], editing: { available: true, reason: null } });
   return Response.json({ error: "Unexpected fixture request" }, { status: 404 });
 };
-createRoot(document.getElementById("root")!).render(<SharedDirectoryProfileEdit kind={isClient?'client':"organization"} recordId="record-one" />);
+const root=createRoot(document.getElementById("root")!);
+const mount=(recordId:string|null)=>root.render(<>{recordId&&<SharedDirectoryProfileEdit kind={isClient?'client':"organization"} recordId={recordId} />}<AppDialogHost /></>);
+(window as Window&{sharedProfileMount?:typeof mount}).sharedProfileMount=mount;
+mount("record-one");

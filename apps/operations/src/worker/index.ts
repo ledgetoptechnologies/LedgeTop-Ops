@@ -64,6 +64,7 @@ import { searchShareRecipients, shareDirectoryRecipientsEnabled } from "./share-
 import { syncProjectAlpha } from "./project-alpha";
 import { runProjectAlphaSnapshotRecovery } from "./project-alpha-snapshot-recovery";
 import { registerProjectAlphaConnectorAdminRoutes, portalAuthorityErrorResponse } from "./project-alpha-connector-admin";
+import { registerPortalDirectoryCorrespondenceRoutes } from './portal-directory-correspondence-routes';
 import { registerProjectAlphaProjectV2AcceptanceRoutes } from "./project-alpha-project-v2-acceptance-routes";
 import { registerProjectAlphaPrivateAdminRoutes } from "./project-alpha-private-admin-routes";
 import { registerProjectAlphaApiV2ReadAcceptanceRoutes } from "./project-alpha-api-v2-read-acceptance-routes";
@@ -3393,6 +3394,7 @@ app.get("/api/admin/delivery-change-recovery", async (c) => {
   return c.json(await deliveryChangeRecoveryStatus(c.env));
 });
 registerProjectAlphaConnectorAdminRoutes(app);
+registerPortalDirectoryCorrespondenceRoutes(app);
 registerProjectAlphaApiV2ReadAcceptanceRoutes(app);
 registerProjectAlphaApiV2SyncRoutes(app);
 registerProjectAlphaDirectoryReadAdoptionRoutes(app);

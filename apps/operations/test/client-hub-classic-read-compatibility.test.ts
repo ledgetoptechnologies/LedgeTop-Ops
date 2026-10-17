@@ -309,7 +309,7 @@ print(len(packet['queries']))
     const { ops, env } = await compatibilityFixture();
     const primaryId = await classic(ops, primary, 97);
     const secondaryId = await classic(ops, secondary, 98);
-    expect(await reconcileClientHubIndex(env, 40)).toMatchObject({ status: "complete" });
+    await finishIndex(env);
     expect((await listClientHubRoots(env, staff, { limit: 100 })).clients).toHaveLength(2);
     const conflict = (surface: string) => ops.prepare(`INSERT INTO project_alpha_api_v2_inventory_conflicts
       (source_id,source_instance_id,application_id,history_epoch_id,inventory_kind,resource_type,project_alpha_public_id,external_id)

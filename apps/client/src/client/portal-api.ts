@@ -1,6 +1,7 @@
 import { requestJson, selectClientWorkspaceId, selectedClientWorkspaceId } from "./bulk-download";
 import type { DeliveryLocationCollection, ViewerPublicShareCreation, ViewerPublicShareSummary, ViewerShellSessionGrant } from "@ltds/shared";
 import { loadNativePortalContext, type NativePortalBootstrap } from "./native-portal-api";
+import { NO_AUTHORIZED_CLIENT_WORKSPACE } from "./portal-bootstrap-classification";
 
 export interface PortalCapabilities {
   manageTeam: boolean;
@@ -352,7 +353,9 @@ export async function loadPortalBootstrap(
       ? prior
       : workspaces[0]?.id ?? null);
     selectClientWorkspaceId(selectedWorkspaceId);
-    if (!selectedWorkspaceId) throw new Error("No authorized client workspace is available");
+    if (!selectedWorkspaceId) throw Object.assign(new Error("No authorized client workspace is available"), {
+      status: 403, body: { error: "No authorized client workspace is available", code: NO_AUTHORIZED_CLIENT_WORKSPACE },
+    });
   } else {
     if (requestedWorkspaceId) throw Object.assign(new Error("This workspace is not available to your account"), {status: 403});
     selectClientWorkspaceId(null);

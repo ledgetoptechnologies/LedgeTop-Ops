@@ -82,7 +82,7 @@ test("validated workspace hint selects the authorized workspace before feedback 
 
 test("unavailable workspace hints stop all downstream resource probes", async ({page}) => {
   const calls = await mock(page, undefined, {workspace: true}); await page.goto("/portal/feedback/feedback-one?workspace=not-allowed");
-  await expect(page.getByText("Access not provisioned", {exact: true})).toBeVisible();
+  await expect(page.getByText("Workspace access not set up yet", {exact: true})).toBeVisible();
   expect(calls.every(call => ["/api/client/session", "/api/client/v2/workspaces"].includes(call.path))).toBe(true);
 });
 

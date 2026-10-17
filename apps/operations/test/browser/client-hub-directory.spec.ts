@@ -185,8 +185,9 @@ test("matching business IDs from two producers retain source labels, contacts an
   });
   await page.goto("/clients");
   await expect(page.locator(".client-directory-card")).toHaveCount(2);
-  await expect(page.getByRole("link", { name: "Open Primary business client workspace" })).toContainText("Project Alpha");
-  await expect(page.getByRole("link", { name: "Open Secondary business client workspace" })).toContainText("project-alpha:secondary");
+  await expect(page.getByRole("link", { name: "Open Primary business client workspace" })).toContainText("Ledge Top Drone Services");
+  await expect(page.getByRole("link", { name: "Open Secondary business client workspace" })).toContainText("Ledge Top Technologies");
+  await expect(page.locator(".client-directory-grid")).not.toContainText("project-alpha:");
   await expect(page.getByRole("link", { name: "Open Secondary business client workspace" })).toContainText("Portal ready");
   await page.getByRole("link", { name: "Open Primary business client workspace" }).click();
   await expect(page.getByText("Primary contact", { exact: true })).toBeVisible();
@@ -194,6 +195,8 @@ test("matching business IDs from two producers retain source labels, contacts an
   await page.goBack();
   await page.getByRole("link", { name: "Open Secondary business client workspace" }).click();
   await expect(page.getByText("Secondary contact", { exact: true })).toBeVisible();
+  await expect(page.locator(".client-hub-title")).toContainText("Ledge Top Technologies");
+  await expect(page.locator(".client-hub-title")).not.toContainText("project-alpha:");
   await expect(page.getByText("Secondary portal login", { exact: true })).toBeVisible();
   await expect(page.getByText("secondary-login@example.test", { exact: true })).toBeVisible();
   await expect(page.getByText("Primary contact", { exact: true })).toHaveCount(0);
@@ -593,4 +596,56 @@ test("malformed client identifiers show an error instead of crashing or double-d
   }
   expect(requested.some(url => url.pathname.startsWith("/api/client-hub/"))).toBe(false);
   expect(errors).toEqual([]);
+});
+
+test("client detail header uses business names for raw and generic Project Alpha source labels", async ({ page }) => {
+  await mock(page, route => route.fulfill({ json: { clients: [], nextCursor: null, capabilities } }));
+  await page.goto("/clients/sources/project-alpha%3Astaging/business/organizations/org-staging");
+  await expect(page.getByRole("heading", { name: "Hidden customer", exact: true })).toBeVisible();
+  await expect(page.locator(".client-hub-title")).toContainText("Project Alpha (staging)");
+  await expect(page.locator(".client-hub-title")).not.toContainText("project-alpha:");
+  await page.goto("/clients/sources/project-alpha%3Aprimary/business/organizations/org-primary");
+  await expect(page.getByRole("heading", { name: "Hidden customer", exact: true })).toBeVisible();
+  await expect(page.locator(".client-hub-title")).toContainText("Ledge Top Drone Services");
+  await expect(page.locator(".client-hub-title p", { hasText: /^Project Alpha$/ })).toHaveCount(0);
+  await expect(page.locator(".client-hub-title")).not.toContainText("project-alpha:");
+});
+
+test("client source filter shows readable source names while keeping raw option values", async ({ page }) => {
+  const sources = [{ source_id: "delivery:local", display_name: "Local delivery" }, { source_id: "project-alpha:stage-one", display_name: "PA Stage One" },
+    { source_id: "project-alpha:primary", display_name: "Project Alpha" }, { source_id: "project-alpha:staging", display_name: "project-alpha:staging" }];
+  const requested = await mock(page, route => route.fulfill({ json: { clients: [client("org-a", "Acme")], sources, nextCursor: null, capabilities } }));
+  await page.goto("/clients");
+  const filter = page.getByRole("combobox", { name: "Client source" });
+  await expect(filter.locator("option")).toHaveText(["All available sources", "Local delivery", "PA Stage One", "Ledge Top Drone Services", "Project Alpha (staging)"]);
+  expect(await filter.locator("option").evaluateAll(options => options.map(option => (option as HTMLOptionElement).value)))
+    .toEqual(["", ...sources.map(source => source.source_id)]);
+  await filter.selectOption("project-alpha:staging");
+  await expect(page).toHaveURL(/source=project-alpha%3Astaging$/);
+  await expect.poll(() => requested.some(url => url.pathname === "/api/client-hub" && url.searchParams.get("source") === "project-alpha:staging")).toBe(true);
+});
+
+for (const width of [375, 1280]) test(`initial directory load shows decorative card skeletons that fit ${width}px and respect reduced motion`, async ({ page }) => {
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  await page.setViewportSize({ width, height: 900 });
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await mock(page, async route => { await gate; return route.fulfill({ json: { clients: [client("org-a", "Acme")], nextCursor: null, capabilities } }); });
+  await page.goto("/clients");
+  const skeletons = page.locator(".client-directory-grid .client-directory-skeleton");
+  await expect(skeletons).toHaveCount(3);
+  await expect(page.locator(".client-directory-status[role=status]")).toHaveText("Loading clients…");
+  await expect(page.locator(".client-directory-grid")).toHaveAttribute("aria-busy", "true");
+  expect(await skeletons.evaluateAll(nodes => nodes.every(node => node.getAttribute("aria-hidden") === "true"))).toBe(true);
+  await expect(page.getByRole("status").filter({ hasText: "Loading clients…" })).toHaveCount(1);
+  await expect(page.getByText("No clients yet")).toHaveCount(0);
+  expect(await page.evaluate(() => ({
+    fits: document.documentElement.scrollWidth <= window.innerWidth,
+    iterations: getComputedStyle(document.querySelector(".client-directory-skeleton .ltds-skeleton-bar")!).animationIterationCount,
+    columns: getComputedStyle(document.querySelector(".client-directory-grid")!).gridTemplateColumns.split(" ").length,
+  }))).toEqual({ fits: true, iterations: "1", columns: width < 600 ? 1 : expect.any(Number) });
+  release();
+  await expect(page.getByRole("link", { name: "Open Acme client workspace" })).toBeVisible();
+  await expect(skeletons).toHaveCount(0);
+  await expect(page.locator(".client-directory-grid")).toHaveAttribute("aria-busy", "false");
 });

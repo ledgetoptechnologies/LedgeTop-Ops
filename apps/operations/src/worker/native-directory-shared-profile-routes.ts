@@ -8,7 +8,8 @@ import { writeNativeDirectorySharedProfiles, type NativeDirectoryUpdateWrite } f
 import type { Env, StaffPrincipal } from './types';
 import { directoryMaterializationReadSource } from './project-alpha-directory-materialization-read-source';
 import { probeConfiguredProjectAlphaDirectoryClientContactProfile } from './project-alpha-directory-profile-api-v2';
-import { manageSharedProfilePortalGrant,portalGrantSchema } from './shared-profile-portal-authority';
+import { resolveDirectoryPortalSource,aliasWorkspaceWitnessSql } from './portal-directory-correspondence';
+import { manageSharedProfilePortalGrant,portalGrantSchema,sharedProfileCorrespondenceColumns,sharedProfileGrantSourceCurrent,type SharedProfilePortalGrant } from './shared-profile-portal-authority';
 import { readSharedProfileAuthorityRecoveryStatus, recoverSharedProfileAuthority } from './shared-profile-authority-recovery';
 
 type Bindings = { Bindings: Env; Variables: { principal: StaffPrincipal; administrator: boolean } };
@@ -113,37 +114,61 @@ export async function nativeDirectorySharedProfileDelivery(db:D1Database,groupId
   }
   return {state:destinations.some(d=>d.state==='conflict')?'conflict' as const:destinations.every(d=>d.state==='acknowledged')?'acknowledged' as const:'pending' as const,destinations};
 }
-async function portalSetup(c:C,groupId:string,members:readonly Member[],identitySafe:boolean){
-  type Candidate={workspaceId:string;sourceId:string;principalPublicId:string;targetPublicId:string;recordId:string;groupId:string;clientName:string;state:'available'|'enabled'|'revoked'};
-  const candidates:Candidate[]=[];
+export type SharedProfilePortalSetupCandidate={workspaceId:string;sourceId:string;portalSourceId?:string;correspondenceRevisionId?:string;
+ principalPublicId:string;targetPublicId:string;recordId:string;groupId:string;clientName:string;
+ state:'available'|'enabled'|'revoked'|'suspended';currentGrantId?:string;currentGrantRevision?:number};
+export async function sharedProfilePortalSetup(c:C,groupId:string,members:readonly Member[],identitySafe:boolean){
+  const candidates:SharedProfilePortalSetupCandidate[]=[];
   if(!await canMerge(c)||members.some(m=>m.kind!=='client'))return{available:false,candidates};
   try{
+    const db=c.env.OPS_DB.withSession('first-primary'),bridgeColumns=await sharedProfileCorrespondenceColumns(db);
     for(const member of members){
-      const mappings=(await c.env.OPS_DB.prepare("SELECT source_id,project_alpha_public_id FROM project_alpha_active_directory_mappings WHERE record_id=? AND resource_type='client' ORDER BY source_id")
-        .bind(member.recordId).all<{source_id:string;project_alpha_public_id:string}>()).results;
+      const stored=(await db.prepare("SELECT * FROM shared_profile_portal_grants WHERE group_id=? AND record_id=? AND target_type='client' ORDER BY id LIMIT 65")
+        .bind(groupId,member.recordId).all<SharedProfilePortalGrant&{state:string}>()).results;
+      if(stored.length>64)return{available:false,candidates:[]};
+      const seen=new Set<string>();
+      const mappings=(await db.prepare("SELECT source_id,project_alpha_public_id,source_instance_id,application_id,history_epoch_id FROM project_alpha_active_directory_mappings WHERE record_id=? AND resource_type='client' ORDER BY source_id")
+        .bind(member.recordId).all<{source_id:string;project_alpha_public_id:string;source_instance_id:string;application_id:string;history_epoch_id:string}>()).results;
       for(const mapping of mappings){
         if(!member.sourceIds.includes(mapping.source_id))continue;
+        const resolved=await resolveDirectoryPortalSource(c.env,mapping.source_id,{sourceInstanceId:mapping.source_instance_id,applicationId:mapping.application_id,historyEpochId:mapping.history_epoch_id});
+        if(!resolved||(resolved.correspondenceRevisionId&&!bridgeColumns))continue;
         const rows=(await c.env.DELIVERY_DB.withSession('first-primary').prepare(`SELECT w.id workspaceId,p.public_id principalPublicId,e.public_id targetPublicId
           FROM portal_v2_workspaces w JOIN pa_portal_workspace_sources s ON s.workspace_id=w.id AND s.projection_source_id=w.project_alpha_source_id
           JOIN portal_v2_directory_checkpoints checkpoint ON checkpoint.workspace_id=w.id
           JOIN portal_v2_directory_generations generation ON generation.id=checkpoint.active_generation_id AND generation.workspace_id=w.id AND generation.status='active' AND generation.complete=1
+          ${resolved.correspondenceRevisionId?`JOIN portal_v2_directory_entities root ON root.workspace_id=w.id AND root.generation_id=generation.id AND root.active=1 AND root.parent_public_id IS NULL
+            AND ((w.root_type='organization' AND root.entity_type='organization' AND root.public_id=w.pa_organization_public_id)
+              OR (w.root_type='standalone_client' AND root.entity_type IN('client','standalone_client') AND root.public_id=w.pa_client_public_id))`:''}
           JOIN pa_portal_principals p ON p.workspace_id=w.id AND p.status='active'
           JOIN portal_v2_directory_entities e ON e.workspace_id=w.id AND e.generation_id=generation.id AND e.public_id=? AND e.active=1 AND e.entity_type IN('client','standalone_client')
-          WHERE w.project_alpha_source_id=? AND w.status='active'
+          WHERE w.project_alpha_source_id=? AND w.status='active' ${resolved.correspondenceRevisionId?`AND ${aliasWorkspaceWitnessSql('w')}`:''}
+          ${resolved.correspondenceRevisionId?"AND ((w.root_type='organization' AND e.parent_public_id=root.public_id) OR (w.root_type='standalone_client' AND e.public_id=root.public_id AND e.parent_public_id IS NULL))":''}
           AND EXISTS(SELECT 1 FROM pa_portal_entitlement_intents entitlement WHERE entitlement.workspace_id=w.id
             AND entitlement.principal_public_id=p.public_id AND entitlement.scope_type='client' AND entitlement.scope_public_id=e.public_id
             AND entitlement.effect='allow' AND entitlement.capability='directory.read' AND entitlement.status='active'
             AND (entitlement.valid_from IS NULL OR datetime(entitlement.valid_from)<=datetime('now'))
             AND (entitlement.expires_at IS NULL OR datetime(entitlement.expires_at)>datetime('now'))) ORDER BY w.id,p.public_id LIMIT 65`)
-          .bind(mapping.project_alpha_public_id,mapping.source_id).all<{workspaceId:string;principalPublicId:string;targetPublicId:string}>()).results;
+          .bind(mapping.project_alpha_public_id,resolved.portalSourceId).all<{workspaceId:string;principalPublicId:string;targetPublicId:string}>()).results;
         if(rows.length>64)return{available:false,candidates:[]};
         for(const row of rows){
-          const prior=await c.env.OPS_DB.prepare(`SELECT state FROM shared_profile_portal_grants WHERE workspace_id=? AND source_id=? AND principal_public_id=? AND target_type='client' AND target_public_id=? AND group_id=?`)
-            .bind(row.workspaceId,mapping.source_id,row.principalPublicId,row.targetPublicId,groupId).first<string>('state');
-          candidates.push({...row,sourceId:mapping.source_id,recordId:member.recordId,groupId,clientName:member.profile.name!,state:prior==='active'?'enabled':prior==='revoked'?'revoked':'available'});
-          if(candidates.length>64)return{available:false,candidates:[]};
+          const prior=stored.find(g=>g.workspace_id===row.workspaceId&&(g.directory_source_id??g.source_id)===mapping.source_id&&g.principal_public_id===row.principalPublicId&&g.target_public_id===row.targetPublicId);
+          if(prior)seen.add(prior.id);
+          const current=prior&&JSON.stringify(JSON.parse(prior.group_membership_json).slice().sort())===JSON.stringify(members.map(m=>m.recordId).sort())&&prior.source_instance_id===mapping.source_instance_id&&prior.application_id===mapping.application_id&&prior.history_epoch_id===mapping.history_epoch_id&&await sharedProfileGrantSourceCurrent(c.env,prior);
+          const sourceFields=prior?.directory_source_id?{portalSourceId:prior.source_id,correspondenceRevisionId:prior.correspondence_revision_id!}:
+            resolved.correspondenceRevisionId?{portalSourceId:resolved.portalSourceId,correspondenceRevisionId:resolved.correspondenceRevisionId}:{};
+          candidates.push({...row,sourceId:mapping.source_id,...sourceFields,recordId:member.recordId,groupId,clientName:member.profile.name!,
+            state:prior?.state==='revoked'?'revoked':prior?(current?'enabled':'suspended'):'available',...(prior?{currentGrantId:prior.id,currentGrantRevision:prior.revision}:{})});
         }
       }
+      // Retain exact old authority for explicit unlink even when its producer/root is unavailable.
+      for(const prior of stored){if(seen.has(prior.id))continue;
+        candidates.push({workspaceId:prior.workspace_id,sourceId:prior.directory_source_id??prior.source_id,
+          ...(prior.directory_source_id?{portalSourceId:prior.source_id,correspondenceRevisionId:prior.correspondence_revision_id!}:{}),
+          principalPublicId:prior.principal_public_id,targetPublicId:prior.target_public_id,recordId:member.recordId,groupId,clientName:member.profile.name!,
+          state:prior.state==='revoked'?'revoked':'suspended',currentGrantId:prior.id,currentGrantRevision:prior.revision});
+      }
+      if(candidates.length>64)return{available:false,candidates:[]};
     }
     return{available:identitySafe,candidates};
   }catch{return{available:false,candidates:[]};}
@@ -158,7 +183,7 @@ async function readGroup(c:C,groupId:string){
   const identitySafe=g.kind!=='client'||await identitySafeContactReady(c,members);
   return {id:g.id,kind:g.kind,version:g.version,profile:JSON.parse(g.profile_json),members:members.map(({profile:_,...m})=>m),
     emailEditing:identitySafe,emailEditingReason:identitySafe?null:'identity_safe_contact_profile_unavailable',
-    portalSetup:await portalSetup(c,g.id,members,identitySafe),
+    portalSetup:await sharedProfilePortalSetup(c,g.id,members,identitySafe),
     editing:{available:editable&&identitySafe,reason:!identitySafe?'identity_safe_contact_profile_unavailable':editable?null:'directory_edit_permission_required'},delivery:await nativeDirectorySharedProfileDelivery(c.env.OPS_DB,g.id)};
 }
 export function registerNativeDirectorySharedProfileRoutes(app:Hono<Bindings>){const route=NATIVE_DIRECTORY_SHARED_PROFILE_ROUTE;

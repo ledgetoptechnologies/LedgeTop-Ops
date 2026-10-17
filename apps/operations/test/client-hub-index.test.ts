@@ -230,7 +230,7 @@ describe("resumable Client Hub index", { timeout: 60_000 }, () => {
     ]);
     await finish(env);
     expect(await ops.prepare("SELECT source_id,pa_public_id,mapping_status,workspace_id,account_count,contact_count,portal_status FROM client_hub_roots WHERE public_id='secondary-org'").first())
-      .toEqual({ source_id: "project-alpha:secondary", pa_public_id: publicId, mapping_status: "mapped", workspace_id: "secondary-workspace", account_count: 0, contact_count: 2, portal_status: "active" });
+      .toEqual({ source_id: "project-alpha:secondary", pa_public_id: publicId, mapping_status: "mapped", workspace_id: "secondary-workspace", account_count: 0, contact_count: 1, portal_status: "active" });
     expect(await ops.prepare("SELECT source_id,root_public_id FROM client_hub_search_values WHERE normalized_value='secondary@example.test'").first())
       .toEqual({ source_id: "project-alpha:secondary", root_public_id: "secondary-org" });
     expect(await ops.prepare("SELECT workspace_id,account_count,project_count FROM client_hub_roots WHERE public_id='primary-org'").first()).toEqual({ workspace_id: "workspace", account_count: 1, project_count: 0 });
@@ -238,6 +238,52 @@ describe("resumable Client Hub index", { timeout: 60_000 }, () => {
     expect(await ops.prepare("SELECT source_id,root_public_id FROM client_hub_search_values WHERE normalized_value='other-source@example.test'").first())
       .toEqual({ source_id: "project-alpha:secondary", root_public_id: "secondary-org" });
   });
+  it("counts PA contact records separately from portal sign-in principals", async () => {
+    const { ops, delivery, env } = await fixture();
+    const orgPublicId = "a".repeat(32), clientPublicId = "b".repeat(32), portalPublicId = "c".repeat(32);
+    await ops.batch([
+      ops.prepare("INSERT INTO pa_organizations(id,name,active,payload_json) VALUES('org','Business',1,?)")
+        .bind(JSON.stringify({ public_id: orgPublicId })),
+      ops.prepare("INSERT INTO pa_clients(id,name,organization_id,active,payload_json) VALUES('contact','One contact','org',1,'{}')"),
+      ops.prepare("INSERT INTO pa_clients(id,name,organization_id,active,payload_json) VALUES('standalone','Standalone',NULL,1,?)")
+        .bind(JSON.stringify({ public_id: clientPublicId })),
+    ]);
+    await delivery.batch([
+      delivery.prepare(`INSERT INTO portal_v2_workspaces(id,root_type,pa_organization_public_id,pa_client_public_id,display_name,status) VALUES
+        ('org-workspace','organization',?,NULL,'Business portal','active'),
+        ('client-workspace','standalone_client',NULL,?,'Client portal','active'),
+        ('portal-only','organization',?,NULL,'Portal only','active')`).bind(orgPublicId, clientPublicId, portalPublicId),
+      delivery.prepare(`INSERT INTO pa_portal_principals VALUES
+        ('org-workspace','person','One contact','person@example.test','active'),
+        ('org-workspace','another-login','Another login','another@example.test','active'),
+        ('org-workspace','revoked-login','Revoked login','revoked@example.test','revoked'),
+        ('client-workspace','person','Standalone','standalone@example.test','active'),
+        ('portal-only','person','Portal contact','portal@example.test','active'),
+        ('portal-only','revoked-login','Revoked login','revoked@example.test','revoked')`),
+    ]);
+    await projectWorkspace(delivery, "org-workspace", "organization", orgPublicId);
+    await projectWorkspace(delivery, "client-workspace", "standalone_client", clientPublicId);
+    await projectWorkspace(delivery, "portal-only", "organization", portalPublicId);
+    await finish(env);
+    const counts = () => ops.prepare(`SELECT root_namespace,public_id,contact_count FROM client_hub_roots
+      WHERE status='active' ORDER BY root_namespace,public_id`).all();
+    expect((await counts()).results).toEqual([
+      { root_namespace: "business", public_id: "org", contact_count: 1 },
+      { root_namespace: "business", public_id: "standalone", contact_count: 1 },
+      { root_namespace: "portal", public_id: "portal-only", contact_count: 1 },
+    ]);
+    expect(await ops.prepare("SELECT count(*) count FROM client_hub_search_values WHERE record_type='portal_principal' AND normalized_value='another@example.test'").first("count")).toBe(1);
+    // A second PA contact is a second contact record; sign-in changes are not.
+    await ops.prepare("INSERT INTO pa_clients(id,name,organization_id,active,payload_json) VALUES('second-contact','Second contact','org',1,'{}')").run();
+    await delivery.prepare("UPDATE pa_portal_principals SET status='revoked' WHERE workspace_id='org-workspace'").run();
+    await nextCycle(ops); await finish(env);
+    expect((await counts()).results).toEqual([
+      { root_namespace: "business", public_id: "org", contact_count: 2 },
+      { root_namespace: "business", public_id: "standalone", contact_count: 1 },
+      { root_namespace: "portal", public_id: "portal-only", contact_count: 1 },
+    ]);
+  });
+
   it("backfills more than 500 roots with bounded pages and resumes from its persisted checkpoint", async () => {
     const { ops, env } = await fixture();
     await ops.prepare(`WITH RECURSIVE sequence(n) AS (VALUES(0) UNION ALL SELECT n+1 FROM sequence WHERE n<619)
@@ -277,7 +323,7 @@ describe("resumable Client Hub index", { timeout: 60_000 }, () => {
       { source_id: "project-alpha:primary", display_name: "Source customer" },
     ]);
     const business = await ops.prepare("SELECT account_count,project_count,request_count,contact_count FROM client_hub_roots WHERE public_id='org'").first();
-    expect(business).toEqual({ account_count: 1, project_count: 1, request_count: 1, contact_count: 2 });
+    expect(business).toEqual({ account_count: 1, project_count: 1, request_count: 1, contact_count: 1 });
     const search = await ops.prepare("SELECT record_type,field,normalized_value,project_id FROM client_hub_search_values ORDER BY record_type,field").all();
     expect(search.results).toEqual(expect.arrayContaining([
       expect.objectContaining({ record_type: "pa_client", field: "contact", normalized_value: "business contact" }),
