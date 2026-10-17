@@ -118,10 +118,10 @@ test("retains the separately scoped reviewed project-creation route", async ({ p
 test("keeps the original primary status and manual sync available while no source manifest is deployed", async ({ page }) => {
   const requests = await fixture(page, { connectors: [], legacyPrimary: true, health: [{ sourceId: primary, status: "healthy", lastAttemptAt: "2026-09-07T00:00:00Z", lastSuccessAt: "2026-09-07T00:00:02Z", lastErrorCode: null }], recovery: [], portal: { available: false, authorities: [], recovery: null }, projectManagement: [] });
   await page.goto("/administration");
-  const card = page.getByRole("region", { name: "Primary connection" });
+  const card = page.getByRole("region", { name: "Ledge Top Drone Services connection" });
   await expect(card).toContainText("original deployment configuration");
-  await card.getByRole("button", { name: "Sync primary now" }).click();
-  await expect(page.getByRole("status").filter({ hasText: "Primary connection synchronization finished." })).toBeVisible();
+  await card.getByRole("button", { name: "Sync now" }).click();
+  await expect(page.getByRole("status").filter({ hasText: "Ledge Top Drone Services synchronization finished." })).toBeVisible();
   expect(requests.filter(request => request.method !== "GET")).toEqual([{ path: `${endpoint}/project-alpha%3Aprimary/sync`, method: "POST", body: {} }]);
 });
 

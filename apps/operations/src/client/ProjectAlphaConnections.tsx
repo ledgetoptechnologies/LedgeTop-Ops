@@ -646,7 +646,7 @@ function PortalPurpose({ connector, status, primaryActive, disabled, onAction }:
     {status?.available && <>
       <p>Uses this connection's deployed event-key commitment. It does not register a source or grant client access by itself.</p>
       {authority && !current && <p className="notice">Refresh portal configuration after the deployed connection revision changes.</p>}
-      {(!primaryActive || connector.state !== "active") && <p>Both this connection and the primary must be active before portal activation.</p>}
+      {(!primaryActive || connector.state !== "active") && <p>Both this connection and the {projectAlphaSourceName(PRIMARY)} connection must be active before portal activation.</p>}
       <div className="alpha-connection-actions">
         <button type="button" disabled={disabled || connector.state === "retired" || authority?.state === "retired"}
           onClick={() => onAction("configure")}>{authority ? "Refresh portal configuration" : "Configure client portal"}</button>
@@ -908,16 +908,16 @@ export function ProjectAlphaConnections() {
     } catch (caught) { if (live.current) setError(caught instanceof Error ? caught.message : "Portal recovery could not be completed."); }
     finally { if (live.current) setSyncing(null); }
   };
-  const legacy: Connector = { sourceId: PRIMARY, displayName: "Primary connection", producerBindingId: "legacy", snapshotOrigin: "", snapshotBasePath: "", applicationKey: "", profile: "primary_legacy", state: "active", readVisible: true, activeRevision: 0, version: 0 };
+  const legacy: Connector = { sourceId: PRIMARY, displayName: projectAlphaSourceName(PRIMARY), producerBindingId: "legacy", snapshotOrigin: "", snapshotBasePath: "", applicationKey: "", profile: "primary_legacy", state: "active", readVisible: true, activeRevision: 0, version: 0 };
   return <Card title="Project Alpha connections"><div className="alpha-connections">
     <p>Connection identities, destinations, and credentials are managed as deployment configuration. Operations can show status and request a sync, but cannot register, alter, or retire a source from the browser.</p>
     {error && <p role="alert" className="notice">{error}</p>}{message && <p role="status" className="notice">{message}</p>}{!data && !error && <Skeleton variant="list" rows={3} label="Loading connections…" />}
     <button type="button" className="button-ghost button-small" disabled={loading || Boolean(syncing)} onClick={refresh}>Refresh connection status</button>
-    {data?.legacyPrimary && <section className="alpha-connection" aria-label="Primary connection"><h3>Primary connection</h3><p><strong>Business record sync</strong> · Using the original deployment configuration. Add it to the deployment source manifest to migrate it to the same exact-source registry as additional Project Alpha instances.</p><SyncHealth health={data.health.find(row => row.sourceId === PRIMARY)} /><button type="button" disabled={loading || Boolean(syncing)} onClick={() => void sync(legacy)}>{syncing === PRIMARY ? "Synchronizing…" : "Sync primary now"}</button></section>}
+    {data?.legacyPrimary && <section className="alpha-connection" aria-label={`${projectAlphaSourceName(PRIMARY)} connection`}><h3>{projectAlphaSourceName(PRIMARY)}</h3><p><strong>Business record sync</strong> · Using the original deployment configuration. Add it to the deployment source manifest to migrate it to the same exact-source registry as additional Project Alpha instances.</p><SyncHealth health={data.health.find(row => row.sourceId === PRIMARY)} /><button type="button" disabled={loading || Boolean(syncing)} onClick={() => void sync(legacy)}>{syncing === PRIMARY ? "Synchronizing…" : "Sync now"}</button></section>}
     {data?.connectors.map(connector => {
       const management = data.projectManagement?.find(row => row.sourceId === connector.sourceId);
       return <section key={connector.sourceId} className="alpha-connection" aria-label={`${connector.displayName} connection`}><h3>{connector.displayName}</h3>
-        <p><strong>{connector.state}</strong> · {connector.profile === "primary_legacy" ? "Primary staff authority" : "Business data only"} · {connector.readVisible ? "Business records visible" : "Business records hidden"}</p>
+        <p><strong>{connector.state}</strong> · {connector.profile === "primary_legacy" ? "Staff authority source" : "Business data only"} · {connector.readVisible ? "Business records visible" : "Business records hidden"}</p>
         <SyncHealth health={data.health.find(row => row.sourceId === connector.sourceId)} /><RecoveryStatus connector={connector} recovery={data.recovery?.find(row => row.sourceId === connector.sourceId)} />
         <PortalPurpose connector={connector} status={data.portal}
           primaryActive={data.legacyPrimary || data.connectors.some(row => row.sourceId === PRIMARY && row.state === "active")}
