@@ -15,7 +15,7 @@ const proof = (overrides: Record<string, unknown> = {}) => ({ directorySourceId:
   applicationKey: "ltds_ops", connectorRevision: 3, connectorVersion: 4, currentKeyFingerprint: "d".repeat(64), primaryAuthorityVersion: 5, ...overrides });
 const readyStatus = () => ({ status: "ready", current: null, preview: { proof: proof(), proofSha256: PROOF_SHA } });
 const activeStatus = (status = "ready", preview: unknown = null) => ({ status, current: { version: 1, state: "active", revisionId: REVISION,
-  revocationProofSha256: REVOKE_SHA, approvedByStaffId: "admin", approvedAt: "2026-10-17T07:00:00.000Z" }, preview });
+  revocationProofSha256: REVOKE_SHA, approvedByStaffId: "admin", approvedAt: "2026-10-17 07:00:00" }, preview });
 const requestSha = (body: Record<string, unknown>) => createHash("sha256").update(JSON.stringify({ directorySourceId: staging,
   operationId: body.operationId, action: body.action, expectedVersion: body.expectedVersion, expectedProofSha256: body.expectedProofSha256 })).digest("hex");
 
@@ -127,6 +127,18 @@ test("disconnect stays available when the upstream connection is unavailable, af
   await expect(card(page).getByRole("status").filter({ hasText: "Client workspaces are disconnected" })).toBeVisible();
   expect(calls.posts).toHaveLength(1);
   expect(calls.posts[0]!.body).toMatchObject({ action: "revoke", expectedVersion: 1, expectedProofSha256: REVOKE_SHA });
+});
+
+test.describe("in a non-UTC browser timezone", () => {
+test.use({ timezoneId: "America/Chicago" });
+test("the SQLite UTC approval time is shown as UTC, not shifted by the browser timezone", async ({ page }) => {
+  const connected = activeStatus("ready", null);
+  await fixture(page, { discovery: { status: "review", candidates: [{ directorySourceId: staging, review: connected }] }, status: () => connected });
+  await page.goto("/administration");
+  const expected = await page.evaluate(() => new Date(Date.UTC(2026, 9, 17, 7, 0, 0)).toLocaleString());
+  expect(expected).toContain("2:00:00 AM");
+  await expect(card(page)).toContainText(expected);
+});
 });
 
 test("a changed connection is shown as needing review with a reconnect action", async ({ page }) => {

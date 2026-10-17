@@ -25,6 +25,12 @@ const text = (value: unknown, max = 512): value is string => typeof value === "s
 const count = (value: unknown): value is number => typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
 const positive = (value: unknown): value is number => count(value) && value > 0;
 const uuid = (value: unknown): value is string => typeof value === "string" && UUID.test(value);
+/** The server records approval time as SQLite UTC text ("YYYY-MM-DD HH:MM:SS");
+ * read it as UTC (like the rest of this page) so the browser's timezone can't shift it. */
+const SQLITE_UTC = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/;
+function utcTime(value: string): number {
+  return Date.parse(SQLITE_UTC.test(value) ? `${value.replace(" ", "T")}Z` : value);
+}
 /** A canonical HTTPS origin: no path, query, credentials or trailing slash. */
 function httpsOrigin(value: unknown): value is string {
   if (typeof value !== "string" || value.length > 2048) return false;
@@ -48,7 +54,7 @@ export function validCorrespondenceStatus(value: unknown, directorySourceId: str
     && (current.state === "active" || current.state === "revoked") && uuid(current.revisionId)
     && typeof current.revocationProofSha256 === "string" && SHA256.test(current.revocationProofSha256)
     && text(current.approvedByStaffId, 256) && typeof current.approvedAt === "string" && current.approvedAt.length <= 64
-    && !Number.isNaN(Date.parse(current.approvedAt)))) return false;
+    && !Number.isNaN(utcTime(current.approvedAt)))) return false;
   if (preview !== null && !(record(preview) && typeof preview.proofSha256 === "string" && SHA256.test(preview.proofSha256)
     && validProof(preview.proof, directorySourceId))) return false;
   return true;
@@ -227,7 +233,7 @@ function PortalCorrespondenceCard({ directorySourceId, initial, connectors, onCh
       {reason && <p role="status" className="notice">{reason}</p>}
       {status.current && <dl className="alpha-correspondence-current">
         <div><dt>Status</dt><dd>{status.current.state !== "active" ? "Disconnected" : status.status === "suspended" ? "Paused for review" : "Connected"}</dd></div>
-        <div><dt>Approved</dt><dd>{new Date(status.current.approvedAt).toLocaleString()}</dd></div>
+        <div><dt>Approved</dt><dd>{new Date(utcTime(status.current.approvedAt)).toLocaleString()}</dd></div>
       </dl>}
       {!status.preview && !active && !reason && <p role="status">No connection is ready for review yet.</p>}
     </>}
