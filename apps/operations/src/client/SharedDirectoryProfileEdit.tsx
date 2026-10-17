@@ -6,7 +6,11 @@ import { NativeDirectoryProfileEdit, serializeNativeDirectoryProfile, type Profi
 
 type Kind = "organization" | "client";
 type Member = { recordId: string; version: number; sourceIds: string[]; sourceNames?: string[] };
-type PortalCandidate={workspaceId:string;sourceId:string;principalPublicId:string;targetPublicId:string;recordId:string;groupId:string;clientName:string;state:'available'|'enabled'|'revoked'};
+// sourceId is the logical business-records source. When the client portal uses a
+// different source, the server pairs portalSourceId with the approved
+// correspondence revision; the two travel together or not at all.
+type PortalCandidate={workspaceId:string;sourceId:string;portalSourceId?:string;correspondenceRevisionId?:string;principalPublicId:string;targetPublicId:string;recordId:string;groupId:string;clientName:string;
+  state:'available'|'enabled'|'revoked'|'suspended';currentGrantId?:string;currentGrantRevision?:number};
 type SharedProfile = { id: string; kind: Kind; version: number; profile: Record<string, string>; members: Member[];
   delivery: { state: "acknowledged" | "pending" | "conflict"; destinations?: unknown[] }; editing?: { available: boolean; reason?: string | null };
   emailEditing?: boolean; emailEditingReason?: string | null;portalSetup?:{available:boolean;candidates:PortalCandidate[]} };
@@ -42,13 +46,25 @@ function validProfile(value: SharedProfile, kind: Kind, recordId: string): boole
     && !!value.delivery && ["acknowledged", "pending", "conflict"].includes(value.delivery.state)
     && (value.portalSetup===undefined||validPortalSetup(value));
 }
-const candidateKey=(candidate:PortalCandidate)=>JSON.stringify([candidate.workspaceId,candidate.sourceId,candidate.principalPublicId,candidate.targetPublicId,candidate.recordId]);
+const candidateKey=(candidate:PortalCandidate)=>JSON.stringify([candidate.workspaceId,candidate.sourceId,candidate.portalSourceId??null,candidate.correspondenceRevisionId??null,candidate.principalPublicId,candidate.targetPublicId,candidate.recordId]);
+const PORTAL_SOURCE_PATTERN=/^project-alpha:[a-z0-9][a-z0-9_-]{0,63}$/,REVISION_PATTERN=/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+function validCorrespondencePair(candidate:PortalCandidate):boolean{
+  if(candidate.portalSourceId===undefined&&candidate.correspondenceRevisionId===undefined)return true;
+  return typeof candidate.portalSourceId==='string'&&PORTAL_SOURCE_PATTERN.test(candidate.portalSourceId)&&candidate.portalSourceId!==candidate.sourceId
+    &&typeof candidate.correspondenceRevisionId==='string'&&REVISION_PATTERN.test(candidate.correspondenceRevisionId);
+}
+function validCurrentGrant(candidate:PortalCandidate):boolean{
+  if(candidate.currentGrantId===undefined&&candidate.currentGrantRevision===undefined)return candidate.state!=='suspended';
+  return typeof candidate.currentGrantId==='string'&&candidate.currentGrantId.length>0&&candidate.currentGrantId.length<=128
+    &&Number.isSafeInteger(candidate.currentGrantRevision)&&(candidate.currentGrantRevision as number)>0;
+}
 function validPortalSetup(value:SharedProfile):boolean{
   const setup=value.portalSetup;
   return !!setup&&typeof setup.available==='boolean'&&Array.isArray(setup.candidates)&&setup.candidates.length<=64
     && setup.candidates.every(candidate=>!!candidate&&['workspaceId','sourceId','principalPublicId','targetPublicId','recordId','groupId','clientName'].every(field=>
-      typeof candidate[field as keyof PortalCandidate]==='string'&&candidate[field as keyof PortalCandidate].length>0&&candidate[field as keyof PortalCandidate].length<=512)
-      && candidate.groupId===value.id&&['available','enabled','revoked'].includes(candidate.state)
+      typeof (candidate as Record<string,unknown>)[field]==='string'&&((candidate as Record<string,unknown>)[field] as string).length>0&&((candidate as Record<string,unknown>)[field] as string).length<=512)
+      && candidate.groupId===value.id&&['available','enabled','revoked','suspended'].includes(candidate.state)
+      && validCorrespondencePair(candidate)&&validCurrentGrant(candidate)
       && value.members.some(member=>member.recordId===candidate.recordId&&member.sourceIds.includes(candidate.sourceId)))
     && new Set(setup.candidates.map(candidateKey)).size===setup.candidates.length;
 }
@@ -165,7 +181,9 @@ function SharedDirectoryProfileEditBound({ kind, recordId, allowPreparedAttempt 
       ||!ownerAttempt&&(!response?.sharedProfile?.portalSetup?.available||candidate.state!=='available'))return;
     const operationId=ownerAttempt?.request.mutationId??crypto.randomUUID(),grantId=ownerAttempt?null:crypto.randomUUID();
     const current=ownerAttempt??{kind:'grant' as const,key,request:{path:`${ENDPOINT}/portal-grants`,method:'POST' as const,mutationId:operationId,
-      body:JSON.stringify({operationId,id:grantId,workspaceId:candidate.workspaceId,sourceId:candidate.sourceId,recipientMode:'first_verified_identity',issuer:null,subject:null,
+      body:JSON.stringify({operationId,id:grantId,workspaceId:candidate.workspaceId,sourceId:candidate.sourceId,
+        ...(candidate.portalSourceId?{portalSourceId:candidate.portalSourceId,correspondenceRevisionId:candidate.correspondenceRevisionId}:{}),
+        recipientMode:'first_verified_identity',issuer:null,subject:null,
         principalPublicId:candidate.principalPublicId,targetType:'client',targetPublicId:candidate.targetPublicId,recordId:candidate.recordId,groupId:candidate.groupId,expectedRevision:0,state:'active'})}};
     setOwnerAttempt(current);setBusy(true);setError('');setSuccess('');
     try{const result=await transmit(current.request) as {ok?:boolean;revision?:number};if(result?.ok!==true||result.revision!==1)throw new Error('The portal editing acknowledgement could not be verified.');
@@ -204,7 +222,9 @@ function SharedDirectoryProfileEditBound({ kind, recordId, allowPreparedAttempt 
         <p><strong>{candidate.clientName}</strong> · {sourceLabel(candidate.sourceId)}</p>
         {candidate.state==='available'?<button type="button" className="button-orange" disabled={busy||!!attempt||!shared.portalSetup?.available||!!ownerAttempt&&ownerAttempt.key!==candidateKey(candidate)} onClick={()=>void enablePortal(candidate)}>
           {ownerAttempt?.kind==='grant'&&ownerAttempt.key===candidateKey(candidate)?'Retry same portal permission':'Enable portal profile editing'}</button>
-          :<p role="status">{candidate.state==='enabled'?'Profile editing enabled for verified sign-in.':'Portal profile editing permission is revoked.'}</p>}
+          :<p role="status">{candidate.state==='enabled'?'Profile editing enabled for verified sign-in.'
+            :candidate.state==='suspended'?'Paused for review: the client workspace connection changed. Review it on the Project Alpha connections page before portal editing can resume.'
+            :'Portal profile editing permission is revoked.'}</p>}
       </div>)}
     </Card>}
     {!shared && response.canMerge && <Card title="Shared profile"><p>Merge this profile with its reviewed copy in another Project Alpha.</p>

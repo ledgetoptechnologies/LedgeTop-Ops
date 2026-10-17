@@ -136,6 +136,29 @@ for(const scenario of ['owner-positive','owner-lost-response'] as const)test(`${
   const body=JSON.parse(writes[0]!.body!);expect(body.operationId).toBe(writes[0]!.mutationId);expect(body.id).not.toBe(body.operationId);
   expect(body).toMatchObject({recipientMode:'first_verified_identity',issuer:null,subject:null,targetType:'client',recordId:'record-one',principalPublicId:'principal-one',sourceId:'project-alpha:primary',expectedRevision:0,state:'active'});
 });
+test('an aliased candidate forwards its logical source with the exact portal correspondence pair',async({page})=>{
+  await render(page,'owner-alias');
+  await page.getByRole('button',{name:'Enable portal profile editing',exact:true}).click();
+  await expect(page.getByText('Profile editing enabled for verified sign-in.',{exact:true})).toBeVisible();
+  const writes=mutations(await calls(page));expect(writes).toHaveLength(1);
+  expect(JSON.parse(writes[0]!.body!)).toMatchObject({sourceId:'project-alpha:staging',portalSourceId:'project-alpha:primary',
+    correspondenceRevisionId:'11111111-2222-4333-8444-555555555555',expectedRevision:0,state:'active'});
+});
+
+test('a candidate with only half of the correspondence pair is rejected as unverifiable',async({page})=>{
+  await render(page,'owner-half-pair');
+  await expect(page.getByRole('button',{name:'Enable portal profile editing',exact:true})).toHaveCount(0);
+  await expect(page.getByRole('alert')).toBeVisible();
+  expect(mutations(await calls(page))).toEqual([]);
+});
+
+test('a suspended correspondence grant asks for review and offers no enable action',async({page})=>{
+  await render(page,'owner-suspended');
+  await expect(page.getByText(/Paused for review: the client workspace connection changed/)).toBeVisible();
+  await expect(page.getByRole('button',{name:'Enable portal profile editing',exact:true})).toHaveCount(0);
+  expect(mutations(await calls(page))).toEqual([]);
+});
+
 for(const scenario of ['bootstrap-positive','bootstrap-lost-response'] as const)test(`${scenario} creates one reviewed client profile before presenting portal activation`,async({page})=>{
   await render(page,scenario);
   await expect(page.getByText('Merge a duplicate in the other PA first.',{exact:false})).toBeVisible();

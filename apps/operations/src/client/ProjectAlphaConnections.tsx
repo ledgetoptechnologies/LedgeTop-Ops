@@ -5,6 +5,7 @@ import { api, ApiError } from "./api";
 import { projectAdoptionReviewFailureMessage } from "./project-adoption-review-message";
 import { DirectoryExistingRecordAdoptionPanel } from "./DirectoryExistingRecordAdoptionPanel";
 import { NativeDirectoryExistingImportPanel } from "./NativeDirectoryExistingImportPanel";
+import { PortalCorrespondencePanel } from "./PortalCorrespondenceCard";
 
 const ENDPOINT = "/api/admin/integrations/project-alpha/connectors";
 const READ_ACCEPTANCE_ENDPOINT = "/api/admin/integrations/project-alpha/api-v2/read-acceptance";
@@ -30,7 +31,8 @@ type PortalStatus = { available: boolean; authorities: PortalAuthority[];
   recovery: { version: number; sourceId: string; action: string; startedAt: string } | null };
 type ProjectManagementRoute = { sourceId: string; version: number; revision: number; enabled: boolean; reviewedUrlTemplate: string | null };
 type Directory = { connectors: Connector[]; health: Health[]; legacyPrimary: boolean; recovery?: Recovery[] | null;
-  portal?: PortalStatus; projectManagement?: ProjectManagementRoute[]; existingImport?: { enabled: boolean } };
+  portal?: PortalStatus; projectManagement?: ProjectManagementRoute[]; existingImport?: { enabled: boolean };
+  portalDirectoryCorrespondence?: unknown };
 type ReadAcceptancePart = { status: string; reason?: string; count?: number; exactIdentityMatch?: boolean; exactContractMatch?: boolean };
 type ReadAcceptance = { sourceId: string; readOnly: boolean; capabilities: ReadAcceptancePart;
   directory: ReadAcceptancePart; projects: ReadAcceptancePart; clientWrites?: {
@@ -927,6 +929,7 @@ export function ProjectAlphaConnections() {
         <details><summary>Connection details</summary><dl><dt>Source</dt><dd>{connector.sourceId}</dd><dt>Producer</dt><dd>{connector.producerBindingId}</dd><dt>Destination</dt><dd>{connector.snapshotOrigin}{connector.snapshotBasePath}</dd><dt>Application</dt><dd>{connector.applicationKey}</dd><dt>Revision</dt><dd>{connector.activeRevision}</dd></dl><p>These values are read-only here. Change the reviewed deployment source manifest and deploy Operations; do not paste credentials into this page.</p></details>
       </section>;
     })}
+    {data && <PortalCorrespondencePanel discovery={data.portalDirectoryCorrespondence} connectors={data.connectors} onChanged={() => setRevision(value => value + 1)} />}
     <ApiV2InventoryPanel disabled={loading || Boolean(syncing)} />
     <ApiV2OperatorPanel disabled={loading || Boolean(syncing)} />
     <DirectoryExistingRecordAdoptionPanel disabled={loading || Boolean(syncing)} />

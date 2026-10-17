@@ -5,10 +5,12 @@ import "../../src/client/styles.css";
 
 export type Scenario = "update-lost-response" | "update-reload-failure" | "pending" | "conflict" | "readonly" | "protected"
   | "stale" | "merge" | "merge-denied" | "merge-differences" | "merge-lost-response" | "merge-malformed"
-  | "owner-positive" | "owner-lost-response" | "bootstrap-positive" | "bootstrap-lost-response";
+  | "owner-positive" | "owner-lost-response" | "bootstrap-positive" | "bootstrap-lost-response"
+  | "owner-alias" | "owner-half-pair" | "owner-suspended";
 export type Call = { path: string; method: string; mutationId: string | null; body: string | null };
 const fixtureWindow = window as Window & { sharedProfileScenario?: Scenario; sharedProfileCalls?: Call[] };
 const scenario = fixtureWindow.sharedProfileScenario ?? "pending", calls: Call[] = [];
+const aliasScenario = scenario === "owner-alias" || scenario === "owner-half-pair" || scenario === "owner-suspended";
 fixtureWindow.sharedProfileCalls = calls;
 let sequence = 0, updates = 0, confirms = 0, postUpdateReads = 0, merged = false,ownerWrites=0,bootstrapWrites=0,ownerEnabled=false,bootstrapped=false;
 Object.defineProperty(window.crypto, "randomUUID", { configurable: true,
@@ -33,8 +35,12 @@ window.fetch = async (input, init) => {
     if (isMerge && !merged) return Response.json({ sharedProfile: null, canMerge: true });
     if(scenario.startsWith('bootstrap-')&&!bootstrapped)return Response.json({sharedProfile:null,canMerge:false,canBootstrap:true});
     return Response.json({ sharedProfile: { id: "shared-one", kind: isClient?'client':"organization", version: scenario === "stale" ? 0 : updates ? 3 : 2,
-      profile: updatedProfile, members:isClient?[members[0]]:members, delivery: { state: scenario === "conflict" ? "conflict" : scenario === "pending" || updates ? "pending" : "acknowledged" },
-      ...(isClient?{portalSetup:{available:true,candidates:[{workspaceId:'workspace-one',sourceId:'project-alpha:primary',principalPublicId:'principal-one',targetPublicId:'target-one',recordId:'record-one',groupId:'shared-one',clientName:'Synthetic Shared Client',state:ownerEnabled?'enabled':'available'}]}}:{}),
+      profile: updatedProfile, members:isClient?[aliasScenario?{...members[0],sourceIds:['project-alpha:staging']}:members[0]]:members, delivery: { state: scenario === "conflict" ? "conflict" : scenario === "pending" || updates ? "pending" : "acknowledged" },
+      ...(isClient?{portalSetup:{available:true,candidates:[{workspaceId:'workspace-one',sourceId:aliasScenario?'project-alpha:staging':'project-alpha:primary',
+        ...(scenario==='owner-alias'||scenario==='owner-suspended'?{portalSourceId:'project-alpha:primary',correspondenceRevisionId:'11111111-2222-4333-8444-555555555555'}:{}),
+        ...(scenario==='owner-half-pair'?{portalSourceId:'project-alpha:primary'}:{}),
+        principalPublicId:'principal-one',targetPublicId:'target-one',recordId:'record-one',groupId:'shared-one',clientName:'Synthetic Shared Client',
+        ...(scenario==='owner-suspended'?{state:'suspended',currentGrantId:'grant-one',currentGrantRevision:2}:{state:ownerEnabled?'enabled':'available'})}]}}:{}),
       editing: { available: scenario !== "readonly", reason: scenario === "readonly" ? "permission_required" : null } } });
   }
   if (path.startsWith("/api/client-hub/shared-profiles/candidates?"))
