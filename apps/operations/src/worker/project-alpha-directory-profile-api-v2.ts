@@ -306,19 +306,22 @@ export function validatedProjectAlphaDirectoryClientContactProfileAcknowledgemen
 export function isProjectAlphaDirectoryProfileUpdateCommand(kind: ProjectAlphaDirectoryProfileKind, value: unknown): value is ProjectAlphaDirectoryProfileUpdateCommand { return updateCommand(kind, value); }
 export function isProjectAlphaDirectoryCreateCommand(kind: ProjectAlphaDirectoryProfileKind, value: unknown): value is ProjectAlphaDirectoryCreateCommand { return createCommand(kind, value); }
 
-export async function sendProjectAlphaDirectoryProfileUpdate(connectionInput: ProjectAlphaApiV2Connection, kind: ProjectAlphaDirectoryProfileKind, publicIdValue: string, inputCommand: ProjectAlphaDirectoryProfileUpdateCommand, send: typeof fetch = fetch): Promise<ProjectAlphaDirectoryProfileOutcome> {
-  return sendDirectoryProfileUpdateToEndpoint(connectionInput, kind, publicIdValue, inputCommand, endpoint(kind, "update"), false, send);
+export async function sendProjectAlphaDirectoryProfileUpdate(connectionInput: ProjectAlphaApiV2Connection, kind: ProjectAlphaDirectoryProfileKind, publicIdValue: string, inputCommand: ProjectAlphaDirectoryProfileUpdateCommand, send: typeof fetch = fetch, beforePost?: (body:string)=>Promise<void>): Promise<ProjectAlphaDirectoryProfileOutcome> {
+  return sendDirectoryProfileUpdateToEndpoint(connectionInput, kind, publicIdValue, inputCommand, endpoint(kind, "update"), false, send, beforePost);
 }
 
 async function sendDirectoryProfileUpdateToEndpoint(connectionInput: ProjectAlphaApiV2Connection, kind: ProjectAlphaDirectoryProfileKind,
   publicIdValue: string, inputCommand: ProjectAlphaDirectoryProfileUpdateCommand, required: Readonly<ProjectAlphaApiV2Endpoint>,
-  identitySafeContactProfile: boolean, send: typeof fetch): Promise<ProjectAlphaDirectoryProfileOutcome> {
+  identitySafeContactProfile: boolean, send: typeof fetch, beforePost?: (body:string)=>Promise<void>): Promise<ProjectAlphaDirectoryProfileOutcome> {
   try {
     const connection = normalized(connectionInput);
     if ((kind !== "client" && kind !== "organization") || !publicId(publicIdValue) || !updateCommand(kind, inputCommand)) return { status: "rejected", reason: "invalid_command" };
     const body = requestBody(inputCommand); if (body === null) return { status: "rejected", reason: "request_limit" };
     if (typeof connection.expectedHistoryEpoch !== "string" || !uuid(connection.expectedHistoryEpoch)) return { status: "blocked", reason: "preflight", preflight: { status: "misconfigured", reason: "configuration" } };
     const preflight = await probeProjectAlphaApiV2(connection, [], send, [required]); if (preflight.status !== "verified") return preflightFailure(preflight);
+    // Fresh local/private authority may await RPC; it must finish before the
+    // unchanged PA network timer starts. No asynchronous gap follows this gate.
+    if(beforePost)await beforePost(body);
     const posted = await post(connection, required.path.replace("{publicId}", publicIdValue), body, 200, send); if (!(posted instanceof Response)) return posted;
     const info = diagnostic(posted);
     try { const parsed = await boundedJson(posted, identitySafeContactProfile ? TIMEOUT_MS : undefined); if (!profileSuccess(parsed, kind, publicIdValue, inputCommand, connection, info.requestId)) return { status: "uncertain", reason: "invalid_contract", ...info }; const outcome = { status: "acknowledged" as const, httpStatus: 200 as const, response: parsed }; acknowledgements.set(outcome, { commandJson: body, responseJson: JSON.stringify(parsed), destinationOrigin: new URL(connection.baseUrl).origin, ...(identitySafeContactProfile ? { identitySafeContactProfile: true as const } : {}) }); return outcome; }
@@ -329,9 +332,9 @@ async function sendDirectoryProfileUpdateToEndpoint(connectionInput: ProjectAlph
 /** Neutral writes require the exact new endpoint. Missing support never falls
  * back to the legacy route, even for a name/phone-only shared profile change. */
 export function sendProjectAlphaDirectoryClientContactProfileUpdate(connection: ProjectAlphaApiV2Connection, publicIdValue: string,
-  command: ProjectAlphaDirectoryClientContactProfileUpdateCommand, send: typeof fetch = fetch): Promise<ProjectAlphaDirectoryProfileOutcome> {
+  command: ProjectAlphaDirectoryClientContactProfileUpdateCommand, send: typeof fetch = fetch, beforePost?: (body:string)=>Promise<void>): Promise<ProjectAlphaDirectoryProfileOutcome> {
   return sendDirectoryProfileUpdateToEndpoint(connection, "client", publicIdValue, command,
-    PROJECT_ALPHA_DIRECTORY_CLIENT_CONTACT_PROFILE_ENDPOINT, true, send);
+    PROJECT_ALPHA_DIRECTORY_CLIENT_CONTACT_PROFILE_ENDPOINT, true, send, beforePost);
 }
 
 export async function sendConfiguredProjectAlphaDirectoryClientContactProfileUpdate(env: ProjectAlphaApiV2ConnectionEnvironment,

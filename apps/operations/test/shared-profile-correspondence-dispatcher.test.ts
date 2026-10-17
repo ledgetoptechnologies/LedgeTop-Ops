@@ -33,6 +33,7 @@ it('dispatches both logical PA destinations under the exact approved physical-pr
  const due=(await f.db.prepare(`SELECT 'profile' queue_kind,command_id FROM project_alpha_directory_outbox WHERE state='pending' AND next_attempt_at<=? UNION ALL SELECT 'create_observation',command_id FROM native_directory_create_observation_dispatch WHERE state='pending' AND next_attempt_at<=?`).bind(schedulerNow,schedulerNow).all<{queue_kind:string;command_id:string}>()).results;
  expect(due).toHaveLength(2);expect(due.every(r=>r.queue_kind==='profile')).toBe(true);expect(due.map(r=>r.command_id).sort()).toEqual(f.commands.map(c=>c.command_id).sort());
  const captured=captureImportQueries(f.db);const result=await drainNativeDirectoryOutboxes({...f.configured,OPS_DB:captured.database,NATIVE_DIRECTORY_OUTBOX_DRAIN_ENABLED:'true'},{maxCommands:2,rotationTime:0,now:()=>schedulerNow,send:f.send});expect(result,JSON.stringify({posts:f.posts,result,due})).toMatchObject({status:'drained',attempted:2,acknowledged:2,failed:0});
+ expect(f.configured.SHARED_PROFILE_PORTAL_AUTHORITY.readAuthority).toHaveBeenCalledTimes(8); // Four fresh boundaries per logical destination.
  expect(f.posts.sort()).toEqual([logical,'project-alpha:secondary'].sort());expect(captured.queries.length).toBeGreaterThan(10);expect(checkImportQueryDepth(captured.queries)).toMatchObject({failures:[]});
 },120_000);
 it('denies physical namespace substitution and stale correspondence before claiming',async()=>{
@@ -52,4 +53,9 @@ it('rejects an expired live authority proof before claiming or sending a portal 
  const f=await pending(),c=f.commands[0]!;f.configured.SHARED_PROFILE_PORTAL_AUTHORITY.readAuthority.mockResolvedValue({ok:true,proof:{...f.proof,contextVersion:'b'.repeat(64),verifiedUntil:new Date(Date.now()-1000).toISOString()}});
  expect(await dispatchProjectAlphaDirectoryProfileOutboxCommand(f.configured,c.source_id,c.command_id,f.send)).toMatchObject({status:'blocked',reason:'authority'});
  expect(f.send).not.toHaveBeenCalled();expect(await f.db.prepare('SELECT attempts FROM project_alpha_directory_outbox WHERE command_id=?').bind(c.command_id).first('attempts')).toBe(0);
+},120_000);
+
+it('rejects authority that expires during capability probing before any PA POST',async()=>{
+ const f=await pending(),c=f.commands[0]!;f.setProbe(async()=>{f.configured.SHARED_PROFILE_PORTAL_AUTHORITY.readAuthority.mockResolvedValue({ok:true,proof:{...f.proof,contextVersion:'b'.repeat(64),verifiedUntil:new Date(Date.now()-1000).toISOString()}});});
+ expect(await dispatchProjectAlphaDirectoryProfileOutboxCommand(f.configured,c.source_id,c.command_id,f.send)).toMatchObject({status:'blocked',reason:'authority'});expect(f.posts).toHaveLength(0);
 },120_000);

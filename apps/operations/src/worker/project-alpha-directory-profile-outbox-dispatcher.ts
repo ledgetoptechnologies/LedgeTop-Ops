@@ -745,19 +745,17 @@ export async function dispatchProjectAlphaDirectoryProfileOutboxCommand(env: Env
     let postAuthorityRejected=false;
     // Transport capability probing can await network I/O. Reauthorize portal
     // scope immediately before the actual POST, after that probe completes.
-    const guardedSend:typeof fetch=current.portalAuthority?async(input,init)=>{
-      if(init?.method==="POST"){
-        const live=await exactReservation(env.OPS_DB,leased,connection,env);
-        if(typeof live==="string"||!live.portalAuthority||JSON.stringify(live.transport)!==String(init.body)){
-          postAuthorityRejected=true;throw new Error("portal authority changed");
-        }
-      }return send(input,init);
-    }:send;
+    const beforePost=current.portalAuthority?async(body:string)=>{
+      const live=await exactReservation(env.OPS_DB,leased,connection,env);
+      if(typeof live==="string"||!live.portalAuthority||JSON.stringify(live.transport)!==body){
+        postAuthorityRejected=true;throw new Error("portal authority changed");
+      }
+    }:undefined;
     const outcome = current.operation === "create"
-      ? await sendProjectAlphaDirectoryCreate(connection, leased.resource_type, current.transport as ProjectAlphaDirectoryCreateCommand, guardedSend)
+      ? await sendProjectAlphaDirectoryCreate(connection, leased.resource_type, current.transport as ProjectAlphaDirectoryCreateCommand, send)
       : current.identitySafeContactProfile
-        ? await sendProjectAlphaDirectoryClientContactProfileUpdate(connection,current.publicId!,current.transport as ProjectAlphaDirectoryClientContactProfileUpdateCommand,guardedSend)
-        : await sendProjectAlphaDirectoryProfileUpdate(connection, leased.resource_type, current.publicId!, current.transport as ProjectAlphaDirectoryProfileUpdateCommand, guardedSend);
+        ? await sendProjectAlphaDirectoryClientContactProfileUpdate(connection,current.publicId!,current.transport as ProjectAlphaDirectoryClientContactProfileUpdateCommand,send,beforePost)
+        : await sendProjectAlphaDirectoryProfileUpdate(connection, leased.resource_type, current.publicId!, current.transport as ProjectAlphaDirectoryProfileUpdateCommand, send,beforePost);
     if(postAuthorityRejected){await release(env.OPS_DB,leased,token,Date.now(),"portal_pre_post_authority");return{phase:"invalid" as const,reason:"authority" as const};}
     if (outcome.status !== "acknowledged") {
       if (outcome.status === "conflict") {
