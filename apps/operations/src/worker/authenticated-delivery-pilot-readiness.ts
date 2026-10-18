@@ -92,6 +92,7 @@ export async function authenticatedDeliveryPilotReadiness(env: Env): Promise<Aut
   if (!flags.creation) reasons.push("creation_disabled");
 
   let schemaReady = false;
+  let explicitOwnershipReady = false;
   let projectionCount: number | null = null;
   let unreceiptedCount: number | null = null;
   let notificationsReady = false;
@@ -103,6 +104,14 @@ export async function authenticatedDeliveryPilotReadiness(env: Env): Promise<Aut
     schemaReady = count(schema?.n) === REQUIRED_TABLES.length;
     if (!schemaReady) reasons.push("schema_unavailable");
     if (schemaReady) {
+      // Migration0233 permits exact primary workspace folder ownership without
+      // enabling relationship inheritance. Older schemas retain the relation gate.
+      const explicit = await db.prepare(`SELECT
+        (SELECT count(*) FROM pragma_table_info('portal_primary_staff_bindings')
+          WHERE name IN ('ownership_kind','ops_division_id'))=2
+        AND EXISTS(SELECT 1 FROM sqlite_master WHERE type='table'
+          AND name='portal_primary_folder_authority_mutations') ready`).first<{ ready: number }>();
+      explicitOwnershipReady = count(explicit?.ready) === 1;
       const projection = await db.prepare(`SELECT count(*) n FROM (
         SELECT workspace.id
         FROM portal_v2_workspaces workspace
@@ -152,12 +161,13 @@ export async function authenticatedDeliveryPilotReadiness(env: Env): Promise<Aut
     "hierarchy_disabled", "hierarchy_relations_disabled", "grants_disabled", "authority_mutations_disabled", "schema_unavailable",
     "primary_projection_unavailable", "unreceipted_bindings", "readiness_check_unavailable",
   ];
-  const enabled = !reasons.some(reason => mutationBlockers.includes(reason));
+  const enabled = !reasons.some(reason => mutationBlockers.includes(reason)
+    && (reason !== "hierarchy_relations_disabled" || !explicitOwnershipReady));
   const creationEnabled = enabled && flags.creation;
   return {
     enabled,
     creationEnabled,
-    pilotReady: creationEnabled && notificationsReady,
+    pilotReady: creationEnabled && flags.hierarchyRelations && notificationsReady,
     reasons,
     checks: {
       flags,

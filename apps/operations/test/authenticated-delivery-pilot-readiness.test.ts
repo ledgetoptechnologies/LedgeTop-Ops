@@ -11,20 +11,41 @@ describe("authenticated delivery pilot readiness", { timeout: 180_000, concurren
   let runtime: Miniflare;
   let db: D1Database;
   let emptyDb: D1Database;
+  let currentDb: D1Database;
   let env: Env;
   const workspace = "pilot-workspace", organization = "1".repeat(32);
 
   beforeAll(async () => {
     runtime = new Miniflare({ modules: true, compatibilityDate: "2026-07-22",
-      script: "export default {fetch(){return new Response('ok')}}", d1Databases: { DELIVERY_DB: "pilot-readiness", EMPTY_DB: "pilot-readiness-empty" } });
+      script: "export default {fetch(){return new Response('ok')}}", d1Databases: { DELIVERY_DB: "pilot-readiness", EMPTY_DB: "pilot-readiness-empty", CURRENT_DB: "pilot-readiness-explicit" } });
     db = await runtime.getD1Database("DELIVERY_DB") as unknown as D1Database;
     emptyDb = await runtime.getD1Database("EMPTY_DB") as unknown as D1Database;
+    currentDb = await runtime.getD1Database("CURRENT_DB") as unknown as D1Database;
     const directory = new URL("../../client/migrations/", import.meta.url);
-    for (const name of readdirSync(directory).filter(name => /^\d{4}_.*\.sql$/.test(name) && name.slice(0, 4) <= "0209").sort())
-      await db.batch(splitD1MigrationStatements(readFileSync(new URL(name, directory), "utf8")).map(sql => db.prepare(sql)));
+    for (const name of readdirSync(directory).filter(name => /^\d{4}_.*\.sql$/.test(name) && name.slice(0, 4) <= "0233").sort()) {
+      const statements = splitD1MigrationStatements(readFileSync(new URL(name, directory), "utf8"));
+      if (name.slice(0, 4) <= "0209") await db.batch(statements.map(sql => db.prepare(sql)));
+      await currentDb.batch(statements.map(sql => currentDb.prepare(sql)));
+    }
     env = { DELIVERY_DB: db } as Env;
-  });
+  }, 180_000);
   afterAll(async () => runtime.dispose());
+
+  async function seedPrimaryProjection(database: D1Database) {
+    const snapshot = "pilot-snapshot", directory = "pilot-directory";
+    await database.batch([
+      database.prepare(`INSERT INTO portal_v2_workspaces(id,root_type,pa_organization_public_id,display_name,status,project_alpha_source_id)
+        VALUES(?,'organization',?,'Pilot','active','project-alpha:primary')`).bind(workspace, organization),
+      database.prepare(`INSERT INTO pa_portal_projection_generations(id,workspace_id,source_generation,source_sequence,snapshot_hash,page_count,
+        record_count,workspace_root_type,workspace_root_public_id,workspace_display_name,workspace_source_version,workspace_active,status,complete,projection_source_id)
+        VALUES(?,?,'source',1,?,1,1,'organization',?,'Pilot','v1',1,'active',1,'project-alpha:primary')`).bind(snapshot, workspace, "a".repeat(64), organization),
+      database.prepare(`INSERT INTO portal_v2_directory_generations(id,workspace_id,source_generation,source_sequence,status,complete)
+        VALUES(?,?,'source',1,'active',1)`).bind(directory, workspace),
+      database.prepare(`INSERT INTO portal_v2_directory_checkpoints(workspace_id,active_generation_id,source_sequence) VALUES(?,?,1)`).bind(workspace, directory),
+      database.prepare(`INSERT INTO pa_portal_projection_checkpoints(workspace_id,source_generation,source_sequence,snapshot_generation_id)
+        VALUES(?,'source',1,?)`).bind(workspace, snapshot),
+    ]);
+  }
 
   it("fails closed with typed flag and projection reasons and no identifiers", async () => {
     const result = await authenticatedDeliveryPilotReadiness(env);
@@ -50,19 +71,7 @@ describe("authenticated delivery pilot readiness", { timeout: 180_000, concurren
     env.CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED = "true";
     env.AUTHENTICATED_DELIVERY_GRANTS_ENABLED = "true";
     env.PROJECT_ACCESS_AUTHORITY_MUTATIONS_ENABLED = "true";
-    const snapshot = "pilot-snapshot", directory = "pilot-directory";
-    await db.batch([
-      db.prepare(`INSERT INTO portal_v2_workspaces(id,root_type,pa_organization_public_id,display_name,status,project_alpha_source_id)
-        VALUES(?,'organization',?,'Pilot','active','project-alpha:primary')`).bind(workspace, organization),
-      db.prepare(`INSERT INTO pa_portal_projection_generations(id,workspace_id,source_generation,source_sequence,snapshot_hash,page_count,
-        record_count,workspace_root_type,workspace_root_public_id,workspace_display_name,workspace_source_version,workspace_active,status,complete,projection_source_id)
-        VALUES(?,?,'source',1,?,1,1,'organization',?,'Pilot','v1',1,'active',1,'project-alpha:primary')`).bind(snapshot, workspace, "a".repeat(64), organization),
-      db.prepare(`INSERT INTO portal_v2_directory_generations(id,workspace_id,source_generation,source_sequence,status,complete)
-        VALUES(?,?,'source',1,'active',1)`).bind(directory, workspace),
-      db.prepare(`INSERT INTO portal_v2_directory_checkpoints(workspace_id,active_generation_id,source_sequence) VALUES(?,?,1)`).bind(workspace, directory),
-      db.prepare(`INSERT INTO pa_portal_projection_checkpoints(workspace_id,source_generation,source_sequence,snapshot_generation_id)
-        VALUES(?,'source',1,?)`).bind(workspace, snapshot),
-    ]);
+    await seedPrimaryProjection(db);
     const result = await authenticatedDeliveryPilotReadiness(env);
     expect(result).toMatchObject({ enabled: true, creationEnabled: false, pilotReady: false,
       checks: { primaryProjection: { ready: true, activeWorkspaceCount: 1 }, bindings: { unreceiptedActiveCount: 0 } } });
@@ -72,6 +81,8 @@ describe("authenticated delivery pilot readiness", { timeout: 180_000, concurren
     env.AUTHENTICATED_DELIVERY_NOTIFICATIONS_ENABLED = "true";
     const complete = await authenticatedDeliveryPilotReadiness(env);
     expect(complete).toMatchObject({ enabled: true, creationEnabled: true, pilotReady: true, reasons: [], checks: { notifications: { ready: true } } });
+    expect(await authenticatedDeliveryPilotReadiness({ ...env, CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED: "false" }))
+      .toMatchObject({ enabled: false, creationEnabled: false, pilotReady: false, reasons: ["hierarchy_relations_disabled"] });
   });
 
   it("blocks mutation controls when an active Operations binding lacks its 0189 receipt", async () => {
@@ -83,4 +94,24 @@ describe("authenticated delivery pilot readiness", { timeout: 180_000, concurren
     expect(JSON.stringify(result)).not.toContain("unreceipted-binding");
     expect(JSON.stringify(result)).not.toContain("Jobs/Clients/Pilot");
   });
+  it("enables exact0233 primary ownership controls without advertising the relation pilot", async () => {
+    const target = { ...env, DELIVERY_DB: currentDb, CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED: "false",
+      CLIENT_PORTAL_HIERARCHY_V2_ENABLED: "true", AUTHENTICATED_DELIVERY_GRANTS_ENABLED: "true",
+      PROJECT_ACCESS_AUTHORITY_MUTATIONS_ENABLED: "true", AUTHENTICATED_DELIVERY_CREATION_ENABLED: "true",
+      AUTHENTICATED_DELIVERY_NOTIFICATIONS_ENABLED: "true" } as Env;
+    expect(await authenticatedDeliveryPilotReadiness(target)).toMatchObject({ enabled: false, creationEnabled: false, pilotReady: false,
+      reasons: expect.arrayContaining(["primary_projection_unavailable", "hierarchy_relations_disabled"]) });
+    await seedPrimaryProjection(currentDb);
+    expect(await authenticatedDeliveryPilotReadiness(target)).toMatchObject({ enabled: true, creationEnabled: true, pilotReady: false,
+      reasons: ["hierarchy_relations_disabled"], checks: { flags: { hierarchyRelations: false },
+        schema: { ready: true }, primaryProjection: { ready: true }, bindings: { unreceiptedActiveCount: 0 } } });
+    expect(await authenticatedDeliveryPilotReadiness({ ...target, PROJECT_ACCESS_AUTHORITY_MUTATIONS_ENABLED: "false" }))
+      .toMatchObject({ enabled: false, creationEnabled: false, pilotReady: false,
+        reasons: expect.arrayContaining(["authority_mutations_disabled"]) });
+    await currentDb.prepare(`INSERT INTO portal_v2_folder_bindings(id,workspace_id,owner_scope_type,owner_public_id,r2_prefix,source_type,source_version,status)
+      VALUES('unreceipted-explicit-binding',?,'organization',?,'Jobs/Clients/ExplicitPilot/','operations','v1','active')`).bind(workspace, organization).run();
+    expect(await authenticatedDeliveryPilotReadiness(target)).toMatchObject({ enabled: false, creationEnabled: false, pilotReady: false,
+      reasons: ["hierarchy_relations_disabled", "unreceipted_bindings"] });
+  });
+
 });
