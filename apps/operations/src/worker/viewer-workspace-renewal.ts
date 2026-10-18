@@ -2,6 +2,7 @@ import { ViewerServiceError, viewerServiceOrigin } from "@ltds/shared";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
 import { authenticateBoundStaffForViewerRenewal } from "./auth";
+import { readBoundedJson } from "./bounded-json";
 import { hmac, timingSafeEqual } from "./crypto";
 import { consumeNativeStaffOnboardingRateLimit } from "./native-staff-onboarding-rate-limit";
 import { requestHostAllowed } from "./host-admission";
@@ -89,7 +90,7 @@ function validPreflight(request: Request): boolean {
 }
 
 async function handle(request: Request, env: Env): Promise<Response> {
-  if (env.ENVIRONMENT !== "staging" || env.VIEWER_WORKSPACE_RENEWAL_CORS_ENABLED !== "true" || !viewerProcessingEnabled(env))
+  if (!["staging", "production"].includes(env.ENVIRONMENT) || env.VIEWER_WORKSPACE_RENEWAL_CORS_ENABLED !== "true" || !viewerProcessingEnabled(env))
     return disabled();
   if (!requestHostAllowed(request.url, env)) return json(null, { error: "Request host was rejected" }, 403);
   const origin = requestOrigin(request, env);
@@ -131,11 +132,13 @@ async function handle(request: Request, env: Env): Promise<Response> {
       return json(origin, { error: "Request body is too large or invalid" }, 413);
     if (!/^application\/json(?:\s*;|$)/i.test(request.headers.get("Content-Type") || ""))
       return json(origin, { error: "JSON content type required" }, 415);
-    const rawBody = await request.text();
-    if (new TextEncoder().encode(rawBody).byteLength > MAX_BODY_BYTES)
-      return json(origin, { error: "Request body is too large" }, 413);
     let decoded: unknown;
-    try { decoded = JSON.parse(rawBody); } catch { return json(origin, { error: "Invalid JSON body" }, 400); }
+    try { decoded = await readBoundedJson(request, MAX_BODY_BYTES, "Workspace renewal"); }
+    catch (error) {
+      if (error instanceof HTTPException && error.status === 413)
+        return json(origin, { error: "Request body is too large" }, 413);
+      return json(origin, { error: "Invalid JSON body" }, 400);
+    }
     const parsed = requestSchema.safeParse(decoded);
     if (!parsed.success) return json(origin, { error: "Invalid renewal request" }, 400);
     const requestId = parsed.data.requestId;
