@@ -3220,7 +3220,7 @@ export function ClientPortalApp({
   let content: ReactNode;
 
   if (unifiedView)
-    content = <UnifiedPortal page={page as UnifiedPage} workspaces={workspaces} displayName={shellDisplayName}
+    content = <UnifiedPortal page={page as UnifiedPage} workspaces={workspaces}
       openInAccount={openInAccount} navigate={navigate} supplement={page === "dashboard" ? operationsHomeSummary : undefined}
       renderStatus={request => <StatusPill tone={statusTone(request.status)}>{statusLabel(request.status, request.projectAlphaDraftCreated)}</StatusPill>} />;
   else if (native)

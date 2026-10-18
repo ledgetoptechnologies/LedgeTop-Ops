@@ -21,10 +21,9 @@ function byUpdated(left: UnifiedRequest, right: UnifiedRequest) {
   return right.request.updatedAt.localeCompare(left.request.updatedAt);
 }
 
-export function UnifiedPortal({ page, workspaces, displayName, openInAccount, navigate, renderStatus, supplement }: {
+export function UnifiedPortal({ page, workspaces, openInAccount, navigate, renderStatus, supplement }: {
   page: UnifiedPage;
   workspaces: PortalWorkspace[];
-  displayName: string;
   openInAccount: OpenInAccount;
   navigate: (page: UnifiedPage) => void;
   renderStatus: (request: PortalServiceRequest) => ReactNode;
@@ -137,7 +136,7 @@ export function UnifiedPortal({ page, workspaces, displayName, openInAccount, na
 
   const openRequests = requests.filter(item => !CLOSED_REQUEST.has(item.request.status));
   return <>
-    <section className="portal-welcome"><span className="eyebrow">Client portal</span><h1>{displayName}</h1>
+    <section className="portal-welcome"><span className="eyebrow">Client portal</span><h1>Welcome</h1>
       <p>Projects, files and service requests from every Ledge Top business you work with, in one place.</p></section>
     {filterBar}{problems}
     <div className="portal-stat-grid">
