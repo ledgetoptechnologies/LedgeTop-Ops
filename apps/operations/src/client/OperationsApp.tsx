@@ -5682,7 +5682,7 @@ function ShareDialog({
         : active === undefined ? <Loading /> :
           <>
             {!fileTarget && <p className="share-mode-description">Create a bearer link for anyone who receives the complete URL. Use an access code when the content should not be open to everyone holding the link.</p>}
-            {shown && (
+            {shown && !result && (
               <div className="current-share">
                 <div>
                   <strong>Already shared</strong>

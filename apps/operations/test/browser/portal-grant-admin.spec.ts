@@ -48,7 +48,7 @@ test("nonadministrators retain ordinary sharing without probing authenticated gr
   await expect(page.getByRole("button", {name: "Grant to client workspace", exact: true})).toHaveCount(0);
   await expect(page.getByRole("combobox", {name: "Portal connection"})).toHaveCount(0);
   await expect(page.getByRole("button", {name: "Create link", exact: true})).toBeEnabled();
-  await page.getByRole("button", {name: "Create link", exact: true}).click(); await expect(page.getByText("Already shared", {exact: true})).toBeVisible();
+  await page.getByRole("button", {name: "Create link", exact: true}).click(); await expect(page.getByText("Link created", {exact: true})).toBeVisible();
   expect(calls.filter(call => call.path === "/api/delivery/shares" && call.method === "POST")).toHaveLength(1);
   expect(calls.some(call => call.path.startsWith("/api/delivery/authenticated-grants") || call.path.startsWith("/api/delivery/native-grants") || call.path.startsWith("/api/client-portal/folder-grant-targets") || /\/accounts\/[^/]+\/folder-grants/.test(call.path))).toBe(false);
 });
