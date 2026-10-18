@@ -1,0 +1,80 @@
+{
+  "startedAt": "2026-10-18T21:35:53.540Z",
+  "target": "http://127.0.0.1:18087",
+  "images": {
+    "capturedAt": "2026-10-18",
+    "images": {
+      "NEXTCLOUD_IMAGE": "nextcloud@sha256:6d69b9052afab060afe8d004e9b00820f95a040b42db967b31eef9a48661e8bc",
+      "POSTGRES_IMAGE": "postgres@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24",
+      "REDIS_IMAGE": "redis@sha256:3811787313eba226a2ef38658c6ccb91cd5e110edc89c37767de373120a0e5a0"
+    },
+    "sourceTags": {
+      "NEXTCLOUD_IMAGE": "nextcloud:34.0.5-apache",
+      "POSTGRES_IMAGE": "postgres:17-alpine",
+      "REDIS_IMAGE": "redis:8-alpine"
+    }
+  },
+  "results": [
+    {
+      "name": "Only app port is published, bound to host loopback",
+      "passed": true
+    },
+    {
+      "name": "Anonymous DAV access is denied",
+      "passed": true
+    },
+    {
+      "name": "Both employees can read the exact server fixture",
+      "passed": true
+    },
+    {
+      "name": "An unassigned account cannot list or guess the source mount",
+      "passed": true
+    },
+    {
+      "name": "Read-only mount rejects create, overwrite, delete, mkdir and rename",
+      "passed": true
+    },
+    {
+      "name": "Disposable employee folder supports create and download",
+      "passed": true
+    },
+    {
+      "name": "Distinct-timestamp version checks reject duplicate creation and stale edits",
+      "passed": true
+    },
+    {
+      "name": "Byte ranges return the requested bytes",
+      "passed": true
+    },
+    {
+      "name": "Rename and delete work inside the disposable folder",
+      "passed": true
+    },
+    {
+      "name": "Direct server edits become visible after explicit index refresh",
+      "passed": true
+    },
+    {
+      "name": "Disabling an employee denies fresh authenticated requests",
+      "passed": true
+    },
+    {
+      "name": "Timestamp-preserving edits advance revisions and reject stale writes",
+      "passed": false,
+      "error": "Stale write must be rejected even when file size and modification time are preserved\n\n204 !== 412\n"
+    }
+  ],
+  "windowsExplorer": "not tested",
+  "trueNAS": "not contacted",
+  "opsSSO": "not implemented",
+  "revisionProbe": {
+    "sameSize": true,
+    "preservedModificationTime": true,
+    "revisionAdvanced": false,
+    "staleWriteStatus": 204
+  },
+  "completedAt": "2026-10-18T21:36:04.403Z",
+  "cleanupErrors": [],
+  "passed": false
+}

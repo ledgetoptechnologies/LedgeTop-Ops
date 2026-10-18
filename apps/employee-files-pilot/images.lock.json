@@ -1,0 +1,13 @@
+{
+  "capturedAt": "2026-10-18",
+  "images": {
+    "NEXTCLOUD_IMAGE": "nextcloud@sha256:6d69b9052afab060afe8d004e9b00820f95a040b42db967b31eef9a48661e8bc",
+    "POSTGRES_IMAGE": "postgres@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24",
+    "REDIS_IMAGE": "redis@sha256:3811787313eba226a2ef38658c6ccb91cd5e110edc89c37767de373120a0e5a0"
+  },
+  "sourceTags": {
+    "NEXTCLOUD_IMAGE": "nextcloud:34.0.5-apache",
+    "POSTGRES_IMAGE": "postgres:17-alpine",
+    "REDIS_IMAGE": "redis:8-alpine"
+  }
+}

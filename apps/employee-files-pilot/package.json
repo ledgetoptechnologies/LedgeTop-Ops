@@ -1,0 +1,10 @@
+{
+  "name": "ltds-employee-files-pilot",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check": "node --check pilot.mjs && node --check acceptance.mjs",
+    "test": "node --test pilot.test.mjs",
+    "test:integration": "node pilot.mjs test"
+  }
+}

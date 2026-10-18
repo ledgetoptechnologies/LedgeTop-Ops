@@ -1,0 +1,99 @@
+name: ltds-employee-pilot
+
+x-nextcloud: &nextcloud
+  image: ${NEXTCLOUD_IMAGE:?Run node pilot.mjs init}
+  restart: "no"
+  environment: &nextcloud-env
+    POSTGRES_HOST: db
+    POSTGRES_DB: employee_pilot
+    POSTGRES_USER: employee_pilot
+    POSTGRES_PASSWORD_FILE: /run/secrets/database
+    NEXTCLOUD_ADMIN_USER: pilot-admin
+    NEXTCLOUD_ADMIN_PASSWORD_FILE: /run/secrets/admin
+    NEXTCLOUD_TRUSTED_DOMAINS: 127.0.0.1 localhost
+    NEXTCLOUD_INIT_HTACCESS: "true"
+    REDIS_HOST: redis
+    PHP_MEMORY_LIMIT: 512M
+    PHP_UPLOAD_LIMIT: 2G
+    NEXTCLOUD_UPDATE: "0"
+  volumes:
+    - nextcloud:/var/www/html
+    - type: bind
+      source: ./.pilot/source
+      target: /pilot-source
+      read_only: true
+      bind:
+        create_host_path: false
+    - ./occ-secret.php:/opt/pilot/occ-secret.php:ro
+  secrets:
+    - database
+    - admin
+    - employee-one
+    - employee-two
+    - outsider
+  networks: [backend]
+
+services:
+  db:
+    image: ${POSTGRES_IMAGE:?Run node pilot.mjs init}
+    restart: "no"
+    environment:
+      POSTGRES_DB: employee_pilot
+      POSTGRES_USER: employee_pilot
+      POSTGRES_PASSWORD_FILE: /run/secrets/database
+    secrets: [database]
+    volumes: ["database:/var/lib/postgresql/data"]
+    networks: [backend]
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -U employee_pilot -d employee_pilot"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  redis:
+    image: ${REDIS_IMAGE:?Run node pilot.mjs init}
+    restart: "no"
+    command: [redis-server, --save, "", --appendonly, "no"]
+    networks: [backend]
+    healthcheck:
+      test: [CMD, redis-cli, ping]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  app:
+    <<: *nextcloud
+    ports: ["127.0.0.1:18087:80"]
+    networks: [backend, frontend]
+    depends_on:
+      db: {condition: service_healthy}
+      redis: {condition: service_healthy}
+    healthcheck:
+      test: [CMD, php, -r, "$$s=json_decode(file_get_contents('http://127.0.0.1/status.php'),true); exit(($$s['installed'] ?? false) && !($$s['maintenance'] ?? true) ? 0 : 1);"]
+      interval: 10s
+      timeout: 5s
+      retries: 60
+      start_period: 30s
+
+  cron:
+    <<: *nextcloud
+    entrypoint: /cron.sh
+    depends_on:
+      app: {condition: service_healthy}
+
+networks:
+  frontend:
+    driver: bridge
+  backend:
+    internal: true
+
+volumes:
+  nextcloud:
+  database:
+
+secrets:
+  database: {file: ./.pilot/secrets/database}
+  admin: {file: ./.pilot/secrets/admin}
+  employee-one: {file: ./.pilot/secrets/employee-one}
+  employee-two: {file: ./.pilot/secrets/employee-two}
+  outsider: {file: ./.pilot/secrets/outsider}
