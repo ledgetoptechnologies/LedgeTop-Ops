@@ -35,6 +35,11 @@ export function createOperationsHomeRouter(dependencies: { resolvePrincipal?: Re
   });
   router.get("/home", async c => {
     const result = await readOperationsServiceHomes(c.env, c.get("operationsPrincipal"));
+    // Only this initial empty discovery can bootstrap the independent PA
+    // authority. A raced/revoked or malformed response keeps its normal denial.
+    if (!result.ok && result.code === "absent") return c.json({
+      error: "Client access is not provisioned", code: "no_authorized_operations_home",
+    }, 403);
     if (!result.ok) return result.code === "denied"
       ? c.json({ error: "Client access is not provisioned" }, 403)
       : c.json({ error: "Client services are temporarily unavailable" }, 503);

@@ -36,18 +36,20 @@ describe("native Operations recipient route", () => {
       .toEqual({ intentId, opaqueToken: token });
     expect(replaceState).toHaveBeenCalledExactlyOnceWith(null, "", pathname);
   });
-  it("admits only the primary staging portal origin and scrubs foreign-host bearer fragments", () => {
+  it("admits exact primary portal origins and retains the old staging entry while scrubbing foreign-host fragments", () => {
     const historyFor = () => {
       const replaceState = vi.fn();
       return { history: { state: null, replaceState }, replaceState };
     };
-    for (const origin of ["https://client-staging.ledgetopdroneservices.com", "http://127.0.0.1:4173"]) {
+    for (const origin of ["https://portal.ledgetopdroneservices.com", "https://portal-staging.ledgetopdroneservices.com",
+      "https://client-staging.ledgetopdroneservices.com", "http://127.0.0.1:4173"]) {
       const { history, replaceState } = historyFor();
       expect(consumeOperationsNativeRecipientEnrollmentRoute({ origin, pathname, search: "", hash: `#${token}` }, history))
         .toEqual({ intentId, opaqueToken: token });
       expect(replaceState).toHaveBeenCalledOnce();
     }
-    for (const origin of ["https://portal-staging.ledgetoptechnologies.com", "https://project-alpha.ledgetopdroneservices.com", "https://client.ledgetopdroneservices.com", "http://localhost:4173",
+    for (const origin of ["https://portal.ledgetoptechnologies.com", "https://portal-staging.ledgetoptechnologies.com", "https://project-alpha.ledgetopdroneservices.com", "https://client.ledgetopdroneservices.com", "http://localhost:4173",
+      "http://portal.ledgetopdroneservices.com", "https://portal.ledgetopdroneservices.com.evil.example",
       "http://client-staging.ledgetopdroneservices.com", "https://client-staging.evil.example"]) {
       const { history, replaceState } = historyFor();
       expect(consumeOperationsNativeRecipientEnrollmentRoute({ origin, pathname, search: "", hash: `#${token}` }, history)).toBeNull();

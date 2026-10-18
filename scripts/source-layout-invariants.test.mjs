@@ -332,8 +332,9 @@ test("the deployed Client Worker keeps reviewed resources, hosts, and portal ass
   // The reviewed production contract retains existing native transports and
   // enables explicit folder enforcement only. Receiver-only/future authority
   // gates, route namespaces, no-email guards and resource checks stay exact.
-  // Operator-owned variables survive deployment without copying their values.
-  assert.equal(normalizedSha256("apps/client/wrangler.jsonc"), "2517a084f3d84f8ddd3cf138cfbc7de770c4d6f660d02c50da7101665e6892a1");
+  // Portal origin retirement changes only the reviewed host/profile bundle;
+  // public compatibility hosts and existing resources remain pinned.
+  assert.equal(normalizedSha256("apps/client/wrangler.jsonc"), "911c19cca058600cb1cc5c8ccf36f7c937130452444975915c6302728ce9223e");
   assert.equal("CLIENT_PORTAL_INVITATION_FROM_NAME" in readJson("apps/client/wrangler.jsonc").vars, false);
   const config = readJson("apps/client/wrangler.jsonc");
   assert.deepEqual(config.services.filter(service => service.binding === "SHARED_PROFILE_PORTAL"), [{
@@ -374,10 +375,14 @@ test("the deployed Client Worker keeps reviewed resources, hosts, and portal ass
   assert.equal(config.vars.PUBLIC_BASE_URL, "https://portal.ledgetopdroneservices.com");
   assert.equal(config.vars.PUBLIC_SHARE_ORIGIN, "https://portal.ledgetopdroneservices.com");
   assert.equal(config.vars.EXPECTED_HOST, "portal.ledgetopdroneservices.com");
-  assert.equal(config.vars.CLIENT_PORTAL_ORIGIN, "https://client.ledgetopdroneservices.com");
-  assert.equal(config.vars.CLIENT_PORTAL_ORIGINS, "https://client.ledgetopdroneservices.com,https://portal.ledgetopdroneservices.com,https://portal.ledgetoptechnologies.com");
+  assert.equal(config.vars.CLIENT_PORTAL_ORIGIN, "https://portal.ledgetopdroneservices.com");
+  assert.equal(config.vars.CLIENT_PORTAL_ORIGINS, "https://portal.ledgetopdroneservices.com,https://portal.ledgetoptechnologies.com");
+  assert.equal(config.vars.CLIENT_PORTAL_RETIRED_ORIGINS, "https://client.ledgetopdroneservices.com");
   assert.equal(config.vars.LEGACY_CLIENT_ORIGINS, "https://client.ledgetopdroneservices.com");
-  assert.equal(config.vars.CLIENT_ACCESS_AUDS, `${config.vars.CLIENT_ACCESS_AUD},3bc9637846ccf4e1343b969cc8f14ed2cb0628956293463cf164c4080fa47e57`);
+  assert.equal(config.vars.CLIENT_ACCESS_AUDS, config.vars.CLIENT_ACCESS_AUD);
+  assert.equal(config.vars.CLIENT_PORTAL_NATIVE_RECIPIENT_ENROLLMENT_EXPECTED_HOST, "portal.ledgetopdroneservices.com");
+  assert.equal(config.vars.CLIENT_PORTAL_OPERATIONS_NATIVE_AUTHORITY_EXPECTED_HOST, "portal.ledgetopdroneservices.com");
+  assert.equal(JSON.parse(config.vars.CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_DEPLOYMENT_PROFILE).portalOrigin, config.vars.CLIENT_PORTAL_ORIGIN);
   assert.equal(config.vars.CLIENT_PORTAL_ENABLED, "true");
   assert.equal(config.vars.CLIENT_AUTHORITY_WORKSPACE_CLAIM_WRITER_ENABLED, "false");
   assert.equal(config.vars.CLIENT_AUTHORITY_WORKSPACE_BINDING_WRITER_ENABLED, "false");
@@ -495,8 +500,11 @@ test("the deployed Client Worker keeps reviewed resources, hosts, and portal ass
 test("the deployed Operations Worker preserves native production transport and explicit folder authority", () => {
   // Preserve the current native production transport. Deferred catalog/legacy
   // mutation paths stay disabled and have no production service/workflow binding.
-  assert.equal(normalizedSha256("apps/operations/wrangler.jsonc"), "036c56e71fe198de25f7ab4d9150a32b76fd7075f4cd9fb3a43ee79af214d20d");
+  assert.equal(normalizedSha256("apps/operations/wrangler.jsonc"), "336b8942fe9c09650ee13d591d9ee6c444041835862a722a127d3457dbebeee2");
   const config = readJson("apps/operations/wrangler.jsonc");
+  assert.equal(config.vars.DELIVERY_BASE_URL, "https://portal.ledgetopdroneservices.com");
+  assert(config.vars.CLIENT_PORTAL_ORIGINS.split(",").includes("https://client.ledgetopdroneservices.com"),
+    "existing client-host public video links retain their Stream origin admission");
   assert.equal(config.vars.VIEWER_WORKSPACE_RENEWAL_CORS_ENABLED, "true");
   assert.deepEqual(config.services.filter(service => service.binding === "SHARED_PROFILE_PORTAL_AUTHORITY"), [{
     binding: "SHARED_PROFILE_PORTAL_AUTHORITY", service: "ledgetop-clients", entrypoint: "SharedProfilePortalAuthorityReader",

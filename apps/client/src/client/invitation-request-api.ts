@@ -17,7 +17,7 @@ export const invitationRequestSchema = z.object({
 export type PortalInvitationRequest = z.infer<typeof invitationRequestSchema>;
 export const invitationRequestPageSchema = z.object({items: z.array(invitationRequestSchema).max(100), nextCursor: z.string().min(1).max(4096).nullable()});
 export const invitationRequestStatus = (status: PortalInvitationRequest["status"]) => ({pending: "Pending approval", approving: "Approval in progress — not issued", approved: "Approved", rejected: "Rejected", cancelled: "Cancelled", stale: "Needs a new request"})[status];
-const capabilityLabels: Record<string, string> = {"workspace.view": "Workspace viewing", "delivery.view": "Delivery viewing", "request.create": "Service requests"};
+const capabilityLabels: Record<string, string> = {"workspace.view": "Account viewing", "delivery.view": "Delivery viewing", "request.create": "Service requests"};
 export const invitationCapabilitiesLabel = (capabilities: readonly string[]) => capabilities.map(value => capabilityLabels[value] ?? "Unsupported capability").join(" · ");
 export function invitationTermsLabel(terms: PortalInvitationRequest["accessTerms"]): string {
   if (!terms) return "Existing scope rules — unclassified";

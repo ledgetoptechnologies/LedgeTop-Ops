@@ -1986,3 +1986,26 @@
 .portal-team-invite-form > p:not([role]) { margin: 0; color: var(--muted); font-size: .86rem; line-height: 1.5; }
 .portal-team-invite-form > h3, .portal-team-panel > h3 { margin: .75rem 0 0; }
 .portal-team-lists { padding-top: 1rem; border-top: 1px solid var(--line); }
+
+/* Unified client portal: one place across every business a client works with. */
+.unified-portal-filter { margin: 0 0 1rem; flex-wrap: wrap; max-width: 100%; }
+.unified-portal-business { color: var(--muted, #5d6873); font-weight: 700; overflow-wrap: anywhere; }
+.unified-portal-problems { display: grid; gap: .45rem; margin: 0 0 1rem; padding: .85rem 1rem; border: 1px solid #f3c7a6; border-radius: 12px; background: #fff7f0; }
+.unified-portal-problems p { margin: 0; }
+.unified-portal-problems button { justify-self: start; }
+.unified-portal-requests { list-style: none; margin: 0; padding: 0; display: grid; }
+.unified-portal-requests li { display: flex; justify-content: space-between; align-items: center; gap: 1rem; padding: .8rem 0; border-top: 1px solid var(--line, #e3e8ec); min-width: 0; }
+.unified-portal-requests li:first-child { border-top: 0; }
+.unified-portal-requests li > div:first-child { display: grid; gap: .2rem; min-width: 0; }
+.unified-portal-requests small { color: var(--muted, #5d6873); overflow-wrap: anywhere; }
+.unified-portal-request-actions { display: flex; align-items: center; gap: .6rem; flex: none; }
+.unified-portal-chooser p { margin-top: 0; }
+.unified-portal-account-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 16rem), 1fr)); gap: .85rem; margin: 0 0 1rem; }
+.unified-portal-account-list > button { display: grid; justify-items: start; gap: .2rem; padding: .9rem 1rem; text-align: left; min-height: 64px; }
+.unified-portal-account-list small { color: var(--muted, #5d6873); }
+.unified-portal-account-list .ltds-card p { margin: .2rem 0 .8rem; color: var(--muted, #5d6873); }
+.unified-portal-context { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: .5rem 1rem; margin: 0 0 1rem; padding: .55rem .85rem; border-radius: 10px; background: #f2f5f7; font-weight: 700; color: var(--ink, #172b3a); }
+@media (max-width: 640px) {
+  .unified-portal-requests li { flex-direction: column; align-items: stretch; }
+  .unified-portal-request-actions { justify-content: space-between; }
+}

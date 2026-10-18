@@ -92,14 +92,17 @@ function requestErrorMessage(body: RequestErrorBody): string {
   return body.message || "Request failed";
 }
 
-export type ClientRequestInit = RequestInit & { omitWorkspace?: boolean };
+/** workspaceId scopes one call to an explicit client account instead of the tab's ambient selection. */
+export type ClientRequestInit = RequestInit & { omitWorkspace?: boolean; workspaceId?: string };
 
 export async function requestJson<T>(url: string, init?: ClientRequestInit): Promise<T> {
-  const { omitWorkspace, ...fetchInit } = init ?? {};
+  const { omitWorkspace, workspaceId: explicitWorkspaceId, ...fetchInit } = init ?? {};
   const headers = new Headers(fetchInit.headers);
   if (omitWorkspace) headers.delete("X-LTDS-Workspace-Id");
+  if (explicitWorkspaceId !== undefined && !/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(explicitWorkspaceId))
+    throw Object.assign(new Error("Invalid client link"), { status: 403 });
   const workspaceId = !omitWorkspace && url.startsWith("/api/client/") && !url.startsWith("/api/client/v2/")
-    ? selectedClientWorkspaceId()
+    ? explicitWorkspaceId ?? selectedClientWorkspaceId()
     : null;
   if (workspaceId) headers.set("X-LTDS-Workspace-Id", workspaceId);
   const response = await fetch(url, { credentials: "same-origin", ...fetchInit, headers });

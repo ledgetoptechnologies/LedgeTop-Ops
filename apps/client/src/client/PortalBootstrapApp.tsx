@@ -21,7 +21,18 @@ export function operationsBootstrapOutcome(error: unknown): "legacy" | "blocked"
   if (typeof error !== "object" || error === null) return "blocked";
   try {
     const descriptor = Object.getOwnPropertyDescriptor(error, "status");
-    return descriptor && "value" in descriptor && descriptor.value === 404 ? "legacy" : "blocked";
+    if (!descriptor || !("value" in descriptor)) return "blocked";
+    if (descriptor.value === 404) return "legacy";
+    if (descriptor.value !== 403) return "blocked";
+    const bodyDescriptor = Object.getOwnPropertyDescriptor(error, "body");
+    const body = bodyDescriptor && "value" in bodyDescriptor ? bodyDescriptor.value : null;
+    if (!body || typeof body !== "object" || Object.getPrototypeOf(body) !== Object.prototype) return "blocked";
+    const code = Object.getOwnPropertyDescriptor(body, "code");
+    const message = Object.getOwnPropertyDescriptor(body, "error");
+    // Never interpret a generic 403, raced revocation, or authentication failure
+    // as PA admission. ClientPortalApp performs its own full PA authorization.
+    return Object.keys(body).length === 2 && code && "value" in code && code.value === "no_authorized_operations_home"
+      && message && "value" in message && message.value === "Client access is not provisioned" ? "legacy" : "blocked";
   } catch {
     return "blocked";
   }

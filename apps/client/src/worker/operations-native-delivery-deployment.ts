@@ -13,6 +13,13 @@ export const NATIVE_DELIVERY_PRODUCTION_PROFILE = JSON.stringify({
   publicShareOrigin: "https://portal.ledgetopdroneservices.com",
 });
 
+/** Canonical portal deployment. The original exact profile remains supported
+ * only with its original primary origin for a coordinated rollout/rollback. */
+export const NATIVE_DELIVERY_PORTAL_PRODUCTION_PROFILE = JSON.stringify({
+  ...JSON.parse(NATIVE_DELIVERY_PRODUCTION_PROFILE),
+  portalOrigin: "https://portal.ledgetopdroneservices.com",
+});
+
 export type NativeDeliveryDeploymentEnv = Readonly<{
   ENVIRONMENT?: string;
   EXPECTED_HOST?: string;
@@ -29,12 +36,15 @@ export function nativeDeliveryDeploymentEnabled(env: NativeDeliveryDeploymentEnv
   if (env.ENVIRONMENT === "staging") {
     if (env.CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_DEPLOYMENT_PROFILE) return false;
     if (surface === "publication") return env.EXPECTED_HOST === "delivery-staging.ledgetopdroneservices.com";
-    return surface === "rpc" || env.CLIENT_PORTAL_ORIGIN === "https://client-staging.ledgetopdroneservices.com";
+    return surface === "rpc" || ["https://client-staging.ledgetopdroneservices.com",
+      "https://portal-staging.ledgetopdroneservices.com"].includes(env.CLIENT_PORTAL_ORIGIN ?? "");
   }
+  const expectedProfile = env.CLIENT_PORTAL_ORIGIN === "https://portal.ledgetopdroneservices.com"
+    ? NATIVE_DELIVERY_PORTAL_PRODUCTION_PROFILE
+    : env.CLIENT_PORTAL_ORIGIN === "https://client.ledgetopdroneservices.com" ? NATIVE_DELIVERY_PRODUCTION_PROFILE : null;
   return env.ENVIRONMENT === "production"
-    && env.CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_DEPLOYMENT_PROFILE === NATIVE_DELIVERY_PRODUCTION_PROFILE
+    && expectedProfile !== null && env.CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_DEPLOYMENT_PROFILE === expectedProfile
     && env.EXPECTED_HOST === "portal.ledgetopdroneservices.com"
     && env.PUBLIC_BASE_URL === "https://portal.ledgetopdroneservices.com"
-    && env.PUBLIC_SHARE_ORIGIN === "https://portal.ledgetopdroneservices.com"
-    && env.CLIENT_PORTAL_ORIGIN === "https://client.ledgetopdroneservices.com";
+    && env.PUBLIC_SHARE_ORIGIN === "https://portal.ledgetopdroneservices.com";
 }

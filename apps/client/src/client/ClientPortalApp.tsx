@@ -106,7 +106,8 @@ import { ImageLocationMap } from "./ImageLocationMap";
 import { ServiceLibrary } from "./ServiceLibrary";
 import { canBeginRequest, RequestAvailabilityMessage, useRequestAvailability, type RequestAvailability } from "./RequestAvailability";
 import { RequestScopeBoundary } from "./RequestScopeBoundary";
-import { workspaceSwitcherLabels } from "./workspace-labels";
+import { UNIFIED_PAGES, UnifiedPortal, type UnifiedPage } from "./UnifiedPortal";
+import { unifiedAccount, unifiedAccountSupported } from "./unified-portal";
 import { LeaveFeedback, PortalFeedback } from "./PortalFeedback";
 import { PortalNotifications } from "./PortalNotifications";
 import { loadFeedbackFile, withPortalWorkspace } from "./feedback-api";
@@ -177,17 +178,17 @@ function blockedPortal(
     return {
       status: "blocked",
       optionalClientWorkspaceAbsent,
-      title: "No client workspace yet",
+      title: "No client account yet",
       detail:
-        "You're signed in, but no client workspace has been shared with this account yet. Contact your Ledge Top representative.",
+        "You're signed in, but no client account has been shared with your sign-in yet. Contact your Ledge Top representative.",
     };
   if (error.status === 403)
     return {
       status: "blocked",
       optionalClientWorkspaceAbsent,
-      title: "Workspace access not set up yet",
+      title: "Client access not set up yet",
       detail:
-        "You're signed in, but this account doesn't have access to this client workspace. Contact your Ledge Top representative.",
+        "You're signed in, but this account doesn't have access to this client account. Contact your Ledge Top representative.",
     };
   if (error.status === 503)
     return {
@@ -1626,7 +1627,7 @@ function NewServiceRequestWizard({
   }
 
   if (loadingDraft) return <div className="portal-request-draft-loading" aria-label="Loading saved request"><Loading /></div>;
-  if (draftLoadFailed) return <div className="portal-request-draft-error"><EmptyState title="Saved draft unavailable" detail={message || "This draft could not be opened in the selected workspace."} />{onCancel && <button type="button" className="button-ghost" onClick={onCancel}>Back to request history</button>}</div>;
+  if (draftLoadFailed) return <div className="portal-request-draft-error"><EmptyState title="Saved draft unavailable" detail={message || "This draft could not be opened for the selected client."} />{onCancel && <button type="button" className="button-ghost" onClick={onCancel}>Back to request history</button>}</div>;
 
   return <form className="portal-request-form portal-request-wizard" onSubmit={submit}>
     <nav className="portal-request-stepper" aria-label="Service request progress"><ol>{REQUEST_STEPS.map((item, index) => <li key={item} className={item === step ? "is-current" : REQUEST_STEPS.indexOf(step) > index ? "is-complete" : ""}><button type="button" onClick={() => index <= REQUEST_STEPS.indexOf(step) && goTo(item)} aria-current={item === step ? "step" : undefined}><span>{index + 1}</span>{item === "services" ? "Services" : item === "location" ? "Work area" : item === "details" ? "Details" : item === "contact" ? "Contact" : "Review"}</button></li>)}</ol></nav>
@@ -2216,7 +2217,7 @@ function ProjectWorkspace({
         </StatusPill>
       </section>
       {feedback && <LeaveFeedback key={project.id} target={{ kind: "project", projectId: project.id }} label={project.projectName} />}
-      <nav className="portal-workspace-tabs" aria-label="Project workspace">
+      <nav className="portal-workspace-tabs" aria-label="Project sections">
         {(["overview", "files", ...(viewer ? ["models" as const] : []), "requests"] as WorkspaceTab[]).map((item) => (
           <button
             key={item}
@@ -2427,7 +2428,7 @@ function DelegatedSharePanel({ workspaceId }: { workspaceId: string }) {
 const invitationScopeTypes = new Set<PortalWorkspaceEntry["type"]>(["organization", "department", "client", "project"]);
 
 function hierarchyScopeLabel(type: PortalHierarchyScopeType | "workspace"): string {
-  if (type === "workspace") return "Workspace-wide";
+  if (type === "workspace") return "Account-wide";
   return `${type.charAt(0).toUpperCase()}${type.slice(1)} access`;
 }
 
@@ -2505,7 +2506,7 @@ function WorkspaceTeamPanel({ invitationEmailDelivery, hierarchyScopedInvitation
     try {
     const access = await loadPortalWorkspaceAccess(id, undefined, controller.signal);
     if (controller.signal.aborted || generation !== lifetime.current) return;
-    if (!/^project-alpha:[A-Za-z0-9_-]+$/.test(access.sourceId) || typeof access.sourceName !== "string" || typeof access.workspaceName !== "string" || workspaceMode === "native" && access.sourceId !== expectedSourceId) { clearProtected(); throw new Error("Invitation workspace source could not be verified."); }
+    if (!/^project-alpha:[A-Za-z0-9_-]+$/.test(access.sourceId) || typeof access.sourceName !== "string" || typeof access.workspaceName !== "string" || workspaceMode === "native" && access.sourceId !== expectedSourceId) { clearProtected(); throw new Error("The invitation's client account could not be verified."); }
     if (!Array.isArray(access.members) || access.members.some(member=>member.managerVersion!==undefined&&(!Number.isSafeInteger(member.managerVersion)||member.managerVersion<0)||member.canChangeManager!==undefined&&typeof member.canChangeManager!=="boolean") || !Array.isArray(access.invitations) || !access.invitationPolicy || !["allowed", "disabled", "require_approval"].includes(access.invitationPolicy.mode) || !Number.isSafeInteger(access.invitationPolicy.version) || typeof access.projectAccessTermsSupported !== "boolean" || typeof access.canManageMembers !== "boolean" || typeof access.invitationRequestsSupported !== "boolean" || access.peerAdminManagement!==undefined&&typeof access.peerAdminManagement!=="boolean" || access.peerAdminManagement===true&&!access.canManageMembers || access.addressBookAvailable !== undefined && typeof access.addressBookAvailable !== "boolean" || access.canManageAddressBook !== undefined && typeof access.canManageAddressBook !== "boolean" || access.canManageAddressBook === true && access.addressBookAvailable !== true || !Array.isArray(access.inviteScopes) || access.inviteScopes.some(scope => !["organization", "department", "client", "project"].includes(scope.type) || typeof scope.publicId !== "string" || typeof scope.displayName !== "string" || typeof scope.projectEndSupported !== "boolean" || !Array.isArray(scope.capabilities) || scope.capabilities.some(capability => !["delivery.view", "request.create"].includes(capability))) || !Array.isArray(access.projectAccessOptions) || access.projectAccessOptions.some(option => typeof option.projectPublicId !== "string" || typeof option.projectEndSupported !== "boolean") || !access.canManageMembers && (access.members.length > 0 || access.invitations.length > 0)) { clearProtected(); throw new Error("Invitation settings could not be verified. Refresh team access before continuing."); }
     const pendingAdministratorChange = pendingManager.current;
     if (pendingAdministratorChange) {
@@ -2568,7 +2569,7 @@ function WorkspaceTeamPanel({ invitationEmailDelivery, hierarchyScopedInvitation
         : value.resourceMode !== "native"); setWorkspaces(values);
       const first = values.find(value => value.id === initialWorkspaceId)?.id ?? values[0]?.id ?? "";
       setWorkspaceId(first);
-      if (first) await refreshAccess(first); else { setLoading(false); setError("No workspace with team management is available."); }
+      if (first) await refreshAccess(first); else { setLoading(false); setError("No client account with team management is available."); }
     }).catch(caught => { if (!controller.signal.aborted && generation === lifetime.current) { setLoading(false); setError(invitationError(caught)); } });
     return () => { lifetime.current++; controller.abort(); readController.current?.abort(); mutationController.current?.abort(); };
   }, []);
@@ -2654,7 +2655,7 @@ function WorkspaceTeamPanel({ invitationEmailDelivery, hierarchyScopedInvitation
     try{const result=await changePortalWorkspacePeerAdministrator(operation.workspaceId,operation.identityId,{manager:operation.manager,expectedVersion:operation.expectedVersion},undefined,{idempotencyKey:operation.key,signal:controller.signal});
       if(controller.signal.aborted||generation!==lifetime.current)return;
       if(result.manager!==operation.manager||result.version!==operation.expectedVersion+1)throw new Error("The administrator change could not be confirmed.");
-      pendingManager.current=null;setReviewedManager(null);setMessage(operation.manager?"Administrator access added. This person can now manage organization access.":"Administrator access removed. The person's ordinary workspace access is unchanged.");
+      pendingManager.current=null;setReviewedManager(null);setMessage(operation.manager?"Administrator access added. This person can now manage organization access.":"Administrator access removed. The person's ordinary account access is unchanged.");
       await refreshAccess(operation.workspaceId);
     }catch(caught){if(controller.signal.aborted||generation!==lifetime.current)return;const status=(caught as RequestError).status;
       if(status&&[401,403,404].includes(status)){pendingManager.current=null;clearProtected();setError(invitationError(caught));}
@@ -2678,8 +2679,8 @@ function WorkspaceTeamPanel({ invitationEmailDelivery, hierarchyScopedInvitation
   const selectedCapabilities = organizationWide ? rootCapabilities : inviteScopes.find(scope => scope.type === selectedScope?.type && scope.publicId === selectedScope?.publicId)?.capabilities ?? [];
   const canInvite = ready && (workspaceMode !== "native" || canManageMembers) && inviteScopes.some(scope => scope.capabilities.length > 0);
   const workspaceWideLabel = currentWorkspace?.rootType === "organization"
-    ? "Give access across this entire organization workspace"
-    : "Give access across this entire client workspace";
+    ? "Give access across this entire organization"
+    : "Give access across this entire client account";
   const approvalRequired = policy?.mode === "require_approval";
   const secondaryApprovalUnavailable = secondaryWorkspace && approvalRequired;
   const formDisabled = !ready || policy?.mode === "disabled" || secondaryApprovalUnavailable || !(approvalRequired ? requestsSupported : invitationEmailDelivery) || busy || uncertain || historyLocked || addressBookLocked || reviewedManager !== null;
@@ -2691,13 +2692,13 @@ function WorkspaceTeamPanel({ invitationEmailDelivery, hierarchyScopedInvitation
   const reviewedScopeName = reviewed?.organizationWide ? currentWorkspace?.displayName : reviewedScope ? hierarchy.find(entry => entry.type === reviewedScope.type && entry.publicId === reviewedScope.publicId)?.displayName : null;
 
   return <div className="portal-team-panel">
-    {workspaces.length > 1 && <label>Manage team workspace<select value={workspaceId} onChange={event => void selectWorkspace(event.target.value)} disabled={busy || uncertain || historyLocked || addressBookLocked}>{workspaces.map(workspace => <option key={workspace.id} value={workspace.id}>{workspace.displayName}</option>)}</select></label>}
+    {workspaces.length > 1 && <label>Manage team for<select value={workspaceId} onChange={event => void selectWorkspace(event.target.value)} disabled={busy || uncertain || historyLocked || addressBookLocked}>{workspaces.map(workspace => <option key={workspace.id} value={workspace.id}>{workspace.displayName}</option>)}</select></label>}
     {loading && <Loading />}
     {workspaceId && <button className="button-ghost" disabled={busy || loading || historyLocked || addressBookLocked} onClick={() => { setError(""); void refreshAccess(workspaceId); }}>Refresh team access</button>}
     {policy?.mode === "disabled" && <p className="portal-info-notice" role="status">Invitations are disabled by this organization's policy. Existing access can still be reviewed.</p>}
     {approvalRequired && !secondaryWorkspace && <p className="portal-info-notice" role="status">Administrator approval is required. Submit the exact recipient, scope, and duration for review. A request does not issue an invitation or grant access.</p>}
-    {secondaryApprovalUnavailable && <p className="portal-info-notice" role="status"><strong>Invitations need a source policy change.</strong> This connected Project Alpha workspace requires approval, but approval requests aren't supported for this connected workspace. Existing members and invitations remain available below; no approval control is shown.</p>}
-    {ready && !canManageMembers && <p className="portal-info-notice" role="status">Workspace member records are not available in your current verified access. {canInvite ? "Only the scoped access choices authorized below are available." : "No invitation controls are shown."}</p>}
+    {secondaryApprovalUnavailable && <p className="portal-info-notice" role="status"><strong>Invitations need a source policy change.</strong> This client account requires approval, but approval requests aren't supported for this client account. Existing members and invitations remain available below; no approval control is shown.</p>}
+    {ready && !canManageMembers && <p className="portal-info-notice" role="status">Team member records are not available in your current verified access. {canInvite ? "Only the scoped access choices authorized below are available." : "No invitation controls are shown."}</p>}
     {error && <p className="portal-form-error" role="alert">{error}</p>}{message && <p role="status">{message}</p>}
     {uncertain && (pendingManager.current ? peerAdminManagement : pendingInvite.current !== null) && <button className="button-primary" disabled={busy || loading || !ready || (pendingManager.current ? !peerAdminManagement : !!pendingInvite.current?.input.accessTerms && !termsSupported)} onClick={() => pendingManager.current ? void saveManagerChange() : void sendInvitation()}>{pendingManager.current ? "Retry same administrator change" : "Retry same invitation"}</button>}
     {ready && currentWorkspace?.rootType === "organization" && addressBookAvailable && canManageAddressBook && accessSource && <PortalAddressBook key={`${workspaceId}:${accessSource}`} workspaceId={workspaceId} sourceId={accessSource} locked={busy || uncertain || historyLocked} onLock={setAddressBookLocked} onContactsChanged={() => setAddressContact(null)} onInvalidated={message => {setAddressContact(null); clearProtected(); setError(message);}} />}
@@ -2733,14 +2734,14 @@ function WorkspaceTeamPanel({ invitationEmailDelivery, hierarchyScopedInvitation
       <p className="portal-copy">{selectedCapabilities.includes("delivery.view") ? "Delivery viewing is included for this scope." : "Delivery viewing is not included for this scope."}</p>
       <label className="portal-check"><input type="checkbox" disabled={formDisabled || !selectedCapabilities.includes("request.create") || !selectedCapabilities.includes("delivery.view")} checked={canRequest} onChange={event => { setCanRequest(event.target.checked); clearReview(); }} /> Allow this person to submit service requests for the selected scope</label>
       {canManageMembers && rootCapabilities.length > 0 && <label className="portal-check portal-wide-access"><input type="checkbox" disabled={formDisabled} checked={organizationWide} onChange={event => { const capabilities = event.target.checked ? rootCapabilities : inviteScopes.find(scope => scope.type === selectedScope?.type && scope.publicId === selectedScope?.publicId)?.capabilities ?? []; setOrganizationWide(event.target.checked); setCanRequest(!capabilities.includes("delivery.view") && capabilities.includes("request.create")); setWideConfirmed(false); clearReview(); }} /> {workspaceWideLabel}</label>}
-      {broadConfirmationRequired && <div className="portal-danger-disclosure" role="alert"><strong>Broader access</strong><p>The selected capabilities apply to current and future projects across {organizationWide ? "the workspace" : "this organization"}.</p><label className="portal-check"><input type="checkbox" required disabled={formDisabled} checked={wideConfirmed} onChange={event => { setWideConfirmed(event.target.checked); clearReview(); }} /> I understand and want to grant {organizationWide ? "workspace-wide" : "organization-wide"} access.</label></div>}
+      {broadConfirmationRequired && <div className="portal-danger-disclosure" role="alert"><strong>Broader access</strong><p>The selected capabilities apply to current and future projects across {organizationWide ? "this client account" : "this organization"}.</p><label className="portal-check"><input type="checkbox" required disabled={formDisabled} checked={wideConfirmed} onChange={event => { setWideConfirmed(event.target.checked); clearReview(); }} /> I understand and want to grant {organizationWide ? "account-wide" : "organization-wide"} access.</label></div>}
       {!reviewed && <button className="button-primary" disabled={formDisabled || (!organizationWide && !selectedScope) || (broadConfirmationRequired && !wideConfirmed) || projectScope && (!accessMode || !termsSupported)}>{approvalRequired ? "Review approval request" : "Review invitation"}</button>}
-      {reviewed && <section className="portal-info-notice" aria-label={approvalRequired ? "Review approval request" : "Review collaborator invitation"}><h4>{approvalRequired ? "Review approval request" : "Review invitation"}</h4><p><strong>{reviewed.email}</strong> · {reviewedScopeName || "Selected authorized scope"}</p>{reviewed.addressContact && addressContact?.id === reviewed.addressContact.id && <p>Copied from {addressContact.displayName} in this workspace address book. The invitation remains an independent access record.</p>}<p>{invitationCapabilitiesLabel(reviewed.capabilities)}</p><p>{reviewed.accessTerms ? termDescription(reviewed.accessTerms) : "Selected hierarchy scope — existing access rules apply"}</p>{reviewed.accessTerms?.mode === "project_end" && <p>Reopening does not renew expired access.</p>}{approvalRequired ? <p>This submits an administrator approval request only. It sends no invitation email and grants no access. If approved later, the invitation link lasts seven days separately from access duration.</p> : <p>Invitation link: seven days. Access duration is separate.</p>}<div className="actions"><button type="button" className="button-primary" disabled={formDisabled} onClick={() => void sendInvitation()}>{busy ? "Saving..." : approvalRequired ? "Request approval" : "Send invitation"}</button><button type="button" className="button-ghost" disabled={busy || uncertain} onClick={() => setReviewed(null)}>Cancel review</button></div></section>}
+      {reviewed && <section className="portal-info-notice" aria-label={approvalRequired ? "Review approval request" : "Review collaborator invitation"}><h4>{approvalRequired ? "Review approval request" : "Review invitation"}</h4><p><strong>{reviewed.email}</strong> · {reviewedScopeName || "Selected authorized scope"}</p>{reviewed.addressContact && addressContact?.id === reviewed.addressContact.id && <p>Copied from {addressContact.displayName} for this client address book. The invitation remains an independent access record.</p>}<p>{invitationCapabilitiesLabel(reviewed.capabilities)}</p><p>{reviewed.accessTerms ? termDescription(reviewed.accessTerms) : "Selected hierarchy scope — existing access rules apply"}</p>{reviewed.accessTerms?.mode === "project_end" && <p>Reopening does not renew expired access.</p>}{approvalRequired ? <p>This submits an administrator approval request only. It sends no invitation email and grants no access. If approved later, the invitation link lasts seven days separately from access duration.</p> : <p>Invitation link: seven days. Access duration is separate.</p>}<div className="actions"><button type="button" className="button-primary" disabled={formDisabled} onClick={() => void sendInvitation()}>{busy ? "Saving..." : approvalRequired ? "Request approval" : "Send invitation"}</button><button type="button" className="button-ghost" disabled={busy || uncertain} onClick={() => setReviewed(null)}>Cancel review</button></div></section>}
     </form>}
     {ready && accessSource && !secondaryWorkspace && <PortalInvitationRequests key={`${workspaceId}:${historyRevision}`} workspaceId={workspaceId} sourceId={accessSource} supported={requestsSupported} locked={busy || uncertain || addressBookLocked} onLock={setHistoryLocked} onInvalidated={message => { clearProtected(); setError(message); }} />}
-    {reviewedManager&&<section className="portal-danger-disclosure" aria-label="Review administrator access change"><h4>{reviewedManager.manager?"Add organization administrator?":"Remove organization administrator?"}</h4><p><strong>{reviewedManager.member.email??"Verified portal user"}</strong></p><p>{reviewedManager.manager?"This person will be able to invite, suspend, promote, and demote eligible people across this organization workspace.":"This removes team-management authority only. The person's ordinary workspace and delivery access stays in place."}</p><div className="actions"><button type="button" className="button-primary" disabled={managerActionDisabled} onClick={()=>void saveManagerChange()}>{busy?"Saving…":reviewedManager.manager?"Add administrator":"Remove administrator"}</button><button type="button" className="button-ghost" disabled={busy||uncertain||historyLocked||addressBookLocked} onClick={()=>setReviewedManager(null)}>Cancel</button></div></section>}
+    {reviewedManager&&<section className="portal-danger-disclosure" aria-label="Review administrator access change"><h4>{reviewedManager.manager?"Add organization administrator?":"Remove organization administrator?"}</h4><p><strong>{reviewedManager.member.email??"Verified portal user"}</strong></p><p>{reviewedManager.manager?"This person will be able to invite, suspend, promote, and demote eligible people across this organization.":"This removes team-management authority only. The person's ordinary account and delivery access stays in place."}</p><div className="actions"><button type="button" className="button-primary" disabled={managerActionDisabled} onClick={()=>void saveManagerChange()}>{busy?"Saving…":reviewedManager.manager?"Add administrator":"Remove administrator"}</button><button type="button" className="button-ghost" disabled={busy||uncertain||historyLocked||addressBookLocked} onClick={()=>setReviewedManager(null)}>Cancel</button></div></section>}
     {ready && canManageMembers && !uncertain && <div className="portal-team-lists">
-      <section><h3>People</h3>{members.length === 0 && <p className="portal-copy">No workspace members are available.</p>}{members.map(member => {
+      <section><h3>People</h3>{members.length === 0 && <p className="portal-copy">No team members are available.</p>}{members.map(member => {
         const sourceManaged = member.source === "project_alpha";
         return <div className="portal-team-row" key={member.identityId}><span><strong>{member.email ?? "Verified portal user"}</strong><small>{member.manager ? "Administrator" : "Member"} · {member.status}</small><small>{sourceManaged ? "Source-managed member" : "Locally invited collaborator"}</small>{sourceManaged&&<small>Access is managed in this Project Alpha source and cannot be changed here.</small>}</span><div className="actions">{peerAdminManagement&&!sourceManaged&&member.status==="active"&&member.canChangeManager===true&&<button className="button-ghost button-small" disabled={managerActionDisabled||reviewed!==null} onClick={()=>{setReviewed(null);setReviewedManager({member,manager:!member.manager});setMessage("");setError("");}}>{member.manager?"Remove administrator":"Make administrator"}</button>}{!sourceManaged && member.status === "active" && <button className="button-ghost button-small" disabled={busy || uncertain || historyLocked || addressBookLocked || !ready || reviewedManager !== null} onClick={() => void removeAccess("member", member.identityId)}>Suspend</button>}</div></div>;
       })}</section>
@@ -2770,6 +2771,9 @@ export function ClientPortalApp({
     initialRoute.projectId,
   );
   const [feedbackId, setFeedbackId] = useState<string | null>(initialRoute.feedbackId ?? null);
+  // In the unified portal, list pages merge every account; a link that names an
+  // account (?workspace=) opens that account's own page instead.
+  const [accountFocus, setAccountFocus] = useState(() => new URLSearchParams(location.search).has("workspace"));
   const [authenticatedDeliveryFolder, setAuthenticatedDeliveryFolder] = useState<DeliveryFolderLocation>(readAuthenticatedDeliveryFolderLocation);
   const [requests, setRequests] = useState<PortalServiceRequest[]>([]);
   const [drafts, setDrafts] = useState<PortalServiceDraftSummary[]>([]);
@@ -2886,7 +2890,9 @@ export function ClientPortalApp({
     loadPortalBootstrap(undefined, requestedWorkspaceId, controller.signal)
       .then((data) => {
         if (active && !controller.signal.aborted) {
-          history.replaceState(null, "", withPortalWorkspace(`${location.pathname}${location.search}`));
+          const unifiedList = data.capabilities.workspaceHierarchyV2 && (data.workspaces ?? []).filter(unifiedAccountSupported).length > 1
+            && !requestedWorkspaceId && UNIFIED_PAGES.has(parseClientPortalRoute(location.pathname).page);
+          if (!unifiedList) history.replaceState(null, "", withPortalWorkspace(`${location.pathname}${location.search}`));
           setRequests(data.resourceMode === "native" ? [] : data.requests);
           setGate({ status: "ready", data });
         }
@@ -2928,6 +2934,7 @@ export function ClientPortalApp({
           bootstrapController.current?.abort(); setSwitchingWorkspace(false); setGate({status: "loading"}); setBootstrapRevision(value => value + 1);
         }
         setPage(route.page);
+        setAccountFocus(new URLSearchParams(location.search).has("workspace"));
         setProjectId(route.projectId);
         setFeedbackId(route.feedbackId ?? null);
         setAuthenticatedDeliveryFolder(readAuthenticatedDeliveryFolderLocation());
@@ -2965,11 +2972,14 @@ export function ClientPortalApp({
   }, [mobileNavOpen]);
 
   function navigate(nextPage: TopPage, replace = false) {
-    window.history[replace ? "replaceState" : "pushState"]({}, "", withPortalWorkspace(clientPortalPath(nextPage)));
+    const unifiedNow = gate.status === "ready" && gate.data.capabilities.workspaceHierarchyV2
+      && (gate.data.workspaces ?? []).filter(unifiedAccountSupported).length > 1;
+    window.history[replace ? "replaceState" : "pushState"]({}, "", unifiedNow ? clientPortalPath(nextPage) : withPortalWorkspace(clientPortalPath(nextPage)));
     setFeedbackId(null);
     setProjectId(null);
     setAuthenticatedDeliveryFolder({ folderId: null, invalid: false });
     setPage(nextPage);
+    setAccountFocus(false);
     setRequestDraftId(null);
     setEditing(null);
     setMobileNavOpen(false);
@@ -3057,30 +3067,29 @@ export function ClientPortalApp({
   const mapboxPublicToken = gate.data.resourceMode === "native" ? null : gate.data.mapboxPublicToken;
   const shellDisplayName = native ? native.workspace.displayName : account!.displayName;
   const workspaces = gate.data.workspaces ?? [];
-  const workspaceLabels = workspaceSwitcherLabels(workspaces);
   const selectedWorkspaceId = gate.data.selectedWorkspaceId ?? null;
-  const switchWorkspace = async (workspaceId: string) => {
-    if (workspaceId === selectedWorkspaceId) return;
-    bootstrapController.current?.abort(); const controller = new AbortController(); bootstrapController.current = controller;
-    setSwitchingWorkspace(true);
-    setPortalWorkspaceSelection(workspaceId);
-    try {
-      const data = await loadPortalBootstrap(undefined, workspaceId, controller.signal);
-      if (controller.signal.aborted || bootstrapController.current !== controller) return;
-      setRequests(data.resourceMode === "native" ? [] : data.requests);
-      setProjectId(null);
-      setPage("dashboard");
-      setRequestDraftId(null);
-      setFeedbackId(null);
-      setAuthenticatedDeliveryFolder({ folderId: null, invalid: false });
-      window.history.pushState({}, "", withPortalWorkspace(clientPortalPath("dashboard")));
-      setGate({ status: "ready", data });
-    } catch (caught) {
-      if (controller.signal.aborted || bootstrapController.current !== controller) return;
-      setPortalWorkspaceSelection(selectedWorkspaceId);
-      window.alert((caught as Error).message || "This workspace could not be opened.");
-    } finally {
-      if (bootstrapController.current === controller) setSwitchingWorkspace(false);
+  const unifiedMode = capabilities.workspaceHierarchyV2 && workspaces.filter(unifiedAccountSupported).length > 1;
+  const unifiedView = unifiedMode && UNIFIED_PAGES.has(page) && !accountFocus;
+  const currentAccount = unifiedMode ? workspaces.find(workspace => workspace.id === selectedWorkspaceId) : undefined;
+  /** Opens a page of one exact client account; the account is loaded fresh if it isn't the current one. */
+  const openInAccount = (workspaceId: string, path: string) => {
+    const url = new URL(path, window.location.origin);
+    url.searchParams.set("workspace", workspaceId);
+    const route = parseClientPortalRoute(url.pathname);
+    window.history.pushState({}, "", `${url.pathname}${url.search}`);
+    setAccountFocus(true);
+    setProjectId(route.projectId);
+    setFeedbackId(route.feedbackId ?? null);
+    setAuthenticatedDeliveryFolder({ folderId: null, invalid: false });
+    setRequestDraftId(null);
+    setEditing(null);
+    setMobileNavOpen(false);
+    setPage(route.page);
+    if (workspaceId !== selectedWorkspaceId) {
+      bootstrapController.current?.abort();
+      setPortalWorkspaceSelection(workspaceId);
+      setGate({ status: "loading" });
+      setBootstrapRevision(value => value + 1);
     }
   };
   const onSaved = (saved: PortalServiceRequest) => {
@@ -3155,7 +3164,7 @@ export function ClientPortalApp({
   const selectedProject = projects.find((project) => project.id === projectId);
   const renderRequestSurface = (requestProjects: PortalProject[], fixedProjectId?: string): ReactNode => fixedProjectId ? (() => {
     const project = requestProjects.find(item => item.id === fixedProjectId);
-    if (!project) return <Card title="Project unavailable"><p>This project is no longer in your current workspace access.</p></Card>;
+    if (!project) return <Card title="Project unavailable"><p>This project is no longer in your current access.</p></Card>;
     const projectRequests = requests.filter(request => request.projectId === fixedProjectId);
     return <>
       <Card title="Request additional service" className="portal-request-card"><ServiceRequestForm
@@ -3177,7 +3186,7 @@ export function ClientPortalApp({
     {requestNotice && <p className="portal-message portal-request-notice" role="status">{requestNotice}</p>}
     {!editing && !canBeginRequest(requestAvailability, requestProjects) && <RequestAvailabilityMessage availability={requestAvailability} />}
     {!editing && drafts.length > 0 && <Card title="Saved drafts" className="portal-request-drafts-card">
-      <p className="portal-card-intro">Continue an autosaved request in this workspace. Nothing is submitted until you review and confirm it.</p>
+      <p className="portal-card-intro">Continue an autosaved request for this client. Nothing is submitted until you review and confirm it.</p>
       <div className="portal-request-drafts" role="list">{drafts.map(item => <article key={item.id} role="listitem"><div>
         <strong>{item.title}</strong><span>{item.serviceNames.length ? item.serviceNames.join(", ") : "Services not selected"}</span>
         <small>{item.areaAcres != null ? `${item.areaAcres.toLocaleString(undefined, { maximumFractionDigits: 2 })} acres` : "No work area saved"} · Updated {formatDate(item.updatedAt)}</small>
@@ -3210,9 +3219,13 @@ export function ClientPortalApp({
   </> : null;
   let content: ReactNode;
 
-  if (native)
+  if (unifiedView)
+    content = <UnifiedPortal page={page as UnifiedPage} workspaces={workspaces}
+      openInAccount={openInAccount} navigate={navigate} supplement={page === "dashboard" ? operationsHomeSummary : undefined}
+      renderStatus={request => <StatusPill tone={statusTone(request.status)}>{statusLabel(request.status, request.projectAlphaDraftCreated)}</StatusPill>} />;
+  else if (native)
     content = <NativeWorkspaceContent key={`${native.workspace.sourceId}:${native.workspace.id}:${native.contextVersion}`} context={native} page={page} projectId={projectId} feedbackId={feedbackId} openProject={openProject}
-      onInvalid={caught => { bootstrapController.current?.abort(); const status = (caught as RequestError).status; setGate(status === 409 ? {status: "blocked", optionalClientWorkspaceAbsent: false, title: "Workspace changed", detail: "Your workspace changed. Refresh the portal before continuing."} : status === 404 || status === 410 ? {status: "blocked", optionalClientWorkspaceAbsent: false, title: "Shared item unavailable", detail: "This shared item or its access has changed. Refresh the portal to check your current workspace."} : blockedPortal(caught)); }}
+      onInvalid={caught => { bootstrapController.current?.abort(); const status = (caught as RequestError).status; setGate(status === 409 ? {status: "blocked", optionalClientWorkspaceAbsent: false, title: "Client access changed", detail: "Your client access changed. Refresh the portal before continuing."} : status === 404 || status === 410 ? {status: "blocked", optionalClientWorkspaceAbsent: false, title: "Shared item unavailable", detail: "This shared item or its access has changed. Refresh the portal to check your current access."} : blockedPortal(caught)); }}
       renderTeam={native.capabilities.workspaceMembershipManagement ? () => <Card title="Team access" className="portal-team-card"><WorkspaceTeamPanel initialWorkspaceId={native.workspace.id} workspaceMode="native" expectedSourceId={native.workspace.sourceId} invitationEmailDelivery={native.capabilities.invitationEmailDelivery} hierarchyScopedInvitations={native.capabilities.hierarchyScopedInvitations} /></Card> : undefined}
       renderRequests={renderRequestSurface}
       renderModels={id => <ProjectViewerModels projectId={id} initialDisplayUnits={readClientViewerUnits()}
@@ -3251,7 +3264,7 @@ export function ClientPortalApp({
       </Card>
     );
   else if (page === "feedback")
-    content = capabilities.feedback ? <PortalFeedback key={`${requestContextKey}:${feedbackId ?? "list"}`} id={feedbackId} /> : <Card title="Feedback unavailable"><p>Feedback is not enabled for this workspace.</p></Card>;
+    content = capabilities.feedback ? <PortalFeedback key={`${requestContextKey}:${feedbackId ?? "list"}`} id={feedbackId} /> : <Card title="Feedback unavailable"><p>Feedback is not enabled for this client account.</p></Card>;
   else if (page === "not-found")
     content = (
       <Card>
@@ -3330,7 +3343,7 @@ export function ClientPortalApp({
                   <span>{project.externalRef}</span>
                   <strong>{project.projectName}</strong>
                   <small>
-                    {project.nextMilestone || "Open project workspace"}
+                    {project.nextMilestone || "Open project"}
                   </small>
                 </button>
               ))}
@@ -3352,7 +3365,7 @@ export function ClientPortalApp({
     content = (
       <>
         <section className="portal-page-heading">
-          <span className="eyebrow">Project workspaces</span>
+          <span className="eyebrow">Projects</span>
           <h1>Projects</h1>
           <p>
             Track project details, download files, and request additional
@@ -3384,7 +3397,7 @@ export function ClientPortalApp({
                 </div>
                 <h2>{project.projectName}</h2>
                 <p>{project.summary || project.clientName}</p>
-                <span className="portal-project-link">Open workspace →</span>
+                <span className="portal-project-link">Open project →</span>
               </button>
             ))}
           </div>
@@ -3450,7 +3463,7 @@ export function ClientPortalApp({
         {!editing && !canBeginRequest(requestAvailability, projects) && <RequestAvailabilityMessage availability={requestAvailability} />}
         {!editing && drafts.length > 0 && (
           <Card title="Saved drafts" className="portal-request-drafts-card">
-            <p className="portal-card-intro">Continue an autosaved request in this workspace. Nothing is submitted until you review and confirm it.</p>
+            <p className="portal-card-intro">Continue an autosaved request for this client. Nothing is submitted until you review and confirm it.</p>
             <div className="portal-request-drafts" role="list">
               {drafts.map(item => <article key={item.id} role="listitem">
                 <div>
@@ -3579,24 +3592,11 @@ export function ClientPortalApp({
     <div className="client-portal">
       <header className="client-portal-header">
         <PortalBrand product="Client portal" />
-        {capabilities.workspaceHierarchyV2 && workspaces.length > 1 && (
-          <label className="portal-workspace-switcher">
-            <span>Workspace</span>
-            <select
-              aria-label="Client workspace"
-              value={selectedWorkspaceId ?? ""}
-              disabled={switchingWorkspace}
-              onChange={event => void switchWorkspace(event.target.value)}
-            >
-              {workspaces.map(workspace => <option key={workspace.id} value={workspace.id}>{workspaceLabels.get(workspace.id) ?? workspace.displayName}</option>)}
-            </select>
-          </label>
-        )}
         <nav className="client-portal-top-nav" aria-label="Client portal">
-          {navigation.filter(item => (item.page !== "feedback" || capabilities.feedback) && (item.page !== "requests" || capabilities.requestV2)).map((item) => (
+          {navigation.filter(item => unifiedMode || (item.page !== "feedback" || capabilities.feedback) && (item.page !== "requests" || capabilities.requestV2)).map((item) => (
             <a
               key={item.page}
-              href={withPortalWorkspace(clientPortalPath(item.page))}
+              href={unifiedMode ? clientPortalPath(item.page) : withPortalWorkspace(clientPortalPath(item.page))}
               aria-current={
                 page === item.page ||
                 (item.page === "projects" && page === "project") ||
@@ -3616,18 +3616,23 @@ export function ClientPortalApp({
         {!switchingWorkspace && <PortalNotifications key={requestContextKey} />}
         <button ref={mobileNavTrigger} className="portal-nav-trigger" type="button" aria-label="Open navigation" aria-expanded={mobileNavOpen} aria-controls="portal-mobile-navigation" onClick={() => setMobileNavOpen(true)}><span className="nav-hamburger" aria-hidden="true"><i /><i /><i /></span></button>
         <AccountMenu className="portal-account-menu" displayName={shellDisplayName}
-          avatar={shellDisplayName.slice(0, 2).toUpperCase()} accountHref={withPortalWorkspace(clientPortalPath("account"))}
+          avatar={shellDisplayName.slice(0, 2).toUpperCase()} accountHref={unifiedMode ? clientPortalPath("account") : withPortalWorkspace(clientPortalPath("account"))}
           onAccount={() => navigate("account")} />
       </header>
       {mobileNavOpen && <div className="portal-mobile-nav-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) { setMobileNavOpen(false); mobileNavTrigger.current?.focus(); } }}>
         <div ref={mobileNavPanel} id="portal-mobile-navigation" className="portal-mobile-nav" role="dialog" aria-modal="true" aria-label="Navigation">
           <header><strong>Navigation</strong><button type="button" aria-label="Close navigation" onClick={() => { setMobileNavOpen(false); mobileNavTrigger.current?.focus(); }}>Close</button></header>
           <nav aria-label="Mobile client portal navigation">
-            {[...navigation.filter(item => (item.page !== "feedback" || capabilities.feedback) && (item.page !== "requests" || capabilities.requestV2)), { page: "account" as const, label: "Account" }].map((item) => <a key={item.page} href={withPortalWorkspace(clientPortalPath(item.page))} aria-current={page === item.page || (item.page === "projects" && page === "project") || (item.page === "requests" && page === "request-new") ? "page" : undefined} onClick={(event) => { event.preventDefault(); navigate(item.page); }}>{item.label}</a>)}
+            {[...navigation.filter(item => unifiedMode || (item.page !== "feedback" || capabilities.feedback) && (item.page !== "requests" || capabilities.requestV2)), { page: "account" as const, label: "Account" }].map((item) => <a key={item.page} href={unifiedMode ? clientPortalPath(item.page) : withPortalWorkspace(clientPortalPath(item.page))} aria-current={page === item.page || (item.page === "projects" && page === "project") || (item.page === "requests" && page === "request-new") ? "page" : undefined} onClick={(event) => { event.preventDefault(); navigate(item.page); }}>{item.label}</a>)}
           </nav>
         </div>
       </div>}
-      <main className="client-portal-main">{switchingWorkspace ? <Loading /> : content}</main>
+      <main className="client-portal-main">{switchingWorkspace ? <Loading /> : <>
+        {currentAccount && !unifiedView && <p className="unified-portal-context">
+          <span>{unifiedAccount(currentAccount).business} · {currentAccount.displayName}</span>
+          {UNIFIED_PAGES.has(page) && <button type="button" className="portal-text-action" onClick={() => navigate(page as UnifiedPage)}>Show all businesses</button>}
+        </p>}
+        {content}</>}</main>
     </div>
   );
 }

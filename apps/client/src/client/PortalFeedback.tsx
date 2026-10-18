@@ -73,7 +73,7 @@ export function PortalFeedback({ id, nativeWorkspaceId = null }: { id?: string |
   }
   useEffect(() => { setItems([]); setDetail(null); setCursor(null); void load(); return () => { pending.current?.abort(); pending.current = null; sequence.current += 1; }; }, [id, nativeWorkspaceId]);
   return <div className="portal-feedback-page">
-    <header><div><span className="eyebrow">Your feedback</span><h1>{id ? "Feedback details" : "Feedback"}</h1><p>Feedback you submitted in this workspace. Your team decides how best to handle it.</p></div>{id && <a className="button button-ghost" href={feedbackPath()}>All feedback</a>}</header>
+    <header><div><span className="eyebrow">Your feedback</span><h1>{id ? "Feedback details" : "Feedback"}</h1><p>Feedback you submitted for this client. Your team decides how best to handle it.</p></div>{id && <a className="button button-ghost" href={feedbackPath()}>All feedback</a>}</header>
     {error && <div className="portal-inline-error" role="alert"><p>{error}</p><button className="button-ghost" onClick={() => void load(retryCursor.current)}>Retry feedback</button></div>}
     {loading && <Skeleton variant="list" rows={3} label="Loading feedback…" />}
     {detail && <Card title={detail.feedback.target.label}><FeedbackSummary item={detail.feedback} /><section className="portal-feedback-history" aria-label="Feedback history"><h3>Updates</h3>{detail.events.map(event => <article key={event.revision}><strong>{feedbackStatusLabel(event.status)}</strong><small>{new Date(event.createdAt).toLocaleString()} · {event.actor === "staff" ? "Your team" : "You"}</small>{event.note && <p>{event.note}</p>}</article>)}</section></Card>}

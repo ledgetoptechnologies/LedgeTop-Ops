@@ -1,10 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
+import { Hono } from "hono";
 vi.mock("cloudflare:workers", () => ({ WorkflowEntrypoint: class {}, WorkerEntrypoint: class {} }));
 import { decodeItemRef, encodeItemRef, indexedImmediateChildVisibility, isHiddenKey, keyWithinRoot, parseRange, prefixHasBrowsableEntry, prefixHasVisibleContent, streamPlayerUrl, type VisibleContentBucket } from "../src/worker/files";
 import { createSessionCookie, presignR2Get, verifyRotatingSessionCookie, verifySessionCookie } from "../src/worker/security";
 import { hashAccessCode } from "../../operations/src/worker/crypto";
 import { verifyAccessCode } from "../src/worker/security";
-import deliveryWorker, { cloudTransferResumeOrigin, ensurePublicId, framePolicyForPath, markUnavailableFolder, requestHostAllowed, requireSameOrigin, serveAppShell, sourceUrlForItem, streamItem } from "../src/worker/index";
+import deliveryWorker, { authenticatedPreviewFrameAllowed, cloudTransferResumeOrigin, deliverySecurityHeaders, ensurePublicId, framePolicyForPath, markUnavailableFolder, requestHostAllowed, requireSameOrigin, serveAppShell, sourceUrlForItem, streamItem } from "../src/worker/index";
 import { legacyClientRedirectLocation, malformedPortalLaunchRedirect } from "../src/worker/origin-policy";
 import type { Env, ShareRow } from "../src/worker/types";
 
@@ -343,6 +344,47 @@ describe("inline PDF routing",()=>{
     expect(wrongHost.status).toBe(404);
     expect(wrongHost.headers.get("X-Frame-Options")).toBe("DENY");
     expect(wrongHost.headers.get("Content-Security-Policy")).toContain("frame-ancestors 'none'");
+  });
+});
+
+describe("authenticated preview frame response policy", () => {
+  const paths = [
+    "/api/client/v2/workspaces/workspace-one/files/np1_signed-handle/preview",
+    "/api/client/files/cf1_signed-handle/preview",
+    "/api/client/authenticated-deliveries/preview",
+    "/api/client/operations/data/files/ond1_signed-handle/preview",
+  ];
+  const inline = (type = "application/pdf", status = 200, disposition = "inline; filename=report.pdf") =>
+    new Response(status === 304 ? null : "safe fixture bytes", { status, headers: { "Content-Type": type, "Content-Disposition": disposition } });
+  it.each(paths)("permits only safe successful GET/HEAD inline responses at %s", path => {
+    for (const method of ["GET", "HEAD"]) for (const status of [200, 206, 304])
+      expect(authenticatedPreviewFrameAllowed(path, method, inline("application/pdf", status))).toBe(true);
+    for (const status of [301, 401, 403, 404, 409, 410, 415, 500])
+      expect(authenticatedPreviewFrameAllowed(path, "GET", inline("text/plain", status))).toBe(false);
+    for (const method of ["POST", "PUT", "DELETE", "OPTIONS"])
+      expect(authenticatedPreviewFrameAllowed(path, method, inline())).toBe(false);
+    for (const type of ["text/html", "image/svg+xml", "application/xhtml+xml", "application/javascript", "application/octet-stream"])
+      expect(authenticatedPreviewFrameAllowed(path, "GET", inline(type))).toBe(false);
+    expect(authenticatedPreviewFrameAllowed(path, "GET", inline("text/plain", 200, "attachment"))).toBe(false);
+    expect(authenticatedPreviewFrameAllowed(path, "GET", inline("text/plain", 200, "inline-fake"))).toBe(false);
+  });
+  it("keeps downloads, malformed handles, unrelated URLs and unsupported nesting unframeable", () => {
+    for (const path of ["/portal", "/health", ...paths.map(path => path.replace(/preview$/, "download")),
+      "/api/client/v2/workspaces/workspace/files/anything/preview", "/api/client/files/anything/preview",
+      paths[0] + "/extra", "/api/client/v2/workspaces/a%2Fb/files/np1_handle/preview"])
+      expect(authenticatedPreviewFrameAllowed(path, "GET", inline())).toBe(false);
+  });
+  it("changes only the framing directives of the production locked security policy after a safe response", async () => {
+    const app = new Hono().use("*", deliverySecurityHeaders).all("*", () => inline());
+    const locked = await app.request("https://client.test/ordinary");
+    for (const path of paths) {
+      const allowed = await app.request("https://client.test" + path);
+      expect(allowed.headers.get("X-Frame-Options")).toBe("SAMEORIGIN");
+      expect(allowed.headers.get("Content-Security-Policy")).toBe(locked.headers.get("Content-Security-Policy")!
+        .replace("frame-ancestors 'none'", "frame-ancestors 'self'"));
+      expect(allowed.headers.get("X-Content-Type-Options")).toBe("nosniff");
+      expect(allowed.headers.get("Referrer-Policy")).toBe(locked.headers.get("Referrer-Policy"));
+    }
   });
 });
 

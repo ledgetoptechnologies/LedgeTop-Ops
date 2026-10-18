@@ -15,7 +15,7 @@ export function useRequestAvailability(contextKey: string | null, workspaceId: s
     setResult({ key, state: "loading", data: null });
     loadPortalRequestReadiness(projectId, controller.signal).then(data => {
       if (controller.signal.aborted || current !== sequence.current) return;
-      if (data.workspaceId !== workspaceId) throw new Error("Request workspace changed.");
+      if (data.workspaceId !== workspaceId) throw new Error("The client for this request changed.");
       setResult({ key, state: "ready", data });
     }).catch(() => {
       if (!controller.signal.aborted && current === sequence.current) setResult({ key, state: "error", data: null });
@@ -33,9 +33,9 @@ export function requestUnavailableReason(reason?: PortalRequestReadinessReason):
   if (reason === "catalog_unavailable") return "The service library is not ready for new requests. Your existing requests and saved drafts are unchanged.";
   if (reason === "no_services_assigned") return "No services are currently assigned to this request context. Your existing requests and saved drafts are unchanged.";
   if (reason === "service_assignments_unavailable") return "Assigned services cannot be verified right now. Your existing requests and saved drafts are unchanged; try again shortly.";
-  if (reason === "project_unavailable") return "This project is no longer available for a new request in this workspace.";
+  if (reason === "project_unavailable") return "This project is no longer available for a new request.";
   if (reason === "request_not_permitted") return "Your current access does not include starting a request for this context.";
-  if (reason === "legacy_access_unavailable") return "Service requests are not connected for this workspace yet.";
+  if (reason === "legacy_access_unavailable") return "Service requests are not connected for this client account yet.";
   return "New requests are temporarily unavailable. Your existing requests and saved drafts are unchanged.";
 }
 export function RequestAvailabilityMessage({ availability }: { availability: RequestAvailability }) {

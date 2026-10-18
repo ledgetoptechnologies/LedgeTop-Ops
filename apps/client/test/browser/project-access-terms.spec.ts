@@ -73,7 +73,7 @@ for (const [status, code] of [[403, "invitation_policy_disabled"], [409, "invita
 
 test("uncertain invitations keep their original target terms and idempotency key through refresh", async ({page}) => {
   let attempts = 0; const calls = await mock(page, (route, call) => call.method === "POST" && ++attempts === 1 ? route.fulfill({status: 503, json: {error: "Unconfirmed delivery"}}) : undefined); await open(page); await review(page); await page.getByRole("button", {name: "Send invitation", exact: true}).dblclick();
-  await expect(page.getByRole("alert")).toContainText("not confirmed"); await expect(page.getByRole("combobox", {name: "Manage team workspace"})).toBeDisabled(); await expect(page.getByRole("combobox", {name: "Collaborator access duration"})).toHaveCount(0); await expect(page.getByRole("button", {name: "Retry same invitation"})).toBeDisabled();
+  await expect(page.getByRole("alert")).toContainText("not confirmed"); await expect(page.getByRole("combobox", {name: "Manage team for"})).toBeDisabled(); await expect(page.getByRole("combobox", {name: "Collaborator access duration"})).toHaveCount(0); await expect(page.getByRole("button", {name: "Retry same invitation"})).toBeDisabled();
   await page.getByRole("button", {name: "Refresh team access"}).click(); await expect(page.getByRole("button", {name: "Retry same invitation"})).toBeEnabled(); await expect(page.getByRole("region", {name: "Review collaborator invitation"})).toContainText("North seawall construction documentation"); await page.getByRole("button", {name: "Retry same invitation"}).click(); await expect(page.getByRole("status").filter({hasText: "Invitation issued"})).toBeVisible();
   const posts = calls.filter(call => call.method === "POST"); expect(posts).toHaveLength(2); expect(posts[0]?.key).toBe(posts[1]?.key); expect(posts[0]?.body).toEqual(posts[1]?.body);
 });
@@ -81,7 +81,7 @@ test("uncertain invitations keep their original target terms and idempotency key
 test("late settings from an earlier management workspace cannot replace the selected project", async ({page}) => {
   let release!: () => void; const wait = new Promise<void>(resolve => {release = resolve;});
   await mock(page, (route, call) => call.path === "/api/client/v2/workspaces/workspace-a/access" ? wait.then(() => late(route, access())) : undefined);
-  await page.goto("/portal/account?workspace=workspace-a"); await page.getByRole("combobox", {name: "Manage team workspace"}).selectOption("workspace-b"); await expect(page.getByRole("radio", {name: /Mountain bridge inspection/})).toBeChecked(); release();
+  await page.goto("/portal/account?workspace=workspace-a"); await page.getByRole("combobox", {name: "Manage team for"}).selectOption("workspace-b"); await expect(page.getByRole("radio", {name: /Mountain bridge inspection/})).toBeChecked(); release();
   await expect(page.getByRole("radio", {name: /North seawall/})).toHaveCount(0); await expect(page.getByText("manager-workspace-a@example.test", {exact: true})).toHaveCount(0); await expect(page.getByRole("radio", {name: /Mountain bridge inspection/})).toBeChecked();
 });
 

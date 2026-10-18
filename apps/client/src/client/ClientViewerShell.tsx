@@ -50,7 +50,7 @@ export function ClientViewerShell({ route }: { route: ClientViewerShellRoute }) 
       return createPortalViewerSession(route.projectId, route.associationId, key, readClientViewerUnits());
     const bootstrap = await loadPortalBootstrap(undefined, route.workspaceId);
     if (bootstrap.resourceMode !== "native" || bootstrap.workspace.id !== route.workspaceId || bootstrap.capabilities.viewer !== true)
-      throw new Error("This 3D model is no longer available in the selected workspace.");
+      throw new Error("This 3D model is no longer available for the selected client.");
     return createNativeViewerSession(bootstrap, route.projectId, route.associationId, key, readClientViewerUnits());
   };
   const exit = new URL(clientProjectPath(route.projectId), window.location.origin);

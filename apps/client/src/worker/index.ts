@@ -1,4 +1,4 @@
-import { Hono } from "hono";
+import { Hono, type MiddlewareHandler } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { secureHeaders } from "hono/secure-headers";
 import { isMovedSourceMarker, type DeliveryItem, type DeliveryManifest } from "@ltds/shared";
@@ -145,9 +145,35 @@ const frameablePdfSecurityHeaders = secureHeaders({
   xFrameOptions: "SAMEORIGIN",
   xXssProtection: false,
 });
-app.use("*", (c, next) => framePolicyForPath(c.req.path, c.req.method).xFrameOptions === "SAMEORIGIN"
-  ? frameablePdfSecurityHeaders(c, next)
-  : lockedSecurityHeaders(c, next));
+export function authenticatedPreviewFrameAllowed(path: string, method: string, response: Response): boolean {
+  if (method !== "GET" && method !== "HEAD") return false;
+  const previewPath =
+    /^\/api\/client\/v2\/workspaces\/[A-Za-z0-9][A-Za-z0-9_-]{0,127}\/files\/np1_[A-Za-z0-9_-]+\/preview$/.test(path) ||
+    /^\/api\/client\/files\/cf1_[A-Za-z0-9_-]+\/preview$/.test(path) ||
+    path === "/api/client/authenticated-deliveries/preview" ||
+    /^\/api\/client\/operations\/data\/files\/ond1_[A-Za-z0-9_-]+\/preview$/.test(path);
+  if (!previewPath || ![200, 206, 304].includes(response.status) ||
+      !/^inline(?:;|$)/i.test(response.headers.get("Content-Disposition") ?? "")) return false;
+  const type = (response.headers.get("Content-Type") ?? "").split(";", 1)[0]!.trim().toLowerCase();
+  return /^(application\/(pdf|json)|text\/(plain|csv)|image\/(avif|gif|jpeg|png|webp)|audio\/(aac|flac|mpeg|ogg|wav|webm)|video\/(mp4|mpeg|ogg|quicktime|webm))$/.test(type);
+}
+
+export const deliverySecurityHeaders: MiddlewareHandler = async (c, next) => {
+  await (framePolicyForPath(c.req.path, c.req.method).xFrameOptions === "SAMEORIGIN"
+    ? frameablePdfSecurityHeaders(c, next)
+    : lockedSecurityHeaders(c, next));
+  // Authentication, current grants and safe inline MIME admission remain in
+  // each resource route. Never make an error response or attachment frameable.
+  if (authenticatedPreviewFrameAllowed(c.req.path, c.req.method, c.res)) {
+    const policy = c.res.headers.get("Content-Security-Policy") ?? "";
+    const frameAncestors = /\bframe-ancestors 'none'(?=;|$)/;
+    if (frameAncestors.test(policy)) {
+      c.header("Content-Security-Policy", policy.replace(frameAncestors, "frame-ancestors 'self'"));
+      c.header("X-Frame-Options", "SAMEORIGIN");
+    }
+  }
+};
+app.use("*", deliverySecurityHeaders);
 
 app.use("*", async (c, next) => {
   const malformedLaunch = (c.req.method === "GET" || c.req.method === "HEAD")

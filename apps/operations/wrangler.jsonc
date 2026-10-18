@@ -38,7 +38,7 @@
     "ENVIRONMENT": "production",
     "TEAM_DOMAIN": "https://ledgetoptechnologies.cloudflareaccess.com",
     "OPERATIONS_AUD": "d09e298c864b9c8f4491b4b42a4dbe2ecbf558b5868d18258443740e56032407",
-    "DELIVERY_BASE_URL": "https://client.ledgetopdroneservices.com",
+    "DELIVERY_BASE_URL": "https://portal.ledgetopdroneservices.com",
     "CLIENT_PORTAL_ORIGINS": "https://portal.ledgetopdroneservices.com,https://portal.ledgetoptechnologies.com,https://client.ledgetopdroneservices.com",
     "PUBLIC_SHARE_ORIGIN": "https://portal.ledgetopdroneservices.com",
     "PROJECT_ALPHA_BASE_URL": "https://project-alpha.ledgetopdroneservices.com",

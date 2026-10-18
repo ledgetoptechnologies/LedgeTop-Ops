@@ -40,11 +40,33 @@ describe("independent Operations home HTTP admission", () => {
   it("discovery distinguishes disabled from denied or unavailable without PA fallback", async () => {
     const router = createOperationsHomeRouter({ resolvePrincipal: async () => principal });
     const denied = fixture(false);
-    expect((await router.fetch(request("/home"), denied.env)).status).toBe(403);
+    const absent = await router.fetch(request("/home"), denied.env);
+    expect(absent.status).toBe(403);
+    expect(await absent.json()).toEqual({ error: "Client access is not provisioned", code: "no_authorized_operations_home" });
+    expect(denied.rpc).not.toHaveBeenCalled();
     const { env } = fixture();
     expect((await router.fetch(request("/home"), { ...env, CLIENT_PORTAL_OPERATIONS_SERVICE_HOME_ENABLED: "false" })).status).toBe(404);
     expect((await router.fetch(request("/home"), { ...env, CLIENT_PORTAL_SERVICE_METADATA_READER: undefined })).status).toBe(503);
   });
+  it("never labels invalid subjects, RPC revocation, or a changed snapshot as absence", async () => {
+    const invalid = fixture(false);
+    const invalidResponse = await createOperationsHomeRouter({ resolvePrincipal: async () => ({ ...principal, subject: " " }) })
+      .fetch(request("/home"), invalid.env);
+    expect(invalidResponse.status).toBe(403);
+    expect(await invalidResponse.json()).toEqual({ error: "Client access is not provisioned" });
+    for (const race of [false, true]) {
+      const f = fixture();
+      if (race) f.rpc.mockImplementationOnce(async () => {
+        f.statement.all.mockResolvedValue({ success: true, results: [] });
+        return successWire();
+      });
+      else f.rpc.mockResolvedValueOnce(denialWire());
+      const denied = await createOperationsHomeRouter({ resolvePrincipal: async () => principal }).fetch(request("/home"), f.env);
+      expect(denied.status).toBe(403);
+      expect(await denied.json()).toEqual({ error: "Client access is not provisioned" });
+    }
+  });
+
   it("is default-off before any identity or storage lookup", async () => {
     const { env, rpc } = fixture();
     const resolvePrincipal = vi.fn(async () => principal);
@@ -63,6 +85,9 @@ describe("independent Operations home HTTP admission", () => {
     const router = createOperationsHomeRouter({ resolvePrincipal: async () => null });
     expect((await router.fetch(request(), env)).status).toBe(401);
     expect((await router.fetch(new Request(`https://other.example.test${path}`), env)).status).toBe(404);
+    const wrongOrigin = await router.fetch(new Request("https://other.example.test/home"), env);
+    expect(wrongOrigin.status).toBe(404);
+    expect(await wrongOrigin.json()).toEqual({ error: "Not found" });
     expect(rpc).not.toHaveBeenCalled();
   });
 

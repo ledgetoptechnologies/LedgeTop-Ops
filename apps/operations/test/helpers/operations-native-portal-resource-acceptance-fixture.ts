@@ -512,7 +512,9 @@ export async function runCanonicalPortalResourceAcceptance(onReady?:(context:Can
 
     const unenrolledHome = await router.fetch(new Request(`${portalOrigin}/api/client/v2/operations/home`), portalEnvironment);
     expect(unenrolledHome.status).toBe(403);
-    expect(await unenrolledHome.json()).toEqual({ error: "Client access is not provisioned" });
+    expect(await unenrolledHome.json()).toEqual({
+      error: "Client access is not provisioned", code: "no_authorized_operations_home",
+    });
     const unenrolledDeliveries = await router.fetch(
       new Request(`${portalOrigin}/api/client/operations/data/deliveries`), portalEnvironment);
     expect(unenrolledDeliveries.status).toBe(200);

@@ -85,7 +85,7 @@ async function currentAuthority(env: OperationsServiceHomeEnv, principal: Pick<V
 
 export type OperationsServiceHome = Omit<Extract<OperationsServiceHomeResult, { ok: true }>, "ok">;
 export type OperationsServiceHomesResult = Readonly<{ ok: true; homes: readonly OperationsServiceHome[] }>
-  | Readonly<{ ok: false; code: "disabled" | "denied" | "unavailable" }>;
+  | Readonly<{ ok: false; code: "disabled" | "denied" | "absent" | "unavailable" }>;
 
 /** Discovery exposes only homes explicitly permitted to this verified person.
  * Recheck the entire snapshot after all RPCs: a revoked earlier home must not
@@ -96,7 +96,12 @@ export async function readOperationsServiceHomes(env: OperationsServiceHomeEnv,
   if (!env.CLIENT_PORTAL_SERVICE_METADATA_READER) return { ok: false, code: "unavailable" };
   const before = await currentAuthorities(env, principal);
   if (!before) return { ok: false, code: "unavailable" };
-  if (!before.length) return { ok: false, code: "denied" };
+  // Absence is only an authenticated, valid principal's initial empty lookup.
+  // It does not describe denial/revocation during a read and grants no PA access.
+  if (principal.issuer.length < 1 || principal.issuer.length > 512 || principal.issuer.trim() !== principal.issuer
+    || principal.subject.length < 1 || principal.subject.length > 512 || principal.subject.trim() !== principal.subject)
+    return { ok: false, code: "denied" };
+  if (!before.length) return { ok: false, code: "absent" };
   // At most twenty private calls; each has its own bounded timeout.
   const results = await Promise.all(before.map(row => readOperationsServiceHome(env, principal, row.authority_id)));
   const homes: OperationsServiceHome[] = [];

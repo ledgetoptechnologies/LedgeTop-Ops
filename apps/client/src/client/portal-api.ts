@@ -335,7 +335,7 @@ export async function loadPortalBootstrap(
   signal?: AbortSignal,
 ): Promise<PortalBootstrap | NativePortalBootstrap> {
   const request: PortalRequest = (url, init) => requestApi(url, signal ? {...init, signal} : init);
-  if (requestedWorkspaceId !== undefined && requestedWorkspaceId !== null && !/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(requestedWorkspaceId)) throw Object.assign(new Error("Invalid workspace link"), {status: 403});
+  if (requestedWorkspaceId !== undefined && requestedWorkspaceId !== null && !/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(requestedWorkspaceId)) throw Object.assign(new Error("Invalid client link"), {status: 403});
   type PortalSession = {
     account: PortalAccount;
     capabilities?: Partial<PortalCapabilities>;
@@ -348,20 +348,20 @@ export async function loadPortalBootstrap(
     workspaces = await loadPortalWorkspaces(request);
     if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
     const prior = selectedClientWorkspaceId();
-    if (requestedWorkspaceId && !workspaces.some(workspace => workspace.id === requestedWorkspaceId)) throw Object.assign(new Error("This workspace is not available to your account"), {status: 403});
+    if (requestedWorkspaceId && !workspaces.some(workspace => workspace.id === requestedWorkspaceId)) throw Object.assign(new Error("This client account is not available to your sign-in"), {status: 403});
     selectedWorkspaceId = requestedWorkspaceId || (workspaces.some(workspace => workspace.id === prior)
       ? prior
       : workspaces[0]?.id ?? null);
     selectClientWorkspaceId(selectedWorkspaceId);
-    if (!selectedWorkspaceId) throw Object.assign(new Error("No authorized client workspace is available"), {
-      status: 403, body: { error: "No authorized client workspace is available", code: NO_AUTHORIZED_CLIENT_WORKSPACE },
+    if (!selectedWorkspaceId) throw Object.assign(new Error("No authorized client account is available"), {
+      status: 403, body: { error: "No authorized client account is available", code: NO_AUTHORIZED_CLIENT_WORKSPACE },
     });
   } else {
-    if (requestedWorkspaceId) throw Object.assign(new Error("This workspace is not available to your account"), {status: 403});
+    if (requestedWorkspaceId) throw Object.assign(new Error("This client account is not available to your sign-in"), {status: 403});
     selectClientWorkspaceId(null);
   }
   const selected = workspaces.find(workspace => workspace.id === selectedWorkspaceId);
-  if (selected?.sourceId && selected.sourceId !== "project-alpha:primary" && selected.resourceMode !== "native") throw Object.assign(new Error("This connected workspace is not available in this portal mode"), {status: 403});
+  if (selected?.sourceId && selected.sourceId !== "project-alpha:primary" && selected.resourceMode !== "native") throw Object.assign(new Error("This client account is not available here"), {status: 403});
   if (selected?.resourceMode === "native") {
     const context = await loadNativePortalContext(selected, request, signal);
     if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
