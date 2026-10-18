@@ -124,6 +124,7 @@ export function AccountMenu({
   details,
   accountHref,
   onAccount,
+  sessionStatus,
   className = "",
 }: {
   displayName: string;
@@ -131,6 +132,7 @@ export function AccountMenu({
   details?: ReactNode;
   accountHref?: string;
   onAccount?: () => void;
+  sessionStatus?: ReactNode;
   className?: string;
 }) {
   const [open, setOpen] = useState(false);
@@ -179,6 +181,7 @@ export function AccountMenu({
         if (onAccount) { event.preventDefault(); onAccount(); }
         setOpen(false);
       }}>Account</a>}
+      {sessionStatus && <div role="none">{sessionStatus}</div>}
       <a role="menuitem" href={CLOUDFLARE_ACCESS_LOGOUT_PATH}>Logout</a>
     </div>}
   </div>;

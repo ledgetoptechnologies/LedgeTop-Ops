@@ -12,7 +12,13 @@ describe("Wisconsin geometry prefilter",()=>{
   it("rejects a distant polygon",()=>{expect(intersectsWI(bbox({type:"Polygon",coordinates:[[[-105,39],[-104,39],[-104,40],[-105,40],[-105,39]]]}))).toBe(false);});
   it("keeps a Wisconsin-tagged TFR even when it has no geometry",()=>{expect(isWisconsinTfr({state:"WI"})).toBe(true);});
   it("rejects nationwide and other-state TFR rows without Wisconsin geometry",()=>{expect(isWisconsinTfr({state:"USA"})).toBe(false);expect(isWisconsinTfr({STATE:"MN"})).toBe(false);});
-  it("keeps a TFR whose mapped geometry intersects Wisconsin",()=>{expect(isWisconsinTfr({state:"USA"},[{type:"Feature",geometry:{type:"Polygon",coordinates:[[[-90,44],[-89,44],[-89,45],[-90,45],[-90,44]]]},properties:{STATE:"USA"}}])).toBe(true);});
+  it("keeps a TFR with Wisconsin feature metadata",()=>{expect(isWisconsinTfr({state:"USA"},[{type:"Feature",geometry:{type:"Polygon",coordinates:[[[-90,44],[-89,44],[-89,45],[-90,45],[-90,44]]]},properties:{STATE:"WI"}}])).toBe(true);});
+  it("does not treat Michigan inside the request rectangle as Wisconsin",()=>{
+    const feature={type:"Feature",geometry:{type:"Polygon",coordinates:[[[-87.7,46],[-87.5,46],[-87.5,46.2],[-87.7,46.2],[-87.7,46]]]},properties:{STATE:"MI"}};
+    expect(intersectsWI(bbox(feature.geometry))).toBe(true);
+    expect(isWisconsinTfr({state:"MI"},[feature])).toBe(false);
+    expect(isWisconsinTfr({state:"USA"},[{...feature,properties:{STATE:"USA"}}])).toBe(false);
+  });
   it("limits SUA ingestion to Wisconsin SAA records, including MOAs",()=>{expect(isWisconsinSua({state:"WI",type_class:"SAA",airspace_type:"M"})).toBe(true);expect(isWisconsinSua({state:"MI",type_class:"SAA",airspace_type:"M"})).toBe(false);expect(isWisconsinSua({state:"WI",type_class:"TFR"})).toBe(false);});
 });
 
