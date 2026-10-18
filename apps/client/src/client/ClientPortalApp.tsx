@@ -3071,6 +3071,8 @@ export function ClientPortalApp({
   const unifiedMode = capabilities.workspaceHierarchyV2 && workspaces.filter(unifiedAccountSupported).length > 1;
   const unifiedView = unifiedMode && UNIFIED_PAGES.has(page) && !accountFocus;
   const currentAccount = unifiedMode ? workspaces.find(workspace => workspace.id === selectedWorkspaceId) : undefined;
+  const unifiedScopes = unifiedMode ? workspaces.filter(unifiedAccountSupported).map(workspace => workspace.id) : [];
+  const unifiedLabels = new Map(workspaces.map(workspace => [workspace.id, `${unifiedAccount(workspace).business} · ${workspace.displayName}`]));
   /** Opens a page of one exact client account; the account is loaded fresh if it isn't the current one. */
   const openInAccount = (workspaceId: string, path: string) => {
     const url = new URL(path, window.location.origin);
@@ -3613,7 +3615,9 @@ export function ClientPortalApp({
             </a>
           ))}
         </nav>
-        {!switchingWorkspace && <PortalNotifications key={requestContextKey} />}
+        {!switchingWorkspace && (unifiedMode
+          ? <PortalNotifications key={`unified:${unifiedScopes.join(",")}`} scopes={unifiedScopes} labels={unifiedLabels} />
+          : <PortalNotifications key={requestContextKey} />)}
         <button ref={mobileNavTrigger} className="portal-nav-trigger" type="button" aria-label="Open navigation" aria-expanded={mobileNavOpen} aria-controls="portal-mobile-navigation" onClick={() => setMobileNavOpen(true)}><span className="nav-hamburger" aria-hidden="true"><i /><i /><i /></span></button>
         <AccountMenu className="portal-account-menu" displayName={shellDisplayName}
           avatar={shellDisplayName.slice(0, 2).toUpperCase()} accountHref={unifiedMode ? clientPortalPath("account") : withPortalWorkspace(clientPortalPath("account"))}

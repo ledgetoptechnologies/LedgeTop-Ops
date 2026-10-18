@@ -399,7 +399,9 @@ test("native notification bell keeps request and feedback updates in the exact w
     {kind: "request", id: "notice-second", action: "dismiss", workspace: "workspace-b"},
     {kind: "request", id: "notice-new", action: "read", workspace: "workspace-b"},
   ]);
-  expect(calls.filter(call => call.path === "/api/client/notification-history" || call.path.startsWith("/api/client/notifications/")).every(call => call.workspace === "workspace-b")).toBe(true);
+  // The unified bell reads every account with its own scope; each update is changed only in its own account.
+  expect(calls.filter(call => call.path.startsWith("/api/client/notifications/")).every(call => call.workspace === "workspace-b")).toBe(true);
+  expect(calls.filter(call => call.path === "/api/client/notification-history").every(call => ["workspace-a", "workspace-b", "workspace-c"].includes(call.workspace ?? ""))).toBe(true);
   expect(calls.filter(call => call.path.includes("feedback-notifications")).every(call => call.path.startsWith("/api/client/v2/workspaces/workspace-b/") && call.workspace === undefined)).toBe(true);
 });
 
@@ -480,7 +482,7 @@ test("an authenticated delivery link stays put when its mark-read update cannot 
   expect(calls.filter(call => call.path.endsWith("/delivery-change-read-failed") && call.method === "PATCH")).toHaveLength(1);
 });
 
-test("switching native sources aborts stale notifications and resets the bell to the selected workspace", async ({page}) => {
+test("the unified bell keeps every account's updates, each labelled and scoped, across opening another account", async ({page}) => {
   let release!: () => void; const wait = new Promise<void>(resolve => { release = resolve; });
   const calls = await mock(page, (route, call) => {
     if (/\/api\/client\/v2\/workspaces\/workspace-[bc]\/context$/.test(call.path)) {
@@ -488,8 +490,9 @@ test("switching native sources aborts stale notifications and resets the bell to
       return route.fulfill({json: requestContext(id)});
     }
     if (call.path === "/api/client/notification-history" && call.method === "GET") {
-      if (call.workspace === "workspace-b") return wait.then(() => late(route, notificationHistory([notification("coastal-stale", "Coastal stale update")])));
+      if (call.workspace === "workspace-b") return wait.then(() => late(route, notificationHistory([notification("coastal-late", "Coastal late update")])));
       if (call.workspace === "workspace-c") return route.fulfill({json: notificationHistory([notification("mountain-current", "Mountain current update", "workspace-c")], undefined, "workspace-c")});
+      return route.fulfill({json: {...notificationHistory([], undefined, "workspace-b"), scope: {sourceId: "project-alpha:primary", workspaceId: call.workspace ?? null, rootType: "organization", rootPublicId: "org-shared"}}});
     }
     return undefined;
   });
@@ -497,10 +500,17 @@ test("switching native sources aborts stale notifications and resets the bell to
   await expect.poll(() => calls.some(call => call.path === "/api/client/notification-history" && call.workspace === "workspace-b")).toBe(true);
   await openAccount(page, "workspace-c");
   const bell = page.getByRole("button", {name: /Notifications, 1 unread update/}); await expect(bell).toBeVisible(); await bell.click();
-  await expect(page.getByText("Mountain current update", {exact: true})).toBeVisible(); release();
-  await expect(page.getByText("Coastal stale update", {exact: true})).toHaveCount(0);
-  expect(calls.some(call => call.path === "/api/client/notification-history" && call.workspace === "workspace-c")).toBe(true);
+  const panel = page.getByRole("region", {name: "Notifications"});
+  await expect(panel.getByText("Mountain current update", {exact: true})).toBeVisible();
+  await expect(panel).toContainText("Mountain Engineering");
+  release();
+  await expect(panel.getByText("Coastal late update", {exact: true})).toBeVisible();
+  await expect(panel).toContainText("Coastal Surveying and Infrastructure Development");
+  await expect(page.getByRole("button", {name: /Notifications, 2 unread updates/})).toBeVisible();
+  await expect(panel.getByRole("alert")).toHaveCount(0);
+  expect(new Set(calls.filter(call => call.path === "/api/client/notification-history").map(call => call.workspace))).toEqual(new Set(["workspace-a", "workspace-b", "workspace-c"]));
 });
+
 
 for (const width of [390, 1280]) test(`native notification bell is accessible and contained at ${width}px`, async ({page}) => {
   await page.setViewportSize({width, height: 800});
