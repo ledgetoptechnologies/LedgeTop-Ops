@@ -38,7 +38,9 @@ export function bbox(geometry: Geometry | undefined): { minLat: number; minLon: 
 export function intersectsWI(box: ReturnType<typeof bbox>): boolean { return Boolean(box && box.minLon <= WI.maxLon && box.maxLon >= WI.minLon && box.minLat <= WI.maxLat && box.maxLat >= WI.minLat); }
 function stateCode(value: unknown): string { return String(value || "").trim().toUpperCase(); }
 export function isWisconsinTfr(row: JsonRow, features: Feature[] = []): boolean {
-  return stateCode(row.state ?? row.STATE) === "WI" || features.some(feature => intersectsWI(bbox(feature.geometry)));
+  // The WFS bounding rectangle also contains Michigan's Upper Peninsula.
+  // Use FAA state metadata for this state-specific feed, not the request bounds.
+  return stateCode(row.state ?? row.STATE) === "WI" || features.some(feature => stateCode(feature.properties.state ?? feature.properties.STATE) === "WI");
 }
 export function isWisconsinSua(properties: JsonRow): boolean {
   return stateCode(properties.state ?? properties.STATE) === "WI" && stateCode(properties.type_class) === "SAA";
@@ -87,7 +89,12 @@ export async function refreshTfrs(env: Env): Promise<AirspaceRefreshResult> {
     const geometryByNotam = new Map<string, Feature[]>();
     for (const feature of features) { const key = normalizeNotam(feature.properties.NOTAM_KEY ?? feature.properties.notam_id); if (!key) continue; const current = geometryByNotam.get(key) || []; current.push(feature); geometryByNotam.set(key, current); }
     const rows = new Map<string, JsonRow>();
-    for (const row of [...asRows(listedRaw), ...asRows(noShapeRaw)]) { const key = normalizeNotam(row.notam_id ?? row.NOTAM_KEY); if (key) rows.set(key, row); }
+    for (const row of [...asRows(listedRaw), ...asRows(noShapeRaw)]) {
+      const key = normalizeNotam(row.notam_id ?? row.NOTAM_KEY);
+      // A notice may have more than one state entry. Do not overwrite its WI
+      // entry with an adjacent-state entry from the second feed.
+      if (key && (!rows.has(key) || isWisconsinTfr(row) || !isWisconsinTfr(rows.get(key)!))) rows.set(key, row);
+    }
     for (const [key, values] of geometryByNotam) if (!rows.has(key)) rows.set(key, values[0]!.properties);
     const selected = [...rows.entries()].filter(([key, row]) => isWisconsinTfr(row, geometryByNotam.get(key) || []));
     const details = new Map<string, Awaited<ReturnType<typeof detail>>>();
@@ -101,15 +108,24 @@ export async function refreshTfrs(env: Env): Promise<AirspaceRefreshResult> {
       return { ...data, fingerprint: await contentFingerprint(data) };
     }));
     desired.sort((a, b) => a.key.localeCompare(b.key));
-    const sourceFingerprint = await contentFingerprint(desired.map(value => [value.key, value.fingerprint]));
+    const sourceFingerprint = await contentFingerprint({ selection: "faa-state-wi-v2", notices: desired.map(value => [value.key, value.fingerprint]) });
     const sourceState = await env.OPS_DB.prepare("SELECT content_fingerprint FROM airspace_source_health WHERE source='faa-tfr'").first<{ content_fingerprint: string | null }>();
-    if (sourceState?.content_fingerprint === sourceFingerprint) { await health(env, "faa-tfr", "fresh", undefined, sourceFingerprint); return { records: desired.length, changed: false }; }
-
-    const currentRows = await env.OPS_DB.prepare("SELECT notam_id,content_fingerprint,missing_snapshots,status FROM tfr_notices").all<{ notam_id: string; content_fingerprint: string | null; missing_snapshots: number; status: string }>();
+    const currentRows = await env.OPS_DB.prepare("SELECT notam_id,state,content_fingerprint,missing_snapshots,status FROM tfr_notices").all<{ notam_id: string; state: string | null; content_fingerprint: string | null; missing_snapshots: number; status: string }>();
     const current = new Map(currentRows.results.map(value => [value.notam_id, value]));
     const desiredKeys = new Set(desired.map(value => value.key));
     const statements: D1PreparedStatement[] = [];
     let changed = false, pendingAbsence = false;
+    // Earlier refreshes labelled every bbox match WI. Correct only records for
+    // which a successful current FAA snapshot supplies a different state;
+    // preserve their history and the normal missing-notice grace period.
+    for (const previous of currentRows.results) {
+      const row = rows.get(previous.notam_id), officialState = stateCode(row?.state ?? row?.STATE);
+      if (!desiredKeys.has(previous.notam_id) && officialState && officialState !== "WI" && stateCode(previous.state) !== officialState) {
+        changed = true;
+        statements.push(env.OPS_DB.prepare("UPDATE tfr_notices SET state=?,content_fingerprint=NULL,updated_at=datetime('now') WHERE notam_id=?").bind(officialState, previous.notam_id));
+      }
+    }
+    if (sourceState?.content_fingerprint === sourceFingerprint && !changed) { await health(env, "faa-tfr", "fresh", undefined, sourceFingerprint); return { records: desired.length, changed: false }; }
     for (const item of desired) {
       const previous = current.get(item.key);
       if (previous?.content_fingerprint === item.fingerprint && previous.missing_snapshots === 0) continue;
@@ -183,7 +199,7 @@ export async function rebuildOperationAirspaceMatches(env: Env): Promise<number>
     env.OPS_DB.prepare(`SELECT o.id,o.projection_source_id,sl.latitude,sl.longitude,o.scheduled_start_at scheduled_start,o.scheduled_end_at scheduled_end
       FROM pa_operations o JOIN pa_service_locations sl ON sl.id=(SELECT candidate.id FROM pa_service_locations candidate WHERE candidate.project_id=o.project_id AND candidate.active=1 AND candidate.latitude IS NOT NULL AND candidate.longitude IS NOT NULL ORDER BY candidate.id LIMIT 1)
       WHERE o.active=1 AND o.status IN ('scheduled','in_progress')`).all<{ id: string; projection_source_id: string; latitude: number; longitude: number; scheduled_start: string | null; scheduled_end: string | null }>(),
-    env.OPS_DB.prepare("SELECT n.id,n.effective_at,n.expires_at,g.geojson,g.min_lat,g.min_lon,g.max_lat,g.max_lon FROM tfr_notices n JOIN tfr_geometries g ON g.tfr_id=n.id WHERE n.status IN ('active','scheduled')").all<any>(),
+    env.OPS_DB.prepare("SELECT n.id,n.effective_at,n.expires_at,g.geojson,g.min_lat,g.min_lon,g.max_lat,g.max_lon FROM tfr_notices n JOIN tfr_geometries g ON g.tfr_id=n.id WHERE n.status IN ('active','scheduled') AND UPPER(TRIM(COALESCE(n.state,'')))='WI'").all<any>(),
     env.OPS_DB.prepare("SELECT r.id,r.starts_at,r.ends_at,a.geojson,a.min_lat,a.min_lon,a.max_lat,a.max_lon FROM sua_reservations r JOIN sua_areas a ON a.id=r.area_id WHERE r.status IN ('active','upcoming','pending')").all<any>(),
   ]);
   const statements: D1PreparedStatement[] = [env.OPS_DB.prepare("DELETE FROM pa_operation_airspace_matches")]; let count = 0;
@@ -216,6 +232,6 @@ export async function markAirspaceStaleAndPurge(env: Env): Promise<void> {
 }
 
 export async function airspaceView(env: Env, operationFilter: { sql: string; values: unknown[] } = { sql: "o.active=1", values: [] }) {
-  const [healthRows, tfrs, sua, matches] = await Promise.all([env.OPS_DB.prepare("SELECT * FROM airspace_source_health ORDER BY source").all(), env.OPS_DB.prepare("SELECT id,notam_id,title,description,status,effective_at,expires_at,official_url,geometry_available,state,type FROM tfr_notices WHERE status IN ('active','scheduled','unknown') AND UPPER(TRIM(COALESCE(state,'')))='WI' ORDER BY CASE status WHEN 'active' THEN 0 WHEN 'scheduled' THEN 1 ELSE 2 END,effective_at LIMIT 200").all(), env.OPS_DB.prepare("SELECT r.id,r.status,r.starts_at,r.ends_at,r.low_altitude,r.high_altitude,r.remarks,a.name,a.airspace_type FROM sua_reservations r JOIN sua_areas a ON a.id=r.area_id WHERE r.status IN ('active','upcoming','pending','not_listed','unknown') ORDER BY CASE r.status WHEN 'active' THEN 0 WHEN 'upcoming' THEN 1 ELSE 2 END,r.starts_at LIMIT 250").all(), env.OPS_DB.prepare(`SELECT m.operation_id,m.source_type,m.source_id,m.match_type,o.title operation_title,CASE m.source_type WHEN 'tfr' THEN COALESCE((SELECT n.notam_id || ' · ' || n.title FROM tfr_notices n WHERE n.id=m.source_id),'TFR') ELSE COALESCE((SELECT a.name FROM sua_reservations r JOIN sua_areas a ON a.id=r.area_id WHERE r.id=m.source_id),'SUA / MOA') END source_title FROM pa_operation_airspace_matches m JOIN pa_operations o ON o.id=m.operation_id WHERE ${operationFilter.sql} ORDER BY o.scheduled_start_at`).bind(...operationFilter.values).all()]);
+  const [healthRows, tfrs, sua, matches] = await Promise.all([env.OPS_DB.prepare("SELECT * FROM airspace_source_health ORDER BY source").all(), env.OPS_DB.prepare("SELECT id,notam_id,title,description,status,effective_at,expires_at,official_url,geometry_available,state,type FROM tfr_notices WHERE status IN ('active','scheduled','unknown') AND UPPER(TRIM(COALESCE(state,'')))='WI' ORDER BY CASE status WHEN 'active' THEN 0 WHEN 'scheduled' THEN 1 ELSE 2 END,effective_at LIMIT 200").all(), env.OPS_DB.prepare("SELECT r.id,r.status,r.starts_at,r.ends_at,r.low_altitude,r.high_altitude,r.remarks,a.name,a.airspace_type FROM sua_reservations r JOIN sua_areas a ON a.id=r.area_id WHERE r.status IN ('active','upcoming','pending','not_listed','unknown') ORDER BY CASE r.status WHEN 'active' THEN 0 WHEN 'upcoming' THEN 1 ELSE 2 END,r.starts_at LIMIT 250").all(), env.OPS_DB.prepare(`SELECT m.operation_id,m.source_type,m.source_id,m.match_type,o.title operation_title,CASE m.source_type WHEN 'tfr' THEN COALESCE((SELECT n.notam_id || ' · ' || n.title FROM tfr_notices n WHERE n.id=m.source_id),'TFR') ELSE COALESCE((SELECT a.name FROM sua_reservations r JOIN sua_areas a ON a.id=r.area_id WHERE r.id=m.source_id),'SUA / MOA') END source_title FROM pa_operation_airspace_matches m JOIN pa_operations o ON o.id=m.operation_id WHERE (${operationFilter.sql}) AND (m.source_type!='tfr' OR EXISTS (SELECT 1 FROM tfr_notices n WHERE n.id=m.source_id AND UPPER(TRIM(COALESCE(n.state,'')))='WI')) ORDER BY o.scheduled_start_at`).bind(...operationFilter.values).all()]);
   return { sources: healthRows.results, tfrs: tfrs.results, sua: sua.results, operationMatches: matches.results, disclaimer: "Situational awareness only. Verify current NOTAMs, TFRs, SUA status, and authorization with official FAA sources before flight. No listed restriction is not a clearance." };
 }

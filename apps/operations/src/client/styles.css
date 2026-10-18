@@ -134,6 +134,9 @@
 }
 .account-menu-popover [role="menuitem"] { min-height: 44px; padding: .65rem .75rem; display: flex; align-items: center; border-radius: 7px; color: #f4f7f9; text-decoration: none; font-weight: 760; }
 .account-menu-popover [role="menuitem"]:hover, .account-menu-popover [role="menuitem"]:focus-visible { color: #fff; background: #ffffff12; outline: none; }
+.account-session-status { display: grid; gap: .2rem; padding: .65rem .75rem; margin-bottom: .2rem; border-bottom: 1px solid #ffffff20; color: #f4f7f9; }
+.account-session-status strong { font-size: .9rem; font-variant-numeric: tabular-nums; }
+.account-session-status small { color: #c0cbd4; font-size: .75rem; line-height: 1.4; }
 
 /* ---------------------------------------------------------------------------
    Main content area
@@ -2679,7 +2682,7 @@ ul { color: var(--muted); }
   .delivery-tools nav { width: 100%; flex-basis: 100%; }
   .airspace-row { flex-direction: column; }
   .airspace-row > div:last-child { align-items: flex-start; }
-  .profile small { display: none; }
+  .profile .account-menu-copy small { display: none; }
   .ops-main .ltds-card > table { display: block; max-width: 100%; overflow-x: auto; }
   .managed-notice, .stale-notice { align-items: flex-start; flex-direction: column; gap: .2rem; }
   .airspace-counts { grid-template-columns: repeat(2, 1fr); }

@@ -16,6 +16,7 @@ import {
   type ServiceRequestNotificationSnapshot,
 } from "@ltds/shared";
 import { authenticateStaff } from "./auth";
+import { staffSessionStatus } from "./session-status";
 import {
   airspaceView,
   markAirspaceStaleAndPurge,
@@ -958,6 +959,10 @@ async function verifyProjectAlphaQuote(
 }
 
 app.get("/health", (c) => c.json({ status: "ok", service: "ltds-ops" }));
+app.get("/api/session/status", (c) => {
+  c.header("Cache-Control", "no-store");
+  return c.json(staffSessionStatus(c.get("principal")));
+});
 app.get("/api/session", async (c) => {
   const principal = c.get("principal"),
     administrator = c.get("administrator");
