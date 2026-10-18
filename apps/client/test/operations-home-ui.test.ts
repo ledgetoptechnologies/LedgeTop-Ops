@@ -92,6 +92,18 @@ describe("operations home bootstrap routing", () => {
     expect(isUnifiedPortalRoot("/s/public-share")).toBe(false);
   });
 
+  it("allows independent PA bootstrap only for the exact authenticated Operations absence", () => {
+    const body = { error: "Client access is not provisioned", code: "no_authorized_operations_home" };
+    expect(operationsBootstrapOutcome({ status: 403, body })).toBe("legacy");
+    for (const failure of [
+      { status: 401, body }, { status: 503, body }, { status: 403, body: { ...body, extra: true } },
+      { status: 403, body: { code: body.code } }, { status: 403, body: { ...body, error: "revoked" } },
+      Object.create({ status: 403, body }), { status: 403, body: Object.create(body) },
+      { status: 403, get body() { throw Error("unexpected"); } },
+      { status: 403, body: { error: body.error, get code() { throw Error("unexpected"); } } },
+    ]) expect(operationsBootstrapOutcome(failure)).toBe("blocked");
+  });
+
   it("allows legacy fallback only for an explicit 404", () => {
     expect(operationsBootstrapOutcome(Object.assign(new Error("disabled"), { status: 404 }))).toBe("legacy");
     for (const failure of [

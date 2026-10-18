@@ -40,9 +40,9 @@ describe("Operations service home private helper", () => {
       .resolves.toEqual({ ok: false, code: "denied" });
   });
 
-  it("does not fall back when discovery is denied or its transport is missing", async () => {
+  it("distinguishes initial authenticated absence from unavailable discovery", async () => {
     const read = vi.fn(async () => response());
-    await expect(readOperationsServiceHomes(env(read, [null]), principal)).resolves.toEqual({ ok: false, code: "denied" });
+    await expect(readOperationsServiceHomes(env(read, [null]), principal)).resolves.toEqual({ ok: false, code: "absent" });
     expect(read).not.toHaveBeenCalled();
     const { CLIENT_PORTAL_SERVICE_METADATA_READER: _reader, ...missing } = env(read);
     await expect(readOperationsServiceHomes(missing, principal)).resolves.toEqual({ ok: false, code: "unavailable" });
@@ -230,7 +230,7 @@ describe("Operations service home against explicit permission ledger", () => {
     await expect(readOperationsServiceHome(realEnv(read), principal, authorityId))
       .resolves.toEqual({ ok: false, code: "denied" });
     expect(read).not.toHaveBeenCalled();
-    await expect(readOperationsServiceHomes(realEnv(read), principal)).resolves.toEqual({ ok: false, code: "denied" });
+    await expect(readOperationsServiceHomes(realEnv(read), principal)).resolves.toEqual({ ok: false, code: "absent" });
   });
 
   it("does not use a historical grant when native discovery is selected but its migration is absent", async () => {
@@ -248,7 +248,7 @@ describe("Operations service home against explicit permission ledger", () => {
     await expect(readOperationsServiceHome(realEnv(read), principal, authorityId))
       .resolves.toEqual({ ok: false, code: "denied" });
     expect(read).not.toHaveBeenCalled();
-    await expect(readOperationsServiceHomes(realEnv(read), principal)).resolves.toEqual({ ok: false, code: "denied" });
+    await expect(readOperationsServiceHomes(realEnv(read), principal)).resolves.toEqual({ ok: false, code: "absent" });
   });
 
   it("drops a result when only the home permission is removed during the RPC", async () => {
