@@ -1,0 +1,30 @@
+name: Private Operations MCP
+
+on:
+  pull_request:
+    paths:
+      - 'apps/operations-mcp/**'
+      - '.github/workflows/operations-mcp.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'apps/operations-mcp/**'
+      - '.github/workflows/operations-mcp.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  mcp:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
+        with:
+          node-version: 24
+      - run: npm ci --ignore-scripts
+        working-directory: apps/operations-mcp
+      - run: npm run check && npm test
+        working-directory: apps/operations-mcp
