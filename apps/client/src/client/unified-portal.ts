@@ -78,7 +78,9 @@ async function loadNativeProjects(context: NativePortalContext, signal: AbortSig
     const result = await loadNativeHierarchy(context, signal, cursor);
     for (const entry of result.entries) if (entry.type === "project") projects.push({
       id: entry.publicId, externalRef: entry.publicId, clientName: context.workspace.displayName, projectName: entry.displayName,
-      canRequestService: context.capabilities.requestV2 === true, status: "active", summary: null, siteAddress: null, serviceAddress: null,
+      // An active directory row may represent a retained, completed project;
+      // the hierarchy response does not attest its current lifecycle status.
+      canRequestService: context.capabilities.requestV2 === true, status: null, summary: null, siteAddress: null, serviceAddress: null,
       projectContactName: null, projectContactEmail: null, projectContactPhone: null, nextMilestone: null, lastUpdateAt: null,
     });
     cursor = result.page.nextCursor;

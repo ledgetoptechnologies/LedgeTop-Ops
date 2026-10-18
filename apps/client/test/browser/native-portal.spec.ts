@@ -756,6 +756,10 @@ test("the unified portal lists every account's projects without a switcher and o
   // Same public project ID in two accounts stays two separate items.
   await expect(page.getByRole("button", {name: /Coastal seawall construction documentation/})).toBeVisible();
   await expect(page.getByRole("button", {name: /Mountain bridge inspection/})).toBeVisible();
+  // Native hierarchy authorizes discovery, but has no project lifecycle field.
+  // Retained completed projects must not be labelled Active merely for existing.
+  await expect(page.getByRole("button", {name: /Mountain bridge inspection/}).getByText("Active", {exact: true})).toHaveCount(0);
+  await expect(page.getByRole("button", {name: /Primary-only project/}).getByText("Active", {exact: true})).toBeVisible();
   await expect(page.locator(".client-portal")).not.toContainText("project-alpha:");
   await expect(page.locator(".client-portal")).not.toContainText("Project Alpha (");
   expect(calls.filter(call => call.path === "/api/client/projects").every(call => call.workspace === "workspace-a")).toBe(true);
