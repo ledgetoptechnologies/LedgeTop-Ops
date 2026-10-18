@@ -495,8 +495,9 @@ test("the deployed Client Worker keeps reviewed resources, hosts, and portal ass
 test("the deployed Operations Worker preserves native production transport and explicit folder authority", () => {
   // Preserve the current native production transport. Deferred catalog/legacy
   // mutation paths stay disabled and have no production service/workflow binding.
-  assert.equal(normalizedSha256("apps/operations/wrangler.jsonc"), "f9d0ba73c8a8a218352d34e9054e40eabdafb1b98b71bbb253bc8004b9ecb30b");
+  assert.equal(normalizedSha256("apps/operations/wrangler.jsonc"), "036c56e71fe198de25f7ab4d9150a32b76fd7075f4cd9fb3a43ee79af214d20d");
   const config = readJson("apps/operations/wrangler.jsonc");
+  assert.equal(config.vars.VIEWER_WORKSPACE_RENEWAL_CORS_ENABLED, "true");
   assert.deepEqual(config.services.filter(service => service.binding === "SHARED_PROFILE_PORTAL_AUTHORITY"), [{
     binding: "SHARED_PROFILE_PORTAL_AUTHORITY", service: "ledgetop-clients", entrypoint: "SharedProfilePortalAuthorityReader",
   }]);
