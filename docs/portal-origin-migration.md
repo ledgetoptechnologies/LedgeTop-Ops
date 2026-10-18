@@ -25,6 +25,8 @@ Client production accepts only its existing canonical Access audience after reti
 
 The native deployment guard supports the original exact production profile/origin pair for a coordinated rollout or rollback, plus the new exact canonical pair. Mixing a profile with the other origin is rejected. Recipient, publication and file authority checks remain unchanged.
 
+Native enrollment tokens bind the existing intent, token hash, target/revision and verified Access principal rather than the former portal hostname. The old enrollment page redirects with the same path; browsers preserve its fragment, and the canonical frontend consumes and scrubs it before requesting a new same-origin session and inspecting the existing intent. Exact canonical Drone Services frontend eligibility must ship with this patch. Deploy fresh frontend assets while retaining older hashed assets for open sessions; a backend-only deployment that inherits the old frontend is insufficient. Expired, revoked or changed intents still fail their existing checks.
+
 ## Release and retirement gates
 
 1. Back up the complete live app/policy/DNS/domain definitions and all policy references. Capture share configuration and existing anonymous routes.
