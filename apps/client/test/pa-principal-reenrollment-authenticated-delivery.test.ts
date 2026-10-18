@@ -1,7 +1,9 @@
 import {readFileSync,readdirSync} from 'node:fs';
 import {Miniflare} from 'miniflare';
 import {afterAll,beforeAll,describe,expect,it,vi} from 'vitest';
-vi.mock('cloudflare:workers',()=>({WorkerEntrypoint:class {}}));
+vi.mock('cloudflare:workers',()=>({WorkerEntrypoint:class {},WorkflowEntrypoint:class {}}));
+import {Hono} from 'hono';
+import {deliverySecurityHeaders} from '../src/worker/index';
 import {ingestOpsSyncPortalProjection} from '../src/worker/ops-sync-portal-entrypoint';
 import {createClientPortalRouter} from '../src/worker/client-portal/routes';
 import {d1ClientPortalRepository} from '../src/worker/client-portal/repository';
@@ -18,8 +20,8 @@ describe.each(['legacy-primary','native-primary','native-secondary'] as const)('
  let currentActor=actor,workspace='',identity='',rootHandle='',fileHandle='';
  let oldRow:unknown,oldEligibility:unknown;
  const common={schemaVersion:3,applicationKey,occurredAt:'2026-10-01T00:00:00.000Z',sourceGeneration:'folder-generation',workspaceId:'folder-upstream'};
- const router=()=>createClientPortalRouter({resolvePrincipal:async()=>currentActor,repository:d1ClientPortalRepository});
- const request=(path:string)=>router().request('https://client.test'+path,{headers:path==='/session'?{}:{'X-LTDS-Workspace-ID':workspace}},env);
+ const router=()=>new Hono<{Bindings:Env}>().use('*',deliverySecurityHeaders).route('/api/client',createClientPortalRouter({resolvePrincipal:async()=>currentActor,repository:d1ClientPortalRepository}));
+ const request=(path:string,init:RequestInit={})=>router().request('https://client.test/api/client'+path,{...init,headers:{...(path==='/session'?{}:{'X-LTDS-Workspace-ID':workspace}),...init.headers}},env);
  const ingest=async(sequence:number,payload:Record<string,unknown>)=>{
   const deliveryId=`folder-delivery-${sequence}-${String(payload.kind)}`;
   expect(await ingestOpsSyncPortalProjection(env,{protocolVersion:1,sourceId:source,applicationKey,deliveryId,projectionKind:'portal',body:JSON.stringify({...common,sourceSequence:sequence,deliveryId,...payload})})).toMatchObject({ok:true,status:'completed'});
@@ -78,6 +80,41 @@ describe.each(['legacy-primary','native-primary','native-secondary'] as const)('
   rootHandle=await encodeAuthenticatedDeliveryHandle(env,{v:1,sourceId:source,workspaceId:workspace,identityId:identity,eventId:'folder-event',grantId:'folder-grant',grantVersion:1,bindingId:'folder-binding',bindingSourceVersion:'project-v1',expires:Date.now()+600_000,kind:'folder',path:''});
  },180_000);
  afterAll(async()=>mf?.dispose());
+ it('frames only authorized safe inline previews using the production security middleware',async()=>{
+  const frameable=(response:Response)=>{
+   expect(response.headers.get('X-Frame-Options')).toBe('SAMEORIGIN');
+   expect(response.headers.get('Content-Security-Policy')).toContain("frame-ancestors 'self'");
+   expect(response.headers.get('Content-Security-Policy')).toContain('https://viewer.ledgetopdroneservices.com');
+   expect(response.headers.get('X-Content-Type-Options')).toBe('nosniff');
+  };
+  const locked=(response:Response)=>{
+   expect(response.headers.get('X-Frame-Options')).toBe('DENY');
+   expect(response.headers.get('Content-Security-Policy')).toContain("frame-ancestors 'none'");
+  };
+  const list=await request('/authenticated-deliveries/files?folder='+encodeURIComponent(rootHandle));
+  const adFile=(await list.json() as {files:Array<{id:string}>}).files[0]!.id;
+  let preview='/authenticated-deliveries/preview?file='+encodeURIComponent(adFile);
+  if(mode!=='legacy-primary'){
+   const folders=await request(`/v2/workspaces/${workspace}/deliveries`);
+   expect(folders.status,await folders.clone().text()).toBe(200);
+   const folder=(await folders.json() as {items:Array<{id:string}>}).items[0]!.id;
+   const files=await request(`/v2/workspaces/${workspace}/folders/${encodeURIComponent(folder)}`);
+   expect(files.status,await files.clone().text()).toBe(200);
+   const file=(await files.json() as {files:Array<{id:string}>}).files[0]!.id;
+   expect(file).toMatch(/^np1_/);
+   preview=`/v2/workspaces/${workspace}/files/${encodeURIComponent(file)}/preview`;
+  }
+  for(const init of [{},{method:'HEAD'},{headers:{Range:'bytes=0-2'}}]){
+   const response=await request(preview,init);expect([200,206]).toContain(response.status);frameable(response);
+  }
+  const download=await request('/authenticated-deliveries/download?file='+encodeURIComponent(adFile));
+  expect(download.status).toBe(200);locked(download);
+  currentActor={...actor,subject:'different-subject'};
+  const denied=await request(preview);expect([403,404]).toContain(denied.status);locked(denied);currentActor=actor;
+  await db.prepare("UPDATE file_index SET content_type='text/html' WHERE r2_key='clients/reenrolled-folder/readme.txt'").run();
+  try{const unsafe=await request(preview);expect(unsafe.status).toBe(415);locked(unsafe);}
+  finally{await db.prepare("UPDATE file_index SET content_type='text/plain' WHERE r2_key='clients/reenrolled-folder/readme.txt'").run();}
+ },180_000);
  it('reads and downloads only while the exact current principal witness is live',async()=>{
   const list=await request('/authenticated-deliveries/files?folder='+encodeURIComponent(rootHandle));
   expect(list.status,await list.clone().text()).toBe(200);
@@ -99,6 +136,10 @@ describe.each(['legacy-primary','native-primary','native-secondary'] as const)('
   expect((await request('/authenticated-deliveries/download?file='+encodeURIComponent(fileHandle))).status).toBe(200);
   await ingest(6,{kind:'event',event:{resource:'principal',action:'tombstone',publicId:'folder-current',sourceVersion:'current-revoked-v3'}});
   expect([403,404]).toContain((await request('/authenticated-deliveries/download?file='+encodeURIComponent(fileHandle))).status);
+  const revokedPreview=await request('/authenticated-deliveries/preview?file='+encodeURIComponent(fileHandle));
+  expect([403,404]).toContain(revokedPreview.status);
+  expect(revokedPreview.headers.get('X-Frame-Options')).toBe('DENY');
+  expect(revokedPreview.headers.get('Content-Security-Policy')).toContain("frame-ancestors 'none'");
   expect(await db.prepare('SELECT * FROM pa_portal_principals WHERE workspace_id=? AND public_id=?').bind(workspace,'folder-old').first()).toEqual(oldRow);
   expect((await db.prepare('SELECT * FROM portal_v2_identity_eligibility_bindings WHERE workspace_id=? AND principal_public_id=?').bind(workspace,'folder-old').all()).results).toEqual(oldEligibility);
   expect((await db.prepare('PRAGMA foreign_key_check').all()).results).toEqual([]);
