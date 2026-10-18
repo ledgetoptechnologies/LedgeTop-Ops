@@ -219,7 +219,7 @@ test("effective authenticated-delivery folders use only AD1 scoped reads and pre
   await expect.poll(() => new URL(page.url()).searchParams.get("folder")).toBe(ad1Child);
   await page.getByRole("button", {name: "Effective deliverables"}).click();
   await expect.poll(() => new URL(page.url()).searchParams.get("folder")).toBe(ad1Root);
-  await page.getByRole("combobox", {name: "Client workspace"}).selectOption(otherEffectiveWorkspace.id);
+  await page.getByRole("combobox", {name: "Client account"}).selectOption(otherEffectiveWorkspace.id);
   await expect(page).toHaveURL(new RegExp(`/portal/dashboard\\?workspace=${otherEffectiveWorkspace.id}$`));
   await expect(page.getByRole("heading", {name: "Shared delivery folder"})).toHaveCount(0);
   expect(calls.filter(call => call.path === "/api/client/authenticated-deliveries/files").map(call => call.query.get("folder"))).toEqual([ad1Root, ad1Child, ad1Root]);
@@ -436,10 +436,10 @@ test("workspace-v2 selection scopes every authenticated resource request and swi
 
   await page.goto("/portal");
   await expect(page.getByRole("heading", { name: "Alpha" })).toBeVisible();
-  await expect(page.getByRole("combobox", { name: "Client workspace" })).toHaveValue("workspace-a");
+  await expect(page.getByRole("combobox", { name: "Client account" })).toHaveValue("workspace-a");
   expect(observed.filter(item => ["/api/client/projects", "/api/client/service-requests", "/api/client/map-config", "/api/client/notification-history"].includes(item.path)).every(item => item.workspace === "workspace-a")).toBe(true);
 
-  await page.getByRole("combobox", { name: "Client workspace" }).selectOption("workspace-b");
+  await page.getByRole("combobox", { name: "Client account" }).selectOption("workspace-b");
   await expect(page.getByRole("heading", { name: "Beta" })).toBeVisible();
   await expect(page.getByText("Beta Site")).toBeVisible();
   expect(observed.filter(item => item.path === "/api/client/projects").at(-1)?.workspace).toBe("workspace-b");
@@ -602,8 +602,8 @@ test("native workspace branding stays generic Ledge Top for every source across 
     }))).toEqual({ documentFits: true, outside: 0 });
 
     if (width >= 961) {
-      await expect(page.getByRole("combobox", { name: "Client workspace" })).toBeVisible();
-      await expect(page.getByRole("combobox", { name: "Client workspace" }).locator("option")).toHaveText(["LTT Client", "LTDS Client"]);
+      await expect(page.getByRole("combobox", { name: "Client account" })).toBeVisible();
+      await expect(page.getByRole("combobox", { name: "Client account" }).locator("option")).toHaveText(["LTT Client", "LTDS Client"]);
       const labelStyles = await brand.locator("small").evaluate(element => {
         const style = getComputedStyle(element);
         return { whiteSpace: style.whiteSpace, textOverflow: style.textOverflow, overflow: style.overflow };
@@ -1234,9 +1234,9 @@ for (const width of [1280, 390, 320]) {
     await page.getByLabel("I understand and want to grant organization-wide access.").check();
     await expect(page.getByRole("button", { name: "Review invitation" })).toBeEnabled();
 
-    await page.getByLabel("Give access across this entire organization workspace").check();
+    await page.getByLabel("Give access across this entire organization").check();
     await expect(page.getByRole("button", { name: "Review invitation" })).toBeDisabled();
-    await page.getByLabel("I understand and want to grant workspace-wide access.").check();
+    await page.getByLabel("I understand and want to grant account-wide access.").check();
     await expect(page.getByRole("button", { name: "Review invitation" })).toBeEnabled();
 
     if (width <= 390) {
@@ -1276,7 +1276,7 @@ test("peer administrators use a reviewed responsive workflow and preserve ordina
   await review.getByRole("button",{name:"Add administrator"}).click();
   await expect(peerRow).toContainText("Administrator · active");expect(writes).toHaveLength(1);expect(writes[0]!.key).toMatch(/^[A-Za-z0-9-]{16,}$/);
   await peerRow.getByRole("button",{name:"Remove administrator"}).click();
-  await expect(review).toContainText("ordinary workspace and delivery access stays in place");
+  await expect(review).toContainText("ordinary account and delivery access stays in place");
   await review.getByRole("button",{name:"Remove administrator"}).click();
   await expect(peerRow).toContainText("Member · active");await expect(peerRow.getByRole("button",{name:"Suspend"})).toBeVisible();
   expect(writes.map(write=>write.body.manager)).toEqual([true,false]);

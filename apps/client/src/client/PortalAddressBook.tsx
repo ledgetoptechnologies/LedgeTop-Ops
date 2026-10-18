@@ -38,7 +38,7 @@ const inputFromContact = (contact: AddressBookContact): AddressBookContactInput 
 });
 const inviteHistory = (contact: AddressBookContact) => contact.previousInvitation
   ? `Latest invitation to this email: ${contact.previousInvitation.status} · ${new Date(contact.previousInvitation.lastInvitedAt).toLocaleDateString()}`
-  : "No earlier invitation to this email in this workspace";
+  : "No earlier invitation to this email for this client";
 const matchesInput = (contact: AddressBookContact, input: AddressBookContactInput) => contact.displayName === input.displayName
   && contact.email.toLocaleLowerCase() === input.email.toLocaleLowerCase() && contact.phone === input.phone
   && contact.company === input.company && contact.roleOrTrade === input.roleOrTrade;
@@ -76,7 +76,7 @@ export function PortalAddressBook({workspaceId, sourceId, locked, onLock, onInva
       setCursor(page.nextCursor); setContextVersion(page.contextVersion);
     } catch (caught) {
       if (!controller.signal.aborted && run === generation.current) {
-        if (invalidContext(caught)) {setRows([]); setCursor(null); callbacks.current.onInvalidated("The address book or your workspace access changed. Refresh team access.");}
+        if (invalidContext(caught)) {setRows([]); setCursor(null); callbacks.current.onInvalidated("The address book or your access changed. Refresh team access.");}
         else if ((caught as RequestError).status === 409) {setRows([]); setCursor(null); setContextVersion(null); setError("The address book changed. Search again for current contacts.");}
         else setError("Organization contacts could not be loaded. Retry to check current records.");
       }
@@ -116,11 +116,11 @@ export function PortalAddressBook({workspaceId, sourceId, locked, onLock, onInva
     } catch (caught) {
       if (!controller.signal.aborted && run === generation.current) {
         const status = (caught as RequestError).status, code = bodyCode(caught);
-        if (invalidContext(caught)) {pending.current = null; callbacks.current.onLock(false); setRows([]); setCursor(null); callbacks.current.onInvalidated("The address book or your workspace access changed. Refresh team access.");}
+        if (invalidContext(caught)) {pending.current = null; callbacks.current.onLock(false); setRows([]); setCursor(null); callbacks.current.onInvalidated("The address book or your access changed. Refresh team access.");}
         else if (code === "address_book_capacity") {pending.current = null; callbacks.current.onLock(false); setError("This address book has reached its contact limit. Delete an unused contact before adding another. Your entered fields are still here.");}
         else if (status === 409 || code === "address_contact_changed" || code === "address_book_cursor_changed") {pending.current = null; callbacks.current.onLock(false); setDeleting(null); setError("This contact changed. Your unsaved fields are still here; refresh the address book before saving again."); queueMicrotask(() => void load(null, query));}
         else if (status && status < 500 && status !== 429) {pending.current = null; callbacks.current.onLock(false); setError("The contact change was not accepted. Review the fields and try again.");}
-        else {setUncertain(true); setError("The contact change is not confirmed. Retry the same change before editing another contact or switching workspaces.");}
+        else {setUncertain(true); setError("The contact change is not confirmed. Retry the same change before editing another contact or switching clients.");}
       }
     } finally {if (!controller.signal.aborted && run === generation.current) {mutation.current = null; setBusy(false);}}
   }
@@ -171,7 +171,7 @@ export function PortalAddressBookPicker({workspaceId, sourceId, disabled, select
       if (page.items.some(contact => !addressBookContactMatches(contact, workspaceId, sourceId))) throw Object.assign(new Error("Context changed"), {status: 403});
       if (next && contextVersion && contextVersion !== page.contextVersion) throw Object.assign(new Error("Context changed"), {status: 409});
       setRows(previous => [...new Map((next ? [...previous, ...page.items] : page.items).map(contact => [contact.id, contact])).values()]); setCursor(page.nextCursor); setContextVersion(page.contextVersion);
-    } catch (caught) {if (!controller.signal.aborted && run === generation.current) {if (invalidContext(caught)) {setRows([]); setCursor(null); onInvalidated("The address book or your workspace access changed. Refresh team access.");} else setError((caught as RequestError).status === 409 ? "This address book changed. Close the picker and refresh team access." : "Contacts could not be loaded. Retry the search.");}}
+    } catch (caught) {if (!controller.signal.aborted && run === generation.current) {if (invalidContext(caught)) {setRows([]); setCursor(null); onInvalidated("The address book or your access changed. Refresh team access.");} else setError((caught as RequestError).status === 409 ? "This address book changed. Close the picker and refresh team access." : "Contacts could not be loaded. Retry the search.");}}
     finally {if (!controller.signal.aborted && run === generation.current) {read.current = null; setLoading(false);}}
   }
   const close = () => {read.current?.abort(); generation.current++; setOpen(false); dialog.current?.close(); queueMicrotask(() => trigger.current?.focus());};

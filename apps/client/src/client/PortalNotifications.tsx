@@ -36,7 +36,7 @@ export function PortalNotifications(){
         .filter(item=>!localUpdates.current.get(`${item.kind}:${item.id}`)?.dismissed)
         .map(item=>({...item,readAt:localUpdates.current.get(`${item.kind}:${item.id}`)?.readAt??item.readAt})));setCursor(page.nextCursor);setCoverage(page.coverage);
     }catch(caught){if(abort.signal.aborted||run!==generation.current)return;if([401,403,404,409,410].includes((caught as RequestError).status??0)){setItems([]);setCursor(null);}
-      setError('Notifications could not be loaded. Your workspace access may have changed.');}
+      setError('Notifications could not be loaded. Your access may have changed.');}
     finally{if(controller.current===abort){controller.current=null;setLoading(false);}}
   }
   useEffect(()=>{generation.current++;controller.current?.abort();controller.current=null;localUpdates.current.clear();setItems([]);setCursor(null);setCoverage(null);setError('');if(enabled)void load();else setLoading(false);

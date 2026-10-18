@@ -23,7 +23,7 @@ function workspacePath(path: string, workspaceId: string): string {
 const featureOrder: NativeWorkspaceFeatureKey[] = ["directory", "deliveries", "serviceRequests", "feedback", "models", "team", "billing"];
 const featureLabels: Record<NativeWorkspaceFeatureKey, string> = {
   directory: "Projects and directory", deliveries: "Delivery files", serviceRequests: "Service requests", feedback: "Feedback",
-  models: "3D models", team: "Workspace members", billing: "Billing",
+  models: "3D models", team: "Team members", billing: "Billing",
 };
 const stateLabels: Record<NativeWorkspaceFeatureState, string> = {
   available: "Ready", not_in_access: "Not in access", not_supported: "Not connected", temporarily_unavailable: "Temporarily unavailable",
@@ -32,25 +32,25 @@ function featureDetail(key: NativeWorkspaceFeatureKey, readiness: NativeWorkspac
   const status = readiness[key];
   if (key === "directory") return status.state === "available"
     ? "Authorized directory and project records can be browsed. Every record is checked against current access before it is shown."
-    : "Directory viewing is not included in this workspace's current access.";
+    : "Directory viewing is not included for this client's current access.";
   if (key === "deliveries") return status.state === "available"
     ? "Shared delivery folders are ready. Each folder and file is authorized again when it is opened."
-    : "The delivery backend is not ready for this workspace. Existing shares and files have not been removed.";
+    : "The delivery backend is not ready for this client account. Existing shares and files have not been removed.";
   if (key === "serviceRequests") return status.state === "available"
     ? "Service requests are available through this exact connected source. Project access and request authority are checked again for every change."
     : "New service requests are not connected for this Project Alpha source. Existing authorized request history remains unchanged.";
   if (key === "feedback") return status.state === "available"
     ? "Feedback is ready for individually authorized projects and delivery items. Access is checked again when feedback is sent or opened."
-    : status.state === "not_in_access" ? "Feedback is not in your current directory access." : "Feedback storage is not ready for this workspace.";
+    : status.state === "not_in_access" ? "Feedback is not in your current directory access." : "Feedback storage is not ready for this client account.";
   if (key === "models") return status.state === "available"
-    ? "3D models explicitly shared with this workspace are ready. Access is checked again whenever a model opens."
+    ? "3D models explicitly shared with this client account are ready. Access is checked again whenever a model opens."
     : "3D model viewing is not connected for this Project Alpha source.";
-  if (key === "team") return "Workspace member management is not connected for this Project Alpha source.";
-  return "Billing is managed by the source system and is not connected in this workspace.";
+  if (key === "team") return "Team member management is not connected for this Project Alpha source.";
+  return "Billing is managed by the source system and is not connected for this client account.";
 }
 function FeatureReadiness({features}: {features: NativeWorkspaceFeatureReadiness}) {
-  return <Card title="Workspace features">
-    <p>These statuses show what this connected workspace can operate right now. They are not services purchased or assigned to your organization.</p>
+  return <Card title="Available features">
+    <p>These statuses show what this client account can use right now. They are not services purchased or assigned to your organization.</p>
     <ul className="native-feature-list">{featureOrder.map(key => <li key={key}>
       <div><strong>{featureLabels[key]}</strong><small>{featureDetail(key, features)}</small></div>
       <span className={`native-feature-status native-feature-status-${features[key].state}`}>{stateLabels[features[key].state]}</span>
@@ -93,7 +93,7 @@ export function NativeWorkspaceContent({ context, page, projectId, feedbackId, o
       const result = await loadNativeHierarchy(context, controller.signal, next);
       if (controller.signal.aborted || contextController.current.signal.aborted || sequence !== hierarchySequence.current) return;
       setHierarchy(current => { const keys = new Set(next ? current.map(entry => `${entry.type}:${entry.publicId}`) : []); return [...(next ? current : []), ...result.entries.filter(entry => !keys.has(`${entry.type}:${entry.publicId}`))]; }); setHierarchyCursor(result.page.nextCursor);
-    } catch (caught) { if (!controller.signal.aborted && !contextController.current.signal.aborted) { fail(caught); setHierarchyError("The workspace directory could not be loaded. Try again."); } }
+    } catch (caught) { if (!controller.signal.aborted && !contextController.current.signal.aborted) { fail(caught); setHierarchyError("The directory could not be loaded. Try again."); } }
     finally { if (sequence === hierarchySequence.current) { hierarchyController.current = null; if (!controller.signal.aborted) setHierarchyLoading(false); } }
   }, [context, fail]);
   useEffect(() => {
@@ -144,28 +144,28 @@ export function NativeWorkspaceContent({ context, page, projectId, feedbackId, o
   const unavailableFeature: NativeWorkspaceFeatureKey = page === "feedback" ? "feedback"
     : page === "project" && params.get("tab") === "models" ? "models" : "serviceRequests";
 
-  return <section className="native-workspace" aria-label="Connected client workspace">
-    <header className="portal-welcome"><span className="eyebrow">Connected workspace</span><h1>{context.workspace.displayName}</h1></header>
+  return <section className="native-workspace" aria-label="Client account">
+    <header className="portal-welcome"><span className="eyebrow">Client account</span><h1>{context.workspace.displayName}</h1></header>
     {unsupportedRoute ? <><Card title="Feature unavailable"><p>{featureDetail(unavailableFeature, context.features)}</p></Card><FeatureReadiness features={context.features} /></> :
       ((page === "requests" || page === "request-new") || (page === "project" && projectTab === "requests")) && context.capabilities.requestV2 && renderRequests
         ? renderRequests(requestProjects, page === "project" ? projectId ?? undefined : undefined)
         : page === "project" && projectTab === "models" && projectId && context.capabilities.viewer && renderModels ? renderModels(projectId)
-        : page === "feedback" ? <PortalFeedback nativeWorkspaceId={context.workspace.id} id={feedbackId} /> : page === "account" ? <><Card title="Workspace access"><p>You are viewing resources shared with your signed-in identity in this workspace. Access is evaluated from the current Project Alpha source and workspace authorization.</p></Card><BusinessProfile workspaceId={context.workspace.id}/>{renderTeam?.()}<FeatureReadiness features={context.features} /></> : page === "not-found" ? <Card title="Page unavailable"><p>This page is not available in this workspace.</p></Card> : relevantHierarchy ? <>
-      <Card title={page === "dashboard" ? "Workspace directory" : page === "project" ? "Project" : "Projects"}>
-        {!context.capabilities.directoryRead ? <p>The directory is not included in your current workspace access.</p> : <>
+        : page === "feedback" ? <PortalFeedback nativeWorkspaceId={context.workspace.id} id={feedbackId} /> : page === "account" ? <><Card title="Your access"><p>You are viewing items shared with your sign-in for this client. Access is checked against your current permissions each time.</p></Card><BusinessProfile workspaceId={context.workspace.id}/>{renderTeam?.()}<FeatureReadiness features={context.features} /></> : page === "not-found" ? <Card title="Page unavailable"><p>This page is not available for this client.</p></Card> : relevantHierarchy ? <>
+      <Card title={page === "dashboard" ? "Directory" : page === "project" ? "Project" : "Projects"}>
+        {!context.capabilities.directoryRead ? <p>The directory is not included in your current access.</p> : <>
           {hierarchyError && <div role="alert"><p>{hierarchyError}</p><button className="button-ghost" onClick={() => hierarchyCursor ? void fetchHierarchy(hierarchyCursor) : setHierarchyRetry(value => value + 1)}>Retry directory</button></div>}
           {entries.length > 0 && <ul className="native-workspace-list">{entries.map(entry => <li key={`${entry.type}:${entry.publicId}`}><div><strong>{entry.displayName}</strong><small>{entry.type.replaceAll("_", " ")}{parentLabel(entry) ? ` · ${parentLabel(entry)}` : ""}</small></div>{entry.type === "project" && <div>{page !== "project" && <a className="button button-ghost" href={workspacePath(clientProjectPath(entry.publicId), context.workspace.id)} onClick={event => { if (!event.ctrlKey && !event.metaKey && !event.shiftKey && event.button === 0) { event.preventDefault(); openProject(entry.publicId); } }}>Open project<span className="visually-hidden">: {entry.displayName}</span></a>}{context.capabilities.feedback && <LeaveFeedback target={{kind:'project',projectId:entry.publicId}} label={entry.displayName} compact nativeWorkspaceId={context.workspace.id} />}</div>}</li>)}</ul>}
           {hierarchyLoading && <Loading />}
           {!hierarchyLoading && !hierarchyError && entries.length === 0 && <EmptyState title={hierarchyCursor ? "No matching records loaded yet" : page === "project" ? "Project unavailable" : "No directory entries shared"} detail={hierarchyCursor ? "Continue through the accessible directory pages to check more records." : "Only records included in your current access are shown."} />}
           {hierarchyCursor && <><p>Showing loaded records only. More accessible directory pages are available.</p><button className="button-ghost" disabled={hierarchyLoading} onClick={() => void fetchHierarchy(hierarchyCursor)}>Load more directory records</button></>}
         </>}
-        {context.capabilities.deliveryView && <a className="button button-orange" href={workspacePath("/portal/deliveries", context.workspace.id)}>Browse workspace deliveries</a>}
+        {context.capabilities.deliveryView && <a className="button button-orange" href={workspacePath("/portal/deliveries", context.workspace.id)}>Browse deliveries</a>}
       </Card>
       {page === "dashboard" && <><FeatureReadiness features={context.features} />{renderDashboardSupplement?.()}</>}
-    </> : page === "deliveries" ? !context.capabilities.deliveryView ? <Card title="Deliveries unavailable"><p>Delivery viewing is not included in your current workspace access.</p></Card> : <>
+    </> : page === "deliveries" ? !context.capabilities.deliveryView ? <Card title="Deliveries unavailable"><p>Delivery viewing is not included in your current access.</p></Card> : <>
       {(folderId || linkedFile) && <Card title="Delivery files"><button className="button-ghost" onClick={() => navigateFolder(null)}>All delivery folders</button>{renderFiles({ folderId, load: filesLoad, loadExactFile: exactLoad, onFolderChange: navigateFolder, onLinkedFileChange: syncLinkedFile })}</Card>}
       {!folderId && !linkedFile && <Card title="Shared delivery folders">
-        <p>Folders explicitly shared with you in this workspace.</p>
+        <p>Folders explicitly shared with you for this client.</p>
         {deliveryError && <div role="alert"><p>{deliveryError}</p><button className="button-ghost" onClick={() => cursor ? void fetchDeliveries(cursor) : setDeliveryRetry(value => value + 1)}>Retry delivery folders</button></div>}
         {targets.length > 0 && <ul className="native-workspace-list">{targets.map(target => <li key={target.id}><div><strong>{target.displayName}</strong><small>{target.owner.type.replaceAll("_", " ")}</small></div><div><button className="button-orange" onClick={() => navigateFolder(target.id)}>Open folder<span className="visually-hidden">: {target.displayName}</span></button>{context.capabilities.feedback && <LeaveFeedback target={{kind:'folder',projectId:target.owner.type==='project'?target.owner.publicId:null,folderId:target.id}} label={target.displayName} compact nativeWorkspaceId={context.workspace.id} />}</div></li>)}</ul>}
         {deliveryLoading && <Loading />}

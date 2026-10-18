@@ -45,9 +45,9 @@ async function late(route: Route, json: unknown) {await route.fulfill({json}).ca
 test("project-only manager uses filtered invite scopes without enumerating the workspace directory", async ({page}) => {
   const calls = await fixture(page); await open(page);
   await expect(page.getByRole("radio", {name: /North seawall/})).toBeChecked();
-  await expect(page.getByText("Workspace member records are not available", {exact: false})).toBeVisible();
+  await expect(page.getByText("Team member records are not available", {exact: false})).toBeVisible();
   await expect(page.getByRole("heading", {name: "People", exact: true})).toHaveCount(0);
-  await expect(page.getByLabel("Give access across this entire organization workspace")).toHaveCount(0);
+  await expect(page.getByLabel("Give access across this entire organization")).toHaveCount(0);
   expect(calls.some(call => /\/(hierarchy|members)$/.test(call.path))).toBe(false);
 });
 
@@ -72,19 +72,19 @@ test("request-only delegatable scopes remain usable without synthesizing deliver
 test("organization-wide review uses advertised root capabilities instead of the selected project", async ({page}) => {
   const scopes = [{type: "project", publicId: "project-workspace-a", displayName: "Delivery project", capabilities: ["delivery.view"], projectEndSupported: true}, {type: "organization", publicId: "org-a", displayName: "Acme Construction", capabilities: ["request.create"], projectEndSupported: false}];
   const calls = await fixture(page, (route, call) => call.path.endsWith("/access") ? route.fulfill({json: access("workspace-a", {canManageMembers: true, inviteScopes: scopes})}) : undefined);
-  await open(page); await page.getByLabel("Give access across this entire organization workspace").check(); await page.getByLabel("I understand and want to grant workspace-wide access.").check(); await submit(page);
+  await open(page); await page.getByLabel("Give access across this entire organization").check(); await page.getByLabel("I understand and want to grant account-wide access.").check(); await submit(page);
   expect(posts(calls)[0]?.body).toEqual({email: "collaborator@example.test", organizationWide: true, confirmOrganizationWide: true, capabilities: ["request.create"], expectedInvitationPolicyVersion: 2}); await expect(historyRegion(page)).not.toContainText("Delivery viewing");
 });
 
 test("workspace-wide membership administration alone never fabricates a broader invitation offer", async ({page}) => {
   await fixture(page, (route, call) => call.path.endsWith("/access") ? route.fulfill({json: access("workspace-a", {canManageMembers: true})}) : undefined);
-  await open(page); await expect(page.getByLabel("Give access across this entire organization workspace")).toHaveCount(0); await expect(page.getByRole("radio", {name: /North seawall/})).toBeVisible();
+  await open(page); await expect(page.getByLabel("Give access across this entire organization")).toHaveCount(0); await expect(page.getByRole("radio", {name: /North seawall/})).toBeVisible();
 });
 
 test("uncertain request retries exactly the original body and key", async ({page}) => {
   let attempts = 0; const calls = await fixture(page, (route, call) => call.path.endsWith("/invitations") && ++attempts === 1 ? route.fulfill({status: 503, json: {error: "Uncertain save"}}) : undefined);
   await open(page); await review(page); await page.getByRole("button", {name: "Request approval", exact: true}).click();
-  await expect(page.getByRole("alert")).toContainText("not confirmed"); await expect(page.getByLabel("Manage team workspace")).toBeDisabled();
+  await expect(page.getByRole("alert")).toContainText("not confirmed"); await expect(page.getByLabel("Manage team for")).toBeDisabled();
   await page.getByRole("button", {name: "Refresh team access"}).click(); await page.getByRole("button", {name: "Retry same invitation"}).click();
   await expect(historyRegion(page)).toContainText("Pending approval"); expect(posts(calls)).toHaveLength(2); expect(posts(calls)[1]?.body).toEqual(posts(calls)[0]?.body); expect(posts(calls)[1]?.key).toBe(posts(calls)[0]?.key);
 });
@@ -112,7 +112,7 @@ test("raced policy rejects the reviewed request without issuing or silently retr
 
 test("cancellation is separately confirmed and uses the current request version", async ({page}) => {
   const calls = await fixture(page); await open(page); await submit(page); await historyRegion(page).getByRole("button", {name: "Cancel request", exact: true}).click();
-  await expect(page.getByLabel("Manage team workspace")).toBeDisabled(); await page.getByRole("button", {name: "Keep request"}).click(); expect(posts(calls)).toHaveLength(1);
+  await expect(page.getByLabel("Manage team for")).toBeDisabled(); await page.getByRole("button", {name: "Keep request"}).click(); expect(posts(calls)).toHaveLength(1);
   await historyRegion(page).getByRole("button", {name: "Cancel request", exact: true}).click(); await page.getByRole("button", {name: "Confirm cancellation"}).click();
   await expect(historyRegion(page).getByText("Cancelled", {exact: true})).toBeVisible(); expect(posts(calls)[1]?.body).toEqual({expectedVersion: 1});
 });
@@ -143,7 +143,7 @@ test("unavailable history is not empty and does not probe the unsupported endpoi
 test("late own-history response cannot populate another selected management workspace", async ({page}) => {
   let release!: () => void; const wait = new Promise<void>(resolve => {release = resolve;}); let started = false;
   await fixture(page, (route, call) => call.path === "/api/client/v2/workspaces/workspace-a/invitation-requests" ? (started = true, wait.then(() => late(route, {items: [row()], nextCursor: null}))) : undefined);
-  await open(page); await expect.poll(() => started).toBe(true); await page.getByLabel("Manage team workspace").selectOption("workspace-b"); await expect(page.getByRole("radio", {name: /Mountain bridge/})).toBeChecked(); release();
+  await open(page); await expect.poll(() => started).toBe(true); await page.getByLabel("Manage team for").selectOption("workspace-b"); await expect(page.getByRole("radio", {name: /Mountain bridge/})).toBeChecked(); release();
   await expect(historyRegion(page)).toContainText("No invitation requests yet"); await expect(historyRegion(page)).not.toContainText("collaborator@example.test");
 });
 

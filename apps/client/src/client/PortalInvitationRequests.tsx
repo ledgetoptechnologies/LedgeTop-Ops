@@ -45,7 +45,7 @@ export function PortalInvitationRequests({workspaceId, sourceId, supported, lock
     }} finally {if (!controller.signal.aborted && run === generation.current) {mutation.current = null; setBusy(false);}}
   }
   return <section className="portal-invitation-requests" aria-label="Your invitation requests"><header><h3>Your invitation requests</h3>{supported && <button className="button-ghost" disabled={loading || busy || uncertain || locked} onClick={() => void load()}>Refresh invitation requests</button>}</header>
-    <p>Requests are separate from invitations and access. Only your requests in this workspace are shown.</p>
+    <p>Requests are separate from invitations and access. Only your requests for this client are shown.</p>
     {!supported ? <p role="status">Invitation request history is unavailable until its database update is ready.</p> : <>
       {loading && <Skeleton variant="list" rows={3} label="Loading invitation requests…" />}{notice && <p role="status">{notice}</p>}
       {error && <div role="alert"><p>{error}</p>{!uncertain && <button className="button-ghost" disabled={loading || locked} onClick={() => void load(retry.current)}>Retry invitation requests</button>}</div>}

@@ -93,9 +93,9 @@ test("native refresh discovers identity without the selected workspace header an
 test("primary compatibility and native workspace switching preserve independent projects and Back/Forward", async ({page}) => {
   const calls = await mock(page); await page.goto("/portal?workspace=workspace-a");
   await expect(page.getByText("Primary-only project", {exact: true})).toBeVisible();
-  await expect(page.getByRole("combobox", {name: "Client workspace"}).locator("option")).toHaveText(workspaces.map(item => item.displayName));
+  await expect(page.getByRole("combobox", {name: "Client account"}).locator("option")).toHaveText(workspaces.map(item => item.displayName));
   await expect(page.locator(".client-portal-header")).not.toContainText("project-alpha:");
-  await page.getByRole("combobox", {name: "Client workspace"}).selectOption("workspace-b");
+  await page.getByRole("combobox", {name: "Client account"}).selectOption("workspace-b");
   await expect(page.getByText("Coastal seawall construction documentation", {exact: true})).toBeVisible();
   await expect(page.getByText("Primary-only project", {exact: true})).toHaveCount(0);
   await page.goBack(); await expect(page.getByText("Primary-only project", {exact: true})).toBeVisible();
@@ -109,7 +109,7 @@ test("same public project IDs remain source-separated and project links preserve
   await expect(project).toHaveAttribute("href", "/portal/projects/project-shared?workspace=workspace-b");
   await project.click(); await expect(page).toHaveURL(/\/portal\/projects\/project-shared\?workspace=workspace-b$/);
   await expect(page.getByText("Coastal seawall construction documentation", {exact: true})).toBeVisible();
-  await page.getByRole("combobox", {name: "Client workspace"}).selectOption("workspace-c");
+  await page.getByRole("combobox", {name: "Client account"}).selectOption("workspace-c");
   await expect(page.getByText("Mountain bridge inspection", {exact: true})).toBeVisible();
   await expect(page.getByText("Coastal seawall construction documentation", {exact: true})).toHaveCount(0);
 });
@@ -257,7 +257,7 @@ test("late folder responses cannot repopulate a newly selected workspace", async
   let release!: () => void; const wait = new Promise<void>(resolve => { release = resolve; });
   const calls = await mock(page, (route, call) => call.path.includes("workspace-b/folders/") ? wait.then(() => late(route, folder())) : undefined);
   await page.goto("/portal/deliveries?workspace=workspace-b&folder=folder-workspace-b"); await expect.poll(() => calls.some(call => call.path.includes("workspace-b/folders/"))).toBe(true);
-  await page.getByRole("combobox", {name: "Client workspace"}).selectOption("workspace-c");
+  await page.getByRole("combobox", {name: "Client account"}).selectOption("workspace-c");
   await expect(page.getByText("Mountain bridge inspection", {exact: true})).toBeVisible(); release();
   await expect(page).toHaveURL(/workspace=workspace-c$/); await expect(page.getByText("workspace-b-orthomosaic-review.png", {exact: true})).toHaveCount(0);
 });
@@ -268,7 +268,7 @@ test("Back reauthorizes an earlier native workspace before its exact file reques
   const calls = await mock(page, (route, call) => call.path.endsWith("workspace-b/context") && delayContext ? contextWait.then(() => late(route, context())) : call.path.endsWith("workspace-b/files/file-workspace-b") && ++metadataReads === 1 ? fileWait.then(() => late(route, {...envelope(), file: file()})) : undefined);
   await page.goto("/portal/deliveries?workspace=workspace-b&file=file-workspace-b");
   await expect.poll(() => metadataReads).toBe(1); await expect(page.getByText("Opening linked file…")).toBeVisible();
-  await page.getByRole("combobox", {name: "Client workspace"}).selectOption("workspace-c"); await expect(page.getByText("Mountain bridge inspection", {exact: true})).toBeVisible();
+  await page.getByRole("combobox", {name: "Client account"}).selectOption("workspace-c"); await expect(page.getByText("Mountain bridge inspection", {exact: true})).toBeVisible();
   releaseOldFile(); await expect(page.getByRole("dialog")).toHaveCount(0);
   delayContext = true; const before = calls.filter(call => call.path.endsWith("workspace-b/context")).length; await page.goBack();
   await expect.poll(() => calls.filter(call => call.path.endsWith("workspace-b/context")).length).toBeGreaterThan(before);
@@ -487,7 +487,7 @@ test("switching native sources aborts stale notifications and resets the bell to
   });
   await page.goto("/portal?workspace=workspace-b");
   await expect.poll(() => calls.some(call => call.path === "/api/client/notification-history" && call.workspace === "workspace-b")).toBe(true);
-  await page.getByRole("combobox", {name: "Client workspace"}).selectOption("workspace-c");
+  await page.getByRole("combobox", {name: "Client account"}).selectOption("workspace-c");
   const bell = page.getByRole("button", {name: /Notifications, 1 unread update/}); await expect(bell).toBeVisible(); await bell.click();
   await expect(page.getByText("Mountain current update", {exact: true})).toBeVisible(); release();
   await expect(page.getByText("Coastal stale update", {exact: true})).toHaveCount(0);
@@ -513,22 +513,22 @@ for (const width of [390, 1280]) test(`native notification bell is accessible an
 
 for (const path of ["/portal/requests", "/portal/requests/new", "/portal/feedback", "/portal/account", "/portal/projects/project-shared?tab=models", "/portal/projects/project-shared?tab=requests"]) test(`native unsupported feature ${path} is explicit without legacy or Viewer probes`, async ({page}) => {
   const calls = await mock(page); await page.goto(`${path}${path.includes("?") ? "&" : "?"}workspace=workspace-b`);
-  await expect(page.getByRole("heading", {name: "Workspace features"})).toBeVisible();
+  await expect(page.getByRole("heading", {name: "Available features"})).toBeVisible();
   await expect(page.getByText("They are not services purchased or assigned to your organization.", {exact: false})).toBeVisible();
   nativeCallsOnly(calls); await expect(page.getByRole("button", {name: /New request|Leave Feedback|Invite/i})).toHaveCount(0);
 });
 
 test("capabilities absent from native context do not produce optimistic directory or delivery probes", async ({page}) => {
   const calls = await mock(page, (route, call) => call.path.endsWith("workspace-b/context") ? route.fulfill({json: {...context(), features: {...features(), directory: {state: "not_in_access", reason: "capability_not_granted"}, deliveries: {state: "temporarily_unavailable", reason: "backend_unavailable"}}, capabilities: {...context().capabilities, directoryRead: false, deliveryView: false}}}) : undefined);
-  await page.goto("/portal?workspace=workspace-b"); await expect(page.getByText("The directory is not included in your current workspace access.")).toBeVisible();
+  await page.goto("/portal?workspace=workspace-b"); await expect(page.getByText("The directory is not included in your current access.")).toBeVisible();
   await expect(page.getByText("Not in access", {exact: true})).toBeVisible();
-  await page.goto("/portal/deliveries?workspace=workspace-b"); await expect(page.getByText("Delivery viewing is not included in your current workspace access.")).toBeVisible();
+  await page.goto("/portal/deliveries?workspace=workspace-b"); await expect(page.getByText("Delivery viewing is not included in your current access.")).toBeVisible();
   expect(calls.some(call => /\/(hierarchy|deliveries)$/.test(call.path))).toBe(false);
 });
 
 test("native feature readiness is operational status, not purchased services or optimistic secondary features", async ({page}) => {
   const calls = await mock(page); await page.goto("/portal?workspace=workspace-b");
-  const surface = page.locator(".ltds-card").filter({has: page.getByRole("heading", {name: "Workspace features"})});
+  const surface = page.locator(".ltds-card").filter({has: page.getByRole("heading", {name: "Available features"})});
   await expect(surface).toContainText("Ready");
   await expect(surface).toContainText("Not connected");
   await expect(surface).toContainText("Existing authorized request history remains unchanged.");
@@ -603,7 +603,7 @@ test("native team rejects a valid access envelope from the wrong source before r
     return undefined;
   });
   await page.goto("/portal/account?workspace=workspace-b");
-  await expect(page.getByRole("alert")).toContainText("workspace source could not be verified");
+  await expect(page.getByRole("alert")).toContainText("client account could not be verified");
   await expect(page.getByText("leaked@example.test", {exact: true})).toHaveCount(0);
   await expect(page.getByRole("heading", {name: "Invite a collaborator"})).toHaveCount(0);
   await expect(page.getByRole("button", {name: /administrator|Suspend|approval/i})).toHaveCount(0);
@@ -627,7 +627,7 @@ test("member authority loss clears ambiguous retries and every protected team co
   await page.getByRole("button", {name: "Review invitation"}).click(); await page.getByRole("button", {name: "Send invitation"}).click();
   await expect(page.getByRole("button", {name: "Retry same invitation"})).toBeVisible();
   await page.getByRole("button", {name: "Refresh team access"}).click();
-  await expect(page.getByText("Workspace member records are not available in your current verified access.", {exact: false})).toBeVisible();
+  await expect(page.getByText("Team member records are not available in your current verified access.", {exact: false})).toBeVisible();
   await expect(page.getByRole("button", {name: "Retry same invitation"})).toHaveCount(0);
   await expect(page.getByRole("heading", {name: /Invite a collaborator|People|Invitations/})).toHaveCount(0);
   await expect(page.getByText("local@example.test", {exact: true})).toHaveCount(0);
@@ -683,7 +683,7 @@ test("secondary approval policy is explicit and exposes no broken approval workf
   await expect(page.getByText("Invitations need a source policy change.", {exact: false})).toBeVisible();
   await expect(page.getByRole("heading", {name: "Invite a collaborator"})).toHaveCount(0);
   await expect(page.getByRole("button", {name: /approval/i})).toHaveCount(0);
-  await expect(page.getByText("No workspace members are available.", {exact: true})).toBeVisible();
+  await expect(page.getByText("No team members are available.", {exact: true})).toBeVisible();
 });
 
 test("secondary member management fails closed and retries without exposing records", async ({page}) => {
@@ -701,7 +701,7 @@ test("secondary member management fails closed and retries without exposing reco
   await expect(page.getByRole("alert")).toContainText("Temporary membership failure");
   await expect(page.getByRole("heading", {name: "People"})).toHaveCount(0);
   available = true; await page.getByRole("button", {name: "Refresh team access"}).click();
-  await expect(page.getByText("Workspace member records are not available in your current verified access.", {exact: false})).toBeVisible();
+  await expect(page.getByText("Team member records are not available in your current verified access.", {exact: false})).toBeVisible();
   await expect(page.getByRole("heading", {name: "Invite a collaborator"})).toHaveCount(0);
   await expect(page.getByRole("heading", {name: "People"})).toHaveCount(0);
 });
@@ -722,7 +722,7 @@ for (const width of [375, 640, 1280, 3440]) test(`native portal directory and de
   const projectContext = project.locator(".visually-hidden");
   await expect(projectContext).toHaveCSS("position", "absolute"); await expect(projectContext).toHaveCSS("width", "1px"); await expect(projectContext).toHaveCSS("height", "1px"); await expect(projectContext).toHaveCSS("clip", "rect(0px, 0px, 0px, 0px)");
   await page.screenshot({path: testInfo.outputPath(`native-directory-${width}.png`)});
-  await page.getByRole("link", {name: "Browse workspace deliveries"}).click(); await expect(page.getByRole("button", {name: /^Open folder\s*:/})).toBeVisible();
+  await page.getByRole("link", {name: "Browse deliveries"}).click(); await expect(page.getByRole("button", {name: /^Open folder\s*:/})).toBeVisible();
   const folderContext = page.getByRole("button", {name: /^Open folder\s*:/}).locator(".visually-hidden");
   await expect(folderContext).toHaveCSS("position", "absolute"); await expect(folderContext).toHaveCSS("width", "1px"); await expect(folderContext).toHaveCSS("height", "1px"); await expect(folderContext).toHaveCSS("clip", "rect(0px, 0px, 0px, 0px)");
   await expect(page.locator("body")).toHaveJSProperty("scrollWidth", await page.locator("body").evaluate(element => element.clientWidth));

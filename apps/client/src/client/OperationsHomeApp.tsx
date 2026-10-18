@@ -11,7 +11,7 @@ export function OperationsServiceSummary({ response, embedded = false }: {
   const hasServices = response.homes.some(home => home.services.length > 0);
   return <section className="portal-card" aria-label="Independent operations service summary">
     <h2>{embedded ? "Operations services" : hasServices ? "Available services" : "No services available"}</h2>
-    {embedded && <p>Your service summary. Files and requests follow the access for your selected workspace.</p>}
+    {embedded && <p>Your service summary. Files and requests follow the access for your selected client.</p>}
     {response.homes.length === 0
       ? <p>Your account has no active operations services.</p>
       : response.homes.map(home => <div key={home.authorityId}>
@@ -82,9 +82,9 @@ export function OperationsHomeApp({ response, clientUnavailable = false, onRetry
         <p>Services, invoices and files Ledge Top currently shares with you.</p>
       </section>
       {clientUnavailable && <section className="portal-card portal-workspace-status" role="status">
-        <h2>Project workspace unavailable</h2>
-        <p>Your projects and requests could not be opened for the selected workspace. Your services, invoices and files below are still available.</p>
-        {onRetryClient && <button type="button" className="button-orange" onClick={onRetryClient}>Try my other workspaces</button>}
+        <h2>Project details unavailable</h2>
+        <p>Your projects and requests could not be opened for the selected client. Your services, invoices and files below are still available.</p>
+        {onRetryClient && <button type="button" className="button-orange" onClick={onRetryClient}>Try my other client accounts</button>}
       </section>}
       <OperationsNativeServicePanel response={response} />
     </main>

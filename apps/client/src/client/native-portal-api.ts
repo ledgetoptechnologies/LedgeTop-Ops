@@ -26,7 +26,7 @@ export interface NativeDeliveries extends NativeEnvelope { items: NativeDelivery
 
 const text = (value: unknown, maximum = 4096): value is string => typeof value === "string" && value.length > 0 && value.length <= maximum;
 const nullableText = (value: unknown): value is string | null => value === null || text(value);
-const invalid = () => Object.assign(new Error("The workspace response could not be verified. Refresh the portal."), { status: 409 });
+const invalid = () => Object.assign(new Error("The client account response could not be verified. Refresh the portal."), { status: 409 });
 const featureKeys: NativeWorkspaceFeatureKey[] = ["directory", "deliveries", "serviceRequests", "feedback", "models", "team", "billing"];
 const exactFeature = (value: NativeWorkspaceFeatureStatus | undefined, state: NativeWorkspaceFeatureState, reason: NativeWorkspaceFeatureReason) =>
   !!value && value.state === state && value.reason === reason && Object.keys(value).length === 2;

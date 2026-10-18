@@ -82,7 +82,7 @@ test("validated workspace hint selects the authorized workspace before feedback 
 
 test("unavailable workspace hints stop all downstream resource probes", async ({page}) => {
   const calls = await mock(page, undefined, {workspace: true}); await page.goto("/portal/feedback/feedback-one?workspace=not-allowed");
-  await expect(page.getByText("Workspace access not set up yet", {exact: true})).toBeVisible();
+  await expect(page.getByText("Client access not set up yet", {exact: true})).toBeVisible();
   expect(calls.every(call => ["/api/client/session", "/api/client/v2/workspaces"].includes(call.path))).toBe(true);
 });
 
@@ -95,10 +95,10 @@ test("uncertain create retries the exact key and message", async ({page}) => {
 
 test("workspace Back and Forward validate the destination before feedback reads", async ({page}) => {
   const calls = await mock(page, undefined, {workspace: true}); await page.goto("/portal/feedback/feedback-one?workspace=workspace-a"); await expect(page.getByText("Please check the north edge.")).toBeVisible();
-  await page.getByLabel("Client workspace").selectOption("workspace-b"); await expect(page).toHaveURL(/workspace=workspace-b/); const before = calls.length;
+  await page.getByLabel("Client account").selectOption("workspace-b"); await expect(page).toHaveURL(/workspace=workspace-b/); const before = calls.length;
   await page.goBack(); await expect(page).toHaveURL(/feedback-one\?workspace=workspace-a/); await expect(page.getByText("Please check the north edge.")).toBeVisible();
   const after = calls.slice(before); expect(after.find(call => call.path === "/api/client/feedback/feedback-one")?.workspace).toBe("workspace-a"); expect(after.findIndex(call => call.path === "/api/client/v2/workspaces")).toBeLessThan(after.findIndex(call => call.path === "/api/client/feedback/feedback-one"));
-  await page.goForward(); await expect(page.getByLabel("Client workspace")).toHaveValue("workspace-b");
+  await page.goForward(); await expect(page.getByLabel("Client account")).toHaveValue("workspace-b");
 });
 
 test("a definite rate limit does not permanently lock the message", async ({page}) => {
