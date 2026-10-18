@@ -106,7 +106,8 @@ import { ImageLocationMap } from "./ImageLocationMap";
 import { ServiceLibrary } from "./ServiceLibrary";
 import { canBeginRequest, RequestAvailabilityMessage, useRequestAvailability, type RequestAvailability } from "./RequestAvailability";
 import { RequestScopeBoundary } from "./RequestScopeBoundary";
-import { workspaceSwitcherLabels } from "./workspace-labels";
+import { UNIFIED_PAGES, UnifiedPortal, type UnifiedPage } from "./UnifiedPortal";
+import { unifiedAccount, unifiedAccountSupported } from "./unified-portal";
 import { LeaveFeedback, PortalFeedback } from "./PortalFeedback";
 import { PortalNotifications } from "./PortalNotifications";
 import { loadFeedbackFile, withPortalWorkspace } from "./feedback-api";
@@ -2770,6 +2771,9 @@ export function ClientPortalApp({
     initialRoute.projectId,
   );
   const [feedbackId, setFeedbackId] = useState<string | null>(initialRoute.feedbackId ?? null);
+  // In the unified portal, list pages merge every account; a link that names an
+  // account (?workspace=) opens that account's own page instead.
+  const [accountFocus, setAccountFocus] = useState(() => new URLSearchParams(location.search).has("workspace"));
   const [authenticatedDeliveryFolder, setAuthenticatedDeliveryFolder] = useState<DeliveryFolderLocation>(readAuthenticatedDeliveryFolderLocation);
   const [requests, setRequests] = useState<PortalServiceRequest[]>([]);
   const [drafts, setDrafts] = useState<PortalServiceDraftSummary[]>([]);
@@ -2886,7 +2890,9 @@ export function ClientPortalApp({
     loadPortalBootstrap(undefined, requestedWorkspaceId, controller.signal)
       .then((data) => {
         if (active && !controller.signal.aborted) {
-          history.replaceState(null, "", withPortalWorkspace(`${location.pathname}${location.search}`));
+          const unifiedList = data.capabilities.workspaceHierarchyV2 && (data.workspaces ?? []).filter(unifiedAccountSupported).length > 1
+            && !requestedWorkspaceId && UNIFIED_PAGES.has(parseClientPortalRoute(location.pathname).page);
+          if (!unifiedList) history.replaceState(null, "", withPortalWorkspace(`${location.pathname}${location.search}`));
           setRequests(data.resourceMode === "native" ? [] : data.requests);
           setGate({ status: "ready", data });
         }
@@ -2928,6 +2934,7 @@ export function ClientPortalApp({
           bootstrapController.current?.abort(); setSwitchingWorkspace(false); setGate({status: "loading"}); setBootstrapRevision(value => value + 1);
         }
         setPage(route.page);
+        setAccountFocus(new URLSearchParams(location.search).has("workspace"));
         setProjectId(route.projectId);
         setFeedbackId(route.feedbackId ?? null);
         setAuthenticatedDeliveryFolder(readAuthenticatedDeliveryFolderLocation());
@@ -2965,11 +2972,14 @@ export function ClientPortalApp({
   }, [mobileNavOpen]);
 
   function navigate(nextPage: TopPage, replace = false) {
-    window.history[replace ? "replaceState" : "pushState"]({}, "", withPortalWorkspace(clientPortalPath(nextPage)));
+    const unifiedNow = gate.status === "ready" && gate.data.capabilities.workspaceHierarchyV2
+      && (gate.data.workspaces ?? []).filter(unifiedAccountSupported).length > 1;
+    window.history[replace ? "replaceState" : "pushState"]({}, "", unifiedNow ? clientPortalPath(nextPage) : withPortalWorkspace(clientPortalPath(nextPage)));
     setFeedbackId(null);
     setProjectId(null);
     setAuthenticatedDeliveryFolder({ folderId: null, invalid: false });
     setPage(nextPage);
+    setAccountFocus(false);
     setRequestDraftId(null);
     setEditing(null);
     setMobileNavOpen(false);
@@ -3057,30 +3067,29 @@ export function ClientPortalApp({
   const mapboxPublicToken = gate.data.resourceMode === "native" ? null : gate.data.mapboxPublicToken;
   const shellDisplayName = native ? native.workspace.displayName : account!.displayName;
   const workspaces = gate.data.workspaces ?? [];
-  const workspaceLabels = workspaceSwitcherLabels(workspaces);
   const selectedWorkspaceId = gate.data.selectedWorkspaceId ?? null;
-  const switchWorkspace = async (workspaceId: string) => {
-    if (workspaceId === selectedWorkspaceId) return;
-    bootstrapController.current?.abort(); const controller = new AbortController(); bootstrapController.current = controller;
-    setSwitchingWorkspace(true);
-    setPortalWorkspaceSelection(workspaceId);
-    try {
-      const data = await loadPortalBootstrap(undefined, workspaceId, controller.signal);
-      if (controller.signal.aborted || bootstrapController.current !== controller) return;
-      setRequests(data.resourceMode === "native" ? [] : data.requests);
-      setProjectId(null);
-      setPage("dashboard");
-      setRequestDraftId(null);
-      setFeedbackId(null);
-      setAuthenticatedDeliveryFolder({ folderId: null, invalid: false });
-      window.history.pushState({}, "", withPortalWorkspace(clientPortalPath("dashboard")));
-      setGate({ status: "ready", data });
-    } catch (caught) {
-      if (controller.signal.aborted || bootstrapController.current !== controller) return;
-      setPortalWorkspaceSelection(selectedWorkspaceId);
-      window.alert((caught as Error).message || "This client account could not be opened.");
-    } finally {
-      if (bootstrapController.current === controller) setSwitchingWorkspace(false);
+  const unifiedMode = capabilities.workspaceHierarchyV2 && workspaces.filter(unifiedAccountSupported).length > 1;
+  const unifiedView = unifiedMode && UNIFIED_PAGES.has(page) && !accountFocus;
+  const currentAccount = unifiedMode ? workspaces.find(workspace => workspace.id === selectedWorkspaceId) : undefined;
+  /** Opens a page of one exact client account; the account is loaded fresh if it isn't the current one. */
+  const openInAccount = (workspaceId: string, path: string) => {
+    const url = new URL(path, window.location.origin);
+    url.searchParams.set("workspace", workspaceId);
+    const route = parseClientPortalRoute(url.pathname);
+    window.history.pushState({}, "", `${url.pathname}${url.search}`);
+    setAccountFocus(true);
+    setProjectId(route.projectId);
+    setFeedbackId(route.feedbackId ?? null);
+    setAuthenticatedDeliveryFolder({ folderId: null, invalid: false });
+    setRequestDraftId(null);
+    setEditing(null);
+    setMobileNavOpen(false);
+    setPage(route.page);
+    if (workspaceId !== selectedWorkspaceId) {
+      bootstrapController.current?.abort();
+      setPortalWorkspaceSelection(workspaceId);
+      setGate({ status: "loading" });
+      setBootstrapRevision(value => value + 1);
     }
   };
   const onSaved = (saved: PortalServiceRequest) => {
@@ -3210,7 +3219,11 @@ export function ClientPortalApp({
   </> : null;
   let content: ReactNode;
 
-  if (native)
+  if (unifiedView)
+    content = <UnifiedPortal page={page as UnifiedPage} workspaces={workspaces} displayName={shellDisplayName}
+      openInAccount={openInAccount} navigate={navigate} supplement={page === "dashboard" ? operationsHomeSummary : undefined}
+      renderStatus={request => <StatusPill tone={statusTone(request.status)}>{statusLabel(request.status, request.projectAlphaDraftCreated)}</StatusPill>} />;
+  else if (native)
     content = <NativeWorkspaceContent key={`${native.workspace.sourceId}:${native.workspace.id}:${native.contextVersion}`} context={native} page={page} projectId={projectId} feedbackId={feedbackId} openProject={openProject}
       onInvalid={caught => { bootstrapController.current?.abort(); const status = (caught as RequestError).status; setGate(status === 409 ? {status: "blocked", optionalClientWorkspaceAbsent: false, title: "Client access changed", detail: "Your client access changed. Refresh the portal before continuing."} : status === 404 || status === 410 ? {status: "blocked", optionalClientWorkspaceAbsent: false, title: "Shared item unavailable", detail: "This shared item or its access has changed. Refresh the portal to check your current access."} : blockedPortal(caught)); }}
       renderTeam={native.capabilities.workspaceMembershipManagement ? () => <Card title="Team access" className="portal-team-card"><WorkspaceTeamPanel initialWorkspaceId={native.workspace.id} workspaceMode="native" expectedSourceId={native.workspace.sourceId} invitationEmailDelivery={native.capabilities.invitationEmailDelivery} hierarchyScopedInvitations={native.capabilities.hierarchyScopedInvitations} /></Card> : undefined}
@@ -3579,24 +3592,11 @@ export function ClientPortalApp({
     <div className="client-portal">
       <header className="client-portal-header">
         <PortalBrand product="Client portal" />
-        {capabilities.workspaceHierarchyV2 && workspaces.length > 1 && (
-          <label className="portal-workspace-switcher">
-            <span>Client</span>
-            <select
-              aria-label="Client account"
-              value={selectedWorkspaceId ?? ""}
-              disabled={switchingWorkspace}
-              onChange={event => void switchWorkspace(event.target.value)}
-            >
-              {workspaces.map(workspace => <option key={workspace.id} value={workspace.id}>{workspaceLabels.get(workspace.id) ?? workspace.displayName}</option>)}
-            </select>
-          </label>
-        )}
         <nav className="client-portal-top-nav" aria-label="Client portal">
-          {navigation.filter(item => (item.page !== "feedback" || capabilities.feedback) && (item.page !== "requests" || capabilities.requestV2)).map((item) => (
+          {navigation.filter(item => unifiedMode || (item.page !== "feedback" || capabilities.feedback) && (item.page !== "requests" || capabilities.requestV2)).map((item) => (
             <a
               key={item.page}
-              href={withPortalWorkspace(clientPortalPath(item.page))}
+              href={unifiedMode ? clientPortalPath(item.page) : withPortalWorkspace(clientPortalPath(item.page))}
               aria-current={
                 page === item.page ||
                 (item.page === "projects" && page === "project") ||
@@ -3616,18 +3616,23 @@ export function ClientPortalApp({
         {!switchingWorkspace && <PortalNotifications key={requestContextKey} />}
         <button ref={mobileNavTrigger} className="portal-nav-trigger" type="button" aria-label="Open navigation" aria-expanded={mobileNavOpen} aria-controls="portal-mobile-navigation" onClick={() => setMobileNavOpen(true)}><span className="nav-hamburger" aria-hidden="true"><i /><i /><i /></span></button>
         <AccountMenu className="portal-account-menu" displayName={shellDisplayName}
-          avatar={shellDisplayName.slice(0, 2).toUpperCase()} accountHref={withPortalWorkspace(clientPortalPath("account"))}
+          avatar={shellDisplayName.slice(0, 2).toUpperCase()} accountHref={unifiedMode ? clientPortalPath("account") : withPortalWorkspace(clientPortalPath("account"))}
           onAccount={() => navigate("account")} />
       </header>
       {mobileNavOpen && <div className="portal-mobile-nav-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) { setMobileNavOpen(false); mobileNavTrigger.current?.focus(); } }}>
         <div ref={mobileNavPanel} id="portal-mobile-navigation" className="portal-mobile-nav" role="dialog" aria-modal="true" aria-label="Navigation">
           <header><strong>Navigation</strong><button type="button" aria-label="Close navigation" onClick={() => { setMobileNavOpen(false); mobileNavTrigger.current?.focus(); }}>Close</button></header>
           <nav aria-label="Mobile client portal navigation">
-            {[...navigation.filter(item => (item.page !== "feedback" || capabilities.feedback) && (item.page !== "requests" || capabilities.requestV2)), { page: "account" as const, label: "Account" }].map((item) => <a key={item.page} href={withPortalWorkspace(clientPortalPath(item.page))} aria-current={page === item.page || (item.page === "projects" && page === "project") || (item.page === "requests" && page === "request-new") ? "page" : undefined} onClick={(event) => { event.preventDefault(); navigate(item.page); }}>{item.label}</a>)}
+            {[...navigation.filter(item => unifiedMode || (item.page !== "feedback" || capabilities.feedback) && (item.page !== "requests" || capabilities.requestV2)), { page: "account" as const, label: "Account" }].map((item) => <a key={item.page} href={unifiedMode ? clientPortalPath(item.page) : withPortalWorkspace(clientPortalPath(item.page))} aria-current={page === item.page || (item.page === "projects" && page === "project") || (item.page === "requests" && page === "request-new") ? "page" : undefined} onClick={(event) => { event.preventDefault(); navigate(item.page); }}>{item.label}</a>)}
           </nav>
         </div>
       </div>}
-      <main className="client-portal-main">{switchingWorkspace ? <Loading /> : content}</main>
+      <main className="client-portal-main">{switchingWorkspace ? <Loading /> : <>
+        {currentAccount && !unifiedView && <p className="unified-portal-context">
+          <span>{unifiedAccount(currentAccount).business} · {currentAccount.displayName}</span>
+          {UNIFIED_PAGES.has(page) && <button type="button" className="portal-text-action" onClick={() => navigate(page as UnifiedPage)}>Show all businesses</button>}
+        </p>}
+        {content}</>}</main>
     </div>
   );
 }

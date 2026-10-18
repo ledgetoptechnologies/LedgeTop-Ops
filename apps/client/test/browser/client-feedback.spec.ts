@@ -33,6 +33,14 @@ async function mock(page: Page, custom?: (route: Route, url: URL, call: Call) =>
 }
 async function late(route: Route, json: unknown) {try {await route.fulfill({json});} catch {/* aborted request */}}
 
+/** An in-app link to one exact client account (e.g. from a unified list or a notification); replaces the removed switcher. */
+async function openAccount(page: Page, workspaceId: string, path = "/portal/dashboard") {
+  await page.evaluate(([id, target]) => {
+    const url = new URL(target, location.origin); url.searchParams.set("workspace", id);
+    window.history.pushState({}, "", `${url.pathname}${url.search}`); window.dispatchEvent(new PopStateEvent("popstate"));
+  }, [workspaceId, path] as const);
+}
+
 test("project feedback is generic and duplicate clicks create one idempotent submission", async ({page}) => {
   let release!: () => void; const wait = new Promise<void>(resolve => {release = resolve;});
   const calls = await mock(page, (route, _url, call) => call.path === "/api/client/feedback" && call.method === "POST" ? wait.then(() => late(route, detail())) : undefined);
@@ -95,10 +103,10 @@ test("uncertain create retries the exact key and message", async ({page}) => {
 
 test("workspace Back and Forward validate the destination before feedback reads", async ({page}) => {
   const calls = await mock(page, undefined, {workspace: true}); await page.goto("/portal/feedback/feedback-one?workspace=workspace-a"); await expect(page.getByText("Please check the north edge.")).toBeVisible();
-  await page.getByLabel("Client account").selectOption("workspace-b"); await expect(page).toHaveURL(/workspace=workspace-b/); const before = calls.length;
+  await openAccount(page, "workspace-b"); await expect(page).toHaveURL(/workspace=workspace-b/); const before = calls.length;
   await page.goBack(); await expect(page).toHaveURL(/feedback-one\?workspace=workspace-a/); await expect(page.getByText("Please check the north edge.")).toBeVisible();
   const after = calls.slice(before); expect(after.find(call => call.path === "/api/client/feedback/feedback-one")?.workspace).toBe("workspace-a"); expect(after.findIndex(call => call.path === "/api/client/v2/workspaces")).toBeLessThan(after.findIndex(call => call.path === "/api/client/feedback/feedback-one"));
-  await page.goForward(); await expect(page.getByLabel("Client account")).toHaveValue("workspace-b");
+  await page.goForward(); await expect(page).toHaveURL(/workspace=workspace-b/);
 });
 
 test("a definite rate limit does not permanently lock the message", async ({page}) => {

@@ -1,5 +1,13 @@
 import { expect, test, type Page, type Route } from "@playwright/test";
 
+/** An in-app link to one exact client account (e.g. from a unified list or a notification); replaces the removed switcher. */
+async function openAccount(page: Page, workspaceId: string, path = "/portal/dashboard") {
+  await page.evaluate(([id, target]) => {
+    const url = new URL(target, location.origin); url.searchParams.set("workspace", id);
+    window.history.pushState({}, "", `${url.pathname}${url.search}`); window.dispatchEvent(new PopStateEvent("popstate"));
+  }, [workspaceId, path] as const);
+}
+
 const date = "2026-08-26T12:00:00Z";
 const workspaces = [
   { id: "workspace-a", rootType: "organization", rootPublicId: "org-shared", displayName: "Primary customer" },
@@ -93,9 +101,9 @@ test("native refresh discovers identity without the selected workspace header an
 test("primary compatibility and native workspace switching preserve independent projects and Back/Forward", async ({page}) => {
   const calls = await mock(page); await page.goto("/portal?workspace=workspace-a");
   await expect(page.getByText("Primary-only project", {exact: true})).toBeVisible();
-  await expect(page.getByRole("combobox", {name: "Client account"}).locator("option")).toHaveText(workspaces.map(item => item.displayName));
+  await expect(page.getByRole("combobox", {name: "Client account"})).toHaveCount(0);
   await expect(page.locator(".client-portal-header")).not.toContainText("project-alpha:");
-  await page.getByRole("combobox", {name: "Client account"}).selectOption("workspace-b");
+  await openAccount(page, "workspace-b");
   await expect(page.getByText("Coastal seawall construction documentation", {exact: true})).toBeVisible();
   await expect(page.getByText("Primary-only project", {exact: true})).toHaveCount(0);
   await page.goBack(); await expect(page.getByText("Primary-only project", {exact: true})).toBeVisible();
@@ -109,7 +117,7 @@ test("same public project IDs remain source-separated and project links preserve
   await expect(project).toHaveAttribute("href", "/portal/projects/project-shared?workspace=workspace-b");
   await project.click(); await expect(page).toHaveURL(/\/portal\/projects\/project-shared\?workspace=workspace-b$/);
   await expect(page.getByText("Coastal seawall construction documentation", {exact: true})).toBeVisible();
-  await page.getByRole("combobox", {name: "Client account"}).selectOption("workspace-c");
+  await openAccount(page, "workspace-c");
   await expect(page.getByText("Mountain bridge inspection", {exact: true})).toBeVisible();
   await expect(page.getByText("Coastal seawall construction documentation", {exact: true})).toHaveCount(0);
 });
@@ -257,7 +265,7 @@ test("late folder responses cannot repopulate a newly selected workspace", async
   let release!: () => void; const wait = new Promise<void>(resolve => { release = resolve; });
   const calls = await mock(page, (route, call) => call.path.includes("workspace-b/folders/") ? wait.then(() => late(route, folder())) : undefined);
   await page.goto("/portal/deliveries?workspace=workspace-b&folder=folder-workspace-b"); await expect.poll(() => calls.some(call => call.path.includes("workspace-b/folders/"))).toBe(true);
-  await page.getByRole("combobox", {name: "Client account"}).selectOption("workspace-c");
+  await openAccount(page, "workspace-c");
   await expect(page.getByText("Mountain bridge inspection", {exact: true})).toBeVisible(); release();
   await expect(page).toHaveURL(/workspace=workspace-c$/); await expect(page.getByText("workspace-b-orthomosaic-review.png", {exact: true})).toHaveCount(0);
 });
@@ -268,7 +276,7 @@ test("Back reauthorizes an earlier native workspace before its exact file reques
   const calls = await mock(page, (route, call) => call.path.endsWith("workspace-b/context") && delayContext ? contextWait.then(() => late(route, context())) : call.path.endsWith("workspace-b/files/file-workspace-b") && ++metadataReads === 1 ? fileWait.then(() => late(route, {...envelope(), file: file()})) : undefined);
   await page.goto("/portal/deliveries?workspace=workspace-b&file=file-workspace-b");
   await expect.poll(() => metadataReads).toBe(1); await expect(page.getByText("Opening linked file…")).toBeVisible();
-  await page.getByRole("combobox", {name: "Client account"}).selectOption("workspace-c"); await expect(page.getByText("Mountain bridge inspection", {exact: true})).toBeVisible();
+  await openAccount(page, "workspace-c"); await expect(page.getByText("Mountain bridge inspection", {exact: true})).toBeVisible();
   releaseOldFile(); await expect(page.getByRole("dialog")).toHaveCount(0);
   delayContext = true; const before = calls.filter(call => call.path.endsWith("workspace-b/context")).length; await page.goBack();
   await expect.poll(() => calls.filter(call => call.path.endsWith("workspace-b/context")).length).toBeGreaterThan(before);
@@ -487,7 +495,7 @@ test("switching native sources aborts stale notifications and resets the bell to
   });
   await page.goto("/portal?workspace=workspace-b");
   await expect.poll(() => calls.some(call => call.path === "/api/client/notification-history" && call.workspace === "workspace-b")).toBe(true);
-  await page.getByRole("combobox", {name: "Client account"}).selectOption("workspace-c");
+  await openAccount(page, "workspace-c");
   const bell = page.getByRole("button", {name: /Notifications, 1 unread update/}); await expect(bell).toBeVisible(); await bell.click();
   await expect(page.getByText("Mountain current update", {exact: true})).toBeVisible(); release();
   await expect(page.getByText("Coastal stale update", {exact: true})).toHaveCount(0);
@@ -737,4 +745,57 @@ for (const width of [375, 640, 1280, 3440]) test(`native portal directory and de
   await expect(previewDownload).toHaveClass(/\bbutton\b/); await expect(previewDownload).toHaveCSS("text-decoration-line", "none"); await expect(previewDownload).toHaveCSS("align-items", "center"); await expect(previewDownload).toHaveCSS("justify-content", "center");
   expect(await previewDownload.evaluate(element => parseFloat(getComputedStyle(element).borderTopLeftRadius))).toBeGreaterThan(0);
   expect(errors).toEqual([]);
+});
+
+test("the unified portal lists every account's projects without a switcher and opens each in its exact account", async ({page}) => {
+  const calls = await mock(page); await page.goto("/portal/projects");
+  await expect(page.getByRole("combobox", {name: "Client account"})).toHaveCount(0);
+  const projects = page.locator(".portal-project-grid .portal-project-card");
+  await expect(projects).toHaveCount(3);
+  await expect(page.getByRole("button", {name: /Primary-only project/})).toContainText("Ledge Top Drone Services");
+  // Same public project ID in two accounts stays two separate items.
+  await expect(page.getByRole("button", {name: /Coastal seawall construction documentation/})).toBeVisible();
+  await expect(page.getByRole("button", {name: /Mountain bridge inspection/})).toBeVisible();
+  await expect(page.locator(".client-portal")).not.toContainText("project-alpha:");
+  await expect(page.locator(".client-portal")).not.toContainText("Project Alpha (");
+  expect(calls.filter(call => call.path === "/api/client/projects").every(call => call.workspace === "workspace-a")).toBe(true);
+  expect(calls.some(call => call.path.endsWith("workspace-b/hierarchy")) && calls.some(call => call.path.endsWith("workspace-c/hierarchy"))).toBe(true);
+  await page.getByRole("button", {name: /Mountain bridge inspection/}).click();
+  await expect(page).toHaveURL(/\/portal\/projects\/project-shared\?workspace=workspace-c$/);
+  await expect(page.getByText("Mountain bridge inspection", {exact: true}).first()).toBeVisible();
+  await expect(page.getByText("Coastal seawall construction documentation", {exact: true})).toHaveCount(0);
+  await expect(page.locator(".unified-portal-context")).toContainText("Mountain Engineering");
+  const topNav = page.getByRole("navigation", {name: "Client portal"});
+  if (await topNav.isVisible()) await topNav.getByRole("link", {name: "Projects"}).click();
+  else { await page.getByRole("button", {name: "Open navigation"}).click(); await page.getByRole("navigation", {name: "Mobile client portal navigation"}).getByRole("link", {name: "Projects"}).click(); }
+  await expect(page).toHaveURL(/\/portal\/projects$/);
+  await expect(projects).toHaveCount(3);
+});
+
+test("one unavailable account is reported in place without hiding the others", async ({page}) => {
+  let failing = true;
+  await mock(page, (route, call) => call.path.endsWith("workspace-c/context") && failing ? route.fulfill({status: 503, json: {error: "Temporarily unavailable"}}) : undefined);
+  await page.goto("/portal/projects");
+  await expect(page.getByRole("alert")).toContainText("Mountain Engineering");
+  await expect(page.getByRole("button", {name: /Coastal seawall construction documentation/})).toBeVisible();
+  await expect(page.getByRole("button", {name: /Primary-only project/})).toBeVisible();
+  failing = false; await page.getByRole("button", {name: "Try again"}).click();
+  await expect(page.getByRole("button", {name: /Mountain bridge inspection/})).toBeVisible();
+  await expect(page.getByRole("alert")).toHaveCount(0);
+});
+
+test("a link naming an account still opens that account's own page", async ({page}) => {
+  await mock(page); await page.goto("/portal/projects?workspace=workspace-b");
+  await expect(page.getByRole("link", {name: /^Open project\s*: Coastal seawall construction documentation$/})).toBeVisible();
+  await expect(page.getByText("Mountain bridge inspection", {exact: true})).toHaveCount(0);
+  await page.getByRole("button", {name: "Show all businesses"}).click();
+  await expect(page).toHaveURL(/\/portal\/projects$/);
+  await expect(page.getByRole("button", {name: /Mountain bridge inspection/})).toBeVisible();
+});
+
+for (const width of [375, 1280]) test(`unified projects fit ${width}px without horizontal scrolling`, async ({page}) => {
+  await page.setViewportSize({width, height: 900});
+  await mock(page); await page.goto("/portal/projects");
+  await expect(page.locator(".portal-project-grid .portal-project-card")).toHaveCount(3);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1)).toBe(true);
 });

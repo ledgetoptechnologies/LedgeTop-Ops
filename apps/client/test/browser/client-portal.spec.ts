@@ -4,6 +4,14 @@ import { fileURLToPath } from "node:url";
 import type { DeliveryLocationCollection } from "@ltds/shared";
 import type { PortalAccount, PortalFilePage, PortalServiceDraft, PortalServiceRequest } from "../../src/client/portal-api";
 
+/** An in-app link to one exact client account (e.g. from a unified list or a notification); replaces the removed switcher. */
+async function openAccount(page: Page, workspaceId: string, path = "/portal/dashboard") {
+  await page.evaluate(([id, target]) => {
+    const url = new URL(target, location.origin); url.searchParams.set("workspace", id);
+    window.history.pushState({}, "", `${url.pathname}${url.search}`); window.dispatchEvent(new PopStateEvent("popstate"));
+  }, [workspaceId, path] as const);
+}
+
 const account = { id: "account-a", displayName: "Acme Surveying" };
 const projects = [{ id: "project-a", externalRef: "ALPHA-1", clientName: "Acme", projectName: "North Site", canRequestService: true, status: "in_progress", summary: "Aerial progress documentation", siteAddress: null, serviceAddress: "100 Main St", projectContactName: "LTDS Operations", projectContactEmail: "ops@example.com", projectContactPhone: null, nextMilestone: "Spring progress imagery", lastUpdateAt: "2026-08-01T12:00:00.000Z" }];
 const filePage = { files: [{ id: "file-a", name: "final.pdf", size: 2048, uploadedAt: "2026-08-01T12:00:00.000Z", contentType: "application/pdf", kind: "pdf" as const, previewPath: "/api/client/files/file-a/preview?projectId=project-a", thumbnailPath: "/api/client/files/file-a/thumbnail?projectId=project-a", downloadPath: "/api/client/files/file-a/download?projectId=project-a" }], prefix: "", cursor: null };
@@ -219,7 +227,7 @@ test("effective authenticated-delivery folders use only AD1 scoped reads and pre
   await expect.poll(() => new URL(page.url()).searchParams.get("folder")).toBe(ad1Child);
   await page.getByRole("button", {name: "Effective deliverables"}).click();
   await expect.poll(() => new URL(page.url()).searchParams.get("folder")).toBe(ad1Root);
-  await page.getByRole("combobox", {name: "Client account"}).selectOption(otherEffectiveWorkspace.id);
+  await openAccount(page, otherEffectiveWorkspace.id);
   await expect(page).toHaveURL(new RegExp(`/portal/dashboard\\?workspace=${otherEffectiveWorkspace.id}$`));
   await expect(page.getByRole("heading", {name: "Shared delivery folder"})).toHaveCount(0);
   expect(calls.filter(call => call.path === "/api/client/authenticated-deliveries/files").map(call => call.query.get("folder"))).toEqual([ad1Root, ad1Child, ad1Root]);
@@ -407,7 +415,7 @@ test("client-created links use opaque authorized targets and remain usable on de
   expect(revoked).toBe(true);
 });
 
-test("workspace-v2 selection scopes every authenticated resource request and switches without a full refresh", async ({ page }) => {
+test("the unified portal lists every account with its own scope and opens items in their exact account", async ({ page }) => {
   const observed: Array<{ path: string; workspace: string | undefined }> = [];
   await page.route("**/api/client/**", async route => {
     const request = route.request();
@@ -435,16 +443,22 @@ test("workspace-v2 selection scopes every authenticated resource request and swi
   });
 
   await page.goto("/portal");
-  await expect(page.getByRole("heading", { name: "Alpha" })).toBeVisible();
-  await expect(page.getByRole("combobox", { name: "Client account" })).toHaveValue("workspace-a");
-  expect(observed.filter(item => ["/api/client/projects", "/api/client/service-requests", "/api/client/map-config", "/api/client/notification-history"].includes(item.path)).every(item => item.workspace === "workspace-a")).toBe(true);
+  await expect(page.getByRole("button", { name: /North Site/ })).toBeVisible();
+  await expect(page.getByRole("button", { name: /Beta Site/ })).toBeVisible();
+  await expect(page.getByRole("combobox", { name: "Client account" })).toHaveCount(0);
+  await expect(page).toHaveURL(/\/portal$/);
+  // Each account's own resources are read with that account's own explicit scope, never a merged one.
+  const projectReads = observed.filter(item => item.path === "/api/client/projects");
+  expect(projectReads.every(item => item.workspace === "workspace-a" || item.workspace === "workspace-b")).toBe(true);
+  expect(new Set(projectReads.map(item => item.workspace))).toEqual(new Set(["workspace-a", "workspace-b"]));
+  expect(observed.filter(item => item.path === "/api/client/service-requests").every(item => item.workspace)).toBe(true);
 
-  await page.getByRole("combobox", { name: "Client account" }).selectOption("workspace-b");
-  await expect(page.getByRole("heading", { name: "Beta" })).toBeVisible();
-  await expect(page.getByText("Beta Site")).toBeVisible();
+  await page.getByRole("button", { name: /Beta Site/ }).click();
+  await expect(page).toHaveURL(/\/portal\/projects\/project-b\?workspace=workspace-b$/);
+  await expect(page.locator(".unified-portal-context")).toContainText("Ledge Top Drone Services · Beta");
   expect(observed.filter(item => item.path === "/api/client/projects").at(-1)?.workspace).toBe("workspace-b");
-  await expect(page).toHaveURL(/\/portal\/dashboard\?workspace=workspace-b$/);
 });
+
 
 test("authorized portal supports project, delivery, and request workflows", async ({ page }) => {
   await mockAuthorizedPortal(page);
@@ -602,13 +616,10 @@ test("native workspace branding stays generic Ledge Top for every source across 
     }))).toEqual({ documentFits: true, outside: 0 });
 
     if (width >= 961) {
-      await expect(page.getByRole("combobox", { name: "Client account" })).toBeVisible();
-      await expect(page.getByRole("combobox", { name: "Client account" }).locator("option")).toHaveText(["LTT Client", "LTDS Client"]);
-      const labelStyles = await brand.locator("small").evaluate(element => {
-        const style = getComputedStyle(element);
-        return { whiteSpace: style.whiteSpace, textOverflow: style.textOverflow, overflow: style.overflow };
-      });
-      expect(labelStyles).toEqual({ whiteSpace: "nowrap", textOverflow: "ellipsis", overflow: "hidden" });
+      await expect(page.getByRole("combobox", { name: "Client account" })).toHaveCount(0);
+      // With no account switcher the full "Client portal" label has room and is never clipped.
+      expect(await brand.locator("small").evaluate(element => element.scrollWidth <= element.clientWidth + 1)).toBe(true);
+      await expect(brand.locator("small")).toHaveText(/client portal/i);
     }
   }
 });
