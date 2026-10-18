@@ -93,6 +93,8 @@ describe.each(["production", "staging"] as const)("canonical portal migration: %
   it("accepts existing bearer cookies on their original share host and still rechecks the current share version", async () => {
     const configuration = migration(environment), expiresAt = Date.now() + 4 * 60 * 60_000;
     const cookie = await createSessionCookie(configuration.DELIVERY_SESSION_SECRET, configuration.SESSION_KEY_ID, "existing-share", 7, expiresAt);
+    const cookieHeader = cookie.split(";")[0];
+    if (!cookieHeader) throw new Error("Expected a signed session cookie header");
     let currentVersion = 7;
     const first = vi.fn(async () => ({ id: "existing-share", public_id: "existing-public-link", share_version: currentVersion,
       project_exists: 1, project_active: 1, revoked_at: null, revoked_reason: null, expires_at: null, unavailable_since: null,
@@ -105,7 +107,7 @@ describe.each(["production", "staging"] as const)("canonical portal migration: %
       PUBLIC_MANIFEST_RATE_LIMITER: { limit: async () => ({ success: true }) },
     } as unknown as Env;
     const origin = environment === "production" ? configuration.CLIENT_PORTAL_RETIRED_ORIGINS : configuration.PUBLIC_SHARE_ORIGIN;
-    const request = () => new Request(`${origin}/api/public/shares/existing-public-link/locations`, { headers: { Cookie: cookie.split(";")[0] } });
+    const request = () => new Request(`${origin}/api/public/shares/existing-public-link/locations`, { headers: { Cookie: cookieHeader } });
     const response = await worker.fetch(request(), env, context);
     expect(response.status).toBe(200);
     expect(response.headers.get("Location")).toBeNull();
