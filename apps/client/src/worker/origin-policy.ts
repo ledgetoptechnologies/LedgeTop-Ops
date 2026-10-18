@@ -2,7 +2,7 @@ import { HTTPException } from "hono/http-exception";
 import type { Env } from "./types";
 
 type OriginEnv = Pick<Env,
-  "ENVIRONMENT" | "EXPECTED_HOST" | "PUBLIC_BASE_URL" | "PUBLIC_SHARE_ORIGIN" | "CLIENT_PORTAL_ORIGIN" | "CLIENT_PORTAL_ORIGINS" | "LEGACY_CLIENT_ORIGINS"
+  "ENVIRONMENT" | "EXPECTED_HOST" | "PUBLIC_BASE_URL" | "PUBLIC_SHARE_ORIGIN" | "CLIENT_PORTAL_ORIGIN" | "CLIENT_PORTAL_ORIGINS" | "LEGACY_CLIENT_ORIGINS" | "CLIENT_PORTAL_RETIRED_ORIGINS"
 >;
 
 type RequestNamespace = "public" | "portal" | "internal" | "shared" | "assets" | "unknown";
@@ -94,13 +94,28 @@ export function configuredPublicRequestOrigins(env: OriginEnv): string[] | null 
   return [...new Set([publicOrigin, ...legacyOrigins])];
 }
 
+/** Portal retirement must not add an origin to the public bearer allowlist.
+ * A former portal may independently remain an explicit legacy public-link host. */
+export function configuredRetiredPortalOrigins(env: OriginEnv): string[] | null {
+  if (!env.CLIENT_PORTAL_RETIRED_ORIGINS) return [];
+  const values = env.CLIENT_PORTAL_RETIRED_ORIGINS.split(",").map(value => value.trim());
+  if (!values.length || values.length > 4 || values.some(value => !value)) return null;
+  const origins = values.map(value => exactOrigin(value, deployed(env))?.origin ?? null);
+  if (origins.some(value => value === null)) return null;
+  const exact = origins as string[];
+  const active = configuredClientPortalOrigins(env);
+  if (!active || new Set(exact).size !== exact.length || exact.some(value => active.includes(value))) return null;
+  return exact;
+}
+
 export function clientPortalRequestOriginAllowed(request: Request, env: OriginEnv): boolean {
   const origins = configuredClientPortalOrigins(env);
   const legacy = configuredLegacyClientOrigins(env);
-  if (!origins || !legacy) return false;
+  const retired = configuredRetiredPortalOrigins(env);
+  if (!origins || !legacy || !retired) return false;
   let requestOrigin: string;
   try { requestOrigin = new URL(request.url).origin; } catch { return false; }
-  return request.headers.get("Origin") === requestOrigin && [...origins, ...legacy].includes(requestOrigin);
+  return !retired.includes(requestOrigin) && request.headers.get("Origin") === requestOrigin && [...origins, ...legacy].includes(requestOrigin);
 }
 
 export function requirePublicShareOrigin(env: OriginEnv): string {
@@ -135,14 +150,17 @@ export function malformedPortalLaunchRedirect(requestUrl: string, env: OriginEnv
   if (!deployed(env)) return null;
   const origins = configuredClientPortalOrigins(env);
   const legacy = configuredLegacyClientOrigins(env);
-  if (!origins || !legacy) return null;
+  const retired = configuredRetiredPortalOrigins(env);
+  if (!origins || !legacy || !retired) return null;
   let request: URL;
   try { request = new URL(requestUrl); } catch { return null; }
   const pathname = request.pathname.toLocaleLowerCase("en-US");
-  if (![...origins, ...legacy].includes(request.origin) || (pathname !== "/portal*" && pathname !== "/portal%2a")) return null;
+  if (![...origins, ...legacy, ...retired].includes(request.origin) || (pathname !== "/portal*" && pathname !== "/portal%2a")) return null;
   request.pathname = "/portal";
   request.searchParams.delete("__cf_access_message");
-  return request.toString();
+  return retired.includes(request.origin)
+    ? new URL(`${request.pathname}${request.search}`, configuredClientPortalOrigin(env)!).toString()
+    : request.toString();
 }
 
 /** Redirects non-secret browser entry routes from an explicitly configured
@@ -152,10 +170,11 @@ export function malformedPortalLaunchRedirect(requestUrl: string, env: OriginEnv
 export function legacyClientRedirectLocation(requestUrl: string, env: OriginEnv): string | null {
   if (!deployed(env)) return null;
   const legacy = configuredLegacyClientOrigins(env);
-  if (!legacy) return null;
+  const retired = configuredRetiredPortalOrigins(env);
+  if (!legacy || !retired) return null;
   let request: URL;
   try { request = new URL(requestUrl); } catch { return null; }
-  if (!legacy.includes(request.origin)) return null;
+  if (![...legacy, ...retired].includes(request.origin)) return null;
   const namespace = requestNamespace(request.pathname);
   if (request.pathname === "/health" || request.pathname.startsWith("/api/") || namespace === "public" || namespace === "assets" || namespace === "unknown") return null;
   const targetOrigin = configuredClientPortalOrigin(env);
@@ -176,6 +195,11 @@ export function requestHostAllowed(requestUrl: string, env: OriginEnv): boolean 
   const legacyOrigins = configuredLegacyClientOrigins(env);
   if (!legacyOrigins) return false;
   if (namespace === "public") return publicRequestOrigins.includes(request.origin);
+  const retired = configuredRetiredPortalOrigins(env);
+  if (!retired) return false;
+  // GET/HEAD portal entries redirect before admission. API bodies/cookies are
+  // never forwarded to another origin, and retired hosts cannot serve private data.
+  if (retired.includes(request.origin)) return namespace === "shared" || namespace === "assets";
   const primaryPortalOrigin = configuredClientPortalOrigin(env);
   // Machine ingress is canonical-only. Legacy origins remain available to the
   // browser/public namespaces above and below, but never to /api/internal/*.

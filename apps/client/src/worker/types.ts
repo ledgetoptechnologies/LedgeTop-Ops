@@ -188,6 +188,9 @@ export interface Env {
   CLIENT_ACCESS_TEAM_DOMAIN?: string;
   CLIENT_ACCESS_AUD?: string;
   CLIENT_ACCESS_AUDS?: string;
+  /** Retired portal entry hosts redirect to the primary portal but never admit client APIs.
+   * Separate from LEGACY_CLIENT_ORIGINS, which preserves existing public bearer links. */
+  CLIENT_PORTAL_RETIRED_ORIGINS?: string;
   MAPBOX_PUBLIC_TOKEN?: string;
   ENVIRONMENT: string;
   SESSION_KEY_ID: string;
