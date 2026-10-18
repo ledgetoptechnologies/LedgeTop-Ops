@@ -799,3 +799,59 @@ for (const width of [375, 1280]) test(`unified projects fit ${width}px without h
   await expect(page.locator(".portal-project-grid .portal-project-card")).toHaveCount(3);
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1)).toBe(true);
 });
+
+test("unified focus revalidation clears a revoked account before the response and recovers independently", async ({page}) => {
+  let revoked = false, release: (() => void) | undefined;
+  await mock(page, (route, call) => {
+    if (call.path.endsWith("workspace-c/context") && revoked) return new Promise<void>(resolve => {
+      release = () => { void route.fulfill({status: 403, json: {error: "Access revoked"}}).then(() => resolve()); };
+    });
+    return undefined;
+  });
+  await page.clock.install();
+  await page.goto("/portal/projects");
+  await expect(page.getByRole("button", {name: /Mountain bridge inspection/})).toBeVisible();
+  revoked = true;
+  await page.clock.fastForward(1100);
+  await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+  await expect(page.getByRole("button", {name: /Mountain bridge inspection/})).toHaveCount(0);
+  await expect.poll(() => Boolean(release)).toBe(true);
+  release!();
+  await expect(page.getByRole("alert")).toContainText("Access revoked");
+  await expect(page.getByRole("button", {name: /Coastal seawall construction documentation/})).toBeVisible();
+  await expect(page.getByRole("button", {name: /Primary-only project/})).toBeVisible();
+  revoked = false;
+  await page.getByRole("button", {name: "Try again"}).click();
+  await expect(page.getByRole("button", {name: /Mountain bridge inspection/})).toBeVisible();
+  await expect(page.getByRole("alert")).toHaveCount(0);
+});
+
+test("unified polling removes stale data after a source becomes unavailable", async ({page}) => {
+  let unavailable = false;
+  await mock(page, (route, call) => call.path.endsWith("workspace-c/context") && unavailable
+    ? route.fulfill({status: 503, json: {error: "Source unavailable"}}) : undefined);
+  await page.clock.install();
+  await page.goto("/portal/projects");
+  await expect(page.getByRole("button", {name: /Mountain bridge inspection/})).toBeVisible();
+  unavailable = true;
+  await page.clock.fastForward(60_001);
+  await expect(page.getByRole("alert")).toContainText("Source unavailable");
+  await expect(page.getByRole("button", {name: /Mountain bridge inspection/})).toHaveCount(0);
+  await expect(page.getByRole("button", {name: /Primary-only project/})).toBeVisible();
+});
+
+test("unified projects reports hierarchy pagination limits instead of a complete partial list", async ({page}) => {
+  let pages = 0;
+  await mock(page, (route, call) => {
+    if (call.path.endsWith("workspace-c/hierarchy")) {
+      pages++;
+      return route.fulfill({json: {...hierarchy("workspace-c"), page: {nextCursor: `page-${pages}`}}});
+    }
+    return undefined;
+  });
+  await page.goto("/portal/projects");
+  await expect(page.getByRole("alert")).toContainText("too large to load completely");
+  expect(pages).toBe(10);
+  await expect(page.getByRole("button", {name: /Mountain bridge inspection/})).toHaveCount(0);
+  await expect(page.getByRole("button", {name: /Primary-only project/})).toBeVisible();
+});

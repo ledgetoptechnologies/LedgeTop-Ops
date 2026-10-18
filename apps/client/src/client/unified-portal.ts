@@ -84,6 +84,7 @@ async function loadNativeProjects(context: NativePortalContext, signal: AbortSig
     cursor = result.page.nextCursor;
     if (!cursor) break;
   }
+  if (cursor) throw new Error("This client’s project list is too large to load completely here. Open that client’s projects to see the remaining items.");
   return projects;
 }
 

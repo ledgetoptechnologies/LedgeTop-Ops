@@ -30,7 +30,6 @@ export function UnifiedPortal({ page, workspaces, openInAccount, navigate, rende
   supplement?: ReactNode;
 }) {
   const accounts = useMemo(() => workspaces.filter(unifiedAccountSupported).map(unifiedAccount), [workspaces]);
-  const accountKey = accounts.map(account => account.workspace.id).join("\u0000");
   const [results, setResults] = useState<Map<string, UnifiedAccountResult>>(() => new Map());
   const [retry, setRetry] = useState(0);
   const [filter, setFilter] = useState<string>("all");
@@ -38,16 +37,45 @@ export function UnifiedPortal({ page, workspaces, openInAccount, navigate, rende
   const generation = useRef(0);
 
   useEffect(() => {
-    const controller = new AbortController(), current = ++generation.current;
-    setResults(new Map());
-    void loadUnifiedPortal(accounts.map(account => account.workspace), controller.signal, result => {
-      if (controller.signal.aborted || current !== generation.current) return;
-      setResults(previous => new Map(previous).set(result.account.workspace.id, result));
-    }).catch(() => undefined);
-    return () => controller.abort();
-    // accountKey captures the exact authorized account list.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [accountKey, retry]);
+    let active = true, controller: AbortController | null = null, lastStartedAt = -Infinity;
+    const clear = () => {
+      generation.current++;
+      controller?.abort();
+      controller = null;
+      setResults(new Map());
+    };
+    const refresh = () => {
+      if (!active || document.visibilityState !== "visible") return;
+      const now = Date.now();
+      if (now - lastStartedAt < 1000) return;
+      lastStartedAt = now;
+      // Hide the previous private summaries before checking each account again.
+      // A denied/unavailable account must never retain its last successful data.
+      clear();
+      const current = generation.current, requestController = new AbortController();
+      controller = requestController;
+      void loadUnifiedPortal(accounts.map(account => account.workspace), requestController.signal, result => {
+        if (!active || requestController.signal.aborted || current !== generation.current) return;
+        setResults(previous => new Map(previous).set(result.account.workspace.id, result));
+      }).catch(() => undefined);
+    };
+    const visibilityChanged = () => {
+      if (document.visibilityState === "visible") refresh();
+      else { clear(); lastStartedAt = 0; }
+    };
+    refresh();
+    window.addEventListener("focus", refresh);
+    document.addEventListener("visibilitychange", visibilityChanged);
+    const timer = window.setInterval(refresh, 60_000);
+    return () => {
+      active = false;
+      generation.current++;
+      controller?.abort();
+      window.clearInterval(timer);
+      window.removeEventListener("focus", refresh);
+      document.removeEventListener("visibilitychange", visibilityChanged);
+    };
+  }, [accounts, retry]);
 
   const withClient = showsClientName(accounts);
   const filters = useMemo(() => {
