@@ -41,12 +41,13 @@ const ownerPolicy = `EXISTS(SELECT 1 FROM native_directory_grants own WHERE own.
   AND own.permission='directory.profile.view' AND own.effect='allow' AND own.active=1 AND ${ownerGrantApplies('own')})
   AND NOT EXISTS(SELECT 1 FROM native_directory_grants deny WHERE deny.staff_id=p.owner_staff_id
     AND deny.permission='directory.profile.view' AND deny.effect='deny' AND deny.active=1
-    AND (${ownerGrantApplies('deny')} OR (deny.scope_kind IN ('division','business_area') AND NOT EXISTS(
-      SELECT 1 FROM native_directory_resource_scopes classified
-      JOIN native_business_areas area ON area.id=classified.business_area_id AND area.active=1
-      LEFT JOIN native_business_divisions division ON division.id=classified.division_id AND division.active=1
-      WHERE classified.record_id=r.record_id AND classified.active=1
-        AND (deny.scope_kind='business_area' OR (classified.scope_kind='division' AND division.id IS NOT NULL))))))`;
+    AND (${ownerGrantApplies('deny')} OR (deny.scope_kind IN ('division','business_area') AND (
+      NOT EXISTS(SELECT 1 FROM native_directory_resource_scopes any_scope WHERE any_scope.record_id=r.record_id AND any_scope.active=1)
+      OR EXISTS(SELECT 1 FROM native_directory_resource_scopes classified
+        LEFT JOIN native_business_areas area ON area.id=classified.business_area_id AND area.active=1
+        LEFT JOIN native_business_divisions division ON division.id=classified.division_id AND division.active=1
+        WHERE classified.record_id=r.record_id AND classified.active=1
+          AND (area.id IS NULL OR (deny.scope_kind='division' AND (classified.scope_kind<>'division' OR division.id IS NULL))))))))`;
 
 async function readRows(env: AgentEnvironment, actor: Principal, client: string, sourceId: string,
   source: SourceGrant, identity: string, recordId: string | null, q: string, cursor: string, limit: number) {

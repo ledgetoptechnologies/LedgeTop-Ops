@@ -47,7 +47,7 @@ describe('independent signed Access service identity', () => {
 
 describe('machine read routes against full source219 D1', () => {
   let mf: Miniflare, db: D1Database;
-  const record = 'client-one', other = 'client-two', owner = 'agent-owner';
+  const record = 'client-one', other = 'client-two', multi = 'multiscope-client', owner = 'agent-owner';
   const identity = JSON.stringify([origin, instance, application, epoch]);
   const profile = { name: 'Test Client', email: 'client@example.test', phone: '', clientType: 'consumer' as const,
     addressLine1: '', addressLine2: '', city: '', state: 'WI', postalCode: '', country: 'US' };
@@ -97,12 +97,15 @@ describe('machine read routes against full source219 D1', () => {
       db.prepare(`INSERT INTO native_staff_profiles(staff_id,login_email,display_name) VALUES(?,'owner@example.test','Owner')`).bind(owner),
       db.prepare(`INSERT INTO native_business_areas(id,name) VALUES('agent-area','Area')`),
       db.prepare(`INSERT INTO native_business_divisions(id,business_area_id,name) VALUES('agent-division','agent-area','Division')`),
+      db.prepare(`INSERT INTO native_business_divisions(id,business_area_id,name) VALUES('agent-inactive-division','agent-area','Initially active division')`),
       ...['directory.profile.edit', 'directory.identity.link', 'directory.profile.view'].map(permission => db.prepare(`INSERT INTO native_directory_grants
         (id,staff_id,permission,effect,scope_kind,granted_by) VALUES(?,?,?,'allow','global',?)`).bind(permission, owner, permission, owner)),
     ]);
-    for (const recordId of [record, other]) {
+    for (const recordId of [record, other, multi]) {
       const admissionId = uuid(), mutationId = uuid();
-      const scopes = [{ businessAreaId: 'agent-area', divisionId: 'agent-division' }];
+      const scopes: { businessAreaId: string; divisionId: string | null }[] = [{ businessAreaId: 'agent-area', divisionId: 'agent-division' }];
+      if (recordId === multi) scopes.push({ businessAreaId: 'agent-area', divisionId: null }, { businessAreaId: 'agent-area', divisionId: 'agent-inactive-division' });
+      scopes.sort((a, b) => `${a.businessAreaId}\0${a.divisionId ?? ''}`.localeCompare(`${b.businessAreaId}\0${b.divisionId ?? ''}`));
       const destination = { sourceId, sourceInstanceUUID: instance, applicationUUID: application, historyEpoch: epoch, origin,
         externalCanonicalId: recordId, expectedAuthorizationGeneration: '0' };
       const { expectedAuthorizationGeneration: _, ...admitted } = destination;
@@ -204,6 +207,31 @@ describe('machine read routes against full source219 D1', () => {
     expect((await call(m.client, `/clients/${sourceId}/${record}`)).status).toBe(200);
     expect((await call(m.client, `/clients/${sourceId}/${other}`)).status).toBe(404);
     expect((await call(m.client, `/clients/project-alpha:other/${record}`)).status).toBe(403);
+  });
+  it('known plus unknown active scopes never erase a relevant division deny', async () => {
+    const m = await machine();
+    await db.batch([
+      db.prepare(`INSERT INTO native_business_divisions(id,business_area_id,name) VALUES('agent-denied-division','agent-area','Denied division')`),
+      db.prepare(`INSERT INTO native_directory_grants(id,staff_id,permission,effect,scope_kind,division_id,granted_by)
+        VALUES('agent-multiscope-deny',?,'directory.profile.view','deny','division','agent-denied-division',?)`).bind(owner, owner),
+      db.prepare(`INSERT INTO native_directory_grants(id,staff_id,permission,effect,scope_kind,division_id,granted_by)
+        VALUES('agent-multiscope-edit-deny',?,'directory.profile.edit','deny','division','agent-denied-division',?)`).bind(owner, owner),
+    ]);
+    try {
+      // Existing valid division A plus unknown area-only scope cannot dismiss a B deny.
+      expect((await call(m.client, `/clients/${sourceId}/${multi}`)).status).toBe(404);
+      await db.prepare(`UPDATE native_directory_grants SET active=0 WHERE id='agent-multiscope-deny'`).run();
+      expect((await call(m.client, `/clients/${sourceId}/${multi}`)).status).toBe(200); // edit deny is unrelated
+      await db.prepare(`UPDATE native_directory_grants SET active=1 WHERE id='agent-multiscope-deny'`).run();
+      await db.prepare(`UPDATE native_directory_resource_scopes SET active=0 WHERE record_id=? AND scope_kind='business_area'`).bind(multi).run();
+      await db.prepare(`UPDATE native_business_divisions SET active=0 WHERE id='agent-inactive-division'`).run();
+      // A known division plus an active scope pointing to an inactive division is also unknown.
+      expect((await call(m.client, `/clients/${sourceId}/${multi}`)).status).toBe(404);
+    } finally {
+      await db.prepare(`UPDATE native_business_divisions SET active=1 WHERE id='agent-inactive-division'`).run();
+      await db.prepare(`UPDATE native_directory_resource_scopes SET active=1 WHERE record_id=? AND scope_kind='business_area'`).bind(multi).run();
+      await db.prepare(`UPDATE native_directory_grants SET active=0 WHERE id IN ('agent-multiscope-deny','agent-multiscope-edit-deny')`).run();
+    }
   });
   it('machine resource ceiling and deny override a source allow', async () => {
     const m = await machine();
