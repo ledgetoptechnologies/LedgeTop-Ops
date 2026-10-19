@@ -106,7 +106,10 @@ function setup() {
     CREATE TABLE permissions(key TEXT PRIMARY KEY,description TEXT NOT NULL);
     CREATE TABLE roles(id TEXT PRIMARY KEY);
     CREATE TABLE role_permissions(role_id TEXT NOT NULL,permission_key TEXT NOT NULL,PRIMARY KEY(role_id,permission_key),FOREIGN KEY(role_id) REFERENCES roles(id),FOREIGN KEY(permission_key) REFERENCES permissions(key));
-    CREATE TABLE divisions(id TEXT PRIMARY KEY,project_alpha_business_unit_id TEXT UNIQUE);
+    CREATE TABLE divisions(id TEXT PRIMARY KEY,project_alpha_business_unit_id TEXT UNIQUE,active INTEGER NOT NULL DEFAULT 1);
+    CREATE TABLE pa_local_division_source_heads(projection_source_id TEXT PRIMARY KEY,identity_key TEXT);
+    INSERT INTO pa_local_division_source_heads VALUES('project-alpha:primary','fixture');
+    CREATE TABLE pa_local_division_mappings(resource_kind TEXT,resource_id TEXT,projection_source_id TEXT,division_id TEXT,identity_key TEXT DEFAULT 'fixture',PRIMARY KEY(resource_kind,resource_id,projection_source_id));
     CREATE TABLE pa_operations(id TEXT PRIMARY KEY,project_id TEXT NOT NULL,business_unit_id TEXT,title TEXT NOT NULL,status TEXT NOT NULL,scheduled_start_at TEXT,scheduled_end_at TEXT,location TEXT,active INTEGER NOT NULL,projection_source_id TEXT NOT NULL DEFAULT 'project-alpha:primary');
     CREATE TABLE pa_operation_assignments(operation_id TEXT,user_id TEXT,active INTEGER NOT NULL,PRIMARY KEY(operation_id,user_id));
     CREATE TABLE pa_service_locations(id TEXT PRIMARY KEY,project_id TEXT,name TEXT,latitude REAL,longitude REAL,active INTEGER NOT NULL);
@@ -118,7 +121,7 @@ function setup() {
   ops.exec(readFileSync(new URL("../migrations/0035_project_alpha_connectors.sql", import.meta.url), "utf8"));
   const insertStaff = ops.prepare("INSERT INTO staff_users VALUES (?,?,?,?)");
   for (const value of Object.values(principals)) insertStaff.run(value.id, value.email, value.displayName, value.projectAlphaUserId);
-  ops.prepare("INSERT INTO divisions VALUES (?,?)").run("division-flight", "unit-flight");
+  ops.prepare("INSERT INTO divisions(id,project_alpha_business_unit_id) VALUES (?,?)").run("division-flight", "unit-flight");
   ops.prepare("INSERT INTO pa_operations(id,project_id,business_unit_id,title,status,scheduled_start_at,scheduled_end_at,location,active) VALUES (?,?,?,?,?,?,?,?,?)").run(
     "operation-1", "pa-project-1", "unit-flight", "North parcel mapping", "scheduled",
     "2026-08-10T15:00:00Z", "2026-08-10T18:00:00Z", "North parcel", 1,
@@ -127,6 +130,7 @@ function setup() {
     "operation-2", "pa-project-1", "unit-flight", "South parcel mapping", "scheduled",
     "2026-08-11T15:00:00Z", "2026-08-11T18:00:00Z", "South parcel", 1,
   );
+  ops.exec("INSERT INTO pa_local_division_mappings(resource_kind,resource_id,projection_source_id,division_id) VALUES('project','pa-project-1','project-alpha:primary','division-flight')");
   ops.prepare("INSERT INTO pa_operation_assignments VALUES (?,?,1)").run("operation-1", "pa-pilot");
   ops.prepare("INSERT INTO pa_service_locations VALUES (?,?,?,?,?,1)").run("location-1", "pa-project-1", "North field", 44.765432, -88.123456);
 

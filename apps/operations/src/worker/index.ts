@@ -1,3 +1,4 @@
+import { localDivisionJoin } from "./local-project-division";
 import { Hono, type Context } from "hono";
 import { reservePrimaryFolderMutation,attemptPrimaryFolderMutation,completePrimaryFolderMutation,reconcilePrimaryFolderMutation,readPrimaryFolderMutationReview,retryPrimaryDivisionMutation,type DivisionMutationWitness } from './primary-folder-authority-mutations';
 import { backfillIncomingRcloneOutbox, drainIncomingRcloneOutbox } from "./incoming-rclone-outbox";
@@ -1107,7 +1108,7 @@ app.get("/api/dashboard", async (c) => {
     );
   const [operations, tasks, airspace, sync, shares] = await Promise.all([
     c.env.OPS_DB.prepare(
-      `SELECT o.id,o.title,o.status,o.scheduled_start_at scheduled_start,o.business_unit_id,d.name division_name FROM pa_operations o LEFT JOIN divisions d ON d.project_alpha_business_unit_id=o.business_unit_id WHERE ${op.sql} AND o.status NOT IN ('completed','cancelled') ORDER BY o.scheduled_start_at LIMIT 8`,
+      `SELECT o.id,o.title,o.status,o.scheduled_start_at scheduled_start,o.business_unit_id,d.name division_name FROM pa_operations o ${localDivisionJoin("o", "operation")} WHERE ${op.sql} AND o.status NOT IN ('completed','cancelled') ORDER BY o.scheduled_start_at LIMIT 8`,
     )
       .bind(...op.values)
       .all(),
@@ -1167,7 +1168,7 @@ app.get("/api/projects", async (c) => {
     allOperations,
   );
   const search = (c.req.query("search") || "").trim();
-  let sql = `SELECT p.id,p.name,p.status,p.start_date,p.end_date,p.client_id,p.organization_id,p.manager_user_id,pm.display_name manager_name,COALESCE(c.name,o.name,'Unassigned') customer_name,CASE WHEN ?=1 THEN pf.r2_prefix ELSE NULL END r2_prefix,CASE WHEN ?=1 THEN pf.division_id ELSE NULL END division_id FROM pa_projects p LEFT JOIN pa_clients c ON c.id=p.client_id LEFT JOIN pa_organizations o ON o.id=p.organization_id LEFT JOIN pa_users pm ON pm.id=p.manager_user_id LEFT JOIN project_folders pf ON pf.project_id=p.id WHERE ${access.sql}`;
+  let sql = `SELECT p.id,p.name,p.status,p.start_date,p.end_date,p.client_id,p.organization_id,p.manager_user_id,pm.display_name manager_name,COALESCE(c.name,o.name,'Unassigned') customer_name,CASE WHEN ?=1 THEN pf.r2_prefix ELSE NULL END r2_prefix,CASE WHEN ?=1 THEN pf.division_id ELSE NULL END division_id,local_div.id local_division_id,local_div.name local_division_name,CASE WHEN local_div.id IS NULL THEN 'unassigned' ELSE 'assigned' END local_division_status FROM pa_projects p LEFT JOIN pa_clients c ON c.id=p.client_id LEFT JOIN pa_organizations o ON o.id=p.organization_id LEFT JOIN pa_users pm ON pm.id=p.manager_user_id LEFT JOIN project_folders pf ON pf.project_id=p.id ${localDivisionJoin("p", "project", "local_div")} WHERE ${access.sql}`;
   const values: unknown[] = [
     administrator ? 1 : 0,
     administrator ? 1 : 0,
@@ -1203,7 +1204,7 @@ app.get("/api/projects/:id", async (c) => {
     allOperations,
   );
   const project = await c.env.OPS_DB.prepare(
-    `SELECT p.*,pm.display_name manager_name,COALESCE(c.name,o.name,'Unassigned') customer_name,CASE WHEN ?=1 THEN pf.r2_prefix ELSE NULL END r2_prefix,CASE WHEN ?=1 THEN pf.division_id ELSE NULL END division_id FROM pa_projects p LEFT JOIN pa_clients c ON c.id=p.client_id LEFT JOIN pa_organizations o ON o.id=p.organization_id LEFT JOIN pa_users pm ON pm.id=p.manager_user_id LEFT JOIN project_folders pf ON pf.project_id=p.id WHERE p.id=? AND ${access.sql}`,
+    `SELECT p.*,pm.display_name manager_name,COALESCE(c.name,o.name,'Unassigned') customer_name,CASE WHEN ?=1 THEN pf.r2_prefix ELSE NULL END r2_prefix,CASE WHEN ?=1 THEN pf.division_id ELSE NULL END division_id,local_div.id local_division_id,local_div.name local_division_name,CASE WHEN local_div.id IS NULL THEN 'unassigned' ELSE 'assigned' END local_division_status FROM pa_projects p LEFT JOIN pa_clients c ON c.id=p.client_id LEFT JOIN pa_organizations o ON o.id=p.organization_id LEFT JOIN pa_users pm ON pm.id=p.manager_user_id LEFT JOIN project_folders pf ON pf.project_id=p.id ${localDivisionJoin("p", "project", "local_div")} WHERE p.id=? AND ${access.sql}`,
   )
     .bind(
       administrator ? 1 : 0,
@@ -1755,7 +1756,7 @@ app.get("/api/operations", async (c) => {
     "operation",
   );
   const result = await c.env.OPS_DB.prepare(
-    `SELECT o.*,o.scheduled_start_at scheduled_start,o.scheduled_end_at scheduled_end,d.name division_name,p.name project_name FROM pa_operations o LEFT JOIN divisions d ON d.project_alpha_business_unit_id=o.business_unit_id LEFT JOIN pa_projects p ON p.id=o.project_id WHERE ${where.sql} ORDER BY COALESCE(o.scheduled_start_at,o.updated_at) DESC LIMIT 250`,
+    `SELECT o.*,o.scheduled_start_at scheduled_start,o.scheduled_end_at scheduled_end,d.name division_name,p.name project_name FROM pa_operations o ${localDivisionJoin("o", "operation")} LEFT JOIN pa_projects p ON p.id=o.project_id WHERE ${where.sql} ORDER BY COALESCE(o.scheduled_start_at,o.updated_at) DESC LIMIT 250`,
   )
     .bind(...where.values)
     .all();
@@ -1802,7 +1803,7 @@ app.get("/api/tasks", async (c) => {
     "task",
   );
   const result = await c.env.OPS_DB.prepare(
-    `SELECT t.*,t.notes description,d.name division_name,o.title operation_title,p.name project_name,(SELECT GROUP_CONCAT(s.display_name, ', ') FROM pa_task_assignments ta JOIN staff_users s ON s.project_alpha_user_id=ta.user_id WHERE ta.task_id=t.id AND ta.active=1) assigned_name FROM pa_tasks t LEFT JOIN divisions d ON d.project_alpha_business_unit_id=t.business_unit_id LEFT JOIN pa_operations o ON o.id=t.operation_id LEFT JOIN pa_projects p ON p.id=t.project_id WHERE ${where.sql} ORDER BY CASE t.status WHEN 'blocked' THEN 0 WHEN 'in_progress' THEN 1 WHEN 'todo' THEN 2 ELSE 3 END,t.due_at LIMIT 300`,
+    `SELECT t.*,t.notes description,d.name division_name,o.title operation_title,p.name project_name,(SELECT GROUP_CONCAT(s.display_name, ', ') FROM pa_task_assignments ta JOIN staff_users s ON s.project_alpha_user_id=ta.user_id WHERE ta.task_id=t.id AND ta.active=1) assigned_name FROM pa_tasks t ${localDivisionJoin("t", "task")} LEFT JOIN pa_operations o ON o.id=t.operation_id LEFT JOIN pa_projects p ON p.id=t.project_id WHERE ${where.sql} ORDER BY CASE t.status WHEN 'blocked' THEN 0 WHEN 'in_progress' THEN 1 WHEN 'todo' THEN 2 ELSE 3 END,t.due_at LIMIT 300`,
   )
     .bind(...where.values)
     .all<{ id: string } & Record<string, unknown>>();

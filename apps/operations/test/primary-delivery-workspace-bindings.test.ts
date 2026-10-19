@@ -287,7 +287,7 @@ describe("primary signed workspace folder binding",{timeout:60_000,concurrent:fa
     }
   });
 
-  it("retries only the reviewed original division operation and fences its late original command after reactivation",async()=>{
+  it("retires PA-owned division deactivation without replaying writes and still reconciles a proven prior result",async()=>{
     const ids=['retry-division-a','retry-division-b'];
     await ops.batch(ids.map(id=>ops.prepare("INSERT INTO divisions(id,name,code,active,project_alpha_business_unit_id,updated_at) VALUES(?,?,?,1,?,'2026-10-16 00:00:00')").bind(id,id,id,id)));
     await ops.prepare("INSERT INTO pa_projection_entity_leases(projection_source_id,entity_type,entity_id,owner_event_id,lease_until) VALUES('project-alpha:primary','integration_projection','project-alpha','snapshot:retry-original',datetime('now','+1 hour'))").run();
@@ -295,29 +295,14 @@ describe("primary signed workspace folder binding",{timeout:60_000,concurrent:fa
     const witness={divisionIds:ids,sourceId:'project-alpha:primary',leaseOwner:'snapshot:retry-original',expectedRows};
     const mutation=await reservePrimaryFolderMutation(env,staff.id,'division_deactivation',witness);
     await attemptPrimaryFolderMutation(env,mutation);
-    const delayedOriginal=primaryDivisionDeactivationStatement(env,witness);
-    await expect(reconcilePrimaryFolderMutation(env,mutation!.operationId,'reconcile')).rejects.toMatchObject({status:409});
+    expect(()=>primaryDivisionDeactivationStatement(env,witness)).toThrow(/no longer control/);
     const review=await readPrimaryFolderMutationReview(env,mutation!.operationId);
-    await expect(retryPrimaryDivisionMutation(env,mutation!.operationId,'0'.repeat(64))).rejects.toMatchObject({status:409});
-    expect(await retryPrimaryDivisionMutation(env,mutation!.operationId,review.contextVersion)).toMatchObject({state:'completed'});
-    expect((await ops.prepare("SELECT active FROM divisions WHERE id IN(?,?)").bind(...ids).all<{active:number}>()).results).toEqual([{active:0},{active:0}]);
-    // A later legitimate snapshot may reactivate both divisions. The old
-    // command must remain incapable of deactivating either one afterwards.
-    await ops.batch([
-      ops.prepare("UPDATE divisions SET active=1,updated_at='2026-10-16 01:00:00' WHERE id IN(?,?)").bind(...ids),
-      ops.prepare("INSERT INTO pa_projection_entity_leases(projection_source_id,entity_type,entity_id,owner_event_id,lease_until) VALUES('project-alpha:primary','integration_projection','project-alpha','snapshot:newer',datetime('now','+1 hour'))"),
-    ]);
-    expect(Number((await delayedOriginal.run()).meta.changes)).toBe(0);
-    const target=(await searchPrimaryWorkspaceBindingTargets(env,staff,'Jobs/AfterDivisionRetry/','Acme',{divisionId:ids[0]!})).targets[0]!;
-    const linked=await createPrimaryWorkspaceBinding(env,staff,'Jobs/AfterDivisionRetry/',{folderRef:'after-retry',workspaceId:workspace,ownershipMode:'explicit_workspace',divisionId:ids[0]!,ownerScopeType:'organization',ownerPublicId:organizationPublic,reasonCode:'reviewed_client_folder',expectedContextVersion:target.contextVersion},'after-division-retry');
-    expect(linked.binding?.state).toBe('active');
-    expect(Number((await delayedOriginal.run()).meta.changes)).toBe(0);
+    await expect(retryPrimaryDivisionMutation(env,mutation!.operationId,review.contextVersion)).rejects.toMatchObject({status:409});
     expect(await ops.prepare("SELECT count(*) n FROM divisions WHERE id IN(?,?) AND active=1").bind(...ids).first<number>('n')).toBe(2);
-    await suspendExplicitBindingsForDivisionDeactivation(env,ids);
-    expect(await delivery.prepare("SELECT state FROM portal_primary_staff_bindings WHERE binding_id=?").bind(linked.binding!.bindingId).first<string>('state')).toBe('suspended');
-    expect(await delivery.prepare("SELECT status FROM portal_v2_folder_bindings WHERE id=?").bind(linked.binding!.bindingId).first<string>('status')).toBe('suspended');
-    await ops.prepare("DELETE FROM pa_projection_entity_leases WHERE owner_event_id='snapshot:newer'").run();
+    // A result committed by the previous release may still be proven and closed.
     await ops.prepare("UPDATE divisions SET active=0 WHERE id IN(?,?)").bind(...ids).run();
+    expect(await reconcilePrimaryFolderMutation(env,mutation!.operationId,'reconcile')).toMatchObject({state:'completed'});
+    await ops.prepare("DELETE FROM pa_projection_entity_leases WHERE owner_event_id='snapshot:retry-original'").run();
   });
 
   it("lists only the exact signed primary project workspace and creates no access",async()=>{

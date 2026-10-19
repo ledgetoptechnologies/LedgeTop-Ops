@@ -1,3 +1,4 @@
+import { assignLocalProjectDivision, readLocalProjectDivision } from "./local-project-division";
 import { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { isBusinessProjectionSource } from "./client-hub-source";
@@ -39,6 +40,16 @@ function destinationBoundBody(value: unknown, destinationProjectId: string): unk
  * the project-operational-memory service. */
 export function registerProjectOperationalRoutes(app: App, resolveContext: ResolveProjectOperationalContext,
   verifyContext: VerifyProjectOperationalContext): void {
+  // Legacy projection project IDs are resolved to their source on the server.
+  app.get("/api/projects/:id/local-division", async c => {
+    const result=await readLocalProjectDivision(c.env,c.get("principal"),c.req.param("id"));
+    c.header("Cache-Control","no-store");return c.json(result);
+  });
+  app.post("/api/projects/:id/local-division", async c => {
+    const result=await assignLocalProjectDivision(c.env,c.get("principal"),c.req.param("id"),
+      await readBoundedJson(c.req.raw,2048,"Local project division review"),c.req.header("Idempotency-Key")||"");
+    c.header("Cache-Control","no-store");return c.json(result);
+  });
   const base = "/api/client-hub/sources/:sourceId/:rootNamespace/:kind/:publicId/business-projects/:projectId";
   app.get(`${base}/internal-notes`, async c => {
     const clientKind = routeKind(c, "Project notes are unavailable for this source"), principal = c.get("principal");

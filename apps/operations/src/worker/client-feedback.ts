@@ -1,3 +1,4 @@
+import { localDivisionJoin } from "./local-project-division";
 import type { ClientFeedbackEvent, ClientFeedbackStatus, StaffClientFeedbackItem } from "@ltds/shared";
 import type { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
@@ -114,7 +115,7 @@ export async function readStaffFeedbackScope(env: Env, actor: StaffPrincipal, re
     const ownership = {sql:"((p.client_id=? AND owner.id IS NOT NULL) OR (p.organization_id=? AND organization.id IS NOT NULL))",values:[local.client_id,local.org_id]};
     source = await ops.prepare(`SELECT p.id project_id,d.id division_id,p.client_id,p.organization_id,CASE WHEN ${assignment.sql} THEN 1 ELSE 0 END assigned,
       owner.id owner_id,owner.organization_id owner_organization_id,organization.id root_organization_id
-      FROM pa_projects p JOIN divisions d ON d.project_alpha_business_unit_id=p.business_unit_id AND d.active=1
+      FROM pa_projects p ${localDivisionJoin("p", "project", "d", true)}
       LEFT JOIN pa_clients owner ON owner.id=p.client_id AND owner.active=1
       LEFT JOIN pa_organizations organization ON organization.id=? AND organization.active=1
       WHERE p.id=? AND p.projection_source_id='project-alpha:primary' AND (${filter.sql}) AND (${ownership.sql})`).bind(...assignment.values,local.org_id,local.pa_project_id,...filter.values,...ownership.values).first();
@@ -210,7 +211,7 @@ export async function readStaffNativeFeedbackScope(env:Env,actor:StaffPrincipal,
     auth.grants.some(row=>row.source==='override'&&row.effect==='allow'&&row.scope==='global'&&row.permission==='operations.view_all'));
   const assignment=paProjectFilter(scope,actor,false,false);
   const row=await ops.prepare(`SELECT p.id project_id,d.id division_id,CASE WHEN ${assignment.sql} THEN 1 ELSE 0 END assigned
-    FROM pa_projects p JOIN divisions d ON d.project_alpha_business_unit_id=p.business_unit_id AND d.active=1
+    FROM pa_projects p ${localDivisionJoin("p", "project", "d", true)}
     LEFT JOIN pa_clients owner ON owner.id=p.client_id AND owner.projection_source_id=p.projection_source_id AND owner.active=1
     WHERE p.projection_source_id=? AND ${validatedUniquePublicIdExpression('pa_projects','p')}=? AND (${filter.sql})
       AND ${target.rootType==='organization'?`(p.organization_id=? OR (p.organization_id IS NULL AND owner.organization_id=?))`:

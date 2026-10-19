@@ -134,10 +134,17 @@ describe("entitlement projection",()=>{
     expect(await db.prepare("SELECT collection FROM pa_projection_fingerprints WHERE collection='task_assignments'").first("collection")).toBe("task_assignments");
   });
 
-  it("projects business units and derives task calendar changes incrementally",async()=>{
+  it("keeps PA unit events passive and derives task calendar changes incrementally",async()=>{
     const businessUnit:ProjectionEvent={event_id:"a0928e33-f38b-4a7c-88df-b601bb6d719e",event_type:"projection.changed",occurred_at:"2026-07-22T05:00:00.000000Z",schema_version:1,application_key:"ltds_ops",projection:{entity_type:"business_unit",entity_id:"30",action:"upsert",source_updated_at:"2026-07-22T05:00:00.000000Z",data:{id:30,name:"Green Bay",code:"green-bay",is_active:true}}};
     await expect(applyProjectionEvent(env(),businessUnit,"unit-hash")).resolves.toBe("applied");
-    expect(await db.prepare("SELECT name FROM divisions WHERE project_alpha_business_unit_id='30'").first("name")).toBe("Green Bay");
+    expect(await db.prepare("SELECT name FROM divisions WHERE project_alpha_business_unit_id='30'").first("name")).toBe("PA 30");
+    expect(await db.prepare("SELECT name FROM pa_business_units WHERE id='30'").first("name")).toBe("Green Bay");
+    const before=(await db.prepare("SELECT * FROM divisions ORDER BY id").all()).results;
+    const retired={...businessUnit,event_id:crypto.randomUUID(),projection:{...businessUnit.projection,action:"revoke" as const,source_updated_at:"2026-07-22T05:00:01.000000Z",data:{...businessUnit.projection.data,name:"Renamed",is_active:false}}};
+    await expect(applyProjectionEvent(env(),retired,"unit-retired-hash")).resolves.toBe("applied");
+    const newUnit={...businessUnit,event_id:crypto.randomUUID(),projection:{...businessUnit.projection,entity_id:"new-unit",data:{id:"new-unit",name:"New PA unit",code:"new-unit"}}};
+    await expect(applyProjectionEvent(env(),newUnit,"unit-new-hash")).resolves.toBe("applied");
+    expect((await db.prepare("SELECT * FROM divisions ORDER BY id").all()).results).toEqual(before);
 
     const task:ProjectionEvent={event_id:"ff2b7f4d-09a5-44e0-83cb-0423d41021d1",event_type:"projection.changed",occurred_at:"2026-07-22T05:01:00.000000Z",schema_version:1,application_key:"ltds_ops",projection:{entity_type:"task",entity_id:"110",action:"upsert",source_updated_at:"2026-07-22T05:01:00.000000Z",data:{id:110,project_id:40,business_unit_id:30,title:"Map site",status:"todo",due_at:"2026-07-23T18:00:00.000000Z"}}};
     await expect(applyProjectionEvent(env(),task,"task-hash")).resolves.toBe("applied");
@@ -146,7 +153,7 @@ describe("entitlement projection",()=>{
     const unscheduled:ProjectionEvent={...task,event_id:"d2266134-bd9a-47d9-aee2-46f771078e86",occurred_at:"2026-07-22T05:02:00.000000Z",projection:{...task.projection,source_updated_at:"2026-07-22T05:02:00.000000Z",data:{...task.projection.data,due_at:null}}};
     await expect(applyProjectionEvent(env(),unscheduled,"task-unscheduled-hash")).resolves.toBe("applied");
     expect(await db.prepare("SELECT active FROM pa_calendar_events WHERE id='task:110'").first("active")).toBe(0);
-  });
+ },30_000);
 
   it("accepts client and organization projections and retries portal propagation before advancing the source version",async()=>{
     const state={failNext:true,writes:[] as Array<{sql:string;values:unknown[]}>};

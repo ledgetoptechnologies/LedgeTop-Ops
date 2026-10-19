@@ -1,3 +1,4 @@
+import { localDivisionJoin } from "./local-project-division";
 import type { Permission } from "@ltds/shared";
 import { Hono, type Context } from "hono";
 import { HTTPException } from "hono/http-exception";
@@ -182,7 +183,7 @@ function authoritativeContextSql(kind: WorkContextKind): { ctes: string; allowed
             WHERE a.project_id=p.id AND a.user_id=actor.project_alpha_user_id AND a.active=1)
         ) THEN 1 ELSE 0 END manage_assigned
        FROM pa_projects p CROSS JOIN actor
-       LEFT JOIN divisions d ON d.project_alpha_business_unit_id=p.business_unit_id
+       ${localDivisionJoin("p", "project")}
        WHERE p.id=? AND p.active=1 AND ${projectAlphaReadVisibleSql("p.projection_source_id")}`
     : `SELECT t.id,d.id division_id,
         CASE WHEN t.projection_source_id='project-alpha:primary' AND actor.project_alpha_user_id IS NOT NULL
@@ -196,7 +197,7 @@ function authoritativeContextSql(kind: WorkContextKind): { ctes: string; allowed
           WHERE a.task_id=t.id AND a.user_id=actor.project_alpha_user_id AND a.active=1
         ) THEN 1 ELSE 0 END manage_assigned
        FROM pa_tasks t CROSS JOIN actor
-       LEFT JOIN divisions d ON d.project_alpha_business_unit_id=t.business_unit_id
+       ${localDivisionJoin("t", "task")}
        WHERE t.id=? AND t.active=1 AND ${projectAlphaReadVisibleSql("t.projection_source_id")}`;
   const view = viewPermission(kind);
   return {
@@ -263,7 +264,7 @@ async function visibleContext(
           UNION SELECT p.manager_user_id WHERE p.manager_user_id IS NOT NULL
         )) manage_staff_ids
        FROM pa_projects p
-       LEFT JOIN divisions d ON d.project_alpha_business_unit_id=p.business_unit_id
+       ${localDivisionJoin("p", "project")}
        WHERE p.id=? AND ${filter.sql}`,
     ).bind(id, ...filter.values).first<WorkContextRow>();
     if (!row) throw new HTTPException(404, { message: "Project not found" });
@@ -280,7 +281,7 @@ async function visibleContext(
         JOIN staff_users s ON s.project_alpha_user_id=a.user_id
         WHERE a.task_id=t.id AND a.active=1) manage_staff_ids
      FROM pa_tasks t
-     LEFT JOIN divisions d ON d.project_alpha_business_unit_id=t.business_unit_id
+     ${localDivisionJoin("t", "task")}
      WHERE t.id=? AND ${filter.sql}`,
   ).bind(id, ...filter.values).first<WorkContextRow>();
   if (!row) throw new HTTPException(404, { message: "Task not found" });
@@ -361,7 +362,7 @@ async function contextRows(
             SELECT a.user_id FROM pa_project_assignments a WHERE a.project_id=p.id AND a.active=1
             UNION SELECT p.manager_user_id WHERE p.manager_user_id IS NOT NULL
           )) manage_staff_ids
-         FROM pa_projects p LEFT JOIN divisions d ON d.project_alpha_business_unit_id=p.business_unit_id
+         FROM pa_projects p ${localDivisionJoin("p", "project")}
          WHERE p.active=1 AND p.id IN (${placeholders}) AND ${projectAlphaReadVisibleSql("p.projection_source_id")}`
       : `SELECT t.id,t.title,t.status,d.id division_id,
           (SELECT owner.id FROM staff_users owner WHERE owner.project_alpha_user_id=t.created_by_user_id LIMIT 1) owner_id,
@@ -371,7 +372,7 @@ async function contextRows(
           (SELECT GROUP_CONCAT(s.id) FROM pa_task_assignments a
             JOIN staff_users s ON s.project_alpha_user_id=a.user_id
             WHERE a.task_id=t.id AND a.active=1) manage_staff_ids
-         FROM pa_tasks t LEFT JOIN divisions d ON d.project_alpha_business_unit_id=t.business_unit_id
+         FROM pa_tasks t ${localDivisionJoin("t", "task")}
          WHERE t.active=1 AND t.id IN (${placeholders}) AND ${projectAlphaReadVisibleSql("t.projection_source_id")}`;
     const rows = await env.OPS_DB.withSession("first-primary").prepare(query)
       .bind(...chunk).all<WorkContextRow>();
