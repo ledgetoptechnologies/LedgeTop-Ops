@@ -225,6 +225,16 @@ Run `node src/machine-cli.mjs doctor` with that environment for a connection GET
 reads require separately provisioned Access service identity and current native
 agent, owner and source authority. An Access token alone grants no native scope.
 
+That offline discovery lists tools only. Call authenticated `get_connection` to
+obtain `sources: [{sourceId, displayName}]`, then pass an exact returned source ID
+to `find_clients`. Sources appear only when at least one current native record is
+readable under both owner and machine policy, with the exact configured source,
+visible connector, current identity head and live capability-only observer.
+Revoked, denied, unavailable or empty sources are not advertised. Display names
+come from the matched connector and never select identity or grant access.
+The response additions pass through the older machine adapter unchanged; its
+older description still calls the tool an inspection of the connection.
+
 Machine mode is pinned to `https://ops-staging.ledgetopdroneservices.com` and only
 GET `/api/agent/v1/connection`, `/api/agent/v1/clients`, or the source-qualified
 client-detail route. Lookup requires `sourceId` and accepts query, cursor and

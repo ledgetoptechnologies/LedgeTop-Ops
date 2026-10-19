@@ -77,6 +77,57 @@ async function readRows(env: AgentEnvironment, actor: Principal, client: string,
     recordId, recordId, cursor, q, limit).all<{ record_id: string; record_kind: string; current_version: number; profile_json: string }>()).results;
 }
 
+/** A grant names a candidate, never proof that the source or any record is readable. */
+async function sourceContext(env: AgentEnvironment, actor: Principal, sourceId: string) {
+  const grants = (await env.OPS_DB.withSession('first-primary').prepare(`SELECT projection_source_id,origin,source_instance_id,application_id,history_epoch_id
+    FROM ops_agent_read_grants WHERE agent_id=? AND source_id=? AND active=1 AND effect='allow' LIMIT 65`)
+    .bind(actor.id, sourceId).all<SourceGrant>()).results;
+  if (!grants.length || grants.length > 64 || !env.PROJECT_ALPHA_LOCAL_DIVISION_IDENTITY_CONNECTIONS) return null;
+  const source = grants[0]!, identity = JSON.stringify([source.origin, source.source_instance_id, source.application_id, source.history_epoch_id]);
+  if (grants.some(g => JSON.stringify(g) !== JSON.stringify(source)) || !SOURCE.test(source.projection_source_id)) return null;
+  try {
+    const directory = resolveProjectAlphaApiV2Connection(env, sourceId);
+    const observerEnv = { PROJECT_ALPHA_API_V2_CONNECTIONS: env.PROJECT_ALPHA_LOCAL_DIVISION_IDENTITY_CONNECTIONS };
+    const observer = resolveProjectAlphaApiV2Connection(observerEnv, source.projection_source_id);
+    const key = (c: typeof directory.connection) => JSON.stringify([c.baseUrl, c.expectedSourceInstanceId, c.expectedApplicationId, c.expectedHistoryEpoch]);
+    if (!directory.enabled || !observer.enabled || directory.sourceId !== sourceId || key(directory.connection) !== identity || key(observer.connection) !== identity) return null;
+    return { source, identity, observerEnv };
+  } catch { return null; }
+}
+
+async function sourceVerified(context: NonNullable<Awaited<ReturnType<typeof sourceContext>>>, probe: Probe) {
+  const observed = await probe(context.observerEnv, context.source.projection_source_id);
+  return observed.status === 'verified' && observed.grantedCapabilities.length === 1 && observed.grantedCapabilities[0] === 'api.capabilities.read'
+    && JSON.stringify([context.source.origin, observed.sourceInstanceId, observed.applicationId, observed.historyEpoch]) === context.identity;
+}
+
+type DiscoveredSource = { sourceId: string; displayName: string; source: SourceGrant; record: unknown };
+async function readableSources(env: AgentEnvironment, actor: Principal, client: string, probe: Probe,
+  previous?: readonly DiscoveredSource[]): Promise<DiscoveredSource[]> {
+  const candidates = (await env.OPS_DB.withSession('first-primary').prepare(`SELECT DISTINCT source_id FROM ops_agent_read_grants
+    WHERE agent_id=? AND active=1 AND effect='allow' ORDER BY source_id LIMIT 65`).bind(actor.id).all<{ source_id: string }>()).results;
+  if (candidates.length > 64) throw Error();
+  const readable: DiscoveredSource[] = [];
+  for (const { source_id: sourceId } of candidates) {
+    if (!SOURCE.test(sourceId)) continue;
+    const context = await sourceContext(env, actor, sourceId);
+    if (!context) continue;
+    if (previous) {
+      const prior = previous.find(value => value.sourceId === sourceId);
+      // A post-audit selection can reuse only the exact tuple actually probed in this request.
+      if (!prior || JSON.stringify(prior.source) !== JSON.stringify(context.source)) continue;
+    } else if (!await sourceVerified(context, probe)) continue;
+    const rows = await readRows(env, actor, client, sourceId, context.source, context.identity, null, '', '', 1);
+    if (rows.length !== 1) continue;
+    const connector = await env.OPS_DB.withSession('first-primary').prepare(`SELECT display_name FROM pa_connectors
+      WHERE source_id=? AND snapshot_origin=? AND read_visible=1`).bind(context.source.projection_source_id, context.source.origin)
+      .first<{ display_name: string }>();
+    if (!connector || typeof connector.display_name !== 'string' || !connector.display_name.trim() || connector.display_name.length > 160) continue;
+    readable.push({ sourceId, displayName: connector.display_name, source: context.source, record: rows[0] });
+  }
+  return readable;
+}
+
 async function audit(db: D1Database, actor: Principal, requestId: string, action: Action, outcome: 'allowed' | 'denied' | 'rate_limited') {
   // Intentionally excludes queries, profile contents, URLs, source credentials and raw assertions.
   const id = crypto.randomUUID();
@@ -111,9 +162,13 @@ export async function handleAgentRead(request: Request, env: AgentEnvironment,
     if (reservation === null) { await audit(env.OPS_DB, actor, requestId, action, 'rate_limited'); return response({ error: 'Agent rate limited' }, 429); }
     if (connection) {
       if (url.search) throw Error();
+      const sources = await readableSources(env, actor, service.accessClientId, dependencies.probe ?? probeConfiguredProjectAlphaApiV2Connection);
       await audit(env.OPS_DB, actor, requestId, action, 'allowed');
       if (!await principal(env.OPS_DB, service.accessClientId, actor.version) || Date.now() / 1000 >= service.expiresAt) throw Error();
-      return response({ principal: { kind: 'agent', id: actor.id }, readOnly: true, tools: ['get_connection', 'find_clients', 'get_client'] });
+      const current = await readableSources(env, actor, service.accessClientId, dependencies.probe ?? probeConfiguredProjectAlphaApiV2Connection, sources);
+      if (JSON.stringify(sources) !== JSON.stringify(current) || Date.now() / 1000 >= service.expiresAt) throw Error();
+      return response({ principal: { kind: 'agent', id: actor.id }, readOnly: true, tools: ['get_connection', 'find_clients', 'get_client'],
+        sources: sources.map(({ sourceId, displayName }) => ({ sourceId, displayName })) });
     }
     if (new Set(url.searchParams.keys()).size !== [...url.searchParams.keys()].length) throw Error();
     const allowed = lookup ? ['sourceId', 'q', 'cursor', 'limit'] : [];
@@ -124,21 +179,11 @@ export async function handleAgentRead(request: Request, env: AgentEnvironment,
     const limit = Number(url.searchParams.get('limit') ?? '20');
     if (!SOURCE.test(sourceId) || (recordId !== null && !ID.test(recordId)) || q.length > 100 || /\p{C}/u.test(q)
       || (cursor !== '' && !ID.test(cursor)) || !Number.isSafeInteger(limit) || limit < 1 || limit > 25) throw Error();
-    const grants = (await env.OPS_DB.withSession('first-primary').prepare(`SELECT projection_source_id,origin,source_instance_id,application_id,history_epoch_id
-      FROM ops_agent_read_grants WHERE agent_id=? AND source_id=? AND active=1 AND effect='allow' LIMIT 65`)
-      .bind(actor.id, sourceId).all<SourceGrant>()).results;
-    if (!grants.length || grants.length > 64 || !env.PROJECT_ALPHA_LOCAL_DIVISION_IDENTITY_CONNECTIONS) throw Error();
-    const source = grants[0]!, identity = JSON.stringify([source.origin, source.source_instance_id, source.application_id, source.history_epoch_id]);
-    if (grants.some(g => JSON.stringify(g) !== JSON.stringify(source)) || !SOURCE.test(source.projection_source_id)) throw Error();
-    const directory = resolveProjectAlphaApiV2Connection(env, sourceId);
-    const observerEnv = { PROJECT_ALPHA_API_V2_CONNECTIONS: env.PROJECT_ALPHA_LOCAL_DIVISION_IDENTITY_CONNECTIONS };
-    const observer = resolveProjectAlphaApiV2Connection(observerEnv, source.projection_source_id);
-    const key = (c: typeof directory.connection) => JSON.stringify([c.baseUrl, c.expectedSourceInstanceId, c.expectedApplicationId, c.expectedHistoryEpoch]);
-    if (!directory.enabled || !observer.enabled || directory.sourceId !== sourceId || key(directory.connection) !== identity || key(observer.connection) !== identity) throw Error();
+    const context = await sourceContext(env, actor, sourceId);
+    if (!context) throw Error();
+    const { source, identity } = context;
     // Always use the dedicated capability-only observer. Never directory/finance credentials.
-    const probe = await (dependencies.probe ?? probeConfiguredProjectAlphaApiV2Connection)(observerEnv, source.projection_source_id);
-    if (probe.status !== 'verified' || probe.grantedCapabilities.length !== 1 || probe.grantedCapabilities[0] !== 'api.capabilities.read'
-      || JSON.stringify([source.origin, probe.sourceInstanceId, probe.applicationId, probe.historyEpoch]) !== identity) throw Error();
+    if (!await sourceVerified(context, dependencies.probe ?? probeConfiguredProjectAlphaApiV2Connection)) throw Error();
     if (!await principal(env.OPS_DB, service.accessClientId, actor.version)) throw Error();
     const rows = await readRows(env, actor, service.accessClientId, sourceId, source, identity, recordId, q, cursor, recordId ? 1 : limit + 1);
     const output = rows.slice(0, limit).map(row => {

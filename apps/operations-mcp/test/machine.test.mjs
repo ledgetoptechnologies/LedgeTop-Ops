@@ -13,6 +13,14 @@ test('machine config has one exact staging origin and never accepts production o
   assert.equal(machineConfig({ LTDS_MCP_MACHINE_CREDENTIAL_FILE: config.credentialFile }).origin, origin);
   for (const env of [{ LTDS_MCP_MACHINE_CREDENTIAL_FILE: 'relative.json' }, { LTDS_MCP_MACHINE_CREDENTIAL_FILE: config.credentialFile, LTDS_OPS_ORIGIN: 'https://ops.ledgetopdroneservices.com' }]) assert.throws(() => machineConfig(env));
 });
+
+test('connection preserves source discovery additions without inferring aliases or changing the transport', async () => {
+  const payload = { principal: { kind: 'agent', id: 'machine-one' }, readOnly: true,
+    tools: ['get_connection', 'find_clients', 'get_client'],
+    sources: [{ sourceId: 'project-alpha:staging', displayName: 'Ledge Top Drone Services' }] };
+  const client = new MachineReadClient(config, { loadCredential: async () => credential, fetch: async () => reply(payload) });
+  assert.deepEqual(await client.connection(), payload);
+});
 test('three fixed reads send service credentials freshly each time, no cookies or human tokens', async () => {
   const calls = []; let reads = 0;
   const client = new MachineReadClient(config, { loadCredential: async () => { reads++; return credential; }, fetch: async (url, options) => { calls.push([url, options]); return reply({ ok: true }); } });

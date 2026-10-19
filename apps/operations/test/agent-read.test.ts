@@ -134,8 +134,59 @@ describe('machine read routes against full source219 D1', () => {
   afterAll(async () => { await mf?.dispose(); });
   it('supports only three reads and never returns endpoint/credential/owner metadata', async () => {
     const m = await machine(), r = await call(m.client, '/connection'); expect(r.status).toBe(200);
-    expect(await r.json()).toEqual({ principal: { kind: 'agent', id: m.id }, readOnly: true, tools: ['get_connection', 'find_clients', 'get_client'] });
+    expect(await r.json()).toEqual({ principal: { kind: 'agent', id: m.id }, readOnly: true, tools: ['get_connection', 'find_clients', 'get_client'],
+      sources: [{ sourceId, displayName: 'Agent fixture' }] });
     expect(r.headers.get('cache-control')).toBe('no-store');
+  });
+  it('discovers only currently readable sources for a resource-only grant without exposing profiles or tuples', async () => {
+    const m = await machine();
+    await db.prepare('UPDATE ops_agent_read_grants SET active=0,version=version+1 WHERE id=?').bind(m.grant).run();
+    await db.prepare(`INSERT INTO ops_agent_read_grants(id,agent_id,source_id,projection_source_id,origin,source_instance_id,application_id,history_epoch_id,effect,scope_kind,record_id)
+      VALUES(?,?,?,?,?,?,?,?,'allow','resource',?)`).bind(uuid(), m.id, sourceId, projectionSource, origin, instance, application, epoch, record).run();
+    probe.mockClear();
+    const r = await call(m.client, '/connection'); expect(r.status).toBe(200);
+    expect((await r.json() as any).sources).toEqual([{ sourceId, displayName: 'Agent fixture' }]);
+    expect(probe).toHaveBeenCalledOnce();
+  });
+  it.each(['revoked-grant', 'owner-deny', 'machine-deny', 'wrong-tuple', 'disabled', 'stale-head', 'no-readable-rows'] as const)
+    ('does not discover a source with %s', async kind => {
+      const m = await machine(), deny = uuid();
+      let changes = {};
+      if (kind === 'revoked-grant' || kind === 'wrong-tuple' || kind === 'no-readable-rows')
+        await db.prepare('UPDATE ops_agent_read_grants SET active=0,version=version+1 WHERE id=?').bind(m.grant).run();
+      if (kind === 'wrong-tuple' || kind === 'no-readable-rows')
+        await db.prepare(`INSERT INTO ops_agent_read_grants(id,agent_id,source_id,projection_source_id,origin,source_instance_id,application_id,history_epoch_id,effect,scope_kind,record_id)
+          VALUES(?,?,?,?,?,?,?,?,'allow','resource',?)`).bind(uuid(), m.id, kind === 'no-readable-rows' ? 'project-alpha:empty' : sourceId,
+            projectionSource, origin, instance, application, kind === 'wrong-tuple' ? uuid() : epoch, record).run();
+      if (kind === 'no-readable-rows') changes = { PROJECT_ALPHA_API_V2_CONNECTIONS: envelope('project-alpha:empty', 'directory-unused') };
+      if (kind === 'owner-deny') await db.prepare(`INSERT INTO native_directory_grants(id,staff_id,permission,effect,scope_kind,granted_by)
+        VALUES(?,?,'directory.profile.view','deny','global',?)`).bind(deny, owner, owner).run();
+      if (kind === 'machine-deny') await db.prepare(`INSERT INTO ops_agent_read_grants(id,agent_id,source_id,projection_source_id,origin,source_instance_id,application_id,history_epoch_id,effect,scope_kind)
+        VALUES(?,?,?,?,?,?,?,?,'deny','source')`).bind(deny, m.id, sourceId, projectionSource, origin, instance, application, epoch).run();
+      if (kind === 'disabled') changes = { PROJECT_ALPHA_API_V2_CONNECTIONS: envelope(sourceId, 'directory-unused').replace('"enabled":true', '"enabled":false') };
+      if (kind === 'stale-head') await db.prepare('UPDATE pa_local_division_source_heads SET identity_key=NULL,revision=revision+1 WHERE projection_source_id=?').bind(projectionSource).run();
+      try {
+        const r = await call(m.client, '/connection', changes); expect(r.status).toBe(200);
+        expect((await r.json() as any).sources).toEqual([]);
+      } finally {
+        if (kind === 'owner-deny') await db.prepare('UPDATE native_directory_grants SET active=0 WHERE id=?').bind(deny).run();
+        if (kind === 'stale-head') await db.prepare('UPDATE pa_local_division_source_heads SET identity_key=?,revision=revision+1 WHERE projection_source_id=?').bind(identity, projectionSource).run();
+      }
+    });
+  it('rechecks discovery after mandatory audit and withholds revoked or relabeled results', async () => {
+    for (const kind of ['grant', 'label'] as const) {
+      const m = await machine();
+      const change = kind === 'grant'
+        ? `UPDATE ops_agent_read_grants SET active=0,version=version+1 WHERE id='${m.grant}';`
+        : `UPDATE pa_connectors SET display_name='Changed label',version=version+1 WHERE source_id='${projectionSource}';`;
+      await db.prepare(`CREATE TRIGGER agent_discovery_after_audit AFTER INSERT ON ops_agent_read_audit
+        WHEN NEW.agent_id='${m.id}' AND NEW.outcome='allowed' BEGIN ${change} END`).run();
+      try { expect((await call(m.client, '/connection')).status).toBe(403); }
+      finally {
+        await db.prepare('DROP TRIGGER agent_discovery_after_audit').run();
+        if (kind === 'label') await db.prepare(`UPDATE pa_connectors SET display_name='Agent fixture',version=version+1 WHERE source_id=?`).bind(projectionSource).run();
+      }
+    }
   });
   it('reads a source-qualified client through native owner AND machine grants with live observer', async () => {
     const m = await machine(); probe.mockClear();

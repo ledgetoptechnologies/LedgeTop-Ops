@@ -14,6 +14,15 @@ six human read tools, previews, files, access rosters, grants, finance, onboardi
 mutations and general staff routes are unavailable to this transport. This is an
 incremental read surface, not unattended parity with the nine human read tools.
 
+`get_connection` includes `sources: [{sourceId, displayName}]` for tool-driven
+source discovery without repository instructions. Candidate sources come only
+from the caller's active grants. Each requires the same exact source/observer
+checks and current native record policy as a lookup, with at least one readable
+record. The selection, record witness and connector label are checked again
+after the mandatory audit. Display names are bounded labels from the exact
+matched connector, not authority. An empty list is not permission to guess an
+alias or change identity. No additional tool, scope or credential is introduced.
+
 ## Authentication and authority
 
 Cloudflare must later provide a more-specific Access application for only the
