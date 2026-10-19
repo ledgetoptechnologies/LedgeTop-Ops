@@ -5,6 +5,7 @@ import {
   sendProjectAlphaDirectoryCreate,
   sendProjectAlphaDirectoryProfileUpdate,
   validatedProjectAlphaDirectoryProfileAcknowledgement,
+  validatedProjectAlphaDirectoryCreateGenerationConflict,
   sendProjectAlphaDirectoryClientContactProfileUpdate,
   validatedProjectAlphaDirectoryClientContactProfileAcknowledgement,
   type ProjectAlphaDirectoryClientContactProfileUpdateCommand,
@@ -17,7 +18,7 @@ import { withEnabledConfiguredProjectAlphaApiV2Connection, type ProjectAlphaApiV
 import type { ProjectAlphaApiV2Connection } from "./project-alpha-api-v2";
 import { advances, PROJECT_ALPHA_PROJECT_MAX_INTEGER } from "./project-alpha-project-transport";
 import { directoryMaterializationReadSource } from "./project-alpha-directory-materialization-read-source";
-import { validateDirectoryCreateRecoveryReservation } from "./project-alpha-directory-create-generation-recovery";
+import { validateDirectoryCreateRecoveryReservation } from "./project-alpha-directory-create-recovery-reservation";
 import type { NativeDirectoryPortalWriterActor } from "./native-directory-profile-writer";
 import type { SharedProfilePortalAuthorityBinding, SharedProfilePortalProof } from "../../../../packages/shared/src/shared-business-profile";
 import { portalProofSchema, stablePortalRequestFingerprint, sharedProfileCorrespondenceColumns, sharedProfileGrantSourceCurrent, type SharedProfilePortalGrant } from "./shared-profile-portal-authority";
@@ -45,6 +46,7 @@ type Internal = Readonly<{ operation: "create" | "update"; transport: ProjectAlp
   publicId: string | null; actor: Actor | NativeDirectoryPortalWriterActor; identitySafeContactProfile?: boolean;
   portalAuthority?: Readonly<{ proof: SharedProfilePortalProof; grant: SharedProfilePortalGrant; requestSha256: string }> }>;
 type RelationshipDependency = Readonly<{
+  relationship_version:number;
   evidence_kind: "unlinked" | "parent_intent" | "existing_mapping" | "acquired_mapping";
   organization_record_id: string | null; organization_record_version: number | null;
   parent_external_canonical_id: string | null; resolved_parent_public_id: string | null;
@@ -54,7 +56,7 @@ type RelationshipDependency = Readonly<{
 
 export type ProjectAlphaDirectoryProfileOutboxDispatcherOutcome =
   | Readonly<{ status: "acknowledged"; commandId: string; replayed: boolean; publicId: string; revision: string }>
-  | Readonly<{ status: "conflict"; reason: "source" | "command" | "remote"; httpStatus?: number; requestId?: string }>
+  | Readonly<{ status: "conflict"; reason: "source" | "command" | "remote"; httpStatus?: number; requestId?: string;createGenerationConflict?:true }>
   | Readonly<{ status: "blocked"; reason: "configuration" | "authority" | "destination" | "not_due" | "in_progress" }>
   | Readonly<{ status: "uncertain"; reason: string; httpStatus?: number; requestId?: string }>;
 
@@ -358,7 +360,7 @@ export async function acquiredDirectoryMappingUpdateEvidence(db: D1Database, con
     expectedAuthorizationGeneration, expectedProjectAlphaPublicId: expectedPublicId });
 }
 async function relationshipDependency(db: D1Database, row: Row): Promise<RelationshipDependency | null> {
-  const dependencies = (await db.prepare(`SELECT dependency.evidence_kind,dependency.organization_record_id,
+  const dependencies = (await db.prepare(`SELECT dependency.relationship_version,dependency.evidence_kind,dependency.organization_record_id,
       dependency.organization_record_version,dependency.parent_external_canonical_id,resolved.resolved_parent_public_id,
       dependency.parent_mapping_command_id,dependency.parent_activation_id,dependency.parent_ack_revision,
       dependency.parent_ack_command_json,dependency.parent_ack_outcome_json
@@ -552,8 +554,23 @@ async function currentParentRevision(db: D1Database, row: Row, dependency: Relat
       dependency.resolved_parent_public_id).all<{ revision: string }>()).results;
   return candidates.length === 1 && /^[1-9][0-9]{0,18}$/.test(candidates[0]!.revision) ? candidates[0]!.revision : null;
 }
+async function currentCreateRelationship(db:D1Database,row:Row,dependency:RelationshipDependency){
+ return !!await db.withSession("first-primary").prepare(`SELECT 1 ok FROM operations_directory_client_organizations relation
+ LEFT JOIN operations_directory_records parent ON parent.record_id=relation.organization_record_id AND parent.record_kind='organization'
+ LEFT JOIN operations_directory_lifecycle_state parent_state ON parent_state.record_id=parent.record_id
+ WHERE relation.client_record_id=? AND relation.relationship_version=? AND relation.organization_record_id IS ?
+ AND NOT EXISTS(SELECT 1 FROM operations_directory_lifecycle_state state WHERE state.record_id=relation.client_record_id AND state.status<>'active')
+ AND (relation.organization_record_id IS NULL OR (parent.current_version=? AND coalesce(parent_state.status,'active')='active'
+  AND EXISTS(SELECT 1 FROM effective_native_directory_enrollments enrollment,json_each(enrollment.destinations_json) destination
+   WHERE enrollment.record_id=parent.record_id AND json_extract(destination.value,'$.sourceId')=?
+    AND json_extract(destination.value,'$.sourceInstanceUUID')=? AND json_extract(destination.value,'$.applicationUUID')=?
+    AND json_extract(destination.value,'$.historyEpoch')=? AND json_extract(destination.value,'$.origin')=?
+    AND json_extract(destination.value,'$.externalCanonicalId')=?)))`).bind(row.record_id,dependency.relationship_version,
+  dependency.organization_record_id,dependency.organization_record_version,row.source_id,row.expected_source_instance_id,
+  row.application_id,row.expected_history_epoch_id,row.destination_base_url,dependency.parent_external_canonical_id).first();
+}
 async function exactReservation(db: D1Database, row: Row, connection: ProjectAlphaApiV2Connection,
-  portalEnvironment?:Environment): Promise<Internal | "destination" | "command" | "authority"> {
+  portalEnvironment?:Environment,requireCurrentCreateRelationship=false): Promise<Internal | "destination" | "command" | "authority"> {
   if (!sameDestination(row, connection)) return "destination";
   if (row.intent_state !== "materialized" || row.command_json !== row.materialization_command_json
     || row.external_id !== row.external_canonical_id || row.record_kind !== row.resource_type || row.current_version !== row.record_version
@@ -609,6 +626,7 @@ async function exactReservation(db: D1Database, row: Row, connection: ProjectAlp
     const commandFields = command.fields as Record<string, unknown>;
     const dependency = await relationshipDependency(db, row);
     if (!dependency || commandFields.organizationPublicId !== dependency.resolved_parent_public_id) return "command";
+    if((requireCurrentCreateRelationship||row.recovery_authorization_id!==null)&&!await currentCreateRelationship(db,row,dependency))return "command";
     const profile = { ...commandFields }; delete profile.organizationPublicId;
     const parentRevision = dependency.evidence_kind === "unlinked" ? null : await currentParentRevision(db, row, dependency);
     if (dependency.evidence_kind !== "unlinked" && !parentRevision) return "command";
@@ -752,18 +770,24 @@ export async function dispatchProjectAlphaDirectoryProfileOutboxCommand(env: Env
       }
     }:undefined;
     const outcome = current.operation === "create"
-      ? await sendProjectAlphaDirectoryCreate(connection, leased.resource_type, current.transport as ProjectAlphaDirectoryCreateCommand, send)
+      ? await sendProjectAlphaDirectoryCreate(connection, leased.resource_type, current.transport as ProjectAlphaDirectoryCreateCommand, send,
+        async body=>{const fresh=await row(env.OPS_DB,leased.command_id);
+          const live=fresh?await exactReservation(env.OPS_DB,fresh,connection,env,leased.recovery_authorization_id!==null):null;
+          if(!live||typeof live==="string"||live.operation!=="create"||JSON.stringify(live.transport)!==body){postAuthorityRejected=true;throw Error("create authority changed");}})
       : current.identitySafeContactProfile
         ? await sendProjectAlphaDirectoryClientContactProfileUpdate(connection,current.publicId!,current.transport as ProjectAlphaDirectoryClientContactProfileUpdateCommand,send,beforePost)
         : await sendProjectAlphaDirectoryProfileUpdate(connection, leased.resource_type, current.publicId!, current.transport as ProjectAlphaDirectoryProfileUpdateCommand, send,beforePost);
     if(postAuthorityRejected){await release(env.OPS_DB,leased,token,Date.now(),"portal_pre_post_authority");return{phase:"invalid" as const,reason:"authority" as const};}
     if (outcome.status !== "acknowledged") {
       if (outcome.status === "conflict") {
-        const saved = JSON.stringify({ directoryProfileDispatcher: "conflict", reason: outcome.reason, ...diagnostic(outcome) });
+        const typedGeneration=current.operation==="create"&&!!validatedProjectAlphaDirectoryCreateGenerationConflict(outcome);
+        const details={...diagnostic(outcome),...(typedGeneration?{createGenerationConflict:true as const}:{})};
+        const saved = JSON.stringify({ directoryProfileDispatcher: "conflict", reason: outcome.reason, ...diagnostic(outcome),
+          ...(typedGeneration?{errorCode:"authorization_generation_conflict"}:{}) });
         const settled = await env.OPS_DB.prepare(`UPDATE project_alpha_directory_outbox SET state='terminal',outcome_json=?,lease_token=NULL,lease_expires_at=NULL,
           updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE command_id=? AND state='leased' AND lease_token=? AND lease_expires_at>?`)
           .bind(saved, leased.command_id, token, Date.now()).run();
-        return settled.meta.changes === 1 ? { phase: "conflict" as const, details: diagnostic(outcome) } : { phase: "uncertain" as const, reason: "lost_lease" };
+        return settled.meta.changes === 1 ? { phase: "conflict" as const, details } : { phase: "uncertain" as const, reason: "lost_lease" };
       }
       await release(env.OPS_DB, leased, token, Date.now(), outcome.reason);
       const preflight = outcome.reason === "preflight" ? outcome.preflight : undefined;
@@ -851,4 +875,17 @@ export async function dispatchProjectAlphaDirectoryProfileOutboxCommand(env: Env
   if (result.phase === "blocked") return { status: "blocked", reason: result.reason };
   return result.reason === "destination" ? { status: "blocked", reason: "destination" }
     : result.reason === "authority" ? { status: "blocked", reason: "authority" } : { status: "conflict", reason: "command" };
+}
+
+/** Internal read-only create authority/transport proof. In particular a linked
+ * client uses the same current ACK-backed parent dependency as normal dispatch.
+ * This supplies no retry authority and never changes immutable command bytes. */
+export async function readAuthorizedDirectoryCreateReservation(env:Environment,sourceId:string,commandId:string):Promise<ProjectAlphaDirectoryCreateCommand|null>{
+ const selected=await row(env.OPS_DB,commandId);
+ if(!selected||selected.source_id!==sourceId)return null;
+ const configured=await withEnabledConfiguredProjectAlphaApiV2Connection(env,sourceId,async connection=>{
+  const checked=await exactReservation(env.OPS_DB,selected,connection,env,true);
+  return typeof checked!=="string"&&checked.operation==="create"?checked.transport as ProjectAlphaDirectoryCreateCommand:null;
+ });
+ return configured.status==="enabled"?configured.value:null;
 }

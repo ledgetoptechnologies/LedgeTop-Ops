@@ -361,7 +361,7 @@ export async function sendConfiguredProjectAlphaDirectoryProfileUpdate(env: Proj
   return configured.status === "enabled" ? configured.value : configured.status === "disabled" ? configured : { status: "blocked", reason: "preflight", preflight: { status: "misconfigured", reason: "configuration" } };
 }
 
-export async function sendProjectAlphaDirectoryCreate(connectionInput: ProjectAlphaApiV2Connection, kind: ProjectAlphaDirectoryProfileKind, inputCommand: ProjectAlphaDirectoryCreateCommand, send: typeof fetch = fetch): Promise<ProjectAlphaDirectoryCreateOutcome> {
+export async function sendProjectAlphaDirectoryCreate(connectionInput: ProjectAlphaApiV2Connection, kind: ProjectAlphaDirectoryProfileKind, inputCommand: ProjectAlphaDirectoryCreateCommand, send: typeof fetch = fetch, beforePost?: (body:string)=>Promise<void>): Promise<ProjectAlphaDirectoryCreateOutcome> {
   try {
     const connection = normalized(connectionInput);
     if ((kind !== "client" && kind !== "organization") || !createCommand(kind, inputCommand)) return { status: "rejected", reason: "invalid_command" };
@@ -374,13 +374,14 @@ export async function sendProjectAlphaDirectoryCreate(connectionInput: ProjectAl
       ? ["directory.clients.organization.assign"] : [];
     const preflight = await probeProjectAlphaApiV2(connection, [], send, [required], requiredGrantedCapabilities);
     if (preflight.status !== "verified") return preflightFailure(preflight);
+    if(beforePost)await beforePost(body);
     const posted = await post(connection, required.path, body, [200, 201], send, true); if (!(posted instanceof Response)) return posted;
     const info = diagnostic(posted);
     try { const parsed = await boundedJson(posted); if (!createSuccess(parsed, kind, inputCommand, connection, info.requestId, posted.status)) return { status: "uncertain", reason: "invalid_contract", ...info }; const outcome = { status: "acknowledged" as const, httpStatus: posted.status as 200 | 201, response: parsed }; acknowledgements.set(outcome, { commandJson: body, responseJson: JSON.stringify(parsed), destinationOrigin: new URL(connection.baseUrl).origin }); return outcome; }
     catch (error) { return { status: "uncertain", reason: error instanceof Error && error.message === "response_limit" ? "response_limit" : error instanceof Error && error.message === "transport" ? "transport" : "invalid_contract", ...info }; }
   } catch { return { status: "rejected", reason: "invalid_command" }; }
 }
-export async function sendConfiguredProjectAlphaDirectoryCreate(env: ProjectAlphaApiV2ConnectionEnvironment, sourceId: string, kind: ProjectAlphaDirectoryProfileKind, command: ProjectAlphaDirectoryCreateCommand, send: typeof fetch = fetch): Promise<ProjectAlphaDirectoryCreateOutcome | Readonly<{ status: "disabled"; sourceId: string }>> {
-  const configured = await withEnabledConfiguredProjectAlphaApiV2Connection(env, sourceId, connection => sendProjectAlphaDirectoryCreate(connection, kind, command, send));
+export async function sendConfiguredProjectAlphaDirectoryCreate(env: ProjectAlphaApiV2ConnectionEnvironment, sourceId: string, kind: ProjectAlphaDirectoryProfileKind, command: ProjectAlphaDirectoryCreateCommand, send: typeof fetch = fetch, beforePost?: (body:string)=>Promise<void>): Promise<ProjectAlphaDirectoryCreateOutcome | Readonly<{ status: "disabled"; sourceId: string }>> {
+  const configured = await withEnabledConfiguredProjectAlphaApiV2Connection(env, sourceId, connection => sendProjectAlphaDirectoryCreate(connection, kind, command, send,beforePost));
   return configured.status === "enabled" ? configured.value : configured.status === "disabled" ? configured : { status: "blocked", reason: "preflight", preflight: { status: "misconfigured", reason: "configuration" } };
 }

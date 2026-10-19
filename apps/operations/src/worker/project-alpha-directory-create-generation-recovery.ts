@@ -1,3 +1,5 @@
+import { readAuthorizedDirectoryCreateReservation } from "./project-alpha-directory-profile-outbox-dispatcher";
+import { directoryCreateRecoveryGrant as grant,directoryCreateRecoveryActorCurrent as currentActor } from "./project-alpha-directory-create-recovery-reservation";
 import { readConfiguredProjectAlphaDirectoryInventory } from "./project-alpha-directory-command-api-v2";
 import { resolveProjectAlphaApiV2Connection } from "./project-alpha-api-v2-connections";
 import { persistProjectAlphaDirectoryInventoryPage } from "./project-alpha-v2-sync";
@@ -31,7 +33,7 @@ async function prior(db:D1Database,id:string){return db.withSession("first-prima
   observed_authorization_generation,actor_staff_id,actor_access_subject,actor_email,actor_admission_version,
   actor_profile_version,record_id,profile_grant_id,identity_grant_id,enrollment_grant_id,reason
   FROM project_alpha_directory_create_generation_recoveries WHERE authorization_id=?`).bind(id).first<Prior>();}
-function replay(p:Prior,i:DirectoryCreateRecoveryInput,a:DirectoryCreateRecoveryActor):DirectoryCreateRecoveryOutcome{return p.predecessor_command_id===i.predecessorCommandId&&p.successor_command_id===i.successorCommandId&&p.source_id===i.sourceId
+function replay(p:Prior,i:DirectoryCreateRecoveryInput,a:Omit<DirectoryCreateRecoveryActor,"verifiedUntil">):DirectoryCreateRecoveryOutcome{return p.predecessor_command_id===i.predecessorCommandId&&p.successor_command_id===i.successorCommandId&&p.source_id===i.sourceId
   &&p.reason===i.reason&&p.actor_staff_id===a.staffId&&p.actor_access_subject===a.accessSubject&&p.actor_email===a.email
   &&p.actor_admission_version===a.admissionVersion&&p.actor_profile_version===a.profileVersion
     ?{status:"prepared",successorCommandId:p.successor_command_id,generation:p.observed_authorization_generation,replayed:true}
@@ -48,61 +50,17 @@ async function load(db:D1Database,id:string){return db.withSession("first-primar
   JOIN operations_directory_records record ON record.record_id=intent.record_id
   JOIN operations_directory_audit audit ON audit.mutation_id=intent.mutation_id AND audit.record_id=intent.record_id
     AND audit.record_version=intent.record_version WHERE outbox.command_id=?`).bind(id).first<Row>();}
-async function grant(db:D1Database,staff:string,permission:string,record:string):Promise<string|null>{return db.withSession("first-primary")
-  .prepare(`SELECT allow_grant.id FROM native_directory_grants allow_grant WHERE allow_grant.staff_id=?
-    AND allow_grant.permission=? AND allow_grant.effect='allow' AND allow_grant.active=1
-    AND (allow_grant.scope_kind='global' OR allow_grant.scope_kind='resource' AND allow_grant.resource_id=?
-      OR allow_grant.scope_kind='assigned' AND EXISTS(SELECT 1 FROM native_directory_assignments a WHERE a.record_id=? AND a.staff_id=? AND a.active=1)
-      OR allow_grant.scope_kind='business_area' AND EXISTS(SELECT 1 FROM native_directory_resource_scopes s WHERE s.record_id=? AND s.active=1 AND s.business_area_id=allow_grant.business_area_id)
-      OR allow_grant.scope_kind='division' AND EXISTS(SELECT 1 FROM native_directory_resource_scopes s WHERE s.record_id=? AND s.active=1 AND s.division_id=allow_grant.division_id))
-    AND NOT EXISTS(SELECT 1 FROM native_directory_grants deny WHERE deny.staff_id=? AND deny.permission=? AND deny.effect='deny' AND deny.active=1
-      AND (deny.scope_kind='global' OR deny.scope_kind='resource' AND deny.resource_id=?
-        OR deny.scope_kind='assigned' AND EXISTS(SELECT 1 FROM native_directory_assignments a WHERE a.record_id=? AND a.staff_id=? AND a.active=1)
-        OR deny.scope_kind='business_area' AND EXISTS(SELECT 1 FROM native_directory_resource_scopes s WHERE s.record_id=? AND s.active=1 AND s.business_area_id=deny.business_area_id)
-        OR deny.scope_kind='division' AND EXISTS(SELECT 1 FROM native_directory_resource_scopes s WHERE s.record_id=? AND s.active=1 AND s.division_id=deny.division_id)))
-    ORDER BY CASE allow_grant.scope_kind WHEN 'resource' THEN 1 WHEN 'division' THEN 2 WHEN 'business_area' THEN 3 WHEN 'assigned' THEN 4 ELSE 5 END,allow_grant.id LIMIT 1`)
-  .bind(staff,permission,record,record,staff,record,record,staff,permission,record,record,staff,record,record).first<string>("id");}
-async function currentActor(db:D1Database,actor:Omit<DirectoryCreateRecoveryActor,"verifiedUntil">):Promise<boolean>{return !!await db.withSession("first-primary")
-  .prepare(`SELECT 1 present FROM staff_users staff JOIN native_staff_admissions admission ON admission.staff_id=staff.id
-    JOIN native_staff_profiles profile ON profile.staff_id=staff.id WHERE staff.id=? AND staff.status='active'
-    AND staff.access_subject=? AND admission.active=1 AND admission.bound_access_subject=? AND admission.version=?
-    AND profile.login_email=? AND profile.version=?`).bind(actor.staffId,actor.accessSubject,actor.accessSubject,
-      actor.admissionVersion,actor.email,actor.profileVersion).first();}
-
-export type DirectoryCreateRecoveryReservationProof={profileGrantId:string;identityGrantId:string;enrollmentGrantId:string;
-  rootCommandJson:string;rootCommandId:string;authorizationId:string};
-/** Presend-only validator. Historical acknowledgements must use the immutable
- * ledger without requiring these current grants to remain active. */
-export async function validateDirectoryCreateRecoveryReservation(db:D1Database,commandId:string,
-  actor:Omit<DirectoryCreateRecoveryActor,"verifiedUntil">):Promise<DirectoryCreateRecoveryReservationProof|null>{
-  if(!await currentActor(db,actor))return null;
-  const row=await db.withSession("first-primary").prepare(`SELECT recovery.authorization_id,recovery.root_command_id,
-      root.command_json root_command_json,recovery.record_id,recovery.actor_staff_id,recovery.actor_access_subject,
-      recovery.actor_email,recovery.actor_admission_version,recovery.actor_profile_version,recovery.profile_grant_id,
-      recovery.identity_grant_id,recovery.enrollment_grant_id
-    FROM project_alpha_directory_create_generation_recoveries recovery
-    JOIN project_alpha_directory_outbox root ON root.command_id=recovery.root_command_id
-    JOIN native_staff_admissions admission ON admission.staff_id=recovery.actor_staff_id
-      AND admission.active=1 AND admission.bound_access_subject=recovery.actor_access_subject
-      AND admission.version=recovery.actor_admission_version
-    JOIN native_staff_profiles profile ON profile.staff_id=recovery.actor_staff_id
-      AND profile.login_email=recovery.actor_email AND profile.version=recovery.actor_profile_version
-    WHERE recovery.successor_command_id=?`).bind(commandId).first<Record<string,unknown>>();
-  if(!row||row.actor_staff_id!==actor.staffId||row.actor_access_subject!==actor.accessSubject||row.actor_email!==actor.email
-    ||row.actor_admission_version!==actor.admissionVersion||row.actor_profile_version!==actor.profileVersion)return null;
-  const selected=await Promise.all([grant(db,actor.staffId,"directory.profile.edit",String(row.record_id)),
-    grant(db,actor.staffId,"directory.identity.link",String(row.record_id)),grant(db,actor.staffId,"directory.enrollment.manage",String(row.record_id))]);
-  if(selected[0]!==row.profile_grant_id||selected[1]!==row.identity_grant_id||selected[2]!==row.enrollment_grant_id)return null;
-  return{profileGrantId:selected[0]!,identityGrantId:selected[1]!,enrollmentGrantId:selected[2]!,
-    rootCommandJson:String(row.root_command_json),rootCommandId:String(row.root_command_id),authorizationId:String(row.authorization_id)};
-}
-
 export async function prepareDirectoryCreateGenerationRecovery(env:DirectoryCreateRecoveryEnvironment,input:DirectoryCreateRecoveryInput,
-  actor:DirectoryCreateRecoveryActor,send:typeof fetch=fetch):Promise<DirectoryCreateRecoveryOutcome>{
+ actor:DirectoryCreateRecoveryActor,send:typeof fetch=fetch):Promise<DirectoryCreateRecoveryOutcome>{
+ const expiry=Date.parse(actor.verifiedUntil);
+ return prepareRecovery(env,input,actor,()=>Promise.resolve(Number.isFinite(expiry)&&expiry>Date.now()),false,send);
+}
+async function prepareRecovery(env:DirectoryCreateRecoveryEnvironment,input:DirectoryCreateRecoveryInput,
+ actor:Omit<DirectoryCreateRecoveryActor,"verifiedUntil">,authority:()=>Promise<boolean>,sharedTransport:boolean,
+ send:typeof fetch):Promise<DirectoryCreateRecoveryOutcome>{
   if(env.PROJECT_ALPHA_DIRECTORY_CREATE_GENERATION_RECOVERY_ENABLED!=="true")return{status:"blocked",reason:"disabled"};
-  const verifiedUntil=Date.parse(actor.verifiedUntil);
   if(!UUID.test(input.authorizationId)||!UUID.test(input.predecessorCommandId)||!UUID.test(input.successorCommandId)
-    ||input.reason.length<1||input.reason.length>500||!Number.isFinite(verifiedUntil)||verifiedUntil<=Date.now())return{status:"blocked",reason:"authority"};
+    ||input.reason.length<1||input.reason.length>500||!await authority())return{status:"blocked",reason:"authority"};
   try{
     if(!await currentActor(env.OPS_DB,actor))return{status:"blocked",reason:"authority"};
     const old=await prior(env.OPS_DB,input.authorizationId);if(old){const exact=replay(old,input,actor);if(exact.status!=="prepared")return exact;
@@ -126,8 +84,12 @@ export async function prepareDirectoryCreateGenerationRecovery(env:DirectoryCrea
     if(!configured.enabled||configured.connection.expectedSourceInstanceId!==row.expected_source_instance_id
       ||configured.connection.expectedApplicationId!==row.application_id||configured.connection.expectedHistoryEpoch!==row.expected_history_epoch_id
       ||new URL(configured.connection.baseUrl).origin!==new URL(row.destination_base_url).origin)return{status:"blocked",reason:"configuration"};
+    const validateSharedTransport=sharedTransport||(row.record_kind==="client"&&command.fields.organizationPublicId!==null);
     let replayCommand:ProjectAlphaWireCreateCommand;
-    if(row.record_kind==="organization")replayCommand={commandId:command.commandId,externalId:command.externalId,
+    if(validateSharedTransport){
+      const checked=await readAuthorizedDirectoryCreateReservation(env,input.sourceId,input.predecessorCommandId);
+      if(!checked)return{status:"blocked",reason:"authority"};replayCommand=checked;
+    }else if(row.record_kind==="organization")replayCommand={commandId:command.commandId,externalId:command.externalId,
       expectedAuthorizationGeneration:command.expectedAuthorizationGeneration,
       profile:command.fields as Extract<ProjectAlphaWireCreateCommand,{organization?:never}>["profile"]};
     else{const fields={...command.fields} as Record<string,unknown>;if(fields.organizationPublicId!==null)return{status:"blocked",reason:"not_eligible"};
@@ -135,7 +97,15 @@ export async function prepareDirectoryCreateGenerationRecovery(env:DirectoryCrea
         expectedAuthorizationGeneration:command.expectedAuthorizationGeneration,
         profile:fields as Extract<ProjectAlphaWireCreateCommand,{organization:unknown}>["profile"],organization:null};}
     const replayCommandJson=JSON.stringify(replayCommand);
-    const replayOutcome=await sendConfiguredProjectAlphaDirectoryCreate(env,input.sourceId,row.record_kind,replayCommand,send);
+    let replayAuthorityRejected=false;
+    const replayOutcome=await sendConfiguredProjectAlphaDirectoryCreate(env,input.sourceId,row.record_kind,replayCommand,send,async body=>{
+      const selected=await Promise.all([grant(env.OPS_DB,actor.staffId,"directory.profile.edit",row.record_id),
+        grant(env.OPS_DB,actor.staffId,"directory.identity.link",row.record_id),grant(env.OPS_DB,actor.staffId,"directory.enrollment.manage",row.record_id)]);
+      const checked=validateSharedTransport?await readAuthorizedDirectoryCreateReservation(env,input.sourceId,input.predecessorCommandId):replayCommand;
+      if(!await authority()||!await currentActor(env.OPS_DB,actor)||selected.some((v,n)=>v!==grants[n])
+       ||!checked||JSON.stringify(checked)!==body){replayAuthorityRejected=true;throw Error("recovery authority changed");}
+    });
+    if(replayAuthorityRejected)return{status:"blocked",reason:"authority"};
     const conflictProof=validatedProjectAlphaDirectoryCreateGenerationConflict(replayOutcome);
     if(!conflictProof||conflictProof.commandJson!==replayCommandJson
       ||conflictProof.destinationOrigin!==new URL(row.destination_base_url).origin
@@ -146,7 +116,9 @@ export async function prepareDirectoryCreateGenerationRecovery(env:DirectoryCrea
       ||observed.inventory.applicationId!==row.application_id||observed.inventory.historyEpoch!==row.expected_history_epoch_id
       ||!RECOVERABLE_GENERATION.test(observed.inventory.authorizationGeneration)
       ||BigInt(observed.inventory.authorizationGeneration)>=MAX_GENERATION)return{status:"blocked",reason:"generation"};
-    if(Date.now()>=verifiedUntil||!await currentActor(env.OPS_DB,actor))return{status:"blocked",reason:"authority"};
+    if(!await authority()||!await currentActor(env.OPS_DB,actor))return{status:"blocked",reason:"authority"};
+    if(validateSharedTransport){const checked=await readAuthorizedDirectoryCreateReservation(env,input.sourceId,input.predecessorCommandId);
+      if(!checked||JSON.stringify(checked)!==replayCommandJson)return{status:"blocked",reason:"stale"};}
     const persisted=await persistProjectAlphaDirectoryInventoryPage(env.OPS_DB,observed.inventory,null);
     if(persisted.status!=="persisted"||persisted.continuationIdentity.authorizationGeneration!==observed.inventory.authorizationGeneration)return{status:"blocked",reason:"generation"};
     const successor=planDirectoryCreateGenerationRecovery(command,{predecessorCommandId:input.predecessorCommandId,
@@ -155,7 +127,7 @@ export async function prepareDirectoryCreateGenerationRecovery(env:DirectoryCrea
     if(!successor||!plain(audit.actor)||typeof audit.actor.selectedGrantId!=="string"
       ||typeof audit.actor.selectedIdentityGrantId!=="string")
       return{status:"blocked",reason:"not_eligible"};const successorJson=JSON.stringify(successor);
-    if(Date.now()>=verifiedUntil||!await currentActor(env.OPS_DB,actor))return{status:"blocked",reason:"authority"};
+    if(!await authority()||!await currentActor(env.OPS_DB,actor))return{status:"blocked",reason:"authority"};
     await env.OPS_DB.batch([env.OPS_DB.prepare(`INSERT INTO project_alpha_directory_create_generation_recoveries(
       authorization_id,root_command_id,predecessor_command_id,successor_command_id,recovery_depth,intent_id,source_id,
       source_instance_id,application_id,history_epoch_id,destination_origin,resource_type,record_id,external_id,
@@ -177,4 +149,72 @@ export async function prepareDirectoryCreateGenerationRecovery(env:DirectoryCrea
         row.expected_source_instance_id,row.origin_snapshot_json,Date.now(),row.expected_history_epoch_id)]);
     return{status:"prepared",successorCommandId:input.successorCommandId,generation:observed.inventory.authorizationGeneration,replayed:false};
   }catch{return{status:"uncertain",reason:"database"};}
+}
+
+/** Durable approval delegation, not a human authentication session. Authority
+ * is derived afresh from the exact immutable approved decision and audited
+ * original reviewer; current native admission/profile/grants still fence it. */
+async function approvedOnboardingActor(db:D1Database,commandId:string){
+ return db.withSession("first-primary").prepare(`SELECT decision.decision_id,decision.reviewer_staff_id staffId,
+ decision.reviewer_subject accessSubject,decision.reviewer_email email,decision.original_admission_version admissionVersion,
+ decision.original_profile_version profileVersion FROM operations_directory_effective_materializations m
+ JOIN project_alpha_directory_outbox outbox ON outbox.command_id=m.command_id
+ JOIN operations_directory_intents intent ON intent.intent_id=m.intent_id
+ JOIN operations_directory_records record ON record.record_id=intent.record_id AND record.current_version=intent.record_version
+ JOIN operations_directory_audit audit ON audit.mutation_id=intent.mutation_id AND audit.record_id=intent.record_id
+  AND audit.record_version=intent.record_version AND audit.actor_type='staff'
+ JOIN client_onboarding_decisions decision ON decision.outcome='approved' AND decision.reviewer_staff_id=audit.actor_id
+  AND decision.reviewer_subject=audit.original_verified_access_subject
+  AND decision.reviewer_email=json_extract(audit.command_json,'$.actor.loginEmail')
+  AND decision.original_admission_version=json_extract(audit.command_json,'$.actor.admissionVersion')
+  AND decision.original_profile_version=json_extract(audit.command_json,'$.actor.profileVersion')
+ JOIN client_onboarding_portal_activation_intents activation ON activation.decision_id=decision.decision_id AND activation.state='pending'
+ WHERE outbox.command_id=? AND outbox.state='terminal' AND json_extract(outbox.outcome_json,'$.httpStatus')=409
+ AND json_extract(outbox.command_json,'$.operation')='create'
+ AND ((record.record_id=decision.client_record_id AND record.current_version=decision.client_record_version
+       AND json_extract(audit.command_json,'$.createAdmissionId')='client-onboarding:'||decision.decision_id||':client')
+  OR (record.record_id=decision.organization_record_id AND record.current_version=decision.organization_record_version
+       AND json_extract(audit.command_json,'$.createAdmissionId')='client-onboarding:'||decision.decision_id||':organization')
+  OR EXISTS(SELECT 1 FROM client_onboarding_shared_company_child_receipts receipt
+   JOIN client_onboarding_shared_company_plan_children child ON child.plan_id=receipt.plan_id AND child.client_record_id=receipt.client_record_id
+   WHERE receipt.decision_id=decision.decision_id AND child.client_record_id=record.record_id AND record.current_version=1
+    AND child.mutation_id=intent.mutation_id AND child.create_admission_id=json_extract(audit.command_json,'$.createAdmissionId')))
+ AND NOT EXISTS(SELECT 1 FROM operations_directory_lifecycle_state lifecycle WHERE lifecycle.record_id=record.record_id AND lifecycle.status<>'active')
+ AND NOT EXISTS(SELECT 1 FROM operations_directory_client_organizations relation
+  LEFT JOIN operations_directory_records parent ON parent.record_id=relation.organization_record_id AND parent.record_kind='organization'
+  LEFT JOIN operations_directory_lifecycle_state lifecycle ON lifecycle.record_id=relation.organization_record_id
+  WHERE relation.client_record_id=record.record_id AND relation.organization_record_id IS NOT NULL
+   AND (parent.record_id IS NULL OR coalesce(lifecycle.status,'active')<>'active'))
+ AND EXISTS(SELECT 1 FROM json_each(activation.destinations_json) destination
+  WHERE json_extract(destination.value,'$.sourceId')=intent.source_id
+   AND json_extract(destination.value,'$.sourceInstanceUUID')=intent.source_instance_uuid
+   AND json_extract(destination.value,'$.applicationUUID')=intent.application_uuid
+   AND json_extract(destination.value,'$.historyEpoch')=intent.expected_history_epoch_id
+   AND json_extract(destination.value,'$.origin')=intent.destination_origin)
+ AND EXISTS(SELECT 1 FROM effective_native_directory_enrollments enrollment,json_each(enrollment.destinations_json) destination
+  WHERE enrollment.record_id=record.record_id AND json_extract(destination.value,'$.sourceId')=intent.source_id
+   AND json_extract(destination.value,'$.sourceInstanceUUID')=intent.source_instance_uuid
+   AND json_extract(destination.value,'$.applicationUUID')=intent.application_uuid
+   AND json_extract(destination.value,'$.historyEpoch')=intent.expected_history_epoch_id
+   AND json_extract(destination.value,'$.origin')=intent.destination_origin
+   AND json_extract(destination.value,'$.externalCanonicalId')=intent.external_canonical_id)
+ LIMIT 2`).bind(commandId).all<Omit<DirectoryCreateRecoveryActor,"verifiedUntil">&{decision_id:string}>();
+}
+export async function prepareApprovedOnboardingCreateGenerationRecovery(
+ env:DirectoryCreateRecoveryEnvironment&{CLIENT_ONBOARDING_ADMIN_ENABLED?:string},input:DirectoryCreateRecoveryInput,
+ send:typeof fetch=fetch):Promise<DirectoryCreateRecoveryOutcome>{
+ if(env.CLIENT_ONBOARDING_ADMIN_ENABLED!=="true"||env.PROJECT_ALPHA_DIRECTORY_CREATE_GENERATION_RECOVERY_ENABLED!=="true")
+  return{status:"blocked",reason:"disabled"};
+ const selected=(await approvedOnboardingActor(env.OPS_DB,input.predecessorCommandId)).results;
+ if(selected.length!==1)return{status:"blocked",reason:"authority"};
+ const original=selected[0]!;
+ const authority=async()=>{const current=(await approvedOnboardingActor(env.OPS_DB,input.predecessorCommandId)).results;
+  return current.length===1&&JSON.stringify(current[0])===JSON.stringify(original);};
+ return prepareRecovery(env,input,original,authority,true,send);
+}
+
+/** Candidate qualification only; the recovery service repeats it after network
+ * waits and still checks current admission and all three native permissions. */
+export async function hasApprovedOnboardingCreateRecovery(env:{OPS_DB:D1Database},commandId:string){
+ return (await approvedOnboardingActor(env.OPS_DB,commandId)).results.length===1;
 }
