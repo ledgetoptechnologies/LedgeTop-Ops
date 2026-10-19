@@ -3,7 +3,7 @@ import { HTTPException } from "hono/http-exception";
 import type { Env } from "../src/worker/types";
 
 const calls = vi.hoisted(() => ({ legacy: vi.fn(), native: vi.fn(), issue: vi.fn(), reveal: vi.fn(),
-  review: vi.fn(), inbox: vi.fn(), approve: vi.fn(), enrollmentChoices: vi.fn() }));
+  review: vi.fn(), inbox: vi.fn(), approve: vi.fn(), existingCompanies: vi.fn(), enrollmentChoices: vi.fn() }));
 vi.mock("cloudflare:workers", () => ({ WorkflowEntrypoint: class {}, WorkerEntrypoint: class {}, DurableObject: class {} }));
 vi.mock("../src/worker/auth", () => ({ authenticateStaff: calls.legacy }));
 vi.mock("../src/worker/native-staff-auth", () => ({
@@ -23,6 +23,10 @@ vi.mock("../src/worker/client-onboarding-approval", () => ({
 }));
 vi.mock("../src/worker/client-onboarding-enrollment-discovery", () => ({
   readClientOnboardingEnrollmentChoices: calls.enrollmentChoices,
+}));
+vi.mock("../src/worker/client-onboarding-existing-company",async original=>({
+  ...await original<typeof import("../src/worker/client-onboarding-existing-company")>(),
+  readClientOnboardingExistingCompanies:calls.existingCompanies,
 }));
 import worker from "../src/worker/index";
 
@@ -83,6 +87,7 @@ beforeEach(() => {
     submissionId: "33333333-3333-4333-8333-333333333333",
     clientRecordId: "55555555-5555-4555-8555-555555555555",
     clientRecordVersion: 1, relationshipVersion: 1 });
+  calls.existingCompanies.mockReset().mockResolvedValue({companies:[],nextAfterRecordId:null,existingContactReuse:"unsupported"});
   calls.enrollmentChoices.mockReset().mockResolvedValue({ sourceIds: ["project-alpha:primary"] });
 });
 
@@ -207,7 +212,7 @@ describe("native client onboarding staff route", () => {
     expect(await reply.json()).toEqual({ decisionId: "44444444-4444-4444-8444-444444444444",
       submissionId, clientRecordId: "55555555-5555-4555-8555-555555555555",
       clientRecordVersion: 1, relationshipVersion: 1, replayed: false });
-    expect(calls.approve).toHaveBeenCalledWith(database, actor, submissionId, "e".repeat(64), [], undefined);
+    expect(calls.approve).toHaveBeenCalledWith(database, actor, submissionId, "e".repeat(64), [], undefined, undefined);
     expect(reply.headers.get("Cache-Control")).toBe("no-store");
   });
 
@@ -258,7 +263,7 @@ describe("native client onboarding staff route", () => {
     const empty = await send("/api/client-onboarding/staff/approve", "POST",
       { submissionId, fieldsSha256, sourceIds: [] }, csrf);
     expect(empty.status).toBe(200);
-    expect(calls.approve).toHaveBeenCalledWith(database, actor, submissionId, fieldsSha256, [], undefined);
+    expect(calls.approve).toHaveBeenCalledWith(database, actor, submissionId, fieldsSha256, [], undefined, undefined);
 
     calls.approve.mockClear();
     const configured = { ...env(), PROJECT_ALPHA_API_V2_CONNECTIONS: "server-owned-config" } as Env;
@@ -267,7 +272,7 @@ describe("native client onboarding staff route", () => {
       { submissionId, fieldsSha256, sourceIds: selectedSourceIds }, csrf, configured);
     expect(selected.status).toBe(200);
     expect(calls.approve).toHaveBeenCalledWith(database, actor, submissionId, fieldsSha256,
-      selectedSourceIds, "server-owned-config");
+      selectedSourceIds, "server-owned-config", undefined);
   });
 
   it("discovers only server-configured enrollment choices through the native CSRF boundary", async () => {
@@ -323,4 +328,17 @@ describe("native client onboarding staff route", () => {
     expect((await send("/api/session")).status).toBe(401);
     expect(calls.legacy).toHaveBeenCalledOnce();
   });
+  it("requires native CSRF for existing-company review and carries only an exact explicit selection into approval",async()=>{
+    const csrf=await session(),submissionId="33333333-3333-4333-8333-333333333333";
+    const input={submissionId,sourceIds:["project-alpha:primary"],query:"Example",afterRecordId:null};
+    expect((await send("/api/client-onboarding/staff/existing-companies","POST",input,"bad")).status).toBe(403);
+    expect(calls.existingCompanies).not.toHaveBeenCalled();
+    expect((await send("/api/client-onboarding/staff/existing-companies","POST",input,csrf)).status).toBe(200);
+    expect(calls.existingCompanies).toHaveBeenCalledWith(database,actor,input);
+    const organizationSelection={kind:"existing",recordId:"company:exact",expectedVersion:4};
+    expect((await send("/api/client-onboarding/staff/approve","POST",{submissionId,fieldsSha256:"e".repeat(64),sourceIds:[],organizationSelection},csrf)).status).toBe(200);
+    expect(calls.approve).toHaveBeenCalledWith(database,actor,submissionId,"e".repeat(64),[],undefined,organizationSelection);
+    expect((await send("/api/client-onboarding/staff/approve","POST",{submissionId,fieldsSha256:"e".repeat(64),sourceIds:[],organizationSelection:{...organizationSelection,email:"inferred@example.test"}},csrf)).status).toBe(400);
+  });
+
 });

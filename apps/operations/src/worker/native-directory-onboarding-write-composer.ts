@@ -120,10 +120,10 @@ function savedApprovalReceipt(value: unknown): Omit<Extract<NativeOnlyClientOnbo
 }
 
 /**
- * Private 0083 composer for a native-only person/client approval.  It supports
- * a new explicitly-unlinked client or an existing client whose current parent
- * relationship is preserved.  Organization creation/link changes intentionally
- * remain outside this smallest staged-state prerequisite.
+ * Private 0083 composer for reviewed client approval. A new contact can be
+ * unlinked or use an explicitly created/reviewed existing organization; an
+ * existing client's current relationship remains preserved. The regular
+ * writers retain all authority, audit, enrollment and dependency guards.
  */
 export async function approveNativeOnlyClientOnboarding(db: D1Database,
   input: NativeOnlyClientOnboardingApproval,
@@ -137,15 +137,16 @@ export async function approveNativeOnlyClientOnboarding(db: D1Database,
     || !Number.isSafeInteger(input.relationship.expectedVersion) || input.relationship.expectedVersion < 0
     || !UUID.test(input.relationship.mutationId)) return { status: "rejected", reason: "invalid_approval" };
   const actor = profile.actor;
-  if (organization && (organization.kind !== "organization" || organization.operation !== "create"
-    || organization.destinations.length !== 0 || organization.expectedLocalVersion !== 0
+  if (organization && (organization.kind !== "organization" || (organization.operation === "create"
+      ? organization.destinations.length !== 0 || organization.expectedLocalVersion !== 0
+      : organization.operation !== "update" || organization.expectedLocalVersion < 1)
     || profile.operation !== "create" || organization.recordId === profile.recordId
     || organization.mutationId === profile.mutationId
-    || organization.createAdmissionId === profile.createAdmissionId
+    || (organization.operation === "create" && organization.createAdmissionId === profile.createAdmissionId)
     || organization.actor.staffId !== actor.staffId || organization.actor.accessSubject !== actor.accessSubject
     || organization.actor.admissionVersion !== actor.admissionVersion
     || organization.actor.profileVersion !== actor.profileVersion
-    || JSON.stringify(organization.scopes) !== JSON.stringify(input.scopes)))
+    || (organization.operation === "create" && JSON.stringify(organization.scopes) !== JSON.stringify(input.scopes))))
     return { status: "rejected", reason: "invalid_organization_plan" };
   const expectedRelationshipMutation = profile.operation === "create"
     ? await deterministicUuid(`${profile.mutationId}\0client-relationship\0${organization?.recordId ?? "unlinked"}`) : input.relationship.mutationId;
@@ -195,8 +196,13 @@ export async function approveNativeOnlyClientOnboarding(db: D1Database,
       || resolved.some((value,index) => !value || value.sourceId !== selectedSourceIds[index]))
       return {status:"blocked",reason:"destination_resolution"};
     profile={...profile,destinations:resolved.map(value=>({...value,externalCanonicalId:profile.recordId}))};
-    if (organization) organization={...organization,
+    if (organization?.operation === "create") organization={...organization,
       destinations:resolved.map(value=>({...value,externalCanonicalId:organization!.recordId}))};
+    if (organization?.operation === "update" && resolved.some(child => !organization!.destinations.some(parent =>
+      parent.sourceId === child.sourceId && parent.sourceInstanceUUID === child.sourceInstanceUUID
+      && parent.applicationUUID === child.applicationUUID && parent.historyEpoch === child.historyEpoch
+      && parent.origin === child.origin && parent.expectedAuthorizationGeneration === child.expectedAuthorizationGeneration)))
+      return {status:"blocked",reason:"existing_organization_source_coverage"};
   }
   let organizationStatements: readonly D1PreparedStatement[] = [];
   if (organization) {
@@ -210,7 +216,7 @@ export async function approveNativeOnlyClientOnboarding(db: D1Database,
   const recording = recordingSession(session);
   const planned = organization
     ? await writeNativeOnlyOnboardingDecisionProfile(recording.db,input.decisionId,profile,
-      { recordId: organization.recordId, version: 1, mutationId: organization.mutationId,
+      { recordId: organization.recordId, version: organization.expectedLocalVersion + 1, mutationId: organization.mutationId,
         destinations: organization.destinations })
     : await writeNativeOnlyClientOnboardingDecisionProfile(recording.db,input.decisionId,profile);
   const profileStatements = recording.statements();
@@ -240,7 +246,7 @@ export async function approveNativeOnlyClientOnboarding(db: D1Database,
       scopesJson,profile.operation === "create" ? "new" : "existing",profile.recordId,profile.expectedLocalVersion,
       profile.mutationId,`${profile.mutationId}:audit`,profile.operation === "create" ? profile.createAdmissionId : null,
       profileJson,clientDestinationsJson,input.relationship.mutationId,input.relationship.mode,input.relationship.expectedVersion,
-      organization ? "new" : null,organization?.recordId ?? null,organization?.expectedLocalVersion ?? null,
+      organization ? organization.operation === "create" ? "new" : "existing" : null,organization?.recordId ?? null,organization?.expectedLocalVersion ?? null,
       organization?.mutationId ?? null,organization ? `${organization.mutationId}:audit` : null,
       organization?.operation === "create" ? organization.createAdmissionId : null,organizationProfileJson,organizationDestinationsJson);
   const clientAdmissionStatements: D1PreparedStatement[] = [];
@@ -252,7 +258,7 @@ export async function approveNativeOnlyClientOnboarding(db: D1Database,
     clientAdmissionStatements.push(session.prepare(`INSERT INTO native_directory_create_admission_relationships
       (create_admission_id,client_record_id,organization_record_id,organization_record_version)
       VALUES(?,?,?,?)`).bind(profile.createAdmissionId,profile.recordId,organization?.recordId ?? null,
-        organization ? 1 : null));
+        organization ? organization.expectedLocalVersion + 1 : null));
   }
   const organizationAdmissionStatements = organization?.operation === "create" ? [session.prepare(`INSERT INTO native_directory_create_admissions
     (id,staff_id,bound_access_subject,record_id,record_kind,scopes_json,profile_json,destinations_json,issued_by)
@@ -265,13 +271,13 @@ export async function approveNativeOnlyClientOnboarding(db: D1Database,
      VALUES(?,?,?,?,?,'approved',?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(input.decisionId,input.invitationId,input.submissionId,
       input.fieldsSha256,input.requestSha256,actor.staffId,actor.accessSubject,actor.loginEmail,actor.admissionVersion,
       actor.profileVersion,input.reason,reviewed,profile.recordId,clientVersion,organization?.recordId ?? null,
-      organization ? 1 : null,relationshipVersion,receipt);
+      organization ? organization.expectedLocalVersion + 1 : null,relationshipVersion,receipt);
   try { await session.batch([fence,...organizationAdmissionStatements,...organizationStatements,
     ...clientAdmissionStatements,...profileStatements,decision,
     session.prepare("DELETE FROM client_onboarding_decision_fences WHERE decision_id=?").bind(input.decisionId)]); }
   catch { return { status: "blocked", reason: "authority_or_atomic_write" }; }
   return { status: "written", replayed: false, decisionId: input.decisionId, invitationId: input.invitationId,
     submissionId: input.submissionId, clientRecordId: profile.recordId, clientRecordVersion: clientVersion,
-    organizationRecordId: organization?.recordId ?? null, organizationRecordVersion: organization ? 1 : null,
+    organizationRecordId: organization?.recordId ?? null, organizationRecordVersion: organization ? organization.expectedLocalVersion + 1 : null,
     relationshipVersion };
 }

@@ -1054,3 +1054,75 @@ Authority, identity or enrollment changes require explicit staff review rather
 than silently broadening or replaying approval. Files remain separately granted.
 Business onboarding's existing-company/contact reuse is a separate pending slice;
 this continuation does not merge or duplicate an existing company by matching text.
+
+
+## Explicit company review and exact reuse (migration 0216)
+
+Keep the onboarding administration flag disabled until the staff UI supports this
+contract. Consumer/new individual approval keeps its existing request shape.
+Business approval now requires `organizationSelection` alongside the existing
+`submissionId`, `fieldsSha256`, and canonical `sourceIds`:
+
+- `{ "kind": "new" }` explicitly creates a new company and contact.
+- `{ "kind": "existing", "recordId": "<exact canonical Ops ID>", "expectedVersion": 3 }`
+  creates a new contact under that exact company. Company fields from the
+  recipient are proposals only and never overwrite the existing company.
+
+Missing or ambiguous business selection fails closed. The new UI must let staff
+review potential existing companies before explicitly choosing creation; it must
+not silently resubmit a failed reuse as `kind:new`. Names and emails are search
+text, not identity evidence. New individual contacts remain separate records;
+existing-contact proposal retargeting is deliberately unsupported in this slice.
+
+`POST /api/client-onboarding/staff/existing-companies` accepts exactly
+`{submissionId, sourceIds, query, afterRecordId:null|previousNextAfterRecordId}`.
+It uses the same native staff authentication, same-origin/CSRF checks and no-store
+responses as review. The bounded first slice requires current global native
+view/edit/link permissions and rejects any active deny. It returns at most 20
+`companies` with `recordId`, `expectedVersion`, `name`, `sourceIds`, `reusable`, and
+`reason`, plus `nextAfterRecordId` and `existingContactReuse:"unsupported"`.
+Coverage is reviewed using these IDs, then current PA bindings/delivery state and
+source identity are reverified at approval. A candidate with local coverage is
+not a promise that its live PA connection is available.
+
+Reuse is limited to an active, ungrouped exact canonical company whose existing
+PA destinations cover every selected contact destination. Existing company
+copies keep all their own enrollments even when the new contact selects only
+one. Adding a company to another PA remains a separate explicit operation.
+Grouped source-owned company aliases return `grouped_parent_alias_unsupported`;
+acquired mappings whose immutable enrollment requires a different external-parent alias return
+`acquired_parent_alias_unsupported`; insufficient coverage returns `selected_sources_not_covered`; inactive companies
+return `company_not_active`. No automatic matching or company cloning occurs.
+
+The existing guarded organization writer commits an audited no-op next revision
+with unchanged business fields, followed atomically by the new contact, explicit
+parent intent, and approval decision. PA sees a normal revision-checked company
+update, not another company creation. Migration 0216 enforces unchanged company
+fields, current version, lifecycle, no shared group membership, unchanged source
+coverage and approved parent identity in the same transaction. Stale choices,
+current denies, live binding drift, and unsupported aliases fail without a partial
+contact or company. Idempotent retries use the original immutable company audit
+snapshot and return the original receipt; changing the reviewed version conflicts.
+
+### Next contract for grouped companies and existing contacts
+
+An explicit grouped-company selection must pin the shared profile ID/version,
+complete ordered member record IDs/versions and lifecycle, and the selected
+source-to-parent alias mapping. Each source must have exactly one parent alias
+with a current active mapping, remote head, source/app/history/origin and binding
+revision. Approval must recheck the whole group and source coverage atomically;
+no source may choose a sibling by matching its name. A new contact's single
+canonical parent cannot currently represent these source-specific parent aliases (including acquired mappings whose enrollment
+coordinate differs from their active external parent): that requires a new immutable reviewed relationship evidence schema and matching
+materializer/ACK guards, or separate exact client member records under each
+source-owned parent linked by an explicit shared-contact group. The latter fits
+the existing two-member shared writer, but must be reviewed against portal proof,
+invitation target and replay fences before implementation.
+
+Existing-contact reuse must be a distinct reviewed resolution pinned to the
+submission, original invitation target policy, exact contact/group version,
+member IDs/relationships, selected sources, preserved vs proposed fields and
+current native authority. New-client invitations currently forbid retargeting to
+an existing contact; changing that constraint requires a narrow immutable
+resolution record and corresponding decision-fence checks. Neither email matching
+nor changing a browser-supplied record ID is sufficient evidence.

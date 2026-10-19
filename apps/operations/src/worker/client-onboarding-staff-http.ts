@@ -1,3 +1,4 @@
+import { parseClientOnboardingOrganizationSelection, readClientOnboardingExistingCompanies } from "./client-onboarding-existing-company";
 import { readClientOnboardingPortalActivationStatus } from "./client-onboarding-portal-activation";
 import { Buffer } from "node:buffer";
 import { timingSafeEqual } from "node:crypto";
@@ -13,7 +14,7 @@ import { approveNewNativeOnlyClientOnboarding } from "./client-onboarding-approv
 import { readClientOnboardingEnrollmentChoices } from "./client-onboarding-enrollment-discovery";
 import { parseClientOnboardingEnrollmentSourceIds } from "./client-onboarding-enrollment-selection";
 
-export type ClientOnboardingStaffRoute = "session" | "create" | "reveal" | "review" | "approve" | "enrollment-choices" | "inbox" | "activation-status";
+export type ClientOnboardingStaffRoute = "session" | "create" | "reveal" | "review" | "approve" | "enrollment-choices" | "inbox" | "activation-status" | "existing-companies";
 export type ClientOnboardingStaffHttpDependencies = Readonly<{
   configuration: NativeStaffAccessConfiguration & Readonly<{ origin: string; csrfSecret: string }>;
   database: D1Database;
@@ -38,6 +39,7 @@ class HttpFailure extends Error {
 
 export function clientOnboardingStaffHttpRequest(method: string, path: string): ClientOnboardingStaffRoute | null {
   if (method === "GET" && path === "/api/client-onboarding/staff/session") return "session";
+  if (method === "POST" && path === "/api/client-onboarding/staff/existing-companies") return "existing-companies";
   if (method === "POST" && path === "/api/client-onboarding/staff/activation-status") return "activation-status";
   if (method === "POST" && path === "/api/client-onboarding/staff/inbox") return "inbox";
   if (method === "POST" && path === "/api/client-onboarding/staff/create") return "create";
@@ -155,11 +157,17 @@ async function body(request: Request, route: Exclude<ClientOnboardingStaffRoute,
     if (!exact(value, ["cursor"])) throw new HttpFailure(400, "invalid_request");
     return value;
   }
+  if (route === "existing-companies") {
+    if (!exact(value,["submissionId","sourceIds","query","afterRecordId"])) throw new HttpFailure(400,"invalid_request");
+    return value;
+  }
   if (route === "approve") {
     if (!(exact(value, ["submissionId", "fieldsSha256"])
-        || exact(value, ["submissionId", "fieldsSha256", "sourceIds"]))
+        || exact(value, ["submissionId", "fieldsSha256", "sourceIds"])
+        || exact(value,["submissionId","fieldsSha256","sourceIds","organizationSelection"]))
       || typeof value.submissionId !== "string" || typeof value.fieldsSha256 !== "string"
-      || (Object.hasOwn(value, "sourceIds") && parseClientOnboardingEnrollmentSourceIds(value.sourceIds) === null))
+      || (Object.hasOwn(value, "sourceIds") && parseClientOnboardingEnrollmentSourceIds(value.sourceIds) === null)
+      || (Object.hasOwn(value,"organizationSelection") && parseClientOnboardingOrganizationSelection(value.organizationSelection)===null))
       throw new HttpFailure(400, "invalid_request");
     return value;
   }
@@ -223,6 +231,11 @@ export async function handleClientOnboardingStaffHttp(request: Request,
     unexpired(auth);
     const input = await body(request, route);
     unexpired(auth);
+    if(route==="existing-companies") {
+      try {const choices=await readClientOnboardingExistingCompanies(authority.database,auth,input);
+        unexpired(auth);return response(200,choices);
+      } catch {throw new HttpFailure(403,"client_onboarding_denied");}
+    }
     if (route === "enrollment-choices") {
       try {
         const choices = await readClientOnboardingEnrollmentChoices(authority.database,
@@ -259,7 +272,7 @@ export async function handleClientOnboardingStaffHttp(request: Request,
     if (route === "approve") {
       try {
         const approved = await approveNewNativeOnlyClientOnboarding(authority.database, auth,
-          input.submissionId, input.fieldsSha256, input.sourceIds ?? [], projectAlphaApiV2Connections);
+          input.submissionId, input.fieldsSha256, input.sourceIds ?? [], projectAlphaApiV2Connections,input.organizationSelection);
         return response(200, { decisionId: approved.decisionId, submissionId: approved.submissionId,
           clientRecordId: approved.clientRecordId, clientRecordVersion: approved.clientRecordVersion,
           ...(approved.organizationRecordId === null ? {} : {
