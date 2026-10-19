@@ -155,6 +155,34 @@ describe("entitlement projection",()=>{
     expect(await db.prepare("SELECT active FROM pa_calendar_events WHERE id='task:110'").first("active")).toBe(0);
  },30_000);
 
+  it.each(["project","project_assignment"] as const)("invalidates a restored epoch before a real %s projection changes authority context",async kind=>{
+    const source=secondary.sourceId,origin="https://secondary.example.test";
+    const instance="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",application="bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    const oldEpoch="cccccccc-cccc-4ccc-8ccc-cccccccccccc",restoredEpoch="eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",requestId="dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+    const identity=JSON.stringify([origin,instance,application,oldEpoch]);
+    await db.prepare("CREATE TABLE pa_local_division_source_heads(projection_source_id TEXT PRIMARY KEY,identity_key TEXT,revision INTEGER,verified_at TEXT)").run();
+    await db.prepare("INSERT INTO pa_local_division_source_heads VALUES(?,?,1,'previous')").bind(source,identity).run();
+    await db.prepare("CREATE TABLE pa_local_division_mappings(resource_kind TEXT,resource_id TEXT,projection_source_id TEXT,identity_key TEXT,division_id TEXT)").run();
+    await db.prepare("INSERT INTO pa_local_division_mappings VALUES('project','historic-id',?,?,'division-pa-30')").bind(source,identity).run();
+    const send=vi.fn(async()=>{
+      expect(await db.prepare("SELECT identity_key FROM pa_local_division_source_heads WHERE projection_source_id=?").bind(source).first("identity_key")).toBeNull();
+      expect(await db.prepare("SELECT count(*) n FROM pa_projects WHERE projection_source_id=?").bind(source).first("n")).toBe(0);
+      return Response.json({apiVersion:"2",sourceInstanceId:instance,applicationId:application,historyEpoch:restoredEpoch,requestId,
+        grantedCapabilities:[{name:"api.capabilities.read"}],implementedEndpoints:[{method:"GET",path:"/api/v2/capabilities",requiredCapability:"api.capabilities.read"}]},
+        {headers:{"Cache-Control":"no-store","X-Request-ID":requestId}});
+    });
+    vi.stubGlobal("fetch",send);
+    const runtime={...env(),PROJECT_ALPHA_BASE_URL:origin,PROJECT_ALPHA_API_V2_CONNECTIONS:JSON.stringify({version:1,instances:{[source]:{
+      sourceId:source,enabled:true,baseUrl:origin,apiKey:"capabilities-only-fixture",sourceInstanceId:instance,applicationId:application,historyEpoch:oldEpoch,
+    }}})} as Env;
+    const change=projection(kind,kind==="project"?"40":"assignment-1",kind==="project"?{name:"Restored project"}:{project_id:40,user_id:42});
+    await expect(applyProjectionEventForSource(runtime,secondary,change,`restored-${kind}`)).resolves.toBe("applied");
+    expect(send).toHaveBeenCalledOnce();
+    expect(await db.prepare("SELECT identity_key FROM pa_local_division_source_heads WHERE projection_source_id=?").bind(source).first("identity_key")).toBeNull();
+    expect(await db.prepare("SELECT identity_key FROM pa_local_division_mappings WHERE resource_id='historic-id'").first("identity_key")).toBe(identity);
+    expect(await db.prepare(`SELECT count(*) n FROM ${kind==="project"?"pa_projects":"pa_project_assignments"} WHERE projection_source_id=?`).bind(source).first("n")).toBe(1);
+  },30_000);
+
   it("accepts client and organization projections and retries portal propagation before advancing the source version",async()=>{
     const state={failNext:true,writes:[] as Array<{sql:string;values:unknown[]}>};
     const delivery=portalDatabase(state);

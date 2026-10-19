@@ -121,6 +121,27 @@ describe("source-isolated business snapshots", () => {
       expect(await ops.prepare("SELECT count(*) n FROM client_business_activity WHERE record_kind NOT IN ('client','organization','project') OR occurred_at>=?")
         .bind(at).first("n")).toBe(0);
     },60_000);
+    it("keeps local divisions, grants and folder authority unchanged through PA unit rename retirement and omission",async()=>{
+      const {ops,delivery,env}=fixture!;
+      const payload=snapshot("Local authority");
+      vi.stubGlobal("fetch",vi.fn(async()=>Response.json(payload)));
+      await syncProjectAlpha(env);
+      const staff=await ops.prepare("SELECT id FROM staff_users WHERE email='shared@example.test'").first<string>("id");
+      expect(staff).toBeTruthy();
+      await ops.prepare("INSERT INTO divisions(id,name,code,project_alpha_business_unit_id,active) VALUES('local-retained','Local Greenleaf','local-retained','2',1)").run();
+      await ops.prepare("INSERT INTO staff_permission_overrides(id,staff_id,permission_key,effect,scope,division_id,scope_key,created_by) VALUES('local-retained',?,'operations.manage','allow','division','local-retained','local-retained',?)").bind(staff,staff).run();
+      await ops.prepare("INSERT INTO project_folders(project_id,division_id,r2_prefix,match_method,confirmed_by) VALUES('5','local-retained','Jobs/Clients/Retained/','manual',?)").bind(staff).run();
+      await ops.prepare("INSERT INTO pa_local_division_mappings(resource_kind,resource_id,projection_source_id,identity_key,division_id,version,assignment_kind) VALUES('project','5','project-alpha:primary','[1]','local-retained',1,'legacy_exact')").run();
+      const tables=["divisions","staff_permission_overrides","local_staff_role_assignments","project_folders","pa_local_division_mappings"];
+      const before=await Promise.all(tables.map(async table=>(await ops.prepare(`SELECT * FROM ${table}`).all()).results));
+      const deliveryBefore=(await delivery.prepare("SELECT * FROM client_accounts ORDER BY id").all()).results;
+      for(const units of [[{id:2,name:"Renamed remote unit",code:"new-code",is_active:true}],[{id:2,name:"Retired remote unit",code:"new-code",is_active:false}],[]]) {
+        payload.business_units=units;
+        await syncProjectAlpha(env);
+        for(let i=0;i<tables.length;i++) expect((await ops.prepare(`SELECT * FROM ${tables[i]}`).all()).results).toEqual(before[i]);
+        expect((await delivery.prepare("SELECT * FROM client_accounts ORDER BY id").all()).results).toEqual(deliveryBefore);
+      }
+    },90_000);
   });
 
   describe("primary and secondary source isolation",()=>{
