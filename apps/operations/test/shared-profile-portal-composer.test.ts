@@ -2,7 +2,7 @@ import { readFileSync, readdirSync } from "node:fs";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import type { Env } from '../src/worker/types';
 import type { SharedProfilePortalProof } from '../../../packages/shared/src/shared-business-profile';
-import { updateSharedPortalProfile,readEditableSharedPortalProfiles } from '../src/worker/shared-profile-portal-composer';
+import { updateSharedPortalProfile,readEditableSharedPortalProfiles,sharedProfileKnownBindingContinuationsSettled } from '../src/worker/shared-profile-portal-composer';
 import { transitionSharedProfilePortalAuthority } from '../src/worker/shared-profile-portal-authority';
 import { Miniflare } from "miniflare";
 import { splitD1MigrationStatements } from "../../client/test/helpers/d1-migrations";
@@ -176,6 +176,56 @@ function diagnosedDatabase(database:D1Database,errors:string[]):D1Database{
 }
 
 describe('portal shared profile real canonical composer',()=>{
+  it('withholds editable for incomplete current binding jobs and preserves authorization/contact checks',async()=>{
+    for(const state of [null,'pending','leased','uncertain','conflict','complete']as const){
+      const f=await portalFixture(),before=await footprint(f.groupId);
+      // Readiness-only synthetic scheduler states, not claims of valid PA ACKs.
+      // All actual tables/constraints remain; temporarily skip only job provenance
+      // while constructing rows from this test's acknowledged create fixtures.
+      const triggers=(await db.prepare("SELECT name,sql FROM sqlite_schema WHERE type='trigger' AND tbl_name='native_directory_profile_binding_jobs' AND sql LIKE '%BEFORE INSERT%'").all<{name:string;sql:string}>()).results;
+      expect(triggers).toHaveLength(1);await db.prepare(`DROP TRIGGER ${triggers[0]!.name}`).run();
+      try{for(const r of f.records){
+        const command=written(r.outcome).commandIds[0]!;
+        await db.prepare(`INSERT INTO native_directory_profile_binding_jobs
+          (command_id,intent_id,record_id,local_version,source_id,source_instance_id,application_id,history_epoch_id,destination_origin,
+           resource_type,external_id,public_id,mapping_kind,mapping_provenance_id,actor_id,access_subject,actor_json,acknowledged_command_json,acknowledged_outcome_json,authorization_generation,live_revision)
+          SELECT o.command_id,i.intent_id,i.record_id,1,o.source_id,o.expected_source_instance_id,o.application_id,o.expected_history_epoch_id,o.destination_base_url,
+            o.resource_type,o.external_id,m.project_alpha_public_id,'legacy',o.command_id,?,?,'{}',o.command_json,o.outcome_json,'1','1'
+          FROM project_alpha_directory_outbox o JOIN operations_directory_intents i ON i.record_id=? AND i.source_id=o.source_id
+          JOIN project_alpha_directory_mappings m ON m.command_id=o.command_id WHERE o.command_id=?`)
+          .bind(f.actor.staffId,f.actor.accessSubject,r.input.recordId,command).run();
+        if(state)await db.prepare(`INSERT INTO native_directory_profile_binding_dispatch(command_id,state,lease_token,lease_expires_at)
+          VALUES(?,?,?,?)`).bind(command,state,state==='leased'?'synthetic-lease':null,state==='leased'?Date.now()+10000:null).run();
+      }}finally{await db.prepare(triggers[0]!.sql).run();}
+      expect(await sharedProfileKnownBindingContinuationsSettled(db,f.groupId)).toBe(state==='complete');
+      httpMocks.contactProbe.mockClear();
+      expect(await readEditableSharedPortalProfiles(f.env,f.proof)).toMatchObject({ok:true,profiles:[{editable:state==='complete'}]});
+      expect(httpMocks.contactProbe).toHaveBeenCalledTimes(state==='complete'?2:0);
+      if(state==='complete'){
+        httpMocks.contactProbe.mockResolvedValue({status:'unavailable'});
+        expect(await readEditableSharedPortalProfiles(f.env,f.proof)).toMatchObject({ok:true,profiles:[{editable:false}]});
+        httpMocks.contactProbe.mockResolvedValue({status:'verified'});
+        expect(await readEditableSharedPortalProfiles(f.env,{...f.proof,targets:[]})).toMatchObject({ok:true,profiles:[]});
+      }
+      expect(await footprint(f.groupId)).toEqual(before);
+      if(state==='pending'){
+        expect(await updateSharedPortalProfile(f.env,{...f.proof,grantId:f.grantId,expectedVersion:1,mutationId:uuid(),profile:{...f.profile,phone:'512-555-0199'}})).toMatchObject({ok:true,profiles:[{editable:false}]});
+        // Old version1 jobs no longer suppress version2; ordinary delivery still does.
+        expect(await sharedProfileKnownBindingContinuationsSettled(db,f.groupId)).toBe(true);
+        expect(await readEditableSharedPortalProfiles(f.env,f.proof)).toMatchObject({ok:true,profiles:[{editable:false}]});
+      }
+    }
+  },60_000);
+  it('retains legacy missing-table behavior but closes partial-schema/read failures',async()=>{
+    const isolated=new Miniflare({modules:true,compatibilityDate:'2026-08-06',script:"export default {fetch(){return new Response('ok')}}",d1Databases:['LEGACY']});
+    try{const legacy=await isolated.getD1Database('LEGACY')as D1Database;
+      expect(await sharedProfileKnownBindingContinuationsSettled(legacy,uuid())).toBe(true);
+      await legacy.prepare('CREATE TABLE native_directory_profile_binding_jobs(command_id TEXT)').run();
+      expect(await sharedProfileKnownBindingContinuationsSettled(legacy,uuid())).toBe(false);
+      await legacy.prepare('CREATE TABLE native_directory_profile_binding_dispatch(command_id TEXT)').run();
+      expect(await sharedProfileKnownBindingContinuationsSettled(legacy,uuid())).toBe(false);
+    }finally{await isolated.dispose();}
+  });
   it('atomically updates both clients and replays with a refreshed authority head and TTL',async()=>{
     const f=await portalFixture(),mutationId=uuid(),input={...f.proof,grantId:f.grantId,expectedVersion:1,mutationId,profile:{...f.profile,email:'contact-only@example.test'}};
     const standalonePortalActor={kind:'portal',actorId:`portal:${f.grantId}`,issuer:f.proof.issuer,subject:f.proof.subject,grantId:f.grantId,grantRevision:1,

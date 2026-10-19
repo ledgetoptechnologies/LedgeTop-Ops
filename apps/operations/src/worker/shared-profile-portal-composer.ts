@@ -22,12 +22,31 @@ async function contactReady(env:Env,grant:SharedProfilePortalGrant):Promise<bool
   }
   return sources.size>0&&(await Promise.all([...sources].map(source=>probeConfiguredProjectAlphaDirectoryClientContactProfile(env,source)))).every(p=>p.status==='verified');
 }
+/** Known current binding work must settle before offering another portal edit.
+ * Legacy databases without either continuation table retain their old behavior;
+ * a partial schema or failed read cannot establish readiness. No remote probes. */
+export async function sharedProfileKnownBindingContinuationsSettled(db:D1Database,groupId:string):Promise<boolean>{
+  try{
+    const tables=(await db.prepare(`SELECT name FROM sqlite_schema WHERE type='table'
+      AND name IN ('native_directory_profile_binding_jobs','native_directory_profile_binding_dispatch')`).all<{name:string}>()).results;
+    if(tables.length===0)return true;
+    if(tables.length!==2)return false;
+    return !await db.prepare(`SELECT 1 pending FROM native_directory_shared_profile_members member
+      JOIN operations_directory_records record ON record.record_id=member.record_id
+      JOIN native_directory_profile_binding_jobs job ON job.record_id=record.record_id
+        AND job.resource_type=record.record_kind AND job.local_version=record.current_version
+      LEFT JOIN native_directory_profile_binding_dispatch dispatch ON dispatch.command_id=job.command_id
+      WHERE member.group_id=? AND (dispatch.state IS NULL OR dispatch.state<>'complete') LIMIT 1`)
+      .bind(groupId).first();
+  }catch{return false;}
+}
 export async function readEditableSharedPortalProfiles(env:Env,proof:SharedProfilePortalProof):Promise<SharedProfilePortalResult>{
   const grants=await authorizedSharedProfilePortalGrants(env,proof);
   if(!grants)return{ok:false,code:'unavailable'};
   try{return{ok:true,profiles:await Promise.all(grants.map(async g=>({grantId:g.id,kind:g.kind,version:g.version,
-    profile:JSON.parse(g.profile_json),editable:await contactReady(env,g)
-      &&(await nativeDirectorySharedProfileDelivery(env.OPS_DB,g.group_id)).state==='acknowledged'})))};}
+    profile:JSON.parse(g.profile_json),editable:await sharedProfileKnownBindingContinuationsSettled(env.OPS_DB,g.group_id)
+      &&(await nativeDirectorySharedProfileDelivery(env.OPS_DB,g.group_id)).state==='acknowledged'
+      &&await contactReady(env,g)})))};}
   catch{return{ok:false,code:'unavailable'};}
 }
 /** Only the private Client binding supplies identity/target witnesses. Replay
