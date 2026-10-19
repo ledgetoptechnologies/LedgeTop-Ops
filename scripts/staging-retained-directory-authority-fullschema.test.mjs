@@ -302,7 +302,7 @@ async function makeSchema2Input(db, latestClose, phase, approvalSequence, reacti
   return value;
 }
 
-async function recoverAndAcknowledgeRetainedCreate(db) {
+async function recoverAndAcknowledgeRetainedCreate(db, beforeDispatch) {
   const { readConfiguredProjectAlphaDirectoryInventory } = await loadBundledModule("project-alpha-directory-command-api-v2.ts");
   const { persistProjectAlphaDirectoryInventoryPage } = await loadBundledModule("project-alpha-v2-sync.ts");
   const { prepareDirectoryCreateGenerationRecovery } = await loadBundledModule("project-alpha-directory-create-generation-recovery.ts");
@@ -317,6 +317,10 @@ async function recoverAndAcknowledgeRetainedCreate(db) {
   { staffId: target.staffId, accessSubject: "access|retained", email: "beaukoltz@ledgetopdroneservices.com", admissionVersion: 1,
     profileVersion: 1, verifiedUntil: "2999-01-01T00:00:00.000Z" }, recoveryTransport("53")),
   { status: "prepared", successorCommandId, generation: "53", replayed: false });
+  if (beforeDispatch) {
+    await beforeDispatch({ environment, successorCommandId, dispatchProjectAlphaDirectoryProfileOutboxCommand });
+    return;
+  }
   const dispatched = await dispatchProjectAlphaDirectoryProfileOutboxCommand(environment, target.sourceId, successorCommandId, recoveryTransport("53", true));
   assert.equal(dispatched.status, "acknowledged");
   assert.equal((await first(db, "SELECT count(*) count FROM project_alpha_directory_unsettled_commands u JOIN project_alpha_directory_outbox o ON o.command_id=u.command_id WHERE json_extract(o.origin_snapshot_json,'$.actorId')=?", target.staffId)).count, 0);
@@ -589,3 +593,71 @@ test("node:sqlite executes canonical 183 authority batches atomically when worke
     assert.deepEqual((await all(racedDb, "SELECT active FROM native_directory_grants WHERE id IN (?,?,?) ORDER BY id", ...grantIds)).map(row => row.active), [0, 0, 0]);
   } finally { racedDb.close(); }
 }, 120_000);
+
+
+test("retained recovery rejects incomplete modern authority rather than falling back to legacy", async t => {
+  const modern = nodeSqliteD1();
+  const definitions = new Map();
+  try {
+    await migrate(modern);
+    for (const name of fs.readdirSync(migrationDirectory).filter(name => /^\d{4}_.+\.sql$/.test(name)
+      && name.slice(0, 4) > "0183" && name.slice(0, 4) <= "0219").sort()) await applyMigration(modern, name);
+    for (const name of ["client_onboarding_portal_activation_intents", "operations_directory_lifecycle_state"]) {
+      definitions.set(name, (await first(modern, "SELECT sql FROM sqlite_master WHERE type='table' AND name=?", name)).sql);
+    }
+  } finally { modern.close(); }
+  for (const missing of ["lifecycle", "effective enrollment"]) await t.test(missing, async () => {
+    const db = nodeSqliteD1();
+    try {
+      await migrate(db);
+      const lineage = await seed(db);
+      const activation = compileRetainedDirectoryAuthority(await makeInput(db, lineage, "reactivate", 20), { root });
+      await applyRetainedDirectoryAuthority(db, activation, { target: STAGING_TARGET });
+      await recoverAndAcknowledgeRetainedCreate(db, async ({ environment, successorCommandId, dispatchProjectAlphaDirectoryProfileOutboxCommand }) => {
+        // Model partial modern schema installation using exact real table DDL.
+        // Other legacy reads remain functional; the modern marker itself must
+        // prevent fallback when its required authority object is absent.
+        await db.execScript(definitions.get("client_onboarding_portal_activation_intents"));
+        if (missing === "effective enrollment") await db.execScript(definitions.get("operations_directory_lifecycle_state"));
+        let posts = 0;
+        const transport = async (url, init) => { if (init?.method === "POST") posts++; return recoveryTransport("53", true)(url, init); };
+        assert.deepEqual(await dispatchProjectAlphaDirectoryProfileOutboxCommand(environment, target.sourceId, successorCommandId, transport), { status: "conflict", reason: "command" });
+        assert.equal(posts, 0);
+        assert.equal((await first(db, "SELECT state FROM project_alpha_directory_outbox WHERE command_id=?", successorCommandId)).state, "pending");
+      });
+    } finally { db.close(); }
+  });
+});
+
+
+test("premodern retained recovery rejects an injected stale relationship dependency observation", async () => {
+  const db = nodeSqliteD1();
+  try {
+    await migrate(db);
+    const lineage = await seed(db);
+    const activation = compileRetainedDirectoryAuthority(await makeInput(db, lineage, "reactivate", 20), { root });
+    await applyRetainedDirectoryAuthority(db, activation, { target: STAGING_TARGET });
+    await recoverAndAcknowledgeRetainedCreate(db, async ({ environment, successorCommandId, dispatchProjectAlphaDirectoryProfileOutboxCommand }) => {
+      assert.equal((await first(db, "SELECT relationship_version FROM operations_directory_client_organizations WHERE client_record_id=?", target.recordId)).relationship_version, 1);
+      let injected = 0, posts = 0;
+      // Fault injection at the historical dependency read boundary only. No
+      // committed relationship, trigger or immutable reservation is modified.
+      const wrap = (statement, sql) => ({ ...statement,
+        bind(...values) { return wrap(statement.bind(...values), sql); },
+        async all() {
+          const result = await statement.all();
+          if (!sql.includes("SELECT dependency.relationship_version")) return result;
+          injected++;
+          return { ...result, results: result.results.map(row => ({ ...row, relationship_version: 2 })) };
+        },
+      });
+      const observed = { ...db, prepare(sql) { return wrap(db.prepare(sql), sql); } };
+      const transport = async (url, init) => { if (init?.method === "POST") posts++; return recoveryTransport("53", true)(url, init); };
+      assert.deepEqual(await dispatchProjectAlphaDirectoryProfileOutboxCommand({ ...environment, OPS_DB: observed }, target.sourceId, successorCommandId, transport), { status: "conflict", reason: "command" });
+      assert.ok(injected > 0);
+      assert.equal(posts, 0);
+      assert.equal((await first(db, "SELECT relationship_version FROM operations_directory_client_organizations WHERE client_record_id=?", target.recordId)).relationship_version, 1);
+      assert.equal((await first(db, "SELECT state FROM project_alpha_directory_outbox WHERE command_id=?", successorCommandId)).state, "pending");
+    });
+  } finally { db.close(); }
+});

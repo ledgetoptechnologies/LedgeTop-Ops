@@ -555,13 +555,26 @@ async function currentParentRevision(db: D1Database, row: Row, dependency: Relat
   return candidates.length === 1 && /^[1-9][0-9]{0,18}$/.test(candidates[0]!.revision) ? candidates[0]!.revision : null;
 }
 async function currentCreateRelationship(db:D1Database,row:Row,dependency:RelationshipDependency){
- return !!await db.withSession("first-primary").prepare(`SELECT 1 ok FROM operations_directory_client_organizations relation
+ // Retained 0181/0183 authority supports recovery before lifecycle (0201)
+ // and imported enrollments (0202) exist. Select only schema-owned sources;
+ // a partially missing installed modern authority is never a legacy fallback.
+ const session=db.withSession("first-primary");
+ const names=new Set((await session.prepare(`SELECT name FROM sqlite_master WHERE type IN('table','view')
+  AND name IN('operations_directory_lifecycle_state','operations_directory_lifecycle_fences',
+   'native_directory_enrollments','effective_native_directory_enrollments',
+   'reviewed_import_enrollment_admissions','client_onboarding_portal_activation_intents')`).all<{name:string}>()).results.map(row=>row.name));
+ const lifecycle=names.has('operations_directory_lifecycle_state'),effective=names.has('effective_native_directory_enrollments');
+ if((!lifecycle&&(names.has('operations_directory_lifecycle_fences')||effective||names.has('client_onboarding_portal_activation_intents')))
+  ||(!effective&&(names.has('reviewed_import_enrollment_admissions')||names.has('client_onboarding_portal_activation_intents')))
+  ||(!effective&&!names.has('native_directory_enrollments')))return false;
+ const enrollment=effective?'effective_native_directory_enrollments':'native_directory_enrollments';
+ return !!await session.prepare(`SELECT 1 ok FROM operations_directory_client_organizations relation
  LEFT JOIN operations_directory_records parent ON parent.record_id=relation.organization_record_id AND parent.record_kind='organization'
- LEFT JOIN operations_directory_lifecycle_state parent_state ON parent_state.record_id=parent.record_id
+ ${lifecycle?'LEFT JOIN operations_directory_lifecycle_state parent_state ON parent_state.record_id=parent.record_id':''}
  WHERE relation.client_record_id=? AND relation.relationship_version=? AND relation.organization_record_id IS ?
- AND NOT EXISTS(SELECT 1 FROM operations_directory_lifecycle_state state WHERE state.record_id=relation.client_record_id AND state.status<>'active')
- AND (relation.organization_record_id IS NULL OR (parent.current_version=? AND coalesce(parent_state.status,'active')='active'
-  AND EXISTS(SELECT 1 FROM effective_native_directory_enrollments enrollment,json_each(enrollment.destinations_json) destination
+ AND ${lifecycle?"NOT EXISTS(SELECT 1 FROM operations_directory_lifecycle_state state WHERE state.record_id=relation.client_record_id AND state.status<>'active')":'1=1'}
+ AND (relation.organization_record_id IS NULL OR (parent.current_version=? AND ${lifecycle?"coalesce(parent_state.status,'active')='active'":'1=1'}
+  AND EXISTS(SELECT 1 FROM ${enrollment} enrollment,json_each(enrollment.destinations_json) destination
    WHERE enrollment.record_id=parent.record_id AND json_extract(destination.value,'$.sourceId')=?
     AND json_extract(destination.value,'$.sourceInstanceUUID')=? AND json_extract(destination.value,'$.applicationUUID')=?
     AND json_extract(destination.value,'$.historyEpoch')=? AND json_extract(destination.value,'$.origin')=?
