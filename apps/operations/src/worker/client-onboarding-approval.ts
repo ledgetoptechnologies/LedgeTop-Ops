@@ -1,3 +1,4 @@
+import { existingOnboardingCompany, parseClientOnboardingOrganizationSelection } from "./client-onboarding-existing-company";
 import type { AuthenticatedNativeStaffWithAdmissionVersion } from "./native-staff-auth";
 import { approveNativeOnlyClientOnboarding,
   type NativeOnlyClientOnboardingApprovalOutcome } from "./native-directory-onboarding-write-composer";
@@ -108,7 +109,7 @@ async function consumerSourceHasOrganizationFields(database: D1Database, submiss
 export async function approveNewNativeOnlyClientOnboarding(database: D1Database,
   authenticated: AuthenticatedNativeStaffWithAdmissionVersion,
   submissionId: unknown, expectedFieldsSha256: unknown, rawSourceIds: unknown = [],
-  projectAlphaApiV2Connections?: string): Promise<ClientOnboardingApprovalReceipt> {
+  projectAlphaApiV2Connections?: string, rawOrganizationSelection?:unknown): Promise<ClientOnboardingApprovalReceipt> {
   try {
     const sourceIds = parseClientOnboardingEnrollmentSourceIds(rawSourceIds);
     if (typeof submissionId !== "string" || !UUID.test(submissionId)
@@ -116,6 +117,10 @@ export async function approveNewNativeOnlyClientOnboarding(database: D1Database,
       || sourceIds === null || Date.parse(authenticated.verifiedUntil) <= Date.now()) return denied();
     const review = await readClientOnboardingSubmissionForReview(database, authenticated, submissionId);
     const kind = approvalKind(review.fields);
+    const organizationSelection=rawOrganizationSelection===undefined ? null
+      : parseClientOnboardingOrganizationSelection(rawOrganizationSelection);
+    if ((kind==="business" && organizationSelection===null)
+      || (kind!=="business" && rawOrganizationSelection!==undefined)) return denied();
     if (review.targetClientRecordId !== null || review.fieldsSha256 !== expectedFieldsSha256 || kind === null
       || (kind === "consumer" && await consumerSourceHasOrganizationFields(database, review.submissionId,
         review.fieldsSha256))) return denied();
@@ -131,7 +136,11 @@ export async function approveNewNativeOnlyClientOnboarding(database: D1Database,
     const organizationMutationId = kind === "business"
       ? await deterministicUuid(`client-onboarding-approval:v1:organization-profile:${review.submissionId}`) : null;
     const organizationRecordId = kind === "business"
-      ? await deterministicUuid(`client-onboarding-approval:v1:organization-record:${review.submissionId}`) : null;
+      ? organizationSelection?.kind==="existing" ? organizationSelection.recordId
+        : await deterministicUuid(`client-onboarding-approval:v1:organization-record:${review.submissionId}`) : null;
+    const existingCompany=organizationSelection?.kind==="existing"
+      ? await existingOnboardingCompany(database,authenticated,organizationSelection,sourceIds,organizationMutationId!,
+        projectAlphaApiV2Connections) : null;
     const relationshipMutationId = await deterministicUuid(`${mutationId}\0client-relationship\0${organizationRecordId ?? "unlinked"}`);
     const selectedGrantId = await selectedCreateGrant(database, authenticated.identity.staffId,
       "directory.profile.edit", recordId, review.scopes);
@@ -160,7 +169,8 @@ export async function approveNewNativeOnlyClientOnboarding(database: D1Database,
       postalCode: review.fields.postalCode,
       country: review.fields.country,
     } as const;
-    const reason = kind === "business"
+    const reason = existingCompany ? "Approved a new contact linked to an explicitly reviewed existing company; company fields preserved"
+      : kind === "business"
       ? sourceIds.length ? "Approved as a new organization and linked client/contact for explicit enrollment"
         : "Approved as a new native-only organization with linked client/contact"
       : sourceIds.length ? "Approved as a new unlinked client profile for explicit enrollment"
@@ -177,14 +187,19 @@ export async function approveNewNativeOnlyClientOnboarding(database: D1Database,
         mutationId, organizationRecordId, organizationMutationId, relationshipMutationId,
         authenticated.identity.staffId, authenticated.identity.verifiedAccessSubject,
         authenticated.admissionVersion, authenticated.identity.profileVersion,
-        ...(sourceIds.length ? [sourceIds] : [])]));
+        ...(sourceIds.length ? [sourceIds] : []),organizationSelection,existingCompany?.profile ?? null]));
     const outcome = await approveNativeOnlyClientOnboarding(database, {
       decisionId, invitationId: review.invitationId, submissionId: review.submissionId,
       fieldsSha256: review.fieldsSha256, requestSha256, reason, reviewedFieldsJson,
       enrollmentSourceIds: sourceIds,
       scopes: review.scopes, verifiedUntil: authenticated.verifiedUntil,
       relationship: { mode: "change", expectedVersion: 0, mutationId: relationshipMutationId },
-      organizationProfile: kind === "business" ? { operation: "create", mutationId: organizationMutationId!,
+      organizationProfile: existingCompany && organizationSelection?.kind==="existing" ? {
+        operation:"update",mutationId:organizationMutationId!,recordId:organizationSelection.recordId,
+        expectedLocalVersion:organizationSelection.expectedVersion,kind:"organization",profile:existingCompany.profile,
+        destinations:existingCompany.destinations,actor:{...actor,selectedGrantId:existingCompany.selectedGrantId,
+          selectedIdentityGrantId:existingCompany.selectedIdentityGrantId},
+      } : kind === "business" ? { operation: "create", mutationId: organizationMutationId!,
         recordId: organizationRecordId!, expectedLocalVersion: 0, kind: "organization",
         createAdmissionId: `client-onboarding:${decisionId}:organization`, destinations: [], actor,
         scopes: review.scopes, profile: { name: review.fields.organizationName,

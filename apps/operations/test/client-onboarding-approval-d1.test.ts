@@ -1,15 +1,28 @@
+import { materializeResolvedProjectAlphaDirectoryClientIntents } from "../src/worker/project-alpha-directory-client-intent-materializer";
 import { readFileSync, readdirSync } from "node:fs";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { Miniflare } from "miniflare";
 import { splitD1MigrationStatements } from "../../client/test/helpers/d1-migrations";
-import { approveNewNativeOnlyClientOnboarding } from "../src/worker/client-onboarding-approval";
+import { approveNewNativeOnlyClientOnboarding as approveRaw } from "../src/worker/client-onboarding-approval";
+import { readClientOnboardingExistingCompanies } from "../src/worker/client-onboarding-existing-company";
 import { listClientOnboardingSubmissionsForReview } from "../src/worker/client-onboarding-review";
 
 const inventoryRead = vi.hoisted(() => vi.fn());
+const bindingRead=vi.hoisted(()=>vi.fn());
+vi.mock("../src/worker/project-alpha-directory-read-api-v2",async original=>({
+  ...await original<typeof import("../src/worker/project-alpha-directory-read-api-v2")>(),
+  readConfiguredProjectAlphaDirectoryBindingStatus:bindingRead,
+}));
 vi.mock("../src/worker/project-alpha-directory-inventory-api-v2", () => ({
   readConfiguredProjectAlphaDirectoryInventory: inventoryRead,
 }));
 
+async function approveNewNativeOnlyClientOnboarding(...args:Parameters<typeof approveRaw>) {
+  // Explicit company creation in these legacy creation regressions.
+  if (args[6]===undefined && args[2] && await db.prepare("SELECT 1 FROM client_onboarding_submissions WHERE submission_id=? AND json_extract(fields_json,'$.clientType')='business'").bind(args[2]).first())
+    args[6]={kind:"new"};
+  return approveRaw(...args);
+}
 let runtime: Miniflare | undefined;
 let db: D1Database;
 let sequence = 0;
@@ -80,11 +93,9 @@ describe("native-only client onboarding approval against migrated D1", () => {
     db = await runtime.getD1Database("OPS_DB") as D1Database;
     const directory = new URL("../migrations/", import.meta.url);
     for (const name of readdirSync(directory).filter(item => /^\d{4}_.+\.sql$/.test(item)
-      && item.slice(0, 4) <= "0140").sort())
+      && item.slice(0, 4) <= "0216").sort())
       await db.batch(splitD1MigrationStatements(readFileSync(new URL(name, directory), "utf8"))
         .map(statement => db.prepare(statement)));
-    await db.batch(splitD1MigrationStatements(readFileSync(new URL("0214_client_onboarding_portal_activation.sql",directory),"utf8"))
-      .map(statement=>db.prepare(statement)));
     await db.batch([
       db.prepare(`INSERT INTO staff_users(id,email,display_name,access_subject,status)
         VALUES(?,?,?,?,'active')`).bind(staffId, actor.identity.email, actor.identity.displayName,
@@ -335,4 +346,99 @@ describe("native-only client onboarding approval against migrated D1", () => {
       await db.prepare("UPDATE native_directory_grants SET active=0 WHERE id='deny-business-identity-north'").run();
     }
   });
+  it("requires an explicit company review choice while preserving individual API compatibility",async()=>{
+    const item=await submission(business), before=await count("operations_directory_records");
+    await expect(approveRaw(db,actor,item.submissionId,item.fieldsSha256)).rejects.toThrow("client_onboarding_approval_denied");
+    expect(await count("operations_directory_records")).toBe(before);
+    const person=await submission(consumer);
+    await expect(approveRaw(db,actor,person.submissionId,person.fieldsSha256,[],undefined,{kind:"new"}))
+      .rejects.toThrow("client_onboarding_approval_denied");
+    expect(await approveRaw(db,actor,person.submissionId,person.fieldsSha256)).toMatchObject({status:"written"});
+  });
+
+  it("reuses an explicitly reviewed company without changing its fields or duplicating it, and replays exactly",async()=>{
+    const firstItem=await submission(business);
+    const first=await approveRaw(db,actor,firstItem.submissionId,firstItem.fieldsSha256,[],undefined,{kind:"new"});
+    const companyId=first.organizationRecordId!;
+    await db.prepare(`INSERT OR IGNORE INTO native_directory_grants(id,staff_id,permission,effect,scope_kind,active,granted_by)
+      VALUES('approve-view',?,'directory.profile.view','allow','global',1,?)`).bind(staffId,staffId).run();
+    const item=await submission({...business,name:"Second Contact",organizationName:"Unreviewed changed company",organizationPhone:"920-555-0999"});
+    const choices=await readClientOnboardingExistingCompanies(db,actor,{submissionId:item.submissionId,sourceIds:[],query:"Example",afterRecordId:null});
+    expect(choices.companies.find(value=>value.recordId===companyId)).toMatchObject({expectedVersion:1,reusable:true,sourceIds:[]});
+    const selection={kind:"existing" as const,recordId:companyId,expectedVersion:1};
+    const before=await count("operations_directory_records"), outbox=await count("project_alpha_directory_outbox");
+    const result=await approveRaw(db,actor,item.submissionId,item.fieldsSha256,[],undefined,selection);
+    expect(result).toMatchObject({status:"written",organizationRecordId:companyId,organizationRecordVersion:2,relationshipVersion:1});
+    expect(await count("operations_directory_records")).toBe(before+1);
+    expect(await count("project_alpha_directory_outbox")).toBe(outbox);
+    expect(await db.prepare(`SELECT profile_json FROM operations_directory_revisions WHERE record_id=? AND version=2`).bind(companyId).first("profile_json"))
+      .toBe(await db.prepare(`SELECT profile_json FROM operations_directory_revisions WHERE record_id=? AND version=1`).bind(companyId).first("profile_json"));
+    expect(await db.prepare("SELECT organization_record_id FROM operations_directory_client_organizations WHERE client_record_id=?").bind(result.clientRecordId).first("organization_record_id")).toBe(companyId);
+    expect(await approveRaw(db,actor,item.submissionId,item.fieldsSha256,[],undefined,selection)).toMatchObject({...result,replayed:true});
+    await expect(approveRaw(db,actor,item.submissionId,item.fieldsSha256,[],undefined,{...selection,expectedVersion:2}))
+      .rejects.toThrow("client_onboarding_approval_denied");
+  });
+
+  it("rejects uncovered PA destinations, stale companies, and current scoped denies before any mutation",async()=>{
+    const firstItem=await submission(business);
+    const first=await approveRaw(db,actor,firstItem.submissionId,firstItem.fieldsSha256,[],undefined,{kind:"new"});
+    const selection={kind:"existing" as const,recordId:first.organizationRecordId!,expectedVersion:1};
+    const item=await submission(business),before=await count("operations_directory_records");
+    const choices=await readClientOnboardingExistingCompanies(db,actor,{submissionId:item.submissionId,sourceIds:[selectedSourceId],query:"Example",afterRecordId:null});
+    expect(choices.companies.find(value=>value.recordId===selection.recordId)).toMatchObject({reusable:false,reason:"selected_sources_not_covered"});
+    await expect(approveRaw(db,actor,item.submissionId,item.fieldsSha256,[selectedSourceId],selectedConnection,selection)).rejects.toThrow();
+    await expect(approveRaw(db,actor,item.submissionId,item.fieldsSha256,[],undefined,{...selection,expectedVersion:99})).rejects.toThrow();
+    await db.prepare(`INSERT INTO native_directory_grants(id,staff_id,permission,effect,scope_kind,resource_id,active,granted_by)
+      VALUES('deny-reuse-company',?,'directory.profile.edit','deny','resource',?,1,?)`).bind(staffId,selection.recordId,staffId).run();
+    try {
+      await expect(approveRaw(db,actor,item.submissionId,item.fieldsSha256,[],undefined,selection)).rejects.toThrow();
+      await expect(readClientOnboardingExistingCompanies(db,actor,{submissionId:item.submissionId,sourceIds:[],query:"",afterRecordId:null})).rejects.toThrow();
+    } finally {await db.prepare("UPDATE native_directory_grants SET active=0 WHERE id='deny-reuse-company'").run();}
+    expect(await count("operations_directory_records")).toBe(before);
+  });
+
+  it("links a second enrolled contact through the existing company's exact PA parent intent, without another company create",async()=>{
+    await db.prepare(`INSERT OR IGNORE INTO native_directory_grants(id,staff_id,permission,effect,scope_kind,active,granted_by)
+      VALUES('approve-view',?,'directory.profile.view','allow','global',1,?)`).bind(staffId,staffId).run();
+    inventoryRead.mockResolvedValue({status:"observed",inventory:{authorizationGeneration:"8"}});
+    const item=await submission(business);
+    const first=await approveRaw(db,actor,item.submissionId,item.fieldsSha256,[selectedSourceId],selectedConnection,{kind:"new"});
+    const company=first.organizationRecordId!;
+    const outbox=await db.prepare(`SELECT o.command_id FROM project_alpha_directory_outbox o
+      JOIN operations_directory_materializations m ON m.command_id=o.command_id
+      JOIN operations_directory_intents i ON i.intent_id=m.intent_id WHERE i.record_id=?`).bind(company).first<{command_id:string}>();
+    expect(outbox).not.toBeNull();
+    const commandId=outbox!.command_id,publicId="a".repeat(32);
+    const identity={sourceInstanceId:"a0000000-0000-4000-8000-000000000001",applicationId:"b0000000-0000-4000-8000-000000000002",historyEpoch:"c0000000-0000-4000-8000-000000000003"};
+    await db.prepare("UPDATE project_alpha_directory_outbox SET state='leased',attempts=1,lease_token='synthetic',lease_expires_at=9999999999999 WHERE command_id=? AND state='pending'").bind(commandId).run();
+    await db.prepare(`INSERT INTO project_alpha_directory_mappings(source_id,resource_type,external_id,project_alpha_public_id,source_instance_id,application_id,history_epoch_id,command_id)
+      VALUES(?,'organization',?,?,?,?,?,?)`).bind(selectedSourceId,company,publicId,identity.sourceInstanceId,identity.applicationId,identity.historyEpoch,commandId).run();
+    const outcome={status:"acknowledged",response:{requestId:commandId,replayed:false,...identity,result:{resource:{type:"organization",id:company,publicId,revision:"1"},data:{publicId},authorizationGeneration:"9"}}};
+    await db.prepare("UPDATE project_alpha_directory_outbox SET state='acknowledged',outcome_json=?,lease_token=NULL,lease_expires_at=NULL WHERE command_id=? AND state='leased'").bind(JSON.stringify(outcome),commandId).run();
+    await db.prepare("UPDATE operations_directory_intents SET state='acknowledged' WHERE record_id=? AND state='materialized'").bind(company).run();
+    await expect(materializeResolvedProjectAlphaDirectoryClientIntents(db,[selectedSourceId],12,Date.now())).resolves.toMatchObject({materialized:1});
+    const childOutbox=await db.prepare(`SELECT o.command_id FROM project_alpha_directory_outbox o
+      JOIN operations_directory_materializations m ON m.command_id=o.command_id
+      JOIN operations_directory_intents i ON i.intent_id=m.intent_id WHERE i.record_id=?`).bind(first.clientRecordId).first<{command_id:string}>();
+    const childCommandId=childOutbox!.command_id,childPublicId="b".repeat(32);
+    await db.prepare("UPDATE project_alpha_directory_outbox SET state='leased',attempts=1,lease_token='synthetic',lease_expires_at=9999999999999 WHERE command_id=? AND state='pending'").bind(childCommandId).run();
+    await db.prepare(`INSERT INTO project_alpha_directory_mappings(source_id,resource_type,external_id,project_alpha_public_id,source_instance_id,application_id,history_epoch_id,command_id)
+      VALUES(?,'client',?,?,?,?,?,?)`).bind(selectedSourceId,first.clientRecordId,childPublicId,identity.sourceInstanceId,identity.applicationId,identity.historyEpoch,childCommandId).run();
+    const childOutcome={status:"acknowledged",response:{requestId:childCommandId,replayed:false,...identity,result:{resource:{type:"client",id:first.clientRecordId,publicId:childPublicId,revision:"1"},data:{publicId:childPublicId},authorizationGeneration:"9"}}};
+    await db.prepare("UPDATE project_alpha_directory_outbox SET state='acknowledged',outcome_json=?,lease_token=NULL,lease_expires_at=NULL WHERE command_id=? AND state='leased'").bind(JSON.stringify(childOutcome),childCommandId).run();
+    await db.prepare("UPDATE operations_directory_intents SET state='acknowledged' WHERE record_id=? AND state='materialized'").bind(first.clientRecordId).run();
+    inventoryRead.mockImplementation(async()=>({status:"observed",inventory:{authoritative:false,sourceId:selectedSourceId,
+      ...identity,requestId:uuid(),authorizationGeneration:"9",resources:[],nextCursor:null}}));
+    bindingRead.mockResolvedValue({status:"observed",observation:{authorizationGeneration:"9",resource:{revision:"1"}}});
+    const next=await submission({...business,name:"Another Contact"});
+    const result=await approveRaw(db,actor,next.submissionId,next.fieldsSha256,[selectedSourceId],selectedConnection,
+      {kind:"existing",recordId:company,expectedVersion:1});
+    expect(result).toMatchObject({organizationRecordId:company,organizationRecordVersion:2});
+    expect(await db.prepare("SELECT json_extract(audit.command_json,'$.operation') operation FROM operations_directory_audit audit JOIN operations_directory_revisions revision ON revision.mutation_id=audit.mutation_id WHERE revision.record_id=? AND revision.version=2").bind(company).first("operation")).toBe("update");
+    expect((await db.prepare(`SELECT evidence_kind,organization_record_id,organization_record_version,parent_external_canonical_id
+      FROM operations_directory_intent_relationship_dependencies WHERE client_record_id=?`).bind(result.clientRecordId).all()).results)
+      .toEqual([{evidence_kind:"parent_intent",organization_record_id:company,organization_record_version:2,parent_external_canonical_id:company}]);
+    expect(await db.prepare("SELECT count(*) total FROM operations_directory_intents WHERE record_id=?").bind(result.clientRecordId).first("total")).toBe(1);
+  });
+
 });

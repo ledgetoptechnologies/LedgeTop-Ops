@@ -280,7 +280,7 @@ type RelationshipEvidence = Readonly<{
   parentActivationId: string | null; parentAckRevision: string | null; parentAckCommandJson: string | null;
   parentAckOutcomeJson: string | null;
 }>;
-type StagedOrganization = Readonly<{ recordId: string; version: 1; mutationId: string;
+type StagedOrganization = Readonly<{ recordId: string; version: number; mutationId: string;
   destinations: readonly NativeDirectoryDestinationAuthority[] }>;
 
 async function linkedRelationshipEvidence(db: DirectoryWriteD1, relationship: RelationshipState,
@@ -294,10 +294,9 @@ async function linkedRelationshipEvidence(db: DirectoryWriteD1, relationship: Re
   if (stagedOrganization?.recordId === parentId && stagedOrganization.version === parentVersion) {
     const index = stagedOrganization.destinations.findIndex(value => destinationKey(value) === destinationKey(destinationValue)
       && value.historyEpoch === destinationValue.historyEpoch && value.origin === destinationValue.origin
-      && value.externalCanonicalId === parentId
       && value.expectedAuthorizationGeneration === destinationValue.expectedAuthorizationGeneration);
     return index < 0 ? null : {
-      evidenceKind: "parent_intent", parentExternalCanonicalId: parentId, parentPublicId: null,
+      evidenceKind: "parent_intent", parentExternalCanonicalId: stagedOrganization.destinations[index]!.externalCanonicalId, parentPublicId: null,
       parentIntentId: `${stagedOrganization.mutationId}:intent:${index}`, parentMappingCommandId: null,
       parentActivationId: null, parentAckRevision: null, parentAckCommandJson: null, parentAckOutcomeJson: null,
     };
@@ -768,7 +767,7 @@ async function planNativeDirectoryProfileWriteInternal(db: DirectoryWriteD1, inp
       const organizationRecordId = write.relationship!.organizationRecordId;
       let organizationRecordVersion: number | null = null;
       if (organizationRecordId !== null) {
-        if (stagedOrganization?.recordId === organizationRecordId && stagedOrganization.version === 1) {
+        if (stagedOrganization?.recordId === organizationRecordId && Number.isSafeInteger(stagedOrganization.version) && stagedOrganization.version >= 1) {
           organizationRecordVersion = stagedOrganization.version;
         } else {
           const parent = await db.prepare(`SELECT record.current_version version FROM operations_directory_records record
