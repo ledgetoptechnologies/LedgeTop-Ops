@@ -64,7 +64,10 @@ function setup() {
   database.exec(`
     CREATE TABLE staff_users(id TEXT PRIMARY KEY,email TEXT,display_name TEXT,project_alpha_user_id TEXT UNIQUE);
     CREATE TABLE staff_divisions(staff_id TEXT NOT NULL,division_id TEXT NOT NULL);
-    CREATE TABLE divisions(id TEXT PRIMARY KEY,project_alpha_business_unit_id TEXT UNIQUE);
+    CREATE TABLE divisions(id TEXT PRIMARY KEY,project_alpha_business_unit_id TEXT UNIQUE,active INTEGER NOT NULL DEFAULT 1);
+    CREATE TABLE pa_local_division_source_heads(projection_source_id TEXT PRIMARY KEY,identity_key TEXT);
+    INSERT INTO pa_local_division_source_heads VALUES('project-alpha:primary','fixture');
+    CREATE TABLE pa_local_division_mappings(resource_kind TEXT,resource_id TEXT,projection_source_id TEXT,division_id TEXT,identity_key TEXT DEFAULT 'fixture',PRIMARY KEY(resource_kind,resource_id,projection_source_id));
     CREATE TABLE pa_projects(id TEXT PRIMARY KEY,name TEXT NOT NULL);
     CREATE TABLE pa_operations(
       id TEXT PRIMARY KEY,project_id TEXT,business_unit_id TEXT,title TEXT NOT NULL,status TEXT NOT NULL,
@@ -77,7 +80,8 @@ function setup() {
     );
     CREATE TABLE operational_job_briefs(operation_id TEXT PRIMARY KEY);
     CREATE TABLE operational_job_brief_sop_links(operation_id TEXT NOT NULL,revision_id TEXT NOT NULL);
-    INSERT INTO divisions VALUES ('division-flight','unit-flight');
+    INSERT INTO divisions(id,project_alpha_business_unit_id) VALUES ('division-flight','unit-flight');
+    INSERT INTO pa_local_division_mappings(resource_kind,resource_id,projection_source_id,division_id) VALUES('project','project-1','project-alpha:primary','division-flight');
     INSERT INTO pa_projects VALUES ('project-1','North site');
     INSERT INTO pa_operations(id,project_id,business_unit_id,title,status,scheduled_start_at,updated_at,active) VALUES
       ('operation-1','project-1','unit-flight','North capture','scheduled','2026-08-15T15:00:00Z','2026-08-10T00:00:00Z',1),

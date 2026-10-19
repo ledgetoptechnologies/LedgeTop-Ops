@@ -1,3 +1,4 @@
+import { localDivisionJoin } from "./local-project-division";
 import { buildNavigationDestination } from "@ltds/shared";
 import { Hono, type Context } from "hono";
 import { HTTPException } from "hono/http-exception";
@@ -242,7 +243,7 @@ async function visibleOperation(
         (SELECT sl.longitude FROM pa_service_locations sl WHERE sl.project_id=o.project_id AND sl.active=1 AND sl.latitude IS NOT NULL AND sl.longitude IS NOT NULL ORDER BY sl.id LIMIT 1) service_longitude,
         (SELECT GROUP_CONCAT(s.id) FROM pa_operation_assignments a JOIN staff_users s ON s.project_alpha_user_id=a.user_id WHERE a.operation_id=o.id AND a.active=1) assigned_staff_ids
        FROM pa_operations o
-       LEFT JOIN divisions d ON d.project_alpha_business_unit_id=o.business_unit_id
+       ${localDivisionJoin("o", "operation")}
        WHERE o.id=? AND ${filter.sql}`,
     )
     .bind(operationId, ...filter.values)

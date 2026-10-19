@@ -8,6 +8,9 @@ export type Env = Omit<Cloudflare.Env, "CLIENT_PORTAL_PROJECTION_INGRESS"|"OPERA
   PROJECT_ALPHA_WEBHOOK_ED25519_PUBLIC_KEY?: string;
   PROJECT_ALPHA_WEBHOOK_ED25519_PREVIOUS_PUBLIC_KEY?: string;
   PROJECT_ALPHA_ALLOW_LEGACY_HMAC?: string;
+  /** Dedicated api.capabilities.read-only credentials; never the Ops command key. */
+  PROJECT_ALPHA_API_V2_CONNECTIONS?: string;
+  PROJECT_ALPHA_BASE_URL?: string;
   PROJECT_ALPHA_CONNECTOR_CREDENTIALS?: string;
   PROJECT_ALPHA_CONNECTOR_EVENT_CREDENTIALS?: string;
   /** Same deployment-owned source allow-list used by Operations. */

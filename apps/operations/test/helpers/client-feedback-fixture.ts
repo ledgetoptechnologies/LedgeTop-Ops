@@ -19,6 +19,9 @@ export async function feedbackFixture() {
     CREATE TABLE pa_clients(id TEXT PRIMARY KEY,organization_id TEXT,active INTEGER);
     CREATE TABLE pa_organizations(id TEXT PRIMARY KEY,active INTEGER);
     CREATE TABLE divisions(id TEXT PRIMARY KEY,project_alpha_business_unit_id TEXT UNIQUE,active INTEGER);
+    CREATE TABLE pa_local_division_source_heads(projection_source_id TEXT PRIMARY KEY,identity_key TEXT);
+    INSERT INTO pa_local_division_source_heads VALUES('project-alpha:primary','fixture');
+    CREATE TABLE pa_local_division_mappings(resource_kind TEXT,resource_id TEXT,projection_source_id TEXT,division_id TEXT,identity_key TEXT DEFAULT 'fixture',PRIMARY KEY(resource_kind,resource_id,projection_source_id));
     CREATE TABLE project_folders(id TEXT PRIMARY KEY,project_id TEXT,division_id TEXT,r2_prefix TEXT UNIQUE);
     CREATE TABLE pa_project_assignments(project_id TEXT,user_id TEXT,active INTEGER);
     CREATE TABLE pa_operations(id TEXT,project_id TEXT,active INTEGER);
@@ -45,6 +48,7 @@ export async function feedbackFixture() {
       ops.prepare("INSERT INTO pa_projects(id,client_id,organization_id,active,business_unit_id,manager_user_id) VALUES(?,?,NULL,1,?,'staff-pa')").bind(pa,pa,division),
       ops.prepare("INSERT INTO pa_clients VALUES(?,NULL,1)").bind(pa),
       ops.prepare("INSERT INTO divisions VALUES(?,?,1)").bind(division,division),
+      ops.prepare("INSERT INTO pa_local_division_mappings(resource_kind,resource_id,projection_source_id,division_id) VALUES('project',?,'project-alpha:primary',?)").bind(pa,division),
       ops.prepare("INSERT INTO project_folders VALUES(?,?,?,?)").bind(id,pa,division,prefix),
       ...["operations.manage","projects.view","delivery.browse"].map(permission=>ops.prepare("INSERT INTO staff_permission_overrides VALUES(?,?,'allow','division',?)").bind(feedbackStaff.id,permission,division)),
     ]);

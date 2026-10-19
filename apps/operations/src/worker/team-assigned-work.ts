@@ -1,3 +1,4 @@
+import { localDivisionJoin } from "./local-project-division";
 import { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import {
@@ -107,7 +108,7 @@ async function assignedOperations(
        ON target_assignment.operation_id=o.id AND target_assignment.user_id=?
          AND target_assignment.active=1
      LEFT JOIN pa_projects p ON p.id=o.project_id
-     LEFT JOIN divisions d ON d.project_alpha_business_unit_id=o.business_unit_id
+     ${localDivisionJoin("o", "operation")}
      LEFT JOIN operational_job_briefs brief ON brief.operation_id=o.id
      LEFT JOIN operational_job_brief_sop_links links ON links.operation_id=o.id
      WHERE ${filter.sql}

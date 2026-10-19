@@ -1,3 +1,4 @@
+import { refreshLocalDivisionSourceIdentity } from "../../operations/src/worker/local-project-division-source";
 import type { DeliveryIntentEvent, EntitlementEvent, Env, IntegrationEvent, PortalProjectionEvent, ProjectionEvent } from "./types";
 import {
   PRIMARY_PROJECT_ALPHA_SOURCE,
@@ -264,6 +265,11 @@ async function applyProjectionEventLocked(env: Env, source: ProjectAlphaSourceCo
     const calendarExternalId = `${event.projection.entity_type}:${event.projection.entity_id}`;
     if(event.projection.entity_type==="operation"||event.projection.entity_type==="task")
       references.push({kind:"calendar_event",externalId:calendarExternalId});
+    // Relationship and assignment events can also change a mapped project's
+    // authority context. Fence every applied projection before any row changes.
+    const registered=proof?.mode==="registry"?await env.OPS_DB.prepare("SELECT snapshot_origin FROM pa_connectors WHERE source_id=?").bind(source.sourceId).first<{snapshot_origin:string}>():null;
+    await refreshLocalDivisionSourceIdentity(env,source.sourceId,registered?.snapshot_origin??env.PROJECT_ALPHA_BASE_URL??"",
+      ()=>proof?[connectorFenceStatement(env.OPS_DB,proof)]:[]);
     const ids=await prepareProjectAlphaSourceRecords(mappingDatabase(env,proof),source,references);
     const data=mapProjectAlphaSourceRow(collection,row,ids);
     const localId=requiredValue(data,"id");
@@ -280,7 +286,7 @@ async function applyProjectionEventLocked(env: Env, source: ProjectAlphaSourceCo
     statements.push(
       env.OPS_DB.prepare(`INSERT INTO pa_business_units (projection_source_id,id,name,code,active,payload_json,last_sync_id) VALUES (?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,code=excluded.code,active=excluded.active,payload_json=excluded.payload_json,last_sync_id=excluded.last_sync_id,updated_at=datetime('now') WHERE pa_business_units.projection_source_id=excluded.projection_source_id`).bind(source.sourceId,localId,name,code,active,rawJson,marker),
     );
-    if(source.staffAuthority)statements.push(env.OPS_DB.prepare(`INSERT INTO divisions (id,name,code,project_alpha_business_unit_id,active) VALUES (?,?,?,?,?) ON CONFLICT(project_alpha_business_unit_id) DO UPDATE SET name=excluded.name,code=excluded.code,active=excluded.active,updated_at=datetime('now')`).bind(`division-pa-${event.projection.entity_id}`,name,code,localId,active));
+    // PA business units are passive historical compatibility data only.
   } else if(event.projection.entity_type==="project") {
     const businessUnitId=value(data,"business_unit_id");
     statements.push(

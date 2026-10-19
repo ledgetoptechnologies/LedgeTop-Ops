@@ -1,5 +1,5 @@
+import { refreshLocalDivisionSourceIdentity } from "./local-project-division-source";
 import type { Env } from "./types";
-import { reservePrimaryFolderMutation,attemptPrimaryFolderMutation,completePrimaryFolderMutation,primaryDivisionDeactivationStatement,suspendExplicitBindingsForDivisionDeactivation,type DivisionMutationWitness } from './primary-folder-authority-mutations';
 import { businessActivityObservationStatement } from "./client-business-activity";
 import { assertProjectAlphaConnectorProof, connectorFenceStatement, resolveProjectAlphaConnector,
   type ProjectAlphaConnectorProof } from "./project-alpha-connectors";
@@ -389,7 +389,7 @@ async function runBatches(db: D1Database, statements: D1PreparedStatement[], bef
   }
 }
 
-function projectionStatements(db: D1Database, data: SnapshotCollections, syncId: string, changed: ReadonlySet<CollectionName>, applicationKey: string, generatedAt: string, source: ProjectAlphaSourceContext, ids: ProjectAlphaSourceMap,predeactivatedUnits:ReadonlySet<string>=new Set()): D1PreparedStatement[] {
+function projectionStatements(db: D1Database, data: SnapshotCollections, syncId: string, changed: ReadonlySet<CollectionName>, applicationKey: string, generatedAt: string, source: ProjectAlphaSourceContext, ids: ProjectAlphaSourceMap): D1PreparedStatement[] {
   const statements: D1PreparedStatement[] = [];
   if (changed.has("users")) for (const raw of data.users) {
     const row = mapProjectAlphaSourceRow("users", raw, ids);
@@ -420,18 +420,13 @@ function projectionStatements(db: D1Database, data: SnapshotCollections, syncId:
     const id = text(row.id);
     if (!id) continue;
     const name = text(row.name) || `Business unit ${id}`;
-    const code = text(row.code) || stableId("pa", id);
     const isActive = row.is_active === false || row.is_active === 0 ? 0 : 1;
     statements.push(db.prepare(`INSERT INTO pa_business_units (id,name,code,active,payload_json,last_sync_id,projection_source_id) VALUES (?,?,?,?,?,?,?)
       ON CONFLICT(id) DO UPDATE SET name=excluded.name,code=excluded.code,active=excluded.active,payload_json=excluded.payload_json,last_sync_id=excluded.last_sync_id,updated_at=datetime('now')`)
       .bind(id, name, text(row.code), isActive, JSON.stringify(raw), syncId, source.sourceId));
-    if (!source.staffAuthority) continue;
-    if(predeactivatedUnits.has(id))statements.push(db.prepare(`UPDATE divisions SET name=?,code=?,updated_at=datetime('now') WHERE project_alpha_business_unit_id=?`).bind(name,code,id));
-    else statements.push(db.prepare(`UPDATE divisions SET name=?,code=?,active=?,updated_at=datetime('now') WHERE project_alpha_business_unit_id=?`)
-      .bind(name, code, isActive, id));
-    statements.push(db.prepare(`INSERT INTO divisions (id,name,code,project_alpha_business_unit_id,active)
-      SELECT ?,?,?,?,? WHERE NOT EXISTS (SELECT 1 FROM divisions WHERE project_alpha_business_unit_id=?)`)
-      .bind(stableId("division-pa", id), name, code, id, isActive, id));
+    // PA internal units are passive historical observations. Local Operations
+    // divisions, names, active state and grants have their own authority.
+
   }
 
   if (changed.has("worker_business_units")) for (const raw of data.worker_business_units) {
@@ -662,7 +657,7 @@ function reconciliationStatements(db: D1Database, data: SnapshotCollections, syn
   // Business ingestion is not a grant to manage local staff, divisions or Access.
   if (!source.staffAuthority) return statements;
 
-  const authorizationChanged = changed.has("users") || changed.has("business_units") || changed.has("application_entitlements");
+  const authorizationChanged = changed.has("users") || changed.has("application_entitlements");
   // Reconcile a legacy PA-managed staff row by its verified PA email on every
   // snapshot.  A historical PA identity may have been retired and replaced
   // while retaining the same sign-in email; limiting the association repair to
@@ -855,32 +850,14 @@ export async function syncProjectAlphaForSource(env: Env, context: ProjectAlphaS
         connectorFenceStatement(env.OPS_DB,proof),...statements,
       ])).slice(1),
     } : env.OPS_DB;
+    // No restored projection may become visible under a prior identity's map.
+    await refreshLocalDivisionSourceIdentity(env,source.sourceId,snapshotConnection.baseUrl,
+      ()=>proof?[connectorFenceStatement(env.OPS_DB,proof)]:[]);
+    await refreshLease();
     const ids = await prepareProjectAlphaSourceRecords(mappingDb,source,refs);
-    const inactiveUnits=source.staffAuthority&&changed.has('business_units')?data.business_units
-      .map(raw=>mapProjectAlphaSourceRow('business_units',raw,ids))
-      .filter(row=>row.is_active===false||row.is_active===0).map(row=>text(row.id)).filter((id):id is string=>!!id):[];
-    const inactiveRows=inactiveUnits.length?(await env.OPS_DB.withSession('first-primary').prepare(`SELECT id,active,project_alpha_business_unit_id,updated_at FROM divisions
-      WHERE active=1 AND project_alpha_business_unit_id IN(SELECT value FROM json_each(?)) ORDER BY id`).bind(JSON.stringify(inactiveUnits))
-      .all<NonNullable<DivisionMutationWitness['expectedRows']>[number]>()).results:[];
-    const inactiveDivisions=inactiveRows.map(row=>row.id);
-    const divisionWitness:DivisionMutationWitness={divisionIds:inactiveDivisions,sourceId:source.sourceId,leaseOwner,expectedRows:inactiveRows};
-    const divisionMutation=inactiveDivisions.length?await reservePrimaryFolderMutation(env,'system:project-alpha-sync','division_deactivation',divisionWitness):null;
-    await suspendExplicitBindingsForDivisionDeactivation(env,inactiveDivisions);
-    await attemptPrimaryFolderMutation(env,divisionMutation);
-    if(inactiveDivisions.length){
-      await refreshLease();
-      const result=await env.OPS_DB.batch([...(proof?[connectorFenceStatement(env.OPS_DB,proof)]:[]),primaryDivisionDeactivationStatement(env,divisionWitness)]);
-      if(Number(result.at(-1)?.meta.changes)!==inactiveDivisions.length){
-        // A completed guarded statement reporting zero changes is a known
-        // no-write outcome, unlike an interrupted/unknown dispatch.
-        if(Number(result.at(-1)?.meta.changes)===0)await completePrimaryFolderMutation(env,divisionMutation,true);
-        throw new Error('project-alpha-division-authority-changed');
-      }
-    }
-    await completePrimaryFolderMutation(env,divisionMutation);
-    // Do not repeat the ownership-changing active=0 assignment after releasing
-    // the Delivery fence. A later projection batch may safely update metadata.
-    await runBatches(env.OPS_DB, projectionStatements(env.OPS_DB, data, syncId, changed, applicationKey,generatedAt,source,ids,new Set(inactiveUnits)),refreshLease,proof);
+    // A PA unit rename, retirement or omission cannot mutate local divisions
+    // or suspend independently granted folder access.
+    await runBatches(env.OPS_DB, projectionStatements(env.OPS_DB, data, syncId, changed, applicationKey,generatedAt,source,ids),refreshLease,proof);
     await runBatches(env.OPS_DB, reconciliationStatements(env.OPS_DB, data, syncId, changed, applicationKey,generatedAt,source),refreshLease,proof);
     // Clients are written before organizations. Resolve their observation owner
     // only after all source rows exist; this never uses generated_at or sync time.

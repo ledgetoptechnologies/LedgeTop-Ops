@@ -23,6 +23,7 @@ export async function reservePrimaryFolderMutation(env:Databases,actorId:string,
 /** All selected divisions change or none do. The original command is fenced
  * by its exact snapshot lease, so a reviewed retry can retire a late dispatch. */
 export function primaryDivisionDeactivationStatement(env:Databases,witness:DivisionMutationWitness,original=true):D1PreparedStatement{
+  if(witness.sourceId?.startsWith('project-alpha:'))return conflict('PA internal divisions no longer control local Operations divisions; reconcile the prior result without dispatching another deactivation');
   if(!witness.sourceId||!witness.leaseOwner||!witness.expectedRows?.length||witness.expectedRows.length!==witness.divisionIds.length)
     return conflict('Division deactivation has no complete original authority witness');
   return env.OPS_DB.prepare(`UPDATE divisions SET active=0,updated_at=datetime('now')

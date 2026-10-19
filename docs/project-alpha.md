@@ -591,3 +591,77 @@ The receiver acknowledges a valid event after its D1 projection is committed. Cl
 A complete snapshot runs daily for recovery and reconciliation. Project Alpha uses OFFSET pagination and emits a fresh `generated_at` on every page, so LTDS reads two complete bounded passes and requires identical per-collection fingerprints before any projection or missing-row deactivation. An unequal pass fails as `project-alpha-snapshot-unstable` and retains the last-known-good projection. This doubles normal snapshot reads and hashing work, but prevents a moving OFFSET window from silently revoking access. Collection fingerprints skip unchanged projection writes, except time-bounded memberships are recomputed on every run so expiration does not depend on a payload change. Each pass retains the same page-count, page-byte, total-record, timeout, retry, and lease limits. The snapshot fails with `delivery-db-binding-required` before fetching or committing fingerprints when the Delivery D1 binding is unavailable; it must not report a healthy reconciliation while the portal projection is stale.
 
 Client-workspace authorization is reconciled from the current projection, not from names. A concrete active PA client controls the client account's active state; losing an optional organization alone does not suspend that account. Project grants remain valid only while the PA project is active and still belongs to the account's exact client, or, for view-only grants, its active organization. A client, organization, or project revoke/remap revokes invalid project delivery, member, and folder associations before a later account or source reactivation can revive stale access. Client-scoped folders are revoked when their concrete client account is suspended. These are LTDS-local projection and authorization changes only; LTDS never mutates Project Alpha.
+
+
+## Retirement of PA internal divisions
+
+Migration `0215_local_project_division_authority.sql` stores Operations-owned
+project-to-division relationships independently of PA internal business units.
+It stages only exact existing primary-source links, retaining the same division
+IDs. Staged rows initially have no source identity and grant no division scope;
+a controlled, reviewed one-time stamp must bind them to the verified current
+identity before the release is made available. Historical operation/task exceptions, including orphan and explicitly
+unassigned work, keep their previous effective scope. Missing or inactive
+mappings do not fall back to a PA unit, another source, or all divisions.
+
+PA unit catalog observations remain passive compatibility data. Unit renames,
+inactive flags, omissions, and new unit records no longer rename, deactivate,
+or create Operations divisions or suspend local folder grants. Existing local
+staff grants, division IDs, native business scopes, and confirmed
+`project_folders.division_id` delivery authority remain separate and unchanged.
+There is no automatic correspondence between `native_business_divisions` and
+legacy Operations `divisions` based on matching IDs or names.
+
+An administrator with `operations.manage` may review a legacy projected
+project's local classification through `GET /api/projects/:id/local-division`
+and `POST` to the same route. The request supplies `divisionId` (or explicit
+null), `expectedVersion`, a review reason, and a UUID `Idempotency-Key`. The
+server selects the source from the project, enforces old/new division denies,
+and atomically rechecks role, source visibility, project activity, target
+activity, and mapping version. Changes are audited and repeated requests do
+not duplicate the change. This updates operational classification, not delivery
+folder grants, native business scope, client membership, or PA data.
+
+New PA-created projects remain unassigned until an authorized local review.
+Project list/detail fields `local_division_id`, `local_division_name`, and
+`local_division_status` are distinct from the confirmed delivery folder's
+`division_id`. Existing exceptional work scopes remain stable when a project's
+classification changes.
+
+Before releasing this migration, quiesce the old PA snapshot/event consumer,
+drain its lease, and inventory any `division_deactivation` folder authority
+operations. The new consumer cannot dispatch another PA-owned deactivation.
+A previously committed result can still be proven and reconciled; an uncertain
+pending operation must be reviewed without automatically clearing its Delivery
+fence. Preserve existing public links and folder grants during acceptance.
+
+Source identity is the exact normalized HTTPS origin, PA source instance UUID,
+application UUID, and history epoch UUID. The source projection lease covers a
+capabilities preflight before project/work projection writes. It first clears
+the old identity head, then restores only a matching verified runtime connection.
+Failed, disabled, missing, or mismatched verification leaves mappings unusable.
+A changed source instance/application/epoch cannot inherit a previous map even
+when resource IDs repeat. Existing work overrides remain present and prevent
+fallback to a newly reviewed parent mapping. Recovery of the same exact identity
+may restore its previously reviewed mappings; it never restamps mappings.
+
+Both Operations snapshots AND the Ops Sync incremental writer must be upgraded.
+Ops Sync needs its own deployment-owned `PROJECT_ALPHA_API_V2_CONNECTIONS`
+envelope using dedicated `api.capabilities.read`-only keys, not the Ops command key.
+Its registered connector origin must match the configured capabilities origin.
+A legacy unregistered adapter additionally requires `PROJECT_ALPHA_BASE_URL`;
+without an exact origin it cannot verify division scope. These keys are server
+secrets, not browser settings. Their absence permits ordinary source ingestion
+but keeps local division classification unassigned. No old writer may be left
+running after the controlled mapping release.
+
+The migration rollout gate is: pause both old projection writers, drain the
+source lease and inspect pending folder mutations, capture the exact legacy
+project/operation/task effective scope rows, apply 0215, deploy both new writers,
+verify each source identity, and review a source-specific one-time stamp of only
+`legacy_exact` mappings whose identity is still NULL. Stamp with an exact
+identity-head comparison and expected row count; never run this operation on a
+restored epoch or stamp all sources together. Compare every captured effective
+scope and all local IDs/grants/folder authority before releasing traffic. New
+projects remain unmapped. This controlled data step has not been executed by
+this source change and must not be omitted.
