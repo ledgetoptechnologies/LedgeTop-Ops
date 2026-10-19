@@ -119,6 +119,7 @@ async function assignedOperations(
   return rows.results.map(row => {
     const canViewSops = evaluatePermission(grants, principal, "sops.view", {
       divisionId: row.division_id,
+      divisionAuthorityUnknown: row.division_id === null,
       assignedStaffIds: row.assigned_staff_ids?.split(",").filter(Boolean) || [],
     });
     return {

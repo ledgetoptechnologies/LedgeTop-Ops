@@ -641,7 +641,12 @@ capabilities preflight before project/work projection writes. It first clears
 the old identity head, then restores only a matching verified runtime connection.
 Failed, disabled, missing, or mismatched verification leaves mappings unusable.
 A changed source instance/application/epoch cannot inherit a previous map even
-when resource IDs repeat. Existing work overrides remain present and prevent
+when resource IDs repeat. Unknown or inactive classification also retains
+permission-specific division override denies conservatively. A global allow
+cannot bypass such a deny just because the effective division disappeared;
+division-only allows never match an unknown context. Global authority without
+an applicable deny remains usable. SOP content reads and assignment mutations
+repeat this rule in their authoritative SQL, not only in response decoration. Existing work overrides remain present and prevent
 fallback to a newly reviewed parent mapping. Recovery of the same exact identity
 may restore its previously reviewed mappings; it never restamps mappings.
 

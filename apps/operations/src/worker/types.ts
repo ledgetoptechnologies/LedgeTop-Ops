@@ -400,6 +400,9 @@ export interface GrantRow {
 
 export interface ResourceContext {
   divisionId?: string | null;
+  /** Unknown local classification cannot discard division-specific denies.
+   * This only broadens deny matching; it never makes a division allow apply. */
+  divisionAuthorityUnknown?: boolean;
   assignedStaffIds?: string[];
   ownerId?: string | null;
 }

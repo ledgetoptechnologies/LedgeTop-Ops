@@ -211,6 +211,7 @@ async function jsonBody<T>(c: AppContext, schema: z.ZodType<T>): Promise<T> {
 function resourceContext(operation: OperationRow): ResourceContext {
   return {
     divisionId: operation.division_id,
+    divisionAuthorityUnknown: operation.division_id === null,
     assignedStaffIds: operation.assigned_staff_ids?.split(",").filter(Boolean) || [],
   };
 }
