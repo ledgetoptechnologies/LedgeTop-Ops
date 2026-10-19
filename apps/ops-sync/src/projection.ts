@@ -265,11 +265,11 @@ async function applyProjectionEventLocked(env: Env, source: ProjectAlphaSourceCo
     const calendarExternalId = `${event.projection.entity_type}:${event.projection.entity_id}`;
     if(event.projection.entity_type==="operation"||event.projection.entity_type==="task")
       references.push({kind:"calendar_event",externalId:calendarExternalId});
-    if(["project","operation","task"].includes(event.projection.entity_type)) {
-      const registered=proof?.mode==="registry"?await env.OPS_DB.prepare("SELECT snapshot_origin FROM pa_connectors WHERE source_id=?").bind(source.sourceId).first<{snapshot_origin:string}>():null;
-      await refreshLocalDivisionSourceIdentity(env,source.sourceId,registered?.snapshot_origin??env.PROJECT_ALPHA_BASE_URL??"",
-        ()=>proof?[connectorFenceStatement(env.OPS_DB,proof)]:[]);
-    }
+    // Relationship and assignment events can also change a mapped project's
+    // authority context. Fence every applied projection before any row changes.
+    const registered=proof?.mode==="registry"?await env.OPS_DB.prepare("SELECT snapshot_origin FROM pa_connectors WHERE source_id=?").bind(source.sourceId).first<{snapshot_origin:string}>():null;
+    await refreshLocalDivisionSourceIdentity(env,source.sourceId,registered?.snapshot_origin??env.PROJECT_ALPHA_BASE_URL??"",
+      ()=>proof?[connectorFenceStatement(env.OPS_DB,proof)]:[]);
     const ids=await prepareProjectAlphaSourceRecords(mappingDatabase(env,proof),source,references);
     const data=mapProjectAlphaSourceRow(collection,row,ids);
     const localId=requiredValue(data,"id");
