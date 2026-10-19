@@ -743,7 +743,8 @@ async function planNativeDirectoryProfileWriteInternal(db: DirectoryWriteD1, inp
   if (!await authority(db, write)) return { status: "blocked", reason: "native_directory_authority" };
   const scopesJson = JSON.stringify(write.scopes), profileJson = JSON.stringify(write.profile);
   const stagedAdmission = write.operation === "create" && stagedOnboardingDecisionId !== null
-    && write.createAdmissionId === `client-onboarding:${stagedOnboardingDecisionId}:${write.kind}`;
+    && (write.createAdmissionId === `client-onboarding:${stagedOnboardingDecisionId}:${write.kind}`
+      || (write.kind === "client" && write.createAdmissionId === `client-onboarding-member:${stagedOnboardingDecisionId}:${write.recordId}`));
   if (write.operation === "create" && !stagedAdmission && !await db.prepare(`SELECT 1 ok FROM native_directory_create_admissions
     WHERE id=? AND staff_id=? AND bound_access_subject=? AND record_id=? AND record_kind=? AND active=1
       AND consumed_mutation_id IS NULL AND consumed_at IS NULL AND json(scopes_json)=json(?)
@@ -1071,6 +1072,18 @@ export async function writeNativeOnlyOnboardingDecisionProfile(db: DirectoryWrit
       || input.relationship.organizationRecordId !== stagedOrganization.recordId)))
     return { status: "rejected", reason: "invalid_onboarding_decision_write" };
   return executeNativeDirectoryProfileWrite(db, input, true, decisionId, stagedOrganization);
+}
+
+/** Exact shared-company child planner. Its transient admission can only be
+ * established by the immutable reviewed plan's atomic execution fence. The
+ * existing company is read normally and never staged or mutated here. */
+export async function writeSharedCompanyOnboardingMemberProfile(db: DirectoryWriteD1,
+  planId: string, input: NativeDirectoryProfileWrite): Promise<NativeDirectoryProfileWriteOutcome> {
+  if (!UUID.test(planId) || input.kind !== "client" || input.operation !== "create"
+    || input.createAdmissionId !== `client-onboarding-member:${planId}:${input.recordId}`
+    || input.relationship.organizationRecordId === null || input.destinations.length < 1)
+    return { status: "rejected", reason: "invalid_onboarding_member_write" };
+  return executeNativeDirectoryProfileWrite(db, input, false, planId);
 }
 
 /**

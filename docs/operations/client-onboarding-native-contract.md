@@ -1210,3 +1210,33 @@ a truthful approval receipt plus the complete member plan. It must wait for all
 child ACKs and independently verify each exact own-client PA principal before
 creating the shared-contact group and matching own-profile templates. No fake
 interactive session/merge preview or company-member access may be inferred.
+
+0218 adds `POST /api/client-onboarding/staff/approve-shared-company` accepting
+exactly `{planId,submissionId,fieldsSha256}`. It uses the same native staff,
+same-origin and CSRF boundary as preparation. Destination or parent replacements
+are never accepted in this request. The original reviewer must still have the
+same admission/profile identity and current global view/edit/link/enrollment
+permissions without a deny. A plan is never approval authority by itself: fresh
+inventory generations, PA binding proofs, durable parent heads, current local
+parent mappings/enrollments and the whole live company plan are compared again.
+The execution batch repeats those local evidence checks before every child.
+
+The private composer stages each ordinary client writer, its exact create
+admission, parent relationship and selected pending PA commands in one batch.
+Per-child artifact receipts exhaust the selected member plan before the decision
+can commit. A failure in any later child rolls back every earlier sibling,
+admission, outbox row and decision. Existing company fields, versions and
+enrollments remain unchanged. The original nine-field decision receipt anchors
+the first ordered child and its actual unchanged parent version. The response
+also includes `planId`, complete `members` (child and parent IDs/versions/source
+IDs), `replayed` and `portalActivation:"pending"`. That state means activation is
+queued; it never claims PA delivery or portal readiness. Exact saved-decision
+retries return the same child identities without creating another record.
+
+The append-only `client_onboarding_shared_company_approvals` relation connects
+that decision with every immutable planned child. The activation intent stores
+the complete selected destination union. Its decision-owned contact creation
+fence requires all per-source own-client proofs before one shared contact group
+can be created. It does not reuse or fabricate an interactive pair-merge preview.
+The administration feature flag remains held until the activation worker bridge,
+all-child ACK acceptance and Claude's explicit company-selection UI are accepted.
