@@ -227,7 +227,8 @@ describe("Project Alpha snapshot synchronization", () => {
     expect(sql).toContain("INSERT INTO pa_tasks");
     expect(sql).toContain("INSERT INTO pa_task_assignments");
     expect(sql).toContain("INSERT INTO pa_calendar_events");
-    expect(sql).toContain("project_alpha_business_unit_id");
+    expect(sql).not.toContain("project_alpha_business_unit_id");
+    expect(sql).not.toContain("INSERT INTO divisions");
     expect(sql).toContain("s.sync_protected=0");
     expect(sql).toContain("INSERT OR IGNORE INTO staff_role_assignments");
     expect(sql).toContain("SET status=CASE WHEN project_alpha_user_id IN");

@@ -70,21 +70,31 @@ describe("Client Hub project feedback history",{timeout:60_000},()=>{
   it("rejects rows when a grant is revoked after the last per-record scope check",async()=>{
     await fixture.seed();
     const owner=await fixture.seed(),record=await owner.create("Must remain private after access changes");
-    let scopeReads=0,revoked=false;
-    const wrapStatement=(statement:D1PreparedStatement,afterFirst?:()=>Promise<void>):D1PreparedStatement=>({
+    let scopeReads=0,revoked=false,initialScopeAuthorized=false;
+    const wrapStatement=(statement:D1PreparedStatement,afterFirst?:(result:unknown)=>Promise<void>):D1PreparedStatement=>({
       bind(...values:unknown[]){return wrapStatement(statement.bind(...values),afterFirst);},
       async first(columnName?:string){
         const result=columnName===undefined?await statement.first():await statement.first(columnName);
-        if(afterFirst)await afterFirst();
+        if(afterFirst)await afterFirst(result);
         return result;
       },
       all:statement.all.bind(statement),
     }) as unknown as D1PreparedStatement;
     const racingOps={withSession:()=>{
       const session=fixture.ops.withSession("first-primary");
-      return {prepare:(sql:string)=>wrapStatement(session.prepare(sql),sql.includes("FROM pa_projects p JOIN divisions d")?async()=>{
+      // Follow the scope read across its source-qualified local-division joins;
+      // the historical direct PA-business-unit join is no longer present.
+      return {prepare:(sql:string)=>wrapStatement(session.prepare(sql),sql.includes("SELECT p.id project_id,d.id division_id")&&sql.includes("FROM pa_projects p")?async result=>{
         scopeReads+=1;
+        if(scopeReads===1){
+          expect(result).toMatchObject({project_id:owner.pa,division_id:owner.division});
+          expect(await fixture.ops.prepare(`SELECT count(*) n FROM staff_permission_overrides
+            WHERE staff_id=? AND permission_key='operations.manage' AND scope='division' AND division_id=?`)
+            .bind(feedbackStaff.id,owner.division).first<number>('n')).toBe(1);
+          initialScopeAuthorized=true;
+        }
         if(scopeReads===2){
+          expect(initialScopeAuthorized).toBe(true);
           revoked=true;
           await fixture.ops.prepare(`DELETE FROM staff_permission_overrides
             WHERE staff_id=? AND permission_key='operations.manage' AND scope='division' AND division_id=?`)
@@ -94,7 +104,7 @@ describe("Client Hub project feedback history",{timeout:60_000},()=>{
     }} as unknown as D1Database;
     await expect(listClientHubProjectFeedbackHistory({...fixture.env,OPS_DB:racingOps},feedbackStaff,
       context(owner.pa),owner.pa,{limit:5})).rejects.toMatchObject({status:409});
-    expect({scopeReads,revoked}).toEqual({scopeReads:2,revoked:true});
+    expect({scopeReads,revoked,initialScopeAuthorized}).toEqual({scopeReads:2,revoked:true,initialScopeAuthorized:true});
     expect(await fixture.db.prepare("SELECT id FROM client_feedback WHERE id=?").bind(record.id).first("id")).toBe(record.id);
   });
 

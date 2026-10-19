@@ -172,6 +172,11 @@ describe('source-owned native portal resources with real signed projection and l
     beforeLogin=(await db.prepare('SELECT count(*) n FROM portal_v2_workspace_memberships').first<number>('n'))!;
     bootstrapStatus=(await request('/session')).status;
     expect(bootstrapStatus).toBe(200);
+    // This historical portal fixture deliberately stops the earlier Ops chain
+    // at 0040. Current feedback readers additionally consume the real additive
+    // local-division schema; PA business-unit fields no longer confer scope.
+    await opsDb.batch(splitD1MigrationStatements(readFileSync(
+      new URL('../migrations/0215_local_project_division_authority.sql',import.meta.url),'utf8')).map(sql=>opsDb.prepare(sql)));
     // Real staff producer: the client cannot consume a pending publication,
     // and no fixture-created membership or binding makes the happy path pass.
     for(const f of [a,b]){
@@ -182,6 +187,13 @@ describe('source-owned native portal resources with real signed projection and l
           .bind(mapping.get('organization','same-organization'),`Customer ${f.name}`,JSON.stringify({public_id:rootId}),'fixture',f.source),
         opsDb.prepare(`INSERT INTO pa_projects(id,organization_id,name,payload_json,last_sync_id,projection_source_id) VALUES(?,?,?,?,?,?)`)
           .bind(mapping.get('project','same-project'),mapping.get('organization','same-organization'),`Project ${f.name}`,JSON.stringify({public_id:projectId}),'fixture',f.source),
+        // Exact source/project witnesses belong to this reduced portal fixture;
+        // capabilities preflight and reviewed stamping have separate full-chain tests.
+        opsDb.prepare(`INSERT INTO pa_local_division_source_heads(projection_source_id,identity_key,revision) VALUES(?,?,1)`)
+          .bind(f.source,JSON.stringify(['portal-resource-fixture',f.source])),
+        opsDb.prepare(`INSERT INTO pa_local_division_mappings(resource_kind,resource_id,projection_source_id,identity_key,division_id,version,assignment_kind,assigned_by,reason)
+          VALUES('project',?,?,?,'native-division',1,'staff_reviewed',?,'Portal resource fixture exact project scope')`)
+          .bind(mapping.get('project','same-project'),f.source,JSON.stringify(['portal-resource-fixture',f.source]),staff.id),
       ]);
       const input={folderRef:encodeRef(`native/${f.name}`),sourceId:f.source,workspaceId:f.workspace,projectId:mapping.get('project','same-project'),
         principalPublicId:'same-person',reasonCode:'client_delivery',expiresAt:null};
