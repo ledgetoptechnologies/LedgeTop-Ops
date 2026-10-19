@@ -88,7 +88,8 @@ async function portalGrantOwnerCurrent(env:Env,v:z.infer<typeof portalGrantSchem
 }
 
 /** Explicit owner action. The source/workspace/principal/client tuple is verified without email matching. */
-export async function manageSharedProfilePortalGrant(env:Env,actor:StaffPrincipal,raw:unknown):Promise<{ok:boolean;revision?:number}>{
+export async function manageSharedProfilePortalGrant(env:Env,actor:StaffPrincipal,raw:unknown,
+ expectedOwner?:Readonly<{admissionVersion:number;profileVersion:number}>):Promise<{ok:boolean;revision?:number}>{
  const parsed=portalGrantSchema.safeParse(raw);if(!parsed.success||!await isAdministrator(env,actor))return{ok:false};const v=parsed.data,portalSourceId=v.portalSourceId??v.sourceId;
  const db=env.OPS_DB.withSession('first-primary');
  try{
@@ -98,7 +99,7 @@ export async function manageSharedProfilePortalGrant(env:Env,actor:StaffPrincipa
    WHERE staff.id=? AND staff.access_subject=? AND staff.status='active' AND admission.active=1
    AND admission.bound_access_subject=staff.access_subject AND profile.login_email=?`)
    .bind(actor.id,actor.accessSubject,actor.email).first<{admission_version:number;profile_version:number}>();
-  if(!nativeOwner)return{ok:false};
+  if(!nativeOwner||(expectedOwner&&(nativeOwner.admission_version!==expectedOwner.admissionVersion||nativeOwner.profile_version!==expectedOwner.profileVersion)))return{ok:false};
   const ownerAuthority=`SELECT 1 FROM staff_users staff JOIN staff_role_assignments role ON role.staff_id=staff.id
    JOIN native_staff_admissions admission ON admission.staff_id=staff.id JOIN native_staff_profiles profile ON profile.staff_id=staff.id
    WHERE staff.id=? AND staff.access_subject=? AND profile.login_email=? AND admission.version=? AND profile.version=?

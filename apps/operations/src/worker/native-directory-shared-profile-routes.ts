@@ -14,7 +14,7 @@ import { readSharedProfileAuthorityRecoveryStatus, recoverSharedProfileAuthority
 
 type Bindings = { Bindings: Env; Variables: { principal: StaffPrincipal; administrator: boolean } };
 type C = Context<Bindings>;
-type Member = { recordId: string; kind: 'organization'|'client'; version: number; profile: Record<string,string>;
+export type SharedProfileMember = { recordId: string; kind: 'organization'|'client'; version: number; profile: Record<string,string>;
   sourceIds: string[]; parentRecordId: string|null; relationshipVersion: number|null; parentVersion: number|null };
 export const NATIVE_DIRECTORY_SHARED_PROFILE_ROUTE = '/api/client-hub/shared-profiles';
 const pairSchema = z.object({recordIds:z.array(canonicalRecordId).length(2),primaryRecordId:canonicalRecordId}).strict();
@@ -81,6 +81,7 @@ async function identitySafeContactReady(c:C,members:readonly Member[]):Promise<b
   const probes=await Promise.all(sources.map(source=>probeConfiguredProjectAlphaDirectoryClientContactProfile(c.env,source)));
   return probes.every(probe=>probe.status==='verified');
 }
+type Member = SharedProfileMember;
 type CreationActor=Awaited<ReturnType<typeof nativeActor>>;
 export function sharedProfileCreationFence(db:D1Database,input:{groupId:string;mutationId:string;mode:'single'|'pair';requestSha256:string;
   actor:CreationActor;kind:Member['kind'];profile:Record<string,string>;members:Member[];previewToken:string|null}) {
@@ -90,7 +91,7 @@ export function sharedProfileCreationFence(db:D1Database,input:{groupId:string;m
       input.actor.accessSubject,input.actor.admissionVersion,input.actor.profileVersion,input.actor.loginEmail,input.kind,
       JSON.stringify(input.profile),JSON.stringify(input.members.map(m=>m.recordId)),JSON.stringify(input.members),input.previewToken);
 }
-function creationStatements(db:D1Database,groupId:string,kind:Member['kind'],profile:Record<string,string>,members:Member[],actorId:string){
+export function sharedProfileCreationStatements(db:D1Database,groupId:string,kind:Member['kind'],profile:Record<string,string>,members:Member[],actorId:string){
   const profileJson=JSON.stringify(profile);
   return [db.prepare('INSERT INTO native_directory_shared_profiles(id,kind,profile_json,membership_json,created_by) VALUES(?,?,?,?,?)')
       .bind(groupId,kind,profileJson,JSON.stringify(members.map(m=>m.recordId)),actorId),
@@ -118,10 +119,16 @@ export type SharedProfilePortalSetupCandidate={workspaceId:string;sourceId:strin
  principalPublicId:string;targetPublicId:string;recordId:string;groupId:string;clientName:string;
  state:'available'|'enabled'|'revoked'|'suspended';currentGrantId?:string;currentGrantRevision?:number};
 export async function sharedProfilePortalSetup(c:C,groupId:string,members:readonly Member[],identitySafe:boolean){
+  if(!await canMerge(c))return{available:false,candidates:[] as SharedProfilePortalSetupCandidate[]};
+  return readSharedProfilePortalSetup(c.env,groupId,members,identitySafe);
+}
+/** Read-only candidate discovery. Mutations independently revalidate the
+ * saved/native owner and exact principal/client authority in their issuer. */
+export async function readSharedProfilePortalSetup(env:Env,groupId:string,members:readonly SharedProfileMember[],identitySafe:boolean){
   const candidates:SharedProfilePortalSetupCandidate[]=[];
-  if(!await canMerge(c)||members.some(m=>m.kind!=='client'))return{available:false,candidates};
+  if(members.some(m=>m.kind!=='client'))return{available:false,candidates};
   try{
-    const db=c.env.OPS_DB.withSession('first-primary'),bridgeColumns=await sharedProfileCorrespondenceColumns(db);
+    const db=env.OPS_DB.withSession('first-primary'),bridgeColumns=await sharedProfileCorrespondenceColumns(db);
     for(const member of members){
       const stored=(await db.prepare("SELECT * FROM shared_profile_portal_grants WHERE group_id=? AND record_id=? AND target_type='client' ORDER BY id LIMIT 65")
         .bind(groupId,member.recordId).all<SharedProfilePortalGrant&{state:string}>()).results;
@@ -131,9 +138,9 @@ export async function sharedProfilePortalSetup(c:C,groupId:string,members:readon
         .bind(member.recordId).all<{source_id:string;project_alpha_public_id:string;source_instance_id:string;application_id:string;history_epoch_id:string}>()).results;
       for(const mapping of mappings){
         if(!member.sourceIds.includes(mapping.source_id))continue;
-        const resolved=await resolveDirectoryPortalSource(c.env,mapping.source_id,{sourceInstanceId:mapping.source_instance_id,applicationId:mapping.application_id,historyEpochId:mapping.history_epoch_id});
+        const resolved=await resolveDirectoryPortalSource(env,mapping.source_id,{sourceInstanceId:mapping.source_instance_id,applicationId:mapping.application_id,historyEpochId:mapping.history_epoch_id});
         if(!resolved||(resolved.correspondenceRevisionId&&!bridgeColumns))continue;
-        const rows=(await c.env.DELIVERY_DB.withSession('first-primary').prepare(`SELECT w.id workspaceId,p.public_id principalPublicId,e.public_id targetPublicId
+        const rows=(await env.DELIVERY_DB.withSession('first-primary').prepare(`SELECT w.id workspaceId,p.public_id principalPublicId,e.public_id targetPublicId
           FROM portal_v2_workspaces w JOIN pa_portal_workspace_sources s ON s.workspace_id=w.id AND s.projection_source_id=w.project_alpha_source_id
           JOIN portal_v2_directory_checkpoints checkpoint ON checkpoint.workspace_id=w.id
           JOIN portal_v2_directory_generations generation ON generation.id=checkpoint.active_generation_id AND generation.workspace_id=w.id AND generation.status='active' AND generation.complete=1
@@ -154,7 +161,7 @@ export async function sharedProfilePortalSetup(c:C,groupId:string,members:readon
         for(const row of rows){
           const prior=stored.find(g=>g.workspace_id===row.workspaceId&&(g.directory_source_id??g.source_id)===mapping.source_id&&g.principal_public_id===row.principalPublicId&&g.target_public_id===row.targetPublicId);
           if(prior)seen.add(prior.id);
-          const current=prior&&JSON.stringify(JSON.parse(prior.group_membership_json).slice().sort())===JSON.stringify(members.map(m=>m.recordId).sort())&&prior.source_instance_id===mapping.source_instance_id&&prior.application_id===mapping.application_id&&prior.history_epoch_id===mapping.history_epoch_id&&await sharedProfileGrantSourceCurrent(c.env,prior);
+          const current=prior&&JSON.stringify(JSON.parse(prior.group_membership_json).slice().sort())===JSON.stringify(members.map(m=>m.recordId).sort())&&prior.source_instance_id===mapping.source_instance_id&&prior.application_id===mapping.application_id&&prior.history_epoch_id===mapping.history_epoch_id&&await sharedProfileGrantSourceCurrent(env,prior);
           const sourceFields=prior?.directory_source_id?{portalSourceId:prior.source_id,correspondenceRevisionId:prior.correspondence_revision_id!}:
             resolved.correspondenceRevisionId?{portalSourceId:resolved.portalSourceId,correspondenceRevisionId:resolved.correspondenceRevisionId}:{};
           candidates.push({...row,sourceId:mapping.source_id,...sourceFields,recordId:member.recordId,groupId,clientName:member.profile.name!,
@@ -213,7 +220,7 @@ export function registerNativeDirectorySharedProfileRoutes(app:Hono<Bindings>){c
     if(existing)fail('record_already_grouped');
     const groupId=input.mutationId;
     try{await c.env.OPS_DB.batch([sharedProfileCreationFence(c.env.OPS_DB,{groupId,mutationId:input.mutationId,mode:'single',requestSha256,
-      actor,kind:m.kind,profile:m.profile,members:[m],previewToken:null}),...creationStatements(c.env.OPS_DB,groupId,m.kind,m.profile,[m],actor.staffId)]);}
+      actor,kind:m.kind,profile:m.profile,members:[m],previewToken:null}),...sharedProfileCreationStatements(c.env.OPS_DB,groupId,m.kind,m.profile,[m],actor.staffId)]);}
     catch{fail('shared_membership_changed');}
     return c.json({replayed:false,sharedProfile:await readGroup(c,groupId)},201);
   });
@@ -252,7 +259,7 @@ export function registerNativeDirectorySharedProfileRoutes(app:Hono<Bindings>){c
     const groupId=crypto.randomUUID(),requestSha256=await hash(input);
     try{await c.env.OPS_DB.batch([
       sharedProfileCreationFence(c.env.OPS_DB,{groupId,mutationId:input.mutationId,mode:'pair',requestSha256,actor,kind:proof.kind,profile:proof.profile,members,previewToken:input.previewToken}),
-      ...creationStatements(c.env.OPS_DB,groupId,proof.kind,proof.profile,members,actor.staffId),
+      ...sharedProfileCreationStatements(c.env.OPS_DB,groupId,proof.kind,proof.profile,members,actor.staffId),
       c.env.OPS_DB.prepare('UPDATE native_directory_shared_profile_previews SET confirmed_mutation_id=?,group_id=? WHERE token=? AND confirmed_mutation_id IS NULL').bind(input.mutationId,groupId,input.previewToken),
     ]);}catch{fail('shared_membership_changed');}return c.json({status:'linked',replayed:false,sharedProfile:await readGroup(c,groupId)},201);});
   app.patch(`${route}/:groupId`,async c=>{const input=await body(c,patchSchema);keyed(c,input.mutationId);const groupId=mutationId.parse(c.req.param('groupId'));

@@ -1,3 +1,4 @@
+import { readClientOnboardingPortalActivationStatus } from "./client-onboarding-portal-activation";
 import { Buffer } from "node:buffer";
 import { timingSafeEqual } from "node:crypto";
 import { readBoundedJson } from "./bounded-json";
@@ -12,7 +13,7 @@ import { approveNewNativeOnlyClientOnboarding } from "./client-onboarding-approv
 import { readClientOnboardingEnrollmentChoices } from "./client-onboarding-enrollment-discovery";
 import { parseClientOnboardingEnrollmentSourceIds } from "./client-onboarding-enrollment-selection";
 
-export type ClientOnboardingStaffRoute = "session" | "create" | "reveal" | "review" | "approve" | "enrollment-choices" | "inbox";
+export type ClientOnboardingStaffRoute = "session" | "create" | "reveal" | "review" | "approve" | "enrollment-choices" | "inbox" | "activation-status";
 export type ClientOnboardingStaffHttpDependencies = Readonly<{
   configuration: NativeStaffAccessConfiguration & Readonly<{ origin: string; csrfSecret: string }>;
   database: D1Database;
@@ -37,6 +38,7 @@ class HttpFailure extends Error {
 
 export function clientOnboardingStaffHttpRequest(method: string, path: string): ClientOnboardingStaffRoute | null {
   if (method === "GET" && path === "/api/client-onboarding/staff/session") return "session";
+  if (method === "POST" && path === "/api/client-onboarding/staff/activation-status") return "activation-status";
   if (method === "POST" && path === "/api/client-onboarding/staff/inbox") return "inbox";
   if (method === "POST" && path === "/api/client-onboarding/staff/create") return "create";
   if (method === "POST" && path === "/api/client-onboarding/staff/reveal") return "reveal";
@@ -161,7 +163,7 @@ async function body(request: Request, route: Exclude<ClientOnboardingStaffRoute,
       throw new HttpFailure(400, "invalid_request");
     return value;
   }
-  if (route === "review") {
+  if (route === "review" || route === "activation-status") {
     if (!exact(value, ["submissionId"]) || typeof value.submissionId !== "string")
       throw new HttpFailure(400, "invalid_request");
     return value;
@@ -232,6 +234,13 @@ export async function handleClientOnboardingStaffHttp(request: Request,
           throw new HttpFailure(503, "client_onboarding_unavailable");
         throw new HttpFailure(403, "client_onboarding_denied");
       }
+    }
+    if (route === "activation-status") {
+      try {
+        const status = await readClientOnboardingPortalActivationStatus(authority.database, auth, input.submissionId);
+        unexpired(auth);
+        return response(200, status);
+      } catch { throw new HttpFailure(403, "client_onboarding_denied"); }
     }
     if (route === "inbox") {
       try {
