@@ -1,4 +1,5 @@
 node_modules/
+apps/operations-mcp/.local-tools/
 .wrangler/
 .dev.vars
 .env

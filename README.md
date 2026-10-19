@@ -1,5 +1,9 @@
 # LTDS Ops
 
+For owner-operated Codex, Claude, and Hermes connections, see the
+[private Operations MCP adapter](apps/operations-mcp/README.md). It uses the
+existing human Cloudflare Access login and defaults to read-only tools.
+
 ## Current pilot status
 
 The client pilot is available canonically at `portal.ledgetopdroneservices.com`
