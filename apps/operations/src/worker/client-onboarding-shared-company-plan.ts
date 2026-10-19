@@ -69,11 +69,74 @@ async function companyMembers(db:D1Database,selection:SharedCompanySelection):Pr
  if(JSON.stringify(rows.map(({recordId,expectedVersion})=>({recordId,expectedVersion})))!==JSON.stringify(selection.members))return deny();
  return rows;
 }
-function receipt(planId:string,submissionId:string,selection:SharedCompanySelection,sourceIds:readonly string[],expiresAt:string,children:readonly PlannedChild[]) {
+function receipt(planId:string,submissionId:string,selection:SharedCompanySelection,sourceIds:readonly string[],expiresAt:string,children:readonly PlannedChild[],approvalAvailable:boolean) {
  return {planId,submissionId,companyGroupId:selection.groupId,companyGroupVersion:selection.expectedVersion,
-  sourceIds,expiresAt,state:"reviewed" as const,approvalAvailable:false as const,
+  sourceIds,expiresAt,state:"reviewed" as const,approvalAvailable,
   children:children.map(c=>({clientRecordId:c.clientRecordId,parentRecordId:c.parentRecordId,
    parentRecordVersion:c.parentRecordVersion,sourceIds:c.destinations.map(d=>d.sourceId)}))};
+}
+
+// A reviewed 0217 plan is not sufficient: 0218 must supply the complete
+// composed approval protocol. Checking each object also fails closed during a
+// partial migration, without writing an execution fence merely to test it.
+const approvalProtocolObjects = [
+ "client_onboarding_shared_company_parent_heads", "client_onboarding_shared_company_execution_fences",
+ "client_onboarding_live_shared_company_execution_fences", "client_onboarding_shared_company_execution_insert",
+ "client_onboarding_shared_company_child_receipts", "client_onboarding_shared_company_child_receipt_insert",
+ "client_onboarding_shared_company_child_delivery_guard", "client_onboarding_shared_company_child_receipt_consume",
+ "client_onboarding_shared_company_child_receipt_immutable", "client_onboarding_shared_company_child_receipt_durable",
+ "client_onboarding_shared_company_execution_update", "client_onboarding_shared_company_member_admission",
+ "client_onboarding_shared_company_approvals", "client_onboarding_shared_company_approval_insert",
+ "client_onboarding_shared_company_approval_immutable", "client_onboarding_shared_company_approval_durable",
+ "client_onboarding_shared_company_approval_stage", "client_onboarding_shared_company_execution_complete",
+ "client_onboarding_shared_contact_creation_fences", "client_onboarding_live_shared_contact_creation_fences",
+ "client_onboarding_shared_contact_creation_insert", "client_onboarding_shared_contact_creation_immutable",
+ "client_onboarding_shared_contact_creation_complete", "client_onboarding_decisions_protocol_exclusive",
+ "client_onboarding_decisions_insert_guard", "client_onboarding_decisions_legacy_insert_guard",
+ "client_onboarding_decisions_shared_insert_guard", "native_directory_shared_group_insert",
+ "client_onboarding_portal_activation_proof_insert", "client_onboarding_shared_execution_live_plan",
+ "client_onboarding_shared_child_live_plan", "client_onboarding_shared_child_live_evidence",
+ "client_onboarding_shared_decision_live_plan", "client_onboarding_shared_decision_live_evidence",
+ "client_onboarding_shared_admission_live_plan", "client_onboarding_shared_admission_live_evidence",
+];
+
+/** Advisory, read-only final check, used only after prepare's fresh remote
+ * proofs. It confers no authority and does not replace approve's revalidation. */
+async function approvalAvailable(database:D1Database,auth:Auth,planId:string,children:readonly PlannedChild[]){
+ const db=database.withSession("first-primary");
+ const supported=await db.prepare(`SELECT 1 supported WHERE NOT EXISTS(
+  SELECT 1 FROM json_each(?) required LEFT JOIN sqlite_master object ON object.name=required.value
+   AND object.type IN('table','view','trigger') WHERE object.name IS NULL)`)
+  .bind(JSON.stringify(approvalProtocolObjects)).first();
+ if(!supported)return false;
+ // The 0218 SQL head view is deliberately execution-fence scoped. Use the
+ // normal read-only head resolver here; never open a mutation fence for UI.
+ for(const child of children)for(const destination of child.destinations){
+  const proof=child.bindings.find(p=>p.sourceId===destination.sourceId);
+  if(!proof)return false;
+  const head=await readNativeDirectoryDurableRemoteHead(database,"organization",child.parentRecordId,child.parentRecordVersion,
+   {...destination,externalCanonicalId:proof.binding.externalId});
+  if(!head||!proof||head.externalCanonicalId!==proof.binding.externalId||head.projectAlphaPublicId!==proof.binding.publicId
+   ||head.revision!==proof.resource.revision||!proof.resource.present)return false;
+ }
+ return !!await db.prepare(`SELECT 1 FROM client_onboarding_live_shared_company_plans plan
+  JOIN client_onboarding_shared_company_plan_seals seal ON seal.plan_id=plan.plan_id
+  WHERE plan.plan_id=? AND plan.reviewer_staff_id=? AND plan.reviewer_subject=? AND plan.reviewer_email=?
+   AND plan.reviewer_admission_version=? AND plan.reviewer_profile_version=?
+   AND ?>strftime('%Y-%m-%dT%H:%M:%fZ','now')
+   AND seal.child_count=(SELECT count(*) FROM client_onboarding_shared_company_plan_children child WHERE child.plan_id=plan.plan_id)
+   AND NOT EXISTS(SELECT 1 FROM client_onboarding_shared_company_plan_children child
+    LEFT JOIN effective_native_directory_enrollments enrollment ON enrollment.record_id=child.parent_record_id
+    WHERE child.plan_id=plan.plan_id AND(enrollment.record_id IS NULL OR json(enrollment.destinations_json)<>json(child.parent_enrollment_json)))
+   AND NOT EXISTS(SELECT 1 FROM client_onboarding_shared_company_plan_children child JOIN json_each(child.destinations_json) destination
+    WHERE child.plan_id=plan.plan_id AND NOT EXISTS(SELECT 1 FROM project_alpha_api_v2_inventory_receipts receipt
+     WHERE receipt.source_id=json_extract(destination.value,'$.sourceId')
+      AND receipt.source_instance_id=json_extract(destination.value,'$.sourceInstanceUUID')
+      AND receipt.application_id=json_extract(destination.value,'$.applicationUUID') AND receipt.history_epoch_id=json_extract(destination.value,'$.historyEpoch')
+      AND receipt.inventory_kind='directory' AND receipt.authorization_generation=json_extract(destination.value,'$.expectedAuthorizationGeneration')
+      AND receipt.observed_at>=strftime('%Y-%m-%dT%H:%M:%fZ','now','-5 minutes') AND receipt.observed_at<=strftime('%Y-%m-%dT%H:%M:%fZ','now')))` )
+  .bind(planId,auth.identity.staffId,auth.identity.verifiedAccessSubject,auth.identity.email,auth.admissionVersion,
+   auth.identity.profileVersion,auth.verifiedUntil).first();
 }
 function bindingFingerprint(value:ProjectAlphaDirectoryBindingObservation){return {sourceId:value.sourceId,
  sourceInstanceId:value.sourceInstanceId,applicationId:value.applicationId,historyEpoch:value.historyEpoch,
@@ -126,7 +189,8 @@ export async function prepareClientOnboardingSharedCompanyPlan(database:D1Databa
  const saved=await database.withSession("first-primary").prepare(`SELECT plan.request_sha256 requestSha,plan.verified_until expiresAt
   FROM client_onboarding_live_shared_company_plans plan JOIN client_onboarding_shared_company_plan_seals seal ON seal.plan_id=plan.plan_id
   WHERE plan.plan_id=?`).bind(input.commandId).first<{requestSha:string;expiresAt:string}>();
- if(saved){if(saved.requestSha!==requestSha)return deny();return {...receipt(input.commandId,review.submissionId,selected,sources,saved.expiresAt,children),replayed:true};}
+ if(saved){if(saved.requestSha!==requestSha)return deny();return {...receipt(input.commandId,review.submissionId,selected,sources,saved.expiresAt,children,
+  await approvalAvailable(database,auth,input.commandId,children)),replayed:true};}
  const expiresAt=new Date(Math.min(Date.parse(auth.verifiedUntil),Date.now()+15*60_000)).toISOString();
  await database.withSession("first-primary").batch([
   database.prepare(`INSERT INTO client_onboarding_shared_company_plans(plan_id,submission_id,invitation_id,fields_sha256,request_sha256,
@@ -141,7 +205,8 @@ export async function prepareClientOnboardingSharedCompanyPlan(database:D1Databa
     child.parentRecordId,child.parentRecordVersion,JSON.stringify(child.destinations),child.parentEnrollmentJson,JSON.stringify(child.bindings))),
   database.prepare("INSERT INTO client_onboarding_shared_company_plan_seals(plan_id,child_count) VALUES(?,?)").bind(input.commandId,children.length),
  ]);
- return {...receipt(input.commandId,review.submissionId,selected,sources,expiresAt,children),replayed:false};
+ return {...receipt(input.commandId,review.submissionId,selected,sources,expiresAt,children,
+  await approvalAvailable(database,auth,input.commandId,children)),replayed:false};
 }
 
 /** Credential-free exact group choices for review. No email/name matching is

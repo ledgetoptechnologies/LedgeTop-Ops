@@ -548,7 +548,7 @@ describe("native-only client onboarding approval against migrated D1", () => {
     expect(choices.companies.find(c=>c.groupId===groupId)).toMatchObject({reviewAvailable:true,expectedVersion:1});
     const beforeRecords=await count("operations_directory_records"),beforeAdmissions=await count("native_directory_create_admissions"),beforeGrants=await count("shared_profile_portal_grants");
     const plan=await prepareClientOnboardingSharedCompanyPlan(db,actor,input,dualConnection);
-    expect(plan).toMatchObject({planId:input.commandId,state:"reviewed",approvalAvailable:false,replayed:false,sourceIds:input.sourceIds});
+    expect(plan).toMatchObject({planId:input.commandId,state:"reviewed",approvalAvailable:true,replayed:false,sourceIds:input.sourceIds});
     expect(plan.children).toHaveLength(2);
     for(const child of plan.children){expect(child.sourceIds).toHaveLength(1);expect(child.parentRecordVersion).toBe(1);
       expect(members.find(m=>m.recordId===child.parentRecordId)?.sourceIds).toEqual(child.sourceIds);}
@@ -557,6 +557,74 @@ describe("native-only client onboarding approval against migrated D1", () => {
     expect(await count("shared_profile_portal_grants")).toBe(beforeGrants);
     expect(await db.prepare("SELECT count(*) total FROM client_onboarding_decisions WHERE submission_id=?").bind(proposal.submissionId).first("total")).toBe(0);
     expect(await prepareClientOnboardingSharedCompanyPlan(db,actor,input,dualConnection)).toEqual({...plan,replayed:true});
+    expect(choices.approvalAvailable).toBe(false); // Discovery never promises approval.
+    // Rehearse an actual 0217-only schema in this disposable D1: remove every
+    // object created/replaced by 0218, capture a new review, then restore the
+    // exact original DDL. No approval is attempted with guards absent.
+    const protocolNames=[...readFileSync(new URL("../migrations/0218_client_onboarding_shared_company_approval.sql",import.meta.url),"utf8")
+      .matchAll(/^CREATE (?:TABLE|VIEW|TRIGGER) (\w+)/gm)].map(match=>match[1]!);
+    const protocol=(await db.prepare(`SELECT type,name,sql FROM sqlite_master WHERE name IN(${protocolNames.map(()=>'?').join(',')}) ORDER BY rowid`)
+      .bind(...protocolNames).all<{type:string;name:string;sql:string}>()).results;
+    expect(protocol).toHaveLength(protocolNames.length);
+    for(const object of [...protocol].reverse())await db.prepare(`DROP ${object.type} "${object.name}"`).run();
+    try{expect(await prepareClientOnboardingSharedCompanyPlan(db,actor,{...input,commandId:uuid()},dualConnection))
+      .toMatchObject({approvalAvailable:false,replayed:false,state:"reviewed"});}
+    finally{for(const object of protocol)await db.prepare(object.sql).run();}
+    // Age one separate sealed fixture plan to model time passing; restore its
+    // immutability guard before calling application code with the expired plan.
+    const expiringInput={...input,commandId:uuid()};
+    const expiring=await prepareClientOnboardingSharedCompanyPlan(db,actor,expiringInput,dualConnection);
+    expect(expiring.approvalAvailable).toBe(true);
+    const immutableSql=await db.prepare("SELECT sql FROM sqlite_master WHERE name='client_onboarding_shared_company_plan_immutable'").first<string>("sql");
+    await db.prepare("DROP TRIGGER client_onboarding_shared_company_plan_immutable").run();
+    try{await db.prepare("UPDATE client_onboarding_shared_company_plans SET verified_until='2020-01-01T00:00:00.000Z' WHERE plan_id=?").bind(expiring.planId).run();}
+    finally{await db.prepare(immutableSql!).run();}
+    await expect(prepareClientOnboardingSharedCompanyPlan(db,actor,expiringInput,dualConnection)).rejects.toThrow();
+    // 0217 review remains usable without the complete 0218 mutating protocol.
+    const guardName="client_onboarding_shared_admission_live_evidence";
+    const guardSql=await db.prepare("SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?").bind(guardName).first<string>("sql");
+    expect(guardSql).toBeTruthy();
+    await db.prepare(`DROP TRIGGER ${guardName}`).run();
+    try{expect(await prepareClientOnboardingSharedCompanyPlan(db,actor,input,dualConnection)).toMatchObject({approvalAvailable:false,replayed:true});}
+    finally{await db.prepare(guardSql!).run();}
+    // Revoke current authority only after prepare's initial authorization and
+    // fresh remote reads. The final real SQL check must observe the withdrawal.
+    let hookFired=false;
+    const finalReadSession=new Proxy(db.withSession("first-primary"),{get(target,key){
+      if(key==='prepare')return(sql:string)=>{
+        const statement=target.prepare(sql);
+        if(!sql.includes("WHERE plan.plan_id=? AND plan.reviewer_staff_id=?"))return statement;
+        return new Proxy(statement,{get(stmt,method){
+          if(method==='bind')return(...values:Parameters<D1PreparedStatement['bind']>)=>{
+            const bound=stmt.bind(...values);
+            return new Proxy(bound,{get(value,operation){
+              if(operation==='first')return async(...args:[])=>{hookFired=true;
+                await db.prepare("UPDATE native_directory_grants SET active=0 WHERE id='approve-enrollment'").run();
+                return value.first(...args);};
+              const member=value[operation as keyof D1PreparedStatement];return typeof member==='function'?member.bind(value):member;
+            }});
+          };
+          const member=stmt[method as keyof D1PreparedStatement];return typeof member==='function'?member.bind(stmt):member;
+        }});
+      };
+      const member=target[key as keyof D1DatabaseSession];return typeof member==='function'?member.bind(target):member;
+    }});
+    const finalReadDatabase=new Proxy(db,{get(target,key){if(key==='withSession')return()=>finalReadSession;
+      const member=target[key as keyof D1Database];return typeof member==='function'?member.bind(target):member;}});
+    try{expect(await prepareClientOnboardingSharedCompanyPlan(finalReadDatabase,actor,input,dualConnection)).toMatchObject({approvalAvailable:false,replayed:true});
+      expect(hookFired).toBe(true);
+    }finally{await db.prepare("UPDATE native_directory_grants SET active=1 WHERE id='approve-enrollment'").run();}
+    expect(await prepareClientOnboardingSharedCompanyPlan(db,actor,input,dualConnection)).toMatchObject({approvalAvailable:true,replayed:true});
+    await expect(prepareClientOnboardingSharedCompanyPlan(db,{...actor,verifiedUntil:"2020-01-01T00:00:00.000Z"},input,dualConnection)).rejects.toThrow();
+    const originalBinding=bindingRead.getMockImplementation()!;
+    bindingRead.mockImplementation(async(...args)=>{const result=await originalBinding(...args);return {...result,observation:{...result.observation,resource:{revision:"2",present:true}}};});
+    try{await expect(prepareClientOnboardingSharedCompanyPlan(db,actor,input,dualConnection)).rejects.toThrow();}
+    finally{bindingRead.mockImplementation(originalBinding);}
+    expect(await count("operations_directory_records")).toBe(beforeRecords);
+    expect(await count("native_directory_create_admissions")).toBe(beforeAdmissions);
+    expect(await count("shared_profile_portal_grants")).toBe(beforeGrants);
+    expect(await count("client_onboarding_shared_company_execution_fences")).toBe(0);
+
     await expect(prepareClientOnboardingSharedCompanyPlan(db,actor,{...input,organizationSelection:{...selection,expectedVersion:2}},dualConnection)).rejects.toThrow();
     await expect(prepareClientOnboardingSharedCompanyPlan(db,actor,{...input,sourceIds:[secondSourceId]},dualConnection)).rejects.toThrow();
     await expect(db.prepare("UPDATE client_onboarding_shared_company_plans SET request_sha256=? WHERE plan_id=?").bind("d".repeat(64),plan.planId).run()).rejects.toThrow("immutable");
@@ -658,8 +726,10 @@ describe("native-only client onboarding approval against migrated D1", () => {
     const input={commandId:uuid(),submissionId:proposal.submissionId,fieldsSha256:proposal.fieldsSha256,sourceIds:[selectedSourceId],
       organizationSelection:{kind:"shared_existing",groupId,expectedVersion:1,members:[{recordId:company,expectedVersion:1}]}};
     const plan=await prepareClientOnboardingSharedCompanyPlan(db,actor,input,selectedConnection);
+    expect(plan.approvalAvailable).toBe(true);
     const approval={planId:plan.planId,submissionId:proposal.submissionId,fieldsSha256:proposal.fieldsSha256},before=await count("operations_directory_records");
-    revision="8";await expect(approveClientOnboardingSharedCompany(db,actor,approval,selectedConnection)).rejects.toThrow();
+    revision="8";await expect(prepareClientOnboardingSharedCompanyPlan(db,actor,input,selectedConnection)).rejects.toThrow();
+    await expect(approveClientOnboardingSharedCompany(db,actor,approval,selectedConnection)).rejects.toThrow();
     revision="7";boundExternal="pa/another-company";await expect(approveClientOnboardingSharedCompany(db,actor,approval,selectedConnection)).rejects.toThrow();
     expect(await count("operations_directory_records")).toBe(before);boundExternal=foreignId;
     const result=await approveClientOnboardingSharedCompany(db,actor,approval,selectedConnection),child=result.members[0]!;

@@ -42,3 +42,24 @@ manager principals, changed principal proofs, changed approving authority,
 lost committed acknowledgements, replay and non-restoration of revoked access.
 The fixture uses synthetic data and mocked remote PA reads; deployed two-server
 acceptance remains a separate release check.
+
+## Review readiness
+
+Company discovery returns `approvalAvailable: false`: it has not captured an
+approvable plan. `reviewAvailable` only means the exact candidate can be reviewed.
+A prepared plan receipt may return `approvalAvailable: true` after fresh remote
+parent reads, only when all migration 0218 protocol objects exist, the sealed
+0217 plan is still live and unexpired, the same reviewer admission/profile and
+four global grants still apply, and current durable parent heads, enrollment
+and authorization-generation evidence match the reviewed children. The final
+check reads primary state and opens no execution fence. A 0217-only or partial
+0218 installation can still capture review evidence but reports false.
+
+This boolean is an advisory response for that prepared plan, not a permission or
+promise that a later action will succeed. The approval endpoint independently
+revalidates the entire plan, current PA proofs, configuration, grants and atomic
+SQL execution fences. Changing authority after preparation can produce a false
+receipt while leaving only the existing immutable review evidence. Expired,
+changed or decided plans do not become newly approvable on prepare replay;
+completed approval replay uses the existing decision endpoint instead. No new
+runtime flag is needed, and the existing staff HTTP gate stays in force.
