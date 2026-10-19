@@ -604,7 +604,7 @@ describe("native-only client onboarding approval against migrated D1", () => {
     await expect(db.prepare(`INSERT INTO client_onboarding_decisions
       SELECT ?,?, ?,?,request_sha256,outcome,reviewer_staff_id,reviewer_subject,reviewer_email,original_admission_version,
        original_profile_version,reason,reviewed_fields_json,client_record_id,client_record_version,organization_record_id,
-       organization_record_version,relationship_version,json_set(receipt_json,'$.decisionId',?,'$.invitationId',?,'$.submissionId',?),created_at
+       organization_record_version,relationship_version,json_set(receipt_json,'$.decisionId',?,'$.invitationId',?,'$.submissionId',?),decided_at
       FROM client_onboarding_decisions WHERE decision_id=?`).bind(unfencedId,unrelated.invitationId,unrelated.submissionId,unrelated.fieldsSha256,
        unfencedId,unrelated.invitationId,unrelated.submissionId,plan.planId).run()).rejects.toThrow("artifacts are incomplete");
   },120_000);
