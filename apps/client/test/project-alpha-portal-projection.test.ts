@@ -11,6 +11,7 @@ import contactAssignmentMigration from "../migrations/0190_portal_contact_assign
 import wireContractClaimMigration from "../migrations/0191_portal_projection_wire_contract_claim.sql?raw";
 import billingIndependenceMigration from "../migrations/0192_contact_assignment_billing_independence.sql?raw";
 import clientAuthorityWorkspaceClaimMigration from "../migrations/0216_client_authority_workspace_ownership_claim.sql?raw";
+import profileAuthorityMigration from "../migrations/0232_shared_profile_edit_authority.sql?raw";
 import { splitD1MigrationStatements } from "./helpers/d1-migrations";
 import { authorizePortalWorkspaceCapability } from "../src/worker/client-portal/workspace-v2";
 import type { VerifiedClientPrincipal } from "../src/worker/client-portal/types";
@@ -95,6 +96,7 @@ describe("Project Alpha portal hierarchy projection", () => {
     await applyMigration(db, wireContractClaimMigration);
     await applyMigration(db, billingIndependenceMigration);
     await applyMigration(db, clientAuthorityWorkspaceClaimMigration);
+    await applyMigration(db, profileAuthorityMigration);
     await db.prepare("PRAGMA foreign_keys=ON").run();
     env = {
       DELIVERY_DB: db,
@@ -646,4 +648,102 @@ describe("Project Alpha portal hierarchy projection", () => {
       .bind(rows[0]!.workspace_id, rows[1]!.workspace_id).first("count")).toBe(0);
   });
 
+  async function fencedProjectionCase(name: string) {
+    const sourceId = `project-alpha:fence-${name}`;
+    const workspaceId = await baseline(sourceId);
+    await db.prepare(`INSERT INTO portal_shared_profile_authority_heads
+      (workspace_id,source_id,revision,state,operation_id) VALUES(?,?,1,'active','initial')`)
+      .bind(workspaceId, sourceId).run();
+    const transitionAuthority = vi.fn(async () => ({ ok: true }));
+    const environment = { ...env, SHARED_PROFILE_PORTAL: { transitionAuthority } } as unknown as Env;
+    const head = () => db.prepare("SELECT revision,state,pending_operation_id FROM portal_shared_profile_authority_heads WHERE workspace_id=?")
+      .bind(workspaceId).first();
+    const event = envelope("event", `fence-${name}-event`, 11, {
+      sourceGeneration: "source-generation-ten",
+      event: { resource: "principal", action: "tombstone", publicId: projectedPrincipal.publicId, sourceVersion: "principal-v2" },
+    });
+    return { sourceId, workspaceId, environment, transitionAuthority, head, event };
+  }
+
+  it("fence liveness: semantic event rejection cannot block a newer valid activation", async () => {
+    const c = await fencedProjectionCase("event-rejection");
+    const invalid = { ...c.event, event: { resource: "entity", action: "upsert", entity: {
+      ...contact, publicId: "orphan-contact", parentPublicId: "missing-parent",
+    } } };
+    // Shape-valid authenticated producer input; rejection occurs in the real graph validator.
+    expect(parsePortalProjectionDelivery(invalid, applicationKey)).toBeTruthy();
+    await expect(applyFrom(c.sourceId, invalid, c.environment)).rejects.toThrow("portal-parent-invalid");
+    expect(await c.head()).toEqual({ revision: 1, state: "active", pending_operation_id: null });
+    expect(c.transitionAuthority).not.toHaveBeenCalled();
+    const next = sourceSnapshot(20, "fence-event-recovery");
+    await applyFrom(c.sourceId, next.page, c.environment);
+    expect(await applyFrom(c.sourceId, next.activate, c.environment)).toBe("completed");
+    expect(await c.head()).toEqual({ revision: 2, state: "blocked", pending_operation_id: null });
+  });
+
+  it.each(["incomplete", "invalid-graph"])("fence liveness: %s snapshot rejection cannot block a newer valid activation", async mode => {
+    const c = await fencedProjectionCase(`snapshot-${mode}`);
+    const rejected = sourceSnapshot(20, `fence-rejected-${mode}`);
+    if (mode === "invalid-graph") {
+      const entities = rejected.page.entities as Array<{ publicId: string; parentPublicId: string | null }>;
+      entities.find(entity => entity.publicId === contact.publicId)!.parentPublicId = "missing-parent";
+      await applyFrom(c.sourceId, rejected.page, c.environment);
+    }
+    await expect(applyFrom(c.sourceId, rejected.activate, c.environment)).rejects.toThrow(mode === "incomplete" ? "portal-generation-incomplete" : "portal-parent-invalid");
+    expect(await c.head()).toEqual({ revision: 1, state: "active", pending_operation_id: null });
+    expect(c.transitionAuthority).not.toHaveBeenCalled();
+    const next = sourceSnapshot(30, `fence-snapshot-recovery-${mode}`);
+    await applyFrom(c.sourceId, next.page, c.environment);
+    expect(await applyFrom(c.sourceId, next.activate, c.environment)).toBe("completed");
+    expect(await c.head()).toEqual({ revision: 2, state: "blocked", pending_operation_id: null });
+  });
+
+  it.each(["atomic-rollback", "unknown-outcome"])("fence liveness: %s retains ownership until the same delivery retries", async mode => {
+    const c = await fencedProjectionCase(mode);
+    let observedBlocked = false;
+    let proxy: D1Database;
+    proxy = new Proxy(db, { get(target, property) {
+      if (property === "withSession") return () => proxy;
+      if (property === "batch") return async (statements: D1PreparedStatement[]) => {
+        const head = await c.head();
+        observedBlocked = head?.state === "blocked" && !!head.pending_operation_id;
+        if (mode === "unknown-outcome") throw new Error("uncertain-batch-outcome");
+        return target.batch([...statements, target.prepare("INSERT INTO portal_shared_profile_runtime(id,hooks_ready) VALUES(2,0)")]);
+      };
+      const value = target[property as keyof D1Database];
+      return typeof value === "function" ? value.bind(target) : value;
+    } });
+    await expect(applyFrom(c.sourceId, c.event, { ...c.environment, DELIVERY_DB: proxy })).rejects.toThrow();
+    expect(observedBlocked).toBe(true); // Revocation was fenced BEFORE its actual/uncertain authority batch.
+    const pending = await c.head();
+    expect(pending).toMatchObject({ revision: 2, state: "blocked", pending_operation_id: expect.any(String) });
+    expect(await db.prepare("SELECT source_sequence FROM pa_portal_projection_checkpoints WHERE workspace_id=?").bind(c.workspaceId).first("source_sequence")).toBe(10);
+    expect(await db.prepare("SELECT COUNT(*) count FROM pa_portal_projection_receipts WHERE projection_source_id=? AND delivery_id=?").bind(c.sourceId, c.event.deliveryId).first("count")).toBe(0);
+    const unrelated = sourceSnapshot(40, `fence-other-${mode}`);
+    await applyFrom(c.sourceId, unrelated.page, c.environment);
+    await expect(applyFrom(c.sourceId, unrelated.activate, c.environment)).rejects.toThrow("shared-profile-authority-busy");
+    expect(await c.head()).toEqual(pending);
+    expect(await applyFrom(c.sourceId, c.event, c.environment)).toBe("completed");
+    expect(await c.head()).toEqual({ revision: 2, state: "blocked", pending_operation_id: null });
+  });
+
+  it("fence liveness: a committed batch with lost acknowledgement reconciles its receipt", async () => {
+    const c = await fencedProjectionCase("lost-ack");
+    let called = false;
+    let proxy: D1Database;
+    proxy = new Proxy(db, { get(target, property) {
+      if (property === "withSession") return () => proxy;
+      if (property === "batch") return async (statements: D1PreparedStatement[]) => {
+        await target.batch(statements); called = true;
+        throw new Error("lost-batch-acknowledgement");
+      };
+      const value = target[property as keyof D1Database];
+      return typeof value === "function" ? value.bind(target) : value;
+    } });
+    expect(await applyFrom(c.sourceId, c.event, { ...c.environment, DELIVERY_DB: proxy })).toBe("duplicate");
+    expect(called).toBe(true);
+    expect(await c.head()).toEqual({ revision: 2, state: "blocked", pending_operation_id: null });
+    expect(await applyFrom(c.sourceId, c.event, c.environment)).toBe("duplicate");
+    expect(c.transitionAuthority).toHaveBeenCalledOnce();
+  });
 });

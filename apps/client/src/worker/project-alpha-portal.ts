@@ -1282,8 +1282,15 @@ async function processDelivery(env: Env, delivery: PortalProjectionDelivery, pay
   if (duplicate) return duplicate;
   try {
     if (delivery.kind === "snapshot.page") return await stageSnapshotPage(env, delivery, payloadHash, source, db);
-    const profileFence=await blockBusinessProfileWorkspace(env,delivery.workspaceId,JSON.stringify(['projection',source.sourceId,delivery.deliveryId,payloadHash]));
-    const mutationDb:PortalAuthorityDatabase={prepare:sql=>db.prepare(sql),batch:<T>(statements:D1PreparedStatement[])=>businessProfileAuthorityBatch<T>(db,[profileFence],statements)};
+    const mutationDb:PortalAuthorityDatabase={prepare:sql=>db.prepare(sql),batch:async<T>(statements:D1PreparedStatement[])=>{
+      // Validate the complete candidate before reserving durable ownership. A
+      // rejected graph/activation has no authority batch and must not strand a
+      // fence. Every actual mutation is still blocked first and atomically
+      // asserts/releases its exact fence with the existing checkpoint guards.
+      // A failed or uncertain batch deliberately retains ownership for replay.
+      const profileFence=await blockBusinessProfileWorkspace(env,delivery.workspaceId,JSON.stringify(['projection',source.sourceId,delivery.deliveryId,payloadHash]));
+      return businessProfileAuthorityBatch<T>(db,[profileFence],statements);
+    }};
     if (delivery.kind === "snapshot.activate") return await activateSnapshot(env, delivery, payloadHash, source, mutationDb);
     return await applyEvent(env, delivery, payloadHash, source, mutationDb);
   } catch (error) {
