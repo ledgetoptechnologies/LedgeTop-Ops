@@ -3,7 +3,7 @@ import { HTTPException } from "hono/http-exception";
 import type { Env } from "../src/worker/types";
 
 const calls = vi.hoisted(() => ({ legacy: vi.fn(), native: vi.fn(), issue: vi.fn(), reveal: vi.fn(),
-  review: vi.fn(), inbox: vi.fn(), approve: vi.fn(), existingCompanies: vi.fn(), sharedPlan:vi.fn(), sharedChoices:vi.fn(), enrollmentChoices: vi.fn() }));
+  review: vi.fn(), inbox: vi.fn(), approve: vi.fn(), sharedApprove:vi.fn(), existingCompanies: vi.fn(), sharedPlan:vi.fn(), sharedChoices:vi.fn(), enrollmentChoices: vi.fn() }));
 vi.mock("cloudflare:workers", () => ({ WorkflowEntrypoint: class {}, WorkerEntrypoint: class {}, DurableObject: class {} }));
 vi.mock("../src/worker/auth", () => ({ authenticateStaff: calls.legacy }));
 vi.mock("../src/worker/native-staff-auth", () => ({
@@ -21,6 +21,7 @@ vi.mock("../src/worker/client-onboarding-review", () => ({
 vi.mock("../src/worker/client-onboarding-approval", () => ({
   approveNewNativeOnlyClientOnboarding: calls.approve,
 }));
+vi.mock("../src/worker/client-onboarding-shared-company-approval",()=>({approveClientOnboardingSharedCompany:calls.sharedApprove}));
 vi.mock("../src/worker/client-onboarding-enrollment-discovery", () => ({
   readClientOnboardingEnrollmentChoices: calls.enrollmentChoices,
 }));
@@ -363,6 +364,19 @@ describe("native client onboarding staff route", () => {
     const choices={submissionId,sourceIds:input.sourceIds,query:"Example",afterGroupId:null};
     expect((await send("/api/client-onboarding/staff/shared-company-choices","POST",choices,csrf)).status).toBe(200);
     expect(calls.sharedChoices).toHaveBeenCalledWith(database,actor,choices);
+  });
+
+  it("approves a sealed shared-company review only through the native CSRF-protected exact plan endpoint",async()=>{
+    const csrf=await session(),input={planId:"55555555-5555-4555-8555-555555555555",submissionId:"33333333-3333-4333-8333-333333333333",fieldsSha256:"e".repeat(64)};
+    calls.sharedApprove.mockResolvedValue({decisionId:input.planId,members:[],portalActivation:"pending",replayed:false});
+    expect((await send("/api/client-onboarding/staff/approve-shared-company","POST",input,"bad")).status).toBe(403);
+    expect(calls.sharedApprove).not.toHaveBeenCalled();
+    expect((await send("/api/client-onboarding/staff/approve-shared-company","POST",{...input,sourceIds:["project-alpha:primary"]},csrf)).status).toBe(400);
+    expect(calls.sharedApprove).not.toHaveBeenCalled();
+    const reply=await send("/api/client-onboarding/staff/approve-shared-company","POST",input,csrf);
+    expect(reply.status).toBe(200);expect(await reply.json()).toMatchObject({decisionId:input.planId,portalActivation:"pending"});
+    expect(calls.sharedApprove).toHaveBeenCalledWith(database,actor,input,undefined);
+    expect(reply.headers.get("Cache-Control")).toBe("no-store");
   });
 
 });

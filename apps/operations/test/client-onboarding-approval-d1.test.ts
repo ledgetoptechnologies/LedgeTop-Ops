@@ -1,5 +1,6 @@
 import {readNativeDirectoryDurableRemoteHead} from "../src/worker/native-directory-profile-writer";
 import {prepareClientOnboardingSharedCompanyPlan,readClientOnboardingSharedCompanyChoices} from "../src/worker/client-onboarding-shared-company-plan";
+import {approveClientOnboardingSharedCompany} from "../src/worker/client-onboarding-shared-company-approval";
 import {sharedProfileCreationFence,sharedProfileCreationStatements,type SharedProfileMember} from "../src/worker/native-directory-shared-profile-routes";
 import { materializeResolvedProjectAlphaDirectoryClientIntents } from "../src/worker/project-alpha-directory-client-intent-materializer";
 import { readFileSync, readdirSync } from "node:fs";
@@ -96,7 +97,7 @@ describe("native-only client onboarding approval against migrated D1", () => {
     db = await runtime.getD1Database("OPS_DB") as D1Database;
     const directory = new URL("../migrations/", import.meta.url);
     for (const name of readdirSync(directory).filter(item => /^\d{4}_.+\.sql$/.test(item)
-      && item.slice(0, 4) <= "0217").sort())
+      && item.slice(0, 4) <= "0218").sort())
       await db.batch(splitD1MigrationStatements(readFileSync(new URL(name, directory), "utf8"))
         .map(statement => db.prepare(statement)));
     await db.batch([
@@ -490,7 +491,7 @@ describe("native-only client onboarding approval against migrated D1", () => {
     expect(await materializeResolvedProjectAlphaDirectoryClientIntents(db,[selectedSourceId],12,Date.now())).toMatchObject({materialized:0});
   });
 
-  it("seals an explicit grouped company member plan for both selected PA sources without approving, creating or granting clients",async()=>{
+  it("seals a grouped company plan then atomically approves only its exact selected new contacts without changing companies or grants",async()=>{
     await db.prepare(`INSERT OR IGNORE INTO native_directory_grants(id,staff_id,permission,effect,scope_kind,active,granted_by)
       VALUES('approve-view',?,'directory.profile.view','allow','global',1,?)`).bind(staffId,staffId).run();
     const configurations=JSON.parse(dualConnection).instances;
@@ -574,6 +575,38 @@ describe("native-only client onboarding approval against migrated D1", () => {
     try{await expect(prepareClientOnboardingSharedCompanyPlan(db,actor,{...input,commandId:uuid()},dualConnection)).rejects.toThrow();
       await expect(readClientOnboardingSharedCompanyChoices(db,actor,{submissionId:proposal.submissionId,sourceIds:input.sourceIds,query:"",afterGroupId:null})).rejects.toThrow();
     }finally{await db.prepare("UPDATE native_directory_grants SET active=0 WHERE id='deny-shared-plan'").run();}
-  });
+    const approvalInput={planId:plan.planId,submissionId:proposal.submissionId,fieldsSha256:proposal.fieldsSha256};
+    // The last child receipt fails after both writers were staged. The batch
+    // must not leave its earlier sibling, admissions, outbox or decision behind.
+    await db.prepare(`CREATE TRIGGER test_fail_last_shared_child BEFORE INSERT ON client_onboarding_shared_company_child_receipts
+      WHEN NEW.client_record_id=(SELECT max(client_record_id) FROM client_onboarding_shared_company_plan_children WHERE plan_id=NEW.plan_id)
+      BEGIN SELECT RAISE(ABORT,'synthetic last child failure'); END`).run();
+    const baselineOutbox=await count("project_alpha_directory_outbox");
+    await expect(approveClientOnboardingSharedCompany(db,actor,approvalInput,dualConnection)).rejects.toThrow();
+    expect(await count("operations_directory_records")).toBe(beforeRecords);
+    expect(await count("native_directory_create_admissions")).toBe(beforeAdmissions);
+    expect(await count("project_alpha_directory_outbox")).toBe(baselineOutbox);
+    expect(await db.prepare("SELECT count(*) total FROM client_onboarding_decisions WHERE submission_id=?").bind(proposal.submissionId).first("total")).toBe(0);
+    await db.prepare("DROP TRIGGER test_fail_last_shared_child").run();
+    const approved=await approveClientOnboardingSharedCompany(db,actor,approvalInput,dualConnection);
+    expect(approved).toMatchObject({decisionId:plan.planId,replayed:false,portalActivation:"pending"});
+    expect(approved.members).toHaveLength(2);
+    expect(await count("operations_directory_records")).toBe(beforeRecords+2);
+    expect(await count("native_directory_create_admissions")).toBe(beforeAdmissions+2);
+    expect(await count("project_alpha_directory_outbox")).toBe(baselineOutbox+2);
+    for(const parent of members)expect(await db.prepare("SELECT current_version FROM operations_directory_records WHERE record_id=?").bind(parent.recordId).first("current_version")).toBe(1);
+    expect(await count("shared_profile_portal_grants")).toBe(beforeGrants);
+    expect(await count("client_onboarding_shared_company_execution_fences")).toBe(0);
+    expect(await db.prepare("SELECT count(*) total FROM client_onboarding_shared_company_child_receipts WHERE plan_id=?").bind(plan.planId).first("total")).toBe(2);
+    expect(await db.prepare("SELECT json_array_length(destinations_json) total FROM client_onboarding_portal_activation_intents WHERE decision_id=?").bind(plan.planId).first("total")).toBe(2);
+    expect(await approveClientOnboardingSharedCompany(db,actor,approvalInput,dualConnection)).toEqual({...approved,replayed:true});
+    const unrelated=await submission({...business,name:"No decision fence"}),unfencedId=uuid();
+    await expect(db.prepare(`INSERT INTO client_onboarding_decisions
+      SELECT ?,?, ?,?,request_sha256,outcome,reviewer_staff_id,reviewer_subject,reviewer_email,original_admission_version,
+       original_profile_version,reason,reviewed_fields_json,client_record_id,client_record_version,organization_record_id,
+       organization_record_version,relationship_version,json_set(receipt_json,'$.decisionId',?,'$.invitationId',?,'$.submissionId',?),created_at
+      FROM client_onboarding_decisions WHERE decision_id=?`).bind(unfencedId,unrelated.invitationId,unrelated.submissionId,unrelated.fieldsSha256,
+       unfencedId,unrelated.invitationId,unrelated.submissionId,plan.planId).run()).rejects.toThrow("artifacts are incomplete");
+  },120_000);
 
 });
