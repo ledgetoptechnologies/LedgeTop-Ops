@@ -491,7 +491,9 @@ async function dispatchClientOnboardingStaff(c: any) {
     },
     database: c.env.OPS_DB,
     handoffKeyringJson: c.env.CLIENT_ONBOARDING_HANDOFF_KEYRING,
-    recipientOrigin: c.env.PUBLIC_SHARE_ORIGIN,
+    // Onboarding opens in the client portal. Public links retain their own
+    // configured origin so existing delivery URLs are not changed here.
+    recipientOrigin: c.env.DELIVERY_BASE_URL,
     projectAlphaApiV2Connections: c.env.PROJECT_ALPHA_API_V2_CONNECTIONS,
   });
 }

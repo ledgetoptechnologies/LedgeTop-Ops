@@ -46,7 +46,8 @@ const database: D1Database = { prepare: unavailable, batch: unavailable, exec: u
   withSession: unavailable, dump: unavailable };
 function env(enabled = "true"): Env {
   return { ENVIRONMENT: "production", EXPECTED_HOST: "ops.example.test", OPERATIONS_ORIGINS: origin,
-    PUBLIC_BASE_URL: origin, PUBLIC_SHARE_ORIGIN: "https://portal.example.test", INCOMING_EXPECTED_HOST: "incoming.example.test",
+    PUBLIC_BASE_URL: origin, DELIVERY_BASE_URL: "https://portal.example.test",
+    PUBLIC_SHARE_ORIGIN: "https://delivery.example.test", INCOMING_EXPECTED_HOST: "incoming.example.test",
     INCOMING_BASE_URL: "https://incoming.example.test", OPS_DB: database,
     TEAM_DOMAIN: "https://synthetic-team.cloudflareaccess.com",
     OPERATIONS_AUD: "synthetic-staff-audience", CLIENT_ONBOARDING_ADMIN_ENABLED: enabled,
@@ -133,7 +134,8 @@ describe("native client onboarding staff route", () => {
     const revealed = await send("/api/client-onboarding/staff/reveal", "POST",
       { commandId: command.commandId }, csrf);
     expect(revealed.status).toBe(200);
-    expect(await revealed.json()).toMatchObject({ invitationSecret: "d".repeat(64) });
+    expect(await revealed.json()).toMatchObject({ invitationSecret: "d".repeat(64),
+      recipientUrl: `https://portal.example.test/onboarding/11111111-1111-4111-8111-111111111111#${"d".repeat(64)}` });
     expect(revealed.headers.get("Cache-Control")).toBe("no-store");
     expect(revealed.headers.get("Access-Control-Allow-Origin")).toBeNull();
     expect(calls.reveal).toHaveBeenCalledWith(database, { authenticatedNativeStaff: handoffActor,
