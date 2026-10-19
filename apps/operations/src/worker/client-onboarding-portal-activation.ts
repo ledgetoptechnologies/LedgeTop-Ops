@@ -274,10 +274,14 @@ export async function processClientOnboardingPortalActivation(env:Env){
  if(env.CLIENT_ONBOARDING_ADMIN_ENABLED!=="true"||!portalAutomaticEligibilityEnabled(env)||!await d1TablesPresent(env.OPS_DB,tables))return{processed:0,active:0};
  const db=env.OPS_DB.withSession("first-primary"),scan=await db.prepare("SELECT after_decision_id,version FROM client_onboarding_portal_activation_scan WHERE singleton=1")
   .first<{after_decision_id:string;version:number}>();if(!scan)throw Error("onboarding_activation_schema_unavailable");
- const rows=(await db.prepare(`SELECT intent.decision_id,intent.client_record_id,intent.version,decision.reviewer_staff_id,
+ const pendingAfter=async(after:string)=>(await db.prepare(`SELECT intent.decision_id,intent.client_record_id,intent.version,decision.reviewer_staff_id,
   decision.reviewer_subject,decision.reviewer_email,decision.original_admission_version,decision.original_profile_version,intent.destinations_json client_destinations_json
   FROM client_onboarding_portal_activation_intents intent JOIN client_onboarding_decisions decision ON decision.decision_id=intent.decision_id AND decision.outcome='approved'
-  WHERE intent.state='pending' AND intent.decision_id>? ORDER BY intent.decision_id LIMIT 4`).bind(scan.after_decision_id).all<Intent>()).results;
+  WHERE intent.state='pending' AND intent.decision_id>? ORDER BY intent.decision_id LIMIT 4`).bind(after).all<Intent>()).results;
+ let rows=await pendingAfter(scan.after_decision_id);
+ // A decision inserted below the cursor must not wait for an empty reset tick.
+ // Wrap only after exhausting the tail, then process one bounded batch once.
+ if(!rows.length&&scan.after_decision_id)rows=await pendingAfter("");
  let processed=0,active=0,last="";const started=Date.now();
  for(const intent of rows){if(Date.now()-started>50_000)break;last=intent.decision_id;let reason:ActivationState;
   try{reason=await activate(env,intent,started+50_000);}catch{reason="activation_failed";}
