@@ -18,6 +18,16 @@ Provision through the approved Cloudflare account process and record non-secret 
 
 Never reuse a production worker name, host, Access audience, D1 ID, R2 bucket, queue, Workflow name, or rate-limit namespace. Never put secrets in a Wrangler config or shell command.
 
+Operations staging omits eight reviewed optional feature flags when they are off,
+leaving room for credentials and active controls in the Worker binding budget.
+The exact list is in [staging-default-off-vars.mjs](../../scripts/staging-default-off-vars.mjs).
+Their runtime gates enable only on the literal string `true`; absence preserves
+their disabled state. Staging validation accepts absence or literal `false` only
+for this list. Other required fields and production validation stay explicit.
+The release-evidence `disabledFeatureFlags` list continues to describe effective
+disabled capabilities, including these defaults; it is not a list of bindings
+that must all be physically stored.
+
 The client portal release program is specified in
 [client-portal-rollout.md](client-portal-rollout.md). Its config is default-off;
 the existing Delivery staging Access app is not the client identity app.

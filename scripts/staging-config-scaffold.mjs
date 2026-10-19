@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { validateApp, validateCrossApp } from "./staging-preflight.mjs";
+import { compactStagingVars } from "./staging-default-off-vars.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const marker = /<([A-Z][A-Z0-9_]*)>/g;
@@ -82,6 +83,7 @@ export function renderConfigs(base, values) {
   const configs = {};
   for (const [app, entry] of Object.entries(entries)) {
     configs[app] = replaceMarkers(readJson(path.join(base, entry.template)), values);
+    configs[app].vars = compactStagingVars(app, configs[app].vars);
     const rendered = JSON.stringify(configs[app]);
     const unresolved = [...rendered.matchAll(marker)].map((match) => match[1]);
     if (unresolved.length) throw new Error(`${app} has unresolved values: ${[...new Set(unresolved)].join(", ")}`);

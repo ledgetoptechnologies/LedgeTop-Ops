@@ -1,3 +1,5 @@
+import { normalizedStagingVars } from "./staging-default-off-vars.mjs";
+
 // This committed declaration is release intent, not production approval or readback.
 export const eligibilityFlags = Object.freeze([
   "CLIENT_PORTAL_HIERARCHY_V2_ENABLED",
@@ -84,13 +86,15 @@ export function validatePortalReleaseProfile(declaration, clientConfig, operatio
           : (authenticatedEnabled ? "true" : "false");
       if (config.vars[flag] !== flagExpected) errors.push(`${label} ${flag} must be exactly ${flagExpected} for ${declaration.profile}`);
     }
+    const offVars = label === "Operations" && config.name === "ledgetop-ops-staging" && config.vars.ENVIRONMENT === "staging"
+      ? normalizedStagingVars("operations", config.vars) : config.vars;
     const mailFlags = label === "Client" ? ["CLIENT_PORTAL_INVITATION_EMAIL_ENABLED"] : operationsMailFlags;
     for (const flag of mailFlags) {
-      if (config.vars[flag] !== "false") errors.push(`${label} ${flag} must remain exactly false for the no-email portal release`);
+      if (offVars[flag] !== "false") errors.push(`${label} ${flag} must remain exactly false for the no-email portal release`);
     }
     const dormantMutations = label === "Client" ? dormantClientMutations : dormantOperationsMutations;
     for (const flag of dormantMutations) {
-      if (config.vars[flag] !== "false") errors.push(`${label} ${flag} must remain exactly false for this portal release profile`);
+      if (offVars[flag] !== "false") errors.push(`${label} ${flag} must remain exactly false for this portal release profile`);
     }
   }
   return errors;

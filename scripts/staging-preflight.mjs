@@ -3,6 +3,7 @@ import crypto from "node:crypto";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { APP_SOURCE_DIRS, REQUIRED_DISABLED_FEATURE_FLAGS, REQUIRED_STAGING_MIGRATIONS, REQUIRED_STAGING_MIGRATION_SHA256, REQUIRED_STAGING_SECRETS, STAGING_ACCOUNT_ID, STAGING_ALLOWED_VAR_NAMES, STAGING_HOSTS, STAGING_INVENTORY, STAGING_REQUEST_ATTACHMENT_R2_CORS, STAGING_STATIC_VARS } from "./staging-requirements.mjs";
+import { normalizedStagingVars } from "./staging-default-off-vars.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const apps = ["delivery", "operations", "ops-sync"];
@@ -76,7 +77,7 @@ export function validateApp(app, staging, production) {
   if (Object.hasOwn(staging, "secrets")) errors.push(`${app} must not place the release-only secret manifest in Wrangler configuration`);
   for (const key of Object.keys(staging)) if (!reviewedTopLevelKeys.has(key)) errors.push(`${app} contains unreviewed Wrangler field ${key}`);
 
-  const vars = staging.vars ?? {};
+  const vars = normalizedStagingVars(app, staging.vars ?? {});
   const allowedVars = STAGING_ALLOWED_VAR_NAMES[app] ?? [];
   for (const key of allowedVars) if (!Object.hasOwn(vars, key)) errors.push(`${app} vars is missing reviewed field ${key}`);
   for (const key of Object.keys(vars)) if (!allowedVars.includes(key)) errors.push(`${app} vars contains unreviewed field ${key}`);

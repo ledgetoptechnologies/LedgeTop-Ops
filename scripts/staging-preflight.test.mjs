@@ -6,6 +6,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { validateApp, validateCrossApp, validateFiles, validateMigrationInventory, validateRequestAttachmentCors, validateSecretManifest } from "./staging-preflight.mjs";
 import { APP_SOURCE_DIRS, FEATURE_FLAG_ACTIVATION_POLICIES, REQUIRED_DISABLED_FEATURE_FLAGS, REQUIRED_STAGING_MIGRATIONS, REQUIRED_STAGING_MIGRATION_SHA256, REQUIRED_STAGING_SECRETS, STAGING_ACCOUNT_ID, STAGING_ALLOWED_VAR_NAMES, STAGING_HOSTS, STAGING_INVENTORY, STAGING_PROJECT_ALPHA_ORIGIN, STAGING_REQUEST_ATTACHMENT_R2_CORS, STAGING_STATIC_VARS } from "./staging-requirements.mjs";
+import { STAGING_OPTIONAL_DEFAULT_OFF_FLAGS, normalizedStagingVars } from "./staging-default-off-vars.mjs";
 
 const audiences = Object.freeze({ delivery: "c".repeat(64), operations: "d".repeat(64), "ops-sync": "b".repeat(64) });
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -431,14 +432,32 @@ test("requires the exact staging request-attachment R2 CORS policy", () => {
   const checkedIn = JSON.parse(fs.readFileSync(path.join(root, "docs", "staging", "request-attachments-r2-cors.json"), "utf8"));
   assert.deepEqual(checkedIn, clone(STAGING_REQUEST_ATTACHMENT_R2_CORS));
 });
-test("requires every portal-v2 and Operations capability to be explicitly false", () => {
+test("requires explicit false except the eight reviewed Ops default-off omissions", () => {
   for (const app of ["delivery", "operations"]) {
     for (const flag of REQUIRED_DISABLED_FEATURE_FLAGS[app]) {
       const staging = stagingConfig(app);
       delete staging.vars[flag];
       const errors = validateApp(app, staging, productionFrom(staging));
-      assert(errors.some((error) => error.includes(flag)), `${app}.${flag}: ${errors.join(" | ")}`);
+      const optional = STAGING_OPTIONAL_DEFAULT_OFF_FLAGS[app]?.includes(flag) ?? false;
+      assert.equal(errors.some((error) => error.includes(flag)), !optional, `${app}.${flag}: ${errors.join(" | ")}`);
     }
+  }
+});
+
+test("optional Ops gates accept only absence or literal false and never hide explicit activation", () => {
+  const flags = STAGING_OPTIONAL_DEFAULT_OFF_FLAGS.operations;
+  assert.equal(flags.length, 8);
+  assert.equal(new Set(flags).size, 8);
+  for (const flag of flags) {
+    for (const value of ["false", "true", "", null, undefined, false, true, "FALSE", " false "]) {
+      const staging = stagingConfig("operations");
+      staging.vars[flag] = value;
+      const errors = validateApp("operations", staging, productionFrom(staging));
+      assert.equal(errors.some(error => error.includes(flag)), value !== "false", `${flag}: ${String(value)}`);
+    }
+    const staging = stagingConfig("operations");
+    delete staging.vars[flag];
+    assert.deepEqual(validateApp("operations", staging, productionFrom(staging)), []);
   }
 });
 
@@ -670,9 +689,11 @@ test("checked-in staging examples exactly match every approved deployment-critic
       const actual = config[key] ?? (Array.isArray(expected) ? [] : undefined);
       assert.deepEqual(actual, expected, `${example}.${key}`);
     }
-    for (const [key, expected] of Object.entries(STAGING_STATIC_VARS[app])) assert.equal(config.vars[key], expected, `${example}.vars.${key}`);
-    assert.deepEqual(new Set(Object.keys(config.vars)), new Set(STAGING_ALLOWED_VAR_NAMES[app]), `${example}.vars`);
-    for (const flag of REQUIRED_DISABLED_FEATURE_FLAGS[app]) assert.equal(config.vars[flag], "false", `${example}.${flag}`);
+    const effective = normalizedStagingVars(app, config.vars);
+    for (const [key, expected] of Object.entries(STAGING_STATIC_VARS[app])) assert.equal(effective[key], expected, `${example}.vars.${key}`);
+    assert.deepEqual(new Set(Object.keys(effective)), new Set(STAGING_ALLOWED_VAR_NAMES[app]), `${example}.vars`);
+    for (const flag of REQUIRED_DISABLED_FEATURE_FLAGS[app]) assert.equal(effective[flag], "false", `${example}.${flag}`);
+    for (const flag of STAGING_OPTIONAL_DEFAULT_OFF_FLAGS[app] ?? []) assert.equal(Object.hasOwn(config.vars, flag), false, `${example} must omit ${flag}`);
   }
   const secretManifest = JSON.parse(fs.readFileSync(path.join(root, "docs", "staging", "staging-secret-manifest.json"), "utf8"));
   assert.deepEqual(validateSecretManifest(secretManifest), []);

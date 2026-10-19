@@ -35,6 +35,28 @@ test("committed release intent is valid for both checked-in configurations", () 
   assert.deepEqual(validatePortalReleaseProfile(declaration, client, operations), []);
 });
 
+test("staging no-mail profile permits reviewed omitted Ops gates without relaxing production", () => {
+  const flags = ["AUTHENTICATED_DELIVERY_NOTIFICATIONS_ENABLED", "PROJECT_ACCESS_EXPIRY_NOTIFICATIONS_ENABLED",
+    "PROJECT_ALPHA_DELIVERY_INTENTS_ENABLED", "PROJECT_ALPHA_DELIVERY_GUEST_ENABLED"];
+  const pair = configs(receiver);
+  pair[1].name = "ledgetop-ops-staging";
+  pair[1].vars.ENVIRONMENT = "staging";
+  for (const flag of flags) delete pair[1].vars[flag];
+  assert.deepEqual(validatePortalReleaseProfile(receiver, ...pair), []);
+  for (const flag of flags) for (const value of ["true", "", null, undefined, false]) {
+    const invalid = structuredClone(pair);
+    invalid[1].vars[flag] = value;
+    assert(validatePortalReleaseProfile(receiver, ...invalid).some(error => error.includes(flag)));
+  }
+  pair[1].vars.ENVIRONMENT = "production";
+  const errors = validatePortalReleaseProfile(receiver, ...pair);
+  for (const flag of flags) assert(errors.some(error => error.includes(flag)));
+  pair[1].vars.ENVIRONMENT = "staging";
+  pair[1].name = "ledgetop-ops";
+  const productionNameErrors = validatePortalReleaseProfile(receiver, ...pair);
+  for (const flag of flags) assert(productionNameErrors.some(error => error.includes(flag)));
+});
+
 test("missing, malformed, unknown, and extra-field profiles never infer activation", () => {
   const pair = configs(activation);
   for (const declaration of [undefined, null, [], "default-on-eligibility", {}, { profile: activation.profile },

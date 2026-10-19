@@ -5,6 +5,7 @@ import path from "node:path";
 import test, { after } from "node:test";
 import { historicalDefaultOffProduction } from "./test-fixtures/historical-default-off-production.mjs";
 import { renderConfigs, REQUIRED_STAGING_CONFIG_VALUES, validateRenderedConfigs, validateValues, writeRenderedConfigs } from "./staging-config-scaffold.mjs";
+import { STAGING_OPTIONAL_DEFAULT_OFF_FLAGS, compactStagingVars } from "./staging-default-off-vars.mjs";
 
 const root = path.resolve(import.meta.dirname, "..");
 // Validate the historical template contract independently of today's enabled production.
@@ -94,6 +95,25 @@ test("relationship recovery stays explicitly off in rendered baselines and rejec
     else configs.operations.vars[flag] = value;
     assert(validateRenderedConfigs(historicalRoot, configs).some(error => error.includes(flag)));
   }
+});
+
+test("rendered Ops config saves exactly eight default-off bindings and still rejects activations", () => {
+  const configs = renderConfigs(root, values);
+  const flags = STAGING_OPTIONAL_DEFAULT_OFF_FLAGS.operations;
+  assert.equal(flags.length, 8);
+  for (const flag of flags) assert.equal(Object.hasOwn(configs.operations.vars, flag), false, flag);
+  const oldVars = { ...configs.operations.vars, ...Object.fromEntries(flags.map(flag => [flag, "false"])) };
+  const compact = compactStagingVars("operations", oldVars);
+  assert.equal(Object.keys(oldVars).length - Object.keys(compact).length, 8);
+  assert.deepEqual(compact, configs.operations.vars);
+  assert.deepEqual(validateRenderedConfigs(historicalRoot, configs), []);
+  for (const flag of flags) {
+    const changed = structuredClone(configs);
+    changed.operations.vars[flag] = "true";
+    assert(validateRenderedConfigs(historicalRoot, changed).some(error => error.includes(flag)), flag);
+  }
+  assert.deepEqual(compactStagingVars("delivery", oldVars), oldVars);
+  assert.deepEqual(compactStagingVars("ops-sync", oldVars), oldVars);
 });
 
 test("keeps production native authority registrations exact and explicitly enabled", () => {
