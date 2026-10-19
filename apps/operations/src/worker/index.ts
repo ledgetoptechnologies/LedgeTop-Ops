@@ -17,6 +17,7 @@ import {
   type ServiceRequestNotificationSnapshot,
 } from "@ltds/shared";
 import { authenticateStaff } from "./auth";
+import { handleAgentRead } from "./agent-read-routes";
 import { staffSessionStatus } from "./session-status";
 import {
   airspaceView,
@@ -476,6 +477,9 @@ async function dispatchProjectAlphaApiV2MonitorControl(c: any) {
       consumeNativeStaffOnboardingRateLimit(c.env.OPS_DB, key, limit, periodSeconds),
   });
 }
+// Independent service identities never enter human staff middleware or routes.
+app.use("/api/agent/v1", c => handleAgentRead(c.req.raw, c.env));
+app.use("/api/agent/v1/*", c => handleAgentRead(c.req.raw, c.env));
 app.use("/api/native-integrations/monitor", dispatchProjectAlphaApiV2MonitorControl);
 app.use("/api/native-integrations/monitor/*", dispatchProjectAlphaApiV2MonitorControl);
 // Native client-profile onboarding is deliberately dispatched before the

@@ -212,6 +212,9 @@ export type Env = Omit<
   /** Non-secret Cloudflare Access service-token expiry timestamps for connector operations diagnostics. */
   PROJECT_ALPHA_LTDS_ACCESS_SERVICE_TOKEN_EXPIRES_AT?: string;
   PROJECT_ALPHA_LTT_ACCESS_SERVICE_TOKEN_EXPIRES_AT?: string;
+  /** Separate staging-only service JWT audience; never the human Operations audience. */
+  OPS_AGENT_READ_AUD?: string;
+  OPS_AGENT_READ_ENABLED?: string;
   /** Temporary, default-off gate for numeric quote linkage on pre-catalog requests only. */
   LEGACY_CLIENT_REQUEST_PA_QUOTE_LINK_ENABLED?: string;
   /** Enables the separately scoped, staff-triggered private draft command. */
