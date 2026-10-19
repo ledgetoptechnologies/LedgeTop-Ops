@@ -651,8 +651,30 @@ fallback to a newly reviewed parent mapping. Recovery of the same exact identity
 may restore its previously reviewed mappings; it never restamps mappings.
 
 Both Operations snapshots AND the Ops Sync incremental writer must be upgraded.
-Ops Sync needs its own deployment-owned `PROJECT_ALPHA_API_V2_CONNECTIONS`
-envelope using dedicated `api.capabilities.read`-only keys, not the Ops command key.
+Both writers should receive a deployment-owned
+`PROJECT_ALPHA_LOCAL_DIVISION_IDENTITY_CONNECTIONS` envelope using dedicated
+`api.capabilities.read`-only keys, not the Ops command key. It uses the same
+versioned envelope contract as `PROJECT_ALPHA_API_V2_CONNECTIONS`, but keys
+entries by exact snapshot/event projection source IDs. An explicitly present
+invalid, disabled or incomplete identity envelope fails closed; it never falls
+back to a directory alias. Existing installations with matching namespaces may
+retain the general envelope in Operations as a compatibility fallback only
+when the separate identity envelope is absent. Ops Sync uses ONLY the dedicated
+identity envelope, even if a general API connection secret exists in its runtime.
+For either writer, a dedicated probe must advertise exactly one granted
+capability, `api.capabilities.read`; accidentally copied command/financial keys
+are rejected before restoring a source identity head. Inventory this separate
+secret for both worker deployments before the controlled mapping release.
+
+For example, a directory source named `project-alpha:staging` and a snapshot
+source named `project-alpha:primary` remain separate existing namespaces. The
+identity-only envelope must explicitly configure `project-alpha:primary`; no
+name, email, origin or physical-server match infers that alias. Keep the normal
+directory envelope, its audit/enrollment IDs and mappings unchanged. Both Ops
+and Sync identity keys must bind the SAME existing PA application UUID, source
+instance, history epoch and origin for that projection source. Different key
+material is expected; creating a new PA application for Sync would make the
+shared identity head alternate and retire previously reviewed mappings.
 Its registered connector origin must match the configured capabilities origin.
 A legacy unregistered adapter additionally requires `PROJECT_ALPHA_BASE_URL`;
 without an exact origin it cannot verify division scope. These keys are server

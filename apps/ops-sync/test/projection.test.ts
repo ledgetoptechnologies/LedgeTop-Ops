@@ -172,7 +172,7 @@ describe("entitlement projection",()=>{
         {headers:{"Cache-Control":"no-store","X-Request-ID":requestId}});
     });
     vi.stubGlobal("fetch",send);
-    const runtime={...env(),PROJECT_ALPHA_BASE_URL:origin,PROJECT_ALPHA_API_V2_CONNECTIONS:JSON.stringify({version:1,instances:{[source]:{
+    const runtime={...env(),PROJECT_ALPHA_BASE_URL:origin,PROJECT_ALPHA_LOCAL_DIVISION_IDENTITY_CONNECTIONS:JSON.stringify({version:1,instances:{[source]:{
       sourceId:source,enabled:true,baseUrl:origin,apiKey:"capabilities-only-fixture",sourceInstanceId:instance,applicationId:application,historyEpoch:oldEpoch,
     }}})} as Env;
     const change=projection(kind,kind==="project"?"40":"assignment-1",kind==="project"?{name:"Restored project"}:{project_id:40,user_id:42});
@@ -181,6 +181,15 @@ describe("entitlement projection",()=>{
     expect(await db.prepare("SELECT identity_key FROM pa_local_division_source_heads WHERE projection_source_id=?").bind(source).first("identity_key")).toBeNull();
     expect(await db.prepare("SELECT identity_key FROM pa_local_division_mappings WHERE resource_id='historic-id'").first("identity_key")).toBe(identity);
     expect(await db.prepare(`SELECT count(*) n FROM ${kind==="project"?"pa_projects":"pa_project_assignments"} WHERE projection_source_id=?`).bind(source).first("n")).toBe(1);
+    // A copied general envelope is never usable by the Sync identity verifier.
+    send.mockClear();
+    await db.prepare("UPDATE pa_local_division_source_heads SET identity_key=? WHERE projection_source_id=?").bind(identity,source).run();
+    const generalOnly={...runtime,PROJECT_ALPHA_LOCAL_DIVISION_IDENTITY_CONNECTIONS:undefined,
+      PROJECT_ALPHA_API_V2_CONNECTIONS:runtime.PROJECT_ALPHA_LOCAL_DIVISION_IDENTITY_CONNECTIONS} as Env;
+    const next={...change,event_id:crypto.randomUUID(),projection:{...change.projection,source_updated_at:"2026-08-26T13:00:00Z"}};
+    await expect(applyProjectionEventForSource(generalOnly,secondary,next,`no-dedicated-${kind}`)).resolves.toBe("applied");
+    expect(send).not.toHaveBeenCalled();
+    expect(await db.prepare("SELECT identity_key FROM pa_local_division_source_heads WHERE projection_source_id=?").bind(source).first("identity_key")).toBeNull();
   },30_000);
 
   it("accepts client and organization projections and retries portal propagation before advancing the source version",async()=>{

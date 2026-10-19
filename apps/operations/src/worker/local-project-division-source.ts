@@ -1,11 +1,18 @@
 import { resolveProjectAlphaApiV2Connection,probeConfiguredProjectAlphaApiV2Connection } from "./project-alpha-api-v2-connections";
 import { d1TablesPresent } from "./schema-readiness";
 import type { Env } from "./types";
-type IdentityEnvironment=Pick<Env,"OPS_DB"|"PROJECT_ALPHA_API_V2_CONNECTIONS">;
+type IdentityEnvironment=Pick<Env,"OPS_DB"|"PROJECT_ALPHA_API_V2_CONNECTIONS"|"PROJECT_ALPHA_LOCAL_DIVISION_IDENTITY_CONNECTIONS">;
+
+/** Explicit identity-only aliases are deployment assertions, not inferred joins.
+ * An explicitly supplied invalid or incomplete envelope never falls back. */
+function identityConnectionEnvironment(env:IdentityEnvironment) {
+  return {PROJECT_ALPHA_API_V2_CONNECTIONS:env.PROJECT_ALPHA_LOCAL_DIVISION_IDENTITY_CONNECTIONS !== undefined
+    ? env.PROJECT_ALPHA_LOCAL_DIVISION_IDENTITY_CONNECTIONS : env.PROJECT_ALPHA_API_V2_CONNECTIONS};
+}
 
 export function configuredLocalDivisionIdentity(env:IdentityEnvironment,sourceId:string):string|null {
   try {
-    const selected=resolveProjectAlphaApiV2Connection(env,sourceId);
+    const selected=resolveProjectAlphaApiV2Connection(identityConnectionEnvironment(env),sourceId);
     if(!selected.enabled || !selected.connection.expectedHistoryEpoch)return null;
     const c=selected.connection;
     return JSON.stringify([c.baseUrl,c.expectedSourceInstanceId,c.expectedApplicationId,c.expectedHistoryEpoch]);
@@ -30,8 +37,10 @@ export async function refreshLocalDivisionSourceIdentity(env:IdentityEnvironment
     origin=url.origin;
   } catch {return;}
   if(JSON.parse(key)[0]!==origin)return;
-  const probe=await probeConfiguredProjectAlphaApiV2Connection(env,sourceId);
+  const probe=await probeConfiguredProjectAlphaApiV2Connection(identityConnectionEnvironment(env),sourceId);
   if(probe.status!=="verified" || JSON.stringify([origin,probe.sourceInstanceId,probe.applicationId,probe.historyEpoch])!==key)return;
+  if(env.PROJECT_ALPHA_LOCAL_DIVISION_IDENTITY_CONNECTIONS !== undefined
+    && (probe.grantedCapabilities.length!==1 || probe.grantedCapabilities[0]!=="api.capabilities.read"))return;
   await env.OPS_DB.batch([...fence(),env.OPS_DB.prepare(`UPDATE pa_local_division_source_heads SET identity_key=?,verified_at=datetime('now')
     WHERE projection_source_id=? AND revision=? AND identity_key IS NULL`).bind(key,sourceId,revision)]);
 }
