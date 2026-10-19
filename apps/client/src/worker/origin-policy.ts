@@ -5,7 +5,7 @@ type OriginEnv = Pick<Env,
   "ENVIRONMENT" | "EXPECTED_HOST" | "PUBLIC_BASE_URL" | "PUBLIC_SHARE_ORIGIN" | "CLIENT_PORTAL_ORIGIN" | "CLIENT_PORTAL_ORIGINS" | "LEGACY_CLIENT_ORIGINS" | "CLIENT_PORTAL_RETIRED_ORIGINS"
 >;
 
-type RequestNamespace = "public" | "portal" | "internal" | "shared" | "assets" | "unknown";
+type RequestNamespace = "public" | "portal" | "onboarding" | "internal" | "shared" | "assets" | "unknown";
 
 function deployed(env: Pick<Env, "ENVIRONMENT">): boolean {
   return env.ENVIRONMENT === "production" || env.ENVIRONMENT === "staging";
@@ -31,6 +31,7 @@ export function requestNamespace(path: string): RequestNamespace {
     || path === "/client-share" || path.startsWith("/client-share/")
     || path === "/api/public" || path.startsWith("/api/public/")) return "public";
   if (path === "/api/internal" || path.startsWith("/api/internal/")) return "internal";
+  if (path === "/api/client-onboarding" || path.startsWith("/api/client-onboarding/")) return "onboarding";
   if (path === "/portal" || path.startsWith("/portal/")
     || path === "/onboarding" || path.startsWith("/onboarding/")
     || path === "/api/client" || path.startsWith("/api/client/")) return "portal";
@@ -204,6 +205,9 @@ export function requestHostAllowed(requestUrl: string, env: OriginEnv): boolean 
   // Machine ingress is canonical-only. Legacy origins remain available to the
   // browser/public namespaces above and below, but never to /api/internal/*.
   if (namespace === "internal") return primaryPortalOrigin !== null && request.origin === primaryPortalOrigin;
+  // Invitation capabilities are submitted only to their canonical portal.
+  // Presentation aliases and legacy public-link hosts do not receive them.
+  if (namespace === "onboarding") return primaryPortalOrigin !== null && request.origin === primaryPortalOrigin;
   const portalOrigins = configuredClientPortalOrigins(env);
   if (!portalOrigins) return false;
   if (namespace === "portal") return portalOrigins.includes(request.origin) || legacyOrigins.includes(request.origin);
