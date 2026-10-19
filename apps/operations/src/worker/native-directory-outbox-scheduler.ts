@@ -104,28 +104,38 @@ async function eligibleCandidates(db: D1Database, sourceIds: readonly string[], 
   if (sourceIds.length === 0) return [];
   const placeholders = sourceIds.map(() => "?").join(",");
   const maximumCandidates = MAX_SOURCES * 8 * maxCommands;
-  const bindingArm = bindingContinuationEnabled ? `
-      UNION ALL
-      SELECT 'binding_continuation','normal',j.command_id,j.source_id,
-        CASE d.state WHEN 'leased' THEN d.lease_expires_at ELSE d.next_attempt_at END,j.created_at
-      FROM native_directory_profile_binding_jobs j JOIN native_directory_profile_binding_dispatch d ON d.command_id=j.command_id
-      WHERE (d.state IN('pending','uncertain') AND d.next_attempt_at<=?) OR (d.state='leased' AND d.lease_expires_at<=?)` : '';
-  const recoveryArm = relationshipRecoveryEnabled ? `
-      UNION ALL
-      SELECT 'relationship','generation_recovery',command_id,source_id,
+  type Lane = Readonly<{ sql: string; timing: readonly number[] }>;
+  // Keep each unique queue/kind lane and its timing bindings together. D1
+  // limits one compound SELECT to five terms; optional lanes can total eight.
+  const lanes: Lane[] = [
+    { sql: `SELECT 'profile','normal',command_id,source_id,
+        CASE state WHEN 'leased' THEN lease_expires_at ELSE next_attempt_at END,created_at
+      FROM project_alpha_directory_outbox
+      WHERE (state='pending' AND next_attempt_at<=?) OR (state='leased' AND lease_expires_at<=?)`, timing: [now, now] },
+    { sql: `SELECT 'relationship','normal',command_id,source_id,
+        CASE state WHEN 'leased' THEN lease_expires_at ELSE next_attempt_at END,created_at
+      FROM project_alpha_directory_relationship_outbox
+      WHERE (state='pending' AND next_attempt_at<=?) OR (state='leased' AND lease_expires_at<=?)`, timing: [now, now] },
+  ];
+  if (relationshipRecoveryEnabled) lanes.push({ sql: `SELECT 'relationship','generation_recovery',command_id,source_id,
         CASE state WHEN 'leased' THEN lease_expires_at ELSE next_attempt_at END,created_at
       FROM project_alpha_directory_relationship_recovery_outbox
-      WHERE (state='pending' AND next_attempt_at<=?) OR (state='leased' AND lease_expires_at<=?)` : "";
-  const lifecycleArm = lifecycleEnabled ? `
-      UNION ALL
-      SELECT 'lifecycle','normal',command_id,source_id,
+      WHERE (state='pending' AND next_attempt_at<=?) OR (state='leased' AND lease_expires_at<=?)`, timing: [now, now] });
+  if (bindingContinuationEnabled) lanes.push({ sql: `SELECT 'binding_continuation','normal',j.command_id,j.source_id,
+        CASE d.state WHEN 'leased' THEN d.lease_expires_at ELSE d.next_attempt_at END,j.created_at
+      FROM native_directory_profile_binding_jobs j JOIN native_directory_profile_binding_dispatch d ON d.command_id=j.command_id
+      WHERE (d.state IN('pending','uncertain') AND d.next_attempt_at<=?) OR (d.state='leased' AND d.lease_expires_at<=?)`, timing: [now, now] });
+  if (lifecycleEnabled) lanes.push({ sql: `SELECT 'lifecycle','normal',command_id,source_id,
         CASE state WHEN 'leased' THEN lease_expires_at ELSE next_attempt_at END,created_at
       FROM project_alpha_directory_lifecycle_outbox lifecycle
       WHERE ((state='pending' AND next_attempt_at<=?) OR (state='leased' AND lease_expires_at<=?))
         AND NOT EXISTS(SELECT 1 FROM project_alpha_directory_lifecycle_outbox sibling
-          WHERE sibling.mutation_id=lifecycle.mutation_id AND sibling.state='terminal')` : "";
-  const onboardingRecoveryArm=onboardingRecoveryEnabled?`
-      UNION ALL SELECT 'onboarding_create_recovery','normal',outbox.command_id,outbox.source_id,0,outbox.created_at
+          WHERE sibling.mutation_id=lifecycle.mutation_id AND sibling.state='terminal')`, timing: [now, now] });
+  lanes.push({ sql: `SELECT 'create_observation','normal',j.command_id,j.source_id,
+        CASE d.state WHEN 'leased' THEN d.lease_expires_at ELSE d.next_attempt_at END,j.created_at
+      FROM native_directory_create_observation_jobs j JOIN native_directory_create_observation_dispatch d ON d.command_id=j.command_id
+      WHERE (d.state IN('pending','uncertain') AND d.next_attempt_at<=?) OR (d.state='leased' AND d.lease_expires_at<=?)`, timing: [now, now] });
+  if (onboardingRecoveryEnabled) lanes.push({ sql: `SELECT 'onboarding_create_recovery','normal',outbox.command_id,outbox.source_id,0,outbox.created_at
       FROM operations_directory_effective_materializations materialization
       JOIN project_alpha_directory_outbox outbox ON outbox.command_id=materialization.command_id
       JOIN operations_directory_intents intent ON intent.intent_id=materialization.intent_id
@@ -134,28 +144,21 @@ async function eligibleCandidates(db: D1Database, sourceIds: readonly string[], 
        AND EXISTS(SELECT 1 FROM client_onboarding_decisions decision WHERE decision.outcome='approved'
         AND (decision.client_record_id=intent.record_id OR decision.organization_record_id=intent.record_id
          OR EXISTS(SELECT 1 FROM client_onboarding_shared_company_child_receipts child
-          WHERE child.decision_id=decision.decision_id AND child.client_record_id=intent.record_id)))`:"";
-  const profileRecoveryArm=profileRecoveryEnabled?` UNION ALL
-   SELECT 'profile_generation_recovery','normal',outbox.command_id,outbox.source_id,coalesce(checks.checked_at,0),outbox.created_at
+          WHERE child.decision_id=decision.decision_id AND child.client_record_id=intent.record_id)))`, timing: [] });
+  if (profileRecoveryEnabled) lanes.push({ sql: `SELECT 'profile_generation_recovery','normal',outbox.command_id,outbox.source_id,coalesce(checks.checked_at,0),outbox.created_at
    FROM operations_directory_effective_materializations m JOIN project_alpha_directory_outbox outbox ON outbox.command_id=m.command_id
    JOIN operations_directory_intents intent ON intent.intent_id=m.intent_id JOIN operations_directory_records record ON record.record_id=intent.record_id
    LEFT JOIN project_alpha_directory_profile_recovery_checks checks ON checks.command_id=outbox.command_id
    WHERE outbox.state='terminal' AND json_extract(outbox.outcome_json,'$.httpStatus')=409 AND json_extract(outbox.command_json,'$.operation')='update'
-    AND intent.state='materialized' AND record.current_version=intent.record_version AND coalesce(checks.state,'pending')='pending' AND coalesce(checks.next_attempt_at,0)<=?`:'';
-  const query = `WITH eligible(queue_kind,command_kind,command_id,source_id,eligible_at,created_at) AS (
-      SELECT 'profile','normal',command_id,source_id,
-        CASE state WHEN 'leased' THEN lease_expires_at ELSE next_attempt_at END,created_at
-      FROM project_alpha_directory_outbox
-      WHERE (state='pending' AND next_attempt_at<=?) OR (state='leased' AND lease_expires_at<=?)
-      UNION ALL
-      SELECT 'relationship','normal',command_id,source_id,
-        CASE state WHEN 'leased' THEN lease_expires_at ELSE next_attempt_at END,created_at
-      FROM project_alpha_directory_relationship_outbox
-      WHERE (state='pending' AND next_attempt_at<=?) OR (state='leased' AND lease_expires_at<=?)${recoveryArm}${bindingArm}${lifecycleArm}
-      UNION ALL SELECT 'create_observation','normal',j.command_id,j.source_id,
-        CASE d.state WHEN 'leased' THEN d.lease_expires_at ELSE d.next_attempt_at END,j.created_at
-      FROM native_directory_create_observation_jobs j JOIN native_directory_create_observation_dispatch d ON d.command_id=j.command_id
-      WHERE (d.state IN('pending','uncertain') AND d.next_attempt_at<=?) OR (d.state='leased' AND d.lease_expires_at<=?)${onboardingRecoveryArm}${profileRecoveryArm}
+    AND intent.state='materialized' AND record.current_version=intent.record_version AND coalesce(checks.state,'pending')='pending' AND coalesce(checks.next_attempt_at,0)<=?`, timing: [now] });
+  const session = db.withSession("first-primary");
+  const rows: Candidate[] = [];
+  for (let offset = 0; offset < lanes.length; offset += 5) {
+    const chunk = lanes.slice(offset, offset + 5);
+    // Queue/kind groups never span chunks, so their row_number positions are
+    // identical to the former single SELECT. Merge before applying fairOrder.
+    const query = `WITH eligible(queue_kind,command_kind,command_id,source_id,eligible_at,created_at) AS (
+      ${chunk.map(lane => lane.sql).join("\nUNION ALL\n")}
     ), ranked AS (
       SELECT queue_kind,command_kind,command_id,source_id,
         row_number() OVER(PARTITION BY source_id,queue_kind,command_kind ORDER BY eligible_at,created_at,command_id) position
@@ -163,12 +166,12 @@ async function eligibleCandidates(db: D1Database, sourceIds: readonly string[], 
     )
     SELECT queue_kind,command_kind,command_id,source_id,position FROM ranked
     WHERE position<=? ORDER BY position,source_id,queue_kind LIMIT ?`;
-  const session = db.withSession("first-primary");
-  const timing = Array(6 + (relationshipRecoveryEnabled ? 2 : 0) + (bindingContinuationEnabled ? 2 : 0)
-    + (lifecycleEnabled ? 2 : 0)).fill(now);
-  const rows = (await session.prepare(query)
-    .bind(...timing,...(profileRecoveryEnabled?[now]:[]), ...sourceIds, maxCommands, maximumCandidates)
-    .all<Candidate>()).results;
+    const maximumChunkCandidates = MAX_SOURCES * chunk.length * maxCommands;
+    const result = await session.prepare(query)
+      .bind(...chunk.flatMap(lane => lane.timing), ...sourceIds, maxCommands, maximumChunkCandidates)
+      .all<Candidate>();
+    rows.push(...result.results);
+  }
   return rows.filter(row => (row.queue_kind === "profile_generation_recovery" || row.queue_kind === "onboarding_create_recovery" || row.queue_kind === "profile" || row.queue_kind === "relationship"
       || row.queue_kind === 'binding_continuation' || row.queue_kind === "lifecycle" || row.queue_kind === "create_observation")
     && (row.command_kind === "normal" || row.command_kind === "generation_recovery")

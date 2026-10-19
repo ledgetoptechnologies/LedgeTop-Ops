@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import { captureImportQueries } from "./helpers/native-import-query-depth";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { Miniflare } from "miniflare";
 import type {SharedProfilePortalAuthorityBinding} from '../../../packages/shared/src/shared-business-profile';
@@ -10,6 +11,10 @@ const relationshipDispatch = vi.hoisted(() => vi.fn());
 const continuationDispatch = vi.hoisted(() => vi.fn());
 const lifecycleDispatch = vi.hoisted(() => vi.fn());
 const materializeClients = vi.hoisted(() => vi.fn());
+const onboardingRecovery = vi.hoisted(() => vi.fn());
+vi.mock('../src/worker/project-alpha-directory-create-generation-recovery',()=>({
+  prepareApprovedOnboardingCreateGenerationRecovery:onboardingRecovery,hasApprovedOnboardingCreateRecovery:vi.fn().mockResolvedValue(false),
+}));
 const profileRecovery = vi.hoisted(() => vi.fn());
 const profileRecoverySchema = vi.hoisted(() => vi.fn());
 vi.mock('../src/worker/project-alpha-directory-profile-generation-recovery',()=>({
@@ -87,6 +92,8 @@ beforeAll(async () => {
     "project_alpha_directory_relationship_recovery_outbox"])
     await db.prepare(`CREATE TABLE ${table}(command_id TEXT PRIMARY KEY,source_id TEXT NOT NULL,state TEXT NOT NULL,
       next_attempt_at INTEGER NOT NULL,lease_expires_at INTEGER,created_at TEXT NOT NULL,command_json TEXT,outcome_json TEXT)`).run();
+  await db.prepare('CREATE TABLE client_onboarding_decisions(decision_id TEXT PRIMARY KEY,outcome TEXT,client_record_id TEXT,organization_record_id TEXT)').run();
+  await db.prepare('CREATE TABLE client_onboarding_shared_company_child_receipts(decision_id TEXT,client_record_id TEXT)').run();
   await db.prepare('CREATE TABLE operations_directory_records(record_id TEXT PRIMARY KEY,current_version INTEGER)').run();
   await db.prepare('CREATE TABLE operations_directory_intents(intent_id TEXT PRIMARY KEY,record_id TEXT,record_version INTEGER,state TEXT)').run();
   await db.prepare('CREATE TABLE operations_directory_effective_materializations(intent_id TEXT,command_id TEXT)').run();
@@ -102,6 +109,7 @@ beforeAll(async () => {
 
 beforeEach(async () => {
   await db.batch([
+    db.prepare('DELETE FROM client_onboarding_decisions'),db.prepare('DELETE FROM client_onboarding_shared_company_child_receipts'),
     db.prepare('DELETE FROM native_directory_create_observation_dispatch'),db.prepare('DELETE FROM native_directory_create_observation_jobs'),
     db.prepare("DELETE FROM project_alpha_directory_outbox"),
     db.prepare("DELETE FROM project_alpha_directory_relationship_outbox"),
@@ -118,6 +126,7 @@ beforeEach(async () => {
   continuationDispatch.mockReset().mockResolvedValue({ status: "acknowledged" });
   lifecycleDispatch.mockReset().mockResolvedValue({ status: "acknowledged" });
   materializeClients.mockReset().mockResolvedValue({ examined: 0, materialized: 0, blocked: 0 });
+  onboardingRecovery.mockReset().mockResolvedValue({status:'blocked',reason:'test-boundary'});
   profileRecoverySchema.mockReset().mockResolvedValue(false);
   profileRecovery.mockReset().mockResolvedValue({status:'blocked',reason:'nonexecution_not_proven'});
 });
@@ -526,3 +535,44 @@ it('caps an oversized requested budget while allowing only the already-started d
  expect(result).toMatchObject({attempted:3,acknowledged:3,exhausted:true});expect(profileDispatch).toHaveBeenCalledTimes(3);
  expect(profileDispatch.mock.calls.map(call=>call[2])).not.toContain('budget-cap-4');expect(now-dueAt).toBe(210_000);
 });
+
+
+it.each([false,true])('executes actual candidate SELECTs at D1 compound limit five with all optional lanes=%s',async allOptional=>{
+ const sources=['project-alpha:a','project-alpha:b'];profileRecoverySchema.mockResolvedValue(true);
+ await command('profile','normal-profile',sources[0]!);await command('relationship','normal-relationship',sources[0]!);
+ await recoveryCommand('relationship-recovery',sources[1]!);await lifecycleCommand('lifecycle',sources[0]!);
+ await db.batch([
+  db.prepare("INSERT INTO native_directory_profile_binding_jobs VALUES('binding',?,'2026-01-01')").bind(sources[1]),
+  db.prepare("INSERT INTO native_directory_profile_binding_dispatch VALUES('binding','pending',0,NULL)"),
+  db.prepare("INSERT INTO native_directory_create_observation_jobs VALUES('observation',?,'2026-01-01')").bind(sources[1]),
+  db.prepare("INSERT INTO native_directory_create_observation_dispatch VALUES('observation','pending',0,NULL)"),
+ ]);
+ for(const [id,operation,source]of [['onboarding','create',sources[0]!],['profile-recovery','update',sources[1]!]]as const){
+  await command('profile',id,source,'terminal');await db.batch([
+   db.prepare('UPDATE project_alpha_directory_outbox SET command_json=?,outcome_json=? WHERE command_id=?').bind(JSON.stringify({operation}),'{"httpStatus":409}',id),
+   db.prepare('INSERT INTO operations_directory_records VALUES(?,2)').bind(id),
+   db.prepare("INSERT INTO operations_directory_intents VALUES(?,?,2,'materialized')").bind(id,id),
+   db.prepare('INSERT INTO operations_directory_effective_materializations VALUES(?,?)').bind(id,id),
+  ]);
+ }
+ await db.prepare("INSERT INTO client_onboarding_decisions VALUES('decision','approved','onboarding',NULL)").run();
+ // Verify the actual Miniflare D1 engine enforces the deployed limit before
+ // exercising the application's generated SQL; no SQL-string-only simulation.
+ expect((await db.prepare(Array.from({length:5},()=>"SELECT 1 AS n").join(" UNION ALL ")).all()).results).toHaveLength(5);
+ await expect(db.prepare(Array.from({length:6},()=>"SELECT 1 AS n").join(" UNION ALL ")).all()).rejects.toThrow('too many terms in compound SELECT');
+ const captured=captureImportQueries(db);
+ const result=await drainNativeDirectoryOutboxes({...environment(sources),OPS_DB:captured.database,ENVIRONMENT:'staging',
+  NATIVE_DIRECTORY_PROFILE_BINDING_CONTINUATION_ENABLED:'true',NATIVE_DIRECTORY_LIFECYCLE_ENABLED:allOptional?'true':'false',
+  PROJECT_ALPHA_DIRECTORY_RELATIONSHIP_GENERATION_RECOVERY_ENABLED:allOptional?'true':'false',
+  CLIENT_ONBOARDING_ADMIN_ENABLED:'true',PROJECT_ALPHA_DIRECTORY_CREATE_GENERATION_RECOVERY_ENABLED:'true'},
+  {now:()=>dueAt,rotationTime:0,maxCommands:12});
+ const queries=captured.queries.filter(q=>q.sql.startsWith('WITH eligible('));
+ expect(result.attempted).toBe(allOptional?8:6);expect(profileRecovery).toHaveBeenCalledOnce();
+ expect(new Set([profileDispatch.mock.calls[0]![1],profileRecovery.mock.calls[0]![1]])).toEqual(new Set(sources));
+ expect(queries).toHaveLength(2);
+ expect(queries.every(q=>(q.sql.match(/UNION ALL/g)?.length??0)+1<=5)).toBe(true);
+ expect(relationshipDispatch).toHaveBeenCalledTimes(allOptional?2:1);
+ expect(continuationDispatch).toHaveBeenCalledOnce();expect(observationDispatch).toHaveBeenCalledOnce();
+ expect(lifecycleDispatch).toHaveBeenCalledTimes(allOptional?1:0);expect(onboardingRecovery).toHaveBeenCalledOnce();
+ expect(profileRecovery.mock.calls[0]![2]).toBe('profile-recovery');
+},60_000);
