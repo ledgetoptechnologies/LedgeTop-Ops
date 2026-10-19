@@ -1138,3 +1138,75 @@ validated child ACK, own-principal portal template activation and stable retries
 create ACK generation advances by one, while update ACK generation remains the
 same. Real PA command execution (including an initial new-company workflow's
 existing create-generation recovery) remains a separate staging acceptance step.
+
+
+## Shared-company reviewed plan foundation (migration 0217)
+
+This stage captures review evidence only. It creates no client, create admission,
+company revision, approval decision, portal template, email or file permission.
+Both responses include `approvalAvailable:false`; the existing approval endpoint
+still rejects `shared_existing`. The onboarding administration flag remains held
+until the composed-write and activation bridge (0218) and UI are accepted.
+
+`POST /api/client-onboarding/staff/shared-company-choices` accepts exactly
+`{submissionId,sourceIds,query,afterGroupId:null|previousNextAfterGroupId}` and uses
+native staff auth, same-origin/CSRF checks, no-store responses, current global
+view/edit/link/enrollment permissions and no active deny. Authorization is inside
+the bounded SQL query. It returns at most 20 company groups, each with `groupId`,
+`expectedVersion`, `name`, full ordered `members` (`recordId`, `expectedVersion`,
+`sourceIds`), `reviewAvailable` and a fixed reason. These are credential-free local
+review suggestions; preparation rechecks current PA bindings and durable heads.
+
+`POST /api/client-onboarding/staff/shared-company-plan` accepts exactly:
+
+```json
+{
+  "commandId": "<new UUID for this staff review action; retry unchanged>",
+  "submissionId": "<reviewed submission UUID>",
+  "fieldsSha256": "<reviewed immutable field digest>",
+  "sourceIds": ["project-alpha:primary", "project-alpha:secondary"],
+  "organizationSelection": {
+    "kind": "shared_existing",
+    "groupId": "<exact company shared-profile UUID>",
+    "expectedVersion": 1,
+    "members": [
+      {"recordId": "<exact first canonical company ID>", "expectedVersion": 2},
+      {"recordId": "<exact second canonical company ID>", "expectedVersion": 3}
+    ]
+  }
+}
+```
+
+Members must be complete and sorted by canonical record ID; source IDs are the
+existing canonical sorted selection. One or both current PA destinations may be
+selected. No submitted name/email identifies or merges an existing company.
+Source coverage must resolve to exactly one parent alias per selected source.
+Sources under the same canonical parent share one planned contact; source-owned
+A/B parents produce two planned contacts with a later shared-contact group. No
+existing company or person receives new portal/file access from this plan.
+
+The response contains `planId`, `submissionId`, company group ID/version,
+`sourceIds`, expiration, `state:"reviewed"`, `approvalAvailable:false`, `replayed`,
+and only the planned child IDs, exact parent ID/version and source IDs. PA
+origins, key material, public IDs, binding revisions and generations stay in
+server-owned immutable evidence, not browser authority. A staff UI should show
+"Review snapshot ready", never "Approved" for this response.
+
+Preparation pins the whole company group/version/member set, immutable proposal,
+current scope IDs and actor/admission/profile witnesses. It reads current exact PA
+organization binding/remote-head proofs and fresh persisted inventory generations,
+then atomically writes the plan, reserved child evidence and an exhaustion seal.
+Each selected source must appear once across the complete children. Existing
+company data and enrollments remain unchanged. Missing children or changed
+membership/scope/lifecycle/authority roll back the complete plan batch. The seal
+and all plan/member rows are immutable and durable. Identical command retries
+return the same snapshot; a changed review choice conflicts. Plans expire within
+15 minutes and the original verified staff-session window; stale plans require a
+new staff review command.
+
+The 0218 bridge must re-read every pinned PA parent proof and whole live plan,
+atomically create every planned contact/relationship/intent and only then commit
+a truthful approval receipt plus the complete member plan. It must wait for all
+child ACKs and independently verify each exact own-client PA principal before
+creating the shared-contact group and matching own-profile templates. No fake
+interactive session/merge preview or company-member access may be inferred.

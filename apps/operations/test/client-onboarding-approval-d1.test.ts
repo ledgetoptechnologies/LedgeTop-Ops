@@ -1,4 +1,6 @@
 import {readNativeDirectoryDurableRemoteHead} from "../src/worker/native-directory-profile-writer";
+import {prepareClientOnboardingSharedCompanyPlan,readClientOnboardingSharedCompanyChoices} from "../src/worker/client-onboarding-shared-company-plan";
+import {sharedProfileCreationFence,sharedProfileCreationStatements,type SharedProfileMember} from "../src/worker/native-directory-shared-profile-routes";
 import { materializeResolvedProjectAlphaDirectoryClientIntents } from "../src/worker/project-alpha-directory-client-intent-materializer";
 import { readFileSync, readdirSync } from "node:fs";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
@@ -94,7 +96,7 @@ describe("native-only client onboarding approval against migrated D1", () => {
     db = await runtime.getD1Database("OPS_DB") as D1Database;
     const directory = new URL("../migrations/", import.meta.url);
     for (const name of readdirSync(directory).filter(item => /^\d{4}_.+\.sql$/.test(item)
-      && item.slice(0, 4) <= "0216").sort())
+      && item.slice(0, 4) <= "0217").sort())
       await db.batch(splitD1MigrationStatements(readFileSync(new URL(name, directory), "utf8"))
         .map(statement => db.prepare(statement)));
     await db.batch([
@@ -486,6 +488,92 @@ describe("native-only client onboarding approval against migrated D1", () => {
     expect(await approveRaw(db,actor,next.submissionId,next.fieldsSha256,[selectedSourceId],selectedConnection,
       {kind:"existing",recordId:company,expectedVersion:1})).toMatchObject({...result,replayed:true});
     expect(await materializeResolvedProjectAlphaDirectoryClientIntents(db,[selectedSourceId],12,Date.now())).toMatchObject({materialized:0});
+  });
+
+  it("seals an explicit grouped company member plan for both selected PA sources without approving, creating or granting clients",async()=>{
+    await db.prepare(`INSERT OR IGNORE INTO native_directory_grants(id,staff_id,permission,effect,scope_kind,active,granted_by)
+      VALUES('approve-view',?,'directory.profile.view','allow','global',1,?)`).bind(staffId,staffId).run();
+    const configurations=JSON.parse(dualConnection).instances;
+    let currentGeneration="8";
+    inventoryRead.mockImplementation(async(_environment,sourceId)=>{
+      const source=configurations[sourceId];return {status:"observed",inventory:{authoritative:false,sourceId,
+        sourceInstanceId:source.sourceInstanceId,applicationId:source.applicationId,historyEpoch:source.historyEpoch,
+        requestId:uuid(),authorizationGeneration:currentGeneration,resources:[],nextCursor:null}};
+    });
+    bindingRead.mockImplementation(async(_environment,sourceId,type,externalId,publicId)=>{
+      const source=configurations[sourceId];return {status:"observed",observation:{sourceId,
+        sourceInstanceId:source.sourceInstanceId,applicationId:source.applicationId,historyEpoch:source.historyEpoch,
+        requestId:uuid(),authorizationGeneration:"9",binding:{type,externalId,publicId,createdAt:"2026-01-01T00:00:00.000Z"},resource:{revision:"1",present:true}}};
+    });
+    async function ack(recordId:string,type:"organization"|"client",sourceId:string,publicId:string){
+      const row=await db.prepare(`SELECT o.command_id FROM project_alpha_directory_outbox o JOIN operations_directory_materializations m ON m.command_id=o.command_id
+        JOIN operations_directory_intents i ON i.intent_id=m.intent_id WHERE i.record_id=?`).bind(recordId).first<{command_id:string}>();
+      expect(row).not.toBeNull();const command=row!.command_id,source=configurations[sourceId];
+      await db.prepare("UPDATE project_alpha_directory_outbox SET state='leased',attempts=1,lease_token='synthetic',lease_expires_at=9999999999999 WHERE command_id=? AND state='pending'").bind(command).run();
+      await db.prepare(`INSERT INTO project_alpha_directory_mappings(source_id,resource_type,external_id,project_alpha_public_id,source_instance_id,application_id,history_epoch_id,command_id)
+        VALUES(?,?,?,?,?,?,?,?)`).bind(sourceId,type,recordId,publicId,source.sourceInstanceId,source.applicationId,source.historyEpoch,command).run();
+      const outcome={status:"acknowledged",response:{requestId:command,replayed:false,sourceInstanceId:source.sourceInstanceId,applicationId:source.applicationId,historyEpoch:source.historyEpoch,
+        result:{resource:{type,id:recordId,publicId,revision:"1"},data:{publicId},authorizationGeneration:"9"}}};
+      await db.prepare("UPDATE project_alpha_directory_outbox SET state='acknowledged',outcome_json=?,lease_token=NULL,lease_expires_at=NULL WHERE command_id=? AND state='leased'").bind(JSON.stringify(outcome),command).run();
+      await db.prepare("UPDATE operations_directory_intents SET state='acknowledged' WHERE record_id=? AND state='materialized'").bind(recordId).run();
+    }
+    const members:SharedProfileMember[]=[];
+    for(const [index,source] of [selectedSourceId,secondSourceId].entries()){
+      const item=await submission(business),created=await approveRaw(db,actor,item.submissionId,item.fieldsSha256,[source],dualConnection,{kind:"new"});
+      await ack(created.organizationRecordId!,"organization",source,(index===0?"6":"7").repeat(32));
+      await materializeResolvedProjectAlphaDirectoryClientIntents(db,[source],12,Date.now());
+      await ack(created.clientRecordId,"client",source,(index===0?"8":"9").repeat(32));
+      const fields=JSON.parse(await db.prepare("SELECT profile_json FROM operations_directory_revisions WHERE record_id=? AND version=1").bind(created.organizationRecordId).first<string>("profile_json") ?? "null");
+      members.push({recordId:created.organizationRecordId!,version:1,kind:"organization",profile:fields,sourceIds:[source],parentRecordId:null,parentVersion:null,relationshipVersion:null});
+    }
+    members.sort((a,b)=>a.recordId.localeCompare(b.recordId));
+    const groupId=uuid(),preview=uuid(),mutation=uuid(),writerActor={staffId,accessSubject:actor.identity.verifiedAccessSubject,
+      admissionVersion:actor.admissionVersion,profileVersion:actor.identity.profileVersion,loginEmail:actor.identity.email};
+    const proof={members,primaryRecordId:members[0]!.recordId,profile:members[0]!.profile,kind:"organization",differences:[],actor:writerActor};
+    await db.batch([
+      db.prepare("INSERT INTO native_directory_shared_profile_previews(token,actor_id,proof_json,expires_at) VALUES(?,?,?,?)").bind(preview,staffId,JSON.stringify(proof),actor.verifiedUntil),
+      sharedProfileCreationFence(db,{groupId,mutationId:mutation,mode:"pair",requestSha256:"c".repeat(64),actor:writerActor,kind:"organization",profile:members[0]!.profile,members,previewToken:preview}),
+      ...sharedProfileCreationStatements(db,groupId,"organization",members[0]!.profile,members,staffId),
+    ]);
+    currentGeneration="9";
+    const proposal=await submission({...business,name:"Reviewed group contact"});
+    const selection={kind:"shared_existing",groupId,expectedVersion:1,members:members.map(m=>({recordId:m.recordId,expectedVersion:m.version}))};
+    const input={commandId:uuid(),submissionId:proposal.submissionId,fieldsSha256:proposal.fieldsSha256,sourceIds:[selectedSourceId,secondSourceId],organizationSelection:selection};
+    const choices=await readClientOnboardingSharedCompanyChoices(db,actor,{submissionId:proposal.submissionId,sourceIds:input.sourceIds,query:"Example",afterGroupId:null});
+    expect(choices.companies.find(c=>c.groupId===groupId)).toMatchObject({reviewAvailable:true,expectedVersion:1});
+    const beforeRecords=await count("operations_directory_records"),beforeAdmissions=await count("native_directory_create_admissions"),beforeGrants=await count("shared_profile_portal_grants");
+    const plan=await prepareClientOnboardingSharedCompanyPlan(db,actor,input,dualConnection);
+    expect(plan).toMatchObject({planId:input.commandId,state:"reviewed",approvalAvailable:false,replayed:false,sourceIds:input.sourceIds});
+    expect(plan.children).toHaveLength(2);
+    for(const child of plan.children){expect(child.sourceIds).toHaveLength(1);expect(child.parentRecordVersion).toBe(1);
+      expect(members.find(m=>m.recordId===child.parentRecordId)?.sourceIds).toEqual(child.sourceIds);}
+    expect(await count("operations_directory_records")).toBe(beforeRecords);
+    expect(await count("native_directory_create_admissions")).toBe(beforeAdmissions);
+    expect(await count("shared_profile_portal_grants")).toBe(beforeGrants);
+    expect(await db.prepare("SELECT count(*) total FROM client_onboarding_decisions WHERE submission_id=?").bind(proposal.submissionId).first("total")).toBe(0);
+    expect(await prepareClientOnboardingSharedCompanyPlan(db,actor,input,dualConnection)).toEqual({...plan,replayed:true});
+    await expect(prepareClientOnboardingSharedCompanyPlan(db,actor,{...input,organizationSelection:{...selection,expectedVersion:2}},dualConnection)).rejects.toThrow();
+    await expect(prepareClientOnboardingSharedCompanyPlan(db,actor,{...input,sourceIds:[secondSourceId]},dualConnection)).rejects.toThrow();
+    await expect(db.prepare("UPDATE client_onboarding_shared_company_plans SET request_sha256=? WHERE plan_id=?").bind("d".repeat(64),plan.planId).run()).rejects.toThrow("immutable");
+    await expect(db.prepare("DELETE FROM client_onboarding_shared_company_plan_children WHERE plan_id=?").bind(plan.planId).run()).rejects.toThrow("durable");
+    const oldCount=await count("client_onboarding_shared_company_plans"),newId=uuid();
+    await expect(db.batch([
+      db.prepare(`INSERT INTO client_onboarding_shared_company_plans SELECT ?,submission_id,invitation_id,fields_sha256,request_sha256,
+        company_group_id,company_group_version,company_members_json,source_ids_json,scopes_json,client_profile_json,reviewer_staff_id,
+        reviewer_subject,reviewer_email,reviewer_admission_version,reviewer_profile_version,verified_until,created_at
+        FROM client_onboarding_shared_company_plans WHERE plan_id=?`).bind(newId,plan.planId),
+      db.prepare("INSERT INTO client_onboarding_shared_company_plan_seals(plan_id,child_count) VALUES(?,2)").bind(newId),
+    ])).rejects.toThrow("not exhausted");
+    expect(await count("client_onboarding_shared_company_plans")).toBe(oldCount);
+    const primaryOnly=await prepareClientOnboardingSharedCompanyPlan(db,actor,{...input,commandId:uuid(),sourceIds:[selectedSourceId]},dualConnection);
+    expect(primaryOnly.children).toHaveLength(1);expect(primaryOnly.children[0]!.sourceIds).toEqual([selectedSourceId]);
+    const unknown={...input,commandId:uuid(),sourceIds:["project-alpha:missing"]};
+    await expect(prepareClientOnboardingSharedCompanyPlan(db,actor,unknown,dualConnection)).rejects.toThrow();
+    await db.prepare(`INSERT INTO native_directory_grants(id,staff_id,permission,effect,scope_kind,resource_id,active,granted_by)
+      VALUES('deny-shared-plan',?,'directory.identity.link','deny','resource',?,1,?)`).bind(staffId,members[0]!.recordId,staffId).run();
+    try{await expect(prepareClientOnboardingSharedCompanyPlan(db,actor,{...input,commandId:uuid()},dualConnection)).rejects.toThrow();
+      await expect(readClientOnboardingSharedCompanyChoices(db,actor,{submissionId:proposal.submissionId,sourceIds:input.sourceIds,query:"",afterGroupId:null})).rejects.toThrow();
+    }finally{await db.prepare("UPDATE native_directory_grants SET active=0 WHERE id='deny-shared-plan'").run();}
   });
 
 });

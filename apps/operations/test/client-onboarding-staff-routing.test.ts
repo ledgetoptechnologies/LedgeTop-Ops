@@ -3,7 +3,7 @@ import { HTTPException } from "hono/http-exception";
 import type { Env } from "../src/worker/types";
 
 const calls = vi.hoisted(() => ({ legacy: vi.fn(), native: vi.fn(), issue: vi.fn(), reveal: vi.fn(),
-  review: vi.fn(), inbox: vi.fn(), approve: vi.fn(), existingCompanies: vi.fn(), enrollmentChoices: vi.fn() }));
+  review: vi.fn(), inbox: vi.fn(), approve: vi.fn(), existingCompanies: vi.fn(), sharedPlan:vi.fn(), sharedChoices:vi.fn(), enrollmentChoices: vi.fn() }));
 vi.mock("cloudflare:workers", () => ({ WorkflowEntrypoint: class {}, WorkerEntrypoint: class {}, DurableObject: class {} }));
 vi.mock("../src/worker/auth", () => ({ authenticateStaff: calls.legacy }));
 vi.mock("../src/worker/native-staff-auth", () => ({
@@ -27,6 +27,10 @@ vi.mock("../src/worker/client-onboarding-enrollment-discovery", () => ({
 vi.mock("../src/worker/client-onboarding-existing-company",async original=>({
   ...await original<typeof import("../src/worker/client-onboarding-existing-company")>(),
   readClientOnboardingExistingCompanies:calls.existingCompanies,
+}));
+vi.mock("../src/worker/client-onboarding-shared-company-plan",async original=>({
+  ...await original<typeof import("../src/worker/client-onboarding-shared-company-plan")>(),
+  prepareClientOnboardingSharedCompanyPlan:calls.sharedPlan,readClientOnboardingSharedCompanyChoices:calls.sharedChoices,
 }));
 import worker from "../src/worker/index";
 
@@ -87,6 +91,8 @@ beforeEach(() => {
     submissionId: "33333333-3333-4333-8333-333333333333",
     clientRecordId: "55555555-5555-4555-8555-555555555555",
     clientRecordVersion: 1, relationshipVersion: 1 });
+  calls.sharedPlan.mockReset().mockResolvedValue({planId:"55555555-5555-4555-8555-555555555555",state:"reviewed",approvalAvailable:false});
+  calls.sharedChoices.mockReset().mockResolvedValue({companies:[],nextAfterGroupId:null,approvalAvailable:false});
   calls.existingCompanies.mockReset().mockResolvedValue({companies:[],nextAfterRecordId:null,existingContactReuse:"unsupported"});
   calls.enrollmentChoices.mockReset().mockResolvedValue({ sourceIds: ["project-alpha:primary"] });
 });
@@ -339,6 +345,24 @@ describe("native client onboarding staff route", () => {
     expect((await send("/api/client-onboarding/staff/approve","POST",{submissionId,fieldsSha256:"e".repeat(64),sourceIds:[],organizationSelection},csrf)).status).toBe(200);
     expect(calls.approve).toHaveBeenCalledWith(database,actor,submissionId,"e".repeat(64),[],undefined,organizationSelection);
     expect((await send("/api/client-onboarding/staff/approve","POST",{submissionId,fieldsSha256:"e".repeat(64),sourceIds:[],organizationSelection:{...organizationSelection,email:"inferred@example.test"}},csrf)).status).toBe(400);
+  });
+
+  it("prepares native CSRF-protected grouped review evidence without exposing an approval or bearer capability",async()=>{
+    const csrf=await session(),submissionId="33333333-3333-4333-8333-333333333333";
+    const organizationSelection={kind:"shared_existing",groupId:"11111111-1111-4111-8111-111111111111",expectedVersion:1,
+      members:[{recordId:"company:a",expectedVersion:1},{recordId:"company:b",expectedVersion:1}]};
+    const input={commandId:"55555555-5555-4555-8555-555555555555",submissionId,fieldsSha256:"e".repeat(64),sourceIds:["project-alpha:primary","project-alpha:secondary"],organizationSelection};
+    expect((await send("/api/client-onboarding/staff/shared-company-plan","POST",input,"bad")).status).toBe(403);
+    expect(calls.sharedPlan).not.toHaveBeenCalled();
+    const reply=await send("/api/client-onboarding/staff/shared-company-plan","POST",input,csrf);
+    expect(reply.status).toBe(200);expect(await reply.json()).toMatchObject({state:"reviewed",approvalAvailable:false});
+    expect(calls.sharedPlan).toHaveBeenCalledWith(database,actor,input,undefined);
+    expect(reply.headers.get("Cache-Control")).toBe("no-store");
+    expect((await send("/api/client-onboarding/staff/approve","POST",{submissionId,fieldsSha256:input.fieldsSha256,sourceIds:input.sourceIds,organizationSelection},csrf)).status).toBe(400);
+    expect(calls.approve).not.toHaveBeenCalled();
+    const choices={submissionId,sourceIds:input.sourceIds,query:"Example",afterGroupId:null};
+    expect((await send("/api/client-onboarding/staff/shared-company-choices","POST",choices,csrf)).status).toBe(200);
+    expect(calls.sharedChoices).toHaveBeenCalledWith(database,actor,choices);
   });
 
 });
