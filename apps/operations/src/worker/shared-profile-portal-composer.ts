@@ -1,4 +1,5 @@
 import type { Env } from './types';
+import { onboardingPortalGrantIdentityCurrent } from './client-onboarding-portal-activation';
 import type { SharedProfilePortalProof,SharedProfilePortalUpdate,SharedProfilePortalResult } from '../../../../packages/shared/src/shared-business-profile';
 import { authorizedSharedProfilePortalGrants,portalUpdateSchema,prepareSharedProfilePortalWrite,stablePortalRequestFingerprint,
   normalizePortalBusinessProfile,sharedProfileGrantSourceCurrent,type SharedProfilePortalGrant } from './shared-profile-portal-authority';
@@ -9,6 +10,7 @@ import { writeNativeDirectorySharedPortalProfiles,type NativeDirectoryPortalUpda
 
 async function contactReady(env:Env,grant:SharedProfilePortalGrant):Promise<boolean>{
   if(grant.kind!=='client')return true;
+  if(!await onboardingPortalGrantIdentityCurrent(env,grant))return false;
   const members=JSON.parse(grant.group_membership_json) as string[];
   const sources=new Set<string>();
   for(const id of members){

@@ -3,6 +3,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { Miniflare } from "miniflare";
 import { splitD1MigrationStatements } from "../../client/test/helpers/d1-migrations";
 import { approveNewNativeOnlyClientOnboarding } from "../src/worker/client-onboarding-approval";
+import { listClientOnboardingSubmissionsForReview } from "../src/worker/client-onboarding-review";
 
 const inventoryRead = vi.hoisted(() => vi.fn());
 vi.mock("../src/worker/project-alpha-directory-inventory-api-v2", () => ({
@@ -82,6 +83,8 @@ describe("native-only client onboarding approval against migrated D1", () => {
       && item.slice(0, 4) <= "0140").sort())
       await db.batch(splitD1MigrationStatements(readFileSync(new URL(name, directory), "utf8"))
         .map(statement => db.prepare(statement)));
+    await db.batch(splitD1MigrationStatements(readFileSync(new URL("0214_client_onboarding_portal_activation.sql",directory),"utf8"))
+      .map(statement=>db.prepare(statement)));
     await db.batch([
       db.prepare(`INSERT INTO staff_users(id,email,display_name,access_subject,status)
         VALUES(?,?,?,?,'active')`).bind(staffId, actor.identity.email, actor.identity.displayName,
@@ -110,7 +113,11 @@ describe("native-only client onboarding approval against migrated D1", () => {
 
   it("creates exactly one unlinked native client, replays deterministically, and reserves no PA work", async () => {
     const item = await submission(), beforeOutbox = await count("project_alpha_directory_outbox");
+    expect((await listClientOnboardingSubmissionsForReview(db, actor)).submissions.map(item => item.submissionId)).toContain(item.submissionId);
     const first = await approveNewNativeOnlyClientOnboarding(db, actor, item.submissionId, item.fieldsSha256);
+    expect((await listClientOnboardingSubmissionsForReview(db, actor)).submissions.map(item => item.submissionId)).not.toContain(item.submissionId);
+    expect(await db.prepare("SELECT client_record_id,policy,state FROM client_onboarding_portal_activation_intents WHERE decision_id=?")
+      .bind(first.decisionId).first()).toEqual({client_record_id:first.clientRecordId,policy:"own_client_profile_v1",state:"pending"});
     approvedClientRecordId = first.clientRecordId;
     expect(first).toMatchObject({ status: "written", replayed: false, submissionId: item.submissionId,
       clientRecordVersion: 1, relationshipVersion: 1 });

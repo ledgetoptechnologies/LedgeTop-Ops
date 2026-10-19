@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   readConfiguredProjectAlphaDirectoryBindingStatus,
+  readConfiguredProjectAlphaDirectoryClientPortalIdentity,
   readConfiguredProjectAlphaDirectoryProfile,
 } from "../src/worker/project-alpha-directory-read-api-v2";
 
@@ -127,4 +128,29 @@ describe("dormant Project Alpha API-v2 directory reads", () => {
       sendFor(ids.a, endpoint("client"), oversized));
     expect(result).toEqual({ status: "uncertain", reason: "response_limit", httpStatus: 200 });
   });
+  it("opts into exact own-client principal proof without changing ordinary status reads", async () => {
+    const payload = {...binding(ids.a), clientPortalIdentity: {state:"eligible",principalPublicId:"b".repeat(32),associationVersion:"c".repeat(64)}};
+    const send = vi.fn<typeof fetch>(async (url, init) => {
+      if (String(url).endsWith("/capabilities")) return json(capabilities(ids.a,endpoint("client",true)));
+      expect(new Headers(init?.headers).get("X-PA-Include-Client-Portal-Identity")).toBe("1");
+      return json(payload);
+    });
+    expect(await readConfiguredProjectAlphaDirectoryClientPortalIdentity(env(),sourceA,"ops/client-42",clientId,send))
+      .toMatchObject({status:"observed",observation:{clientPortalIdentity:payload.clientPortalIdentity,resource:{revision:"8"},authorizationGeneration:"7"}});
+    const ordinary = sendFor(ids.a,endpoint("client",true),json(payload));
+    expect(await readConfiguredProjectAlphaDirectoryBindingStatus(env(),sourceA,"client","ops/client-42",clientId,ordinary))
+      .toMatchObject({status:"uncertain",reason:"invalid_contract"});
+  });
+  it.each([
+    undefined,
+    {state:"eligible",principalPublicId:null,associationVersion:"c".repeat(64)},
+    {state:"eligible",principalPublicId:"b".repeat(32),associationVersion:"invalid"},
+    {state:"revoked",principalPublicId:"b".repeat(32),associationVersion:null},
+    {state:"eligible",principalPublicId:"b".repeat(32),associationVersion:"c".repeat(64),email:"untrusted@example.test"},
+  ])("rejects missing or malformed own-client association proof %j", async proof => {
+    const value = {...binding(ids.a),...(proof===undefined?{}:{clientPortalIdentity:proof})};
+    expect(await readConfiguredProjectAlphaDirectoryClientPortalIdentity(env(),sourceA,"ops/client-42",clientId,
+      sendFor(ids.a,endpoint("client",true),json(value)))).toMatchObject({status:"uncertain",reason:"invalid_contract"});
+  });
+
 });

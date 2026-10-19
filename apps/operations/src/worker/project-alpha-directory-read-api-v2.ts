@@ -42,6 +42,7 @@ export type ProjectAlphaDirectoryProfileObservation = Readonly<{
   resource: Readonly<{ type: ProjectAlphaDirectoryReadKind; id: string; revision: string }>;
   profile: ProjectAlphaDirectoryProfile;
 }>;
+export type ProjectAlphaClientPortalIdentity = Readonly<{ state: "eligible" | "revoked" | "review_required" | "unavailable"; principalPublicId: string | null; associationVersion: string | null }>;
 export type ProjectAlphaDirectoryBindingObservation = Readonly<{
   authoritative: false;
   sourceId: string;
@@ -50,6 +51,7 @@ export type ProjectAlphaDirectoryBindingObservation = Readonly<{
   historyEpoch: string;
   requestId: string;
   authorizationGeneration: string;
+  clientPortalIdentity?: ProjectAlphaClientPortalIdentity;
   binding: Readonly<{ type: ProjectAlphaDirectoryReadKind; externalId: string; publicId: string; createdAt: string }>;
   resource: Readonly<{ revision: string; present: true }>;
 }>;
@@ -189,13 +191,23 @@ function profile(value: unknown, expectedKind: ProjectAlphaDirectoryReadKind, ex
   return Object.freeze({ authoritative: false, sourceId, sourceInstanceId: connection.expectedSourceInstanceId, applicationId: connection.expectedApplicationId, historyEpoch: connection.expectedHistoryEpoch!,
     requestId: value.requestId, authorizationGeneration: value.authorizationGeneration, resource: Object.freeze({ type: expectedKind, id: value.resource.id, revision: value.resource.revision }), profile: Object.freeze(result) });
 }
-function binding(value: unknown, expectedKind: ProjectAlphaDirectoryReadKind, expectedExternalId: string, expectedPublicId: string, connection: Readonly<ProjectAlphaApiV2Connection>, requestId: string | null, sourceId: string): ProjectAlphaDirectoryBindingObservation | null {
-  if (!plain(value) || !exact(value, ["apiVersion", "sourceInstanceId", "historyEpoch", "authorizationGeneration", "binding", "resource", "applicationId", "requestId"])
+function binding(value: unknown, expectedKind: ProjectAlphaDirectoryReadKind, expectedExternalId: string, expectedPublicId: string, connection: Readonly<ProjectAlphaApiV2Connection>, requestId: string | null, sourceId: string, includeClientPortalIdentity = false): ProjectAlphaDirectoryBindingObservation | null {
+  if (!plain(value) || !exact(value, ["apiVersion", "sourceInstanceId", "historyEpoch", "authorizationGeneration", "binding", "resource", "applicationId", "requestId", ...(includeClientPortalIdentity ? ["clientPortalIdentity"] : [])])
     || value.apiVersion !== "2" || value.sourceInstanceId !== connection.expectedSourceInstanceId || value.applicationId !== connection.expectedApplicationId || value.historyEpoch !== connection.expectedHistoryEpoch
     || !v4(value.requestId) || value.requestId !== requestId || !revision(value.authorizationGeneration, true) || !plain(value.binding) || !exact(value.binding, ["type", "externalId", "publicId", "createdAt"])
     || value.binding.type !== expectedKind || value.binding.externalId !== expectedExternalId || value.binding.publicId !== expectedPublicId || !canonicalTimestamp(value.binding.createdAt)
     || !plain(value.resource) || !exact(value.resource, ["revision", "present"]) || !revision(value.resource.revision) || value.resource.present !== true) return null;
+  let ownIdentity: ProjectAlphaClientPortalIdentity | undefined;
+  if (includeClientPortalIdentity) {
+    const proof = value.clientPortalIdentity;
+    if (expectedKind !== "client" || !plain(proof) || !exact(proof, ["state", "principalPublicId", "associationVersion"])
+      || !["eligible", "revoked", "review_required", "unavailable"].includes(String(proof.state))) return null;
+    if (proof.state === "eligible" ? !publicId(proof.principalPublicId) || typeof proof.associationVersion !== "string"
+      || !/^[0-9a-f]{64}$/.test(proof.associationVersion) : proof.principalPublicId !== null || proof.associationVersion !== null) return null;
+    ownIdentity = Object.freeze({ state: proof.state, principalPublicId: proof.principalPublicId, associationVersion: proof.associationVersion }) as ProjectAlphaClientPortalIdentity;
+  }
   return Object.freeze({ authoritative: false, sourceId, sourceInstanceId: connection.expectedSourceInstanceId, applicationId: connection.expectedApplicationId, historyEpoch: connection.expectedHistoryEpoch!,
+    ...(ownIdentity ? { clientPortalIdentity: ownIdentity } : {}),
     requestId: value.requestId, authorizationGeneration: value.authorizationGeneration, binding: Object.freeze({ type: expectedKind, externalId: value.binding.externalId, publicId: value.binding.publicId, createdAt: value.binding.createdAt }), resource: Object.freeze({ revision: value.resource.revision, present: true }) });
 }
 function base64url(value: string): string {
@@ -203,10 +215,12 @@ function base64url(value: string): string {
   for (const byte of bytes) binary += String.fromCharCode(byte);
   return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/u, "");
 }
-async function get(connection: Readonly<ProjectAlphaApiV2Connection>, path: string, send: typeof fetch): Promise<Response | Uncertain> {
+async function get(connection: Readonly<ProjectAlphaApiV2Connection>, path: string, send: typeof fetch, includeClientPortalIdentity = false): Promise<Response | Uncertain> {
   const controller = new AbortController(), timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
   try {
-    const response = await send(new URL(path, connection.baseUrl), { method: "GET", headers: headers(connection), redirect: "manual", credentials: "omit", cache: "no-store", signal: controller.signal });
+    const requestHeaders = headers(connection);
+    if (includeClientPortalIdentity) requestHeaders.set("X-PA-Include-Client-Portal-Identity", "1");
+    const response = await send(new URL(path, connection.baseUrl), { method: "GET", headers: requestHeaders, redirect: "manual", credentials: "omit", cache: "no-store", signal: controller.signal });
     if (response.redirected || (response.status >= 300 && response.status < 400)) { await response.body?.cancel(); return { status: "uncertain", reason: "invalid_contract", httpStatus: response.status }; }
     return response;
   }
@@ -250,20 +264,28 @@ export async function readConfiguredProjectAlphaDirectoryBindingStatus(
   requestedExternalId: string,
   expectedPublicId: string,
   send: typeof fetch = fetch,
+  includeClientPortalIdentity = false,
 ): Promise<ProjectAlphaDirectoryBindingStatusOutcome> {
   if (!kind(kindValue) || !externalId(requestedExternalId) || !publicId(expectedPublicId)) return { status: "blocked", reason: "configuration" };
   const configured = await withEnabledConfiguredProjectAlphaApiV2Connection<ProjectAlphaDirectoryBindingStatusOutcome>(env, sourceId, async connection => {
     const preflight = await probeProjectAlphaApiV2(connection, [], send, [endpoint(kindValue, true)]);
     if (preflight.status !== "verified") return preflightOutcome(preflight);
-    const response = await get(connection, `/api/v2/bindings/${kindValue}/status/${base64url(requestedExternalId)}`, send);
+    const response = await get(connection, `/api/v2/bindings/${kindValue}/status/${base64url(requestedExternalId)}`, send, includeClientPortalIdentity);
     if (isUncertain(response)) return response;
     if (response.status !== 200) { await response.body?.cancel(); return statusFrom(response); }
     if (!trustedHeaders(response, true)) { await response.body?.cancel(); return { status: "uncertain", reason: "invalid_contract", httpStatus: response.status }; }
     const requestId = response.headers.get("X-Request-ID");
     try {
-      const observed = binding(await boundedJson(response), kindValue, requestedExternalId, expectedPublicId, connection, requestId, sourceId);
+      const observed = binding(await boundedJson(response), kindValue, requestedExternalId, expectedPublicId, connection, requestId, sourceId, includeClientPortalIdentity);
       return observed ? { status: "observed", observation: observed } : { status: "uncertain", reason: "invalid_contract", httpStatus: 200 };
     } catch (error) { return { status: "uncertain", reason: error instanceof Error && error.message === "timeout" ? "timeout" : error instanceof Error && error.message === "response_limit" ? "response_limit" : error instanceof Error && error.message === "transport" ? "transport" : "invalid_contract", httpStatus: 200 }; }
   });
   return configured.status === "enabled" ? configured.value : configured.status === "disabled" ? configured : { status: "blocked", reason: "configuration" };
+}
+
+/** Opt-in observation of the PA-managed own-client principal. Never infers a
+ * principal from contact email or from another principal's directory.read. */
+export function readConfiguredProjectAlphaDirectoryClientPortalIdentity(env: ProjectAlphaApiV2ConnectionEnvironment,
+  sourceId: string, requestedExternalId: string, expectedPublicId: string, send: typeof fetch = fetch) {
+  return readConfiguredProjectAlphaDirectoryBindingStatus(env,sourceId,"client",requestedExternalId,expectedPublicId,send,true);
 }

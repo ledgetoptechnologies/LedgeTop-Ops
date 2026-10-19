@@ -1012,3 +1012,45 @@ invalid origin yields `recipientUrl: null`; the existing secret handoff is kept.
 The recipient bridge still requires its own tested deployment activation. No
 notification email, PA write, portal grant or file grant is issued by discovery
 or by revealing the link.
+
+
+## Automatic own-profile continuation after reviewed approval
+
+New approvals stage a durable `own_client_profile_v1` intent in migration0214,
+inside the approval transaction. It captures the selected destination identities
+before the temporary decision fence is removed. Historical decisions are not
+backfilled. The exported activation cycle is separately scheduled for
+`13-58/15 * * * *` during the coordinated release; it requires the onboarding
+admin and existing portal automatic-eligibility gates and all new tables.
+
+The cycle waits for exact PA create acknowledgements and current source-specific
+bindings, verifies the PA-managed own-client principal, and discovers the matching
+complete portal projection. A `directory.read` grant held by another organization
+contact does not qualify that contact for profile editing. PA's bound-client
+status read supplies an opt-in association proof; neither names nor email
+addresses identify which client is owned. Missing/old PA support remains pending.
+
+The original approver's current native admission/profile and global owner/edit/
+identity-link authority are revalidated. The existing shared-profile creation
+fences and template issuer remain authoritative. Only the approved canonical
+client is placed in its single shared-profile group, with synchronization limited
+to the immutable selected PA destinations. Automatic templates are reserved with
+a durable proof marker before issuance, so an uncertain grant response cannot
+leave an unmarked automatic permission. First verified identity binding remains
+PA/Client-owned; this cycle never creates a human session, sends a client email,
+or grants a folder, project, organization-wide edit, or financial capability.
+
+Every automatic own-profile edit-readiness check re-reads the exact PA association.
+Revoked/changed/ambiguous identity or changed source history closes editing.
+Explicit template revocation is not automatically reversed. Previously reviewed
+manual grants retain their existing policy. A template may be prepared before
+first login; the existing Client authority handshake activates its proof head
+when the verified client first visits.
+
+Staff can poll `POST /api/client-onboarding/staff/activation-status` with exactly
+`{ "submissionId": "..." }` and the native CSRF proof. Current review authority
+is checked before returning pending/active/blocked state and a fixed reason code.
+Authority, identity or enrollment changes require explicit staff review rather
+than silently broadening or replaying approval. Files remain separately granted.
+Business onboarding's existing-company/contact reuse is a separate pending slice;
+this continuation does not merge or duplicate an existing company by matching text.
