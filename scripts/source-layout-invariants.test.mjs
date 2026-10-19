@@ -500,7 +500,8 @@ test("the deployed Client Worker keeps reviewed resources, hosts, and portal ass
 test("the deployed Operations Worker preserves native production transport and explicit folder authority", () => {
   // Preserve the current native production transport. Deferred catalog/legacy
   // mutation paths stay disabled and have no production service/workflow binding.
-  assert.equal(normalizedSha256("apps/operations/wrangler.jsonc"), "336b8942fe9c09650ee13d591d9ee6c444041835862a722a127d3457dbebeee2");
+  // The only new settings are disabled onboarding mail controls and its isolated cron.
+  assert.equal(normalizedSha256("apps/operations/wrangler.jsonc"), "3349d7e568a1fcae8c0fc4345254648c66ecdcaa13bb2aa2ebc62aa86386d67c");
   const config = readJson("apps/operations/wrangler.jsonc");
   assert.equal(config.vars.DELIVERY_BASE_URL, "https://portal.ledgetopdroneservices.com");
   assert(config.vars.CLIENT_PORTAL_ORIGINS.split(",").includes("https://client.ledgetopdroneservices.com"),
@@ -556,7 +557,7 @@ test("the deployed Operations Worker preserves native production transport and e
   assert.equal(config.workflows?.find(workflow => workflow.binding === "OPS_CATALOG_PROMOTION_WORKFLOW"), undefined);
   assert.equal(config.workflows?.find((workflow) => workflow.binding === "OPS_CATALOG_PROMOTION_WORKFLOW")?.schedules, undefined);
   assert(!config.triggers.crons.some((cron) => /catalog/i.test(cron)));
-  assert.deepEqual(config.triggers.crons, ["*/15 * * * *", "*/5 * * * *", "2-57/5 * * * *", "17 * * * *", "4-59/15 * * * *", "3-58/5 * * * *", "1-56/5 * * * *"]);
+  assert.deepEqual(config.triggers.crons, ["*/15 * * * *", "*/5 * * * *", "2-57/5 * * * *", "17 * * * *", "4-59/15 * * * *", "3-58/5 * * * *", "1-56/5 * * * *", "11-56/15 * * * *"]);
   assert.equal(config.keep_vars, true);
   assert.equal(config.vars.NATIVE_DIRECTORY_EXISTING_IMPORT_ENABLED, "false");
   assert.equal(config.vars.NATIVE_DIRECTORY_EXISTING_IMPORT_AREAS, undefined);

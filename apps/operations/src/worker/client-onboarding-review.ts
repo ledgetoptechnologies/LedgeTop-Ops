@@ -29,10 +29,11 @@ type ReviewCursor = Readonly<{ submittedAt: string; submissionId: string }>;
 
 /** One authority query for individual review and the inbox: denied records never
  * affect the returned page size or cursor. */
-function authorizedReviews(database: D1Database, authenticated: AuthenticatedNativeStaffWithAdmissionVersion,
-  submissionId: string | null, after: ReviewCursor | null, limit: number): D1PreparedStatement {
+type ReviewAuthority = Pick<AuthenticatedNativeStaffWithAdmissionVersion, "identity" | "admissionVersion">;
+function authorizedReviewPlan(authenticated: ReviewAuthority,
+  submissionId: string | null, after: ReviewCursor | null, limit: number) {
     const actor = authenticated.identity;
-    return database.withSession("first-primary").prepare(`WITH candidate AS (
+    return { sql: `WITH candidate AS (
       SELECT submission.invitation_id,submission.submission_id,submission.fields_json,
         submission.fields_sha256,submission.created_at AS submitted_at,
         invitation.target_client_record_id,issuance.scopes_json
@@ -96,11 +97,16 @@ function authorizedReviews(database: D1Database, authenticated: AuthenticatedNat
                   AND assignment.staff_id=? AND assignment.active=1))
               OR (deny_row.scope_kind='business_area' AND deny_row.business_area_id=scope.business_area_id)
               OR (deny_row.scope_kind='division' AND deny_row.division_id=scope.division_id))))
-    ORDER BY candidate.submitted_at,candidate.submission_id LIMIT ?`).bind(actor.staffId, actor.verifiedAccessSubject, authenticated.admissionVersion,
+    ORDER BY candidate.submitted_at,candidate.submission_id LIMIT ?`, bindings: [actor.staffId, actor.verifiedAccessSubject, authenticated.admissionVersion,
       actor.profileVersion, actor.email, submissionId, submissionId, after?.submittedAt ?? null,
       after?.submittedAt ?? null, after?.submittedAt ?? null, after?.submissionId ?? null,
-      actor.staffId, actor.staffId, actor.staffId, actor.staffId, limit);
+      actor.staffId, actor.staffId, actor.staffId, actor.staffId, limit] };
 
+}
+function authorizedReviews(database: D1Database, authenticated: ReviewAuthority,
+  submissionId: string | null, after: ReviewCursor | null, limit: number): D1PreparedStatement {
+  const plan = authorizedReviewPlan(authenticated, submissionId, after, limit);
+  return database.withSession("first-primary").prepare(plan.sql).bind(...plan.bindings);
 }
 function parseReview(row: ReviewRow): ClientOnboardingSubmissionReview {
     if (!UUID.test(row.submission_id) || !UUID.test(row.invitation_id)
@@ -169,4 +175,32 @@ export async function listClientOnboardingSubmissionsForReview(database: D1Datab
     }))), nextCursor: rows.length > 32 && last
       ? Object.freeze({ submittedAt: last.submittedAt, submissionId: last.submissionId }) : null });
   } catch { return denied(); }
+}
+
+
+/** Scheduler-only lookup for a deployment-selected staff recipient. It does not
+ * authenticate a request or manufacture an Access session. Current profile and
+ * admission witnesses are joined to exactly the same review authority query. */
+export async function readClientOnboardingNotificationRecipient(database: D1Database,
+  submissionId: string, staffId: string): Promise<{ email: string; admissionVersion: number; profileVersion: number;
+    guard: { sql: string; bindings: (string | number | null)[] } } | null> {
+  if (!UUID.test(submissionId) || !/^[A-Za-z0-9][A-Za-z0-9:._-]{0,190}$/.test(staffId)) return null;
+  const row = await database.withSession("first-primary").prepare(`SELECT profile.login_email email,
+    profile.display_name,profile.version profile_version,admission.version admission_version,admission.bound_access_subject
+    FROM native_staff_admissions admission JOIN native_staff_profiles profile ON profile.staff_id=admission.staff_id
+    JOIN staff_users staff ON staff.id=admission.staff_id AND staff.status='active'
+    WHERE admission.staff_id=? AND admission.active=1
+      AND NOT EXISTS(SELECT 1 FROM client_onboarding_decisions WHERE submission_id=?)`)
+    .bind(staffId, submissionId).first<{email:string;display_name:string;profile_version:number;admission_version:number;bound_access_subject:string}>();
+  if (!row || !/^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$/.test(row.email) || row.email.length > 254) return null;
+  const plan = authorizedReviewPlan({ identity: { kind: "native", staffId,
+    verifiedAccessSubject: row.bound_access_subject, email: row.email, displayName: row.display_name,
+    profileVersion: row.profile_version }, admissionVersion: row.admission_version }, submissionId, null, 1);
+  const guard = { sql: `EXISTS(${plan.sql})
+    AND EXISTS(SELECT 1 FROM staff_users WHERE id=? AND status='active')
+    AND NOT EXISTS(SELECT 1 FROM client_onboarding_decisions WHERE submission_id=?)`,
+    bindings: [...plan.bindings, staffId, submissionId] };
+  const authorized = await database.withSession("first-primary").prepare(`SELECT 1 WHERE ${guard.sql}`)
+    .bind(...guard.bindings).first();
+  return authorized ? { email: row.email, admissionVersion: row.admission_version, profileVersion: row.profile_version, guard } : null;
 }

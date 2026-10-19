@@ -129,6 +129,7 @@ import { cleanupProjectMemoryAttachmentUploads } from "./project-memory-attachme
 import { listAdminAuditEvents } from "./admin-audit";
 import { registerClientFeedbackRoutes, staffFeedbackEntryEnabled } from "./client-feedback";
 import { processClientFeedbackNotifications } from "./client-feedback-notifications";
+import { CLIENT_ONBOARDING_NOTIFICATION_CRON, processClientOnboardingNotifications } from "./client-onboarding-notifications";
 import { processProjectAccessExpiryNotifications } from "./project-access-expiry-notifications";
 import { maintainAuthenticatedDeliveryChanges } from "./delivery-change-maintenance";
 import {
@@ -3512,6 +3513,13 @@ async function scheduled(
   env: Env,
   ctx: ExecutionContext,
 ) {
+  if (event.cron === CLIENT_ONBOARDING_NOTIFICATION_CRON) {
+    if (!notificationMigrationMaintenanceActive(env)) {
+      const result = await processClientOnboardingNotifications(env);
+      console.log(JSON.stringify({ event: "client_onboarding.notifications.tick", ...result }));
+    }
+    return;
+  }
   if (event.cron === NATIVE_DIRECTORY_RECONCILIATION_CRON) {
     try {
       const result = await runNativeDirectoryReconciliationScheduler(env);

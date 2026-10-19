@@ -65,6 +65,9 @@
     "CLIENT_DELEGATED_SHARE_SIGNER_ENABLED": "false",
     "CLIENT_ONBOARDING_ADMIN_ENABLED": "false",
     "CLIENT_ONBOARDING_ADMIN_ORIGIN": "",
+    "CLIENT_ONBOARDING_NOTIFICATIONS_ENABLED": "false",
+    "CLIENT_ONBOARDING_NOTIFICATIONS_NOT_BEFORE": "",
+    "CLIENT_ONBOARDING_NOTIFICATION_STAFF_IDS": "[]",
     "CLIENT_PORTAL_WORKSPACE_BINDING_ADMIN_ENABLED": "false",
       "CLIENT_PORTAL_WORKSPACE_BINDING_ADMIN_ORIGIN": "",
       "CLIENT_PORTAL_AUTHORITY_V3_OWNER_ENABLED": "false",
@@ -129,7 +132,7 @@
   },
   "send_email": [{ "name": "NOTIFICATION_EMAIL", "allowed_sender_addresses": ["delivery@<STAGING_EMAIL_DOMAIN>"] }],
   "observability": { "enabled": true, "head_sampling_rate": 1 },
-  "triggers": { "crons": ["*/15 * * * *", "*/5 * * * *", "2-57/5 * * * *", "17 * * * *", "4-59/15 * * * *", "3-58/5 * * * *", "1-56/5 * * * *", "6-51/15 * * * *"] },
+  "triggers": { "crons": ["*/15 * * * *", "*/5 * * * *", "2-57/5 * * * *", "17 * * * *", "4-59/15 * * * *", "3-58/5 * * * *", "1-56/5 * * * *", "11-56/15 * * * *", "6-51/15 * * * *"] },
   "r2_buckets": [
     { "binding": "DATA_BUCKET", "bucket_name": "client-data-staging" },
     { "binding": "INCOMING_BUCKET", "bucket_name": "ltds-incoming-staging" }

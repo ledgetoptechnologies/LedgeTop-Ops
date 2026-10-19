@@ -39,6 +39,9 @@ export type Env = Omit<
   | "CLIENT_ONBOARDING_ADMIN_ENABLED"
   | "CLIENT_ONBOARDING_ADMIN_ORIGIN"
   | "CLIENT_ONBOARDING_HANDOFF_KEYRING"
+  | "CLIENT_ONBOARDING_NOTIFICATIONS_ENABLED"
+  | "CLIENT_ONBOARDING_NOTIFICATIONS_NOT_BEFORE"
+  | "CLIENT_ONBOARDING_NOTIFICATION_STAFF_IDS"
   | "DELIVERY_SHARE_DIRECTORY_RECIPIENTS_ENABLED"
   | "CLIENT_DELEGATED_SHARE_SIGNER_ENABLED"
   | "CLIENT_ONBOARDING_RECIPIENT_BRIDGE_ENABLED"
@@ -193,6 +196,12 @@ export type Env = Omit<
   CLIENT_ONBOARDING_ADMIN_ORIGIN?: string;
   /** Deployment secret containing the bounded AES-GCM handoff keyring. */
   CLIENT_ONBOARDING_HANDOFF_KEYRING?: string;
+  /** Opt-in staff-only onboarding email notifications, independent of approval. */
+  CLIENT_ONBOARDING_NOTIFICATIONS_ENABLED?: string;
+  /** Exact UTC rollout cutoff; historical events do not generate emails. */
+  CLIENT_ONBOARDING_NOTIFICATIONS_NOT_BEFORE?: string;
+  /** JSON list of native staff IDs; current review authority is rechecked. */
+  CLIENT_ONBOARDING_NOTIFICATION_STAFF_IDS?: string;
   PROJECT_ALPHA_CONNECTOR_SNAPSHOT_CREDENTIALS?: string;
   PROJECT_ALPHA_CONNECTOR_EVENT_CREDENTIALS?: string;
   /** Deploy-managed source manifest; selects configured credential references and is never browser-administered. */
