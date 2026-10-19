@@ -1,3 +1,4 @@
+import { parseSharedCompanySelection, prepareClientOnboardingSharedCompanyPlan, readClientOnboardingSharedCompanyChoices } from "./client-onboarding-shared-company-plan";
 import { parseClientOnboardingOrganizationSelection, readClientOnboardingExistingCompanies } from "./client-onboarding-existing-company";
 import { readClientOnboardingPortalActivationStatus } from "./client-onboarding-portal-activation";
 import { Buffer } from "node:buffer";
@@ -14,7 +15,7 @@ import { approveNewNativeOnlyClientOnboarding } from "./client-onboarding-approv
 import { readClientOnboardingEnrollmentChoices } from "./client-onboarding-enrollment-discovery";
 import { parseClientOnboardingEnrollmentSourceIds } from "./client-onboarding-enrollment-selection";
 
-export type ClientOnboardingStaffRoute = "session" | "create" | "reveal" | "review" | "approve" | "enrollment-choices" | "inbox" | "activation-status" | "existing-companies";
+export type ClientOnboardingStaffRoute = "session" | "create" | "reveal" | "review" | "approve" | "enrollment-choices" | "inbox" | "activation-status" | "existing-companies" | "shared-company-plan" | "shared-company-choices";
 export type ClientOnboardingStaffHttpDependencies = Readonly<{
   configuration: NativeStaffAccessConfiguration & Readonly<{ origin: string; csrfSecret: string }>;
   database: D1Database;
@@ -39,6 +40,8 @@ class HttpFailure extends Error {
 
 export function clientOnboardingStaffHttpRequest(method: string, path: string): ClientOnboardingStaffRoute | null {
   if (method === "GET" && path === "/api/client-onboarding/staff/session") return "session";
+  if(method==="POST"&&path==="/api/client-onboarding/staff/shared-company-plan")return "shared-company-plan";
+  if(method==="POST"&&path==="/api/client-onboarding/staff/shared-company-choices")return "shared-company-choices";
   if (method === "POST" && path === "/api/client-onboarding/staff/existing-companies") return "existing-companies";
   if (method === "POST" && path === "/api/client-onboarding/staff/activation-status") return "activation-status";
   if (method === "POST" && path === "/api/client-onboarding/staff/inbox") return "inbox";
@@ -157,6 +160,16 @@ async function body(request: Request, route: Exclude<ClientOnboardingStaffRoute,
     if (!exact(value, ["cursor"])) throw new HttpFailure(400, "invalid_request");
     return value;
   }
+  if(route==="shared-company-plan") {
+    if(!exact(value,["commandId","submissionId","fieldsSha256","sourceIds","organizationSelection"])
+      ||parseSharedCompanySelection(value.organizationSelection)===null
+      ||parseClientOnboardingEnrollmentSourceIds(value.sourceIds)===null)throw new HttpFailure(400,"invalid_request");
+    return value;
+  }
+  if(route==="shared-company-choices") {
+    if(!exact(value,["submissionId","sourceIds","query","afterGroupId"]))throw new HttpFailure(400,"invalid_request");
+    return value;
+  }
   if (route === "existing-companies") {
     if (!exact(value,["submissionId","sourceIds","query","afterRecordId"])) throw new HttpFailure(400,"invalid_request");
     return value;
@@ -231,6 +244,14 @@ export async function handleClientOnboardingStaffHttp(request: Request,
     unexpired(auth);
     const input = await body(request, route);
     unexpired(auth);
+    if(route==="shared-company-plan"||route==="shared-company-choices") {
+      try {
+        const result=route==="shared-company-plan"
+          ? await prepareClientOnboardingSharedCompanyPlan(authority.database,auth,input,projectAlphaApiV2Connections)
+          : await readClientOnboardingSharedCompanyChoices(authority.database,auth,input);
+        unexpired(auth);return response(200,result);
+      } catch {throw new HttpFailure(403,"client_onboarding_denied");}
+    }
     if(route==="existing-companies") {
       try {const choices=await readClientOnboardingExistingCompanies(authority.database,auth,input);
         unexpired(auth);return response(200,choices);
