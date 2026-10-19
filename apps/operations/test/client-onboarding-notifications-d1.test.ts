@@ -6,6 +6,7 @@ import { processClientOnboardingNotifications, clientOnboardingNotificationConfi
 import { readClientOnboardingNotificationRecipient } from "../src/worker/client-onboarding-review";
 import type { Env } from "../src/worker/types";
 import type { OutboundMail } from "../src/worker/mailer";
+import * as mailer from "../src/worker/mailer";
 
 let runtime: Miniflare;
 let db: D1Database;
@@ -147,5 +148,47 @@ describe("durable onboarding review notifications", () => {
     expect(send).toHaveBeenCalledTimes(1);
     expect(await db.prepare("SELECT state,attempt_count FROM client_onboarding_review_notification_recipients WHERE submission_id=?")
       .bind(submission).first()).toMatchObject({ state: "reconciliation_required", attempt_count: 1 });
+  });
+
+  it("walks more than one delivery page without dropping staff tuples or repeating mail", async () => {
+    const second = "onboarding-notice-second";
+    await db.batch([
+      db.prepare("INSERT INTO staff_users(id,email,display_name,access_subject) VALUES(?,'second@example.test','Second','access|second')").bind(second),
+      db.prepare("INSERT INTO native_staff_admissions(staff_id,bound_access_subject,active,admitted_by) VALUES(?,'access|second',1,?)").bind(second, staffId),
+      db.prepare("INSERT INTO native_staff_profiles(staff_id,login_email,display_name) VALUES(?,'second@example.test','Second')").bind(second),
+      db.prepare(`INSERT INTO native_directory_grants(id,staff_id,permission,effect,scope_kind,granted_by)
+        VALUES('notice-second-allow',?,'directory.profile.edit','allow','global',?)`).bind(second, staffId),
+    ]);
+    const first = await event();
+    for (let index = 0; index < 4; index++) await event();
+    first.env.CLIENT_ONBOARDING_NOTIFICATION_STAFF_IDS = JSON.stringify([staffId, second]);
+    const send = vi.fn(async (_env: Env, _mail: OutboundMail) => {});
+    for (let cycle = 0; cycle < 5; cycle++) await processClientOnboardingNotifications(first.env, send);
+    expect(send).toHaveBeenCalledTimes(10);
+    expect(send.mock.calls.filter(([, message]) => message.to === "reviewer@example.test")).toHaveLength(5);
+    expect(send.mock.calls.filter(([, message]) => message.to === "second@example.test")).toHaveLength(5);
+    expect(new Set(send.mock.calls.map(([, message]) => message.messageIdKey)).size).toBe(10);
+  });
+
+  it("caps definitive pre-acceptance failures at three transport attempts", async () => {
+    const { submission, env } = await event();
+    // Exercise the dispatcher policy at the existing typed transport-classifier
+    // boundary. This fixture does not claim real SMTP acceptance or rejection.
+    const classify = vi.spyOn(mailer, "notificationMailFailureCode").mockReturnValue("mail-smtp-rejected");
+    const send = vi.fn(async () => { throw Error("definitive transport fixture"); });
+    try {
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        for (let cycle = 0; cycle < 3 && send.mock.calls.length < attempt; cycle++)
+          await processClientOnboardingNotifications(env, send);
+        expect(send).toHaveBeenCalledTimes(attempt);
+        await db.prepare(`UPDATE client_onboarding_review_notification_recipients
+          SET next_attempt_at='2000-01-01T00:00:00.000Z',version=version+1
+          WHERE submission_id=? AND state='pending'`).bind(submission).run();
+      }
+      for (let cycle = 0; cycle < 3; cycle++) await processClientOnboardingNotifications(env, send);
+      expect(send).toHaveBeenCalledTimes(3);
+      expect(await db.prepare("SELECT state,attempt_count FROM client_onboarding_review_notification_recipients WHERE submission_id=?")
+        .bind(submission).first()).toMatchObject({ state: "reconciliation_required", attempt_count: 3 });
+    } finally { classify.mockRestore(); }
   });
 });
