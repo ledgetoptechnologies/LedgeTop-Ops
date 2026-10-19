@@ -1003,6 +1003,12 @@ test("checked-in evidence example stays complete as migrations, flags, gates, an
   const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
   const example = JSON.parse(fs.readFileSync(path.join(root, "docs", "staging", "release-evidence.json.example"), "utf8"));
   for (const app of ["delivery", "operations"]) assert.deepEqual(example.migrations[app].expected, [...REQUIRED_STAGING_MIGRATIONS[app]], `migrations.${app}`);
+  for (const [app, names] of Object.entries(REQUIRED_STAGING_SECRETS)) {
+    assert.deepEqual([...example.secrets[app].names].sort(), [...names].sort(), `secrets.${app}`);
+  }
+  for (const app of ["operations", "ops-sync"]) {
+    assert(REQUIRED_STAGING_SECRETS[app].includes("PROJECT_ALPHA_LOCAL_DIVISION_IDENTITY_CONNECTIONS"), `${app} requires dedicated projection identity credentials`);
+  }
   assert.equal(example.migrations.freshBootstrap.schemaVersion, 2);
   assert.equal(example.migrations.freshBootstrap.mode, "generated-empty-d1-disposable");
   assert.match(example.migrations.freshBootstrap.runId, /^[a-z0-9-]+$/);
