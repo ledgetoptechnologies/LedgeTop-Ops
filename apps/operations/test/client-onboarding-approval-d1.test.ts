@@ -1,4 +1,8 @@
 import {readNativeDirectoryDurableRemoteHead} from "../src/worker/native-directory-profile-writer";
+import {writeNativeDirectorySharedProfiles} from "../src/worker/native-directory-profile-writer";
+import {acquireProjectAlphaExistingDirectoryBinding} from "../src/worker/project-alpha-existing-directory-acquisition-coordinator";
+import {activateProjectAlphaExistingDirectoryBinding} from "../src/worker/project-alpha-existing-directory-binding-review-consumer";
+import {existingOrganizationRemote} from "./helpers/operations-native-portal-resource-acceptance-fixture";
 import {prepareClientOnboardingSharedCompanyPlan,readClientOnboardingSharedCompanyChoices} from "../src/worker/client-onboarding-shared-company-plan";
 import {approveClientOnboardingSharedCompany} from "../src/worker/client-onboarding-shared-company-approval";
 import {sharedProfileCreationFence,sharedProfileCreationStatements,type SharedProfileMember} from "../src/worker/native-directory-shared-profile-routes";
@@ -608,5 +612,75 @@ describe("native-only client onboarding approval against migrated D1", () => {
       FROM client_onboarding_decisions WHERE decision_id=?`).bind(unfencedId,unrelated.invitationId,unrelated.submissionId,unrelated.fieldsSha256,
        unfencedId,unrelated.invitationId,unrelated.submissionId,plan.planId).run()).rejects.toThrow("artifacts are incomplete");
   },120_000);
+
+  it("uses a genuinely acquired foreign company binding without rewriting either identity, and denies stale or unsettled parent evidence",async()=>{
+    await db.batch([
+      db.prepare(`INSERT OR IGNORE INTO native_directory_grants(id,staff_id,permission,effect,scope_kind,active,granted_by)
+        VALUES('approve-view',?,'directory.profile.view','allow','global',1,?)`).bind(staffId,staffId),
+      db.prepare(`INSERT OR IGNORE INTO staff_role_assignments(id,staff_id,role_id,scope,scope_key,created_by)
+        VALUES('onboarding-acquisition-owner',?,'role-owner','global','global',?)`).bind(staffId,staffId),
+    ]);
+    inventoryRead.mockResolvedValue({status:"observed",inventory:{authorizationGeneration:"8"}});
+    const original=await submission(business),created=await approveRaw(db,actor,original.submissionId,original.fieldsSha256,[selectedSourceId],selectedConnection,{kind:"new"});
+    const company=created.organizationRecordId!,source=JSON.parse(selectedConnection).instances[selectedSourceId];
+    const environment={OPS_DB:db,PROJECT_ALPHA_API_V2_CONNECTIONS:selectedConnection};
+    const actual=await vi.importActual<typeof import("../src/worker/project-alpha-directory-read-api-v2")>("../src/worker/project-alpha-directory-read-api-v2");
+    bindingRead.mockImplementation(actual.readConfiguredProjectAlphaDirectoryBindingStatus);
+    const remote=existingOrganizationRemote({sourceInstanceId:source.sourceInstanceId,applicationId:source.applicationId,
+      historyEpochId:source.historyEpoch,apiKey:source.apiKey});
+    const foreignId="pa/organization/existing-one",publicId="90000000000000000000000000000001";
+    const grantGeneration=await db.prepare("SELECT generation FROM native_directory_grant_generations WHERE staff_id=?").bind(staffId).first<number>("generation");
+    const acquired=await acquireProjectAlphaExistingDirectoryBinding(environment,{reviewId:uuid(),commandId:uuid(),sourceId:selectedSourceId,
+      recordId:company,externalId:foreignId,resourceType:"organization",projectAlphaPublicId:publicId,expectedProjectAlphaRevision:"7",
+      expectedAuthorizationGeneration:"8",localRecordVersion:1,reviewer:{staffId,accessSubject:actor.identity.verifiedAccessSubject,
+        admissionVersion:1,profileVersion:1,grantGeneration:grantGeneration!}},remote);
+    expect(acquired).toMatchObject({status:"acquired"});if(acquired.status!=="acquired")throw Error(JSON.stringify(acquired));
+    expect(await activateProjectAlphaExistingDirectoryBinding(environment,{reviewItemId:acquired.reviewReceiptId,idempotencyKey:uuid()},
+      {staffId,accessSubject:actor.identity.verifiedAccessSubject},remote)).toMatchObject({status:"activated",recordId:company});
+    const mapping=await db.prepare(`SELECT record_id,external_id,project_alpha_public_id,mapping_kind,provenance_id
+      FROM project_alpha_active_directory_mappings WHERE record_id=? AND source_id=?`).bind(company,selectedSourceId).first<Record<string,string>>();
+    expect(mapping).toMatchObject({record_id:company,external_id:foreignId,project_alpha_public_id:publicId,mapping_kind:"acquired"});
+    expect(mapping!.external_id).not.toBe(company);
+    expect(await db.prepare("SELECT count(*) total FROM project_alpha_existing_directory_binding_activation_receipts WHERE activation_id=?").bind(mapping!.provenance_id).first("total")).toBe(1);
+    const profile=JSON.parse((await db.prepare("SELECT profile_json FROM operations_directory_revisions WHERE record_id=? AND version=1").bind(company).first<string>("profile_json"))!);
+    const parent:SharedProfileMember={recordId:company,version:1,kind:"organization",profile,sourceIds:[selectedSourceId],parentRecordId:null,parentVersion:null,relationshipVersion:null};
+    const groupId=uuid(),writerActor={staffId,accessSubject:actor.identity.verifiedAccessSubject,admissionVersion:1,profileVersion:1,loginEmail:actor.identity.email};
+    await db.batch([sharedProfileCreationFence(db,{groupId,mutationId:uuid(),mode:"single",requestSha256:"a".repeat(64),actor:writerActor,
+      kind:"organization",profile,members:[parent],previewToken:null}),...sharedProfileCreationStatements(db,groupId,"organization",profile,[parent],staffId)]);
+    inventoryRead.mockImplementation(async()=>({status:"observed",inventory:{authoritative:false,sourceId:selectedSourceId,
+      sourceInstanceId:source.sourceInstanceId,applicationId:source.applicationId,historyEpoch:source.historyEpoch,
+      requestId:uuid(),authorizationGeneration:"9",resources:[],nextCursor:null}}));
+    let revision="7",boundExternal=foreignId;
+    bindingRead.mockImplementation(async()=>({status:"observed",observation:{sourceId:selectedSourceId,
+      sourceInstanceId:source.sourceInstanceId,applicationId:source.applicationId,historyEpoch:source.historyEpoch,
+      requestId:uuid(),authorizationGeneration:"9",binding:{type:"organization",externalId:boundExternal,publicId,createdAt:"2026-10-01T12:00:00.000Z"},resource:{revision,present:true}}}));
+    const proposal=await submission({...business,name:"Acquired company new contact"});
+    const input={commandId:uuid(),submissionId:proposal.submissionId,fieldsSha256:proposal.fieldsSha256,sourceIds:[selectedSourceId],
+      organizationSelection:{kind:"shared_existing",groupId,expectedVersion:1,members:[{recordId:company,expectedVersion:1}]}};
+    const plan=await prepareClientOnboardingSharedCompanyPlan(db,actor,input,selectedConnection);
+    const approval={planId:plan.planId,submissionId:proposal.submissionId,fieldsSha256:proposal.fieldsSha256},before=await count("operations_directory_records");
+    revision="8";await expect(approveClientOnboardingSharedCompany(db,actor,approval,selectedConnection)).rejects.toThrow();
+    revision="7";boundExternal="pa/another-company";await expect(approveClientOnboardingSharedCompany(db,actor,approval,selectedConnection)).rejects.toThrow();
+    expect(await count("operations_directory_records")).toBe(before);boundExternal=foreignId;
+    const result=await approveClientOnboardingSharedCompany(db,actor,approval,selectedConnection),child=result.members[0]!;
+    expect(result.members).toHaveLength(1);expect(child.sourceIds).toEqual([selectedSourceId]);
+    const command=JSON.parse((await db.prepare(`SELECT outbox.command_json FROM operations_directory_intents intent
+      JOIN operations_directory_materializations materialization ON materialization.intent_id=intent.intent_id
+      JOIN project_alpha_directory_outbox outbox ON outbox.command_id=materialization.command_id WHERE intent.record_id=?`).bind(child.clientRecordId).first<string>("command_json"))!);
+    expect(command).toMatchObject({operation:"create",externalId:child.clientRecordId,fields:{organizationPublicId:publicId}});
+    expect(await db.prepare("SELECT current_version FROM operations_directory_records WHERE record_id=?").bind(company).first("current_version")).toBe(1);
+    expect(await db.prepare(`SELECT record_id,external_id,project_alpha_public_id,mapping_kind,provenance_id
+      FROM project_alpha_active_directory_mappings WHERE record_id=? AND source_id=?`).bind(company,selectedSourceId).first()).toEqual(mapping);
+    expect(await db.prepare("SELECT count(*) total FROM operations_directory_intents WHERE record_id=? AND source_id<>?").bind(child.clientRecordId,selectedSourceId).first("total")).toBe(0);
+    const changed=await writeNativeDirectorySharedProfiles(db,{groupId,mutationId:uuid(),expectedVersion:1,requestSha256:"c".repeat(64),profile,writes:[{operation:"update",mutationId:uuid(),recordId:company,expectedLocalVersion:1,kind:"organization",profile,
+      actor:{...writerActor,selectedGrantId:"approve-profile",selectedIdentityGrantId:"approve-identity"},destinations:[{sourceId:selectedSourceId,
+        sourceInstanceUUID:source.sourceInstanceId,applicationUUID:source.applicationId,historyEpoch:source.historyEpoch,origin:source.baseUrl,
+        externalCanonicalId:foreignId,expectedAuthorizationGeneration:"9"}]}]});
+    expect(changed).toMatchObject({status:"written"});
+    expect(await db.prepare("SELECT count(*) total FROM project_alpha_directory_unsettled_commands WHERE external_id=? AND source_id=?").bind(foreignId,selectedSourceId).first<number>("total")).toBeGreaterThan(0);
+    const pending=await submission({...business,name:"Blocked pending company"});
+    await expect(prepareClientOnboardingSharedCompanyPlan(db,actor,{...input,commandId:uuid(),submissionId:pending.submissionId,fieldsSha256:pending.fieldsSha256,
+      organizationSelection:{...input.organizationSelection,expectedVersion:2,members:[{recordId:company,expectedVersion:2}]}},selectedConnection)).rejects.toThrow();
+  },180_000);
 
 });
