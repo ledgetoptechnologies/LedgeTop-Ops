@@ -9,7 +9,7 @@ import { configuredLocalDivisionIdentity,refreshLocalDivisionSourceIdentity } fr
 const source="project-alpha:primary",origin="https://pa.example.test";
 const instance="11111111-1111-4111-8111-111111111111",application="22222222-2222-4222-8222-222222222222",epoch="33333333-3333-4333-8333-333333333333";
 let runtime:Miniflare,db:D1Database,env:Env,next=0;
-beforeAll(()=>{runtime=new Miniflare({modules:true,script:"export default {fetch(){return new Response('ok')}}",d1Databases:Array.from({length:8},(_,i)=>`DB${i}`)});});
+beforeAll(()=>{runtime=new Miniflare({modules:true,script:"export default {fetch(){return new Response('ok')}}",d1Databases:Array.from({length:12},(_,i)=>`DB${i}`)});});
 afterAll(()=>runtime.dispose());
 beforeEach(async()=>{
   db=await runtime.getD1Database(`DB${next++}`) as D1Database;
@@ -52,6 +52,51 @@ describe("local division source identity preflight",()=>{
     probe.mockResolvedValue({status:"verified",sourceInstanceId:application,applicationId:instance,historyEpoch:epoch});
     await refreshLocalDivisionSourceIdentity(env,source,origin);
     expect(await db.prepare("SELECT identity_key FROM pa_local_division_source_heads").first("identity_key")).toBeNull();
+  });
+
+  it("uses an explicit projection identity envelope without renaming the directory alias",async()=>{
+    const original=JSON.parse(env.PROJECT_ALPHA_API_V2_CONNECTIONS!);
+    const entry=original.instances[source],alias="project-alpha:staging";
+    const directory=JSON.stringify({version:1,instances:{[alias]:{...entry,sourceId:alias}}});
+    const identityEnvelope=JSON.stringify({version:1,instances:{[source]:{...entry,apiKey:"separate-capabilities-only-key"}}});
+    const directoryOnly={...env,PROJECT_ALPHA_API_V2_CONNECTIONS:directory};
+    expect(configuredLocalDivisionIdentity(directoryOnly,source)).toBeNull();
+    const explicit={...directoryOnly,PROJECT_ALPHA_LOCAL_DIVISION_IDENTITY_CONNECTIONS:identityEnvelope};
+    expect(configuredLocalDivisionIdentity(explicit,source)).toBe(configuredLocalDivisionIdentity(env,source));
+    probe.mockResolvedValue({status:"verified",sourceInstanceId:instance,applicationId:application,historyEpoch:epoch,grantedCapabilities:["api.capabilities.read"]});
+    await refreshLocalDivisionSourceIdentity(explicit,source,origin);
+    expect(probe).toHaveBeenCalledWith({PROJECT_ALPHA_API_V2_CONNECTIONS:identityEnvelope},source);
+    expect(await db.prepare("SELECT identity_key FROM pa_local_division_source_heads").first("identity_key")).toBe(configuredLocalDivisionIdentity(env,source));
+    expect(explicit.PROJECT_ALPHA_API_V2_CONNECTIONS).toBe(directory);
+  });
+  it("fails closed for an explicit invalid or incomplete identity envelope instead of using general connections",async()=>{
+    for(const configured of ["",JSON.stringify({version:1,instances:{}})]) {
+      const explicit={...env,PROJECT_ALPHA_LOCAL_DIVISION_IDENTITY_CONNECTIONS:configured};
+      expect(configuredLocalDivisionIdentity(explicit,source)).toBeNull();
+      await refreshLocalDivisionSourceIdentity(explicit,source,origin);
+      expect(await db.prepare("SELECT identity_key FROM pa_local_division_source_heads").first("identity_key")).toBeNull();
+    }
+    expect(probe).not.toHaveBeenCalled();
+  });
+  it("pins application identity independently of credentials so both writers agree only on the same PA application",()=>{
+    const readonly=JSON.parse(env.PROJECT_ALPHA_API_V2_CONNECTIONS!);
+    readonly.instances[source].apiKey="dedicated-sync-read-key";
+    const same={...env,PROJECT_ALPHA_LOCAL_DIVISION_IDENTITY_CONNECTIONS:JSON.stringify(readonly)};
+    expect(configuredLocalDivisionIdentity(same,source)).toBe(configuredLocalDivisionIdentity(env,source));
+    readonly.instances[source].applicationId="55555555-5555-4555-8555-555555555555";
+    expect(configuredLocalDivisionIdentity({...same,PROJECT_ALPHA_LOCAL_DIVISION_IDENTITY_CONNECTIONS:JSON.stringify(readonly)},source)).not.toBe(configuredLocalDivisionIdentity(env,source));
+  });
+
+  it("rejects accidentally copied command or financial keys in a dedicated identity envelope",async()=>{
+    const dedicated={...env,PROJECT_ALPHA_LOCAL_DIVISION_IDENTITY_CONNECTIONS:env.PROJECT_ALPHA_API_V2_CONNECTIONS};
+    for(const grantedCapabilities of [["api.capabilities.read","directory.clients.write"],["api.capabilities.read","financial.summary.read"],[]]) {
+      probe.mockResolvedValue({status:"verified",sourceInstanceId:instance,applicationId:application,historyEpoch:epoch,grantedCapabilities});
+      await refreshLocalDivisionSourceIdentity(dedicated,source,origin);
+      expect(await db.prepare("SELECT identity_key FROM pa_local_division_source_heads").first("identity_key")).toBeNull();
+    }
+    probe.mockResolvedValue({status:"verified",sourceInstanceId:instance,applicationId:application,historyEpoch:epoch,grantedCapabilities:["api.capabilities.read"]});
+    await refreshLocalDivisionSourceIdentity(dedicated,source,origin);
+    expect(await db.prepare("SELECT identity_key FROM pa_local_division_source_heads").first("identity_key")).toBe(configuredLocalDivisionIdentity(dedicated,source));
   });
 
 });

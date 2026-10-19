@@ -103,6 +103,8 @@ export type Env = Omit<
   PROJECT_ALPHA_CONNECTOR_CREDENTIALS?: string;
   /** Versioned, deployment-owned API-v2 connections. Never accepted from a browser or connector registry request. */
   PROJECT_ALPHA_API_V2_CONNECTIONS?: string;
+  /** Exact projection-source identities with dedicated api.capabilities.read keys. */
+  PROJECT_ALPHA_LOCAL_DIVISION_IDENTITY_CONNECTIONS?: string;
   /** Default-off, route-less PA catalog snapshot to Client staging coordinator. */
   PROJECT_ALPHA_CATALOG_STAGING_COORDINATOR_ENABLED?: string;
   /** Default-off, route-less promotion after an exact staged snapshot. */

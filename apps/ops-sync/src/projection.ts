@@ -268,7 +268,8 @@ async function applyProjectionEventLocked(env: Env, source: ProjectAlphaSourceCo
     // Relationship and assignment events can also change a mapped project's
     // authority context. Fence every applied projection before any row changes.
     const registered=proof?.mode==="registry"?await env.OPS_DB.prepare("SELECT snapshot_origin FROM pa_connectors WHERE source_id=?").bind(source.sourceId).first<{snapshot_origin:string}>():null;
-    await refreshLocalDivisionSourceIdentity(env,source.sourceId,registered?.snapshot_origin??env.PROJECT_ALPHA_BASE_URL??"",
+    await refreshLocalDivisionSourceIdentity({OPS_DB:env.OPS_DB,
+      PROJECT_ALPHA_LOCAL_DIVISION_IDENTITY_CONNECTIONS:env.PROJECT_ALPHA_LOCAL_DIVISION_IDENTITY_CONNECTIONS},source.sourceId,registered?.snapshot_origin??env.PROJECT_ALPHA_BASE_URL??"",
       ()=>proof?[connectorFenceStatement(env.OPS_DB,proof)]:[]);
     const ids=await prepareProjectAlphaSourceRecords(mappingDatabase(env,proof),source,references);
     const data=mapProjectAlphaSourceRow(collection,row,ids);
