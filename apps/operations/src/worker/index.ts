@@ -130,6 +130,7 @@ import { listAdminAuditEvents } from "./admin-audit";
 import { registerClientFeedbackRoutes, staffFeedbackEntryEnabled } from "./client-feedback";
 import { processClientFeedbackNotifications } from "./client-feedback-notifications";
 import { CLIENT_ONBOARDING_NOTIFICATION_CRON, processClientOnboardingNotifications } from "./client-onboarding-notifications";
+import { CLIENT_ONBOARDING_PORTAL_ACTIVATION_CRON, processClientOnboardingPortalActivation } from "./client-onboarding-portal-activation";
 import { processProjectAccessExpiryNotifications } from "./project-access-expiry-notifications";
 import { maintainAuthenticatedDeliveryChanges } from "./delivery-change-maintenance";
 import {
@@ -3513,6 +3514,16 @@ async function scheduled(
   env: Env,
   ctx: ExecutionContext,
 ) {
+  if (event.cron === CLIENT_ONBOARDING_PORTAL_ACTIVATION_CRON) {
+    try {
+      const result = await processClientOnboardingPortalActivation(env);
+      console.log(JSON.stringify({ event: "client_onboarding.portal_activation.tick", processed: result.processed, active: result.active }));
+    } catch {
+      console.error(JSON.stringify({ event: "client_onboarding.portal_activation.error" }));
+      throw new Error("Client onboarding portal activation failed");
+    }
+    return;
+  }
   if (event.cron === CLIENT_ONBOARDING_NOTIFICATION_CRON) {
     if (!notificationMigrationMaintenanceActive(env)) {
       const result = await processClientOnboardingNotifications(env);

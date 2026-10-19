@@ -61,7 +61,7 @@ test("renders all three exact staging configs without placeholders", () => {
   assert.equal(configs.operations.vars.CLIENT_REQUEST_TRIAGE_TO, values.STAGING_TRIAGE_EMAIL);
   assert.equal(configs.operations.main, "src/worker/staging-native-authority-entrypoint.ts");
   assert.deepEqual(configs.operations.triggers?.crons,
-    ["*/15 * * * *", "*/5 * * * *", "2-57/5 * * * *", "17 * * * *", "4-59/15 * * * *", "3-58/5 * * * *", "1-56/5 * * * *", "11-56/15 * * * *", "6-51/15 * * * *"],
+    ["*/15 * * * *", "*/5 * * * *", "2-57/5 * * * *", "17 * * * *", "4-59/15 * * * *", "3-58/5 * * * *", "1-56/5 * * * *", "11-56/15 * * * *", "13-58/15 * * * *", "6-51/15 * * * *"],
     "the isolated staging template retains its dormant reconciliation schedule");
   assert.deepEqual(JSON.parse(fs.readFileSync(path.join(root, "apps/operations/wrangler.jsonc"), "utf8")).triggers.crons,
     configs.operations.triggers.crons.filter(cron => cron !== "6-51/15 * * * *"),
