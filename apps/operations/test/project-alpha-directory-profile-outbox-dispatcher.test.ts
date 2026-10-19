@@ -164,7 +164,15 @@ describe("native Directory profile outbox dispatcher", () => {
     expect(source).toContain("recovery.rootCommandJson !== row.root_command_json");
     expect(source).toContain("recovery?.profileGrantId ?? originalActor.selectedGrantId");
     expect(source).toContain("recovery?.identityGrantId ?? originalActor.selectedIdentityGrantId");
-    expect(source).toContain("const rootCommand = recovery ? parse(recovery.rootCommandJson) : command");
+    expect(source).toContain("profileRecovery.authorization_id!==row.recovery_authorization_id");
+    expect(source).toContain("profileRecovery.root_command_id!==row.root_command_id");
+    expect(source).toContain("profileRecovery.root_command_json!==row.root_command_json");
+    expect(source).toContain("profileRecovery.actor_json!==JSON.stringify(audit.actor)");
+    // Both successor types retain their immutable original command. A profile
+    // successor must not fall through to the create reservation or fresh body.
+    expect(source).toMatch(/const rootCommand\s*=\s*profileRecovery\s*\?\s*parse\(profileRecovery\.root_command_json\)\s*:\s*recovery\s*\?\s*parse\(recovery\.rootCommandJson\)\s*:\s*command\s*;/);
+    expect(source).toMatch(/if\s*\(!rootCommand\)\s*return\s*"command"/);
+    expect(source).toContain("value.expectedAuthorizationGeneration === rootCommand.expectedAuthorizationGeneration");
   });
   it("derives the fixed destination proof from the current 0203 schema and only an exact acknowledged update", async () => {
     const recordId = "614ed50f-8800-4ab3-aa69-009d8e5cefa9";
