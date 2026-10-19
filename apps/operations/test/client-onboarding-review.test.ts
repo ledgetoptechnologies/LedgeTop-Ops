@@ -31,8 +31,8 @@ describe("client onboarding submission review authority", () => {
     expect(sql).toContain("deny_row.effect='deny'");
     expect(sql).toContain("permission='directory.profile.edit'");
     expect(fake.bind).toHaveBeenCalledWith(actor.identity.staffId, actor.identity.verifiedAccessSubject,
-      actor.admissionVersion, actor.identity.profileVersion, actor.identity.email, submissionId,
-      actor.identity.staffId, actor.identity.staffId, actor.identity.staffId, actor.identity.staffId);
+      actor.admissionVersion, actor.identity.profileVersion, actor.identity.email, submissionId, submissionId, null, null, null, null,
+      actor.identity.staffId, actor.identity.staffId, actor.identity.staffId, actor.identity.staffId, 1);
   });
 
   it("fails closed when the scoped query returns no authorized row", async () => {

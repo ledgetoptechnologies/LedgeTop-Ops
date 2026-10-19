@@ -990,3 +990,25 @@ from these local tests.
   `CLIENT_ONBOARDING_PREFILL_ENABLED=true` gate (false in release configs).
   The staff issuance UI, intent-to-proof completion, and exact cross-Worker
   revocation/replay acceptance remain mandatory before activation.
+
+
+## Review discovery and recipient link handoff
+
+`POST /api/client-onboarding/staff/inbox` accepts exactly `{ "cursor": null }`
+for its first page, or the previous `nextCursor`. It uses the same current native
+admission, profile, allow-over-every-scope and deny precedence as individual
+submission review. Authorization is applied before the 32-item page limit. Only
+pending, undecided submissions appear; a changed permission is rechecked for
+every page. The response exposes a name/company summary and submission ID, not
+full fields, contact email or invitation secrets. A summary is an Ops review
+notice, not authority to approve or enroll a client.
+
+The one-time reveal response includes `recipientUrl` when the deployment's
+`PUBLIC_SHARE_ORIGIN` is a canonical HTTPS origin. The invitation secret remains
+only in its fragment (`/onboarding/<invitation-id>#<secret>`), with the existing
+`no-store` response and one-time reveal audit. The recipient route scrubs that
+fragment before mounting React and sending its first API request. Missing or
+invalid origin yields `recipientUrl: null`; the existing secret handoff is kept.
+The recipient bridge still requires its own tested deployment activation. No
+notification email, PA write, portal grant or file grant is issued by discovery
+or by revealing the link.

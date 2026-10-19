@@ -488,6 +488,7 @@ async function dispatchClientOnboardingStaff(c: any) {
     },
     database: c.env.OPS_DB,
     handoffKeyringJson: c.env.CLIENT_ONBOARDING_HANDOFF_KEYRING,
+    recipientOrigin: c.env.PUBLIC_SHARE_ORIGIN,
     projectAlphaApiV2Connections: c.env.PROJECT_ALPHA_API_V2_CONNECTIONS,
   });
 }

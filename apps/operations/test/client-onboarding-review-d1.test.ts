@@ -2,7 +2,7 @@ import { readFileSync, readdirSync } from "node:fs";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { Miniflare } from "miniflare";
 import { splitD1MigrationStatements } from "../../client/test/helpers/d1-migrations";
-import { readClientOnboardingSubmissionForReview } from "../src/worker/client-onboarding-review";
+import { readClientOnboardingSubmissionForReview, listClientOnboardingSubmissionsForReview } from "../src/worker/client-onboarding-review";
 
 let runtime: Miniflare | undefined;
 let db: D1Database;
@@ -57,7 +57,7 @@ describe("client onboarding review against migrated D1", () => {
     db = await runtime.getD1Database("OPS_DB") as D1Database;
     const directory = new URL("../migrations/", import.meta.url);
     for (const name of readdirSync(directory).filter(item => /^\d{4}_.+\.sql$/.test(item)
-      && item.slice(0, 4) <= "0080").sort()) {
+      && item.slice(0, 4) <= "0083").sort()) {
       await db.batch(splitD1MigrationStatements(readFileSync(new URL(name, directory), "utf8"))
         .map(statement => db.prepare(statement)));
       if (name.startsWith("0057_")) await db.batch([
@@ -120,4 +120,37 @@ describe("client onboarding review against migrated D1", () => {
     await grant("deny-assigned", "deny", "assigned");
     await denied(id);
   });
+  it("pages only authorized pending submissions without starving behind denied rows", async () => {
+    await db.prepare("UPDATE native_directory_grants SET active=0").run();
+    await db.prepare("UPDATE native_directory_grants SET active=1 WHERE id='bootstrap'").run();
+    const visible: string[] = [];
+    for (let i = 0; i < 34; i++) {
+      await submission(null, [{ businessAreaId: "area:b", divisionId: null }]);
+      visible.push(await submission(null, [{ businessAreaId: "area:a", divisionId: null }]));
+    }
+    await db.prepare("UPDATE native_directory_grants SET active=0 WHERE id='bootstrap'").run();
+    await db.prepare("UPDATE native_directory_grants SET active=1 WHERE id='allow-a'").run();
+    const first = await listClientOnboardingSubmissionsForReview(db, actor);
+    expect(first.submissions).toHaveLength(32);
+    expect(first.nextCursor).not.toBeNull();
+    expect(first.submissions.every(item => item.name === fields.name && !("email" in item) && !("fields" in item))).toBe(true);
+    const second = await listClientOnboardingSubmissionsForReview(db, actor, first.nextCursor);
+    expect(second.nextCursor).toBeNull();
+    const all = [...first.submissions, ...second.submissions].map(item => item.submissionId);
+    expect(new Set(all).size).toBe(all.length);
+    expect(visible.every(id => all.includes(id))).toBe(true);
+    await db.prepare("UPDATE native_directory_grants SET active=1 WHERE id='deny-a-division'").run();
+    await grant("inbox-deny", "deny", "business_area", { businessAreaId: "area:a" });
+    expect(await listClientOnboardingSubmissionsForReview(db, actor)).toEqual({ submissions: [], nextCursor: null });
+  }, 120_000);
+
+  it("rejects forged cursor shapes and expired staff sessions", async () => {
+    await expect(listClientOnboardingSubmissionsForReview(db, actor, { submittedAt: "2026-10-18", submissionId: uuid() }))
+      .rejects.toThrow("client_onboarding_review_denied");
+    await expect(listClientOnboardingSubmissionsForReview(db, { ...actor, verifiedUntil: "invalid" }))
+      .rejects.toThrow("client_onboarding_review_denied");
+    await expect(listClientOnboardingSubmissionsForReview(db, { ...actor, verifiedUntil: "2020-01-01T00:00:00.000Z" }))
+      .rejects.toThrow("client_onboarding_review_denied");
+  });
+
 });

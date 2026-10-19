@@ -7,16 +7,18 @@ import { authenticateNativeStaffWithAdmissionVersion,
   type NativeStaffAccessConfiguration } from "./native-staff-auth";
 import { issueClientOnboardingWithHandoff, revealClientOnboardingSecret,
   snapshotClientOnboardingKeyring, type ClientOnboardingKeyring } from "./client-onboarding-handoff";
-import { readClientOnboardingSubmissionForReview } from "./client-onboarding-review";
+import { readClientOnboardingSubmissionForReview, listClientOnboardingSubmissionsForReview } from "./client-onboarding-review";
 import { approveNewNativeOnlyClientOnboarding } from "./client-onboarding-approval";
 import { readClientOnboardingEnrollmentChoices } from "./client-onboarding-enrollment-discovery";
 import { parseClientOnboardingEnrollmentSourceIds } from "./client-onboarding-enrollment-selection";
 
-export type ClientOnboardingStaffRoute = "session" | "create" | "reveal" | "review" | "approve" | "enrollment-choices";
+export type ClientOnboardingStaffRoute = "session" | "create" | "reveal" | "review" | "approve" | "enrollment-choices" | "inbox";
 export type ClientOnboardingStaffHttpDependencies = Readonly<{
   configuration: NativeStaffAccessConfiguration & Readonly<{ origin: string; csrfSecret: string }>;
   database: D1Database;
   handoffKeyringJson?: string;
+  /** Canonical portal origin, supplied by deployment configuration, never browser input. */
+  recipientOrigin?: string;
   /** Deployment-owned secret passed only to the credential-free list helper. */
   projectAlphaApiV2Connections?: string;
 }>;
@@ -35,12 +37,25 @@ class HttpFailure extends Error {
 
 export function clientOnboardingStaffHttpRequest(method: string, path: string): ClientOnboardingStaffRoute | null {
   if (method === "GET" && path === "/api/client-onboarding/staff/session") return "session";
+  if (method === "POST" && path === "/api/client-onboarding/staff/inbox") return "inbox";
   if (method === "POST" && path === "/api/client-onboarding/staff/create") return "create";
   if (method === "POST" && path === "/api/client-onboarding/staff/reveal") return "reveal";
   if (method === "POST" && path === "/api/client-onboarding/staff/review") return "review";
   if (method === "POST" && path === "/api/client-onboarding/staff/approve") return "approve";
   if (method === "POST" && path === "/api/client-onboarding/staff/enrollment-choices") return "enrollment-choices";
   return null;
+}
+
+export function clientOnboardingRecipientUrl(origin: string | undefined,
+  invitationId: string, invitationSecret: string): string | null {
+  try {
+    const parsed = new URL(origin ?? "");
+    if (parsed.protocol !== "https:" || parsed.origin !== origin || parsed.username || parsed.password
+      || parsed.port || parsed.pathname !== "/" || parsed.search || parsed.hash
+      || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(invitationId)
+      || !HEX.test(invitationSecret)) return null;
+    return `${parsed.origin}/onboarding/${invitationId}#${invitationSecret}`;
+  } catch { return null; }
 }
 
 function response(status: number, body: Record<string, unknown>): Response {
@@ -134,6 +149,10 @@ async function body(request: Request, route: Exclude<ClientOnboardingStaffRoute,
     throw new HttpFailure(400, "invalid_request");
   }
   if (!plain(value)) throw new HttpFailure(400, "invalid_request");
+  if (route === "inbox") {
+    if (!exact(value, ["cursor"])) throw new HttpFailure(400, "invalid_request");
+    return value;
+  }
   if (route === "approve") {
     if (!(exact(value, ["submissionId", "fieldsSha256"])
         || exact(value, ["submissionId", "fieldsSha256", "sourceIds"]))
@@ -176,6 +195,7 @@ export async function handleClientOnboardingStaffHttp(request: Request,
     // Capture deployment configuration before authentication/CSRF awaits so a
     // mutable test or host object cannot change the selected destinations.
     const projectAlphaApiV2Connections = dependencies.projectAlphaApiV2Connections;
+    const recipientOrigin = dependencies.recipientOrigin;
     const handoff = route === "create" || route === "reveal" ? keyring(dependencies.handoffKeyringJson) : undefined;
     if (url.origin !== authority.origin || url.search || url.hash)
       throw new HttpFailure(403, "client_onboarding_denied");
@@ -213,6 +233,13 @@ export async function handleClientOnboardingStaffHttp(request: Request,
         throw new HttpFailure(403, "client_onboarding_denied");
       }
     }
+    if (route === "inbox") {
+      try {
+        const inbox = await listClientOnboardingSubmissionsForReview(authority.database, auth, input.cursor);
+        unexpired(auth);
+        return response(200, inbox);
+      } catch { throw new HttpFailure(403, "client_onboarding_denied"); }
+    }
     if (route === "review") {
       try {
         const review = await readClientOnboardingSubmissionForReview(authority.database, auth, input.submissionId);
@@ -245,7 +272,8 @@ export async function handleClientOnboardingStaffHttp(request: Request,
       const revealed = await revealClientOnboardingSecret(authority.database,
         { authenticatedNativeStaff: handoffAuthentication(auth), commandId: input.commandId }, handoff!);
       return response(200, { commandId: revealed.commandId, invitationId: revealed.invitationId,
-        expiresAt: revealed.expiresAt, invitationSecret: revealed.invitationSecret });
+        expiresAt: revealed.expiresAt, invitationSecret: revealed.invitationSecret,
+        recipientUrl: clientOnboardingRecipientUrl(recipientOrigin, revealed.invitationId, revealed.invitationSecret) });
     } catch { throw new HttpFailure(403, "client_onboarding_denied"); }
   } catch (error) {
     const failure = error instanceof HttpFailure ? error

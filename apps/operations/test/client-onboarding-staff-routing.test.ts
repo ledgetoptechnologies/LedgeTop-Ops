@@ -3,7 +3,7 @@ import { HTTPException } from "hono/http-exception";
 import type { Env } from "../src/worker/types";
 
 const calls = vi.hoisted(() => ({ legacy: vi.fn(), native: vi.fn(), issue: vi.fn(), reveal: vi.fn(),
-  review: vi.fn(), approve: vi.fn(), enrollmentChoices: vi.fn() }));
+  review: vi.fn(), inbox: vi.fn(), approve: vi.fn(), enrollmentChoices: vi.fn() }));
 vi.mock("cloudflare:workers", () => ({ WorkflowEntrypoint: class {}, WorkerEntrypoint: class {}, DurableObject: class {} }));
 vi.mock("../src/worker/auth", () => ({ authenticateStaff: calls.legacy }));
 vi.mock("../src/worker/native-staff-auth", () => ({
@@ -16,6 +16,7 @@ vi.mock("../src/worker/client-onboarding-handoff", () => ({
 }));
 vi.mock("../src/worker/client-onboarding-review", () => ({
   readClientOnboardingSubmissionForReview: calls.review,
+  listClientOnboardingSubmissionsForReview: calls.inbox,
 }));
 vi.mock("../src/worker/client-onboarding-approval", () => ({
   approveNewNativeOnlyClientOnboarding: calls.approve,
@@ -36,7 +37,7 @@ const database: D1Database = { prepare: unavailable, batch: unavailable, exec: u
   withSession: unavailable, dump: unavailable };
 function env(enabled = "true"): Env {
   return { ENVIRONMENT: "production", EXPECTED_HOST: "ops.example.test", OPERATIONS_ORIGINS: origin,
-    PUBLIC_BASE_URL: origin, INCOMING_EXPECTED_HOST: "incoming.example.test",
+    PUBLIC_BASE_URL: origin, PUBLIC_SHARE_ORIGIN: "https://portal.example.test", INCOMING_EXPECTED_HOST: "incoming.example.test",
     INCOMING_BASE_URL: "https://incoming.example.test", OPS_DB: database,
     TEAM_DOMAIN: "https://synthetic-team.cloudflareaccess.com",
     OPERATIONS_AUD: "synthetic-staff-audience", CLIENT_ONBOARDING_ADMIN_ENABLED: enabled,
@@ -66,6 +67,7 @@ beforeEach(() => {
   calls.reveal.mockReset().mockResolvedValue({ commandId: "22222222-2222-4222-8222-222222222222",
     invitationId: "11111111-1111-4111-8111-111111111111", expiresAt: "2099-01-01T00:00:00.000Z",
     invitationSecret: "d".repeat(64) });
+  calls.inbox.mockReset().mockResolvedValue({ submissions: [], nextCursor: null });
   calls.review.mockReset().mockResolvedValue({
     invitationId: "11111111-1111-4111-8111-111111111111",
     submissionId: "33333333-3333-4333-8333-333333333333", fieldsSha256: "e".repeat(64),
@@ -298,6 +300,20 @@ describe("native client onboarding staff route", () => {
     }, csrf);
     expect(reply.status).toBe(503);
     expect(await reply.json()).toEqual({ error: "client_onboarding_unavailable" });
+  });
+
+  it("lists authorized submissions through the native CSRF boundary", async () => {
+    const csrf = await session();
+    const reply = await send("/api/client-onboarding/staff/inbox", "POST", { cursor: null }, csrf);
+    expect(reply.status).toBe(200);
+    expect(await reply.json()).toEqual({ submissions: [], nextCursor: null });
+    expect(reply.headers.get("Cache-Control")).toBe("no-store");
+    expect(calls.inbox).toHaveBeenCalledWith(database, actor, null);
+    expect(calls.legacy).not.toHaveBeenCalled();
+    calls.inbox.mockClear();
+    expect((await send("/api/client-onboarding/staff/inbox", "POST", { cursor: null }, "bad")).status).toBe(403);
+    expect((await send("/api/client-onboarding/staff/inbox", "POST", { cursor: null, staffId: "other" }, csrf)).status).toBe(400);
+    expect(calls.inbox).not.toHaveBeenCalled();
   });
 
   it("reserves the exact namespace and leaves unrelated API paths to legacy auth", async () => {

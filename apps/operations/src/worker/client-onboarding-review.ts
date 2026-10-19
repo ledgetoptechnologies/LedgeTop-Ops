@@ -25,20 +25,14 @@ type ReviewRow = {
   scopes_json: string;
 };
 
-/**
- * Reads one immutable submission only when the current native actor can edit
- * every scope in its review context. The query deliberately mirrors the
- * decision authority: proposed issuance scopes for new clients, and the full
- * current resource scope set for existing clients. Any matching deny wins.
- */
-export async function readClientOnboardingSubmissionForReview(database: D1Database,
-  authenticated: AuthenticatedNativeStaffWithAdmissionVersion,
-  submissionId: unknown): Promise<ClientOnboardingSubmissionReview> {
-  try {
-    if (typeof submissionId !== "string" || !UUID.test(submissionId)
-      || Date.parse(authenticated.verifiedUntil) <= Date.now()) return denied();
+type ReviewCursor = Readonly<{ submittedAt: string; submissionId: string }>;
+
+/** One authority query for individual review and the inbox: denied records never
+ * affect the returned page size or cursor. */
+function authorizedReviews(database: D1Database, authenticated: AuthenticatedNativeStaffWithAdmissionVersion,
+  submissionId: string | null, after: ReviewCursor | null, limit: number): D1PreparedStatement {
     const actor = authenticated.identity;
-    const row = await database.withSession("first-primary").prepare(`WITH candidate AS (
+    return database.withSession("first-primary").prepare(`WITH candidate AS (
       SELECT submission.invitation_id,submission.submission_id,submission.fields_json,
         submission.fields_sha256,submission.created_at AS submitted_at,
         invitation.target_client_record_id,issuance.scopes_json
@@ -49,7 +43,9 @@ export async function readClientOnboardingSubmissionForReview(database: D1Databa
         AND admission.bound_access_subject=? AND admission.version=?
       JOIN native_staff_profiles profile ON profile.staff_id=admission.staff_id
         AND profile.version=? AND profile.login_email=?
-      WHERE submission.submission_id=? AND invitation.state='submitted' AND invitation.version=2
+      WHERE (? IS NULL OR submission.submission_id=?) AND invitation.state='submitted' AND invitation.version=2
+        ${submissionId === null ? `AND NOT EXISTS(SELECT 1 FROM client_onboarding_decisions decision WHERE decision.submission_id=submission.submission_id)` : ''}
+        AND (? IS NULL OR submission.created_at>? OR (submission.created_at=? AND submission.submission_id>?))
     ), review_scopes AS (
       SELECT candidate.submission_id,candidate.target_client_record_id AS record_id,
         CASE WHEN candidate.target_client_record_id IS NULL THEN 'new' ELSE 'existing' END AS target_kind,
@@ -100,10 +96,14 @@ export async function readClientOnboardingSubmissionForReview(database: D1Databa
                   AND assignment.staff_id=? AND assignment.active=1))
               OR (deny_row.scope_kind='business_area' AND deny_row.business_area_id=scope.business_area_id)
               OR (deny_row.scope_kind='division' AND deny_row.division_id=scope.division_id))))
-    LIMIT 1`).bind(actor.staffId, actor.verifiedAccessSubject, authenticated.admissionVersion,
-      actor.profileVersion, actor.email, submissionId, actor.staffId, actor.staffId,
-      actor.staffId, actor.staffId).first<ReviewRow>();
-    if (!row || row.submission_id !== submissionId || !UUID.test(row.invitation_id)
+    ORDER BY candidate.submitted_at,candidate.submission_id LIMIT ?`).bind(actor.staffId, actor.verifiedAccessSubject, authenticated.admissionVersion,
+      actor.profileVersion, actor.email, submissionId, submissionId, after?.submittedAt ?? null,
+      after?.submittedAt ?? null, after?.submittedAt ?? null, after?.submissionId ?? null,
+      actor.staffId, actor.staffId, actor.staffId, actor.staffId, limit);
+
+}
+function parseReview(row: ReviewRow): ClientOnboardingSubmissionReview {
+    if (!UUID.test(row.submission_id) || !UUID.test(row.invitation_id)
       || !HEX.test(row.fields_sha256) || !Number.isFinite(Date.parse(row.submitted_at))) return denied();
     const rawScopes: unknown = JSON.parse(row.scopes_json);
     if (!Array.isArray(rawScopes) || rawScopes.length < 1 || rawScopes.length > 128) return denied();
@@ -118,5 +118,55 @@ export async function readClientOnboardingSubmissionForReview(database: D1Databa
     return Object.freeze({ invitationId: row.invitation_id, submissionId: row.submission_id,
       fieldsSha256: row.fields_sha256, submittedAt: row.submitted_at,
       targetClientRecordId: row.target_client_record_id, scopes: Object.freeze(scopes), fields });
+
+}
+
+/** Reads only a submission covered by current edit authority over every scope. */
+export async function readClientOnboardingSubmissionForReview(database: D1Database,
+  authenticated: AuthenticatedNativeStaffWithAdmissionVersion,
+  submissionId: unknown): Promise<ClientOnboardingSubmissionReview> {
+  try {
+    if (typeof submissionId !== "string" || !UUID.test(submissionId)
+      || Date.parse(authenticated.verifiedUntil) <= Date.now()) return denied();
+    const row = await authorizedReviews(database, authenticated, submissionId, null, 1).first<ReviewRow>();
+    if (!row || row.submission_id !== submissionId) return denied();
+    return parseReview(row);
+  } catch { return denied(); }
+}
+
+export type ClientOnboardingInbox = Readonly<{
+  submissions: readonly Readonly<{ submissionId: string; submittedAt: string; name: string;
+    organizationName: string; clientType: "consumer" | "business"; existingClient: boolean }>[];
+  nextCursor: ReviewCursor | null;
+}>;
+
+/** Bounded keyset page, filtering authorization in SQL before LIMIT. No totals,
+ * bearer secrets or full submitted profiles are exposed by discovery. */
+export async function listClientOnboardingSubmissionsForReview(database: D1Database,
+  authenticated: AuthenticatedNativeStaffWithAdmissionVersion, rawCursor: unknown = null): Promise<ClientOnboardingInbox> {
+  try {
+    if (!Number.isFinite(Date.parse(authenticated.verifiedUntil))
+      || Date.parse(authenticated.verifiedUntil) <= Date.now()) return denied();
+    let after: ReviewCursor | null = null;
+    if (rawCursor !== null) {
+      if (!rawCursor || typeof rawCursor !== "object" || Array.isArray(rawCursor)) return denied();
+      const value = rawCursor as Record<string, unknown>;
+      if (Object.keys(value).length !== 2 || typeof value.submittedAt !== "string"
+        || typeof value.submissionId !== "string" || !UUID.test(value.submissionId)
+        || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(value.submittedAt)
+        || !Number.isFinite(Date.parse(value.submittedAt))
+        || new Date(value.submittedAt).toISOString() !== value.submittedAt) return denied();
+      after = { submittedAt: value.submittedAt, submissionId: value.submissionId };
+    }
+    const rows = (await authorizedReviews(database, authenticated, null, after, 33).all<ReviewRow>()).results;
+    if (Date.parse(authenticated.verifiedUntil) <= Date.now()) return denied();
+    const reviews = rows.slice(0, 32).map(parseReview);
+    const last = reviews.at(-1);
+    return Object.freeze({ submissions: Object.freeze(reviews.map(review => Object.freeze({
+      submissionId: review.submissionId, submittedAt: review.submittedAt, name: review.fields.name,
+      organizationName: review.fields.organizationName, clientType: review.fields.clientType,
+      existingClient: review.targetClientRecordId !== null,
+    }))), nextCursor: rows.length > 32 && last
+      ? Object.freeze({ submittedAt: last.submittedAt, submissionId: last.submissionId }) : null });
   } catch { return denied(); }
 }
