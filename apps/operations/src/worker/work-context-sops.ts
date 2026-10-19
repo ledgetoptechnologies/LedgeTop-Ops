@@ -115,6 +115,7 @@ function viewPermission(kind: WorkContextKind): Permission {
 function contextResource(row: WorkContextRow): ResourceContext {
   return {
     divisionId: row.division_id,
+    divisionAuthorityUnknown: row.division_id === null,
     ownerId: row.owner_id,
     assignedStaffIds: row.assigned_staff_ids?.split(",").filter(Boolean) || [],
   };
@@ -123,6 +124,7 @@ function contextResource(row: WorkContextRow): ResourceContext {
 function contextManageResource(row: WorkContextRow): ResourceContext {
   return {
     divisionId: row.division_id,
+    divisionAuthorityUnknown: row.division_id === null,
     ownerId: row.owner_id,
     assignedStaffIds: row.manage_staff_ids?.split(",").filter(Boolean) || [],
   };
@@ -133,7 +135,7 @@ function scopedPermissionSql(permission: Permission, assignedColumn: "assigned" 
       SELECT 1 FROM current_grants denied
       WHERE denied.permission='${permission}' AND denied.source='override' AND denied.effect='deny'
         AND (denied.scope='global'
-          OR (denied.scope='division' AND denied.division_id=context.division_id)
+          OR (denied.scope='division' AND (context.division_id IS NULL OR denied.division_id=context.division_id))
           OR (denied.scope='assigned' AND context.${assignedColumn}=1)
           OR (denied.scope='own' AND context.owned=1))
     ) AND EXISTS (

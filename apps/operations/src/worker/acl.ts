@@ -29,7 +29,11 @@ function matches(grant: GrantRow, principal: StaffPrincipal, context?: ResourceC
 }
 
 export function evaluatePermission(grants: GrantRow[], principal: StaffPrincipal, permission: Permission, context?: ResourceContext): boolean {
-  const applicable = grants.filter(grant => grant.permission === permission && matches(grant, principal, context));
+  const applicable = grants.filter(grant => grant.permission === permission && (
+    matches(grant, principal, context)
+    || (context?.divisionAuthorityUnknown === true && grant.scope === "division"
+      && grant.source === "override" && grant.effect === "deny")
+  ));
   if (applicable.some(grant => grant.source === "override" && grant.effect === "deny")) return false;
   return applicable.some(grant => grant.effect === "allow");
 }

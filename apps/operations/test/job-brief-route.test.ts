@@ -31,6 +31,7 @@ vi.mock("../src/worker/request-security", async importOriginal => ({
 }));
 
 import worker from "../src/worker/index";
+import { evaluatePermission } from "../src/worker/acl";
 
 type SqlValue = string | number | bigint | null | Uint8Array;
 
@@ -615,4 +616,35 @@ describe("operational job brief routes", () => {
     expect(JSON.parse(text).brief.sops).toEqual([]);
     expect(text).not.toContain("DENIED SOP CONTENT");
   });
+  it.each([
+    "UPDATE pa_local_division_source_heads SET identity_key=NULL",
+    "UPDATE pa_local_division_source_heads SET identity_key='restored-epoch'",
+    "DELETE FROM pa_local_division_mappings",
+    "UPDATE divisions SET active=0",
+    "UPDATE pa_local_division_mappings SET division_id=NULL",
+  ])("retains explicit denies when local classification becomes unknown: %s",async change=>{
+    const state=setup();
+    const grants:any[]=[
+      {permission:"operations.view",source:"role",effect:"allow",scope:"global"},
+      {permission:"operations.manage",source:"role",effect:"allow",scope:"global"},
+      {permission:"operations.manage",source:"override",effect:"deny",scope:"division",divisionId:"division-flight"},
+    ];
+    mocks.requirePermission.mockImplementation(async (_env:any,principal:any,permission:any,context:any)=>{
+      if(!evaluatePermission(grants,principal,permission,context))throw new HTTPException(403,{message:"Scoped access denied"});
+    });
+    mocks.hasPermission.mockImplementation(async (_env:any,principal:any,permission:any,context:any)=>evaluatePermission(grants,principal,permission,context));
+    const put=()=>worker.fetch(request("/api/operations/operation-1/job-brief","admin",{
+      method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({expectedVersion:0,items:[]}),
+    }),state.env,executionCtx);
+    expect((await put()).status).toBe(403);
+    state.ops.exec(change);
+    expect((await put()).status).toBe(403);
+    expect(state.ops.prepare("SELECT version FROM operational_job_briefs WHERE operation_id='operation-1'").get()).toBeUndefined();
+    grants.splice(2,1);
+    grants[1]={...grants[1],scope:"division",divisionId:"division-flight"};
+    expect((await put()).status).toBe(403);
+    grants[1]={...grants[1],scope:"global",divisionId:null};
+    expect((await put()).status).toBe(200);
+  });
+
 });

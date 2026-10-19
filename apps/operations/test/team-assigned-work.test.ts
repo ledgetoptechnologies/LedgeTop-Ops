@@ -189,4 +189,22 @@ describe("Team assigned work", () => {
     const denied = await state.app.fetch(request("hidden"), state.env);
     expect(denied.status).toBe(403);
   });
+  it("keeps scoped SOP denies effective when classification becomes unknown", async () => {
+    const actual=await vi.importActual<typeof import("../src/worker/acl")>("../src/worker/acl");
+    mocks.evaluatePermission.mockImplementation(actual.evaluatePermission);
+    const grants:any[]=[
+      {permission:"sops.view",source:"role",effect:"allow",scope:"global"},
+      {permission:"sops.view",source:"override",effect:"deny",scope:"division",divisionId:"division-flight"},
+    ];
+    mocks.loadGrants.mockResolvedValue(grants);
+    const state=setup();
+    const read=async()=>{const response=await state.app.fetch(request("admin"),state.env);expect(response.status).toBe(200);return await response.json() as any;};
+    expect((await read()).operations.every((row:any)=>row.canViewSops===false&&row.sopCount===0)).toBe(true);
+    state.database.exec("UPDATE pa_local_division_source_heads SET identity_key=NULL");
+    expect((await read()).operations.every((row:any)=>row.canViewSops===false&&row.sopCount===0)).toBe(true);
+    mocks.loadGrants.mockResolvedValue(grants.filter(row=>row.effect!=="deny"));
+    expect((await read()).operations.every((row:any)=>row.canViewSops===true)).toBe(true);
+    mocks.loadGrants.mockResolvedValue([{permission:"sops.view",source:"role",effect:"allow",scope:"division",divisionId:"division-flight"}]);
+    expect((await read()).operations.every((row:any)=>row.canViewSops===false&&row.sopCount===0)).toBe(true);
+  });
 });

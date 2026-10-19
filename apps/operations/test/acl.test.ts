@@ -9,6 +9,14 @@ function grant(values:Partial<GrantRow>):GrantRow{return{permission:"delivery.br
 describe("ACL evaluation",()=>{
   it("permits a same-division resource and denies another division",()=>{const grants=[grant({})];expect(evaluatePermission(grants,principal,"delivery.browse",{divisionId:"chippewa"})).toBe(true);expect(evaluatePermission(grants,principal,"delivery.browse",{divisionId:"madison"})).toBe(false);});
   it("gives an applicable explicit deny precedence over global role access",()=>{const grants=[grant({scope:"global",divisionId:null}),grant({effect:"deny",source:"override",scope:"division",divisionId:"chippewa"})];expect(evaluatePermission(grants,principal,"delivery.browse",{divisionId:"chippewa"})).toBe(false);expect(evaluatePermission(grants,principal,"delivery.browse",{divisionId:"madison"})).toBe(true);});
+  it("applies division denies conservatively to explicitly unknown classification without granting division allows",()=>{
+    const global=grant({scope:"global",divisionId:null}),deny=grant({effect:"deny",source:"override"});
+    const unknown={divisionId:null,divisionAuthorityUnknown:true};
+    expect(evaluatePermission([global,deny],principal,"delivery.browse",unknown)).toBe(false);
+    expect(evaluatePermission([global],principal,"delivery.browse",unknown)).toBe(true);
+    expect(evaluatePermission([grant({})],principal,"delivery.browse",unknown)).toBe(false);
+    expect(evaluatePermission([global,deny],principal,"delivery.browse",{divisionId:"madison",divisionAuthorityUnknown:false})).toBe(true);
+  });
   it("filters division and assigned access in SQL before pagination",()=>{const result=buildScopedWhere({global:false,divisions:["chippewa"],assigned:true,own:false,deniedDivisions:[],deniedGlobal:false},principal,"o","EXISTS (SELECT 1 FROM operation_staff os WHERE os.operation_id=o.id AND os.staff_id=?)");expect(result.sql).toContain("o.division_id IN (?)");expect(result.sql).toContain("operation_staff");expect(result.values).toEqual(["chippewa","kollins"]);});
 });
 

@@ -631,4 +631,32 @@ describe("Project and Task direct SOP links", () => {
       sopLinks: [],
     }]);
   });
+  it.each(["project","task"] as const)("retains scoped SOP denies for unknown %s classification in reads and atomic writes",async kind=>{
+    const actual=await vi.importActual<typeof import("../src/worker/acl")>("../src/worker/acl");
+    const state=setup(),id=kind==="project"?"project-1":"task-1",path=`/api/work-contexts/${kind}/${id}/sops`;
+    const put=()=>state.app.fetch(request(path,"admin",{method:"PUT",body:JSON.stringify({expectedVersion:1,revisionIds:[]})}),state.env);
+    expect((await state.app.fetch(request(path,"admin",{method:"PUT",body:JSON.stringify({expectedVersion:0,revisionIds:[revisionOne]})}),state.env)).status).toBe(200);
+    mocks.requirePermission.mockImplementation(actual.requirePermission);
+    mocks.loadGrants.mockImplementation(actual.loadGrants);
+    mocks.evaluatePermission.mockImplementation(actual.evaluatePermission);
+    state.database.exec("UPDATE pa_local_division_source_heads SET identity_key=NULL");
+    const deny=(permission:string)=>state.database.prepare("INSERT INTO staff_permission_overrides(id,staff_id,permission_key,effect,scope,division_id) VALUES('unknown-deny','staff-admin',?,'deny','division','division-flight')").run(permission);
+    deny("sops.view");
+    expect((await state.app.fetch(request(path,"admin"),state.env)).status).toBe(403);
+    await expect(readAuthorizedWorkContextSopRevision(state.env,principals.admin,kind,id,"lidar-capture",revisionOne)).rejects.toMatchObject({status:404});
+    state.database.exec("DELETE FROM staff_permission_overrides WHERE id='unknown-deny'");
+    deny("sops.assign");
+    const read=await state.app.fetch(request(path,"admin"),state.env);
+    expect(read.status).toBe(200);expect(await read.json()).toMatchObject({canEdit:false});
+    expect((await put()).status).toBe(403);
+    state.database.exec("DELETE FROM staff_permission_overrides WHERE id='unknown-deny'");
+    const permitted=await state.app.fetch(request(path,"admin"),state.env);
+    expect(permitted.status).toBe(200);expect(await permitted.json()).toMatchObject({canEdit:true});
+    await expect(readAuthorizedWorkContextSopRevision(state.env,principals.admin,kind,id,"lidar-capture",revisionOne)).resolves.toMatchObject({revision_id:revisionOne});
+    state.env.OPS_DB.setBeforeBatch(()=>{deny("sops.assign");});
+    expect((await put()).status).toBe(403);
+    expect(state.database.prepare("SELECT version FROM work_context_sop_link_sets WHERE context_kind=? AND context_id=?").get(kind,id)).toEqual({version:1});
+    expect(state.database.prepare("SELECT COUNT(*) count FROM work_context_sop_links").get()).toEqual({count:1});
+  });
+
 });
