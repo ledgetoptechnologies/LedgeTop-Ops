@@ -129,6 +129,7 @@ describe("reviewed release migration fixtures", () => {
     ["operations", "0215_local_project_division_authority.sql"],
     ["operations", "0216_client_onboarding_existing_company.sql"],
     ["operations", "0217_client_onboarding_shared_company_plans.sql"],
+    ["operations", "0218_client_onboarding_shared_company_approval.sql"],
     ["client", "0232_shared_profile_edit_authority.sql"],
     ["client", "0233_explicit_primary_workspace_folder_ownership.sql"],
     ["client", "0234_pa_principal_reenrollment.sql"],
