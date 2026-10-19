@@ -192,3 +192,55 @@ Protocol/client references: [MCP server development](https://modelcontextprotoco
 [Codex MCP](https://developers.openai.com/codex/mcp),
 [Claude MCP](https://code.claude.com/docs/en/mcp),
 [Hermes MCP](https://hermes-agent.nousresearch.com/docs/user-guide/features/mcp).
+
+
+## Separate staging machine mode
+
+The human adapter above retains its nine default read tools and explicit browser
+sign-in. Autonomous staging agents use a different entry point:
+
+```json
+{
+  "command": "C:/Program Files/nodejs/node.exe",
+  "args": ["C:/path/to/Operations/apps/operations-mcp/src/machine-cli.mjs"],
+  "env": {
+    "LTDS_MCP_MACHINE_CREDENTIAL_FILE": "C:/private/agent-specific/credential.private.json"
+  }
+}
+```
+
+This example does not register an MCP client. Each agent must have a distinct
+credential file containing exactly `clientId` and `clientSecret`. Do not put their
+values in MCP arguments, checked-in configuration, chat or logs. The file must be
+regular and owned by the running user. On Windows disable ACL inheritance and
+allow only the owner and optionally SYSTEM, with FullControl. Other users,
+Administrators-group access, inherited rules and reparse-point paths are rejected.
+On POSIX require owner-only access (mode0600 or stricter) and matching UID. The
+adapter validates permissions without changing them. Keep parent directories
+private too.
+
+Run `node src/machine-cli.mjs doctor` with that environment for a connection GET.
+`serve` (the default) advertises exactly `get_connection`, `find_clients` and
+`get_client`. Discovery needs neither credentials nor network access. Actual
+reads require separately provisioned Access service identity and current native
+agent, owner and source authority. An Access token alone grants no native scope.
+
+Machine mode is pinned to `https://ops-staging.ledgetopdroneservices.com` and only
+GET `/api/agent/v1/connection`, `/api/agent/v1/clients`, or the source-qualified
+client-detail route. Lookup requires `sourceId` and accepts query, cursor and
+limit1-25. Detail requires exact `sourceId` and `recordId`; names and emails do not
+prove identity. No production override, human session, cloudflared fallback,
+cookies, writes, files or finance tools exist. Redirects are rejected, TLS
+verification remains enabled, requests time out after20 seconds and JSON responses
+are limited to1MiB. Diagnostics are generic; credential values and JWTs are
+redacted. Authorized profile data still requires a trusted agent client and must
+be treated as untrusted content.
+
+Each request reloads and validates the credential file. Rotate it atomically at
+the same path, retaining private ownership/permissions. Unsafe or malformed
+replacement fails before network access. There is no automatic retry or human
+login fallback. Local tests cover real SDK stdio discovery, Windows ACL privacy,
+rotation, malformed files, fixed routes, rejected writes, TLS-disable rejection,
+redaction and response bounds. They do not establish live staging readiness. This
+adapter does not create keys, Access applications, native grants or MCP client
+registrations.

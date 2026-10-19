@@ -1,4 +1,4 @@
-import { lstat, readFile } from 'node:fs/promises';
+import { readMachineCredential } from './machine-credential.mjs';
 import path from 'node:path';
 import { AccessClientError } from './access-client.mjs';
 
@@ -10,24 +10,15 @@ const fail = () => new AccessClientError('Staging machine read unavailable. Chec
 export function machineConfig(env = process.env) {
   const credentialFile = env.LTDS_MCP_MACHINE_CREDENTIAL_FILE;
   if (typeof credentialFile !== 'string' || !path.isAbsolute(credentialFile) || /[\x00-\x1f\x7f]/.test(credentialFile)
+    || (process.platform === 'win32' && !/^[A-Za-z]:[\\/]/.test(credentialFile))
+    || (env.NODE_TLS_REJECT_UNAUTHORIZED !== undefined && env.NODE_TLS_REJECT_UNAUTHORIZED !== '1')
     || (env.LTDS_OPS_ORIGIN !== undefined && env.LTDS_OPS_ORIGIN !== ORIGIN)) throw fail();
   return Object.freeze({ origin: ORIGIN, credentialFile });
 }
-async function readCredential(file) {
-  const stat = await lstat(file);
-  if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 20000 || (process.platform !== 'win32' && (stat.mode & 0o077))) throw fail();
-  const value = JSON.parse(await readFile(file, 'utf8'));
-  if (!value || typeof value !== 'object' || Array.isArray(value)
-    || Object.keys(value).sort().join(',') !== 'clientId,clientSecret'
-    || ![value.clientId, value.clientSecret].every(v => typeof v === 'string' && /^[\x21-\x7e]{1,8192}$/.test(v))) throw fail();
-  // Current cfast_ and older64hex secrets both work; no invented secret format.
-  return value;
-}
-
 /** Independent three-read transport. Never calls cloudflared or human API routes. */
 export class MachineReadClient {
   #configuration; #fetch; #readCredential;
-  constructor(configuration = machineConfig(), { fetch = globalThis.fetch, loadCredential = readCredential } = {}) {
+  constructor(configuration = machineConfig(), { fetch = globalThis.fetch, loadCredential = readMachineCredential } = {}) {
     this.#configuration = machineConfig({ LTDS_OPS_ORIGIN: configuration.origin, LTDS_MCP_MACHINE_CREDENTIAL_FILE: configuration.credentialFile });
     this.#fetch = fetch; this.#readCredential = loadCredential;
   }
@@ -35,6 +26,7 @@ export class MachineReadClient {
     let credential;
     const controller = new AbortController(), timer = setTimeout(() => controller.abort(), 20000);
     try {
+      if (process.env.NODE_TLS_REJECT_UNAUTHORIZED !== undefined && process.env.NODE_TLS_REJECT_UNAUTHORIZED !== '1') throw fail();
       credential = await this.#readCredential(this.#configuration.credentialFile);
       const response = await this.#fetch(`${this.#configuration.origin}/api/agent/v1${route}`, {
         method: 'GET', redirect: 'error', signal: controller.signal,
@@ -51,11 +43,13 @@ export class MachineReadClient {
         }
       } finally { reader.releaseLock(); }
       const result = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+      const scrub = value => value.split(credential.clientSecret).join('[redacted]').split(credential.clientId).join('[redacted]')
+        .replace(/\beyJ[A-Za-z0-9_-]*\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/g, '[redacted]');
       const redact = value => {
-        if (typeof value === 'string') return value.split(credential.clientSecret).join('[redacted]').split(credential.clientId).join('[redacted]');
+        if (typeof value === 'string') return scrub(value);
         if (Array.isArray(value)) return value.map(redact);
         if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value)
-          .filter(([key]) => !/(?:token|secret|credential|password|authorization|cookie|headers)/i.test(key)).map(([key, child]) => [key, redact(child)]));
+          .filter(([key]) => !/(?:token|secret|credential|password|authorization|cookie|headers|jwt|assertion|cf-access)/i.test(key)).map(([key, child]) => [scrub(key), redact(child)]));
         return value;
       };
       return redact(result);

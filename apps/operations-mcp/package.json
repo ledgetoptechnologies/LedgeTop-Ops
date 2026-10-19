@@ -9,7 +9,7 @@
     "start": "node src/cli.mjs",
     "login": "node src/cli.mjs login",
     "doctor": "node src/cli.mjs doctor",
-    "check": "node --check src/cli.mjs && node --check src/server.mjs && node --check src/tools.mjs && node --check src/access-client.mjs",
+    "check": "node --check src/cli.mjs && node --check src/server.mjs && node --check src/tools.mjs && node --check src/access-client.mjs && node --check src/machine-client.mjs && node --check src/machine-credential.mjs && node --check src/machine-server.mjs && node --check src/machine-cli.mjs",
     "test": "node --test"
   },
   "dependencies": {
