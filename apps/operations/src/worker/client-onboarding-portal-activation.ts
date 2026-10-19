@@ -8,7 +8,7 @@ import { readConfiguredProjectAlphaDirectoryClientPortalIdentity, type ProjectAl
 import { probeConfiguredProjectAlphaDirectoryClientContactProfile } from "./project-alpha-directory-profile-api-v2";
 import { resolveProjectAlphaApiV2Connection } from "./project-alpha-api-v2-connections";
 import { currentClientRelationship, normalizeProfile, clientUpdateProfile } from "./native-directory-profile-routes";
-import { sharedProfileCreationFence, sharedProfileCreationStatements, readSharedProfilePortalSetup, type SharedProfileMember } from "./native-directory-shared-profile-routes";
+import { sharedProfileCreationFence, sharedProfileCreationStatements, readSharedProfilePortalSetup, type SharedProfileMember, type SharedProfilePortalSetupCandidate } from "./native-directory-shared-profile-routes";
 import { manageSharedProfilePortalGrant, type SharedProfilePortalGrant } from "./shared-profile-portal-authority";
 
 type Destination = Omit<NativeDirectoryDestinationAuthority,"expectedAuthorizationGeneration">;
@@ -77,8 +77,137 @@ async function observations(env:Env,record:SharedProfileMember,selected:Destinat
   results.push(value.observation);
  }return results;
 }
+async function activeClientLineage(env:Env,recordId:string):Promise<boolean>{
+ return Boolean(await env.OPS_DB.withSession("first-primary").prepare(`SELECT 1 FROM operations_directory_records client
+  JOIN operations_directory_client_organizations relation ON relation.client_record_id=client.record_id
+  LEFT JOIN operations_directory_lifecycle_state lifecycle ON lifecycle.record_id=client.record_id
+  LEFT JOIN operations_directory_records parent ON parent.record_id=relation.organization_record_id AND parent.record_kind='organization'
+  LEFT JOIN operations_directory_lifecycle_state parent_state ON parent_state.record_id=parent.record_id
+  WHERE client.record_id=? AND client.record_kind='client' AND (lifecycle.record_id IS NULL OR lifecycle.status='active')
+  AND (relation.organization_record_id IS NULL OR (parent.record_id IS NOT NULL AND (parent_state.record_id IS NULL OR parent_state.status='active')))`)
+  .bind(recordId).first());
+}
+type SharedApproval={plan_id:string;client_profile_json:string;child_count:number};
+type SharedChild={client_record_id:string;parent_record_id:string;destinations_json:string};
+type OwnCandidate={member:SharedProfileMember;observed:ProjectAlphaDirectoryBindingObservation;candidate:SharedProfilePortalSetupCandidate;grantId:string};
+function ownFingerprint(observation:ProjectAlphaDirectoryBindingObservation){
+ return JSON.stringify([observation.sourceId,observation.sourceInstanceId,observation.applicationId,observation.historyEpoch,
+  observation.binding,observation.resource,observation.clientPortalIdentity]);
+}
+/** A reviewed shared company has one new source-owned contact per parent alias.
+ * Every child must have its exact ACK and own-principal proof before grouping
+ * or issuing any template. This is approval authority, never an interactive merge. */
+async function activateSharedCompany(env:Env,intent:Intent,approval:SharedApproval,actor:StaffPrincipal,deadline:number):Promise<ActivationState>{
+ if(approval.plan_id!==intent.decision_id||approval.child_count<1||approval.child_count>2)return"identity_changed";
+ const children=(await env.OPS_DB.withSession("first-primary").prepare(`SELECT child.client_record_id,child.parent_record_id,child.destinations_json
+  FROM client_onboarding_shared_company_plan_children child JOIN client_onboarding_shared_company_child_receipts receipt
+  ON receipt.plan_id=child.plan_id AND receipt.client_record_id=child.client_record_id
+  WHERE child.plan_id=? ORDER BY child.client_record_id`).bind(approval.plan_id).all<SharedChild>()).results;
+ if(children.length!==approval.child_count||children[0]?.client_record_id!==intent.client_record_id)return"identity_changed";
+ const raw=JSON.parse(approval.client_profile_json) as Record<string,string>;delete raw.clientType;
+ const checked=clientUpdateProfile.safeParse(raw);if(!checked.success)return"identity_changed";
+ const profile=normalizeProfile(checked.data),members:SharedProfileMember[]=[],witnesses:{member:SharedProfileMember;observed:ProjectAlphaDirectoryBindingObservation}[]=[];
+ const allDestinations:Destination[]=[];
+ for(const child of children){
+  const selected=destinations(env,child.destinations_json);if(!selected?.length)return"identity_changed";
+  const enrolled=await env.OPS_DB.withSession("first-primary").prepare("SELECT destinations_json FROM effective_native_directory_enrollments WHERE record_id=?")
+   .bind(child.client_record_id).first<string>("destinations_json");
+  if(!enrolled||JSON.stringify(destinations(env,enrolled))!==JSON.stringify(selected))return"identity_changed";
+  const m=await member(env,{...intent,client_record_id:child.client_record_id},selected);
+  if(!m||m.version!==1||m.parentRecordId!==child.parent_record_id||m.relationshipVersion!==1
+   ||JSON.stringify(m.profile)!==JSON.stringify(profile)||!await activeClientLineage(env,m.recordId))return"identity_changed";
+  const observed=await observations(env,m,selected,deadline);if(!observed)return"awaiting_pa";
+  members.push(m);allDestinations.push(...selected);witnesses.push(...observed.map(value=>({member:m,observed:value})));
+ }
+ const approved=destinations(env,intent.client_destinations_json);
+ allDestinations.sort((a,b)=>a.sourceId.localeCompare(b.sourceId));
+ if(!approved||new Set(allDestinations.map(d=>d.sourceId)).size!==allDestinations.length
+  ||JSON.stringify(approved)!==JSON.stringify(allDestinations))return"identity_changed";
+ for(const source of allDestinations.map(d=>d.sourceId)){
+  if(Date.now()>deadline)return"awaiting_pa";
+  if((await probeConfiguredProjectAlphaDirectoryClientContactProfile(env,source)).status!=="verified")return"awaiting_pa";
+ }
+ const groupId=intent.decision_id,membership=JSON.stringify(members.map(m=>m.recordId));
+ const linked=(await env.OPS_DB.prepare("SELECT record_id,group_id FROM native_directory_shared_profile_members WHERE record_id IN(SELECT value FROM json_each(?))")
+  .bind(membership).all<{record_id:string;group_id:string}>()).results;
+ if(linked.some(row=>row.group_id!==groupId))return"identity_changed";
+ const group=await env.OPS_DB.prepare("SELECT kind,version,profile_json,membership_json FROM native_directory_shared_profiles WHERE id=?")
+  .bind(groupId).first<{kind:string;version:number;profile_json:string;membership_json:string}>();
+ if(group&&(group.kind!=="client"||group.version!==1||group.profile_json!==JSON.stringify(profile)
+  ||group.membership_json!==membership||linked.length!==members.length))return"identity_changed";
+ if(!group&&linked.length)return"identity_changed";
+ // Candidate discovery is read-only and works before a group exists.
+ const setup=await readSharedProfilePortalSetup(env,groupId,members,true);if(!setup.available)return"awaiting_portal";
+ const chosen:OwnCandidate[]=[];
+ for(const witness of witnesses){
+  const observed=witness.observed,own=observed.clientPortalIdentity!;
+  const matches=setup.candidates.filter(c=>c.sourceId===observed.sourceId&&c.recordId===witness.member.recordId
+   &&c.targetPublicId===observed.binding.publicId&&c.principalPublicId===own.principalPublicId);
+  if(matches.length!==1)return"awaiting_portal";
+  const candidate=matches[0]!;
+  if(candidate.state==='revoked'||candidate.state==='suspended')return"identity_changed";
+  const grantId=await uuid(`onboarding-profile-grant:${intent.decision_id}:${candidate.sourceId}:${candidate.workspaceId}:${candidate.principalPublicId}`);
+  if(candidate.state==='enabled'&&candidate.currentGrantId!==grantId)return"identity_changed";
+  chosen.push({...witness,candidate,grantId});
+ }
+ // Recheck every remote witness before reserving any proof or creating a group.
+ for(const {observed} of chosen){
+  if(Date.now()>deadline)return"awaiting_pa";
+  const second=await readConfiguredProjectAlphaDirectoryClientPortalIdentity(env,observed.sourceId,observed.binding.externalId,observed.binding.publicId);
+  if(second.status!=="observed"||identityFingerprint(second.observation)!==identityFingerprint(observed))return"awaiting_pa";
+ }
+ if(!await approver(env,intent))return"authority_changed";
+ await env.OPS_DB.batch(chosen.map(({member:m,observed,candidate,grantId})=>env.OPS_DB.prepare(`INSERT OR IGNORE INTO client_onboarding_portal_activation_proofs
+  (grant_id,decision_id,source_id,record_id,principal_public_id,association_version,binding_observation_json) VALUES(?,?,?,?,?,?,?)`)
+  .bind(grantId,intent.decision_id,candidate.sourceId,m.recordId,candidate.principalPublicId,
+   observed.clientPortalIdentity!.associationVersion,JSON.stringify(observed))));
+ for(const {member:m,observed,candidate,grantId} of chosen){
+  const proof=await env.OPS_DB.prepare(`SELECT decision_id,source_id,record_id,principal_public_id,association_version,binding_observation_json
+   FROM client_onboarding_portal_activation_proofs WHERE grant_id=?`).bind(grantId)
+   .first<{decision_id:string;source_id:string;record_id:string;principal_public_id:string;association_version:string;binding_observation_json:string}>();
+  if(!proof||proof.decision_id!==intent.decision_id||proof.source_id!==candidate.sourceId||proof.record_id!==m.recordId
+   ||proof.principal_public_id!==candidate.principalPublicId||proof.association_version!==observed.clientPortalIdentity!.associationVersion
+   ||ownFingerprint(JSON.parse(proof.binding_observation_json))!==ownFingerprint(observed))return"identity_changed";
+ }
+ if(!group){
+  await env.OPS_DB.batch([
+   env.OPS_DB.prepare(`INSERT INTO client_onboarding_shared_contact_creation_fences(decision_id,mutation_id,actor_id,profile_json,membership_json)
+    VALUES(?,?,?,?,?)`).bind(groupId,await uuid(`onboarding-profile-group:${groupId}`),actor.id,JSON.stringify(profile),membership),
+   ...sharedProfileCreationStatements(env.OPS_DB,groupId,"client",profile,members,actor.id),
+   env.OPS_DB.prepare("DELETE FROM client_onboarding_shared_contact_creation_fences WHERE decision_id=?").bind(groupId),
+  ]);
+ }
+ for(const {member:m,candidate,grantId} of chosen){
+  if(Date.now()>deadline)return"awaiting_pa";
+  if(!await approver(env,intent))return"authority_changed";
+  if(!await activeClientLineage(env,m.recordId))return"identity_changed";
+  if(candidate.state==='enabled')continue;
+  const result=await manageSharedProfilePortalGrant(env,actor,{operationId:await uuid(`onboarding-profile-issue:${grantId}`),id:grantId,
+   workspaceId:candidate.workspaceId,sourceId:candidate.sourceId,
+   ...(candidate.portalSourceId?{portalSourceId:candidate.portalSourceId,correspondenceRevisionId:candidate.correspondenceRevisionId}:{}),
+   recipientMode:"first_verified_identity",issuer:null,subject:null,principalPublicId:candidate.principalPublicId,
+   targetType:"client",targetPublicId:candidate.targetPublicId,recordId:m.recordId,groupId,expectedRevision:0,state:"active"},
+   {admissionVersion:intent.original_admission_version,profileVersion:intent.original_profile_version});
+  if(!result.ok)return"awaiting_portal";
+ }
+ // Status is a last observation, not an authorization token. Read authoritative
+ // grant states again so a revocation during issuance is not reported active.
+ const finalGrants=(await env.OPS_DB.withSession("first-primary").prepare(`SELECT id,state FROM shared_profile_portal_grants
+  WHERE group_id=? AND id IN(SELECT value FROM json_each(?))`).bind(groupId,JSON.stringify(chosen.map(c=>c.grantId)))
+  .all<{id:string;state:string}>()).results;
+ if(finalGrants.length!==chosen.length)return"awaiting_portal";
+ if(finalGrants.some(grant=>grant.state!=="active"))return"identity_changed";
+ return"active";
+}
 async function activate(env:Env,intent:Intent,deadline:number):Promise<ActivationState>{
  const actor=await approver(env,intent);if(!actor)return"authority_changed";
+ if(await d1TablesPresent(env.OPS_DB,["client_onboarding_shared_company_approvals"])){
+  const shared=await env.OPS_DB.withSession("first-primary").prepare(`SELECT approval.plan_id,plan.client_profile_json,seal.child_count
+   FROM client_onboarding_shared_company_approvals approval JOIN client_onboarding_shared_company_plans plan ON plan.plan_id=approval.plan_id
+   JOIN client_onboarding_shared_company_plan_seals seal ON seal.plan_id=plan.plan_id WHERE approval.decision_id=?`)
+   .bind(intent.decision_id).first<SharedApproval>();
+  if(shared)return activateSharedCompany(env,intent,shared,actor,deadline);
+ }
  const selected=destinations(env,intent.client_destinations_json);if(!selected)return"identity_changed";
  if(!selected.length)return"enrollment_required";
  const enrolled=await env.OPS_DB.prepare("SELECT destinations_json FROM effective_native_directory_enrollments WHERE record_id=?")
@@ -169,7 +298,8 @@ export async function onboardingPortalGrantIdentityCurrent(env:Env,grant:SharedP
   .bind(grant.id).first<{source_id:string;record_id:string;principal_public_id:string;association_version:string;binding_observation_json:string}>();
  if(!proof)return true;
  if(proof.record_id!==grant.record_id||proof.principal_public_id!==grant.principal_public_id)return false;
- try{const before=JSON.parse(proof.binding_observation_json) as ProjectAlphaDirectoryBindingObservation;
+ try{if(!await activeClientLineage(env,proof.record_id))return false;
+  const before=JSON.parse(proof.binding_observation_json) as ProjectAlphaDirectoryBindingObservation;
   if(before.binding.publicId!==grant.target_public_id||before.sourceId!==proof.source_id
    ||proof.source_id!==(grant.directory_source_id??grant.source_id))return false;
   const value=await readConfiguredProjectAlphaDirectoryClientPortalIdentity(env,proof.source_id,before.binding.externalId,before.binding.publicId);
