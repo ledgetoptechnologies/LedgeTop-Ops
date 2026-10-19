@@ -1,3 +1,4 @@
+import {readAuthorizedDirectoryCreateReservation} from "../src/worker/project-alpha-directory-profile-outbox-dispatcher";
 import {readNativeDirectoryDurableRemoteHead} from "../src/worker/native-directory-profile-writer";
 import {writeNativeDirectorySharedProfiles} from "../src/worker/native-directory-profile-writer";
 import {acquireProjectAlphaExistingDirectoryBinding} from "../src/worker/project-alpha-existing-directory-acquisition-coordinator";
@@ -738,6 +739,25 @@ describe("native-only client onboarding approval against migrated D1", () => {
       JOIN operations_directory_materializations materialization ON materialization.intent_id=intent.intent_id
       JOIN project_alpha_directory_outbox outbox ON outbox.command_id=materialization.command_id WHERE intent.record_id=?`).bind(child.clientRecordId).first<string>("command_json"))!);
     expect(command).toMatchObject({operation:"create",externalId:child.clientRecordId,fields:{organizationPublicId:publicId}});
+    const childCommandId=await db.prepare(`SELECT materialization.command_id FROM operations_directory_intents intent
+      JOIN operations_directory_materializations materialization ON materialization.intent_id=intent.intent_id
+      WHERE intent.record_id=?`).bind(child.clientRecordId).first<string>("command_id");
+    // The enrollment keeps the local company UUID; acquired mapping and wire
+    // parent keep the distinct remote canonical ID. Both are authoritative.
+    expect(JSON.parse((await db.prepare("SELECT destinations_json FROM effective_native_directory_enrollments WHERE record_id=?")
+      .bind(company).first<string>("destinations_json"))!)[0].externalCanonicalId).toBe(company);
+    expect(await readAuthorizedDirectoryCreateReservation(environment,selectedSourceId,childCommandId!))
+      .toMatchObject({externalId:child.clientRecordId,organization:{externalId:foreignId,expectedRevision:"7"}});
+    const wrongEpoch=JSON.parse(selectedConnection);wrongEpoch.instances[selectedSourceId].historyEpoch="c0000000-0000-4000-8000-000000000099";
+    expect(await readAuthorizedDirectoryCreateReservation({...environment,PROJECT_ALPHA_API_V2_CONNECTIONS:JSON.stringify(wrongEpoch)},selectedSourceId,childCommandId!)).toBeNull();
+    const denyId=uuid();
+    await db.prepare(`INSERT INTO native_directory_grants(id,staff_id,permission,effect,scope_kind,active,granted_by)
+      VALUES(?,?,'directory.profile.edit','deny','global',1,?)`).bind(denyId,staffId,staffId).run();
+    expect(await readAuthorizedDirectoryCreateReservation(environment,selectedSourceId,childCommandId!)).toBeNull();
+    await db.prepare("UPDATE native_directory_grants SET active=0 WHERE id=?").bind(denyId).run();
+    expect(await readAuthorizedDirectoryCreateReservation(environment,selectedSourceId,childCommandId!))
+      .toMatchObject({externalId:child.clientRecordId,organization:{externalId:foreignId,expectedRevision:"7"}});
+
     expect(await db.prepare("SELECT current_version FROM operations_directory_records WHERE record_id=?").bind(company).first("current_version")).toBe(1);
     expect(await db.prepare(`SELECT record_id,external_id,project_alpha_public_id,mapping_kind,provenance_id
       FROM project_alpha_active_directory_mappings WHERE record_id=? AND source_id=?`).bind(company,selectedSourceId).first()).toEqual(mapping);
@@ -747,6 +767,7 @@ describe("native-only client onboarding approval against migrated D1", () => {
         sourceInstanceUUID:source.sourceInstanceId,applicationUUID:source.applicationId,historyEpoch:source.historyEpoch,origin:source.baseUrl,
         externalCanonicalId:foreignId,expectedAuthorizationGeneration:"9"}]}]});
     expect(changed).toMatchObject({status:"written"});
+    expect(await readAuthorizedDirectoryCreateReservation(environment,selectedSourceId,childCommandId!)).toBeNull();
     expect(await db.prepare("SELECT count(*) total FROM project_alpha_directory_unsettled_commands WHERE external_id=? AND source_id=?").bind(foreignId,selectedSourceId).first<number>("total")).toBeGreaterThan(0);
     const pending=await submission({...business,name:"Blocked pending company"});
     await expect(prepareClientOnboardingSharedCompanyPlan(db,actor,{...input,commandId:uuid(),submissionId:pending.submissionId,fieldsSha256:pending.fieldsSha256,

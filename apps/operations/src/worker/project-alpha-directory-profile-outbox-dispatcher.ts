@@ -580,7 +580,8 @@ async function currentCreateRelationship(db:D1Database,row:Row,dependency:Relati
     AND json_extract(destination.value,'$.historyEpoch')=? AND json_extract(destination.value,'$.origin')=?
     AND json_extract(destination.value,'$.externalCanonicalId')=?)))`).bind(row.record_id,dependency.relationship_version,
   dependency.organization_record_id,dependency.organization_record_version,row.source_id,row.expected_source_instance_id,
-  row.application_id,row.expected_history_epoch_id,row.destination_base_url,dependency.parent_external_canonical_id).first();
+  row.application_id,row.expected_history_epoch_id,row.destination_base_url,
+  dependency.evidence_kind==="acquired_mapping"?dependency.organization_record_id:dependency.parent_external_canonical_id).first();
 }
 async function exactReservation(db: D1Database, row: Row, connection: ProjectAlphaApiV2Connection,
   portalEnvironment?:Environment,requireCurrentCreateRelationship=false): Promise<Internal | "destination" | "command" | "authority"> {
