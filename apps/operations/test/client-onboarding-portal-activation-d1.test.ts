@@ -1,3 +1,4 @@
+import {materializeResolvedProjectAlphaDirectoryClientIntents} from "../src/worker/project-alpha-directory-client-intent-materializer";
 import { readFileSync, readdirSync } from "node:fs";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { Miniflare } from "miniflare";
@@ -8,7 +9,8 @@ import { readNativeDirectoryDurableRemoteHead } from "../src/worker/native-direc
 import type { Env } from "../src/worker/types";
 import type { SharedProfilePortalGrant } from "../src/worker/shared-profile-portal-authority";
 const portalProofRead=vi.hoisted(()=>vi.fn());
-vi.mock("../src/worker/project-alpha-directory-read-api-v2",async original=>({...await original<typeof import("../src/worker/project-alpha-directory-read-api-v2")>(),readConfiguredProjectAlphaDirectoryClientPortalIdentity:portalProofRead}));
+const bindingRead=vi.hoisted(()=>vi.fn());
+vi.mock("../src/worker/project-alpha-directory-read-api-v2",async original=>({...await original<typeof import("../src/worker/project-alpha-directory-read-api-v2")>(),readConfiguredProjectAlphaDirectoryClientPortalIdentity:portalProofRead,readConfiguredProjectAlphaDirectoryBindingStatus:bindingRead}));
 vi.mock("../src/worker/project-alpha-directory-profile-api-v2",async original=>({...await original<typeof import("../src/worker/project-alpha-directory-profile-api-v2")>(),probeConfiguredProjectAlphaDirectoryClientContactProfile:async()=>({status:"verified"})}));
 
 const inventoryRead = vi.hoisted(() => vi.fn());
@@ -187,4 +189,72 @@ describe("approved onboarding through real D1 shared-profile and template issuer
     portalProofRead.mockResolvedValue({status:"observed",observation:{...observed,clientPortalIdentity:{...observed.clientPortalIdentity,principalPublicId:managerId}}});
     expect(await onboardingPortalGrantIdentityCurrent(environment,grants[0]!)).toBe(false);
   },120_000);
+  it("materializes and activates only the new contact after a reviewed existing company's exact next-revision ACK",async()=>{
+    await db.prepare(`INSERT INTO native_directory_grants(id,staff_id,permission,effect,scope_kind,active,granted_by)
+      VALUES('view-existing-parent',?,'directory.profile.view','allow','global',1,?)`).bind(staffId,staffId).run();
+    const identity={sourceInstanceId:"a0000000-0000-4000-8000-000000000001",applicationId:"b0000000-0000-4000-8000-000000000002",historyEpoch:"c0000000-0000-4000-8000-000000000003"};
+    inventoryRead.mockImplementation(async()=>({status:"observed",inventory:{authoritative:false,sourceId:selectedSourceId,...identity,
+      requestId:uuid(),authorizationGeneration:"8",resources:[],nextCursor:null}}));
+    bindingRead.mockImplementation(async(_env,_source,type,externalId,publicId)=>({status:"observed",observation:{authoritative:false,sourceId:selectedSourceId,...identity,
+      requestId:uuid(),authorizationGeneration:"9",binding:{type,externalId,publicId,createdAt:"2026-01-01T00:00:00.000Z"},resource:{revision:"1",present:true}}}));
+    const initial=await submission(business),companyCreated=await approveNewNativeOnlyClientOnboarding(db,actor,initial.submissionId,initial.fieldsSha256,[selectedSourceId],selectedConnection,{kind:"new"});
+    const company=companyCreated.organizationRecordId!,companyPublic="1".repeat(32);
+    async function ack(recordId:string,type:"organization"|"client",version:number,publicId:string,authorizationGeneration="9"){
+      const row=await db.prepare(`SELECT outbox.command_id FROM operations_directory_intents intent
+        JOIN operations_directory_materializations materialization ON materialization.intent_id=intent.intent_id
+        JOIN project_alpha_directory_outbox outbox ON outbox.command_id=materialization.command_id
+        WHERE intent.record_id=? AND intent.record_version=?`).bind(recordId,version).first<{command_id:string}>();
+      expect(row).not.toBeNull();const commandId=row!.command_id;
+      await db.prepare("UPDATE project_alpha_directory_outbox SET state='leased',attempts=1,lease_token='synthetic',lease_expires_at=9999999999999 WHERE command_id=? AND state='pending'").bind(commandId).run();
+      if(version===1)await db.prepare(`INSERT INTO project_alpha_directory_mappings(source_id,resource_type,external_id,project_alpha_public_id,source_instance_id,application_id,history_epoch_id,command_id)
+        VALUES(?,?,?,?,?,?,?,?)`).bind(selectedSourceId,type,recordId,publicId,identity.sourceInstanceId,identity.applicationId,identity.historyEpoch,commandId).run();
+      const outcome={status:"acknowledged",response:{requestId:commandId,replayed:false,...identity,result:{resource:version===1?{type,id:recordId,publicId,revision:String(version)}:{type,publicId,revision:String(version)},data:{publicId},authorizationGeneration}}};
+      await db.prepare("UPDATE project_alpha_directory_outbox SET state='acknowledged',outcome_json=?,lease_token=NULL,lease_expires_at=NULL WHERE command_id=? AND state='leased'").bind(JSON.stringify(outcome),commandId).run();
+      await db.prepare("UPDATE operations_directory_intents SET state='acknowledged' WHERE record_id=? AND record_version=? AND state='materialized'").bind(recordId,version).run();
+    }
+    await ack(company,"organization",1,companyPublic);
+    await materializeResolvedProjectAlphaDirectoryClientIntents(db,[selectedSourceId],12,Date.now());
+    await ack(companyCreated.clientRecordId,"client",1,"2".repeat(32));
+    inventoryRead.mockImplementation(async()=>({status:"observed",inventory:{authoritative:false,sourceId:selectedSourceId,...identity,
+      requestId:uuid(),authorizationGeneration:"9",resources:[],nextCursor:null}}));
+    const next=await submission({...business,name:"Exact new contact"});
+    const selection={kind:"existing" as const,recordId:company,expectedVersion:1};
+    const approved=await approveNewNativeOnlyClientOnboarding(db,actor,next.submissionId,next.fieldsSha256,[selectedSourceId],selectedConnection,selection);
+    expect(await materializeResolvedProjectAlphaDirectoryClientIntents(db,[selectedSourceId],12,Date.now())).toMatchObject({materialized:0});
+    await ack(company,"organization",2,companyPublic);
+    expect(await materializeResolvedProjectAlphaDirectoryClientIntents(db,[selectedSourceId],12,Date.now())).toMatchObject({materialized:1,blocked:0});
+    const publicId="3".repeat(32),principalId="4".repeat(32),managerId="5".repeat(32);
+    await ack(approved.clientRecordId,"client",1,publicId,"10");
+    const workspace=uuid(),generation=uuid();
+    await deliveryDb.batch([
+      deliveryDb.prepare("INSERT INTO portal_v2_workspaces VALUES(?,?,'active',?)").bind(workspace,selectedSourceId,companyPublic),
+      deliveryDb.prepare("INSERT INTO pa_portal_workspace_sources VALUES(?,?,?)").bind(workspace,selectedSourceId,uuid()),
+      deliveryDb.prepare("INSERT INTO portal_v2_directory_checkpoints VALUES(?,?)").bind(workspace,generation),
+      deliveryDb.prepare("INSERT INTO portal_v2_directory_generations VALUES(?,?,'active',1)").bind(generation,workspace),
+      deliveryDb.prepare("INSERT INTO portal_v2_directory_entities VALUES(?,?,?,'organization',NULL,1)").bind(workspace,generation,companyPublic),
+      deliveryDb.prepare("INSERT INTO portal_v2_directory_entities VALUES(?,?,?,'client',?,1)").bind(workspace,generation,publicId,companyPublic),
+      ...[principalId,managerId].flatMap(principal=>[
+        deliveryDb.prepare("INSERT INTO pa_portal_principals VALUES(?,?,NULL,'active')").bind(workspace,principal),
+        deliveryDb.prepare("INSERT INTO pa_portal_entitlement_intents VALUES(?,?,'client',?,'allow','directory.read','active',NULL,NULL)").bind(workspace,principal,publicId),
+      ]),
+    ]);
+    const observed={authoritative:false,sourceId:selectedSourceId,...identity,requestId:uuid(),authorizationGeneration:"10",
+      binding:{type:"client",externalId:approved.clientRecordId,publicId,createdAt:"2026-10-18T00:00:00.000Z"},resource:{revision:"1",present:true},
+      clientPortalIdentity:{state:"eligible",principalPublicId:principalId,associationVersion:"b".repeat(64)}};
+    portalProofRead.mockImplementation(async(_env,_source,externalId)=>externalId===approved.clientRecordId
+      ?{status:"observed",observation:observed}:{status:"uncertain",reason:"invalid_contract"});
+    const environment={OPS_DB:db,DELIVERY_DB:deliveryDb,PROJECT_ALPHA_API_V2_CONNECTIONS:selectedConnection,
+      CLIENT_ONBOARDING_ADMIN_ENABLED:"true",CLIENT_PORTAL_HIERARCHY_V2_ENABLED:"true",CLIENT_PORTAL_PA_IDENTITY_AUTO_ELIGIBILITY_ENABLED:"true",
+      CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED:"true",CLIENT_PORTAL_DENY_POLICY_MANAGEMENT_ENABLED:"true"} as Env;
+    for(let n=0;n<3;n++)await processClientOnboardingPortalActivation(environment);
+    expect(await db.prepare("SELECT state,reason FROM client_onboarding_portal_activation_intents WHERE decision_id=?").bind(approved.decisionId).first()).toEqual({state:"active",reason:"active"});
+    const grants=(await db.prepare("SELECT * FROM shared_profile_portal_grants WHERE record_id=?").bind(approved.clientRecordId).all<SharedProfilePortalGrant>()).results;
+    expect(grants).toHaveLength(1);expect(grants[0]).toMatchObject({principal_public_id:principalId,target_public_id:publicId,target_type:"client"});
+    expect(await onboardingPortalGrantIdentityCurrent(environment,grants[0]!)).toBe(true);
+    expect(await count("operations_portal_native_delivery_authority_heads")).toBe(0);
+    expect(await approveNewNativeOnlyClientOnboarding(db,actor,next.submissionId,next.fieldsSha256,[selectedSourceId],selectedConnection,selection)).toMatchObject({...approved,replayed:true});
+    for(let n=0;n<2;n++)await processClientOnboardingPortalActivation(environment);
+    expect(await db.prepare("SELECT count(*) total FROM shared_profile_portal_grants WHERE record_id=?").bind(approved.clientRecordId).first("total")).toBe(1);
+  },120_000);
+
 });

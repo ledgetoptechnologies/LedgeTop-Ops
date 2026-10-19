@@ -16,7 +16,7 @@ type Candidate = Readonly<{ intent_id: string; mutation_id: string; record_id: s
   desired_payload_json: string; expected_history_epoch_id: string; audit_command_json: string; audit_actor_id: string;
   original_verified_access_subject: string; relationship_version: number; relationship_mutation_id: string;
   organization_record_id: string; organization_record_version: number; parent_external_canonical_id: string;
-  resolved_parent_public_id: string; parent_intent_id: string }>;
+  resolved_parent_public_id: string; parent_intent_id: string;parent_mutation_id:string;parent_audit_command_json:string;parent_desired_payload_json:string }>;
 
 export type ClientIntentMaterializationResult = Readonly<{ examined: number; materialized: number; blocked: number }>;
 
@@ -106,8 +106,20 @@ async function exactReservation(db: D1Database, row: Candidate): Promise<Readonl
   commandId: string; commandJson: string; originSnapshotJson: string; dispositionJson: string
 }> | null> {
   if (!PUBLIC_ID.test(row.resolved_parent_public_id) || row.record_version !== 1 || row.relationship_version !== 1
-    || row.organization_record_version !== 1 || row.record_id !== row.external_canonical_id
-    || row.organization_record_id !== row.parent_external_canonical_id) return null;
+    || row.record_id !== row.external_canonical_id || row.organization_record_id !== row.parent_external_canonical_id) return null;
+  // The parent may be an explicitly reviewed existing company's audited next
+  // revision. Accept only the exact ACK-resolved parent intent/revision/audit
+  // tuple loaded below, never an arbitrary positive organization version.
+  const parent=parse(row.parent_audit_command_json);
+  if(!parent || !Number.isSafeInteger(row.organization_record_version) || row.organization_record_version<1
+    || parent.resourceType!=="organization" || parent.recordId!==row.organization_record_id
+    || parent.mutationId!==row.parent_mutation_id || parent.expectedLocalVersion!==row.organization_record_version-1
+    || parent.operation!==(row.organization_record_version===1?"create":"update")
+    || JSON.stringify(parent.fields)!==row.parent_desired_payload_json || !Array.isArray(parent.destinations)
+    || parent.destinations.filter(value=>exactDestination(value) && value.sourceId===row.source_id
+      && value.sourceInstanceUUID===row.source_instance_uuid && value.applicationUUID===row.application_uuid
+      && value.historyEpoch===row.expected_history_epoch_id && value.origin===row.destination_origin
+      && value.externalCanonicalId===row.parent_external_canonical_id).length!==1)return null;
   const value = audit(row.audit_command_json, row); if (!value) return null;
   if (value.actor.staffId !== row.audit_actor_id || value.actor.accessSubject !== row.original_verified_access_subject) return null;
   const matching = value.destinations.filter(destination => destination.sourceId === row.source_id
@@ -148,7 +160,9 @@ export async function materializeResolvedProjectAlphaDirectoryClientIntents(db: 
       intent.desired_payload_json,intent.expected_history_epoch_id,audit.command_json audit_command_json,
       audit.actor_id audit_actor_id,audit.original_verified_access_subject,dependency.relationship_version,
       dependency.relationship_mutation_id,dependency.organization_record_id,dependency.organization_record_version,
-      dependency.parent_external_canonical_id,resolved.resolved_parent_public_id,dependency.parent_intent_id
+      dependency.parent_external_canonical_id,resolved.resolved_parent_public_id,dependency.parent_intent_id,
+      parent_intent.mutation_id parent_mutation_id,parent_intent.desired_payload_json parent_desired_payload_json,
+      parent_audit.command_json parent_audit_command_json
     FROM operations_directory_intents intent
     JOIN operations_directory_records client ON client.record_id=intent.record_id AND client.record_kind='client'
       AND client.current_version=intent.record_version
@@ -172,6 +186,15 @@ export async function materializeResolvedProjectAlphaDirectoryClientIntents(db: 
       AND parent.record_kind='organization' AND parent.current_version=dependency.organization_record_version
     JOIN operations_directory_revisions parent_revision ON parent_revision.record_id=parent.record_id
       AND parent_revision.version=parent.current_version
+    JOIN operations_directory_intents parent_intent ON parent_intent.intent_id=dependency.parent_intent_id
+      AND parent_intent.record_id=parent.record_id AND parent_intent.record_version=parent_revision.version
+      AND parent_intent.mutation_id=parent_revision.mutation_id AND parent_intent.state='acknowledged'
+      AND parent_intent.source_id=intent.source_id AND parent_intent.source_instance_uuid=intent.source_instance_uuid
+      AND parent_intent.application_uuid=intent.application_uuid AND parent_intent.expected_history_epoch_id=intent.expected_history_epoch_id
+      AND parent_intent.destination_origin=intent.destination_origin AND parent_intent.external_canonical_id=dependency.parent_external_canonical_id
+    JOIN operations_directory_audit parent_audit ON parent_audit.record_id=parent_intent.record_id
+      AND parent_audit.record_version=parent_intent.record_version AND parent_audit.mutation_id=parent_intent.mutation_id
+      AND parent_audit.actor_type='staff'
     WHERE intent.state='waiting' AND intent.source_id IN (${placeholders})
       AND (intent.created_at>? OR (intent.created_at=? AND intent.intent_id>?))
       AND NOT EXISTS(SELECT 1 FROM operations_directory_materializations materialization WHERE materialization.intent_id=intent.intent_id)

@@ -1126,3 +1126,15 @@ current native authority. New-client invitations currently forbid retargeting to
 an existing contact; changing that constraint requires a narrow immutable
 resolution record and corresponding decision-fence checks. Neither email matching
 nor changing a browser-supplied record ID is sufficient evidence.
+
+
+The existing-company delivery path accepts a later parent revision only from its
+exact acknowledged parent intent joined to the current organization revision and
+immutable staff audit. The audit must describe the correct create/update kind,
+previous local version, parent mutation, desired fields and source/app/history/
+origin/external tuple. An arbitrary positive parent version is not sufficient.
+Acceptance covers the no-op company update ACK, second-contact materialization,
+validated child ACK, own-principal portal template activation and stable retries;
+create ACK generation advances by one, while update ACK generation remains the
+same. Real PA command execution (including an initial new-company workflow's
+existing create-generation recovery) remains a separate staging acceptance step.

@@ -1,3 +1,4 @@
+import {readNativeDirectoryDurableRemoteHead} from "../src/worker/native-directory-profile-writer";
 import { materializeResolvedProjectAlphaDirectoryClientIntents } from "../src/worker/project-alpha-directory-client-intent-materializer";
 import { readFileSync, readdirSync } from "node:fs";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
@@ -439,6 +440,52 @@ describe("native-only client onboarding approval against migrated D1", () => {
       FROM operations_directory_intent_relationship_dependencies WHERE client_record_id=?`).bind(result.clientRecordId).all()).results)
       .toEqual([{evidence_kind:"parent_intent",organization_record_id:company,organization_record_version:2,parent_external_canonical_id:company}]);
     expect(await db.prepare("SELECT count(*) total FROM operations_directory_intents WHERE record_id=?").bind(result.clientRecordId).first("total")).toBe(1);
+    const update=await db.prepare(`SELECT outbox.command_id FROM operations_directory_intents intent
+      JOIN operations_directory_materializations materialization ON materialization.intent_id=intent.intent_id
+      JOIN project_alpha_directory_outbox outbox ON outbox.command_id=materialization.command_id
+      WHERE intent.record_id=? AND intent.record_version=2`).bind(company).first<{command_id:string}>();
+    expect(update).not.toBeNull();const updateCommandId=update!.command_id;
+    await db.prepare("UPDATE project_alpha_directory_outbox SET state='leased',attempts=1,lease_token='synthetic',lease_expires_at=9999999999999 WHERE command_id=? AND state='pending'").bind(updateCommandId).run();
+    const updated={status:"acknowledged",response:{requestId:updateCommandId,replayed:false,...identity,result:{resource:{type:"organization",publicId,revision:"2"},data:{publicId},authorizationGeneration:"9"}}};
+    await db.prepare("UPDATE project_alpha_directory_outbox SET state='acknowledged',outcome_json=?,lease_token=NULL,lease_expires_at=NULL WHERE command_id=? AND state='leased'").bind(JSON.stringify(updated),updateCommandId).run();
+    await db.prepare("UPDATE operations_directory_intents SET state='acknowledged' WHERE record_id=? AND record_version=2 AND state='materialized'").bind(company).run();
+    const wrongParentProof=new Proxy(db,{get(target,property){
+      if(property==="prepare")return(sql:string)=>{
+        const statement=target.prepare(sql);
+        if(!sql.includes("parent_audit.command_json parent_audit_command_json"))return statement;
+        const wrapped=(bound:D1PreparedStatement):D1PreparedStatement=>new Proxy(bound,{get(value,key){
+          if(key==="bind")return(...parameters:unknown[])=>wrapped(value.bind(...parameters));
+          if(key==="all")return async()=>{
+            const result=await value.all<Record<string,unknown>>();
+            return {...result,results:result.results.map(row=>{
+              const audit=JSON.parse(String(row.parent_audit_command_json));audit.expectedLocalVersion=0;
+              return {...row,parent_audit_command_json:JSON.stringify(audit)};
+            })};
+          };
+          const member=value[key as keyof D1PreparedStatement];return typeof member==="function"?member.bind(value):member;
+        }});
+        return wrapped(statement);
+      };
+      const value=target[property as keyof D1Database];return typeof value==="function"?value.bind(target):value;
+    }});
+    await expect(materializeResolvedProjectAlphaDirectoryClientIntents(wrongParentProof,[selectedSourceId],12,Date.now())).resolves.toMatchObject({materialized:0,blocked:1});
+    await expect(materializeResolvedProjectAlphaDirectoryClientIntents(db,[selectedSourceId],12,Date.now())).resolves.toMatchObject({materialized:1,blocked:0});
+    const second=await db.prepare(`SELECT materialization.command_id,materialization.command_json FROM operations_directory_intents intent
+      JOIN operations_directory_materializations materialization ON materialization.intent_id=intent.intent_id WHERE intent.record_id=?`).bind(result.clientRecordId).first<{command_id:string;command_json:string}>();
+    expect(second).not.toBeNull();expect(JSON.parse(second!.command_json).fields.organizationPublicId).toBe(publicId);
+    const secondPublic="c".repeat(32),secondId=second!.command_id;
+    await db.prepare("UPDATE project_alpha_directory_outbox SET state='leased',attempts=1,lease_token='synthetic',lease_expires_at=9999999999999 WHERE command_id=? AND state='pending'").bind(secondId).run();
+    await db.prepare(`INSERT INTO project_alpha_directory_mappings(source_id,resource_type,external_id,project_alpha_public_id,source_instance_id,application_id,history_epoch_id,command_id)
+      VALUES(?,'client',?,?,?,?,?,?)`).bind(selectedSourceId,result.clientRecordId,secondPublic,identity.sourceInstanceId,identity.applicationId,identity.historyEpoch,secondId).run();
+    const secondOutcome={status:"acknowledged",response:{requestId:secondId,replayed:false,...identity,result:{resource:{type:"client",id:result.clientRecordId,publicId:secondPublic,revision:"1"},data:{publicId:secondPublic},authorizationGeneration:"10"}}};
+    await db.prepare("UPDATE project_alpha_directory_outbox SET state='acknowledged',outcome_json=?,lease_token=NULL,lease_expires_at=NULL WHERE command_id=? AND state='leased'").bind(JSON.stringify(secondOutcome),secondId).run();
+    await db.prepare("UPDATE operations_directory_intents SET state='acknowledged' WHERE record_id=? AND state='materialized'").bind(result.clientRecordId).run();
+    expect(await readNativeDirectoryDurableRemoteHead(db,"client",result.clientRecordId,1,{sourceId:selectedSourceId,
+      sourceInstanceUUID:identity.sourceInstanceId,applicationUUID:identity.applicationId,historyEpoch:identity.historyEpoch,
+      origin:"https://pa-primary.example.test",externalCanonicalId:result.clientRecordId})).toEqual({projectAlphaPublicId:secondPublic,externalCanonicalId:result.clientRecordId,revision:"1"});
+    expect(await approveRaw(db,actor,next.submissionId,next.fieldsSha256,[selectedSourceId],selectedConnection,
+      {kind:"existing",recordId:company,expectedVersion:1})).toMatchObject({...result,replayed:true});
+    expect(await materializeResolvedProjectAlphaDirectoryClientIntents(db,[selectedSourceId],12,Date.now())).toMatchObject({materialized:0});
   });
 
 });
