@@ -6,6 +6,7 @@ import {
   sendProjectAlphaDirectoryProfileUpdate,
   validatedProjectAlphaDirectoryProfileAcknowledgement,
   validatedProjectAlphaDirectoryCreateGenerationConflict,
+  validatedProjectAlphaDirectoryProfileGenerationConflict,
   sendProjectAlphaDirectoryClientContactProfileUpdate,
   validatedProjectAlphaDirectoryClientContactProfileAcknowledgement,
   type ProjectAlphaDirectoryClientContactProfileUpdateCommand,
@@ -19,6 +20,8 @@ import type { ProjectAlphaApiV2Connection } from "./project-alpha-api-v2";
 import { advances, PROJECT_ALPHA_PROJECT_MAX_INTEGER } from "./project-alpha-project-transport";
 import { directoryMaterializationReadSource } from "./project-alpha-directory-materialization-read-source";
 import { validateDirectoryCreateRecoveryReservation } from "./project-alpha-directory-create-recovery-reservation";
+import {directoryProfileRecoveryLineage,captureProfileRecoverySnapshot,sameProfileRecoverySnapshot} from './directory-profile-recovery-reservation';
+import {readAutomaticProfileRecoveryIdentity} from './directory-profile-recovery-identity';
 import type { NativeDirectoryPortalWriterActor } from "./native-directory-profile-writer";
 import type { SharedProfilePortalAuthorityBinding, SharedProfilePortalProof } from "../../../../packages/shared/src/shared-business-profile";
 import { portalProofSchema, stablePortalRequestFingerprint, sharedProfileCorrespondenceColumns, sharedProfileGrantSourceCurrent, type SharedProfilePortalGrant } from "./shared-profile-portal-authority";
@@ -56,7 +59,7 @@ type RelationshipDependency = Readonly<{
 
 export type ProjectAlphaDirectoryProfileOutboxDispatcherOutcome =
   | Readonly<{ status: "acknowledged"; commandId: string; replayed: boolean; publicId: string; revision: string }>
-  | Readonly<{ status: "conflict"; reason: "source" | "command" | "remote"; httpStatus?: number; requestId?: string;createGenerationConflict?:true }>
+  | Readonly<{ status: "conflict"; reason: "source" | "command" | "remote"; httpStatus?: number; requestId?: string;createGenerationConflict?:true;profileGenerationConflict?:true }>
   | Readonly<{ status: "blocked"; reason: "configuration" | "authority" | "destination" | "not_due" | "in_progress" }>
   | Readonly<{ status: "uncertain"; reason: string; httpStatus?: number; requestId?: string }>;
 
@@ -116,9 +119,9 @@ export async function readPortalAuthorityWithinBudget(binding:SharedProfilePorta
  finally{if(timeout!==undefined)clearTimeout(timeout);}
 }
 async function livePortalReservation(db:D1Database,row:Row,value:NativeDirectoryPortalWriterActor,
-  environment:Environment|undefined):Promise<NonNullable<Internal["portalAuthority"]>|null>{
+  environment:Environment|undefined,profileRecovery=false):Promise<NonNullable<Internal["portalAuthority"]>|null>{
   const binding=environment?.SHARED_PROFILE_PORTAL_AUTHORITY;
-  if(!environment||!binding||row.recovery_authorization_id!==null)return null;
+  if(!environment||!binding||(row.recovery_authorization_id!==null&&!profileRecovery))return null;
   const bridgeColumns=await sharedProfileCorrespondenceColumns(db);
   const correspondence=bridgeColumns?correspondenceGrantSql("grant_row"):"1=1";
   const grant=await db.prepare(`SELECT grant_row.*,g.kind,g.version,g.profile_json,c.request_sha256
@@ -577,7 +580,7 @@ async function currentCreateRelationship(db:D1Database,row:Row,dependency:Relati
   AND EXISTS(SELECT 1 FROM ${enrollment} enrollment,json_each(enrollment.destinations_json) destination
    WHERE enrollment.record_id=parent.record_id AND json_extract(destination.value,'$.sourceId')=?
     AND json_extract(destination.value,'$.sourceInstanceUUID')=? AND json_extract(destination.value,'$.applicationUUID')=?
-    AND json_extract(destination.value,'$.historyEpoch')=? AND json_extract(destination.value,'$.origin')=?
+    AND (json_extract(destination.value,'$.historyEpoch')=?${effective?" OR enrollment.enrollment_kind='native_create' AND json_type(destination.value,'$.historyEpoch') IS NULL":''}) AND json_extract(destination.value,'$.origin')=?
     AND json_extract(destination.value,'$.externalCanonicalId')=?)))`).bind(row.record_id,dependency.relationship_version,
   dependency.organization_record_id,dependency.organization_record_version,row.source_id,row.expected_source_instance_id,
   row.application_id,row.expected_history_epoch_id,row.destination_base_url,
@@ -596,13 +599,17 @@ async function exactReservation(db: D1Database, row: Row, connection: ProjectAlp
   if (!command || !audit || !snapshot || !disposition || typeof audit.actor === "undefined") return "command";
   const originalActor = row.audit_actor_type==="system"?portalActor(audit.actor):actor(audit.actor); if (!originalActor) return "command";
   const portal=isPortalActor(originalActor);
-  if(portal&&(command.operation!=="update"||row.recovery_authorization_id!==null))return "command";
-  const recovery = row.recovery_authorization_id === null || portal ? null : await validateDirectoryCreateRecoveryReservation(db,
+  const profileRecovery=row.recovery_authorization_id!==null&&command.operation==='update'
+    ?await directoryProfileRecoveryLineage(db,row.command_id):null;
+  if(profileRecovery&&(profileRecovery.authorization_id!==row.recovery_authorization_id||profileRecovery.root_command_id!==row.root_command_id
+    ||profileRecovery.root_command_json!==row.root_command_json||profileRecovery.actor_json!==JSON.stringify(audit.actor)))return 'authority';
+  if(portal&&(command.operation!=="update"||(row.recovery_authorization_id!==null&&!profileRecovery)))return "command";
+  const recovery = row.recovery_authorization_id === null || portal || profileRecovery ? null : await validateDirectoryCreateRecoveryReservation(db,
     row.command_id, { staffId: originalActor.staffId, accessSubject: originalActor.accessSubject,
       email: originalActor.loginEmail, admissionVersion: originalActor.admissionVersion, profileVersion: originalActor.profileVersion });
-  if (row.recovery_authorization_id !== null && (!recovery || recovery.authorizationId !== row.recovery_authorization_id
+  if (row.recovery_authorization_id !== null && !profileRecovery&&(!recovery || recovery.authorizationId !== row.recovery_authorization_id
     || recovery.rootCommandId !== row.root_command_id || recovery.rootCommandJson !== row.root_command_json)) return "authority";
-  const rootCommand = recovery ? parse(recovery.rootCommandJson) : command;
+  const rootCommand = profileRecovery?parse(profileRecovery.root_command_json):recovery ? parse(recovery.rootCommandJson) : command;
   if (!rootCommand) return "command";
   const actorId=portal?originalActor.actorId:originalActor.staffId,actorSubject=portal?originalActor.subject:originalActor.accessSubject;
   if (row.audit_actor_id !== actorId || row.original_verified_access_subject !== actorSubject
@@ -618,7 +625,7 @@ async function exactReservation(db: D1Database, row: Row, connection: ProjectAlp
     && value.applicationUUID === row.application_id && value.historyEpoch === row.expected_history_epoch_id
     && value.origin === row.destination_base_url && value.externalCanonicalId === row.external_id
     && value.expectedAuthorizationGeneration === rootCommand.expectedAuthorizationGeneration)) return "command";
-  const portalAuthority=portal?await livePortalReservation(db,row,originalActor,portalEnvironment):undefined;
+  const portalAuthority=portal?await livePortalReservation(db,row,originalActor,portalEnvironment,!!profileRecovery):undefined;
   if(portal&&!portalAuthority)return "authority";
   if (!portal&&(!await permitted(db, row, originalActor, "directory.profile.edit", recovery?.profileGrantId ?? originalActor.selectedGrantId)
     || (row.resource_type === "client" && !await permitted(db, row, originalActor, "directory.identity.link", recovery?.identityGrantId ?? originalActor.selectedIdentityGrantId))
@@ -665,6 +672,7 @@ async function exactReservation(db: D1Database, row: Row, connection: ProjectAlp
     if (!Object.hasOwn(fields, "organizationPublicId")) return "command";
     const dependency = await relationshipDependency(db, row);
     if (!dependency || fields.organizationPublicId !== dependency.resolved_parent_public_id) return "command";
+    if(profileRecovery&&!await currentUpdateRelationship(db,row,dependency))return 'command';
     delete fields.organizationPublicId;
   }
   const transport = { commandId: row.command_id, expectedRevision: command.expectedRevision,
@@ -687,10 +695,42 @@ async function exactReservation(db: D1Database, row: Row, connection: ProjectAlp
     identitySafeContactProfile=true;
   }
   if(portal&&row.resource_type==='client'&&!identitySafeContactProfile)return 'authority';
+  if(profileRecovery&&profileRecovery.endpoint_policy!==(identitySafeContactProfile?'contact':'regular'))return 'authority';
+  if(profileRecovery&&!await profileUpdateGroupCurrent(db,row,originalActor))return 'authority';
   return typeof command.expectedRevision === "string" && typeof command.expectedAuthorizationGeneration === "string"
     && isProjectAlphaDirectoryProfileUpdateCommand(row.resource_type, transport)
     ? { operation: "update", transport, publicId: mapping.project_alpha_public_id, actor: originalActor,identitySafeContactProfile,
       ...(portalAuthority?{portalAuthority}:{}) } : "command";
+}
+async function profileUpdateGroupCurrent(db:D1Database,row:Row,value:Actor|NativeDirectoryPortalWriterActor):Promise<boolean>{
+ const groupId=await db.prepare('SELECT group_id FROM native_directory_shared_profile_members WHERE record_id=?').bind(row.record_id).first<string>('group_id');
+ if(!groupId)return true;
+ return!!await db.prepare(`SELECT 1 FROM native_directory_shared_profiles g
+ JOIN native_directory_shared_profile_commands c ON c.group_id=g.id AND c.expected_version=g.version-1
+ JOIN json_each(c.members_json) target ON json_extract(target.value,'$.recordId')=?
+ WHERE g.id=? AND g.kind=? AND c.actor_id=? AND c.actor_kind=? AND json(g.profile_json)=json(?) AND json(c.profile_json)=json(g.profile_json)
+ AND json_extract(target.value,'$.mutationId')=? AND json_extract(target.value,'$.version')=?
+ AND json_array_length(c.members_json)=json_array_length(g.membership_json)
+ AND NOT EXISTS(SELECT 1 FROM json_each(c.members_json) expected
+  LEFT JOIN native_directory_shared_profile_members m ON m.group_id=g.id AND m.record_id=json_extract(expected.value,'$.recordId')
+  LEFT JOIN operations_directory_records r ON r.record_id=m.record_id
+  WHERE m.record_id IS NULL OR r.current_version<>json_extract(expected.value,'$.version')+1
+    OR NOT EXISTS(SELECT 1 FROM json_each(g.membership_json) membership WHERE membership.value=m.record_id)
+    OR EXISTS(SELECT 1 FROM operations_directory_lifecycle_state l WHERE l.record_id=m.record_id AND l.status<>'active'))`)
+ .bind(row.record_id,groupId,row.resource_type,isPortalActor(value)?value.actorId:value.staffId,isPortalActor(value)?'portal':'staff',row.revision_profile_json,row.mutation_id,row.record_version-1).first();
+}
+async function currentUpdateRelationship(db:D1Database,row:Row,d:RelationshipDependency):Promise<boolean>{
+ // Profile updates do not carry a parent resource CAS or change association.
+ // Parent profile-version advancement alone is not a relationship change.
+ return!!await db.prepare(`SELECT 1 FROM operations_directory_client_organizations r
+ WHERE r.client_record_id=? AND r.relationship_version=? AND r.organization_record_id IS ?
+ AND NOT EXISTS(SELECT 1 FROM operations_directory_lifecycle_state l WHERE l.record_id=r.client_record_id AND l.status<>'active')
+ AND (r.organization_record_id IS NULL OR (
+  NOT EXISTS(SELECT 1 FROM operations_directory_lifecycle_state l WHERE l.record_id=r.organization_record_id AND l.status<>'active')
+  AND EXISTS(SELECT 1 FROM project_alpha_active_directory_mappings m WHERE m.record_id=r.organization_record_id
+   AND m.resource_type='organization' AND m.source_id=? AND m.source_instance_id=? AND m.application_id=?
+   AND m.history_epoch_id=? AND m.project_alpha_public_id=?)))`)
+ .bind(row.record_id,d.relationship_version,d.organization_record_id,row.source_id,row.expected_source_instance_id,row.application_id,row.expected_history_epoch_id,d.resolved_parent_public_id).first();
 }
 async function row(db: D1Database, commandId: string): Promise<Row | null> {
   const materializationSource = await directoryMaterializationReadSource(db);
@@ -752,7 +792,7 @@ export async function dispatchProjectAlphaDirectoryProfileOutboxCommand(env: Env
   if (!initial) return { status: "blocked", reason: "in_progress" };
   if (initial.source_id !== sourceId) return { status: "conflict", reason: "source" };
   const done = replay(initial); if (done) return done;
-  if (initial.recovery_authorization_id !== null && env.PROJECT_ALPHA_DIRECTORY_CREATE_GENERATION_RECOVERY_ENABLED !== "true")
+  if (initial.recovery_authorization_id !== null && parse(initial.command_json)?.operation==='create'&&env.PROJECT_ALPHA_DIRECTORY_CREATE_GENERATION_RECOVERY_ENABLED !== "true")
     return { status: "blocked", reason: "authority" };
   const selected = await withEnabledConfiguredProjectAlphaApiV2Connection(env, sourceId, async connection => {
     const checked = await exactReservation(env.OPS_DB, initial, connection,env);
@@ -777,11 +817,40 @@ export async function dispatchProjectAlphaDirectoryProfileOutboxCommand(env: Env
     let postAuthorityRejected=false;
     // Transport capability probing can await network I/O. Reauthorize portal
     // scope immediately before the actual POST, after that probe completes.
-    const beforePost=current.portalAuthority?async(body:string)=>{
-      const live=await exactReservation(env.OPS_DB,leased,connection,env);
-      if(typeof live==="string"||!live.portalAuthority||JSON.stringify(live.transport)!==body){
+    const beforePost=current.portalAuthority||leased.recovery_authorization_id!==null?async(body:string)=>{
+      const snapshotContext=current.portalAuthority&&leased.recovery_authorization_id!==null?{recordId:leased.record_id,sourceId:leased.source_id,
+        externalId:leased.external_id,publicId:current.publicId!,staffId:null,groupId:current.portalAuthority.grant.group_id}:null;
+      const beforeIdentity=snapshotContext?await captureProfileRecoverySnapshot(env.OPS_DB,snapshotContext):null;
+      if(snapshotContext&&!beforeIdentity){postAuthorityRejected=true;throw Error('profile authority unavailable');}
+      const fresh=await row(env.OPS_DB,leased.command_id);
+      const live=fresh?await exactReservation(env.OPS_DB,fresh,connection,env):null;
+      if(!live||typeof live==="string"||(current.portalAuthority&&!live.portalAuthority)||JSON.stringify(live.transport)!==body){
         postAuthorityRejected=true;throw new Error("portal authority changed");
       }
+      if(current.portalAuthority&&leased.recovery_authorization_id!==null&&leased.resource_type==='client'){
+        const lineage=await directoryProfileRecoveryLineage(env.OPS_DB,leased.command_id);
+        const activation=await env.OPS_DB.prepare('SELECT principal_public_id,association_version FROM client_onboarding_portal_activation_proofs WHERE grant_id=?')
+          .bind(current.portalAuthority.grant.id).first<{principal_public_id:string;association_version:string}>();
+        if(!lineage||(lineage.identity_policy==='automatic_own')!==!!activation){postAuthorityRejected=true;throw Error('profile identity policy changed');}
+        if(lineage.identity_policy==='automatic_own'){
+        const before=lineage?.observed_identity_json?parse(lineage.observed_identity_json):null;
+        const identity=await readAutomaticProfileRecoveryIdentity(env,current.portalAuthority.grant,{sourceId:leased.source_id,
+          sourceInstanceId:leased.expected_source_instance_id,applicationId:leased.application_id,historyEpoch:leased.expected_history_epoch_id,
+          recordId:leased.record_id,externalId:leased.external_id,publicId:current.publicId!,expectedRevision:(current.transport as ProjectAlphaDirectoryProfileUpdateCommand).expectedRevision},send);
+        if(identity.status!=='observed'||!before||!plain(before.recoveryProofs)
+          ||JSON.stringify(identity.observation.recoveryProofs)!==JSON.stringify(before.recoveryProofs)){
+          postAuthorityRejected=true;throw Error('profile recovery identity changed');}
+        }
+      }
+      if(snapshotContext&&beforeIdentity){
+        const afterIdentity=await captureProfileRecoverySnapshot(env.OPS_DB,snapshotContext);
+        if(!afterIdentity||!sameProfileRecoverySnapshot(beforeIdentity,afterIdentity)){
+          postAuthorityRejected=true;throw Error('profile authority changed');}
+      }
+      // PA identity reads and the final local fence can outlive a short Client
+      // witness. A semantically unchanged rowset does not extend that witness.
+      if(live.portalAuthority&&!(Date.parse(live.portalAuthority.proof.verifiedUntil)>Date.now())){
+        postAuthorityRejected=true;throw Error('portal authority proof expired');}
     }:undefined;
     const outcome = current.operation === "create"
       ? await sendProjectAlphaDirectoryCreate(connection, leased.resource_type, current.transport as ProjectAlphaDirectoryCreateCommand, send,
@@ -795,9 +864,10 @@ export async function dispatchProjectAlphaDirectoryProfileOutboxCommand(env: Env
     if (outcome.status !== "acknowledged") {
       if (outcome.status === "conflict") {
         const typedGeneration=current.operation==="create"&&!!validatedProjectAlphaDirectoryCreateGenerationConflict(outcome);
-        const details={...diagnostic(outcome),...(typedGeneration?{createGenerationConflict:true as const}:{})};
+        const typedProfile=current.operation==='update'&&!!validatedProjectAlphaDirectoryProfileGenerationConflict(outcome);
+        const details={...diagnostic(outcome),...(typedGeneration?{createGenerationConflict:true as const}:{}),...(typedProfile?{profileGenerationConflict:true as const}:{})};
         const saved = JSON.stringify({ directoryProfileDispatcher: "conflict", reason: outcome.reason, ...diagnostic(outcome),
-          ...(typedGeneration?{errorCode:"authorization_generation_conflict"}:{}) });
+          ...(typedGeneration||typedProfile?{errorCode:"authorization_generation_conflict"}:{}) });
         const settled = await env.OPS_DB.prepare(`UPDATE project_alpha_directory_outbox SET state='terminal',outcome_json=?,lease_token=NULL,lease_expires_at=NULL,
           updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE command_id=? AND state='leased' AND lease_token=? AND lease_expires_at>?`)
           .bind(saved, leased.command_id, token, Date.now()).run();
@@ -902,4 +972,48 @@ export async function readAuthorizedDirectoryCreateReservation(env:Environment,s
   return typeof checked!=="string"&&checked.operation==="create"?checked.transport as ProjectAlphaDirectoryCreateCommand:null;
  });
  return configured.status==="enabled"?configured.value:null;
+}
+
+type ProfileUpdateReservation={row:Row;checked:Internal;snapshot:Awaited<ReturnType<typeof captureProfileRecoverySnapshot>>};
+const updateReservations=new WeakMap<object,ProfileUpdateReservation>();
+/** An opaque presend proof for a terminal update, never a caller-supplied
+ * actor or an allow-terminal escape for normal dispatch. Snapshot capture is
+ * bracketed by the complete existing reservation, including fresh Client RPC. */
+export async function readAuthorizedDirectoryProfileUpdateReservation(env:Environment,sourceId:string,commandId:string,withSnapshot=true){
+ try{
+  const selected=await row(env.OPS_DB,commandId),command=selected&&parse(selected.command_json);
+  if(!selected||selected.source_id!==sourceId||selected.state!=='terminal'||parse(String(selected.outcome_json))?.httpStatus!==409
+   ||command?.operation!=='update')return null;
+  const configured=await withEnabledConfiguredProjectAlphaApiV2Connection(env,sourceId,async connection=>{
+   const checked=await exactReservation(env.OPS_DB,selected,connection,env,true);
+   if(typeof checked==='string'||checked.operation!=='update')return null;
+   if(selected.resource_type==='client'){
+    const relationship=await relationshipDependency(env.OPS_DB,selected);
+    if(!relationship||!await currentUpdateRelationship(env.OPS_DB,selected,relationship))return null;
+   }
+   if(!await profileUpdateGroupCurrent(env.OPS_DB,selected,checked.actor))return null;
+   const audit=parse(selected.audit_command_json),marker=audit?.sharedContactProfile;
+   const membership=await env.OPS_DB.prepare('SELECT group_id FROM native_directory_shared_profile_members WHERE record_id=?').bind(selected.record_id).first<string>('group_id');
+   const context={recordId:selected.record_id,sourceId,externalId:selected.external_id,publicId:checked.publicId!,staffId:isPortalActor(checked.actor)?null:checked.actor.staffId,
+    groupId:plain(marker)&&typeof marker.groupId==='string'?marker.groupId:membership??null};
+   const before=withSnapshot?await captureProfileRecoverySnapshot(env.OPS_DB,context):null;if(withSnapshot&&!before)return null;
+   const fresh=await row(env.OPS_DB,commandId);if(!fresh||JSON.stringify(fresh)!==JSON.stringify(selected))return null;
+   const again=await exactReservation(env.OPS_DB,fresh,connection,env,true);
+   if(typeof again==='string'||again.operation!=='update'||JSON.stringify(again.transport)!==JSON.stringify(checked.transport))return null;
+   const after=withSnapshot?await captureProfileRecoverySnapshot(env.OPS_DB,context):null;
+   if(withSnapshot&&(!before||!after||!sameProfileRecoverySnapshot(before,after)))return null;
+   const current=await env.OPS_DB.prepare(`SELECT 1 FROM effective_native_directory_enrollments e
+    JOIN json_each(e.destinations_json) d WHERE e.record_id=? AND json_extract(d.value,'$.sourceId')=?
+     AND json_extract(d.value,'$.sourceInstanceUUID')=? AND json_extract(d.value,'$.applicationUUID')=?
+     AND (json_extract(d.value,'$.historyEpoch')=? OR e.enrollment_kind='native_create' AND json_type(d.value,'$.historyEpoch') IS NULL) AND json_extract(d.value,'$.origin')=?
+     AND NOT EXISTS(SELECT 1 FROM operations_directory_lifecycle_state l WHERE l.record_id=e.record_id AND l.status<>'active')`)
+    .bind(selected.record_id,sourceId,selected.expected_source_instance_id,selected.application_id,selected.expected_history_epoch_id,selected.destination_base_url).first();
+   if(!current)return null;
+   const proof=Object.freeze({commandId,sourceId});updateReservations.set(proof,{row:fresh,checked:again,snapshot:after});return proof;
+  });
+  return configured.status==='enabled'?configured.value:null;
+ }catch{return null;}
+}
+export function validatedDirectoryProfileUpdateReservation(proof:unknown):ProfileUpdateReservation|null{
+ return proof&&typeof proof==='object'?updateReservations.get(proof)??null:null;
 }

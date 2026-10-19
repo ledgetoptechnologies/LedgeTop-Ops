@@ -4,6 +4,9 @@ import {
   sendProjectAlphaDirectoryCreate,
   sendProjectAlphaDirectoryProfileUpdate,
   validatedProjectAlphaDirectoryCreateGenerationConflict,
+  validatedProjectAlphaDirectoryProfileGenerationConflict,
+  sendProjectAlphaDirectoryClientContactProfileUpdate,
+  PROJECT_ALPHA_DIRECTORY_CLIENT_CONTACT_PROFILE_ENDPOINT,
   type ProjectAlphaDirectoryClientCreateCommand,
   type ProjectAlphaDirectoryClientCreateProfile,
   type ProjectAlphaDirectoryClientUpdateProfile,
@@ -82,6 +85,39 @@ describe("Project Alpha API-v2 Directory profile transport", () => {
     const outcome = await sendProjectAlphaDirectoryCreate(connection, "client", staleCommand, staleTransport(make));
     expect(outcome).toEqual({ status: "conflict", reason: "http_status", httpStatus: 409, requestId });
     expect(validatedProjectAlphaDirectoryCreateGenerationConflict(outcome)).toBeNull();
+    expect(validatedProjectAlphaDirectoryProfileGenerationConflict(outcome)).toBeNull();
+  });
+
+  it.each([false,true])('keeps client regular/contact conflict authority separated (contact=%s)',async contact=>{
+    const command={commandId,expectedRevision:'1',expectedAuthorizationGeneration:'7',profile:clientUpdateProfile};
+    const required=contact?PROJECT_ALPHA_DIRECTORY_CLIENT_CONTACT_PROFILE_ENDPOINT:endpoint('client','update');
+    const send=vi.fn<typeof fetch>(async url=>String(url).endsWith('/capabilities')?json(capabilities(required)):json(staleEnvelope(),409));
+    const outcome=await(contact?sendProjectAlphaDirectoryClientContactProfileUpdate(connection,clientId,command,send)
+      :sendProjectAlphaDirectoryProfileUpdate(connection,'client',clientId,command,send));
+    expect(validatedProjectAlphaDirectoryProfileGenerationConflict(outcome)).toMatchObject({kind:'client',publicId:clientId,
+      endpointPath:required.path.replace('{publicId}',clientId),identitySafeContactProfile:contact,commandJson:JSON.stringify(command)});
+    expect(validatedProjectAlphaDirectoryCreateGenerationConflict(outcome)).toBeNull();
+  });
+  it.each([
+    ['generic',()=>json({error:{code:'revision_conflict'}},409)],
+    ['wrong source',()=>json({...staleEnvelope(),sourceInstanceId:commandId},409)],
+    ['wrong application',()=>json({...staleEnvelope(),applicationId:commandId},409)],
+    ['wrong epoch',()=>json({...staleEnvelope(),historyEpoch:commandId},409)],
+    ['wrong request',()=>json({...staleEnvelope(),requestId:commandId},409)],
+    ['extra field',()=>json({...staleEnvelope(),detail:'untrusted'},409)],
+    ['cookie',()=>json(staleEnvelope(),409,{'Set-Cookie':'forbidden'})],
+    ['redirect',()=>json(staleEnvelope(),409,{Location:'https://elsewhere.example.test'})],
+    ['oversized',()=>json(staleEnvelope(),409,{'Content-Length':'65537'})],
+  ])('does not grant update recovery authority for %s',async(_name,make)=>{
+    const command={commandId,expectedRevision:'1',expectedAuthorizationGeneration:'7',profile:clientUpdateProfile};
+    for(const contact of [false,true]){
+      const required=contact?PROJECT_ALPHA_DIRECTORY_CLIENT_CONTACT_PROFILE_ENDPOINT:endpoint('client','update');
+      const send=vi.fn<typeof fetch>(async url=>String(url).endsWith('/capabilities')?json(capabilities(required)):make());
+      const outcome=await(contact?sendProjectAlphaDirectoryClientContactProfileUpdate(connection,clientId,command,send)
+        :sendProjectAlphaDirectoryProfileUpdate(connection,'client',clientId,command,send));
+      expect(validatedProjectAlphaDirectoryProfileGenerationConflict(outcome)).toBeNull();
+      expect(validatedProjectAlphaDirectoryCreateGenerationConflict(outcome)).toBeNull();
+    }
   });
   it.each([
     ["cookie", { "Set-Cookie": "forbidden" }],
@@ -119,6 +155,18 @@ describe("Project Alpha API-v2 Directory profile transport", () => {
     });
     await expect(sendProjectAlphaDirectoryProfileUpdate(connection, "organization", organizationId, command, send)).resolves.toMatchObject({ status: "acknowledged", httpStatus: 200, response: { result: { resource: { type: "organization", publicId: organizationId, revision: "2" } } } });
     expect(send).toHaveBeenCalledTimes(2);
+  });
+
+  it("recognizes exact nonexecuted organization-profile authorization-generation conflicts", async () => {
+    const command: ProjectAlphaDirectoryProfileUpdateCommand = { commandId, expectedRevision: "1", expectedAuthorizationGeneration: "7", profile: organizationProfile };
+    const send = vi.fn<typeof fetch>(async url => String(url).endsWith("/capabilities")
+      ? json(capabilities(endpoint("organization", "update"))) : json(staleEnvelope(), 409));
+    const outcome = await sendProjectAlphaDirectoryProfileUpdate(connection, "organization", organizationId, command, send);
+    expect(outcome).toMatchObject({ status: "conflict", httpStatus: 409, errorCode: "authorization_generation_conflict" });
+    expect(validatedProjectAlphaDirectoryCreateGenerationConflict(outcome)).toBeNull();
+    expect(validatedProjectAlphaDirectoryProfileGenerationConflict(outcome)).toMatchObject({kind:'organization',publicId:organizationId,
+      endpointPath:`/api/v2/directory/organizations/${organizationId}/profile/commands`,identitySafeContactProfile:false,commandJson:JSON.stringify(command)});
+    expect(validatedProjectAlphaDirectoryProfileGenerationConflict({...outcome})).toBeNull();
   });
 
   it("sends the exact PA client create contract, including the optional relationship field", async () => {

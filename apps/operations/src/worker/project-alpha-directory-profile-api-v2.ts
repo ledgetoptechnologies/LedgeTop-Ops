@@ -243,6 +243,15 @@ function createSuccess(value: unknown, kind: ProjectAlphaDirectoryProfileKind, c
 type GenerationConflictEvidence = Readonly<{ commandJson: string; destinationOrigin: string; requestId: string;
   sourceInstanceId: string; applicationId: string; historyEpoch: string }>;
 const generationConflicts = new WeakMap<object, GenerationConflictEvidence>();
+type ProfileGenerationConflictEvidence = GenerationConflictEvidence & Readonly<{
+  kind: ProjectAlphaDirectoryProfileKind; publicId: string; endpointPath: string; identitySafeContactProfile: boolean;
+}>;
+const profileGenerationConflicts = new WeakMap<object, ProfileGenerationConflictEvidence>();
+/** Update evidence is deliberately disjoint from create evidence and binds the
+ * exact regular/contact endpoint. Serialized errors cannot recreate it. */
+export function validatedProjectAlphaDirectoryProfileGenerationConflict(outcome: unknown): ProfileGenerationConflictEvidence | null {
+  return outcome && typeof outcome === "object" ? profileGenerationConflicts.get(outcome) ?? null : null;
+}
 /** Proof exists only for an exact create response validated by this transport.
  * A caller-supplied errorCode or historical generic 409 is not evidence. */
 export function validatedProjectAlphaDirectoryCreateGenerationConflict(outcome: unknown): GenerationConflictEvidence | null {
@@ -256,7 +265,7 @@ function generationConflict(value: unknown, connection: ProjectAlphaApiV2Connect
     && exact(value.error, ["code"]) && value.error.code === "authorization_generation_conflict";
 }
 async function post(connection: ProjectAlphaApiV2Connection, path: string, body: string, expectedStatus: number | readonly number[], send: typeof fetch,
-  inspectCreateConflict = false): Promise<Response | ProjectAlphaDirectoryProfileTransportFailure> {
+  inspectConflict: false | true | Readonly<{kind:ProjectAlphaDirectoryProfileKind;publicId:string;identitySafeContactProfile:boolean}> = false): Promise<Response | ProjectAlphaDirectoryProfileTransportFailure> {
   const controller = new AbortController(); const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
   try {
     const response = await send(new URL(path, connection.baseUrl), { method: "POST", headers: headers(connection), body, redirect: "manual", credentials: "omit", cache: "no-store", signal: controller.signal });
@@ -264,14 +273,16 @@ async function post(connection: ProjectAlphaApiV2Connection, path: string, body:
     const accepted = Array.isArray(expectedStatus) ? expectedStatus.includes(response.status) : response.status === expectedStatus;
     if (!accepted) {
       const failure = statusFailure(response, expectedStatus);
-      if (inspectCreateConflict && failure.status === "conflict" && response.status === 409) {
+      if (inspectConflict && failure.status === "conflict" && response.status === 409) {
         try {
           const parsed = await boundedJson(response);
           if (generationConflict(parsed, connection, failure.requestId)) {
             const outcome = { ...failure, errorCode: "authorization_generation_conflict" as const };
-            generationConflicts.set(outcome, Object.freeze({ commandJson: body, destinationOrigin: new URL(connection.baseUrl).origin,
+            const evidence = Object.freeze({ commandJson: body, destinationOrigin: new URL(connection.baseUrl).origin,
               requestId: failure.requestId!, sourceInstanceId: connection.expectedSourceInstanceId,
-              applicationId: connection.expectedApplicationId, historyEpoch: connection.expectedHistoryEpoch! }));
+              applicationId: connection.expectedApplicationId, historyEpoch: connection.expectedHistoryEpoch! });
+            if(inspectConflict===true)generationConflicts.set(outcome,evidence);
+            else profileGenerationConflicts.set(outcome,Object.freeze({...evidence,...inspectConflict,endpointPath:path}));
             return outcome;
           }
         } catch (error) {
@@ -322,7 +333,8 @@ async function sendDirectoryProfileUpdateToEndpoint(connectionInput: ProjectAlph
     // Fresh local/private authority may await RPC; it must finish before the
     // unchanged PA network timer starts. No asynchronous gap follows this gate.
     if(beforePost)await beforePost(body);
-    const posted = await post(connection, required.path.replace("{publicId}", publicIdValue), body, 200, send); if (!(posted instanceof Response)) return posted;
+    const posted = await post(connection, required.path.replace("{publicId}", publicIdValue), body, 200, send,
+      {kind,publicId:publicIdValue,identitySafeContactProfile}); if (!(posted instanceof Response)) return posted;
     const info = diagnostic(posted);
     try { const parsed = await boundedJson(posted, identitySafeContactProfile ? TIMEOUT_MS : undefined); if (!profileSuccess(parsed, kind, publicIdValue, inputCommand, connection, info.requestId)) return { status: "uncertain", reason: "invalid_contract", ...info }; const outcome = { status: "acknowledged" as const, httpStatus: 200 as const, response: parsed }; acknowledgements.set(outcome, { commandJson: body, responseJson: JSON.stringify(parsed), destinationOrigin: new URL(connection.baseUrl).origin, ...(identitySafeContactProfile ? { identitySafeContactProfile: true as const } : {}) }); return outcome; }
     catch (error) { return { status: "uncertain", reason: error instanceof Error && error.message === "response_limit" ? "response_limit" : error instanceof Error && error.message === "transport" ? "transport" : error instanceof Error && error.message === "timeout" ? "timeout" : "invalid_contract", ...info }; }

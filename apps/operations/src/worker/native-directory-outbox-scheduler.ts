@@ -1,4 +1,5 @@
 import { prepareApprovedOnboardingCreateGenerationRecovery,hasApprovedOnboardingCreateRecovery } from "./project-alpha-directory-create-generation-recovery";
+import {recoverDirectoryProfileGeneration,profileGenerationRecoverySchema} from './project-alpha-directory-profile-generation-recovery';
 import { enqueueNativeDirectoryCreateObservations, dispatchNativeDirectoryCreateObservation } from './native-directory-create-observations';
 import { parseDuplicateFreeJson } from "./bounded-json";
 import {
@@ -34,7 +35,7 @@ type Environment = ProjectAlphaApiV2ConnectionEnvironment & Readonly<{
   NATIVE_DIRECTORY_LIFECYCLE_ENABLED?: string;
   SHARED_PROFILE_PORTAL_AUTHORITY?: SharedProfilePortalAuthorityBinding;
 }>;
-type QueueKind = "onboarding_create_recovery" | "profile" | "relationship" | "binding_continuation" | "lifecycle" | "create_observation";
+type QueueKind = "profile_generation_recovery" | "onboarding_create_recovery" | "profile" | "relationship" | "binding_continuation" | "lifecycle" | "create_observation";
 type Candidate = Readonly<{
   queue_kind: QueueKind;
   command_kind: "normal" | "generation_recovery";
@@ -99,10 +100,10 @@ function configuredSourceIds(raw: unknown): readonly string[] | null {
 
 async function eligibleCandidates(db: D1Database, sourceIds: readonly string[], now: number,
   maxCommands: number, relationshipRecoveryEnabled: boolean, bindingContinuationEnabled: boolean,
-  lifecycleEnabled: boolean, onboardingRecoveryEnabled: boolean): Promise<readonly Candidate[]> {
+  lifecycleEnabled: boolean, onboardingRecoveryEnabled: boolean,profileRecoveryEnabled=false): Promise<readonly Candidate[]> {
   if (sourceIds.length === 0) return [];
   const placeholders = sourceIds.map(() => "?").join(",");
-  const maximumCandidates = MAX_SOURCES * 7 * maxCommands;
+  const maximumCandidates = MAX_SOURCES * 8 * maxCommands;
   const bindingArm = bindingContinuationEnabled ? `
       UNION ALL
       SELECT 'binding_continuation','normal',j.command_id,j.source_id,
@@ -134,6 +135,13 @@ async function eligibleCandidates(db: D1Database, sourceIds: readonly string[], 
         AND (decision.client_record_id=intent.record_id OR decision.organization_record_id=intent.record_id
          OR EXISTS(SELECT 1 FROM client_onboarding_shared_company_child_receipts child
           WHERE child.decision_id=decision.decision_id AND child.client_record_id=intent.record_id)))`:"";
+  const profileRecoveryArm=profileRecoveryEnabled?` UNION ALL
+   SELECT 'profile_generation_recovery','normal',outbox.command_id,outbox.source_id,coalesce(checks.checked_at,0),outbox.created_at
+   FROM operations_directory_effective_materializations m JOIN project_alpha_directory_outbox outbox ON outbox.command_id=m.command_id
+   JOIN operations_directory_intents intent ON intent.intent_id=m.intent_id JOIN operations_directory_records record ON record.record_id=intent.record_id
+   LEFT JOIN project_alpha_directory_profile_recovery_checks checks ON checks.command_id=outbox.command_id
+   WHERE outbox.state='terminal' AND json_extract(outbox.outcome_json,'$.httpStatus')=409 AND json_extract(outbox.command_json,'$.operation')='update'
+    AND intent.state='materialized' AND record.current_version=intent.record_version AND coalesce(checks.state,'pending')='pending' AND coalesce(checks.next_attempt_at,0)<=?`:'';
   const query = `WITH eligible(queue_kind,command_kind,command_id,source_id,eligible_at,created_at) AS (
       SELECT 'profile','normal',command_id,source_id,
         CASE state WHEN 'leased' THEN lease_expires_at ELSE next_attempt_at END,created_at
@@ -147,7 +155,7 @@ async function eligibleCandidates(db: D1Database, sourceIds: readonly string[], 
       UNION ALL SELECT 'create_observation','normal',j.command_id,j.source_id,
         CASE d.state WHEN 'leased' THEN d.lease_expires_at ELSE d.next_attempt_at END,j.created_at
       FROM native_directory_create_observation_jobs j JOIN native_directory_create_observation_dispatch d ON d.command_id=j.command_id
-      WHERE (d.state IN('pending','uncertain') AND d.next_attempt_at<=?) OR (d.state='leased' AND d.lease_expires_at<=?)${onboardingRecoveryArm}
+      WHERE (d.state IN('pending','uncertain') AND d.next_attempt_at<=?) OR (d.state='leased' AND d.lease_expires_at<=?)${onboardingRecoveryArm}${profileRecoveryArm}
     ), ranked AS (
       SELECT queue_kind,command_kind,command_id,source_id,
         row_number() OVER(PARTITION BY source_id,queue_kind,command_kind ORDER BY eligible_at,created_at,command_id) position
@@ -159,9 +167,9 @@ async function eligibleCandidates(db: D1Database, sourceIds: readonly string[], 
   const timing = Array(6 + (relationshipRecoveryEnabled ? 2 : 0) + (bindingContinuationEnabled ? 2 : 0)
     + (lifecycleEnabled ? 2 : 0)).fill(now);
   const rows = (await session.prepare(query)
-    .bind(...timing, ...sourceIds, maxCommands, maximumCandidates)
+    .bind(...timing,...(profileRecoveryEnabled?[now]:[]), ...sourceIds, maxCommands, maximumCandidates)
     .all<Candidate>()).results;
-  return rows.filter(row => (row.queue_kind === "onboarding_create_recovery" || row.queue_kind === "profile" || row.queue_kind === "relationship"
+  return rows.filter(row => (row.queue_kind === "profile_generation_recovery" || row.queue_kind === "onboarding_create_recovery" || row.queue_kind === "profile" || row.queue_kind === "relationship"
       || row.queue_kind === 'binding_continuation' || row.queue_kind === "lifecycle" || row.queue_kind === "create_observation")
     && (row.command_kind === "normal" || row.command_kind === "generation_recovery")
     && (row.queue_kind === "relationship" || row.command_kind === "normal")
@@ -183,11 +191,11 @@ function fairOrder(candidates: readonly Candidate[], sourceIds: readonly string[
   const tick = Math.max(0, Math.floor(rotationTime / ROTATION_INTERVAL_MS));
   const sourceStart = tick % sourceIds.length;
   const queues: readonly Readonly<{ queue: QueueKind; command: Candidate["command_kind"] }>[] = tick % 2 === 0
-    ? [{ queue: "profile", command: "normal" }, {queue:"onboarding_create_recovery",command:"normal"}, { queue: "relationship", command: "normal" },
+    ? [{ queue: "profile", command: "normal" }, {queue:'profile_generation_recovery',command:'normal'}, {queue:"onboarding_create_recovery",command:"normal"}, { queue: "relationship", command: "normal" },
       { queue: "relationship", command: "generation_recovery" }, { queue:'binding_continuation',command:'normal' },
       { queue: "lifecycle", command: "normal" }, {queue:"create_observation",command:"normal"}]
     : [{queue:"create_observation",command:"normal"}, { queue: "lifecycle", command: "normal" }, { queue:'binding_continuation',command:'normal' }, { queue: "relationship", command: "normal" }, { queue: "relationship", command: "generation_recovery" },
-      { queue: "profile", command: "normal" },{queue:"onboarding_create_recovery",command:"normal"}];
+      { queue: "profile", command: "normal" },{queue:"onboarding_create_recovery",command:"normal"},{queue:'profile_generation_recovery',command:'normal'}];
   const ordered: Candidate[] = [];
   for (let position = 1; position <= maxCommands && ordered.length < maxCommands; position += 1) {
     for (let offset = 0; offset < sourceIds.length && ordered.length < maxCommands; offset += 1) {
@@ -277,11 +285,12 @@ export async function drainNativeDirectoryOutboxes(env: Environment,
   await enqueueNativeDirectoryCreateObservations(env.OPS_DB,sourceIds,maxCommands);
   const candidates = await eligibleCandidates(env.OPS_DB, sourceIds, startedAt, maxCommands,
     relationshipGenerationRecovery === "true", profileBindingContinuationEnabled(continuationPolicy), lifecycleEnabled,
-    env.CLIENT_ONBOARDING_ADMIN_ENABLED==="true"&&createGenerationRecovery==="true");
+    env.CLIENT_ONBOARDING_ADMIN_ENABLED==="true"&&createGenerationRecovery==="true",await profileGenerationRecoverySchema(env.OPS_DB));
   const selected = fairOrder(candidates, sourceIds, rotationTime, maxCommands);
   const send = deadlineFetch(options.send ?? fetch, deadline, now);
   const dispatchEnvironment = { OPS_DB: env.OPS_DB, DELIVERY_DB: env.DELIVERY_DB, PROJECT_ALPHA_API_V2_CONNECTIONS: connections,
     SHARED_PROFILE_PORTAL_AUTHORITY: portalAuthority,CLIENT_ONBOARDING_ADMIN_ENABLED:env.CLIENT_ONBOARDING_ADMIN_ENABLED,
+    NATIVE_DIRECTORY_OUTBOX_DRAIN_ENABLED:env.NATIVE_DIRECTORY_OUTBOX_DRAIN_ENABLED,
     PROJECT_ALPHA_DIRECTORY_CREATE_GENERATION_RECOVERY_ENABLED: createGenerationRecovery,
     PROJECT_ALPHA_DIRECTORY_RELATIONSHIP_GENERATION_RECOVERY_ENABLED: relationshipGenerationRecovery, ...continuationPolicy,
     ...(lifecycleEnabled ? { PROJECT_ALPHA_DIRECTORY_LIFECYCLE_ENABLED: "true" } : {}) };
@@ -293,7 +302,9 @@ export async function drainNativeDirectoryOutboxes(env: Environment,
       // Recover and send one approved create before observing a generation for
       // the next one. Successor bytes remain immutable; PA still CAS-checks the
       // fresh generation. Network ambiguity never creates another successor.
-      const outcome = candidate.queue_kind === "onboarding_create_recovery"
+      const outcome = candidate.queue_kind==='profile_generation_recovery'
+        ?await recoverProfile(dispatchEnvironment,candidate,send)
+        :candidate.queue_kind === "onboarding_create_recovery"
         ? await recoverOnboardingCreate(dispatchEnvironment,candidate,send)
         : candidate.queue_kind === "create_observation"
         ? await dispatchNativeDirectoryCreateObservation(dispatchEnvironment,candidate.source_id,candidate.command_id,send)
@@ -321,6 +332,16 @@ export async function drainNativeDirectoryOutboxes(env: Environment,
   return result;
 }
 
+async function recoverProfile(env:Environment,candidate:Candidate,send:typeof fetch){
+ const result=await recoverDirectoryProfileGeneration(env,candidate.source_id,candidate.command_id,send);
+ const now=Date.now();
+ const reason='reason'in result?result.reason:result.status;
+ const state=['depth','remote_changed','association_changed','identity','onboarding_native_not_noop','onboarding_remote_not_noop'].includes(reason)?'review_required':'pending';
+ await env.OPS_DB.prepare(`INSERT INTO project_alpha_directory_profile_recovery_checks(command_id,source_id,next_attempt_at,checked_at,reason,state)
+ VALUES(?,?,?,?,?,?) ON CONFLICT(command_id) DO UPDATE SET next_attempt_at=excluded.next_attempt_at,checked_at=excluded.checked_at,reason=excluded.reason,state=excluded.state`)
+ .bind(candidate.command_id,candidate.source_id,now+5*60_000,now,reason,state).run();
+ return result;
+}
 async function recoveryUuid(seed:string){
  const bytes=new Uint8Array(await crypto.subtle.digest("SHA-256",new TextEncoder().encode(seed))).slice(0,16);
  bytes[6]=(bytes[6]!&15)|64;bytes[8]=(bytes[8]!&63)|128;

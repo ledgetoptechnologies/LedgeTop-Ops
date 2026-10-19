@@ -1,3 +1,6 @@
+import {readAutomaticProfileRecoveryIdentity} from "../src/worker/directory-profile-recovery-identity";
+import {writeNativeDirectoryLifecycle} from "../src/worker/native-directory-lifecycle-writer";
+import {persistProjectAlphaDirectoryInventoryPage} from "../src/worker/project-alpha-v2-sync";
 import {materializeResolvedProjectAlphaDirectoryClientIntents} from "../src/worker/project-alpha-directory-client-intent-materializer";
 import { readFileSync, readdirSync } from "node:fs";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
@@ -69,9 +72,9 @@ async function submission(fields: typeof consumer | Record<string, string> = con
       actor.identity.verifiedAccessSubject, actor.verifiedUntil, targetClientRecordId),
     db.prepare(`INSERT INTO client_onboarding_issuance_commands
       (invitation_id,command_id,request_sha256,scopes_json,issuer_admission_version,
-       issuer_profile_version,issuer_email,verified_until) VALUES(?,?,?,?,1,1,?,?)`)
+       issuer_profile_version,issuer_email,verified_until) VALUES(?,?,?,?,?,?,?,?)`)
       .bind(invitationId, commandId, "b".repeat(64), targetClientRecordId === null ? JSON.stringify(scopes) : null,
-        actor.identity.email, actor.verifiedUntil),
+        actor.admissionVersion, actor.identity.profileVersion, actor.identity.email, actor.verifiedUntil),
     db.prepare(`INSERT INTO client_onboarding_submissions
       (invitation_id,submission_id,fields_json,fields_sha256) VALUES(?,?,?,?)`)
       .bind(invitationId, submissionId, JSON.stringify(fields), fieldsSha256),
@@ -103,7 +106,7 @@ describe("shared-company onboarding through all-child ACK and own-principal acti
     ].map(sql=>deliveryDb.prepare(sql)));
     const directory = new URL("../migrations/", import.meta.url);
     for (const name of readdirSync(directory).filter(item => /^\d{4}_.+\.sql$/.test(item)
-      && item.slice(0, 4) <= "0218").sort())
+      && item.slice(0, 4) <= "0220").sort())
       await db.batch(splitD1MigrationStatements(readFileSync(new URL(name, directory), "utf8"))
         .map(statement => db.prepare(statement)));
 
@@ -334,4 +337,36 @@ describe("shared-company onboarding through all-child ACK and own-principal acti
     await f.tick();expect(await f.state()).toEqual({state:"blocked",reason:"authority_changed"});expect(await f.grants()).toHaveLength(0);
     expect(await db.prepare("SELECT id FROM native_directory_shared_profiles WHERE id=?").bind(f.plan.planId).first()).toBeNull();
   },120_000);
+  it("denies at the isolated AUTO helper boundary when the original local parent is archive-pending but the target parent and PA own witnesses remain active",async()=>{
+    // This directly tests helper policy, not Client admission/browser auth. All
+    // company planning, approval and automatic proof/grant issuance remain real.
+    // Refresh the synthetic caller from its CURRENT native profile; an earlier
+    // case deliberately advanced that version, which must never be rolled back.
+    actor.identity.profileVersion=(await db.prepare('SELECT version FROM native_staff_profiles WHERE staff_id=?').bind(staffId).first<number>('version'))!;
+    const f=await fixture();await f.acknowledge(0);await f.acknowledge(1);await f.tick();
+    expect(await f.state()).toEqual({state:'active',reason:'active'});
+    const grants=await f.grants(),original=f.children[0]!,target=f.children[1]!;
+    expect(original.parentRecordId).not.toBe(target.parentRecordId);
+    const grant=grants.find(g=>g.record_id===original.clientRecordId)!,config=configs[target.sourceId];
+    const requested={sourceId:target.sourceId,sourceInstanceId:config.sourceInstanceId,applicationId:config.applicationId,historyEpoch:config.historyEpoch,
+      recordId:target.clientRecordId,externalId:target.clientRecordId,publicId:target.publicId,expectedRevision:'1'};
+    const noHttp=vi.fn<typeof fetch>(async()=>{throw Error('HTTP outside mocked PA own-witness boundary');});
+    const beforeProofs=(await db.prepare('SELECT * FROM client_onboarding_portal_activation_proofs WHERE decision_id=? ORDER BY grant_id').bind(f.plan.planId).all()).results;
+    const beforeOwn=JSON.stringify([...f.observations]);
+    expect(await readAutomaticProfileRecoveryIdentity(environment(),grant,requested,noHttp)).toMatchObject({status:'observed'});
+    const parentConfig=configs[original.sourceId],parentPublic=(await db.prepare("SELECT project_alpha_public_id FROM project_alpha_active_directory_mappings WHERE record_id=? AND source_id=? AND resource_type='organization'").bind(original.parentRecordId,original.sourceId).first<string>('project_alpha_public_id'))!;
+    expect(await persistProjectAlphaDirectoryInventoryPage(db,{authoritative:false,sourceId:original.sourceId,sourceInstanceId:parentConfig.sourceInstanceId,
+      applicationId:parentConfig.applicationId,historyEpoch:parentConfig.historyEpoch,requestId:uuid(),authorizationGeneration:'10',nextCursor:null,
+      resources:[{type:'organization',publicId:parentPublic,revision:'1',present:true,lastAction:'upsert',projectionSha256:'a'.repeat(64),binding:{externalId:original.parentRecordId,status:'active',resourceRevision:'1'}}]},null)).toMatchObject({status:'persisted'});
+    const archived=await writeNativeDirectoryLifecycle(db,{mutationId:uuid(),recordId:original.parentRecordId,kind:'organization',action:'archive',expectedLifecycleVersion:0,expectedRecordVersion:1,
+      actor:{staffId,accessSubject:actor.identity.verifiedAccessSubject,admissionVersion:actor.admissionVersion,loginEmail:actor.identity.email,profileVersion:actor.identity.profileVersion,
+        selectedProfileGrantId:'approve-profile',selectedEnrollmentGrantId:'approve-enrollment',verifiedUntil:actor.verifiedUntil}});
+    expect(archived,JSON.stringify(archived)).toMatchObject({status:'written',lifecycleStatus:'archive_pending'});
+    expect(await db.prepare("SELECT coalesce((SELECT status FROM operations_directory_lifecycle_state WHERE record_id=?),'active') status").bind(target.parentRecordId).first('status')).toBe('active');
+    expect(await readAutomaticProfileRecoveryIdentity(environment(),grant,requested,noHttp)).toEqual({status:'denied'});
+    expect(JSON.stringify([...f.observations])).toBe(beforeOwn);
+    expect((await db.prepare('SELECT * FROM client_onboarding_portal_activation_proofs WHERE decision_id=? ORDER BY grant_id').bind(f.plan.planId).all()).results).toEqual(beforeProofs);
+    expect(noHttp).not.toHaveBeenCalled();
+  },180_000);
+
 });

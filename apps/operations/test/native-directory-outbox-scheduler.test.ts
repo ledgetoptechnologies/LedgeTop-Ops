@@ -10,6 +10,11 @@ const relationshipDispatch = vi.hoisted(() => vi.fn());
 const continuationDispatch = vi.hoisted(() => vi.fn());
 const lifecycleDispatch = vi.hoisted(() => vi.fn());
 const materializeClients = vi.hoisted(() => vi.fn());
+const profileRecovery = vi.hoisted(() => vi.fn());
+const profileRecoverySchema = vi.hoisted(() => vi.fn());
+vi.mock('../src/worker/project-alpha-directory-profile-generation-recovery',()=>({
+  profileGenerationRecoverySchema:profileRecoverySchema,recoverDirectoryProfileGeneration:profileRecovery,
+}));
 vi.mock("../src/worker/project-alpha-directory-profile-outbox-dispatcher", () => ({
   dispatchProjectAlphaDirectoryProfileOutboxCommand: profileDispatch,
 }));
@@ -81,7 +86,11 @@ beforeAll(async () => {
   for (const table of ["project_alpha_directory_outbox", "project_alpha_directory_relationship_outbox",
     "project_alpha_directory_relationship_recovery_outbox"])
     await db.prepare(`CREATE TABLE ${table}(command_id TEXT PRIMARY KEY,source_id TEXT NOT NULL,state TEXT NOT NULL,
-      next_attempt_at INTEGER NOT NULL,lease_expires_at INTEGER,created_at TEXT NOT NULL)`).run();
+      next_attempt_at INTEGER NOT NULL,lease_expires_at INTEGER,created_at TEXT NOT NULL,command_json TEXT,outcome_json TEXT)`).run();
+  await db.prepare('CREATE TABLE operations_directory_records(record_id TEXT PRIMARY KEY,current_version INTEGER)').run();
+  await db.prepare('CREATE TABLE operations_directory_intents(intent_id TEXT PRIMARY KEY,record_id TEXT,record_version INTEGER,state TEXT)').run();
+  await db.prepare('CREATE TABLE operations_directory_effective_materializations(intent_id TEXT,command_id TEXT)').run();
+  await db.prepare('CREATE TABLE project_alpha_directory_profile_recovery_checks(command_id TEXT PRIMARY KEY,source_id TEXT,next_attempt_at INTEGER,checked_at INTEGER,reason TEXT,state TEXT)').run();
   await db.prepare(`CREATE TABLE native_directory_profile_binding_jobs(
     command_id TEXT PRIMARY KEY,source_id TEXT NOT NULL,created_at TEXT NOT NULL)`).run();
   await db.prepare(`CREATE TABLE native_directory_profile_binding_dispatch(
@@ -100,6 +109,8 @@ beforeEach(async () => {
     db.prepare("DELETE FROM native_directory_profile_binding_jobs"),
     db.prepare("DELETE FROM native_directory_profile_binding_dispatch"),
     db.prepare("DELETE FROM project_alpha_directory_lifecycle_outbox"),
+    db.prepare('DELETE FROM operations_directory_effective_materializations'),db.prepare('DELETE FROM operations_directory_intents'),
+    db.prepare('DELETE FROM operations_directory_records'),db.prepare('DELETE FROM project_alpha_directory_profile_recovery_checks'),
   ]);
   observationDispatch.mockReset().mockResolvedValue({status:'acknowledged'});
   profileDispatch.mockReset().mockResolvedValue({ status: "acknowledged" });
@@ -107,9 +118,39 @@ beforeEach(async () => {
   continuationDispatch.mockReset().mockResolvedValue({ status: "acknowledged" });
   lifecycleDispatch.mockReset().mockResolvedValue({ status: "acknowledged" });
   materializeClients.mockReset().mockResolvedValue({ examined: 0, materialized: 0, blocked: 0 });
+  profileRecoverySchema.mockReset().mockResolvedValue(false);
+  profileRecovery.mockReset().mockResolvedValue({status:'blocked',reason:'nonexecution_not_proven'});
 });
 
 afterAll(async () => runtime.dispose());
+
+it('backs off unproven terminal updates fairly without starving another recovery or ordinary work',async()=>{
+ const source='project-alpha:staging';profileRecoverySchema.mockResolvedValue(true);
+ for(const id of ['recovery-a','recovery-b']){
+  await command('profile',id,source,'terminal');
+  await db.batch([
+   db.prepare("UPDATE project_alpha_directory_outbox SET command_json=?,outcome_json=? WHERE command_id=?").bind('{"operation":"update"}','{"httpStatus":409}',id),
+   db.prepare('INSERT INTO operations_directory_records VALUES(?,2)').bind(id),
+   db.prepare("INSERT INTO operations_directory_intents VALUES(?,?,2,'materialized')").bind(id,id),
+   db.prepare('INSERT INTO operations_directory_effective_materializations VALUES(?,?)').bind(id,id),
+  ]);
+ }
+ await command('profile','ordinary-pending',source);
+ expect(await drainNativeDirectoryOutboxes(environment([source]),{now:()=>Date.now(),rotationTime:0,maxCommands:3})).toMatchObject({attempted:3,acknowledged:1,blocked:2});
+ expect(profileRecovery.mock.calls.map(c=>c[2]).sort()).toEqual(['recovery-a','recovery-b']);
+ expect(profileDispatch).toHaveBeenCalledOnce();
+ expect((await db.prepare('SELECT state FROM project_alpha_directory_outbox WHERE command_id LIKE ? ORDER BY command_id').bind('recovery-%').all()).results).toEqual([{state:'terminal'},{state:'terminal'}]);
+ const checks=(await db.prepare('SELECT state,reason,next_attempt_at FROM project_alpha_directory_profile_recovery_checks').all<{state:string;reason:string;next_attempt_at:number}>()).results;
+ expect(checks).toHaveLength(2);expect(checks.every(c=>c.state==='pending'&&c.reason==='nonexecution_not_proven'&&c.next_attempt_at>Date.now())).toBe(true);
+ profileRecovery.mockClear();await drainNativeDirectoryOutboxes(environment([source]),{now:()=>Date.now(),rotationTime:0,maxCommands:3});
+ expect(profileRecovery).not.toHaveBeenCalled();
+ await db.prepare('UPDATE project_alpha_directory_profile_recovery_checks SET next_attempt_at=0').run();
+ profileRecovery.mockResolvedValue({status:'blocked',reason:'depth'});
+ await drainNativeDirectoryOutboxes(environment([source]),{now:()=>Date.now(),rotationTime:0,maxCommands:3});
+ expect((await db.prepare('SELECT state FROM project_alpha_directory_profile_recovery_checks').all()).results).toEqual([{state:'review_required'},{state:'review_required'}]);
+ profileRecovery.mockClear();await drainNativeDirectoryOutboxes(environment([source]),{now:()=>Date.now()+600_000,rotationTime:0,maxCommands:3});
+ expect(profileRecovery).not.toHaveBeenCalled();
+});
 
 it('pins the exact private portal authority reader before asynchronous scheduler work',async()=>{
   const sourceId='project-alpha:primary';await command('profile','portal-profile',sourceId);
