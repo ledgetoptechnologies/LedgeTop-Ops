@@ -1,25 +1,41 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
+import { safeRecipientLink } from "../src/client/ClientOnboardingStaff";
+import { submissionFromLocation } from "../src/client/ClientOnboardingReview";
 
-const source = readFileSync(new URL("../src/client/ClientOnboardingStaff.tsx", import.meta.url), "utf8");
+const read = (name: string) => readFileSync(new URL(`../src/client/${name}`, import.meta.url), "utf8");
+const staff = read("ClientOnboardingStaff.tsx"), review = read("ClientOnboardingReview.tsx"), api = read("onboarding-staff-api.ts");
+const id = "11111111-1111-4111-8111-111111111111", secret = "d".repeat(64);
 
 describe("client onboarding staff UI security boundary", () => {
-  it("does not persist or log the one-time secret", () => {
-    expect(source).not.toMatch(/localStorage|sessionStorage|console\./);
-    expect(source).not.toContain("recipientUrl");
+  it("never persists or logs the one-time link or secret", () => {
+    for (const source of [staff, review, api]) expect(source).not.toMatch(/localStorage|sessionStorage|console\./);
+    // The link is held in memory and only handed to the clipboard or a navigation; it is never rendered as text.
+    expect(staff).not.toMatch(/\{revealed\.(link|secret)\}/);
+    expect(staff).not.toContain("<output");
   });
 
   it("uses only the bounded staff endpoints with no-store fetches", () => {
-    expect(source).toContain('const endpoint = "/api/client-onboarding/staff"');
-    expect(source).toContain('cache: "no-store"');
-    expect(source).toContain('`${endpoint}/session`');
-    expect(source).toContain('`${endpoint}/create`');
-    expect(source).toContain('`${endpoint}/reveal`');
-    expect(source).toContain('`${endpoint}/review`');
-    expect(source).toContain('`${endpoint}/enrollment-choices`');
-    expect(source).toContain('`${endpoint}/approve`');
-    expect(source).toContain('sourceIds })');
-    expect(source).toContain('approvalUncertain && frozenSources ? frozenSources : selectedSources');
-    expect(source).not.toContain('`${endpoint}/reject`');
+    expect(api).toContain('export const endpoint = "/api/client-onboarding/staff"');
+    expect(api).toContain('cache: "no-store"');
+    expect(staff).toContain("`${endpoint}/session`");
+    for (const route of ["create", "reveal"]) expect(staff).toContain(`post(session, "${route}"`);
+    for (const route of ["inbox", "review", "enrollment-choices", "activation-status", "approve", "existing-companies",
+      "shared-company-choices", "shared-company-plan", "approve-shared-company"]) expect(review).toContain(`post(session, "${route}"`);
+    expect(review).not.toContain('"reject"');
+  });
+
+  it("accepts only an https onboarding link for exactly the revealed invitation", () => {
+    expect(safeRecipientLink(`https://portal.example.test/onboarding/${id}#${secret}`, id)).toBe(`https://portal.example.test/onboarding/${id}#${secret}`);
+    for (const value of [`http://portal.example.test/onboarding/${id}#${secret}`, `https://portal.example.test/onboarding/other#${secret}`,
+      `https://portal.example.test/onboarding/${id}?next=x#${secret}`, `https://user@portal.example.test/onboarding/${id}#${secret}`,
+      `https://portal.example.test/onboarding/${id}#short`, `javascript:alert(1)//onboarding/${id}#${secret}`, null, 7])
+      expect(safeRecipientLink(value, id)).toBeNull();
+  });
+
+  it("opens only an exact submission UUID from an email link", () => {
+    expect(submissionFromLocation(`?submission=${id}`)).toBe(id);
+    for (const search of ["", "?submission=../../x", "?submission=11111111-1111-1111-1111-111111111111", `?submission=${"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".toUpperCase()}`])
+      expect(submissionFromLocation(search)).toBeNull();
   });
 });

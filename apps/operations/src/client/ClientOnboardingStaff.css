@@ -36,3 +36,38 @@
   .onboarding-created dl div { grid-template-columns: 1fr; gap: .15rem; }
   .onboarding-staff-shell > header { min-height: 64px; }
 }
+
+/* Review inbox, company choice, approval plan and activation progress. */
+.onboarding-inbox { display: grid; gap: .8rem; }
+.onboarding-inbox h2 { margin: 0; }
+.onboarding-inbox-heading { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: .5rem; }
+.onboarding-inbox-list { display: grid; gap: .5rem; margin: 0; padding: 0; list-style: none; }
+.onboarding-inbox-list button { display: grid; gap: .15rem; width: 100%; min-height: 56px; padding: .75rem .9rem; border: 1px solid var(--line, #cbd2d8); border-radius: 10px; background: #fff; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+.onboarding-inbox-list button:hover { border-color: #9aa8b3; }
+.onboarding-inbox-list button[aria-current="true"] { border-color: var(--orange, #d95716); box-shadow: 0 0 0 2px #d9571622; }
+.onboarding-inbox-list span, .onboarding-inbox-list small { color: var(--muted, #5d6873); overflow-wrap: anywhere; }
+.onboarding-review-meta, .onboarding-hint { color: var(--muted, #5d6873); }
+.onboarding-review fieldset { display: grid; gap: .55rem; min-width: 0; margin: 0; padding: 1rem; border: 1px solid var(--line, #cbd2d8); border-radius: 10px; }
+.onboarding-review legend { padding: 0 .35rem; font-weight: 850; }
+.onboarding-review fieldset > label { display: flex; align-items: flex-start; gap: .55rem; font-weight: 650; }
+.onboarding-review fieldset > label input { width: 1.1rem; min-height: 1.1rem; margin: .15rem 0 0; flex: none; }
+.onboarding-review fieldset > label span { display: grid; gap: .1rem; min-width: 0; }
+.onboarding-review fieldset > label small { color: var(--muted, #5d6873); font-weight: 500; }
+.onboarding-review fieldset > label.is-unavailable { opacity: .7; }
+.onboarding-approval-action { display: grid; gap: .75rem; justify-items: start; }
+.onboarding-approval-action > fieldset, .onboarding-company-picker { width: 100%; box-sizing: border-box; }
+.onboarding-company-picker { display: grid; gap: .65rem; }
+.onboarding-company-search { display: flex; flex-wrap: wrap; align-items: flex-end; gap: .6rem; width: 100%; }
+.onboarding-company-search label { display: grid; gap: .3rem; flex: 1 1 16rem; min-width: 0; font-weight: 750; }
+.onboarding-company-search input { box-sizing: border-box; width: 100%; min-height: 44px; padding: .65rem; border: 1px solid var(--line, #cbd2d8); border-radius: 8px; font: inherit; }
+.onboarding-plan { display: grid; gap: .6rem; width: 100%; box-sizing: border-box; padding: 1rem; border: 1px solid #f0c8ad; border-radius: 10px; background: #fff8f3; }
+.onboarding-plan ul { margin: 0; padding-left: 1.2rem; }
+.onboarding-plan button { justify-self: start; }
+.onboarding-approval-success { display: grid; gap: .6rem; padding: 1rem; border-radius: 10px; background: #f2f7f4; }
+.onboarding-activation { display: flex; flex-wrap: wrap; align-items: center; gap: .6rem; }
+.onboarding-secret-actions { display: flex; flex-wrap: wrap; gap: .6rem; }
+.onboarding-invite-ready { display: grid; gap: .7rem; }
+@media (max-width: 640px) {
+  .onboarding-company-search button { width: 100%; }
+  .onboarding-secret-actions > button { flex: 1 1 100%; }
+}
