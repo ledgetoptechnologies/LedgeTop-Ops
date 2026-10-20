@@ -6,6 +6,7 @@ import { sqlScope } from "./acl";
 import { readBoundedJson } from "./bounded-json";
 import { auditStatement } from "./request-security";
 import { probeProjectAlphaApiV2, type ProjectAlphaApiV2Probe } from "./project-alpha-api-v2";
+import { readInstalledWriterReadiness } from "./project-alpha-installed-writer-readiness";
 import { listEnabledProjectAlphaApiV2SourceIds, withEnabledConfiguredProjectAlphaApiV2Connection } from "./project-alpha-api-v2-connections";
 import {
   PROJECT_ALPHA_DIRECTORY_INVENTORY_ENDPOINT,
@@ -154,6 +155,7 @@ function acceptanceSummary(
   projects: Record<string, unknown>,
   catalog: Record<string, unknown>,
   clientWrites: Record<string, unknown>,
+  installedWriterReadiness?: Record<string, unknown>,
 ): Record<string, unknown> {
   return {
     sourceId: sourceIdValue,
@@ -163,6 +165,7 @@ function acceptanceSummary(
     projects,
     catalog,
     clientWrites,
+    ...(installedWriterReadiness === undefined ? {} : { installedWriterReadiness }),
   };
 }
 
@@ -217,6 +220,7 @@ export function registerProjectAlphaApiV2ReadAcceptanceRoutes(app: App): void {
 
     const selected = await withEnabledConfiguredProjectAlphaApiV2Connection(c.env, requestedSourceId,
       async connection => {
+        const installedWriterReadiness = await readInstalledWriterReadiness(connection);
         const probe = await probeProjectAlphaApiV2(connection, [], fetch, [
           PROJECT_ALPHA_DIRECTORY_INVENTORY_ENDPOINT,
           PROJECT_ALPHA_PROJECT_INVENTORY_ENDPOINT,
@@ -224,7 +228,7 @@ export function registerProjectAlphaApiV2ReadAcceptanceRoutes(app: App): void {
         if (probe.status !== "verified") {
           const unavailable = { status: "not_attempted", reason: "capabilities" };
           return acceptanceSummary(requestedSourceId, safeProbe(probe), unavailable, unavailable, unavailable,
-            { meaning: "advertised_prerequisites_only", create: unavailable, profileWrite: unavailable });
+            { meaning: "advertised_prerequisites_only", create: unavailable, profileWrite: unavailable }, installedWriterReadiness);
         }
         const directory = await readProjectAlphaDirectoryInventoryAfterVerifiedCapabilities(connection, requestedSourceId,
           { type: "all", limit: 200 }, fetch);
@@ -243,7 +247,7 @@ export function registerProjectAlphaApiV2ReadAcceptanceRoutes(app: App): void {
           [CLIENT_PROFILE_WRITE_ENDPOINT.requiredCapability]);
         return acceptanceSummary(requestedSourceId, safeProbe(probe), await safeDirectory(directory),
           await safeProject(projects), catalog, { meaning: "advertised_prerequisites_only",
-            create: advertisedPrerequisite(clientCreateProbe), profileWrite: advertisedPrerequisite(clientProfileWriteProbe) });
+            create: advertisedPrerequisite(clientCreateProbe), profileWrite: advertisedPrerequisite(clientProfileWriteProbe) }, installedWriterReadiness);
       });
     const result = selected.status === "enabled" ? selected.value : acceptanceSummary(requestedSourceId,
       { status: selected.status, exactIdentityMatch: false, exactContractMatch: false },

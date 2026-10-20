@@ -13,6 +13,7 @@ const mocks = vi.hoisted(() => ({
   catalog: vi.fn(),
   audit: vi.fn(),
   batch: vi.fn(),
+  writerReadiness: vi.fn(),
 }));
 
 vi.mock("../src/worker/acl", () => ({ sqlScope: mocks.scope }));
@@ -21,6 +22,7 @@ vi.mock("../src/worker/project-alpha-api-v2-connections", () => ({
   withEnabledConfiguredProjectAlphaApiV2Connection: mocks.configured,
 }));
 vi.mock("../src/worker/project-alpha-api-v2", () => ({ probeProjectAlphaApiV2: mocks.probe }));
+vi.mock("../src/worker/project-alpha-installed-writer-readiness", () => ({ readInstalledWriterReadiness: mocks.writerReadiness }));
 vi.mock("../src/worker/project-alpha-directory-command-api-v2", () => ({
   PROJECT_ALPHA_DIRECTORY_INVENTORY_ENDPOINT: { method: "GET", path: "/api/v2/directory/inventory", requiredCapability: "directory.inventory.read" },
   readProjectAlphaDirectoryInventoryAfterVerifiedCapabilities: mocks.directory,
@@ -96,6 +98,8 @@ beforeEach(() => {
   } });
   mocks.audit.mockResolvedValue({});
   mocks.batch.mockResolvedValue([]);
+  mocks.writerReadiness.mockResolvedValue({ meaning: "advertised_prerequisites_only", singleCapabilitiesObservation: true,
+    identity: { status: "advertised", exactIdentityMatch: true, exactContractMatch: true }, checks: {} });
 });
 
 describe("Project Alpha API-v2 read acceptance route", () => {
@@ -126,6 +130,7 @@ describe("Project Alpha API-v2 read acceptance route", () => {
     expect((await fixture(false).send()).status).toBe(404);
     expect(mocks.configured).not.toHaveBeenCalled();
     expect(mocks.probe).not.toHaveBeenCalled();
+    expect(mocks.writerReadiness).not.toHaveBeenCalled();
     expect(mocks.directory).not.toHaveBeenCalled();
     expect(mocks.projects).not.toHaveBeenCalled();
     expect(mocks.catalog).not.toHaveBeenCalled();
@@ -136,12 +141,15 @@ describe("Project Alpha API-v2 read acceptance route", () => {
     mocks.scope.mockResolvedValueOnce({ global: true, deniedGlobal: true });
     expect((await fixture().send()).status).toBe(403);
     expect(mocks.configured).not.toHaveBeenCalled();
+    expect(mocks.writerReadiness).not.toHaveBeenCalled();
   });
 
   it("accepts only an explicitly selected source and runs capabilities before both inventories", async () => {
     const response = await fixture().send();
     expect(response.status).toBe(200);
     expect(mocks.configured).toHaveBeenCalledWith(expect.anything(), sourceId, expect.any(Function));
+    expect(mocks.writerReadiness).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ apiKey: "server-only-api-key",
+      expectedSourceInstanceId: sourceInstanceId, expectedApplicationId: applicationId, expectedHistoryEpoch: historyEpoch }));
     expect(mocks.probe).toHaveBeenCalledWith(expect.objectContaining({ apiKey: "server-only-api-key" }), [], fetch,
       expect.arrayContaining([
         expect.objectContaining({ method: "GET", path: "/api/v2/directory/inventory", requiredCapability: "directory.inventory.read" }),
@@ -171,6 +179,7 @@ describe("Project Alpha API-v2 read acceptance route", () => {
       clientWrites: { meaning: "advertised_prerequisites_only",
         create: { status: "advertised", exactIdentityMatch: true, exactContractMatch: true },
         profileWrite: { status: "advertised", exactIdentityMatch: true, exactContractMatch: true } },
+      installedWriterReadiness: { meaning: "advertised_prerequisites_only", singleCapabilitiesObservation: true },
     });
     const serialized = JSON.stringify(body);
     for (const privateValue of ["server-only-api-key", "private-pa.example.test", "private-customer-record", "private-project-record", "e".repeat(32), "a".repeat(32)])
