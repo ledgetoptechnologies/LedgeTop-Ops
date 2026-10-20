@@ -12,6 +12,8 @@ import { reconcileClientPortalWorkspaces } from "./client-portal-workspace-recon
 import { getProjectAlphaSnapshotRecoveryStatus } from "./project-alpha-snapshot-recovery";
 import {
   ensureDeploymentConfiguredProjectAlphaConnectors, listProjectAlphaConnectors, ProjectAlphaConnectorError,
+  deploymentAllowsProjectAlphaSource,
+  assertProjectAlphaConnectorDeploymentConfiguration,
 } from "./project-alpha-connectors";
 import { PortalSourceAuthorityError } from "../../../client/src/worker/project-alpha-portal-authority";
 import {
@@ -19,6 +21,7 @@ import {
   configureConnectorPortal,
   getConnectorPortalStatus,
   recoverConnectorPortalCoordination,
+  setCoordinatedProjectAlphaConnectorState,
 } from "./project-alpha-portal-coordination";
 import type { Env, StaffPrincipal } from "./types";
 import {
@@ -134,6 +137,33 @@ export function registerProjectAlphaConnectorAdminRoutes(app: App): void {
     return c.json({ connectors, health: safeHealth, recovery, portal, projectManagement, ...(existingImport ? { existingImport } : {}),
       portalDirectoryCorrespondence: await discoverPortalDirectoryCorrespondence(c.env),
       legacyPrimary: !registeredPrimary || registeredPrimary.state === "pending" });
+  });
+  // Observe and change an existing deployment-owned business connection without
+  // reconciling its intentionally suspended state back to the manifest.
+  const registered = async (env: Env, sourceId: string) => {
+    if (!env.PROJECT_ALPHA_CONNECTOR_SOURCES?.trim())
+      throw new HTTPException(404, { message: "Project Alpha source is not configured for this deployment" });
+    const connector = (await listProjectAlphaConnectors(env)).find(row => row.sourceId === sourceId);
+    if (!connector) throw new HTTPException(404, { message: "Project Alpha source is not configured for this deployment" });
+    return connector;
+  };
+  const coordination = async (env: Env) => {
+    const { available, recovery } = await getConnectorPortalStatus(env);
+    return { available, recovery };
+  };
+  app.get(`${ROOT}/:sourceId/state`, async c => c.json({
+    connector: await registered(c.env, c.req.param("sourceId")), coordination: await coordination(c.env),
+  }));
+  app.post(`${ROOT}/:sourceId/state`, async c => {
+    const value = await json(c.req.raw, z.object({ expectedVersion: z.number().int().positive().safe(),
+      state: z.enum(["suspended", "active"]), }).strict());
+    const sourceId = c.req.param("sourceId");
+    await registered(c.env, sourceId);
+    if (value.state === "active" && !deploymentAllowsProjectAlphaSource(c.env, sourceId))
+      throw new HTTPException(409, { message: "Project Alpha source is disabled in this deployment" });
+    const deployment = value.state === "active" ? await assertProjectAlphaConnectorDeploymentConfiguration(c.env, sourceId) : undefined;
+    const connector = await setCoordinatedProjectAlphaConnectorState(c.env, sourceId, value, c.get("principal").id, deployment);
+    return c.json({ connector, coordination: await coordination(c.env) });
   });
   // This controls the portal purpose of an already deployment-owned source.
   // It deliberately accepts no source identity, destination, credential, or

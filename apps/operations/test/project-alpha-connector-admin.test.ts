@@ -117,7 +117,7 @@ describe("Project Alpha deployment-owned connector administration boundary", { t
     expect((await send(`${ROOT}/recover-portal-update`, "POST", { expectedVersion: 1 })).status).toBe(403);
   });
 
-  it("does not expose browser source-registration, revision, or state mutations", async () => {
+  it("does not expose browser source-registration or revision mutations", async () => {
     const before = await counts();
     const removed: Array<[string, string, unknown]> = [
       [ROOT, "POST", {}], [`${ROOT}/primary-preflight`, "POST", {}], [`${ROOT}/${encodeURIComponent(primary)}`, "PATCH", {}],

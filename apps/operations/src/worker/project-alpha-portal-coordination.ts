@@ -9,6 +9,7 @@ import {
   listProjectAlphaConnectors, ProjectAlphaConnectorError, reviseProjectAlphaConnector,
   assertProjectAlphaConnectorStateTransition, setProjectAlphaConnectorState, type ProjectAlphaConnectorRevisionInput,
   type ProjectAlphaConnectorProof, type ProjectAlphaConnectorState, type ProjectAlphaConnectorSummary, type ProjectAlphaConnectorEnvironment,
+  assertProjectAlphaConnectorDeploymentConfiguration, type DeploymentConfiguredSource,
 } from "./project-alpha-connectors";
 import {
   PrimaryDeliveryAuthorityError, primaryDeliveryAuthorityProof, primaryDeliveryAuthorityReady,
@@ -294,12 +295,21 @@ export async function changeConnectorPortal(env: Env, sourceId: string, expected
 }
 
 export async function setCoordinatedProjectAlphaConnectorState(env: Env, sourceId: string,
-  input: { expectedVersion: number; state: ProjectAlphaConnectorState; readVisible?: boolean; displayName?: string }, actorId: string) {
+  input: { expectedVersion: number; state: ProjectAlphaConnectorState; readVisible?: boolean; displayName?: string }, actorId: string,
+  deploymentContext?: DeploymentConfiguredSource) {
+  // Only trusted server-side administration supplies this optional context.
+  // Recheck it before any coordination write; the final primitive also checks
+  // the exact deployed identity/revision and split credentials. Old callers
+  // retain their existing credential path and state algorithm.
+  const deploymentEntry = deploymentContext && input.state === "active"
+    ? await assertProjectAlphaConnectorDeploymentConfiguration(env, sourceId) : undefined;
+  if (deploymentContext && (!deploymentEntry || JSON.stringify(deploymentContext) !== JSON.stringify(deploymentEntry)))
+    throw new ProjectAlphaConnectorError("changed", "Connector deployment configuration changed before resuming");
   // Before the paired upgrade no secondary portal authority can be provisioned
   // by these routes. Preserve the existing business-only administration API.
   if (!await ready(env)) {
     await requireUnusedPortalSchema(env);
-    return setProjectAlphaConnectorState(env, sourceId, input, actorId);
+    return setProjectAlphaConnectorState(env, sourceId, input, actorId, undefined, deploymentEntry);
   }
   const connector = await source(env, sourceId);
   assertProjectAlphaConnectorStateTransition(connector.state, input.state);
@@ -309,7 +319,7 @@ export async function setCoordinatedProjectAlphaConnectorState(env: Env, sourceI
     readVisible:input.readVisible??connector.readVisible,displayName:input.displayName??connector.displayName});
   // Label/visibility changes do not revoke client access. Resuming business sync
   // deliberately does not reactivate a portal purpose that was paused earlier.
-  const result = await setProjectAlphaConnectorState(env, sourceId, input, actorId, sourceMutationPermit(env, operation, input.expectedVersion));
+  const result = await setProjectAlphaConnectorState(env, sourceId, input, actorId, sourceMutationPermit(env, operation, input.expectedVersion), deploymentEntry);
   await finish(env, operation);
   return result;
 }

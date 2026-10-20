@@ -161,7 +161,7 @@ interface ConnectorKeyCommitment {
   readonly algorithm: "ed25519" | "hmac-sha256";
   readonly fingerprint: string;
 }
-interface DeploymentConfiguredSource {
+export interface DeploymentConfiguredSource {
   readonly registration: RegisterProjectAlphaConnectorInput;
   readonly eventCurrent: ConnectorKeyCommitment;
   readonly eventPrevious: ConnectorKeyCommitment | null;
@@ -973,4 +973,21 @@ export async function listProjectAlphaConnectors(env: ProjectAlphaConnectorEnvir
   }
   const allowed = new Set(configured.map(entry => entry.registration.sourceId));
   return rows.filter(row => allowed.has(row.source_id)).map(summary);
+}
+
+/** Read-only counterpart to the normal resolver's deployment identity checks.
+ * Administration must not reconcile a deliberately suspended source before
+ * resuming it, or activate an old registered producer under a changed manifest. */
+export async function assertProjectAlphaConnectorDeploymentConfiguration(env: ProjectAlphaConnectorEnvironment,
+  requestedSource: string): Promise<DeploymentConfiguredSource> {
+  const id = sourceId(requestedSource), entry = deploymentSources(env).find(value => value.registration.sourceId === id);
+  if (!entry?.enabled) return fail("changed", "Connector is not enabled for this deployment");
+  const db = database(env), row = await read(db, id);
+  if (!row || !matchesDeploymentIdentity(row, entry))
+    return fail("changed", "Connector identity does not match the local deployment manifest");
+  const revision = await db.prepare("SELECT * FROM pa_connector_revisions WHERE source_id=? AND revision=?")
+    .bind(id, row.active_revision).first<RevisionRow>();
+  if (!revisionMatchesDeployment(revision, entry))
+    return fail("changed", "Connector revision does not match the local deployment manifest");
+  return entry;
 }

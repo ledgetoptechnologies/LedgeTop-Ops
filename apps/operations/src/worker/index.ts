@@ -380,7 +380,12 @@ const PROJECT_ALPHA_PROJECTION_API_ROOTS = Object.freeze([
   "/api/admin/integrations/project-alpha",
 ] as const);
 
-export function projectAlphaProjectionApiRequest(path: string): boolean {
+export function projectAlphaProjectionApiRequest(path: string, method = "GET"): boolean {
+  // Connection control/observation must remain usable when an intentional
+  // suspension differs from the deployment manifest. All normal staff,
+  // administrator, deny-aware permission, Origin and CSRF guards still apply.
+  if ((method === "POST" && path === "/api/admin/integrations/project-alpha/connectors/recover-portal-update")
+    || (["GET", "POST"].includes(method) && /^\/api\/admin\/integrations\/project-alpha\/connectors\/[^/]+\/state$/.test(path))) return false;
   return PROJECT_ALPHA_PROJECTION_API_ROOTS.some(root => path === root || path.startsWith(`${root}/`))
     || /^\/api\/team\/staff\/[^/]+\/assigned-work(?:\/|$)/.test(path);
 }
@@ -638,7 +643,7 @@ app.use("/api/*", async (c, next) => {
   // malformed connector deployment must fail those reads closed without
   // taking down unrelated Operations APIs such as session, airspace, raw file
   // delivery, diagnostics, or staff administration.
-  if (projectAlphaProjectionApiRequest(c.req.path))
+  if (projectAlphaProjectionApiRequest(c.req.path, c.req.method))
     await ensureDeploymentConfiguredProjectAlphaConnectors(c.env);
   if (["POST", "PUT", "PATCH", "DELETE"].includes(c.req.method)) {
     if (
