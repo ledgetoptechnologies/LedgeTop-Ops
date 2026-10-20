@@ -15,8 +15,9 @@ import { readClientOnboardingSubmissionForReview, listClientOnboardingSubmission
 import { approveNewNativeOnlyClientOnboarding } from "./client-onboarding-approval";
 import { readClientOnboardingEnrollmentChoices } from "./client-onboarding-enrollment-discovery";
 import { parseClientOnboardingEnrollmentSourceIds } from "./client-onboarding-enrollment-selection";
+import { readClientOnboardingScopeChoices } from "./client-onboarding-scope-choices";
 
-export type ClientOnboardingStaffRoute = "session" | "create" | "reveal" | "review" | "approve" | "enrollment-choices" | "inbox" | "activation-status" | "existing-companies" | "shared-company-plan" | "shared-company-choices" | "approve-shared-company";
+export type ClientOnboardingStaffRoute = "session" | "scope-choices" | "create" | "reveal" | "review" | "approve" | "enrollment-choices" | "inbox" | "activation-status" | "existing-companies" | "shared-company-plan" | "shared-company-choices" | "approve-shared-company";
 export type ClientOnboardingStaffHttpDependencies = Readonly<{
   configuration: NativeStaffAccessConfiguration & Readonly<{ origin: string; csrfSecret: string }>;
   database: D1Database;
@@ -41,6 +42,7 @@ class HttpFailure extends Error {
 
 export function clientOnboardingStaffHttpRequest(method: string, path: string): ClientOnboardingStaffRoute | null {
   if (method === "GET" && path === "/api/client-onboarding/staff/session") return "session";
+  if (method === "POST" && path === "/api/client-onboarding/staff/scope-choices") return "scope-choices";
   if(method==="POST"&&path==="/api/client-onboarding/staff/shared-company-plan")return "shared-company-plan";
   if(method==="POST"&&path==="/api/client-onboarding/staff/approve-shared-company")return "approve-shared-company";
   if(method==="POST"&&path==="/api/client-onboarding/staff/shared-company-choices")return "shared-company-choices";
@@ -158,6 +160,10 @@ async function body(request: Request, route: Exclude<ClientOnboardingStaffRoute,
     throw new HttpFailure(400, "invalid_request");
   }
   if (!plain(value)) throw new HttpFailure(400, "invalid_request");
+  if (route === "scope-choices") {
+    if (!exact(value, [])) throw new HttpFailure(400, "invalid_request");
+    return value;
+  }
   if (route === "inbox") {
     if (!exact(value, ["cursor"])) throw new HttpFailure(400, "invalid_request");
     return value;
@@ -250,6 +256,17 @@ export async function handleClientOnboardingStaffHttp(request: Request,
     unexpired(auth);
     const input = await body(request, route);
     unexpired(auth);
+    if (route === "scope-choices") {
+      try {
+        const choices = await readClientOnboardingScopeChoices(authority.database, auth);
+        unexpired(auth);
+        return response(200, choices);
+      } catch (error) {
+        if (error instanceof Error && error.message === "client_onboarding_scope_choices_denied")
+          throw new HttpFailure(403, "client_onboarding_denied");
+        throw new HttpFailure(503, "client_onboarding_unavailable");
+      }
+    }
     if(route==="shared-company-plan"||route==="shared-company-choices"||route==="approve-shared-company") {
       try {
         const result=route==="approve-shared-company"

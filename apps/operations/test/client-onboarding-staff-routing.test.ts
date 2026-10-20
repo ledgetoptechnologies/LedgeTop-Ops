@@ -3,7 +3,7 @@ import { HTTPException } from "hono/http-exception";
 import type { Env } from "../src/worker/types";
 
 const calls = vi.hoisted(() => ({ legacy: vi.fn(), native: vi.fn(), issue: vi.fn(), reveal: vi.fn(),
-  review: vi.fn(), inbox: vi.fn(), approve: vi.fn(), sharedApprove:vi.fn(), existingCompanies: vi.fn(), sharedPlan:vi.fn(), sharedChoices:vi.fn(), enrollmentChoices: vi.fn() }));
+  review: vi.fn(), inbox: vi.fn(), approve: vi.fn(), sharedApprove:vi.fn(), existingCompanies: vi.fn(), sharedPlan:vi.fn(), sharedChoices:vi.fn(), enrollmentChoices: vi.fn(), scopeChoices: vi.fn() }));
 vi.mock("cloudflare:workers", () => ({ WorkflowEntrypoint: class {}, WorkerEntrypoint: class {}, DurableObject: class {} }));
 vi.mock("../src/worker/auth", () => ({ authenticateStaff: calls.legacy }));
 vi.mock("../src/worker/native-staff-auth", () => ({
@@ -25,6 +25,9 @@ vi.mock("../src/worker/client-onboarding-shared-company-approval",()=>({approveC
 vi.mock("../src/worker/client-onboarding-enrollment-discovery", () => ({
   readClientOnboardingEnrollmentChoices: calls.enrollmentChoices,
 }));
+vi.mock("../src/worker/client-onboarding-scope-choices", () => ({
+  readClientOnboardingScopeChoices: calls.scopeChoices,
+}));
 vi.mock("../src/worker/client-onboarding-existing-company",async original=>({
   ...await original<typeof import("../src/worker/client-onboarding-existing-company")>(),
   readClientOnboardingExistingCompanies:calls.existingCompanies,
@@ -34,6 +37,7 @@ vi.mock("../src/worker/client-onboarding-shared-company-plan",async original=>({
   prepareClientOnboardingSharedCompanyPlan:calls.sharedPlan,readClientOnboardingSharedCompanyChoices:calls.sharedChoices,
 }));
 import worker from "../src/worker/index";
+import { clientOnboardingStaffHttpRequest } from "../src/worker/client-onboarding-staff-http";
 
 const origin = "https://ops.example.test";
 const keyring = { activeKeyId: "current", keys: { current: "ab".repeat(32) } };
@@ -97,9 +101,53 @@ beforeEach(() => {
   calls.sharedChoices.mockReset().mockResolvedValue({companies:[],nextAfterGroupId:null,approvalAvailable:false});
   calls.existingCompanies.mockReset().mockResolvedValue({companies:[],nextAfterRecordId:null,existingContactReuse:"unsupported"});
   calls.enrollmentChoices.mockReset().mockResolvedValue({ sourceIds: ["project-alpha:primary"] });
+  calls.scopeChoices.mockReset().mockResolvedValue({ scopes: [{ businessAreaId: "area:onboarding", name: "Drone Services",
+    allowAreaWide: false, divisions: [{ divisionId: "division:onboarding", name: "Greenleaf" }] }] });
 });
 
 describe("native client onboarding staff route", () => {
+  it("matches scope choices only at the exact POST route", () => {
+    const path = "/api/client-onboarding/staff/scope-choices";
+    expect(clientOnboardingStaffHttpRequest("POST", path)).toBe("scope-choices");
+    for (const method of ["GET", "HEAD", "PUT", "PATCH", "DELETE"])
+      expect(clientOnboardingStaffHttpRequest(method, path)).toBeNull();
+    expect(clientOnboardingStaffHttpRequest("POST", `${path}/`)).toBeNull();
+  });
+  it("reads named scope choices only through strict native-staff Origin and CSRF checks", async () => {
+    const path = "/api/client-onboarding/staff/scope-choices";
+    expect((await send(path, "POST", {}, undefined, env("false"))).status).toBe(404);
+    expect(calls.native).not.toHaveBeenCalled();
+    expect((await send(path, "POST", {}, "bad")).status).toBe(403);
+    expect(calls.scopeChoices).not.toHaveBeenCalled();
+    const csrf = await session();
+    expect((await send(path, "POST", {}, csrf, env(), "https://other.example.test")).status).toBe(403);
+    expect((await send(path, "POST", { staffId: "another-staff" }, csrf)).status).toBe(400);
+    expect(calls.scopeChoices).not.toHaveBeenCalled();
+    const reply = await send(path, "POST", {}, csrf);
+    expect(reply.status).toBe(200);
+    expect(await reply.json()).toEqual(await calls.scopeChoices.mock.results[0]?.value);
+    expect(reply.headers.get("Cache-Control")).toBe("no-store");
+    expect(calls.scopeChoices).toHaveBeenCalledWith(database, actor);
+    expect(calls.legacy).not.toHaveBeenCalled();
+    expect(calls.issue).not.toHaveBeenCalled();
+    expect(calls.reveal).not.toHaveBeenCalled();
+  });
+
+  it("collapses revoked scope authority to denial and refuses incomplete scope inventories", async () => {
+    const csrf = await session(), path = "/api/client-onboarding/staff/scope-choices";
+    calls.scopeChoices.mockRejectedValueOnce(Error("client_onboarding_scope_choices_denied"));
+    const denied = await send(path, "POST", {}, csrf);
+    expect(denied.status).toBe(403);
+    expect(await denied.json()).toEqual({ error: "client_onboarding_denied" });
+    calls.scopeChoices.mockRejectedValueOnce(Error("client_onboarding_scope_choices_unavailable"));
+    const unavailable = await send(path, "POST", {}, csrf);
+    expect(unavailable.status).toBe(503);
+    expect(await unavailable.json()).toEqual({ error: "client_onboarding_unavailable" });
+    calls.native.mockRejectedValueOnce(Error("revoked"));
+    expect((await send(path, "POST", {}, csrf)).status).toBe(403);
+    expect(calls.scopeChoices).toHaveBeenCalledTimes(2);
+  });
+
   it("is absent by default before either authentication stack", async () => {
     expect((await send("/api/client-onboarding/staff/session", "GET", undefined, undefined, env("false"))).status).toBe(404);
     expect(calls.native).not.toHaveBeenCalled();
