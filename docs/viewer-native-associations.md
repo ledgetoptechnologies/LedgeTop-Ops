@@ -5,8 +5,8 @@ existing native client project. They do not publish processing outputs, create
 clients, grant client access, or create public links. Viewer continues to own
 models, versions, assets and processing.
 
-All endpoints retain the existing **global** `viewer.view` requirement. Creating
-or refreshing an association additionally requires global `viewer.manage`.
+Catalog reads and staff sessions require **global** `viewer.view`. Creating
+or refreshing an association requires global `viewer.manage`.
 Division-only permissions do not expose the global Viewer catalog. The normal
 Operations human authentication and mutation-security middleware still applies.
 
