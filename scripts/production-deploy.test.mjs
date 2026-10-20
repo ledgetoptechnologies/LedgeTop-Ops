@@ -118,6 +118,27 @@ test('reader only sends fixed official GET with no redirect/retry or arbitrary e
   await assert.rejects(reader.get('/access/apps'), /Read endpoint/);
   await assert.rejects(reader.get('/workers/scripts'), /Incomplete/);
 });
+
+test('malformed conventional tokens fail generically before Headers or transport can echo them', () => {
+  const marker = 'OFFLINE-SECRET-MARKER-1234567890';
+  for (const suffix of ['\r\nBAD', '\n', '\r', '\r\n', '\tBAD', ' BAD', '\x7f', '\u00e9', '\u200b']) {
+    let calls = 0;
+    assert.throws(() => new CloudflareReader('a'.repeat(32), marker + suffix, () => { calls++;throw new Error('transport must not run'); }), error => {
+      assert.equal(error.message, 'Conventional CLOUDFLARE_ACCOUNT_ID/API_TOKEN required');
+      assert.ok(!error.message.includes(marker));return true;
+    });
+    assert.equal(calls, 0);
+  }
+});
+
+test('malformed-token constructor error remains redacted when printed by a CLI process', () => {
+  const marker = 'OFFLINE-SECRET-MARKER-1234567890';
+  const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => ['PATH', 'SYSTEMROOT', 'WINDIR'].includes(k.toUpperCase())));
+  const code = `import { CloudflareReader } from './scripts/production-deploy.mjs';try {new CloudflareReader('a'.repeat(32),process.env.CLOUDFLARE_API_TOKEN,()=>{throw new Error('transport prohibited')});process.exitCode=2;}catch(error){console.error(JSON.stringify({HELD:true,message:error.message,automaticRetry:false}));process.exitCode=1;}`;
+  const child = spawnSync(process.execPath, ['--input-type=module', '-e', code], { cwd: ROOT, env: { ...env, CLOUDFLARE_API_TOKEN: marker + '\r\nBAD' }, encoding: 'utf8', windowsHide: true });
+  assert.equal(child.status, 1);assert.ok(!child.stdout.includes(marker) && !child.stderr.includes(marker));
+  assert.equal(JSON.parse(child.stderr).message, 'Conventional CLOUDFLARE_ACCOUNT_ID/API_TOKEN required');
+});
 test('capture detects deployment changed during fresh GETs', async () => {
   const { snapshot } = fixture();const reader = readerFor(snapshot);
   const get = reader.get.bind(reader);let count = 0;

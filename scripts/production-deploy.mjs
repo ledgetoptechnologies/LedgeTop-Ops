@@ -138,7 +138,9 @@ export function checkMode(mode, fingerprint = frontendFingerprint()) {
 
 export class CloudflareReader {
   constructor(account, token, fetchImpl = fetch) {
-    need(/^[a-f0-9]{32}$/.test(account ?? '') && typeof token === 'string' && token.length >= 20, 'Conventional CLOUDFLARE_ACCOUNT_ID/API_TOKEN required');
+    // Reject malformed header values before fetch/Headers can echo them in an
+    // exception. The CLI prints error messages, never credential values.
+    need(/^[a-f0-9]{32}$/.test(account ?? '') && typeof token === 'string' && token.length >= 20 && !/[^\x21-\x7e]/.test(token), 'Conventional CLOUDFLARE_ACCOUNT_ID/API_TOKEN required');
     this.account = account; this.token = token; this.fetch = fetchImpl;
   }
   async get(suffix) {
