@@ -1,7 +1,7 @@
 # Production deployment after the controlled onboarding rollout
 
 The generic `apps/*/wrangler.jsonc` files remain install/development intent. Do
-not use bare `npx wrangler deploy` for these existing production Workers. Its
+not use the direct CLI release command for these existing production Workers. Its
 explicit defaults override operator-owned flags, it replaces the cron list,
 and its current asset directory does not prove historical URL retention.
 
@@ -17,7 +17,7 @@ enables flags nor creates bindings, grants, schemas, keys, schedules or assets.
 Keep automatic deployment disabled until this adapter has been reviewed and
 the initial controlled rollout is complete. Root must replace each actual
 dashboard deployment command; an npm wrapper does not change the dashboard's
-existing bare `npx wrangler deploy` command.
+existing direct CLI release command.
 
 With each build root set to its existing `apps/<app>` directory, keep the normal
 qualified build command and use exactly one of these deployment commands:
