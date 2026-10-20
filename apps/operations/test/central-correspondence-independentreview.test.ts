@@ -103,14 +103,14 @@ it("requires unique nomination independent of entry order and excludes an active
  expect(await ops.prepare("SELECT count(*) n FROM portal_directory_correspondence_heads").first("n")).toBe(1);
 },60_000);
 
-it("suspends a reviewed alias on primary authority/key changes, retains history and requires a fresh review",async()=>{
+it("resumes the approved alias after authority-only changes and requires fresh review for a different key",async()=>{
  let selected=await resolveDirectoryPortalSource(env,logical,tuple);expect(selected?.portalSourceId).toBe(primary);
  const originalRevision=selected!.correspondenceRevisionId!;
  await client.prepare("UPDATE pa_primary_delivery_authority SET state='suspended',authority_version=authority_version+1 WHERE source_id=?").bind(primary).run();
  expect(await resolveDirectoryPortalSource(env,logical,tuple,originalRevision)).toBeNull();
  expect((await previewPortalDirectoryCorrespondence(env,logical)).status).toBe("suspended");
  await client.prepare("UPDATE pa_primary_delivery_authority SET state='active',authority_version=authority_version+1 WHERE source_id=?").bind(primary).run();
- expect(await resolveDirectoryPortalSource(env,logical,tuple,originalRevision)).toBeNull();
+ expect(await resolveDirectoryPortalSource(env,logical,tuple,originalRevision)).toEqual(selected);
  await approve();
  const refreshed=await resolveDirectoryPortalSource(env,logical,tuple);expect(refreshed?.correspondenceRevisionId).not.toBe(originalRevision);
  const key="f".repeat(64);

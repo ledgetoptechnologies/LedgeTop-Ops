@@ -81,7 +81,13 @@ async function currentProof(env:CorrespondenceEnv,row:Head):Promise<PortalDirect
  try{
   const stored=proofSchema.parse(JSON.parse(row.proof_json));
   if(stored.directorySourceId!==row.directory_source_id||stored.portalSourceId!==row.portal_source_id||await correspondenceHash(stored)!==row.proof_sha256)return null;
-  const current=await metadata(env,row.directory_source_id);return current&&canonical(current)===canonical(stored)?current:null;
+  const current=await metadata(env,row.directory_source_id);
+  // Approval binds immutable producer identity, configuration, revision and key.
+  // Normal pause/resume advances these two lifecycle counters without replacing
+  // that approval. They are approval floors, not historical high-water marks;
+  // metadata still requires the exact CURRENT active connector/mirror pair.
+  if(!current||current.connectorVersion<stored.connectorVersion||current.primaryAuthorityVersion<stored.primaryAuthorityVersion)return null;
+  return canonical({...current,connectorVersion:stored.connectorVersion,primaryAuthorityVersion:stored.primaryAuthorityVersion})===canonical(stored)?current:null;
  }catch{return null;}
 }
 export async function previewPortalDirectoryCorrespondence(env:CorrespondenceEnv,id:string):Promise<PortalDirectoryCorrespondenceStatus>{
@@ -174,7 +180,7 @@ export function correspondenceGrantSql(alias:string):string{
  (connector.snapshot_origin=json_extract(revision.proof_json,'$.baseUrl')),
  (connector.application_key=json_extract(revision.proof_json,'$.applicationKey')),
  (connector.active_revision=json_extract(revision.proof_json,'$.connectorRevision')),
- (connector.version=json_extract(revision.proof_json,'$.connectorVersion')),
+ (connector.version>=json_extract(revision.proof_json,'$.connectorVersion')),
  (signing.current_key_fingerprint=json_extract(revision.proof_json,'$.currentKeyFingerprint'))
  ) SELECT MIN(coalesce(allowed,0)) FROM correspondence_predicates)=1))`;
 }
