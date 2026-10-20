@@ -1,0 +1,1572 @@
+{
+  "schemaVersion": 1,
+  "profile": "production-onboarding-normal-v1",
+  "sourceBase": "45e1bc97abc98ebbcacbd0cc58c831a2cc9825cc",
+  "wranglerVersion": "4.118.0",
+  "wranglerRuntimeSHA256": "a1a7a98e0b073d39dc3229b1b89f66accb51ae557fb34552250f914f12a81efd",
+  "workers": {
+    "operations": {
+      "name": "ledgetop-ops",
+      "settings": {
+        "placement": {},
+        "compatibility_date": "2026-07-22",
+        "compatibility_flags": [
+          "nodejs_compat"
+        ],
+        "usage_model": "standard",
+        "tags": [],
+        "tail_consumers": [],
+        "logpush": false,
+        "observability": {
+          "enabled": true,
+          "head_sampling_rate": 1,
+          "redact_query_string": false,
+          "logs": {
+            "enabled": true,
+            "head_sampling_rate": 1,
+            "persist": true,
+            "invocation_logs": true
+          },
+          "traces": {
+            "enabled": false,
+            "persist": true,
+            "head_sampling_rate": 1
+          }
+        }
+      },
+      "runtime": {
+        "migration_tag": "thumbnail-renderer-v1",
+        "exports": {
+          "SharedProfilePortalIngress": {
+            "type": "worker"
+          },
+          "ThumbnailRendererContainer": {
+            "type": "durable-object",
+            "storage": "sqlite"
+          }
+        },
+        "assets": {
+          "not_found_handling": "single-page-application",
+          "static_routing": {
+            "user_worker": [
+              "/api/*",
+              "/health",
+              "/r/*",
+              "/administration/client-portal/operations-recipients",
+              "/administration/client-portal/operations-delivery-authority",
+              "/administration/client-portal/operations-workspaces",
+              "/administration/client-portal/operations-billing-authority",
+              "/administration/client-portal/operations-billing-permissions"
+            ]
+          },
+          "serve_directly": true,
+          "raw_run_worker_first": [
+            "/api/*",
+            "/health",
+            "/r/*",
+            "/administration/client-portal/operations-recipients",
+            "/administration/client-portal/operations-delivery-authority",
+            "/administration/client-portal/operations-workspaces",
+            "/administration/client-portal/operations-billing-authority",
+            "/administration/client-portal/operations-billing-permissions"
+          ],
+          "base_path": "/"
+        },
+        "compatibility_date": "2026-07-22",
+        "compatibility_flags": [
+          "nodejs_compat"
+        ],
+        "usage_model": "standard",
+        "containers": [
+          {
+            "class_name": "ThumbnailRendererContainer"
+          }
+        ]
+      },
+      "script": {
+        "handlers": [
+          "fetch",
+          "queue",
+          "scheduled"
+        ],
+        "named_handlers": [
+          {
+            "name": "ThumbnailRendererContainer",
+            "handlers": [
+              "class"
+            ]
+          },
+          {
+            "name": "dispatchThumbnailRendererApi",
+            "handlers": [
+              "class"
+            ]
+          },
+          {
+            "name": "projectAlphaProjectionApiRequest",
+            "handlers": [
+              "class"
+            ]
+          },
+          {
+            "name": "runScheduledPrimaryProjectAlphaSync",
+            "handlers": [
+              "class"
+            ]
+          },
+          {
+            "name": "ClientDelegatedShareSigner",
+            "handlers": [
+              "createClientDelegatedShare"
+            ]
+          },
+          {
+            "name": "ClientOnboardingRecipientBridge",
+            "handlers": [
+              "session",
+              "submit",
+              "status"
+            ]
+          },
+          {
+            "name": "ClientPortalNativeFinancialReader",
+            "handlers": [
+              "readFinancialDocuments"
+            ]
+          },
+          {
+            "name": "ClientPortalRecipientEnrollmentBridge",
+            "handlers": [
+              "inspectEnrollment",
+              "redeemEnrollment"
+            ]
+          },
+          {
+            "name": "ClientPortalServiceMetadataReader",
+            "handlers": [
+              "readServiceMetadata"
+            ]
+          },
+          {
+            "name": "OperationsPortalNativeDeliveryAuthorizationReader",
+            "handlers": [
+              "readNativeDeliveryAuthorization"
+            ]
+          },
+          {
+            "name": "OperationsPortalNativeRecipientEnrollmentIngress",
+            "handlers": [
+              "inspectNativeEnrollment",
+              "redeemNativeEnrollment"
+            ]
+          },
+          {
+            "name": "ProjectAlphaDeliveryIntentIngress",
+            "handlers": [
+              "ingestProjectAlphaDeliveryIntent"
+            ]
+          },
+          {
+            "name": "SharedProfilePortalIngress",
+            "handlers": [
+              "readProfile",
+              "transitionAuthority",
+              "bindProfileIdentity",
+              "updateProfile"
+            ]
+          },
+          {
+            "name": "ViewerSessionIssuer",
+            "handlers": [
+              "listNativeClientViewerModels",
+              "issueNativeClientViewerSession",
+              "issueClientViewerSession",
+              "createClientViewerShare",
+              "listClientViewerShares",
+              "revokeClientViewerShare"
+            ]
+          },
+          {
+            "name": "DropboxImportWorkflow",
+            "handlers": [
+              "__workflow_entrypoint",
+              "run"
+            ]
+          },
+          {
+            "name": "IncomingRclonePromotionWorkflow",
+            "handlers": [
+              "__workflow_entrypoint",
+              "run"
+            ]
+          },
+          {
+            "name": "IncomingUploadLifecycleWorkflow",
+            "handlers": [
+              "__workflow_entrypoint",
+              "run"
+            ]
+          },
+          {
+            "name": "ProjectAlphaCatalogPromotionWorkflow",
+            "handlers": [
+              "__workflow_entrypoint",
+              "run"
+            ]
+          },
+          {
+            "name": "R2CrudWorkflow",
+            "handlers": [
+              "__workflow_entrypoint",
+              "run"
+            ]
+          }
+        ]
+      },
+      "bindings": [
+        {
+          "name": "ASSETS",
+          "type": "assets"
+        },
+        {
+          "name": "AUDIT_IP_SECRET",
+          "type": "secret_text"
+        },
+        {
+          "name": "CLIENT_ONBOARDING_HANDOFF_KEYRING",
+          "type": "secret_text"
+        },
+        {
+          "bucket_name": "client-data",
+          "name": "DATA_BUCKET",
+          "type": "r2_bucket"
+        },
+        {
+          "name": "DELIVERY_ACCESS_CODE_PEPPER",
+          "type": "secret_text"
+        },
+        {
+          "database_id": "7f40a7b7-c3ec-470e-a626-e798867f71f8",
+          "id": "7f40a7b7-c3ec-470e-a626-e798867f71f8",
+          "name": "DELIVERY_DB",
+          "type": "d1"
+        },
+        {
+          "name": "DELIVERY_TOKEN_SECRET",
+          "type": "secret_text"
+        },
+        {
+          "class_name": "DropboxImportWorkflow",
+          "name": "DROPBOX_IMPORT_WORKFLOW",
+          "type": "workflow",
+          "workflow_name": "ltds-dropbox-import"
+        },
+        {
+          "name": "INCOMING_ACCESS_CODE_PEPPER",
+          "type": "secret_text"
+        },
+        {
+          "bucket_name": "ltds-incoming",
+          "name": "INCOMING_BUCKET",
+          "type": "r2_bucket"
+        },
+        {
+          "class_name": "IncomingUploadLifecycleWorkflow",
+          "name": "INCOMING_LIFECYCLE_WORKFLOW",
+          "type": "workflow",
+          "workflow_name": "ltds-incoming-upload-lifecycle"
+        },
+        {
+          "name": "INCOMING_PICKUP_SECRET",
+          "type": "secret_text"
+        },
+        {
+          "class_name": "IncomingRclonePromotionWorkflow",
+          "name": "INCOMING_RCLONE_PROMOTION_WORKFLOW",
+          "type": "workflow",
+          "workflow_name": "ledgetop-incoming-rclone-promotion"
+        },
+        {
+          "name": "INCOMING_SESSION_SECRET",
+          "type": "secret_text"
+        },
+        {
+          "name": "MAPBOX_PUBLIC_TOKEN",
+          "type": "secret_text"
+        },
+        {
+          "allowed_sender_addresses": [
+            "delivery@ledgetopdroneservices.com"
+          ],
+          "name": "NOTIFICATION_EMAIL",
+          "type": "send_email"
+        },
+        {
+          "entrypoint": "OperationsPortalNativeDeliveryAuthorityIngress",
+          "environment": "production",
+          "name": "OPERATIONS_PORTAL_NATIVE_DELIVERY_AUTHORITY",
+          "service": "ledgetop-clients",
+          "type": "service"
+        },
+        {
+          "entrypoint": "OperationsPortalNativeRecipientAuthorityIngress",
+          "environment": "production",
+          "name": "OPERATIONS_PORTAL_NATIVE_RECIPIENT_AUTHORITY",
+          "service": "ledgetop-clients",
+          "type": "service"
+        },
+        {
+          "entrypoint": "OperationsPortalWorkspacePublicationIngress",
+          "environment": "production",
+          "name": "OPERATIONS_PORTAL_WORKSPACE_PUBLICATION",
+          "service": "ledgetop-clients",
+          "type": "service"
+        },
+        {
+          "name": "OPERATIONS_SESSION_SECRET",
+          "type": "secret_text"
+        },
+        {
+          "database_id": "6ebf7514-d306-4615-ae56-ad869c874dbd",
+          "id": "6ebf7514-d306-4615-ae56-ad869c874dbd",
+          "name": "OPS_DB",
+          "type": "d1"
+        },
+        {
+          "name": "PROJECT_ALPHA_API_KEY",
+          "type": "secret_text"
+        },
+        {
+          "name": "PROJECT_ALPHA_API_V2_CONNECTIONS",
+          "type": "secret_text"
+        },
+        {
+          "name": "PROJECT_ALPHA_CONNECTOR_SNAPSHOT_CREDENTIALS",
+          "type": "secret_text"
+        },
+        {
+          "name": "PROJECT_ALPHA_CONNECTOR_SOURCES",
+          "type": "secret_text"
+        },
+        {
+          "name": "PROJECT_ALPHA_LOCAL_DIVISION_IDENTITY_CONNECTIONS",
+          "type": "secret_text"
+        },
+        {
+          "name": "PROJECT_ALPHA_WEBHOOK_ED25519_PUBLIC_KEY",
+          "type": "secret_text"
+        },
+        {
+          "name": "R2_ACCESS_KEY_ID",
+          "type": "secret_text"
+        },
+        {
+          "class_name": "R2CrudWorkflow",
+          "name": "R2_CRUD_WORKFLOW",
+          "type": "workflow",
+          "workflow_name": "ltds-r2-crud"
+        },
+        {
+          "name": "R2_DELIVERY_UPLOAD_ACCESS_KEY_ID",
+          "type": "secret_text"
+        },
+        {
+          "name": "R2_DELIVERY_UPLOAD_SECRET_ACCESS_KEY",
+          "type": "secret_text"
+        },
+        {
+          "name": "R2_SECRET_ACCESS_KEY",
+          "type": "secret_text"
+        },
+        {
+          "entrypoint": "SharedProfilePortalAuthorityReader",
+          "environment": "production",
+          "name": "SHARED_PROFILE_PORTAL_AUTHORITY",
+          "service": "ledgetop-clients",
+          "type": "service"
+        },
+        {
+          "name": "SMTP_PASSWORD",
+          "type": "secret_text"
+        },
+        {
+          "name": "STREAM",
+          "type": "stream"
+        },
+        {
+          "name": "THUMBNAIL_INGEST_SECRET",
+          "type": "secret_text"
+        },
+        {
+          "name": "THUMBNAIL_QUEUE",
+          "queue_name": "ltds-thumbnail-jobs",
+          "type": "queue"
+        },
+        {
+          "class_name": "ThumbnailRendererContainer",
+          "name": "THUMBNAIL_RENDERER",
+          "namespace_id": "6466383fd9aa4b63a53140127ab73b11",
+          "type": "durable_object_namespace"
+        },
+        {
+          "name": "TURNSTILE_SECRET",
+          "type": "secret_text"
+        },
+        {
+          "name": "TURNSTILE_SITE_KEY",
+          "type": "secret_text"
+        },
+        {
+          "name": "VIEWER_EVENT_HMAC_SECRET",
+          "type": "secret_text"
+        },
+        {
+          "name": "VIEWER_SERVICE_HMAC_SECRET",
+          "type": "secret_text"
+        }
+      ],
+      "crons": [
+        "*/15 * * * *",
+        "*/5 * * * *",
+        "1-56/5 * * * *",
+        "11-56/15 * * * *",
+        "13-58/15 * * * *",
+        "17 * * * *",
+        "2-57/5 * * * *",
+        "3-58/5 * * * *",
+        "4-59/15 * * * *",
+        "6-51/15 * * * *"
+      ],
+      "metadata": {
+        "placement": {},
+        "usage_model": "standard",
+        "tags": [],
+        "tail_consumers": [],
+        "logpush": false,
+        "observability": {
+          "enabled": true,
+          "head_sampling_rate": 1,
+          "redact_query_string": false,
+          "logs": {
+            "enabled": true,
+            "head_sampling_rate": 1,
+            "persist": true,
+            "invocation_logs": true
+          },
+          "traces": {
+            "enabled": false,
+            "persist": true,
+            "head_sampling_rate": 1
+          }
+        },
+        "exports": {
+          "SharedProfilePortalIngress": {
+            "type": "worker"
+          },
+          "ThumbnailRendererContainer": {
+            "type": "durable-object",
+            "storage": "sqlite"
+          }
+        },
+        "migration_tag": "thumbnail-renderer-v1",
+        "containers": [
+          {
+            "class_name": "ThumbnailRendererContainer"
+          }
+        ],
+        "assets": {
+          "config": {
+            "not_found_handling": "single-page-application",
+            "run_worker_first": [
+              "/api/*",
+              "/health",
+              "/r/*",
+              "/administration/client-portal/operations-recipients",
+              "/administration/client-portal/operations-delivery-authority",
+              "/administration/client-portal/operations-workspaces",
+              "/administration/client-portal/operations-billing-authority",
+              "/administration/client-portal/operations-billing-permissions"
+            ]
+          }
+        }
+      },
+      "forbiddenPlainNames": [
+        "DROPBOX_IMPORT_ENABLED",
+        "R2_PURGE_ENABLED",
+        "LEGACY_CLIENT_REQUEST_PA_QUOTE_LINK_ENABLED",
+        "PROJECT_ALPHA_API_V2_MONITOR_ENABLED",
+        "PROJECT_ALPHA_API_V2_READ_ACCEPTANCE_ENABLED",
+        "PROJECT_ALPHA_PROJECT_V2_ACTIVATION_ENABLED",
+        "PROJECT_ALPHA_DRAFT_QUOTES_ENABLED",
+        "CLIENT_HUB_PA_CONTACT_ASSIGNMENTS_ENABLED"
+      ],
+      "plainNames": [
+        "ALERT_FROM",
+        "ALERT_TO",
+        "APPLICATION_KEY",
+        "AUTHENTICATED_DELIVERY_CREATION_ENABLED",
+        "AUTHENTICATED_DELIVERY_GRANTS_ENABLED",
+        "AUTHENTICATED_DELIVERY_NOTIFICATIONS_ENABLED",
+        "CLIENT_DELEGATED_SHARE_SIGNER_ENABLED",
+        "CLIENT_ONBOARDING_ADMIN_ENABLED",
+        "CLIENT_ONBOARDING_ADMIN_ORIGIN",
+        "CLIENT_ONBOARDING_NOTIFICATIONS_ENABLED",
+        "CLIENT_ONBOARDING_NOTIFICATIONS_NOT_BEFORE",
+        "CLIENT_ONBOARDING_NOTIFICATION_STAFF_IDS",
+        "CLIENT_ONBOARDING_RECIPIENT_BRIDGE_ENABLED",
+        "CLIENT_PORTAL_DENY_POLICY_MANAGEMENT_ENABLED",
+        "CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED",
+        "CLIENT_PORTAL_HIERARCHY_V2_ENABLED",
+        "CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED",
+        "CLIENT_PORTAL_MEMBERSHIP_MANAGEMENT_ENABLED",
+        "CLIENT_PORTAL_NATIVE_FINANCIAL_RPC_ENABLED",
+        "CLIENT_PORTAL_NATIVE_RECIPIENT_ENROLLMENT_ENABLED",
+        "CLIENT_PORTAL_NATIVE_RECIPIENT_OWNER_ENABLED",
+        "CLIENT_PORTAL_NATIVE_RECIPIENT_SERVICE_HOME_ENABLED",
+        "CLIENT_PORTAL_NOTIFICATION_MIGRATION_MAINTENANCE",
+        "CLIENT_PORTAL_OPERATIONS_MANAGEMENT_ENABLED",
+        "CLIENT_PORTAL_ORIGINS",
+        "CLIENT_PORTAL_PA_IDENTITY_AUTO_ELIGIBILITY_ENABLED",
+        "CLIENT_PORTAL_PRIMARY_WORKSPACE_RECONCILIATION_ENABLED",
+        "CLIENT_PORTAL_ROOT_ACCESS_POLICY_ENABLED",
+        "CLIENT_PORTAL_SERVICE_METADATA_RPC_ENABLED",
+        "CLIENT_PORTAL_WORKSPACE_RECONCILIATION_ENABLED",
+        "CLIENT_REQUEST_TRIAGE_TO",
+        "CLIENT_VIEWER_SESSION_ISSUER_ENABLED",
+        "CLIENT_VIEWER_SHARES_ENABLED",
+        "DEFAULT_UNITS",
+        "DELIVERY_BASE_URL",
+        "DELIVERY_SHARE_DIRECTORY_RECIPIENTS_ENABLED",
+        "DIRECT_DELIVERY_UPLOADS_ENABLED",
+        "DISPLAY_TIMEZONE",
+        "DROPBOX_CLIENT_ID",
+        "ENVIRONMENT",
+        "EXPECTED_HOST",
+        "FILE_EVENTS_QUEUE_NAME",
+        "INCOMING_BASE_URL",
+        "INCOMING_EXPECTED_HOST",
+        "INCOMING_RCLONE_PROMOTION_ENABLED",
+        "MAP_STYLE_URL",
+        "NATIVE_DIRECTORY_EXISTING_IMPORT_AREAS",
+        "NATIVE_DIRECTORY_EXISTING_IMPORT_ENABLED",
+        "NATIVE_DIRECTORY_OUTBOX_DRAIN_ENABLED",
+        "NATIVE_DIRECTORY_PROFILE_BINDING_CONTINUATION_ENABLED",
+        "NATIVE_DIRECTORY_PROFILE_WRITES_ENABLED",
+        "NATIVE_INTEGRATION_CONTROL_ENABLED",
+        "NATIVE_INTEGRATION_CONTROL_ORIGIN",
+        "NOTIFICATION_FROM",
+        "OPERATIONS_AUD",
+        "OPERATIONS_ORIGINS",
+        "OPERATIONS_PORTAL_NATIVE_BILLING_OWNER_ENABLED",
+        "OPERATIONS_PORTAL_NATIVE_DELIVERY_AUTHORITY_DISPATCH_ENABLED",
+        "OPERATIONS_PORTAL_NATIVE_DELIVERY_CANCELLATION_ENABLED",
+        "OPERATIONS_PORTAL_NATIVE_DELIVERY_OWNER_ENABLED",
+        "OPERATIONS_PORTAL_NATIVE_DELIVERY_READER_ENABLED",
+        "OPERATIONS_PORTAL_NATIVE_RECIPIENT_AUTHORITY_DISPATCH_ENABLED",
+        "OPERATIONS_PORTAL_WORKSPACE_OWNER_ENABLED",
+        "OPERATIONS_PORTAL_WORKSPACE_PUBLICATION_DISPATCH_ENABLED",
+        "PROJECT_ACCESS_AUTHORITY_MUTATIONS_ENABLED",
+        "PROJECT_ACCESS_EXPIRY_NOTIFICATIONS_ENABLED",
+        "PROJECT_ALPHA_API_V2_MONITOR_RECIPIENT",
+        "PROJECT_ALPHA_API_V2_SYNC_ENABLED",
+        "PROJECT_ALPHA_BASE_URL",
+        "PROJECT_ALPHA_CONNECTOR_SOURCES_REQUIRED",
+        "PROJECT_ALPHA_DELIVERY_DIRECT_COMPAT_ENABLED",
+        "PROJECT_ALPHA_DELIVERY_DIRECT_COMPAT_UNTIL",
+        "PROJECT_ALPHA_DELIVERY_GUEST_ENABLED",
+        "PROJECT_ALPHA_DELIVERY_INTENTS_ENABLED",
+        "PROJECT_ALPHA_DIRECTORY_CREATE_GENERATION_RECOVERY_ENABLED",
+        "PROJECT_ALPHA_DIRECTORY_EXISTING_RECORD_ADOPTION_ENABLED",
+        "PROJECT_ALPHA_DIRECTORY_LOCAL_PROFILE_ADOPTION_ENABLED",
+        "PROJECT_ALPHA_PRIVATE_ADMIN_TRANSPORT_ENABLED",
+        "PUBLIC_BASE_URL",
+        "PUBLIC_SHARE_ORIGIN",
+        "R2_ACCOUNT_ID",
+        "R2_BUCKET_NAME",
+        "R2_INCOMING_BUCKET_NAME",
+        "SMTP_FROM",
+        "SMTP_HOST",
+        "SMTP_NOTIFICATIONS_ENABLED",
+        "SMTP_USERNAME",
+        "STREAM_ACCOUNT_ID",
+        "STREAM_CUSTOMER_CODE",
+        "TEAM_DOMAIN",
+        "TFR_REGION",
+        "THUMBNAIL_DLQ_NAME",
+        "THUMBNAIL_INGEST_EXPECTED_HOST",
+        "THUMBNAIL_QUEUE_NAME",
+        "THUMBNAIL_RENDERER_EXPECTED_HOST",
+        "VIEWER_BASE_URL",
+        "VIEWER_EVENT_KEY_ID",
+        "VIEWER_EVENT_PREVIOUS_KEY_ID",
+        "VIEWER_INTEGRATION_ENABLED",
+        "VIEWER_PROCESSING_ENABLED",
+        "VIEWER_PUBLIC_SHARES_ENABLED",
+        "VIEWER_SERVICE_KEY_ID",
+        "VIEWER_WORKSPACE_RENEWAL_CORS_ENABLED"
+      ],
+      "plainValueSHA256": {
+        "ALERT_FROM": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "ALERT_TO": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "APPLICATION_KEY": "8261bb94d4511f644d8bc323539b55f6c7a1892341e206f6c6ae633c36bc759d",
+        "AUTHENTICATED_DELIVERY_CREATION_ENABLED": "b5bea41b6c623f7c09f1bf24dcae58ebab3c0cdd90ad966bc43a45b44867e12b",
+        "AUTHENTICATED_DELIVERY_GRANTS_ENABLED": "b5bea41b6c623f7c09f1bf24dcae58ebab3c0cdd90ad966bc43a45b44867e12b",
+        "AUTHENTICATED_DELIVERY_NOTIFICATIONS_ENABLED": "fcbcf165908dd18a9e49f7ff27810176db8e9f63b4352213741664245224f8aa",
+        "CLIENT_DELEGATED_SHARE_SIGNER_ENABLED": "fcbcf165908dd18a9e49f7ff27810176db8e9f63b4352213741664245224f8aa",
+        "CLIENT_PORTAL_DENY_POLICY_MANAGEMENT_ENABLED": "b5bea41b6c623f7c09f1bf24dcae58ebab3c0cdd90ad966bc43a45b44867e12b",
+        "CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED": "fcbcf165908dd18a9e49f7ff27810176db8e9f63b4352213741664245224f8aa",
+        "CLIENT_PORTAL_HIERARCHY_V2_ENABLED": "b5bea41b6c623f7c09f1bf24dcae58ebab3c0cdd90ad966bc43a45b44867e12b",
+        "CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED": "b5bea41b6c623f7c09f1bf24dcae58ebab3c0cdd90ad966bc43a45b44867e12b",
+        "CLIENT_PORTAL_MEMBERSHIP_MANAGEMENT_ENABLED": "fcbcf165908dd18a9e49f7ff27810176db8e9f63b4352213741664245224f8aa",
+        "CLIENT_PORTAL_NATIVE_FINANCIAL_RPC_ENABLED": "b5bea41b6c623f7c09f1bf24dcae58ebab3c0cdd90ad966bc43a45b44867e12b",
+        "CLIENT_PORTAL_NATIVE_RECIPIENT_ENROLLMENT_ENABLED": "b5bea41b6c623f7c09f1bf24dcae58ebab3c0cdd90ad966bc43a45b44867e12b",
+        "CLIENT_PORTAL_NATIVE_RECIPIENT_OWNER_ENABLED": "b5bea41b6c623f7c09f1bf24dcae58ebab3c0cdd90ad966bc43a45b44867e12b",
+        "CLIENT_PORTAL_NATIVE_RECIPIENT_SERVICE_HOME_ENABLED": "b5bea41b6c623f7c09f1bf24dcae58ebab3c0cdd90ad966bc43a45b44867e12b",
+        "CLIENT_PORTAL_NOTIFICATION_MIGRATION_MAINTENANCE": "fcbcf165908dd18a9e49f7ff27810176db8e9f63b4352213741664245224f8aa",
+        "CLIENT_PORTAL_OPERATIONS_MANAGEMENT_ENABLED": "fcbcf165908dd18a9e49f7ff27810176db8e9f63b4352213741664245224f8aa",
+        "CLIENT_PORTAL_ORIGINS": "7fe50e89f19548781d1d7cdf698cc1d67f1c40bb6f4056f50e7442924c05f2a6",
+        "CLIENT_PORTAL_PA_IDENTITY_AUTO_ELIGIBILITY_ENABLED": "b5bea41b6c623f7c09f1bf24dcae58ebab3c0cdd90ad966bc43a45b44867e12b",
+        "CLIENT_PORTAL_PRIMARY_WORKSPACE_RECONCILIATION_ENABLED": "b5bea41b6c623f7c09f1bf24dcae58ebab3c0cdd90ad966bc43a45b44867e12b",
+        "CLIENT_PORTAL_ROOT_ACCESS_POLICY_ENABLED": "b5bea41b6c623f7c09f1bf24dcae58ebab3c0cdd90ad966bc43a45b44867e12b",
+        "CLIENT_PORTAL_SERVICE_METADATA_RPC_ENABLED": "b5bea41b6c623f7c09f1bf24dcae58ebab3c0cdd90ad966bc43a45b44867e12b",
+        "CLIENT_PORTAL_WORKSPACE_RECONCILIATION_ENABLED": "b5bea41b6c623f7c09f1bf24dcae58ebab3c0cdd90ad966bc43a45b44867e12b",
+        "CLIENT_REQUEST_TRIAGE_TO": "b7e705012f6a5b1e6417299288cf79ab6e438637cc88ac61f4d15d26f017fad5",
+        "CLIENT_VIEWER_SESSION_ISSUER_ENABLED": "fcbcf165908dd18a9e49f7ff27810176db8e9f63b4352213741664245224f8aa",
+        "CLIENT_VIEWER_SHARES_ENABLED": "fcbcf165908dd18a9e49f7ff27810176db8e9f63b4352213741664245224f8aa",
+        "DEFAULT_UNITS": "3a5b8990e60ffa74e15461d7547e0f62aa94d19de4e3de687bd31176f8b6d17b",
+        "DELIVERY_BASE_URL": "c2470869cc96774380ba533c188e0b860d3ef800f0a36222d2876cad7eaa29e5",
+        "DELIVERY_SHARE_DIRECTORY_RECIPIENTS_ENABLED": "fcbcf165908dd18a9e49f7ff27810176db8e9f63b4352213741664245224f8aa",
+        "DIRECT_DELIVERY_UPLOADS_ENABLED": "b5bea41b6c623f7c09f1bf24dcae58ebab3c0cdd90ad966bc43a45b44867e12b",
+        "DISPLAY_TIMEZONE": "a77b7136d7ecc350d85920c42820c60e5af14172c4213eba09856c2db6e35e7a",
+        "DROPBOX_CLIENT_ID": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "ENVIRONMENT": "ab8e18ef4ebebeddc0b3152ce9c9006e14fc05242e3fc9ce32246ea6a9543074",
+        "EXPECTED_HOST": "e5471cde2c06af8f4481220207669a22be4cefad311f19018c1eb4189df5460e",
+        "FILE_EVENTS_QUEUE_NAME": "c55563beb4e0fbdb3a58f687d550b392a51a94ca1b76b5d38c1f8724cc124140",
+        "INCOMING_BASE_URL": "ec133ec7bffb28f6d6a401a7d68259d1d4e401154e835fad621b95a201042bda",
+        "INCOMING_EXPECTED_HOST": "99db880ed20e80d0ea137cfd04e6d5f19b5d632badc2e4a75bb70861eacb85cf",
+        "INCOMING_RCLONE_PROMOTION_ENABLED": "b5bea41b6c623f7c09f1bf24dcae58ebab3c0cdd90ad966bc43a45b44867e12b",
+        "MAP_STYLE_URL": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "NATIVE_DIRECTORY_EXISTING_IMPORT_AREAS": "57e42d785f64f90245cce2275174c0b1676ad71bca5ccca25117371c56f481db",
+        "NATIVE_DIRECTORY_EXISTING_IMPORT_ENABLED": "fcbcf165908dd18a9e49f7ff27810176db8e9f63b4352213741664245224f8aa",
+        "NATIVE_DIRECTORY_OUTBOX_DRAIN_ENABLED": "b5bea41b6c623f7c09f1bf24dcae58ebab3c0cdd90ad966bc43a45b44867e12b",
+        "NATIVE_DIRECTORY_PROFILE_BINDING_CONTINUATION_ENABLED": "b5bea41b6c623f7c09f1bf24dcae58ebab3c0cdd90ad966bc43a45b44867e12b",
+        "NATIVE_DIRECTORY_PROFILE_WRITES_ENABLED": "b5bea41b6c623f7c09f1bf24dcae58ebab3c0cdd90ad966bc43a45b44867e12b",
+        "NATIVE_INTEGRATION_CONTROL_ENABLED": "fcbcf165908dd18a9e49f7ff27810176db8e9f63b4352213741664245224f8aa",
+        "NATIVE_INTEGRATION_CONTROL_ORIGIN": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "NOTIFICATION_FROM": "f7234f21388c13bfe4f68c060eda1f6d9ba35581aa4c366eed88741c3837901c",
+        "OPERATIONS_AUD": "7721b36d519bb90d7dcd34e09504093e740b6ff349c9e51d1d4c3aba39d4959a",
+        "OPERATIONS_ORIGINS": "0f251e4d4d529170ee63a28809c31c35ca8e324d51b2a42e9e82309efa4df6ac",
+        "OPERATIONS_PORTAL_NATIVE_BILLING_OWNER_ENABLED": "b5bea41b6c623f7c09f1bf24dcae58ebab3c0cdd90ad966bc43a45b44867e12b",
+        "OPERATIONS_PORTAL_NATIVE_DELIVERY_AUTHORITY_DISPATCH_ENABLED": "b5bea41b6c623f7c09f1bf24dcae58ebab3c0cdd90ad966bc43a45b44867e12b",
+        "OPERATIONS_PORTAL_NATIVE_DELIVERY_CANCELLATION_ENABLED": "b5bea41b6c623f7c09f1bf24dcae58ebab3c0cdd90ad966bc43a45b44867e12b",
+        "OPERATIONS_PORTAL_NATIVE_DELIVERY_OWNER_ENABLED": "b5bea41b6c623f7c09f1bf24dcae58ebab3c0cdd90ad966bc43a45b44867e12b",
+        "OPERATIONS_PORTAL_NATIVE_DELIVERY_READER_ENABLED": "b5bea41b6c623f7c09f1bf24dcae58ebab3c0cdd90ad966bc43a45b44867e12b",
+        "OPERATIONS_PORTAL_NATIVE_RECIPIENT_AUTHORITY_DISPATCH_ENABLED": "b5bea41b6c623f7c09f1bf24dcae58ebab3c0cdd90ad966bc43a45b44867e12b",
+        "OPERATIONS_PORTAL_WORKSPACE_OWNER_ENABLED": "b5bea41b6c623f7c09f1bf24dcae58ebab3c0cdd90ad966bc43a45b44867e12b",
+        "OPERATIONS_PORTAL_WORKSPACE_PUBLICATION_DISPATCH_ENABLED": "b5bea41b6c623f7c09f1bf24dcae58ebab3c0cdd90ad966bc43a45b44867e12b",
+        "PROJECT_ACCESS_AUTHORITY_MUTATIONS_ENABLED": "b5bea41b6c623f7c09f1bf24dcae58ebab3c0cdd90ad966bc43a45b44867e12b",
+        "PROJECT_ACCESS_EXPIRY_NOTIFICATIONS_ENABLED": "fcbcf165908dd18a9e49f7ff27810176db8e9f63b4352213741664245224f8aa",
+        "PROJECT_ALPHA_API_V2_MONITOR_RECIPIENT": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "PROJECT_ALPHA_API_V2_SYNC_ENABLED": "b5bea41b6c623f7c09f1bf24dcae58ebab3c0cdd90ad966bc43a45b44867e12b",
+        "PROJECT_ALPHA_BASE_URL": "819daedca74c11043abc785775b29b76a56332a142e2d1a46f72bc95687f3289",
+        "PROJECT_ALPHA_CONNECTOR_SOURCES_REQUIRED": "fcbcf165908dd18a9e49f7ff27810176db8e9f63b4352213741664245224f8aa",
+        "PROJECT_ALPHA_DELIVERY_DIRECT_COMPAT_ENABLED": "fcbcf165908dd18a9e49f7ff27810176db8e9f63b4352213741664245224f8aa",
+        "PROJECT_ALPHA_DELIVERY_DIRECT_COMPAT_UNTIL": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "PROJECT_ALPHA_DELIVERY_GUEST_ENABLED": "fcbcf165908dd18a9e49f7ff27810176db8e9f63b4352213741664245224f8aa",
+        "PROJECT_ALPHA_DELIVERY_INTENTS_ENABLED": "fcbcf165908dd18a9e49f7ff27810176db8e9f63b4352213741664245224f8aa",
+        "PROJECT_ALPHA_DIRECTORY_EXISTING_RECORD_ADOPTION_ENABLED": "b5bea41b6c623f7c09f1bf24dcae58ebab3c0cdd90ad966bc43a45b44867e12b",
+        "PROJECT_ALPHA_DIRECTORY_LOCAL_PROFILE_ADOPTION_ENABLED": "b5bea41b6c623f7c09f1bf24dcae58ebab3c0cdd90ad966bc43a45b44867e12b",
+        "PROJECT_ALPHA_PRIVATE_ADMIN_TRANSPORT_ENABLED": "b5bea41b6c623f7c09f1bf24dcae58ebab3c0cdd90ad966bc43a45b44867e12b",
+        "PUBLIC_BASE_URL": "5a639ac64b6337294bc4252729bde0bb6b02fc8a1edbe9ecabe07d220f7ad85b",
+        "PUBLIC_SHARE_ORIGIN": "c2470869cc96774380ba533c188e0b860d3ef800f0a36222d2876cad7eaa29e5",
+        "R2_ACCOUNT_ID": "80fe1a4db1dcf4fc5dd29f16acb4870c8a00b616ea0290aa1ba9d50baca43902",
+        "R2_BUCKET_NAME": "115dce4ef32b5e06c1c3d03b2eadd7590d028c49b3295e295740beee638e5d27",
+        "R2_INCOMING_BUCKET_NAME": "82347a6eec62db3d7434ac0fa743e9e60445f9e2421743bc9a95feb670e4bea9",
+        "SMTP_FROM": "a883daa0acc71f855566087e8a0436ee7f78dee82e9bcd1d90d67e47d02cd588",
+        "SMTP_HOST": "baf8948be444889e4c5309caa2da8bb3b3e14e4ebda34e5d87eaf4f5c44d22b2",
+        "SMTP_NOTIFICATIONS_ENABLED": "b5bea41b6c623f7c09f1bf24dcae58ebab3c0cdd90ad966bc43a45b44867e12b",
+        "SMTP_USERNAME": "a883daa0acc71f855566087e8a0436ee7f78dee82e9bcd1d90d67e47d02cd588",
+        "STREAM_ACCOUNT_ID": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "STREAM_CUSTOMER_CODE": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "TEAM_DOMAIN": "591ec8b1f8daf2e29a71623a23df48da2d43cebfdc4b87ff185d33da80aefdf2",
+        "TFR_REGION": "b3b5f01f4d03f75645048197063ab69478386b4236341e12a93b4a0b7adf9a54",
+        "THUMBNAIL_DLQ_NAME": "e8d656e06bf4697da311c09067ade96fb8085708c4e0c6e63728250ced3ab95d",
+        "THUMBNAIL_INGEST_EXPECTED_HOST": "e5471cde2c06af8f4481220207669a22be4cefad311f19018c1eb4189df5460e",
+        "THUMBNAIL_QUEUE_NAME": "a03f464e262600aa45651186449b1f3ca89837ac07925c431e9b36b514de1930",
+        "THUMBNAIL_RENDERER_EXPECTED_HOST": "99db880ed20e80d0ea137cfd04e6d5f19b5d632badc2e4a75bb70861eacb85cf",
+        "VIEWER_BASE_URL": "954b9ec3c2f702caf3d16eafe772f6ceefadeaf0e785c9d36da85c811e34eeaf",
+        "VIEWER_EVENT_KEY_ID": "fc98e17835fead5b2b7439168ecf7ef2d7949dc1861bf6e44ee7496f1c7294da",
+        "VIEWER_EVENT_PREVIOUS_KEY_ID": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "VIEWER_INTEGRATION_ENABLED": "b5bea41b6c623f7c09f1bf24dcae58ebab3c0cdd90ad966bc43a45b44867e12b",
+        "VIEWER_PROCESSING_ENABLED": "b5bea41b6c623f7c09f1bf24dcae58ebab3c0cdd90ad966bc43a45b44867e12b",
+        "VIEWER_PUBLIC_SHARES_ENABLED": "b5bea41b6c623f7c09f1bf24dcae58ebab3c0cdd90ad966bc43a45b44867e12b",
+        "VIEWER_SERVICE_KEY_ID": "00c2ecf1fa7c2f6ca0e443c5ddf6a5c50c4265ef39ebe7b253ab4a5fee48f520",
+        "VIEWER_WORKSPACE_RENEWAL_CORS_ENABLED": "b5bea41b6c623f7c09f1bf24dcae58ebab3c0cdd90ad966bc43a45b44867e12b"
+      },
+      "assetsSHA256": "4ea626805aeb9005a6af51c7ec914c618aeb78448eaee6155f614ca34b51609d"
+    },
+    "client": {
+      "name": "ledgetop-clients",
+      "settings": {
+        "placement": {},
+        "compatibility_date": "2026-07-16",
+        "compatibility_flags": [
+          "nodejs_compat"
+        ],
+        "usage_model": "standard",
+        "tags": [],
+        "tail_consumers": [],
+        "logpush": false,
+        "limits": {
+          "cpu_ms": 300000,
+          "subrequests": 25000
+        },
+        "observability": {
+          "enabled": true,
+          "head_sampling_rate": 1,
+          "redact_query_string": false,
+          "logs": {
+            "enabled": true,
+            "head_sampling_rate": 1,
+            "persist": true,
+            "invocation_logs": true
+          },
+          "traces": {
+            "enabled": false,
+            "persist": true,
+            "head_sampling_rate": 1
+          }
+        }
+      },
+      "runtime": {
+        "exports": {
+          "SharedProfilePortalAuthorityReader": {
+            "type": "worker"
+          }
+        },
+        "assets": {
+          "not_found_handling": "single-page-application",
+          "static_routing": {
+            "user_worker": [
+              "/",
+              "/api/*",
+              "/s/*",
+              "/client-share/*",
+              "/portal*",
+              "/onboarding/*",
+              "/assets/*",
+              "/health"
+            ]
+          },
+          "serve_directly": true,
+          "raw_run_worker_first": [
+            "/",
+            "/api/*",
+            "/s/*",
+            "/client-share/*",
+            "/portal*",
+            "/onboarding/*",
+            "/assets/*",
+            "/health"
+          ],
+          "base_path": "/"
+        },
+        "compatibility_date": "2026-07-16",
+        "compatibility_flags": [
+          "nodejs_compat"
+        ],
+        "usage_model": "standard",
+        "limits": {
+          "cpu_ms": 300000,
+          "subrequests": 25000
+        }
+      },
+      "script": {
+        "handlers": [
+          "fetch",
+          "scheduled"
+        ],
+        "named_handlers": [
+          {
+            "name": "authenticatedPreviewFrameAllowed",
+            "handlers": [
+              "class"
+            ]
+          },
+          {
+            "name": "bulkDownloadResumeExpiresAt",
+            "handlers": [
+              "class"
+            ]
+          },
+          {
+            "name": "bulkJobProgress",
+            "handlers": [
+              "class"
+            ]
+          },
+          {
+            "name": "bulkQuotaRetryAfterSeconds",
+            "handlers": [
+              "class"
+            ]
+          },
+          {
+            "name": "classifyPublicRateLimit",
+            "handlers": [
+              "class"
+            ]
+          },
+          {
+            "name": "cleanupTemporaryZips",
+            "handlers": [
+              "class"
+            ]
+          },
+          {
+            "name": "cloudTransferResumeOrigin",
+            "handlers": [
+              "class"
+            ]
+          },
+          {
+            "name": "deliverySecurityHeaders",
+            "handlers": [
+              "class"
+            ]
+          },
+          {
+            "name": "ensurePublicId",
+            "handlers": [
+              "class"
+            ]
+          },
+          {
+            "name": "framePolicyForPath",
+            "handlers": [
+              "class"
+            ]
+          },
+          {
+            "name": "friendlyBulkFailure",
+            "handlers": [
+              "class"
+            ]
+          },
+          {
+            "name": "markUnavailableFolder",
+            "handlers": [
+              "class"
+            ]
+          },
+          {
+            "name": "readyBulkJobIsExpired",
+            "handlers": [
+              "class"
+            ]
+          },
+          {
+            "name": "requestHostAllowed",
+            "handlers": [
+              "class"
+            ]
+          },
+          {
+            "name": "requireSameOrigin",
+            "handlers": [
+              "class"
+            ]
+          },
+          {
+            "name": "serveAppShell",
+            "handlers": [
+              "class"
+            ]
+          },
+          {
+            "name": "sourceUrlForItem",
+            "handlers": [
+              "class"
+            ]
+          },
+          {
+            "name": "streamItem",
+            "handlers": [
+              "class"
+            ]
+          },
+          {
+            "name": "ClientAuthorityWorkspaceBindingIngress",
+            "handlers": [
+              "bindWorkspace",
+              "getBindingStatus"
+            ]
+          },
+          {
+            "name": "ClientPortalAuthorityV2Ingress",
+            "handlers": [
+              "applyAuthority",
+              "getAuthorityStatus",
+              "applyAuthorityV3",
+              "getAuthorityV3Status"
+            ]
+          },
+          {
+            "name": "OperationsPortalNativeDeliveryAuthorityIngress",
+            "handlers": [
+              "applyNativeDeliveryAuthority",
+              "getNativeDeliveryAuthorityStatus",
+              "getNativeDeliveryAuthorityDisposition",
+              "cancelNativeDeliveryAuthority"
+            ]
+          },
+          {
+            "name": "OperationsPortalNativeRecipientAuthorityIngress",
+            "handlers": [
+              "applyNativeAuthority",
+              "getNativeAuthorityStatus"
+            ]
+          },
+          {
+            "name": "OperationsPortalWorkspacePublicationIngress",
+            "handlers": [
+              "publishWorkspace",
+              "getPublicationStatus",
+              "cancelWorkspacePublication",
+              "getPublicationDisposition",
+              "fetch"
+            ]
+          },
+          {
+            "name": "OpsInventoryCatalogPromotionCoordinator",
+            "handlers": [
+              "promoteCatalogInventorySnapshot"
+            ]
+          },
+          {
+            "name": "OpsInventoryCatalogStagingIngress",
+            "handlers": [
+              "stageCatalogInventoryPage"
+            ]
+          },
+          {
+            "name": "OpsPortalAccessAuthorityIngress",
+            "handlers": [
+              "recordAuthority"
+            ]
+          },
+          {
+            "name": "OpsSyncPortalProjectionIngress",
+            "handlers": [
+              "ingestProjectAlphaPortalProjection"
+            ]
+          },
+          {
+            "name": "SharedProfilePortalAuthorityReader",
+            "handlers": [
+              "readAuthority"
+            ]
+          },
+          {
+            "name": "VerifiedRecipientDeliveryAuthorityIngress",
+            "handlers": [
+              "applyAuthority",
+              "getAuthorityStatus",
+              "fetch"
+            ]
+          },
+          {
+            "name": "BulkDownloadWorkflow",
+            "handlers": [
+              "__workflow_entrypoint",
+              "run"
+            ]
+          },
+          {
+            "name": "CloudTransferWorkflow",
+            "handlers": [
+              "__workflow_entrypoint",
+              "run"
+            ]
+          }
+        ]
+      },
+      "bindings": [
+        {
+          "name": "ACCESS_CODE_RATE_LIMITER",
+          "namespace_id": "19462026",
+          "simple": {
+            "limit": 10,
+            "period": 60
+          },
+          "type": "ratelimit"
+        },
+        {
+          "name": "APP_SECRET",
+          "type": "secret_text"
+        },
+        {
+          "name": "ASSETS",
+          "type": "assets"
+        },
+        {
+          "name": "AUDIT_IP_SECRET",
+          "type": "secret_text"
+        },
+        {
+          "class_name": "BulkDownloadWorkflow",
+          "name": "BULK_DOWNLOAD_WORKFLOW",
+          "type": "workflow",
+          "workflow_name": "ltds-bulk-download"
+        },
+        {
+          "entrypoint": "ClientDelegatedShareSigner",
+          "environment": "production",
+          "name": "CLIENT_DELEGATED_SHARE_SIGNER",
+          "service": "ledgetop-ops",
+          "type": "service"
+        },
+        {
+          "name": "CLIENT_ONBOARDING_RECIPIENT_BRIDGE",
+          "type": "service",
+          "service": "ledgetop-ops",
+          "entrypoint": "ClientOnboardingRecipientBridge"
+        },
+        {
+          "entrypoint": "ClientPortalNativeFinancialReader",
+          "environment": "production",
+          "name": "CLIENT_PORTAL_NATIVE_FINANCIAL_READER",
+          "service": "ledgetop-ops",
+          "type": "service"
+        },
+        {
+          "name": "CLIENT_PORTAL_NATIVE_RECIPIENT_ENROLLMENT_CSRF_SECRET",
+          "type": "secret_text"
+        },
+        {
+          "name": "CLIENT_PORTAL_OPERATIONS_NATIVE_CONTENT_AUDIT_HMAC_SECRET",
+          "type": "secret_text"
+        },
+        {
+          "entrypoint": "ClientPortalServiceMetadataReader",
+          "environment": "production",
+          "name": "CLIENT_PORTAL_SERVICE_METADATA_READER",
+          "service": "ledgetop-ops",
+          "type": "service"
+        },
+        {
+          "class_name": "CloudTransferWorkflow",
+          "name": "CLOUD_TRANSFER_WORKFLOW",
+          "type": "workflow",
+          "workflow_name": "ltds-cloud-transfer"
+        },
+        {
+          "bucket_name": "client-data",
+          "name": "DATA_BUCKET",
+          "type": "r2_bucket"
+        },
+        {
+          "name": "DELIVERY_ACCESS_CODE_PEPPER",
+          "type": "secret_text"
+        },
+        {
+          "database_id": "7f40a7b7-c3ec-470e-a626-e798867f71f8",
+          "id": "7f40a7b7-c3ec-470e-a626-e798867f71f8",
+          "name": "DELIVERY_DB",
+          "type": "d1"
+        },
+        {
+          "name": "DELIVERY_SESSION_SECRET",
+          "type": "secret_text"
+        },
+        {
+          "name": "MAPBOX_PUBLIC_TOKEN",
+          "type": "secret_text"
+        },
+        {
+          "entrypoint": "OperationsPortalNativeDeliveryAuthorizationReader",
+          "environment": "production",
+          "name": "OPERATIONS_PORTAL_NATIVE_DELIVERY_AUTHORIZATION_READER",
+          "service": "ledgetop-ops",
+          "type": "service"
+        },
+        {
+          "entrypoint": "OperationsPortalNativeRecipientEnrollmentIngress",
+          "environment": "production",
+          "name": "OPERATIONS_PORTAL_NATIVE_RECIPIENT_ENROLLMENT",
+          "service": "ledgetop-ops",
+          "type": "service"
+        },
+        {
+          "name": "PUBLIC_BULK_RATE_LIMITER",
+          "namespace_id": "19462030",
+          "simple": {
+            "limit": 3,
+            "period": 60
+          },
+          "type": "ratelimit"
+        },
+        {
+          "name": "PUBLIC_DOWNLOAD_RATE_LIMITER",
+          "namespace_id": "19462032",
+          "simple": {
+            "limit": 30,
+            "period": 60
+          },
+          "type": "ratelimit"
+        },
+        {
+          "name": "PUBLIC_MANIFEST_RATE_LIMITER",
+          "namespace_id": "19462028",
+          "simple": {
+            "limit": 120,
+            "period": 60
+          },
+          "type": "ratelimit"
+        },
+        {
+          "name": "PUBLIC_MEDIA_RATE_LIMITER",
+          "namespace_id": "19462029",
+          "simple": {
+            "limit": 180,
+            "period": 60
+          },
+          "type": "ratelimit"
+        },
+        {
+          "name": "PUBLIC_SESSION_RATE_LIMITER",
+          "namespace_id": "19462027",
+          "simple": {
+            "limit": 20,
+            "period": 60
+          },
+          "type": "ratelimit"
+        },
+        {
+          "name": "PUBLIC_STREAM_RATE_LIMITER",
+          "namespace_id": "19462033",
+          "simple": {
+            "limit": 10,
+            "period": 60
+          },
+          "type": "ratelimit"
+        },
+        {
+          "name": "PUBLIC_THUMBNAIL_RATE_LIMITER",
+          "namespace_id": "19462031",
+          "simple": {
+            "limit": 300,
+            "period": 60
+          },
+          "type": "ratelimit"
+        },
+        {
+          "name": "R2_ACCESS_KEY_ID",
+          "type": "secret_text"
+        },
+        {
+          "name": "R2_SECRET_ACCESS_KEY",
+          "type": "secret_text"
+        },
+        {
+          "entrypoint": "SharedProfilePortalIngress",
+          "environment": "production",
+          "name": "SHARED_PROFILE_PORTAL",
+          "service": "ledgetop-ops",
+          "type": "service"
+        },
+        {
+          "name": "STREAM",
+          "type": "stream"
+        },
+        {
+          "entrypoint": "ViewerSessionIssuer",
+          "environment": "production",
+          "name": "VIEWER_SESSION_ISSUER",
+          "service": "ledgetop-ops",
+          "type": "service"
+        }
+      ],
+      "crons": [
+        "*/5 * * * *",
+        "15 * * * *"
+      ],
+      "metadata": {
+        "placement": {},
+        "usage_model": "standard",
+        "tags": [],
+        "tail_consumers": [],
+        "logpush": false,
+        "limits": {
+          "cpu_ms": 300000,
+          "subrequests": 25000
+        },
+        "observability": {
+          "enabled": true,
+          "head_sampling_rate": 1,
+          "redact_query_string": false,
+          "logs": {
+            "enabled": true,
+            "head_sampling_rate": 1,
+            "persist": true,
+            "invocation_logs": true
+          },
+          "traces": {
+            "enabled": false,
+            "persist": true,
+            "head_sampling_rate": 1
+          }
+        },
+        "exports": {
+          "SharedProfilePortalAuthorityReader": {
+            "type": "worker"
+          }
+        },
+        "assets": {
+          "config": {
+            "not_found_handling": "single-page-application",
+            "run_worker_first": [
+              "/",
+              "/api/*",
+              "/s/*",
+              "/client-share/*",
+              "/portal*",
+              "/onboarding/*",
+              "/assets/*",
+              "/health"
+            ]
+          }
+        }
+      },
+      "forbiddenPlainNames": [],
+      "plainNames": [
+        "AUTHENTICATED_DELIVERY_CREATION_ENABLED",
+        "AUTHENTICATED_DELIVERY_GRANTS_ENABLED",
+        "CLIENT_ACCESS_AUD",
+        "CLIENT_ACCESS_AUDS",
+        "CLIENT_ACCESS_TEAM_DOMAIN",
+        "CLIENT_DELEGATED_SHARES_ENABLED",
+        "CLIENT_DELEGATED_SHARE_KEY_ID",
+        "CLIENT_ONBOARDING_RECIPIENT_BRIDGE_ENABLED",
+        "CLIENT_PORTAL_ACCESS_ENROLLMENT_READY",
+        "CLIENT_PORTAL_ADDRESS_BOOK_ENABLED",
+        "CLIENT_PORTAL_CONTENT_AUDIT_ENABLED",
+        "CLIENT_PORTAL_DENY_POLICY_MANAGEMENT_ENABLED",
+        "CLIENT_PORTAL_ENABLED",
+        "CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED",
+        "CLIENT_PORTAL_HIERARCHY_V2_ENABLED",
+        "CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED",
+        "CLIENT_PORTAL_INVITATION_EMAIL_ENABLED",
+        "CLIENT_PORTAL_INVITATION_FROM",
+        "CLIENT_PORTAL_INVITATION_FROM_NAME",
+        "CLIENT_PORTAL_MEMBERSHIP_MANAGEMENT_ENABLED",
+        "CLIENT_PORTAL_NATIVE_FEEDBACK_SOURCE_IDS",
+        "CLIENT_PORTAL_NATIVE_FINANCIAL_ENABLED",
+        "CLIENT_PORTAL_NATIVE_RECIPIENT_ENROLLMENT_ENABLED",
+        "CLIENT_PORTAL_NATIVE_RECIPIENT_ENROLLMENT_EXPECTED_HOST",
+        "CLIENT_PORTAL_NATIVE_RECIPIENT_SERVICE_HOME_ENABLED",
+        "CLIENT_PORTAL_NATIVE_REQUESTS_ENABLED",
+        "CLIENT_PORTAL_NOTIFICATION_MIGRATION_MAINTENANCE",
+        "CLIENT_PORTAL_OPERATIONS_NATIVE_AUTHORITY_EXPECTED_HOST",
+        "CLIENT_PORTAL_OPERATIONS_NATIVE_AUTHORITY_STATUS_ENABLED",
+        "CLIENT_PORTAL_OPERATIONS_NATIVE_AUTHORITY_WRITER_ENABLED",
+        "CLIENT_PORTAL_OPERATIONS_NATIVE_CONTENT_AUDIT_ENABLED",
+        "CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_CANCELLATION_ENABLED",
+        "CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_DEPLOYMENT_PROFILE",
+        "CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_READ_ENABLED",
+        "CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_STATUS_ENABLED",
+        "CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_WRITER_ENABLED",
+        "CLIENT_PORTAL_OPERATIONS_PUBLICATION_WRITER_ENABLED",
+        "CLIENT_PORTAL_OPERATIONS_SERVICE_HOME_ENABLED",
+        "CLIENT_PORTAL_ORIGIN",
+        "CLIENT_PORTAL_ORIGINS",
+        "CLIENT_PORTAL_PA_IDENTITY_AUTO_ELIGIBILITY_ENABLED",
+        "CLIENT_PORTAL_PEER_ADMIN_ENABLED",
+        "CLIENT_PORTAL_REQUEST_V2_ENABLED",
+        "CLIENT_PORTAL_RETIRED_ORIGINS",
+        "CLIENT_PORTAL_ROOT_ACCESS_POLICY_ENABLED",
+        "CLIENT_PORTAL_SERVICE_ASSIGNMENT_POLICY_ENABLED",
+        "CLIENT_PORTAL_TEAM_ENABLED",
+        "CLIENT_REQUEST_ATTACHMENTS_ENABLED",
+        "CLIENT_VIEWER_ENABLED",
+        "CLIENT_VIEWER_SHARES_ENABLED",
+        "CLOUD_TRANSFER_DROPBOX_ENABLED",
+        "CLOUD_TRANSFER_GOOGLE_ENABLED",
+        "CLOUD_TRANSFER_GOOGLE_PICKER_CLIENT_ENABLED",
+        "DROPBOX_CLIENT_ID",
+        "ENVIRONMENT",
+        "EXPECTED_HOST",
+        "GOOGLE_CLIENT_ID",
+        "GOOGLE_CLOUD_PROJECT_NUMBER",
+        "GOOGLE_PICKER_API_KEY",
+        "LEGACY_CLIENT_ORIGINS",
+        "POLICY_AUD",
+        "PREVIOUS_SESSION_KEY_ID",
+        "PROJECT_ACCESS_AUTHORITY_MUTATIONS_ENABLED",
+        "PROJECT_ALPHA_CATALOG_HMAC_KEY_ID",
+        "PROJECT_ALPHA_CATALOG_PREVIOUS_HMAC_KEY_ID",
+        "PROJECT_ALPHA_CATALOG_SYNC_ENABLED",
+        "PROJECT_ALPHA_PORTAL_APPLICATION_KEY",
+        "PROJECT_ALPHA_PORTAL_DIRECT_HTTP_ENABLED",
+        "PROJECT_ALPHA_PORTAL_SYNC_ENABLED",
+        "PROJECT_ALPHA_PRICING_HINTS_ENABLED",
+        "PROJECT_ALPHA_PRICING_HINT_ALLOWED_ORIGIN",
+        "PROJECT_ALPHA_PRICING_HINT_APPLICATION_KEY",
+        "PROJECT_ALPHA_PRICING_HINT_CURRENCIES",
+        "PROJECT_ALPHA_PRICING_HINT_URL",
+        "PROJECT_ALPHA_SERVICE_ASSIGNMENT_SYNC_ENABLED",
+        "PUBLIC_BASE_URL",
+        "PUBLIC_SHARE_ORIGIN",
+        "R2_BUCKET_NAME",
+        "R2_S3_ENDPOINT",
+        "SESSION_KEY_ID",
+        "STREAM_CUSTOMER_CODE",
+        "TEAM_DOMAIN"
+      ],
+      "plainValueSHA256": {
+        "AUTHENTICATED_DELIVERY_CREATION_ENABLED": "fcbcf165908dd18a9e49f7ff27810176db8e9f63b4352213741664245224f8aa",
+        "AUTHENTICATED_DELIVERY_GRANTS_ENABLED": "b5bea41b6c623f7c09f1bf24dcae58ebab3c0cdd90ad966bc43a45b44867e12b",
+        "CLIENT_ACCESS_AUD": "92f75596f68d6c19d1929cf60a5e59a0547d4f2a1b52de1572b6c42f298b7248",
+        "CLIENT_ACCESS_AUDS": "92f75596f68d6c19d1929cf60a5e59a0547d4f2a1b52de1572b6c42f298b7248",
+        "CLIENT_ACCESS_TEAM_DOMAIN": "591ec8b1f8daf2e29a71623a23df48da2d43cebfdc4b87ff185d33da80aefdf2",
+        "CLIENT_DELEGATED_SHARE_KEY_ID": "3bfc269594ef649228e9a74bab00f042efc91d5acc6fbee31a382e80d42388fe",
+        "CLIENT_DELEGATED_SHARES_ENABLED": "fcbcf165908dd18a9e49f7ff27810176db8e9f63b4352213741664245224f8aa",
+        "CLIENT_PORTAL_ACCESS_ENROLLMENT_READY": "fcbcf165908dd18a9e49f7ff27810176db8e9f63b4352213741664245224f8aa",
+        "CLIENT_PORTAL_ADDRESS_BOOK_ENABLED": "fcbcf165908dd18a9e49f7ff27810176db8e9f63b4352213741664245224f8aa",
+        "CLIENT_PORTAL_CONTENT_AUDIT_ENABLED": "fcbcf165908dd18a9e49f7ff27810176db8e9f63b4352213741664245224f8aa",
+        "CLIENT_PORTAL_DENY_POLICY_MANAGEMENT_ENABLED": "b5bea41b6c623f7c09f1bf24dcae58ebab3c0cdd90ad966bc43a45b44867e12b",
+        "CLIENT_PORTAL_ENABLED": "b5bea41b6c623f7c09f1bf24dcae58ebab3c0cdd90ad966bc43a45b44867e12b",
+        "CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED": "b5bea41b6c623f7c09f1bf24dcae58ebab3c0cdd90ad966bc43a45b44867e12b",
+        "CLIENT_PORTAL_HIERARCHY_V2_ENABLED": "b5bea41b6c623f7c09f1bf24dcae58ebab3c0cdd90ad966bc43a45b44867e12b",
+        "CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED": "b5bea41b6c623f7c09f1bf24dcae58ebab3c0cdd90ad966bc43a45b44867e12b",
+        "CLIENT_PORTAL_INVITATION_EMAIL_ENABLED": "fcbcf165908dd18a9e49f7ff27810176db8e9f63b4352213741664245224f8aa",
+        "CLIENT_PORTAL_INVITATION_FROM": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "CLIENT_PORTAL_INVITATION_FROM_NAME": "a8b3947204f83f6a54e8b6be0ad813d63d3d1070b23d22266dcab9600da0325e",
+        "CLIENT_PORTAL_MEMBERSHIP_MANAGEMENT_ENABLED": "fcbcf165908dd18a9e49f7ff27810176db8e9f63b4352213741664245224f8aa",
+        "CLIENT_PORTAL_NATIVE_FEEDBACK_SOURCE_IDS": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "CLIENT_PORTAL_NATIVE_FINANCIAL_ENABLED": "b5bea41b6c623f7c09f1bf24dcae58ebab3c0cdd90ad966bc43a45b44867e12b",
+        "CLIENT_PORTAL_NATIVE_RECIPIENT_ENROLLMENT_ENABLED": "b5bea41b6c623f7c09f1bf24dcae58ebab3c0cdd90ad966bc43a45b44867e12b",
+        "CLIENT_PORTAL_NATIVE_RECIPIENT_ENROLLMENT_EXPECTED_HOST": "c8e7c49c9349e9f9ca1a0740087d948c5d17dfbe5afa36a43f788bbf41d0eecc",
+        "CLIENT_PORTAL_NATIVE_RECIPIENT_SERVICE_HOME_ENABLED": "b5bea41b6c623f7c09f1bf24dcae58ebab3c0cdd90ad966bc43a45b44867e12b",
+        "CLIENT_PORTAL_NATIVE_REQUESTS_ENABLED": "fcbcf165908dd18a9e49f7ff27810176db8e9f63b4352213741664245224f8aa",
+        "CLIENT_PORTAL_NOTIFICATION_MIGRATION_MAINTENANCE": "fcbcf165908dd18a9e49f7ff27810176db8e9f63b4352213741664245224f8aa",
+        "CLIENT_PORTAL_OPERATIONS_NATIVE_AUTHORITY_EXPECTED_HOST": "c8e7c49c9349e9f9ca1a0740087d948c5d17dfbe5afa36a43f788bbf41d0eecc",
+        "CLIENT_PORTAL_OPERATIONS_NATIVE_AUTHORITY_STATUS_ENABLED": "b5bea41b6c623f7c09f1bf24dcae58ebab3c0cdd90ad966bc43a45b44867e12b",
+        "CLIENT_PORTAL_OPERATIONS_NATIVE_AUTHORITY_WRITER_ENABLED": "b5bea41b6c623f7c09f1bf24dcae58ebab3c0cdd90ad966bc43a45b44867e12b",
+        "CLIENT_PORTAL_OPERATIONS_NATIVE_CONTENT_AUDIT_ENABLED": "b5bea41b6c623f7c09f1bf24dcae58ebab3c0cdd90ad966bc43a45b44867e12b",
+        "CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_CANCELLATION_ENABLED": "b5bea41b6c623f7c09f1bf24dcae58ebab3c0cdd90ad966bc43a45b44867e12b",
+        "CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_DEPLOYMENT_PROFILE": "826df88400de527cd4d38644b9d6eb72f747f1e8bf29e61099969dd05469381f",
+        "CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_READ_ENABLED": "b5bea41b6c623f7c09f1bf24dcae58ebab3c0cdd90ad966bc43a45b44867e12b",
+        "CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_STATUS_ENABLED": "b5bea41b6c623f7c09f1bf24dcae58ebab3c0cdd90ad966bc43a45b44867e12b",
+        "CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_WRITER_ENABLED": "b5bea41b6c623f7c09f1bf24dcae58ebab3c0cdd90ad966bc43a45b44867e12b",
+        "CLIENT_PORTAL_OPERATIONS_PUBLICATION_WRITER_ENABLED": "b5bea41b6c623f7c09f1bf24dcae58ebab3c0cdd90ad966bc43a45b44867e12b",
+        "CLIENT_PORTAL_OPERATIONS_SERVICE_HOME_ENABLED": "b5bea41b6c623f7c09f1bf24dcae58ebab3c0cdd90ad966bc43a45b44867e12b",
+        "CLIENT_PORTAL_ORIGIN": "c2470869cc96774380ba533c188e0b860d3ef800f0a36222d2876cad7eaa29e5",
+        "CLIENT_PORTAL_ORIGINS": "63a0e83e11565de47d2fac0c5400ec76d1caea11623c9311fd35b4a49581ff12",
+        "CLIENT_PORTAL_PA_IDENTITY_AUTO_ELIGIBILITY_ENABLED": "b5bea41b6c623f7c09f1bf24dcae58ebab3c0cdd90ad966bc43a45b44867e12b",
+        "CLIENT_PORTAL_PEER_ADMIN_ENABLED": "fcbcf165908dd18a9e49f7ff27810176db8e9f63b4352213741664245224f8aa",
+        "CLIENT_PORTAL_REQUEST_V2_ENABLED": "fcbcf165908dd18a9e49f7ff27810176db8e9f63b4352213741664245224f8aa",
+        "CLIENT_PORTAL_RETIRED_ORIGINS": "e7167cddebdbb6565eb2f70b7ef465519f8ef8db73752c3e25b0b085315b0643",
+        "CLIENT_PORTAL_ROOT_ACCESS_POLICY_ENABLED": "b5bea41b6c623f7c09f1bf24dcae58ebab3c0cdd90ad966bc43a45b44867e12b",
+        "CLIENT_PORTAL_SERVICE_ASSIGNMENT_POLICY_ENABLED": "fcbcf165908dd18a9e49f7ff27810176db8e9f63b4352213741664245224f8aa",
+        "CLIENT_PORTAL_TEAM_ENABLED": "fcbcf165908dd18a9e49f7ff27810176db8e9f63b4352213741664245224f8aa",
+        "CLIENT_REQUEST_ATTACHMENTS_ENABLED": "fcbcf165908dd18a9e49f7ff27810176db8e9f63b4352213741664245224f8aa",
+        "CLIENT_VIEWER_ENABLED": "fcbcf165908dd18a9e49f7ff27810176db8e9f63b4352213741664245224f8aa",
+        "CLIENT_VIEWER_SHARES_ENABLED": "fcbcf165908dd18a9e49f7ff27810176db8e9f63b4352213741664245224f8aa",
+        "CLOUD_TRANSFER_DROPBOX_ENABLED": "fcbcf165908dd18a9e49f7ff27810176db8e9f63b4352213741664245224f8aa",
+        "CLOUD_TRANSFER_GOOGLE_ENABLED": "fcbcf165908dd18a9e49f7ff27810176db8e9f63b4352213741664245224f8aa",
+        "CLOUD_TRANSFER_GOOGLE_PICKER_CLIENT_ENABLED": "fcbcf165908dd18a9e49f7ff27810176db8e9f63b4352213741664245224f8aa",
+        "DROPBOX_CLIENT_ID": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "ENVIRONMENT": "ab8e18ef4ebebeddc0b3152ce9c9006e14fc05242e3fc9ce32246ea6a9543074",
+        "EXPECTED_HOST": "c8e7c49c9349e9f9ca1a0740087d948c5d17dfbe5afa36a43f788bbf41d0eecc",
+        "GOOGLE_CLIENT_ID": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "GOOGLE_CLOUD_PROJECT_NUMBER": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "GOOGLE_PICKER_API_KEY": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "LEGACY_CLIENT_ORIGINS": "e7167cddebdbb6565eb2f70b7ef465519f8ef8db73752c3e25b0b085315b0643",
+        "POLICY_AUD": "aaebfa5c304d60027c74001a87329415d488a053b7eb356233f69d7625e320c8",
+        "PREVIOUS_SESSION_KEY_ID": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "PROJECT_ACCESS_AUTHORITY_MUTATIONS_ENABLED": "fcbcf165908dd18a9e49f7ff27810176db8e9f63b4352213741664245224f8aa",
+        "PROJECT_ALPHA_CATALOG_HMAC_KEY_ID": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "PROJECT_ALPHA_CATALOG_PREVIOUS_HMAC_KEY_ID": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "PROJECT_ALPHA_CATALOG_SYNC_ENABLED": "fcbcf165908dd18a9e49f7ff27810176db8e9f63b4352213741664245224f8aa",
+        "PROJECT_ALPHA_PORTAL_APPLICATION_KEY": "8261bb94d4511f644d8bc323539b55f6c7a1892341e206f6c6ae633c36bc759d",
+        "PROJECT_ALPHA_PORTAL_DIRECT_HTTP_ENABLED": "fcbcf165908dd18a9e49f7ff27810176db8e9f63b4352213741664245224f8aa",
+        "PROJECT_ALPHA_PORTAL_SYNC_ENABLED": "b5bea41b6c623f7c09f1bf24dcae58ebab3c0cdd90ad966bc43a45b44867e12b",
+        "PROJECT_ALPHA_PRICING_HINT_ALLOWED_ORIGIN": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "PROJECT_ALPHA_PRICING_HINT_APPLICATION_KEY": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "PROJECT_ALPHA_PRICING_HINT_CURRENCIES": "a26cdf3a6e709124385d4d7eb9bff6b897a58ed5597fbab779b89849dbe81b21",
+        "PROJECT_ALPHA_PRICING_HINTS_ENABLED": "fcbcf165908dd18a9e49f7ff27810176db8e9f63b4352213741664245224f8aa",
+        "PROJECT_ALPHA_PRICING_HINT_URL": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "PROJECT_ALPHA_SERVICE_ASSIGNMENT_SYNC_ENABLED": "fcbcf165908dd18a9e49f7ff27810176db8e9f63b4352213741664245224f8aa",
+        "PUBLIC_BASE_URL": "c2470869cc96774380ba533c188e0b860d3ef800f0a36222d2876cad7eaa29e5",
+        "PUBLIC_SHARE_ORIGIN": "c2470869cc96774380ba533c188e0b860d3ef800f0a36222d2876cad7eaa29e5",
+        "R2_BUCKET_NAME": "115dce4ef32b5e06c1c3d03b2eadd7590d028c49b3295e295740beee638e5d27",
+        "R2_S3_ENDPOINT": "810ca028d7d48de9127d341c229dbbc5e866b73109865aa7327e09bb304faecf",
+        "SESSION_KEY_ID": "3bfc269594ef649228e9a74bab00f042efc91d5acc6fbee31a382e80d42388fe",
+        "STREAM_CUSTOMER_CODE": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "TEAM_DOMAIN": "591ec8b1f8daf2e29a71623a23df48da2d43cebfdc4b87ff185d33da80aefdf2"
+      },
+      "assetsSHA256": "b1c41485893a0ed4b1a9933fbbe880e3da77e6c0b90d12866c105f1e478bf1f3"
+    },
+    "ops-sync": {
+      "name": "ledgetop-ops-sync",
+      "settings": {
+        "placement": {},
+        "compatibility_date": "2026-07-22",
+        "compatibility_flags": [
+          "nodejs_compat"
+        ],
+        "usage_model": "standard",
+        "tags": [],
+        "tail_consumers": [],
+        "logpush": false,
+        "observability": {
+          "enabled": true,
+          "head_sampling_rate": 1,
+          "redact_query_string": false,
+          "logs": {
+            "enabled": true,
+            "head_sampling_rate": 1,
+            "persist": true,
+            "invocation_logs": true
+          },
+          "traces": {
+            "enabled": false,
+            "persist": true,
+            "head_sampling_rate": 1
+          }
+        }
+      },
+      "runtime": {
+        "compatibility_date": "2026-07-22",
+        "compatibility_flags": [
+          "nodejs_compat"
+        ],
+        "usage_model": "standard"
+      },
+      "script": {
+        "handlers": [
+          "fetch",
+          "scheduled"
+        ],
+        "named_handlers": [
+          {
+            "name": "handleRequest",
+            "handlers": [
+              "class"
+            ]
+          },
+          {
+            "name": "reconcileScheduledAccess",
+            "handlers": [
+              "class"
+            ]
+          }
+        ]
+      },
+      "bindings": [
+        {
+          "name": "CF_ACCESS_GROUP_API_TOKEN",
+          "type": "secret_text"
+        },
+        {
+          "entrypoint": "OpsSyncPortalProjectionIngress",
+          "environment": "production",
+          "name": "CLIENT_PORTAL_PROJECTION_INGRESS",
+          "service": "ledgetop-clients",
+          "type": "service"
+        },
+        {
+          "database_id": "7f40a7b7-c3ec-470e-a626-e798867f71f8",
+          "id": "7f40a7b7-c3ec-470e-a626-e798867f71f8",
+          "name": "DELIVERY_DB",
+          "type": "d1"
+        },
+        {
+          "entrypoint": "ProjectAlphaDeliveryIntentIngress",
+          "environment": "production",
+          "name": "OPERATIONS_DELIVERY_INTENT_INGRESS",
+          "service": "ledgetop-ops",
+          "type": "service"
+        },
+        {
+          "database_id": "6ebf7514-d306-4615-ae56-ad869c874dbd",
+          "id": "6ebf7514-d306-4615-ae56-ad869c874dbd",
+          "name": "OPS_DB",
+          "type": "d1"
+        },
+        {
+          "name": "PROJECT_ALPHA_CONNECTOR_EVENT_CREDENTIALS",
+          "type": "secret_text"
+        },
+        {
+          "name": "PROJECT_ALPHA_CONNECTOR_SOURCES",
+          "type": "secret_text"
+        },
+        {
+          "name": "PROJECT_ALPHA_LOCAL_DIVISION_IDENTITY_CONNECTIONS",
+          "type": "secret_text"
+        },
+        {
+          "name": "PROJECT_ALPHA_WEBHOOK_ED25519_PUBLIC_KEY",
+          "type": "secret_text"
+        },
+        {
+          "name": "PROJECT_ALPHA_WEBHOOK_HMAC_SECRET",
+          "type": "secret_text"
+        }
+      ],
+      "crons": [
+        "*/5 * * * *"
+      ],
+      "metadata": {
+        "placement": {},
+        "usage_model": "standard",
+        "tags": [],
+        "tail_consumers": [],
+        "logpush": false,
+        "observability": {
+          "enabled": true,
+          "head_sampling_rate": 1,
+          "redact_query_string": false,
+          "logs": {
+            "enabled": true,
+            "head_sampling_rate": 1,
+            "persist": true,
+            "invocation_logs": true
+          },
+          "traces": {
+            "enabled": false,
+            "persist": true,
+            "head_sampling_rate": 1
+          }
+        }
+      },
+      "forbiddenPlainNames": [],
+      "plainNames": [
+        "APPLICATION_KEY",
+        "CF_ACCESS_AUD",
+        "CF_ACCESS_GROUP_ID",
+        "CF_ACCESS_GROUP_NAME",
+        "CF_ACCOUNT_ID",
+        "EXPECTED_HOST",
+        "PROJECT_ALPHA_ALLOW_LEGACY_HMAC",
+        "PROJECT_ALPHA_CONNECTOR_SOURCES_REQUIRED",
+        "TEAM_DOMAIN"
+      ],
+      "plainValueSHA256": {
+        "APPLICATION_KEY": "8261bb94d4511f644d8bc323539b55f6c7a1892341e206f6c6ae633c36bc759d",
+        "CF_ACCESS_AUD": "90f67c1106054baca38a840e9f32def837b5e95162cf22894b4f050a9b0945ec",
+        "CF_ACCESS_GROUP_ID": "ba439eafb39acc7a0802503a2c8c1a95d92276539db2b1242cb0887111790cbf",
+        "CF_ACCESS_GROUP_NAME": "a7d4b7ef16e7618a4da5019e664c8bbd3f29f3dd4fad453e981031954092373c",
+        "CF_ACCOUNT_ID": "80fe1a4db1dcf4fc5dd29f16acb4870c8a00b616ea0290aa1ba9d50baca43902",
+        "EXPECTED_HOST": "912ae0ba25fe0e1a82b0d0d6c6a203772c3b6d8ca81aa80f3db18cac18029ec9",
+        "PROJECT_ALPHA_ALLOW_LEGACY_HMAC": "b5bea41b6c623f7c09f1bf24dcae58ebab3c0cdd90ad966bc43a45b44867e12b",
+        "PROJECT_ALPHA_CONNECTOR_SOURCES_REQUIRED": "fcbcf165908dd18a9e49f7ff27810176db8e9f63b4352213741664245224f8aa",
+        "TEAM_DOMAIN": "591ec8b1f8daf2e29a71623a23df48da2d43cebfdc4b87ff185d33da80aefdf2"
+      },
+      "assetsSHA256": "74234e98afe7498fb5daf1f36ac2d78acc339464f950703b8c019892f982b90b"
+    }
+  },
+  "frontendSHA256": "9112f567a3a5ea3d800fe4398d71bb8c2d74a8dc8a9e8c82e6070dfdd4534b59"
+}
