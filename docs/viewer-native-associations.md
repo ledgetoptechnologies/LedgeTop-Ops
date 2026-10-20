@@ -6,7 +6,9 @@ clients, grant client access, or create public links. Viewer continues to own
 models, versions, assets and processing.
 
 Catalog reads and staff sessions require **global** `viewer.view`. Creating
-or refreshing an association requires global `viewer.manage`.
+or refreshing an association requires both global `viewer.view` and global
+`viewer.manage`: the shared authorization helper checks view access before the
+requested action permission.
 Division-only permissions do not expose the global Viewer catalog. The normal
 Operations human authentication and mutation-security middleware still applies.
 
