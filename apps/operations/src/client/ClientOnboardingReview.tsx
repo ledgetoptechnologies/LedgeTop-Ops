@@ -13,6 +13,13 @@ type Decided = { clientRecordId: string; organizationRecordId?: string; sourceId
 const ACTIVATION_POLL_MS = 10_000, ACTIVATION_POLL_LIMIT = 30;
 
 /** Reads ?submission= from an owner email link; only an exact submission UUID is accepted. */
+/** False once the component has unmounted, so late replies change nothing (and close nothing). */
+function useAlive() {
+  const alive = useRef(true);
+  useEffect(() => { alive.current = true; return () => { alive.current = false; }; }, []);
+  return alive;
+}
+
 export function submissionFromLocation(search: string): string | null {
   const value = new URLSearchParams(search).get("submission");
   return value && UUID.test(value) ? value : null;
@@ -179,6 +186,7 @@ function DirectApproval({ session, review, sourceIds, companyMode, locked, onLoc
   const [error, setError] = useState("");
   const frozen = useRef<string | null>(null);
   const [uncertain, setUncertain] = useState(false);
+  const alive = useAlive();
   const sourcesKey = sourceIds.join(",");
   // A changed business or company mode (only possible while unfrozen) invalidates the chosen company.
   useEffect(() => { if (!frozen.current) setCompany(null); }, [sourcesKey, companyMode]);
@@ -193,13 +201,15 @@ function DirectApproval({ session, review, sourceIds, companyMode, locked, onLoc
     frozen.current = body;
     try {
       const value = await post(session, "approve", JSON.parse(body));
+      if (!alive.current) return;
       if (!validApproval(value) || value.submissionId !== review.submissionId) throw new Error("invalid_response");
       setUncertain(false);
       onApproved({ clientRecordId: value.clientRecordId, organizationRecordId: value.organizationRecordId, sourceIds, replayed: value.replayed });
     } catch (caught) {
+      if (!alive.current) return;
       if (uncertainFailure(caught)) setUncertain(true);
       else { frozen.current = null; setUncertain(false); onLock(false); setError("Approval was refused. Check your review permissions, the selected businesses and the company, then try again."); onRefused(caught); }
-    } finally { setBusy(false); }
+    } finally { if (alive.current) setBusy(false); }
   };
   return <div className="onboarding-approval-action">
     {companyMode === "existing" && <ExistingCompanyPicker key={sourcesKey} session={session} review={review} sourceIds={sourceIds} selected={company} onSelect={setCompany} locked={locked || busy} onRefused={onRefused} />}
@@ -221,16 +231,22 @@ function ExistingCompanyPicker({ session, review, sourceIds, selected, onSelect,
   const [after, setAfter] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const alive = useAlive();
   const search = async (event: FormEvent | null, more = false) => {
     event?.preventDefault();
     if (busy || locked) return;
     setBusy(true); setError(""); if (!more) { onSelect(null); setResults(null); }
     try {
       const value = await post(session, "existing-companies", { submissionId: review.submissionId, sourceIds, query: query.trim(), afterRecordId: more ? after : null });
+      if (!alive.current) return;
       if (!validExistingCompanies(value)) throw new Error("invalid_response");
       setResults(current => [...(more ? current ?? [] : []), ...value.companies]); setAfter(value.nextAfterRecordId);
-    } catch (caught) { setError("Companies couldn't be searched. Check your directory permissions and try again."); onRefused(caught); }
-    finally { setBusy(false); }
+    } catch (caught) {
+      if (!alive.current) return;
+      setError("Companies couldn't be searched. Check your directory permissions and try again.");
+      // A definite refusal withdraws earlier results too: a company is chosen only from a fresh authorized read.
+      if (!uncertainFailure(caught)) { setResults(null); setAfter(null); onSelect(null); onRefused(caught); }
+    } finally { if (alive.current) setBusy(false); }
   };
   return <div className="onboarding-company-picker">
     <form onSubmit={event => void search(event)} className="onboarding-company-search">
@@ -260,6 +276,8 @@ function SharedCompanyApproval({ session, review, sourceIds, onLock, onRefused, 
   const [uncertain, setUncertain] = useState<"plan" | "approve" | null>(null);
   const planCommand = useRef<{ commandId: string; body: string } | null>(null);
   const searchRun = useRef(0);
+  const alive = useAlive();
+  useEffect(() => () => { searchRun.current += 1; }, []);
   const sourcesKey = sourceIds.join(",");
   // Changed businesses (only possible while unfrozen) invalidate earlier search results.
   useEffect(() => { if (planCommand.current) return; searchRun.current += 1; setCompany(null); setResults(null); setAfter(null); }, [sourcesKey]);
@@ -275,8 +293,12 @@ function SharedCompanyApproval({ session, review, sourceIds, onLock, onRefused, 
       if (!validSharedCompanies(value)) throw new Error("invalid_response");
       if (run !== searchRun.current) return;
       setResults(current => [...(more ? current ?? [] : []), ...value.companies]); setAfter(value.nextAfterGroupId);
-    } catch (caught) { if (run !== searchRun.current) return; setError("Shared companies couldn't be searched. Check your directory permissions and try again."); onRefused(caught); }
-    finally { setBusy(null); }
+    } catch (caught) {
+      if (run !== searchRun.current) return;
+      setError("Shared companies couldn't be searched. Check your directory permissions and try again.");
+      // A definite refusal withdraws earlier results too: a company is chosen only from a fresh authorized read.
+      if (!uncertainFailure(caught)) { setResults(null); setAfter(null); setCompany(null); onRefused(caught); }
+    } finally { if (alive.current && run === searchRun.current) setBusy(null); }
   };
   const prepare = async () => {
     if (!company || busy) return;
@@ -289,12 +311,14 @@ function SharedCompanyApproval({ session, review, sourceIds, onLock, onRefused, 
     planCommand.current = command;
     try {
       const value = await post(session, "shared-company-plan", { commandId: command.commandId, ...JSON.parse(command.body) });
+      if (!alive.current) return;
       if (!validSharedPlan(value, { planId: command.commandId, submissionId: review.submissionId, groupId: company.groupId })) throw new Error("invalid_response");
       setPlan(value); setUncertain(null);
     } catch (caught) {
+      if (!alive.current) return;
       if (uncertainFailure(caught)) setUncertain("plan");
       else { setUncertain(null); release(); setError("The plan was refused. The company may have changed; search again and choose it again."); onRefused(caught); }
-    } finally { setBusy(null); }
+    } finally { if (alive.current) setBusy(null); }
   };
   const approve = async () => {
     if (!plan || busy) return;
@@ -302,13 +326,15 @@ function SharedCompanyApproval({ session, review, sourceIds, onLock, onRefused, 
     setBusy("approve"); setError("");
     try {
       const value = await post(session, "approve-shared-company", { planId: plan.planId, submissionId: review.submissionId, fieldsSha256: review.fieldsSha256 });
+      if (!alive.current) return;
       if (!validSharedApproval(value, plan.planId, review.submissionId)) throw new Error("invalid_response");
       setUncertain(null);
       onApproved({ clientRecordId: value.clientRecordId, organizationRecordId: value.organizationRecordId, sourceIds: plan.sourceIds, replayed: value.replayed });
     } catch (caught) {
+      if (!alive.current) return;
       if (uncertainFailure(caught)) setUncertain("approve");
       else { setUncertain(null); release(); setError("Approval was refused. The plan may have expired or the company changed; prepare a new plan."); onRefused(caught); }
-    } finally { setBusy(null); }
+    } finally { if (alive.current) setBusy(null); }
   };
   if (sourceIds.length === 0) return <p className="onboarding-hint">Choose at least one business above to use a shared company.</p>;
   return <div className="onboarding-approval-action">

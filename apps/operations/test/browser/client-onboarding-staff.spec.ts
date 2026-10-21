@@ -101,8 +101,9 @@ test("the page closes when the verified session deadline passes", async ({ page 
   await expect(page.locator(".onboarding-review")).toHaveCount(0);
 });
 
-test("a refreshed token is used without reloading open reviews or inbox pages", async ({ page }) => {
-  await render(page, "success", "", true);
+for (const mode of ["success", "advancing-session"]) test(`a refreshed token is used without reloading open reviews or inbox pages (${mode})`, async ({ page }) => {
+  // advancing-session returns a new bounded deadline on every refresh, so the refresh really changes state.
+  await render(page, mode, "", true);
   await page.getByRole("button", { name: "Load more submissions" }).click();
   await openSubmission(page, "Later Client");
   await page.clock.fastForward("08:01");
@@ -348,6 +349,66 @@ test("a refused company search re-verifies the session", async ({ page }) => {
   await page.getByRole("button", { name: "Search", exact: true }).click();
   await expect(page.getByRole("alert")).toContainText("Companies couldn't be searched");
   await expect.poll(() => sessionReads(page)).toBe(2);
+});
+
+test("a refused page of company results withdraws the earlier results and the chosen company", async ({ page }) => {
+  await render(page, "search-page-denied");
+  await openSubmission(page, "Dana Business");
+  await page.getByLabel("An existing company in Operations").check();
+  await page.getByRole("button", { name: "Search", exact: true }).click();
+  await page.getByLabel(/^Example LLC\s*Ledge Top Drone Services/).check();
+  await page.getByRole("button", { name: "Load more companies" }).click();
+  await expect(page.getByRole("alert")).toContainText("Companies couldn't be searched");
+  await expect(page.locator(".onboarding-company-picker input[type=radio]")).toHaveCount(0);
+  await expect(page.getByRole("button", { name: /^Approve for/ })).toBeDisabled();
+  // The session is still valid, so the review itself stays; a fresh search is required.
+  await expect.poll(() => sessionReads(page)).toBe(2);
+  await expect(page.getByRole("heading", { name: "Review Dana Business" })).toBeVisible();
+  expect(await bodies(page, "approve")).toEqual([]);
+});
+
+test("a refused page of shared companies withdraws the earlier results and the chosen company", async ({ page }) => {
+  await render(page, "shared-page-denied");
+  await openSubmission(page, "Dana Business");
+  await page.getByLabel("An existing company shared by both businesses").check();
+  await page.getByLabel("Ledge Top Drone Services").check();
+  await page.getByRole("button", { name: "Search", exact: true }).click();
+  await page.getByLabel(/^Example LLC/).check();
+  await page.getByRole("button", { name: "Load more companies" }).click();
+  await expect(page.getByRole("alert")).toContainText("Shared companies couldn't be searched");
+  await expect(page.getByLabel(/^Example LLC/)).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Review approval plan" })).toBeDisabled();
+  await expect.poll(() => sessionReads(page)).toBe(2);
+  expect(await bodies(page, "shared-company-plan")).toEqual([]);
+});
+
+for (const kind of ["existing", "shared"]) test(`a late ${kind} company search refusal can't close a newly opened review`, async ({ page }) => {
+  await render(page, "late-search-404");
+  await openSubmission(page, "Dana Business");
+  await page.getByLabel(kind === "existing" ? "An existing company in Operations" : "An existing company shared by both businesses").check();
+  if (kind === "shared") await page.getByLabel("Ledge Top Drone Services").check();
+  await page.getByRole("button", { name: "Search", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Searching…" })).toBeVisible();
+  await openSubmission(page, "Reviewed Client");
+  await page.evaluate(() => (window as Window & { release?: () => void }).release?.());
+  await page.waitForTimeout(200);
+  await expect(page.getByRole("heading", { name: "Review Reviewed Client" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Client onboarding unavailable" })).toHaveCount(0);
+  expect(await sessionReads(page)).toBe(1);
+});
+
+test("a refusal during an in-flight session check forces one fresh check afterwards", async ({ page }) => {
+  await render(page, "deferred-recheck", "", true);
+  await openSubmission(page, "Reviewed Client");
+  await page.clock.fastForward("08:01");
+  await expect.poll(() => sessionReads(page)).toBe(2);
+  await page.getByRole("button", { name: "Approve for Operations only" }).click();
+  await expect(page.getByRole("alert")).toContainText("Approval was refused");
+  // The earlier check was authorized before the refusal; its success must not settle it.
+  await page.evaluate(() => (window as Window & { release?: () => void }).release?.());
+  await expect.poll(() => sessionReads(page)).toBe(3);
+  await expect(page.getByRole("heading", { name: "Client onboarding unavailable" })).toBeVisible();
+  await expect(page.locator(".onboarding-review")).toHaveCount(0);
 });
 
 for (const mode of ["poll-null", "poll-transient"]) test(`activation polling continues after ${mode === "poll-null" ? "an empty" : "a failed"} read until active`, async ({ page }) => {

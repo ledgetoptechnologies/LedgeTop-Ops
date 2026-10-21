@@ -67,7 +67,9 @@ export function ClientOnboardingStaff() {
   const verify = useRef<(() => void) | null>(null);
   useEffect(() => {
     const controller = new AbortController();
-    let checking = false;
+    // A refusal that arrives while a check is running queues one fresh check: the
+    // running one may have been authorized before the revocation.
+    let checking = false, pending = false;
     const load = (first: boolean) => { checking = true; return json(`${endpoint}/session`, { method: "GET", signal: controller.signal, headers: { "X-Native-Staff-Request": "1" } })
       .then(value => {
         if (!validSession(value)) throw new Error("invalid_response");
@@ -83,10 +85,13 @@ export function ClientOnboardingStaff() {
         if (!first && !authorityLost(error)) return;
         close((error as RequestFailure | null)?.status === 404 && first ? "This administrator-only capability is not enabled."
           : first ? "Administrator onboarding access could not be verified." : "Your onboarding access changed. Reload the page to continue.");
-      }).finally(() => { checking = false; }); };
+      }).finally(() => {
+        checking = false;
+        if (pending && !controller.signal.aborted && sessionRef.current) { pending = false; void load(false); }
+      }); };
     void load(true);
     // A refused request elsewhere on the page re-verifies the session at once.
-    verify.current = () => { if (!checking) void load(false); };
+    verify.current = () => { if (checking) pending = true; else void load(false); };
     // The request token rotates every ten minutes; refresh it so long reviews keep working.
     const timer = window.setInterval(() => void load(false), SESSION_REFRESH_MS);
     return () => { controller.abort(); window.clearInterval(timer); verify.current = null; };
@@ -108,6 +113,8 @@ export function ClientOnboardingStaff() {
     if (status === 401 || status === 404) close("Your onboarding access changed. Reload the page to continue.");
     else if (status === 403) verify.current?.();
   }, [close]);
+  // Stable, so a successful refresh never re-runs the inbox or review loads.
+  const lost = useCallback(() => close("Your onboarding access changed. Reload the page to continue."), [close]);
 
   const session = sessionRef.current;
   if (accessError) return <main className="onboarding-staff-gate"><Card><h1>Client onboarding unavailable</h1><p role="alert">{accessError}</p><a className="button-ghost" href="/">Return to Operations</a></Card></main>;
@@ -115,7 +122,7 @@ export function ClientOnboardingStaff() {
   return <div className="onboarding-staff-shell"><header><Brand product="Operations" name="Ledge Top" /><a href="/">Exit onboarding</a></header><main>
     <div className="onboarding-staff-heading"><p className="eyebrow">Client onboarding</p><h1>Client onboarding</h1>
       <p>Invite a client to fill in their profile, then review what they submit and choose which Ledge Top businesses they belong to.</p></div>
-    <ClientOnboardingInbox session={session} onRefused={refused} onAuthorityLost={() => close("Your onboarding access changed. Reload the page to continue.")} />
+    <ClientOnboardingInbox session={session} onRefused={refused} onAuthorityLost={lost} />
     <ClientOnboardingIssuer session={session} onRefused={refused} />
   </main></div>;
 }

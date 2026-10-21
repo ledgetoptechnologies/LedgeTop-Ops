@@ -35,9 +35,13 @@ window.fetch = async (input, init) => {
     sessionReads += 1;
     if (mode === "disabled") return new Response(JSON.stringify({ error: "not_found" }), { status: 404 });
     if ((mode === "refresh-denied" || mode === "approve-revoked") && sessionReads > 1) return denied();
+    // A refresh already in flight when a refusal arrives, then revoked access.
+    if (mode === "deferred-recheck" && sessionReads === 2) await held();
+    if (mode === "deferred-recheck" && sessionReads > 2) return denied();
     if (mode === "refresh-unavailable" && sessionReads > 1) return Response.json({ error: "client_onboarding_unavailable" }, { status: 503 });
     return Response.json({ csrfToken: String(sessionReads % 10).repeat(64),
-      verifiedUntil: mode === "short-session" ? new Date(Date.now() + 60_000).toISOString() : "2099-01-01T00:00:00.000Z" });
+      verifiedUntil: mode === "short-session" ? new Date(Date.now() + 60_000).toISOString()
+        : mode === "advancing-session" ? new Date(Date.now() + 60 * 60_000).toISOString() : "2099-01-01T00:00:00.000Z" });
   }
   if (route === "inbox") {
     if (mode === "inbox-denied") return Response.json({ error: "client_onboarding_denied" }, { status: 403 });
@@ -77,7 +81,7 @@ window.fetch = async (input, init) => {
   if (route === "approve") {
     approvalAttempts += 1;
     if (mode === "delayed-approval") await held();
-    if (mode === "approve-denied" || mode === "approve-revoked") return denied();
+    if (mode === "approve-denied" || mode === "approve-revoked" || mode === "deferred-recheck") return denied();
     if (mode === "uncertain-approval" && approvalAttempts === 1) return Response.json({ error: "client_onboarding_unavailable" }, { status: 503 });
     approved = true;
     return Response.json({ decisionId: "44444444-4444-4444-8444-444444444444", submissionId: body.submissionId,
@@ -86,10 +90,14 @@ window.fetch = async (input, init) => {
       relationshipVersion: 1, replayed: false });
   }
   if (route === "existing-companies" && mode === "search-denied") return denied();
-  if (route === "existing-companies") return Response.json({ existingContactReuse: "unsupported", nextAfterRecordId: null, companies: [
+  if (route === "existing-companies" && mode === "search-page-denied" && body.afterRecordId) return denied();
+  if (route === "existing-companies" && mode === "late-search-404") { await held(); return Response.json({ error: "not_found" }, { status: 404 }); }
+  if (route === "existing-companies") return Response.json({ existingContactReuse: "unsupported", nextAfterRecordId: mode === "search-page-denied" ? "org:next" : null, companies: [
     { recordId: "org:example", expectedVersion: 4, name: "Example LLC", sourceIds: [primary], reusable: true, reason: null },
     { recordId: "org:example-old", expectedVersion: 2, name: "Example LLC (old)", sourceIds: [], reusable: false, reason: "company_not_active" } ] });
-  if (route === "shared-company-choices") return Response.json({ approvalAvailable: false, nextAfterGroupId: null, companies: [
+  if (route === "shared-company-choices" && mode === "shared-page-denied" && body.afterGroupId) return denied();
+  if (route === "shared-company-choices" && mode === "late-search-404") { await held(); return Response.json({ error: "not_found" }, { status: 404 }); }
+  if (route === "shared-company-choices") return Response.json({ approvalAvailable: false, nextAfterGroupId: mode === "shared-page-denied" ? "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" : null, companies: [
     { groupId: "99999999-9999-4999-8999-999999999999", expectedVersion: 3, name: "Example LLC", reviewAvailable: true, reason: null,
       members: [{ recordId: "org:ltt", expectedVersion: 2, sourceIds: [secondary] }, { recordId: "org:ltds", expectedVersion: 5, sourceIds: [primary] }] } ] });
   if (route === "shared-company-plan" && mode === "delayed-plan") await held();
