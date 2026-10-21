@@ -161,6 +161,38 @@ test("staff link a ready model to a native client project with the exact returne
   expect(links[1]!.body).toEqual(links[0]!.body);
 });
 
+test("an unconfirmed link can't be stranded by a refreshed catalog and retries exactly as sent", async ({ page }) => {
+  let reads = 0, posts = 0;
+  const ops = await mockOps(page, ["viewer.view", "viewer.manage"], (url, method, route) => {
+    if (url.pathname === "/api/viewer/native-associations" && method === "GET") {
+      reads += 1;
+      // After the first read the project has a newer generation.
+      return route.fulfill({ json: reads === 1 ? nativeData() : { ...nativeData(), projects: nativeData().projects.map(project => ({ ...project, generationId: "generation-4" })) } });
+    }
+    if (url.pathname === "/api/viewer/native-associations" && method === "POST") { posts += 1; return route.fulfill(posts === 1 ? { status: 503, json: { error: "Viewer unavailable" } } : { status: 201, json: { association, replayed: false } }); }
+    return undefined;
+  });
+  await page.goto("/viewer/models");
+  const form = page.locator("form.viewer-association-form");
+  await form.getByRole("combobox", { name: "Client project" }).selectOption({ label: "Harbor Authority · Seawall survey" });
+  await form.getByRole("combobox", { name: "Model" }).selectOption({ label: "Ranch 3D mesh" });
+  await form.getByRole("button", { name: "Link model" }).click();
+  await expect(form.getByRole("button", { name: "Retry same link" })).toBeEnabled();
+  // A catalog read can't run while the link is unconfirmed, so it can't strand the retry.
+  await expect(page.getByRole("button", { name: "Refresh" })).toBeDisabled();
+  expect(reads).toBe(1);
+  await form.getByRole("button", { name: "Retry same link" }).click();
+  await expect(page.getByRole("status").filter({ hasText: "Ranch 3D mesh is linked to Seawall survey" })).toBeVisible();
+  const links = ops.filter(call => call.method === "POST" && call.path === "/api/viewer/native-associations");
+  expect(links).toHaveLength(2);
+  expect(links[1]!.key).toBe(links[0]!.key);
+  expect(links[1]!.body).toEqual(links[0]!.body);
+  expect((links[1]!.body as { generationId: string }).generationId).toBe("generation-3");
+  // Afterwards the list is current again and a new link would use the newer generation.
+  await expect(page.getByRole("button", { name: "Refresh" })).toBeEnabled();
+  expect(reads).toBe(2);
+});
+
 test("a changed client project is reloaded and never substituted", async ({ page }) => {
   let reads = 0;
   const ops = await mockOps(page, ["viewer.view", "viewer.manage"], (url, method, route) => {

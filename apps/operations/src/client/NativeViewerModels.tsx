@@ -50,7 +50,8 @@ export function NativeViewerModels({ canManage }: { canManage: boolean }) {
   const [error, setError] = useState("");
   const [query, setQuery] = useState("");
   // An uncertain link request is retried with the identical body and key; any change of selection needs a new key.
-  const pending = useRef<{ body: string; key: string } | null>(null);
+  // It is kept independently of later catalog reads, so a refreshed generation can't strand it.
+  const pending = useRef<{ body: string; key: string; modelTitle: string; projectName: string } | null>(null);
   const [uncertainLink, setUncertainLink] = useState(false);
   const run = useRef(0);
 
@@ -80,15 +81,21 @@ export function NativeViewerModels({ canManage }: { canManage: boolean }) {
 
   const link = async (event: FormEvent) => {
     event.preventDefault();
-    if (busy || !selectedProject || !selectedModel) return;
-    const body = JSON.stringify({ ...targetOf(selectedProject), viewerModelId: selectedModel.id });
-    if (!pending.current || pending.current.body !== body) pending.current = { body, key: crypto.randomUUID() };
+    if (busy) return;
+    if (!uncertainLink) {
+      if (!selectedProject || !selectedModel) return;
+      const body = JSON.stringify({ ...targetOf(selectedProject), viewerModelId: selectedModel.id });
+      if (!pending.current || pending.current.body !== body)
+        pending.current = { body, key: crypto.randomUUID(), modelTitle: selectedModel.title, projectName: selectedProject.projectName };
+    }
+    // An unconfirmed link is retried exactly as sent, whatever the catalog shows now.
     const request = pending.current;
+    if (!request) return;
     setBusy(true); setError(""); setMessage("");
     try {
       const result = await api<{ replayed?: boolean }>("/api/viewer/native-associations", { method: "POST", headers: { "Idempotency-Key": request.key }, body: request.body });
       pending.current = null; setUncertainLink(false);
-      setMessage(result.replayed ? "This link was already saved." : `${selectedModel.title} is linked to ${selectedProject.projectName}.`);
+      setMessage(result.replayed ? "This link was already saved." : `${request.modelTitle} is linked to ${request.projectName}.`);
       setProjectKey(""); setModelId("");
       await load();
     } catch (caught) {
@@ -126,12 +133,12 @@ export function NativeViewerModels({ canManage }: { canManage: boolean }) {
           <option value="">{readyModels.length ? "Choose a ready model" : "No ready models"}</option>
           {readyModels.map(model => <option key={model.id} value={model.id}>{model.title}</option>)}
         </select></label>
-        <button type="submit" className="button-orange" disabled={busy || !selectedProject || !selectedModel}>{busy ? "Linking…" : uncertainLink ? "Retry same link" : "Link model"}</button>
+        <button type="submit" className="button-orange" disabled={busy || (uncertainLink ? !pending.current : !selectedProject || !selectedModel)}>{busy ? "Linking…" : uncertainLink ? "Retry same link" : "Link model"}</button>
       </form>
     </Card>}
     {error && <p className="notice error" role="alert">{error}</p>}
     {message && <p className="notice" role="status">{message}</p>}
-    <Card title="Linked client models" action={<button type="button" className="button-ghost button-small" disabled={busy} onClick={() => void load()}>Refresh</button>}>
+    <Card title="Linked client models" action={<button type="button" className="button-ghost button-small" disabled={busy || uncertainLink} onClick={() => void load()}>Refresh</button>}>
       {data.associations.length > 6 && <label className="viewer-native-search">Find a model<input type="search" value={query} maxLength={120} onChange={event => setQuery(event.target.value)} placeholder="Model, project or client" /></label>}
       {!data.associations.length ? <EmptyState title="No client models yet" detail={canManage ? "Link a ready model to a client project above." : "Models appear here once they're linked to a client project."} />
         : !associations.length ? <p>No linked models match “{query}”.</p>
