@@ -3,6 +3,8 @@
   "version": "0.2.0",
   "private": true,
   "scripts": {
+    "viewer:check": "npm --prefix apps/viewer run check && node --test scripts/viewer-monorepo-boundaries.test.mjs",
+    "viewer:build": "npm --prefix apps/viewer run build",
     "production:deploy": "node scripts/production-deploy.mjs",
     "production:deploy:test": "node --test scripts/production-deploy.test.mjs",
     "staging:two-source:check": "node scripts/staging-ops-two-source-connection-profile-v1.mjs --check",

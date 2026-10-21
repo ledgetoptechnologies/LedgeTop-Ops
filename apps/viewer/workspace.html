@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <link rel="icon" href="https://ledgetopdroneservices.com/images/DroneLogo01.webp" type="image/webp">
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>LTDS Viewer Workspace</title>
+  <link rel="stylesheet" href="/workspace.css">
+  <link rel="stylesheet" href="/workspace-management.css">
+  <link rel="stylesheet" href="/workspace-transfers.css">
+</head>
+<body>
+  <div id="workspace" class="workspace-shell">
+    <aside class="workspace-nav" aria-label="Viewer workspace">
+      <a class="workspace-brand" href="/workspace" aria-label="LTDS Viewer home">
+        <img class="brand-mark" src="https://ledgetopdroneservices.com/images/DroneLogo01.webp" alt="">
+        <span><strong>Ledge Top</strong><small>Viewer Workspace</small></span>
+      </a>
+      <nav id="workspace-navigation"></nav>
+      <div class="workspace-nav-foot">
+        <span class="health-dot" id="nav-health-dot"></span>
+        <span id="nav-health-label">Connecting</span>
+      </div>
+    </aside>
+    <main class="workspace-main">
+      <header class="workspace-header">
+        <button id="nav-toggle" class="icon-button" aria-label="Toggle navigation">☰</button>
+        <div><p class="eyebrow">3D data operations</p><h1 id="page-title">Dashboard</h1></div>
+        <div class="workspace-actions">
+          <button class="secondary-button background-work-indicator" id="background-work-button" aria-label="Open background work; 0 active jobs">
+            <span aria-hidden="true">↻</span><span>Background</span><strong id="background-work-count">0</strong>
+          </button>
+          <button class="secondary-button" id="refresh-button">Refresh</button>
+          <button class="primary-button" id="new-project-button">New project</button>
+        </div>
+      </header>
+      <section id="workspace-content" aria-live="polite"></section>
+    </main>
+  </div>
+  <dialog id="workspace-modal" class="workspace-modal" aria-labelledby="workspace-modal-title">
+    <div id="workspace-modal-content"></div>
+  </dialog>
+  <div id="workspace-toast" role="status"></div>
+  <script type="module" src="/workspace-projects.js"></script>
+</body>
+</html>

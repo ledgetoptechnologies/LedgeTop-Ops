@@ -1,0 +1,15 @@
+node_modules/
+dist/
+*.log
+.DS_Store
+.vite/
+
+# Large model data (served from separate asset servers, not needed in repo)
+public/models/
+public/3d-tiles/
+public/potree/
+public/basis/
+
+# Local server metadata store / derivatives cache and secrets
+data/
+.env

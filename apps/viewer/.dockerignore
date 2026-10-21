@@ -1,0 +1,17 @@
+node_modules
+dist
+data
+.git
+.env
+.env.*
+!.env.example
+.backups
+tmp
+.review_tmp
+.worktrees
+.vite
+*.log
+.DS_Store
+public/potree
+public/models
+public/3d-tiles

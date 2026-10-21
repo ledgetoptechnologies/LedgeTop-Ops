@@ -1,0 +1,74 @@
+{
+  "asset": {
+    "version": "1.0"
+  },
+  "geometricError": 2.8284271247461903,
+  "root": {
+    "transform": [
+      1.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      1.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      1.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      1.0
+    ],
+    "boundingVolume": {
+      "box": [
+        0.0,
+        -0.0,
+        0.0,
+        1.0,
+        0.0,
+        0.0,
+        0.0,
+        -1.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ]
+    },
+    "geometricError": 2.8284271247461903,
+    "refine": "REPLACE",
+    "content": {
+      "uri": "root.b3dm"
+    },
+    "children": [
+      {
+        "transform": null,
+        "boundingVolume": {
+          "box": [
+            0.0,
+            -0.0,
+            0.0,
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            -1.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ]
+        },
+        "geometricError": 0.0,
+        "refine": "REPLACE",
+        "content": {
+          "uri": "LOD-0/Mesh.b3dm"
+        },
+        "children": null
+      }
+    ]
+  }
+}

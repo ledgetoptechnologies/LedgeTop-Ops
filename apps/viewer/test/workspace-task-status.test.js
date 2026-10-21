@@ -1,0 +1,50 @@
+'use strict';
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+const crypto = require('node:crypto');
+const express = require('express');
+const auth = require('../server/auth');
+const { openDatabase } = require('../server/database');
+const { ViewerRepository } = require('../server/repository');
+const { ProcessingRepository } = require('../server/processingRepository');
+const { createProcessingApi } = require('../server/processingApi');
+
+test('task summary follows the active attempt while keeping newer failed history available', async t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'viewer-task-status-'));
+  const db = openDatabase(path.join(root, 'viewer.sqlite'));
+  const repository = new ViewerRepository(db), processing = new ProcessingRepository(db);
+  const project = processing.createProject({ displayName: 'Status fixture' });
+  const dataset = processing.createDataset({ projectId: project.id, displayName: 'Source', storageMode: 'managed', rootKey: 'datasets', relativePath: crypto.randomUUID() });
+  const hash = crypto.createHash('sha256').digest('hex');
+  processing.finalizeDataset(dataset.id, [{ relativePath: 'photo.jpg', byteSize: 0, sha256: hash }], hash);
+  const provider = processing.upsertProvider({ type: 'nodeodm', displayName: 'Fixture', endpoint: 'http://127.0.0.1:3000', enabled: true });
+  const task = processing.createTask({ projectId: project.id, datasetId: dataset.id, displayName: 'Recovered task' });
+  const first = processing.createAttempt({ taskId: task.id, providerId: provider.id });
+  processing.transitionAttempt(first.id, 'failed');
+  const later = processing.createAttempt({ taskId: task.id, providerId: provider.id });
+  processing.transitionAttempt(later.id, 'failed');
+  // Model a recovered task whose authoritative active attempt is not the highest attempt number.
+  processing.transitionAttempt(first.id, 'ready_for_review');
+  db.prepare("UPDATE processing_tasks SET active_attempt_id=?,status='ready_for_review' WHERE id=?").run(first.id, task.id);
+  const token = 'task-status-read-only-test-token-0000000000';
+  processing.createAdminSession({ tokenHash: auth.hashToken(token), subject: 'ops:fixture', permissions: ['viewer.processing.read'], displayUnits: 'imperial', expiresAt: new Date(Date.now() + 60000).toISOString() });
+  const app = express(); app.use(createProcessingApi({ repository, processing, storage: {} }));
+  const server = await new Promise(resolve => { const listener = app.listen(0, '127.0.0.1', () => resolve(listener)); });
+  t.after(async () => { await new Promise(resolve => server.close(resolve)); db.close(); fs.rmSync(root, { recursive: true, force: true }); });
+  const base = `http://127.0.0.1:${server.address().port}/api/v1/tasks`;
+  const read = async suffix => { const response = await fetch(base + suffix, { headers: { authorization: `Bearer ${token}` } }); assert.equal(response.status, 200); return response.json(); };
+  const list = await read(''), detail = await read(`/${task.id}`), history = await read(`/${task.id}/attempts`);
+  assert.equal(list.tasks[0].latestAttempt.id, first.id);
+  assert.equal(detail.task.latestAttempt.id, first.id);
+  assert.equal(detail.task.metrics.processingStatus, 'ready_for_review');
+  assert.equal(detail.task.metrics.averageGsdM, null, 'missing authoritative metrics stay unavailable');
+  assert.ok(history.attempts.some(item => item.id === later.id && item.status === 'failed'));
+  // A genuinely failed active attempt must not be hidden by the presence of an older ready attempt.
+  db.prepare("UPDATE processing_tasks SET active_attempt_id=?,status='failed' WHERE id=?").run(later.id, task.id);
+  assert.equal((await read(`/${task.id}`)).task.metrics.processingStatus, 'failed');
+  db.prepare('UPDATE processing_tasks SET active_attempt_id=NULL WHERE id=?').run(task.id);
+  assert.equal((await read(`/${task.id}`)).task.latestAttempt.id, later.id, 'legacy tasks without an active pointer fall back to the latest attempt');
+});

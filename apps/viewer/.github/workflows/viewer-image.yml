@@ -1,0 +1,249 @@
+name: Viewer image
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+    tags: ["v*"]
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: viewer-image-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify-and-build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v6
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run checks
+        run: npm run check
+
+      - name: Normalize image name
+        id: image
+        shell: bash
+        run: echo "name=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+
+      - name: Set isolated candidate reference
+        id: candidate
+        shell: bash
+        run: echo "ref=${{ steps.image.outputs.name }}:candidate-${GITHUB_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_OUTPUT"
+
+      - name: Generate image metadata
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ steps.image.outputs.name }}
+          # metadata-action's automatic semver flavor otherwise emits
+          # `latest` for version tags even when the explicit raw tag is off.
+          flavor: |
+            latest=false
+          tags: |
+            type=sha,prefix=sha-
+            type=ref,event=tag
+            type=raw,value=latest,enable=${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+
+      - name: Log in to GitHub Container Registry
+        if: github.event_name == 'push'
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build isolated candidate
+        id: build
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          build-args: |
+            VIEWER_SOURCE_COMMIT=${{ github.sha }}
+          push: ${{ github.event_name == 'push' }}
+          load: ${{ github.event_name == 'pull_request' }}
+          tags: ${{ steps.candidate.outputs.ref }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          # Docker's local image store cannot retain attestation manifests. Push
+          # candidates keep full provenance/SBOM; PR candidates are loaded only
+          # for the identical runtime verification below.
+          provenance: ${{ github.event_name == 'push' }}
+          sbom: ${{ github.event_name == 'push' }}
+
+      - name: Verify exact candidate image
+        id: verify
+        shell: bash
+        env:
+          CANDIDATE_IMAGE: ${{ steps.candidate.outputs.ref }}
+          IMAGE_NAME: ${{ steps.image.outputs.name }}
+          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+          EXPECTED_REVISION: ${{ github.sha }}
+          EXPECTED_SCHEMA_VERSION: "38"
+          EXPECTED_OBJ2TILES_VERSION: "1.6.2"
+          EXPECTED_OBJ2TILES_SOURCE_SHA256: "79093e12f6eab2cfcd522aebe670892c5d8874e160956b84f3e55c77b94ac0b5"
+          EXPECTED_OBJ2TILES_PATCH_SHA256: "6d5d99ea1d1e36208e44d0456d35cb0d8c68092dfd4a6ad01288bf85bb67322b"
+          EXPECTED_POTREE_VERSION: "1.8.2"
+        run: |
+          set -euo pipefail
+          [[ "$EXPECTED_REVISION" =~ ^[0-9a-f]{40}$ ]]
+          if [[ "$GITHUB_EVENT_NAME" == "push" ]]; then
+            [[ "$IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+            CANDIDATE_DIGEST="$(docker buildx imagetools inspect "$CANDIDATE_IMAGE" --format '{{json .Manifest.Digest}}' | tr -d '"')"
+            test "$CANDIDATE_DIGEST" = "$IMAGE_DIGEST"
+            VERIFY_IMAGE="$IMAGE_NAME@$IMAGE_DIGEST"
+            docker pull "$VERIFY_IMAGE"
+          else
+            VERIFY_IMAGE="$CANDIDATE_IMAGE"
+            docker image inspect "$VERIFY_IMAGE" >/dev/null
+          fi
+          test "$(docker inspect --format '{{.Config.User}}' "$VERIFY_IMAGE")" = "568:568"
+          test "$(docker inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$VERIFY_IMAGE")" = "$EXPECTED_REVISION"
+          docker run --rm --entrypoint sh -e EXPECTED_REVISION="$EXPECTED_REVISION" "$VERIFY_IMAGE" -c \
+            'test "$(cat /app/source-commit.txt)" = "$EXPECTED_REVISION" && test "$(stat -c %a /app/source-commit.txt)" = 444'
+            docker run --rm --entrypoint sh -e EXPECTED_OBJ2TILES_VERSION="$EXPECTED_OBJ2TILES_VERSION" "$VERIFY_IMAGE" -c \
+              '/opt/obj2tiles/Obj2Tiles --version 2>&1 | grep -F "$EXPECTED_OBJ2TILES_VERSION" >/dev/null'
+            docker run --rm --network none --entrypoint node "$VERIFY_IMAGE" -e '
+              const assert=require("node:assert/strict"),fs=require("node:fs"),child=require("node:child_process");
+              const receipt=JSON.parse(fs.readFileSync("/opt/poisson/build-info.json","utf8"));
+              assert.equal(receipt.sourceCommit,"262b0f539d404057d1f36e1adc07fc9388678899");
+              assert.equal(receipt.sourceSha256,"4a07ad091a63cc8403c57a8906b97b41d07c2fd87aa8aad0e7680dac20c4dcd5");
+              assert.equal(receipt.patchSha256,"9ecff362ba0dba772d1969b415768ecc5503aba3f2dc5e18d2d101834ba9272c");
+              assert.equal(receipt.precision,"double");assert.equal(receipt.threads,2);
+              assert.equal(require("./server/measurementReconstructionSupport").reconstructionAvailable(),true);
+              assert.equal(require("./server/measurementReconstructionSupport").reconstructionAvailable({measurementPoissonBin:"/unavailable"}),false);
+              const smoke=child.spawnSync("/opt/poisson/PoissonRecon",[],{encoding:"utf8",timeout:10000});
+              assert.ok(!smoke.error);assert.match(smoke.stdout+smoke.stderr,/Usage:/);
+            '
+            # Only tests are mounted; all numerical engines, private APIs and
+            # native libraries are exercised from the exact built runtime.
+            docker run --rm --network none --entrypoint node \
+              -e POTREE_BUNDLE=/app/dist/potree/build/potree/potree.js \
+              -v "$PWD/test:/app/test:ro" "$VERIFY_IMAGE" --test \
+              test/potree-visibility-patch.test.mjs \
+              test/measurement-volume.test.mjs \
+            test/measurement-native-raster.test.mjs \
+            test/measurement-worker-transport.test.js \
+            test/measurement-unit-evidence.test.mjs \
+            test/measurement-delaunay-reference.test.mjs \
+            test/measurement-delaunay-frozen-review.test.mjs \
+              test/measurement-raster-transect.test.mjs \
+              test/measurement-point-surface.test.mjs \
+              test/measurement-ept-crs.test.mjs \
+              test/measurement-ept-vertical-units.test.mjs \
+              test/measurement-point-encoded-units.test.mjs \
+              test/measurement-point-transect-request.test.js \
+              test/ephemeral-point-measurements.test.js \
+              test/measurement-closed-mesh.test.mjs \
+              test/measurement-reconstruction.test.mjs \
+              test/measurement-calculation-jobs.test.js \
+              test/measurement-transect-jobs.test.js \
+              test/measurement-private-api.test.js
+          docker run --rm --entrypoint node \
+            -e EXPECTED_OBJ2TILES_SOURCE_SHA256="$EXPECTED_OBJ2TILES_SOURCE_SHA256" \
+            -e EXPECTED_OBJ2TILES_PATCH_SHA256="$EXPECTED_OBJ2TILES_PATCH_SHA256" \
+            "$VERIFY_IMAGE" -e '
+              const crypto=require("node:crypto"),fs=require("node:fs");
+              const info=JSON.parse(fs.readFileSync("/opt/obj2tiles/build-info.json","utf8"));
+              const binary=crypto.createHash("sha256").update(fs.readFileSync("/opt/obj2tiles/Obj2Tiles")).digest("hex");
+              if(info.schemaVersion!==1||info.sourceVersion!=="v1.6.2"||info.sourceSha256!==process.env.EXPECTED_OBJ2TILES_SOURCE_SHA256||info.patchSha256!==process.env.EXPECTED_OBJ2TILES_PATCH_SHA256||info.binarySha256!==binary)process.exit(1);
+            '
+          docker run --rm "$VERIFY_IMAGE" node scripts/verify-obj2tiles-runtime.mjs
+          docker run --rm --network none "$VERIFY_IMAGE" node scripts/verify-potree-visibility.mjs /app/dist/potree/build/potree/potree.js
+          docker run --rm --entrypoint node "$VERIFY_IMAGE" -e '
+            const fs=require("node:fs");
+            const file="/app/dist/potree/build/potree/potree.js";
+            const source=fs.readFileSync(file,"utf8");
+            const start=source.indexOf("class EptLoader");
+            const end=source.indexOf("class CopcLoader",start+1);
+            const shared="new Potree.PointCloudCopcGeometryNode(geometry)";
+            const nonexistent="new Potree.PointCloudEptGeometryNode(geometry)";
+            if(start<0||end<=start)process.exit(2);
+            const block=source.slice(start,end);
+            if((block.split(shared).length-1)!==1||source.includes(nonexistent)||!source.slice(end).includes(shared))process.exit(3);
+            const route=source.indexOf("isFullFile ?");
+            const lazRs=source.indexOf("EptLazRsDecoderWorker.js",route);
+            const legacy=source.indexOf("EptLaszipDecoderWorker.js",route);
+            const moduleFactory="url.endsWith(\"/EptLazRsDecoderWorker.js\") ? {type: \"module\"} : undefined";
+            const decodedPointCount="Number.isSafeInteger(e.data.pointCount) && e.data.pointCount > 0 ? e.data.pointCount : pointCount";
+            if(route<0||lazRs<route||legacy<lazRs||!source.includes(moduleFactory)||!source.includes(decodedPointCount))process.exit(4);
+            const workerDirectory="/app/dist/potree/build/potree/workers";
+            const workerFile=`${workerDirectory}/EptLazRsDecoderWorker.js`;
+            const workerSource=fs.readFileSync(workerFile,"utf8");
+            const relativeWasmReference=/new URL\(`laz_rs_wasm_bg-[^`]+\.wasm`,import\.meta\.url\)/.test(workerSource);
+            if(!workerSource.includes("EPT LAZ-RS decode failed")||workerSource.includes("data:application/wasm;base64,")||workerSource.length<10000||!relativeWasmReference)process.exit(5);
+            const wasm=fs.readdirSync(workerDirectory).filter((name)=>/^laz_rs_wasm_bg-.*\.wasm$/.test(name));
+            if(wasm.length!==1||fs.statSync(`${workerDirectory}/${wasm[0]}`).size<1000)process.exit(6);
+          '
+          VIEWER_SCHEMA_VERSION="$(docker run --rm --entrypoint node "$VERIFY_IMAGE" -e '
+            const {openDatabase}=require("./server/database");
+            const db=openDatabase("/tmp/release-attestation.sqlite");
+            try{process.stdout.write(String(db.prepare("SELECT MAX(version) AS version FROM schema_migrations").get().version));}
+            finally{db.close();}
+          ')"
+          test "$VIEWER_SCHEMA_VERSION" = "$EXPECTED_SCHEMA_VERSION"
+          echo "schema-version=$VIEWER_SCHEMA_VERSION" >> "$GITHUB_OUTPUT"
+          printf 'Verified candidate image `%s`\n' "$VERIFY_IMAGE" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Promote verified digest to release tags
+        if: github.event_name == 'push'
+        shell: bash
+        env:
+          FINAL_TAGS: ${{ steps.meta.outputs.tags }}
+          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+          PUBLISHED_IMAGE: ${{ steps.image.outputs.name }}@${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          test -n "$FINAL_TAGS"
+          while IFS= read -r tag; do
+            test -n "$tag" || continue
+            docker buildx imagetools create --tag "$tag" "$PUBLISHED_IMAGE"
+            PROMOTED_DIGEST="$(docker buildx imagetools inspect "$tag" --format '{{json .Manifest.Digest}}' | tr -d '"')"
+            test "$PROMOTED_DIGEST" = "$IMAGE_DIGEST"
+          done <<< "$FINAL_TAGS"
+
+      - name: Write verified release attestation
+        if: github.event_name == 'push'
+        shell: bash
+        env:
+          IMAGE_NAME: ${{ steps.image.outputs.name }}
+          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+          PUBLISHED_IMAGE: ${{ steps.image.outputs.name }}@${{ steps.build.outputs.digest }}
+          EXPECTED_REVISION: ${{ github.sha }}
+          EXPECTED_SCHEMA_VERSION: "38"
+          EXPECTED_OBJ2TILES_VERSION: "1.6.2"
+          EXPECTED_POTREE_VERSION: "1.8.2"
+          VIEWER_SCHEMA_VERSION: ${{ steps.verify.outputs.schema-version }}
+        run: |
+          set -euo pipefail
+          node scripts/write-image-attestation.mjs viewer-image-attestation.json
+          sha256sum viewer-image-attestation.json > viewer-image-attestation.json.sha256
+          printf 'Promoted verified immutable image `%s`\n\n' "$PUBLISHED_IMAGE" >> "$GITHUB_STEP_SUMMARY"
+          printf 'Release attestation SHA-256: `%s`\n' "$(cut -d' ' -f1 viewer-image-attestation.json.sha256)" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload release attestation
+        if: github.event_name == 'push'
+        uses: actions/upload-artifact@v6
+        with:
+          name: viewer-image-attestation-${{ github.sha }}
+          path: |
+            viewer-image-attestation.json
+            viewer-image-attestation.json.sha256
+          if-no-files-found: error
+          retention-days: 90

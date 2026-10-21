@@ -1,0 +1,44 @@
+{
+  "name": "ltds-3d-viewer",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "scripts": {
+    "postinstall": "node scripts/patch-3d-tiles-renderer.mjs && node scripts/install-basis-transcoder.mjs",
+    "test": "vite build && node --test --test-concurrency=1 \"test/*.test.js\" \"test/*.test.mjs\"",
+    "dev": "vite --host 0.0.0.0 --port 8080",
+    "build": "vite build",
+    "preview": "vite preview --host 0.0.0.0 --port 8080",
+    "server": "node server/index.js",
+    "check": "npm test",
+    "audit:lod": "node scripts/audit-lod-equivalence.mjs",
+    "validate:lod": "node scripts/validate-lod.mjs",
+    "verify:production": "node scripts/production-readiness.mjs",
+    "verify:odm-provider": "node scripts/verify-odm-provider.mjs",
+    "verify:processing-scale": "node scripts/processing-scale-rehearsal.js",
+    "start": "npm run build && npm run server"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@loaders.gl/core": "^4.3.4",
+    "@loaders.gl/las": "^4.3.4",
+    "3d-tiles-renderer": "0.5.1",
+    "cookie": "^0.7.1",
+    "delaunator": "5.0.1",
+    "draco3d": "^1.5.7",
+    "express": "^4.19.2",
+    "geotiff": "^3.0.5",
+    "leaflet": "^1.9.4",
+    "three": "0.185.1",
+    "three-mesh-bvh": "^0.9.14",
+    "unzipper": "^0.12.3"
+  },
+  "devDependencies": {
+    "vite": "^8.2.1"
+  }
+}

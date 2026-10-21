@@ -1,0 +1,58 @@
+.measurement-report { box-sizing: border-box; width: min(1000px, 96vw); max-width: 96vw; max-height: 94vh; padding: 0; border: 0; border-radius: 10px; background: #fff; color: #172334; }
+.measurement-report .measurement-report-toolbar { position: sticky; top: 0; z-index: 1; display: flex; flex-wrap: wrap; gap: 10px; align-items: center; padding: 14px 24px; background: #edf2f6; border-bottom: 1px solid #d3dde5; }
+.measurement-report-toolbar label { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; }
+.measurement-report .measurement-report-document { padding: 28px 36px; font: 13px/1.45 Arial, sans-serif; }
+.measurement-report-header { border-top: 5px solid #ee5007; padding-top: 12px; margin-bottom: 20px; }
+.measurement-report-brand { color: #a93606; font-size: 12px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; }
+.measurement-report-brand span { margin-left: 12px; color: #546576; font-weight: 400; }
+.measurement-report h1 { margin: 15px 0 4px; font-size: 28px; line-height: 1.15; color: #172334; }
+.measurement-report-model { margin: 0 0 6px; font-size: 18px; font-weight: 600; overflow-wrap: anywhere; }
+.measurement-report-meta { margin: 0; color: #546576; font-size: 11px; }
+.measurement-report h2 { margin: 20px 0 10px; font-size: 17px; break-after: avoid; }
+.measurement-report h2 span { display: inline-block; margin-left: 8px; color: #546576; font-size: 11px; font-weight: normal; }
+.measurement-report .measurement-report-figure { margin: 0 0 18px; break-inside: avoid; }
+.measurement-report-figure figcaption { display: flex; flex-wrap: wrap; gap: 4px 12px; margin: 0 0 6px; font-size: 11px; color: #546576; }
+.measurement-report-figure figcaption strong { color: #172334; }
+.measurement-report .measurement-report-figure img { display: block; width: 100%; height: auto; max-height: 265px; object-fit: contain; background: #f4f6f8; border: 1px solid #d3dde5; }
+.measurement-report [hidden] { display: none !important; }
+.measurement-report table { width: 100%; border-collapse: collapse; table-layout: fixed; font-size: 11px; margin: 0; }
+.measurement-report-name-col { width: 31%; }
+.measurement-report th, .measurement-report td { padding: 9px 8px; border: 0; border-bottom: 1px solid #d3dde5; text-align: left; vertical-align: top; overflow-wrap: anywhere; }
+.measurement-report thead th { background: #edf2f6; color: #33475a; font-size: 10px; font-weight: 700; }
+.measurement-report tbody th { font-weight: 600; }
+.measurement-report small { display: block; margin-top: 3px; font-size: 9px; color: #546576; font-weight: normal; }
+.measurement-report-number { color: #a93606; }
+.measurement-report-notes { margin-top: 10px; font-size: 9px; color: #546576; }
+.measurement-report-notes p { margin: 5px 0; }
+.measurement-report-appendix { border-top: 1px solid #b7c7d3; margin-top: 24px; }
+.measurement-report-detail { padding-bottom: 12px; border-bottom: 1px solid #d3dde5; }
+.measurement-report-detail h3 { margin: 14px 0 8px; font-size: 13px; break-after: avoid; }
+.measurement-report-detail dl { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 18px; margin: 0; font-size: 10px; }
+.measurement-report-detail dl div { display: grid; grid-template-columns: 115px 1fr; gap: 8px; }
+.measurement-report-detail dt { color: #546576; }
+.measurement-report-detail dd { margin: 0; overflow-wrap: anywhere; }
+.measurement-report-calculation { font-size: 10px; white-space: pre-line; overflow-wrap: anywhere; }
+.measurement-report-edges { font-size: 9px; color: #546576; overflow-wrap: anywhere; }
+.measurement-report-warning { color: #714e12; font-size: 11px; }
+@media print {
+  @page { margin: 13mm 14mm; }
+  html:has(dialog.measurement-report[open]), body:has(dialog.measurement-report[open]) { height: auto !important; overflow: visible !important; background: white !important; }
+  dialog.measurement-report[open] { position: static !important; width: 100% !important; max-width: none !important; height: auto !important; max-height: none !important; margin: 0 !important; padding: 0 !important; overflow: visible !important; border: 0 !important; border-radius: 0; box-shadow: none; }
+  .measurement-report .measurement-report-toolbar { display: none !important; }
+  .measurement-report .measurement-report-document { padding: 0; font-size: 10pt; }
+  .measurement-report-header { margin-bottom: 4mm; padding-top: 2mm; }
+  .measurement-report h1 { font-size: 23pt; margin-top: 3mm; }
+  .measurement-report-model { font-size: 14pt; }
+  .measurement-report .measurement-report-figure { margin-bottom: 4mm; }
+  .measurement-report .measurement-report-figure img { max-height: 63mm; width: 100%; height: auto; object-fit: contain; }
+  .measurement-report table { font-size: 8pt; }
+  .measurement-report th, .measurement-report td { padding: 2mm 1.6mm; }
+  .measurement-report thead { display: table-header-group; }
+  .measurement-report tr { break-inside: avoid; }
+  .measurement-report tbody tr:last-child { break-after: avoid; }
+  .measurement-report-notes { break-before: avoid; break-inside: avoid; font-size: 7pt; }
+  .measurement-report-appendix { break-before: page; margin-top: 0; border-top: 0; }
+  .measurement-report-detail dl { break-inside: avoid; }
+  .measurement-report-detail { break-inside: avoid; }
+  .measurement-report-detail p { orphans: 3; widows: 3; }
+}

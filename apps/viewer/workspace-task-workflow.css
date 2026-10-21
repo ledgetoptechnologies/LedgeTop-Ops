@@ -1,0 +1,22 @@
+.task-transfer-tray{position:fixed;right:20px;bottom:20px;z-index:80;width:min(390px,calc(100vw - 40px));padding:16px;border:1px solid var(--orange,#ee5007);border-radius:12px;background:#15181d;color:var(--text,#fff);box-shadow:0 8px 32px #0008;overflow-wrap:anywhere}
+.task-transfer-tray p{font-size:13px;line-height:1.5;color:var(--muted,#c0c5cf)}
+.task-transfer-tray progress{display:block;width:100%;height:8px;margin:12px 0;accent-color:var(--orange,#ee5007)}
+.task-transfer-tray progress[hidden]{display:none}
+.task-transfer-tray button,.new-task-form [data-edit-options],.new-task-form [data-preset-open],.new-task-form [data-preset-save] button,.new-task-form [data-background]{min-height:40px;padding:8px 14px;border:1px solid var(--border,#444);border-radius:8px;background:#252932;color:var(--text,#fff);cursor:pointer}
+.new-task-form [data-preset-save][hidden]{display:none}
+.new-task-form [data-preset-save]{display:grid;gap:12px}
+.new-task-form [data-preset-status]{margin:0;font-size:13px}
+.new-task-form [data-progress]{height:10px;border-radius:8px}
+.new-task-form [data-status]{font-variant-numeric:tabular-nums;line-height:1.5}
+.task-panel:has(.task-more-actions[open]){overflow:visible;position:relative;z-index:3}
+.project-row.selected:has(.task-more-actions[open]){overflow:visible;position:relative;z-index:3}
+.task-more-actions .project-more-menu{min-width:220px;max-width:calc(100vw - 48px)}
+.task-more-actions .project-more-menu button{min-height:44px;white-space:normal}
+.task-page-navigation{display:flex;flex-wrap:wrap;gap:8px;margin-top:16px}
+.public-share-first{grid-template-columns:minmax(0,1.4fr) minmax(0,1fr)}
+.authenticated-share-options{border:1px solid var(--border);border-radius:10px;padding:14px}
+.authenticated-share-options>summary{cursor:pointer;color:var(--muted);line-height:1.5}
+.authenticated-share-options>summary:focus-visible{outline:2px solid var(--orange);outline-offset:4px}
+.authenticated-share-options>.content-card{margin-top:14px}
+@media(max-width:1000px){.public-share-first{grid-template-columns:1fr}}
+@media(max-width:720px){.task-quick-actions{display:flex;flex-wrap:wrap}.task-quick-actions>button{flex:1 1 auto;width:auto}.task-quick-actions>.task-more-actions{margin-left:auto}.task-more-actions>summary{height:44px}}

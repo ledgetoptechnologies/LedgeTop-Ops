@@ -1,0 +1,5 @@
+services:
+  viewer-api:
+    image: ${VIEWER_ROLLBACK_IMAGE:?VIEWER_ROLLBACK_IMAGE is required for rollback}
+  viewer-worker:
+    image: ${VIEWER_ROLLBACK_IMAGE:?VIEWER_ROLLBACK_IMAGE is required for rollback}

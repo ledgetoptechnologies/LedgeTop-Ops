@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>LTDS 3D Viewer — Sign In</title>
+<style>
+  :root { --brand-orange: #EE5007; --brand-gold: #F8CB2E; }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    display: flex; align-items: center; justify-content: center;
+    background: #0a0a0c; color: #f5f5f5;
+    font-family: 'Outfit', system-ui, sans-serif;
+  }
+  form {
+    width: 320px; max-width: 90vw; padding: 28px;
+    background: rgba(14,14,18,0.96); border: 1px solid rgba(238,80,7,0.28);
+    border-radius: 12px; box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+  }
+  h1 { font-size: 16px; margin: 0 0 4px; color: #fff; }
+  p.sub { font-size: 12px; color: #888; margin: 0 0 20px; }
+  input[type=password] {
+    width: 100%; padding: 10px 12px; margin-bottom: 12px;
+    background: #1a1a20; border: 1px solid rgba(255,255,255,0.15); border-radius: 8px;
+    color: #eee; font-size: 14px; font-family: inherit;
+  }
+  button {
+    width: 100%; padding: 10px; border: none; border-radius: 8px;
+    background: linear-gradient(135deg, var(--brand-orange), #c73a0a); color: #fff;
+    font-weight: 700; font-size: 14px; cursor: pointer; font-family: inherit;
+  }
+  button:disabled { opacity: 0.6; cursor: default; }
+  #msg { min-height: 18px; margin-top: 10px; font-size: 12px; color: #ff8080; }
+</style>
+</head>
+<body>
+<form id="login-form">
+  <h1>LTDS 3D Viewer</h1>
+  <p class="sub">Sign in to manage projects and share links.</p>
+  <input type="password" id="password" name="password" placeholder="Password" autofocus required>
+  <button type="submit" id="submit-btn">Sign In</button>
+  <div id="msg"></div>
+</form>
+<script>
+  const form = document.getElementById('login-form');
+  const msg = document.getElementById('msg');
+  const btn = document.getElementById('submit-btn');
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    msg.textContent = '';
+    btn.disabled = true;
+    try {
+      const res = await fetch('/api/admin/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ password: document.getElementById('password').value }),
+      });
+      if (res.ok) {
+        location.reload();
+        return;
+      }
+      const body = await res.json().catch(() => ({}));
+      msg.textContent = res.status === 429
+        ? 'Too many attempts — please wait a few minutes.'
+        : (body.error || 'Sign-in failed.');
+    } catch (err) {
+      msg.textContent = 'Could not reach the server.';
+    }
+    btn.disabled = false;
+  });
+</script>
+</body>
+</html>

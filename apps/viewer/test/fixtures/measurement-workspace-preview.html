@@ -1,0 +1,20 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Local measurement interaction fixture</title><style>body{margin:0;background:#11141a;color:#eee;font:14px sans-serif}header{padding:12px}button{padding:8px;background:#282d34;color:white;border:1px solid #555;border-radius:6px}main{display:flex}aside{width:310px;max-height:85vh;overflow:auto;padding:14px}#viewport{width:850px;height:600px;position:relative;background:#16212c}canvas{width:850px;height:600px}.hint{color:#b3bdcd;font-size:12px}</style></head><body><header><button data-mode="model">3D Model</button><button data-mode="cloud">Point Cloud</button><button data-mode="ortho">Orthophoto</button><button data-mode="dsm">DSM</button><button data-mode="dtm">DTM</button><output id="mode">model</output></header><main><aside id="panel-measure"><h2>Measurements</h2><button data-tool="distance">Distance</button><button data-tool="area">Polygon</button></aside><div id="viewport"><canvas width="850" height="600" aria-label="Synthetic measurement surface" tabindex="0"></canvas></div></main><output id="navigation">Navigation moves: 0</output><script type="module">
+import {createMeasurementWorkspace} from '/measurement-workspace.mjs';
+import {calculateBrowserSurface} from '/measurement-browser-surface.mjs';
+const host=document.querySelector('#viewport'),canvas=host.querySelector('canvas'),ctx=canvas.getContext('2d');
+let mode='model',moves=0;
+function paint(){ctx.fillStyle='#16212c';ctx.fillRect(0,0,850,600);ctx.strokeStyle='#446';for(let x=0;x<850;x+=50){ctx.beginPath();ctx.moveTo(x,0);ctx.lineTo(x,600);ctx.stroke();}for(let y=0;y<600;y+=50){ctx.beginPath();ctx.moveTo(0,y);ctx.lineTo(850,y);ctx.stroke();}ctx.fillStyle='#54646f';ctx.fillRect(300,210,220,130);ctx.fillStyle='white';ctx.fillText('Synthetic native raster: 2 m above a zero reference',285,185);}
+paint();
+const workspace=createMeasurementWorkspace({
+  panel:document.querySelector('#panel-measure'),
+  context:()=>({mode,element:canvas,host,
+    pick:e=>{const r=canvas.getBoundingClientRect();return[(e.clientX-r.left)/10,(600-e.clientY+r.top)/10,0];},
+    project:p=>[p[0]*10,600-p[1]*10],
+    capture:async()=>{paint();const copy=document.createElement('canvas');copy.width=850;copy.height=600;copy.getContext('2d').drawImage(canvas,0,0);return copy;}}),
+  token:()=>null,permitted:()=>true,coordinateReference:()=>({crs:'EPSG:32616',verticalUnit:'m'}),toLonLat:()=>[-87,43],
+  toolChanged:tool=>document.querySelector('#mode').textContent=`${mode} · ${tool}`,
+  calculateSurface:(record,{reference,signal})=>calculateBrowserSurface({vertices:record.vertices,reference,values:new Float64Array(85*60).fill(2),width:85,height:60,bounds:{minE:0,maxE:85,minN:0,maxN:60}},{signal}),
+});
+document.querySelectorAll('[data-tool]').forEach(button=>button.onclick=()=>workspace.setTool(button.dataset.tool));document.querySelectorAll('[data-mode]').forEach(button=>button.onclick=()=>{workspace.modeChanged();mode=button.dataset.mode;document.querySelector('#mode').textContent=mode;workspace.tick();});
+canvas.addEventListener('pointermove',e=>{if(e.buttons){moves++;document.querySelector('#navigation').textContent=`Navigation moves: ${moves}`;}});
+</script></body></html>

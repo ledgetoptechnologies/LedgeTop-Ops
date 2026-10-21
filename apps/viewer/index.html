@@ -1,0 +1,752 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <link rel="icon" href="https://ledgetopdroneservices.com/images/DroneLogo01.webp" type="image/webp">
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Ledge Top Drone Services — 3D Viewer</title>
+  <style>
+    :root {
+      --brand-orange: #EE5007;
+      --brand-gold: #F8CB2E;
+      --brand-dark: #0a0a0c;
+      --brand-panel: rgba(14,14,18,0.96);
+      --brand-text: #f5f5f5;
+      --brand-muted: #717275;
+      --panel-border: rgba(238,80,7,0.28);
+      --panel-hover: rgba(238,80,7,0.10);
+      --radius: 10px;
+      --shadow: 0 8px 32px rgba(0,0,0,0.5);
+      --font: 'Outfit', system-ui, sans-serif;
+      --accent-hover: #ff6a22;
+    }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: var(--brand-dark); color: #f5f5f5; font-family: var(--font); }
+    #app { position: fixed; inset: 0; display: flex; flex-direction: column; }
+    canvas { display: block; }
+
+    #topbar {
+      height: 60px; min-height: 60px;
+      background: linear-gradient(90deg, rgba(5,5,7,0.98), rgba(18,18,24,0.96));
+      border-bottom: 1px solid var(--panel-border);
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 0 18px; gap: 12px; z-index: 100;
+      box-shadow: var(--shadow);
+    }
+    #brand { display: flex; align-items: center; gap: 14px; min-width: 0; flex: 1; }
+    #brand img { height: 38px; width: auto; flex-shrink: 0; filter: drop-shadow(0 0 6px rgba(248,203,46,0.35)); }
+    #brand-info { display: flex; flex-direction: column; line-height: 1.15; min-width: 0; }
+    #brand-info span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    #brand-info .company { font-weight: 700; font-size: 16px; color: #fff; letter-spacing: 0.3px; }
+    #brand-info .project { font-weight: 400; font-size: 12px; color: var(--brand-orange); margin-top: 2px; }
+
+    #project-switcher {
+      margin-left: 6px; background: rgba(255,255,255,0.04); color: #eee;
+      border: 1px solid rgba(255,255,255,0.12); border-radius: 8px;
+      padding: 6px 10px; font-family: var(--font); font-size: 12px; font-weight: 600;
+      cursor: pointer; display: none;
+    }
+    #project-switcher:hover { border-color: var(--brand-orange); }
+
+    #view-tabs { display: flex; flex-shrink: 0; align-items: center; gap: 8px; background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.08); border-radius: 999px; padding: 4px; }
+    .tab-btn {
+      display: flex; align-items: center; gap: 7px;
+      padding: 8px 16px; border-radius: 999px; border: none;
+      background: transparent; color: #c0c0c0; font-family: var(--font); font-size: 13px; font-weight: 600;
+      cursor: pointer; transition: all 0.2s ease;
+    }
+    .tab-btn:hover { color: var(--brand-orange); background: var(--panel-hover); }
+    .tab-btn.active { background: linear-gradient(135deg, var(--brand-orange), #c73a0a); color: #fff; box-shadow: 0 4px 14px rgba(238,80,7,0.38); }
+    .tab-btn svg { width: 16px; height: 16px; fill: currentColor; }
+
+    #main { flex: 1; display: flex; min-height: 0; position: relative; }
+    #sidebar {
+      width: var(--sidebar-width,300px); min-width: var(--sidebar-width,300px); position:relative;
+      background: var(--brand-panel);
+      border-right: 1px solid var(--panel-border);
+      display: flex; flex-direction: column;
+      z-index: 90; overflow: hidden;
+      transition: transform 0.25s ease, width 0.25s ease;
+    }
+    #sidebar.collapsed { transform: translateX(-100%); width: 0; min-width: 0; }
+    #sidebar.resizing { transition:none; }
+    #sidebar-resize { position:absolute;right:0;top:0;bottom:0;width:7px;cursor:col-resize;touch-action:none;z-index:100;background:transparent; }
+    #sidebar-resize:hover,#sidebar-resize:focus-visible,#sidebar.resizing #sidebar-resize { background:var(--brand-orange);outline:none; }
+    #sidebar.collapsed #sidebar-resize { display:none; }
+
+    #sidebar-custom { padding: 14px; gap: 14px; display: flex; flex-direction: column; overflow-y: auto; }
+    .panel { background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.08); border-radius: var(--radius); padding: 14px; }
+    .panel h3 { font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.8px; color: var(--brand-orange); margin-bottom: 12px; display: flex; align-items: center; gap: 6px; }
+    .panel h3 svg { width: 14px; height: 14px; }
+    .tool-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    .tool-btn, .layer-btn {
+      display: flex; align-items: center; justify-content: center; gap: 6px;
+      padding: 9px; border-radius: 8px; border: 1px solid rgba(255,255,255,0.1);
+      background: rgba(255,255,255,0.03); color: #e0e0e0; font-family: var(--font); font-size: 12px; font-weight: 600;
+      cursor: pointer; transition: all 0.18s ease;
+    }
+    .tool-btn:hover, .layer-btn:hover { border-color: var(--brand-orange); color: var(--brand-orange); background: var(--panel-hover); }
+    .tool-btn.active, .layer-btn.active { background: rgba(238,80,7,0.18); border-color: var(--brand-orange); color: #fff; }
+    .tool-btn svg { width: 14px; height: 14px; }
+    [hidden] { display: none !important; }
+    body:has(#sidebar.collapsed) #sidebar-toggle { display: flex; }
+    .tool-btn.full, .layer-btn.full { grid-column: 1 / -1; }
+    .hint { font-size: 11px; color: var(--brand-muted); line-height: 1.45; }
+    .slider-row { display: flex; align-items: center; gap: 10px; margin-top: 10px; font-size: 12px; color: #c8c8c8; }
+    .slider-row input[type=range] { flex: 1; accent-color: var(--brand-orange); }
+    .pc-elevation-range { position: relative; height: 32px; margin: 2px 8px 8px; }
+    .pc-elevation-range::before { content: ''; position: absolute; top: 14px; left: 0; right: 0; height: 4px; border-radius: 4px; background: #45454a; }
+    .pc-elevation-range input[type=range] { appearance: none; -webkit-appearance: none; position: absolute; inset: 0; width: 100%; height: 32px; margin: 0; background: transparent; pointer-events: none; }
+    .pc-elevation-range input[type=range]::-webkit-slider-runnable-track { height: 4px; background: transparent; }
+    .pc-elevation-range input[type=range]::-moz-range-track { height: 4px; background: transparent; }
+    .pc-elevation-range input[type=range]::-webkit-slider-thumb { appearance: none; -webkit-appearance: none; width: 17px; height: 17px; margin-top: -6.5px; border: 2px solid white; border-radius: 50%; background: var(--brand-orange); pointer-events: auto; cursor: ew-resize; }
+    .pc-elevation-range input[type=range]::-moz-range-thumb { width: 13px; height: 13px; border: 2px solid white; border-radius: 50%; background: var(--brand-orange); pointer-events: auto; cursor: ew-resize; }
+    .pc-elevation-range input[type=range]:focus-visible { outline: 2px solid var(--brand-orange); outline-offset: 3px; border-radius: 4px; z-index: 3; }
+    .pc-elevation-range input[type=range]:disabled { opacity: .45; }
+     .slider-row select, .slider-row input[type=number] {
+       background: #1a1a20; color: #eee; border: 1px solid rgba(255,255,255,0.15);
+       border-radius: 6px; padding: 4px 6px; font-size: 12px; font-family: var(--font); flex: 1; min-width: 0;
+     }
+     .slider-row .val { min-width: 34px; text-align: right; color: var(--brand-muted); }
+    #measure-output {
+      margin-top: 10px; padding: 10px; border-radius: 8px; background: rgba(0,0,0,0.25);
+      font-size: 12px; color: #f5f5f5; min-height: 24px; line-height: 1.5;
+    }
+    #measure-output:empty { display: none; }
+    #measure-output .sub { color: var(--brand-muted); font-size: 11px; }
+    #measure-output b { color: var(--brand-gold); }
+
+    .navhelp { display: grid; grid-template-columns: auto 1fr; gap: 4px 10px; font-size: 11px; color: #c8c8c8; }
+    .navhelp .k { color: var(--brand-orange); font-weight: 700; white-space: nowrap; }
+
+    #viewer-wrap { flex: 1; position: relative; min-width: 0; background: #050505; }
+    #three-container, #leaflet-map, #cloud-container { position: absolute; inset: 0; display: none; }
+    /* isolate Leaflet's internal pane z-indexes (200-700) so app UI like the
+       DEM legend (z 120) isn't buried under map tiles */
+    #leaflet-map { z-index: 0; }
+    #leaflet-map.measuring { cursor: crosshair; }
+    .map-measure-label {
+      background: rgba(10,10,12,0.92); color: #fff; border: 1px solid var(--brand-orange);
+      box-shadow: 0 2px 8px rgba(0,0,0,0.5); font-weight: 700;
+    }
+    .map-measure-label::before { border-top-color: var(--brand-orange) !important; }
+    .tool-btn:disabled { cursor: not-allowed; opacity: 0.42; }
+    #labels-container { position: absolute; inset: 0; pointer-events: none; overflow: hidden; z-index: 60; }
+    #three-container canvas { position: absolute; inset: 0; touch-action: none; }
+    #three-container canvas.measuring {
+      cursor: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='25' height='25' viewBox='0 0 25 25'%3E%3Cpath d='M12.5 1v23M1 12.5h23' stroke='%23000' stroke-width='3'/%3E%3Cpath d='M12.5 1v23M1 12.5h23' stroke='%23EE5007' stroke-width='1.5'/%3E%3Ccircle cx='12.5' cy='12.5' r='2' fill='%23fff'/%3E%3C/svg%3E") 12 12, crosshair;
+    }
+
+    .mlabel {
+      background: rgba(10,10,12,0.88);
+      border: 1px solid var(--brand-orange);
+      color: #fff; font-family: var(--font); font-size: 12px; font-weight: 700;
+      padding: 3px 9px; border-radius: 7px; white-space: nowrap;
+      box-shadow: 0 2px 10px rgba(0,0,0,0.6);
+      pointer-events: none;
+    }
+    .mlabel.preview { border-color: rgba(255,255,255,0.4); color: #ddd; font-weight: 400; }
+
+    #cam-tooltip {
+      position: fixed; z-index: 300; display: none; pointer-events: none;
+      background: rgba(10,10,12,0.92); border: 1px solid var(--brand-orange);
+      color: #fff; font-size: 11px; padding: 4px 9px; border-radius: 6px;
+      font-family: ui-monospace, Menlo, monospace;
+    }
+
+    #statusbar {
+      height: 30px; min-height: 30px;
+      background: rgba(10,10,12,0.98);
+      border-top: 1px solid rgba(255,255,255,0.08);
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 0 14px; font-size: 11px; color: #999; z-index: 100;
+    }
+    #status-left, #status-right { display: flex; align-items: center; gap: 18px; }
+    .status-pill { display: flex; align-items: center; gap: 6px; padding: 3px 8px; border-radius: 6px; background: rgba(255,255,255,0.04); }
+    #fps { color: #4ade80; font-weight: 700; }
+    #coords { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--brand-orange); }
+
+    #loading-overlay {
+      position: absolute; inset: 0; display: flex; flex-direction: column;
+      align-items: center; justify-content: center; z-index: 200;
+      background: rgba(5,5,8,0.94); backdrop-filter: blur(10px);
+      transition: opacity 0.4s ease; pointer-events: none;
+    }
+    #loading-overlay.hidden { opacity: 0; }
+    .brand-loader { display: flex; flex-direction: column; align-items: center; gap: 14px; }
+    .spinner {
+      width: 56px; height: 56px; border-radius: 50%;
+      border: 4px solid rgba(238,80,7,0.12); border-top-color: var(--brand-orange);
+      animation: spin 1s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    #loading-text { color: #aaa; font-size: 13px; letter-spacing: 0.4px; }
+    #loading-progress { color: var(--brand-orange); font-size: 13px; font-weight: 700; min-height: 18px; }
+    #loading-cancel { display: none; pointer-events: auto; min-height: 40px; padding: 8px 14px; border-radius: 7px; border: 1px solid #ff8a65; background: #25252b; color: #fff; cursor: pointer; }
+
+    #floating-controls { position: absolute; top: 14px; right: 14px; z-index: 120; display: flex; gap: 8px; }
+    .icon-btn {
+      width: 38px; height: 38px; border-radius: 50%;
+      background: var(--brand-panel); border: 1px solid var(--panel-border);
+      color: #e0e0e0; display: flex; align-items: center; justify-content: center;
+      cursor: pointer; transition: all 0.2s ease; backdrop-filter: blur(8px);
+    }
+    .icon-btn:hover { border-color: var(--brand-orange); color: var(--brand-orange); background: var(--panel-hover); }
+    .icon-btn svg { width: 18px; height: 18px; }
+
+    #sidebar-toggle {
+      display: none; position: absolute; top: 74px; left: 14px; z-index: 95;
+      width: 38px; height: 38px; border-radius: 50%;
+      background: var(--brand-panel); border: 1px solid var(--panel-border);
+      color: var(--brand-orange); align-items: center; justify-content: center;
+      cursor: pointer; backdrop-filter: blur(8px);
+    }
+
+    #error-panel {
+      position: absolute; top: 50%; left: 50%; transform: translate(-50%,-50%);
+      z-index: 250; background: rgba(80,16,16,0.96); border: 1px solid #ff4444;
+      border-radius: var(--radius); padding: 22px 28px; max-width: 520px; text-align: center; display: none;
+      box-shadow: var(--shadow);
+    }
+    #error-panel h2 { color: #ff6666; font-size: 16px; margin-bottom: 8px; }
+    #error-panel p { color: #ddd; font-size: 13px; line-height: 1.5; }
+    #error-actions { display: none; justify-content: center; gap: 10px; margin-top: 16px; flex-wrap: wrap; }
+    #error-actions button { min-height: 40px; padding: 8px 14px; border-radius: 7px; border: 1px solid #ff8a65; cursor: pointer; }
+    #error-retry { background: #ee5007; color: #fff; }
+    #error-lod { background: #25252b; color: #fff; }
+
+    .leaflet-control-zoom a { background: var(--brand-panel) !important; color: #fff !important; border-color: var(--panel-border) !important; }
+    .leaflet-control-attribution { background: rgba(10,10,12,0.85) !important; color: #999 !important; }
+    .leaflet-control-attribution a { color: var(--brand-orange) !important; }
+    #dem-legend {
+      position: absolute; bottom: 44px; right: 14px; z-index: 120;
+      background: var(--brand-panel); border: 1px solid var(--panel-border);
+      border-radius: var(--radius); padding: 10px 12px; display: none;
+      flex-direction: column; gap: 6px; backdrop-filter: blur(8px);
+    }
+    #dem-legend canvas { width: 20px; height: 160px; border-radius: 4px; }
+    #dem-legend-labels { display: flex; flex-direction: column; justify-content: space-between; font-size: 10px; color: #ccc; height: 160px; }
+    #dem-hover {
+      position: absolute; bottom: 44px; left: 14px; z-index: 120;
+      background: var(--brand-panel); border: 1px solid var(--panel-border);
+      border-radius: var(--radius); padding: 8px 12px; font-size: 12px; color: #fff;
+      display: none; backdrop-filter: blur(8px); pointer-events: none;
+    }
+
+    /* Camera photo: nonblocking preview by default, expanded inspector on demand */
+    #photo-modal {
+      position: fixed; inset: 0; z-index: 400; display: none;
+      pointer-events: none;
+    }
+    #photo-frame {
+      position: absolute; display: flex; flex-direction: column; gap: 8px;
+      box-sizing: border-box; padding: 10px; pointer-events: auto;
+      color: #fff; background: var(--brand-panel); border: 1px solid var(--panel-border);
+      border-radius: 10px; box-shadow: 0 12px 40px rgba(0,0,0,0.65);
+    }
+    #photo-modal.docked #photo-frame {
+      top: 66px; right: 14px; max-width: calc(100vw - 28px); max-height: calc(100vh - 108px);
+    }
+    #photo-modal.expanded {
+      align-items: center; justify-content: center; pointer-events: auto;
+      background: rgba(0,0,0,0.88); backdrop-filter: blur(6px);
+    }
+    #photo-modal.expanded #photo-frame {
+      position: absolute; inset: 0; width: 100%; height: 100%; padding: 0;
+      max-width: none; max-height: none; border: 0; border-radius: 0; background: #080808;
+    }
+    #photo-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-width: 0; }
+    #photo-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; font-weight: 700; color: #fff; font-family: ui-monospace, Menlo, monospace; }
+    #photo-meta { flex-shrink: 0; text-align: right; font-size: 11px; color: var(--brand-muted); white-space: nowrap; }
+    #photo-modal.expanded #photo-header { position: absolute; bottom: 0; left: 0; right: 0; z-index: 4; padding: 18px 14px 12px; background: linear-gradient(transparent, rgba(0,0,0,.85)); pointer-events: none; }
+    #photo-imgwrap {
+      position: relative; display: flex; align-items: center; justify-content: center;
+      overflow: hidden; border-radius: 8px; background: #080808; touch-action: none;
+    }
+    #photo-modal.docked #photo-imgwrap { cursor: zoom-in; }
+    #photo-modal.expanded #photo-imgwrap.zoomed { cursor: grab; }
+    #photo-modal.expanded #photo-imgwrap { border-radius: 0; }
+    #photo-img {
+      flex: none; max-width: none; max-height: none; object-fit: contain;
+      border: 0;
+      box-sizing: border-box; transition: opacity 0.25s ease; background: #111;
+      user-select: none; -webkit-user-drag: none;
+    }
+    #photo-spinner {
+      position: absolute; width: 44px; height: 44px; border-radius: 50%;
+      border: 4px solid rgba(238,80,7,0.15); border-top-color: var(--brand-orange);
+      animation: spin 1s linear infinite; display: none;
+    }
+    #photo-empty {
+      display: none; align-items: center; justify-content: center;
+      width: 100%; height: 100%; min-height: 180px; padding: 24px; box-sizing: border-box;
+      border: 1px solid var(--panel-border); border-radius: 8px;
+      background: #111; color: var(--brand-muted); font-weight: 700;
+    }
+    #photo-actions { display: flex; gap: 10px; align-items: center; justify-content: space-between; }
+    #photo-modal.expanded #photo-actions { position: absolute; left: 12px; top: 12px; right: 58px; z-index: 4; justify-content: flex-start; }
+    #photo-download {
+      color: #fff; background: linear-gradient(135deg, var(--brand-orange), #c73a0a);
+      text-decoration: none; font-size: 12px; font-weight: 700;
+      padding: 8px 16px; border-radius: 8px;
+    }
+    #photo-close {
+      position: absolute; top: 6px; right: 6px; width: 30px; height: 30px;
+      border-radius: 50%; background: var(--brand-orange); color: #fff; border: none;
+      font-size: 18px; font-weight: 700; cursor: pointer; z-index: 5;
+      box-shadow: 0 4px 14px rgba(0,0,0,0.6);
+    }
+    .map-camera-marker { background: transparent; border: 0; }
+    .map-camera-marker svg { display: block; width: 100%; height: 100%; transform-origin: 50% 50%; filter: drop-shadow(0 2px 2px rgba(0,0,0,.75)); }
+
+    /* Admin-only topbar controls (Share / Log out) — hidden by default,
+       shown by main.js only in admin mode. */
+    #admin-controls { display: none; align-items: center; gap: 8px; }
+    .text-btn {
+      padding: 8px 14px; border-radius: 999px; border: 1px solid rgba(255,255,255,0.12);
+      background: rgba(255,255,255,0.04); color: #ddd; font-family: var(--font); font-size: 12px; font-weight: 600;
+      cursor: pointer; transition: all 0.18s ease;
+    }
+    .text-btn:hover { border-color: var(--brand-orange); color: var(--brand-orange); background: var(--panel-hover); }
+    .text-btn.primary { background: linear-gradient(135deg, var(--brand-orange), #c73a0a); border-color: transparent; color: #fff; }
+
+    /* Embed mode: minimal chrome — just the 3D viewport + floating controls */
+    body.embed-mode #topbar, body.embed-mode #sidebar, body.embed-mode #sidebar-toggle,
+    body.embed-mode #statusbar { display: none !important; }
+    body.view-mode #project-switcher, body.view-mode #admin-controls,
+    body.embed-mode #project-switcher, body.embed-mode #admin-controls,
+    body.project-mode #admin-controls { display: none !important; }
+
+    /* Share password prompt (view/embed/project modes) */
+    #share-password-overlay {
+      position: fixed; inset: 0; z-index: 500; display: none;
+      align-items: center; justify-content: center;
+      background: rgba(5,5,8,0.94); backdrop-filter: blur(8px);
+    }
+    #share-password-box {
+      width: 320px; max-width: 90vw; padding: 26px; text-align: center;
+      background: var(--brand-panel); border: 1px solid var(--panel-border);
+      border-radius: var(--radius); box-shadow: var(--shadow);
+    }
+    #share-password-box h2 { font-size: 15px; color: #fff; margin-bottom: 6px; }
+    #share-password-box p { font-size: 12px; color: var(--brand-muted); margin-bottom: 16px; }
+    #share-password-input {
+      width: 100%; padding: 9px 12px; margin-bottom: 10px;
+      background: #1a1a20; border: 1px solid rgba(255,255,255,0.15); border-radius: 8px;
+      color: #eee; font-size: 13px; font-family: var(--font);
+    }
+    #share-password-error { min-height: 16px; font-size: 11px; color: #ff8080; margin-bottom: 8px; }
+
+    /* Share management modal (admin mode) */
+    #share-modal {
+      position: fixed; inset: 0; z-index: 400; display: none;
+      align-items: center; justify-content: center;
+      background: rgba(0,0,0,0.72); backdrop-filter: blur(4px);
+    }
+    #share-modal-box {
+      width: 480px; max-width: 92vw; max-height: 86vh; overflow-y: auto;
+      background: var(--brand-panel); border: 1px solid var(--panel-border);
+      border-radius: var(--radius); box-shadow: var(--shadow); padding: 20px;
+      position: relative;
+    }
+    #share-modal-close {
+      position: absolute; top: 14px; right: 14px; background: none; border: none;
+      color: #999; font-size: 20px; cursor: pointer; line-height: 1;
+    }
+    #share-modal-box h2 { font-size: 15px; color: #fff; margin-bottom: 14px; }
+    #share-modal-box .panel { margin-bottom: 14px; }
+    #share-create-result {
+      display: none; margin-top: 12px; padding: 10px; border-radius: 8px;
+      background: rgba(74,222,128,0.1); border: 1px solid rgba(74,222,128,0.35); font-size: 12px;
+    }
+    #share-create-result .url-row { display: flex; align-items: center; gap: 8px; margin-top: 6px; }
+    #share-create-result input {
+      flex: 1; background: #10120f; border: 1px solid rgba(255,255,255,0.15); border-radius: 6px;
+      color: #cde; font-size: 11px; padding: 5px 7px; font-family: ui-monospace, monospace;
+    }
+    #share-links-list { display: flex; flex-direction: column; gap: 8px; }
+    .share-link-row {
+      display: flex; align-items: center; justify-content: space-between; gap: 10px;
+      padding: 9px 10px; border-radius: 8px; background: rgba(255,255,255,0.03); font-size: 11px; color: #ccc;
+    }
+    .share-link-row.revoked { opacity: 0.45; }
+    .share-link-row .meta { display: flex; flex-direction: column; gap: 2px; }
+    .share-link-row .revoke-btn {
+      background: none; border: 1px solid rgba(255,80,80,0.4); color: #ff8080;
+      border-radius: 6px; padding: 4px 8px; font-size: 11px; cursor: pointer;
+    }
+
+    @media (max-width: 1024px) {
+      /* Keep title and navigation in explicit rows before the full tabs squeeze
+         the brand into a tall stack. Truncation preserves the complete text. */
+      #topbar { display: grid; grid-template-columns: minmax(0, 1fr) auto; height: auto; padding: 8px 12px; gap: 8px 12px; }
+      #brand { grid-column: 1; grid-row: 1; }
+      #admin-controls { grid-column: 2; grid-row: 1; }
+      #view-tabs { grid-column: 1 / -1; grid-row: 2; justify-self: center; }
+      #sidebar { position: absolute; top: 0; left: 0; bottom: 0; height: 100%; width: var(--sidebar-width,300px); }
+      #sidebar-toggle { display: flex; }
+    }
+    @media (max-width: 640px) {
+      #topbar { height: auto; min-height: 54px; flex-wrap: wrap; gap: 10px; padding: 8px 12px; }
+      #brand img { height: 30px; }
+      #brand-info .company { font-size: 14px; }
+      .tab-btn { padding: 7px 10px; font-size: 11px; }
+      .tab-btn span { display: none; }
+      #statusbar { font-size: 10px; padding: 0 8px; }
+      #status-left, #status-right { gap: 8px; }
+      #photo-modal.docked #photo-frame { top: 112px; right: 8px; max-width: calc(100vw - 16px); max-height: calc(100vh - 154px); }
+      #photo-actions .hint { display: none; }
+    }
+  </style>
+</head>
+<body>
+<div id="app">
+  <header id="topbar">
+    <div id="brand">
+      <img src="https://ledgetopdroneservices.com/images/DroneLogo01.webp" alt="LTDS Logo">
+      <div id="brand-info">
+        <span class="company">Ledge Top Drone Services</span>
+        <span class="project" id="brand-project">Loading project…</span>
+      </div>
+      <select id="project-switcher" aria-label="Switch project"></select>
+    </div>
+    <nav id="view-tabs">
+      <button class="tab-btn active" data-mode="model" id="tab-model" aria-label="3D Model">
+        <svg viewBox="0 0 24 24"><path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/></svg>
+        <span>3D Model</span>
+      </button>
+      <button class="tab-btn" data-mode="cloud" id="tab-cloud" aria-label="Point Cloud">
+        <svg viewBox="0 0 24 24"><path d="M3 15a4 4 0 004 4h9a5 5 0 10-.1-9.999 5.002 5.002 0 10-9.78 2.096A4.001 4.001 0 003 15z"/></svg>
+        <span>Point Cloud</span>
+      </button>
+      <button class="tab-btn" data-mode="ortho" id="tab-ortho" aria-label="Orthophoto">
+        <svg viewBox="0 0 24 24"><path d="M9 20l-5.447-2.724A1 1 0 013 16.382V5.618a1 1 0 011.447-.894L9 7m0 13l6-3m-6 3V7m6 10l4.553 2.276A1 1 0 0021 18.382V7.618a1 1 0 00-.553-.894L15 4m0 13V4m0 0L9 7"/></svg>
+        <span>Orthophoto</span>
+      </button>
+      <button class="tab-btn" data-mode="dsm" id="tab-dsm" aria-label="DSM">
+        <svg viewBox="0 0 24 24"><path d="M3 20h18L14 10l-4 5-3-4-6 9z"/></svg>
+        <span>DSM</span>
+      </button>
+      <button class="tab-btn" data-mode="dtm" id="tab-dtm" aria-label="DTM">
+        <svg viewBox="0 0 24 24"><path d="M3 20h18L12 4 3 20z"/></svg>
+        <span>DTM</span>
+      </button>
+    </nav>
+    <div id="admin-controls">
+      <button class="text-btn primary" id="btn-share">Share</button>
+      <button class="text-btn" id="btn-logout">Log out</button>
+    </div>
+  </header>
+
+  <div id="main">
+    <aside id="sidebar">
+      <div id="sidebar-resize" role="separator" aria-label="Resize navigation sidebar" aria-orientation="vertical" aria-valuemin="240" aria-valuemax="720" aria-valuenow="300" tabindex="0"></div>
+      <div id="sidebar-custom">
+        <!-- Advanced mesh controls are retained, but hidden. Default request is
+             maximum detail with automatic bounded memory; see switchMode. -->
+        <div class="panel" id="panel-3d-layers" hidden>
+          <h3><svg viewBox="0 0 24 24"><path d="M4 6h16M4 10h16M4 14h16M4 18h16" stroke="currentColor" stroke-width="2" fill="none"/></svg> Layers</h3>
+          <div class="tool-grid">
+            <button class="layer-btn full active" data-layer="tiles" id="layer-tiles">Streamed LOD Mesh</button>
+          </div>
+          <div class="slider-row">
+            <span>Detail</span>
+            <input type="range" id="lod-detail" min="2" max="24" step="1" value="24">
+          </div>
+          <label class="slider-row" for="lod-memory-mode">
+            <span>Viewer memory</span>
+            <select id="lod-memory-mode">
+              <option value="auto">Auto</option>
+              <option value="balanced">Balanced</option>
+              <option value="high">High</option>
+            </select>
+          </label>
+          <div class="hint" id="lod-evaluation-note" hidden style="margin-top:6px;color:var(--brand-orange)">Evaluation mode: reduced medium/far demand. Nearby surfaces retain requested detail; Detail 24 restores raw quality everywhere.</div>
+        </div>
+
+        <div class="panel" id="panel-nav">
+          <h3><svg viewBox="0 0 24 24"><path d="M12 2v20M2 12h20" stroke="currentColor" stroke-width="2" fill="none"/></svg> Navigation</h3>
+          <div class="navhelp">
+            <span class="k">Left drag</span><span>Orbit around point under cursor</span>
+            <span class="k">Right drag</span><span>Pan / move the map</span>
+            <span class="k">Middle drag</span><span>Slide view any direction</span>
+            <span class="k">Scroll</span><span>Zoom toward cursor</span>
+            <span class="k">Esc</span><span>Exit measurement tool</span>
+          </div>
+        </div>
+
+        <div class="panel" id="panel-camera-positions">
+          <h3><svg viewBox="0 0 24 24"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z" stroke="currentColor" stroke-width="2" fill="none"/></svg> Camera Positions</h3>
+          <div class="tool-grid">
+            <button class="layer-btn full" data-layer="cameras" id="layer-cameras" aria-label="Show camera positions" aria-pressed="false">Show</button>
+          </div>
+          <div class="slider-row" id="cam-size-row" style="display:none;">
+            <span>Size</span>
+            <input type="range" id="cam-size" min="0.1" max="4" step="0.1" value="0.5">
+          </div>
+        </div>
+
+        <div class="panel" id="panel-measure">
+          <h3><svg viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16" stroke="currentColor" stroke-width="2" fill="none"/></svg> Measurements</h3>
+          <div class="tool-grid">
+            <button class="tool-btn active" data-tool="none" id="tool-none">Select</button>
+            <button class="tool-btn" data-tool="distance" id="tool-distance">Distance</button>
+            <button class="tool-btn" data-tool="area" id="tool-area">Polygon</button>
+            <button class="tool-btn" data-tool="volume" id="tool-volume" hidden>Volume</button>
+            <button class="tool-btn full" id="tool-clear" hidden>Clear Measurements</button>
+          </div>
+          <div id="measure-output"></div>
+          <div class="hint" style="margin-top:10px;">Vertices use the selected visible surface. Simplified or incomplete source geometry limits measurement accuracy.</div>
+          <div id="map-volume-options" style="display:none;margin-top:10px;">
+            <label class="slider-row"><span>Surface</span><select id="map-volume-surface"><option value="auto">Auto (prefer DSM)</option><option value="dsm" disabled>DSM</option><option value="dtm" disabled>DTM</option></select></label>
+            <label class="slider-row"><span>Reference</span><select id="map-volume-reference"><option value="lowest">Lowest sampled point</option><option value="average">Average surface</option><option value="custom">Custom elevation</option></select></label>
+            <label class="slider-row" id="map-volume-custom-row" style="display:none;"><span>Elevation</span><input id="map-volume-custom" type="number" step="0.1"><span class="val" id="map-volume-custom-unit">ft</span></label>
+            <div class="hint">Volume integrates DSM/DTM cells inside the polygon against the selected horizontal reference plane.</div>
+          </div>
+        </div>
+
+        <div class="panel" id="panel-model-report"><h3>Reports</h3><button class="tool-btn full" id="btn-model-report">Measurements report</button><p class="hint">Your saved measurements, quantities, and overview images.</p><div id="model-report-download"></div></div>
+        <div class="panel" id="panel-camera">
+          <h3><svg viewBox="0 0 24 24"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z" stroke="currentColor" stroke-width="2" fill="none"/></svg> Camera</h3>
+          <div class="tool-grid">
+            <button class="tool-btn" id="btn-reset">Reset View</button>
+            <button class="tool-btn" id="btn-top">Top View</button>
+            <button class="tool-btn full" id="btn-fullscreen">Fullscreen</button>
+          </div>
+        </div>
+
+         <div class="panel" id="panel-ortho" style="display:none;">
+           <h3><svg viewBox="0 0 24 24"><path d="M4 4h16v16H4z" stroke="currentColor" stroke-width="2" fill="none"/></svg> Orthophoto</h3>
+           <div class="slider-row">
+             <span>Opacity</span>
+             <input type="range" id="ortho-opacity" min="0" max="100" step="5" value="100">
+             <span class="val" id="ortho-opacity-val">100%</span>
+           </div>
+           <div class="hint" style="margin-top:10px;">Full-resolution tiles stream from the GeoTIFF as you zoom. Use Measurements for map distance and area. Volume requires a 3D elevation surface.</div>
+         </div>
+
+         <div class="panel" id="panel-dem" style="display:none;">
+           <h3><svg viewBox="0 0 24 24"><path d="M3 20h18L14 10l-4 5-3-4-6 9z" stroke="currentColor" stroke-width="2" fill="none"/></svg> Elevation Settings</h3>
+           <div class="slider-row" style="margin-top:0;">
+             <span>Color</span>
+             <select id="dem-colormap">
+               <option value="viridis" selected>Viridis</option>
+               <option value="jet">Jet</option>
+               <option value="terrain">Terrain</option>
+               <option value="plasma">Plasma</option>
+               <option value="rdylgn">Red-Yellow-Green</option>
+               <option value="gray">Grayscale</option>
+             </select>
+           </div>
+           <div class="slider-row">
+             <span>Shading</span>
+             <input type="range" id="dem-shading" min="0" max="2" step="0.1" value="1">
+             <span class="val" id="dem-shading-val">1.0</span>
+           </div>
+           <div class="slider-row">
+             <span id="dem-min-label">Min ft</span>
+             <input type="number" id="dem-min" placeholder="auto">
+             <span id="dem-max-label">Max ft</span>
+             <input type="number" id="dem-max" placeholder="auto">
+           </div>
+           <div class="slider-row">
+             <span>Color steps</span>
+             <select id="dem-steps">
+               <option value="0" selected>Continuous</option>
+               <option value="4">4 bands</option>
+               <option value="6">6 bands</option>
+               <option value="8">8 bands</option>
+               <option value="12">12 bands</option>
+               <option value="16">16 bands</option>
+               <option value="24">24 bands</option>
+               <option value="32">32 bands</option>
+             </select>
+           </div>
+           <div class="slider-row">
+             <span>Opacity</span>
+             <input type="range" id="dem-opacity" min="10" max="100" step="5" value="100">
+             <span class="val" id="dem-opacity-val">100%</span>
+           </div>
+           <div class="tool-grid" style="margin-top:10px;">
+             <button class="tool-btn full" id="dem-reset">Reset to defaults</button>
+           </div>
+           <div class="hint" style="margin-top:10px;">Narrow the Min/Max range to stretch colors over less elevation (more sensitivity). Bands quantize the scale so each color covers a labeled elevation range.</div>
+         </div>
+
+         <div class="panel" id="panel-pc" style="display:none;">
+           <h3><svg viewBox="0 0 24 24"><circle cx="6" cy="7" r="1.6" fill="currentColor"/><circle cx="12" cy="5" r="1.6" fill="currentColor"/><circle cx="18" cy="8" r="1.6" fill="currentColor"/><circle cx="8" cy="13" r="1.6" fill="currentColor"/><circle cx="15" cy="14" r="1.6" fill="currentColor"/><circle cx="11" cy="19" r="1.6" fill="currentColor"/></svg> Point Cloud</h3>
+           <div class="slider-row" style="margin-top:0;">
+             <span>Points</span>
+             <input type="range" id="pc2-budget" min="1" max="20" step="0.5" value="10">
+             <span class="val" id="pc2-budget-val">10M</span>
+           </div>
+           <div class="slider-row">
+             <span>Size</span>
+             <input type="range" id="pc2-size" min="0.2" max="3" step="0.1" value="1">
+             <span class="val" id="pc2-size-val">1.0</span>
+           </div>
+           <!-- Sizing modes intentionally hidden: use fixed-size points in every session. -->
+           <div class="slider-row">
+             <span>Color</span>
+             <select id="pc2-color">
+               <option value="rgba" selected>RGB</option>
+               <option value="elevation">Elevation</option>
+               <option value="classification">Classification</option>
+             </select>
+           </div>
+           <div id="pc2-elevation-controls" hidden>
+             <div class="slider-row">
+               <label for="pc2-elevation-min" id="pc2-elevation-min-label">Min ft</label>
+               <input type="number" id="pc2-elevation-min" step="any" placeholder="auto" style="width:75px;min-width:0;">
+               <label for="pc2-elevation-max" id="pc2-elevation-max-label">Max ft</label>
+               <input type="number" id="pc2-elevation-max" step="any" placeholder="auto" style="width:75px;min-width:0;">
+             </div>
+             <div class="pc-elevation-range" role="group" aria-label="Elevation color range">
+               <input type="range" id="pc2-elevation-low" min="0" max="1000" step="1" value="0" aria-label="Lower elevation color bound">
+               <input type="range" id="pc2-elevation-high" min="0" max="1000" step="1" value="1000" aria-label="Upper elevation color bound">
+             </div>
+             <div class="tool-grid"><button type="button" class="tool-btn full" id="pc2-elevation-reset">Reset elevation range to auto</button></div>
+             <div class="hint" id="pc2-elevation-status" role="status">Waiting for point-cloud elevation bounds.</div>
+             <div class="hint">Range adjusts elevation colors only. Points outside the range remain visible. Narrow the range for more color sensitivity.</div>
+           </div>
+           <div class="slider-row">
+             <span>EDL Shading</span>
+             <input type="checkbox" id="pc2-edl" checked style="accent-color:var(--brand-orange);">
+           </div>
+           <div class="tool-grid" style="margin-top:10px;">
+             <button type="button" class="tool-btn full" id="pc2-reset">Reset display to defaults</button>
+             <button class="tool-btn full" id="pc2-fit">Fit to Screen</button>
+           </div>
+           <div class="hint" style="margin-top:10px;" id="pc2-quality-hint">Auto quality: the point budget tunes itself to keep your device smooth. Raise Points for more detail on strong hardware.</div>
+         </div>
+      </div>
+    </aside>
+
+    <div id="viewer-wrap">
+      <button id="sidebar-toggle" aria-label="Toggle tools" aria-controls="sidebar" aria-expanded="true"><svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M3 6h18M3 12h18M3 18h18" stroke="currentColor" stroke-width="2"/></svg></button>
+      <div id="three-container"></div>
+      <div id="labels-container"></div>
+      <div id="leaflet-map"></div>
+      <div id="cloud-container"></div>
+
+      <div id="floating-controls">
+        <button class="icon-btn" id="btn-measure-float" title="Toggle distance measurement" style="display:none;"><svg viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16" stroke="currentColor" stroke-width="2" fill="none"/></svg></button>
+        <button class="icon-btn" id="btn-capture-float" title="Save view image" aria-label="Save view image"><svg viewBox="0 0 24 24"><path d="M4 6h4l2-2h4l2 2h4v14H4z" stroke="currentColor" stroke-width="2" fill="none"/><circle cx="12" cy="12" r="4" stroke="currentColor" stroke-width="2" fill="none"/></svg></button>
+        <button class="icon-btn" id="btn-reset-float" title="Reset camera"><svg viewBox="0 0 24 24"><path d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" stroke="currentColor" stroke-width="2" fill="none"/></svg></button>
+        <button class="icon-btn" id="btn-fullscreen-float" title="Fullscreen"><svg viewBox="0 0 24 24"><path d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4" stroke="currentColor" stroke-width="2" fill="none"/></svg></button>
+      </div>
+
+      <div id="loading-overlay">
+        <div class="brand-loader">
+          <div class="spinner"></div>
+          <div id="loading-text">Loading viewer...</div>
+          <div id="loading-progress"></div>
+          <button id="loading-cancel" type="button">Cancel full mesh</button>
+        </div>
+      </div>
+
+      <div id="error-panel">
+        <h2>Viewer Error</h2>
+        <p id="error-message">Check the console for details.</p>
+        <div id="error-actions">
+          <button id="error-retry" type="button">Retry full mesh</button>
+          <button id="error-lod" type="button">Continue with LOD</button>
+        </div>
+      </div>
+
+      <div id="dem-legend">
+        <div style="display:flex;align-items:center;gap:10px;height:160px;">
+          <canvas id="legend-canvas" width="20" height="160"></canvas>
+          <div id="dem-legend-labels"></div>
+        </div>
+        <div id="dem-legend-unit" style="font-size:10px;color:#aaa;text-align:center;margin-top:4px;">Elevation (ft)</div>
+      </div>
+      <div id="dem-hover">Elevation: —</div>
+    </div>
+  </div>
+
+  <footer id="statusbar">
+    <div id="status-left">
+      <span class="status-pill"><span id="fps">0</span> FPS</span>
+      <span class="status-pill" id="coords">E —  N —  El —</span>
+      <span class="status-pill" id="mode-status">Mode: 3D Model</span>
+    </div>
+    <div id="status-right">
+      <span class="status-pill" id="mem-display" title="JavaScript heap only. Not tile cache, total browser memory, or GPU memory. Tile cache usage is available in LOD diagnostics.">JS heap: unavailable</span>
+      <span class="status-pill" id="lod-status">LOD: —</span>
+      <span class="status-pill" id="cloud-status">Cloud: —</span>
+      <span class="status-pill" id="tris-status">Tris: —</span>
+    </div>
+  </footer>
+</div>
+
+<div id="cam-tooltip"></div>
+
+<div id="photo-modal" aria-hidden="true">
+  <div id="photo-frame" role="dialog" aria-modal="false" aria-labelledby="photo-title">
+    <button id="photo-close" aria-label="Close">×</button>
+    <div id="photo-imgwrap" tabindex="0" aria-label="Expand camera photo">
+      <img id="photo-img" alt="Flight photo">
+      <div id="photo-spinner"></div>
+      <div id="photo-empty" role="status">No photo available</div>
+    </div>
+    <div id="photo-header">
+      <span id="photo-title">—</span>
+      <span id="photo-meta"></span>
+    </div>
+    <div id="photo-actions">
+      <a id="photo-download" href="#" download>Download Original</a>
+       <span class="hint">Click photo to fill window · scroll to zoom · Esc closes</span>
+    </div>
+  </div>
+</div>
+
+<div id="share-password-overlay">
+  <div id="share-password-box">
+    <h2>Password required</h2>
+    <p>This shared link is password-protected.</p>
+    <input type="password" id="share-password-input" placeholder="Password" autocomplete="off">
+    <div id="share-password-error"></div>
+    <button class="text-btn primary" id="share-password-submit" style="width:100%;">Unlock</button>
+  </div>
+</div>
+
+<div id="share-modal">
+  <div id="share-modal-box">
+    <button id="share-modal-close" aria-label="Close">&times;</button>
+    <h2>Share links</h2>
+    <div class="panel">
+      <h3>Create new link</h3>
+      <div class="slider-row" style="margin-top:0;">
+        <span>Password</span>
+        <input type="text" id="share-new-password" placeholder="Leave blank for none">
+      </div>
+      <div class="slider-row">
+        <span>Expires in (days)</span>
+        <input type="number" id="share-new-expires" placeholder="Never" min="1">
+      </div>
+      <div class="slider-row">
+        <span>Allow measuring</span>
+        <input type="checkbox" id="share-new-perm-measure" checked style="accent-color:var(--brand-orange);">
+      </div>
+      <div class="slider-row">
+        <span>Show camera positions</span>
+        <input type="checkbox" id="share-new-perm-cameras" checked style="accent-color:var(--brand-orange);">
+      </div>
+      <div class="tool-grid" style="margin-top:10px;">
+        <button class="tool-btn full" id="share-create-btn">Create Link</button>
+      </div>
+      <div id="share-create-result"></div>
+    </div>
+    <div class="panel">
+      <h3>Existing links</h3>
+      <div id="share-links-list"><div class="hint">No share links yet for this project.</div></div>
+    </div>
+  </div>
+</div>
+
+<!-- Leaflet + GeoTIFF -->
+
+<script type="module" src="/main.js"></script>
+</body>
+</html>
