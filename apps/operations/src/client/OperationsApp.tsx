@@ -55,6 +55,7 @@ import { ImageLocationMap } from "./ImageLocationMap";
 import { constrainViewerOffset, pointerAnchoredOffset } from "./viewer-zoom";
 import { activeShareLoadError, createShareLoadDeadline } from "./share-load-deadline";
 import { ViewerProcessingPanel } from "./ViewerProcessingPanel";
+import { NativeViewerModels } from "./NativeViewerModels";
 import {
   activateDeliveryFolderCache,
   deactivateDeliveryFolderCache,
@@ -465,7 +466,7 @@ export function OperationsApp() {
           <DeliveryHub {...props} />
         )}{" "}
         {page === "viewer" && allowed(session.user, "viewer.view") && (
-          <ViewerDataOverview session={session} />
+          <ViewerPage session={session} />
         )}{" "}
         {page === "team" && allowed(session.user, "team.view") && (
           <Team {...props} />
@@ -516,8 +517,8 @@ function PageHeading({ page, displayName }: { page: Page; displayName: string })
       "Manage client delivery, incoming uploads, and shared links.",
     ],
     viewer: [
-      "3D models overview",
-      "Monitor Viewer storage, processing, and provider health, then open the dedicated workspace.",
+      "3D Viewer",
+      "Link models to client projects, run and recover processing, and manage sharing — or open the full Viewer workspace.",
     ],
     team: [
       "Team",
@@ -3763,6 +3764,47 @@ function exactViewerWorkspaceMessage(
     Object.keys(message).sort().join(",") === keys.slice().sort().join(",")
     ? message
     : null;
+}
+
+const VIEWER_SECTIONS = [
+  { id: "overview", label: "Overview", path: "/viewer" },
+  { id: "models", label: "Client models", path: "/viewer/models" },
+  { id: "processing", label: "Processing", path: "/viewer/processing" },
+  { id: "sharing", label: "Sharing & setup", path: "/viewer/sharing" },
+] as const;
+type ViewerSection = typeof VIEWER_SECTIONS[number]["id"];
+/** /operations/processing (processing notifications and attempt deep links) opens the Processing section. */
+export function viewerSectionFromPath(pathname: string): ViewerSection {
+  if (pathname === "/operations/processing" || pathname === "/viewer/processing") return "processing";
+  if (pathname === "/viewer/models") return "models";
+  if (pathname === "/viewer/sharing") return "sharing";
+  return "overview";
+}
+
+/** One Ops page for the Ledge Top Viewer: overview, native client models, processing and sharing. */
+function ViewerPage({ session }: { session: Session }) {
+  const [section, setSection] = useState<ViewerSection>(() => viewerSectionFromPath(location.pathname));
+  useEffect(() => {
+    const sync = () => setSection(viewerSectionFromPath(location.pathname));
+    window.addEventListener("popstate", sync);
+    return () => window.removeEventListener("popstate", sync);
+  }, []);
+  const choose = (next: ViewerSection) => {
+    if (next === section) return;
+    const target = VIEWER_SECTIONS.find(item => item.id === next)!;
+    // A section change drops attempt deep-link and reauthorization parameters.
+    window.history.pushState(null, "", target.path);
+    setSection(next);
+  };
+  return <div className="viewer-page">
+    <nav className="viewer-page-sections ltds-segmented" aria-label="3D Viewer sections">
+      {VIEWER_SECTIONS.map(item => <button type="button" key={item.id} aria-current={section === item.id ? "page" : undefined} onClick={() => choose(item.id)}>{item.label}</button>)}
+    </nav>
+    {section === "overview" && <ViewerDataOverview session={session} />}
+    {section === "models" && <NativeViewerModels canManage={allowed(session.user, "viewer.manage")} />}
+    {section === "processing" && <ViewerProcessingPanel mapToken={session.mapboxPublicToken} />}
+    {section === "sharing" && <ViewerModels session={session} />}
+  </div>;
 }
 
 function ViewerDataOverview({session}:{session:Session}) {
@@ -7201,7 +7243,6 @@ function ViewerModels({ session }: { session: Session }) {
   if (loading && !data) return <Loading />;
   return <div className="viewer-admin-layout">
     <ErrorLine error={error || actionError} />
-    <ViewerProcessingPanel mapToken={session.mapboxPublicToken} />
     {data && !data.enabled && <Card title="3D Viewer is disabled">
       <p>Enable the Viewer integration only after its URL, service key, routes, and database migration are ready.</p>
       {canManage && <button type="button" className="button-orange" disabled={connectionPreflightBusy} onClick={() => void testViewerConnection()}>
