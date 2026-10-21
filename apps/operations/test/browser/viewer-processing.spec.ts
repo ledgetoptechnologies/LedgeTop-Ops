@@ -168,6 +168,66 @@ test("an authenticated Viewer bounce issues one fixed-origin grant and returns t
   expect(issued).toBe(1);
 });
 
+async function mockReauthorization(page: import("@playwright/test").Page, context: import("@playwright/test").BrowserContext, workspaceOrigin = "https://viewer.ledgetopdroneservices.com") {
+  const grant = "z".repeat(43), counts = { issued: 0 };
+  await context.route("https://*.ledgetopdroneservices.com/workspace/**", route =>
+    route.fulfill({ contentType: "text/html", body: "<!doctype html><title>Reauthorized Viewer</title>" }));
+  await page.route("**/api/**", route => {
+    const request = route.request(), url = new URL(request.url());
+    if (url.pathname === "/api/session") return route.fulfill({ json: {
+      user: { id: "staff-one", email: "staff@example.test", displayName: "Staff", status: "Active",
+        profileType: "Administrator", isAdministrator: true, permissions: ["viewer.view"], divisions: [] },
+      csrfToken: "csrf", timezone: "America/Chicago", mapStyleUrl: null, mapboxPublicToken: null, capabilities: {},
+    } });
+    if (url.pathname === "/api/viewer/overview") return route.fulfill({ json: {
+      enabled: true, viewerBaseUrl: "https://viewer.ledgetopdroneservices.com", overview: null,
+    } });
+    if (url.pathname === "/api/viewer/admin-grant" && request.method() === "POST") {
+      counts.issued += 1;
+      expect(request.headers()["x-csrf-token"]).toBe("csrf");
+      expect(request.headers()["idempotency-key"]).toMatch(/^[0-9a-f-]{36}$/);
+      return route.fulfill({ status: 201, json: {
+        grant, grantExpiresAt: new Date(Date.now() + 60_000).toISOString(), sessionTtlSeconds: 1800,
+        redeemUrl: "https://viewer.ledgetopdroneservices.com/api/v1/admin-sessions/redeem",
+        workspaceUrl: `${workspaceOrigin}/workspace/${grant}`,
+      } });
+    }
+    return route.fulfill({ status: 404, json: { error: "Not found" } });
+  });
+  return { grant, counts };
+}
+
+test("an explicit current-tab recovery bounce echoes its mode beside the same nonce", async ({ page, context }) => {
+  const state = "s".repeat(32);
+  const { grant, counts } = await mockReauthorization(page, context);
+  await page.goto(`/viewer/reauthorize?state=${state}&recoveryMode=same-tab`);
+  await page.waitForURL(`https://viewer.ledgetopdroneservices.com/workspace/${grant}#reauthorize=${state}&recoveryMode=same-tab`);
+  expect(counts.issued).toBe(1);
+});
+
+for (const [label, search] of [
+  ["an unknown mode", `state=${"s".repeat(32)}&recoveryMode=popup`],
+  ["a repeated mode", `state=${"s".repeat(32)}&recoveryMode=same-tab&recoveryMode=same-tab`],
+  ["a repeated nonce", `state=${"s".repeat(32)}&state=${"t".repeat(32)}&recoveryMode=same-tab`],
+  ["a malformed nonce", "state=short&recoveryMode=same-tab"],
+  ["a mode without a nonce", "recoveryMode=same-tab"],
+] as const) test(`a Viewer bounce with ${label} is refused before any grant is issued`, async ({ page, context }) => {
+  const { counts } = await mockReauthorization(page, context);
+  await page.goto(`/viewer/reauthorize?${search}`);
+  await expect(page.getByText("This Viewer sign-in link isn't valid. Open the Viewer from Operations again.")).toBeVisible();
+  await page.waitForTimeout(300);
+  expect(counts.issued).toBe(0);
+  expect(new URL(page.url()).origin).not.toBe("https://viewer.ledgetopdroneservices.com");
+});
+
+test("a current-tab recovery never follows a grant for a foreign Viewer origin", async ({ page, context }) => {
+  const { counts } = await mockReauthorization(page, context, "https://evil.ledgetopdroneservices.com");
+  await page.goto(`/viewer/reauthorize?state=${"s".repeat(32)}&recoveryMode=same-tab`);
+  await expect(page.getByText("3D Viewer returned an invalid reauthorization link")).toBeVisible();
+  expect(counts.issued).toBe(1);
+  expect(new URL(page.url()).pathname).toBe("/viewer/reauthorize");
+});
+
 for (const invalidOrigin of [false, true]) {
   test(`blocked Viewer pop-ups offer authenticated same-tab navigation${invalidOrigin ? " and reject an unexpected origin" : ""}`, async ({ page, context }) => {
     const viewerOrigin = "https://viewer.ledgetopdroneservices.com";
