@@ -294,6 +294,84 @@ test("business, company mode and shared company are frozen while a plan is being
   await expect(page.getByLabel("Ledge Top Drone Services")).toBeDisabled();
 });
 
+const sessionReads = async (page: Page) => (await calls(page)).filter(call => call.path.endsWith("/session")).length;
+
+for (const mode of ["choices-denied", "status-denied"]) test(`a ${mode.split("-")[0]} refusal closes the review instead of offering an Operations-only approval`, async ({ page }) => {
+  await render(page, mode, `?submission=${consumerId}`);
+  await expect(page.getByRole("alert").filter({ hasText: "outside your review access" })).toBeVisible();
+  await expect(page.locator(".onboarding-review")).toHaveCount(0);
+  await expect(page.locator("body")).not.toContainText("client@example.test");
+  await expect(page.getByRole("button", { name: /^Approve/ })).toHaveCount(0);
+  // The refusal re-verifies the session; it is still valid, so the rest of the page stays.
+  await expect.poll(() => sessionReads(page)).toBe(2);
+  await expect(page.getByRole("region", { name: "Submissions awaiting review" })).toBeVisible();
+});
+
+test("businesses that can't be checked block approval until checked again", async ({ page }) => {
+  await render(page, "choices-unavailable", `?submission=${consumerId}`);
+  await expect(page.getByRole("alert")).toContainText("can't be approved yet");
+  await expect(page.getByRole("button", { name: /^Approve/ })).toHaveCount(0);
+  await page.getByRole("button", { name: "Check again" }).click();
+  await expect(page.getByRole("button", { name: "Approve for Operations only" })).toBeVisible();
+  expect(await sessionReads(page)).toBe(1);
+});
+
+test("a disabled capability on any read closes the whole page", async ({ page }) => {
+  await render(page, "review-disabled", `?submission=${consumerId}`);
+  await expect(page.getByRole("heading", { name: "Client onboarding unavailable" })).toBeVisible();
+  await expect(page.locator(".onboarding-inbox, .onboarding-staff-form")).toHaveCount(0);
+});
+
+test("a refused approval releases the choices and re-verifies the session", async ({ page }) => {
+  await render(page, "approve-denied");
+  await openSubmission(page, "Reviewed Client");
+  await page.getByLabel("Ledge Top Drone Services").check();
+  await page.getByRole("button", { name: "Approve for Ledge Top Drone Services" }).click();
+  await expect(page.getByRole("alert")).toContainText("Approval was refused");
+  await expect(page.getByLabel("Ledge Top Drone Services")).toBeEnabled();
+  await expect.poll(() => sessionReads(page)).toBe(2);
+  await expect(page.getByRole("heading", { name: "Review Reviewed Client" })).toBeVisible();
+});
+
+test("a refused approval after the staff session was revoked closes everything", async ({ page }) => {
+  await render(page, "approve-revoked");
+  await openSubmission(page, "Reviewed Client");
+  await page.getByRole("button", { name: "Approve for Operations only" }).click();
+  await expect(page.getByRole("heading", { name: "Client onboarding unavailable" })).toBeVisible();
+  await expect(page.locator(".onboarding-review, .onboarding-inbox")).toHaveCount(0);
+});
+
+test("a refused company search re-verifies the session", async ({ page }) => {
+  await render(page, "search-denied");
+  await openSubmission(page, "Dana Business");
+  await page.getByLabel("An existing company in Operations").check();
+  await page.getByRole("button", { name: "Search", exact: true }).click();
+  await expect(page.getByRole("alert")).toContainText("Companies couldn't be searched");
+  await expect.poll(() => sessionReads(page)).toBe(2);
+});
+
+for (const mode of ["poll-null", "poll-transient"]) test(`activation polling continues after ${mode === "poll-null" ? "an empty" : "a failed"} read until active`, async ({ page }) => {
+  await render(page, mode, `?submission=${consumerId}`, true);
+  await page.getByRole("button", { name: "Approve for Operations only", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "Approved", exact: true })).toBeVisible();
+  await page.clock.runFor(1);
+  await expect.poll(async () => (await bodies(page, "activation-status")).length).toBe(2);
+  for (let i = 0; i < 3; i++) { await page.clock.runFor(10_001); await page.evaluate(() => Promise.resolve()); }
+  await expect(page.locator(".onboarding-activation")).toContainText("Portal active", { timeout: 1000 });
+  expect((await bodies(page, "activation-status")).length).toBeGreaterThanOrEqual(mode === "poll-null" ? 4 : 3);
+});
+
+test("a refused activation read stops polling and re-verifies the session", async ({ page }) => {
+  await render(page, "activation-denied", `?submission=${consumerId}`, true);
+  await page.getByRole("button", { name: "Approve for Operations only", exact: true }).click();
+  await expect(page.locator(".onboarding-approval-success")).toContainText("outside your access");
+  const reads = (await bodies(page, "activation-status")).length;
+  await page.clock.runFor(60_000);
+  expect((await bodies(page, "activation-status")).length).toBe(reads);
+  await expect(page.getByRole("button", { name: "Check status now" })).toHaveCount(0);
+  await expect.poll(() => sessionReads(page)).toBe(2);
+});
+
 test("an already reviewed submission shows its activation instead of approval controls", async ({ page }) => {
   await render(page, "decided", `?submission=${consumerId}`);
   await expect(page.getByRole("heading", { name: "Already reviewed" })).toBeVisible();

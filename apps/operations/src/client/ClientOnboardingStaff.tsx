@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import { Brand, Card, Loading, Skeleton } from "@ltds/ui";
 import { ClientOnboardingInbox } from "./ClientOnboardingReview";
-import { authorityLost, endpoint, json, post, record, uncertainFailure, uuid, validSession, type RequestFailure, type StaffSession } from "./onboarding-staff-api";
+import { authorityLost, endpoint, json, post, record, refusalStatus, uncertainFailure, uuid, validSession, type RequestFailure, type StaffSession } from "./onboarding-staff-api";
 import "./ClientOnboardingStaff.css";
 
 type ScopeChoice = { businessAreaId: string; name: string; allowAreaWide: boolean; divisions: Array<{ divisionId: string; name: string }> };
@@ -64,9 +64,11 @@ export function ClientOnboardingStaff() {
   const [verifiedUntil, setVerifiedUntil] = useState<string | null>(null);
   const [accessError, setAccessError] = useState("");
   const close = useCallback((message: string) => { sessionRef.current = null; setVerifiedUntil(null); setAccessError(message); }, []);
+  const verify = useRef<(() => void) | null>(null);
   useEffect(() => {
     const controller = new AbortController();
-    const load = (first: boolean) => json(`${endpoint}/session`, { method: "GET", signal: controller.signal, headers: { "X-Native-Staff-Request": "1" } })
+    let checking = false;
+    const load = (first: boolean) => { checking = true; return json(`${endpoint}/session`, { method: "GET", signal: controller.signal, headers: { "X-Native-Staff-Request": "1" } })
       .then(value => {
         if (!validSession(value)) throw new Error("invalid_response");
         if (!first && !sessionRef.current) return;
@@ -81,11 +83,13 @@ export function ClientOnboardingStaff() {
         if (!first && !authorityLost(error)) return;
         close((error as RequestFailure | null)?.status === 404 && first ? "This administrator-only capability is not enabled."
           : first ? "Administrator onboarding access could not be verified." : "Your onboarding access changed. Reload the page to continue.");
-      });
+      }).finally(() => { checking = false; }); };
     void load(true);
+    // A refused request elsewhere on the page re-verifies the session at once.
+    verify.current = () => { if (!checking) void load(false); };
     // The request token rotates every ten minutes; refresh it so long reviews keep working.
     const timer = window.setInterval(() => void load(false), SESSION_REFRESH_MS);
-    return () => { controller.abort(); window.clearInterval(timer); };
+    return () => { controller.abort(); window.clearInterval(timer); verify.current = null; };
   }, [close]);
   useEffect(() => {
     if (!verifiedUntil) return;
@@ -95,7 +99,15 @@ export function ClientOnboardingStaff() {
     const timer = window.setTimeout(expire, Math.min(remaining, MAX_TIMER_MS));
     return () => window.clearTimeout(timer);
   }, [verifiedUntil, close]);
-  const lost = useCallback(() => close("Your onboarding access changed. Reload the page to continue."), [close]);
+  // The staff API answers every authentication, CSRF, expiry, capability and resource
+  // denial with 403 and a disabled capability with 404. A 401 or 404 closes the page
+  // at once; a 403 closes the view that asked (callers do that) and re-verifies the
+  // session, which closes everything if the staff authority itself is gone.
+  const refused = useCallback((caught: unknown) => {
+    const status = refusalStatus(caught);
+    if (status === 401 || status === 404) close("Your onboarding access changed. Reload the page to continue.");
+    else if (status === 403) verify.current?.();
+  }, [close]);
 
   const session = sessionRef.current;
   if (accessError) return <main className="onboarding-staff-gate"><Card><h1>Client onboarding unavailable</h1><p role="alert">{accessError}</p><a className="button-ghost" href="/">Return to Operations</a></Card></main>;
@@ -103,12 +115,12 @@ export function ClientOnboardingStaff() {
   return <div className="onboarding-staff-shell"><header><Brand product="Operations" name="Ledge Top" /><a href="/">Exit onboarding</a></header><main>
     <div className="onboarding-staff-heading"><p className="eyebrow">Client onboarding</p><h1>Client onboarding</h1>
       <p>Invite a client to fill in their profile, then review what they submit and choose which Ledge Top businesses they belong to.</p></div>
-    <ClientOnboardingInbox session={session} onAuthorityLost={lost} />
-    <ClientOnboardingIssuer session={session} onAuthorityLost={lost} />
+    <ClientOnboardingInbox session={session} onRefused={refused} onAuthorityLost={() => close("Your onboarding access changed. Reload the page to continue.")} />
+    <ClientOnboardingIssuer session={session} onRefused={refused} />
   </main></div>;
 }
 
-export function ClientOnboardingIssuer({ session, onAuthorityLost }: { session: StaffSession; onAuthorityLost: () => void }) {
+export function ClientOnboardingIssuer({ session, onRefused }: { session: StaffSession; onRefused: (caught: unknown) => void }) {
   const [commandId] = useState(uuid);
   const [expiresAt, setExpiresAt] = useState(defaultExpiry);
   const [choices, setChoices] = useState<ScopeChoice[] | null | "unavailable">(null);
@@ -128,7 +140,7 @@ export function ClientOnboardingIssuer({ session, onAuthorityLost }: { session: 
     void post(session, "scope-choices", {}).then(value => {
       const parsed = validScopeChoices(value);
       if (active) setChoices(parsed ?? "unavailable");
-    }).catch(caught => { if (!active) return; if (authorityLost(caught)) onAuthorityLost(); else setChoices("unavailable"); });
+    }).catch(caught => { if (!active) return; setChoices("unavailable"); onRefused(caught); });
     return () => { active = false; };
     // Business areas are read once per staff session.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -155,7 +167,7 @@ export function ClientOnboardingIssuer({ session, onAuthorityLost }: { session: 
       setCreated(value);
     } catch (caught) {
       if (uncertainFailure(caught)) setUncertain("create");
-      else setError("The invitation was refused. Check your permissions and the details, then try again.");
+      else { setError("The invitation was refused. Check your permissions and the details, then try again."); onRefused(caught); }
     } finally { setBusy(null); }
   };
   const reveal = async () => {
@@ -170,7 +182,7 @@ export function ClientOnboardingIssuer({ session, onAuthorityLost }: { session: 
         link: safeRecipientLink(value.recipientUrl, created.invitationId), secret: value.invitationSecret });
     } catch (caught) {
       if (uncertainFailure(caught)) setUncertain("reveal");
-      else setError("The link couldn't be created. It won't be attempted again from this page.");
+      else { setError("The link couldn't be created. It won't be attempted again from this page."); onRefused(caught); }
     } finally { setBusy(null); }
   };
   const copyLink = async () => {

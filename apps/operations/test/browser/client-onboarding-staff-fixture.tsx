@@ -14,7 +14,8 @@ const consumerId = "33333333-3333-4333-8333-333333333333", businessId = "7777777
 const laterId = "88888888-8888-4888-8888-888888888888";
 const invitationId = "11111111-1111-4111-8111-111111111111";
 const primary = "project-alpha:primary", secondary = "project-alpha:secondary";
-let approved = false, activationReads = 0, approvalAttempts = 0, sessionReads = 0;
+let approved = false, activationReads = 0, approvalAttempts = 0, sessionReads = 0, choiceReads = 0;
+const denied = () => Response.json({ error: "client_onboarding_denied" }, { status: 403 });
 // Delayed modes hold the write until the test calls window.release().
 const held = () => new Promise<void>(resolve => { fixtureWindow.release = resolve; });
 
@@ -33,7 +34,7 @@ window.fetch = async (input, init) => {
   if (route === "session") {
     sessionReads += 1;
     if (mode === "disabled") return new Response(JSON.stringify({ error: "not_found" }), { status: 404 });
-    if (mode === "refresh-denied" && sessionReads > 1) return Response.json({ error: "client_onboarding_denied" }, { status: 403 });
+    if ((mode === "refresh-denied" || mode === "approve-revoked") && sessionReads > 1) return denied();
     if (mode === "refresh-unavailable" && sessionReads > 1) return Response.json({ error: "client_onboarding_unavailable" }, { status: 503 });
     return Response.json({ csrfToken: String(sessionReads % 10).repeat(64),
       verifiedUntil: mode === "short-session" ? new Date(Date.now() + 60_000).toISOString() : "2099-01-01T00:00:00.000Z" });
@@ -48,14 +49,22 @@ window.fetch = async (input, init) => {
     ].filter(item => !(approved && item.submissionId === (mode.startsWith("business") || mode === "shared" ? businessId : consumerId))),
     nextCursor: { submittedAt: "2098-01-02T00:00:00.000Z", submissionId: businessId } });
   }
+  if (route === "review" && mode === "review-disabled") return Response.json({ error: "not_found" }, { status: 404 });
   if (route === "review") return Response.json({ invitationId, submissionId: body.submissionId, fieldsSha256: "e".repeat(64),
     submittedAt: "2098-01-01T00:00:00.000Z", targetClientRecordId: body.submissionId === laterId ? "client:existing-1" : null,
     scopes: [{ businessAreaId: "area:onboarding", divisionId: null }], fields: { ...fields(body.submissionId === businessId), ...(body.submissionId === laterId ? { name: "Later Client" } : {}) } });
+  if (route === "enrollment-choices") choiceReads += 1;
+  if (route === "enrollment-choices" && mode === "choices-denied") return denied();
+  if (route === "enrollment-choices" && mode === "choices-unavailable" && choiceReads === 1) return Response.json({ error: "client_onboarding_unavailable" }, { status: 503 });
   if (route === "enrollment-choices") return Response.json({ sourceIds: mode === "no-sources" ? [] : [secondary, primary] });
   if (route === "activation-status") {
     if (mode === "decided") return Response.json({ activation: { clientRecordId: "55555555-5555-4555-8555-555555555555", updatedAt: "2098-01-05T00:00:00.000Z", state: "active", reason: "active" } });
+    if (mode === "status-denied") return denied();
     if (!approved) return Response.json({ activation: null });
     activationReads += 1;
+    if (mode === "activation-denied") return denied();
+    if (mode === "poll-null" && activationReads <= 2) return Response.json({ activation: null });
+    if (mode === "poll-transient" && activationReads === 1) return Response.json({ error: "temporary" }, { status: 503 });
     return Response.json({ activation: { clientRecordId: "55555555-5555-4555-8555-555555555555", updatedAt: "2098-01-05T00:00:00.000Z",
       state: activationReads > 1 ? "active" : "pending", reason: activationReads > 1 ? "active" : "awaiting_pa" } });
   }
@@ -68,6 +77,7 @@ window.fetch = async (input, init) => {
   if (route === "approve") {
     approvalAttempts += 1;
     if (mode === "delayed-approval") await held();
+    if (mode === "approve-denied" || mode === "approve-revoked") return denied();
     if (mode === "uncertain-approval" && approvalAttempts === 1) return Response.json({ error: "client_onboarding_unavailable" }, { status: 503 });
     approved = true;
     return Response.json({ decisionId: "44444444-4444-4444-8444-444444444444", submissionId: body.submissionId,
@@ -75,6 +85,7 @@ window.fetch = async (input, init) => {
       ...(body.organizationSelection ? { organizationRecordId: "66666666-6666-4666-8666-666666666666", organizationRecordVersion: 1 } : {}),
       relationshipVersion: 1, replayed: false });
   }
+  if (route === "existing-companies" && mode === "search-denied") return denied();
   if (route === "existing-companies") return Response.json({ existingContactReuse: "unsupported", nextAfterRecordId: null, companies: [
     { recordId: "org:example", expectedVersion: 4, name: "Example LLC", sourceIds: [primary], reusable: true, reason: null },
     { recordId: "org:example-old", expectedVersion: 2, name: "Example LLC (old)", sourceIds: [], reusable: false, reason: "company_not_active" } ] });

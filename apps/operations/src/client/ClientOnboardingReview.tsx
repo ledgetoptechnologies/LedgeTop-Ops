@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import { Card, Skeleton, StatusPill } from "@ltds/ui";
 import {
-  activationText, authorityLost, destinationList, destinationName, existingReasonText, post, sharedReasonText, uncertainFailure, uuid, UUID,
+  activationText, authorityLost, destinationList, refusalStatus, destinationName, existingReasonText, post, sharedReasonText, uncertainFailure, uuid, UUID,
   validActivation, validApproval, validChoices, validExistingCompanies, validInbox, validReview, validSharedApproval,
   validSharedCompanies, validSharedPlan,
   type Activation, type ExistingCompany, type InboxCursor, type InboxItem, type OrganizationSelection, type Review,
@@ -18,7 +18,7 @@ export function submissionFromLocation(search: string): string | null {
   return value && UUID.test(value) ? value : null;
 }
 
-export function ClientOnboardingInbox({ session, onAuthorityLost }: { session: StaffSession; onAuthorityLost: () => void }) {
+export function ClientOnboardingInbox({ session, onRefused, onAuthorityLost }: { session: StaffSession; onRefused: (caught: unknown) => void; onAuthorityLost: () => void }) {
   const [items, setItems] = useState<InboxItem[]>([]);
   const [cursor, setCursor] = useState<InboxCursor | null>(null);
   const [loading, setLoading] = useState(true);
@@ -69,17 +69,19 @@ export function ClientOnboardingInbox({ session, onAuthorityLost }: { session: S
         </button></li>)}</ul>}
       {cursor && <button type="button" className="button-ghost" disabled={loading} onClick={() => void load(cursor)}>{loading ? "Loading…" : "Load more submissions"}</button>}
     </section></Card>
-    {selected && <ClientOnboardingReviewPanel key={selected} session={session} submissionId={selected} onDecided={decided} onAuthorityLost={onAuthorityLost} />}
+    {selected && <ClientOnboardingReviewPanel key={selected} session={session} submissionId={selected} onDecided={decided} onRefused={onRefused} />}
   </>;
 }
 
-export function ClientOnboardingReviewPanel({ session, submissionId, onDecided, onAuthorityLost }: {
-  session: StaffSession; submissionId: string; onDecided: (submissionId: string) => void; onAuthorityLost: () => void;
+export function ClientOnboardingReviewPanel({ session, submissionId, onDecided, onRefused }: {
+  session: StaffSession; submissionId: string; onDecided: (submissionId: string) => void; onRefused: (caught: unknown) => void;
 }) {
   const [review, setReview] = useState<Review | null>(null);
   const [loadError, setLoadError] = useState("");
   const [available, setAvailable] = useState<string[] | null>(null);
-  const [sourceNote, setSourceNote] = useState("");
+  // Businesses and review status must both be confirmed before any approval is offered.
+  const [checkError, setCheckError] = useState("");
+  const [checkRun, setCheckRun] = useState(0);
   const [activation, setActivation] = useState<Activation | null | undefined>(undefined);
   const [selectedSources, setSelectedSources] = useState<string[]>([]);
   const [companyMode, setCompanyMode] = useState<CompanyMode>("new");
@@ -101,20 +103,30 @@ export function ClientOnboardingReviewPanel({ session, submissionId, onDecided, 
         if (!validReview(value) || value.submissionId !== submissionId) throw new Error("invalid_response");
         if (!active) return;
         setReview(value);
-        const [choices, status] = await Promise.allSettled([
-          post(session, "enrollment-choices", { submissionId }), post(session, "activation-status", { submissionId })]);
-        if (!active) return;
-        if (choices.status === "fulfilled" && validChoices(choices.value)) setAvailable([...choices.value.sourceIds].sort());
-        else { setAvailable([]); setSourceNote("The available businesses couldn't be checked. You can still approve in Operations only, or reload this submission."); }
-        setActivation(status.status === "fulfilled" && validActivation(status.value) ? status.value.activation : null);
       } catch (caught) {
         if (!active) return;
-        if ((caught as { status?: number } | null)?.status === 401) { onAuthorityLost(); return; }
         setLoadError("This submission wasn't found, or it's outside your review access.");
+        onRefused(caught);
       }
     })();
     return () => { active = false; };
-  }, [session, submissionId, onAuthorityLost]);
+  }, [session, submissionId, onRefused]);
+  useEffect(() => {
+    if (!review) return;
+    let active = true;
+    setCheckError(""); setAvailable(null); setActivation(undefined);
+    void Promise.allSettled([post(session, "enrollment-choices", { submissionId }), post(session, "activation-status", { submissionId })]).then(([choices, status]) => {
+      if (!active) return;
+      // A refusal closes the review (its details included) rather than offering a narrower fallback.
+      const refusal = [choices, status].find(result => result.status === "rejected" && refusalStatus(result.reason) !== 0) as PromiseRejectedResult | undefined;
+      if (refusal) { setReview(null); setLoadError("This submission is outside your review access."); onRefused(refusal.reason); return; }
+      if (choices.status !== "fulfilled" || !validChoices(choices.value) || status.status !== "fulfilled" || !validActivation(status.value)) {
+        setCheckError("The available businesses and review status couldn't be checked, so this submission can't be approved yet."); return;
+      }
+      setAvailable([...choices.value.sourceIds].sort()); setActivation(status.value.activation);
+    });
+    return () => { active = false; };
+  }, [session, submissionId, review, checkRun, onRefused]);
 
   if (loadError) return <Card><p className="onboarding-staff-error" role="alert">{loadError}</p></Card>;
   if (!review) return <Card><Skeleton variant="form" rows={4} label="Loading submission…" /></Card>;
@@ -129,14 +141,15 @@ export function ClientOnboardingReviewPanel({ session, submissionId, onDecided, 
     <p className="onboarding-review-meta">Submitted {new Date(review.submittedAt).toLocaleString()}</p>
     <dl className="onboarding-review-fields">{rows.map(([label, value]) => <div key={label}><dt>{label}</dt><dd>{value || "—"}</dd></div>)}</dl>
     {review.targetClientRecordId !== null && <p className="onboarding-staff-error" role="status"><strong>Can't be approved here.</strong> This submission updates an existing client, which this review doesn't support yet.</p>}
-    {review.targetClientRecordId === null && activation === undefined && <Skeleton variant="text" lines={2} label="Checking review status…" />}
+    {review.targetClientRecordId === null && activation === undefined && !checkError && <Skeleton variant="text" lines={2} label="Checking review status…" />}
+    {review.targetClientRecordId === null && checkError && <div className="onboarding-staff-error" role="alert"><p>{checkError}</p>
+      <button type="button" className="button-ghost button-small" onClick={() => setCheckRun(value => value + 1)}>Check again</button></div>}
     {review.targetClientRecordId === null && !finished && activation === null && available !== null && <>
       <fieldset className="onboarding-destinations"><legend>Which Ledge Top businesses is this client for?</legend>
         {available.length === 0 && <p>No Project Alpha businesses are available for this submission.</p>}
         {available.map(sourceId => <label key={sourceId}><input type="checkbox" checked={selectedSources.includes(sourceId)} disabled={locked}
           onChange={event => chooseSource(sourceId, event.target.checked)} />
           {destinationName(sourceId)}</label>)}
-        {sourceNote && <p role="status">{sourceNote}</p>}
         <p className="onboarding-hint">{selectedSources.length === 0 ? "No business selected: the client is approved in Operations only."
           : `A client record is created in ${destinationList(selectedSources)}. Project Alpha stays the owner of documents and finances.`}</p>
       </fieldset>
@@ -147,19 +160,19 @@ export function ClientOnboardingReviewPanel({ session, submissionId, onDecided, 
       </fieldset>}
       {!business || companyMode !== "shared"
         ? <DirectApproval session={session} review={review} sourceIds={selectedSources} locked={locked}
-            companyMode={business && companyMode !== "shared" ? companyMode : null} onLock={lock} onApproved={result => { setDecided(result); onDecided(submissionId); }} />
-        : <SharedCompanyApproval session={session} review={review} sourceIds={selectedSources} onLock={lock}
+            companyMode={business && companyMode !== "shared" ? companyMode : null} onLock={lock} onRefused={onRefused} onApproved={result => { setDecided(result); onDecided(submissionId); }} />
+        : <SharedCompanyApproval session={session} review={review} sourceIds={selectedSources} onLock={lock} onRefused={onRefused}
             onApproved={result => { setDecided(result); onDecided(submissionId); }} />}
     </>}
-    {finished && <ActivationStatus session={session} submissionId={submissionId} initial={activation ?? null} decided={decided} />}
+    {finished && <ActivationStatus session={session} submissionId={submissionId} initial={activation ?? null} decided={decided} onRefused={onRefused} />}
   </section></Card>;
 }
 
 /** Approval for an individual, a new company, or one existing company. A definite
  * denial releases the request; an uncertain result retries the identical body. */
-function DirectApproval({ session, review, sourceIds, companyMode, locked, onLock, onApproved }: {
+function DirectApproval({ session, review, sourceIds, companyMode, locked, onLock, onRefused, onApproved }: {
   session: StaffSession; review: Review; sourceIds: string[]; companyMode: Exclude<CompanyMode, "shared"> | null;
-  locked: boolean; onLock: (locked: boolean) => void; onApproved: (result: Decided) => void;
+  locked: boolean; onLock: (locked: boolean) => void; onRefused: (caught: unknown) => void; onApproved: (result: Decided) => void;
 }) {
   const [company, setCompany] = useState<ExistingCompany | null>(null);
   const [busy, setBusy] = useState(false);
@@ -185,11 +198,11 @@ function DirectApproval({ session, review, sourceIds, companyMode, locked, onLoc
       onApproved({ clientRecordId: value.clientRecordId, organizationRecordId: value.organizationRecordId, sourceIds, replayed: value.replayed });
     } catch (caught) {
       if (uncertainFailure(caught)) setUncertain(true);
-      else { frozen.current = null; setUncertain(false); onLock(false); setError("Approval was refused. Check your review permissions, the selected businesses and the company, then try again."); }
+      else { frozen.current = null; setUncertain(false); onLock(false); setError("Approval was refused. Check your review permissions, the selected businesses and the company, then try again."); onRefused(caught); }
     } finally { setBusy(false); }
   };
   return <div className="onboarding-approval-action">
-    {companyMode === "existing" && <ExistingCompanyPicker key={sourcesKey} session={session} review={review} sourceIds={sourceIds} selected={company} onSelect={setCompany} locked={locked || busy} />}
+    {companyMode === "existing" && <ExistingCompanyPicker key={sourcesKey} session={session} review={review} sourceIds={sourceIds} selected={company} onSelect={setCompany} locked={locked || busy} onRefused={onRefused} />}
     {error && <p className="onboarding-staff-error" role="alert">{error}</p>}
     <button type="button" className="button-orange" disabled={busy || !ready} onClick={() => void approve()}>
       {busy ? "Approving…" : uncertain ? "Retry same approval" : `Approve for ${destinationList(sourceIds)}`}</button>
@@ -199,8 +212,9 @@ function DirectApproval({ session, review, sourceIds, companyMode, locked, onLoc
   </div>;
 }
 
-function ExistingCompanyPicker({ session, review, sourceIds, selected, onSelect, locked }: {
+function ExistingCompanyPicker({ session, review, sourceIds, selected, onSelect, locked, onRefused }: {
   session: StaffSession; review: Review; sourceIds: string[]; selected: ExistingCompany | null; onSelect: (company: ExistingCompany | null) => void; locked: boolean;
+  onRefused: (caught: unknown) => void;
 }) {
   const [query, setQuery] = useState(review.fields.organizationName.slice(0, 150));
   const [results, setResults] = useState<ExistingCompany[] | null>(null);
@@ -215,7 +229,7 @@ function ExistingCompanyPicker({ session, review, sourceIds, selected, onSelect,
       const value = await post(session, "existing-companies", { submissionId: review.submissionId, sourceIds, query: query.trim(), afterRecordId: more ? after : null });
       if (!validExistingCompanies(value)) throw new Error("invalid_response");
       setResults(current => [...(more ? current ?? [] : []), ...value.companies]); setAfter(value.nextAfterRecordId);
-    } catch { setError("Companies couldn't be searched. Check your directory permissions and try again."); }
+    } catch (caught) { setError("Companies couldn't be searched. Check your directory permissions and try again."); onRefused(caught); }
     finally { setBusy(false); }
   };
   return <div className="onboarding-company-picker">
@@ -233,8 +247,8 @@ function ExistingCompanyPicker({ session, review, sourceIds, selected, onSelect,
 }
 
 /** Shared company: search, then a server-prepared plan, then approval of exactly that plan. */
-function SharedCompanyApproval({ session, review, sourceIds, onLock, onApproved }: {
-  session: StaffSession; review: Review; sourceIds: string[]; onLock: (locked: boolean) => void; onApproved: (result: Decided) => void;
+function SharedCompanyApproval({ session, review, sourceIds, onLock, onRefused, onApproved }: {
+  session: StaffSession; review: Review; sourceIds: string[]; onLock: (locked: boolean) => void; onRefused: (caught: unknown) => void; onApproved: (result: Decided) => void;
 }) {
   const [query, setQuery] = useState(review.fields.organizationName.slice(0, 150));
   const [results, setResults] = useState<SharedCompany[] | null>(null);
@@ -261,7 +275,7 @@ function SharedCompanyApproval({ session, review, sourceIds, onLock, onApproved 
       if (!validSharedCompanies(value)) throw new Error("invalid_response");
       if (run !== searchRun.current) return;
       setResults(current => [...(more ? current ?? [] : []), ...value.companies]); setAfter(value.nextAfterGroupId);
-    } catch { if (run === searchRun.current) setError("Shared companies couldn't be searched. Check your directory permissions and try again."); }
+    } catch (caught) { if (run !== searchRun.current) return; setError("Shared companies couldn't be searched. Check your directory permissions and try again."); onRefused(caught); }
     finally { setBusy(null); }
   };
   const prepare = async () => {
@@ -279,7 +293,7 @@ function SharedCompanyApproval({ session, review, sourceIds, onLock, onApproved 
       setPlan(value); setUncertain(null);
     } catch (caught) {
       if (uncertainFailure(caught)) setUncertain("plan");
-      else { setUncertain(null); release(); setError("The plan was refused. The company may have changed; search again and choose it again."); }
+      else { setUncertain(null); release(); setError("The plan was refused. The company may have changed; search again and choose it again."); onRefused(caught); }
     } finally { setBusy(null); }
   };
   const approve = async () => {
@@ -293,7 +307,7 @@ function SharedCompanyApproval({ session, review, sourceIds, onLock, onApproved 
       onApproved({ clientRecordId: value.clientRecordId, organizationRecordId: value.organizationRecordId, sourceIds: plan.sourceIds, replayed: value.replayed });
     } catch (caught) {
       if (uncertainFailure(caught)) setUncertain("approve");
-      else { setUncertain(null); release(); setError("Approval was refused. The plan may have expired or the company changed; prepare a new plan."); }
+      else { setUncertain(null); release(); setError("Approval was refused. The plan may have expired or the company changed; prepare a new plan."); onRefused(caught); }
     } finally { setBusy(null); }
   };
   if (sourceIds.length === 0) return <p className="onboarding-hint">Choose at least one business above to use a shared company.</p>;
@@ -327,28 +341,38 @@ function SharedCompanyApproval({ session, review, sourceIds, onLock, onApproved 
   </div>;
 }
 
-function ActivationStatus({ session, submissionId, initial, decided }: {
-  session: StaffSession; submissionId: string; initial: Activation | null; decided: Decided | null;
+function ActivationStatus({ session, submissionId, initial, decided, onRefused }: {
+  session: StaffSession; submissionId: string; initial: Activation | null; decided: Decided | null; onRefused: (caught: unknown) => void;
 }) {
   const [activation, setActivation] = useState<Activation | null>(initial);
   const [error, setError] = useState("");
   const [checking, setChecking] = useState(false);
-  const polls = useRef(0);
+  const [refused, setRefused] = useState(false);
+  // Bumped after every settled read, so the next bounded poll is scheduled even when
+  // the result (null, or a failed read) is the same as before.
+  const [settled, setSettled] = useState(0);
+  const polls = useRef(0), inFlight = useRef(false), mounted = useRef(true);
+  useEffect(() => () => { mounted.current = false; }, []);
   const check = useCallback(async () => {
-    setChecking(true);
+    if (inFlight.current) return;
+    inFlight.current = true; setChecking(true);
     try {
       const value = await post(session, "activation-status", { submissionId });
       if (!validActivation(value)) throw new Error("invalid_response");
+      if (!mounted.current) return;
       setActivation(value.activation); setError("");
-    } catch { setError("The activation status couldn't be checked right now."); }
-    finally { setChecking(false); }
-  }, [session, submissionId]);
+    } catch (caught) {
+      if (!mounted.current) return;
+      if (refusalStatus(caught)) { setRefused(true); setError("The activation status is outside your access."); onRefused(caught); }
+      else setError("The activation status couldn't be checked right now.");
+    } finally { inFlight.current = false; if (mounted.current) { setChecking(false); setSettled(value => value + 1); } }
+  }, [session, submissionId, onRefused]);
   useEffect(() => {
-    if (activation && activation.state !== "pending") return;
+    if (refused || (activation && activation.state !== "pending")) return;
     if (polls.current >= ACTIVATION_POLL_LIMIT) return;
-    const timer = window.setTimeout(() => { polls.current += 1; void check(); }, activation === null && polls.current === 0 ? 0 : ACTIVATION_POLL_MS);
+    const timer = window.setTimeout(() => { polls.current += 1; void check(); }, settled === 0 && activation === null ? 0 : ACTIVATION_POLL_MS);
     return () => window.clearTimeout(timer);
-  }, [activation, check, decided]);
+  }, [activation, check, settled, refused]);
   const tone = activation?.state === "active" ? "success" : activation?.state === "blocked" ? "danger" : "warning";
   return <div className="onboarding-approval-success" role="status" aria-live="polite">
     <h3>{decided ? "Approved" : "Already reviewed"}</h3>
@@ -357,6 +381,6 @@ function ActivationStatus({ session, submissionId, initial, decided }: {
     <div className="onboarding-activation"><StatusPill tone={tone}>{activation ? activation.state === "active" ? "Portal active" : activation.state === "blocked" ? "Needs attention" : "In progress" : "Starting"}</StatusPill>
       <span>{activation ? activationText[activation.reason] : "Waiting for portal activation to start."}</span></div>
     {error && <p className="onboarding-staff-error">{error}</p>}
-    {(!activation || activation.state === "pending") && <button type="button" className="button-ghost button-small" disabled={checking} onClick={() => { polls.current = 0; void check(); }}>{checking ? "Checking…" : "Check status now"}</button>}
+    {!refused && (!activation || activation.state === "pending") && <button type="button" className="button-ghost button-small" disabled={checking} onClick={() => { polls.current = 0; void check(); }}>{checking ? "Checking…" : "Check status now"}</button>}
   </div>;
 }
