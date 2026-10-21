@@ -136,6 +136,14 @@ export function checkMode(mode, fingerprint = frontendFingerprint()) {
   need(fingerprint === PROFILE.frontendSHA256, 'Frontend/build dependency changes require the retained asset union release path; backend mode cannot publish them');
 }
 
+export function buildModulePath(app, root = ROOT) {
+  need(Object.hasOwn(PROFILE.workers, app), 'Unknown Worker');
+  // Sync uses Wrangler's --outdir dist; the Vite frontends use named Worker
+  // subdirectories. Never select a stale nested Sync artifact as a fallback.
+  const relative = { operations: 'ledgetop_ops/index.js', client: 'ledgetop_clients/index.js', 'ops-sync': 'index.js' }[app];
+  return path.join(root, 'apps', app, 'dist', relative);
+}
+
 export class CloudflareReader {
   constructor(account, token, fetchImpl = fetch) {
     // Reject malformed header values before fetch/Headers can echo them in an
@@ -306,8 +314,7 @@ export async function main(argv = process.argv.slice(2)) {
   const cli = path.join(ROOT, 'apps', app, 'node_modules/wrangler/wrangler-dist/cli.js');
   need(fs.existsSync(cli) && hash(fs.readFileSync(cli)) === PROFILE.wranglerRuntimeSHA256, 'Installed Wrangler runtime changed; qualify before deployment');
   const reader = new CloudflareReader(process.env.CLOUDFLARE_ACCOUNT_ID, process.env.CLOUDFLARE_API_TOKEN);
-  const moduleDirectory = { operations: 'ledgetop_ops', client: 'ledgetop_clients', 'ops-sync': 'ledgetop_ops_sync' }[app];
-  const main = path.join(ROOT, 'apps', app, 'dist', moduleDirectory, 'index.js');
+  const main = buildModulePath(app);
   const parent = path.join(ROOT, '.backups/production-deploy');fs.mkdirSync(parent, { recursive: true, mode: 0o700 });
   const directory = path.join(parent, `${app}-${crypto.randomUUID()}`);
   const result = await executeDeployment({ app, mode: argv[3], cli, main, directory, reader });
