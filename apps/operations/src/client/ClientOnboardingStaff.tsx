@@ -1,18 +1,21 @@
-import { useEffect, useRef, useState, type FormEvent } from "react";
-import { Brand, Card, Loading } from "@ltds/ui";
+import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
+import { Brand, Card, Loading, Skeleton } from "@ltds/ui";
 import { ClientOnboardingInbox } from "./ClientOnboardingReview";
-import { endpoint, json, post, uncertainFailure, uuid, validSession, record, type StaffSession } from "./onboarding-staff-api";
+import { authorityLost, endpoint, json, post, record, uncertainFailure, uuid, validSession, type RequestFailure, type StaffSession } from "./onboarding-staff-api";
 import "./ClientOnboardingStaff.css";
 
-type Scope = { businessAreaId: string; divisionId: string };
+type ScopeChoice = { businessAreaId: string; name: string; allowAreaWide: boolean; divisions: Array<{ divisionId: string; name: string }> };
+/** divisionId "" means not yet chosen; null means the whole business area. */
+type ScopeRow = { businessAreaId: string; divisionId: string | null | "" };
 type Created = { invitationId: string; expiresAt: string; requestSha256: string; state: string };
 /** The recipient link carries the one-time secret in its #fragment: it lives only in
  * memory, is never rendered as text, and is never rebuilt from the secret. */
 type Revealed = { invitationId: string; expiresAt: string; link: string | null; secret: string };
-type TargetMode = "proposed-scopes" | "existing-client";
 
 const MAX_UI_SCOPES = 16;
 const SESSION_REFRESH_MS = 8 * 60 * 1000;
+const MAX_TIMER_MS = 2_147_000_000;
+const AREA_WIDE = "__area__";
 const localDateTime = (date: Date) => {
   const part = (value: number) => String(value).padStart(2, "0");
   return `${date.getFullYear()}-${part(date.getMonth() + 1)}-${part(date.getDate())}T${part(date.getHours())}:${part(date.getMinutes())}`;
@@ -26,6 +29,25 @@ function validCreated(value: Record<string, unknown>): value is Created & Record
   return typeof value.invitationId === "string" && typeof value.expiresAt === "string"
     && typeof value.requestSha256 === "string" && /^[0-9a-f]{64}$/.test(value.requestSha256) && typeof value.state === "string";
 }
+const ID = /^[A-Za-z0-9][A-Za-z0-9:._-]{0,190}$/;
+export function validScopeChoices(value: Record<string, unknown>): ScopeChoice[] | null {
+  if (!Array.isArray(value.scopes) || value.scopes.length > 256) return null;
+  const areas = new Set<string>();
+  for (const scope of value.scopes) {
+    if (!record(scope) || typeof scope.businessAreaId !== "string" || !ID.test(scope.businessAreaId) || areas.has(scope.businessAreaId)
+      || typeof scope.name !== "string" || !scope.name.trim() || scope.name.length > 300 || typeof scope.allowAreaWide !== "boolean"
+      || !Array.isArray(scope.divisions) || scope.divisions.length > 256) return null;
+    areas.add(scope.businessAreaId);
+    const divisions = new Set<string>();
+    for (const division of scope.divisions) {
+      if (!record(division) || typeof division.divisionId !== "string" || !ID.test(division.divisionId) || divisions.has(division.divisionId)
+        || typeof division.name !== "string" || !division.name.trim() || division.name.length > 300) return null;
+      divisions.add(division.divisionId);
+    }
+    if (!scope.allowAreaWide && scope.divisions.length === 0) return null;
+  }
+  return value.scopes as ScopeChoice[];
+}
 /** Accepts only an https onboarding link for exactly this invitation. */
 export function safeRecipientLink(value: unknown, invitationId: string): string | null {
   if (typeof value !== "string" || value.length > 512) return null;
@@ -35,38 +57,62 @@ export function safeRecipientLink(value: unknown, invitationId: string): string 
       && url.pathname === `/onboarding/${invitationId}` && /^#[0-9a-f]{64}$/.test(url.hash) ? url.href : null;
   } catch { return null; }
 }
-
 export function ClientOnboardingStaff() {
-  const [session, setSession] = useState<StaffSession | null>(null);
+  // One stable session object: a refresh rotates the token in place, so open reviews,
+  // inbox pages and in-flight retries are not reloaded or remounted.
+  const sessionRef = useRef<StaffSession | null>(null);
+  const [verifiedUntil, setVerifiedUntil] = useState<string | null>(null);
   const [accessError, setAccessError] = useState("");
+  const close = useCallback((message: string) => { sessionRef.current = null; setVerifiedUntil(null); setAccessError(message); }, []);
   useEffect(() => {
     const controller = new AbortController();
     const load = (first: boolean) => json(`${endpoint}/session`, { method: "GET", signal: controller.signal, headers: { "X-Native-Staff-Request": "1" } })
-      .then(value => { if (!validSession(value)) throw new Error("invalid_response"); setSession({ csrfToken: value.csrfToken, verifiedUntil: value.verifiedUntil }); })
-      .catch(error => { if (controller.signal.aborted || !first) return; setAccessError(error instanceof Error && "status" in error && error.status === 404
-        ? "This administrator-only capability is not enabled." : "Administrator onboarding access could not be verified."); });
+      .then(value => {
+        if (!validSession(value)) throw new Error("invalid_response");
+        if (!first && !sessionRef.current) return;
+        if (sessionRef.current) Object.assign(sessionRef.current, { csrfToken: value.csrfToken, verifiedUntil: value.verifiedUntil });
+        else sessionRef.current = { csrfToken: value.csrfToken, verifiedUntil: value.verifiedUntil };
+        setVerifiedUntil(value.verifiedUntil);
+      })
+      .catch(error => {
+        if (controller.signal.aborted) return;
+        // On a refresh, a definite refusal closes everything; a transient failure
+        // keeps the page only until the current verification deadline.
+        if (!first && !authorityLost(error)) return;
+        close((error as RequestFailure | null)?.status === 404 && first ? "This administrator-only capability is not enabled."
+          : first ? "Administrator onboarding access could not be verified." : "Your onboarding access changed. Reload the page to continue.");
+      });
     void load(true);
     // The request token rotates every ten minutes; refresh it so long reviews keep working.
     const timer = window.setInterval(() => void load(false), SESSION_REFRESH_MS);
     return () => { controller.abort(); window.clearInterval(timer); };
-  }, []);
+  }, [close]);
+  useEffect(() => {
+    if (!verifiedUntil) return;
+    const remaining = Date.parse(verifiedUntil) - Date.now();
+    const expire = () => close("Your onboarding session expired. Reload the page to continue.");
+    if (!(remaining > 0)) { expire(); return; }
+    const timer = window.setTimeout(expire, Math.min(remaining, MAX_TIMER_MS));
+    return () => window.clearTimeout(timer);
+  }, [verifiedUntil, close]);
+  const lost = useCallback(() => close("Your onboarding access changed. Reload the page to continue."), [close]);
 
+  const session = sessionRef.current;
   if (accessError) return <main className="onboarding-staff-gate"><Card><h1>Client onboarding unavailable</h1><p role="alert">{accessError}</p><a className="button-ghost" href="/">Return to Operations</a></Card></main>;
-  if (!session) return <main className="onboarding-staff-gate"><Loading /></main>;
+  if (!session || !verifiedUntil) return <main className="onboarding-staff-gate"><Loading /></main>;
   return <div className="onboarding-staff-shell"><header><Brand product="Operations" name="Ledge Top" /><a href="/">Exit onboarding</a></header><main>
     <div className="onboarding-staff-heading"><p className="eyebrow">Client onboarding</p><h1>Client onboarding</h1>
       <p>Invite a client to fill in their profile, then review what they submit and choose which Ledge Top businesses they belong to.</p></div>
-    <ClientOnboardingInbox session={session} />
-    <ClientOnboardingIssuer session={session} />
+    <ClientOnboardingInbox session={session} onAuthorityLost={lost} />
+    <ClientOnboardingIssuer session={session} onAuthorityLost={lost} />
   </main></div>;
 }
 
-export function ClientOnboardingIssuer({ session }: { session: StaffSession }) {
+export function ClientOnboardingIssuer({ session, onAuthorityLost }: { session: StaffSession; onAuthorityLost: () => void }) {
   const [commandId] = useState(uuid);
   const [expiresAt, setExpiresAt] = useState(defaultExpiry);
-  const [targetMode, setTargetMode] = useState<TargetMode>("proposed-scopes");
-  const [targetClientRecordId, setTargetClientRecordId] = useState("");
-  const [scopes, setScopes] = useState<Scope[]>([{ businessAreaId: "", divisionId: "" }]);
+  const [choices, setChoices] = useState<ScopeChoice[] | null | "unavailable">(null);
+  const [rows, setRows] = useState<ScopeRow[]>([{ businessAreaId: "", divisionId: "" }]);
   const [created, setCreated] = useState<Created | null>(null);
   const [revealed, setRevealed] = useState<Revealed | null>(null);
   const [busy, setBusy] = useState<"create" | "reveal" | null>(null);
@@ -75,22 +121,36 @@ export function ClientOnboardingIssuer({ session }: { session: StaffSession }) {
   const [notice, setNotice] = useState("");
   const [popupBlocked, setPopupBlocked] = useState(false);
   const revealAttempted = useRef(false);
+  const frozen = Boolean(created || uncertain || busy);
 
-  const mutateScope = (index: number, patch: Partial<Scope>) => setScopes(current => current.map((scope, position) => position === index ? { ...scope, ...patch } : scope));
+  useEffect(() => {
+    let active = true;
+    void post(session, "scope-choices", {}).then(value => {
+      const parsed = validScopeChoices(value);
+      if (active) setChoices(parsed ?? "unavailable");
+    }).catch(caught => { if (!active) return; if (authorityLost(caught)) onAuthorityLost(); else setChoices("unavailable"); });
+    return () => { active = false; };
+    // Business areas are read once per staff session.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  const available = Array.isArray(choices) ? choices : [];
+  const area = (id: string) => available.find(choice => choice.businessAreaId === id);
+  const rowKey = (row: ScopeRow) => `${row.businessAreaId}\u0000${row.divisionId ?? AREA_WIDE}`;
+  const complete = rows.length > 0 && rows.every(row => row.businessAreaId && row.divisionId !== "") && new Set(rows.map(rowKey)).size === rows.length;
+  const update = (index: number, patch: Partial<ScopeRow>) => setRows(current => current.map((row, position) => position === index ? { ...row, ...patch } : row));
+
   const submit = async (event: FormEvent) => {
     event.preventDefault();
-    if (busy || created || uncertain) return;
+    if (busy || created || uncertain || !Array.isArray(choices)) return;
     const parsedExpiry = new Date(expiresAt);
     const invalid = !Number.isFinite(parsedExpiry.valueOf()) || parsedExpiry <= new Date() ? "Choose a future expiration time."
-      : targetMode === "existing-client" && !targetClientRecordId.trim() ? "Enter the existing client record ID."
-      : targetMode === "proposed-scopes" && scopes.some(scope => !scope.businessAreaId.trim()) ? "Every business area needs an ID." : "";
+      : !complete ? "Choose a business area and division for every row, without repeating one." : "";
     setError(invalid);
     if (invalid) return;
     setBusy("create");
     try {
-      const value = await post(session, "create", { commandId, expiresAt: parsedExpiry.toISOString(),
-        targetClientRecordId: targetMode === "existing-client" ? targetClientRecordId.trim() : null,
-        scopes: targetMode === "existing-client" ? null : scopes.map(scope => ({ businessAreaId: scope.businessAreaId.trim(), divisionId: scope.divisionId.trim() || null })) });
+      const value = await post(session, "create", { commandId, expiresAt: parsedExpiry.toISOString(), targetClientRecordId: null,
+        scopes: rows.map(row => ({ businessAreaId: row.businessAreaId, divisionId: row.divisionId === "" ? null : row.divisionId })) });
       if (!validCreated(value)) throw new Error("invalid_response");
       setCreated(value);
     } catch (caught) {
@@ -130,24 +190,37 @@ export function ClientOnboardingIssuer({ session }: { session: StaffSession }) {
   };
 
   return <Card><section className="onboarding-created" aria-labelledby="onboarding-invite-title">
-    <h2 id="onboarding-invite-title">Invite a client</h2>
+    <h2 id="onboarding-invite-title">Invite a new client</h2>
     <p>Creates a one-time link where the client fills in their profile. It doesn't give the client any access until you review and approve their submission.</p>
     <form className="onboarding-staff-form" onSubmit={submit}>
-      <label>Link expires<input type="datetime-local" value={expiresAt} min={localDateTime(new Date(Date.now() + 60_000))} disabled={Boolean(created || uncertain)} onChange={event => setExpiresAt(event.target.value)} required /></label>
-      <fieldset className="wide onboarding-target-mode"><legend>Who is this for?</legend>
-        <label><input type="radio" name="target-mode" value="proposed-scopes" checked={targetMode === "proposed-scopes"} disabled={Boolean(created || uncertain)} onChange={() => { setTargetMode("proposed-scopes"); setTargetClientRecordId(""); }} />A new client</label>
-        <label><input type="radio" name="target-mode" value="existing-client" checked={targetMode === "existing-client"} disabled={Boolean(created || uncertain)} onChange={() => setTargetMode("existing-client")} />An existing client record</label>
+      <label>Link expires<input type="datetime-local" value={expiresAt} min={localDateTime(new Date(Date.now() + 60_000))} disabled={frozen} onChange={event => setExpiresAt(event.target.value)} required /></label>
+      <fieldset className="wide onboarding-scopes"><legend>Business areas</legend>
+        {choices === null && <Skeleton variant="text" lines={2} label="Loading business areas…" />}
+        {choices === "unavailable" && <p className="onboarding-staff-error" role="alert">Business areas couldn't be loaded, so invitations can't be created right now.</p>}
+        {Array.isArray(choices) && choices.length === 0 && <p role="status">You don't have any business areas you can invite clients into.</p>}
+        {Array.isArray(choices) && choices.length > 0 && <>{rows.map((row, index) => {
+          const selected = area(row.businessAreaId);
+          return <div className="onboarding-scope" key={index}>
+            <label>Business area<select value={row.businessAreaId} disabled={frozen} required
+              onChange={event => update(index, { businessAreaId: event.target.value, divisionId: "" })}>
+              <option value="">Choose a business area</option>
+              {available.map(choice => <option key={choice.businessAreaId} value={choice.businessAreaId}>{choice.name}</option>)}
+            </select></label>
+            <label>Division<select value={row.divisionId === null ? AREA_WIDE : row.divisionId} disabled={frozen || !selected} required
+              onChange={event => update(index, { divisionId: event.target.value === AREA_WIDE ? null : event.target.value })}>
+              <option value="">{selected ? "Choose a division" : "Choose a business area first"}</option>
+              {selected?.allowAreaWide && <option value={AREA_WIDE}>Whole business area</option>}
+              {selected?.divisions.map(division => <option key={division.divisionId} value={division.divisionId}>{division.name}</option>)}
+            </select></label>
+            {rows.length > 1 && !frozen && <button type="button" className="button-ghost" onClick={() => setRows(current => current.filter((_, position) => position !== index))}>Remove</button>}
+          </div>;
+        })}
+          {!frozen && <button type="button" className="button-ghost" disabled={rows.length >= MAX_UI_SCOPES} onClick={() => setRows(current => current.length >= MAX_UI_SCOPES ? current : [...current, { businessAreaId: "", divisionId: "" }])}>Add business area</button>}
+          {rows.length >= MAX_UI_SCOPES && <p role="status">Up to {MAX_UI_SCOPES} business areas per invitation.</p>}</>}
       </fieldset>
-      {targetMode === "existing-client" && <label className="wide">Existing client record ID<input value={targetClientRecordId} maxLength={191} disabled={Boolean(created || uncertain)} onChange={event => setTargetClientRecordId(event.target.value)} required /></label>}
-      {targetMode === "proposed-scopes" && <fieldset className="wide"><legend>Business areas</legend>{scopes.map((scope, index) => <div className="onboarding-scope" key={index}>
-        <label>Business area ID<input value={scope.businessAreaId} maxLength={128} disabled={Boolean(created || uncertain)} onChange={event => mutateScope(index, { businessAreaId: event.target.value })} required /></label>
-        <label>Division ID <small>Optional</small><input value={scope.divisionId} maxLength={128} disabled={Boolean(created || uncertain)} onChange={event => mutateScope(index, { divisionId: event.target.value })} /></label>
-        {scopes.length > 1 && !created && !uncertain && <button type="button" className="button-ghost" onClick={() => setScopes(current => current.filter((_, position) => position !== index))}>Remove</button>}
-      </div>)}{!created && !uncertain && <button type="button" className="button-ghost" disabled={scopes.length >= MAX_UI_SCOPES} onClick={() => setScopes(current => current.length >= MAX_UI_SCOPES ? current : [...current, { businessAreaId: "", divisionId: "" }])}>Add business area</button>}
-        {scopes.length >= MAX_UI_SCOPES && <p role="status">Up to {MAX_UI_SCOPES} business areas per invitation.</p>}</fieldset>}
       {error && <p className="wide onboarding-staff-error" role="alert">{error}</p>}
       {uncertain === "create" && <p className="wide onboarding-staff-error" role="alert"><strong>The invitation result isn't confirmed.</strong> Don't create another one from this page. Reference <code>{commandId}</code> if an administrator needs to check it.</p>}
-      {!created && !uncertain && <button className="button-orange wide" disabled={Boolean(busy)}>{busy === "create" ? "Creating…" : "Create invitation"}</button>}
+      {!created && !uncertain && <button className="button-orange wide" disabled={Boolean(busy) || !Array.isArray(choices) || choices.length === 0 || !complete}>{busy === "create" ? "Creating…" : "Create invitation"}</button>}
     </form>
     {created && <div className="onboarding-invite-ready">
       <p>Invitation created. It expires {new Date(created.expiresAt).toLocaleString()}.</p>

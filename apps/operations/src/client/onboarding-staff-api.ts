@@ -71,6 +71,8 @@ export const uncertainFailure = (caught: unknown) => {
   const status = caught instanceof Error && "status" in caught ? Number((caught as RequestFailure).status) : 0;
   return !status || status >= 500 || (caught instanceof Error && caught.message === "invalid_response");
 };
+/** A definite authentication or capability refusal: privileged views must close. */
+export const authorityLost = (caught: unknown) => [401, 403, 404].includes(Number((caught as RequestFailure | null)?.status ?? 0));
 export const post = (session: StaffSession, route: string, body: unknown) => json(`${endpoint}/${route}`, { method: "POST",
   headers: { "Content-Type": "application/json", "X-CSRF-Token": session.csrfToken }, body: JSON.stringify(body) });
 

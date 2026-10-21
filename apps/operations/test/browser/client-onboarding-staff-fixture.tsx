@@ -5,7 +5,7 @@ import { ClientOnboardingStaff } from "../../src/client/ClientOnboardingStaff";
 
 type Call = { path: string; body: unknown };
 const calls: Call[] = [];
-const fixtureWindow = window as Window & { onboardingCalls?: Call[]; onboardingMode?: string; copied?: string[]; opened?: string[] };
+const fixtureWindow = window as Window & { onboardingCalls?: Call[]; onboardingMode?: string; copied?: string[]; opened?: string[]; release?: () => void };
 fixtureWindow.onboardingCalls = calls;
 fixtureWindow.copied = [];
 fixtureWindow.opened = [];
@@ -14,7 +14,9 @@ const consumerId = "33333333-3333-4333-8333-333333333333", businessId = "7777777
 const laterId = "88888888-8888-4888-8888-888888888888";
 const invitationId = "11111111-1111-4111-8111-111111111111";
 const primary = "project-alpha:primary", secondary = "project-alpha:secondary";
-let approved = false, activationReads = 0, approvalAttempts = 0;
+let approved = false, activationReads = 0, approvalAttempts = 0, sessionReads = 0;
+// Delayed modes hold the write until the test calls window.release().
+const held = () => new Promise<void>(resolve => { fixtureWindow.release = resolve; });
 
 Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText: async (value: string) => { fixtureWindow.copied!.push(value); } } });
 window.open = ((url?: string | URL) => { fixtureWindow.opened!.push(String(url)); return null; }) as typeof window.open;
@@ -29,8 +31,12 @@ window.fetch = async (input, init) => {
   calls.push({ path, body });
   const route = path.split("/").at(-1);
   if (route === "session") {
+    sessionReads += 1;
     if (mode === "disabled") return new Response(JSON.stringify({ error: "not_found" }), { status: 404 });
-    return Response.json({ csrfToken: "a".repeat(64), verifiedUntil: "2099-01-01T00:00:00.000Z" });
+    if (mode === "refresh-denied" && sessionReads > 1) return Response.json({ error: "client_onboarding_denied" }, { status: 403 });
+    if (mode === "refresh-unavailable" && sessionReads > 1) return Response.json({ error: "client_onboarding_unavailable" }, { status: 503 });
+    return Response.json({ csrfToken: String(sessionReads % 10).repeat(64),
+      verifiedUntil: mode === "short-session" ? new Date(Date.now() + 60_000).toISOString() : "2099-01-01T00:00:00.000Z" });
   }
   if (route === "inbox") {
     if (mode === "inbox-denied") return Response.json({ error: "client_onboarding_denied" }, { status: 403 });
@@ -53,8 +59,15 @@ window.fetch = async (input, init) => {
     return Response.json({ activation: { clientRecordId: "55555555-5555-4555-8555-555555555555", updatedAt: "2098-01-05T00:00:00.000Z",
       state: activationReads > 1 ? "active" : "pending", reason: activationReads > 1 ? "active" : "awaiting_pa" } });
   }
+  if (route === "scope-choices") {
+    if (mode === "scopes-unavailable") return Response.json({ error: "client_onboarding_unavailable" }, { status: 503 });
+    return Response.json({ scopes: mode === "no-scopes" ? [] : [
+      { businessAreaId: "area:drone", name: "Drone Services", allowAreaWide: true, divisions: [{ divisionId: "division:inspections", name: "Inspections" }] },
+      { businessAreaId: "area:tech", name: "Technologies", allowAreaWide: false, divisions: [{ divisionId: "division:web", name: "Web" }] }] });
+  }
   if (route === "approve") {
     approvalAttempts += 1;
+    if (mode === "delayed-approval") await held();
     if (mode === "uncertain-approval" && approvalAttempts === 1) return Response.json({ error: "client_onboarding_unavailable" }, { status: 503 });
     approved = true;
     return Response.json({ decisionId: "44444444-4444-4444-8444-444444444444", submissionId: body.submissionId,
@@ -68,6 +81,7 @@ window.fetch = async (input, init) => {
   if (route === "shared-company-choices") return Response.json({ approvalAvailable: false, nextAfterGroupId: null, companies: [
     { groupId: "99999999-9999-4999-8999-999999999999", expectedVersion: 3, name: "Example LLC", reviewAvailable: true, reason: null,
       members: [{ recordId: "org:ltt", expectedVersion: 2, sourceIds: [secondary] }, { recordId: "org:ltds", expectedVersion: 5, sourceIds: [primary] }] } ] });
+  if (route === "shared-company-plan" && mode === "delayed-plan") await held();
   if (route === "shared-company-plan") return Response.json({ planId: body.commandId, submissionId: body.submissionId,
     companyGroupId: body.organizationSelection.groupId, companyGroupVersion: 3, sourceIds: body.sourceIds, expiresAt: "2099-01-01T00:00:00.000Z",
     state: "reviewed", approvalAvailable: true, replayed: false, children: body.sourceIds.map((sourceId: string, index: number) => ({

@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { safeRecipientLink } from "../src/client/ClientOnboardingStaff";
+import { safeRecipientLink, validScopeChoices } from "../src/client/ClientOnboardingStaff";
 import { submissionFromLocation } from "../src/client/ClientOnboardingReview";
 
 const read = (name: string) => readFileSync(new URL(`../src/client/${name}`, import.meta.url), "utf8");
@@ -31,6 +31,17 @@ describe("client onboarding staff UI security boundary", () => {
       `https://portal.example.test/onboarding/${id}?next=x#${secret}`, `https://user@portal.example.test/onboarding/${id}#${secret}`,
       `https://portal.example.test/onboarding/${id}#short`, `javascript:alert(1)//onboarding/${id}#${secret}`, null, 7])
       expect(safeRecipientLink(value, id)).toBeNull();
+  });
+
+  it("accepts only well-formed named scope choices", () => {
+    const area = { businessAreaId: "area:drone", name: "Drone Services", allowAreaWide: true, divisions: [{ divisionId: "division:a", name: "A" }] };
+    expect(validScopeChoices({ scopes: [area] })).toEqual([area]);
+    expect(validScopeChoices({ scopes: [] })).toEqual([]);
+    for (const value of [{}, { scopes: [area, area] }, { scopes: [{ ...area, name: " " }] }, { scopes: [{ ...area, businessAreaId: "../x" }] },
+      { scopes: [{ ...area, allowAreaWide: false, divisions: [] }] }, { scopes: [{ ...area, divisions: [{ divisionId: "d", name: "" }] }] }])
+      expect(validScopeChoices(value as Record<string, unknown>)).toBeNull();
+    expect(staff).toContain('post(session, "scope-choices", {})');
+    expect(staff).not.toMatch(/Business area ID|Existing client record/);
   });
 
   it("opens only an exact submission UUID from an email link", () => {

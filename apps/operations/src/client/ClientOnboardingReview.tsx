@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import { Card, Skeleton, StatusPill } from "@ltds/ui";
 import {
-  activationText, destinationList, destinationName, existingReasonText, post, sharedReasonText, uncertainFailure, uuid, UUID,
+  activationText, authorityLost, destinationList, destinationName, existingReasonText, post, sharedReasonText, uncertainFailure, uuid, UUID,
   validActivation, validApproval, validChoices, validExistingCompanies, validInbox, validReview, validSharedApproval,
   validSharedCompanies, validSharedPlan,
   type Activation, type ExistingCompany, type InboxCursor, type InboxItem, type OrganizationSelection, type Review,
@@ -18,7 +18,7 @@ export function submissionFromLocation(search: string): string | null {
   return value && UUID.test(value) ? value : null;
 }
 
-export function ClientOnboardingInbox({ session }: { session: StaffSession }) {
+export function ClientOnboardingInbox({ session, onAuthorityLost }: { session: StaffSession; onAuthorityLost: () => void }) {
   const [items, setItems] = useState<InboxItem[]>([]);
   const [cursor, setCursor] = useState<InboxCursor | null>(null);
   const [loading, setLoading] = useState(true);
@@ -38,13 +38,14 @@ export function ClientOnboardingInbox({ session }: { session: StaffSession }) {
         return [...merged.values()];
       });
       setCursor(value.nextCursor);
-    } catch {
+    } catch (caught) {
       if (run !== generation.current) return;
-      // Denied or revoked reviewers see no rows at all.
-      setItems([]); setCursor(null);
+      // Denied or revoked reviewers see no rows and no open review at all.
+      setItems([]); setCursor(null); setSelected(null);
+      if (authorityLost(caught)) { onAuthorityLost(); return; }
       setError("Submissions awaiting review couldn't be loaded. Your review access may have changed.");
     } finally { if (run === generation.current) setLoading(false); }
-  }, [session]);
+  }, [session, onAuthorityLost]);
   useEffect(() => { void load(null); }, [load]);
   const open = (submissionId: string) => {
     setSelected(submissionId);
@@ -68,12 +69,12 @@ export function ClientOnboardingInbox({ session }: { session: StaffSession }) {
         </button></li>)}</ul>}
       {cursor && <button type="button" className="button-ghost" disabled={loading} onClick={() => void load(cursor)}>{loading ? "Loading…" : "Load more submissions"}</button>}
     </section></Card>
-    {selected && <ClientOnboardingReviewPanel key={selected} session={session} submissionId={selected} onDecided={decided} />}
+    {selected && <ClientOnboardingReviewPanel key={selected} session={session} submissionId={selected} onDecided={decided} onAuthorityLost={onAuthorityLost} />}
   </>;
 }
 
-export function ClientOnboardingReviewPanel({ session, submissionId, onDecided }: {
-  session: StaffSession; submissionId: string; onDecided: (submissionId: string) => void;
+export function ClientOnboardingReviewPanel({ session, submissionId, onDecided, onAuthorityLost }: {
+  session: StaffSession; submissionId: string; onDecided: (submissionId: string) => void; onAuthorityLost: () => void;
 }) {
   const [review, setReview] = useState<Review | null>(null);
   const [loadError, setLoadError] = useState("");
@@ -83,8 +84,14 @@ export function ClientOnboardingReviewPanel({ session, submissionId, onDecided }
   const [selectedSources, setSelectedSources] = useState<string[]>([]);
   const [companyMode, setCompanyMode] = useState<CompanyMode>("new");
   const [decided, setDecided] = useState<Decided | null>(null);
-  // An uncertain approval freezes the reviewed choices so a retry sends the identical request.
+  // From the moment an approval or plan is sent until it settles (and while its result
+  // is uncertain or a plan is held) the reviewed choices are frozen, so a retry sends the
+  // identical request. The ref closes the gap before React re-renders.
   const [locked, setLocked] = useState(false);
+  const lockRef = useRef(false);
+  const lock = useCallback((value: boolean) => { lockRef.current = value; setLocked(value); }, []);
+  const chooseSource = (sourceId: string, checked: boolean) => { if (!lockRef.current) setSelectedSources(current => checked ? [...new Set([...current, sourceId])].sort() : current.filter(value => value !== sourceId)); };
+  const chooseMode = (mode: CompanyMode) => { if (!lockRef.current) setCompanyMode(mode); };
 
   useEffect(() => {
     let active = true;
@@ -100,10 +107,14 @@ export function ClientOnboardingReviewPanel({ session, submissionId, onDecided }
         if (choices.status === "fulfilled" && validChoices(choices.value)) setAvailable([...choices.value.sourceIds].sort());
         else { setAvailable([]); setSourceNote("The available businesses couldn't be checked. You can still approve in Operations only, or reload this submission."); }
         setActivation(status.status === "fulfilled" && validActivation(status.value) ? status.value.activation : null);
-      } catch { if (active) setLoadError("This submission wasn't found, or it's outside your review access."); }
+      } catch (caught) {
+        if (!active) return;
+        if ((caught as { status?: number } | null)?.status === 401) { onAuthorityLost(); return; }
+        setLoadError("This submission wasn't found, or it's outside your review access.");
+      }
     })();
     return () => { active = false; };
-  }, [session, submissionId]);
+  }, [session, submissionId, onAuthorityLost]);
 
   if (loadError) return <Card><p className="onboarding-staff-error" role="alert">{loadError}</p></Card>;
   if (!review) return <Card><Skeleton variant="form" rows={4} label="Loading submission…" /></Card>;
@@ -123,21 +134,21 @@ export function ClientOnboardingReviewPanel({ session, submissionId, onDecided }
       <fieldset className="onboarding-destinations"><legend>Which Ledge Top businesses is this client for?</legend>
         {available.length === 0 && <p>No Project Alpha businesses are available for this submission.</p>}
         {available.map(sourceId => <label key={sourceId}><input type="checkbox" checked={selectedSources.includes(sourceId)} disabled={locked}
-          onChange={event => setSelectedSources(current => event.target.checked ? [...current, sourceId].sort() : current.filter(value => value !== sourceId))} />
+          onChange={event => chooseSource(sourceId, event.target.checked)} />
           {destinationName(sourceId)}</label>)}
         {sourceNote && <p role="status">{sourceNote}</p>}
         <p className="onboarding-hint">{selectedSources.length === 0 ? "No business selected: the client is approved in Operations only."
           : `A client record is created in ${destinationList(selectedSources)}. Project Alpha stays the owner of documents and finances.`}</p>
       </fieldset>
       {business && <fieldset className="onboarding-company-mode"><legend>Company</legend>
-        <label><input type="radio" name={`company-${submissionId}`} disabled={locked} checked={companyMode === "new"} onChange={() => setCompanyMode("new")} />New company “{f.organizationName}”</label>
-        <label><input type="radio" name={`company-${submissionId}`} disabled={locked} checked={companyMode === "existing"} onChange={() => setCompanyMode("existing")} />An existing company in Operations</label>
-        <label><input type="radio" name={`company-${submissionId}`} disabled={locked} checked={companyMode === "shared"} onChange={() => setCompanyMode("shared")} />An existing company shared by both businesses</label>
+        <label><input type="radio" name={`company-${submissionId}`} disabled={locked} checked={companyMode === "new"} onChange={() => chooseMode("new")} />New company “{f.organizationName}”</label>
+        <label><input type="radio" name={`company-${submissionId}`} disabled={locked} checked={companyMode === "existing"} onChange={() => chooseMode("existing")} />An existing company in Operations</label>
+        <label><input type="radio" name={`company-${submissionId}`} disabled={locked} checked={companyMode === "shared"} onChange={() => chooseMode("shared")} />An existing company shared by both businesses</label>
       </fieldset>}
       {!business || companyMode !== "shared"
-        ? <DirectApproval key={`${companyMode}:${selectedSources.join(",")}`} session={session} review={review} sourceIds={selectedSources}
-            companyMode={business && companyMode !== "shared" ? companyMode : null} onLock={setLocked} onApproved={result => { setDecided(result); onDecided(submissionId); }} />
-        : <SharedCompanyApproval key={selectedSources.join(",")} session={session} review={review} sourceIds={selectedSources} onLock={setLocked}
+        ? <DirectApproval session={session} review={review} sourceIds={selectedSources} locked={locked}
+            companyMode={business && companyMode !== "shared" ? companyMode : null} onLock={lock} onApproved={result => { setDecided(result); onDecided(submissionId); }} />
+        : <SharedCompanyApproval session={session} review={review} sourceIds={selectedSources} onLock={lock}
             onApproved={result => { setDecided(result); onDecided(submissionId); }} />}
     </>}
     {finished && <ActivationStatus session={session} submissionId={submissionId} initial={activation ?? null} decided={decided} />}
@@ -146,37 +157,39 @@ export function ClientOnboardingReviewPanel({ session, submissionId, onDecided }
 
 /** Approval for an individual, a new company, or one existing company. A definite
  * denial releases the request; an uncertain result retries the identical body. */
-function DirectApproval({ session, review, sourceIds, companyMode, onLock, onApproved }: {
+function DirectApproval({ session, review, sourceIds, companyMode, locked, onLock, onApproved }: {
   session: StaffSession; review: Review; sourceIds: string[]; companyMode: Exclude<CompanyMode, "shared"> | null;
-  onLock: (locked: boolean) => void; onApproved: (result: Decided) => void;
+  locked: boolean; onLock: (locked: boolean) => void; onApproved: (result: Decided) => void;
 }) {
   const [company, setCompany] = useState<ExistingCompany | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const frozen = useRef<string | null>(null);
   const [uncertain, setUncertain] = useState(false);
-  useEffect(() => onLock(uncertain), [uncertain, onLock]);
+  const sourcesKey = sourceIds.join(",");
+  // A changed business or company mode (only possible while unfrozen) invalidates the chosen company.
+  useEffect(() => { if (!frozen.current) setCompany(null); }, [sourcesKey, companyMode]);
   const selection: OrganizationSelection | null = companyMode === "new" ? { kind: "new" }
     : companyMode === "existing" && company ? { kind: "existing", recordId: company.recordId, expectedVersion: company.expectedVersion } : null;
   const ready = companyMode === null || selection !== null;
   const approve = async () => {
-    if (busy || !ready) return;
-    setBusy(true); setError("");
+    if (busy || !ready || (locked && !frozen.current)) return;
+    onLock(true); setBusy(true); setError("");
     const body = frozen.current ?? JSON.stringify({ submissionId: review.submissionId, fieldsSha256: review.fieldsSha256, sourceIds,
       ...(companyMode ? { organizationSelection: selection } : {}) });
     frozen.current = body;
     try {
       const value = await post(session, "approve", JSON.parse(body));
       if (!validApproval(value) || value.submissionId !== review.submissionId) throw new Error("invalid_response");
-      frozen.current = null; setUncertain(false);
+      setUncertain(false);
       onApproved({ clientRecordId: value.clientRecordId, organizationRecordId: value.organizationRecordId, sourceIds, replayed: value.replayed });
     } catch (caught) {
       if (uncertainFailure(caught)) setUncertain(true);
-      else { frozen.current = null; setUncertain(false); setError("Approval was refused. Check your review permissions, the selected businesses and the company, then try again."); }
+      else { frozen.current = null; setUncertain(false); onLock(false); setError("Approval was refused. Check your review permissions, the selected businesses and the company, then try again."); }
     } finally { setBusy(false); }
   };
   return <div className="onboarding-approval-action">
-    {companyMode === "existing" && <ExistingCompanyPicker session={session} review={review} sourceIds={sourceIds} selected={company} onSelect={setCompany} locked={uncertain} />}
+    {companyMode === "existing" && <ExistingCompanyPicker key={sourcesKey} session={session} review={review} sourceIds={sourceIds} selected={company} onSelect={setCompany} locked={locked || busy} />}
     {error && <p className="onboarding-staff-error" role="alert">{error}</p>}
     <button type="button" className="button-orange" disabled={busy || !ready} onClick={() => void approve()}>
       {busy ? "Approving…" : uncertain ? "Retry same approval" : `Approve for ${destinationList(sourceIds)}`}</button>
@@ -232,21 +245,28 @@ function SharedCompanyApproval({ session, review, sourceIds, onLock, onApproved 
   const [error, setError] = useState("");
   const [uncertain, setUncertain] = useState<"plan" | "approve" | null>(null);
   const planCommand = useRef<{ commandId: string; body: string } | null>(null);
-  useEffect(() => onLock(uncertain !== null || plan !== null), [uncertain, plan, onLock]);
+  const searchRun = useRef(0);
+  const sourcesKey = sourceIds.join(",");
+  // Changed businesses (only possible while unfrozen) invalidate earlier search results.
+  useEffect(() => { if (planCommand.current) return; searchRun.current += 1; setCompany(null); setResults(null); setAfter(null); }, [sourcesKey]);
+  const release = () => { setPlan(null); planCommand.current = null; onLock(false); };
+  const frozen = Boolean(busy === "plan" || busy === "approve" || uncertain || plan);
   const search = async (event: FormEvent | null, more = false) => {
     event?.preventDefault();
-    if (busy || uncertain) return;
-    setBusy("search"); setError(""); if (!more) { setCompany(null); setPlan(null); setResults(null); }
+    if (busy || uncertain || plan) return;
+    const run = ++searchRun.current;
+    setBusy("search"); setError(""); if (!more) { setCompany(null); setResults(null); }
     try {
       const value = await post(session, "shared-company-choices", { submissionId: review.submissionId, sourceIds, query: query.trim(), afterGroupId: more ? after : null });
       if (!validSharedCompanies(value)) throw new Error("invalid_response");
+      if (run !== searchRun.current) return;
       setResults(current => [...(more ? current ?? [] : []), ...value.companies]); setAfter(value.nextAfterGroupId);
-    } catch { setError("Shared companies couldn't be searched. Check your directory permissions and try again."); }
+    } catch { if (run === searchRun.current) setError("Shared companies couldn't be searched. Check your directory permissions and try again."); }
     finally { setBusy(null); }
   };
   const prepare = async () => {
     if (!company || busy) return;
-    setBusy("plan"); setError("");
+    onLock(true); setBusy("plan"); setError("");
     const selection: SharedSelection = { kind: "shared_existing", groupId: company.groupId, expectedVersion: company.expectedVersion,
       members: company.members.map(member => ({ recordId: member.recordId, expectedVersion: member.expectedVersion }))
         .sort((left, right) => left.recordId < right.recordId ? -1 : left.recordId > right.recordId ? 1 : 0) };
@@ -259,12 +279,12 @@ function SharedCompanyApproval({ session, review, sourceIds, onLock, onApproved 
       setPlan(value); setUncertain(null);
     } catch (caught) {
       if (uncertainFailure(caught)) setUncertain("plan");
-      else { planCommand.current = null; setUncertain(null); setError("The plan was refused. The company may have changed; search again and choose it again."); }
+      else { setUncertain(null); release(); setError("The plan was refused. The company may have changed; search again and choose it again."); }
     } finally { setBusy(null); }
   };
   const approve = async () => {
     if (!plan || busy) return;
-    if (Date.parse(plan.expiresAt) <= Date.now() && uncertain !== "approve") { setPlan(null); planCommand.current = null; setError("The plan expired. Prepare it again."); return; }
+    if (Date.parse(plan.expiresAt) <= Date.now() && uncertain !== "approve") { release(); setError("The plan expired. Prepare it again."); return; }
     setBusy("approve"); setError("");
     try {
       const value = await post(session, "approve-shared-company", { planId: plan.planId, submissionId: review.submissionId, fieldsSha256: review.fieldsSha256 });
@@ -273,21 +293,21 @@ function SharedCompanyApproval({ session, review, sourceIds, onLock, onApproved 
       onApproved({ clientRecordId: value.clientRecordId, organizationRecordId: value.organizationRecordId, sourceIds: plan.sourceIds, replayed: value.replayed });
     } catch (caught) {
       if (uncertainFailure(caught)) setUncertain("approve");
-      else { setUncertain(null); setPlan(null); planCommand.current = null; setError("Approval was refused. The plan may have expired or the company changed; prepare a new plan."); }
+      else { setUncertain(null); release(); setError("Approval was refused. The plan may have expired or the company changed; prepare a new plan."); }
     } finally { setBusy(null); }
   };
   if (sourceIds.length === 0) return <p className="onboarding-hint">Choose at least one business above to use a shared company.</p>;
   return <div className="onboarding-approval-action">
     {!plan && <>
       <form onSubmit={event => void search(event)} className="onboarding-company-search">
-        <label>Search shared companies<input value={query} maxLength={150} disabled={Boolean(uncertain)} onChange={event => setQuery(event.target.value)} /></label>
-        <button className="button-ghost" disabled={Boolean(busy) || Boolean(uncertain)}>{busy === "search" ? "Searching…" : "Search"}</button></form>
+        <label>Search shared companies<input value={query} maxLength={150} disabled={frozen} onChange={event => setQuery(event.target.value)} /></label>
+        <button className="button-ghost" disabled={Boolean(busy) || frozen}>{busy === "search" ? "Searching…" : "Search"}</button></form>
       {results && results.length === 0 && <p>No matching shared companies.</p>}
       {results && results.length > 0 && <fieldset><legend>Shared companies</legend>{results.map(item => <label key={item.groupId} className={item.reviewAvailable ? "" : "is-unavailable"}>
-        <input type="radio" name={`shared-${review.submissionId}`} disabled={!item.reviewAvailable || Boolean(uncertain)} checked={company?.groupId === item.groupId} onChange={() => setCompany(item)} />
+        <input type="radio" name={`shared-${review.submissionId}`} disabled={!item.reviewAvailable || frozen} checked={company?.groupId === item.groupId} onChange={() => { if (!planCommand.current) setCompany(item); }} />
         <span><strong>{item.name}</strong><small>{destinationList([...new Set(item.members.flatMap(member => member.sourceIds))].sort())}</small>
           {item.reason && <small>{sharedReasonText[item.reason]}</small>}</span></label>)}</fieldset>}
-      {after && <button type="button" className="button-ghost" disabled={Boolean(busy)} onClick={() => void search(null, true)}>Load more companies</button>}
+      {after && <button type="button" className="button-ghost" disabled={Boolean(busy) || frozen} onClick={() => void search(null, true)}>Load more companies</button>}
       <button type="button" className="button-orange" disabled={!company || Boolean(busy)} onClick={() => void prepare()}>
         {busy === "plan" ? "Preparing…" : uncertain === "plan" ? "Retry same plan" : "Review approval plan"}</button>
       {uncertain === "plan" && <p className="onboarding-staff-error" role="alert">The plan result isn't confirmed. Retrying asks for exactly the same plan.</p>}
@@ -300,7 +320,7 @@ function SharedCompanyApproval({ session, review, sourceIds, onLock, onApproved 
       {!plan.approvalAvailable && <p className="onboarding-staff-error" role="status">Approval isn't available for this plan with your current permissions.</p>}
       <button type="button" className="button-orange" disabled={Boolean(busy) || !plan.approvalAvailable} onClick={() => void approve()}>
         {busy === "approve" ? "Approving…" : uncertain === "approve" ? "Retry same approval" : "Approve this plan"}</button>
-      {uncertain !== "approve" && <button type="button" className="button-ghost" disabled={Boolean(busy)} onClick={() => { setPlan(null); planCommand.current = null; }}>Change company</button>}
+      {uncertain !== "approve" && <button type="button" className="button-ghost" disabled={Boolean(busy)} onClick={release}>Change company</button>}
       {uncertain === "approve" && <p className="onboarding-staff-error" role="alert">The approval result isn't confirmed. Retrying approves exactly the same plan.</p>}
     </div>}
     {error && <p className="onboarding-staff-error" role="alert">{error}</p>}

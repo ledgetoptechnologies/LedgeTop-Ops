@@ -13,7 +13,8 @@ const consumerId = "33333333-3333-4333-8333-333333333333", businessId = "7777777
 const ORIGIN = "https://ops.onboarding.test";
 type Call = { path: string; body: Record<string, unknown> };
 
-async function render(page: Page, mode = "success", search = "") {
+async function render(page: Page, mode = "success", search = "", clock = false) {
+  if (clock) await page.clock.install();
   await page.route(`${ORIGIN}/**`, route => route.fulfill({ contentType: "text/html",
     body: '<!doctype html><meta name="viewport" content="width=device-width, initial-scale=1"><div id="root"></div>' }));
   await page.goto(`${ORIGIN}/administration/client-onboarding${search}`);
@@ -23,6 +24,10 @@ async function render(page: Page, mode = "success", search = "") {
 }
 const calls = (page: Page) => page.evaluate(() => (window as Window & { onboardingCalls?: Call[] }).onboardingCalls ?? []) as Promise<Call[]>;
 const bodies = async (page: Page, route: string) => (await calls(page)).filter(call => call.path.endsWith(`/${route}`)).map(call => call.body);
+async function chooseScope(page: Page) {
+  await page.getByRole("combobox", { name: /^Business area/ }).selectOption({ label: "Drone Services" });
+  await page.getByRole("combobox", { name: /^Division/ }).selectOption({ label: "Whole business area" });
+}
 async function openSubmission(page: Page, name: string) {
   await page.getByRole("button", { name: new RegExp(`^${name}`) }).click();
   await expect(page.getByRole("heading", { name: `Review ${name}` })).toBeVisible();
@@ -60,15 +65,56 @@ test("a malformed deep link is ignored instead of being sent to the server", asy
   expect(await bodies(page, "review")).toEqual([]);
 });
 
-test("denied reviewers see no submissions at all", async ({ page }) => {
-  await render(page, "inbox-denied");
-  await expect(page.getByRole("alert")).toContainText("couldn't be loaded");
-  await expect(page.locator(".onboarding-inbox-list")).toHaveCount(0);
+test("a denied inbox closes every privileged view, including an open review", async ({ page }) => {
+  await render(page, "inbox-denied", `?submission=${consumerId}`);
+  await expect(page.getByRole("heading", { name: "Client onboarding unavailable" })).toBeVisible();
+  await expect(page.getByRole("alert")).toContainText("access changed");
+  await expect(page.locator(".onboarding-inbox-list, .onboarding-review, .onboarding-staff-form")).toHaveCount(0);
+});
+
+test("a denied session refresh closes the open review and any revealed link", async ({ page }) => {
+  await render(page, "refresh-denied", "", true);
+  await chooseScope(page);
+  await page.getByRole("button", { name: "Create invitation" }).click();
+  await page.getByRole("button", { name: "Create one-time link" }).click();
+  await expect(page.getByRole("heading", { name: "One-time link ready" })).toBeVisible();
+  await openSubmission(page, "Reviewed Client");
+  await page.clock.fastForward("08:01");
+  await expect(page.getByRole("heading", { name: "Client onboarding unavailable" })).toBeVisible();
+  await expect(page.locator(".onboarding-review, .onboarding-secret")).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Copy link" })).toHaveCount(0);
+});
+
+test("a transient refresh failure keeps the page open", async ({ page }) => {
+  await render(page, "refresh-unavailable", "", true);
+  await openSubmission(page, "Reviewed Client");
+  await page.clock.fastForward("08:01");
+  await expect.poll(async () => (await calls(page)).filter(call => call.path.endsWith("/session")).length).toBe(2);
+  await expect(page.getByRole("heading", { name: "Review Reviewed Client" })).toBeVisible();
+});
+
+test("the page closes when the verified session deadline passes", async ({ page }) => {
+  await render(page, "short-session", "", true);
+  await openSubmission(page, "Reviewed Client");
+  await page.clock.fastForward("01:01");
+  await expect(page.getByRole("alert")).toContainText("session expired");
+  await expect(page.locator(".onboarding-review")).toHaveCount(0);
+});
+
+test("a refreshed token is used without reloading open reviews or inbox pages", async ({ page }) => {
+  await render(page, "success", "", true);
+  await page.getByRole("button", { name: "Load more submissions" }).click();
+  await openSubmission(page, "Later Client");
+  await page.clock.fastForward("08:01");
+  await expect.poll(async () => (await calls(page)).filter(call => call.path.endsWith("/session")).length).toBe(2);
+  expect(await bodies(page, "inbox")).toHaveLength(2);
+  expect(await bodies(page, "review")).toHaveLength(1);
+  await expect(page.getByRole("button", { name: /^Later Client/ })).toBeVisible();
 });
 
 test("the one-time link can be copied or opened but is never shown on the page", async ({ page }) => {
   await render(page);
-  await page.getByLabel("Business area ID").fill("area:onboarding");
+  await chooseScope(page);
   await page.getByRole("button", { name: "Create invitation" }).click();
   await page.getByRole("button", { name: "Create one-time link" }).click();
   await expect(page.getByRole("heading", { name: "One-time link ready" })).toBeVisible();
@@ -87,7 +133,7 @@ test("the one-time link can be copied or opened but is never shown on the page",
 
 test("without a configured link the invitation code can be copied but is not displayed", async ({ page }) => {
   await render(page, "no-link");
-  await page.getByLabel("Business area ID").fill("area:onboarding");
+  await chooseScope(page);
   await page.getByRole("button", { name: "Create invitation" }).click();
   await page.getByRole("button", { name: "Create one-time link" }).click();
   await expect(page.getByRole("heading", { name: "Invitation code ready" })).toBeVisible();
@@ -99,7 +145,7 @@ test("without a configured link the invitation code can be copied but is not dis
 
 test("an uncertain link creation is locked and never repeated", async ({ page }) => {
   await render(page, "uncertain");
-  await page.getByLabel("Business area ID").fill("area:onboarding");
+  await chooseScope(page);
   await page.getByRole("button", { name: "Create invitation" }).click();
   await page.getByRole("button", { name: "Create one-time link" }).click();
   await expect(page.getByRole("alert")).toContainText("The link result isn't confirmed");
@@ -107,14 +153,31 @@ test("an uncertain link creation is locked and never repeated", async ({ page })
   expect(await bodies(page, "reveal")).toHaveLength(1);
 });
 
-test("an existing-client invitation sends a client target with no business areas", async ({ page }) => {
+test("invitations use named business areas and divisions, never typed IDs", async ({ page }) => {
   await render(page);
-  await page.getByLabel("An existing client record").check();
-  await expect(page.getByLabel("Business area ID")).toHaveCount(0);
-  await page.getByLabel("Existing client record ID").fill("client:existing-123");
+  await expect(page.getByLabel(/ID$/)).toHaveCount(0);
+  await expect(page.getByText("An existing client record")).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Create invitation" })).toBeDisabled();
+  await page.getByRole("combobox", { name: /^Business area/ }).selectOption({ label: "Technologies" });
+  // Only areas that allow it offer the whole-area choice.
+  await expect(page.getByRole("combobox", { name: /^Division/ }).locator("option", { hasText: "Whole business area" })).toHaveCount(0);
+  await page.getByRole("combobox", { name: /^Division/ }).selectOption({ label: "Web" });
+  await page.getByRole("button", { name: "Add business area" }).click();
+  await page.getByRole("combobox", { name: /^Business area/ }).nth(1).selectOption({ label: "Drone Services" });
+  await page.getByRole("combobox", { name: /^Division/ }).nth(1).selectOption({ label: "Whole business area" });
   await page.getByRole("button", { name: "Create invitation" }).click();
   await expect(page.getByRole("button", { name: "Create one-time link" })).toBeVisible();
-  expect((await bodies(page, "create"))[0]).toMatchObject({ targetClientRecordId: "client:existing-123", scopes: null });
+  await expect(page.getByRole("combobox", { name: /^Business area/ }).first()).toBeDisabled();
+  await expect(page.getByLabel("Link expires")).toBeDisabled();
+  expect((await bodies(page, "create"))[0]).toMatchObject({ targetClientRecordId: null,
+    scopes: [{ businessAreaId: "area:tech", divisionId: "division:web" }, { businessAreaId: "area:drone", divisionId: null }] });
+});
+
+for (const [mode, text] of [["no-scopes", "don't have any business areas"], ["scopes-unavailable", "couldn't be loaded"]] as const) test(`invitations can't be created when business areas are ${mode}`, async ({ page }) => {
+  await render(page, mode);
+  await expect(page.locator(".onboarding-scopes")).toContainText(text);
+  await expect(page.getByRole("button", { name: "Create invitation" })).toBeDisabled();
+  expect(await bodies(page, "create")).toEqual([]);
 });
 
 test("an individual approved for both businesses shows friendly names and follows activation to active", async ({ page }) => {
@@ -193,6 +256,42 @@ test("an uncertain approval locks the choices and retries the identical request"
   const approvals = await bodies(page, "approve");
   expect(approvals).toHaveLength(2);
   expect(approvals[1]).toEqual(approvals[0]);
+});
+
+test("choices are frozen from the moment an approval is sent until it settles", async ({ page }) => {
+  await render(page, "delayed-approval");
+  await openSubmission(page, "Reviewed Client");
+  await page.getByLabel("Ledge Top Drone Services").check();
+  await page.getByRole("button", { name: "Approve for Ledge Top Drone Services" }).click();
+  await expect(page.getByRole("button", { name: "Approving…" })).toBeDisabled();
+  await expect(page.getByLabel("Ledge Top Drone Services")).toBeDisabled();
+  await expect(page.getByLabel("Ledge Top Technologies")).toBeDisabled();
+  await page.getByLabel("Ledge Top Technologies").dispatchEvent("click");
+  await expect(page.getByLabel("Ledge Top Technologies")).not.toBeChecked();
+  await page.evaluate(() => (window as Window & { release?: () => void }).release?.());
+  await expect(page.getByRole("heading", { name: "Approved" })).toBeVisible();
+  expect(await bodies(page, "approve")).toEqual([{ submissionId: consumerId, fieldsSha256: "e".repeat(64), sourceIds: ["project-alpha:primary"] }]);
+});
+
+test("business, company mode and shared company are frozen while a plan is being prepared", async ({ page }) => {
+  await render(page, "delayed-plan");
+  await openSubmission(page, "Dana Business");
+  await page.getByLabel("An existing company shared by both businesses").check();
+  await page.getByLabel("Ledge Top Drone Services").check();
+  await page.getByRole("button", { name: "Search", exact: true }).click();
+  await page.getByLabel(/^Example LLC/).check();
+  await page.getByRole("button", { name: "Review approval plan" }).click();
+  await expect(page.getByRole("button", { name: "Preparing…" })).toBeDisabled();
+  for (const label of ["Ledge Top Drone Services", "Ledge Top Technologies", /^New company/, "An existing company in Operations"] as const)
+    await expect(page.getByLabel(label, { exact: typeof label === "string" })).toBeDisabled();
+  await expect(page.getByLabel(/^Example LLC/)).toBeDisabled();
+  await expect(page.getByLabel("Search shared companies")).toBeDisabled();
+  await page.evaluate(() => (window as Window & { release?: () => void }).release?.());
+  await expect(page.getByRole("region", { name: "Approval plan" })).toBeVisible();
+  const plans = await bodies(page, "shared-company-plan");
+  expect(plans).toHaveLength(1);
+  expect(plans[0]).toMatchObject({ sourceIds: ["project-alpha:primary"] });
+  await expect(page.getByLabel("Ledge Top Drone Services")).toBeDisabled();
 });
 
 test("an already reviewed submission shows its activation instead of approval controls", async ({ page }) => {
