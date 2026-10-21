@@ -20,7 +20,7 @@ import { isDirectoryReplayAcceptanceLocation } from "./DirectoryReplayAcceptance
 import { ProjectReplayAcceptance } from "./ProjectReplayAcceptance";
 import { isProjectReplayAcceptanceLocation } from "./ProjectReplayAcceptanceRoute";
 
-const viewerShellRoute = parseOperationsViewerShellRoute(window.location.pathname);
+const viewerShellRoute = parseOperationsViewerShellRoute(window.location.pathname, window.location.search);
 const onboardingStaffRoute = window.location.pathname === "/administration/client-onboarding";
 const recipientEnrollmentRoute = window.location.pathname === "/administration/client-portal/recipients";
 const operationsRecipientEnrollmentRoute = window.location.pathname === "/administration/client-portal/operations-recipients";
