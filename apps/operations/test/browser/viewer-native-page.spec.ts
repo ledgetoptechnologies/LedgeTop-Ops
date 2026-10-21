@@ -41,9 +41,11 @@ async function mockOps(page: Page, permissions: string[], handle: (url: URL, met
 }
 
 /** The Viewer admin API: a session, a task list with two failed attempts and per-attempt diagnostics. */
-async function mockViewer(context: BrowserContext, options: { recovery: Record<string, boolean>; recoverStatuses?: number[] }) {
+async function mockViewer(context: BrowserContext, options: { recovery: Record<string, boolean>; recoverStatuses?: number[];
+  providers?: Array<Record<string, unknown>>; providerStatuses?: number[]; patchStatuses?: number[] }) {
   const calls: Call[] = [];
   const statuses = [...(options.recoverStatuses ?? [202])];
+  const providerStatuses = [...(options.providerStatuses ?? [201])], patchStatuses = [...(options.patchStatuses ?? [200])];
   const attempt = (id: string, taskId: string, number: number) => ({ id, taskId, datasetId: `dataset-${taskId}`, attemptNumber: number, providerId: "provider-1",
     providerTaskId: "upstream", presetId: null, options: {}, status: "failed", progress: 1, providerOutputCursor: null, capabilityFingerprint: null,
     errorCode: "ingest_failed", errorMessage: "The finished model couldn't be imported.", resultModelId: null, resultModelVersionId: null, createdBy: "ops:staff-one",
@@ -75,13 +77,26 @@ async function mockViewer(context: BrowserContext, options: { recovery: Record<s
       return route.fulfill({ status, json: status === 202 ? { attempt: { id: "attempt-ben", status: "ingesting" } } : { error: "temporarily_unavailable" } });
     }
     if (/\/retry$/.test(path) && request.method() === "POST") return route.fulfill({ status: 202, json: { attempt: { id: "attempt-other-2" } } });
+    if (path === "/api/v1/processing/providers" && request.method() === "POST") {
+      const status = providerStatuses.shift() ?? 201;
+      return route.fulfill({ status, json: status === 201 ? { provider: { id: "provider-new" } } : { error: "invalid_request" } });
+    }
+    const providerPatch = /^\/api\/v1\/processing\/providers\/([^/]+)$/.exec(path);
+    if (providerPatch && request.method() === "PATCH") {
+      const body = JSON.parse(request.postData() || "{}"), provider = (options.providers ?? []).find(item => item.id === providerPatch[1]);
+      // Mirrors Viewer: a provider-managed install refuses admissionLimit outright.
+      if (provider?.dispatchMode === "provider_managed" && Object.hasOwn(body, "admissionLimit")) return route.fulfill({ status: 400, json: { error: "provider_dispatch_managed" } });
+      const status = patchStatuses.shift() ?? 200;
+      return route.fulfill({ status, json: status === 200 ? { provider: { ...provider, ...body } } : { error: "temporarily_unavailable" } });
+    }
+    if (path === "/api/v1/processing/providers") return route.fulfill({ json: { providers: options.providers ?? [], nextCursor: null } });
     if (path === "/api/v1/storage") return route.fulfill({ json: { storage: null, trash: { items: [], nextCursor: null, totalCount: 0, totalBytes: 0 } } });
     if (path === "/api/v1/processing/presets") return route.fulfill({ json: { presets: [] } });
     return route.fulfill({ json: { projects: [], datasets: [], outputs: [], providers: [], nextCursor: null, totalCount: 0, totalBytes: 0 } });
   });
   return calls;
 }
-const processingBootstrap = { enabled: true, viewerBaseUrl: VIEWER, permissions: ["viewer.processing.read", "viewer.processing.write"],
+const processingBootstrap = { enabled: true, viewerBaseUrl: VIEWER, permissions: ["viewer.processing.read", "viewer.processing.write", "viewer.providers.write"],
   units: { default: "imperial", resolved: "imperial" }, events: [] };
 const grant = { grant: "g".repeat(43), grantExpiresAt: new Date(Date.now() + 60_000).toISOString(), sessionTtlSeconds: 1800,
   redeemUrl: `${VIEWER}/api/v1/admin-sessions/redeem`, workspaceUrl: `${VIEWER}/workspace/${"g".repeat(43)}`, units: { default: "imperial", resolved: "imperial" } };
@@ -259,4 +274,64 @@ for (const width of [320, 390]) test(`the Viewer page sections fit ${width}px wi
     await expect(page.locator(".viewer-association-list, .viewer-ingest-recovery").first()).toBeVisible();
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
   }
+});
+
+const provider = (id: string, displayName: string, extra: Record<string, unknown>) => ({ id, displayName, type: "nodeodm", endpoint: `https://${id}.example.test`,
+  enabled: false, activeAttempts: 0, credential: { configured: true, updatedAt: date }, capabilities: null, capabilityFingerprint: null,
+  lastHealth: "healthy", lastHealthAt: date, createdAt: date, updatedAt: date, ...extra });
+// Production Viewer reports and accepts an admission limit; staging reports provider-managed dispatch and rejects it.
+const providerShapes = [provider("legacy", "Production NodeODM", { admissionLimit: 4 }),
+  provider("managed", "Staging ClusterODM", { type: "clusterodm", dispatchMode: "provider_managed", submissionConcurrency: 1 })];
+async function openProviders(page: Page) {
+  await page.goto("/viewer/processing");
+  await page.getByRole("navigation", { name: "Processing sections" }).getByRole("button", { name: "Providers" }).click();
+}
+
+test("a new provider sends only the fields Viewer accepts, and a refused request can be corrected and sent again", async ({ page, context }) => {
+  await mockOps(page, ["viewer.view"], processingRoutes);
+  const viewer = await mockViewer(context, { recovery: {}, providers: providerShapes, providerStatuses: [400, 201] });
+  await openProviders(page);
+  const form = page.locator("form.viewer-processing-form");
+  await expect(form.getByRole("combobox", { name: "Type" })).toHaveCount(0);
+  await form.getByLabel("Name").fill("Field NodeODM");
+  await form.getByLabel("HTTPS or private endpoint").fill("https://odm.example.test");
+  await form.getByLabel("Provider token (optional)").fill("p".repeat(40));
+  await form.getByRole("button", { name: "Add disabled provider" }).click();
+  await expect(page.getByRole("alert").filter({ hasText: "invalid_request" })).toBeVisible();
+  // The token is cleared after every attempt; the operator re-enters it to try again.
+  await expect(form.getByLabel("Provider token (optional)")).toHaveValue("");
+  await form.getByLabel("Provider token (optional)").fill("q".repeat(40));
+  await form.getByRole("button", { name: "Add disabled provider" }).click();
+  await expect(page.getByRole("status").filter({ hasText: "Provider credential stored" })).toBeVisible();
+  const creates = viewer.filter(call => call.method === "POST" && call.path === "/api/v1/processing/providers");
+  expect(creates.map(call => call.body)).toEqual([
+    { displayName: "Field NodeODM", endpoint: "https://odm.example.test", credential: { token: "p".repeat(40) } },
+    { displayName: "Field NodeODM", endpoint: "https://odm.example.test", credential: { token: "q".repeat(40) } }]);
+});
+
+test("provider settings follow each install: a legacy admission limit stays editable, provider-managed admission is never sent", async ({ page, context }) => {
+  await mockOps(page, ["viewer.view"], processingRoutes);
+  const viewer = await mockViewer(context, { recovery: {}, providers: providerShapes, patchStatuses: [200, 503, 200] });
+  await openProviders(page);
+  const legacy = page.locator("article.viewer-provider-card").filter({ has: page.getByRole("heading", { name: "Production NodeODM" }) });
+  const managed = page.locator("article.viewer-provider-card").filter({ has: page.getByRole("heading", { name: "Staging ClusterODM" }) });
+  await expect(legacy).toContainText("admission limit 4");
+  await expect(managed).toContainText("admission managed by the provider");
+  await legacy.getByText("Edit provider settings").click();
+  await legacy.getByLabel("Admission limit").fill("6");
+  await legacy.getByRole("button", { name: "Save settings" }).click();
+  await expect(page.getByRole("status").filter({ hasText: "Provider settings saved" })).toBeVisible();
+  await managed.getByText("Edit provider settings").click();
+  await expect(managed.getByLabel("Admission limit")).toHaveCount(0);
+  await expect(managed).toContainText("The provider manages job admission");
+  await managed.getByLabel("Name").fill("Staging ClusterODM pool");
+  await managed.getByRole("button", { name: "Save settings" }).click();
+  await expect(page.getByRole("alert").filter({ hasText: "temporarily_unavailable" })).toBeVisible();
+  await managed.getByRole("button", { name: "Save settings" }).click();
+  await expect(page.getByRole("status").filter({ hasText: "Provider settings saved" })).toBeVisible();
+  const patches = viewer.filter(call => call.method === "PATCH" && call.path.startsWith("/api/v1/processing/providers/"));
+  expect(patches.map(call => [call.path, call.body])).toEqual([
+    ["/api/v1/processing/providers/legacy", { displayName: "Production NodeODM", endpoint: "https://legacy.example.test", admissionLimit: 6 }],
+    ["/api/v1/processing/providers/managed", { displayName: "Staging ClusterODM pool", endpoint: "https://managed.example.test" }],
+    ["/api/v1/processing/providers/managed", { displayName: "Staging ClusterODM pool", endpoint: "https://managed.example.test" }]]);
 });

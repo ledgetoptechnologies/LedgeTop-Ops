@@ -3036,3 +3036,4 @@ a.dashboard-alert:hover > span[aria-hidden] { transform: translateX(3px); }
   .alpha-correspondence-details dl { grid-template-columns: minmax(0, 1fr); }
 }
 .viewer-native-models .viewer-association-help { margin: 0 0 1rem; }
+.viewer-provider-managed { margin: .25rem 0 .5rem; color: var(--muted); font-size: .8rem; }

@@ -143,7 +143,11 @@ export interface ViewerProviderSummary {
   type: "nodeodm" | "clusterodm";
   endpoint: string;
   enabled: boolean;
-  admissionLimit: number;
+  /** Present where Viewer limits outstanding jobs itself; absent when the provider manages admission. */
+  admissionLimit?: number;
+  /** "provider_managed": the provider admits work and Viewer rejects admissionLimit changes. */
+  dispatchMode?: "provider_managed";
+  submissionConcurrency?: number;
   activeAttempts: number;
   credential: {
     configured: boolean;
