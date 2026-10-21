@@ -14,7 +14,7 @@ const consumerId = "33333333-3333-4333-8333-333333333333", businessId = "7777777
 const laterId = "88888888-8888-4888-8888-888888888888";
 const invitationId = "11111111-1111-4111-8111-111111111111";
 const primary = "project-alpha:primary", secondary = "project-alpha:secondary";
-let approved = false, activationReads = 0, approvalAttempts = 0, sessionReads = 0, choiceReads = 0;
+let approved = false, activationReads = 0, approvalAttempts = 0, sessionReads = 0, choiceReads = 0, sharedSearchHeld = false;
 const denied = () => Response.json({ error: "client_onboarding_denied" }, { status: 403 });
 // Delayed modes hold the write until the test calls window.release().
 const held = () => new Promise<void>(resolve => { fixtureWindow.release = resolve; });
@@ -96,6 +96,7 @@ window.fetch = async (input, init) => {
     { recordId: "org:example", expectedVersion: 4, name: "Example LLC", sourceIds: [primary], reusable: true, reason: null },
     { recordId: "org:example-old", expectedVersion: 2, name: "Example LLC (old)", sourceIds: [], reusable: false, reason: "company_not_active" } ] });
   if (route === "shared-company-choices" && mode === "shared-page-denied" && body.afterGroupId) return denied();
+  if (route === "shared-company-choices" && mode === "held-shared-search" && !sharedSearchHeld) { sharedSearchHeld = true; await held(); }
   if (route === "shared-company-choices" && mode === "late-search-404") { await held(); return Response.json({ error: "not_found" }, { status: 404 }); }
   if (route === "shared-company-choices") return Response.json({ approvalAvailable: false, nextAfterGroupId: mode === "shared-page-denied" ? "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" : null, companies: [
     { groupId: "99999999-9999-4999-8999-999999999999", expectedVersion: 3, name: "Example LLC", reviewAvailable: true, reason: null,

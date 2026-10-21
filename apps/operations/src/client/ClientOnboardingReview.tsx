@@ -280,7 +280,9 @@ function SharedCompanyApproval({ session, review, sourceIds, onLock, onRefused, 
   useEffect(() => () => { searchRun.current += 1; }, []);
   const sourcesKey = sourceIds.join(",");
   // Changed businesses (only possible while unfrozen) invalidate earlier search results.
-  useEffect(() => { if (planCommand.current) return; searchRun.current += 1; setCompany(null); setResults(null); setAfter(null); }, [sourcesKey]);
+  // The superseded search no longer owns the busy state.
+  useEffect(() => { if (planCommand.current) return; searchRun.current += 1; setCompany(null); setResults(null); setAfter(null);
+    setBusy(current => current === "search" ? null : current); }, [sourcesKey]);
   const release = () => { setPlan(null); planCommand.current = null; onLock(false); };
   const frozen = Boolean(busy === "plan" || busy === "approve" || uncertain || plan);
   const search = async (event: FormEvent | null, more = false) => {

@@ -397,6 +397,27 @@ for (const kind of ["existing", "shared"]) test(`a late ${kind} company search r
   expect(await sessionReads(page)).toBe(1);
 });
 
+test("changing businesses during a shared search leaves search and planning usable", async ({ page }) => {
+  await render(page, "held-shared-search");
+  await openSubmission(page, "Dana Business");
+  await page.getByLabel("An existing company shared by both businesses").check();
+  await page.getByLabel("Ledge Top Drone Services").check();
+  await page.getByRole("button", { name: "Search", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Searching…" })).toBeVisible();
+  await page.getByLabel("Ledge Top Technologies").check();
+  await page.evaluate(() => (window as Window & { release?: () => void }).release?.());
+  // The superseded reply is dropped, and the search is usable again for the new businesses.
+  await expect(page.getByRole("button", { name: "Search", exact: true })).toBeEnabled();
+  await expect(page.getByLabel(/^Example LLC/)).toHaveCount(0);
+  await page.getByRole("button", { name: "Search", exact: true }).click();
+  await page.getByLabel(/^Example LLC/).check();
+  await page.getByRole("button", { name: "Review approval plan" }).click();
+  await expect(page.getByRole("region", { name: "Approval plan" })).toBeVisible();
+  const searches = await bodies(page, "shared-company-choices");
+  expect(searches.map(body => body.sourceIds)).toEqual([["project-alpha:primary"], ["project-alpha:primary", "project-alpha:secondary"]]);
+  expect((await bodies(page, "shared-company-plan"))[0]).toMatchObject({ sourceIds: ["project-alpha:primary", "project-alpha:secondary"] });
+});
+
 test("a refusal during an in-flight session check forces one fresh check afterwards", async ({ page }) => {
   await render(page, "deferred-recheck", "", true);
   await openSubmission(page, "Reviewed Client");
