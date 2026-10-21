@@ -266,7 +266,7 @@ test("an effective authenticated-delivery bell action stays put when marking it 
   await page.getByRole("button", {name: /Notifications, 1 unread update/}).click();
   await page.getByRole("link", {name: "Files changed in your delivery"}).click();
   await expect(page).toHaveURL(new RegExp(`/portal\\?workspace=${effectiveWorkspace.id}$`));
-  await expect(page.getByRole("alert")).toContainText("The notification update could not be confirmed.");
+  await expect(page.getByRole("alert").filter({hasText: "The notification update could not be confirmed."})).toBeVisible();
   expect(calls.filter(call => call.path === "/api/client/notification-history/authenticated-delivery/effective-delivery-notice" && call.method === "PATCH")).toHaveLength(1);
   expect(calls.some(call => call.path === "/api/client/authenticated-deliveries/files" || call.path === "/api/client/past-deliveries")).toBe(false);
 });

@@ -478,7 +478,7 @@ test("an authenticated delivery link stays put when its mark-read update cannot 
   const panel = page.getByRole("region", {name: "Notifications"});
   await panel.getByRole("link", {name: "Files changed in your delivery"}).click();
   await expect(page).toHaveURL(/\/portal\?workspace=workspace-b$/);
-  await expect(panel.getByRole("alert")).toContainText("The notification update could not be confirmed.");
+  await expect(panel.getByRole("alert").filter({hasText: "The notification update could not be confirmed."})).toBeVisible();
   expect(calls.filter(call => call.path.endsWith("/delivery-change-read-failed") && call.method === "PATCH")).toHaveLength(1);
 });
 
@@ -511,6 +511,112 @@ test("the unified bell keeps every account's updates, each labelled and scoped, 
   expect(new Set(calls.filter(call => call.path === "/api/client/notification-history").map(call => call.workspace))).toEqual(new Set(["workspace-a", "workspace-b", "workspace-c"]));
 });
 
+/** One account's notification page, scoped exactly to that account. */
+function accountHistory(workspaceId: string, items: unknown[] = [], nextCursor: string | null = null) {
+  return {...notificationHistory(items, undefined, workspaceId === "workspace-a" ? "workspace-b" : workspaceId),
+    scope: {sourceId: workspace(workspaceId).sourceId ?? "project-alpha:primary", workspaceId, rootType: "organization", rootPublicId: "org-shared"}, nextCursor};
+}
+const historyCalls = (calls: Call[], workspaceId: string) => calls.filter(call => call.path === "/api/client/notification-history" && call.method === "GET" && call.workspace === workspaceId);
+async function openUnifiedBell(page: Page) {
+  await page.goto("/portal?workspace=workspace-b");
+  await page.locator(".portal-notification-bell").click();
+  return page.getByRole("region", {name: "Notifications"});
+}
+const revalidate = (page: Page) => page.evaluate(() => window.dispatchEvent(new Event("focus")));
+
+test("the unified bell retries only the account that failed and keeps the others' pages", async ({page}) => {
+  let mountainFails = true;
+  const calls = await mock(page, (route, call) => {
+    if (call.path === "/api/client/v2/workspaces/workspace-b/context") return route.fulfill({json: requestContext()});
+    if (call.path !== "/api/client/notification-history" || call.method !== "GET") return undefined;
+    if (call.workspace === "workspace-b") return route.fulfill({json: call.query.get("cursor")
+      ? accountHistory("workspace-b", [notification("coastal-older", "Coastal older update")])
+      : accountHistory("workspace-b", [notification("coastal-first", "Coastal first update")], "coastal-cursor")});
+    if (call.workspace === "workspace-c") return mountainFails ? route.fulfill({status: 503, json: {error: "Retry"}})
+      : route.fulfill({json: accountHistory("workspace-c", [notification("mountain-recovered", "Mountain recovered update", "workspace-c")])});
+    return route.fulfill({json: accountHistory(call.workspace ?? "workspace-a")});
+  });
+  const panel = await openUnifiedBell(page);
+  await expect(panel.getByText("Coastal first update", {exact: true})).toBeVisible();
+  await expect(panel.getByRole("alert")).toContainText("Mountain Engineering");
+  // Coverage is incomplete while an account is missing.
+  await expect(panel).toContainText("Request history is currently unavailable.");
+  mountainFails = false;
+  await panel.getByRole("button", {name: "Retry notifications"}).click();
+  await expect(panel.getByText("Mountain recovered update", {exact: true})).toBeVisible();
+  await expect(panel.getByRole("alert")).toHaveCount(0);
+  await expect(panel).toContainText("Request history is shown.");
+  expect(historyCalls(calls, "workspace-b")).toHaveLength(1);
+  expect(historyCalls(calls, "workspace-c").map(call => call.query.get("cursor"))).toEqual([null, null]);
+  await panel.getByRole("button", {name: "Load more updates"}).click();
+  await expect(panel.getByText("Coastal older update", {exact: true})).toBeVisible();
+  expect(historyCalls(calls, "workspace-b").map(call => call.query.get("cursor"))).toEqual([null, "coastal-cursor"]);
+});
+
+test("a refused read or dismiss withdraws only that account's updates and pending actions", async ({page}) => {
+  let mountainRevoked = false;
+  const calls = await mock(page, (route, call) => {
+    if (call.path === "/api/client/v2/workspaces/workspace-b/context") return route.fulfill({json: requestContext()});
+    if (call.path === "/api/client/notifications/mountain-one" && call.method === "PATCH") return route.fulfill({status: 403, json: {error: "Forbidden"}});
+    if (call.path !== "/api/client/notification-history" || call.method !== "GET") return undefined;
+    if (call.workspace === "workspace-b") return route.fulfill({json: accountHistory("workspace-b", [notification("coastal-one", "Coastal update")])});
+    if (call.workspace === "workspace-c") return mountainRevoked ? route.fulfill({status: 403, json: {error: "Forbidden"}})
+      : route.fulfill({json: accountHistory("workspace-c", [notification("mountain-one", "Mountain update", "workspace-c")])});
+    return route.fulfill({json: accountHistory(call.workspace ?? "workspace-a")});
+  });
+  const panel = await openUnifiedBell(page);
+  const mountain = panel.locator("article").filter({hasText: "Mountain update"});
+  await expect(mountain).toBeVisible();
+  mountainRevoked = true;
+  await mountain.getByRole("button", {name: "Dismiss"}).click();
+  await expect(mountain).toHaveCount(0);
+  await expect(panel.getByText("Coastal update", {exact: true})).toBeVisible();
+  // The refused account is rechecked straight away, and stays withdrawn.
+  await expect.poll(() => historyCalls(calls, "workspace-c").length).toBe(2);
+  await expect(panel.getByRole("alert").first()).toContainText(/no longer available|could not be loaded/);
+  await expect(page.getByRole("button", {name: /Notifications, 1 unread update$/})).toBeVisible();
+});
+
+test("the unified bell revalidates on focus and drops an account revoked after load", async ({page}) => {
+  let revoked = false;
+  const calls = await mock(page, (route, call) => {
+    if (call.path === "/api/client/v2/workspaces/workspace-b/context") return route.fulfill({json: requestContext()});
+    if (call.path !== "/api/client/notification-history" || call.method !== "GET") return undefined;
+    if (call.workspace === "workspace-c") return revoked ? route.fulfill({status: 403, json: {error: "Forbidden"}})
+      : route.fulfill({json: accountHistory("workspace-c", [notification("mountain-one", "Mountain update", "workspace-c")])});
+    return route.fulfill({json: accountHistory(call.workspace ?? "workspace-a", call.workspace === "workspace-b" ? [notification("coastal-one", "Coastal update")] : [])});
+  });
+  const panel = await openUnifiedBell(page);
+  await expect(panel.getByText("Mountain update", {exact: true})).toBeVisible();
+  revoked = true;
+  await page.waitForTimeout(1100);
+  await revalidate(page);
+  await expect(panel.getByText("Mountain update", {exact: true})).toHaveCount(0);
+  await expect(panel.getByText("Coastal update", {exact: true})).toBeVisible();
+  await expect(panel.getByRole("alert")).toContainText("Mountain Engineering");
+  expect(historyCalls(calls, "workspace-c")).toHaveLength(2);
+});
+
+test("a late reply from an earlier read never replaces the newer one", async ({page}) => {
+  let release!: () => void; const wait = new Promise<void>(resolve => { release = resolve; });
+  let coastalReads = 0;
+  await mock(page, (route, call) => {
+    if (call.path === "/api/client/v2/workspaces/workspace-b/context") return route.fulfill({json: requestContext()});
+    if (call.path !== "/api/client/notification-history" || call.method !== "GET") return undefined;
+    if (call.workspace === "workspace-b" && ++coastalReads === 1) return wait.then(() => late(route, accountHistory("workspace-b", [notification("coastal-stale", "Coastal stale update")])));
+    if (call.workspace === "workspace-b") return route.fulfill({json: accountHistory("workspace-b", [notification("coastal-fresh", "Coastal fresh update")])});
+    return route.fulfill({json: accountHistory(call.workspace ?? "workspace-a")});
+  });
+  const panel = await openUnifiedBell(page);
+  await expect.poll(() => coastalReads).toBe(1);
+  await page.waitForTimeout(1100);
+  await revalidate(page);
+  await expect(panel.getByText("Coastal fresh update", {exact: true})).toBeVisible();
+  release();
+  await page.waitForTimeout(300);
+  await expect(panel.getByText("Coastal stale update", {exact: true})).toHaveCount(0);
+  await expect(panel.getByText("Coastal fresh update", {exact: true})).toBeVisible();
+});
 
 for (const width of [390, 1280]) test(`native notification bell is accessible and contained at ${width}px`, async ({page}) => {
   await page.setViewportSize({width, height: 800});

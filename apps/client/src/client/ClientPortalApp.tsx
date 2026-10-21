@@ -3616,7 +3616,7 @@ export function ClientPortalApp({
           ))}
         </nav>
         {!switchingWorkspace && (unifiedMode
-          ? <PortalNotifications key={`unified:${unifiedScopes.join(",")}`} scopes={unifiedScopes} labels={unifiedLabels} />
+          ? <PortalNotifications key={`unified:${requestContextKey ?? ""}:${unifiedScopes.join(",")}`} contextKey={requestContextKey ?? ""} scopes={unifiedScopes} labels={unifiedLabels} />
           : <PortalNotifications key={requestContextKey} />)}
         <button ref={mobileNavTrigger} className="portal-nav-trigger" type="button" aria-label="Open navigation" aria-expanded={mobileNavOpen} aria-controls="portal-mobile-navigation" onClick={() => setMobileNavOpen(true)}><span className="nav-hamburger" aria-hidden="true"><i /><i /><i /></span></button>
         <AccountMenu className="portal-account-menu" displayName={shellDisplayName}
