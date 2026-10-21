@@ -618,6 +618,41 @@ test("a late reply from an earlier read never replaces the newer one", async ({p
   await expect(panel.getByText("Coastal fresh update", {exact: true})).toBeVisible();
 });
 
+test("without request support the bell still resets on a verified context change and drops stale reads and updates", async ({page}) => {
+  let releaseRead!: () => void; const heldRead = new Promise<void>(resolve => { releaseRead = resolve; });
+  let releasePatch!: () => void; const heldPatch = new Promise<void>(resolve => { releasePatch = resolve; });
+  let coastalReads = 0;
+  const calls = await mock(page, (route, call) => {
+    // The default contexts have requestV2 = false.
+    if (call.path === "/api/client/notifications/coastal-one" && call.method === "PATCH") return heldPatch.then(() => late(route, {ok: true}));
+    if (call.path !== "/api/client/notification-history" || call.method !== "GET") return undefined;
+    if (call.workspace === "workspace-b") {
+      coastalReads += 1;
+      if (coastalReads === 2) return heldRead.then(() => late(route, accountHistory("workspace-b", [notification("coastal-stale", "Coastal stale update")])));
+      return route.fulfill({json: accountHistory("workspace-b", [notification("coastal-one", "Coastal update")])});
+    }
+    return route.fulfill({json: accountHistory(call.workspace ?? "workspace-a")});
+  });
+  const panel = await openUnifiedBell(page);
+  const coastal = panel.locator("article").filter({hasText: "Coastal update"});
+  await expect(coastal).toBeVisible();
+  await coastal.getByRole("button", {name: "Mark read"}).click();
+  await page.waitForTimeout(1100);
+  await revalidate(page);
+  await expect.poll(() => coastalReads).toBe(2);
+  // Same accounts, new verified context (workspace-c, context-workspace-c): both in-flight results are stale.
+  await openAccount(page, "workspace-c");
+  await expect.poll(() => coastalReads).toBe(3);
+  releasePatch(); releaseRead();
+  await page.waitForTimeout(300);
+  await page.locator(".portal-notification-bell").click();
+  const fresh = page.getByRole("region", {name: "Notifications"});
+  await expect(fresh.locator("article").filter({hasText: "Coastal update"}).getByRole("button", {name: "Mark read"})).toBeVisible();
+  await expect(fresh.getByText("Coastal stale update", {exact: true})).toHaveCount(0);
+  await expect(page.getByRole("button", {name: /Notifications, 1 unread update$/})).toBeVisible();
+  expect(calls.filter(call => call.path === "/api/client/notifications/coastal-one" && call.method === "PATCH")).toHaveLength(1);
+});
+
 for (const width of [390, 1280]) test(`native notification bell is accessible and contained at ${width}px`, async ({page}) => {
   await page.setViewportSize({width, height: 800});
   await mock(page, (route, call) => {

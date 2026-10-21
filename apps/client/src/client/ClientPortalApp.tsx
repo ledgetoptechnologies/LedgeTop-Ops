@@ -3073,6 +3073,9 @@ export function ClientPortalApp({
   const currentAccount = unifiedMode ? workspaces.find(workspace => workspace.id === selectedWorkspaceId) : undefined;
   const unifiedScopes = unifiedMode ? workspaces.filter(unifiedAccountSupported).map(workspace => workspace.id) : [];
   const unifiedLabels = new Map(workspaces.map(workspace => [workspace.id, `${unifiedAccount(workspace).business} · ${workspace.displayName}`]));
+  // Notification history doesn't depend on request support, so the bell resets on the
+  // verified source/workspace/context version whether or not requests are enabled.
+  const notificationContextKey = native ? `${native.workspace.sourceId}:${native.workspace.id}:${native.contextVersion}` : `${account!.id}:${selectedWorkspaceId ?? "legacy"}`;
   /** Opens a page of one exact client account; the account is loaded fresh if it isn't the current one. */
   const openInAccount = (workspaceId: string, path: string) => {
     const url = new URL(path, window.location.origin);
@@ -3616,7 +3619,7 @@ export function ClientPortalApp({
           ))}
         </nav>
         {!switchingWorkspace && (unifiedMode
-          ? <PortalNotifications key={`unified:${requestContextKey ?? ""}:${unifiedScopes.join(",")}`} contextKey={requestContextKey ?? ""} scopes={unifiedScopes} labels={unifiedLabels} />
+          ? <PortalNotifications key={`unified:${notificationContextKey}:${unifiedScopes.join(",")}`} contextKey={notificationContextKey} scopes={unifiedScopes} labels={unifiedLabels} />
           : <PortalNotifications key={requestContextKey} />)}
         <button ref={mobileNavTrigger} className="portal-nav-trigger" type="button" aria-label="Open navigation" aria-expanded={mobileNavOpen} aria-controls="portal-mobile-navigation" onClick={() => setMobileNavOpen(true)}><span className="nav-hamburger" aria-hidden="true"><i /><i /><i /></span></button>
         <AccountMenu className="portal-account-menu" displayName={shellDisplayName}
