@@ -152,6 +152,7 @@ export function ViewerProcessingPanel({ mapToken }: { mapToken: string | null })
   const [presets, setPresets] = useState<ViewerProcessingPreset[]>([]);
   const [storage, setStorage] = useState<ViewerStorageSummary | null>(null);
   const [reviewAttempt, setReviewAttempt] = useState<ViewerProcessingAttemptDetail | null>(null);
+  const [reviewRecovery, setReviewRecovery] = useState<ViewerIngestRecovery | null>(null);
   const [pendingGcpDraftId, setPendingGcpDraftId] = useState<string | null>(null);
   const [projectContext, setProjectContext] = useState<string | null>(null);
   const [cursors, setCursors] = useState<PageCursors>({ projects: null, datasets: null, tasks: null, outputs: null, providers: null });
@@ -207,6 +208,9 @@ export function ViewerProcessingPanel({ mapToken }: { mapToken: string | null })
     setPresets(firstArray(presetData, "presets"));
     setStorage(storageData);
     setReviewAttempt(reviewData);
+    // A deep-linked attempt shows the recovery Viewer advertises for it (one read, not one per row).
+    if (reviewData && safeAttempt) void readIngestRecovery(client, safeAttempt).then(value => { if (generation === loadGeneration.current) setReviewRecovery(value); }, () => { if (generation === loadGeneration.current) setReviewRecovery(null); });
+    else setReviewRecovery(null);
     if (reviewData && !reviewTabSelected.current) {
       reviewTabSelected.current = true;
       setTab("tasks");
@@ -329,7 +333,13 @@ export function ViewerProcessingPanel({ mapToken }: { mapToken: string | null })
     {tab === "shares" && <Card title="Shares"><p>Published-model demo links, expiry, revocation, passwords, units, and download policy are managed in Public demo links below. Raw dataset inputs and processing logs are never share candidates.</p><a className="button-orange button-small" href="#viewer-public-shares">Go to public demo links</a></Card>}
     {tab === "settings" && <><ViewerPresetSettings presets={presets} providers={providers} canWrite={can("viewer.providers.write")} busy={busy} mutate={mutate} /><Card title="Viewer settings"><p>Installation units default to imperial. Each staff member may override measurement display without changing canonical stored values. Provider endpoints, admission limits, credentials, and health are managed in Providers.</p></Card></>}
 
-    {reviewAttempt && <Card title="Requested processing review"><StatusPill tone={reviewAttempt.attempt.status === "ready_for_review" ? "success" : reviewAttempt.attempt.status === "failed" ? "danger" : "warning"}>{reviewAttempt.attempt.status}</StatusPill><p>Attempt {reviewAttempt.attempt.id} · task {reviewAttempt.attempt.taskId} · dataset {reviewAttempt.attempt.datasetId} · {Math.round((reviewAttempt.attempt.progress || 0) * 100)}%</p>{reviewAttempt.attempt.errorMessage && <p className="viewer-processing-error">{reviewAttempt.attempt.errorMessage}</p>}<details><summary>Sanitized processing logs</summary><ol>{reviewAttempt.logs.map((log, index) => <li key={`${log.created_at}-${index}`}>{log.created_at} · {log.level} · {log.message}</li>)}</ol></details></Card>}
+    {reviewAttempt && <Card title="Requested processing review"><StatusPill tone={reviewAttempt.attempt.status === "ready_for_review" ? "success" : reviewAttempt.attempt.status === "failed" ? "danger" : "warning"}>{reviewAttempt.attempt.status.replace(/_/g, " ")}</StatusPill>
+      <h3>{tasks.find(task => task.id === reviewAttempt.attempt.taskId)?.displayName || "Processing task"}</h3>
+      <p>Attempt {reviewAttempt.attempt.attemptNumber} · {Math.round((reviewAttempt.attempt.progress || 0) * 100)}%{tasks.some(task => task.id === reviewAttempt.attempt.taskId) ? <> · <button type="button" className="button-link" onClick={() => setTab("tasks")}>Show in Tasks</button></> : null}</p>
+      <small>Attempt {reviewAttempt.attempt.id} · task {reviewAttempt.attempt.taskId} · dataset {reviewAttempt.attempt.datasetId}</small>
+      {reviewAttempt.attempt.errorMessage && <p className="viewer-processing-error">{reviewAttempt.attempt.errorMessage}</p>}
+      {reviewRecovery && <IngestRecoveryAction attemptId={reviewAttempt.attempt.id} recovery={reviewRecovery} canWrite={can("viewer.processing.write")} busy={busy} mutate={mutate} onChecked={setReviewRecovery} />}
+      <details><summary>Sanitized processing logs</summary><ol>{reviewAttempt.logs.map((log, index) => <li key={`${log.created_at}-${index}`}>{log.created_at} · {log.level} · {log.message}</li>)}</ol></details></Card>}
 
     {!!bootstrap.events.length && <Card title="Processing notifications"><div className="viewer-processing-list">
       {bootstrap.events.map(event => <article key={event.event_id}>
@@ -615,7 +625,18 @@ function TaskRow({ client, task, providers, presets, canWrite, canPublish, busy,
   const [reviewOpen, setReviewOpen] = useState(false);
   const [reviewAssetKinds, setReviewAssetKinds] = useState<ViewerReviewSessionGrant["assetKinds"]>([]);
   const [reviewBusy, setReviewBusy] = useState(false), [reviewError, setReviewError] = useState("");
+  const [recovery, setRecovery] = useState<ViewerIngestRecovery | null>(null);
   const attempt = task.latestAttempt;
+  useEffect(() => setRecovery(null), [attempt?.id]);
+  // Retry reprocesses from scratch. When Viewer advertises an import recovery the finished
+  // results are recovered instead, so Retry checks first and is withheld while one is available.
+  const retry = () => void mutate(async client => {
+    if (!attempt) return;
+    const advertised = await readIngestRecovery(client, attempt.id).catch(() => null);
+    setRecovery(advertised);
+    if (advertised?.available) throw new Error("Processing already finished for this attempt. Recover the model import instead of reprocessing.");
+    await client.request(`/api/v1/attempts/${encodeURIComponent(attempt.id)}/retry`, { method: "POST", headers: { "Idempotency-Key": crypto.randomUUID() }, body: "{}" });
+  }, "A new retry attempt was created.");
   useEffect(() => {
     reviewWindow.current?.close();
     reviewWindow.current = null;
@@ -669,13 +690,14 @@ function TaskRow({ client, task, providers, presets, canWrite, canPublish, busy,
     {detail && <details open className="viewer-attempt-detail"><summary>Attempt logs</summary><progress max={1} value={detail.attempt.progress || 0} />{detail.logs.length ? <ol>{detail.logs.map((log, index) => <li key={`${log.created_at}-${index}`}><time>{log.created_at}</time> <strong>{log.level}</strong> {log.message}</li>)}</ol> : <p>No provider logs yet.</p>}</details>}
     {history && <details open className="viewer-attempt-history"><summary>Attempt and model-version history</summary>{history.attempts.length ? <ol>{history.attempts.map(item => <AttemptHistoryItem key={item.id} attempt={item} provider={providers.find(provider => provider.id === item.providerId)} />)}</ol> : <p>No attempts have been created.</p>}{history.nextCursor && <button type="button" className="button-ghost button-small" disabled={busy} onClick={() => void query(async viewer => { const next = await viewer.request<ViewerProcessingAttemptPage>(`/api/v1/tasks/${encodeURIComponent(task.id)}/attempts?limit=20&cursor=${encodeURIComponent(history.nextCursor!)}`); setHistory(current => current ? { attempts: [...current.attempts, ...next.attempts], nextCursor: next.nextCursor } : next); })}>Load older attempts</button>}</details>}
     {reviewOpen && <p className="viewer-upload-resume" role="status">The unpublished model is open in the dedicated Viewer tab. <button type="button" className="button-ghost button-small" onClick={() => void closeReview()}>Close preview session</button></p>}
+    {attempt && recovery && <IngestRecoveryAction attemptId={attempt.id} recovery={recovery} canWrite={canWrite} busy={busy} mutate={mutate} onChecked={setRecovery} />}
     <TaskStorageDetails task={task} busy={busy} query={query} />
   </div><div>
-    {attempt && <button type="button" className="button-ghost button-small" onClick={() => void clientFor(mutate, async client => { try { setDetail(await client.request<ViewerProcessingAttemptDetail>(`/api/v1/attempts/${encodeURIComponent(attempt.id)}`)); setDetailError(""); } catch (caught) { setDetailError((caught as Error).message); } })}>Progress & logs</button>}
+    {attempt && <button type="button" className="button-ghost button-small" onClick={() => void clientFor(mutate, async client => { try { setDetail(await client.request<ViewerProcessingAttemptDetail>(`/api/v1/attempts/${encodeURIComponent(attempt.id)}`)); setDetailError(""); } catch (caught) { setDetailError((caught as Error).message); } setRecovery(await readIngestRecovery(client, attempt.id).catch(() => null)); })}>Progress & logs</button>}
     <button type="button" className="button-ghost button-small" disabled={busy} onClick={() => void query(async viewer => setHistory(await viewer.request<ViewerProcessingAttemptPage>(`/api/v1/tasks/${encodeURIComponent(task.id)}/attempts?limit=20`)))}>Attempt history</button>
     {canPublish && attempt?.status === "ready_for_review" && !reviewOpen && <button type="button" className="button-orange button-small" disabled={busy || reviewBusy || !client} onClick={() => void openReview()}>{reviewBusy ? "Opening review…" : "Preview unpublished model in new tab"}</button>}
     {canWrite && task.status === "draft" && !task.activeAttemptId && <DraftAttemptControls task={task} providers={providers} presets={presets} busy={busy} mutate={mutate} />}
-    {canWrite && attempt?.status === "failed" && <button type="button" className="button-ghost button-small" disabled={busy} onClick={() => void mutate(client => client.request(`/api/v1/attempts/${encodeURIComponent(attempt.id)}/retry`, { method: "POST", headers: { "Idempotency-Key": crypto.randomUUID() }, body: "{}" }), "A new retry attempt was created.")}>Retry</button>}
+    {canWrite && attempt?.status === "failed" && !recovery?.available && <button type="button" className="button-ghost button-small" disabled={busy} onClick={retry}>Retry</button>}
     {canWrite && active && <button type="button" className="button-danger button-small" disabled={busy} onClick={() => void mutate(client => client.request(`/api/v1/attempts/${encodeURIComponent(attempt!.id)}/cancel`, { method: "POST", headers: { "Idempotency-Key": crypto.randomUUID() }, body: "{}" }), "Cancellation requested.")}>Cancel</button>}
     {canPublish && attempt?.status === "ready_for_review" && <PublishButton task={task} availableKinds={reviewAssetKinds} busy={busy} mutate={mutate} />}
     {canWrite && <TaskCatalogControls task={task} active={active} busy={busy} mutate={mutate} />}
@@ -720,6 +742,51 @@ function TaskStorageDetails({ task, busy, query }: { task: ViewerProcessingTask;
       {usage.outputs.length > 0 && <ul>{usage.outputs.map(output => <li key={output.id}>{output.displayName}: {formatBytes(output.byteSize)} · {output.status}</li>)}</ul>}
       {usage.nextCursor && <button type="button" className="button-ghost button-small" disabled={busy} onClick={() => void fetchPage(usage.nextCursor!)}>Load more outputs</button>}</>}
   </details>;
+}
+
+export type ViewerIngestRecovery = { kind: "ingest"; available: boolean; remainingRequests: number };
+export function validIngestRecovery(value: unknown): ViewerIngestRecovery | null {
+  const recovery = (value as { diagnostics?: { recovery?: unknown } } | null)?.diagnostics?.recovery as Record<string, unknown> | undefined;
+  return recovery && recovery.kind === "ingest" && typeof recovery.available === "boolean"
+    && typeof recovery.remainingRequests === "number" && Number.isInteger(recovery.remainingRequests) && recovery.remainingRequests >= 0
+    ? recovery as ViewerIngestRecovery : null;
+}
+/** Reads the recovery Viewer advertises for one attempt; null when none is advertised or it couldn't be read. */
+async function readIngestRecovery(client: ViewerAdminClient, attemptId: string): Promise<ViewerIngestRecovery | null> {
+  return validIngestRecovery(await client.request(`/api/v1/attempts/${encodeURIComponent(attemptId)}/diagnostics?eventLimit=1&logLimit=1`));
+}
+
+/**
+ * Re-imports a model whose processing already finished but whose import didn't. Offered
+ * only when Viewer advertises it; it never reprocesses (unlike Retry). An unconfirmed
+ * request is retried with the same Idempotency-Key.
+ */
+function IngestRecoveryAction({ attemptId, recovery, canWrite, busy, mutate, onChecked }: {
+  attemptId: string; recovery: ViewerIngestRecovery; canWrite: boolean; busy: boolean; mutate: Mutate; onChecked: (recovery: ViewerIngestRecovery | null) => void;
+}) {
+  const key = useRef<string | null>(null);
+  const [uncertainResult, setUncertainResult] = useState(false);
+  if (!recovery.available) return null;
+  const recover = () => void mutate(async client => {
+    key.current ??= crypto.randomUUID();
+    try {
+      await client.request(`/api/v1/attempts/${encodeURIComponent(attemptId)}/recover-ingest`, { method: "POST", headers: { "Idempotency-Key": key.current }, body: "{}" });
+      key.current = null; setUncertainResult(false);
+    } catch (caught) {
+      const status = (caught as { status?: number }).status ?? 0;
+      if (status && status < 500) { key.current = null; setUncertainResult(false); } else setUncertainResult(true);
+      throw caught;
+    } finally {
+      onChecked(await readIngestRecovery(client, attemptId).catch(() => null));
+    }
+  }, "Model import recovery started. The model appears for review once Viewer finishes importing it.");
+  return <div className="viewer-ingest-recovery" role="region" aria-label="Model import recovery">
+    <p><strong>Processing finished, but the model wasn't imported.</strong> Recover the import to use the finished results. This doesn't reprocess the photos.</p>
+    {canWrite ? <button type="button" className="button-orange button-small" disabled={busy || recovery.remainingRequests === 0} onClick={recover}>
+      {uncertainResult ? "Retry same recovery" : "Recover model import"}</button> : <p>Ask someone with processing access to recover the import.</p>}
+    <small>{recovery.remainingRequests === 0 ? "No recovery requests remain for this attempt." : `${recovery.remainingRequests} recovery request${recovery.remainingRequests === 1 ? "" : "s"} remaining.`}</small>
+    {uncertainResult && <p className="viewer-processing-error" role="alert">The recovery result isn't confirmed. Retrying sends the same request.</p>}
+  </div>;
 }
 
 async function clientFor(mutate: Mutate, action: (client: ViewerAdminClient) => Promise<void>): Promise<void> {
