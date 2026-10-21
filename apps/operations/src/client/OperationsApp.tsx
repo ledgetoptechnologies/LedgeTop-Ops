@@ -56,6 +56,7 @@ import { constrainViewerOffset, pointerAnchoredOffset } from "./viewer-zoom";
 import { activeShareLoadError, createShareLoadDeadline } from "./share-load-deadline";
 import { ViewerProcessingPanel } from "./ViewerProcessingPanel";
 import { NativeViewerModels } from "./NativeViewerModels";
+import { parseViewerReauthorization, viewerReauthorizationFragment } from "./viewer-reauthorization";
 import {
   activateDeliveryFolderCache,
   deactivateDeliveryFolderCache,
@@ -3811,9 +3812,10 @@ function ViewerDataOverview({session}:{session:Session}) {
   const { data, error, reload } = useLoad<ViewerOverviewResponse>(() => api("/api/viewer/overview"), []);
   const [opening, setOpening] = useState(false), [actionError, setActionError] = useState("");
   const [popupBlocked, setPopupBlocked] = useState(false);
-  const reauthorizationState = new URLSearchParams(location.search).get("state");
+  const [reauthorization] = useState(() => parseViewerReauthorization(location.search));
+  const reauthorizationState = reauthorization.kind === "none" ? null : reauthorization.kind === "valid" ? reauthorization.nonce : "invalid";
   useEffect(() => {
-    if (!data?.viewerBaseUrl || !reauthorizationState || !/^[A-Za-z0-9_-]{32,128}$/.test(reauthorizationState)) return;
+    if (!data?.viewerBaseUrl || reauthorization.kind !== "valid") return;
     let active = true;
     const run = async () => {
       setOpening(true); setActionError("");
@@ -3827,7 +3829,7 @@ function ViewerDataOverview({session}:{session:Session}) {
         const target = new URL(grant.workspaceUrl);
         if (target.origin !== expected.origin || target.pathname !== `/workspace/${encodeURIComponent(grant.grant)}` || target.search || target.hash)
           throw new Error("3D Viewer returned an invalid reauthorization link");
-        target.hash = `reauthorize=${reauthorizationState}`;
+        target.hash = viewerReauthorizationFragment(reauthorization);
         if (active) location.replace(target.href);
       } catch (caught) {
         if (active) setActionError((caught as Error).message);
@@ -3835,7 +3837,7 @@ function ViewerDataOverview({session}:{session:Session}) {
     };
     void run();
     return () => { active = false; };
-  }, [data?.viewerBaseUrl, reauthorizationState]);
+  }, [data?.viewerBaseUrl, reauthorization]);
   const openWorkspace = async (currentTab = false) => {
     const popup = currentTab ? null : window.open("about:blank", "_blank");
     if (!currentTab && !popup) {
@@ -3919,6 +3921,7 @@ function ViewerDataOverview({session}:{session:Session}) {
       popup?.close(); setActionError((caught as Error).message);
     } finally { setOpening(false); }
   };
+  if (reauthorization.kind === "invalid") return <Card><ErrorLine error="This Viewer sign-in link isn't valid. Open the Viewer from Operations again." /></Card>;
   if (!data && !error) return <Card><PanelSkeleton /></Card>;
   if (reauthorizationState) return <Card><ErrorLine error={error || actionError} />{opening && <Loading />}{!opening && !error && !actionError && <p>Reauthorizing the Viewer workspace…</p>}</Card>;
   if (error) return <><ErrorLine error={error} /><button type="button" className="button-ghost" onClick={() => void reload()}>Retry overview</button></>;
