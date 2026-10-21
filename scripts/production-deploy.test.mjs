@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
-import { PROFILE, hash, canonical, validateInstallation, compileConfig, checkMode, capture, CloudflareReader, verifyCandidate, verifySourceMap, executeDeployment, validateBuildEnvironment, frontendInputHash } from './production-deploy.mjs';
+import { PROFILE, hash, canonical, validateInstallation, compileConfig, checkMode, capture, CloudflareReader, verifyCandidate, verifySourceMap, executeDeployment, validateBuildEnvironment, frontendInputHash, buildModulePath } from './production-deploy.mjs';
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const ids = { operations: '11111111-1111-4111-8111-111111111111', client: '22222222-2222-4222-8222-222222222222', 'ops-sync': '33333333-3333-4333-8333-333333333333' };
 const NEW = '44444444-4444-4444-8444-444444444444';
@@ -188,16 +188,17 @@ test('returned source map semantics match genuine sibling; paths may only normal
   modern.modules[1].content_base64 = Buffer.from(JSON.stringify({ ...original, mappings: 'wrong' })).toString('base64');
   assert.throws(() => verifyCandidate(snapshot, 'operations', version, modern, Buffer.from('new'), original), /differs/);
 });
-async function flow(t, fail = null) {
+async function flow(t, fail = null, app = 'operations') {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'prod-deploy-fixture-'));t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
-  const main = path.join(directory, 'index.js');fs.writeFileSync(main, 'new');fs.writeFileSync(main + '.map', JSON.stringify(genuineMap()));
-  const { profile, snapshot } = fixture();const version = clone(snapshot.operations.version);version.id = NEW;version.resources.script.etag = 'b'.repeat(64);
-  const modern = { id: NEW, assets: clone(snapshot.operations.modern.assets), modules: [{ name: 'index.js', content_base64: Buffer.from('new').toString('base64') }, { name: 'index.js.map', content_base64: Buffer.from(JSON.stringify(genuineMap())).toString('base64') }] };
+  const main = buildModulePath(app, directory);fs.mkdirSync(path.dirname(main), { recursive: true });
+  fs.writeFileSync(main, 'new');fs.writeFileSync(main + '.map', JSON.stringify(genuineMap()));
+  const { profile, snapshot } = fixture();const version = clone(snapshot[app].version);version.id = NEW;version.resources.script.etag = 'b'.repeat(64);
+  const modern = { id: NEW, assets: clone(snapshot[app].modern.assets), modules: [{ name: 'index.js', content_base64: Buffer.from('new').toString('base64') }, { name: 'index.js.map', content_base64: Buffer.from(JSON.stringify(genuineMap())).toString('base64') }] };
   const reader = readerFor(snapshot, { version, modern });const calls = [];
   const runNative = async (cli, argv, out, phase) => {
     calls.push(phase);assert.equal(cli, 'fixture-cli');assert.ok(argv.includes('--config'));
     if (phase === 'upload') {
-      snapshot.operations.latest = NEW;
+      snapshot[app].latest = NEW;
       if (fail === 'native') throw new Error('ambiguous native failure');
       if (fail === 'assets') modern.assets = { changed: true };
       if (fail === 'concurrent') snapshot.client.schedules.schedules.pop();
@@ -209,18 +210,30 @@ async function flow(t, fail = null) {
       return `Worker Version ID: ${NEW}\n`;
     }
     assert.deepEqual(argv.slice(0, 4), ['versions', 'deploy', `${NEW}@100%`, '--yes']);
-    snapshot.operations.version = clone(version);snapshot.operations.modern = clone(modern);snapshot.operations.deployment.versions = [{ version_id: NEW, percentage: 100 }];snapshot.operations.deployment.id = NEW;
-    snapshot.operations.settings.annotations['workers/triggered_by'] = 'wrangler';
-    snapshot.operations.settings.annotations['workers/message'] = 'native deployment message';
+    snapshot[app].version = clone(version);snapshot[app].modern = clone(modern);snapshot[app].deployment.versions = [{ version_id: NEW, percentage: 100 }];snapshot[app].deployment.id = NEW;
+    snapshot[app].settings.annotations['workers/triggered_by'] = 'wrangler';
+    snapshot[app].settings.annotations['workers/message'] = 'native deployment message';
     return 'Deployed';
   };
-  const operation = executeDeployment({ app: 'operations', mode: 'backend', cli: 'fixture-cli', main, directory: path.join(directory, 'journal'), reader, runNative, fingerprint: PROFILE.frontendSHA256, profile });
+  const operation = executeDeployment({ app, mode: 'backend', cli: 'fixture-cli', main, directory: path.join(directory, 'journal'), reader, runNative, fingerprint: PROFILE.frontendSHA256, profile });
   return { operation, calls, directory };
 }
 test('full injected flow: freshGET→oneinactiveupload→verify→separatenativeactivate→verify', async t => {
   const { operation, calls, directory } = await flow(t);const result = await operation;
   assert.equal(result.verifiedActive, true);assert.deepEqual(calls, ['upload', 'activate']);
   assert.ok(fs.existsSync(path.join(directory, 'journal/verified-active.json')));
+});
+
+test('Sync uses the observed flat Wrangler build plus genuine sibling map through the guarded flow', async t => {
+  const { operation, calls, directory } = await flow(t, null, 'ops-sync');
+  assert.ok(fs.existsSync(path.join(directory, 'apps/ops-sync/dist/index.js')));
+  assert.ok(fs.existsSync(path.join(directory, 'apps/ops-sync/dist/index.js.map')));
+  assert.equal(fs.existsSync(path.join(directory, 'apps/ops-sync/dist/ledgetop_ops_sync/index.js')), false);
+  assert.equal((await operation).verifiedActive, true);
+  assert.deepEqual(calls, ['upload', 'activate']);
+  assert.equal(buildModulePath('operations', directory), path.join(directory, 'apps/operations/dist/ledgetop_ops/index.js'));
+  assert.equal(buildModulePath('client', directory), path.join(directory, 'apps/client/dist/ledgetop_clients/index.js'));
+  assert.throws(() => buildModulePath('foreign', directory), /Unknown Worker/);
 });
 test('unselected recognized code rollout allowed while its protected controls stay exact', async t => {
   const { operation, calls } = await flow(t, 'concurrent-code');assert.equal((await operation).verifiedActive, true);assert.deepEqual(calls, ['upload', 'activate']);

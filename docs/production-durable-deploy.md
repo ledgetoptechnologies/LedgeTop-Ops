@@ -28,6 +28,12 @@ node ../../scripts/production-deploy.mjs --worker client --mode backend --execut
 node ../../scripts/production-deploy.mjs --worker ops-sync --mode backend --execute
 ```
 
+`npm run build` remains the build entrypoint in each application root. Operations
+and Client produce `dist/ledgetop_ops/index.js` and
+`dist/ledgetop_clients/index.js`; Sync's Wrangler dry run produces
+`dist/index.js`. Each module needs its genuine sibling `index.js.map`. The adapter
+uses these exact layouts and does not fall back to a stale nested Sync bundle.
+
 The only credentials accepted are the conventional build-environment
 `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID`. The adapter does not search
 credential files, call login, invoke a browser, or read the operator's MCP files.
