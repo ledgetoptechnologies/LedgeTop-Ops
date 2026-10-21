@@ -5,6 +5,7 @@ import { z } from 'zod';
 import type { Env } from '../types';
 import type { VerifiedClientPrincipal } from './types';
 import { authorizeNativePortalReadTarget,resolveNativePortalWorkspaceReadContext } from './workspace-v2';
+import { folderOwnerEntityType } from '../../../../../packages/shared/src/folder-owner-entity';
 import { clientPortalRequestOriginAllowed } from '../origin-policy';
 import { readBoundedClientJson } from '../bounded-json';
 import type { SharedProfilePortalBinding,SharedProfilePortalProof,SharedProfilePortalResult,SharedProfileTarget } from '../../../../../packages/shared/src/shared-business-profile';
@@ -53,7 +54,12 @@ export async function resolveBusinessProfileProof(env:SharedProfileClientEnviron
  AND (i.valid_from IS NULL OR datetime(i.valid_from)<=datetime('now')) AND (i.expires_at IS NULL OR datetime(i.expires_at)>datetime('now'))
  ORDER BY p.public_id,i.scope_public_id LIMIT 65`).bind(context.identityId,context.generationId,workspaceId,context.identityId,context.identityId).all<SharedProfileTarget>()).results;
  if(rows.length>64)return null;const targets:SharedProfileTarget[]=[];
- for(const row of rows)if(await authorizeNativePortalReadTarget(env,context,'directory.read',{scopeType:'client',publicId:row.publicId}))targets.push(row);
+ for(const row of rows){
+  // The PA client scope denotes this exact standalone root, not a second
+  // entity named "client". Keep the Ops proof's client scope unchanged.
+  const scopeType=folderOwnerEntityType('client',row.publicId,context.rootType,context.rootPublicId);
+  if(await authorizeNativePortalReadTarget(env,context,'directory.read',{scopeType,publicId:row.publicId}))targets.push(row);
+ }
  // This is only a target witness. An explicit owner-issued organization edit
  // grant in Ops is still required; workspace membership grants no profile edit.
  if(context.rootType==='organization'){
