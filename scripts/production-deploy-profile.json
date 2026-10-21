@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "profile": "production-onboarding-normal-v1",
-  "sourceBase": "45e1bc97abc98ebbcacbd0cc58c831a2cc9825cc",
+  "sourceBase": "159ba84253e7156b10e3564449c4e3d15cbf64f4",
   "wranglerVersion": "4.118.0",
   "wranglerRuntimeSHA256": "a1a7a98e0b073d39dc3229b1b89f66accb51ae557fb34552250f914f12a81efd",
   "workers": {
@@ -70,7 +70,8 @@
             "/administration/client-portal/operations-billing-authority",
             "/administration/client-portal/operations-billing-permissions"
           ],
-          "base_path": "/"
+          "base_path": "/",
+          "html_handling": "auto-trailing-slash"
         },
         "compatibility_date": "2026-07-22",
         "compatibility_flags": [
@@ -491,14 +492,14 @@
         }
       },
       "forbiddenPlainNames": [
+        "CLIENT_HUB_PA_CONTACT_ASSIGNMENTS_ENABLED",
         "DROPBOX_IMPORT_ENABLED",
-        "R2_PURGE_ENABLED",
         "LEGACY_CLIENT_REQUEST_PA_QUOTE_LINK_ENABLED",
+        "NATIVE_DIRECTORY_EXISTING_IMPORT_ENABLED",
         "PROJECT_ALPHA_API_V2_MONITOR_ENABLED",
-        "PROJECT_ALPHA_API_V2_READ_ACCEPTANCE_ENABLED",
-        "PROJECT_ALPHA_PROJECT_V2_ACTIVATION_ENABLED",
         "PROJECT_ALPHA_DRAFT_QUOTES_ENABLED",
-        "CLIENT_HUB_PA_CONTACT_ASSIGNMENTS_ENABLED"
+        "PROJECT_ALPHA_PROJECT_V2_ACTIVATION_ENABLED",
+        "R2_PURGE_ENABLED"
       ],
       "plainNames": [
         "ALERT_FROM",
@@ -548,7 +549,6 @@
         "INCOMING_RCLONE_PROMOTION_ENABLED",
         "MAP_STYLE_URL",
         "NATIVE_DIRECTORY_EXISTING_IMPORT_AREAS",
-        "NATIVE_DIRECTORY_EXISTING_IMPORT_ENABLED",
         "NATIVE_DIRECTORY_OUTBOX_DRAIN_ENABLED",
         "NATIVE_DIRECTORY_PROFILE_BINDING_CONTINUATION_ENABLED",
         "NATIVE_DIRECTORY_PROFILE_WRITES_ENABLED",
@@ -568,6 +568,7 @@
         "PROJECT_ACCESS_AUTHORITY_MUTATIONS_ENABLED",
         "PROJECT_ACCESS_EXPIRY_NOTIFICATIONS_ENABLED",
         "PROJECT_ALPHA_API_V2_MONITOR_RECIPIENT",
+        "PROJECT_ALPHA_API_V2_READ_ACCEPTANCE_ENABLED",
         "PROJECT_ALPHA_API_V2_SYNC_ENABLED",
         "PROJECT_ALPHA_BASE_URL",
         "PROJECT_ALPHA_CONNECTOR_SOURCES_REQUIRED",
@@ -647,7 +648,6 @@
         "INCOMING_RCLONE_PROMOTION_ENABLED": "b5bea41b6c623f7c09f1bf24dcae58ebab3c0cdd90ad966bc43a45b44867e12b",
         "MAP_STYLE_URL": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
         "NATIVE_DIRECTORY_EXISTING_IMPORT_AREAS": "57e42d785f64f90245cce2275174c0b1676ad71bca5ccca25117371c56f481db",
-        "NATIVE_DIRECTORY_EXISTING_IMPORT_ENABLED": "fcbcf165908dd18a9e49f7ff27810176db8e9f63b4352213741664245224f8aa",
         "NATIVE_DIRECTORY_OUTBOX_DRAIN_ENABLED": "b5bea41b6c623f7c09f1bf24dcae58ebab3c0cdd90ad966bc43a45b44867e12b",
         "NATIVE_DIRECTORY_PROFILE_BINDING_CONTINUATION_ENABLED": "b5bea41b6c623f7c09f1bf24dcae58ebab3c0cdd90ad966bc43a45b44867e12b",
         "NATIVE_DIRECTORY_PROFILE_WRITES_ENABLED": "b5bea41b6c623f7c09f1bf24dcae58ebab3c0cdd90ad966bc43a45b44867e12b",
@@ -701,7 +701,8 @@
         "VIEWER_PROCESSING_ENABLED": "b5bea41b6c623f7c09f1bf24dcae58ebab3c0cdd90ad966bc43a45b44867e12b",
         "VIEWER_PUBLIC_SHARES_ENABLED": "b5bea41b6c623f7c09f1bf24dcae58ebab3c0cdd90ad966bc43a45b44867e12b",
         "VIEWER_SERVICE_KEY_ID": "00c2ecf1fa7c2f6ca0e443c5ddf6a5c50c4265ef39ebe7b253ab4a5fee48f520",
-        "VIEWER_WORKSPACE_RENEWAL_CORS_ENABLED": "b5bea41b6c623f7c09f1bf24dcae58ebab3c0cdd90ad966bc43a45b44867e12b"
+        "VIEWER_WORKSPACE_RENEWAL_CORS_ENABLED": "b5bea41b6c623f7c09f1bf24dcae58ebab3c0cdd90ad966bc43a45b44867e12b",
+        "PROJECT_ALPHA_API_V2_READ_ACCEPTANCE_ENABLED": "b5bea41b6c623f7c09f1bf24dcae58ebab3c0cdd90ad966bc43a45b44867e12b"
       },
       "assetsSHA256": "4ea626805aeb9005a6af51c7ec914c618aeb78448eaee6155f614ca34b51609d"
     },
@@ -769,7 +770,8 @@
             "/assets/*",
             "/health"
           ],
-          "base_path": "/"
+          "base_path": "/",
+          "html_handling": "auto-trailing-slash"
         },
         "compatibility_date": "2026-07-16",
         "compatibility_flags": [
@@ -1030,7 +1032,8 @@
           "name": "CLIENT_ONBOARDING_RECIPIENT_BRIDGE",
           "type": "service",
           "service": "ledgetop-ops",
-          "entrypoint": "ClientOnboardingRecipientBridge"
+          "entrypoint": "ClientOnboardingRecipientBridge",
+          "environment": "production"
         },
         {
           "entrypoint": "ClientPortalNativeFinancialReader",
@@ -1568,5 +1571,5 @@
       "assetsSHA256": "74234e98afe7498fb5daf1f36ac2d78acc339464f950703b8c019892f982b90b"
     }
   },
-  "frontendSHA256": "9112f567a3a5ea3d800fe4398d71bb8c2d74a8dc8a9e8c82e6070dfdd4534b59"
+  "frontendSHA256": "636f86a871ab4a8d2e99d8b71471397ae9c473d947231385e56ed4f87ba7994c"
 }
