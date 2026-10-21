@@ -19,8 +19,24 @@ the initial controlled rollout is complete. Root must replace each actual
 dashboard deployment command; an npm wrapper does not change the dashboard's
 existing direct CLI release command.
 
-With each build root set to its existing `apps/<app>` directory, keep the normal
-qualified build command and use exactly one of these deployment commands:
+Set the build root to `apps/operations`, `apps/client`, or `apps/ops-sync` for
+the corresponding Worker. Set the nonsecret **build** variable
+`SKIP_DEPENDENCY_INSTALL=1`, then use this build command in each root:
+
+```sh
+npm ci && npm run build
+```
+
+Cloudflare otherwise detects the repository-root `pnpm-lock.yaml` and can run
+`pnpm install --frozen-lockfile` in an application root that has only an npm
+lockfile, failing before the configured command starts. The documented
+[skip-dependency-install setting](https://developers.cloudflare.com/workers/ci-cd/builds/build-image/#skip-dependency-install)
+lets the explicit `npm ci` use each application's reviewed `package-lock.json`.
+Apply it to the non-deploying environment diagnostic too; an installation
+failure does not verify environment availability. Keep the repository lockfiles
+and application build wrappers unchanged.
+
+After the controlled rollout, use the matching guarded deployment command:
 
 ```sh
 node ../../scripts/production-deploy.mjs --worker operations --mode backend --execute
