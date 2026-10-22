@@ -20,6 +20,12 @@ Its Authenticode signature was valid and attributed to Microsoft Corporation.
 This check uses Windows' existing tool-signature validation; it is not an
 isolated network-denial test.
 
+Invoke the script with PowerShell Core 7.3 or later (`pwsh`), not Windows
+PowerShell 5.1. The actual run used the existing cached PowerShell 7.6.5 runtime;
+the script declares both minimum version and Core edition requirements. Confirm
+`$PSVersionTable` in the chosen executable before invocation. No shell fallback
+or global tool installation is performed.
+
 `scripts/windows-offline-signing-rehearsal.ps1` verifies those exact inputs,
 creates an RSA key and one-hour code-signing certificate using managed
 CertificateRequest, exports **only the public CER**, and invokes:

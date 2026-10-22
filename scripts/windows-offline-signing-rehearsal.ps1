@@ -1,3 +1,5 @@
+#requires -Version 7.3
+#requires -PSEdition Core
 param(
   [Parameter(Mandatory)][string]$PackagePath,
   [Parameter(Mandatory)][string]$SignToolPath,
