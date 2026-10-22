@@ -2,6 +2,8 @@ name: Publish Operations Viewer image
 
 on:
   pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review]
     paths:
       - 'apps/viewer/**'
       - '.github/workflows/publish-viewer.yml'
@@ -23,6 +25,8 @@ concurrency:
 
 jobs:
   verify-and-build:
+    # Drafts and branches other than main are tested on staging, not on GitHub minutes.
+    if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
     runs-on: ubuntu-24.04
     defaults:
       run:
