@@ -17,11 +17,12 @@ allows only the new portal and retained LTDS private portal for byte requests;
 the LTT presentation alias gains no native byte access. Its configured allowlist
 must also explicitly retain each admitted private origin.
 
-The pure navigation redirect policy remains disabled by default and unmounted.
+The pure navigation redirect policy is split into a separate preparation
+candidate; this backend candidate contains no navigation module or mounting.
 There are no permanent redirects. Source preparation is not proof that the new
 hosts are serving or that a live canonical cutover is complete.
 
-Local validation on October 22: 44 Node checks (10 navigation policy, 10 actual
+Local validation on October 22: 34 Node checks (10 actual
 compatibility helper, 24 repository/configuration invariants), 46 focused Client
 Worker/native route checks and 10 receiver preflight checks passed. Client
 TypeScript also passed. These synthetic route tests prove both reviewed private
@@ -115,7 +116,6 @@ dependencies (`npm ci --prefix apps/client`).
 
 ```powershell
 node --test scripts/domain-migration-compatibility.test.mjs
-node --test scripts/canonical-domain-navigation.test.mjs
 npm --prefix apps/client test -- --maxWorkers=1 --pool=threads test/portal-origin-migration.test.ts test/operations-native-delivery-deployment.test.ts test/operations-native-delivery-routes.test.ts
 npm --prefix apps/client test -- --maxWorkers=1 --pool=threads test/platform-security.test.ts test/client-routing.test.ts test/client-onboarding-origin-worker.test.ts test/public-share-routes.test.ts test/access-identity.test.ts
 node --test scripts/source-layout-invariants.test.mjs

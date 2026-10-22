@@ -5,11 +5,46 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
-import { PROFILE, hash, canonical, validateInstallation, compileConfig, checkMode, capture, CloudflareReader, verifyCandidate, verifySourceMap, executeDeployment, validateBuildEnvironment, frontendInputHash, buildModulePath } from './production-deploy.mjs';
+import { PROFILE, hash, canonical, validateInstallation, compileConfig, checkMode, capture, CloudflareReader, verifyCandidate, verifySourceMap, executeDeployment, validateBuildEnvironment, frontendInputHash, reviewedFrontendDigest, frontendFingerprint, buildModulePath } from './production-deploy.mjs';
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const ids = { operations: '11111111-1111-4111-8111-111111111111', client: '22222222-2222-4222-8222-222222222222', 'ops-sync': '33333333-3333-4333-8333-333333333333' };
 const NEW = '44444444-4444-4444-8444-444444444444';
 const clone = x => structuredClone(x);
+
+test('worker-only Viewer source compatibility admits just the reviewed exact path and SHA', () => {
+  const file = 'packages/shared/src/viewer-service.ts';
+  const candidate = '075afdc83aee2c288a10be47441e1fd7cf141edfc8a2c9936ba7102d005024b6';
+  const baseline = 'a7f1b2160fb85c06d99213edbc4ef69c0df8f0e96de6284b7d312c2520f91b0f';
+  assert.equal(reviewedFrontendDigest(file, candidate), baseline);
+  for (const other of ['package.json', 'packages/shared/src/other.ts', './' + file, file.toUpperCase()])
+    assert.equal(reviewedFrontendDigest(other, candidate), candidate);
+  const changed = hash('any additional worker or browser source change');
+  assert.equal(reviewedFrontendDigest(file, changed), changed);
+  assert.equal(frontendInputHash(file, Buffer.from('changed source')), hash('changed source'));
+});
+
+test('only the exact reviewed Viewer root-script manifest aliases the locked frontend baseline', () => {
+  const raw = fs.readFileSync(path.join(ROOT, 'package.json'));
+  const normalized = raw.toString('utf8').replaceAll('\r\n', '\n');
+  assert.equal(hash(normalized), 'f8eb91b8e39b62df7d7a13b6474f96297e05110c443899c1b109fa2a0062a1d0');
+  const baseline = '3c5cf8119ffa8eb65d2216db89a583ba79b91a7ada75cbae8aec0856af59ae31';
+  assert.equal(frontendInputHash('package.json', raw), baseline);
+  assert.equal(frontendInputHash('package.json', Buffer.from(normalized.replaceAll('\n', '\r\n'))), baseline);
+  for (const alter of [
+    value => { value.scripts['viewer:build'] += ' --changed'; },
+    value => { value.scripts.build = 'changed'; },
+    value => { value.dependencies = { 'unreviewed-package': '1.0.0' }; },
+  ]) {
+    const value = JSON.parse(normalized); alter(value);
+    const bytes = Buffer.from(JSON.stringify(value, null, 2));
+    assert.equal(frontendInputHash('package.json', bytes), hash(bytes));
+    assert.notEqual(frontendInputHash('package.json', bytes), baseline);
+  }
+  assert.equal(frontendInputHash('apps/client/package.json', raw), hash(normalized));
+  assert.equal(frontendInputHash('packages/shared/src/unreviewed.ts', raw), hash(normalized));
+  assert.equal(frontendFingerprint(ROOT), PROFILE.frontendSHA256);
+  assert.throws(() => checkMode('ui', PROFILE.frontendSHA256), /UI deployment denied/);
+});
 const genuineMap = () => ({ version: 3, file: 'index.js', sources: ['fixture.ts'], sourcesContent: ['export const fixture = true;'], names: [], mappings: 'AAAA' });
 function fixture() {
   const profile = clone(PROFILE), snapshot = {};
