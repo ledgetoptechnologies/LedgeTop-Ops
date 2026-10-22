@@ -118,6 +118,10 @@ WHEN NEW.capability<>'scanner' AND NOT EXISTS(SELECT 1 FROM staff_personnel_auth
  WHERE a.actor_staff_id=NEW.actor_staff_id AND a.bound_access_subject=NEW.actor_access_subject
   AND a.target_staff_id=NEW.staff_id AND a.capability=NEW.capability)
 BEGIN SELECT RAISE(ABORT,'personnel authority changed'); END;
+CREATE TRIGGER staff_personnel_upload_completion_lifecycle BEFORE INSERT ON staff_personnel_events
+WHEN NEW.event_kind='uploaded' AND (NEW.capability<>'staff.documents.upload'
+ OR NOT EXISTS(SELECT 1 FROM staff_personnel_profiles WHERE staff_id=NEW.staff_id AND archived_at IS NULL))
+BEGIN SELECT RAISE(ABORT,'personnel upload target is archived'); END;
 CREATE UNIQUE INDEX staff_personnel_scan_once ON staff_personnel_events(document_id) WHERE capability='scanner';
 CREATE TRIGGER staff_personnel_events_lifecycle BEFORE INSERT ON staff_personnel_events
 WHEN NEW.event_kind IN ('profile_archived','profile_restored') AND (

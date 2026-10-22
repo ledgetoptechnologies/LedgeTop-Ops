@@ -1,0 +1,43 @@
+{
+  "date": "2026-10-22",
+  "base": "a47d7cf4d6cfeea8ba4cb6618cd2f24045883995",
+  "scope": "default-off personnel source review only",
+  "canonicalLfSha256": {
+    "apps/operations/migrations/0225_staff_personnel_documents.sql": "c81414400ade14733a059be73860f579929b38299e214021b068118272fb7702",
+    "apps/operations/src/worker/staff-personnel-http.ts": "699e4d824a72131e3edcebb08b220b258664c0469f9b0621e6428e5b56dfcd45",
+    "apps/operations/test/staff-personnel-http.test.ts": "447508dc7c2badd1ce5a3e1cfa6e724b69e30d08e324ae46d4ab2bf6b6ae44fe"
+  },
+  "tests": {
+    "personnel": {
+      "passed": 12,
+      "total": 12,
+      "seconds": 52.51
+    },
+    "nativePolicyReadAndEarlierPersonnel": {
+      "passed": 25,
+      "total": 25
+    },
+    "reviewedMigrationInventory": {
+      "passed": 33,
+      "total": 33,
+      "seconds": 20.17
+    },
+    "allOperationsMigrations": {
+      "applied": 225,
+      "foreignKeyViolations": 0,
+      "newCapabilities": 5
+    }
+  },
+  "activation": {
+    "enabled": false,
+    "remoteWrites": false,
+    "actualPersonnelData": false,
+    "scannerConsumerImplemented": false,
+    "scannerLiveQualified": false,
+    "UIImplemented": false,
+    "PAIntegration": false,
+    "publicLinks": false,
+    "automaticPurge": false
+  },
+  "authenticationCoverage": "Personnel test seam supplies an already verified native actor; existing native-auth suites own signed JWT validation"
+}

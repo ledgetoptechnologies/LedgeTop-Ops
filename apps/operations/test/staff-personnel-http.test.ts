@@ -3,6 +3,7 @@ import { Miniflare } from 'miniflare';
 import { readdirSync,readFileSync } from 'node:fs';
 import { splitD1MigrationStatements } from '../../client/test/helpers/d1-migrations';
 import { handleStaffPersonnelHttp as actualHandler,type StaffPersonnelDependencies } from '../src/worker/staff-personnel-http';
+import { executeNativeStaffManagementCommand } from '../src/worker/native-staff-management-command';
 let runtime:Miniflare,db:D1Database,bucket:R2Bucket;
 const origin='https://ops.example.test',token='synthetic-personnel-scanner-token-only-123456789';
 const admin='personnel-admin',survivor='personnel-survivor',target='personnel-target',other='personnel-other';
@@ -102,6 +103,15 @@ describe('private native personnel documents',()=>{
  await expect(db.prepare('DELETE FROM staff_personnel_documents WHERE id=?').bind(id).run()).rejects.toThrow(/retained/);
  await expect(db.prepare('DELETE FROM staff_personnel_events').run()).rejects.toThrow(/retained/);
  });
+ it('an upload reserved before archive cannot commit after the profile is archived',async()=>{
+ const race='personnel-race-target';await staff(race);for(const cap of caps)await delegation(admin,cap,race);
+ const wrapped={head:bucket.head.bind(bucket),put:async(...args:Parameters<R2Bucket['put']>)=>{const object=await bucket.put(...args);
+ const response=await handleStaffPersonnelHttp(request(`profiles/${race}/archive`,'POST',{commandId:crypto.randomUUID(),expectedVersion:1,reason:'Synthetic archive during object write'}),deps());expect(response.status).toBe(200);return object;}} as unknown as R2Bucket;
+ expect((await upload(race,pdf,{},deps(admin,{bucket:wrapped}))).status).toBe(503);
+ const row=await db.prepare('SELECT id,status FROM staff_personnel_documents WHERE staff_id=?').bind(race).first<{id:string;status:string}>();expect(row?.status).toBe('uploading');
+ expect((await handleStaffPersonnelHttp(request(`profiles/${race}/documents/${row!.id}/content`),deps())).status).toBe(409);
+ expect(await db.prepare("SELECT count(*) count FROM staff_personnel_events WHERE staff_id=? AND event_kind='uploaded'").bind(race).first('count')).toBe(0);
+ });
  it('archives atomically with admission revocation and preserves private admin access; restore never regrants',async()=>{
  const body={commandId:crypto.randomUUID(),expectedVersion:1,reason:'Synthetic employment ended'};
  expect((await handleStaffPersonnelHttp(request(`profiles/${target}/archive`,'POST',body),deps())).status).toBe(200);
@@ -109,6 +119,8 @@ describe('private native personnel documents',()=>{
  expect((await handleStaffPersonnelHttp(request(`profiles/${target}`),deps())).status).toBe(200);
  expect((await upload()).status).toBe(503);
  await expect(db.prepare('UPDATE native_staff_admissions SET active=1,version=version+1 WHERE staff_id=?').bind(target).run()).rejects.toThrow(/archived/);
+ await delegation(admin,'staff.admission.enable',target);const admission=await db.prepare('SELECT version FROM native_staff_admissions WHERE staff_id=?').bind(target).first<number>('version');
+ await expect(executeNativeStaffManagementCommand(db,{commandId:crypto.randomUUID(),contractVersion:1,capability:'staff.admission.enable',actor:{staffId:admin,verifiedAccessSubject:`${admin}:subject`},targetStaffId:target,expectedVersion:admission,reason:'Synthetic attempted reactivation'})).rejects.toThrow('native_staff_management_command_denied');
  expect((await handleStaffPersonnelHttp(request(`profiles/${target}/restore`,'POST',{...body,commandId:crypto.randomUUID(),expectedVersion:2}),deps())).status).toBe(200);
  expect(await db.prepare('SELECT active FROM native_staff_admissions WHERE staff_id=?').bind(target).first('active')).toBe(0);
  });

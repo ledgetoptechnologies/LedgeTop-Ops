@@ -71,6 +71,27 @@ document. All admitted files stay quarantined until the trusted scanner accepts
 them. No inline document rendering, macro execution or structural-validation-as-AV
 claim is introduced.
 
+The repository already contains a **different** ClamAV consumer:
+`scripts/truenas/incoming-pickup.Dockerfile`,
+`scripts/truenas/incoming-pickup-entrypoint.sh`, and
+`scripts/truenas/incoming-pickup-worker.sh`. It handles client incoming quarantine
+and server pickup; its refresh-failure and bounded-scan patterns are useful
+references. It must not receive this personnel bucket, credentials or documents.
+Its NAS mounts, promotion/deletion workflow and incoming callback credentials
+are not part of personnel processing and must remain untouched.
+
+A dedicated personnel consumer and job-discovery/claim mechanism are still
+missing. The intended staging adapter runs as its own isolated container on
+192.168.50.90, with no NAS mounts or shared incoming credentials, read-only root,
+bounded scratch storage, current ClamAV definitions, timeout/retry behavior and a
+separate personnel service identity. It must obtain bounded leased job IDs, fetch
+the pinned quarantine bytes, independently hash and validate their type/container,
+scan them, then submit the matching verdict receipt. Scanner errors or stale
+definitions leave a retryable quarantine record, never a clean verdict. The
+current API provides the pinned content/receipt protocol but does not yet provide
+leased discovery, implement that consumer, or prove actual AV processing. A token
+and endpoint alone therefore do not make uploads operationally ready.
+
 Each upload is bounded to 25 MiB by actual streamed bytes independently of
 Content-Length. A profile has at most 100 retained uploads and 512 MiB total,
 including failed/incomplete uploads. Original bytes are write-once at opaque UUID
@@ -120,6 +141,15 @@ seven-year or indefinite legal requirement, calculate binding legal dates, or
 automatically purge personnel information. A later reviewed retention/disposition
 process is necessary before any exceptional destruction path can exist.
 
+Primary reference examples illustrate why a single retention period is unsuitable:
+[Wisconsin DWD payroll recordkeeping](https://www.dwd.wi.gov/er/laborstandards/permanentrecords.htm)
+describes a three-year payroll-record requirement, while the
+[IRS business recordkeeping guidance](https://www.irs.gov/businesses/small-businesses-self-employed/how-long-should-i-keep-records)
+states employment-tax records should be kept at least four years after the tax
+becomes due or is paid, whichever is later. These are not blanket classifications
+for every non-compete, contract or 1099. Category, applicable rule, triggering event
+and any hold still require a specific retention decision.
+
 ## Verification scope
 
 `apps/operations/test/staff-personnel-http.test.ts` uses synthetic identities,
@@ -128,3 +158,22 @@ provides a synthetic previously verified native actor; signed Access JWT validat
 remains covered by the existing native staff authentication suites. These tests
 do not prove a deployed scanner, production bucket isolation, a live upload,
 legal retention compliance, or UI accessibility. No real personnel data is used.
+
+Local evidence on October 22, 2026:
+
+- Full Operations `npm run check`: passed with isolated lockfile-installed dependencies.
+- Personnel HTTP/SQL/R2 suite: 12/12 groups passed (52.51 seconds), including
+  independent streamed size limits, CSRF/Origin, exact replay, cross-profile
+  reads, scanner rejection, accepted-object tampering, retention holds,
+  upload-completion/archival race, native admission-enable denial, restore
+  without admission, late transaction rollback and final-admin preservation.
+- Native staff policy/read regression plus the earlier personnel suite: 25/25
+  groups passed across three files before adding the last two focused regressions.
+- Reviewed migration inventory/tamper suite: 33/33 passed (20.17 seconds).
+  Personnel 0225 is a separately hash-validated successor; frozen release and
+  current-source contracts were not rewritten.
+- All 225 Operations SQL migrations applied in a fresh local Miniflare D1;
+  foreign-key check returned zero violations and all five new capabilities existed.
+
+These results support source review. They do not authorize activation or claim
+the missing scanner consumer, staff UI, live bucket or production rollout exists.
