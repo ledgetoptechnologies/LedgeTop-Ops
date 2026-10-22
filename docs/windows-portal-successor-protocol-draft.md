@@ -71,14 +71,21 @@ continuity proof internally, never in browser JSON. No existing route invokes it
 The candidate WHERE predicates are grouped to respect D1's expression-tree depth
 limit; a real-schema query-planning regression covers that limit.
 
-## Next byte, queue and audit implementation
+## Implemented short selector; byte, queue and audit integration remains open
 
-Use a distinct encryption purpose, handle prefix and successor-only byte route.
-The handle retains original lifecycle/path/provider-version/SHA pins plus current
-publication pins and chain digest. Its expiry is the minimum of 15 minutes,
-original grant expiry and verified human expiry. Existing `ond1_` handles keep
-their original semantics. Long queue references retain original selectors; each
-resolve obtains fresh successor proof and a fresh short byte handle.
+The source-only `windows-portal-successor-handles.ts` uses the distinct `wsp1_`
+prefix, AES-GCM purpose and authenticated prefix. It pins the canonical original
+grant fingerprint (binding all original lifecycle fields), authority and person,
+relative path, strong ETag, provider version, SHA256 and size, plus current
+publication's six pins, count and chain digest. The matcher recomputes the
+original fingerprint, validates original download permission and first/current
+continuity, then compares current person/session expiry and all context pins.
+Its expiry is the minimum of 15 minutes, original grant expiry and verified human
+expiry. Decode proves format/integrity only; it never authorizes content.
+Existing `ond1_` handles keep their original semantics and reject the new tokens.
+No route uses the new selectors yet. The successor-only byte route remains to
+be implemented. Long queue references must retain original selectors; each
+resolve must obtain fresh successor proof and a fresh short byte handle.
 
 Existing content-start audit is deliberately tied to the original publication
 and ordinary live-head view. Do not weaken its guard or forge an updated command.
