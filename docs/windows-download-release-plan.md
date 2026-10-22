@@ -155,6 +155,46 @@ amd64 build enables CGO. Retain that as a binary-publication requirement; privat
 unsigned bootstrap/helper tests can proceed with the verified inputs. Do not
 claim complete third-party notices from this root-license observation alone.
 
+### Runtime attribution progress, 2026-10-22
+
+The previous unsigned preview omitted the redistributed .NET runtime licenses
+and notices. The preview now invokes `windows-package-runtime-notices.ps1`
+after publish and before inventory/packing. It checks the actual runtimeconfig
+and dependency references against the reviewed self-contained x64.NET10.0.13
+pair, verifies exact nupkg/file hashes, and retains the NETCore license and
+third-party notices plus the WindowsDesktop license. Both nupkg signatures were
+independently verified with `dotnet nuget verify --all`: Microsoft author and
+NuGet repository signatures passed. WindowsDesktop's package lacks component
+third-party notice files; unmodified WPF and Windows Forms notices are retained
+from the package nuspec's exact Microsoft source commit. The receipt records
+all five notice hashes and provenance. This closes those concrete omissions,
+not every bundled component's licensing requirements.
+
+`windows-helper-buildinfo.mjs` reads only the qualified hash-pinned helper,
+without executing it. Its checked-in linked-module inventory records66 module
+dependencies and three replacements, including two forks. It also reports
+Go1.27.3, CGO enabled and `vcs.modified=true`. Therefore fetching licenses from
+the main repository's `go.mod` alone is insufficient: collect the exact linked
+module/replacement license and notice texts, Go toolchain notices, and account
+for native CGO/Windows-linked components. The modified-source build marker also
+means the public commit alone is not a complete source-provenance claim. The
+package receipt deliberately continues to say `completeThirdPartyAttribution=false`.
+
+Stable remains unconfigured in `ReleaseProfiles.For`; neither source visibility
+nor a successful unsigned pack authorizes installing or publishing that channel.
+Before distribution, choose a durable signed publisher and distinct reviewed
+pilot/stable MSIX identities; compile each trusted profile; replace construction
+artwork; and publish immutable versioned MSIX artifacts behind fixed HTTPS
+download URLs. Use direct `.appinstaller` download links: Microsoft's current
+documentation says the `ms-appinstaller:` protocol is disabled by default on
+ordinary systems. The App Installer descriptor should use on-launch checks
+without blocking activation, background checks, and omit
+`ForceUpdateFromAnyVersion`; rollback remains a forward-version signed release.
+These descriptor settings and clean-machine install/update/rollback/uninstall
+tests are still unimplemented, and no signing credential is requested here.
+[Microsoft current App Installer overview](https://learn.microsoft.com/en-us/windows/msix/app-installer/app-installer-file-overview),
+[Microsoft update settings](https://learn.microsoft.com/en-us/windows/msix/app-installer/update-settings).
+
 ## Update, rollback and uninstall acceptance
 
 Use App Installer's supported update mechanism rather than a custom privileged

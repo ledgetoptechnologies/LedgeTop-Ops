@@ -81,7 +81,7 @@ try {
 $checker = Join-Path $PSScriptRoot 'windows-package-channel-check.ps1'
 $channel = & $checker -AssemblyPath (Join-Path $payload 'LedgeTop.Files.dll') -ExpectedChannel pilot | ConvertFrom-Json
 New-Item -ItemType Directory -Path (Join-Path $payload 'helper'),(Join-Path $payload 'Notices'),(Join-Path $payload 'Assets') | Out-Null
-$runtimeNotices = & (Join-Path $PSScriptRoot 'windows-package-runtime-notices.ps1') -PayloadDirectory $payload -NugetPackagesDirectory $env:NUGET_PACKAGES | ConvertFrom-Json
+$runtimeNotices = & (Join-Path $PSScriptRoot 'windows-package-runtime-notices.ps1') -PayloadDirectory $payload -NugetPackagesDirectory $env:NUGET_PACKAGES -SourceNoticeDirectory (Join-Path $source 'apps/windows-download/Packaging/Notices') | ConvertFrom-Json
 Copy-Item -LiteralPath $HelperPath -Destination (Join-Path $payload 'helper/cloudflared.exe')
 Copy-Item -LiteralPath $HelperLicensePath -Destination (Join-Path $payload 'Notices/LICENSE.cloudflared.txt')
 if ((Hash (Join-Path $payload 'helper/cloudflared.exe')) -ne $helperSha -or (Hash (Join-Path $payload 'Notices/LICENSE.cloudflared.txt')) -ne $licenseSha) { throw 'Copied package input differs.' }

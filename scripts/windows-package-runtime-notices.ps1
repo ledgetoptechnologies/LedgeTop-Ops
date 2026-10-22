@@ -1,6 +1,7 @@
 param(
   [Parameter(Mandatory)][string]$PayloadDirectory,
-  [Parameter(Mandatory)][string]$NugetPackagesDirectory
+  [Parameter(Mandatory)][string]$NugetPackagesDirectory,
+  [string]$SourceNoticeDirectory = (Join-Path $PSScriptRoot '../apps/windows-download/Packaging/Notices')
 )
 
 # Copy the vendor's actual notices from the exact signed runtime packages used
@@ -19,6 +20,7 @@ function LocalDirectory([string]$Path) {
 }
 $payload = LocalDirectory $PayloadDirectory
 $packages = LocalDirectory $NugetPackagesDirectory
+$sourceNotices = LocalDirectory $SourceNoticeDirectory
 $frameworks = @((Get-Content -LiteralPath (Join-Path $payload 'LedgeTop.Files.runtimeconfig.json') -Raw | ConvertFrom-Json).runtimeOptions.includedFrameworks)
 if ($frameworks.Count -ne 2 -or @($frameworks | Where-Object { $_.version -cne '10.0.13' }).Count -ne 0 -or
     (@($frameworks.name | Sort-Object) -join ',') -cne 'Microsoft.NETCore.App,Microsoft.WindowsDesktop.App') { throw 'Runtime notices require the reviewed self-contained .NET10.0.13 framework pair.' }
@@ -50,6 +52,19 @@ foreach ($inputPackage in $inputs) {
     }
   } finally { $zip.Dispose() }
 }
+# WindowsDesktop's nupkg omits its third-party notice files. Preserve both
+# component source notices from its nuspec's exact dotnet/dotnet commit, rather
+# than guessing that NETCore's notice file covers the full desktop payload.
+foreach ($file in @(
+  @{name='THIRD-PARTY-NOTICES.WPF.txt';sha256='d23dba2fee20c6b59d8f7088ee9ed372459c952a319b7ca90f3eec370cc76eb9';component='wpf'},
+  @{name='THIRD-PARTY-NOTICES.WindowsForms.txt';sha256='5a412b38efae0b162dc0893b319023f4cd14a8985a0f9f9ae01ac052b37a36eb';component='winforms'}
+)) {
+  $path = Join-Path $sourceNotices $file.name
+  if (([IO.File]::GetAttributes($path) -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'Reparse source notice.' }
+  $bytes = [IO.File]::ReadAllBytes($path)
+  if ((HashBytes $bytes) -cne $file.sha256) { throw 'Desktop component source notice hash differs.' }
+  $pending += @{name=$file.name;bytes=$bytes;sha256=$file.sha256;sourceUrl="https://raw.githubusercontent.com/dotnet/dotnet/4099f83977f4d29604a9aeb971fb0a7bc1d5f699/src/$($file.component)/THIRD-PARTY-NOTICES.TXT"}
+}
 $noticeDirectory = Join-Path $payload 'Notices'
 if (-not [IO.Directory]::Exists($noticeDirectory)) { $null = [IO.Directory]::CreateDirectory($noticeDirectory) }
 $null = LocalDirectory $noticeDirectory
@@ -60,5 +75,5 @@ foreach ($file in $pending) {
 }
 [pscustomobject]@{
   schemaVersion=1;runtimeVersion='10.0.13';rid='win-x64';completeThirdPartyAttribution=$false
-  notices=@($pending | ForEach-Object { [pscustomobject]@{path="Notices/$($_.name)";bytes=$_.bytes.Length;sha256=$_.sha256;packageId=$_.packageId;packageVersion='10.0.13';packageSha256=$_.packageSha256;packageEntry=$_.entry} })
+  notices=@($pending | ForEach-Object { [pscustomobject]@{path="Notices/$($_.name)";bytes=$_.bytes.Length;sha256=$_.sha256;packageId=$_.packageId;packageVersion='10.0.13';packageSha256=$_.packageSha256;packageEntry=$_.entry;sourceUrl=$_.sourceUrl} })
 } | ConvertTo-Json -Depth 5
