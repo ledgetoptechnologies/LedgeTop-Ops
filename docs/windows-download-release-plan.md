@@ -44,6 +44,52 @@ installer should require SMB credentials, bucket keys or a machine-wide service.
 
 ## Build and signing pipeline
 
+### Verified project-local packaging tools
+
+On October22 the PC had no Windows SDK/Visual Studio packaging tools installed.
+That does not require a global SDK installation: Microsoft's documented NuGet
+route was exercised in a private tooling cache, outside the BCL-only app's
+dependency graph. `Microsoft.Windows.SDK.BuildTools` version10.0.28000.2705
+passed `dotnet nuget verify --all` with Microsoft author and NuGet repository
+signatures. The exact nupkg SHA256 is
+`8bfdfb6ca2633f531cf80b5fa22512ba61a394d7988f0970db83baadc67929ed`.
+
+Its complete `bin/10.0.28000.0/x64` directory was retained. Before execution,
+Windows Authenticode reported Valid/Microsoft Corporation for both tools:
+
+| Tool | SHA256 |
+| --- | --- |
+| makeappx.exe | `98ddf5a4fdb38a1d32c2ca7b350a2012ed430d277baa1bf03ac91ef82365f1d3` |
+| signtool.exe | `d6c04707c59a67fce9fa4bb5fe76c79445b60e1e326d8b500a2f2ba8707c590a` |
+
+Both actual help commands ran successfully; MakeAppx reports10.0.28000.2705.
+No package was built, signed or installed; no certificate or system PATH was
+changed. Signature verification and help execution qualify this tool candidate,
+not the final WPF payload or signing-provider integration. Before future use,
+reverify the exact package/tool hashes and signatures rather than trusting the
+cache directory or a mutable version lookup.
+[Microsoft SDK-tools extraction instructions](https://learn.microsoft.com/en-us/azure/artifact-signing/how-to-signing-integrations),
+[exact official NuGet package](https://www.nuget.org/packages/Microsoft.Windows.SDK.BuildTools/10.0.28000.2705).
+
+### Required application preparation before the first package
+
+The current desktop uses a strict but user-writable setup JSON file and one
+`%LOCALAPPDATA%/LedgeTop/Files` state root. Parsing validates shape, not provenance.
+Before packaging, bind endpoint/helper identity to a reviewed installed or
+embedded release profile, reject mutable endpoint/helper overrides in packaged
+mode, and derive distinct pilot/stable state roots from that trusted profile.
+Keep principal/source subdirectories inside each channel. No user-selected
+destination may become an application cleanup root. Do not silently migrate or
+reuse another channel's durable queue.
+
+Then produce an explicit self-contained x64 layout with the pinned helper and
+required notices, manifest and visual assets. Build an unsigned candidate with
+MakeAppx validation enabled, unpack it, and compare the expected manifest,
+inventory and file hashes. An unsigned package is a build-test artifact only;
+trusted signing, clean-machine install and update acceptance remain separate.
+
+### Release build
+
 1. Pin the reviewed SDK and dependency locks. Build self-contained Windows x64
    first; add arm64 only with native-runner acceptance. Produce an SBOM and retain
    the exact commit, runtime version, dependency hashes and build log.
