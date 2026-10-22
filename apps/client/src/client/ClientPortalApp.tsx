@@ -107,7 +107,8 @@ import { ServiceLibrary } from "./ServiceLibrary";
 import { canBeginRequest, RequestAvailabilityMessage, useRequestAvailability, type RequestAvailability } from "./RequestAvailability";
 import { RequestScopeBoundary } from "./RequestScopeBoundary";
 import { UNIFIED_PAGES, UnifiedPortal, type UnifiedPage } from "./UnifiedPortal";
-import { unifiedAccount, unifiedAccountSupported } from "./unified-portal";
+import { AREA_TEXT, accountArea, unifiedAccount, unifiedAccountSupported } from "./unified-portal";
+import { ClientSessionExpiry } from "./ClientSessionExpiry";
 import { LeaveFeedback, PortalFeedback } from "./PortalFeedback";
 import { PortalNotifications } from "./PortalNotifications";
 import { loadFeedbackFile, withPortalWorkspace } from "./feedback-api";
@@ -229,11 +230,13 @@ function formatBytes(bytes: number): string {
   return `${(bytes / 1024 ** 3).toFixed(1)} GB`;
 }
 
+/** What a client sees for a request. Internal system names (Project Alpha, linkage) never appear here. */
 function statusLabel(status: PortalServiceRequestStatus, projectAlphaDraftCreated?: boolean): string {
-  if (projectAlphaDraftCreated && !["declined", "cancelled", "completed"].includes(status)) return "PA draft quote created";
-  if (status === "accepted_pending_pa_linkage")
-    return "Approved · preparing PA draft quote";
-  if (status === "accepted_linked") return "PA draft quote created";
+  if (projectAlphaDraftCreated && !["declined", "cancelled", "completed"].includes(status)) return "Quote in progress";
+  if (status === "accepted_pending_pa_linkage") return "Approved · preparing your quote";
+  if (status === "accepted_linked") return "Quote in progress";
+  if (status === "submitted") return "Received";
+  if (status === "under_review") return "In review";
   return status
     .replaceAll("_", " ")
     .replace(/\b\w/g, (character) => character.toUpperCase());
@@ -867,8 +870,8 @@ function RequestList({
             )}
             {request.projectAlphaDraftCreated && (
               <aside className="portal-pa-draft-created" role="status">
-                <strong>Project Alpha draft quote created</strong>
-                <span>This does not mean you accepted it.</span>
+                <strong>Your quote is being prepared</strong>
+                <span>We’ll send it for you to review. Nothing is accepted until you approve it.</span>
               </aside>
             )}
             {request.workAreaRevision && (
@@ -3066,6 +3069,7 @@ export function ClientPortalApp({
   const projects = gate.data.resourceMode === "native" ? [] : gate.data.projects;
   const mapboxPublicToken = gate.data.resourceMode === "native" ? null : gate.data.mapboxPublicToken;
   const shellDisplayName = native ? native.workspace.displayName : account!.displayName;
+  const accountEmail = account?.email ?? null;
   const workspaces = gate.data.workspaces ?? [];
   const selectedWorkspaceId = gate.data.selectedWorkspaceId ?? null;
   const unifiedMode = capabilities.workspaceHierarchyV2 && workspaces.filter(unifiedAccountSupported).length > 1;
@@ -3328,7 +3332,7 @@ export function ClientPortalApp({
                 ).length
               }
             </span>
-            <strong>PA draft quotes</strong>
+            <strong>Quotes in progress</strong>
             <button
               className="portal-text-action"
               onClick={() => navigate("requests")}
@@ -3623,7 +3627,9 @@ export function ClientPortalApp({
           : <PortalNotifications key={requestContextKey} />)}
         <button ref={mobileNavTrigger} className="portal-nav-trigger" type="button" aria-label="Open navigation" aria-expanded={mobileNavOpen} aria-controls="portal-mobile-navigation" onClick={() => setMobileNavOpen(true)}><span className="nav-hamburger" aria-hidden="true"><i /><i /><i /></span></button>
         <AccountMenu className="portal-account-menu" displayName={shellDisplayName}
-          avatar={shellDisplayName.slice(0, 2).toUpperCase()} accountHref={unifiedMode ? clientPortalPath("account") : withPortalWorkspace(clientPortalPath("account"))}
+          avatar={shellDisplayName.slice(0, 1).toUpperCase()} accountHref={unifiedMode ? clientPortalPath("account") : withPortalWorkspace(clientPortalPath("account"))}
+          details={accountEmail ? <small>{accountEmail}</small> : undefined}
+          sessionStatus={<ClientSessionExpiry />}
           onAccount={() => navigate("account")} />
       </header>
       {mobileNavOpen && <div className="portal-mobile-nav-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) { setMobileNavOpen(false); mobileNavTrigger.current?.focus(); } }}>
@@ -3636,8 +3642,8 @@ export function ClientPortalApp({
       </div>}
       <main className="client-portal-main">{switchingWorkspace ? <Loading /> : <>
         {currentAccount && !unifiedView && <p className="unified-portal-context">
-          <span>{unifiedAccount(currentAccount).business} · {currentAccount.displayName}</span>
-          {UNIFIED_PAGES.has(page) && <button type="button" className="portal-text-action" onClick={() => navigate(page as UnifiedPage)}>Show all businesses</button>}
+          <span>{AREA_TEXT[accountArea(unifiedAccount(currentAccount))].name} · {currentAccount.displayName}</span>
+          {UNIFIED_PAGES.has(page) && <button type="button" className="portal-text-action" onClick={() => navigate(page as UnifiedPage)}>Back to everything</button>}
         </p>}
         {content}</>}</main>
     </div>

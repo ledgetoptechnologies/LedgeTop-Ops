@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { ApiError, api } from "./api";
+import { formatSessionExpiry } from "@ltds/ui";
 import { formatSessionRemaining, readSessionTiming } from "./session-time";
 
 type Clock = { deadline: number; expiresAt: number };
@@ -56,9 +57,7 @@ export function SessionExpiry({ userId }: { userId: string }) {
       : state === "ready" && clock ? <>
         <small>Session valid for</small>
         <strong role="timer" aria-live="off">{formatSessionRemaining(clock.deadline - now)}</strong>
-        <small>Expires <time dateTime={new Date(clock.expiresAt).toISOString()}>
-          {new Date(clock.expiresAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}
-        </time></small>
+        <small>Expires <time dateTime={new Date(clock.expiresAt).toISOString()}>{formatSessionExpiry(clock.expiresAt)}</time></small>
       </> : <small>{state === "loading" ? "Checking session…" : "Session time unavailable"}</small>}
   </div>;
 }

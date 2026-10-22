@@ -333,8 +333,8 @@ for (const width of [375, 1280]) test(`native service requests expose the shared
   await page.goto("/portal/requests?workspace=workspace-b");
   await expect(page.getByRole("heading", {name: "Service requests"})).toBeVisible();
   await expect(page.getByText("Coastal progress mapping", {exact: true})).toBeVisible();
-  await expect(page.getByText("PA draft quote created", {exact: true})).toBeVisible();
-  await expect(page.getByText("This does not mean you accepted it.", {exact: true})).toBeVisible();
+  await expect(page.getByText("Quote in progress", {exact: true})).toBeVisible();
+  await expect(page.getByText("We’ll send it for you to review. Nothing is accepted until you approve it.", {exact: true})).toBeVisible();
   await page.getByRole("button", {name: "Submit new request"}).click();
   await expect(page).toHaveURL(/\/portal\/requests\/new\?workspace=workspace-b/);
   await expect(page.getByRole("heading", {name: "Define your site and scope"})).toBeVisible();
@@ -903,7 +903,10 @@ test("the unified portal lists every account's projects without a switcher and o
   await expect(page.getByRole("combobox", {name: "Client account"})).toHaveCount(0);
   const projects = page.locator(".portal-project-grid .portal-project-card");
   await expect(projects).toHaveCount(3);
-  await expect(page.getByRole("button", {name: /Primary-only project/})).toContainText("Ledge Top Drone Services");
+  // Items name the client account (several are open) but never make the client pick or read a business.
+  await expect(page.getByRole("button", {name: /Primary-only project/})).toContainText("Primary customer");
+  await expect(page.locator(".portal-project-grid")).not.toContainText("Ledge Top Drone Services");
+  await expect(page.getByRole("group", {name: "Show items from"})).toHaveCount(0);
   // Same public project ID in two accounts stays two separate items.
   await expect(page.getByRole("button", {name: /Coastal seawall construction documentation/})).toBeVisible();
   await expect(page.getByRole("button", {name: /Mountain bridge inspection/})).toBeVisible();
@@ -943,7 +946,7 @@ test("a link naming an account still opens that account's own page", async ({pag
   await mock(page); await page.goto("/portal/projects?workspace=workspace-b");
   await expect(page.getByRole("link", {name: /^Open project\s*: Coastal seawall construction documentation$/})).toBeVisible();
   await expect(page.getByText("Mountain bridge inspection", {exact: true})).toHaveCount(0);
-  await page.getByRole("button", {name: "Show all businesses"}).click();
+  await page.getByRole("button", {name: "Back to everything"}).click();
   await expect(page).toHaveURL(/\/portal\/projects$/);
   await expect(page.getByRole("button", {name: /Mountain bridge inspection/})).toBeVisible();
 });
@@ -1009,4 +1012,118 @@ test("unified projects reports hierarchy pagination limits instead of a complete
   expect(pages).toBe(10);
   await expect(page.getByRole("button", {name: /Mountain bridge inspection/})).toHaveCount(0);
   await expect(page.getByRole("button", {name: /Primary-only project/})).toBeVisible();
+});
+
+test.describe("unified home without business switching", () => {
+  // A client with drone work (primary source) and website work (secondary source), plus a legacy account.
+  const sources: Record<string, string> = {"workspace-b": "project-alpha:primary", "workspace-c": "project-alpha:secondary"};
+  const names: Record<string, string> = {"workspace-b": "Coastal Surveying and Infrastructure Development", "workspace-c": "Rivera Web Studio"};
+  const listed = workspaces.map(item => sources[item.id] ? {...item, sourceId: sources[item.id], displayName: names[item.id]} : item);
+  const request = (id: string, title: string, status: string, updatedAt: string) => ({id, projectId: null, requestType: "service", title, details: "Synthetic request",
+    location: null, preferredStartAt: null, status, createdAt: "2026-08-01T12:00:00.000Z", updatedAt});
+  const requestsFor: Record<string, unknown[]> = {
+    "workspace-b": [request("req-b1", "Seawall progress flight", "under_review", "2026-08-20T12:00:00.000Z")],
+    "workspace-c": [request("req-c1", "Homepage refresh", "completed", "2026-08-18T12:00:00.000Z"),
+      request("req-c2", "Google Ads campaign", "submitted", "2026-08-22T12:00:00.000Z")],
+  };
+  async function mockBoth(page: Page) {
+    return mock(page, (route, call) => {
+      if (call.path === "/api/client/v2/workspaces") return route.fulfill({json: {workspaces: listed}});
+      const match = call.path.match(/^\/api\/client\/v2\/workspaces\/(workspace-[bc])\/(context|hierarchy)$/);
+      if (match) {
+        const id = match[1]!, ws = listed.find(item => item.id === id)!;
+        if (match[2] === "context") return route.fulfill({json: {...requestContext(id), workspace: ws}});
+        const value = hierarchy(id);
+        return route.fulfill({json: {...value, sourceId: sources[id], entries: value.entries.map(entry => entry.type === "project"
+          ? {...entry, displayName: id === "workspace-c" ? "Website refresh" : "Coastal seawall construction documentation"} : entry.type === "organization" ? {...entry, displayName: ws.displayName} : entry)}});
+      }
+      if (call.path === "/api/client/service-requests" && call.workspace && requestsFor[call.workspace]) return route.fulfill({json: {requests: requestsFor[call.workspace]}});
+      return undefined;
+    });
+  }
+
+  test("home merges everything, shows progress at a glance and never names or splits by business", async ({page}) => {
+    await mockBoth(page); await page.goto("/portal");
+    await expect(page.getByRole("heading", {name: "Welcome back"})).toBeVisible();
+    await expect(page.getByRole("group", {name: "Show items from"})).toHaveCount(0);
+    const tile = (label: string) => page.locator(".portal-overview-tile").filter({hasText: label});
+    await expect(tile("Requests in progress").locator(".portal-overview-value")).toHaveText("2");
+    await expect(tile("Completed requests").locator(".portal-overview-value")).toHaveText("1");
+    await expect(page.getByRole("img", {name: "1 received, 1 in review, 1 completed"})).toBeVisible();
+    const activity = page.locator(".ltds-card").filter({has: page.getByRole("heading", {name: "Recent activity"})});
+    await expect(activity.locator("li strong")).toHaveText(["Google Ads campaign", "Seawall progress flight", "Homepage refresh"]);
+    await expect(page.getByRole("button", {name: /Website refresh/})).toBeVisible();
+    await expect(page.getByRole("button", {name: /Coastal seawall construction documentation/})).toBeVisible();
+    await expect(page.locator(".client-portal-main")).not.toContainText("Ledge Top Drone Services");
+    await expect(page.locator(".client-portal-main")).not.toContainText("Ledge Top Technologies");
+  });
+
+  test("a new request asks what the client needs and sends it to the matching account", async ({page}) => {
+    await mockBoth(page); await page.goto("/portal");
+    await page.getByRole("button", {name: "New request"}).first().click();
+    const chooser = page.locator(".unified-portal-chooser");
+    await expect(chooser.getByRole("heading", {name: "What do you need help with?"})).toBeVisible();
+    await expect(chooser.getByRole("button", {name: /Drone flight or field work/})).toBeVisible();
+    await expect(chooser).not.toContainText("Ledge Top Technologies");
+    await chooser.getByRole("button", {name: /Website or marketing/}).click();
+    await expect(page).toHaveURL(/\/portal\/requests\/new\?workspace=workspace-c$/);
+    await expect(page.locator(".unified-portal-context")).toContainText("Website and marketing · Rivera Web Studio");
+  });
+
+  test("deliveries and feedback are described by the work, not the business", async ({page}) => {
+    await mockBoth(page); await page.goto("/portal/deliveries");
+    // Two accounts cover drone work, so each is told apart by its client name; neither by a business.
+    await expect(page.getByText("Drone and survey deliveries", {exact: true})).toHaveCount(2);
+    await expect(page.locator(".unified-portal-area").filter({hasText: "Primary customer"})).toContainText("Drone and survey deliveries");
+    await expect(page.getByText("Website and marketing files", {exact: true})).toBeVisible();
+    await expect(page.locator(".client-portal-main")).not.toContainText("Ledge Top Technologies");
+    await page.goto("/portal/feedback");
+    await expect(page.getByText("Website and marketing", {exact: true})).toBeVisible();
+  });
+
+  test("the redesigned home fits a phone without sideways scrolling", async ({page}) => {
+    await page.setViewportSize({width: 375, height: 812});
+    await mockBoth(page); await page.goto("/portal");
+    await expect(page.locator(".portal-overview-tile")).toHaveCount(4);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  });
+});
+
+test.describe("client header matches Operations", () => {
+  test("account shows the signed-in email and how long the session lasts, without seconds", async ({page}) => {
+    await page.clock.install({time: new Date("2030-01-01T12:00:00Z")});
+    await mock(page, (route, call) => {
+      if (call.path === "/api/client/session") return route.fulfill({json: {account: {id: call.workspace ? "account-a" : "", displayName: "Primary customer", email: "jamie@example.test"}, capabilities: {workspaceHierarchyV2: true}}});
+      if (call.path === "/api/client/session/status") return route.fulfill({json: {serverTime: "2030-01-01T12:00:00.000Z", expiresAt: "2030-01-03T16:13:30.000Z"}});
+      return undefined;
+    });
+    await page.goto("/portal");
+    const trigger = page.getByRole("button", {name: /^Account menu for /});
+    await expect(trigger).toBeVisible();
+    if (await page.getByRole("navigation", {name: "Client portal"}).isVisible()) await expect(trigger).toContainText("jamie@example.test");
+    await trigger.click();
+    const menu = page.getByRole("menu", {name: "Account"});
+    await expect(menu.getByRole("timer")).toHaveText("2d 4h 13m");
+    await expect(menu.locator("time")).toHaveText(/^[A-Z][a-z]{2}, [A-Z][a-z]{2} \d{1,2}, \d{1,2}:\d{2}\s?[AP]M$/);
+    await expect(menu.getByRole("menuitem", {name: "Logout"})).toHaveAttribute("href", "/cdn-cgi/access/logout");
+  });
+
+  test("without session timing from the server the menu shows no made-up countdown", async ({page}) => {
+    await mock(page);
+    await page.goto("/portal");
+    await page.getByRole("button", {name: /^Account menu for /}).click();
+    const menu = page.getByRole("menu", {name: "Account"});
+    await expect(menu.getByRole("menuitem", {name: "Logout"})).toBeVisible();
+    await expect(menu.getByRole("timer")).toHaveCount(0);
+    await expect(menu.locator(".account-session-status")).toHaveCount(0);
+  });
+
+  test("the current page is marked like Operations: orange text with an underline", async ({page}) => {
+    test.skip((page.viewportSize()?.width ?? 0) < 961, "the desktop menu is hidden on phones");
+    await mock(page); await page.goto("/portal");
+    const current = page.getByRole("navigation", {name: "Client portal"}).getByRole("link", {name: "Home"});
+    await expect(current).toHaveAttribute("aria-current", "page");
+    const style = await current.evaluate(element => { const computed = getComputedStyle(element); return {color: computed.color, border: computed.borderBottomColor, width: computed.borderBottomWidth}; });
+    expect(style).toEqual({color: "rgb(238, 80, 7)", border: "rgb(238, 80, 7)", width: "3px"});
+  });
 });
