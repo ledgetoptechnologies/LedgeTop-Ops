@@ -81,6 +81,19 @@ STREAM_PROXY_URL=""
 LARGE_IMAGE_LOCKED=0
 LAST_HTTP_STATUS=""
 LAST_HTTP_BODY=""
+CLAIM_FAILURE_DELAY_SECONDS=30
+
+log_claim_rejection() {
+  local error_code correlation_id
+  error_code=$(json_string "$LAST_HTTP_BODY" error 2>/dev/null || true)
+  correlation_id=$(json_string "$LAST_HTTP_BODY" correlationId 2>/dev/null || true)
+  case "$error_code" in
+    claim_database_unavailable|claim_internal_error|unauthorized) ;;
+    *) error_code="unclassified" ;;
+  esac
+  [[ "$correlation_id" =~ ^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$ ]] || correlation_id="unavailable"
+  log "claim rejected with HTTP $LAST_HTTP_STATUS category=$error_code request=$correlation_id"
+}
 
 stop_heartbeat() {
   if [[ -n "$HEARTBEAT_PID" ]]; then
@@ -714,7 +727,7 @@ claim_once() {
   LAST_HTTP_BODY=$(<"$body_file")
   rm -f -- "$body_file" "$status_file"
   [[ "$LAST_HTTP_STATUS" == "200" ]] || {
-    log "claim rejected with HTTP $LAST_HTTP_STATUS"
+    log_claim_rejection
     return 20
   }
   local result
@@ -955,6 +968,10 @@ main() {
     (( STOP_REQUESTED != 0 )) && break
     if (( rc == 10 )); then
       sleep "$LTDSTHUMB_IDLE_SECONDS" &
+    elif (( rc == 20 )); then
+      # A failed claim may have committed remotely before its response was
+      # lost. Poll later without replaying that request or touching its lease.
+      sleep "$CLAIM_FAILURE_DELAY_SECONDS" &
     else
       sleep 5 &
     fi
