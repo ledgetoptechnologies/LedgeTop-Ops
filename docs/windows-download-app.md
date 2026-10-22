@@ -10,6 +10,12 @@ and [the employee API](employee-windows-api-draft.md),
 and [the concrete installer/release plan](windows-download-release-plan.md).
 Their routes remain unmounted; no host folder access is granted by installation.
 
+The current source also implements durable queues and publication-continuous
+portal browsing/downloads. See [the catalog contract](windows-portal-catalog-contract.md)
+and [the staging activation packet](windows-files-staging-acceptance.md) for the
+current integration boundary. Historical test counts below describe their named
+checkpoints; Engineering Hub and the draft PRs retain current exact-head evidence.
+
 ## Product direction
 
 One Windows application should show the signed-in person's authorized files.
