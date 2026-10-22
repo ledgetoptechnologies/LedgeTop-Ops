@@ -25,3 +25,4 @@ apps/*/.staging-native-authority/
 apps/*/.staging-onboarding-authority/
 apps/*/wrangler.production.native-authority.*.json
 apps/*/.production-native-authority/
+apps/*/.windows-files-staging/
