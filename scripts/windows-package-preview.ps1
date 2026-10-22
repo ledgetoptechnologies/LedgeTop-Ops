@@ -81,6 +81,7 @@ try {
 $checker = Join-Path $PSScriptRoot 'windows-package-channel-check.ps1'
 $channel = & $checker -AssemblyPath (Join-Path $payload 'LedgeTop.Files.dll') -ExpectedChannel pilot | ConvertFrom-Json
 New-Item -ItemType Directory -Path (Join-Path $payload 'helper'),(Join-Path $payload 'Notices'),(Join-Path $payload 'Assets') | Out-Null
+$runtimeNotices = & (Join-Path $PSScriptRoot 'windows-package-runtime-notices.ps1') -PayloadDirectory $payload -NugetPackagesDirectory $env:NUGET_PACKAGES | ConvertFrom-Json
 Copy-Item -LiteralPath $HelperPath -Destination (Join-Path $payload 'helper/cloudflared.exe')
 Copy-Item -LiteralPath $HelperLicensePath -Destination (Join-Path $payload 'Notices/LICENSE.cloudflared.txt')
 if ((Hash (Join-Path $payload 'helper/cloudflared.exe')) -ne $helperSha -or (Hash (Join-Path $payload 'Notices/LICENSE.cloudflared.txt')) -ne $licenseSha) { throw 'Copied package input differs.' }
@@ -128,7 +129,9 @@ $receipt = [pscustomobject]@{
   schemaVersion=1;status='unsigned_local_preview_only';sourceCommit=$ReviewedCommit;sourceTree=$tree;sourceArchiveSha256=(Hash $archive)
   sdk=$sdk;rid='win-x64';selfContained=$true;channel='pilot';applicationSha256=$channel.assemblySha256
   scriptSha256=(Hash $PSCommandPath);channelCheckerSha256=(Hash $checker);makeAppxSha256=$makeAppxSha
+  runtimeNoticeCollectorSha256=(Hash (Join-Path $PSScriptRoot 'windows-package-runtime-notices.ps1'))
   helperSha256=$helperSha;rootLicenseSha256=$licenseSha;completeThirdPartyAttribution=$false
+  runtimeNotices=$runtimeNotices.notices
   payloadFiles=$inventory.Count;payloadBytes=($inventory | Measure-Object bytes -Sum).Sum;inventorySha256=(Hash $inventoryPath)
   packageBytes=(Get-Item -LiteralPath $package).Length;packageSha256=(Hash $package);validatedPack=$true;unpackedInventoryExact=$true
   sourceAcceptanceVerified=$false;runtimeTestsExecuted=$false
