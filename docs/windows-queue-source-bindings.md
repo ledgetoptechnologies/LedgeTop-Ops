@@ -83,10 +83,13 @@ distinguish disabled, invalid, denied and unavailable, with no internal errors.
 The ordinary reader still requires its original publication. Neither issuer nor
 grant head is mutated to manufacture continuity.
 
-No portal consumer, queue, byte handle or audit integration is changed yet. The
-portal must independently prove current consumer home/grant/publication state,
-strictly validate this distinct response and preserve original queue lifecycle
-pins. Purpose-separated successor handles and content-start audit must bind both
+The separate source-only consumer authorizer now proves current local
+home/grant/publication/resource state, validates the distinct response against
+the original grant and local effective publication, and rechecks local state
+after the bounded private RPC. It returns a distinct context and has no fallback
+to ordinary authority. Original views, queue resolution, byte routes and audit
+are unchanged. The next integration must preserve original queue lifecycle pins.
+Purpose-separated successor handles and content-start audit must bind both
 original grant and effective publication before any index/R2 access or byte
 handoff. Queue resume across a publication change is still unfinished.
 

@@ -1,6 +1,6 @@
 # Windows portal publication successor protocol (draft)
 
-Producer source is implemented; consumer and content integration are unfinished.
+Producer and consumer authorization source is implemented; content integration is unfinished.
 This does not make cross-publication downloads available in a deployed portal.
 
 ## Implemented producer
@@ -39,24 +39,35 @@ revision, publication, recipient, resource, features and expiry remain pinned.
 The original reader and grant-dispatch path pass no effective publication and
 continue to require the original publication.
 
-## Next consumer implementation
+## Implemented consumer authorization source
 
 The ordinary Client `operations_portal_native_delivery_live_heads` view correctly
 disappears when its original publication is no longer current. It must remain
-unchanged. A separate candidate query must prove the exact current active grant
+unchanged. A separate candidate query proves the exact current active grant
 through raw heads/commands/history/receipts, current recipient/workspace/home
 receipt, and the current publication head/receipt/snapshot retaining the selected
 folder and project. Candidate rows are not content authorization by themselves.
 
-Read a candidate before private RPC, validate/hash its original canonical grant,
-then strictly validate the distinct successor response. Every nested object must
-have exact own keys. The original authorization must equal the expected original
-proof; grant ID/hash and `first` must match the original wire; `current` must match
-the consumer's current publication; revisions/sequences must be positive safe
+`authorizeWindowsPortalSuccessor` reads a candidate before private RPC,
+validates/hashes its original canonical grant, then strictly validates the
+distinct successor response. Every nested object has exact own keys. The original
+authorization equals the expected original proof; grant ID/hash and `first` match
+the original wire; `current` matches the consumer's current publication;
+revisions/sequences are positive safe
 integers, contiguous and bounded by 64 publications. Chain SHA is opaque producer
-evidence, not a locally recomputed history proof. Re-read the candidate afterward
-and require the entire original/current tuple to remain unchanged. Validate human
-identity, original expiry and feature before and after RPC. No fallback reader.
+evidence, not a locally recomputed history proof. The candidate is re-read
+afterward and the entire original/current tuple must remain unchanged. Original
+expiry and identity/feature pins are checked; the caller must first verify a human
+session and repeat proof at each content phase. There is no ordinary-reader
+fallback. A missing successor method or schema returns unavailable. The bounded
+private call retains its 1.5-second deadline.
+
+The returned `successorContext` is distinct from the ordinary context: it contains
+`originalGrant`, not `command`, and cannot be passed directly to the old byte or
+audit paths. It carries the original fingerprint, selected prefix and frozen
+continuity proof internally, never in browser JSON. No existing route invokes it.
+The candidate WHERE predicates are grouped to respect D1's expression-tree depth
+limit; a real-schema query-planning regression covers that limit.
 
 ## Next byte, queue and audit implementation
 

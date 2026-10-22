@@ -17,6 +17,8 @@ import { readWindowsPortalSuccessorAuthorization, readWindowsPortalSuccessorAuth
   readOperationsPortalNativeDeliveryAuthorization }
   from "../src/worker/operations-portal-native-delivery-authority-reader";
 import { parseOperationsPortalNativeDeliveryAuthorityCommand } from "@ltds/shared/operations-portal-native-delivery-authority";
+import { authorizeWindowsPortalSuccessor } from "../../client/src/worker/client-portal/windows-portal-successor-authorization";
+import { WINDOWS_PORTAL_SUCCESSOR_CANDIDATE_SQL } from "../../client/src/worker/client-portal/windows-portal-successor-candidate";
 
 describe("Windows publication history evidence with real canonical Ops/Client producers", () => {
   it("retains an unchanged grant across applied refreshes, excludes pending commands, and rejects revocation", async () => {
@@ -47,6 +49,17 @@ describe("Windows publication history evidence with real canonical Ops/Client pr
       expect(initial.publicationCount).toBe(1);
       expect(initial.current).toEqual(initial.first);
       const original = await readWindowsPortalSuccessorAuthorization(db, grant);
+      const opsEnv = { OPS_DB: db, ENVIRONMENT: "staging", EXPECTED_HOST: "ops-staging.ledgetopdroneservices.com",
+        PUBLIC_BASE_URL: "https://ops-staging.ledgetopdroneservices.com", OPERATIONS_PORTAL_NATIVE_DELIVERY_READER_ENABLED: "true" };
+      const consumerEnv = { DELIVERY_DB: client, ENVIRONMENT: "staging", CLIENT_PORTAL_ORIGIN: "https://client-staging.ledgetopdroneservices.com",
+        CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_READ_ENABLED: "true", OPERATIONS_PORTAL_NATIVE_DELIVERY_AUTHORIZATION_READER: {
+          readNativeDeliveryAuthorization: async () => { throw new Error("ordinary RPC must not be used as fallback"); },
+          readWindowsDeliverySuccessorAuthorization: (wire: string) => readWindowsPortalSuccessorAuthorizationEntrypoint(opsEnv, wire),
+        } };
+      const initialCandidate = await client.prepare(WINDOWS_PORTAL_SUCCESSOR_CANDIDATE_SQL).bind(authorityId, ctx.issuer, ctx.subject).first();
+      expect(initialCandidate).not.toBeNull();
+      await expect(authorizeWindowsPortalSuccessor(consumerEnv, { issuer: ctx.issuer, subject: ctx.subject }, authorityId))
+        .resolves.toMatchObject({ ok: true, successorContext: { kind: "windows-portal-successor-v1", continuity: { publicationCount: 1 } } });
       const oldRequest = { ...original.authorization, feature: "file.download" as const };
       await expect(readOperationsPortalNativeDeliveryAuthorization(db, oldRequest)).resolves.toEqual(original.authorization);
       for (const forged of [
@@ -80,6 +93,15 @@ describe("Windows publication history evidence with real canonical Ops/Client pr
         EXPECTED_HOST: "ops-staging.ledgetopdroneservices.com", PUBLIC_BASE_URL: "https://ops-staging.ledgetopdroneservices.com",
         OPERATIONS_PORTAL_NATIVE_DELIVERY_READER_ENABLED: "true" }, wire!);
       expect(JSON.parse(rpc)).toEqual({ ok: true, protocolVersion: 1, successor });
+      // Consumer original live_heads intentionally disappears; the separate
+      // candidate query and strict successor proof now agree on publication 2.
+      expect(await client.prepare("SELECT authority_id FROM operations_portal_native_delivery_live_heads WHERE authority_id=?")
+        .bind(authorityId).first()).toBeNull();
+      const consumer = await authorizeWindowsPortalSuccessor(consumerEnv, { issuer: ctx.issuer, subject: ctx.subject }, authorityId);
+      expect(consumer).toMatchObject({ ok: true, successorContext: { originalRequestFingerprint: refreshed.grantFingerprint,
+        continuity: refreshed, originalGrant: grant } });
+      await expect(authorizeWindowsPortalSuccessor(consumerEnv, { issuer: ctx.issuer, subject: "another-person" }, authorityId))
+        .resolves.toEqual({ ok: false, code: "denied" });
       // Old callers still require their exact original publication.
       await expect(readOperationsPortalNativeDeliveryAuthorization(db, oldRequest)).rejects.toThrow("authorization_denied");
       expect(JSON.stringify(refreshed)).not.toContain("r2Prefix");
@@ -108,6 +130,10 @@ describe("Windows publication history evidence with real canonical Ops/Client pr
       expect(authorizations).toBe(2);
       await expect(readWindowsPortalPublicationChainEvidence(db, grant)).rejects.toThrow("chain_unproven");
       await expect(readWindowsPortalSuccessorAuthorization(db, grant)).rejects.toThrow();
+      // Local Client still has the old active grant. Remote revoke must stop it
+      // even before the revoke is delivered to Client.
+      await expect(authorizeWindowsPortalSuccessor(consumerEnv, { issuer: ctx.issuer, subject: ctx.subject }, authorityId))
+        .resolves.toEqual({ ok: false, code: "denied" });
       expect((await db.prepare("PRAGMA foreign_key_check").all()).results).toEqual([]);
     }, { stopAfterReady: true, operationsThroughMigration: "0203_effective_native_directory_enrollment_consumers.sql" });
   }, 240_000);
