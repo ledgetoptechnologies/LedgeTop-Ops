@@ -1,0 +1,9 @@
+{
+  "status": "Valid",
+  "signerSubject": "CN=\"Cloudflare, Inc.\", O=\"Cloudflare, Inc.\", L=San Francisco, S=California, C=US, SERIALNUMBER=4710875, OID.2.5.4.15=Private Organization, OID.1.3.6.1.4.1.311.60.2.1.2=Delaware, OID.1.3.6.1.4.1.311.60.2.1.3=US",
+  "signerThumbprint": "0B6C68C4BAD79F9AC39E07FE84223FB796D4D0BC",
+  "signerNotBefore": "2026-06-26T00:00:00.0000000Z",
+  "signerNotAfter": "2027-06-25T23:59:59.0000000Z",
+  "timestampSubject": "CN=DigiCert SHA256 RSA4096 Timestamp Responder 2026 1, O=\"DigiCert, Inc.\", C=US",
+  "helperSha256": "76b2805253d0d6ffacb092a7acfbee99e7af6917835c0c5410e23f3ef5052da2"
+}
