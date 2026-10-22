@@ -122,6 +122,26 @@ export type OperationsPortalNativeDeliveryAuthorizationProof = Readonly<{
 export type OperationsPortalNativeDeliveryAuthorizationReaderResult =
   | Readonly<{ ok: true; protocolVersion: 1; authorization: OperationsPortalNativeDeliveryAuthorizationProof }>
   | Readonly<{ ok: false; protocolVersion: 1; code: "disabled" | "denied" }>;
+/** Private successor proof; original grant authorization is never rewritten. */
+export type OperationsPortalNativeDeliveryPublicationPins = Readonly<{
+  operationId: string; publicationId: string; revision: number; sourceSequence: number;
+  snapshotId: string; snapshotSha256: string;
+}>;
+export type OperationsPortalNativeDeliveryPublicationContinuity = Readonly<{
+  grantOperationId: string; grantFingerprint: string;
+  first: OperationsPortalNativeDeliveryPublicationPins; current: OperationsPortalNativeDeliveryPublicationPins;
+  publicationCount: number; chainSha256: string;
+}>;
+export type OperationsPortalNativeDeliverySuccessorAuthorization = Readonly<{
+  authorization: OperationsPortalNativeDeliveryAuthorizationProof;
+  continuity: OperationsPortalNativeDeliveryPublicationContinuity;
+}>;
+export type OperationsPortalNativeDeliverySuccessorReaderResult =
+  | Readonly<{ ok: true; protocolVersion: 1; successor: OperationsPortalNativeDeliverySuccessorAuthorization }>
+  | Readonly<{ ok: false; protocolVersion: 1; code: "disabled" | "invalid" | "denied" | "unavailable" }>;
+export interface OperationsPortalNativeDeliverySuccessorReaderBinding {
+  readWindowsDeliverySuccessorAuthorization(canonicalOriginalGrant: string): Promise<string>;
+}
 export interface OperationsPortalNativeDeliveryAuthorizationReaderBinding {
   readNativeDeliveryAuthorization(input: OperationsPortalNativeDeliveryAuthorizationReadRequest): Promise<string>;
 }

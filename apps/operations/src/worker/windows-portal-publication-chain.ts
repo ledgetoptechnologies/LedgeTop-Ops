@@ -1,20 +1,17 @@
 import { canonicalOperationsPortalNativeDeliveryAuthorityCommand, parseOperationsPortalNativeDeliveryAuthorityCommand,
   sha256OperationsPortalNativeDeliveryAuthorityCommand,
-  type OperationsPortalNativeDeliveryAuthorityCommand } from "@ltds/shared/operations-portal-native-delivery-authority";
+  type OperationsPortalNativeDeliveryAuthorityCommand, type OperationsPortalNativeDeliveryPublicationPins,
+  type OperationsPortalNativeDeliveryPublicationContinuity } from "@ltds/shared/operations-portal-native-delivery-authority";
 
 /** A bounded prerequisite for a future successor RPC, NOT content authorization.
  * It proves historical resource retention only. Current recipient/home authority,
  * portal consumer state, handles, audit and byte handoff still require proofs. */
 export const WINDOWS_PORTAL_PUBLICATION_CHAIN_LIMIT = 64;
-type Publication = Readonly<{ operationId: string; publicationId: string; revision: number; sourceSequence: number;
-  snapshotId: string; snapshotSha256: string }>;
+type Publication = OperationsPortalNativeDeliveryPublicationPins;
 type Head = { operation_id: string; publication_id: string; revision: number; source_sequence: number;
   snapshot_id: string; snapshot_sha256: string };
 type History = Head & { expected_revision: number; resource_retained: number };
-export type WindowsPortalPublicationChainEvidence = Readonly<{
-  grantOperationId: string; grantFingerprint: string; first: Publication; current: Publication;
-  publicationCount: number; chainSha256: string;
-}>;
+export type WindowsPortalPublicationChainEvidence = OperationsPortalNativeDeliveryPublicationContinuity;
 const fail = (): never => { throw new Error("windows_portal_publication_chain_unproven"); };
 const publication = (r: Head): Publication => Object.freeze({ operationId: r.operation_id, publicationId: r.publication_id,
   revision: r.revision, sourceSequence: r.source_sequence, snapshotId: r.snapshot_id, snapshotSha256: r.snapshot_sha256 });

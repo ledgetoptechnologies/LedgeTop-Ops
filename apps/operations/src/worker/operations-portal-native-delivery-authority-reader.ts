@@ -1,8 +1,12 @@
-import type { OperationsPortalNativeDeliveryAuthorizationProof,
-  OperationsPortalNativeDeliveryAuthorizationReadRequest,
-  OperationsPortalNativeDeliveryAuthorizationReaderResult,
-  OperationsPortalNativeDeliveryFeature } from "@ltds/shared/operations-portal-native-delivery-authority";
+import { parseOperationsPortalNativeDeliveryAuthorityCommand, canonicalOperationsPortalNativeDeliveryAuthorityCommand,
+  OPERATIONS_PORTAL_NATIVE_DELIVERY_AUTHORITY_MAX_BYTES, type OperationsPortalNativeDeliveryAuthorizationProof,
+  type OperationsPortalNativeDeliveryAuthorizationReadRequest,
+  type OperationsPortalNativeDeliveryAuthorizationReaderResult,
+  type OperationsPortalNativeDeliveryFeature, type OperationsPortalNativeDeliveryPublicationPins,
+  type OperationsPortalNativeDeliverySuccessorAuthorization,
+  type OperationsPortalNativeDeliverySuccessorReaderResult } from "@ltds/shared/operations-portal-native-delivery-authority";
 import { configuredDeploymentOrigin } from "@ltds/shared/configured-deployment-origin";
+import { readWindowsPortalPublicationChainEvidence } from "./windows-portal-publication-chain";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 const HASH = /^[0-9a-f]{64}$/u;
@@ -46,7 +50,7 @@ type Row = { authority_id: string; revision: number; recipient_binding_id: strin
  * immediately before byte handoff. The returned prefix is server-internal and
  * must never be copied into a browser response or signed handle plaintext. */
 async function readAuthorization(database: D1Database, input: ReadOperationsPortalNativeDeliveryAuthorizationInput,
-  requireAcknowledgedDelivery: boolean): Promise<OperationsPortalNativeDeliveryAuthorization> {
+  requireAcknowledgedDelivery: boolean, effectivePublication?: OperationsPortalNativeDeliveryPublicationPins): Promise<OperationsPortalNativeDeliveryAuthorization> {
   if (!input || !valid(input)) denied();
   const row = await database.withSession("first-primary").prepare(`SELECT head.authority_id,head.revision,
       head.recipient_binding_id,head.enrollment_intent_id,head.issuer,head.subject,head.target_id,head.target_revision,
@@ -82,17 +86,17 @@ async function readAuthorization(database: D1Database, input: ReadOperationsPort
     LEFT JOIN operations_portal_native_delivery_authority_receipts delivery_receipt
       ON delivery_receipt.operation_id=delivery_outbox.operation_id
     JOIN operations_portal_workspace_publication_heads publication ON publication.target_id=head.target_id
-      AND publication.latest_operation_id=head.publication_operation_id
+      AND publication.latest_operation_id=COALESCE(?,head.publication_operation_id)
       AND publication.target_revision=head.target_revision
       AND publication.client_authority_id=head.client_authority_id AND publication.workspace_id=head.workspace_id
       AND publication.root_kind=head.root_kind AND publication.root_record_id=head.root_record_id
-      AND publication.publication_revision=head.publication_revision
-      AND publication.source_sequence=head.publication_source_sequence
-      AND publication.snapshot_id=head.publication_snapshot_id
-      AND publication.snapshot_sha256=head.publication_snapshot_sha256
+      AND publication.publication_revision=COALESCE(?,head.publication_revision)
+      AND publication.source_sequence=COALESCE(?,head.publication_source_sequence)
+      AND publication.snapshot_id=COALESCE(?,head.publication_snapshot_id)
+      AND publication.snapshot_sha256=COALESCE(?,head.publication_snapshot_sha256)
     JOIN operations_portal_workspace_publication_receipts publication_receipt
       ON publication_receipt.operation_id=publication.latest_operation_id
-      AND publication_receipt.publication_id=head.publication_id
+      AND publication_receipt.publication_id=COALESCE(?,head.publication_id)
       AND publication_receipt.target_id=publication.target_id
       AND publication_receipt.resulting_revision=publication.publication_revision
       AND publication_receipt.source_sequence=publication.source_sequence
@@ -100,7 +104,7 @@ async function readAuthorization(database: D1Database, input: ReadOperationsPort
       AND publication_receipt.snapshot_sha256=publication.snapshot_sha256
     JOIN operations_portal_workspace_publication_commands publication_command
       ON publication_command.operation_id=publication_receipt.operation_id
-      AND publication_command.publication_id=head.publication_id
+      AND publication_command.publication_id=COALESCE(?,head.publication_id)
       AND publication_command.target_id=publication.target_id
       AND publication_command.target_revision=publication.target_revision
       AND publication_command.client_authority_id=publication.client_authority_id
@@ -166,7 +170,10 @@ async function readAuthorization(database: D1Database, input: ReadOperationsPort
       AND head.client_folder_binding_id=? AND head.external_project_id=? AND head.project_version=?
       AND head.ops_folder_project_id=? AND head.ops_division_id=?
       AND substr(head.selected_r2_prefix,1,length(head.base_r2_prefix))=head.base_r2_prefix COLLATE BINARY`)
-    .bind(input.feature, requireAcknowledgedDelivery ? 1 : 0, input.authorityId, input.authorityRevision,
+    .bind(effectivePublication?.operationId ?? null, effectivePublication?.revision ?? null,
+      effectivePublication?.sourceSequence ?? null, effectivePublication?.snapshotId ?? null,
+      effectivePublication?.snapshotSha256 ?? null, effectivePublication?.publicationId ?? null,
+      effectivePublication?.publicationId ?? null, input.feature, requireAcknowledgedDelivery ? 1 : 0, input.authorityId, input.authorityRevision,
       input.recipientBindingId, input.enrollmentIntentId, input.issuer, input.subject,
       input.targetId, input.targetRevision, input.targetClientRecordId, input.clientAuthorityId, input.workspaceId,
       input.homeOwnershipEpoch, input.homeGrantRevision, input.homeGrantOperationId, input.homeRequestFingerprint,
@@ -200,6 +207,37 @@ export function readOperationsPortalNativeDeliveryAuthorization(database: D1Data
   return readAuthorization(database, input, true);
 }
 
+/** Private producer proof for the Windows successor RPC (source, not deployed).
+ * Both history retention and current home/recipient/folder authority are needed.
+ * No caller can supply effective publication pins without proving the chain. */
+export async function readWindowsPortalSuccessorAuthorization(database: D1Database,
+  rawGrant: unknown): Promise<OperationsPortalNativeDeliverySuccessorAuthorization> {
+  const grant = parseOperationsPortalNativeDeliveryAuthorityCommand(rawGrant);
+  if (!grant || grant.action !== "delivery.grant" || !grant.features.includes("file.download")) return denied();
+  const a = grant.authority, t = grant.target, r = grant.recipient, p = grant.publication, f = grant.resource;
+  const input: ReadOperationsPortalNativeDeliveryAuthorizationInput = {
+    authorityId: a.authorityId, authorityRevision: Number(a.resultingRevision), recipientBindingId: r.recipientBindingId,
+    enrollmentIntentId: r.enrollmentIntentId, issuer: r.issuer, subject: r.subject, targetId: t.targetId,
+    targetRevision: Number(t.targetRevision), targetClientRecordId: r.targetClientRecordId, clientAuthorityId: t.clientAuthorityId,
+    workspaceId: t.workspaceId, homeOwnershipEpoch: Number(r.homeOwnershipEpoch), homeGrantRevision: Number(r.homeGrantRevision),
+    homeGrantOperationId: r.homeGrantOperationId, homeRequestFingerprint: r.homeRequestFingerprint,
+    publicationOperationId: p.operationId, publicationId: p.publicationId, publicationRevision: Number(p.revision),
+    publicationSourceSequence: Number(p.sourceSequence), publicationSnapshotId: p.snapshotId, publicationSnapshotSha256: p.snapshotSha256,
+    folderReservationId: f.folderReservationId, folderReservationRevision: Number(f.folderReservationRevision),
+    clientFolderBindingId: f.clientFolderBindingId, externalProjectId: f.externalProjectId, projectVersion: Number(f.projectVersion),
+    opsFolderProjectId: f.opsFolderProjectId, opsDivisionId: f.opsDivisionId, feature: "file.download",
+  };
+  const before = await readWindowsPortalPublicationChainEvidence(database, grant);
+  await readAuthorization(database, input, true, before.current);
+  const after = await readWindowsPortalPublicationChainEvidence(database, grant);
+  if (after.chainSha256 !== before.chainSha256 || JSON.stringify(after.current) !== JSON.stringify(before.current)) return denied();
+  // This last atomic query also rejects a home/recipient/folder change during
+  // the history recheck, or a publication advance after the chain was captured.
+  const authorization = await readAuthorization(database, input, true, after.current);
+  if (!(Date.parse(authorization.expiresAt) > Date.now())) return denied();
+  return Object.freeze({ authorization, continuity: after });
+}
+
 /** Pre-dispatch proof uses the same current resource joins but cannot require a
  * receipt for the command that has not reached Client yet. Never use it for a
  * content request. */
@@ -212,6 +250,33 @@ export type OperationsPortalNativeDeliveryAuthorizationReaderEnv = Readonly<{
   OPS_DB: D1Database; ENVIRONMENT?: string; EXPECTED_HOST?: string; PUBLIC_BASE_URL?: string;
   OPERATIONS_PORTAL_NATIVE_DELIVERY_READER_ENABLED?: string;
 }>;
+/** Separate private protocol; never accepts a caller-supplied effective
+ * publication or treats an ordinary grant proof as a successor response. */
+export async function readWindowsPortalSuccessorAuthorizationEntrypoint(
+  env: OperationsPortalNativeDeliveryAuthorizationReaderEnv, raw: unknown,
+): Promise<string> {
+  const failure = (code: "disabled" | "invalid" | "denied" | "unavailable") => {
+    const result: OperationsPortalNativeDeliverySuccessorReaderResult = { ok: false, protocolVersion: 1, code };
+    return JSON.stringify(result);
+  };
+  if (!configuredDeploymentOrigin({ environment: env.ENVIRONMENT ?? "", origin: env.PUBLIC_BASE_URL,
+    expectedHost: env.EXPECTED_HOST }) || env.OPERATIONS_PORTAL_NATIVE_DELIVERY_READER_ENABLED !== "true") return failure("disabled");
+  if (typeof raw !== "string" || new TextEncoder().encode(raw).byteLength > OPERATIONS_PORTAL_NATIVE_DELIVERY_AUTHORITY_MAX_BYTES) return failure("invalid");
+  let grant;
+  try {
+    grant = parseOperationsPortalNativeDeliveryAuthorityCommand(JSON.parse(raw));
+    if (!grant || canonicalOperationsPortalNativeDeliveryAuthorityCommand(grant) !== raw) return failure("invalid");
+  } catch { return failure("invalid"); }
+  try {
+    const successor = await readWindowsPortalSuccessorAuthorization(env.OPS_DB, grant);
+    const result: OperationsPortalNativeDeliverySuccessorReaderResult = { ok: true, protocolVersion: 1, successor };
+    const serialized = JSON.stringify(result);
+    return new TextEncoder().encode(serialized).byteLength <= 16_384 ? serialized : failure("unavailable");
+  } catch (error) {
+    return failure(error instanceof Error && (error.message === "operations_portal_native_delivery_authorization_denied"
+      || error.message === "windows_portal_publication_chain_unproven") ? "denied" : "unavailable");
+  }
+}
 /** Root mounts this behind a private RPC entrypoint; it intentionally has no
  * HTTP/browser serializer and defaults off outside an exact configured deployment. */
 export async function readOperationsPortalNativeDeliveryAuthorizationEntrypoint(

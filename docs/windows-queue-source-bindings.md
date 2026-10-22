@@ -67,12 +67,28 @@ identities and a chain digest. Migration 0224 adds its target/sequence index.
 The maximum is 64 publications including the original; longer history needs a
 separate continuity-epoch design, not silent truncation.
 
-This component is not content authorization. It is not mounted as RPC or HTTP,
-does not inspect current recipient/home consumer authorization, and does not
-change queue matching, existing handles or content audit. The eventual successor
-RPC must combine this history evidence with fresh current recipient/home/folder
-proofs and consumer state, then extend purpose-separated handles and audit before
-any index/R2 access. Queue resume across a publication change is still unfinished.
+The history component alone is not content authorization. The source now adds
+`readWindowsDeliverySuccessorAuthorization(canonicalOriginalGrant)` on the existing
+private Ops service-binding entrypoint. It uses the same deployment admission as
+the ordinary reader, accepts only bounded exact canonical grant JSON and returns
+a bounded primitive JSON string. It is not deployed or exposed as HTTP.
+
+That method proves history retention, checks current producer home/recipient/
+folder/project/physical mapping with the effective publication, proves history
+again, and finishes with another current joined permission query. It returns
+`{ok:true,protocolVersion:1,successor:{authorization,continuity}}`. The original
+grant authorization retains its original publication and expiry;
+`continuity.current` separately identifies the effective publication. Failures
+distinguish disabled, invalid, denied and unavailable, with no internal errors.
+The ordinary reader still requires its original publication. Neither issuer nor
+grant head is mutated to manufacture continuity.
+
+No portal consumer, queue, byte handle or audit integration is changed yet. The
+portal must independently prove current consumer home/grant/publication state,
+strictly validate this distinct response and preserve original queue lifecycle
+pins. Purpose-separated successor handles and content-start audit must bind both
+original grant and effective publication before any index/R2 access or byte
+handoff. Queue resume across a publication change is still unfinished.
 
 A normal publication refresh currently returns 409 for an old queue reference.
 That is an explicit source limitation, not the intended final restart/resume
@@ -85,17 +101,14 @@ joins native workspace/recipient heads, acknowledged home receipts, current
 publication heads/receipts/commands/checkpoints, published folder/project
 sources, and current folder reservations/project revisions/physical mapping.
 Its delivery authority heads and dispatch also carry exact lifecycle versions.
-Current portal authorization RPC proves one exact current publication; it does
-not prove that a historical queue selector is a permitted successor resource.
+The ordinary portal authorization RPC proves one exact current publication. The
+separate successor RPC source supplies the producer-side proof only.
 
-A subsequent reviewed continuity protocol must prove at the Ops producer that
-the old and current publications belong to the same uninterrupted delivery grant
-epoch, recipient enrollment/home ownership epoch, target/client/workspace and
-folder/project mapping, with no intervening revoke or remap. It needs an
-immutable successor/continuity record or stable resource/grant generation
-separate from publication revisions, and a bounded authenticated RPC returning
-the current exact command only for that proven successor. The portal must check
-that transition and then use ordinary fresh authority checks. Tests must cover
+The next consumer protocol must preserve the proved uninterrupted delivery grant,
+recipient enrollment/home ownership epoch, target/client/workspace and
+folder/project mapping. A later stable continuity epoch can replace the bounded
+immutable-history scan without accepting omitted or unprovable history. The
+portal must check the transition and repeat fresh authority checks. Tests must cover
 ordinary metadata refresh with same-content resume, changed version, intervening
-revoke/regrant, ownership/client switch and folder remap. No such cross-publication
-authority is inferred or invented here.
+revoke/regrant, ownership/client switch and folder remap. No existing content
+route gains cross-publication authority from the new producer method alone.
