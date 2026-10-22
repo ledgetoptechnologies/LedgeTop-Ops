@@ -508,13 +508,14 @@ test("the deployed Operations Worker preserves native production transport and e
   // Preserve the current native production transport. Deferred catalog/legacy
   // mutation paths stay disabled and have no production service/workflow binding.
   // New settings are disabled onboarding mail controls and isolated mail/activation crons.
-  assert.equal(normalizedSha256("apps/operations/wrangler.jsonc"), "d0167bdde3bb566446f0f4df8779ddb0dbb7ec6f1a51577033bd191ad36b6472");
+  assert.equal(normalizedSha256("apps/operations/wrangler.jsonc"), "0f61f43723e484ec7de68742882fa145764059463b595442949b52c24b681b98");
   const config = readJson("apps/operations/wrangler.jsonc");
   assert.equal(config.vars.PUBLIC_BASE_URL,"https://ops.ledgetop.app");
   assert.equal(config.vars.EXPECTED_HOST,"ops.ledgetop.app");
   assert.equal(config.vars.OPERATIONS_ORIGINS,"https://ops.ledgetop.app,https://ops.ledgetopdroneservices.com,https://ops.ledgetoptechnologies.com");
   assert.deepEqual(config.routes.map(route=>route.pattern),["ops.ledgetop.app","ops.ledgetopdroneservices.com","ops.ledgetoptechnologies.com","incoming.ledgetopdroneservices.com"]);
-  assert.equal(config.vars.DELIVERY_BASE_URL, "https://portal.ledgetopdroneservices.com");
+  assert.equal(config.vars.DELIVERY_BASE_URL, "https://portal.ledgetop.app");
+  assert.equal(config.vars.PUBLIC_SHARE_ORIGIN, "https://portal.ledgetopdroneservices.com");
   assert(config.vars.CLIENT_PORTAL_ORIGINS.split(",").includes("https://client.ledgetopdroneservices.com"),
     "existing client-host public video links retain their Stream origin admission");
   assert.equal(config.vars.VIEWER_WORKSPACE_RENEWAL_CORS_ENABLED, "true");

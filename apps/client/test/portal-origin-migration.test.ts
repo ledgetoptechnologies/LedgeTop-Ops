@@ -1,4 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
+import { generateKeyPair, SignJWT } from "jose";
+const signedEnrollmentFixture = vi.hoisted(() => ({ publicKey: null as CryptoKey | null }));
+vi.mock("../src/worker/client-portal/access-identity", async importOriginal => {
+  const actual = await importOriginal<typeof import("../src/worker/client-portal/access-identity")>();
+  return { ...actual, resolveCloudflareRecipientEnrollmentProof: (request: Request, env: Env) =>
+    actual.resolveCloudflareRecipientEnrollmentProof(request, env,
+      signedEnrollmentFixture.publicKey ? async () => signedEnrollmentFixture.publicKey! : undefined) };
+});
 vi.mock("cloudflare:workers", () => ({ WorkflowEntrypoint: class {}, WorkerEntrypoint: class {} }));
 import worker, { requireSameOrigin } from "../src/worker/index";
 import { clientPortalRequestOriginAllowed, configuredPublicRequestOrigins, configuredRetiredPortalOrigins,
@@ -228,4 +236,62 @@ describe("requested .app client primary with historical public links", () => {
     }
     expect(binding.inspectNativeEnrollment).not.toHaveBeenCalled();expect(binding.redeemNativeEnrollment).not.toHaveBeenCalled();
   });
+
+  it("verifies signed client Access and preserves same-origin consent RPC on both reviewed private hosts",async()=>{
+    const {publicKey,privateKey}=await generateKeyPair("RS256");
+    signedEnrollmentFixture.publicKey=publicKey;
+    try {
+      const issuer="https://synthetic-client.cloudflareaccess.com",subject="synthetic-client-subject";
+      const expires=Math.floor(Date.now()/1000)+600;
+      const assertion=await new SignJWT({type:"app",email:"controlled-recipient@example.test"})
+        .setProtectedHeader({alg:"RS256"}).setIssuer(issuer).setAudience("canonical-client-audience")
+        .setSubject(subject).setIssuedAt().setExpirationTime(expires).sign(privateKey);
+      const wrongAudience=await new SignJWT({type:"app",email:"controlled-recipient@example.test"})
+        .setProtectedHeader({alg:"RS256"}).setIssuer(issuer).setAudience("staff-only-audience")
+        .setSubject(subject).setIssuedAt().setExpirationTime(expires).sign(privateKey);
+      for(const [index,origin] of [portal,publicOrigin].entries()) {
+        const intentId=`${String(index+21).padStart(8,"0")}-0000-4000-8000-000000000000`;
+        const operationId=`${String(index+31).padStart(8,"0")}-0000-4000-8000-000000000000`;
+        const target={targetId:"00000041-0000-4000-8000-000000000000",targetRevision:1,clientRecordId:"synthetic-native-client"};
+        const opaqueToken="a".repeat(64);
+        const inspect=vi.fn().mockResolvedValue(JSON.stringify({intentId,revision:1,state:"issued",
+          target:{...target,displayLabel:"Synthetic client"},expiresAt:new Date(expires*1000).toISOString()}));
+        const redeem=vi.fn().mockResolvedValue(JSON.stringify({intentId,revision:2,state:"pending"}));
+        const fetch=vi.fn(()=>{throw Error("Consent must use the private service methods, never HTTP");});
+        const settings=configuration();
+        const env={...settings,CLIENT_ACCESS_TEAM_DOMAIN:issuer,CLIENT_PORTAL_NATIVE_RECIPIENT_ENROLLMENT_ENABLED:"true",
+          CLIENT_PORTAL_NATIVE_RECIPIENT_ENROLLMENT_CSRF_SECRET:"synthetic-consent-secret-at-least-thirty-two-characters",
+          OPERATIONS_PORTAL_NATIVE_RECIPIENT_ENROLLMENT:{inspectNativeEnrollment:inspect,redeemNativeEnrollment:redeem,fetch}} as unknown as Env;
+        const request=(path:string,body?:unknown,csrfToken?:string,jwt=assertion,requestOrigin=origin)=>new Request(
+          `${requestOrigin}/api/client/operations/recipient-enrollment/${path}`,{method:body===undefined?"GET":"POST",
+          headers:{Origin:requestOrigin,"Sec-Fetch-Site":"same-origin","X-Operations-Enrollment-Request":"1",
+            "Cf-Access-Jwt-Assertion":jwt,...(body===undefined?{}:{"Content-Type":"application/json","X-CSRF-Token":csrfToken??""})},
+          ...(body===undefined?{}:{body:JSON.stringify(body)})});
+        const opened=await worker.fetch(request("session"),env,context);
+        expect(opened.status).toBe(200);expect(opened.headers.get("Location")).toBeNull();
+        const {csrfToken}=await opened.json() as {csrfToken:string};expect(csrfToken).toMatch(/^\d{1,12}\.[0-9a-f]{64}$/);
+        const reviewed=await worker.fetch(request("inspect",{intentId,opaqueToken},csrfToken),env,context);
+        expect(reviewed.status).toBe(200);expect(reviewed.headers.get("Cache-Control")).toBe("no-store");
+        expect(await reviewed.text()).not.toContain(opaqueToken);
+        expect(inspect).toHaveBeenCalledExactlyOnceWith({protocolVersion:1,intentId,opaqueToken});
+        const consent={intentId,opaqueToken,operationId,acknowledged:true,acknowledgedTarget:target};
+        const submitted=await worker.fetch(request("redeem",consent,csrfToken),env,context);
+        expect(submitted.status).toBe(200);expect(submitted.headers.get("Location")).toBeNull();
+        await expect(submitted.json()).resolves.toEqual({intentId,revision:2,state:"pending"});
+        expect(redeem).toHaveBeenCalledExactlyOnceWith({protocolVersion:1,...consent,
+          principal:{issuer,subject},recipientLabel:"controlled-recipient@example.test",verifiedUntil:new Date(expires*1000).toISOString()});
+        for(const jwt of [wrongAudience,assertion.replace(/\.[^.]+$/,signature=>"."+(signature[1]==="a"?"b":"a")+signature.slice(2))])
+          expect((await worker.fetch(request("redeem",consent,csrfToken,jwt),env,context)).status).toBe(401);
+        expect((await worker.fetch(request("redeem",{...consent,principal:{issuer,subject:"forged"}},csrfToken),env,context)).status).toBe(400);
+        for(const rejectedOrigin of [otherPortal,"https://ops.ledgetop.app","https://ledgetop.app"])
+          expect((await worker.fetch(request("redeem",consent,csrfToken,assertion,rejectedOrigin),env,context)).status).not.toBe(200);
+        expect(inspect).toHaveBeenCalledTimes(1);expect(redeem).toHaveBeenCalledTimes(1);expect(fetch).not.toHaveBeenCalled();
+        expect(settings.CLIENT_PORTAL_ORIGIN).toBe(portal);
+        expect(settings.CLIENT_PORTAL_NATIVE_RECIPIENT_ENROLLMENT_EXPECTED_HOST).toBe("portal.ledgetop.app");
+        expect(settings.PUBLIC_BASE_URL).toBe(publicOrigin);expect(settings.PUBLIC_SHARE_ORIGIN).toBe(publicOrigin);
+        expect(settings.EXPECTED_HOST).toBe("portal.ledgetopdroneservices.com");
+      }
+    } finally { signedEnrollmentFixture.publicKey=null; }
+  });
+
 });

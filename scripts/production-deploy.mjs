@@ -43,6 +43,7 @@ function activeId(state) {
   return rows[0].version_id;
 }
 export function validateInstallation(snapshot, { allowLatest = {}, profile = PROFILE, selectedApp } = {}) {
+  need(profile.onboardingAdminOrigin === undefined || profile.onboardingAdminOrigin === 'https://ops.ledgetop.app', 'Unreviewed canonical admin origin profile');
   need(snapshot && equal(Object.keys(snapshot).sort(), Object.keys(profile.workers).sort()), 'Existing complete production installation required');
   for (const [app, spec] of Object.entries(profile.workers)) {
     const s = snapshot[app]; const id = activeId(s);
@@ -71,7 +72,7 @@ export function validateInstallation(snapshot, { allowLatest = {}, profile = PRO
   }
   const ops = varsOf(snapshot.operations); const client = varsOf(snapshot.client);
   for (const name of ['CLIENT_ONBOARDING_ADMIN_ENABLED', 'CLIENT_ONBOARDING_RECIPIENT_BRIDGE_ENABLED', 'CLIENT_ONBOARDING_NOTIFICATIONS_ENABLED', 'PROJECT_ALPHA_DIRECTORY_CREATE_GENERATION_RECOVERY_ENABLED']) need(ops[name] === 'true', `Final normal onboarding profile missing: ${name}`);
-  need(ops.CLIENT_ONBOARDING_ADMIN_ORIGIN === 'https://ops.ledgetopdroneservices.com', 'Canonical admin origin required');
+  need(ops.CLIENT_ONBOARDING_ADMIN_ORIGIN === (profile.onboardingAdminOrigin ?? 'https://ops.ledgetopdroneservices.com'), 'Canonical admin origin required');
   need(client.CLIENT_ONBOARDING_RECIPIENT_BRIDGE_ENABLED === 'true', 'Client bridge is not the reviewed final normal profile');
   const recipients = JSON.parse(ops.CLIENT_ONBOARDING_NOTIFICATION_STAFF_IDS);
   need(Array.isArray(recipients) && recipients.length >= 1 && recipients.length <= 16 && new Set(recipients).size === recipients.length && recipients.every(x => typeof x === 'string' && /^[A-Za-z0-9][A-Za-z0-9:._-]{0,190}$/.test(x)), 'Notification recipient profile malformed');
@@ -316,23 +317,52 @@ export async function executeDeployment({ app, mode, cli, main, directory, reade
   save('after.private.json', after);save('verified-active.json', { candidate: cid, runtimeSHA256: hash(js), assetsPreserved: true, resourcesPreserved: true, settingsPreserved: true, schedulesPreserved: true, ...finalMapsProof, runtimeHTTPAcceptanceStillRequired: true });
   return { candidate: cid, verifiedActive: true, journal: directory };
 }
+const DOMAIN_PHASE_NAMES = ['baseline', 'ops-alias-preparation', 'client-private-overlap', 'portal-entry-canonical', 'staff-canonical'];
+export function parseDeploymentArguments(argv) {
+  if (!argv.length || equal(argv, ['--check'])) return {kind:'check'};
+  if (equal(argv, ['--check-build-environment'])) return {kind:'environment'};
+  if (argv.length === 3 && argv[0] === '--inspect' && argv[1] === '--domain-phase') {
+    need(DOMAIN_PHASE_NAMES.includes(argv[2]), 'Unknown reviewed domain phase');
+    return {kind:'inspect',phase:argv[2]};
+  }
+  need([5,7].includes(argv.length) && argv[0] === '--worker' && argv[2] === '--mode' && argv[4] === '--execute'
+    && (argv.length === 5 || argv[5] === '--domain-phase'), 'Use --worker operations|client|ops-sync --mode backend --execute [--domain-phase <reviewed-name>], or --inspect --domain-phase <reviewed-name>');
+  need(Object.hasOwn(PROFILE.workers, argv[1]), 'Unknown Worker');
+  need(argv[3] === 'backend', 'UI deployment denied: backend is the only supported mode');
+  const phase = argv.length === 7 ? argv[6] : 'baseline';
+  need(DOMAIN_PHASE_NAMES.includes(phase), 'Unknown reviewed domain phase');
+  return {kind:'execute',app:argv[1],mode:'backend',phase};
+}
+export async function inspectProductionInstallation(reader, phase, profile) {
+  need(DOMAIN_PHASE_NAMES.includes(phase), 'Unknown reviewed domain phase');
+  const snapshot = validateInstallation(await capture(reader), {profile});
+  return {recognizedPhase:phase,activeVersionIds:Object.fromEntries(Object.entries(snapshot).map(([app,state]) => [app,activeId(state)])),
+    protectedProfileSHA256:hash(canonical(profile)),frontendSHA256:profile.frontendSHA256,
+    recognized:true,readOnly:true,uploadEnabled:false,activationEnabled:false,rawSnapshotPrinted:false};
+}
 export async function main(argv = process.argv.slice(2)) {
-  if (!argv.length || equal(argv, ['--check'])) { console.log(JSON.stringify({ offline: true, network: false, profile: PROFILE.profile }));return; }
-  if (equal(argv, ['--check-build-environment'])) {
+  const args = parseDeploymentArguments(argv);
+  if (args.kind === 'check') { console.log(JSON.stringify({ offline: true, network: false, profile: PROFILE.profile }));return; }
+  if (args.kind === 'environment') {
     const presence = { accountIdPresent: Object.hasOwn(process.env, 'CLOUDFLARE_ACCOUNT_ID'), apiTokenPresent: Object.hasOwn(process.env, 'CLOUDFLARE_API_TOKEN') };
     console.log(JSON.stringify({ offline: true, network: false, valuesPrinted: false, ...presence }));
     need(presence.accountIdPresent && presence.apiTokenPresent, 'Configure conventional production build environment before enabling deployments');return;
   }
-  need(argv.length === 5 && argv[0] === '--worker' && argv[2] === '--mode' && argv[4] === '--execute', 'Use --worker operations|client|ops-sync --mode backend --execute; no implicit deployment');
-  const app = argv[1];need(Object.hasOwn(PROFILE.workers, app), 'Unknown Worker');checkMode(argv[3]);
+  checkMode('backend');
   validateBuildEnvironment();
+  const {domainRecognitionProfile} = await import('./production-domain-recognition.mjs');
+  const profile = domainRecognitionProfile(args.phase);
+  const reader = new CloudflareReader(process.env.CLOUDFLARE_ACCOUNT_ID, process.env.CLOUDFLARE_API_TOKEN);
+  if (args.kind === 'inspect') {
+    console.log(JSON.stringify(await inspectProductionInstallation(reader,args.phase,profile)));return;
+  }
+  const app = args.app;
   const cli = path.join(ROOT, 'apps', app, 'node_modules/wrangler/wrangler-dist/cli.js');
   need(fs.existsSync(cli) && hash(fs.readFileSync(cli)) === PROFILE.wranglerRuntimeSHA256, 'Installed Wrangler runtime changed; qualify before deployment');
-  const reader = new CloudflareReader(process.env.CLOUDFLARE_ACCOUNT_ID, process.env.CLOUDFLARE_API_TOKEN);
   const main = buildModulePath(app);
   const parent = path.join(ROOT, '.backups/production-deploy');fs.mkdirSync(parent, { recursive: true, mode: 0o700 });
   const directory = path.join(parent, `${app}-${crypto.randomUUID()}`);
-  const result = await executeDeployment({ app, mode: argv[3], cli, main, directory, reader });
+  const result = await executeDeployment({ app, mode: args.mode, cli, main, directory, reader, profile });
   console.log(JSON.stringify(result));
 }
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) main().catch(error => {

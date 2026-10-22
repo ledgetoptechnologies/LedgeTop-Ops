@@ -40,6 +40,16 @@ describe("standard Operations Worker native recipient enrollment mount", () => {
     expect(calls.auth).toHaveBeenCalledOnce();
   });
 
+  it("returns the new private recipient entry origin without changing the separate public share origin", async () => {
+    const settings = env({ DELIVERY_BASE_URL: "https://portal.ledgetop.app",
+      PUBLIC_SHARE_ORIGIN: "https://portal.ledgetopdroneservices.com" });
+    const response = await worker.fetch(session(), settings, execution);
+    expect(response.status).toBe(200);
+    expect(response.headers.get("Location")).toBeNull();
+    expect(await response.json()).toMatchObject({ recipientOrigin: "https://portal.ledgetop.app" });
+    expect(settings.PUBLIC_SHARE_ORIGIN).toBe("https://portal.ledgetopdroneservices.com");
+  });
+
   it.each([
     { CLIENT_PORTAL_NATIVE_RECIPIENT_OWNER_ENABLED: undefined },
     { CLIENT_PORTAL_NATIVE_RECIPIENT_ENROLLMENT_ENABLED: undefined },
