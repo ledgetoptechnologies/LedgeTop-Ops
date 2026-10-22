@@ -97,7 +97,7 @@ if (!serviceAuthKeys && (previousServiceKeyId || previousServiceSecret)) {
 }
 
 const opsBaseUrl = normalizedOrigin(process.env.OPS_BASE_URL || 'https://ops.ledgetopdroneservices.com');
-const opsControllerOrigins = controllerOrigins(opsBaseUrl, process.env.OPS_CONTROLLER_ORIGINS);
+const opsControllerOrigins = controllerOrigins(opsBaseUrl, process.env.OPS_CONTROLLER_ORIGINS, !production);
 
 const config = {
   measurementCalculationsEnabled: bool(process.env.MEASUREMENT_CALCULATIONS_ENABLED, true),

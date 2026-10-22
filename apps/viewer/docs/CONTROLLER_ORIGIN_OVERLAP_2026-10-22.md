@@ -8,7 +8,8 @@ new-domain acceptance. Viewer remains on its existing public hostname.
 Ops signs each admin grant with the exact admitted staff request URL origin,
 never the browser `Origin` header or canonical-site default. Renewal grants also
 carry the target Viewer session ID. Viewer accepts only configured exact HTTPS
-staff controller origins, persists the controller on the grant/session, and
+staff controller origins (explicit loopback origins/ports are supported only
+outside production), persists the controller on the grant/session, and
 requires renewal subject, controller and target session to match the presented
 bearer before consuming the one-time grant. The bearer and session ID stay
 unchanged. Existing client/public viewing remains separate.
@@ -106,3 +107,12 @@ metadata used by those storage tests.
 No image was published, container restarted, NAS accessed or production setting
 changed by this candidate. The parent release must run Linux CI and record the
 published image revision plus live old/new browser acceptance before cutover.
+
+
+The first hosted Linux Viewer run reached 2,126 passing tests but failed three
+stale schema-38 expectations. The follow-up updates current-schema assertions
+and exact-image verification gates to 39 while preserving the immutable original
+source-import manifest at 38. No grant contract or browser source changed in
+that correction. Explicit local-development loopback controllers also retain
+prior safe HTTP/port behavior outside production; production still requires
+exact HTTPS controller origins without port exceptions.

@@ -11,7 +11,7 @@ const {controllerOrigins}=require('../server/controllerOrigins');
 const OLD='https://ops.ledgetopdroneservices.com',NEW='https://ops.ledgetop.app',PORTAL='https://portal.ledgetop.app';
 
 async function fixture(t){
- const previous={opsBaseUrl:config.opsBaseUrl,opsControllerOrigins:config.opsControllerOrigins,serviceAuthSecret:config.serviceAuthSecret};
+ const previous={production:config.production,opsBaseUrl:config.opsBaseUrl,opsControllerOrigins:config.opsControllerOrigins,serviceAuthSecret:config.serviceAuthSecret};
  Object.assign(config,{opsBaseUrl:OLD,opsControllerOrigins:[OLD,NEW],serviceAuthSecret:'synthetic-service-secret-at-least-thirty-two-characters'});
  const root=fs.mkdtempSync(path.join(os.tmpdir(),'viewer-controller-overlap-')),db=openDatabase(path.join(root,'viewer.sqlite'));
  const processing=new ProcessingRepository(db),repository=new ViewerRepository(db),app=express();
@@ -136,4 +136,25 @@ test('an explicitly retained previous Technologies staff alias supports its own 
  assert.equal((await renewed.json()).controllerOrigin,retained);
  const preflight=await fetch(f.base+'/api/v1/admin-sessions/redeem',{method:'OPTIONS',headers:{Origin:retained}});
  assert.equal(preflight.status,204);assert.equal(preflight.headers.get('Access-Control-Allow-Origin'),retained);
+});
+
+
+test('explicit loopback controllers with ports remain usable only outside production',async t=>{
+ const f=await fixture(t),loopbacks=['http://127.0.0.1:3030','http://localhost:3031','https://localhost:3443'];
+ config.production=false;config.opsBaseUrl=loopbacks[0];config.opsControllerOrigins=controllerOrigins(loopbacks[0],loopbacks.join(','),true);
+ assert.deepEqual(config.opsControllerOrigins,loopbacks);
+ for(const origin of loopbacks){
+  const response=await f.redeem(f.issue(origin));assert.equal(response.status,200);
+  const session=await response.json();assert.equal(session.controllerOrigin,origin);
+  const current=await fetch(f.base+'/api/v1/admin-sessions/current',{headers:{authorization:`Bearer ${session.accessToken}`}});assert.equal(current.status,200);
+  const preflight=await fetch(f.base+'/api/v1/admin-sessions/redeem',{method:'OPTIONS',headers:{Origin:origin}});assert.equal(preflight.status,204);
+ }
+ assert.equal(workspaceConnectSources('/workspace',loopbacks[0],loopbacks,true),"'self' blob: https://server.arcgisonline.com "+loopbacks.join(' '));
+ assert.deepEqual(controllerOrigins(loopbacks[0],loopbacks.join(',')),[],'production does not admit HTTP or loopback port exceptions');
+ for(const rejected of ['http://192.168.50.90:3030','http://localhost.evil.example:3030','https://ops.example.test:3443'])
+  assert.deepEqual(controllerOrigins(loopbacks[0],loopbacks[0]+','+rejected,true),[]);
+ config.production=true;
+ for(const origin of loopbacks){
+  const preflight=await fetch(f.base+'/api/v1/admin-sessions/redeem',{method:'OPTIONS',headers:{Origin:origin}});assert.equal(preflight.status,403);
+ }
 });

@@ -93,7 +93,7 @@ app.use((req, res, next) => {
     // GLTFLoader decodes embedded B3DM textures through temporary blob URLs.
     // Only the staff workspace may contact its configured Ops authority for
     // silent renewal. Public viewing and other routes keep their prior policy.
-    `connect-src ${workspaceConnectSources(req.path, config.opsBaseUrl, config.opsControllerOrigins)}`,
+    `connect-src ${workspaceConnectSources(req.path, config.opsBaseUrl, config.opsControllerOrigins, !config.production)}`,
     "worker-src 'self' blob:",
     "frame-src 'self'",
     "object-src 'none'",

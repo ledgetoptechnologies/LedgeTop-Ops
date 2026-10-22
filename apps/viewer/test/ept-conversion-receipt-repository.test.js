@@ -128,14 +128,14 @@ test('receipt rows reject update/delete but follow deletion of their owning job'
   assert.equal(f.store.get(f.jobId), null);
 });
 
-test('v37 databases upgrade to v38 with no fabricated historical receipts', t => {
+test('v37 databases upgrade to the current schema with no fabricated historical receipts', t => {
   const db = new DatabaseSync(':memory:');t.after(() => db.close());
   db.exec('CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY,name TEXT NOT NULL,applied_at TEXT NOT NULL)');
   for (const migration of MIGRATIONS.filter(item => item.version <= 37)) {
     db.exec(migration.sql);db.prepare('INSERT INTO schema_migrations VALUES(?,?,?)').run(migration.version, migration.name, 'now');
   }
   applyMigrations(db);applyMigrations(db);
-  assert.equal(db.prepare('SELECT MAX(version) n FROM schema_migrations').get().n, 38);
+  assert.equal(db.prepare('SELECT MAX(version) n FROM schema_migrations').get().n, MIGRATIONS.at(-1).version);
   assert.equal(db.prepare('SELECT COUNT(*) n FROM derivative_ept_conversion_receipts').get().n, 0);
 });
 

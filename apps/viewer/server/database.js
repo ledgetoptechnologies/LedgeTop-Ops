@@ -2033,7 +2033,7 @@ const MIGRATIONS = [
     const {config}=require('./config');
     const {controllerOriginAllowed}=require('./controllerOrigins');
     const legacyOrigin=config.opsBaseUrl;
-    if(!controllerOriginAllowed(legacyOrigin,config.opsControllerOrigins))throw new Error('Legacy workspace controller must be an exact configured trusted Ops origin');
+    if(!controllerOriginAllowed(legacyOrigin,config.opsControllerOrigins,!config.production))throw new Error('Legacy workspace controller must be an exact configured trusted Ops origin');
     database.prepare('UPDATE admin_grants SET controller_origin=? WHERE controller_origin IS NULL').run(legacyOrigin);
     database.prepare('UPDATE admin_sessions SET controller_origin=? WHERE controller_origin IS NULL').run(legacyOrigin);
     database.prepare("INSERT INTO app_state(key,value,updated_at) VALUES ('workspace_legacy_controller_origin',?,?)").run(legacyOrigin,new Date().toISOString());
