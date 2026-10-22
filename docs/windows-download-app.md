@@ -1,11 +1,12 @@
 # Operations Windows download app
 
-Status: tested transfer foundation plus source-level human portal adapter,
-started 2026-10-21. This is not a released desktop client, a live-qualified
+Status: tested transfer foundation, human portal and employee adapters, audited
+employee provisioning and unmounted read routes, started 2026-10-21. This is not a released desktop client, a live-qualified
 Operations integration, a sync service, or an Explorer files-on-demand provider.
 
-Employee read authority and the Linux gateway are being implemented in a stacked
-source branch. See [the private gateway protocol](employee-read-gateway-protocol.md)
+Employee read authority and the Linux gateway are implemented in draft PR235,
+stacked on the client/Windows draft PR234. See [the private gateway protocol](employee-read-gateway-protocol.md)
+and [the employee API](employee-windows-api-draft.md),
 and [the concrete installer/release plan](windows-download-release-plan.md).
 Their routes remain unmounted; no host folder access is granted by installation.
 
@@ -44,9 +45,9 @@ SHA-256; validated resumed responses; cancellation and interruption handling;
 and atomic completion that preserves existing local files. It must not upload,
 delete remote content, follow arbitrary redirects, or overwrite a user's file.
 
-The prototype's caller-supplied transfer metadata is not a new authorization
-mechanism. A later reviewed adapter must obtain identity-bound resource handles,
-current access and trusted content metadata from the server. Origin configuration
+The prototype's transfer metadata is not a new authorization mechanism. The
+implemented adapters obtain identity-bound resource handles, current access and
+trusted content metadata from the server. Origin configuration
 must come from trusted application configuration, not a downloaded file listing.
 The server must provide a usable strong version and content hash before a real
 delivery can pass this integrity contract. An R2 ETag must not be assumed to be a
@@ -80,8 +81,9 @@ version and checksum pins before returning data. Missing R2 SHA-256 fails closed
 existing/multipart file coverage requires a version-fenced streaming checksum
 job or ingestion proof. No large file is buffered or hashed in a Worker here.
 
-Employee access still needs a new exact staff-to-managed-root read-grant family
-and server Docker gateway. Existing profile-directory grants are not file grants,
+Employee access now has an exact staff-to-managed-root read-grant family,
+audited provisioning and server Docker gateway in source. Real staging enrollment
+and human acceptance remain open. Existing profile-directory grants are not file grants,
 and R2 prefixes must never be translated into arbitrary server paths. Start that
 gateway with read-only synthetic mounts and strict native staff admission; keep
 the preserved-mtime stale-write failure as a hard gate against writable sync.
@@ -94,11 +96,17 @@ contain bearer tokens or signed download URLs.
 
 ## Milestones and acceptance
 
-Current local evidence: 29/29 Windows acceptance groups (including a real owned
-subprocess fixture), client typecheck, 113 native server tests and 24 source-layout
-checks passed. Independent reviewers found no blockers in the source-level
-adapter and server manifest changes. These are synthetic/local results, not
+Local evidence at employee commit `e0ee82e5`: 37/37 Windows acceptance groups
+(including a real owned subprocess fixture), 184 focused Ops tests, full Ops
+typecheck and 24 source-layout checks pass. The unchanged gateway passed 67 Linux
+tests at `db0136a3`. Prior client source passed typecheck and 113 native tests at
+the PR234 checkpoint. Independent review found no blocker in the unmounted
+adapters, read/provisioning routes and migration. These are synthetic/local results, not
 Engineering Hub execution, a live human login, or customer rollout acceptance.
+GitHub could not start the new-head jobs because of an account payment/spending
+limit block; required current-head checks are not claimed green. The durable queue
+contract is being implemented separately; see
+[the queue draft](windows-queue-contract-draft.md).
 
 1. **Transfer foundation:** run deterministic synthetic tests on Windows for
    interruption/resume, cancellation, changed versions, invalid ranges, corrupt

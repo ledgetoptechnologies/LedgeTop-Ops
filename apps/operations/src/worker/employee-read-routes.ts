@@ -52,9 +52,28 @@ function range(value: string | null, size: number): { start: number; end: number
   return { start, end };
 }
 
+/** Shared preparation for ordinary read and durable selector resolution; no authority is inferred from a selector. */
+export async function employeeReadManifest(config: ReadConfiguration, dependencies: Readonly<{ database: D1Database; fetch?: typeof fetch }>,
+  proof: EmployeeReadProof, path: string, signal: AbortSignal): Promise<Response> {
+  const response = await readEmployeeGateway(proof, { operation: "manifest", path, expectedSha256: null, range: null, snapshotId: null, cursor: null }, config.gateway, {
+    fetch: dependencies.fetch ?? fetch, recheck: p => recheckEmployeeReadAuthority(dependencies.database, p),
+    auditContentStart: (p, resource) => recordEmployeeContentStart(dependencies.database, p, resource),
+  }, signal);
+    if (response.status !== 200) return response;
+    const value = await response.json() as { sha256: string; size: number; snapshotId: string; snapshotExpiresAt: number };
+    const expiresAt = Math.min(Math.floor(Date.now() / 1000) + 900, Math.floor(Date.parse(proof.verifiedUntil) / 1000), value.snapshotExpiresAt - 30);
+    if (expiresAt <= Math.floor(Date.now() / 1000) + 5) return fail(409, "employee_read_renew_manifest");
+    const handle = await encodeEmployeeFileHandle(employeeHandleContext({ opsOrigin: config.opsOrigin, issuer: config.access.issuer, audience: config.access.staffAudience, key: config.handleKey }), { v: 1, proof, path: path, snapshotId: value.snapshotId, sha256: value.sha256, size: value.size, expiresAt });
+    const logicalFileId = await employeeLogicalFileId(employeeHandleContext({ opsOrigin: config.opsOrigin, issuer: config.access.issuer, audience: config.access.staffAudience, key: config.handleKey }), proof, path);
+    if (!await recheckEmployeeReadAuthority(dependencies.database, proof) || Date.now() >= expiresAt * 1000) return fail(403, "employee_read_denied");
+    return Response.json({ schemaVersion: 1, logicalFileId, remoteVersion: value.sha256, strongETag: `"${value.sha256}"`, size: value.size,
+      sha256: value.sha256, name: employeeWindowsFileName(path), downloadPath: `${BASE}/downloads/${handle}`, expiresAt });
+}
+
 /** Deliberately unmounted. Does not provision roots/grants or modify global Env. */
 export function createEmployeeReadRouter(configuration: ReadConfiguration, dependencies: Readonly<{ database: D1Database; fetch?: typeof fetch }>) {
   const router = new Hono<Bindings>().basePath(BASE), database = dependencies.database, fetcher = dependencies.fetch ?? fetch;
+  const manifestDependencies = Object.freeze({ database, fetch: fetcher });
   let config: ReadConfiguration | null = null;
   try {
     const value = { enabled: configuration.enabled, opsOrigin: configuration.opsOrigin, access: Object.freeze({ ...configuration.access }),
@@ -97,16 +116,7 @@ export function createEmployeeReadRouter(configuration: ReadConfiguration, depen
   });
   router.get("/roots/:rootId/manifest", async c => {
     const selected = selection(c.req.url, "manifest"), proof = await current(c.get("employee"), c.req.param("rootId"));
-    const response = await backend(proof, selected, c.req.raw.signal);
-    if (response.status !== 200) return response;
-    const value = await response.json() as { sha256: string; size: number; snapshotId: string; snapshotExpiresAt: number };
-    const expiresAt = Math.min(Math.floor(Date.now() / 1000) + 900, Math.floor(Date.parse(proof.verifiedUntil) / 1000), value.snapshotExpiresAt - 30);
-    if (expiresAt <= Math.floor(Date.now() / 1000) + 5) return fail(409, "employee_read_renew_manifest");
-    const handle = await encodeEmployeeFileHandle(handles(), { v: 1, proof, path: selected.path, snapshotId: value.snapshotId, sha256: value.sha256, size: value.size, expiresAt });
-    const logicalFileId = await employeeLogicalFileId(handles(), proof, selected.path);
-    if (!await recheckEmployeeReadAuthority(database, proof) || Date.now() >= expiresAt * 1000) return fail(403, "employee_read_denied");
-    return c.json({ schemaVersion: 1, logicalFileId, remoteVersion: value.sha256, strongETag: `"${value.sha256}"`, size: value.size,
-      sha256: value.sha256, name: employeeWindowsFileName(selected.path), downloadPath: `${BASE}/downloads/${handle}`, expiresAt });
+    return employeeReadManifest(config!, manifestDependencies, proof, selected.path, c.req.raw.signal);
   });
   router.get("/downloads/:fileHandle", async c => {
     query(c.req.url, []);

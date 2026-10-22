@@ -1,4 +1,5 @@
 using System.Net;
+using System.Diagnostics;
 using System.Net.Http.Headers;
 using System.Runtime.CompilerServices;
 using System.Security.Cryptography;
@@ -12,6 +13,9 @@ namespace LedgeTop.WindowsDownload;
 
 /// <summary>Trusted metadata must come from a future authenticated server adapter, not file-list guesses.</summary>
 public sealed record DownloadSpec(string OpaqueIdentity, Uri ContentUri, string FileName, long Length, string ETag, string Sha256);
+public enum DownloadPhase { Receiving, Verifying, Completed }
+/// <summary>Received bytes include an existing partial; integrity is established only at Completed.</summary>
+public sealed record DownloadProgress(long BytesTransferred, long TotalBytes, DownloadPhase Phase);
 public sealed class TransferException(string message) : Exception(message);
 
 /// <summary>Read-only prototype. No upload, filesystem placeholders or automatic updates.</summary>
@@ -142,9 +146,23 @@ public sealed class Downloader : IDisposable
         catch (JsonException) { throw new TransferException("Transfer metadata is invalid."); }
     }
 
-    public async Task<string> DownloadAsync(DownloadSpec spec, string outputRoot, CancellationToken cancellationToken = default)
+    public async Task<string> DownloadAsync(DownloadSpec spec, string outputRoot, CancellationToken cancellationToken = default,
+        IProgress<DownloadProgress>? progress = null)
     {
         cancellationToken.ThrowIfCancellationRequested(); Validate(spec);
+        DownloadPhase? reportedPhase = null;
+        long reportedAt = 0;
+        void Report(long bytes, DownloadPhase phase)
+        {
+            if (progress is null) return;
+            var now = Stopwatch.GetTimestamp();
+            // A large transfer must not enqueue one UI callback per 64 KiB buffer.
+            if (reportedPhase == phase && phase == DownloadPhase.Receiving
+                && Stopwatch.GetElapsedTime(reportedAt, now) < TimeSpan.FromMilliseconds(100)) return;
+            reportedPhase = phase; reportedAt = now;
+            try { progress.Report(new(bytes, spec.Length, phase)); }
+            catch (Exception) { /* An observer cannot change transfer integrity or undo promotion. */ }
+        }
         var root = ChooseRoot(outputRoot);
         var finalPath = Path.Combine(root, spec.FileName);
         CheckPath(finalPath);
@@ -174,6 +192,7 @@ public sealed class Downloader : IDisposable
             if (File.Exists(partialPath) && offset == spec.Length) {
                 RequireRegularFile(partialPath); File.Delete(partialPath); offset = 0;
             }
+            Report(offset, DownloadPhase.Receiving);
             if (offset < spec.Length || !File.Exists(partialPath)) {
                 using var request = new HttpRequestMessage(HttpMethod.Get, spec.ContentUri);
                 request.Headers.IfMatch.Add(EntityTagHeaderValue.Parse(spec.ETag));
@@ -213,6 +232,7 @@ public sealed class Downloader : IDisposable
                         int count = await input.ReadAsync(buffer.AsMemory(0, (int)Math.Min(buffer.Length, remaining - received)), cancellationToken);
                         if (count == 0) throw new TransferException("The response ended before the trusted length.");
                         await output.WriteAsync(buffer.AsMemory(0, count), cancellationToken); received += count;
+                        Report(offset + received, DownloadPhase.Receiving);
                     }
                     if (await input.ReadAsync(buffer.AsMemory(0, 1), cancellationToken) != 0) {
                         output.SetLength(offset); output.Flush(true); // Retain only the prefix trusted before this rejected response.
@@ -223,6 +243,7 @@ public sealed class Downloader : IDisposable
             }
             cancellationToken.ThrowIfCancellationRequested();
             RequireRegularFile(partialPath);
+            Report(spec.Length, DownloadPhase.Verifying);
             // Keep a read handle denying writes through final promotion (Windows permits rename via Delete sharing).
             await using (var verify = new FileStream(partialPath, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete, 65536, FileOptions.Asynchronous)) {
                 if (verify.Length != spec.Length) throw new TransferException("Partial length changed before verification.");
@@ -234,6 +255,7 @@ public sealed class Downloader : IDisposable
                 cancellationToken.ThrowIfCancellationRequested();
                 CheckPath(finalPath); CheckPath(partialPath);
                 File.Move(partialPath, finalPath, overwrite: false); // Same local root, atomic promotion; never replaces an existing file.
+                Report(spec.Length, DownloadPhase.Completed);
                 // Promotion is the commit boundary. Deferred state cleanup must not report a completed download as failed.
                 try { RequireRegularFile(statePath); File.Delete(statePath); }
                 catch (IOException) { } catch (UnauthorizedAccessException) { } catch (TransferException) { }

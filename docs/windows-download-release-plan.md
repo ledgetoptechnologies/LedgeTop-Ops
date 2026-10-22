@@ -49,6 +49,22 @@ disable signature enforcement or import a development root certificate.
 [Microsoft MSIX signing](https://learn.microsoft.com/en-us/windows/msix/package/signing-package-overview),
 [cloudflared license](https://github.com/cloudflare/cloudflared/blob/master/LICENSE)
 
+### Qualified vendor candidate
+
+On 2026-10-22, the official Windows x64 cloudflared `2026.10.3` asset
+(`cloudflared-windows-amd64.exe`, 55,329,336 bytes) matched GitHub's published
+SHA256 `76b2805253d0d6ffacb092a7acfbee99e7af6917835c0c5410e23f3ef5052da2`.
+Windows Authenticode verified publisher Cloudflare, Inc. Root independently
+rechecked the local hash and signature. Actual version/help execution confirmed
+the login `--app`/`--quiet` and token `--app` flags used by the adapter.
+
+Retain this exact asset hash when evaluating packaging; GitHub marks the release
+mutable, so a version tag alone is insufficient. The binary was qualified in an
+owned temporary directory and was not installed globally. No login, token-cache
+read or real authenticated desktop session was performed. Bundled-binary and
+clean-machine runtime qualification remain open.
+[Official release](https://github.com/cloudflare/cloudflared/releases/tag/2026.10.3)
+
 ## Update, rollback and uninstall acceptance
 
 Use App Installer's supported update mechanism rather than a custom privileged

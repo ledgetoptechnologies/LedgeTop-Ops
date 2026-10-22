@@ -133,10 +133,55 @@ No promise of remote wiping or deletion of already-downloaded data is made.
 Final hashes protect content integrity; they do not establish client identity,
 current authorization or whether a future server adapter may issue a manifest.
 
+## Durable queue core and source adapters
+
+`TransferQueue` now persists an app-owned queue for one trusted source alias and
+server-derived principal. `EmployeeQueuedDownloadSource` and
+`PortalQueuedDownloadSource` obtain non-authorizing references and fresh manifests
+from the unmounted queue APIs. No JWT, cookie, expiring byte handle or download
+URL is stored in queue state. Keep the state directory private to the Windows
+user; it must be an existing empty directory on first use. The UI can aggregate
+multiple source queues without presenting a workspace switch.
+
+Enqueue resolves current trusted pins. `StartAsync`/`RetryAsync` schedule one job;
+`WaitForIdleAsync` awaits it, and `GetJobsAsync` returns its state after checking
+the current session. Active pause/cancel signals work immediately, even while a
+session request is blocked or the user has signed out. Inactive changes remain
+session-gated. The start cancellation token governs admission; use pause/cancel
+to stop a scheduled transfer. Progress distinguishes Receiving, Verifying and
+Completed; receiving bytes are not yet integrity-verified. Completed is reported
+only after hash validation and atomic promotion.
+
+After restart, Running jobs become Paused. Every retry resolves current identity
+and content pins before using existing partials. A changed content version blocks
+the old job until explicit selection of a new version. If a crash occurred after
+file promotion but before queue completion, exact interrupted-job recovery can
+verify the existing local length/SHA and fresh identity without overwriting or
+downloading it again. Missing/ambiguous owned state requires manual recovery;
+the app does not guess which files to delete.
+
+```csharp
+// session, rootId/path and directories come from trusted app configuration
+// and the current authorized file list. These APIs are not activated yet.
+using var source = new EmployeeQueuedDownloadSource("ltds-employee", session);
+var selection = await source.GetReferenceAsync(rootId, path, cancellationToken);
+await using var queue = await TransferQueue.OpenAsync(stateDirectory, source, cancellationToken);
+var job = await queue.EnqueueAsync(selection.ResourceReference, destination, cancellationToken);
+await queue.StartAsync(job, progress, cancellationToken);
+await queue.WaitForIdleAsync(cancellationToken);
+var jobs = await queue.GetJobsAsync(cancellationToken);
+```
+
+See [the source API contract](../../docs/windows-queue-source-bindings.md).
+Portal publication refresh currently invalidates a reference; safe producer-side
+continuity is unfinished and must be implemented before promising automatic
+restart across ordinary publication updates. Routes remain unmounted, and this
+code has no installed desktop UI or live enrollment.
+
 ## Remaining product work
 
 - Real staging human sign-in, expiry/identity-change and revocation acceptance;
-  per-user queue/session binding and reviewed cloudflared distribution. No
+  live queue/session acceptance and reviewed cloudflared distribution. No
   browser-profile copying, service tokens or bucket credentials belong here.
 - Version-fenced checksum coverage for existing and multipart files. Native
   selectors remain expiring person/grant-bound selectors, not bearer credentials

@@ -4,6 +4,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vites
 import { Miniflare } from "miniflare";
 import { createLocalJWKSet, exportJWK, generateKeyPair, SignJWT } from "jose";
 import { splitD1MigrationStatements } from "../../client/test/helpers/d1-migrations";
+import { createEmployeeQueueRouter } from "../src/worker/employee-queue-routes";
 import { createEmployeeReadRouter } from "../src/worker/employee-read-routes";
 
 // Only replace remote key retrieval. Native JWT verification, identity resolver,
@@ -56,15 +57,69 @@ describe("joined employee read source acceptance with full migrated D1 and real 
       return new Response(new ReadableStream({ pull(c) { if (sent) c.close(); else { sent = true; c.enqueue(new Uint8Array(size).fill(7)); } }, cancel }, { highWaterMark: 0 }),
         { status: selected ? 206 : 200, headers: { "Content-Type": "application/octet-stream", "Content-Length": String(size), ETag: `"${sha}"`, ...(selected ? { "Content-Range": `bytes ${selected.start}-${selected.end}/3` } : {}) } });
     });
-    const router = createEmployeeReadRouter({ enabled: true, opsOrigin: origin, access: { enabled: true, issuer, staffAudience: audience },
-      gateway: { origin: "https://gateway.example.test", gatewayId, keyId: "joined", key: new Uint8Array(32).fill(1) }, handleKey: new Uint8Array(32).fill(2) }, { database, fetch: fetcher as typeof fetch });
+    const config = { enabled: true, opsOrigin: origin, access: { enabled: true, issuer, staffAudience: audience },
+      gateway: { origin: "https://gateway.example.test", gatewayId, keyId: "joined", key: new Uint8Array(32).fill(1) }, handleKey: new Uint8Array(32).fill(2), queueKey: new Uint8Array(32).fill(3) };
+    const router = createEmployeeReadRouter(config, { database, fetch: fetcher as typeof fetch });
+    const queue = createEmployeeQueueRouter(config, { database, fetch: fetcher as typeof fetch });
+    const queueCall = (path: string) => queue.fetch(new Request(origin + base + "/queue" + path, { headers: { "Cf-Access-Jwt-Assertion": token } }));
     const call = (path: string, headers: Record<string, string> = {}) => router.fetch(new Request(origin + path, { headers: { "Cf-Access-Jwt-Assertion": token, ...headers } }));
     const manifest = async () => {
       const response = await call(`${base}/roots/${rootId}/manifest?path=${encodeURIComponent(relative)}`); expect(response.status).toBe(200);
       return await response.json() as { downloadPath: string; strongETag: string };
     };
-    return { call, manifest, fetcher, cancel, revokeOnFetch: () => { revokeDuringContent = true; } };
+    return { call, queueCall, manifest, fetcher, cancel, revokeOnFetch: () => { revokeDuringContent = true; } };
   }
+  it("durable reference renews snapshots and detects changed content without following a revoked/regranted grant", async () => {
+    const h = harness();
+    const session = await h.queueCall("/session"); expect(session.status).toBe(200);
+    const identity = await session.json() as { principalId: string; expiresAt: number };
+    expect(identity.principalId).toMatch(/^odqp1_[a-f0-9]{64}$/u);
+    const minted = await h.queueCall("/reference?rootId=" + rootId + "&path=" + encodeURIComponent(relative)); expect(minted.status).toBe(200);
+    const selected = await minted.json() as { principalId: string; resourceRef: string; manifest: Record<string, unknown> };
+    expect(selected.principalId).toBe(identity.principalId); expect(selected.resourceRef).toMatch(/^odqr1_/u);
+    expect(JSON.stringify(selected.resourceRef)).not.toContain(relative); expect(h.fetcher).not.toHaveBeenCalled();
+    expect(Object.keys(selected)).toEqual(["schemaVersion", "principalId", "resourceRef"]);
+    const resolve = () => h.queueCall("/resolve?resourceRef=" + selected.resourceRef);
+    let response = await resolve(); expect(response.status).toBe(200);
+    let renewed = await response.json() as typeof selected; selected.manifest = renewed.manifest;
+    expect(h.fetcher).toHaveBeenCalledTimes(1);
+    expect(renewed.manifest.logicalFileId).toBe(selected.manifest.logicalFileId);
+    response = await resolve(); expect(response.status).toBe(200); renewed = await response.json() as typeof selected;
+    expect(renewed.manifest.downloadPath).not.toBe(selected.manifest.downloadPath);
+    // Profile edits do not change person/admission or resource identity.
+    await database.prepare("UPDATE native_staff_profiles SET version=version+1 WHERE staff_id=?").bind(staffId).run();
+    response = await resolve(); expect(response.status).toBe(200);
+    expect((await response.json() as typeof selected).manifest.logicalFileId).toBe(selected.manifest.logicalFileId);
+    const changedSha = "d".repeat(64);
+    h.fetcher.mockImplementationOnce(async () => Response.json({ schemaVersion:1,sha256:changedSha,size:4,etag:`"${changedSha}"`,snapshotId,snapshotExpiresAt:Math.floor(Date.now()/1000)+1800 }));
+    response = await resolve(); expect(response.status).toBe(200); renewed = await response.json() as typeof selected;
+    expect(renewed.manifest.remoteVersion).toBe(changedSha); expect(renewed.manifest.logicalFileId).toBe(selected.manifest.logicalFileId);
+    await grant(`10000000-0000-4000-8000-${String(sequence).padStart(12,"0")}`);
+    await database.prepare("UPDATE ops_employee_read_grants SET active=0,grant_generation=grant_generation+1 WHERE grant_id=?").bind(grantId).run();
+    expect((await resolve()).status).toBe(403);
+    expect((await database.prepare("SELECT count(*) count FROM ops_employee_read_content_starts WHERE staff_id=?").bind(staffId).first<{count:number}>())?.count).toBe(0);
+  });
+  it("admission disable/re-enable changes principal and old reference cannot be resurrected", async () => {
+    const h = harness(), selected = await (await h.queueCall("/reference?rootId="+rootId+"&path="+relative)).json() as {principalId:string;resourceRef:string};
+    await database.prepare("UPDATE native_staff_admissions SET active=0,version=version+1 WHERE staff_id=?").bind(staffId).run();
+    expect((await h.queueCall("/session")).status).toBe(401);
+    await database.prepare("UPDATE native_staff_admissions SET active=1,version=version+1 WHERE staff_id=?").bind(staffId).run();
+    const session = await h.queueCall("/session"); expect(session.status).toBe(200);
+    expect((await session.json() as {principalId:string}).principalId).not.toBe(selected.principalId);
+    expect((await h.queueCall("/resolve?resourceRef="+selected.resourceRef)).status).toBe(409);
+  });
+  it("queue refuses revocation during fresh preparation and root remaps without minting a byte handle", async () => {
+    const h = harness(), selected = await (await h.queueCall("/reference?rootId="+rootId+"&path="+relative)).json() as {resourceRef:string};
+    h.fetcher.mockImplementationOnce(async () => {
+      await database.prepare("UPDATE ops_employee_read_grants SET active=0,grant_generation=grant_generation+1 WHERE grant_id=?").bind(grantId).run();
+      return Response.json({schemaVersion:1,sha256:sha,size:3,etag:`"${sha}"`,snapshotId,snapshotExpiresAt:Math.floor(Date.now()/1000)+1800});
+    });
+    const response = await h.queueCall("/resolve?resourceRef="+selected.resourceRef); expect(response.status).toBe(403);
+    expect(await response.text()).not.toContain("eof1_");
+    await grant(`10000000-0000-4000-8000-${String(sequence).padStart(12,"0")}`);
+    await database.prepare("UPDATE ops_employee_read_roots SET root_generation=root_generation+1,root_fingerprint=? WHERE root_id=?").bind("e".repeat(64),rootId).run();
+    h.fetcher.mockClear();expect((await h.queueCall("/resolve?resourceRef="+selected.resourceRef)).status).toBe(403);expect(h.fetcher).not.toHaveBeenCalled();
+  });
   it("joins real admission, discovery, preparation, exact old grant selection, range content and durable audit", async () => {
     const h = harness(), roots = await h.call(base + "/roots"); expect(roots.status).toBe(200);
     expect(await roots.json()).toEqual({ schemaVersion: 1, roots: [{ rootId, gatewayId, displayName: "Synthetic server files" }] });
