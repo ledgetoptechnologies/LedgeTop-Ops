@@ -34,6 +34,29 @@ even `matches_pinned_local_replay` is not migration or activation approval.
 
 ## Optional exact schema-object diagnostics
 
+The reviewed root invocation has now run against staging with both diagnostics
+and recovery metadata enabled. Its result is
+`staging/windows-staging-schema-drift-2026-10-22.json`:
+
+- Both complete ordered ledgers match their local baseline checkpoints; both
+  foreign-key checks report zero violations.
+- Both replace the local `_cf_METADATA` identity with `_cf_KV`. Ops also has
+  `staging_native_authority_migrations`.
+- Ops has 38 changed SQL fingerprints (5 tables, 29 triggers, 4 views); Client
+  has 8 (2 tables, 6 triggers). These changes still need semantic review. A
+  fingerprint difference alone is not evidence of a defect or a harmless change.
+- Both current recovery bookmarks were observed. Public evidence retains their
+  hashes; no restore, paired snapshot, backup export or retention extension was
+  tested or performed.
+
+The actual remote invocation used clean source `a823b69d` and its corrected
+exact-prefix query. That CLI preceded the additive query-digest output field.
+The original receipt remains unchanged; the explicitly derived observation
+records the executed source, tool, shared query and raw receipt hashes. This is
+caller-recorded provenance, not signed attestation, and does not relabel an old
+LIKE-query capture. Fresh local replay qualified the same exact query scope.
+The result remains `requires_review`, with `canonicalBaselineVerified: false`.
+
 A separately reviewed, default-off option retains only each sqlite_master object's `type`, `name`, `tbl_name` and exact UTF-8 SQL SHA256 (`null` remains null). It never emits SQL text or application rows. The preflight option is `includeSchemaObjectDigests: true` / `--read-only --schema-object-digests`; it uses precisely the existing validated, bounded schema query pages, without an additional query or changed binding/identity checks. This option does not change `canonicalBaselineVerified` or make the pages atomic. Root must review and compose it with any other preflight options before remote invocation.
 
 The current retained object maps were derived from **one full exact-query local replay**, using `node scripts/windows-files-canonical-baseline.mjs --local-replay --schema-object-digests`. This run applied all Windows suffixes locally; it was not a baseline-only replay. Its complete temporary capture SHA256 is `b8290547d5841efb45dc832750989afa3d5a29cc4d75944d97650aef35d09721`. The seven-checkpoint reference was derived by removing each checkpoint's per-object map; the baseline-map reference was derived by retaining only the baseline checkpoint for each app. Runtime/source inventory metadata is retained from that full run, including source inventories through the suffixes.
@@ -57,4 +80,4 @@ The old `name NOT LIKE 'sqlite_%'` predicate treated `_` as a wildcard and hid l
 
 Generator references and preflight observations now include `schemaQuerySha256` for the exact UTF-8 query string. The refreshed query digest is `8fce60a0f677bb4e8e21d04b6e64efa0b46ad4a6a982141f1b432bc0788eecd9`. Comparison never reports `matches_pinned_local_replay` unless that exact scope digest is present: absent, old or different valid digests produce `requires_review` / `query_scope_unverified`; malformed digests are refused. Even the correct field is supplied metadata, not signed remote attestation. A derived receipt must preserve its original capture and clearly record the actually executed source/tool/query provenance; merely adding a new digest to an old LIKE-query receipt cannot qualify it.
 
-The corrected query did not change any schema hashes/counts in this canonical local source, and current staging hashes remain different. A complete exact-query full replay—not a scope label alone—qualified these refreshed local artifacts. Subsequent validation-only changes did not rerun migrations. Local checks: 34/34 focused query/helper/comparison/preflight tests passed. No remote query was performed in this work.
+The corrected query did not change any schema hashes/counts in this canonical local source, and current staging hashes remain different. A complete exact-query full replayâ€”not a scope label aloneâ€”qualified these refreshed local artifacts. Subsequent validation-only changes did not rerun migrations. Local checks: 34/34 focused query/helper/comparison/preflight tests passed. No remote query was performed in this work.
