@@ -10,6 +10,7 @@
   "exports": {
     ".": "./src/index.tsx",
     "./client-profile-onboarding": "./src/ClientProfileOnboardingForm.tsx",
+    "./competitor-intel": "./src/CompetitorIntelVisuals.tsx",
     "./styles.css": "./src/styles.css"
   }
 }

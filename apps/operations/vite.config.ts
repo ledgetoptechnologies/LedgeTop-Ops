@@ -13,6 +13,7 @@ export const sharedAliases = [
   { find: "@ltds/shared/operations-portal-workspace-publication", replacement: sharedSource("operations-portal-workspace-publication") },
   { find: "@ltds/shared/operations-portal-native-authority", replacement: sharedSource("operations-portal-native-authority") },
   { find: "@ltds/shared/operations-portal-native-delivery-authority", replacement: sharedSource("operations-portal-native-delivery-authority") },
+  { find: "@ltds/shared/competitor-intel", replacement: sharedSource("competitor-intel") },
   // A regular expression is required here: Vite string aliases also match package subpaths.
   { find: /^@ltds\/shared$/, replacement: sharedSource("index") },
 ] as const;
