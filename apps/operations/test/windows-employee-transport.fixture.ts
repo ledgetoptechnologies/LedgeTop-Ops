@@ -28,11 +28,11 @@ function verifyMigrationInventory() {
   }
 }
 
-export async function employeeTransportAuthority(rootId: string, gatewayId: string, fingerprint: string) {
+export async function employeeTransportAuthority(rootId: string, gatewayId: string, fingerprint: string, supplied?: { database: D1Database; runtime: Miniflare }) {
   verifyMigrationInventory();
-  const runtime = new Miniflare({ modules: true, compatibilityDate: "2026-08-06", script: "export default {}", d1Databases: ["DB"] });
+  const runtime = supplied?.runtime ?? new Miniflare({ modules: true, compatibilityDate: "2026-08-06", script: "export default {}", d1Databases: ["DB"] });
   try {
-    const db = await runtime.getD1Database("DB") as unknown as D1Database;
+    const db = supplied?.database ?? await runtime.getD1Database("DB") as unknown as D1Database;
     await applyCanonicalChain(db, "operations", finalMigration, true);
     async function person(name: string, owner = false) {
       const id = `synthetic-${name}`, email = `${name}@employee-transport.invalid`, subject = `synthetic-${name}-subject`;
@@ -59,5 +59,5 @@ export async function employeeTransportAuthority(rootId: string, gatewayId: stri
     return { runtime, db, alice, bob, async revoke() {
       await provisionEmployeeRead(db, owner, { commandId: crypto.randomUUID(), kind: "revoke-grant", grantId, expectedGeneration: 1 }, options);
     } };
-  } catch (error) { await runtime.dispose(); throw error; }
+  } catch (error) { if (!supplied) await runtime.dispose(); throw error; }
 }
