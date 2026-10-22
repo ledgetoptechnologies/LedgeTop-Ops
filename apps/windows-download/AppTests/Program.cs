@@ -28,6 +28,7 @@ var groups = new (string Name, Func<Task> Run)[] {
     ("resume all finishes every paused download, one at a time", ResumeAllInTurn),
     ("long folders and delivery lists continue with Show more", Paging),
     ("the setup file is read strictly and problems are explained", SettingsFile),
+    ("packaged releases use only their compiled profile and their own channel folder", PackagedReleases),
     ("the window renders sign-in and files screens", Render),
 };
 foreach (var group in groups) {
@@ -343,6 +344,108 @@ Task SettingsFile()
     return Task.CompletedTask;
 }
 
+async Task PackagedReleases()
+{
+    var root = Path.Combine(Path.GetTempPath(), "ltfiles-release-" + Guid.NewGuid().ToString("N"));
+    var local = Path.Combine(root, "Local"); var user = Path.Combine(root, "User"); var install = Path.Combine(root, "Install");
+    var helperBytes = new byte[] { 0x4d, 0x5a, 1, 2, 3, 4 };
+    Directory.CreateDirectory(Path.Combine(install, "helper"));
+    File.WriteAllBytes(Path.Combine(install, "helper", "cloudflared.exe"), helperBytes);
+    var helperHash = Convert.ToHexStringLower(SHA256.HashData(helperBytes));
+    ReleaseProfile Profile(ReleaseChannel channel, string? hash = null, string relative = @"helper\cloudflared.exe") =>
+        new(channel, new Uri("https://portal.example.test/portal"), new Uri("https://ops.example.test/api/staff/files"), relative, hash ?? helperHash);
+    StartupPlan Run((bool, ReleaseChannel?) compiled, Func<ReleaseChannel, ReleaseProfile?> profiles, params string[] args) =>
+        Startup.Choose(compiled, args, local, user, install, profiles);
+    (bool, ReleaseChannel?) pilot = (true, ReleaseChannel.Pilot);
+    try {
+        // The old shared records and a developer settings file already exist on this PC.
+        var legacyQueue = Path.Combine(local, "LedgeTop", "Files", "queue", "portal", "odqp1_" + new string('a', 64));
+        Directory.CreateDirectory(legacyQueue);
+        File.WriteAllText(Path.Combine(legacyQueue, "queue.json"), "legacy");
+        var overrideJson = $$"""{"portalApplicationUrl":"https://evil.example.test/portal","staffApplicationUrl":null,"cloudflaredPath":"C:\\evil\\cloudflared.exe","cloudflaredSha256":"{{new string('b', 64)}}"}""";
+        File.WriteAllText(LiveSettings.PathUnder(local), overrideJson);
+        Environment.SetEnvironmentVariable("LEDGETOP_FILES_PORTAL_URL", "https://evil.example.test/portal");
+
+        // Packaged pilot: the compiled profile only, despite the settings file, arguments and environment.
+        var plan = Run(pilot, channel => Profile(channel), "--demo", "--demo-signed-in", "--settings", LiveSettings.PathUnder(local));
+        var live = plan.Backend as LiveBackend ?? throw new Exception("Expected the live backend, got " + plan.Backend?.GetType().Name + " / " + plan.Problem);
+        Equal("https://portal.example.test/portal", live.Settings.PortalApplicationUrl.ToString());
+        Equal(Path.Combine(install, "helper", "cloudflared.exe"), live.Settings.CloudflaredPath);
+        Equal(helperHash, live.Settings.CloudflaredSha256);
+        Equal(Path.Combine(local, "LedgeTop", "Files", "pilot", "queue"), live.StateDirectory);
+        Equal("Pilot", plan.Tag);
+        await live.DisposeAsync();
+
+        // Stable has its own folder; neither reuses the developer or the old shared records.
+        var stable = (LiveBackend)Run((true, ReleaseChannel.Stable), channel => Profile(channel)).Backend!;
+        Equal(Path.Combine(local, "LedgeTop", "Files", "stable", "queue"), stable.StateDirectory);
+        await stable.DisposeAsync();
+        var roots = new[] { live.StateDirectory, stable.StateDirectory, Startup.StateRoot(local, "developer"), Path.Combine(local, "LedgeTop", "Files", "queue") };
+        Equal(roots.Length, roots.Distinct(StringComparer.OrdinalIgnoreCase).Count());
+        foreach (var outer in roots) foreach (var inner in roots)
+            True(outer == inner || !inner.StartsWith(outer + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase), "no channel folder nests in another");
+        Equal("legacy", File.ReadAllText(Path.Combine(legacyQueue, "queue.json")));
+        True(!Directory.Exists(roots[0]) && !Directory.Exists(roots[1]), "nothing is copied or migrated into a channel folder at startup");
+        Equal(overrideJson, File.ReadAllText(LiveSettings.PathUnder(local)));
+
+        // The real compiled table: pilot pins the qualified cloudflared build, so a different installed file is refused;
+        // stable is unconfigured and refuses before looking for any helper.
+        var compiledPilot = ReleaseProfiles.For(ReleaseChannel.Pilot)!;
+        Equal("76b2805253d0d6ffacb092a7acfbee99e7af6917835c0c5410e23f3ef5052da2", compiledPilot.CloudflaredSha256);
+        Equal(@"helper\cloudflared.exe", compiledPilot.CloudflaredRelativePath);
+        Equal(Startup.HelperProblem, Run(pilot, ReleaseProfiles.For).Problem);
+        Equal(Startup.UnreviewedProblem, Run((true, ReleaseChannel.Stable), ReleaseProfiles.For).Problem);
+        foreach (var uri in new[] { compiledPilot.PortalApplicationUrl, compiledPilot.StaffApplicationUrl! }) {
+            True(uri.Scheme == "https" && uri.Host.EndsWith("-staging.ledgetopdroneservices.com") && uri.AbsolutePath != "/", uri + " is a path-scoped staging origin");
+            True(!uri.Host.EndsWith(".app"), "no ledgetop.app before the domain migration");
+        }
+        True(ReleaseProfiles.For(ReleaseChannel.Stable) is null, "stable stays unconfigured");
+
+        // Unknown or malformed profiles fail closed with a reason and never fall back to developer setup or demo.
+        var unknown = Run((true, null), channel => Profile(channel), "--demo");
+        True(unknown.Backend is null && unknown.Problem == Startup.UnknownReleaseProblem, "unknown release refused");
+        foreach (var bad in new Func<ReleaseChannel, ReleaseProfile?>[] {
+            _ => null,
+            _ => Profile(ReleaseChannel.Stable),
+            channel => Profile(channel) with { CloudflaredSha256 = null },
+            channel => Profile(channel, relative: @"..\cloudflared.exe"),
+            channel => Profile(channel, relative: @"helper\..\..\cloudflared.exe"),
+            channel => Profile(channel, relative: @"C:\Windows\cloudflared.exe"),
+            channel => Profile(channel, relative: @"\\server\share\cloudflared.exe"),
+            channel => Profile(channel, relative: @"helper\cloudflared.exe:stream"),
+            channel => Profile(channel, relative: ""),
+        }) {
+            var refused = Run(pilot, bad, "--demo");
+            True(refused.Backend is null && refused.Problem == Startup.UnreviewedProblem, "malformed profile refused: " + refused.Problem);
+        }
+        // Wrong or missing helper.
+        var wrong = Run(pilot, channel => Profile(channel, hash: new string('c', 64)));
+        True(wrong.Backend is null && wrong.Problem == Startup.HelperProblem, "changed helper refused");
+        var missing = Run(pilot, channel => Profile(channel, relative: @"helper\missing.exe"));
+        True(missing.Backend is null && missing.Problem == Startup.HelperProblem, "missing helper refused");
+
+        // Compiled channel parsing: exact lowercase values only; anything else is an unknown release.
+        static System.Reflection.AssemblyMetadataAttribute M(string value) => new(ReleaseProfiles.ChannelKey, value);
+        Equal((false, (ReleaseChannel?)null), ReleaseProfiles.Compiled([]));
+        Equal((true, (ReleaseChannel?)ReleaseChannel.Pilot), ReleaseProfiles.Compiled([M("pilot")]));
+        Equal((true, (ReleaseChannel?)ReleaseChannel.Stable), ReleaseProfiles.Compiled([M("stable"), new System.Reflection.AssemblyMetadataAttribute("Other", "x")]));
+        foreach (var odd in new System.Reflection.AssemblyMetadataAttribute[][] { [M("Pilot")], [M("beta")], [M("")], [M("pilot"), M("stable")], [M("pilot"), M("pilot")] })
+            Equal((true, (ReleaseChannel?)null), ReleaseProfiles.Compiled(odd));
+        Equal((false, (ReleaseChannel?)null), ReleaseProfiles.Compiled(typeof(App).Assembly));
+
+        // Developer builds keep explicit demo and the developer settings file, with their own folder.
+        Equal("Demo data", Run((false, null), ReleaseProfiles.For, "--demo").Tag);
+        var developer = Run((false, null), ReleaseProfiles.For);
+        True(developer.Backend is null && developer.Problem == Startup.HelperProblem, "developer build uses its own settings file (whose helper is missing here)");
+        File.Delete(LiveSettings.PathUnder(local));
+        var unset = Run((false, null), ReleaseProfiles.For);
+        True(unset.Backend is null && unset.Problem is null, "no developer settings means not set up");
+    } finally {
+        Environment.SetEnvironmentVariable("LEDGETOP_FILES_PORTAL_URL", null);
+        try { Directory.Delete(root, true); } catch (IOException) { }
+    }
+}
+
 async Task Render()
 {
     Directory.CreateDirectory(screenshots);
@@ -457,7 +560,7 @@ sealed class Env : IAsyncDisposable, IShell
     {
         window = new MainWindow { Width = 1180, Height = 780, ShowInTaskbar = false, WindowStartupLocation = WindowStartupLocation.Manual, Left = -20000, Top = -20000 };
         Model = new MainViewModel(Backend, window, Downloads);
-        window.Attach(Model, demo: true);
+        window.Attach(Model, "Demo data");
         window.Show();
         return window;
     }

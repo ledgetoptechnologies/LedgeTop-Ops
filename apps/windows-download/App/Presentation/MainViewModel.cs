@@ -34,6 +34,7 @@ public sealed class MainViewModel : Observable, IAsyncDisposable
     private bool signingIn, bannerIsError, checkingPerson;
     private NodeViewModel? selected;
     private object? moreFiles;
+    private Task? closing;
 
     private const string DefaultSetupText = "Install it from the link in Ledge Top Operations or your client portal. If you already did, ask your Ledge Top contact to check the installation.";
 
@@ -336,11 +337,15 @@ public sealed class MainViewModel : Observable, IAsyncDisposable
         BannerIsError = true;
     }
 
-    public async ValueTask DisposeAsync()
+    /// <summary>Closing twice (window and owner) waits on the same shutdown rather than racing it.</summary>
+    public ValueTask DisposeAsync()
     {
-        generation++;
-        var old = queue; queue = null;
-        if (old is not null) await old.DisposeAsync();
+        if (closing is null) {
+            generation++;
+            var old = queue; queue = null;
+            closing = old is null ? Task.CompletedTask : old.DisposeAsync().AsTask();
+        }
+        return new ValueTask(closing);
     }
 }
 

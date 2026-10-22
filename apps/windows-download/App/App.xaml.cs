@@ -9,26 +9,20 @@ public partial class App : Application
     protected override async void OnStartup(StartupEventArgs e)
     {
         base.OnStartup(e);
-        var arguments = e.Args;
-        var demo = arguments.Contains("--demo") || arguments.Contains("--demo-signed-in");
-        var local = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
-        IFilesBackend backend; string downloads; var notSetUp = false; string? setupProblem = null;
-        if (demo) {
-            var root = Path.Combine(Path.GetTempPath(), "LedgeTopFilesDemo");
-            var minutes = arguments.SkipWhile(value => value != "--demo-session-minutes").Skip(1).FirstOrDefault();
-            backend = new DemoBackend(Path.Combine(root, "queue"), signedIn: arguments.Contains("--demo-signed-in"),
-                sessionLength: double.TryParse(minutes, out var length) ? TimeSpan.FromMinutes(length) : null);
-            downloads = Path.Combine(root, "Downloads");
-        } else {
-            downloads = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Downloads", "Ledge Top");
-            // Setup validation and source construction both happen before the window; neither can escape startup.
-            var (live, problem) = LiveBackend.Open(LiveSettings.DefaultPath, Path.Combine(local, "LedgeTop", "Files", "queue"));
-            if (live is null) { backend = new NotSetUpBackend(); notSetUp = true; setupProblem = problem; }
-            else backend = live;
+        // The release channel is compiled in; setup checks and source construction finish before the window exists.
+        StartupPlan plan;
+        try {
+            plan = Backends.Startup.Choose(ReleaseProfiles.Compiled(typeof(App).Assembly), e.Args,
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), AppContext.BaseDirectory, ReleaseProfiles.For);
+        } catch (Exception) {
+            plan = new(null, "Ledge Top Files couldn't start on this PC. Restart it, and if this keeps happening, ask your Ledge Top contact to check the installation.",
+                Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Downloads", "Ledge Top"), null);
         }
+        var notSetUp = plan.Backend is null; var setupProblem = plan.Problem;
         var window = new MainWindow();
-        var model = new MainViewModel(backend, window, downloads);
-        window.Attach(model, demo);
+        var model = new MainViewModel(plan.Backend ?? new NotSetUpBackend(), window, plan.Downloads);
+        window.Attach(model, plan.Tag);
         window.Show();
         // Nothing escapes startup: a problem shows a plain setup message instead of crashing the app.
         try {

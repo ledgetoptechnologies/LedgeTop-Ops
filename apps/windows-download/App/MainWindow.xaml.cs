@@ -14,10 +14,12 @@ public partial class MainWindow : Window, IShell
 
     public MainWindow() => InitializeComponent();
 
-    public void Attach(MainViewModel viewModel, bool demo)
+    /// <param name="tag">A small header label such as "Demo data" or "Pilot"; null shows none.</param>
+    public void Attach(MainViewModel viewModel, string? tag)
     {
         model = viewModel; DataContext = viewModel;
-        DemoTag.Visibility = demo ? Visibility.Visible : Visibility.Collapsed;
+        DemoTag.Visibility = tag is null ? Visibility.Collapsed : Visibility.Visible;
+        DemoTagText.Text = tag ?? "";
         viewModel.PropertyChanged += (_, e) => { if (e.PropertyName == nameof(MainViewModel.Screen)) ShowScreen(); };
         viewModel.Files.CollectionChanged += (_, _) => FilesEmpty.Visibility = viewModel.Files.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
         viewModel.Transfers.CollectionChanged += (_, _) => TransfersEmpty.Visibility = viewModel.Transfers.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
@@ -54,6 +56,8 @@ public partial class MainWindow : Window, IShell
     {
         base.OnClosing(e);
         clock.Stop();
-        if (model is not null) await model.DisposeAsync();
+        // Stopping and saving happen in the queue; a failure while closing must never crash the app.
+        try { if (model is not null) await model.DisposeAsync(); }
+        catch (Exception) { /* the queue keeps its own durable state and shows any problem next time */ }
     }
 }

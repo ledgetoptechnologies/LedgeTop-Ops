@@ -16,8 +16,8 @@ public sealed record LiveSettings(Uri PortalApplicationUrl, Uri? StaffApplicatio
     private const string Broken = "The setup file on this PC is damaged or incomplete. Reinstall Ledge Top Files or ask your Ledge Top contact to check it.";
     private const string Unreadable = "The setup file on this PC couldn't be read. Restart the PC and try again.";
 
-    public static string DefaultPath => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-        "LedgeTop", "Files", "settings.json");
+    /// <summary>The developer-build settings file. Packaged releases never read it.</summary>
+    public static string PathUnder(string localAppData) => Path.Combine(localAppData, "LedgeTop", "Files", "settings.json");
 
     /// <summary>Null when the app hasn't been set up on this PC; <see cref="SettingsException"/> when the file is unusable.</summary>
     public static LiveSettings? Load(string path)
@@ -93,12 +93,13 @@ public sealed class LiveBackend : IFilesBackend
         if (settings is null) return (null, null);
         try { return (new LiveBackend(settings, stateDirectory), null); }
         catch (Exception) {
-            return (null, "The sign-in helper installed with Ledge Top Files is missing or has been changed, so it can't be trusted. Reinstall Ledge Top Files or ask your Ledge Top contact to check it.");
+            return (null, Startup.HelperProblem);
         }
     }
 
     public LiveBackend(LiveSettings settings, string stateDirectory)
     {
+        Settings = settings;
         StateDirectory = stateDirectory;
         portalAccess = new CloudflareAccessSession(settings.PortalApplicationUrl, settings.CloudflaredPath, settings.CloudflaredSha256);
         portalSource = new PortalQueuedDownloadSource("portal", portalAccess);
@@ -115,6 +116,8 @@ public sealed class LiveBackend : IFilesBackend
         Catalog = new LiveCatalog(portal, staff, portalSource, staffSource);
     }
 
+    /// <summary>The origins and helper this backend was built with (for diagnostics and tests).</summary>
+    public LiveSettings Settings { get; }
     public ISessionGateway Session { get; }
     public IFileCatalog Catalog { get; }
     public IReadOnlyList<IQueuedDownloadSource> Sources { get; }

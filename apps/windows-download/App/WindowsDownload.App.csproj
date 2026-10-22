@@ -10,6 +10,16 @@
     <RootNamespace>LedgeTop.Files</RootNamespace>
     <ApplicationIcon />
   </PropertyGroup>
+  <!-- Packaged releases compile their channel in (-p:LedgeTopReleaseChannel=pilot|stable); developer builds leave it unset. -->
+  <!-- MSBuild compares text case-insensitively; the exact checks below are ordinal. The app also refuses unknown values. -->
+  <ItemGroup Condition="'$(LedgeTopReleaseChannel)' != ''">
+    <AssemblyMetadata Include="LedgeTop.ReleaseChannel" Value="$(LedgeTopReleaseChannel)" />
+  </ItemGroup>
+  <!-- A package build (-p:LedgeTopPackage=true) must name a known channel; it can never fall back to a developer build. -->
+  <Target Name="RequireReleaseChannel" BeforeTargets="BeforeBuild"
+          Condition="'$(LedgeTopPackage)' == 'true' And !$([System.String]::Equals('$(LedgeTopReleaseChannel)', 'pilot', StringComparison.Ordinal)) And !$([System.String]::Equals('$(LedgeTopReleaseChannel)', 'stable', StringComparison.Ordinal))">
+    <Error Text="Package builds need LedgeTopReleaseChannel=pilot or stable (got '$(LedgeTopReleaseChannel)')." />
+  </Target>
   <ItemGroup>
     <ProjectReference Include="../Core/WindowsDownload.Core.csproj" />
     <!-- WPF omits these implicit usings; no code here uses WPF's Path shape. -->

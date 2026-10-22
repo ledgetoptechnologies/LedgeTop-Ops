@@ -214,7 +214,12 @@ public sealed class QueueHost : IAsyncDisposable
         if (running is { } stop) {
             try { await Queue(stop.Alias).PauseAsync(stop.Id); } catch (Exception) { /* draining below still stops it */ }
         }
-        foreach (var queue in queues.Values) await queue.DisposeAsync();
+        // Release every source's queue even if one fails to save its final state; report the first failure.
+        Exception? failure = null;
+        foreach (var queue in queues.Values) {
+            try { await queue.DisposeAsync(); } catch (Exception error) { failure ??= error; }
+        }
+        if (failure is not null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Throw(failure);
     }
 
     /// <summary>Synchronous progress relay so updates aren't reordered by a captured context.</summary>
