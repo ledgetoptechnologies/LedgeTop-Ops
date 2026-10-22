@@ -104,6 +104,28 @@ test("optional fixed staging recovery metadata follows BOTH live inventory valid
   for (const config of f.configs) await assert.rejects(access(config.path));
 });
 
+test("combined recovery and object diagnostics preserve guards, query set and SQL privacy", async () => {
+  const f = fixture();
+  const receipt = await windowsFilesStagingPreflight({ readOnly: true, recoveryMetadata: true, includeSchemaObjectDigests: true, run: f.run });
+  assert.deepEqual(f.calls.slice(0, 4).map(args => args[0]), ["deployments", "versions", "deployments", "versions"]);
+  assert.equal(f.calls.filter(args => args[1] === "time-travel").length, 2);
+  assert.equal(f.calls.filter(args => args[1] === "execute").length, 6);
+  for (const worker of receipt.workers) {
+    assert.equal(worker.recovery.restoreVerified, false);
+    assert.equal(worker.schemaObjectDigests.count, 1);
+    assert.equal(worker.schemaObjectDigests.objects[0].name, "synthetic");
+    assert.equal(worker.migrations.canonicalBaselineVerified, false);
+  }
+  assert.ok(!JSON.stringify(receipt).includes("DO_NOT_PRINT"));
+  assert.equal(receipt.activated, false);
+  assert.equal(receipt.migrationsApplied, false);
+  for (const config of f.configs) await assert.rejects(access(config.path));
+  const rejected = fixture();
+  rejected.details.delivery.resources.bindings.find(binding => binding.name === "DELIVERY_DB").id = id(90);
+  await assert.rejects(windowsFilesStagingPreflight({ readOnly: true, recoveryMetadata: true, includeSchemaObjectDigests: true, run: rejected.run }));
+  assert.ok(rejected.calls.every(args => args[0] !== "d1"));
+});
+
 test("no recovery query if either live version has wrong resources, identity or split deployment", async () => {
   for (const change of [
     f => { f.details.operations.resources.bindings.find(b => b.name === "OPS_DB").id = id(90); },
