@@ -4,4 +4,4 @@ This isolated preparation candidate contains a pure navigation policy and ten te
 
 Targets are `https://ops.ledgetop.app` for staff and `https://portal.ledgetop.app` for clients. Public bearer links, API methods, machine ingress, cookies, capabilities, uploads and Viewer routes stay on their existing origins. Future mounting requires a separately tested retained-asset UI release and live new-host authentication acceptance.
 
-Validation: `node --test scripts/canonical-domain-navigation.test.mjs` (10 passed). These tests are discovered by the repository Node test glob; no workflow wiring or production setting is changed.
+Validation: `node --test scripts/canonical-domain-navigation.test.mjs` (10 passed). The source-invariants CI job explicitly runs this test file; trigger policy and production settings are unchanged.
