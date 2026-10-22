@@ -21,11 +21,10 @@ public partial class App : Application
             downloads = Path.Combine(root, "Downloads");
         } else {
             downloads = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Downloads", "Ledge Top");
-            LiveSettings? settings = null;
-            try { settings = LiveSettings.Load(LiveSettings.DefaultPath); }
-            catch (SettingsException error) { setupProblem = error.Message; }
-            if (settings is null) { backend = new NotSetUpBackend(); notSetUp = true; }
-            else backend = new LiveBackend(settings, Path.Combine(local, "LedgeTop", "Files", "queue"));
+            // Setup validation and source construction both happen before the window; neither can escape startup.
+            var (live, problem) = LiveBackend.Open(LiveSettings.DefaultPath, Path.Combine(local, "LedgeTop", "Files", "queue"));
+            if (live is null) { backend = new NotSetUpBackend(); notSetUp = true; setupProblem = problem; }
+            else backend = live;
         }
         var window = new MainWindow();
         var model = new MainViewModel(backend, window, downloads);

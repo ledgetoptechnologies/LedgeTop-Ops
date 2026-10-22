@@ -202,10 +202,12 @@ public sealed class MainViewModel : Observable, IAsyncDisposable
     /// <summary>Shows a folder's first page of files. Sections and roots without files just expand.</summary>
     public async Task SelectAsync(NodeViewModel? node)
     {
+        // A node from a previous person's tree changes nothing, not even the breadcrumb.
+        if (node is not null && !IsCurrent(node.View)) return;
         selected = node; moreFiles = null;
         foreach (var name in new[] { nameof(Location), nameof(FilesEmptyText), nameof(HasMoreFiles) }) Raise(name);
         Files.Clear(); Notice = ""; LoadMoreFiles.Refresh();
-        if (node is null || node.Node.Kind == NodeKind.Section || !IsCurrent(node.View)) { DownloadSelected.Refresh(); return; }
+        if (node is null || node.Node.Kind == NodeKind.Section) { DownloadSelected.Refresh(); return; }
         await AddFilesAsync(node, null);
     }
 

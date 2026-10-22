@@ -55,7 +55,7 @@ public sealed record LiveSettings(Uri PortalApplicationUrl, Uri? StaffApplicatio
         if (reader.TokenType != JsonTokenType.EndObject || reader.Read()) throw new FormatException();
         static Uri Origin(string? value) =>
             Uri.TryCreate(value, UriKind.Absolute, out var uri) && uri.Scheme == Uri.UriSchemeHttps && uri.UserInfo.Length == 0
-                && uri.Query.Length == 0 && uri.Fragment.Length == 0 ? uri : throw new FormatException();
+                && uri.Query.Length == 0 && uri.Fragment.Length == 0 && uri.AbsolutePath != "/" ? uri : throw new FormatException();
         var portal = Origin(values.GetValueOrDefault("portalApplicationUrl"));
         var staff = values.GetValueOrDefault("staffApplicationUrl") is { } staffValue ? Origin(staffValue) : null;
         var binary = values.GetValueOrDefault("cloudflaredPath");
@@ -80,6 +80,22 @@ public sealed class LiveBackend : IFilesBackend
     private readonly EmployeeQueuedDownloadSource? staffSource;
     private readonly PortalClient portal;
     private readonly EmployeeClient? staff;
+
+    /// <summary>
+    /// Reads the setup and builds the real sources. Returns no backend and no problem when the PC isn't set up,
+    /// and a plain problem (never an exception) when the setup or the pinned cloudflared can't be used.
+    /// </summary>
+    public static (LiveBackend? Backend, string? Problem) Open(string settingsPath, string stateDirectory)
+    {
+        LiveSettings? settings;
+        try { settings = LiveSettings.Load(settingsPath); }
+        catch (SettingsException error) { return (null, error.Message); }
+        if (settings is null) return (null, null);
+        try { return (new LiveBackend(settings, stateDirectory), null); }
+        catch (Exception) {
+            return (null, "The sign-in helper installed with Ledge Top Files is missing or has been changed, so it can't be trusted. Reinstall Ledge Top Files or ask your Ledge Top contact to check it.");
+        }
+    }
 
     public LiveBackend(LiveSettings settings, string stateDirectory)
     {

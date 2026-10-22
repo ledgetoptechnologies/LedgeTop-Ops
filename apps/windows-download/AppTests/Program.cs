@@ -189,6 +189,13 @@ async Task PersonSwitch()
     await Task.Delay(800); Pump();
     True(!File.Exists(Path.Combine(env.Downloads, "ortho-full.tif")), "Alice's file not promoted for Bob");
 
+    // A late selection of one of Alice's old folders can't bring back her breadcrumb or files.
+    harbor.IsSelected = false; harbor.IsSelected = true;
+    await env.Model.SelectAsync(harbor);
+    await Task.Delay(400); Pump();
+    Equal("", env.Model.Location);
+    Equal(0, env.Model.Files.Count);
+
     // Bob's own download lives only in Bob's list.
     await env.OpenAsync("deliveries", "greenleaf");
     env.Check("volumes.csv");
@@ -301,7 +308,7 @@ Task SettingsFile()
     try {
         var hash = new string('a', 64);
         string Write(string json) { var path = Path.Combine(folder, Guid.NewGuid().ToString("N") + ".json"); File.WriteAllText(path, json); return path; }
-        var good = $$"""{"portalApplicationUrl":"https://portal.example.test/","staffApplicationUrl":null,"cloudflaredPath":"C:\\Program Files\\cloudflared\\cloudflared.exe","cloudflaredSha256":"{{hash}}"}""";
+        var good = $$"""{"portalApplicationUrl":"https://portal.example.test/files/","staffApplicationUrl":null,"cloudflaredPath":"C:\\Program Files\\cloudflared\\cloudflared.exe","cloudflaredSha256":"{{hash}}"}""";
         var loaded = LiveSettings.Load(Write(good));
         True(loaded is { StaffApplicationUrl: null } && loaded.PortalApplicationUrl.Host == "portal.example.test", "valid setup loads");
         True(LiveSettings.Load(Path.Combine(folder, "missing.json")) is null, "missing file means not set up");
@@ -309,6 +316,7 @@ Task SettingsFile()
             (good.Replace("}", ",\"portalApplicationUrl\":\"https://other.example.test/\"}"), "duplicate key"),
             (good.Replace("}", ",\"token\":\"x\"}"), "unknown key"),
             (good.Replace("https://portal", "http://portal"), "plain http"),
+            (good.Replace("example.test/files/", "example.test/"), "root URL instead of the app path"),
             (good.Replace(hash, "abc"), "short hash"),
             (good.Replace(@"C:\\Program Files", "relative"), "relative binary"),
             (good[..^1], "truncated"),
@@ -319,6 +327,18 @@ Task SettingsFile()
             try { LiveSettings.Load(Write(bad)); throw new Exception("accepted " + why); }
             catch (SettingsException error) { True(error.Message.Contains("setup file"), why + " explained"); }
         }
+
+        // Building the real sources: every failure becomes a setup message, never an exception.
+        var state = Path.Combine(folder, "queue");
+        True(LiveBackend.Open(Path.Combine(folder, "missing.json"), state) == (null, null), "not set up");
+        var root = LiveBackend.Open(Write(good.Replace("example.test/files/", "example.test/")), state);
+        True(root.Backend is null && root.Problem!.Contains("setup file"), "root URL explained");
+        var missing = LiveBackend.Open(Write(good), state);
+        True(missing.Backend is null && missing.Problem!.Contains("sign-in helper"), "missing cloudflared explained");
+        var binary = Path.Combine(folder, "cloudflared.exe");
+        File.WriteAllBytes(binary, [1, 2, 3]);
+        var changed = LiveBackend.Open(Write(good.Replace(@"C:\\Program Files\\cloudflared\\cloudflared.exe", binary.Replace(@"\", @"\\"))), state);
+        True(changed.Backend is null && changed.Problem!.Contains("sign-in helper"), "changed cloudflared explained");
     } finally { Directory.Delete(folder, true); }
     return Task.CompletedTask;
 }
