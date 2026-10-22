@@ -88,6 +88,14 @@ MakeAppx validation enabled, unpack it, and compare the expected manifest,
 inventory and file hashes. An unsigned package is a build-test artifact only;
 trusted signing, clean-machine install and update acceptance remain separate.
 
+Before packing and again on the extracted application DLL, run
+`scripts/windows-package-channel-check.ps1 -AssemblyPath <app.dll> -ExpectedChannel pilot`
+(or `stable` for a reviewed stable build). This offline PE metadata guard never
+loads application code. It rejects absent, duplicate, unknown or mismatched
+compiled channel metadata, including an accidentally packaged developer build.
+It does not verify the profile's endpoint/helper values, package signature or
+manifest/channel identity; retain those independent package acceptance checks.
+
 ### Release build
 
 1. Pin the reviewed SDK and dependency locks. Build self-contained Windows x64
