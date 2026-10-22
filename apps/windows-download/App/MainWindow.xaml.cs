@@ -78,7 +78,11 @@ public partial class MainWindow : Window, IShell
         // Running work was already told to stop; a save failure or a stuck sign-in check must not keep the app open forever.
         try { await closingModel.DisposeAsync().AsTask().WaitAsync(ShutdownLimit); }
         catch (Exception) { /* the queue keeps its own durable state; an interrupted transfer resumes as "needs checking" */ }
+        // The shutdown may already have been finished, so let the first OnClosing unwind before closing for real:
+        // WPF refuses Close while the window is still closing.
+        await Dispatcher.Yield(DispatcherPriority.Background);
         readyToClose = true;
-        Close();
+        try { Close(); }
+        catch (InvalidOperationException) { readyToClose = false; IsEnabled = true; }
     }
 }

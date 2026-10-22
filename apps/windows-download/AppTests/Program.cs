@@ -492,6 +492,21 @@ async Task CloseBeforeSignedIn()
 
 async Task CloseWindow()
 {
+    // Nothing to stop: signed out (no queue), and a model that was already shut down. Each closes exactly once.
+    foreach (var alreadyClosed in new[] { false, true }) {
+        await using var env = Env.Create(signedIn: alreadyClosed);
+        var window = env.Window();
+        var closedCount = 0; window.Closed += (_, _) => closedCount++;
+        await env.Model.StartAsync();
+        if (alreadyClosed) { await env.Model.DisposeAsync(); await env.Model.DisposeAsync(); }
+        window.Close();
+        await Until(() => closedCount == 1, alreadyClosed ? "already shut down window closes" : "signed-out window closes", seconds: 10);
+        await Task.Delay(300); Pump();
+        Equal(1, closedCount);
+        True(!window.IsVisible, "window gone");
+        True(Locks.Free(env.Backend.StateDirectory), "nothing left locked");
+    }
+
     foreach (var stuck in new[] { false, true }) {
         await using var env = Env.Create(signedIn: true, rate: 600_000);
         var window = env.Window();
