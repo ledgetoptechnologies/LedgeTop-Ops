@@ -1,5 +1,6 @@
 // Opt-in loopback acceptance only. No credentials, trust-store changes or live endpoints.
 using System.Net;
+using System.Diagnostics;
 using System.Net.Security;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
@@ -19,6 +20,8 @@ if (args[0] == "--certificate") {
 }
 if (args[0] != "--run") throw new ArgumentException("Unknown mode.");
 var config = JsonSerializer.Deserialize<Configuration>(File.ReadAllText(args[1])) ?? throw new Exception("Missing fixture.");
+if (config.ExpectedBytes != 2L * 1024 * 1024 && config.ExpectedBytes != 3L * 1024 * 1024 * 1024 + 17)
+    throw new Exception("Only the fixed bounded synthetic sizes are supported.");
 var origin = new Uri(config.Origin);
 if (origin.Scheme != "https" || origin.Host != "127.0.0.1" || origin.Port < 1024 || origin.AbsolutePath != "/")
     throw new Exception("Only loopback TLS is permitted by this harness.");
@@ -44,7 +47,7 @@ Assert(roots.Count == 1 && roots[0].RootId == config.RootId, "Expected exact pro
 var entries = await employee.GetEntriesAsync(config.RootId);
 Assert(entries.Entries.Count == 1 && entries.Entries[0].Name == "map.bin", "Actual gateway directory differs.");
 var manifest = await employee.GetDownloadManifestAsync(config.RootId, "map.bin");
-Assert(manifest.Length == 2 * 1024 * 1024 && manifest.Sha256 == config.Sha256, "Gateway manifest digest differs.");
+Assert(manifest.Length == config.ExpectedBytes && manifest.Sha256 == config.Sha256, "Gateway manifest digest differs.");
 var destination = Path.Combine(config.Output, "resumed"); Directory.CreateDirectory(destination);
 using (var first = new Downloader(Handler(), [origin], session: session)) {
     try { await first.DownloadAsync(manifest, destination); throw new Exception("Interrupted transport unexpectedly completed."); }
@@ -54,16 +57,18 @@ Assert(!File.Exists(Path.Combine(destination, "map.bin")), "Interrupted bytes we
 var partial = Directory.GetFiles(destination, "*.part", SearchOption.AllDirectories).Single();
 var retained = new FileInfo(partial).Length;
 Assert(retained > 0 && retained < manifest.Length, "No real network prefix was retained.");
+if (config.ExpectedBytes > int.MaxValue) Assert(retained > int.MaxValue, "Large acceptance must resume beyond a 32-bit offset.");
 using (var resumed = new Downloader(Handler(), [origin], session: session)) {
     var result = await resumed.DownloadAsync(manifest, destination);
-    Assert(Convert.ToHexStringLower(SHA256.HashData(File.ReadAllBytes(result))) == config.Sha256, "Resumed file digest differs.");
+    using var verified = File.OpenRead(result);
+    Assert(Convert.ToHexStringLower(SHA256.HashData(verified)) == config.Sha256, "Resumed file digest differs.");
 }
 using var raw = new HttpClient(Handler());
 async Task<HttpResponseMessage> Read(Uri uri, string assertion, string? etag = null) {
     using var request = new HttpRequestMessage(HttpMethod.Get, uri);
     request.Headers.Add("Cf-Access-Token", assertion);
     if (etag is not null) request.Headers.Add("If-Match", etag);
-    return await raw.SendAsync(request);
+    return await raw.SendAsync(request, HttpCompletionOption.ResponseHeadersRead);
 }
 using (var other = await Read(manifest.ContentUri, config.OtherToken, manifest.ETag))
     Assert(other.StatusCode == HttpStatusCode.Forbidden, "Another admitted user reused this handle.");
@@ -90,9 +95,11 @@ using (var denied = new Downloader(Handler(), [origin], session: session)) {
 }
 Console.WriteLine(JsonSerializer.Serialize(new { kind = "local-employee-transport-v1", bytes = manifest.Length, sha256 = config.Sha256,
     retainedPrefixBytes = retained, tlsPinRejected = true, rootsAndListingParsed = true, resumedDigestVerified = true,
-    crossUserDenied = true, traversalDenied = true, staleVersionRejected = true, revokedHandleDenied = true }));
+    crossUserDenied = true, traversalDenied = true, staleVersionRejected = true, revokedHandleDenied = true,
+    peakWorkingSetBytes = Process.GetCurrentProcess().PeakWorkingSet64 }));
 static void Assert(bool value, string message) { if (!value) throw new Exception(message); }
-sealed record Configuration(string Origin, string Certificate, string Output, string Token, string Sha256, string ControlToken, string RootId, string OtherToken);
+sealed record Configuration(string Origin, string Certificate, string Output, string Token, string Sha256, string ControlToken, string RootId, string OtherToken,
+    long ExpectedBytes = 2L * 1024 * 1024);
 sealed class SyntheticTokenRunner(string token) : IAccessCommandRunner {
     public Task<AccessCommandResult> RunAsync(string path, IReadOnlyList<string> arguments, CancellationToken cancellationToken) {
         if (arguments.Count != 4 || arguments[0] != "access" || arguments[1] != "token" || arguments[2] != "--app")

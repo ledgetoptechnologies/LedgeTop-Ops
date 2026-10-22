@@ -2,7 +2,7 @@ import { createServer, request as tlsRequest } from "node:https";
 import { request as plainRequest } from "node:http";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { mkdtemp, readFile, writeFile, rm, mkdir } from "node:fs/promises";
+import { mkdtemp, readFile, writeFile, rm, mkdir, statfs } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { once } from "node:events";
@@ -19,6 +19,12 @@ vi.mock("jose", async () => ({ ...await vi.importActual<typeof import("jose")>("
 const execute = promisify(execFile);
 const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 it("actual .NET employee client reads real Python gateway under native D1 grants and refuses revoked/stale/cross-user reads", async () => {
+  if (process.env.LEDGETOP_EMPLOYEE_LARGE !== undefined && process.env.LEDGETOP_EMPLOYEE_LARGE !== "1")
+    throw Error("Large mode must be explicitly selected as 1");
+  const large = process.env.LEDGETOP_EMPLOYEE_LARGE === "1";
+  const expectedBytes = large ? 3 * 1024 ** 3 + 17 : 2 * 1024 ** 2;
+  const interruptAfter = large ? 2 * 1024 ** 3 + 1024 ** 2 + 17 : 16_384;
+  const startedAt = Date.now();
   const dotnet = process.env.LEDGETOP_TEST_DOTNET ?? "dotnet", windowsRoot = resolve("../windows-download");
   const childEnv = { ...process.env, DOTNET_GENERATE_ASPNET_CERTIFICATE: "false", DOTNET_CLI_TELEMETRY_OPTOUT: "1" };
   expect((await execute(dotnet, ["--version"], { cwd: windowsRoot, env: childEnv, timeout: 20_000 })).stdout.trim())
@@ -26,11 +32,18 @@ it("actual .NET employee client reads real Python gateway under native D1 grants
   await execute(dotnet, ["build", "EmployeeTransportTests/WindowsDownload.EmployeeTransportTests.csproj", "--nologo"],
     { cwd: windowsRoot, env: childEnv, timeout: 90_000 });
   const dll = join(windowsRoot, "EmployeeTransportTests/bin/Debug/net10.0/LedgeTop.WindowsDownload.Tests.dll");
+  const hostSpace = await statfs(tmpdir(), { bigint: true });
+  const hostAvailableBytes = hostSpace.bavail * hostSpace.bsize;
+  // Allow source + two immutable gateway snapshots + desktop destination plus
+  // reserve on the PC, even if Docker's virtual disk grows on the same drive.
+  if (large && hostAvailableBytes < BigInt(expectedBytes) * 4n + 2n * 1024n ** 3n)
+    throw Error("Insufficient PC disk space for the bounded large-file fixture");
   const temporary = await mkdtemp(join(tmpdir(), "ledge-top-synthetic-employee-"));
   const suffix = randomUUID(), container = `ops-employee-transport-${suffix}`, network = `ops-employee-transport-${suffix}`, image = `ops-employee-transport:${suffix}`;
+  const volume = `ops-employee-transport-${suffix}`;
   const rootId = randomUUID(), gatewayId = randomUUID(), key = randomBytes(32), control = randomBytes(32).toString("hex");
   let authority: Awaited<ReturnType<typeof employeeTransportAuthority>> | undefined, server: ReturnType<typeof createServer> | undefined;
-  let localDockerValidated = false;
+  let localDockerValidated = false, ownedVolumeCreated = false;
   const docker = (args: string[], timeout = 30_000) => execute("docker", args, { timeout, maxBuffer: 2 * 1024 * 1024 });
   try {
     // Never build/run this fixture through a remote Docker context or NAS daemon.
@@ -42,20 +55,29 @@ it("actual .NET employee client reads real Python gateway under native D1 grants
     localDockerValidated = true;
     await docker(["build", "--pull=false", "--network=none", "-f", resolve("../employee-read-gateway/Dockerfile.transport-test"), "-t", image, resolve("../employee-read-gateway")], 90_000);
     const imageId = (await docker(["image", "inspect", "--format", "{{.Id}}", image])).stdout.trim();
+    if (large) {
+      await docker(["volume", "create", "--driver=local", "--label", "ledgetop.synthetic-transport=true", volume]);
+      ownedVolumeCreated = true;
+      if ((await docker(["volume", "inspect", "--format", "{{.Driver}} {{json .Options}}", volume])).stdout.trim() !== "local null")
+        throw Error("Synthetic volume must be a plain local Docker volume without driver options");
+    }
     await docker(["network", "create", "--label", "ledgetop.synthetic-transport=true", network]);
     await docker(["run", "--detach", "--name", container, "--label", "ledgetop.synthetic-transport=true", "--network", network,
       "--read-only", "--cap-drop=ALL", "--security-opt=no-new-privileges", "--pids-limit=64", "--memory=128m", "--cpus=1",
       "--tmpfs", "/tmp:rw,nosuid,nodev,noexec,size=32m,mode=1777", "--publish", "127.0.0.1::8080",
+      ...(large ? ["--mount", `type=volume,source=${volume},target=/synthetic`, "--env", "SYNTHETIC_LARGE_FILE=1"] : []),
       "--env", `SYNTHETIC_ROOT_ID=${rootId}`, "--env", `SYNTHETIC_GATEWAY_ID=${gatewayId}`, "--env", `SYNTHETIC_KEY_HEX=${key.toString("hex")}`, image]);
-    let ready: { root: { path: string; fingerprint: string } } | undefined;
-    for (let attempt = 0; attempt < 80; attempt++) {
+    let ready: { root: { path: string; fingerprint: string }; bytes: number; sha256: string; volumeAvailableBytes: number;
+      volumeAvailableBytesBefore: number; sourceAllocatedBytes: number } | undefined;
+    for (let attempt = 0; attempt < (large ? 480 : 80); attempt++) {
       const status = JSON.parse((await docker(["inspect", "--format", "{{json .State}}", container])).stdout);
       if (!status.Running) throw Error("Owned synthetic gateway exited before readiness");
       const logs = (await docker(["logs", container])).stdout.trim();
       if (logs) { ready = JSON.parse(logs.split("\n")[0]!); break; }
       await delay(250);
     }
-    if (!ready || !/^\/tmp\/synthetic-transport-[A-Za-z0-9_-]+\/source$/u.test(ready.root.path)) throw Error("Synthetic root readiness missing");
+    const allowedRoot = large ? /^\/synthetic\/synthetic-transport-[A-Za-z0-9_-]+\/source$/u : /^\/tmp\/synthetic-transport-[A-Za-z0-9_-]+\/source$/u;
+    if (!ready || !allowedRoot.test(ready.root.path) || ready.bytes !== expectedBytes) throw Error("Synthetic root readiness missing");
     const ownedSource = ready.root.path;
     const binding = (await docker(["port", container, "8080/tcp"])).stdout.trim();
     if (!/^127\.0\.0\.1:[0-9]+$/u.test(binding)) throw Error("Gateway must publish only to IPv4 loopback");
@@ -108,13 +130,13 @@ it("actual .NET employee client reads real Python gateway under native D1 grants
           if (!interrupted && response.status === 200 && req.url?.startsWith("/api/staff/files/downloads/")) {
             interrupted = true;
             // TCP/TLS may deliver arbitrarily small chunks. Commit an actual
-            // complete 16KiB prefix before cutting the response; aborting before
+            // complete configured prefix before cutting the response; aborting before
             // headers permits HttpClient's normal safe GET retry instead.
             let written = 0;
-            while (written < 16_384) {
+            while (written < interruptAfter) {
               const part = await reader.read(); if (part.done) throw Error("Short synthetic gateway body");
-              const selected = part.value.subarray(0, 16_384 - written);
-              res.write(selected); written += selected.length;
+              const selected = part.value.subarray(0, interruptAfter - written);
+              if (!res.write(selected)) await once(res, "drain"); written += selected.length;
             }
             await delay(150); res.destroy();
             while (!(await reader.read()).done) { /* drain owned fixture; upstream cancel is separate */ }
@@ -133,18 +155,21 @@ it("actual .NET employee client reads real Python gateway under native D1 grants
         const request = tlsRequest(String(url), { method: "POST", headers: Object.fromEntries(new Headers(init.headers)), ca: certificate,
           rejectUnauthorized: true, signal: init.signal ?? undefined }, incoming => {
           const headers = new Headers(); for (const [name, value] of Object.entries(incoming.headers)) if (typeof value === "string") headers.set(name, value);
-          resolve(new Response(Readable.toWeb(incoming) as ReadableStream<Uint8Array>, { status: incoming.statusCode!, headers }));
+          resolve(new Response(Readable.toWeb(incoming, { strategy: { highWaterMark: 64 * 1024, size: (chunk: Uint8Array) => chunk.byteLength } }) as ReadableStream<Uint8Array>, { status: incoming.statusCode!, headers }));
         }); request.on("error", reject); request.end(String(init.body));
       });
     }) as typeof fetch;
     router = createEmployeeReadRouter({ enabled: true, opsOrigin: origin, access: { enabled: true, issuer, staffAudience: audience },
       gateway: { origin, gatewayId, keyId: "synthetic-local-key", key }, handleKey: randomBytes(32) }, { database: fixture.db, fetch: gatewayFetch });
     const output = join(temporary, "output"); await mkdir(output);
-    const sha256 = createHash("sha256").update(Uint8Array.from({ length: 2 * 1024 * 1024 }, (_, i) => (i * 31 + 17) % 251)).digest("hex");
+    const hash = createHash("sha256"), pattern = Buffer.from(Uint8Array.from({ length: 251 }, (_, i) => (i * 31 + 17) % 251));
+    const block = Buffer.alloc(pattern.length * 4096); for (let at = 0; at < block.length; at += pattern.length) pattern.copy(block, at);
+    for (let remaining = expectedBytes; remaining > 0;) { const count = Math.min(remaining, block.length); hash.update(block.subarray(0, count)); remaining -= count; }
+    const sha256 = hash.digest("hex"); expect(ready.sha256).toBe(sha256);
     const config = join(temporary, "synthetic-employee.json");
     await writeFile(config, JSON.stringify({ Origin: origin, Certificate: join(temporary, "certificate.pem"), Output: output,
-      Token: await token(fixture.alice), OtherToken: await token(fixture.bob), RootId: rootId, Sha256: sha256, ControlToken: control }));
-    const result = await execute(dotnet, [dll, "--run", config], { env: childEnv, timeout: 90_000 }).catch(error => {
+      Token: await token(fixture.alice), OtherToken: await token(fixture.bob), RootId: rootId, Sha256: sha256, ControlToken: control, ExpectedBytes: expectedBytes }));
+    const result = await execute(dotnet, [dll, "--run", config], { env: childEnv, timeout: large ? 480_000 : 90_000 }).catch(error => {
       console.error(JSON.stringify({ interrupted, gatewayCalls, upstreamOperations,
         requests: requests.map(r => ({ status: r.status, range: r.range, download: r.path.startsWith("/api/staff/files/downloads/") })),
         adapterErrors: errors.map(e => e instanceof Error ? e.message : "adapter_error") }));
@@ -152,16 +177,22 @@ it("actual .NET employee client reads real Python gateway under native D1 grants
     });
     expect(errors).toEqual([]);
     const receipt = JSON.parse(result.stdout.trim());
-    expect(receipt).toMatchObject({ kind: "local-employee-transport-v1", bytes: 2 * 1024 * 1024, sha256, tlsPinRejected: true,
+    expect(receipt).toMatchObject({ kind: "local-employee-transport-v1", bytes: expectedBytes, sha256, tlsPinRejected: true,
       rootsAndListingParsed: true, resumedDigestVerified: true, crossUserDenied: true, traversalDenied: true, staleVersionRejected: true, revokedHandleDenied: true });
     const downloads = requests.filter(item => item.path.startsWith("/api/staff/files/downloads/"));
     expect(downloads.map(item => item.status)).toEqual([200, 206, 403, 412, 403]);
     expect(downloads[1]!.range).toBe(`bytes=${receipt.retainedPrefixBytes}-`);
+    if (large) expect(receipt.retainedPrefixBytes).toBeGreaterThan(2 ** 31 - 1);
     expect(gatewayCallsAtRevocation).toBeGreaterThan(0); expect(gatewayCalls).toBe(gatewayCallsAtRevocation);
     expect(upstreamOperations).toEqual(["list", "manifest", "content", "content", "manifest"]);
     const auditEvents = await fixture.db.prepare("SELECT count(*) n FROM ops_employee_read_content_starts").first("n");
     expect(auditEvents).toBe(2);
-    const evidence = { ...receipt, imageId, observedDownloadStatuses: downloads.map(item => item.status), upstreamOperations,
+    const pythonPeak = (await docker(["exec", container, "python", "-c", "print(next(line.split()[1] for line in open('/proc/1/status') if line.startswith('VmHWM:')))"])).stdout.trim();
+    const evidence = { ...receipt, imageId, largeFileMode: large, elapsedMs: Date.now() - startedAt,
+      hostAvailableBytesBefore: hostAvailableBytes.toString(), volumeAvailableBytesBefore: ready.volumeAvailableBytesBefore,
+      volumeAvailableBytesAfterSource: ready.volumeAvailableBytes, sourceAllocatedBytes: ready.sourceAllocatedBytes,
+      nodePeakRssBytes: process.resourceUsage().maxRSS * 1024, pythonPeakRssBytes: Number(pythonPeak) * 1024,
+      observedDownloadStatuses: downloads.map(item => item.status), upstreamOperations,
       gatewayCallsAfterRevocation: 0, auditEvents, limits: "Actual local .NET/Ops D1/Python container transport; synthetic JWKS discovery/helper and local TLS adapters. No human sign-in, NAS, staging host, EH or production acceptance." };
     console.log(JSON.stringify(evidence));
     if (process.env.LEDGETOP_EMPLOYEE_TRANSPORT_RECEIPT) await writeFile(process.env.LEDGETOP_EMPLOYEE_TRANSPORT_RECEIPT, JSON.stringify(evidence, null, 2) + "\n", { flag: "wx" });
@@ -170,6 +201,7 @@ it("actual .NET employee client reads real Python gateway under native D1 grants
     await authority?.runtime.dispose();
     if (localDockerValidated) {
       await docker(["rm", "--force", container]).catch(() => {});
+      if (ownedVolumeCreated) await docker(["volume", "rm", volume]).catch(() => {});
       await docker(["network", "rm", network]).catch(() => {});
       await docker(["image", "rm", image]).catch(() => {});
     }

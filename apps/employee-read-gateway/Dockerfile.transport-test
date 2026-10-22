@@ -3,5 +3,6 @@ ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
 WORKDIR /app
 COPY employee_read_gateway ./employee_read_gateway
 COPY tests/transport_lab_server.py ./transport_lab_server.py
+RUN mkdir /synthetic && chown 65532:65532 /synthetic && chmod 0700 /synthetic
 USER 65532:65532
 ENTRYPOINT ["python", "/app/transport_lab_server.py"]
