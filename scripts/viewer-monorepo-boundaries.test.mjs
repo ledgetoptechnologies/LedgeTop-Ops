@@ -20,7 +20,7 @@ const migratedSteps = steps(workflow);
 const originalSteps = steps(upstream);
 
 test('Viewer publication only watches its imported application and workflow', () => {
-  assert.match(workflow, /^  workflow_dispatch:$/m);
+  assert.doesNotMatch(workflow, /^  workflow_dispatch:/m);
   assert.match(workflow, /^  push:\n    branches: \[main\]\n    paths:/m);
   for (const event of ['pull_request', 'push']) {
     const eventBlock = workflow.split(`  ${event}:\n`)[1].split(/^(?:  [a-z_]+:|\S)/m)[0];
@@ -43,14 +43,14 @@ test('Actions use the nested locked application and Docker build context', () =>
   assert.match(workflow, /type=sha,prefix=sha-,format=long/);
 });
 
-test('PR and manual builds load local candidates and cannot promote or publish', () => {
+test('PR builds load local candidates and cannot promote or publish', () => {
   const build = migratedSteps.get('Build isolated candidate');
   for (const flag of ['push', 'provenance', 'sbom']) {
     assert.ok(build.includes(`${flag}: \${{ ${releaseGuard} }}`), `${flag} must be main-push only`);
   }
   assert.ok(build.includes("load: ${{ github.event_name != 'push' || github.ref != 'refs/heads/main' }}"));
   for (const name of ['Log in to GitHub Container Registry', 'Promote verified digest to release tags', 'Write verified release attestation', 'Upload release attestation']) {
-    assert.ok(migratedSteps.get(name).includes(`if: ${releaseGuard}\n`), `${name} must not execute on PR or workflow_dispatch`);
+    assert.ok(migratedSteps.get(name).includes(`if: ${releaseGuard}\n`), `${name} must execute only on main pushes`);
   }
   assert.match(migratedSteps.get('Set isolated candidate reference'), /candidate-\$\{GITHUB_SHA\}-\$\{GITHUB_RUN_ID\}-\$\{GITHUB_RUN_ATTEMPT\}/);
   assert.ok(migratedSteps.get('Generate image metadata').includes(`type=raw,value=latest,enable=\${{ ${releaseGuard} }}`));

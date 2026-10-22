@@ -1,7 +1,6 @@
 name: Publish Operations Viewer image
 
 on:
-  workflow_dispatch:
   pull_request:
     paths:
       - 'apps/viewer/**'
