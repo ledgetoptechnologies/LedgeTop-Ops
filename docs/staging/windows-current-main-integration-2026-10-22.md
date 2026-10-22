@@ -58,6 +58,17 @@ not stop a stalled upstream until another chunk or the existing deadline.
 Explicit caller/deadline abortion is tested. See the framing document for that
 bounded resource limitation.
 
+Follow-up `2819be31` (combined equivalent `76fc9887`) adds request-owned
+abortion before discarding server-rejected content. The independent reviewer
+and root combined-source run each passed 124 focused tests, including an actual
+Workerd source that emits one byte and then stalls during final denial, thrown
+authorization, expiry, length and range checks. Root combined-source Ops
+typechecking passed. The historical thrown recheck bypassed discard and left
+that source alive; native discard alone already cancels the pending first write
+in the other counterfactual. This test proves the explicit cleanup order without
+claiming physical socket-disconnect detection. Details and exact test scope are
+in `../windows-employee-rejected-download-abort.md`.
+
 The separate opt-in large run also passed with native framing: 3,221,225,489
 bytes, resumed from 2,148,532,241 (beyond signed 32-bit range), with exact full
 and resumed content lengths and verified SHA-256. Statuses remained
