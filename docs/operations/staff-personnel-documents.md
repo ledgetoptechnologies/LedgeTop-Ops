@@ -17,7 +17,7 @@ delegation management; this change does not create delegation or recovery routes
 
 Activation requires all of the following, separately reviewed:
 
-- Apply migration 0225 after the existing Operations migrations.
+- Apply migrations 0225 and 0226 after the existing Operations migrations.
 - Bind `STAFF_DOCUMENTS_BUCKET` to a **new, private personnel-only R2 bucket**.
   Never bind `client-data`, `DATA_BUCKET`, incoming, or any employee delivery root.
   Do not configure public domains, public access, notifications that index its
@@ -59,7 +59,9 @@ Base: `/api/staff-personnel/profiles/:staffId`.
 | POST `/archive` or `/restore` | `{commandId,expectedVersion,reason}`; explicit `staff.profile.archive` or `staff.profile.restore`. |
 
 Document DTO fields: `id,staffId,filename,category,contentType,size,status,createdAt`.
-Lists additionally include `retention:{hold,reviewAfter,reviewNote,version}`.
+Lists additionally include `retention:{hold,reviewAfter,reviewNote,version}` and
+`scan:null|{state,attempts,retryAfter,errorCode}`. Lease tokens and worker credentials
+are never returned to human callers.
 Internal keys, object ETags and hashes never appear in human DTOs or audit payloads.
 Categories: `agreement`, `tax`, `onboarding`, `other`.
 
@@ -80,17 +82,14 @@ references. It must not receive this personnel bucket, credentials or documents.
 Its NAS mounts, promotion/deletion workflow and incoming callback credentials
 are not part of personnel processing and must remain untouched.
 
-A dedicated personnel consumer and job-discovery/claim mechanism are still
-missing. The intended staging adapter runs as its own isolated container on
-192.168.50.90, with no NAS mounts or shared incoming credentials, read-only root,
-bounded scratch storage, current ClamAV definitions, timeout/retry behavior and a
-separate personnel service identity. It must obtain bounded leased job IDs, fetch
-the pinned quarantine bytes, independently hash and validate their type/container,
-scan them, then submit the matching verdict receipt. Scanner errors or stale
-definitions leave a retryable quarantine record, never a clean verdict. The
-current API provides the pinned content/receipt protocol but does not yet provide
-leased discovery, implement that consumer, or prove actual AV processing. A token
-and endpoint alone therefore do not make uploads operationally ready.
+A dedicated consumer is now implemented in `scripts/personnel-scanner/consumer.py`,
+with isolated Compose source in `deploy/personnel-scanner.compose.yml`. Migration
+0226 adds bounded leased discovery, delayed retries and manual-review exhaustion.
+Local tests exercised actual ClamAV with clean/EICAR fixtures and consumer
+download/digest/validation/verdict orchestration using synthetic transport.
+This is not a live staging deployment or Cloudflare Access/API/bucket acceptance.
+See [the scanner staging handoff](staff-personnel-scanner-staging.md) for the
+remaining operator configuration and live acceptance. No NAS consumer is reused.
 
 Each upload is bounded to 25 MiB by actual streamed bytes independently of
 Content-Length. A profile has at most 100 retained uploads and 512 MiB total,
@@ -103,19 +102,31 @@ not implemented, so unrecoverable reservations require a reviewed operator proce
 
 ## Scanner boundary
 
-`GET /api/staff-personnel/scanner/:documentId/content` and
-`POST /api/staff-personnel/scanner/:documentId/receipt` require only the dedicated
-scanner bearer credential, never a human personnel grant. They cannot enumerate
-documents. The scanner GET returns quarantined exact-version bytes and
-`X-Document-SHA256`, `X-Document-ETag`, `X-Document-Content-Type`, and an encoded
+`POST /api/staff-personnel/scanner/claim` accepts `{workerId}` using the dedicated
+scanner bearer credential and returns at most one ten-minute job/lease. A worker
+ID can hold at most one unexpired job. Its job contains the opaque document ID,
+expected type, filename, size, digest, ETag, opaque R2 object version, exact
+content/receipt/retry paths, policy version and an unguessable lease token.
+Subsequent `GET /scanner/:id/content` and `POST /scanner/:id/receipt` require both
+the scanner bearer and that exact current `X-Scan-Lease` token. The bearer alone
+cannot fetch or accept content. No human personnel grant is scanner authority.
+The GET returns quarantined exact-version bytes and `X-Document-SHA256`,
+`X-Document-ETag`, `X-Document-Version`, `X-Document-Content-Type`, and an encoded
 `X-Document-Filename`. Receipt JSON is exactly
-`{sha256,etag,verdict:"clean"|"rejected"}`. Server metadata must match the stored
-object version/size/hash. Contradictory or mismatched receipts fail closed;
-repeating the identical terminal verdict is idempotent. The scanner's SHA must
-come from its own byte digest, not from copying the expected response header.
+`{sha256,etag,objectVersion,verdict:"clean"|"rejected",engineVersion,definitionsVersion,policyVersion:"personnel-v1"}`.
+The immutable object version, size, digest metadata and ETag must all match.
+The final SQL audit transaction requires the current unexpired lease; a stale
+worker cannot accept a reclaimed job. An identical terminal receipt with its
+original lease is idempotent. `POST /scanner/:id/retry` accepts a bounded error code
+with the current lease, clears it and delays another attempt. Eight unsuccessful
+attempts lead to manual review, retaining quarantine bytes. There is no automatic
+acceptance or administrator override. The scanner calculates its own byte digest;
+it must not copy the expected response header as proof.
 
-Only accepted objects can be downloaded. Reads pin the accepted ETag, expected
-size and stored integrity metadata. A changed/missing object fails closed.
+Only accepted objects can be downloaded. Both HEAD and the actual returned GET
+must match the immutable R2 object version, ETag, expected size and digest metadata.
+Same-byte overwrites with identical ETags still fail because their R2 versions
+change. A changed GET body or newly unauthorized body is cancelled before release.
 Scanner receipts and uploads/downloads are audited without recording document
 contents, object keys or hashes in ordinary event details.
 
@@ -176,4 +187,5 @@ Local evidence on October 22, 2026:
   foreign-key check returned zero violations and all five new capabilities existed.
 
 These results support source review. They do not authorize activation or claim
-the missing scanner consumer, staff UI, live bucket or production rollout exists.
+the staff UI, live private bucket or production rollout exists. The scanner
+handoff records the newer 0226 consumer and lease evidence separately.

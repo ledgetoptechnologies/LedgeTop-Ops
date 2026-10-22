@@ -57,7 +57,7 @@ CREATE TABLE staff_personnel_documents(
  'application/vnd.openxmlformats-officedocument.wordprocessingml.document','application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')),
  size_bytes INTEGER NOT NULL CHECK(size_bytes BETWEEN 1 AND 26214400),
  sha256 TEXT NOT NULL CHECK(length(sha256)=64 AND sha256 NOT GLOB '*[^0-9a-f]*'), object_key TEXT NOT NULL UNIQUE CHECK(object_key='personnel/'||id||'/content'),
- object_etag TEXT, status TEXT NOT NULL DEFAULT 'uploading' CHECK(status IN ('uploading','quarantined','accepted','rejected')),
+ object_etag TEXT, object_version TEXT, status TEXT NOT NULL DEFAULT 'uploading' CHECK(status IN ('uploading','quarantined','accepted','rejected')),
  created_at TEXT NOT NULL DEFAULT(strftime('%Y-%m-%dT%H:%M:%fZ','now')),
  scanned_at TEXT, UNIQUE(actor_staff_id,command_id), UNIQUE(id,staff_id)
 );
@@ -78,7 +78,8 @@ WHEN NEW.id IS NOT OLD.id OR NEW.staff_id IS NOT OLD.staff_id OR NEW.actor_staff
  OR NEW.filename IS NOT OLD.filename OR NEW.category IS NOT OLD.category OR NEW.content_type IS NOT OLD.content_type
  OR NEW.size_bytes IS NOT OLD.size_bytes OR NEW.sha256 IS NOT OLD.sha256 OR NEW.object_key IS NOT OLD.object_key
  OR NEW.created_at IS NOT OLD.created_at OR (OLD.object_etag IS NOT NULL AND NEW.object_etag IS NOT OLD.object_etag)
- OR NOT ((OLD.status='uploading' AND NEW.status='quarantined' AND NEW.object_etag IS NOT NULL AND NEW.scanned_at IS NULL)
+ OR (OLD.object_version IS NOT NULL AND NEW.object_version IS NOT OLD.object_version)
+ OR NOT ((OLD.status='uploading' AND NEW.status='quarantined' AND NEW.object_etag IS NOT NULL AND NEW.object_version IS NOT NULL AND NEW.scanned_at IS NULL)
   OR (OLD.status='quarantined' AND NEW.status IN ('accepted','rejected') AND NEW.scanned_at IS NOT NULL))
 BEGIN SELECT RAISE(ABORT,'invalid personnel document transition'); END;
 CREATE TRIGGER staff_personnel_documents_no_delete BEFORE DELETE ON staff_personnel_documents

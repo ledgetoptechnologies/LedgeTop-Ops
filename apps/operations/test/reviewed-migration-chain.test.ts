@@ -140,6 +140,7 @@ describe("reviewed release migration fixtures", () => {
     ["operations", "0223_employee_read_provisioning.sql"],
     ["operations", "0224_windows_portal_publication_chain_index.sql"],
     ["operations", "0225_staff_personnel_documents.sql"],
+    ["operations", "0226_staff_personnel_scan_leases.sql"],
     ["client", "0235_windows_portal_successor_candidates.sql"],
     ["client", "0236_windows_portal_successor_content_start_audit.sql"],
   ] as const)("validates exact %s successor %s without expanding historical authority", (application, name) => {

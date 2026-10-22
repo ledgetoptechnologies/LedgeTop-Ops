@@ -1,0 +1,34 @@
+services:
+  personnel-scanner:
+    build:
+      context: ../scripts/personnel-scanner
+    platform: linux/amd64
+    restart: unless-stopped
+    read_only: true
+    user: "10001:10001"
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 3g
+    cpus: 1.0
+    pids_limit: 64
+    tmpfs:
+      - /work:size=128m,uid=10001,gid=10001,mode=0700,noexec,nosuid,nodev
+      - /tmp:size=32m,uid=10001,gid=10001,mode=0700,noexec,nosuid,nodev
+    volumes:
+      - personnel-signatures:/var/lib/clamav
+    environment:
+      PERSONNEL_OPS_ORIGIN: https://ops-staging.ledgetopdroneservices.com
+      PERSONNEL_WORKER_ID: personnel-staging-1
+    secrets:
+      - personnel_scanner_token
+      - personnel_access_client_id
+      - personnel_access_client_secret
+secrets:
+  personnel_scanner_token:
+    file: ./private/personnel-scanner-token.txt
+  personnel_access_client_id:
+    file: ./private/personnel-access-client-id.txt
+  personnel_access_client_secret:
+    file: ./private/personnel-access-client-secret.txt
+volumes:
+  personnel-signatures:

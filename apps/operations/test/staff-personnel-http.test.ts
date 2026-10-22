@@ -32,11 +32,15 @@ async function handleStaffPersonnelHttp(req:Request,d:StaffPersonnelDependencies
  return actualHandler(req,d);}
 async function upload(targetId=target,body=pdf,more:Record<string,string>={},d=deps()){
  return handleStaffPersonnelHttp(request(`profiles/${targetId}/documents`,'POST',body,{'Content-Type':'application/pdf','X-File-Name':'agreement.pdf','X-Document-Category':'agreement','Idempotency-Key':crypto.randomUUID(),...more}),d);}
-async function scan(id:string,verdict='clean'){const row=await db.prepare('SELECT sha256,object_etag FROM staff_personnel_documents WHERE id=?').bind(id).first<{sha256:string;object_etag:string}>();
- return handleStaffPersonnelHttp(request(`scanner/${id}/receipt`,'POST',{sha256:row!.sha256,etag:row!.object_etag,verdict},{Authorization:`Bearer ${token}`}),deps());}
+const claims=new Map<string,any>();
+async function claimFor(id:string){if(claims.has(id))return claims.get(id);for(let n=0;n<100;n++){
+ const result=await actualHandler(request('scanner/claim','POST',{workerId:crypto.randomUUID()},{Authorization:`Bearer ${token}`}),deps());expect(result.status).toBe(200);const value=await result.json() as any;if(!value.job)throw Error('No scan job');claims.set(value.job.documentId,value.job);if(value.job.documentId===id)return value.job;}throw Error('Too many test claims');}
+const provenance={engineVersion:'synthetic-test-engine',definitionsVersion:'synthetic-test-definitions',policyVersion:'personnel-v1'};
+async function scan(id:string,verdict='clean'){const row=await db.prepare('SELECT sha256,object_etag,object_version FROM staff_personnel_documents WHERE id=?').bind(id).first<{sha256:string;object_etag:string;object_version:string}>(),claim=await claimFor(id);
+ return handleStaffPersonnelHttp(request(`scanner/${id}/receipt`,'POST',{sha256:row!.sha256,etag:row!.object_etag,objectVersion:row!.object_version,verdict,...provenance},{Authorization:`Bearer ${token}`,'X-Scan-Lease':claim.leaseToken}),deps());}
 describe('private native personnel documents',()=>{
  beforeAll(async()=>{runtime=new Miniflare({modules:true,compatibilityDate:'2026-07-22',script:"export default {fetch(){return new Response('ok')}}",d1Databases:['OPS_DB'],r2Buckets:['PERSONNEL']});db=await runtime.getD1Database('OPS_DB') as D1Database;bucket=await runtime.getR2Bucket('PERSONNEL') as unknown as R2Bucket;
- const folder=new URL('../migrations/',import.meta.url);for(const name of readdirSync(folder).filter(name=>/^\d{4}_.+\.sql$/.test(name)&&(name.slice(0,4)<='0074'||name.startsWith('0123_')||name.startsWith('0225_'))).sort())await db.batch(splitD1MigrationStatements(readFileSync(new URL(name,folder),'utf8')).map(sql=>db.prepare(sql)));
+ const folder=new URL('../migrations/',import.meta.url);for(const name of readdirSync(folder).filter(name=>/^\d{4}_.+\.sql$/.test(name)&&(name.slice(0,4)<='0074'||name.startsWith('0123_')||name.startsWith('0225_')||name.startsWith('0226_'))).sort())await db.batch(splitD1MigrationStatements(readFileSync(new URL(name,folder),'utf8')).map(sql=>db.prepare(sql)));
  for(const id of [admin,survivor,target,other])await staff(id);await controlPlane(admin);await controlPlane(survivor);for(const cap of caps)await delegation(admin,cap,target);
  },120000);
  afterAll(async()=>runtime?.dispose());
@@ -81,18 +85,54 @@ describe('private native personnel documents',()=>{
  expect((await handleStaffPersonnelHttp(request(`profiles/${target}/documents/${value.document.id}/content`,'HEAD'),deps())).status).toBe(200);
  });
  it('rejects forged or conflicting scan results and blocks rejected files',async()=>{
- const value=await (await upload()).json() as any;const id=value.document.id;
- expect((await handleStaffPersonnelHttp(request(`scanner/${id}/receipt`,'POST',{sha256:'0'.repeat(64),etag:'bad',verdict:'clean'},{Authorization:`Bearer ${token}`}),deps())).status).toBe(409);
+ const value=await (await upload()).json() as any;const id=value.document.id,claim=await claimFor(id);
+ expect((await handleStaffPersonnelHttp(request(`scanner/${id}/receipt`,'POST',{sha256:'0'.repeat(64),etag:'bad',objectVersion:claim.objectVersion,verdict:'clean',...provenance},{Authorization:`Bearer ${token}`,'X-Scan-Lease':claim.leaseToken}),deps())).status).toBe(409);
  expect((await scan(id,'rejected')).status).toBe(200);expect((await scan(id)).status).toBe(409);
  expect((await handleStaffPersonnelHttp(request(`profiles/${target}/documents/${id}/content`),deps())).status).toBe(409);
  });
  it('trusted scanner can fetch the pinned quarantine object; accepted-byte mutation is detected',async()=>{
- const value=await (await upload()).json() as any,id=value.document.id;
+ const value=await (await upload()).json() as any,id=value.document.id,claim=await claimFor(id);
  expect((await actualHandler(request(`scanner/${id}/content`),deps())).status).toBe(403);
- const content=await actualHandler(request(`scanner/${id}/content`,'GET',undefined,{Authorization:`Bearer ${token}`}),deps());expect(content.status).toBe(200);expect(content.headers.get('X-Document-ETag')).toBeTruthy();expect(await content.text()).toBe(pdf);
+ const content=await actualHandler(request(`scanner/${id}/content`,'GET',undefined,{Authorization:`Bearer ${token}`,'X-Scan-Lease':claim.leaseToken}),deps());expect(content.status).toBe(200);expect(content.headers.get('X-Document-ETag')).toBeTruthy();expect(await content.text()).toBe(pdf);
  expect((await scan(id)).status).toBe(200);
  const row=await db.prepare('SELECT object_key FROM staff_personnel_documents WHERE id=?').bind(id).first<{object_key:string}>();await bucket.put(row!.object_key,'tampered');
  expect((await actualHandler(request(`profiles/${target}/documents/${id}/content`),deps())).status).toBe(409);
+ });
+ it('scan leases fence stale workers, retries and bounded exhaustion without accepting bytes',async()=>{
+ const value=await (await upload()).json() as any,id=value.document.id,old=await claimFor(id);
+ expect((await actualHandler(request(`scanner/${id}/content`,'GET',undefined,{Authorization:`Bearer ${token}`}),deps())).status).toBe(403);
+ await db.prepare("UPDATE staff_personnel_scan_jobs SET lease_until='2000-01-01T00:00:00.000Z' WHERE document_id=?").bind(id).run();
+ expect((await actualHandler(request(`scanner/${id}/content`,'GET',undefined,{Authorization:`Bearer ${token}`,'X-Scan-Lease':old.leaseToken}),deps())).status).toBe(409);
+ const reclaimed=await (await actualHandler(request('scanner/claim','POST',{workerId:'reclaimed-worker'},{Authorization:`Bearer ${token}`}),deps())).json() as any;
+ expect(reclaimed.job.documentId).toBe(id);expect(reclaimed.job.leaseToken).not.toBe(old.leaseToken);claims.set(id,reclaimed.job);
+ expect((await actualHandler(request(`scanner/${id}/retry`,'POST',{code:'scan_unavailable'},{Authorization:`Bearer ${token}`,'X-Scan-Lease':old.leaseToken}),deps())).status).toBe(409);
+ expect((await actualHandler(request(`scanner/${id}/retry`,'POST',{code:'scan_unavailable'},{Authorization:`Bearer ${token}`,'X-Scan-Lease':reclaimed.job.leaseToken}),deps())).status).toBe(200);
+ const row=await db.prepare('SELECT state,attempts FROM staff_personnel_scan_jobs WHERE document_id=?').bind(id).first<{state:string;attempts:number}>();expect(row).toEqual({state:'pending',attempts:2});
+ for(let n=2;n<8;n++)await db.prepare('UPDATE staff_personnel_scan_jobs SET attempts=attempts+1 WHERE document_id=?').bind(id).run();
+ await actualHandler(request('scanner/claim','POST',{workerId:'exhausted-worker'},{Authorization:`Bearer ${token}`}),deps());
+ expect(await db.prepare('SELECT state FROM staff_personnel_scan_jobs WHERE document_id=?').bind(id).first('state')).toBe('manual_review');
+ expect(await db.prepare('SELECT status FROM staff_personnel_documents WHERE id=?').bind(id).first('status')).toBe('quarantined');
+ });
+ it('pins opaque R2 versions even when overwrite bytes and ETags are identical',async()=>{
+ const value=await (await upload()).json() as any,id=value.document.id;expect((await scan(id)).status).toBe(200);
+ const row=await db.prepare('SELECT object_key,object_version,object_etag,sha256 FROM staff_personnel_documents WHERE id=?').bind(id).first<{object_key:string;object_version:string;object_etag:string;sha256:string}>();
+ const replacement=await bucket.put(row!.object_key,pdf,{customMetadata:{documentId:id,sha256:row!.sha256}});expect(replacement!.etag).toBe(row!.object_etag);expect(replacement!.version).not.toBe(row!.object_version);
+ expect((await actualHandler(request(`profiles/${target}/documents/${id}/content`),deps())).status).toBe(409);
+ const pending=await (await upload()).json() as any,pendingId=pending.document.id;await claimFor(pendingId);
+ const pendingRow=await db.prepare('SELECT object_key,sha256 FROM staff_personnel_documents WHERE id=?').bind(pendingId).first<{object_key:string;sha256:string}>();await bucket.put(pendingRow!.object_key,pdf,{customMetadata:{documentId:pendingId,sha256:pendingRow!.sha256}});
+ expect((await scan(pendingId)).status).toBe(409);expect(await db.prepare('SELECT status FROM staff_personnel_documents WHERE id=?').bind(pendingId).first('status')).toBe('quarantined');
+ });
+ it('cancels changed-version bodies when an overwrite races between HEAD and GET',async()=>{
+ const value=await (await upload()).json() as any,id=value.document.id;expect((await scan(id)).status).toBe(200);let cancelled=false;
+ const row=await db.prepare('SELECT object_key,sha256 FROM staff_personnel_documents WHERE id=?').bind(id).first<{object_key:string;sha256:string}>();
+ const race={head:bucket.head.bind(bucket),get:async(key:string,options:R2GetOptions)=>{await bucket.put(key,pdf,{customMetadata:{documentId:id,sha256:row!.sha256}});const changed=await bucket.get(key,options) as R2ObjectBody;
+ const body=new ReadableStream({start(controller){controller.enqueue(new TextEncoder().encode(pdf));},cancel(){cancelled=true;return changed.body.cancel();}});
+ return {size:changed.size,etag:changed.etag,version:changed.version,customMetadata:changed.customMetadata,body};}} as unknown as R2Bucket;
+ expect((await actualHandler(request(`profiles/${target}/documents/${id}/content`),deps(admin,{bucket:race}))).status).toBe(409);expect(cancelled).toBe(true);
+ });
+ it('concurrent scanner claims never lease the same document twice',async()=>{
+ await upload();await upload();const results=await Promise.all(['parallel-a','parallel-b'].map(workerId=>actualHandler(request('scanner/claim','POST',{workerId},{Authorization:`Bearer ${token}`}),deps())));
+ const jobs=await Promise.all(results.map(async result=>(await result.json() as any).job));expect(jobs.every(Boolean)).toBe(true);expect(jobs[0].documentId).not.toBe(jobs[1].documentId);
  });
  it('holds and retention reviews are versioned, audited, idempotent and never purge',async()=>{
  const value=await (await upload()).json() as any,id=value.document.id,cmd=crypto.randomUUID();const body={commandId:cmd,expectedVersion:1,hold:true,reviewAfter:null,reviewNote:'Synthetic legal hold'};

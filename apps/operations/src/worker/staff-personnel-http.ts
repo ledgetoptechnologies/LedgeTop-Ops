@@ -13,7 +13,7 @@ const CATEGORIES=['agreement','tax','onboarding','other'];
 const CAPS=['staff.documents.read','staff.documents.upload','staff.documents.manage','staff.profile.archive','staff.profile.restore'] as const;
 type Capability=typeof CAPS[number];
 type Actor={staffId:string;subject:string;until:number};
-type Row={id:string;staff_id:string;actor_staff_id:string;command_id:string;request_sha256:string;filename:string;category:string;content_type:string;size_bytes:number;sha256:string;object_key:string;object_etag:string|null;status:string;created_at:string};
+type Row={id:string;staff_id:string;actor_staff_id:string;command_id:string;request_sha256:string;filename:string;category:string;content_type:string;size_bytes:number;sha256:string;object_key:string;object_etag:string|null;object_version:string|null;status:string;created_at:string};
 type Config=NativeStaffAccessConfiguration & {origin:string;csrfSecret:string};
 export type StaffPersonnelDependencies={configuration:Config;database:D1Database;bucket?:R2Bucket;scannerToken?:string;
   /** Trusted test seam. Production dispatch does not supply this. */
@@ -59,27 +59,53 @@ function typeMatches(data:Uint8Array,name:string,type:string){const start=Buffer
 async function csrf(config:Config,auth:AuthenticatedNativeStaffWithAdmissionVersion,bucket:number){
   const key=await crypto.subtle.importKey('raw',new TextEncoder().encode(config.csrfSecret),{name:'HMAC',hash:'SHA-256'},false,['sign']);
   return Buffer.from(await crypto.subtle.sign('HMAC',key,new TextEncoder().encode(JSON.stringify(['staff-personnel-csrf-v1',config.origin,config.issuer,config.staffAudience,auth.identity.staffId,auth.identity.verifiedAccessSubject,auth.admissionVersion,bucket])))).toString('hex');}
-async function matchingObject(bucket:R2Bucket,row:Row){const object=await bucket.head(row.object_key);if(!object||object.size!==row.size_bytes||object.customMetadata?.sha256!==row.sha256||object.customMetadata?.documentId!==row.id||(row.object_etag&&object.etag!==row.object_etag))fail(409,'document_integrity_conflict');return object;}
+function objectMatches(object:R2Object,row:Row){return object.size===row.size_bytes&&object.customMetadata?.sha256===row.sha256&&object.customMetadata?.documentId===row.id&&(!row.object_etag||object.etag===row.object_etag)&&(!row.object_version||object.version===row.object_version);}
+async function matchingObject(bucket:R2Bucket,row:Row){const object=await bucket.head(row.object_key);if(!object||!objectMatches(object,row))fail(409,'document_integrity_conflict');return object;}
+async function matchingBody(bucket:R2Bucket,row:Row){const object=await bucket.get(row.object_key,{onlyIf:{etagMatches:row.object_etag!}});if(!object||!('body' in object))fail(409,'document_integrity_conflict');if(!objectMatches(object,row)){await object.body.cancel();fail(409,'document_integrity_conflict');}return object;}
 
 async function scanner(request:Request,deps:StaffPersonnelDependencies,path:string){const token=deps.scannerToken;
   if(!token||token.length<32||token.length>512||!deps.bucket)fail(503,'personnel_scanner_unavailable');
   const supplied=request.headers.get('Authorization')??'',expected=`Bearer ${token}`;
   if(Buffer.byteLength(supplied)!==Buffer.byteLength(expected)||!timingSafeEqual(Buffer.from(supplied),Buffer.from(expected)))fail(403,'personnel_denied');
-  const match=/^\/api\/staff-personnel\/scanner\/([0-9a-f-]+)\/(content|receipt)$/.exec(path);if(!match||!UUID.test(match[1]??''))fail(404,'not_found');
-  const db=deps.database.withSession('first-primary'),row=await db.prepare('SELECT * FROM staff_personnel_documents WHERE id=?').bind(match[1]).first<Row>();
+  const db=deps.database.withSession('first-primary');
+  if(path===`${STAFF_PERSONNEL_BASE}/scanner/claim`&&request.method==='POST'){
+    const input=await readBoundedJson(request,4096);exact(input,['workerId']);if(typeof input.workerId!=='string'||!/^[A-Za-z0-9_-]{1,64}$/.test(input.workerId))fail(400,'invalid_request');
+    const leaseToken=Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString('hex'),leaseHash=await hash(leaseToken);
+    await db.prepare("UPDATE staff_personnel_scan_jobs SET state='manual_review',lease_until=NULL,last_error='attempts_exhausted' WHERE document_id IN (SELECT document_id FROM staff_personnel_scan_jobs WHERE attempts>=8 AND (state='pending' OR (state='leased' AND lease_until<=strftime('%Y-%m-%dT%H:%M:%fZ','now'))) LIMIT 100)").run();
+    const claimed=await db.prepare(`UPDATE staff_personnel_scan_jobs SET state='leased',attempts=attempts+1,
+      lease_sha256=?,lease_until=strftime('%Y-%m-%dT%H:%M:%fZ','now','+10 minutes'),worker_id=?,last_error=NULL
+      WHERE document_id=(SELECT job.document_id FROM staff_personnel_scan_jobs job JOIN staff_personnel_documents d ON d.id=job.document_id
+      WHERE d.status='quarantined' AND job.attempts<8 AND ((job.state='pending' AND job.retry_after<=strftime('%Y-%m-%dT%H:%M:%fZ','now')) OR (job.state='leased' AND job.lease_until<=strftime('%Y-%m-%dT%H:%M:%fZ','now')))
+      AND NOT EXISTS(SELECT 1 FROM staff_personnel_scan_jobs busy WHERE busy.state='leased' AND busy.worker_id=? AND busy.lease_until>strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+      ORDER BY job.created_at,job.document_id LIMIT 1) RETURNING document_id,attempts,lease_until`).bind(leaseHash,input.workerId,input.workerId).first<{document_id:string;attempts:number;lease_until:string}>();
+    if(!claimed)return json(200,{job:null});const row=await db.prepare('SELECT * FROM staff_personnel_documents WHERE id=?').bind(claimed.document_id).first<Row>();if(!row)fail(409,'scan_job_conflict');
+    return json(200,{job:{documentId:row.id,leaseToken,leaseUntil:claimed.lease_until,attempt:claimed.attempts,filename:row.filename,contentType:row.content_type,size:row.size_bytes,sha256:row.sha256,etag:row.object_etag,objectVersion:row.object_version,
+      contentPath:`${STAFF_PERSONNEL_BASE}/scanner/${row.id}/content`,receiptPath:`${STAFF_PERSONNEL_BASE}/scanner/${row.id}/receipt`,retryPath:`${STAFF_PERSONNEL_BASE}/scanner/${row.id}/retry`,policyVersion:'personnel-v1'}});}
+  const match=/^\/api\/staff-personnel\/scanner\/([0-9a-f-]+)\/(content|receipt|retry)$/.exec(path);if(!match||!UUID.test(match[1]??''))fail(404,'not_found');
+  const row=await db.prepare('SELECT * FROM staff_personnel_documents WHERE id=?').bind(match[1]).first<Row>();
   if(!row||!['quarantined','accepted','rejected'].includes(row.status))fail(404,'not_found');
+  const leaseToken=request.headers.get('X-Scan-Lease')??'';if(!/^[a-f0-9]{64}$/.test(leaseToken))fail(403,'scan_lease_required');const leaseHash=await hash(leaseToken);
+  const job=await db.prepare('SELECT state,lease_sha256,lease_until,attempts FROM staff_personnel_scan_jobs WHERE document_id=?').bind(row.id).first<{state:string;lease_sha256:string|null;lease_until:string|null;attempts:number}>();
+  if(!job||job.lease_sha256!==leaseHash)fail(409,'scan_lease_conflict');
+  async function leased(){const found=await db.prepare("SELECT 1 ok FROM staff_personnel_scan_jobs WHERE document_id=? AND state='leased' AND lease_sha256=? AND lease_until>strftime('%Y-%m-%dT%H:%M:%fZ','now')").bind(row!.id,leaseHash).first();if(!found)fail(409,'scan_lease_expired');}
+  if(match[2]==='retry'&&request.method==='POST'){
+    const input=await readBoundedJson(request,4096);exact(input,['code']);if(!['definitions_stale','scan_unavailable','download_failed','object_mismatch','validation_unavailable'].includes(String(input.code)))fail(400,'invalid_request');
+    await leased();const changed=await db.prepare(`UPDATE staff_personnel_scan_jobs SET state=?,lease_until=NULL,lease_sha256=NULL,worker_id=NULL,last_error=?,retry_after=strftime('%Y-%m-%dT%H:%M:%fZ','now',?)
+      WHERE document_id=? AND state='leased' AND lease_sha256=? AND lease_until>strftime('%Y-%m-%dT%H:%M:%fZ','now')`)
+      .bind(job.attempts>=8?'manual_review':'pending',input.code,`+${Math.min(3600,30*2**job.attempts)} seconds`,row.id,leaseHash).run();if(changed.meta.changes!==1)fail(409,'scan_lease_expired');return json(200,{status:job.attempts>=8?'manual_review':'retry_pending'});}
   if(match[2]==='content'&&request.method==='GET'){
-    if(row.status!=='quarantined')fail(409,'scan_already_completed');await matchingObject(deps.bucket,row);
-    const object=await deps.bucket.get(row.object_key,{onlyIf:{etagMatches:row.object_etag!}});if(!object||!('body' in object))fail(409,'document_integrity_conflict');
-    return new Response(object.body,{headers:{...headers,'Content-Type':'application/octet-stream','Content-Length':String(row.size_bytes),'X-Document-SHA256':row.sha256,'X-Document-ETag':row.object_etag!,'X-Document-Content-Type':row.content_type,'X-Document-Filename':encodeURIComponent(row.filename)}});}
+    if(row.status!=='quarantined')fail(409,'scan_already_completed');await leased();await matchingObject(deps.bucket,row);
+    const object=await matchingBody(deps.bucket,row);
+    try{await leased();}catch(error){await object.body.cancel();throw error;}return new Response(object.body,{headers:{...headers,'Content-Type':'application/octet-stream','Content-Length':String(row.size_bytes),'X-Document-SHA256':row.sha256,'X-Document-ETag':row.object_etag!,'X-Document-Version':row.object_version!,'X-Document-Content-Type':row.content_type,'X-Document-Filename':encodeURIComponent(row.filename)}});}
   if(match[2]!=='receipt'||request.method!=='POST')fail(405,'method_not_allowed');
-  const input=await readBoundedJson(request,4096);exact(input,['sha256','etag','verdict']);
-  if(input.sha256!==row.sha256||input.etag!==row.object_etag||!['clean','rejected'].includes(String(input.verdict)))fail(409,'scan_receipt_mismatch');
+  const input=await readBoundedJson(request,4096);exact(input,['sha256','etag','objectVersion','verdict','engineVersion','definitionsVersion','policyVersion']);
+  if(input.policyVersion!=='personnel-v1'||typeof input.engineVersion!=='string'||typeof input.definitionsVersion!=='string'||![input.engineVersion,input.definitionsVersion].every(v=>/^[A-Za-z0-9._:+ -]{1,120}$/.test(v)))fail(400,'invalid_scan_provenance');
+  if(input.sha256!==row.sha256||input.etag!==row.object_etag||input.objectVersion!==row.object_version||!['clean','rejected'].includes(String(input.verdict)))fail(409,'scan_receipt_mismatch');
   await matchingObject(deps.bucket,row);const status=input.verdict==='clean'?'accepted':'rejected';
-  if(row.status===status)return json(200,{status,replayed:true});if(row.status!=='quarantined')fail(409,'scan_receipt_conflict');
+  if(row.status===status&&job.state==='completed'){const prior=await db.prepare("SELECT request_sha256 FROM staff_personnel_events WHERE document_id=? AND capability='scanner' AND command_id=?").bind(row.id,leaseHash).first<{request_sha256:string}>();if(prior?.request_sha256!==await hash(JSON.stringify(input)))fail(409,'scan_receipt_conflict');return json(200,{status,replayed:true});}if(row.status!=='quarantined')fail(409,'scan_receipt_conflict');await leased();
   await db.batch([db.prepare("UPDATE staff_personnel_documents SET status=?,scanned_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='quarantined'").bind(status,row.id),
-    db.prepare(`INSERT INTO staff_personnel_events(id,staff_id,document_id,capability,command_id,request_sha256,event_kind) VALUES(?,?,?,'scanner',?,?,?)`)
-    .bind(crypto.randomUUID(),row.staff_id,row.id,crypto.randomUUID(),await hash(JSON.stringify(input)),`scan_${status}`)]);
+    db.prepare(`INSERT INTO staff_personnel_events(id,staff_id,document_id,capability,command_id,request_sha256,event_kind,details_json) VALUES(?,?,?,'scanner',?,?,?,?)`)
+    .bind(crypto.randomUUID(),row.staff_id,row.id,leaseHash,await hash(JSON.stringify(input)),`scan_${status}`,JSON.stringify({engineVersion:input.engineVersion,definitionsVersion:input.definitionsVersion,policyVersion:input.policyVersion}))]);
   return json(200,{status,replayed:false});}
 
 /** Dedicated private personnel boundary. Never pass DATA_BUCKET as bucket. */
@@ -103,8 +129,8 @@ export async function handleStaffPersonnelHttp(request:Request,deps:StaffPersonn
     if(!timingSafeEqual(Buffer.from(supplied,'hex'),Buffer.from(current,'hex'))&&!timingSafeEqual(Buffer.from(supplied,'hex'),Buffer.from(prior,'hex')))fail(403,'personnel_denied');}
   if(request.method==='DELETE')fail(405,'personnel_records_are_retained');
   if(request.method==='GET'&&!document&&(!section||section==='documents')){const profile=await db.prepare('SELECT archived_at,version FROM staff_personnel_profiles WHERE staff_id=?').bind(target).first();
-    const rows=await db.prepare('SELECT d.*,r.hold,r.review_after,r.review_note,r.version retention_version FROM staff_personnel_documents d JOIN staff_personnel_retention r ON r.document_id=d.id WHERE d.staff_id=? ORDER BY d.created_at DESC,d.id LIMIT 100').bind(target).all<Row&{hold:number;review_after:string|null;review_note:string;retention_version:number}>();
-    await authority(db,actor,target,'staff.documents.read');return json(200,{profile,documents:rows.results.map(row=>({...dto(row),retention:{hold:row.hold===1,reviewAfter:row.review_after,reviewNote:row.review_note,version:row.retention_version}}))});}
+    const rows=await db.prepare('SELECT d.*,r.hold,r.review_after,r.review_note,r.version retention_version,j.state scan_state,j.attempts scan_attempts,j.retry_after scan_retry_after,j.last_error scan_error FROM staff_personnel_documents d JOIN staff_personnel_retention r ON r.document_id=d.id LEFT JOIN staff_personnel_scan_jobs j ON j.document_id=d.id WHERE d.staff_id=? ORDER BY d.created_at DESC,d.id LIMIT 100').bind(target).all<Row&{hold:number;review_after:string|null;review_note:string;retention_version:number;scan_state:string|null;scan_attempts:number|null;scan_retry_after:string|null;scan_error:string|null}>();
+    await authority(db,actor,target,'staff.documents.read');return json(200,{profile,documents:rows.results.map(row=>({...dto(row),retention:{hold:row.hold===1,reviewAfter:row.review_after,reviewNote:row.review_note,version:row.retention_version},scan:row.scan_state?{state:row.scan_state,attempts:row.scan_attempts,retryAfter:row.scan_retry_after,errorCode:row.scan_error}:null}))});}
   if(section==='documents'&&!document&&request.method==='POST'){
     if(!deps.bucket||!deps.scannerToken||deps.scannerToken.length<32)fail(503,'personnel_storage_unavailable');
     const cmd=command(request.headers.get('Idempotency-Key')),name=filename(request),category=request.headers.get('X-Document-Category')??'',type=request.headers.get('Content-Type')??'';
@@ -116,15 +142,15 @@ export async function handleStaffPersonnelHttp(request:Request,deps:StaffPersonn
     if(row.status!=='uploading'){await authority(db,actor,target,cap);return json(200,{document:dto(row),replayed:true});}
     let object=await deps.bucket.head(row.object_key);
     if(!object){await authority(db,actor,target,cap);object=await deps.bucket.put(row.object_key,data,{onlyIf:{etagDoesNotMatch:'*'},customMetadata:{sha256:sha,documentId:row.id},httpMetadata:{contentType:'application/octet-stream'}});}
-    if(!object)fail(409,'upload_in_progress');await matchingObject(deps.bucket,row);await authority(db,actor,target,cap);
-    await db.batch([db.prepare("UPDATE staff_personnel_documents SET status='quarantined',object_etag=? WHERE id=? AND status='uploading'").bind(object.etag,row.id),event(db,actor,target,cap,'uploaded',cmd,fingerprint,row.id)]);
+    if(!object)fail(409,'upload_in_progress');await matchingObject(deps.bucket,{...row,object_etag:object.etag,object_version:object.version});await authority(db,actor,target,cap);
+    await db.batch([db.prepare("UPDATE staff_personnel_documents SET status='quarantined',object_etag=?,object_version=? WHERE id=? AND status='uploading'").bind(object.etag,object.version,row.id),event(db,actor,target,cap,'uploaded',cmd,fingerprint,row.id)]);
     return json(201,{document:dto(await readRow(db,target,row.id)),replayed:false});}
   if(section==='documents'&&document&&action==='content'&&(request.method==='GET'||request.method==='HEAD')){
     if(!deps.bucket)fail(503,'personnel_storage_unavailable');const row=await readRow(db,target,document);if(row.status!=='accepted')fail(409,'document_not_accepted');
     await matchingObject(deps.bucket,row);await authority(db,actor,target,cap);
     await event(db,actor,target,cap,'downloaded',crypto.randomUUID(),await hash(JSON.stringify([row.id,request.method])),row.id).run();
-    const object=request.method==='HEAD'?null:await deps.bucket.get(row.object_key,{onlyIf:{etagMatches:row.object_etag!}});
-    if(request.method!=='HEAD'&&(!object||!('body'in object)))fail(409,'document_integrity_conflict');await authority(db,actor,target,cap);
+    const object=request.method==='HEAD'?null:await matchingBody(deps.bucket,row);
+    try{await authority(db,actor,target,cap);}catch(error){if(object)await object.body.cancel();throw error;}
     return new Response(object&&'body'in object?(object as R2ObjectBody).body:null,{headers:{...headers,'Content-Type':row.content_type,'Content-Length':String(row.size_bytes),'Content-Disposition':`attachment; filename="document"; filename*=UTF-8''${encodeURIComponent(row.filename).replace(/['()*]/g,c=>'%'+c.charCodeAt(0).toString(16).toUpperCase())}`}});}
   if(section==='documents'&&document&&action==='retention'&&request.method==='POST'){
     const row=await readRow(db,target,document),input=await readBoundedJson(request,4096);exact(input,['commandId','expectedVersion','hold','reviewAfter','reviewNote']);
