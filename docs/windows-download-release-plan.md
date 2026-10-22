@@ -198,8 +198,15 @@ documentation says the `ms-appinstaller:` protocol is disabled by default on
 ordinary systems. The App Installer descriptor should use on-launch checks
 without blocking activation, background checks, and omit
 `ForceUpdateFromAnyVersion`; rollback remains a forward-version signed release.
-These descriptor settings and clean-machine install/update/rollback/uninstall
-tests are still unimplemented, and no signing credential is requested here.
+The standalone `windows-appinstaller-preview.ps1` now constructs these settings
+from the actual unsigned MSIX identity and matching construction receipt. Its
+explicit preview mode uses reserved `.invalid` URLs and an `.xml` suffix; it
+cannot create a usable update channel. Actual package/manifest/hash matching,
+XML parsing and unsafe-input refusal were exercised against the 522-file
+candidate, as recorded in `staging/windows-appinstaller-preview-2026-10-22.md`.
+Signed production descriptors, Windows update behavior and clean-machine
+install/update/rollback/uninstall tests remain unverified. No signing credential
+is requested here.
 [Microsoft current App Installer overview](https://learn.microsoft.com/en-us/windows/msix/app-installer/app-installer-file-overview),
 [Microsoft update settings](https://learn.microsoft.com/en-us/windows/msix/app-installer/update-settings).
 
