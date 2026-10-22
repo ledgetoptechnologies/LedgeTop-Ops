@@ -57,6 +57,10 @@ Neither acceptance proves deployed staging, actual human sign-in, live R2,
 Engineering Hub execution, a signed installation or Cloud Files hydration.
 
 Prepare and review a staging-only composition before changing runtime routing.
+An executable, offline paired entry-module/config constructor now exists in
+`scripts/windows-files-staging-composition.mjs`, with CLI and static-build
+qualification described in `docs/windows-files-staging-composition.md`.
+It has not activated either Worker; production mains/configs remain unchanged.
 Do not replace production Wrangler configuration with staging values. Keep
 Cloudflare build policy at main pushes and PRs. A direct SSH test is not an
 Engineering Hub runner execution; runner enrollment is a separate gate.

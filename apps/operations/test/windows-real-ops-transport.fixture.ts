@@ -17,7 +17,7 @@ import { dispatchNextOperationsPortalNativeDeliveryAuthority } from "../src/work
 import { parseOperationsPortalNativeDeliveryAuthorityCommand } from "@ltds/shared/operations-portal-native-delivery-authority";
 import type { AuthenticatedNativeStaffWithAdmissionVersion } from "../src/worker/native-staff-auth";
 import { applyOperationsPortalNativeDeliveryAuthority, readOperationsPortalNativeDeliveryAuthorityStatus } from "../../client/src/worker/operations-portal-native-delivery-authority";
-export async function realOpsTransportAuthority(operations: D1Database, client: D1Database) {
+export async function realOpsTransportAuthority(operations: D1Database, client: D1Database, options: { issuer?: string } = {}) {
     let sequence = 1;
     const id = () => `d0000000-0000-4000-8000-${String(sequence++).padStart(12, "0")}`;
     const organization = "ops/organization/native-delivery";
@@ -26,7 +26,7 @@ export async function realOpsTransportAuthority(operations: D1Database, client: 
     const physicalProject = "ops/physical/native-delivery";
     const division = "native-delivery-division";
     const basePrefix = "clients/native-delivery/project/";
-    const issuer = "https://synthetic.cloudflareaccess.com", subject = "synthetic-recipient";
+    const issuer = options.issuer ?? "https://synthetic.cloudflareaccess.com", subject = "synthetic-recipient";
     function future(hours = 1) { return new Date(Date.now() + hours * 3600000).toISOString(); }
     function owner(): AuthenticatedNativeStaffWithAdmissionVersion {
         return { identity: { kind: "native", staffId: "native-delivery-owner",
