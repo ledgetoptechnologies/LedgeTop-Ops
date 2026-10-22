@@ -3,6 +3,7 @@ import { Miniflare } from 'miniflare';
 import { readdirSync,readFileSync } from 'node:fs';
 import { splitD1MigrationStatements } from '../../client/test/helpers/d1-migrations';
 import { handleStaffPersonnelHttp as actualHandler,type StaffPersonnelDependencies } from '../src/worker/staff-personnel-http';
+import { executeNativeStaffManagementCommand } from '../src/worker/native-staff-management-command';
 let runtime:Miniflare,db:D1Database,bucket:R2Bucket;
 const origin='https://ops.example.test',token='synthetic-personnel-scanner-token-only-123456789';
 const admin='personnel-admin',survivor='personnel-survivor',target='personnel-target',other='personnel-other';
@@ -31,11 +32,15 @@ async function handleStaffPersonnelHttp(req:Request,d:StaffPersonnelDependencies
  return actualHandler(req,d);}
 async function upload(targetId=target,body=pdf,more:Record<string,string>={},d=deps()){
  return handleStaffPersonnelHttp(request(`profiles/${targetId}/documents`,'POST',body,{'Content-Type':'application/pdf','X-File-Name':'agreement.pdf','X-Document-Category':'agreement','Idempotency-Key':crypto.randomUUID(),...more}),d);}
-async function scan(id:string,verdict='clean'){const row=await db.prepare('SELECT sha256,object_etag FROM staff_personnel_documents WHERE id=?').bind(id).first<{sha256:string;object_etag:string}>();
- return handleStaffPersonnelHttp(request(`scanner/${id}/receipt`,'POST',{sha256:row!.sha256,etag:row!.object_etag,verdict},{Authorization:`Bearer ${token}`}),deps());}
+const claims=new Map<string,any>();
+async function claimFor(id:string){if(claims.has(id))return claims.get(id);for(let n=0;n<100;n++){
+ const result=await actualHandler(request('scanner/claim','POST',{workerId:crypto.randomUUID()},{Authorization:`Bearer ${token}`}),deps());expect(result.status).toBe(200);const value=await result.json() as any;if(!value.job)throw Error('No scan job');claims.set(value.job.documentId,value.job);if(value.job.documentId===id)return value.job;}throw Error('Too many test claims');}
+const provenance={engineVersion:'synthetic-test-engine',definitionsVersion:'synthetic-test-definitions',policyVersion:'personnel-v1'};
+async function scan(id:string,verdict='clean'){const row=await db.prepare('SELECT sha256,object_etag,object_version FROM staff_personnel_documents WHERE id=?').bind(id).first<{sha256:string;object_etag:string;object_version:string}>(),claim=await claimFor(id);
+ return handleStaffPersonnelHttp(request(`scanner/${id}/receipt`,'POST',{sha256:row!.sha256,etag:row!.object_etag,objectVersion:row!.object_version,verdict,...provenance},{Authorization:`Bearer ${token}`,'X-Scan-Lease':claim.leaseToken}),deps());}
 describe('private native personnel documents',()=>{
  beforeAll(async()=>{runtime=new Miniflare({modules:true,compatibilityDate:'2026-07-22',script:"export default {fetch(){return new Response('ok')}}",d1Databases:['OPS_DB'],r2Buckets:['PERSONNEL']});db=await runtime.getD1Database('OPS_DB') as D1Database;bucket=await runtime.getR2Bucket('PERSONNEL') as unknown as R2Bucket;
- const folder=new URL('../migrations/',import.meta.url);for(const name of readdirSync(folder).filter(name=>/^\d{4}_.+\.sql$/.test(name)&&(name.slice(0,4)<='0074'||name.startsWith('0123_')||name.startsWith('0225_'))).sort())await db.batch(splitD1MigrationStatements(readFileSync(new URL(name,folder),'utf8')).map(sql=>db.prepare(sql)));
+ const folder=new URL('../migrations/',import.meta.url);for(const name of readdirSync(folder).filter(name=>/^\d{4}_.+\.sql$/.test(name)&&(name.slice(0,4)<='0074'||name.startsWith('0123_')||name.startsWith('0225_')||name.startsWith('0226_'))).sort())await db.batch(splitD1MigrationStatements(readFileSync(new URL(name,folder),'utf8')).map(sql=>db.prepare(sql)));
  for(const id of [admin,survivor,target,other])await staff(id);await controlPlane(admin);await controlPlane(survivor);for(const cap of caps)await delegation(admin,cap,target);
  },120000);
  afterAll(async()=>runtime?.dispose());
@@ -80,18 +85,54 @@ describe('private native personnel documents',()=>{
  expect((await handleStaffPersonnelHttp(request(`profiles/${target}/documents/${value.document.id}/content`,'HEAD'),deps())).status).toBe(200);
  });
  it('rejects forged or conflicting scan results and blocks rejected files',async()=>{
- const value=await (await upload()).json() as any;const id=value.document.id;
- expect((await handleStaffPersonnelHttp(request(`scanner/${id}/receipt`,'POST',{sha256:'0'.repeat(64),etag:'bad',verdict:'clean'},{Authorization:`Bearer ${token}`}),deps())).status).toBe(409);
+ const value=await (await upload()).json() as any;const id=value.document.id,claim=await claimFor(id);
+ expect((await handleStaffPersonnelHttp(request(`scanner/${id}/receipt`,'POST',{sha256:'0'.repeat(64),etag:'bad',objectVersion:claim.objectVersion,verdict:'clean',...provenance},{Authorization:`Bearer ${token}`,'X-Scan-Lease':claim.leaseToken}),deps())).status).toBe(409);
  expect((await scan(id,'rejected')).status).toBe(200);expect((await scan(id)).status).toBe(409);
  expect((await handleStaffPersonnelHttp(request(`profiles/${target}/documents/${id}/content`),deps())).status).toBe(409);
  });
  it('trusted scanner can fetch the pinned quarantine object; accepted-byte mutation is detected',async()=>{
- const value=await (await upload()).json() as any,id=value.document.id;
+ const value=await (await upload()).json() as any,id=value.document.id,claim=await claimFor(id);
  expect((await actualHandler(request(`scanner/${id}/content`),deps())).status).toBe(403);
- const content=await actualHandler(request(`scanner/${id}/content`,'GET',undefined,{Authorization:`Bearer ${token}`}),deps());expect(content.status).toBe(200);expect(content.headers.get('X-Document-ETag')).toBeTruthy();expect(await content.text()).toBe(pdf);
+ const content=await actualHandler(request(`scanner/${id}/content`,'GET',undefined,{Authorization:`Bearer ${token}`,'X-Scan-Lease':claim.leaseToken}),deps());expect(content.status).toBe(200);expect(content.headers.get('X-Document-ETag')).toBeTruthy();expect(await content.text()).toBe(pdf);
  expect((await scan(id)).status).toBe(200);
  const row=await db.prepare('SELECT object_key FROM staff_personnel_documents WHERE id=?').bind(id).first<{object_key:string}>();await bucket.put(row!.object_key,'tampered');
  expect((await actualHandler(request(`profiles/${target}/documents/${id}/content`),deps())).status).toBe(409);
+ });
+ it('scan leases fence stale workers, retries and bounded exhaustion without accepting bytes',async()=>{
+ const value=await (await upload()).json() as any,id=value.document.id,old=await claimFor(id);
+ expect((await actualHandler(request(`scanner/${id}/content`,'GET',undefined,{Authorization:`Bearer ${token}`}),deps())).status).toBe(403);
+ await db.prepare("UPDATE staff_personnel_scan_jobs SET lease_until='2000-01-01T00:00:00.000Z' WHERE document_id=?").bind(id).run();
+ expect((await actualHandler(request(`scanner/${id}/content`,'GET',undefined,{Authorization:`Bearer ${token}`,'X-Scan-Lease':old.leaseToken}),deps())).status).toBe(409);
+ const reclaimed=await (await actualHandler(request('scanner/claim','POST',{workerId:'reclaimed-worker'},{Authorization:`Bearer ${token}`}),deps())).json() as any;
+ expect(reclaimed.job.documentId).toBe(id);expect(reclaimed.job.leaseToken).not.toBe(old.leaseToken);claims.set(id,reclaimed.job);
+ expect((await actualHandler(request(`scanner/${id}/retry`,'POST',{code:'scan_unavailable'},{Authorization:`Bearer ${token}`,'X-Scan-Lease':old.leaseToken}),deps())).status).toBe(409);
+ expect((await actualHandler(request(`scanner/${id}/retry`,'POST',{code:'scan_unavailable'},{Authorization:`Bearer ${token}`,'X-Scan-Lease':reclaimed.job.leaseToken}),deps())).status).toBe(200);
+ const row=await db.prepare('SELECT state,attempts FROM staff_personnel_scan_jobs WHERE document_id=?').bind(id).first<{state:string;attempts:number}>();expect(row).toEqual({state:'pending',attempts:2});
+ for(let n=2;n<8;n++)await db.prepare('UPDATE staff_personnel_scan_jobs SET attempts=attempts+1 WHERE document_id=?').bind(id).run();
+ await actualHandler(request('scanner/claim','POST',{workerId:'exhausted-worker'},{Authorization:`Bearer ${token}`}),deps());
+ expect(await db.prepare('SELECT state FROM staff_personnel_scan_jobs WHERE document_id=?').bind(id).first('state')).toBe('manual_review');
+ expect(await db.prepare('SELECT status FROM staff_personnel_documents WHERE id=?').bind(id).first('status')).toBe('quarantined');
+ });
+ it('pins opaque R2 versions even when overwrite bytes and ETags are identical',async()=>{
+ const value=await (await upload()).json() as any,id=value.document.id;expect((await scan(id)).status).toBe(200);
+ const row=await db.prepare('SELECT object_key,object_version,object_etag,sha256 FROM staff_personnel_documents WHERE id=?').bind(id).first<{object_key:string;object_version:string;object_etag:string;sha256:string}>();
+ const replacement=await bucket.put(row!.object_key,pdf,{customMetadata:{documentId:id,sha256:row!.sha256}});expect(replacement!.etag).toBe(row!.object_etag);expect(replacement!.version).not.toBe(row!.object_version);
+ expect((await actualHandler(request(`profiles/${target}/documents/${id}/content`),deps())).status).toBe(409);
+ const pending=await (await upload()).json() as any,pendingId=pending.document.id;await claimFor(pendingId);
+ const pendingRow=await db.prepare('SELECT object_key,sha256 FROM staff_personnel_documents WHERE id=?').bind(pendingId).first<{object_key:string;sha256:string}>();await bucket.put(pendingRow!.object_key,pdf,{customMetadata:{documentId:pendingId,sha256:pendingRow!.sha256}});
+ expect((await scan(pendingId)).status).toBe(409);expect(await db.prepare('SELECT status FROM staff_personnel_documents WHERE id=?').bind(pendingId).first('status')).toBe('quarantined');
+ });
+ it('cancels changed-version bodies when an overwrite races between HEAD and GET',async()=>{
+ const value=await (await upload()).json() as any,id=value.document.id;expect((await scan(id)).status).toBe(200);let cancelled=false;
+ const row=await db.prepare('SELECT object_key,sha256 FROM staff_personnel_documents WHERE id=?').bind(id).first<{object_key:string;sha256:string}>();
+ const race={head:bucket.head.bind(bucket),get:async(key:string,options:R2GetOptions)=>{await bucket.put(key,pdf,{customMetadata:{documentId:id,sha256:row!.sha256}});const changed=await bucket.get(key,options) as R2ObjectBody;
+ const body=new ReadableStream({start(controller){controller.enqueue(new TextEncoder().encode(pdf));},cancel(){cancelled=true;return changed.body.cancel();}});
+ return {size:changed.size,etag:changed.etag,version:changed.version,customMetadata:changed.customMetadata,body};}} as unknown as R2Bucket;
+ expect((await actualHandler(request(`profiles/${target}/documents/${id}/content`),deps(admin,{bucket:race}))).status).toBe(409);expect(cancelled).toBe(true);
+ });
+ it('concurrent scanner claims never lease the same document twice',async()=>{
+ await upload();await upload();const results=await Promise.all(['parallel-a','parallel-b'].map(workerId=>actualHandler(request('scanner/claim','POST',{workerId},{Authorization:`Bearer ${token}`}),deps())));
+ const jobs=await Promise.all(results.map(async result=>(await result.json() as any).job));expect(jobs.every(Boolean)).toBe(true);expect(jobs[0].documentId).not.toBe(jobs[1].documentId);
  });
  it('holds and retention reviews are versioned, audited, idempotent and never purge',async()=>{
  const value=await (await upload()).json() as any,id=value.document.id,cmd=crypto.randomUUID();const body={commandId:cmd,expectedVersion:1,hold:true,reviewAfter:null,reviewNote:'Synthetic legal hold'};
@@ -102,6 +143,15 @@ describe('private native personnel documents',()=>{
  await expect(db.prepare('DELETE FROM staff_personnel_documents WHERE id=?').bind(id).run()).rejects.toThrow(/retained/);
  await expect(db.prepare('DELETE FROM staff_personnel_events').run()).rejects.toThrow(/retained/);
  });
+ it('an upload reserved before archive cannot commit after the profile is archived',async()=>{
+ const race='personnel-race-target';await staff(race);for(const cap of caps)await delegation(admin,cap,race);
+ const wrapped={head:bucket.head.bind(bucket),put:async(...args:Parameters<R2Bucket['put']>)=>{const object=await bucket.put(...args);
+ const response=await handleStaffPersonnelHttp(request(`profiles/${race}/archive`,'POST',{commandId:crypto.randomUUID(),expectedVersion:1,reason:'Synthetic archive during object write'}),deps());expect(response.status).toBe(200);return object;}} as unknown as R2Bucket;
+ expect((await upload(race,pdf,{},deps(admin,{bucket:wrapped}))).status).toBe(503);
+ const row=await db.prepare('SELECT id,status FROM staff_personnel_documents WHERE staff_id=?').bind(race).first<{id:string;status:string}>();expect(row?.status).toBe('uploading');
+ expect((await handleStaffPersonnelHttp(request(`profiles/${race}/documents/${row!.id}/content`),deps())).status).toBe(409);
+ expect(await db.prepare("SELECT count(*) count FROM staff_personnel_events WHERE staff_id=? AND event_kind='uploaded'").bind(race).first('count')).toBe(0);
+ });
  it('archives atomically with admission revocation and preserves private admin access; restore never regrants',async()=>{
  const body={commandId:crypto.randomUUID(),expectedVersion:1,reason:'Synthetic employment ended'};
  expect((await handleStaffPersonnelHttp(request(`profiles/${target}/archive`,'POST',body),deps())).status).toBe(200);
@@ -109,6 +159,8 @@ describe('private native personnel documents',()=>{
  expect((await handleStaffPersonnelHttp(request(`profiles/${target}`),deps())).status).toBe(200);
  expect((await upload()).status).toBe(503);
  await expect(db.prepare('UPDATE native_staff_admissions SET active=1,version=version+1 WHERE staff_id=?').bind(target).run()).rejects.toThrow(/archived/);
+ await delegation(admin,'staff.admission.enable',target);const admission=await db.prepare('SELECT version FROM native_staff_admissions WHERE staff_id=?').bind(target).first<number>('version');
+ await expect(executeNativeStaffManagementCommand(db,{commandId:crypto.randomUUID(),contractVersion:1,capability:'staff.admission.enable',actor:{staffId:admin,verifiedAccessSubject:`${admin}:subject`},targetStaffId:target,expectedVersion:admission,reason:'Synthetic attempted reactivation'})).rejects.toThrow('native_staff_management_command_denied');
  expect((await handleStaffPersonnelHttp(request(`profiles/${target}/restore`,'POST',{...body,commandId:crypto.randomUUID(),expectedVersion:2}),deps())).status).toBe(200);
  expect(await db.prepare('SELECT active FROM native_staff_admissions WHERE staff_id=?').bind(target).first('active')).toBe(0);
  });

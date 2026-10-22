@@ -44,6 +44,11 @@ const initialClientMigrations = Object.freeze([
 // Separately reviewed application successors are byte-validated, but never
 // enter the frozen Operations199/Client149 inventories returned by this helper.
 const operationsSuccessors = Object.freeze({
+  "0226_staff_personnel_scan_leases.sql": "3bb7249081a785cf3b63de975aad86fe931fb93ea191011706aaab67d4af2fc2",
+  "0225_staff_personnel_documents.sql": "a6f7694f70cf370fa605ac44ee685f8235e8c2676877bb296ca955de8a1d0f11",
+  "0222_employee_read_roots.sql": "1b91e7eebe6580df7a780a8b473e3325fde2d9a8a8dc37282bc40c6f32e8edda",
+  "0223_employee_read_provisioning.sql": "d55a0d5e16f37f231e0938516a1ee7248b0e3b4190e8de5e6c68e1e9a3e1810a",
+  "0224_windows_portal_publication_chain_index.sql": "4252667cceb62ca9bbbb3efd8804a7dc69f58dae1396240f0109fbac6abbcd15",
   "0221_portal_correspondence_lifecycle_write_guards.sql": "10aba7d094dbcf35276d95552f8d518fbfeed41ca8ce91f04818e1c863793e18",
   "0220_directory_profile_generation_recovery.sql": "87285f8df2703fc4d4ee09dba92f96008ecbefa74a3a6692ca18c65f359b37c2",
   "0219_staging_agent_read_authority.sql": "622f41e5e61b9389fa2d01ad40bd38a3483b75be5e9f36e17786f7f6f22f272d",
@@ -63,6 +68,8 @@ const operationsSuccessors = Object.freeze({
 });
 
 const clientSuccessors = Object.freeze({
+  "0235_windows_portal_successor_candidates.sql": "50046477dda2efe378d4b01c7de9f4ff2383d1511cf56c4c7a9633b4e41c0841",
+  "0236_windows_portal_successor_content_start_audit.sql": "fcbc6f9f802dee3e2bfe592f1476f485b24d7f5414ca86143ddd9a299e82ffcf",
   "0232_shared_profile_edit_authority.sql": "3c2b3ddbdb920739c8f4ab8f437808749f5f83581b098518c5efd41c2e0b0073",
   "0233_explicit_primary_workspace_folder_ownership.sql": "7d419b99aab73086c60571cd854d49b62351d5c43ad4347e5da1a1e2fb18878a",
   // Reviewed reenrollment receipts preserve revoked identity history and fence

@@ -1,0 +1,73 @@
+{
+  "schemaVersion": 2,
+  "date": "2026-10-22",
+  "sourceBaseCommit": "e3c1d9ec7dd05cc7d5016b5234dd9036ea3b4921",
+  "scope": "default-off personnel source and isolated synthetic scanner qualification",
+  "canonicalLfSha256": {
+    "apps/operations/migrations/0225_staff_personnel_documents.sql": "a6f7694f70cf370fa605ac44ee685f8235e8c2676877bb296ca955de8a1d0f11",
+    "apps/operations/migrations/0226_staff_personnel_scan_leases.sql": "3bb7249081a785cf3b63de975aad86fe931fb93ea191011706aaab67d4af2fc2",
+    "apps/operations/src/worker/staff-personnel-http.ts": "213572c583f1b8aec8b95e40b3b76a897bb82b5e485c942cd55dee4eb3c0c636",
+    "apps/operations/test/staff-personnel-http.test.ts": "d66df5f4fadbaa119189a985beb4ff951a917cd1fbae676f1946fee2756734d0",
+    "scripts/personnel-scanner/consumer.py": "994518fb7b41540d53f0de9533e5e959e18d4771524e8f6434a17caf26bed2bc",
+    "scripts/personnel-scanner/test_consumer.py": "852177956677e37e364d664545718d2dbf4d3ad2568916daf4879b85af95c174",
+    "scripts/personnel-scanner/Dockerfile": "048bba7476de68a3d14236705b12791175e7e68f60146ad748c6ed9a0dc252d2",
+    "scripts/personnel-scanner/requirements.txt": "55d76d720048f0278c9896d184d188bb5241bdc601b5106d784b04500477707f",
+    "deploy/personnel-scanner.compose.yml": "fdfbd0b873c547fb82520bd9e070b2e66b4710fa60eddc7683e7a4fd87bf2c46"
+  },
+  "tests": {
+    "operationsTypecheck": "passed",
+    "personnelAndMigrationInventory": {
+      "passed": 50,
+      "total": 50,
+      "personnelGroups": 16,
+      "migrationGroups": 34,
+      "seconds": 90.06
+    },
+    "scannerContainerUnits": {
+      "passed": 9,
+      "skipped": 1,
+      "total": 10,
+      "network": "none"
+    },
+    "actualClamAVContainerGate": {
+      "passed": 1,
+      "total": 1,
+      "seconds": 54.429,
+      "cases": [
+        "clean text",
+        "EICAR rejection",
+        "actual recursion-limit rejection",
+        "consumer validation/digest/AV/verdict orchestration with synthetic transport"
+      ],
+      "network": "official definitions refresh only; no Ops API calls"
+    },
+    "allOperationsMigrations": {
+      "applied": 226,
+      "foreignKeyViolations": 0,
+      "newCapabilities": 5,
+      "personnelSchemaObjects": 34
+    },
+    "composeConfig": "passed"
+  },
+  "container": {
+    "localImageId": "sha256:0ee61fe12528143458a8a2d937e5a1c0eea04246ad80aeda73e4fb476bb4b22d",
+    "published": false,
+    "clamAV": "1.4.4",
+    "python": "3.13.14",
+    "pypdf": "6.21.2",
+    "pillow": "13.0.0"
+  },
+  "activation": {
+    "enabled": false,
+    "remoteWrites": false,
+    "actualPersonnelData": false,
+    "scannerConsumerImplemented": true,
+    "scannerLiveQualified": false,
+    "AccessServiceIdentityProvisioned": false,
+    "UIImplemented": false,
+    "PAIntegration": false,
+    "publicLinks": false,
+    "automaticPurge": false
+  },
+  "authenticationCoverage": "Personnel tests use a previously verified synthetic native actor; signed JWT validation is covered by existing native-auth suites; no live Access path was exercised"
+}
