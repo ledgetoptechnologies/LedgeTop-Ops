@@ -55,6 +55,7 @@ import { ImageLocationMap } from "./ImageLocationMap";
 import { constrainViewerOffset, pointerAnchoredOffset } from "./viewer-zoom";
 import { activeShareLoadError, createShareLoadDeadline } from "./share-load-deadline";
 import { ViewerProcessingPanel } from "./ViewerProcessingPanel";
+import { StaffDocumentsButton } from "./StaffPersonnelDocuments";
 import {
   activateDeliveryFolderCache,
   deactivateDeliveryFolderCache,
@@ -6561,6 +6562,11 @@ function Team({ session }: { session: Session }) {
                 </>
               ) : (
                 <small>Access is managed by a system administrator.</small>
+              )}
+              {session.user.isAdministrator && (
+                <div className="staff-card-actions">
+                  <StaffDocumentsButton person={person} self={person.id === session.user.id} />
+                </div>
               )}
               {allowed(session.user, "operations.view") && (
                 <TeamAssignedWork staffId={person.id} />

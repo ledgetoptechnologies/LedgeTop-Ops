@@ -1,0 +1,33 @@
+/* Private employee documents panel (Team → Documents). */
+.personnel-documents { display: grid; gap: 1.1rem; }
+.personnel-documents h3 { margin: 0 0 .5rem; font-size: .95rem; }
+.personnel-documents .notice { display: flex; flex-wrap: wrap; align-items: center; gap: .6rem; }
+.personnel-archived { display: grid; gap: .2rem; border-left: 3px solid var(--orange); }
+.personnel-upload { display: grid; gap: .5rem; padding: .9rem 1rem; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--surface-soft); }
+.personnel-upload-fields { display: grid; grid-template-columns: minmax(12rem, 1fr) minmax(12rem, 1.4fr) auto; gap: .75rem; align-items: end; }
+.personnel-upload-fields label { display: grid; gap: .3rem; font-size: .82rem; font-weight: 700; min-width: 0; }
+.personnel-upload-fields input[type="file"] { min-width: 0; max-width: 100%; }
+.personnel-upload-fields button { min-height: 44px; }
+.personnel-upload small { color: var(--muted); }
+.personnel-group ul { list-style: none; margin: 0; padding: 0; display: grid; gap: .5rem; }
+.personnel-document { display: flex; justify-content: space-between; gap: 1rem; padding: .75rem .9rem; border: 1px solid var(--line); border-radius: var(--radius-sm); }
+.personnel-document-main { display: grid; gap: .3rem; min-width: 0; }
+.personnel-document-main strong { overflow-wrap: anywhere; }
+.personnel-document-main small { color: var(--muted); }
+.personnel-document-badges { display: flex; flex-wrap: wrap; gap: .35rem; }
+.personnel-document-actions { display: flex; flex-wrap: wrap; align-items: flex-start; gap: .4rem; flex: none; }
+.personnel-profile-actions { display: grid; gap: .5rem; padding-top: 1rem; border-top: 1px solid var(--line); }
+.personnel-profile-actions p { margin: 0; color: var(--muted); }
+.personnel-profile-actions button { justify-self: start; }
+.personnel-check { display: flex; gap: .5rem; align-items: flex-start; font-weight: 600; }
+.ltds-form label small { display: block; color: var(--muted); font-weight: 400; margin-top: .25rem; }
+@media (max-width: 640px) {
+  .personnel-upload-fields { grid-template-columns: 1fr; }
+  .personnel-document { flex-direction: column; }
+  .personnel-document-actions button, .personnel-profile-actions button { min-height: 44px; flex: 1 1 auto; }
+  .personnel-profile-actions button { justify-self: stretch; }
+}
+/* Retention and archive forms: label above its control at every width. */
+.personnel-form > label:not(.personnel-check) { display: grid; gap: .35rem; font-size: .85rem; font-weight: 700; }
+.personnel-form textarea, .personnel-form input[type="date"] { width: 100%; box-sizing: border-box; font: inherit; font-weight: 400; }
+.personnel-document-main strong { color: var(--ink); }

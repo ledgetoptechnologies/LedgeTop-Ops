@@ -3022,3 +3022,5 @@ a.dashboard-alert:hover > span[aria-hidden] { transform: translateX(3px); }
   .alpha-correspondence .alpha-connection-actions > button { flex: 1 1 auto; min-height: 44px; }
   .alpha-correspondence-details dl { grid-template-columns: minmax(0, 1fr); }
 }
+
+.staff-card-actions { display: flex; flex-wrap: wrap; gap: .5rem; }
