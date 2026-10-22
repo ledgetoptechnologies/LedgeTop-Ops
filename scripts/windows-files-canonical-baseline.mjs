@@ -25,7 +25,7 @@ export async function generateWindowsCanonicalBaseline({baselineOnly=false,inclu
   reviewedClientMigrationNames(new URL("../apps/client/migrations/",import.meta.url));
   const result={schemaVersion:1,scope:"local-canonical-schema-and-ledger-replay",canonicalBaselineVerified:false,
     runtime:{node:process.versions.node,miniflare:require("miniflare/package.json").version,wrangler:require("wrangler/package.json").version,lockSha256:sha(await readFile(resolve(root,"apps/client/package-lock.json"),"utf8")),compatibilityDate:"2026-08-06",workerd:require("workerd/package.json").version},
-    ledgerDDLSha256:sha(wranglerLedgerDDL),apps:{}};
+    ledgerDDLSha256:sha(wranglerLedgerDDL),schemaQuerySha256:sha(canonicalSchemaQuery),apps:{}};
   for(const [app,p]of Object.entries(profiles)){
     const directory=resolve(root,"apps",p.directory,"migrations"),names=(await readdir(directory)).filter(n=>/^\d{4}_.+\.sql$/.test(n)&&n<=(baselineOnly?p.baseline:p.final)).sort();
     const sources=await Promise.all(names.map(async name=>({name,source:(await readFile(resolve(directory,name),"utf8")).replace(/\r\n/g,"\n")})));

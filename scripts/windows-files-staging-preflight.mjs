@@ -194,6 +194,7 @@ export async function windowsFilesStagingPreflight({ readOnly = false, recoveryM
       worker.schemaObservation = "Bounded ordered pages, not an atomic schema snapshot; re-read before activation.";
     }
     return { schemaVersion: 1, status: "read_only_observed", accountId: STAGING_ACCOUNT_ID, workers,
+      schemaQuerySha256: createHash("sha256").update(WINDOWS_STAGING_READ_QUERIES.schema).digest("hex"),
       activated: false, migrationsApplied: false, versionBindingsMatchedInventory: true,
       note: "Live version metadata and read-only schema observations; not route activation, authority, desktop or deployment acceptance." };
   } finally {

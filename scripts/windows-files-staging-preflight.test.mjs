@@ -318,3 +318,9 @@ test("object digest capture requires explicit read-only mode before any process"
     await assert.rejects(windowsFilesStagingPreflight({...options,run:()=>{calls++}}), /schema_digests_require_read_only/);
   assert.equal(calls,0);
 });
+
+test("declares the exact executed schema query digest without adding a query", async () => {
+ const f=fixture(),receipt=await windowsFilesStagingPreflight({readOnly:true,run:f.run});
+ assert.equal(receipt.schemaQuerySha256,createHash("sha256").update(WINDOWS_STAGING_READ_QUERIES.schema).digest("hex"));
+ assert.equal(f.calls.length,10);
+});

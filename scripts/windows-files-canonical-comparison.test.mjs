@@ -6,7 +6,7 @@ import {STAGING_ACCOUNT_ID} from "./staging-requirements.mjs";
 import {readPinnedWindowsSchemaReference,verifyPinnedWindowsSchemaReferenceBytes,compareWindowsObservedSchemaAndLedger} from "./windows-files-canonical-comparison.mjs";
 const sha=value=>createHash("sha256").update(JSON.stringify(value)).digest("hex");
 const {reference}=await readPinnedWindowsSchemaReference();
-function observed(ops=0,client=0){return{schemaVersion:1,status:"read_only_observed",accountId:STAGING_ACCOUNT_ID,activated:false,migrationsApplied:false,
+function observed(ops=0,client=0){return{schemaVersion:1,status:"read_only_observed",schemaQuerySha256:reference.schemaQuerySha256,accountId:STAGING_ACCOUNT_ID,activated:false,migrationsApplied:false,
  workers:[...["operations","delivery"]].map((app,i)=>{const c=reference.apps[app].checkpoints[i===0?ops:client];return{app,migrations:{names:[...c.names],count:c.names.length,sha256:c.ledgerSha256,canonicalBaselineVerified:false},schemaSha256:c.schemaSha256,schemaObjectCount:c.schemaObjectCount,foreignKeyViolationCount:0}})}}
 test("pins the complete local reference; modified bytes cannot become expected state",async()=>{
  const raw=await readFile(new URL("../docs/staging/windows-canonical-baseline-local-2026-10-22.json",import.meta.url),"utf8");
@@ -51,4 +51,14 @@ test("reference source inventory matches every current LF-normalized migration b
   const inventory=await Promise.all(names.map(async n=>[n,createHash("sha256").update((await readFile(new URL(n,folder),"utf8")).replace(/\r\n/g,"\n")).digest("hex")]));
   assert.equal(sha(inventory),p.sourceInventorySha256);assert.equal(names.length,p.sourceCount);
  }
+});
+
+test("requires exact declared observation query scope before reporting replay matches",async()=>{
+ for(const digest of [undefined,"0".repeat(64),createHash("sha256").update("SELECT type,name,tbl_name,sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name,tbl_name").digest("hex")]){
+  const input=observed();input.schemaQuerySha256=digest;const result=await compareWindowsObservedSchemaAndLedger(input);
+  assert.equal(result.observedSchemaAndLedgerComparison.status,"requires_review");assert.equal(result.observedSchemaAndLedgerComparison.queryScopeVerified,false);
+  assert.ok(result.observedSchemaAndLedgerComparison.workers.every(w=>w.status==="query_scope_unverified"));
+ }
+ const valid=await compareWindowsObservedSchemaAndLedger(observed());assert.equal(valid.observedSchemaAndLedgerComparison.queryScopeVerified,true);
+ const invalid=observed();invalid.schemaQuerySha256="not-sha";await assert.rejects(compareWindowsObservedSchemaAndLedger(invalid),/canonical_observation_invalid/);
 });

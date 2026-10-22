@@ -11,6 +11,7 @@
     "workerd": "1.20260730.1"
   },
   "ledgerDDLSha256": "bb2827fcb994d961df9b53224d22762e05cef1ad07758db640226fa5b357ae04",
+  "schemaQuerySha256": "8fce60a0f677bb4e8e21d04b6e64efa0b46ad4a6a982141f1b432bc0788eecd9",
   "apps": {
     "operations": {
       "baseline": "0221_portal_correspondence_lifecycle_write_guards.sql",

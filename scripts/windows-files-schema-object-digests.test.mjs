@@ -2,13 +2,14 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {createRequire} from "node:module";
 import {createHash} from "node:crypto";
+import {WINDOWS_SCHEMA_QUERY} from "./windows-files-schema-query.mjs";
 import {schemaObjectDigests,compareSchemaObjectDigests} from "./windows-files-schema-object-digests.mjs";
 const require=createRequire(new URL("../apps/client/package.json",import.meta.url));
 const {Miniflare}=require("miniflare");
 test("real local SQLite trigger/DDL changes are attributed without SQL export or normalization",async()=>{
  const mf=new Miniflare({modules:true,compatibilityDate:"2026-08-06",script:"export default {}",d1Databases:["DB"],outboundService:()=>{throw Error("No network")}});
  try{
-  const db=await mf.getD1Database("DB"),query="SELECT type,name,tbl_name,sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name,tbl_name";
+  const db=await mf.getD1Database("DB"),query=WINDOWS_SCHEMA_QUERY;
   await db.batch([db.prepare("CREATE TABLE example(value TEXT)"),db.prepare("CREATE INDEX example_index ON example(value)"),db.prepare("CREATE TRIGGER example_trigger BEFORE INSERT ON example BEGIN SELECT 1; END")]);
   const before=schemaObjectDigests((await db.prepare(query).all()).results);
   await db.batch([db.prepare("DROP TRIGGER example_trigger"),db.prepare("CREATE TRIGGER example_trigger BEFORE INSERT ON example BEGIN SELECT  1; END"),db.prepare("DROP INDEX example_index"),db.prepare("CREATE TABLE extra(value INTEGER)")]);
@@ -29,10 +30,10 @@ test("refuses duplicate/malformed/oversized object inventories and forged digest
  const valid=schemaObjectDigests([row]);assert.throws(()=>compareSchemaObjectDigests(valid,{...valid,sha256:"0".repeat(64)}),/schema_object_digests_invalid/);
 });
 
-test("retained baseline-only local capture is pinned and matches prior full-replay checkpoints",async()=>{
+test("retained baseline maps are pinned and match the same exact-query full-replay checkpoints",async()=>{
  const{readFile}=await import("node:fs/promises");
  const raw=(await readFile(new URL("../docs/staging/windows-canonical-baseline-objects-local-2026-10-22.json",import.meta.url),"utf8")).replace(/\r\n/g,"\n");
- assert.equal(createHash("sha256").update(raw).digest("hex"),"ed0764cb744631c864d9ad64ba0f2edc6d4c824b0a8c31e415b16cddf0e0d515");
+ assert.equal(createHash("sha256").update(raw).digest("hex"),"e2509bd4e9cc5eb8e1ff724cafc370ad196b2fecd3a9cde6943e51b05a7e9b35");
  const captured=JSON.parse(raw),full=JSON.parse(await readFile(new URL("../docs/staging/windows-canonical-baseline-local-2026-10-22.json",import.meta.url),"utf8"));
  for(const app of ["operations","delivery"]){
   assert.equal(captured.apps[app].checkpoints.length,1);
