@@ -12,7 +12,32 @@ the application entrypoints do not mount them. The earlier staging gateway
 receipt proves an isolated container test with no network or host mounts; it is
 not a listening service. The desktop integration has synthetic acceptance, not
 a real human sign-in result. Local checks do not satisfy required hosted merge
-checks. GitHub currently refuses jobs before execution for account billing.
+checks. The earlier GitHub billing restriction has cleared: hosted Windows,
+gateway and MCP checks passed on `e68e2adc`. These are baseline observations;
+the final candidate's complete hosted suite remains a merge gate.
+
+A separate opt-in local transport acceptance now connects the
+actual .NET portal client and downloader over loopback TLS to the existing
+Client routers and real local D1/R2. A 2 MiB synthetic download was interrupted
+after 16,384 bytes, resumed with HTTP 206 and passed its final SHA-256 check.
+Revoking the delivery through the actual Ops issuer made the saved handle return
+404 without another R2 read, even while the Client grant remained active. The
+test uses the real local Ops reader. Incorrect TLS pins and invalid RS256
+signatures were refused. Identity bootstrap, PA acknowledgements, JWKS discovery,
+the token helper and direct-function service bindings remain test fixtures.
+See `docs/staging/windows-local-client-transport-2026-10-22.md`.
+
+The separate employee acceptance connects the actual .NET employee client to
+the Ops router and native admission/grant records, then through a signed TLS
+adapter to the Python gateway's HTTP server. The same 2 MiB interruption/resume
+passes; cross-user, traversal, stale-version and revoked-grant requests are
+refused. No gateway calls follow revocation. The disposable container holds only
+its own synthetic files in tmpfs and has no host mounts; its ordinary Docker
+bridge permits outbound traffic and publishes inbound HTTP only on loopback.
+See `docs/staging/windows-local-employee-transport-2026-10-22.md`.
+
+Neither acceptance proves deployed staging, actual human sign-in, live R2,
+Engineering Hub execution, a signed installation or Cloud Files hydration.
 
 Prepare and review a staging-only composition before changing runtime routing.
 Do not replace production Wrangler configuration with staging values. Keep
