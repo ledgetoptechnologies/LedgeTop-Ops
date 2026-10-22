@@ -18,6 +18,11 @@ const AUDIENCES = Object.freeze({
 });
 const PORTAL = "https://portal-staging.ledgetopdroneservices.com";
 const OPS = "https://ops-staging.ledgetopdroneservices.com";
+// No caller-supplied DB identifier, timestamp, bookmark or command fragment.
+const RECOVERY_READS = Object.freeze({
+  operations: Object.freeze(["d1", "time-travel", "info", "ltds-ops-staging", "--json"]),
+  delivery: Object.freeze(["d1", "time-travel", "info", "client-data-staging", "--json"]),
+});
 export const WINDOWS_STAGING_READ_QUERIES = Object.freeze({
   ledger: "SELECT name FROM d1_migrations ORDER BY id",
   foreignKeys: "PRAGMA foreign_key_check",
@@ -119,10 +124,21 @@ function ledgerReceipt(app, rows) {
     note: "Complete observed ledger retained; presence of the named baseline and ordered suffix do not verify all earlier migrations against canonical source.",
     names, count: names.length, sha256: hash(names), requiredSuffix: rule.suffix, pending: rule.suffix.filter(n => !names.includes(n)) };
 }
+function recoveryReceipt(value, startedAt) {
+  // Conservative current documented format: unknown provider shapes need
+  // review, rather than copying arbitrary provider text into the receipt.
+  if (!value || Array.isArray(value) || Object.keys(value).join() !== "bookmark"
+    || typeof value.bookmark !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{8}-[0-9a-f]{8}-[0-9a-f]{32}$/.test(value.bookmark)) fail("recovery_metadata_invalid");
+  return { bookmark: value.bookmark, observationStartedAt: startedAt, observationCompletedAt: new Date().toISOString(),
+    restoreVerified: false, crossDatabaseAtomicSnapshot: false,
+    note: "Provider-reported current recovery bookmark, observed sequentially per database. Not a backup export, restore test, atomic paired snapshot or readiness approval; retention may expire." };
+}
 
 /** Read-only observations only. The executable CLI requires --read-only; callers
  * must also opt in explicitly. This never applies migrations or activates routes. */
-export async function windowsFilesStagingPreflight({ readOnly = false, run = installedWrangler } = {}) {
+export async function windowsFilesStagingPreflight({ readOnly = false, recoveryMetadata = false, run = installedWrangler } = {}) {
+  if (typeof recoveryMetadata !== "boolean") fail("recovery_opt_in_invalid");
+  if (recoveryMetadata && readOnly !== true) fail("recovery_requires_read_only");
   if (readOnly !== true) return { schemaVersion: 1, status: "not_run", requiredFlag: "--read-only" };
   const directory = await mkdtemp(path.join(tmpdir(), "ops-windows-read-preflight-")), configPath = path.join(directory, "wrangler.json");
   const config = { account_id: STAGING_ACCOUNT_ID, name: "windows-files-read-preflight-staging", compatibility_date: "2026-10-01", send_metrics: false,
@@ -140,6 +156,16 @@ export async function windowsFilesStagingPreflight({ readOnly = false, run = ins
       const name = STAGING_INVENTORY[app].name;
       const deployment = latestDeployment(await read(["deployments", "list", "--name", name, "--json"]));
       workers.push(versionReceipt(app, await read(["versions", "view", deployment.versionId, "--name", name, "--json"]), deployment));
+    }
+    // Only after both inventories have matched. Metadata reads never restore,
+    // export, mutate or activate anything, and are absent by default.
+    if (recoveryMetadata) {
+      for (const worker of workers) {
+        const target = worker.databases.find(b => b.binding === MIGRATIONS[worker.app].binding);
+        if (target.name !== RECOVERY_READS[worker.app][3]) fail("version_resource_mismatch");
+        const startedAt = new Date().toISOString();
+        worker.recovery = recoveryReceipt(await read(RECOVERY_READS[worker.app]), startedAt);
+      }
     }
     for (const worker of workers) {
       const target = worker.databases.find(b => b.binding === MIGRATIONS[worker.app].binding);
@@ -174,13 +200,15 @@ export async function windowsFilesStagingPreflight({ readOnly = false, run = ins
 }
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const args = process.argv.slice(2);
-  if (args.some(arg => arg !== "--read-only") || args.length > 1) {
+  if (args.some(arg => !["--read-only", "--recovery-metadata"].includes(arg)) || new Set(args).size !== args.length
+    || args.includes("--recovery-metadata") && !args.includes("--read-only")) {
     process.stderr.write("windows_staging_preflight_arguments\n"); process.exitCode = 1;
-  } else try { process.stdout.write(JSON.stringify(await windowsFilesStagingPreflight({ readOnly: args[0] === "--read-only" }), null, 2) + "\n"); }
+  } else try { process.stdout.write(JSON.stringify(await windowsFilesStagingPreflight({ readOnly: args.includes("--read-only"), recoveryMetadata: args.includes("--recovery-metadata") }), null, 2) + "\n"); }
   catch (error) {
     const allowed = new Set(["wrangler_read_failed", "wrangler_output_invalid", "wrangler_json_invalid", "deployment_list_invalid", "deployment_latest_ambiguous",
       "deployment_not_single_version", "version_detail_invalid", "version_bindings_invalid", "version_environment_mismatch", "version_identity_mismatch",
-      "version_resource_mismatch", "version_service_mismatch", "database_response_invalid", "migration_ledger_invalid", "schema_response_invalid", "schema_page_invalid", "schema_page_limit"]);
+      "version_resource_mismatch", "version_service_mismatch", "database_response_invalid", "migration_ledger_invalid", "schema_response_invalid", "schema_page_invalid", "schema_page_limit",
+      "recovery_metadata_invalid", "recovery_opt_in_invalid", "recovery_requires_read_only"]);
     process.stderr.write((allowed.has(error?.code) ? error.code : "windows_staging_preflight_failed") + "\n"); process.exitCode = 1;
   }
 }

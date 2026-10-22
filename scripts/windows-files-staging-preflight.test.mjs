@@ -2,6 +2,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile, access } from "node:fs/promises";
 import { createHash } from "node:crypto";
+import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import { windowsFilesStagingPreflight, WINDOWS_STAGING_READ_QUERIES, windowsStagingSchemaQuery } from "./windows-files-staging-preflight.mjs";
 import { STAGING_ACCOUNT_ID, STAGING_INVENTORY } from "./staging-requirements.mjs";
 
@@ -10,7 +12,7 @@ const baseline = { operations: "0221_portal_correspondence_lifecycle_write_guard
 const suffix = { operations: ["0222_employee_read_roots.sql", "0223_employee_read_provisioning.sql", "0224_windows_portal_publication_chain_index.sql"],
   delivery: ["0235_windows_portal_successor_candidates.sql", "0236_windows_portal_successor_content_start_audit.sql"] };
 function fixture() {
-  const calls = [], configs = [], details = {}, ledgers = {}, deployments = {}, schemas = {};
+  const calls = [], configs = [], details = {}, ledgers = {}, deployments = {}, schemas = {}, recovery = {};
   for (const [app, version] of [["operations", 10], ["delivery", 20]]) {
     const inv = STAGING_INVENTORY[app], vars = app === "operations" ? {
       ENVIRONMENT: "staging", TEAM_DOMAIN: "https://ledgetoptechnologies.cloudflareaccess.com", PUBLIC_BASE_URL: "https://ops-staging.ledgetopdroneservices.com",
@@ -31,12 +33,18 @@ function fixture() {
     ];
     ledgers[app] = [{ name: "0001_initial.sql" }, { name: baseline[app] }];
     schemas[app] = [{ type: "table", name: "synthetic", tbl_name: "synthetic", sql: "CREATE TABLE synthetic(value TEXT DEFAULT 'DO_NOT_PRINT_SCHEMA')" }];
+    recovery[app] = { bookmark: `00000001-00000002-00004e2f-${String(version).padStart(32, "0")}` };
   }
   const run = async (args, options) => {
     calls.push(args); const configPath = args[args.indexOf("--config") + 1];
     configs.push({ path: configPath, cwd: options.cwd, data: JSON.parse(await readFile(configPath, "utf8")) });
     if (args[0] === "deployments") return JSON.stringify(deployments[args[args.indexOf("--name") + 1] === STAGING_INVENTORY.operations.name ? "operations" : "delivery"]);
     if (args[0] === "versions") return JSON.stringify(details[args[args.indexOf("--name") + 1] === STAGING_INVENTORY.operations.name ? "operations" : "delivery"]);
+    if (args[1] === "time-travel") {
+      assert.deepEqual(args.slice(0, -2), ["d1", "time-travel", "info", args[3], "--json"]);
+      assert.ok(["ltds-ops-staging", "client-data-staging"].includes(args[3]));
+      return JSON.stringify(recovery[args[3] === "ltds-ops-staging" ? "operations" : "delivery"]);
+    }
     assert.equal(args[0], "d1"); assert.equal(args[1], "execute"); assert.ok(args.includes("--remote"));
     const app = args[2] === "ltds-ops-staging" ? "operations" : "delivery", sql = args[args.indexOf("--command") + 1];
     const schemaOffset = sql.match(/ LIMIT 128 OFFSET (0|[1-9][0-9]*)$/)?.[1];
@@ -46,12 +54,91 @@ function fixture() {
       : schemas[app].slice(Number(schemaOffset), Number(schemaOffset) + 128);
     return JSON.stringify([{ success: true, results }]);
   };
-  return { calls, configs, details, ledgers, deployments, schemas, run };
+  return { calls, configs, details, ledgers, deployments, schemas, recovery, run };
 }
 test("requires explicit read-only opt-in before any process or temporary config", async () => {
   let calls = 0;
   assert.equal((await windowsFilesStagingPreflight({ run: () => { calls++; } })).status, "not_run");
   assert.equal(calls, 0);
+});
+
+test("recovery observations require explicit boolean and read-only opt-in without invoking runner", async () => {
+  let calls = 0; const run = () => { calls++; };
+  await assert.rejects(windowsFilesStagingPreflight({ recoveryMetadata: true, run }), /recovery_requires_read_only/);
+  for (const value of ["true", 1, null, {}, []])
+    await assert.rejects(windowsFilesStagingPreflight({ readOnly: true, recoveryMetadata: value, run }), /recovery_opt_in_invalid/);
+  assert.equal(calls, 0);
+  const f = fixture(), receipt = await windowsFilesStagingPreflight({ readOnly: true, run: f.run });
+  assert.ok(f.calls.every(args => args[1] !== "time-travel"));
+  assert.ok(receipt.workers.every(worker => worker.recovery === undefined));
+});
+
+test("CLI refuses missing read-only opt-in, duplicates and arbitrary recovery arguments before runner", () => {
+  for (const args of [["--recovery-metadata"], ["--read-only", "--recovery-metadata", "--recovery-metadata"],
+    ["--read-only", "--recovery-metadata", "--timestamp", "2026-10-22"],
+    ["--read-only", "--recovery-metadata", "restore"], ["--read-only", "--database", "production"]]) {
+    const result = spawnSync(process.execPath, [fileURLToPath(new URL("./windows-files-staging-preflight.mjs", import.meta.url)), ...args],
+      { encoding: "utf8", timeout: 5000, windowsHide: true });
+    assert.equal(result.status, 1); assert.equal(result.stdout, "");
+    assert.equal(result.stderr, "windows_staging_preflight_arguments\n");
+  }
+});
+
+test("optional fixed staging recovery metadata follows BOTH live inventory validations", async () => {
+  const f = fixture(), receipt = await windowsFilesStagingPreflight({ readOnly: true, recoveryMetadata: true, run: f.run });
+  assert.deepEqual(f.calls.slice(0, 4).map(args => args[0]), ["deployments", "versions", "deployments", "versions"]);
+  assert.deepEqual(f.calls.slice(4, 6).map(args => args.slice(0, -2)), [
+    ["d1", "time-travel", "info", "ltds-ops-staging", "--json"],
+    ["d1", "time-travel", "info", "client-data-staging", "--json"],
+  ]);
+  assert.ok(f.calls.every(args => !args.includes("restore") && !args.includes("export") && !args.includes("--timestamp") && !args.includes("--bookmark")));
+  for (const worker of receipt.workers) {
+    assert.equal(worker.recovery.bookmark, f.recovery[worker.app].bookmark);
+    assert.ok(Number.isFinite(Date.parse(worker.recovery.observationStartedAt)));
+    assert.ok(Date.parse(worker.recovery.observationCompletedAt) >= Date.parse(worker.recovery.observationStartedAt));
+    assert.equal(worker.recovery.restoreVerified, false); assert.equal(worker.recovery.crossDatabaseAtomicSnapshot, false);
+    assert.match(worker.recovery.note, /Not a backup export, restore test, atomic paired snapshot or readiness approval/);
+  }
+  assert.equal(receipt.activated, false); assert.equal(receipt.migrationsApplied, false);
+  assert.equal(receipt.accountId, STAGING_ACCOUNT_ID);
+  for (const config of f.configs) await assert.rejects(access(config.path));
+});
+
+test("no recovery query if either live version has wrong resources, identity or split deployment", async () => {
+  for (const change of [
+    f => { f.details.operations.resources.bindings.find(b => b.name === "OPS_DB").id = id(90); },
+    f => { f.details.delivery.resources.bindings.find(b => b.name === "DELIVERY_DB").id = id(90); },
+    f => { f.details.delivery.resources.bindings.find(b => b.name === "ENVIRONMENT").text = "production"; },
+    f => { f.deployments.delivery[0].versions[0].percentage = 50; },
+  ]) {
+    const f = fixture(); change(f);
+    await assert.rejects(windowsFilesStagingPreflight({ readOnly: true, recoveryMetadata: true, run: f.run }));
+    assert.ok(f.calls.every(args => args[0] !== "d1"));
+    for (const config of f.configs) await assert.rejects(access(config.path));
+  }
+});
+
+test("invalid recovery provider results fail closed without leaking text or querying later databases", async () => {
+  for (const value of [null, [], {}, { bookmark: "DO_NOT_PRINT_PROVIDER_VALUE" },
+    { bookmark: "a".repeat(1024) }, { bookmark: "00000001-00000002-00004e2f-0a83ea2fceebc654de0640c422be4653", extra: "DO_NOT_PRINT_PROVIDER_VALUE" },
+    { bookmark: "00000001-00000002-00004e2f-0a83ea2fceebc654de0640c422be4653\n" }]) {
+    const f = fixture(); f.recovery.operations = value;
+    await assert.rejects(windowsFilesStagingPreflight({ readOnly: true, recoveryMetadata: true, run: f.run }),
+      error => error.message === "recovery_metadata_invalid" && !JSON.stringify(error).includes("DO_NOT_PRINT"));
+    assert.equal(f.calls.length, 5);
+    for (const config of f.configs) await assert.rejects(access(config.path));
+  }
+});
+
+test("recovery runner failures and malformed JSON are sanitized with no restore fallback", async () => {
+  for (const [reply, expected] of [[() => { throw Error("DO_NOT_PRINT_CREDENTIAL_OR_PROVIDER_ERROR"); }, "wrangler_read_failed"],
+    [() => "DO_NOT_PRINT_JSON", "wrangler_json_invalid"], [() => "x".repeat(2 * 1024 * 1024 + 1), "wrangler_output_invalid"]]) {
+    const f = fixture(), run = async (args, options) => args[1] === "time-travel" ? reply() : f.run(args, options);
+    await assert.rejects(windowsFilesStagingPreflight({ readOnly: true, recoveryMetadata: true, run }),
+      error => error.message === expected && !JSON.stringify(error).includes("DO_NOT_PRINT"));
+    assert.equal(f.calls.length, 4);
+    for (const config of f.configs) await assert.rejects(access(config.path));
+  }
 });
 test("validates both live versions before fixed staging-only queries and cleans its exact owned config", async () => {
   const f = fixture(), receipt = await windowsFilesStagingPreflight({ readOnly: true, run: f.run });
