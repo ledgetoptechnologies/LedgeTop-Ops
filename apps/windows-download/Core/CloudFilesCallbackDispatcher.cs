@@ -12,7 +12,7 @@ internal enum CloudFilesCancelResult { NotFound, UnsupportedRange, Drained }
 internal sealed class CloudFilesCallbackDispatcher : IAsyncDisposable
 {
     private sealed record Entry(byte[] Identity, CloudFilesOperationContext Context, CancellationTokenSource Cancellation,
-        TaskCompletionSource Completion) { internal volatile bool Ending; }
+        TaskCompletionSource Completion) { internal readonly object CancelSync = new(); internal bool Ending; internal Task? CancelTask; }
     private readonly object sync = new();
     private readonly Dictionary<CloudFilesRequestKey, Entry> requests = [];
     private readonly PlaceholderHydrationCoordinator coordinator;
@@ -75,7 +75,7 @@ internal sealed class CloudFilesCallbackDispatcher : IAsyncDisposable
             // Native CANCEL may describe a subset. This first unregistered slice cannot drop still-needed intervals.
             if (offset != entry.Context.RequiredOffset || length != entry.Context.RequiredLength) return CloudFilesCancelResult.UnsupportedRange;
         }
-        RequestCancel(entry); // Cancellation callbacks never execute while holding the dispatcher lock.
+        await Observe(RequestCancel(entry)).WaitAsync(waitCancellation); // No callback runs under the dispatcher lock.
         await Observe(entry.Completion.Task).WaitAsync(waitCancellation);
         return CloudFilesCancelResult.Drained;
     }
@@ -96,7 +96,7 @@ internal sealed class CloudFilesCallbackDispatcher : IAsyncDisposable
     private async Task DrainAsync(Entry[] entries)
     {
         await Task.Yield();
-        foreach (var entry in entries) RequestCancel(entry);
+        await Task.WhenAll(entries.Select(entry => Observe(RequestCancel(entry))));
         await Task.WhenAll(entries.Select(entry => Observe(entry.Completion.Task)));
         // Includes the native hydrator's joined keepalive and terminal operation lifetime.
         coordinator.Dispose();
@@ -115,7 +115,9 @@ internal sealed class CloudFilesCallbackDispatcher : IAsyncDisposable
         }
         // The hydrator's native terminal call and keepalive are now fully joined.
         // Retirement permits a later callback with the same opaque keys to authorize a new range.
-        entry.Ending = true;
+        Task cancellationDrain;
+        lock (entry.CancelSync) { entry.Ending = true; cancellationDrain = entry.CancelTask ?? Task.CompletedTask; }
+        await Observe(cancellationDrain); // CTS.Dispose must not race executing cancellation observers.
         entry.Cancellation.Dispose();
         lock (sync) {
             requests.Remove(Key(entry.Context));
@@ -123,11 +125,13 @@ internal sealed class CloudFilesCallbackDispatcher : IAsyncDisposable
             else if (failure is not null) entry.Completion.TrySetException(failure);
             else entry.Completion.TrySetResult();
         }
-    }    private static void RequestCancel(Entry entry) {
-        if (entry.Ending || entry.Completion.Task.IsCompleted) return;
-        try { entry.Cancellation.Cancel(); }
-        catch (ObjectDisposedException) when (entry.Ending) { }
-        catch (AggregateException) { /* Token cancellation is signaled even if a trusted observer throws. Drain still waits. */ }
+    }
+    private static Task RequestCancel(Entry entry) {
+        lock (entry.CancelSync) {
+            if (entry.Ending) return Task.CompletedTask;
+            // CancelAsync returns a tracked completion for all token observers. No callback is invoked under sync.
+            return entry.CancelTask ??= entry.Cancellation.CancelAsync();
+        }
     }
     private static async Task Observe(Task task) { try { await task; } catch { } }
     private static CloudFilesRequestKey Key(CloudFilesOperationContext c) => new(c.ConnectionKey, c.TransferKey, c.RequestKey);

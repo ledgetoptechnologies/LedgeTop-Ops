@@ -17,7 +17,8 @@ internal static class CloudFilesCallbackTests
         ("callback cancellation drains only matching request and refuses unsupported subsets",Cancel),
         ("callback stop rejects new requests and drains terminal and keepalive before disposal",Stop),
         ("callback native EOF normalization bounded active map and failure redaction",Limits),
-        ("callback actual managed native adapter marshals only verified coordinator bytes",NativeBoundary)
+        ("callback actual managed native adapter marshals only verified coordinator bytes",NativeBoundary),
+        ("callback retirement waits for a blocked cancellation observer before CTS disposal",CancellationObservers)
     ];
     private static void Assert(bool value){if(!value)throw new Exception("Callback assertion failed.");}
     private static async Task Reject(Func<Task> action){try{await action();}catch(TransferException){return;}throw new Exception("Expected callback rejection.");}
@@ -82,6 +83,23 @@ internal static class CloudFilesCallbackTests
         for(var index=1;index<12;index++)await dispatcher.FetchDataAsync(Identity.Encode(),Context(index));
         using var other=new Fixture();await using var broken=other.Create((c,id,context,t)=>throw new Exception("synthetic-secret-do-not-leak"));
         try{await broken.FetchDataAsync(Identity.Encode(),Context());throw new Exception("Expected failure");}catch(TransferException e){Assert(!e.Message.Contains("synthetic-secret"));}
+    }
+    private static async Task CancellationObservers() {
+        using var f=new Fixture();var entered=new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);var observer=new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var finish=new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);using var release=new ManualResetEventSlim();CancellationTokenRegistration registration=default;
+        await using var dispatcher=f.Create(async(c,id,context,token)=>{
+            registration=token.Register(()=>{observer.TrySetResult();release.Wait();});
+            await c.HydrateAsync(id,context.RequiredOffset,context.RequiredLength,new Sink(),CancellationToken.None);
+            entered.TrySetResult();await finish.Task;
+        });
+        var task=dispatcher.FetchDataAsync(Identity.Encode(),Context());await entered.Task;
+        var cancel=Task.Run(()=>dispatcher.CancelFetchDataAsync(new(123,456,0),0,Bytes.Length));await observer.Task;
+        finish.SetResult();var stop=dispatcher.StopAsync();
+        var waited=false;var allPending=false;
+        try { try { await task.WaitAsync(TimeSpan.FromMilliseconds(50)); } catch(TimeoutException) { waited=true; }
+            allPending=!task.IsCompleted&&!stop.IsCompleted&&!cancel.IsCompleted;
+        } finally { release.Set(); }
+        await cancel;await stop;await task;registration.Dispose();Assert(waited&&allPending);
     }
     private static async Task NativeBoundary() {
         using var f=new Fixture();var native=new CapturingNative();

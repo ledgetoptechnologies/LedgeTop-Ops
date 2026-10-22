@@ -25,7 +25,12 @@ new range and must obtain fresh authorization. The bounded map limits only
 in-flight work (default256); it does not permanently exhaust a connection after
 256 completed callbacks. Shutdown snapshots still include all undrained work.
 Cancellation signals only the exact matching request and waits for its tracked
-operation to drain. Cancellation callbacks run outside the dispatcher lock.
+operation to drain. Cancellation callbacks run outside the dispatcher lock. Their single tracked
+`CancelAsync` task must settle before request CTS disposal or retirement. A
+blocked cancellation-observer regression verifies operation and Stop remain
+pending until that observer releases. Trusted token observers must not wait for
+their own request completion or Stop, which would create a self-deadlock; the
+native adapter must use non-reentrant cancellation observers.
 Cancellation of one request does not cancel another request sharing a transfer
 key. The first unregistered slice supports only cancellation of the entire
 normalized requested range. Native cancellation **may specify a subset**; this
@@ -58,7 +63,7 @@ native completion operation.
 
 ## Verification
 
-The six added callback groups use the actual hydration coordinator and
+The seven added callback groups use the actual hydration coordinator and
 Downloader, temporary owned cache, SHA verification and asynchronous recording
 sinks. The composed positive path invokes the actual managed native-transfer adapter
 against a fake native boundary and checks marshalled buffer contents; it makes no
