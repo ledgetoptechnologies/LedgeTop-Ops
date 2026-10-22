@@ -1,6 +1,5 @@
 import { ZodError } from "zod";
-import { reconcileAccessGroup } from "./access-group";
-import { accessCircuitIsOpen, completeEvent, applyEntitlementEventForSource, applyProjectionEventForSource, recordAccessFailure, recordAccessSuccess, recordEventFailure, routeDeliveryIntentEventForSource, routePortalProjectionEventForSource } from "./projection";
+import { completeEvent, applyEntitlementEventForSource, applyProjectionEventForSource, recordEventFailure, routeDeliveryIntentEventForSource, routePortalProjectionEventForSource } from "./projection";
 import { parseIntegrationEvent } from "./schema";
 import { readWebhookBody, requireAccessServiceTokenIdentity, sha256Hex, validateRequestTimestamp, verifyAccessAssertion, verifyWebhookSignature, type AccessEnvironment } from "./security";
 import type { Env } from "./types";
@@ -156,25 +155,10 @@ export async function handleRequest(request: Request, env: Env, accessVerifier: 
       await assertProjectAlphaConnectorProof(env,proof);
       return json(200,{ok:true,event_id:event.event_id,status:result});
     }
-    let accessMembers = 0;
-    let accessPending = false;
-    if (event.event_type !== "projection.changed" && event.event_type !== "portal.projection") {
-      try {
-        if(await accessCircuitIsOpen(env))throw new Error("access-group-circuit-open");
-        await assertProjectAlphaConnectorProof(env,proof);
-        const emails = await reconcileAccessGroup(env,() => assertProjectAlphaConnectorProof(env,candidate.proof));
-        accessMembers = emails.length;
-        await recordAccessSuccess(env,proof);
-      } catch (error) {
-        const message = error instanceof Error?error.message:"access-group-error";
-        if(message==="access-group-circuit-open")await recordEventFailure(env,event.event_id,message,source,proof);
-        else await recordAccessFailure(env,event.event_id,message,proof);
-        console.error(JSON.stringify({event:"ops_sync_access_reconciliation_pending",error:message}));
-        accessPending = true;
-      }
-    }
-    await completeEvent(env,event,accessPending,source,proof);
-    return json(accessPending?202:200,{ok:true,event_id:event.event_id,status:accessPending?"completed-access-reconciliation-pending":"completed",access_members:accessMembers});
+    // PA business delivery cannot alter Operations staff admission or the
+    // Cloudflare group. Preserve the existing group until native staff cutover.
+    await completeEvent(env,event,false,source,proof);
+    return json(200,{ok:true,event_id:event.event_id,status:"completed",access_members:0});
   } catch (error) {
     const message = error instanceof ZodError ? "event-schema-invalid" : error instanceof SyntaxError ? "json-invalid"
       : error instanceof ProjectAlphaConnectorError ? `project-alpha-connector-${error.code}`
@@ -186,22 +170,11 @@ export async function handleRequest(request: Request, env: Env, accessVerifier: 
   }
 }
 
-export async function reconcileScheduledAccess(env: Env): Promise<number> {
-  let proof: ProjectAlphaConnectorProof | undefined;
-  try {
-    const connector = await resolveProjectAlphaConnector(env,PRIMARY_PROJECT_ALPHA_SOURCE.sourceId,"events");
-    proof = connector.proof;
-    await assertProjectAlphaConnectorProof(env,proof);
-    if(await accessCircuitIsOpen(env))throw new Error("access-group-circuit-open");
-    const emails = await reconcileAccessGroup(env,() => assertProjectAlphaConnectorProof(env,connector.proof));
-    await recordAccessSuccess(env,proof);
-    return emails.length;
-  } catch (error) {
-    const message = error instanceof Error?error.message:"access-group-error";
-    if(proof && message!=="access-group-circuit-open")await recordAccessFailure(env,null,message,proof).catch(()=>undefined);
-    console.error(JSON.stringify({event:"ops_sync_scheduled_access_reconciliation_failed",error:message}));
-    throw error;
-  }
+export async function reconcileScheduledAccess(_env: Env): Promise<number> {
+  // Kept as a no-op for existing cron bindings. An automatic PA-derived group
+  // replacement could remove local staff or admit historical accounts. Native
+  // admission reconciliation requires its own reviewed membership migration.
+  return 0;
 }
 
 export default {

@@ -39,7 +39,7 @@ function isHumanAccessIdentity(claims: AccessClaims): claims is AccessClaims & {
 async function activeStaffForIdentity(env: Env, claims: AccessClaims & { sub: string; email: string }): Promise<StaffPrincipal> {
   const email = claims.email.trim().toLowerCase(); const subject = claims.sub.trim();
   const user = await env.OPS_DB.prepare("SELECT id,email,display_name,access_subject,project_alpha_user_id FROM staff_users WHERE email=? AND status='active'").bind(email).first<{ id: string; email: string; display_name: string; access_subject: string | null; project_alpha_user_id: string | null }>();
-  if (!user) throw new HTTPException(403, { message: "Your Access identity is not provisioned for LTDS Operations" });
+  if (!user) throw new HTTPException(403, { message: "This email is not set up for Ledge Top. Sign in with your Operations staff email or contact your administrator." });
   if (user.access_subject && user.access_subject !== subject) throw new HTTPException(403, { message: "This staff account is bound to a different Access identity" });
   if (!user.access_subject) {
     try { await env.OPS_DB.prepare("UPDATE staff_users SET access_subject=?,last_seen_at=datetime('now'),updated_at=datetime('now') WHERE id=? AND access_subject IS NULL").bind(subject, user.id).run(); }

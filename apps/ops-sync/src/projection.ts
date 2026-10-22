@@ -31,8 +31,6 @@ async function validateSourceProof(env: Env, source: ProjectAlphaSourceContext, 
   await assertProjectAlphaConnectorProof(env,proof);
 }
 
-function staffId(userId: string): string { return `staff-pa-${userId.replace(/[^a-zA-Z0-9_-]/g, "-")}`; }
-
 const PROJECTION_LEASE_DURATION = "+10 minutes";
 const GLOBAL_PROJECTION_ENTITY_TYPE = "integration_projection";
 const GLOBAL_PROJECTION_ENTITY_ID = "project-alpha";
@@ -71,48 +69,12 @@ async function applyEntitlementEventLocked(env: Env, source: ProjectAlphaSourceC
       .bind(source.sourceId,event.event_id,event.event_type,event.user.id,event.occurred_at,payloadHash)]);
   }
 
-  const ids = await prepareProjectAlphaSourceRecords(mappingDatabase(env,proof),source,[
-    {kind:"user",externalId:event.user.id},
-    {kind:"application_entitlement",externalId:`entitlement-${event.user.id}`},
-  ]);
-  const userId = ids.get("user",event.user.id);
-  const entitlementId = ids.get("application_entitlement",`entitlement-${event.user.id}`);
-  const latest = await env.OPS_DB.prepare("SELECT last_event_at FROM pa_application_entitlements WHERE projection_source_id=? AND user_id=?").bind(source.sourceId,userId).first<{ last_event_at: string | null }>();
-  if (latest?.last_event_at && (Date.parse(event.occurred_at) < Date.parse(latest.last_event_at) || (!receipt && Date.parse(event.occurred_at) === Date.parse(latest.last_event_at)))) {
-    await fencedBatch(env,proof,[env.OPS_DB.prepare("UPDATE integration_event_receipts SET status='ignored',processed_at=datetime('now'),last_error=NULL WHERE projection_source_id=? AND event_id=?").bind(source.sourceId,event.event_id)]);
-    return "ignored";
-  }
-
-  const enabled = event.entitlement.enabled && event.user.active && event.event_type !== "application_entitlement.revoked";
-  const syncMarker = `event:${event.event_id}`;
-  await fencedBatch(env,proof,[
-    env.OPS_DB.prepare(`INSERT INTO pa_users (projection_source_id,id,email,display_name,role,active,payload_json,last_sync_id) VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET email=excluded.email,display_name=excluded.display_name,active=excluded.active,payload_json=excluded.payload_json,last_sync_id=excluded.last_sync_id,updated_at=datetime('now') WHERE pa_users.projection_source_id=excluded.projection_source_id`).bind(source.sourceId,userId,event.user.email,event.user.display_name,null,event.user.active?1:0,JSON.stringify(event.user),syncMarker),
-    env.OPS_DB.prepare(`INSERT INTO pa_application_entitlements (projection_source_id,id,user_id,application_key,enabled,role_key,business_unit_ids_json,payload_json,last_event_at,last_sync_id,active) VALUES (?,?,?,?,?,?,?,?,?,?,1) ON CONFLICT(user_id) DO UPDATE SET application_key=excluded.application_key,enabled=excluded.enabled,role_key=excluded.role_key,business_unit_ids_json=excluded.business_unit_ids_json,payload_json=excluded.payload_json,last_event_at=excluded.last_event_at,last_sync_id=excluded.last_sync_id,active=1,updated_at=datetime('now') WHERE pa_application_entitlements.projection_source_id=excluded.projection_source_id`).bind(source.sourceId,entitlementId,userId,event.entitlement.application_key,enabled?1:0,event.entitlement.role_key,JSON.stringify(event.entitlement.business_unit_ids),JSON.stringify(event.entitlement),event.occurred_at,syncMarker),
-  ]);
-
-  const protectedStaff = await env.OPS_DB.prepare("SELECT id FROM staff_users WHERE lower(email)=? AND sync_protected=1").bind(event.user.email).first<{ id: string }>();
-  if (!protectedStaff) {
-    const existing = await env.OPS_DB.prepare("SELECT id FROM staff_users WHERE project_alpha_user_id=? OR lower(email)=? ORDER BY CASE WHEN project_alpha_user_id=? THEN 0 ELSE 1 END LIMIT 1").bind(event.user.id,event.user.email,event.user.id).first<{ id: string }>();
-    const id = existing?.id ?? staffId(event.user.id);
-    await fencedBatch(env,proof,[
-      env.OPS_DB.prepare(`INSERT INTO staff_users (id,email,display_name,project_alpha_user_id,status,provisioning_source) VALUES (?,?,?,?,?,'project-alpha') ON CONFLICT(id) DO UPDATE SET email=excluded.email,display_name=excluded.display_name,project_alpha_user_id=excluded.project_alpha_user_id,status=excluded.status,provisioning_source='project-alpha',access_subject=CASE WHEN excluded.status='inactive' THEN NULL ELSE access_subject END,updated_at=datetime('now')`).bind(id,event.user.email,event.user.display_name,event.user.id,enabled?"active":"inactive"),
-      env.OPS_DB.prepare("DELETE FROM staff_role_assignments WHERE staff_id=? AND role_id<>'role-owner'").bind(id),
-      env.OPS_DB.prepare("DELETE FROM staff_divisions WHERE staff_id=?").bind(id),
-    ]);
-    if (enabled) {
-      const roleKey = event.entitlement.role_key;
-      if (roleKey === "role-admin") {
-        await fencedBatch(env,proof,[env.OPS_DB.prepare("INSERT INTO staff_role_assignments (id,staff_id,role_id,scope,division_id,scope_key) VALUES (?,?,'role-admin','global',NULL,'global') ON CONFLICT(id) DO NOTHING")
-          .bind(`assignment-pa-${event.user.id}-global`,id)]);
-      } else {
-        // Keep incremental authorization identical to daily recovery: PA
-        // assignments grant visibility; non-admin entitlement labels do not.
-        await fencedBatch(env,proof,[env.OPS_DB.prepare("INSERT INTO staff_role_assignments (id,staff_id,role_id,scope,division_id,scope_key) VALUES (?,?,'role-operator','assigned',NULL,'assigned') ON CONFLICT(id) DO NOTHING")
-          .bind(`assignment-pa-${event.user.id}-assigned`,id)]);
-      }
-    }
-  }
-  return "applied";
+  // Retired PA employee synchronization: acknowledge authenticated historical
+  // events durably without importing identities, changing staff/grants, or
+  // invoking Access reconciliation. A retry must still detect payload conflicts.
+  await fencedBatch(env,proof,[env.OPS_DB.prepare("UPDATE integration_event_receipts SET status='ignored',processed_at=datetime('now'),last_error=NULL WHERE projection_source_id=? AND event_id=?")
+    .bind(source.sourceId,event.event_id)]);
+  return "ignored";
 }
 
 export async function applyEntitlementEvent(env: Env, event: EntitlementEvent, payloadHash: string): Promise<ProjectionResult> {
@@ -121,8 +83,8 @@ export async function applyEntitlementEvent(env: Env, event: EntitlementEvent, p
 
 export async function applyEntitlementEventForSource(env: Env, source: ProjectAlphaSourceContext, event: EntitlementEvent, payloadHash: string, proof?: ProjectAlphaConnectorProof): Promise<ProjectionResult> {
   source=createProjectAlphaSourceContext(source.sourceId);
-  // Staff authority is unresolved for additional producers. Reject before even
-  // reserving a lease/receipt; their ordinary users remain snapshot business data.
+  // Keep the established primary-only legacy ingress contract. Even its
+  // authenticated employee events are ignored and can never manage Ops staff.
   if(!source.staffAuthority)throw new Error("projection-source-authority-unsupported");
   await validateSourceProof(env,source,proof);
   await claimGlobalProjection(env,source,event.event_id);
