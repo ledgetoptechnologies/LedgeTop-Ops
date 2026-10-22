@@ -18,5 +18,6 @@
   "opsOnlyRevokeDenied": true,
   "clientGrantStillActive": true,
   "opsReaderDeniedReplies": 1,
-  "limits": "Local Client routers/D1/R2 only; virtual staging host adapter, actual local Ops D1 reader via direct function binding adapter; simulated JWKS discovery/token helper; no human sign-in, deployed Worker, real R2 or employee gateway acceptance."
+  "limits": "Local Client routers/D1/R2 only; virtual staging host adapter, actual local Ops D1 reader via direct function binding adapter; simulated JWKS discovery/token helper; no human sign-in, deployed Worker, real R2 or employee gateway acceptance.",
+  "setupLimits": "Synthetic owner/admission seeds and SQL-simulated PA directory outbox/mapping acknowledgement; no PA round trip. Ops binding uses direct function calls, not deployed RPC."
 }

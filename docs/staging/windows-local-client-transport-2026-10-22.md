@@ -65,7 +65,9 @@ a corrupted RS256 signature are both rejected.
 - The Ops remote-reader proof now comes from the actual Ops catalog/successor
   entrypoints, backed by the full local 224-migration Ops chain and actual
   command-created grant, home, publication and folder authority. Owner/admission
-  and external PA acknowledgments remain explicitly synthetic seed data. The
+  and external PA acknowledgments remain explicitly synthetic seed data. In
+  particular, `acknowledgeCreate` updates the PA directory outbox/mapping rows
+  locally; no actual PA round trip is exercised. The
   binding adapter calls real functions in-process; it does not prove a deployed
   Cloudflare cross-worker service binding. No handcrafted successor proof DTO
   rescues an Ops denial. Only the selected test profile receives authority.
