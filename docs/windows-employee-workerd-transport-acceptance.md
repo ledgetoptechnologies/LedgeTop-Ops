@@ -149,3 +149,21 @@ probe created an actual empty owned volume, injected a CLI acknowledgement error
 and confirmed the real harness cleanup attempted removal and the volume was
 absent. The harness exited with the deliberately injected error, as intended;
 no container or large-file data was allocated for that probe.
+
+## Independent current-main integration check
+
+Root independently ran the ordinary acceptance on combined source `2807ec2f`,
+which includes main `77eb072a`, the reviewed Windows source, this composition,
+the native framing repair, and the incoming request-signal opt-in. It passed
+1/1 in 73.41 seconds including mandatory cleanup. The 2 MiB download resumed
+from 16,384 bytes, verified its digest, retained native 200/206 lengths, and
+passed the other-user/stale-version/revoked-handle checks. Gateway calls after
+revocation were zero and content-start audits were two. Safe evidence is in
+`docs/staging/windows-employee-workerd-2026-10-22.json`.
+
+The same combined review also passed 138 focused framing/transport tests, five
+joined D1 tests, both app type checks, 38 composition/bundle/preflight tests,
+and the separate actual Client-to-Ops named-RPC download acceptance. These are
+local source checks; they do not authorize or prove a live deployment. The
+large source test was independently reviewed without duplicating the transfer;
+its cleanup-only follow-up was separately exercised by the empty-volume fault.
