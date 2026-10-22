@@ -1,3 +1,4 @@
+import "./node-fixed-length-stream";
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { createLocalJWKSet, exportJWK, generateKeyPair, SignJWT } from "jose";
 import { createEmployeeReadRouter, employeeWindowsFileName } from "../src/worker/employee-read-routes";
@@ -153,11 +154,23 @@ describe("unmounted employee read HTTP factory with real RS256 verification", ()
   });
   it("cancels the validated transport stream when authority changes at the final route handoff", async () => {
     const h = harness(), body = await h.manifest();
+    let release!: () => void, sent = 0;
+    const next = new Promise<void>(done => { release = done; });
+    h.fetcher.mockResolvedValueOnce(new Response(new ReadableStream<Uint8Array>({
+      async pull(output) {
+        if (sent++ === 0) output.enqueue(new Uint8Array([1]));
+        else if (sent === 2) { await next; output.enqueue(new Uint8Array([2])); }
+      }, cancel: h.cancel,
+    }, { highWaterMark: 0 }), { headers: { "Content-Type": "application/octet-stream", "Content-Length": "3", ETag: `"${sha}"` } }));
     mocks.audit.mockImplementationOnce(async () => {
       mocks.recheck.mockResolvedValueOnce(true).mockResolvedValueOnce(false);
     });
     const response = await h.call(body.downloadPath, { "If-Match": body.strongETag });
-    expect(response.status).toBe(403); expect(h.cancel).toHaveBeenCalledOnce();
+    expect(response.status).toBe(403); expect(await response.json()).toEqual({ error: "employee_read_denied" });
+    // Native fixed framing detects downstream cancellation on the next write;
+    // the denied route has already returned only its static error body.
+    release(); await new Promise(resolve => setTimeout(resolve, 0));
+    expect(h.cancel).toHaveBeenCalledOnce();
   });
   it.each(["CON.txt", "CONIN$", "LPT².map", ".LTDS-DOWNLOADS-V1", "a".repeat(149) + "😀.raw"])("produces a bounded safe Windows basename from %s", name => {
     const result = employeeWindowsFileName(name); expect(result.length).toBeLessThanOrEqual(150); expect(result).not.toMatch(/[. ]$/u);
