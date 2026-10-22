@@ -125,7 +125,13 @@ internal static class AccessSessionTests
             case "stdout-overflow": Console.Out.Write(new string('o', 65536)); return 0;
             case "stderr-overflow": Console.Error.Write(new string('e', 65536)); return 0;
             case "sleep":
-                await File.WriteAllTextAsync(arguments[2], Environment.ProcessId.ToString(System.Globalization.CultureInfo.InvariantCulture));
+                // Publish readiness only after the PID file's writer is closed. Otherwise the
+                // parent's existence probe may race the Windows FileShare.None write handle.
+                var pendingPid = arguments[2] + "." + Guid.NewGuid().ToString("N") + ".tmp";
+                try {
+                    await File.WriteAllTextAsync(pendingPid, Environment.ProcessId.ToString(System.Globalization.CultureInfo.InvariantCulture));
+                    File.Move(pendingPid, arguments[2], overwrite: false);
+                } finally { if (File.Exists(pendingPid)) File.Delete(pendingPid); }
                 await Task.Delay(Timeout.Infinite); return 0;
             default: return 64;
         }
