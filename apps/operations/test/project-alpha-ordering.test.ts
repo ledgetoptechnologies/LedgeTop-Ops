@@ -39,11 +39,11 @@ const collections=["users","business_units","worker_business_units","clients","o
 afterEach(()=>vi.unstubAllGlobals());
 
 describe("Project Alpha snapshot/webhook ordering",()=>{
-  describe("retired PA identity repair",()=>{
+  describe("independent Ops employee ownership",()=>{
     let fixture:OrderingFixture|undefined,dispose:Disposer|undefined;
     beforeAll(async()=>{fixture=await orderingFixture(value=>{dispose=value;});},90_000);
     afterAll(async()=>{if(dispose)await dispose();},30_000);
-    it("repairs a retired PA identity by the active entitled email after snapshots stabilize",async()=>{
+    it("retains Ops staff identity and admission despite a matching active PA user and entitlement",async()=>{
       const {ops,delivery}=fixture!;
       for(const statement of [
         "CREATE TABLE client_accounts(id TEXT PRIMARY KEY,status TEXT NOT NULL,display_name TEXT,project_alpha_source_id TEXT NOT NULL DEFAULT 'project-alpha:primary',project_alpha_client_id TEXT,project_alpha_organization_id TEXT,updated_at TEXT)",
@@ -54,6 +54,8 @@ describe("Project Alpha snapshot/webhook ordering",()=>{
         "CREATE TABLE client_member_project_grants(account_id TEXT,project_id TEXT,revoked_at TEXT,PRIMARY KEY(account_id,project_id))",
       ])await delivery.prepare(statement).run();
       await ops.prepare("INSERT INTO staff_users(id,email,display_name,project_alpha_user_id,status,provisioning_source) VALUES('legacy','kstirn@example.com','Kollins','retired-pa-user','inactive','project-alpha')").run();
+      const staffBefore=await ops.prepare("SELECT * FROM staff_users ORDER BY id").all();
+      const admissionsBefore=await ops.prepare("SELECT * FROM native_staff_admissions ORDER BY staff_id").all();
 
       vi.stubGlobal("fetch",vi.fn(async()=>Response.json({
         generated_at:"2026-08-13T01:55:16.744842Z",
@@ -62,8 +64,11 @@ describe("Project Alpha snapshot/webhook ordering",()=>{
       })));
       await syncProjectAlpha({OPS_DB:ops,DELIVERY_DB:delivery,PROJECT_ALPHA_BASE_URL:"https://pa.example.test",PROJECT_ALPHA_API_KEY:"read-only",APPLICATION_KEY:"ltds_ops"} as Env);
 
-      expect(await ops.prepare("SELECT project_alpha_user_id FROM staff_users WHERE id='legacy'").first("project_alpha_user_id")).toBe("current-pa-user");
-      expect(await ops.prepare("SELECT status FROM staff_users WHERE id='legacy'").first("status")).toBe("active");
+      // PA inventory remains readable, but matching email/entitlement cannot
+      // repair, provision or reactivate an Operations employee.
+      expect((await ops.prepare("SELECT * FROM staff_users ORDER BY id").all()).results).toEqual(staffBefore.results);
+      expect((await ops.prepare("SELECT * FROM native_staff_admissions ORDER BY staff_id").all()).results).toEqual(admissionsBefore.results);
+      expect(await ops.prepare("SELECT id FROM pa_users WHERE id='current-pa-user'").first("id")).toBe("current-pa-user");
     },30_000);
   });
 
