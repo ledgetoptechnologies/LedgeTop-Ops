@@ -31,3 +31,13 @@ The comparison CLI's zero exit code means it produced a comparison result,
 including `requires_review`. It is not a shell readiness gate. Callers must
 inspect the explicit result and retain the separate deployment authorization;
 even `matches_pinned_local_replay` is not migration or activation approval.
+
+## Optional exact schema-object diagnostics
+
+A separately reviewed, default-off option retains only each sqlite_master object's `type`, `name`, `tbl_name` and exact UTF-8 SQL SHA256 (`null` remains null). It never emits SQL text or application rows. The preflight option is `includeSchemaObjectDigests: true` / `--read-only --schema-object-digests`; it uses precisely the existing validated, bounded schema query pages, without an additional query or changed binding/identity checks. This option does not change `canonicalBaselineVerified` or make the pages atomic. Root must review and compose it with any other preflight options before remote invocation.
+
+The corresponding local command is `node scripts/windows-files-canonical-baseline.mjs --local-replay --baseline-only --schema-object-digests`. Its completed baseline-only capture is retained in `docs/staging/windows-canonical-baseline-objects-local-2026-10-22.json` (LF-normalized SHA256 `ed0764cb744631c864d9ad64ba0f2edc6d4c824b0a8c31e415b16cddf0e0d515`). No Windows suffixes were replayed for this capture. Both full-schema and ledger hashes exactly reproduce the earlier local baseline checkpoints. It includes the platform `_cf_METADATA` table and Wrangler `d1_migrations`; neither is silently ignored. Their presence or fingerprints are diagnostic evidence, not authority to rewrite them.
+
+`compareSchemaObjectDigests(expected, observed)` in `scripts/windows-files-schema-object-digests.mjs` reports missing/extra identities and changed SQL fingerprints, with `canonicalBaselineVerified: false`. It is an attribution aid, not a whitelist or schema approval. Exact metadata DDL and whitespace-only trigger differences remain visible. The current remote-vs-local differences have not been attributed by this work; no remote calls were made.
+
+Phase-two validation: 27/27 helper/comparison/preflight tests pass. Tests execute real local SQLite DDL to change only trigger whitespace, remove an index and add a table; each is attributed without SQL export. They also cover raw UTF-8 hashing, distinct null SQL, duplicate/malformed/oversized inventories, tampered digests, pinned retained capture, default absence, explicit read-only requirement, unchanged query calls and no SQL text in optional receipts.

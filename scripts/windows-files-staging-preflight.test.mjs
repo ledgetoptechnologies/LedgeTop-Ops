@@ -275,3 +275,24 @@ test("rejects a repeated schema object across pages instead of returning a misle
   await assert.rejects(windowsFilesStagingPreflight({ readOnly: true, run: f.run }), /schema_response_invalid/);
   assert.ok(!f.calls.some(args => args[0] === "d1" && args[2] === "client-data-staging"));
 });
+
+test("optional object fingerprints reuse the exact existing query set and never export SQL", async () => {
+  const ordinary = fixture(), diagnostic = fixture();
+  const base = await windowsFilesStagingPreflight({ readOnly: true, run: ordinary.run });
+  const withDigests = await windowsFilesStagingPreflight({ readOnly: true, run: diagnostic.run, includeSchemaObjectDigests: true });
+  assert.deepEqual(diagnostic.calls.map(args=>args.slice(0,-2)), ordinary.calls.map(args=>args.slice(0,-2)));
+  assert.ok(base.workers.every(w => w.schemaObjectDigests === undefined));
+  for (const worker of withDigests.workers) {
+    assert.equal(worker.schemaObjectDigests.count, 1);
+    assert.equal(worker.schemaObjectDigests.objects[0].name, "synthetic");
+    assert.match(worker.schemaObjectDigests.objects[0].sqlSha256, /^[a-f0-9]{64}$/);
+    assert.equal(worker.migrations.canonicalBaselineVerified, false);
+  }
+  assert.ok(!JSON.stringify(withDigests).includes("DO_NOT_PRINT_SCHEMA"));
+});
+test("object digest capture requires explicit read-only mode before any process", async () => {
+  let calls=0;
+  for (const options of [{includeSchemaObjectDigests:true},{readOnly:true,includeSchemaObjectDigests:"yes"}])
+    await assert.rejects(windowsFilesStagingPreflight({...options,run:()=>{calls++}}), /schema_digests_require_read_only/);
+  assert.equal(calls,0);
+});

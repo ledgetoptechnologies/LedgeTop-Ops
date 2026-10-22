@@ -5,6 +5,7 @@ import { mkdtemp, writeFile, unlink, rmdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { schemaObjectDigests } from "./windows-files-schema-object-digests.mjs";
 import { STAGING_ACCOUNT_ID, STAGING_INVENTORY } from "./staging-requirements.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -136,9 +137,10 @@ function recoveryReceipt(value, startedAt) {
 
 /** Read-only observations only. The executable CLI requires --read-only; callers
  * must also opt in explicitly. This never applies migrations or activates routes. */
-export async function windowsFilesStagingPreflight({ readOnly = false, recoveryMetadata = false, run = installedWrangler } = {}) {
+export async function windowsFilesStagingPreflight({ readOnly = false, recoveryMetadata = false, includeSchemaObjectDigests = false, run = installedWrangler } = {}) {
   if (typeof recoveryMetadata !== "boolean") fail("recovery_opt_in_invalid");
   if (recoveryMetadata && readOnly !== true) fail("recovery_requires_read_only");
+  if (typeof includeSchemaObjectDigests !== "boolean" || includeSchemaObjectDigests && readOnly !== true) fail("schema_digests_require_read_only");
   if (readOnly !== true) return { schemaVersion: 1, status: "not_run", requiredFlag: "--read-only" };
   const directory = await mkdtemp(path.join(tmpdir(), "ops-windows-read-preflight-")), configPath = path.join(directory, "wrangler.json");
   const config = { account_id: STAGING_ACCOUNT_ID, name: "windows-files-read-preflight-staging", compatibility_date: "2026-10-01", send_metrics: false,
@@ -187,6 +189,7 @@ export async function windowsFilesStagingPreflight({ readOnly = false, recoveryM
       }
       worker.schemaSha256 = hash(schema.map(r => [r.type, r.name, r.tbl_name, r.sql]));
       worker.schemaObjectCount = schema.length;
+      if (includeSchemaObjectDigests) worker.schemaObjectDigests = schemaObjectDigests(schema);
       worker.schemaObservation = "Bounded ordered pages, not an atomic schema snapshot; re-read before activation.";
     }
     return { schemaVersion: 1, status: "read_only_observed", accountId: STAGING_ACCOUNT_ID, workers,
@@ -200,14 +203,14 @@ export async function windowsFilesStagingPreflight({ readOnly = false, recoveryM
 }
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const args = process.argv.slice(2);
-  if (args.some(arg => !["--read-only", "--recovery-metadata"].includes(arg)) || new Set(args).size !== args.length
-    || args.includes("--recovery-metadata") && !args.includes("--read-only")) {
+  if (args.some(arg => !["--read-only", "--recovery-metadata", "--schema-object-digests"].includes(arg)) || new Set(args).size !== args.length
+    || (args.includes("--recovery-metadata") || args.includes("--schema-object-digests")) && !args.includes("--read-only")) {
     process.stderr.write("windows_staging_preflight_arguments\n"); process.exitCode = 1;
-  } else try { process.stdout.write(JSON.stringify(await windowsFilesStagingPreflight({ readOnly: args.includes("--read-only"), recoveryMetadata: args.includes("--recovery-metadata") }), null, 2) + "\n"); }
+  } else try { process.stdout.write(JSON.stringify(await windowsFilesStagingPreflight({ readOnly: args.includes("--read-only"), recoveryMetadata: args.includes("--recovery-metadata"), includeSchemaObjectDigests: args.includes("--schema-object-digests") }), null, 2) + "\n"); }
   catch (error) {
     const allowed = new Set(["wrangler_read_failed", "wrangler_output_invalid", "wrangler_json_invalid", "deployment_list_invalid", "deployment_latest_ambiguous",
       "deployment_not_single_version", "version_detail_invalid", "version_bindings_invalid", "version_environment_mismatch", "version_identity_mismatch",
-      "version_resource_mismatch", "version_service_mismatch", "database_response_invalid", "migration_ledger_invalid", "schema_response_invalid", "schema_page_invalid", "schema_page_limit",
+      "version_resource_mismatch", "version_service_mismatch", "database_response_invalid", "migration_ledger_invalid", "schema_object_digests_invalid", "schema_object_digests_limit", "schema_digests_require_read_only", "schema_response_invalid", "schema_page_invalid", "schema_page_limit",
       "recovery_metadata_invalid", "recovery_opt_in_invalid", "recovery_requires_read_only"]);
     process.stderr.write((allowed.has(error?.code) ? error.code : "windows_staging_preflight_failed") + "\n"); process.exitCode = 1;
   }
