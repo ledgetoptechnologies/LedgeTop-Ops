@@ -31,7 +31,10 @@ test("builds executable paired staging mains and preserves all other config and 
   assert.deepEqual(input, before);
   for (const app of ["operations", "delivery"]) {
     const expected = structuredClone(input.sources[app]); expected.main = ".windows-files-staging/entrypoint.ts";
-    if (app === "operations") expected.vars.OPERATIONS_PORTAL_NATIVE_DELIVERY_READER_ENABLED = "true";
+    if (app === "operations") {
+      expected.vars.OPERATIONS_PORTAL_NATIVE_DELIVERY_READER_ENABLED = "true";
+      expected.compatibility_flags = [...(expected.compatibility_flags ?? []), "enable_request_signal"];
+    }
     else Object.assign(expected.vars, { CLIENT_PORTAL_ENABLED: "true", CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_READ_ENABLED: "true", CLIENT_PORTAL_OPERATIONS_NATIVE_CONTENT_AUDIT_ENABLED: "true" });
     assert.deepEqual(result.configs[app], expected);
     assert.doesNotMatch(result.entries[app], /export \* from/);
@@ -41,6 +44,35 @@ test("builds executable paired staging mains and preserves all other config and 
     assert.doesNotMatch(result.entries[app], /SIGNING_KEY|HANDLE_KEY|QUEUE_KEY/);
   }
   assert.equal(result.receipt.physicallyVerified, false); assert.equal(result.receipt.activated, false);
+});
+test("enabled Ops opts into incoming request aborts while preserving existing flags and Client config", () => {
+  const input = fixture();
+  input.sources.operations.compatibility_flags = ["nodejs_compat", "some_future_reviewed_flag"];
+  input.sources.delivery.compatibility_flags = ["nodejs_compat", "disable_request_signal"];
+  const before = structuredClone(input), result = buildWindowsStagingComposition(input);
+  assert.deepEqual(input, before);
+  assert.deepEqual(result.configs.operations.compatibility_flags, ["nodejs_compat", "some_future_reviewed_flag", "enable_request_signal"]);
+  assert.deepEqual(result.configs.delivery.compatibility_flags, input.sources.delivery.compatibility_flags);
+});
+test("existing incoming abort opt-in is emitted once without reordering other flags", () => {
+  const input = fixture();
+  input.sources.operations.compatibility_flags = ["nodejs_compat", "enable_request_signal", "some_future_reviewed_flag", "enable_request_signal"];
+  assert.deepEqual(buildWindowsStagingComposition(input).configs.operations.compatibility_flags,
+    ["nodejs_compat", "enable_request_signal", "some_future_reviewed_flag"]);
+});
+test("enabled Ops refuses an explicit incoming abort opt-out or malformed flags", () => {
+  for (const flags of [["nodejs_compat", "disable_request_signal"], "nodejs_compat", ["nodejs_compat", null]]) {
+    const input = fixture(); input.sources.operations.compatibility_flags = flags;
+    assert.throws(() => buildWindowsStagingComposition(input), /inputs_invalid/);
+  }
+});
+test("disabled composition leaves both apps compatibility flags unchanged", () => {
+  const input = fixture(); input.profile.enabled = false;
+  input.sources.operations.compatibility_flags = ["nodejs_compat", "disable_request_signal", "some_future_reviewed_flag"];
+  input.sources.delivery.compatibility_flags = ["enable_request_signal", "some_other_reviewed_flag"];
+  const before = structuredClone(input), result = buildWindowsStagingComposition(input);
+  assert.deepEqual(input, before);
+  for (const app of ["operations", "delivery"]) assert.deepEqual(result.configs[app].compatibility_flags, input.sources[app].compatibility_flags);
 });
 test("actual complete bundles preserve every reviewed runtime export and reject library export drift", async () => {
   const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
