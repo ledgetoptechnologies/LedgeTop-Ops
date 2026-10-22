@@ -58,7 +58,7 @@ window.fetch = async (input, init) => {
   const mutationId = new Headers(init?.headers).get("Idempotency-Key");
   calls.push({ path, method, mutationId, body });
   if (path.includes("/create-options")) return Response.json({ kind: "organization",
-    sources: [{ id: sourceId, name: "Primary" }], scopes: [{ id: "area:one", name: "Area One", divisions: [] }], organizations: [] });
+    sources: [{ id: sourceId, name: "Primary" }, ...((scenario as string) === "two-destinations" ? [{ id: "project-alpha:secondary", name: "Secondary" }] : [])], scopes: [{ id: "area:one", name: "Area One", divisions: [] }], organizations: [] });
   if (path.endsWith("/create-admissions")) {
     createAdmissionCalls += 1;
     if (scenario === "admission-400" && createAdmissionCalls === 1)
@@ -154,7 +154,7 @@ window.fetch = async (input, init) => {
 function Fixture() {
   const [recordId, setRecordId] = useState("record-one");
   const [recoveryIdentity, setRecoveryIdentity] = useState({ recordId: "client-prop", organizationRecordId: "organization-one" });
-  if (["create-lost-response", "admission-400", "write-400"].includes(scenario)) return <NativeDirectoryProfileCreate />;
+  if (["create-lost-response", "admission-400", "write-400", "two-destinations"].includes(scenario)) return <NativeDirectoryProfileCreate />;
   if (scenario === "relationship-readonly") return <NativeDirectoryProfileEdit kind="client" recordId="client-one" />;
   if (scenario === "prepared-lost-response") return <NativeDirectoryProfileEdit kind="client" recordId="client-one" allowPreparedAttempt />;
   if (scenario === "recovery-org-switch" || scenario === "recovery-record-switch") return <>

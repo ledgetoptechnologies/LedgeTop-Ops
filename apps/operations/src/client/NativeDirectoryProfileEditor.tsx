@@ -2,6 +2,7 @@ import { useEffect, useId, useState, type FormEvent } from "react";
 import { Card, Dialog, Skeleton } from "@ltds/ui";
 import { projectAlphaSourceName } from "@ltds/shared";
 import { api, ApiError } from "./api";
+import { isUnitedStates, isUsStateCode, US_COUNTRY, US_STATES } from "./us-states";
 import { executeCreateAttempt, executeProfileAttempt, executeRelationshipAttempt,
   type FrozenCreateAttempt, type FrozenDirectoryRequest } from "./NativeDirectoryProfileAttempts";
 import { DirectoryRelationshipRecoveryReview, usableRelationshipRecoveryCapability } from "./DirectoryRelationshipRecoveryReview";
@@ -28,6 +29,8 @@ interface CreateOptions { kind: Kind; sources: Array<{ id: string; name: string 
 
 const EMPTY: ProfileForm = { name: "", generalEmail: "", generalPhone: "", email: "", phone: "", clientType: "unknown",
   addressLine1: "", addressLine2: "", city: "", state: "", postalCode: "", country: "" };
+/** Most work is in Wisconsin, so new profiles start there; staff can change either field. */
+const CREATE_DEFAULTS: ProfileForm = { ...EMPTY, state: "WI", country: US_COUNTRY };
 const routeKind = (kind: Kind): RouteKind => kind === "organization" ? "organizations" : "standalone-clients";
 const message = (caught: unknown, fallback: string) => caught instanceof Error ? caught.message : fallback;
 export const isStagingNativeDirectoryProfilePreparationLocation = (location: Pick<Location, "protocol" | "hostname" | "port">) =>
@@ -89,9 +92,48 @@ function ProfileFields({ kind, value, onChange, prefix, creating, disabled = fal
           <option value="unknown">Unknown</option><option value="business">Business</option><option value="consumer">Consumer</option>
         </select></label>}</>}
     {field("addressLine1", "Address line 1", 255, false, true)}{field("addressLine2", "Address line 2", 255, false, true)}
-    {field("city", "City", 100)}{field("state", "State", kind === "client" ? 2 : 100)}
-    {field("postalCode", "Postal code", kind === "client" ? 20 : 32)}{field("country", "Country", 100)}
+    {field("city", "City", 100)}
+    <StateField kind={kind} value={value} onChange={onChange} prefix={prefix} disabled={disabled} />
+    {field("postalCode", "Postal code", kind === "client" ? 20 : 32)}
+    <CountryField value={value.country} onChange={next => onChange("country", next)} prefix={prefix} disabled={disabled} />
   </div>;
+}
+
+/** A US state picker (stored as the USPS code) when the country is the United States; free text otherwise.
+ * A value already on file that isn't a known code is kept as its own option rather than changed. */
+function StateField({ kind, value, onChange, prefix, disabled }: { kind: Kind; value: ProfileForm;
+  onChange: (field: keyof ProfileForm, value: string) => void; prefix: string; disabled: boolean }) {
+  const id = `${prefix}-state`;
+  if (!isUnitedStates(value.country) && value.country.trim() !== "")
+    return <label htmlFor={id} className="ltds-field">State / province<input id={id} maxLength={kind === "client" ? 2 : 100} value={value.state}
+      disabled={disabled} onChange={event => onChange("state", event.target.value)} /></label>;
+  const current = value.state.trim();
+  return <label htmlFor={id} className="ltds-field">State<select id={id} value={value.state} disabled={disabled} onChange={event => onChange("state", event.target.value)}>
+    <option value="">Choose a state</option>
+    {current && !isUsStateCode(current) && <option value={value.state}>{value.state}</option>}
+    {US_STATES.map(([code, name]) => <option key={code} value={code}>{name}</option>)}
+  </select></label>;
+}
+
+/** United States by default; "Other country" switches to free text. An existing non-US value stays as typed. */
+function CountryField({ value, onChange, prefix, disabled }: { value: string; onChange: (value: string) => void; prefix: string; disabled: boolean }) {
+  const id = `${prefix}-country`, [chooseOther, setOther] = useState(false);
+  // A loaded non-US value always shows as "Other"; an empty value only once Other is chosen.
+  const other = chooseOther || (value.trim() !== "" && !isUnitedStates(value));
+  const choice = other ? "other" : isUnitedStates(value) ? value : "";
+  return <>
+    <label htmlFor={id} className="ltds-field">Country<select id={id} value={choice} disabled={disabled} onChange={event => {
+      if (event.target.value === "other") { setOther(true); onChange(""); } else { setOther(false); onChange(event.target.value); }
+    }}>
+      <option value="">Choose a country</option>
+      {/* An existing spelling such as "United States" is kept exactly as stored. */}
+      {isUnitedStates(value) && value !== US_COUNTRY && <option value={value}>United States</option>}
+      <option value={US_COUNTRY}>United States</option>
+      <option value="other">Other country</option>
+    </select></label>
+    {other && <label htmlFor={`${id}-other`} className="ltds-field">Country name<input id={`${id}-other`} maxLength={100} value={value}
+      disabled={disabled} onChange={event => onChange(event.target.value)} /></label>}
+  </>;
 }
 
 function status(result: { status?: unknown }): string {
@@ -110,7 +152,7 @@ function createdMessage(attempt: FrozenCreateAttempt, result: { status?: unknown
 }
 
 export function NativeDirectoryProfileCreate() {
-  const id = useId(), [kind, setKind] = useState<Kind>("organization"), [fields, setFields] = useState<ProfileForm>(EMPTY);
+  const id = useId(), [kind, setKind] = useState<Kind>("organization"), [fields, setFields] = useState<ProfileForm>(CREATE_DEFAULTS);
   const [sourceIds, setSourceIds] = useState<string[]>([]), [selectedScope, setSelectedScope] = useState(""), [options, setOptions] = useState<CreateOptions | null>(null);
   const [organizationId, setOrganizationId] = useState("");
   const [attempt, setAttempt] = useState<FrozenCreateAttempt | null>(null);
@@ -157,7 +199,7 @@ export function NativeDirectoryProfileCreate() {
       { recordId: frozen.mutationId, kind, version: 1, sourceIds: frozen.sourceIds }, value => {
         reachedWrite = true; setAttempt(value);
       });
-      setAttempt(null); setSuccess(createdMessage(frozen, result as { status?: unknown })); setFields(EMPTY); setSourceIds([]); setSelectedScope(""); setOpen(false);
+      setAttempt(null); setSuccess(createdMessage(frozen, result as { status?: unknown })); setFields(CREATE_DEFAULTS); setSourceIds([]); setSelectedScope(""); setOpen(false);
     } catch (caught) {
       const invalidAdmission = !reachedWrite && caught instanceof ApiError && caught.status === 400;
       if (invalidAdmission) setAttempt(null);

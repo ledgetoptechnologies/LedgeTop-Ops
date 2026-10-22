@@ -2825,7 +2825,12 @@ ul { color: var(--muted); }
 .client-directory-create { margin: .25rem 0 1rem; }
 .client-directory-create-bar { display: flex; flex-wrap: wrap; align-items: center; gap: .75rem; }
 .client-directory-create-bar > .notice { flex: 1 1 18rem; margin: 0; }
-.client-directory-profile-form .ltds-check-list .ltds-check-option { max-width: 26rem; }
+/* Destinations sit side by side; the legend and hint span the row. Phones stack them. */
+.client-directory-profile-form .ltds-check-list { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.client-directory-profile-form .ltds-check-list > .ltds-field-hint { grid-column: 1 / -1; }
+@media (max-width: 640px) {
+  .client-directory-profile-form .ltds-check-list { grid-template-columns: minmax(0, 1fr); }
+}
 
 /* ---------------------------------------------------------------------------
    Finance summary (admin dashboard panel)
