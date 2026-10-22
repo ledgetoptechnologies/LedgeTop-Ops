@@ -1,7 +1,12 @@
 import { createCatalogSourceContext, PRIMARY_ALPHA_SOURCE_ID } from "@ltds/shared";
 
 /** Configured server provenance, not authentication or a second-source registry. */
-export interface ProjectAlphaSourceContext { readonly sourceId: string; readonly staffAuthority: boolean }
+export interface ProjectAlphaSourceContext {
+  readonly sourceId: string;
+  /** Legacy primary-transport compatibility only (HMAC/Delivery ingress).
+   * Never permission to create, update or authorize Operations employees. */
+  readonly staffAuthority: boolean;
+}
 export function createProjectAlphaSourceContext(sourceId: unknown): ProjectAlphaSourceContext {
   const validated = createCatalogSourceContext(sourceId).sourceId;
   return Object.freeze({ sourceId: validated, staffAuthority: validated === PRIMARY_ALPHA_SOURCE_ID });
