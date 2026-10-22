@@ -40,12 +40,37 @@ or transfer success claim.
 
 ## Remaining release gates
 
-The new physical employee test reached full-Worker discovery and a content 200,
-but .NET rejected the response before creating a partial: the gateway supplied
-the expected content length while the custom Worker response stream lost it.
-This exposed a real runtime framing gap that the earlier Node route test did
-not cover. A native fixed-length framing repair and cancellation regression are
-under review. This candidate must not be activated while that lane is failing.
+The first physical employee test exposed a runtime framing gap: the gateway
+supplied the expected length, but the custom Worker stream lost it and .NET
+correctly refused the response. Repair `55e2934a` uses native fixed-length
+framing without buffering the file or weakening client validation. Root passed
+138 focused tests, five joined D1 tests, Ops typechecking and the actual full
+employee transport on this combined source. The latter passed in 73.41 seconds,
+including verified 2 MiB resume, TLS/signature rejection, other-user denial,
+stale-version rejection and post-revoke denial with zero later gateway calls.
+The safe receipt is `windows-employee-workerd-2026-10-22.json` beside this file.
+
+Staging composition now opts enabled Ops into incoming request signals while
+preserving other flags and rejecting an explicit opt-out. Production config is
+unchanged. All 38 constructor/bundle/preflight tests pass. Physical browser
+disconnect cancellation remains unverified; cancelling a native readable may
+not stop a stalled upstream until another chunk or the existing deadline.
+Explicit caller/deadline abortion is tested. See the framing document for that
+bounded resource limitation.
+
+The separate opt-in large run also passed with native framing: 3,221,225,489
+bytes, resumed from 2,148,532,241 (beyond signed 32-bit range), with exact full
+and resumed content lengths and verified SHA-256. Statuses remained
+200/206/403/412/403, with two content-start audits and no gateway calls after
+revocation. This is actual local full-Workerd acceptance, separate from the
+earlier Node-adapter proof. Root reviewed the immutable test and receipt rather
+than duplicating that large transfer after its independent ordinary run. It
+does not qualify standalone Workerd or hosted Cloudflare memory: the measured
+Node test host peaked near 2 GB. Owned volume and other fixture cleanup passed.
+Review additionally found an uncertain volume-create acknowledgement edge;
+cleanup-only follow-up `0ea5b4ae` now attempts removal and checks absence even
+when creation did not report success. An actual empty-volume lost-acknowledgement
+fault verified that path, without allocating or repeating the large transfer.
 
 These checks use synthetic, local resources. They do not establish live staging
 or production transfer acceptance, real user sessions, remote R2 byte access,
