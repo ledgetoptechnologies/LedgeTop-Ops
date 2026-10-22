@@ -2,6 +2,8 @@ name: CI
 
 on:
   pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review]
   push:
     branches: [main]
 
@@ -14,6 +16,8 @@ permissions:
 
 jobs:
   source-invariants:
+    # Drafts and branches other than main are tested on staging, not on GitHub minutes.
+    if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
     runs-on: ubuntu-24.04
     steps:
       - name: Check out the exact commit
@@ -117,6 +121,8 @@ jobs:
 
   incoming-pickup:
     name: incoming-pickup-alpine
+    # Drafts and branches other than main are tested on staging, not on GitHub minutes.
+    if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
     runs-on: ubuntu-24.04
     steps:
       - name: Check out the exact commit
@@ -150,6 +156,8 @@ jobs:
 
   packages:
     name: ${{ matrix.package }}
+    # Drafts and branches other than main are tested on staging, not on GitHub minutes.
+    if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
@@ -188,6 +196,8 @@ jobs:
 
   operations-browser:
     name: operations-browser-${{ matrix.project }}
+    # Drafts and branches other than main are tested on staging, not on GitHub minutes.
+    if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     strategy:
@@ -230,6 +240,8 @@ jobs:
 
   client-browser:
     name: client-browser-${{ matrix.project }}
+    # Drafts and branches other than main are tested on staging, not on GitHub minutes.
+    if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     strategy:
