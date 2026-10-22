@@ -1,0 +1,42 @@
+{
+  "schemaVersion": 1,
+  "sourceCommit": "8cadba88cf0f486d1378735a9b2b6f553bae5594",
+  "sourceArchiveSha256": "9fda4e94e2e96dbdb92a7d9d3a197097dcb8262d7cec65f67d99a76540a2bd28",
+  "environment": "isolated synthetic lab on staging server 192.168.50.90",
+  "remoteDirectory": "/home/bkoltz/ops-staff-client-lab-8cadba88",
+  "pcAddress": "http://127.0.0.1:8789/",
+  "transport": "SSH loopback tunnel; no public lab route",
+  "windowsChecks": {
+    "nativeStaffManagementAndAuthentication": {"passed": 72, "files": 9},
+    "snapshotStatementPlans": {"passed": 23},
+    "snapshotConnectorAndSourceIsolation": {"passed": 18},
+    "syncProjection": {"passed": 21},
+    "authenticatedEntitlementAndScheduledNoop": {"passed": 2},
+    "accessGroupHelper": {"passed": 6},
+    "fullSchemaSyntheticAcceptance": {"passed": 4},
+    "sourceViewerAndWorkflowContracts": {"passed": 36},
+    "operationsTypeScript": "passed",
+    "syncTypeScript": "passed"
+  },
+  "stagingServerChecks": {
+    "fullSchemaSyntheticAcceptance": {"passed": 4},
+    "sharedClientWriterAndComposer": {"passed": 27},
+    "portalDispatcher": {"passed": 8},
+    "portalDispatcherInitialAttempt": "One 5000ms test timeout during parallel suite execution; same unchanged suite passed 8/8 using existing CI=true 30000ms configuration and no file parallelism.",
+    "operationsTypeScript": "passed",
+    "syncTypeScript": "passed",
+    "httpSmokeThroughPcTunnel": "passed: token/Host/Origin denials, native edit/stale refusal, PA employee isolation, disable/enable, selected client source isolation",
+    "browser": "Verified profile edit then ignored PA revocation; native Ops profile remains edited."
+  },
+  "scope": {
+    "productionDeployed": false,
+    "livePaServersChanged": false,
+    "productionAccessPermissionsChanged": false,
+    "trueNasAccessed": false,
+    "sharedStagingDatabasesChanged": false,
+    "engineeringHubRun": false,
+    "realPaOutboundFanoutVerified": false,
+    "productionEmployeeAdminUiComplete": false,
+    "nativeAdmissionDisablesLegacyLogin": false
+  }
+}
