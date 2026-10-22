@@ -5,9 +5,12 @@ come from Microsoft's `dotnet/dotnet` commit
 `4099f83977f4d29604a9aeb971fb0a7bc1d5f699`, the repository commit recorded in the
 signed `Microsoft.WindowsDesktop.App.Runtime.win-x64`10.0.13 nupkg's nuspec.
 The package contains its MIT license but omits these component notice files.
-The self-contained layout includes both WPF and Windows Forms runtime binaries;
-retain both notice files rather than treating the application's WPF UI as proof
-that the other packaged runtime files need no attribution.
+The actual WPF publish includes Presentation assemblies and shared drawing
+binaries (`System.Drawing.Common.dll` and `System.Private.Windows.GdiPlus.dll`),
+and omits `System.Windows.Forms.dll`. Retain both component notice files as
+conservative vendor material for the selected desktop runtime package; this
+does not claim that every third-party component named in those files is linked
+into the application, or that the full Windows Forms runtime is shipped.
 
 | Local file | Original source | SHA256 |
 | --- | --- | --- |
