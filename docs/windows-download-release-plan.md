@@ -212,6 +212,26 @@ is requested here.
 
 ## Update, rollback and uninstall acceptance
 
+### Signing route checkpoint
+
+The local rehearsal in
+`staging/windows-offline-signing-rehearsal-2026-10-22.md` conclusively rejected
+SignTool's external `/dg` operation for this construction MSIX: SDK exit 1,
+`0x80070032`, no digest or signed package. The input remained unchanged. It did
+not test every signing approach or qualify the current runtime candidate.
+
+For direct HTTPS distribution, the preferred production candidate is Microsoft's
+Artifact Signing service, subject to the owner's publisher, eligibility and
+subscription decisions. Its supported SignTool integration uses the provider's
+`/dlib` plugin and requires an enrolled identity, certificate profile and signing
+role. An existing trusted code-signing provider remains an alternative. Store
+distribution offers Store-managed signing but changes the release channel.
+None was enrolled or activated by this rehearsal. Retain the construction
+publisher until the actual verified publisher and separate pilot/stable package
+identities are settled; do not publish under the temporary identity.
+[Microsoft signing options](https://learn.microsoft.com/en-us/windows/msix/package/signing-package-overview),
+[supported signing integration](https://learn.microsoft.com/en-us/azure/artifact-signing/how-to-signing-integrations).
+
 Use App Installer's supported update mechanism rather than a custom privileged
 updater. Pilot the chosen launch/background settings. An update must pause and
 checkpoint transfers before replacing binaries, then renew human authorization
