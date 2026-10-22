@@ -31,6 +31,7 @@ var groups = new (string Name, Func<Task> Run)[] {
     ("packaged releases use only their compiled profile and their own channel folder", PackagedReleases),
     ("closing during startup or sign-in opens nothing and leaves no queue locked", CloseBeforeSignedIn),
     ("closing the window waits for downloads to stop and save, even with sign-in stuck", CloseWindow),
+    ("closing while the previous person's downloads are still stopping waits for them and opens nothing new", CloseDuringSwitch),
     ("the window renders sign-in and files screens", Render),
 };
 foreach (var group in groups) {
@@ -487,6 +488,47 @@ async Task CloseBeforeSignedIn()
         await Task.Delay(300); Pump();
         True(env.Model.Screen == Screen.SignIn && env.Model.Sections.Count == 0, "no files after a sign-in that finished after close");
         True(!Directory.Exists(env.Backend.StateDirectory) || Locks.Free(env.Backend.StateDirectory), "no queue left open");
+    }
+}
+
+async Task CloseDuringSwitch()
+{
+    // Two ways a different person arrives: the app notices on its own, or someone signs in after the session ended.
+    foreach (var viaSignIn in new[] { false, true }) {
+        var now = DateTimeOffset.Now;
+        await using var env = Env.Create(signedIn: true, rate: 400_000, clock: () => now);
+        await env.Model.StartAsync();
+        var alice = env.Backend.Principal;
+        await env.OpenAsync("deliveries", "land-script");
+        env.Check("ortho-full.tif");
+        env.Model.DownloadSelected.Execute(null);
+        await Until(() => env.Model.Transfers.Any(row => row.State == QueuedTransferState.Running && row.Percent > 1), "Alice's download running");
+        if (viaSignIn) {
+            // The app's clock says the sign-in ended, but Alice's download is still running when Bob signs in.
+            now = now.AddHours(2); env.Model.Tick();
+            Equal(Screen.SignIn, env.Model.Screen);
+        }
+        env.Backend.HoldStops();
+        env.Backend.SwitchPerson();
+        var bob = env.Backend.Principal;
+        Task switching;
+        if (viaSignIn) { env.Model.SignIn.Execute(null); switching = Until(() => env.Model.SignIn.CanExecute(null), "sign-in finished", seconds: 30); }
+        else switching = env.Model.CheckPersonAsync();
+        // Alice's queue has been detached and is stopping; it can't finish until released.
+        await Until(() => !env.Model.IsTransferring && env.Model.Sections.Count == 0, "Alice's queue detached", seconds: 10);
+        var closing = env.Model.DisposeAsync().AsTask();
+        await Task.Delay(400);
+        True(!closing.IsCompleted, "closing waits for Alice's downloads to finish stopping");
+        env.Backend.ReleaseStops();
+        await closing; await switching;
+        await Task.Delay(400); Pump();
+        True(env.Model.Files.Count == 0 && env.Model.Transfers.Count == 0, "no files or downloads shown after close");
+        Equal(0, env.Model.Sections.Count);
+        True(!Directory.Exists(Path.Combine(env.Backend.StateDirectory, "portal", bob)), "Bob's queue was never opened");
+        True(Directory.Exists(Path.Combine(env.Backend.StateDirectory, "portal", alice)), "Alice's records kept");
+        True(Locks.Free(env.Backend.StateDirectory), "no queue left locked");
+        Equal(0, env.Backend.Writing);
+        True(!File.Exists(Path.Combine(env.Downloads, "ortho-full.tif")), "nothing promoted");
     }
 }
 

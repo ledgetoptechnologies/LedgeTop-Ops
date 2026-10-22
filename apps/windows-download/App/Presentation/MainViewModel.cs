@@ -39,6 +39,8 @@ public sealed class MainViewModel : Observable, IAsyncDisposable
     private bool closed;
     /// <summary>A queue that is being opened right now, so closing can wait for it and release it.</summary>
     private Task<QueueHost>? opening;
+    /// <summary>The previous person's queue while it stops after a sign-in change, so closing waits for it too.</summary>
+    private Task? retiring;
 
     private const string DefaultSetupText = "Install it from the link in Ledge Top Operations or your client portal. If you already did, ask your Ledge Top contact to check the installation.";
 
@@ -98,6 +100,7 @@ public sealed class MainViewModel : Observable, IAsyncDisposable
     /// <summary>Uses a cached session if there is one; never opens a browser.</summary>
     public async Task StartAsync()
     {
+        if (closed) return;
         try {
             var current = await backend.Session.TryCurrentAsync();
             if (closed) return;
@@ -108,6 +111,7 @@ public sealed class MainViewModel : Observable, IAsyncDisposable
 
     private async Task SignInAsync()
     {
+        if (closed) return;
         signingIn = true; SignIn.Refresh();
         SignInStatus = "Finish signing in in your browser, then come back here.";
         try {
@@ -128,7 +132,11 @@ public sealed class MainViewModel : Observable, IAsyncDisposable
     private async Task EnterAsync(SessionInfo current)
     {
         if (closed) return;
-        if (person is not null && person != current.PrincipalId) await CloseViewsAsync();
+        if (person is not null && person != current.PrincipalId) {
+            await CloseViewsAsync();
+            // The window may have closed while the previous person's downloads were stopping.
+            if (closed) return;
+        }
         session = current; Banner = ""; UpdateSession();
         if (queue is null) {
             var view = generation;
@@ -164,7 +172,10 @@ public sealed class MainViewModel : Observable, IAsyncDisposable
         Notice = ""; Banner = "";
         foreach (var name in new[] { nameof(Location), nameof(FilesEmptyText), nameof(HasMoreFiles) }) Raise(name);
         foreach (var command in new[] { DownloadSelected, PauseAll, ResumeAll, ClearFinished, LoadMoreFiles }) command.Refresh();
-        if (old is not null) await old.DisposeAsync();
+        if (old is null) return;
+        var drain = old.DisposeAsync().AsTask();
+        retiring = drain;
+        try { await drain; } finally { if (retiring == drain) retiring = null; }
     }
 
     /// <summary>
@@ -172,7 +183,7 @@ public sealed class MainViewModel : Observable, IAsyncDisposable
     /// </summary>
     public async Task CheckPersonAsync()
     {
-        if (checkingPerson || person is null) return;
+        if (closed || checkingPerson || person is null) return;
         checkingPerson = true;
         try {
             var current = await backend.Session.TryCurrentAsync();
@@ -360,10 +371,13 @@ public sealed class MainViewModel : Observable, IAsyncDisposable
     private async Task CloseAsync()
     {
         closed = true; generation++;
-        var old = queue; queue = null; var pending = opening;
+        var old = queue; queue = null; var pending = opening; var draining = retiring;
         Exception? failure = null;
         if (old is not null) {
             try { await old.DisposeAsync(); } catch (Exception error) { failure = error; }
+        }
+        if (draining is not null) {
+            try { await draining; } catch (Exception error) { failure ??= error; }
         }
         if (pending is not null) {
             QueueHost? late = null;

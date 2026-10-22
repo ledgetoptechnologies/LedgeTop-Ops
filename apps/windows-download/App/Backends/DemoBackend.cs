@@ -62,6 +62,9 @@ public sealed class DemoBackend : IFilesBackend
     /// <summary>Makes only the download sources' sign-in checks hang (the window's own session check still answers).</summary>
     public void BlockSources() { lock (state) state.SourceGate ??= new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously); }
     public void ReleaseSources() { TaskCompletionSource? gate; lock (state) { gate = state.SourceGate; state.SourceGate = null; } gate?.TrySetResult(); }
+    /// <summary>Makes a stopped download take until <see cref="ReleaseStops"/> to finish stopping (a slow drain).</summary>
+    public void HoldStops() { lock (state) state.StopGate ??= new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously); }
+    public void ReleaseStops() { TaskCompletionSource? gate; lock (state) { gate = state.StopGate; state.StopGate = null; } gate?.TrySetResult(); }
     /// <summary>How many downloads are writing bytes right now.</summary>
     public int Writing { get { lock (state) return state.Writing; } }
     /// <summary>The most downloads that were ever writing at the same moment.</summary>
@@ -85,7 +88,7 @@ public sealed class DemoBackend : IFilesBackend
         public TimeSpan SessionLength;
         public DateTimeOffset ExpiresAt;
         public double BytesPerSecond;
-        public TaskCompletionSource? Gate, SourceGate;
+        public TaskCompletionSource? Gate, SourceGate, StopGate;
         public int Writing, MostAtOnce;
         public bool Valid => SignedIn && ExpiresAt > DateTimeOffset.UtcNow.AddSeconds(5);
         public string Principal => "odqp1_" + Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes("demo-person-" + Person)));
@@ -203,6 +206,11 @@ public sealed class DemoBackend : IFilesBackend
                 progress?.Report(new DownloadProgress(bytes.Length, bytes.Length, DownloadPhase.Verifying));
                 await Task.Delay(300, cancellationToken);
                 File.Move(partial, final, overwrite: false);
+            } catch (OperationCanceledException) {
+                // A held stop finishes only when released, like a slow disk or network close.
+                Task? hold; lock (state) hold = state.StopGate?.Task;
+                if (hold is not null) await hold;
+                throw;
             } finally { lock (state) state.Writing--; }
             progress?.Report(new DownloadProgress(bytes.Length, bytes.Length, DownloadPhase.Completed));
             return final;
