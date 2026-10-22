@@ -35,7 +35,7 @@ export async function employeeWorkerdTransportFixture(input: Input) {
   const pair = await generateKeyPair("RS256", { extractable: true });
   const publicKey = await exportJWK(pair.publicKey); publicKey.kid = "local-employee-workerd-only";
   const observations = { jwksRequests: 0, gatewayRequests: 0, forbiddenNetwork: [] as string[] };
-  const runtime = new Miniflare({ name: "local-employee-ops", modules: true, compatibilityDate: "2026-08-06", compatibilityFlags: ["nodejs_compat"], script,
+  const runtime = new Miniflare({ name: "local-employee-ops", modules: true, compatibilityDate: "2026-08-06", compatibilityFlags: ["nodejs_compat", "enable_request_signal"], script,
     d1Databases: { OPS_DB: crypto.randomUUID() }, bindings: { ENVIRONMENT: "staging", TEAM_DOMAIN: issuer, OPERATIONS_AUD: audience,
       PUBLIC_BASE_URL: opsOrigin, EXPECTED_HOST: new URL(opsOrigin).host,
       WINDOWS_EMPLOYEE_GATEWAY_SIGNING_KEY: Buffer.from(gatewayKey).toString("base64url"),
