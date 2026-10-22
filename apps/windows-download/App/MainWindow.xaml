@@ -1,0 +1,272 @@
+<Window x:Class="LedgeTop.Files.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:p="clr-namespace:LedgeTop.Files.Presentation"
+        Title="Ledge Top Files" Width="1180" Height="780" MinWidth="760" MinHeight="520"
+        Background="{StaticResource Page}" Foreground="{StaticResource Ink}" FontFamily="{StaticResource UiFont}" WindowStartupLocation="CenterScreen">
+  <Window.Resources>
+    <BooleanToVisibilityConverter x:Key="Visible" />
+  </Window.Resources>
+  <Grid>
+    <Grid.RowDefinitions>
+      <RowDefinition Height="Auto" />
+      <RowDefinition Height="Auto" />
+      <RowDefinition Height="*" />
+    </Grid.RowDefinitions>
+
+    <!-- Header -->
+    <Border Grid.Row="0" Background="{StaticResource HeaderBack}" Padding="18,10">
+      <DockPanel LastChildFill="False">
+        <StackPanel Orientation="Horizontal" DockPanel.Dock="Left" VerticalAlignment="Center">
+          <ContentControl ContentTemplate="{StaticResource LtMark}" Width="34" Height="34" Focusable="False" />
+          <StackPanel Margin="10,0,0,0" VerticalAlignment="Center">
+            <TextBlock Text="Ledge Top" Foreground="White" FontWeight="Bold" FontSize="15" />
+            <TextBlock Text="FILES" Foreground="{StaticResource Orange}" FontWeight="Bold" FontSize="10" Margin="0,-1,0,0" />
+          </StackPanel>
+          <Border x:Name="DemoTag" Margin="14,0,0,0" Background="#33EE5007" CornerRadius="6" Padding="8,2" VerticalAlignment="Center" Visibility="Collapsed">
+            <TextBlock x:Name="DemoTagText" Text="Demo data" Foreground="#FFB894" FontSize="11" FontWeight="SemiBold" />
+          </Border>
+        </StackPanel>
+        <TextBlock DockPanel.Dock="Right" Text="{Binding SessionText}" Foreground="#C7D0D7" VerticalAlignment="Center" FontSize="13" />
+      </DockPanel>
+    </Border>
+
+    <!-- Banner: expiry warnings and errors -->
+    <Border Grid.Row="1" Padding="18,9" Visibility="{Binding HasBanner, Converter={StaticResource Visible}}">
+      <Border.Style>
+        <Style TargetType="Border">
+          <Setter Property="Background" Value="{StaticResource WarnBack}" />
+          <Style.Triggers>
+            <DataTrigger Binding="{Binding BannerIsError}" Value="True"><Setter Property="Background" Value="{StaticResource ErrorBack}" /></DataTrigger>
+          </Style.Triggers>
+        </Style>
+      </Border.Style>
+      <TextBlock Text="{Binding Banner}" FontWeight="SemiBold" AutomationProperties.LiveSetting="Assertive" />
+    </Border>
+
+    <!-- Sign in -->
+    <Grid Grid.Row="2" x:Name="SignInScreen">
+      <Border Style="{StaticResource Card}" Width="440" HorizontalAlignment="Center" VerticalAlignment="Center" Padding="34,30">
+        <StackPanel>
+          <Border Background="{StaticResource HeaderBack}" CornerRadius="14" Width="64" Height="64" Padding="10" HorizontalAlignment="Left">
+            <ContentControl ContentTemplate="{StaticResource LtMark}" Focusable="False" />
+          </Border>
+          <TextBlock Text="Sign in to Ledge Top Files" FontSize="22" FontWeight="Bold" Margin="0,18,0,6" />
+          <TextBlock Foreground="{StaticResource Muted}" FontSize="14" LineHeight="21"
+                     Text="Use your Ledge Top account in your browser. The files you're allowed to download appear here, from client deliveries and the company server." />
+          <Button Style="{StaticResource Primary}" Content="Sign in with your browser" Command="{Binding SignIn}" Margin="0,22,0,0" HorizontalAlignment="Left" Padding="18,9" />
+          <TextBlock Text="{Binding SignInStatus}" Margin="0,14,0,0" FontSize="13" Foreground="{StaticResource Muted}" AutomationProperties.LiveSetting="Polite" />
+        </StackPanel>
+      </Border>
+    </Grid>
+
+    <!-- Not set up -->
+    <Grid Grid.Row="2" x:Name="NotSetUpScreen">
+      <Border Style="{StaticResource Card}" Width="460" HorizontalAlignment="Center" VerticalAlignment="Center" Padding="34,30">
+        <StackPanel>
+          <TextBlock Text="{Binding SetupTitle}" FontSize="20" FontWeight="Bold" Margin="0,0,0,8" />
+          <TextBlock Foreground="{StaticResource Muted}" FontSize="14" LineHeight="21" Text="{Binding SetupText}" />
+        </StackPanel>
+      </Border>
+    </Grid>
+
+    <!-- Files -->
+    <Grid Grid.Row="2" x:Name="FilesScreen" Margin="16">
+      <Grid.RowDefinitions>
+        <RowDefinition Height="*" />
+        <RowDefinition Height="Auto" />
+      </Grid.RowDefinitions>
+      <Grid.ColumnDefinitions>
+        <ColumnDefinition Width="280" MinWidth="200" />
+        <ColumnDefinition Width="12" />
+        <ColumnDefinition Width="*" />
+      </Grid.ColumnDefinitions>
+
+      <!-- Places -->
+      <Border Grid.Column="0" Style="{StaticResource Card}" Padding="6,10">
+        <TreeView x:Name="Places" ItemsSource="{Binding Sections}" BorderThickness="0" Background="Transparent" AutomationProperties.Name="Places"
+                  ScrollViewer.HorizontalScrollBarVisibility="Disabled">
+          <TreeView.ItemContainerStyle>
+            <Style TargetType="TreeViewItem">
+              <Setter Property="IsExpanded" Value="{Binding IsExpanded, Mode=TwoWay}" />
+              <Setter Property="IsSelected" Value="{Binding IsSelected, Mode=TwoWay}" />
+              <Setter Property="Padding" Value="4,5" />
+              <Setter Property="FontSize" Value="13" />
+              <Setter Property="FontWeight" Value="Normal" />
+              <Setter Property="Foreground" Value="{StaticResource Ink}" />
+            </Style>
+          </TreeView.ItemContainerStyle>
+          <TreeView.ItemTemplate>
+            <HierarchicalDataTemplate DataType="{x:Type p:NodeViewModel}" ItemsSource="{Binding Children}">
+              <TextBlock x:Name="NodeName" Text="{Binding Name}" TextWrapping="NoWrap" TextTrimming="CharacterEllipsis" ToolTip="{Binding Name}" />
+              <HierarchicalDataTemplate.Triggers>
+                <DataTrigger Binding="{Binding IsSection}" Value="True">
+                  <Setter TargetName="NodeName" Property="FontWeight" Value="Bold" />
+                  <Setter TargetName="NodeName" Property="Foreground" Value="{StaticResource Muted}" />
+                </DataTrigger>
+                <DataTrigger Binding="{Binding IsSection}" Value="False">
+                  <Setter TargetName="NodeName" Property="FontWeight" Value="Normal" />
+                </DataTrigger>
+                <DataTrigger Binding="{Binding IsMore}" Value="True">
+                  <Setter TargetName="NodeName" Property="Foreground" Value="#B33D00" />
+                  <Setter TargetName="NodeName" Property="FontWeight" Value="SemiBold" />
+                </DataTrigger>
+              </HierarchicalDataTemplate.Triggers>
+            </HierarchicalDataTemplate>
+          </TreeView.ItemTemplate>
+        </TreeView>
+      </Border>
+
+      <!-- Files in the chosen folder -->
+      <Border Grid.Column="2" Style="{StaticResource Card}" Padding="16,14">
+        <Grid>
+          <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+          </Grid.RowDefinitions>
+          <DockPanel Grid.Row="0" LastChildFill="True">
+            <Button DockPanel.Dock="Right" Style="{StaticResource Primary}" Command="{Binding DownloadSelected}" Content="Download selected" />
+            <TextBlock Text="{Binding Location}" FontSize="16" FontWeight="SemiBold" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" TextWrapping="NoWrap" Margin="0,0,12,0" />
+          </DockPanel>
+          <Border Grid.Row="1" Margin="0,10,0,0" Padding="12,8" CornerRadius="8" Background="{StaticResource WarnBack}"
+                  Visibility="{Binding HasNotice, Converter={StaticResource Visible}}">
+            <TextBlock Text="{Binding Notice}" Foreground="{StaticResource WarnInk}" FontSize="13" AutomationProperties.LiveSetting="Polite" />
+          </Border>
+          <Grid Grid.Row="2" Margin="0,10,0,0">
+            <Grid.RowDefinitions>
+              <RowDefinition Height="*" />
+              <RowDefinition Height="Auto" />
+            </Grid.RowDefinitions>
+            <ListView x:Name="FileList" ItemsSource="{Binding Files}" BorderThickness="0" AutomationProperties.Name="Files" SelectionMode="Extended">
+              <ListView.ItemContainerStyle>
+                <Style TargetType="ListViewItem">
+                  <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+                  <Setter Property="Foreground" Value="{StaticResource Ink}" />
+                  <Setter Property="Padding" Value="2,6" />
+                  <Setter Property="ToolTip" Value="{Binding StatusDetail}" />
+                  <Style.Triggers>
+                    <DataTrigger Binding="{Binding StatusDetail}" Value=""><Setter Property="ToolTip" Value="{x:Null}" /></DataTrigger>
+                  </Style.Triggers>
+                </Style>
+              </ListView.ItemContainerStyle>
+              <ListView.View>
+                <GridView>
+                  <GridViewColumn Width="36">
+                    <GridViewColumn.CellTemplate>
+                      <DataTemplate>
+                        <CheckBox IsChecked="{Binding IsChecked, Mode=TwoWay}" IsEnabled="{Binding CanDownload}" AutomationProperties.Name="{Binding Name}" />
+                      </DataTemplate>
+                    </GridViewColumn.CellTemplate>
+                  </GridViewColumn>
+                  <GridViewColumn Header="Name" Width="360">
+                    <GridViewColumn.CellTemplate>
+                      <DataTemplate><TextBlock Text="{Binding Name}" TextWrapping="NoWrap" TextTrimming="CharacterEllipsis" /></DataTemplate>
+                    </GridViewColumn.CellTemplate>
+                  </GridViewColumn>
+                  <GridViewColumn Header="Type" Width="70" DisplayMemberBinding="{Binding Type}" />
+                  <GridViewColumn Header="Size" Width="90" DisplayMemberBinding="{Binding Size}" />
+                  <GridViewColumn Header="Status" Width="140">
+                    <GridViewColumn.CellTemplate>
+                      <DataTemplate>
+                        <Border Background="{StaticResource WarnBack}">
+                          <Border.Style>
+                            <Style TargetType="Border" BasedOn="{StaticResource Pill}">
+                              <Style.Triggers><DataTrigger Binding="{Binding Status}" Value=""><Setter Property="Visibility" Value="Collapsed" /></DataTrigger></Style.Triggers>
+                            </Style>
+                          </Border.Style>
+                          <TextBlock Text="{Binding Status}" Foreground="{StaticResource WarnInk}" FontSize="12" FontWeight="SemiBold" />
+                        </Border>
+                      </DataTemplate>
+                    </GridViewColumn.CellTemplate>
+                  </GridViewColumn>
+                </GridView>
+              </ListView.View>
+            </ListView>
+            <TextBlock x:Name="FilesEmpty" Text="{Binding FilesEmptyText}" Foreground="{StaticResource Muted}" HorizontalAlignment="Center" VerticalAlignment="Center" FontSize="14" />
+            <Button Grid.Row="1" Style="{StaticResource Small}" Margin="0,8,0,0" HorizontalAlignment="Center" Command="{Binding LoadMoreFiles}"
+                    Content="Show more files" Visibility="{Binding HasMoreFiles, Converter={StaticResource Visible}}" />
+          </Grid>
+        </Grid>
+      </Border>
+
+      <!-- Downloads -->
+      <Border Grid.Row="1" Grid.ColumnSpan="3" Style="{StaticResource Card}" Margin="0,12,0,0" Padding="16,12" MaxHeight="300">
+        <DockPanel>
+          <DockPanel DockPanel.Dock="Top" LastChildFill="True" Margin="0,0,0,8">
+            <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
+              <Button Style="{StaticResource Small}" Content="Pause all" Command="{Binding PauseAll}" Margin="6,0,0,0" />
+              <Button Style="{StaticResource Small}" Content="Resume all" Command="{Binding ResumeAll}" Margin="6,0,0,0" />
+              <Button Style="{StaticResource Small}" Content="Clear finished" Command="{Binding ClearFinished}" Margin="6,0,0,0" />
+            </StackPanel>
+            <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+              <TextBlock Text="Downloads" FontSize="15" FontWeight="SemiBold" />
+              <TextBlock Text="  ·  Saving to " Foreground="{StaticResource Muted}" FontSize="13" VerticalAlignment="Center" />
+              <TextBlock Text="{Binding Destination}" Foreground="{StaticResource Muted}" FontSize="13" VerticalAlignment="Center" TextWrapping="NoWrap" TextTrimming="CharacterEllipsis" MaxWidth="460" ToolTip="{Binding Destination}" />
+              <Button Style="{StaticResource Link}" Content="Change" Command="{Binding ChangeFolder}" Margin="4,0,0,0" FontSize="13" />
+            </StackPanel>
+          </DockPanel>
+          <Grid>
+            <TextBlock x:Name="TransfersEmpty" Text="Files you download appear here." Foreground="{StaticResource Muted}" FontSize="13" Margin="0,4" />
+            <ScrollViewer VerticalScrollBarVisibility="Auto">
+              <ItemsControl ItemsSource="{Binding Transfers}" AutomationProperties.Name="Downloads">
+                <ItemsControl.ItemTemplate>
+                  <DataTemplate DataType="{x:Type p:TransferRow}">
+                    <Border BorderBrush="{StaticResource Line}" BorderThickness="0,1,0,0" Padding="0,8">
+                      <Grid>
+                        <Grid.ColumnDefinitions>
+                          <ColumnDefinition Width="*" />
+                          <ColumnDefinition Width="220" />
+                          <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <StackPanel Grid.Column="0" Margin="0,0,12,0">
+                          <TextBlock FontSize="13" TextWrapping="NoWrap" TextTrimming="CharacterEllipsis">
+                            <Run Text="{Binding Name, Mode=OneWay}" FontWeight="SemiBold" /><Run Text="  ·  " Foreground="{StaticResource Muted}" /><Run Text="{Binding ProgressText, Mode=OneWay}" Foreground="{StaticResource Muted}" />
+                          </TextBlock>
+                          <TextBlock Text="{Binding Detail}" FontSize="12" Foreground="{StaticResource Muted}" Margin="0,2,0,0"
+                                     Visibility="{Binding HasDetail, Converter={StaticResource Visible}}" />
+                        </StackPanel>
+                        <StackPanel Grid.Column="1" VerticalAlignment="Center">
+                          <ProgressBar Value="{Binding Percent, Mode=OneWay}" Maximum="100" Visibility="{Binding IsRunning, Converter={StaticResource Visible}}" AutomationProperties.Name="{Binding Name}" />
+                          <Border x:Name="StatusPill" Style="{StaticResource Pill}" Background="#EEF1F4" Margin="0,4,0,0">
+                            <TextBlock x:Name="StatusText" Text="{Binding Status}" FontSize="12" FontWeight="SemiBold" Foreground="{StaticResource Muted}" />
+                          </Border>
+                        </StackPanel>
+                        <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center" Margin="12,0,0,0">
+                          <Button Style="{StaticResource Small}" Content="Pause" Command="{Binding Pause}" Visibility="{Binding IsActive, Converter={StaticResource Visible}}" Margin="4,0,0,0" />
+                          <Button Style="{StaticResource Small}" Content="{Binding ResumeLabel}" Command="{Binding Resume}" Visibility="{Binding CanResume, Converter={StaticResource Visible}}" Margin="4,0,0,0" />
+                          <Button Style="{StaticResource Small}" Content="Open" Command="{Binding Open}" Margin="4,0,0,0" x:Name="OpenButton" Visibility="Collapsed" />
+                          <Button Style="{StaticResource Small}" Content="Show in folder" Command="{Binding Reveal}" Margin="4,0,0,0" x:Name="RevealButton" Visibility="Collapsed" />
+                          <Button Style="{StaticResource Small}" Content="Cancel" Command="{Binding Cancel}" Margin="4,0,0,0" x:Name="CancelButton" />
+                        </StackPanel>
+                      </Grid>
+                    </Border>
+                    <DataTemplate.Triggers>
+                      <DataTrigger Binding="{Binding State}" Value="Completed">
+                        <Setter TargetName="StatusPill" Property="Background" Value="{StaticResource DoneBack}" />
+                        <Setter TargetName="StatusText" Property="Foreground" Value="{StaticResource DoneInk}" />
+                        <Setter TargetName="OpenButton" Property="Visibility" Value="Visible" />
+                        <Setter TargetName="RevealButton" Property="Visibility" Value="Visible" />
+                      </DataTrigger>
+                      <DataTrigger Binding="{Binding IsFinished}" Value="True">
+                        <Setter TargetName="CancelButton" Property="Visibility" Value="Collapsed" />
+                      </DataTrigger>
+                      <DataTrigger Binding="{Binding IsWarning}" Value="True">
+                        <Setter TargetName="StatusPill" Property="Background" Value="{StaticResource WarnBack}" />
+                        <Setter TargetName="StatusText" Property="Foreground" Value="{StaticResource WarnInk}" />
+                      </DataTrigger>
+                      <DataTrigger Binding="{Binding IsError}" Value="True">
+                        <Setter TargetName="StatusPill" Property="Background" Value="{StaticResource ErrorBack}" />
+                        <Setter TargetName="StatusText" Property="Foreground" Value="{StaticResource ErrorInk}" />
+                      </DataTrigger>
+                    </DataTemplate.Triggers>
+                  </DataTemplate>
+                </ItemsControl.ItemTemplate>
+              </ItemsControl>
+            </ScrollViewer>
+          </Grid>
+        </DockPanel>
+      </Border>
+    </Grid>
+  </Grid>
+</Window>

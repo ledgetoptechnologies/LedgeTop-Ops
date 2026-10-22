@@ -1,0 +1,17 @@
+{
+  "description": "Synthetic local acceptance records; never import into production.",
+  "sources": {
+    "ltds": "project-alpha:primary",
+    "ltt": "project-alpha:secondary"
+  },
+  "opsEmployee": {
+    "id": "synthetic-ops-employee",
+    "email": "employee@ops-isolation.invalid",
+    "displayName": "Synthetic Ops Employee"
+  },
+  "clients": [
+    { "id": "synthetic-drone-only", "name": "Synthetic Drone Client", "email": "drone@client-isolation.invalid", "destinations": ["ltds"] },
+    { "id": "synthetic-technology-only", "name": "Synthetic Technology Client", "email": "technology@client-isolation.invalid", "destinations": ["ltt"] },
+    { "id": "synthetic-shared-client", "name": "Synthetic Shared Client", "email": "shared@client-isolation.invalid", "destinations": ["ltds", "ltt"] }
+  ]
+}

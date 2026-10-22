@@ -1,0 +1,151 @@
+{
+  "schemaVersion": 1,
+  "helperSha256": "76b2805253d0d6ffacb092a7acfbee99e7af6917835c0c5410e23f3ef5052da2",
+  "architecture": "AMD64",
+  "format": "PE32+",
+  "imports": [
+    {
+      "dll": "KERNEL32.dll",
+      "symbols": [
+        "AddVectoredContinueHandler",
+        "AddVectoredExceptionHandler",
+        "CloseHandle",
+        "CreateEventA",
+        "CreateIoCompletionPort",
+        "CreateThread",
+        "CreateWaitableTimerA",
+        "CreateWaitableTimerExW",
+        "DeleteCriticalSection",
+        "DuplicateHandle",
+        "EnterCriticalSection",
+        "ExitProcess",
+        "FreeEnvironmentStringsW",
+        "GetConsoleMode",
+        "GetCurrentThreadId",
+        "GetEnvironmentStringsW",
+        "GetErrorMode",
+        "GetLastError",
+        "GetProcAddress",
+        "GetProcessAffinityMask",
+        "GetQueuedCompletionStatusEx",
+        "GetStdHandle",
+        "GetSystemDirectoryA",
+        "GetSystemInfo",
+        "GetThreadContext",
+        "InitializeCriticalSection",
+        "LeaveCriticalSection",
+        "LoadLibraryExW",
+        "PostQueuedCompletionStatus",
+        "QueryPerformanceCounter",
+        "RaiseFailFastException",
+        "ResumeThread",
+        "RtlLookupFunctionEntry",
+        "RtlVirtualUnwind",
+        "SetConsoleCtrlHandler",
+        "SetErrorMode",
+        "SetEvent",
+        "SetProcessPriorityBoost",
+        "SetThreadContext",
+        "SetThreadPriority",
+        "SetUnhandledExceptionFilter",
+        "SetWaitableTimer",
+        "Sleep",
+        "SuspendThread",
+        "SwitchToThread",
+        "TlsAlloc",
+        "TlsGetValue",
+        "VirtualAlloc",
+        "VirtualFree",
+        "VirtualProtect",
+        "VirtualQuery",
+        "WaitForMultipleObjects",
+        "WaitForSingleObject",
+        "WerGetFlags",
+        "WerSetFlags",
+        "WriteConsoleW",
+        "WriteFile",
+        "__C_specific_handler"
+      ]
+    },
+    {
+      "dll": "api-ms-win-crt-environment-l1-1-0.dll",
+      "symbols": [
+        "__p__environ"
+      ]
+    },
+    {
+      "dll": "api-ms-win-crt-heap-l1-1-0.dll",
+      "symbols": [
+        "_set_new_mode",
+        "calloc",
+        "free",
+        "malloc"
+      ]
+    },
+    {
+      "dll": "api-ms-win-crt-locale-l1-1-0.dll",
+      "symbols": [
+        "_configthreadlocale"
+      ]
+    },
+    {
+      "dll": "api-ms-win-crt-math-l1-1-0.dll",
+      "symbols": [
+        "__setusermatherr"
+      ]
+    },
+    {
+      "dll": "api-ms-win-crt-private-l1-1-0.dll",
+      "symbols": [
+        "memcpy"
+      ]
+    },
+    {
+      "dll": "api-ms-win-crt-runtime-l1-1-0.dll",
+      "symbols": [
+        "__p___argc",
+        "__p___argv",
+        "_cexit",
+        "_configure_narrow_argv",
+        "_crt_atexit",
+        "_exit",
+        "_initialize_narrow_environment",
+        "_set_app_type",
+        "_initterm",
+        "_initterm_e",
+        "_set_invalid_parameter_handler",
+        "abort",
+        "exit",
+        "signal"
+      ]
+    },
+    {
+      "dll": "api-ms-win-crt-stdio-l1-1-0.dll",
+      "symbols": [
+        "__acrt_iob_func",
+        "__p__commode",
+        "__p__fmode",
+        "__stdio_common_vfprintf",
+        "fflush",
+        "fwrite",
+        "setvbuf"
+      ]
+    },
+    {
+      "dll": "api-ms-win-crt-string-l1-1-0.dll",
+      "symbols": [
+        "strlen",
+        "strncmp"
+      ]
+    }
+  ],
+  "delayImportDirectory": {
+    "rva": 0,
+    "size": 0
+  },
+  "completeNativeProvenance": false,
+  "limitations": [
+    "PE import tables enumerate declared DLL imports, not statically linked native libraries or DLLs loaded dynamically by name.",
+    "CGO_ENABLED=1 and these imports do not identify the builder C compiler/runtime or establish linked native license completeness."
+  ]
+}

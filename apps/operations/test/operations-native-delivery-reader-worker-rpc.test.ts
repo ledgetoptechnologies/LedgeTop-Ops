@@ -30,7 +30,9 @@ describe('native private reader class transport and environment boundaries', () 
           const selector = new URL(request.url).searchParams.get('case');
           const binding = selector==='enabled' ? env.ENABLED : selector==='production' ? env.PRODUCTION : selector==='wronghost' ? env.WRONGHOST : env.DISABLED;
           const input = request.method==='POST' ? await request.json() : {};
-          const result = await binding.readNativeDeliveryAuthorization(input);
+          const result = new URL(request.url).searchParams.get('protocol')==='successor'
+            ? await binding.readWindowsDeliverySuccessorAuthorization(input)
+            : await binding.readNativeDeliveryAuthorization(input);
           return Response.json({ primitive: typeof result, result });
         } };`,
         serviceBindings: Object.fromEntries(['enabled','disabled','production','wronghost'].map(name => [name.toUpperCase(), {
@@ -48,6 +50,23 @@ describe('native private reader class transport and environment boundaries', () 
     expect(body.primitive).toBe('string');
     expect(JSON.parse(body.result)).toEqual({ ok: false, protocolVersion: 1, code: 'denied' });
     expect(body.result).not.toMatch(/SELECT|sqlite|__rpc|dispos|stack/i);
+  });
+
+  it('keeps successor calls distinct, bounded and default-off across actual service RPC', async () => {
+    for (const selector of ['disabled','wronghost','enabled','production']) {
+      const response = await runtime.dispatchFetch(`https://synthetic.test/?case=${selector}&protocol=successor`, {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify('not-a-canonical-grant'),
+      });
+      const result = await response.json() as { primitive: string; result: string };
+      expect(result.primitive).toBe('string');
+      expect(JSON.parse(result.result)).toEqual({ ok: false, protocolVersion: 1,
+        code: selector==='disabled'||selector==='wronghost' ? 'disabled' : 'invalid' });
+      expect(result.result).not.toMatch(/SELECT|sqlite|__rpc|dispos|stack/i);
+    }
+    const large = await runtime.dispatchFetch('https://synthetic.test/?case=enabled&protocol=successor', {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify('x'.repeat(65_537)),
+    });
+    expect(await large.json()).toEqual({ primitive: 'string', result: JSON.stringify({ ok: false, protocolVersion: 1, code: 'invalid' }) });
   });
 
   it('supports exact production configuration but rejects disabled and mismatched-origin invocations', async () => {

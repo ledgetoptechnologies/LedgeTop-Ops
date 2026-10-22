@@ -1,0 +1,40 @@
+{
+  "kind": "local-employee-transport-v1",
+  "bytes": 3221225489,
+  "sha256": "276e3167c7710b73691bbe9a3c0d66605ff1b21852b0afde7cc54d9f651797e0",
+  "retainedPrefixBytes": 2148532241,
+  "tlsPinRejected": true,
+  "rootsAndListingParsed": true,
+  "resumedDigestVerified": true,
+  "crossUserDenied": true,
+  "traversalDenied": true,
+  "staleVersionRejected": true,
+  "revokedHandleDenied": true,
+  "peakWorkingSetBytes": 75517952,
+  "imageId": "sha256:551ed4fc96b8621ed06e6caed9a2bc3ab26b180ddeb9c1fe01f370993a82c9d5",
+  "largeFileMode": true,
+  "elapsedMs": 126808,
+  "hostAvailableBytesBefore": "774972698624",
+  "volumeAvailableBytesBefore": 774098923520,
+  "volumeAvailableBytesAfterSource": 770877562880,
+  "sourceAllocatedBytes": 3221233664,
+  "nodePeakRssBytes": 650878976,
+  "pythonPeakRssBytes": 35565568,
+  "observedDownloadStatuses": [
+    200,
+    206,
+    403,
+    412,
+    403
+  ],
+  "upstreamOperations": [
+    "list",
+    "manifest",
+    "content",
+    "content",
+    "manifest"
+  ],
+  "gatewayCallsAfterRevocation": 0,
+  "auditEvents": 2,
+  "limits": "Actual local .NET/Ops D1/Python container transport; synthetic JWKS discovery/helper and local TLS adapters. No human sign-in, NAS, staging host, EH or production acceptance."
+}

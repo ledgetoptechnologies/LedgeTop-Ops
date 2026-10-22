@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--UNSIGNED OFFLINE CONSTRUCTION PREVIEW. Not for installation, hosting or distribution.-->
+<AppInstaller Version="0.0.0.1" Uri="https://installer-preview.example.invalid/windows/pilot/preview.appinstaller" xmlns="http://schemas.microsoft.com/appx/appinstaller/2021">
+  <MainPackage Name="LedgeTop.Files.PilotBuildPreview" Publisher="CN=LedgeTop Build Preview" Version="0.0.0.1" ProcessorArchitecture="x64" Uri="https://installer-preview.example.invalid/windows/pilot/preview-0.0.0.1.msix" />
+  <UpdateSettings>
+    <OnLaunch HoursBetweenUpdateChecks="12" ShowPrompt="false" UpdateBlocksActivation="false" />
+    <AutomaticBackgroundTask />
+  </UpdateSettings>
+</AppInstaller>

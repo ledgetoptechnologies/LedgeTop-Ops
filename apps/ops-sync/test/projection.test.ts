@@ -58,75 +58,55 @@ describe("entitlement projection",()=>{
   });
   afterEach(async()=>{vi.unstubAllGlobals();await miniflare.dispose();});
 
-  it("grants, retries a pending event, completes idempotently, and revokes",async()=>{
+  it("ignores employee grants and revocations durably without importing a PA employee",async()=>{
+    const before=await staffSnapshot();
     const grant=event();
-    await expect(applyEntitlementEvent(env(),grant,"hash-a")).resolves.toBe("applied");
-    expect(await db.prepare("SELECT status FROM staff_users WHERE project_alpha_user_id='42'").first("status")).toBe("active");
-    expect(await db.prepare("SELECT role_id FROM staff_role_assignments WHERE staff_id='staff-pa-42'").first("role_id")).toBe("role-operator");
-    expect(await db.prepare("SELECT scope FROM staff_role_assignments WHERE staff_id='staff-pa-42'").first("scope")).toBe("assigned");
-    expect(await db.prepare("SELECT count(*) AS total FROM staff_divisions WHERE staff_id='staff-pa-42'").first("total")).toBe(0);
-    await expect(applyEntitlementEvent(env(),grant,"hash-a")).resolves.toBe("applied");
-    await completeEvent(env(),grant);
+    await expect(applyEntitlementEvent(env(),grant,"hash-a")).resolves.toBe("ignored");
+    expect(await db.prepare("SELECT status,last_error FROM integration_event_receipts WHERE event_id=?").bind(grant.event_id).first()).toEqual({status:"ignored",last_error:null});
     await expect(applyEntitlementEvent(env(),grant,"hash-a")).resolves.toBe("duplicate");
-
-    const revoke=event({event_id:"959204fb-5ac3-4d18-8798-7759bd56cbe9",event_type:"application_entitlement.revoked",occurred_at:"2026-07-17T20:01:00.000000Z"});
-    await expect(applyEntitlementEvent(env(),revoke,"hash-b")).resolves.toBe("applied");
-    expect(await db.prepare("SELECT status FROM staff_users WHERE project_alpha_user_id='42'").first("status")).toBe("inactive");
-    expect(await db.prepare("SELECT count(*) AS total FROM staff_role_assignments WHERE staff_id='staff-pa-42'").first("total")).toBe(0);
+    await expect(applyEntitlementEvent(env(),grant,"different-payload")).rejects.toThrow("event-id-conflict");
+    const revoke=event({event_id:crypto.randomUUID(),event_type:"application_entitlement.revoked",occurred_at:"2026-07-17T20:01:00Z"});
+    await expect(applyEntitlementEvent(env(),revoke,"hash-b")).resolves.toBe("ignored");
+    expect(await staffSnapshot()).toEqual(before);
+    for(const table of ["pa_users","pa_application_entitlements","pa_projection_record_ids"])
+      expect(await db.prepare(`SELECT count(*) total FROM ${table}`).first("total")).toBe(0);
+    expect(await db.prepare("SELECT count(*) total FROM pa_projection_entity_leases").first("total")).toBe(0);
   });
 
-  it("preserves a per-event Access failure when projection completion is acknowledged",async()=>{
-    const grant=event();
-    await applyEntitlementEvent(env(),grant,"access-pending");
-    await recordAccessFailure(env(),grant.event_id,"access-group-update-503");
-    await completeEvent(env(),grant,true);
-    expect(await db.prepare("SELECT status FROM integration_event_receipts WHERE event_id=?").bind(grant.event_id).first("status")).toBe("completed");
-    expect(await db.prepare("SELECT last_error FROM integration_event_receipts WHERE event_id=?").bind(grant.event_id).first("last_error")).toBe("access-group-update-503");
+  async function staffSnapshot(){
+    return Promise.all(["staff_users","staff_role_assignments","staff_divisions","staff_permission_overrides"].map(async table=>
+      (await db.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all()).results));
+  }
+
+  it("preserves existing Ops accounts, access subjects, grants and protected owner for PA profile/status/admin changes",async()=>{
+    await db.batch([
+      db.prepare("INSERT INTO staff_users(id,email,display_name,project_alpha_user_id,access_subject,status,provisioning_source) VALUES('local-pilot','pilot@example.com','Ops Pilot','42','subject-local','active','project-alpha')"),
+      db.prepare("INSERT INTO staff_role_assignments(id,staff_id,role_id,scope,scope_key) VALUES('local-role','local-pilot','role-operator','assigned','assigned')"),
+      db.prepare("INSERT INTO staff_divisions(staff_id,division_id) VALUES('local-pilot','division-pa-30')"),
+    ]);
+    const before=await staffSnapshot();
+    for(const user of [
+      {id:"42",email:"pilot@example.com",display_name:"PA Rename",active:false},
+      {id:"42",email:"new@example.com",display_name:"PA Rename Again",active:true},
+      {id:"1",email:"beaukoltz@ledgetopdroneservices.com",display_name:"PA Owner Rename",active:false},
+    ])for(const role of ["role-admin","role-division-manager","role-operator"] as const){
+      const incoming=event({event_id:crypto.randomUUID(),user,entitlement:{application_key:"ltds_ops",enabled:user.active,role_key:role,business_unit_ids:["30"]}});
+      await expect(applyEntitlementEvent(env(),incoming,`${user.email}-${role}`)).resolves.toBe("ignored");
+    }
+    expect(await staffSnapshot()).toEqual(before);
   });
 
-  it("maps PA administrators to immutable global admin access",async()=>{
-    const admin=event({entitlement:{application_key:"ltds_ops",enabled:true,role_key:"role-admin",business_unit_ids:["30"]}});
-    await expect(applyEntitlementEvent(env(),admin,"admin-hash")).resolves.toBe("applied");
-    expect(await db.prepare("SELECT immutable FROM roles WHERE id='role-admin'").first("immutable")).toBe(1);
-    expect(await db.prepare("SELECT role_id FROM staff_role_assignments WHERE staff_id='staff-pa-42'").first("role_id")).toBe("role-admin");
-    expect(await db.prepare("SELECT scope FROM staff_role_assignments WHERE staff_id='staff-pa-42'").first("scope")).toBe("global");
-    expect(await db.prepare("SELECT count(*) AS total FROM staff_divisions WHERE staff_id='staff-pa-42'").first("total")).toBe(0);
-  });
-
-  it("reduces non-admin PA entitlement labels to assigned-only operator access",async()=>{
-    const legacy=event({entitlement:{application_key:"ltds_ops",enabled:true,role_key:"role-division-manager",business_unit_ids:["30"]}});
-    await expect(applyEntitlementEvent(env(),legacy,"legacy-hash")).resolves.toBe("applied");
-    const assignment=await db.prepare("SELECT role_id,scope,division_id FROM staff_role_assignments WHERE staff_id='staff-pa-42'").first<{role_id:string;scope:string;division_id:string|null}>();
-    expect(assignment).toBeTruthy();
-    expect(assignment!.role_id).toBe("role-operator");
-    expect(assignment!.scope).toBe("assigned");
-    expect(await db.prepare("SELECT role_key FROM pa_application_entitlements WHERE user_id='42'").first("role_key")).toBe("role-division-manager");
-    const divisions=await db.prepare("SELECT count(*) AS total FROM staff_divisions WHERE staff_id='staff-pa-42'").first<{total:number}>();
-    expect(divisions!.total).toBe(0);
-  });
-
-  it("ignores older events and never changes the protected Owner",async()=>{
-    const ownerBefore=await db.prepare("SELECT status,sync_protected FROM staff_users WHERE id='staff-beau-koltz'").first<{status:string;sync_protected:number}>();
-    const ownerEvent=event({user:{id:"1",email:"beaukoltz@ledgetopdroneservices.com",display_name:"Changed Name",active:false},entitlement:{application_key:"ltds_ops",enabled:false,role_key:"role-operator",business_unit_ids:[]}});
-    await applyEntitlementEvent(env(),ownerEvent,"owner-hash");
-    expect(await db.prepare("SELECT status,sync_protected FROM staff_users WHERE id='staff-beau-koltz'").first()).toEqual(ownerBefore);
-    expect(await db.prepare("SELECT role_id FROM staff_role_assignments WHERE staff_id='staff-beau-koltz'").first("role_id")).toBe("role-owner");
-
-    const newer=event({event_id:"92d580e2-4865-4f83-8a76-a011c510dcf1",occurred_at:"2026-07-17T21:00:00.000000Z"});
-    await applyEntitlementEvent(env(),newer,"newer");
-    const older=event({event_id:"bcb7fb95-73d9-421b-8bc8-96190fafcd7e",occurred_at:"2026-07-17T20:59:59.000000Z",entitlement:{application_key:"ltds_ops",enabled:false,role_key:"role-operator",business_unit_ids:[]}});
-    await expect(applyEntitlementEvent(env(),older,"older")).resolves.toBe("ignored");
-    expect(await db.prepare("SELECT enabled FROM pa_application_entitlements WHERE user_id='42'").first("enabled")).toBe(1);
-  });
-
-  it("updates email in place and prevents a pending older retry from rolling state back",async()=>{
-    const first=event();
-    await applyEntitlementEvent(env(),first,"first");
-    const changed=event({event_id:"b43f5552-acde-4d8d-93a1-f09be56a91ec",occurred_at:"2026-07-17T20:02:00.000000Z",user:{id:"42",email:"new-pilot@example.com",display_name:"Renamed Pilot",active:true}});
-    await applyEntitlementEvent(env(),changed,"changed");
-    expect(await db.prepare("SELECT email FROM staff_users WHERE project_alpha_user_id='42'").first("email")).toBe("new-pilot@example.com");
-    await expect(applyEntitlementEvent(env(),first,"first")).resolves.toBe("ignored");
-    expect(await db.prepare("SELECT email FROM staff_users WHERE project_alpha_user_id='42'").first("email")).toBe("new-pilot@example.com");
+  it("retires an old pending entitlement without applying it, while preserving unrelated receipt failures",async()=>{
+    const incoming=event();
+    await db.prepare("INSERT INTO integration_event_receipts(projection_source_id,event_id,integration,event_type,user_id,occurred_at,payload_hash,status,last_error) VALUES('project-alpha:primary',?,'project-alpha',?,'42',?,'pending-hash','pending','old-error')")
+      .bind(incoming.event_id,incoming.event_type,incoming.occurred_at).run();
+    const before=await staffSnapshot();
+    await expect(applyEntitlementEvent(env(),incoming,"pending-hash")).resolves.toBe("ignored");
+    expect(await staffSnapshot()).toEqual(before);
+    expect(await db.prepare("SELECT status,last_error FROM integration_event_receipts WHERE event_id=?").bind(incoming.event_id).first()).toEqual({status:"ignored",last_error:null});
+    await recordAccessFailure(env(),incoming.event_id,"access-group-update-503");
+    await completeEvent(env(),incoming,true);
+    expect(await db.prepare("SELECT last_error FROM integration_event_receipts WHERE event_id=?").bind(incoming.event_id).first("last_error")).toBe("access-group-update-503");
   });
 
   it("accepts the task-assignment fingerprint added by migration 0008",async()=>{
@@ -444,7 +424,7 @@ describe("entitlement projection",()=>{
     await db.prepare("INSERT INTO pa_users(projection_source_id,id,email,active,payload_json,last_sync_id) VALUES (?,?,'foreign@example.com',1,'{}','test')").bind(secondary.sourceId,foreignIds.get("user","42")).run();
     await expect(db.prepare("INSERT INTO pa_application_entitlements(projection_source_id,id,user_id,application_key,enabled,role_key,payload_json,last_sync_id) VALUES (?,?,?,'ltds_ops',1,'role-admin','{}','test')").bind(secondary.sourceId,foreignIds.get("application_entitlement","entitlement-42"),foreignIds.get("user","42")).run()).rejects.toThrow();
     const desired=await desiredAccessEmails(db);
-    expect(desired).toContain("pilot@example.com");
+    expect(desired).not.toContain("pilot@example.com");
     expect(desired).not.toContain("foreign@example.com");
   });
 

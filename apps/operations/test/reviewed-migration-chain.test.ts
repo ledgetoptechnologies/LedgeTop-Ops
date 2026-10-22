@@ -136,6 +136,11 @@ describe("reviewed release migration fixtures", () => {
     ["client", "0232_shared_profile_edit_authority.sql"],
     ["client", "0233_explicit_primary_workspace_folder_ownership.sql"],
     ["client", "0234_pa_principal_reenrollment.sql"],
+    ["operations", "0222_employee_read_roots.sql"],
+    ["operations", "0223_employee_read_provisioning.sql"],
+    ["operations", "0224_windows_portal_publication_chain_index.sql"],
+    ["client", "0235_windows_portal_successor_candidates.sql"],
+    ["client", "0236_windows_portal_successor_content_start_audit.sql"],
   ] as const)("validates exact %s successor %s without expanding historical authority", (application, name) => {
     const fixture=copyMigrations(application);
     const reviewed=()=>application==="operations"?reviewedOperationsMigrationNames(fixture.url):reviewedClientMigrationNames(fixture.url);

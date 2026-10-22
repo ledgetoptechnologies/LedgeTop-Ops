@@ -80,6 +80,16 @@ describe('Operations-native encrypted resource selectors', () => {
     await expect(encode(env, { ...handle(), etag: undefined })).rejects.toThrow();
     await expect(encode(env, { ...handle(), after: 'next', entryKind: 'file' })).rejects.toThrow();
   });
+  it('preserves complete provider/digest pins and rejects partial or non-file pins', async () => {
+    const pinned = { ...handle(), providerVersion: 'provider-upload-one', sha256: 'a'.repeat(64) };
+    expect(await decode(env, await encode(env, pinned))).toEqual(pinned);
+    await expect(encode(env, { ...handle(), providerVersion: 'one' })).rejects.toThrow();
+    await expect(encode(env, { ...handle(), sha256: 'a'.repeat(64) })).rejects.toThrow();
+    await expect(encode(env, { ...pinned, sha256: 'not-a-digest' })).rejects.toThrow();
+    await expect(encode(env, { ...pinned, providerVersion: ' one ' })).rejects.toThrow();
+    await expect(encode(env, { ...pinned, providerVersion: 'x'.repeat(257) })).rejects.toThrow();
+    await expect(encode(env, { ...pinned, kind: 'folder', path: '', etag: undefined })).rejects.toThrow();
+  });
   it('accepts a root folder and a complete bounded cursor', async () => {
     const root = { ...handle(), kind: 'folder' as const, path: '', etag: undefined };
     expect(await decode(env, await encode(env, root))).toEqual(root);
