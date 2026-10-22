@@ -207,3 +207,4 @@ code has no installed desktop UI or live enrollment.
 
 No production service, TrueNAS stack, public link or client access policy is
 changed by this package.
+`CloudFilesNativeTransfer` adds an unactivated, internal x64 transfer/progress boundary. See [native boundary limits and ABI evidence](../../docs/windows-cloud-files-native-transfer.md). No registered placeholder hydration or offline/pin feature is enabled.
