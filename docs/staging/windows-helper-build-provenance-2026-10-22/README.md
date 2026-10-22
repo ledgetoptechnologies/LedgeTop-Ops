@@ -78,5 +78,8 @@ this research does not substitute it automatically or change the installed
 helper pin. No maintainer outreach or signing purchase is authorized here.
 
 `completeThirdPartyAttribution` and native build provenance remain unproved.
-The ten Go notices are source evidence only in this step; the latest verified
-unsigned construction package remains the previous511-file module-notice build.
+The ten Go notices were source evidence only during this research step. A later
+bounded package follow-up retained those exact texts and provenance manifest:
+see `../windows-go-notices-package-2026-10-22.md` and its actual522-file unsigned
+construction receipt. That inclusion does not clear the native/build-source
+limits above.

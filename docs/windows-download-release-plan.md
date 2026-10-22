@@ -180,8 +180,11 @@ were subsequently fetched from the official Go proxy, every Go content hash
 matched the binary's embedded expected sum, and99 actual vendor notice texts
 are retained with per-file/module provenance. The preview now includes those
 texts and their manifest for the exact helper hash. Source-embedded notices and
-per-subcomponent applicability still need review, along with Go toolchain
-notices and native CGO/Windows-linked components. The modified-source build marker also
+per-subcomponent applicability still need review. The ten exact Go1.27.3
+root/vendor LICENSE and PATENTS files have also been collected from the official
+version's pinned source commit and included in an actually packed/unpacked
+522-file unsigned candidate, with per-file/provenance hashes retained. Native
+CGO/Windows-linked component provenance remains unresolved. The modified-source build marker also
 means the public commit alone is not a complete source-provenance claim. The
 package receipt deliberately continues to say `completeThirdPartyAttribution=false`.
 
