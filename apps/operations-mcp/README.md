@@ -106,7 +106,9 @@ Read mode advertises ten tools:
 | `get_client_creation_options` | Inspect permitted sources, scopes, and organizations |
 
 For an existing public link, first browse the authorized folder and retain its
-exact prefix (and `itemRef` for a file). `get_existing_public_link` reads the
+exact containing folder prefix. For a file, pass the selected entry's
+`files[].id` as `itemRef` (there is no returned `itemRef` property).
+`get_existing_public_link` reads the
 existing share through the same server authorization as the sharing dialog,
 including `delivery.share.create` permission to recover its URL. It returns
 `share: null` when no active share exists; it never creates one as a fallback.
