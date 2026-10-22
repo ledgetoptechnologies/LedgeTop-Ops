@@ -77,6 +77,9 @@ The same draft now includes native slice `fe4e4eec` and callback lifecycle
 `66ba2a5b` plus cancellation-drain correction `13e6d5b3`. Root combined these
 without changing the existing app entrypoint or UI. Both test families remain
 registered. The rebuilt combined transfer suite passed **86/86** groups.
+The combined desktop regression run also passed **19/19** groups, including
+WPF rendering, identity changes, queue pause/resume and shutdown. It used demo
+data and no production network or installed provider.
 
 The internal x64 adapter builds `CF_OPERATION_INFO` and transfer parameters,
 holds a copied buffer pinned through a synchronous native call, and releases it
@@ -86,8 +89,9 @@ commit point; a cancellation racing afterward cannot issue a contradictory
 failure. No separate native completion operation is invented.
 
 A truthful indeterminate progress heartbeat runs while the whole-file cache is
-downloaded and verified, and is joined before final transfer or failure. Microsoft
-documents that periodic provider progress resets the fetch callback's60-second
+downloaded and verified, and is joined before final transfer or failure. [Microsoft
+documents](https://learn.microsoft.com/en-us/windows/win32/api/cfapi/nf-cfapi-cfreportproviderprogress)
+that periodic provider progress resets the fetch callback's60-second
 timeout. Tests exercise progress failure, cancellation observers throwing, and
 the final-call cancellation race without invoking real transfer/progress APIs.
 
