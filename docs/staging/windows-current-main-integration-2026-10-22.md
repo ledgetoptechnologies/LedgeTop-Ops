@@ -40,6 +40,13 @@ or transfer success claim.
 
 ## Remaining release gates
 
+The new physical employee test reached full-Worker discovery and a content 200,
+but .NET rejected the response before creating a partial: the gateway supplied
+the expected content length while the custom Worker response stream lost it.
+This exposed a real runtime framing gap that the earlier Node route test did
+not cover. A native fixed-length framing repair and cancellation regression are
+under review. This candidate must not be activated while that lane is failing.
+
 These checks use synthetic, local resources. They do not establish live staging
 or production transfer acceptance, real user sessions, remote R2 byte access,
 Explorer placeholder callbacks, offline pin/eviction, a signed installer, or an
