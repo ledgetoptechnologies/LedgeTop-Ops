@@ -1,0 +1,19 @@
+{
+  "kind": "local-client-transport-v1",
+  "bytes": 2097152,
+  "sha256": "91d6f139837323de3829070b54945b770230a2fbfd270b370184b57305bfaf65",
+  "retainedPrefixBytes": 16384,
+  "tlsPinRejected": true,
+  "invalidSignatureRejected": true,
+  "catalogParsed": true,
+  "resumedDigestVerified": true,
+  "revokedHandleDenied": true,
+  "observedDownloadStatuses": [
+    200,
+    206,
+    404
+  ],
+  "auditEvents": 1,
+  "storageReadsAfterRevocation": 0,
+  "limits": "Local Client routers/D1/R2 only; virtual staging host adapter, simulated Ops reader proof/JWKS discovery/token helper; no human sign-in, deployed Worker, real R2 or employee gateway acceptance."
+}
