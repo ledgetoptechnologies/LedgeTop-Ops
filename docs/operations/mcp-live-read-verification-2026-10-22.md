@@ -34,9 +34,9 @@ bearer URL. Null/denial never creates a replacement link.
 All 34 adapter tests and syntax checks pass, including actual SDK child-process
 stdio discovery of ten read tools, exact encoded query routing, rejected extra
 arguments, and null/403 behavior with no mutation/fallback. These tests use
-synthetic API fixtures. **The added tenth tool has not yet been installed or
-verified against a live synthetic share**; installed discovery remains nine
-tools until its adapter source is updated and reloaded.
+synthetic API fixtures. **The added link lookup has not been verified against
+a live synthetic share.** Its installed discovery and authenticated transport
+were verified separately below.
 
 A separately launched actual SDK stdio client against the isolated patched
 adapter discovered ten tools (including the new lookup), then completed live
