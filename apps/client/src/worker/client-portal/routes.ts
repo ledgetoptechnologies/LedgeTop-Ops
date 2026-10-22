@@ -32,6 +32,7 @@ import {
   ClientAccessConfigurationError,
   clientAccessConfiguration,
   resolveCloudflareClientPrincipal,
+  resolveCloudflareRecipientEnrollmentProof,
 } from "./access-identity";
 import { validateRequestArea } from "./request-area";
 import { ServiceCatalogPageError } from "./service-catalog-page";
@@ -403,6 +404,8 @@ export function createClientPortalRouter(
   }>();
 
   router.use("*", async (c, next) => {
+    const sessionTimingRequest = c.req.method === "GET" && /^(?:\/api\/client)?\/session\/status$/.test(c.req.path);
+    if (sessionTimingRequest) c.header("Cache-Control", "no-store");
     if (c.env.CLIENT_PORTAL_ENABLED !== "true")
       return c.json({ error: "Not found" }, 404);
     const portalOrigins = configuredClientPortalOrigins(c.env);
@@ -432,7 +435,7 @@ export function createClientPortalRouter(
     let session = await repository.resolveSession(c.env, principal);
     const workspaceV2Request = /\/v2\/(?:workspaces|invitations)(?:\/|$)/.test(c.req.path);
     let workspace: EffectivePortalWorkspaceContext | null = null;
-    if (portalHierarchyV2Enabled(c.env) && !workspaceV2Request) {
+    if (portalHierarchyV2Enabled(c.env) && !workspaceV2Request && !sessionTimingRequest) {
       let selectedWorkspace = c.req.header(PORTAL_WORKSPACE_HEADER);
       // Browser image/iframe/download requests cannot carry the JSON client's
       // workspace header. The encrypted coordinate selects a workspace only;
@@ -495,7 +498,7 @@ export function createClientPortalRouter(
         }
       }
     }
-    if (!session && !(portalHierarchyV2Enabled(c.env) && (workspaceV2Request || c.req.path.endsWith("/session"))))
+    if (!session && !(portalHierarchyV2Enabled(c.env) && (workspaceV2Request || sessionTimingRequest || c.req.path.endsWith("/session"))))
       throw new HTTPException(403, { message: "Client access is not provisioned" });
     // Workspace-v2 can resolve a global identity that deliberately has no
     // single legacy account. The sentinel is unreachable from legacy routes.
@@ -520,6 +523,18 @@ export function createClientPortalRouter(
   router.route("/v2/workspaces", createBusinessProfileRouter());
   router.route("/authenticated-deliveries",createAuthenticatedDeliveryResourceRouter());
 
+  router.get("/session/status", async (c) => {
+    // Reuse the existing signed-deadline verifier. Never decode an unverified
+    // assertion, infer expiry from a grant, or accept browser-supplied timing.
+    const proof = await resolveCloudflareRecipientEnrollmentProof(c.req.raw, c.env);
+    const principal = c.get("clientPrincipal");
+    const now = Date.now();
+    if (!proof || proof.principal.issuer !== principal.issuer || proof.principal.subject !== principal.subject
+      || proof.principal.email !== principal.email || Date.parse(proof.verifiedUntil) <= now)
+      throw new HTTPException(401, { message: "Client authentication is required" });
+    return c.json({ serverTime: new Date(now).toISOString(), expiresAt: proof.verifiedUntil });
+  });
+
   router.get("/session", async (c) => {
     const session = c.get("clientSession");
     const workspace = selectedWorkspace(c);
@@ -535,7 +550,7 @@ export function createClientPortalRouter(
       }
     }
     return c.json({
-      account: { id: session.accountId, displayName: session.displayName },
+      account: { id: session.accountId, displayName: session.displayName, email: c.get("clientPrincipal").email },
       viewerDisplayUnits,
       capabilities: {
         feedback: await feedbackSchemaAvailable(c.env),
