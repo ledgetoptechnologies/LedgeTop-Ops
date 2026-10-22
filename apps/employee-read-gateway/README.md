@@ -1,8 +1,9 @@
 # Employee read gateway prototype
 
 **This is a source-level pilot, not production-qualified file access.** Live
-routes remain unmounted. Large-directory pagination, efficient resumable large
-transfers and deployment qualification are still required before employee use.
+routes remain unmounted. Paginated directory listings and retained prepared
+copies are implemented; joined desktop integration and real deployment and
+large-transfer qualification are still required before employee use.
 
 This Linux service is a private, read-only Ops backend. It accepts only signed
 `POST /v1/read`; it does not accept desktop credentials, human Access JWTs,
@@ -79,8 +80,11 @@ limits, monitoring, key rotation and provisioning still need deployment review.
 Each request reopens the enrolled root and checks its device/inode. Traversal
 uses Linux directory fds, `O_NOFOLLOW`, nonblocking opens and `fstat`; nested
 mount IDs, hard-linked files, symlinks, FIFOs, sockets and special files are
-refused. Listing returns at most 200 entries, sorted by UTF-8 bytes. Larger
-directories fail explicitly. Paths reject Unicode controls, format characters
+refused. Listing returns at most 200 entries per page, sorted by UTF-8 bytes,
+with signed cursors bound to the exact identity, authority, path and immutable
+listing. The bounded listing cache supports at least 100,000 short names;
+changed directory metadata, expired/evicted listings and cross-context cursors
+require a restart. Paths reject Unicode controls, format characters
 and surrogates; private-use Linux filename characters are preserved.
 
 HMAC authenticates exact request bytes. The durable SQLite nonce store claims
@@ -92,10 +96,15 @@ after this upstream await and before handing off metadata or bytes.
 
 The service hashes a single copy into an unlinked private temporary file, then
 serves only that snapshot. It never hashes a live fd and rereads it for content.
-Source identity, size, mtime and ctime are compared around copying. Content
-always reopens the source and makes a new snapshot; a previous snapshot does
-not authorize a deleted or replaced source. Ranges are inclusive, pinned to the
-expected SHA256 and checked against the exact snapshot length.
+Source identity, size, mtime and ctime are compared around preparation. Manifest
+returns an opaque UUID `snapshotId` and expiry alongside its digest. Every
+content request must provide that ID and expected digest, freshly reopen and
+stat-check the current source, and match the exact staff/admission/profile/
+grant/root/path/signing-key pins. A retained copy cannot authorize a deleted,
+replaced or observably changed source. Missing/expired copies return 409 for
+manifest renewal; changed source or digest returns 412. Content never rereads
+or recopies source bytes. Inclusive range readers use independent `pread`
+offsets and safely retain their fd through reference-counted leases.
 
 Stat comparisons are a consistency check, not an atomic filesystem snapshot:
 same-tick mutations may retain identical timestamps. Concurrent/adversarial
@@ -105,12 +114,17 @@ semantics require filesystem snapshots or a cooperative finalized-ingest
 workflow; this remains a staging qualification gate.
 
 Defaults permit 64GiB files and 128GiB total reserved snapshots, preserve 1GiB
-free disk and allow two concurrent snapshots. File, reservation and available
-space limits are checked before copying. Copies check cancellation and deadline
-each MiB. Temporary snapshots are unlinked, released on completion/disconnect
-and forcibly closed after a maximum 30-minute TTL. Every request currently
-rebuilds its snapshot, so hashing large files costs extra I/O and temporary disk.
-No permanent duplicate raw-photo archive is created.
+free disk, retain at most 32 cache entries and allow two concurrent preparations
+plus 32 active read leases. File, reservation and available-space limits are
+checked before copying; idle entries alone may be evicted. Retained physical
+usage is already reflected in free space, while pending copies reserve their
+full size. Preparation slots are released immediately after preparation.
+Copies and readers check cancellation and deadline each MiB. Completion or
+disconnect releases only its read lease; the prepared copy remains reusable
+until idle eviction or its maximum 30-minute TTL. Expiry refuses new leases and
+never closes an fd still in use. Reader timers bound stalled/abandoned leases by
+their signed request deadline and cache TTL. All copies are private, unlinked,
+ephemeral and lost on process restart. No permanent raw-photo archive is created.
 
 ## Synthetic tests
 
@@ -128,13 +142,14 @@ mismatch rejection. No privileged test container is required.
 
 ## Remaining performance and deployment gates
 
-The 200-entry response bound and 2,000-entry scan bound deliberately fail closed.
-Mapping folders commonly contain thousands of photos, so paginated browsing
-with version-fenced cursors is required for those real workflows. The current
-service also copies and hashes the entire source for every manifest and every
-range request. Resuming a 30GiB file therefore repeats that I/O; it is not yet
-an efficient large-job downloader. A version-fenced temporary snapshot cache
-with explicit preparation/polling is needed before making performance claims.
+Mapping folders are now paginated, and ordinary full/range retries reuse their
+prepared copy without repeated source I/O. The synthetic suite proves these
+contracts, including concurrent independent offsets and cache accounting; it
+does not prove actual 30GiB throughput. Initial manifest preparation still
+copies the entire file synchronously and can take up to 15 minutes. Explicit
+asynchronous preparation/polling, realistic disk/ingress timeout qualification,
+Windows integration and provisioning remain before production release. Evicted
+or expired copies require a fresh preparation, with the corresponding I/O cost.
 
 Cancellation and deadlines are checked between bounded reads. A kernel-stalled
 filesystem read cannot be forcibly interrupted by this Python thread alone;

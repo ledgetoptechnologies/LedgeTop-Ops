@@ -11,6 +11,7 @@ export type EmployeeReadProof = Readonly<{
 export type EmployeeReadSelection = Readonly<{
   operation: "list" | "manifest" | "content"; path: string;
   expectedSha256: string | null; range: Readonly<{ start: number; end: number }> | null;
+  cursor?: string | null; snapshotId?: string | null;
 }>;
 export type EmployeeGatewayConfiguration = Readonly<{
   origin: string; gatewayId: string; keyId: string; key: Uint8Array;
@@ -41,7 +42,8 @@ function inputSnapshot(proof: EmployeeReadProof, selection: EmployeeReadSelectio
   config: EmployeeGatewayConfiguration) {
   const p = Object.freeze({ ...proof }), r = selection.range;
   const s = Object.freeze({ operation: selection.operation, path: selection.path,
-    expectedSha256: selection.expectedSha256, range: r === null ? null : Object.freeze({ start: r.start, end: r.end }) });
+    expectedSha256: selection.expectedSha256, range: r === null ? null : Object.freeze({ start: r.start, end: r.end }),
+    cursor: selection.cursor ?? null, snapshotId: selection.snapshotId ?? null });
   const c = { origin: config.origin, gatewayId: config.gatewayId, keyId: config.keyId, key: new Uint8Array(config.key) };
   const origin = new URL(c.origin);
   if (origin.protocol !== "https:" || origin.origin !== c.origin || origin.username || origin.password
@@ -56,9 +58,12 @@ function inputSnapshot(proof: EmployeeReadProof, selection: EmployeeReadSelectio
     || !canonicalEmployeeReadPath(s.path, s.operation === "list")) throw Error();
   if (s.operation === "content") {
     if (typeof s.expectedSha256 !== "string" || !HEX.test(s.expectedSha256)
+      || typeof s.snapshotId !== "string" || !UUID.test(s.snapshotId) || s.cursor !== null
       || (s.range !== null && (!Number.isSafeInteger(s.range.start) || !Number.isSafeInteger(s.range.end)
         || s.range.start < 0 || s.range.end < s.range.start || s.range.end >= MAX_BYTES))) throw Error();
-  } else if (s.expectedSha256 !== null || s.range !== null) throw Error();
+  } else if (s.expectedSha256 !== null || s.range !== null || s.snapshotId !== null
+    || (s.operation === "manifest" && s.cursor !== null)
+    || (s.cursor !== null && (typeof s.cursor !== "string" || !/^[A-Za-z0-9._-]{1,8192}$/.test(s.cursor)))) throw Error();
   return { proof: p, selection: s, config: c };
 }
 
@@ -97,13 +102,22 @@ function exactObject(value: unknown, keys: string[]): value is Record<string, un
   return value !== null && typeof value === "object" && !Array.isArray(value)
     && Object.keys(value).sort().join(",") === keys.sort().join(",");
 }
-function validMetadata(value: unknown, operation: "list" | "manifest" | "content"): boolean {
-  if (operation === "manifest") return exactObject(value, ["schemaVersion", "sha256", "size", "etag"])
+function validMetadata(value: unknown, selection: EmployeeReadSelection): boolean {
+  if (selection.operation === "manifest") return exactObject(value, ["schemaVersion", "sha256", "size", "etag", "snapshotId", "snapshotExpiresAt"])
     && value.schemaVersion === 1 && typeof value.sha256 === "string" && HEX.test(value.sha256)
     && value.etag === `"${value.sha256}"` && typeof value.size === "number"
-    && Number.isSafeInteger(value.size) && value.size >= 0 && value.size <= MAX_BYTES;
-  if (!exactObject(value, ["schemaVersion", "entries"]) || value.schemaVersion !== 1
+    && Number.isSafeInteger(value.size) && value.size >= 0 && value.size <= MAX_BYTES
+    && typeof value.snapshotId === "string" && UUID.test(value.snapshotId)
+    && typeof value.snapshotExpiresAt === "number" && Number.isSafeInteger(value.snapshotExpiresAt)
+    && value.snapshotExpiresAt > Math.floor(Date.now() / 1000)
+    // Match admitted gateway clock skew; the gateway separately enforces a
+    // maximum 1800-second lifetime with a monotonic timer.
+    && value.snapshotExpiresAt <= Math.floor(Date.now() / 1000) + 1830;
+  if (!exactObject(value, ["schemaVersion", "entries", "nextCursor"]) || value.schemaVersion !== 1
+    || (value.nextCursor !== null && (typeof value.nextCursor !== "string"
+      || !/^[A-Za-z0-9._-]{1,8192}$/.test(value.nextCursor) || value.nextCursor === selection.cursor))
     || !Array.isArray(value.entries) || value.entries.length > 200) return false;
+  if (value.entries.length === 0 && value.nextCursor !== null) return false;
   const seen = new Set<string>(); let previous: Uint8Array | null = null;
   return value.entries.every((entry: unknown) => {
     if (!exactObject(entry, ["name", "kind"]) || typeof entry.name !== "string"
@@ -145,7 +159,7 @@ export async function readEmployeeGateway(proof: EmployeeReadProof, selection: E
       rootGeneration: p.rootGeneration, rootFingerprint: p.rootFingerprint, staffId: p.staffId,
       accessSubject: p.accessSubject, admissionVersion: p.admissionVersion, profileVersion: p.profileVersion,
       grantId: p.grantId, grantGeneration: p.grantGeneration, operation: s.operation, path: s.path,
-      expectedSha256: s.expectedSha256, range: s.range, expiresAt, deadlineAt });
+      expectedSha256: s.expectedSha256, range: s.range, cursor: s.cursor, snapshotId: s.snapshotId, expiresAt, deadlineAt });
     if (encoder.encode(body).length > 16_384) throw Error();
     const nonce = hex(crypto.getRandomValues(new Uint8Array(16)).buffer);
     const signature = await signEmployeeReadBody(body, c, timestamp, nonce);
@@ -155,13 +169,13 @@ export async function readEmployeeGateway(proof: EmployeeReadProof, selection: E
       headers: { "Content-Type": "application/json", "X-Ops-Read-Key-Id": c.keyId,
         "X-Ops-Read-Time": String(timestamp), "X-Ops-Read-Nonce": nonce, "X-Ops-Read-Signature": signature }, body });
     if (!await valid()) { await discard(upstream); return staticError(403, "employee_read_denied"); }
-    if ([404, 409, 412, 416, 429, 503].includes(upstream.status)) {
+    if ([404, 408, 409, 412, 413, 416, 429, 503, 507].includes(upstream.status)) {
       const status = upstream.status; await discard(upstream); return staticError(status, "employee_read_unavailable");
     }
     if (s.operation !== "content") {
       if (upstream.status !== 200) throw Error();
       const metadata = await smallJson(upstream, s.operation === "list" ? 262_144 : 65_536);
-      if (!validMetadata(metadata, s.operation)) throw Error();
+      if (!validMetadata(metadata, s)) throw Error();
       if (!await valid()) return staticError(403, "employee_read_denied");
       return Response.json(metadata, { headers: { "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff" } });
     }

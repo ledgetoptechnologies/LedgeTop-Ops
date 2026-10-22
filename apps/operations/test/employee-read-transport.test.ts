@@ -6,6 +6,7 @@ import { canonicalEmployeeReadPath, readEmployeeGateway, signEmployeeReadBody,
 
 const gateway = "11111111-1111-4111-8111-111111111111";
 const sha = "a".repeat(64);
+const snapshotId = "55555555-5555-4555-8555-555555555555";
 const proof = () => ({ gatewayId: gateway, rootId: "22222222-2222-4222-8222-222222222222",
   rootGeneration: 3, rootFingerprint: "b".repeat(64), staffId: "staff:synthetic", accessSubject: "access|synthetic",
   admissionVersion: 4, profileVersion: 5, grantId: "33333333-3333-4333-8333-333333333333",
@@ -13,8 +14,11 @@ const proof = () => ({ gatewayId: gateway, rootId: "22222222-2222-4222-8222-2222
 const config = (): EmployeeGatewayConfiguration => ({ origin: "https://private-gateway.example.test", gatewayId: gateway,
   keyId: "employee-v1", key: new Uint8Array(32).fill(0x31) });
 const selection = (operation: "list" | "manifest" | "content" = "content"): EmployeeReadSelection => ({ operation,
-  path: operation === "list" ? "" : "photos/image.raw", expectedSha256: operation === "content" ? sha : null, range: null });
-const manifest = () => Response.json({ schemaVersion: 1, sha256: sha, size: 3, etag: `"${sha}"` });
+  path: operation === "list" ? "" : "photos/image.raw", expectedSha256: operation === "content" ? sha : null, range: null,
+  cursor: null, snapshotId: operation === "content" ? snapshotId : null });
+const manifestValue = () => ({ schemaVersion: 1, sha256: sha, size: 3, etag: `"${sha}"`, snapshotId,
+  snapshotExpiresAt: Math.floor(Date.now() / 1000) + 1800 });
+const manifest = () => Response.json(manifestValue());
 function content(chunks: number[][] = [[1, 2, 3]], length = 3, extra: Record<string, string> = {}, status = 200) {
   const cancel = vi.fn(); let index = 0;
   const body = new ReadableStream<Uint8Array>({ pull(c) {
@@ -69,6 +73,86 @@ describe("employee private read transport", () => {
     expect(h.auditContentStart).not.toHaveBeenCalled();
   });
 
+  it("accepts a nonempty page and its opaque continuation without treating it as authority", async () => {
+    const h = harness(Response.json({ schemaVersion: 1, entries: [{ name: "photo.raw", kind: "file" }], nextCursor: "page.v1_next" }));
+    const result = await readEmployeeGateway(proof(), { ...selection("list"), cursor: "page.v1_prior" }, config(), h.dependencies);
+    expect(result.status).toBe(200); expect(await result.json()).toMatchObject({ nextCursor: "page.v1_next" });
+    expect(JSON.parse(String(h.fetcher.mock.calls[0]![1]!.body))).toMatchObject({ operation: "list", cursor: "page.v1_prior", snapshotId: null });
+    expect(h.recheck.mock.calls.length).toBeGreaterThanOrEqual(3);
+  });
+  it.each(["", "bad/cursor", "bad%cursor", "x".repeat(8193)])("rejects malformed or oversized input cursor", async cursor => {
+    const h = harness();
+    expect((await readEmployeeGateway(proof(), { ...selection("list"), cursor }, config(), h.dependencies)).status).toBe(502);
+    expect(h.fetcher).not.toHaveBeenCalled();
+  });
+  it("propagates gateway denial of a syntactically valid but tampered opaque cursor", async () => {
+    const h = harness(new Response("private cursor diagnostic", { status: 404 }));
+    const result = await readEmployeeGateway(proof(), { ...selection("list"), cursor: "page.v1_tampered" }, config(), h.dependencies);
+    expect(JSON.parse(String(h.fetcher.mock.calls[0]![1]!.body)).cursor).toBe("page.v1_tampered");
+    expect(result.status).toBe(404); expect(await result.text()).toBe('{"error":"employee_read_unavailable"}');
+  });
+  it.each(["", "bad/cursor", "x".repeat(8193), 1])("rejects malformed or oversized response continuation", async nextCursor => {
+    const h = harness(Response.json({ schemaVersion: 1, entries: [{ name: "photo.raw", kind: "file" }], nextCursor }));
+    expect((await readEmployeeGateway(proof(), selection("list"), config(), h.dependencies)).status).toBe(502);
+  });
+  it("rejects an immediate continuation loop", async () => {
+    const cursor = "page.v1_same";
+    const h = harness(Response.json({ schemaVersion: 1, entries: [{ name: "photo.raw", kind: "file" }], nextCursor: cursor }));
+    expect((await readEmployeeGateway(proof(), { ...selection("list"), cursor }, config(), h.dependencies)).status).toBe(502);
+  });
+  it("rejects an empty page that claims more entries and a response missing continuation state", async () => {
+    for (const value of [{ schemaVersion: 1, entries: [], nextCursor: "page.v1_next" }, { schemaVersion: 1, entries: [] }]) {
+      const h = harness(Response.json(value));
+      expect((await readEmployeeGateway(proof(), selection("list"), config(), h.dependencies)).status).toBe(502);
+    }
+  });
+  it.each(["list", "manifest"] as const)("rejects snapshot selectors for %s", async operation => {
+    const h = harness();
+    expect((await readEmployeeGateway(proof(), { ...selection(operation), snapshotId }, config(), h.dependencies)).status).toBe(502);
+    expect(h.fetcher).not.toHaveBeenCalled();
+  });
+  it.each(["manifest", "content"] as const)("rejects cursors for %s", async operation => {
+    const h = harness();
+    expect((await readEmployeeGateway(proof(), { ...selection(operation), cursor: "page.v1_forbidden" }, config(), h.dependencies)).status).toBe(502);
+    expect(h.fetcher).not.toHaveBeenCalled();
+  });
+  it.each([null, undefined, "not-a-uuid", "00000000-0000-0000-0000-000000000000", "55555555-5555-4555-7555-555555555555"])("requires a canonical content snapshot ID", async id => {
+    const h = harness();
+    expect((await readEmployeeGateway(proof(), { ...selection(), snapshotId: id }, config(), h.dependencies)).status).toBe(502);
+    expect(h.fetcher).not.toHaveBeenCalled();
+  });
+  it.each(["missing-id", "bad-id", "bad-variant", "missing-expiry", "expired", "too-long", "fractional", "wrong-type"])("rejects invalid snapshot manifest %s", async invalid => {
+    const value: Record<string, unknown> = manifestValue();
+    switch (invalid) {
+      case "missing-id": delete value.snapshotId; break;
+      case "bad-id": value.snapshotId = "not-a-uuid"; break;
+      case "bad-variant": value.snapshotId = "55555555-5555-4555-7555-555555555555"; break;
+      case "missing-expiry": delete value.snapshotExpiresAt; break;
+      case "expired": value.snapshotExpiresAt = Math.floor(Date.now() / 1000); break;
+      case "too-long": value.snapshotExpiresAt = Math.floor(Date.now() / 1000) + 1831; break;
+      case "fractional": value.snapshotExpiresAt = Math.floor(Date.now() / 1000) + 1.5; break;
+      case "wrong-type": value.snapshotExpiresAt = String(Math.floor(Date.now() / 1000) + 30); break;
+    }
+    const h = harness(Response.json(value));
+    expect((await readEmployeeGateway(proof(), selection("manifest"), config(), h.dependencies)).status).toBe(502);
+  });
+  it("accepts the bounded gateway clock-skew margin without accepting a longer advertised lifetime", async () => {
+    const now = Date.now(); vi.spyOn(Date, "now").mockReturnValue(now);
+    const allowed = harness(Response.json({ ...manifestValue(), snapshotExpiresAt: Math.floor(now / 1000) + 1825 }));
+    expect((await readEmployeeGateway(proof(), selection("manifest"), config(), allowed.dependencies)).status).toBe(200);
+    const rejected = harness(Response.json({ ...manifestValue(), snapshotExpiresAt: Math.floor(now / 1000) + 1831 }));
+    expect((await readEmployeeGateway(proof(), selection("manifest"), config(), rejected.dependencies)).status).toBe(502);
+  });
+  it("snapshots input cursor and null snapshot selector before the first authority await", async () => {
+    const selected = { ...selection("list"), cursor: "page.v1_original" }, gate = deferred<boolean>();
+    const h = harness(Response.json({ schemaVersion: 1, entries: [{ name: "photo.raw", kind: "file" }], nextCursor: null }));
+    h.recheck.mockImplementationOnce(() => gate.promise);
+    const pending = readEmployeeGateway(proof(), selected, config(), h.dependencies);
+    selected.cursor = "page.v1_changed"; selected.snapshotId = snapshotId; gate.resolve(true);
+    expect((await pending).status).toBe(200);
+    expect(JSON.parse(String(h.fetcher.mock.calls[0]![1]!.body))).toMatchObject({ cursor: "page.v1_original", snapshotId: null });
+  });
+
   it.each(["http://private-gateway.example.test", "https://private-gateway.example.test/path", "https://user:pass@private-gateway.example.test", "https://private-gateway.example.test?x=1", "https://private-gateway.example.test#x"])("rejects unsafe configured origin %s before fetch", async origin => {
     const h = harness(); expect((await readEmployeeGateway(proof(), selection(), { ...config(), origin }, h.dependencies)).status).toBe(502);
     expect(h.fetcher).not.toHaveBeenCalled();
@@ -113,7 +197,7 @@ describe("employee private read transport", () => {
   it("rechecks authority after asynchronous metadata body consumption", async () => {
     const h = harness();
     h.fetcher.mockResolvedValueOnce(new Response(new ReadableStream({ pull(c) {
-      h.recheck.mockResolvedValue(false); c.enqueue(new TextEncoder().encode('{"schemaVersion":1,"sha256":"' + sha + '","size":3,"etag":"\\"' + sha + '\\""}')); c.close();
+      h.recheck.mockResolvedValue(false); c.enqueue(new TextEncoder().encode(JSON.stringify(manifestValue()))); c.close();
     } }, { highWaterMark: 0 }), { headers: { "Content-Type": "application/json" } }));
     expect((await readEmployeeGateway(proof(), selection("manifest"), config(), h.dependencies)).status).toBe(403);
   });
@@ -164,24 +248,25 @@ describe("employee private read transport", () => {
   });
   it("copies proof, nested selection and key before the first authority await", async () => {
     const p = proof(), c = config(), originalKey = new Uint8Array(c.key);
-    const selected = { operation: "content" as const, path: "photos/image.raw", expectedSha256: sha, range: { start: 1, end: 2 } };
+    const selected = { operation: "content" as const, path: "photos/image.raw", expectedSha256: sha, range: { start: 1, end: 2 }, cursor: null, snapshotId };
     const source = content([[7, 8]], 2, { "Content-Range": "bytes 1-2/4" }, 206), h = harness(source.response), gate = deferred<boolean>();
     h.recheck.mockImplementationOnce(() => gate.promise);
     const pending = readEmployeeGateway(p, selected, c, h.dependencies);
-    p.staffId = "staff:other"; p.grantGeneration = 99; selected.path = "other.raw"; selected.range.end = 100; c.key.fill(0xff);
+    p.staffId = "staff:other"; p.grantGeneration = 99; selected.path = "other.raw"; selected.range.end = 100;
+    selected.snapshotId = "66666666-6666-4666-8666-666666666666"; c.key.fill(0xff);
     gate.resolve(true);
     const response = await pending;
     expect(response.status).toBe(206); await response.arrayBuffer();
     const init = h.fetcher.mock.calls[0]![1]!, body = String(init.body), headers = new Headers(init.headers);
-    expect(JSON.parse(body)).toMatchObject({ staffId: "staff:synthetic", grantGeneration: 6, path: "photos/image.raw", range: { start: 1, end: 2 } });
+    expect(JSON.parse(body)).toMatchObject({ staffId: "staff:synthetic", grantGeneration: 6, path: "photos/image.raw", range: { start: 1, end: 2 }, snapshotId, cursor: null });
     expect(h.recheck.mock.calls.every(([seen]) => seen.staffId === "staff:synthetic" && seen.grantGeneration === 6)).toBe(true);
     expect(headers.get("x-ops-read-signature")).toBe(await signEmployeeReadBody(body, { ...c, key: originalKey }, Number(headers.get("x-ops-read-time")), headers.get("x-ops-read-nonce")!));
   });
   it("requires UTF-8 byte order rather than UTF-16 code-unit order for directory names", async () => {
     const entries = [{ name: "\uff01", kind: "file" }, { name: "😀", kind: "folder" }];
-    const sorted = harness(Response.json({ schemaVersion: 1, entries }));
+    const sorted = harness(Response.json({ schemaVersion: 1, entries, nextCursor: null }));
     expect((await readEmployeeGateway(proof(), selection("list"), config(), sorted.dependencies)).status).toBe(200);
-    const reversed = harness(Response.json({ schemaVersion: 1, entries: [...entries].reverse() }));
+    const reversed = harness(Response.json({ schemaVersion: 1, entries: [...entries].reverse(), nextCursor: null }));
     expect((await readEmployeeGateway(proof(), selection("list"), config(), reversed.dependencies)).status).toBe(502);
   });
   it.each(['{"schemaVersion":1,"entries":[],"entries":[]}', '{"schemaVersion":1,"entries":[],"unexpected":"private"}'])("rejects duplicate or extra metadata fields", async text => {
@@ -190,12 +275,12 @@ describe("employee private read transport", () => {
   });
   it("accepts 200 maximum-length Unicode names even when Python JSON escapes inflate their wire size", async () => {
     const entries = Array.from({ length: 200 }, (_, index) => ({ name: String(index).padStart(3, "0") + "é".repeat(125), kind: "file" }));
-    const body = JSON.stringify({ schemaVersion: 1, entries }).replace(/[^\x00-\x7f]/g, c => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`);
+    const body = JSON.stringify({ schemaVersion: 1, entries, nextCursor: null }).replace(/[^\x00-\x7f]/g, c => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`);
     expect(new TextEncoder().encode(body).length).toBeGreaterThan(65_536);
     expect(new TextEncoder().encode(body).length).toBeLessThanOrEqual(262_144);
     const h = harness(new Response(body, { headers: { "Content-Type": "application/json" } }));
     const result = await readEmployeeGateway(proof(), selection("list"), config(), h.dependencies);
-    expect(result.status).toBe(200); expect(await result.json()).toEqual({ schemaVersion: 1, entries });
+    expect(result.status).toBe(200); expect(await result.json()).toEqual({ schemaVersion: 1, entries, nextCursor: null });
   });
   it.each([["list", 262_144], ["manifest", 65_536]] as const)("rejects over-limit %s metadata and cancels its body", async (operation, limit) => {
     const cancel = vi.fn(); let sent = false;

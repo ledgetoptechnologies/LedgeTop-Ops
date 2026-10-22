@@ -9,6 +9,7 @@ vi.mock("../src/worker/employee-read-authority", () => ({ resolveEmployeeReadAut
 
 const gatewayId = "11111111-1111-4111-8111-111111111111", rootId = "22222222-2222-4222-8222-222222222222";
 const sha = "a".repeat(64), database = {} as D1Database;
+const snapshotId = "55555555-5555-4555-8555-555555555555";
 function authenticated(): AuthenticatedNativeStaffWithAdmissionVersion {
   return { identity: { kind: "native", staffId: "staff:synthetic", verifiedAccessSubject: "access|synthetic", email: "synthetic@example.invalid",
     displayName: "Synthetic employee", profileVersion: 3 }, admissionVersion: 4, verifiedUntil: new Date(Date.now() + 3_600_000).toISOString() };
@@ -21,7 +22,7 @@ function authority(): EmployeeReadProof {
 function configuration() { return { enabled: true, access: { enabled: true, issuer: "https://synthetic.cloudflareaccess.com", staffAudience: "synthetic-staff-audience-only" },
   gateway: { origin: "https://gateway.example.test", gatewayId, keyId: "synthetic-key", key: new Uint8Array(32).fill(0x31) } }; }
 const manifestSelection = (): EmployeeReadSelection => ({ operation: "manifest", path: "photos/map.raw", expectedSha256: null, range: null });
-const contentSelection = (): EmployeeReadSelection => ({ operation: "content", path: "photos/map.raw", expectedSha256: sha, range: null });
+const contentSelection = (): EmployeeReadSelection => ({ operation: "content", path: "photos/map.raw", expectedSha256: sha, range: null, cursor: null, snapshotId });
 const request = (init: RequestInit = {}) => new Request("https://ops.example.test/api/unmounted-employee-read", init);
 function content() {
   const cancel = vi.fn(); let emitted = false;
@@ -29,7 +30,8 @@ function content() {
     if (emitted) c.close(); else { emitted = true; c.enqueue(new Uint8Array([1, 2, 3])); }
   }, cancel }, { highWaterMark: 0 }), { headers: { "Content-Type": "application/octet-stream", "Content-Length": "3", ETag: `"${sha}"` } }) };
 }
-function dependencies(response = Response.json({ schemaVersion: 1, sha256: sha, size: 3, etag: `"${sha}"` })) {
+function dependencies(response = Response.json({ schemaVersion: 1, sha256: sha, size: 3, etag: `"${sha}"`, snapshotId,
+  snapshotExpiresAt: Math.floor(Date.now() / 1000) + 1800 })) {
   return { fetch: vi.fn(async (_url: RequestInfo | URL, _init?: RequestInit) => response),
     auditContentStart: vi.fn(async (_proof: EmployeeReadProof, _selection: EmployeeReadSelection) => undefined) };
 }
@@ -96,19 +98,20 @@ describe("unmounted authenticated employee read service", () => {
   });
   it("copies access settings, gateway key and nested selection before authentication awaits", async () => {
     const gate = deferred<AuthenticatedNativeStaffWithAdmissionVersion>(), cfg = configuration(), originalKey = new Uint8Array(cfg.gateway.key);
-    const selected = { operation: "content" as const, path: "photos/map.raw", expectedSha256: sha, range: { start: 0, end: 2 } };
+    const selected = { operation: "content" as const, path: "photos/map.raw", expectedSha256: sha, range: { start: 0, end: 2 }, cursor: null, snapshotId };
     const deps = dependencies(new Response(new Uint8Array([1, 2, 3]), { status: 206,
       headers: { "Content-Type": "application/octet-stream", "Content-Length": "3", ETag: `"${sha}"`, "Content-Range": "bytes 0-2/4" } }));
     mocks.authenticate.mockImplementationOnce(() => gate.promise);
     const result = readAuthenticatedEmployeeFile(request(), database, rootId, selected, cfg, deps);
     cfg.access.issuer = "https://changed.cloudflareaccess.com"; cfg.access.staffAudience = "changed-audience";
     cfg.gateway.origin = "https://changed.example.test"; cfg.gateway.key.fill(0xff); selected.path = "changed.raw"; selected.range.end = 99;
+    selected.snapshotId = "66666666-6666-4666-8666-666666666666";
     gate.resolve(authenticated());
     const response = await result; expect(response.status).toBe(206); await response.arrayBuffer();
     expect(mocks.authenticate.mock.calls[0]![2]).toMatchObject({ issuer: "https://synthetic.cloudflareaccess.com", staffAudience: "synthetic-staff-audience-only" });
     const [url, init] = deps.fetch.mock.calls[0]!, body = String(init!.body), headers = new Headers(init!.headers);
     expect(url).toBe("https://gateway.example.test/v1/read");
-    expect(JSON.parse(body)).toMatchObject({ path: "photos/map.raw", range: { start: 0, end: 2 } });
+    expect(JSON.parse(body)).toMatchObject({ path: "photos/map.raw", range: { start: 0, end: 2 }, snapshotId, cursor: null });
     expect(headers.get("X-Ops-Read-Signature")).toBe(await signEmployeeReadBody(body, { ...cfg.gateway, key: originalKey },
       Number(headers.get("X-Ops-Read-Time")), headers.get("X-Ops-Read-Nonce")!));
   });
@@ -120,6 +123,18 @@ describe("unmounted authenticated employee read service", () => {
     await entered.promise; controller.abort(); release.resolve(source.response);
     expect((await pending).status).toBe(403); expect(backendSignal?.aborted).toBe(true);
     expect(source.cancel).toHaveBeenCalledOnce(); expect(deps.auditContentStart).not.toHaveBeenCalled();
+  });
+  it("copies a listing cursor and null snapshot selector before the authentication await", async () => {
+    const gate = deferred<AuthenticatedNativeStaffWithAdmissionVersion>();
+    const selected: EmployeeReadSelection & { cursor: string; snapshotId: string | null } = { operation: "list", path: "", expectedSha256: null,
+      range: null, cursor: "page.v1_original", snapshotId: null };
+    const deps = dependencies(Response.json({ schemaVersion: 1, entries: [{ name: "photo.raw", kind: "file" }], nextCursor: null }));
+    mocks.authenticate.mockImplementationOnce(() => gate.promise);
+    const pending = readAuthenticatedEmployeeFile(request(), database, rootId, selected, configuration(), deps);
+    selected.cursor = "page.v1_changed"; selected.snapshotId = snapshotId; gate.resolve(authenticated());
+    const result = await pending;
+    expect(result.status).toBe(200);
+    expect(JSON.parse(String(deps.fetch.mock.calls[0]![1]!.body))).toMatchObject({ operation: "list", cursor: "page.v1_original", snapshotId: null });
   });
   it("does not reach the backend when Request.signal was already aborted", async () => {
     const controller = new AbortController(); controller.abort(); const deps = dependencies();

@@ -26,7 +26,8 @@ export async function readAuthenticatedEmployeeFile(request: Request, database: 
       keyId: configuration.gateway.keyId, key: new Uint8Array(configuration.gateway.key) });
     const range = selection.range;
     const selected = Object.freeze({ operation: selection.operation, path: selection.path, expectedSha256: selection.expectedSha256,
-      range: range === null ? null : Object.freeze({ start: range.start, end: range.end }) });
+      range: range === null ? null : Object.freeze({ start: range.start, end: range.end }),
+      cursor: selection.cursor ?? null, snapshotId: selection.snapshotId ?? null });
     const fetcher = dependencies.fetch, auditContentStart = dependencies.auditContentStart;
     const authenticated = await authenticateNativeStaffWithAdmissionVersion(request, database, access);
     const authority = await resolveEmployeeReadAuthority(database, authenticated, rootId);

@@ -4,6 +4,6 @@
   "keyId": "synthetic-key",
   "timestamp": 1792638000,
   "nonce": "cccccccccccccccccccccccccccccccc",
-  "body": "{\"schemaVersion\":1,\"gatewayId\":\"10000000-0000-4000-8000-000000000001\",\"rootId\":\"20000000-0000-4000-8000-000000000002\",\"rootGeneration\":1,\"rootFingerprint\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"staffId\":\"synthetic-staff\",\"accessSubject\":\"synthetic|human\",\"admissionVersion\":2,\"profileVersion\":3,\"grantId\":\"30000000-0000-4000-8000-000000000003\",\"grantGeneration\":4,\"operation\":\"content\",\"path\":\"photos/Map 01.jpg\",\"expectedSha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"range\":{\"start\":1024,\"end\":2047},\"expiresAt\":1792638030,\"deadlineAt\":1792638900}",
-  "signature": "33649fa5400962ce0b9a69ba2bec3e16fc38218b4bafd4a4ee1759adce47a219"
+  "body": "{\"schemaVersion\":1,\"gatewayId\":\"10000000-0000-4000-8000-000000000001\",\"rootId\":\"20000000-0000-4000-8000-000000000002\",\"rootGeneration\":1,\"rootFingerprint\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"staffId\":\"synthetic-staff\",\"accessSubject\":\"synthetic|human\",\"admissionVersion\":2,\"profileVersion\":3,\"grantId\":\"30000000-0000-4000-8000-000000000003\",\"grantGeneration\":4,\"operation\":\"content\",\"path\":\"photos/Map 01.jpg\",\"expectedSha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"range\":{\"start\":1024,\"end\":2047},\"expiresAt\":1792638030,\"deadlineAt\":1792638900,\"cursor\":null,\"snapshotId\":\"40000000-0000-4000-8000-000000000004\"}",
+  "signature": "e30345fb8f0a18f951ccd6cf4dcba6da9a6a552a2838b6a8a7fc2a24a76eb8e1"
 }

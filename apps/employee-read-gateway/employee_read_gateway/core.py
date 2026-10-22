@@ -17,18 +17,14 @@ import unicodedata
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Callable
+from .errors import Denied
+from .snapshot_cache import SnapshotCache, SnapshotLease as Snapshot, authority_binding, source_identity
 
 SAFE = 9_007_199_254_740_991
 HEX = re.compile(r"[a-f0-9]{64}\Z")
 FIELDS = {"schemaVersion", "gatewayId", "rootId", "rootGeneration", "rootFingerprint", "staffId",
           "accessSubject", "admissionVersion", "profileVersion", "grantId", "grantGeneration",
-          "operation", "path", "expectedSha256", "range", "expiresAt", "deadlineAt"}
-
-
-class Denied(Exception):
-    def __init__(self, code="invalid-request", status=400):
-        self.code, self.status = code, status
-        super().__init__(code)
+          "operation", "path", "expectedSha256", "range", "cursor", "snapshotId", "expiresAt", "deadlineAt"}
 
 
 def integer(value, minimum=0):
@@ -198,46 +194,10 @@ class Reply:
     body: bytes | Snapshot
 
 
-class Snapshot:
-    def __init__(self, stream, length, digest, release, expires):
-        self.stream, self.length, self.sha256 = stream, length, digest
-        self.release, self.expires, self.closed = release, expires, False
-        self.start, self.end = 0, length - 1
-        self.lock = threading.Lock()
-        self.timer = threading.Timer(max(0, expires - time.monotonic()), self.close)
-        self.timer.daemon = True
-        self.timer.start()
-
-    def chunks(self, cancelled=lambda: False):
-        if self.closed:
-            raise Denied("snapshot-expired", 408)
-        self.stream.seek(self.start)
-        remaining = max(0, self.end - self.start + 1)
-        try:
-            while remaining:
-                if self.closed or cancelled() or time.monotonic() >= self.expires:
-                    raise Denied("request-cancelled", 408)
-                data = self.stream.read(min(1024 * 1024, remaining))
-                if not data:
-                    raise Denied("snapshot-unavailable", 503)
-                remaining -= len(data)
-                yield data
-        finally:
-            self.close()
-
-    def close(self):
-        with self.lock:
-            if not self.closed:
-                self.closed = True
-                self.timer.cancel()
-                self.stream.close()
-                self.release()
-
-
 class Gateway:
     def __init__(self, gateway_id, roots, keys, replay, spool, *, max_file_bytes=64 * 1024**3,
                  max_spool_bytes=128 * 1024**3, minimum_free_bytes=1024**3, concurrency=2,
-                 snapshot_ttl=1800, clock=time.time):
+                 snapshot_ttl=1800, max_snapshot_entries=32, max_snapshot_readers=32, clock=time.time):
         canonical_uuid(gateway_id)
         if not keys or any(not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", key_id) or not isinstance(key, bytes) or len(key) < 32 for key_id, key in keys.items()):
             raise ValueError("Dedicated signing keys are required")
@@ -255,7 +215,20 @@ class Gateway:
             raise ValueError("Explicit root enrollment required")
         self.max_file_bytes, self.max_spool_bytes, self.minimum_free = max_file_bytes, max_spool_bytes, minimum_free_bytes
         self.snapshot_ttl, self.clock = snapshot_ttl, clock
-        self.slots, self.lock, self.reserved = threading.BoundedSemaphore(concurrency), threading.Lock(), 0
+        self.slots = threading.BoundedSemaphore(concurrency)
+        self.cache = SnapshotCache(spool, max_bytes=max_spool_bytes, minimum_free=minimum_free_bytes,
+                                   max_entries=max_snapshot_entries, max_readers=max_snapshot_readers,
+                                   ttl=snapshot_ttl, clock=clock)
+        self.directory_pages, self.directory_lock = None, threading.Lock()
+
+    @property
+    def reserved(self):
+        return self.cache.reserved
+
+    def close(self):
+        self.cache.close()
+        if self.directory_pages is not None and hasattr(self.directory_pages, "close"):
+            self.directory_pages.close()
 
     def authenticate(self, headers, body):
         def header(name, pattern):
@@ -288,6 +261,8 @@ class Gateway:
         for name in ("rootGeneration", "admissionVersion", "profileVersion", "grantGeneration"):
             integer(request[name], 1)
         text(request["staffId"])
+        if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9:._-]{0,190}", request["staffId"]) is None:
+            raise Denied()
         # Native Access subjects are opaque: admission preserves surrounding whitespace.
         text(request["accessSubject"], opaque=True)
         if not isinstance(request["rootFingerprint"], str) or not HEX.fullmatch(request["rootFingerprint"]):
@@ -312,7 +287,16 @@ class Gateway:
                 raise Denied()
             if integer(byte_range["start"]) > integer(byte_range["end"]):
                 raise Denied("invalid-range", 416)
+        if operation == "content":
+            canonical_uuid(request["snapshotId"])
+        elif request["snapshotId"] is not None:
+            raise Denied()
+        cursor = request["cursor"]
+        if cursor is not None and (operation != "list" or not isinstance(cursor, str) or not 1 <= len(cursor) <= 8192
+                                   or not cursor.isascii() or any(ord(c) < 33 or ord(c) > 126 for c in cursor)):
+            raise Denied()
         self.replay.claim(key_id, nonce, expiry, now)
+        request["_keyId"] = key_id
         return request
 
     def open_source(self, request):
@@ -355,72 +339,63 @@ class Gateway:
     def execute(self, headers, body, cancelled: Callable[[], bool] = lambda: False):
         request = self.authenticate(headers, body)
         request["_monotonicDeadline"] = time.monotonic() + max(0, request["deadlineAt"] - self.clock())
-        if not self.slots.acquire(blocking=False):
-            raise Denied("gateway-busy", 503)
-        fd, retained_slot = None, False
+        fd, snapshot, preparing = None, None, False
         try:
             self.check_deadline(request, cancelled)
-            fd, expected_mount = self.open_source(request)
-            if request["operation"] == "list":
-                entries = []
-                with os.scandir(fd) as iterator:
-                    for scanned, entry in enumerate(iterator):
-                        self.check_deadline(request, cancelled)
-                        if scanned >= 2000:
-                            raise Denied("folder-too-large", 413)
-                        try:
-                            path_parts(entry.name)
-                            child = os.open(entry.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK, dir_fd=fd)
-                            try:
-                                info = os.fstat(child)
-                                if mount_id(child) != expected_mount:
-                                    continue
-                                if stat.S_ISDIR(info.st_mode):
-                                    kind = "folder"
-                                elif stat.S_ISREG(info.st_mode) and info.st_nlink == 1:
-                                    kind = "file"
-                                else:
-                                    continue
-                            finally:
-                                os.close(child)
-                        except (OSError, Denied):
-                            continue
-                        entries.append({"name": entry.name, "kind": kind})
-                        if len(entries) > 200:
-                            raise Denied("folder-too-large", 413)
-                entries.sort(key=lambda item: item["name"].encode("utf-8"))
+            if request["operation"] == "content":
+                snapshot = self.cache.acquire(request["snapshotId"], authority_binding(request), request["expectedSha256"],
+                                              request["_monotonicDeadline"], lambda: self.check_deadline(request, cancelled))
+                try:
+                    fd, _ = self.open_source(request)
+                    if source_identity(os.fstat(fd)) != snapshot.source:
+                        raise Denied("content-version-changed", 412)
+                except (OSError, Denied):
+                    # This exact bound, digest-matching entry is now known stale.
+                    # Existing leases retain their fd, but idle bytes need not wait for TTL.
+                    self.cache.expire(request["snapshotId"])
+                    raise Denied("content-version-changed", 412) from None
                 self.check_deadline(request, cancelled)
-                return self.json_reply({"schemaVersion": 1, "entries": entries})
-            snapshot = self.snapshot(fd, request, cancelled)
-            retained_slot = True  # Snapshot.close now owns both reservation and concurrency slot.
-            try:
-                self.check_deadline(request, cancelled)
-                etag = '"' + snapshot.sha256 + '"'
-                if request["operation"] == "manifest":
-                    result = self.json_reply({"schemaVersion": 1, "sha256": snapshot.sha256, "size": snapshot.length, "etag": etag})
-                    snapshot.close()
-                    return result
-                if not hmac.compare_digest(snapshot.sha256, request["expectedSha256"]):
-                    raise Denied("content-version-changed", 412)
-                headers = {"Content-Type": "application/octet-stream", "ETag": etag, "Content-Length": str(snapshot.length)}
+                response_headers = {"Content-Type": "application/octet-stream", "ETag": '"' + snapshot.sha256 + '"',
+                                    "Content-Length": str(snapshot.length)}
                 byte_range, status_code = request["range"], 200
                 if byte_range is not None:
                     if byte_range["end"] >= snapshot.length:
                         raise Denied("invalid-range", 416)
                     snapshot.start, snapshot.end = byte_range["start"], byte_range["end"]
-                    headers["Content-Length"] = str(snapshot.end - snapshot.start + 1)
-                    headers["Content-Range"] = f"bytes {snapshot.start}-{snapshot.end}/{snapshot.length}"
+                    response_headers["Content-Length"] = str(snapshot.end - snapshot.start + 1)
+                    response_headers["Content-Range"] = f"bytes {snapshot.start}-{snapshot.end}/{snapshot.length}"
                     status_code = 206
-                return Reply(status_code, headers, snapshot)
+                reply = Reply(status_code, response_headers, snapshot)
+                snapshot = None  # Response consumer owns the lease, not the cache entry.
+                return reply
+            fd, expected_mount = self.open_source(request)
+            if request["operation"] == "list":
+                with self.directory_lock:
+                    if self.directory_pages is None:
+                        from .directory_pages import DirectoryPages
+                        self.directory_pages = DirectoryPages(self.keys, self.clock)
+                return self.json_reply(self.directory_pages.list_page(fd, expected_mount, request,
+                                                                     lambda: self.check_deadline(request, cancelled)))
+            if not self.slots.acquire(blocking=False):
+                raise Denied("gateway-busy", 503)
+            preparing = True
+            entry = self.prepare_snapshot(fd, request, cancelled)
+            try:
+                self.check_deadline(request, cancelled)
             except BaseException:
-                snapshot.close()
+                self.cache.expire(entry.snapshot_id)
                 raise
+            return self.json_reply({"schemaVersion": 1, "sha256": entry.sha256, "size": entry.length,
+                                    "etag": '"' + entry.sha256 + '"', "snapshotId": entry.snapshot_id,
+                                    "snapshotExpiresAt": entry.expires_at})
         except OSError:
             raise Denied("resource-unavailable", 404) from None
         finally:
+            if snapshot is not None:
+                snapshot.close()
             if fd is not None:
                 os.close(fd)
-            if not retained_slot:
+            if preparing:
                 self.slots.release()
 
     @staticmethod
@@ -428,46 +403,31 @@ class Gateway:
         body = json.dumps(value, ensure_ascii=True, separators=(",", ":")).encode()
         return Reply(200, {"Content-Type": "application/json", "Content-Length": str(len(body))}, body)
 
-    def snapshot(self, fd, request, cancelled):
+    def prepare_snapshot(self, fd, request, cancelled):
         before = os.fstat(fd)
         length = before.st_size
         if length > self.max_file_bytes:
             raise Denied("file-too-large", 413)
-        with self.lock:
-            if self.reserved + length > self.max_spool_bytes \
-                    or shutil.disk_usage(self.spool).free < self.reserved + length + self.minimum_free:
-                raise Denied("snapshot-quota-exceeded", 507)
-            self.reserved += length
-        stream = None
-        def release():
-            with self.lock:
-                self.reserved -= length
-            self.slots.release()
-        try:
+        with self.cache.reserve(length) as reservation:
             stream = tempfile.TemporaryFile(mode="w+b", dir=self.spool)
-            digest, remaining = hashlib.sha256(), length
-            while remaining:
-                self.check_deadline(request, cancelled)
-                data = os.read(fd, min(1024 * 1024, remaining))
-                if not data:
+            try:
+                digest, remaining = hashlib.sha256(), length
+                while remaining:
+                    self.check_deadline(request, cancelled)
+                    data = os.read(fd, min(1024 * 1024, remaining))
+                    if not data:
+                        raise Denied("source-changed", 409)
+                    stream.write(data)
+                    digest.update(data)
+                    remaining -= len(data)
+                if os.read(fd, 1):
                     raise Denied("source-changed", 409)
-                stream.write(data)
-                digest.update(data)
-                remaining -= len(data)
-            if os.read(fd, 1):
-                raise Denied("source-changed", 409)
-            after = os.fstat(fd)
-            identity = lambda s: (s.st_dev, s.st_ino, s.st_size, s.st_mtime_ns, s.st_ctime_ns, s.st_nlink)
-            if identity(before) != identity(after) or after.st_nlink != 1:
-                raise Denied("source-changed", 409)
-            self.check_deadline(request, cancelled)
-            stream.flush()
-            stream.seek(0)
-            return Snapshot(stream, length, digest.hexdigest(), release, time.monotonic() + self.snapshot_ttl)
-        except BaseException:
-            if stream is not None:
+                after = os.fstat(fd)
+                if source_identity(before) != source_identity(after) or after.st_nlink != 1:
+                    raise Denied("source-changed", 409)
+                self.check_deadline(request, cancelled)
+                stream.flush()
+                return reservation.commit(stream, digest.hexdigest(), authority_binding(request), source_identity(after))
+            except BaseException:
                 stream.close()
-            with self.lock:
-                self.reserved -= length
-            # execute still owns and releases its concurrency slot on snapshot construction failure.
-            raise
+                raise

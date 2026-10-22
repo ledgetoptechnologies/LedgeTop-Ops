@@ -33,17 +33,22 @@ class GatewayTests(unittest.TestCase):
         self.gateway_id, self.root_id, self.grant_id = [str(uuid.uuid4()) for _ in range(3)]
         self.root = enroll(self.source, self.root_id, 1)
         self.replay = ReplayStore(os.path.join(self.state, "nonces.sqlite3"))
+        self.gateways = []
         self.gateway = self.make_gateway()
         self.replies = []
 
     def make_gateway(self, **kwargs):
-        return Gateway(self.gateway_id, [self.root], {"synthetic_key": self.key}, self.replay, self.spool,
-                       minimum_free_bytes=0, **kwargs)
+        gateway = Gateway(self.gateway_id, [self.root], {"synthetic_key": self.key}, self.replay, self.spool,
+                          minimum_free_bytes=0, **kwargs)
+        self.gateways.append(gateway)
+        return gateway
 
     def tearDown(self):
         for reply in self.replies:
             if isinstance(reply.body, Snapshot):
                 reply.body.close()
+        for gateway in self.gateways:
+            gateway.close()
         self.temporary.cleanup()
 
     def request(self, operation="manifest", path="map.bin", **changes):
@@ -52,7 +57,7 @@ class GatewayTests(unittest.TestCase):
                      rootFingerprint=self.root.fingerprint, staffId="synthetic-staff-1", accessSubject="synthetic-human-subject",
                      admissionVersion=1, profileVersion=1, grantId=self.grant_id, grantGeneration=1,
                      operation=operation, path=path, expectedSha256=hashlib.sha256(self.data).hexdigest() if operation == "content" else None,
-                     range=None, expiresAt=now + 25, deadlineAt=now + 120)
+                     range=None, cursor=None, snapshotId=None, expiresAt=now + 25, deadlineAt=now + 120)
         value.update(changes)
         return value
 
@@ -66,9 +71,17 @@ class GatewayTests(unittest.TestCase):
                 "X-Ops-Read-Nonce": nonce, "X-Ops-Read-Signature": hmac.digest(self.key, message.encode(), "sha256").hex()}, body
 
     def run_request(self, request=None, gateway=None, **kwargs):
-        reply = (gateway or self.gateway).execute(*self.signed(request), **kwargs)
+        gateway = gateway or self.gateway
+        if request is not None and request.get("operation") == "content" and request.get("snapshotId") is None:
+            request = self.prepared(request, gateway)
+        reply = gateway.execute(*self.signed(request), **kwargs)
         self.replies.append(reply)
         return reply
+
+    def prepared(self, request, gateway=None):
+        manifest_request = {**request, "operation": "manifest", "expectedSha256": None, "range": None, "snapshotId": None, "cursor": None}
+        prepared = json.loads(self.run_request(manifest_request, gateway=gateway).body)
+        return {**request, "snapshotId": prepared["snapshotId"]}
 
     def denied(self, call, status=None, code=None):
         with self.assertRaises(Denied) as result:
@@ -82,9 +95,12 @@ class GatewayTests(unittest.TestCase):
         reply = self.run_request()
         value = json.loads(reply.body)
         self.assertEqual({"schemaVersion": 1, "sha256": hashlib.sha256(self.data).hexdigest(), "size": len(self.data),
-                          "etag": '"' + hashlib.sha256(self.data).hexdigest() + '"'}, value)
+                          "etag": '"' + hashlib.sha256(self.data).hexdigest() + '"'},
+                         {key: item for key, item in value.items() if key not in ("snapshotId", "snapshotExpiresAt")})
+        self.assertEqual(value["snapshotId"], str(uuid.UUID(value["snapshotId"])))
+        self.assertLessEqual(value["snapshotExpiresAt"], time.time() + 1800)
         self.assertEqual([], os.listdir(self.spool))
-        self.assertEqual(0, self.gateway.reserved)
+        self.assertEqual(len(self.data), self.gateway.reserved)
 
     def test_full_content_returns_snapshot_not_live_descriptor(self):
         reply = self.run_request(self.request("content"))
@@ -92,7 +108,7 @@ class GatewayTests(unittest.TestCase):
             stream.write(b"x" * len(self.data))
         self.assertEqual(self.data, b"".join(reply.body.chunks()))
         self.assertEqual(str(len(self.data)), reply.headers["Content-Length"])
-        self.assertEqual(0, self.gateway.reserved)
+        self.assertEqual(len(self.data), self.gateway.reserved)
 
     def test_inclusive_range_content_headers_and_bytes(self):
         reply = self.run_request(self.request("content", range={"start": 4, "end": 12}))
@@ -275,15 +291,20 @@ class GatewayTests(unittest.TestCase):
             with open(os.path.join(self.source, name), "wb"):
                 pass
         value = json.loads(self.run_request(self.request("list", "")).body)
-        self.assertEqual({"schemaVersion", "entries"}, set(value))
+        self.assertEqual({"schemaVersion", "entries", "nextCursor"}, set(value))
         self.assertEqual(sorted([entry["name"] for entry in value["entries"]], key=lambda name: name.encode()), [entry["name"] for entry in value["entries"]])
         self.assertTrue(all(set(entry) == {"name", "kind"} for entry in value["entries"]))
 
-    def test_folder_over_200_fails_instead_of_truncating(self):
+    def test_folder_over_200_is_paginated_without_truncating(self):
         for index in range(200):
             with open(os.path.join(self.source, f"file-{index}"), "wb"):
                 pass
-        self.denied(lambda: self.run_request(self.request("list", "")), 413, "folder-too-large")
+        first = json.loads(self.run_request(self.request("list", "")).body)
+        self.assertEqual(200, len(first["entries"]))
+        self.assertIsInstance(first["nextCursor"], str)
+        second = json.loads(self.run_request(self.request("list", "", cursor=first["nextCursor"])).body)
+        self.assertEqual(1, len(second["entries"]))
+        self.assertIsNone(second["nextCursor"])
 
     def test_invalid_canonical_paths(self):
         for path in ("", "/map.bin", "../map.bin", "a/./b", "a//b", "a/", "a\\b", "a%2fb", "a:b", "a\x00b", "a\ud800b", "a\u200bb", "a\u0085b", "a/" * 64 + "a", "é" * 128):
@@ -311,7 +332,7 @@ class GatewayTests(unittest.TestCase):
         headers = {"Content-Type": "application/json", "X-Ops-Read-Key-Id": vector["keyId"],
                    "X-Ops-Read-Time": str(vector["timestamp"]), "X-Ops-Read-Nonce": vector["nonce"],
                    "X-Ops-Read-Signature": vector["signature"]}
-        self.assertEqual(parsed, gateway.authenticate(headers, body))
+        self.assertEqual({**parsed, "_keyId": vector["keyId"]}, gateway.authenticate(headers, body))
         self.denied(lambda: gateway.authenticate(headers, body), 409, "replayed-request")
 
     def test_duplicate_unknown_missing_and_noncanonical_scalars(self):
@@ -321,6 +342,7 @@ class GatewayTests(unittest.TestCase):
         for changes in ({"extra": 1}, {"schemaVersion": True}, {"rootGeneration": True}, {"admissionVersion": 1.0},
                         {"expiresAt": "100"}, {"profileVersion": 0}, {"gatewayId": self.gateway_id.upper()},
                         {"accessSubject": "   "}, {"accessSubject": "x" * 192}, {"staffId": "id\ue000"},
+                        {"staffId": "employee/other"}, {"staffId": "é"},
                         {"grantId": "00000000-0000-0000-0000-000000000000"},
                         {"range": {"start": 0, "end": 1, "extra": 2}},
                         {"expectedSha256": "a" * 64}, {"operation": "delete"}):
@@ -374,9 +396,11 @@ class GatewayTests(unittest.TestCase):
     def test_snapshot_concurrency_and_quota_release(self):
         gateway = self.make_gateway(concurrency=1)
         reply = self.run_request(self.request("content"), gateway=gateway)
-        self.denied(lambda: self.run_request(gateway=gateway), 503, "gateway-busy")
+        # Active retained-content leases do not consume expensive preparation slots.
+        self.run_request(gateway=gateway)
         reply.body.close()
         self.run_request(gateway=gateway)
+        gateway.close()
         self.assertEqual(0, gateway.reserved)
         limited = self.make_gateway(max_file_bytes=100, max_spool_bytes=100, concurrency=3)
         first = self.run_request(self.request("content"), gateway=limited)
@@ -384,6 +408,7 @@ class GatewayTests(unittest.TestCase):
         self.denied(lambda: self.run_request(self.request("content"), gateway=limited), 507)
         first.body.close()
         second.body.close()
+        limited.close()
         self.assertEqual(0, limited.reserved)
 
     def test_disk_free_space_and_file_size_bounds(self):
@@ -484,7 +509,7 @@ class GatewayTests(unittest.TestCase):
         thread.start()
         try:
             connection = http.client.HTTPConnection(*server.server_address, timeout=5)
-            headers, body = self.signed(self.request("content", range={"start": 1, "end": 5}))
+            headers, body = self.signed(self.prepared(self.request("content", range={"start": 1, "end": 5})))
             connection.request("POST", "/v1/read", body=body, headers=headers)
             response = connection.getresponse()
             self.assertEqual(206, response.status)
