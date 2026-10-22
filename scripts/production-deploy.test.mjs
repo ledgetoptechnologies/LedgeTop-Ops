@@ -5,11 +5,47 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
-import { PROFILE, hash, canonical, validateInstallation, compileConfig, checkMode, capture, CloudflareReader, verifyCandidate, verifySourceMap, executeDeployment, validateBuildEnvironment, frontendInputHash, buildModulePath } from './production-deploy.mjs';
+import { domainPhaseValues, domainRecognitionProfile, domainRecognitionDiff } from './production-domain-recognition.mjs';
+import { PROFILE, hash, canonical, validateInstallation, compileConfig, checkMode, capture, CloudflareReader, verifyCandidate, verifySourceMap, executeDeployment, validateBuildEnvironment, frontendInputHash, reviewedFrontendDigest, frontendFingerprint, parseDeploymentArguments, inspectProductionInstallation, buildModulePath } from './production-deploy.mjs';
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const ids = { operations: '11111111-1111-4111-8111-111111111111', client: '22222222-2222-4222-8222-222222222222', 'ops-sync': '33333333-3333-4333-8333-333333333333' };
 const NEW = '44444444-4444-4444-8444-444444444444';
 const clone = x => structuredClone(x);
+
+test('worker-only Viewer source compatibility admits just the reviewed exact path and SHA', () => {
+  const file = 'packages/shared/src/viewer-service.ts';
+  const candidate = '075afdc83aee2c288a10be47441e1fd7cf141edfc8a2c9936ba7102d005024b6';
+  const baseline = 'a7f1b2160fb85c06d99213edbc4ef69c0df8f0e96de6284b7d312c2520f91b0f';
+  assert.equal(reviewedFrontendDigest(file, candidate), baseline);
+  for (const other of ['package.json', 'packages/shared/src/other.ts', './' + file, file.toUpperCase()])
+    assert.equal(reviewedFrontendDigest(other, candidate), candidate);
+  const changed = hash('any additional worker or browser source change');
+  assert.equal(reviewedFrontendDigest(file, changed), changed);
+  assert.equal(frontendInputHash(file, Buffer.from('changed source')), hash('changed source'));
+});
+
+test('only the exact reviewed Viewer root-script manifest aliases the locked frontend baseline', () => {
+  const raw = fs.readFileSync(path.join(ROOT, 'package.json'));
+  const normalized = raw.toString('utf8').replaceAll('\r\n', '\n');
+  assert.equal(hash(normalized), 'f8eb91b8e39b62df7d7a13b6474f96297e05110c443899c1b109fa2a0062a1d0');
+  const baseline = '3c5cf8119ffa8eb65d2216db89a583ba79b91a7ada75cbae8aec0856af59ae31';
+  assert.equal(frontendInputHash('package.json', raw), baseline);
+  assert.equal(frontendInputHash('package.json', Buffer.from(normalized.replaceAll('\n', '\r\n'))), baseline);
+  for (const alter of [
+    value => { value.scripts['viewer:build'] += ' --changed'; },
+    value => { value.scripts.build = 'changed'; },
+    value => { value.dependencies = { 'unreviewed-package': '1.0.0' }; },
+  ]) {
+    const value = JSON.parse(normalized); alter(value);
+    const bytes = Buffer.from(JSON.stringify(value, null, 2));
+    assert.equal(frontendInputHash('package.json', bytes), hash(bytes));
+    assert.notEqual(frontendInputHash('package.json', bytes), baseline);
+  }
+  assert.equal(frontendInputHash('apps/client/package.json', raw), hash(normalized));
+  assert.equal(frontendInputHash('packages/shared/src/unreviewed.ts', raw), hash(normalized));
+  assert.equal(frontendFingerprint(ROOT), PROFILE.frontendSHA256);
+  assert.throws(() => checkMode('ui', PROFILE.frontendSHA256), /UI deployment denied/);
+});
 const genuineMap = () => ({ version: 3, file: 'index.js', sources: ['fixture.ts'], sourcesContent: ['export const fixture = true;'], names: [], mappings: 'AAAA' });
 function fixture() {
   const profile = clone(PROFILE), snapshot = {};
@@ -17,6 +53,7 @@ function fixture() {
     const defaults = JSON.parse(fs.readFileSync(path.join(ROOT, 'apps', app, 'wrangler.jsonc'))).vars;
     const vars = Object.fromEntries(spec.plainNames.map(name => [name, defaults[name] ?? 'synthetic-fixture']));
     if (app === 'operations') Object.assign(vars, {
+      DELIVERY_BASE_URL: 'https://portal.ledgetopdroneservices.com',
       CLIENT_ONBOARDING_ADMIN_ENABLED: 'true', CLIENT_ONBOARDING_ADMIN_ORIGIN: 'https://ops.ledgetopdroneservices.com',
       CLIENT_ONBOARDING_RECIPIENT_BRIDGE_ENABLED: 'true', CLIENT_ONBOARDING_NOTIFICATIONS_ENABLED: 'true',
       CLIENT_ONBOARDING_NOTIFICATION_STAFF_IDS: '["synthetic-owner"]', CLIENT_ONBOARDING_NOTIFICATIONS_NOT_BEFORE: '2026-10-20T00:00:00.000Z',
@@ -52,6 +89,103 @@ function readerFor(snapshot, candidate) {
     return clone(id === NEW ? candidate.version : s.version);
   } };
 }
+
+test('finite domain recognition preserves all resources, public namespaces and protected scalar hashes', () => {
+  assert.deepEqual(domainRecognitionProfile('baseline'), PROFILE);
+  assert.deepEqual(domainRecognitionProfile('ops-alias-preparation').workers.client, PROFILE.workers.client);
+  for (const phase of ['baseline','ops-alias-preparation','client-private-overlap'])
+    assert.equal(domainRecognitionProfile(phase).workers.operations.plainValueSHA256.DELIVERY_BASE_URL,
+      PROFILE.workers.operations.plainValueSHA256.DELIVERY_BASE_URL);
+  for (const phase of ['portal-entry-canonical','staff-canonical'])
+    assert.equal(domainRecognitionProfile(phase).workers.operations.plainValueSHA256.DELIVERY_BASE_URL,
+      hash('https://portal.ledgetop.app'));
+  for (const phase of ['baseline', 'ops-alias-preparation', 'client-private-overlap', 'portal-entry-canonical', 'staff-canonical']) {
+    const { profile: base, snapshot } = fixture();
+    const values = domainPhaseValues(phase), profile = domainRecognitionProfile(phase, base);
+    for (const [app, vars] of Object.entries(values)) for (const [name, text] of Object.entries(vars)) {
+      for (const bindings of [snapshot[app].version.resources.bindings, snapshot[app].settings.bindings])
+        bindings.find(row => row.name === name).text = text;
+    }
+    assert.equal(validateInstallation(snapshot, { profile }), snapshot);
+    for (const [app, worker] of Object.entries(base.workers)) {
+      const next = profile.workers[app];
+      for (const key of Object.keys(worker).filter(key => key !== 'plainValueSHA256')) assert.deepEqual(next[key], worker[key]);
+      for (const [name, sha] of Object.entries(worker.plainValueSHA256))
+        if (!Object.hasOwn(values[app] ?? {}, name)) assert.equal(next.plainValueSHA256[name], sha);
+    }
+    for (const [app, name] of [['operations','PUBLIC_SHARE_ORIGIN'],['client','PUBLIC_BASE_URL'],['client','PUBLIC_SHARE_ORIGIN'],['client','EXPECTED_HOST'],['client','LEGACY_CLIENT_ORIGINS']])
+      assert.equal(profile.workers[app].plainValueSHA256[name], base.workers[app].plainValueSHA256[name]);
+    const wrong = clone(snapshot);
+    for (const bindings of [wrong.client.settings.bindings, wrong.client.version.resources.bindings])
+      bindings.find(row => row.name === 'PUBLIC_SHARE_ORIGIN').text = 'https://portal.ledgetop.app';
+    assert.throws(() => validateInstallation(wrong, { profile }), /scalar configuration changed/);
+    const resource = clone(snapshot); resource.client.version.resources.bindings.find(row => row.type === 'd1').id = NEW;
+    assert.throws(() => validateInstallation(resource, { profile }), /bindings differ|resource/);
+    const flag = clone(snapshot);
+    for (const bindings of [flag.operations.settings.bindings, flag.operations.version.resources.bindings])
+      bindings.find(row => row.name === 'CLIENT_ONBOARDING_ADMIN_ENABLED').text = 'false';
+    assert.throws(() => validateInstallation(flag, { profile }), /scalar configuration|normal onboarding/);
+    const secret = clone(snapshot);
+    for (const bindings of [secret.client.settings.bindings, secret.client.version.resources.bindings])
+      bindings.push({name:'UNREVIEWED_SECRET',type:'secret_text'});
+    assert.throws(() => validateInstallation(secret, { profile }), /resource or secret binding/);
+    assert.equal(domainRecognitionDiff(phase).writesPerformed, false);
+    assert.equal(domainRecognitionDiff(phase).deploymentEnabled, false);
+  }
+  assert.throws(() => domainRecognitionProfile('arbitrary'), /Unknown reviewed domain phase/);
+  const arbitrary = fixture(); arbitrary.profile.onboardingAdminOrigin = 'https://unreviewed.example';
+  assert.throws(() => validateInstallation(arbitrary.snapshot, {profile:arbitrary.profile}), /Unreviewed canonical admin origin/);
+  const changed = domainPhaseValues('client-private-overlap'); changed.client.CLIENT_PORTAL_ORIGIN = 'https://unreviewed.example';
+  assert.equal(domainPhaseValues('client-private-overlap').client.CLIENT_PORTAL_ORIGIN, 'https://portal.ledgetop.app');
+  // Two Worker updates cannot be atomic. Every permitted intermediate state
+  // above passes; generating new entry URLs before the Client update does not.
+  const {profile: base, snapshot: unsafe} = fixture();
+  base.workers.client.plainValueSHA256.CLIENT_PORTAL_ORIGIN = hash('https://portal.ledgetopdroneservices.com');
+  for (const bindings of [unsafe.client.settings.bindings, unsafe.client.version.resources.bindings])
+    bindings.find(row => row.name === 'CLIENT_PORTAL_ORIGIN').text = 'https://portal.ledgetopdroneservices.com';
+  for (const bindings of [unsafe.operations.settings.bindings, unsafe.operations.version.resources.bindings])
+    bindings.find(row => row.name === 'DELIVERY_BASE_URL').text = 'https://portal.ledgetop.app';
+  for (const phase of ['baseline','ops-alias-preparation','client-private-overlap','portal-entry-canonical','staff-canonical'])
+    assert.throws(() => validateInstallation(unsafe, {profile:domainRecognitionProfile(phase,base)}), /scalar configuration changed/);
+});
+
+test('strict CLI defaults to baseline and only admits finite explicit phase names', () => {
+  assert.deepEqual(parseDeploymentArguments([]), {kind:'check'});
+  const execute=['--worker','operations','--mode','backend','--execute'];
+  assert.deepEqual(parseDeploymentArguments(execute), {kind:'execute',app:'operations',mode:'backend',phase:'baseline'});
+  for (const phase of ['baseline','ops-alias-preparation','client-private-overlap','portal-entry-canonical','staff-canonical']) {
+    assert.equal(parseDeploymentArguments([...execute,'--domain-phase',phase]).phase,phase);
+    assert.deepEqual(parseDeploymentArguments(['--inspect','--domain-phase',phase]),{kind:'inspect',phase});
+  }
+  for (const args of [
+    ['--inspect'],['--inspect','--domain-phase','unknown'],['--inspect','--domain-phase','baseline','--execute'],
+    [...execute,'--profile','arbitrary.json'],[...execute,'--domain-phase','unknown'],
+    [...execute,'--domain-phase','baseline','--domain-phase','staff-canonical'],
+    ['--worker','operations','--mode','ui','--execute'],['--domain-phase','staff-canonical',...execute],
+  ]) assert.throws(()=>parseDeploymentArguments(args), /Use --worker|Unknown reviewed domain phase|UI deployment denied/);
+});
+
+test('inspection returns only IDs, hashes and booleans through GET-only recognition, without native commands', async()=>{
+  const {profile,snapshot}=fixture(),reader=readerFor(snapshot);
+  const receipt=await inspectProductionInstallation(reader,'baseline',profile);
+  assert.deepEqual(receipt.activeVersionIds,ids);
+  assert.equal(receipt.protectedProfileSHA256,hash(canonical(profile)));
+  assert.equal(receipt.readOnly,true);assert.equal(receipt.uploadEnabled,false);assert.equal(receipt.activationEnabled,false);
+  assert.deepEqual(Object.keys(receipt).sort(),['recognizedPhase','activeVersionIds','protectedProfileSHA256','frontendSHA256','recognized','readOnly','uploadEnabled','activationEnabled','rawSnapshotPrinted'].sort());
+  assert.ok(reader.calls.length>0);assert.ok(reader.calls.every(url=>url.startsWith('/workers/')));
+  assert.ok(!JSON.stringify(receipt).includes('synthetic-fixture'));
+  const invalid=readerFor(snapshot);
+  await assert.rejects(inspectProductionInstallation(invalid,'unknown',profile),/Unknown reviewed domain phase/);
+  assert.deepEqual(invalid.calls,[]);
+});
+
+test('unknown phase and malformed inspection refuse before credentials or network',()=>{
+  for(const args of [['--inspect','--domain-phase','unknown'],['--inspect','--domain-phase','baseline','--execute']]){
+    const child=spawnSync(process.execPath,['scripts/production-deploy.mjs',...args],{cwd:ROOT,encoding:'utf8',env:{PATH:process.env.PATH}});
+    assert.equal(child.status,1);assert.equal(child.stdout,'');
+    assert.match(JSON.parse(child.stderr).message,/Unknown reviewed domain phase|Use --worker/);
+  }
+});
 test('recognized final profile: effective original scalars,<=128, all resources and10crons', () => {
   const { profile, snapshot } = fixture();assert.equal(validateInstallation(snapshot, { profile }), snapshot);
   assert.equal(PROFILE.workers.operations.crons.length, 10);

@@ -1,4 +1,4 @@
-import { nativeDeliveryDeploymentEnabled } from '../operations-native-delivery-deployment';
+import { nativeDeliveryDeploymentEnabled, nativeDeliveryRequestOriginAllowed } from '../operations-native-delivery-deployment';
 import { Hono, type Context } from 'hono';
 import { HTTPException } from 'hono/http-exception';
 import { isMovedSourceMarker } from '@ltds/shared';
@@ -83,9 +83,9 @@ export function createOperationsNativeDeliveryRouter(dependencies: { resolvePrin
       || !nativeDeliveryDeploymentEnabled(c.env)) return c.json({ error: 'Not found' }, 404);
     const origins = configuredClientPortalOrigins(c.env);
     if (!origins) return c.json({ error: 'Client portal is not configured' }, 503);
-    // EXPECTED_HOST belongs to public delivery. Native bytes are confined to
-    // the exact primary authenticated portal, never secondary/legacy origins.
-    if (new URL(c.req.url).origin !== c.env.CLIENT_PORTAL_ORIGIN) return c.json({ error: 'Not found' }, 404);
+    // Only exact browser origins pinned by the physical profile may reach
+    // normal authentication; public host admission alone never grants bytes.
+    if (!nativeDeliveryRequestOriginAllowed(c.env, c.req.url)) return c.json({ error: 'Not found' }, 404);
     try {
       if (!dependencies.resolvePrincipal) clientAccessConfiguration(c.env);
       const principal = await (dependencies.resolvePrincipal ?? resolveCloudflareClientPrincipal)(c.req.raw, c.env);

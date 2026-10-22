@@ -1,0 +1,40 @@
+{
+  "app": "operations",
+  "baseline": "43f31609960af14b060964b1ca53d875f4d9eac2",
+  "candidate": "a045e30fff179e015febbd920da46550a9cf96e8",
+  "oldCount": 238,
+  "newCount": 238,
+  "oldAggregate": "45adc863cfe178963df5ea23fb11451f14816ccc949962365fe9bf9efac0646f",
+  "newAggregate": "158f856d517ebfd7d71bd1f6afd86b8892fa7e2a7c20fa3809e37ac621a4c074",
+  "runtimeCount": 123,
+  "runtimeIdentical": true,
+  "oldRuntimeAggregate": "ed13a6c56a29f138d54b2235eb5f014860c32921589b20dafbf9ca7123d4547f",
+  "newRuntimeAggregate": "ed13a6c56a29f138d54b2235eb5f014860c32921589b20dafbf9ca7123d4547f",
+  "differences": [
+    {
+      "path": "assets/index-Raqyjyww.js.map",
+      "old": [
+        "assets/index-Raqyjyww.js.map",
+        8842081,
+        "c24fba9d913ae070be9409b7cdc275e4fb175847c84fa26b05f1d861d029b4f8"
+      ],
+      "next": [
+        "assets/index-Raqyjyww.js.map",
+        8842285,
+        "4295820bf3d8ce8ba4ad6735b7964fa55c20cc9c9dd749ae7ed0147f393f99e4"
+      ]
+    }
+  ],
+  "mapDetails": [
+    {
+      "path": "assets/index-Raqyjyww.js.map",
+      "topLevelChanged": [
+        "sourcesContent"
+      ],
+      "sourcesChanged": [
+        "../../../node_modules/@ltds/shared/src/viewer-service.ts"
+      ],
+      "mappingsIdentical": true
+    }
+  ]
+}
