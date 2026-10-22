@@ -100,6 +100,26 @@ Existing output files are never replaced, even if created after HTTP starts.
 Promotion is the completion boundary: locked state metadata can remain for later
 cleanup without incorrectly reporting that the verified final file failed.
 
+## Employee read adapter (unmounted server draft)
+
+`EmployeeClient` uses the human `CloudflareAccessSession` against one fixed Ops
+HTTPS origin. It discovers at most 100 explicitly granted labeled roots, reads
+UTF-8-sorted directory pages of at most 200 entries, and obtains a trusted
+manifest for an exact relative source path. Paths and cursors are escaped once;
+traversal, malformed metadata, duplicate fields, redirects, unsafe output names
+and responses exceeding the bounded JSON limits fail closed. Discovery/list
+requests have a 60-second deadline; manifest preparation allows up to 15 minutes
+with explicit cancellation for the initial large-file copy.
+
+The manifest requires a content SHA-256, matching content version and quoted
+SHA ETag. Download state uses logical file identity plus SHA, so renewing a
+snapshot handle can resume the same version while changed content starts a
+separate transfer. HTTP 401 requires explicit human login, 403 denies access,
+and 404/409 requires rediscovery or manifest renewal; none launches a browser.
+Synthetic acceptance includes the actual owned test apphost subprocess and
+the verified downloader. Public employee route factories remain unmounted;
+live provisioning, staging sign-in and large-file acceptance are still gates.
+
 ## Filesystem boundary
 
 The caller chooses an existing absolute local directory owned by the signed-in
@@ -123,8 +143,8 @@ current authorization or whether a future server adapter may issue a manifest.
   or durable queue identifiers; the manifest supplies the separate stable ID.
 - Server-controlled routing: employees read from an approved Docker/server
   gateway, while clients read only their authorized R2-backed portal content.
-  The client adapter is implemented and synthetically tested; the employee
-  connector and live deployment acceptance remain pending.
+  Both adapters are implemented and synthetically tested; employee route
+  activation and live deployment acceptance remain pending.
 - Claude-owned UI/UX, signed Windows packaging, distribution/update policy,
   installation/uninstallation checks and real large-media transfer acceptance.
 - Windows Cloud Files API / Explorer placeholders, online-only hydration,

@@ -16,7 +16,7 @@ describe('explicit exact-root employee read authority against full source222 D1'
     mf = new Miniflare({ modules: true, compatibilityDate: '2026-08-06', script: 'export default {fetch(){return new Response("ok")}}', d1Databases: ['OPS_DB'] });
     db = await mf.getD1Database('OPS_DB') as D1Database;
     const directory = new URL('../migrations/', import.meta.url);
-    for (const name of readdirSync(directory).filter(name => /^\d{4}_.+\.sql$/u.test(name) && name.slice(0, 4) <= '0222').sort())
+    for (const name of readdirSync(directory).filter(name => /^\d{4}_.+\.sql$/u.test(name) && name.slice(0, 4) <= '0223').sort())
       await db.batch(splitD1MigrationStatements(readFileSync(new URL(name, directory), 'utf8')).map(sql => db.prepare(sql)));
   }, 90_000);
   afterAll(async () => { await mf?.dispose(); });
@@ -63,6 +63,14 @@ describe('explicit exact-root employee read authority against full source222 D1'
     await db.prepare("INSERT INTO staff_role_assignments(id,staff_id,role_id,scope,scope_key,created_by) VALUES(?,?,'role-owner','global','global',?)")
       .bind(uuid(), outsider.id, outsider.id).run();
     expect(await resolve(db, await authenticated(outsider), rootId)).toBeNull();
+  });
+  it('can resolve a requested current grant without silently substituting another grant', async () => {
+    const first = await grant(alice), second = await grant(alice), auth = await authenticated(alice);
+    expect((await resolve(db, auth, rootId))?.grantId).toBe(first);
+    expect((await resolve(db, auth, rootId, second))?.grantId).toBe(second);
+    await db.prepare('UPDATE ops_employee_read_grants SET active=0,grant_generation=grant_generation+1 WHERE grant_id=?').bind(second).run();
+    expect(await resolve(db, auth, rootId, second)).toBeNull();
+    expect((await resolve(db, auth, rootId))?.grantId).toBe(first);
   });
   it('a matching current exact-root deny overrides allows without denying another staff member', async () => {
     await grant(alice); await grant(bob);
@@ -172,7 +180,7 @@ describe('explicit exact-root employee read authority against full source222 D1'
     const auth = await authenticated(alice);
     expect(await list(db, auth)).toEqual([]);
     await grant(alice); await grant(bob);
-    expect(await list(db, auth)).toEqual([{ rootId, gatewayId }]);
+    expect(await list(db, auth)).toEqual([{ rootId, gatewayId, displayName: 'Server files' }]);
     const roots = await list(db, auth); expect(Object.isFrozen(roots)).toBe(true); expect(Object.isFrozen(roots![0])).toBe(true);
     expect(await list(db, await authenticated(outsider))).toEqual([]);
     await grant(alice, { effect: 'deny' }); expect(await list(db, auth)).toEqual([]);

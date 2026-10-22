@@ -187,6 +187,7 @@ public sealed class Downloader : IDisposable
                 using var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
                 if (response.StatusCode == HttpStatusCode.Unauthorized) throw new LoginRequiredException();
                 if (response.StatusCode == HttpStatusCode.Forbidden) throw new AccessDeniedException();
+                if (response.StatusCode is HttpStatusCode.NotFound or HttpStatusCode.Conflict) throw new ResourceUnavailableException();
                 var remaining = spec.Length - offset;
                 if ((offset > 0 && response.StatusCode != HttpStatusCode.PartialContent)
                     || (offset == 0 && response.StatusCode is not (HttpStatusCode.OK or HttpStatusCode.PartialContent)))

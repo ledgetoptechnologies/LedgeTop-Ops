@@ -54,9 +54,10 @@ const query = `SELECT root.gateway_id gatewayId,root.root_id rootId,root.root_ge
 /** A verified human identity is necessary but never grants a managed root.
  * No role, directory permission, legacy membership or email match grants bytes. */
 export async function resolveEmployeeReadAuthority(database: D1Database,
-  authenticated: AuthenticatedNativeStaffWithAdmissionVersion, rootId: string): Promise<EmployeeReadAuthority | null> {
+  authenticated: AuthenticatedNativeStaffWithAdmissionVersion, rootId: string, exactGrantId?: string): Promise<EmployeeReadAuthority | null> {
   try {
-    if (typeof rootId !== 'string' || !UUID.test(rootId) || !exact(authenticated, ['identity', 'verifiedUntil', 'admissionVersion'])
+    if (typeof rootId !== 'string' || !UUID.test(rootId) || (exactGrantId !== undefined && (typeof exactGrantId !== 'string' || !UUID.test(exactGrantId)))
+      || !exact(authenticated, ['identity', 'verifiedUntil', 'admissionVersion'])
       || !exact(authenticated.identity, ['kind', 'staffId', 'verifiedAccessSubject', 'email', 'displayName', 'profileVersion'])) return null;
     const identity = authenticated.identity;
     if (identity.kind !== 'native' || typeof identity.staffId !== 'string' || !STAFF.test(identity.staffId)
@@ -67,8 +68,8 @@ export async function resolveEmployeeReadAuthority(database: D1Database,
     // Trusted input may be mutable test/caller data: capture it before any await.
     const input = Object.freeze({ rootId, staffId: identity.staffId, accessSubject: identity.verifiedAccessSubject,
       admissionVersion: authenticated.admissionVersion, profileVersion: identity.profileVersion, email: identity.email, verifiedUntil: authenticated.verifiedUntil });
-    const row = await database.withSession('first-primary').prepare(query + ' ORDER BY allowed.grant_id LIMIT 1')
-      .bind(input.rootId, input.staffId, input.accessSubject, input.admissionVersion, input.profileVersion).first<Row>();
+    const row = await database.withSession('first-primary').prepare(query + (exactGrantId === undefined ? '' : ' AND allowed.grant_id=?') + ' ORDER BY allowed.grant_id LIMIT 1')
+      .bind(input.rootId, input.staffId, input.accessSubject, input.admissionVersion, input.profileVersion, ...(exactGrantId === undefined ? [] : [exactGrantId])).first<Row>();
     if (!row || row.email !== input.email || !positive(row.expiresAt) || row.expiresAt > 253402300799) return null;
     const proof = Object.freeze({ gatewayId: row.gatewayId, rootId: row.rootId, rootGeneration: row.rootGeneration, rootFingerprint: row.rootFingerprint,
       staffId: row.staffId, accessSubject: row.accessSubject, admissionVersion: row.admissionVersion, profileVersion: row.profileVersion,
@@ -95,7 +96,7 @@ export async function recheckEmployeeReadAuthority(database: D1Database, proof: 
  * null means unavailable/invalid/over capacity; an empty array means no grants.
  * Callers must still resolve and recheck authority for each later operation. */
 export async function listEmployeeReadRoots(database: D1Database,
-  authenticated: AuthenticatedNativeStaffWithAdmissionVersion): Promise<readonly Readonly<{ rootId: string; gatewayId: string }>[] | null> {
+  authenticated: AuthenticatedNativeStaffWithAdmissionVersion): Promise<readonly Readonly<{ rootId: string; gatewayId: string; displayName: string }>[] | null> {
   try {
     if (!exact(authenticated, ['identity', 'verifiedUntil', 'admissionVersion'])
       || !exact(authenticated.identity, ['kind', 'staffId', 'verifiedAccessSubject', 'email', 'displayName', 'profileVersion'])) return null;
@@ -132,10 +133,18 @@ export async function listEmployeeReadRoots(database: D1Database,
       const proof = await resolveEmployeeReadAuthority(database, input, candidate.rootId);
       if (proof) proofs.push(proof);
     }
+    const roots: Readonly<{ rootId: string; gatewayId: string; displayName: string }>[] = [];
+    for (const proof of proofs) {
+      const row = await database.withSession('first-primary').prepare(`SELECT display_name displayName FROM ops_employee_read_roots
+        WHERE root_id=? AND gateway_id=? AND root_generation=? AND root_fingerprint=? AND status='active'`)
+        .bind(proof.rootId, proof.gatewayId, proof.rootGeneration, proof.rootFingerprint).first<{ displayName: string }>();
+      if (!row || typeof row.displayName !== 'string' || row.displayName.length > 160 || !row.displayName.trim() || /\p{C}/u.test(row.displayName)) return null;
+      roots.push(Object.freeze({ rootId: proof.rootId, gatewayId: proof.gatewayId, displayName: row.displayName }));
+    }
     for (const proof of proofs) if (!await recheckEmployeeReadAuthority(database, proof)) return null;
     // Even an empty listing must distinguish no grants from a session whose
     // native admission/profile changed while the candidate read was pending.
     if (!await currentIdentity() || !validUntil(input.verifiedUntil)) return null;
-    return Object.freeze(proofs.map(proof => Object.freeze({ rootId: proof.rootId, gatewayId: proof.gatewayId })));
+    return Object.freeze(roots);
   } catch { return null; }
 }
