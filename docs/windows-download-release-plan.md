@@ -133,6 +133,20 @@ read or real authenticated desktop session was performed. Bundled-binary and
 clean-machine runtime qualification remain open.
 [Official release](https://github.com/cloudflare/cloudflared/releases/tag/2026.10.3)
 
+The candidate was reverified on October22 and staged with its exact upstream
+root license in an owned private package-input cache. The adjacent evidence is
+`docs/staging/windows-helper-package-inputs-2026-10-22.json`. The helper was not
+executed or used for authentication in that step. The root license at pinned
+upstream commit`de6376c5af4a67cbc65258682e5a01781827643d` has SHA256
+`58d1e17ffe5109a7ae296caafcadfdbe6a7d176f0bc4ab01e12a689b0499d8bd`.
+
+No supplied notice/SBOM artifact was found among the release's uploaded assets
+or its complete source tree. Root Apache2.0 license and Go dependency pins do
+not establish complete attribution for the exact linked binary, whose Windows
+amd64 build enables CGO. Retain that as a binary-publication requirement; private
+unsigned bootstrap/helper tests can proceed with the verified inputs. Do not
+claim complete third-party notices from this root-license observation alone.
+
 ## Update, rollback and uninstall acceptance
 
 Use App Installer's supported update mechanism rather than a custom privileged
