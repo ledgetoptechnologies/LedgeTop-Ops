@@ -5,6 +5,14 @@ grant access, deploy a gateway, or qualify live storage. They support native
 employee server files and native Operations portal R2 delivery; PA legacy
 membership and public shares are not queue sources.
 
+Local pause/cancel of an already owned queued job persists without waiting for
+network authentication or the discovery command gate. It returns no metadata or
+content. A stop invalidates starts already waiting for sign-in; resuming requires
+a later explicit start and fresh source/principal authorization. All durable
+mutations share the queue state lock, including the final disposal/ownership
+release, so a stop cannot save after another process acquires the queue. Offline
+restart tests inspect saved pause/cancel state before authentication is released.
+
 For employee files the base is `/api/staff/files/queue`; for native portal files
 it is `/api/client/operations/data/queue`. All operations are authenticated GETs:
 

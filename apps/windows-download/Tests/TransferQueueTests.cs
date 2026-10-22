@@ -20,6 +20,8 @@ internal static class TransferQueueTests
         ("queue interrupted promotion recovers verified existing content without overwriting", ExistingRecovery),
         ("queue refuses reparse state roots and output directories", Reparse),
         ("queue active pause and cancel drain immediately while session discovery is blocked", OfflineStop),
+        ("queue inactive pause and cancel persist offline across restart", OfflineQueuedStop),
+        ("queue local pause fences a start already awaiting sign-in", PendingStartStop),
         ("queue record and serialized byte caps reject without starting transfers", Bounds)
     ];
     private static void Assert(bool value) { if (!value) throw new Exception("Queue assertion failed."); }
@@ -287,6 +289,63 @@ internal static class TransferQueueTests
             source.SessionWait = null; source.Principal = Source.Owner; source.Expiry = DateTimeOffset.UtcNow.AddHours(1);
             Assert((await Job(queue, id)).State == (cancel ? QueuedTransferState.Cancelled : QueuedTransferState.Paused));
             Assert(!File.Exists(Path.Combine(fixture.Output, "map.bin")) && new FileInfo(Part(fixture)).Length == 7);
+        }
+    }
+
+    private static async Task OfflineQueuedStop() {
+        using var fixture = new Fixture(); var source = new Source(); Guid paused, cancelled;
+        await using (var queue = await TransferQueue.OpenAsync(fixture.State, source)) {
+            paused = await queue.EnqueueAsync("odqr1_resource_one", fixture.Output);
+            cancelled = await queue.EnqueueAsync("odqr1_resource_two", fixture.Output);
+            var authentication = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            source.SessionWait = authentication.Task;
+            using var discoveryCancellation = new CancellationTokenSource();
+            var blockedDiscovery = queue.GetJobsAsync(discoveryCancellation.Token);
+            await source.SessionRequested.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            var calls = source.SessionCalls;
+            try {
+                await queue.PauseAsync(paused).WaitAsync(TimeSpan.FromSeconds(2));
+                await queue.CancelAsync(cancelled).WaitAsync(TimeSpan.FromSeconds(2));
+                Assert(source.SessionCalls == calls && !authentication.Task.IsCompleted && source.DownloadCalls == 0);
+                // Verify committed state while discovery still owns the command
+                // gate. A process exit now must not restore these jobs as Queued.
+                var stored = JsonNode.Parse(await File.ReadAllTextAsync(State(fixture)))!["jobs"]!.AsArray();
+                Assert(stored.Single(value => value!["jobId"]!.GetValue<Guid>() == paused)!["state"]!.GetValue<string>() == "Paused");
+                Assert(stored.Single(value => value!["jobId"]!.GetValue<Guid>() == cancelled)!["state"]!.GetValue<string>() == "Cancelled");
+            } finally { discoveryCancellation.Cancel(); authentication.TrySetResult(); }
+            await Throws<OperationCanceledException>(() => blockedDiscovery);
+            source.SessionWait = null;
+        }
+        await using var reopened = await TransferQueue.OpenAsync(fixture.State, source);
+        Assert((await Job(reopened, paused)).State == QueuedTransferState.Paused);
+        Assert((await Job(reopened, cancelled)).State == QueuedTransferState.Cancelled && source.DownloadCalls == 0);
+        source.Expiry = DateTimeOffset.UtcNow.AddSeconds(-1);
+        await Throws<LoginRequiredException>(() => reopened.RetryAsync(paused));
+        Assert(source.DownloadCalls == 0);
+    }
+
+    private static async Task PendingStartStop() {
+        foreach (var cancel in new[] { false, true }) {
+            using var fixture = new Fixture(); var source = new Source();
+            await using var queue = await TransferQueue.OpenAsync(fixture.State, source);
+            var id = await queue.EnqueueAsync("odqr1_resource_one", fixture.Output);
+            var authentication = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            source.SessionWait = authentication.Task;
+            var starting = queue.StartAsync(id);
+            await source.SessionRequested.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            try {
+                await (cancel ? queue.CancelAsync(id) : queue.PauseAsync(id)).WaitAsync(TimeSpan.FromSeconds(2));
+                Assert(!authentication.Task.IsCompleted && source.DownloadCalls == 0);
+            } finally { authentication.TrySetResult(); }
+            await Throws<TransferException>(() => starting);
+            source.SessionWait = null;
+            Assert((await Job(queue, id)).State == (cancel ? QueuedTransferState.Cancelled : QueuedTransferState.Paused));
+            Assert(source.DownloadCalls == 0 && !File.Exists(Path.Combine(fixture.Output, "map.bin")));
+            if (!cancel) {
+                await queue.RetryAsync(id); await queue.WaitForIdleAsync();
+                Assert((await Job(queue, id)).State == QueuedTransferState.Completed && source.DownloadCalls == 1);
+                Assert((await File.ReadAllBytesAsync(Path.Combine(fixture.Output, "map.bin"))).SequenceEqual(source.Bytes));
+            }
         }
     }
 
