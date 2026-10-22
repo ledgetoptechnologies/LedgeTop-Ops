@@ -85,8 +85,8 @@ public sealed class CloudFilesProbe(ICloudFilesNative? nativeBoundary = null) {
             if (segment.Length == 0 || segment is "." or ".." || segment.EndsWith('.') || segment.EndsWith(' ')) return false;
             if (segment.Any(c => char.IsControl(c) || "<>:\"/|?*".Contains(c))) return false;
             var basename = segment.Split('.')[0].ToUpperInvariant();
-            if (basename is "CON" or "PRN" or "AUX" or "NUL" ||
-                (basename.Length == 4 && (basename.StartsWith("COM", StringComparison.Ordinal) || basename.StartsWith("LPT", StringComparison.Ordinal)) && basename[3] is >= '1' and <= '9')) return false;
+            if (basename is "CON" or "PRN" or "AUX" or "NUL" or "CONIN$" or "CONOUT$" ||
+                (basename.Length == 4 && (basename.StartsWith("COM", StringComparison.Ordinal) || basename.StartsWith("LPT", StringComparison.Ordinal)) && (basename[3] is >= '1' and <= '9' or '¹' or '²' or '³'))) return false;
         }
         return true;
     }

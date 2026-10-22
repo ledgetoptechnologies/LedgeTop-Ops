@@ -34,7 +34,7 @@ internal static class CloudFilesProbeTests {
     }
     private static Task MetadataResults() {
         var native = new FakeNative(); var probe = new CloudFilesProbe(native);
-        foreach (var path in new[] { "", "relative.txt", @"\\server\share\file", @"\\?\C:\file", @"C:\folder\*.bin", @"C:\folder\file:stream", @"C:\folder\..\file", @"C:\folder\.\file", @"C:\folder\", @"C:\file.", @"C:\NUL.txt", @"C:\COM1\file", "C:\\x\nfile", "C:\\" + new string('a', 260) })
+        foreach (var path in new[] { "", "relative.txt", @"\\server\share\file", @"\\?\C:\file", @"C:\folder\*.bin", @"C:\folder\file:stream", @"C:\folder\..\file", @"C:\folder\.\file", @"C:\folder\", @"C:\file.", @"C:\NUL.txt", @"C:\COM1\file", @"C:\CONIN$", @"C:\CONOUT$.txt", @"C:\COM¹.bin", @"C:\LPT²\file", "C:\\x\nfile", "C:\\" + new string('a', 260) })
             Assert(probe.InspectExistingFile(path).Code == "literal-local-file-required", "Unsafe file path accepted.");
         Assert(native.Calls == 0, "Invalid path reached native boundary.");
         native.State = 0;
