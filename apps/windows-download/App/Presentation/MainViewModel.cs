@@ -39,8 +39,10 @@ public sealed class MainViewModel : Observable, IAsyncDisposable
     private bool closed;
     /// <summary>A queue that is being opened right now, so closing can wait for it and release it.</summary>
     private Task<QueueHost>? opening;
-    /// <summary>The previous person's queue while it stops after a sign-in change, so closing waits for it too.</summary>
-    private Task? retiring;
+    /// <summary>Previous people's queues while they stop after a sign-in change, so closing waits for them too.</summary>
+    private readonly HashSet<Task> retiring = [];
+    /// <summary>One sign-in at a time opens views, so two can never both open (and orphan) a queue.</summary>
+    private readonly SemaphoreSlim entering = new(1, 1);
 
     private const string DefaultSetupText = "Install it from the link in Ledge Top Operations or your client portal. If you already did, ask your Ledge Top contact to check the installation.";
 
@@ -131,6 +133,13 @@ public sealed class MainViewModel : Observable, IAsyncDisposable
 
     private async Task EnterAsync(SessionInfo current)
     {
+        await entering.WaitAsync();
+        try { await EnterOnceAsync(current); }
+        finally { entering.Release(); }
+    }
+
+    private async Task EnterOnceAsync(SessionInfo current)
+    {
         if (closed) return;
         if (person is not null && person != current.PrincipalId) {
             await CloseViewsAsync();
@@ -174,8 +183,8 @@ public sealed class MainViewModel : Observable, IAsyncDisposable
         foreach (var command in new[] { DownloadSelected, PauseAll, ResumeAll, ClearFinished, LoadMoreFiles }) command.Refresh();
         if (old is null) return;
         var drain = old.DisposeAsync().AsTask();
-        retiring = drain;
-        try { await drain; } finally { if (retiring == drain) retiring = null; }
+        retiring.Add(drain);
+        try { await drain; } finally { retiring.Remove(drain); }
     }
 
     /// <summary>
@@ -371,13 +380,13 @@ public sealed class MainViewModel : Observable, IAsyncDisposable
     private async Task CloseAsync()
     {
         closed = true; generation++;
-        var old = queue; queue = null; var pending = opening; var draining = retiring;
+        var old = queue; queue = null; var pending = opening; var draining = retiring.ToArray();
         Exception? failure = null;
         if (old is not null) {
             try { await old.DisposeAsync(); } catch (Exception error) { failure = error; }
         }
-        if (draining is not null) {
-            try { await draining; } catch (Exception error) { failure ??= error; }
+        foreach (var drain in draining) {
+            try { await drain; } catch (Exception error) { failure ??= error; }
         }
         if (pending is not null) {
             QueueHost? late = null;

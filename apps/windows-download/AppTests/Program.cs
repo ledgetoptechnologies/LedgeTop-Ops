@@ -479,6 +479,24 @@ async Task CloseBeforeSignedIn()
         // A second close returns the same finished shutdown.
         await env.Model.DisposeAsync();
     }
+    // Two startups race: only one opens a queue at a time, and closing releases it (adapted from Codex's regression).
+    await using (var env = Env.Create(signedIn: true)) {
+        env.Backend.BlockSources();
+        var first = env.Model.StartAsync();
+        await Until(() => env.Backend.SourceChecks > 0, "first queue opening");
+        var second = env.Model.StartAsync();
+        await Task.Delay(150); Pump();
+        Equal(1, env.Backend.SourceChecks);
+        var closing = env.Model.DisposeAsync().AsTask();
+        await Task.Delay(150); Pump();
+        True(!closing.IsCompleted, "closing waits for the queue that is opening");
+        env.Backend.ReleaseSources();
+        await closing; await first; await second;
+        await Task.Delay(300); Pump();
+        True(Locks.Free(env.Backend.StateDirectory), "no queue left locked");
+        True(env.Model.Screen != Screen.Files && env.Model.Sections.Count == 0, "nothing shown after close");
+        Equal(0, env.Backend.Writing);
+    }
     // Sign-in finishes in the browser after the window closed.
     await using (var env = Env.Create(signedIn: false)) {
         await env.Model.StartAsync();

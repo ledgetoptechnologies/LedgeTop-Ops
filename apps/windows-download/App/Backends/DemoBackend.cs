@@ -65,6 +65,8 @@ public sealed class DemoBackend : IFilesBackend
     /// <summary>Makes a stopped download take until <see cref="ReleaseStops"/> to finish stopping (a slow drain).</summary>
     public void HoldStops() { lock (state) state.StopGate ??= new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously); }
     public void ReleaseStops() { TaskCompletionSource? gate; lock (state) { gate = state.StopGate; state.StopGate = null; } gate?.TrySetResult(); }
+    /// <summary>How many times a download source has checked who is signed in.</summary>
+    public int SourceChecks { get { lock (state) return state.SourceChecks; } }
     /// <summary>How many downloads are writing bytes right now.</summary>
     public int Writing { get { lock (state) return state.Writing; } }
     /// <summary>The most downloads that were ever writing at the same moment.</summary>
@@ -89,7 +91,7 @@ public sealed class DemoBackend : IFilesBackend
         public DateTimeOffset ExpiresAt;
         public double BytesPerSecond;
         public TaskCompletionSource? Gate, SourceGate, StopGate;
-        public int Writing, MostAtOnce;
+        public int Writing, MostAtOnce, SourceChecks;
         public bool Valid => SignedIn && ExpiresAt > DateTimeOffset.UtcNow.AddSeconds(5);
         public string Principal => "odqp1_" + Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes("demo-person-" + Person)));
         public bool Sees(string key) => Person == 0 || key is "deliveries" or "greenleaf";
@@ -162,6 +164,7 @@ public sealed class DemoBackend : IFilesBackend
 
         public async Task<QueuedDownloadSession> GetSessionAsync(CancellationToken cancellationToken = default)
         {
+            lock (state) state.SourceChecks++;
             await state.CheckAsync(cancellationToken, source: true);
             return new QueuedDownloadSession(state.Principal, state.ExpiresAt);
         }
