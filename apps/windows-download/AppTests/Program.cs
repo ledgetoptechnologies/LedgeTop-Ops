@@ -482,16 +482,19 @@ async Task CloseBeforeSignedIn()
     // Two startups race: only one opens a queue at a time, and closing releases it (adapted from Codex's regression).
     await using (var env = Env.Create(signedIn: true)) {
         env.Backend.BlockSources();
-        var first = env.Model.StartAsync();
-        await Until(() => env.Backend.SourceChecks > 0, "first queue opening");
-        var second = env.Model.StartAsync();
-        await Task.Delay(150); Pump();
-        Equal(1, env.Backend.SourceChecks);
-        var closing = env.Model.DisposeAsync().AsTask();
-        await Task.Delay(150); Pump();
-        True(!closing.IsCompleted, "closing waits for the queue that is opening");
-        env.Backend.ReleaseSources();
-        await closing; await first; await second;
+        Task first, second, closing;
+        // Release the held check even when an assertion fails, so a regression fails instead of hanging in dispose.
+        try {
+            first = env.Model.StartAsync();
+            await Until(() => env.Backend.SourceChecks > 0, "first queue opening");
+            second = env.Model.StartAsync();
+            await Task.Delay(150); Pump();
+            Equal(1, env.Backend.SourceChecks);
+            closing = env.Model.DisposeAsync().AsTask();
+            await Task.Delay(150); Pump();
+            True(!closing.IsCompleted, "closing waits for the queue that is opening");
+        } finally { env.Backend.ReleaseSources(); }
+        await closing.WaitAsync(TimeSpan.FromSeconds(30)); await first.WaitAsync(TimeSpan.FromSeconds(30)); await second.WaitAsync(TimeSpan.FromSeconds(30));
         await Task.Delay(300); Pump();
         True(Locks.Free(env.Backend.StateDirectory), "no queue left locked");
         True(env.Model.Screen != Screen.Files && env.Model.Sections.Count == 0, "nothing shown after close");
