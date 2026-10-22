@@ -61,7 +61,7 @@ try {
   $sdk = & $DotnetPath --version
   if ($LASTEXITCODE -ne 0 -or $sdk -cne '10.0.402') { throw 'The reviewed SDK10.0.402 is required.' }
 $archive = Join-Path $root 'source.zip'
-& git -C $SourceRepository archive --format=zip "--output=$archive" $ReviewedCommit -- apps/windows-download docs/staging/windows-helper-module-notices-2026-10-22
+& git -C $SourceRepository archive --format=zip "--output=$archive" $ReviewedCommit -- apps/windows-download docs/staging/windows-helper-module-notices-2026-10-22 docs/staging/windows-helper-build-provenance-2026-10-22/go-runtime-notices docs/staging/windows-helper-build-provenance-2026-10-22/go-runtime-notices.json
 if ($LASTEXITCODE -ne 0) { throw 'Source archive failed.' }
 $source = Join-Path $root 'source'
 [IO.Compression.ZipFile]::ExtractToDirectory($archive, $source)
@@ -100,6 +100,7 @@ foreach ($notice in $moduleManifest.modules.notices) {
   Copy-Item -LiteralPath $inputNotice -Destination $outputNotice
 }
 [IO.File]::WriteAllBytes((Join-Path $moduleNoticeOutput 'manifest.json'), $moduleManifestBytes)
+$goNotices = & (Join-Path $PSScriptRoot 'windows-package-go-notices.ps1') -SourceDirectory (Join-Path $source 'docs/staging/windows-helper-build-provenance-2026-10-22') -PayloadDirectory $payload -HelperSha256 $helperSha | ConvertFrom-Json
 Copy-Item -LiteralPath $HelperPath -Destination (Join-Path $payload 'helper/cloudflared.exe')
 Copy-Item -LiteralPath $HelperLicensePath -Destination (Join-Path $payload 'Notices/LICENSE.cloudflared.txt')
 if ((Hash (Join-Path $payload 'helper/cloudflared.exe')) -ne $helperSha -or (Hash (Join-Path $payload 'Notices/LICENSE.cloudflared.txt')) -ne $licenseSha) { throw 'Copied package input differs.' }
@@ -151,6 +152,8 @@ $receipt = [pscustomobject]@{
   helperSha256=$helperSha;rootLicenseSha256=$licenseSha;completeThirdPartyAttribution=$false
   runtimeNotices=$runtimeNotices.notices
   helperModuleNotices=[pscustomobject]@{manifestSha256=$moduleManifestSha;moduleCount=66;noticeFiles=99;completeThirdPartyAttribution=$false}
+  goRuntimeNotices=$goNotices
+  goNoticeCollectorSha256=(Hash (Join-Path $PSScriptRoot 'windows-package-go-notices.ps1'))
   payloadFiles=$inventory.Count;payloadBytes=($inventory | Measure-Object bytes -Sum).Sum;inventorySha256=(Hash $inventoryPath)
   packageBytes=(Get-Item -LiteralPath $package).Length;packageSha256=(Hash $package);validatedPack=$true;unpackedInventoryExact=$true
   sourceAcceptanceVerified=$false;runtimeTestsExecuted=$false
