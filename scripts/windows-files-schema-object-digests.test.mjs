@@ -42,3 +42,36 @@ test("retained baseline-only local capture is pinned and matches prior full-repl
   assert.deepEqual(compareSchemaObjectDigests(c.schemaObjectDigests,c.schemaObjectDigests).changed,[]);
  }
 });
+
+test("rejects custom prototypes, accessors and unknown fields before interpreting manifests",()=>{
+ const row={type:"table",name:"x",tbl_name:"x",sql:"CREATE TABLE x(v)"},valid=schemaObjectDigests([row]);
+ assert.throws(()=>schemaObjectDigests([Object.assign(Object.create({inherited:true}),row)]),/schema_object_digests_invalid/);
+ for(const value of [Object.assign(Object.create({inherited:true}),valid),{...valid,unexpected:true},{...valid,scope:"other-scope"}])
+  assert.throws(()=>compareSchemaObjectDigests(valid,value),/schema_object_digests_invalid/);
+ const forgedRow=Object.assign(Object.create({inherited:true}),valid.objects[0]);
+ assert.throws(()=>compareSchemaObjectDigests(valid,{...valid,objects:[forgedRow]}),/schema_object_digests_invalid/);
+ let accessed=false;const accessor={...row};Object.defineProperty(accessor,"sql",{enumerable:true,get(){accessed=true;throw Error("must not run")}});
+ assert.throws(()=>schemaObjectDigests([accessor]),/schema_object_digests_invalid/);assert.equal(accessed,false);
+ const symbolRow={...row,[Symbol("hidden")]:true};assert.throws(()=>schemaObjectDigests([symbolRow]),/schema_object_digests_invalid/);
+ const sparse=[row];delete sparse[0];assert.throws(()=>schemaObjectDigests(sparse),/schema_object_digests_invalid/);
+ const array=[row];array.extra=true;assert.throws(()=>schemaObjectDigests(array),/schema_object_digests_invalid/);
+});
+test("supports explicit null-prototype data records without changing fingerprints",()=>{
+ const row={type:"table",name:"x",tbl_name:"x",sql:"CREATE TABLE x(v)"};
+ const a=schemaObjectDigests([row]),b=schemaObjectDigests([Object.assign(Object.create(null),row)]);
+ assert.deepEqual(a,b);
+ const c=Object.assign(Object.create(null),b,{objects:b.objects.map(r=>Object.assign(Object.create(null),r))});
+ assert.equal(compareSchemaObjectDigests(a,c).inventoryDigestEqual,true);
+});
+test("bounds complete serialized manifests before checking their digest",()=>{
+ const valid=schemaObjectDigests([{type:"table",name:"x",tbl_name:"x",sql:null}]);
+ const objects=Array.from({length:650},(_,i)=>({type:"table",name:String(i)+"n".repeat(1700),tbl_name:"t".repeat(1700),sqlSha256:null}));
+ // Deliberately stale digest: size rejection must happen first, not hashing.
+ assert.throws(()=>compareSchemaObjectDigests(valid,{...valid,count:objects.length,objects}),/schema_object_digests_limit/);
+ assert.throws(()=>schemaObjectDigests(objects.map(r=>({type:r.type,name:r.name,tbl_name:r.tbl_name,sql:null}))),/schema_object_digests_limit/);
+});
+test("reports order-only inventory changes separately from identity/SQL differences",()=>{
+ const rows=[{type:"table",name:"x",tbl_name:"x",sql:"CREATE TABLE x(v)"},{type:"table",name:"y",tbl_name:"y",sql:"CREATE TABLE y(v)"}];
+ const result=compareSchemaObjectDigests(schemaObjectDigests(rows),schemaObjectDigests([...rows].reverse()));
+ assert.equal(result.inventoryDigestEqual,false);assert.deepEqual([result.missing,result.extra,result.changed],[[],[],[]]);assert.equal(result.canonicalBaselineVerified,false);
+});

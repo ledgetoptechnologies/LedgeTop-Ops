@@ -41,3 +41,9 @@ The corresponding local command is `node scripts/windows-files-canonical-baselin
 `compareSchemaObjectDigests(expected, observed)` in `scripts/windows-files-schema-object-digests.mjs` reports missing/extra identities and changed SQL fingerprints, with `canonicalBaselineVerified: false`. It is an attribution aid, not a whitelist or schema approval. Exact metadata DDL and whitespace-only trigger differences remain visible. The current remote-vs-local differences have not been attributed by this work; no remote calls were made.
 
 Phase-two validation: 27/27 helper/comparison/preflight tests pass. Tests execute real local SQLite DDL to change only trigger whitespace, remove an index and add a table; each is attributed without SQL export. They also cover raw UTF-8 hashing, distinct null SQL, duplicate/malformed/oversized inventories, tampered digests, pinned retained capture, default absence, explicit read-only requirement, unchanged query calls and no SQL text in optional receipts.
+
+### Diagnostic manifest validation
+
+Fingerprint helpers accept only enumerable own data fields on plain `Object.prototype` records or explicit null-prototype records. Custom prototypes, unknown manifest fields, symbols, hidden fields, accessor properties, sparse/augmented arrays and unexpected scope values are refused. Arrays must be dense ordinary arrays; object identifiers are bounded to 4096 UTF-8 bytes. Complete serialized manifests are bounded to 2 MiB before digest verification/calculation. SQL remains byte-exact, and the captured baseline artifact/pin are unchanged.
+
+The comparison also returns `inventoryDigestEqual`. An order-only inventory difference can have no missing/extra/changed object identities while this flag is false. Neither result upgrades aggregate schema validation or canonical proof. Validation-only follow-up: 31/31 focused tests passed, with no migration replay or remote invocation.
