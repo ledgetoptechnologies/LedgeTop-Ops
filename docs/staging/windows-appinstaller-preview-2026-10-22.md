@@ -55,9 +55,11 @@ describes the independent background check and higher-version behavior.
 
 The adjacent JSON is the observed local rehearsal receipt. Checks parse the XML,
 verify namespaces and package attributes, verify the descriptor SHA-256, and
-exercise 18 negative cases including mismatched manifest identity, wrong package
+exercise 20 negative cases including mismatched manifest identity, wrong package
 hash, release misuse, unsafe URLs, XML injection and prohibited external entities.
 XML is written through `XmlWriter`, and input XML prohibits DTD processing.
+The new output leaf is canonicalized and rejects dot-segment, trailing-dot,
+reserved-device and existing-path aliases before any output is written.
 
 The recorded construction package is the 522-file Go/runtime-notices rehearsal
 from `51a083b639f37f6810848a365cdbbb36c943564f`, 83,809,359 bytes, SHA-256

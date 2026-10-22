@@ -53,6 +53,8 @@ Denied 'different origin' @{PackageUrl='https://other.example.invalid/preview.ms
 Denied 'XML URL injection' @{PackageUrl='https://installer-preview.example.invalid/preview.msix"/><Injected/>'}
 Denied 'encoded path' @{PackageUrl='https://installer-preview.example.invalid/%2e%2e/preview.msix'}
 Denied 'no overwrite' @{OutputDirectory=$arguments.OutputDirectory}
+Denied 'dot-segment output alias' @{OutputDirectory=($arguments.OutputDirectory+'/missing/..')}
+Denied 'trailing-dot output alias' @{OutputDirectory=($arguments.OutputDirectory+'.')}
 $originalManifest = [IO.File]::ReadAllText($arguments.UnpackedManifestPath)
 foreach ($case in @(
   @{name='mismatched name';old='LedgeTop.Files.PilotBuildPreview';new='LedgeTop.Files.Stable'},

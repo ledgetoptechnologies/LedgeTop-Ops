@@ -87,9 +87,16 @@ foreach ($name in $packagedIdentity.Keys) {
   if ($packagedIdentity[$name] -cne $unpackedIdentity[$name]) { throw 'Unpacked identity differs from actual packaged manifest.' }
 }
 # Never overwrite an existing directory or descriptor, including prior evidence.
-if (-not [IO.Path]::IsPathFullyQualified($OutputDirectory) -or (Test-Path -LiteralPath $OutputDirectory)) { throw 'Use a new absolute output directory.' }
-$outputParent = LocalExisting ([IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($OutputDirectory)))
-$OutputDirectory = Join-Path $outputParent ([IO.Path]::GetFileName($OutputDirectory))
+if (-not [IO.Path]::IsPathFullyQualified($OutputDirectory) -or $OutputDirectory.StartsWith('\\') -or
+    $OutputDirectory -match '(^|[\\/])\.{1,2}([\\/]|$)') { throw 'Use a new absolute canonical output directory.' }
+$OutputDirectory = [IO.Path]::GetFullPath($OutputDirectory)
+$outputLeaf = [IO.Path]::GetFileName($OutputDirectory)
+if ($outputLeaf -cnotmatch '\A[A-Za-z0-9][A-Za-z0-9._-]{0,127}\z' -or $outputLeaf.EndsWith('.') -or
+    $outputLeaf -match '\A(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(\.|$)' -or (Test-Path -LiteralPath $OutputDirectory)) {
+  throw 'Use a new canonical output leaf without Windows path aliases.'
+}
+$outputParent = LocalExisting ([IO.Path]::GetDirectoryName($OutputDirectory))
+$OutputDirectory = Join-Path $outputParent $outputLeaf
 [IO.Directory]::CreateDirectory($OutputDirectory) | Out-Null
 $output = Join-Path $OutputDirectory 'LedgeTop.Files.preview.appinstaller.xml'
 $settings = [Xml.XmlWriterSettings]::new()
