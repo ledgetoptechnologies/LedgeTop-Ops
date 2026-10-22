@@ -38,6 +38,11 @@ synthetic API fixtures. **The added tenth tool has not yet been installed or
 verified against a live synthetic share**; installed discovery remains nine
 tools until its adapter source is updated and reloaded.
 
+A separately launched actual SDK stdio client against the isolated patched
+adapter discovered ten tools (including the new lookup), then completed live
+`get_connection` as the same active owner with writes disabled. This verifies
+the patched transport/authentication path without changing the installed adapter.
+
 ## Client support and remaining boundaries
 
 The README supplies local stdio configurations for Codex, Claude, and Hermes.
