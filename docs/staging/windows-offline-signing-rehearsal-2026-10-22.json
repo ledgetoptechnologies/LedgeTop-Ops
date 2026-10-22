@@ -1,0 +1,20 @@
+{
+  "schema": 1,
+  "packageSha256": "b7c01c87461471def1a432b2554c2b734aeb9042a4a5e47e5fd00ab4b7b7e472",
+  "packageBytes": 83809359,
+  "zipEntries": 524,
+  "publisher": "CN=LedgeTop Build Preview",
+  "privateKeyExported": false,
+  "persistentCertificateInstallationRequested": false,
+  "installed": false,
+  "published": false,
+  "timestampRequested": false,
+  "digestCommand": "sign /fd SHA256 /f public.cer /dg <owned-directory> <owned-copy.msix>",
+  "outcome": "sdk-digest-generation-rejected",
+  "ownedCopyVerified": true,
+  "exitCode": 1,
+  "output": "Done Adding Additional Store\r\nError information: \"Error: SignerSign() failed. Decoupled digest operation is not supported for AppX file. Use /dlib and /dmdf instead.\" (-2147024846/0x80070032)\r\nSignTool Error: An unexpected internal error has occurred.\r\n",
+  "artifacts": [],
+  "ownedTempRemoved": true,
+  "originalPackageUnchanged": true
+}
