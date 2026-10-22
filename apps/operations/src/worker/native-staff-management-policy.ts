@@ -1,5 +1,5 @@
 import { isNativeAccessSubject } from "./native-access-subject";
-export const NATIVE_STAFF_MANAGEMENT_CAPABILITIES = Object.freeze(["staff.profile.read", "staff.profile.edit", "staff.effective_access.read", "staff.revocation_impact.read", "staff.onboarding.create", "staff.onboarding.approve", "staff.onboarding.cancel", "staff.admission.enable", "staff.admission.disable", "staff.membership.manage", "staff.directory_grant.manage", "staff.admin_delegation.manage", "staff.identity.recover"] as const);
+export const NATIVE_STAFF_MANAGEMENT_CAPABILITIES = Object.freeze(["staff.profile.read", "staff.profile.edit", "staff.effective_access.read", "staff.revocation_impact.read", "staff.onboarding.create", "staff.onboarding.approve", "staff.onboarding.cancel", "staff.admission.enable", "staff.admission.disable", "staff.membership.manage", "staff.directory_grant.manage", "staff.admin_delegation.manage", "staff.identity.recover", "staff.documents.read", "staff.documents.upload", "staff.documents.manage", "staff.profile.archive", "staff.profile.restore"] as const);
 export type NativeStaffManagementCapability = typeof NATIVE_STAFF_MANAGEMENT_CAPABILITIES[number];
 export type NativeStaffManagementScope = "global" | "business_area" | "division" | "exact_staff";
 type Actor = {

@@ -8,7 +8,7 @@ const MANAGEMENT_CAPABILITIES = new Set<string>([
   "staff.profile.read", "staff.profile.edit", "staff.effective_access.read", "staff.revocation_impact.read",
   "staff.onboarding.create", "staff.onboarding.approve", "staff.onboarding.cancel", "staff.admission.enable",
   "staff.admission.disable", "staff.membership.manage", "staff.directory_grant.manage",
-  "staff.admin_delegation.manage", "staff.identity.recover",
+  "staff.admin_delegation.manage", "staff.identity.recover", "staff.documents.read", "staff.documents.upload", "staff.documents.manage", "staff.profile.archive", "staff.profile.restore",
 ]);
 const DIRECTORY_CAPABILITIES = new Set<string>(NATIVE_DIRECTORY_PERMISSIONS);
 type ReadCapability = "staff.profile.read" | "staff.effective_access.read" | "staff.revocation_impact.read";

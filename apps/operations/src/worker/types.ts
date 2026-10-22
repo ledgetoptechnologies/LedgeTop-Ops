@@ -87,6 +87,10 @@ export type Env = Omit<
   | "OPERATIONS_PORTAL_WORKSPACE_PUBLICATION_DISPATCH_ENABLED"
   | "OPERATIONS_PORTAL_WORKSPACE_PUBLICATION"
 > & {
+  /** Private personnel rollout: never bind DATA_BUCKET or expose through file catalogs. */
+  STAFF_PERSONNEL_ENABLED?: string;
+  STAFF_DOCUMENTS_BUCKET?: R2Bucket;
+  STAFF_DOCUMENTS_SCANNER_TOKEN?: string;
   SHARED_PROFILE_PORTAL_AUTHORITY?: import('../../../../packages/shared/src/shared-business-profile').SharedProfilePortalAuthorityBinding;
   /** Explicit because Operations modules are also type-checked from sibling Worker projects with narrower generated Env types. */
   ENVIRONMENT?: string;

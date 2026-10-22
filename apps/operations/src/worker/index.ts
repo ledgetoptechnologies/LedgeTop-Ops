@@ -98,6 +98,7 @@ import { handleReviewedImportEnrollmentHttp, REVIEWED_IMPORT_ENROLLMENT_BASE } f
 import { readReviewedImportEnrollmentReview, resolveReviewedImportEnrollmentDestinations } from "./reviewed-import-enrollment-destinations";
 import { dispatchViewerWorkspaceRenewal } from "./viewer-workspace-renewal";
 import { consumeNativeStaffOnboardingRateLimit } from "./native-staff-onboarding-rate-limit";
+import { handleStaffPersonnelHttp } from "./staff-personnel-http";
 import {
   auditStatement,
   csrfToken,
@@ -546,6 +547,17 @@ async function dispatchRecipientEnrollmentOwner(c:Context<{Bindings:Env;Variable
 }
 app.use("/api/native-client-portal/recipient-enrollment",dispatchRecipientEnrollmentOwner);
 app.use("/api/native-client-portal/recipient-enrollment/*",dispatchRecipientEnrollmentOwner);
+// Dedicated personnel routes authenticate native Operations staff directly.
+async function dispatchStaffPersonnel(c: Context<{ Bindings: Env; Variables: Variables }>) {
+  return handleStaffPersonnelHttp(c.req.raw, {
+    configuration: { enabled: c.env.STAFF_PERSONNEL_ENABLED === "true", issuer: c.env.TEAM_DOMAIN ?? "",
+      staffAudience: c.env.OPERATIONS_AUD, origin: c.env.PUBLIC_BASE_URL, csrfSecret: c.env.OPERATIONS_SESSION_SECRET },
+    database: c.env.OPS_DB, bucket: c.env.STAFF_DOCUMENTS_BUCKET,
+    scannerToken: c.env.STAFF_DOCUMENTS_SCANNER_TOKEN,
+  });
+}
+app.use("/api/staff-personnel", dispatchStaffPersonnel);
+app.use("/api/staff-personnel/*", dispatchStaffPersonnel);
 // Native Operations enrollment has its own target model and authority ledger.
 // Dispatch before PA-backed staff admission; the handler verifies native staff.
 async function dispatchOperationsNativeRecipientOwner(c: Context<{ Bindings: Env; Variables: Variables }>) {
