@@ -56,5 +56,3 @@ public sealed record PlaceholderIdentity(string Channel, string SourceAlias, str
     internal string ScopeKey => Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(JsonSerializer.Serialize(new { Channel, SourceAlias, Origin, PrincipalId }))));
     private sealed record Envelope(int Version, PlaceholderIdentity Identity);
 }
-
-
