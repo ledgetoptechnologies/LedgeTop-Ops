@@ -9,8 +9,9 @@ using LedgeTop.Files.Presentation;
 using LedgeTop.WindowsDownload;
 
 // Synthetic UI acceptance for Ledge Top Files: real TransferQueue on temporary folders, demo sources,
-// no network, no sign-in, no installer. Optional first argument: a folder for rendered screenshots.
-var screenshots = args.Length > 0 ? args[0] : null;
+// no network, no sign-in, no installer. Optional first argument: a folder for rendered screenshots
+// (otherwise they go to a new temporary folder, which is printed and kept as evidence).
+var screenshots = args.Length > 0 ? args[0] : Path.Combine(Path.GetTempPath(), "ltfiles-screens-" + Guid.NewGuid().ToString("N"));
 var passed = 0; var failed = 0;
 var groups = new (string Name, Func<Task> Run)[] {
     ("file type labels and sizes read like the Operations badges", TextLabels),
@@ -21,8 +22,12 @@ var groups = new (string Name, Func<Task> Run)[] {
     ("a file already in the folder is never overwritten or queued", NameTaken),
     ("files that can't be verified can't be selected and are reported", Unverifiable),
     ("an expired sign-in pauses work and asks to sign in again", Expiry),
-    ("another person's downloads are hidden after a different sign-in", PersonSwitch),
+    ("a different sign-in closes the previous person's files, queue and late results", PersonSwitch),
     ("pause keeps the partial and resume finishes the same file", PauseResume),
+    ("pause all stops the running download while sign-in checks are stuck", PauseAllOffline),
+    ("resume all finishes every paused download, one at a time", ResumeAllInTurn),
+    ("long folders and delivery lists continue with Show more", Paging),
+    ("the setup file is read strictly and problems are explained", SettingsFile),
     ("the window renders sign-in and files screens", Render),
 };
 foreach (var group in groups) {
@@ -131,28 +136,72 @@ async Task Expiry()
     await env.OpenAsync("deliveries", "land-script");
     env.Check("ortho-full.tif");
     env.Model.DownloadSelected.Execute(null);
-    await Until(() => env.Model.Transfers.Any(row => row.State == QueuedTransferState.Running), "download running");
+    await Until(() => env.Model.Transfers.Any(row => row.State == QueuedTransferState.Running && row.Percent > 1), "download running");
     env.Backend.Expire(); now = now.AddHours(2);
     env.Model.Tick();
     Equal(Screen.SignIn, env.Model.Screen);
     Equal(Text.SessionExpired, env.Model.SignInStatus);
-    await Until(() => !File.Exists(Path.Combine(env.Downloads, "ortho-full.tif")), "nothing promoted after expiry");
+    // The worker must actually drain: nothing running, and the file never promoted.
+    await Until(() => !env.Model.IsTransferring, "transfer drained after expiry");
+    await Task.Delay(800); Pump();
+    True(!File.Exists(Path.Combine(env.Downloads, "ortho-full.tif")), "nothing promoted after expiry");
+    // Signing in again shows the item stopped for sign-in, not running or done.
+    env.Model.SignIn.Execute(null);
+    await Until(() => env.Model.Screen == Screen.Files && env.Model.Transfers.Count == 1, "back after signing in");
+    var state = env.Model.Transfers.Single().State;
+    True(state is QueuedTransferState.LoginRequired or QueuedTransferState.Paused, "stopped for sign-in, was " + state);
+    True(!File.Exists(Path.Combine(env.Downloads, "ortho-full.tif")), "still not promoted");
 }
 
 async Task PersonSwitch()
 {
-    await using var env = Env.Create(signedIn: true);
+    await using var env = Env.Create(signedIn: true, rate: 300_000);
     await env.Model.StartAsync();
+    var alice = env.Backend.Principal;
+    await env.OpenAsync("deliveries", "land-script");
+    env.Check("ortho-full.tif");
+    env.Model.DownloadSelected.Execute(null);
+    await Until(() => env.Model.Transfers.Any(row => row.State == QueuedTransferState.Running && row.Percent > 1), "Alice's download running");
+    True(env.Model.Files.Count > 0 && env.Model.Sections.Count == 2, "Alice's lists shown");
+
+    // A folder listing for Alice is still on its way when Bob signs in.
+    var harbor = env.Model.Sections.Single(item => item.Node.Key == "deliveries").Children.Single(item => item.Node.Key == "harbor");
+    var late = env.Model.SelectAsync(harbor);
+    env.Backend.SwitchPerson();
+    var bob = env.Backend.Principal;
+    True(alice != bob, "different opaque people");
+    await env.Model.CheckPersonAsync();
+    await late;
+    Pump();
+
+    True(!env.Model.IsTransferring, "Alice's transfer drained");
+    Equal(0, env.Model.Transfers.Count);
+    Equal(0, env.Model.Files.Count);
+    Equal("", env.Model.Location);
+    Equal(1, env.Model.Sections.Count);
+    True(env.Model.Banner.Contains("someone else"), "explains the switch");
+    var deliveries = env.Model.Sections.Single();
+    deliveries.IsExpanded = true;
+    await Until(() => deliveries.Children.Any(child => child.Node.Key == "greenleaf"), "Bob's deliveries listed");
+    True(deliveries.Children.All(child => child.Node.Key == "greenleaf"), "only Bob's deliveries");
+    True(Directory.Exists(Path.Combine(env.Backend.StateDirectory, "portal", alice)) && Directory.Exists(Path.Combine(env.Backend.StateDirectory, "portal", bob)),
+        "each person has their own queue folder");
+    await Task.Delay(800); Pump();
+    True(!File.Exists(Path.Combine(env.Downloads, "ortho-full.tif")), "Alice's file not promoted for Bob");
+
+    // Bob's own download lives only in Bob's list.
     await env.OpenAsync("deliveries", "greenleaf");
     env.Check("volumes.csv");
     env.Model.DownloadSelected.Execute(null);
-    await Until(() => env.Model.Transfers.Count == 1, "queued");
-    env.Backend.SwitchPerson();
-    await env.Model.RefreshTransfersAsync();
-    Equal(0, env.Model.Transfers.Count);
-    True(env.Model.Banner.Contains("someone else"), "explains hidden downloads");
-}
+    await Until(() => env.Model.Transfers.Count == 1 && env.Model.Transfers[0].State == QueuedTransferState.Completed, "Bob's download completes");
 
+    // Alice again: her paused download is back, Bob's is not.
+    env.Backend.SwitchPerson(0);
+    await env.Model.CheckPersonAsync();
+    await Until(() => env.Model.Transfers.Count == 1, "Alice's list back");
+    Equal("ortho-full.tif", env.Model.Transfers[0].Name);
+    Equal(QueuedTransferState.Paused, env.Model.Transfers[0].State);
+}
 async Task PauseResume()
 {
     await using var env = Env.Create(signedIn: true, rate: 2_000_000);
@@ -174,9 +223,108 @@ async Task PauseResume()
     Equal(row.Item!.Job.Sha256, Convert.ToHexStringLower(SHA256.HashData(bytes)));
 }
 
+async Task PauseAllOffline()
+{
+    await using var env = Env.Create(signedIn: true, rate: 300_000);
+    await env.Model.StartAsync();
+    await env.OpenAsync("deliveries", "land-script");
+    env.Check("ortho-full.tif"); env.Check("report.pdf");
+    env.Model.DownloadSelected.Execute(null);
+    await Until(() => env.Model.Transfers.Count == 2 && env.Model.Transfers.Any(row => row.State == QueuedTransferState.Running && row.Percent > 1), "one running, one waiting");
+    var partial = Directory.EnumerateFiles(env.Downloads, "*.ltds-demo-partial", new EnumerationOptions { AttributesToSkip = 0 }).Single();
+
+    env.Backend.BlockSessions();
+    var stopping = env.Model.PauseAll.RunAsync();
+    var finished = await Task.WhenAny(stopping, Task.Delay(TimeSpan.FromSeconds(5)));
+    True(finished == stopping, "pause all returned while sign-in checks hang");
+    True(!env.Model.IsTransferring, "nothing transferring");
+    var size = new FileInfo(partial).Length;
+    await Task.Delay(1000);
+    Equal(size, new FileInfo(partial).Length);
+    True(env.Backend.MostAtOnce == 1, "never two at once");
+
+    env.Backend.ReleaseSessions();
+    await env.Model.RefreshTransfersAsync();
+    await Until(() => env.Model.Transfers.All(row => row.State == QueuedTransferState.Paused), "both paused");
+    await Task.Delay(800); Pump();
+    True(env.Model.Transfers.All(row => row.State == QueuedTransferState.Paused), "nothing restarted by itself");
+}
+
+async Task ResumeAllInTurn()
+{
+    await using var env = Env.Create(signedIn: true, rate: 3_000_000);
+    await env.Model.StartAsync();
+    await env.OpenAsync("deliveries", "land-script");
+    env.Check("report.pdf"); env.Check("ortho-full.tif");
+    env.Model.DownloadSelected.Execute(null);
+    await Until(() => env.Model.Transfers.Count == 2 && env.Model.Transfers.Any(row => row.IsRunning), "started");
+    await env.Model.PauseAll.RunAsync();
+    await env.Model.RefreshTransfersAsync();
+    await Until(() => env.Model.Transfers.All(row => row.State == QueuedTransferState.Paused), "both paused");
+    True(env.Model.ResumeAll.CanExecute(null), "resume all offered");
+
+    await env.Model.ResumeAll.RunAsync();
+    await Until(() => env.Model.Transfers.All(row => row.State == QueuedTransferState.Completed), "both completed", seconds: 90);
+    Equal(1, env.Backend.MostAtOnce);
+    foreach (var row in env.Model.Transfers) {
+        var bytes = await File.ReadAllBytesAsync(row.OutputPath!);
+        Equal(row.Item!.Job.Sha256, Convert.ToHexStringLower(SHA256.HashData(bytes)));
+    }
+}
+
+async Task Paging()
+{
+    await using var env = Env.Create(signedIn: true, pageSize: 2);
+    await env.Model.StartAsync();
+    var deliveries = env.Model.Sections.Single(item => item.Node.Key == "deliveries");
+    deliveries.IsExpanded = true;
+    await Until(() => deliveries.Children.Any(child => child.IsMore), "first page of deliveries");
+    Equal(3, deliveries.Children.Count);
+    deliveries.Children.Single(child => child.IsMore).IsSelected = true;
+    await Until(() => deliveries.Children.Any(child => child.Node.Key == "harbor"), "next page of deliveries");
+    True(!deliveries.Children.Any(child => child.IsMore), "no more after the last page");
+    Equal(3, deliveries.Children.Count);
+
+    await env.Model.SelectAsync(deliveries.Children.Single(child => child.Node.Key == "land-script"));
+    Equal(2, env.Model.Files.Count);
+    True(env.Model.HasMoreFiles, "more files offered");
+    await env.Model.LoadMoreFiles.RunAsync();
+    Equal(4, env.Model.Files.Count);
+    True(!env.Model.HasMoreFiles, "all files shown");
+    Equal(4, env.Model.Files.Select(file => file.Name).Distinct().Count());
+}
+
+Task SettingsFile()
+{
+    var folder = Path.Combine(Path.GetTempPath(), "ltfiles-settings-" + Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(folder);
+    try {
+        var hash = new string('a', 64);
+        string Write(string json) { var path = Path.Combine(folder, Guid.NewGuid().ToString("N") + ".json"); File.WriteAllText(path, json); return path; }
+        var good = $$"""{"portalApplicationUrl":"https://portal.example.test/","staffApplicationUrl":null,"cloudflaredPath":"C:\\Program Files\\cloudflared\\cloudflared.exe","cloudflaredSha256":"{{hash}}"}""";
+        var loaded = LiveSettings.Load(Write(good));
+        True(loaded is { StaffApplicationUrl: null } && loaded.PortalApplicationUrl.Host == "portal.example.test", "valid setup loads");
+        True(LiveSettings.Load(Path.Combine(folder, "missing.json")) is null, "missing file means not set up");
+        foreach (var (bad, why) in new[] {
+            (good.Replace("}", ",\"portalApplicationUrl\":\"https://other.example.test/\"}"), "duplicate key"),
+            (good.Replace("}", ",\"token\":\"x\"}"), "unknown key"),
+            (good.Replace("https://portal", "http://portal"), "plain http"),
+            (good.Replace(hash, "abc"), "short hash"),
+            (good.Replace(@"C:\\Program Files", "relative"), "relative binary"),
+            (good[..^1], "truncated"),
+            ("[]", "not an object"),
+            ("{\"portalApplicationUrl\":\"https://p.example.test/\"} // x", "trailing comment"),
+            ("{" + new string(' ', 20_000) + "}", "oversized"),
+        }) {
+            try { LiveSettings.Load(Write(bad)); throw new Exception("accepted " + why); }
+            catch (SettingsException error) { True(error.Message.Contains("setup file"), why + " explained"); }
+        }
+    } finally { Directory.Delete(folder, true); }
+    return Task.CompletedTask;
+}
+
 async Task Render()
 {
-    if (screenshots is null) return;
     Directory.CreateDirectory(screenshots);
     await using (var env = Env.Create(signedIn: false)) {
         var window = env.Window();
@@ -184,18 +332,32 @@ async Task Render()
         Snap(window, Path.Combine(screenshots, "sign-in.png"));
         window.Close();
     }
-    await using (var env = Env.Create(signedIn: true, rate: 1_500_000)) {
+    await using (var env = Env.Create(signedIn: false)) {
+        var window = env.Window();
+        env.Model.ShowNotSetUp("The setup file on this PC is damaged or incomplete. Reinstall Ledge Top Files or ask your Ledge Top contact to check it.");
+        Snap(window, Path.Combine(screenshots, "setup-problem.png"));
+        window.Close();
+    }
+    await using (var env = Env.Create(signedIn: true, rate: 1_500_000, pageSize: 3)) {
         var window = env.Window();
         Directory.CreateDirectory(env.Downloads);
         await File.WriteAllTextAsync(Path.Combine(env.Downloads, "inspection.pdf"), "already here");
         await env.Model.StartAsync();
         await env.OpenAsync("deliveries", "land-script");
-        env.Check("PIN-20261020113.kml"); env.Check("ortho-full.tif"); env.Check("report.pdf");
+        env.Check("PIN-20261020113.kml"); env.Check("ortho-full.tif");
         env.Model.DownloadSelected.Execute(null);
         await Until(() => env.Model.Transfers.Any(row => row.State == QueuedTransferState.Running && row.Percent > 20), "visible progress", seconds: 60);
         Snap(window, Path.Combine(screenshots, "files.png"));
         window.Close();
     }
+    foreach (var name in new[] { "sign-in.png", "setup-problem.png", "files.png" }) {
+        var info = new FileInfo(Path.Combine(screenshots, name));
+        True(info.Exists && info.Length > 10_000, name + " rendered");
+        using var stream = info.OpenRead();
+        var frame = BitmapDecoder.Create(stream, BitmapCreateOptions.None, BitmapCacheOption.OnLoad).Frames[0];
+        True(frame.PixelWidth >= 1000 && frame.PixelHeight >= 600, name + " full size");
+    }
+    Console.WriteLine("Screenshots: " + screenshots);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -263,11 +425,11 @@ sealed class Env : IAsyncDisposable, IShell
     public MainViewModel Model { get; private set; }
     public string Downloads { get; }
 
-    public static Env Create(bool signedIn, double rate = 40_000_000, Func<DateTimeOffset>? clock = null)
+    public static Env Create(bool signedIn, double rate = 40_000_000, Func<DateTimeOffset>? clock = null, int pageSize = 200)
     {
         var root = Path.Combine(Path.GetTempPath(), "ltfiles-test-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(root);
-        return new Env(root, new DemoBackend(Path.Combine(root, "queue"), signedIn, bytesPerSecond: rate), clock);
+        return new Env(root, new DemoBackend(Path.Combine(root, "queue"), signedIn, bytesPerSecond: rate, pageSize: pageSize), clock);
     }
 
     /// <summary>Attaches the real window so rendering uses the production XAML.</summary>
@@ -285,6 +447,7 @@ sealed class Env : IAsyncDisposable, IShell
         var node = Model.Sections.Single(item => item.Node.Key == section);
         node.IsExpanded = true;
         await Wait.Until(() => node.Children.Any(child => child.Node.Key == folder), "folder listed");
+        await Task.Delay(50);
         var child = node.Children.Single(item => item.Node.Key == folder);
         await Model.SelectAsync(child);
     }

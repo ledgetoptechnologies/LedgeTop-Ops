@@ -30,9 +30,12 @@ public sealed class Command(Func<Task> run, Func<bool>? canRun = null, Action<Ex
     public bool CanExecute(object? parameter) => !running && (canRun?.Invoke() ?? true);
     public void Refresh() => CanExecuteChanged?.Invoke(this, EventArgs.Empty);
 
-    public async void Execute(object? parameter)
+    public async void Execute(object? parameter) => await RunAsync();
+
+    /// <summary>Same as <see cref="Execute"/>, but awaitable (tests and chained actions).</summary>
+    public async Task RunAsync()
     {
-        if (!CanExecute(parameter)) return;
+        if (!CanExecute(null)) return;
         running = true; Refresh();
         try { await run(); }
         catch (Exception error) { failed?.Invoke(error); }

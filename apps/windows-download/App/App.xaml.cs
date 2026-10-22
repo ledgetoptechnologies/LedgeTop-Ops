@@ -12,7 +12,7 @@ public partial class App : Application
         var arguments = e.Args;
         var demo = arguments.Contains("--demo") || arguments.Contains("--demo-signed-in");
         var local = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
-        IFilesBackend backend; string downloads; var notSetUp = false;
+        IFilesBackend backend; string downloads; var notSetUp = false; string? setupProblem = null;
         if (demo) {
             var root = Path.Combine(Path.GetTempPath(), "LedgeTopFilesDemo");
             var minutes = arguments.SkipWhile(value => value != "--demo-session-minutes").Skip(1).FirstOrDefault();
@@ -21,7 +21,9 @@ public partial class App : Application
             downloads = Path.Combine(root, "Downloads");
         } else {
             downloads = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Downloads", "Ledge Top");
-            var settings = LiveSettings.Load(LiveSettings.DefaultPath);
+            LiveSettings? settings = null;
+            try { settings = LiveSettings.Load(LiveSettings.DefaultPath); }
+            catch (SettingsException error) { setupProblem = error.Message; }
             if (settings is null) { backend = new NotSetUpBackend(); notSetUp = true; }
             else backend = new LiveBackend(settings, Path.Combine(local, "LedgeTop", "Files", "queue"));
         }
@@ -29,8 +31,13 @@ public partial class App : Application
         var model = new MainViewModel(backend, window, downloads);
         window.Attach(model, demo);
         window.Show();
-        if (notSetUp) model.ShowNotSetUp();
-        else await model.StartAsync();
+        // Nothing escapes startup: a problem shows a plain setup message instead of crashing the app.
+        try {
+            if (notSetUp) model.ShowNotSetUp(setupProblem);
+            else await model.StartAsync();
+        } catch (Exception) {
+            model.ShowNotSetUp("Ledge Top Files couldn't start on this PC. Restart it, and if this keeps happening, ask your Ledge Top contact to check the installation.");
+        }
     }
 
     /// <summary>Used when this PC has no trusted setup: nothing to browse or download.</summary>

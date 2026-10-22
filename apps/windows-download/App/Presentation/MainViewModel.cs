@@ -24,10 +24,18 @@ public sealed class MainViewModel : Observable, IAsyncDisposable
     private readonly Dictionary<Guid, (long Bytes, DateTimeOffset At, double Rate)> rates = [];
     private QueueHost? queue;
     private SessionInfo? session;
+    /// <summary>The person whose files and queue are open; everything shown belongs to them.</summary>
+    private string? person;
+    /// <summary>Bumped whenever the person's views are torn down, so late results from before are dropped.</summary>
+    private int generation;
     private Screen screen = Screen.Loading;
-    private string signInStatus = "", banner = "", sessionText = "", notice = "", destination;
-    private bool signingIn, bannerIsError;
+    private string signInStatus = "", banner = "", sessionText = "", notice = "", destination, setupText = DefaultSetupText,
+        setupTitle = "Ledge Top Files isn't set up on this PC yet";
+    private bool signingIn, bannerIsError, checkingPerson;
     private NodeViewModel? selected;
+    private object? moreFiles;
+
+    private const string DefaultSetupText = "Install it from the link in Ledge Top Operations or your client portal. If you already did, ask your Ledge Top contact to check the installation.";
 
     public MainViewModel(IFilesBackend backend, IShell shell, string defaultDestination, Func<DateTimeOffset>? clock = null)
     {
@@ -37,7 +45,9 @@ public sealed class MainViewModel : Observable, IAsyncDisposable
         DownloadSelected = new Command(DownloadSelectedAsync, () => Files.Any(file => file.IsChecked && file.CanDownload), Fail);
         ChangeFolder = new Command(ChooseFolder);
         PauseAll = new Command(() => queue?.PauseAllAsync() ?? Task.CompletedTask, () => Transfers.Any(item => item.IsActive), Fail);
-        ResumeAll = new Command(() => queue?.ResumeAllAsync() ?? Task.CompletedTask, () => Transfers.Any(item => item.State == QueuedTransferState.Paused), Fail);
+        ResumeAll = new Command(() => queue?.ResumeAllAsync() ?? Task.CompletedTask,
+            () => Transfers.Any(item => item.State == QueuedTransferState.Paused) || queue?.HasHeld == true, Fail);
+        LoadMoreFiles = new Command(LoadMoreFilesAsync, () => moreFiles is not null, Fail);
         ClearFinished = new Command(() => { foreach (var done in Transfers.Where(item => item.IsFinished).ToList()) Transfers.Remove(done); },
             () => Transfers.Any(item => item.IsFinished));
     }
@@ -51,6 +61,11 @@ public sealed class MainViewModel : Observable, IAsyncDisposable
     public string Notice { get => notice; private set { if (Set(ref notice, value)) Raise(nameof(HasNotice)); } }
     public bool HasNotice => Notice.Length > 0;
     public string Destination { get => destination; private set => Set(ref destination, value); }
+    public string SetupText { get => setupText; private set => Set(ref setupText, value); }
+    public string SetupTitle { get => setupTitle; private set => Set(ref setupTitle, value); }
+    public bool HasMoreFiles => moreFiles is not null;
+    /// <summary>True while a transfer is running or still stopping; no network.</summary>
+    public bool IsTransferring => queue?.IsBusy == true;
 
     public ObservableCollection<NodeViewModel> Sections { get; } = [];
     public ObservableCollection<FileRow> Files { get; } = [];
@@ -64,9 +79,16 @@ public sealed class MainViewModel : Observable, IAsyncDisposable
     public Command PauseAll { get; }
     public Command ResumeAll { get; }
     public Command ClearFinished { get; }
+    public Command LoadMoreFiles { get; }
 
-    /// <summary>Shown when this PC has no trusted setup for the real sources.</summary>
-    public void ShowNotSetUp() => Screen = Screen.NotSetUp;
+    /// <summary>Shown when this PC has no usable setup for the real sources; <paramref name="problem"/> says why.</summary>
+    public void ShowNotSetUp(string? problem = null)
+    {
+        SetupTitle = problem is null ? "Ledge Top Files isn't set up on this PC yet" : "Ledge Top Files can't open on this PC";
+        SetupText = problem ?? DefaultSetupText; Screen = Screen.NotSetUp;
+    }
+
+    internal bool IsCurrent(int view) => view == generation;
 
     /// <summary>Uses a cached session if there is one; never opens a browser.</summary>
     public async Task StartAsync()
@@ -97,19 +119,59 @@ public sealed class MainViewModel : Observable, IAsyncDisposable
 
     private async Task EnterAsync(SessionInfo current)
     {
+        if (person is not null && person != current.PrincipalId) await CloseViewsAsync();
         session = current; Banner = ""; UpdateSession();
         if (queue is null) {
-            queue = await QueueHost.OpenAsync(backend.StateDirectory, backend.Sources);
-            queue.Changed += () => shell.OnUi(() => _ = RefreshTransfersAsync());
-            queue.Progress += (id, progress) => shell.OnUi(() => OnProgress(id, progress));
+            var view = generation;
+            var host = await QueueHost.OpenAsync(backend.StateDirectory, backend.Sources);
+            if (view != generation) { await host.DisposeAsync(); return; }
+            queue = host; person = current.PrincipalId;
+            // Events from a host that has since been closed are ignored.
+            host.Changed += () => shell.OnUi(() => { if (queue == host) _ = RefreshTransfersAsync(); });
+            host.Progress += (id, progress) => shell.OnUi(() => { if (queue == host) OnProgress(id, progress); });
         }
         Screen = Screen.Files;
         await LoadSectionsAsync();
         await RefreshTransfersAsync();
-        _ = queue.PumpAsync();
+        _ = queue?.PumpAsync();
     }
 
-    /// <summary>Called every few seconds by the window: warns before expiry and pauses work after it.</summary>
+    /// <summary>
+    /// Closes everything that belongs to the person who was signed in: their running transfer is stopped and
+    /// drained, their queues are released, and every list and message is cleared. Results that were already
+    /// on the way are dropped because the generation changes first.
+    /// </summary>
+    private async Task CloseViewsAsync()
+    {
+        generation++;
+        var old = queue; queue = null; person = null;
+        selected = null; moreFiles = null;
+        Sections.Clear(); Files.Clear(); Transfers.Clear(); rates.Clear();
+        Notice = ""; Banner = "";
+        foreach (var name in new[] { nameof(Location), nameof(FilesEmptyText), nameof(HasMoreFiles) }) Raise(name);
+        foreach (var command in new[] { DownloadSelected, PauseAll, ResumeAll, ClearFinished, LoadMoreFiles }) command.Refresh();
+        if (old is not null) await old.DisposeAsync();
+    }
+
+    /// <summary>
+    /// Rechecks who is signed in (no browser). A different person replaces every view; no session goes back to sign-in.
+    /// </summary>
+    public async Task CheckPersonAsync()
+    {
+        if (checkingPerson || person is null) return;
+        checkingPerson = true;
+        try {
+            var current = await backend.Session.TryCurrentAsync();
+            if (current is null) { if (Screen == Screen.Files) { session = null; Screen = Screen.SignIn; SignInStatus = Text.SessionExpired; } return; }
+            if (current.PrincipalId == person) return;
+            await CloseViewsAsync();
+            await EnterAsync(current);
+            Banner = "You're signed in as someone else now, so the previous person's files and downloads were closed."; BannerIsError = false;
+        } catch (Exception error) { Fail(error, recheck: false); }
+        finally { checkingPerson = false; }
+    }
+
+    /// <summary>Called every few seconds by the window: warns before expiry, pauses work after it and notices a different sign-in.</summary>
     public void Tick()
     {
         if (session is null || Screen != Screen.Files) return;
@@ -121,37 +183,51 @@ public sealed class MainViewModel : Observable, IAsyncDisposable
         }
         UpdateSession();
         if (left <= ExpiryWarning) { Banner = Text.SessionExpiring(left); BannerIsError = false; }
+        _ = CheckPersonAsync();
     }
 
     private void UpdateSession() => SessionText = session is null ? "" : Text.SignedInUntil(session.ExpiresAt);
 
     private async Task LoadSectionsAsync()
     {
+        var view = generation;
+        var sections = await backend.Catalog.GetSectionsAsync();
+        if (view != generation) return;
         Sections.Clear();
-        foreach (var node in await backend.Catalog.GetSectionsAsync())
-            Sections.Add(new NodeViewModel(node, null, this));
+        foreach (var node in sections) Sections.Add(new NodeViewModel(node, null, this, view));
     }
 
-    internal async Task<IReadOnlyList<CatalogNode>> ChildrenAsync(CatalogNode node) => await backend.Catalog.GetChildrenAsync(node);
+    internal Task<NodePage> ChildrenAsync(CatalogNode node, object? more) => backend.Catalog.GetChildrenAsync(node, more);
 
-    /// <summary>Shows a folder's files. Sections and roots without files just expand.</summary>
+    /// <summary>Shows a folder's first page of files. Sections and roots without files just expand.</summary>
     public async Task SelectAsync(NodeViewModel? node)
     {
-        selected = node; Raise(nameof(Location)); Raise(nameof(FilesEmptyText));
-        Files.Clear(); Notice = "";
-        if (node is null || node.Node.Kind == NodeKind.Section) { DownloadSelected.Refresh(); return; }
+        selected = node; moreFiles = null;
+        foreach (var name in new[] { nameof(Location), nameof(FilesEmptyText), nameof(HasMoreFiles) }) Raise(name);
+        Files.Clear(); Notice = ""; LoadMoreFiles.Refresh();
+        if (node is null || node.Node.Kind == NodeKind.Section || !IsCurrent(node.View)) { DownloadSelected.Refresh(); return; }
+        await AddFilesAsync(node, null);
+    }
+
+    private Task LoadMoreFilesAsync() => selected is { } node && moreFiles is { } more ? AddFilesAsync(node, more) : Task.CompletedTask;
+
+    private async Task AddFilesAsync(NodeViewModel node, object? more)
+    {
+        var view = generation;
         try {
-            var listing = await backend.Catalog.ListAsync(node.Node);
-            if (selected != node) return;
+            var listing = await backend.Catalog.ListAsync(node.Node, more);
+            // Another folder, or another person, may have been chosen meanwhile.
+            if (view != generation || selected != node) return;
             foreach (var file in listing.Files.OrderBy(file => file.Name, StringComparer.CurrentCultureIgnoreCase))
                 Files.Add(new FileRow(file, DownloadSelected.Refresh));
-        } catch (Exception error) { Fail(error); }
-        DownloadSelected.Refresh();
+            moreFiles = listing.More;
+        } catch (Exception error) { if (view == generation) Fail(error); }
+        Raise(nameof(HasMoreFiles)); LoadMoreFiles.Refresh(); DownloadSelected.Refresh();
     }
 
     private async Task DownloadSelectedAsync()
     {
-        if (queue is null) return;
+        if (queue is not { } host) return;
         var chosen = Files.Where(file => file.IsChecked && file.CanDownload).ToList();
         var problem = Text.DestinationProblem(Destination);
         if (problem is not null) { Notice = problem; return; }
@@ -159,12 +235,14 @@ public sealed class MainViewModel : Observable, IAsyncDisposable
         var taken = new List<string>(); var already = 0;
         foreach (var row in chosen) {
             var reference = await backend.Catalog.GetReferenceAsync(row.File);
-            switch (await queue.EnqueueAsync(row.File.SourceAlias, reference, row.File.Name, Destination)) {
+            if (queue != host) return;
+            switch (await host.EnqueueAsync(row.File.SourceAlias, reference, row.File.Name, Destination)) {
                 case EnqueueOutcome.NameTaken: taken.Add(row.File.Name); break;
                 case EnqueueOutcome.AlreadyQueued: already++; break;
                 default: row.IsChecked = false; break;
             }
         }
+        if (queue != host) return;
         var skipped = Files.Count(file => file.IsChecked && !file.CanDownload);
         Notice = string.Join(" ", new[] {
             taken.Count == 0 ? "" : taken.Count == 1
@@ -187,24 +265,33 @@ public sealed class MainViewModel : Observable, IAsyncDisposable
 
     public async Task RefreshTransfersAsync()
     {
-        if (queue is null) return;
+        if (queue is not { } host) return;
         IReadOnlyList<TransferItem> items;
-        try { items = await queue.SnapshotAsync(); }
+        try { items = await host.SnapshotAsync(); }
         catch (LoginRequiredException) {
-            if (Screen == Screen.Files) { session = null; Screen = Screen.SignIn; SignInStatus = Text.SessionExpired; }
+            if (queue == host && Screen == Screen.Files) { session = null; Screen = Screen.SignIn; SignInStatus = Text.SessionExpired; }
             return;
         }
         catch (AccessDeniedException) {
-            // Another person signed in: never show the previous person's downloads.
-            Transfers.Clear(); Banner = "You're signed in as someone else. Their downloads are hidden."; BannerIsError = true;
+            // The queue belongs to someone else now: never show it, and find out who is signed in.
+            if (queue != host) return;
+            Transfers.Clear();
+            await CheckPersonAsync();
             return;
         }
-        catch (Exception error) { Fail(error); return; }
+        catch (Exception error) { if (queue == host) Fail(error); return; }
+        if (queue != host) return;
         var byId = Transfers.ToDictionary(row => row.Id);
         var ordered = new List<TransferRow>();
         foreach (var item in items) {
             if (!byId.TryGetValue(item.Job.JobId, out var row)) row = new TransferRow(this);
-            row.Update(item);
+            // Show what the person asked for: held items read as paused and resumed ones as waiting.
+            var shown = item.Job.State switch {
+                QueuedTransferState.Queued when host.IsHeld(item.Job.JobId) => item with { Job = item.Job with { State = QueuedTransferState.Paused } },
+                QueuedTransferState.Paused when host.IsWanted(item.Job.JobId) => item with { Job = item.Job with { State = QueuedTransferState.Queued } },
+                _ => item,
+            };
+            row.Update(shown);
             ordered.Add(row);
         }
         Transfers.Clear();
@@ -229,8 +316,12 @@ public sealed class MainViewModel : Observable, IAsyncDisposable
     internal void Open(TransferRow row) { if (row.OutputPath is { } path && File.Exists(path)) shell.OpenFile(path); }
     internal void Reveal(TransferRow row) { if (row.OutputPath is { } path) shell.ShowInFolder(path); }
 
-    internal void Fail(Exception error)
+    internal void Fail(Exception error) => Fail(error, recheck: true);
+
+    private void Fail(Exception error, bool recheck)
     {
+        // Access can be denied because a different person signed in; that is handled as a switch, not an error.
+        if (recheck && error is AccessDeniedException) _ = CheckPersonAsync();
         Banner = error switch {
             LoginRequiredException => Text.SessionExpired,
             AccessDeniedException => "You don't have access to that anymore. Refresh to see what you can download.",
@@ -245,29 +336,40 @@ public sealed class MainViewModel : Observable, IAsyncDisposable
 
     public async ValueTask DisposeAsync()
     {
-        if (queue is not null) await queue.DisposeAsync();
+        generation++;
+        var old = queue; queue = null;
+        if (old is not null) await old.DisposeAsync();
     }
 }
 
-/// <summary>A folder in the tree; children load the first time it expands.</summary>
+/// <summary>A folder in the tree; children load the first time it expands, a page at a time.</summary>
 public sealed class NodeViewModel : Observable
 {
     private readonly MainViewModel owner;
-    private bool expanded, loaded, isSelected;
+    private bool expanded, loaded, isSelected, loadingMore;
+    private object? more;
 
-    public NodeViewModel(CatalogNode node, NodeViewModel? parent, MainViewModel owner)
+    public NodeViewModel(CatalogNode node, NodeViewModel? parent, MainViewModel owner, int view)
     {
-        Node = node; Parent = parent; this.owner = owner;
+        Node = node; Parent = parent; this.owner = owner; View = view;
         // A per-node placeholder makes the expander show until the real children load.
-        Children.Add(new NodeViewModel());
+        Children.Add(new NodeViewModel("Loading…", null));
     }
 
-    private NodeViewModel() { Node = new CatalogNode("", "Loading…", NodeKind.Folder, ""); owner = null!; loaded = true; }
+    /// <summary>A placeholder, or (with a parent) the "Show more" row that loads the parent's next page.</summary>
+    private NodeViewModel(string label, NodeViewModel? moreOf)
+    {
+        Node = new CatalogNode("", label, NodeKind.Folder, ""); owner = moreOf?.owner!; Parent = moreOf; loaded = true; IsMore = moreOf is not null;
+        View = moreOf?.View ?? -1;
+    }
 
     public CatalogNode Node { get; }
     public NodeViewModel? Parent { get; }
+    /// <summary>Which person's view this belongs to; a node from before a sign-in change does nothing.</summary>
+    public int View { get; }
+    public bool IsMore { get; }
     public string Name => Node.Name;
-    public bool IsSection => Node.Kind == NodeKind.Section;
+    public bool IsSection => Node.Kind == NodeKind.Section && !IsMore;
     public string Path => Parent is null || Parent.IsSection ? Name : Parent.Path + "  ›  " + Name;
     public ObservableCollection<NodeViewModel> Children { get; } = [];
 
@@ -280,7 +382,11 @@ public sealed class NodeViewModel : Observable
     public bool IsSelected
     {
         get => isSelected;
-        set { if (Set(ref isSelected, value) && value && owner is not null && Node.Key.Length > 0) _ = owner.SelectAsync(this); }
+        set {
+            if (!Set(ref isSelected, value) || !value || owner is null) return;
+            if (IsMore) _ = Parent!.LoadMoreAsync();
+            else if (Node.Key.Length > 0) _ = owner.SelectAsync(this);
+        }
     }
 
     private async Task LoadAsync()
@@ -288,10 +394,32 @@ public sealed class NodeViewModel : Observable
         if (loaded || owner is null) return;
         loaded = true;
         try {
-            var children = await owner.ChildrenAsync(Node);
+            var page = await owner.ChildrenAsync(Node, null);
+            if (!owner.IsCurrent(View)) return;
             Children.Clear();
-            foreach (var child in children) Children.Add(new NodeViewModel(child, this, owner));
-        } catch (Exception error) { Children.Clear(); loaded = false; owner.Fail(error); }
+            Add(page);
+        } catch (Exception error) { Children.Clear(); loaded = false; if (owner.IsCurrent(View)) owner.Fail(error); }
+    }
+
+    /// <summary>Loads the next page in place of the "Show more" row.</summary>
+    internal async Task LoadMoreAsync()
+    {
+        if (loadingMore || more is null || !owner.IsCurrent(View)) return;
+        loadingMore = true;
+        try {
+            var page = await owner.ChildrenAsync(Node, more);
+            if (!owner.IsCurrent(View)) return;
+            foreach (var row in Children.Where(child => child.IsMore).ToList()) Children.Remove(row);
+            Add(page);
+        } catch (Exception error) { if (owner.IsCurrent(View)) owner.Fail(error); }
+        finally { loadingMore = false; }
+    }
+
+    private void Add(NodePage page)
+    {
+        foreach (var child in page.Nodes) Children.Add(new NodeViewModel(child, this, owner, View));
+        more = page.More;
+        if (more is not null) Children.Add(new NodeViewModel(Node.Kind == NodeKind.Section ? "Show more…" : "Show more folders…", this));
     }
 }
 

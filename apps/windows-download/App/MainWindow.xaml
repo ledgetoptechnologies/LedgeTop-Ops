@@ -64,9 +64,8 @@
     <Grid Grid.Row="2" x:Name="NotSetUpScreen">
       <Border Style="{StaticResource Card}" Width="460" HorizontalAlignment="Center" VerticalAlignment="Center" Padding="34,30">
         <StackPanel>
-          <TextBlock Text="Ledge Top Files isn't set up on this PC yet" FontSize="20" FontWeight="Bold" Margin="0,0,0,8" />
-          <TextBlock Foreground="{StaticResource Muted}" FontSize="14" LineHeight="21"
-                     Text="Install it from the link in Ledge Top Operations or your client portal. If you already did, ask your Ledge Top contact to check the installation." />
+          <TextBlock Text="{Binding SetupTitle}" FontSize="20" FontWeight="Bold" Margin="0,0,0,8" />
+          <TextBlock Foreground="{StaticResource Muted}" FontSize="14" LineHeight="21" Text="{Binding SetupText}" />
         </StackPanel>
       </Border>
     </Grid>
@@ -108,6 +107,10 @@
                 <DataTrigger Binding="{Binding IsSection}" Value="False">
                   <Setter TargetName="NodeName" Property="FontWeight" Value="Normal" />
                 </DataTrigger>
+                <DataTrigger Binding="{Binding IsMore}" Value="True">
+                  <Setter TargetName="NodeName" Property="Foreground" Value="#B33D00" />
+                  <Setter TargetName="NodeName" Property="FontWeight" Value="SemiBold" />
+                </DataTrigger>
               </HierarchicalDataTemplate.Triggers>
             </HierarchicalDataTemplate>
           </TreeView.ItemTemplate>
@@ -131,6 +134,10 @@
             <TextBlock Text="{Binding Notice}" Foreground="{StaticResource WarnInk}" FontSize="13" AutomationProperties.LiveSetting="Polite" />
           </Border>
           <Grid Grid.Row="2" Margin="0,10,0,0">
+            <Grid.RowDefinitions>
+              <RowDefinition Height="*" />
+              <RowDefinition Height="Auto" />
+            </Grid.RowDefinitions>
             <ListView x:Name="FileList" ItemsSource="{Binding Files}" BorderThickness="0" AutomationProperties.Name="Files" SelectionMode="Extended">
               <ListView.ItemContainerStyle>
                 <Style TargetType="ListViewItem">
@@ -177,6 +184,8 @@
               </ListView.View>
             </ListView>
             <TextBlock x:Name="FilesEmpty" Text="{Binding FilesEmptyText}" Foreground="{StaticResource Muted}" HorizontalAlignment="Center" VerticalAlignment="Center" FontSize="14" />
+            <Button Grid.Row="1" Style="{StaticResource Small}" Margin="0,8,0,0" HorizontalAlignment="Center" Command="{Binding LoadMoreFiles}"
+                    Content="Show more files" Visibility="{Binding HasMoreFiles, Converter={StaticResource Visible}}" />
           </Grid>
         </Grid>
       </Border>

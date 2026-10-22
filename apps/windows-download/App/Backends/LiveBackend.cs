@@ -4,19 +4,66 @@ using LedgeTop.WindowsDownload;
 
 namespace LedgeTop.Files.Backends;
 
-/// <summary>Trusted local setup for a real copy of the app. It names fixed origins and the reviewed
-/// cloudflared binary; it never contains a token, bucket key or service credential.</summary>
+/// <summary>The settings file exists but can't be trusted; <see cref="Exception.Message"/> is safe to show.</summary>
+public sealed class SettingsException(string message) : Exception(message);
+
+/// <summary>Local setup for a real copy of the app: fixed origins and the reviewed cloudflared binary.
+/// It never contains a token, bucket key or service credential. This file is user-writable, so it is not
+/// proof of where the binary came from: the installer must supply trusted origins and the cloudflared identity.</summary>
 public sealed record LiveSettings(Uri PortalApplicationUrl, Uri? StaffApplicationUrl, string CloudflaredPath, string CloudflaredSha256)
 {
+    private const int MaximumBytes = 16 * 1024;
+    private const string Broken = "The setup file on this PC is damaged or incomplete. Reinstall Ledge Top Files or ask your Ledge Top contact to check it.";
+    private const string Unreadable = "The setup file on this PC couldn't be read. Restart the PC and try again.";
+
     public static string DefaultPath => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
         "LedgeTop", "Files", "settings.json");
 
-    /// <summary>Null when the app hasn't been set up on this PC.</summary>
+    /// <summary>Null when the app hasn't been set up on this PC; <see cref="SettingsException"/> when the file is unusable.</summary>
     public static LiveSettings? Load(string path)
     {
         if (!File.Exists(path)) return null;
-        var value = JsonSerializer.Deserialize<LiveSettings>(File.ReadAllText(path), new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
-        return value is { PortalApplicationUrl: not null, CloudflaredPath.Length: > 0, CloudflaredSha256.Length: 64 } ? value : null;
+        byte[] bytes;
+        try {
+            using var input = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
+            if (input.Length > MaximumBytes) throw new SettingsException(Broken);
+            bytes = new byte[input.Length];
+            input.ReadExactly(bytes);
+        } catch (Exception error) when (error is IOException or UnauthorizedAccessException) { throw new SettingsException(Unreadable); }
+        try { return Parse(bytes); }
+        catch (Exception error) when (error is JsonException or FormatException or ArgumentException or InvalidOperationException) { throw new SettingsException(Broken); }
+    }
+
+    /// <summary>Strict: one object, only the four known keys, each at most once, with well-formed values.</summary>
+    internal static LiveSettings Parse(ReadOnlySpan<byte> json)
+    {
+        var reader = new Utf8JsonReader(json, new JsonReaderOptions { CommentHandling = JsonCommentHandling.Disallow, MaxDepth = 2 });
+        var values = new Dictionary<string, string?>(StringComparer.Ordinal);
+        if (!reader.Read() || reader.TokenType != JsonTokenType.StartObject) throw new FormatException();
+        while (reader.Read() && reader.TokenType != JsonTokenType.EndObject) {
+            if (reader.TokenType != JsonTokenType.PropertyName) throw new FormatException();
+            var name = reader.GetString()!;
+            if (name is not ("portalApplicationUrl" or "staffApplicationUrl" or "cloudflaredPath" or "cloudflaredSha256") || values.ContainsKey(name))
+                throw new FormatException();
+            reader.Read();
+            values[name] = reader.TokenType switch {
+                JsonTokenType.String => reader.GetString(),
+                JsonTokenType.Null when name == "staffApplicationUrl" => null,
+                _ => throw new FormatException(),
+            };
+        }
+        if (reader.TokenType != JsonTokenType.EndObject || reader.Read()) throw new FormatException();
+        static Uri Origin(string? value) =>
+            Uri.TryCreate(value, UriKind.Absolute, out var uri) && uri.Scheme == Uri.UriSchemeHttps && uri.UserInfo.Length == 0
+                && uri.Query.Length == 0 && uri.Fragment.Length == 0 ? uri : throw new FormatException();
+        var portal = Origin(values.GetValueOrDefault("portalApplicationUrl"));
+        var staff = values.GetValueOrDefault("staffApplicationUrl") is { } staffValue ? Origin(staffValue) : null;
+        var binary = values.GetValueOrDefault("cloudflaredPath");
+        if (binary is null || !Path.IsPathFullyQualified(binary) || binary.StartsWith(@"\\", StringComparison.Ordinal)
+            || !binary.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)) throw new FormatException();
+        var hash = values.GetValueOrDefault("cloudflaredSha256");
+        if (hash is not { Length: 64 } || !hash.All(Uri.IsHexDigit)) throw new FormatException();
+        return new LiveSettings(portal, staff, binary, hash.ToLowerInvariant());
     }
 }
 
@@ -67,7 +114,10 @@ public sealed class LiveBackend : IFilesBackend
     {
         public async Task<SessionInfo?> TryCurrentAsync(CancellationToken cancellationToken = default)
         {
-            try { return new SessionInfo((await probe.GetSessionAsync(cancellationToken)).ExpiresAt); }
+            try {
+                var session = await probe.GetSessionAsync(cancellationToken);
+                return new SessionInfo(session.PrincipalId, session.ExpiresAt);
+            }
             catch (LoginRequiredException) { return null; }
         }
 
@@ -93,55 +143,43 @@ public sealed class LiveBackend : IFilesBackend
             return Task.FromResult<IReadOnlyList<CatalogNode>>(sections);
         }
 
-        public async Task<IReadOnlyList<CatalogNode>> GetChildrenAsync(CatalogNode node, CancellationToken cancellationToken = default)
+        // One server page per call: the window offers "Show more" for the rest, so nothing authorized is unreachable.
+        public async Task<NodePage> GetChildrenAsync(CatalogNode node, object? more = null, CancellationToken cancellationToken = default)
         {
-            var result = new List<CatalogNode>();
             if (node.Kind == NodeKind.Section && node.SourceAlias == "portal") {
-                string? cursor = null;
-                do {
-                    var page = await portal.GetDeliveriesAsync(cursor, cancellationToken);
-                    result.AddRange(page.Items.Select(item => new CatalogNode("p:" + item.Handle, item.DisplayName, NodeKind.Root, "portal", new PortalPlace(item.Handle))));
-                    cursor = page.NextCursor;
-                } while (cursor is not null && result.Count < 500);
-                return result;
+                var page = await portal.GetDeliveriesAsync(more as string, cancellationToken);
+                return new NodePage(page.Items.Select(item => new CatalogNode("p:" + item.Handle, item.DisplayName, NodeKind.Root, "portal", new PortalPlace(item.Handle))).ToList(),
+                    page.NextCursor);
             }
-            if (node.Kind == NodeKind.Section && staff is not null) {
-                foreach (var root in await staff.GetRootsAsync(cancellationToken))
-                    result.Add(new CatalogNode("s:" + root.RootId, root.DisplayName, NodeKind.Root, "employee", new StaffPlace(root.RootId, "")));
-                return result;
-            }
-            return (await ListAsync(node, cancellationToken)).Folders;
+            if (node.Kind == NodeKind.Section && staff is not null)
+                return new NodePage((await staff.GetRootsAsync(cancellationToken))
+                    .Select(root => new CatalogNode("s:" + root.RootId, root.DisplayName, NodeKind.Root, "employee", new StaffPlace(root.RootId, ""))).ToList());
+            var listing = await ListAsync(node, more, cancellationToken);
+            return new NodePage(listing.Folders, listing.More);
         }
 
-        public async Task<CatalogListing> ListAsync(CatalogNode folder, CancellationToken cancellationToken = default)
+        public async Task<CatalogListing> ListAsync(CatalogNode folder, object? more = null, CancellationToken cancellationToken = default)
         {
-            var folders = new List<CatalogNode>(); var files = new List<CatalogFile>();
             switch (folder.Payload) {
                 case PortalPlace place: {
-                    string? cursor = null;
-                    do {
-                        var page = await portal.GetFolderAsync(place.Handle, cursor, cancellationToken);
-                        folders.AddRange(page.Folders.Select(item => new CatalogNode("p:" + item.Handle, item.Name, NodeKind.Folder, "portal", new PortalPlace(item.Handle))));
-                        files.AddRange(page.Files.Select(item => new CatalogFile("p:" + item.Handle, item.Name, item.Size, item.DownloadAvailable, "portal", new PortalFilePlace(item.Handle))));
-                        cursor = page.NextCursor;
-                    } while (cursor is not null && folders.Count + files.Count < 5000);
-                    break;
+                    var page = await portal.GetFolderAsync(place.Handle, more as string, cancellationToken);
+                    return new CatalogListing(
+                        page.Folders.Select(item => new CatalogNode("p:" + item.Handle, item.Name, NodeKind.Folder, "portal", new PortalPlace(item.Handle))).ToList(),
+                        page.Files.Select(item => new CatalogFile("p:" + item.Handle, item.Name, item.Size, item.DownloadAvailable, "portal", new PortalFilePlace(item.Handle))).ToList(),
+                        page.NextCursor);
                 }
                 case StaffPlace place when staff is not null: {
-                    string? cursor = null;
-                    do {
-                        var page = await staff.GetEntriesAsync(place.RootId, place.Path, cursor, cancellationToken);
-                        foreach (var entry in page.Entries) {
-                            var path = place.Path.Length == 0 ? entry.Name : place.Path + "/" + entry.Name;
-                            if (entry.Kind == "folder") folders.Add(new CatalogNode("s:" + place.RootId + ":" + path, entry.Name, NodeKind.Folder, "employee", new StaffPlace(place.RootId, path)));
-                            else files.Add(new CatalogFile("s:" + place.RootId + ":" + path, entry.Name, -1, true, "employee", new StaffFilePlace(place.RootId, path)));
-                        }
-                        cursor = page.NextCursor;
-                    } while (cursor is not null && folders.Count + files.Count < 5000);
-                    break;
+                    var page = await staff.GetEntriesAsync(place.RootId, place.Path, more as string, cancellationToken);
+                    var folders = new List<CatalogNode>(); var files = new List<CatalogFile>();
+                    foreach (var entry in page.Entries) {
+                        var path = place.Path.Length == 0 ? entry.Name : place.Path + "/" + entry.Name;
+                        if (entry.Kind == "folder") folders.Add(new CatalogNode("s:" + place.RootId + ":" + path, entry.Name, NodeKind.Folder, "employee", new StaffPlace(place.RootId, path)));
+                        else files.Add(new CatalogFile("s:" + place.RootId + ":" + path, entry.Name, -1, true, "employee", new StaffFilePlace(place.RootId, path)));
+                    }
+                    return new CatalogListing(folders, files, page.NextCursor);
                 }
+                default: return new CatalogListing([], []);
             }
-            return new CatalogListing(folders, files);
         }
 
         public async Task<string> GetReferenceAsync(CatalogFile file, CancellationToken cancellationToken = default) => file.Payload switch {
