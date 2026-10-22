@@ -1,7 +1,6 @@
 name: Publish TrueNAS thumbnail renderer images
 
 on:
-  workflow_dispatch:
   push:
     branches: [main]
     paths:
