@@ -62,6 +62,8 @@ reconnection or a new session before discovering the added server.
 
 The installed local Hermes CLI supports this equivalent configuration command
 (`--args` must be last). The server name must not replace the staging entry.
+This entry was added and saved with all ten read tools enabled; the existing
+staging entry remains present. Actual `hermes mcp test` passed with ten tools.
 
 ```powershell
 hermes mcp add ledgetop_operations `
@@ -72,6 +74,9 @@ hermes mcp add ledgetop_operations `
   --args 'C:/Projects/Ledge Top Operations/operations-private-mcp/apps/operations-mcp/src/cli.mjs'
 hermes mcp test ledgetop_operations
 ```
+
+The supported CLI explicitly instructs open sessions to use `/reload-mcp`, or
+start a new session. This does not restart Hermes itself or create a new daemon.
 
 A Hermes process on another host cannot use this PC's absolute script paths or
 human login cache. Install the adapter there with verified Node/cloudflared and
@@ -86,8 +91,16 @@ disabled for all three agents. Agent IDs label diagnostics; they do not create
 separately scoped identities. The backend still enforces the human's current
 permissions.
 
-The installed adapter initially advertises nine read tools. The isolated
-reviewed update adds a tenth, `get_existing_public_link`. It uses an existing
+The reviewed update is now installed; fresh connections advertise ten read
+tools including `get_existing_public_link`. Existing Codex/Claude processes were
+not forcibly restarted and may retain their original nine-tool inventory.
+Claude supports reconnecting the named server through `/mcp`; no generic
+hot-reload command for the current Codex app was established. Reconnect that
+server through the app's supported controls when convenient, rather than killing
+or replacing the app-server. See [Claude MCP connection management](https://code.claude.com/docs/en/mcp)
+and [OpenAI MCP setup](https://learn.chatgpt.com/docs/extend/mcp?surface=cli).
+
+The existing-link tool uses an existing
 authorized GET and never creates a link. For a file, pass its `files[].id` from
 `list_delivery_folder` as `itemRef`, with the exact containing folder prefix.
 Returned complete links are bearer access and belong only in the requesting
