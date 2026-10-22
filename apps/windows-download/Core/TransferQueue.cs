@@ -45,6 +45,7 @@ public sealed class TransferQueue : IAsyncDisposable
     private readonly FileStream processLock;
     private readonly SemaphoreSlim commands = new(1, 1);
     private readonly object sync = new();
+    private readonly Dictionary<Guid, Guid> localStops = [];
     private QueuedTransfer[] jobs;
     private CancellationTokenSource? activeCancellation;
     private Task activeTask = Task.CompletedTask;
@@ -127,11 +128,15 @@ public sealed class TransferQueue : IAsyncDisposable
 
     private async Task BeginAsync(Guid jobId, IProgress<DownloadProgress>? progress, CancellationToken cancellationToken)
     {
+        Guid observedStop;
+        lock (sync) { EnsureOpen(); observedStop = localStops.GetValueOrDefault(jobId); }
         await commands.WaitAsync(cancellationToken);
         try {
             EnsureOpen(); await VerifySessionAsync(cancellationToken);
             lock (sync) {
                 Healthy(); var job = Find(jobId);
+                if (localStops.GetValueOrDefault(jobId) != observedStop)
+                    throw new TransferException("This start request was superseded by a local stop; explicitly resume it when ready.");
                 if (activeJob is not null || job.State is QueuedTransferState.Running or QueuedTransferState.Completed
                     or QueuedTransferState.Cancelled or QueuedTransferState.VersionChanged) throw new TransferException("This job cannot start; choose an eligible paused job or explicitly create a new version.");
                 // Persist Running before starting any resolution or byte request.
@@ -147,33 +152,27 @@ public sealed class TransferQueue : IAsyncDisposable
     public Task CancelAsync(Guid jobId, CancellationToken cancellationToken = default) => StopAsync(jobId, QueuedTransferState.Cancelled, cancellationToken);
     private async Task StopAsync(Guid jobId, QueuedTransferState requested, CancellationToken cancellationToken)
     {
-        // Stopping app-owned work needs no network authorization. Signal before
-        // even waiting for a command that may be blocked on session discovery.
-        var active = SignalStop(jobId, requested);
-        if (active is not null) { await active; return; }
-        await commands.WaitAsync(cancellationToken);
-        try {
-            EnsureOpen();
-            active = SignalStop(jobId, requested);
-            if (active is not null) { await active; return; }
-            await VerifySessionAsync(cancellationToken);
-            lock (sync) { Healthy(); var job = Find(jobId); if (job.State is QueuedTransferState.Completed or QueuedTransferState.Cancelled or QueuedTransferState.VersionChanged) return;
-                Commit(jobs.Select(job => job.JobId == jobId ? job with { State = requested, ErrorCode = null,
-                RecoveryRequired = requested != QueuedTransferState.Cancelled && job.RecoveryRequired } : job).ToArray()); }
-        } finally { commands.Release(); }
-    }
-
-    private Task? SignalStop(Guid jobId, QueuedTransferState requested)
-    {
-        Task pending; CancellationTokenSource? cancellation;
+        // Restricting already-owned work needs no network permission. Do not
+        // wait for a command gate that may be stalled on session discovery.
+        // Every local stop also invalidates starts already awaiting that gate
+        // or authentication; only a later explicit start may use the new epoch.
+        Task? pending = null; CancellationTokenSource? cancellation = null;
         lock (sync) {
             EnsureOpen();
-            if (activeJob != jobId) return null;
-            if (requested == QueuedTransferState.Cancelled || stopState != QueuedTransferState.Cancelled) stopState = requested;
-            cancellation = activeCancellation; pending = activeTask;
+            if (activeJob == jobId) {
+                localStops[jobId] = Guid.NewGuid();
+                if (requested == QueuedTransferState.Cancelled || stopState != QueuedTransferState.Cancelled) stopState = requested;
+                cancellation = activeCancellation; pending = activeTask;
+            } else {
+                cancellationToken.ThrowIfCancellationRequested(); Healthy(); var job = Find(jobId);
+                if (job.State is QueuedTransferState.Completed or QueuedTransferState.Cancelled or QueuedTransferState.VersionChanged) return;
+                localStops[jobId] = Guid.NewGuid();
+                Commit(jobs.Select(value => value.JobId == jobId ? value with { State = requested, ErrorCode = null,
+                    RecoveryRequired = requested != QueuedTransferState.Cancelled && value.RecoveryRequired } : value).ToArray());
+            }
         }
         try { cancellation?.Cancel(); } catch (ObjectDisposedException) { /* completed concurrently */ }
-        return pending;
+        if (pending is not null) await pending;
     }
 
     public async Task RefreshSessionAsync(CancellationToken cancellationToken = default)
@@ -374,7 +373,15 @@ public sealed class TransferQueue : IAsyncDisposable
     public async ValueTask DisposeAsync()
     {
         await commands.WaitAsync();
-        try { if (disposed) return; try { await DrainAsync(); } finally { disposed = true; processLock.Dispose(); } }
+        try {
+            lock (sync) { if (disposed) return; }
+            try { await DrainAsync(); }
+            finally {
+                // Local restrictive stops bypass commands, but must finish
+                // their durable commit before exclusive ownership is released.
+                lock (sync) { disposed = true; processLock.Dispose(); }
+            }
+        }
         finally { commands.Release(); }
     }
 }
