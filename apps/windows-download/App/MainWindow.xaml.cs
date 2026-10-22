@@ -52,12 +52,33 @@ public partial class MainWindow : Window, IShell
 
     public void ShowInFolder(string path) => Process.Start(new ProcessStartInfo("explorer.exe") { ArgumentList = { "/select,", path } });
 
-    protected override async void OnClosing(CancelEventArgs e)
+    /// <summary>The longest the window waits for downloads to stop and save before closing anyway.</summary>
+    public TimeSpan ShutdownLimit { get; set; } = TimeSpan.FromSeconds(30);
+    private Task? shutdown;
+    private bool readyToClose;
+
+    /// <summary>
+    /// The first close is held until downloads have stopped and been saved (or the limit passes), then the window
+    /// really closes. Closing again meanwhile just waits for that same shutdown.
+    /// </summary>
+    protected override void OnClosing(CancelEventArgs e)
     {
         base.OnClosing(e);
+        if (e.Cancel || readyToClose || model is null) return;
+        e.Cancel = true;
+        if (shutdown is not null) return;
         clock.Stop();
-        // Stopping and saving happen in the queue; a failure while closing must never crash the app.
-        try { if (model is not null) await model.DisposeAsync(); }
-        catch (Exception) { /* the queue keeps its own durable state and shows any problem next time */ }
+        IsEnabled = false;
+        Title = "Ledge Top Files - stopping downloads";
+        shutdown = FinishAsync(model);
+    }
+
+    private async Task FinishAsync(MainViewModel closingModel)
+    {
+        // Running work was already told to stop; a save failure or a stuck sign-in check must not keep the app open forever.
+        try { await closingModel.DisposeAsync().AsTask().WaitAsync(ShutdownLimit); }
+        catch (Exception) { /* the queue keeps its own durable state; an interrupted transfer resumes as "needs checking" */ }
+        readyToClose = true;
+        Close();
     }
 }

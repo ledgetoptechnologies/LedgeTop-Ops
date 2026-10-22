@@ -35,6 +35,10 @@ public sealed class MainViewModel : Observable, IAsyncDisposable
     private NodeViewModel? selected;
     private object? moreFiles;
     private Task? closing;
+    /// <summary>Set once the window is closing; anything still waiting on sign-in then opens nothing.</summary>
+    private bool closed;
+    /// <summary>A queue that is being opened right now, so closing can wait for it and release it.</summary>
+    private Task<QueueHost>? opening;
 
     private const string DefaultSetupText = "Install it from the link in Ledge Top Operations or your client portal. If you already did, ask your Ledge Top contact to check the installation.";
 
@@ -96,9 +100,10 @@ public sealed class MainViewModel : Observable, IAsyncDisposable
     {
         try {
             var current = await backend.Session.TryCurrentAsync();
+            if (closed) return;
             if (current is null) { Screen = Screen.SignIn; return; }
             await EnterAsync(current);
-        } catch (Exception error) { Fail(error); Screen = Screen.SignIn; }
+        } catch (Exception error) { if (!closed) { Fail(error); Screen = Screen.SignIn; } }
     }
 
     private async Task SignInAsync()
@@ -107,7 +112,9 @@ public sealed class MainViewModel : Observable, IAsyncDisposable
         SignInStatus = "Finish signing in in your browser, then come back here.";
         try {
             await backend.Session.SignInAsync();
+            if (closed) return;
             var current = await backend.Session.TryCurrentAsync();
+            if (closed) return;
             if (current is null) { SignInStatus = "You weren't signed in. Try again when you're ready."; return; }
             SignInStatus = "";
             await EnterAsync(current);
@@ -120,11 +127,17 @@ public sealed class MainViewModel : Observable, IAsyncDisposable
 
     private async Task EnterAsync(SessionInfo current)
     {
+        if (closed) return;
         if (person is not null && person != current.PrincipalId) await CloseViewsAsync();
         session = current; Banner = ""; UpdateSession();
         if (queue is null) {
             var view = generation;
-            var host = await QueueHost.OpenAsync(backend.StateDirectory, backend.Sources);
+            var open = QueueHost.OpenAsync(backend.StateDirectory, backend.Sources);
+            opening = open;
+            QueueHost host;
+            try { host = await open; } finally { if (opening == open) opening = null; }
+            // Closing took ownership of this queue while it opened and releases it.
+            if (closed) return;
             if (view != generation) { await host.DisposeAsync(); return; }
             queue = host; person = current.PrincipalId;
             // Events from a host that has since been closed are ignored.
@@ -134,7 +147,7 @@ public sealed class MainViewModel : Observable, IAsyncDisposable
         Screen = Screen.Files;
         await LoadSectionsAsync();
         await RefreshTransfersAsync();
-        _ = queue?.PumpAsync();
+        if (!closed) _ = queue?.PumpAsync();
     }
 
     /// <summary>
@@ -163,6 +176,7 @@ public sealed class MainViewModel : Observable, IAsyncDisposable
         checkingPerson = true;
         try {
             var current = await backend.Session.TryCurrentAsync();
+            if (closed) return;
             if (current is null) { if (Screen == Screen.Files) { session = null; Screen = Screen.SignIn; SignInStatus = Text.SessionExpired; } return; }
             if (current.PrincipalId == person) return;
             await CloseViewsAsync();
@@ -337,15 +351,28 @@ public sealed class MainViewModel : Observable, IAsyncDisposable
         BannerIsError = true;
     }
 
-    /// <summary>Closing twice (window and owner) waits on the same shutdown rather than racing it.</summary>
-    public ValueTask DisposeAsync()
+    /// <summary>
+    /// Stops and saves this person's downloads and releases their queues. Closing twice (window and owner) waits on the
+    /// same shutdown. A queue still opening (sign-in finishing while the window closes) is released too.
+    /// </summary>
+    public ValueTask DisposeAsync() => new(closing ??= CloseAsync());
+
+    private async Task CloseAsync()
     {
-        if (closing is null) {
-            generation++;
-            var old = queue; queue = null;
-            closing = old is null ? Task.CompletedTask : old.DisposeAsync().AsTask();
+        closed = true; generation++;
+        var old = queue; queue = null; var pending = opening;
+        Exception? failure = null;
+        if (old is not null) {
+            try { await old.DisposeAsync(); } catch (Exception error) { failure = error; }
         }
-        return new ValueTask(closing);
+        if (pending is not null) {
+            QueueHost? late = null;
+            try { late = await pending; } catch (Exception) { /* it never opened, so there is nothing to release */ }
+            if (late is not null && late != old) {
+                try { await late.DisposeAsync(); } catch (Exception error) { failure ??= error; }
+            }
+        }
+        if (failure is not null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Throw(failure);
     }
 }
 

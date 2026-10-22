@@ -29,6 +29,8 @@ var groups = new (string Name, Func<Task> Run)[] {
     ("long folders and delivery lists continue with Show more", Paging),
     ("the setup file is read strictly and problems are explained", SettingsFile),
     ("packaged releases use only their compiled profile and their own channel folder", PackagedReleases),
+    ("closing during startup or sign-in opens nothing and leaves no queue locked", CloseBeforeSignedIn),
+    ("closing the window waits for downloads to stop and save, even with sign-in stuck", CloseWindow),
     ("the window renders sign-in and files screens", Render),
 };
 foreach (var group in groups) {
@@ -446,6 +448,82 @@ async Task PackagedReleases()
     }
 }
 
+async Task CloseBeforeSignedIn()
+{
+    // Startup's own session check is still waiting when the window closes.
+    await using (var env = Env.Create(signedIn: true)) {
+        env.Backend.BlockSessions();
+        var start = env.Model.StartAsync();
+        await env.Model.DisposeAsync();
+        env.Backend.ReleaseSessions();
+        await start;
+        await Task.Delay(300); Pump();
+        True(env.Model.Screen != Screen.Files && env.Model.Sections.Count == 0, "nothing opened after close");
+        True(!Directory.Exists(env.Backend.StateDirectory), "no queue was created");
+    }
+    // The session answered, but the queue is still opening when the window closes.
+    await using (var env = Env.Create(signedIn: true)) {
+        env.Backend.BlockSources();
+        var start = env.Model.StartAsync();
+        await Task.Delay(200); Pump();
+        var closing = env.Model.DisposeAsync().AsTask();
+        await Task.Delay(200);
+        True(!closing.IsCompleted, "closing waits for the queue that is still opening");
+        env.Backend.ReleaseSources();
+        await closing; await start;
+        await Task.Delay(300); Pump();
+        True(env.Model.Screen != Screen.Files && env.Model.Sections.Count == 0, "no files shown after close");
+        True(Locks.Free(env.Backend.StateDirectory), "the late queue was released");
+        Equal(0, env.Backend.Writing);
+        // A second close returns the same finished shutdown.
+        await env.Model.DisposeAsync();
+    }
+    // Sign-in finishes in the browser after the window closed.
+    await using (var env = Env.Create(signedIn: false)) {
+        await env.Model.StartAsync();
+        env.Model.SignIn.Execute(null);
+        await env.Model.DisposeAsync();
+        await Until(() => env.Model.SignIn.CanExecute(null), "sign-in finished", seconds: 10);
+        await Task.Delay(300); Pump();
+        True(env.Model.Screen == Screen.SignIn && env.Model.Sections.Count == 0, "no files after a sign-in that finished after close");
+        True(!Directory.Exists(env.Backend.StateDirectory) || Locks.Free(env.Backend.StateDirectory), "no queue left open");
+    }
+}
+
+async Task CloseWindow()
+{
+    foreach (var stuck in new[] { false, true }) {
+        await using var env = Env.Create(signedIn: true, rate: 600_000);
+        var window = env.Window();
+        window.ShutdownLimit = stuck ? TimeSpan.FromSeconds(2) : TimeSpan.FromSeconds(20);
+        var closedCount = 0; window.Closed += (_, _) => closedCount++;
+        await env.Model.StartAsync();
+        await env.OpenAsync("deliveries", "land-script");
+        env.Check("ortho-full.tif");
+        env.Model.DownloadSelected.Execute(null);
+        await Until(() => env.Model.Transfers.Any(row => row.State == QueuedTransferState.Running && row.Percent > 1), "download running");
+        if (stuck) env.Backend.BlockSessions();
+        window.Close();
+        window.Close();
+        True(closedCount == 0 && window.IsVisible, "the first close waits for the shutdown");
+        await Until(() => closedCount == 1, "window closes after downloads stop", seconds: 30);
+        Equal(0, env.Backend.Writing);
+        var partial = Directory.EnumerateFiles(env.Downloads, "*.ltds-demo-partial", new EnumerationOptions { AttributesToSkip = 0 }).Single();
+        var size = new FileInfo(partial).Length;
+        await Task.Delay(600);
+        Equal(size, new FileInfo(partial).Length);
+        True(!File.Exists(Path.Combine(env.Downloads, "ortho-full.tif")), "nothing promoted");
+        if (stuck) env.Backend.ReleaseSessions();
+        await Until(() => Locks.Free(env.Backend.StateDirectory), "queue released", seconds: 30);
+        Equal(1, closedCount);
+        if (!stuck) {
+            // The stopped download was saved as paused, not left as running.
+            var saved = Directory.EnumerateFiles(env.Backend.StateDirectory, "queue.json", SearchOption.AllDirectories).Select(File.ReadAllText).Single(text => text.Contains("ortho-full.tif"));
+            True(saved.Contains("\"paused\"", StringComparison.OrdinalIgnoreCase), "saved as paused");
+        }
+    }
+}
+
 async Task Render()
 {
     Directory.CreateDirectory(screenshots);
@@ -586,6 +664,20 @@ sealed class Env : IAsyncDisposable, IShell
     {
         await Model.DisposeAsync();
         try { Directory.Delete(root, true); } catch (IOException) { } catch (UnauthorizedAccessException) { }
+    }
+}
+
+static class Locks
+{
+    /// <summary>True when no queue under the folder is still held open by this process.</summary>
+    public static bool Free(string root)
+    {
+        if (!Directory.Exists(root)) return true;
+        foreach (var file in Directory.EnumerateFiles(root, ".queue.lock", new EnumerationOptions { RecurseSubdirectories = true, AttributesToSkip = 0 })) {
+            try { using var held = new FileStream(file, FileMode.Open, FileAccess.ReadWrite, FileShare.None); }
+            catch (IOException) { return false; }
+        }
+        return true;
     }
 }
 

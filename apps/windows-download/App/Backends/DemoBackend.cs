@@ -59,6 +59,11 @@ public sealed class DemoBackend : IFilesBackend
     /// <summary>Makes every sign-in check hang (offline or a stuck token cache) until <see cref="ReleaseSessions"/>.</summary>
     public void BlockSessions() { lock (state) state.Gate ??= new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously); }
     public void ReleaseSessions() { TaskCompletionSource? gate; lock (state) { gate = state.Gate; state.Gate = null; } gate?.TrySetResult(); }
+    /// <summary>Makes only the download sources' sign-in checks hang (the window's own session check still answers).</summary>
+    public void BlockSources() { lock (state) state.SourceGate ??= new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously); }
+    public void ReleaseSources() { TaskCompletionSource? gate; lock (state) { gate = state.SourceGate; state.SourceGate = null; } gate?.TrySetResult(); }
+    /// <summary>How many downloads are writing bytes right now.</summary>
+    public int Writing { get { lock (state) return state.Writing; } }
     /// <summary>The most downloads that were ever writing at the same moment.</summary>
     public int MostAtOnce => state.MostAtOnce;
     /// <summary>The opaque person ID sources report right now.</summary>
@@ -80,24 +85,33 @@ public sealed class DemoBackend : IFilesBackend
         public TimeSpan SessionLength;
         public DateTimeOffset ExpiresAt;
         public double BytesPerSecond;
-        public TaskCompletionSource? Gate;
+        public TaskCompletionSource? Gate, SourceGate;
         public int Writing, MostAtOnce;
         public bool Valid => SignedIn && ExpiresAt > DateTimeOffset.UtcNow.AddSeconds(5);
         public string Principal => "odqp1_" + Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes("demo-person-" + Person)));
         public bool Sees(string key) => Person == 0 || key is "deliveries" or "greenleaf";
 
-        public async Task CheckAsync(CancellationToken cancellationToken)
+        public async Task CheckAsync(CancellationToken cancellationToken, bool source = false)
         {
-            Task? gate; lock (this) gate = Gate?.Task;
-            if (gate is not null) await gate.WaitAsync(cancellationToken);
+            await WaitAsync(cancellationToken, source);
             if (!Valid) throw new LoginRequiredException();
+        }
+
+        public async Task WaitAsync(CancellationToken cancellationToken, bool source = false)
+        {
+            Task? gate, sourceGate; lock (this) { gate = Gate?.Task; sourceGate = source ? SourceGate?.Task : null; }
+            if (gate is not null) await gate.WaitAsync(cancellationToken);
+            if (sourceGate is not null) await sourceGate.WaitAsync(cancellationToken);
         }
     }
 
     private sealed class DemoSession(DemoState state) : ISessionGateway
     {
-        public Task<SessionInfo?> TryCurrentAsync(CancellationToken cancellationToken = default) =>
-            Task.FromResult(state.Valid ? new SessionInfo(state.Principal, state.ExpiresAt) : null);
+        public async Task<SessionInfo?> TryCurrentAsync(CancellationToken cancellationToken = default)
+        {
+            await state.WaitAsync(cancellationToken);
+            return state.Valid ? new SessionInfo(state.Principal, state.ExpiresAt) : null;
+        }
 
         public async Task SignInAsync(CancellationToken cancellationToken = default)
         {
@@ -145,7 +159,7 @@ public sealed class DemoBackend : IFilesBackend
 
         public async Task<QueuedDownloadSession> GetSessionAsync(CancellationToken cancellationToken = default)
         {
-            await state.CheckAsync(cancellationToken);
+            await state.CheckAsync(cancellationToken, source: true);
             return new QueuedDownloadSession(state.Principal, state.ExpiresAt);
         }
 
