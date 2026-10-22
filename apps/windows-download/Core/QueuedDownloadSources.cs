@@ -84,8 +84,11 @@ public abstract class QueuedDownloadSource : IQueuedDownloadSource, IDisposable
     }
     private string ContentPath(string path)
     {
-        var pattern = employee ? "\\A/api/staff/files/downloads/eof1_[A-Za-z0-9_-]+\\z" : "\\A/api/client/operations/data/files/ond1_[A-Za-z0-9_-]+/download\\z";
-        var prefix = employee ? Base + "/downloads/" : Base + "/files/";
+        var successor = !employee && path.StartsWith(Base + "/windows-successor/files/", StringComparison.Ordinal);
+        var pattern = employee ? "\\A/api/staff/files/downloads/eof1_[A-Za-z0-9_-]+\\z"
+            : successor ? "\\A/api/client/operations/data/windows-successor/files/wsp1_[A-Za-z0-9_-]+/download\\z"
+            : "\\A/api/client/operations/data/files/ond1_[A-Za-z0-9_-]+/download\\z";
+        var prefix = employee ? Base + "/downloads/" : Base + (successor ? "/windows-successor/files/" : "/files/");
         var suffix = employee ? 0 : "/download".Length;
         if (path.Length - prefix.Length - suffix > (employee ? 16384 : 8192) || !Regex.IsMatch(path, pattern)) throw Invalid();
         return path;

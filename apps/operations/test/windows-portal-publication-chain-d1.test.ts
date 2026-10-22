@@ -1,6 +1,16 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
 vi.mock("cloudflare:workers", () => ({ WorkerEntrypoint: class {} }));
+const jwks = vi.hoisted(() => vi.fn());
+vi.mock("../../client/src/worker/client-portal/access-identity", async () => {
+  const actual = await vi.importActual<typeof import("../../client/src/worker/client-portal/access-identity")>("../../client/src/worker/client-portal/access-identity");
+  // Ops and Client install separate jose copies. Inject only the supported
+  // key-resolver argument, preserving the actual Client JWT verifier/mapping.
+  return { ...actual, resolveCloudflareRecipientEnrollmentProof: (request: Request,
+    env: Parameters<typeof actual.resolveCloudflareRecipientEnrollmentProof>[1]) =>
+    actual.resolveCloudflareRecipientEnrollmentProof(request, env, jwks()) };
+});
+import { createLocalJWKSet, exportJWK, generateKeyPair, SignJWT } from "jose";
 import { runCanonicalPortalResourceAcceptance } from "./helpers/operations-native-portal-resource-acceptance-fixture";
 import { listOperationsPortalNativeDeliveryCandidates, issueOperationsPortalNativeDeliveryAuthority,
   revokeOperationsPortalNativeDeliveryAuthority } from "../src/worker/operations-portal-native-delivery-authority-issuer";
@@ -19,6 +29,11 @@ import { readWindowsPortalSuccessorAuthorization, readWindowsPortalSuccessorAuth
 import { parseOperationsPortalNativeDeliveryAuthorityCommand } from "@ltds/shared/operations-portal-native-delivery-authority";
 import { authorizeWindowsPortalSuccessor } from "../../client/src/worker/client-portal/windows-portal-successor-authorization";
 import { WINDOWS_PORTAL_SUCCESSOR_CANDIDATE_SQL } from "../../client/src/worker/client-portal/windows-portal-successor-candidate";
+import { splitD1MigrationStatements } from "../../client/test/helpers/d1-migrations";
+import { createWindowsPortalSuccessorRouter, type WindowsPortalSuccessorRouteEnv } from "../../client/src/worker/client-portal/windows-portal-successor-routes";
+import { createOperationsNativeQueueRouter } from "../../client/src/worker/client-portal/operations-native-queue-routes";
+import { encodeOperationsNativeDeliveryHandle } from "../../client/src/worker/client-portal/operations-native-delivery-handles";
+import { readOperationsPortalNativeDeliveryAuthorizationEntrypoint } from "../src/worker/operations-portal-native-delivery-authority-reader";
 
 describe("Windows publication history evidence with real canonical Ops/Client producers", () => {
   it("retains an unchanged grant across applied refreshes, excludes pending commands, and rejects revocation", async () => {
@@ -26,6 +41,8 @@ describe("Windows publication history evidence with real canonical Ops/Client pr
       const { operations: db, client, id, owner } = ctx;
       await db.prepare(readFileSync(new URL("../migrations/0224_windows_portal_publication_chain_index.sql", import.meta.url), "utf8")).run();
       await client.prepare(readFileSync(new URL("../../client/migrations/0235_windows_portal_successor_candidates.sql", import.meta.url), "utf8")).run();
+      await client.batch(splitD1MigrationStatements(readFileSync(new URL("../../client/migrations/0236_windows_portal_successor_content_start_audit.sql", import.meta.url), "utf8"))
+        .map(sql => client.prepare(sql)));
       const candidate = (await listOperationsPortalNativeDeliveryCandidates(db, { targetId: ctx.workspace.targetId, owner })).items
         .find(item => item.recipientBindingId === ctx.recipient.recipientBindingId);
       if (!candidate || !ctx.recipient.recipientBindingId) throw new Error("missing synthetic candidate");
@@ -61,6 +78,45 @@ describe("Windows publication history evidence with real canonical Ops/Client pr
       expect(initialCandidate).not.toBeNull();
       await expect(authorizeWindowsPortalSuccessor(consumerEnv, { issuer: ctx.issuer, subject: ctx.subject }, authorityId))
         .resolves.toMatchObject({ ok: true, successorContext: { kind: "windows-portal-successor-v1", continuity: { publicationCount: 1 } } });
+      // Real signed human -> durable reference -> manifest -> R2 range bytes,
+      // retaining the original grant across an acknowledged publication refresh.
+      // Only JWK discovery is substituted; JWT signature/issuer/audience checks run.
+      const pair = await generateKeyPair("RS256", { extractable: true }), key = await exportJWK(pair.publicKey);
+      key.kid = "synthetic-successor"; jwks.mockReturnValue(createLocalJWKSet({ keys: [key] }));
+      const audience = "synthetic-successor-queue", origin = consumerEnv.CLIENT_PORTAL_ORIGIN;
+      const jwt = await new SignJWT({ type: "app", email: "synthetic@example.invalid" }).setProtectedHeader({ alg: "RS256", kid: key.kid })
+        .setIssuer(ctx.issuer).setSubject(ctx.subject).setAudience(audience).setExpirationTime("1h").sign(pair.privateKey);
+      const bytes = new TextEncoder().encode("synthetic publication-continuous exact range bytes");
+      const checksum = await crypto.subtle.digest("SHA-256", bytes);
+      const storageKey = grant.resource.selectedR2Prefix + "successor-map.bin";
+      const object = await ctx.bucket.put(storageKey, bytes, { sha256: checksum });
+      if (!object) throw new Error("missing synthetic object");
+      await client.prepare("INSERT INTO file_index(r2_key,etag,size,uploaded_at,content_type,media_kind) VALUES(?,?,?,datetime('now'),'application/octet-stream','other')")
+        .bind(storageKey, object.etag, bytes.length).run();
+      const queueEnv = { ...consumerEnv, CLIENT_PORTAL_ENABLED: "true", DATA_BUCKET: ctx.bucket,
+        DELIVERY_SESSION_SECRET: "synthetic-successor-desktop-secret-".repeat(3), CLIENT_ACCESS_TEAM_DOMAIN: ctx.issuer, CLIENT_ACCESS_AUD: audience,
+        CLIENT_PORTAL_OPERATIONS_NATIVE_CONTENT_AUDIT_ENABLED: "true", CLIENT_PORTAL_OPERATIONS_NATIVE_CONTENT_AUDIT_HMAC_SECRET: "synthetic-successor-audit-secret-".repeat(3),
+        OPERATIONS_PORTAL_NATIVE_DELIVERY_AUTHORIZATION_READER: { ...consumerEnv.OPERATIONS_PORTAL_NATIVE_DELIVERY_AUTHORIZATION_READER,
+          readNativeDeliveryAuthorization: (input: Parameters<typeof readOperationsPortalNativeDeliveryAuthorizationEntrypoint>[1]) =>
+            readOperationsPortalNativeDeliveryAuthorizationEntrypoint(opsEnv, input) } } as unknown as WindowsPortalSuccessorRouteEnv;
+      const config = { enabled: true, portalOrigin: origin, issuer: ctx.issuer, audience, queueKey: new Uint8Array(32).fill(17) };
+      const queue = createOperationsNativeQueueRouter(config), downloads = createWindowsPortalSuccessorRouter(config);
+      const request = (path: string, extra: HeadersInit = {}) => new Request(origin + path, { headers: { "Cf-Access-Jwt-Assertion": jwt, ...extra } });
+      const g = grant;
+      const selector = await encodeOperationsNativeDeliveryHandle(queueEnv, { v: 1, kind: "file", authorityId, authorityRevision: g.authority.resultingRevision,
+        ...g.recipient, targetId: g.target.targetId, targetRevision: g.target.targetRevision, clientAuthorityId: g.target.clientAuthorityId, workspaceId: g.target.workspaceId,
+        publicationId: g.publication.publicationId, publicationOperationId: g.publication.operationId, publicationRevision: g.publication.revision,
+        publicationSourceSequence: g.publication.sourceSequence, snapshotId: g.publication.snapshotId, snapshotSha256: g.publication.snapshotSha256,
+        folderReservationId: g.resource.folderReservationId, folderReservationRevision: g.resource.folderReservationRevision,
+        clientFolderBindingId: g.resource.clientFolderBindingId, externalProjectId: g.resource.externalProjectId, projectVersion: g.resource.projectVersion,
+        path: "successor-map.bin", etag: object.etag, expires: Date.now() + 600_000 });
+      const selectedResponse = await queue.fetch(request("/api/client/operations/data/queue/reference?fileHandle=" + selector), queueEnv);
+      expect(selectedResponse.status).toBe(200);
+      const selected = await selectedResponse.json() as { resourceRef: string };
+      const resolve = () => queue.fetch(request("/api/client/operations/data/queue/resolve?resourceRef=" + selected.resourceRef), queueEnv);
+      const beforeResponse = await resolve(); expect(beforeResponse.status).toBe(200);
+      type Resolved = { manifest: { logicalFileId: string; remoteVersion: string; sha256: string; strongETag: string; downloadPath: string } };
+      const beforeManifest = (await beforeResponse.json() as Resolved).manifest;
       const oldRequest = { ...original.authorization, feature: "file.download" as const };
       await expect(readOperationsPortalNativeDeliveryAuthorization(db, oldRequest)).resolves.toEqual(original.authorization);
       for (const forged of [
@@ -101,6 +157,16 @@ describe("Windows publication history evidence with real canonical Ops/Client pr
       const consumer = await authorizeWindowsPortalSuccessor(consumerEnv, { issuer: ctx.issuer, subject: ctx.subject }, authorityId);
       expect(consumer).toMatchObject({ ok: true, successorContext: { originalRequestFingerprint: refreshed.grantFingerprint,
         continuity: refreshed, originalGrant: grant } });
+      const renewedResponse = await resolve(); expect(renewedResponse.status).toBe(200);
+      const renewed = (await renewedResponse.json() as Resolved).manifest;
+      expect(renewed.logicalFileId).toBe(beforeManifest.logicalFileId);
+      expect(renewed.remoteVersion).toBe(beforeManifest.remoteVersion); expect(renewed.sha256).toBe(beforeManifest.sha256);
+      expect((await downloads.fetch(request(beforeManifest.downloadPath), queueEnv)).status).toBe(404);
+      const ranged = await downloads.fetch(request(renewed.downloadPath, { Range: "bytes=8-", "If-Match": renewed.strongETag }), queueEnv);
+      expect(ranged.status).toBe(206); expect(ranged.headers.get("Content-Range")).toBe(`bytes 8-${bytes.length - 1}/${bytes.length}`);
+      expect(new Uint8Array(await ranged.arrayBuffer())).toEqual(bytes.slice(8));
+      const event = await client.prepare("SELECT original_publication_revision,effective_publication_revision,publication_count FROM windows_portal_successor_content_start_events").all();
+      expect(event.results).toEqual([{ original_publication_revision: 1, effective_publication_revision: 2, publication_count: 2 }]);
       await expect(authorizeWindowsPortalSuccessor(consumerEnv, { issuer: ctx.issuer, subject: "another-person" }, authorityId))
         .resolves.toEqual({ ok: false, code: "denied" });
       // Old callers still require their exact original publication.
@@ -135,6 +201,9 @@ describe("Windows publication history evidence with real canonical Ops/Client pr
       // even before the revoke is delivered to Client.
       await expect(authorizeWindowsPortalSuccessor(consumerEnv, { issuer: ctx.issuer, subject: ctx.subject }, authorityId))
         .resolves.toEqual({ ok: false, code: "denied" });
+      expect((await resolve()).status).toBe(409);
+      expect((await downloads.fetch(request(renewed.downloadPath), queueEnv)).status).toBe(404);
+      expect(await client.prepare("SELECT count(*) n FROM windows_portal_successor_content_start_events").first("n")).toBe(1);
       expect((await db.prepare("PRAGMA foreign_key_check").all()).results).toEqual([]);
     }, { stopAfterReady: true, operationsThroughMigration: "0203_effective_native_directory_enrollment_consumers.sql" });
   }, 240_000);

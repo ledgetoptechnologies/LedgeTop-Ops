@@ -58,12 +58,16 @@ pin: recipient/enrollment/client, target/workspace, home ownership and grant,
 delivery authority revision, publication operation/revision/source sequence and
 published snapshot, folder reservation/binding and project version, plus the
 relative path. Short expiry, object etag/provider version/SHA are excluded.
-Resolve first obtains fresh current Ops authorization, compares the exact old
-lifecycle through the existing matcher, then resolves current index/R2 metadata
-through the existing native manifest implementation. Revocation, regrant,
-ownership change, folder remap or changed publication pins fail closed.
+Resolve obtains fresh producer/local successor authorization, validates the old
+selector shape and compares its complete original lifecycle through the existing
+pure command matcher before any index read. The distinct successor manifest
+helper then rechecks current index/R2 identity and emits a short `wsp1_` byte URL.
+Logical file IDs retain the ordinary manifest's exact HMAC domain/material, so
+unchanged provider version/content can resume an old partial. Revocation,
+regrant, ownership change and folder remap still fail closed. Publication changes
+are accepted only through the complete retained-history proof below.
 
-## Portal publication continuity remains unfinished
+## Portal publication continuity source; live/catalog qualification unfinished
 
 The unmounted `windows-portal-publication-chain.ts` evidence reader now proves
 one prerequisite: an uninterrupted, bounded sequence of acknowledged applied
@@ -95,16 +99,19 @@ The separate source-only consumer authorizer now proves current local
 home/grant/publication/resource state, validates the distinct response against
 the original grant and local effective publication, and rechecks local state
 after the bounded private RPC. It returns a distinct context and has no fallback
-to ordinary authority. Original views, queue resolution, byte routes and audit
-are unchanged. The next integration must preserve original queue lifecycle pins.
-Purpose-separated successor handles and content-start audit must bind both
-original grant and effective publication before any index/R2 access or byte
-handoff. Queue resume across a publication change is still unfinished.
+to ordinary authority. Original views and ordinary byte/audit semantics remain
+unchanged. Migration 0235 shares the local candidate predicate with the separate
+0236 immutable successor ledger. New successor selectors, manifest helper and
+byte-router source bind original grant and effective publication. The unmounted
+queue factory now uses these components on resolve, preserving original saved
+lifecycle pins. Successor bytes require the separate audit and fresh authority,
+index and R2 identity checks before final streamed handoff.
 
-A normal publication refresh currently returns 409 for an old queue reference.
-That is an explicit source limitation, not the intended final restart/resume
-experience. Removing publication or delivery revision pins would allow an old
-selector to follow replacement authority and is not a safe continuity contract.
+The new source accepts a proved refresh for an old queue reference; it never
+removes original publication or delivery revision pins to follow replacement
+authority. Current deployed routes are unchanged. Catalog discovery, folder
+listing and file metadata still need separate continuity support, and human
+staging plus large-file qualification remain required before release.
 
 The existing authoritative producer seam is
 `operations-portal-native-delivery-authority-issuer.ts`'s `contextSql`, which
@@ -113,13 +120,13 @@ publication heads/receipts/commands/checkpoints, published folder/project
 sources, and current folder reservations/project revisions/physical mapping.
 Its delivery authority heads and dispatch also carry exact lifecycle versions.
 The ordinary portal authorization RPC proves one exact current publication. The
-separate successor RPC source supplies the producer-side proof only.
+separate successor RPC source supplies the producer-side proof.
 
-The next consumer protocol must preserve the proved uninterrupted delivery grant,
+The consumer protocol preserves the proved uninterrupted delivery grant,
 recipient enrollment/home ownership epoch, target/client/workspace and
 folder/project mapping. A later stable continuity epoch can replace the bounded
 immutable-history scan without accepting omitted or unprovable history. The
-portal must check the transition and repeat fresh authority checks. Tests must cover
+portal checks the transition and repeats fresh authority checks. Acceptance must cover
 ordinary metadata refresh with same-content resume, changed version, intervening
 revoke/regrant, ownership/client switch and folder remap. No existing content
 route gains cross-publication authority from the new producer method alone.
