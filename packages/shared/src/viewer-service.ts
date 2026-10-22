@@ -924,6 +924,8 @@ export class ViewerServiceClient {
   }
 
   async createAdminGrant(input: {
+    controllerOrigin: string;
+    targetSessionId?: string;
     subject: string;
     permissions: ViewerProcessingPermission[];
     authorizationExpiresAt: string;
@@ -932,6 +934,8 @@ export class ViewerServiceClient {
   }): Promise<ViewerAdminSessionGrant> {
     const path = "/api/v1/admin-grants";
     const body = JSON.stringify({
+      controllerOrigin: input.controllerOrigin,
+      ...(input.targetSessionId ? { targetSessionId: input.targetSessionId } : {}),
       subject: input.subject,
       permissions: input.permissions,
       authorizationExpiresAt: input.authorizationExpiresAt,

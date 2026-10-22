@@ -2023,6 +2023,24 @@ const MIGRATIONS = [
       WHEN EXISTS(SELECT 1 FROM derivative_jobs WHERE id=OLD.job_id)
       BEGIN SELECT RAISE(ABORT,'EPT conversion receipts are immutable'); END;
   `},
+  {version:39,name:'pinned_workspace_controller_origins',sql:`
+    ALTER TABLE admin_grants ADD COLUMN controller_origin TEXT;
+    ALTER TABLE admin_grants ADD COLUMN target_session_id TEXT;
+    ALTER TABLE admin_sessions ADD COLUMN controller_origin TEXT;
+  `,after(database){
+    // Keep OPS_BASE_URL unchanged for this first upgrade: it is the authority
+    // existing envelopes actually advertised, never an incoming request value.
+    const {config}=require('./config');
+    const {controllerOriginAllowed}=require('./controllerOrigins');
+    const legacyOrigin=config.opsBaseUrl;
+    if(!controllerOriginAllowed(legacyOrigin,config.opsControllerOrigins))throw new Error('Legacy workspace controller must be an exact configured trusted Ops origin');
+    database.prepare('UPDATE admin_grants SET controller_origin=? WHERE controller_origin IS NULL').run(legacyOrigin);
+    database.prepare('UPDATE admin_sessions SET controller_origin=? WHERE controller_origin IS NULL').run(legacyOrigin);
+    database.prepare("INSERT INTO app_state(key,value,updated_at) VALUES ('workspace_legacy_controller_origin',?,?)").run(legacyOrigin,new Date().toISOString());
+    database.exec(`CREATE TRIGGER admin_session_controller_immutable BEFORE UPDATE OF controller_origin ON admin_sessions
+      WHEN NEW.controller_origin IS NOT OLD.controller_origin
+      BEGIN SELECT RAISE(ABORT,'workspace controller origin is immutable'); END;`);
+  }},
 ];
 
 function applyMigrations(database) {
@@ -2046,6 +2064,7 @@ function applyMigrations(database) {
         continue;
       }
       database.exec(migration.sql);
+      migration.after?.(database);
       database.prepare(
         'INSERT INTO schema_migrations(version,name,applied_at) VALUES (?,?,?)',
       ).run(migration.version, migration.name, new Date().toISOString());

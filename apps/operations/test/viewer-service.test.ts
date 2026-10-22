@@ -364,3 +364,20 @@ describe("Viewer service client", () => {
     await expect(client.listModels()).resolves.toEqual([]);
   });
 });
+
+
+it("signs the exact controller and renewal-session pins into the admin-grant body",async()=>{
+ const fetcher=vi.fn(async(_input:RequestInfo|URL,init?:RequestInit)=>{
+  const body=String(init?.body),headers=init?.headers as Record<string,string>;
+  expect(JSON.parse(body)).toMatchObject({controllerOrigin:"https://ops.ledgetop.app",targetSessionId:"existing-viewer-session-001"});
+  const expected=await signViewerServiceRequest({secret,keyId:"ops-v1",method:"POST",pathWithQuery:"/api/v1/admin-grants",body,
+   timestamp:Number(headers["X-LTDS-Timestamp"]),nonce:headers["X-LTDS-Nonce"]});
+  expect(headers["X-LTDS-Signature"]).toBe(expected["X-LTDS-Signature"]);
+  return Response.json({grant:"a".repeat(43),grantExpiresAt:new Date(Date.now()+60000).toISOString(),sessionTtlSeconds:1800,
+   redeemUrl:"https://viewer.example.test/api/v1/admin-sessions/redeem"},{status:201});
+ });
+ const client=new ViewerServiceClient({baseUrl:"https://viewer.example.test",keyId:"ops-v1",secret},fetcher as typeof fetch);
+ await client.createAdminGrant({controllerOrigin:"https://ops.ledgetop.app",targetSessionId:"existing-viewer-session-001",
+  subject:"ops:staff-one",permissions:["viewer.projects.read"],authorizationExpiresAt:new Date(Date.now()+1800000).toISOString(),displayUnits:"imperial",idempotencyKey:"test-controller-grant-001"});
+ expect(fetcher).toHaveBeenCalledOnce();
+});
