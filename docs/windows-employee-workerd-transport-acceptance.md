@@ -141,3 +141,11 @@ Host available space before allocation was 773,621,649,408 bytes; the owned volu
 reported 769,816,645,632 bytes before source generation and 766,595,289,088 after.
 Allocated source blocks occupied 3,221,233,664 bytes. This is bounded synthetic
 local acceptance, not a NAS, Engineering Hub or deployed-service performance claim.
+
+Unknown volume-create acknowledgement is also covered by cleanup: after local
+Docker validation, large mode always attempts removal and checks absence of its
+generated volume name, even if create never returned success. A bounded fault
+probe created an actual empty owned volume, injected a CLI acknowledgement error,
+and confirmed the real harness cleanup attempted removal and the volume was
+absent. The harness exited with the deliberately injected error, as intended;
+no container or large-file data was allocated for that probe.
