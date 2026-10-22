@@ -1,4 +1,5 @@
 import { expect, test, type Page, type Route } from "@playwright/test";
+import { readFileSync } from "node:fs";
 import type { DeliveryLocationCollection } from "@ltds/shared";
 
 const folderId = "Zm9sZGVy";
@@ -295,6 +296,22 @@ test("image viewer matches Operations interaction and keeps PDF/video controls u
   await expect(page.frameLocator(".video-preview iframe").locator("video")).toHaveAttribute("controls", "");
   await expect(page.locator(".zoomable-delivery-image")).toHaveCount(0); await expect(page.getByRole("button", { name: "Fit" })).toHaveCount(0);
   await page.keyboard.press("Escape"); await expect(page.getByRole("dialog")).toHaveCount(0); await expect(trigger).toBeFocused();
+});
+
+test("opening an original video starts playback without pressing Play and keeps controls available", async ({ page }) => {
+  await mockShare(page, undefined, undefined, [rootVideo]);
+  await page.route("**/api/public/shares/public/items/*/stream-ticket", route => route.fulfill({ status: 404, json: { error: "Preview unavailable" } }));
+  const videoBytes = readFileSync(new URL("../fixtures/client-portal-seek.mp4", import.meta.url));
+  await page.route("**/media/flight.mp4", route => route.fulfill({ contentType: "video/mp4", body: videoBytes }));
+  await page.goto("/s/public?view=grid");
+  await page.getByRole("button", { name: "Preview Flight.mp4" }).click();
+  const video = page.getByRole("dialog", { name: "Preview Flight.mp4" }).locator("video");
+  await expect(video).toBeVisible();
+  await expect(video).toHaveJSProperty("muted", true);
+  await expect(video).toHaveJSProperty("controls", true);
+  await expect.poll(() => video.evaluate(element => (element as HTMLVideoElement).currentTime)).toBeGreaterThan(0);
+  await page.keyboard.press("Escape");
+  await expect(page.locator("video")).toHaveCount(0);
 });
 
 test("image viewer supports a real two-touch pinch gesture and keeps the image bounded", async ({ page }) => {

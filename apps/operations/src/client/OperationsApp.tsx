@@ -6272,6 +6272,8 @@ function OperationsMedia({
       <video
         src={item.sourceUrl}
         controls
+        autoPlay
+        muted
         playsInline
         preload="metadata"
         onError={() => setFailed(true)}

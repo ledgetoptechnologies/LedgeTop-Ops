@@ -671,9 +671,10 @@ test("authenticated video preview uses native controls and supports seeking with
   await expect(video).toHaveAttribute("playsinline", "");
   await expect(video).toHaveAttribute("preload", "metadata");
   await expect.poll(() => video.evaluate(element => (element as HTMLVideoElement).readyState)).toBeGreaterThanOrEqual(1);
+  await expect(video).toHaveJSProperty("muted", true);
+  await expect.poll(() => video.evaluate(element => (element as HTMLVideoElement).currentTime)).toBeGreaterThan(0);
   await video.evaluate(async element => {
     const media = element as HTMLVideoElement;
-    await media.play();
     media.pause();
     await new Promise<void>((resolve, reject) => {
       const timer = window.setTimeout(() => reject(new Error("seek timed out")), 3_000);

@@ -3207,7 +3207,7 @@ app.post("/api/delivery/items/:itemRef/stream-ticket", async (c) => {
     throw new HTTPException(404, { message: "Video preview unavailable" });
   const token = await c.env.STREAM.video(row.stream_uid).generateToken();
   return c.json({
-    url: `https://customer-${c.env.STREAM_CUSTOMER_CODE}.cloudflarestream.com/${token}/iframe`,
+    url: `https://customer-${c.env.STREAM_CUSTOMER_CODE}.cloudflarestream.com/${token}/iframe?autoplay=true&muted=true`,
     expiresIn: 3600,
   });
 });

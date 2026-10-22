@@ -662,7 +662,7 @@ function FileBrowser({
             <div className="portal-file-preview-stage">
               {loadExactFile && previewMediaError && <div role="alert"><p>The preview could not be loaded. The file or your access may have changed.</p><button className="button-ghost" onClick={() => setFileRetry(value => value + 1)}>Retry preview</button></div>}
               {preview.file.kind === "image" && <img src={preview.file.previewPath!} alt={preview.file.name} onError={loadExactFile ? () => setPreviewMediaError(true) : undefined} />}
-              {preview.file.kind === "video" && <video src={preview.file.previewPath!} controls playsInline preload="metadata" onError={loadExactFile ? () => setPreviewMediaError(true) : undefined} />}
+              {preview.file.kind === "video" && <video src={preview.file.previewPath!} controls autoPlay muted playsInline preload="metadata" onError={loadExactFile ? () => setPreviewMediaError(true) : undefined} />}
               {preview.file.kind === "audio" && <audio src={preview.file.previewPath!} controls preload="metadata" onError={loadExactFile ? () => setPreviewMediaError(true) : undefined} />}
               {(preview.file.kind === "pdf" || preview.file.kind === "text") && (
                 <iframe src={preview.file.previewPath!} title={`Preview ${preview.file.name}`} />
