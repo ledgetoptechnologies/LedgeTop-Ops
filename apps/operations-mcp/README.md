@@ -90,7 +90,7 @@ Hosted/cloud agents cannot directly launch this local stdio server.
 
 ## Tools and authority
 
-Read mode advertises nine tools:
+Read mode advertises ten tools:
 
 | Tool | Purpose |
 | --- | --- |
@@ -99,10 +99,22 @@ Read mode advertises nine tools:
 | `get_client` | Inspect one exact client record |
 | `get_client_access` | Inspect external access and pending states |
 | `list_delivery_folder` | Browse authorized folder references |
+| `get_existing_public_link` | Read an already active link for an exact authorized folder/file; never create or renew one |
 | `list_delivery_grants` | Inspect bindings and current grants |
 | `find_grant_audiences` | Search authorized recipients for a binding |
 | `preview_delivery_access` | Review recipients, expiry, and context; performs a read-only POST |
 | `get_client_creation_options` | Inspect permitted sources, scopes, and organizations |
+
+For an existing public link, first browse the authorized folder and retain its
+exact prefix (and `itemRef` for a file). `get_existing_public_link` reads the
+existing share through the same server authorization as the sharing dialog,
+including `delivery.share.create` permission to recover its URL. It returns
+`share: null` when no active share exists; it never creates one as a fallback.
+An active legacy share may have `shareUrl: null` and `recoverable: false`; do not
+invent its URL or rotate its credential. The returned complete URL contains a
+bearer credential: reveal it only to the requesting authorized user, and exclude
+it from diagnostics, shared agent discussions, and acceptance receipts. An access
+code is never returned.
 
 Set `LTDS_MCP_ALLOW_WRITES="true"` in a **trusted local connection configuration**
 to additionally advertise `create_client`, `grant_delivery_access`, and
@@ -123,6 +135,7 @@ Example requests after connecting:
 
 - “Find Acme and show its current portal access.”
 - “Check which recipients have access to this delivery folder.”
+- “Retrieve the existing public link for this specific delivery folder.”
 - “Preview granting this specific client access to this folder.”
 - With writes enabled: “Create this client record using the selected source and business area.”
 
@@ -196,7 +209,7 @@ Protocol/client references: [MCP server development](https://modelcontextprotoco
 
 ## Separate staging machine mode
 
-The human adapter above retains its nine default read tools and explicit browser
+The human adapter above retains its ten default read tools and explicit browser
 sign-in. Autonomous staging agents use a different entry point:
 
 ```json
