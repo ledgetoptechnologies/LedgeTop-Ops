@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { schemaObjectDigests } from "./windows-files-schema-object-digests.mjs";
+import { WINDOWS_SCHEMA_QUERY } from "./windows-files-schema-query.mjs";
 import { STAGING_ACCOUNT_ID, STAGING_INVENTORY } from "./staging-requirements.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -27,7 +28,7 @@ const RECOVERY_READS = Object.freeze({
 export const WINDOWS_STAGING_READ_QUERIES = Object.freeze({
   ledger: "SELECT name FROM d1_migrations ORDER BY id",
   foreignKeys: "PRAGMA foreign_key_check",
-  schema: "SELECT type,name,tbl_name,sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name,tbl_name",
+  schema: WINDOWS_SCHEMA_QUERY,
 });
 const SCHEMA_PAGE = 128, SCHEMA_PAGES = 32;
 export function windowsStagingSchemaQuery(offset) {

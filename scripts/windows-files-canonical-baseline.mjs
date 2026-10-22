@@ -4,13 +4,14 @@ import {createRequire} from "node:module";
 import {readFile,readdir} from "node:fs/promises";
 import {fileURLToPath} from "node:url";
 import {resolve} from "node:path";
+import {WINDOWS_SCHEMA_QUERY} from "./windows-files-schema-query.mjs";
 import {reviewedOperationsMigrationNames,reviewedClientMigrationNames} from "../apps/operations/test/helpers/reviewed-operations-migration-chain.ts";
 
 const root=fileURLToPath(new URL("../",import.meta.url));
 const require=createRequire(new URL("../apps/client/package.json",import.meta.url));
 const {Miniflare}=require("miniflare"),{unstable_splitSqlQuery}=require("wrangler");
 const sha=value=>createHash("sha256").update(typeof value==="string"?value:JSON.stringify(value)).digest("hex");
-export const canonicalSchemaQuery="SELECT type,name,tbl_name,sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name,tbl_name";
+export const canonicalSchemaQuery=WINDOWS_SCHEMA_QUERY;
 // Exact reviewed pinned Wrangler getCreateMigrationsTableQuery output. Do not
 // replace it with the older test-helper ledger (different SQL/type/constraints).
 export const wranglerLedgerDDL='CREATE TABLE IF NOT EXISTS "d1_migrations"(\n\t\tid         INTEGER PRIMARY KEY AUTOINCREMENT,\n\t\tname       TEXT UNIQUE,\n\t\tapplied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL\n);';
