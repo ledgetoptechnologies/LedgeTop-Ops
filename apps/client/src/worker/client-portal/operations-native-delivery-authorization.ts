@@ -76,7 +76,8 @@ function expectedProof(command: OperationsPortalNativeDeliveryAuthorityCommand):
     opsFolderProjectId: command.resource.opsFolderProjectId, opsDivisionId: command.resource.opsDivisionId,
     selectedR2Prefix: command.resource.selectedR2Prefix, expiresAt: command.expiresAt, features: command.features };
 }
-function matchesProof(value: unknown, command: OperationsPortalNativeDeliveryAuthorityCommand): boolean {
+/** Shape/equality only; never establishes current authority by itself. */
+export function operationsNativeDeliveryProofMatchesCommand(value: unknown, command: OperationsPortalNativeDeliveryAuthorityCommand): boolean {
   const expected = expectedProof(command), proof = exact(value, Object.keys(expected));
   return !!proof && Object.entries(expected).every(([key, value]) => key === 'features'
     ? Array.isArray(proof[key]) && JSON.stringify(proof[key]) === JSON.stringify(value) : proof[key] === value);
@@ -122,7 +123,7 @@ export async function authorizeNativeOperationsDelivery(env: NativeOperationsDel
         || handle.expires <= Date.now())) return { ok: false, code: 'denied' };
     const raw = privateResponse(await boundedRead(env.OPERATIONS_PORTAL_NATIVE_DELIVERY_AUTHORIZATION_READER, authorizationRequest(command, feature)));
     const success = exact(raw, ['ok', 'protocolVersion', 'authorization']);
-    if (!success || success.ok !== true || success.protocolVersion !== 1 || !matchesProof(success.authorization, command)) {
+    if (!success || success.ok !== true || success.protocolVersion !== 1 || !operationsNativeDeliveryProofMatchesCommand(success.authorization, command)) {
       const failure = exact(raw, ['ok', 'protocolVersion', 'code']);
       return { ok: false, code: failure?.ok === false && failure.protocolVersion === 1
         && (failure.code === 'denied' || failure.code === 'disabled') ? 'denied' : 'unavailable' };
