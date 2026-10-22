@@ -3,6 +3,7 @@ import path from "node:path";
 import { createRequire } from "node:module";
 import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
+import { assertWindowsStagingRuntimeExports } from "./windows-files-staging-exports.mjs";
 const sha = bytes => createHash("sha256").update(bytes).digest("hex");
 
 /** Offline esbuild qualification only. It does not deploy or upload assets. */
@@ -27,10 +28,10 @@ export async function buildWindowsStagingModules(root) {
     const candidate = await build({ ...options, entryPoints: [path.join(generated, "entrypoint.ts")], outfile: path.join(output, "entrypoint.js") });
     const exportsOf = result => Object.values(result.metafile.outputs).flatMap(o => o.exports).sort();
     const before = exportsOf(baseline), after = exportsOf(candidate);
-    if (JSON.stringify(before) !== JSON.stringify(after)) throw Error("windows_staging_named_exports_changed");
+    const exportObservation = assertWindowsStagingRuntimeExports(app, before, after);
     fs.mkdirSync(output);
     for (const file of candidate.outputFiles) fs.writeFileSync(file.path, file.contents, { flag: "wx" });
-    observations.push({ app, exports: after, baselineNamedExportsPreserved: true, moduleSha256: sha(candidate.outputFiles[0].contents), moduleBytes: candidate.outputFiles[0].contents.length });
+    observations.push({ app, exports: after, ...exportObservation, moduleSha256: sha(candidate.outputFiles[0].contents), moduleBytes: candidate.outputFiles[0].contents.length });
     fs.writeFileSync(path.join(output, "build-receipt.json"), JSON.stringify({ schemaVersion: 1, status: "offline_module_build_only", observations: observations.filter(o => o.app === app), uploaded: false, activated: false, workerdRpcTested: false }, null, 2) + "\n", { flag: "wx" });
   }
   return { schemaVersion: 1, status: "offline_module_build_only", observations, uploaded: false, activated: false, workerdRpcTested: false };

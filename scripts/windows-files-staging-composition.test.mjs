@@ -3,9 +3,12 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { createRequire } from "node:module";
+import { fileURLToPath } from "node:url";
 import { STAGING_ACCOUNT_ID, STAGING_INVENTORY } from "./staging-requirements.mjs";
 import { buildWindowsStagingComposition, WINDOWS_STAGING_SECRET_SLOTS } from "./windows-files-staging-composition.mjs";
 import { writeWindowsStagingComposition } from "./windows-files-staging-composition-cli.mjs";
+import { WINDOWS_STAGING_EXPORT_POLICY, assertWindowsStagingRuntimeExports } from "./windows-files-staging-exports.mjs";
 
 export function fixture() {
   const issuer = "https://ledgetoptechnologies.cloudflareaccess.com";
@@ -31,10 +34,36 @@ test("builds executable paired staging mains and preserves all other config and 
     if (app === "operations") expected.vars.OPERATIONS_PORTAL_NATIVE_DELIVERY_READER_ENABLED = "true";
     else Object.assign(expected.vars, { CLIENT_PORTAL_ENABLED: "true", CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_READ_ENABLED: "true", CLIENT_PORTAL_OPERATIONS_NATIVE_CONTENT_AUDIT_ENABLED: "true" });
     assert.deepEqual(result.configs[app], expected);
-    assert.match(result.entries[app], /export \* from/);
+    assert.doesNotMatch(result.entries[app], /export \* from/);
+    assert.match(result.entries[app], /export \{/);
+    for (const name of WINDOWS_STAGING_EXPORT_POLICY[app].runtime) assert.ok(result.entries[app].includes(name));
+    for (const name of WINDOWS_STAGING_EXPORT_POLICY[app].helpers) assert.ok(!result.entries[app].includes(name));
     assert.doesNotMatch(result.entries[app], /SIGNING_KEY|HANDLE_KEY|QUEUE_KEY/);
   }
   assert.equal(result.receipt.physicallyVerified, false); assert.equal(result.receipt.activated, false);
+});
+test("actual complete bundles preserve every reviewed runtime export and reject library export drift", async () => {
+  const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+  const generated = buildWindowsStagingComposition(fixture());
+  for (const [app, directory, main] of [["operations", "operations", "staging-native-authority-entrypoint.ts"], ["delivery", "client", "index.ts"]]) {
+    const base = path.join(root, "apps", directory);
+    const { build } = createRequire(path.join(base, "package.json"))("esbuild");
+    const options = { bundle: true, format: "esm", platform: "browser", conditions: ["workerd", "worker", "browser"],
+      external: ["cloudflare:*", "node:*"], write: false, metafile: true, logLevel: "silent" };
+    const baseline = await build({ ...options, entryPoints: [path.join(base, "src/worker", main)] });
+    const stagingDirectory = fs.mkdtempSync(path.join(base, ".windows-staging-export-test-"));
+    let candidate;
+    try {
+      candidate = await build({ ...options, stdin: { contents: generated.entries[app], loader: "ts",
+        sourcefile: "entrypoint.ts", resolveDir: stagingDirectory } });
+    } finally { fs.rmdirSync(stagingDirectory); } // Owned, empty directory; no recursive deletion.
+    const exportsOf = result => Object.values(result.metafile.outputs).flatMap(output => output.exports);
+    const before = exportsOf(baseline), after = exportsOf(candidate);
+    assert.equal(assertWindowsStagingRuntimeExports(app, before, after).runtimeExportsPreserved, true);
+    assert.throws(() => assertWindowsStagingRuntimeExports(app, [...before, "NewUnreviewedConstant"], after), /source_exports_unreviewed/);
+    assert.throws(() => assertWindowsStagingRuntimeExports(app, before, after.filter(name => name !== WINDOWS_STAGING_EXPORT_POLICY[app].runtime[0])), /runtime_exports_changed/);
+    assert.throws(() => assertWindowsStagingRuntimeExports(app, before, [...after, WINDOWS_STAGING_EXPORT_POLICY[app].helpers[0]]), /runtime_exports_changed/);
+  }
 });
 test("disabled preparation cannot enable reader flags or require nonexistent private slots", () => {
   const input = fixture(); input.profile.enabled = false;

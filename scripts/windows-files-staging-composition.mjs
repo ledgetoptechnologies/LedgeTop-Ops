@@ -1,6 +1,7 @@
 import { isDeepStrictEqual } from "node:util";
 import { createHash } from "node:crypto";
 import { STAGING_ACCOUNT_ID, STAGING_INVENTORY } from "./staging-requirements.mjs";
+import { WINDOWS_STAGING_EXPORT_POLICY } from "./windows-files-staging-exports.mjs";
 
 export const WINDOWS_STAGING_SECRET_SLOTS = Object.freeze({
   operations: ["WINDOWS_EMPLOYEE_GATEWAY_SIGNING_KEY", "WINDOWS_EMPLOYEE_HANDLE_KEY", "WINDOWS_EMPLOYEE_QUEUE_KEY"],
@@ -67,8 +68,8 @@ export function buildWindowsStagingComposition({ profile, preflight, sources }) 
     databaseId: STAGING_INVENTORY.delivery.d1_databases.find(b => b.binding === "DELIVERY_DB").database_id,
     bucketName: STAGING_INVENTORY.delivery.r2_buckets.find(b => b.binding === "DATA_BUCKET").bucket_name,
     opsReaderWorkerName: STAGING_INVENTORY.operations.name };
-  entries.operations = `// Generated public metadata only. Never add secrets.\nimport standard from "../src/worker/staging-native-authority-entrypoint";\nimport {createWindowsEmployeeStagingWorker} from "../src/worker/windows-files-staging-worker";\nexport * from "../src/worker/staging-native-authority-entrypoint";\nexport default createWindowsEmployeeStagingWorker(${JSON.stringify({ enabled: profile.enabled, gateway: profile.gateway })},standard);\n`;
-  entries.delivery = `// Generated public metadata only. Never add secrets.\nimport standard from "../src/worker/index";\nimport {createWindowsPortalStagingWorker} from "../src/worker/client-portal/windows-files-staging-worker";\nexport * from "../src/worker/index";\nexport default createWindowsPortalStagingWorker(${JSON.stringify({ enabled: profile.enabled, deployment })},standard);\n`;
+  entries.operations = `// Generated public metadata only. Never add secrets.\nimport standard from "../src/worker/staging-native-authority-entrypoint";\nimport {createWindowsEmployeeStagingWorker} from "../src/worker/windows-files-staging-worker";\nexport {${WINDOWS_STAGING_EXPORT_POLICY.operations.runtime.join(',')}} from "../src/worker/staging-native-authority-entrypoint";\nexport default createWindowsEmployeeStagingWorker(${JSON.stringify({ enabled: profile.enabled, gateway: profile.gateway })},standard);\n`;
+  entries.delivery = `// Generated public metadata only. Never add secrets.\nimport standard from "../src/worker/index";\nimport {createWindowsPortalStagingWorker} from "../src/worker/client-portal/windows-files-staging-worker";\nexport {${WINDOWS_STAGING_EXPORT_POLICY.delivery.runtime.join(',')}} from "../src/worker/index";\nexport default createWindowsPortalStagingWorker(${JSON.stringify({ enabled: profile.enabled, deployment })},standard);\n`;
   return { configs, entries, receipt: { schemaVersion: 1, status: "source_composition_only", enabled: profile.enabled,
     profileSha256: hash(profile), preflightSha256: hash(preflight), configSha256: Object.fromEntries(Object.entries(configs).map(([k,v]) => [k,hash(v)])),
     entrySha256: Object.fromEntries(Object.entries(entries).map(([k,v]) => [k,createHash("sha256").update(v).digest("hex")])),

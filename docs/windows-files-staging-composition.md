@@ -11,7 +11,8 @@ bare roots: `/api/staff/files`, `/api/admin/employee-files`, and Client
 `/api/client/operations/data/{windows-catalog,windows-successor,queue}`. A claimed
 path never falls through after a factory 401/403/404/405/503. Prefix lookalikes
 and unrelated dashboard/public-link routes use the original handler. Ops queue
-and scheduled handlers, Client scheduled handling, and all named exports survive.
+and scheduled handlers, Client scheduled handling, and every reviewed runtime
+class export survive. Library helpers remain internal to the bundled module.
 
 ## Prepare and build, offline
 
@@ -45,9 +46,19 @@ overwritten. Output failure leaves partial preparation visible for review.
 
 The offline build verifies config/entry hashes, bundles both complete Worker
 graphs with the installed esbuild, and compares their actual named-export
-inventories with the original mains. Its ignored `module-build` output is a
+inventories with the reviewed runtime export policy and original source mains.
+The policy preserves16 Ops and13 Client classes plus each default handler, and
+explicitly classifies the existing library helpers. Unknown source exports,
+missing runtime exports or leaked helper exports reject the build. Its ignored `module-build` output is a
 static qualification artifact, not a deployed Worker or an assets upload.
 No script runs Wrangler deployment, migrations, SSH, EH jobs or cloud mutations.
+
+An actual Workerd startup test found that the earlier `export *` composition
+exported cron strings as entrypoints, which the runtime rejected. Static source
+export equality did not detect this. Generated mains now explicitly export the
+reviewed runtime classes. This changes only the isolated staging generator;
+production source mains and configuration are unchanged. A successful offline
+bundle still does not by itself prove Workerd startup or live deployment.
 
 ## Private configuration and runtime behavior
 
