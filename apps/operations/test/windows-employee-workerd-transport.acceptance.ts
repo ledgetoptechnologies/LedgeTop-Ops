@@ -14,8 +14,11 @@ import { employeeWorkerdTransportFixture } from "./windows-employee-workerd.fixt
 const execute = promisify(execFile);
 const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 it("actual .NET employee crosses full Ops Workerd and Python gateway and rejects revoked/stale/cross-user reads", async () => {
-  if (process.env.LEDGETOP_EMPLOYEE_LARGE !== undefined) throw Error("This acceptance permits only the bounded 2 MiB fixture");
-  const expectedBytes = 2 * 1024 ** 2, interruptAfter = 16_384;
+  if (process.env.LEDGETOP_EMPLOYEE_LARGE !== undefined && process.env.LEDGETOP_EMPLOYEE_LARGE !== "1")
+    throw Error("Large mode must be explicitly selected as 1");
+  const large = process.env.LEDGETOP_EMPLOYEE_LARGE === "1";
+  const expectedBytes = large ? 3 * 1024 ** 3 + 17 : 2 * 1024 ** 2;
+  const interruptAfter = large ? 2 * 1024 ** 3 + 1024 ** 2 + 17 : 16_384;
   const startedAt = Date.now();
   const dotnet = process.env.LEDGETOP_TEST_DOTNET ?? "dotnet", windowsRoot = resolve("../windows-download");
   const childEnv = { ...process.env, DOTNET_GENERATE_ASPNET_CERTIFICATE: "false", DOTNET_CLI_TELEMETRY_OPTOUT: "1" };
@@ -26,11 +29,16 @@ it("actual .NET employee crosses full Ops Workerd and Python gateway and rejects
   const dll = join(windowsRoot, "EmployeeTransportTests/bin/Debug/net10.0/LedgeTop.WindowsDownload.Tests.dll");
   const hostSpace = await statfs(tmpdir(), { bigint: true });
   const hostAvailableBytes = hostSpace.bavail * hostSpace.bsize;
+  // Source + two immutable gateway snapshots + desktop destination; Docker's
+  // virtual disk may grow on the same PC drive. Keep an additional reserve.
+  if (large && hostAvailableBytes < BigInt(expectedBytes) * 4n + 2n * 1024n ** 3n)
+    throw Error("Insufficient PC space for bounded synthetic source, spool and destination");
   const temporary = await mkdtemp(join(tmpdir(), "ledge-top-synthetic-employee-"));
   const suffix = randomUUID(), container = `ops-employee-transport-${suffix}`, network = `ops-employee-transport-${suffix}`, image = `ops-employee-transport:${suffix}`;
+  const volume = `ops-employee-transport-${suffix}`;
   const rootId = randomUUID(), gatewayId = randomUUID(), key = randomBytes(32), control = randomBytes(32).toString("hex");
   let authority: Awaited<ReturnType<typeof employeeWorkerdTransportFixture>> | undefined, server: ReturnType<typeof createServer> | undefined;
-  let localDockerValidated = false, dockerContext: string | undefined;
+  let localDockerValidated = false, ownedVolumeCreated = false, dockerContext: string | undefined;
   const docker = (args: string[], timeout = 30_000) => execute("docker", dockerContext ? ["--context", dockerContext, ...args] : args, { timeout, maxBuffer: 2 * 1024 * 1024 });
   try {
     // Never build/run this fixture through a remote Docker context or NAS daemon.
@@ -46,21 +54,28 @@ it("actual .NET employee crosses full Ops Workerd and Python gateway and rejects
     await docker(["image", "inspect", "--format", "{{.Id}}", "python:3.14.9-slim-trixie"]); // Cached base only; no implicit registry pull.
     await docker(["build", "--label", "ledgetop.synthetic-transport=true", "--pull=false", "--network=none", "-f", resolve("../employee-read-gateway/Dockerfile.transport-test"), "-t", image, resolve("../employee-read-gateway")], 90_000);
     const imageId = (await docker(["image", "inspect", "--format", "{{.Id}}", image])).stdout.trim();
+    if (large) {
+      await docker(["volume", "create", "--driver=local", "--label", "ledgetop.synthetic-transport=true", volume]);
+      ownedVolumeCreated = true;
+      if ((await docker(["volume", "inspect", "--format", "{{.Driver}} {{json .Options}}", volume])).stdout.trim() !== "local null")
+        throw Error("Synthetic volume must be plain local storage without driver options");
+    }
     await docker(["network", "create", "--label", "ledgetop.synthetic-transport=true", network]);
     await docker(["run", "--detach", "--name", container, "--label", "ledgetop.synthetic-transport=true", "--network", network,
       "--read-only", "--cap-drop=ALL", "--security-opt=no-new-privileges", "--pids-limit=64", "--memory=128m", "--cpus=1",
       "--tmpfs", "/tmp:rw,nosuid,nodev,noexec,size=32m,mode=1777", "--publish", "127.0.0.1::8080",
+      ...(large ? ["--mount", `type=volume,source=${volume},target=/synthetic`, "--env", "SYNTHETIC_LARGE_FILE=1"] : []),
       "--env", `SYNTHETIC_ROOT_ID=${rootId}`, "--env", `SYNTHETIC_GATEWAY_ID=${gatewayId}`, "--env", `SYNTHETIC_KEY_HEX=${key.toString("hex")}`, image]);
     let ready: { root: { path: string; fingerprint: string }; bytes: number; sha256: string; volumeAvailableBytes: number;
       volumeAvailableBytesBefore: number; sourceAllocatedBytes: number } | undefined;
-    for (let attempt = 0; attempt < 80; attempt++) {
+    for (let attempt = 0; attempt < (large ? 480 : 80); attempt++) {
       const status = JSON.parse((await docker(["inspect", "--format", "{{json .State}}", container])).stdout);
       if (!status.Running) throw Error("Owned synthetic gateway exited before readiness");
       const logs = (await docker(["logs", container])).stdout.trim();
       if (logs) { ready = JSON.parse(logs.split("\n")[0]!); break; }
       await delay(250);
     }
-    const allowedRoot = /^\/tmp\/synthetic-transport-[A-Za-z0-9_-]+\/source$/u;
+    const allowedRoot = large ? /^\/synthetic\/synthetic-transport-[A-Za-z0-9_-]+\/source$/u : /^\/tmp\/synthetic-transport-[A-Za-z0-9_-]+\/source$/u;
     if (!ready || !allowedRoot.test(ready.root.path) || ready.bytes !== expectedBytes) throw Error("Synthetic root readiness missing");
     const ownedSource = ready.root.path;
     const binding = (await docker(["port", container, "8080/tcp"])).stdout.trim();
@@ -168,7 +183,7 @@ it("actual .NET employee crosses full Ops Workerd and Python gateway and rejects
     const config = join(temporary, "synthetic-employee.json");
     await writeFile(config, JSON.stringify({ Origin: origin, Certificate: join(temporary, "certificate.pem"), Output: output,
       Token: fixture.token, OtherToken: fixture.otherToken, RootId: rootId, Sha256: sha256, ControlToken: control, ExpectedBytes: expectedBytes }));
-    const result = await execute(dotnet, [dll, "--run", config], { env: childEnv, timeout: 90_000 }).catch(error => {
+    const result = await execute(dotnet, [dll, "--run", config], { env: childEnv, timeout: large ? 480_000 : 90_000 }).catch(error => {
       console.error(JSON.stringify({ interrupted, gatewayCalls, upstreamOperations, gatewayHeaders,
         requests: requests.map(r => ({ status: r.status, range: r.range, download: r.path.startsWith("/api/staff/files/downloads/"), contentLength: r.contentLength, contentEncoding: r.contentEncoding, strongEtag: r.strongEtag })),
         adapterErrors: errors.map(e => e instanceof Error ? e.message : "adapter_error") }));
@@ -183,6 +198,7 @@ it("actual .NET employee crosses full Ops Workerd and Python gateway and rejects
     const downloads = requests.filter(item => item.path.startsWith("/api/staff/files/downloads/"));
     expect(downloads.map(item => item.status)).toEqual([200, 206, 403, 412, 403]);
     expect(downloads[1]!.range).toBe(`bytes=${receipt.retainedPrefixBytes}-`);
+    if (large) expect(receipt.retainedPrefixBytes).toBeGreaterThan(2 ** 31 - 1);
     expect(downloads.slice(0, 2).map(item => item.contentLength)).toEqual([String(expectedBytes), String(expectedBytes - receipt.retainedPrefixBytes)]);
     expect(downloads.slice(0, 2).every(item => item.strongEtag && item.contentEncoding === null)).toBe(true);
     expect(gatewayCallsAtRevocation).toBeGreaterThan(0); expect(gatewayCalls).toBe(gatewayCallsAtRevocation);
@@ -190,7 +206,7 @@ it("actual .NET employee crosses full Ops Workerd and Python gateway and rejects
     const auditEvents = await fixture.db.prepare("SELECT count(*) n FROM ops_employee_read_content_starts").first("n");
     expect(auditEvents).toBe(2);
     const pythonPeak = (await docker(["exec", container, "python", "-c", "print(next(line.split()[1] for line in open('/proc/1/status') if line.startswith('VmHWM:')))"])).stdout.trim();
-    const evidence = { ...receipt, imageId, invalidSignatureRejected: true, fullOpsComposition: fixture.fullOpsComposition, workerBundle: fixture.bundle, elapsedMs: Date.now() - startedAt,
+    const evidence = { ...receipt, imageId, largeFileMode: large, invalidSignatureRejected: true, fullOpsComposition: fixture.fullOpsComposition, workerBundle: fixture.bundle, elapsedMs: Date.now() - startedAt,
       hostAvailableBytesBefore: hostAvailableBytes.toString(), volumeAvailableBytesBefore: ready.volumeAvailableBytesBefore,
       volumeAvailableBytesAfterSource: ready.volumeAvailableBytes, sourceAllocatedBytes: ready.sourceAllocatedBytes,
       nodePeakRssBytes: process.resourceUsage().maxRSS * 1024, pythonPeakRssBytes: Number(pythonPeak) * 1024,
@@ -206,13 +222,15 @@ it("actual .NET employee crosses full Ops Workerd and Python gateway and rejects
       // Names are generated only by this invocation. Missing never-created resources are harmless;
       // successful cleanup is independently checked instead of silently accepting a leaked resource.
       await docker(["rm", "--force", container]).catch(() => {});
+      if (ownedVolumeCreated) await docker(["volume", "rm", volume]).catch(() => {});
       await docker(["network", "rm", network]).catch(() => {});
       await docker(["image", "rm", image]).catch(() => {});
       try {
         const containers = (await docker(["ps", "--all", "--filter", `name=^/${container}$`, "--format", "{{.Names}}"])).stdout.trim();
         const networks = (await docker(["network", "ls", "--filter", `name=^${network}$`, "--format", "{{.Name}}"])).stdout.trim();
         const images = (await docker(["image", "ls", "--filter", `reference=${image}`, "--format", "{{.Repository}}:{{.Tag}}"])).stdout.trim();
-        if (containers || networks || images) throw Error("Owned Docker fixture cleanup incomplete");
+        const volumes = ownedVolumeCreated ? (await docker(["volume", "ls", "--filter", `name=^${volume}$`, "--format", "{{.Name}}"])).stdout.trim() : "";
+        if (containers || networks || images || volumes) throw Error("Owned Docker fixture cleanup incomplete");
       } catch (error) { cleanupErrors.push(error); }
     }
     try {
