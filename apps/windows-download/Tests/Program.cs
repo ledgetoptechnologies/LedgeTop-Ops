@@ -28,7 +28,8 @@ var tests = new (string Name, Func<Task> Run)[] {
     ("oversized valid prefix cannot publish on a later failed retry", OversizedRetry),
     ("metadata cleanup cannot undo a committed successful download", LockedMetadata),
 }.Concat(AccessSessionTests.Groups).Concat(PortalClientTests.Groups).Concat(EmployeeClientTests.Groups)
-    .Concat(TransferQueueTests.Groups).Concat(DownloadProgressTests.Groups).Concat(QueuedDownloadSourceTests.Groups).Concat(PlaceholderHydrationTests.Groups).ToArray();
+    .Concat(TransferQueueTests.Groups).Concat(DownloadProgressTests.Groups).Concat(QueuedDownloadSourceTests.Groups)
+    .Concat(PlaceholderHydrationTests.Groups).Concat(CloudFilesProbeTests.Groups).ToArray();
 foreach (var test in tests) {
     try { await test.Run(); passed++; Console.WriteLine("PASS " + test.Name); }
     catch (Exception error) { Console.Error.WriteLine("FAIL " + test.Name + ": " + error.GetType().Name + " " + error.Message); Environment.ExitCode = 1; }
