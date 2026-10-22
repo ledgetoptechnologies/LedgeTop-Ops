@@ -43,7 +43,9 @@ continue to require the original publication.
 
 The ordinary Client `operations_portal_native_delivery_live_heads` view correctly
 disappears when its original publication is no longer current. It must remain
-unchanged. A separate candidate query proves the exact current active grant
+unchanged. Migration 0235 adds a separate successor-candidate view and an exact
+authority/person selector. This lets the reader and future audit guards share
+one local predicate without changing ordinary authority. It proves the current active grant
 through raw heads/commands/history/receipts, current recipient/workspace/home
 receipt, and the current publication head/receipt/snapshot retaining the selected
 folder and project. Candidate rows are not content authorization by themselves.
@@ -86,6 +88,25 @@ The atomic insert must prove the current local candidate, exact file-index pins
 and absence of tombstones. Repeat private/local authorization before and after
 audit and before R2 metadata/bytes and final handoff. A missing ledger or failed
 audit denies content; successful history alone never permits a read.
+
+The planned ledger is download-only and separate from migration 0228. Its
+immutable records retain the original authority/home/folder/project pins plus
+the original publication source sequence, effective publication's six pins,
+chain digest and bounded publication count. Principal, prefix, resource and
+content-version values are purpose-separated fingerprints; never persist raw
+storage keys, person identifiers, provider versions or the original grant wire.
+Content-version evidence hashes the trusted tuple of ETag, provider version,
+SHA256 and length, rather than ETag alone.
+
+An insert and dedupe lookup must run in one D1 batch and both re-prove the same
+current candidate, canonical original grant, person, exact file-index ETag/size
+and absence of active file/prefix tombstones. A deduplicated old event cannot
+authorize a new read. The database guard proves local state only: the caller
+must separately obtain current producer continuity before writing and compare
+the complete original/current/digest tuple without silently substituting a new
+one. After audit it repeats private/local proof and trusted R2 identity before
+byte handoff. Missing table/view/guard/index or any failure denies bytes. No
+database predicate can replace verification of R2 provider version and SHA256.
 
 Acceptance still needed: actual same-content queued resume after refresh,
 changed-content isolation, missing/omitted/restored history, revoke/regrant,

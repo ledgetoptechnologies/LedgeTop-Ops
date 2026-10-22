@@ -25,6 +25,7 @@ describe("Windows publication history evidence with real canonical Ops/Client pr
     await runCanonicalPortalResourceAcceptance(async ctx => {
       const { operations: db, client, id, owner } = ctx;
       await db.prepare(readFileSync(new URL("../migrations/0224_windows_portal_publication_chain_index.sql", import.meta.url), "utf8")).run();
+      await client.prepare(readFileSync(new URL("../../client/migrations/0235_windows_portal_successor_candidates.sql", import.meta.url), "utf8")).run();
       const candidate = (await listOperationsPortalNativeDeliveryCandidates(db, { targetId: ctx.workspace.targetId, owner })).items
         .find(item => item.recipientBindingId === ctx.recipient.recipientBindingId);
       if (!candidate || !ctx.recipient.recipientBindingId) throw new Error("missing synthetic candidate");
