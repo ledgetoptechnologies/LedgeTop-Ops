@@ -114,12 +114,37 @@ test('fragment-less legacy sessions and legacy single-token links remain recover
   assert.deepEqual(calls,['manifest']);
 });
 
-test('Ops admits the canonical root only when explicitly configured and retains the two old hosts', () => {
-  const env={ENVIRONMENT:'production',EXPECTED_HOST:'ledgetop.app',OPERATIONS_ORIGINS:'https://ledgetop.app,https://ops.ledgetopdroneservices.com,https://ops.ledgetoptechnologies.com'};
+test('Ops admits the requested staff subdomain only when explicitly configured and retains the two old hosts', () => {
+  const env={ENVIRONMENT:'production',EXPECTED_HOST:'ops.ledgetop.app',OPERATIONS_ORIGINS:'https://ops.ledgetop.app,https://ops.ledgetopdroneservices.com,https://ops.ledgetoptechnologies.com'};
   for (const origin of env.OPERATIONS_ORIGINS.split(',')) assert.equal(operationsHostAllowed(`${origin}/api/session`,env),true);
   assert.equal(operationsHostAllowed('https://portal.ledgetop.app/api/session',env),false);
+  assert.equal(operationsHostAllowed('https://ledgetop.app/api/session',env),false);
   assert.equal(operationsHostAllowed('https://ops.unrelated.invalid/api/session',env),false);
-  assert.equal(operationsHostAllowed('https://ledgetop.app/api/session',{...env,OPERATIONS_ORIGINS:'https://ops.ledgetopdroneservices.com'}),false);
+  assert.equal(operationsHostAllowed('https://ops.ledgetop.app/api/session',{...env,OPERATIONS_ORIGINS:'https://ops.ledgetopdroneservices.com'}),false);
+});
+
+test('the requested client primary can coexist with old public namespaces without admitting staff or apex hosts', () => {
+  const env={...finalPortal,EXPECTED_HOST:'portal.ledgetopdroneservices.com',PUBLIC_BASE_URL:OLD_PUBLIC,
+    PUBLIC_SHARE_ORIGIN:OLD_PUBLIC,CLIENT_PORTAL_ORIGIN:NEW_PORTAL,
+    CLIENT_PORTAL_ORIGINS:`${NEW_PORTAL},${OLD_PUBLIC},${OLD_PRIVATE}`,
+    LEGACY_CLIENT_ORIGINS:OLD_CLIENT,CLIENT_PORTAL_RETIRED_ORIGINS:''};
+  assert.ok(configuredClientPortalOrigins(env));
+  assert.deepEqual(configuredPublicRequestOrigins(env),[OLD_PUBLIC,OLD_CLIENT]);
+  assert.equal(requestHostAllowed(`${NEW_PORTAL}/portal/account`,env),true);
+  assert.equal(requestHostAllowed(`${NEW_PORTAL}/api/client/me`,env),true);
+  for(const origin of [OLD_PUBLIC,OLD_CLIENT]) {
+    assert.equal(requestHostAllowed(`${origin}/s/synthetic-public-id`,env),true);
+    assert.equal(requestHostAllowed(`${origin}/api/public/shares/synthetic-public-id/session`,env),true);
+    assert.equal(legacyClientRedirectLocation(`${origin}/s/synthetic-public-id`,env),null);
+  }
+  for(const origin of [NEW_PORTAL,'https://ops.ledgetop.app','https://ledgetop.app']) {
+    assert.equal(requestHostAllowed(`${origin}/s/synthetic-public-id`,env),false);
+  }
+  for(const origin of ['https://ops.ledgetop.app','https://ledgetop.app']) {
+    assert.equal(requestHostAllowed(`${origin}/portal/account`,env),false);
+    assert.equal(requestHostAllowed(`${origin}/api/client/me`,env),false);
+  }
+  assert.equal(clientPortalRequestOriginAllowed(new Request(`${NEW_PORTAL}/api/client/me`,{headers:{Origin:'https://ops.ledgetop.app'}}),env),false);
 });
 
 test('native delivery physical admission is a separate cutover gate, not implied by the new portal allowlist', () => {

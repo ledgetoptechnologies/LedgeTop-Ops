@@ -114,6 +114,7 @@ test("explicit production folder preflight preserves physical deployment admissi
     databaseId: config.d1_databases.find(binding => binding.binding === "DELIVERY_DB").database_id,
     portalOrigin: config.vars.CLIENT_PORTAL_ORIGIN,
     publicShareOrigin: config.vars.PUBLIC_SHARE_ORIGIN,
+    privateRequestOrigins: ["https://portal.ledgetop.app", "https://portal.ledgetopdroneservices.com"],
   });
   assert.deepEqual(operations.services.find(binding => binding.binding === "OPERATIONS_PORTAL_NATIVE_RECIPIENT_AUTHORITY"), {
     binding: "OPERATIONS_PORTAL_NATIVE_RECIPIENT_AUTHORITY", service: config.name, entrypoint: "OperationsPortalNativeRecipientAuthorityIngress",

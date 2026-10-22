@@ -12,12 +12,12 @@ test('canonical navigation is disabled by default and requires the exact boolean
   assert.equal(canonicalDomainNavigationRedirect(request(),{enabled:true,surface:'unknown'}),null);
 });
 
-test('old Operations entry pages redirect reversibly to the fixed canonical root with path and query intact', () => {
+test('old Operations entry pages redirect reversibly to the requested staff subdomain with path and query intact', () => {
   for (const origin of ['https://ops.ledgetopdroneservices.com','https://ops.ledgetoptechnologies.com']) {
     for (const method of ['GET','HEAD']) for (const path of ['/', '/dashboard', '/airspace', '/operations/', '/delivery', '/team', '/administration', '/clients?q=synthetic%40example.invalid&scope=ltds']) {
       const response=canonicalDomainNavigationRedirect(request(path,origin,method),ops);
       assert.equal(response.status,302);
-      assert.equal(response.headers.get('Location'),`https://ledgetop.app${path}`);
+      assert.equal(response.headers.get('Location'),`https://ops.ledgetop.app${path}`);
       assert.equal(response.headers.get('Cache-Control'),'no-store');
       assert.equal(response.headers.get('Referrer-Policy'),'no-referrer');
       assert.equal(response.headers.get('Set-Cookie'),null);
@@ -28,7 +28,7 @@ test('old Operations entry pages redirect reversibly to the fixed canonical root
 
 test('ordinary source-bound Client Hub bookmarks survive navigation', () => {
   const path='/clients/sources/project-alpha%3Aprimary/business/organizations/synthetic-client?q=name';
-  assert.equal(canonicalDomainNavigationRedirect(request(path),ops).headers.get('Location'),`https://ledgetop.app${path}`);
+  assert.equal(canonicalDomainNavigationRedirect(request(path),ops).headers.get('Location'),`https://ops.ledgetop.app${path}`);
 });
 
 test('portal browser pages go only to the separate canonical portal and retain project/workspace selection', () => {
@@ -70,12 +70,12 @@ test('capability and login query parameters are not redirected by the generic na
 });
 
 test('new canonical domains, unrelated origins, staging and malformed origins cannot create redirect loops or open redirects', () => {
-  for (const origin of ['https://ledgetop.app','https://portal.ledgetop.app','https://evil.invalid','http://ops.ledgetopdroneservices.com','https://ops.ledgetopdroneservices.com:8443','https://ops.ledgetopdroneservices.com.evil.invalid','https://ops-staging.ledgetopdroneservices.com','https://ops.ledgetopdroneservices.com.'])
+  for (const origin of ['https://ops.ledgetop.app','https://ledgetop.app','https://portal.ledgetop.app','https://evil.invalid','http://ops.ledgetopdroneservices.com','https://ops.ledgetopdroneservices.com:8443','https://ops.ledgetopdroneservices.com.evil.invalid','https://ops-staging.ledgetopdroneservices.com','https://ops.ledgetopdroneservices.com.'])
     for (const configuration of [ops,portal]) assert.equal(canonicalDomainNavigationRedirect(request('/',origin),configuration),null);
   for (const url of ['not-a-url','https://user:pass@ops.ledgetopdroneservices.com/','//ops.ledgetopdroneservices.com/'])
     assert.equal(canonicalDomainNavigationRedirect({method:'GET',url},ops),null);
   assert.equal(canonicalDomainNavigationRedirect(request('/?next=https%3A%2F%2Fevil.invalid'),ops),null);
-  assert.equal(canonicalDomainNavigationRedirect(request('/?q=https%3A%2F%2Fevil.invalid'),ops).headers.get('Location'),'https://ledgetop.app/?q=https%3A%2F%2Fevil.invalid');
+  assert.equal(canonicalDomainNavigationRedirect(request('/?q=https%3A%2F%2Fevil.invalid'),ops).headers.get('Location'),'https://ops.ledgetop.app/?q=https%3A%2F%2Fevil.invalid');
 });
 
 test('ambiguous or encoded route separators cannot enter a whitelisted browser namespace', () => {
@@ -90,5 +90,5 @@ test('encoded capability words and ambiguous encoded segments stay with their or
     '/clients/%256Fnboarding/synthetic','/clients/%252fapi','/clients/%','/clients/%GG','/clients/%C0%AF'])
     assert.equal(canonicalDomainNavigationRedirect(request(path),ops),null,path);
   const ordinary='/clients/sources/project-alpha%3Aprimary/business/organizations/synthetic-id?Q=synthetic&scope=ltds';
-  assert.equal(canonicalDomainNavigationRedirect(request(ordinary),ops).headers.get('Location'),`https://ledgetop.app${ordinary}`);
+  assert.equal(canonicalDomainNavigationRedirect(request(ordinary),ops).headers.get('Location'),`https://ops.ledgetop.app${ordinary}`);
 });

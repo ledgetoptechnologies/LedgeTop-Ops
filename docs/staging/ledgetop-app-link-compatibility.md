@@ -1,22 +1,66 @@
 # ledgetop.app compatibility and acceptance
 
-This is a review/test packet. No DNS, Access policy, Worker route, canonical
-configuration, deployment profile or existing link was changed by these checks.
-The candidate addresses are `https://ledgetop.app` for Operations and
-`https://portal.ledgetop.app` for the client portal. PA's domains and ownership
-remain separate.
+This is a source/configuration review and local test packet. Live DNS, deployed Worker configuration and existing links were not changed by
+these checks. Separately, the rollout operator verified additive new staff and
+private portal destinations on the existing Access applications, retaining old
+destinations, policies, audiences and session durations. Worker domain/runtime
+and bucket CORS changes remain source preparation at this checkpoint. The user-confirmed addresses are **`https://ops.ledgetop.app` for
+staff** and **`https://portal.ledgetop.app` for clients**. These supersede the
+initial apex staff-host proposal. The apex `https://ledgetop.app` is not an
+implicit staff, portal, or public-bearer origin. PA remains separate.
 
-Current candidate scope: the pure navigation redirect policy is implemented,
-disabled by default, and unmounted. Host admission, origin transitions,
-native physical-deployment profiles, Access destinations, Worker domains and
-generated production links have not been changed. This candidate is preparation
-for the migration, not a serving new domain or a completed canonical cutover.
+The source candidate adds the exact new Worker domains, staff/private origin
+settings and mirrored upload CORS origins. The private portal primary becomes
+the new client host. Public canonical origins remain on the existing LTDS portal.
+The new native physical profile pins the unchanged Worker/account/database and
+allows only the new portal and retained LTDS private portal for byte requests;
+the LTT presentation alias gains no native byte access. Its configured allowlist
+must also explicitly retain each admitted private origin.
 
-Validated on October 22: 10 navigation-policy checks, 9 actual compatibility
-helper checks, 114 existing Client Worker checks, and 10 existing portal
-preflight checks passed; Operations and Client TypeScript checks passed. Live
-new-domain sign-in, upload, Viewer renewal and legacy download acceptance are
-still required after the additive configuration stage below.
+The pure navigation redirect policy remains disabled by default and unmounted.
+There are no permanent redirects. Source preparation is not proof that the new
+hosts are serving or that a live canonical cutover is complete.
+
+Local validation on October 22: 44 Node checks (10 navigation policy, 10 actual
+compatibility helper, 24 repository/configuration invariants), 46 focused Client
+Worker/native route checks and 10 receiver preflight checks passed. Client
+TypeScript also passed. These synthetic route tests prove both reviewed private
+hosts can stream the same existing authorized file handle without redirects and return identical finite fixture bytes,
+recheck its current grant, and deny revoked access before R2 acquisition. They
+also prove old public session cookies remain usable on the original hosts and
+still fail after share-version revocation. They do not substitute for live
+Access authentication or real browser download/upload acceptance.
+
+Live new-domain sign-in, denied identities, upload/CORS, Viewer renewal, existing
+open private sessions and historical public download acceptance remain release
+gates. Retain the old domains, route handlers, signing secrets and Access
+applications until that acceptance passes; a new DNS record alone is not a
+completed migration.
+
+## Confirmed staff/client separation
+
+The staff and client subdomains are separate application surfaces. Reusing the
+same parent DNS zone does not share their sessions or grant their permissions.
+
+| Host | Intended application | Must not become |
+| --- | --- | --- |
+| `ops.ledgetop.app` | Staff Operations, protected by the existing staff Access policy and Ops staff authorization | A client/public bearer host |
+| `portal.ledgetop.app` | Client portal, protected on its private paths by client Access and current client grants | A staff API host or automatic alternate public bearer host |
+| `ledgetop.app` | No application assignment implied by this request | An implicit staff/client admission alias |
+| Existing LTDS public portal/client hosts | Existing public links, sessions and download APIs | Redirect-only hosts that discard old host-bound sessions |
+
+An additive client migration can set `CLIENT_PORTAL_ORIGIN` to the new client
+subdomain while retaining the original public canonical tuple and old private
+presentation aliases. This preserves old share and session endpoints. It still
+requires the separately reviewed native-delivery physical profile for the new
+private primary. Do not label a successful host-allowlist check proof that file
+delivery, the Access audience, or private grants are working on the new host.
+
+Before reporting the two new hosts live, verify both a permitted and a denied
+identity on each application. A valid client Access assertion must not admit a
+staff route, and a staff cookie must not replace client resource authorization.
+Keep cookie host boundaries, exact origin checks and existing audience checks;
+do not broaden these to `*.ledgetop.app` to avoid testing individual hosts.
 
 ## What existing source actually requires
 
@@ -72,7 +116,9 @@ dependencies (`npm ci --prefix apps/client`).
 ```powershell
 node --test scripts/domain-migration-compatibility.test.mjs
 node --test scripts/canonical-domain-navigation.test.mjs
-npm --prefix apps/client test -- test/platform-security.test.ts test/client-routing.test.ts test/portal-origin-migration.test.ts test/client-onboarding-origin-worker.test.ts test/public-share-routes.test.ts
+npm --prefix apps/client test -- --maxWorkers=1 --pool=threads test/portal-origin-migration.test.ts test/operations-native-delivery-deployment.test.ts test/operations-native-delivery-routes.test.ts
+npm --prefix apps/client test -- --maxWorkers=1 --pool=threads test/platform-security.test.ts test/client-routing.test.ts test/client-onboarding-origin-worker.test.ts test/public-share-routes.test.ts test/access-identity.test.ts
+node --test scripts/source-layout-invariants.test.mjs
 ```
 
 The new Node suite imports the actual TypeScript origin policy, route parser,
@@ -81,11 +127,12 @@ not reimplement those decisions. It covers final and additive-only configuration
 known unsafe partial/overlapping configurations, preserved opaque credentials,
 legacy host-only cookies, encoded paths/query and separate namespaces.
 
-On the initial review candidate, the existing five Client suites passed
-**114/114**, and receiver preflight passed **10/10**. These tests use controlled
-fixtures and actual Worker/helper code. They do not prove live `.app` DNS,
-certificate issuance, Access configuration, remote keys, or customer downloads.
-Record the final candidate revision and final test result after integration.
+The current source candidate passed **46/46** focused migration/native route
+checks and **104/104** additional existing routing, public-share and identity
+checks; receiver preflight passed **10/10**. These tests use controlled fixtures
+and actual Worker/helper code. They do not prove live `.app` DNS, certificate
+issuance, Access configuration, remote keys, or customer downloads. Record the
+final candidate revision after integration.
 
 ## Live acceptance before enabling redirects
 

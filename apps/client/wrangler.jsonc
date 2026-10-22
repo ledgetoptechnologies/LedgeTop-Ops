@@ -9,6 +9,10 @@
   "keep_vars": true,
   "routes": [
     {
+      "pattern": "portal.ledgetop.app",
+      "custom_domain": true
+    },
+    {
       "pattern": "client.ledgetopdroneservices.com",
       "custom_domain": true
     },
@@ -100,8 +104,8 @@
     "CLIENT_DELEGATED_SHARES_ENABLED": "false",
     "CLIENT_ONBOARDING_RECIPIENT_BRIDGE_ENABLED": "false",
     "CLIENT_DELEGATED_SHARE_KEY_ID": "v1",
-    "CLIENT_PORTAL_ORIGIN": "https://portal.ledgetopdroneservices.com",
-    "CLIENT_PORTAL_ORIGINS": "https://portal.ledgetopdroneservices.com,https://portal.ledgetoptechnologies.com",
+    "CLIENT_PORTAL_ORIGIN": "https://portal.ledgetop.app",
+    "CLIENT_PORTAL_ORIGINS": "https://portal.ledgetop.app,https://portal.ledgetopdroneservices.com,https://portal.ledgetoptechnologies.com",
     "CLIENT_PORTAL_RETIRED_ORIGINS": "https://client.ledgetopdroneservices.com",
     "LEGACY_CLIENT_ORIGINS": "https://client.ledgetopdroneservices.com",
     "CLIENT_ACCESS_TEAM_DOMAIN": "https://ledgetoptechnologies.cloudflareaccess.com",
@@ -122,12 +126,12 @@
     "GOOGLE_PICKER_API_KEY": "",
     "GOOGLE_CLOUD_PROJECT_NUMBER": "",
     "CLIENT_PORTAL_NATIVE_RECIPIENT_ENROLLMENT_ENABLED": "true",
-    "CLIENT_PORTAL_NATIVE_RECIPIENT_ENROLLMENT_EXPECTED_HOST": "portal.ledgetopdroneservices.com",
-    "CLIENT_PORTAL_OPERATIONS_NATIVE_AUTHORITY_EXPECTED_HOST": "portal.ledgetopdroneservices.com",
+    "CLIENT_PORTAL_NATIVE_RECIPIENT_ENROLLMENT_EXPECTED_HOST": "portal.ledgetop.app",
+    "CLIENT_PORTAL_OPERATIONS_NATIVE_AUTHORITY_EXPECTED_HOST": "portal.ledgetop.app",
     "CLIENT_PORTAL_OPERATIONS_NATIVE_AUTHORITY_STATUS_ENABLED": "true",
     "CLIENT_PORTAL_OPERATIONS_NATIVE_AUTHORITY_WRITER_ENABLED": "true",
     "CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_CANCELLATION_ENABLED": "true",
-    "CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_DEPLOYMENT_PROFILE": "{\"version\":1,\"accountId\":\"846c924bf17bf4f3dd15c97a4c5d1d51\",\"workerName\":\"ledgetop-clients\",\"databaseBinding\":\"DELIVERY_DB\",\"databaseId\":\"7f40a7b7-c3ec-470e-a626-e798867f71f8\",\"portalOrigin\":\"https://portal.ledgetopdroneservices.com\",\"publicShareOrigin\":\"https://portal.ledgetopdroneservices.com\"}"
+    "CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_DEPLOYMENT_PROFILE": "{\"version\":1,\"accountId\":\"846c924bf17bf4f3dd15c97a4c5d1d51\",\"workerName\":\"ledgetop-clients\",\"databaseBinding\":\"DELIVERY_DB\",\"databaseId\":\"7f40a7b7-c3ec-470e-a626-e798867f71f8\",\"portalOrigin\":\"https://portal.ledgetop.app\",\"publicShareOrigin\":\"https://portal.ledgetopdroneservices.com\",\"privateRequestOrigins\":[\"https://portal.ledgetop.app\",\"https://portal.ledgetopdroneservices.com\"]}"
   },
   "observability": { "enabled": true, "head_sampling_rate": 1 },
   "ratelimits": [

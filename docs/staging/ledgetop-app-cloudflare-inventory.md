@@ -1,6 +1,7 @@
 # ledgetop.app Cloudflare readiness inventory
 
-Read-only observation on October 22, 2026. No DNS, Workers, Access, certificate,
+Initial read-only observation on October 22, 2026, followed by the additive
+Access destination changes recorded below. No DNS, Workers, certificate,
 policy, account, database or TrueNAS changes were made.
 
 ## Account-specific observations
@@ -61,7 +62,7 @@ or blanket public-bypass policies.
    to the appropriate Client application. Public share paths must remain outside
    a blanket human-login policy, while internal/service paths retain their own
    strict authentication. Review matching precedence before saving changes.
-4. Add Worker Custom Domains: `ledgetop.app` to `ledgetop-ops`, and
+4. Add Worker Custom Domains: `ops.ledgetop.app` to `ledgetop-ops`, and
    `portal.ledgetop.app` to `ledgetop-clients`. Those Worker names are from the
    current repository configs and must be compared with live deployment settings
    before applying. Do not add a competing origin CNAME first.
@@ -83,3 +84,36 @@ has not been executed and is not evidence that a new hostname is protected.
 Do not delete legacy domains, public-link records, policies or certificates as
 part of this initial connection. Existing client links are the compatibility
 contract, not disposable migration artifacts.
+
+## October 22 implementation update (not a live cutover)
+
+The user clarified the staff hostname is `ops.ledgetop.app`; the apex is not an
+Operations host. A fresh dashboard inspection still showed fifteen Access apps,
+only the two old staff destinations, and no Worker connected to the new zone.
+The following additive Access destinations were saved and verified through the
+existing Cloudflare applications after the targeted source checks passed:
+
+- Staff app `76ca2837-2d09-4d22-a303-d191823cdb83`: `ops.ledgetop.app`.
+- Client app `34439cca-fa0b-43e2-a830-bd569e303e68`:
+  `portal.ledgetop.app/portal*` and `portal.ledgetop.app/api/client*`.
+
+Cloudflare confirmed both saves, and the expanded application inventory showed
+the exact added destinations alongside all original destinations. No Access
+policy, principal, audience or session duration changed. No public-share path
+was added to human Access. This protects the new private paths before binding
+them; it does not provide DNS, Worker admission or a functioning new portal.
+
+The candidate retains the public origin/expected-host tuple and old public
+routes. A separate exact native delivery profile pins the same physical Client
+Worker/database and the two private request origins: the new portal and the
+existing Drone Services portal. Old private file requests therefore continue
+normal identity, resource, grant and revision checks on their original host;
+the Technologies alias does not acquire native byte access. Enrollment requests
+on the pinned pair remain same-origin rather than forwarding cookies or bodies.
+Both native recipient expected-host settings track the new configured primary;
+they validate deployment configuration, not the HTTP internal-ingress hostname.
+
+Do not activate this candidate before its tests, Access destinations, verified
+physical deployment profile and Viewer origin compatibility are accepted. The
+generic navigation redirect helper remains unmounted and disabled; source
+preparation does not establish a working public hostname.

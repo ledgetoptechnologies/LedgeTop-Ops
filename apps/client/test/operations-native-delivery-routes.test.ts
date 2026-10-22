@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { NativeOperationsDeliveryContext } from '../src/worker/client-portal/operations-native-delivery-authorization';
 import type { Env } from '../src/worker/types';
+import { NATIVE_DELIVERY_APP_PORTAL_PRODUCTION_PROFILE } from '../src/worker/operations-native-delivery-deployment';
 import { createOperationsNativeDeliveryRouter } from '../src/worker/client-portal/operations-native-delivery-routes';
 import { encodeOperationsNativeDeliveryHandle, decodeOperationsNativeDeliveryHandle, type OperationsNativeDeliveryHandle }
   from '../src/worker/client-portal/operations-native-delivery-handles';
@@ -57,6 +58,29 @@ describe('native Operations folder HTTP routes', () => {
   async function path(kind: 'folder' | 'file') {
     return `/${kind === 'folder' ? 'folders' : 'files'}/${await encodeOperationsNativeDeliveryHandle(env, handle(kind))}`;
   }
+  it.each(['https://portal.ledgetop.app','https://portal.ledgetopdroneservices.com'])(
+    'keeps exact overlap file downloads on %s while enforcing the same current grant, identity and physical key',async privateOrigin=>{
+      const production={...env,ENVIRONMENT:'production',EXPECTED_HOST:'portal.ledgetopdroneservices.com',
+        PUBLIC_BASE_URL:'https://portal.ledgetopdroneservices.com',PUBLIC_SHARE_ORIGIN:'https://portal.ledgetopdroneservices.com',
+        CLIENT_PORTAL_ORIGIN:'https://portal.ledgetop.app',
+        CLIENT_PORTAL_ORIGINS:'https://portal.ledgetop.app,https://portal.ledgetopdroneservices.com,https://portal.ledgetoptechnologies.com',
+        CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_DEPLOYMENT_PROFILE:NATIVE_DELIVERY_APP_PORTAL_PRODUCTION_PROFILE} as Env;
+      const expectedBytes=Uint8Array.from({length:42},(_,index)=>index);
+      get.mockImplementationOnce(async()=>({etag:'synthetic-etag',size:42,
+        body:new ReadableStream({start(controller){controller.enqueue(expectedBytes);controller.close();}})}));
+      const endpoint=`${privateOrigin}${await path('file')}/download`;
+      const response=await router().fetch(new Request(endpoint),production);
+      expect(response.status).toBe(200);expect(response.headers.get('Location')).toBeNull();
+      expect(response.headers.get("Content-Length")).toBe("42");
+      expect(new Uint8Array(await response.arrayBuffer())).toEqual(expectedBytes);
+      expect(get).toHaveBeenCalledWith('synthetic/photos/photo.jpg',expect.anything());
+      expect(authorization).toHaveBeenCalled();
+      for(const call of authorization.mock.calls){expect(call[1]).toEqual(principal);expect(call[2]).toBe(id(2));expect(call[3]).toBe('file.download');}
+      get.mockClear();head.mockClear();authorization.mockResolvedValue({ok:false,code:'denied'});
+      const revoked=await router().fetch(new Request(endpoint),production);
+      expect(revoked.status).toBe(404);expect(revoked.headers.get('Location')).toBeNull();
+      expect(get).not.toHaveBeenCalled();expect(head).not.toHaveBeenCalled();
+    });
   it('is default-off and production-off before identity, ledger, index or R2 lookups', async () => {
     const resolvePrincipal = vi.fn(async () => principal), instance = createOperationsNativeDeliveryRouter({ resolvePrincipal });
     for (const override of [{ ENVIRONMENT: 'production' }, { CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_READ_ENABLED: undefined }, { CLIENT_PORTAL_ENABLED: 'false' }]) {

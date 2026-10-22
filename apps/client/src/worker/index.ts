@@ -47,6 +47,8 @@ import { runClientDelegatedShareExpiryReconciliation } from "./client-portal/del
 import { BULK_CACHE_EXPIRED_ROW_LIMIT, BULK_CACHE_ORPHAN_CLAIM_LIMIT, BULK_CACHE_PENDING_DELETE_LIMIT }
   from "./bulk-cache-limits";
 import { clientPortalEntryOrigin, configuredPublicRequestOrigins, legacyClientRedirectLocation, malformedPortalLaunchRedirect, requestHostAllowed, requirePublicShareOrigin } from "./origin-policy";
+import { nativeDeliveryRequestOriginAllowed } from "./operations-native-delivery-deployment";
+import { configuredDeploymentOrigin } from "@ltds/shared/configured-deployment-origin";
 import {
   classifyPublicShareLifecycle,
   logPublicShareOutcome,
@@ -1137,15 +1139,25 @@ app.all("/api/client/v2/recipient-enrollment/*", c => handleRecipientEnrollmentH
 }));
 // Native consent must not pass through historical PA-backed client admission.
 // The handler independently verifies Access identity, CSRF and staging scope.
-app.all("/api/client/operations/recipient-enrollment/*", c => handleOperationsNativeRecipientEnrollmentHttp(c.req.raw, {
+app.all("/api/client/operations/recipient-enrollment/*", c => {
+  // During the exact-profile migration, existing same-origin enrollment
+  // sessions stay on the old private host; cookies/bodies never cross hosts.
+  const primary = configuredDeploymentOrigin({ environment: c.env.ENVIRONMENT,
+    origin: c.env.CLIENT_PORTAL_ORIGIN,
+    expectedHost: c.env.CLIENT_PORTAL_NATIVE_RECIPIENT_ENROLLMENT_EXPECTED_HOST ?? c.env.EXPECTED_HOST });
+  const requestOrigin = primary && nativeDeliveryRequestOriginAllowed(c.env, c.req.url)
+    ? new URL(c.req.url).origin : c.env.CLIENT_PORTAL_ORIGIN ?? "";
+  return handleOperationsNativeRecipientEnrollmentHttp(c.req.raw, {
   env: c.env,
   enabled: c.env.CLIENT_PORTAL_ENABLED === "true" && c.env.CLIENT_PORTAL_NATIVE_RECIPIENT_ENROLLMENT_ENABLED === "true",
   environment: c.env.ENVIRONMENT,
-  expectedHost: c.env.CLIENT_PORTAL_NATIVE_RECIPIENT_ENROLLMENT_EXPECTED_HOST ?? c.env.EXPECTED_HOST,
-  origin: c.env.CLIENT_PORTAL_ORIGIN ?? "",
+  expectedHost: requestOrigin !== (c.env.CLIENT_PORTAL_ORIGIN ?? "") ? new URL(requestOrigin).hostname
+    : c.env.CLIENT_PORTAL_NATIVE_RECIPIENT_ENROLLMENT_EXPECTED_HOST ?? c.env.EXPECTED_HOST,
+  origin: requestOrigin,
   csrfSecret: c.env.CLIENT_PORTAL_NATIVE_RECIPIENT_ENROLLMENT_CSRF_SECRET ?? "",
   binding: c.env.OPERATIONS_PORTAL_NATIVE_RECIPIENT_ENROLLMENT,
-}));
+  });
+});
 app.route("/api/client", createClientPortalRouter({ pricingHintProvider: projectAlphaPricingHintProvider }));
 app.route("/api/client-onboarding", clientOnboardingRecipientRouter);
 app.on(["GET", "HEAD"], "/onboarding/:invitationId", c => c.env.CLIENT_ONBOARDING_RECIPIENT_BRIDGE_ENABLED === "true"

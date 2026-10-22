@@ -5,7 +5,7 @@ import { clientPortalRequestOriginAllowed, configuredPublicRequestOrigins, confi
   legacyClientRedirectLocation, malformedPortalLaunchRedirect, requestHostAllowed } from "../src/worker/origin-policy";
 import { createSessionCookie } from "../src/worker/security";
 import { nativeDeliveryDeploymentEnabled, NATIVE_DELIVERY_PORTAL_PRODUCTION_PROFILE,
-  NATIVE_DELIVERY_PRODUCTION_PROFILE } from "../src/worker/operations-native-delivery-deployment";
+  NATIVE_DELIVERY_PRODUCTION_PROFILE, NATIVE_DELIVERY_APP_PORTAL_PRODUCTION_PROFILE } from "../src/worker/operations-native-delivery-deployment";
 import type { Env } from "../src/worker/types";
 
 function migration(environment: "production" | "staging") {
@@ -138,4 +138,94 @@ it("admits only the exact canonical native deployment profile/origin pair", () =
   expect(nativeDeliveryDeploymentEnabled({ ...configuration, CLIENT_PORTAL_ORIGIN: "https://client.ledgetopdroneservices.com" })).toBe(false);
   expect(nativeDeliveryDeploymentEnabled(migration("staging"))).toBe(true);
   expect(nativeDeliveryDeploymentEnabled({ ...migration("staging"), CLIENT_PORTAL_ORIGIN: "https://other-staging.example" })).toBe(false);
+});
+
+describe("requested .app client primary with historical public links", () => {
+  const portal="https://portal.ledgetop.app", publicOrigin="https://portal.ledgetopdroneservices.com",
+    legacy="https://client.ledgetopdroneservices.com", otherPortal="https://portal.ledgetoptechnologies.com";
+  function configuration() {
+    return {...migration("production"),CLIENT_PORTAL_ORIGIN:portal,
+      CLIENT_PORTAL_ORIGINS:`${portal},${publicOrigin},${otherPortal}`,
+      CLIENT_PORTAL_NATIVE_RECIPIENT_ENROLLMENT_EXPECTED_HOST:"portal.ledgetop.app",
+      CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_DEPLOYMENT_PROFILE:NATIVE_DELIVERY_APP_PORTAL_PRODUCTION_PROFILE};
+  }
+
+  it("serves old public link shells and rejects public/session namespaces on staff and apex hosts",async()=>{
+    const assets=vi.fn(async()=>new Response("synthetic existing public link shell"));
+    const env={...configuration(),ASSETS:{fetch:assets}} as unknown as Env;
+    for(const origin of [publicOrigin,legacy]) for(const path of ["/s/existing-link?folder=opaque_ref","/client-share/existing-link"]) {
+      const response=await worker.fetch(new Request(`${origin}${path}`),env,context);
+      expect(response.status).toBe(200);expect(response.headers.get("Location")).toBeNull();
+    }
+    for(const origin of [portal,"https://ops.ledgetop.app","https://ledgetop.app",otherPortal])
+      for(const path of ["/s/existing-link","/api/public/shares/existing-link/manifest"]){
+        const response=await worker.fetch(new Request(`${origin}${path}`),env,context);
+        expect(response.status).toBe(404);expect(response.headers.get("Location")).toBeNull();
+      }
+    expect(assets).toHaveBeenCalledTimes(4);
+  });
+
+  it("keeps old host-bound public sessions usable and rechecks revocation without redirecting their API",async()=>{
+    const settings=configuration(),expiresAt=Date.now()+4*3_600_000;
+    const cookie=(await createSessionCookie(settings.DELIVERY_SESSION_SECRET,settings.SESSION_KEY_ID,"retained-share",7,expiresAt)).split(";")[0]!;
+    let shareVersion=7;
+    const statement={bind:()=>statement,first:vi.fn(async()=>({id:"retained-share",public_id:"retained-link",share_version:shareVersion,
+      project_exists:1,project_active:1,revoked_at:null,revoked_reason:null,expires_at:null,unavailable_since:null,
+      r2_object_key:"synthetic-retained.jpg",image_location_map_enabled:0}))};
+    const env={...settings,DELIVERY_DB:{prepare:()=>statement},DATA_BUCKET:{head:async()=>({key:"synthetic-retained.jpg"})},
+      AUDIT_IP_SECRET:"synthetic-audit-secret-at-least-thirty-two-characters",
+      PUBLIC_MANIFEST_RATE_LIMITER:{limit:async()=>({success:true})}} as unknown as Env;
+    for(const origin of [publicOrigin,legacy]) {
+      const request=()=>new Request(`${origin}/api/public/shares/retained-link/locations`,{headers:{Cookie:cookie}});
+      const response=await worker.fetch(request(),env,context);
+      expect(response.status).toBe(200);expect(response.headers.get("Location")).toBeNull();expect(response.headers.get("Set-Cookie")).toBeNull();
+      shareVersion=8;
+      expect((await worker.fetch(request(),env,context)).status).toBe(401);
+      shareVersion=7;
+    }
+  });
+
+  it("admits only the exact new private physical profile and keeps native byte APIs behind client authentication",async()=>{
+    const settings=configuration();
+    for(const surface of ["portal","rpc","publication"] as const) {
+      expect(nativeDeliveryDeploymentEnabled(settings,surface)).toBe(true);
+      for(const profile of [NATIVE_DELIVERY_PRODUCTION_PROFILE,NATIVE_DELIVERY_PORTAL_PRODUCTION_PROFILE,
+        NATIVE_DELIVERY_APP_PORTAL_PRODUCTION_PROFILE+" ",JSON.stringify({...JSON.parse(NATIVE_DELIVERY_APP_PORTAL_PRODUCTION_PROFILE),databaseId:"wrong-database"})])
+        expect(nativeDeliveryDeploymentEnabled({...settings,CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_DEPLOYMENT_PROFILE:profile},surface)).toBe(false);
+    }
+    const prepare=vi.fn(()=>{throw Error("Missing identity must not read data");});
+    const env={...settings,CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_READ_ENABLED:"true",DELIVERY_DB:{prepare}} as unknown as Env;
+    const path="/api/client/operations/data/deliveries";
+    const response=await worker.fetch(new Request(`${portal}${path}`),env,context);
+    expect(response.status).toBe(401);expect(response.headers.get("Location")).toBeNull();
+    expect((await worker.fetch(new Request(`${publicOrigin}${path}`),env,context)).status).toBe(401);
+    for(const origin of [legacy,otherPortal,"https://ops.ledgetop.app","https://ledgetop.app"]) {
+      const denied=await worker.fetch(new Request(`${origin}${path}`),env,context);
+      expect(denied.status).toBe(404);expect(denied.headers.get("Location")).toBeNull();
+    }
+    expect(prepare).not.toHaveBeenCalled();
+  });
+
+  it("routes recipient consent to the new private expected host while keeping public expected host unchanged",async()=>{
+    const settings=configuration();
+    expect(settings.EXPECTED_HOST).toBe("portal.ledgetopdroneservices.com");
+    const binding={inspectNativeEnrollment:vi.fn(),redeemNativeEnrollment:vi.fn()};
+    const env={...settings,CLIENT_PORTAL_NATIVE_RECIPIENT_ENROLLMENT_ENABLED:"true",
+      CLIENT_PORTAL_NATIVE_RECIPIENT_ENROLLMENT_CSRF_SECRET:"synthetic-consent-secret-at-least-thirty-two-characters",
+      OPERATIONS_PORTAL_NATIVE_RECIPIENT_ENROLLMENT:binding} as unknown as Env;
+    const path="/api/client/operations/recipient-enrollment/session";
+    const headers={"Sec-Fetch-Site":"same-origin","X-Operations-Enrollment-Request":"1"};
+    expect((await worker.fetch(new Request(`${portal}${path}`,{headers}),env,context)).status).toBe(401);
+    expect((await worker.fetch(new Request(`${publicOrigin}${path}`,{headers}),env,context)).status).toBe(401);
+    for(const origin of [otherPortal])
+      expect((await worker.fetch(new Request(`${origin}${path}`,{headers}),env,context)).status).toBe(403);
+    const oldExpectedHost={...env,CLIENT_PORTAL_NATIVE_RECIPIENT_ENROLLMENT_EXPECTED_HOST:settings.EXPECTED_HOST};
+    for(const origin of [portal,publicOrigin])
+      expect((await worker.fetch(new Request(`${origin}${path}`,{headers}),oldExpectedHost,context)).status).toBe(503);
+    for(const CLIENT_PORTAL_ORIGIN of [undefined, "malformed"]) {
+      const invalid={...env, CLIENT_PORTAL_ORIGIN} as unknown as Env;
+      expect((await worker.fetch(new Request(`${portal}${path}`,{headers}),invalid,context)).status).toBe(404);
+    }
+    expect(binding.inspectNativeEnrollment).not.toHaveBeenCalled();expect(binding.redeemNativeEnrollment).not.toHaveBeenCalled();
+  });
 });

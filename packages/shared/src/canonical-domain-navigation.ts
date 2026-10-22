@@ -14,7 +14,7 @@ export interface CanonicalDomainNavigationConfiguration {
 }
 
 const TARGETS = Object.freeze({
-  operations: "https://ledgetop.app",
+  operations: "https://ops.ledgetop.app",
   portal: "https://portal.ledgetop.app",
 });
 const SOURCES: Readonly<Record<CanonicalDomainSurface, readonly string[]>> = Object.freeze({
