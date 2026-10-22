@@ -42,9 +42,10 @@ async function anchor(db: D1DatabaseSession, grant: OperationsPortalNativeDelive
  * acknowledged applied publications count; failed/unapplied commands do not.
  * Every intermediate publication must retain the exact folder and project. */
 export async function readWindowsPortalPublicationChainEvidence(database: D1Database,
-  rawGrant: unknown): Promise<WindowsPortalPublicationChainEvidence> {
+  rawGrant: unknown, requiredFeature: "folder.list" | "file.metadata" | "file.download" = "file.download"): Promise<WindowsPortalPublicationChainEvidence> {
   const grant = parseOperationsPortalNativeDeliveryAuthorityCommand(rawGrant);
-  if (!grant || grant.action !== "delivery.grant" || !grant.features.includes("file.download")
+  if (!grant || grant.action !== "delivery.grant" || !["folder.list", "file.metadata", "file.download"].includes(requiredFeature)
+    || !grant.features.includes(requiredFeature)
     || !grant.expiresAt || Date.parse(grant.expiresAt) <= Date.now()) return fail();
   const firstSequence = Number(grant.publication.sourceSequence), firstRevision = Number(grant.publication.revision);
   if (!Number.isSafeInteger(firstSequence) || !Number.isSafeInteger(firstRevision) || firstRevision !== firstSequence) return fail();

@@ -169,7 +169,7 @@ public sealed class PortalQueuedDownloadSource : QueuedDownloadSource
     internal PortalQueuedDownloadSource(string alias, CloudflareAccessSession session, HttpMessageHandler handler, Downloader downloader) : base(alias, session, false, handler, downloader) { }
     public Task<QueuedDownloadReference> GetReferenceAsync(string fileHandle, CancellationToken cancellationToken = default)
     {
-        if (fileHandle is null || fileHandle.Length > 8192 || !Regex.IsMatch(fileHandle, "\\Aond1_[A-Za-z0-9_-]+\\z")) throw new ArgumentException("A current native file selector is required.");
+        if (fileHandle is null || fileHandle.Length > 8192 || !Regex.IsMatch(fileHandle, "\\A(?:ond1|wpc1)_[A-Za-z0-9_-]+\\z")) throw new ArgumentException("A current native file selector is required.");
         return SelectAsync("fileHandle=" + Uri.EscapeDataString(fileHandle), cancellationToken);
     }
 }

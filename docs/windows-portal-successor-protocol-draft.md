@@ -1,7 +1,7 @@
 # Windows portal publication successor protocol (draft)
 
-Producer, consumer, successor bytes/audit and queue resolution source are implemented;
-catalog continuity and live qualification are unfinished.
+Producer, consumer, successor bytes/audit, queue resolution and dedicated Windows
+catalog source are implemented; live qualification is unfinished.
 This does not make cross-publication downloads available in a deployed portal.
 
 ## Implemented producer
@@ -123,7 +123,8 @@ changed-content isolation, missing/omitted/restored history, revoke/regrant,
 recipient/home/client switch, folder remap, stale consumer publication, expiry,
 concurrent refresh/revoke, provider changes and audit failure. Large-history
 performance and a later stable continuity epoch remain separate qualification.
-This producer method currently proves `file.download` only. Catalog discovery,
-folder listing and metadata still use original-publication authority and need
-their own reviewed continuity support; queue recovery alone will not make the
-whole desktop browser survive a publication refresh.
+The existing successor method proves `file.download` only. A separate explicit
+catalog RPC and `wpc1_` catalog source now prove `folder.list` and `file.metadata`
+without implying download access. Ordinary browser routes remain pinned to
+their original publication. See `windows-portal-catalog-contract.md` for the
+dedicated desktop API and its remaining deployment/qualification gates.

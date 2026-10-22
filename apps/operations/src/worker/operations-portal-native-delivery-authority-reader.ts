@@ -4,7 +4,8 @@ import { parseOperationsPortalNativeDeliveryAuthorityCommand, canonicalOperation
   type OperationsPortalNativeDeliveryAuthorizationReaderResult,
   type OperationsPortalNativeDeliveryFeature, type OperationsPortalNativeDeliveryPublicationPins,
   type OperationsPortalNativeDeliverySuccessorAuthorization,
-  type OperationsPortalNativeDeliverySuccessorReaderResult } from "@ltds/shared/operations-portal-native-delivery-authority";
+  type OperationsPortalNativeDeliverySuccessorReaderResult, type WindowsPortalCatalogFeature,
+  type OperationsPortalNativeCatalogSuccessorReaderResult } from "@ltds/shared/operations-portal-native-delivery-authority";
 import { configuredDeploymentOrigin } from "@ltds/shared/configured-deployment-origin";
 import { readWindowsPortalPublicationChainEvidence } from "./windows-portal-publication-chain";
 
@@ -210,10 +211,15 @@ export function readOperationsPortalNativeDeliveryAuthorization(database: D1Data
 /** Private producer proof for the Windows successor RPC (source, not deployed).
  * Both history retention and current home/recipient/folder authority are needed.
  * No caller can supply effective publication pins without proving the chain. */
-export async function readWindowsPortalSuccessorAuthorization(database: D1Database,
+export function readWindowsPortalSuccessorAuthorization(database: D1Database,
   rawGrant: unknown): Promise<OperationsPortalNativeDeliverySuccessorAuthorization> {
+  return readFeatureSuccessorAuthorization(database, rawGrant, "file.download");
+}
+async function readFeatureSuccessorAuthorization(database: D1Database,
+  rawGrant: unknown, feature: WindowsPortalCatalogFeature | "file.download"): Promise<OperationsPortalNativeDeliverySuccessorAuthorization> {
   const grant = parseOperationsPortalNativeDeliveryAuthorityCommand(rawGrant);
-  if (!grant || grant.action !== "delivery.grant" || !grant.features.includes("file.download")) return denied();
+  if (!grant || grant.action !== "delivery.grant" || !["folder.list", "file.metadata", "file.download"].includes(feature)
+    || !grant.features.includes(feature)) return denied();
   const a = grant.authority, t = grant.target, r = grant.recipient, p = grant.publication, f = grant.resource;
   const input: ReadOperationsPortalNativeDeliveryAuthorizationInput = {
     authorityId: a.authorityId, authorityRevision: Number(a.resultingRevision), recipientBindingId: r.recipientBindingId,
@@ -225,16 +231,17 @@ export async function readWindowsPortalSuccessorAuthorization(database: D1Databa
     publicationSourceSequence: Number(p.sourceSequence), publicationSnapshotId: p.snapshotId, publicationSnapshotSha256: p.snapshotSha256,
     folderReservationId: f.folderReservationId, folderReservationRevision: Number(f.folderReservationRevision),
     clientFolderBindingId: f.clientFolderBindingId, externalProjectId: f.externalProjectId, projectVersion: Number(f.projectVersion),
-    opsFolderProjectId: f.opsFolderProjectId, opsDivisionId: f.opsDivisionId, feature: "file.download",
+    opsFolderProjectId: f.opsFolderProjectId, opsDivisionId: f.opsDivisionId, feature,
   };
-  const before = await readWindowsPortalPublicationChainEvidence(database, grant);
-  await readAuthorization(database, input, true, before.current);
-  const after = await readWindowsPortalPublicationChainEvidence(database, grant);
+  const before = await readWindowsPortalPublicationChainEvidence(database, grant, feature);
+  const initial = await readAuthorization(database, input, true, before.current);
+  if (!initial.features.includes(feature)) return denied();
+  const after = await readWindowsPortalPublicationChainEvidence(database, grant, feature);
   if (after.chainSha256 !== before.chainSha256 || JSON.stringify(after.current) !== JSON.stringify(before.current)) return denied();
   // This last atomic query also rejects a home/recipient/folder change during
   // the history recheck, or a publication advance after the chain was captured.
   const authorization = await readAuthorization(database, input, true, after.current);
-  if (!(Date.parse(authorization.expiresAt) > Date.now())) return denied();
+  if (!authorization.features.includes(feature) || !(Date.parse(authorization.expiresAt) > Date.now())) return denied();
   return Object.freeze({ authorization, continuity: after });
 }
 
@@ -270,6 +277,31 @@ export async function readWindowsPortalSuccessorAuthorizationEntrypoint(
   try {
     const successor = await readWindowsPortalSuccessorAuthorization(env.OPS_DB, grant);
     const result: OperationsPortalNativeDeliverySuccessorReaderResult = { ok: true, protocolVersion: 1, successor };
+    const serialized = JSON.stringify(result);
+    return new TextEncoder().encode(serialized).byteLength <= 16_384 ? serialized : failure("unavailable");
+  } catch (error) {
+    return failure(error instanceof Error && (error.message === "operations_portal_native_delivery_authorization_denied"
+      || error.message === "windows_portal_publication_chain_unproven") ? "denied" : "unavailable");
+  }
+}
+/** Explicit catalog-only RPC; download protocol and preview access remain separate. */
+export async function readWindowsPortalCatalogSuccessorAuthorizationEntrypoint(
+  env: OperationsPortalNativeDeliveryAuthorizationReaderEnv, raw: unknown, feature: unknown,
+): Promise<string> {
+  const failure = (code: "disabled" | "invalid" | "denied" | "unavailable") =>
+    JSON.stringify({ ok: false, protocolVersion: 1, code } satisfies OperationsPortalNativeCatalogSuccessorReaderResult);
+  if (!configuredDeploymentOrigin({ environment: env.ENVIRONMENT ?? "", origin: env.PUBLIC_BASE_URL,
+    expectedHost: env.EXPECTED_HOST }) || env.OPERATIONS_PORTAL_NATIVE_DELIVERY_READER_ENABLED !== "true") return failure("disabled");
+  if (feature !== "folder.list" && feature !== "file.metadata") return failure("invalid");
+  if (typeof raw !== "string" || new TextEncoder().encode(raw).byteLength > OPERATIONS_PORTAL_NATIVE_DELIVERY_AUTHORITY_MAX_BYTES) return failure("invalid");
+  let grant;
+  try {
+    grant = parseOperationsPortalNativeDeliveryAuthorityCommand(JSON.parse(raw));
+    if (!grant || canonicalOperationsPortalNativeDeliveryAuthorityCommand(grant) !== raw) return failure("invalid");
+  } catch { return failure("invalid"); }
+  try {
+    const catalog = await readFeatureSuccessorAuthorization(env.OPS_DB, grant, feature);
+    const result: OperationsPortalNativeCatalogSuccessorReaderResult = { ok: true, protocolVersion: 1, feature, catalog };
     const serialized = JSON.stringify(result);
     return new TextEncoder().encode(serialized).byteLength <= 16_384 ? serialized : failure("unavailable");
   } catch (error) {

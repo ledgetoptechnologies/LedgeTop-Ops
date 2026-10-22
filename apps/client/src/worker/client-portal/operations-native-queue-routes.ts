@@ -8,12 +8,13 @@ import { authorizeNativeOperationsDelivery, type NativeOperationsDeliveryAuthori
 import { decodeOperationsNativeDeliveryHandle, encodeOperationsNativeDeliveryHandle, operationsNativeDeliveryHandleMatchesCommand, type OperationsNativeDeliveryHandle } from "./operations-native-delivery-handles";
 import { authorizeWindowsPortalSuccessor } from "./windows-portal-successor-authorization";
 import { prepareWindowsPortalSuccessorManifest } from "./windows-portal-successor-routes";
+import { selectWindowsPortalCatalogDownload } from "./windows-portal-catalog-routes";
 import type { OperationsNativeContentAuditEnv } from "./operations-native-content-audit";
 import type { VerifiedClientPrincipal } from "./types";
 import { validateRelativePath } from "../files";
 
 type QueueEnv = Env & NativeOperationsDeliveryAuthorizationEnv & OperationsNativeContentAuditEnv
-  & Parameters<typeof authorizeWindowsPortalSuccessor>[0];
+  & Parameters<typeof authorizeWindowsPortalSuccessor>[0] & Parameters<typeof selectWindowsPortalCatalogDownload>[0];
 type Configuration = Readonly<{ enabled: boolean; portalOrigin: string; issuer: string; audience: string; queueKey: Uint8Array }>;
 type Human = { principal: VerifiedClientPrincipal; verifiedUntil: string };
 const BASE = "/api/client/operations/data", ttl = 900_000;
@@ -51,7 +52,16 @@ export function createOperationsNativeQueueRouter(input: Configuration) {
     const h = c.get("human"), principalId = await principal(h);
     let handle: OperationsNativeDeliveryHandle;
     if (operation === "reference") {
-      const q = queueQuery(c.req.url, ["fileHandle"]), decoded = await decodeOperationsNativeDeliveryHandle(c.env, q.get("fileHandle")!);
+      const q = queueQuery(c.req.url, ["fileHandle"]), raw = q.get("fileHandle")!;
+      if (raw.startsWith("wpc1_")) {
+        const selected = await selectWindowsPortalCatalogDownload(c.env, raw, h.principal, Date.parse(h.verifiedUntil), c.req.raw.signal);
+        const resourceRef = await encodeQueueReference(context, principalId, selection(selected.originalSelector));
+        const final = await authorizeWindowsPortalSuccessor(c.env, h.principal, selected.originalSelector.authorityId);
+        if (!final.ok || JSON.stringify(final.successorContext) !== JSON.stringify(selected.downloadContext) || Date.parse(h.verifiedUntil) <= Date.now())
+          return error(!final.ok && final.code === "unavailable" ? 503 : 409);
+        return c.json({ schemaVersion: 1, principalId, resourceRef });
+      }
+      const decoded = await decodeOperationsNativeDeliveryHandle(c.env, raw);
       if (!decoded || decoded.kind !== "file" || decoded.issuer !== h.principal.issuer || decoded.subject !== h.principal.subject) return error(404);
       handle = decoded;
     } else {

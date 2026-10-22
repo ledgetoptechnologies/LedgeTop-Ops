@@ -142,6 +142,15 @@ export type OperationsPortalNativeDeliverySuccessorReaderResult =
 export interface OperationsPortalNativeDeliverySuccessorReaderBinding {
   readWindowsDeliverySuccessorAuthorization(canonicalOriginalGrant: string): Promise<string>;
 }
+/** Catalog continuation is a distinct protocol and never grants byte access. */
+export type WindowsPortalCatalogFeature = "folder.list" | "file.metadata";
+export type OperationsPortalNativeCatalogSuccessorReaderResult =
+  | Readonly<{ ok: true; protocolVersion: 1; feature: WindowsPortalCatalogFeature;
+      catalog: OperationsPortalNativeDeliverySuccessorAuthorization }>
+  | Readonly<{ ok: false; protocolVersion: 1; code: "disabled" | "invalid" | "denied" | "unavailable" }>;
+export interface OperationsPortalNativeCatalogSuccessorReaderBinding {
+  readWindowsCatalogSuccessorAuthorization(canonicalOriginalGrant: string, feature: WindowsPortalCatalogFeature): Promise<string>;
+}
 export interface OperationsPortalNativeDeliveryAuthorizationReaderBinding {
   readNativeDeliveryAuthorization(input: OperationsPortalNativeDeliveryAuthorizationReadRequest): Promise<string>;
 }
