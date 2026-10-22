@@ -24,6 +24,37 @@ const temporary = (): never => { throw new HTTPException(503, { message: 'Shared
 const clean = (value: string) => value.replace(/[\u0000-\u001f\u007f]/gu, '').slice(0, 500);
 const db = (c: Ctx) => c.env.DELIVERY_DB.withSession('first-primary');
 const upperBound = (prefix: string) => prefix.slice(0, -1) + String.fromCharCode(prefix.charCodeAt(prefix.length - 1) + 1);
+function checksumSha256(object: R2Object): string | null {
+  const bytes = object.checksums?.sha256;
+  return bytes?.byteLength === 32 ? [...new Uint8Array(bytes)].map(value => value.toString(16).padStart(2, '0')).join('') : null;
+}
+function pinnedObjectMatches(handle: OperationsNativeDeliveryHandle, object: R2Object): boolean {
+  return handle.providerVersion === undefined || object.version === handle.providerVersion && checksumSha256(object) === handle.sha256;
+}
+async function logicalFileId(c: Ctx, handle: OperationsNativeDeliveryHandle): Promise<string> {
+  const secret = c.env.DELIVERY_SESSION_SECRET;
+  if (!secret || secret.length < 32) return temporary();
+  const encoder = new TextEncoder();
+  const key = await crypto.subtle.importKey('raw', encoder.encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+  const value = JSON.stringify([handle.issuer, handle.subject, handle.authorityId, handle.targetId, handle.clientFolderBindingId, handle.path]);
+  const digest = await crypto.subtle.sign('HMAC', key, encoder.encode(`operations-native-desktop-logical-file-v1\0${value}`));
+  return `ondf1_${[...new Uint8Array(digest)].map(byte => byte.toString(16).padStart(2, '0')).join('')}`;
+}
+function desktopFileName(key: string): string {
+  const bounded = (value: string): string => {
+    let result = '';
+    for (const character of value) {
+      const safe = /^[\uD800-\uDFFF]$/u.test(character) ? '_' : character;
+      if (result.length + safe.length > 150) break;
+      result += safe;
+    }
+    return result;
+  };
+  let name = bounded((key.split('/').at(-1) ?? '').replace(/[\p{Cc}<>:"/\\|?*]/gu, '_').trim()).trim().replace(/[. ]+$/u, '');
+  if (!name || name === '.' || name === '..') name = 'download';
+  if (/^(?:CON|PRN|AUX|NUL|CONIN\$|CONOUT\$|COM[1-9¹²³]|LPT[1-9¹²³])(?:\.|$)/iu.test(name) || name === '.ltds-downloads-v1') name = bounded(`_${name}`);
+  return name;
+}
 async function authorize(c: Ctx, authorityId: string, feature: OperationsPortalNativeDeliveryFeature, handle?: OperationsNativeDeliveryHandle) {
   const result = await authorizeNativeOperationsDelivery(c.env, c.get('operationsPrincipal'), authorityId, feature, handle);
   if (!result.ok) return result.code === 'unavailable' ? temporary() : unavailable();
@@ -167,6 +198,29 @@ export function createOperationsNativeDeliveryRouter(dependencies: { resolvePrin
     await authorize(c, handle.authorityId, 'file.metadata', handle);
     return c.json({ resourceMode: 'operations_native_delivery', file: fileDto(context, row, c.req.param('fileHandle')) });
   });
+  router.get('/files/:fileHandle/download-manifest', async c => {
+    const handle = await decode(c, c.req.param('fileHandle'), 'file');
+    const { context, row } = await readFile(c, handle, 'file.download');
+    const head = await c.env.DATA_BUCKET.head(row.r2_key);
+    if (!head || isMovedSourceMarker(head) || head.httpEtag !== `"${head.etag}"` || head.etag !== row.etag.replace(/^"|"$/gu, '')
+      || !/^"[\x21\x23-\x7e]+"$/u.test(head.httpEtag) || head.size !== row.size || !pinnedObjectMatches(handle, head)) return unavailable();
+    // HEAD exposes only uploader-verified R2 checksum metadata. Never download
+    // or buffer large client content in a Worker merely to mint a descriptor.
+    await readFile(c, handle, 'file.download');
+    const sha256 = checksumSha256(head);
+    if (!sha256) return c.json({ error: 'A verified download checksum is not available', code: 'download-checksum-unavailable' }, 409);
+    if (!head.version || head.version.length > 256 || head.version.trim() !== head.version || /[\u0000-\u001f\u007f]/u.test(head.version)) return unavailable();
+    const expires = Math.min(handle.expires, Date.now() + TTL, Date.parse(context.command.expiresAt!));
+    const expiresAt = Math.floor(expires / 1000);
+    if (expiresAt <= Math.floor(Date.now() / 1000)) return unavailable();
+    const pinnedClaims = { ...handle, providerVersion: head.version, sha256, expires: expiresAt * 1000 };
+    const pinned = await encodeOperationsNativeDeliveryHandle(c.env, pinnedClaims);
+    const identity = await logicalFileId(c, handle);
+    await authorize(c, handle.authorityId, 'file.download', pinnedClaims);
+    return c.json({ schemaVersion: 1, logicalFileId: identity, remoteVersion: head.version, strongETag: head.httpEtag,
+      size: head.size, sha256, name: desktopFileName(row.r2_key),
+      downloadPath: `/api/client/operations/data/files/${encodeURIComponent(pinned)}/download`, expiresAt });
+  });
   async function media(c: Ctx, disposition: 'inline' | 'attachment') {
     const handle = await decode(c, c.req.param('fileHandle') ?? '', 'file'), feature = disposition === 'inline' ? 'file.preview' : 'file.download';
     const { context, row } = await readFile(c, handle, feature), type = (row.content_type ?? 'application/octet-stream').split(';')[0]!.trim().toLowerCase();
@@ -175,7 +229,7 @@ export function createOperationsNativeDeliveryRouter(dependencies: { resolvePrin
     await authorize(c, handle.authorityId, feature, handle);
     const head = await c.env.DATA_BUCKET.head(row.r2_key);
     const etag = (value: string) => value.trim().replace(/^W\//u, '').replace(/^"|"$/gu, '');
-    if (!head || isMovedSourceMarker(head) || etag(head.httpEtag) !== etag(row.etag) || head.size !== row.size) return unavailable();
+    if (!head || isMovedSourceMarker(head) || etag(head.httpEtag) !== etag(row.etag) || head.size !== row.size || !pinnedObjectMatches(handle, head)) return unavailable();
     // Even a 416/HEAD/304 reveals metadata: re-prove the current person/resource
     // after the asynchronous storage read, not just before it.
     await readFile(c, handle, feature);
@@ -196,7 +250,7 @@ export function createOperationsNativeDeliveryRouter(dependencies: { resolvePrin
     const object = await c.env.DATA_BUCKET.get(row.r2_key, { ...(range ? { range } : {}), onlyIf: { etagMatches: head.etag } });
     if (!object || !('body' in object)) return unavailable();
     try {
-      if (isMovedSourceMarker(object) || object.etag !== head.etag || object.size !== head.size) return unavailable();
+      if (isMovedSourceMarker(object) || object.etag !== head.etag || object.size !== head.size || !pinnedObjectMatches(handle, object)) return unavailable();
       await readFile(c, handle, feature);
       // This independent native audit is mandatory before bytes, not a best-
       // effort background task. It never invents a PA principal/source identity.

@@ -14,7 +14,7 @@ namespace LedgeTop.WindowsDownload;
 public sealed record DownloadSpec(string OpaqueIdentity, Uri ContentUri, string FileName, long Length, string ETag, string Sha256);
 public sealed class TransferException(string message) : Exception(message);
 
-/// <summary>Read-only prototype. No authentication, upload, filesystem placeholders or automatic updates.</summary>
+/// <summary>Read-only prototype. No upload, filesystem placeholders or automatic updates.</summary>
 public sealed class Downloader : IDisposable
 {
     private const string StateDirectory = ".ltds-downloads-v1";
@@ -22,6 +22,7 @@ public sealed class Downloader : IDisposable
     private readonly HttpClient client;
     private readonly HashSet<string> origins;
     private readonly long maximumBytes;
+    private readonly CloudflareAccessSession? accessSession;
     private sealed record State(int Version, string Descriptor, long Length, string ETag, string Sha256);
 
     public Downloader(IEnumerable<Uri> allowedOrigins, long maximumBytes = 1L << 40)
@@ -31,13 +32,23 @@ public sealed class Downloader : IDisposable
             CheckCertificateRevocationList = true
         }, allowedOrigins, maximumBytes) { }
 
+    public Downloader(CloudflareAccessSession session, long maximumBytes = 1L << 40)
+        : this(new HttpClientHandler {
+            AllowAutoRedirect = false, UseCookies = false, UseDefaultCredentials = false,
+            Credentials = null, AutomaticDecompression = DecompressionMethods.None,
+            CheckCertificateRevocationList = true
+        }, [session.Origin], maximumBytes, session) { }
+
     // Synthetic tests may inject a handler. Production callers cannot install ambient authentication handlers.
-    internal Downloader(HttpMessageHandler handler, IEnumerable<Uri> allowedOrigins, long maximumBytes = 1L << 40)
+    internal Downloader(HttpMessageHandler handler, IEnumerable<Uri> allowedOrigins, long maximumBytes = 1L << 40, CloudflareAccessSession? session = null)
     {
         if (maximumBytes < 0) throw new ArgumentOutOfRangeException(nameof(maximumBytes));
         this.maximumBytes = maximumBytes;
         origins = new HashSet<string>(allowedOrigins.Select(Origin), StringComparer.Ordinal);
         if (origins.Count == 0) throw new ArgumentException("An exact HTTPS origin allowlist is required.");
+        if (session is not null && (origins.Count != 1 || !origins.Contains(Origin(session.Origin))))
+            throw new ArgumentException("An Access session is restricted to its single exact origin.");
+        accessSession = session;
         client = new HttpClient(handler, disposeHandler: true) { Timeout = Timeout.InfiniteTimeSpan };
     }
 
@@ -60,7 +71,7 @@ public sealed class Downloader : IDisposable
         SafeFileName(spec.FileName);
     }
 
-    private static void SafeFileName(string name)
+    internal static void SafeFileName(string name)
     {
         if (string.IsNullOrWhiteSpace(name) || name.Length > 150 || name is "." or ".." or StateDirectory
             || name.EndsWith('.') || name.EndsWith(' ') || name.Any(c => char.IsControl(c) || "<>:\"/\\|?*".Contains(c)))
@@ -171,7 +182,11 @@ public sealed class Downloader : IDisposable
                     request.Headers.Range = new RangeHeaderValue(offset, null);
                     request.Headers.IfRange = new RangeConditionHeaderValue(EntityTagHeaderValue.Parse(spec.ETag));
                 }
+                if (accessSession is not null)
+                    request.Headers.Add("Cf-Access-Token", await accessSession.GetTokenAsync(cancellationToken));
                 using var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+                if (response.StatusCode == HttpStatusCode.Unauthorized) throw new LoginRequiredException();
+                if (response.StatusCode == HttpStatusCode.Forbidden) throw new AccessDeniedException();
                 var remaining = spec.Length - offset;
                 if ((offset > 0 && response.StatusCode != HttpStatusCode.PartialContent)
                     || (offset == 0 && response.StatusCode is not (HttpStatusCode.OK or HttpStatusCode.PartialContent)))

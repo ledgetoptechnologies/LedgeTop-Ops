@@ -1,8 +1,8 @@
 # Operations Windows download app
 
-Status: research and an isolated transfer prototype, started 2026-10-21. This is
-not a released desktop client, an authenticated Operations integration, a sync
-service, or an Explorer files-on-demand provider.
+Status: tested transfer foundation plus source-level human portal adapter,
+started 2026-10-21. This is not a released desktop client, a live-qualified
+Operations integration, a sync service, or an Explorer files-on-demand provider.
 
 ## Product direction
 
@@ -61,8 +61,25 @@ person, grant and publication version. They are not standalone authorization or
 a durable queue identity. Re-list after expiry and resolve a stable logical file
 identity before resuming. Current ordinary file DTOs do not supply a trusted
 SHA-256 for file bytes; publication snapshot hashes describe JSON, not content.
-The reviewed routes also have no desktop login exchange, device flow or PKCE
-handoff. These are explicit implementation gaps, not completed integrations.
+The reviewed routes have no custom desktop OAuth exchange. The first adapter
+instead reuses Cloudflare's official human cloudflared login and cached-token
+mechanism against the fixed protected portal application URL. This preserves
+the existing portal audience and person-bound authorization, without a new
+delegation service or shared machine credential. Live staging acceptance remains
+required; source tests do not establish that an installed desktop is connected.
+
+The source now adds an authenticated native `download-manifest` route. It reads
+R2 checksum metadata and returns a version-pinned encrypted download selector,
+opaque stable logical ID and trusted content fields. Existing byte routes enforce
+version and checksum pins before returning data. Missing R2 SHA-256 fails closed;
+existing/multipart file coverage requires a version-fenced streaming checksum
+job or ingestion proof. No large file is buffered or hashed in a Worker here.
+
+Employee access still needs a new exact staff-to-managed-root read-grant family
+and server Docker gateway. Existing profile-directory grants are not file grants,
+and R2 prefixes must never be translated into arbitrary server paths. Start that
+gateway with read-only synthetic mounts and strict native staff admission; keep
+the preserved-mtime stale-write failure as a hard gate against writable sync.
 
 Keep the original interrupted transfer on a changed remote version. Obtain fresh
 metadata and restart explicitly; never append content from two versions. An
@@ -71,6 +88,12 @@ plane, not stored indefinitely in a queue file. Queue metadata and logs must not
 contain bearer tokens or signed download URLs.
 
 ## Milestones and acceptance
+
+Current local evidence: 29/29 Windows acceptance groups (including a real owned
+subprocess fixture), client typecheck, 113 native server tests and 24 source-layout
+checks passed. Independent reviewers found no blockers in the source-level
+adapter and server manifest changes. These are synthetic/local results, not
+Engineering Hub execution, a live human login, or customer rollout acceptance.
 
 1. **Transfer foundation:** run deterministic synthetic tests on Windows for
    interruption/resume, cancellation, changed versions, invalid ranges, corrupt
@@ -141,3 +164,5 @@ evidence until that execution path is operational.
 - [App Installer distribution](https://learn.microsoft.com/en-us/windows/msix/app-installer/app-installer-file-overview)
 - [App Installer update behavior](https://learn.microsoft.com/en-us/windows/msix/app-installer/auto-update-and-repair--overview)
 - [Access to GitHub release assets](https://docs.github.com/en/rest/releases/assets#get-a-release-asset)
+- [Cloudflare human CLI authentication](https://developers.cloudflare.com/cloudflare-one/tutorials/cli/)
+- [R2 upload versions and stored checksums](https://developers.cloudflare.com/r2/api/workers/workers-api-reference/)

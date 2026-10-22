@@ -5,6 +5,11 @@ using System.Net.Http.Headers;
 using System.Security.Cryptography;
 using LedgeTop.WindowsDownload;
 
+if (args.Length > 0 && args[0] == "--synthetic-access-child-v1") {
+    Environment.ExitCode = await AccessSessionTests.RunChildAsync(args);
+    return;
+}
+
 var passed = 0;
 var tests = new (string Name, Func<Task> Run)[] {
     ("exact verified bytes promote once without overwrite", Full),
@@ -22,7 +27,7 @@ var tests = new (string Name, Func<Task> Run)[] {
     ("one owned download cannot run concurrently", ExclusiveTransfer),
     ("oversized valid prefix cannot publish on a later failed retry", OversizedRetry),
     ("metadata cleanup cannot undo a committed successful download", LockedMetadata),
-};
+}.Concat(AccessSessionTests.Groups).Concat(PortalClientTests.Groups).ToArray();
 foreach (var test in tests) {
     try { await test.Run(); passed++; Console.WriteLine("PASS " + test.Name); }
     catch (Exception error) { Console.Error.WriteLine("FAIL " + test.Name + ": " + error.GetType().Name + " " + error.Message); Environment.ExitCode = 1; }
