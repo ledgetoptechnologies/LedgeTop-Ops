@@ -14,7 +14,9 @@ export default {
     environment: 'node',
     include: ['scripts/independent-staff-client-acceptance.test.ts'],
     testTimeout: 120_000,
-    hookTimeout: 120_000,
+    // Preparing both complete canonical schemas can exceed two minutes on
+    // Windows. Bound preparation separately from individual service commands.
+    hookTimeout: process.platform === 'win32' ? 240_000 : 120_000,
     fileParallelism: false,
   },
 };

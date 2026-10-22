@@ -7,6 +7,28 @@ a provider on a real user's folders as part of this source-only phase.
 
 ## Distribution decision
 
+### Ownership and address checkpoint, 2026-10-22
+
+Ops and each PA manage employees independently; only client profiles synchronize
+to selected PA destinations. The Windows gateway/read/queue routes must continue
+to require current native Ops admission and an explicit file grant, including
+when a legacy staff row remains active or PA sends a grant for the same email.
+The updated backend draft removes the old PA staff writers and automatic
+Access-group rewriting without deleting existing staff or widening membership.
+
+`ledgetop.app` and `portal.ledgetop.app` are separate migration candidates, not
+active Windows endpoint replacements. Keep the currently reviewed fixed Ops,
+portal and gateway origins until exact host, audience, CSRF, redirect and native
+delivery acceptance is complete. Never teach the desktop to follow a redirect
+with its human token to accommodate the domain move.
+
+The backend draft includes the reviewed main/ready-PR CI policy and matches it
+in the Windows/gateway workflows. This does not enable Engineering Hub execution
+or satisfy required hosted checks. The corresponding CI policy release remains
+separate from employee/client delivery activation.
+
+### Installer target
+
 Use a per-user, signed MSIX desktop package as the first distribution candidate.
 Keep the private GitHub source repository private. Publish signed binary artifacts
 through a dedicated HTTPS download endpoint after release approval. A GitHub
@@ -105,7 +127,8 @@ overwrite failure. Client R2 remains read-only.
 - Large-file performance and interrupted resume, including files above 30 GB.
 - R2 checksum coverage/backfill and employee gateway enrollment/temporary-storage
   sizing, using staging without touching TrueNAS.
-- Claude's unified browsing, transfer queue and accessible desktop interface.
+- Live qualification of Claude's implemented unified browsing and transfer queue;
+  its synthetic WPF acceptance is passing, not installed-user acceptance.
 - Clean-machine signed install/update/rollback/uninstall acceptance.
 - Separate Cloud Files placeholder/offline qualification before advertising it.
 

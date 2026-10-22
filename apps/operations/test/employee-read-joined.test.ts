@@ -6,6 +6,9 @@ import { createLocalJWKSet, exportJWK, generateKeyPair, SignJWT } from "jose";
 import { splitD1MigrationStatements } from "../../client/test/helpers/d1-migrations";
 import { createEmployeeQueueRouter } from "../src/worker/employee-queue-routes";
 import { createEmployeeReadRouter } from "../src/worker/employee-read-routes";
+import { applyEntitlementEventForSource } from "../../ops-sync/src/projection";
+import type { Env as SyncEnv, EntitlementEvent } from "../../ops-sync/src/types";
+import { createProjectAlphaSourceContext } from "../src/worker/project-alpha-source";
 
 // Only replace remote key retrieval. Native JWT verification, identity resolver,
 // exact-root authority and durable SQL content audit are all real source code.
@@ -22,7 +25,7 @@ describe("joined employee read source acceptance with full migrated D1 and real 
     runtime = new Miniflare({ modules: true, compatibilityDate: "2026-08-06", script: 'export default { fetch() { return new Response("synthetic"); } }', d1Databases: ["OPS_DB"] });
     database = await runtime.getD1Database("OPS_DB") as D1Database;
     const directory = new URL("../migrations/", import.meta.url);
-    for (const name of readdirSync(directory).filter(name => /^\d{4}_.+\.sql$/u.test(name) && name.slice(0, 4) <= "0223").sort())
+    for (const name of readdirSync(directory).filter(name => /^\d{4}_.+\.sql$/u.test(name) && name.slice(0, 4) <= "0224").sort())
       await database.batch(splitD1MigrationStatements(readFileSync(new URL(name, directory), "utf8")).map(sql => database.prepare(sql)));
     pair = await generateKeyPair("RS256", { extractable: true }); const publicKey = await exportJWK(pair.publicKey);
     publicKey.kid = "joined"; publicKey.alg = "RS256"; keys.mockReturnValue(createLocalJWKSet({ keys: [publicKey] }));
@@ -101,8 +104,33 @@ describe("joined employee read source acceptance with full migrated D1 and real 
   });
   it("admission disable/re-enable changes principal and old reference cannot be resurrected", async () => {
     const h = harness(), selected = await (await h.queueCall("/reference?rootId="+rootId+"&path="+relative)).json() as {principalId:string;resourceRef:string};
+    const bytes = await h.manifest();
     await database.prepare("UPDATE native_staff_admissions SET active=0,version=version+1 WHERE staff_id=?").bind(staffId).run();
-    expect((await h.queueCall("/session")).status).toBe(401);
+    // Legacy and PA employee records are not native admission authority.
+    expect(await database.prepare("SELECT status FROM staff_users WHERE id=?").bind(staffId).first("status")).toBe("active");
+    h.fetcher.mockClear();
+    const denied = async () => {
+      for (const path of [base + "/roots", `${base}/roots/${rootId}/entries?path=photos`,
+        `${base}/roots/${rootId}/manifest?path=${encodeURIComponent(relative)}`, bytes.downloadPath])
+        expect((await h.call(path)).status, path).toBe(401);
+      for (const path of ["/session", `/reference?rootId=${rootId}&path=${encodeURIComponent(relative)}`,
+        "/resolve?resourceRef=" + selected.resourceRef]) expect((await h.queueCall(path)).status).toBe(401);
+      expect(h.fetcher).not.toHaveBeenCalled();
+    };
+    await denied();
+    for (const sourceId of ["project-alpha:primary", "project-alpha:secondary"]) for (const active of [true, false]) {
+      const event: EntitlementEvent = { event_id: crypto.randomUUID(), event_type: active ? "application_entitlement.changed" : "application_entitlement.revoked",
+        occurred_at: new Date().toISOString(), schema_version: 1,
+        user: { id: staffId, email, display_name: "PA must not restore native employee", active },
+        entitlement: { application_key: "ltds_ops", enabled: active, role_key: "role-admin", business_unit_ids: [] } };
+      const apply = applyEntitlementEventForSource({ OPS_DB: database } as SyncEnv, createProjectAlphaSourceContext(sourceId), event, "synthetic-isolation");
+      if (sourceId === "project-alpha:primary") await expect(apply).resolves.toBe("ignored");
+      else await expect(apply).rejects.toThrow("projection-source-authority-unsupported");
+      expect(await database.prepare("SELECT active FROM native_staff_admissions WHERE staff_id=?").bind(staffId).first("active")).toBe(0);
+      expect(await database.prepare("SELECT status FROM staff_users WHERE id=?").bind(staffId).first("status")).toBe("active");
+      await denied();
+    }
+    expect(await database.prepare("SELECT count(*) n FROM ops_employee_read_content_starts WHERE staff_id=?").bind(staffId).first("n")).toBe(0);
     await database.prepare("UPDATE native_staff_admissions SET active=1,version=version+1 WHERE staff_id=?").bind(staffId).run();
     const session = await h.queueCall("/session"); expect(session.status).toBe(200);
     expect((await session.json() as {principalId:string}).principalId).not.toBe(selected.principalId);
