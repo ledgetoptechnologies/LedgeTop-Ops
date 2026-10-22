@@ -38,13 +38,55 @@ import { readWindowsPortalCatalogSuccessorAuthorizationEntrypoint } from "../src
 import { createWindowsPortalCatalogRouter, type WindowsPortalCatalogRouteEnv } from "../../client/src/worker/client-portal/windows-portal-catalog-routes";
 
 describe("Windows publication history evidence with real canonical Ops/Client producers", () => {
-  it("retains an unchanged grant across applied refreshes, excludes pending commands, and rejects revocation", async () => {
+  it("retains an unchanged grant across refreshes and revocation on the current Ops0221/Client0234 staging baseline", async () => {
     await runCanonicalPortalResourceAcceptance(async ctx => {
       const { operations: db, client, id, owner } = ctx;
-      await db.prepare(readFileSync(new URL("../migrations/0224_windows_portal_publication_chain_index.sql", import.meta.url), "utf8")).run();
-      await client.prepare(readFileSync(new URL("../../client/migrations/0235_windows_portal_successor_candidates.sql", import.meta.url), "utf8")).run();
-      await client.batch(splitD1MigrationStatements(readFileSync(new URL("../../client/migrations/0236_windows_portal_successor_content_start_audit.sql", import.meta.url), "utf8"))
-        .map(sql => client.prepare(sql)));
+      // Rehearse the additive suffix on populated, fully current baselines.
+      const suffixes = [
+        [db, "../migrations/", ["0222_employee_read_roots.sql", "0223_employee_read_provisioning.sql", "0224_windows_portal_publication_chain_index.sql"]],
+        [client, "../../client/migrations/", ["0235_windows_portal_successor_candidates.sql", "0236_windows_portal_successor_content_start_audit.sql"]],
+      ] as const;
+      expect(await db.prepare("SELECT name FROM d1_migrations ORDER BY id DESC LIMIT 1").first("name"))
+        .toBe("0221_portal_correspondence_lifecycle_write_guards.sql");
+      expect(await client.prepare("SELECT name FROM d1_migrations ORDER BY id DESC LIMIT 1").first("name"))
+        .toBe("0234_pa_principal_reenrollment.sql");
+      for (const [database, directory, names] of suffixes) {
+        // _cf_ tables are workerd-internal and prohibit reads through D1.
+        // Snapshot every application table and every existing application schema
+        // object; only new suffix objects may appear during this rehearsal.
+        const schemaQuery = "SELECT type,name,tbl_name,sql FROM sqlite_master ORDER BY type,name";
+        const schemaBefore = (await database.prepare(schemaQuery).all<{type:string;name:string;tbl_name:string;sql:string|null}>()).results
+          .filter(row => !row.name.startsWith("sqlite_") && !row.name.startsWith("_cf_"));
+        const tables = schemaBefore.filter(row => row.type === "table").map(row => row.name);
+        const quote = (name: string) => '"' + name.replaceAll('"', '""') + '"';
+        const before = await database.batch(tables.map(name => database.prepare("SELECT * FROM " + quote(name))));
+        for (const name of names) {
+          const sql = readFileSync(new URL(directory + name, import.meta.url), "utf8");
+          await database.batch([...splitD1MigrationStatements(sql).map(statement => database.prepare(statement)),
+            database.prepare("INSERT INTO d1_migrations(name) VALUES(?)").bind(name)]);
+        }
+        const schemaAfter = (await database.prepare(schemaQuery).all()).results;
+        for (const object of schemaBefore)
+          expect(schemaAfter.find(row => row.type === object.type && row.name === object.name), "existing schema changed: " + object.name).toEqual(object);
+        const after = await database.batch<Record<string, unknown>>(tables.map(name => database.prepare("SELECT * FROM " + quote(name))));
+        const canonical = (rows: unknown[]) => rows.map(row => JSON.stringify(row)).sort();
+        for (let i = 0; i < tables.length; i++) {
+          const rows = after[i]!.results.filter(row => {
+            if (tables[i] === "d1_migrations") return !(names as readonly unknown[]).includes(row.name);
+            if (database === db && tables[i] === "permissions") return row.key !== "employee.files.manage";
+            if (database === db && tables[i] === "role_permissions") return row.permission_key !== "employee.files.manage";
+            return true;
+          });
+          expect(canonical(rows), "existing rows changed in " + tables[i]).toEqual(canonical(before[i]!.results));
+        }
+        expect((await database.prepare("PRAGMA foreign_key_check").all()).results).toEqual([]);
+      }
+      expect(await db.prepare("SELECT * FROM permissions WHERE key='employee.files.manage'").all()).toMatchObject({results:[{
+        key: "employee.files.manage", description: "Manage exact employee file-read root registrations and grants" }]});
+      expect((await db.prepare("SELECT * FROM role_permissions WHERE permission_key='employee.files.manage' ORDER BY role_id").all()).results)
+        .toEqual([{role_id:"role-admin",permission_key:"employee.files.manage"},{role_id:"role-owner",permission_key:"employee.files.manage"}]);
+      expect(await db.prepare("SELECT count(*) n FROM d1_migrations").first("n")).toBe(224);
+      expect(await client.prepare("SELECT count(*) n FROM d1_migrations").first("n")).toBe(155);
       const candidate = (await listOperationsPortalNativeDeliveryCandidates(db, { targetId: ctx.workspace.targetId, owner })).items
         .find(item => item.recipientBindingId === ctx.recipient.recipientBindingId);
       if (!candidate || !ctx.recipient.recipientBindingId) throw new Error("missing synthetic candidate");
@@ -246,6 +288,7 @@ describe("Windows publication history evidence with real canonical Ops/Client pr
       expect((await catalog.fetch(request(catalogBase + "/files/" + refreshedCatalog.file + "/download-manifest"), queueEnv)).status).toBe(404);
       expect(await client.prepare("SELECT count(*) n FROM windows_portal_successor_content_start_events").first("n")).toBe(1);
       expect((await db.prepare("PRAGMA foreign_key_check").all()).results).toEqual([]);
-    }, { stopAfterReady: true, operationsThroughMigration: "0203_effective_native_directory_enrollment_consumers.sql" });
+    }, { stopAfterReady: true, operationsThroughMigration: "0221_portal_correspondence_lifecycle_write_guards.sql",
+      clientThroughMigration: "0234_pa_principal_reenrollment.sql" });
   }, 240_000);
 });
