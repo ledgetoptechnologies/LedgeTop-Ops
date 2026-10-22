@@ -61,7 +61,7 @@ try {
   $sdk = & $DotnetPath --version
   if ($LASTEXITCODE -ne 0 -or $sdk -cne '10.0.402') { throw 'The reviewed SDK10.0.402 is required.' }
 $archive = Join-Path $root 'source.zip'
-& git -C $SourceRepository archive --format=zip "--output=$archive" $ReviewedCommit -- apps/windows-download
+& git -C $SourceRepository archive --format=zip "--output=$archive" $ReviewedCommit -- apps/windows-download docs/staging/windows-helper-module-notices-2026-10-22
 if ($LASTEXITCODE -ne 0) { throw 'Source archive failed.' }
 $source = Join-Path $root 'source'
 [IO.Compression.ZipFile]::ExtractToDirectory($archive, $source)
@@ -82,6 +82,24 @@ $checker = Join-Path $PSScriptRoot 'windows-package-channel-check.ps1'
 $channel = & $checker -AssemblyPath (Join-Path $payload 'LedgeTop.Files.dll') -ExpectedChannel pilot | ConvertFrom-Json
 New-Item -ItemType Directory -Path (Join-Path $payload 'helper'),(Join-Path $payload 'Notices'),(Join-Path $payload 'Assets') | Out-Null
 $runtimeNotices = & (Join-Path $PSScriptRoot 'windows-package-runtime-notices.ps1') -PayloadDirectory $payload -NugetPackagesDirectory $env:NUGET_PACKAGES -SourceNoticeDirectory (Join-Path $source 'apps/windows-download/Packaging/Notices') | ConvertFrom-Json
+$moduleNoticeSource = Join-Path $source 'docs/staging/windows-helper-module-notices-2026-10-22'
+$moduleManifestText = [IO.File]::ReadAllText((Join-Path $moduleNoticeSource 'manifest.json')).Replace("`r`n", "`n")
+$moduleManifestBytes = [Text.Encoding]::UTF8.GetBytes($moduleManifestText)
+$moduleManifestSha = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($moduleManifestBytes)).ToLowerInvariant()
+if ($moduleManifestSha -cne '3b2a544ea71e1e6babc118a2c1888a3a3754f977f0b725526d03e7481dd63143') { throw 'Qualified helper module notice manifest differs.' }
+$moduleManifest = $moduleManifestText | ConvertFrom-Json
+if ($moduleManifest.helperSha256 -cne $helperSha -or $moduleManifest.moduleCount -ne 66 -or @($moduleManifest.modules.notices).Count -ne 99) { throw 'Helper module notice bundle is not for this qualified binary.' }
+$moduleNoticeOutput = Join-Path $payload 'Notices/cloudflared-modules'
+New-Item -ItemType Directory -Path $moduleNoticeOutput | Out-Null
+foreach ($notice in $moduleManifest.modules.notices) {
+  if ($notice.outputPath -cnotmatch '\A[0-9]{2}-[a-f0-9]{16}/[0-9]{3}-[A-Za-z0-9_.-]+\.txt\z') { throw 'Unexpected module notice output path.' }
+  $inputNotice = Join-Path $moduleNoticeSource $notice.outputPath
+  if ((Get-Item -LiteralPath $inputNotice).Length -ne $notice.bytes -or (Hash $inputNotice) -cne $notice.sha256) { throw 'Module notice bytes differ.' }
+  $outputNotice = Join-Path $moduleNoticeOutput $notice.outputPath
+  New-Item -ItemType Directory -Path ([IO.Path]::GetDirectoryName($outputNotice)) -Force | Out-Null
+  Copy-Item -LiteralPath $inputNotice -Destination $outputNotice
+}
+[IO.File]::WriteAllBytes((Join-Path $moduleNoticeOutput 'manifest.json'), $moduleManifestBytes)
 Copy-Item -LiteralPath $HelperPath -Destination (Join-Path $payload 'helper/cloudflared.exe')
 Copy-Item -LiteralPath $HelperLicensePath -Destination (Join-Path $payload 'Notices/LICENSE.cloudflared.txt')
 if ((Hash (Join-Path $payload 'helper/cloudflared.exe')) -ne $helperSha -or (Hash (Join-Path $payload 'Notices/LICENSE.cloudflared.txt')) -ne $licenseSha) { throw 'Copied package input differs.' }
@@ -132,6 +150,7 @@ $receipt = [pscustomobject]@{
   runtimeNoticeCollectorSha256=(Hash (Join-Path $PSScriptRoot 'windows-package-runtime-notices.ps1'))
   helperSha256=$helperSha;rootLicenseSha256=$licenseSha;completeThirdPartyAttribution=$false
   runtimeNotices=$runtimeNotices.notices
+  helperModuleNotices=[pscustomobject]@{manifestSha256=$moduleManifestSha;moduleCount=66;noticeFiles=99;completeThirdPartyAttribution=$false}
   payloadFiles=$inventory.Count;payloadBytes=($inventory | Measure-Object bytes -Sum).Sum;inventorySha256=(Hash $inventoryPath)
   packageBytes=(Get-Item -LiteralPath $package).Length;packageSha256=(Hash $package);validatedPack=$true;unpackedInventoryExact=$true
   sourceAcceptanceVerified=$false;runtimeTestsExecuted=$false

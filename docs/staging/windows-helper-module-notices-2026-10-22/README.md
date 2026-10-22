@@ -48,6 +48,7 @@ the unsigned preview), Go runtime/toolchain notices, native CGO/linked Windows
 component provenance, and any source modifications implied by
 `vcs.modified=true`. No publisher/signing/install/update qualification, license
 purchase, legal conclusion, binary publication or production change is implied.
-`completeThirdPartyAttribution` remains false. This source bundle is deliberately
-not yet wired into the product's package preview until the remaining scope is
-reviewed.
+`completeThirdPartyAttribution` remains false. The unsigned package preview
+retains these99 notice texts and their provenance manifest conservatively for
+the exact helper hash. Inclusion is useful attribution material; it does not
+clear the remaining distribution requirements.
