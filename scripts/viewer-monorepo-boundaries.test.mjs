@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
+import { createRequire } from 'node:module';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const read = relative => fs.readFileSync(path.join(root, relative), 'utf8').replace(/\r\n/g, '\n');
@@ -18,6 +19,19 @@ function steps(source) {
 }
 const migratedSteps = steps(workflow);
 const originalSteps = steps(upstream);
+const { MIGRATIONS } = createRequire(import.meta.url)('../apps/viewer/server/database.js');
+// The original imported workflow is historical evidence. The controller-pin
+// migration advances only these two reviewed schema gates from 38 to 39; every
+// other byte of the upstream verification/promotion contract stays compared.
+function reviewedUpstreamStep(name) {
+  const original = originalSteps.get(name);
+  if (!['Verify exact candidate image', 'Write verified release attestation'].includes(name)) return original;
+  assert.equal(MIGRATIONS.at(-1).version, 39, 'another schema advance requires a new explicit gate review');
+  assert.equal(original.split('EXPECTED_SCHEMA_VERSION: "38"').length - 1, 1);
+  assert.equal(migratedSteps.get(name).split('EXPECTED_SCHEMA_VERSION: "39"').length - 1, 1);
+  return original.replace('EXPECTED_SCHEMA_VERSION: "38"', 'EXPECTED_SCHEMA_VERSION: "39"');
+}
+
 
 test('Viewer publication only watches its imported application and workflow', () => {
   assert.doesNotMatch(workflow, /^  workflow_dispatch:/m);
@@ -61,7 +75,7 @@ test('All upstream runtime and numerical-engine verification remains intact', ()
     'if [[ "$GITHUB_EVENT_NAME" == "push" && "$GITHUB_REF" == "refs/heads/main" ]]; then',
     'if [[ "$GITHUB_EVENT_NAME" == "push" ]]; then',
   );
-  assert.equal(actual, originalSteps.get('Verify exact candidate image'), 'The monorepo move must not omit or alter the upstream runtime gate');
+  assert.equal(actual, reviewedUpstreamStep('Verify exact candidate image'), 'Only the reviewed schema-39 advance may differ from the upstream runtime gate');
   assert.ok(workflow.indexOf('- name: Verify exact candidate image') < workflow.indexOf('- name: Promote verified digest to release tags'));
   assert.match(actual, /test "\$CANDIDATE_DIGEST" = "\$IMAGE_DIGEST"/);
   assert.match(actual, /VERIFY_IMAGE="\$IMAGE_NAME@\$IMAGE_DIGEST"/);
@@ -71,7 +85,7 @@ test('All upstream runtime and numerical-engine verification remains intact', ()
 test('Promotion and attestation retain exact verified digest semantics', () => {
   for (const name of ['Promote verified digest to release tags', 'Write verified release attestation']) {
     const actual = migratedSteps.get(name).replace(`if: ${releaseGuard}`, "if: github.event_name == 'push'");
-    assert.equal(actual, originalSteps.get(name), `${name} must retain the upstream digest/attestation checks`);
+    assert.equal(actual, reviewedUpstreamStep(name), `${name} must retain the upstream digest/attestation checks`);
   }
   assert.match(migratedSteps.get('Upload release attestation'), /path: \|\n            apps\/viewer\/viewer-image-attestation\.json\n            apps\/viewer\/viewer-image-attestation\.json\.sha256/);
 });

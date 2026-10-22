@@ -168,6 +168,8 @@ async function handle(request: Request, env: Env): Promise<Response> {
       return json(origin, { error: "Operations authorization is too close to expiry to renew" }, 401);
     const units = await resolveViewerUnits(env, verified.principal.id);
     const grant = await viewerServiceClient(env).createAdminGrant({
+      controllerOrigin: new URL(request.url).origin,
+      targetSessionId: parsed.data.sessionId,
       subject: `ops:${verified.principal.id}`.slice(0, 200),
       permissions,
       authorizationExpiresAt: new Date(expiresAt * 1000).toISOString(),

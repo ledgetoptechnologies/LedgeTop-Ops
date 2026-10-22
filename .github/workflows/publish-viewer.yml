@@ -117,7 +117,7 @@ jobs:
           IMAGE_NAME: ${{ steps.image.outputs.name }}
           IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
           EXPECTED_REVISION: ${{ github.sha }}
-          EXPECTED_SCHEMA_VERSION: "38"
+          EXPECTED_SCHEMA_VERSION: "39"
           EXPECTED_OBJ2TILES_VERSION: "1.6.2"
           EXPECTED_OBJ2TILES_SOURCE_SHA256: "79093e12f6eab2cfcd522aebe670892c5d8874e160956b84f3e55c77b94ac0b5"
           EXPECTED_OBJ2TILES_PATCH_SHA256: "6d5d99ea1d1e36208e44d0456d35cb0d8c68092dfd4a6ad01288bf85bb67322b"
@@ -248,7 +248,7 @@ jobs:
           IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
           PUBLISHED_IMAGE: ${{ steps.image.outputs.name }}@${{ steps.build.outputs.digest }}
           EXPECTED_REVISION: ${{ github.sha }}
-          EXPECTED_SCHEMA_VERSION: "38"
+          EXPECTED_SCHEMA_VERSION: "39"
           EXPECTED_OBJ2TILES_VERSION: "1.6.2"
           EXPECTED_POTREE_VERSION: "1.8.2"
           VIEWER_SCHEMA_VERSION: ${{ steps.verify.outputs.schema-version }}

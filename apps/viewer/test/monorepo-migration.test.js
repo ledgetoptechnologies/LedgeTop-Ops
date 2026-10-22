@@ -41,7 +41,7 @@ test('the monorepo relocation preserves package identity and container runtime p
   assert.deepEqual(manifest.runtime.workerCommand, ['node', 'server/workerSupervisor.js']);
 });
 
-test('the unchanged schema reopens existing catalog data without moving its SQLite file or model asset', t => {
+test('the current schema preserves imported catalog data without moving its SQLite file or model asset', t => {
   const storage = fs.mkdtempSync(path.join(os.tmpdir(), 'viewer-monorepo-continuity-'));
   t.after(() => fs.rmSync(storage, { recursive: true, force: true }));
   const databasePath = path.join(storage, 'data', 'viewer.sqlite');
@@ -53,8 +53,9 @@ test('the unchanged schema reopens existing catalog data without moving its SQLi
   try {
     database.prepare('INSERT INTO app_state (key,value,updated_at) VALUES (?,?,?)')
       .run('monorepo-migration-continuity', JSON.stringify({ asset: 'models/existing-model.bin', marker: 'unchanged' }), '2026-10-21T00:00:00.000Z');
-    assert.equal(database.prepare('SELECT MAX(version) version FROM schema_migrations').get().version, manifest.runtime.schemaVersion);
-    assert.equal(MIGRATIONS.at(-1).version, manifest.runtime.schemaVersion);
+    assert.equal(database.prepare('SELECT MAX(version) version FROM schema_migrations').get().version, MIGRATIONS.at(-1).version);
+    assert.equal(manifest.runtime.schemaVersion, 38, "the immutable import manifest records its original schema");
+    assert.ok(MIGRATIONS.at(-1).version >= manifest.runtime.schemaVersion);
   } finally { database.close(); }
   const filesBefore = fs.readdirSync(path.dirname(databasePath)).sort();
   database = openDatabase(databasePath);
