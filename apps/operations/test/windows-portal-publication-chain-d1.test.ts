@@ -34,6 +34,8 @@ import { createWindowsPortalSuccessorRouter, type WindowsPortalSuccessorRouteEnv
 import { createOperationsNativeQueueRouter } from "../../client/src/worker/client-portal/operations-native-queue-routes";
 import { encodeOperationsNativeDeliveryHandle } from "../../client/src/worker/client-portal/operations-native-delivery-handles";
 import { readOperationsPortalNativeDeliveryAuthorizationEntrypoint } from "../src/worker/operations-portal-native-delivery-authority-reader";
+import { readWindowsPortalCatalogSuccessorAuthorizationEntrypoint } from "../src/worker/operations-portal-native-delivery-authority-reader";
+import { createWindowsPortalCatalogRouter, type WindowsPortalCatalogRouteEnv } from "../../client/src/worker/client-portal/windows-portal-catalog-routes";
 
 describe("Windows publication history evidence with real canonical Ops/Client producers", () => {
   it("retains an unchanged grant across applied refreshes, excludes pending commands, and rejects revocation", async () => {
@@ -49,7 +51,7 @@ describe("Windows publication history evidence with real canonical Ops/Client pr
       const operationId = id(), authorityId = id();
       await issueOperationsPortalNativeDeliveryAuthority(db, { operationId, authorityId, owner,
         recipientBindingId: ctx.recipient.recipientBindingId, folderReservationId: candidate.folderReservationId,
-        expectedRevision: 0, expectedCandidateFingerprint: candidate.candidateFingerprint, features: ["file.download"],
+        expectedRevision: 0, expectedCandidateFingerprint: candidate.candidateFingerprint, features: ["folder.list", "file.metadata", "file.download"],
         expiresAt: new Date(Date.now() + 3600_000).toISOString(), reasonCode: "Synthetic Windows publication chain" });
       const wire = await db.prepare("SELECT canonical_wire_json wire FROM operations_portal_native_delivery_authority_outbox WHERE operation_id=?")
         .bind(operationId).first<string>("wire");
@@ -93,15 +95,38 @@ describe("Windows publication history evidence with real canonical Ops/Client pr
       if (!object) throw new Error("missing synthetic object");
       await client.prepare("INSERT INTO file_index(r2_key,etag,size,uploaded_at,content_type,media_kind) VALUES(?,?,?,datetime('now'),'application/octet-stream','other')")
         .bind(storageKey, object.etag, bytes.length).run();
+      const unicodeKey = grant.resource.selectedR2Prefix + "Unicode🚁/ 彩色🚁 map.bin";
+      const unicodeObject = await ctx.bucket.put(unicodeKey, bytes, { sha256: checksum });
+      await client.prepare("INSERT INTO file_index(r2_key,etag,size,uploaded_at,content_type,media_kind) VALUES(?,?,?,datetime('now'),'application/octet-stream','other')")
+        .bind(unicodeKey, unicodeObject!.etag, bytes.length).run();
       const queueEnv = { ...consumerEnv, CLIENT_PORTAL_ENABLED: "true", DATA_BUCKET: ctx.bucket,
         DELIVERY_SESSION_SECRET: "synthetic-successor-desktop-secret-".repeat(3), CLIENT_ACCESS_TEAM_DOMAIN: ctx.issuer, CLIENT_ACCESS_AUD: audience,
         CLIENT_PORTAL_OPERATIONS_NATIVE_CONTENT_AUDIT_ENABLED: "true", CLIENT_PORTAL_OPERATIONS_NATIVE_CONTENT_AUDIT_HMAC_SECRET: "synthetic-successor-audit-secret-".repeat(3),
         OPERATIONS_PORTAL_NATIVE_DELIVERY_AUTHORIZATION_READER: { ...consumerEnv.OPERATIONS_PORTAL_NATIVE_DELIVERY_AUTHORIZATION_READER,
+          readWindowsCatalogSuccessorAuthorization: (wire: string, feature: "folder.list" | "file.metadata") =>
+            readWindowsPortalCatalogSuccessorAuthorizationEntrypoint(opsEnv, wire, feature),
           readNativeDeliveryAuthorization: (input: Parameters<typeof readOperationsPortalNativeDeliveryAuthorizationEntrypoint>[1]) =>
-            readOperationsPortalNativeDeliveryAuthorizationEntrypoint(opsEnv, input) } } as unknown as WindowsPortalSuccessorRouteEnv;
+            readOperationsPortalNativeDeliveryAuthorizationEntrypoint(opsEnv, input) } } as unknown as WindowsPortalCatalogRouteEnv;
       const config = { enabled: true, portalOrigin: origin, issuer: ctx.issuer, audience, queueKey: new Uint8Array(32).fill(17) };
       const queue = createOperationsNativeQueueRouter(config), downloads = createWindowsPortalSuccessorRouter(config);
+      const catalog = createWindowsPortalCatalogRouter(config), catalogBase = "/api/client/operations/data/windows-catalog";
+      const selectedPrefix = grant.resource.selectedR2Prefix;
       const request = (path: string, extra: HeadersInit = {}) => new Request(origin + path, { headers: { "Cf-Access-Jwt-Assertion": jwt, ...extra } });
+      async function browse() {
+        const listed = await catalog.fetch(request(catalogBase + "/deliveries"), queueEnv); expect(listed.status).toBe(200);
+        const root = (await listed.json() as { items: { id: string }[] }).items[0]!.id;
+        const opened = await catalog.fetch(request(catalogBase + "/folders/" + root), queueEnv); expect(opened.status).toBe(200);
+        const folder = await opened.json() as { files: { id: string; name: string; downloadAvailable: boolean }[]; folders: { id: string; name: string }[] };
+        expect(folder.files).toHaveLength(1); expect(folder.files[0]).toMatchObject({ name: "successor-map.bin", downloadAvailable: true });
+        expect(JSON.stringify(folder)).not.toContain(selectedPrefix);
+        const unicodeFolder = folder.folders.find(item => item.name === "Unicode🚁"); expect(unicodeFolder).toBeDefined();
+        const nestedResponse = await catalog.fetch(request(catalogBase + "/folders/" + unicodeFolder!.id), queueEnv); expect(nestedResponse.status).toBe(200);
+        const nested = await nestedResponse.json() as typeof folder;
+        expect(nested.files).toEqual([{ id: expect.stringMatching(/^wpc1_/u), name: " 彩色🚁 map.bin", size: bytes.length, downloadAvailable: true }]);
+        return { root, file: folder.files[0]!.id };
+      }
+      const initialCatalog = await browse();
+      expect((await catalog.fetch(request(catalogBase + "/files/" + initialCatalog.file), queueEnv)).status).toBe(200);
       const g = grant;
       const selector = await encodeOperationsNativeDeliveryHandle(queueEnv, { v: 1, kind: "file", authorityId, authorityRevision: g.authority.resultingRevision,
         ...g.recipient, targetId: g.target.targetId, targetRevision: g.target.targetRevision, clientAuthorityId: g.target.clientAuthorityId, workspaceId: g.target.workspaceId,
@@ -157,6 +182,20 @@ describe("Windows publication history evidence with real canonical Ops/Client pr
       const consumer = await authorizeWindowsPortalSuccessor(consumerEnv, { issuer: ctx.issuer, subject: ctx.subject }, authorityId);
       expect(consumer).toMatchObject({ ok: true, successorContext: { originalRequestFingerprint: refreshed.grantFingerprint,
         continuity: refreshed, originalGrant: grant } });
+      // Browsing has its own explicit feature proof. Old page selectors fail;
+      // discovery at publication2 returns fresh metadata without forging a grant.
+      expect((await catalog.fetch(request(catalogBase + "/folders/" + initialCatalog.root), queueEnv)).status).toBe(404);
+      expect((await catalog.fetch(request(catalogBase + "/files/" + initialCatalog.file), queueEnv)).status).toBe(404);
+      const refreshedCatalog = await browse();
+      const catalogSelection = await queue.fetch(request("/api/client/operations/data/queue/reference?fileHandle=" + refreshedCatalog.file), queueEnv);
+      expect(catalogSelection.status).toBe(200);
+      const catalogReference = await catalogSelection.json() as { resourceRef: string };
+      const catalogResolvedResponse = await queue.fetch(request("/api/client/operations/data/queue/resolve?resourceRef=" + catalogReference.resourceRef), queueEnv);
+      expect(catalogResolvedResponse.status).toBe(200);
+      expect((await catalogResolvedResponse.json() as Resolved).manifest.logicalFileId).toBe(beforeManifest.logicalFileId);
+      const catalogManifestResponse = await catalog.fetch(request(catalogBase + "/files/" + refreshedCatalog.file + "/download-manifest"), queueEnv);
+      expect(catalogManifestResponse.status).toBe(200);
+      expect((await catalogManifestResponse.json() as Resolved["manifest"]).logicalFileId).toBe(beforeManifest.logicalFileId);
       const renewedResponse = await resolve(); expect(renewedResponse.status).toBe(200);
       const renewed = (await renewedResponse.json() as Resolved).manifest;
       expect(renewed.logicalFileId).toBe(beforeManifest.logicalFileId);
@@ -203,6 +242,8 @@ describe("Windows publication history evidence with real canonical Ops/Client pr
         .resolves.toEqual({ ok: false, code: "denied" });
       expect((await resolve()).status).toBe(409);
       expect((await downloads.fetch(request(renewed.downloadPath), queueEnv)).status).toBe(404);
+      expect((await catalog.fetch(request(catalogBase + "/deliveries"), queueEnv)).status).toBe(404);
+      expect((await catalog.fetch(request(catalogBase + "/files/" + refreshedCatalog.file + "/download-manifest"), queueEnv)).status).toBe(404);
       expect(await client.prepare("SELECT count(*) n FROM windows_portal_successor_content_start_events").first("n")).toBe(1);
       expect((await db.prepare("PRAGMA foreign_key_check").all()).results).toEqual([]);
     }, { stopAfterReady: true, operationsThroughMigration: "0203_effective_native_directory_enrollment_consumers.sql" });

@@ -69,6 +69,14 @@ internal static class QueuedDownloadSourceTests
         }),new Downloader([f.Session.Origin]));
         Assert((await portal.GetReferenceAsync("ond1_current")).ResourceReference==Reference);
         await Throws<ArgumentException>(()=>portal.GetReferenceAsync("eof1_wrong_source"));
+        using var catalog = new PortalQueuedDownloadSource("portal",f.Session,new Handler((r,_)=>{
+            Assert(r.RequestUri!.Query=="?fileHandle=wpc1_current_catalog");return Task.FromResult(Json(Envelope(false,true)));
+        }),new Downloader([f.Session.Origin]));
+        Assert((await catalog.GetReferenceAsync("wpc1_current_catalog")).ResourceReference==Reference);
+        var catalogCalls=f.Runner.Calls;
+        foreach(var unsafeHandle in new[]{"wsp1_bytes","wpc1_","wpc1_../escape","wpc1_valid?other=1","wpc1_%2f","wpc1_quoted=","https://evil.example/","wpc1_a\r\nHeader:1"})
+            await Throws<ArgumentException>(()=>catalog.GetReferenceAsync(unsafeHandle));
+        Assert(f.Runner.Calls==catalogCalls);
     }
     private static async Task InvalidManifests() {
         foreach(var employee in new[]{true,false}) foreach(var key in new[]{"downloadPath","logicalFileId","remoteVersion","strongETag","size","sha256","name","expiresAt","unknown"}) {

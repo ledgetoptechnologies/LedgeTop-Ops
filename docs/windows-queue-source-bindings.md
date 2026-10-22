@@ -67,7 +67,7 @@ unchanged provider version/content can resume an old partial. Revocation,
 regrant, ownership change and folder remap still fail closed. Publication changes
 are accepted only through the complete retained-history proof below.
 
-## Portal publication continuity source; live/catalog qualification unfinished
+## Portal publication continuity source; live qualification unfinished
 
 The unmounted `windows-portal-publication-chain.ts` evidence reader now proves
 one prerequisite: an uninterrupted, bounded sequence of acknowledged applied
@@ -109,9 +109,12 @@ index and R2 identity checks before final streamed handoff.
 
 The new source accepts a proved refresh for an old queue reference; it never
 removes original publication or delivery revision pins to follow replacement
-authority. Current deployed routes are unchanged. Catalog discovery, folder
-listing and file metadata still need separate continuity support, and human
-staging plus large-file qualification remain required before release.
+authority. Current deployed routes are unchanged. The new dedicated Windows
+catalog uses separate `wpc1_` metadata selectors and explicit list/metadata RPC
+proofs; queue selection separately proves download permission and converts the
+same original grant into a durable reference without eager storage reads. See
+`windows-portal-catalog-contract.md`. Human staging and large-file qualification
+remain required before release.
 
 The existing authoritative producer seam is
 `operations-portal-native-delivery-authority-issuer.ts`'s `contextSql`, which

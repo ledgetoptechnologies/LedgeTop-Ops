@@ -68,13 +68,13 @@ describe("successor candidate query against real Client schema", () => {
     } finally { await runtime.dispose(); }
   });
 
-  it("tracks current applied publication while preserving original grant and terminal revoke fences", async () => {
+  it.each(["file.download", "folder.list", "file.metadata"] as const)("tracks %s current applied publication while preserving original grant and terminal revoke fences", async feature => {
     const runtime = new Miniflare({ modules: true, compatibilityDate: "2026-08-06", script: "export default {}",
       d1Databases: { DB: crypto.randomUUID() } });
     try {
       const db = await runtime.getD1Database("DB") as unknown as D1Database;
       await schema(db); await apply(db, migration);
-      let command = grant(), published = publication(command);
+      let command: OperationsPortalNativeDeliveryAuthorityCommand = { ...grant(), features: [feature] }, published = publication(command);
       published = { ...published, snapshot: { ...published.snapshot, snapshotSha256: await sha256OperationsPortalWorkspaceSnapshot(published) } };
       const receipt = await consumeOperationsPortalWorkspacePublication(db, published);
       command = { ...command, publication: { ...command.publication, snapshotSha256: published.snapshot.snapshotSha256 } };

@@ -37,6 +37,12 @@ describe("bounded Windows publication chain evidence validation", () => {
     expect(Object.isFrozen(result.current)).toBe(true);
     expect(JSON.stringify(result)).not.toContain("synthetic/photos/");
   });
+  it.each(["folder.list", "file.metadata"] as const)("accepts explicit %s-only evidence without changing the download default", async feature => {
+    const g = { ...grant(), features: [feature] };
+    await expect(read(database().db, g, feature)).resolves.toMatchObject({ publicationCount: 3 });
+    await expect(read(database().db, g)).rejects.toThrow("chain_unproven");
+    await expect(read(database().db, g, "file.preview" as never)).rejects.toThrow("chain_unproven");
+  });
   it("rejects overflow before scanning history", async () => {
     const test = database(65);
     await expect(read(test.db, grant())).rejects.toThrow("chain_unproven");
