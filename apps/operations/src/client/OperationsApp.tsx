@@ -55,6 +55,7 @@ import { ImageLocationMap } from "./ImageLocationMap";
 import { constrainViewerOffset, pointerAnchoredOffset } from "./viewer-zoom";
 import { activeShareLoadError, createShareLoadDeadline } from "./share-load-deadline";
 import { ViewerProcessingPanel } from "./ViewerProcessingPanel";
+import { SignInProblem, type StartupFailure } from "./SignInProblem";
 import {
   activateDeliveryFolderCache,
   deactivateDeliveryFolderCache,
@@ -269,7 +270,7 @@ const destinationRequest = (action: string, count: number, prefix: string): Text
 
 export function OperationsApp() {
   const [session, setSession] = useState<Session | null>(null),
-    [error, setError] = useState(""),
+    [error, setError] = useState<StartupFailure | null>(null),
     [page, setPage] = useState<Page>(pathPage(location.pathname)),
     [mobileNavOpen, setMobileNavOpen] = useState(false),
     [manageOpen, setManageOpen] = useState(false);
@@ -338,7 +339,7 @@ export function OperationsApp() {
         setSession(value);
         normalizeLocation(value);
       })
-      .catch((caught) => {if (!controller.signal.aborted) setError(caught.message);});
+      .catch((caught) => {if (!controller.signal.aborted) setError({status: caught instanceof ApiError ? caught.status : null, message: caught.message});});
     return () => controller.abort();
   }, []);
   useEffect(() => {
@@ -393,12 +394,7 @@ export function OperationsApp() {
     setManageOpen(false);
     window.scrollTo(0, 0);
   }
-  if (error)
-    return (
-      <main className="fatal">
-        <EmptyState title="Operations unavailable" detail={error} />
-      </main>
-    );
+  if (error) return <SignInProblem failure={error} />;
   if (!session)
     return (
       <main className="fatal">
