@@ -30,9 +30,10 @@ separate from employee/client delivery activation.
 ### Installer target
 
 Use a per-user, signed MSIX desktop package as the first distribution candidate.
-Keep the private GitHub source repository private. Publish signed binary artifacts
-through a dedicated HTTPS download endpoint after release approval. A GitHub
-source login must not be needed to install or update the app. Use separate pilot
+The owner has made the source repository public for CI. Source visibility does
+not provision file access or authorize binary publication. Publish signed binary
+artifacts through a dedicated HTTPS download endpoint after release approval. A
+GitHub source login must not be needed to install or update the app. Use separate pilot
 and stable identities/channels so a staging app cannot replace production state.
 
 MSIX supports desktop applications; it does not require converting the transfer
