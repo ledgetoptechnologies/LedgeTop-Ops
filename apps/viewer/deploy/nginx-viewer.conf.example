@@ -1,0 +1,107 @@
+# External Nginx reference for viewer.ledgetopdroneservices.com.
+# This file is NOT mounted or started by docker-compose.yml. Adapt it in the
+# separately managed Nginx `http {}` context and replace the LAN address,
+# certificate paths, and trusted cloudflared source address.
+
+# http{} scope --------------------------------------------------------------
+limit_req_zone $binary_remote_addr zone=viewer_redeem:10m rate=5r/s;
+limit_req_zone $binary_remote_addr zone=viewer_share:10m rate=10r/s;
+limit_req_zone $binary_remote_addr zone=viewer_assets:10m rate=500r/s;
+limit_conn_zone $binary_remote_addr zone=viewer_asset_connections:10m;
+
+map $http_upgrade $viewer_connection_upgrade {
+    default upgrade;
+    '' close;
+}
+
+upstream ltds_viewer_lan {
+    # Direct host-published viewer-api port. Do not point this at the Internet.
+    server 192.168.50.80:8088;
+    # Optional only when Viewer is deliberately bound on both routed subnets:
+    # server 192.168.10.80:8088 backup;
+    keepalive 32;
+}
+
+# Optional follow-up hardening: store this separately with root/nginx-readable
+# mode 640 and uncomment both the include and proxy header below:
+#   map $host $viewer_proxy_secret {
+#       default "GENERATED_43_CHARACTER_BASE64URL_SECRET";
+#   }
+# include /etc/nginx/secrets/viewer-proxy-secret.conf;
+
+server {
+    listen 443 ssl http2;
+    server_name viewer.ledgetopdroneservices.com;
+
+    # ssl_certificate ...;
+    # ssl_certificate_key ...;
+
+    # Trust only the exact cloudflared/local proxy source. Never use 0.0.0.0/0.
+    # Adjust this address to the real tunnel process/container source.
+    set_real_ip_from 127.0.0.1;
+    real_ip_header CF-Connecting-IP;
+    real_ip_recursive on;
+
+    client_max_body_size 33m;
+    client_body_timeout 60s;
+    send_timeout 300s;
+
+    # Overwrite forwarding headers so clients cannot add fake proxy hops.
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-Host $host;
+    proxy_set_header X-Forwarded-Proto https;
+    proxy_set_header X-Forwarded-For $remote_addr;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection $viewer_connection_upgrade;
+    proxy_set_header Range $http_range;
+    proxy_set_header If-Range $http_if_range;
+    # Optional with PROXY_SHARED_SECRET enabled in Viewer. This replacement
+    # discards any inbound copy. Never use the client header value.
+    # proxy_set_header X-Viewer-Proxy-Secret $viewer_proxy_secret;
+    proxy_redirect off;
+    proxy_cache off;
+
+    location = /api/v1/admin-sessions/redeem {
+        limit_req zone=viewer_redeem burst=10 nodelay;
+        proxy_pass http://ltds_viewer_lan;
+    }
+
+    location ^~ /api/share/ {
+        access_log off;
+        limit_req zone=viewer_share burst=30 nodelay;
+        add_header Cache-Control "private, no-store" always;
+        proxy_pass http://ltds_viewer_lan;
+    }
+
+    location ^~ /api/v1/admin/uploads/ {
+        proxy_request_buffering off;
+        proxy_buffering off;
+        proxy_read_timeout 300s;
+        proxy_send_timeout 300s;
+        proxy_pass http://ltds_viewer_lan;
+    }
+
+    # Capability-bearing paths must not enter proxy caches or access logs.
+    # Streaming is range-friendly; authorization and byte integrity remain in
+    # the Viewer application because X_ACCEL_REDIRECT_PREFIX is empty.
+    location ~ ^/(session-assets|assets|view|embed)/ {
+        access_log off;
+        limit_req zone=viewer_assets burst=1000 nodelay;
+        limit_conn viewer_asset_connections 64;
+        proxy_buffering off;
+        proxy_request_buffering off;
+        proxy_force_ranges on;
+        proxy_max_temp_file_size 0;
+        proxy_read_timeout 300s;
+        add_header Cache-Control "private, no-store" always;
+        proxy_pass http://ltds_viewer_lan;
+    }
+
+    location / {
+        proxy_read_timeout 60s;
+        proxy_send_timeout 60s;
+        proxy_pass http://ltds_viewer_lan;
+    }
+}

@@ -1,0 +1,4 @@
+'use strict';
+const {signViewerEvent}=require('./viewerEvents');
+async function deliverOneEvent(processing,config,fetchImpl=fetch){if(!config.viewerEventUrl)return false;const event=processing.claimEvent();if(!event)return false;try{const url=new URL(config.viewerEventUrl),body=event.payload_json,headers=signViewerEvent({secret:config.viewerEventSecret,keyId:config.viewerEventKeyId,method:'POST',path:url.pathname,body});const response=await fetchImpl(url,{method:'POST',redirect:'error',signal:AbortSignal.timeout(15000),headers:{...headers,'Content-Type':'application/json','Idempotency-Key':event.id},body});if(!response.ok)throw new Error(`callback rejected with HTTP ${response.status}`);await response.body?.cancel();processing.deliverEvent(event.id);}catch(error){processing.retryEvent(event.id,error.message,event.attempt_count);}return true;}
+module.exports={deliverOneEvent};

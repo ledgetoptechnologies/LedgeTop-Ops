@@ -1,0 +1,8 @@
+diff --git a/Src/MultiThreading.h b/Src/MultiThreading.h
+--- a/Src/MultiThreading.h
++++ b/Src/MultiThreading.h
+@@ -176,1 +176,3 @@
+-	inline unsigned int ThreadPool::_NumThreads = std::thread::hardware_concurrency();
++	// LTDS measurement jobs have a fixed two-thread budget, independently of
++	// host CPU count and OpenMP environment settings.
++	inline unsigned int ThreadPool::_NumThreads = 2;

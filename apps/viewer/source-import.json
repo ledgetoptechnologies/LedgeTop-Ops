@@ -1,0 +1,50 @@
+{
+  "schemaVersion": 1,
+  "upstream": {
+    "repository": "https://github.com/ledgetoptechnologies/3D-Viewer",
+    "commit": "44208101dff490e88069b9838730cc18ff08c544",
+    "tree": "4f1d12a2a7e805b15e6af2db27fb31b896d55270",
+    "trackedFiles": 615
+  },
+  "destination": "apps/viewer",
+  "packageName": "ltds-3d-viewer",
+  "image": "ghcr.io/ledgetoptechnologies/ledgetop-ops-viewer:latest",
+  "previousImage": "ghcr.io/ledgetoptechnologies/3d-viewer:latest",
+  "baselineCompose": {
+    "fixture": "test/fixtures/monorepo-migration/docker-compose.viewer-4420810.yml",
+    "sha256": "ec82dd8383b6291406499fd047695ad287cda824192e706136c1ffadfbf62776"
+  },
+  "runtime": {
+    "workdir": "/app",
+    "uid": 568,
+    "gid": 568,
+    "port": 8088,
+    "schemaVersion": 38,
+    "services": [
+      "viewer-api",
+      "viewer-worker"
+    ],
+    "storageTarget": "/app/storage",
+    "databasePath": "/app/storage/data/viewer.sqlite",
+    "workerCommand": [
+      "node",
+      "server/workerSupervisor.js"
+    ]
+  },
+  "sourcePolicy": "Tracked files from the exact upstream commit only; no local working files, data, secrets, or unmerged pull requests.",
+  "outstandingUpstreamPullRequests": [
+    {
+      "number": 21,
+      "url": "https://github.com/ledgetoptechnologies/3D-Viewer/pull/21",
+      "statusAtImport": "open",
+      "included": false,
+      "note": "Claude production UI/current-tab recovery requires a separate reviewed migration."
+    },
+    {
+      "number": 10,
+      "url": "https://github.com/ledgetoptechnologies/3D-Viewer/pull/10",
+      "statusAtImport": "open; held on dev",
+      "included": false
+    }
+  ]
+}

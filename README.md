@@ -43,11 +43,19 @@ Project Alpha is authoritative for explicitly selected users, Project Managers a
 
 ## Repository
 
+The 3D Viewer API, processing worker, and browser application live in
+[`apps/viewer`](apps/viewer/README.md). They share a separately deployed Docker
+image, `ghcr.io/ledgetoptechnologies/ledgetop-ops-viewer:latest`; they are not
+Cloudflare Workers. See the [Viewer migration runbook](apps/viewer/docs/OPERATIONS_MONOREPO_MIGRATION.md)
+before changing an existing stack. Its services, storage, database, and settings
+stay in place when switching the image name.
+
 ```text
 apps/
   operations/  React/Vite staff UI + Hono Worker API
   client/      React/Vite client UI + Hono Worker API
   ops-sync/    Project Alpha webhook + Cloudflare Access reconciliation Worker
+  viewer/      3D Viewer browser app, Node API, worker, and Docker image
 packages/
   shared/      permission and API contracts
   ui/          LTDS branding and reusable React UI
@@ -56,7 +64,7 @@ docs/
   operations/  production operations and recovery runbooks
 ```
 
-Each app intentionally has its own `package.json`, lockfile, `wrangler.jsonc`, migrations, and deploy lifecycle. Cloudflare Builds must use the application directory as its root and run `npm run deploy`.
+Each Cloudflare app intentionally has its own `package.json`, lockfile, `wrangler.jsonc`, migrations, and deploy lifecycle. Cloudflare Builds must use the application directory as its root and run `npm run deploy`. Viewer uses its own locked dependencies and the dedicated `publish-viewer.yml` workflow, which verifies the container before publishing it. Run `npm ci --prefix apps/viewer` and `npm run viewer:check` for its tests.
 
 | Worker | Build root | Deploy command |
 |---|---|---|

@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Camera marker visual reference</title>
+<style>
+body { margin:0; background:#15191e; color:#eee; font:16px system-ui; }
+h1 { font-size:22px; margin:24px; }
+#views { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:8px; padding:12px; }
+section { text-align:center; background:#222830; border-radius:8px; overflow:hidden; }
+canvas { display:block; width:100%; }
+p { margin:12px; }
+@media(max-width:700px) { #views { grid-template-columns:repeat(2,minmax(0,1fr)); } }
+</style>
+<h1>Camera marker: back, front, angled, rolled</h1>
+<div id="views"></div>
+<script type="module">
+import * as THREE from 'three';
+import { cameraMarkerGeometryData, CAMERA_MARKER_COLORS, CAMERA_MARKER_OPACITY } from '../../camera-markers.mjs';
+const examples = [
+  ['Back / image-up', [Math.PI, 0, 0]],
+  ['Front / viewing direction', [0, 0, Math.PI]],
+  ['Angled back', [Math.PI-0.35, 0.5, 0]],
+  ['Rolled capture', [Math.PI, 0, Math.PI]],
+];
+for (const [label, angles] of examples) {
+  const section = document.createElement('section');
+  const caption = document.createElement('p'); caption.textContent = label;
+  document.querySelector('#views').append(section);
+  const renderer = new THREE.WebGLRenderer({antialias:true});
+  renderer.setPixelRatio(devicePixelRatio); renderer.setSize(360,280);
+  renderer.setClearColor(0x222830); section.append(renderer.domElement,caption);
+  const scene = new THREE.Scene();
+  const group = new THREE.Group(); group.rotation.set(...angles); scene.add(group);
+  for (const [key, positions] of Object.entries(cameraMarkerGeometryData())) {
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position',new THREE.Float32BufferAttribute(positions,3));
+    const mesh = new THREE.Mesh(geometry,new THREE.MeshBasicMaterial({
+      color:CAMERA_MARKER_COLORS[key], transparent:true,
+      opacity:CAMERA_MARKER_OPACITY.normal, side:THREE.FrontSide, depthWrite:false,
+    }));
+    mesh.renderOrder = group.children.length; group.add(mesh);
+  }
+  const camera = new THREE.PerspectiveCamera(35,360/280,0.01,20);
+  camera.position.set(0,0,3.3); camera.lookAt(0,0,0);
+  renderer.render(scene,camera);
+}
+</script>
+</html>

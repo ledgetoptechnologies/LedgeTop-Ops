@@ -1,0 +1,47 @@
+{
+  "schemaVersion": 1,
+  "adminGrant": {
+    "secret": "viewer-shared-secret-32-characters-minimum",
+    "keyId": "ops-v1",
+    "method": "POST",
+    "path": "/api/v1/admin-grants",
+    "timestamp": 1800000000,
+    "nonce": "grant-nonce-1234567890",
+    "body": "{\"subject\":\"ops:staff-one\",\"permissions\":[\"viewer.projects.read\",\"viewer.datasets.read\",\"viewer.processing.read\",\"viewer.providers.read\",\"viewer.datasets.write\"],\"authorizationExpiresAt\":\"2027-01-15T08:30:00.000Z\",\"displayUnits\":\"imperial\"}",
+    "contentSha256": "133fc1c1e56d7b479cac4443d762ca933d2301eb1be3dd1f1ee50d62d6d25b0f",
+    "signature": "KTOOeax479XBC8UaQZLPAJ2sUTPQjnFC_naeX53YHR8"
+  },
+  "processingEvent": {
+    "secret": "viewer-event-secret-32-characters-minimum",
+    "keyId": "viewer-v1",
+    "method": "POST",
+    "path": "/api/viewer/events",
+    "timestamp": 1800000001,
+    "nonce": "event-nonce-1234567890",
+    "body": "{\"schemaVersion\":1,\"eventId\":\"event-ready-0001\",\"type\":\"processing.ready_for_review\",\"occurredAt\":\"2027-01-15T08:01:00.000Z\",\"projectId\":\"project-one\",\"taskId\":\"task-one\",\"attemptId\":\"attempt-one\",\"projectDisplayName\":\"North site\",\"taskDisplayName\":\"Map flight 1\",\"requestedBySubject\":\"ops:staff-one\",\"status\":\"ready_for_review\",\"reviewUrl\":\"https://ops.example.test/operations/processing?attemptId=attempt-one\"}",
+    "contentSha256": "e5a203baed7c61aa62664ee49d5c0948e27c182419766ffa5d89e5560e1d0b22",
+    "signature": "pyHRt2dEmVvaQ7rphy3hWAw7Xb72usge9lXlyl_SlwU"
+  },
+  "viewerClientGrantWorkspace": {
+    "secret": "viewer-event-secret-32-characters-minimum",
+    "keyId": "viewer-v1",
+    "method": "POST",
+    "path": "/api/viewer/workspace/client-grants",
+    "timestamp": 1800000003,
+    "nonce": "client-grants-nonce-1234567890",
+    "body": "{\"subject\":\"ops:staff-one\",\"action\":\"list\"}",
+    "contentSha256": "02488bb41e205bc919ac39e693ba55923e1c28a4a91113f365dc4005b376e638",
+    "signature": "GsipUK2b1fqZno57wfUsix6iAv9H_pdEjiqIiKGbWVg"
+  },
+  "sourceAuthorizationIntrospection": {
+    "secret": "viewer-event-secret-32-characters-minimum",
+    "keyId": "viewer-v1",
+    "method": "POST",
+    "path": "/api/viewer/source-authorizations/introspect",
+    "timestamp": 1800000002,
+    "nonce": "introspection-nonce-1234567890",
+    "body": "{\"authorizationId\":\"authorization-one\",\"authorizationVersion\":2,\"subject\":\"client-subject\",\"modelId\":\"model-one\",\"shareId\":\"share-one\"}",
+    "contentSha256": "509f9234a5033927d1167abdbab1d99b2a628498e6b5f96f78ef232a7607ab43",
+    "signature": "6K29QYzItVJLCYYuu-RDLxu1UJr2eAeTtz1-NZ9DuuI"
+  }
+}

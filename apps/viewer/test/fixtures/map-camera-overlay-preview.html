@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Map camera overlay QA</title>
+<link rel="stylesheet" href="/node_modules/leaflet/dist/leaflet.css">
+<style>body{margin:0;background:#15181d;color:#fff;font:14px system-ui}header{height:90px;padding:8px;box-sizing:border-box}button,select{margin:4px;padding:6px}#map{height:calc(100vh - 90px);background:repeating-linear-gradient(45deg,#28352f,#28352f 25px,#33443c 25px,#33443c 50px)}output{display:block}.legacy-camera svg{filter:drop-shadow(0 2px 2px #000)}</style></head>
+<body><header><label>Cameras <select id="count"><option>1000</option><option selected>10000</option><option>25000</option></select></label>
+<label>Renderer <select id="renderer"><option value="canvas">Shared canvas</option><option value="dom">Baseline DOM/SVG</option></select></label>
+<button id="toggle">Hide cameras</button><button id="motion">Run zoom/pan comparison</button><output id="status">Starting…</output><output id="metrics" aria-live="polite">No timed comparison yet.</output></header><div id="map"></div>
+<script type="module">
+import * as L from '/node_modules/leaflet/dist/leaflet-src.esm.js';
+import {createMapCameraOverlay} from '/map-camera-overlay.mjs';
+const map=L.map('map',{zoomControl:true}).setView([40,-90],12), status=document.querySelector('#status');
+let layer,records=[],visible=true,selected=null,drawn=0,motionTimer=null;
+const stats={frames:0,longTasks:[],rafIntervals:[],photoRequests:0};
+if('PerformanceObserver'in window){try{new PerformanceObserver(list=>{stats.longTasks.push(...list.getEntries().map(entry=>({start:entry.startTime,duration:entry.duration})));}).observe({entryTypes:['longtask']});}catch{}}
+function display(){status.textContent=`${records.length} sources / ${drawn} painted; ${document.querySelectorAll('.legacy-camera').length} DOM pins; selected ${selected??'none'}. Keyboard: Tab to Camera button, arrows/Home/End, Enter. No photo network requests.`;}
+function build(){if(layer)map.removeLayer(layer);records=Array.from({length:Number(document.querySelector('#count').value)},(_,source)=>({source,latlng:[40+(Math.floor(source/100)/Math.ceil(Number(document.querySelector('#count').value)/100)-.5)*.15,-90+(source%100/100-.5)*.15],bearing:source*13%360,label:`synthetic-${source}.jpg`}));
+if(document.querySelector('#renderer').value==='canvas'){layer=createMapCameraOverlay(L,{onSelect:source=>{selected=source;display();},onFrame:points=>{drawn=points.length;stats.frames++;display();}}).setData(records,24);}
+else{layer=L.layerGroup(records.map(record=>L.marker(record.latlng,{icon:L.divIcon({className:'legacy-camera',iconSize:[24,32],iconAnchor:[12,32],html:`<svg viewBox="0 0 24 32"><path d="M12 31C9 26 1 17 1 12a11 11 0 0 1 22 0c0 5-8 14-11 19Z" fill="#ee5007" stroke="#c73a0a"/><path d="M5 9h3l1.5-2h5L16 9h3v10H5Z" fill="white"/><circle cx="12" cy="14" r="3" fill="#ee5007"/><path d="M12 1.5 10 4.5h4Z" fill="#f8cb2e" transform="rotate(${record.bearing} 12 12)"/></svg>`})}).on('click',()=>{selected=record.source;display();})));
+drawn=records.length;}
+if(visible)layer.addTo(map);display();}
+document.querySelector('#count').onchange=build;document.querySelector('#renderer').onchange=build;
+document.querySelector('#toggle').onclick=()=>{visible=!visible;if(visible)layer.addTo(map);else map.removeLayer(layer);document.querySelector('#toggle').textContent=visible?'Hide cameras':'Show cameras';};
+document.querySelector('#motion').onclick=()=>{if(motionTimer)return;stats.longTasks=[];stats.rafIntervals=[];let previous=performance.now(),end=previous+7000,index=0;
+const controls=['#motion','#count','#renderer','#toggle'].map(selector=>document.querySelector(selector));controls.forEach(control=>control.disabled=true);document.querySelector('#metrics').textContent='Measuring the same seven-second zoom/pan sequence…';
+function frame(time){stats.rafIntervals.push(time-previous);previous=time;if(time<end)requestAnimationFrame(frame);else{const sorted=[...stats.rafIntervals].sort((a,b)=>a-b),at=p=>sorted[Math.min(sorted.length-1,Math.floor(sorted.length*p))]||0;document.querySelector('#metrics').textContent=`${document.querySelector('#renderer').value}, ${records.length} cameras, overlay ${visible?'on':'off'}: RAF p50 ${at(.5).toFixed(1)} ms / p95 ${at(.95).toFixed(1)} ms / max ${at(1).toFixed(1)} ms; long tasks ${stats.longTasks.length}, total ${stats.longTasks.reduce((sum,item)=>sum+item.duration,0).toFixed(1)} ms; ${sorted.length} frames. Synthetic fixture, not production telemetry.`;controls.forEach(control=>control.disabled=false);}}requestAnimationFrame(frame);
+motionTimer=setInterval(()=>{const step=index++%4;if(step===0)map.zoomIn();if(step===1)map.panBy([150,60]);if(step===2)map.zoomOut();if(step===3)map.panBy([-150,-60]);if(index>=8){clearInterval(motionTimer);motionTimer=null;display();}},700);};
+window.__mapCameraHarness={map,stats,get layer(){return layer;},get records(){return records;},get selected(){return selected;},build};build();
+</script></body></html>

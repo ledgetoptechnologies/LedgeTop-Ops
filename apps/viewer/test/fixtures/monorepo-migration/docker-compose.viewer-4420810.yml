@@ -1,0 +1,73 @@
+x-runtime: &runtime
+  image: ghcr.io/ledgetoptechnologies/3d-viewer:latest
+  pull_policy: always
+  restart: unless-stopped
+  # Updates drain active work first. This gives current database/filesystem
+  # operations time to finish before Docker sends SIGKILL.
+  stop_grace_period: 2m
+  init: true
+  read_only: true
+  # TrueNAS SCALE Apps service identity. The fixed host Storage dataset must
+  # be pre-created and owned by 568:568; startup never changes host ownership.
+  user: "568:568"
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  pids_limit: 256
+  env_file:
+    - ${VIEWER_ENV_FILE:-/mnt/Plugins/App_Data/Model-Viewer/Config/viewer.env}
+  tmpfs:
+    - "/tmp:rw,noexec,nosuid,nodev,size=256m"
+  logging: {driver: json-file, options: {max-size: 10m, max-file: "3"}}
+  environment: &runtime-env
+    PORT: 8088
+    EMERGENCY_ADMIN_ENABLED: "false"
+    PROCESSING_PLATFORM_ENABLED: ${PROCESSING_PLATFORM_ENABLED:-true}
+    LOCAL_DERIVATIVES_ENABLED: "false"
+    # Eligible new OBJ+GLB work always queues the required KTX2 derivative.
+    # Explicit false makes that work fail closed; it never bypasses readiness.
+    # Generation preserves the original mesh as the authenticated source/fallback.
+    MESH_DERIVATIVES_ENABLED: ${MESH_DERIVATIVES_ENABLED:-true}
+    OBJ2TILES_BIN: /opt/obj2tiles/Obj2Tiles
+    DATA_DIR: /app/storage/data
+    DATABASE_PATH: /app/storage/data/viewer.sqlite
+    DATASETS_MOUNT: /app/storage/datasets
+    MODELS_MOUNT: /app/storage/models
+    CACHE_MOUNT: /app/storage/cache
+    TRASH_MOUNT: /app/storage/trash
+    DATASET_IMPORT_MOUNT: /app/storage/imports/datasets
+    TERRA_IMPORT_MOUNT: /app/storage/imports/terra
+    WEBODM_MEDIA_MOUNT: /imports/webodm
+    X_ACCEL_REDIRECT_PREFIX: ""
+  volumes: &runtime-volumes
+    - type: bind
+      source: /mnt/Plugins/App_Data/Model-Viewer/Storage
+      target: /app/storage
+      bind:
+        create_host_path: false
+    - /mnt/Plugins/App_Data/WebODM/Media:/imports/webodm:ro
+
+services:
+  viewer-api:
+    <<: *runtime
+    ports: ["${VIEWER_BIND_ADDRESS:-192.168.50.80}:${VIEWER_PORT:-8088}:8088"]
+    healthcheck:
+      test: [CMD, node, scripts/container-healthcheck.js]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  viewer-worker:
+    <<: *runtime
+    # Obj2Tiles/KTX2 generation runs here on TrueNAS, never on the Hermes host.
+    # Fixed ceilings leave eight of the server's 24 CPU cores for NodeODM,
+    # ZFS, and serving. The database singleton additionally serializes conversion.
+    cpus: "16.0"
+    mem_limit: 24g
+    command: ["node", "server/workerSupervisor.js"]
+    healthcheck:
+      test: [CMD, node, -e, "const {config}=require('./server/config');const {openDatabase}=require('./server/database');const db=openDatabase(config.databasePath);const row=db.prepare(\"SELECT value FROM app_state WHERE key='processing_worker_heartbeat'\").get();db.close();const value=row&&JSON.parse(row.value);if(!value||Date.parse(value.at)<=Date.now()-30000)process.exit(1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
