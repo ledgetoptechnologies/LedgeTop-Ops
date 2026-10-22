@@ -36,6 +36,23 @@ its own synthetic files in tmpfs and has no host mounts; its ordinary Docker
 bridge permits outbound traffic and publishes inbound HTTP only on loopback.
 See `docs/staging/windows-local-employee-transport-2026-10-22.md`.
 
+The opt-in large employee run also passed with 3 GiB + 17 actual bytes,
+interrupted and resumed at byte 2,148,532,241. It uses a new plain local Docker
+volume for owned synthetic source/snapshots, checks disk capacity before writing,
+streams generation and verification, and leaves product deadlines unchanged.
+The final large run and ordinary 2 MiB regression both passed; revocation,
+cross-user and stale-version refusals remained effective. This does not qualify
+30 GiB files, a deployed proxy or live R2. See
+`docs/staging/windows-large-employee-transport-2026-10-22.md`.
+
+The latest unsigned construction validates 522 payload files after pack/unpack,
+including .NET, helper-module and Go runtime notices. An offline App Installer
+preview is bound to that actual package identity and SHA-256; its positive and
+20 refusal cases pass. It deliberately uses reserved `.invalid` URLs and cannot
+activate an update channel. Neither artifact is signed, installed or published.
+See `docs/staging/windows-go-notices-package-2026-10-22.md` and
+`docs/staging/windows-appinstaller-preview-2026-10-22.md`.
+
 Neither acceptance proves deployed staging, actual human sign-in, live R2,
 Engineering Hub execution, a signed installation or Cloud Files hydration.
 
