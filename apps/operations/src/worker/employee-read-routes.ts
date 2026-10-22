@@ -130,18 +130,33 @@ export function createEmployeeReadRouter(configuration: ReadConfiguration, depen
     if (c.req.header("If-Match") !== `"${handle.sha256}"`) return fail(412, "employee_read_etag");
     const requestedRange = range(c.req.header("Range") ?? null, handle.size);
     const boundedProof = { ...proof, verifiedUntil: new Date(Math.min(Date.parse(proof.verifiedUntil), handle.expiresAt * 1000)).toISOString() };
-    const response = await backend(boundedProof, { operation: "content", path: handle.path, expectedSha256: handle.sha256,
-      snapshotId: handle.snapshotId, range: requestedRange, cursor: null }, c.req.raw.signal);
-    if (response.status !== 200 && response.status !== 206) return response;
-    const expectedLength = requestedRange ? requestedRange.end - requestedRange.start + 1 : handle.size;
-    if (response.headers.get("Content-Length") !== String(expectedLength)
-      || (requestedRange !== null && response.headers.get("Content-Range") !== `bytes ${requestedRange.start}-${requestedRange.end}/${handle.size}`)) {
-      await discard(response); return fail(503, "employee_read_unavailable");
+    const owned = new AbortController();
+    const signal = AbortSignal.any([c.req.raw.signal, owned.signal]);
+    let response: Response | null = null, handedOff = false;
+    try {
+      response = await backend(boundedProof, { operation: "content", path: handle.path, expectedSha256: handle.sha256,
+        snapshotId: handle.snapshotId, range: requestedRange, cursor: null }, signal);
+      if (response.status !== 200 && response.status !== 206) {
+        // The backend returns static errors, not upstream diagnostics/content.
+        // Abort its request ownership without discarding the returned error body.
+        const error = response; response = null; return error;
+      }
+      const expectedLength = requestedRange ? requestedRange.end - requestedRange.start + 1 : handle.size;
+      if (response.headers.get("Content-Length") !== String(expectedLength)
+        || (requestedRange !== null && response.headers.get("Content-Range") !== `bytes ${requestedRange.start}-${requestedRange.end}/${handle.size}`))
+        return fail(503, "employee_read_unavailable");
+      if (!await recheckEmployeeReadAuthority(database, boundedProof) || Date.now() >= handle.expiresAt * 1000)
+        return fail(403, "employee_read_denied");
+      handedOff = true;
+      return response;
+    } finally {
+      if (!handedOff) {
+        // Native fixed framing may not observe readable cancellation until a
+        // later write. Explicitly stop even a permanently stalled source first.
+        owned.abort();
+        if (response) await discard(response);
+      }
     }
-    if (!await recheckEmployeeReadAuthority(database, boundedProof) || Date.now() >= handle.expiresAt * 1000) {
-      await discard(response); return fail(403, "employee_read_denied");
-    }
-    return response;
   });
   router.notFound(() => errorResponse(404, "employee_read_unavailable"));
   router.onError(error => error instanceof Failure ? errorResponse(error.status, error.code) : errorResponse(503, "employee_read_unavailable"));
