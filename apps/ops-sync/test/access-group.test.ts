@@ -20,8 +20,11 @@ describe("Access rule-group reconciliation", () => {
     expect(body.include).toEqual([{email:{email:"owner@example.com"}},{email:{email:"user@example.com"}}]);
     expect(body.exclude).toEqual([{geo:{country_code:"XX"}}]);
     expect(calls[1]?.init?.method).toBe("PUT");
-    expect(bind).toHaveBeenCalledWith("project-alpha:primary","project-alpha:primary");
-    expect(db.prepare).toHaveBeenCalledWith(expect.stringContaining("u.projection_source_id=? AND e.projection_source_id=?"));
+    expect(bind).toHaveBeenCalledWith();
+    const query = vi.mocked(db.prepare).mock.calls[0]?.[0] as string;
+    expect(query).toContain("FROM staff_users s");
+    expect(query).toContain("s.status='active'");
+    expect(query).not.toMatch(/pa_users|pa_application_entitlements|role-owner|sync_protected/);
   });
 
   it("recovers a stale group identifier through an exact configured group name", async () => {

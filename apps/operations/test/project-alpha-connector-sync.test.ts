@@ -267,4 +267,20 @@ describe("registered source snapshot end-to-end", () => {
     expect(await ops.prepare("SELECT last_error_code FROM integration_health WHERE projection_source_id=? AND integration='project-alpha'")
       .bind(source.sourceId).first("last_error_code")).toBe("project-alpha-network-redirect");
   }, 30_000);
+  it("keeps primary PA staff snapshots read-only to Ops accounts while client business data still refreshes", async () => {
+    await ops.prepare("UPDATE staff_users SET provisioning_source='project-alpha',access_subject='existing-bound-subject',status='inactive' WHERE id='primary-staff'").run();
+    const tables=[...preservedOpsTables,"staff_permission_overrides","local_staff_role_assignments"];
+    const before=await snapshotRows(ops,tables);
+    const fetcher=stableFetch("Primary refreshed");
+    vi.stubGlobal("fetch",fetcher);
+    await expect(syncRegisteredProjectAlpha(env,primary)).resolves.toMatchObject({status:"success"});
+    expect(await snapshotRows(ops,tables)).toEqual(before);
+    expect(await ops.prepare("SELECT display_name FROM pa_users WHERE id='1'").first("display_name")).toBe("Primary refreshed user");
+    expect(await ops.prepare("SELECT name FROM pa_clients WHERE id='4'").first("name")).toBe("Primary refreshed contact");
+    expect(await ops.prepare("SELECT name FROM pa_organizations WHERE id='3'").first("name")).toBe("Primary refreshed organization");
+    expect(await ops.prepare("SELECT name FROM pa_projects WHERE id='5'").first("name")).toBe("Primary refreshed project");
+    expect(await ops.prepare("SELECT count(*) count FROM pa_application_entitlements").first("count")).toBe(0);
+    expect((await ops.prepare("PRAGMA foreign_key_check").all()).results).toEqual([]);
+  },60_000);
+
 });

@@ -2,6 +2,8 @@ name: CI
 
 on:
   pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review]
   push:
     branches: [main]
 
@@ -14,6 +16,8 @@ permissions:
 
 jobs:
   source-invariants:
+    # Drafts and branches other than main are tested on staging, not on GitHub minutes.
+    if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
     runs-on: ubuntu-24.04
     steps:
       - name: Check out the exact commit
@@ -33,6 +37,9 @@ jobs:
 
       - name: Verify guarded production deployment tooling without credentials
         run: node --test scripts/production-deploy.test.mjs
+
+      - name: Verify main and PR workflow trigger policy
+        run: node --test scripts/workflow-trigger-policy.test.mjs
 
       - name: Verify repository contracts
         run: node --test scripts/source-layout-invariants.test.mjs scripts/client-portal-joined-acceptance.test.mjs scripts/client-portal-rollout-manifest.test.mjs scripts/client-portal-release-profile.test.mjs scripts/staging-cloudflare-d1-target.test.mjs scripts/staging-native-migration-profile.test.mjs scripts/staging-project-alpha-api-v2-acceptance-profile.test.mjs scripts/staging-project-alpha-api-v2-viewer-acceptance-profile.test.mjs scripts/staging-project-alpha-directory-adoption-acceptance-profile.test.mjs scripts/staging-directory-writes-acceptance-profile.test.mjs scripts/staging-paired-end-to-end-acceptance-profile.test.mjs scripts/staging-native-workspace-acceptance-cli.test.mjs scripts/staging-directory-nonmutation-snapshot-verifier.test.mjs scripts/native-recipient-route-mount.test.mjs scripts/native-delivery-migration-evidence.test.mjs scripts/pa-api-v2-staging-acceptance.test.mjs scripts/pa-api-v2-directory-staging-acceptance.test.mjs scripts/ops-project-v2-joined-live-acceptance.test.mjs scripts/ops-directory-v2-joined-live-acceptance.test.mjs
@@ -117,6 +124,8 @@ jobs:
 
   incoming-pickup:
     name: incoming-pickup-alpine
+    # Drafts and branches other than main are tested on staging, not on GitHub minutes.
+    if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
     runs-on: ubuntu-24.04
     steps:
       - name: Check out the exact commit
@@ -150,6 +159,8 @@ jobs:
 
   packages:
     name: ${{ matrix.package }}
+    # Drafts and branches other than main are tested on staging, not on GitHub minutes.
+    if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
@@ -188,6 +199,8 @@ jobs:
 
   operations-browser:
     name: operations-browser-${{ matrix.project }}
+    # Drafts and branches other than main are tested on staging, not on GitHub minutes.
+    if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     strategy:
@@ -230,6 +243,8 @@ jobs:
 
   client-browser:
     name: client-browser-${{ matrix.project }}
+    # Drafts and branches other than main are tested on staging, not on GitHub minutes.
+    if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     strategy:

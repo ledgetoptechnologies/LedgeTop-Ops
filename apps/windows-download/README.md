@@ -64,8 +64,15 @@ The server currently requires R2's stored full-file SHA-256. A missing checksum
 returns `download-checksum-unavailable`; it does not trigger a large download in
 a Worker or substitute an ETag. Older and multipart files still need a separate
 version-fenced checksum backfill/ingest implementation before broad acceptance.
-Employee server-folder access is also pending its own explicit read-grant and
-Docker gateway implementation. Neither limitation is cleared by synthetic tests.
+Employee server-folder access has a separate explicit read-grant and Docker
+gateway prototype in this draft. Its live enrollment/TLS and staging activation
+are still pending. Neither limitation is cleared by synthetic tests.
+
+Employee ownership is independent: Ops manages Ops staff, and each PA manages
+its own people. PA employee snapshots/entitlements cannot provision or change
+Ops staff. Windows file reads require current native Ops admission plus an
+explicit file grant; a PA account or matching email is insufficient. Client
+profiles remain synchronized only to their selected PA destinations.
 
 ## Transfer contract
 
