@@ -151,15 +151,31 @@ function createdMessage(attempt: FrozenCreateAttempt, result: { status?: unknown
     : `${lead}${status(result)} Sending to ${destinations}. It can take a few minutes to appear in client search, so there's no need to create it again.`;
 }
 
+/** Files each chosen Project Alpha business under the Operations business area of the same name, so a
+ * new record is visible to that business's staff without a separate choice. A business without exactly
+ * one matching area is reported as missing rather than guessed. */
+export function scopesForDestinations(scopes: CreateOptions["scopes"], sourceIds: readonly string[]) {
+  const key = (value: string) => value.toLowerCase().replace(/[^a-z0-9]/g, "");
+  const matched: Array<{ businessAreaId: string; divisionId: null }> = [], missing: string[] = [];
+  for (const sourceId of sourceIds) {
+    const name = projectAlphaSourceName(sourceId), areas = scopes.filter(area => key(area.name) === key(name));
+    if (areas.length === 1) matched.push({ businessAreaId: areas[0]!.id, divisionId: null }); else missing.push(name);
+  }
+  return { scopes: matched, missing };
+}
+
+type NewOrganization = { name: string; attempt: FrozenCreateAttempt | null; busy: boolean; error: string };
+
 export function NativeDirectoryProfileCreate() {
-  const id = useId(), [kind, setKind] = useState<Kind>("organization"), [fields, setFields] = useState<ProfileForm>(CREATE_DEFAULTS);
-  const [sourceIds, setSourceIds] = useState<string[]>([]), [selectedScope, setSelectedScope] = useState(""), [options, setOptions] = useState<CreateOptions | null>(null);
-  const [organizationId, setOrganizationId] = useState("");
+  const id = useId(), [kind, setKind] = useState<Kind>("client"), [fields, setFields] = useState<ProfileForm>(CREATE_DEFAULTS);
+  const [sourceIds, setSourceIds] = useState<string[]>([]), [options, setOptions] = useState<CreateOptions | null>(null);
+  const [organizationId, setOrganizationId] = useState(""), [organizationQuery, setOrganizationQuery] = useState("");
+  const [newOrganization, setNewOrganization] = useState<NewOrganization | null>(null);
   const [attempt, setAttempt] = useState<FrozenCreateAttempt | null>(null);
   const [optionsError, setOptionsError] = useState(""), [busy, setBusy] = useState(false), [error, setError] = useState(""), [success, setSuccess] = useState("");
   const [open, setOpen] = useState(false);
   useEffect(() => {
-    let active = true; setOptions(null); setOptionsError(""); setSourceIds([]); setSelectedScope(""); setOrganizationId("");
+    let active = true; setOptions(null); setOptionsError(""); setSourceIds([]); setOrganizationId(""); setOrganizationQuery(""); setNewOrganization(null);
     void api<unknown>(`/api/client-hub/directory/create-options?kind=${kind}`).then(value => {
       if (!active || !value || typeof value !== "object" || Array.isArray(value)) throw new Error("Client profile setup choices could not be verified.");
       const result = value as CreateOptions;
@@ -171,14 +187,16 @@ export function NativeDirectoryProfileCreate() {
   }, [kind]);
   const change = (field: keyof ProfileForm, value: string) => setFields(previous => ({ ...previous,
     [field]: field === "clientType" && ["unknown", "business", "consumer"].includes(value) ? value : value }));
+  const derived = scopesForDestinations(options?.scopes ?? [], sourceIds);
+  // While a new organization is being saved (or awaits its retry) the businesses it is sent to stay fixed.
+  const organizationLocked = Boolean(newOrganization?.busy || newOrganization?.attempt);
   const submit = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault(); if (busy || (!attempt && (!sourceIds.length || !selectedScope))) return;
+    event.preventDefault();
+    if (busy || newOrganization || (!attempt && (!sourceIds.length || derived.missing.length || !derived.scopes.length))) return;
     let current = attempt;
     if (!current) {
-      const [businessAreaId, divisionId] = selectedScope.split("\0"), mutationId = crypto.randomUUID(),
-        profile = serializeNativeDirectoryProfile(kind, fields, "create");
-      if (!businessAreaId) return;
-      const scopes = [{ businessAreaId, divisionId: divisionId || null }], selectedOrganization = options?.organizations.find(value => value.recordId === organizationId);
+      const mutationId = crypto.randomUUID(), profile = serializeNativeDirectoryProfile(kind, fields, "create");
+      const scopes = derived.scopes, selectedOrganization = options?.organizations.find(value => value.recordId === organizationId);
       const relationship = selectedOrganization
         ? { organizationRecordId: selectedOrganization.recordId, expectedOrganizationVersion: selectedOrganization.expectedVersion }
         : { organizationRecordId: null, expectedOrganizationVersion: null };
@@ -199,7 +217,8 @@ export function NativeDirectoryProfileCreate() {
       { recordId: frozen.mutationId, kind, version: 1, sourceIds: frozen.sourceIds }, value => {
         reachedWrite = true; setAttempt(value);
       });
-      setAttempt(null); setSuccess(createdMessage(frozen, result as { status?: unknown })); setFields(CREATE_DEFAULTS); setSourceIds([]); setSelectedScope(""); setOpen(false);
+      setAttempt(null); setSuccess(createdMessage(frozen, result as { status?: unknown })); setFields(CREATE_DEFAULTS); setSourceIds([]);
+      setOrganizationId(""); setOrganizationQuery(""); setOpen(false);
     } catch (caught) {
       const invalidAdmission = !reachedWrite && caught instanceof ApiError && caught.status === 400;
       if (invalidAdmission) setAttempt(null);
@@ -209,14 +228,65 @@ export function NativeDirectoryProfileCreate() {
     }
     finally { setBusy(false); }
   };
-  const scopeOptions = options?.scopes.flatMap(area => [{ value: `${area.id}\0`, label: area.name },
-    ...area.divisions.map(division => ({ value: `${area.id}\0${division.id}`, label: `${area.name} · ${division.name}` }))]) ?? [];
+  /** Creates the organization first (name only, for the ticked businesses), then selects it for this client.
+   * An unconfirmed result keeps the exact request so a retry cannot create a second organization. */
+  const createOrganization = async () => {
+    const pending = newOrganization;
+    if (!pending || pending.busy || (!pending.attempt && (!pending.name.trim() || !sourceIds.length))) return;
+    setNewOrganization({ ...pending, busy: true, error: "" });
+    let current = pending.attempt;
+    try {
+      if (!current) {
+        const organizationOptions = await api<unknown>("/api/client-hub/directory/create-options?kind=organization");
+        const organizationScopes = organizationOptions && typeof organizationOptions === "object" && Array.isArray((organizationOptions as CreateOptions).scopes)
+          ? (organizationOptions as CreateOptions).scopes : null;
+        if (!organizationScopes) throw new Error("Organization setup choices could not be verified.");
+        const scopes = scopesForDestinations(organizationScopes, sourceIds);
+        if (scopes.missing.length || !scopes.scopes.length)
+          throw new Error(`You can't create organizations for ${scopes.missing.join(" and ")} yet. Ask an administrator.`);
+        const mutationId = crypto.randomUUID(), common = { mutationId, sourceIds: [...sourceIds], scopes: scopes.scopes,
+          profile: serializeNativeDirectoryProfile("organization", { ...EMPTY, name: pending.name }, "create") };
+        current = { mutationId, phase: "admission", sourceIds: [...sourceIds],
+          admission: { path: "/api/client-hub/directory/create-admissions", method: "POST", mutationId, body: JSON.stringify({ kind: "organization", ...common }) },
+          write: { path: "/api/client-hub/directory/organizations", method: "POST", mutationId, body: JSON.stringify(common) } };
+      }
+    } catch (caught) {
+      setNewOrganization(previous => previous && { ...previous, busy: false, error: message(caught, "The organization couldn't be created.") });
+      return;
+    }
+    const frozen = current;
+    let reachedWrite = frozen.phase === "write", latest = frozen;
+    setNewOrganization(previous => previous && { ...previous, attempt: frozen });
+    try {
+      await executeCreateAttempt(frozen, request => api(request.path, { method: request.method,
+        headers: { "Idempotency-Key": request.mutationId }, body: request.body }),
+      { recordId: frozen.mutationId, kind: "organization", version: 1, sourceIds: frozen.sourceIds }, value => {
+        reachedWrite = true; latest = value; setNewOrganization(previous => previous && { ...previous, attempt: value });
+      });
+    } catch (caught) {
+      const invalid = !reachedWrite && caught instanceof ApiError && caught.status === 400;
+      setNewOrganization(previous => previous && { ...previous, busy: false, attempt: invalid ? null : latest,
+        error: invalid ? `${message(caught, "The organization request was invalid.")} Check the name and try again.`
+          : `${message(caught, "The organization couldn't be confirmed.")} Retry sends the same organization, so it won't be created twice.` });
+      return;
+    }
+    const created = { recordId: frozen.mutationId, expectedVersion: 1, name: pending.name.trim(), sourceIds: [...frozen.sourceIds] };
+    setOptions(previous => previous && { ...previous, organizations: [created, ...previous.organizations.filter(value => value.recordId !== created.recordId)] });
+    setOrganizationId(created.recordId); setOrganizationQuery(created.name); setNewOrganization(null);
+  };
   const selectedOrganization = options?.organizations.find(value => value.recordId === organizationId), availableSources = selectedOrganization
     ? options?.sources.filter(source => selectedOrganization.sourceIds.includes(source.id)) ?? [] : options?.sources ?? [];
+  const query = organizationQuery.trim().toLowerCase();
+  const matches = query ? (options?.organizations ?? []).filter(value => value.name.toLowerCase().includes(query)).slice(0, 8) : [];
+  const chooseOrganization = (recordId: string) => {
+    const next = options?.organizations.find(value => value.recordId === recordId);
+    setOrganizationId(next?.recordId ?? ""); setOrganizationQuery(next?.name ?? "");
+    if (next) setSourceIds(previous => previous.filter(sourceId => next.sourceIds.includes(sourceId)));
+  };
   const kindLabel = kind === "organization" ? "organization" : "client";
   const toggleSource = (sourceId: string, checked: boolean) => setSourceIds(previous =>
     checked ? [...new Set([...previous, sourceId])] : previous.filter(value => value !== sourceId));
-  const formId = `${id}-create-form`;
+  const formId = `${id}-create-form`, locked = Boolean(attempt);
   return <div className="client-directory-create">
     <div className="client-directory-create-bar">
       <button type="button" className="button-orange" onClick={() => { setSuccess(""); setOpen(true); }}>
@@ -224,49 +294,77 @@ export function NativeDirectoryProfileCreate() {
       </button>
       {success && <p role="status" className="notice ok">{success}</p>}
     </div>
-    <Dialog open={open} onClose={() => { if (!busy) setOpen(false); }} dismissible={!busy} size="lg" title="Add client profile"
-      description="Create an organization or client in Client Hub and send it to the Project Alpha destinations you choose."
-      footer={options && options.sources.length > 0 && scopeOptions.length > 0 ? <>
+    <Dialog open={open} onClose={() => { if (!busy && !newOrganization?.busy) setOpen(false); }} dismissible={!busy && !newOrganization?.busy} size="lg" title="Add client profile"
+      description="Add a client, with or without an organization, or an organization on its own, and send it to the Ledge Top businesses you choose."
+      footer={options && options.sources.length > 0 ? <>
         <button type="button" className="button-ghost" disabled={busy} onClick={() => setOpen(false)}>Cancel</button>
-        <button type="submit" form={formId} className="button-orange" disabled={busy || (!attempt && (!sourceIds.length || !selectedScope))}>
+        <button type="submit" form={formId} className="button-orange"
+          disabled={busy || Boolean(newOrganization) || (!attempt && (!sourceIds.length || derived.missing.length > 0))}>
           {busy ? "Saving profile…" : attempt ? "Retry same profile creation" : `Create ${kindLabel}`}</button>
       </> : undefined}>
       {optionsError && <p role="alert" className="notice error">{optionsError}</p>}
       {!options && !optionsError && <Skeleton variant="form" rows={6} label="Loading client profile choices…" />}
-      {options && (!options.sources.length || !scopeOptions.length)
-        ? <p role="status" className="notice">No permitted Project Alpha destinations and business scopes are available for a new client profile.</p>
+      {options && !options.sources.length
+        ? <p role="status" className="notice">No Project Alpha businesses are available for a new client profile.</p>
         : options && <form id={formId} onSubmit={event => void submit(event)} className="client-directory-profile-form ltds-form">
         {attempt && <p role="status" className="notice warning">This profile is waiting to be retried. Its details are locked so the retry sends exactly the same request.</p>}
         <section className="ltds-form-section" aria-label="Destination">
           <h3>Destination</h3>
           <div className="ltds-form-grid">
-            <label htmlFor={`${id}-kind`} className="ltds-field">Profile type<select id={`${id}-kind`} value={kind} disabled={Boolean(attempt)} onChange={event => setKind(event.target.value === "client" ? "client" : "organization")}>
-              <option value="organization">Organization</option><option value="client">Client</option>
+            <label htmlFor={`${id}-kind`} className="ltds-field ltds-span-2">Profile type<select id={`${id}-kind`} value={kind} disabled={locked || organizationLocked}
+              onChange={event => setKind(event.target.value === "organization" ? "organization" : "client")}>
+              <option value="client">Client</option><option value="organization">Organization only</option>
             </select></label>
-            <label htmlFor={`${id}-scope`} className="ltds-field">Business scope<select id={`${id}-scope`} required value={selectedScope} disabled={Boolean(attempt)} onChange={event => setSelectedScope(event.target.value)}>
-              <option value="">Choose a business scope</option>{scopeOptions.map(scope => <option key={scope.value} value={scope.value}>{scope.label}</option>)}</select></label>
-            {kind === "client" && <label htmlFor={`${id}-organization`} className="ltds-field ltds-span-2">Organization relationship<select id={`${id}-organization`} value={organizationId} disabled={Boolean(attempt)}
-              onChange={event => { setOrganizationId(event.target.value); setSourceIds(previous => {
-                const next = options.organizations.find(value => value.recordId === event.target.value);
-                return next ? previous.filter(sourceId => next.sourceIds.includes(sourceId)) : previous;
-              }); }}>
-              <option value="">No organization (standalone client)</option>
-              {options.organizations.map(organization => <option key={organization.recordId} value={organization.recordId}>{organization.name}</option>)}
-            </select><small>Choose an organization to create a linked client, or leave this standalone.</small></label>}
             <fieldset className="ltds-check-list ltds-span-2">
               <legend>Project Alpha destinations</legend>
               {availableSources.map(source => <label key={source.id} className="ltds-check-option">
-                <input type="checkbox" value={source.id} checked={sourceIds.includes(source.id)} disabled={Boolean(attempt)}
+                <input type="checkbox" value={source.id} checked={sourceIds.includes(source.id)} disabled={locked || organizationLocked}
                   onChange={event => toggleSource(source.id, event.target.checked)} />
                 <span>{projectAlphaSourceName(source.id)}</span>
               </label>)}
-              <small className="ltds-field-hint">Choose every destination that should receive this profile.</small>
+              <small className="ltds-field-hint">{selectedOrganization ? `Limited to the businesses ${selectedOrganization.name} belongs to.` : "Choose every business that should receive this profile."}</small>
+              {derived.missing.length > 0 && <p role="alert" className="notice warning ltds-field-hint">You can't add client profiles for {derived.missing.join(" and ")} yet. Ask an administrator.</p>}
             </fieldset>
           </div>
         </section>
+        {kind === "client" && <section className="ltds-form-section" aria-label="Organization">
+          <h3>Organization</h3>
+          <div className="ltds-form-grid">
+            {selectedOrganization
+              ? <div className="ltds-field ltds-span-2 client-directory-organization-chosen"><span>Organization</span>
+                <div><strong>{selectedOrganization.name}</strong>
+                  <button type="button" className="button-ghost button-small" disabled={locked} onClick={() => chooseOrganization("")}>Change</button></div></div>
+              : <div className="ltds-field ltds-span-2 client-directory-organization-search">
+                <label htmlFor={`${id}-organization`}>Organization</label>
+                <input id={`${id}-organization`} type="search" autoComplete="off" placeholder="Type to search organizations…" value={organizationQuery}
+                  disabled={locked || Boolean(newOrganization)} onChange={event => setOrganizationQuery(event.target.value)} />
+                {matches.length > 0 && <ul className="client-directory-organization-results" aria-label="Matching organizations">
+                  {matches.map(value => <li key={value.recordId}><button type="button" onClick={() => chooseOrganization(value.recordId)}>{value.name}</button></li>)}</ul>}
+                {query && !matches.length && !newOrganization && <small className="notice warning">No organization matches “{organizationQuery.trim()}”. You can create it below.</small>}
+                {!newOrganization && <button type="button" className="button-ghost button-small client-directory-organization-new" disabled={locked}
+                  onClick={() => setNewOrganization({ name: organizationQuery.trim(), attempt: null, busy: false, error: "" })}>+ Create new organization</button>}
+                <small>Leave empty for a client without an organization.</small>
+              </div>}
+            {newOrganization && <div className="client-directory-new-organization ltds-span-2" role="group" aria-labelledby={`${id}-new-organization-title`}>
+              <h4 id={`${id}-new-organization-title`}>Create new organization</h4>
+              <label htmlFor={`${id}-new-organization`} className="ltds-field">Organization name
+                <input id={`${id}-new-organization`} maxLength={150} value={newOrganization.name} disabled={newOrganization.busy || Boolean(newOrganization.attempt)}
+                  onChange={event => setNewOrganization(previous => previous && { ...previous, name: event.target.value })}
+                  onKeyDown={event => { if (event.key === "Enter") { event.preventDefault(); void createOrganization(); } }} /></label>
+              <small>{sourceIds.length ? `It's created for ${sourceIds.map(projectAlphaSourceName).join(" and ")} and linked to this client. You can add its contact details later.`
+                : "Tick at least one business above first."}</small>
+              {newOrganization.error && <p role="alert" className="notice error">{newOrganization.error}</p>}
+              <div className="client-directory-new-organization-actions">
+                <button type="button" className="button-ghost" disabled={newOrganization.busy || Boolean(newOrganization.attempt)} onClick={() => setNewOrganization(null)}>Cancel</button>
+                <button type="button" className="button-orange" disabled={newOrganization.busy || (!newOrganization.attempt && (!newOrganization.name.trim() || !sourceIds.length))}
+                  onClick={() => void createOrganization()}>{newOrganization.busy ? "Creating…" : newOrganization.attempt ? "Retry same organization" : "Create organization"}</button>
+              </div>
+            </div>}
+          </div>
+        </section>}
         <section className="ltds-form-section" aria-label="Profile details">
           <h3>{kind === "organization" ? "Organization details" : "Client details"}</h3>
-          <ProfileFields kind={kind} value={fields} onChange={change} prefix={id} creating disabled={Boolean(attempt)} />
+          <ProfileFields kind={kind} value={fields} onChange={change} prefix={id} creating disabled={locked} />
         </section>
         {error && <p role="alert" className="notice error">{error}</p>}
       </form>}

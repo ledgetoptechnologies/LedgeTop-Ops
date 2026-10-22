@@ -31,8 +31,8 @@ async function openCreate(page: Page) {
 
 async function fillCreate(page: Page, name: string) {
   await openCreate(page);
+  await page.getByLabel("Profile type").selectOption({ label: "Organization only" });
   await page.getByRole("checkbox", { name: "Ledge Top Drone Services" }).check();
-  await page.getByLabel("Business scope").selectOption({ label: "Area One" });
   await page.getByLabel("Organization name").fill(name);
 }
 

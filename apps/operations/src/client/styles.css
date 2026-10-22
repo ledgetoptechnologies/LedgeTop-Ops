@@ -2831,6 +2831,23 @@ ul { color: var(--muted); }
 @media (max-width: 640px) {
   .client-directory-profile-form .ltds-check-list { grid-template-columns: minmax(0, 1fr); }
 }
+/* Organization picker: search existing, or create one by name (Project Alpha style). */
+.client-directory-organization-search { display: grid; gap: .4rem; }
+.client-directory-organization-search > label { font-size: .84rem; font-weight: 750; }
+.client-directory-organization-search > input { width: 100%; min-width: 0; padding: .7rem; border: 1px solid var(--control-border); border-radius: 8px; background: #fff; }
+.client-directory-organization-search > small { color: var(--muted); font-size: .78rem; }
+.client-directory-organization-search > small.notice { color: inherit; }
+.client-directory-organization-new { justify-self: start; }
+.client-directory-organization-results { display: grid; margin: 0; padding: .25rem; list-style: none; border: 1px solid var(--line); border-radius: 8px; background: #fff; max-height: 15rem; overflow-y: auto; }
+.client-directory-organization-results button { width: 100%; padding: .55rem .65rem; border: 0; border-radius: 6px; background: none; color: var(--ink); font: inherit; text-align: left; cursor: pointer; }
+.client-directory-organization-results button:hover, .client-directory-organization-results button:focus-visible { background: var(--surface-soft); }
+.client-directory-organization-chosen { display: grid; gap: .4rem; }
+.client-directory-organization-chosen > span { font-size: .84rem; font-weight: 750; }
+.client-directory-organization-chosen > div { display: flex; flex-wrap: wrap; align-items: center; gap: .75rem; padding: .65rem .8rem; border: 1px solid var(--line); border-radius: 8px; background: var(--surface-soft); }
+.client-directory-new-organization { display: grid; gap: .6rem; max-width: 26rem; padding: 1rem; border: 1px solid var(--line); border-left: 4px solid var(--orange); border-radius: 10px; background: #fff; box-shadow: 0 6px 18px rgba(16, 24, 32, .08); }
+.client-directory-new-organization h4 { margin: 0; font-size: .95rem; }
+.client-directory-new-organization small { color: var(--muted); font-size: .78rem; }
+.client-directory-new-organization-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: .5rem; }
 
 /* ---------------------------------------------------------------------------
    Finance summary (admin dashboard panel)

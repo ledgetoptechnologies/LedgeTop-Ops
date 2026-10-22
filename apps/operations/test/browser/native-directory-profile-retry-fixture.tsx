@@ -57,8 +57,15 @@ window.fetch = async (input, init) => {
   const path = String(input), method = init?.method ?? "GET", body = typeof init?.body === "string" ? init.body : null;
   const mutationId = new Headers(init?.headers).get("Idempotency-Key");
   calls.push({ path, method, mutationId, body });
-  if (path.includes("/create-options")) return Response.json({ kind: "organization",
-    sources: [{ id: sourceId, name: "Primary" }, ...((scenario as string) === "two-destinations" ? [{ id: "project-alpha:secondary", name: "Secondary" }] : [])], scopes: [{ id: "area:one", name: "Area One", divisions: [] }], organizations: [] });
+  if (path.includes("/create-options")) {
+    const two = ["two-destinations", "new-organization-lost", "missing-area"].includes(scenario as string);
+    return Response.json({ kind: new URL(path, "https://ops.example.test").searchParams.get("kind") === "client" ? "client" : "organization",
+      sources: [{ id: sourceId, name: "Primary" }, ...(two ? [{ id: "project-alpha:secondary", name: "Secondary" }] : [])],
+      // Business areas carry the businesses' names; records are filed under the one matching each destination.
+      scopes: [{ id: "area:one", name: "Ledge Top Drone Services", divisions: [] },
+        ...((scenario as string) !== "missing-area" && two ? [{ id: "area:two", name: "Ledge Top Technologies", divisions: [] }] : [])],
+      organizations: [] });
+  }
   if (path.endsWith("/create-admissions")) {
     createAdmissionCalls += 1;
     if (scenario === "admission-400" && createAdmissionCalls === 1)
@@ -71,9 +78,16 @@ window.fetch = async (input, init) => {
       return new Response(JSON.stringify({ error: "Response lost after commit" }), { status: 503 });
     if (scenario === "write-400" && createWriteCalls === 1)
       return new Response(JSON.stringify({ error: "Write response could not be accepted" }), { status: 400 });
+    if ((scenario as string) === "new-organization-lost" && createWriteCalls === 1)
+      return new Response(JSON.stringify({ error: "Response lost after commit" }), { status: 503 });
     const parsed = JSON.parse(body!);
     return Response.json({ status: "pending", recordId: parsed.mutationId, kind: "organization", version: 1, replayed: true,
-      destinations: [{ sourceId, state: "pending" }] });
+      destinations: (parsed.sourceIds as string[]).map(id => ({ sourceId: id, state: "pending" })) });
+  }
+  if (path.endsWith("/standalone-clients") && method === "POST") {
+    const parsed = JSON.parse(body!);
+    return Response.json({ status: "pending", recordId: parsed.mutationId, kind: "client", version: 1, replayed: false,
+      destinations: (parsed.sourceIds as string[]).map(id => ({ sourceId: id, state: "pending" })) });
   }
   if (path.endsWith("/standalone-clients/client-one") && method === "GET")
     return Response.json(readonlyClientSnapshot());
@@ -154,7 +168,7 @@ window.fetch = async (input, init) => {
 function Fixture() {
   const [recordId, setRecordId] = useState("record-one");
   const [recoveryIdentity, setRecoveryIdentity] = useState({ recordId: "client-prop", organizationRecordId: "organization-one" });
-  if (["create-lost-response", "admission-400", "write-400", "two-destinations"].includes(scenario)) return <NativeDirectoryProfileCreate />;
+  if (["create-lost-response", "admission-400", "write-400", "two-destinations", "new-organization-lost", "missing-area"].includes(scenario)) return <NativeDirectoryProfileCreate />;
   if (scenario === "relationship-readonly") return <NativeDirectoryProfileEdit kind="client" recordId="client-one" />;
   if (scenario === "prepared-lost-response") return <NativeDirectoryProfileEdit kind="client" recordId="client-one" allowPreparedAttempt />;
   if (scenario === "recovery-org-switch" || scenario === "recovery-record-switch") return <>
