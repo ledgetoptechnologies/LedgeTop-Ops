@@ -38,7 +38,7 @@ it("actual .NET employee crosses full Ops Workerd and Python gateway and rejects
   const volume = `ops-employee-transport-${suffix}`;
   const rootId = randomUUID(), gatewayId = randomUUID(), key = randomBytes(32), control = randomBytes(32).toString("hex");
   let authority: Awaited<ReturnType<typeof employeeWorkerdTransportFixture>> | undefined, server: ReturnType<typeof createServer> | undefined;
-  let localDockerValidated = false, ownedVolumeCreated = false, dockerContext: string | undefined;
+  let localDockerValidated = false, dockerContext: string | undefined;
   const docker = (args: string[], timeout = 30_000) => execute("docker", dockerContext ? ["--context", dockerContext, ...args] : args, { timeout, maxBuffer: 2 * 1024 * 1024 });
   try {
     // Never build/run this fixture through a remote Docker context or NAS daemon.
@@ -56,7 +56,6 @@ it("actual .NET employee crosses full Ops Workerd and Python gateway and rejects
     const imageId = (await docker(["image", "inspect", "--format", "{{.Id}}", image])).stdout.trim();
     if (large) {
       await docker(["volume", "create", "--driver=local", "--label", "ledgetop.synthetic-transport=true", volume]);
-      ownedVolumeCreated = true;
       if ((await docker(["volume", "inspect", "--format", "{{.Driver}} {{json .Options}}", volume])).stdout.trim() !== "local null")
         throw Error("Synthetic volume must be plain local storage without driver options");
     }
@@ -222,14 +221,15 @@ it("actual .NET employee crosses full Ops Workerd and Python gateway and rejects
       // Names are generated only by this invocation. Missing never-created resources are harmless;
       // successful cleanup is independently checked instead of silently accepting a leaked resource.
       await docker(["rm", "--force", container]).catch(() => {});
-      if (ownedVolumeCreated) await docker(["volume", "rm", volume]).catch(() => {});
+      // A daemon may create this generated volume even when the CLI acknowledgement fails.
+      if (large) await docker(["volume", "rm", volume]).catch(() => {});
       await docker(["network", "rm", network]).catch(() => {});
       await docker(["image", "rm", image]).catch(() => {});
       try {
         const containers = (await docker(["ps", "--all", "--filter", `name=^/${container}$`, "--format", "{{.Names}}"])).stdout.trim();
         const networks = (await docker(["network", "ls", "--filter", `name=^${network}$`, "--format", "{{.Name}}"])).stdout.trim();
         const images = (await docker(["image", "ls", "--filter", `reference=${image}`, "--format", "{{.Repository}}:{{.Tag}}"])).stdout.trim();
-        const volumes = ownedVolumeCreated ? (await docker(["volume", "ls", "--filter", `name=^${volume}$`, "--format", "{{.Name}}"])).stdout.trim() : "";
+        const volumes = large ? (await docker(["volume", "ls", "--filter", `name=^${volume}$`, "--format", "{{.Name}}"])).stdout.trim() : "";
         if (containers || networks || images || volumes) throw Error("Owned Docker fixture cleanup incomplete");
       } catch (error) { cleanupErrors.push(error); }
     }
