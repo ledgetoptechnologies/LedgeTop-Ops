@@ -8,7 +8,7 @@ import { once } from "node:events";
 import { randomBytes } from "node:crypto";
 import { expect, it, vi } from "vitest";
 import { createLocalJWKSet, exportJWK, generateKeyPair, SignJWT } from "jose";
-import { principal } from "./helpers/windows-portal-successor-fixture";
+import { principal } from "../test/helpers/windows-portal-successor-fixture";
 import { transportFixture } from "./windows-real-transport.fixture";
 import { createWindowsPortalCatalogRouter, type WindowsPortalCatalogRouteEnv } from "../src/worker/client-portal/windows-portal-catalog-routes";
 import { createWindowsPortalSuccessorRouter } from "../src/worker/client-portal/windows-portal-successor-routes";
@@ -17,6 +17,7 @@ import { createWindowsPortalSuccessorRouter } from "../src/worker/client-portal/
 // runs in the existing production recipient-identity function.
 const keys = vi.hoisted(() => vi.fn());
 vi.mock("jose", async () => ({ ...await vi.importActual<typeof import("jose")>("jose"), createRemoteJWKSet: keys }));
+vi.mock("cloudflare:workers", () => ({ WorkerEntrypoint: class {} }));
 const run = promisify(execFile);
 it("actual .NET client parses Worker catalog and resumes real TLS/R2 bytes, then refuses a revoked D1 handle", async () => {
   const dotnet = process.env.LEDGETOP_TEST_DOTNET ?? "dotnet";
@@ -79,9 +80,14 @@ it("actual .NET client parses Worker catalog and resumes real TLS/R2 bytes, then
             interrupted = true;
             // Cut the *transport* after the real route's authorization, R2 pinning
             // and mandatory D1 content-start audit; do not fake a route response.
-            const first = await reader.read();
-            if (first.done || first.value.length < 16_384) throw Error("Fixture body too short to interrupt");
-            res.write(first.value.subarray(0, 16_384));
+            let sent = 0;
+            while (sent < 16_384) {
+              const part = await reader.read();
+              if (part.done) throw Error("Fixture body too short to interrupt");
+              const prefix = part.value.subarray(0, 16_384 - sent);
+              if (!res.write(prefix)) await once(res, "drain");
+              sent += prefix.length;
+            }
             await new Promise(resolve => setTimeout(resolve, 150));
             res.destroy();
             // Drain this tiny owned fixture after cutting the client socket.
@@ -106,18 +112,17 @@ it("actual .NET client parses Worker catalog and resumes real TLS/R2 bytes, then
         get: async (...args: Parameters<R2Bucket["get"]>) => { storageReads++; return f.bucket.get(...args); },
       },
       CLIENT_PORTAL_OPERATIONS_NATIVE_CONTENT_AUDIT_ENABLED: "true", CLIENT_PORTAL_OPERATIONS_NATIVE_CONTENT_AUDIT_HMAC_SECRET: randomBytes(48).toString("hex"),
-      OPERATIONS_PORTAL_NATIVE_DELIVERY_AUTHORIZATION_READER: {
-        readNativeDeliveryAuthorization: async () => { throw Error("Ordinary authorization must not rescue denial"); },
-        readWindowsDeliverySuccessorAuthorization: async () => JSON.stringify({ ok: true, protocolVersion: 1, successor: f.successor }),
-        readWindowsCatalogSuccessorAuthorization: async (_wire: string, feature: string) => JSON.stringify({ ok: true, protocolVersion: 1, feature, catalog: f.successor }),
-      } } as unknown as WindowsPortalCatalogRouteEnv;
+      OPERATIONS_PORTAL_NATIVE_DELIVERY_AUTHORIZATION_READER: f.reader } as unknown as WindowsPortalCatalogRouteEnv;
     const config = { enabled: true, portalOrigin: workerOrigin, issuer: principal.issuer, audience };
     catalog = createWindowsPortalCatalogRouter(config); content = createWindowsPortalSuccessorRouter(config);
     const output = join(temporary, "output"); await mkdir(output);
     const sha256 = Buffer.from(f.sha).toString("hex");
     const configPath = join(temporary, "synthetic-config.json");
     await writeFile(configPath, JSON.stringify({ Origin: origin, Certificate: join(temporary, "certificate.pem"), Output: output, Token: token, Sha256: sha256, ControlToken: controlToken }));
-    const result = await run(dotnet, [dll, "--run", configPath], { env: childEnv, timeout: 60_000 });
+    const result = await run(dotnet, [dll, "--run", configPath], { env: childEnv, timeout: 60_000 }).catch(error => {
+      if (errors.length) throw new AggregateError(errors, "Local route adapter failed");
+      throw error;
+    });
     expect(errors).toEqual([]);
     const receipt = JSON.parse(result.stdout.trim());
     expect(receipt).toMatchObject({ kind: "local-client-transport-v1", bytes: f.bytes.length, sha256, tlsPinRejected: true, invalidSignatureRejected: true, catalogParsed: true, resumedDigestVerified: true, revokedHandleDenied: true });
@@ -126,9 +131,11 @@ it("actual .NET client parses Worker catalog and resumes real TLS/R2 bytes, then
     expect(downloads[1]!.range).toBe(`bytes=${receipt.retainedPrefixBytes}-`);
     expect(storageReadsAtRevocation).toBeGreaterThan(0);
     expect(storageReads).toBe(storageReadsAtRevocation);
+    expect(f.readerObservations.calls).toBeGreaterThan(0);
+    expect(f.readerObservations.denied).toBeGreaterThan(0);
     expect(await f.db.prepare("SELECT count(*) n FROM windows_portal_successor_content_start_events").first("n")).toBe(1);
-    const evidence = { ...receipt, observedDownloadStatuses: downloads.map(r => r.status), auditEvents: 1, storageReadsAfterRevocation: 0,
-      limits: "Local Client routers/D1/R2 only; virtual staging host adapter, simulated Ops reader proof/JWKS discovery/token helper; no human sign-in, deployed Worker, real R2 or employee gateway acceptance." };
+    const evidence = { ...receipt, observedDownloadStatuses: downloads.map(r => r.status), auditEvents: 1, storageReadsAfterRevocation: 0, opsOnlyRevokeDenied: true, clientGrantStillActive: true, opsReaderDeniedReplies: f.readerObservations.denied,
+      limits: "Local Ops/Client authority, routers, D1/R2 only; virtual staging host adapter, actual local Ops D1 reader via direct function binding adapter; simulated JWKS discovery/token helper; no human sign-in, deployed Worker, real R2 or employee gateway acceptance." };
     console.log(JSON.stringify(evidence));
     // Optional caller-owned receipt, never includes ephemeral keys, JWTs or handles.
     if (process.env.LEDGETOP_TRANSPORT_RECEIPT) await writeFile(process.env.LEDGETOP_TRANSPORT_RECEIPT, JSON.stringify(evidence, null, 2) + "\n", { flag: "wx" });

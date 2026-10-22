@@ -15,5 +15,8 @@
   ],
   "auditEvents": 1,
   "storageReadsAfterRevocation": 0,
-  "limits": "Local Client routers/D1/R2 only; virtual staging host adapter, simulated Ops reader proof/JWKS discovery/token helper; no human sign-in, deployed Worker, real R2 or employee gateway acceptance."
+  "opsOnlyRevokeDenied": true,
+  "clientGrantStillActive": true,
+  "opsReaderDeniedReplies": 1,
+  "limits": "Local Client routers/D1/R2 only; virtual staging host adapter, actual local Ops D1 reader via direct function binding adapter; simulated JWKS discovery/token helper; no human sign-in, deployed Worker, real R2 or employee gateway acceptance."
 }
