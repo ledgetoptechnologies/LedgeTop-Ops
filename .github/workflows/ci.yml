@@ -40,6 +40,9 @@ jobs:
       - name: Verify credential-safe two-source staging connection profile
         run: node --test scripts/staging-ops-two-source-connection-profile-v1.test.mjs
 
+      - name: Verify Windows staging preflight without network or credentials
+        run: node --test scripts/windows-files-staging-preflight.test.mjs
+
       - name: Verify frozen203 paired staging authority and cleanup
         run: node --test scripts/staging-pa-ops-authority-v203.test.mjs
 

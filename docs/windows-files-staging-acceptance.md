@@ -62,6 +62,77 @@ Employee signing, file-handle encryption and queue-reference encryption keys
 must be separate. The gateway receives only its signing key. Desktop setup
 contains approved origins/helper provenance, never these server secrets.
 
+## Observed staging baseline and migration boundaries
+
+Read-only control-plane inspection on 2026-10-22 found:
+
+| Worker | Active version (100%) | Database |
+| --- | --- | --- |
+| `ledgetop-ops-staging` | `231fead7-433e-4015-847e-ea9ebda35894` | Ops `78b34173-b168-4e3d-9832-bb9d245cc6b8` |
+| `ledgetop-clients-staging` | `6b9f1ff4-ce41-493e-a922-25081c2b67f4` | Client `b6f653ab-9acd-4421-9ad0-207754b59aeb` |
+
+Both Workers bind the staging Client database and `client-data-staging` bucket.
+The Client private authorization reader targets `ledgetop-ops-staging`, and its
+primary portal is `https://portal-staging.ledgetopdroneservices.com`. The actual
+Ops and portal human audiences differ from their known production audiences.
+These are observations, not permanent deployment pins; re-read them before use.
+
+Repeat the credential-safe observation with
+`npm run staging:windows-files:preflight`. It uses the installed Wrangler
+credential provider, validates both Worker versions before fixed staging-only
+database reads, and emits no credential values or raw schema/client rows.
+Invoking the underlying script without `--read-only` performs no network calls.
+Its offline unit tests run in the existing main/PR CI job.
+
+The saved receipt is
+`docs/staging/windows-files-preflight-2026-10-22.json`. The completed live run
+observed 2,403 Ops and 1,158 Client schema objects and zero foreign-key violations.
+Schema reads use bounded 128-object pages, a 32-page cap and unchanged 2 MiB
+subprocess output limits. Duplicate objects or a full final page fail instead of
+producing a truncated hash. Only hashes and counts leave the schema reader.
+The receipt preserves ordered migration names, but explicitly does not verify
+the entire earlier canonical history or claim an atomic metadata/schema
+snapshot. It is an observation, not migration or deployment authorization.
+
+Read-only ledger queries found Ops through
+`0221_portal_correspondence_lifecycle_write_guards.sql` and Client through
+`0234_pa_principal_reenrollment.sql`. All five Windows suffix migrations were
+absent. No migration or data change was made during inspection. Complete ordered
+ledgers and schema still need verification; a maximum prefix alone is not proof.
+
+The proposed order is Ops 0222, 0223, 0224, then Client 0235, 0236. Keep routes off
+through preparation. Ops 0223 also adds `employee.files.manage` and its links to
+existing owner/admin roles. A preservation check must allow exactly those new
+rows while comparing every prior permission and role link unchanged. Management
+permission alone does not create a file-read grant. Other suffix effects are
+new tables, views, guards and indexes; existing ordinary delivery authorization
+and audit remain authoritative for their routes.
+
+These files are not safe to replay blindly: they include non-idempotent ALTER,
+INSERT and CREATE statements. Use a reviewed exact-window migration configuration
+with ledger reconciliation after each file. The five-file sequence is not one
+cross-database transaction. On a failure or unknown outcome, inspect actual
+ledger/schema before any retry; never delete a ledger entry to force replay.
+Retain a verified restorable staging checkpoint before applying. Keeping the
+additive schema with routes off is preferable to dropping durable command/audit
+records; restoration or a forward fix needs its own reviewed plan.
+
+The canonical local joined test now rehearses the populated Ops 0221 and Client
+0234 baselines before applying this exact suffix. Its final run passed in
+222.03 seconds under the existing 240-second test deadline. It compares every
+pre-existing application table row and schema definition, permits only the
+named migration entries and exact permission/role-link additions, then runs the
+native producer, signed human JWT, Unicode catalog, durable reference,
+publication refresh, conditional R2 range, audit and revoke checks. Foreign-key
+checks pass. This uses synthetic local Miniflare D1/R2, not a copy of remote
+client data or a remote Wrangler apply. It does not test an interrupted apply,
+restore a backup, or execute the fixture's separate post-ready public-link suite.
+
+Engineering Hub currently reports autonomous execution disabled. Its existing
+Windows task is unclaimed; there is no execution receipt. Source preparation
+and local developer acceptance do not establish the requested EH branch runner
+path. Do not bypass that gap with an unrecorded branch deployment.
+
 ## Gateway qualification
 
 Read `/home/bkoltz/AGENTS.md` and any applicable service instructions before
