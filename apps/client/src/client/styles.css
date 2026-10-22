@@ -2135,3 +2135,4 @@
 @media (max-width: 960px) {
   .portal-account-menu .account-menu-trigger { width: 44px; height: 44px; padding: 3px; border-color: #ffffff30; background: #1c252c; }
 }
+.portal-finance-overdue { color: var(--red); }

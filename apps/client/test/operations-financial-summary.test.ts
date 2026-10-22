@@ -38,9 +38,27 @@ describe("financial portal presentation",()=>{
     expect(html).toContain("all paid up");expect(html).toContain(">Paid<");expect(html).not.toContain("Pay now");
     expect(html).not.toContain("Balance due");
   });
-  it("lists contracts separately with review and sign",()=>{
-    const html=render("ready",[{...document,kind:"contract",status:"sent",amountPaid:null,balanceDue:null}]);
-    expect(html).toContain("Contracts");expect(html).toContain("Review and sign");expect(html).not.toContain("Balance due");
-    expect(html).not.toContain("Pay now");
+  it("offers review and sign for a pending contract whose sign link is its document page, without a duplicate link",()=>{
+    const page="https://pa.example.test/?page=public-doc&token=abcdefghijklmnop";
+    const html=render("ready",[{...document,kind:"contract",status:"pending",total:"0.00",amountPaid:null,balanceDue:null,documentUrl:page,actionUrl:page}]);
+    expect(html).toContain("Contracts");expect(html).toContain("Awaiting your signature");expect(html).toContain("Review and sign");
+    expect(html).not.toContain("View document");expect(html).not.toContain("Balance due");expect(html).not.toContain("Pay now");
+  });
+  it("shows a signed contract's state with no actions when the server gives no links",()=>{
+    const html=render("ready",[{...document,kind:"contract",status:"active",total:"0.00",amountPaid:null,balanceDue:null,documentUrl:null as unknown as string,actionUrl:null as unknown as string}]);
+    expect(html).toContain(">Active<");expect(html).not.toContain("Review and sign");expect(html).not.toContain("View document");
+  });
+  it("keeps every cent at the largest amounts the server accepts, alone and summed",()=>{
+    const exact=(decimal:string)=>new Intl.NumberFormat(undefined,{style:"currency",currency:"USD"}).format(decimal as unknown as number);
+    const big={...document,total:"90071992547409.93",amountPaid:"0.00",balanceDue:"90071992547409.93"};
+    const one=render("ready",[big]);
+    expect(one).toContain(exact("90071992547409.93"));expect(one).not.toContain(exact("90071992547409.92"));
+    const sum=render("ready",[big,{...big,publicId:"doc-2",total:"999999999999999999.99",balanceDue:"999999999999999999.99"}]);
+    expect(sum).toContain(exact("1000090071992547409.92"));
+  });
+  it("calls out overdue invoices first and in the summary",()=>{
+    const html=render("ready",[{...document,publicId:"due"},{...document,publicId:"late",status:"overdue",total:"20.00",balanceDue:"20.00"}]);
+    expect(html).toContain("1 overdue");expect(html).toContain("Overdue");
+    expect(html.indexOf(">Overdue<")).toBeLessThan(html.indexOf("Payment due"));
   });
 });

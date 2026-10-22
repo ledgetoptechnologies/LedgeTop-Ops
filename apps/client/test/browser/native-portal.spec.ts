@@ -1108,6 +1108,14 @@ test.describe("client header matches Operations", () => {
     await expect(menu.getByRole("menuitem", {name: "Logout"})).toHaveAttribute("href", "/cdn-cgi/access/logout");
   });
 
+  test("a native account also shows the verified sign-in email, not a workspace contact", async ({page}) => {
+    test.skip((page.viewportSize()?.width ?? 0) < 961, "the account details are collapsed on phones");
+    await mock(page, (route, call) => call.path === "/api/client/session"
+      ? route.fulfill({json: {account: {id: "", displayName: "Client portal", email: "jamie@example.test"}, capabilities: {workspaceHierarchyV2: true}}}) : undefined);
+    await page.goto("/portal?workspace=workspace-b");
+    await expect(page.getByRole("button", {name: /^Account menu for /})).toContainText("jamie@example.test");
+  });
+
   test("without session timing from the server the menu shows no made-up countdown", async ({page}) => {
     await mock(page);
     await page.goto("/portal");

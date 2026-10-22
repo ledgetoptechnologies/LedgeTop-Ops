@@ -54,20 +54,35 @@ function OperationsFinancialPanel({response}:{response:PortalOperationsHomeRespo
   return <OperationsFinancialSummary state={state} documents={documents}/>;
 }
 
-/** Whole cents from a server decimal string ("1234.50"); amounts are never parsed as floats. */
-const cents = (value: string | null) => value === null ? null : Number(value.replace(".", ""));
-function money(amountInCents: number, currency: string) {
-  try { return new Intl.NumberFormat(undefined, { style: "currency", currency }).format(amountInCents / 100); }
-  catch { return `${currency} ${(amountInCents / 100).toFixed(2)}`; }
+/**
+ * Exact whole cents from a server decimal string ("1234.50"). The server allows up to 18 integer digits, which a
+ * float can't hold, so all money math here is BigInt and nothing is ever parsed as a float.
+ */
+const cents = (value: string | null) => value === null ? null : BigInt(value.replace(".", ""));
+function money(amountInCents: bigint, currency: string) {
+  const negative = amountInCents < 0n, absolute = negative ? -amountInCents : amountInCents;
+  const decimal = `${negative ? "-" : ""}${absolute / 100n}.${String(absolute % 100n).padStart(2, "0")}`;
+  // Intl formats a decimal string exactly (no float rounding) in current browsers.
+  try { return new Intl.NumberFormat(undefined, { style: "currency", currency }).format(decimal as unknown as number); }
+  catch { return `${currency} ${decimal}`; }
 }
-type InvoiceState = "due" | "partial" | "paid" | "other";
+function percentPaid(paid: bigint, total: bigint) {
+  if (total <= 0n) return 100;
+  const value = Number(paid * 100n / total);
+  return Math.max(0, Math.min(100, value));
+}
+type InvoiceState = "overdue" | "due" | "partial" | "paid" | "other";
 function invoiceState(document: PortalFinancialDocument): InvoiceState {
   const total = cents(document.total)!, due = cents(document.balanceDue), paid = cents(document.amountPaid);
-  if (due !== null) return due <= 0 ? "paid" : paid && paid > 0 ? "partial" : "due";
-  if (paid !== null) return paid >= total ? "paid" : paid > 0 ? "partial" : "due";
-  return "other";
+  const owing = due !== null ? due > 0n : paid !== null ? paid < total : null;
+  if (owing === null) return "other";
+  if (!owing) return "paid";
+  if (document.status === "overdue") return "overdue";
+  return paid !== null && paid > 0n ? "partial" : "due";
 }
-const STATE_TEXT: Record<InvoiceState, string> = { due: "Payment due", partial: "Partly paid", paid: "Paid", other: "" };
+const STATE_TEXT: Record<InvoiceState, string> = { overdue: "Overdue", due: "Payment due", partial: "Partly paid", paid: "Paid", other: "" };
+const STATE_TONE: Record<InvoiceState, string> = { overdue: "danger", due: "warning", partial: "warning", paid: "success", other: "neutral" };
+const CONTRACT_TEXT: Record<string, string> = { pending: "Awaiting your signature", active: "Active", paused: "Paused", completed: "Completed" };
 
 /**
  * Invoices and contracts as a picture: what's owed now, how much of each invoice is paid, and one tap to pay.
@@ -76,19 +91,19 @@ const STATE_TEXT: Record<InvoiceState, string> = { due: "Payment due", partial: 
 export function OperationsFinancialSummary({state,documents}:{state:"loading"|"ready"|"unavailable";documents:PortalFinancialDocument[]}){
   const invoices = documents.filter(document => document.kind !== "contract");
   const contracts = documents.filter(document => document.kind === "contract");
-  const owed = new Map<string, { amount: number; count: number }>();
+  const owed = new Map<string, { amount: bigint; count: number }>();
+  let overdue = 0;
   for (const invoice of invoices) {
     const state = invoiceState(invoice);
-    if (state !== "due" && state !== "partial") continue;
-    const due = cents(invoice.balanceDue) ?? cents(invoice.total)! - (cents(invoice.amountPaid) ?? 0);
-    const entry = owed.get(invoice.currency) ?? { amount: 0, count: 0 };
+    if (state !== "due" && state !== "partial" && state !== "overdue") continue;
+    if (state === "overdue") overdue++;
+    const due = cents(invoice.balanceDue) ?? cents(invoice.total)! - (cents(invoice.amountPaid) ?? 0n);
+    const entry = owed.get(invoice.currency) ?? { amount: 0n, count: 0 };
     owed.set(invoice.currency, { amount: entry.amount + due, count: entry.count + 1 });
   }
   const dueCount = [...owed.values()].reduce((sum, entry) => sum + entry.count, 0);
-  const ordered = [...invoices].sort((left, right) => {
-    const rank = (document: PortalFinancialDocument) => ({ due: 0, partial: 0, other: 1, paid: 2 })[invoiceState(document)];
-    return rank(left) - rank(right);
-  });
+  const rank: Record<InvoiceState, number> = { overdue: 0, due: 1, partial: 1, other: 2, paid: 3 };
+  const ordered = [...invoices].sort((left, right) => rank[invoiceState(left)] - rank[invoiceState(right)]);
   return <section className="portal-card portal-finance" aria-label="Invoices and contracts"><h2>Invoices and contracts</h2>
     {state==="loading"?<p>Loading financial documents…</p>:state==="unavailable"?<p>Financial information is temporarily unavailable.</p>
       :documents.length===0?<p>No invoices or contracts are currently available.</p>
@@ -97,7 +112,8 @@ export function OperationsFinancialSummary({state,documents}:{state:"loading"|"r
           {dueCount ? <>
             <span className="portal-finance-label">Balance due</span>
             <span className="portal-finance-total">{[...owed].map(([currency, entry]) => money(entry.amount, currency)).join(" + ")}</span>
-            <span className="portal-finance-detail">{dueCount === 1 ? "1 invoice needs payment" : `${dueCount} invoices need payment`}</span>
+            <span className="portal-finance-detail">{dueCount === 1 ? "1 invoice needs payment" : `${dueCount} invoices need payment`}
+              {overdue > 0 && <strong className="portal-finance-overdue">{overdue === 1 ? " · 1 overdue" : ` · ${overdue} overdue`}</strong>}</span>
           </> : <>
             <span className="portal-finance-check" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5" /></svg></span>
             <span className="portal-finance-total">You’re all paid up</span>
@@ -106,12 +122,13 @@ export function OperationsFinancialSummary({state,documents}:{state:"loading"|"r
         </div>}
         {ordered.length > 0 && <ul className="portal-finance-list">{ordered.map(document => {
           const state = invoiceState(document), total = cents(document.total)!;
-          const paid = state === "paid" ? total : cents(document.amountPaid) ?? (cents(document.balanceDue) !== null ? total - cents(document.balanceDue)! : 0);
-          const percent = total > 0 ? Math.max(0, Math.min(100, Math.round(paid / total * 100))) : 100;
+          const due = cents(document.balanceDue);
+          const paid = state === "paid" ? total : cents(document.amountPaid) ?? (due !== null ? total - due : 0n);
+          const percent = percentPaid(paid, total);
           return <li key={`${document.scopeKey}:${document.kind}:${document.publicId}`}>
             <div className="portal-finance-row">
               <strong>{money(total, document.currency)}</strong>
-              <span className={`status-pill ${state === "paid" ? "success" : state === "other" ? "neutral" : "warning"}`}>{STATE_TEXT[state] || document.status}</span>
+              <span className={`status-pill ${STATE_TONE[state]}`}>{STATE_TEXT[state] || document.status}</span>
             </div>
             {state !== "other" && <div className="portal-finance-meter" role="img" aria-label={`${percent}% paid`}><span style={{ width: `${percent}%` }} /></div>}
             <div className="portal-finance-actions">
@@ -121,14 +138,17 @@ export function OperationsFinancialSummary({state,documents}:{state:"loading"|"r
             </div>
           </li>;
         })}</ul>}
-        {contracts.length > 0 && <div className="portal-finance-contracts"><h3>Contracts</h3><ul>{contracts.map(document =>
-          <li key={`${document.scopeKey}:${document.kind}:${document.publicId}`}>
-            <span>Contract <small>{document.status}</small></span>
+        {contracts.length > 0 && <div className="portal-finance-contracts"><h3>Contracts</h3><ul>{contracts.map(document => {
+          // A pending contract is reviewed and signed on its document page, so its sign link is that same page.
+          const sign = document.status === "pending" && document.actionUrl ? document.actionUrl : null;
+          return <li key={`${document.scopeKey}:${document.kind}:${document.publicId}`}>
+            <span>Contract <small>{CONTRACT_TEXT[document.status] ?? document.status}</small></span>
             <span className="portal-finance-actions">
-              {document.actionUrl && document.actionUrl !== document.documentUrl && <a className="button-ghost button-small" href={document.actionUrl} rel="noreferrer">Review and sign</a>}
-              {document.documentUrl && <a className="portal-text-action" href={document.documentUrl} rel="noreferrer">View document</a>}
+              {sign && <a className="button-orange button-small" href={sign} rel="noreferrer">Review and sign</a>}
+              {document.documentUrl && document.documentUrl !== sign && <a className="portal-text-action" href={document.documentUrl} rel="noreferrer">View document</a>}
             </span>
-          </li>)}</ul></div>}
+          </li>;
+        })}</ul></div>}
       </>}
   </section>;
 }

@@ -15,6 +15,8 @@ export interface NativePortalContext {
 }
 export interface NativePortalBootstrap extends NativePortalContext {
   resourceMode: "native";
+  /** The person signed in (verified Access email from /api/client/session), never a workspace or CRM contact. */
+  identity?: { email: string | null };
   capabilities: PortalCapabilities & { directoryRead: boolean; deliveryView: boolean };
   workspaces: PortalWorkspace[];
   selectedWorkspaceId: string;

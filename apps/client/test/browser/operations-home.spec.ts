@@ -67,12 +67,12 @@ test("financial panel clears the prior authority synchronously while a replaceme
     if(path==="/api/client/session")return route.fulfill({status:401,json:{error:"Sign in required"}});
     return route.fulfill({status:404,json:{error:"not found"}});});
   await page.goto("/portal");
-  await expect(page.getByRole("link",{name:"View document"})).toHaveAttribute("href",/pa-a\.example\.test/);
+  await expect(page.getByRole("link",{name:"Review and sign"})).toHaveAttribute("href",/pa-a\.example\.test/);
   await page.evaluate(()=>document.dispatchEvent(new Event("visibilitychange")));
   await expect(page.getByText("Loading financial documents…",{exact:true})).toBeVisible();
   await expect(page.locator('a[href*="pa-a.example.test"]')).toHaveCount(0);
   releaseB?.();
-  await expect(page.getByRole("link",{name:"View document"})).toHaveAttribute("href",/pa-b\.example\.test/);
+  await expect(page.getByRole("link",{name:"Review and sign"})).toHaveAttribute("href",/pa-b\.example\.test/);
 });
 
 async function expectAuthorizedNavigation(page: Page, unavailableLinks: string[] = []) {

@@ -3069,7 +3069,7 @@ export function ClientPortalApp({
   const projects = gate.data.resourceMode === "native" ? [] : gate.data.projects;
   const mapboxPublicToken = gate.data.resourceMode === "native" ? null : gate.data.mapboxPublicToken;
   const shellDisplayName = native ? native.workspace.displayName : account!.displayName;
-  const accountEmail = account?.email ?? null;
+  const accountEmail = (native ? native.identity?.email : account?.email) ?? null;
   const workspaces = gate.data.workspaces ?? [];
   const selectedWorkspaceId = gate.data.selectedWorkspaceId ?? null;
   const unifiedMode = capabilities.workspaceHierarchyV2 && workspaces.filter(unifiedAccountSupported).length > 1;
