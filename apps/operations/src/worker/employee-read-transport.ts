@@ -196,8 +196,16 @@ export async function readEmployeeGateway(proof: EmployeeReadProof, selection: E
     } else if (upstream.status !== 200 || headers.has("Content-Range")) throw Error();
     await audit(p, s);
     if (!await valid()) { await discard(upstream); return staticError(403, "employee_read_denied"); }
+    // A generic guarded ReadableStream loses Content-Length at the Worker boundary.
+    // Native fixed framing preserves incremental backpressure and rejects short/long bodies.
+    const fixed = new FixedLengthStream(length);
     const reader = upstream.body.getReader(); let delivered = 0;
-    const cleanup = () => { if (timer) clearTimeout(timer); signal?.removeEventListener("abort", abort); };
+    // Explicitly unblock an in-flight upstream read on caller/deadline abort;
+    // Workerd pipe cancellation alone can wait for that read to settle.
+    const cancelReader = () => { void reader.cancel().catch(() => { /* preserve interruption */ }); };
+    controller.signal.addEventListener("abort", cancelReader, { once: true });
+    const cleanup = () => { if (timer) clearTimeout(timer); signal?.removeEventListener("abort", abort);
+      controller.signal.removeEventListener("abort", cancelReader); };
     const stream = new ReadableStream<Uint8Array>({
       async pull(output) {
         try {
@@ -211,8 +219,14 @@ export async function readEmployeeGateway(proof: EmployeeReadProof, selection: E
       },
       async cancel() { cleanup(); controller.abort(); await reader.cancel(); },
     });
+    const response = new Response(fixed.readable, { status: upstream.status, headers: resultHeaders });
+    // The response owns this bounded pump. Observe every rejection. An explicit
+    // caller/deadline abort also interrupts a backpressured write.
+    void stream.pipeTo(fixed.writable, { signal: controller.signal })
+      .catch(() => { /* the readable reports the interruption to the consumer */ })
+      .finally(cleanup);
     handedOff = true;
-    return new Response(stream, { status: upstream.status, headers: resultHeaders });
+    return response;
   } catch { await discard(upstream); return staticError(502, "employee_gateway_unavailable"); }
   finally { if (!handedOff) { if (timer) clearTimeout(timer); signal?.removeEventListener("abort", abort); } }
 }

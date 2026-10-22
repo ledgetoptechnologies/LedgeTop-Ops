@@ -1,3 +1,4 @@
+import "./node-fixed-length-stream";
 import { createHash, createHmac } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -219,7 +220,7 @@ describe("employee private read transport", () => {
     const result = await readEmployeeGateway(proof(), selection(), config(), h.dependencies);
     expect(h.auditContentStart).toHaveBeenCalledOnce();
     const reader = result.body!.getReader(); expect(await reader.read()).toMatchObject({ value: new Uint8Array([1]) });
-    await reader.cancel(); expect(source.cancel).toHaveBeenCalledOnce();
+    await reader.cancel(); await new Promise(resolve => setTimeout(resolve, 0)); expect(source.cancel).toHaveBeenCalledOnce();
     expect((h.fetcher.mock.calls[0]![1]!.signal as AbortSignal).aborted).toBe(true);
   });
   it("preserves a verified conditional inclusive range", async () => {

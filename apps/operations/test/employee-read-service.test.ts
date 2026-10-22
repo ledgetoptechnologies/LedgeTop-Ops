@@ -1,3 +1,4 @@
+import "./node-fixed-length-stream";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { readAuthenticatedEmployeeFile } from "../src/worker/employee-read-service";
 import { signEmployeeReadBody, type EmployeeReadProof, type EmployeeReadSelection } from "../src/worker/employee-read-transport";

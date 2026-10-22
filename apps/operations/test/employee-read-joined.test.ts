@@ -1,3 +1,4 @@
+import "./node-fixed-length-stream";
 import { createHash } from "node:crypto";
 import { readFileSync, readdirSync } from "node:fs";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";

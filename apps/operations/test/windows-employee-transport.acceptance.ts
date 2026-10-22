@@ -1,3 +1,4 @@
+import "./node-fixed-length-stream";
 import { createServer, request as tlsRequest } from "node:https";
 import { request as plainRequest } from "node:http";
 import { execFile } from "node:child_process";
