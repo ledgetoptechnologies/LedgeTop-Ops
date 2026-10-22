@@ -35,7 +35,13 @@ test("native consent is mounted before historical PA admission with independent 
   assert.match(mount, /handleOperationsNativeRecipientEnrollmentHttp\(c\.req\.raw/);
   assert.match(mount, /CLIENT_PORTAL_ENABLED === "true" && c\.env\.CLIENT_PORTAL_NATIVE_RECIPIENT_ENROLLMENT_ENABLED === "true"/);
   assert.match(mount, /environment: c\.env\.ENVIRONMENT/);
-  assert.match(mount, /origin: c\.env\.CLIENT_PORTAL_ORIGIN \?\? ""/);
+  // The reviewed physical profile may preserve an old same-origin session.
+  // Deployment-origin validation must still succeed before selecting that host.
+  assert.match(mount, /const primary = configuredDeploymentOrigin\(\{ environment: c\.env\.ENVIRONMENT,/);
+  assert.match(mount, /origin: c\.env\.CLIENT_PORTAL_ORIGIN,/);
+  assert.match(mount, /expectedHost: c\.env\.CLIENT_PORTAL_NATIVE_RECIPIENT_ENROLLMENT_EXPECTED_HOST \?\? c\.env\.EXPECTED_HOST/);
+  assert.match(mount, /const requestOrigin = primary && nativeDeliveryRequestOriginAllowed\(c\.env, c\.req\.url\)\s*\? new URL\(c\.req\.url\)\.origin : c\.env\.CLIENT_PORTAL_ORIGIN \?\? ""/);
+  assert.match(mount, /origin: requestOrigin,/);
   assert.match(mount, /csrfSecret: c\.env\.CLIENT_PORTAL_NATIVE_RECIPIENT_ENROLLMENT_CSRF_SECRET \?\? ""/);
   assert.match(mount, /binding: c\.env\.OPERATIONS_PORTAL_NATIVE_RECIPIENT_ENROLLMENT/);
   assert.doesNotMatch(mount, /resolveProof|CLIENT_PORTAL_RECIPIENT_ENROLLMENT_BRIDGE/);
