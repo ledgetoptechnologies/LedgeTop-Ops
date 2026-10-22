@@ -18,6 +18,9 @@ async function setup(page: Page, options: Options = {}) {
       doc("22222222-2222-4222-8222-222222222222", "W-4.pdf", "tax", "quarantined"),
       doc("33333333-3333-4333-8333-333333333333", "scan.pdf", "onboarding", "rejected"),
       doc("44444444-4444-4444-8444-444444444444", "partial.pdf", "other", "uploading"),
+      doc("55555555-5555-4555-8555-555555555555", "I-9.pdf", "onboarding", "quarantined", { scan: { state: "manual_review", attempts: 8, retryAfter: null, errorCode: "attempts_exhausted" } }),
+      doc("66666666-6666-4666-8666-666666666666", "Handbook.pdf", "other", "quarantined", { scan: { state: "pending", attempts: 2, retryAfter: "2026-10-22T20:15:00Z", errorCode: "scan_unavailable" } }),
+      doc("77777777-7777-4777-8777-777777777777", "Direct deposit.pdf", "tax", "quarantined", { scan: { state: "leased", attempts: 1, retryAfter: null, errorCode: null } }),
     ],
     uploads: [] as Array<{ headers: Record<string, string>; size: number }>,
     posts: [] as Array<{ path: string; body: any; headers: Record<string, string> }>,
@@ -95,7 +98,13 @@ test("documents are grouped by type and show their scan state honestly, with no 
   await expect(row("W-4.pdf")).toContainText("Waiting for virus scan");
   await expect(row("scan.pdf")).toContainText("Blocked by virus scan");
   await expect(row("partial.pdf")).toContainText("Upload not finished");
-  for (const locked of ["W-4.pdf", "scan.pdf", "partial.pdf"]) await expect(row(locked).getByRole("button", { name: "Download" })).toHaveCount(0);
+  await expect(row("I-9.pdf")).toContainText("Scan needs attention");
+  await expect(row("I-9.pdf")).toContainText("couldn't finish after several tries");
+  await expect(row("Handbook.pdf")).toContainText("Scan will retry");
+  await expect(row("Handbook.pdf")).toContainText("it will try again after");
+  await expect(row("Direct deposit.pdf")).toContainText("Scanning now");
+  await expect(row("I-9.pdf")).not.toContainText("attempts_exhausted");
+  for (const locked of ["W-4.pdf", "scan.pdf", "partial.pdf", "I-9.pdf", "Handbook.pdf", "Direct deposit.pdf"]) await expect(row(locked).getByRole("button", { name: "Download" })).toHaveCount(0);
   await expect(dialog.getByRole("button", { name: /delete|remove/i })).toHaveCount(0);
 });
 

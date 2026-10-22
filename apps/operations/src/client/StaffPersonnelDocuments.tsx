@@ -12,6 +12,8 @@ type Retention = { hold: boolean; reviewAfter: string | null; reviewNote: string
 export type PersonnelDocument = {
   id: string; staffId: string; filename: string; category: Category; contentType: string; size: number;
   status: "uploading" | "quarantined" | "accepted" | "rejected"; createdAt: string; retention: Retention;
+  /** Scanner progress for quarantined files; absent on older records. */
+  scan?: { state: "pending" | "leased" | "completed" | "manual_review"; attempts: number; retryAfter: string | null; errorCode: string | null } | null;
 };
 type Category = "agreement" | "tax" | "onboarding" | "other";
 type Listing = { profile: { archived_at: string | null; version: number } | null; documents: PersonnelDocument[] };
@@ -76,7 +78,11 @@ const day = (value: string) => new Date(value).toLocaleDateString(undefined, { y
 function statusPill(document: PersonnelDocument) {
   switch (document.status) {
     case "accepted": return <StatusPill tone="success">Ready</StatusPill>;
-    case "quarantined": return <StatusPill tone="warning">Waiting for virus scan</StatusPill>;
+    case "quarantined":
+      if (document.scan?.state === "manual_review") return <StatusPill tone="danger">Scan needs attention</StatusPill>;
+      if (document.scan?.state === "leased") return <StatusPill tone="warning">Scanning now</StatusPill>;
+      if (document.scan?.state === "pending" && document.scan.attempts > 0) return <StatusPill tone="warning">Scan will retry</StatusPill>;
+      return <StatusPill tone="warning">Waiting for virus scan</StatusPill>;
     case "rejected": return <StatusPill tone="danger">Blocked by virus scan</StatusPill>;
     default: return <StatusPill tone="warning">Upload not finished</StatusPill>;
   }
@@ -203,6 +209,8 @@ export function StaffPersonnelDocuments({ person, self, onClose }: { person: Per
               {document.retention.reviewAfter && <StatusPill>Review after {day(document.retention.reviewAfter + "T12:00:00")}</StatusPill>}
             </div>
             {document.status === "rejected" && <small className="personnel-document-detail">The scanner found a problem. The file can't be opened; upload a clean copy if one is needed.</small>}
+            {document.status === "quarantined" && document.scan?.state === "manual_review" && <small className="personnel-document-detail">The virus scan couldn't finish after several tries, so the file stays locked. An administrator needs to check the scanner.</small>}
+            {document.status === "quarantined" && document.scan?.state === "pending" && document.scan.attempts > 0 && <small className="personnel-document-detail">The last scan attempt didn't finish{document.scan.retryAfter ? `; it will try again after ${new Date(document.scan.retryAfter).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })}` : ""}. The file stays locked until it passes.</small>}
             {document.status === "uploading" && <small className="personnel-document-detail">This upload was interrupted. Retry it from the device that started it, or ask your administrator.</small>}
           </div>
           <div className="personnel-document-actions">
