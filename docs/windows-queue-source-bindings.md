@@ -57,6 +57,23 @@ ownership change, folder remap or changed publication pins fail closed.
 
 ## Portal publication continuity remains unfinished
 
+The unmounted `windows-portal-publication-chain.ts` evidence reader now proves
+one prerequisite: an uninterrupted, bounded sequence of acknowledged applied
+publications retaining the original folder mapping, project version and owner.
+It checks every intermediate publication, so omission followed by restoration
+fails. It pins the exact acknowledged active grant wire and original expiry,
+rechecks the current grant/publication afterward, and returns only publication
+identities and a chain digest. Migration 0224 adds its target/sequence index.
+The maximum is 64 publications including the original; longer history needs a
+separate continuity-epoch design, not silent truncation.
+
+This component is not content authorization. It is not mounted as RPC or HTTP,
+does not inspect current recipient/home consumer authorization, and does not
+change queue matching, existing handles or content audit. The eventual successor
+RPC must combine this history evidence with fresh current recipient/home/folder
+proofs and consumer state, then extend purpose-separated handles and audit before
+any index/R2 access. Queue resume across a publication change is still unfinished.
+
 A normal publication refresh currently returns 409 for an old queue reference.
 That is an explicit source limitation, not the intended final restart/resume
 experience. Removing publication or delivery revision pins would allow an old
