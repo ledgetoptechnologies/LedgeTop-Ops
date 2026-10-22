@@ -7,9 +7,12 @@ const sha = bytes => createHash("sha256").update(bytes).digest("hex");
 
 /** Offline esbuild qualification only. It does not deploy or upload assets. */
 export async function buildWindowsStagingModules(root) {
+  root = path.resolve(root);
+  if (root.startsWith("\\\\") || fs.lstatSync(root).isSymbolicLink() || fs.realpathSync(root).toLowerCase() !== root.toLowerCase()) throw Error("windows_staging_build_root_alias");
   const observations = [];
   for (const [app, directory, originalMain] of [["operations", "operations", "src/worker/staging-native-authority-entrypoint.ts"], ["delivery", "client", "src/worker/index.ts"]]) {
     const base = path.join(root, "apps", directory), generated = path.join(base, ".windows-files-staging");
+    if (fs.realpathSync(generated).toLowerCase() !== generated.toLowerCase() || fs.lstatSync(generated).isSymbolicLink()) throw Error("windows_staging_build_root_alias");
     const output = path.join(generated, "module-build");
     if (fs.existsSync(output)) throw Error("windows_staging_build_output_exists");
     const config = JSON.parse(fs.readFileSync(path.join(base, "wrangler.staging.windows-files.json"), "utf8"));
