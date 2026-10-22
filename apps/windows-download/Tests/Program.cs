@@ -29,7 +29,8 @@ var tests = new (string Name, Func<Task> Run)[] {
     ("metadata cleanup cannot undo a committed successful download", LockedMetadata),
 }.Concat(AccessSessionTests.Groups).Concat(PortalClientTests.Groups).Concat(EmployeeClientTests.Groups)
     .Concat(TransferQueueTests.Groups).Concat(DownloadProgressTests.Groups).Concat(QueuedDownloadSourceTests.Groups)
-    .Concat(PlaceholderHydrationTests.Groups).Concat(CloudFilesProbeTests.Groups).Concat(CloudFilesNativeTransferTests.Groups).ToArray();
+    .Concat(PlaceholderHydrationTests.Groups).Concat(CloudFilesProbeTests.Groups)
+    .Concat(CloudFilesNativeTransferTests.Groups).Concat(CloudFilesCallbackTests.Groups).ToArray();
 foreach (var test in tests) {
     try { await test.Run(); passed++; Console.WriteLine("PASS " + test.Name); }
     catch (Exception error) { Console.Error.WriteLine("FAIL " + test.Name + ": " + error.GetType().Name + " " + error.Message); Environment.ExitCode = 1; }
