@@ -7,6 +7,21 @@ or NAS paths, including NAS mounts on the staging host.
 
 ## Current boundary
 
+Latest qualification: the source-only combined candidate now has real full
+Client-to-Ops Workerd RPC and full Ops-to-Python gateway transfer acceptance,
+including native content-length framing and explicit server-rejection abort
+cleanup. Those newer tests supersede the transport limitations of the earlier
+Node adapters described below; their exact scope is in
+`staging/windows-current-main-integration-2026-10-22.md`.
+
+A fresh read-only control-plane observation at 2026-10-22T23:35Z found the same
+paired active versions, complete ledger hashes and schema hashes as the earlier
+receipt, with zero foreign-key violations. All five Windows suffix migrations
+are still absent. The concise refresh receipt is
+`staging/windows-staging-preflight-refresh-2026-10-22.json`; it does not attest
+historical migration SQL/data effects or an atomic snapshot. No runtime or
+database change occurred.
+
 The standalone employee and portal handlers have local joined acceptance, but
 the application entrypoints do not mount them. The earlier staging gateway
 receipt proves an isolated container test with no network or host mounts; it is
