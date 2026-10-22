@@ -1,0 +1,92 @@
+{
+  "schemaVersion": 1,
+  "status": "unsigned_local_preview_only",
+  "sourceCommit": "dc8d5cea3f8c0e5f353895afee08bb5889d6263c",
+  "sourceTree": "0384c9c6fc8bb7e6e644731065ac3a5a3bc6de5c",
+  "sourceArchiveSha256": "e225ac5ac83d250752a96af9faac3246e3e0a7167a7c7484ceac2369731883a1",
+  "sdk": "10.0.402",
+  "rid": "win-x64",
+  "selfContained": true,
+  "channel": "pilot",
+  "applicationSha256": "f4b108999b1a015623cc7396d47d12b3c45c7727e00b0a9abcd66bcf0dd99aca",
+  "scriptSha256": "89e0df10501be9cb6a5dfb87ced7a4d75df4bdebc912b5c4d56c08701dd60d01",
+  "channelCheckerSha256": "08ad25773debc1bcd599459ae382b561acdf7e9a3176d365ccd02502756584d5",
+  "makeAppxSha256": "98ddf5a4fdb38a1d32c2ca7b350a2012ed430d277baa1bf03ac91ef82365f1d3",
+  "runtimeNoticeCollectorSha256": "01d38b18e9455f8884ce95721d594312e814272babe23acabdd20d23b98acaf4",
+  "helperSha256": "76b2805253d0d6ffacb092a7acfbee99e7af6917835c0c5410e23f3ef5052da2",
+  "rootLicenseSha256": "58d1e17ffe5109a7ae296caafcadfdbe6a7d176f0bc4ab01e12a689b0499d8bd",
+  "completeThirdPartyAttribution": false,
+  "runtimeNotices": [
+    {
+      "path": "Notices/LICENSE.Microsoft.NETCore.App.txt",
+      "bytes": 1139,
+      "sha256": "d7a68596ab69b06f51ca278a6545148e4269a9381c26d597c13df5d88e08cf5b",
+      "packageId": "microsoft.netcore.app.runtime.win-x64",
+      "packageVersion": "10.0.13",
+      "packageSha256": "c66885d464697be75676b4d1fbca38b8806f3af01d65d27205b3f06add094444",
+      "packageEntry": "LICENSE.TXT",
+      "sourceUrl": null
+    },
+    {
+      "path": "Notices/THIRD-PARTY-NOTICES.Microsoft.NETCore.App.txt",
+      "bytes": 78041,
+      "sha256": "6d15e10a101c6bfff2ab4429ed061bf76c456fc4b23ad6b03e0d0f8377148a21",
+      "packageId": "microsoft.netcore.app.runtime.win-x64",
+      "packageVersion": "10.0.13",
+      "packageSha256": "c66885d464697be75676b4d1fbca38b8806f3af01d65d27205b3f06add094444",
+      "packageEntry": "THIRD-PARTY-NOTICES.TXT",
+      "sourceUrl": null
+    },
+    {
+      "path": "Notices/LICENSE.Microsoft.WindowsDesktop.App.txt",
+      "bytes": 1137,
+      "sha256": "a89886665765362eb77e0f8e26602c924520041d1711b2eedc136434fe4d01ab",
+      "packageId": "microsoft.windowsdesktop.app.runtime.win-x64",
+      "packageVersion": "10.0.13",
+      "packageSha256": "af044758d6bc23eca96b60c9ce13b38f211c3e736eef9458de3cadbbd3e20ff2",
+      "packageEntry": "LICENSE",
+      "sourceUrl": null
+    },
+    {
+      "path": "Notices/THIRD-PARTY-NOTICES.WPF.txt",
+      "bytes": 2703,
+      "sha256": "d23dba2fee20c6b59d8f7088ee9ed372459c952a319b7ca90f3eec370cc76eb9",
+      "packageId": null,
+      "packageVersion": "10.0.13",
+      "packageSha256": null,
+      "packageEntry": null,
+      "sourceUrl": "https://raw.githubusercontent.com/dotnet/dotnet/4099f83977f4d29604a9aeb971fb0a7bc1d5f699/src/wpf/THIRD-PARTY-NOTICES.TXT"
+    },
+    {
+      "path": "Notices/THIRD-PARTY-NOTICES.WindowsForms.txt",
+      "bytes": 1966,
+      "sha256": "5a412b38efae0b162dc0893b319023f4cd14a8985a0f9f9ae01ac052b37a36eb",
+      "packageId": null,
+      "packageVersion": "10.0.13",
+      "packageSha256": null,
+      "packageEntry": null,
+      "sourceUrl": "https://raw.githubusercontent.com/dotnet/dotnet/4099f83977f4d29604a9aeb971fb0a7bc1d5f699/src/winforms/THIRD-PARTY-NOTICES.TXT"
+    }
+  ],
+  "helperModuleNotices": {
+    "manifestSha256": "3b2a544ea71e1e6babc118a2c1888a3a3754f977f0b725526d03e7481dd63143",
+    "moduleCount": 66,
+    "noticeFiles": 99,
+    "completeThirdPartyAttribution": false
+  },
+  "payloadFiles": 511,
+  "payloadBytes": 202529975.0,
+  "inventorySha256": "b7d067300fad7d008745153e810b093374d41e347aac68627564584b0ba7302f",
+  "packageBytes": 83798920,
+  "packageSha256": "e19b4771222d6eb24a3317beec6497f4fb611db60940b054afa38ddf46b79861",
+  "validatedPack": true,
+  "unpackedInventoryExact": true,
+  "sourceAcceptanceVerified": false,
+  "runtimeTestsExecuted": false,
+  "signed": false,
+  "installed": false,
+  "published": false,
+  "liveTransferTested": false,
+  "cleanMachineTested": false,
+  "outputRoot": "C:\\Users\\fstor\\AppData\\Local\\LedgeTopFilesPackagePreviews\\432ae7e27951402eb2891ee476a75d6b"
+}

@@ -36,12 +36,27 @@ negative-test pass. The corrected test used the original notice entry from the
 bundle manifest, confirmed it existed, modified that entry, and observed the
 expected rejection and empty output directory.
 
+The final preview integration was actually packed once from clean archive of
+`dc8d5cea3f8c0e5f353895afee08bb5889d6263c`. It retained the99 vendor files and
+canonical-LF provenance manifest under `Notices/cloudflared-modules/`, alongside
+the previously repaired .NET notices and cloudflared root license. Validated
+MakeAppx pack/unpack and complete path/length/SHA256 verification passed. Payload
+511 files/202529975 bytes; unsigned package83798920 bytes; SHA256
+`e19b4771222d6eb24a3317beec6497f4fb611db60940b054afa38ddf46b79861`.
+The packaged module manifest SHA256 is
+`3b2a544ea71e1e6babc118a2c1888a3a3754f977f0b725526d03e7481dd63143`.
+Receipt: `windows-helper-notices-package-2026-10-22.json`. Normalizing only the
+JSON manifest's line endings is explicit; every vendor notice's original bytes
+stay unchanged. Later changes are evidence/documentation only; no extra full
+package rehearsal was run after those edits.
+
 The source bundle's README and manifest retain the scope limits. Filename
 selection does not identify all source-embedded/per-subcomponent notices or
 prove which subpackages were linked; extra test/subpackage notices are retained
 conservatively. This does not close Go toolchain/runtime, native CGO/Windows or
-modified main-module source provenance. Complete attribution stays false and
-the bundle is not yet injected into published/installed product artifacts.
+modified main-module source provenance. Complete attribution stays false. The
+bundle is in the verified unsigned construction package, and no published or
+installed product artifact was changed.
 
 The underlying algorithms and service are described by the primary sources:
 [Go module proxy services](https://proxy.golang.org/),
