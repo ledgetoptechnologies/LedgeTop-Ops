@@ -59,7 +59,13 @@ export function buildWindowsStagingComposition({ profile, preflight, sources }) 
     const candidate = structuredClone(source);
     candidate.main = ".windows-files-staging/entrypoint.ts";
     if (profile.enabled) {
-      if (app === "operations") candidate.vars.OPERATIONS_PORTAL_NATIVE_DELIVERY_READER_ENABLED = "true";
+      if (app === "operations") {
+        candidate.vars.OPERATIONS_PORTAL_NATIVE_DELIVERY_READER_ENABLED = "true";
+        const flags = source.compatibility_flags ?? [];
+        if (!Array.isArray(flags) || flags.some(flag => typeof flag !== "string") || flags.includes("disable_request_signal")) reject();
+        candidate.compatibility_flags = flags.filter((flag, index) => flag !== "enable_request_signal" || flags.indexOf(flag) === index);
+        if (!candidate.compatibility_flags.includes("enable_request_signal")) candidate.compatibility_flags.push("enable_request_signal");
+      }
       else Object.assign(candidate.vars, { CLIENT_PORTAL_ENABLED: "true", CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_READ_ENABLED: "true", CLIENT_PORTAL_OPERATIONS_NATIVE_CONTENT_AUDIT_ENABLED: "true" });
     }
     configs[app] = candidate;

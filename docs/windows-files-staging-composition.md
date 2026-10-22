@@ -60,6 +60,26 @@ reviewed runtime classes. This changes only the isolated staging generator;
 production source mains and configuration are unchanged. A successful offline
 bundle still does not by itself prove Workerd startup or live deployment.
 
+Enabled Ops composition also adds the explicit `enable_request_signal`
+compatibility flag, deduplicating that flag while preserving other flags and
+their order. An explicit `disable_request_signal` rejects enabled preparation;
+disabled preparation and Client flags remain unchanged. Cloudflare requires
+this opt-in for an incoming request's signal to report client disconnects.
+This constructor change alone does not prove physical disconnect cancellation:
+that requires a native socket test against the actual Workerd stream path.
+It changes no production Wrangler configuration.
+
+The constructor and real-bundle suite passes24 tests, including absent and
+already-enabled flags, duplicate opt-ins, unknown-flag preservation, explicit
+opt-out rejection, and disabled/Client configuration preservation. A bounded
+local diagnostic on pinned Workerd1.20260730.1 did not observe incoming signal
+abortion after destroying a response socket after its first chunk, including
+through a direct native socket and with `waitUntil`. This opt-in therefore
+remains necessary configuration, not physical-disconnect acceptance. Explicit
+caller cancellation and the transport deadline are separate tested mechanisms.
+
+Reference: [incoming request signal compatibility flag](https://developers.cloudflare.com/workers/configuration/compatibility-flags/#enable-requestsignal-for-incoming-requests).
+
 ## Private configuration and runtime behavior
 
 Only the existing secret-store bindings supply keys, encoded as canonical
