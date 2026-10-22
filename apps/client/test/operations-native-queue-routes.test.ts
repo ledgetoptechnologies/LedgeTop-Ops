@@ -34,6 +34,11 @@ function proof(value: OperationsPortalNativeDeliveryAuthorityCommand) {
     opsDivisionId: value.resource.opsDivisionId, selectedR2Prefix: value.resource.selectedR2Prefix,
     expiresAt: value.expiresAt, features: value.features };
 }
+function publicationPins(value: OperationsPortalNativeDeliveryAuthorityCommand) {
+ return { operationId:value.publication.operationId, publicationId:value.publication.publicationId,
+  revision:Number(value.publication.revision),sourceSequence:Number(value.publication.sourceSequence),
+  snapshotId:value.publication.snapshotId,snapshotSha256:value.publication.snapshotSha256 };
+}
 function handle(kind: 'folder' | 'file' = 'folder'): OperationsNativeDeliveryHandle {
   return { v: 1, kind, authorityId: id(2), authorityRevision: '1', recipientBindingId: id(5), enrollmentIntentId: id(6), targetClientRecordId: 'synthetic-client',
     issuer: principal.issuer, subject: principal.subject, targetId: id(3), targetRevision: '1', clientAuthorityId: id(4), workspaceId: 'synthetic-workspace',
@@ -46,19 +51,26 @@ const origin="https://client-staging.ledgetopdroneservices.com", audience="synth
 describe("native portal durable queue with actual RS256 and exact canonical authority",()=>{
  let env:Env, token:string, pair:Awaited<ReturnType<typeof generateKeyPair>>, value:OperationsPortalNativeDeliveryAuthorityCommand;
  let row:{canonical_command_json:string;request_fingerprint:string}|null;
- const head=vi.fn(), get=vi.fn(), rpc=vi.fn(), index=vi.fn();
+ let current:ReturnType<typeof publicationPins>;
+ const head=vi.fn(), get=vi.fn(), rpc=vi.fn(), successorRpc=vi.fn(), index=vi.fn();
  const config={enabled:true,portalOrigin:origin,issuer:principal.issuer,audience,queueKey:new Uint8Array(32).fill(7)};
  beforeAll(async()=>{pair=await generateKeyPair("RS256",{extractable:true});const k=await exportJWK(pair.publicKey);k.kid="queue";keys.mockReturnValue(createLocalJWKSet({keys:[k]}));});
- async function refresh(){row={canonical_command_json:canonical(value),request_fingerprint:await fingerprint(value)};}
+ async function refresh(){row={canonical_command_json:canonical(value),request_fingerprint:await fingerprint(value)};current=publicationPins(value);}
  async function jwt(subject=principal.subject,claims:Record<string,unknown>={}){return new SignJWT({type:"app",email:"synthetic@example.invalid",...claims}).setProtectedHeader({alg:"RS256",kid:"queue"}).setIssuer(principal.issuer).setSubject(subject).setAudience(audience).setExpirationTime("1h").sign(pair.privateKey);}
  beforeEach(async()=>{
   vi.clearAllMocks();value=command();await refresh();token=await jwt();
   head.mockResolvedValue({etag:"synthetic-etag",httpEtag:'"synthetic-etag"',size:42,version:"provider-one",checksums:{sha256:new Uint8Array(32).fill(10).buffer}});
   index.mockResolvedValue({r2_key:"synthetic/photos/photo.jpg",etag:"synthetic-etag",size:42,uploaded_at:new Date().toISOString(),content_type:"image/jpeg",media_kind:"image"});
   rpc.mockImplementation(async()=>JSON.stringify({ok:true,protocolVersion:1,authorization:proof(value)}));
+  successorRpc.mockImplementation(async()=>JSON.stringify({ok:true,protocolVersion:1,successor:{authorization:proof(value),
+   continuity:{grantOperationId:value.operationId,grantFingerprint:row?.request_fingerprint,first:publicationPins(value),current,
+    publicationCount:current.sourceSequence-Number(value.publication.sourceSequence)+1,chainSha256:"c".repeat(64)}}}));
   env={ENVIRONMENT:"staging",CLIENT_PORTAL_ORIGIN:origin,CLIENT_PORTAL_ENABLED:"true",CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_READ_ENABLED:"true",DELIVERY_SESSION_SECRET:"s".repeat(48),CLIENT_ACCESS_TEAM_DOMAIN:principal.issuer,CLIENT_ACCESS_AUD:audience,
-   DELIVERY_DB:{withSession:()=>({prepare:(sql:string)=>({bind:()=>({first:()=>sql.includes("operations_portal_native_delivery_live_heads")?Promise.resolve(row):index()})})})},
-   DATA_BUCKET:{head,get},OPERATIONS_PORTAL_NATIVE_DELIVERY_AUTHORIZATION_READER:{readNativeDeliveryAuthorization:rpc}} as unknown as Env;
+   DELIVERY_DB:{withSession:()=>({prepare:(sql:string)=>({bind:()=>({first:()=>sql.includes("operations_portal_native_delivery_successor_candidates")
+    ?Promise.resolve(row&&{...row,publication_operation_id:current.operationId,publication_id:current.publicationId,
+      publication_revision:current.revision,publication_source_sequence:current.sourceSequence,snapshot_id:current.snapshotId,snapshot_sha256:current.snapshotSha256})
+    :sql.includes("operations_portal_native_delivery_live_heads")?Promise.resolve(row):index()})})})},
+   DATA_BUCKET:{head,get},OPERATIONS_PORTAL_NATIVE_DELIVERY_AUTHORIZATION_READER:{readNativeDeliveryAuthorization:rpc,readWindowsDeliverySuccessorAuthorization:successorRpc}} as unknown as Env;
  });
  const call=(path:string,extra:HeadersInit={},instance=createOperationsNativeQueueRouter(config))=>instance.fetch(new Request(origin+prefix+path,{headers:{"Cf-Access-Jwt-Assertion":token,...extra}}),env);
  async function select(){const selector=await encodeOperationsNativeDeliveryHandle(env,handle("file"));const r=await call("/reference?fileHandle="+selector);expect(r.status).toBe(200);return await r.json() as {schemaVersion:number;principalId:string;resourceRef:string;manifest:Record<string,unknown>};}
@@ -70,18 +82,24 @@ describe("native portal durable queue with actual RS256 and exact canonical auth
   expect(Object.keys(renewed)).toEqual(["schemaVersion","principalId","manifest"]);expect(Object.keys(renewed.manifest)).toHaveLength(9);expect(get).not.toHaveBeenCalled();
   expect(JSON.stringify(renewed)).not.toContain("synthetic/photos/");expect(JSON.stringify(selected.resourceRef)).not.toContain("photo.jpg");
  });
- it("publication refresh remains409 until an authoritative continuity transition is implemented",async()=>{
-  const selected=await select();head.mockClear();index.mockClear();
-  value={...value,publication:{...value.publication,revision:"2",sourceSequence:"2",snapshotId:id(90)}};await refresh();
-  const r=await call("/resolve?resourceRef="+selected.resourceRef);expect(r.status).toBe(409);expect(head).not.toHaveBeenCalled();expect(index).not.toHaveBeenCalled();
+ it("renews a proved publication without rewriting the original durable selector or logical file identity",async()=>{
+  const selected=await select();const first=await call("/resolve?resourceRef="+selected.resourceRef);expect(first.status).toBe(200);
+  const before=await first.json() as typeof selected;const original=canonical(value);
+  current={...current,operationId:id(88),publicationId:id(89),revision:2,sourceSequence:2,snapshotId:id(90)};
+  const r=await call("/resolve?resourceRef="+selected.resourceRef);expect(r.status).toBe(200);
+  const after=await r.json() as typeof selected;expect(canonical(value)).toBe(original);
+  expect(after.manifest.logicalFileId).toBe(before.manifest.logicalFileId);expect(after.manifest.sha256).toBe(before.manifest.sha256);
+  expect(after.manifest.downloadPath).toMatch(/^\/api\/client\/operations\/data\/windows-successor\/files\/wsp1_[A-Za-z0-9_-]+\/download$/u);
+  expect(get).not.toHaveBeenCalled();
  });
- it.each(["recipient","target","home","grant","root"])("cannot follow changed %s lifecycle",async kind=>{
+ it.each(["recipient","target","home","grant","root","publication"])("cannot follow changed %s lifecycle",async kind=>{
   const selected=await select();head.mockClear();
   if(kind==="recipient")value={...value,recipient:{...value.recipient,recipientBindingId:id(91)}};
   if(kind==="target")value={...value,target:{...value.target,targetRevision:"2"}};
   if(kind==="home")value={...value,recipient:{...value.recipient,homeOwnershipEpoch:"2"}};
   if(kind==="grant")value={...value,authority:{...value.authority,expectedRevision:"1",resultingRevision:"2"}};
   if(kind==="root")value={...value,resource:{...value.resource,folderReservationRevision:"2"}};
+  if(kind==="publication")value={...value,publication:{...value.publication,revision:"2",sourceSequence:"2",snapshotId:id(90)}};
   await refresh();expect((await call("/resolve?resourceRef="+selected.resourceRef)).status).toBe(409);expect(head).not.toHaveBeenCalled();
  });
  it("revocation during HEAD fails closed without a reference or manifest",async()=>{

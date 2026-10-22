@@ -18,7 +18,8 @@ internal static class QueuedDownloadSourceTests
         ("queue source status redirects duplicate JSON invalid UTF8 and bounds fail closed", Responses),
         ("queue source verified downloader emits truthful progress without credential persistence", Download),
         ("queue source cancellation does not launch login or start another request", Cancellation),
-        ("queue actual adapter joins lightweight reference durable enqueue renewal and verified completion", JoinedQueue)
+        ("queue actual adapter joins lightweight reference durable enqueue renewal and verified completion", JoinedQueue),
+        ("portal queue resumes an owned partial through only the dedicated successor byte path", SuccessorResume)
     ];
     private static void Assert(bool value) { if (!value) throw new Exception("Queue source assertion failed."); }
     private static async Task Throws<T>(Func<Task> run) where T : Exception { try { await run(); } catch (T) { return; } throw new Exception("Expected safe queue source failure."); }
@@ -153,6 +154,56 @@ internal static class QueuedDownloadSourceTests
         Assert((await reopened.GetJobsAsync()).Single().State==QueuedTransferState.Completed && bytes==1);
     }
     private sealed class ProgressSink(List<DownloadProgress> items):IProgress<DownloadProgress>{public void Report(DownloadProgress p)=>items.Add(p);}
+    private static async Task SuccessorResume() {
+        using var f = new Fixture(); int resolutions = 0, requests = 0;
+        using var source = f.Source(false, new Handler((request, _) => {
+            if (request.RequestUri!.AbsolutePath.EndsWith("/session", StringComparison.Ordinal))
+                return Task.FromResult(Json(new { schemaVersion = 1, principalId = Principal, expiresAt = DateTimeOffset.UtcNow.ToUnixTimeSeconds() + 3600 }));
+            var envelope = Envelope(false); var manifest = Manifest(false);
+            if (++resolutions >= 3) manifest["downloadPath"] = Base(false) + "/windows-successor/files/wsp1_renewed/download";
+            envelope["manifest"] = manifest; return Task.FromResult(Json(envelope));
+        }), new Handler((request, _) => {
+            requests++;
+            if (requests == 1) {
+                Assert(request.RequestUri!.AbsolutePath == Base(false) + "/files/ond1_renewed/download");
+                var interrupted = new HttpResponseMessage(HttpStatusCode.OK) { Content = new StreamContent(new InterruptedPrefix()) };
+                interrupted.Headers.ETag = new("\"" + Sha + "\""); interrupted.Content.Headers.ContentLength = Bytes.Length;
+                return Task.FromResult(interrupted);
+            }
+            Assert(request.RequestUri!.AbsolutePath == Base(false) + "/windows-successor/files/wsp1_renewed/download"
+                && request.Headers.Range?.ToString() == "bytes=8-" && request.Headers.IfMatch.Single().Tag == "\"" + Sha + "\"");
+            var resumed = new HttpResponseMessage(HttpStatusCode.PartialContent) { Content = new ByteArrayContent(Bytes[8..]) };
+            resumed.Headers.ETag = new("\"" + Sha + "\""); resumed.Content.Headers.ContentRange = new ContentRangeHeaderValue(8, Bytes.Length - 1, Bytes.Length);
+            return Task.FromResult(resumed);
+        }));
+        var output = Path.Combine(f.Root, "output"); Directory.CreateDirectory(output);
+        var state = Path.Combine(f.Root, "state"); Directory.CreateDirectory(state);
+        await using (var queue = await TransferQueue.OpenAsync(state, source)) {
+            var id = await queue.EnqueueAsync(Reference, output);
+            await queue.StartAsync(id); await queue.WaitForIdleAsync();
+            Assert((await queue.GetJobsAsync()).Single().State == QueuedTransferState.Failed);
+            Assert(new FileInfo(Directory.GetFiles(output, "*.part", SearchOption.AllDirectories).Single()).Length == 8);
+            await queue.RetryAsync(id); await queue.WaitForIdleAsync();
+            Assert((await queue.GetJobsAsync()).Single().State == QueuedTransferState.Completed && requests == 2);
+        }
+        Assert(File.ReadAllBytes(Path.Combine(output, "queue.bin")).SequenceEqual(Bytes));
+        foreach (var path in new[] {
+            Base(false) + "/files/wsp1_wrong/download", Base(false) + "/windows-successor/files/ond1_wrong/download",
+            Base(false) + "/windows-successor/files/wsp1_ok/download?extra=1",
+            Base(false) + "/windows-successor/files/wsp1_ok/preview", Base(false) + "/windows-successor/files/wsp1_/download"
+        }) {
+            var envelope = Envelope(false); var manifest = Manifest(false); manifest["downloadPath"] = path; envelope["manifest"] = manifest;
+            using var invalid = f.Source(false, new Handler((_, _) => Task.FromResult(Json(envelope))));
+            await Throws<TransferException>(() => invalid.ResolveAsync(Reference));
+        }
+    }
+    private sealed class InterruptedPrefix : MemoryStream {
+        private bool sent;
+        public override ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default) {
+            if (sent) throw new IOException("Synthetic interruption after owned prefix.");
+            sent = true; Bytes.AsMemory(0, 8).CopyTo(buffer); return ValueTask.FromResult(8);
+        }
+    }
     private sealed class Handler(Func<HttpRequestMessage,CancellationToken,Task<HttpResponseMessage>> action):HttpMessageHandler {
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request,CancellationToken cancellationToken)=>action(request,cancellationToken);
     }

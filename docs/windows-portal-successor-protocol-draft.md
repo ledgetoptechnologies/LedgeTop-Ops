@@ -1,6 +1,7 @@
 # Windows portal publication successor protocol (draft)
 
-Producer and consumer authorization source is implemented; content integration is unfinished.
+Producer, consumer, successor bytes/audit and queue resolution source are implemented;
+catalog continuity and live qualification are unfinished.
 This does not make cross-publication downloads available in a deployed portal.
 
 ## Implemented producer
@@ -43,7 +44,9 @@ continue to require the original publication.
 
 The ordinary Client `operations_portal_native_delivery_live_heads` view correctly
 disappears when its original publication is no longer current. It must remain
-unchanged. A separate candidate query proves the exact current active grant
+unchanged. Migration 0235 adds a separate successor-candidate view and an exact
+authority/person selector. This lets the reader and future audit guards share
+one local predicate without changing ordinary authority. It proves the current active grant
 through raw heads/commands/history/receipts, current recipient/workspace/home
 receipt, and the current publication head/receipt/snapshot retaining the selected
 folder and project. Candidate rows are not content authorization by themselves.
@@ -65,29 +68,57 @@ private call retains its 1.5-second deadline.
 The returned `successorContext` is distinct from the ordinary context: it contains
 `originalGrant`, not `command`, and cannot be passed directly to the old byte or
 audit paths. It carries the original fingerprint, selected prefix and frozen
-continuity proof internally, never in browser JSON. No existing route invokes it.
+continuity proof internally, never in browser JSON. The unmounted Windows queue
+and distinct successor byte router now invoke it; ordinary routes are unchanged.
 The candidate WHERE predicates are grouped to respect D1's expression-tree depth
 limit; a real-schema query-planning regression covers that limit.
 
-## Next byte, queue and audit implementation
+## Implemented short selector, byte, queue and audit source
 
-Use a distinct encryption purpose, handle prefix and successor-only byte route.
-The handle retains original lifecycle/path/provider-version/SHA pins plus current
-publication pins and chain digest. Its expiry is the minimum of 15 minutes,
-original grant expiry and verified human expiry. Existing `ond1_` handles keep
-their original semantics. Long queue references retain original selectors; each
-resolve obtains fresh successor proof and a fresh short byte handle.
+The source-only `windows-portal-successor-handles.ts` uses the distinct `wsp1_`
+prefix, AES-GCM purpose and authenticated prefix. It pins the canonical original
+grant fingerprint (binding all original lifecycle fields), authority and person,
+relative path, strong ETag, provider version, SHA256 and size, plus current
+publication's six pins, count and chain digest. The matcher recomputes the
+original fingerprint, validates original download permission and first/current
+continuity, then compares current person/session expiry and all context pins.
+Its expiry is the minimum of 15 minutes, original grant expiry and verified human
+expiry. Decode proves format/integrity only; it never authorizes content.
+Existing `ond1_` handles keep their original semantics and reject the new tokens.
+The unmounted successor-only router accepts those tokens at
+`/api/client/operations/data/windows-successor/files/:fileHandle/download`.
+Long queue references retain original selectors; resolve obtains fresh successor
+proof and a short byte handle. Exact ordinary logical file IDs are retained.
 
 Existing content-start audit is deliberately tied to the original publication
 and ordinary live-head view. Do not weaken its guard or forge an updated command.
-A separate immutable successor ledger/guard must bind original grant, effective
+A separate immutable successor ledger/guard (migration 0236) binds original grant, effective
 publication, chain digest, HMAC resource/version and a distinct dedupe purpose.
-The atomic insert must prove the current local candidate, exact file-index pins
-and absence of tombstones. Repeat private/local authorization before and after
+The atomic insert proves the current local candidate, exact file-index pins
+and absence of tombstones. Private/local authorization repeats before and after
 audit and before R2 metadata/bytes and final handoff. A missing ledger or failed
 audit denies content; successful history alone never permits a read.
 
-Acceptance still needed: actual same-content queued resume after refresh,
+The ledger is download-only and separate from migration 0228. Its
+immutable records retain the original authority/home/folder/project pins plus
+the original publication source sequence, effective publication's six pins,
+chain digest and bounded publication count. Principal, prefix, resource and
+content-version values are purpose-separated fingerprints; never persist raw
+storage keys, person identifiers, provider versions or the original grant wire.
+Content-version evidence hashes the trusted tuple of ETag, provider version,
+SHA256 and length, rather than ETag alone.
+
+An insert and dedupe lookup run in one D1 batch and both re-prove the same
+current candidate, canonical original grant, person, exact file-index ETag/size
+and absence of active file/prefix tombstones. A deduplicated old event cannot
+authorize a new read. The database guard proves local state only: the caller
+separately obtains current producer continuity before writing and compares
+the complete original/current/digest tuple without silently substituting a new
+one. After audit it repeats private/local proof and trusted R2 identity before
+byte handoff. Missing table/view/guard/index or any failure denies bytes. No
+database predicate can replace verification of R2 provider version and SHA256.
+
+Live acceptance still needed: actual same-content queued resume after refresh,
 changed-content isolation, missing/omitted/restored history, revoke/regrant,
 recipient/home/client switch, folder remap, stale consumer publication, expiry,
 concurrent refresh/revoke, provider changes and audit failure. Large-history

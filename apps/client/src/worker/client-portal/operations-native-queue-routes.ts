@@ -1,16 +1,19 @@
 import { Hono } from "hono";
+import { HTTPException } from "hono/http-exception";
 import { queueContext, queuePrincipal, encodeQueueReference, decodeQueueReference, queueQuery } from "@ltds/shared/windows-queue-reference";
 import type { Env } from "../types";
 import { nativeDeliveryDeploymentEnabled } from "../operations-native-delivery-deployment";
 import { resolveCloudflareRecipientEnrollmentProof } from "./access-identity";
 import { authorizeNativeOperationsDelivery, type NativeOperationsDeliveryAuthorizationEnv } from "./operations-native-delivery-authorization";
-import { decodeOperationsNativeDeliveryHandle, encodeOperationsNativeDeliveryHandle, type OperationsNativeDeliveryHandle } from "./operations-native-delivery-handles";
-import { createOperationsNativeDeliveryRouter } from "./operations-native-delivery-routes";
+import { decodeOperationsNativeDeliveryHandle, encodeOperationsNativeDeliveryHandle, operationsNativeDeliveryHandleMatchesCommand, type OperationsNativeDeliveryHandle } from "./operations-native-delivery-handles";
+import { authorizeWindowsPortalSuccessor } from "./windows-portal-successor-authorization";
+import { prepareWindowsPortalSuccessorManifest } from "./windows-portal-successor-routes";
 import type { OperationsNativeContentAuditEnv } from "./operations-native-content-audit";
 import type { VerifiedClientPrincipal } from "./types";
 import { validateRelativePath } from "../files";
 
-type QueueEnv = Env & NativeOperationsDeliveryAuthorizationEnv & OperationsNativeContentAuditEnv;
+type QueueEnv = Env & NativeOperationsDeliveryAuthorizationEnv & OperationsNativeContentAuditEnv
+  & Parameters<typeof authorizeWindowsPortalSuccessor>[0];
 type Configuration = Readonly<{ enabled: boolean; portalOrigin: string; issuer: string; audience: string; queueKey: Uint8Array }>;
 type Human = { principal: VerifiedClientPrincipal; verifiedUntil: string };
 const BASE = "/api/client/operations/data", ttl = 900_000;
@@ -59,19 +62,25 @@ export function createOperationsNativeQueueRouter(input: Configuration) {
       const r = reference.resource;
       if (r.kind !== "file" || typeof r.authorityId !== "string" || typeof r.path !== "string" || !r.path || validateRelativePath(r.path) !== r.path
         || r.issuer !== h.principal.issuer || r.subject !== h.principal.subject) return error(409);
-      const fresh = await authorizeNativeOperationsDelivery(c.env, h.principal, r.authorityId, "file.download");
+      const fresh = await authorizeWindowsPortalSuccessor(c.env, h.principal, r.authorityId);
       if (!fresh.ok) return error(fresh.code === "unavailable" ? 503 : 409);
-      const expires = Math.min(Date.now() + ttl, Date.parse(h.verifiedUntil), Date.parse(fresh.context.command.expiresAt!));
+      const successorContext = fresh.successorContext;
+      const expires = Math.min(Date.now() + ttl, Date.parse(h.verifiedUntil), Date.parse(successorContext.originalGrant.expiresAt!));
       // No storage access until the reference's exact original pins have been checked.
       const candidate = { ...r, etag: "pending", expires } as OperationsNativeDeliveryHandle;
       // Validate exact original selector shape before any index read.
       await encodeOperationsNativeDeliveryHandle(c.env, candidate);
-      const pinned = await authorizeNativeOperationsDelivery(c.env, h.principal, r.authorityId, "file.download", candidate);
-      if (!pinned.ok) return error(pinned.code === "unavailable" ? 503 : 409);
-      const key = pinned.context.selectedR2Prefix + r.path;
-      const row = await c.env.DELIVERY_DB.withSession("first-primary").prepare("SELECT etag FROM file_index WHERE r2_key=?").bind(key).first<{ etag: string }>();
-      if (!row || typeof row.etag !== "string") return error(409);
-      handle = { ...candidate, etag: row.etag };
+      if (!operationsNativeDeliveryHandleMatchesCommand(candidate, successorContext.originalGrant)) return error(409);
+      // Keep every original lifecycle pin in the durable reference. Only the
+      // distinct short selector uses the proved effective publication.
+      const response = await prepareWindowsPortalSuccessorManifest(c.env, successorContext, h.principal,
+        Date.parse(h.verifiedUntil), r.path, c.req.raw.signal);
+      if (response.status !== 200) return response;
+      const manifest: unknown = await response.json();
+      const final = await authorizeWindowsPortalSuccessor(c.env, h.principal, r.authorityId);
+      if (!final.ok || JSON.stringify(final.successorContext) !== JSON.stringify(successorContext) || Date.parse(h.verifiedUntil) <= Date.now())
+        return error(!final.ok && final.code === "unavailable" ? 503 : 409);
+      return c.json({ schemaVersion: 1, principalId, manifest });
     }
     const auth = await authorizeNativeOperationsDelivery(c.env, h.principal, handle.authorityId, "file.download", handle);
     if (!auth.ok) return error(auth.code === "unavailable" ? 503 : 409);
@@ -81,17 +90,7 @@ export function createOperationsNativeQueueRouter(input: Configuration) {
       if (!final.ok || Date.parse(h.verifiedUntil) <= Date.now()) return error(final.ok || final.code !== "unavailable" ? 409 : 503);
       return c.json({ schemaVersion: 1, principalId, resourceRef });
     }
-    handle = { ...handle, expires: Math.min(handle.expires, Date.parse(h.verifiedUntil)) };
-    const encoded = await encodeOperationsNativeDeliveryHandle(c.env, handle);
-    // In-process reuse of the existing full native manifest implementation: no
-    // network hop, bearer forwarding or alternate storage validation path.
-    const reads = createOperationsNativeDeliveryRouter({ resolvePrincipal: async () => h.principal });
-    const response = await reads.fetch(new Request(config.portalOrigin + "/files/" + encoded + "/download-manifest", { signal: c.req.raw.signal }), c.env);
-    if (response.status !== 200) return response;
-    const manifest: unknown = await response.json();
-    const final = await authorizeNativeOperationsDelivery(c.env, h.principal, handle.authorityId, "file.download", handle);
-    if (!final.ok || Date.parse(h.verifiedUntil) <= Date.now()) return error(final.ok || final.code !== "unavailable" ? 409 : 503);
-    return c.json({ schemaVersion: 1, principalId, manifest });
+    return error(503);
   });
-  router.onError(() => error(503)); return router;
+  router.onError(failure => error(failure instanceof HTTPException ? failure.status : 503)); return router;
 }
