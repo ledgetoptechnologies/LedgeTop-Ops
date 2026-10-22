@@ -10,7 +10,7 @@
   "traversalDenied": true,
   "staleVersionRejected": true,
   "revokedHandleDenied": true,
-  "imageId": "sha256:00505b9640951be30103d39aaa6f2b699efb0c77132ac41a9d06f46f6624e705",
+  "imageId": "sha256:2456a495010c05aa4ebb9f3c77cca7fc26c9e1cf938e947130361a522f87b99e",
   "observedDownloadStatuses": [
     200,
     206,

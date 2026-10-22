@@ -47,7 +47,16 @@ gateway destinations and asserts human Access headers never reach the gateway.
 This is local reverse-proxy transport acceptance, not production ingress/TLS
 configuration acceptance.
 
-Full Ops migrations through `0223` run in temporary Miniflare D1. Native
+All 223 Ops migrations through the exact
+`0223_employee_read_provisioning.sql` filename are pinned by a complete
+LF-normalized filename/SHA-256 inventory in
+`apps/operations/test/fixtures/windows-employee-transport-migrations-0223.json`.
+The inventory itself has the separately pinned SHA-256
+`e60ada4d152c98a822c75e3caa86187b8558a6be944f14860c520fc2b098aa2a`.
+Unexpected source additions, missing names or content changes fail before D1 is
+allocated. The existing `applyCanonicalChain` loader then applies that exact
+chain with its canonical synthetic seed and normal `d1_migrations` receipts;
+historical receipts and triggers are not bypassed or rewritten. Native
 profiles/admissions are explicitly seeded only for synthetic owner/Alice/Bob.
 The normal provisioning service registers the enrolled root, grants Alice exact
 root access, and later revokes that grant. Bob is admitted but has no file
