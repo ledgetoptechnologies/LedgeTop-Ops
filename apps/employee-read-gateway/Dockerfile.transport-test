@@ -1,0 +1,7 @@
+FROM python:3.14.9-slim-trixie
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
+WORKDIR /app
+COPY employee_read_gateway ./employee_read_gateway
+COPY tests/transport_lab_server.py ./transport_lab_server.py
+USER 65532:65532
+ENTRYPOINT ["python", "/app/transport_lab_server.py"]
