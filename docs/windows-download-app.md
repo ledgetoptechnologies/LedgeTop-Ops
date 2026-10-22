@@ -4,6 +4,11 @@ Status: tested transfer foundation plus source-level human portal adapter,
 started 2026-10-21. This is not a released desktop client, a live-qualified
 Operations integration, a sync service, or an Explorer files-on-demand provider.
 
+Employee read authority and the Linux gateway are being implemented in a stacked
+source branch. See [the private gateway protocol](employee-read-gateway-protocol.md)
+and [the concrete installer/release plan](windows-download-release-plan.md).
+Their routes remain unmounted; no host folder access is granted by installation.
+
 ## Product direction
 
 One Windows application should show the signed-in person's authorized files.

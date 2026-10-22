@@ -1,0 +1,28 @@
+name: Employee read gateway prototype
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - apps/employee-read-gateway/**
+      - docs/employee-read-gateway-protocol.md
+      - .github/workflows/employee-read-gateway.yml
+  pull_request:
+    paths:
+      - apps/employee-read-gateway/**
+      - docs/employee-read-gateway-protocol.md
+      - .github/workflows/employee-read-gateway.yml
+
+permissions:
+  contents: read
+
+jobs:
+  synthetic-linux-files:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Build isolated synthetic acceptance image
+        run: docker build --file apps/employee-read-gateway/Dockerfile.test --tag ops-employee-read-test apps/employee-read-gateway
+      - name: Verify read gateway without network, host mounts or capabilities
+        run: docker run --rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges --tmpfs /tmp:rw,nosuid,nodev,size=256m ops-employee-read-test
