@@ -19,9 +19,15 @@ public sealed class AccessPreference(string path)
     {
         try {
             var file = new FileInfo(Path);
-            if (!file.Exists || file.Length > 64 || (file.Attributes & FileAttributes.ReparsePoint) != 0) return null;
-            return File.ReadAllText(Path) switch { ClientText => AccessMode.Client, EmployeeText => AccessMode.Employee, _ => null };
-        } catch (Exception error) when (error is IOException or UnauthorizedAccessException) { return null; }
+            if (!file.Exists || (file.Attributes & FileAttributes.ReparsePoint) != 0) return null;
+            // One handle, read at most one byte past the limit, so a file replaced after the check still can't be large.
+            using var stream = new FileStream(Path, FileMode.Open, FileAccess.Read, FileShare.Read);
+            var buffer = new byte[65]; var total = 0;
+            while (total < buffer.Length) { var read = stream.Read(buffer, total, buffer.Length - total); if (read == 0) break; total += read; }
+            if (total > 64) return null;
+            var text = new System.Text.UTF8Encoding(false, true).GetString(buffer, 0, total);
+            return text switch { ClientText => AccessMode.Client, EmployeeText => AccessMode.Employee, _ => null };
+        } catch (Exception error) when (error is IOException or UnauthorizedAccessException or System.Text.DecoderFallbackException) { return null; }
     }
 
     /// <summary>Saves the choice; a failure only means the person is asked again next time.</summary>
