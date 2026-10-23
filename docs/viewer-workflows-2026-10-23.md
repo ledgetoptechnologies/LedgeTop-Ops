@@ -28,6 +28,8 @@ The sharing workflow distinguishes Public link and Client Workspace tabs. Accoun
 
 Viewer grants cover the selected account/workspace and its eligible members. They do not implement Files' per-person or department grant model. Project-wide grants explicitly include current and future published tasks, and the displayed grant history is scoped to the current Viewer project/model.
 
+Native revocation prevents subsequent issuance, including renewal, through the live grant check. An already-issued Viewer session can remain valid for the existing bounded lifetime (up to 30 minutes). The signed bridge forwards that limit, the proxy validates it, and the success notice explains it. Legacy queued session-revocation notices retain their pending state.
+
 ## Measurements
 
 The existing calculation and lifecycle tests passed before changing the interaction controls. Claude's UI audit found separate usability problems: Escape saved a draft, names opened rename rather than selecting a measurement, the dedicated Volume action was hidden, and calculation notices promised that closing the inspector would save a pending result.
@@ -53,5 +55,6 @@ Existing code can display registered EPT clouds and selected direct LAS/LAZ/PLY 
 - Authenticated navigation: 20 Operations browser checks, six client browser checks, ten route checks, and two final failed-job link checks passed. These browser fixtures use the actual application layout and a mocked Viewer iframe.
 - Sharing: 79 Viewer checks, 13 focused Operations bridge checks, and the desktop workspace browser scenario passed, including keyboard focus and tab-panel state.
 - Combined branch: both application typechecks passed; 42 Operations Viewer tests and 85 overview/view-mode/sharing/proxy tests passed.
+- Final revocation follow-up: 87 Viewer tests, 14 Operations bridge/issuer tests, and the Operations typecheck passed.
 
 These checks use synthetic fixtures. They do not certify survey accuracy or establish that the changes are deployed to the live service.
