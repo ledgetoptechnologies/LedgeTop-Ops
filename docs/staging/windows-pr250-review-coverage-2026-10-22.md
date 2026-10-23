@@ -72,9 +72,15 @@ Those paths need coordinated release and recovery review before a main rollout.
   adopt the replacement root or its previous grants.
 - Directory cursor signing has a distinct purpose prefix; a separate derived
   subkey is a possible later rotation improvement, not an identified bypass.
-- Canonical staging schema/data history, the remaining six application DDL
-  differences, platform objects, live users/grants and protected EH execution
-  remain unresolved. Review does not enable autonomy or authorize a migration.
+- All 46 changed application definitions now have bounded lexical attribution:
+  40 whitespace, three comment-only and three exact RAISE syntax relations.
+  All five platform/staging presence differences additionally have exact
+  source-shape attribution. Independent read-only review of commit `596d5553`
+  verified upstream tag/commit/file identities, diagnostic/repository/capture
+  hashes and each of the five exact comparisons. This proves shape attribution,
+  not canonical staging schema/data history or semantic readiness. Original
+  mismatches remain visible. Live users/grants and protected EH execution remain
+  unqualified; review does not enable autonomy or authorize a migration.
 
 Hermes explicitly withheld a full Hub verdict because he did not inspect all
 432 files. This matrix preserves that boundary and records complementary
