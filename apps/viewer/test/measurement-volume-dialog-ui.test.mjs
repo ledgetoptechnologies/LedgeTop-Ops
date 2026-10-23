@@ -186,7 +186,7 @@ test('persisted server complete surface result opens as current without weakenin
 
 test('accepted volume notice is polite, contains no private measurement data and survives ordinary close',async()=>{
   const wait=deferred(),f=fixture((_record,{onJob})=>{onJob({cancel:async()=>{}});onJob({cancel:async()=>{}});return wait.promise;});
-  const pending=f.calculate();assert.equal(f.notices.length,1);assert.equal(f.notices[0].attributes.role,'status');assert.match(f.notices[0].textContent,/while your access remains valid/);assert.doesNotMatch(f.notices[0].textContent,/Pile A/);f.handle.close();assert.equal(f.notices[0].removed,undefined);wait.resolve(result);await pending;assert.equal(f.saved(),0);
+  const pending=f.calculate();assert.equal(f.notices.length,1);assert.equal(f.notices[0].attributes.role,'status');assert.match(f.notices[0].textContent,/Keep this window open to save/);assert.doesNotMatch(f.notices[0].textContent,/Pile A/);f.handle.close();assert.equal(f.notices[0].removed,undefined);wait.resolve(result);await pending;assert.equal(f.saved(),0);
 });
 
 const serverRecord={id:'polygon',name:'Pile A',revision:2,kind:'polygon',modelVersionId:'version',source:{kind:'ortho'}};

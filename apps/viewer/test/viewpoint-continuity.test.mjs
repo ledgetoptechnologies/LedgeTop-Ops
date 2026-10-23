@@ -19,7 +19,7 @@ function harness() {
   const home = [50, 50, 50];
   const elements = new Proxy({}, { get: (o, key) => o[key] ||= { style: {}, classList: { remove() {} } } });
   const ctx = {
-    THREE, AbortController, camera, pendingPointCloudView: null, lastShared3DView: null,
+    THREE, AbortController, camera, viewerSlice:{reset(){ctx.calls.push('slice-reset');},refresh(){}}, pendingPointCloudView: null, lastShared3DView: null,
     preserveIncomingModelView: false, modeEpoch: 0, mapToolEpoch: 0, modeAbortController: null,
     state: { activeMode: 'model', activeTool: 'none', cloudMode: 'potree', meshSource: 'tiles' },
     tilesRenderer: { root: {} }, timers: [], iframe: null, calls: [],
@@ -73,7 +73,7 @@ for (const mapMode of ['ortho', 'dsm', 'dtm']) {
     assert.deepEqual(ctx.iframe.contentWindow.__getViewUTM().position, [10, 20, 30]);
     ctx.iframe.contentWindow.__setViewUTM(90, 80, 70, 9, 8, 7);
     go(mapMode);
-    assert.equal(ctx.iframe, null);
+    assert.equal(ctx.iframe, null);assert.ok(ctx.calls.includes('slice-reset'),'mode departures reset view-only slicing');
     go('model');
     assert.deepEqual(camera.position.toArray(), [90, 80, 70]);
     assert.deepEqual(target.toArray(), [9, 8, 7]);

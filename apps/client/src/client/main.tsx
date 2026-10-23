@@ -7,7 +7,7 @@ import "./styles.css";
 import { parseClientPortalRoute } from "./portal-route";
 import { consumeInvitationToken } from "./invitation-acceptance";
 import { consumeDeliveryRoute, handoffLegacyPublicShare } from "./route";
-import { ClientViewerShell, parseClientViewerShellRoute } from "./ClientViewerShell";
+import { parseClientViewerShellRoute } from "./ClientViewerShell";
 import { ClientOnboardingRecipientApp } from "./ClientOnboardingRecipientApp";
 import { consumeClientOnboardingRecipientRoute } from "./client-onboarding-recipient-route";
 import { ClientPortalRecipientEnrollmentApp } from "./ClientPortalRecipientEnrollmentApp";
@@ -59,7 +59,7 @@ if (!handoffLegacyPublicShare(window.location, url => window.location.replace(ur
           : onboardingRoute
           ? <ClientOnboardingRecipientApp {...onboardingRoute} />
           : viewerShellRoute
-          ? <ClientViewerShell route={viewerShellRoute} />
+          ? <ClientPortalApp initialPage="project" />
           : isInvitationAcceptance
           ? <InvitationAcceptanceApp token={invitationToken} />
           : isPortalRoot

@@ -61,3 +61,29 @@ for (const [method,action,body] of [['POST','create',{grant:{note:'private-clien
   assert.equal(response.status,403);assert.equal(records.length,1);assert.equal(records[0].action,action);assert.equal(records[0].stage,'upstream_rejection');assert.doesNotMatch(JSON.stringify(records),/private-|grant-one/);
   assert.notEqual(response.headers.get('x-ltds-client-access-request'),'private-forged-id');assert.equal(response.headers.get('x-ltds-client-access-request'),records[0].requestId);
 });
+
+
+const nativeTarget={sourceId:'project-alpha:primary',workspaceId:'workspace-one',workspaceName:'Client workspace',projectPublicId:'project-one',projectName:'Site',associations:[{id:'association-one',viewerModelId:'model-one',modelTitle:'Model'}]};
+for(const method of ['GET','POST','DELETE'])test(`native client grant proxy signs a distinct ${method} envelope using the existing permission`,async t=>{
+  const calls=[],app=express();app.use(express.json());
+  const authorize=permission=>(req,_res,next)=>{assert.equal(permission,'viewer.client_grants.manage');req.adminPrincipal={subject:'ops:staff-one'};next()};
+  createClientGrantProxy({config:{opsAutomationBaseUrl:'https://incoming.example.test',viewerEventSecret:'s'.repeat(32),viewerEventKeyId:'viewer-v1'},authorize,fetchImpl:async(url,init)=>{calls.push({url,init});return new Response(JSON.stringify({targets:[nativeTarget],grants:[],replayed:false,...(method==='DELETE'?{existingSessionsExpireWithinSeconds:1800}:{})}))}}).mount(app);
+  const server=await new Promise(resolve=>{const instance=app.listen(0,'127.0.0.1',()=>resolve(instance))});t.after(()=>new Promise(resolve=>server.close(resolve)));
+  const body=method==='POST'?{grant:{sourceId:nativeTarget.sourceId,workspaceId:nativeTarget.workspaceId,projectPublicId:nativeTarget.projectPublicId}}:method==='DELETE'?{grantId:'grant-one',reason:'No longer needed'}:null;
+  const response=await fetch(`http://127.0.0.1:${server.address().port}/api/v1/workspace/native-client-grants`,{method,headers:{'Content-Type':'application/json','Idempotency-Key':'native-proxy-request-0001'},...(body?{body:JSON.stringify(body)}:{})});
+  assert.equal(response.status,method==='POST'?201:200);assert.equal(calls.length,1);if(method==='DELETE')assert.equal((await response.json()).existingSessionsExpireWithinSeconds,1800);
+  const envelope=JSON.parse(calls[0].init.body);assert.equal(envelope.connection,'native');assert.equal(envelope.subject,'ops:staff-one');assert.equal(envelope.action,method==='POST'?'create':method==='DELETE'?'revoke':'list');assert.equal(new URL(calls[0].url).pathname,REMOTE_PATH);assert.ok(calls[0].init.headers['X-LTDS-Viewer-Signature']);
+});
+for(const malformed of [{targets:[{...nativeTarget,sourceId:'untrusted'}],grants:[]},{targets:[{...nativeTarget,associations:[{id:'association',viewerModelId:null,modelTitle:'Model'}]}],grants:[]},{targets:[],grants:[{id:'invalid'}]},{targets:[],grants:[],replayed:'yes'}])test('native client grant proxy rejects malformed verified target snapshots',async t=>{
+  const app=express(),authorize=()=> (req,_res,next)=>{req.adminPrincipal={subject:'ops:staff-one'};next()};
+  createClientGrantProxy({config:{opsAutomationBaseUrl:'https://incoming.example.test',viewerEventSecret:'s'.repeat(32),viewerEventKeyId:'viewer-v1'},authorize,diagnostic:()=>{},fetchImpl:async()=>new Response(JSON.stringify(malformed))}).mount(app);
+  const server=await new Promise(resolve=>{const instance=app.listen(0,'127.0.0.1',()=>resolve(instance))});t.after(()=>new Promise(resolve=>server.close(resolve)));
+  assert.equal((await fetch(`http://127.0.0.1:${server.address().port}/api/v1/workspace/native-client-grants`)).status,502);
+});
+
+for(const seconds of [undefined,null,0,-1,1801,30.5,'1800'])test(`native revoke proxy rejects invalid session expiry bound ${seconds}`,async t=>{
+  const app=express();app.use(express.json());const authorize=()=> (req,_res,next)=>{req.adminPrincipal={subject:'ops:staff-one'};next()};
+  createClientGrantProxy({config:{opsAutomationBaseUrl:'https://incoming.example.test',viewerEventSecret:'s'.repeat(32),viewerEventKeyId:'viewer-v1'},authorize,diagnostic:()=>{},fetchImpl:async()=>new Response(JSON.stringify({targets:[],grants:[],existingSessionsExpireWithinSeconds:seconds}))}).mount(app);
+  const server=await new Promise(resolve=>{const instance=app.listen(0,'127.0.0.1',()=>resolve(instance))});t.after(()=>new Promise(resolve=>server.close(resolve)));
+  assert.equal((await fetch(`http://127.0.0.1:${server.address().port}/api/v1/workspace/native-client-grants`,{method:'DELETE',headers:{'Content-Type':'application/json','Idempotency-Key':'native-revoke-bound-0001'},body:JSON.stringify({grantId:'grant-one',reason:'Ended access'})})).status,502);
+});

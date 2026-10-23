@@ -24,6 +24,16 @@ type ViewerApp = Hono<{ Bindings: Env; Variables: Variables }>;
 const opaqueId = z.string().min(1).max(128).regex(/^[A-Za-z0-9][A-Za-z0-9_-]*$/);
 const idempotencyKey = z.string().min(16).max(128).regex(/^[A-Za-z0-9][A-Za-z0-9._:-]*$/);
 const associationInput = z.object({ projectId: opaqueId, viewerModelId: opaqueId }).strict();
+const nativeAssociationTargetInput = z.object({
+  sourceId: z.string().regex(/^project-alpha:[a-z0-9][a-z0-9_-]{0,63}$/),
+  workspaceId: opaqueId,
+  projectPublicId: z.string().min(1).max(200),
+  projectId: opaqueId,
+  generationId: opaqueId,
+  sourceVersion: z.string().min(1).max(200),
+}).strict();
+const nativeAssociationInput = nativeAssociationTargetInput.extend({ viewerModelId: opaqueId }).strict();
+type NativeAssociationTarget = z.infer<typeof nativeAssociationTargetInput>;
 const clientGrantInput = z.object({
   accountId: opaqueId,
   projectId: opaqueId,
@@ -39,6 +49,8 @@ const clientGrantInput = z.object({
     context.addIssue({ code: "custom", path: ["associationId"], message: "Task grants require an association" });
   if (value.scopeType === "task" && value.includeFuturePublished)
     context.addIssue({ code: "custom", path: ["includeFuturePublished"], message: "Task grants cannot include future tasks" });
+  if (value.scopeType === "project" && !value.includeFuturePublished)
+    context.addIssue({ code: "custom", path: ["includeFuturePublished"], message: "Project grants must include published tasks" });
   if (value.expiresAt && Date.parse(value.expiresAt) <= Date.now())
     context.addIssue({ code: "custom", path: ["expiresAt"], message: "Grant expiry must be in the future" });
 });
@@ -134,6 +146,76 @@ interface PortalProjectRow {
   project_name: string;
   client_name: string;
   source_updated_at: string;
+}
+
+// The same canonical projection authorizes native client model reads. The
+// workspace/source pair is explicit: PA public IDs alone are not globally unique.
+const nativeAssociationProjectsSql = `SELECT project.id,project.project_alpha_project_id,
+  project.project_name,project.client_name,project.source_updated_at,
+  workspace.id workspace_id,workspace.project_alpha_source_id source_id,
+  workspace.display_name workspace_name,generation.id generation_id
+  FROM portal_v2_workspaces workspace
+  JOIN portal_v2_directory_checkpoints checkpoint ON checkpoint.workspace_id=workspace.id
+  JOIN portal_v2_directory_generations generation ON generation.id=checkpoint.active_generation_id
+    AND generation.workspace_id=workspace.id AND generation.status='active' AND generation.complete=1
+  JOIN portal_v2_directory_entities entity ON entity.workspace_id=workspace.id AND entity.generation_id=generation.id
+    AND entity.entity_type='project' AND entity.active=1
+  JOIN projects project ON project.project_alpha_source_id=workspace.project_alpha_source_id
+    AND project.project_alpha_project_id=entity.public_id AND project.source_updated_at=entity.source_version AND project.active=1
+  WHERE workspace.status='active' AND workspace.legacy_account_id IS NULL`;
+interface NativeAssociationProject extends PortalProjectRow {
+  workspace_id: string; source_id: string; workspace_name: string; generation_id: string;
+}
+function nativeTargetBindings(target: NativeAssociationTarget): string[] {
+  return [target.sourceId,target.workspaceId,target.projectPublicId,target.projectId,target.generationId,target.sourceVersion];
+}
+const nativeAssociationTargetSql = `${nativeAssociationProjectsSql}
+  AND workspace.project_alpha_source_id=? AND workspace.id=? AND entity.public_id=?
+  AND project.id=? AND generation.id=? AND entity.source_version=?`;
+
+export async function resolveNativeViewerAssociationTarget(env: Env, target: NativeAssociationTarget): Promise<NativeAssociationProject> {
+  const rows = await primaryDeliveryDb(env).prepare(`${nativeAssociationTargetSql} LIMIT 2`)
+    .bind(...nativeTargetBindings(target)).all<NativeAssociationProject>();
+  if(rows.results.length!==1)throw new HTTPException(409,{message:"Native client project changed or is unavailable"});
+  return rows.results[0]!;
+}
+
+export async function listNativeViewerAssociationTargets(env: Env, principal: StaffPrincipal) {
+  await requireGlobalViewer(env,principal,"viewer.view");
+  const rows = await primaryDeliveryDb(env).prepare(`${nativeAssociationProjectsSql}
+    ORDER BY workspace.display_name COLLATE NOCASE,project.project_name COLLATE NOCASE,project.id LIMIT 501`)
+    .all<NativeAssociationProject>();
+  if(rows.results.length>500)throw new HTTPException(503,{message:"The native Viewer project list is too large"});
+  return rows.results.map(row=>({sourceId:row.source_id,workspaceId:row.workspace_id,workspaceName:row.workspace_name,
+    projectPublicId:row.project_alpha_project_id,projectId:row.id,projectName:row.project_name,
+    clientName:row.client_name,generationId:row.generation_id,sourceVersion:row.source_updated_at}));
+}
+
+export async function currentNativeStaffAssociation(env: Env, target: NativeAssociationTarget, associationId: string) {
+  await resolveNativeViewerAssociationTarget(env,target);
+  const association = await primaryDeliveryDb(env).prepare(`SELECT association.*,
+    project.project_name,project.client_name,project.active project_active,
+    project.source_updated_at current_project_source_version
+    FROM viewer_model_associations association JOIN projects project ON project.id=association.project_id
+    WHERE association.id=? AND association.project_id=? AND association.project_alpha_project_id=?
+      AND association.project_source_version=? AND association.model_status='ready'
+      AND association.state='active' AND association.revoked_at IS NULL
+      AND EXISTS(${nativeAssociationTargetSql}) LIMIT 1`)
+    .bind(associationId,target.projectId,target.projectPublicId,target.sourceVersion,...nativeTargetBindings(target)).first<AssociationRow>();
+  if(!association)throw new HTTPException(404,{message:"Published native Viewer task not found"});
+  return association;
+}
+
+async function listNativeStaffAssociations(env: Env) {
+  const rows=await primaryDeliveryDb(env).prepare(`SELECT association.*,
+    project.project_name,project.client_name,project.active project_active,
+    project.source_updated_at current_project_source_version
+    FROM viewer_model_associations association JOIN projects project ON project.id=association.project_id
+    WHERE EXISTS(${nativeAssociationProjectsSql}
+      AND project.id=association.project_id AND entity.source_version=association.project_source_version)
+    ORDER BY association.model_title COLLATE NOCASE,association.id LIMIT 501`).all<AssociationRow>();
+  if(rows.results.length>500)throw new HTTPException(503,{message:"The native Viewer association list is too large"});
+  return rows.results.map(associationView);
 }
 
 function primaryDeliveryDb(env: Env): D1Database {
@@ -425,7 +507,7 @@ export async function listNativeViewerClientGrantWorkspace(env:Env,principal:Sta
   const database=primaryDeliveryDb(env);
   const [grants,rows]=await Promise.all([listNativeViewerClientGrants(env,principal),database.prepare(`SELECT
     workspace.id workspace_id,workspace.project_alpha_source_id source_id,workspace.display_name workspace_name,
-    entity.public_id project_public_id,entity.display_name project_name,association.id association_id,association.model_title
+    entity.public_id project_public_id,entity.display_name project_name,association.id association_id,association.model_title,association.viewer_model_id
     FROM portal_v2_workspaces workspace
     JOIN portal_v2_directory_checkpoints checkpoint ON checkpoint.workspace_id=workspace.id
     JOIN portal_v2_directory_generations generation ON generation.id=checkpoint.active_generation_id
@@ -440,14 +522,14 @@ export async function listNativeViewerClientGrantWorkspace(env:Env,principal:Sta
     WHERE workspace.status='active' AND workspace.legacy_account_id IS NULL
     ORDER BY workspace.display_name COLLATE NOCASE,entity.display_name COLLATE NOCASE,association.model_title COLLATE NOCASE LIMIT 501`)
     .all<{workspace_id:string;source_id:string;workspace_name:string;project_public_id:string;project_name:string;
-      association_id:string|null;model_title:string|null}>()]);
+      association_id:string|null;model_title:string|null;viewer_model_id:string|null}>()]);
   if(rows.results.length>500)throw new HTTPException(503,{message:"The native Viewer target list is too large"});
   const targets=new Map<string,{sourceId:string;workspaceId:string;workspaceName:string;projectPublicId:string;projectName:string;
-    associations:Array<{id:string;modelTitle:string}>}>();
+    associations:Array<{id:string;modelTitle:string;viewerModelId:string|null}>}>();
   for(const row of rows.results){const key=`${row.source_id}\u0000${row.workspace_id}\u0000${row.project_public_id}`;
     let target=targets.get(key);if(!target){target={sourceId:row.source_id,workspaceId:row.workspace_id,workspaceName:row.workspace_name,
       projectPublicId:row.project_public_id,projectName:row.project_name,associations:[]};targets.set(key,target);}
-    if(row.association_id&&row.model_title)target.associations.push({id:row.association_id,modelTitle:row.model_title});}
+    if(row.association_id&&row.model_title)target.associations.push({id:row.association_id,modelTitle:row.model_title,viewerModelId:row.viewer_model_id});}
   return {grants,targets:[...targets.values()]};
 }
 
@@ -595,11 +677,11 @@ export async function listViewerClientGrantWorkspace(env: Env, principal: StaffP
   const [grantRows, projectRows, associationRows] = await Promise.all([
     listViewerClientGrants(env, principal),
     database.prepare(`SELECT DISTINCT project.id,project_grant.account_id account_id,
-      project.client_name,project.project_name FROM projects project
+      project.client_name,project.project_name,account.display_name account_name FROM projects project
       JOIN client_project_grants project_grant ON project_grant.project_id=project.id AND project_grant.revoked_at IS NULL
       JOIN client_accounts account ON account.id=project_grant.account_id AND account.status='active'
       WHERE project.active=1 ORDER BY project.client_name COLLATE NOCASE,project.project_name COLLATE NOCASE LIMIT 501`).all<{
-        id:string;account_id:string;client_name:string;project_name:string;
+        id:string;account_id:string;client_name:string;project_name:string;account_name:string;
       }>(),
     listAssociations(env),
   ]);
@@ -616,7 +698,7 @@ export async function listViewerClientGrantWorkspace(env: Env, principal: StaffP
       associationId:row.association_id, modelTitle:row.model_title, includeFuturePublished:Boolean(row.include_future_published),
       permissions:{measure:Boolean(row.can_measure),cameras:Boolean(row.can_view_cameras),download:Boolean(row.can_download)},
       expiresAt:row.authorization_expires_at, status:row.status, createdAt:row.created_at, revokedAt:row.revoked_at })),
-    projects: projectRows.results.map(row=>({id:row.id,accountId:row.account_id,clientName:row.client_name,projectName:row.project_name})),
+    projects: projectRows.results.map(row=>({id:row.id,accountId:row.account_id,accountName:row.account_name,clientName:row.client_name,projectName:row.project_name})),
     associations: liveAssociations.map(row=>({
       id:row.id,
       projectId:row.projectId,
@@ -655,7 +737,15 @@ export async function persistViewerAssociation(input: {
   model: ViewerModelSummary & { activeVersion: NonNullable<ViewerModelSummary["activeVersion"]> };
   idempotencyKey: string;
   fingerprint: string;
+  nativeTarget?: NativeAssociationTarget;
 }): Promise<{ id: string; created: boolean; replayed: boolean }> {
+  if(input.nativeTarget){
+    if(input.project.id!==input.nativeTarget.projectId ||
+      input.project.project_alpha_project_id!==input.nativeTarget.projectPublicId ||
+      input.project.source_updated_at!==input.nativeTarget.sourceVersion)
+      throw new HTTPException(400,{message:"Native Viewer project tuple is inconsistent"});
+    await resolveNativeViewerAssociationTarget(input.env,input.nativeTarget);
+  }
   const replay = await replayedAssociationMutation({
     env: input.env, principal: input.principal, action: "association.create",
     idempotencyKey: input.idempotencyKey, fingerprint: input.fingerprint,
@@ -691,6 +781,14 @@ export async function persistViewerAssociation(input: {
       SELECT ?,?,?,?,id FROM viewer_model_associations WHERE project_id=? AND viewer_model_id=?`)
       .bind(input.principal.id, input.idempotencyKey, "association.create", input.fingerprint,
         input.project.id, input.model.id)];
+  if(input.nativeTarget){
+    // D1 batch is atomic. A failed current-generation check must abort before
+    // changing the association, revocation outbox or idempotency receipt.
+    statements.unshift(database.prepare(`SELECT CASE WHEN
+      (SELECT COUNT(*) FROM (${nativeAssociationTargetSql}))=1
+      THEN 1 ELSE json('viewer-native-project-authority-changed') END current_target`)
+      .bind(...nativeTargetBindings(input.nativeTarget)));
+  }
   try {
     await database.batch(statements);
   } catch (error) {
@@ -698,7 +796,10 @@ export async function persistViewerAssociation(input: {
       env: input.env, principal: input.principal, action: "association.create",
       idempotencyKey: input.idempotencyKey, fingerprint: input.fingerprint,
     });
-    if (!raced) throw error;
+    if (!raced) {
+      if(input.nativeTarget)await resolveNativeViewerAssociationTarget(input.env,input.nativeTarget);
+      throw error;
+    }
     return { id: raced, created: false, replayed: true };
   }
   const persisted = await database.prepare(
@@ -715,12 +816,17 @@ export async function issueViewerSession(input: {
   association: AssociationRow;
   idempotencyKey: string;
   displayUnits?: ViewerDisplayUnits;
+  staffAccessExpiresAt?: number;
+  nativeTarget?: NativeAssociationTarget;
   verifiedIndividualIdentity?: {
     identityId: string;
     principalIssuer: string;
     principalSubject: string;
   };
 }): Promise<ViewerSessionGrant> {
+  if(input.staffAccessExpiresAt!==undefined && (!Number.isSafeInteger(input.staffAccessExpiresAt) ||
+    input.staffAccessExpiresAt>8_640_000_000_000 || input.staffAccessExpiresAt*1000<=Date.now()+60_000))
+    throw new HTTPException(401,{message:"Operations authorization is missing or too close to expiry"});
   const personalMeasurements = input.audience === "client" &&
     input.verifiedIndividualIdentity?.identityId === input.actorId &&
     input.verifiedIndividualIdentity.principalIssuer.length > 0 &&
@@ -731,6 +837,8 @@ export async function issueViewerSession(input: {
     viewerModelId: input.association.viewer_model_id,
     viewerModelVersionId: input.association.viewer_model_version_id,
     displayUnits: input.displayUnits || "imperial",
+    ...(input.staffAccessExpiresAt!==undefined?{staffAccessExpiresAt:input.staffAccessExpiresAt}:{}),
+    ...(input.nativeTarget?{nativeTarget:input.nativeTarget}:{}),
     ...(personalMeasurements ? { personalMeasurements: true } : {}),
   }));
   const db = primaryDeliveryDb(input.env);
@@ -739,7 +847,8 @@ export async function issueViewerSession(input: {
   if (!currentModel?.available || currentModel.status !== "ready" || !currentModel.activeVersion ||
     currentModel.activeVersion.id !== input.association.viewer_model_version_id)
     throw new HTTPException(409, { message: "The 3D model changed and must be re-associated before viewing" });
-  const maximumAuthorizationExpiry = Date.now() + 30 * 60 * 1000;
+  const maximumAuthorizationExpiry = Math.min(Date.now() + 30 * 60 * 1000,
+    input.staffAccessExpiresAt!==undefined?input.staffAccessExpiresAt*1000:Infinity);
   const sourceAuthorizationExpiry = input.association.authorization_expires_at
     ? Date.parse(input.association.authorization_expires_at)
     : maximumAuthorizationExpiry;
@@ -852,6 +961,72 @@ function viewerError(error: unknown): never {
 }
 
 export function registerViewerIntegrationRoutes(app: ViewerApp): void {
+  app.get("/api/viewer/native-associations", async c => {
+    const principal=c.get("principal");
+    await requireGlobalViewer(c.env,principal,"viewer.view");
+    if(!viewerIntegrationEnabled(c.env))return c.json({enabled:false,projects:[],models:[],associations:[]});
+    try{
+      const [projects,models,associations]=await Promise.all([
+        listNativeViewerAssociationTargets(c.env,principal),viewerServiceClient(c.env).listModels(),listNativeStaffAssociations(c.env),
+      ]);
+      return c.json({enabled:true,projects,models,associations});
+    }catch(error){return viewerError(error);}
+  });
+
+  app.post("/api/viewer/native-associations", async c => {
+    const principal=c.get("principal");
+    await requireGlobalViewer(c.env,principal,"viewer.manage");
+    const parsed=nativeAssociationInput.safeParse(await c.req.json().catch(()=>null));
+    const key=idempotencyKey.safeParse(c.req.header("Idempotency-Key"));
+    if(!parsed.success||!key.success)throw new HTTPException(400,{message:"Native Viewer association is invalid"});
+    try{
+      const {viewerModelId,...target}=parsed.data;
+      const project=await resolveNativeViewerAssociationTarget(c.env,target);
+      const fingerprint=await associationMutationFingerprint("native-association.create",parsed.data);
+      const replay=await replayedAssociationMutation({env:c.env,principal,action:"association.create",
+        idempotencyKey:key.data,fingerprint});
+      if(replay)return c.json({association:associationView(await currentNativeStaffAssociation(c.env,target,replay)),
+        replayed:true,sessionRevocation:await drainViewerSessionRevocations(c.env,{associationId:replay})});
+      const model=(await viewerServiceClient(c.env).listModels()).find(item=>item.id===viewerModelId);
+      if(!model?.available||model.status!=="ready"||!model.activeVersion)
+        throw new HTTPException(404,{message:"Ready Viewer model not found"});
+      const persisted=await persistViewerAssociation({env:c.env,principal,project,
+        model:model as ViewerModelSummary & {activeVersion:NonNullable<ViewerModelSummary["activeVersion"]>},
+        idempotencyKey:key.data,fingerprint,nativeTarget:target});
+      const association=associationView(await currentNativeStaffAssociation(c.env,target,persisted.id));
+      const sessionRevocation=await drainViewerSessionRevocations(c.env,{associationId:persisted.id});
+      if(!persisted.replayed)await c.env.OPS_DB.batch([await auditStatement(c.env,c.req.raw,principal,
+        persisted.created?"viewer.native_association.created":"viewer.native_association.refreshed",
+        "viewer_model_association",persisted.id,null,{...target,viewerModelId,viewerModelVersionId:model.activeVersion.id})]);
+      return c.json({association,replayed:persisted.replayed,sessionRevocation},persisted.created?201:200);
+    }catch(error){return viewerError(error);}
+  });
+
+  app.post("/api/viewer/native-associations/:associationId/session", async c => {
+    const principal=c.get("principal");
+    await requireGlobalViewer(c.env,principal,"viewer.view");
+    const target=nativeAssociationTargetInput.safeParse(await c.req.json().catch(()=>null));
+    const associationId=opaqueId.safeParse(c.req.param("associationId"));
+    const key=idempotencyKey.safeParse(c.req.header("Idempotency-Key"));
+    if(!target.success||!associationId.success||!key.success)
+      throw new HTTPException(400,{message:"Native Viewer session request is invalid"});
+    if(principal.accessExpiresAt===undefined)
+      throw new HTTPException(401,{message:"Operations authorization expiry is required"});
+    try{
+      const association=await currentNativeStaffAssociation(c.env,target.data,associationId.data);
+      const grant=await issueViewerSession({env:c.env,actorId:principal.id,audience:"ops",association,
+        idempotencyKey:key.data,displayUnits:await resolveViewerUnits(c.env,principal.id),
+        staffAccessExpiresAt:principal.accessExpiresAt,nativeTarget:target.data});
+      const current=await currentNativeStaffAssociation(c.env,target.data,associationId.data);
+      if(current.association_version!==association.association_version ||
+        current.viewer_model_id!==association.viewer_model_id ||
+        current.viewer_model_version_id!==association.viewer_model_version_id ||
+        current.viewer_resource_version!==association.viewer_resource_version)
+        throw new HTTPException(409,{message:"Viewer association changed while opening the model"});
+      return c.json({...grant,modelId:association.viewer_model_id},201);
+    }catch(error){return viewerError(error);}
+  });
+
   app.get("/api/viewer/connection-preflight", async c => {
     c.header("Cache-Control", "no-store");
     await requireGlobalViewer(c.env, c.get("principal"), "viewer.manage");
