@@ -7,6 +7,8 @@ import { fileURLToPath } from "node:url";
 import { validateApp, validateCrossApp, validateFiles, validateMigrationInventory, validateRequestAttachmentCors, validateSecretManifest } from "./staging-preflight.mjs";
 import { APP_SOURCE_DIRS, FEATURE_FLAG_ACTIVATION_POLICIES, REQUIRED_DISABLED_FEATURE_FLAGS, REQUIRED_STAGING_MIGRATIONS, REQUIRED_STAGING_MIGRATION_SHA256, REQUIRED_STAGING_SECRETS, STAGING_ACCOUNT_ID, STAGING_ALLOWED_VAR_NAMES, STAGING_HOSTS, STAGING_INVENTORY, STAGING_PROJECT_ALPHA_ORIGIN, STAGING_REQUEST_ATTACHMENT_R2_CORS, STAGING_STATIC_VARS } from "./staging-requirements.mjs";
 import { STAGING_OPTIONAL_DEFAULT_OFF_FLAGS, normalizedStagingVars } from "./staging-default-off-vars.mjs";
+import { inspectWindowsStagingOpsBindingBudget } from "./staging-windows-ops-binding-budget.mjs";
+import { WINDOWS_STAGING_SECRET_SLOTS } from "./windows-files-staging-entry-renderer.mjs";
 
 const audiences = Object.freeze({ delivery: "c".repeat(64), operations: "d".repeat(64), "ops-sync": "b".repeat(64) });
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -101,6 +103,59 @@ test("accepts the exact approved isolated staging inventory", () => {
     const staging = stagingConfig(app);
     assert.deepEqual(validateApp(app, staging, productionFrom(staging)), []);
   }
+});
+test("retires only the unused Ops staging membership scalar and keeps Client explicitly off", () => {
+  const flag = "CLIENT_PORTAL_MEMBERSHIP_MANAGEMENT_ENABLED";
+  const ops = stagingConfig("operations"), client = stagingConfig("delivery");
+  assert.equal(Object.hasOwn(ops.vars, flag), false);
+  assert.equal(REQUIRED_DISABLED_FEATURE_FLAGS.operations.includes(flag), false);
+  assert.equal(Object.hasOwn(FEATURE_FLAG_ACTIVATION_POLICIES.operations, flag), false);
+  assert.equal(client.vars[flag], "false");
+  assert.equal(REQUIRED_DISABLED_FEATURE_FLAGS.delivery.includes(flag), true);
+  assert.equal(Object.hasOwn(FEATURE_FLAG_ACTIVATION_POLICIES.delivery, flag), true);
+  assert.deepEqual(validateApp("operations", ops, productionFrom(ops)), []);
+  for (const value of ["false", "true", "", "FALSE"]) {
+    const stale = structuredClone(ops); stale.vars[flag] = value;
+    assert(validateApp("operations", stale, productionFrom(ops)).some(error => error.includes(`unreviewed field ${flag}`)));
+  }
+});
+const budgetFixture = (plainText = 115, secretText = 10) => ({
+  accountId: STAGING_ACCOUNT_ID, workerName: STAGING_INVENTORY.operations.name,
+  bindings: [
+    ...Array.from({ length: plainText }, (_, index) => ({ name: `PUBLIC_${index}`, type: "plain_text" })),
+    ...Array.from({ length: secretText }, (_, index) => ({ name: `PRIVATE_${index}`, type: "secret_text" })),
+    { name: "OPS_DB", type: "d1" }, { name: "DATA_BUCKET", type: "r2_bucket" },
+  ],
+});
+test("checks the observed staging text plus secret budget before the three Windows additions", () => {
+  const receipt = inspectWindowsStagingOpsBindingBudget(budgetFixture());
+  assert.equal(receipt.observedPlainText, 115);
+  assert.equal(receipt.observedSecretText, 10);
+  assert.deepEqual(receipt.additionalSecretNames, WINDOWS_STAGING_SECRET_SLOTS.operations);
+  assert.equal(receipt.plannedTotal, 128);
+  assert.equal(receipt.cloudChanged, false);
+  assert.throws(() => inspectWindowsStagingOpsBindingBudget(budgetFixture(116)), /text_secret_budget_exceeded/);
+  const retired = budgetFixture(); retired.bindings.push({ name: "CLIENT_PORTAL_MEMBERSHIP_MANAGEMENT_ENABLED", type: "plain_text" });
+  assert.throws(() => inspectWindowsStagingOpsBindingBudget(retired), /membership_binding_not_retired/);
+  const partlyAdded = budgetFixture();
+  partlyAdded.bindings.push({ name: WINDOWS_STAGING_SECRET_SLOTS.operations[0], type: "secret_text" });
+  assert.equal(inspectWindowsStagingOpsBindingBudget(partlyAdded).plannedTotal, 128);
+  const fullyAdded = budgetFixture();
+  fullyAdded.bindings.push(...WINDOWS_STAGING_SECRET_SLOTS.operations.map(name => ({ name, type: "secret_text" })));
+  const ready = inspectWindowsStagingOpsBindingBudget(fullyAdded);
+  assert.equal(ready.plannedTotal, 128);
+  assert.deepEqual(ready.additionalSecretNames, []);
+});
+test("binding budget rejects other identities, unreviewed shapes and secret-slot collisions", () => {
+  const cases = [
+    value => { value.workerName = "ledgetop-ops"; },
+    value => { value.accountId = "0".repeat(32); },
+    value => { value.bindings.push({ ...value.bindings[0] }); },
+    value => { value.bindings[0].text = "fixture-value-must-not-be-accepted"; },
+    value => { value.bindings.push({ name: "UNREVIEWED_JSON", type: "json" }); },
+    value => { value.bindings.push({ name: WINDOWS_STAGING_SECRET_SLOTS.operations[0], type: "plain_text" }); },
+  ];
+  for (const change of cases) { const input = budgetFixture(); change(input); assert.throws(() => inspectWindowsStagingOpsBindingBudget(input)); }
 });
 test("keeps Project Alpha Directory reconciliation modeled and default-off", () => {
   const staging = stagingConfig("operations"), production = productionFrom(staging);
