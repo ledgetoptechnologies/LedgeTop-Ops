@@ -685,7 +685,9 @@ async Task HostileNames()
                 && (File.Exists(path) || Directory.Exists(path));
         };
         var checks = backend.SourceChecks;
-        foreach (var name in new[] { @"\attacker.example\share\report.pdf", @"\?\C:\Windows\win.ini", @"C:\Windows\win.ini", @"C:report.pdf",
+        foreach (var name in new[] { @"\attacker.example\share\report.pdf", @"\?\C:\Windows\win.ini",
+            @"\\attacker.example\share\report.pdf", @"\\?\C:\Windows\win.ini", @"\\?\UNC\attacker.example\share\report.pdf", @"\\.\pipe\report", @"\\.\C:",
+            "//attacker.example/share/report.pdf", @"C:\Windows\win.ini", @"C:report.pdf",
             @"..\outside.pdf", "sub/report.pdf", @"sub\report.pdf", "report.pdf:stream", "CON", "lpt1.txt", "COM¹.dat", "aux .txt",
             "invoice\u202Efdp.exe", "zero\u200Bwidth.pdf", "line\u2028break.pdf", "bad\0name.pdf", "bad\uD800name.pdf", "trailing.", "trailing ", "", ".", "..",
             new string('a', 151) }) {
