@@ -28,6 +28,15 @@ definitions remain unresolved:
   `native_directory_existing_import_live_reviews`.
 - Client: `client_folder_notification_batch_control_result`.
 
+The later bounded residual comparison attributes three of these six to comment
+tokens only (`client_onboarding_portal_activation_proofs`,
+`native_directory_profile_binding_continuation_ack`, and
+`native_directory_existing_import_live_reviews`). The other three differ in
+non-comment tokens; the Client trigger also has a changed literal-token sequence.
+The safe residual JSON reports token kinds/counts, never token contents. All six
+remain in the original unresolved category: this further attribution does not
+approve a schema, infer semantic equivalence or change the release gates.
+
 The two `_cf_METADATA` absences, two `_cf_KV` additions, and Operations
 `staging_native_authority_migrations` addition are also unresolved. No object is
 ignored, rewritten or approved by the lexical comparison. Semantic equivalence,

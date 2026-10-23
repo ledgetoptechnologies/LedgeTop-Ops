@@ -4,6 +4,9 @@ This matrix describes actual review coverage, not approval for rollout. The
 reviewed base is main `77eb072a`; the pushed candidate reviewed by Hermes is
 `4142b7c68c25bf231c54a4ff3ba23b941bac2574`. Subsequent fixes are identified
 separately. A partial review must not become a full Hub approval verdict.
+Hermes also reviewed `4142b7c6..6a87b077` by reading the follow-up source and ran
+the canonical-runner/preflight subset (30/30). He did not run .NET acceptance
+because that environment lacks the SDK, and still withheld a whole-task verdict.
 
 | Slice | Independent coverage | Executed evidence and limits |
 | --- | --- | --- |
