@@ -23,8 +23,13 @@ The selected-source backend `61a6dde1` passed 32/32 App groups and independent
 source review. Its client mode constructs no employee adapter; employee mode
 constructs no portal adapter. The two-argument constructor defaults to client.
 These tests use inert helper bytes and synthetic adapters, not live sign-in.
-Packaged startup selection remains a separate implementation and acceptance
-requirement. Combined-source person pairing is also unqualified.
+Claude's startup selection `7bc047a7` is now integrated in `3250e1ed`, which
+passed independent source review and a serialized 38/38 synthetic App run.
+Selection precedes authentication; switching stops and saves the prior view
+before opening the other source. Preferences select an offered mode and grant
+no authority. This supersedes the pending startup implementation status, but
+does not establish installed-package or live sign-in acceptance. Combined-source
+person pairing remains unqualified; the app uses one source at a time.
 
 The existing EH task `ceff196b-0f59-420a-b21a-ec89c098ba60` was observed at
 revision 6 with the older candidate `efb1ce96`, in review and owned by Codex.

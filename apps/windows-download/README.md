@@ -7,6 +7,21 @@ It is **not a released Windows desktop application, installer or sync client**.
 Tests use synthetic identities and handlers, install no software and make no
 production connections. No NuGet packages are required.
 
+The desktop offers **Client deliveries** or **Company files** before sign-in.
+It remembers an offered choice per release channel. Switching stops and saves
+the previous transfers before opening the other source; a denied sign-in never
+falls back to the other mode. The preference grants no access. Each service
+still checks its own current identity and grants.
+
+The combined desktop checkpoint `3250e1ed` passed 38/38 synthetic App groups on
+2026-10-23, including selection, switching, pause/resume and shutdown races.
+That result does not qualify a live login, installed package or files on demand.
+Run the desktop harness on Windows with the pinned SDK:
+
+```powershell
+dotnet run --project AppTests/WindowsDownload.App.Tests.csproj -c Release -p:UseSharedCompilation=false
+```
+
 ## Run the synthetic acceptance harness
 
 Use the reviewed .NET SDK `10.0.402`. From this directory:
@@ -225,8 +240,10 @@ unfinished, so this source evidence is not a promise of live automatic restart.
   gateway, while clients read only their authorized R2-backed portal content.
   Both adapters are implemented and synthetically tested; employee route
   activation and live deployment acceptance remain pending.
-- Claude-owned UI/UX, signed Windows packaging, distribution/update policy,
-  installation/uninstallation checks and real large-media transfer acceptance.
+- Live acceptance of the Claude-owned desktop UI, trusted signed packaging,
+  publication of the planned update channel, installation/uninstallation checks
+  and real large-media transfers. Local unsigned package construction and the
+  installer plan are evidence for preparation, not distribution readiness.
 - Windows Cloud Files API / Explorer placeholders, online-only hydration,
   explicit offline pinning, eviction, cache lifecycle and revocation behavior.
 - Writable employee synchronization, conflict handling and durable revisions.
