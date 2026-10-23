@@ -16,11 +16,11 @@ function fixture(t) {
   fs.writeFileSync(path.join(old, 'assets/old-123.js'), 'old client bytes');
   fs.writeFileSync(path.join(next, 'index.html'), '<script src="/assets/new-456.js"></script>');
   fs.writeFileSync(path.join(next, 'assets/new-456.js'), 'new client bytes');
-  const inventory = { schemaVersion: 1, workerName: PROFILE.workers.client.name,
-    activeVersionId: VERSION, assetAssociationSHA256: PROFILE.workers.client.assetsSHA256,
+  const inventory = { schemaVersion: 2, workerName: PROFILE.workers.client.name,
+    activeVersionId: VERSION, assetConfigSHA256: PROFILE.workers.client.assetsSHA256,
     supportedVersionIds: [VERSION], files: inventoryDirectory(old) };
   const input = { app: 'client', retainedDirectory: old, candidateDirectory: next,
-    activeVersionId: VERSION, assetAssociationSHA256: inventory.assetAssociationSHA256 };
+    activeVersionId: VERSION, assetConfigSHA256: inventory.assetConfigSHA256 };
   function argumentsFor(value = inventory) {
     const inventoryBytes = Buffer.from(JSON.stringify(value));
     return { ...input, inventoryBytes, approvedInventorySHA256: hash(inventoryBytes) };
@@ -37,6 +37,13 @@ test('plans an exact union and preserves rollback bytes without enabling deploym
   assert.equal(plan.files.find(file => file.path === '/index.html').source, 'candidate');
   assert.equal(plan.deploymentEnabled, false); assert.equal(plan.completenessProvedByPlanner, false);
   assert.equal(plan.writesPerformed, false);
+  assert.equal(plan.schemaVersion, 2);
+  assert.equal(plan.assetConfigSHA256, f.inventory.assetConfigSHA256);
+  assert.equal(plan.rollback.assetConfigSHA256, f.inventory.assetConfigSHA256);
+  assert.equal('assetAssociationSHA256' in plan, false);
+  assert.equal('assetAssociationSHA256' in plan.rollback, false);
+  assert.equal(plan.liveAssetGenerationBindingVerified, false);
+  assert.equal(plan.liveAssetContentVerified, false);
   assert.deepEqual(inventoryDirectory(f.old), oldBefore); assert.deepEqual(inventoryDirectory(f.next), nextBefore);
   assert.deepEqual(planRetainedUiAssets(f.argumentsFor()), plan);
   assert.throws(() => checkMode('ui'), /UI deployment denied/);
@@ -50,14 +57,45 @@ test('requires an externally approved exact manifest digest before reading asset
   }
 });
 
-test('rejects changed Worker, active version, physical association and unsupported coverage claims', t => {
+test('rejects changed Worker, active version, asset configuration and unsupported coverage claims', t => {
   const f = fixture(t);
   for (const patch of [{ workerName: 'foreign' }, { activeVersionId: '87654321-1234-4123-8123-123456789abc' },
-    { assetAssociationSHA256: 'b'.repeat(64) }, { schemaVersion: 2 }, { completeness: true }])
+    { assetConfigSHA256: 'b'.repeat(64) }, { schemaVersion: 1 }, { completeness: true }])
     assert.throws(() => planRetainedUiAssets(f.argumentsFor({ ...f.inventory, ...patch })));
   for (const supportedVersionIds of [[], [VERSION, VERSION], ['invalid'], ['87654321-1234-4123-8123-123456789abc']])
     assert.throws(() => planRetainedUiAssets(f.argumentsFor({ ...f.inventory, supportedVersionIds })), /historical version identities/);
   assert.throws(() => planRetainedUiAssets({ ...f.argumentsFor(), app: 'ops-sync' }), /Only existing UI/);
+});
+
+test('rejects the old association field even with a reviewed digest', t => {
+  const f = fixture(t), { assetConfigSHA256, ...rest } = f.inventory;
+  for (const schemaVersion of [1, 2]) {
+    const legacy = { ...rest, schemaVersion, assetAssociationSHA256: assetConfigSHA256 };
+    assert.throws(() => planRetainedUiAssets(f.argumentsFor(legacy)), /schema 2/);
+  }
+  assert.throws(() => planRetainedUiAssets(f.argumentsFor({ ...f.inventory,
+    assetAssociationSHA256: assetConfigSHA256 })), /schema 2/);
+  const { assetConfigSHA256: ignored, ...inputWithoutConfig } = f.argumentsFor();
+  assert.throws(() => planRetainedUiAssets({ ...inputWithoutConfig,
+    assetAssociationSHA256: assetConfigSHA256 }), /schema 2/);
+});
+
+test('equal asset configuration does not establish content or generation identity', t => {
+  const f = fixture(t), before = planRetainedUiAssets(f.argumentsFor());
+  fs.writeFileSync(path.join(f.old, 'assets/old-123.js'), 'different retained bytes');
+  // Configuration equality cannot substitute for the separately reviewed bytes.
+  assert.throws(() => planRetainedUiAssets(f.argumentsFor()), /exactly match/);
+  f.inventory.files = inventoryDirectory(f.old);
+  const after = planRetainedUiAssets(f.argumentsFor());
+  assert.equal(after.activeVersionId, before.activeVersionId);
+  assert.equal(after.assetConfigSHA256, before.assetConfigSHA256);
+  assert.notEqual(after.historicalInventorySHA256, before.historicalInventorySHA256);
+  assert.notEqual(after.unionSHA256, before.unionSHA256);
+  for (const plan of [before, after]) {
+    assert.equal(plan.liveAssetGenerationBindingVerified, false);
+    assert.equal(plan.liveAssetContentVerified, false);
+    assert.equal(plan.deploymentEnabled, false);
+  }
 });
 
 test('rejects incomplete, extra or modified retained payload instead of assuming inventory completeness', t => {

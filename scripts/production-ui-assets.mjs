@@ -56,21 +56,22 @@ export function inventoryDirectory(directory) {
 
 /** Input inventory is a review artifact, never a self-authorizing claim.
  * Digest approval and completeness provenance must come from outside this
- * planner; an opaque live association alone does not enumerate old assets. */
+ * planner. The profile's assetsSHA256 hashes configuration metadata only:
+ * equality does not identify a live asset generation or bind any file bytes. */
 export function planRetainedUiAssets({ app, inventoryBytes, approvedInventorySHA256,
-  retainedDirectory, candidateDirectory, activeVersionId, assetAssociationSHA256,
+  retainedDirectory, candidateDirectory, activeVersionId, assetConfigSHA256,
   profile = PROFILE }) {
   need(['operations', 'client'].includes(app), 'Only existing UI Workers are supported');
   need(SHA.test(approvedInventorySHA256 ?? '') && Buffer.isBuffer(inventoryBytes)
     && inventoryBytes.length <= 8 * 1024 * 1024 && hash(inventoryBytes) === approvedInventorySHA256,
   'An exact externally reviewed historical inventory digest is required');
   let inventory; try { inventory = JSON.parse(inventoryBytes.toString('utf8')); } catch { throw new Error('Invalid historical inventory JSON'); }
-  need(own(inventory, ['schemaVersion', 'workerName', 'activeVersionId', 'assetAssociationSHA256', 'supportedVersionIds', 'files'])
-    && inventory.schemaVersion === 1 && inventory.workerName === profile.workers[app].name
+  need(own(inventory, ['schemaVersion', 'workerName', 'activeVersionId', 'assetConfigSHA256', 'supportedVersionIds', 'files'])
+    && inventory.schemaVersion === 2 && inventory.workerName === profile.workers[app].name
     && UUID.test(activeVersionId ?? '') && inventory.activeVersionId === activeVersionId
-    && SHA.test(assetAssociationSHA256 ?? '') && inventory.assetAssociationSHA256 === assetAssociationSHA256
-    && assetAssociationSHA256 === profile.workers[app].assetsSHA256,
-  'Historical inventory does not match the recognized live Worker/version/asset association');
+    && SHA.test(assetConfigSHA256 ?? '') && inventory.assetConfigSHA256 === assetConfigSHA256
+    && assetConfigSHA256 === profile.workers[app].assetsSHA256,
+  'Historical inventory does not match schema 2 and the recognized Worker/version/asset configuration');
   need(Array.isArray(inventory.supportedVersionIds) && inventory.supportedVersionIds.length > 0
     && inventory.supportedVersionIds.length <= 100 && inventory.supportedVersionIds.every(value => UUID.test(value))
     && new Set(inventory.supportedVersionIds).size === inventory.supportedVersionIds.length
@@ -98,9 +99,11 @@ export function planRetainedUiAssets({ app, inventoryBytes, approvedInventorySHA
   }
   need(candidate.some(file => file.path === '/index.html'), 'Candidate HTML entry is required');
   const files = [...union.values()].sort((a, b) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0);
-  return { schemaVersion: 1, workerName: inventory.workerName, activeVersionId,
-    assetAssociationSHA256, historicalInventorySHA256: approvedInventorySHA256,
+  return { schemaVersion: 2, workerName: inventory.workerName, activeVersionId,
+    assetConfigSHA256, historicalInventorySHA256: approvedInventorySHA256,
     unionSHA256: hash(canonical(files)), files,
-    rollback: { activeVersionId, assetAssociationSHA256, inventorySHA256: approvedInventorySHA256, files: retained },
+    rollback: { activeVersionId, assetConfigSHA256, inventorySHA256: approvedInventorySHA256, files: retained },
+    // Local byte validation and configuration equality establish neither claim.
+    liveAssetGenerationBindingVerified: false, liveAssetContentVerified: false,
     deploymentEnabled: false, completenessProvedByPlanner: false, writesPerformed: false };
 }
