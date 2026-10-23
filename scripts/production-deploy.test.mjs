@@ -70,13 +70,18 @@ test('Windows shared source changes remain protected: manifest compatibility doe
   assert.throws(() => checkMode('backend', fingerprint), /retained asset union/);
   // Reconstruct main77's protected source in a temporary copy, with exact
   // before/after pins. This is test-only evidence, NOT a production alias.
-  const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'production-frontend-manifest-'));
+  const temporaryParent = fs.realpathSync(os.tmpdir());
+  const temporary = fs.mkdtempSync(path.join(temporaryParent, 'production-frontend-manifest-'));
   try {
     const copy = relative => {
       const source = path.join(ROOT, relative);
       if (!fs.existsSync(source)) return;
       const worker = path.join(source, 'worker');
-      fs.cpSync(source, path.join(temporary, relative), { recursive: true, filter: file => file !== worker });
+      fs.cpSync(source, path.join(temporary, relative), { recursive: true, filter: file => {
+        if (file === worker) return false;
+        assert.equal(fs.lstatSync(file).isSymbolicLink(), false, 'Test copy refuses repository symlinks');
+        return true;
+      } });
     };
     for (const app of ['client', 'operations'])
       for (const relative of ['src', 'public', 'index.html', 'vite.config.ts', 'package.json', 'package-lock.json'])
@@ -98,7 +103,13 @@ test('Windows shared source changes remain protected: manifest compatibility doe
     assert.equal(reviewedFrontendDigest(queue, digest), digest);
     fs.rmSync(path.join(temporary, queue));
     assert.equal(frontendFingerprint(temporary), PROFILE.frontendSHA256);
-  } finally { fs.rmSync(temporary, { recursive: true, force: true }); }
+  } finally {
+    assert.equal(fs.lstatSync(temporary).isSymbolicLink(), false);
+    const resolved = fs.realpathSync(temporary);
+    assert.equal(path.dirname(resolved), temporaryParent, 'Cleanup stays directly in the owned temporary parent');
+    assert.match(path.basename(resolved), /^production-frontend-manifest-[A-Za-z0-9]{6}$/);
+    fs.rmSync(resolved, { recursive: true, force: true });
+  }
 });
 const genuineMap = () => ({ version: 3, file: 'index.js', sources: ['fixture.ts'], sourcesContent: ['export const fixture = true;'], names: [], mappings: 'AAAA' });
 function fixture() {
