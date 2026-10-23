@@ -675,7 +675,14 @@ async Task HostileNames()
     try {
         var report = await reference("report.pdf");
         var probed = new List<string>();
-        host.Hooks.Exists = path => { probed.Add(path); return File.Exists(path) || Directory.Exists(path); };
+        // Fully synthetic observer: it records every probe and only ever touches the test's own downloads folder,
+        // so even a regression that leaks a rooted or UNC name never reaches that path or the network.
+        var owned = Path.TrimEndingDirectorySeparator(downloads) + Path.DirectorySeparatorChar;
+        host.Hooks.Exists = path => {
+            probed.Add(path);
+            return path.StartsWith(owned, StringComparison.OrdinalIgnoreCase) && !path[owned.Length..].Contains(Path.DirectorySeparatorChar)
+                && (File.Exists(path) || Directory.Exists(path));
+        };
         var checks = backend.SourceChecks;
         foreach (var name in new[] { @"\attacker.example\share\report.pdf", @"\?\C:\Windows\win.ini", @"C:\Windows\win.ini", @"C:report.pdf",
             @"..\outside.pdf", "sub/report.pdf", @"sub\report.pdf", "report.pdf:stream", "CON", "lpt1.txt", "COM¹.dat", "aux .txt",
