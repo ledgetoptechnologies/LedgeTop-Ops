@@ -132,3 +132,51 @@ its resulting bindings/routes. This document does not authorize that step.
 The earlier staging-host free-space figure was historical. The latest supplied
 metadata reports about 8.89 GB local-root free; large fixture generation belongs
 on the approved PC lab, not that host or a NAS mount.
+
+## Build disabled source modules without a deployment configuration
+
+When current live settings are incomplete, use the separate offline source path:
+
+```powershell
+node scripts/windows-files-source-preparation.mjs --write-sources PUBLIC_INPUTS_JSON WORKSPACE_ROOT
+node scripts/windows-files-source-preparation.mjs --build-sources WORKSPACE_ROOT
+```
+
+Its exact input keys are `profile` and `preflight`; configuration `sources` are
+rejected. The existing public profile contract is reused, but `enabled` must be
+`false`. Paired preflight Worker names, HTTPS origins, human issuer/audiences,
+version UUIDs, database/bucket identities, required named services and zero FK
+violations must match the existing staging inventory. Missing dedicated Windows
+secret slots and pending suffix migrations are acceptable for this disabled
+compile path; they remain requirements of the separate enabled composition.
+The observation is supplied explicitly and is not fetched or certified fresh by
+these offline functions. It is never relabelled as suffix-applied or canonical.
+
+Gateway metadata is **compile input only**, with ownership/provisioning explicitly
+unverified. For example, the existing test gateway origin/UUID/key ID can be used
+as clearly labelled synthetic disabled compile input. This does not configure a
+runtime gateway, enroll an identity or read/create keys.
+
+Both source constructors use `windows-files-staging-entry-renderer.mjs` so the
+entry code cannot diverge. The full composition still requires its original
+complete configuration, source-preservation and enabled admission checks. The
+source-only path writes only `.windows-files-source-preparation/entrypoint.ts`,
+`public-inputs.json` and `receipt.json` in each app, never a Wrangler config.
+Directories are separate from the existing full composition output. Both
+write targets must be new, regular and below the canonical workspace; aliases
+and overwrite attempts reject. Partial failures remain visible for review.
+
+The source-only builder checks the saved public inputs, entry bytes, selected
+preparation/source-main hashes, paired receipts and actual runtime-export
+inventories before retaining complete esbuild modules. It rejects reuse of
+existing build outputs. Each result records module hashes/sizes and an input
+inventory. Those physical input hashes are **post-build file observations**,
+not exact compiler-loader byte attestation or an atomic source snapshot.
+esbuild's zero-byte browser-disabled virtual inputs are recorded as virtual,
+without a fabricated physical file hash; other virtual namespaces reject.
+
+Receipt statuses explicitly say `not_configuration`; `configWritten`, `uploaded`,
+`activated`, `deployReady`, Workerd startup and runtime acceptance remain false.
+A successful disabled module build proves neither preservation of live variables,
+assets or schedules nor a deploy-ready/rollback artifact. It does not authorize
+upload, schema migration, enrollment, grants, activation or EH execution.
