@@ -1190,11 +1190,13 @@ async Task NoFallbackOnRefusal()
 
 async Task PendingSignInSwitchAndClose()
 {
-    // The client's sign-in check is stuck (offline or a hung token cache) when the person switches, and then closes.
+    // The client's cached-session check is stuck (offline or a hung token cache; not an interactive browser login)
+    // when the person switches, and then closes.
     var root = Path.Combine(Path.GetTempPath(), "ltfiles-pending-" + Guid.NewGuid().ToString("N"));
     Directory.CreateDirectory(root);
     var state = Path.Combine(root, "queue");
     var backends = new List<DemoBackend>();
+    FilesSession? session = null;
     IFilesBackend Make(AccessMode mode)
     {
         var backend = new DemoBackend(state, signedIn: true, mode: mode);
@@ -1205,7 +1207,7 @@ async Task PendingSignInSwitchAndClose()
         var choice = new AccessChoice(Make, [AccessMode.Client, AccessMode.Employee], AccessPreference.For(root, "pilot"));
         choice.Preference.Save(AccessMode.Client);
         var shell = new ChooserShell();
-        var session = new FilesSession(shell, choice, Path.Combine(root, "Downloads"), null);
+        session = new FilesSession(shell, choice, Path.Combine(root, "Downloads"), null);
         var starting = session.StartAsync();
         await Until(() => shell.Attached.Count == 1, "client view shown while its sign-in check is stuck");
         var client = shell.Attached[0];
@@ -1224,17 +1226,25 @@ async Task PendingSignInSwitchAndClose()
         True(!Directory.Exists(Path.Combine(state, "portal")), "no client queue was opened after the switch");
         True(company.Sections.All(node => node.Node.SourceAlias == "employee"), "the late client result never reached the company view");
 
-        // Closing while a newly chosen view is still checking its sign-in finishes promptly too.
-        backends[1].BlockSessions();
+        // Closing while a newly chosen view is still checking its session finishes promptly too: switching back
+        // builds a new client backend, whose cached-session check is blocked from the start.
         company.SwitchAccess.Execute(null);
         await Until(() => session.Mode == AccessMode.Client && shell.Attached.Count == 3, "switched back");
+        True(backends.Count == 3 && shell.Attached[2].Screen != Screen.Files, "the new client check is still pending");
         await session.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(10));
         Equal(1, backends[1].Disposals);
+        Equal(1, backends[2].Disposals);
         foreach (var backend in backends) backend.ReleaseSessions();
         Pump();
         True(Locks.Free(state), "every queue released after closing");
     } finally {
+        // Release every gate first, then close whatever is still open, before removing the owned folder. A failure
+        // above still fails the test; this only keeps an early failure from leaving queues open.
         foreach (var backend in backends) backend.ReleaseSessions();
+        if (session is not null) {
+            try { await session.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(30)); }
+            catch (Exception error) when (error is TimeoutException or IOException) { Console.Error.WriteLine("cleanup: " + error.GetType().Name); }
+        }
         try { Directory.Delete(root, true); } catch (IOException) { }
     }
 }
