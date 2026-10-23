@@ -11,11 +11,16 @@ import { authenticateNativeStaffWithAdmissionVersion } from "../src/worker/nativ
 import { resolveEmployeeReadAuthority, recheckEmployeeReadAuthority } from "../src/worker/employee-read-authority";
 import { handleAgentRead } from "../src/worker/agent-read-routes";
 import type { Env } from "../src/worker/types";
+import worker from "../src/worker/index";
 import { readNativeStaffCutoverReadiness, canonicalStaffReadiness, NATIVE_STAFF_READINESS_SNAPSHOT_QUERY as READINESS_QUERY,
   NATIVE_STAFF_PRODUCTION_TARGET } from "../../../scripts/native-staff-cutover-readiness.mjs";
 
 const keys = vi.hoisted(() => ({ getKey: undefined as unknown }));
 vi.mock("jose", async importOriginal => ({ ...await importOriginal<typeof import("jose")>(), createRemoteJWKSet: () => keys.getKey }));
+// Node route acceptance does not instantiate RPC/workflow/container platform
+// classes. The exported fetch dispatcher and all authentication/ACL/CSRF/D1
+// implementations remain real; only their otherwise-unused base classes stub.
+vi.mock("cloudflare:workers", () => ({ WorkflowEntrypoint: class {}, WorkerEntrypoint: class {}, DurableObject: class {} }));
 const issuer = "https://synthetic-staff.cloudflareaccess.com", audience = "synthetic-staff-audience", origin = "https://ops.example.test";
 const actions = ["staff.onboarding.create", "staff.onboarding.approve", "staff.admission.disable", "staff.membership.manage", "staff.directory_grant.manage", "staff.admin_delegation.manage"];
 const directoryCaps = ["directory.profile.view", "directory.profile.edit", "directory.identity.link", "directory.enrollment.manage", "directory.portal_access.manage"];
@@ -264,6 +269,73 @@ describe("Ops-owned joined staff lifecycle against actual full-chain local D1", 
     expect((await handle(new Request(`${origin}${BASE}/${target.id}`, { headers: h }), deps())).status).toBe(200);
     expect((await handle(new Request(`${origin}${BASE}/session`, { headers: headers(await token(actor, { type: "service" })) }), deps())).status).toBe(403);
     expect((await handle(new Request(`${origin}${BASE}/session`, { headers: headers("invalid.jwt.bytes") }), deps())).status).toBe(403);
+  });
+
+  it("runs the full mounted worker fetch path for staff lifecycle and denies stale normal Ops/Viewer sessions", async () => {
+    const actor = await staff(), target = await staff(); await administrator(actor);
+    const actorHeaders = headers(await token(actor)), targetAssertion = await token(target);
+    const viewerOrigin = "https://viewer-staging.ledgetopdroneservices.com";
+    const mountedEnv: Env = { ...env(), ENVIRONMENT:"staging", EXPECTED_HOST:new URL(origin).hostname,
+      PUBLIC_BASE_URL:origin, OPERATIONS_ORIGINS:origin, OPERATIONS_SESSION_SECRET:deps().configuration.csrfSecret,
+      VIEWER_INTEGRATION_ENABLED:"true",VIEWER_PROCESSING_ENABLED:"true",VIEWER_WORKSPACE_RENEWAL_CORS_ENABLED:"true",
+      VIEWER_BASE_URL:viewerOrigin };
+    const waitUntil = vi.fn(), executionContext = { waitUntil,passThroughOnException(){} } as unknown as ExecutionContext;
+    const fetch = (request:Request) => worker.fetch(request,mountedEnv,executionContext);
+    const nativeSession = () => fetch(new Request(`${origin}${BASE}/session`,{headers:actorHeaders}));
+    const nativeRead = () => fetch(new Request(`${origin}${BASE}/${target.id}`,{headers:actorHeaders}));
+    const ordinarySession = () => fetch(new Request(`${origin}/api/session/status`,{headers:headers(targetAssertion)}));
+    const viewerChallenge = () => fetch(new Request(`${origin}/api/viewer/workspace/session-renewal/challenge`,{
+      headers:{"Cf-Access-Jwt-Assertion":targetAssertion,Origin:viewerOrigin} }));
+    // The mount must itself remain absent before native authentication while
+    // cutover is disabled. This is not a direct handler invocation or auth mock.
+    await db.prepare("UPDATE native_staff_access_reconciliation SET enabled=0 WHERE singleton=1").run();
+    try {
+      const disabled = await fetch(new Request(`${origin}${BASE}/session`,{
+        headers:{"Sec-Fetch-Site":"same-origin","X-Native-Staff-Request":"1"} }));
+      expect(disabled.status).toBe(404); expect(await disabled.json()).toEqual({error:"not_found"});
+      expect((await nativeSession()).status).toBe(404);
+    } finally { await db.prepare("UPDATE native_staff_access_reconciliation SET enabled=1 WHERE singleton=1").run(); }
+
+    const session = await nativeSession(); expect(session.status).toBe(200);
+    expect(session.headers.get("Cloudflare-CDN-Cache-Control")).toBe("no-store");
+    const {csrfToken} = await session.json() as {csrfToken:string};
+    expect(csrfToken).toMatch(/^\d+\.[0-9a-f]{64}$/u);
+    const read = await nativeRead(); expect(read.status).toBe(200);
+    expect(await read.json()).toMatchObject({target:{staffId:target.id,admissionVersion:1,profileVersion:1},
+      scopedProfile:{loginEmail:target.email,displayName:target.id}});
+    const normal = await ordinarySession(); expect(normal.status).toBe(200);
+    expect(await normal.json()).toMatchObject({userId:target.id});
+    const challenge = await viewerChallenge(); expect(challenge.status).toBe(200);
+    expect(await challenge.json()).toMatchObject({protocolVersion:1,challenge:expect.any(String)});
+
+    const mutation = (action:string,value:Record<string,unknown>,overrides:Record<string,string>={}) => fetch(new Request(
+      `${origin}${BASE}/${target.id}/${action}`,{method:"POST",headers:{...actorHeaders,Origin:origin,
+        "Content-Type":"application/json","X-CSRF-Token":csrfToken,...overrides},body:JSON.stringify(value)}));
+    const disable = {commandId:uuid(),expectedVersion:1,reason:"Synthetic mounted-worker disable"};
+    expect((await mutation("disable",disable,{Origin:"https://other.example.test"})).status).toBe(403);
+    expect((await mutation("disable",disable,{"Sec-Fetch-Site":"cross-site"})).status).toBe(403);
+    expect((await mutation("disable",disable,{"X-CSRF-Token":""})).status).toBe(403);
+    expect((await mutation("disable",disable,{"Cf-Access-Jwt-Assertion":targetAssertion})).status).toBe(403);
+    expect(await joinedState(target)).toMatchObject({status:"active",active:1,version:1,profile_version:1});
+
+    const edit = await mutation("profile",{commandId:uuid(),expectedVersion:1,reason:"Synthetic mounted-worker profile edit",displayName:"Mounted Profile"});
+    expect(edit.status).toBe(200); expect(await edit.json()).toMatchObject({receipt:{capability:"staff.profile.edit",resultVersion:2}});
+    expect(await joinedState(target)).toMatchObject({display_name:"Mounted Profile",profile_version:2,status:"active",version:1});
+    const offboard = await mutation("disable",disable); expect(offboard.status).toBe(200);
+    expect(await offboard.json()).toMatchObject({receipt:{capability:"staff.admission.disable",resultVersion:2}});
+    // Reuse the exact same still-unexpired signed JWT after offboarding. The
+    // normal mounted middleware and separate mounted renewal boundary must deny.
+    expect((await ordinarySession()).status).toBe(403);
+    expect((await viewerChallenge()).status).toBe(403);
+    expect(await joinedState(target)).toMatchObject({status:"inactive",active:0,version:2});
+
+    const enable = await mutation("enable",{commandId:uuid(),expectedVersion:2,reason:"Synthetic mounted-worker re-enable"});
+    expect(enable.status).toBe(200); expect(await enable.json()).toMatchObject({receipt:{capability:"staff.admission.enable",resultVersion:3}});
+    expect((await ordinarySession()).status).toBe(200);
+    expect((await viewerChallenge()).status).toBe(200);
+    const finalRead = await nativeRead(); expect(finalRead.status).toBe(200);
+    expect(await finalRead.json()).toMatchObject({target:{admissionActive:true,admissionVersion:3,profileVersion:2},scopedProfile:{displayName:"Mounted Profile"}});
+    expect(waitUntil).not.toHaveBeenCalled();
   });
 
   it("cannot disable the last complete native control plane and rolls the bridge back with it", async () => {
