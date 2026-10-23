@@ -207,6 +207,9 @@ public sealed class TransferQueue : IAsyncDisposable
     {
         var sessionExpiry = DateTimeOffset.MaxValue;
         try {
+            // A disconnected destination is local to this job, not queue corruption.
+            // Refuse it before resolution/bytes; recheck again after network awaits.
+            LocalDirectory(job.Destination);
             CheckSource(); var session = await source.GetSessionAsync(cancellationToken); ValidSession(session);
             if (session.PrincipalId != principal) throw new AccessDeniedException();
             var resolved = await source.ResolveAsync(job.ResourceReference, cancellationToken);
@@ -319,6 +322,15 @@ public sealed class TransferQueue : IAsyncDisposable
         if (!Path.IsPathFullyQualified(value) || value.StartsWith("\\\\", StringComparison.Ordinal) || !Directory.Exists(value)) throw new TransferException("Choose an existing absolute local directory.");
         var path = Path.TrimEndingDirectorySeparator(Path.GetFullPath(value)); CheckPath(path); return path;
     }
+    private static string CanonicalStoredDestination(string value)
+    {
+        // Loading durable metadata must not require removable destinations to exist.
+        // Live existence/reparse checks remain mandatory at start and recovery.
+        if (!Path.IsPathFullyQualified(value) || value.StartsWith("\\\\", StringComparison.Ordinal)
+            || Path.TrimEndingDirectorySeparator(Path.GetFullPath(value)) != value)
+            throw new TransferException("Queue destinations must be canonical absolute local paths.");
+        return value;
+    }
     private static void CheckPath(string path)
     {
         string? current = path;
@@ -354,7 +366,7 @@ public sealed class TransferQueue : IAsyncDisposable
                     || (job.RecoveryRequired && job.State is QueuedTransferState.Queued or QueuedTransferState.Completed or QueuedTransferState.Cancelled or QueuedTransferState.VersionChanged)
                     || string.IsNullOrWhiteSpace(job.RemoteVersion) || job.RemoteVersion.Length > 256 || job.RemoteVersion.Any(char.IsControl)
                     || job.ErrorCode is not (null or "interrupted" or "resource-identity-changed" or "version-changed" or "login-required" or "access-denied" or "resource-unavailable" or "transfer-failed" or "state-save-failed" or "existing-content-mismatch")) throw new JsonException();
-                Reference(job.ResourceReference); LocalDirectory(job.Destination); ValidatePins(job.FileName, job.Length, job.ETag, job.Sha256);
+                Reference(job.ResourceReference); CanonicalStoredDestination(job.Destination); ValidatePins(job.FileName, job.Length, job.ETag, job.Sha256);
             }
             return state.Jobs;
         } catch (Exception error) when (error is JsonException or DecoderFallbackException or ArgumentException or InvalidOperationException or NullReferenceException) { throw new TransferException("Queue state is malformed or ambiguous."); }

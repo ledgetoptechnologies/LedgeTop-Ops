@@ -22,7 +22,10 @@ internal static class TransferQueueTests
         ("queue active pause and cancel drain immediately while session discovery is blocked", OfflineStop),
         ("queue inactive pause and cancel persist offline across restart", OfflineQueuedStop),
         ("queue local pause fences a start already awaiting sign-in", PendingStartStop),
-        ("queue record and serialized byte caps reject without starting transfers", Bounds)
+        ("queue record and serialized byte caps reject without starting transfers", Bounds),
+        ("queue unavailable destinations isolate jobs across reopen and explicit retry", MissingDestinations),
+        ("queue stored destinations remain canonical absolute local paths", DestinationSyntax),
+        ("queue rechecks replaced destination aliases before new and recovery bytes", ReopenedDestinationReparse)
     ];
     private static void Assert(bool value) { if (!value) throw new Exception("Queue assertion failed."); }
     private static async Task<T> Throws<T>(Func<Task> action) where T : Exception {
@@ -346,6 +349,91 @@ internal static class TransferQueueTests
                 Assert((await Job(queue, id)).State == QueuedTransferState.Completed && source.DownloadCalls == 1);
                 Assert((await File.ReadAllBytesAsync(Path.Combine(fixture.Output, "map.bin"))).SequenceEqual(source.Bytes));
             }
+        }
+    }
+
+    private static async Task MissingDestinations() {
+        foreach (var scenario in new[] { "queued", "interrupted", "completed" }) {
+            using var fixture = new Fixture(); var source = new Source();
+            var available = Path.Combine(fixture.Root, "available"); Directory.CreateDirectory(available);
+            var disconnected = Path.Combine(fixture.Root, "disconnected"); Guid missing, other; byte[]? running = null;
+            await using (var queue = await TransferQueue.OpenAsync(fixture.State, source)) {
+                missing = await queue.EnqueueAsync("odqr1_resource_one", fixture.Output);
+                other = await queue.EnqueueAsync("odqr1_resource_two", available);
+                if (scenario == "interrupted") {
+                    source.Mode = Mode.Block; await queue.StartAsync(missing);
+                    await source.Blocked.Task.WaitAsync(TimeSpan.FromSeconds(5));
+                    running = await File.ReadAllBytesAsync(State(fixture)); await queue.PauseAsync(missing);
+                } else if (scenario == "completed") {
+                    await queue.StartAsync(missing); await queue.WaitForIdleAsync(); await queue.PauseAsync(other);
+                }
+            }
+            if (running is not null) await File.WriteAllBytesAsync(State(fixture), running);
+            Directory.Move(fixture.Output, disconnected); source.Mode = Mode.Normal;
+            await using var reopened = await TransferQueue.OpenAsync(fixture.State, source);
+            var items = await reopened.GetJobsAsync(); Assert(items.Count == 2);
+            var absent = items.Single(job => job.JobId == missing);
+            Assert(absent.State == (scenario == "completed" ? QueuedTransferState.Completed : scenario == "interrupted" ? QueuedTransferState.Paused : QueuedTransferState.Queued));
+            Assert(absent.RecoveryRequired == (scenario == "interrupted"));
+            Assert(items.Single(job => job.JobId == other).State == (scenario == "completed" ? QueuedTransferState.Paused : QueuedTransferState.Queued));
+            await reopened.StartAsync(other); await reopened.WaitForIdleAsync();
+            Assert((await Job(reopened, other)).State == QueuedTransferState.Completed);
+            Assert((await File.ReadAllBytesAsync(Path.Combine(available, "second.bin"))).SequenceEqual(source.Bytes));
+            if (scenario == "completed") { Assert(!Directory.Exists(fixture.Output)); continue; }
+            var downloads = source.DownloadCalls; var resolutions = source.Resolutions;
+            await reopened.RetryAsync(missing); await reopened.WaitForIdleAsync();
+            Assert((await Job(reopened, missing)).State == QueuedTransferState.Failed);
+            Assert(source.DownloadCalls == downloads && source.Resolutions == resolutions && !Directory.Exists(fixture.Output));
+            Assert((await Job(reopened, other)).State == QueuedTransferState.Completed);
+            Directory.Move(disconnected, fixture.Output);
+            await reopened.RetryAsync(missing); await reopened.WaitForIdleAsync();
+            Assert((await Job(reopened, missing)).State == QueuedTransferState.Completed);
+            Assert((await File.ReadAllBytesAsync(Path.Combine(fixture.Output, "map.bin"))).SequenceEqual(source.Bytes));
+            Assert(source.LastOffset == (scenario == "interrupted" ? 7 : 0));
+        }
+    }
+
+    private static async Task ReopenedDestinationReparse() {
+        foreach (var interrupted in new[] { false, true }) {
+            using var fixture = new Fixture(); var source = new Source(); Guid id; byte[]? running = null;
+            await using (var queue = await TransferQueue.OpenAsync(fixture.State, source)) {
+                id = await queue.EnqueueAsync("odqr1_resource_one", fixture.Output);
+                if (interrupted) {
+                    source.Mode = Mode.Block; await queue.StartAsync(id); await source.Blocked.Task.WaitAsync(TimeSpan.FromSeconds(5));
+                    running = await File.ReadAllBytesAsync(State(fixture)); await queue.PauseAsync(id);
+                }
+            }
+            if (running is not null) await File.WriteAllBytesAsync(State(fixture), running);
+            var target = Path.Combine(fixture.Root, "renamed-output"); Directory.Move(fixture.Output, target);
+            if (OperatingSystem.IsWindows()) {
+                foreach (var path in new[] { fixture.Output, target }) Assert(System.Text.RegularExpressions.Regex.IsMatch(path, "\\A[A-Za-z]:[\\\\A-Za-z0-9._ -]+\\z"));
+                var start = new ProcessStartInfo("cmd.exe") { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true,
+                    Arguments = "/d /c mklink /J \"" + fixture.Output + "\" \"" + target + "\"" };
+                using var process = Process.Start(start)!; await process.WaitForExitAsync(); Assert(process.ExitCode == 0);
+            } else Directory.CreateSymbolicLink(fixture.Output, target);
+            try {
+                source.Mode = Mode.Normal; var resolutions = source.Resolutions; var downloads = source.DownloadCalls;
+                await using var reopened = await TransferQueue.OpenAsync(fixture.State, source);
+                Assert((await Job(reopened, id)).RecoveryRequired == interrupted);
+                await reopened.RetryAsync(id); await reopened.WaitForIdleAsync();
+                Assert((await Job(reopened, id)).State == QueuedTransferState.Failed);
+                Assert(source.Resolutions == resolutions && source.DownloadCalls == downloads);
+                Assert(!File.Exists(Path.Combine(target, "map.bin")));
+                if (interrupted) Assert(Directory.GetFiles(target, "*.part", SearchOption.AllDirectories).Length == 1);
+            } finally { Directory.Delete(fixture.Output); } // Only the owned link, never its target.
+        }
+    }
+
+    private static async Task DestinationSyntax() {
+        using var fixture = new Fixture(); var source = new Source();
+        await using (var queue = await TransferQueue.OpenAsync(fixture.State, source)) { await queue.EnqueueAsync("odqr1_resource_one", fixture.Output); }
+        var original = JsonNode.Parse(await File.ReadAllTextAsync(State(fixture)))!;
+        foreach (var destination in new[] { "relative", @"\\server\share\folder", "C:relative", fixture.Output + Path.DirectorySeparatorChar,
+            Path.Combine(fixture.Output, "..", "output"), fixture.Output + "\0", @"\\?\C:\folder" }) {
+            var state = original.DeepClone(); state["jobs"]![0]!["destination"] = destination;
+            await File.WriteAllTextAsync(State(fixture), state.ToJsonString());
+            await Throws<TransferException>(async () => { await using var _ = await TransferQueue.OpenAsync(fixture.State, source); });
+            Assert(source.DownloadCalls == 0);
         }
     }
 
