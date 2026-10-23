@@ -32,7 +32,10 @@ function assetConfig(assets) {
   if (!object(assets.static_routing) || Object.keys(assets.static_routing).some(k => !["asset_worker","user_worker"].includes(k))
     || Object.values(assets.static_routing).some(v => !Array.isArray(v))
     || !same(routing, { asset_worker: assets.static_routing.asset_worker ?? [], user_worker: assets.static_routing.user_worker ?? [] })) fail();
-  const { static_routing, raw_run_worker_first, ...config } = assets;
+  // The version API rejects deprecated serve_directly together with explicit
+  // run_worker_first (10021). Omit it only from request serialization; the
+  // complete observed assets object still has to match inactive readback.
+  const { static_routing, raw_run_worker_first, serve_directly, ...config } = assets;
   return { ...structuredClone(config), run_worker_first: [...raw_run_worker_first] };
 }
 

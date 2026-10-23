@@ -63,6 +63,28 @@ test("inactive preparation preserves live variables, explicitly inherits resourc
   assert.doesNotMatch(JSON.stringify(result.receipt),/private-sentinel|CURRENT_ONLY|OLD_SECRET/);
   assert.equal(result.receipt.uploadAuthorized,false);assert.equal(result.receipt.promotionAuthorized,false);
 });
+test("asset request omits deprecated serve_directly without mutating or normalizing raw readback",()=>{
+  const input=fixture(),before=structuredClone(input),result=prepare(input);
+  for(const app of APPS) {
+    const config=result.uploads[app].unsafe.metadata.assets.config;
+    assert.equal(input.versionDetails[app].detail.resources.script_runtime.assets.serve_directly,true);
+    assert.equal(Object.hasOwn(config,"serve_directly"),false);
+    assert.deepEqual(config.run_worker_first,["/api/*","!/assets/*"]);
+    assert.equal(compare(input,candidate(input)).assetsRoutingCompared,true);
+    const changed=candidate(input);
+    delete changed[app].detail.resources.script_runtime.assets.serve_directly;
+    assert.throws(()=>compare(input,changed),/inputs_invalid/);
+    changed[app].detail.resources.script_runtime.assets.serve_directly=false;
+    assert.throws(()=>compare(input,changed),/inputs_invalid/);
+  }
+  assert.deepEqual(input,before);
+  const falseInput=fixture();
+  for(const app of APPS) falseInput.versionDetails[app].detail.resources.script_runtime.assets.serve_directly=false;
+  const falseBefore=structuredClone(falseInput),falseResult=prepare(falseInput);
+  for(const app of APPS) assert.equal(Object.hasOwn(falseResult.uploads[app].unsafe.metadata.assets.config,"serve_directly"),false);
+  assert.deepEqual(falseInput,falseBefore);
+});
+
 test("actual inactive comparison is required but never grants activation or proves code/asset association",()=>{
   const input=fixture(),result=compare(input,candidate(input));
   assert.equal(result.status,"supplied_inactive_resources_match");assert.equal(result.promotionAuthorized,false);assert.equal(result.codeVerified,false);assert.equal(result.assetAssociationVerified,false);

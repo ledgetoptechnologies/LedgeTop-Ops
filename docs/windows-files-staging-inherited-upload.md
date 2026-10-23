@@ -60,8 +60,14 @@ route policy: `raw_run_worker_first` maps to `run_worker_first`; its derived
 `static_routing` must agree and is not posted. API omission of an empty routing
 array and Wrangler's explicit empty-array representation are lossless for this
 input validation only; the final raw inactive runtime comparison remains exact.
-`base_path`, `serve_directly`,
-`not_found_handling` and optional `html_handling` map unchanged. This mirrors the
+`base_path`, `not_found_handling` and optional `html_handling` map unchanged.
+The deprecated observed `serve_directly` boolean is validated but omitted from
+request metadata when explicit `run_worker_first` is emitted. Cloudflare rejected
+posting both with HTTP 400/code `10021`; the observed `true` value is not grounds
+for rejecting an otherwise consistent baseline. This is request serialization
+only: the entire raw inactive assets/runtime object, including `serve_directly`,
+must still exactly match the baseline before any separate activation. A missing
+or changed readback field holds the candidate; no reconstruction is assumed. This mirrors the
 repository's existing production adapter pattern without reusing its policy or
 values. No asset JWT or files are uploaded by this module.
 
