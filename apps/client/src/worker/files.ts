@@ -120,7 +120,7 @@ export async function prefixHasBrowsableEntry(bucket: VisibleContentBucket, root
 }
 
 export function streamPlayerUrl(customerCode: string, token: string): string {
-  const options = new URLSearchParams({ controls: "true", preload: "metadata", letterboxColor: "#0d141a" });
+  const options = new URLSearchParams({ controls: "true", autoplay: "true", muted: "true", preload: "metadata", letterboxColor: "#0d141a" });
   return `https://customer-${customerCode}.cloudflarestream.com/${token}/iframe?${options.toString()}`;
 }
 
