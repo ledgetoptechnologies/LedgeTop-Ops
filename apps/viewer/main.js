@@ -4412,7 +4412,7 @@ function switchMode(mode, { historyMode = 'push', updateHistory = true, force = 
   const isDirectCloud = isPC && state.cloudMode === 'direct';
   const volumeButton = document.getElementById('tool-volume');
   volumeButton.disabled = measurementWorkspace?.volumeUnavailable===true;
-  volumeButton.title = '';
+  volumeButton.title = volumeButton.disabled?'No permitted volume calculation source is published for this model.':'Volume uses a permitted elevation raster or registered point-cloud surface. Staff can also use available specialist methods.';
   dom.threeContainer.style.display = (is3D || isDirectCloud) ? 'block' : 'none';
   dom.labelsContainer.style.display = (is3D || isDirectCloud) ? 'block' : 'none';
   dom.cloudContainer.style.display = isPotreeCloud ? 'block' : 'none';
