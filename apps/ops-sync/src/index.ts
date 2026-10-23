@@ -6,6 +6,7 @@ import type { Env } from "./types";
 import { clientPortalProjectionFailureDiagnostic } from "./client-portal-projection-diagnostic";
 import { PRIMARY_PROJECT_ALPHA_SOURCE, type ProjectAlphaSourceContext } from "../../operations/src/worker/project-alpha-source";
 import { assertProjectAlphaConnectorProof, ProjectAlphaConnectorError, resolveProjectAlphaConnector, type ProjectAlphaConnectorProof } from "../../operations/src/worker/project-alpha-connectors";
+import { reconcileNativeStaffAccess } from "./native-staff-access";
 
 type AccessVerifier = (request: Request, env: AccessEnvironment) => Promise<unknown>;
 
@@ -170,11 +171,12 @@ export async function handleRequest(request: Request, env: Env, accessVerifier: 
   }
 }
 
-export async function reconcileScheduledAccess(_env: Env): Promise<number> {
-  // Kept as a no-op for existing cron bindings. An automatic PA-derived group
-  // replacement could remove local staff or admit historical accounts. Native
-  // admission reconciliation requires its own reviewed membership migration.
-  return 0;
+export async function reconcileScheduledAccess(env: Env): Promise<number> {
+  // PA ingress never schedules this. The existing application cron may converge
+  // exact native membership only after the separately reviewed default-off
+  // cohort control is enabled. No bootstrap or role-based bypass is inferred.
+  const result = await reconcileNativeStaffAccess(env);
+  return result.status === "applied" ? result.members : 0;
 }
 
 export default {

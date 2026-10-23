@@ -1,4 +1,4 @@
-interface ReconciliationEnvironment {
+export interface ReconciliationEnvironment {
   OPS_DB: D1Database;
   CF_ACCOUNT_ID: string;
   CF_ACCESS_GROUP_ID: string;
@@ -76,7 +76,9 @@ async function loadAccessGroup(
     if (!listResponse.ok || !listEnvelope.success || !Array.isArray(listEnvelope.result)) {
       throw cloudflareError("access-group-list", listResponse, listEnvelope);
     }
-    const group = listEnvelope.result.find((candidate) => candidate.name === groupName);
+    const matching = listEnvelope.result.filter((candidate) => candidate.name === groupName);
+    if (matching.length > 1) throw new Error("access-group-name-ambiguous");
+    const group = matching[0];
     if (group?.id) {
       return { endpoint: `${accountEndpoint}/${encodeURIComponent(group.id)}`, group };
     }
@@ -99,16 +101,43 @@ export async function desiredAccessEmails(db: D1Database): Promise<string[]> {
 }
 
 export async function reconcileAccessGroup(env: ReconciliationEnvironment, authorize?: () => Promise<void>): Promise<string[]> {
+  return applyManagedEmails(env, () => desiredAccessEmails(env.OPS_DB), authorize, false);
+}
+
+/** Native reconciliation supplies its own exact joined membership, independently
+ * of PA projections and the historical compatibility helper above. */
+export async function reconcileAccessGroupForEmails(env: ReconciliationEnvironment, desired: readonly string[],
+  authorize: () => Promise<void>): Promise<string[]> {
+  const emails = [...desired];
+  if (emails.length === 0 || emails.length > 10_000 || emails.some(email => typeof email !== "string" || email.length > 254
+    || email !== email.trim().toLowerCase() || /[\p{Cc}\p{Cf}]/u.test(email) || !/^[^\s@]+@[^\s@]+$/u.test(email))
+    || new Set(emails).size !== emails.length) throw new Error("access-group-members-invalid");
+  emails.sort();
+  return applyManagedEmails(env, async () => emails, authorize, true);
+}
+
+function managedEmails(group: AccessGroup): string[] {
+  if (!group || typeof group.name !== "string" || !group.name || typeof group.id !== "string"
+    || group.exclude !== undefined && !Array.isArray(group.exclude)
+    || group.require !== undefined && !Array.isArray(group.require)
+    || group.include !== undefined && !Array.isArray(group.include)) throw new Error("access-group-shape-invalid");
+  return (group.include ?? []).map(rule => {
+    if (!rule || typeof rule !== "object" || Array.isArray(rule) || Object.keys(rule).join() !== "email")
+      throw new Error("access-group-unmanaged-include-rule");
+    const value = (rule as {email?: unknown}).email;
+    if (!value || typeof value !== "object" || Array.isArray(value) || Object.keys(value).join() !== "email"
+      || typeof (value as {email?:unknown}).email !== "string") throw new Error("access-group-unmanaged-include-rule");
+    return (value as {email:string}).email.trim().toLowerCase();
+  }).sort();
+}
+
+async function applyManagedEmails(env: ReconciliationEnvironment, desired: () => Promise<string[]>,
+  authorize: (() => Promise<void>) | undefined, verifyWrite: boolean): Promise<string[]> {
   if (![env.CF_ACCOUNT_ID, env.CF_ACCESS_GROUP_ID, env.CF_ACCESS_GROUP_API_TOKEN].every(configured)) throw new Error("access-group-configuration-invalid");
   const headers = { Authorization: `Bearer ${env.CF_ACCESS_GROUP_API_TOKEN}`, "Content-Type": "application/json", Accept: "application/json" };
   const { endpoint, group } = await loadAccessGroup(env, headers, authorize);
-  const emails = await desiredAccessEmails(env.OPS_DB);
-  const currentEmails=(group.include??[]).map((rule)=>{
-    if(!rule||typeof rule!=="object"||!("email" in rule))throw new Error("access-group-unmanaged-include-rule");
-    const email=(rule as {email?:{email?:unknown}}).email?.email;
-    if(typeof email!=="string")throw new Error("access-group-unmanaged-include-rule");
-    return email.trim().toLowerCase();
-  }).sort();
+  const emails = await desired();
+  const currentEmails = managedEmails(group);
   if(currentEmails.length===emails.length&&currentEmails.every((email,index)=>email===emails[index]))return emails;
   const updateResponse = await boundedFetch(endpoint, {
     method: "PUT",
@@ -123,5 +152,18 @@ export async function reconcileAccessGroup(env: ReconciliationEnvironment, autho
   }, authorize);
   const updateEnvelope = await responseEnvelope<AccessGroup>(updateResponse);
   if (!updateResponse.ok || !updateEnvelope.success) throw cloudflareError("access-group-update", updateResponse, updateEnvelope);
+  if (verifyWrite) {
+    // Acknowledged writes still need a readback. No remote CAS or atomicity with
+    // D1 is implied; a later cron also checks already-applied generations.
+    const response = await boundedFetch(endpoint, { headers }, authorize);
+    const envelope = await responseEnvelope<AccessGroup>(response);
+    if (!response.ok || !envelope.success || !envelope.result) throw new Error("access-group-readback-failed");
+    const observed = envelope.result;
+    if (JSON.stringify(managedEmails(observed)) !== JSON.stringify(emails)
+      || JSON.stringify(observed.exclude ?? []) !== JSON.stringify(group.exclude ?? [])
+      || JSON.stringify(observed.require ?? []) !== JSON.stringify(group.require ?? [])
+      || observed.id !== group.id || observed.name !== group.name
+      || (observed.is_default ?? false) !== (group.is_default ?? false)) throw new Error("access-group-readback-mismatch");
+  }
   return emails;
 }
