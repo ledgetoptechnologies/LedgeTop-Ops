@@ -103,7 +103,13 @@ export function compileConfig(snapshot, app, main, profile = PROFILE) {
 }
 
 export function reviewedFrontendDigest(file, digest) {
-  if (file === 'package.json' && digest === 'f8eb91b8e39b62df7d7a13b6474f96297e05110c443899c1b109fa2a0062a1d0')
+  // 730e3d18 adds only two read-only Windows staging preflight aliases and
+  // their test to the root test command. No app/build/lock inputs change.
+  // Both complete reviewed manifests are finite aliases, never script filters.
+  if (file === 'package.json' && [
+    'f8eb91b8e39b62df7d7a13b6474f96297e05110c443899c1b109fa2a0062a1d0',
+    'c2c9b2f65bf33250158efa14ee67ac20432518ce4b33f20b45c23042ca3f2ebf',
+  ].includes(digest))
     return '3c5cf8119ffa8eb65d2216db89a583ba79b91a7ada75cbae8aec0856af59ae31';
   // PR243 a045e30f changes worker-only grant DTO/method code. All browser
   // runtime bytes are identical; two source maps embed the changed source.
@@ -119,8 +125,9 @@ export function frontendInputHash(file, raw) {
   const digest = hash(text ? raw.toString('utf8').replaceAll('\r\n', '\n') : raw);
   // Reviewed 159ba842 -> 43f31609: the only root manifest changes add the
   // viewer:check/viewer:build scripts. Exact locked per-app builds produce
-  // identical complete browser asset trees (including maps). This finite
-  // byte identity alias does not admit another script, dependency or file.
+  // identical complete browser asset trees (including maps). These finite
+  // byte identity aliases (plus the exact staging-only manifest above) do not
+  // admit another script, dependency or file.
   return reviewedFrontendDigest(file, digest);
 }
 export function frontendFingerprint(root = ROOT) {

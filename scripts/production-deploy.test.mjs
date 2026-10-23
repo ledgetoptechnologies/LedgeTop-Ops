@@ -24,27 +24,81 @@ test('worker-only Viewer source compatibility admits just the reviewed exact pat
   assert.equal(frontendInputHash(file, Buffer.from('changed source')), hash('changed source'));
 });
 
-test('only the exact reviewed Viewer root-script manifest aliases the locked frontend baseline', () => {
+test('only the exact reviewed Viewer and Windows staging manifests alias the locked frontend baseline', () => {
   const raw = fs.readFileSync(path.join(ROOT, 'package.json'));
   const normalized = raw.toString('utf8').replaceAll('\r\n', '\n');
-  assert.equal(hash(normalized), 'f8eb91b8e39b62df7d7a13b6474f96297e05110c443899c1b109fa2a0062a1d0');
+  assert.equal(hash(normalized), 'c2c9b2f65bf33250158efa14ee67ac20432518ce4b33f20b45c23042ca3f2ebf');
+  // Undo precisely the 730e3d18 root manifest delta, preserving bytes. This
+  // must reproduce main77's reviewed manifest, including all other fields.
+  const historical = normalized
+    .replace(' scripts/windows-files-staging-preflight.test.mjs', '')
+    .replace('    "staging:windows-files:preflight": "node scripts/windows-files-staging-preflight.mjs --read-only",\n', '')
+    .replace('    "staging:windows-files:preflight:test": "node --test scripts/windows-files-staging-preflight.test.mjs",\n', '');
+  assert.equal(hash(historical), 'f8eb91b8e39b62df7d7a13b6474f96297e05110c443899c1b109fa2a0062a1d0');
   const baseline = '3c5cf8119ffa8eb65d2216db89a583ba79b91a7ada75cbae8aec0856af59ae31';
-  assert.equal(frontendInputHash('package.json', raw), baseline);
-  assert.equal(frontendInputHash('package.json', Buffer.from(normalized.replaceAll('\n', '\r\n'))), baseline);
+  for (const manifest of [normalized, historical]) {
+    assert.equal(frontendInputHash('package.json', Buffer.from(manifest)), baseline);
+    assert.equal(frontendInputHash('package.json', Buffer.from(manifest.replaceAll('\n', '\r\n'))), baseline);
+  }
   for (const alter of [
     value => { value.scripts['viewer:build'] += ' --changed'; },
     value => { value.scripts.build = 'changed'; },
+    value => { value.scripts['staging:windows-files:preflight'] += ' --changed'; },
+    value => { value.scripts['staging:windows-files:preflight:test'] = 'node other.mjs'; },
+    value => { value.scripts.test += ' scripts/unreviewed.test.mjs'; },
+    value => { value.scripts.unreviewed = 'node unreviewed.mjs'; },
     value => { value.dependencies = { 'unreviewed-package': '1.0.0' }; },
   ]) {
     const value = JSON.parse(normalized); alter(value);
-    const bytes = Buffer.from(JSON.stringify(value, null, 2));
-    assert.equal(frontendInputHash('package.json', bytes), hash(bytes));
-    assert.notEqual(frontendInputHash('package.json', bytes), baseline);
+    for (const ending of ['\n', '\r\n']) {
+      const text = JSON.stringify(value, null, 2).replaceAll('\n', ending);
+      const bytes = Buffer.from(text);
+      assert.equal(frontendInputHash('package.json', bytes), hash(text.replaceAll('\r\n', '\n')));
+      assert.notEqual(frontendInputHash('package.json', bytes), baseline);
+    }
   }
   assert.equal(frontendInputHash('apps/client/package.json', raw), hash(normalized));
   assert.equal(frontendInputHash('packages/shared/src/unreviewed.ts', raw), hash(normalized));
-  assert.equal(frontendFingerprint(ROOT), PROFILE.frontendSHA256);
+  for (const other of ['./package.json', 'PACKAGE.JSON'])
+    assert.equal(frontendInputHash(other, raw), hash(normalized));
   assert.throws(() => checkMode('ui', PROFILE.frontendSHA256), /UI deployment denied/);
+});
+
+test('Windows shared source changes remain protected: manifest compatibility does not authorize a production release', () => {
+  const fingerprint = frontendFingerprint(ROOT);
+  assert.notEqual(fingerprint, PROFILE.frontendSHA256);
+  assert.throws(() => checkMode('backend', fingerprint), /retained asset union/);
+  // Reconstruct main77's protected source in a temporary copy, with exact
+  // before/after pins. This is test-only evidence, NOT a production alias.
+  const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'production-frontend-manifest-'));
+  try {
+    const copy = relative => {
+      const source = path.join(ROOT, relative);
+      if (!fs.existsSync(source)) return;
+      const worker = path.join(source, 'worker');
+      fs.cpSync(source, path.join(temporary, relative), { recursive: true, filter: file => file !== worker });
+    };
+    for (const app of ['client', 'operations'])
+      for (const relative of ['src', 'public', 'index.html', 'vite.config.ts', 'package.json', 'package-lock.json'])
+        copy(`apps/${app}/${relative}`);
+    for (const relative of ['package.json', 'package-lock.json', 'packages/shared/src']) copy(relative);
+    const authority = 'packages/shared/src/operations-portal-native-delivery-authority.ts';
+    const source = fs.readFileSync(path.join(temporary, authority), 'utf8').replaceAll('\r\n', '\n');
+    assert.equal(hash(source), 'e10a371519d29333185706af6353cd701ce4553e3711b945205c860b12cc60bd');
+    assert.equal(reviewedFrontendDigest(authority, hash(source)), hash(source));
+    const start = source.indexOf('/** Private successor proof; original grant authorization is never rewritten. */\n');
+    const end = source.indexOf('export interface OperationsPortalNativeDeliveryAuthorizationReaderBinding {\n', start);
+    assert.ok(start >= 0 && end > start);
+    const historical = source.slice(0, start) + source.slice(end);
+    assert.equal(hash(historical), 'c7cd7dabf0a3c16fca643b1d2b1070f773b9ad6549de8c06e48cd5410a6c70ef');
+    fs.writeFileSync(path.join(temporary, authority), historical);
+    const queue = 'packages/shared/src/windows-queue-reference.ts';
+    const digest = hash(fs.readFileSync(path.join(temporary, queue), 'utf8').replaceAll('\r\n', '\n'));
+    assert.equal(digest, '55a51ea413aa2a38b444f7ce7eb618cb152e52f1f340ce8a03b5c65cc9911747');
+    assert.equal(reviewedFrontendDigest(queue, digest), digest);
+    fs.rmSync(path.join(temporary, queue));
+    assert.equal(frontendFingerprint(temporary), PROFILE.frontendSHA256);
+  } finally { fs.rmSync(temporary, { recursive: true, force: true }); }
 });
 const genuineMap = () => ({ version: 3, file: 'index.js', sources: ['fixture.ts'], sourcesContent: ['export const fixture = true;'], names: [], mappings: 'AAAA' });
 function fixture() {
