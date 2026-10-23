@@ -34,6 +34,7 @@ var groups = new (string Name, Func<Task> Run)[] {
     ("closing while the previous person's downloads are still stopping waits for them and opens nothing new", CloseDuringSwitch),
     ("hostile listed names never reach the file system; safe names keep the overwrite check", HostileNames),
     ("closing waits for pause all to save waiting items as paused", PauseAllSavedBeforeClose),
+    ("closing waits for a pause all that is still stopping, and every closer waits for the same shutdown", PauseAllStoppingBeforeClose),
     ("closing fences a start that was already past its list check", NoStartAfterClose),
     ("closing releases the backend once, after its queues", BackendReleased),
     ("the window renders sign-in and files screens", Render),
@@ -721,6 +722,32 @@ async Task PauseAllSavedBeforeClose()
         await closing.WaitAsync(TimeSpan.FromSeconds(30));
         Equal(2, SavedStates(backend.StateDirectory, "paused"));
         Equal(0, SavedStates(backend.StateDirectory, "queued"));
+    } finally { gate.TrySetResult(); await host.DisposeAsync(); try { Directory.Delete(root, true); } catch (IOException) { } }
+}
+
+async Task PauseAllStoppingBeforeClose()
+{
+    var (backend, host, root, downloads, reference) = await HostFixture(rate: 300_000);
+    var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    try {
+        Equal(EnqueueOutcome.Added, await host.EnqueueAsync("portal", await reference("ortho-full.tif"), "ortho-full.tif", downloads));
+        Equal(EnqueueOutcome.Added, await host.EnqueueAsync("portal", await reference("report.pdf"), "report.pdf", downloads));
+        await Until(() => host.IsBusy && backend.Writing == 1, "first download running");
+        await host.SnapshotAsync();
+        // Pause all has taken its list but not yet stopped the running download or scheduled its save.
+        var reached = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        host.Hooks.BeforeRunningPause = () => { reached.TrySetResult(); return gate.Task; };
+        var pausing = host.PauseAllAsync();
+        await reached.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        var first = host.DisposeAsync().AsTask(); var second = host.DisposeAsync().AsTask();
+        await Task.Delay(400);
+        True(!first.IsCompleted && !second.IsCompleted, "every closer waits while pause all is still stopping");
+        gate.SetResult();
+        await Task.WhenAll(pausing, first, second).WaitAsync(TimeSpan.FromSeconds(30));
+        Equal(2, SavedStates(backend.StateDirectory, "paused"));
+        Equal(0, SavedStates(backend.StateDirectory, "queued"));
+        // After closing, Pause all is a no-op rather than a late save against released queues.
+        await host.PauseAllAsync();
     } finally { gate.TrySetResult(); await host.DisposeAsync(); try { Directory.Delete(root, true); } catch (IOException) { } }
 }
 

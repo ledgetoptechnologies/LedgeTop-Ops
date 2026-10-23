@@ -11,7 +11,7 @@ public enum EnqueueOutcome { Added, AlreadyQueued, NameTaken, UnsafeName }
 internal sealed class QueueHostHooks
 {
     internal Func<string, bool>? Exists;
-    internal Func<Task>? AfterSnapshot, BeforeHeldPersist;
+    internal Func<Task>? AfterSnapshot, BeforeRunningPause, BeforeHeldPersist;
     internal Action<Guid>? Starting;
 }
 
@@ -35,6 +35,7 @@ public sealed class QueueHost : IAsyncDisposable
     private readonly HashSet<Task> background = [];
     private (string Alias, Guid Id)? active;
     private bool disposed;
+    private Task? disposal;
 
     internal QueueHostHooks Hooks { get; } = new();
 
@@ -129,25 +130,38 @@ public sealed class QueueHost : IAsyncDisposable
     public async Task PauseAllAsync()
     {
         (string Alias, Guid Id)? running; List<TransferItem> waiting;
+        // Registered under the same lock that closing uses, before any await or event: closing either waits for this
+        // whole operation (stop and save) or this Pause all never starts.
+        var operation = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         lock (sync) {
+            if (disposed) return;
+            background.Add(operation.Task);
             running = active;
             waiting = known.Where(item => item.Job.State == QueuedTransferState.Queued || wanted.Contains(item.Job.JobId)).ToList();
             foreach (var item in waiting) held.Add(item.Job.JobId);
             if (running is { } current) held.Add(current.Id);
             wanted.Clear();
         }
-        if (running is { } stop) await Queue(stop.Alias).PauseAsync(stop.Id);
-        Changed?.Invoke();
-        Track(Task.Run(async () => {
-            if (Hooks.BeforeHeldPersist is { } hold) await hold();
-            foreach (var item in waiting.Where(item => item.Job.State == QueuedTransferState.Queued)) {
-                try {
-                    using var limit = new CancellationTokenSource(TimeSpan.FromSeconds(30));
-                    await Queue(item.SourceAlias).PauseAsync(item.Job.JobId, limit.Token);
-                } catch (Exception) { /* still held in memory; the queue keeps it waiting */ }
-            }
+        try {
+            if (Hooks.BeforeRunningPause is { } before) await before();
+            if (running is { } stop) await Queue(stop.Alias).PauseAsync(stop.Id);
             Changed?.Invoke();
-        }));
+        } catch { Settle(operation); throw; }
+        // Saving the held items as paused happens afterwards and never delays the stop; the operation stays
+        // registered until it finishes.
+        _ = Task.Run(async () => {
+            try {
+                if (Hooks.BeforeHeldPersist is { } hold) await hold();
+                foreach (var item in waiting.Where(item => item.Job.State == QueuedTransferState.Queued)) {
+                    try {
+                        using var limit = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+                        await Queue(item.SourceAlias).PauseAsync(item.Job.JobId, limit.Token);
+                    } catch (Exception) { /* still held in memory; the queue keeps it waiting */ }
+                }
+                Changed?.Invoke();
+            } catch (Exception) { /* an observer failure can't undo the saves */ }
+            finally { Settle(operation); }
+        });
     }
 
     /// <summary>Puts every paused item back in line; they run one at a time, in list order.</summary>
@@ -240,10 +254,10 @@ public sealed class QueueHost : IAsyncDisposable
 
     private static bool Exists(string path) => File.Exists(path) || Directory.Exists(path);
 
-    private void Track(Task task)
+    private void Settle(TaskCompletionSource operation)
     {
-        lock (sync) background.Add(task);
-        _ = task.ContinueWith(done => { lock (sync) background.Remove(done); }, TaskScheduler.Default);
+        lock (sync) background.Remove(operation.Task);
+        operation.TrySetResult();
     }
 
     private TransferQueue Queue(string alias) =>
@@ -253,10 +267,16 @@ public sealed class QueueHost : IAsyncDisposable
     /// Stops and drains this person's transfers and releases their queues. The running transfer is signalled
     /// first, without any sign-in check, so it stops even while the session is unreachable.
     /// </summary>
-    public async ValueTask DisposeAsync()
+    public ValueTask DisposeAsync()
     {
-        (string Alias, Guid Id)? running;
-        lock (sync) { if (disposed) return; disposed = true; running = active; }
+        // Every caller waits for the one real shutdown, not just the first.
+        lock (sync) { if (!disposed) { disposed = true; disposal = DrainAndReleaseAsync(active); } }
+        return new(disposal!);
+    }
+
+    private async Task DrainAndReleaseAsync((string Alias, Guid Id)? running)
+    {
+        await Task.Yield(); // Never run queue stops or callbacks while the caller holds sync.
         if (running is { } stop) {
             try { await Queue(stop.Alias).PauseAsync(stop.Id); } catch (Exception) { /* draining below still stops it */ }
         }
