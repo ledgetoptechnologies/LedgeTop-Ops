@@ -36,6 +36,13 @@ var groups = new (string Name, Func<Task> Run)[] {
     ("closing waits for pause all to save waiting items as paused", PauseAllSavedBeforeClose),
     ("closing waits for a pause all that is still stopping, and every closer waits for the same shutdown", PauseAllStoppingBeforeClose),
     ("closing fences a start that was already past its list check", NoStartAfterClose),
+    ("a resume after pause all wins over its late save", ResumeBeatsLatePauseSave),
+    ("resume all after pause all wins over its late save", ResumeAllBeatsLatePauseSave),
+    ("pause all wins over a start that was already chosen", PauseAllBeatsChosenStart),
+    ("pause all wins over a start already shown as active but not yet begun", PauseAllBeatsPublishedStart),
+    ("pause all wins over a resume still waiting its turn, and a later resume still works", PauseAllBeatsPendingResume),
+    ("a repeated resume of the running download never frees its slot for a second source", RepeatedResumeKeepsOneActive),
+    ("a late finish from an older start never frees a newer start's slot", StaleIdleKeepsOneActive),
     ("closing releases the backend once, after its queues", BackendReleased),
     ("the window renders sign-in and files screens", Render),
 };
@@ -750,6 +757,217 @@ async Task PauseAllStoppingBeforeClose()
         Equal(0, SavedStates(backend.StateDirectory, "queued"));
         // After closing, Pause all is a no-op rather than a late save against released queues.
         await host.PauseAllAsync();
+    } finally { gate.TrySetResult(); await host.DisposeAsync(); try { Directory.Delete(root, true); } catch (IOException) { } }
+}
+
+async Task<(DemoBackend Backend, QueueHost Host, string Root, string Downloads, TaskCompletionSource Gate, Task SaveSettled)> PausedWithLateSave()
+{
+    // Ortho is running and report waits; Pause all stops ortho and holds report, with its save gated.
+    var (backend, host, root, downloads, reference) = await HostFixture(rate: 300_000);
+    var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    Equal(EnqueueOutcome.Added, await host.EnqueueAsync("portal", await reference("ortho-full.tif"), "ortho-full.tif", downloads));
+    Equal(EnqueueOutcome.Added, await host.EnqueueAsync("portal", await reference("report.pdf"), "report.pdf", downloads));
+    await Until(() => host.IsBusy && backend.Writing == 1, "ortho running");
+    await host.SnapshotAsync();
+    host.Hooks.BeforeHeldPersist = () => gate.Task;
+    var settled = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    host.Hooks.HeldSaveSettled = () => settled.TrySetResult();
+    await host.PauseAllAsync();
+    await Until(() => !host.IsBusy && backend.Writing == 0, "ortho stopped");
+    return (backend, host, root, downloads, gate, settled.Task);
+}
+static QueuedTransferState StateOf(IReadOnlyList<TransferItem> items, string name) => items.Single(item => item.Job.FileName == name).Job.State;
+
+async Task ResumeBeatsLatePauseSave()
+{
+    var (backend, host, root, _, gate, saveSettled) = await PausedWithLateSave();
+    try {
+        var report = (await host.SnapshotAsync()).Single(item => item.Job.FileName == "report.pdf");
+        await host.ResumeAsync(report);
+        await Until(() => backend.Writing == 1, "report resumed and writing");
+        gate.SetResult();
+        await saveSettled.WaitAsync(TimeSpan.FromSeconds(30)); // the late save has finished acting
+        var items = await host.SnapshotAsync();
+        Equal(QueuedTransferState.Running, StateOf(items, "report.pdf"));
+        Equal(1, backend.Writing);
+        // The resume's intent was kept: report is not held and nothing was saved paused for it.
+        True(!host.IsHeld(items.Single(item => item.Job.FileName == "report.pdf").Job.JobId), "report is not held");
+    } finally { gate.TrySetResult(); await host.DisposeAsync(); try { Directory.Delete(root, true); } catch (IOException) { } }
+}
+
+async Task ResumeAllBeatsLatePauseSave()
+{
+    var (backend, host, root, downloads, gate, saveSettled) = await PausedWithLateSave();
+    try {
+        await host.ResumeAllAsync();
+        await Until(() => backend.Writing == 1, "resume all restarted ortho");
+        gate.SetResult();
+        await saveSettled.WaitAsync(TimeSpan.FromSeconds(30)); // the late save has finished acting
+        var items = await host.SnapshotAsync();
+        Equal(QueuedTransferState.Running, StateOf(items, "ortho-full.tif"));
+        Equal(QueuedTransferState.Queued, StateOf(items, "report.pdf"));
+        True(!host.IsHeld(items.Single(item => item.Job.FileName == "report.pdf").Job.JobId), "report is not held");
+        // Resume all's intent survives: report is still waiting its turn, so when ortho stops it starts by itself.
+        True(host.IsWanted(items.Single(item => item.Job.FileName == "report.pdf").Job.JobId), "report still wanted");
+        await host.PauseAsync(items.Single(item => item.Job.FileName == "ortho-full.tif"));
+        await Until(() => host.IsBusy && backend.Writing == 1, "report started in turn");
+        Equal(QueuedTransferState.Running, StateOf(await host.SnapshotAsync(), "report.pdf"));
+    } finally { gate.TrySetResult(); await host.DisposeAsync(); try { Directory.Delete(root, true); } catch (IOException) { } }
+}
+
+async Task PauseAllBeatsChosenStart()
+{
+    var (backend, host, root, downloads, reference) = await HostFixture(rate: 300_000);
+    var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    host.Hooks.StartSettled = id => started.TrySetResult();
+    try {
+        var reached = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var once = 0;
+        host.Hooks.BeforeStart = () => Interlocked.Exchange(ref once, 1) == 0 ? Gate() : Task.CompletedTask;
+        Task Gate() { reached.TrySetResult(); return gate.Task; }
+        Equal(EnqueueOutcome.Added, await host.EnqueueAsync("portal", await reference("report.pdf"), "report.pdf", downloads));
+        await reached.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        // The pump has chosen report; Pause all now holds it before it starts.
+        await host.SnapshotAsync();
+        await host.PauseAllAsync();
+        gate.SetResult();
+        await started.Task.WaitAsync(TimeSpan.FromSeconds(30)); // the older start has been decided
+        Equal(0, backend.Writing);
+        True(!host.IsBusy, "nothing started");
+        await Until(() => SavedStates(backend.StateDirectory, "paused") == 1, "report saved paused");
+        True(!File.Exists(Path.Combine(downloads, "report.pdf")), "nothing downloaded");
+    } finally { gate.TrySetResult(); await host.DisposeAsync(); try { Directory.Delete(root, true); } catch (IOException) { } }
+}
+
+async Task PauseAllBeatsPublishedStart()
+{
+    var (backend, host, root, downloads, reference) = await HostFixture(rate: 300_000);
+    var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    host.Hooks.StartSettled = id => started.TrySetResult();
+    try {
+        var reached = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var once = 0;
+        host.Hooks.AfterStartPublished = () => Interlocked.Exchange(ref once, 1) == 0 ? Gate() : Task.CompletedTask;
+        Task Gate() { reached.TrySetResult(); return gate.Task; }
+        Equal(EnqueueOutcome.Added, await host.EnqueueAsync("portal", await reference("report.pdf"), "report.pdf", downloads));
+        await reached.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        True(host.IsBusy, "the start is published as active");
+        await host.SnapshotAsync();
+        await host.PauseAllAsync();
+        gate.SetResult();
+        await started.Task.WaitAsync(TimeSpan.FromSeconds(30)); // the older start has been decided
+        Equal(0, backend.Writing);
+        True(!host.IsBusy, "the older start never began");
+        Equal(QueuedTransferState.Paused, StateOf(await host.SnapshotAsync(), "report.pdf"));
+        True(!File.Exists(Path.Combine(downloads, "report.pdf")), "nothing downloaded");
+    } finally { gate.TrySetResult(); await host.DisposeAsync(); try { Directory.Delete(root, true); } catch (IOException) { } }
+}
+
+async Task PauseAllBeatsPendingResume()
+{
+    var (backend, host, root, downloads, reference) = await HostFixture(rate: 300_000);
+    var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    try {
+        Equal(EnqueueOutcome.Added, await host.EnqueueAsync("portal", await reference("report.pdf"), "report.pdf", downloads));
+        await Until(() => backend.Writing == 1, "report running");
+        var report = (await host.SnapshotAsync()).Single(item => item.Job.FileName == "report.pdf");
+        await host.PauseAsync(report);
+        await Until(() => !host.IsBusy && backend.Writing == 0, "report paused");
+        report = (await host.SnapshotAsync()).Single(item => item.Job.FileName == "report.pdf");
+        Equal(QueuedTransferState.Paused, report.Job.State);
+        // A resume is requested but still waiting before it starts; Pause all happens meanwhile.
+        var reached = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var once = 0;
+        host.Hooks.BeforeStart = () => Interlocked.Exchange(ref once, 1) == 0 ? Gate() : Task.CompletedTask;
+        Task Gate() { reached.TrySetResult(); return gate.Task; }
+        var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        host.Hooks.StartSettled = id => started.TrySetResult();
+        var resuming = host.ResumeAsync(report);
+        await reached.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        await host.SnapshotAsync();
+        await host.PauseAllAsync();
+        gate.SetResult();
+        await resuming.WaitAsync(TimeSpan.FromSeconds(10)); // superseded quietly, not reported as a failure
+        await started.Task.WaitAsync(TimeSpan.FromSeconds(30)); // the older start has been decided
+        Equal(0, backend.Writing);
+        True(!host.IsBusy, "the older resume never began");
+        Equal(QueuedTransferState.Paused, StateOf(await host.SnapshotAsync(), "report.pdf"));
+        // A resume requested after Pause all is the newest intent and works.
+        await host.ResumeAsync((await host.SnapshotAsync()).Single(item => item.Job.FileName == "report.pdf"));
+        await Until(() => host.IsBusy && backend.Writing == 1, "a later resume starts");
+    } finally { gate.TrySetResult(); await host.DisposeAsync(); try { Directory.Delete(root, true); } catch (IOException) { } }
+}
+
+async Task<string> EmployeeReference(DemoBackend backend, string name)
+{
+    async Task<CatalogFile?> Find(CatalogNode node)
+    {
+        var listing = await backend.Catalog.ListAsync(node);
+        if (listing.Files.FirstOrDefault(file => file.Name == name) is { } found) return found;
+        foreach (var child in (await backend.Catalog.GetChildrenAsync(node)).Nodes) if (await Find(child) is { } deeper) return deeper;
+        return null;
+    }
+    var server = (await backend.Catalog.GetSectionsAsync()).Single(node => node.SourceAlias == "employee");
+    foreach (var child in (await backend.Catalog.GetChildrenAsync(server)).Nodes)
+        if (await Find(child) is { } file) return await backend.Catalog.GetReferenceAsync(file);
+    throw new Exception("Employee demo file not found: " + name);
+}
+
+async Task RepeatedResumeKeepsOneActive()
+{
+    var (backend, host, root, downloads, reference) = await HostFixture(rate: 300_000);
+    try {
+        Equal(EnqueueOutcome.Added, await host.EnqueueAsync("portal", await reference("ortho-full.tif"), "ortho-full.tif", downloads));
+        await Until(() => host.IsBusy && backend.Writing == 1, "ortho running");
+        var ortho = (await host.SnapshotAsync()).Single(item => item.Job.FileName == "ortho-full.tif");
+        await host.ResumeAsync(ortho); // a repeated or stale Resume of what is already running
+        await host.ResumeAsync(ortho);
+        True(host.IsBusy, "the running download still owns the slot");
+        Equal(1, backend.Writing);
+        Equal(EnqueueOutcome.Added, await host.EnqueueAsync("employee", await EmployeeReference(backend, "site-plan.dwg"), "site-plan.dwg", downloads));
+        await Task.Delay(300);
+        Equal(1, backend.Writing);
+        var site = (await host.SnapshotAsync()).Single(item => item.Job.FileName == "site-plan.dwg");
+        await host.ResumeAsync(site); // stops ortho first, then starts the other source
+        // ResumeAsync returns once the site plan's start has been admitted, so read the queues right away.
+        var items = await host.SnapshotAsync();
+        Equal(QueuedTransferState.Running, StateOf(items, "site-plan.dwg"));
+        Equal(QueuedTransferState.Paused, StateOf(items, "ortho-full.tif"));
+        Equal(1, backend.MostAtOnce);
+    } finally { await host.DisposeAsync(); try { Directory.Delete(root, true); } catch (IOException) { } }
+}
+
+async Task StaleIdleKeepsOneActive()
+{
+    var (backend, host, root, downloads, reference) = await HostFixture(rate: 300_000);
+    var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    try {
+        Equal(EnqueueOutcome.Added, await host.EnqueueAsync("portal", await reference("ortho-full.tif"), "ortho-full.tif", downloads));
+        await Until(() => host.IsBusy && backend.Writing == 1, "ortho running");
+        // The first start's finish callback is held back until after a newer start of the same item.
+        var reached = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var once = 0;
+        host.Hooks.BeforeIdleRelease = () => Interlocked.Exchange(ref once, 1) == 0 ? Held() : Task.CompletedTask;
+        Task Held() { reached.TrySetResult(); return gate.Task; }
+        var ortho = (await host.SnapshotAsync()).Single(item => item.Job.FileName == "ortho-full.tif");
+        await host.PauseAsync(ortho);
+        await reached.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        await host.ResumeAsync((await host.SnapshotAsync()).Single(item => item.Job.FileName == "ortho-full.tif"));
+        await Until(() => host.IsBusy && backend.Writing == 1, "ortho resumed");
+        var released = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        host.Changed += () => released.TrySetResult();
+        gate.SetResult();
+        await released.Task.WaitAsync(TimeSpan.FromSeconds(10)); // the old callback has run its release
+        True(host.IsBusy, "the newer start still owns the slot");
+        Equal(EnqueueOutcome.Added, await host.EnqueueAsync("employee", await EmployeeReference(backend, "site-plan.dwg"), "site-plan.dwg", downloads));
+        var site = (await host.SnapshotAsync()).Single(item => item.Job.FileName == "site-plan.dwg");
+        await host.ResumeAsync(site);
+        var items = await host.SnapshotAsync();
+        Equal(QueuedTransferState.Running, StateOf(items, "site-plan.dwg"));
+        Equal(QueuedTransferState.Paused, StateOf(items, "ortho-full.tif"));
+        Equal(1, backend.MostAtOnce);
     } finally { gate.TrySetResult(); await host.DisposeAsync(); try { Directory.Delete(root, true); } catch (IOException) { } }
 }
 
