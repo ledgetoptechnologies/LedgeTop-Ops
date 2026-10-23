@@ -38,6 +38,10 @@ jobs:
       - name: Verify guarded production deployment tooling without credentials
         run: node --test scripts/production-deploy.test.mjs
 
+      - name: Verify the unwired additive UI asset proof locally
+        run: |
+          node --test scripts/ui-release-assets.test.mjs scripts/ui-release-assets-local.test.mjs
+
       - name: Verify main and PR workflow trigger policy
         run: node --test scripts/workflow-trigger-policy.test.mjs
 
