@@ -1,3 +1,4 @@
+import "./node-fixed-length-stream";
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { createLocalJWKSet, exportJWK, generateKeyPair, SignJWT } from "jose";
 import { createWindowsEmployeeFilesStagingRouter, type WindowsEmployeeFilesStagingConfiguration } from "../src/worker/windows-files-staging";
