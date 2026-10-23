@@ -61,7 +61,7 @@ const deps = () => ({ enabledFlag: "true", expectedHost: "ops.example.test", dat
   configuration: { enabled: true, issuer, staffAudience: audience, origin, csrfSecret: "synthetic-csrf-secret-only-for-local-fixtures-123" } });
 const headers = (assertion: string) => ({ "Cf-Access-Jwt-Assertion": assertion, "Sec-Fetch-Site": "same-origin", "X-Native-Staff-Request": "1" });
 async function joinedState(person: Person) {
-  return db.prepare(`SELECT s.status,s.email,s.access_subject,s.project_alpha_user_id,a.active,a.version,p.version profile_version,p.display_name
+  return db.prepare(`SELECT s.status,s.email,s.access_subject,s.project_alpha_user_id,s.sync_protected,a.active,a.version,p.version profile_version,p.display_name
     FROM staff_users s JOIN native_staff_admissions a ON a.staff_id=s.id JOIN native_staff_profiles p ON p.staff_id=s.id WHERE s.id=?`).bind(person.id).first();
 }
 
@@ -242,13 +242,13 @@ describe("Ops-owned joined staff lifecycle against actual full-chain local D1", 
     await db.prepare(`INSERT INTO native_staff_management_delegations(id,actor_staff_id,capability,effect,scope_kind,target_staff_id,granted_by)
       VALUES(?,?,'staff.admission.disable','deny','exact_staff',?,?)`).bind(uuid(), actor.id, target.id, actor.id).run();
     await expect(execute(db, command(actor, target), authority())).rejects.toThrow();
-    const protectedTarget = await staff();
-    await db.prepare("UPDATE staff_users SET sync_protected=1 WHERE id=?").bind(protectedTarget.id).run();
-    await expect(execute(db, command(actor, protectedTarget), authority())).rejects.toThrow();
+    const protectedTarget = await db.prepare("SELECT id,email,access_subject AS subject FROM staff_users WHERE id='staff-beau-koltz'").first<Person>();
+    expect(protectedTarget).not.toBeNull();
+    await expect(execute(db, command(actor, protectedTarget!), authority())).rejects.toThrow();
     const owner = await staff();
     await db.prepare("INSERT INTO staff_role_assignments(id,staff_id,role_id,scope,scope_key) VALUES(?,?,'role-owner','global','global')").bind(uuid(), owner.id).run();
     await expect(execute(db, command(actor, owner), authority())).rejects.toThrow();
-    await expect(execute(db, command(owner, protectedTarget), authority())).rejects.toThrow();
+    await expect(execute(db, command(owner, protectedTarget!), authority())).rejects.toThrow();
   });
 
   it("uses real signed human JWT, actor-bound CSRF and exact origin for supported routes", async () => {
@@ -338,6 +338,87 @@ describe("Ops-owned joined staff lifecycle against actual full-chain local D1", 
     const finalRead = await nativeRead(); expect(finalRead.status).toBe(200);
     expect(await finalRead.json()).toMatchObject({target:{admissionActive:true,admissionVersion:3,profileVersion:2},scopedProfile:{displayName:"Mounted Profile"}});
     expect(waitUntil).not.toHaveBeenCalled();
+  });
+
+  it("materializes real fenced 0073/0074 onboarding and can manage PA-sync-protected normal staff without changing their identity", async () => {
+    const actor = await staff(); await administrator(actor);
+    const target:Person = {id:`onboarded-${++sequence}`,email:`onboarded-${sequence}@example.test`,subject:`access|onboarded-${sequence}`};
+    const onboardingId = uuid(), createId = uuid(), approveId = uuid(), reason = "Synthetic SQL onboarding contract acceptance";
+    const proposal = {memberships:[],directoryGrants:[],managementGrants:[]}, proposalJson = JSON.stringify(proposal);
+    const hash = (value:string) => createHash("sha256").update(value).digest("hex");
+    const proposalSha256 = hash(proposalJson), invitationSecretSha256 = hash("synthetic-onboarding-secret-not-a-production-key");
+    const createdAt = new Date().toISOString(), expiresAt = new Date(Date.now()+600_000).toISOString();
+    const created = {contractVersion:1,capability:"staff.onboarding.create",onboardingId,proposedStaffId:target.id,
+      loginEmail:target.email,displayName:target.id,expiresAt,proposal,proposalSha256,invitationSecretSha256,resultVersion:1};
+    const createJson = JSON.stringify(created), createResultSha256 = hash(createJson);
+    const insertFence = (commandId:string,capability:string,expectedVersion:number,resultJson:string) => db.prepare(`INSERT INTO native_staff_management_fences
+      (target_kind,target_onboarding_id,target_proposed_staff_id,command_id,request_sha256,contract_version,capability,
+       actor_staff_id,actor_access_subject,target_staff_id,expected_version,result_version,reason,display_name,result_json,result_sha256,created_at)
+      VALUES('onboarding',?,?,?,?,1,?,?,?,NULL,?,?,?,NULL,?,?,?)`)
+      .bind(onboardingId,target.id,commandId,hash(`${commandId}:${resultJson}`),capability,actor.id,actor.subject,
+        expectedVersion,expectedVersion+1,reason,resultJson,hash(resultJson),createdAt);
+    const receipt = (commandId:string) => db.prepare(`INSERT INTO native_staff_management_commands
+      (target_kind,target_onboarding_id,target_proposed_staff_id,command_id,request_sha256,contract_version,capability,
+       actor_staff_id,actor_access_subject,target_staff_id,expected_version,result_version,reason,display_name,result_json,result_sha256)
+      SELECT target_kind,target_onboarding_id,target_proposed_staff_id,command_id,request_sha256,contract_version,capability,
+       actor_staff_id,actor_access_subject,target_staff_id,expected_version,result_version,reason,display_name,result_json,result_sha256
+      FROM native_staff_management_fences WHERE command_id=?`).bind(commandId);
+    // Exercise the actual creation triggers and immutable receipt; a pending row
+    // or direct staff seed cannot substitute for this fenced reservation.
+    await db.batch([
+      insertFence(createId,"staff.onboarding.create",0,createJson),
+      db.prepare(`INSERT INTO native_staff_pending_onboarding(onboarding_id,proposed_staff_id,login_email,display_name,
+        invitation_secret_sha256,expires_at,state,version,proposal_json,proposal_sha256,created_by_staff_id,created_by_subject,reason,created_at)
+        VALUES(?,?,?,?,?,?,'pending',1,?,?,?,?,?,?)`).bind(onboardingId,target.id,target.email,target.id,invitationSecretSha256,
+          expiresAt,proposalJson,proposalSha256,actor.id,actor.subject,reason,createdAt),
+      receipt(createId),
+    ]);
+    expect(await db.prepare("SELECT result_sha256 FROM native_staff_management_commands WHERE command_id=?").bind(createId).first("result_sha256")).toBe(createResultSha256);
+    expect(await db.prepare("SELECT count(*) n FROM staff_users WHERE id=?").bind(target.id).first("n")).toBe(0);
+    // The local fixture records a synthetic claim. It does not implement or
+    // claim qualification of a new invitation/claim web endpoint.
+    const claimEvidenceSha256 = hash(JSON.stringify({syntheticOnly:true,staffId:target.id,email:target.email,subject:target.subject}));
+    await db.prepare(`UPDATE native_staff_pending_onboarding SET state='claimed',version=2,claimed_access_subject=?,
+      claimed_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),claim_evidence_sha256=? WHERE onboarding_id=? AND state='pending' AND version=1`)
+      .bind(target.subject,claimEvidenceSha256,onboardingId).run();
+    const approved = {contractVersion:1,capability:"staff.onboarding.approve",targetOnboardingId:onboardingId,
+      proposedStaffId:target.id,proposalSha256,claimEvidenceSha256,claimedAccessSubject:target.subject,proposal,resultVersion:3};
+    const approvalJson = JSON.stringify(approved);
+    // Actual 0074 materialization requires local + sync_protected=1. Native
+    // lifecycle must respect that PA guard while managing this ordinary user.
+    await db.batch([
+      insertFence(approveId,"staff.onboarding.approve",2,approvalJson),
+      db.prepare(`INSERT INTO staff_users(id,email,display_name,access_subject,project_alpha_user_id,status,provisioning_source,sync_protected)
+        VALUES(?,?,?,?,NULL,'active','local',1)`).bind(target.id,target.email,target.id,target.subject),
+      db.prepare("INSERT INTO native_staff_admissions(staff_id,bound_access_subject,active,admitted_by) VALUES(?,?,1,?)").bind(target.id,target.subject,actor.id),
+      db.prepare("INSERT INTO native_staff_profiles(staff_id,login_email,display_name) VALUES(?,?,?)").bind(target.id,target.email,target.id),
+      db.prepare("UPDATE native_staff_management_fences SET mutation_writes=0 WHERE command_id=? AND mutation_writes=1").bind(approveId),
+      receipt(approveId),
+    ]);
+    expect(await db.prepare("SELECT state,version,approval_command_id FROM native_staff_pending_onboarding WHERE onboarding_id=?").bind(onboardingId).first())
+      .toEqual({state:"approved",version:3,approval_command_id:approveId});
+    const history = (await db.prepare("SELECT command_id,result_json,result_sha256 FROM native_staff_management_commands WHERE command_id IN (?,?) ORDER BY command_id")
+      .bind(createId,approveId).all()).results;
+    expect(history).toHaveLength(2);
+    expect(await joinedState(target)).toMatchObject({sync_protected:1,project_alpha_user_id:null,access_subject:target.subject,active:1,version:1});
+    await execute(db,{...command(actor,target,"staff.profile.edit"),displayName:"Onboarded Updated Profile"},authority());
+    await execute(db,command(actor,target),authority());
+    expect(await joinedState(target)).toMatchObject({sync_protected:1,project_alpha_user_id:null,access_subject:target.subject,
+      email:target.email,status:"inactive",active:0,version:2,profile_version:2,display_name:"Onboarded Updated Profile"});
+    await execute(db,command(actor,target,"staff.admission.enable",2),authority());
+    expect(await joinedState(target)).toMatchObject({sync_protected:1,project_alpha_user_id:null,access_subject:target.subject,
+      email:target.email,status:"active",active:1,version:3,profile_version:2});
+    expect((await db.prepare("SELECT command_id,result_json,result_sha256 FROM native_staff_management_commands WHERE command_id IN (?,?) ORDER BY command_id")
+      .bind(createId,approveId).all()).results).toEqual(history);
+    const observed = JSON.parse(await db.prepare(READINESS_QUERY).first<string>("readiness_snapshot") ?? "null") as {
+      onboardingReceipts:Array<{commandId:string;createCommandId:string;staffId:string;valid:number;resultSha256:string;createResultSha256:string}>};
+    expect(observed.onboardingReceipts.find(row=>row.staffId===target.id)).toMatchObject({commandId:approveId,createCommandId:createId,
+      staffId:target.id,valid:1,resultSha256:hash(approvalJson),createResultSha256});
+    // An explicit native deny still protects a PA-sync-immune employee.
+    await db.prepare(`INSERT INTO native_staff_management_delegations(id,actor_staff_id,capability,effect,scope_kind,target_staff_id,granted_by)
+      VALUES(?,?,'staff.admission.disable','deny','exact_staff',?,?)`).bind(uuid(),actor.id,target.id,actor.id).run();
+    await expect(execute(db,command(actor,target,"staff.admission.disable",3),authority())).rejects.toThrow();
+    expect(await joinedState(target)).toMatchObject({sync_protected:1,status:"active",active:1,version:3});
   });
 
   it("cannot disable the last complete native control plane and rolls the bridge back with it", async () => {

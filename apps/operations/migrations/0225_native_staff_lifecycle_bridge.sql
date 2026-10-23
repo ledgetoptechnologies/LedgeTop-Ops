@@ -64,7 +64,9 @@ WHEN NEW.bridge_writes<>1
     JOIN staff_users s ON s.id=a.staff_id WHERE a.staff_id=NEW.target_staff_id
       AND p.login_email=s.email COLLATE BINARY AND s.access_subject=a.bound_access_subject
       AND s.status=CASE a.active WHEN 1 THEN 'active' ELSE 'inactive' END
-      AND s.sync_protected=0 AND s.id<>'staff-beau-koltz'
+      -- sync_protected is immunity from PA sync, not an Ops owner lock.
+      -- Normal 0074 onboarding intentionally sets it to 1; retain its bytes.
+      AND s.id<>'staff-beau-koltz'
       AND NOT EXISTS(SELECT 1 FROM staff_role_assignments r WHERE r.staff_id=s.id AND r.role_id='role-owner' AND r.scope='global')
       AND NOT EXISTS(SELECT 1 FROM local_staff_role_assignments r WHERE r.staff_id=s.id AND r.role_id='role-owner' AND r.scope='global')
       AND ((NEW.capability='staff.profile.edit' AND p.version=NEW.expected_version)
