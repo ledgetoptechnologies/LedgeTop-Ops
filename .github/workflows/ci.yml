@@ -46,6 +46,9 @@ jobs:
           node apps/operations/node_modules/typescript/bin/tsc --project apps/ui-release-assets/tsconfig.json --noEmit
           node --test scripts/ui-release-assets.test.mjs scripts/ui-release-catalog.test.mjs scripts/ui-release-packet.test.mjs scripts/ui-release-assets-local.test.mjs
 
+      - name: Verify isolated canonical navigation preparation
+        run: node --test scripts/canonical-domain-navigation.test.mjs
+
       - name: Verify main and PR workflow trigger policy
         run: node --test scripts/workflow-trigger-policy.test.mjs
 
