@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 import { schemaObjectDigests } from "./windows-files-schema-object-digests.mjs";
 import { WINDOWS_SCHEMA_QUERY } from "./windows-files-schema-query.mjs";
 import { STAGING_ACCOUNT_ID, STAGING_INVENTORY } from "./staging-requirements.mjs";
+import {diagnosticSchemaQuery,selectDiagnosticDefinitions,diagnosticDefinitionSummary,retainDefinitionReviewFile} from "./windows-files-schema-definition-diagnostic.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const WRANGLER = path.join(ROOT, "apps/client/node_modules/wrangler/bin/wrangler.js");
@@ -138,7 +139,7 @@ function recoveryReceipt(value, startedAt) {
 
 /** Read-only observations only. The executable CLI requires --read-only; callers
  * must also opt in explicitly. This never applies migrations or activates routes. */
-export async function windowsFilesStagingPreflight({ readOnly = false, recoveryMetadata = false, includeSchemaObjectDigests = false, run = installedWrangler } = {}) {
+async function observeStaging({ readOnly = false, recoveryMetadata = false, includeSchemaObjectDigests = false, run = installedWrangler, selectedDiagnostic = false } = {}) {
   if (typeof recoveryMetadata !== "boolean") fail("recovery_opt_in_invalid");
   if (recoveryMetadata && readOnly !== true) fail("recovery_requires_read_only");
   if (typeof includeSchemaObjectDigests !== "boolean" || includeSchemaObjectDigests && readOnly !== true) fail("schema_digests_require_read_only");
@@ -159,6 +160,19 @@ export async function windowsFilesStagingPreflight({ readOnly = false, recoveryM
       const name = STAGING_INVENTORY[app].name;
       const deployment = latestDeployment(await read(["deployments", "list", "--name", name, "--json"]));
       workers.push(versionReceipt(app, await read(["versions", "view", deployment.versionId, "--name", name, "--json"]), deployment));
+    }
+    if(selectedDiagnostic){
+      const captures=[];
+      for(const worker of workers){
+        const target=worker.databases.find(b=>b.binding===MIGRATIONS[worker.app].binding);
+        const rows=selectDiagnosticDefinitions(worker.app,queryRows(await read(["d1","execute",target.name,"--remote","--command",diagnosticSchemaQuery(worker.app),"--json"])),{selectedOnly:true});
+        captures.push({app:worker.app,workerName:worker.workerName,versionId:worker.versionId,databaseId:target.id,rows});
+      }
+      const review=await retainDefinitionReviewFile(captures);
+      return {schemaVersion:1,status:"selected_definitions_retained_for_local_review",accountId:STAGING_ACCOUNT_ID,
+        workers:workers.map(worker=>({...worker,definitions:diagnosticDefinitionSummary(worker.app,captures.find(c=>c.app===worker.app).rows)})),...review,
+        canonicalBaselineVerified:false,activated:false,migrationsApplied:false,
+        note:"Selected sqlite_master definitions only. Non-atomic diagnostic; no application rows, semantic equivalence, restore or migration authorization."};
     }
     // Only after both inventories have matched. Metadata reads never restore,
     // export, mutate or activate anything, and are absent by default.
@@ -202,6 +216,12 @@ export async function windowsFilesStagingPreflight({ readOnly = false, recoveryM
     await unlink(configPath).catch(() => {});
     await rmdir(directory).catch(() => {});
   }
+}
+// The default public preflight cannot be switched to raw-definition mode through
+// an extra option; that requires the separately named explicit diagnostic API.
+export function windowsFilesStagingPreflight(options={}){return observeStaging({...options,selectedDiagnostic:false});}
+export function windowsFilesStagingSchemaDiagnostic({readOnly=false,run=installedWrangler}={}){
+  return observeStaging({readOnly,run,selectedDiagnostic:true});
 }
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const args = process.argv.slice(2);

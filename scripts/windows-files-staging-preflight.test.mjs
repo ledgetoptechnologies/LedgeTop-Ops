@@ -1,10 +1,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readFile, access } from "node:fs/promises";
+import { readFile, access, unlink, rmdir } from "node:fs/promises";
+import path from "node:path";
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { windowsFilesStagingPreflight, WINDOWS_STAGING_READ_QUERIES, windowsStagingSchemaQuery } from "./windows-files-staging-preflight.mjs";
+import { windowsFilesStagingPreflight, windowsFilesStagingSchemaDiagnostic, WINDOWS_STAGING_READ_QUERIES, windowsStagingSchemaQuery } from "./windows-files-staging-preflight.mjs";
+import {diagnosticSchemaQuery} from "./windows-files-schema-definition-diagnostic.mjs";
+import {DIAGNOSTIC_IDENTITIES} from "./windows-files-schema-diagnostic-allowlist.mjs";
 import { STAGING_ACCOUNT_ID, STAGING_INVENTORY } from "./staging-requirements.mjs";
 
 const id = n => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
@@ -60,6 +63,48 @@ test("requires explicit read-only opt-in before any process or temporary config"
   let calls = 0;
   assert.equal((await windowsFilesStagingPreflight({ run: () => { calls++; } })).status, "not_run");
   assert.equal(calls, 0);
+});
+
+test("selected definition diagnostic requires opt-in and keeps SQL only in its new local review file",async()=>{
+  let calls=0;assert.equal((await windowsFilesStagingSchemaDiagnostic({run:()=>{calls++;}})).status,"not_run");assert.equal(calls,0);
+  const f=fixture();const run=async(args,options)=>{
+    if(args[0]!=="d1")return f.run(args,options);
+    f.calls.push(args);
+    const app=args[2]==="ltds-ops-staging"?"operations":"delivery";
+    assert.deepEqual(args.slice(0,-2),["d1","execute",args[2],"--remote","--command",diagnosticSchemaQuery(app),"--json"]);
+    const[type,name,tbl_name]=DIAGNOSTIC_IDENTITIES[app][0];
+    return JSON.stringify([{success:true,results:[{type,name,tbl_name,sql:"CREATE TABLE private_only(value TEXT DEFAULT 'DO_NOT_PRINT_RAW_DDL')"}]}]);
+  };
+  const receipt=await windowsFilesStagingSchemaDiagnostic({readOnly:true,run,database:"production",sql:"SELECT * FROM clients"});
+  try{
+    assert.deepEqual(f.calls.slice(0,4).map(a=>a[0]),["deployments","versions","deployments","versions"]);assert.equal(f.calls.length,6);
+    assert.deepEqual(f.calls.slice(4).map(a=>a[2]),["ltds-ops-staging","client-data-staging"]);
+    assert.ok(!JSON.stringify(receipt).includes("DO_NOT_PRINT"));assert.ok(!JSON.stringify(receipt).includes("CREATE TABLE"));
+    assert.equal(receipt.rawSqlInPublicReceipt,false);assert.equal(receipt.canonicalBaselineVerified,false);assert.equal(receipt.activated,false);
+    const raw=await readFile(receipt.reviewFile,"utf8");assert.ok(raw.includes("DO_NOT_PRINT_RAW_DDL"));
+    assert.equal(createHash("sha256").update(raw).digest("hex"),receipt.reviewFileSha256);
+    assert.ok(path.isAbsolute(receipt.reviewFile));assert.match(path.basename(path.dirname(receipt.reviewFile)),/^ops-windows-ddl-review-/);
+    for(const config of f.configs)await assert.rejects(access(config.path));
+  }finally{await unlink(receipt.reviewFile);await rmdir(path.dirname(receipt.reviewFile));}
+});
+
+test("diagnostic rejects mismatched identity and raw provider failures before any local DDL capture",async()=>{
+  for(const change of [f=>{f.details.operations.resources.bindings.find(b=>b.name==="OPS_DB").id=id(90);},
+    f=>{f.details.delivery.resources.bindings.find(b=>b.name==="CLIENT_PORTAL_ORIGIN").text="https://production.example";}]){
+    const f=fixture();change(f);await assert.rejects(windowsFilesStagingSchemaDiagnostic({readOnly:true,run:f.run}),/version_/);
+    assert.ok(f.calls.every(a=>a[0]!=="d1"));
+  }
+  const f=fixture();let reads=0;
+  await assert.rejects(windowsFilesStagingSchemaDiagnostic({readOnly:true,run:async(args,options)=>{
+    if(args[0]!=="d1")return f.run(args,options);reads++;throw Error("DO_NOT_PRINT_RAW_DDL");
+  }}),error=>error.message==="wrangler_read_failed"&&!JSON.stringify(error).includes("DO_NOT_PRINT"));
+  assert.equal(reads,1);for(const config of f.configs)await assert.rejects(access(config.path));
+});
+
+test("default preflight cannot enable definition capture through an unrecognized extra option",async()=>{
+  const f=fixture(),receipt=await windowsFilesStagingPreflight({readOnly:true,selectedDiagnostic:true,run:f.run});
+  assert.equal(receipt.reviewFile,undefined);assert.equal(receipt.status,"read_only_observed");
+  assert.ok(f.calls.every(a=>!Object.values(DIAGNOSTIC_IDENTITIES).some((_,i)=>a.includes(diagnosticSchemaQuery(i?"delivery":"operations")))));
 });
 
 test("recovery observations require explicit boolean and read-only opt-in without invoking runner", async () => {

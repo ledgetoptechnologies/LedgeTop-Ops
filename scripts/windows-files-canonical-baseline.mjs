@@ -5,6 +5,7 @@ import {readFile,readdir} from "node:fs/promises";
 import {fileURLToPath} from "node:url";
 import {resolve} from "node:path";
 import {WINDOWS_SCHEMA_QUERY} from "./windows-files-schema-query.mjs";
+import {selectDiagnosticDefinitions} from "./windows-files-schema-definition-diagnostic.mjs";
 import {reviewedOperationsMigrationNames,reviewedClientMigrationNames} from "../apps/operations/test/helpers/reviewed-operations-migration-chain.ts";
 
 const root=fileURLToPath(new URL("../",import.meta.url));
@@ -17,8 +18,9 @@ export const canonicalSchemaQuery=WINDOWS_SCHEMA_QUERY;
 export const wranglerLedgerDDL='CREATE TABLE IF NOT EXISTS "d1_migrations"(\n\t\tid         INTEGER PRIMARY KEY AUTOINCREMENT,\n\t\tname       TEXT UNIQUE,\n\t\tapplied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL\n);';
 const profiles={operations:{directory:"operations",baseline:"0221_portal_correspondence_lifecycle_write_guards.sql",final:"0224_windows_portal_publication_chain_index.sql",count:221},
   delivery:{directory:"client",baseline:"0234_pa_principal_reenrollment.sql",final:"0236_windows_portal_successor_content_start_audit.sql",count:153}};
-export async function generateWindowsCanonicalBaseline({baselineOnly=false,includeSchemaObjectDigests=false}={}){
+export async function generateWindowsCanonicalBaseline({baselineOnly=false,includeSchemaObjectDigests=false,selectedDefinitionObserver}={}){
   if(typeof baselineOnly!=="boolean"||typeof includeSchemaObjectDigests!=="boolean")throw Error("canonical_replay_options_invalid");
+  if(selectedDefinitionObserver!==undefined&&(!baselineOnly||typeof selectedDefinitionObserver!=="function"))throw Error("canonical_definition_observer_requires_baseline_only");
   // Existing independent immutable source contracts validate full current source
   // and successors before any local SQL executes. They do not alter old pins.
   reviewedOperationsMigrationNames(new URL("../apps/operations/migrations/",import.meta.url));
@@ -43,6 +45,10 @@ export async function generateWindowsCanonicalBaseline({baselineOnly=false,inclu
           checkpoints.push({through:name,names:ledger,ledgerSha256:sha(ledger),schemaSha256:sha(schema.map(r=>[r.type,r.name,r.tbl_name,r.sql])),schemaObjectCount:schema.length,
             foreignKeyViolationCount:(await db.prepare("PRAGMA foreign_key_check").all()).results.length,
             ...(includeSchemaObjectDigests?{schemaObjectDigests:schemaObjectDigests(schema)}:{})});
+          if(selectedDefinitionObserver){
+            const observation=Object.freeze({app,through:name,schemaSha256:checkpoints.at(-1).schemaSha256,rows:selectDiagnosticDefinitions(app,schema)});
+            try{await selectedDefinitionObserver(observation);}catch{throw Error("canonical_definition_observer_failed");}
+          }
         }
       }
       result.apps[app]={baseline:p.baseline,sourceInventorySha256:sha(sources.map(({name,source})=>[name,sha(source)])),sourceCount:sources.length,
