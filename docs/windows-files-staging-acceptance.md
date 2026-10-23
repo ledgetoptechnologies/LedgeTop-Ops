@@ -7,10 +7,26 @@ or NAS paths, including NAS mounts on the staging host.
 
 ## Current boundary
 
-The current pushed app candidate is PR250 `6a87b077`, recorded on the existing
-EH task `ceff196b-0f59-420a-b21a-ec89c098ba60` at revision 4, in review and owned
-by Codex. Execution/autonomy remain disabled. Local follow-up diagnostic and
-packaging evidence does not change that task's candidate or grant execution.
+PR250 is the active integration review. Its older pushed head `61c8cbbf`
+passed Windows, gateway and nine general CI jobs, but Operations tests failed
+because the reviewed migration inventory omitted the newly added 0225. The
+two-line correction `c8b61289` preserves the inventory guards and has passed
+the focused contract, mounted lifecycle and readiness checks; the affected
+historical suites are still being qualified. Do not treat the old CI run as green.
+
+The independently tested desktop repair `a6e735f4` includes Core reservation
+`a3080c8d`, host stop-intent ordering and per-invocation active ownership.
+Its exact-source App run passed 31/31 synthetic groups; the unchanged Core
+passed 103/103. These source repairs do not qualify a previously built package.
+Client-only and employee-only packaged startup remain a separate implementation
+and acceptance requirement. Combined-source person pairing is also unqualified.
+
+The existing EH task `ceff196b-0f59-420a-b21a-ec89c098ba60` was observed at
+revision 6 with the older candidate `efb1ce96`, in review and owned by Codex.
+No supported owner-candidate update operation is exposed in this connection.
+PR and knowledge evidence track the newer inputs; they do not update that task
+or grant execution. Reconcile the task through a supported control path before
+EH execution. Execution/autonomy remain disabled.
 
 Completed baseline-only replay and private selected-definition comparison are
 recorded in `staging/windows-selected-schema-attribution-2026-10-22.md` and its
@@ -35,13 +51,21 @@ cleanup. Those newer tests supersede the transport limitations of the earlier
 Node adapters described below; their exact scope is in
 `staging/windows-current-main-integration-2026-10-22.md`.
 
-A fresh read-only control-plane observation at 2026-10-22T23:35Z found the same
+A fresh read-only control-plane observation at 2026-10-23T05:11Z found the same
 paired active versions, complete ledger hashes and schema hashes as the earlier
 receipt, with zero foreign-key violations. All five Windows suffix migrations
 are still absent. The concise refresh receipt is
-`staging/windows-staging-preflight-refresh-2026-10-22.json`; it does not attest
+`staging/windows-staging-preflight-refresh-2026-10-22.json`; the October 23
+refresh is retained in EH knowledge
+`windows-download/staging-readonly-refresh-2026-10-23.md`. It does not attest
 historical migration SQL/data effects or an atomic snapshot. No runtime or
 database change occurred.
+
+The native staff lifecycle successor 0225 is also absent from that observed
+ledger. The existing Windows preflight's declared suffix stops at 0224; it does
+not qualify the separate native staff handoff, cutover control or reviewed
+production packet. Do not apply additional migrations merely because a source
+file exists or the Windows suffix is pending.
 
 The standalone employee and portal handlers have local joined acceptance, but
 the application entrypoints do not mount them. The earlier staging gateway
@@ -81,7 +105,7 @@ cross-user and stale-version refusals remained effective. This does not qualify
 30 GiB files, a deployed proxy or live R2. See
 `docs/staging/windows-large-employee-transport-2026-10-22.md`.
 
-The current-source unsigned construction validates 522 payload files after pack/unpack,
+A historical unsigned construction validates 522 payload files after pack/unpack,
 including .NET, helper-module and Go runtime notices. An offline App Installer
 preview is bound to that actual package identity and SHA-256; its positive and
 20 refusal cases pass. It deliberately uses reserved `.invalid` URLs and cannot
@@ -89,8 +113,14 @@ activate an update channel. Neither artifact is signed, installed or published.
 It was rebuilt from exact reviewed app source `6a87b077`, including the portal
 metadata deadline fix. See
 `docs/staging/windows-current-source-package-preview-2026-10-22.md` for the
-current package and descriptor fingerprints; older construction/signing evidence
+that checkpoint's package and descriptor fingerprints; older construction/signing evidence
 retains its explicitly older input.
+
+A later unsigned construction at source `2df58a6e` and its descriptor checks are
+recorded in EH knowledge. Both constructions predate the current Core/App queue
+repairs. Rebuild and requalify the final payload before signing or publication;
+neither an old artifact hash nor a passing synthetic App suite establishes that
+the installable package contains the newer source.
 
 Neither acceptance proves deployed staging, actual human sign-in, live R2,
 Engineering Hub execution, a signed installation or Cloud Files hydration.

@@ -13,8 +13,10 @@ Ops and each PA manage employees independently; only client profiles synchronize
 to selected PA destinations. The Windows gateway/read/queue routes must continue
 to require current native Ops admission and an explicit file grant, including
 when a legacy staff row remains active or PA sends a grant for the same email.
-The updated backend draft removes the old PA staff writers and automatic
-Access-group rewriting without deleting existing staff or widening membership.
+The updated backend draft removes PA staff writers and PA-driven Access-group
+rewriting without deleting existing staff or widening membership. The replacement
+Ops-owned lifecycle and reconciliation control require their own reviewed
+handoff, native admission and current-cohort checks before activation.
 
 `ledgetop.app` and `portal.ledgetop.app` are separate migration candidates, not
 active Windows endpoint replacements. Keep the currently reviewed fixed Ops,
@@ -42,6 +44,29 @@ VM before committing to MSIX. If endpoint policy prevents MSIX, retain an MSI
 fallback with the same signed publisher and data-protection rules. Neither
 installer should require SMB credentials, bucket keys or a machine-wide service.
 [Microsoft desktop packaging model](https://learn.microsoft.com/en-us/windows/msix/desktop/desktop-to-uwp-behind-the-scenes)
+
+### Signing route selected for planning, 2026-10-23
+
+Beau delegated provider selection and answered the protected EH planning
+decision `09ba712d-1085-4812-887b-929691ba3534`. Plan Azure Artifact Signing
+Public Trust, Basic, under the verified legal business publisher. Microsoft
+currently lists USD 9.99 per account/month including 5,000 signatures. Recheck
+eligibility and actual billing before enrollment; the exact legal publisher,
+Azure tenant/subscription and validated certificate profile are not established.
+Identity validation requires the legal owner's participation in the Azure portal.
+[Microsoft setup and eligibility](https://learn.microsoft.com/en-us/azure/artifact-signing/quickstart),
+[Microsoft pricing tiers](https://learn.microsoft.com/en-us/azure/artifact-signing/how-to-change-sku).
+
+Use short-lived CI federation scoped to a protected release environment and
+the intended signing profile. Keep identity verification separate from signing
+rights. The real package Publisher must exactly match the validated certificate
+subject; preserve distinct pilot/stable identities, immutable versioned artifacts
+and per-channel state. Verify trust, timestamp, extracted payload and clean-machine
+install/update behavior before publication. The current preview identity and
+unsigned artifacts cannot be promoted by renaming them. No paid resource,
+identity submission, signing credential or public release was created by this
+planning decision. The concrete sequence and remaining gates are recorded in EH
+`windows-download/signing-route-plan-2026-10-23.md`.
 
 ## Build and signing pipeline
 

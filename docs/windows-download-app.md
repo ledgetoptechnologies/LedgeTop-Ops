@@ -4,8 +4,9 @@ Status: tested transfer foundation, human portal and employee adapters, audited
 employee provisioning and unmounted read routes, started 2026-10-21. This is not a released desktop client, a live-qualified
 Operations integration, a sync service, or an Explorer files-on-demand provider.
 
-Employee read authority and the Linux gateway are implemented in draft PR235,
-stacked on the client/Windows draft PR234. See [the private gateway protocol](employee-read-gateway-protocol.md)
+PR250 is the current integration review. PR234 and PR235 preserve the earlier
+client/employee component history; their existence does not mean the routes are
+live. See [the private gateway protocol](employee-read-gateway-protocol.md)
 and [the employee API](employee-windows-api-draft.md),
 and [the concrete installer/release plan](windows-download-release-plan.md).
 Their routes remain unmounted; no host folder access is granted by installation.
@@ -15,6 +16,15 @@ portal browsing/downloads. See [the catalog contract](windows-portal-catalog-con
 and [the staging activation packet](windows-files-staging-acceptance.md) for the
 current integration boundary. Historical test counts below describe their named
 checkpoints; Engineering Hub and the draft PRs retain current exact-head evidence.
+
+The reviewed queue repair `a6e735f4` passed an independent exact-source 31-group
+App run. Its unchanged Core reservation input `a3080c8d` passed 103 synthetic
+groups. The repairs fence newer local stops, stale background saves, repeated
+Resume requests and late callbacks from older invocations. They are source
+evidence, not live sign-in or installed-package acceptance. Separate client-only
+and employee-only backend/startup work remains in progress; no client should
+need staff authorization to use the app. Per-source opaque principal IDs are
+not interchangeable proofs that two cached sessions belong to the same person.
 
 ## Product direction
 
