@@ -11,15 +11,20 @@ PR250 is the active integration review. Its older pushed head `61c8cbbf`
 passed Windows, gateway and nine general CI jobs, but Operations tests failed
 because the reviewed migration inventory omitted the newly added 0225. The
 two-line correction `c8b61289` preserves the inventory guards and has passed
-the focused contract, mounted lifecycle and readiness checks; the affected
-historical suites are still being qualified. Do not treat the old CI run as green.
+the focused contract, mounted lifecycle and readiness checks. All 14 affected
+historical files finished successfully: 102/102 tests. Do not treat the old CI
+run as green; the complete combined source still needs a fresh hosted run.
 
 The independently tested desktop repair `a6e735f4` includes Core reservation
 `a3080c8d`, host stop-intent ordering and per-invocation active ownership.
 Its exact-source App run passed 31/31 synthetic groups; the unchanged Core
 passed 103/103. These source repairs do not qualify a previously built package.
-Client-only and employee-only packaged startup remain a separate implementation
-and acceptance requirement. Combined-source person pairing is also unqualified.
+The selected-source backend `61a6dde1` passed 32/32 App groups and independent
+source review. Its client mode constructs no employee adapter; employee mode
+constructs no portal adapter. The two-argument constructor defaults to client.
+These tests use inert helper bytes and synthetic adapters, not live sign-in.
+Packaged startup selection remains a separate implementation and acceptance
+requirement. Combined-source person pairing is also unqualified.
 
 The existing EH task `ceff196b-0f59-420a-b21a-ec89c098ba60` was observed at
 revision 6 with the older candidate `efb1ce96`, in review and owned by Codex.
@@ -294,8 +299,13 @@ Keep existing PA, Viewer, exporter and message-bus services untouched.
    issuer flows. Upload a small checksum-backed R2 object and verify current
    index/version pins. Do not fabricate active authority rows in D1.
 3. Use the reviewed desktop branch with trusted setup and the pinned official
-   cloudflared helper. Explicitly sign in as the human. Verify employee roots
-   and portal deliveries are discovered together without workspace switching.
+   cloudflared helper. Test client mode and employee mode independently, with an
+   explicit human sign-in for the selected source. A client must not need staff
+   authorization. Verify client mode discovers only portal deliveries and
+   employee mode only approved server roots. Switching mode must drain the old
+   model and isolate its queue, identity and late callbacks. Do not advertise a
+   combined view until reviewed person-pairing evidence exists; matching email
+   text or comparing source-specific opaque principal IDs does not prove it.
 4. Download through each real deployed route: discovery, durable reference,
    queue resolution, partial data, interruption, application restart, fresh
    identity/manifest, range resume and final size/SHA256. Check that no existing

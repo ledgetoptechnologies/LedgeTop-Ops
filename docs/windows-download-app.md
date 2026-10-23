@@ -21,9 +21,12 @@ The reviewed queue repair `a6e735f4` passed an independent exact-source 31-group
 App run. Its unchanged Core reservation input `a3080c8d` passed 103 synthetic
 groups. The repairs fence newer local stops, stale background saves, repeated
 Resume requests and late callbacks from older invocations. They are source
-evidence, not live sign-in or installed-package acceptance. Separate client-only
-and employee-only backend/startup work remains in progress; no client should
-need staff authorization to use the app. Per-source opaque principal IDs are
+evidence, not live sign-in or installed-package acceptance. The selected-source
+backend `61a6dde1` passed 32/32 App groups and independent source review. It
+constructs only the selected source and rejects foreign aliases before adapter
+calls; its default is client mode. Packaged startup selection is still in
+progress; no client should need staff authorization to use the app.
+Per-source opaque principal IDs are
 not interchangeable proofs that two cached sessions belong to the same person.
 
 ## Product direction
