@@ -311,11 +311,12 @@ export function deploymentSourceCommit(root = ROOT, env = process.env) {
   return commit;
 }
 function staffReadinessReceipt(value, sourceCommit) {
-  const keys = ['schemaVersion','sourceCommit','accountId','databaseId','reviewSha256','cohortSha256','observedAt','staffCount','generation'];
-  need(value && equal(Object.keys(value).sort(), keys.sort()) && value.schemaVersion === 1
+  const keys = ['schemaVersion','sourceCommit','accountId','databaseId','reviewSha256','cohortSha256','controlPlaneSha256','observedAt','staffCount','generation'];
+  need(value && equal(Object.keys(value).sort(), keys.sort()) && value.schemaVersion === 2
     && /^[a-f0-9]{40}$/u.test(sourceCommit ?? '') && value.sourceCommit === sourceCommit
     && value.accountId === NATIVE_STAFF_PRODUCTION_TARGET.accountId && value.databaseId === NATIVE_STAFF_PRODUCTION_TARGET.databaseId
     && /^[a-f0-9]{64}$/u.test(value.reviewSha256 ?? '') && /^[a-f0-9]{64}$/u.test(value.cohortSha256 ?? '')
+    && /^[a-f0-9]{64}$/u.test(value.controlPlaneSha256 ?? '')
     && Number.isSafeInteger(value.staffCount) && value.staffCount > 0 && value.staffCount <= 1024
     && Number.isSafeInteger(value.generation) && value.generation >= 0
     && Number.isFinite(Date.parse(value.observedAt)) && Date.parse(value.observedAt) <= Date.now()

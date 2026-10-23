@@ -118,7 +118,7 @@ test('map modes expose projected distance and area tools with deeper native-deta
   assert.match(main, /async function ensureVolumeDataset/);
   assert.match(main, /await ensureVolumeDataset\(modeAbortController\?\.signal\)/);
   assert.match(main, /This task has no published DSM or DTM/);
-  assert.match(main, /The selected DSM\/DTM loads automatically when Volume is chosen/);
+  assert.match(main, /Volume uses a permitted elevation raster or registered point-cloud surface/);
   assert.match(main, /integrateElevationVolume/);
   assert.match(html, /Auto \(prefer DSM\)/);
   assert.match(html, /Lowest sampled point/);

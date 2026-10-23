@@ -14,6 +14,10 @@ this new source while its actual supported management path is unready.
 
 ## Existing staff management API
 
+Before this cutover, follow the [manual offboarding procedure](manual-staff-offboarding.md).
+It covers exact local status denial, managed group removal, session revocation
+and verification. PA changes do not perform those Operations steps.
+
 `/api/native-staff` terminates before ordinary legacy staff middleware, and uses
 verified human Access assertions plus exact native staff admission. Its supported
 routes are:
@@ -97,9 +101,14 @@ finite SELECT snapshot and produces only a count/hash receipt. It requires:
 
 ### Historical handoff and current release state
 
-The private review packet uses `schemaVersion: 2`. It separates
+The private review packet uses `schemaVersion: 3`. It separates
 `handoff: { cohort, controlPlaneStaffIds }`, the immutable originally approved
-snapshot, from `cohort`, the exact freshly reviewed current release snapshot.
+snapshot, from `cohort`, the exact freshly reviewed current release snapshot,
+and top-level `controlPlaneStaffIds`, the exact freshly reviewed current
+administrator/control-plane set. Both sets are required independently: a change
+to the current set requires a new review even with unchanged cohort and
+reconciliation generation. Its IDs must be unique active current cohort members;
+ordering does not change the canonical set.
 Both cohorts contain staff ID, email, bound subject, display name, activity and
 admission/profile versions. The bootstrap plan and binding-evidence hashes bind
 the **handoff** cohort. Its operator must have been active and listed in that
@@ -130,7 +139,8 @@ implement staff onboarding, identity recovery, retrospective grant validation or
 a new approval writer. An existing binding change remains unsupported and
 requires a separately designed reviewed recovery proof. It is not silently
 accepted by updating the current cohort packet. The public readiness receipt
-stays at schema version 1 and exposes only source/target, hashes, count and
+uses schema version 2, adding `controlPlaneSha256` over the canonical current
+control-plane set, and exposes only source/target, hashes, count and
 generation; no identities or command bodies are emitted.
 
 The earlier source contract compared immutable handoff hashes to the mutable

@@ -63,7 +63,7 @@ test("Operations shows a bounded Viewer overview and opens management on the Vie
     return route.fulfill({ status: 404, json: { error: "Not found" } });
   });
 
-  await page.goto("/operations/processing");
+  await page.goto("/viewer");
   await expect(page.getByRole("heading", { name: "3D models", exact: true })).toBeVisible();
   await expect(page.getByText("11 total · 4.0 GB")).toBeVisible();
   await expect(page.getByText("3", { exact: true })).toBeVisible();
@@ -127,7 +127,7 @@ test("Operations keeps disabled Viewer management out of the Data hub", async ({
     return route.fulfill({ status: 404, json: { error: "Not found" } });
   });
 
-  await page.goto("/operations/processing");
+  await page.goto("/viewer");
   await expect(page.getByText("3D Viewer overview is off", { exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "Test Viewer connection" })).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Tasks" })).toHaveCount(0);
@@ -206,7 +206,7 @@ for (const invalidOrigin of [false, true]) {
       return route.fulfill({ status: 404, json: { error: "Not found" } });
     });
 
-    await page.goto("/operations/processing");
+    await page.goto("/viewer");
     await expect(page.getByRole("button", { name: "Open Viewer in this tab" })).toHaveCount(0);
     await page.getByRole("button", { name: "Open Viewer workspace" }).click();
     await expect(page.getByText("Your browser doesn't support pop-ups. Open the Viewer in this tab to continue.")).toBeVisible();
@@ -215,7 +215,7 @@ for (const invalidOrigin of [false, true]) {
     await page.getByRole("button", { name: "Open Viewer in this tab" }).click();
     if (invalidOrigin) {
       await expect(page.getByText("3D Viewer returned an invalid workspace link")).toBeVisible();
-      await expect(page).toHaveURL(/\/operations\/processing$/);
+      await expect(page).toHaveURL(/\/viewer$/);
     } else {
       await expect(page).toHaveURL(`${viewerOrigin}/workspace/${grant}`);
       await expect(page).toHaveTitle("Viewer same tab");

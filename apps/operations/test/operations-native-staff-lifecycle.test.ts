@@ -126,8 +126,8 @@ describe("Ops-owned joined staff lifecycle against actual full-chain local D1", 
         result_json,result_sha256,executed_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`)
         .bind(ref.commandId,ref.approvalId,seedAdmin.id,seedAdmin.subject,plan,hash(plan),evidence,hash(evidence),"{}",hash("{}"),date),
     ]);
-    const review = { schemaVersion: 2, sourceCommit, accountId: NATIVE_STAFF_PRODUCTION_TARGET.accountId,
-      databaseId: NATIVE_STAFF_PRODUCTION_TARGET.databaseId, cohort,
+    const review = { schemaVersion: 3, sourceCommit, accountId: NATIVE_STAFF_PRODUCTION_TARGET.accountId,
+      databaseId: NATIVE_STAFF_PRODUCTION_TARGET.databaseId, cohort,controlPlaneStaffIds:[...selected.controlPlaneStaffIds],
       handoff:{cohort:structuredClone(cohort),controlPlaneStaffIds:[...selected.controlPlaneStaffIds]},
       bootstrapReceipts: [ref], onboardingReceipts:[] };
     let reads = 0;

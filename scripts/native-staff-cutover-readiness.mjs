@@ -48,8 +48,8 @@ function cohort(rows) {
  * owner role as approval. Actual durable bootstrap evidence must match it. */
 export function verifyNativeStaffCutoverReadiness(review, observation, { sourceCommit, now = Date.now(), maxAgeMs = 60_000 } = {}) {
   if (!COMMIT.test(sourceCommit ?? "") || !Number.isSafeInteger(now) || !Number.isSafeInteger(maxAgeMs) || maxAgeMs < 1 || maxAgeMs > 60_000) fail("caller_invalid");
-  if (!exact(review, ["schemaVersion", "sourceCommit", "accountId", "databaseId", "cohort", "handoff", "bootstrapReceipts", "onboardingReceipts"])
-    || review.schemaVersion !== 2 || review.sourceCommit !== sourceCommit
+  if (!exact(review, ["schemaVersion", "sourceCommit", "accountId", "databaseId", "cohort", "controlPlaneStaffIds", "handoff", "bootstrapReceipts", "onboardingReceipts"])
+    || review.schemaVersion !== 3 || review.sourceCommit !== sourceCommit
     || review.accountId !== NATIVE_STAFF_PRODUCTION_TARGET.accountId || review.databaseId !== NATIVE_STAFF_PRODUCTION_TARGET.databaseId) fail("review_target_invalid");
   if (!exact(observation, ["schemaVersion", "accountId", "databaseId", "observedAt", "control", "cohort", "bridgeMismatchCount", "controlPlaneStaffIds", "bootstrapReceipts", "onboardingReceipts"])
     || observation.schemaVersion !== 1 || observation.accountId !== review.accountId || observation.databaseId !== review.databaseId
@@ -73,6 +73,14 @@ export function verifyNativeStaffCutoverReadiness(review, observation, { sourceC
   if (!Array.isArray(observation.controlPlaneStaffIds) || !observation.controlPlaneStaffIds.length
     || observation.controlPlaneStaffIds.some(id => !actual.some(row => row.staffId === id && row.active))
     || new Set(observation.controlPlaneStaffIds).size !== observation.controlPlaneStaffIds.length) fail("control_plane_unavailable");
+  // Current delegated administration can change without advancing admission
+  // generation or changing the cohort. Pin it separately from immutable handoff.
+  const reviewedAdmins = review.controlPlaneStaffIds;
+  if (!Array.isArray(reviewedAdmins) || !reviewedAdmins.length || reviewedAdmins.length > 1024
+    || new Set(reviewedAdmins).size !== reviewedAdmins.length
+    || reviewedAdmins.some(id => typeof id !== "string" || !reviewed.some(row => row.staffId === id && row.active))) fail("review_control_plane_invalid");
+  const currentAdmins = [...observation.controlPlaneStaffIds].sort();
+  if (!same([...reviewedAdmins].sort(), currentAdmins)) fail("reviewed_control_plane_changed");
   const refs = boundedRows(review.bootstrapReceipts, 128), proofs = boundedRows(observation.bootstrapReceipts, 128);
   if (!refs.length || new Set(refs.map(r => r.commandId)).size !== refs.length) fail("bootstrap_review_missing");
   for (const ref of refs) {
@@ -110,8 +118,9 @@ export function verifyNativeStaffCutoverReadiness(review, observation, { sourceC
     if (original.some(r => r.staffId === row.staffId)) continue;
     if (!approvedAdditions.some(r => same(binding(r), binding(row)))) fail("staff_binding_provenance_missing");
   }
-  return Object.freeze({ schemaVersion: 1, sourceCommit, accountId: review.accountId, databaseId: review.databaseId,
+  return Object.freeze({ schemaVersion: 2, sourceCommit, accountId: review.accountId, databaseId: review.databaseId,
     reviewSha256: hash(canonicalStaffReadiness(review)), cohortSha256: hash(canonicalStaffReadiness(actual)),
+    controlPlaneSha256: hash(canonicalStaffReadiness(currentAdmins)),
     observedAt: observation.observedAt, staffCount: actual.length, generation: control.generation });
 }
 

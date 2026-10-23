@@ -54,6 +54,16 @@ Never commit its staff identities to the public repository. This is release
 evidence, not a runtime environment file, credential, bootstrap installer or
 permission to create identities or grant access.
 
+Before native cutover, complete the temporary
+[manual staff offboarding procedure](operations/manual-staff-offboarding.md)
+for departures; PA edits do not perform Operations offboarding. This includes
+local inactive status, exact managed-group removal and Access session revocation
+with independent denial verification. It does not waive this deployment gate.
+The private release review now uses schema 3 and pins the current control-plane
+staff set separately from its historical handoff. Readiness receipts use schema
+2 and include `controlPlaneSha256`; drift of that set invalidates the release
+review even when cohort and reconciliation generation have not changed.
+
 The separate native-staff readiness reader performs only fixed, bounded remote
 SELECT queries through installed Wrangler and conventional build credentials.
 It requires the exact production account/database, the enabled durable handoff,

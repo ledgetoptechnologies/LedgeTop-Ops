@@ -21,13 +21,14 @@ function declaration(name){
   return next?rest.slice(0,next.index):rest;
 }
 const names=['clientAccessDiagnostic','canShareOutput','openShareModal','associationModelId','associationProjectId','portalAccountId',
-  'exactClientAssociations','clientGrantBody','clientSharePanel','clientShareCard','rememberShareResult','clearShareResult','visibleShareResult','shareModal','confirmSharedVersionUpdate',
-  'createOutputShare','bindShareModal','bindProjectShareCard','shareViewLabels','availableShareViews','shareViewControls','bindShareViewControls','selectedShareViews','shareSettingsSummary','shareExpiryInput','editShareModal','retrieveShareLink'];
+  'clientProjectKey','clientProjectLabel','clientAccessSnapshot','exactClientAssociations','clientGrantBody','clientSharePanel','clientShareCard','rememberShareResult','clearShareResult','visibleShareResult','shareModal','confirmSharedVersionUpdate',
+  'createOutputShare','clientGrantRevocationMessage','bindShareModal','bindProjectShareCard','shareViewLabels','availableShareViews','shareViewControls','bindShareViewControls','selectedShareViews','shareSettingsSummary','shareExpiryInput','editShareModal','retrieveShareLink'];
 function fixture(permissions=['viewer.shares.read','viewer.shares.create','viewer.shares.revoke','viewer.processing.publish','viewer.client_grants.manage']){
   const output={id:'output',modelId:'model',projectId:'project',taskId:'task',attemptId:'attempt',status:'ready',activePublished:false,assetKinds:['glb']};
   const state={token:'signed-in',projects:[{id:'project',displayName:'Site'}],tasks:[{id:'task',projectId:'project'}],outputs:[output],
     shares:{},sharePreflight:{},projectShares:{},clientAccess:{projects:[],associations:[],grants:[]},shareContext:{id:'context'},lastShareUrl:null};
   const calls=[],notices=[],rendered=[],decisions=[],copyButtons=[];
+  let nativeRespond=async()=>({targets:[],grants:[]});
   let sequence=0,respond=async(path,options)=>options.method==='POST'
     ?{share:{id:'share',permissions:{view:true,download:false}},viewUrl:'https://viewer.test/view/capability'}
     :path.endsWith('/client-grants')?state.clientAccess:{shares:[],publicationRequired:true,existingAccessUpdateRequired:false,eligibleAssetKinds:['glb']};
@@ -42,7 +43,7 @@ function fixture(permissions=['viewer.shares.read','viewer.shares.create','viewe
     badge:value=>`<span>${esc(value)}</span>`,button:(action,id,label)=>`<button data-action="${action}" data-id="${id}">${label}</button>`,
     openModal:(title,html)=>{rendered.push({title,html});modal.open=true},injectProjectShareCard:()=>{},
     values:form=>({label:form.elements.label?.value||'',password:form.elements.password?.value||'',expiresAt:form.elements.expiresAt.value}),
-    api:async(path,options={})=>{calls.push({path,options:JSON.parse(JSON.stringify(options))});return respond(path,options)},
+    api:async(path,options={})=>{calls.push({path,options:JSON.parse(JSON.stringify(options))});return path.endsWith('/native-client-grants')?nativeRespond(path,options):respond(path,options)},
     mutate:async(...args)=>calls.push({mutation:args}),toast:(...args)=>notices.push(args),navigator:{clipboard:{writeText:async()=>{throw new Error('clipboard denied')}}},
     dialogs:{confirm:async()=>{decisions.push('confirm');return true},form:async()=>null},
   });
@@ -51,7 +52,7 @@ function fixture(permissions=['viewer.shares.read','viewer.shares.create','viewe
     measure:{checked:true},cameras:{checked:true},download:{checked:false}},button:{disabled:false},querySelector(){return this.button},
     querySelectorAll(selector){return selector==='input[name="allowedViews"]'?[{checked:true,value:'model'}]:[]}};
   return {context,state,output,calls,notices,rendered,decisions,modal,modalContent,clientPanel,form,copyButtons,
-    respond(fn){respond=fn},html:()=>rendered.at(-1)?.html||''};
+    respond(fn){respond=fn},respondNative(fn){nativeRespond=fn},html:()=>rendered.at(-1)?.html||''};
 }
 
 test('ready share preflight and cancel execute only reads and never reopen a closed modal',async()=>{
@@ -83,8 +84,8 @@ test('dedicated ready sharing offers explicit link creation without publish UX o
   assert.match(f.html(),/Downloads, including model report/);
   assert.match(f.html(),/Direct Operations client sharing is not available/);
   assert.match(f.html(),/No Operations account or client workspace is required/);
-  assert.match(f.html(),/data-share-mode="internal" aria-pressed="true"/);
-  assert.match(f.html(),/data-share-mode-panel="public" hidden/);
+  assert.match(f.html(),/data-share-mode="internal" role="tab"[^>]*aria-selected="true"/);
+  assert.match(f.html(),/data-share-mode-panel="public"[^>]* hidden/);
   assert.equal(f.calls.every(call=>!call.options.method||call.options.method==='GET'),true);
 });
 
@@ -270,7 +271,7 @@ function associated(f){
     {id:'match',modelId:'model',projectId:'ops-project'},
     {id:'wrong-model',modelId:'other',projectId:'ops-project'},
   ],grants:[]};
-  f.form.elements.associationId={value:'match'};
+  f.form.elements.associationId={value:JSON.stringify(['match','ops-project','account'])};
   f.form.elements.includeFuturePublished={checked:true};
 }
 test('per-model client scope is exact task association and future=false despite forged broad inputs',()=>{
@@ -292,12 +293,13 @@ test('missing, conflicting, ambiguous, and private model associations fail close
   assert.equal(f.context.exactClientAssociations(f.output).length,0);assert.throws(()=>f.context.clientGrantBody(f.form,'output'),/exact Operations/);
 });
 
-test('whole-project client scope and future publications are separate opt-ins',()=>{
+test('whole-project client scope requires current and future publications',()=>{
   const f=fixture();associated(f);
-  f.form.elements.projectId={value:'ops-project'};f.form.elements.wholeProject={checked:false};
+  f.form.elements.projectId={value:JSON.stringify(['ops-project','account'])};f.form.elements.wholeProject={checked:false};
   assert.throws(()=>f.context.clientGrantBody(f.form,null),/explicitly approve/);
   f.form.elements.wholeProject.checked=true;f.form.elements.includeFuturePublished.checked=false;
-  assert.equal(f.context.clientGrantBody(f.form,null).grant.includeFuturePublished,false);
+  assert.throws(()=>f.context.clientGrantBody(f.form,null),/must include/);
+  f.form.elements.includeFuturePublished.checked=true;assert.equal(f.context.clientGrantBody(f.form,null).grant.includeFuturePublished,true);
   f.context.shareModal('project');assert.match(f.html(),/name="wholeProject" required/);
   assert.doesNotMatch(f.html(),/name="(?:includeFuturePublished|wholeProject)" checked/);
 });
@@ -430,4 +432,82 @@ test('failed legacy URL recovery reports unrecoverable only after GET and never 
   assert.equal(f.calls.length,1);assert.equal(f.calls[0].path,'/api/v1/processing/shares/legacy/link');assert.equal(f.calls[0].options.method,undefined);
   assert.match(f.notices.at(-1)[0],/not recoverable.*not been changed or revoked/);
   assert.equal(f.state.shares.output[0].revokedAt,undefined);assert.equal(element.disabled,false);
+});
+
+
+test('duplicate project rows select the exact client account for project and task grants',()=>{
+  const f=fixture();associated(f);
+  f.state.clientAccess.projects.push({id:'ops-project',accountId:'account-two',accountName:'Second account',name:'Client site'});
+  const choices=f.context.exactClientAssociations(f.output);
+  assert.equal(choices.length,2);
+  f.form.elements.associationId.value=choices[1].selectionKey;
+  assert.equal(f.context.clientGrantBody(f.form,'output').grant.accountId,'account-two');
+  f.form.elements.projectId={value:f.context.clientProjectKey(f.state.clientAccess.projects[1])};
+  f.form.elements.wholeProject={checked:true};
+  assert.equal(f.context.clientGrantBody(f.form,null).grant.accountId,'account-two');
+  f.form.elements.projectId.value='ops-project';
+  assert.throws(()=>f.context.clientGrantBody(f.form,null),/explicitly approve/);
+  assert.match(f.context.clientShareCard(f.output,'output'),/Second account/);
+});
+
+test('native connected workspace uses the exact verified source, workspace, project and model association',()=>{
+  const f=fixture();associated(f);
+  f.state.clientNativeAccess={grants:[],targets:[{sourceId:'project-alpha:primary',workspaceId:'workspace',workspaceName:'Client workspace',projectPublicId:'native-project',projectName:'Site',associations:[{id:'native-association',viewerModelId:'model',modelTitle:'Model'}]}]};
+  const choice=f.context.exactClientAssociations(f.output).find(item=>item.id==='native-association');
+  f.form.elements.associationId.value=choice.selectionKey;
+  const body=f.context.clientGrantBody(f.form,'output');
+  assert.equal(body.connection,'native');
+  assert.deepEqual(JSON.parse(JSON.stringify(body.grant)),{sourceId:'project-alpha:primary',workspaceId:'workspace',projectPublicId:'native-project',scopeType:'task',associationId:'native-association',includeFuturePublished:false,expiresAt:null,permissions:{measure:true,cameras:true,download:false}});
+  assert.match(f.context.clientShareCard(f.output,'output'),/Connected Client Workspaces/);
+  f.state.clientNativeAccess.targets[0].associations[0].viewerModelId='another-model';
+  assert.throws(()=>f.context.clientGrantBody(f.form,'output'),/exact Operations/);
+});
+
+test('project grant list only displays grants associated with the current Viewer project',()=>{
+  const f=fixture();associated(f);f.state.shareContext.projectId='project';
+  f.state.clientAccess.grants=[{id:'related',projectId:'ops-project',clientName:'Related client',scopeType:'project'},{id:'unrelated',projectId:'other-project',clientName:'Unrelated client',scopeType:'project'}];
+  const html=f.context.clientShareCard(null,null);
+  assert.match(html,/Related client/);assert.doesNotMatch(html,/Unrelated client/);
+});
+
+test('sharing tabs support arrow keys and synchronize focus, selection and panels',()=>{
+  const f=fixture();
+  const tabs=['internal','public'].map(shareMode=>({dataset:{shareMode},attributes:{},setAttribute(key,value){this.attributes[key]=value},click(){this.onclick()},focus(){this.focused=true}}));
+  const panels=['internal','public'].map(shareModePanel=>({dataset:{shareModePanel}}));
+  f.modalContent.querySelectorAll=selector=>selector==='[data-share-mode]'?tabs:selector==='[data-share-mode-panel]'?panels:[];
+  f.context.bindShareModal('project','output');let prevented=false;
+  tabs[0].onkeydown({key:'ArrowRight',preventDefault(){prevented=true}});
+  assert.equal(prevented,true);assert.equal(tabs[1].focused,true);assert.equal(tabs[1].attributes['aria-selected'],'true');assert.equal(tabs[0].tabIndex,-1);assert.equal(panels[0].hidden,true);assert.equal(panels[1].hidden,false);
+});
+
+
+test('native lookup failure remains visible while legacy client sharing works',async()=>{
+  const f=fixture();associated(f);
+  f.respondNative(async()=>{throw Object.assign(new Error('Unavailable'),{status:502})});
+  await f.context.openShareModal('project','output');await new Promise(resolve=>setImmediate(resolve));
+  const html=f.clientPanel.innerHTML||f.html();
+  assert.match(html,/Connected Client Workspaces could not be loaded/);
+  assert.match(html,/Grant client access/);assert.match(html,/Client site/);
+  assert.match(f.html(),/Create public link/);
+});
+
+test('native-only targets preselect the connected workspace portal',()=>{
+  const f=fixture();associated(f);f.state.clientAccess={projects:[],associations:[],grants:[]};
+  f.state.clientNativeAccess={grants:[],targets:[{sourceId:'project-alpha:primary',workspaceId:'workspace',workspaceName:'Client',projectPublicId:'project',projectName:'Site',associations:[{id:'native-association',viewerModelId:'model',modelTitle:'Model'}]}]};
+  assert.match(f.context.clientShareCard(f.output,'output'),/<option value="native" selected>Connected Client Workspaces/);
+});
+
+
+test('native revocation reports validated open-session lifetime and preserves legacy pending status',async()=>{
+  const f=fixture();const action={dataset:{action:'revoke-native-client-grant',id:'native-grant'}};
+  f.context.dialogs.form=async()=>({reason:'Ended access'});
+  f.modalContent.querySelectorAll=selector=>selector.includes('revoke-native-client-grant')?[action]:[];
+  let responseMessage;
+  f.context.mutate=async(path,options,message)=>{assert.equal(path,'/api/v1/workspace/native-client-grants');assert.equal(options.body.grantId,'native-grant');responseMessage=message({existingSessionsExpireWithinSeconds:1800})};
+  f.context.bindShareModal('project','output');await action.onclick();
+  assert.match(responseMessage,/New client access revoked.*up to 30 minutes/);
+  assert.match(f.context.clientGrantRevocationMessage({existingSessionsExpireWithinSeconds:90},true),/up to 2 minutes/);
+  assert.match(f.context.clientGrantRevocationMessage({existingSessionsExpireWithinSeconds:'1800'},true),/until they expire/);
+  assert.match(f.context.clientGrantRevocationMessage({sessionRevocation:{pending:true}},false),/existing sessions is pending/);
+  assert.equal(f.context.clientGrantRevocationMessage({sessionRevocation:{pending:false}},false),'Client access revoked');
 });

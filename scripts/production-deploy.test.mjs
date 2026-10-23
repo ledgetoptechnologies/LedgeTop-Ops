@@ -65,52 +65,44 @@ test('only the exact reviewed Viewer and Windows staging manifests alias the loc
 });
 
 test('Windows shared source changes remain protected: manifest compatibility does not authorize a production release', () => {
-  const fingerprint = frontendFingerprint(ROOT);
-  assert.notEqual(fingerprint, PROFILE.frontendSHA256);
-  assert.throws(() => checkMode('backend', fingerprint), /retained asset union/);
-  // Reconstruct main77's protected source in a temporary copy, with exact
-  // before/after pins. This is test-only evidence, NOT a production alias.
-  const temporaryParent = fs.realpathSync(os.tmpdir());
-  const temporary = fs.mkdtempSync(path.join(temporaryParent, 'production-frontend-manifest-'));
-  try {
-    const copy = relative => {
-      const source = path.join(ROOT, relative);
-      if (!fs.existsSync(source)) return;
-      const worker = path.join(source, 'worker');
-      fs.cpSync(source, path.join(temporary, relative), { recursive: true, filter: file => {
-        if (file === worker) return false;
-        assert.equal(fs.lstatSync(file).isSymbolicLink(), false, 'Test copy refuses repository symlinks');
-        return true;
-      } });
-    };
-    for (const app of ['client', 'operations'])
-      for (const relative of ['src', 'public', 'index.html', 'vite.config.ts', 'package.json', 'package-lock.json'])
-        copy(`apps/${app}/${relative}`);
-    for (const relative of ['package.json', 'package-lock.json', 'packages/shared/src']) copy(relative);
-    const authority = 'packages/shared/src/operations-portal-native-delivery-authority.ts';
-    const source = fs.readFileSync(path.join(temporary, authority), 'utf8').replaceAll('\r\n', '\n');
-    assert.equal(hash(source), 'e10a371519d29333185706af6353cd701ce4553e3711b945205c860b12cc60bd');
-    assert.equal(reviewedFrontendDigest(authority, hash(source)), hash(source));
-    const start = source.indexOf('/** Private successor proof; original grant authorization is never rewritten. */\n');
-    const end = source.indexOf('export interface OperationsPortalNativeDeliveryAuthorizationReaderBinding {\n', start);
-    assert.ok(start >= 0 && end > start);
-    const historical = source.slice(0, start) + source.slice(end);
-    assert.equal(hash(historical), 'c7cd7dabf0a3c16fca643b1d2b1070f773b9ad6549de8c06e48cd5410a6c70ef');
-    fs.writeFileSync(path.join(temporary, authority), historical);
-    const queue = 'packages/shared/src/windows-queue-reference.ts';
-    const digest = hash(fs.readFileSync(path.join(temporary, queue), 'utf8').replaceAll('\r\n', '\n'));
-    assert.equal(digest, '55a51ea413aa2a38b444f7ce7eb618cb152e52f1f340ce8a03b5c65cc9911747');
-    assert.equal(reviewedFrontendDigest(queue, digest), digest);
-    fs.rmSync(path.join(temporary, queue));
-    assert.equal(frontendFingerprint(temporary), PROFILE.frontendSHA256);
-  } finally {
-    assert.equal(fs.lstatSync(temporary).isSymbolicLink(), false);
-    const resolved = fs.realpathSync(temporary);
-    assert.equal(path.dirname(resolved), temporaryParent, 'Cleanup stays directly in the owned temporary parent');
-    assert.match(path.basename(resolved), /^production-frontend-manifest-[A-Za-z0-9]{6}$/);
-    fs.rmSync(resolved, { recursive: true, force: true });
+  assert.notEqual(frontendFingerprint(ROOT), PROFILE.frontendSHA256);
+  assert.throws(() => checkMode('backend', frontendFingerprint(ROOT)), /retained asset union/);
+  // Newer Viewer UI also differs from the installed production baseline. Verify
+  // the Windows source pins without pretending that undoing only Windows can
+  // reproduce that older UI, and without adding a production compatibility alias.
+  const inputs = [
+    ['packages/shared/src/operations-portal-native-delivery-authority.ts', 'e10a371519d29333185706af6353cd701ce4553e3711b945205c860b12cc60bd'],
+    ['packages/shared/src/windows-queue-reference.ts', '55a51ea413aa2a38b444f7ce7eb618cb152e52f1f340ce8a03b5c65cc9911747'],
+  ];
+  for (const [file, expected] of inputs) {
+    const actual = hash(fs.readFileSync(path.join(ROOT, file), 'utf8').replaceAll('\r\n', '\n'));
+    assert.equal(actual, expected);
+    assert.equal(reviewedFrontendDigest(file, actual), actual);
   }
 });
+
+test('synthetic frontend baseline fingerprints are deterministic and changed UI stays outside backend mode', t => {
+  const temporaryParent = fs.realpathSync(os.tmpdir());
+  const directory = fs.mkdtempSync(path.join(temporaryParent, 'prod-frontend-fixture-'));
+  t.after(() => {
+    assert.equal(fs.lstatSync(directory).isSymbolicLink(), false);
+    const resolved = fs.realpathSync(directory);
+    assert.equal(path.dirname(resolved), temporaryParent);
+    assert.match(path.basename(resolved), /^prod-frontend-fixture-[A-Za-z0-9]{6}$/);
+    fs.rmSync(resolved, { recursive: true, force: true });
+  });
+  for (const app of ['client', 'operations']) fs.mkdirSync(path.join(directory, 'apps', app, 'src'), { recursive: true });
+  const file = 'apps/client/src/main.tsx', original = 'export const title = "Synthetic baseline";\n';
+  fs.writeFileSync(path.join(directory, file), original);
+  const expected = hash(canonical([[file, hash(original)]]));
+  assert.equal(frontendFingerprint(directory), expected);
+  // Only the committed installed profile is an accepted deployment baseline.
+  assert.doesNotThrow(() => checkMode('backend', PROFILE.frontendSHA256));
+  fs.writeFileSync(path.join(directory, file), original + 'export const changed = true;\n');
+  assert.notEqual(frontendFingerprint(directory), expected);
+  assert.throws(() => checkMode('backend', frontendFingerprint(directory)), /retained asset union/);
+});
+
 const genuineMap = () => ({ version: 3, file: 'index.js', sources: ['fixture.ts'], sourcesContent: ['export const fixture = true;'], names: [], mappings: 'AAAA' });
 function fixture() {
   const profile = clone(PROFILE), snapshot = {};
@@ -422,10 +414,12 @@ async function flow(t, fail = null, app = 'operations', staffOptions = {}) {
     assert.equal(args.sourceCommit, sourceCommit);assert.deepEqual(args.review, review);
     staffCalls.push([...calls]);
     if (staffCalls.length === staffOptions.failAt) throw new Error('native staff readiness unavailable');
-    const receipt = { schemaVersion: 1, sourceCommit, accountId: '846c924bf17bf4f3dd15c97a4c5d1d51',
+    const receipt = { schemaVersion: 2, sourceCommit, accountId: '846c924bf17bf4f3dd15c97a4c5d1d51',
       databaseId: '6ebf7514-d306-4615-ae56-ad869c874dbd', reviewSha256: 'a'.repeat(64), cohortSha256: 'b'.repeat(64),
+      controlPlaneSha256: 'c'.repeat(64),
       observedAt: new Date().toISOString(), staffCount: 2, generation: 7 };
     if (staffCalls.length === staffOptions.changeAt) receipt.generation++;
+    if (staffCalls.length === staffOptions.adminChangeAt) receipt.controlPlaneSha256='d'.repeat(64);
     if (staffOptions.receipt) Object.assign(receipt, staffOptions.receipt);
     return receipt;
   };
@@ -479,10 +473,19 @@ test('post-activation handoff loss never returns a verified-active receipt or re
   }
 });
 
+test('admin-set drift with unchanged cohort and generation holds before promotion and refuses after promotion', async t => {
+  for (const app of ['operations','ops-sync']) for (const adminChangeAt of [2,3]) {
+    const { operation, calls, directory } = await flow(t, null, app, {adminChangeAt});
+    await assert.rejects(operation, /Native staff handoff changed/);
+    assert.deepEqual(calls, adminChangeAt===2 ? ['upload'] : ['upload','activate']);
+    assert.equal(fs.existsSync(path.join(directory, 'journal/verified-active.json')), false);
+  }
+});
+
 test('malformed, stale, wrong-source or wrong-target staff receipts fail before any upload', async t => {
-  for (const receipt of [{schemaVersion:2},{sourceCommit:'f'.repeat(40)},{accountId:'c'.repeat(32)},
+  for (const receipt of [{schemaVersion:1},{sourceCommit:'f'.repeat(40)},{accountId:'c'.repeat(32)},
     {databaseId:NEW},{staffCount:0},{staffCount:1025},{generation:-1},{generation:0.5},
-    {reviewSha256:'wrong'},{cohortSha256:'wrong'},{observedAt:'invalid'},
+    {reviewSha256:'wrong'},{cohortSha256:'wrong'},{controlPlaneSha256:'wrong'},{controlPlaneSha256:undefined},{observedAt:'invalid'},
     {observedAt:new Date(Date.now()-120_000).toISOString()},{observedAt:new Date(Date.now()+120_000).toISOString()}]) {
     const { operation, calls } = await flow(t, null, 'operations', {receipt});
     await assert.rejects(operation, /Fresh exact native staff/);assert.deepEqual(calls, []);

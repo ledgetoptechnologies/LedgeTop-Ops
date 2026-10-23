@@ -14,7 +14,15 @@ test("Operations Viewer shell owns route issuance and rejects missing or mismatc
     const path = new URL(request.url()).pathname;
     if (path === "/api/session" && request.method() === "GET") {
       bootstrapRequests += 1;
-      return route.fulfill({ json: { csrfToken: "csrf-viewer-shell" } });
+      return route.fulfill({ json: {
+        user: {
+          id: "staff-viewer", email: "staff@example.test", displayName: "Viewer staff",
+          status: "Active", profileType: "Employee", isAdministrator: false,
+          permissions: ["viewer.view"], divisions: [],
+        },
+        csrfToken: "csrf-viewer-shell", timezone: "America/Chicago",
+        mapStyleUrl: null, mapboxPublicToken: null, capabilities: {},
+      } });
     }
     if (/^\/api\/viewer\/associations\/association-(?:one|two|missing|mismatch)\/session$/.test(path) && request.method() === "POST") {
       sessionPaths.push(path);
@@ -45,13 +53,14 @@ test("Operations Viewer shell owns route issuance and rejects missing or mismatc
   expect(await page.evaluate(() => window.opener === null)).toBe(true);
   await expect(page.locator("iframe")).toHaveAttribute("src", `https://viewer.ledgetopdroneservices.com/session/${grants[0]}`);
   await page.waitForTimeout(250);
-  expect(bootstrapRequests).toBe(1);
+  // The application chrome and renewable model shell each verify the session.
+  expect(bootstrapRequests).toBe(2);
   expect(sessionPaths).toEqual(["/api/viewer/associations/association-one/session"]);
   expect(idempotencyKeys[0]).toMatch(/^[0-9a-f-]{36}$/);
 
   await page.goto("/viewer/session/association-two/model-two");
   await expect(page.locator("iframe")).toHaveAttribute("src", `https://viewer.ledgetopdroneservices.com/session/${grants[1]}`);
-  expect(bootstrapRequests).toBe(2);
+  expect(bootstrapRequests).toBe(4);
   expect(sessionPaths).toEqual([
     "/api/viewer/associations/association-one/session",
     "/api/viewer/associations/association-two/session",

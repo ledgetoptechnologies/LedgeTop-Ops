@@ -19,12 +19,34 @@ function validSnapshot(value) {
     && (value.replayed === undefined || typeof value.replayed === 'boolean');
 }
 
+function validNativeSnapshot(value, action) {
+  const object = item => item && typeof item === 'object' && !Array.isArray(item);
+  const id = item => typeof item === 'string' && ID.test(item);
+  const text = (item, maximum = 1024) => typeof item === 'string' && item.length > 0 && item.length <= maximum && !/[\u0000-\u001f\u007f]/.test(item);
+  const source = item => typeof item === 'string' && /^project-alpha:[a-z0-9][a-z0-9_-]{0,63}$/.test(item);
+  const list = items => Array.isArray(items) && items.length <= 500;
+  return object(value) && (value.replayed === undefined || typeof value.replayed === 'boolean')
+    && (value.existingSessionsExpireWithinSeconds === undefined ? action !== 'revoke'
+      : Number.isSafeInteger(value.existingSessionsExpireWithinSeconds) && value.existingSessionsExpireWithinSeconds > 0 && value.existingSessionsExpireWithinSeconds <= 1800)
+    && list(value.targets) && value.targets.every(target => object(target) && source(target.sourceId)
+      && id(target.workspaceId) && text(target.projectPublicId, 256) && text(target.workspaceName) && text(target.projectName)
+      && list(target.associations) && target.associations.every(item => object(item) && id(item.id) && text(item.modelTitle) && id(item.viewerModelId)))
+    && list(value.grants) && value.grants.every(grant => object(grant) && id(grant.id) && source(grant.source_id)
+      && id(grant.workspace_id) && text(grant.project_public_id, 256) && text(grant.workspace_name)
+      && (grant.project_name === null || text(grant.project_name)) && grant.status === 'active'
+      && ['project', 'task'].includes(grant.scope_type)
+      && (grant.scope_type === 'project' ? grant.association_id === null && grant.include_future_published === 1 : id(grant.association_id) && grant.include_future_published === 0)
+      && ['can_measure', 'can_view_cameras', 'can_download'].every(key => grant[key] === 0 || grant[key] === 1)
+      && Number.isSafeInteger(grant.grant_version) && grant.grant_version > 0
+      && (grant.authorization_expires_at === null || typeof grant.authorization_expires_at === 'string' && Number.isFinite(Date.parse(grant.authorization_expires_at))));
+}
+
 function createClientGrantProxy({ config, authorize, fetchImpl = fetch, diagnostic = record => console.warn(`[client-grant-proxy] ${JSON.stringify(record)}`) }) {
-  async function proxy(req, res, action) {
+  async function proxy(req, res, action, native = false) {
     if (!/^ops:[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(String(req.adminPrincipal?.subject || '')))
       return res.status(403).json({ error: 'Viewer workspace authorization is invalid', code: 'invalid_workspace_subject' });
     const supplied = req.body || {};
-    const envelope = { subject: req.adminPrincipal.subject, action };
+    const envelope = { subject: req.adminPrincipal.subject, action, ...(native ? { connection: "native" } : {}) };
     if (action === 'create') {
       const grant = supplied.grant;
       if (!grant || typeof grant !== 'object' || Array.isArray(grant)) return invalid(res);
@@ -81,7 +103,7 @@ function createClientGrantProxy({ config, authorize, fetchImpl = fetch, diagnost
         return res.status(status).json({ error: 'Operations rejected the client access request', code: 'operations_request_failed' });
       }
       stage = 'response_schema';
-      if (!validSnapshot(payload)) throw new Error('invalid_response');
+      if (!(native ? validNativeSnapshot(payload, action) : validSnapshot(payload))) throw new Error('invalid_response');
       return res.status(action === 'create' && !payload.replayed ? 201 : 200).json(payload);
     } catch {
       report(502, 'operations_unavailable');
@@ -95,6 +117,10 @@ function createClientGrantProxy({ config, authorize, fetchImpl = fetch, diagnost
       router.get(LOCAL_PATH, allowed, (req, res) => proxy(req, res, 'list'));
       router.post(LOCAL_PATH, allowed, (req, res) => proxy(req, res, 'create'));
       router.delete(LOCAL_PATH, allowed, (req, res) => proxy(req, res, 'revoke'));
+      const nativePath = '/api/v1/workspace/native-client-grants';
+      router.get(nativePath, allowed, (req, res) => proxy(req, res, 'list', true));
+      router.post(nativePath, allowed, (req, res) => proxy(req, res, 'create', true));
+      router.delete(nativePath, allowed, (req, res) => proxy(req, res, 'revoke', true));
     },
   };
 }
