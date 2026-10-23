@@ -13,6 +13,7 @@
     "./operations-portal-native-billing-authority": "./src/operations-portal-native-billing-authority.ts",
     "./operations-portal-native-delivery-authority": "./src/operations-portal-native-delivery-authority.ts",
     "./configured-deployment-origin": "./src/configured-deployment-origin.ts",
+    "./competitor-intel": "./src/competitor-intel.ts",
     "./windows-queue-reference": "./src/windows-queue-reference.ts"
   }
 }
