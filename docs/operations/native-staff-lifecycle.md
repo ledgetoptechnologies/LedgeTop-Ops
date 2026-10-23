@@ -48,8 +48,11 @@ fenced command with 0225's additional bridge fence in one D1 batch:
 4. Require completed bridge mutation, durable event and a surviving **usable**
    complete native control plane, then consume the additional fence.
 
-Any failure rolls back every step. Protected staff, the protected owner ID and
-global owners cannot be changed by this ordinary lifecycle path. Owner transfer
+Any failure rolls back every step. The protected owner ID and global owners
+cannot be changed by this ordinary lifecycle path. `sync_protected` prevents PA
+synchronization from modifying staff; it does not prevent authorized Operations
+lifecycle commands. Normal native onboarding sets that flag, and lifecycle
+commands preserve it. Explicit native denies still apply. Owner transfer
 and identity recovery remain separately reviewed maintenance procedures. The
 legacy native-only helper remains for historical isolated service tests; HTTP
 management uses only the joined entrypoint.
