@@ -6,7 +6,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { domainPhaseValues, domainRecognitionProfile, domainRecognitionDiff } from './production-domain-recognition.mjs';
-import { PROFILE, hash, canonical, validateInstallation, compileConfig, checkMode, capture, CloudflareReader, verifyCandidate, verifySourceMap, executeDeployment, validateBuildEnvironment, frontendInputHash, reviewedFrontendDigest, frontendFingerprint, parseDeploymentArguments, inspectProductionInstallation, buildModulePath } from './production-deploy.mjs';
+import { PROFILE, hash, canonical, validateInstallation, compileConfig, checkMode, capture, CloudflareReader, verifyCandidate, verifySourceMap, executeDeployment, validateBuildEnvironment, frontendInputHash, reviewedFrontendDigest, frontendFingerprint, parseDeploymentArguments, inspectProductionInstallation, buildModulePath, readStaffCutoverReview, deploymentSourceCommit } from './production-deploy.mjs';
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const ids = { operations: '11111111-1111-4111-8111-111111111111', client: '22222222-2222-4222-8222-222222222222', 'ops-sync': '33333333-3333-4333-8333-333333333333' };
 const NEW = '44444444-4444-4444-8444-444444444444';
@@ -387,10 +387,10 @@ test('returned source map semantics match genuine sibling; paths may only normal
   modern.modules[1].content_base64 = Buffer.from(JSON.stringify({ ...original, mappings: 'wrong' })).toString('base64');
   assert.throws(() => verifyCandidate(snapshot, 'operations', version, modern, Buffer.from('new'), original), /differs/);
 });
-async function flow(t, fail = null, app = 'operations') {
+async function flow(t, fail = null, app = 'operations', staffOptions = {}) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'prod-deploy-fixture-'));t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
   const main = buildModulePath(app, directory);fs.mkdirSync(path.dirname(main), { recursive: true });
-  fs.writeFileSync(main, 'new');fs.writeFileSync(main + '.map', JSON.stringify(genuineMap()));
+  fs.writeFileSync(main, staffOptions.unchanged ? 'old' : 'new');fs.writeFileSync(main + '.map', JSON.stringify(genuineMap()));
   const { profile, snapshot } = fixture();const version = clone(snapshot[app].version);version.id = NEW;version.resources.script.etag = 'b'.repeat(64);
   const modern = { id: NEW, assets: clone(snapshot[app].modern.assets), modules: [{ name: 'index.js', content_base64: Buffer.from('new').toString('base64') }, { name: 'index.js.map', content_base64: Buffer.from(JSON.stringify(genuineMap())).toString('base64') }] };
   const reader = readerFor(snapshot, { version, modern });const calls = [];
@@ -414,9 +414,136 @@ async function flow(t, fail = null, app = 'operations') {
     snapshot[app].settings.annotations['workers/message'] = 'native deployment message';
     return 'Deployed';
   };
-  const operation = executeDeployment({ app, mode: 'backend', cli: 'fixture-cli', main, directory: path.join(directory, 'journal'), reader, runNative, fingerprint: PROFILE.frontendSHA256, profile });
-  return { operation, calls, directory };
+  // This injected transport receipt tests the release phase boundary, not the
+  // independent D1 readiness verifier's cohort/bootstrap policy or live access.
+  const sourceCommit = 'e'.repeat(40), staffCalls = [];
+  const review = { syntheticTransportFixture: true };
+  const readStaffCutover = async args => {
+    assert.equal(args.sourceCommit, sourceCommit);assert.deepEqual(args.review, review);
+    staffCalls.push([...calls]);
+    if (staffCalls.length === staffOptions.failAt) throw new Error('native staff readiness unavailable');
+    const receipt = { schemaVersion: 1, sourceCommit, accountId: '846c924bf17bf4f3dd15c97a4c5d1d51',
+      databaseId: '6ebf7514-d306-4615-ae56-ad869c874dbd', reviewSha256: 'a'.repeat(64), cohortSha256: 'b'.repeat(64),
+      observedAt: new Date().toISOString(), staffCount: 2, generation: 7 };
+    if (staffCalls.length === staffOptions.changeAt) receipt.generation++;
+    if (staffOptions.receipt) Object.assign(receipt, staffOptions.receipt);
+    return receipt;
+  };
+  const operation = executeDeployment({ app, mode: 'backend', cli: 'fixture-cli', main, directory: path.join(directory, 'journal'), reader, runNative,
+    fingerprint: PROFILE.frontendSHA256, profile, sourceCommit,
+    staffCutoverReview: staffOptions.missing ? undefined : review, readStaffCutover });
+  return { operation, calls, directory, staffCalls };
 }
+
+test('Ops and Sync qualify staff handoff before upload, before activation and after activation', async t => {
+  for (const app of ['operations','ops-sync']) {
+    const { operation, staffCalls, directory } = await flow(t, null, app);
+    assert.equal((await operation).verifiedActive, true);
+    assert.deepEqual(staffCalls, [[], ['upload'], ['upload','activate']]);
+    for (const phase of ['before-upload','before-activate','after-activate'])
+      assert.ok(fs.existsSync(path.join(directory, `journal/native-staff-${phase}.json`)));
+  }
+});
+
+test('missing or unavailable handoff prevents the first native upload for both affected Workers', async t => {
+  for (const app of ['operations','ops-sync']) for (const staffOptions of [{missing:true},{failAt:1}]) {
+    const { operation, calls } = await flow(t, null, app, staffOptions);
+    await assert.rejects(operation, /native staff|native staff handoff/i);assert.deepEqual(calls, []);
+  }
+});
+
+test('unchanged runtime bytes still require current staff handoff readiness', async t => {
+  for (const app of ['operations','ops-sync']) {
+    for (const options of [{missing:true},{failAt:1}]) {
+      const { operation, calls } = await flow(t, null, app, {...options, unchanged:true});
+      await assert.rejects(operation, /native staff/i);assert.deepEqual(calls, []);
+    }
+    const { operation, calls, staffCalls } = await flow(t, null, app, {unchanged:true});
+    assert.deepEqual(await operation, {unchanged:true,noUpload:true});
+    assert.deepEqual(calls, []);assert.deepEqual(staffCalls, [[]]);
+  }
+});
+
+test('changed or unavailable handoff holds inactive candidate without activation or replay', async t => {
+  for (const staffOptions of [{failAt:2},{changeAt:2}]) {
+    const { operation, calls } = await flow(t, null, 'operations', staffOptions);
+    await assert.rejects(operation, /native staff/i);assert.deepEqual(calls, ['upload']);
+  }
+});
+
+test('post-activation handoff loss never returns a verified-active receipt or retries', async t => {
+  for (const options of [{failAt:3},{changeAt:3}]) {
+    const { operation, calls, directory } = await flow(t, null, 'ops-sync', options);
+    await assert.rejects(operation, /native staff/i);assert.deepEqual(calls, ['upload','activate']);
+    assert.equal(fs.existsSync(path.join(directory, 'journal/verified-active.json')), false);
+  }
+});
+
+test('malformed, stale, wrong-source or wrong-target staff receipts fail before any upload', async t => {
+  for (const receipt of [{schemaVersion:2},{sourceCommit:'f'.repeat(40)},{accountId:'c'.repeat(32)},
+    {databaseId:NEW},{staffCount:0},{staffCount:1025},{generation:-1},{generation:0.5},
+    {reviewSha256:'wrong'},{cohortSha256:'wrong'},{observedAt:'invalid'},
+    {observedAt:new Date(Date.now()-120_000).toISOString()},{observedAt:new Date(Date.now()+120_000).toISOString()}]) {
+    const { operation, calls } = await flow(t, null, 'operations', {receipt});
+    await assert.rejects(operation, /Fresh exact native staff/);assert.deepEqual(calls, []);
+  }
+});
+
+test('Client-only deployment neither reads nor requires the unrelated staff handoff packet', async t => {
+  const { operation, calls, staffCalls } = await flow(t, null, 'client', {missing:true,failAt:1});
+  assert.equal((await operation).verifiedActive, true);assert.deepEqual(calls, ['upload','activate']);assert.deepEqual(staffCalls, []);
+});
+
+test('staff packet CLI options are explicit and packet reads are bounded with redacted failures', t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'staff-review-packet-test-'));
+  t.after(() => fs.rmSync(directory, {recursive:true,force:true}));
+  const file = path.join(directory, 'candidate.native-staff-review.json');
+  fs.writeFileSync(file, JSON.stringify({test:'private-identity-not-for-errors'}));
+  const args = ['--worker','operations','--mode','backend','--execute','--staff-cutover-review',file];
+  assert.equal(parseDeploymentArguments(args).staffReviewPath, file);
+  assert.equal(parseDeploymentArguments([...args,'--domain-phase','staff-canonical']).phase, 'staff-canonical');
+  assert.deepEqual(readStaffCutoverReview(file), {test:'private-identity-not-for-errors'});
+  for (const invalid of ['relative.json', file+'\0']) {
+    assert.throws(() => parseDeploymentArguments([...args.slice(0,6),invalid]), /absolute private/);
+    assert.throws(() => readStaffCutoverReview(invalid), /absolute private/);
+  }
+  assert.throws(() => parseDeploymentArguments([...args,'--staff-cutover-review',file]), /unique/);
+  assert.throws(() => parseDeploymentArguments([...args.slice(0,1),'client',...args.slice(2)]), /Ops or Sync/);
+  for (const body of ['private-identity-not-for-errors', 'x'.repeat(1024*1024+1)]) {
+    fs.writeFileSync(file, body);
+    assert.throws(() => readStaffCutoverReview(file), error => !error.message.includes('private-identity') && /packet/.test(error.message));
+  }
+  assert.throws(() => readStaffCutoverReview(directory), /packet/);
+});
+
+test('source qualification rejects override injection before invoking git', () => {
+  assert.throws(() => deploymentSourceCommit(ROOT, {GIT_DIR:'unreviewed'}), /Git source overrides/);
+  assert.throws(() => deploymentSourceCommit(ROOT, {GIT_CONFIG_COUNT:'1'}), /Git source overrides/);
+});
+
+test('source qualification pins a real clean checkout and rejects tracked or untracked source drift', t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'staff-source-pin-test-'));
+  t.after(() => {
+    assert.equal(fs.realpathSync(directory), directory);
+    assert.equal(path.dirname(directory), fs.realpathSync(os.tmpdir()));
+    fs.rmSync(directory, {recursive:true,force:true});
+  });
+  const git = args => {
+    const result = spawnSync('git', ['-c','commit.gpgsign=false','-c','core.hooksPath='+path.join(directory,'no-hooks'),...args],
+      {cwd:directory,encoding:'utf8',windowsHide:true,shell:false});
+    assert.equal(result.status, 0, 'Owned synthetic Git fixture failed');return result.stdout.trim();
+  };
+  git(['init']);git(['config','core.fsmonitor','false']);
+  const file = path.join(directory, 'worker.mjs');fs.writeFileSync(file, 'export default 1;\n');
+  git(['add','worker.mjs']);git(['-c','user.name=Synthetic Fixture','-c','user.email=fixture@example.invalid','commit','--no-gpg-sign','-m','synthetic']);
+  const commit = git(['rev-parse','HEAD']);
+  assert.equal(deploymentSourceCommit(directory), commit);
+  fs.writeFileSync(file, 'export default 2;\n');
+  assert.throws(() => deploymentSourceCommit(directory), /exact clean/);
+  fs.writeFileSync(file, 'export default 1;\n');
+  fs.writeFileSync(path.join(directory,'unreviewed-module.mjs'), 'export default 3;\n');
+  assert.throws(() => deploymentSourceCommit(directory), /exact clean/);
+});
 test('full injected flow: freshGET→oneinactiveupload→verify→separatenativeactivate→verify', async t => {
   const { operation, calls, directory } = await flow(t);const result = await operation;
   assert.equal(result.verifiedActive, true);assert.deepEqual(calls, ['upload', 'activate']);

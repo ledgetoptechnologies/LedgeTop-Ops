@@ -36,7 +36,7 @@ jobs:
           npm ci --prefix apps/client
 
       - name: Verify guarded production deployment tooling without credentials
-        run: node --test scripts/production-deploy.test.mjs
+        run: node --test scripts/production-deploy.test.mjs scripts/native-staff-cutover-readiness.test.mjs
 
       - name: Verify main and PR workflow trigger policy
         run: node --test scripts/workflow-trigger-policy.test.mjs
