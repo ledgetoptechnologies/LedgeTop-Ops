@@ -258,3 +258,45 @@ describe("Viewer workspace client-grant machine bridge", () => {
     expect(fetcher).toHaveBeenCalledTimes(1);
   }, 15_000);
 });
+
+
+async function nativeWorkspaceFixture() {
+  await delivery.exec(`
+    ALTER TABLE projects ADD COLUMN project_alpha_source_id TEXT;
+    UPDATE projects SET project_alpha_source_id='project-alpha:primary';
+    CREATE TABLE portal_v2_workspaces(id TEXT PRIMARY KEY,project_alpha_source_id TEXT,legacy_account_id TEXT,status TEXT,display_name TEXT);
+    CREATE TABLE portal_v2_directory_checkpoints(workspace_id TEXT PRIMARY KEY,active_generation_id TEXT);
+    CREATE TABLE portal_v2_directory_generations(id TEXT PRIMARY KEY,workspace_id TEXT,status TEXT,complete INTEGER);
+    CREATE TABLE portal_v2_directory_entities(workspace_id TEXT,generation_id TEXT,entity_type TEXT,public_id TEXT,source_version TEXT,active INTEGER,display_name TEXT);
+    INSERT INTO portal_v2_workspaces VALUES('native-workspace','project-alpha:primary',NULL,'active','Native Client');
+    INSERT INTO portal_v2_directory_checkpoints VALUES('native-workspace','generation-one');
+    INSERT INTO portal_v2_directory_generations VALUES('generation-one','native-workspace','active',1);
+    INSERT INTO portal_v2_directory_entities VALUES('native-workspace','generation-one','project','pa-project-one','2026-08-18T12:00:00.000Z',1,'Project One');
+  `.replace(/\s*\n\s*/g, ' '));
+  // Use the production schema, including its immutable ownership triggers.
+  const migration=readFileSync(new URL('../../client/migrations/0199_native_viewer_grants.sql',import.meta.url),'utf8');
+  await delivery.exec(migration.replace(/--[^\n]*/g,'').replace(/\s*\n\s*/g,' '));
+}
+
+describe('native Viewer workspace machine bridge',()=>{
+  it('lists verified targets, creates and revokes a source-bound task grant with signed requests',async()=>{
+    await nativeWorkspaceFixture();
+    const listing=await machine({subject:'ops:staff-one',action:'list',connection:'native'},'native-list-nonce-0001');
+    expect(listing.status).toBe(200);
+    expect((await listing.json() as any).targets).toEqual([{sourceId:'project-alpha:primary',workspaceId:'native-workspace',workspaceName:'Native Client',projectPublicId:'pa-project-one',projectName:'Project One',associations:[{id:'association-one',modelTitle:'Model One',viewerModelId:'model-one'}]}]);
+    const envelope={subject:'ops:staff-one',connection:'native',action:'create',idempotencyKey:'native-machine-create-001',grant:{sourceId:'project-alpha:primary',workspaceId:'native-workspace',projectPublicId:'pa-project-one',scopeType:'task',associationId:'association-one',includeFuturePublished:false,expiresAt:null,permissions:{measure:true,cameras:true,download:false}}};
+    const created=await machine(envelope,'native-create-nonce-001');expect(created.status).toBe(201);
+    const grant=(await created.json() as any).grants[0];expect(grant).toMatchObject({source_id:'project-alpha:primary',workspace_id:'native-workspace',association_id:'association-one'});
+    expect((await machine(envelope,'native-replay-nonce-001')).status).toBe(200);
+    expect((await machine({...envelope,idempotencyKey:'native-machine-wrong-001',grant:{...envelope.grant,sourceId:'project-alpha:other'}},'native-wrong-source-001')).status).toBe(404);
+    const revoked=await machine({subject:'ops:staff-one',connection:'native',action:'revoke',idempotencyKey:'native-machine-revoke-001',grantId:grant.id,reason:'Ended access'},'native-revoke-nonce-001');
+    expect(revoked.status).toBe(200);expect((await revoked.json() as any).grants).toEqual([]);
+    expect(await delivery.prepare('SELECT COUNT(*) count FROM viewer_client_grants').first<number>('count')).toBe(0);
+  });
+  it('rejects inert legacy project grants and account/project pairs without current grants',async()=>{
+    const invalid=createEnvelope('project-inert-grant-0001');invalid.grant.includeFuturePublished=false;
+    expect((await machine(invalid,'inert-project-nonce-001')).status).toBe(400);
+    const wrong=createEnvelope('wrong-account-pair-0001');wrong.grant.accountId='another-account';
+    expect((await machine(wrong,'wrong-account-nonce-001')).status).toBe(404);
+  });
+});

@@ -36,7 +36,7 @@ const ACTIVE=new Set(['pending','admitted','initializing','uploading','committed
 const OPERATION_ACTIVE=new Set(['queued','leased','awaiting_derivatives']);
 function readWorkspaceView(url=location.href){const parsed=new URL(url,location.origin),section=parsed.searchParams.get('section')||'dashboard',selectedProjectId=parsed.searchParams.get('project'),expandedTaskId=parsed.searchParams.get('task');return{section:WORKSPACE_SECTIONS.has(section)?section:'dashboard',selectedProjectId:selectedProjectId||null,expandedTaskId:expandedTaskId||null,taskPage:['gcp','settings','files'].includes(parsed.searchParams.get('panel'))?parsed.searchParams.get('panel'):null}}
 const initialView=readWorkspaceView();
-const state={section:initialView.section,token:sessionStorage.getItem(TOKEN_KEY),adminSession:null,projects:[],datasets:[],tasks:[],providers:[],presets:[],outputs:[],operations:[],derivativeJobs:[],diagnosticRuns:[],diagnosticRunsCursor:null,diagnosticRunsError:null,diagnosticRunsLoading:false,selectedDiagnosticRunId:null,diagnosticDetails:{},shares:{},sharePreflight:{},shareContext:null,projectShares:{},clientAccess:null,lastShareUrl:null,storage:null,trashLoadError:null,failedMutations:[],ready:null,busy:false,operationRefreshBusy:false,projectQuery:'',backgroundQuery:'',backgroundImportLimit:3,backgroundDerivativeLimit:3,selectedProjectId:initialView.selectedProjectId,expandedTaskId:initialView.expandedTaskId,taskPage:initialView.taskPage,selectedProviderId:null,taskDetails:{},taskDisclosures:{},orthophotoPreviews:{},gcpWorkspaces:{},logTimer:null,operationTimer:null};
+const state={section:initialView.section,token:sessionStorage.getItem(TOKEN_KEY),adminSession:null,projects:[],datasets:[],tasks:[],providers:[],presets:[],outputs:[],operations:[],derivativeJobs:[],diagnosticRuns:[],diagnosticRunsCursor:null,diagnosticRunsError:null,diagnosticRunsLoading:false,selectedDiagnosticRunId:null,diagnosticDetails:{},shares:{},sharePreflight:{},shareContext:null,projectShares:{},clientAccess:null,clientNativeAccess:null,lastShareUrl:null,storage:null,trashLoadError:null,failedMutations:[],ready:null,busy:false,operationRefreshBusy:false,projectQuery:'',backgroundQuery:'',backgroundImportLimit:3,backgroundDerivativeLimit:3,selectedProjectId:initialView.selectedProjectId,expandedTaskId:initialView.expandedTaskId,taskPage:initialView.taskPage,selectedProviderId:null,taskDetails:{},taskDisclosures:{},orthophotoPreviews:{},gcpWorkspaces:{},logTimer:null,operationTimer:null};
 const content=document.querySelector('#workspace-content'),shell=document.querySelector('#workspace'),modal=document.querySelector('#workspace-modal'),modalContent=document.querySelector('#workspace-modal-content');
 const workspaceController=window.opener&&!window.opener.closed?window.opener:null;
 const reviewSessionController=new ReviewSessionController({origin:location.origin,storage:sessionStorage,issueGrant:({sessionMode,attemptId,outputId},{signal}={})=>api(sessionMode==='published'?`/api/v1/processing/outputs/${encodeURIComponent(outputId)}/view-sessions`:`/api/v1/attempts/${encodeURIComponent(attemptId)}/review-sessions`,{method:'POST',body:{},signal}),measurementRequest:createMeasurementCalculationBroker({origin:location.origin,getAuthorization:()=>({accessToken:state.token,session:state.adminSession})})});
@@ -60,6 +60,7 @@ function canShareOutput(output) {
     &&['viewer.shares.create','viewer.shares.read','viewer.client_grants.manage'].some(can);
 }
 async function openShareModal(projectId,onlyOutputId=null){
+  state.clientNativeAccess=null;
   const context={projectId,onlyOutputId,id:crypto.randomUUID(),mode:'internal',loading:true,clientLoading:can('viewer.client_grants.manage'),clientError:null};
   const token=state.token,subject=state.adminSession?.subject;
   const current=()=>Boolean(token)&&state.shareContext===context&&modal.open&&state.token===token&&state.adminSession?.subject===subject
@@ -82,10 +83,11 @@ async function openShareModal(projectId,onlyOutputId=null){
   // Optional Operations lookup must not hold the independent public-link form.
   // A late result updates only its own panel, preserving typed public-link fields.
   if(context.clientLoading)void(async()=>{
-    let access=null,failure=null;
-    try{access=await api('/api/v1/workspace/client-grants')}catch(error){failure=clientAccessDiagnostic(error);}
+    const [legacy,native]=await Promise.allSettled([api('/api/v1/workspace/client-grants'),api('/api/v1/workspace/native-client-grants')]);
     if(!current()||!can('viewer.client_grants.manage'))return;
-    state.clientAccess=access;context.clientLoading=false;context.clientError=failure;
+    state.clientAccess=legacy.status==='fulfilled'?legacy.value:null;
+    state.clientNativeAccess=native.status==='fulfilled'&&Array.isArray(native.value?.targets)&&Array.isArray(native.value?.grants)?native.value:null;
+    context.clientLoading=false;context.clientError=legacy.status==='rejected'?clientAccessDiagnostic(legacy.reason):null;context.nativeError=native.status==='rejected'?clientAccessDiagnostic(native.reason):null;
     if(context.loading)return;
     const panel=modalContent.querySelector('[data-client-share-panel]');
     if(panel){panel.innerHTML=clientSharePanel(state.outputs.find(output=>output.id===onlyOutputId),onlyOutputId);bindShareModal(projectId,onlyOutputId);}
@@ -161,7 +163,7 @@ function clientAccessDiagnostic(error){
 }
 function validOpsOrigin(value){try{const parsed=new URL(value);return parsed.protocol==='https:'&&parsed.origin===value&&parsed.pathname==='/'&&!parsed.search&&!parsed.hash?value:null}catch{return null}}
 function beginWorkspaceReauthorization(){if(!state.adminSession||!state.token||!validOpsOrigin(sessionStorage.getItem(OPS_ORIGIN_KEY)))return false;void workspaceRecovery.pause();return true}
-function clearWorkspaceAuthorization(reason='unauthorized'){if(workspaceAuthorizationClearing)return;workspaceAuthorizationClearing=true;const expired=reason==='expired'||(reason==='unauthorized'&&Date.parse(state.adminSession?.expiresAt||'')<=Date.now());workspaceRenewal?.dispose();workspaceRenewal=null;if(expired&&beginWorkspaceReauthorization())return;activeNewTask?.dispose();reviewSessionController.suspend({preserve:false});storageUsagePoll.stop();releaseAllGcpImages();sessionStorage.removeItem(TOKEN_KEY);state.token=null;state.adminSession=null;clearInterval(state.logTimer);clearTimeout(state.operationTimer);renderNav();access()}
+function clearWorkspaceAuthorization(reason='unauthorized'){if(workspaceAuthorizationClearing)return;workspaceAuthorizationClearing=true;const expired=reason==='expired'||(reason==='unauthorized'&&Date.parse(state.adminSession?.expiresAt||'')<=Date.now());workspaceRenewal?.dispose();workspaceRenewal=null;if(expired&&beginWorkspaceReauthorization())return;activeNewTask?.dispose();reviewSessionController.suspend({preserve:false});storageUsagePoll.stop();releaseAllGcpImages();sessionStorage.removeItem(TOKEN_KEY);state.token=null;state.adminSession=null;state.clientAccess=null;state.clientNativeAccess=null;clearInterval(state.logTimer);clearTimeout(state.operationTimer);renderNav();access()}
 async function workspaceFetch(path,init={}){
   await workspaceRecovery.wait(init.signal);
   if(workspaceRenewal&&workspaceRenewal.expiresAtMs<=Date.now()){
@@ -195,7 +197,7 @@ async function workspaceFetch(path,init={}){
   }
   return response;
 }
-async function api(path,{method='GET',body,headers={},signal}={}){const init={method,...(signal?{signal}:{}),headers:{Authorization:`Bearer ${state.token}`,Accept:'application/json',...headers}};if(method!=='GET'&&!init.headers['Idempotency-Key'])init.headers['Idempotency-Key']=crypto.randomUUID();if(body!==undefined){init.headers['Content-Type']='application/json';init.body=JSON.stringify(body)}const response=await workspaceFetch(path,init);let payload;try{payload=await response.json()}catch{}if(path==='/api/v1/workspace/client-grants'&&!response.ok){if(response.status===401)clearWorkspaceAuthorization();throw Object.assign(responseError('Operations client access request failed',response.status),clientAccessDiagnostic({status:response.status,code:payload?.code,requestId:response.headers?.get('X-LTDS-Client-Access-Request')}));}if(response.status===401){clearWorkspaceAuthorization();throw responseError('authorization_required',401)}if(response.status===403)throw responseError('Your current Viewer grant does not permit this action',403);if(!response.ok)throw responseError(payload?.message||payload?.error||`Request failed (${response.status})`,response.status);return payload}
+async function api(path,{method='GET',body,headers={},signal}={}){const init={method,...(signal?{signal}:{}),headers:{Authorization:`Bearer ${state.token}`,Accept:'application/json',...headers}};if(method!=='GET'&&!init.headers['Idempotency-Key'])init.headers['Idempotency-Key']=crypto.randomUUID();if(body!==undefined){init.headers['Content-Type']='application/json';init.body=JSON.stringify(body)}const response=await workspaceFetch(path,init);let payload;try{payload=await response.json()}catch{}if(['/api/v1/workspace/client-grants','/api/v1/workspace/native-client-grants'].includes(path)&&!response.ok){if(response.status===401)clearWorkspaceAuthorization();throw Object.assign(responseError('Operations client access request failed',response.status),clientAccessDiagnostic({status:response.status,code:payload?.code,requestId:response.headers?.get('X-LTDS-Client-Access-Request')}));}if(response.status===401){clearWorkspaceAuthorization();throw responseError('authorization_required',401)}if(response.status===403)throw responseError('Your current Viewer grant does not permit this action',403);if(!response.ok)throw responseError(payload?.message||payload?.error||`Request failed (${response.status})`,response.status);return payload}
 async function authenticatedDownload(path,fileName){const grantPath=path.endsWith('/download-grants')?path:path.replace(/\/assets\/([^/]+)$/, '/products/$1/download-grants');if(grantPath===path&&!path.endsWith('/download-grants'))throw new Error('This product does not support a secure download');const response=await workspaceFetch(grantPath,{method:'POST',headers:{Authorization:`Bearer ${state.token}`,'Content-Type':'application/json'},body:'{}'});if(response.status===401){clearWorkspaceAuthorization();throw responseError('authorization_required',401)}if(response.status===403)throw responseError('Your current Viewer grant does not permit this download',403);if(!response.ok)throw responseError(`Download failed (${response.status})`,response.status);const grant=await response.json(),url=new URL(grant.url,location.origin);if(url.origin!==location.origin||!url.pathname.startsWith('/api/v1/processing/product-downloads/'))throw new Error('Invalid download response');const link=document.createElement('a');try{link.href=url.href;link.download=grant.fileName||fileName;link.referrerPolicy='no-referrer';document.body.append(link);link.click()}finally{link.remove()}}
 async function mutate(path,options,message){if(state.busy)return;state.busy=true;shell.setAttribute('aria-busy','true');try{const result=await api(path,options);toast(message);await load();return result}catch(error){toast(error.message,true)}finally{state.busy=false;shell.removeAttribute('aria-busy')}}
 async function confirmedMutation(promptText,path,options,message){if(!await dialogs.confirm(promptText))return;return mutate(path,options,message)}
@@ -582,38 +584,50 @@ async function importGcp(event){event.preventDefault();const form=event.currentT
 function associationModelId(item){return item?.modelId||item?.model_id||item?.viewerModelId||item?.viewer_model_id||null}
 function associationProjectId(item){return item?.projectId||item?.project_id||null}
 function portalAccountId(item){return item?.accountId||item?.account_id||null}
-function exactClientAssociations(output,access=state.clientAccess){
+function clientProjectKey(project){return JSON.stringify([project.id,portalAccountId(project)])}
+function clientProjectLabel(project){return `${project.clientName||project.client_name||'Client'} — ${project.name||project.projectName||project.project_name||project.id} · ${project.nativeTarget?`${project.nativeTarget.sourceId} · ${project.accountName}`:project.accountName||portalAccountId(project)}`}
+function clientAccessSnapshot(){
+  const access=state.clientAccess||{projects:[],associations:[],grants:[]},native=state.clientNativeAccess;
+  if(!native)return access;
+  const projects=(native.targets||[]).map(target=>({id:JSON.stringify([target.sourceId,target.workspaceId,target.projectPublicId]),accountId:target.workspaceId,accountName:target.workspaceName,clientName:target.workspaceName,projectName:target.projectName,nativeTarget:target}));
+  return {...access,projects:[...(access.projects||[]),...projects],
+    associations:[...(access.associations||[]),...projects.flatMap(project=>(project.nativeTarget.associations||[]).map(item=>({...item,projectId:project.id,accountId:project.accountId})))],
+    grants:[...(access.grants||[]),...(native.grants||[]).map(grant=>({...grant,native:true,projectId:JSON.stringify([grant.source_id,grant.workspace_id,grant.project_public_id]),accountId:grant.workspace_id,clientName:grant.workspace_name,projectName:grant.project_name,scopeType:grant.scope_type,associationId:grant.association_id}))]};
+}
+function exactClientAssociations(output,access=clientAccessSnapshot()){
   if(!output?.activePublished||output.status!=='published'||!output.modelId)return[];
   const projects=access?.projects||[],associations=access?.associations||[];
-  return associations.filter(item=>{
-    const project=projects.find(project=>project.id===associationProjectId(item));
-    if(!item.id||associationModelId(item)!==output.modelId||!project||!portalAccountId(project))return false;
-    if(portalAccountId(item)&&portalAccountId(item)!==portalAccountId(project))return false;
-    return associations.filter(other=>associationModelId(other)===output.modelId
-      &&associationProjectId(other)===project.id).length===1;
+  return associations.flatMap(item=>{
+    if(!item.id||associationModelId(item)!==output.modelId)return[];
+    return projects.filter(project=>project.id===associationProjectId(item)&&portalAccountId(project)
+      &&(!portalAccountId(item)||portalAccountId(item)===portalAccountId(project))
+      &&associations.filter(other=>associationModelId(other)===output.modelId&&associationProjectId(other)===project.id).length===1)
+      .map(project=>({...item,accountId:portalAccountId(project),selectionKey:JSON.stringify([item.id,project.id,portalAccountId(project)])}));
   });
 }
 function clientGrantBody(form,onlyOutputId){
-  const projects=state.clientAccess?.projects||[];
+  const projects=clientAccessSnapshot().projects||[];
   let project,association=null;
   if(onlyOutputId){
     const output=state.outputs.find(item=>item.id===onlyOutputId);
-    association=exactClientAssociations(output).find(item=>item.id===form.elements.associationId.value);
-    project=association&&projects.find(item=>item.id===associationProjectId(association));
+    association=exactClientAssociations(output).find(item=>item.selectionKey===form.elements.associationId.value);
+    project=association&&projects.find(item=>item.id===associationProjectId(association)&&portalAccountId(item)===portalAccountId(association));
     if(!association||!project)throw new Error('An exact Operations model association is required for this model.');
   }else{
-    project=projects.find(item=>item.id===form.elements.projectId.value);
+    project=projects.find(item=>clientProjectKey(item)===form.elements.projectId.value);
     if(!project||!portalAccountId(project)||!form.elements.wholeProject.checked)
       throw new Error('Select an Operations project and explicitly approve whole-project access.');
+    if(!form.elements.includeFuturePublished.checked)throw new Error('Project access must include current and future published tasks.');
   }
-  return{grant:{accountId:portalAccountId(project),projectId:project.id,scopeType:onlyOutputId?'task':'project',
-    associationId:association?.id||null,includeFuturePublished:!onlyOutputId&&form.elements.includeFuturePublished.checked,
+  const native=project.nativeTarget;
+  return{...(native?{connection:'native'}:{}),grant:{...(native?{sourceId:native.sourceId,workspaceId:native.workspaceId,projectPublicId:native.projectPublicId}:{accountId:portalAccountId(project),projectId:project.id}),scopeType:onlyOutputId?'task':'project',
+    associationId:association?.id||null,includeFuturePublished:!onlyOutputId,
     expiresAt:form.elements.expiresAt.value?new Date(form.elements.expiresAt.value).toISOString():null,
     permissions:{measure:form.elements.measure.checked,cameras:form.elements.cameras.checked,download:form.elements.download.checked}}};
 }
 function clientSharePanel(output,onlyOutputId){
   if(can('viewer.client_grants.manage')&&state.shareContext?.clientLoading)return card('Authenticated client access',empty('Checking Operations client access… Public links can be created separately.'));
-  if(can('viewer.client_grants.manage')&&state.shareContext?.clientError){
+  if(can('viewer.client_grants.manage')&&state.shareContext?.clientError&&!state.clientNativeAccess?.targets?.length){
     const diagnostic=clientAccessDiagnostic(state.shareContext.clientError);
     const details=[diagnostic.status?`HTTP ${diagnostic.status}`:null,diagnostic.code?`Code: ${diagnostic.code}`:null].filter(Boolean).join(' · ');
     return card('Authenticated client access',empty('Operations client access could not be loaded. Close and reopen Share to retry. Public links are unaffected.')
@@ -624,8 +638,8 @@ function clientSharePanel(output,onlyOutputId){
 }
 function clientShareCard(output,onlyOutputId){
   if(!can('viewer.client_grants.manage'))return card('Authenticated client access',empty('Client-access management requires an additional permission.'));
-  const access=state.clientAccess;
-  if(!access)return card('Authenticated client access',empty('Operations client access is unavailable. No access has been granted.'));
+  const access=clientAccessSnapshot();
+  if(!state.clientAccess&&!state.clientNativeAccess)return card('Authenticated client access',empty('Operations client access is unavailable. No access has been granted.'));
   const associations=onlyOutputId?exactClientAssociations(output):[],projects=access.projects||[];
   let form='';
   if(onlyOutputId&&(!output?.activePublished||output.status!=='published')){
@@ -634,13 +648,16 @@ function clientShareCard(output,onlyOutputId){
     form=empty('No unique Operations association matches this model. Set up its model association in Operations first. Other models and entire client projects will not be granted access here.');
   }else{
     const target=onlyOutputId
-      ?`<label><span>Client Portal project for this exact model</span><select name="associationId" required><option value="">Select client project</option>${associations.map(item=>{const project=projects.find(project=>project.id===associationProjectId(item));return`<option value="${esc(item.id)}">${esc(project.clientName||project.client_name||'Client')} — ${esc(project.name||project.projectName||project.project_name||project.id)}</option>`}).join('')}</select></label><p class="form-note">Only this model. Future published tasks are not included.</p>`
-      :`<label><span>Operations client project</span><select name="projectId" required><option value="">Select client project</option>${projects.filter(portalAccountId).map(project=>`<option value="${esc(project.id)}">${esc(project.clientName||project.client_name||'Client')} — ${esc(project.name||project.projectName||project.project_name||project.id)}</option>`).join('')}</select></label><label class="check"><input type="checkbox" name="wholeProject" required> Grant the entire selected Operations project, not just one Viewer model</label><label class="check"><input type="checkbox" name="includeFuturePublished"> Also include future published tasks</label>`;
-    form=`<form id="client-grant-form" class="manage-form">${target}${field('Expiry (optional)','expiresAt','type="datetime-local"')}<label class="check"><input type="checkbox" name="measure" checked> Measurements</label><label class="check"><input type="checkbox" name="cameras" checked> Camera positions</label><label class="check"><input type="checkbox" name="download"> Downloads</label><button class="primary-button">Grant client access</button></form>`;
+      ?`<label><span>Client Portal project for this exact model</span><select name="associationId" required><option value="">Select client project</option>${associations.map(item=>{const project=projects.find(project=>project.id===associationProjectId(item)&&portalAccountId(project)===portalAccountId(item));return`<option data-portal="${project.nativeTarget?'native':'legacy'}" value="${esc(item.selectionKey)}">${esc(clientProjectLabel(project))}</option>`}).join('')}</select></label><p class="form-note">Only this model. Future published tasks are not included.</p>`
+      :`<label><span>Operations client project</span><select name="projectId" required><option value="">Select client project</option>${projects.filter(portalAccountId).map(project=>`<option data-portal="${project.nativeTarget?'native':'legacy'}" value="${esc(clientProjectKey(project))}">${esc(clientProjectLabel(project))}</option>`).join('')}</select></label><label class="check"><input type="checkbox" name="wholeProject" required> Grant the entire selected Operations project, not just one Viewer model</label><label class="check"><input type="checkbox" name="includeFuturePublished" required> Include current and future published tasks</label>`;
+    form=`<form id="client-grant-form" class="manage-form"><label><span>Portal connection</span><select name="portalConnection"><option value="legacy">Operations client accounts</option>${projects.some(project=>project.nativeTarget)?`<option value="native" ${projects.some(project=>!project.nativeTarget)?'':'selected'}>Connected Client Workspaces</option>`:''}</select></label><p class="form-note">Choose an exact account or verified workspace project. Existing workspace membership controls who can sign in. Viewer access applies to the selected client account or workspace and its eligible members.</p>${target}${field('Expiry (optional)','expiresAt','type="datetime-local"')}<label class="check"><input type="checkbox" name="measure" checked> Measurements</label><label class="check"><input type="checkbox" name="cameras" checked> Camera positions</label><label class="check"><input type="checkbox" name="download"> Downloads</label><button class="primary-button">Grant client access</button></form>`;
   }
-  const ids=new Set(associations.map(item=>item.id)),grants=(access.grants||[]).filter(grant=>!onlyOutputId
-    ||((grant.scopeType||grant.scope_type)==='task'&&ids.has(grant.associationId||grant.association_id)));
-  return card('Authenticated client access',form+`<div class="data-list top-gap">${grants.map(grant=>`<div class="manage-row"><div><strong>${esc(grant.clientName||grant.client_name||grant.accountId)}</strong><small>${esc(grant.projectName||grant.project_name||grant.projectId)}</small></div>${badge(grant.status||'active')}<div>${(grant.status||'active')==='active'?button('revoke-client-grant',grant.id,'Revoke'):''}</div></div>`).join('')||empty('No matching authenticated client grants.')}</div>`);
+  const localModels=new Set(state.outputs.filter(item=>(item.projectId||state.tasks.find(task=>task.id===item.taskId)?.projectId)===state.shareContext?.projectId).map(item=>item.modelId).filter(Boolean));
+  const related=(access.associations||[]).filter(item=>localModels.has(associationModelId(item))),projectIds=new Set(related.map(associationProjectId));
+  const ids=new Set((onlyOutputId?associations:related).map(item=>item.id)),grants=(access.grants||[]).filter(grant=>onlyOutputId
+    ?((grant.scopeType||grant.scope_type)==='task'&&ids.has(grant.associationId||grant.association_id))
+    :projectIds.has(grant.projectId||grant.project_id));
+  return card('Authenticated client access',(state.shareContext?.nativeError?'<p class="form-note" role="status">Connected Client Workspaces could not be loaded. Close and reopen Share to retry. Operations client account sharing remains available.</p>':'')+form+`<div class="data-list top-gap">${grants.map(grant=>`<div class="manage-row"><div><strong>${esc(grant.clientName||grant.client_name||grant.accountId)}</strong><small>${esc(grant.projectName||grant.project_name||grant.projectId)}</small></div>${badge(grant.status||'active')}<div>${(grant.status||'active')==='active'?button(grant.native?'revoke-native-client-grant':'revoke-client-grant',grant.id,'Revoke'):''}</div></div>`).join('')||empty('No matching authenticated client grants.')}</div>`);
 }
 function rememberShareResult(result,projectId,outputId){
   state.lastShareUrl=result.viewUrl;state.lastShareOutputId=outputId;
@@ -702,7 +719,7 @@ function shareModal(projectId,onlyOutputId=null){
     const list=can('viewer.shares.read')?`<div class="data-list top-gap">${(state.shares[output.id]||[]).map(share=>`<div class="manage-row"><div><strong>${esc(share.label||'Public link')}</strong><small>${esc(shareSettingsSummary(share))}</small></div>${badge(share.revokedAt?'revoked':share.expiresAt&&Date.parse(share.expiresAt)<=Date.now()?'expired':'active')}<div class="row-actions">${!share.revokedAt?`${button('copy-existing-share',share.id,'Copy link')}${button('open-existing-share',share.id,'Open')}${can('viewer.shares.create')?button('edit-share',share.id,'Edit settings'):''}${can('viewer.shares.revoke')?button('revoke-share',share.id,'Revoke'):''}`:''}</div></div>`).join('')||empty('No public links.')}</div>`:'';
     publicCards=card(output.displayName||'Model',form+list);
   }
-  openModal(`Share ${selected?.displayName||project?.displayName||'model'}`,`${onlyOutputId?`<div class="row-actions" role="group" aria-label="Sharing audience"><button class="secondary-button" data-share-mode="internal" aria-pressed="${mode==='internal'}">Internal client</button><button class="secondary-button" data-share-mode="public" aria-pressed="${mode==='public'}">Public link</button></div>`:'<p class="form-note">Share whole projects with authenticated Operations clients. Use a task’s Share button to create a public link for that task only.</p>'}<div class="share-columns" style="grid-template-columns:1fr" data-share-context="${esc(state.shareContext?.id||'')}"><div data-share-mode-panel="internal" ${mode==='internal'?'':'hidden'}><div data-client-share-panel>${clientSharePanel(selected,onlyOutputId)}</div></div>${onlyOutputId?`<div data-share-mode-panel="public" ${mode==='public'?'':'hidden'}><p class="form-note">No Operations account or client workspace is required. Anyone with the link can access its allowed content.</p>${result}${publicCards}</div>`:'<div data-legacy-project-shares></div>'}</div>`,'wide-modal');
+  openModal(`Share ${selected?.displayName||project?.displayName||'model'}`,`${onlyOutputId?`<div class="row-actions" role="tablist" aria-label="Sharing audience"><button class="secondary-button" data-share-mode="public" role="tab" id="share-tab-public" aria-controls="share-panel-public" tabindex="${mode==='public'?0:-1}" aria-selected="${mode==='public'}">Public link</button><button class="secondary-button" data-share-mode="internal" role="tab" id="share-tab-internal" aria-controls="share-panel-internal" tabindex="${mode==='internal'?0:-1}" aria-selected="${mode==='internal'}">Client Workspace</button></div>`:'<p class="form-note">Share whole projects with authenticated Operations clients. Use a task’s Share button to create a public link for that task only.</p>'}<div class="share-columns" style="grid-template-columns:1fr" data-share-context="${esc(state.shareContext?.id||'')}"><div data-share-mode-panel="internal" ${onlyOutputId?'role="tabpanel" id="share-panel-internal" aria-labelledby="share-tab-internal"':''} ${mode==='internal'?'':'hidden'}><div data-client-share-panel>${clientSharePanel(selected,onlyOutputId)}</div></div>${onlyOutputId?`<div data-share-mode-panel="public" role="tabpanel" id="share-panel-public" aria-labelledby="share-tab-public" ${mode==='public'?'':'hidden'}><p class="form-note">No Operations account or client workspace is required. Anyone with the link can access its allowed content.</p>${result}${publicCards}</div>`:'<div data-legacy-project-shares></div>'}</div>`,'wide-modal');
   bindShareModal(projectId,onlyOutputId);
 }
 function shareExpiryInput(value){
@@ -811,13 +828,16 @@ function bindShareModal(projectId,onlyOutputId){
   modalContent.querySelectorAll('[data-share-mode]').forEach(element=>element.onclick=()=>{
     if(!onlyOutputId||!state.shareContext)return;
     const mode=element.dataset.shareMode==='public'?'public':'internal';state.shareContext.mode=mode;
-    modalContent.querySelectorAll('[data-share-mode]').forEach(button=>button.setAttribute('aria-pressed',String(button.dataset.shareMode===mode)));
+    modalContent.querySelectorAll('[data-share-mode]').forEach(button=>{button.setAttribute('aria-selected',String(button.dataset.shareMode===mode));button.tabIndex=button.dataset.shareMode===mode?0:-1});
     modalContent.querySelectorAll('[data-share-mode-panel]').forEach(panel=>panel.hidden=panel.dataset.shareModePanel!==mode);
   });
+  const shareTabs=[...modalContent.querySelectorAll('[data-share-mode]')];
+  shareTabs.forEach((tab,index)=>tab.onkeydown=event=>{if(!['ArrowLeft','ArrowRight','Home','End'].includes(event.key))return;event.preventDefault();const next=shareTabs[event.key==='Home'?0:event.key==='End'?shareTabs.length-1:(index+(event.key==='ArrowRight'?1:-1)+shareTabs.length)%shareTabs.length];next.click();next.focus()});
   modalContent.querySelectorAll('.share-form').forEach(bindShareViewControls);
   modalContent.querySelectorAll('[data-action="copy-existing-share"],[data-action="open-existing-share"]').forEach(element=>element.onclick=()=>retrieveShareLink(element));
   modalContent.querySelectorAll('[data-action="edit-share"]').forEach(element=>element.onclick=()=>editShareModal(projectId,onlyOutputId,element.dataset.id));
   const grantForm=modalContent.querySelector('#client-grant-form');
+  if(grantForm){const portal=grantForm.elements.portalConnection,target=grantForm.elements.associationId||grantForm.elements.projectId;if(portal&&target){const update=()=>{for(const option of target.options){if(!option.value)continue;option.hidden=option.dataset.portal!==portal.value;option.disabled=option.hidden}target.value=''};portal.onchange=update;update()}}
   if(grantForm)grantForm.onsubmit=async event=>{
     event.preventDefault();if(grantForm.shareBusy)return;grantForm.shareBusy=true;
     try{
@@ -827,13 +847,13 @@ function bindShareModal(projectId,onlyOutputId){
       if(!modal.open||!grantForm.isConnected)return;
       const serialized=JSON.stringify(body);
       if(grantForm.shareRequest?.serialized!==serialized)grantForm.shareRequest={serialized,key:crypto.randomUUID()};
-      const result=await api('/api/v1/workspace/client-grants',{method:'POST',body,headers:{'Idempotency-Key':grantForm.shareRequest.key}});
-      state.clientAccess=result;toast('Client access granted');
+      const result=await api(body.connection==='native'?'/api/v1/workspace/native-client-grants':'/api/v1/workspace/client-grants',{method:'POST',body,headers:{'Idempotency-Key':grantForm.shareRequest.key}});
+      if(body.connection==='native')state.clientNativeAccess=result;else state.clientAccess=result;toast('Client access granted');
       if(modal.open&&grantForm.isConnected){shareModal(projectId,onlyOutputId);if(!onlyOutputId)injectProjectShareCard(projectId)}
     }catch(error){toast(error.message,true)}finally{grantForm.shareBusy=false}
   };
   modalContent.querySelectorAll('.share-form').forEach(form=>form.onsubmit=event=>{event.preventDefault();return createOutputShare(form,projectId,onlyOutputId)});
-  modalContent.querySelectorAll('[data-action="revoke-client-grant"]').forEach(element=>element.onclick=async()=>{const input=await dialogs.form({title:'Revoke client access',submitLabel:'Revoke access',destructive:true,fields:[{name:'reason',label:'Reason for revoking this client access',required:true,maxLength:240}]});if(input){modal.close();mutate('/api/v1/workspace/client-grants',{method:'DELETE',body:{grantId:element.dataset.id,reason:input.reason}},'Client access revoked')}});
+  modalContent.querySelectorAll('[data-action="revoke-client-grant"],[data-action="revoke-native-client-grant"]').forEach(element=>element.onclick=async()=>{const input=await dialogs.form({title:'Revoke client access',submitLabel:'Revoke access',destructive:true,fields:[{name:'reason',label:'Reason for revoking this client access',required:true,maxLength:240}]});if(input){modal.close();mutate(element.dataset.action==='revoke-native-client-grant'?'/api/v1/workspace/native-client-grants':'/api/v1/workspace/client-grants',{method:'DELETE',body:{grantId:element.dataset.id,reason:input.reason}},'Client access revoked')}});
   modalContent.querySelectorAll('[data-action="revoke-share"]').forEach(element=>element.onclick=async()=>{
     if(!can('viewer.shares.revoke')||!await dialogs.confirm('Revoke this public link? Future access through this link will be blocked.',
       {title:'Revoke public link',submitLabel:'Revoke link',destructive:true})||!element.isConnected||!modal.open)return;

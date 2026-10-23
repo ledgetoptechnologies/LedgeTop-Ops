@@ -13,6 +13,9 @@ import { sendNotificationMail } from "./mailer";
 import type { Env, StaffPrincipal } from "./types";
 import { introspectClientViewerSourceAuthorization } from "./viewer-session-issuer";
 import {
+  createNativeViewerClientGrant,
+  listNativeViewerClientGrantWorkspace,
+  revokeNativeViewerClientGrant,
   createViewerClientGrant,
   listViewerClientGrantWorkspace,
   revokeViewerClientGrant,
@@ -395,6 +398,7 @@ export function registerViewerProcessingRoutes(app: ViewerApp): void {
     const envelopeSchema = z.object({
       subject: z.string().regex(/^ops:[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/),
       action: z.enum(["list", "create", "revoke"]),
+      connection: z.literal("native").optional(),
       idempotencyKey: idempotencyKey.optional(),
       grant: z.unknown().optional(),
       grantId: opaqueId.optional(),
@@ -423,6 +427,17 @@ export function registerViewerProcessingRoutes(app: ViewerApp): void {
       id: row.id, email: row.email, displayName: row.display_name,
       accessSubject: row.access_subject, projectAlphaUserId: row.project_alpha_user_id,
     };
+    if (parsed.data.connection === "native") {
+      if (parsed.data.action === "list") return c.json(await listNativeViewerClientGrantWorkspace(c.env, principal));
+      const result = parsed.data.action === "create"
+        ? await createNativeViewerClientGrant({ env: c.env, principal,
+          grant: parsed.data.grant as Parameters<typeof createNativeViewerClientGrant>[0]["grant"],
+          idempotencyKey: parsed.data.idempotencyKey!, request: c.req.raw })
+        : await revokeNativeViewerClientGrant({ env: c.env, principal, grantId: parsed.data.grantId!,
+          reason: parsed.data.reason!, idempotencyKey: parsed.data.idempotencyKey!, request: c.req.raw });
+      return c.json({ ...await listNativeViewerClientGrantWorkspace(c.env, principal), replayed: result.replayed },
+        parsed.data.action === "create" && !result.replayed ? 201 : 200);
+    }
     if (parsed.data.action === "list") return c.json(await listViewerClientGrantWorkspace(c.env, principal));
     if (parsed.data.action === "create") {
       const result = await createViewerClientGrant({ env: c.env, principal,

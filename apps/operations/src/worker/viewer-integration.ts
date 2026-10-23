@@ -39,6 +39,8 @@ const clientGrantInput = z.object({
     context.addIssue({ code: "custom", path: ["associationId"], message: "Task grants require an association" });
   if (value.scopeType === "task" && value.includeFuturePublished)
     context.addIssue({ code: "custom", path: ["includeFuturePublished"], message: "Task grants cannot include future tasks" });
+  if (value.scopeType === "project" && !value.includeFuturePublished)
+    context.addIssue({ code: "custom", path: ["includeFuturePublished"], message: "Project grants must include published tasks" });
   if (value.expiresAt && Date.parse(value.expiresAt) <= Date.now())
     context.addIssue({ code: "custom", path: ["expiresAt"], message: "Grant expiry must be in the future" });
 });
@@ -425,7 +427,7 @@ export async function listNativeViewerClientGrantWorkspace(env:Env,principal:Sta
   const database=primaryDeliveryDb(env);
   const [grants,rows]=await Promise.all([listNativeViewerClientGrants(env,principal),database.prepare(`SELECT
     workspace.id workspace_id,workspace.project_alpha_source_id source_id,workspace.display_name workspace_name,
-    entity.public_id project_public_id,entity.display_name project_name,association.id association_id,association.model_title
+    entity.public_id project_public_id,entity.display_name project_name,association.id association_id,association.model_title,association.viewer_model_id
     FROM portal_v2_workspaces workspace
     JOIN portal_v2_directory_checkpoints checkpoint ON checkpoint.workspace_id=workspace.id
     JOIN portal_v2_directory_generations generation ON generation.id=checkpoint.active_generation_id
@@ -440,14 +442,14 @@ export async function listNativeViewerClientGrantWorkspace(env:Env,principal:Sta
     WHERE workspace.status='active' AND workspace.legacy_account_id IS NULL
     ORDER BY workspace.display_name COLLATE NOCASE,entity.display_name COLLATE NOCASE,association.model_title COLLATE NOCASE LIMIT 501`)
     .all<{workspace_id:string;source_id:string;workspace_name:string;project_public_id:string;project_name:string;
-      association_id:string|null;model_title:string|null}>()]);
+      association_id:string|null;model_title:string|null;viewer_model_id:string|null}>()]);
   if(rows.results.length>500)throw new HTTPException(503,{message:"The native Viewer target list is too large"});
   const targets=new Map<string,{sourceId:string;workspaceId:string;workspaceName:string;projectPublicId:string;projectName:string;
-    associations:Array<{id:string;modelTitle:string}>}>();
+    associations:Array<{id:string;modelTitle:string;viewerModelId:string|null}>}>();
   for(const row of rows.results){const key=`${row.source_id}\u0000${row.workspace_id}\u0000${row.project_public_id}`;
     let target=targets.get(key);if(!target){target={sourceId:row.source_id,workspaceId:row.workspace_id,workspaceName:row.workspace_name,
       projectPublicId:row.project_public_id,projectName:row.project_name,associations:[]};targets.set(key,target);}
-    if(row.association_id&&row.model_title)target.associations.push({id:row.association_id,modelTitle:row.model_title});}
+    if(row.association_id&&row.model_title)target.associations.push({id:row.association_id,modelTitle:row.model_title,viewerModelId:row.viewer_model_id});}
   return {grants,targets:[...targets.values()]};
 }
 
@@ -595,11 +597,11 @@ export async function listViewerClientGrantWorkspace(env: Env, principal: StaffP
   const [grantRows, projectRows, associationRows] = await Promise.all([
     listViewerClientGrants(env, principal),
     database.prepare(`SELECT DISTINCT project.id,project_grant.account_id account_id,
-      project.client_name,project.project_name FROM projects project
+      project.client_name,project.project_name,account.display_name account_name FROM projects project
       JOIN client_project_grants project_grant ON project_grant.project_id=project.id AND project_grant.revoked_at IS NULL
       JOIN client_accounts account ON account.id=project_grant.account_id AND account.status='active'
       WHERE project.active=1 ORDER BY project.client_name COLLATE NOCASE,project.project_name COLLATE NOCASE LIMIT 501`).all<{
-        id:string;account_id:string;client_name:string;project_name:string;
+        id:string;account_id:string;client_name:string;project_name:string;account_name:string;
       }>(),
     listAssociations(env),
   ]);
@@ -616,7 +618,7 @@ export async function listViewerClientGrantWorkspace(env: Env, principal: StaffP
       associationId:row.association_id, modelTitle:row.model_title, includeFuturePublished:Boolean(row.include_future_published),
       permissions:{measure:Boolean(row.can_measure),cameras:Boolean(row.can_view_cameras),download:Boolean(row.can_download)},
       expiresAt:row.authorization_expires_at, status:row.status, createdAt:row.created_at, revokedAt:row.revoked_at })),
-    projects: projectRows.results.map(row=>({id:row.id,accountId:row.account_id,clientName:row.client_name,projectName:row.project_name})),
+    projects: projectRows.results.map(row=>({id:row.id,accountId:row.account_id,accountName:row.account_name,clientName:row.client_name,projectName:row.project_name})),
     associations: liveAssociations.map(row=>({
       id:row.id,
       projectId:row.projectId,
