@@ -72,9 +72,12 @@ try {
   $env:DOTNET_CLI_TELEMETRY_OPTOUT = '1'
   $env:DOTNET_SKIP_FIRST_TIME_EXPERIENCE = '1'
   $env:DOTNET_GENERATE_ASPNET_CERTIFICATE = 'false'
+  # Use a compiler process in this build's filesystem context. A cached compiler
+  # server can outlive the app context and fail to see freshly generated inputs.
+  # This changes build isolation only, not compiler validation or diagnostics.
   & $DotnetPath publish App/WindowsDownload.App.csproj -c Release -r win-x64 --self-contained true `
     --source https://api.nuget.org/v3/index.json --artifacts-path (Join-Path $root 'artifacts') -o $payload `
-    -p:PublishSingleFile=false -p:DebugType=None -p:DebugSymbols=false `
+    -p:PublishSingleFile=false -p:DebugType=None -p:DebugSymbols=false -p:UseSharedCompilation=false `
     -p:LedgeTopPackage=true -p:LedgeTopReleaseChannel=pilot *> $publishLog
   if ($LASTEXITCODE -ne 0) { throw 'Pilot publish failed; inspect the owned publish.log.' }
 } finally { Pop-Location }
@@ -146,7 +149,7 @@ $extractedChannel = & $checker -AssemblyPath (Join-Path $unpacked 'LedgeTop.File
 if ($extractedChannel.assemblySha256 -cne $channel.assemblySha256) { throw 'Extracted application identity differs.' }
 $receipt = [pscustomobject]@{
   schemaVersion=1;status='unsigned_local_preview_only';sourceCommit=$ReviewedCommit;sourceTree=$tree;sourceArchiveSha256=(Hash $archive)
-  sdk=$sdk;rid='win-x64';selfContained=$true;channel='pilot';applicationSha256=$channel.assemblySha256
+  sdk=$sdk;rid='win-x64';selfContained=$true;sharedCompilation=$false;channel='pilot';applicationSha256=$channel.assemblySha256
   scriptSha256=(Hash $PSCommandPath);channelCheckerSha256=(Hash $checker);makeAppxSha256=$makeAppxSha
   runtimeNoticeCollectorSha256=(Hash (Join-Path $PSScriptRoot 'windows-package-runtime-notices.ps1'))
   helperSha256=$helperSha;rootLicenseSha256=$licenseSha;completeThirdPartyAttribution=$false
