@@ -1,0 +1,8 @@
+{
+  "machine": "Amd64",
+  "magic": "PE32Plus",
+  "importRva": 69361664,
+  "importSize": 4056,
+  "delayImportRva": 0,
+  "delayImportSize": 0
+}

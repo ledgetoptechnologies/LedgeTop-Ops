@@ -1,0 +1,44 @@
+{
+  "schemaVersion": 1,
+  "sourceCommit": "2fb3c693737baeb75355413332bc0c6245ffeacc",
+  "scope": "Actual read-only selected sqlite_master definitions on exact guarded staging resources",
+  "workers": [
+    {
+      "app": "operations",
+      "workerName": "ledgetop-ops-staging",
+      "versionId": "231fead7-433e-4015-847e-ea9ebda35894",
+      "definitionsObserved": 40,
+      "definitionsAbsent": [
+        [
+          "table",
+          "_cf_METADATA",
+          "_cf_METADATA"
+        ]
+      ],
+      "allObservedHashesMatchPriorDriftReport": true
+    },
+    {
+      "app": "delivery",
+      "workerName": "ledgetop-clients-staging",
+      "versionId": "6b9f1ff4-ce41-493e-a922-25081c2b67f4",
+      "definitionsObserved": 9,
+      "definitionsAbsent": [
+        [
+          "table",
+          "_cf_METADATA",
+          "_cf_METADATA"
+        ]
+      ],
+      "allObservedHashesMatchPriorDriftReport": true
+    }
+  ],
+  "privateReviewFileSha256": "1e61f1c5d51cbf0efe3808cd95cb7327b058e219ed786e273e29c56e9e2087b4",
+  "rawSqlPublished": false,
+  "applicationRowsRead": false,
+  "migrationsApplied": false,
+  "canonicalBaselineVerified": false,
+  "semanticEquivalenceEstablished": false,
+  "localBaselineReplay": "running; no result claimed",
+  "receiptRecordedAt": "2026-10-23T00:23:53.139Z",
+  "observationCompletedAt": "2026-10-23T00:18:50.128Z"
+}

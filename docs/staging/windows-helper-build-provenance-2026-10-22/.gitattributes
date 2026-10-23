@@ -1,0 +1,3 @@
+# Immutable upstream reference and license bytes; never execute source recipes.
+upstream/** -text whitespace=-trailing-space
+go-runtime-notices/*.txt -text whitespace=-trailing-space

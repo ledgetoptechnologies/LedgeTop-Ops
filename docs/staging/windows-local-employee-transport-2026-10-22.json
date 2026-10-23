@@ -1,0 +1,31 @@
+{
+  "kind": "local-employee-transport-v1",
+  "bytes": 2097152,
+  "sha256": "91d6f139837323de3829070b54945b770230a2fbfd270b370184b57305bfaf65",
+  "retainedPrefixBytes": 16384,
+  "tlsPinRejected": true,
+  "rootsAndListingParsed": true,
+  "resumedDigestVerified": true,
+  "crossUserDenied": true,
+  "traversalDenied": true,
+  "staleVersionRejected": true,
+  "revokedHandleDenied": true,
+  "imageId": "sha256:2456a495010c05aa4ebb9f3c77cca7fc26c9e1cf938e947130361a522f87b99e",
+  "observedDownloadStatuses": [
+    200,
+    206,
+    403,
+    412,
+    403
+  ],
+  "upstreamOperations": [
+    "list",
+    "manifest",
+    "content",
+    "content",
+    "manifest"
+  ],
+  "gatewayCallsAfterRevocation": 0,
+  "auditEvents": 2,
+  "limits": "Actual local .NET/Ops D1/Python container transport; synthetic JWKS discovery/helper and local TLS adapters. No human sign-in, NAS, staging host, EH or production acceptance."
+}

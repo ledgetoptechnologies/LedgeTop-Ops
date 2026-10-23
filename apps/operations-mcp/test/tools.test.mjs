@@ -27,7 +27,7 @@ async function connected(t, api, config = {}) {
 test('real MCP handshake advertises read tools only by default, and rejects hidden writes', async t => {
   const client = await connected(t, { session: async () => ({ user: { id: 'owner' } }), request: () => assert.fail('no request') });
   const result = await client.listTools();
-  assert.equal(result.tools.length, 9);
+  assert.equal(result.tools.length, 10);
   assert.ok(result.tools.every(v => v.annotations.readOnlyHint));
   assert.ok(result.tools.find(v => v.name === 'preview_delivery_access'));
   const denied = await client.callTool({ name: 'create_client', arguments: {} });
@@ -113,7 +113,40 @@ test('actual child-process stdio discovers tools without an Access login or netw
   const client = new Client({ name: 'stdio-test', version: '1' });
   t.after(() => client.close());
   await client.connect(transport);
-  assert.equal((await client.listTools()).tools.length, 9);
+  assert.equal((await client.listTools()).tools.length, 10);
+});
+
+test('existing public link lookup uses one exact read route without creating or widening a share', async t => {
+  const calls = [];
+  const existing = { share: { shareUrl: 'https://portal.example.test/s/synthetic#synthetic-secret' } };
+  const client = await connected(t, { request: async (...args) => { calls.push(args); return existing; } });
+  const prefix = 'Jobs/Clients/A & B/';
+  const result = await client.callTool({ name: 'get_existing_public_link', arguments: { prefix, itemRef: 'opaque_file_ref' } });
+  const url = new URL(calls[0][0], 'https://example.test');
+  assert.equal(url.pathname, '/api/delivery/shares/active');
+  assert.deepEqual([...url.searchParams], [['prefix', prefix], ['itemRef', 'opaque_file_ref']]);
+  assert.equal(calls[0].length, 1); // Default GET: no mutation body or create endpoint.
+  assert.deepEqual(JSON.parse(result.content[0].text), existing);
+  for (const args of [{ prefix: '' }, { prefix: 'x\n' }, { prefix: 'x'.repeat(1025) }, { prefix, itemRef: '../x' }, { prefix, method: 'POST' }]) {
+    assert.equal((await client.callTool({ name: 'get_existing_public_link', arguments: args })).isError, true);
+  }
+  assert.equal(calls.length, 1);
+});
+
+test('missing and denied existing public links never fall back to create or another identity', async t => {
+  const calls = [];
+  const client = await connected(t, { request: async (...args) => {
+    calls.push(args);
+    if (calls.length === 1) return { share: null };
+    throw new AccessClientError('Operations request failed (HTTP 403).');
+  } });
+  const input = { name: 'get_existing_public_link', arguments: { prefix: 'Jobs/Synthetic/' } };
+  assert.deepEqual(JSON.parse((await client.callTool(input)).content[0].text), { share: null });
+  const denied = await client.callTool(input);
+  assert.equal(denied.isError, true);
+  assert.match(denied.content[0].text, /HTTP 403/);
+  assert.equal(calls.length, 2);
+  assert.ok(calls.every(call => call.length === 1 && call[0].startsWith('/api/delivery/shares/active?')));
 });
 
 test('safe authentication diagnostics survive MCP while arbitrary errors stay hidden', async t => {

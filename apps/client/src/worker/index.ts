@@ -20,6 +20,7 @@ export { OperationsPortalNativeRecipientAuthorityIngress } from "./operations-po
 export { OperationsPortalNativeDeliveryAuthorityIngress } from "./operations-portal-native-delivery-authority-entrypoint";
 import { friendlyBulkFailure } from "./bulk-download-errors";
 import type { Env, ShareRow } from "./types";
+import { selectedClientUiReleaseShell, serveClientUiReleaseAsset } from "./ui-release-routes";
 export { BulkDownloadWorkflow } from "./workflow";
 import { BULK_DOWNLOAD_RETENTION_MS } from "./workflow";
 export { CloudTransferWorkflow } from "./cloud-transfer/workflow";
@@ -393,8 +394,9 @@ function aliasedPath(key: string, root: string, aliases: Map<string, string>): s
 
 app.get("/health", c => c.json({ status: "ok", service: "ltds-delivery" }));
 
-export async function serveAppShell(request: Request, assets: Pick<Fetcher, "fetch">): Promise<Response> {
-  const response = await assets.fetch(request);
+export async function serveAppShell(request: Request, assets: Pick<Fetcher, "fetch">, presentationEnv?: Env): Promise<Response> {
+  const selected = presentationEnv ? await selectedClientUiReleaseShell(request, presentationEnv) : null;
+  const response = selected ?? await assets.fetch(request);
   const headers = new Headers(response.headers); headers.set("Cache-Control", "no-store"); headers.set("X-Robots-Tag", "noindex, nofollow");
   return new Response(response.body, { status: response.status, headers });
 }
@@ -1163,8 +1165,11 @@ app.route("/api/client-onboarding", clientOnboardingRecipientRouter);
 app.on(["GET", "HEAD"], "/onboarding/:invitationId", c => c.env.CLIENT_ONBOARDING_RECIPIENT_BRIDGE_ENABLED === "true"
   ? serveAppShell(c.req.raw, c.env.ASSETS)
   : c.json({ error: "Not found" }, 404));
-app.on(["GET", "HEAD"], "/portal", c => serveAppShell(c.req.raw, c.env.ASSETS));
-app.on(["GET", "HEAD"], "/portal/*", c => serveAppShell(c.req.raw, c.env.ASSETS));
+app.on(["GET", "HEAD"], "/portal", c => serveAppShell(c.req.raw, c.env.ASSETS, c.env));
+app.on(["GET", "HEAD"], "/portal/*", c => serveAppShell(c.req.raw, c.env.ASSETS, c.env));
+// Independent of HTML activation so an already-open new tab survives rollback.
+app.all("/_ui/*", c => serveClientUiReleaseAsset(c.req.raw, c.env));
+app.all("/_ui", c => serveClientUiReleaseAsset(c.req.raw, c.env));
 app.on(["GET", "HEAD"], "/assets/*", c => {
   const path = new URL(c.req.url).pathname;
   if (/%(?:2e|2f|5c)/i.test(path)) throw new HTTPException(404, { message: "Asset not found" });

@@ -808,7 +808,7 @@ function VideoPreview({ item, publicId, namespace }: { item: DeliveryItem; publi
 function OriginalVideo({ item }: { item: DeliveryItem }) {
   const [loading, setLoading] = useState(true); const [failed, setFailed] = useState(false);
   if (failed) return <PreparedPlaceholder item={item} />;
-  return <div className="video-preview" aria-busy={loading}>{loading && <><SkeletonViewer /><span className="media-status">Opening original video…</span></>}<video src={item.sourceUrl} controls playsInline preload="metadata" onLoadedMetadata={() => setLoading(false)} onError={() => setFailed(true)} /></div>;
+  return <div className="video-preview" aria-busy={loading}>{loading && <><SkeletonViewer /><span className="media-status">Opening original video…</span></>}<video src={item.sourceUrl} controls autoPlay muted playsInline preload="metadata" onLoadedMetadata={() => setLoading(false)} onError={() => setFailed(true)} /></div>;
 }
 
 function Thumbnail({ item }: { item: DeliveryItem }) {

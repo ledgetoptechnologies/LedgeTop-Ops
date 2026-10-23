@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "observedDate": "2026-10-22",
+  "repository": "cloudflare/cloudflared",
+  "artifactSha256": "76b2805253d0d6ffacb092a7acfbee99e7af6917835c0c5410e23f3ef5052da2",
+  "listRequest": "https://api.github.com/repos/cloudflare/cloudflared/attestations/sha256:76b2805253d0d6ffacb092a7acfbee99e7af6917835c0c5410e23f3ef5052da2",
+  "listHttpStatus": 404,
+  "verificationCommand": "gh attestation verify <qualified-local-cloudflared.exe> --repo cloudflare/cloudflared --format json",
+  "verificationExitCode": 1,
+  "verificationError": "HTTP 404: Not Found retrieving exact-digest SLSA provenance v1 attestations",
+  "attestationVerified": false,
+  "limitation": "No accessible GitHub artifact attestation was obtained or verified with these requests; HTTP404 does not prove that no attestation exists in another system or under different access."
+}

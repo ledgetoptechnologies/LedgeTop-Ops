@@ -407,7 +407,7 @@ describe("indexed public folder visibility",()=>{
 });
 
 describe("Cloudflare Stream player",()=>{
-  it("requests visible playback controls, seeking metadata, and dark letterboxing",()=>{const url=new URL(streamPlayerUrl("customer-code","signed-token"));expect(url.hostname).toBe("customer-customer-code.cloudflarestream.com");expect(url.pathname).toBe("/signed-token/iframe");expect(Object.fromEntries(url.searchParams)).toEqual({controls:"true",preload:"metadata",letterboxColor:"#0d141a"});});
+  it("starts muted with visible playback controls, seeking metadata, and dark letterboxing",()=>{const url=new URL(streamPlayerUrl("customer-code","signed-token"));expect(url.hostname).toBe("customer-customer-code.cloudflarestream.com");expect(url.pathname).toBe("/signed-token/iframe");expect(Object.fromEntries(url.searchParams)).toEqual({controls:"true",autoplay:"true",muted:"true",preload:"metadata",letterboxColor:"#0d141a"});});
 });
 
 describe("shared folder unavailability grace",()=>{

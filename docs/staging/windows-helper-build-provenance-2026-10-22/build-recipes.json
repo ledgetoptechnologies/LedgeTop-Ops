@@ -1,0 +1,93 @@
+[
+  {
+    "sourcePath": ".ci/commons.gitlab-ci.yml",
+    "sourceUrl": "https://raw.githubusercontent.com/cloudflare/cloudflared/de6376c5af4a67cbc65258682e5a01781827643d/.ci/commons.gitlab-ci.yml",
+    "outputPath": "upstream/.ci__commons.gitlab-ci.yml.source.txt",
+    "bytes": 1641,
+    "sha256": "7ddb3ea9259bff8e27f0e663fc8bb3eeb0bc955d8f0586627da42254933d620f"
+  },
+  {
+    "sourcePath": ".ci/image/Dockerfile",
+    "sourceUrl": "https://raw.githubusercontent.com/cloudflare/cloudflared/de6376c5af4a67cbc65258682e5a01781827643d/.ci/image/Dockerfile",
+    "outputPath": "upstream/.ci__image__Dockerfile.source.txt",
+    "bytes": 1079,
+    "sha256": "c39dcd276ded5ccc0c93356c76e0f0c5612bec7e6795405541960691c03696e4"
+  },
+  {
+    "sourcePath": ".ci/release.gitlab-ci.yml",
+    "sourceUrl": "https://raw.githubusercontent.com/cloudflare/cloudflared/de6376c5af4a67cbc65258682e5a01781827643d/.ci/release.gitlab-ci.yml",
+    "outputPath": "upstream/.ci__release.gitlab-ci.yml.source.txt",
+    "bytes": 4614,
+    "sha256": "838882a1fb8a6edafc1bebdc4e26f39dac7e4d511be631ca75f75a1303685d12"
+  },
+  {
+    "sourcePath": ".ci/scripts/package-windows.sh",
+    "sourceUrl": "https://raw.githubusercontent.com/cloudflare/cloudflared/de6376c5af4a67cbc65258682e5a01781827643d/.ci/scripts/package-windows.sh",
+    "outputPath": "upstream/.ci__scripts__package-windows.sh.source.txt",
+    "bytes": 784,
+    "sha256": "4ab9f2ae98175ebddc33e37f3a1ca51174dadc53d23beb9edc2d9058f39e86d3"
+  },
+  {
+    "sourcePath": ".ci/scripts/windows/builds.ps1",
+    "sourceUrl": "https://raw.githubusercontent.com/cloudflare/cloudflared/de6376c5af4a67cbc65258682e5a01781827643d/.ci/scripts/windows/builds.ps1",
+    "outputPath": "upstream/.ci__scripts__windows__builds.ps1.source.txt",
+    "bytes": 1619,
+    "sha256": "42865cd0ef55c2132ff947991b4f39a11320b8f223bef149120642c70317c9c9"
+  },
+  {
+    "sourcePath": ".ci/scripts/windows/go-wrapper.ps1",
+    "sourceUrl": "https://raw.githubusercontent.com/cloudflare/cloudflared/de6376c5af4a67cbc65258682e5a01781827643d/.ci/scripts/windows/go-wrapper.ps1",
+    "outputPath": "upstream/.ci__scripts__windows__go-wrapper.ps1.source.txt",
+    "bytes": 2395,
+    "sha256": "c03074affbf479888a497e6f1574c791709f7ae7602ff6273a37f3dda21c0771"
+  },
+  {
+    "sourcePath": ".ci/scripts/windows/sign-msi.ps1",
+    "sourceUrl": "https://raw.githubusercontent.com/cloudflare/cloudflared/de6376c5af4a67cbc65258682e5a01781827643d/.ci/scripts/windows/sign-msi.ps1",
+    "outputPath": "upstream/.ci__scripts__windows__sign-msi.ps1.source.txt",
+    "bytes": 1004,
+    "sha256": "fbe9c024c1bad449452d56ca304c0a773ebdc5db0f7a45ba8e7d603da67550d4"
+  },
+  {
+    "sourcePath": ".ci/windows.gitlab-ci.yml",
+    "sourceUrl": "https://raw.githubusercontent.com/cloudflare/cloudflared/de6376c5af4a67cbc65258682e5a01781827643d/.ci/windows.gitlab-ci.yml",
+    "outputPath": "upstream/.ci__windows.gitlab-ci.yml.source.txt",
+    "bytes": 4769,
+    "sha256": "8176a8c5f5a57b4bd0e7a999753c670ce7214e29634b3c84a5c4bf4c768d9fc0"
+  },
+  {
+    "sourcePath": ".gitlab-ci.yml",
+    "sourceUrl": "https://raw.githubusercontent.com/cloudflare/cloudflared/de6376c5af4a67cbc65258682e5a01781827643d/.gitlab-ci.yml",
+    "outputPath": "upstream/.gitlab-ci.yml.source.txt",
+    "bytes": 2693,
+    "sha256": "200cd33df76c7599328275447c337711fe8bc0a5b0c59faaa6124abf3e79e197"
+  },
+  {
+    "sourcePath": "cfsetup.yaml",
+    "sourceUrl": "https://raw.githubusercontent.com/cloudflare/cloudflared/de6376c5af4a67cbc65258682e5a01781827643d/cfsetup.yaml",
+    "outputPath": "upstream/cfsetup.yaml.source.txt",
+    "bytes": 95,
+    "sha256": "1aee96d8f17610a90ed837d37a5a3afdd2ea6fbe2f6f8c67096c5554dff814c9"
+  },
+  {
+    "sourcePath": "github_release.py",
+    "sourceUrl": "https://raw.githubusercontent.com/cloudflare/cloudflared/de6376c5af4a67cbc65258682e5a01781827643d/github_release.py",
+    "outputPath": "upstream/github_release.py.source.txt",
+    "bytes": 10903,
+    "sha256": "35d5098906724d119c567b062b25d90b9619e4a7fb80d3c150b9868287aab1ce"
+  },
+  {
+    "sourcePath": "LICENSE",
+    "sourceUrl": "https://raw.githubusercontent.com/cloudflare/cloudflared/de6376c5af4a67cbc65258682e5a01781827643d/LICENSE",
+    "outputPath": "upstream/LICENSE.cloudflared.txt",
+    "bytes": 11357,
+    "sha256": "58d1e17ffe5109a7ae296caafcadfdbe6a7d176f0bc4ab01e12a689b0499d8bd"
+  },
+  {
+    "sourcePath": "Makefile",
+    "sourceUrl": "https://raw.githubusercontent.com/cloudflare/cloudflared/de6376c5af4a67cbc65258682e5a01781827643d/Makefile",
+    "outputPath": "upstream/Makefile.source.txt",
+    "bytes": 10062,
+    "sha256": "cf269ad4bda9b640566ba7389047174872f935a4bbd7daf1024238fcd1e4b5f9"
+  }
+]

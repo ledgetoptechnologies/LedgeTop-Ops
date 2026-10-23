@@ -1,0 +1,234 @@
+{
+  "schemaVersion": 1,
+  "scope": "Private exact-token verification of only three reviewed RAISE-WHERE/CASE hypotheses; no DDL execution",
+  "localCaptureSha256": "1513c1935c9113052c780b54bc9644c40b564903a8b17ab1b59d6c65507969e7",
+  "remoteCaptureSha256": "1e61f1c5d51cbf0efe3808cd95cb7327b058e219ed786e273e29c56e9e2087b4",
+  "comparedDefinitions": 3,
+  "syntaxRelationCandidates": 3,
+  "messageLiteralDifferences": 0,
+  "apps": [
+    {
+      "app": "operations",
+      "objects": [
+        {
+          "type": "trigger",
+          "name": "native_staff_onboarding_approve_finish",
+          "tbl_name": "native_staff_management_commands",
+          "expectedPresent": true,
+          "observedPresent": true,
+          "expectedSqlSha256": "2e6ee353b58933ae45fa688a8952e44700cd2d5afb54bfe4476c6f5afc506e2a",
+          "observedSqlSha256": "a483ec66d1ab04cb37664109f5ada366b600e7a1e31e1a4111baa5adc5b5ddfb",
+          "category": "unresolved_token_or_structure_difference",
+          "residualAttribution": {
+            "reasonCategory": "non_comment_token_difference",
+            "tokenKindCounts": {
+              "word": {
+                "expected": 48,
+                "observed": 51
+              },
+              "quoted_identifier": {
+                "expected": 0,
+                "observed": 0
+              },
+              "literal": {
+                "expected": 9,
+                "observed": 9
+              },
+              "blob": {
+                "expected": 0,
+                "observed": 0
+              },
+              "number": {
+                "expected": 3,
+                "observed": 3
+              },
+              "comment": {
+                "expected": 0,
+                "observed": 0
+              },
+              "operator": {
+                "expected": 1,
+                "observed": 1
+              },
+              "punctuation": {
+                "expected": 35,
+                "observed": 35
+              }
+            },
+            "changedTokenKinds": [
+              "word",
+              "punctuation"
+            ],
+            "literalTokenSequenceChanged": false,
+            "nonCommentTokenCounts": {
+              "expected": 96,
+              "observed": 99
+            },
+            "commentTokenSequenceChanged": false
+          },
+          "syntaxRelation": {
+            "category": "syntax_relation_candidate",
+            "pattern": "select_raise_where_to_select_case_when_v1",
+            "predicateAndOtherActiveTokensMatch": true,
+            "raiseAbortMessage": {
+              "changed": false,
+              "expectedLiteralSha256": "47ec0d08eeb56c38ac8986a06339bf5240990305c3271f254cbdb4360bdde1a6",
+              "observedLiteralSha256": "47ec0d08eeb56c38ac8986a06339bf5240990305c3271f254cbdb4360bdde1a6"
+            },
+            "semanticEquivalenceEstablished": false,
+            "canonicalBaselineVerified": false
+          }
+        },
+        {
+          "type": "trigger",
+          "name": "operations_directory_audit_original_subject_required",
+          "tbl_name": "operations_directory_audit",
+          "expectedPresent": true,
+          "observedPresent": true,
+          "expectedSqlSha256": "d29fcb4e26e0e13eae79a4c49e598ece913db630c585b89f717b676c2e7f615d",
+          "observedSqlSha256": "c8138b0ebf8fdf5154316e6f081f3cb57380e76d81df0086ffbc21575e772c05",
+          "category": "unresolved_token_or_structure_difference",
+          "residualAttribution": {
+            "reasonCategory": "non_comment_token_difference",
+            "tokenKindCounts": {
+              "word": {
+                "expected": 49,
+                "observed": 52
+              },
+              "quoted_identifier": {
+                "expected": 0,
+                "observed": 0
+              },
+              "literal": {
+                "expected": 2,
+                "observed": 2
+              },
+              "blob": {
+                "expected": 0,
+                "observed": 0
+              },
+              "number": {
+                "expected": 3,
+                "observed": 3
+              },
+              "comment": {
+                "expected": 0,
+                "observed": 0
+              },
+              "operator": {
+                "expected": 0,
+                "observed": 0
+              },
+              "punctuation": {
+                "expected": 21,
+                "observed": 21
+              }
+            },
+            "changedTokenKinds": [
+              "word",
+              "punctuation"
+            ],
+            "literalTokenSequenceChanged": false,
+            "nonCommentTokenCounts": {
+              "expected": 75,
+              "observed": 78
+            },
+            "commentTokenSequenceChanged": false
+          },
+          "syntaxRelation": {
+            "category": "syntax_relation_candidate",
+            "pattern": "select_raise_where_to_select_case_when_v1",
+            "predicateAndOtherActiveTokensMatch": true,
+            "raiseAbortMessage": {
+              "changed": false,
+              "expectedLiteralSha256": "3ecbf087468ec8b580757a29b8908241b04804a88e5a44d9f0fe067f0c906ae3",
+              "observedLiteralSha256": "3ecbf087468ec8b580757a29b8908241b04804a88e5a44d9f0fe067f0c906ae3"
+            },
+            "semanticEquivalenceEstablished": false,
+            "canonicalBaselineVerified": false
+          }
+        }
+      ]
+    },
+    {
+      "app": "delivery",
+      "objects": [
+        {
+          "type": "trigger",
+          "name": "client_folder_notification_batch_control_result",
+          "tbl_name": "client_folder_notification_batch_controls",
+          "expectedPresent": true,
+          "observedPresent": true,
+          "expectedSqlSha256": "b68f87949254902f7a06fbc3f1a09446ca99b1c1b3a83790b1e8c2e429463364",
+          "observedSqlSha256": "d6c84f6aba62f9e89c50e5f9c76c2e497927afca0f06b3709a9b8ca627a23882",
+          "category": "unresolved_token_or_structure_difference",
+          "residualAttribution": {
+            "reasonCategory": "non_comment_token_difference",
+            "tokenKindCounts": {
+              "word": {
+                "expected": 46,
+                "observed": 49
+              },
+              "quoted_identifier": {
+                "expected": 0,
+                "observed": 0
+              },
+              "literal": {
+                "expected": 5,
+                "observed": 5
+              },
+              "blob": {
+                "expected": 0,
+                "observed": 0
+              },
+              "number": {
+                "expected": 1,
+                "observed": 1
+              },
+              "comment": {
+                "expected": 0,
+                "observed": 0
+              },
+              "operator": {
+                "expected": 0,
+                "observed": 0
+              },
+              "punctuation": {
+                "expected": 29,
+                "observed": 29
+              }
+            },
+            "changedTokenKinds": [
+              "word",
+              "literal",
+              "punctuation"
+            ],
+            "literalTokenSequenceChanged": true,
+            "nonCommentTokenCounts": {
+              "expected": 81,
+              "observed": 84
+            },
+            "commentTokenSequenceChanged": false
+          },
+          "syntaxRelation": {
+            "category": "syntax_relation_candidate",
+            "pattern": "select_raise_where_to_select_case_when_v1",
+            "predicateAndOtherActiveTokensMatch": true,
+            "raiseAbortMessage": {
+              "changed": false,
+              "expectedLiteralSha256": "592273562b7689bfbb362dc7125224169c58024b88dc85f45be972b10ec02258",
+              "observedLiteralSha256": "592273562b7689bfbb362dc7125224169c58024b88dc85f45be972b10ec02258"
+            },
+            "semanticEquivalenceEstablished": false,
+            "canonicalBaselineVerified": false
+          }
+        }
+      ]
+    }
+  ],
+  "rawSqlPublished": false,
+  "canonicalBaselineVerified": false,
+  "semanticEquivalenceEstablished": false,
+  "migrationsApplied": false,
+  "note": "Original coarse differences remain unresolved. Only one exact reviewed ABORT-RAISE statement wrapper/reorder is recognized; the predicate and every other active token must match. Only the ABORT second-argument literal is compared separately by exact hash. No historical source/data-effects or readiness proof."
+}

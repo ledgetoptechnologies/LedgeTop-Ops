@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 1,
+  "status": "private_inputs_staged_not_published",
+  "helper": {
+    "version": "2026.10.3",
+    "bytes": 55329336,
+    "sha256": "76b2805253d0d6ffacb092a7acfbee99e7af6917835c0c5410e23f3ef5052da2",
+    "authenticode": "Valid",
+    "signerOrganization": "Cloudflare, Inc.",
+    "filename": "cloudflared.exe"
+  },
+  "upstreamRootLicense": {
+    "sourceCommit": "de6376c5af4a67cbc65258682e5a01781827643d",
+    "sourceUrl": "https://raw.githubusercontent.com/cloudflare/cloudflared/de6376c5af4a67cbc65258682e5a01781827643d/LICENSE",
+    "license": "Apache-2.0",
+    "bytes": 11357,
+    "sha256": "58d1e17ffe5109a7ae296caafcadfdbe6a7d176f0bc4ab01e12a689b0499d8bd",
+    "filename": "LICENSE.cloudflared.txt"
+  },
+  "rootLicenseIsCompleteThirdPartyAttribution": false,
+  "upstreamSuppliedReleaseNoticeOrSbomFound": false,
+  "goOnlyInventoryProvesAllNativeDependencies": false,
+  "helperExecutedThisStep": false,
+  "authenticationAttempted": false,
+  "installed": false,
+  "published": false,
+  "trueNasOrNasAccessed": false
+}

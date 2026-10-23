@@ -1,0 +1,84 @@
+{
+  "schemaVersion": 1,
+  "qualification": "synthetic-remote-linux-only",
+  "date": "2026-10-22",
+  "source": {
+    "commit": "e0ee82e5ad38db4a3808ebd879baff2ecb606daa",
+    "subtree": "apps/employee-read-gateway",
+    "archiveSha256": "938e7e2638fa2dcf65352899bf1586c8dae380643944d964e21d7b1700941b45",
+    "archiveBytes": 133120
+  },
+  "images": {
+    "officialBase": "python:3.14.9-slim-trixie@sha256:a145a961ec2cf5741772d5e39773d979271132884fd778f6c3fad34e52b85402",
+    "testImage": "sha256:1140db4c5276c3ebe279add523f1db8288edaca15f5d446e8b063a34c41c7332"
+  },
+  "host": {
+    "label": "staging",
+    "storagePreflight": "Context and Docker data root resolved to local ext4; no NAS traversal.",
+    "freeDiskKiBBefore": 11531772,
+    "availableMemoryMiBBefore": 5596,
+    "swapUsedMiB": 0
+  },
+  "test": {
+    "command": "python -m unittest discover -s tests -v",
+    "count": 67,
+    "passed": 67,
+    "failed": 0,
+    "seconds": 10.143,
+    "exitCode": 0,
+    "oomKilled": false,
+    "warnings": "error::ResourceWarning"
+  },
+  "container": {
+    "user": "65532:65532",
+    "network": "none",
+    "rootFilesystem": "read-only",
+    "hostMounts": [],
+    "ports": [],
+    "capDrop": [
+      "ALL"
+    ],
+    "securityOpt": [
+      "no-new-privileges"
+    ],
+    "cpuLimit": 1,
+    "memoryBytes": 536870912,
+    "memorySwapBytes": 536870912,
+    "pidsLimit": 64,
+    "tmpfs": {
+      "path": "/tmp",
+      "sizeMiB": 256,
+      "options": [
+        "rw",
+        "nosuid",
+        "nodev"
+      ]
+    }
+  },
+  "reproduction": {
+    "archive": "git archive --format=tar e0ee82e5ad38db4a3808ebd879baff2ecb606daa:apps/employee-read-gateway",
+    "build": "docker build --memory 512m --cpuset-cpus 0 -f Dockerfile.test -t <unique-owned-tag> .",
+    "run": "docker run --network none --read-only --tmpfs /tmp:rw,nosuid,nodev,size=256m --cap-drop ALL --security-opt no-new-privileges --memory 512m --memory-swap 512m --cpus 1 --pids-limit 64 --log-driver none --env PYTHONWARNINGS=error::ResourceWarning <unique-owned-tag>"
+  },
+  "scope": {
+    "syntheticOnly": true,
+    "nasAccess": false,
+    "hostContentMounted": false,
+    "existingServicesChanged": false,
+    "liveRoutesActivated": false,
+    "liveKeysOrGrantsCreated": false,
+    "largeFileEvidence": "Over30GiB fixture is sparse, uses mocked free-space preflight and cancels before copying. No real large-file throughput qualification.",
+    "nestedMountEvidence": "Actual nested mount unavailable in unprivileged container; mount-ID mismatch rejection tested independently.",
+    "sourceConsistency": "Copied served bytes match advertised SHA; stat checks are not an atomic point-in-time source snapshot."
+  },
+  "cleanup": {
+    "verifiedContainerIdentityBeforeRemoval": true,
+    "verifiedStopped": true,
+    "ownedContainerRemoved": true,
+    "ownedImageTagAndImageRemoved": true,
+    "ownedContextRealpathCheckedUnderVarTmp": true,
+    "ownedContextRemoved": true,
+    "broadPrune": false,
+    "baseImageAndBuildCacheRetained": true
+  }
+}

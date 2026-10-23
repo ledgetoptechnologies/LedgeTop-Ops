@@ -49,6 +49,9 @@ export function buildTools(client, { allowWrites = false } = {}) {
   add('list_delivery_folder', 'Browse authorized delivery folders to find folder references; no file bytes are downloaded.',
     { prefix: z.string().max(1400).optional(), cursor: text(8192).optional() },
     a => client.request(query('/api/delivery/folders', a)));
+  add('get_existing_public_link', 'Retrieve an already active public link for one authorized delivery folder or file. Use the exact containing folder prefix from list_delivery_folder; for a file, pass its files[].id as itemRef. Does not create, renew, change, or send a link; null means no active share. A returned shareUrl is bearer access: disclose it only to the requesting authorized user. Existing server sharing permissions apply.',
+    { prefix: text(1024), itemRef: folderRef.optional() },
+    a => client.request(query('/api/delivery/shares/active', a)));
   add('list_delivery_grants', 'Inspect existing grants and folder bindings for an authorized folder. grantId is the logical grant ID; id is a physical record ID.',
     { folderRef }, a => client.request(query('/api/delivery/authenticated-grants', a)));
   add('find_grant_audiences', 'Find current authorized recipients for an existing folder binding. Use returned IDs, never infer them from names.',

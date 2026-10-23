@@ -57,7 +57,7 @@ describe("operations native delivery authorization reader", () => {
       features: ["folder.list", "file.download"] });
     expect(fake.queries[0]).toContain("project_folders physical");
     expect(fake.queries[0]).toContain("operations_portal_workspace_publication_current_checkpoints");
-    expect(fake.bind).toHaveBeenCalledWith(request.feature, 1, request.authorityId, request.authorityRevision,
+    expect(fake.bind).toHaveBeenCalledWith(null, null, null, null, null, null, null, request.feature, 1, request.authorityId, request.authorityRevision,
       request.recipientBindingId, request.enrollmentIntentId, request.issuer, request.subject,
       request.targetId, request.targetRevision,
       request.targetClientRecordId, request.clientAuthorityId, request.workspaceId, request.homeOwnershipEpoch,
