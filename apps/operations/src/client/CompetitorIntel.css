@@ -94,6 +94,7 @@
 .ci-factors h5, .ci-ads-activity h5, .ci-self-lists h5 { font-size: .8rem; text-transform: uppercase; letter-spacing: .03em; color: var(--muted); margin-bottom: .3rem; }
 .ci-factors ul, .ci-self-lists ul, .ci-self-lists ol { margin: 0; padding-left: 1.1rem; display: grid; gap: .25rem; font-size: .86rem; }
 .ci-facts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .55rem; margin: 0; }
+.ci-facts .ci-fresh { white-space: normal; }
 .ci-ads-activity { display: grid; gap: .5rem; padding-top: .7rem; border-top: 1px solid var(--line); font-size: .88rem; }
 .ci-source { display: flex; flex-wrap: wrap; gap: .3rem .7rem; align-items: center; font-size: .82rem; }
 

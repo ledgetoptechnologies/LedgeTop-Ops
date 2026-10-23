@@ -90,6 +90,17 @@ test("competitors rank by threat and show missing evidence honestly", async ({ p
   await expect(pine).toContainText("Blocked automated checks");
   await expect(pine).toContainText("No baseline assessment yet.");
   await noHorizontalScroll(page); await shot(page, "ops-ci-competitors");
+  for (const width of [320, 375]) {
+    await page.setViewportSize({ width, height: 812 });
+    await noHorizontalScroll(page);
+    const freshness = page.getByRole("article", { name: "Lakeside Exteriors" }).locator(".ci-facts .ci-fresh");
+    await expect(freshness).toBeVisible();
+    expect(await freshness.evaluate(element => {
+      const bounds = element.getBoundingClientRect();
+      const facts = element.closest(".ci-facts")!.getBoundingClientRect();
+      return bounds.right <= facts.right && bounds.left >= facts.left;
+    })).toBe(true);
+  }
 });
 
 test("Google Ads and self-assessment mark internal-only content", async ({ page }) => {
