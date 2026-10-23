@@ -224,7 +224,11 @@ Read `/home/bkoltz/AGENTS.md` and any applicable service instructions before
 host changes. SSH uses `bkoltz@192.168.50.90` with the existing trusted host key.
 Recheck realpath, filesystem type, free disk and memory for each owned context.
 Previously documented free-space figures are historical; record current
-capacity and reserve before fixture creation. Large fixture generation belongs
+capacity and reserve before fixture creation. A new read-only observation found
+8,861,564,928 available bytes on the home filesystem (findmnt: ext4), about
+5.4 GB available memory and 17.2 GB free swap. The non-atomic receipt is
+`staging/windows-staging-capacity-refresh-2026-10-22.json`; it created no fixture,
+accessed no NAS path and does not qualify a future owned context. Large fixture generation belongs
 on the approved PC lab, and does not justify pruning unrelated staging data.
 
 Create a unique owned directory on local ext4 for a small synthetic fixture.
