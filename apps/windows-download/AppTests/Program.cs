@@ -758,7 +758,7 @@ async Task PauseAllStoppingBeforeClose()
     } finally { gate.TrySetResult(); await host.DisposeAsync(); try { Directory.Delete(root, true); } catch (IOException) { } }
 }
 
-async Task<(DemoBackend Backend, QueueHost Host, string Root, string Downloads, TaskCompletionSource Gate)> PausedWithLateSave()
+async Task<(DemoBackend Backend, QueueHost Host, string Root, string Downloads, TaskCompletionSource Gate, Task SaveSettled)> PausedWithLateSave()
 {
     // Ortho is running and report waits; Pause all stops ortho and holds report, with its save gated.
     var (backend, host, root, downloads, reference) = await HostFixture(rate: 300_000);
@@ -768,21 +768,23 @@ async Task<(DemoBackend Backend, QueueHost Host, string Root, string Downloads, 
     await Until(() => host.IsBusy && backend.Writing == 1, "ortho running");
     await host.SnapshotAsync();
     host.Hooks.BeforeHeldPersist = () => gate.Task;
+    var settled = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    host.Hooks.HeldSaveSettled = () => settled.TrySetResult();
     await host.PauseAllAsync();
     await Until(() => !host.IsBusy && backend.Writing == 0, "ortho stopped");
-    return (backend, host, root, downloads, gate);
+    return (backend, host, root, downloads, gate, settled.Task);
 }
 static QueuedTransferState StateOf(IReadOnlyList<TransferItem> items, string name) => items.Single(item => item.Job.FileName == name).Job.State;
 
 async Task ResumeBeatsLatePauseSave()
 {
-    var (backend, host, root, _, gate) = await PausedWithLateSave();
+    var (backend, host, root, _, gate, saveSettled) = await PausedWithLateSave();
     try {
         var report = (await host.SnapshotAsync()).Single(item => item.Job.FileName == "report.pdf");
         await host.ResumeAsync(report);
         await Until(() => backend.Writing == 1, "report resumed and writing");
         gate.SetResult();
-        await Task.Delay(600);
+        await saveSettled.WaitAsync(TimeSpan.FromSeconds(30)); // the late save has finished acting
         var items = await host.SnapshotAsync();
         Equal(QueuedTransferState.Running, StateOf(items, "report.pdf"));
         Equal(1, backend.Writing);
@@ -793,12 +795,12 @@ async Task ResumeBeatsLatePauseSave()
 
 async Task ResumeAllBeatsLatePauseSave()
 {
-    var (backend, host, root, downloads, gate) = await PausedWithLateSave();
+    var (backend, host, root, downloads, gate, saveSettled) = await PausedWithLateSave();
     try {
         await host.ResumeAllAsync();
         await Until(() => backend.Writing == 1, "resume all restarted ortho");
         gate.SetResult();
-        await Task.Delay(600);
+        await saveSettled.WaitAsync(TimeSpan.FromSeconds(30)); // the late save has finished acting
         var items = await host.SnapshotAsync();
         Equal(QueuedTransferState.Running, StateOf(items, "ortho-full.tif"));
         Equal(QueuedTransferState.Queued, StateOf(items, "report.pdf"));
@@ -815,6 +817,8 @@ async Task PauseAllBeatsChosenStart()
 {
     var (backend, host, root, downloads, reference) = await HostFixture(rate: 300_000);
     var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    host.Hooks.StartSettled = id => started.TrySetResult();
     try {
         var reached = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var once = 0;
@@ -826,7 +830,7 @@ async Task PauseAllBeatsChosenStart()
         await host.SnapshotAsync();
         await host.PauseAllAsync();
         gate.SetResult();
-        await Task.Delay(600);
+        await started.Task.WaitAsync(TimeSpan.FromSeconds(30)); // the older start has been decided
         Equal(0, backend.Writing);
         True(!host.IsBusy, "nothing started");
         await Until(() => SavedStates(backend.StateDirectory, "paused") == 1, "report saved paused");
@@ -838,6 +842,8 @@ async Task PauseAllBeatsPublishedStart()
 {
     var (backend, host, root, downloads, reference) = await HostFixture(rate: 300_000);
     var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    host.Hooks.StartSettled = id => started.TrySetResult();
     try {
         var reached = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var once = 0;
@@ -849,7 +855,7 @@ async Task PauseAllBeatsPublishedStart()
         await host.SnapshotAsync();
         await host.PauseAllAsync();
         gate.SetResult();
-        await Task.Delay(800);
+        await started.Task.WaitAsync(TimeSpan.FromSeconds(30)); // the older start has been decided
         Equal(0, backend.Writing);
         True(!host.IsBusy, "the older start never began");
         Equal(QueuedTransferState.Paused, StateOf(await host.SnapshotAsync(), "report.pdf"));
@@ -874,13 +880,15 @@ async Task PauseAllBeatsPendingResume()
         var once = 0;
         host.Hooks.BeforeStart = () => Interlocked.Exchange(ref once, 1) == 0 ? Gate() : Task.CompletedTask;
         Task Gate() { reached.TrySetResult(); return gate.Task; }
+        var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        host.Hooks.StartSettled = id => started.TrySetResult();
         var resuming = host.ResumeAsync(report);
         await reached.Task.WaitAsync(TimeSpan.FromSeconds(10));
         await host.SnapshotAsync();
         await host.PauseAllAsync();
         gate.SetResult();
         await resuming.WaitAsync(TimeSpan.FromSeconds(10)); // superseded quietly, not reported as a failure
-        await Task.Delay(500);
+        await started.Task.WaitAsync(TimeSpan.FromSeconds(30)); // the older start has been decided
         Equal(0, backend.Writing);
         True(!host.IsBusy, "the older resume never began");
         Equal(QueuedTransferState.Paused, StateOf(await host.SnapshotAsync(), "report.pdf"));

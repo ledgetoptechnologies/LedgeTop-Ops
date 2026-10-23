@@ -13,6 +13,10 @@ internal sealed class QueueHostHooks
     internal Func<string, bool>? Exists;
     internal Func<Task>? AfterSnapshot, BeforeRunningPause, BeforeHeldPersist, BeforeStart, AfterStartPublished;
     internal Action<Guid>? Starting;
+    /// <summary>After Pause all's background save has finished its last item.</summary>
+    internal Action? HeldSaveSettled;
+    /// <summary>After a start attempt has either begun the transfer or been refused, superseded or failed.</summary>
+    internal Action<Guid>? StartSettled;
 }
 
 /// <summary>
@@ -172,7 +176,7 @@ public sealed class QueueHost : IAsyncDisposable
                 }
                 Changed?.Invoke();
             } catch (Exception) { /* an observer failure can't undo the saves */ }
-            finally { Settle(operation); }
+            finally { Hooks.HeldSaveSettled?.Invoke(); Settle(operation); }
         });
     }
 
@@ -234,6 +238,12 @@ public sealed class QueueHost : IAsyncDisposable
     }
 
     private async Task Start(TransferItem item, StartIntent intent)
+    {
+        try { await StartCore(item, intent); }
+        finally { Hooks.StartSettled?.Invoke(item.Job.JobId); }
+    }
+
+    private async Task StartCore(TransferItem item, StartIntent intent)
     {
         var queue = Queue(item.SourceAlias); var id = item.Job.JobId;
         if (Hooks.BeforeStart is { } before) await before();
