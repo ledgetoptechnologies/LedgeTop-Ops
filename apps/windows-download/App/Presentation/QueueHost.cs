@@ -11,7 +11,7 @@ public enum EnqueueOutcome { Added, AlreadyQueued, NameTaken, UnsafeName }
 internal sealed class QueueHostHooks
 {
     internal Func<string, bool>? Exists;
-    internal Func<Task>? AfterSnapshot, BeforeRunningPause, BeforeHeldPersist, BeforeStart, AfterStartPublished, BeforeIdleRelease;
+    internal Func<Task>? AfterSnapshot, BeforeRunningPause, BeforeHeldPersist, BeforeStart, AfterStartPublished, BeforeIdleRelease, AfterEnqueuePersisted;
     internal Action<Guid>? Starting;
     /// <summary>After Pause all's background save has finished its last item.</summary>
     internal Action? HeldSaveSettled;
@@ -35,8 +35,12 @@ public sealed class QueueHost : IAsyncDisposable
     /// <summary>Paused items the person resumed, waiting their turn.</summary>
     private readonly List<Guid> wanted = [];
     private IReadOnlyList<TransferItem> known = [];
-    /// <summary>Background saves (Pause all) that closing must wait for before releasing the queues.</summary>
+    /// <summary>Owned jobs, including new enqueues not yet present in the displayed snapshot.</summary>
+    private readonly Dictionary<Guid, (string Alias, QueuedTransferState State)> registered;
+    /// <summary>Enqueues and background saves that closing must finish before releasing the queues.</summary>
     private readonly HashSet<Task> background = [];
+    private int pausingAll;
+    private QueueStorageException? pauseSaveFailure;
     /// <summary>One start of one transfer. Only the invocation that owns the active slot, or a stop that targeted it,
     /// may clear it, so a stale callback or a rejected duplicate can never free the slot while bytes still flow.</summary>
     private sealed class Invocation(string alias, Guid id) { public string Alias { get; } = alias; public Guid Id { get; } = id; }
@@ -44,14 +48,17 @@ public sealed class QueueHost : IAsyncDisposable
     /// <summary>Bumped by every Pause all, and per item by Pause and Cancel. A start remembers the values it was
     /// chosen or requested under and never begins once a newer stop has happened.</summary>
     private long pauseAlls;
+    /// <summary>The Pause all generation explicitly released by the most recent Resume all.</summary>
+    private long resumedAllGeneration = -1;
     private readonly Dictionary<Guid, long> stops = [];
-    private readonly record struct StartIntent(Guid Id, long PauseAlls, long Stops);
+    private readonly record struct StartIntent(Guid Id, long PauseAlls, long Stops, bool Explicit);
     private bool disposed;
     private Task? disposal;
 
     internal QueueHostHooks Hooks { get; } = new();
 
-    private QueueHost(Dictionary<string, TransferQueue> queues) => this.queues = queues;
+    private QueueHost(Dictionary<string, TransferQueue> queues, Dictionary<Guid, (string Alias, QueuedTransferState State)> registered)
+    { this.queues = queues; this.registered = registered; }
 
     /// <summary>Raised (on any thread) after the list may have changed.</summary>
     public event Action? Changed;
@@ -65,6 +72,7 @@ public sealed class QueueHost : IAsyncDisposable
     public static async Task<QueueHost> OpenAsync(string stateDirectory, IEnumerable<IQueuedDownloadSource> sources, CancellationToken cancellationToken = default)
     {
         var opened = new Dictionary<string, TransferQueue>(StringComparer.Ordinal);
+        var registered = new Dictionary<Guid, (string Alias, QueuedTransferState State)>();
         try {
             foreach (var source in sources) {
                 var principal = (await source.GetSessionAsync(cancellationToken)).PrincipalId;
@@ -72,12 +80,14 @@ public sealed class QueueHost : IAsyncDisposable
                 var folder = Path.Combine(stateDirectory, source.Alias, principal);
                 Directory.CreateDirectory(folder);
                 opened[source.Alias] = await TransferQueue.OpenAsync(folder, source, cancellationToken);
+                foreach (var job in await opened[source.Alias].GetJobsAsync(cancellationToken))
+                    registered.Add(job.JobId, (source.Alias, job.State));
             }
         } catch {
             foreach (var queue in opened.Values) await queue.DisposeAsync();
             throw;
         }
-        return new QueueHost(opened);
+        return new QueueHost(opened, registered);
     }
 
     /// <summary>True while a transfer is running or being stopped; no network.</summary>
@@ -85,6 +95,9 @@ public sealed class QueueHost : IAsyncDisposable
     /// <summary>Waiting items held by Pause all that haven't been saved as paused yet.</summary>
     public bool IsHeld(Guid jobId) { lock (sync) return held.Contains(jobId); }
     public bool HasHeld { get { lock (sync) return held.Count > 0; } }
+    /// <summary>A restrictive save failed; held items must not be presented as durably paused.</summary>
+    public string? PauseSaveProblem { get { lock (sync) return pauseSaveFailure is null ? null
+        : "Downloads are held, but their paused state could not be saved. Check free disk space before closing the app."; } }
     /// <summary>Paused items the person resumed that are waiting their turn.</summary>
     public bool IsWanted(Guid jobId) { lock (sync) return wanted.Contains(jobId); }
 
@@ -97,7 +110,12 @@ public sealed class QueueHost : IAsyncDisposable
         var items = new List<TransferItem>();
         foreach (var (alias, queue) in queues)
             foreach (var job in await queue.GetJobsAsync(cancellationToken)) items.Add(new TransferItem(alias, job));
-        lock (sync) known = items;
+        lock (sync) {
+            known = items;
+            // An in-flight enqueue is registered by its own operation, never by a racing refresh.
+            foreach (var item in items)
+                if (registered.ContainsKey(item.Job.JobId)) registered[item.Job.JobId] = (item.SourceAlias, item.Job.State);
+        }
         return items;
     }
 
@@ -110,8 +128,44 @@ public sealed class QueueHost : IAsyncDisposable
         if (!IsPlainFileName(fileName)) return EnqueueOutcome.UnsafeName;
         // Never overwrite: an existing file of the same name is reported before anything is queued.
         if ((Hooks.Exists ?? Exists)(Path.Combine(destination, fileName))) return EnqueueOutcome.NameTaken;
-        try { await Queue(sourceAlias).EnqueueAsync(reference, destination, cancellationToken); }
-        catch (TransferException error) when (error.Message.Contains("already contains", StringComparison.Ordinal)) { return EnqueueOutcome.AlreadyQueued; }
+        var operation = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        long observedPause; bool beganDuringPause;
+        lock (sync) {
+            ObjectDisposedException.ThrowIf(disposed, this);
+            observedPause = pauseAlls; beganDuringPause = pausingAll != 0;
+            background.Add(operation.Task);
+        }
+        try {
+            Guid id;
+            try { id = await Queue(sourceAlias).EnqueueAsync(reference, destination, cancellationToken); }
+            catch (TransferException error) when (error.Message.Contains("already contains", StringComparison.Ordinal)) { return EnqueueOutcome.AlreadyQueued; }
+            if (Hooks.AfterEnqueuePersisted is { } persisted) await persisted();
+            bool pause;
+            lock (sync) {
+                registered.Add(id, (sourceAlias, QueuedTransferState.Queued));
+                var crossedPause = beganDuringPause || observedPause != pauseAlls || pausingAll != 0;
+                var explicitlyResumed = crossedPause && resumedAllGeneration == pauseAlls;
+                pause = crossedPause && !explicitlyResumed;
+                if (pause) held.Add(id);
+                // Resume all can happen after Core committed this job but before this host registered it.
+                // Carry that explicit intent forward; a newer Pause all has a different generation and wins.
+                else if (explicitlyResumed && !wanted.Contains(id)) wanted.Add(id);
+            }
+            // The job may have committed while Pause all was stopping/saving an older snapshot.
+            // Save its restrictive intent before it can be scheduled or closing can release its queue.
+            if (pause) {
+                try {
+                    await pump.WaitAsync(cancellationToken);
+                    try {
+                        bool stillHeld; lock (sync) stillHeld = held.Contains(id);
+                        if (stillHeld) {
+                            await Queue(sourceAlias).PauseAsync(id, cancellationToken);
+                            lock (sync) registered[id] = (sourceAlias, QueuedTransferState.Paused);
+                        }
+                    } finally { pump.Release(); }
+                } catch { PauseSaveFailed(); throw; }
+            }
+        } finally { Settle(operation); }
         Changed?.Invoke();
         _ = PumpAsync();
         return EnqueueOutcome.Added;
@@ -145,17 +199,18 @@ public sealed class QueueHost : IAsyncDisposable
     /// </summary>
     public async Task PauseAllAsync()
     {
-        Invocation? running; List<TransferItem> waiting;
+        Invocation? running; List<(string Alias, Guid Id)> waiting;
         // Registered under the same lock that closing uses, before any await or event: closing either waits for this
         // whole operation (stop and save) or this Pause all never starts.
         var operation = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         lock (sync) {
             if (disposed) return;
             background.Add(operation.Task);
-            pauseAlls++;
+            pauseAlls++; pausingAll++;
             running = active;
-            waiting = known.Where(item => item.Job.State == QueuedTransferState.Queued || wanted.Contains(item.Job.JobId)).ToList();
-            foreach (var item in waiting) held.Add(item.Job.JobId);
+            waiting = registered.Where(item => item.Value.State == QueuedTransferState.Queued || wanted.Contains(item.Key))
+                .Select(item => (item.Value.Alias, item.Key)).ToList();
+            foreach (var item in waiting) held.Add(item.Id);
             if (running is { } current) held.Add(current.Id);
             wanted.Clear();
         }
@@ -163,29 +218,30 @@ public sealed class QueueHost : IAsyncDisposable
             if (Hooks.BeforeRunningPause is { } before) await before();
             if (running is { } stop) { await Queue(stop.Alias).PauseAsync(stop.Id); lock (sync) Release(stop); }
             Changed?.Invoke();
-        } catch { Settle(operation); throw; }
+        } catch { PauseSaveFailed(); SettlePauseAll(operation); throw; }
         // Saving the held items as paused happens afterwards and never delays the stop; the operation stays
         // registered until it finishes.
         _ = Task.Run(async () => {
             try {
                 if (Hooks.BeforeHeldPersist is { } hold) await hold();
-                foreach (var item in waiting.Where(item => item.Job.State == QueuedTransferState.Queued)) {
+                foreach (var item in waiting) {
                     try {
                         using var limit = new CancellationTokenSource(TimeSpan.FromSeconds(30));
                         // Every start runs under the pump, so holding it through the save means a resume can't start
                         // this item in between. A resume that came first wins: the item is no longer held, so skip it.
                         await pump.WaitAsync(limit.Token);
                         try {
-                            lock (sync) if (!held.Contains(item.Job.JobId) || active?.Id == item.Job.JobId) continue;
-                            await Queue(item.SourceAlias).PauseAsync(item.Job.JobId, limit.Token);
+                            lock (sync) if (!held.Contains(item.Id) || active?.Id == item.Id) continue;
+                            await Queue(item.Alias).PauseAsync(item.Id, limit.Token);
+                            lock (sync) registered[item.Id] = (item.Alias, QueuedTransferState.Paused);
                         } finally { pump.Release(); }
-                    } catch (Exception) { /* still held in memory; the queue keeps it waiting */ }
+                    } catch (Exception) { PauseSaveFailed(); /* still held in memory; report that it was not saved */ }
                 }
                 Changed?.Invoke();
             } catch (Exception) { /* an observer failure can't undo the saves */ }
             finally {
                 // Closing waits for this operation, so it settles even if an observer throws.
-                try { Hooks.HeldSaveSettled?.Invoke(); } finally { Settle(operation); }
+                try { Hooks.HeldSaveSettled?.Invoke(); } finally { SettlePauseAll(operation); }
             }
         });
     }
@@ -194,9 +250,10 @@ public sealed class QueueHost : IAsyncDisposable
     public Task ResumeAllAsync()
     {
         lock (sync) {
-            foreach (var item in known)
-                if (item.Job.State == QueuedTransferState.Paused || held.Contains(item.Job.JobId))
-                    if (!wanted.Contains(item.Job.JobId)) wanted.Add(item.Job.JobId);
+            resumedAllGeneration = pauseAlls;
+            foreach (var item in registered)
+                if (item.Value.State == QueuedTransferState.Paused || held.Contains(item.Key))
+                    if (!wanted.Contains(item.Key)) wanted.Add(item.Key);
             held.Clear();
         }
         Changed?.Invoke();
@@ -208,7 +265,7 @@ public sealed class QueueHost : IAsyncDisposable
     {
         // This explicit request is the newest intent now; a Pause all or stop after it still wins.
         StartIntent intent;
-        lock (sync) { held.Remove(item.Job.JobId); wanted.Remove(item.Job.JobId); intent = Intent(item.Job.JobId); }
+        lock (sync) { held.Remove(item.Job.JobId); wanted.Remove(item.Job.JobId); intent = Intent(item.Job.JobId, explicitStart: true); }
         await pump.WaitAsync();
         try {
             Invocation? running; lock (sync) running = active;
@@ -239,9 +296,10 @@ public sealed class QueueHost : IAsyncDisposable
                 if (items.Any(item => item.Job.State == QueuedTransferState.Running)) return;
                 next = wanted.Select(id => items.FirstOrDefault(item => item.Job.JobId == id))
                         .FirstOrDefault(item => item is { Job.State: QueuedTransferState.Paused or QueuedTransferState.Queued })
-                    ?? items.FirstOrDefault(item => item.Job.State == QueuedTransferState.Queued && !held.Contains(item.Job.JobId));
+                    ?? items.FirstOrDefault(item => pausingAll == 0 && registered.ContainsKey(item.Job.JobId)
+                        && item.Job.State == QueuedTransferState.Queued && !held.Contains(item.Job.JobId));
                 wanted.RemoveAll(id => !items.Any(item => item.Job.JobId == id && item.Job.State is QueuedTransferState.Paused or QueuedTransferState.Queued));
-                if (next is not null) intent = Intent(next.Job.JobId);
+                if (next is not null) intent = Intent(next.Job.JobId, wanted.Contains(next.Job.JobId));
             }
             if (next is not null) await Start(next, intent);
         } catch (Exception) {
@@ -266,7 +324,8 @@ public sealed class QueueHost : IAsyncDisposable
         TransferQueue.StartReservation reservation; var owner = new Invocation(item.SourceAlias, id);
         lock (sync) {
             // One transfer at a time across every source: never take over a slot another invocation owns.
-            if (disposed || active is not null || held.Contains(id) || !IsCurrent(intent)) return;
+            if (disposed || active is not null || held.Contains(id) || !registered.ContainsKey(id)
+                || (pausingAll != 0 && !intent.Explicit) || !IsCurrent(intent)) return;
             reservation = queue.PrepareStart(id);
             wanted.Remove(id); active = owner;
         }
@@ -314,7 +373,7 @@ public sealed class QueueHost : IAsyncDisposable
 
     // Call under sync.
     private void Stop(Guid id) => stops[id] = stops.GetValueOrDefault(id) + 1;
-    private StartIntent Intent(Guid id) => new(id, pauseAlls, stops.GetValueOrDefault(id));
+    private StartIntent Intent(Guid id, bool explicitStart = false) => new(id, pauseAlls, stops.GetValueOrDefault(id), explicitStart);
     private bool IsCurrent(StartIntent intent) => intent.PauseAlls == pauseAlls && intent.Stops == stops.GetValueOrDefault(intent.Id);
 
     private void Settle(TaskCompletionSource operation)
@@ -322,6 +381,15 @@ public sealed class QueueHost : IAsyncDisposable
         lock (sync) background.Remove(operation.Task);
         operation.TrySetResult();
     }
+
+    private void SettlePauseAll(TaskCompletionSource operation)
+    {
+        lock (sync) pausingAll--;
+        Settle(operation);
+        _ = PumpAsync();
+    }
+
+    private void PauseSaveFailed() { lock (sync) pauseSaveFailure ??= new QueueStorageException(); }
 
     private TransferQueue Queue(string alias) =>
         queues.TryGetValue(alias, out var queue) ? queue : throw new InvalidOperationException("Unknown download source.");
@@ -348,7 +416,7 @@ public sealed class QueueHost : IAsyncDisposable
         Task[] saving; lock (sync) saving = background.ToArray();
         foreach (var save in saving) { try { await save; } catch (Exception) { /* each save handles its own failures */ } }
         // Release every source's queue even if one fails to save its final state; report the first failure.
-        Exception? failure = null;
+        Exception? failure; lock (sync) failure = pauseSaveFailure;
         foreach (var queue in queues.Values) {
             try { await queue.DisposeAsync(); } catch (Exception error) { failure ??= error; }
         }

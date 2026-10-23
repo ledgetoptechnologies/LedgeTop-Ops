@@ -17,7 +17,7 @@ function fixture() {
     canonicalPlanSha256: digest(canonicalPlanJson), bindingEvidenceSha256: digest(bindingEvidenceJson),
     operatorStaffId: cohort[0].staffId, operatorSubject: cohort[0].accessSubject };
   return {
-    review: { schemaVersion: 2, sourceCommit, accountId: TARGET.accountId, databaseId: TARGET.databaseId, cohort,
+    review: { schemaVersion: 3, sourceCommit, accountId: TARGET.accountId, databaseId: TARGET.databaseId, cohort, controlPlaneStaffIds:[cohort[0].staffId],
       handoff: { cohort:structuredClone(cohort),controlPlaneStaffIds:[cohort[0].staffId] },bootstrapReceipts: [ref],onboardingReceipts:[] },
     observation: { schemaVersion: 1, accountId: TARGET.accountId, databaseId: TARGET.databaseId, observedAt: new Date(now).toISOString(),
       control: { enabled: 1, generation: 3, appliedGeneration: 3, leaseId: null, lastSuccessAt: new Date(now).toISOString(), lastError: null },
@@ -44,7 +44,33 @@ function addOnboarded(f) {
     accessSubject:row.accessSubject,displayName:row.displayName,proposalJson,proposalSha256,claimEvidenceSha256,valid:1});
   return row;
 }
-const reviewCurrent = f => { f.review.cohort=structuredClone(f.observation.cohort); };
+const reviewCurrent = f => { f.review.cohort=structuredClone(f.observation.cohort); f.review.controlPlaneStaffIds=[...f.observation.controlPlaneStaffIds]; };
+
+test("same cohort and generation cannot reuse review after current administrator set changes", () => {
+  const f=fixture(), replacement=addOnboarded(f);reviewCurrent(f);
+  const initial=verify(f.review,f.observation,options);
+  f.observation.controlPlaneStaffIds=[replacement.staffId];
+  assert.throws(()=>verify(f.review,f.observation,options),/reviewed_control_plane_changed/u);
+  reviewCurrent(f);const updated=verify(f.review,f.observation,options);
+  assert.equal(initial.cohortSha256,updated.cohortSha256);assert.equal(initial.generation,updated.generation);
+  assert.notEqual(initial.controlPlaneSha256,updated.controlPlaneSha256);
+});
+test("current administrator set hashing ignores order but refuses duplicates and inactive or missing reviewed IDs", () => {
+  const f=fixture(), replacement=addOnboarded(f);
+  f.observation.controlPlaneStaffIds.push(replacement.staffId);reviewCurrent(f);
+  const initial=verify(f.review,f.observation,options);
+  f.observation.controlPlaneStaffIds.reverse();
+  assert.equal(verify(f.review,f.observation,options).controlPlaneSha256,initial.controlPlaneSha256);
+  for(const ids of [[replacement.staffId,replacement.staffId],[],["unknown"]]) {
+    const bad=structuredClone(f);bad.review.controlPlaneStaffIds=ids;
+    assert.throws(()=>verify(bad.review,bad.observation,options),/review_control_plane_invalid/u);
+  }
+  const old=structuredClone(f);old.review.schemaVersion=2;delete old.review.controlPlaneStaffIds;
+  assert.throws(()=>verify(old.review,old.observation,options),/review_target_invalid/u);
+  const inactive=structuredClone(f);inactive.review.cohort[0].active=false;inactive.observation.cohort[0].active=false;
+  inactive.observation.controlPlaneStaffIds=[replacement.staffId];
+  assert.throws(()=>verify(inactive.review,inactive.observation,options),/review_control_plane_invalid/u);
+});
 
 test("a newly reviewed profile edit retains original immutable handoff provenance", () => {
   const f=fixture(); f.observation.cohort[0].displayName="Updated Name";f.observation.cohort[0].profileVersion++;

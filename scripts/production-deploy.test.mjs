@@ -422,10 +422,12 @@ async function flow(t, fail = null, app = 'operations', staffOptions = {}) {
     assert.equal(args.sourceCommit, sourceCommit);assert.deepEqual(args.review, review);
     staffCalls.push([...calls]);
     if (staffCalls.length === staffOptions.failAt) throw new Error('native staff readiness unavailable');
-    const receipt = { schemaVersion: 1, sourceCommit, accountId: '846c924bf17bf4f3dd15c97a4c5d1d51',
+    const receipt = { schemaVersion: 2, sourceCommit, accountId: '846c924bf17bf4f3dd15c97a4c5d1d51',
       databaseId: '6ebf7514-d306-4615-ae56-ad869c874dbd', reviewSha256: 'a'.repeat(64), cohortSha256: 'b'.repeat(64),
+      controlPlaneSha256: 'c'.repeat(64),
       observedAt: new Date().toISOString(), staffCount: 2, generation: 7 };
     if (staffCalls.length === staffOptions.changeAt) receipt.generation++;
+    if (staffCalls.length === staffOptions.adminChangeAt) receipt.controlPlaneSha256='d'.repeat(64);
     if (staffOptions.receipt) Object.assign(receipt, staffOptions.receipt);
     return receipt;
   };
@@ -479,10 +481,19 @@ test('post-activation handoff loss never returns a verified-active receipt or re
   }
 });
 
+test('admin-set drift with unchanged cohort and generation holds before promotion and refuses after promotion', async t => {
+  for (const app of ['operations','ops-sync']) for (const adminChangeAt of [2,3]) {
+    const { operation, calls, directory } = await flow(t, null, app, {adminChangeAt});
+    await assert.rejects(operation, /Native staff handoff changed/);
+    assert.deepEqual(calls, adminChangeAt===2 ? ['upload'] : ['upload','activate']);
+    assert.equal(fs.existsSync(path.join(directory, 'journal/verified-active.json')), false);
+  }
+});
+
 test('malformed, stale, wrong-source or wrong-target staff receipts fail before any upload', async t => {
-  for (const receipt of [{schemaVersion:2},{sourceCommit:'f'.repeat(40)},{accountId:'c'.repeat(32)},
+  for (const receipt of [{schemaVersion:1},{sourceCommit:'f'.repeat(40)},{accountId:'c'.repeat(32)},
     {databaseId:NEW},{staffCount:0},{staffCount:1025},{generation:-1},{generation:0.5},
-    {reviewSha256:'wrong'},{cohortSha256:'wrong'},{observedAt:'invalid'},
+    {reviewSha256:'wrong'},{cohortSha256:'wrong'},{controlPlaneSha256:'wrong'},{controlPlaneSha256:undefined},{observedAt:'invalid'},
     {observedAt:new Date(Date.now()-120_000).toISOString()},{observedAt:new Date(Date.now()+120_000).toISOString()}]) {
     const { operation, calls } = await flow(t, null, 'operations', {receipt});
     await assert.rejects(operation, /Fresh exact native staff/);assert.deepEqual(calls, []);

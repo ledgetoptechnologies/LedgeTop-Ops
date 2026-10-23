@@ -40,6 +40,10 @@ var groups = new (string Name, Func<Task> Run)[] {
     ("a resume after pause all wins over its late save", ResumeBeatsLatePauseSave),
     ("resume all after pause all wins over its late save", ResumeAllBeatsLatePauseSave),
     ("pause all wins over a start that was already chosen", PauseAllBeatsChosenStart),
+    ("pause all holds a new queued item before the displayed snapshot catches up", PauseAllIncludesUnrefreshedEnqueue),
+    ("an enqueue committed across pause all is saved paused before scheduling", PauseAllIncludesConcurrentEnqueue),
+    ("resume all releases a crossing enqueue unless a newer pause all supersedes it", ResumeAllIncludesConcurrentEnqueue),
+    ("a failed pause save remains held and reports that closing cannot confirm it", PauseAllSaveFailureIsVisible),
     ("pause all wins over a start already shown as active but not yet begun", PauseAllBeatsPublishedStart),
     ("pause all wins over a resume still waiting its turn, and a later resume still works", PauseAllBeatsPendingResume),
     ("a repeated resume of the running download never frees its slot for a second source", RepeatedResumeKeepsOneActive),
@@ -54,11 +58,17 @@ var groups = new (string Name, Func<Task> Run)[] {
     ("the choice screen renders and returns only what was clicked", ChooserWindow),
     ("the window renders sign-in and files screens", Render),
 };
-foreach (var group in groups) {
+var selectedGroups = args.Contains("--pause-all-review-only")
+    ? groups.Where(group => group.Name is "pause all holds a new queued item before the displayed snapshot catches up"
+        or "an enqueue committed across pause all is saved paused before scheduling"
+        or "resume all releases a crossing enqueue unless a newer pause all supersedes it"
+        or "a failed pause save remains held and reports that closing cannot confirm it").ToArray()
+    : groups;
+foreach (var group in selectedGroups) {
     try { await Sta(group.Run); passed++; Console.WriteLine("PASS " + group.Name); }
     catch (Exception error) { failed++; Console.Error.WriteLine("FAIL " + group.Name + ": " + error.GetType().Name + " " + error.Message); }
 }
-Console.WriteLine($"{passed}/{groups.Length} app groups passed. Demo data only; no network.");
+Console.WriteLine($"{passed}/{selectedGroups.Length} app groups passed. Demo data only; no network.");
 return failed == 0 ? 0 : 1;
 
 // ---------------------------------------------------------------------------------------------
@@ -861,6 +871,157 @@ async Task PauseAllBeatsChosenStart()
         Equal(0, SavedStates(backend.StateDirectory, "queued"));
         True(!File.Exists(Path.Combine(downloads, "report.pdf")), "nothing downloaded");
     } finally { gate.TrySetResult(); await host.DisposeAsync(); try { Directory.Delete(root, true); } catch (IOException) { } }
+}
+
+async Task PauseAllIncludesUnrefreshedEnqueue()
+{
+    var (backend, host, root, downloads, reference) = await HostFixture(rate: 300_000);
+    var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    var saved = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    try {
+        await host.EnqueueAsync("portal", await reference("ortho-full.tif"), "ortho-full.tif", downloads);
+        await Until(() => host.IsBusy && backend.Writing == 1, "ortho running");
+        await host.SnapshotAsync();
+        await host.EnqueueAsync("portal", await reference("report.pdf"), "report.pdf", downloads);
+        True(host.Known.All(item => item.Job.FileName != "report.pdf"), "the displayed snapshot still lacks the new queue item");
+        host.Hooks.BeforeHeldPersist = () => gate.Task;
+        host.Hooks.HeldSaveSettled = () => saved.TrySetResult();
+        await host.PauseAllAsync();
+        Equal(0, backend.Writing);
+        gate.SetResult();
+        await saved.Task.WaitAsync(TimeSpan.FromSeconds(30));
+        var items = await host.SnapshotAsync();
+        Equal(QueuedTransferState.Paused, StateOf(items, "report.pdf"));
+        Equal(QueuedTransferState.Paused, StateOf(items, "ortho-full.tif"));
+        Equal(0, backend.Writing);
+        True(!File.Exists(Path.Combine(downloads, "report.pdf")), "the missed display item never downloaded");
+        Equal(2, SavedStates(backend.StateDirectory, "paused"));
+        Equal(0, SavedStates(backend.StateDirectory, "queued"));
+    } finally { gate.TrySetResult(); await host.DisposeAsync(); try { Directory.Delete(root, true); } catch (IOException) { } }
+}
+
+async Task PauseAllIncludesConcurrentEnqueue()
+{
+    var (backend, host, root, downloads, reference) = await HostFixture(rate: 300_000);
+    var registration = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    var committed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    var saved = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    Task<EnqueueOutcome>? adding = null;
+    try {
+        await host.EnqueueAsync("portal", await reference("ortho-full.tif"), "ortho-full.tif", downloads);
+        await Until(() => host.IsBusy && backend.Writing == 1, "ortho running");
+        await host.SnapshotAsync();
+        host.Hooks.AfterEnqueuePersisted = () => { committed.TrySetResult(); return registration.Task; };
+        adding = host.EnqueueAsync("portal", await reference("report.pdf"), "report.pdf", downloads);
+        await committed.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        host.Hooks.HeldSaveSettled = () => saved.TrySetResult();
+        await host.PauseAllAsync();
+        await saved.Task.WaitAsync(TimeSpan.FromSeconds(30));
+        // Core committed the report, but the host hasn't registered it. A stale refresh must not admit it.
+        await host.PumpAsync();
+        Equal(0, backend.Writing);
+        registration.SetResult();
+        Equal(EnqueueOutcome.Added, await adding.WaitAsync(TimeSpan.FromSeconds(30)));
+        var items = await host.SnapshotAsync();
+        Equal(QueuedTransferState.Paused, StateOf(items, "report.pdf"));
+        Equal(0, backend.Writing);
+        True(!File.Exists(Path.Combine(downloads, "report.pdf")), "concurrent enqueue stayed held");
+        Equal(2, SavedStates(backend.StateDirectory, "paused"));
+        Equal(0, SavedStates(backend.StateDirectory, "queued"));
+    } finally {
+        registration.TrySetResult();
+        if (adding is not null) { try { await adding.WaitAsync(TimeSpan.FromSeconds(30)); } catch (Exception) { } }
+        await host.DisposeAsync();
+        try { Directory.Delete(root, true); } catch (IOException) { }
+    }
+}
+
+async Task ResumeAllIncludesConcurrentEnqueue()
+{
+    foreach (var pauseAgain in new[] { false, true }) {
+        var (backend, host, root, downloads, reference) = await HostFixture(rate: 300_000);
+        var registration = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var committed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var saved = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        Task<EnqueueOutcome>? adding = null;
+        try {
+            await host.EnqueueAsync("portal", await reference("ortho-full.tif"), "ortho-full.tif", downloads);
+            await Until(() => host.IsBusy && backend.Writing == 1, "ortho running");
+            await host.SnapshotAsync();
+            host.Hooks.AfterEnqueuePersisted = () => { committed.TrySetResult(); return registration.Task; };
+            adding = host.EnqueueAsync("portal", await reference("report.pdf"), "report.pdf", downloads);
+            await committed.Task.WaitAsync(TimeSpan.FromSeconds(10));
+            host.Hooks.HeldSaveSettled = () => saved.TrySetResult();
+            await host.PauseAllAsync();
+            await saved.Task.WaitAsync(TimeSpan.FromSeconds(30));
+            await host.ResumeAllAsync();
+            await Until(() => host.IsBusy && backend.Writing == 1, "resume all restarted ortho");
+            if (pauseAgain) {
+                var savedAgain = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                host.Hooks.HeldSaveSettled = () => savedAgain.TrySetResult();
+                await host.PauseAllAsync();
+                await savedAgain.Task.WaitAsync(TimeSpan.FromSeconds(30));
+            }
+            registration.SetResult();
+            Equal(EnqueueOutcome.Added, await adding.WaitAsync(TimeSpan.FromSeconds(30)));
+            var items = await host.SnapshotAsync();
+            var report = items.Single(item => item.Job.FileName == "report.pdf");
+            if (pauseAgain) {
+                Equal(QueuedTransferState.Paused, report.Job.State);
+                True(host.IsHeld(report.Job.JobId) && !host.IsWanted(report.Job.JobId), "the newest pause all wins");
+                Equal(0, backend.Writing);
+                True(!File.Exists(Path.Combine(downloads, "report.pdf")), "newer pause prevented the report download");
+            } else {
+                Equal(QueuedTransferState.Queued, report.Job.State);
+                True(host.IsWanted(report.Job.JobId) && !host.IsHeld(report.Job.JobId), "resume all includes the committed but unregistered report");
+                var reportStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                host.Hooks.Starting = id => { if (id == report.Job.JobId) reportStarted.TrySetResult(); };
+                await host.PauseAsync(items.Single(item => item.Job.FileName == "ortho-full.tif"));
+                await reportStarted.Task.WaitAsync(TimeSpan.FromSeconds(30));
+                Equal(QueuedTransferState.Running, StateOf(await host.SnapshotAsync(), "report.pdf"));
+                Equal(1, backend.MostAtOnce);
+            }
+        } finally {
+            registration.TrySetResult();
+            if (adding is not null) { try { await adding.WaitAsync(TimeSpan.FromSeconds(30)); } catch (Exception) { } }
+            await host.DisposeAsync();
+            try { Directory.Delete(root, true); } catch (IOException) { }
+        }
+    }
+}
+
+async Task PauseAllSaveFailureIsVisible()
+{
+    var (backend, host, root, downloads, reference) = await HostFixture(rate: 300_000);
+    var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    var reached = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    var saved = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    try {
+        host.Hooks.BeforeStart = () => { reached.TrySetResult(); return gate.Task; };
+        await host.EnqueueAsync("portal", await reference("report.pdf"), "report.pdf", downloads);
+        await reached.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        host.Hooks.HeldSaveSettled = () => saved.TrySetResult();
+        var state = Directory.EnumerateFiles(backend.StateDirectory, "queue.json", SearchOption.AllDirectories)
+            .Single(path => File.ReadAllText(path).Contains("report.pdf"));
+        // Hold this owned test state against replacement, producing a real Windows persistence failure.
+        using (var blocker = new FileStream(state, FileMode.Open, FileAccess.Read, FileShare.Read)) {
+            await host.PauseAllAsync();
+            gate.SetResult();
+            await saved.Task.WaitAsync(TimeSpan.FromSeconds(30));
+        }
+        True(host.PauseSaveProblem is not null && host.PauseSaveProblem.Contains("could not be saved"), "the failed save is reported explicitly");
+        var report = (await host.SnapshotAsync()).Single();
+        True(host.IsHeld(report.Job.JobId), "the failed save never releases its in-memory hold");
+        Equal(QueuedTransferState.Queued, report.Job.State);
+        Equal(0, backend.Writing);
+        var closingFailed = false;
+        try { await host.DisposeAsync(); } catch (QueueStorageException) { closingFailed = true; }
+        True(closingFailed, "closing must not claim the failed pause was durably saved");
+    } finally {
+        gate.TrySetResult();
+        try { await host.DisposeAsync(); } catch (QueueStorageException) { }
+        try { Directory.Delete(root, true); } catch (IOException) { }
+    }
 }
 
 async Task PauseAllBeatsPublishedStart()

@@ -335,6 +335,7 @@ public sealed class MainViewModel : Observable, IAsyncDisposable
     public async Task RefreshTransfersAsync()
     {
         if (queue is not { } host) return;
+        if (host.PauseSaveProblem is { } pendingPauseProblem) { Banner = pendingPauseProblem; BannerIsError = true; }
         IReadOnlyList<TransferItem> items;
         try { items = await host.SnapshotAsync(); }
         catch (LoginRequiredException) {
@@ -348,8 +349,15 @@ public sealed class MainViewModel : Observable, IAsyncDisposable
             await CheckPersonAsync();
             return;
         }
-        catch (Exception error) { if (queue == host) Fail(error); return; }
+        catch (Exception error) {
+            if (queue == host) {
+                if (host.PauseSaveProblem is { } saveProblem) { Banner = saveProblem; BannerIsError = true; }
+                else Fail(error);
+            }
+            return;
+        }
         if (queue != host) return;
+        if (host.PauseSaveProblem is { } pauseProblem) { Banner = pauseProblem; BannerIsError = true; }
         var byId = Transfers.ToDictionary(row => row.Id);
         var ordered = new List<TransferRow>();
         foreach (var item in items) {

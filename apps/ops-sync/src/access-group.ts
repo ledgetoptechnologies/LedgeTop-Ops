@@ -63,25 +63,13 @@ async function loadAccessGroup(
   const configuredResponse = await boundedFetch(configuredEndpoint, { headers }, authorize);
   const configuredEnvelope = await responseEnvelope<AccessGroup>(configuredResponse);
   if (configuredResponse.ok && configuredEnvelope.success && configuredEnvelope.result) {
+    const group = configuredEnvelope.result;
+    // The configured identifier is an authority pin, not a lookup hint. Never
+    // replace another group's full membership after a stale/misdirected read.
+    if (group.id !== env.CF_ACCESS_GROUP_ID || typeof group.name !== "string" || !group.name
+      || env.CF_ACCESS_GROUP_NAME !== undefined && (!env.CF_ACCESS_GROUP_NAME.trim()
+        || group.name !== env.CF_ACCESS_GROUP_NAME)) throw new Error("access-group-identity-mismatch");
     return { endpoint: configuredEndpoint, group: configuredEnvelope.result };
-  }
-
-  // Cloudflare returns HTTP 400 when a stale or wrong resource identifier is
-  // supplied. Resolve an exact deployment-configured name so an identifier
-  // rotation does not permanently block Project Alpha provisioning.
-  const groupName = String(env.CF_ACCESS_GROUP_NAME ?? "").trim();
-  if (groupName !== "") {
-    const listResponse = await boundedFetch(`${accountEndpoint}?per_page=50`, { headers }, authorize);
-    const listEnvelope = await responseEnvelope<AccessGroup[]>(listResponse);
-    if (!listResponse.ok || !listEnvelope.success || !Array.isArray(listEnvelope.result)) {
-      throw cloudflareError("access-group-list", listResponse, listEnvelope);
-    }
-    const matching = listEnvelope.result.filter((candidate) => candidate.name === groupName);
-    if (matching.length > 1) throw new Error("access-group-name-ambiguous");
-    const group = matching[0];
-    if (group?.id) {
-      return { endpoint: `${accountEndpoint}/${encodeURIComponent(group.id)}`, group };
-    }
   }
 
   throw cloudflareError("access-group-read", configuredResponse, configuredEnvelope);
@@ -97,6 +85,7 @@ export async function desiredAccessEmails(db: D1Database): Promise<string[]> {
     WHERE s.status='active'
     ORDER BY email
   `).bind().all<{ email: string }>();
+  if (result.success !== true || !Array.isArray(result.results)) throw new Error("access-group-members-read-failed");
   return result.results.map((row) => row.email).filter(Boolean);
 }
 
