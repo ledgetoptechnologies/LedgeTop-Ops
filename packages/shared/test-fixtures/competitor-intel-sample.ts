@@ -1,5 +1,7 @@
 // Synthetic Competitor Intel sample data for UI fixtures only. Every business
-// is invented and every domain uses the reserved .example TLD.
+// is invented and every domain uses the reserved .example TLD. Read-time
+// freshness assumes a reading date of 2026-10-20: the single Ads checkup
+// (completed Oct 10) has stale 3-day totals but current 30-day scores.
 import type {
   ClientCompetitorReport, ClientScore, CompetitorIntelTriageRow, Probability, Score, ScoreScale, StaffChange, StaffCompetitor, StaffTenantView,
 } from "../src/competitor-intel";
@@ -80,7 +82,7 @@ export const sampleStaffTenant: StaffTenantView = {
   tenantKey: "sample-riverbend", tenantName: "Riverbend Roofing (sample)", monitoring: "active",
   latestScan: { state: "partial", completedAt: "2026-10-20T14:20:00Z", freshness: "current" },
   competitors, changes,
-  ownAds: { ...op(20), period: { start: "2026-09-21", end: "2026-10-20", daysWithData: 30 }, checkedAt: "2026-09-12T08:00:00Z", totalsFreshness: "current", scoresFreshness: "stale",
+  ownAds: { ...op(20), period: { start: "2026-09-10", end: "2026-10-09", daysWithData: 30 }, checkedAt: "2026-10-10T08:00:00Z", totalsFreshness: "stale", scoresFreshness: "current",
     totals: { spend: { micros: "1842375000", currency: "USD" }, clicks: 1236, impressions: 28410, conversions: "41.00", ctrPercent: "4.35",
       costPerConversion: { micros: "44935975", currency: "USD" }, metricsState: "observed", metricsReason: null },
     campaigns: [
@@ -137,7 +139,7 @@ export const sampleClientReport: ClientCompetitorReport = {
   changes: changes.filter(item => item.verdict?.verdict === "accurate").map(item => ({ competitorName: competitors.find(c => c.subjectKey === item.competitorSubjectKey)!.name,
     detectedAt: item.detectedAt, pageUrl: item.pageUrl.url, pageTitle: item.pageTitle, summary: item.summary, significance: item.significance.value,
     category: item.category.value, addedSentences: item.addedSentences, removedSentences: item.removedSentences })),
-  ownAds: { period: { start: "2026-09-21", end: "2026-10-20" }, checkedAt: "2026-09-12T08:00:00Z", totalsFreshness: "current", scoresFreshness: "stale",
+  ownAds: { period: { start: "2026-09-10", end: "2026-10-09" }, checkedAt: "2026-10-10T08:00:00Z", totalsFreshness: "stale", scoresFreshness: "current",
     totals: { spend: { micros: "1842375000", currency: "USD" }, clicks: 1236, impressions: 28410, conversions: "41.00",
       costPerConversion: { micros: "44935975", currency: "USD" }, metricsState: "observed", metricsReason: null },
     scores: { performance: label(score("3.2")), measurementGap: label(score("6.4", "concern_0_10", "0.66")), adCopy: label(score("2.8")), landingPageMismatch: label(score("4.1")) },

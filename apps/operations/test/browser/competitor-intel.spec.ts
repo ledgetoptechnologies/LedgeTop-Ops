@@ -99,8 +99,8 @@ test("Google Ads and self-assessment mark internal-only content", async ({ page 
   await expect(totals).toContainText("$1,842.38");
   await expect(totals).toContainText("$44.94");
   await expect(totals).toContainText("4.35%");
-  await expect(page.getByRole("tabpanel")).toContainText("Totals through Oct 20, 2026");
-  await expect(page.getByRole("tabpanel")).toContainText("Out of date · scored Sep 12, 2026");
+  await expect(page.getByRole("tabpanel")).toContainText("Out of date · totals through Oct 9, 2026");
+  await expect(page.getByRole("tabpanel")).toContainText("Scored Oct 10, 2026");
   await expect(page.getByRole("region", { name: "Active search ads" })).toContainText("Internal · never shown to the client");
   await noHorizontalScroll(page); await shot(page, "ops-ci-ads");
   await page.getByRole("tab", { name: /Self-assessment/ }).click();

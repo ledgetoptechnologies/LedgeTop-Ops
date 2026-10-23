@@ -41,8 +41,9 @@ test("each item keeps its own freshness so a current badge never hides a stale o
   await expect(cards.nth(1)).toContainText("Out of date · assessed Jul 1, 2026");
   await expect(cards.nth(1)).toContainText("Out of date · checked Oct 1, 2026");
   const ads = page.getByRole("region", { name: "How your Google Ads are doing" });
-  await expect(ads).toContainText("Totals through Oct 20, 2026");
-  await expect(ads).toContainText("Out of date · scored Sep 12, 2026");
+  await expect(ads).toContainText("Out of date · totals through Oct 9, 2026");
+  await expect(ads).toContainText("Scored Oct 10, 2026");
+  await expect(ads.getByText("Scored Oct 10, 2026")).not.toContainText("Out of date");
 });
 
 test("raw Google Ads conversions are never labeled as leads", async ({ page }) => {
