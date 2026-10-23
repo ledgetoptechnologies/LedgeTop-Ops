@@ -39,7 +39,9 @@ export function operationsUiPresentationPath(pathname: string): boolean {
 export async function serveOperationsUiShell(request: Request, env: UiReleaseEnv): Promise<Response> {
   const selected = env.UI_ACTIVE_RELEASE;
   if (selected === undefined || selected === "" || !htmlNavigation(request)) return env.ASSETS.fetch(request);
-  if (!canonicalOperationsRequest(request, env)) return failure(404);
+  // Already-admitted staff aliases retain their installed shell. Release HTML
+  // references canonical-only immutable assets and cannot be selected there.
+  if (!canonicalOperationsRequest(request, env)) return env.ASSETS.fetch(request);
   const manifest = findUiReleaseManifest("operations", selected);
   const binding = env.UI_RELEASE_ASSETS;
   if (!manifest || !binding) return failure(503);

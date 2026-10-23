@@ -112,9 +112,21 @@ describe("Operations additive UI through the actual Worker entrypoint", () => {
     expect((await f.request(path)).status).toBe(404); expect(f.fetchRelease).not.toHaveBeenCalled(); expect(f.assets).not.toHaveBeenCalled();
   });
 
-  it("rejects noncanonical origins even with forwarded host headers", async () => {
+  it.each([undefined, "", release.id, "invalid"])("retains admitted staff alias HTML independently of selection %s", async selected => {
+    const f = fixture(); f.env.UI_ACTIVE_RELEASE = selected;
+    for (const path of ["/dashboard", "/viewer", "/viewer/session/association/model"]) {
+      const response = await f.request(path, { headers: { "X-Forwarded-Host": "ops.ledgetop.app", "X-Forwarded-Proto": "https" } }, alias);
+      expect(response.status).toBe(200); expect(await response.text()).toBe("retained legacy Operations HTML");
+      expect(response.headers.get("X-Frame-Options")).toBe("DENY");
+    }
+    expect((await f.request(`${release.prefix}/assets/main.js`, {}, alias)).status).toBe(404);
+    expect(f.assets).toHaveBeenCalledTimes(3); expect(f.fetchRelease).not.toHaveBeenCalled(); expect(f.prepare).not.toHaveBeenCalled();
+  });
+
+  it("rejects untrusted origins even with forwarded host headers", async () => {
     const f = fixture(); f.env.UI_ACTIVE_RELEASE = release.id;
-    for (const host of [alias, "https://attacker.example.test", "http://ops.ledgetop.app", "https://ops.ledgetop.app:8443"])
+    for (const host of ["https://attacker.example.test", "http://ops.ledgetop.app", "https://ops.ledgetop.app:8443",
+      "http://ops.alias.example.test", "https://ops.alias.example.test:8443"])
       for (const path of ["/viewer", `${release.prefix}/assets/main.js`]) {
         const response = await f.request(path, { headers: { "X-Forwarded-Host": "ops.ledgetop.app", "X-Forwarded-Proto": "https" } }, host);
         expect(response.status).toBe(404);

@@ -10,6 +10,15 @@ HTML. Registered immutable assets remain available independently of the selector
 so an HTML rollback can continue serving files needed by already-open new tabs.
 Application origin, API, native owner, and public share admission remain with each
 application. Existing public share shells continue using their original assets.
+Already-admitted noncanonical Operations staff hosts retain legacy HTML even
+when a selector is active or invalid; release assets remain canonical-only.
+The canonical Operations origin comes from its existing deployment settings.
+Production currently recognizes `portal-entry-canonical`, whose Operations
+canonical settings still name the original staff host. Selecting the new UI on
+`ops.ledgetop.app` therefore depends on the separately reviewed staff-canonical
+transition and its old/new-host acceptance. This candidate does not perform it.
+Once new UI tabs exist, HTML rollback clears the selector while retaining the
+canonical-origin configuration, service binding and all registered release files.
 
 The catalog contains the independently reproduced, prefixed UI builds from commit
 `cfcf5cf992084f7b3658763cdf362fbc37101665`: 237 Operations files and 21 Client files,
