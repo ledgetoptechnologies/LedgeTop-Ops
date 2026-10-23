@@ -51,36 +51,56 @@ export function readTree(root) {
 
 /** Resolves one reference against the referencing file. Returns null for
  * references that never reach this tree (data:, blob:, fragments). */
-export function resolveReference(raw, fromPath) {
+export function resolveReference(raw, fromPath, base = fromPath) {
   const value = raw.trim();
   if (!value || value.startsWith('#') || /^(?:data|blob|about|javascript|mailto|tel):/i.test(value)) return null;
   if (/^(?:https?:)?\/\//i.test(value)) return { external: value };
   need(!/^[a-z][a-z0-9+.-]*:/i.test(value), `Unsupported reference scheme: ${value}`);
   // The URL parser decodes %2e%2e into a traversal, so reject before parsing.
   need(!/%(?:2e|2f|5c)/i.test(value.split(/[?#]/)[0]), `Encoded or ambiguous asset path: ${value}`);
-  // Vite's preload dependency lists name chunks relative to the base ("/"),
-  // not to the chunk that lists them.
-  const base = value.startsWith('assets/') ? '/' : fromPath;
   const url = new URL(value, `https://closure.invalid${base}`);
   need(url.origin === 'https://closure.invalid', `Reference escapes the build origin: ${value}`);
   return { path: safeUrlPath(decodeURI(url.pathname)) };
 }
 
+/** Cooked value of a JS string literal body, so './lazy.js' is seen as
+ * the './lazy.js' the runtime loads. Unknown escapes throw. */
+export function decodeJsString(body) {
+  return body.replace(/\\(u\{[0-9a-fA-F]{1,6}\}|u[0-9a-fA-F]{4}|x[0-9a-fA-F]{2}|\r\n|[\s\S])/g, (whole, escape, offset) => {
+    if (/^[ux]/.test(escape) && escape.length > 1) return String.fromCodePoint(parseInt(escape.replace(/^u\{?|^x|\}$/g, ''), 16));
+    if (/^(?:\r\n|\n|\r|\u2028|\u2029)$/.test(escape)) return '';
+    if (escape === '0' && !/[0-9]/.test(body[offset + 2] ?? '')) return '\0';
+    if (/^[ux0-9]$/.test(escape)) throw new Error('Unsupported escape in string literal');
+    return { n: '\n', r: '\r', t: '\t', b: '\b', f: '\f', v: '\v' }[escape] ?? escape;
+  });
+}
+
+const STRING = String.raw`(?:"(?:\\.|[^"\\\n])*"|'(?:\\.|[^'\\\n])*')`;
+const literalBody = quoted => decodeJsString(quoted.slice(1, -1));
+
 // String literals without interpolation. Template literals with ${} are
 // returned separately because their target is computed at runtime.
 function jsStrings(text) {
-  const out = [], computed = [];
+  const out = [], computed = [], undecodable = [];
   const re = /(["'])((?:\\.|(?!\1)[^\\\n])*)\1|`((?:\\.|[^\\`])*)`/g;
   for (let m; (m = re.exec(text));) {
-    if (m[3] !== undefined) (m[3].includes('${') ? computed : out).push(m[3].replace(/\$\{[^}]*\}/g, '${}'));
-    else out.push(m[2]);
+    const body = m[3] !== undefined ? m[3] : m[2];
+    if (m[3] !== undefined && body.includes('${')) { computed.push(body.replace(/\$\{[^}]*\}/g, '${}')); continue; }
+    try { out.push(decodeJsString(body)); } catch { undecodable.push(body.slice(0, 80)); }
   }
-  return { out, computed };
+  return { out, computed, undecodable };
 }
 
 // A literal is treated as a URL reference when it is shaped like one; anything
 // asset-shaped that does not resolve becomes an unresolved obligation.
 const urlShaped = s => /^(?:\.{1,2}\/|\/|assets\/)/.test(s) && !/\s/.test(s) && s.length <= 1024;
+const assetShaped = s => !/\s/.test(s) && s.length <= 1024 && ASSET_EXT.test(s.split(/[?#]/)[0]);
+
+// HTML attribute values, quoted or unquoted.
+function attributes(text, names) {
+  const re = new RegExp(String.raw`\s(${names})\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>\x60]+))`, 'gi');
+  return [...text.matchAll(re)].map(m => ({ name: m[1].toLowerCase(), value: m[2] ?? m[3] ?? m[4] }));
+}
 
 /** References out of one text file, plus anything that cannot be resolved
  * statically. ignorePrefixes names root-relative routes served by the Worker
@@ -88,7 +108,7 @@ const urlShaped = s => /^(?:\.{1,2}\/|\/|assets\/)/.test(s) && !/\s/.test(s) && 
 export function extractReferences(file, text, { ignorePrefixes = [] } = {}) {
   const kind = TEXT_KINDS[path.extname(file).toLowerCase()];
   const refs = [], unresolved = [];
-  const add = (value, via) => refs.push({ value, via });
+  const add = (value, via, base) => refs.push({ value, via, ...(base ? { base } : {}) });
   if (!kind) return { refs, unresolved };
   const fromCss = raw => {
     // Inline data: images can carry their own url(#id) references; they never
@@ -98,9 +118,49 @@ export function extractReferences(file, text, { ignorePrefixes = [] } = {}) {
     for (const m of css.matchAll(/@import\s+(["'])([^"']+)\1/gi)) add(m[2], 'css-import');
     if (/url\(\s*(?:var\(|\$|attr\()/i.test(css)) unresolved.push({ from: file, kind: 'computed-css-url', detail: 'url() argument is computed' });
   };
-  const fromJs = js => {
-    const { out, computed } = jsStrings(js);
+  const fromJs = source => {
+    // Vite's preload dependency map names chunks relative to the base ("/"),
+    // not to the chunk holding it. Only that recognized array gets base "/";
+    // it is then blanked so the generic scan below does not re-read it.
+    const js = source.replace(/(__vite__mapDeps\s*=[^;]*?m\.f\s*=\s*)\[([^\]]*)\]/g, (whole, head, list) => {
+      for (const m of list.matchAll(new RegExp(STRING, 'g'))) {
+        try { add(literalBody(m[0]), 'vite-preload-map', '/'); }
+        catch { unresolved.push({ from: file, kind: 'unsupported-escape', detail: m[0].slice(0, 80) }); }
+      }
+      return `${head}[]`;
+    });
+    // Literal arguments in loading contexts are references whatever their shape
+    // ('worker.js' is as real as './worker.js'). Static and dynamic import()
+    // need no context: browsers reject bare specifiers, and './' or '/' forms
+    // are caught by the literal scan below.
+    const literal = (quoted, then) => {
+      try { then(literalBody(quoted)); }
+      catch { unresolved.push({ from: file, kind: 'unsupported-escape', detail: quoted.slice(0, 80) }); }
+    };
+    for (const m of js.matchAll(new RegExp(String.raw`new\s+URL\s*\(\s*(${STRING})\s*,\s*import\.meta\.url\s*\)`, 'g')))
+      literal(m[1], value => add(value, 'new-url'));
+    // importScripts resolves against the worker script that calls it.
+    for (const m of js.matchAll(new RegExp(String.raw`\bimportScripts\s*\(\s*(${STRING})`, 'g')))
+      literal(m[1], value => add(value, 'import-scripts'));
+    // new Worker('x.js') and serviceWorker.register('x.js') resolve against the
+    // page's address, which on a single-page app can be any route.
+    for (const m of js.matchAll(new RegExp(String.raw`\b(?:serviceWorker\.register|new\s+(?:Shared)?Worker)\s*\(\s*(${STRING})`, 'g')))
+      literal(m[1], value => {
+        if (value.startsWith('/') || /^(?:https?:)?\/\//i.test(value)) add(value, 'worker');
+        else unresolved.push({ from: file, kind: 'document-relative-url', detail: `${value} resolves against the page address` });
+      });
+    const { out, computed, undecodable } = jsStrings(js);
+    // Minified code can make the literal scan pair quotes across regex
+    // literals; only path-shaped bodies are worth an obligation.
+    for (const s of undecodable)
+      if (urlShaped(s.replace(/\\./g, '')) && assetShaped(s.replace(/\\./g, '')))
+        unresolved.push({ from: file, kind: 'unsupported-escape', detail: s });
     for (const s of out) if (urlShaped(s) && ASSET_EXT.test(s.split(/[?#]/)[0])) add(s, 'js-literal');
+    // Without a full JS parser, a regex literal can throw quote pairing off and
+    // hide a real reference. A second, pairing-independent scan of quoted
+    // path-shaped text keeps the result a superset.
+    for (const m of js.matchAll(/["'`]((?:\.{1,2}\/|\/|assets\/)[^"'`\s\\]{1,1024})["'`]/g))
+      if (assetShaped(m[1]) && !m[1].includes('${')) add(m[1], 'js-literal');
     for (const s of out) if (/^\/?assets\/?$/.test(s)) unresolved.push({ from: file, kind: 'computed-asset-path', detail: `bare asset directory literal "${s}" suggests a runtime-built path` });
     // Route and API templates (`/portal/${id}`) are navigation, not files. Only
     // templates whose fixed text names an asset location or extension count.
@@ -121,22 +181,24 @@ export function extractReferences(file, text, { ignorePrefixes = [] } = {}) {
     for (const m of js.matchAll(/\/\/[#@]\s*sourceMappingURL=(\S+)/g)) add(m[1], 'source-map');
   };
   if (kind === 'html' || kind === 'svg') {
-    for (const m of text.matchAll(/\s(?:src|href|poster|data|xlink:href|content)\s*=\s*(["'])([^"']*)\1/gi)) {
-      const v = m[2];
-      if (/^\s*(?:content)/i.test(m[0]) && !urlShaped(v)) continue;
-      add(v, 'html-attr');
+    for (const { name, value } of attributes(text, 'src|href|poster|data|xlink:href|content')) {
+      // <meta content> is mostly prose; only URL-shaped values count.
+      if (name === 'content' && !urlShaped(value)) continue;
+      add(value, 'html-attr');
     }
-    for (const m of text.matchAll(/\s(?:srcset|imagesrcset)\s*=\s*(["'])([^"']*)\1/gi))
-      for (const candidate of m[2].split(',')) { const url = candidate.trim().split(/\s+/)[0]; if (url) add(url, 'srcset'); }
-    for (const m of text.matchAll(/<script\b(?![^>]*\bsrc=)[^>]*>([\s\S]*?)<\/script>/gi)) fromJs(m[1]);
+    for (const { value } of attributes(text, 'srcset|imagesrcset'))
+      for (const candidate of value.split(',')) { const url = candidate.trim().split(/\s+/)[0]; if (url) add(url, 'srcset'); }
+    for (const m of text.matchAll(/<script\b(?![^>]*\bsrc\s*=)[^>]*>([\s\S]*?)<\/script>/gi)) fromJs(m[1]);
     for (const m of text.matchAll(/<style\b[^>]*>([\s\S]*?)<\/style>/gi)) fromCss(m[1]);
-    for (const m of text.matchAll(/\sstyle\s*=\s*(["'])([^"']*)\1/gi)) fromCss(m[2]);
+    for (const { value } of attributes(text, 'style')) fromCss(value);
   } else if (kind === 'css') fromCss(text);
   else if (kind === 'js') fromJs(text);
   else if (kind === 'json') {
     let value; try { value = JSON.parse(text); } catch { unresolved.push({ from: file, kind: 'invalid-json', detail: 'cannot parse' }); return { refs, unresolved }; }
     (function visit(node) {
-      if (typeof node === 'string') { if (urlShaped(node) && ASSET_EXT.test(node.split(/[?#]/)[0])) add(node, 'json-string'); }
+      // Manifests use bare relative paths ("icons/icon.png") resolved against
+      // the manifest URL, so any asset-shaped string counts.
+      if (typeof node === 'string') { if (assetShaped(node) && !/^[a-z][a-z0-9+.-]*:/i.test(node)) add(node, 'json-string'); }
       else if (node && typeof node === 'object') for (const v of Object.values(node)) visit(v);
     })(value);
   }
@@ -155,12 +217,13 @@ export function computeClosure({ root, entries = ['/index.html'], ignorePrefixes
     unresolved.push(...found);
     for (const ref of refs) {
       let target;
-      try { target = resolveReference(ref.value, current); }
+      try { target = resolveReference(ref.value, current, ref.base ?? current); }
       catch (error) { unresolved.push({ from: current, kind: 'invalid-reference', detail: `${ref.value}: ${error.message}` }); continue; }
       if (!target) continue;
       if (target.external) { external.add(target.external); continue; }
       if (!tree.has(target.path)) {
-        unresolved.push({ from: current, kind: 'missing-file', detail: `${ref.via} → ${target.path}` });
+        // One obligation per missing target, however many ways it was found.
+        unresolved.push({ from: current, kind: 'missing-file', detail: target.path, via: ref.via });
         continue;
       }
       if (!reached.has(target.path)) { reached.set(target.path, new Set()); queue.push(target.path); }
@@ -197,6 +260,8 @@ export function closureEvidence({ app, root, entries, ignorePrefixes, sourceComm
   need(/^[a-z][a-z0-9-]{0,40}$/.test(app ?? ''), 'An app name is required');
   need(sourceCommit === null || /^[0-9a-f]{40}$/.test(sourceCommit), 'sourceCommit must be a full commit SHA');
   const closure = computeClosure({ root, entries, ignorePrefixes });
+  // Comparing a tree with itself proves nothing; refuse rather than report it.
+  need(!determinismRoot || path.resolve(determinismRoot) !== path.resolve(root), 'determinismRoot must be a separate build tree');
   const determinism = determinismRoot ? compareTrees(root, determinismRoot) : null;
   const evidence = {
     schemaVersion: 1, kind: 'ui-asset-closure-evidence', app,
@@ -207,7 +272,10 @@ export function closureEvidence({ app, root, entries, ignorePrefixes, sourceComm
     determinism: determinism ? { identical: determinism.identical, compared: determinism.compared, differences: determinism.differences } : null,
     provenance: {
       sourceCommit, sourceCommitVerified: false,
-      buildDeterminism: determinism ? (determinism.identical ? 'two-local-builds-identical' : 'local-builds-differ') : 'not-checked',
+      // Byte equality of two local trees only; whether they came from two
+      // independent locked builds is not something this tool can observe.
+      buildDeterminism: determinism ? (determinism.identical ? 'two-local-trees-byte-identical' : 'local-trees-differ') : 'not-checked',
+      independentBuildsAttested: false,
       liveByteComparison: 'not-performed',
       historicalVersions: 'unproven',
       supportedVersionIds: null,
@@ -215,7 +283,8 @@ export function closureEvidence({ app, root, entries, ignorePrefixes, sourceComm
     approvedInventory: false, completenessProved: false, writesPerformed: false, networkUsed: false,
     obligations: [
       ...(closure.unresolved.length ? ['Resolve or explicitly accept every unresolved reference'] : []),
-      ...(determinism?.identical ? [] : ['Show two independent locked builds of the source commit are byte-identical']),
+      ...(determinism && !determinism.identical ? ['Explain or remove the byte differences between the two build trees'] : []),
+      'Attest that two independent locked builds of the source commit produced byte-identical trees',
       'Review runtime-computed URLs a static scan cannot see (fully computed strings, third-party loaders)',
       'Compare every closure file byte-for-byte with live production',
       'Establish which historical asset trees live tabs may still reference (deployment/version history)',

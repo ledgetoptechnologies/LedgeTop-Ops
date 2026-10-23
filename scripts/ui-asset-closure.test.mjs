@@ -102,7 +102,7 @@ test('a reference to a file absent from the build is reported, never dropped', t
     'index.html': '<script type="module" src="/assets/main-AAAAAAAA.js"></script>',
     'assets/main-AAAAAAAA.js': 'import("./gone-BBBBBBBB.js")',
   }) });
-  assert.deepEqual(closure.unresolved.map(u => [u.kind, u.detail]), [['missing-file', 'js-literal → /assets/gone-BBBBBBBB.js']]);
+  assert.deepEqual(closure.unresolved.map(u => [u.kind, u.detail]), [['missing-file', '/assets/gone-BBBBBBBB.js']]);
 });
 
 test('external, data and fragment references never enter the tree', t => {
@@ -182,10 +182,80 @@ test('evidence never claims approval, completeness or live verification', t => {
 
 test('evidence records a determinism check and its result', t => {
   const a = tree(t, VITE), b = tree(t, VITE), c = tree(t, { ...VITE, 'assets/vendor-Def67890.js': 'changed' });
-  assert.equal(closureEvidence({ app: 'client', root: a, determinismRoot: b }).provenance.buildDeterminism, 'two-local-builds-identical');
+  const same = closureEvidence({ app: 'client', root: a, determinismRoot: b });
+  assert.equal(same.provenance.buildDeterminism, 'two-local-trees-byte-identical');
+  // Byte-equal trees still do not show they came from independent builds.
+  assert.equal(same.provenance.independentBuildsAttested, false);
+  assert.ok(same.obligations.some(o => /independent locked builds/.test(o)));
   const differ = closureEvidence({ app: 'client', root: a, determinismRoot: c });
-  assert.equal(differ.provenance.buildDeterminism, 'local-builds-differ');
-  assert.ok(differ.obligations.some(o => /byte-identical/.test(o)));
+  assert.equal(differ.provenance.buildDeterminism, 'local-trees-differ');
+  assert.ok(differ.obligations.some(o => /byte differences/.test(o)));
+});
+
+test('a tree compared with itself is refused, not reported as deterministic', t => {
+  const a = tree(t, VITE);
+  assert.throws(() => closureEvidence({ app: 'client', root: a, determinismRoot: a }), /separate build tree/);
+  assert.throws(() => closureEvidence({ app: 'client', root: a, determinismRoot: a + path.sep }), /separate build tree/);
+});
+
+test('bare relative targets in loading contexts and manifests are followed', t => {
+  const closure = computeClosure({ root: tree(t, {
+    'index.html': '<link rel="manifest" href="/app.webmanifest"><script type="module" src="/assets/main-AAAAAAAA.js"></script>',
+    'app.webmanifest': '{"icons":[{"src":"icons/icon-192.png"}],"start_url":"/"}',
+    'icons/icon-192.png': 'png',
+    'assets/main-AAAAAAAA.js': 'new Worker(new URL("worker-BBBBBBBB.js",import.meta.url));importScripts("helper-CCCCCCCC.js");',
+    'assets/worker-BBBBBBBB.js': '', 'assets/helper-CCCCCCCC.js': '',
+  }) });
+  assert.deepEqual(closure.unresolved, []);
+  for (const p of ['/icons/icon-192.png', '/assets/worker-BBBBBBBB.js', '/assets/helper-CCCCCCCC.js']) assert.ok(paths(closure).includes(p), p);
+});
+
+test('a page-relative Worker or service worker URL is an obligation on a single-page app', () => {
+  const { refs, unresolved } = extractReferences('/assets/a.js', 'new Worker("w-AAAAAAAA.js");navigator.serviceWorker.register("sw.js");new SharedWorker("/s-BBBBBBBB.js");');
+  assert.deepEqual(unresolved.map(u => u.kind), ['document-relative-url', 'document-relative-url']);
+  assert.ok(refs.some(r => r.value === '/s-BBBBBBBB.js'));
+});
+
+test('quote pairing across minified regex literals does not invent references', () => {
+  const js = 'const a=/["\']/g,b="x",c=e.import",",d=/^\\1$/;import{x}from"./v-AAAAAAAA.js";';
+  const { refs, unresolved } = extractReferences('/assets/a.js', js);
+  assert.deepEqual(unresolved, []);
+  assert.deepEqual(refs.map(r => r.value), ['./v-AAAAAAAA.js']);
+});
+
+test('escaped string literals are decoded the way the runtime reads them', t => {
+  const closure = computeClosure({ root: tree(t, {
+    'index.html': '<script type="module" src="/assets/main-AAAAAAAA.js"></script>',
+    'assets/main-AAAAAAAA.js': String.raw`import("./lazy-BBBBBBBB.js");const w=new URL("\x2e/w-CCCCCCCC.js",import.meta.url);const u="\u{2e}/u-DDDDDDDD.js";const k="a\\b";`,
+    'assets/lazy-BBBBBBBB.js': '', 'assets/w-CCCCCCCC.js': '', 'assets/u-DDDDDDDD.js': '',
+  }) });
+  assert.deepEqual(closure.unresolved, []);
+  for (const p of ['/assets/lazy-BBBBBBBB.js', '/assets/w-CCCCCCCC.js', '/assets/u-DDDDDDDD.js']) assert.ok(paths(closure).includes(p), p);
+});
+
+test('an undecodable path-like literal is an obligation, not silently dropped', () => {
+  const { unresolved } = extractReferences('/assets/a.js', String.raw`import("\1/lazy.js")`);
+  assert.ok(unresolved.some(u => u.kind === 'unsupported-escape'));
+});
+
+test('base-relative resolution applies only to the Vite preload map', t => {
+  const closure = computeClosure({ root: tree(t, {
+    'index.html': '<script type="module" src="/assets/main-AAAAAAAA.js"></script>',
+    'assets/main-AAAAAAAA.js': 'const w=new URL("assets/worker-BBBBBBBB.js",import.meta.url);',
+    'assets/worker-BBBBBBBB.js': '',
+  }) });
+  // The runtime resolves this against /assets/main-…js, i.e. /assets/assets/…
+  assert.deepEqual(closure.unresolved.map(u => [u.kind, u.detail]), [['missing-file', '/assets/assets/worker-BBBBBBBB.js']]);
+  assert.ok(!paths(closure).includes('/assets/worker-BBBBBBBB.js'));
+});
+
+test('unquoted HTML attribute values are followed', t => {
+  const closure = computeClosure({ root: tree(t, {
+    'index.html': '<script type=module src=/assets/main-AAAAAAAA.js></script><link rel=stylesheet href=/assets/s-BBBBBBBB.css><img srcset=/i-CCCCCCCC.png>',
+    'assets/main-AAAAAAAA.js': '', 'assets/s-BBBBBBBB.css': '', 'i-CCCCCCCC.png': '',
+  }) });
+  assert.deepEqual(closure.unresolved, []);
+  assert.deepEqual(paths(closure), ['/assets/main-AAAAAAAA.js', '/assets/s-BBBBBBBB.css', '/i-CCCCCCCC.png', '/index.html']);
 });
 
 test('closure digest is stable across runs and changes with any closure byte', t => {
