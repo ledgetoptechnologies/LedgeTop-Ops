@@ -9,6 +9,7 @@
 .ci-coverage { display: flex; flex-wrap: wrap; align-items: center; gap: .3rem; padding: .7rem .95rem; border-radius: var(--radius-md); background: var(--paper); border: 1px solid var(--line); font-size: .9rem; }
 .ci-report-section { display: grid; gap: .8rem; min-width: 0; }
 .ci-report-section > h3, .ci-report-section-head h3 { font-size: 1.1rem; }
+.ci-report-subhead h4 { font-size: .95rem; }
 .ci-report-section-head { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: .5rem; }
 
 .ci-report-competitors { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 20rem), 1fr)); gap: .9rem; }

@@ -77,7 +77,8 @@ export interface AdsCampaign { name: string; status: string; type: string; cost:
 export interface ActiveSearchAd { campaign: string; adGroup: string; headlines: string[]; descriptions: string[]; finalUrl: string; impressions: number; clicks: number; conversions: Decimal; cost: Money }
 export interface OwnAdsCheckup extends ObservationRef {
   period: { start: string; end: string; daysWithData: number };
-  totalsFreshness: Freshness; scoresFreshness: Freshness;
+  /** Envelope completedAt of the checkup; scores age on their own 30-day window. */
+  checkedAt: Timestamp; totalsFreshness: Freshness; scoresFreshness: Freshness;
   totals: { spend: Money; clicks: number | null; impressions: number | null; conversions: Decimal | null; ctrPercent: Decimal | null; costPerConversion: Money;
     metricsState: EvidenceState; metricsReason: UnknownReason | null };
   campaigns: AdsCampaign[];
@@ -120,12 +121,14 @@ export interface ClientCompetitorReport {
     name: string; canonicalDomain: string; verifiedHomeUrl: { url: string; title: string | null } | null;
     threat: ClientScore | null; serviceOverlap: ClientScore | null; geographicOverlap: Probability | null;
     explanation: string | null; factors: { helps: string[]; hurts: string[] } | null;
-    adActivity: { status: EvidenceState; reason: UnknownReason | null; adCount: { value: number | null; approximate: boolean };
+    /** Baseline assessment age; null with no pinned baseline. */
+    baseline: { assessedAt: Timestamp; freshness: Freshness } | null;
+    adActivity: { checkedAt: Timestamp; status: EvidenceState; reason: UnknownReason | null; adCount: { value: number | null; approximate: boolean };
       lastShownDate: string | null; sourceUrl: string; freshness: Freshness } | null;
   }[];
   changes: { competitorName: string; detectedAt: Timestamp; pageUrl: string; pageTitle: string | null; summary: string;
     significance: Significance | null; category: ChangeCategory | null; addedSentences: string[]; removedSentences: string[] }[];
-  ownAds: { period: { start: string; end: string }; freshness: Freshness;
+  ownAds: { period: { start: string; end: string }; checkedAt: Timestamp; totalsFreshness: Freshness; scoresFreshness: Freshness;
     totals: { spend: Money; clicks: number | null; impressions: number | null; conversions: Decimal | null; costPerConversion: Money; metricsState: EvidenceState; metricsReason: UnknownReason | null };
     scores: { performance: ClientScore; measurementGap: ClientScore; adCopy: ClientScore; landingPageMismatch: ClientScore };
     focus: string | null; findings: { copyDriver: string | null; landingPageDriver: string | null };

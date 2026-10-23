@@ -28,8 +28,28 @@ test("a published report shows reviewed competitors, changes and the Ads overvie
   await expect(page.getByRole("region", { name: "What changed" }).getByRole("article")).toHaveCount(2);
   const ads = page.getByRole("list", { name: "Google Ads totals" });
   await expect(ads).toContainText("$1,842.38"); await expect(ads).toContainText("$44.94"); await expect(ads).toContainText("41");
+  await expect(ads).toContainText("Cost per conversion");
   await noHorizontalScroll(page);
   if (process.env.CI_SHOTS) await page.screenshot({ path: `${process.env.CI_SHOTS}/portal-ci-report-${test.info().project.name}.png`, fullPage: true });
+});
+
+test("each item keeps its own freshness so a current badge never hides a stale one", async ({ page }) => {
+  await render(page);
+  const cards = page.getByRole("region", { name: "Who to keep an eye on" }).getByRole("article");
+  await expect(cards.first()).toContainText("Assessed Sep 14, 2026");
+  await expect(cards.first()).not.toContainText("Out of date");
+  await expect(cards.nth(1)).toContainText("Out of date · assessed Jul 1, 2026");
+  await expect(cards.nth(1)).toContainText("Out of date · checked Oct 1, 2026");
+  const ads = page.getByRole("region", { name: "How your Google Ads are doing" });
+  await expect(ads).toContainText("Totals through Oct 20, 2026");
+  await expect(ads).toContainText("Out of date · scored Sep 12, 2026");
+});
+
+test("raw Google Ads conversions are never labeled as leads", async ({ page }) => {
+  await render(page);
+  const ads = page.getByRole("region", { name: "How your Google Ads are doing" });
+  for (const label of ["Leads", "Cost per lead", "No leads"]) await expect(ads.getByText(label, { exact: true })).toHaveCount(0);
+  await expect(ads.getByRole("columnheader", { name: "Conversions" })).toBeVisible();
 });
 
 test("the client never sees internal-only fields", async ({ page }) => {

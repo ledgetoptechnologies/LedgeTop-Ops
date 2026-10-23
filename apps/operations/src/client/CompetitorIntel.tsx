@@ -269,7 +269,7 @@ function AdsPanel({ view }: { view: StaffTenantView }) {
   return <div className="ci-ads">
     <header className="ci-section-head">
       <div><h3>Google Ads checkup</h3><p className="ci-muted">{ciDate(ads.period.start)} – {ciDate(ads.period.end)} · {ads.period.daysWithData} days with data. Read-only; nothing is changed in Google Ads.</p></div>
-      <FreshnessTag freshness={ads.totalsFreshness} at={ads.period.end} label="Through" />
+      <FreshnessTag freshness={ads.totalsFreshness} at={ads.period.end} label="Totals through" />
     </header>
     {metrics ? <div className="ci-tiles ci-tiles-ads" role="list" aria-label="Ads totals">
       <Metric label="Spend" value={moneyText(totals.spend)} /><Metric label="Clicks" value={number(totals.clicks)} />
@@ -277,6 +277,7 @@ function AdsPanel({ view }: { view: StaffTenantView }) {
       <Metric label="Cost per conversion" value={totals.costPerConversion ? moneyText(totals.costPerConversion) : "No conversions"} />
       <Metric label="Click-through rate" value={totals.ctrPercent ? `${scoreNumberless(totals.ctrPercent)}%` : "—"} />
     </div> : <p className="ci-notice ci-notice-warn">{evidenceText(totals.metricsState, totals.metricsReason)}</p>}
+    <div className="ci-section-head"><h4>Checkup scores</h4><FreshnessTag freshness={ads.scoresFreshness} at={ads.checkedAt} label="Scored" /></div>
     <div className="ci-score-grid">
       <ScoreMeter label="Performance concern" score={ads.scores.performance} />
       <ScoreMeter label="Conversion tracking gap" score={ads.scores.measurementGap} />

@@ -84,6 +84,8 @@ test("competitors rank by threat and show missing evidence honestly", async ({ p
   await expect(summit).toContainText("About 14 ads");
   await expect(page.getByRole("article", { name: "Lakeside Exteriors" })).toContainText("Out of date");
   await expect(page.getByRole("article", { name: "Lakeside Exteriors" })).toContainText("None found");
+  await expect(page.getByRole("article", { name: "Lakeside Exteriors" })).toContainText("Out of date · on Jul 1, 2026");
+  await expect(summit).not.toContainText("Out of date");
   const pine = page.getByRole("article", { name: "North Pine Home Pros" });
   await expect(pine).toContainText("Blocked automated checks");
   await expect(pine).toContainText("No baseline assessment yet.");
@@ -97,6 +99,8 @@ test("Google Ads and self-assessment mark internal-only content", async ({ page 
   await expect(totals).toContainText("$1,842.38");
   await expect(totals).toContainText("$44.94");
   await expect(totals).toContainText("4.35%");
+  await expect(page.getByRole("tabpanel")).toContainText("Totals through Oct 20, 2026");
+  await expect(page.getByRole("tabpanel")).toContainText("Out of date · scored Sep 12, 2026");
   await expect(page.getByRole("region", { name: "Active search ads" })).toContainText("Internal · never shown to the client");
   await noHorizontalScroll(page); await shot(page, "ops-ci-ads");
   await page.getByRole("tab", { name: /Self-assessment/ }).click();
