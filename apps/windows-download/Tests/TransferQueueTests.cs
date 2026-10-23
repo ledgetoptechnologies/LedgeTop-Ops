@@ -22,6 +22,9 @@ internal static class TransferQueueTests
         ("queue active pause and cancel drain immediately while session discovery is blocked", OfflineStop),
         ("queue inactive pause and cancel persist offline across restart", OfflineQueuedStop),
         ("queue local pause fences a start already awaiting sign-in", PendingStartStop),
+        ("queue prepared start cannot outlive a newer local pause or cancel", PreparedStartStop),
+        ("queue prepared start is bound to its original queue instance", PreparedStartOwner),
+        ("queue prepared start still verifies the current principal", PreparedStartIdentity),
         ("queue record and serialized byte caps reject without starting transfers", Bounds),
         ("queue unavailable destinations isolate jobs across reopen and explicit retry", MissingDestinations),
         ("queue stored destinations remain canonical absolute local paths", DestinationSyntax),
@@ -350,6 +353,49 @@ internal static class TransferQueueTests
                 Assert((await File.ReadAllBytesAsync(Path.Combine(fixture.Output, "map.bin"))).SequenceEqual(source.Bytes));
             }
         }
+    }
+
+    private static async Task PreparedStartStop() {
+        foreach (var cancel in new[] { false, true }) {
+            using var fixture = new Fixture(); var source = new Source();
+            await using var queue = await TransferQueue.OpenAsync(fixture.State, source);
+            var id = await queue.EnqueueAsync("odqr1_resource_one", fixture.Output);
+            var saved = await File.ReadAllBytesAsync(State(fixture)); var sessions = source.SessionCalls;
+            var pending = queue.PrepareStart(id);
+            var afterCapture = await File.ReadAllBytesAsync(State(fixture));
+            Assert(source.SessionCalls == sessions && saved.SequenceEqual(afterCapture));
+            // The host publishes this prepared intent, then a newer stop finishes before Begin is invoked.
+            await (cancel ? queue.CancelAsync(id) : queue.PauseAsync(id));
+            await Throws<TransferException>(() => queue.StartAsync(pending));
+            Assert((await Job(queue, id)).State == (cancel ? QueuedTransferState.Cancelled : QueuedTransferState.Paused));
+            Assert(source.DownloadCalls == 0 && !File.Exists(Path.Combine(fixture.Output, "map.bin")));
+            if (!cancel) {
+                await queue.StartAsync(queue.PrepareStart(id)); await queue.WaitForIdleAsync();
+                Assert((await Job(queue, id)).State == QueuedTransferState.Completed && source.DownloadCalls == 1);
+            }
+        }
+    }
+
+    private static async Task PreparedStartOwner() {
+        using var first = new Fixture(); using var second = new Fixture();
+        var source = new Source(); var otherSource = new Source();
+        await using var queue = await TransferQueue.OpenAsync(first.State, source);
+        await using var other = await TransferQueue.OpenAsync(second.State, otherSource);
+        var id = await queue.EnqueueAsync("odqr1_resource_one", first.Output);
+        var pending = queue.PrepareStart(id); var sessions = otherSource.SessionCalls;
+        await Throws<TransferException>(() => other.StartAsync(pending));
+        Assert(otherSource.SessionCalls == sessions && otherSource.DownloadCalls == 0 && source.DownloadCalls == 0);
+        Assert((await Job(queue, id)).State == QueuedTransferState.Queued);
+    }
+
+    private static async Task PreparedStartIdentity() {
+        using var fixture = new Fixture(); var source = new Source();
+        await using var queue = await TransferQueue.OpenAsync(fixture.State, source);
+        var id = await queue.EnqueueAsync("odqr1_resource_one", fixture.Output);
+        var pending = queue.PrepareStart(id);
+        source.Principal = "odqp1_" + new string('b', 64);
+        await Throws<AccessDeniedException>(() => queue.StartAsync(pending));
+        Assert(source.DownloadCalls == 0 && !File.Exists(Path.Combine(fixture.Output, "map.bin")));
     }
 
     private static async Task MissingDestinations() {

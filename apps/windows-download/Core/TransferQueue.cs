@@ -126,10 +126,39 @@ public sealed class TransferQueue : IAsyncDisposable
     public Task RetryAsync(Guid jobId, IProgress<DownloadProgress>? progress = null, CancellationToken cancellationToken = default)
         => BeginAsync(jobId, progress, cancellationToken);
 
-    private async Task BeginAsync(Guid jobId, IProgress<DownloadProgress>? progress, CancellationToken cancellationToken)
+    /// <summary>An in-memory start intent for this queue, not permission to read a resource.
+    /// A later local pause or cancel invalidates it. It cannot be used by another queue instance.</summary>
+    public sealed class StartReservation
     {
-        Guid observedStop;
-        lock (sync) { EnsureOpen(); observedStop = localStops.GetValueOrDefault(jobId); }
+        internal readonly TransferQueue Queue;
+        internal readonly Guid JobId, StopGeneration;
+        internal StartReservation(TransferQueue queue, Guid jobId, Guid stopGeneration)
+        { Queue = queue; JobId = jobId; StopGeneration = stopGeneration; }
+    }
+
+    /// <summary>Captures local stop ordering without authentication, callbacks or state writes.
+    /// A host can capture this before publishing a pending start to its local stop controls.</summary>
+    public StartReservation PrepareStart(Guid jobId)
+    {
+        lock (sync) {
+            EnsureOpen(); Healthy(); _ = Find(jobId);
+            return new(this, jobId, localStops.GetValueOrDefault(jobId));
+        }
+    }
+
+    /// <summary>Starts a previously captured intent only if no newer local stop superseded it.
+    /// Current session, principal, resource and single-transfer checks remain mandatory.</summary>
+    public Task StartAsync(StartReservation reservation, IProgress<DownloadProgress>? progress = null,
+        CancellationToken cancellationToken = default) => BeginAsync(reservation, progress, cancellationToken);
+
+    private async Task BeginAsync(Guid jobId, IProgress<DownloadProgress>? progress, CancellationToken cancellationToken)
+        => await BeginAsync(PrepareStart(jobId), progress, cancellationToken);
+
+    private async Task BeginAsync(StartReservation reservation, IProgress<DownloadProgress>? progress, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(reservation);
+        if (!ReferenceEquals(reservation.Queue, this)) throw new TransferException("This start intent belongs to another queue.");
+        var jobId = reservation.JobId; var observedStop = reservation.StopGeneration;
         await commands.WaitAsync(cancellationToken);
         try {
             EnsureOpen(); await VerifySessionAsync(cancellationToken);
