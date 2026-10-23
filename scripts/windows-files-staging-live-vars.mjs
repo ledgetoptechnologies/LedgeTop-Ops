@@ -44,6 +44,7 @@ export function preserveWindowsStagingLiveVars({ sources, preflight, versionDeta
       for (const binding of bindings) {
         if (!binding || typeof binding.name !== "string" || !NAME.test(binding.name)
           || names.has(binding.name) || !TYPES.has(binding.type)) reject();
+        if (app === "operations" && binding.name === "CLIENT_PORTAL_MEMBERSHIP_MANAGEMENT_ENABLED") reject();
         names.add(binding.name);
         if (binding.type === "plain_text") {
           if (SLOTS.has(binding.name) || typeof binding.text !== "string" || Buffer.byteLength(binding.text, "utf8") > 32768) reject();

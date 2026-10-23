@@ -55,6 +55,20 @@ test("disabled real composition with pending suffix retains active disabled valu
   input.profile.enabled = true;
   assert.throws(() => buildWindowsStagingCompositionWithLiveVars(input), /inputs_invalid/);
 });
+test("requires live Ops membership binding retirement while preserving Client's disabled binding", () => {
+  const name = "CLIENT_PORTAL_MEMBERSHIP_MANAGEMENT_ENABLED";
+  const input = fixture();
+  input.versionDetails.delivery.detail.resources.bindings.push({ name, type: "plain_text", text: "false" });
+  assert.equal(buildWindowsStagingCompositionWithLiveVars(input).configs.delivery.vars[name], "false");
+  for (const text of ["false", "true", "", "FALSE"]) {
+    const stale = structuredClone(input);
+    stale.versionDetails.operations.detail.resources.bindings.push({ name, type: "plain_text", text });
+    const before = structuredClone(stale);
+    assert.throws(() => preserveWindowsStagingLiveVars(stale), /windows_staging_live_vars_inputs_invalid/);
+    assert.throws(() => buildWindowsStagingCompositionWithLiveVars(stale), /windows_staging_live_vars_inputs_invalid/);
+    assert.deepEqual(stale, before);
+  }
+});
 const bad = [
   ["wrong account", f => { f.versionDetails.operations.accountId = "other"; }],
   ["wrong worker", f => { f.versionDetails.operations.workerName = STAGING_INVENTORY.delivery.name; }],
