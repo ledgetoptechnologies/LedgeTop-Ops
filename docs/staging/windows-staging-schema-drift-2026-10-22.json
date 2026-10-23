@@ -1,0 +1,483 @@
+{
+  "schemaVersion": 1,
+  "scope": "Read-only exact-query staging schema/ledger comparison; no application rows or raw SQL",
+  "analysisSourceCommit": "4698c6c65246e6cf607c1e98f93669fa8953316b",
+  "schemaQuerySha256": "8fce60a0f677bb4e8e21d04b6e64efa0b46ad4a6a982141f1b432bc0788eecd9",
+  "localObjectReferenceSha256": "e2509bd4e9cc5eb8e1ff724cafc370ad196b2fecd3a9cde6943e51b05a7e9b35",
+  "observationProvenance": {
+    "scope": "Query metadata recorded by caller after completed CLI; original receipt unchanged",
+    "executedSourceCommit": "a823b69d57cf3fbbc38ec2c7924fa6bd20d0e605",
+    "rawReceiptSha256": "76fd8385699c33503502b09ec68cfeab4743b20a12dece5482546baeedd04f5c",
+    "preflightToolSha256": "fcc5f147df6fd775a8f4ea1dfed3fff44179cd0b38b14bf599f43df947bded89",
+    "sharedQueryModuleSha256": "37996e55a198bf3114c9d98cf8e67d73a268e532a0a315b91c7dc43374f33d97",
+    "note": "The executed source used the shared exact-prefix query. Its CLI preceded the additive query-digest output field. This records known execution inputs; it is not signed attestation or an upgrade of an old LIKE-query capture."
+  },
+  "comparison": {
+    "schemaVersion": 1,
+    "canonicalBaselineVerified": false,
+    "observedSchemaAndLedgerComparison": {
+      "queryScopeVerified": true,
+      "expectedSchemaQuerySha256": "8fce60a0f677bb4e8e21d04b6e64efa0b46ad4a6a982141f1b432bc0788eecd9",
+      "observedSchemaQuerySha256": "8fce60a0f677bb4e8e21d04b6e64efa0b46ad4a6a982141f1b432bc0788eecd9",
+      "scope": "Provided ordered migration names and full sqlite_master SQL shape against pinned local replay; no row/data-effects proof",
+      "status": "requires_review",
+      "referenceSha256": "1a9ba2dffbbe532295be7c3830af37bf3dc150b2f1cba92a4b8eba14139081e7",
+      "workers": [
+        {
+          "app": "operations",
+          "status": "schema_mismatch",
+          "ledgerMatches": true,
+          "schemaMatches": false,
+          "foreignKeysClean": true,
+          "through": "0221_portal_correspondence_lifecycle_write_guards.sql",
+          "sourceInventorySha256": "30876352a508dea2ba4bc305753a97b0ea8917d94f782971da12d57a371c3203",
+          "observedSchemaSha256": "90e1daff584a6f930c6e5922c24f042d9e6bda7acf12a7ca6dd31f400354825e",
+          "expectedSchemaSha256": "8da53584a8a7bf06affec4994ec34cda3bfac9060a360c1566aad873e171a325",
+          "observedSchemaObjectCount": 2403,
+          "expectedSchemaObjectCount": 2402
+        },
+        {
+          "app": "delivery",
+          "status": "schema_mismatch",
+          "ledgerMatches": true,
+          "schemaMatches": false,
+          "foreignKeysClean": true,
+          "through": "0234_pa_principal_reenrollment.sql",
+          "sourceInventorySha256": "a14a8b31eb008e336a82202fee2570a77551489279dffdc1eca9d09e5012dc2b",
+          "observedSchemaSha256": "66315f85873f39a4bd8cbd9b265dd7d4ad3e216111f0cb90d979ef2096f2623a",
+          "expectedSchemaSha256": "e25d98637026da4137f5cf72bba3e5a385cac41ef05be24b1ae81596d659cab8",
+          "observedSchemaObjectCount": 1158,
+          "expectedSchemaObjectCount": 1158
+        }
+      ],
+      "caveats": [
+        "Supplied observations are not signed remote attestation or freshness proof.",
+        "Schema pages, ledger, foreign-key result and Worker metadata are non-atomic observations.",
+        "Exact SQL text is compared, including ledger/platform metadata; no metadata exceptions or SQL normalization.",
+        "SQLite engine/version or migration lineage differences can cause mismatches; never normalize them into approval.",
+        "Matching schema and name-only ledger cannot prove historical source execution, seed/data effects, authority correctness or deployment readiness."
+      ]
+    }
+  },
+  "workers": [
+    {
+      "app": "operations",
+      "versionId": "231fead7-433e-4015-847e-ea9ebda35894",
+      "ledgerSha256": "bb7c3a95c8c7dd62cf02e4223889074c930953c8962ae699d7654a6f7f1284a0",
+      "schemaSha256": "90e1daff584a6f930c6e5922c24f042d9e6bda7acf12a7ca6dd31f400354825e",
+      "schemaObjectCount": 2403,
+      "foreignKeyViolationCount": 0,
+      "pendingMigrations": [
+        "0222_employee_read_roots.sql",
+        "0223_employee_read_provisioning.sql",
+        "0224_windows_portal_publication_chain_index.sql"
+      ],
+      "recovery": {
+        "bookmarkSha256": "f4331b96979e68f1d83d447ff04f944a05afa174a371b4414a7eb00443bb2f01",
+        "observationStartedAt": "2026-10-22T23:52:40.009Z",
+        "observationCompletedAt": "2026-10-22T23:52:41.598Z",
+        "restoreVerified": false,
+        "crossDatabaseAtomicSnapshot": false
+      },
+      "objectDifferences": {
+        "schemaVersion": 1,
+        "scope": "Per-object SQL shape difference only; observations may be non-atomic",
+        "canonicalBaselineVerified": false,
+        "inventoryDigestEqual": false,
+        "missing": [
+          {
+            "type": "table",
+            "name": "_cf_METADATA",
+            "tbl_name": "_cf_METADATA",
+            "sqlSha256": "f197d62ec9699924d941575fe9a9fbb42ef9fde5416b7693f51ebe970c5ff160"
+          }
+        ],
+        "extra": [
+          {
+            "type": "table",
+            "name": "_cf_KV",
+            "tbl_name": "_cf_KV",
+            "sqlSha256": "4043fea8b8581dfc344308300f74de5f3f0c683b4a9b0df120aff19d08d01156"
+          },
+          {
+            "type": "table",
+            "name": "staging_native_authority_migrations",
+            "tbl_name": "staging_native_authority_migrations",
+            "sqlSha256": "ac1f59f2cecef467b2a0406886eb95b6dd934d147a5bd92ed734371f98daba69"
+          }
+        ],
+        "changed": [
+          {
+            "type": "table",
+            "name": "client_onboarding_portal_activation_proofs",
+            "tbl_name": "client_onboarding_portal_activation_proofs",
+            "expectedSqlSha256": "1d36b042b7842c92fb13c506018055a8b3a8dd2d0e990f462b8b9101f9256320",
+            "observedSqlSha256": "9c294feff886b29c0563f901513052f247c23f88e8dd67a4f0b376fdeb316787"
+          },
+          {
+            "type": "table",
+            "name": "operations_directory_portal_write_fences",
+            "tbl_name": "operations_directory_portal_write_fences",
+            "expectedSqlSha256": "022851770fb191b7dda585c9b5ad5de83f25fb3e7044e93505df70a870250ce6",
+            "observedSqlSha256": "155ba0e6dc2ed811c24af4cda439d4dac002574bc0f185bc35b828d8471eaf32"
+          },
+          {
+            "type": "table",
+            "name": "shared_profile_authority_recoveries",
+            "tbl_name": "shared_profile_authority_recoveries",
+            "expectedSqlSha256": "b45008768030e7effefa3712d3fb300cd017725a5a85774fac0d63fe9e87beae",
+            "observedSqlSha256": "12bd25762abd81b719aa20f3ff8eff6b725b9e363bc95ba327d5aaf09283ba59"
+          },
+          {
+            "type": "table",
+            "name": "shared_profile_authority_recovery_audit",
+            "tbl_name": "shared_profile_authority_recovery_audit",
+            "expectedSqlSha256": "63620bd5d24acc67821848277dbb672c174b0e31762e9feaf7957b730ad3f723",
+            "observedSqlSha256": "0b098fa2a8fda4989507e91674b11f1082de6adb9ac8f989e98b3a4351236775"
+          },
+          {
+            "type": "table",
+            "name": "shared_profile_authority_recovery_steps",
+            "tbl_name": "shared_profile_authority_recovery_steps",
+            "expectedSqlSha256": "25e7f8d22a4e4f4a6f507bb98a62d58a25c14512ef8df842c4c212e275dff744",
+            "observedSqlSha256": "77f7e0730e14afd15365936f3618f15cd6432dcc3ac87441eb817c405121acd4"
+          },
+          {
+            "type": "trigger",
+            "name": "native_directory_profile_binding_continuation_ack",
+            "tbl_name": "project_alpha_directory_outbox",
+            "expectedSqlSha256": "c2a35a789d37b46b6d13e9dc61745cbb2157f88a4cf595239bddb5bbac4b3976",
+            "observedSqlSha256": "addfa74ad19dfba557f97e1f7a3ffb2dc8a019037c25816adcbf98e9d1c51b5f"
+          },
+          {
+            "type": "trigger",
+            "name": "native_directory_shared_command_guard",
+            "tbl_name": "native_directory_shared_profile_commands",
+            "expectedSqlSha256": "49e1e247042e6538eb52ae90f7683a1ad2a75d200f4cf3c123da86d339d3fdca",
+            "observedSqlSha256": "cc3d733dfdd7016bcdb9a12e2af4fdd344a495563e159ecbbf7eab4e7047960f"
+          },
+          {
+            "type": "trigger",
+            "name": "native_directory_shared_portal_command_shape",
+            "tbl_name": "native_directory_shared_profile_commands",
+            "expectedSqlSha256": "2c2e21c94061fdc7bec2a9746ab2306a02a01074a3cb6c5eab9588a1e6a93952",
+            "observedSqlSha256": "3a37c5df921333fb890f9c7bded3e8d9dd9e84c710ca6eb9df1243d0db64a4e3"
+          },
+          {
+            "type": "trigger",
+            "name": "native_directory_shared_staff_command_authority",
+            "tbl_name": "native_directory_shared_profile_commands",
+            "expectedSqlSha256": "d07de246c46856908678e745a4478d03d635596e7465ab5f56b5e89c74434391",
+            "observedSqlSha256": "95fd99839f154cf24039a65dd1f696c239f7fd8dda84853e0090882287f82332"
+          },
+          {
+            "type": "trigger",
+            "name": "native_staff_onboarding_approve_finish",
+            "tbl_name": "native_staff_management_commands",
+            "expectedSqlSha256": "2e6ee353b58933ae45fa688a8952e44700cd2d5afb54bfe4476c6f5afc506e2a",
+            "observedSqlSha256": "a483ec66d1ab04cb37664109f5ada366b600e7a1e31e1a4111baa5adc5b5ddfb"
+          },
+          {
+            "type": "trigger",
+            "name": "operations_directory_audit_original_subject_required",
+            "tbl_name": "operations_directory_audit",
+            "expectedSqlSha256": "d29fcb4e26e0e13eae79a4c49e598ece913db630c585b89f717b676c2e7f615d",
+            "observedSqlSha256": "c8138b0ebf8fdf5154316e6f081f3cb57380e76d81df0086ffbc21575e772c05"
+          },
+          {
+            "type": "trigger",
+            "name": "operations_directory_audit_system_subject_null",
+            "tbl_name": "operations_directory_audit",
+            "expectedSqlSha256": "c05949e95c18d3134408dfdca84dde24c1bccb9b32b730f530e2d31157342723",
+            "observedSqlSha256": "2d0ec250cd955c936e80d7e72a06d68f6a5168d919ec784c3e44350b3eac0fa9"
+          },
+          {
+            "type": "trigger",
+            "name": "operations_directory_audit_write_guard",
+            "tbl_name": "operations_directory_audit",
+            "expectedSqlSha256": "4a53a3a3a171ebfe3188c600f40fa84ba4d05815a7aa5ca11b330d000032b62d",
+            "observedSqlSha256": "88be56657b397fac860d24da7edae34a7870fe53738f434c26fd0f362cdf332d"
+          },
+          {
+            "type": "trigger",
+            "name": "operations_directory_intent_relationship_dependencies_insert_guard",
+            "tbl_name": "operations_directory_intent_relationship_dependencies",
+            "expectedSqlSha256": "8bf5032eb00949589d300eb8f73bba15d2b8c8df951d83d9c58f6ceae3a4ce1c",
+            "observedSqlSha256": "5fdc0f7744e1f25807f3a73d502a0084b7cdacb85e2f2612d7d7c026ec69d5a8"
+          },
+          {
+            "type": "trigger",
+            "name": "operations_directory_materializations_original_subject_required",
+            "tbl_name": "operations_directory_materializations",
+            "expectedSqlSha256": "8153f9983f8ae0696b090c9eee2a1dcd4d438a9e09e528ff93f95706ba7ee062",
+            "observedSqlSha256": "dd9c4d03f9de03046d5af1187c388273824f6094aacd630f32561feb3d715c63"
+          },
+          {
+            "type": "trigger",
+            "name": "operations_directory_portal_audit_consume",
+            "tbl_name": "operations_directory_audit",
+            "expectedSqlSha256": "a18b8827dfbc6c9350d5651ca7f205df69ff22c913bb74d858aac745a67b659e",
+            "observedSqlSha256": "5b8b9a1319845c43011dc97096aea0415fae579fa6a271263edabb4ef819bcda"
+          },
+          {
+            "type": "trigger",
+            "name": "operations_directory_portal_fence_exhausted",
+            "tbl_name": "operations_directory_portal_write_fences",
+            "expectedSqlSha256": "8dddb303dcf50be70e314db2e6d39a23ea04f4db20956bf3f083e1d18724353f",
+            "observedSqlSha256": "867b7474a29b48243bf6b3b05a743c9c4fcd1cfc2ad973f6dfcd8157c2acb4b2"
+          },
+          {
+            "type": "trigger",
+            "name": "operations_directory_portal_fence_immutable",
+            "tbl_name": "operations_directory_portal_write_fences",
+            "expectedSqlSha256": "800e0d2ab9e24a40841f1afaebe1228f8212d1d44baa1d17b8be20dac435cd2b",
+            "observedSqlSha256": "02da6d4004734a2c03273afd42c6359ea92130e92e15757bba57f53092129a83"
+          },
+          {
+            "type": "trigger",
+            "name": "operations_directory_portal_intent_consume",
+            "tbl_name": "operations_directory_intents",
+            "expectedSqlSha256": "f50e469f42ce1e87a3a61400a19466759b1ae67050f737a0c177bdb1deaf9230",
+            "observedSqlSha256": "cf04ea873ab59795514437e721c0a7666345ec69d5b16b9a70253829649955c8"
+          },
+          {
+            "type": "trigger",
+            "name": "operations_directory_portal_record_consume",
+            "tbl_name": "operations_directory_records",
+            "expectedSqlSha256": "b8ca0cdcde2bc98c650348d817fde9b84450a9dd2cbfd0e5f6b6817bc102da6d",
+            "observedSqlSha256": "069ccb0a5fc32ad5dc8896430702ce58e911baa0873eb7c8b3df1b6fb6a61c6f"
+          },
+          {
+            "type": "trigger",
+            "name": "operations_directory_portal_revision_consume",
+            "tbl_name": "operations_directory_revisions",
+            "expectedSqlSha256": "b3d7b7adc6f6ed1796bb4b5bb25f3caff4fcad8600dc7526ec0d230889d1b14f",
+            "observedSqlSha256": "f98bc2ce28ef6686c15055bfcaf1cdba049a77cda95437c262fa5f57822dbf5e"
+          },
+          {
+            "type": "trigger",
+            "name": "operations_directory_portal_write_authority",
+            "tbl_name": "operations_directory_portal_write_fences",
+            "expectedSqlSha256": "caf1460290330147abc9da246a1aa2b0ad3631b42b0bc3542d0a1981fbb5ac8e",
+            "observedSqlSha256": "24337e256bfe23be3a3e0a4ba2f6f3384103643a7246c845983bb934b0887973"
+          },
+          {
+            "type": "trigger",
+            "name": "operations_directory_portal_write_shape",
+            "tbl_name": "operations_directory_portal_write_fences",
+            "expectedSqlSha256": "d7be3d40fc65f25fb4e5f4580a104553f245d1d533168b472b26b4d048cbdd2b",
+            "observedSqlSha256": "1e8bdab962566de02e6f53c4944731be41509740adbccad1aff5b2096fd73584"
+          },
+          {
+            "type": "trigger",
+            "name": "operations_directory_staff_portal_exclusion",
+            "tbl_name": "operations_directory_write_fences",
+            "expectedSqlSha256": "e21b707efc43d22d955c12ea69cd6917651f292f5e0c06397e580272b543680e",
+            "observedSqlSha256": "d05b540b5343bdf41446e1c1e89a3ce7b4c864a548d12a29667700828cf9c312"
+          },
+          {
+            "type": "trigger",
+            "name": "project_alpha_api_v2_inventory_receipts_generation_conflict_surface_scoped",
+            "tbl_name": "project_alpha_api_v2_inventory_receipts",
+            "expectedSqlSha256": "db8fb0dd1aea637a44121017b45906ab0364691817035fb5c91cab2a1e625aef",
+            "observedSqlSha256": "664e5975f16c6dda62b82d15e7b54783f8bafc984868b0b0c87f3953df31bd9d"
+          },
+          {
+            "type": "trigger",
+            "name": "shared_profile_portal_delivery_authority_guard",
+            "tbl_name": "shared_profile_portal_audit",
+            "expectedSqlSha256": "7cd957672cf43798d41876d50cb76c95cee916319f3c96a934e6f081fef4a94d",
+            "observedSqlSha256": "5381d22e2607d6cd79648239762412bce37010f55c20f66a5261c905401ed28f"
+          },
+          {
+            "type": "trigger",
+            "name": "shared_profile_recovery_audit_owner",
+            "tbl_name": "shared_profile_authority_recovery_audit",
+            "expectedSqlSha256": "2f4641f24afb884bf277237687b63e363938c9bbff9d78209287ad54ec766ef6",
+            "observedSqlSha256": "0155a7245c5dcab8d4fc3532ab14f306d7e4782bd48658655505af252bdc2580"
+          },
+          {
+            "type": "trigger",
+            "name": "shared_profile_recovery_complete_owner",
+            "tbl_name": "shared_profile_authority_recoveries",
+            "expectedSqlSha256": "63e06784973aeca30625aea0f77c693e45365d356c8ee0af787ec7ee822fd669",
+            "observedSqlSha256": "610e453d49956e8d6761552fb107b64e68224d314f61d6b93794550d5fc95aa3"
+          },
+          {
+            "type": "trigger",
+            "name": "shared_profile_recovery_head_delete",
+            "tbl_name": "shared_profile_portal_authority_heads",
+            "expectedSqlSha256": "af9423423bf80a88cfde4fcc183f0a8e2e5f7bf20afe929edc23b4bb943e164c",
+            "observedSqlSha256": "b1f48083448ba6289e702e499019f03e2259355d4631d2864be2c880bae9b98d"
+          },
+          {
+            "type": "trigger",
+            "name": "shared_profile_recovery_head_insert",
+            "tbl_name": "shared_profile_portal_authority_heads",
+            "expectedSqlSha256": "30d11deb913d42161b04bce48654d6805bdb49aa08a2e99bd64aef676b4bb964",
+            "observedSqlSha256": "53e292788701a48f41a770a708d74ab08d18e8ea6ef14fbce088dc12db09a770"
+          },
+          {
+            "type": "trigger",
+            "name": "shared_profile_recovery_head_update",
+            "tbl_name": "shared_profile_portal_authority_heads",
+            "expectedSqlSha256": "bee036b17e3e8c13003a15a6c261d14faf89cc4a55b290dfd06eb2ea37ee75a9",
+            "observedSqlSha256": "8b0736d1d19266b3b1aeab9ae7a53ea623f7322678a18ebc562239ac9d8461aa"
+          },
+          {
+            "type": "trigger",
+            "name": "shared_profile_recovery_receipt_immutable",
+            "tbl_name": "shared_profile_authority_recoveries",
+            "expectedSqlSha256": "01df95ede4007613251c1e9f3a19ff6e49cbe4a97c441c99f918b7cbe1220107",
+            "observedSqlSha256": "743c6707d03e6ba42817cc9e62fc984ad6b2469d7c2a9b3f8f9630fc4e6115dd"
+          },
+          {
+            "type": "trigger",
+            "name": "shared_profile_recovery_request_owner",
+            "tbl_name": "shared_profile_authority_recoveries",
+            "expectedSqlSha256": "7085b43e8e1ab700966e65ea5cf8ddcbb2ff26bc526f62cca0f02a3baf231158",
+            "observedSqlSha256": "9cfef02cc4b1645dec4458f8488d874607e4b3b7c3ae6ded2de7da37b352747d"
+          },
+          {
+            "type": "trigger",
+            "name": "shared_profile_recovery_step_owner",
+            "tbl_name": "shared_profile_authority_recovery_steps",
+            "expectedSqlSha256": "1d991733485e78068018c2e3aedbda4f26e2eb922fa59d25a2872f637fb4b79e",
+            "observedSqlSha256": "08e555dceafaae078b73c91d7b5e187491c6cf2b7740271504d939505cab23bf"
+          },
+          {
+            "type": "view",
+            "name": "native_directory_existing_import_live_reviews",
+            "tbl_name": "native_directory_existing_import_live_reviews",
+            "expectedSqlSha256": "e33edb294a3a9d99d70d01e2b6fe286294bdea9a071c2ea73d5badfcb5667ddb",
+            "observedSqlSha256": "03529391fc022db7d5b608667c9dbc9aad24cc1e04b7f4194117029bfc6a38c8"
+          },
+          {
+            "type": "view",
+            "name": "operations_directory_live_staff_write_fences",
+            "tbl_name": "operations_directory_live_staff_write_fences",
+            "expectedSqlSha256": "67215ee6a04ea8e3d479c71ae8fe9a4f573247ab8340f55da7476eba53d74d96",
+            "observedSqlSha256": "40b74494a19666e48001bbebf4d8a2d42a83ca253bccdd6da782399b34763e91"
+          },
+          {
+            "type": "view",
+            "name": "shared_profile_authority_recovery_owners",
+            "tbl_name": "shared_profile_authority_recovery_owners",
+            "expectedSqlSha256": "565c9ce9390e0ff972c8dbfbd9f4c7b909320018839401a04df8ece039210bf2",
+            "observedSqlSha256": "f990029e6680dc04c44f270bd245e06bd44d5db88e25c5f486fb2319eba2844f"
+          },
+          {
+            "type": "view",
+            "name": "shared_profile_portal_ack_witnesses",
+            "tbl_name": "shared_profile_portal_ack_witnesses",
+            "expectedSqlSha256": "688621c2dbf39545e208f9dafb830bad68f0ec74727f70fd2413bab6f5261b39",
+            "observedSqlSha256": "6fca7f5b67f84978c90fe8ad512e3cd9b4a77a63067a9ae62444a854e1e1d882"
+          }
+        ]
+      }
+    },
+    {
+      "app": "delivery",
+      "versionId": "6b9f1ff4-ce41-493e-a922-25081c2b67f4",
+      "ledgerSha256": "f810ef13bb7b1e7cf0a464753b4e821c05557b1377ff33473e91cf5ac395f27c",
+      "schemaSha256": "66315f85873f39a4bd8cbd9b265dd7d4ad3e216111f0cb90d979ef2096f2623a",
+      "schemaObjectCount": 1158,
+      "foreignKeyViolationCount": 0,
+      "pendingMigrations": [
+        "0235_windows_portal_successor_candidates.sql",
+        "0236_windows_portal_successor_content_start_audit.sql"
+      ],
+      "recovery": {
+        "bookmarkSha256": "b3da164f9564cf106d0ed984e211f92338fc8d1a544f12351cd36c75b87de323",
+        "observationStartedAt": "2026-10-22T23:52:41.598Z",
+        "observationCompletedAt": "2026-10-22T23:52:42.903Z",
+        "restoreVerified": false,
+        "crossDatabaseAtomicSnapshot": false
+      },
+      "objectDifferences": {
+        "schemaVersion": 1,
+        "scope": "Per-object SQL shape difference only; observations may be non-atomic",
+        "canonicalBaselineVerified": false,
+        "inventoryDigestEqual": false,
+        "missing": [
+          {
+            "type": "table",
+            "name": "_cf_METADATA",
+            "tbl_name": "_cf_METADATA",
+            "sqlSha256": "f197d62ec9699924d941575fe9a9fbb42ef9fde5416b7693f51ebe970c5ff160"
+          }
+        ],
+        "extra": [
+          {
+            "type": "table",
+            "name": "_cf_KV",
+            "tbl_name": "_cf_KV",
+            "sqlSha256": "4043fea8b8581dfc344308300f74de5f3f0c683b4a9b0df120aff19d08d01156"
+          }
+        ],
+        "changed": [
+          {
+            "type": "table",
+            "name": "portal_shared_profile_authority_heads",
+            "tbl_name": "portal_shared_profile_authority_heads",
+            "expectedSqlSha256": "0d3a60f65e5cb820e5c0b846628d28c04798b2bdf241c6b5bd0c2c39bfc80f82",
+            "observedSqlSha256": "3b646e6e9f481997e6c2780b013b3b0e454b366a697721221a66e9dadd7c105e"
+          },
+          {
+            "type": "table",
+            "name": "portal_shared_profile_authority_recoveries",
+            "tbl_name": "portal_shared_profile_authority_recoveries",
+            "expectedSqlSha256": "13c983ab506ea2fa7988cd46407211bfac1701fd9e69cd878c47b56b05e2c2f1",
+            "observedSqlSha256": "dff96bebcc2cd3148c829408a37e060759d29a04883e523d38e9fdea8b2e95e7"
+          },
+          {
+            "type": "trigger",
+            "name": "client_folder_notification_batch_control_result",
+            "tbl_name": "client_folder_notification_batch_controls",
+            "expectedSqlSha256": "b68f87949254902f7a06fbc3f1a09446ca99b1c1b3a83790b1e8c2e429463364",
+            "observedSqlSha256": "d6c84f6aba62f9e89c50e5f9c76c2e497927afca0f06b3709a9b8ca627a23882"
+          },
+          {
+            "type": "trigger",
+            "name": "portal_shared_profile_head_bulk_insert",
+            "tbl_name": "portal_shared_profile_authority_heads",
+            "expectedSqlSha256": "867fa727dced59e19dcf1c85b0c1e825fa60c8013cd1e5bfaf601fd3b126353c",
+            "observedSqlSha256": "93ab6cc1534c7ce4533e7c4613a602ae5bd86fdfe4af4069539dc39e54176816"
+          },
+          {
+            "type": "trigger",
+            "name": "portal_shared_profile_head_identity_immutable",
+            "tbl_name": "portal_shared_profile_authority_heads",
+            "expectedSqlSha256": "c58e8fafb7ef2c6565256d2d81b3c991cf12dbe7ccc9b09e627907a68af3c279",
+            "observedSqlSha256": "93875b06779285550291fbf58f7e2d2e7b72daf15889eab8582820bed2c88002"
+          },
+          {
+            "type": "trigger",
+            "name": "portal_shared_profile_head_no_delete",
+            "tbl_name": "portal_shared_profile_authority_heads",
+            "expectedSqlSha256": "71cc57274451e1a5d8513709a775422e87b3e3c8aaa2718f96da6915039b02f5",
+            "observedSqlSha256": "753a4484ef1e7f3a3390fe8ab3a77c3bcac4a6de4657e47832fc7ac027865979"
+          },
+          {
+            "type": "trigger",
+            "name": "portal_shared_profile_head_pending_activation",
+            "tbl_name": "portal_shared_profile_authority_heads",
+            "expectedSqlSha256": "3a484bef77699c2258e0b4bbfae0c0595457d1bb1fa14e08552d30ddc78f886a",
+            "observedSqlSha256": "3a84f29d7f95be6b8ad23271730613cd999113e9a46bd7f57d60ddb2578c835d"
+          },
+          {
+            "type": "trigger",
+            "name": "portal_shared_profile_recovery_immutable",
+            "tbl_name": "portal_shared_profile_authority_recoveries",
+            "expectedSqlSha256": "8a520ce49ec0232b5555d03ce0dcc76335080f99f4958e9882c2f116e635243f",
+            "observedSqlSha256": "dad9a9c8c05d11d09ea292a951f3a27ca0fa1d7f7d8e55965203ca3d1e64da57"
+          }
+        ]
+      }
+    }
+  ],
+  "definitionSemanticsReviewed": false,
+  "migrationsApplied": false,
+  "activated": false,
+  "note": "Exact local replay qualifies query scope. Hash differences identify objects but do not establish whether SQL changes are semantic or harmless. No metadata exceptions or normalization applied. Recovery bookmarks are untested provider references with finite retention; hashes here do not enable restore."
+}

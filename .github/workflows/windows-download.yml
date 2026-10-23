@@ -1,0 +1,51 @@
+name: Windows download prototype
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - apps/windows-download/**
+      - .github/workflows/windows-download.yml
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths:
+      - apps/windows-download/**
+      - .github/workflows/windows-download.yml
+
+permissions:
+  contents: read
+
+jobs:
+  synthetic-transfer:
+    if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
+    runs-on: windows-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: apps/windows-download
+    env:
+      DOTNET_CLI_TELEMETRY_OPTOUT: '1'
+      DOTNET_SKIP_FIRST_TIME_EXPERIENCE: '1'
+      DOTNET_GENERATE_ASPNET_CERTIFICATE: 'false'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          global-json-file: apps/windows-download/global.json
+      - name: Build synthetic Windows acceptance harness
+        run: dotnet build Tests/WindowsDownload.Tests.csproj --configuration Release
+      - name: Verify transfers against synthetic HTTP handlers and temporary files
+        run: dotnet run --project Tests/WindowsDownload.Tests.csproj --configuration Release --no-build
+      - name: Build the Windows desktop acceptance harness
+        run: dotnet build AppTests/WindowsDownload.App.Tests.csproj --configuration Release
+      - name: Verify identity changes, queue controls and rendered desktop screens
+        run: dotnet run --project AppTests/WindowsDownload.App.Tests.csproj --configuration Release --no-build -- "${{ runner.temp }}/windows-files-ui"
+      - name: Retain synthetic desktop screenshots
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: windows-files-ui-${{ github.sha }}
+          path: ${{ runner.temp }}/windows-files-ui/*.png
+          if-no-files-found: warn
+          retention-days: 7

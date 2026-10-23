@@ -25,6 +25,7 @@ const schema = z.object({
   folderReservationId: z.string().uuid(), folderReservationRevision: positive,
   clientFolderBindingId: bounded(200), externalProjectId: bounded(191), projectVersion: positive,
   path: z.string().max(1024), etag: bounded(256).optional(),
+  providerVersion: bounded(256).optional(), sha256: z.string().regex(/^[a-f0-9]{64}$/).optional(),
   after: bounded(1024).optional(), entryKind: z.enum(['folder', 'file', 'delivery']).optional(),
   expires: z.number().int().positive().refine(Number.isSafeInteger),
 }).strict().superRefine((value, ctx) => {
@@ -37,6 +38,9 @@ const schema = z.object({
   } catch { ctx.addIssue({ code: 'custom', message: 'Invalid resource path' }); }
   if ((value.kind === 'file') !== (value.etag !== undefined))
     ctx.addIssue({ code: 'custom', message: 'Invalid content version' });
+  if ((value.providerVersion !== undefined || value.sha256 !== undefined)
+    && (value.kind !== 'file' || value.providerVersion === undefined || value.sha256 === undefined))
+    ctx.addIssue({ code: 'custom', message: 'Incomplete object identity' });
   if (value.kind !== 'cursor' && (value.after !== undefined || value.entryKind !== undefined))
     ctx.addIssue({ code: 'custom', message: 'Unexpected cursor state' });
   if (value.kind === 'cursor' && ((value.after === undefined) !== (value.entryKind === undefined)))

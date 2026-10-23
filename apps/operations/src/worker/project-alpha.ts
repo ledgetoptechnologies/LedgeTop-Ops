@@ -37,7 +37,6 @@ interface Snapshot extends SnapshotCollections {
   next_page: number | null;
 }
 
-const SUPPORTED_ROLES = new Set(["role-admin", "role-operator", "role-delivery-coordinator", "role-division-manager"]);
 const SNAPSHOT_MAX_PAGES = 100;
 const SNAPSHOT_MAX_RECORDS = 50_000;
 const SNAPSHOT_MAX_PAGE_BYTES = 4 * 1024 * 1024;
@@ -130,10 +129,6 @@ function snapshotBaseUrl(value: string): URL {
 function normalizedEmail(value: unknown): string | null {
   const email = text(value)?.trim().toLowerCase() ?? "";
   return email && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) ? email : null;
-}
-
-function stableId(prefix: string, value: string): string {
-  return `${prefix}-${value.replace(/[^a-zA-Z0-9_-]/g, "-")}`;
 }
 
 function emptyCollections(): SnapshotCollections {
@@ -389,7 +384,7 @@ async function runBatches(db: D1Database, statements: D1PreparedStatement[], bef
   }
 }
 
-function projectionStatements(db: D1Database, data: SnapshotCollections, syncId: string, changed: ReadonlySet<CollectionName>, applicationKey: string, generatedAt: string, source: ProjectAlphaSourceContext, ids: ProjectAlphaSourceMap): D1PreparedStatement[] {
+function projectionStatements(db: D1Database, data: SnapshotCollections, syncId: string, changed: ReadonlySet<CollectionName>, source: ProjectAlphaSourceContext, ids: ProjectAlphaSourceMap): D1PreparedStatement[] {
   const statements: D1PreparedStatement[] = [];
   if (changed.has("users")) for (const raw of data.users) {
     const row = mapProjectAlphaSourceRow("users", raw, ids);
@@ -401,18 +396,8 @@ function projectionStatements(db: D1Database, data: SnapshotCollections, syncId:
     statements.push(db.prepare(`INSERT INTO pa_users (id,email,display_name,role,active,payload_json,last_sync_id,projection_source_id) VALUES (?,?,?,?,?,?,?,?)
       ON CONFLICT(id) DO UPDATE SET email=excluded.email,display_name=excluded.display_name,role=excluded.role,active=excluded.active,payload_json=excluded.payload_json,last_sync_id=excluded.last_sync_id,updated_at=datetime('now')`)
       .bind(id, email, display, text(row.role), isActive, JSON.stringify(raw), syncId, source.sourceId));
-    if (!source.staffAuthority) continue;
-    // Protected Owners are deliberately excluded from all PA-owned identity mutations.
-    statements.push(db.prepare(`UPDATE staff_users SET email=COALESCE(?,email),display_name=?,status=?,provisioning_source='project-alpha',updated_at=datetime('now')
-      WHERE project_alpha_user_id=? AND sync_protected=0`).bind(email, display, isActive ? "active" : "inactive", id));
-    if (email) {
-      statements.push(db.prepare(`UPDATE staff_users SET project_alpha_user_id=?,display_name=?,status=?,provisioning_source='project-alpha',updated_at=datetime('now')
-        WHERE email=? COLLATE NOCASE AND project_alpha_user_id IS NULL AND sync_protected=0`)
-        .bind(id, display, isActive ? "active" : "inactive", email));
-      statements.push(db.prepare(`INSERT INTO staff_users (id,email,display_name,project_alpha_user_id,status,provisioning_source)
-        SELECT ?,?,?,?,?, 'project-alpha' WHERE NOT EXISTS (SELECT 1 FROM staff_users WHERE project_alpha_user_id=? OR email=? COLLATE NOCASE)`)
-        .bind(stableId("staff-pa", id), email, display, id, isActive ? "active" : "inactive", id, email));
-    }
+    // PA users are reference data for historical business records only.
+    // Employee identity, activation and permissions are owned by Operations.
   }
 
   if (changed.has("business_units")) for (const raw of data.business_units) {
@@ -474,15 +459,6 @@ function projectionStatements(db: D1Database, data: SnapshotCollections, syncId:
       .bind(id, text(row.project_id), text(row.client_id), text(row.organization_id), text(row.name), row.latitude ?? null, row.longitude ?? null, sourceActive(row), JSON.stringify(raw), syncId, source.sourceId));
   }
 
-  if (source.staffAuthority && changed.has("application_entitlements")) for (const raw of data.application_entitlements) {
-    const row = mapProjectAlphaSourceRow("application_entitlements", raw, ids);
-    const id = text(row.id), userId = text(row.user_id), role = text(row.role_key);
-    if (!id || !userId || !role || !SUPPORTED_ROLES.has(role) || text(row.application_key) !== applicationKey) continue;
-    statements.push(db.prepare(`INSERT INTO pa_application_entitlements (id,user_id,application_key,enabled,role_key,business_unit_ids_json,payload_json,last_event_at,last_sync_id,active,projection_source_id) VALUES (?,?,?,?,?,?,?,?,?,1,?)
-      ON CONFLICT(user_id) DO UPDATE SET application_key=excluded.application_key,enabled=excluded.enabled,role_key=excluded.role_key,business_unit_ids_json=excluded.business_unit_ids_json,payload_json=excluded.payload_json,last_event_at=excluded.last_event_at,last_sync_id=excluded.last_sync_id,active=1,updated_at=datetime('now')
-      WHERE pa_application_entitlements.last_event_at IS NULL OR datetime(pa_application_entitlements.last_event_at)<=datetime(excluded.last_event_at)`)
-      .bind(id, userId, applicationKey, enabled(row.enabled), role, "[]", JSON.stringify(raw), generatedAt, syncId, source.sourceId));
-  }
   if (changed.has("operations")) for (const raw of data.operations) {
     const row = mapProjectAlphaSourceRow("operations", raw, ids);
     const id = text(row.id), projectId = text(row.project_id), title = text(row.title), status = text(row.status);
@@ -629,7 +605,7 @@ async function clientPortalProjectionStatements(env: Env, data: SnapshotCollecti
   return statements;
 }
 
-function reconciliationStatements(db: D1Database, data: SnapshotCollections, syncId: string, changed: ReadonlySet<CollectionName>, applicationKey: string, generatedAt: string, source: ProjectAlphaSourceContext): D1PreparedStatement[] {
+function reconciliationStatements(db: D1Database, data: SnapshotCollections, syncId: string, changed: ReadonlySet<CollectionName>, generatedAt: string, source: ProjectAlphaSourceContext): D1PreparedStatement[] {
   const tables: Record<CollectionName, string> = {
     users: "pa_users", business_units: "pa_business_units", worker_business_units: "pa_worker_business_units",
     clients: "pa_clients", organizations: "pa_organizations", projects: "pa_projects",
@@ -639,11 +615,9 @@ function reconciliationStatements(db: D1Database, data: SnapshotCollections, syn
   };
   const entityTypes=new Map<CollectionName,ProjectionEntityType>(VERSIONED_COLLECTIONS);
   const statements: D1PreparedStatement[] = SNAPSHOT_COLLECTIONS
-    .filter((collection) => changed.has(collection) && (source.staffAuthority || collection !== "application_entitlements"))
+    .filter((collection) => changed.has(collection) && collection !== "application_entitlements")
     .map((collection) => {
       const entityType=entityTypes.get(collection);
-      if(collection==="application_entitlements")return db.prepare(`UPDATE pa_application_entitlements SET active=0 WHERE last_sync_id<>? AND active<>0 AND projection_source_id=?
-        AND (last_event_at IS NULL OR datetime(last_event_at)<=datetime(?))`).bind(syncId,source.sourceId,generatedAt);
       if(collection==="users")return db.prepare(`UPDATE pa_users SET active=0 WHERE last_sync_id<>? AND active<>0 AND projection_source_id=?
         AND NOT EXISTS (SELECT 1 FROM pa_application_entitlements e WHERE e.user_id=pa_users.id AND e.projection_source_id=pa_users.projection_source_id AND datetime(e.last_event_at)>datetime(?))`).bind(syncId,source.sourceId,generatedAt);
       if(!entityType)return db.prepare(`UPDATE ${tables[collection]} SET active=0 WHERE last_sync_id<>? AND active<>0 AND projection_source_id=?`).bind(syncId,source.sourceId);
@@ -654,65 +628,8 @@ function reconciliationStatements(db: D1Database, data: SnapshotCollections, syn
         ))`).bind(syncId,source.sourceId,entityType,generatedAt);
     });
 
-  // Business ingestion is not a grant to manage local staff, divisions or Access.
-  if (!source.staffAuthority) return statements;
-
-  const authorizationChanged = changed.has("users") || changed.has("application_entitlements");
-  // Reconcile a legacy PA-managed staff row by its verified PA email on every
-  // snapshot.  A historical PA identity may have been retired and replaced
-  // while retaining the same sign-in email; limiting the association repair to
-  // changed snapshot collections leaves that row permanently inactive once the
-  // snapshots have stabilized.  Never replace an identity that still has an
-  // active entitlement for this application, and never touch protected staff.
-  statements.push(db.prepare(`UPDATE staff_users AS s
-    SET project_alpha_user_id=(
-      SELECT u.id FROM pa_users u
-      JOIN pa_application_entitlements e ON e.user_id=u.id
-      WHERE lower(u.email)=lower(s.email)
-        AND u.projection_source_id='project-alpha:primary' AND e.projection_source_id='project-alpha:primary'
-        AND u.active=1 AND e.active=1 AND e.enabled=1 AND e.application_key=?
-      ORDER BY u.id LIMIT 1
-    ), status='active', provisioning_source='project-alpha', updated_at=datetime('now')
-    WHERE s.provisioning_source='project-alpha' AND s.sync_protected=0
-      AND EXISTS (
-        SELECT 1 FROM pa_users u
-        JOIN pa_application_entitlements e ON e.user_id=u.id
-        WHERE lower(u.email)=lower(s.email)
-          AND u.projection_source_id='project-alpha:primary' AND e.projection_source_id='project-alpha:primary'
-          AND u.active=1 AND e.active=1 AND e.enabled=1 AND e.application_key=?
-      )
-      AND (s.project_alpha_user_id IS NULL OR NOT EXISTS (
-        SELECT 1 FROM pa_application_entitlements current_entitlement
-        WHERE current_entitlement.user_id=s.project_alpha_user_id
-          AND current_entitlement.projection_source_id='project-alpha:primary'
-          AND current_entitlement.active=1 AND current_entitlement.enabled=1
-          AND current_entitlement.application_key=?
-      ))`).bind(applicationKey, applicationKey, applicationKey));
-  if (!authorizationChanged) return statements;
-
-  statements.push(
-    db.prepare(`UPDATE staff_users
-      SET status=CASE WHEN project_alpha_user_id IN (
-        SELECT e.user_id FROM pa_application_entitlements e
-        JOIN pa_users u ON u.id=e.user_id
-        WHERE e.active=1 AND e.enabled=1 AND u.active=1 AND e.projection_source_id='project-alpha:primary' AND u.projection_source_id='project-alpha:primary'
-      ) THEN 'active' ELSE 'inactive' END,
-      updated_at=datetime('now')
-      WHERE provisioning_source='project-alpha' AND sync_protected=0`),
-    db.prepare(`DELETE FROM staff_role_assignments WHERE staff_id IN (SELECT id FROM staff_users WHERE provisioning_source='project-alpha' AND sync_protected=0)`),
-    db.prepare(`DELETE FROM staff_divisions WHERE staff_id IN (SELECT id FROM staff_users WHERE provisioning_source='project-alpha' AND sync_protected=0)`),
-  );
-
-  statements.push(
-    db.prepare(`INSERT OR IGNORE INTO staff_role_assignments (id,staff_id,role_id,scope,division_id,scope_key)
-      SELECT 'pa-role-'||replace(e.user_id,':','-')||'-role-admin-global',s.id,'role-admin','global',NULL,'global'
-      FROM pa_application_entitlements e JOIN staff_users s ON s.project_alpha_user_id=e.user_id
-      WHERE e.active=1 AND e.enabled=1 AND e.projection_source_id='project-alpha:primary' AND e.application_key=? AND e.role_key='role-admin' AND s.sync_protected=0 AND s.status='active'`).bind(applicationKey),
-    db.prepare(`INSERT OR IGNORE INTO staff_role_assignments (id,staff_id,role_id,scope,division_id,scope_key)
-      SELECT 'pa-role-'||replace(e.user_id,':','-')||'-role-operator-assigned',s.id,'role-operator','assigned',NULL,'assigned'
-      FROM pa_application_entitlements e JOIN staff_users s ON s.project_alpha_user_id=e.user_id
-      WHERE e.active=1 AND e.enabled=1 AND e.projection_source_id='project-alpha:primary' AND e.application_key=? AND e.role_key<>'role-admin' AND s.sync_protected=0 AND s.status='active'`).bind(applicationKey),
-  );
+  // Snapshots never create, alter or revoke Operations staff or their grants.
+  // Preserve existing local/legacy accounts until explicitly managed in Ops.
   return statements;
 }
 
@@ -780,7 +697,7 @@ export async function syncProjectAlphaForSource(env: Env, context: ProjectAlphaS
     if(proof.sourceId!==source.sourceId)throw new Error("connector-source-mismatch");
     await assertProjectAlphaConnectorProof(env,proof);
   }
-  const applicationKey = configuredApplicationKey(connection.applicationKey);
+  configuredApplicationKey(connection.applicationKey);
   const snapshotConnection = { ...connection, apiKey: configuredSnapshotApiKey(connection.apiKey) };
   snapshotBaseUrl(connection.baseUrl);
   const syncId = crypto.randomUUID();
@@ -826,7 +743,7 @@ export async function syncProjectAlphaForSource(env: Env, context: ProjectAlphaS
     changed.add("worker_business_units");
     changed.add("project_assignments");
     const data=await preserveNewerIncrementalRows(env.OPS_DB,fetchedData,generatedAt,source);
-    const refs = SNAPSHOT_COLLECTIONS.filter(collection => source.staffAuthority || collection !== "application_entitlements")
+    const refs = SNAPSHOT_COLLECTIONS.filter(collection => collection !== "application_entitlements")
       .flatMap(collection => data[collection].flatMap(row => projectAlphaSourceReferences(collection,snapshotMappingRow(collection,row))));
     if(budget){
       // Upper bounds for this business-only path: one projection per changed
@@ -857,8 +774,8 @@ export async function syncProjectAlphaForSource(env: Env, context: ProjectAlphaS
     const ids = await prepareProjectAlphaSourceRecords(mappingDb,source,refs);
     // A PA unit rename, retirement or omission cannot mutate local divisions
     // or suspend independently granted folder access.
-    await runBatches(env.OPS_DB, projectionStatements(env.OPS_DB, data, syncId, changed, applicationKey,generatedAt,source,ids),refreshLease,proof);
-    await runBatches(env.OPS_DB, reconciliationStatements(env.OPS_DB, data, syncId, changed, applicationKey,generatedAt,source),refreshLease,proof);
+    await runBatches(env.OPS_DB, projectionStatements(env.OPS_DB, data, syncId, changed,source,ids),refreshLease,proof);
+    await runBatches(env.OPS_DB, reconciliationStatements(env.OPS_DB, data, syncId, changed,generatedAt,source),refreshLease,proof);
     // Clients are written before organizations. Resolve their observation owner
     // only after all source rows exist; this never uses generated_at or sync time.
     const activityStatements:D1PreparedStatement[]=[];

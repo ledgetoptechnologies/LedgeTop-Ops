@@ -1,0 +1,2 @@
+# Preserve actual upstream vendor license bytes, including whitespace.
+**/*.txt -text whitespace=-trailing-space

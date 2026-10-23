@@ -1,0 +1,43 @@
+{
+  "schemaVersion": 1,
+  "scope": "Populated canonical local D1 suffix failure and lost-observer-acknowledgement acceptance; no remote transport interruption or generic recovery service",
+  "testSourceCommit": "31628f2f2baba1bc80341d7c8d816a74cddaedc1",
+  "test": "apps/operations/test/windows-portal-publication-chain-d1.test.ts",
+  "nodeVersion": "24.16.0",
+  "wranglerVersion": "4.118.0",
+  "miniflareVersion": "4.20260730.0",
+  "operationsBaseline": "0221_portal_correspondence_lifecycle_write_guards.sql",
+  "clientBaseline": "0234_pa_principal_reenrollment.sql",
+  "suffixesExercised": [
+    "0222_employee_read_roots.sql",
+    "0223_employee_read_provisioning.sql",
+    "0224_windows_portal_publication_chain_index.sql",
+    "0235_windows_portal_successor_candidates.sql",
+    "0236_windows_portal_successor_content_start_audit.sql"
+  ],
+  "lateFileFailures": 5,
+  "failureInjection": "Unique ledger-name violation after the exact migration statements and normal new ledger insert in the same local D1 batch",
+  "rollbackChecks": [
+    "Exact per-boundary schema",
+    "Every previous application table row including prior grants and ledger entries",
+    "Zero foreign-key violations",
+    "Earlier committed prefixes retained independently in each database"
+  ],
+  "lostObserverAcknowledgements": 5,
+  "acknowledgementInjection": "Explicit observer exception after a successful awaited commit; not a socket or process-crash test",
+  "reconciliation": "Read the committed ledger/schema before continuing; no replay of committed files, ledger deletion, table drop or backup restore",
+  "existingSignedHumanCatalogRangeAuditRevocationAcceptanceRetained": true,
+  "testCount": 1,
+  "passed": 1,
+  "testDurationSeconds": 289.75,
+  "totalDurationSeconds": 292.01,
+  "timeoutSeconds": 360,
+  "previousUnchangedTestDurationSeconds": 221.66,
+  "typecheckPassed": true,
+  "remoteDatabaseAccess": false,
+  "actualNetworkInterruptionTested": false,
+  "backupRestoreTested": false,
+  "genericProductionReconcilerTested": false,
+  "canonicalBaselineVerified": false,
+  "executionAuthorized": false
+}

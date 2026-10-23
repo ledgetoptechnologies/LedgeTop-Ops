@@ -1,0 +1,9 @@
+**
+!Dockerfile
+!Dockerfile.test
+!employee_read_gateway/
+!employee_read_gateway/*.py
+!tests/
+!tests/*.py
+!testdata/
+!testdata/protocol-vector.json

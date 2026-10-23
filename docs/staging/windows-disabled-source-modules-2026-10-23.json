@@ -1,0 +1,172 @@
+{
+  "schemaVersion": 1,
+  "status": "actual_disabled_complete_modules_built_not_configuration",
+  "sourceBaseCommit": "516a9cfa84b9f9782bf24c3e46ca7b2d9896997a",
+  "sourceEditsUncommitted": true,
+  "preflightCaptureSha256": "d46ac5e80172b6d22e9e8b5c5993d2ab130442b145b7668b5b95fc029d8afded",
+  "preflightCompletedAt": "2026-10-23T01:28:25.606Z",
+  "compiledAt": "2026-10-23T02:13:02.868Z",
+  "syntheticGatewayCompileInputOnly": true,
+  "preparation": {
+    "schemaVersion": 1,
+    "status": "disabled_source_entries_only_not_configuration",
+    "enabled": false,
+    "profileSha256": "526c2682a574d8f450cd34d946b74cf8450214a5bebce119a5a8a90dd1a80b30",
+    "preflightSha256": "46164ae4f29aec4e7d6edd02815be8d8ca7ad8f228c51032493a3ffe5b89e947",
+    "entrySha256": {
+      "operations": "ad9c887ca41574379aa317b4de99bf1d4331b7715173428ffc8b4f321b23ba58",
+      "delivery": "8cb56413b31fea91bbefa52ab72eb77f1f16cad5c8601afbe14542ba4a6ddde4"
+    },
+    "observedWorkers": [
+      {
+        "app": "operations",
+        "workerName": "ledgetop-ops-staging",
+        "versionId": "231fead7-433e-4015-847e-ea9ebda35894"
+      },
+      {
+        "app": "delivery",
+        "workerName": "ledgetop-clients-staging",
+        "versionId": "6b9f1ff4-ce41-493e-a922-25081c2b67f4"
+      }
+    ],
+    "gatewayMetadata": {
+      "origin": "https://synthetic-files-staging.ledgetopdroneservices.com",
+      "gatewayId": "00000000-0000-4000-8000-000000000001",
+      "keyId": "synthetic",
+      "purpose": "compile_input_only_not_runtime_ownership",
+      "provisioned": false
+    },
+    "configWritten": false,
+    "secretsRead": false,
+    "physicallyVerified": false,
+    "canonicalBaselineVerified": false,
+    "uploaded": false,
+    "activated": false,
+    "deployReady": false,
+    "note": "Disabled source compilation only. Identity consistency is not observation freshness, gateway ownership, complete configuration preservation, runtime acceptance or deployment authorization.",
+    "sourceSha256": {
+      "scripts/windows-files-staging-entry-renderer.mjs": "303781eb26f88af3382ef1029bfd5c8f5c469dd45cd5a4595fbfca5a1b9e8e6c",
+      "scripts/windows-files-staging-exports.mjs": "845d8dfbd41c1a624717900af34fc321fc20fc329f8982640d073d6b00ce16f0",
+      "scripts/windows-files-source-preparation.mjs": "ac7053cb0b7898bd8193543fa3cc78bb61429a64c0f07554dfb3d637fd0772a7",
+      "scripts/staging-requirements.mjs": "1f573decac7da348c584999accf770f003bbfbfd3ef4b6dffbb971132ae54e6c",
+      "apps/operations/src/worker/staging-native-authority-entrypoint.ts": "f314da37613eaa54e5aa721804fd7fa93270d4118408749ef9d67a2818b95b70",
+      "apps/operations/src/worker/windows-files-staging-worker.ts": "034068fea15439d0c5fbac8fbc5bd9b86e7cfb0ce4df5795b52df55d0523f9e9",
+      "apps/client/src/worker/index.ts": "96e6013c75d289893f231daf440c8368e71745017db22772351cf779c200a899",
+      "apps/client/src/worker/client-portal/windows-files-staging-worker.ts": "13ab5321da22e6575ad0f1cafdc5fffa264c11c649c767af47e3dd39c725ae9e"
+    }
+  },
+  "build": {
+    "schemaVersion": 1,
+    "status": "disabled_offline_modules_only_not_configuration",
+    "observations": [
+      {
+        "app": "operations",
+        "exports": [
+          "ClientDelegatedShareSigner",
+          "ClientOnboardingRecipientBridge",
+          "ClientPortalNativeFinancialReader",
+          "ClientPortalRecipientEnrollmentBridge",
+          "ClientPortalServiceMetadataReader",
+          "DropboxImportWorkflow",
+          "IncomingRclonePromotionWorkflow",
+          "IncomingUploadLifecycleWorkflow",
+          "OperationsPortalNativeDeliveryAuthorizationReader",
+          "OperationsPortalNativeRecipientEnrollmentIngress",
+          "ProjectAlphaCatalogPromotionWorkflow",
+          "ProjectAlphaDeliveryIntentIngress",
+          "R2CrudWorkflow",
+          "SharedProfilePortalIngress",
+          "ThumbnailRendererContainer",
+          "ViewerSessionIssuer",
+          "default"
+        ],
+        "runtimeExportsPreserved": true,
+        "excludedModuleHelpers": [
+          "NATIVE_DIRECTORY_OUTBOX_CRON",
+          "NATIVE_DIRECTORY_RECONCILIATION_CRON",
+          "PROJECT_ALPHA_API_V2_MONITOR_CRON",
+          "dispatchThumbnailRendererApi",
+          "projectAlphaProjectionApiRequest",
+          "runScheduledPrimaryProjectAlphaSync"
+        ],
+        "esbuildVersion": "0.28.1",
+        "moduleSha256": "af5518ea5a23fc6b0d1d2b9fd6a8a81ed2172908f42702ea10d2f7a23c5b4e67",
+        "moduleBytes": 7830850,
+        "bundleInputCount": 760,
+        "bundleInputsSha256": "b0fd04fb92cd3b582df6b3b1d1f6441ee29abfeac44f466be706c79ffe7fbaaf",
+        "bundleInputFilesObservedAfterBuild": true,
+        "compilerInputBytesAttested": false,
+        "atomicSourceSnapshot": false,
+        "inputEvidenceNote": "Physical input hashes are post-build filesystem observations, not exact esbuild loader-byte attestation or an atomic source snapshot. Virtual disabled inputs have no physical source hash."
+      },
+      {
+        "app": "delivery",
+        "exports": [
+          "BulkDownloadWorkflow",
+          "ClientAuthorityWorkspaceBindingIngress",
+          "ClientPortalAuthorityV2Ingress",
+          "CloudTransferWorkflow",
+          "OperationsPortalNativeDeliveryAuthorityIngress",
+          "OperationsPortalNativeRecipientAuthorityIngress",
+          "OperationsPortalWorkspacePublicationIngress",
+          "OpsInventoryCatalogPromotionCoordinator",
+          "OpsInventoryCatalogStagingIngress",
+          "OpsPortalAccessAuthorityIngress",
+          "OpsSyncPortalProjectionIngress",
+          "SharedProfilePortalAuthorityReader",
+          "VerifiedRecipientDeliveryAuthorityIngress",
+          "default"
+        ],
+        "runtimeExportsPreserved": true,
+        "excludedModuleHelpers": [
+          "authenticatedPreviewFrameAllowed",
+          "bulkDownloadResumeExpiresAt",
+          "bulkJobProgress",
+          "bulkQuotaRetryAfterSeconds",
+          "classifyPublicRateLimit",
+          "cleanupTemporaryZips",
+          "cloudTransferResumeOrigin",
+          "deliverySecurityHeaders",
+          "ensurePublicId",
+          "framePolicyForPath",
+          "friendlyBulkFailure",
+          "markUnavailableFolder",
+          "readyBulkJobIsExpired",
+          "requestHostAllowed",
+          "requireSameOrigin",
+          "serveAppShell",
+          "sourceUrlForItem",
+          "streamItem"
+        ],
+        "esbuildVersion": "0.28.1",
+        "moduleSha256": "3444650c8f9f29187d953450ac2b010941f85a6b91f241cdc0b71f0290253568",
+        "moduleBytes": 2623013,
+        "bundleInputCount": 318,
+        "bundleInputsSha256": "e917137e3a0dda23827fdd4af0b6dd88967f081a9433f2747913bcb4587cf36f",
+        "bundleInputFilesObservedAfterBuild": true,
+        "compilerInputBytesAttested": false,
+        "atomicSourceSnapshot": false,
+        "inputEvidenceNote": "Physical input hashes are post-build filesystem observations, not exact esbuild loader-byte attestation or an atomic source snapshot. Virtual disabled inputs have no physical source hash."
+      }
+    ],
+    "configWritten": false,
+    "secretsRead": false,
+    "uploaded": false,
+    "activated": false,
+    "deployReady": false,
+    "workerdStartupTested": false,
+    "runtimeAcceptanceVerified": false
+  },
+  "uploaded": false,
+  "activated": false,
+  "configWritten": false,
+  "deployReady": false,
+  "validation": {
+    "sourcePreparationAndExistingCompositionTests": {
+      "passed": 54,
+      "failed": 0
+    },
+    "fullCompositionActivationGatesChanged": false,
+    "actualRuntimeExportInventoriesVerified": true
+  }
+}

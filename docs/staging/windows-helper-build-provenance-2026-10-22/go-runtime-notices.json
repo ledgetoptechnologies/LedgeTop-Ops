@@ -1,0 +1,72 @@
+[
+  {
+    "sourcePath": "LICENSE",
+    "sourceUrl": "https://raw.githubusercontent.com/golang/go/2aae1000ea1d4b28923b96db28acf4e3b99d6aff/LICENSE",
+    "outputPath": "go-runtime-notices/LICENSE.txt",
+    "bytes": 1453,
+    "sha256": "911f8f5782931320f5b8d1160a76365b83aea6447ee6c04fa6d5591467db9dad"
+  },
+  {
+    "sourcePath": "PATENTS",
+    "sourceUrl": "https://raw.githubusercontent.com/golang/go/2aae1000ea1d4b28923b96db28acf4e3b99d6aff/PATENTS",
+    "outputPath": "go-runtime-notices/PATENTS.txt",
+    "bytes": 1303,
+    "sha256": "96f408bfae65bf137fc2525d3ecb030271c50c1e90799f87abf8846d8dd505cc"
+  },
+  {
+    "sourcePath": "src/vendor/golang.org/x/crypto/LICENSE",
+    "sourceUrl": "https://raw.githubusercontent.com/golang/go/2aae1000ea1d4b28923b96db28acf4e3b99d6aff/src/vendor/golang.org/x/crypto/LICENSE",
+    "outputPath": "go-runtime-notices/src__vendor__golang.org__x__crypto__LICENSE.txt",
+    "bytes": 1453,
+    "sha256": "911f8f5782931320f5b8d1160a76365b83aea6447ee6c04fa6d5591467db9dad"
+  },
+  {
+    "sourcePath": "src/vendor/golang.org/x/crypto/PATENTS",
+    "sourceUrl": "https://raw.githubusercontent.com/golang/go/2aae1000ea1d4b28923b96db28acf4e3b99d6aff/src/vendor/golang.org/x/crypto/PATENTS",
+    "outputPath": "go-runtime-notices/src__vendor__golang.org__x__crypto__PATENTS.txt",
+    "bytes": 1303,
+    "sha256": "96f408bfae65bf137fc2525d3ecb030271c50c1e90799f87abf8846d8dd505cc"
+  },
+  {
+    "sourcePath": "src/vendor/golang.org/x/net/LICENSE",
+    "sourceUrl": "https://raw.githubusercontent.com/golang/go/2aae1000ea1d4b28923b96db28acf4e3b99d6aff/src/vendor/golang.org/x/net/LICENSE",
+    "outputPath": "go-runtime-notices/src__vendor__golang.org__x__net__LICENSE.txt",
+    "bytes": 1453,
+    "sha256": "911f8f5782931320f5b8d1160a76365b83aea6447ee6c04fa6d5591467db9dad"
+  },
+  {
+    "sourcePath": "src/vendor/golang.org/x/net/PATENTS",
+    "sourceUrl": "https://raw.githubusercontent.com/golang/go/2aae1000ea1d4b28923b96db28acf4e3b99d6aff/src/vendor/golang.org/x/net/PATENTS",
+    "outputPath": "go-runtime-notices/src__vendor__golang.org__x__net__PATENTS.txt",
+    "bytes": 1303,
+    "sha256": "96f408bfae65bf137fc2525d3ecb030271c50c1e90799f87abf8846d8dd505cc"
+  },
+  {
+    "sourcePath": "src/vendor/golang.org/x/sys/LICENSE",
+    "sourceUrl": "https://raw.githubusercontent.com/golang/go/2aae1000ea1d4b28923b96db28acf4e3b99d6aff/src/vendor/golang.org/x/sys/LICENSE",
+    "outputPath": "go-runtime-notices/src__vendor__golang.org__x__sys__LICENSE.txt",
+    "bytes": 1453,
+    "sha256": "911f8f5782931320f5b8d1160a76365b83aea6447ee6c04fa6d5591467db9dad"
+  },
+  {
+    "sourcePath": "src/vendor/golang.org/x/sys/PATENTS",
+    "sourceUrl": "https://raw.githubusercontent.com/golang/go/2aae1000ea1d4b28923b96db28acf4e3b99d6aff/src/vendor/golang.org/x/sys/PATENTS",
+    "outputPath": "go-runtime-notices/src__vendor__golang.org__x__sys__PATENTS.txt",
+    "bytes": 1303,
+    "sha256": "96f408bfae65bf137fc2525d3ecb030271c50c1e90799f87abf8846d8dd505cc"
+  },
+  {
+    "sourcePath": "src/vendor/golang.org/x/text/LICENSE",
+    "sourceUrl": "https://raw.githubusercontent.com/golang/go/2aae1000ea1d4b28923b96db28acf4e3b99d6aff/src/vendor/golang.org/x/text/LICENSE",
+    "outputPath": "go-runtime-notices/src__vendor__golang.org__x__text__LICENSE.txt",
+    "bytes": 1453,
+    "sha256": "911f8f5782931320f5b8d1160a76365b83aea6447ee6c04fa6d5591467db9dad"
+  },
+  {
+    "sourcePath": "src/vendor/golang.org/x/text/PATENTS",
+    "sourceUrl": "https://raw.githubusercontent.com/golang/go/2aae1000ea1d4b28923b96db28acf4e3b99d6aff/src/vendor/golang.org/x/text/PATENTS",
+    "outputPath": "go-runtime-notices/src__vendor__golang.org__x__text__PATENTS.txt",
+    "bytes": 1303,
+    "sha256": "96f408bfae65bf137fc2525d3ecb030271c50c1e90799f87abf8846d8dd505cc"
+  }
+]

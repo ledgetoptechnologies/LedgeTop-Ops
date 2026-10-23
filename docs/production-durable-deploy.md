@@ -39,10 +39,54 @@ and application build wrappers unchanged.
 After the controlled rollout, use the matching guarded deployment command:
 
 ```sh
-node ../../scripts/production-deploy.mjs --worker operations --mode backend --execute
+node ../../scripts/production-deploy.mjs --worker operations --mode backend --execute --staff-cutover-review /absolute/private/reviewed-native-staff-packet.json
 node ../../scripts/production-deploy.mjs --worker client --mode backend --execute
-node ../../scripts/production-deploy.mjs --worker ops-sync --mode backend --execute
+node ../../scripts/production-deploy.mjs --worker ops-sync --mode backend --execute --staff-cutover-review /absolute/private/reviewed-native-staff-packet.json
 ```
+
+### Ops-owned employee handoff
+
+Operations and Sync must not deploy the removal of PA employee offboarding
+before a usable Ops-owned replacement exists. Their guarded deployment now
+requires an externally reviewed, private cohort packet for the exact clean Git
+commit. The path above is a placeholder, not an existing packet or approval.
+Never commit its staff identities to the public repository. This is release
+evidence, not a runtime environment file, credential, bootstrap installer or
+permission to create identities or grant access.
+
+Before native cutover, complete the temporary
+[manual staff offboarding procedure](operations/manual-staff-offboarding.md)
+for departures; PA edits do not perform Operations offboarding. This includes
+local inactive status, exact managed-group removal and Access session revocation
+with independent denial verification. It does not waive this deployment gate.
+The private release review now uses schema 3 and pins the current control-plane
+staff set separately from its historical handoff. Readiness receipts use schema
+2 and include `controlPlaneSha256`; drift of that set invalidates the release
+review even when cohort and reconciliation generation have not changed.
+
+The separate native-staff readiness reader performs only fixed, bounded remote
+SELECT queries through installed Wrangler and conventional build credentials.
+It requires the exact production account/database, the enabled durable handoff,
+matching native and compatibility identities, a usable complete native control
+plane, correctly scoped unrevoked bootstrap evidence, and a recently reconciled
+Access group. Missing permission or evidence holds deployment; the reader does
+not obtain credentials, run login or expand their scope.
+
+The adapter rechecks readiness before uploading, immediately before activation,
+and after activation. It rejects drift or stale observations and does not report
+verified activation after a failed final check. It never retries or restores a
+version automatically after an uncertain write. The metadata reader remains
+GET-only; D1 readiness is a separate read-only boundary. These checks are not a
+distributed transaction across D1, Worker activation and Cloudflare Access.
+Use the controlled release window and reconcile uncertainty explicitly.
+
+This repository change does **not** update actual Cloudflare Builds settings.
+Before main is merged or automatic builds restored, capture and verify the
+real commands for Operations and Sync. A dashboard still running direct
+Wrangler bypasses this supported adapter and must remain disabled until its
+command is corrected. Client-only deployment does not read the employee packet.
+Offline tests and source implementation do not prove the live handoff or allow
+the protected bootstrap decision to be skipped.
 
 `npm run build` remains the build entrypoint in each application root. Operations
 and Client produce `dist/ledgetop_ops/index.js` and
