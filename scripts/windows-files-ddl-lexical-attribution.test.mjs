@@ -66,3 +66,34 @@ test("rejects unselected objects and bounded source overflow without echoing con
   assert.throws(()=>attributeSelectedDdl("production",[],[]),/definition_response_invalid/);
   assert.equal(compare("+".repeat(32769),"+".repeat(32769)+" "),"unresolved_token_or_structure_difference");
 });
+
+const residual=(left,right)=>attributeSelectedDdl("operations",[row(left)],[row(right)]).objects[0].residualAttribution;
+test("attributes comment-only edits without concatenating surrounding active tokens",()=>{
+  for(const [left,right]of [["SELECT /* PRIVATE_OLD */ 1","SELECT /* PRIVATE_NEW */ 1"],
+    ["SELECT /* removed */ 1","SELECT 1"],["SELECT 1 -- old\n+2","SELECT 1 -- new\n+2"],
+    ["SELECT 1/* unclosed comment","SELECT 1"]]){
+    const result=residual(left,right);assert.equal(result.reasonCategory,"comment_tokens_only");
+    assert.equal(result.literalTokenSequenceChanged,false);assert.equal(result.commentTokenSequenceChanged,true);
+  }
+  for(const [left,right]of [["SELECT a/**/b","SELECT ab"],["SELECT -/**/-1","SELECT --1"],
+    ["SELECT 1 -- disabled +2","SELECT 1 +2"],["SELECT '/* not a comment */'","SELECT ''"]])
+    assert.equal(residual(left,right).reasonCategory,"non_comment_token_difference");
+});
+test("word-case candidates fold only ASCII unquoted words, never quoted content or literals",()=>{
+  assert.equal(residual("CREATE TABLE t(a)","create table t(a)").reasonCategory,"word_case_only_candidate");
+  assert.equal(residual("SELECT /* private_a */ word","select /* private_b */ WORD").reasonCategory,"comment_tokens_and_word_case_only_candidate");
+  for(const [left,right]of [["SELECT 'PRIVATE_A'","SELECT 'private_a'"],['SELECT "PRIVATE_A"','SELECT "private_a"'],
+    ["SELECT [PRIVATE_A]","SELECT [private_a]"],["SELECT `PRIVATE_A`","SELECT `private_a`"],
+    ["SELECT X'AB'","SELECT X'ab'"]])assert.equal(residual(left,right).reasonCategory,"non_comment_token_difference");
+});
+test("residual counts and kind flags distinguish changed literal sequences without revealing values",()=>{
+  const literal=residual("DEFAULT 'PRIVATE_LEFT'","DEFAULT 'PRIVATE_RIGHT'");
+  assert.equal(literal.literalTokenSequenceChanged,true);assert.deepEqual(literal.tokenKindCounts.literal,{expected:1,observed:1});
+  assert.deepEqual(literal.changedTokenKinds,["literal"]);
+  assert.deepEqual(residual("DEFAULT 1","DEFAULT 2").changedTokenKinds,["number"]);
+  const structure=residual("CHECK(a>0)","CHECK(a>=0 AND b>0)");assert.equal(structure.literalTokenSequenceChanged,false);
+  assert.ok(structure.nonCommentTokenCounts.expected<structure.nonCommentTokenCounts.observed);
+  assert.ok(!JSON.stringify({literal,structure}).includes("PRIVATE"));assert.ok(!JSON.stringify({literal,structure}).includes("CHECK("));
+  assert.equal(residual("SELECT 'unclosed","SELECT 'unclosed ").reasonCategory,"unsupported_or_malformed_lexical_form");
+  assert.equal(residual(null,"SELECT 1").reasonCategory,"null_sql_shape_difference");
+});

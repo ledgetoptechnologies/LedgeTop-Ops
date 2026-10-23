@@ -71,6 +71,30 @@ function classify(expected,observed){
   if(same(spelling(left),spelling(right)))return "identifier_quoting_only_candidate";
   return "unresolved_token_or_structure_difference";
 }
+function residualAttribution(expected,observed){
+  if(!expected||!observed)return {reasonCategory:"definition_presence_difference"};
+  if(expected.sql===null||observed.sql===null)return {reasonCategory:"null_sql_shape_difference"};
+  const left=tokens(expected.sql),right=tokens(observed.sql);
+  if(!left||!right)return {reasonCategory:"unsupported_or_malformed_lexical_form"};
+  const sequence=list=>list.map(t=>[t.kind,t.raw]);
+  // Remove complete comment tokens AFTER lexing. Never concatenate source
+  // fragments: a/**/b cannot become ab, nor can -/**/- become a line comment.
+  const active=list=>list.filter(t=>t.kind!=="comment");
+  const fold=list=>list.map(t=>[t.kind,t.kind==="word"?t.raw.replace(/[A-Z]/g,c=>c.toLowerCase()):t.raw]);
+  const a=active(left),b=active(right);
+  let reasonCategory="non_comment_token_difference";
+  if(same(sequence(a),sequence(b)))reasonCategory="comment_tokens_only";
+  else if(same(fold(left),fold(right)))reasonCategory="word_case_only_candidate";
+  else if(same(fold(a),fold(b)))reasonCategory="comment_tokens_and_word_case_only_candidate";
+  const kinds=["word","quoted_identifier","literal","blob","number","comment","operator","punctuation"];
+  const tokenKindCounts=Object.fromEntries(kinds.map(kind=>[kind,{expected:left.filter(t=>t.kind===kind).length,observed:right.filter(t=>t.kind===kind).length}]));
+  const literalSequence=list=>sequence(list.filter(t=>t.kind==="literal"||t.kind==="blob"));
+  return {reasonCategory,tokenKindCounts,
+    changedTokenKinds:kinds.filter(kind=>!same(sequence(left.filter(t=>t.kind===kind)),sequence(right.filter(t=>t.kind===kind)))),
+    literalTokenSequenceChanged:!same(literalSequence(a),literalSequence(b)),
+    nonCommentTokenCounts:{expected:a.length,observed:b.length},
+    commentTokenSequenceChanged:!same(sequence(left.filter(t=>t.kind==="comment")),sequence(right.filter(t=>t.kind==="comment")))};
+}
 
 /** Local reviewed selected captures only. No paths, remote IO, SQL execution,
  * normalization approval, literal excerpts, or raw tokens in the safe result. */
@@ -81,14 +105,15 @@ export function attributeSelectedDdl(app,expectedRows,observedRows){
   const left=new Map(expected.map(r=>[key(r),r])),right=new Map(observed.map(r=>[key(r),r]));
   const objects=[...new Set([...left.keys(),...right.keys()])].sort().map(id=>{
     const before=left.get(id),after=right.get(id),identity=before??after;
+    const category=before&&after?classify(before.sql,after.sql):"unresolved_token_or_structure_difference";
     return {type:identity.type,name:identity.name,tbl_name:identity.tbl_name,
       expectedPresent:!!before,observedPresent:!!after,
       expectedSqlSha256:before?hash(before.sql):null,observedSqlSha256:after?hash(after.sql):null,
-      category:before&&after?classify(before.sql,after.sql):"unresolved_token_or_structure_difference"};
+      category,...(category==="unresolved_token_or_structure_difference"?{residualAttribution:residualAttribution(before,after)}:{})};
   });
   const categories=Object.fromEntries(["exact_sql_bytes","whitespace_outside_quoted_tokens_only","identifier_quoting_only_candidate","unresolved_token_or_structure_difference"]
     .map(category=>[category,objects.filter(r=>r.category===category).length]));
   return {schemaVersion:1,app,scope:"Lexical attribution of selected local DDL only; no semantic equivalence or readiness proof",objects,categories,
     canonicalBaselineVerified:false,semanticEquivalenceEstablished:false,
-    caveat:"Identifier quoting is a lexical candidate only: SQLite may interpret double-quoted tokens as literals in legacy contexts. Comments and quoted contents stay exact; no SQL is executed or normalized into approval."};
+    caveat:"Identifier quoting and word case are lexical candidates only: SQLite may interpret double-quoted tokens as literals in legacy contexts. Comment attribution never joins surrounding tokens. No SQL is executed or normalized into approval."};
 }
