@@ -20,6 +20,7 @@ import type {
 } from "@ltds/shared";
 import { Card, EmptyState, Loading, StatusPill, openViewerWindow, requestText, type ViewerWindowHandle } from "@ltds/ui";
 import { api } from "./api";
+import { providerCreateBody } from "./viewer-provider-create";
 import { hashFileOffThread } from "./file-hash";
 import {
   canonicalUploadPath,
@@ -980,12 +981,12 @@ function Imports({ client, projects, preferredProjectId, canImport, busy, mutate
 }
 
 function Providers({ providers, canWrite, busy, mutate, nextCursor, loadMore }: { providers: ViewerProviderSummary[]; canWrite: boolean; busy: boolean; mutate: Mutate; nextCursor: string | null; loadMore: () => void }) {
-  const [name, setName] = useState(""); const [endpoint, setEndpoint] = useState(""); const [providerType, setProviderType] = useState<"nodeodm" | "clusterodm">("clusterodm"); const [credential, setCredential] = useState("");
+  const [name, setName] = useState(""); const [endpoint, setEndpoint] = useState(""); const [credential, setCredential] = useState("");
   const credentialIssue = credential ? providerCredentialError(credential) : null;
   return <Card title="Processing providers">{canWrite && <form className="viewer-processing-form" onSubmit={event => { event.preventDefault(); const token = credential; void mutate(async client => {
-    try { return await client.request("/api/v1/processing/providers", { method: "POST", headers: { "Idempotency-Key": crypto.randomUUID() }, body: JSON.stringify({ displayName: name.trim(), endpoint, type: providerType, enabled: false, admissionLimit: providerType === "nodeodm" ? 1 : 4, ...(token ? { credential: { token } } : {}) }) }); }
+    try { return await client.request("/api/v1/processing/providers", { method: "POST", headers: { "Idempotency-Key": crypto.randomUUID() }, body: JSON.stringify(providerCreateBody(name, endpoint, token)) }); }
     finally { setCredential(""); }
-  }, token ? "Provider credential stored. Probe it before enabling admission." : "Provider saved disabled. Add a credential, then probe it before enabling admission."); }}><label>Name<input value={name} onChange={event => setName(event.target.value)} /></label><label>Type<select value={providerType} onChange={event => setProviderType(event.target.value as typeof providerType)}><option value="clusterodm">ClusterODM</option><option value="nodeodm">NodeODM</option></select></label><label>HTTPS or private endpoint<input type="url" value={endpoint} onChange={event => setEndpoint(event.target.value)} /></label><label>Provider token (optional)<input type="password" autoComplete="new-password" spellCheck={false} value={credential} onChange={event => setCredential(event.target.value)} aria-invalid={credentialIssue ? "true" : undefined} />{credentialIssue && <small className="viewer-processing-error">{credentialIssue}</small>}</label><p className="viewer-processing-wide">The token goes directly to Viewer over the authenticated admin session. It is cleared from this form after submission and is never returned by the API.</p><button className="button-orange" disabled={busy || !name.trim() || !endpoint || Boolean(credentialIssue)}>Add disabled provider</button></form>}
+  }, token ? "Provider credential stored. Probe it before enabling admission." : "Provider saved disabled. Add a credential, then probe it before enabling admission."); }}><label>Name<input value={name} onChange={event => setName(event.target.value)} /></label><label>HTTPS or private endpoint<input type="url" value={endpoint} onChange={event => setEndpoint(event.target.value)} /></label><label>Provider token (optional)<input type="password" autoComplete="new-password" spellCheck={false} value={credential} onChange={event => setCredential(event.target.value)} aria-invalid={credentialIssue ? "true" : undefined} />{credentialIssue && <small className="viewer-processing-error">{credentialIssue}</small>}</label><p className="viewer-processing-wide">Viewer detects the provider type. The token goes directly to Viewer over the authenticated admin session. It is cleared from this form after submission and is never returned by the API.</p><button className="button-orange" disabled={busy || !name.trim() || !endpoint || Boolean(credentialIssue)}>Add disabled provider</button></form>}
     {!providers.length ? <EmptyState title="No providers configured" detail="Published model viewing remains fully operational without a provider." /> : <div className="viewer-processing-list viewer-provider-list">{providers.map(provider => <ProviderCard key={provider.id} provider={provider} canWrite={canWrite} busy={busy} mutate={mutate} />)}</div>}<Pager nextCursor={nextCursor} busy={busy} loadMore={loadMore} />
   </Card>;
 }
