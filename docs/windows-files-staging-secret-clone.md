@@ -43,12 +43,16 @@ module/count/byte bounds. Complete runtime/export/container/limit policy and the
 entire returned modern `assets` object must match. Unknown resource fields are
 not discarded: unsupported resource envelopes refuse and unknown policy fields
 inside admitted resource objects remain part of exact comparisons.
+Both captures must actually contain modern `assets.config` and runtime `assets`
+objects. Two incomplete captures with missing or null asset metadata refuse.
 
 Provider envelope provenance is handled separately: version ID/number/metadata,
 modern startup time/annotations/URLs/source/author/time, and the script's
 `last_deployed_from` may change without being mistaken for runtime policy.
 The code etag, handler metadata and every other admitted state field remain
 pinned. Paired endpoint version numbers and duplicated runtime policy must agree.
+The provider's URL envelope is a bounded array, including an empty array; its
+entries remain opaque envelope data rather than invented runtime policy.
 
 The API's modern assets response currently exposes configuration only. A match
 returns `returnedAssetsMetadataEqual:true` and explicitly

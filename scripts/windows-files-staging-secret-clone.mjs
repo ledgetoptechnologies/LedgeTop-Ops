@@ -50,7 +50,8 @@ function envelope(value, expectedId, modern) {
   const allowed = modern ? [...MODERN_ENVELOPE, ...MODERN_STATE] : [...VERSION_ENVELOPE,"resources"];
   if (Object.keys(value).some(key => !allowed.includes(key)) || !Number.isSafeInteger(value.number) || value.number < 1) fail();
   if (modern) {
-    if (!Number.isFinite(value.startup_time_ms) || value.startup_time_ms < 0 || !object(value.annotations) || !object(value.urls)
+    if (!Number.isFinite(value.startup_time_ms) || value.startup_time_ms < 0 || !object(value.annotations)
+      || !Array.isArray(value.urls) || value.urls.length > 100 || JSON.stringify(value.urls).length > 65536
       || typeof value.source !== "string" || value.source.length > 128 || typeof value.author_id !== "string" || value.author_id.length > 256
       || typeof value.created_on !== "string" || !Number.isFinite(Date.parse(value.created_on))) fail();
   } else if (!object(value.metadata)) fail();
@@ -60,6 +61,7 @@ function validatePair(pair, id) {
   envelope(pair.version,id,false);envelope(pair.modern,id,true);
   const resources = pair.version.resources;
   if (!exact(resources,["script","script_runtime","bindings"]) || !object(resources.script) || !object(resources.script_runtime)
+    || !object(resources.script_runtime.assets) || !object(pair.modern.assets) || !object(pair.modern.assets.config)
     || !exact(resources.script,["etag","handlers","named_handlers","last_deployed_from"])
     || typeof resources.script.etag !== "string" || resources.script.etag.length > 1024
     || typeof resources.script.last_deployed_from !== "string" || resources.script.last_deployed_from.length > 128) fail();

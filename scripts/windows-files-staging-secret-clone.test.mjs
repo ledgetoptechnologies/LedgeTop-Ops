@@ -16,13 +16,13 @@ function fixture(app="operations") {
   const version={id:baselineVersionId,number:3,metadata:{source:"wrangler",created_on:"2026-10-23T00:00:00Z"},resources:{script:{etag:"same-module-etag",handlers:["fetch"],named_handlers:[],last_deployed_from:"wrangler"},script_runtime:runtime,bindings}};
   const modern={id:baselineVersionId,number:3,startup_time_ms:12,compatibility_date:runtime.compatibility_date,compatibility_flags:runtime.compatibility_flags,
     main_module:"index.js",annotations:{"workers/message":"old"},exports,usage_model:"standard",...(app==="operations"?{containers:runtime.containers}:{limits:runtime.limits}),
-    urls:{version:["https://old.invalid"]},source:"wrangler",created_on:"2026-10-23T00:00:00Z",author_id:"old-author",assets,
+    urls:[],source:"wrangler",created_on:"2026-10-23T00:00:00Z",author_id:"old-author",assets,
     modules:[{name:"index.js",content_type:"application/javascript+module",content_base64:Buffer.from("export default {fetch(){}};").toString("base64")},
       {name:"index.js.map",content_type:"application/json",content_base64:Buffer.from("{}").toString("base64")}],
     bindings:structuredClone(bindings),env:Object.fromEntries(bindings.map(({name,...binding})=>[name,structuredClone(binding)]))};
   const baseline=structuredClone({version,modern}),candidate=structuredClone(baseline);
   candidate.version.id=candidateVersionId;candidate.modern.id=candidateVersionId;candidate.version.number=4;candidate.modern.number=4;
-  candidate.modern.startup_time_ms=13;candidate.modern.annotations={"workers/message":"secret-only candidate"};candidate.modern.urls={version:["https://new.invalid"]};
+  candidate.modern.startup_time_ms=13;candidate.modern.annotations={"workers/message":"secret-only candidate"};candidate.modern.urls=[{url:"https://new.invalid",kind:"version"}];
   candidate.modern.source="api";candidate.modern.created_on="2026-10-23T00:01:00Z";candidate.modern.author_id="new-author";
   candidate.version.metadata={source:"api",created_on:"2026-10-23T00:01:00Z"};candidate.version.resources.script.last_deployed_from="api";
   for(const name of WINDOWS_STAGING_SECRET_SLOTS[app]) {
@@ -45,6 +45,8 @@ const changes={
   "same version":f=>{f.candidateVersionId=f.baselineVersionId;},"malformed version":f=>{f.candidateVersionId="bad";},
   "mismatched response ID":f=>{f.candidate.modern.id=f.baselineVersionId;},
   "mismatched endpoint number":f=>{f.candidate.modern.number++;},
+  "object URLs instead of provider array":f=>{f.candidate.modern.urls={version:[]};},
+  "unbounded URLs array":f=>{f.candidate.modern.urls=Array.from({length:101},()=>null);},
   "wrong planned secret":f=>{f.plannedSecretNames[0]="OTHER_SECRET";},"incomplete plan":f=>{f.plannedSecretNames.pop();},
   "module bytes":f=>{f.candidate.modern.modules[0].content_base64=Buffer.from("changed").toString("base64");},
   "module name":f=>{f.candidate.modern.modules[1].name="changed.map";},"module type":f=>{f.candidate.modern.modules[1].content_type="text/plain";},
@@ -82,3 +84,14 @@ test("128 environment budget refuses actual Ops126+3 shape without exposing valu
   const client=fixture("delivery");fillEnvironment(client,99);assert.equal(compare(client).environmentCount,100);
 });
 test("old secret slots must be previously absent",()=>{const input=fixture();input.baseline.version.resources.bindings.push({name:input.plannedSecretNames[0],type:"secret_text"});assert.throws(()=>compare(input),/inputs_invalid/);});
+for(const [label,change] of [
+  ["missing modern assets",pair=>{delete pair.modern.assets;}],
+  ["null modern assets",pair=>{pair.modern.assets=null;}],
+  ["missing modern asset config",pair=>{delete pair.modern.assets.config;}],
+  ["null modern asset config",pair=>{pair.modern.assets.config=null;}],
+  ["missing runtime assets",pair=>{delete pair.version.resources.script_runtime.assets;}],
+  ["null runtime assets",pair=>{pair.version.resources.script_runtime.assets=null;}],
+]) test(`incomplete paired captures refuse even when both have ${label}`,()=>{
+  const input=fixture();change(input.baseline);change(input.candidate);
+  assert.throws(()=>compare(input),e=>e.message==="windows_staging_secret_clone_inputs_invalid");
+});
