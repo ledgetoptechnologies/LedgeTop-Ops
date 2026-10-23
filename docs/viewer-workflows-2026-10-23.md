@@ -18,6 +18,8 @@ The live identities of the two screenshot failures have not been retrieved. The 
 
 ## Authenticated navigation and sharing
 
+The branch incorporates the existing native association and Operations model UI work from pull request #226 as a prerequisite. It does not merge or close that original pull request or activate runtime flags.
+
 Authenticated linked-model routes open in the same tab within the real Operations or Client Portal layout. The client route preserves the exact workspace from the model URL, including on Back navigation; its project navigation continues to use existing authorized portal data. Public Viewer links retain their separate experience.
 
 Private processing reviews launched from the dedicated Viewer workspace still use isolated review tabs and their existing session-renewal controller. These reviews do not automatically acquire an Operations model association. This change does not eliminate every separate review tab.
@@ -47,5 +49,9 @@ Existing code can display registered EPT clouds and selected direct LAS/LAZ/PLY 
 - Measurement browser audit: 34 passed in isolated Chromium, including profile lifecycle, CSV/PNG downloads, and queued/cancelled server inspection.
 - After interaction changes: 476 measurement checks passed, two optional Poisson-engine fixture skips; 76 focused interaction/dialog checks passed.
 - Slice/header/runtime checks: 74 passed, including real WebGL framebuffer assertions for removed/retained geometry, streamed arrivals, and reset.
+- Follow-up measurement checks: 113 unit tests and 40 browser/wiring checks passed, including the real Volume toolbar, Finish-to-inspector, saved selection/focus/rename, cancellation, and renewed draft recovery.
+- Authenticated navigation: 20 Operations browser checks, six client browser checks, ten route checks, and two final failed-job link checks passed. These browser fixtures use the actual application layout and a mocked Viewer iframe.
+- Sharing: 79 Viewer checks, 13 focused Operations bridge checks, and the desktop workspace browser scenario passed, including keyboard focus and tab-panel state.
+- Combined branch: both application typechecks passed; 42 Operations Viewer tests and 85 overview/view-mode/sharing/proxy tests passed.
 
 These checks use synthetic fixtures. They do not certify survey accuracy or establish that the changes are deployed to the live service.
