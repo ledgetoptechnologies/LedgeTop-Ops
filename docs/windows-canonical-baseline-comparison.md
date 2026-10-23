@@ -85,8 +85,9 @@ The corrected query did not change any schema hashes/counts in this canonical lo
 ### Separate conditional RAISE consistency exercise
 
 `scripts/windows-files-conditional-raise-d1.test.mjs` executes only fixed synthetic
-test-source SQL in one fresh local Miniflare/D1 database, with outbound requests
-denied and the runtime disposed in `finally`. It never reads or executes captured
+test-source SQL in one fresh local Miniflare/D1 database, with Worker outbound requests
+denied, optional Node-side CF metadata fetching disabled (`cf:false`), and the runtime
+disposed in `finally`. It never reads or executes captured
 DDL and does not import or replay migration SQL. Its fixed helper emits either
 `SELECT RAISE(ABORT, message) WHERE predicate` or
 `SELECT CASE WHEN predicate THEN RAISE(ABORT, message) END`, preserving each

@@ -26,7 +26,7 @@ test('fixed synthetic conditional RAISE forms agree in local D1 consistency case
   assertCanonicalFileRunner();
   const {Miniflare} = require('miniflare');
   let networkAttempts = 0;
-  const runtime = new Miniflare({modules:true, compatibilityDate:'2026-08-06',
+  const runtime = new Miniflare({modules:true, compatibilityDate:'2026-08-06', cf:false,
     script:"export default {fetch(){return new Response('synthetic-local-only')}}", d1Databases:['DB'],
     outboundService:() => { networkAttempts++; throw Error('conditional_raise_test_network_denied'); }});
   try {

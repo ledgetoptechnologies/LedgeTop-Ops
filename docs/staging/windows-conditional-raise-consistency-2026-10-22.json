@@ -18,6 +18,7 @@
     "denialsPerForm": 21,
     "allowsPerForm": 9,
     "outboundAttempts": 0,
+    "optionalCfMetadataFetchDisabled": true,
     "runtimeDisposed": true
   },
   "canonicalBaselineVerified": false,
