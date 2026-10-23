@@ -51,7 +51,7 @@ The policy preserves16 Ops and13 Client classes plus each default handler, and
 explicitly classifies the existing library helpers. Unknown source exports,
 missing runtime exports or leaked helper exports reject the build. Its ignored `module-build` output is a
 static qualification artifact, not a deployed Worker or an assets upload.
-No script runs Wrangler deployment, migrations, SSH, EH jobs or cloud mutations.
+No script invokes deployment commands, migrations, SSH, EH jobs or cloud mutations.
 
 An actual Workerd startup test found that the earlier `export *` composition
 exported cron strings as entrypoints, which the runtime rejected. Static source
