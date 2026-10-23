@@ -78,12 +78,24 @@ function exportSource(repo, commit, root, n) {
     sourceBlobManifestSHA256: hash(JSON.stringify(verified)) };
 }
 
+/** A new output directory outside the repository. The existing parent is resolved
+ * first so a junction or symlink cannot redirect a lexical path into the checkout. */
+export function newOutsideOutput(repo, output) {
+  const requested = path.resolve(output), parent = path.dirname(requested);
+  fail(fs.existsSync(parent), 'Output parent must already exist');
+  const root = path.join(fs.realpathSync(parent), path.basename(requested));
+  fail(!fs.existsSync(root), 'Output must be a new directory');
+  const relative = path.relative(fs.realpathSync(repo), root);
+  fail(relative === '..' || relative.startsWith('..' + path.sep) || path.isAbsolute(relative),
+    'Output must be outside the repository');
+  return root;
+}
+
 export function runPrefixedBuilds({ repo, commit, output }) {
   fail(/^[0-9a-f]{40}$/.test(commit), 'Release commit must be a full lowercase SHA');
   fail(git(repo, ['rev-parse', `${commit}^{commit}`]) === commit, 'Release commit is not in this repository');
-  const root = path.resolve(output);
-  fail(!fs.existsSync(root), 'Output must be a new directory');
-  fs.mkdirSync(root, { recursive: true });
+  const root = newOutsideOutput(repo, output);
+  fs.mkdirSync(root);
   const receipt = { kind: 'exact-git-blob-prefixed-vite-two-builds', commit, tree: git(repo, ['rev-parse', `${commit}^{tree}`]),
     image: BUILD_IMAGE, serialized: true, environment: { WRANGLER_WRITE_LOGS: 'false' },
     bases: Object.fromEntries(APPLICATIONS.map(app => [app, `/_ui/${app}/${commit}/`])),

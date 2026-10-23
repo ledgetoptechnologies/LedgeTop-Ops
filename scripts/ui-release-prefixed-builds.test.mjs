@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import cp from 'node:child_process';
-import { buildManifest, buildScript, compareManifests, runPrefixedBuilds } from './ui-release-prefixed-builds.mjs';
+import { buildManifest, buildScript, compareManifests, newOutsideOutput, runPrefixedBuilds } from './ui-release-prefixed-builds.mjs';
 
 const commit = 'a'.repeat(40);
 
@@ -49,4 +49,18 @@ test('output must be a new directory', t => {
   const head = cp.execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
   assert.throws(() => runPrefixedBuilds({ repo: process.cwd(), commit: head, output: root }), /new directory/);
   assert.deepEqual(fs.readdirSync(root), []);
+});
+
+test('output must sit outside the repository, even through a linked parent', t => {
+  const repo = process.cwd(), root = fs.mkdtempSync(path.join(os.tmpdir(), 'ui-prefixed-contain-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  assert.throws(() => newOutsideOutput(repo, path.join(repo, 'release-proof')), /outside the repository/);
+  assert.throws(() => newOutsideOutput(repo, path.join(repo, 'scripts', 'proof')), /outside the repository/);
+  assert.throws(() => newOutsideOutput(repo, path.join(root, 'missing', 'proof')), /parent must already exist/);
+  assert.equal(newOutsideOutput(repo, path.join(root, 'proof')), path.join(fs.realpathSync(root), 'proof'));
+  const alias = path.join(root, 'alias');
+  try { fs.symlinkSync(repo, alias, process.platform === 'win32' ? 'junction' : 'dir'); }
+  catch (error) { if (error.code === 'EPERM') return t.skip('Creating filesystem links is unavailable'); throw error; }
+  assert.throws(() => newOutsideOutput(repo, path.join(alias, 'proof')), /outside the repository/);
+  assert.equal(fs.existsSync(path.join(repo, 'proof')), false);
 });
