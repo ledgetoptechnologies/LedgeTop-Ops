@@ -39,6 +39,8 @@ var groups = new (string Name, Func<Task> Run)[] {
     ("a resume after pause all wins over its late save", ResumeBeatsLatePauseSave),
     ("resume all after pause all wins over its late save", ResumeAllBeatsLatePauseSave),
     ("pause all wins over a start that was already chosen", PauseAllBeatsChosenStart),
+    ("pause all wins over a start already shown as active but not yet begun", PauseAllBeatsPublishedStart),
+    ("pause all wins over a resume still waiting its turn, and a later resume still works", PauseAllBeatsPendingResume),
     ("closing releases the backend once, after its queues", BackendReleased),
     ("the window renders sign-in and files screens", Render),
 };
@@ -829,6 +831,62 @@ async Task PauseAllBeatsChosenStart()
         True(!host.IsBusy, "nothing started");
         await Until(() => SavedStates(backend.StateDirectory, "paused") == 1, "report saved paused");
         True(!File.Exists(Path.Combine(downloads, "report.pdf")), "nothing downloaded");
+    } finally { gate.TrySetResult(); await host.DisposeAsync(); try { Directory.Delete(root, true); } catch (IOException) { } }
+}
+
+async Task PauseAllBeatsPublishedStart()
+{
+    var (backend, host, root, downloads, reference) = await HostFixture(rate: 300_000);
+    var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    try {
+        var reached = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var once = 0;
+        host.Hooks.AfterStartPublished = () => Interlocked.Exchange(ref once, 1) == 0 ? Gate() : Task.CompletedTask;
+        Task Gate() { reached.TrySetResult(); return gate.Task; }
+        Equal(EnqueueOutcome.Added, await host.EnqueueAsync("portal", await reference("report.pdf"), "report.pdf", downloads));
+        await reached.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        True(host.IsBusy, "the start is published as active");
+        await host.SnapshotAsync();
+        await host.PauseAllAsync();
+        gate.SetResult();
+        await Task.Delay(800);
+        Equal(0, backend.Writing);
+        True(!host.IsBusy, "the older start never began");
+        Equal(QueuedTransferState.Paused, StateOf(await host.SnapshotAsync(), "report.pdf"));
+        True(!File.Exists(Path.Combine(downloads, "report.pdf")), "nothing downloaded");
+    } finally { gate.TrySetResult(); await host.DisposeAsync(); try { Directory.Delete(root, true); } catch (IOException) { } }
+}
+
+async Task PauseAllBeatsPendingResume()
+{
+    var (backend, host, root, downloads, reference) = await HostFixture(rate: 300_000);
+    var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    try {
+        Equal(EnqueueOutcome.Added, await host.EnqueueAsync("portal", await reference("report.pdf"), "report.pdf", downloads));
+        await Until(() => backend.Writing == 1, "report running");
+        var report = (await host.SnapshotAsync()).Single(item => item.Job.FileName == "report.pdf");
+        await host.PauseAsync(report);
+        await Until(() => !host.IsBusy && backend.Writing == 0, "report paused");
+        report = (await host.SnapshotAsync()).Single(item => item.Job.FileName == "report.pdf");
+        Equal(QueuedTransferState.Paused, report.Job.State);
+        // A resume is requested but still waiting before it starts; Pause all happens meanwhile.
+        var reached = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var once = 0;
+        host.Hooks.BeforeStart = () => Interlocked.Exchange(ref once, 1) == 0 ? Gate() : Task.CompletedTask;
+        Task Gate() { reached.TrySetResult(); return gate.Task; }
+        var resuming = host.ResumeAsync(report);
+        await reached.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        await host.SnapshotAsync();
+        await host.PauseAllAsync();
+        gate.SetResult();
+        await resuming.WaitAsync(TimeSpan.FromSeconds(10)); // superseded quietly, not reported as a failure
+        await Task.Delay(500);
+        Equal(0, backend.Writing);
+        True(!host.IsBusy, "the older resume never began");
+        Equal(QueuedTransferState.Paused, StateOf(await host.SnapshotAsync(), "report.pdf"));
+        // A resume requested after Pause all is the newest intent and works.
+        await host.ResumeAsync((await host.SnapshotAsync()).Single(item => item.Job.FileName == "report.pdf"));
+        await Until(() => host.IsBusy && backend.Writing == 1, "a later resume starts");
     } finally { gate.TrySetResult(); await host.DisposeAsync(); try { Directory.Delete(root, true); } catch (IOException) { } }
 }
 
