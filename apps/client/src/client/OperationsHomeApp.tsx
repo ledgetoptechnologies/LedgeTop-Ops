@@ -101,6 +101,7 @@ export function OperationsFinancialSummary({state,documents}:{state:"loading"|"r
     const entry = owed.get(invoice.currency) ?? { amount: 0n, count: 0 };
     owed.set(invoice.currency, { amount: entry.amount + due, count: entry.count + 1 });
   }
+  const unknownCount = invoices.filter(document => invoiceState(document) === "other").length;
   const dueCount = [...owed.values()].reduce((sum, entry) => sum + entry.count, 0);
   const rank: Record<InvoiceState, number> = { overdue: 0, due: 1, partial: 1, other: 2, paid: 3 };
   const ordered = [...invoices].sort((left, right) => rank[invoiceState(left)] - rank[invoiceState(right)]);
@@ -108,12 +109,16 @@ export function OperationsFinancialSummary({state,documents}:{state:"loading"|"r
     {state==="loading"?<p>Loading financial documents…</p>:state==="unavailable"?<p>Financial information is temporarily unavailable.</p>
       :documents.length===0?<p>No invoices or contracts are currently available.</p>
       :<>
-        {invoices.length > 0 && <div className={`portal-finance-summary${dueCount ? " portal-finance-owing" : " portal-finance-settled"}`}>
+        {invoices.length > 0 && <div className={`portal-finance-summary${dueCount ? " portal-finance-owing" : unknownCount ? "" : " portal-finance-settled"}`}>
           {dueCount ? <>
             <span className="portal-finance-label">Balance due</span>
             <span className="portal-finance-total">{[...owed].map(([currency, entry]) => money(entry.amount, currency)).join(" + ")}</span>
             <span className="portal-finance-detail">{dueCount === 1 ? "1 invoice needs payment" : `${dueCount} invoices need payment`}
+              {unknownCount > 0 && <span> � Some invoice balances are unavailable.</span>}
               {overdue > 0 && <strong className="portal-finance-overdue">{overdue === 1 ? " · 1 overdue" : ` · ${overdue} overdue`}</strong>}</span>
+          </> : unknownCount ? <>
+            <span className="portal-finance-total">Balance unavailable</span>
+            <span className="portal-finance-detail">Payment information is unavailable for {unknownCount === 1 ? "1 invoice" : `${unknownCount} invoices`}.</span>
           </> : <>
             <span className="portal-finance-check" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5" /></svg></span>
             <span className="portal-finance-total">You’re all paid up</span>

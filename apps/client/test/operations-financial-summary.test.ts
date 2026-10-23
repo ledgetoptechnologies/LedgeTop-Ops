@@ -38,6 +38,17 @@ describe("financial portal presentation",()=>{
     expect(html).toContain("all paid up");expect(html).toContain(">Paid<");expect(html).not.toContain("Pay now");
     expect(html).not.toContain("Balance due");
   });
+  it("never claims all paid when an invoice balance is unknown, even alongside a paid invoice",()=>{
+    const unknown={...document,publicId:"unknown",amountPaid:null,balanceDue:null};
+    for(const documents of [[unknown],[unknown,{...document,publicId:"paid",amountPaid:"10.00",balanceDue:"0.00"}]]) {
+      const html=render("ready",documents);
+      expect(html).toContain("Balance unavailable");expect(html).toContain("Payment information is unavailable for 1 invoice");
+      expect(html).not.toContain("all paid up");expect(html).not.toContain("No invoices need payment");
+    }
+    const mixed=render("ready",[unknown,document]);
+    expect(mixed).toContain("Balance due");expect(mixed).toContain(money(10));
+    expect(mixed).toContain("Some invoice balances are unavailable");expect(mixed).not.toContain("all paid up");
+  });
   it("offers review and sign for a pending contract whose sign link is its document page, without a duplicate link",()=>{
     const page="https://pa.example.test/?page=public-doc&token=abcdefghijklmnop";
     const html=render("ready",[{...document,kind:"contract",status:"pending",total:"0.00",amountPaid:null,balanceDue:null,documentUrl:page,actionUrl:page}]);
