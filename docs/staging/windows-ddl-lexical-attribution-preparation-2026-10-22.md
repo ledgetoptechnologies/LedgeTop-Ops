@@ -65,6 +65,47 @@ the quoted-string/blob token sequence. No word-case-only case was observed.
 This is evidence for further source/lineage review, not semantic equivalence,
 historical migration proof, a metadata waiver or migration authorization.
 
+## Three-identity RAISE syntax hypothesis
+
+A separate `syntaxRelation` is considered only for these exact reviewed trigger
+identities: Operations `native_staff_onboarding_approve_finish`, Operations
+`operations_directory_audit_original_subject_required`, and Client
+`client_folder_notification_batch_control_result` (including their fixed table
+identities). It does not broaden the allowlist or change any coarse category.
+
+The matcher requires exactly one uppercase statement of this bounded shape:
+
+```text
+SELECT RAISE(ABORT, <one string-literal message>) WHERE <balanced predicate>;
+```
+
+It constructs only the corresponding `SELECT CASE WHEN <same predicate> THEN
+RAISE(ABORT, <same message>) END;` token order and compares the complete definition.
+Every predicate token and every other active statement token must match exactly.
+Parenthesis/CASE balance and the statement terminator are checked. Additional
+RAISE statements, other RAISE modes, expression messages, malformed forms and
+changed surrounding statements stay unproved. Comment filtering uses the existing
+lexer and never concatenates adjacent source fragments.
+
+Only the known second-argument string literal of that ABORT call can be compared
+separately, with exact literal hashes and an explicit changed flag. Predicate
+action/status literals and literals elsewhere are never masked. No captured DDL
+is executed, modified or written back.
+
+One bounded comparison of the two previously approved private capture files,
+after verifying their exact hashes, found the relation for **all three** identities.
+All three ABORT message-literal hashes matched as well: zero message changes.
+The safe evidence is
+`windows-selected-schema-raise-relation-2026-10-22.json`. The earlier Client
+literal-token-sequence flag is explained by the reordered predicate/message
+positions in this exact transformation, rather than a differing ABORT message.
+
+The result is named `syntax_relation_candidate`; both semantic and canonical
+verification remain false, and all three coarse categories remain unresolved.
+This narrow lexical relation does not verify historical source lineage,
+application data effects, actual trigger behavior or readiness, and is no
+authorization to apply migrations or dismiss platform/marker differences.
+
 Run locally:
 
 ```text

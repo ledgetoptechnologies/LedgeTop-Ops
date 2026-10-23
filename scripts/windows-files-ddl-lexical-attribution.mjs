@@ -95,6 +95,52 @@ function residualAttribution(expected,observed){
     nonCommentTokenCounts:{expected:a.length,observed:b.length},
     commentTokenSequenceChanged:!same(sequence(left.filter(t=>t.kind==="comment")),sequence(right.filter(t=>t.kind==="comment")))};
 }
+const RAISE_RELATION_IDENTITIES=new Set([
+  JSON.stringify(["operations","trigger","native_staff_onboarding_approve_finish","native_staff_management_commands"]),
+  JSON.stringify(["operations","trigger","operations_directory_audit_original_subject_required","operations_directory_audit"]),
+  JSON.stringify(["delivery","trigger","client_folder_notification_batch_control_result","client_folder_notification_batch_controls"]),
+]);
+function raiseWhereRelation(app,before,after){
+  if(!before||!after||before.sql===null||after.sql===null
+    ||!RAISE_RELATION_IDENTITIES.has(JSON.stringify([app,before.type,before.name,before.tbl_name])))return undefined;
+  const rawLeft=tokens(before.sql),rawRight=tokens(after.sql);if(!rawLeft||!rawRight)return undefined;
+  const left=rawLeft.filter(t=>t.kind!=="comment"),right=rawRight.filter(t=>t.kind!=="comment");
+  const is=(token,kind,text)=>token?.kind===kind&&token.raw===text;
+  const wordToken=text=>({kind:"word",raw:text,value:text});
+  const matches=[];
+  for(let i=0;i<left.length;i++){
+    if(!is(left[i],"word","SELECT")||!is(left[i+1],"word","RAISE")||!is(left[i+2],"punctuation","("))continue;
+    // This reviewed relation supports only ABORT and one literal second arg.
+    // Expressions, additional args and other RAISE modes are not generalized.
+    if(!is(left[i+3],"word","ABORT")||!is(left[i+4],"punctuation",",")||left[i+5]?.kind!=="literal"
+      ||!is(left[i+6],"punctuation",")")||!is(left[i+7],"word","WHERE"))return undefined;
+    let end=i+8,depth=0,cases=0;
+    for(;end<left.length;end++){
+      const token=left[end];
+      if(is(token,"punctuation",";")){if(depth||cases)return undefined;break;}
+      if(is(token,"punctuation","("))depth++;
+      else if(is(token,"punctuation",")")){if(--depth<0)return undefined;}
+      else if(is(token,"word","CASE"))cases++;
+      else if(is(token,"word","END")){if(--cases<0)return undefined;}
+      else if(!depth&&!cases&&token.kind==="word"&&["SELECT","BEGIN","THEN","ELSE","WHEN"].includes(token.raw))return undefined;
+    }
+    if(end===left.length||end===i+8||depth||cases)return undefined;
+    matches.push({start:i,end,message:left[i+5],predicate:left.slice(i+8,end),raise:left.slice(i+1,i+7)});
+    i=end;
+  }
+  if(matches.length!==1)return undefined;
+  const m=matches[0];
+  const transformed=[...left.slice(0,m.start),left[m.start],wordToken("CASE"),wordToken("WHEN"),...m.predicate,
+    wordToken("THEN"),...m.raise,wordToken("END"),left[m.end],...left.slice(m.end+1)];
+  const messageIndex=transformed.indexOf(m.message);
+  if(right.length!==transformed.length||right[messageIndex]?.kind!=="literal")return undefined;
+  // Mask exactly one known ABORT-message position, never arbitrary literals.
+  if(!transformed.every((token,index)=>index===messageIndex||token.kind===right[index]?.kind&&token.raw===right[index]?.raw))return undefined;
+  return {category:"syntax_relation_candidate",pattern:"select_raise_where_to_select_case_when_v1",
+    predicateAndOtherActiveTokensMatch:true,
+    raiseAbortMessage:{changed:m.message.raw!==right[messageIndex].raw,expectedLiteralSha256:hash(m.message.raw),observedLiteralSha256:hash(right[messageIndex].raw)},
+    semanticEquivalenceEstablished:false,canonicalBaselineVerified:false};
+}
 
 /** Local reviewed selected captures only. No paths, remote IO, SQL execution,
  * normalization approval, literal excerpts, or raw tokens in the safe result. */
@@ -106,10 +152,12 @@ export function attributeSelectedDdl(app,expectedRows,observedRows){
   const objects=[...new Set([...left.keys(),...right.keys()])].sort().map(id=>{
     const before=left.get(id),after=right.get(id),identity=before??after;
     const category=before&&after?classify(before.sql,after.sql):"unresolved_token_or_structure_difference";
+    const syntaxRelation=category==="unresolved_token_or_structure_difference"?raiseWhereRelation(app,before,after):undefined;
     return {type:identity.type,name:identity.name,tbl_name:identity.tbl_name,
       expectedPresent:!!before,observedPresent:!!after,
       expectedSqlSha256:before?hash(before.sql):null,observedSqlSha256:after?hash(after.sql):null,
-      category,...(category==="unresolved_token_or_structure_difference"?{residualAttribution:residualAttribution(before,after)}:{})};
+      category,...(category==="unresolved_token_or_structure_difference"?{residualAttribution:residualAttribution(before,after)}:{}),
+      ...(syntaxRelation?{syntaxRelation}: {})};
   });
   const categories=Object.fromEntries(["exact_sql_bytes","whitespace_outside_quoted_tokens_only","identifier_quoting_only_candidate","unresolved_token_or_structure_difference"]
     .map(category=>[category,objects.filter(r=>r.category===category).length]));

@@ -97,3 +97,44 @@ test("residual counts and kind flags distinguish changed literal sequences witho
   assert.equal(residual("SELECT 'unclosed","SELECT 'unclosed ").reasonCategory,"unsupported_or_malformed_lexical_form");
   assert.equal(residual(null,"SELECT 1").reasonCategory,"null_sql_shape_difference");
 });
+
+const relationRow=(app,sql)=>({type:"trigger",name:app==="operations"?"operations_directory_audit_original_subject_required":"client_folder_notification_batch_control_result",
+  tbl_name:app==="operations"?"operations_directory_audit":"client_folder_notification_batch_controls",sql});
+const relation=(before,after,app="operations")=>attributeSelectedDdl(app,[relationRow(app,before)],[relationRow(app,after)]).objects[0];
+const predicate="(NEW.action='synthetic_action' AND EXISTS(SELECT 1 FROM synthetic WHERE status='synthetic_status'))";
+const current=(p=predicate,message="'PRIVATE_MESSAGE_A'")=>`CREATE TRIGGER synthetic BEFORE INSERT ON synthetic BEGIN SELECT RAISE(ABORT,${message}) WHERE ${p}; UPDATE synthetic SET n=1; END;`;
+const legacy=(p=predicate,message="'PRIVATE_MESSAGE_A'")=>`CREATE TRIGGER synthetic BEFORE INSERT ON synthetic BEGIN SELECT CASE WHEN ${p} THEN RAISE(ABORT,${message}) END; UPDATE synthetic SET n=1; END;`;
+test("recognizes only exact fixed-identity RAISE-WHERE to legacy CASE wrapper relation",()=>{
+  for(const app of ["operations","delivery"]){
+    const r=relation(current(),legacy(),app);assert.equal(r.category,"unresolved_token_or_structure_difference");
+    assert.equal(r.syntaxRelation.category,"syntax_relation_candidate");assert.equal(r.syntaxRelation.predicateAndOtherActiveTokensMatch,true);
+    assert.equal(r.syntaxRelation.raiseAbortMessage.changed,false);assert.equal(r.syntaxRelation.semanticEquivalenceEstablished,false);
+    assert.equal(r.syntaxRelation.canonicalBaselineVerified,false);
+  }
+  const ordinary=attributeSelectedDdl("operations",[row(current())],[row(legacy())]).objects[0];assert.equal(ordinary.syntaxRelation,undefined);
+});
+test("message comparison masks only ABORT second-argument literal and retains its hashes",()=>{
+  const r=relation(current(),legacy(predicate,"'PRIVATE_MESSAGE_B'"));assert.equal(r.syntaxRelation.raiseAbortMessage.changed,true);
+  assert.match(r.syntaxRelation.raiseAbortMessage.expectedLiteralSha256,/^[0-9a-f]{64}$/);
+  assert.notEqual(r.syntaxRelation.raiseAbortMessage.expectedLiteralSha256,r.syntaxRelation.raiseAbortMessage.observedLiteralSha256);
+  assert.ok(!JSON.stringify(r).includes("PRIVATE_MESSAGE"));assert.ok(!JSON.stringify(r).includes("synthetic_action"));
+});
+test("predicate literals, action mode, other statements and unbalanced forms cannot pass relation",()=>{
+  for(const changed of [legacy(predicate.replace("synthetic_action","different_action")),legacy(predicate.replace("synthetic_status","different_status")),
+    legacy().replace("ABORT","FAIL"),legacy().replace("n=1","n=2"),legacy().replace("SELECT 1","SELECT 2"),
+    legacy().replace(" END; UPDATE","; UPDATE"),legacy().replace("WHEN (","WHEN (("),
+    legacy().replace("THEN RAISE","THEN (RAISE"),legacy().replace("END; UPDATE","END UPDATE")])
+    assert.equal(relation(current(),changed).syntaxRelation,undefined);
+  for(const source of [null,"CREATE TRIGGER synthetic BEGIN SELECT RAISE(ABORT,'unclosed) WHERE a; END;",
+    current().replace("'PRIVATE_MESSAGE_A'","printf('PRIVATE_MESSAGE_A')"),current().replace("ABORT","IGNORE"),
+    current().replace(" WHERE "," WHERE ("),current().replace("; UPDATE"," UPDATE"),
+    current().replace("UPDATE synthetic SET n=1;","SELECT RAISE(ABORT,'x') WHERE a;")])
+    assert.equal(relation(source,legacy()).syntaxRelation,undefined);
+});
+test("comment removal does not join predicates and only the reviewed statement is transformed",()=>{
+  assert.equal(relation(current("a/**/b"),legacy("ab")).syntaxRelation,undefined);
+  assert.equal(relation(current("-/**/-1"),legacy("--1\n")).syntaxRelation,undefined);
+  assert.equal(relation(current("a /* old private */ =1"),legacy("a /* new private */ =1")).syntaxRelation.category,"syntax_relation_candidate");
+  assert.equal(relation(current().replace("UPDATE synthetic SET n=1;","UPDATE synthetic SET n='PRIVATE_OLD';"),
+    legacy().replace("UPDATE synthetic SET n=1;","UPDATE synthetic SET n='PRIVATE_NEW';")).syntaxRelation,undefined);
+});
