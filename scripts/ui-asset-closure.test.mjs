@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { spawnSync } from 'node:child_process';
-import { closureEvidence, compareTrees, computeClosure, extractReferences, readTree, resolveReference } from './ui-asset-closure.mjs';
+import { closureEvidence, compareTrees, computeClosure, extractReferences, readTree, resolveReference, tokenizeJs } from './ui-asset-closure.mjs';
 
 const SCRIPT = path.join(import.meta.dirname, 'ui-asset-closure.mjs');
 
@@ -221,6 +221,59 @@ test('quote pairing across minified regex literals does not invent references', 
   const { refs, unresolved } = extractReferences('/assets/a.js', js);
   assert.deepEqual(unresolved, []);
   assert.deepEqual(refs.map(r => r.value), ['./v-AAAAAAAA.js']);
+});
+
+test('Worker constructors reached through self, window or globalThis are covered', () => {
+  const { refs, unresolved } = extractReferences('/assets/a.js', 'new self.Worker(u,{type:"module"});new window.Worker("w-AAAAAAAA.js");new globalThis.SharedWorker("/s-BBBBBBBB.js");');
+  assert.deepEqual(unresolved.map(u => u.kind).sort(), ['computed-worker', 'document-relative-url']);
+  assert.ok(refs.some(r => r.value === '/s-BBBBBBBB.js'));
+});
+
+test('a regex literal with quotes cannot hide an escaped import that follows it', () => {
+  const { refs, unresolved } = extractReferences('/assets/a.js', String.raw`const r=/["\']/g;import "\x2e/lazy-AAAAAAAA.js";`);
+  assert.deepEqual(unresolved, []);
+  assert.deepEqual(refs.map(r => r.value), ['./lazy-AAAAAAAA.js']);
+});
+
+test('every importScripts argument is followed or reported', () => {
+  const { refs, unresolved } = extractReferences('/assets/w.js', `importScripts('first-AAAAAAAA.js', "second-BBBBBBBB.js", more);`);
+  assert.deepEqual(refs.map(r => r.value), ['first-AAAAAAAA.js', 'second-BBBBBBBB.js']);
+  assert.deepEqual(unresolved.map(u => [u.kind, u.detail]), [['computed-worker', 'importScripts(more)']]);
+});
+
+test('parenthesised or commented computed import() arguments are reported', () => {
+  const { refs, unresolved } = extractReferences('/assets/a.js', 'import((name)); import(/* comment */ name); import(("./p-AAAAAAAA.js")); const m=import.meta.url;');
+  assert.deepEqual(unresolved.map(u => u.kind), ['dynamic-import', 'dynamic-import']);
+  assert.deepEqual(refs.map(r => r.value), ['./p-AAAAAAAA.js']);
+});
+
+test('CSS source map comments are followed', t => {
+  const closure = computeClosure({ root: tree(t, {
+    'index.html': '<link rel="stylesheet" href="/assets/app-AAAAAAAA.css">',
+    'assets/app-AAAAAAAA.css': '.a{}\n/*# sourceMappingURL=app-AAAAAAAA.css.map */',
+    'assets/app-AAAAAAAA.css.map': '{}',
+  }) });
+  assert.deepEqual(closure.unresolved, []);
+  assert.ok(paths(closure).includes('/assets/app-AAAAAAAA.css.map'));
+});
+
+test('runtime-built Blob scripts are an explicit obligation', () => {
+  const { unresolved } = extractReferences('/assets/a.js', 'const u=URL.createObjectURL(new Blob([code],{type:"text/javascript"}));');
+  assert.deepEqual(unresolved.map(u => u.kind), ['blob-script']);
+});
+
+test('the tokenizer separates regex literals, division, templates and comments', () => {
+  const { tokens, comments } = tokenizeJs('a = b / c / d; x = /re\\/["]/g.test(y); t = `p${ {k:`q${"s"}`} }r`; // "/assets/c-AAAAAAAA.js"\n/* \'q\' */ return /x/;');
+  assert.deepEqual(tokens.filter(t => t.type === 'regex').map(t => t.value), ['/re\\/["]/g', '/x/']);
+  assert.deepEqual(tokens.filter(t => t.type === 'string').map(t => t.cooked), ['s']);
+  assert.equal(tokens.filter(t => t.type === 'template-expr').length, 2);
+  assert.equal(comments.length, 2);
+  assert.throws(() => tokenizeJs('const s = "open'), /Unterminated string/);
+});
+
+test('an untokenizable script is an obligation, not a silent skip', () => {
+  const { unresolved } = extractReferences('/assets/a.js', 'const s = `never closed');
+  assert.deepEqual(unresolved.map(u => u.kind), ['unparsed-script']);
 });
 
 test('escaped string literals are decoded the way the runtime reads them', t => {

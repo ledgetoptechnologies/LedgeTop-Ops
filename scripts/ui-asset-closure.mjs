@@ -63,7 +63,7 @@ export function resolveReference(raw, fromPath, base = fromPath) {
   return { path: safeUrlPath(decodeURI(url.pathname)) };
 }
 
-/** Cooked value of a JS string literal body, so './lazy.js' is seen as
+/** Cooked value of a JS string literal body, so '\u002e/lazy.js' is seen as
  * the './lazy.js' the runtime loads. Unknown escapes throw. */
 export function decodeJsString(body) {
   return body.replace(/\\(u\{[0-9a-fA-F]{1,6}\}|u[0-9a-fA-F]{4}|x[0-9a-fA-F]{2}|\r\n|[\s\S])/g, (whole, escape, offset) => {
@@ -75,21 +75,127 @@ export function decodeJsString(body) {
   });
 }
 
-const STRING = String.raw`(?:"(?:\\.|[^"\\\n])*"|'(?:\\.|[^'\\\n])*')`;
-const literalBody = quoted => decodeJsString(quoted.slice(1, -1));
+const REGEX_AFTER_WORD = new Set(['return', 'typeof', 'instanceof', 'in', 'of', 'new', 'delete', 'void', 'throw', 'case', 'do', 'else', 'yield', 'await']);
+const PUNCTUATORS = ['>>>=', '...', '===', '!==', '**=', '<<=', '>>=', '>>>', '&&=', '||=', '??=', '=>', '==', '!=', '<=', '>=', '&&', '||', '??', '?.', '++', '--', '+=', '-=', '*=', '/=', '%=', '&=', '|=', '^=', '<<', '>>', '**'];
 
-// String literals without interpolation. Template literals with ${} are
-// returned separately because their target is computed at runtime.
-function jsStrings(text) {
-  const out = [], computed = [], undecodable = [];
-  const re = /(["'])((?:\\.|(?!\1)[^\\\n])*)\1|`((?:\\.|[^\\`])*)`/g;
-  for (let m; (m = re.exec(text));) {
-    const body = m[3] !== undefined ? m[3] : m[2];
-    if (m[3] !== undefined && body.includes('${')) { computed.push(body.replace(/\$\{[^}]*\}/g, '${}')); continue; }
-    try { out.push(decodeJsString(body)); } catch { undecodable.push(body.slice(0, 80)); }
+/** Minimal JavaScript tokenizer: strings (cooked), templates with nested
+ * expressions, regular expression literals, comments, words and punctuators.
+ * Loading contexts are read from these tokens rather than from quote pairing,
+ * which a regex literal can throw off. Throws on unterminated input. */
+export function tokenizeJs(source) {
+  const tokens = [], comments = [];
+  let i = 0;
+  const regexAllowed = () => {
+    const last = tokens[tokens.length - 1];
+    if (!last) return true;
+    if (last.type === 'word') return REGEX_AFTER_WORD.has(last.value);
+    if (last.type === 'punct') return ![')', ']'].includes(last.value);
+    return false;
+  };
+  function readString(quote) {
+    const start = i++;
+    while (i < source.length && source[i] !== quote) {
+      if (source[i] === '\\') i++;
+      else need(source[i] !== '\n', 'Unterminated string literal');
+      i++;
+    }
+    need(i < source.length, 'Unterminated string literal');
+    const raw = source.slice(start + 1, i++);
+    let cooked = null; try { cooked = decodeJsString(raw); } catch { /* the caller reports it */ }
+    tokens.push({ type: 'string', raw, cooked, start });
   }
-  return { out, computed, undecodable };
+  function readTemplate() {
+    const start = i++, parts = [];
+    let part = '', hasExpression = false;
+    for (;;) {
+      need(i < source.length, 'Unterminated template literal');
+      const ch = source[i];
+      if (ch === '\\') { part += source.slice(i, i + 2); i += 2; continue; }
+      if (ch === '`') { i++; break; }
+      if (ch === '$' && source[i + 1] === '{') {
+        hasExpression = true; parts.push(part); part = ''; i += 2;
+        readTokens('}');
+        continue;
+      }
+      part += ch; i++;
+    }
+    parts.push(part);
+    let cooked = null;
+    if (!hasExpression) { try { cooked = decodeJsString(parts[0]); } catch { /* the caller reports it */ } }
+    tokens.push({ type: hasExpression ? 'template-expr' : 'string', raw: parts.join('${}'), cooked, start });
+  }
+  function readRegex() {
+    const start = i++;
+    let inClass = false;
+    for (;;) {
+      need(i < source.length && source[i] !== '\n', 'Unterminated regular expression');
+      const ch = source[i];
+      if (ch === '\\') { i += 2; continue; }
+      if (ch === '[') inClass = true;
+      else if (ch === ']') inClass = false;
+      else if (ch === '/' && !inClass) { i++; break; }
+      i++;
+    }
+    while (/[A-Za-z]/.test(source[i] ?? '')) i++;
+    tokens.push({ type: 'regex', value: source.slice(start, i), start });
+  }
+  function readTokens(closing) {
+    let depth = 0;
+    while (i < source.length) {
+      const ch = source[i];
+      if (/\s/.test(ch)) { i++; continue; }
+      if (ch === '/' && source[i + 1] === '/') {
+        const end = source.indexOf('\n', i), stop = end < 0 ? source.length : end;
+        comments.push(source.slice(i, stop)); i = stop; continue;
+      }
+      if (ch === '/' && source[i + 1] === '*') {
+        const end = source.indexOf('*/', i + 2); need(end >= 0, 'Unterminated comment');
+        comments.push(source.slice(i, end + 2)); i = end + 2; continue;
+      }
+      if (ch === '"' || ch === "'") { readString(ch); continue; }
+      if (ch === '`') { readTemplate(); continue; }
+      if (ch === '/' && regexAllowed()) { readRegex(); continue; }
+      const word = /^#?[A-Za-z_$\u0080-￿][\w$\u0080-￿]*/.exec(source.slice(i, i + 256));
+      if (word) { tokens.push({ type: 'word', value: word[0], start: i }); i += word[0].length; continue; }
+      const number = /^(?:0[xXoObB][\da-fA-F_]+n?|(?:\d[\d_]*\.?[\d_]*|\.\d[\d_]*)(?:[eE][+-]?\d+)?n?)/.exec(source.slice(i, i + 64));
+      if (number) { tokens.push({ type: 'number', value: number[0], start: i }); i += number[0].length; continue; }
+      if (closing && ch === closing && depth === 0) { i++; return; }
+      if (ch === '{') depth++;
+      if (ch === '}') depth--;
+      const punct = PUNCTUATORS.find(p => source.startsWith(p, i)) ?? ch;
+      // '?.' followed by a digit is a conditional and a number, not chaining.
+      const value = punct === '?.' && /\d/.test(source[i + 2] ?? '') ? '?' : punct;
+      tokens.push({ type: 'punct', value, start: i }); i += value.length;
+    }
+    need(!closing, 'Unterminated template expression');
+  }
+  readTokens(null);
+  return { tokens, comments };
 }
+
+// Arguments of the call whose "(" is tokens[open], split at top-level commas.
+function callArguments(tokens, open) {
+  const args = [[]];
+  let depth = 0, k = open + 1;
+  for (; k < tokens.length; k++) {
+    const t = tokens[k];
+    if (t.type === 'punct' && ['(', '[', '{'].includes(t.value)) depth++;
+    else if (t.type === 'punct' && [')', ']', '}'].includes(t.value)) { if (depth === 0) break; depth--; }
+    else if (t.type === 'punct' && t.value === ',' && depth === 0) { args.push([]); continue; }
+    args[args.length - 1].push(t);
+  }
+  return { args: args.filter((arg, n) => arg.length || n < args.length - 1), close: k };
+}
+// A lone string argument, allowing redundant parentheses around it.
+function loneString(arg) {
+  let list = arg;
+  while (list.length >= 3 && list[0].value === '(' && list[list.length - 1].value === ')') list = list.slice(1, -1);
+  return list.length === 1 && list[0].type === 'string' ? list[0] : null;
+}
+const isWord = (t, value) => t?.type === 'word' && t.value === value;
+const isPunct = (t, value) => t?.type === 'punct' && t.value === value;
+const describe = arg => arg.map(t => t.raw !== undefined ? JSON.stringify(t.raw) : t.value).join(' ').slice(0, 80);
+
 
 // A literal is treated as a URL reference when it is shaped like one; anything
 // asset-shaped that does not resolve becomes an unresolved obligation.
@@ -117,68 +223,103 @@ export function extractReferences(file, text, { ignorePrefixes = [] } = {}) {
     for (const m of css.matchAll(/url\(\s*(["']?)([^"')]+)\1\s*\)/gi)) add(m[2], 'css-url');
     for (const m of css.matchAll(/@import\s+(["'])([^"']+)\1/gi)) add(m[2], 'css-import');
     if (/url\(\s*(?:var\(|\$|attr\()/i.test(css)) unresolved.push({ from: file, kind: 'computed-css-url', detail: 'url() argument is computed' });
+    for (const m of raw.matchAll(/\/\*[#@]\s*sourceMappingURL=([^\s*]+)\s*\*\//g)) add(m[1], 'source-map');
   };
   const fromJs = source => {
-    // Vite's preload dependency map names chunks relative to the base ("/"),
-    // not to the chunk holding it. Only that recognized array gets base "/";
-    // it is then blanked so the generic scan below does not re-read it.
-    const js = source.replace(/(__vite__mapDeps\s*=[^;]*?m\.f\s*=\s*)\[([^\]]*)\]/g, (whole, head, list) => {
-      for (const m of list.matchAll(new RegExp(STRING, 'g'))) {
-        try { add(literalBody(m[0]), 'vite-preload-map', '/'); }
-        catch { unresolved.push({ from: file, kind: 'unsupported-escape', detail: m[0].slice(0, 80) }); }
-      }
-      return `${head}[]`;
-    });
-    // Literal arguments in loading contexts are references whatever their shape
-    // ('worker.js' is as real as './worker.js'). Static and dynamic import()
-    // need no context: browsers reject bare specifiers, and './' or '/' forms
-    // are caught by the literal scan below.
-    const literal = (quoted, then) => {
-      try { then(literalBody(quoted)); }
-      catch { unresolved.push({ from: file, kind: 'unsupported-escape', detail: quoted.slice(0, 80) }); }
+    let tokens = [], comments = [];
+    try { ({ tokens, comments } = tokenizeJs(source)); }
+    catch (error) { unresolved.push({ from: file, kind: 'unparsed-script', detail: error.message }); }
+    const consumed = new Set();
+    const stringRef = (token, via, base) => {
+      consumed.add(token);
+      if (token.cooked === null) unresolved.push({ from: file, kind: 'unsupported-escape', detail: token.raw.slice(0, 80) });
+      else add(token.cooked, via, base);
     };
-    for (const m of js.matchAll(new RegExp(String.raw`new\s+URL\s*\(\s*(${STRING})\s*,\s*import\.meta\.url\s*\)`, 'g')))
-      literal(m[1], value => add(value, 'new-url'));
-    // importScripts resolves against the worker script that calls it.
-    for (const m of js.matchAll(new RegExp(String.raw`\bimportScripts\s*\(\s*(${STRING})`, 'g')))
-      literal(m[1], value => add(value, 'import-scripts'));
-    // new Worker('x.js') and serviceWorker.register('x.js') resolve against the
-    // page's address, which on a single-page app can be any route.
-    for (const m of js.matchAll(new RegExp(String.raw`\b(?:serviceWorker\.register|new\s+(?:Shared)?Worker)\s*\(\s*(${STRING})`, 'g')))
-      literal(m[1], value => {
-        if (value.startsWith('/') || /^(?:https?:)?\/\//i.test(value)) add(value, 'worker');
-        else unresolved.push({ from: file, kind: 'document-relative-url', detail: `${value} resolves against the page address` });
-      });
-    const { out, computed, undecodable } = jsStrings(js);
-    // Minified code can make the literal scan pair quotes across regex
-    // literals; only path-shaped bodies are worth an obligation.
-    for (const s of undecodable)
-      if (urlShaped(s.replace(/\\./g, '')) && assetShaped(s.replace(/\\./g, '')))
-        unresolved.push({ from: file, kind: 'unsupported-escape', detail: s });
-    for (const s of out) if (urlShaped(s) && ASSET_EXT.test(s.split(/[?#]/)[0])) add(s, 'js-literal');
-    // Without a full JS parser, a regex literal can throw quote pairing off and
-    // hide a real reference. A second, pairing-independent scan of quoted
-    // path-shaped text keeps the result a superset.
-    for (const m of js.matchAll(/["'`]((?:\.{1,2}\/|\/|assets\/)[^"'`\s\\]{1,1024})["'`]/g))
-      if (assetShaped(m[1]) && !m[1].includes('${')) add(m[1], 'js-literal');
-    for (const s of out) if (/^\/?assets\/?$/.test(s)) unresolved.push({ from: file, kind: 'computed-asset-path', detail: `bare asset directory literal "${s}" suggests a runtime-built path` });
-    // Route and API templates (`/portal/${id}`) are navigation, not files. Only
-    // templates whose fixed text names an asset location or extension count.
-    for (const s of computed) {
-      if (ignorePrefixes.some(p => s.startsWith(p))) continue;
-      const fixed = s.split(/[?#]/)[0];
-      if (/(?:^|\/)assets\//.test(fixed) || (urlShaped(fixed) && ASSET_EXT.test(fixed)))
-        unresolved.push({ from: file, kind: 'computed-template', detail: `template literal \`${s}\`` });
+    for (let k = 0; k < tokens.length; k++) {
+      const t = tokens[k];
+      // Vite's preload dependency map names chunks relative to the base ("/"),
+      // not to the chunk holding it. Only that recognized array gets base "/".
+      if (isWord(t, '__vite__mapDeps') && isPunct(tokens[k + 1], '=')) {
+        let j = k + 2, depth = 0;
+        while (j < tokens.length && !isPunct(tokens[j], '[')) j++;
+        for (j++; j < tokens.length; j++) {
+          if (isPunct(tokens[j], '[')) depth++;
+          else if (isPunct(tokens[j], ']')) { if (depth === 0) break; depth--; }
+          else if (tokens[j].type === 'string') stringRef(tokens[j], 'vite-preload-map', '/');
+        }
+        continue;
+      }
+      // Code assembled at runtime into a Blob (Mapbox builds its worker this way)
+      // runs as a script whose own loads are text to this scan, not tokens.
+      if (isWord(t, 'createObjectURL') && isPunct(tokens[k + 1], '(') && isWord(tokens[k + 2], 'new') && isWord(tokens[k + 3], 'Blob')) {
+        unresolved.push({ from: file, kind: 'blob-script', detail: 'URL.createObjectURL(new Blob(...)): runtime-built script content is not scanned as code' });
+        continue;
+      }
+      // import(...), not import.meta. Browsers reject bare specifiers, so a lone
+      // string is a reference and anything else is computed.
+      if (isWord(t, 'import') && isPunct(tokens[k + 1], '(') && !isPunct(tokens[k - 1], '.')) {
+        const { args } = callArguments(tokens, k + 1), lone = args[0] && loneString(args[0]);
+        if (lone) stringRef(lone, 'dynamic-import');
+        else unresolved.push({ from: file, kind: 'dynamic-import', detail: `import(${describe(args[0] ?? [])})` });
+        continue;
+      }
+      // new URL(x, import.meta.url): x resolves against this file whatever its shape.
+      if (isWord(t, 'new') && isWord(tokens[k + 1], 'URL') && isPunct(tokens[k + 2], '(')) {
+        const { args } = callArguments(tokens, k + 2);
+        if (args.length >= 2 && args[1].map(x => x.value).join('') === 'import.meta.url') {
+          const lone = loneString(args[0]);
+          if (lone) stringRef(lone, 'new-url');
+          else unresolved.push({ from: file, kind: 'computed-url', detail: `new URL(${describe(args[0])}, import.meta.url)` });
+        }
+        continue;
+      }
+      // importScripts resolves every argument against the calling worker script.
+      if (isWord(t, 'importScripts') && isPunct(tokens[k + 1], '(')) {
+        for (const arg of callArguments(tokens, k + 1).args) {
+          const lone = loneString(arg);
+          if (lone) stringRef(lone, 'import-scripts');
+          else unresolved.push({ from: file, kind: 'computed-worker', detail: `importScripts(${describe(arg)})` });
+        }
+        continue;
+      }
+      // new [self.|window.|globalThis.](Shared)Worker(x) and serviceWorker.register(x)
+      // resolve x against the page address, which on a single-page app can be any route.
+      let open = -1;
+      if (isWord(t, 'new')) {
+        let j = k + 1;
+        if (['self', 'window', 'globalThis'].includes(tokens[j]?.value) && isPunct(tokens[j + 1], '.')) j += 2;
+        if ((isWord(tokens[j], 'Worker') || isWord(tokens[j], 'SharedWorker')) && isPunct(tokens[j + 1], '(')) open = j + 1;
+      } else if (isWord(t, 'serviceWorker') && isPunct(tokens[k + 1], '.') && isWord(tokens[k + 2], 'register') && isPunct(tokens[k + 3], '(')) open = k + 3;
+      if (open >= 0) {
+        const first = callArguments(tokens, open).args[0] ?? [];
+        const lone = loneString(first);
+        if (isWord(first[0], 'new') && isWord(first[1], 'URL')) continue; // the new URL rule covers it
+        if (lone && lone.cooked !== null && (lone.cooked.startsWith('/') || /^(?:https?:)?\/\//i.test(lone.cooked))) stringRef(lone, 'worker');
+        else if (lone) { consumed.add(lone); unresolved.push({ from: file, kind: 'document-relative-url', detail: `${lone.raw} resolves against the page address` }); }
+        else unresolved.push({ from: file, kind: 'computed-worker', detail: `${tokens.slice(k, open).map(x => x.value).join(' ')}(${describe(first)})` });
+      }
     }
-    // An import() argument must start like an expression; regex sources in
-    // string literals ("import(?:...") are not calls.
-    for (const m of js.matchAll(/\bimport\s*\(\s*([A-Za-z_$`'"][^)]*)\)/g))
-      if (!/^\s*(["'`])[^"'`$]*\1\s*$/.test(m[1]) && !/^__vite/.test(m[1].trim())) unresolved.push({ from: file, kind: 'dynamic-import', detail: `import(${m[1].trim().slice(0, 80)})` });
-    for (const m of js.matchAll(/new\s+URL\s*\(\s*([^,)]+),\s*import\.meta\.url\s*\)/g))
-      if (!/^\s*(["'])[^"']*\1\s*$/.test(m[1])) unresolved.push({ from: file, kind: 'computed-url', detail: `new URL(${m[1].trim().slice(0, 80)}, import.meta.url)` });
-    for (const m of js.matchAll(/\b(?:serviceWorker\.register|importScripts|new\s+(?:Shared)?Worker)\s*\(\s*([^,)]+)/g))
-      if (!/^\s*(["'])[^"']*\1\s*$/.test(m[1]) && !/^\s*new\s+URL\b/.test(m[1])) unresolved.push({ from: file, kind: 'computed-worker', detail: m[0].slice(0, 80) });
-    for (const m of js.matchAll(/\/\/[#@]\s*sourceMappingURL=(\S+)/g)) add(m[1], 'source-map');
+    for (const t of tokens) {
+      if (consumed.has(t)) continue;
+      if (t.type === 'string') {
+        if (t.cooked === null) {
+          const plain = t.raw.replace(/\\./g, '');
+          if (urlShaped(plain) && assetShaped(plain)) unresolved.push({ from: file, kind: 'unsupported-escape', detail: t.raw.slice(0, 80) });
+          continue;
+        }
+        if (urlShaped(t.cooked) && ASSET_EXT.test(t.cooked.split(/[?#]/)[0])) add(t.cooked, 'js-literal');
+        if (/^\/?assets\/?$/.test(t.cooked)) unresolved.push({ from: file, kind: 'computed-asset-path', detail: `bare asset directory literal "${t.cooked}" suggests a runtime-built path` });
+      } else if (t.type === 'template-expr') {
+        // Route and API templates (`/portal/${id}`) are navigation, not files. Only
+        // templates whose fixed text names an asset location or extension count.
+        if (ignorePrefixes.some(p => t.raw.startsWith(p))) continue;
+        const fixed = t.raw.split(/[?#]/)[0];
+        if (/(?:^|\/)assets\//.test(fixed) || (urlShaped(fixed) && ASSET_EXT.test(fixed)))
+          unresolved.push({ from: file, kind: 'computed-template', detail: `template literal \`${t.raw}\`` });
+      }
+    }
+    for (const comment of comments)
+      for (const m of comment.matchAll(/[#@]\s*sourceMappingURL=([^\s*]+)/g)) add(m[1], 'source-map');
   };
   if (kind === 'html' || kind === 'svg') {
     for (const { name, value } of attributes(text, 'src|href|poster|data|xlink:href|content')) {
