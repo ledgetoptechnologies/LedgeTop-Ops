@@ -4,7 +4,7 @@ import { servePrivateUiReleaseAsset, uiReleasePrefix, type UiAssetFetcher } from
 import { uiReleaseForRequest } from '../../../packages/shared/src/ui-release-catalog.ts';
 
 export default {
-  async fetch(request: Request, env: { ASSETS: UiAssetFetcher }): Promise<Response> {
+  async fetch(request: Request, env: UiReleaseAssetsEnv): Promise<Response> {
     const url = new URL(request.url);
     const deny = () => new Response(null, { status: 404, headers: { 'Cache-Control': 'no-store' } });
     if (url.origin !== 'https://ui-release.invalid' || url.search || url.hash

@@ -40,6 +40,7 @@ jobs:
 
       - name: Verify additive UI asset policy and local binding contract
         run: |
+          node apps/operations/node_modules/typescript/bin/tsc --project apps/ui-release-assets/tsconfig.json --noEmit
           node --test scripts/ui-release-assets.test.mjs scripts/ui-release-catalog.test.mjs scripts/ui-release-packet.test.mjs scripts/ui-release-assets-local.test.mjs
 
       - name: Verify main and PR workflow trigger policy

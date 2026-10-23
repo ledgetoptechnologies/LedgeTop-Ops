@@ -90,7 +90,7 @@ export type Env = Omit<
   | "OPERATIONS_PORTAL_WORKSPACE_PUBLICATION"
 > & {
   /** Optional HTTP asset service, absent until a separately reviewed UI release packet is installed. */
-  UI_RELEASE_ASSETS?: Cloudflare.Env["ASSETS"];
+  UI_RELEASE_ASSETS?: Pick<Fetcher, "fetch">;
   /** Empty or absent keeps the installed legacy HTML; only exact registered releases may be selected. */
   UI_ACTIVE_RELEASE?: string;
   SHARED_PROFILE_PORTAL_AUTHORITY?: import('../../../../packages/shared/src/shared-business-profile').SharedProfilePortalAuthorityBinding;
