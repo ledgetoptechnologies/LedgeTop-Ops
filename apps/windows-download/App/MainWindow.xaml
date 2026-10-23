@@ -26,13 +26,22 @@
           <Border x:Name="DemoTag" Margin="14,0,0,0" Background="#33EE5007" CornerRadius="6" Padding="8,2" VerticalAlignment="Center" Visibility="Collapsed">
             <TextBlock x:Name="DemoTagText" Text="Demo data" Foreground="#FFB894" FontSize="11" FontWeight="SemiBold" />
           </Border>
+          <Border x:Name="AccessTag" Margin="10,0,0,0" Background="#26FFFFFF" CornerRadius="6" Padding="8,2" VerticalAlignment="Center"
+                  Visibility="{Binding HasAccessLabel, Converter={StaticResource Visible}, FallbackValue=Collapsed}">
+            <TextBlock Text="{Binding AccessLabel}" Foreground="#E6EBEF" FontSize="11" FontWeight="SemiBold" />
+          </Border>
         </StackPanel>
-        <TextBlock DockPanel.Dock="Right" Text="{Binding SessionText}" Foreground="#C7D0D7" VerticalAlignment="Center" FontSize="13" />
+        <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Center">
+          <Button x:Name="SwitchAccessButton" Content="{Binding SwitchAccessText}" Command="{Binding SwitchAccess}" Style="{StaticResource Small}"
+                  Background="#26FFFFFF" Foreground="White" Margin="0,0,14,0" Visibility="{Binding CanSwitchAccess, Converter={StaticResource Visible}, FallbackValue=Collapsed}"
+                  ToolTip="Your downloads stop and are saved first; they resume when you switch back." />
+          <TextBlock Text="{Binding SessionText}" Foreground="#C7D0D7" VerticalAlignment="Center" FontSize="13" />
+        </StackPanel>
       </DockPanel>
     </Border>
 
     <!-- Banner: expiry warnings and errors -->
-    <Border Grid.Row="1" Padding="18,9" Visibility="{Binding HasBanner, Converter={StaticResource Visible}}">
+    <Border Grid.Row="1" Padding="18,9" Visibility="{Binding HasBanner, Converter={StaticResource Visible}, FallbackValue=Collapsed}">
       <Border.Style>
         <Style TargetType="Border">
           <Setter Property="Background" Value="{StaticResource WarnBack}" />
@@ -52,10 +61,37 @@
             <ContentControl ContentTemplate="{StaticResource LtMark}" Focusable="False" />
           </Border>
           <TextBlock Text="Sign in to Ledge Top Files" FontSize="22" FontWeight="Bold" Margin="0,18,0,6" />
-          <TextBlock Foreground="{StaticResource Muted}" FontSize="14" LineHeight="21"
-                     Text="Use your Ledge Top account in your browser. The files you're allowed to download appear here, from client deliveries and the company server." />
+          <TextBlock Foreground="{StaticResource Muted}" FontSize="14" LineHeight="21" TextWrapping="Wrap" Text="{Binding SignInDetail}" />
           <Button Style="{StaticResource Primary}" Content="Sign in with your browser" Command="{Binding SignIn}" Margin="0,22,0,0" HorizontalAlignment="Left" Padding="18,9" />
           <TextBlock Text="{Binding SignInStatus}" Margin="0,14,0,0" FontSize="13" Foreground="{StaticResource Muted}" AutomationProperties.LiveSetting="Polite" />
+        </StackPanel>
+      </Border>
+    </Grid>
+
+    <!-- Choose which files to open (shown before any sign-in) -->
+    <Grid Grid.Row="2" x:Name="ChooseAccessScreen" Visibility="Collapsed">
+      <Border Style="{StaticResource Card}" Width="480" HorizontalAlignment="Center" VerticalAlignment="Center" Padding="34,30">
+        <StackPanel>
+          <Border Background="{StaticResource HeaderBack}" CornerRadius="14" Width="64" Height="64" Padding="10" HorizontalAlignment="Left">
+            <ContentControl ContentTemplate="{StaticResource LtMark}" Focusable="False" />
+          </Border>
+          <TextBlock Text="Which files do you want to open?" FontSize="22" FontWeight="Bold" Margin="0,18,0,6" />
+          <TextBlock Foreground="{StaticResource Muted}" FontSize="14" LineHeight="21" TextWrapping="Wrap"
+                     Text="You can switch later from the top of the window. Nothing signs in until you choose." />
+          <Button x:Name="ChooseClient" Click="OnChooseClient" Margin="0,22,0,0" HorizontalContentAlignment="Stretch" Padding="16,12"
+                  AutomationProperties.Name="Client deliveries: files Ledge Top delivered to me">
+            <StackPanel>
+              <TextBlock Text="Client deliveries" FontSize="15" FontWeight="Bold" />
+              <TextBlock Text="Files Ledge Top delivered to me" FontSize="13" FontWeight="Normal" Foreground="{StaticResource Muted}" Margin="0,2,0,0" />
+            </StackPanel>
+          </Button>
+          <Button x:Name="ChooseEmployee" Click="OnChooseEmployee" Margin="0,10,0,0" HorizontalContentAlignment="Stretch" Padding="16,12"
+                  AutomationProperties.Name="Company files: for Ledge Top staff">
+            <StackPanel>
+              <TextBlock Text="Company files" FontSize="15" FontWeight="Bold" />
+              <TextBlock Text="For Ledge Top staff" FontSize="13" FontWeight="Normal" Foreground="{StaticResource Muted}" Margin="0,2,0,0" />
+            </StackPanel>
+          </Button>
         </StackPanel>
       </Border>
     </Grid>

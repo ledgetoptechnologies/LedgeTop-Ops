@@ -46,6 +46,11 @@ var groups = new (string Name, Func<Task> Run)[] {
     ("a late finish from an older start never frees a newer start's slot", StaleIdleKeepsOneActive),
     ("a throwing save observer still lets closing finish", ThrowingSaveObserverStillCloses),
     ("closing releases the backend once, after its queues", BackendReleased),
+    ("nothing signs in until a kind of files is chosen, and only that kind opens", ChooseBeforeSignIn),
+    ("a remembered choice opens directly; a corrupt or unoffered one asks again", RememberedChoice),
+    ("switching stops and saves downloads, then opens the other kind with a fresh view", SwitchDrainsFirst),
+    ("a refused company setup never falls back to client deliveries", NoFallbackOnRefusal),
+    ("the choice screen renders and returns only what was clicked", ChooserWindow),
     ("the window renders sign-in and files screens", Render),
 };
 foreach (var group in groups) {
@@ -179,7 +184,8 @@ async Task PersonSwitch()
     await env.OpenAsync("deliveries", "land-script");
     env.Check("ortho-full.tif");
     env.Model.DownloadSelected.Execute(null);
-    await Until(() => env.Model.Transfers.Any(row => row.State == QueuedTransferState.Running && row.Percent > 1), "Alice's download running");
+    await Until(() => env.Model.Transfers.Any(row => row.State == QueuedTransferState.Running && row.Percent > 1), "Alice's download running",
+        detail: env.Describe);
     True(env.Model.Files.Count > 0 && env.Model.Sections.Count == 2, "Alice's lists shown");
 
     // A folder listing for Alice is still on its way when Bob signs in.
@@ -385,7 +391,13 @@ async Task PackagedReleases()
 
         // Packaged pilot: the compiled profile only, despite the settings file, arguments and environment.
         var plan = Run(pilot, channel => Profile(channel), "--demo", "--demo-signed-in", "--settings", LiveSettings.PathUnder(local));
-        var live = plan.Backend as LiveBackend ?? throw new Exception("Expected the live backend, got " + plan.Backend?.GetType().Name + " / " + plan.Problem);
+        // Packaged releases offer a choice and sign in to nothing until one is made; each choice builds one source only.
+        True(plan.Backend is null && plan.Problem is null && plan.Access is not null, "packaged release offers a choice: " + plan.Problem);
+        True(plan.Access!.Modes.SequenceEqual([AccessMode.Client, AccessMode.Employee]), "client and company files offered");
+        Equal(Path.Combine(local, "LedgeTop", "Files", "pilot", "access-mode.json"), plan.Access.Preference.Path);
+        var live = plan.Access.Create(AccessMode.Client) as LiveBackend ?? throw new Exception("Expected the live backend");
+        Equal("portal", live.Sources.Single().Alias);
+        await using (var company = (LiveBackend)plan.Access.Create(AccessMode.Employee)) Equal("employee", company.Sources.Single().Alias);
         Equal("https://portal.example.test/portal", live.Settings.PortalApplicationUrl.ToString());
         Equal(Path.Combine(install, "helper", "cloudflared.exe"), live.Settings.CloudflaredPath);
         Equal(helperHash, live.Settings.CloudflaredSha256);
@@ -394,7 +406,7 @@ async Task PackagedReleases()
         await live.DisposeAsync();
 
         // Stable has its own folder; neither reuses the developer or the old shared records.
-        var stable = (LiveBackend)Run((true, ReleaseChannel.Stable), channel => Profile(channel)).Backend!;
+        var stable = (LiveBackend)Run((true, ReleaseChannel.Stable), channel => Profile(channel)).Access!.Create(AccessMode.Client);
         Equal(Path.Combine(local, "LedgeTop", "Files", "stable", "queue"), stable.StateDirectory);
         await stable.DisposeAsync();
         var roots = new[] { live.StateDirectory, stable.StateDirectory, Startup.StateRoot(local, "developer"), Path.Combine(local, "LedgeTop", "Files", "queue") };
@@ -461,6 +473,8 @@ async Task PackagedReleases()
 
         // Developer builds keep explicit demo and the developer settings file, with their own folder.
         Equal("Demo data", Run((false, null), ReleaseProfiles.For, "--demo").Tag);
+        // A profile without the staff application offers client deliveries only.
+        True(Run(pilot, channel => Profile(channel) with { StaffApplicationUrl = null }).Access!.Modes.SequenceEqual([AccessMode.Client]), "client-only setup");
         var developer = Run((false, null), ReleaseProfiles.For);
         True(developer.Backend is null && developer.Problem == Startup.HelperProblem, "developer build uses its own settings file (whose helper is missing here)");
         File.Delete(LiveSettings.PathUnder(local));
@@ -546,7 +560,8 @@ async Task CloseDuringSwitch()
         await env.OpenAsync("deliveries", "land-script");
         env.Check("ortho-full.tif");
         env.Model.DownloadSelected.Execute(null);
-        await Until(() => env.Model.Transfers.Any(row => row.State == QueuedTransferState.Running && row.Percent > 1), "Alice's download running");
+        await Until(() => env.Model.Transfers.Any(row => row.State == QueuedTransferState.Running && row.Percent > 1), "Alice's download running",
+        detail: env.Describe);
         if (viaSignIn) {
             // The app's clock says the sign-in ended, but Alice's download is still running when Bob signs in.
             now = now.AddHours(2); env.Model.Tick();
@@ -1033,6 +1048,170 @@ async Task BackendReleased()
     Equal(1, env.Backend.Disposals);
 }
 
+(string Root, List<AccessMode> Created, List<DemoBackend> Backends, AccessChoice Choice) AccessFixture(AccessMode[]? modes = null, double rate = 40_000_000,
+    Func<AccessMode, IFilesBackend>? create = null)
+{
+    var root = Path.Combine(Path.GetTempPath(), "ltfiles-access-" + Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(root);
+    var created = new List<AccessMode>(); var backends = new List<DemoBackend>();
+    IFilesBackend Make(AccessMode mode)
+    {
+        created.Add(mode);
+        if (create is not null) return create(mode);
+        var backend = new DemoBackend(Path.Combine(root, "queue"), signedIn: true, bytesPerSecond: rate, mode: mode);
+        backends.Add(backend); return backend;
+    }
+    var choice = new AccessChoice(Make, modes ?? [AccessMode.Client, AccessMode.Employee], AccessPreference.For(root, "pilot"));
+    return (root, created, backends, choice);
+}
+
+async Task ChooseBeforeSignIn()
+{
+    var (root, created, _, choice) = AccessFixture();
+    var shell = new ChooserShell();
+    await using (var session = new FilesSession(shell, choice, Path.Combine(root, "Downloads"), "Pilot")) {
+        var starting = session.StartAsync();
+        await Until(() => shell.Pending is not null, "the choice is offered");
+        True(shell.Offered!.SequenceEqual([AccessMode.Client, AccessMode.Employee]), "both kinds offered");
+        Equal(0, created.Count);
+        True(shell.Attached.Count == 0 && choice.Preference.Read() is null, "nothing opened or remembered before choosing");
+        shell.Pending!.SetResult(AccessMode.Client);
+        await starting.WaitAsync(TimeSpan.FromSeconds(30));
+        True(created.SequenceEqual([AccessMode.Client]), "only client deliveries were built");
+        var model = shell.Attached.Single();
+        await Until(() => model.Screen == Screen.Files && model.Sections.Count > 0, "client files shown");
+        True(model.Sections.All(node => node.Node.SourceAlias == "portal"), "no company files in client mode");
+        Equal(FilesSession.SignInDetail(AccessMode.Client), model.SignInDetail);
+        Equal("Client deliveries", model.AccessLabel);
+        Equal("Switch to company files", model.SwitchAccessText);
+        Equal((AccessMode?)AccessMode.Client, choice.Preference.Read());
+    }
+    try { Directory.Delete(root, true); } catch (IOException) { }
+}
+
+async Task RememberedChoice()
+{
+    {
+        var (root, created, _, choice) = AccessFixture();
+        choice.Preference.Save(AccessMode.Employee);
+        var shell = new ChooserShell();
+        await using (var session = new FilesSession(shell, choice, Path.Combine(root, "Downloads"), null)) {
+            await session.StartAsync().WaitAsync(TimeSpan.FromSeconds(30));
+            True(shell.Pending is null, "no choice asked when remembered");
+            True(created.SequenceEqual([AccessMode.Employee]), "remembered company files opened");
+            var model = shell.Attached.Single();
+            await Until(() => model.Sections.Count > 0, "company files shown");
+            True(model.Sections.All(node => node.Node.SourceAlias == "employee"), "no client deliveries in company mode");
+        }
+        foreach (var corrupt in new[] { "client", "{\"mode\":\"Client\"}", "{\"mode\":\"admin\"}", "{\"mode\":\"client\"} ", new string('x', 100) }) {
+            await File.WriteAllTextAsync(choice.Preference.Path, corrupt);
+            Equal((AccessMode?)null, choice.Preference.Read());
+        }
+        var again = new ChooserShell();
+        await using (var session = new FilesSession(again, choice, Path.Combine(root, "Downloads"), null)) {
+            var starting = session.StartAsync();
+            await Until(() => again.Pending is not null, "asked again after a corrupt preference");
+            again.Pending!.SetResult(AccessMode.Client);
+            await starting.WaitAsync(TimeSpan.FromSeconds(30));
+        }
+        try { Directory.Delete(root, true); } catch (IOException) { }
+    }
+    {
+        // Remembered company files on a setup that only offers client deliveries: never opened.
+        var (root, created, _, choice) = AccessFixture(modes: [AccessMode.Client]);
+        choice.Preference.Save(AccessMode.Employee);
+        var shell = new ChooserShell();
+        await using (var session = new FilesSession(shell, choice, Path.Combine(root, "Downloads"), null))
+            await session.StartAsync().WaitAsync(TimeSpan.FromSeconds(30));
+        True(created.SequenceEqual([AccessMode.Client]), "only the offered kind opened");
+        True(!shell.Attached.Single().CanSwitchAccess, "nothing to switch to");
+        try { Directory.Delete(root, true); } catch (IOException) { }
+    }
+}
+
+async Task SwitchDrainsFirst()
+{
+    var (root, created, backends, choice) = AccessFixture(rate: 300_000);
+    var downloads = Path.Combine(root, "Downloads");
+    var shell = new ChooserShell();
+    await using (var session = new FilesSession(shell, choice, downloads, null)) {
+        choice.Preference.Save(AccessMode.Client);
+        await session.StartAsync().WaitAsync(TimeSpan.FromSeconds(30));
+        var client = shell.Attached.Single();
+        await Until(() => client.Sections.Any(node => node.Node.Key == "deliveries"), "client tree");
+        var deliveries = client.Sections.Single(node => node.Node.Key == "deliveries");
+        deliveries.IsExpanded = true;
+        await Until(() => deliveries.Children.Any(child => child.Node.Key == "land-script"), "delivery listed");
+        await client.SelectAsync(deliveries.Children.Single(child => child.Node.Key == "land-script"));
+        client.Files.Single(file => file.Name == "ortho-full.tif").IsChecked = true;
+        client.DownloadSelected.Execute(null);
+        var clientBackend = backends.Single();
+        await Until(() => clientBackend.Writing == 1, "client download running");
+
+        client.SwitchAccess.Execute(null);
+        await Until(() => session.Mode == AccessMode.Employee && shell.Attached.Count == 2, "switched to company files");
+        Equal(1, clientBackend.Disposals);
+        Equal(0, clientBackend.Writing);
+        var saved = Directory.EnumerateFiles(clientBackend.StateDirectory, "queue.json", SearchOption.AllDirectories)
+            .Select(File.ReadAllText).Single(text => text.Contains("ortho-full.tif"));
+        True(saved.Contains("\"paused\"", StringComparison.OrdinalIgnoreCase), "the client download was saved as paused");
+        var company = shell.Attached[1];
+        True(!ReferenceEquals(company, client), "a fresh view");
+        await Until(() => company.Screen == Screen.Files && company.Sections.Count > 0, "company files shown");
+        True(company.Sections.All(node => node.Node.SourceAlias == "employee") && company.Files.Count == 0 && company.Transfers.Count == 0,
+            "nothing from the client view carried over");
+        True(created.SequenceEqual([AccessMode.Client, AccessMode.Employee]), "one backend per choice");
+        Equal((AccessMode?)AccessMode.Employee, choice.Preference.Read());
+    }
+    True(Locks.Free(Path.Combine(root, "queue")), "every queue released after closing");
+    try { Directory.Delete(root, true); } catch (IOException) { }
+}
+
+async Task NoFallbackOnRefusal()
+{
+    var unused = Path.Combine(Path.GetTempPath(), "ltfiles-unused-" + Guid.NewGuid().ToString("N"));
+    var (root, created, _, choice) = AccessFixture(create: mode => mode == AccessMode.Employee
+        ? throw new SettingsException("Employee access is not configured on this PC. Ask your Ledge Top contact to check the setup.")
+        : new DemoBackend(unused, signedIn: true, mode: mode));
+    choice.Preference.Save(AccessMode.Employee);
+    var shell = new ChooserShell();
+    await using (var session = new FilesSession(shell, choice, Path.Combine(root, "Downloads"), null)) {
+        await session.StartAsync().WaitAsync(TimeSpan.FromSeconds(30));
+        True(created.SequenceEqual([AccessMode.Employee]), "client deliveries were never tried instead");
+        var model = shell.Attached.Single();
+        Equal(Screen.NotSetUp, model.Screen);
+        True(model.SetupText.Contains("Employee access is not configured"), "the refusal is explained");
+        True(model.CanSwitchAccess, "the person can still choose client deliveries themselves");
+        Equal((AccessMode?)AccessMode.Employee, choice.Preference.Read());
+    }
+    try { Directory.Delete(root, true); } catch (IOException) { }
+}
+
+async Task ChooserWindow()
+{
+    Directory.CreateDirectory(screenshots);
+    var window = new MainWindow { Width = 1180, Height = 780, ShowInTaskbar = false, WindowStartupLocation = WindowStartupLocation.Manual, Left = -20000, Top = -20000 };
+    window.Show();
+    try {
+        var choosing = window.ChooseAccessAsync([AccessMode.Client, AccessMode.Employee]);
+        Pump();
+        Snap(window, Path.Combine(screenshots, "choose-access.png"));
+        True(!choosing.IsCompleted, "waits for a click");
+        window.ChooseEmployee.RaiseEvent(new RoutedEventArgs(System.Windows.Controls.Primitives.ButtonBase.ClickEvent));
+        Equal(AccessMode.Employee, await choosing.WaitAsync(TimeSpan.FromSeconds(5)));
+        var onlyClient = window.ChooseAccessAsync([AccessMode.Client]);
+        Pump();
+        Equal(Visibility.Collapsed, window.ChooseEmployee.Visibility);
+        window.ChooseClient.RaiseEvent(new RoutedEventArgs(System.Windows.Controls.Primitives.ButtonBase.ClickEvent));
+        Equal(AccessMode.Client, await onlyClient.WaitAsync(TimeSpan.FromSeconds(5)));
+        var abandoned = window.ChooseAccessAsync([AccessMode.Client, AccessMode.Employee]);
+        window.Close();
+        await Until(() => abandoned.IsCanceled, "closing abandons the choice");
+    } finally { if (window.IsVisible) window.Close(); }
+    var info = new FileInfo(Path.Combine(screenshots, "choose-access.png"));
+    True(info.Exists && info.Length > 10_000, "choice screen rendered");
+}
+
 static void Snap(Window window, string path)
 {
     window.UpdateLayout(); Pump();
@@ -1052,7 +1231,7 @@ static void Snap(Window window, string path)
 }
 
 static void Pump() => Wait.Pump();
-static Task Until(Func<bool> condition, string what, int seconds = 30) => Wait.Until(condition, what, seconds);
+static Task Until(Func<bool> condition, string what, int seconds = 30, Func<string>? detail = null) => Wait.Until(condition, what, seconds, detail);
 
 static void Equal<T>(T expected, T actual) { if (!EqualityComparer<T>.Default.Equals(expected, actual)) throw new Exception($"Expected {expected}, got {actual}"); }
 static void True(bool value, string what) { if (!value) throw new Exception("Expected: " + what); }
@@ -1081,6 +1260,21 @@ static Task Sta(Func<Task> test)
 }
 
 /// <summary>A fresh demo backend, view model and folders for one test.</summary>
+sealed class ChooserShell : IAccessWindow
+{
+    private readonly Dispatcher ui = Dispatcher.CurrentDispatcher;
+    public TaskCompletionSource<AccessMode>? Pending;
+    public IReadOnlyList<AccessMode>? Offered;
+    public readonly List<MainViewModel> Attached = [];
+    public Task<AccessMode> ChooseAccessAsync(IReadOnlyList<AccessMode> modes)
+    { Offered = modes; Pending = new(TaskCreationOptions.RunContinuationsAsynchronously); return Pending.Task; }
+    public void Attach(MainViewModel model, string? tag) => Attached.Add(model);
+    public void OnUi(Action action) => ui.BeginInvoke(action);
+    public string? PickFolder(string current) => null;
+    public void OpenFile(string path) { }
+    public void ShowInFolder(string path) { }
+}
+
 sealed class Env : IAsyncDisposable, IShell
 {
     private readonly string root;
@@ -1125,6 +1319,12 @@ sealed class Env : IAsyncDisposable, IShell
 
     public void Check(string name) => Model.Files.Single(file => file.Name == name).IsChecked = true;
 
+    /// <summary>Plain test diagnostics: screen, banner, notice, transfer rows and the demo's writer counts. No file contents.</summary>
+    public string Describe() =>
+        $"screen={Model.Screen}; busy={Model.IsTransferring}; banner='{Model.Banner}'; notice='{Model.Notice}'; " +
+        $"rows=[{string.Join(", ", Model.Transfers.Select(row => $"{row.Name}:{row.State}:{row.Percent:0.0}%"))}]; " +
+        $"writing={Backend.Writing}; mostAtOnce={Backend.MostAtOnce}; sourceChecks={Backend.SourceChecks}";
+
     public void OnUi(Action action) => ui.BeginInvoke(action);
     public string? PickFolder(string current) => null;
     public void OpenFile(string path) { }
@@ -1160,11 +1360,16 @@ static class Wait
         Dispatcher.PushFrame(frame);
     }
 
-    public static async Task Until(Func<bool> condition, string what, int seconds = 30)
+    /// <param name="detail">Extra state to report on a timeout, so a slow or stuck run is diagnosable without retrying.</param>
+    public static async Task Until(Func<bool> condition, string what, int seconds = 30, Func<string>? detail = null)
     {
-        var stop = DateTime.UtcNow.AddSeconds(seconds);
+        var started = DateTime.UtcNow; var stop = started.AddSeconds(seconds);
         while (!condition()) {
-            if (DateTime.UtcNow > stop) throw new Exception("Timed out waiting: " + what);
+            if (DateTime.UtcNow > stop) {
+                string extra;
+                try { extra = detail?.Invoke() ?? ""; } catch (Exception error) { extra = "detail unavailable: " + error.GetType().Name; }
+                throw new Exception($"Timed out waiting after {(DateTime.UtcNow - started).TotalSeconds:0.0}s: {what}" + (extra.Length > 0 ? " [" + extra + "]" : ""));
+            }
             await Task.Delay(50); Pump();
         }
     }
