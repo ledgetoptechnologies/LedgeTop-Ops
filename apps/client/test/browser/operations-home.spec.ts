@@ -67,12 +67,12 @@ test("financial panel clears the prior authority synchronously while a replaceme
     if(path==="/api/client/session")return route.fulfill({status:401,json:{error:"Sign in required"}});
     return route.fulfill({status:404,json:{error:"not found"}});});
   await page.goto("/portal");
-  await expect(page.getByRole("link",{name:"View document"})).toHaveAttribute("href",/pa-a\.example\.test/);
+  await expect(page.getByRole("link",{name:"Review and sign"})).toHaveAttribute("href",/pa-a\.example\.test/);
   await page.evaluate(()=>document.dispatchEvent(new Event("visibilitychange")));
   await expect(page.getByText("Loading financial documents…",{exact:true})).toBeVisible();
   await expect(page.locator('a[href*="pa-a.example.test"]')).toHaveCount(0);
   releaseB?.();
-  await expect(page.getByRole("link",{name:"View document"})).toHaveAttribute("href",/pa-b\.example\.test/);
+  await expect(page.getByRole("link",{name:"Review and sign"})).toHaveAttribute("href",/pa-b\.example\.test/);
 });
 
 async function expectAuthorizedNavigation(page: Page, unavailableLinks: string[] = []) {
@@ -213,7 +213,7 @@ test("independently authorized client portal composes an actionless operations s
   await expect(page.getByRole("link", { name: "Requests" })).toHaveCount(0);
   await expect(page.getByRole("link", { name: "Feedback" })).toHaveCount(0);
   const summary = page.getByRole("region", { name: "Independent operations service summary" });
-  await expect(summary).toContainText("Files and requests follow the access for your selected client");
+  await expect(summary).toContainText("The services you have with Ledge Top");
   await expect(summary.getByText("Aerial operations", { exact: true })).toBeVisible();
   await expect(summary.getByRole("link")).toHaveCount(0);
   await expect(summary.getByRole("button")).toHaveCount(0);
@@ -252,7 +252,7 @@ test("combined portal keeps its operations heading when an authorized home has n
   await page.goto("/portal");
 
   const summary = page.getByRole("region", { name: "Independent operations service summary" });
-  await expect(summary.getByRole("heading", { name: "Operations services" })).toBeVisible();
+  await expect(summary.getByRole("heading", { name: "Services", exact: true })).toBeVisible();
   await expect(summary.getByText("No services are currently listed for this access.", { exact: true })).toBeVisible();
   await expect(summary.getByRole("heading", { name: "No services available", exact: true })).toHaveCount(0);
   await expect(summary.getByRole("link")).toHaveCount(0);
@@ -312,7 +312,7 @@ test("independently authorized native dashboard keeps its workspace distinct fro
 
   await page.goto("/portal?workspace=workspace-b");
   await expect(page.getByRole("heading", { name: "Native Resource Workspace" })).toBeVisible();
-  await expect(page.getByRole("heading", { name: "Operations services" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Services", exact: true })).toBeVisible();
   await expect(page.getByText("Aerial operations", { exact: true })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Client portal" })).toHaveCount(0);
   await expectAuthorizedNavigation(page);

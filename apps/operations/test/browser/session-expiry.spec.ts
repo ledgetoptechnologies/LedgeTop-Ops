@@ -30,8 +30,10 @@ test("account menu shows a live server-timed session above Logout and refreshes 
   expect(statusRequests).toBe(0);
   await trigger.click();
   const menu = page.getByRole("menu", { name: "Account" });
-  await expect(menu.getByRole("timer")).toHaveText(/0m [34]s/);
+  await expect(menu.getByRole("timer")).toHaveText("Less than a minute");
   await expect(menu.getByRole("menuitem", { name: "Logout" })).toBeFocused();
+  // The expiry reads as a full date and time, never seconds.
+  await expect(menu.locator("time")).toHaveText(/^[A-Z][a-z]{2}, [A-Z][a-z]{2} \d{1,2}, \d{1,2}:\d{2}\s?[AP]M$/);
   const order = await menu.evaluate(node => {
     const status = node.querySelector(".account-session-status")!;
     const logout = node.querySelector('[role="menuitem"]')!;
@@ -39,18 +41,18 @@ test("account menu shows a live server-timed session above Logout and refreshes 
   });
   expect(order).toBe(true);
   await page.clock.fastForward(2500);
-  await expect(menu.getByRole("timer")).toHaveText(/0m [12]s/);
+  await expect(menu.getByRole("timer")).toHaveText("Less than a minute");
   await page.clock.fastForward(2000);
   await expect(menu.getByText("Session expired", { exact: true })).toBeVisible();
   await page.keyboard.press("Escape");
   await expect(menu).toHaveCount(0);
   seconds = 3600;
   await trigger.click();
-  await expect(menu.getByRole("timer")).toHaveText(/(?:1h 0m 0s|59m 59s)/);
+  await expect(menu.getByRole("timer")).toHaveText(/^(?:1h 0m|59m)$/);
   expect(statusRequests).toBe(2);
   seconds = 7200;
   await page.evaluate(() => window.dispatchEvent(new Event("focus")));
-  await expect(menu.getByRole("timer")).toHaveText(/(?:2h 0m 0s|1h 59m 59s)/);
+  await expect(menu.getByRole("timer")).toHaveText(/^(?:2h 0m|1h 59m)$/);
   serverError = true;
   await page.evaluate(() => window.dispatchEvent(new Event("focus")));
   await expect(menu.getByText("Session time unavailable", { exact: true })).toBeVisible();

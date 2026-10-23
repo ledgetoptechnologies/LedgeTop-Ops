@@ -11,7 +11,7 @@ describe("verified session time", () => {
     expect(status).toEqual({ userId: "staff-1", expiresAt: "2026-10-18T05:01:01.000Z", serverTime: "2026-10-18T04:00:00.000Z" });
     const timing = readSessionTiming(status, "staff-1");
     // No dependency on the browser wall clock, which may be in another zone or wrong.
-    expect(formatSessionRemaining(timing.expiresAt! - timing.serverTime)).toBe("1h 1m 1s");
+    expect(formatSessionRemaining(timing.expiresAt! - timing.serverTime)).toBe("1h 1m");
   });
 
   it.each([undefined, NaN, Infinity, -1, 0, 1.5, Number.MAX_SAFE_INTEGER])(
@@ -22,9 +22,15 @@ describe("verified session time", () => {
   it("preserves expired deadlines and clamps the countdown at zero", () => {
     const timing = readSessionTiming(staffSessionStatus({ id: "staff-1", accessExpiresAt: now / 1000 - 1 }, now), "staff-1");
     expect(timing.expiresAt).toBeLessThan(timing.serverTime);
-    expect(formatSessionRemaining(-1000)).toBe("0m 0s");
-    expect(formatSessionRemaining(1)).toBe("0m 1s");
-    expect(formatSessionRemaining(60_000)).toBe("1m 0s");
+    expect(formatSessionRemaining(-1000)).toBe("0m");
+    expect(formatSessionRemaining(1)).toBe("Less than a minute");
+    expect(formatSessionRemaining(60_000)).toBe("1m");
+  });
+
+  it("shows days, hours and minutes without seconds", () => {
+    expect(formatSessionRemaining(((2 * 24 + 4) * 60 + 13) * 60_000 + 59_000)).toBe("2d 4h 13m");
+    expect(formatSessionRemaining(24 * 60 * 60_000)).toBe("1d 0h 0m");
+    expect(formatSessionRemaining((4 * 60 + 5) * 60_000)).toBe("4h 5m");
   });
 
   it("rejects another identity, missing status and malformed times", () => {

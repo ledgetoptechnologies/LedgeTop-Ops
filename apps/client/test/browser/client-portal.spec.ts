@@ -455,7 +455,7 @@ test("the unified portal lists every account with its own scope and opens items 
 
   await page.getByRole("button", { name: /Beta Site/ }).click();
   await expect(page).toHaveURL(/\/portal\/projects\/project-b\?workspace=workspace-b$/);
-  await expect(page.locator(".unified-portal-context")).toContainText("Ledge Top Drone Services · Beta");
+  await expect(page.locator(".unified-portal-context")).toContainText("Drone and survey · Beta");
   expect(observed.filter(item => item.path === "/api/client/projects").at(-1)?.workspace).toBe("workspace-b");
 });
 
@@ -2112,17 +2112,17 @@ test("client can cancel pre-work requests and sees PA draft creation without an 
   ];
   await mockAuthorizedPortal(page, null, fixtureRequests, workflowEvents);
   await page.goto("/portal/requests");
-  await expect(page.getByText("Approved · preparing PA draft quote", { exact: true })).toBeVisible();
-  await expect(page.getByText("PA draft quote created", { exact: true })).toBeVisible();
+  await expect(page.getByText("Approved · preparing your quote", { exact: true })).toBeVisible();
+  await expect(page.getByText("Quote in progress", { exact: true })).toBeVisible();
   const quoted = page.locator("article").filter({ hasText: "Quoted mapping" });
-  await expect(quoted.getByText("This does not mean you accepted it.", { exact: true })).toBeVisible();
+  await expect(quoted.getByText("We’ll send it for you to review. Nothing is accepted until you approve it.", { exact: true })).toBeVisible();
   const completed = page.locator("article").filter({ hasText: "Completed mapping" });
   await expect(completed.getByText("Completed", { exact: true })).toBeVisible();
-  await expect(completed.getByText("PA draft quote created", { exact: true })).toHaveCount(0);
+  await expect(completed.getByText("Quote in progress", { exact: true })).toHaveCount(0);
   for (const status of ["Cancelled", "Declined"]) {
     const terminal = page.locator("article").filter({ hasText: `${status} mapping` });
     await expect(terminal.getByText(status, { exact: true })).toBeVisible();
-    await expect(terminal.getByText("PA draft quote created", { exact: true })).toHaveCount(0);
+    await expect(terminal.getByText("Quote in progress", { exact: true })).toHaveCount(0);
     await expect(terminal.getByRole("button", { name: "Cancel request", exact: true })).toHaveCount(0);
   }
   await expect(page.getByText(/\$|document number|open draft/i)).toHaveCount(0);

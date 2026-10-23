@@ -2009,3 +2009,130 @@
   .unified-portal-requests li { flex-direction: column; align-items: stretch; }
   .unified-portal-request-actions { justify-content: space-between; }
 }
+
+/* ---------------------------------------------------------------------------
+   Unified home: overview tiles, request progress, invoices, "what do you need"
+   --------------------------------------------------------------------------- */
+.portal-welcome-split { display: flex; align-items: flex-end; justify-content: space-between; gap: 1rem; flex-wrap: wrap; }
+.portal-welcome-split > div { min-width: 0; }
+.portal-welcome-split .button-orange { min-height: 44px; }
+.portal-overview-tiles { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 1rem; margin: 0 0 1rem; }
+.portal-overview-tile {
+  display: grid; grid-template-columns: auto 1fr; grid-template-areas: "icon value" "label label" "action action";
+  align-items: center; gap: .35rem .75rem; padding: 1.1rem 1.15rem; text-align: left; min-width: 0;
+  background: var(--paper); color: var(--ink); border: 1px solid var(--line); border-radius: var(--radius-md);
+  box-shadow: var(--shadow-sm); font-weight: 400; transition: box-shadow .15s ease, transform .15s ease;
+}
+.portal-overview-tile:hover:not(:disabled) { background: var(--paper); box-shadow: var(--shadow-md); transform: translateY(-1px); }
+.portal-overview-icon { grid-area: icon; display: grid; place-items: center; width: 2.5rem; height: 2.5rem; border-radius: 12px; background: var(--orange-soft); }
+.portal-overview-icon svg { width: 1.35rem; height: 1.35rem; fill: none; stroke: var(--orange); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.portal-overview-tile-progress .portal-overview-icon { background: var(--amber-soft); }
+.portal-overview-tile-progress .portal-overview-icon svg { stroke: var(--amber); }
+.portal-overview-tile-done .portal-overview-icon { background: var(--green-soft); }
+.portal-overview-tile-done .portal-overview-icon svg { stroke: var(--green); }
+.portal-overview-tile-files .portal-overview-icon { background: #e8f0fb; }
+.portal-overview-tile-files .portal-overview-icon svg { stroke: var(--blue); }
+.portal-overview-value { grid-area: value; justify-self: end; font-size: 1.9rem; font-weight: 860; line-height: 1; }
+.portal-overview-tile-files .portal-overview-value { font-size: 1.05rem; color: var(--muted); font-weight: 700; }
+.portal-overview-label { grid-area: label; font-weight: 750; }
+.portal-overview-action { grid-area: action; color: var(--blue); font-size: .86rem; font-weight: 700; }
+
+.portal-progress-card .portal-progress-bar { display: flex; height: .9rem; border-radius: 999px; overflow: hidden; background: var(--surface-soft); gap: 2px; }
+.portal-progress-bar > span { min-width: .5rem; }
+.portal-progress-legend { list-style: none; display: flex; flex-wrap: wrap; gap: .5rem 1.25rem; margin: .85rem 0 0; padding: 0; color: var(--muted); }
+.portal-progress-legend strong { color: var(--ink); margin-right: .15rem; }
+.portal-progress-dot { display: inline-block; width: .7rem; height: .7rem; border-radius: 50%; margin-right: .4rem; vertical-align: -.05rem; }
+.portal-progress-received { background: var(--amber); }
+.portal-progress-review { background: var(--blue); }
+.portal-progress-approved { background: var(--orange); }
+.portal-progress-completed { background: var(--green); }
+.portal-progress-closed { background: #b9c2ca; }
+
+.portal-finance { display: grid; gap: 1rem; }
+.portal-finance h2 { margin: 0; }
+.portal-finance-summary { display: grid; grid-template-columns: auto 1fr; grid-template-areas: "label label" "total total" "detail detail"; gap: .2rem; padding: 1.1rem 1.25rem; border-radius: var(--radius-md); }
+.portal-finance-owing { background: linear-gradient(135deg, #fff4ec, #ffe6d6); border: 1px solid #f6c7a6; }
+.portal-finance-settled { grid-template-areas: "check total" "check detail"; align-items: center; column-gap: .9rem; background: var(--green-soft); border: 1px solid #bfe3cb; }
+.portal-finance-label { grid-area: label; font-size: .78rem; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; color: var(--orange-dark); }
+.portal-finance-total { grid-area: total; font-size: 2rem; font-weight: 860; line-height: 1.1; overflow-wrap: anywhere; }
+.portal-finance-settled .portal-finance-total { font-size: 1.25rem; }
+.portal-finance-detail { grid-area: detail; color: var(--muted); }
+.portal-finance-check { grid-area: check; display: grid; place-items: center; width: 2.75rem; height: 2.75rem; border-radius: 50%; background: var(--green); }
+.portal-finance-check svg { width: 1.5rem; height: 1.5rem; fill: none; stroke: #fff; stroke-width: 2.6; stroke-linecap: round; stroke-linejoin: round; }
+.portal-finance-list, .portal-finance-contracts ul { list-style: none; margin: 0; padding: 0; display: grid; gap: .65rem; }
+.portal-finance-list > li { display: grid; gap: .5rem; padding: .85rem 1rem; border: 1px solid var(--line); border-radius: var(--radius-sm); }
+.portal-finance-row { display: flex; justify-content: space-between; align-items: center; gap: .75rem; }
+.portal-finance-row strong { font-size: 1.1rem; }
+.portal-finance-meter { height: .5rem; border-radius: 999px; background: var(--surface-soft); overflow: hidden; }
+.portal-finance-meter > span { display: block; height: 100%; border-radius: inherit; background: var(--green); }
+.portal-finance-actions { display: flex; flex-wrap: wrap; align-items: center; gap: .4rem 1rem; }
+.portal-finance-actions .portal-text-action { margin: 0; padding: .35rem 0; }
+.portal-finance-contracts h3 { margin: 0 0 .5rem; font-size: .95rem; }
+.portal-finance-contracts li { display: flex; justify-content: space-between; align-items: center; gap: .75rem; padding: .6rem 0; border-top: 1px solid var(--line); }
+.portal-finance-contracts li small { color: var(--muted); margin-left: .35rem; }
+
+.unified-portal-need-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 17rem), 1fr)); gap: .85rem; margin: 0 0 .5rem; }
+.unified-portal-need { display: flex; align-items: flex-start; gap: .85rem; padding: 1rem; text-align: left; min-height: 76px;
+  background: var(--paper); color: var(--ink); border: 1px solid var(--line); border-radius: var(--radius-md); font-weight: 400; }
+.unified-portal-need:hover:not(:disabled) { background: var(--orange-soft); border-color: var(--orange); }
+.unified-portal-need > span:last-child { display: grid; gap: .2rem; min-width: 0; }
+.unified-portal-need small { color: var(--muted); }
+.unified-portal-need .unified-portal-need-client { color: var(--ink); font-weight: 700; }
+.unified-portal-area-icon { flex: none; display: grid; place-items: center; width: 2.5rem; height: 2.5rem; border-radius: 12px; background: var(--orange-soft); }
+.unified-portal-area-icon svg { width: 1.35rem; height: 1.35rem; fill: none; stroke: var(--orange); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.unified-portal-area-web { background: #e8f0fb; }
+.unified-portal-area-web svg { stroke: var(--blue); }
+.unified-portal-area { display: grid; justify-items: start; gap: .55rem; }
+.unified-portal-area strong { font-size: 1.05rem; }
+.unified-portal-quiet { margin: 0; color: var(--muted); }
+@media (max-width: 960px) { .portal-overview-tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 480px) {
+  .portal-overview-tiles { grid-template-columns: 1fr 1fr; gap: .65rem; }
+  .portal-overview-tile { padding: .9rem; }
+  .portal-overview-value { font-size: 1.5rem; }
+  .portal-finance-total { font-size: 1.6rem; }
+  .portal-welcome-split .button-orange { width: 100%; }
+  .portal-finance-actions .button-orange { flex: 1 1 auto; text-align: center; min-height: 44px; }
+}
+
+/* Home order: summary, progress, invoices, projects, activity; services and shared files last. */
+.portal-home { display: flex; flex-direction: column; }
+.portal-home > * { order: 9; }
+.portal-home > .portal-welcome { order: 0; max-width: none; }
+.portal-home > .unified-portal-problems, .portal-home > .unified-portal-chooser { order: 1; }
+.portal-home > .portal-overview-tiles { order: 2; }
+.portal-home > .portal-progress-card { order: 3; }
+.portal-home > .portal-finance { order: 4; }
+.portal-home > .portal-home-projects { order: 5; }
+.portal-home > .portal-home-activity { order: 6; }
+/* Area cards line up whether or not a client name is shown; choices read left to right. */
+.unified-portal-account-list .unified-portal-area { display: flex; flex-direction: column; align-items: flex-start; justify-content: flex-start; gap: .55rem; }
+.unified-portal-account-list .unified-portal-area > p { margin: 0; }
+.unified-portal-account-list .unified-portal-area > button { margin-top: auto; }
+.unified-portal-need { justify-content: flex-start; }
+
+/* ---------------------------------------------------------------------------
+   Header aligned with Operations: menu sits beside the brand with an orange
+   underline for the current page; the account shows an orange initial with the
+   person's details, and the account menu lists session timing above Logout.
+   --------------------------------------------------------------------------- */
+@media (min-width: 961px) {
+  .client-portal-header { grid-template-columns: auto minmax(0, 1fr) auto auto auto; gap: 1.5rem; padding: .55rem max(1rem, calc((100vw - 1440px) / 2)); }
+  .client-portal-top-nav { justify-content: flex-start; align-self: stretch; align-items: stretch; gap: 0; }
+  .client-portal-top-nav a { display: inline-flex; align-items: center; padding: .5rem .78rem; border-radius: 0; border-bottom: 3px solid transparent; font-size: 1rem; font-weight: 700; color: #bfc6cc; background: transparent; }
+  .client-portal-top-nav a:hover { color: #fff; background: transparent; }
+  .client-portal-top-nav a[aria-current=page] { color: var(--orange); background: transparent; border-bottom-color: var(--orange); }
+  .client-portal-top-nav a[aria-current=page]::after { content: none; }
+}
+.portal-account-menu .account-menu-trigger { max-width: min(24rem, 34vw); padding: 4px 6px; border: 1px solid transparent; border-radius: 10px; background: transparent; gap: .6rem; }
+.portal-account-menu .account-menu-trigger:hover, .portal-account-menu .account-menu-trigger[aria-expanded="true"] { background: #ffffff0d; border-color: #ffffff20; }
+.portal-account-menu .account-menu-avatar { background: var(--orange); color: #fff; font-size: .95rem; }
+.portal-account-menu .account-menu-copy small { display: block; overflow: hidden; text-overflow: ellipsis; color: #8f99a2; font-size: .69rem; margin-top: .15rem; }
+.portal-account-menu .account-menu-popover { width: min(240px, calc(100vw - 20px)); }
+.portal-account-menu .account-session-status { display: grid; gap: .2rem; padding: .65rem .75rem; margin-bottom: .2rem; border-bottom: 1px solid #ffffff20; color: #f4f7f9; }
+.portal-account-menu .account-session-status strong { font-size: .9rem; font-variant-numeric: tabular-nums; }
+.portal-account-menu .account-session-status small { color: #c0cbd4; font-size: .75rem; line-height: 1.4; }
+@media (max-width: 960px) {
+  .portal-account-menu .account-menu-trigger { width: 44px; height: 44px; padding: 3px; border-color: #ffffff30; background: #1c252c; }
+}
+.portal-finance-overdue { color: var(--red); }

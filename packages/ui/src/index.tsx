@@ -3,6 +3,7 @@ import type { ViewerSessionGrant, ViewerShellSessionGrant } from "@ltds/shared";
 import { CLOUDFLARE_ACCESS_LOGOUT_PATH } from "./access";
 export { CLOUDFLARE_ACCESS_LOGOUT_PATH } from "./access";
 export { AppDialogHost, requestChoice, requestText, type ChoiceRequest, type TextRequest } from "./app-dialogs";
+export { formatSessionExpiry, formatSessionRemaining } from "./session-time";
 
 /** Generic Ledge Top mark, identical on every domain and product. */
 const LT_MARK_BOX = "238.5 226 776 776", LT_MARK_WHITE = "#f5f3ef", LT_MARK_ORANGE = "#ee5007";
