@@ -48,10 +48,10 @@ function cohort(rows) {
  * owner role as approval. Actual durable bootstrap evidence must match it. */
 export function verifyNativeStaffCutoverReadiness(review, observation, { sourceCommit, now = Date.now(), maxAgeMs = 60_000 } = {}) {
   if (!COMMIT.test(sourceCommit ?? "") || !Number.isSafeInteger(now) || !Number.isSafeInteger(maxAgeMs) || maxAgeMs < 1 || maxAgeMs > 60_000) fail("caller_invalid");
-  if (!exact(review, ["schemaVersion", "sourceCommit", "accountId", "databaseId", "cohort", "bootstrapReceipts"])
-    || review.schemaVersion !== 1 || review.sourceCommit !== sourceCommit
+  if (!exact(review, ["schemaVersion", "sourceCommit", "accountId", "databaseId", "cohort", "handoff", "bootstrapReceipts", "onboardingReceipts"])
+    || review.schemaVersion !== 2 || review.sourceCommit !== sourceCommit
     || review.accountId !== NATIVE_STAFF_PRODUCTION_TARGET.accountId || review.databaseId !== NATIVE_STAFF_PRODUCTION_TARGET.databaseId) fail("review_target_invalid");
-  if (!exact(observation, ["schemaVersion", "accountId", "databaseId", "observedAt", "control", "cohort", "bridgeMismatchCount", "controlPlaneStaffIds", "bootstrapReceipts"])
+  if (!exact(observation, ["schemaVersion", "accountId", "databaseId", "observedAt", "control", "cohort", "bridgeMismatchCount", "controlPlaneStaffIds", "bootstrapReceipts", "onboardingReceipts"])
     || observation.schemaVersion !== 1 || observation.accountId !== review.accountId || observation.databaseId !== review.databaseId
     || !Number.isFinite(Date.parse(observation.observedAt)) || Date.parse(observation.observedAt) > now
     || now - Date.parse(observation.observedAt) > maxAgeMs || observation.bridgeMismatchCount !== 0) fail("observation_invalid_or_stale");
@@ -63,6 +63,13 @@ export function verifyNativeStaffCutoverReadiness(review, observation, { sourceC
     || now - Date.parse(control.lastSuccessAt) > 60_000) fail("cutover_or_reconciliation_pending");
   const reviewed = cohort(review.cohort), actual = cohort(observation.cohort);
   if (!same(reviewed, actual)) fail("reviewed_cohort_changed");
+  // A historical handoff is immutable provenance, not the current lifecycle
+  // state. A newly reviewed release packet still pins every current row above.
+  if (!exact(review.handoff, ["cohort", "controlPlaneStaffIds"])) fail("handoff_invalid");
+  const original = cohort(review.handoff.cohort), originalAdmins = review.handoff.controlPlaneStaffIds;
+  if (!Array.isArray(originalAdmins) || !originalAdmins.length || new Set(originalAdmins).size !== originalAdmins.length
+    || originalAdmins.some(id => !original.some(row => row.staffId === id && row.active))) fail("handoff_control_plane_invalid");
+  const handoffSha256 = hash(canonicalStaffReadiness(original));
   if (!Array.isArray(observation.controlPlaneStaffIds) || !observation.controlPlaneStaffIds.length
     || observation.controlPlaneStaffIds.some(id => !actual.some(row => row.staffId === id && row.active))
     || new Set(observation.controlPlaneStaffIds).size !== observation.controlPlaneStaffIds.length) fail("control_plane_unavailable");
@@ -80,21 +87,73 @@ export function verifyNativeStaffCutoverReadiness(review, observation, { sourceC
       || typeof proof.canonicalPlanJson !== "string" || Buffer.byteLength(proof.canonicalPlanJson) > 262144
       || typeof proof.bindingEvidenceJson !== "string" || Buffer.byteLength(proof.bindingEvidenceJson) > 262144
       || hash(proof.canonicalPlanJson) !== ref.canonicalPlanSha256 || hash(proof.bindingEvidenceJson) !== ref.bindingEvidenceSha256
-      || !actual.some(row => row.staffId === ref.operatorStaffId && row.accessSubject === ref.operatorSubject && row.active)) fail("bootstrap_proof_invalid");
+      || !originalAdmins.includes(ref.operatorStaffId)
+      || !original.some(row => row.staffId === ref.operatorStaffId && row.accessSubject === ref.operatorSubject && row.active)) fail("bootstrap_proof_invalid");
     let plan, evidence;
     try { plan = JSON.parse(proof.canonicalPlanJson); evidence = JSON.parse(proof.bindingEvidenceJson); } catch { fail("bootstrap_json_invalid"); }
-    const cohortSha256 = hash(canonicalStaffReadiness(actual));
     if (!exact(plan, ["kind", "cohortSha256", "controlPlaneStaffIds"])
-      || plan.kind !== "operations-native-staff-cutover-v1" || plan.cohortSha256 !== cohortSha256
+      || plan.kind !== "operations-native-staff-cutover-v1" || plan.cohortSha256 !== handoffSha256
       || !Array.isArray(plan.controlPlaneStaffIds)
-      || !same([...plan.controlPlaneStaffIds].sort(), [...observation.controlPlaneStaffIds].sort())
+      || !same([...plan.controlPlaneStaffIds].sort(), [...originalAdmins].sort())
       || !exact(evidence, ["kind", "cohortSha256", "operatorStaffId", "operatorSubject"])
-      || evidence.kind !== "operations-native-staff-binding-review-v1" || evidence.cohortSha256 !== cohortSha256
+      || evidence.kind !== "operations-native-staff-binding-review-v1" || evidence.cohortSha256 !== handoffSha256
       || evidence.operatorStaffId !== ref.operatorStaffId || evidence.operatorSubject !== ref.operatorSubject) fail("staff_cutover_review_purpose_invalid");
+  }
+  const approvedAdditions = onboardingBindings(review.onboardingReceipts, observation.onboardingReceipts);
+  const binding = row => [row.staffId, row.email, row.accessSubject];
+  for (const row of original) {
+    const current = actual.find(r => r.staffId === row.staffId);
+    if (!current || !same(binding(current), binding(row)) || current.admissionVersion < row.admissionVersion
+      || current.profileVersion < row.profileVersion) fail("historical_binding_changed_or_missing");
+  }
+  for (const row of actual) {
+    if (original.some(r => r.staffId === row.staffId)) continue;
+    if (!approvedAdditions.some(r => same(binding(r), binding(row)))) fail("staff_binding_provenance_missing");
   }
   return Object.freeze({ schemaVersion: 1, sourceCommit, accountId: review.accountId, databaseId: review.databaseId,
     reviewSha256: hash(canonicalStaffReadiness(review)), cohortSha256: hash(canonicalStaffReadiness(actual)),
     observedAt: observation.observedAt, staffCount: actual.length, generation: control.generation });
+}
+
+// These are existing immutable authorized command receipts, not an approval
+// inferred from a pending row, current role, email match or caller boolean.
+function onboardingBindings(references, observations) {
+  const refs = boundedRows(references), proofs = boundedRows(observations), bindings = [];
+  if (new Set(refs.map(r => r.commandId)).size !== refs.length) fail("onboarding_reference_invalid");
+  for (const ref of refs) {
+    if (!exact(ref, ["commandId", "resultSha256", "createCommandId", "createResultSha256"])
+      || typeof ref.commandId !== "string" || !ref.commandId || typeof ref.createCommandId !== "string" || !ref.createCommandId
+      || !SHA.test(ref.resultSha256) || !SHA.test(ref.createResultSha256)) fail("onboarding_reference_invalid");
+    const matches = proofs.filter(p => p.commandId === ref.commandId);
+    if (matches.length !== 1) fail("onboarding_proof_missing");
+    const p = matches[0];
+    if (!exact(p, ["commandId", "resultSha256", "resultJson", "createCommandId", "createResultSha256", "createResultJson",
+      "onboardingId", "staffId", "email", "accessSubject", "displayName", "proposalJson", "proposalSha256", "claimEvidenceSha256", "valid"])
+      || p.valid !== 1 || !same(ref, Object.fromEntries(Object.keys(ref).map(key => [key, p[key]])))
+      || !SHA.test(p.proposalSha256) || !SHA.test(p.claimEvidenceSha256)
+      || [p.resultJson, p.createResultJson, p.proposalJson].some(json => typeof json !== "string" || Buffer.byteLength(json) > 262144)
+      || hash(p.resultJson) !== p.resultSha256 || hash(p.createResultJson) !== p.createResultSha256
+      || hash(p.proposalJson) !== p.proposalSha256) fail("onboarding_proof_invalid");
+    let result, created, proposal;
+    try { result = JSON.parse(p.resultJson); created = JSON.parse(p.createResultJson); proposal = JSON.parse(p.proposalJson); }
+    catch { fail("onboarding_proof_invalid"); }
+    if (!exact(result, ["contractVersion", "capability", "targetOnboardingId", "proposedStaffId", "proposalSha256", "claimEvidenceSha256", "claimedAccessSubject", "proposal", "resultVersion"])
+      || result.contractVersion !== 1 || result.capability !== "staff.onboarding.approve" || result.resultVersion !== 3
+      || result.targetOnboardingId !== p.onboardingId || result.proposedStaffId !== p.staffId
+      || result.claimedAccessSubject !== p.accessSubject || result.proposalSha256 !== p.proposalSha256
+      || result.claimEvidenceSha256 !== p.claimEvidenceSha256 || !same(result.proposal, proposal)
+      || !exact(created, ["contractVersion", "capability", "onboardingId", "proposedStaffId", "loginEmail", "displayName", "expiresAt", "proposal", "proposalSha256", "invitationSecretSha256", "resultVersion"])
+      || created.contractVersion !== 1 || created.capability !== "staff.onboarding.create" || created.resultVersion !== 1
+      || created.onboardingId !== p.onboardingId || created.proposedStaffId !== p.staffId || created.loginEmail !== p.email
+      || created.displayName !== p.displayName || created.proposalSha256 !== p.proposalSha256 || !same(created.proposal, proposal)
+      || !SHA.test(created.invitationSecretSha256) || !Number.isFinite(Date.parse(created.expiresAt))) fail("onboarding_identity_invalid");
+    // Reuse strict identity shape validation without pretending initial versions
+    // or activity still describe this person's current lifecycle state.
+    bindings.push(...cohort([{ staffId:p.staffId,email:p.email,accessSubject:p.accessSubject,
+      displayName:p.displayName,active:true,admissionVersion:1,profileVersion:1 }]));
+  }
+  if (new Set(bindings.map(r => r.staffId)).size !== bindings.length) fail("onboarding_proof_ambiguous");
+  return bindings;
 }
 
 // Finite read-only SQL. No caller text, table identifier, email or staff ID is
@@ -122,6 +181,27 @@ export const NATIVE_STAFF_READINESS_QUERIES = Object.freeze({
       AND julianday(r.executed_at)>=julianday(a.issued_at) AND julianday(r.executed_at)<julianday(a.expires_at)
     THEN 1 ELSE 0 END AS valid FROM native_staff_bootstrap_receipts r
     JOIN native_staff_bootstrap_approvals a ON a.approval_id=r.approval_id ORDER BY r.command_id LIMIT 129`,
+  onboarding: `SELECT c.command_id AS commandId,c.result_sha256 AS resultSha256,c.result_json AS resultJson,
+    created.command_id AS createCommandId,created.result_sha256 AS createResultSha256,created.result_json AS createResultJson,
+    p.onboarding_id AS onboardingId,p.proposed_staff_id AS staffId,p.login_email AS email,p.claimed_access_subject AS accessSubject,
+    p.display_name AS displayName,p.proposal_json AS proposalJson,p.proposal_sha256 AS proposalSha256,p.claim_evidence_sha256 AS claimEvidenceSha256,
+    CASE WHEN p.state='approved' AND p.version=3 AND p.contract_version=1
+      AND c.contract_version=1 AND c.authority_domain='staff_admin' AND c.target_kind='onboarding' AND c.target_staff_id IS NULL
+      AND c.target_proposed_staff_id=p.proposed_staff_id AND c.expected_version=2 AND c.result_version=3
+      AND c.actor_staff_id=p.terminal_by_staff_id AND julianday(c.executed_at)>=julianday(p.claimed_at)
+      AND julianday(c.executed_at)<julianday(p.expires_at) AND julianday(p.terminal_at)<julianday(p.expires_at)
+      AND created.contract_version=1 AND created.authority_domain='staff_admin' AND created.target_kind='onboarding'
+      AND created.target_staff_id IS NULL AND created.target_proposed_staff_id=p.proposed_staff_id
+      AND created.expected_version=0 AND created.result_version=1 AND created.actor_staff_id=p.created_by_staff_id
+      AND created.actor_access_subject=p.created_by_subject
+      AND json_extract(created.result_json,'$.expiresAt')=p.expires_at
+      AND julianday(created.executed_at)<=julianday(p.claimed_at)
+      THEN 1 ELSE 0 END AS valid
+    FROM native_staff_pending_onboarding p JOIN native_staff_management_commands c
+      ON c.command_id=p.approval_command_id AND c.target_onboarding_id=p.onboarding_id AND c.capability='staff.onboarding.approve'
+    JOIN native_staff_management_commands created
+      ON created.target_onboarding_id=p.onboarding_id AND created.capability='staff.onboarding.create'
+    ORDER BY c.command_id LIMIT 1025`,
 });
 function jsonRows(query, keys) {
   return `(SELECT json_group_array(json_object(${keys.map(key => `'${key}',r."${key}"`).join(",")})) FROM (${query}) r)`;
@@ -134,7 +214,8 @@ export const NATIVE_STAFF_READINESS_SNAPSHOT_QUERY = `SELECT json_object(
   'cohort',json(${jsonRows(NATIVE_STAFF_READINESS_QUERIES.cohort, ["staffId", "email", "accessSubject", "displayName", "active", "admissionVersion", "profileVersion"])}),
   'bridgeMismatchCount',(SELECT count FROM (${NATIVE_STAFF_READINESS_QUERIES.bridge})),
   'controlPlaneStaffIds',json((SELECT json_group_array(staffId) FROM (${NATIVE_STAFF_READINESS_QUERIES.controlPlane}))),
-  'bootstrapReceipts',json(${jsonRows(NATIVE_STAFF_READINESS_QUERIES.bootstrap, ["approvalId", "commandId", "canonicalPlanSha256", "bindingEvidenceSha256", "operatorStaffId", "operatorSubject", "canonicalPlanJson", "bindingEvidenceJson", "valid"])})
+  'bootstrapReceipts',json(${jsonRows(NATIVE_STAFF_READINESS_QUERIES.bootstrap, ["approvalId", "commandId", "canonicalPlanSha256", "bindingEvidenceSha256", "operatorStaffId", "operatorSubject", "canonicalPlanJson", "bindingEvidenceJson", "valid"])}),
+  'onboardingReceipts',json(${jsonRows(NATIVE_STAFF_READINESS_QUERIES.onboarding, ["commandId", "resultSha256", "resultJson", "createCommandId", "createResultSha256", "createResultJson", "onboardingId", "staffId", "email", "accessSubject", "displayName", "proposalJson", "proposalSha256", "claimEvidenceSha256", "valid"])})
 ) AS readiness_snapshot`;
 function rows(output) {
   let value; try { value = typeof output === "string" ? JSON.parse(output) : output; } catch { fail("reader_json_invalid"); }
@@ -183,7 +264,7 @@ export async function readNativeStaffCutoverReadiness({ review, sourceCommit, re
     if (selectedRows.length !== 1 || typeof selectedRows[0].readiness_snapshot !== "string"
       || Buffer.byteLength(selectedRows[0].readiness_snapshot) > 16 * 1024 * 1024 || now() - started > 60_000) fail("read_state_invalid");
     let selected; try { selected = JSON.parse(selectedRows[0].readiness_snapshot); } catch { fail("read_state_invalid"); }
-    if (!exact(selected, ["control", "cohort", "bridgeMismatchCount", "controlPlaneStaffIds", "bootstrapReceipts"])) fail("read_state_invalid");
+    if (!exact(selected, ["control", "cohort", "bridgeMismatchCount", "controlPlaneStaffIds", "bootstrapReceipts", "onboardingReceipts"])) fail("read_state_invalid");
     if (!Array.isArray(selected.cohort) || selected.cohort.length > 1024 || selected.cohort.some(row => row.active !== 0 && row.active !== 1)) fail("cohort_active_invalid");
     const observation = { schemaVersion: 1, accountId: target.accountId, databaseId: target.databaseId,
       observedAt: new Date(started).toISOString(), ...selected, cohort: selected.cohort.map(row => ({ ...row, active: row.active === 1 })) };

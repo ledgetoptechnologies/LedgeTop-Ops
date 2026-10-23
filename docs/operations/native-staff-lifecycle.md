@@ -87,10 +87,56 @@ finite SELECT snapshot and produces only a count/hash receipt. It requires:
 - Existing unrevoked durable bootstrap approval/receipt evidence whose original
   plan and independent binding evidence hashes match the reviewed references.
   The plan must explicitly identify `operations-native-staff-cutover-v1`, its
-  exact `cohortSha256`, and observed `controlPlaneStaffIds`; binding evidence
+  original handoff `cohortSha256`, and original approved `controlPlaneStaffIds`; binding evidence
   identifies `operations-native-staff-binding-review-v1`, the same cohort hash
   and operator identity. Directory-only maintenance approvals cannot authorize
   this handoff retroactively.
+
+### Historical handoff and current release state
+
+The private review packet uses `schemaVersion: 2`. It separates
+`handoff: { cohort, controlPlaneStaffIds }`, the immutable originally approved
+snapshot, from `cohort`, the exact freshly reviewed current release snapshot.
+Both cohorts contain staff ID, email, bound subject, display name, activity and
+admission/profile versions. The bootstrap plan and binding-evidence hashes bind
+the **handoff** cohort. Its operator must have been active and listed in that
+original approved control plane. They need not remain active forever.
+
+The fresh database state must still match the current reviewed cohort exactly,
+including current versions, and have a currently usable control plane. An
+authorized display-name edit, disable/re-enable, or reviewed administrator
+succession therefore requires an updated release review, not another privileged
+bootstrap. Removing an old handoff identity or changing its email/subject is
+refused. Current versions cannot precede their original handoff versions.
+
+`onboardingReceipts` lists explicit `{ commandId, resultSha256, createCommandId,
+createResultSha256 }` references for staff added after handoff. Each new binding
+must match immutable authorized `staff.onboarding.create` and
+`staff.onboarding.approve` command results joined to the terminal approved
+onboarding record. The reader verifies result/proposal hashes, exact proposed
+staff ID, created email, claimed subject, command/actor/version linkage and
+execution ordering. A pending row, current administrator role, matching email,
+or a caller's approval boolean does not establish this provenance. The command
+tables' existing authorization triggers establish authority at execution;
+current permissions are not retrospectively substituted for that authority.
+
+The observer reads these proofs in the same fixed bounded primary snapshot.
+There are at most 1,024 cohort/onboarding rows and 128 bootstrap references;
+over-capacity, absent, ambiguous or inconsistent evidence refuses. This does not
+implement staff onboarding, identity recovery, retrospective grant validation or
+a new approval writer. An existing binding change remains unsupported and
+requires a separately designed reviewed recovery proof. It is not silently
+accepted by updating the current cohort packet. The public readiness receipt
+stays at schema version 1 and exposes only source/target, hashes, count and
+generation; no identities or command bodies are emitted.
+
+The earlier source contract compared immutable handoff hashes to the mutable
+current cohort and required the original operator to stay active. That would
+have blocked later releases after ordinary authorized staff changes. Continuity
+regressions now explicitly cover profile edits, admission-version advances,
+onboarding with durable provenance, and retirement of the original operator.
+Tests of synthetic proof data do not establish that any real handoff or new
+staff approval has occurred.
 
 The observer cannot install or execute that reviewed maintenance handoff. A
 private JSON packet or a boolean alone creates no authorization. Normal builds
