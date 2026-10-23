@@ -203,15 +203,22 @@ additive schema with routes off is preferable to dropping durable command/audit
 records; restoration or a forward fix needs its own reviewed plan.
 
 The canonical local joined test now rehearses the populated Ops 0221 and Client
-0234 baselines before applying this exact suffix. Its final run passed in
-222.03 seconds under the existing 240-second test deadline. It compares every
+0234 baselines before applying this exact suffix. Its expanded run passed in
+289.75 seconds under a 360-second deadline for this one test. It compares every
 pre-existing application table row and schema definition, permits only the
 named migration entries and exact permission/role-link additions, then runs the
 native producer, signed human JWT, Unicode catalog, durable reference,
-publication refresh, conditional R2 range, audit and revoke checks. Foreign-key
-checks pass. This uses synthetic local Miniflare D1/R2, not a copy of remote
-client data or a remote Wrangler apply. It does not test an interrupted apply,
-restore a backup, or execute the fixture's separate post-ready public-link suite.
+publication refresh, conditional R2 range, audit and revoke checks. For each of
+the five files it now forces a late ledger uniqueness failure after the exact
+DDL/data and normal ledger insert. Each failed local batch restores the exact
+per-boundary schema, every prior application row/grant/ledger and FK0. A successful
+commit then deliberately loses its observer acknowledgement; reads confirm the
+committed file without replay while retaining each database's independent prefix.
+The receipt is `staging/windows-migration-failure-acceptance-2026-10-22.json`.
+This uses synthetic local Miniflare D1/R2, not remote client data or a remote
+Wrangler apply. It does not simulate an actual socket/process interruption,
+qualify remote apply atomicity or a generic reconciler, restore a backup, or
+execute the fixture's separate post-ready public-link suite.
 
 Engineering Hub currently reports autonomous execution disabled. Its existing
 Windows task is in review with the exact candidate above; there is no execution receipt. Source preparation
@@ -238,6 +245,11 @@ the nonroot service user. Bound CPU, memory, spool, concurrency and logs. Do not
 mount `/mnt`, a home directory, a Docker socket or a NAS source into the service.
 
 Provide reviewed private TLS ingress to the configured fixed gateway origin.
+The three gateway Dockerfiles now pin the same official multi-platform Python
+index; its actual Linux amd64 test image passed 67/67 checks with network disabled,
+read-only root, dropped capabilities, nonroot execution and no host/volume mounts.
+See `staging/windows-gateway-base-image-provenance-2026-10-22.json`. This qualifies
+the tested local base/runtime, not a deployed service or the host's TLS setup.
 The service's default loopback HTTP listener is not a public endpoint. Prove
 unsigned, wrong-key, expired and replayed requests fail, and that a valid signed
 request cannot select an unenrolled root. Record ingress/header/time limits.

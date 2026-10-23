@@ -64,9 +64,13 @@ Those paths need coordinated release and recovery review before a main rollout.
 - The gateway verifies immutable snapshots; the Worker validates metadata and
   framing. Final SHA-256 verification occurs in the Windows downloader. The
   Worker does not independently hash the entire stream.
-- Before a staging host build, record an immutable gateway base-image digest,
-  exact TLS reverse-proxy/certificate pin setup and sufficient snapshot storage.
-  Source review does not establish those host facts.
+- The gateway base is now pinned to a registry-verified immutable multi-platform
+  index. Its actual local Linux amd64 test image passed 67/67 on Python3.14.9
+  under restricted container settings. Other architectures and the production/
+  transport images were not built in that check. Before a staging host build,
+  retain the actual resulting image identity, exact TLS reverse-proxy/certificate
+  pin setup and sufficient snapshot storage; local review does not establish
+  those host facts.
 - Root identity uses device/inode and fails closed on a changed mount. A remount
   requires explicit reviewed re-enrollment and new provisioning; never silently
   adopt the replacement root or its previous grants.
