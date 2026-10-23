@@ -5,6 +5,10 @@ export interface Env {
   DELIVERY_DB: D1Database;
   DATA_BUCKET: R2Bucket;
   ASSETS: Fetcher;
+  /** Optional additive UI HTTP service. Absence never changes legacy presentation. */
+  UI_RELEASE_ASSETS?: Pick<Fetcher, "fetch">;
+  /** Exact reviewed catalog release; empty/absent retains the installed shell. */
+  UI_ACTIVE_RELEASE?: string;
   STREAM: { video(id: string): { generateToken(): Promise<string> } };
   ACCESS_CODE_RATE_LIMITER: RateLimit;
   PUBLIC_SESSION_RATE_LIMITER: RateLimit;

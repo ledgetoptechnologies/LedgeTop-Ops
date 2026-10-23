@@ -201,6 +201,7 @@ import { registerNotificationCenterRoutes } from "./notification-center";
 import { registerStaffInboxRequestRoutes } from "./staff-inbox-requests";
 import { registerNativeDeliveryBindingRoutes } from "./native-delivery-binding-routes";
 import { dispatchOperationsPortalNativeOwnerRequest } from "./operations-portal-native-owner-routes";
+import { dispatchOperationsUiReleaseRequest } from "./ui-release-routes";
 import { registerInvitationReviewRoutes } from "./invitation-review-routes";
 import { reconcileClientHubIndex } from "./client-hub-index";
 import {
@@ -3457,6 +3458,10 @@ app.post("/api/admin/integrations/project-alpha/sync", async (c) => {
   return c.json(clientPortalReconciliation ? { ...result, clientPortalReconciliation } : result);
 });
 
+app.all("*", async c => {
+  const presentation = await dispatchOperationsUiReleaseRequest(c.req.raw, c.env);
+  return presentation ?? c.notFound();
+});
 app.notFound((c) => c.json({ error: "Not found" }, 404));
 app.onError((error, c) => {
   if (error instanceof PortalSourceAuthorityError) {
