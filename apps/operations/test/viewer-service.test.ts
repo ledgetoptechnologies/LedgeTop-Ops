@@ -190,6 +190,43 @@ describe("Viewer service client", () => {
     await expect(client.listModels()).rejects.toMatchObject({ code: "invalid_response" });
   });
 
+  it("keeps ready models usable alongside explicit unavailable unversioned catalog summaries", async () => {
+    // Service catalog DTO, not the browser/session rendering configuration:
+    // unpublished records remain real summaries with a nullable activeVersion.
+    const unpublished = {
+      id: "model-unpublished", title: "Awaiting processing", provider: "webodm", status: "unregistered",
+      updatedAt: "2026-10-20T12:00:00.000Z", available: false, activeVersion: null,
+    };
+    const ready = {
+      id: "model-ready", title: "Published map", provider: "webodm", status: "ready",
+      updatedAt: "2026-10-20T12:01:00.000Z", available: true,
+      activeVersion: { id: "version-ready", providerVersionId: "upstream-ready",
+        createdAt: "2026-10-20T12:00:00.000Z", updatedAt: "2026-10-20T12:01:00.000Z" },
+    };
+    const fetcher = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      expect(String(input)).toBe("https://viewer.example.test/api/v1/models");
+      expect(new Headers(init?.headers).get("X-LTDS-Key-Id")).toBe("ops-v1");
+      return Response.json({ models: [unpublished, ready] });
+    });
+    const client = new ViewerServiceClient({ baseUrl: "https://viewer.example.test", keyId: "ops-v1", secret }, fetcher as typeof fetch);
+    const catalog = await client.listModels();
+    expect(catalog).toEqual([unpublished, ready]);
+    expect(catalog.filter(item => item.available && item.status === "ready" && item.activeVersion)).toEqual([ready]);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects the whole mixed catalog when an unpublished record is serialized as null", async () => {
+    const ready = {
+      id: "model-ready", title: "Published map", provider: "webodm", status: "ready",
+      updatedAt: "2026-10-20T12:01:00.000Z", available: true,
+      activeVersion: { id: "version-ready", providerVersionId: "upstream-ready",
+        createdAt: "2026-10-20T12:00:00.000Z", updatedAt: "2026-10-20T12:01:00.000Z" },
+    };
+    const client = new ViewerServiceClient({ baseUrl: "https://viewer.example.test", keyId: "ops-v1", secret },
+      vi.fn(async () => Response.json({ models: [ready, null] })) as typeof fetch);
+    await expect(client.listModels()).rejects.toMatchObject({ code: "invalid_response" });
+  });
+
   it("accepts only the bounded aggregate Viewer overview contract", async () => {
     const overview = {
       schemaVersion: 1 as const,
