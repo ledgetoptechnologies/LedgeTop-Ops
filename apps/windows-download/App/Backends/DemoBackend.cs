@@ -81,7 +81,9 @@ public sealed class DemoBackend : IFilesBackend
         return sections.Select(section => Search(section, key)).FirstOrDefault(found => found is not null);
     }
 
-    public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+    /// <summary>How many times the app released this backend (tests).</summary>
+    public int Disposals { get; private set; }
+    public ValueTask DisposeAsync() { Disposals++; return ValueTask.CompletedTask; }
 
     internal sealed class DemoState
     {

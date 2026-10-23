@@ -10,7 +10,8 @@
     <RootNamespace>LedgeTop.Files.Tests</RootNamespace>
   </PropertyGroup>
   <ItemGroup>
-    <ProjectReference Include="../App/WindowsDownload.App.csproj" />
+    <!-- The acceptance harness drives demo and developer startup, so it builds the app as an explicit developer build. -->
+    <ProjectReference Include="../App/WindowsDownload.App.csproj" AdditionalProperties="LedgeTopDeveloperBuild=true" />
     <ProjectReference Include="../Core/WindowsDownload.Core.csproj" />
     <Using Include="System.IO" />
   </ItemGroup>

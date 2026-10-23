@@ -269,13 +269,14 @@ public sealed class MainViewModel : Observable, IAsyncDisposable
         var problem = Text.DestinationProblem(Destination);
         if (problem is not null) { Notice = problem; return; }
         Directory.CreateDirectory(Destination);
-        var taken = new List<string>(); var already = 0;
+        var taken = new List<string>(); var already = 0; var unsafeNames = 0;
         foreach (var row in chosen) {
             var reference = await backend.Catalog.GetReferenceAsync(row.File);
             if (queue != host) return;
             switch (await host.EnqueueAsync(row.File.SourceAlias, reference, row.File.Name, Destination)) {
                 case EnqueueOutcome.NameTaken: taken.Add(row.File.Name); break;
                 case EnqueueOutcome.AlreadyQueued: already++; break;
+                case EnqueueOutcome.UnsafeName: unsafeNames++; break;
                 default: row.IsChecked = false; break;
             }
         }
@@ -286,6 +287,8 @@ public sealed class MainViewModel : Observable, IAsyncDisposable
                 ? $"{taken[0]} is already in this folder, so it wasn't downloaded again. Move it or choose another folder."
                 : $"{taken.Count} files are already in this folder, so they weren't downloaded again. Move them or choose another folder.",
             already == 0 ? "" : already == 1 ? "One file was already in your downloads." : $"{already} files were already in your downloads.",
+            unsafeNames == 0 ? "" : unsafeNames == 1 ? "One file has a name Windows can't save safely, so it was skipped. Ask your Ledge Top contact to rename it."
+                : $"{unsafeNames} files have names Windows can't save safely, so they were skipped. Ask your Ledge Top contact to rename them.",
             skipped == 0 ? "" : skipped == 1 ? "One file couldn't be verified yet and was skipped." : $"{skipped} files couldn't be verified yet and were skipped.",
         }.Where(part => part.Length > 0));
         await RefreshTransfersAsync();
@@ -374,6 +377,7 @@ public sealed class MainViewModel : Observable, IAsyncDisposable
     /// <summary>
     /// Stops and saves this person's downloads and releases their queues. Closing twice (window and owner) waits on the
     /// same shutdown. A queue still opening (sign-in finishing while the window closes) is released too.
+    /// The model owns its backend, so the backend's connections are released last, after every queue.
     /// </summary>
     public ValueTask DisposeAsync() => new(closing ??= CloseAsync());
 
@@ -395,6 +399,7 @@ public sealed class MainViewModel : Observable, IAsyncDisposable
                 try { await late.DisposeAsync(); } catch (Exception error) { failure ??= error; }
             }
         }
+        try { await backend.DisposeAsync(); } catch (Exception error) { failure ??= error; }
         if (failure is not null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Throw(failure);
     }
 }

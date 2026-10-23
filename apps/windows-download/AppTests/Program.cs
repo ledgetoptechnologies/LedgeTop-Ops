@@ -32,6 +32,10 @@ var groups = new (string Name, Func<Task> Run)[] {
     ("closing during startup or sign-in opens nothing and leaves no queue locked", CloseBeforeSignedIn),
     ("closing the window waits for downloads to stop and save, even with sign-in stuck", CloseWindow),
     ("closing while the previous person's downloads are still stopping waits for them and opens nothing new", CloseDuringSwitch),
+    ("hostile listed names never reach the file system; safe names keep the overwrite check", HostileNames),
+    ("closing waits for pause all to save waiting items as paused", PauseAllSavedBeforeClose),
+    ("closing fences a start that was already past its list check", NoStartAfterClose),
+    ("closing releases the backend once, after its queues", BackendReleased),
     ("the window renders sign-in and files screens", Render),
 };
 foreach (var group in groups) {
@@ -429,11 +433,20 @@ async Task PackagedReleases()
 
         // Compiled channel parsing: exact lowercase values only; anything else is an unknown release.
         static System.Reflection.AssemblyMetadataAttribute M(string value) => new(ReleaseProfiles.ChannelKey, value);
-        Equal((false, (ReleaseChannel?)null), ReleaseProfiles.Compiled([]));
+        static System.Reflection.AssemblyMetadataAttribute D(string value) => new(ReleaseProfiles.BuildModeKey, value);
         Equal((true, (ReleaseChannel?)ReleaseChannel.Pilot), ReleaseProfiles.Compiled([M("pilot")]));
         Equal((true, (ReleaseChannel?)ReleaseChannel.Stable), ReleaseProfiles.Compiled([M("stable"), new System.Reflection.AssemblyMetadataAttribute("Other", "x")]));
         foreach (var odd in new System.Reflection.AssemblyMetadataAttribute[][] { [M("Pilot")], [M("beta")], [M("")], [M("pilot"), M("stable")], [M("pilot"), M("pilot")] })
             Equal((true, (ReleaseChannel?)null), ReleaseProfiles.Compiled(odd));
+        // A build with neither a channel nor the explicit developer opt-in (a plain Release build) fails closed;
+        // so do mixed and malformed developer markers. Only the exact opt-in alone is a developer build.
+        Equal((false, (ReleaseChannel?)null), ReleaseProfiles.Compiled([D("developer")]));
+        foreach (var odd in new System.Reflection.AssemblyMetadataAttribute[][] { [], [new("Other", "developer")], [D("Developer")], [D("true")], [D("")],
+            [D("developer"), D("developer")], [D("developer"), M("pilot")], [M("pilot"), D("developer")] })
+            Equal((true, (ReleaseChannel?)null), ReleaseProfiles.Compiled(odd));
+        var plain = Run(ReleaseProfiles.Compiled([]), channel => Profile(channel), "--demo", "--demo-signed-in");
+        True(plain.Backend is null && plain.Problem == Startup.UnknownReleaseProblem, "a plain Release build shows neither demo data nor developer setup");
+        // This harness builds the app with the explicit opt-in.
         Equal((false, (ReleaseChannel?)null), ReleaseProfiles.Compiled(typeof(App).Assembly));
 
         // Developer builds keep explicit demo and the developer settings file, with their own folder.
@@ -640,6 +653,109 @@ async Task Render()
 }
 
 // ---------------------------------------------------------------------------------------------
+
+async Task<(DemoBackend Backend, QueueHost Host, string Root, string Downloads, Func<string, Task<string>> Reference)> HostFixture(double rate = 40_000_000)
+{
+    var root = Path.Combine(Path.GetTempPath(), "ltfiles-host-" + Guid.NewGuid().ToString("N"));
+    var downloads = Path.Combine(root, "Downloads"); Directory.CreateDirectory(downloads);
+    var backend = new DemoBackend(Path.Combine(root, "queue"), signedIn: true, bytesPerSecond: rate);
+    var deliveries = (await backend.Catalog.GetSectionsAsync()).Single(node => node.Key == "deliveries");
+    var land = (await backend.Catalog.GetChildrenAsync(deliveries)).Nodes.Single(node => node.Key == "land-script");
+    var files = (await backend.Catalog.ListAsync(land)).Files;
+    async Task<string> Reference(string name) => await backend.Catalog.GetReferenceAsync(files.Single(file => file.Name == name));
+    return (backend, await QueueHost.OpenAsync(backend.StateDirectory, backend.Sources), root, downloads, Reference);
+}
+static int SavedStates(string stateDirectory, string state) =>
+    Directory.EnumerateFiles(stateDirectory, "queue.json", SearchOption.AllDirectories)
+        .Sum(file => System.Text.RegularExpressions.Regex.Matches(File.ReadAllText(file), "\"state\":\"" + state + "\"", System.Text.RegularExpressions.RegexOptions.IgnoreCase).Count);
+
+async Task HostileNames()
+{
+    var (backend, host, root, downloads, reference) = await HostFixture();
+    try {
+        var report = await reference("report.pdf");
+        var probed = new List<string>();
+        host.Hooks.Exists = path => { probed.Add(path); return File.Exists(path) || Directory.Exists(path); };
+        var checks = backend.SourceChecks;
+        foreach (var name in new[] { @"\attacker.example\share\report.pdf", @"\?\C:\Windows\win.ini", @"C:\Windows\win.ini", @"C:report.pdf",
+            @"..\outside.pdf", "sub/report.pdf", @"sub\report.pdf", "report.pdf:stream", "CON", "lpt1.txt", "COM¹.dat", "aux .txt",
+            "invoice\u202Efdp.exe", "zero\u200Bwidth.pdf", "line\u2028break.pdf", "bad\0name.pdf", "bad\uD800name.pdf", "trailing.", "trailing ", "", ".", "..",
+            new string('a', 151) }) {
+            Equal(EnqueueOutcome.UnsafeName, await host.EnqueueAsync("portal", report, name, downloads));
+        }
+        Equal(0, probed.Count);
+        Equal(checks, backend.SourceChecks);
+        Equal(0, (await host.SnapshotAsync()).Count);
+        // A plain name keeps the friendly overwrite refusal, probing exactly that name inside the chosen folder.
+        await File.WriteAllTextAsync(Path.Combine(downloads, "report.pdf"), "keep me");
+        Equal(EnqueueOutcome.NameTaken, await host.EnqueueAsync("portal", report, "report.pdf", downloads));
+        Equal(Path.Combine(downloads, "report.pdf"), probed.Single());
+        Equal("keep me", await File.ReadAllTextAsync(Path.Combine(downloads, "report.pdf")));
+        foreach (var name in new[] { "café.pdf", "cafe\u0301.pdf", "測量図.pdf", "property-\U0001F3E1.pdf", "PIN-20261020113.kml", "a.b.c" })
+            True(QueueHost.IsPlainFileName(name), name + " is a plain name");
+    } finally { await host.DisposeAsync(); try { Directory.Delete(root, true); } catch (IOException) { } }
+}
+
+async Task PauseAllSavedBeforeClose()
+{
+    var (backend, host, root, downloads, reference) = await HostFixture(rate: 300_000);
+    var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    try {
+        Equal(EnqueueOutcome.Added, await host.EnqueueAsync("portal", await reference("ortho-full.tif"), "ortho-full.tif", downloads));
+        Equal(EnqueueOutcome.Added, await host.EnqueueAsync("portal", await reference("report.pdf"), "report.pdf", downloads));
+        await Until(() => host.IsBusy && backend.Writing == 1, "first download running");
+        await host.SnapshotAsync();
+        host.Hooks.BeforeHeldPersist = () => gate.Task;
+        await host.PauseAllAsync();
+        var closing = host.DisposeAsync().AsTask();
+        await Task.Delay(400);
+        True(!closing.IsCompleted, "closing waits while the held item is still being saved");
+        gate.SetResult();
+        await closing.WaitAsync(TimeSpan.FromSeconds(30));
+        Equal(2, SavedStates(backend.StateDirectory, "paused"));
+        Equal(0, SavedStates(backend.StateDirectory, "queued"));
+    } finally { gate.TrySetResult(); await host.DisposeAsync(); try { Directory.Delete(root, true); } catch (IOException) { } }
+}
+
+async Task NoStartAfterClose()
+{
+    var (backend, host, root, downloads, reference) = await HostFixture();
+    var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    try {
+        var reached = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        host.Hooks.AfterSnapshot = () => { reached.TrySetResult(); return gate.Task; };
+        var starts = 0; host.Hooks.Starting = _ => Interlocked.Increment(ref starts);
+        var report = await reference("report.pdf");
+        Equal(EnqueueOutcome.Added, await host.EnqueueAsync("portal", report, "report.pdf", downloads));
+        await reached.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        await host.DisposeAsync();
+        var checks = backend.SourceChecks;
+        gate.SetResult();
+        await Task.Delay(500);
+        Equal(0, Volatile.Read(ref starts));
+        Equal(checks, backend.SourceChecks);
+        Equal(0, backend.Writing);
+        Equal(1, SavedStates(backend.StateDirectory, "queued"));
+        True(!File.Exists(Path.Combine(downloads, "report.pdf")), "nothing downloaded after closing");
+    } finally { gate.TrySetResult(); await host.DisposeAsync(); try { Directory.Delete(root, true); } catch (IOException) { } }
+}
+
+async Task BackendReleased()
+{
+    await using var env = Env.Create(signedIn: true, rate: 600_000);
+    await env.Model.StartAsync();
+    await env.OpenAsync("deliveries", "land-script");
+    env.Check("ortho-full.tif");
+    env.Model.DownloadSelected.Execute(null);
+    await Until(() => env.Model.Transfers.Any(row => row.State == QueuedTransferState.Running), "download running");
+    Equal(0, env.Backend.Disposals);
+    await env.Model.DisposeAsync();
+    Equal(1, env.Backend.Disposals);
+    Equal(0, env.Backend.Writing);
+    True(Locks.Free(env.Backend.StateDirectory), "queues released before the backend");
+    await env.Model.DisposeAsync();
+    Equal(1, env.Backend.Disposals);
+}
 
 static void Snap(Window window, string path)
 {

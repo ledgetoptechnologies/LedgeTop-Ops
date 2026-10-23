@@ -5,7 +5,15 @@ namespace LedgeTop.Files.Presentation;
 /// <summary>A transfer as shown in the list: which source it belongs to plus the queue's own record.</summary>
 public sealed record TransferItem(string SourceAlias, QueuedTransfer Job);
 
-public enum EnqueueOutcome { Added, AlreadyQueued, NameTaken }
+public enum EnqueueOutcome { Added, AlreadyQueued, NameTaken, UnsafeName }
+
+/// <summary>Deterministic pause points for tests. Production leaves every hook unset.</summary>
+internal sealed class QueueHostHooks
+{
+    internal Func<string, bool>? Exists;
+    internal Func<Task>? AfterSnapshot, BeforeHeldPersist;
+    internal Action<Guid>? Starting;
+}
 
 /// <summary>
 /// Presents one durable <see cref="TransferQueue"/> per source as a single list for one signed-in person.
@@ -23,8 +31,12 @@ public sealed class QueueHost : IAsyncDisposable
     /// <summary>Paused items the person resumed, waiting their turn.</summary>
     private readonly List<Guid> wanted = [];
     private IReadOnlyList<TransferItem> known = [];
+    /// <summary>Background saves (Pause all) that closing must wait for before releasing the queues.</summary>
+    private readonly HashSet<Task> background = [];
     private (string Alias, Guid Id)? active;
     private bool disposed;
+
+    internal QueueHostHooks Hooks { get; } = new();
 
     private QueueHost(Dictionary<string, TransferQueue> queues) => this.queues = queues;
 
@@ -80,8 +92,11 @@ public sealed class QueueHost : IAsyncDisposable
     public async Task<EnqueueOutcome> EnqueueAsync(string sourceAlias, string reference, string fileName, string destination,
         CancellationToken cancellationToken = default)
     {
+        // The listed name comes from the server. Check it is one plain name before it reaches any path:
+        // a rooted or UNC name would otherwise make the existence check below touch another place.
+        if (!IsPlainFileName(fileName)) return EnqueueOutcome.UnsafeName;
         // Never overwrite: an existing file of the same name is reported before anything is queued.
-        if (File.Exists(Path.Combine(destination, fileName)) || Directory.Exists(Path.Combine(destination, fileName))) return EnqueueOutcome.NameTaken;
+        if ((Hooks.Exists ?? Exists)(Path.Combine(destination, fileName))) return EnqueueOutcome.NameTaken;
         try { await Queue(sourceAlias).EnqueueAsync(reference, destination, cancellationToken); }
         catch (TransferException error) when (error.Message.Contains("already contains", StringComparison.Ordinal)) { return EnqueueOutcome.AlreadyQueued; }
         Changed?.Invoke();
@@ -123,7 +138,8 @@ public sealed class QueueHost : IAsyncDisposable
         }
         if (running is { } stop) await Queue(stop.Alias).PauseAsync(stop.Id);
         Changed?.Invoke();
-        _ = Task.Run(async () => {
+        Track(Task.Run(async () => {
+            if (Hooks.BeforeHeldPersist is { } hold) await hold();
             foreach (var item in waiting.Where(item => item.Job.State == QueuedTransferState.Queued)) {
                 try {
                     using var limit = new CancellationTokenSource(TimeSpan.FromSeconds(30));
@@ -131,7 +147,7 @@ public sealed class QueueHost : IAsyncDisposable
                 } catch (Exception) { /* still held in memory; the queue keeps it waiting */ }
             }
             Changed?.Invoke();
-        });
+        }));
     }
 
     /// <summary>Puts every paused item back in line; they run one at a time, in list order.</summary>
@@ -170,8 +186,11 @@ public sealed class QueueHost : IAsyncDisposable
         try {
             lock (sync) if (disposed || active is not null) return;
             var items = await SnapshotAsync();
+            if (Hooks.AfterSnapshot is { } pause) await pause();
             TransferItem? next;
             lock (sync) {
+                // Closing may have begun during the snapshot's sign-in check.
+                if (disposed) return;
                 if (items.Any(item => item.Job.State == QueuedTransferState.Running)) return;
                 next = wanted.Select(id => items.FirstOrDefault(item => item.Job.JobId == id))
                         .FirstOrDefault(item => item is { Job.State: QueuedTransferState.Paused or QueuedTransferState.Queued })
@@ -188,7 +207,10 @@ public sealed class QueueHost : IAsyncDisposable
     private async Task Start(TransferItem item)
     {
         var queue = Queue(item.SourceAlias); var id = item.Job.JobId;
-        lock (sync) { wanted.Remove(id); held.Remove(id); active = (item.SourceAlias, id); }
+        // The same lock that closing uses: either closing sees this transfer as active and stops it,
+        // or this start sees closing and never begins.
+        lock (sync) { if (disposed) return; wanted.Remove(id); held.Remove(id); active = (item.SourceAlias, id); }
+        Hooks.Starting?.Invoke(id);
         try { await queue.StartAsync(id, new Relay(progress => Progress?.Invoke(id, progress))); }
         catch { lock (sync) active = null; throw; }
         Changed?.Invoke();
@@ -198,6 +220,30 @@ public sealed class QueueHost : IAsyncDisposable
             Changed?.Invoke();
             await PumpAsync();
         });
+    }
+
+    /// <summary>One plain file name: no folder, drive, device, hidden direction marks or Windows-reserved characters.</summary>
+    internal static bool IsPlainFileName(string name)
+    {
+        if (string.IsNullOrEmpty(name) || name.Length > 150 || name is "." or ".." || name.EndsWith('.') || name.EndsWith(' ')
+            || name.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0 || name.IndexOfAny(['/', '\\', ':', '<', '>', '"', '|', '?', '*']) >= 0) return false;
+        for (var index = 0; index < name.Length;) {
+            if (!System.Text.Rune.TryGetRuneAt(name, index, out var rune)) return false;
+            if (System.Text.Rune.GetUnicodeCategory(rune) is System.Globalization.UnicodeCategory.Control or System.Globalization.UnicodeCategory.Format
+                or System.Globalization.UnicodeCategory.LineSeparator or System.Globalization.UnicodeCategory.ParagraphSeparator) return false;
+            index += rune.Utf16SequenceLength;
+        }
+        var stem = name.Split('.')[0].TrimEnd(' ').ToUpperInvariant();
+        return stem is not ("CON" or "PRN" or "AUX" or "NUL" or "CONIN$" or "CONOUT$")
+            && !System.Text.RegularExpressions.Regex.IsMatch(stem, @"\A(?:COM|LPT)[1-9¹²³]\z");
+    }
+
+    private static bool Exists(string path) => File.Exists(path) || Directory.Exists(path);
+
+    private void Track(Task task)
+    {
+        lock (sync) background.Add(task);
+        _ = task.ContinueWith(done => { lock (sync) background.Remove(done); }, TaskScheduler.Default);
     }
 
     private TransferQueue Queue(string alias) =>
@@ -214,6 +260,10 @@ public sealed class QueueHost : IAsyncDisposable
         if (running is { } stop) {
             try { await Queue(stop.Alias).PauseAsync(stop.Id); } catch (Exception) { /* draining below still stops it */ }
         }
+        // Pause all saves waiting items as paused in the background; finish that before the queues close,
+        // or those items would wait as queued and start by themselves next time.
+        Task[] saving; lock (sync) saving = background.ToArray();
+        foreach (var save in saving) { try { await save; } catch (Exception) { /* each save handles its own failures */ } }
         // Release every source's queue even if one fails to save its final state; report the first failure.
         Exception? failure = null;
         foreach (var queue in queues.Values) {

@@ -18,6 +18,8 @@ public static class ReleaseProfiles
 {
     /// <summary>The assembly metadata key the build sets for packaged releases (MSBuild property LedgeTopReleaseChannel).</summary>
     public const string ChannelKey = "LedgeTop.ReleaseChannel";
+    /// <summary>Set to "developer" only by an explicit developer build (MSBuild property LedgeTopDeveloperBuild=true).</summary>
+    public const string BuildModeKey = "LedgeTop.BuildMode";
 
     /// <summary>
     /// Pilot uses the existing staging hosts (docs/portal-origin-migration.md, docs/windows-files-staging-acceptance.md):
@@ -36,16 +38,20 @@ public static class ReleaseProfiles
     };
 
     /// <summary>
-    /// The channel compiled into this build: null for a developer build, or an error when the value isn't one this
-    /// version knows (so a mistyped release never quietly behaves like a developer build).
+    /// What this build is. Packaged with a channel; a developer build only when it was built explicitly as one
+    /// (and has no channel); otherwise packaged with an unknown channel, which refuses to start. So a plain Release
+    /// build, a mistyped channel or a mixed build never quietly behaves like a developer build or shows demo data.
     /// </summary>
     public static (bool Packaged, ReleaseChannel? Channel) Compiled(Assembly assembly) =>
         Compiled(assembly.GetCustomAttributes<AssemblyMetadataAttribute>());
 
     public static (bool Packaged, ReleaseChannel? Channel) Compiled(IEnumerable<AssemblyMetadataAttribute> metadata)
     {
-        var values = metadata.Where(item => item.Key == ChannelKey).Select(item => item.Value).ToList();
-        if (values.Count == 0) return (false, null);
+        var items = metadata.ToList();
+        var values = items.Where(item => item.Key == ChannelKey).Select(item => item.Value).ToList();
+        var modes = items.Where(item => item.Key == BuildModeKey).Select(item => item.Value).ToList();
+        if (values.Count == 0 && modes is ["developer"]) return (false, null);
+        if (modes.Count != 0) return (true, null);
         return (true, values is ["pilot"] ? ReleaseChannel.Pilot : values is ["stable"] ? ReleaseChannel.Stable : null);
     }
 
