@@ -11,7 +11,7 @@ public enum EnqueueOutcome { Added, AlreadyQueued, NameTaken, UnsafeName }
 internal sealed class QueueHostHooks
 {
     internal Func<string, bool>? Exists;
-    internal Func<Task>? AfterSnapshot, BeforeRunningPause, BeforeHeldPersist;
+    internal Func<Task>? AfterSnapshot, BeforeRunningPause, BeforeHeldPersist, BeforeStart;
     internal Action<Guid>? Starting;
 }
 
@@ -155,7 +155,13 @@ public sealed class QueueHost : IAsyncDisposable
                 foreach (var item in waiting.Where(item => item.Job.State == QueuedTransferState.Queued)) {
                     try {
                         using var limit = new CancellationTokenSource(TimeSpan.FromSeconds(30));
-                        await Queue(item.SourceAlias).PauseAsync(item.Job.JobId, limit.Token);
+                        // Every start runs under the pump, so holding it through the save means a resume can't start
+                        // this item in between. A resume that came first wins: the item is no longer held, so skip it.
+                        await pump.WaitAsync(limit.Token);
+                        try {
+                            lock (sync) if (!held.Contains(item.Job.JobId) || active?.Id == item.Job.JobId) continue;
+                            await Queue(item.SourceAlias).PauseAsync(item.Job.JobId, limit.Token);
+                        } finally { pump.Release(); }
                     } catch (Exception) { /* still held in memory; the queue keeps it waiting */ }
                 }
                 Changed?.Invoke();
@@ -221,9 +227,11 @@ public sealed class QueueHost : IAsyncDisposable
     private async Task Start(TransferItem item)
     {
         var queue = Queue(item.SourceAlias); var id = item.Job.JobId;
+        if (Hooks.BeforeStart is { } before) await before();
         // The same lock that closing uses: either closing sees this transfer as active and stops it,
         // or this start sees closing and never begins.
-        lock (sync) { if (disposed) return; wanted.Remove(id); held.Remove(id); active = (item.SourceAlias, id); }
+        // A Pause all after this item was chosen holds it again; the newer pause wins and it never starts.
+        lock (sync) { if (disposed || held.Contains(id)) return; wanted.Remove(id); active = (item.SourceAlias, id); }
         Hooks.Starting?.Invoke(id);
         try { await queue.StartAsync(id, new Relay(progress => Progress?.Invoke(id, progress))); }
         catch { lock (sync) active = null; throw; }
