@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { stageUiReleasePacket } from './ui-release-packet.mjs';
+import { DEFAULT_RELEASE_ID, RELEASE_MANIFEST_PINS, stageUiReleasePacket } from './ui-release-packet.mjs';
 
 function fixture(t) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'viewer-ui-packet-policy-'));
@@ -35,4 +35,19 @@ test('packet never overwrites an existing sibling directory', t => {
   fs.mkdirSync(output); fs.writeFileSync(path.join(output, 'sentinel'), 'retained');
   assert.throws(() => stageUiReleasePacket(source, output), /new directory/);
   assert.equal(fs.readFileSync(path.join(output, 'sentinel'), 'utf8'), 'retained');
+});
+test('packet refuses a release without reviewed manifest pins before any read or write', t => {
+  const { root, source } = fixture(t), output = path.join(root, 'output');
+  for (const releaseId of ['0'.repeat(40), 'constructor', '__proto__', ''])
+    assert.throws(() => stageUiReleasePacket(source, output, releaseId), /Unpinned release/);
+  assert.equal(fs.existsSync(output), false);
+  assert.deepEqual(fs.readdirSync(source), []);
+});
+test('the original release keeps its exact pins and stays the default', () => {
+  assert.equal(DEFAULT_RELEASE_ID, 'cfcf5cf992084f7b3658763cdf362fbc37101665');
+  assert.deepEqual(RELEASE_MANIFEST_PINS[DEFAULT_RELEASE_ID], {
+    client: 'ffcfa84f31e7855b05895338c6f53ad4d3bc963ad115c3c1290912c7b438a4b9',
+    operations: '621ddeead1c3edb4d3218b8919269f843e5a22b74b2eea42271f2b93ae7292c4',
+  });
+  for (const pins of Object.values(RELEASE_MANIFEST_PINS)) assert.ok(Object.isFrozen(pins));
 });

@@ -7,12 +7,16 @@ import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import catalog from '../packages/shared/src/ui-release-catalog.generated.json' with { type: 'json' };
 
-const releaseId = 'cfcf5cf992084f7b3658763cdf362fbc37101665';
 const controlSha = '4f83140d5f4293ab55bd1207327e995c83258f1e7d3145b1b5d7a3d17fdfe0a7';
-const manifestSha = {
-  client: 'ffcfa84f31e7855b05895338c6f53ad4d3bc963ad115c3c1290912c7b438a4b9',
-  operations: '621ddeead1c3edb4d3218b8919269f843e5a22b74b2eea42271f2b93ae7292c4',
-};
+/** Reviewed build-manifest digests per release. Each new release adds a row; earlier
+ * rows stay unchanged so packets for releases still serving open tabs reproduce. */
+export const RELEASE_MANIFEST_PINS = Object.freeze({
+  cfcf5cf992084f7b3658763cdf362fbc37101665: Object.freeze({
+    client: 'ffcfa84f31e7855b05895338c6f53ad4d3bc963ad115c3c1290912c7b438a4b9',
+    operations: '621ddeead1c3edb4d3218b8919269f843e5a22b74b2eea42271f2b93ae7292c4',
+  }),
+});
+export const DEFAULT_RELEASE_ID = 'cfcf5cf992084f7b3658763cdf362fbc37101665';
 const digest = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
 function fail(condition, message) { if (!condition) throw new Error(message); }
 function walk(directory, relative = '') {
@@ -25,7 +29,9 @@ function walk(directory, relative = '') {
   }).sort();
 }
 
-export function stageUiReleasePacket(proofRoot, outputDirectory) {
+export function stageUiReleasePacket(proofRoot, outputDirectory, releaseId = DEFAULT_RELEASE_ID) {
+  const manifestSha = Object.hasOwn(RELEASE_MANIFEST_PINS, releaseId) ? RELEASE_MANIFEST_PINS[releaseId] : null;
+  fail(manifestSha, `Unpinned release: ${releaseId}`);
   const source = fs.realpathSync(proofRoot), requestedOutput = path.resolve(outputDirectory);
   // Resolve the existing parent before containment checks so a junction or
   // symlink cannot redirect a lexical sibling into the proof inputs.
@@ -82,8 +88,9 @@ export function stageUiReleasePacket(proofRoot, outputDirectory) {
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  fail(process.argv.length === 4, 'Usage: node scripts/ui-release-packet.mjs <independent-build-proof-root> <new-packet-directory>');
-  const receipt = stageUiReleasePacket(process.argv[2], process.argv[3]);
+  fail(process.argv.length === 4 || process.argv.length === 5,
+    'Usage: node scripts/ui-release-packet.mjs <independent-build-proof-root> <new-packet-directory> [release-commit]');
+  const receipt = stageUiReleasePacket(process.argv[2], process.argv[3], process.argv[4] ?? DEFAULT_RELEASE_ID);
   console.log(JSON.stringify({ files: receipt.files.length, bytes: receipt.files.reduce((sum, file) => sum + file.size, 0),
     approvedInventory: false, deploymentApproved: false }));
 }
