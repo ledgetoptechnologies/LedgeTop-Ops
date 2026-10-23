@@ -27,7 +27,7 @@ var tests = new (string Name, Func<Task> Run)[] {
     ("one owned download cannot run concurrently", ExclusiveTransfer),
     ("oversized valid prefix cannot publish on a later failed retry", OversizedRetry),
     ("metadata cleanup cannot undo a committed successful download", LockedMetadata),
-}.Concat(AccessSessionTests.Groups).Concat(PortalClientTests.Groups).Concat(EmployeeClientTests.Groups)
+}.Concat(AccessSessionTests.Groups).Concat(PortalClientTests.Groups).Concat(PortalClientDeadlineTests.Groups).Concat(EmployeeClientTests.Groups)
     .Concat(TransferQueueTests.Groups).Concat(DownloadProgressTests.Groups).Concat(QueuedDownloadSourceTests.Groups)
     .Concat(PlaceholderHydrationTests.Groups).Concat(CloudFilesProbeTests.Groups)
     .Concat(CloudFilesNativeTransferTests.Groups).Concat(CloudFilesCallbackTests.Groups).ToArray();

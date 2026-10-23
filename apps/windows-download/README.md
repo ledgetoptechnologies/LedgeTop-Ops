@@ -53,6 +53,12 @@ The bundled cloudflared version, official provenance, license and SHA-256 still
 require a reviewed packaging decision and real staging login acceptance.
 
 `PortalClient` uses the existing native delivery discovery and folder routes.
+Each portal metadata request has one 60-second linked cancellation deadline
+covering cached-token lookup, response headers and every bounded response-body
+read. `ResponseHeadersRead` alone does not bound body consumption. A deadline
+failure stays a generic timeout; explicit caller cancellation remains cancellation.
+Controlled synthetic streams test a valid header/prefix followed by a permanent
+stall, upstream cancellation and response disposal, plus token/header stalls.
 The accompanying server `download-manifest` route returns an opaque logical ID,
 upload version, SHA-256, length, strong ETag, safe name and short-lived relative
 download route after current human authorization. A fresh encrypted handle pins

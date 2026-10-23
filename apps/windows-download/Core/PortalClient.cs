@@ -24,14 +24,18 @@ public sealed class PortalClient : IDisposable
     private static readonly UTF8Encoding Utf8 = new(false, true);
     private readonly CloudflareAccessSession session;
     private readonly HttpClient client;
+    private readonly TimeSpan requestTimeout;
     public PortalClient(CloudflareAccessSession session) : this(new HttpClientHandler {
         AllowAutoRedirect = false, UseCookies = false, UseDefaultCredentials = false, Credentials = null,
         AutomaticDecompression = DecompressionMethods.None, CheckCertificateRevocationList = true
     }, session) { }
-    internal PortalClient(HttpMessageHandler handler, CloudflareAccessSession session)
+    internal PortalClient(HttpMessageHandler handler, CloudflareAccessSession session, TimeSpan? requestTimeout = null)
     {
+        this.requestTimeout = requestTimeout ?? TimeSpan.FromSeconds(60);
+        if (this.requestTimeout <= TimeSpan.Zero || this.requestTimeout > TimeSpan.FromSeconds(60))
+            throw new ArgumentOutOfRangeException(nameof(requestTimeout));
         this.session = session;
-        client = new HttpClient(handler, true) { Timeout = TimeSpan.FromSeconds(60) };
+        client = new HttpClient(handler, true) { Timeout = Timeout.InfiniteTimeSpan };
     }
 
     public async Task<PortalDeliveries> GetDeliveriesAsync(string? cursor = null, CancellationToken cancellationToken = default)
@@ -112,25 +116,27 @@ public sealed class PortalClient : IDisposable
     {
         var uri = new Uri(session.Origin, path);
         if (uri.GetLeftPart(UriPartial.Authority) != session.Origin.GetLeftPart(UriPartial.Authority)) throw InvalidResponse();
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        deadline.CancelAfter(requestTimeout);
         try {
             using var request = new HttpRequestMessage(HttpMethod.Get, uri);
             request.Headers.Accept.ParseAdd("application/json"); request.Headers.AcceptEncoding.ParseAdd("identity");
-            request.Headers.Add("Cf-Access-Token", await session.GetTokenAsync(cancellationToken));
-            using var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+            request.Headers.Add("Cf-Access-Token", await session.GetTokenAsync(deadline.Token));
+            using var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, deadline.Token);
             if (response.StatusCode == HttpStatusCode.Unauthorized) throw new LoginRequiredException();
             if (response.StatusCode == HttpStatusCode.Forbidden) throw new AccessDeniedException();
             if (response.StatusCode is HttpStatusCode.NotFound or HttpStatusCode.Conflict) throw new ResourceUnavailableException();
             if (response.StatusCode != HttpStatusCode.OK || response.Content.Headers.ContentType?.MediaType != "application/json"
                 || response.Content.Headers.ContentType.CharSet is { } charset && !charset.Trim('"').Equals("utf-8", StringComparison.OrdinalIgnoreCase)
                 || response.Content.Headers.ContentEncoding.Count != 0 || response.Content.Headers.ContentLength > limit) throw InvalidResponse();
-            using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
+            using var stream = await response.Content.ReadAsStreamAsync(deadline.Token);
             using var output = new MemoryStream(); var buffer = new byte[8192];
             while (true) {
-                var read = await stream.ReadAsync(buffer.AsMemory(0, Math.Min(buffer.Length, limit + 1 - (int)output.Length)), cancellationToken);
+                var read = await stream.ReadAsync(buffer.AsMemory(0, Math.Min(buffer.Length, limit + 1 - (int)output.Length)), deadline.Token);
                 if (read == 0) break;
                 output.Write(buffer, 0, read); if (output.Length > limit) throw InvalidResponse();
             }
-            cancellationToken.ThrowIfCancellationRequested();
+            deadline.Token.ThrowIfCancellationRequested();
             var json = JsonDocument.Parse(Utf8.GetString(output.ToArray()), new JsonDocumentOptions { MaxDepth = 16 });
             try { NoDuplicateProperties(json.RootElement); } catch { json.Dispose(); throw; }
             return json;
