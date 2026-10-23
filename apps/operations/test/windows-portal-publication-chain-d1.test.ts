@@ -38,7 +38,7 @@ import { readWindowsPortalCatalogSuccessorAuthorizationEntrypoint } from "../src
 import { createWindowsPortalCatalogRouter, type WindowsPortalCatalogRouteEnv } from "../../client/src/worker/client-portal/windows-portal-catalog-routes";
 
 describe("Windows publication history evidence with real canonical Ops/Client producers", () => {
-  it("retains an unchanged grant across refreshes and revocation on the current Ops0221/Client0234 staging baseline", async () => {
+  it("rolls back failed suffix files and reconciles lost acknowledgements before retaining refreshed grants", async () => {
     await runCanonicalPortalResourceAcceptance(async ctx => {
       const { operations: db, client, id, owner } = ctx;
       // Rehearse the additive suffix on populated, fully current baselines.
@@ -62,8 +62,49 @@ describe("Windows publication history evidence with real canonical Ops/Client pr
         const before = await database.batch(tables.map(name => database.prepare("SELECT * FROM " + quote(name))));
         for (const name of names) {
           const sql = readFileSync(new URL(directory + name, import.meta.url), "utf8");
-          await database.batch([...splitD1MigrationStatements(sql).map(statement => database.prepare(statement)),
-            database.prepare("INSERT INTO d1_migrations(name) VALUES(?)").bind(name)]);
+          const statements = splitD1MigrationStatements(sql);
+          const schemaAtBoundary = (await database.prepare(schemaQuery).all()).results;
+          const tablesAtBoundary = schemaAtBoundary.filter(row => row.type === "table"
+            && !String(row.name).startsWith("sqlite_") && !String(row.name).startsWith("_cf_"));
+          const readRows = () => database.batch(tablesAtBoundary.map(row => database.prepare("SELECT * FROM " + quote(String(row.name)))));
+          const rowsAtBoundary = await readRows();
+          const canonicalRows = (results: {results: unknown[]}[]) => results.map(result => result.results.map(row => JSON.stringify(row)).sort());
+          const ledgerAtBoundary = (await database.prepare("SELECT name FROM d1_migrations ORDER BY id").all<{name:string}>()).results;
+          expect(ledgerAtBoundary.some(row => row.name === name)).toBe(false);
+          // Wrangler appends its ledger INSERT to each file and submits files
+          // separately. Inject a late uniqueness conflict after the exact DDL
+          // and data statements, including 0223's ALTER and permission inserts.
+          await expect(database.batch([...statements.map(statement => database.prepare(statement)),
+            database.prepare("INSERT INTO d1_migrations(name) VALUES(?)").bind(name),
+            database.prepare("INSERT INTO d1_migrations(name) VALUES(?)").bind(ledgerAtBoundary[0]!.name)]))
+            .rejects.toThrow(/UNIQUE constraint failed/u);
+          expect((await database.prepare(schemaQuery).all()).results, "failed file left schema: " + name).toEqual(schemaAtBoundary);
+          expect(canonicalRows(await readRows()), "failed file changed previous rows/grants: " + name)
+            .toEqual(canonicalRows(rowsAtBoundary));
+          expect((await database.prepare("SELECT name FROM d1_migrations ORDER BY id").all()).results).toEqual(ledgerAtBoundary);
+          expect((await database.prepare("PRAGMA foreign_key_check").all()).results).toEqual([]);
+          // Retry only after observing that this file rolled back. Keep all
+          // previously committed files, rather than dropping additive objects.
+          // Model an observer losing the success acknowledgement AFTER commit.
+          // This is not a socket/crash test. Reconcile by reads and do not replay
+          // non-idempotent SQL, edit the ledger, restore or drop anything.
+          const commitWithoutAcknowledgement = async () => {
+            await database.batch([...statements.map(statement => database.prepare(statement)),
+              database.prepare("INSERT INTO d1_migrations(name) VALUES(?)").bind(name)]);
+            throw new Error("synthetic success acknowledgement lost");
+          };
+          await expect(commitWithoutAcknowledgement()).rejects.toThrow("acknowledgement lost");
+          const committedSchema = (await database.prepare(schemaQuery).all()).results;
+          expect(committedSchema.length).toBeGreaterThan(schemaAtBoundary.length);
+          expect((await database.prepare("SELECT name FROM d1_migrations ORDER BY id").all()).results)
+            .toEqual([...ledgerAtBoundary, {name}]);
+          expect((await database.prepare(schemaQuery).all()).results).toEqual(committedSchema);
+          // Each DB retains its independent committed prefix; the five files
+          // are never treated as one cross-database transaction.
+          if (database === db) expect(await client.prepare("SELECT name FROM d1_migrations ORDER BY id DESC LIMIT 1").first("name"))
+            .toBe("0234_pa_principal_reenrollment.sql");
+          else expect(await db.prepare("SELECT name FROM d1_migrations ORDER BY id DESC LIMIT 1").first("name"))
+            .toBe("0224_windows_portal_publication_chain_index.sql");
         }
         const schemaAfter = (await database.prepare(schemaQuery).all()).results;
         for (const object of schemaBefore)
@@ -290,5 +331,5 @@ describe("Windows publication history evidence with real canonical Ops/Client pr
       expect((await db.prepare("PRAGMA foreign_key_check").all()).results).toEqual([]);
     }, { stopAfterReady: true, operationsThroughMigration: "0221_portal_correspondence_lifecycle_write_guards.sql",
       clientThroughMigration: "0234_pa_principal_reenrollment.sql" });
-  }, 240_000);
+  }, 360_000);
 });
