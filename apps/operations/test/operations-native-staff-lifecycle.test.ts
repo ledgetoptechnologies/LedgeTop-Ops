@@ -126,8 +126,10 @@ describe("Ops-owned joined staff lifecycle against actual full-chain local D1", 
         result_json,result_sha256,executed_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`)
         .bind(ref.commandId,ref.approvalId,seedAdmin.id,seedAdmin.subject,plan,hash(plan),evidence,hash(evidence),"{}",hash("{}"),date),
     ]);
-    const review = { schemaVersion: 1, sourceCommit, accountId: NATIVE_STAFF_PRODUCTION_TARGET.accountId,
-      databaseId: NATIVE_STAFF_PRODUCTION_TARGET.databaseId, cohort, bootstrapReceipts: [ref] };
+    const review = { schemaVersion: 2, sourceCommit, accountId: NATIVE_STAFF_PRODUCTION_TARGET.accountId,
+      databaseId: NATIVE_STAFF_PRODUCTION_TARGET.databaseId, cohort,
+      handoff:{cohort:structuredClone(cohort),controlPlaneStaffIds:[...selected.controlPlaneStaffIds]},
+      bootstrapReceipts: [ref], onboardingReceipts:[] };
     let reads = 0;
     const read = async (args:string[]) => { reads++; expect(args[7]).toBe(READINESS_QUERY);
       return [{ success: true, results: (await db.prepare(args[7]!).all()).results }]; };
