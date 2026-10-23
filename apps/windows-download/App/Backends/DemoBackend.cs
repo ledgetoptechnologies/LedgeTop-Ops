@@ -19,8 +19,9 @@ public sealed class DemoBackend : IFilesBackend
     private readonly DemoFolder[] sections;
 
     /// <param name="pageSize">How many places or files one listing returns before "Show more".</param>
-    public DemoBackend(string stateDirectory, bool signedIn = false, TimeSpan? sessionLength = null, double bytesPerSecond = 6_000_000, int pageSize = 200)
+    public DemoBackend(string stateDirectory, bool signedIn = false, TimeSpan? sessionLength = null, double bytesPerSecond = 6_000_000, int pageSize = 200, AccessMode? mode = null)
     {
+        if (mode is { } chosen) AccessModes.Validate(chosen);
         StateDirectory = stateDirectory;
         state = new DemoState { SignedIn = signedIn, SessionLength = sessionLength ?? TimeSpan.FromMinutes(60), BytesPerSecond = bytesPerSecond };
         if (signedIn) state.ExpiresAt = DateTimeOffset.UtcNow + state.SessionLength;
@@ -40,7 +41,8 @@ public sealed class DemoBackend : IFilesBackend
                 ], [F("pj-readme", "README.txt", 2_048)]),
             ], []),
         ];
-        Sources = [new DemoSource("portal", state, Find), new DemoSource("employee", state, Find)];
+        if (mode is { } selected) sections = sections.Where(section => section.Alias == AccessModes.Alias(selected)).ToArray();
+        Sources = sections.Select(section => (IQueuedDownloadSource)new DemoSource(section.Alias, state, Find)).ToArray();
         Session = new DemoSession(state);
         Catalog = new DemoCatalog(sections, state, pageSize);
     }
@@ -129,6 +131,12 @@ public sealed class DemoBackend : IFilesBackend
 
     private sealed class DemoCatalog(DemoFolder[] sections, DemoState state, int pageSize) : IFileCatalog
     {
+        private bool Contains(DemoFolder folder) {
+            static bool Has(DemoFolder root, DemoFolder value) => ReferenceEquals(root, value) || root.Folders.Any(child => Has(child, value));
+            return sections.Any(section => Has(section, folder));
+        }
+        private DemoFolder Check(CatalogNode node) => node.Payload is DemoFolder folder && folder.Alias == node.SourceAlias && Contains(folder)
+            ? folder : throw new ResourceUnavailableException();
         private static CatalogNode Node(DemoFolder folder, NodeKind kind) => new(folder.Key, folder.Name, kind, folder.Alias, folder);
 
         public Task<IReadOnlyList<CatalogNode>> GetSectionsAsync(CancellationToken cancellationToken = default) =>
@@ -136,8 +144,9 @@ public sealed class DemoBackend : IFilesBackend
 
         public async Task<NodePage> GetChildrenAsync(CatalogNode node, object? more = null, CancellationToken cancellationToken = default)
         {
+            var value = Check(node);
             await Task.Delay(60, cancellationToken);
-            var all = ((DemoFolder)node.Payload!).Folders.Where(folder => node.Kind != NodeKind.Section || state.Sees(folder.Key)).ToList();
+            var all = value.Folders.Where(folder => node.Kind != NodeKind.Section || state.Sees(folder.Key)).ToList();
             var from = more as int? ?? 0;
             return new NodePage(all.Skip(from).Take(pageSize).Select(folder => Node(folder, node.Kind == NodeKind.Section ? NodeKind.Root : NodeKind.Folder)).ToList(),
                 from + pageSize < all.Count ? from + pageSize : null);
@@ -145,16 +154,19 @@ public sealed class DemoBackend : IFilesBackend
 
         public async Task<CatalogListing> ListAsync(CatalogNode folder, object? more = null, CancellationToken cancellationToken = default)
         {
+            var value = Check(folder);
             await Task.Delay(150, cancellationToken);
-            var value = (DemoFolder)folder.Payload!;
             var from = more as int? ?? 0;
             return new CatalogListing(value.Folders.Select(child => Node(child, NodeKind.Folder)).ToList(),
                 value.Files.Skip(from).Take(pageSize).Select(file => new CatalogFile(file.Key, file.Name, file.Length, file.Verifiable, value.Alias)).ToList(),
                 from + pageSize < value.Files.Length ? from + pageSize : null);
         }
 
-        public Task<string> GetReferenceAsync(CatalogFile file, CancellationToken cancellationToken = default) =>
-            Task.FromResult("odqr1_" + Convert.ToBase64String(Encoding.UTF8.GetBytes(file.Key)).TrimEnd('=').Replace('+', '-').Replace('/', '_'));
+        public Task<string> GetReferenceAsync(CatalogFile file, CancellationToken cancellationToken = default) {
+            static bool Has(DemoFolder folder, string key) => folder.Files.Any(value => value.Key == key) || folder.Folders.Any(child => Has(child, key));
+            if (!sections.Any(section => section.Alias == file.SourceAlias && Has(section, file.Key))) throw new ResourceUnavailableException();
+            return Task.FromResult("odqr1_" + Convert.ToBase64String(Encoding.UTF8.GetBytes(file.Key)).TrimEnd('=').Replace('+', '-').Replace('/', '_'));
+        }
     }
 
     /// <summary>A stand-in for the employee or portal source: same contract, generated bytes, no network.</summary>

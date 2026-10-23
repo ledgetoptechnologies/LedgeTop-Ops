@@ -74,12 +74,12 @@ public sealed record LiveSettings(Uri PortalApplicationUrl, Uri? StaffApplicatio
 /// </summary>
 public sealed class LiveBackend : IFilesBackend
 {
-    private readonly CloudflareAccessSession portalAccess;
-    private readonly CloudflareAccessSession? staffAccess;
-    private readonly PortalQueuedDownloadSource portalSource;
-    private readonly EmployeeQueuedDownloadSource? staffSource;
-    private readonly PortalClient portal;
-    private readonly EmployeeClient? staff;
+    // Only the chosen source is constructed, authenticated and disposed. The test seam cannot
+    // replace the production factory exposed by the public constructors.
+    internal sealed record SelectedBackend(ISessionGateway Session, IFileCatalog Catalog,
+        IQueuedDownloadSource Source, Action Dispose);
+    private readonly SelectedBackend selected;
+    private int disposed;
 
     /// <summary>
     /// Reads the setup and builds the real sources. Returns no backend and no problem when the PC isn't set up,
@@ -97,23 +97,48 @@ public sealed class LiveBackend : IFilesBackend
         }
     }
 
-    public LiveBackend(LiveSettings settings, string stateDirectory)
+    /// <summary>Compatibility overload: client delivery only; never signs into the employee application.</summary>
+    public LiveBackend(LiveSettings settings, string stateDirectory) : this(settings, stateDirectory, AccessMode.Client) { }
+
+    public LiveBackend(LiveSettings settings, string stateDirectory, AccessMode mode)
+        : this(settings, stateDirectory, mode, CreateSelected) { }
+
+    internal LiveBackend(LiveSettings settings, string stateDirectory, AccessMode mode,
+        Func<LiveSettings, AccessMode, SelectedBackend> factory)
     {
+        AccessModes.Validate(mode);
+        ArgumentNullException.ThrowIfNull(settings);
+        if (mode == AccessMode.Employee && settings.StaffApplicationUrl is null)
+            throw new SettingsException("Employee access is not configured on this PC. Ask your Ledge Top contact to check the setup.");
         Settings = settings;
         StateDirectory = stateDirectory;
-        portalAccess = new CloudflareAccessSession(settings.PortalApplicationUrl, settings.CloudflaredPath, settings.CloudflaredSha256);
-        portalSource = new PortalQueuedDownloadSource("portal", portalAccess);
-        portal = new PortalClient(portalAccess);
-        var sources = new List<IQueuedDownloadSource> { portalSource };
-        if (settings.StaffApplicationUrl is { } staffUrl) {
-            staffAccess = new CloudflareAccessSession(staffUrl, settings.CloudflaredPath, settings.CloudflaredSha256);
-            staffSource = new EmployeeQueuedDownloadSource("employee", staffAccess);
-            staff = new EmployeeClient(staffAccess);
-            sources.Add(staffSource);
+        selected = factory(settings, mode);
+        var alias = AccessModes.Alias(mode);
+        if (selected.Source.Alias != alias) {
+            selected.Dispose();
+            throw new InvalidOperationException("The selected file source is unavailable.");
         }
-        Sources = sources;
-        Session = new LiveSession(portalAccess, staffAccess, portalSource);
-        Catalog = new LiveCatalog(portal, staff, portalSource, staffSource);
+        Sources = Array.AsReadOnly(new[] { selected.Source });
+        Session = selected.Session;
+        Catalog = new SelectedCatalog(mode, selected.Catalog);
+    }
+
+    private static SelectedBackend CreateSelected(LiveSettings settings, AccessMode mode)
+    {
+        var access = new CloudflareAccessSession(mode == AccessMode.Client
+            ? settings.PortalApplicationUrl : settings.StaffApplicationUrl!, settings.CloudflaredPath, settings.CloudflaredSha256);
+        if (mode == AccessMode.Client) {
+            var source = new PortalQueuedDownloadSource("portal", access);
+            var client = new PortalClient(access);
+            return new(new LiveSession(access, source), new LiveCatalog(client, null, source, null), source,
+                () => { client.Dispose(); source.Dispose(); });
+        }
+        else {
+            var source = new EmployeeQueuedDownloadSource("employee", access);
+            var client = new EmployeeClient(access);
+            return new(new LiveSession(access, source), new LiveCatalog(null, client, null, source), source,
+                () => { client.Dispose(); source.Dispose(); });
+        }
     }
 
     /// <summary>The origins and helper this backend was built with (for diagnostics and tests).</summary>
@@ -125,11 +150,11 @@ public sealed class LiveBackend : IFilesBackend
 
     public ValueTask DisposeAsync()
     {
-        portal.Dispose(); staff?.Dispose(); portalSource.Dispose(); staffSource?.Dispose();
+        if (Interlocked.Exchange(ref disposed, 1) == 0) selected.Dispose();
         return ValueTask.CompletedTask;
     }
 
-    private sealed class LiveSession(CloudflareAccessSession portal, CloudflareAccessSession? staff, PortalQueuedDownloadSource probe) : ISessionGateway
+    private sealed class LiveSession(CloudflareAccessSession access, IQueuedDownloadSource probe) : ISessionGateway
     {
         public async Task<SessionInfo?> TryCurrentAsync(CancellationToken cancellationToken = default)
         {
@@ -142,8 +167,31 @@ public sealed class LiveBackend : IFilesBackend
 
         public async Task SignInAsync(CancellationToken cancellationToken = default)
         {
-            await portal.ExplicitLoginAsync(cancellationToken);
-            if (staff is not null) await staff.ExplicitLoginAsync(cancellationToken);
+            await access.ExplicitLoginAsync(cancellationToken);
+        }
+    }
+
+    private sealed class SelectedCatalog(AccessMode mode, IFileCatalog inner) : IFileCatalog
+    {
+        private readonly string alias = AccessModes.Alias(mode);
+        private void Check(string source) { if (source != alias) throw new ResourceUnavailableException(); }
+        private void Check(CatalogNode node) {
+            Check(node.SourceAlias);
+            if (node.Kind == NodeKind.Section && node.Key != (mode == AccessMode.Client ? "deliveries" : "server"))
+                throw new ResourceUnavailableException();
+        }
+        public Task<IReadOnlyList<CatalogNode>> GetSectionsAsync(CancellationToken cancellationToken = default) =>
+            Task.FromResult<IReadOnlyList<CatalogNode>>([mode == AccessMode.Client
+                ? new("deliveries", "Client deliveries", NodeKind.Section, alias)
+                : new("server", "Company server", NodeKind.Section, alias)]);
+        public Task<NodePage> GetChildrenAsync(CatalogNode node, object? more = null, CancellationToken cancellationToken = default) {
+            Check(node); return inner.GetChildrenAsync(node, more, cancellationToken);
+        }
+        public Task<CatalogListing> ListAsync(CatalogNode folder, object? more = null, CancellationToken cancellationToken = default) {
+            Check(folder); return inner.ListAsync(folder, more, cancellationToken);
+        }
+        public Task<string> GetReferenceAsync(CatalogFile file, CancellationToken cancellationToken = default) {
+            Check(file.SourceAlias); return inner.GetReferenceAsync(file, cancellationToken);
         }
     }
 
@@ -152,12 +200,13 @@ public sealed class LiveBackend : IFilesBackend
     private sealed record PortalFilePlace(string Handle);
     private sealed record StaffFilePlace(string RootId, string Path);
 
-    private sealed class LiveCatalog(PortalClient portal, EmployeeClient? staff, PortalQueuedDownloadSource portalSource,
+    private sealed class LiveCatalog(PortalClient? portal, EmployeeClient? staff, PortalQueuedDownloadSource? portalSource,
         EmployeeQueuedDownloadSource? staffSource) : IFileCatalog
     {
         public Task<IReadOnlyList<CatalogNode>> GetSectionsAsync(CancellationToken cancellationToken = default)
         {
-            var sections = new List<CatalogNode> { new("deliveries", "Client deliveries", NodeKind.Section, "portal") };
+            var sections = new List<CatalogNode>();
+            if (portal is not null) sections.Add(new("deliveries", "Client deliveries", NodeKind.Section, "portal"));
             if (staff is not null) sections.Add(new("server", "Company server", NodeKind.Section, "employee"));
             return Task.FromResult<IReadOnlyList<CatalogNode>>(sections);
         }
@@ -165,12 +214,12 @@ public sealed class LiveBackend : IFilesBackend
         // One server page per call: the window offers "Show more" for the rest, so nothing authorized is unreachable.
         public async Task<NodePage> GetChildrenAsync(CatalogNode node, object? more = null, CancellationToken cancellationToken = default)
         {
-            if (node.Kind == NodeKind.Section && node.SourceAlias == "portal") {
+            if (node.Kind == NodeKind.Section && node.SourceAlias == "portal" && portal is not null) {
                 var page = await portal.GetDeliveriesAsync(more as string, cancellationToken);
                 return new NodePage(page.Items.Select(item => new CatalogNode("p:" + item.Handle, item.DisplayName, NodeKind.Root, "portal", new PortalPlace(item.Handle))).ToList(),
                     page.NextCursor);
             }
-            if (node.Kind == NodeKind.Section && staff is not null)
+            if (node.Kind == NodeKind.Section && node.SourceAlias == "employee" && staff is not null)
                 return new NodePage((await staff.GetRootsAsync(cancellationToken))
                     .Select(root => new CatalogNode("s:" + root.RootId, root.DisplayName, NodeKind.Root, "employee", new StaffPlace(root.RootId, ""))).ToList());
             var listing = await ListAsync(node, more, cancellationToken);
@@ -180,7 +229,7 @@ public sealed class LiveBackend : IFilesBackend
         public async Task<CatalogListing> ListAsync(CatalogNode folder, object? more = null, CancellationToken cancellationToken = default)
         {
             switch (folder.Payload) {
-                case PortalPlace place: {
+                case PortalPlace place when portal is not null: {
                     var page = await portal.GetFolderAsync(place.Handle, more as string, cancellationToken);
                     return new CatalogListing(
                         page.Folders.Select(item => new CatalogNode("p:" + item.Handle, item.Name, NodeKind.Folder, "portal", new PortalPlace(item.Handle))).ToList(),
@@ -202,7 +251,7 @@ public sealed class LiveBackend : IFilesBackend
         }
 
         public async Task<string> GetReferenceAsync(CatalogFile file, CancellationToken cancellationToken = default) => file.Payload switch {
-            PortalFilePlace place => (await portalSource.GetReferenceAsync(place.Handle, cancellationToken)).ResourceReference,
+            PortalFilePlace place when portalSource is not null => (await portalSource.GetReferenceAsync(place.Handle, cancellationToken)).ResourceReference,
             StaffFilePlace place when staffSource is not null => (await staffSource.GetReferenceAsync(place.RootId, place.Path, cancellationToken)).ResourceReference,
             _ => throw new ResourceUnavailableException(),
         };
