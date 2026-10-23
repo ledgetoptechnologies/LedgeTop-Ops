@@ -43,6 +43,23 @@ hashes, exact object identities, absent identities and validated Worker metadata
 but no SQL. Temporary owned config files are removed. The raw review file remains
 for the operator to inspect and remove explicitly.
 
+## Remove a completed private review capture
+
+Use only the exact `reviewFile` returned by that invocation. Before removal,
+verify it is the regular, non-reparse `selected-definitions.json` file inside that
+invocation's `ops-windows-ddl-review-*` temporary directory, and that its current
+SHA256 matches `reviewFileSha256`. Do not select a path by searching for a similar
+name or by reading another invocation's receipt.
+
+After local review, remove that exact file with a literal path, then remove only
+its now-empty parent directory. In PowerShell, use `Remove-Item -LiteralPath` for
+each of those two exact paths, **without `-Recurse`**. If the directory is not
+empty or the file/hash/type/ownership checks differ, stop and inspect it locally.
+Do not broaden cleanup to the temporary root, another user's directory, a NAS,
+or repository/EH paths. Never put raw DDL in cleanup commands, public logs or
+committed receipts. The tool does not automatically erase a successful review
+capture, so retain only as long as the local diagnostic review needs it.
+
 For local expected definitions, the canonical generator accepts an optional
 `selectedDefinitionObserver` function only with `baselineOnly:true`. It receives
 one copied/frozen selected-row collection per app after checkpoint hashes have

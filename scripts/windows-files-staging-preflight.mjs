@@ -165,6 +165,7 @@ async function observeStaging({ readOnly = false, recoveryMetadata = false, incl
       const captures=[];
       for(const worker of workers){
         const target=worker.databases.find(b=>b.binding===MIGRATIONS[worker.app].binding);
+        if(!target)fail("version_resource_mismatch");
         const rows=selectDiagnosticDefinitions(worker.app,queryRows(await read(["d1","execute",target.name,"--remote","--command",diagnosticSchemaQuery(worker.app),"--json"])),{selectedOnly:true});
         captures.push({app:worker.app,workerName:worker.workerName,versionId:worker.versionId,databaseId:target.id,rows});
       }

@@ -101,6 +101,14 @@ test("diagnostic rejects mismatched identity and raw provider failures before an
   assert.equal(reads,1);for(const config of f.configs)await assert.rejects(access(config.path));
 });
 
+test("diagnostic missing fixed database binding produces only a sanitized guard code before SQL",async()=>{
+  const f=fixture();f.details.delivery.resources.bindings=f.details.delivery.resources.bindings.filter(binding=>binding.name!=="DELIVERY_DB");
+  await assert.rejects(windowsFilesStagingSchemaDiagnostic({readOnly:true,run:f.run}),
+    error=>error.message==="version_resource_mismatch"&&error.code==="version_resource_mismatch");
+  assert.ok(f.calls.every(args=>args[0]!=="d1"));
+  for(const config of f.configs)await assert.rejects(access(config.path));
+});
+
 test("default preflight cannot enable definition capture through an unrecognized extra option",async()=>{
   const f=fixture(),receipt=await windowsFilesStagingPreflight({readOnly:true,selectedDiagnostic:true,run:f.run});
   assert.equal(receipt.reviewFile,undefined);assert.equal(receipt.status,"read_only_observed");
