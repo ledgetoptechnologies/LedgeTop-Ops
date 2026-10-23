@@ -51,7 +51,8 @@ async function mockAuthorizedPortal(
   mapboxPublicToken: string | null = null,
   fixtureRequests = requests,
   workflowEvents?: { edited?: boolean; changeRequested?: boolean; estimateAccepted?: boolean; cancelled?: boolean;
-    cancellationKeys?: string[]; failFirstCancellation?: boolean; detailGate?: Promise<void>; detailStarted?: () => void },
+    cancellationKeys?: string[]; failFirstCancellation?: boolean; detailGate?: Promise<void>; detailStarted?: () => void;
+    draftSaved?: (input: Record<string, unknown>, version: number) => void },
   locationFixtures: { project: DeliveryLocationCollection; past: DeliveryLocationCollection } = {
     project: { points: [], imageCount: 0, truncated: false },
     past: { points: [], imageCount: 0, truncated: false },
@@ -100,6 +101,7 @@ async function mockAuthorizedPortal(
       expect(request.headers()["idempotency-key"]).toMatch(/^[0-9a-f-]{36}$/);
       draftBody = request.postDataJSON();
       draftVersion += 1;
+      workflowEvents?.draftSaved?.(draftBody!, draftVersion);
       await route.fulfill({ json: { draft: { ...draftBody, id: "draft-a", state: "draft", version: draftVersion, areaSquareMeters: draftBody?.areaGeoJson ? 50585.7 : null, areaAcres: draftBody?.areaGeoJson ? 12.5 : null, services: serviceCatalog.filter(service => (draftBody?.services as Array<{ publicId: string }> | undefined)?.some(selected => selected.publicId === service.publicId)).map(service => ({ ...service, answers: (draftBody?.services as Array<{ publicId: string; answers: Record<string, unknown> }>).find(selected => selected.publicId === service.publicId)?.answers ?? {} })), submittedRequestId: null, createdAt: "2026-08-13T12:00:00.000Z", updatedAt: "2026-08-13T12:01:00.000Z" } } });
     } else if (request.method() === "GET" && path === "/api/client/service-request-drafts/draft-a" && draftBody) {
       await route.fulfill({ json: { draft: { ...draftBody, id: "draft-a", state: "draft", version: draftVersion, areaSquareMeters: draftBody.areaGeoJson ? 50585.7 : null, areaAcres: draftBody.areaGeoJson ? 12.5 : null,
@@ -1956,9 +1958,12 @@ test("final review shows timing, POI coordinates, and a responsive read-only bou
 });
 
 test("pricing guidance ignores an older response after the service basis changes", async ({ page }) => {
-  await mockAuthorizedPortal(page);
-  let mode: "initial" | "race" = "initial";
-  let raceCalls = 0;
+  let savedBasis: { resolution: unknown; version: number } | null = null;
+  let oldBasisVersion: number | undefined, newBasisVersion: number | undefined;
+  await mockAuthorizedPortal(page, null, requests, { draftSaved: (input, version) => {
+    const services = input.services as Array<{ publicId: string; answers: Record<string, unknown> }>;
+    savedBasis = { resolution: services.find(service => service.publicId === "svc-2d-map")?.answers.resolution, version };
+  } });
   let oldRequest: Request | undefined, oldHandlerFinished = false;
   const terminalRequests = new Set<Request>();
   page.on("requestfinished", request => terminalRequests.add(request));
@@ -1966,18 +1971,25 @@ test("pricing guidance ignores an older response after the service basis changes
   let releaseOld!: () => void;
   const oldGate = new Promise<void>(resolve => { releaseOld = resolve; });
   await page.route("**/api/client/service-request-drafts/draft-a/pricing-hint", async route => {
-    if (mode === "initial") return route.fulfill({ json: { available: true, hint: {
+    const basis = savedBasis;
+    const survey = basis?.resolution === "survey";
+    const newerStandard = basis?.resolution === "standard" && oldBasisVersion !== undefined && basis.version > oldBasisVersion;
+    // A pending price read for the original standard draft is not the held
+    // survey request. Only an actual saved service-basis change starts the race.
+    if (!survey && !newerStandard) return route.fulfill({ json: { available: true, hint: {
       kind: "starting_at", currency: "USD", startingAtMinor: 100000,
       disclaimer: "Planning guidance only. Final quote after staff review.", basisVersion: "initial", validUntil: "2099-01-01T00:00:00.000Z",
     } } });
-    const call = ++raceCalls;
-    if (call === 1) { oldRequest = route.request(); await oldGate; }
+    if (survey && oldBasisVersion === undefined) { oldBasisVersion = basis!.version; oldRequest = route.request(); }
+    if (newerStandard) newBasisVersion = basis!.version;
+    const trackedOld = route.request() === oldRequest;
     try {
+      if (survey) await oldGate;
       await route.fulfill({ json: { available: true, hint: {
-        kind: "starting_at", currency: "USD", startingAtMinor: call === 1 ? 100000 : 200000,
-        disclaimer: "Planning guidance only. Final quote after staff review.", basisVersion: call === 1 ? "old" : "new", validUntil: "2099-01-01T00:00:00.000Z",
+        kind: "starting_at", currency: "USD", startingAtMinor: survey ? 100000 : 200000,
+        disclaimer: "Planning guidance only. Final quote after staff review.", basisVersion: `saved-${basis!.version}`, validUntil: "2099-01-01T00:00:00.000Z",
       } } });
-    } finally { if (call === 1) oldHandlerFinished = true; }
+    } finally { if (trackedOld) oldHandlerFinished = true; }
   });
 
   await page.goto("/portal/requests/new");
@@ -1989,12 +2001,17 @@ test("pricing guidance ignores an older response after the service basis changes
   await page.getByRole("button", { name: "Continue" }).click();
   await expect(page.locator(".portal-pricing-hint")).toContainText("Starting at $1,000");
 
-  mode = "race";
   await page.getByRole("button", { name: "Edit services" }).click();
+  // Deterministically cover the pre-survey price read seen in the CI failure:
+  // it must finish normally without satisfying the survey-request gate.
+  const initialHint = await page.evaluate(async () => (await fetch("/api/client/service-request-drafts/draft-a/pricing-hint")).json());
+  expect(initialHint).toMatchObject({ hint: { basisVersion: "initial" } });
+  expect(oldBasisVersion).toBeUndefined();
   await page.getByLabel("Preferred resolution").selectOption("survey");
-  await expect.poll(() => raceCalls).toBe(1);
+  await expect.poll(() => oldBasisVersion).toBeDefined();
+  await expect.poll(() => savedBasis?.resolution).toBe("survey");
   await page.getByLabel("Preferred resolution").selectOption("standard");
-  await expect.poll(() => raceCalls).toBe(2);
+  await expect.poll(() => newBasisVersion).toBeGreaterThan(oldBasisVersion!);
   await page.getByRole("button", { name: "Continue" }).click();
   await page.getByRole("button", { name: "Continue" }).click();
   await page.getByRole("button", { name: "Continue" }).click();
