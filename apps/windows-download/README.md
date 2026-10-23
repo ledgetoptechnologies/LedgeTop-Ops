@@ -1,7 +1,8 @@
 # Windows download foundation (prototype)
 
-This is a BCL-only .NET 10 transfer library and synthetic console acceptance
-harness with a human Cloudflare Access bridge and native portal read adapter.
+This contains a BCL-only .NET 10 transfer library, a Windows WPF desktop
+prototype and synthetic acceptance harnesses, with a human Cloudflare Access
+bridge and separate portal and employee read adapters.
 It is **not a released Windows desktop application, installer or sync client**.
 Tests use synthetic identities and handlers, install no software and make no
 production connections. No NuGet packages are required.
@@ -17,8 +18,9 @@ $env:DOTNET_GENERATE_ASPNET_CERTIFICATE='false'
 dotnet run --project Tests/WindowsDownload.Tests.csproj -c Release
 ```
 
-`global.json` pins the SDK, both projects target `net10.0`, and `NuGet.Config`
-clears external package sources. Tests inject synthetic HTTP handlers; they do
+`global.json` pins the SDK. Core and its console harness target `net10.0`;
+the WPF app and its harness target `net10.0-windows`. `NuGet.Config` clears
+external package sources. Core tests inject synthetic HTTP handlers; they do
 not create a listener, use cookies, access R2, contact a server or read credentials.
 They create isolated temporary folders and clean only their owned trees.
 Windows reparse tests use unprivileged temporary directory junctions, without
@@ -33,6 +35,23 @@ state corruption, oversized-response retry and post-promotion cleanup failure.
 Additional groups cover explicit sign-in versus cached-token lookup, pinned
 executable integrity, origin confinement, bounded subprocess output, authenticated
 discovery/folders/manifests, safe renewal and credentialless transfer state.
+
+On Windows, run the separate desktop acceptance harness with:
+
+```powershell
+dotnet run --project AppTests/WindowsDownload.App.Tests.csproj -c Release -p:UseSharedCompilation=false
+```
+
+For an interactive synthetic preview, explicitly build the developer variant:
+
+```powershell
+dotnet run --project App/WindowsDownload.App.csproj -c Release -p:LedgeTopDeveloperBuild=true -p:UseSharedCompilation=false -- --demo
+```
+
+The preview uses generated demo content, not client files. A plain Release build
+does not opt into developer/demo behavior. Packaged builds use compiled trusted
+profiles and ignore arguments and developer settings; this command is not a
+client installer or live sign-in acceptance.
 
 ## Authenticated portal adapter (not deployed or live-qualified)
 
@@ -186,10 +205,13 @@ var jobs = await queue.GetJobsAsync(cancellationToken);
 ```
 
 See [the source API contract](../../docs/windows-queue-source-bindings.md).
-Portal publication refresh currently invalidates a reference; safe producer-side
-continuity is unfinished and must be implemented before promising automatic
-restart across ordinary publication updates. Routes remain unmounted, and this
-code has no installed desktop UI or live enrollment.
+The separate portal successor implementation can retain logical identity across
+reviewed publication updates only while every intermediate publication preserves
+the original authorized mapping. Omission followed by restoration breaks that
+continuity. See the source API contract for its bounded history and independent
+current authorization checks; do not infer continuity from a matching path.
+Routes remain unmounted. Installed desktop and live enrollment acceptance remain
+unfinished, so this source evidence is not a promise of live automatic restart.
 
 ## Remaining product work
 
