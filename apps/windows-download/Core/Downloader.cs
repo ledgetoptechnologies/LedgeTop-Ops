@@ -28,27 +28,32 @@ public sealed class Downloader : IDisposable
     private readonly HashSet<string> origins;
     private readonly long maximumBytes;
     private readonly CloudflareAccessSession? accessSession;
+    private readonly TimeSpan networkInactivityTimeout;
     private sealed record State(int Version, string Descriptor, long Length, string ETag, string Sha256);
 
-    public Downloader(IEnumerable<Uri> allowedOrigins, long maximumBytes = 1L << 40)
+    public Downloader(IEnumerable<Uri> allowedOrigins, long maximumBytes = 1L << 40, TimeSpan? networkInactivityTimeout = null)
         : this(new HttpClientHandler {
             AllowAutoRedirect = false, UseCookies = false, UseDefaultCredentials = false,
             Credentials = null, AutomaticDecompression = DecompressionMethods.None,
             CheckCertificateRevocationList = true
-        }, allowedOrigins, maximumBytes) { }
+        }, allowedOrigins, maximumBytes, networkInactivityTimeout: networkInactivityTimeout) { }
 
-    public Downloader(CloudflareAccessSession session, long maximumBytes = 1L << 40)
+    public Downloader(CloudflareAccessSession session, long maximumBytes = 1L << 40, TimeSpan? networkInactivityTimeout = null)
         : this(new HttpClientHandler {
             AllowAutoRedirect = false, UseCookies = false, UseDefaultCredentials = false,
             Credentials = null, AutomaticDecompression = DecompressionMethods.None,
             CheckCertificateRevocationList = true
-        }, [session.Origin], maximumBytes, session) { }
+        }, [session.Origin], maximumBytes, session, networkInactivityTimeout) { }
 
     // Synthetic tests may inject a handler. Production callers cannot install ambient authentication handlers.
-    internal Downloader(HttpMessageHandler handler, IEnumerable<Uri> allowedOrigins, long maximumBytes = 1L << 40, CloudflareAccessSession? session = null)
+    internal Downloader(HttpMessageHandler handler, IEnumerable<Uri> allowedOrigins, long maximumBytes = 1L << 40,
+        CloudflareAccessSession? session = null, TimeSpan? networkInactivityTimeout = null)
     {
         if (maximumBytes < 0) throw new ArgumentOutOfRangeException(nameof(maximumBytes));
         this.maximumBytes = maximumBytes;
+        this.networkInactivityTimeout = networkInactivityTimeout ?? TimeSpan.FromSeconds(60);
+        if (this.networkInactivityTimeout < TimeSpan.FromMilliseconds(1) || this.networkInactivityTimeout > TimeSpan.FromMinutes(10))
+            throw new ArgumentOutOfRangeException(nameof(networkInactivityTimeout));
         origins = new HashSet<string>(allowedOrigins.Select(Origin), StringComparer.Ordinal);
         if (origins.Count == 0) throw new ArgumentException("An exact HTTPS origin allowlist is required.");
         if (session is not null && (origins.Count != 1 || !origins.Contains(Origin(session.Origin))))
@@ -160,6 +165,19 @@ public sealed class Downloader : IDisposable
         IProgress<DownloadProgress>? progress = null)
     {
         cancellationToken.ThrowIfCancellationRequested(); Validate(spec);
+        // This is a per-network-await budget, not a total download deadline.
+        // Rearm for headers/stream creation/each read, and stop it during local
+        // disk writes, hashing and flushes. Active large transfers may continue.
+        using var network = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        async ValueTask<int> ReadNetworkAsync(Stream input, Memory<byte> buffer)
+        {
+            network.CancelAfter(networkInactivityTimeout);
+            try {
+                var count = await input.ReadAsync(buffer, network.Token);
+                network.Token.ThrowIfCancellationRequested();
+                return count;
+            } finally { network.CancelAfter(Timeout.InfiniteTimeSpan); }
+        }
         DownloadPhase? reportedPhase = null;
         long reportedAt = 0;
         void Report(long bytes, DownloadPhase phase)
@@ -213,7 +231,10 @@ public sealed class Downloader : IDisposable
                 }
                 if (accessSession is not null)
                     request.Headers.Add("Cf-Access-Token", await accessSession.GetTokenAsync(cancellationToken));
-                using var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+                network.CancelAfter(networkInactivityTimeout);
+                using var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, network.Token);
+                network.CancelAfter(Timeout.InfiniteTimeSpan);
+                network.Token.ThrowIfCancellationRequested();
                 if (response.StatusCode == HttpStatusCode.Unauthorized) throw new LoginRequiredException();
                 if (response.StatusCode == HttpStatusCode.Forbidden) throw new AccessDeniedException();
                 if (response.StatusCode is HttpStatusCode.NotFound or HttpStatusCode.Conflict) throw new ResourceUnavailableException();
@@ -235,16 +256,19 @@ public sealed class Downloader : IDisposable
                 await using (var output = new FileStream(partialPath, FileMode.OpenOrCreate, FileAccess.Write, FileShare.None, 65536, FileOptions.Asynchronous)) {
                     if (output.Length != offset) throw new TransferException("Partial data changed during the request.");
                     output.Position = offset;
-                    await using var input = await response.Content.ReadAsStreamAsync(cancellationToken);
+                    network.CancelAfter(networkInactivityTimeout);
+                    await using var input = await response.Content.ReadAsStreamAsync(network.Token);
+                    network.CancelAfter(Timeout.InfiniteTimeSpan);
+                    network.Token.ThrowIfCancellationRequested();
                     var buffer = new byte[65536];
                     long received = 0;
                     while (received < remaining) {
-                        int count = await input.ReadAsync(buffer.AsMemory(0, (int)Math.Min(buffer.Length, remaining - received)), cancellationToken);
+                        int count = await ReadNetworkAsync(input, buffer.AsMemory(0, (int)Math.Min(buffer.Length, remaining - received)));
                         if (count == 0) throw new TransferException("The response ended before the trusted length.");
                         await output.WriteAsync(buffer.AsMemory(0, count), cancellationToken); received += count;
                         Report(offset + received, DownloadPhase.Receiving);
                     }
-                    if (await input.ReadAsync(buffer.AsMemory(0, 1), cancellationToken) != 0) {
+                    if (await ReadNetworkAsync(input, buffer.AsMemory(0, 1)) != 0) {
                         output.SetLength(offset); output.Flush(true); // Retain only the prefix trusted before this rejected response.
                         throw new TransferException("The response exceeds the trusted length.");
                     }
@@ -272,6 +296,9 @@ public sealed class Downloader : IDisposable
                 return finalPath;
             }
         } catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
+        catch (OperationCanceledException) when (network.IsCancellationRequested) {
+            throw new TransferException("Download stalled; owned partial data can be retried.");
+        }
         catch (TransferException) { throw; }
         catch (HttpRequestException) { throw new TransferException("Download transport failed; authenticated content URLs are never logged."); }
         catch (IOException) { throw new TransferException("Download interrupted or destination unavailable; owned partial data can be retried."); }
