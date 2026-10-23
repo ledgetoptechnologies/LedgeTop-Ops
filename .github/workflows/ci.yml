@@ -38,6 +38,9 @@ jobs:
       - name: Verify guarded production deployment tooling without credentials
         run: node --test scripts/production-deploy.test.mjs
 
+      - name: Verify inactive additive UI binding preparation
+        run: node --test scripts/ui-additive-release-plan.test.mjs
+
       - name: Verify additive UI asset policy and local binding contract
         run: |
           node apps/operations/node_modules/typescript/bin/tsc --project apps/ui-release-assets/tsconfig.json --noEmit
