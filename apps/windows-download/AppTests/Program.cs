@@ -14,6 +14,7 @@ using LedgeTop.WindowsDownload;
 var screenshots = args.Length > 0 ? args[0] : Path.Combine(Path.GetTempPath(), "ltfiles-screens-" + Guid.NewGuid().ToString("N"));
 var passed = 0; var failed = 0;
 var groups = new (string Name, Func<Task> Run)[] {
+    ("client and employee backends construct and route only their selected source", BackendModeTests.Run),
     ("file type labels and sizes read like the Operations badges", TextLabels),
     ("every transfer state has a plain status and next step", StateTexts),
     ("unsafe download folders are refused with a reason", Destinations),
