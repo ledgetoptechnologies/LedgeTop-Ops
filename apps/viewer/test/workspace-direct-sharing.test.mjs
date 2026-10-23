@@ -22,7 +22,7 @@ function declaration(name){
 }
 const names=['clientAccessDiagnostic','canShareOutput','openShareModal','associationModelId','associationProjectId','portalAccountId',
   'clientProjectKey','clientProjectLabel','clientAccessSnapshot','exactClientAssociations','clientGrantBody','clientSharePanel','clientShareCard','rememberShareResult','clearShareResult','visibleShareResult','shareModal','confirmSharedVersionUpdate',
-  'createOutputShare','bindShareModal','bindProjectShareCard','shareViewLabels','availableShareViews','shareViewControls','bindShareViewControls','selectedShareViews','shareSettingsSummary','shareExpiryInput','editShareModal','retrieveShareLink'];
+  'createOutputShare','clientGrantRevocationMessage','bindShareModal','bindProjectShareCard','shareViewLabels','availableShareViews','shareViewControls','bindShareViewControls','selectedShareViews','shareSettingsSummary','shareExpiryInput','editShareModal','retrieveShareLink'];
 function fixture(permissions=['viewer.shares.read','viewer.shares.create','viewer.shares.revoke','viewer.processing.publish','viewer.client_grants.manage']){
   const output={id:'output',modelId:'model',projectId:'project',taskId:'task',attemptId:'attempt',status:'ready',activePublished:false,assetKinds:['glb']};
   const state={token:'signed-in',projects:[{id:'project',displayName:'Site'}],tasks:[{id:'task',projectId:'project'}],outputs:[output],
@@ -495,4 +495,19 @@ test('native-only targets preselect the connected workspace portal',()=>{
   const f=fixture();associated(f);f.state.clientAccess={projects:[],associations:[],grants:[]};
   f.state.clientNativeAccess={grants:[],targets:[{sourceId:'project-alpha:primary',workspaceId:'workspace',workspaceName:'Client',projectPublicId:'project',projectName:'Site',associations:[{id:'native-association',viewerModelId:'model',modelTitle:'Model'}]}]};
   assert.match(f.context.clientShareCard(f.output,'output'),/<option value="native" selected>Connected Client Workspaces/);
+});
+
+
+test('native revocation reports validated open-session lifetime and preserves legacy pending status',async()=>{
+  const f=fixture();const action={dataset:{action:'revoke-native-client-grant',id:'native-grant'}};
+  f.context.dialogs.form=async()=>({reason:'Ended access'});
+  f.modalContent.querySelectorAll=selector=>selector.includes('revoke-native-client-grant')?[action]:[];
+  let responseMessage;
+  f.context.mutate=async(path,options,message)=>{assert.equal(path,'/api/v1/workspace/native-client-grants');assert.equal(options.body.grantId,'native-grant');responseMessage=message({existingSessionsExpireWithinSeconds:1800})};
+  f.context.bindShareModal('project','output');await action.onclick();
+  assert.match(responseMessage,/New client access revoked.*up to 30 minutes/);
+  assert.match(f.context.clientGrantRevocationMessage({existingSessionsExpireWithinSeconds:90},true),/up to 2 minutes/);
+  assert.match(f.context.clientGrantRevocationMessage({existingSessionsExpireWithinSeconds:'1800'},true),/until they expire/);
+  assert.match(f.context.clientGrantRevocationMessage({sessionRevocation:{pending:true}},false),/existing sessions is pending/);
+  assert.equal(f.context.clientGrantRevocationMessage({sessionRevocation:{pending:false}},false),'Client access revoked');
 });

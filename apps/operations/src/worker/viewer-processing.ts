@@ -435,7 +435,8 @@ export function registerViewerProcessingRoutes(app: ViewerApp): void {
           idempotencyKey: parsed.data.idempotencyKey!, request: c.req.raw })
         : await revokeNativeViewerClientGrant({ env: c.env, principal, grantId: parsed.data.grantId!,
           reason: parsed.data.reason!, idempotencyKey: parsed.data.idempotencyKey!, request: c.req.raw });
-      return c.json({ ...await listNativeViewerClientGrantWorkspace(c.env, principal), replayed: result.replayed },
+      return c.json({ ...await listNativeViewerClientGrantWorkspace(c.env, principal), replayed: result.replayed,
+        ...("existingSessionsExpireWithinSeconds" in result ? { existingSessionsExpireWithinSeconds: result.existingSessionsExpireWithinSeconds } : {}) },
         parsed.data.action === "create" && !result.replayed ? 201 : 200);
     }
     if (parsed.data.action === "list") return c.json(await listViewerClientGrantWorkspace(c.env, principal));

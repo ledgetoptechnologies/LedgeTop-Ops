@@ -290,7 +290,7 @@ describe('native Viewer workspace machine bridge',()=>{
     expect((await machine(envelope,'native-replay-nonce-001')).status).toBe(200);
     expect((await machine({...envelope,idempotencyKey:'native-machine-wrong-001',grant:{...envelope.grant,sourceId:'project-alpha:other'}},'native-wrong-source-001')).status).toBe(404);
     const revoked=await machine({subject:'ops:staff-one',connection:'native',action:'revoke',idempotencyKey:'native-machine-revoke-001',grantId:grant.id,reason:'Ended access'},'native-revoke-nonce-001');
-    expect(revoked.status).toBe(200);expect((await revoked.json() as any).grants).toEqual([]);
+    expect(revoked.status).toBe(200);const revokedSnapshot=await revoked.json() as any;expect(revokedSnapshot.grants).toEqual([]);expect(revokedSnapshot.existingSessionsExpireWithinSeconds).toBe(1800);
     expect(await delivery.prepare('SELECT COUNT(*) count FROM viewer_client_grants').first<number>('count')).toBe(0);
   });
   it('rejects inert legacy project grants and account/project pairs without current grants',async()=>{

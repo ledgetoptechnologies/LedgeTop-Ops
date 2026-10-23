@@ -19,13 +19,15 @@ function validSnapshot(value) {
     && (value.replayed === undefined || typeof value.replayed === 'boolean');
 }
 
-function validNativeSnapshot(value) {
+function validNativeSnapshot(value, action) {
   const object = item => item && typeof item === 'object' && !Array.isArray(item);
   const id = item => typeof item === 'string' && ID.test(item);
   const text = (item, maximum = 1024) => typeof item === 'string' && item.length > 0 && item.length <= maximum && !/[\u0000-\u001f\u007f]/.test(item);
   const source = item => typeof item === 'string' && /^project-alpha:[a-z0-9][a-z0-9_-]{0,63}$/.test(item);
   const list = items => Array.isArray(items) && items.length <= 500;
   return object(value) && (value.replayed === undefined || typeof value.replayed === 'boolean')
+    && (value.existingSessionsExpireWithinSeconds === undefined ? action !== 'revoke'
+      : Number.isSafeInteger(value.existingSessionsExpireWithinSeconds) && value.existingSessionsExpireWithinSeconds > 0 && value.existingSessionsExpireWithinSeconds <= 1800)
     && list(value.targets) && value.targets.every(target => object(target) && source(target.sourceId)
       && id(target.workspaceId) && text(target.projectPublicId, 256) && text(target.workspaceName) && text(target.projectName)
       && list(target.associations) && target.associations.every(item => object(item) && id(item.id) && text(item.modelTitle) && id(item.viewerModelId)))
@@ -101,7 +103,7 @@ function createClientGrantProxy({ config, authorize, fetchImpl = fetch, diagnost
         return res.status(status).json({ error: 'Operations rejected the client access request', code: 'operations_request_failed' });
       }
       stage = 'response_schema';
-      if (!(native ? validNativeSnapshot(payload) : validSnapshot(payload))) throw new Error('invalid_response');
+      if (!(native ? validNativeSnapshot(payload, action) : validSnapshot(payload))) throw new Error('invalid_response');
       return res.status(action === 'create' && !payload.replayed ? 201 : 200).json(payload);
     } catch {
       report(502, 'operations_unavailable');
