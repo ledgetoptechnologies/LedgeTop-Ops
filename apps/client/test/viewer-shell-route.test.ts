@@ -21,22 +21,12 @@ describe("client Viewer shell", () => {
     expect(path).not.toContain("grant");
   });
 
-  it("detaches the blank window before same-origin navigation", () => {
-    const replace = vi.fn();
-    const popup = { opener: {} as unknown, location: { replace }, close: vi.fn() };
-    const assign = vi.fn();
-    vi.stubGlobal("window", { location: { origin: "https://portal.example.test", assign }, open: vi.fn(() => popup) });
-    expect(openViewerShell("/portal/viewer/project/association/model")).toBe("new-tab");
-    expect(popup.opener).toBeNull();
-    expect(replace).toHaveBeenCalledWith("https://portal.example.test/portal/viewer/project/association/model");
-    expect(assign).not.toHaveBeenCalled();
-  });
-
-  it("falls back to the current tab when the popup is blocked", () => {
-    const assign = vi.fn();
-    vi.stubGlobal("window", { location: { origin: "https://portal.example.test", assign }, open: vi.fn(() => null) });
+  it("opens models in the current tab without creating a popup", () => {
+    const assign = vi.fn(), open = vi.fn();
+    vi.stubGlobal("window", { location: { origin: "https://portal.example.test", assign }, open });
     expect(openViewerShell("/portal/viewer/project/association/model")).toBe("same-tab");
     expect(assign).toHaveBeenCalledWith("https://portal.example.test/portal/viewer/project/association/model");
+    expect(open).not.toHaveBeenCalled();
   });
 
   it("rejects a cross-origin shell destination", () => {

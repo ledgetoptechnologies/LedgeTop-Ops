@@ -110,7 +110,7 @@ test('direct LAZ/PLY orbit picker is wired to the visible Three.js Points object
   assert.match(mainSource, /import \{ pickDirectPointSurface \} from '\.\/direct-pointcloud-picking\.mjs'/);
   assert.match(mainSource, /state\.activeMode === 'cloud' && state\.cloudMode === 'direct'/);
   assert.match(mainSource, /!pointCloudParent\?\.visible \|\| !pointCloudObject/);
-  assert.match(mainSource, /pickDirectPointSurface\(\{ raycaster, camera, points: pointCloudObject, ndc, viewportHeight \}\)/);
+  assert.match(mainSource, /pickDirectPointSurface\(\{ raycaster, camera, points: pointCloudObject, ndc, viewportHeight, accepts:viewerSlice\?\.active\?point=>viewerSlice.accepts\(point\):undefined \}\)/);
 });
 
 test('point-cloud distance and height labels use thousandth-inch precision in imperial mode', () => {

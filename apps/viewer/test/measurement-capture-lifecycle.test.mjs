@@ -93,7 +93,7 @@ test('open report cleanup clears private image and markup, and is idempotent',as
   assert.match(img.src,/cHJpdmF0ZQ/);f.scope.closeReports();assert.equal(img.src,undefined);assert.equal(dialog.innerHTML,'');assert.equal(f.body.children.length,0);assert.equal(f.reports.size,0);dialog.onclose();
   const close=source.slice(source.indexOf('  function closeDialogs()'),source.indexOf('  function invalidate('));assert.match(close,/closeReports\(\)/);
   assert.match(source.slice(source.indexOf('  function invalidate('),source.indexOf('  async function finish()')),/closeDialogs\(\)/);
-  assert.match(source.slice(source.indexOf('  return {setTool,store')),/dispose\(\).*closeDialogs\(\)/);
+  assert.match(source.slice(source.lastIndexOf('  return {')),/dispose\(\).*closeDialogs\(\)/);
 });
 
 test('report print waits for image decode and fonts, then requires a fresh explicit click',async()=>{

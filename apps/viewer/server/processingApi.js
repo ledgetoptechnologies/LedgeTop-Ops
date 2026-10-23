@@ -27,6 +27,7 @@ const { inspectLodRecoverySource } = require('./lodRecovery');
 const { createStorageUsageMonitor } = require('./storageUsage');
 const { taskImageInventory } = require('./taskImageInventory');
 const { productDescriptor, registeredProducts, createDownloadCapabilities } = require('./productDownloads');
+const { processingJobCounts } = require('./processingOverview');
 
 const PERMISSIONS = new Set(['viewer.projects.read','viewer.projects.write','viewer.datasets.read','viewer.datasets.write','viewer.datasets.import','viewer.processing.read','viewer.processing.write','viewer.processing.publish','viewer.providers.read','viewer.providers.write','viewer.storage.purge','viewer.gcp.read','viewer.gcp.write','viewer.shares.read','viewer.shares.create','viewer.shares.revoke','viewer.client_grants.manage']);
 function validUnits(value) { return value === 'imperial' || value === 'metric'; }
@@ -176,7 +177,7 @@ function createProcessingApi({ repository, processing, storage, providerCredenti
     const projectCounts=db.prepare("SELECT COUNT(*) AS total,COALESCE(SUM(CASE WHEN status='active' THEN 1 ELSE 0 END),0) AS active FROM projects").get();
     const modelCounts=db.prepare('SELECT COUNT(*) AS total,COALESCE(SUM(CASE WHEN active_version_id IS NOT NULL THEN 1 ELSE 0 END),0) AS published FROM models').get();
     const modelBytes=db.prepare("SELECT COALESCE(SUM(byte_size),0) AS bytes FROM model_outputs WHERE status='published'").get();
-    const jobCounts=db.prepare("SELECT COALESCE(SUM(CASE WHEN status IN ('admitted','initializing','uploading','committed','queued_upstream') THEN 1 ELSE 0 END),0) AS queued,COALESCE(SUM(CASE WHEN status IN ('running','ingesting','derivatives','cancelling') THEN 1 ELSE 0 END),0) AS running,COALESCE(SUM(CASE WHEN status='ready_for_review' THEN 1 ELSE 0 END),0) AS reviewReady,COALESCE(SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END),0) AS failed FROM processing_attempts").get();
+    const jobCounts=processingJobCounts(db);
     const providerCounts=db.prepare("SELECT COUNT(*) AS total,COALESCE(SUM(CASE WHEN enabled=1 THEN 1 ELSE 0 END),0) AS enabled,COALESCE(SUM(CASE WHEN enabled=1 AND (runtime_health='healthy' OR (runtime_health IS NULL AND last_health='healthy')) THEN 1 ELSE 0 END),0) AS healthy FROM processing_providers").get();
     const used=db.prepare("SELECT (SELECT COALESCE(SUM(d.byte_size),0) FROM datasets d WHERE d.status<>'trashed' AND d.storage_mode<>'external_reference' AND NOT EXISTS (SELECT 1 FROM processing_attempts a JOIN model_outputs o ON o.attempt_id=a.id WHERE a.dataset_id=d.id AND o.status<>'trashed' AND o.storage_mode='adopted'))+(SELECT COALESCE(SUM(byte_size),0) FROM model_outputs WHERE status<>'trashed' AND storage_mode<>'external_reference') AS bytes").get();
     const spaces=['datasets','models','cache','trash'].map((key)=>storage.space(key));

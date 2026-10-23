@@ -25,7 +25,7 @@ export function directPointPickThreshold({ camera, points, viewportHeight, pickW
   return Number.isFinite(threshold) && threshold > 0 ? threshold : null;
 }
 
-export function pickDirectPointSurface({ raycaster, camera, points, ndc, viewportHeight, pickWindow = DIRECT_POINT_PICK_WINDOW }) {
+export function pickDirectPointSurface({ raycaster, camera, points, ndc, viewportHeight, pickWindow = DIRECT_POINT_PICK_WINDOW, accepts }) {
   if (!raycaster?.setFromCamera || !camera || !points?.isPoints || points.visible === false || !ndc) return null;
   const threshold = directPointPickThreshold({ camera, points, viewportHeight, pickWindow });
   if (!threshold) return null;
@@ -34,8 +34,18 @@ export function pickDirectPointSurface({ raycaster, camera, points, ndc, viewpor
   try {
     pointParams.threshold = threshold;
     raycaster.setFromCamera(ndc, camera);
-    const hit = raycaster.intersectObject(points, false).find((item) => finiteVector3(item.point));
-    return hit ? hit.point.clone() : null;
+    const position=points.geometry.getAttribute('position');
+    let acceptedSource=null;
+    const hit = raycaster.intersectObject(points, false).find((item) => {
+      if(!finiteVector3(item.point))return false;
+      if(!accepts)return true;
+      // Three's Points raycast reports the closest location on the ray. Clip
+      // the actual vertex used by the shader, which can be across the plane.
+      const source=Number.isSafeInteger(item.index)&&position?item.point.clone().set(position.getX(item.index),position.getY(item.index),position.getZ(item.index)).applyMatrix4(points.matrixWorld):item.point;
+      if(!accepts(source))return false;
+      acceptedSource=source;return true;
+    });
+    return hit ? (acceptedSource||hit.point).clone() : null;
   } finally {
     pointParams.threshold = previousThreshold;
   }
