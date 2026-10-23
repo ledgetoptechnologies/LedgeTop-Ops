@@ -259,13 +259,86 @@ test('incoming cancellation aborts and cancels an unconsumed upstream body', asy
   await assert.rejects(response.text(), /cancelled/);
 });
 
-test('body timeout fails the stream and cancels even without incoming body consumption', async () => {
+test('an actively awaited stalled body read times out and cancels upstream', async () => {
   let cancelled = false;
   const response = await fetchUiReleaseAsset(incoming(), { async fetch() {
     return assetResponse(new ReadableStream({ cancel() { cancelled = true; } }));
   } }, manifest, { timeoutMs: 10 });
-  await new Promise(resolve => setTimeout(resolve, 30));
-  await assert.rejects(response.text()); assert.equal(cancelled, true);
+  await assert.rejects(response.text(), /UI asset timeout/); assert.equal(cancelled, true);
+});
+
+test('progressing chunks may take longer than timeoutMs in total', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const count = 8, gapMs = 20, timeoutMs = 50;
+  const input = { ...manifest, files: manifest.files.map(entry => entry.path === file.path ? { ...entry, size: count } : entry) };
+  let sent = 0, cancelled = false;
+  const response = await fetchUiReleaseAsset(incoming(), { async fetch() {
+    return assetResponse(new ReadableStream({
+      async pull(controller) {
+        await new Promise(resolve => setTimeout(resolve, gapMs));
+        controller.enqueue(new Uint8Array([sent++]));
+        if (sent === count) controller.close();
+      },
+      cancel() { cancelled = true; },
+    }, { highWaterMark: 0 }));
+  } }, input, { timeoutMs });
+  const result = response.arrayBuffer().then(bytes => ({ bytes }), error => ({ error }));
+  for (let n = 0; n < count; n++) {
+    await new Promise(resolve => setImmediate(resolve));
+    t.mock.timers.tick(gapMs);
+  }
+  const completed = await result;
+  assert.equal(completed.error, undefined);
+  assert.deepEqual(new Uint8Array(completed.bytes), new Uint8Array(Array.from({ length: count }, (_, n) => n)));
+  assert.ok(count * gapMs > timeoutMs); assert.equal(cancelled, false);
+});
+
+test('a read that stalls after progress gets its own idle bound', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const input = { ...manifest, files: manifest.files.map(entry => entry.path === file.path ? { ...entry, size: 2 } : entry) };
+  let sent = false, cancelled = false, signal;
+  const response = await fetchUiReleaseAsset(incoming(), { async fetch(request) {
+    signal = request.signal;
+    return assetResponse(new ReadableStream({
+      async pull(controller) {
+        if (sent) return new Promise(() => {});
+        await new Promise(resolve => setTimeout(resolve, 20));
+        sent = true; controller.enqueue(new Uint8Array([0]));
+      },
+      cancel() { cancelled = true; },
+    }, { highWaterMark: 0 }));
+  } }, input, { timeoutMs: 30 });
+  const reader = response.body.getReader(), first = reader.read();
+  await new Promise(resolve => setImmediate(resolve)); t.mock.timers.tick(20);
+  assert.deepEqual((await first).value, new Uint8Array([0]));
+  const stalled = assert.rejects(reader.read(), /UI asset timeout/);
+  await new Promise(resolve => setImmediate(resolve));
+  t.mock.timers.tick(20);
+  assert.equal(signal.aborted, false); assert.equal(cancelled, false);
+  t.mock.timers.tick(10);
+  await stalled; assert.equal(signal.aborted, true); assert.equal(cancelled, true);
+});
+
+test('delayed consumption and backpressure do not expire the next body read', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const timeoutMs = 20, pauseMs = 100;
+  const input = { ...manifest, files: manifest.files.map(entry => entry.path === file.path ? { ...entry, size: 2 } : entry) };
+  let sent = 0, cancelled = false, signal;
+  const response = await fetchUiReleaseAsset(incoming(), { async fetch(request) {
+    signal = request.signal;
+    return assetResponse(new ReadableStream({
+      pull(controller) { controller.enqueue(new Uint8Array([sent++])); if (sent === 2) controller.close(); },
+      cancel() { cancelled = true; },
+    }, { highWaterMark: 0 }));
+  } }, input, { timeoutMs });
+  t.mock.timers.tick(pauseMs);
+  assert.equal(signal.aborted, false); assert.equal(cancelled, false); assert.equal(sent, 0);
+  const reader = response.body.getReader();
+  assert.deepEqual((await reader.read()).value, new Uint8Array([0]));
+  t.mock.timers.tick(pauseMs);
+  assert.equal(signal.aborted, false); assert.equal(cancelled, false); assert.equal(sent, 1);
+  assert.deepEqual((await reader.read()).value, new Uint8Array([1]));
+  assert.equal((await reader.read()).done, true); assert.equal(cancelled, false);
 });
 
 test('manifest SHA256 is local policy, not runtime hashing or proof of live generation', async () => {
