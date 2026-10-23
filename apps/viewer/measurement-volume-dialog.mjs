@@ -46,7 +46,7 @@ export function openSurfaceDialog({record,units,calculate,save,onClose=()=>{},au
   if(execution==='server'){
     dialog.querySelector('[data-calculate]').textContent='Calculate volume';
     dialog.querySelector('.surface-action-bar .hint').textContent='Original elevation data · your selected outline';
-    dialog.querySelector('[data-status]').textContent=advancedSettings?'Your polygon area is already available. Review advanced settings only if needed, then calculate volume. You can close this inspector while it works.':'Your outline is ready. Calculate volume when you are ready. You can close this window while it works and return to your measurement later.';
+    dialog.querySelector('[data-status]').textContent=advancedSettings?'Your polygon area is already available. Review advanced settings only if needed, then calculate volume. Keep this inspector open until the result is saved. Closing stops this view from saving a pending result.':'Your outline is ready. Calculate volume when you are ready. Keep this window open until the result is saved. Your outline remains available if you close it.';
   }
   let abort=null,preview=null,regionPreview=null,section=null,selected=null,chartBounds=null,retired=false,closed=false,specialist=null,specialistGeneration=0,nativeProfile=null;
   let jobNotice=null,jobNoticeTimer=null,historyGeneration=0;
@@ -59,7 +59,7 @@ export function openSurfaceDialog({record,units,calculate,save,onClose=()=>{},au
     dialog.querySelector('[data-previous-values]').textContent=values.join(' · ');dialog.querySelector('[data-previous-volume]').hidden=false;
   }
   function clearJobNotice(){clearTimeout(jobNoticeTimer);jobNoticeTimer=null;jobNotice?.remove();jobNotice=null;}
-  function announceJob(){clearJobNotice();jobNotice=document.createElement('div');jobNotice.className='measurement-job-notice';jobNotice.setAttribute('role','status');jobNotice.setAttribute('aria-live','polite');jobNotice.textContent='Volume calculation accepted. You can close this window and return later; work continues while your access remains valid.';document.body.append(jobNotice);jobNoticeTimer=setTimeout(clearJobNotice,8000);jobNoticeTimer?.unref?.();}
+  function announceJob(){clearJobNotice();jobNotice=document.createElement('div');jobNotice.className='measurement-job-notice';jobNotice.setAttribute('role','status');jobNotice.setAttribute('aria-live','polite');jobNotice.textContent='Volume calculation accepted. Keep this window open to save its result to your measurement. Your outline stays saved if you close it.';document.body.append(jobNotice);jobNoticeTimer=setTimeout(clearJobNotice,8000);jobNoticeTimer?.unref?.();}
   const status=dialog.querySelector('[data-status]'),canvas=dialog.querySelector('[data-section-chart]'),plan=dialog.querySelector('[data-section-plan]');
   const field=name=>dialog.querySelector(`[name=${name}]`),value=name=>Number(field(name).value),format=v=>measurementValue(v,1,units);
   function savedSurfaceIsCurrent(current){const r=current?.results;return ['calculated','complete'].includes(r?.status)&&['surface-cut-fill','point-surface-cut-fill'].includes(r.method)&&typeof r.calculationJobId==='string'&&r.calculationJobId.length>0&&[r.cutM3,r.fillM3,r.netM3,r.coverage].every(Number.isFinite)&&r.coverage>=0&&r.coverage<=1&&r.source?.modelVersionId===current.modelVersionId&&!!current.modelVersionId&&!r.volumeInvalidated;}

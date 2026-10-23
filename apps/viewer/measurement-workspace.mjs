@@ -17,6 +17,7 @@ const restoredUnits = {imperial:'imperial','ft-in':'imperial',ft:'feet',yd:'yard
 const DISPLAY_SURFACE_RETRY_MS=500;
 
 export function createMeasurementWorkspace({ panel, context, token, permitted, toolChanged, coordinateReference, toLonLat, calculateSurface, resolveDisplayVertices, adminRequest, surfaceRequest, preferServerSurface=()=>false, onAccessLost=()=>{}, onBeforeAccessLost=()=>{}, accessGeneration=()=>0, reportMetadata=()=>({}), captureReportOrtho=null }) {
+  let volumeIntent=false;
   let units='imperial',draft=null,selected=null,editing=false,cursor=null,bound=null,gesture=null,space=false,shift=false,lastSvg='',disposed=false,volumeAbort=null,ready=!token(),lastCollection=null;
   const selectedExports=new Set(),reportDialogs=new Set(),reportCaptures=new Set();
   const metricCache=new WeakMap();
@@ -33,10 +34,10 @@ export function createMeasurementWorkspace({ panel, context, token, permitted, t
   const message=document.createElement('p');message.className='measurement-message';message.setAttribute('role','status');
   const controls=document.createElement('div');controls.className='measurement-workspace';
   controls.innerHTML=`<label class="measurement-units">Units <select data-m="units"><option value="imperial">Feet / inches</option><option value="feet">Decimal feet</option><option value="yards">Yards</option><option value="metric">Meters</option><option value="centimeters">Centimeters</option></select></label>
-    <div class="measurement-actions measurement-edit-actions" role="group" aria-label="Edit measurement"><button data-m="finish">Finish</button><button data-m="undo">Undo point</button><button data-m="edit">Edit selected</button><button data-m="focus">Focus selected</button></div>
-    <details class="measurement-help"><summary>Controls &amp; accuracy</summary><p class="hint">Drawing: Shift to navigate; right-click to finish. Editing: drag away from handles to navigate normally. Enter / Esc / Finish saves and exits. Delete / Backspace removes the selected point.</p><p class="hint">Finish a polygon to see its area immediately. Choose Calculate volume when you need volume and a side view relative to a reference base.</p><p class="hint">Measurements are private to you. Public-link changes reset on refresh. Display precision is not survey accuracy.</p></details>
+    <div class="measurement-actions measurement-edit-actions" role="group" aria-label="Edit measurement"><button data-m="finish">Finish</button><button data-m="cancel">Cancel</button><button data-m="undo">Undo point</button><button data-m="edit">Edit selected</button><button data-m="focus">Focus selected</button></div>
+    <details class="measurement-help"><summary>Controls &amp; accuracy</summary><p class="hint">Drawing: Shift to navigate; right-click to finish. Editing: drag away from handles to navigate normally. Enter / Finish saves and exits. Esc / Cancel discards unsaved changes. Delete / Backspace removes the selected point.</p><p class="hint">Finish a polygon to see its area immediately. Choose Calculate volume when you need volume and a side view relative to a reference base.</p><p class="hint">Measurements are private to you. Public-link changes reset on refresh. Display precision is not survey accuracy.</p></details>
     <div class="measurement-list-heading"><h4><span data-m-list-title>Saved measurements</span> <span data-m-count>0</span></h4><span class="hint">Newest first</span></div>
-    <p class="hint measurement-list-caption" data-m-list-caption>Click a name to rename. Edit changes its points. Exports include all saved measurements.</p>
+    <p class="hint measurement-list-caption" data-m-list-caption>Click a name to select. Edit changes its points. Exports include all saved measurements.</p>
     <div data-m-list role="region" aria-label="Saved measurements" tabindex="-1"></div><button class="measurement-reload" data-m="reload" hidden>Retry loading measurements</button>
     <section class="measurement-export-section" aria-label="Export measurements"><label class="measurement-units">Export format <select data-m="format"><option value="csv">CSV summary</option><option value="json">JSON data</option><option value="dxf">DXF (meters)</option><option value="geojson">GeoJSON</option></select></label><button data-m="export">Export all measurements</button>
     <div class="measurement-actions measurement-capture-actions" hidden><button data-m="screenshot">Save view PNG</button><button data-m="report">Print / PDF report</button></div></section>`;
@@ -225,19 +226,19 @@ export function createMeasurementWorkspace({ panel, context, token, permitted, t
     const listTitle=temporary?'Temporary measurements':'Saved measurements';
     controls.querySelector('[data-m-list-title]').textContent=listTitle;
     controls.querySelector('[data-m-list-caption]').textContent=temporary
-      ?'Measurements stay in this page only and reset on refresh or closing the tab. They are not saved to the project. Click a name to rename; Edit changes its points. Export all measurements to keep a copy.'
-      :'Click a name to rename. Edit changes its points. Exports include all saved measurements.';
+      ?'Measurements stay in this page only and reset on refresh or closing the tab. They are not saved to the project. Click a name to select; Edit changes its points. Export all measurements to keep a copy.'
+      :'Click a name to select. Edit changes its points. Exports include all saved measurements.';
     controls.querySelector('[data-m-count]').textContent=String(visibleRecords.length);
     const focused=controls.ownerDocument?.activeElement;
     const focusedRecord=focused?.closest?.('[data-record]')?.dataset.record;
     const focusedAction=focusedRecord&&focused?.dataset.m;
     const scrollTop=list.scrollTop;
-    list.innerHTML=visibleRecords.map(r=>`<article class="measurement-row ${selected===r.id?'selected':''} ${r.visible===false?'measurement-hidden':''}" data-record="${escape(r.id)}"><div class="measurement-row-heading"><button data-m="rename" title="Rename ${escape(r.name)}">${escape(r.name)}</button></div><small class="measurement-row-summary">${escape(summary(r))}</small><small class="measurement-row-status" role="status">${escape([r.visible===false?'Hidden from view':'',store.statuses.get(r.id),displayStatus(r)].filter(Boolean).join(' · '))}</small><div class="measurement-actions measurement-row-actions"><button data-m="visibility" title="${r.visible===false?'Show':'Hide'} ${escape(r.name)} on the view">${r.visible===false?'Show':'Hide'}</button><button data-m="edit-record">Edit</button><button data-m="delete">Delete</button>${r.kind==='polygon'?`<button data-m="volume">${Number.isFinite(r.results?.cutM3)||Number.isFinite(r.results?.volumeM3)?'View volume':r.results?.volumeInvalidated?'Recalculate volume':'Calculate volume'}</button>`:''}</div>${Number.isFinite(r.results?.cutM3)?`<small class="measurement-row-result">Net volume: ${escape(measurementValue(r.results.netM3,3,units))}</small>`:Number.isFinite(r.results?.volumeM3)?`<small class="measurement-row-result">Volume: ${escape(measurementValue(r.results.volumeM3,3,units))}</small>`:''}</article>`).join('')||'<p class="hint measurement-list-empty">No saved measurements yet.<br>Choose Distance or Polygon to start.</p>';
+    list.innerHTML=visibleRecords.map(r=>`<article class="measurement-row ${selected===r.id?'selected':''} ${r.visible===false?'measurement-hidden':''}" data-record="${escape(r.id)}"><div class="measurement-row-heading"><button data-m="select" aria-pressed="${selected===r.id}" title="Select ${escape(r.name)}">${escape(r.name)}</button></div><small class="measurement-row-summary">${escape(summary(r))}</small><small class="measurement-row-status" role="status">${escape([r.visible===false?'Hidden from view':'',store.statuses.get(r.id),displayStatus(r)].filter(Boolean).join(' · '))}</small><div class="measurement-actions measurement-row-actions"><button data-m="visibility" title="${r.visible===false?'Show':'Hide'} ${escape(r.name)} on the view">${r.visible===false?'Show':'Hide'}</button><button data-m="edit-record">Edit</button><button data-m="rename">Rename</button><button data-m="delete">Delete</button>${r.kind==='polygon'?`<button data-m="volume">${Number.isFinite(r.results?.cutM3)||Number.isFinite(r.results?.volumeM3)?'View volume':r.results?.volumeInvalidated?'Recalculate volume':'Calculate volume'}</button>`:''}</div>${Number.isFinite(r.results?.cutM3)?`<small class="measurement-row-result">Net volume: ${escape(measurementValue(r.results.netM3,3,units))}</small>`:Number.isFinite(r.results?.volumeM3)?`<small class="measurement-row-result">Volume: ${escape(measurementValue(r.results.volumeM3,3,units))}</small>`:''}</article>`).join('')||'<p class="hint measurement-list-empty">No saved measurements yet.<br>Choose Distance or Polygon to start.</p>';
     if(!visibleRecords.length&&temporary)list.innerHTML='<p class="hint measurement-list-empty">No temporary measurements yet.<br>Choose Distance or Polygon to start.</p>';
     listLayout.update(visibleRecords.length,listTitle);
     list.scrollTop=scrollTop;
     if(focusedAction){const row=[...(list.querySelectorAll?.('[data-record]')||[])].find(node=>node.dataset.record===focusedRecord);[...(row?.querySelectorAll('[data-m]')||[])].find(node=>node.dataset.m===focusedAction)?.focus({preventScroll:true});}
-    for(const action of ['finish','undo'])controls.querySelector(`[data-m="${action}"]`).disabled=!draft;
+    for(const action of ['finish','cancel','undo'])controls.querySelector(`[data-m="${action}"]`).disabled=!draft;
     for(const action of ['edit','focus'])controls.querySelector(`[data-m="${action}"]`).disabled=!store.records.has(selected);
     const chosen=store.records.get(selected),crossFamily=chosen?.collection==='spatial3d'&&measurementCollection(context()?.mode)==='map';
     const edit=controls.querySelector('[data-m="edit"]');
@@ -248,7 +249,7 @@ export function createMeasurementWorkspace({ panel, context, token, permitted, t
   function draftRecord(){return {...draft,vertices:draft.vertices.map(p=>p.slice())};}
   function releaseCursor(){if(cursorOwner){cursorOwner.style.cursor=previousCursor;cursorOwner=null;}}
   function updateCursor(){if(!bound?.element)return;const element=bound.element,handle=!!draft&&!shift&&(editing?(hoverHandle||gesture?.index>=0):space);element.classList.toggle('measurement-placing',!!draft&&!editing&&!shift&&!space);element.classList.toggle('measurement-navigating',!!draft&&shift);element.classList.toggle('measurement-editing',handle);if(draft&&(!editing||shift||handle)){if(cursorOwner!==element){releaseCursor();cursorOwner=element;previousCursor=element.style.cursor||'';}element.style.cursor=shift?'grab':handle?'move':'crosshair';}else releaseCursor();}
-  function disarm(){draft=null;editing=false;selectedVertex=-1;editBaseline=null;draftDisplayVertices=null;cursor=null;gesture=null;space=false;pendingPick=null;updateCursor();toolChanged('none');renderPanel();}
+  function disarm(){volumeIntent=false;draft=null;editing=false;selectedVertex=-1;editBaseline=null;draftDisplayVertices=null;cursor=null;gesture=null;space=false;pendingPick=null;updateCursor();toolChanged('none');renderPanel();}
   function closeReports(){for(const capture of reportCaptures)capture.abort();reportCaptures.clear();for(const dialog of [...reportDialogs])dialog.retire();}
   function closeDialogs(){dialogGeneration++;activeDialog?.close();activeDialog=null;closeReports();}
   function invalidate(reason='Personal measurements unavailable.',{notify=true}={}){
@@ -321,7 +322,7 @@ export function createMeasurementWorkspace({ panel, context, token, permitted, t
     const timestamp=candidate===r?record.updatedAt:candidate.recordedAt;if(typeof timestamp==='string'&&Number.isFinite(Date.parse(timestamp)))summary.recordedAt=timestamp;
     return summary;
   }
-  async function finish({openVolume=false}={}){
+  async function finish({openVolume=volumeIntent}={}){
     if(!draft)return;
     if(disposed||!allowed()){disarm();return;}
     if(draft.vertices.length<(draft.kind==='polygon'?3:2)){disarm();tell('Incomplete measurement cancelled.');return;}
@@ -343,7 +344,7 @@ export function createMeasurementWorkspace({ panel, context, token, permitted, t
     const family=measurementCollection(context()?.mode),kind=tool==='distance'?'distance':'polygon';
     const sourceMode=context()?.mode;
     draft={id:crypto.randomUUID(),name:`${kind==='distance'?'Distance':'Polygon'} ${records().length+1}`,kind,collection:family,vertices:[],coordinateReference:coordinateReference(),visible:true,source:{kind:sourceMode==='model'?'mesh':sourceMode==='cloud'?'pointCloud':sourceMode}};
-    editing=false;updateCursor();renderPanel();toolChanged(tool==='volume'?'area':tool);tell('Click to place points. Hold Shift to navigate.');
+    volumeIntent=tool==='volume';editing=false;updateCursor();renderPanel();toolChanged(tool);tell('Click to place points. Hold Shift to navigate.');
   }
   function editRecord(record){
     if(!record||!allowed())return;
@@ -411,7 +412,8 @@ export function createMeasurementWorkspace({ panel, context, token, permitted, t
     if(!draft)return;
     if(event.code==='Space'){space=true;updateCursor();stop(event);}
     else if(event.key==='Backspace'||(editing&&event.key==='Delete')){if(editing){if(selectedVertex>=0)removeSelectedVertex();else tell('Select a point to remove it.');}else{draft.vertices.pop();cursor=null;}stop(event);}
-    else if(event.key==='Escape'||event.key==='Enter'){stop(event);void finish();}
+    else if(event.key==='Escape'){stop(event);disarm();tell('Unsaved measurement changes cancelled.');}
+    else if(event.key==='Enter'){stop(event);void finish();}
   }
   function keyUp(event){if(event.code==='Space')space=false;if(event.key==='Shift')shift=false;updateCursor();}
   function cancelGesture(){if(gesture?.index>=0&&draft){draft.vertices=gesture.original;draftDisplayVertices=gesture.originalDisplay;}gesture=null;pendingPick=null;}
@@ -537,6 +539,7 @@ export function createMeasurementWorkspace({ panel, context, token, permitted, t
     const action=event.target.closest('[data-m]')?.dataset.m,id=event.target.closest('[data-record]')?.dataset.record,record=store.records.get(id);
     try{
       if(action==='finish')await finish();
+      if(action==='cancel'){disarm();tell('Unsaved measurement changes cancelled.');}
       if(action==='undo'&&draft){draft.vertices.pop();draftDisplayVertices?.pop();}
       if(action==='edit')editRecord(store.records.get(selected));
       if(action==='edit-record'){selected=id;editRecord(record);}
