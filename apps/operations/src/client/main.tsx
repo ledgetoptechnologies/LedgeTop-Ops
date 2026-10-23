@@ -6,7 +6,6 @@ import "mapbox-gl/dist/mapbox-gl.css";
 import "./styles.css";
 import "./request-workflow.css";
 import { OperationsApp } from "./OperationsApp";
-import { OperationsViewerShell, parseOperationsViewerShellRoute } from "./OperationsViewerShell";
 import { ClientOnboardingStaff } from "./ClientOnboardingStaff";
 import { ClientPortalRecipientEnrollment } from "./ClientPortalRecipientEnrollment";
 import { OperationsNativeRecipientEnrollment } from "./OperationsNativeRecipientEnrollment";
@@ -20,7 +19,6 @@ import { isDirectoryReplayAcceptanceLocation } from "./DirectoryReplayAcceptance
 import { ProjectReplayAcceptance } from "./ProjectReplayAcceptance";
 import { isProjectReplayAcceptanceLocation } from "./ProjectReplayAcceptanceRoute";
 
-const viewerShellRoute = parseOperationsViewerShellRoute(window.location.pathname);
 const onboardingStaffRoute = window.location.pathname === "/administration/client-onboarding";
 const recipientEnrollmentRoute = window.location.pathname === "/administration/client-portal/recipients";
 const operationsRecipientEnrollmentRoute = window.location.pathname === "/administration/client-portal/operations-recipients";
@@ -53,6 +51,4 @@ createRoot(document.getElementById("root")!).render(<StrictMode>{projectReplayAc
   ? <ClientPortalRecipientEnrollment />
   : onboardingStaffRoute
   ? <ClientOnboardingStaff />
-  : viewerShellRoute
-  ? <OperationsViewerShell route={viewerShellRoute} />
   : <OperationsApp />}<AppDialogHost /></StrictMode>);

@@ -551,3 +551,14 @@ html:has(.ltds-dialog[open]) { overflow: hidden; }
 .ltds-check-option:has(input:disabled) { opacity: .65; cursor: not-allowed; }
 .ltds-check-option small { margin-left: auto; color: var(--muted); font-weight: 500; }
 @media (max-width: 640px) { .ltds-form-grid { grid-template-columns: 1fr; } }
+
+/* Authenticated model routes remain inside the Operations / Client portal chrome. */
+.ops-main.ops-viewer-main, .client-portal-main.client-viewer-main { max-width: none; padding: 1rem; }
+.ops-viewer-main .viewer-shell-page, .client-viewer-main .viewer-shell-page { min-height: 0; padding: 0; border-radius: var(--radius-lg); }
+.ops-viewer-main .viewer-shell-page > .ltds-viewer-embed,
+.client-viewer-main .viewer-shell-page > .ltds-viewer-embed { min-height: calc(100dvh - 112px); }
+@media (max-width: 640px) {
+  .ops-main.ops-viewer-main, .client-portal-main.client-viewer-main { padding: 0; }
+  .ops-viewer-main .viewer-shell-page > .ltds-viewer-embed,
+  .client-viewer-main .viewer-shell-page > .ltds-viewer-embed { min-height: calc(100dvh - 80px); }
+}
