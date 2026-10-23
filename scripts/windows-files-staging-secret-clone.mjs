@@ -10,7 +10,7 @@ const exact = (value, expected) => object(value) && same(keys(value), [...expect
 const without = (value, removed) => Object.fromEntries(Object.entries(value).filter(([key]) => !removed.includes(key)));
 const fail = () => { throw Error("windows_staging_secret_clone_inputs_invalid"); };
 const budgetFail = () => { throw Error("windows_staging_secret_clone_environment_budget_exceeded"); };
-const VERSION_ENVELOPE = ["id", "number", "metadata"];
+const VERSION_ENVELOPE = ["id", "number", "metadata", "annotations"];
 const MODERN_ENVELOPE = ["id", "number", "startup_time_ms", "annotations", "urls", "source", "created_on", "author_id"];
 const MODERN_STATE = ["compatibility_date", "compatibility_flags", "main_module", "exports", "usage_model", "containers", "limits", "modules", "bindings", "env", "assets"];
 
@@ -54,7 +54,7 @@ function envelope(value, expectedId, modern) {
       || !Array.isArray(value.urls) || value.urls.length > 100 || JSON.stringify(value.urls).length > 65536
       || typeof value.source !== "string" || value.source.length > 128 || typeof value.author_id !== "string" || value.author_id.length > 256
       || typeof value.created_on !== "string" || !Number.isFinite(Date.parse(value.created_on))) fail();
-  } else if (!object(value.metadata)) fail();
+  } else if (!object(value.metadata) || !object(value.annotations)) fail();
 }
 function validatePair(pair, id) {
   if (!exact(pair, ["version","modern"])) fail();

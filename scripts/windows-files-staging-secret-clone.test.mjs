@@ -13,7 +13,7 @@ function fixture(app="operations") {
   const assets={config:{base_path:"/",html_handling:"auto-trailing-slash",not_found_handling:"single-page-application",run_worker_first:["/api/*"]}};
   const runtime={compatibility_date:"2026-07-22",compatibility_flags:["nodejs_compat"],assets:structuredClone(assets.config),exports,usage_model:"standard",
     ...(app==="operations"?{containers:[{class_name:"ThumbnailRendererContainer"}]}:{limits:{cpu_ms:300000,subrequests:25000}})};
-  const version={id:baselineVersionId,number:3,metadata:{source:"wrangler",created_on:"2026-10-23T00:00:00Z"},resources:{script:{etag:"same-module-etag",handlers:["fetch"],named_handlers:[],last_deployed_from:"wrangler"},script_runtime:runtime,bindings}};
+  const version={id:baselineVersionId,number:3,annotations:{"workers/message":"old"},metadata:{source:"wrangler",created_on:"2026-10-23T00:00:00Z",author_id:"old-author",author_email:"synthetic@example.invalid",has_preview:false},resources:{script:{etag:"same-module-etag",handlers:["fetch"],named_handlers:[],last_deployed_from:"wrangler"},script_runtime:runtime,bindings}};
   const modern={id:baselineVersionId,number:3,startup_time_ms:12,compatibility_date:runtime.compatibility_date,compatibility_flags:runtime.compatibility_flags,
     main_module:"index.js",annotations:{"workers/message":"old"},exports,usage_model:"standard",...(app==="operations"?{containers:runtime.containers}:{limits:runtime.limits}),
     urls:[],source:"wrangler",created_on:"2026-10-23T00:00:00Z",author_id:"old-author",assets,
@@ -24,7 +24,8 @@ function fixture(app="operations") {
   candidate.version.id=candidateVersionId;candidate.modern.id=candidateVersionId;candidate.version.number=4;candidate.modern.number=4;
   candidate.modern.startup_time_ms=13;candidate.modern.annotations={"workers/message":"secret-only candidate"};candidate.modern.urls=[{url:"https://new.invalid",kind:"version"}];
   candidate.modern.source="api";candidate.modern.created_on="2026-10-23T00:01:00Z";candidate.modern.author_id="new-author";
-  candidate.version.metadata={source:"api",created_on:"2026-10-23T00:01:00Z"};candidate.version.resources.script.last_deployed_from="api";
+  candidate.version.metadata={source:"api",created_on:"2026-10-23T00:01:00Z",author_id:"new-author",author_email:"synthetic-new@example.invalid",has_preview:false};
+  candidate.version.annotations={"workers/message":"secret-only candidate"};candidate.version.resources.script.last_deployed_from="api";
   for(const name of WINDOWS_STAGING_SECRET_SLOTS[app]) {
     candidate.version.resources.bindings.push({name,type:"secret_text"});candidate.modern.bindings.push({name,type:"secret_text"});candidate.modern.env[name]={type:"secret_text"};
   }
@@ -45,6 +46,9 @@ const changes={
   "same version":f=>{f.candidateVersionId=f.baselineVersionId;},"malformed version":f=>{f.candidateVersionId="bad";},
   "mismatched response ID":f=>{f.candidate.modern.id=f.baselineVersionId;},
   "mismatched endpoint number":f=>{f.candidate.modern.number++;},
+  "malformed old-version annotations":f=>{f.baseline.version.annotations=[];},
+  "malformed candidate-version annotations":f=>{f.candidate.version.annotations=null;},
+  "missing candidate-version annotations":f=>{delete f.candidate.version.annotations;},
   "object URLs instead of provider array":f=>{f.candidate.modern.urls={version:[]};},
   "unbounded URLs array":f=>{f.candidate.modern.urls=Array.from({length:101},()=>null);},
   "wrong planned secret":f=>{f.plannedSecretNames[0]="OTHER_SECRET";},"incomplete plan":f=>{f.plannedSecretNames.pop();},
