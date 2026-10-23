@@ -50,6 +50,7 @@ var groups = new (string Name, Func<Task> Run)[] {
     ("a remembered choice opens directly; a corrupt or unoffered one asks again", RememberedChoice),
     ("switching stops and saves downloads, then opens the other kind with a fresh view", SwitchDrainsFirst),
     ("a refused company setup never falls back to client deliveries", NoFallbackOnRefusal),
+    ("switching or closing never waits behind a stuck sign-in, and a late result opens nothing", PendingSignInSwitchAndClose),
     ("the choice screen renders and returns only what was clicked", ChooserWindow),
     ("the window renders sign-in and files screens", Render),
 };
@@ -1185,6 +1186,57 @@ async Task NoFallbackOnRefusal()
         Equal((AccessMode?)AccessMode.Employee, choice.Preference.Read());
     }
     try { Directory.Delete(root, true); } catch (IOException) { }
+}
+
+async Task PendingSignInSwitchAndClose()
+{
+    // The client's sign-in check is stuck (offline or a hung token cache) when the person switches, and then closes.
+    var root = Path.Combine(Path.GetTempPath(), "ltfiles-pending-" + Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(root);
+    var state = Path.Combine(root, "queue");
+    var backends = new List<DemoBackend>();
+    IFilesBackend Make(AccessMode mode)
+    {
+        var backend = new DemoBackend(state, signedIn: true, mode: mode);
+        if (mode == AccessMode.Client) backend.BlockSessions();
+        backends.Add(backend); return backend;
+    }
+    try {
+        var choice = new AccessChoice(Make, [AccessMode.Client, AccessMode.Employee], AccessPreference.For(root, "pilot"));
+        choice.Preference.Save(AccessMode.Client);
+        var shell = new ChooserShell();
+        var session = new FilesSession(shell, choice, Path.Combine(root, "Downloads"), null);
+        var starting = session.StartAsync();
+        await Until(() => shell.Attached.Count == 1, "client view shown while its sign-in check is stuck");
+        var client = shell.Attached[0];
+        True(!starting.IsCompleted && client.Screen != Screen.Files, "the client sign-in is still pending");
+
+        client.SwitchAccess.Execute(null);
+        await Until(() => session.Mode == AccessMode.Employee && shell.Attached.Count == 2, "switched without waiting for the stuck sign-in");
+        var company = shell.Attached[1];
+        await Until(() => company.Screen == Screen.Files && company.Sections.Count > 0, "company files shown");
+        Equal(1, backends[0].Disposals);
+
+        // The stuck client check now finishes late: it must open nothing for the closed client view.
+        backends[0].ReleaseSessions();
+        await starting.WaitAsync(TimeSpan.FromSeconds(30));
+        Pump();
+        True(!Directory.Exists(Path.Combine(state, "portal")), "no client queue was opened after the switch");
+        True(company.Sections.All(node => node.Node.SourceAlias == "employee"), "the late client result never reached the company view");
+
+        // Closing while a newly chosen view is still checking its sign-in finishes promptly too.
+        backends[1].BlockSessions();
+        company.SwitchAccess.Execute(null);
+        await Until(() => session.Mode == AccessMode.Client && shell.Attached.Count == 3, "switched back");
+        await session.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(10));
+        Equal(1, backends[1].Disposals);
+        foreach (var backend in backends) backend.ReleaseSessions();
+        Pump();
+        True(Locks.Free(state), "every queue released after closing");
+    } finally {
+        foreach (var backend in backends) backend.ReleaseSessions();
+        try { Directory.Delete(root, true); } catch (IOException) { }
+    }
 }
 
 async Task ChooserWindow()

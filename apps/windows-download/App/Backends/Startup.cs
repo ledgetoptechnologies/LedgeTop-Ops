@@ -24,6 +24,18 @@ public static class Startup
     public const string UnreviewedProblem = "This release of Ledge Top Files isn't ready to connect yet. Use a newer release or ask your Ledge Top contact.";
     public const string UnknownReleaseProblem = "This copy of Ledge Top Files has an unknown release setting, so it won't connect. Reinstall Ledge Top Files or ask your Ledge Top contact.";
 
+    /// <summary>The pinned helper exists as a plain local file (no links on its path) with exactly the expected SHA-256.</summary>
+    internal static bool HelperTrusted(string path, string sha256)
+    {
+        try {
+            if (!Path.IsPathFullyQualified(path) || path.StartsWith(@"\\", StringComparison.Ordinal)) return false;
+            for (string? part = Path.GetFullPath(path); part is not null; part = Path.GetDirectoryName(part))
+                if ((File.GetAttributes(part) & FileAttributes.ReparsePoint) != 0) return false;
+            using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
+            return Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(stream)).Equals(sha256, StringComparison.OrdinalIgnoreCase);
+        } catch (Exception error) when (error is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException) { return false; }
+    }
+
     /// <summary>The state root for one channel. Each keeps per-source and per-person folders beneath it.</summary>
     public static string StateRoot(string localAppData, string channelFolder) =>
         Path.Combine(localAppData, "LedgeTop", "Files", channelFolder, "queue");
@@ -65,8 +77,9 @@ public static class Startup
     private static StartupPlan? Choice(LiveSettings settings, string localAppData, string folder, string downloads, string? tag)
     {
         var root = StateRoot(localAppData, folder);
-        try { new LiveBackend(settings, root, AccessMode.Client).DisposeAsync().AsTask().GetAwaiter().GetResult(); }
-        catch (Exception) { return null; }
+        // Check the helper itself, without building either source: each source is only built after it is chosen,
+        // and the chosen source checks the helper again before it is used.
+        if (!HelperTrusted(settings.CloudflaredPath, settings.CloudflaredSha256)) return null;
         AccessMode[] modes = settings.StaffApplicationUrl is null ? [AccessMode.Client] : [AccessMode.Client, AccessMode.Employee];
         return new(null, null, downloads, tag, new AccessChoice(mode => new LiveBackend(settings, root, mode), modes, AccessPreference.For(localAppData, folder)));
     }
