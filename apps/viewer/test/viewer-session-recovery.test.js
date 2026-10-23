@@ -10,7 +10,7 @@ const workspaceSource = fs.readFileSync(path.join(__dirname, '..', 'measurement-
 const REQUEST = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee';
 
 function fixture({ controller = true } = {}) {
-  const timers = new Map(), posts = [], resets = [], measurements = {invalidations:0,installs:0,invalidated:false,displayAborts:0,records:new Map([['private','geometry']])};
+  const timers = new Map(), posts = [], resets = [], measurements = {sliceResets:0,invalidations:0,installs:0,invalidated:false,displayAborts:0,records:new Map([['private','geometry']])};
   let timerId = 0;
   const window = {};
   window.parent = window;
@@ -18,6 +18,7 @@ function fixture({ controller = true } = {}) {
     model: { id: 'model-one',activeVersion:{id:'version-one'} }, expiresAt: new Date(Date.now() + 60_000).toISOString() };
   const context = vm.createContext({
     createMeasurementDraftRecovery,
+    viewerSlice:{reset:()=>measurements.sliceResets++},
     window, VIEW_MODE: 'session', reviewSessionChannel: controller ? { postMessage: value => posts.push(value) } : null,
     REVIEW_CONTROLLER_ID: REQUEST,
     activeViewerSession: session, sessionAccessGeneration: 0, PROJECT: session.model, TILES_URL: '/stable/tileset.json', EPT_URL: '/stable/ept.json',
@@ -88,6 +89,7 @@ test('current-access denial far before expiry is visible without requesting a co
   assert.equal(f.posts.length, 0);
   assert.equal(f.context.sessionRenewalPending, false);
   assert.equal(f.context.sessionRenewalBlocked, true);
+  assert.ok(f.measurements.sliceResets>0,'authorization loss resets the visual cut plane');
   assert.match(f.context.sessionAccessLabel(), /reopen this model/);
   assert.equal(f.context.tilesRenderer !== null, true);
 });
