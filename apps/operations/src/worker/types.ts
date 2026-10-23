@@ -3,6 +3,8 @@ import type { ThumbnailRendererContainer } from "./thumbnail-renderer-container"
 
 export type Env = Omit<
   Cloudflare.Env,
+  | "UI_RELEASE_ASSETS"
+  | "UI_ACTIVE_RELEASE"
   | "DIRECT_DELIVERY_UPLOADS_ENABLED"
   | "R2_PURGE_ENABLED"
   | "THUMBNAIL_RENDERER"
@@ -87,6 +89,10 @@ export type Env = Omit<
   | "OPERATIONS_PORTAL_WORKSPACE_PUBLICATION_DISPATCH_ENABLED"
   | "OPERATIONS_PORTAL_WORKSPACE_PUBLICATION"
 > & {
+  /** Optional HTTP asset service, absent until a separately reviewed UI release packet is installed. */
+  UI_RELEASE_ASSETS?: Pick<Fetcher, "fetch">;
+  /** Empty or absent keeps the installed legacy HTML; only exact registered releases may be selected. */
+  UI_ACTIVE_RELEASE?: string;
   SHARED_PROFILE_PORTAL_AUTHORITY?: import('../../../../packages/shared/src/shared-business-profile').SharedProfilePortalAuthorityBinding;
   /** Explicit because Operations modules are also type-checked from sibling Worker projects with narrower generated Env types. */
   ENVIRONMENT?: string;

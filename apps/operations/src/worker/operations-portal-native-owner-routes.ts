@@ -1,4 +1,5 @@
 import type { Env } from "./types";
+import { serveOperationsUiShell } from "./ui-release-routes";
 import { handleOperationsPortalNativeBillingSourceAuthorityOwnerHttp } from "./operations-portal-native-billing-source-authority-owner-http";
 import { reviewNativeBillingSourceAuthority,grantNativeBillingSourceAuthority,revokeNativeBillingSourceAuthority,
   readNativeBillingSourceAuthorityStatus } from "./operations-portal-native-billing-source-authority-issuer";
@@ -74,12 +75,12 @@ export async function dispatchOperationsPortalNativeOwnerRequest(request: Reques
       || env.OPERATIONS_PORTAL_NATIVE_RECIPIENT_AUTHORITY_DISPATCH_ENABLED !== "true"
       || typeof env.OPERATIONS_PORTAL_NATIVE_RECIPIENT_AUTHORITY?.applyNativeAuthority !== "function"
       || typeof env.OPERATIONS_PORTAL_NATIVE_RECIPIENT_AUTHORITY?.getNativeAuthorityStatus !== "function") return notFound();
-    return env.ASSETS.fetch(request);
+    return serveOperationsUiShell(request, env);
   }
 
   if (delivery) {
     if (env.OPERATIONS_PORTAL_NATIVE_DELIVERY_OWNER_ENABLED !== "true") return notFound();
-    if (pathname === DELIVERY_PAGE) return env.ASSETS.fetch(request);
+    if (pathname === DELIVERY_PAGE) return serveOperationsUiShell(request, env);
     return handleOperationsPortalNativeDeliveryAuthorityOwnerHttp(request, { environment: env.ENVIRONMENT,
       expectedHost: env.EXPECTED_HOST, configuration, database: env.OPS_DB, dispatch: env });
   }
@@ -88,7 +89,7 @@ export async function dispatchOperationsPortalNativeOwnerRequest(request: Reques
       || env.OPERATIONS_PORTAL_WORKSPACE_PUBLICATION_DISPATCH_ENABLED !== "true"
       || typeof env.OPERATIONS_PORTAL_WORKSPACE_PUBLICATION?.publishWorkspace !== "function"
       || typeof env.OPERATIONS_PORTAL_WORKSPACE_PUBLICATION?.getPublicationStatus !== "function") return notFound();
-    if (pathname === WORKSPACE_PAGE) return env.ASSETS.fetch(request);
+    if (pathname === WORKSPACE_PAGE) return serveOperationsUiShell(request, env);
     return handleOperationsPortalWorkspaceOwnerHttp(request, { environment: env.ENVIRONMENT,
       expectedHost: env.EXPECTED_HOST, configuration, database: env.OPS_DB,
       publication: env.OPERATIONS_PORTAL_WORKSPACE_PUBLICATION,folderAuthority:env });
@@ -99,7 +100,7 @@ export async function dispatchOperationsPortalNativeOwnerRequest(request: Reques
     configuration,database:env.OPS_DB,core:{review:(_db,a,i)=>reviewNativeBillingSourceAuthority(env,a,i),
       grant:(_db,a,i)=>grantNativeBillingSourceAuthority(env,a,i),revoke:(_db,a,i)=>revokeNativeBillingSourceAuthority(env,a,i),
       readStatus:(_db,a,id)=>readNativeBillingSourceAuthorityStatus(env,a,id)}});
-  if (pathname === BILLING_PAGE || pathname === BILLING_PERMISSION_PAGE) return env.ASSETS.fetch(request);
+  if (pathname === BILLING_PAGE || pathname === BILLING_PERMISSION_PAGE) return serveOperationsUiShell(request, env);
   if (billingPermission) return handleOperationsPortalNativeBillingPermissionOwnerHttp(request, {
     environment: env.ENVIRONMENT, expectedHost: env.EXPECTED_HOST,
     delegationFlag: env.OPERATIONS_PORTAL_NATIVE_BILLING_OWNER_ENABLED,
