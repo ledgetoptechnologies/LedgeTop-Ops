@@ -1040,7 +1040,7 @@ test('browser camera-centered focal owner reacquires A across A -> B -> A views'
       width: 1200, height: 800, deviceScaleFactor: 1, mobile: false,
       screenWidth: 1200, screenHeight: 800,
     });
-    await client.command('Page.navigate', { url: `${fixture.origin}/?project=${fixtureId}&lodDistanceDemand=0` });
+    await client.command('Page.navigate', { url: `${fixture.origin}/?project=${fixtureId}&view=model&lodDistanceDemand=0` });
     await waitFor(client, `window.__ltds?.tiles?.()?.root?.children?.length === 2`,
       'two-owner fixture hierarchy did not load');
     // Hierarchy JSON arrives before asynchronous child preprocessing. A camera
@@ -1178,8 +1178,8 @@ test('browser LOD stream hides the coarse root after complete top-down foregroun
     await client.command('Network.enable');
     await client.command('Log.enable');
     await client.command('Emulation.setDeviceMetricsOverride', { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false, screenWidth: 1440, screenHeight: 900 });
-    await client.command('Page.navigate', { url: `${origin}/?project=${fixtureId}&lodDistanceDemand=0` });
-    await waitFor(client, `location.search.includes('view=model') && document.querySelector('#tab-model')?.classList.contains('active')`, 'verified LOD was not selected over the available orthophoto');
+    await client.command('Page.navigate', { url: `${origin}/?project=${fixtureId}&view=model&lodDistanceDemand=0` });
+    await waitFor(client, `location.search.includes('view=model') && document.querySelector('#tab-model')?.classList.contains('active')`, 'explicit model selection did not activate the verified LOD');
     await waitFor(client, 'Boolean(window.__ltds?.tiles()?.root && window.__ltds.tiles().group.children.length)', 'no LOD tile attached');
     await waitFor(client, 'window.__ltds.state?.lodManifestReport?.valid === true', 'REPLACE manifest did not validate');
     await waitFor(client, `(() => { const t=window.__ltds.tiles(); return !t.downloadQueue?.running && !t.parseQueue?.running && !t.processNodeQueue?.running; })()`, 'balanced startup queues did not settle');
@@ -1715,7 +1715,7 @@ test('browser close view refines at the default Detail and small motion retains 
       width: 1440, height: 900, deviceScaleFactor: 1, mobile: false,
       screenWidth: 1440, screenHeight: 900,
     });
-    await client.command('Page.navigate', { url: `${fixture.origin}/?project=${fixtureId}&lodDistanceDemand=0` });
+    await client.command('Page.navigate', { url: `${fixture.origin}/?project=${fixtureId}&view=model&lodDistanceDemand=0` });
     await waitFor(client, 'Boolean(window.__ltds?.tiles()?.root?.engineData?.scene)', 'coarse root did not load');
 
     await waitFor(client, `(() => {
@@ -1865,7 +1865,7 @@ test('browser camera layer preserves all in-view source markers and map anchors 
     await client.command('Runtime.enable');
     await client.command('Log.enable');
     await client.command('Emulation.setDeviceMetricsOverride', { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
-    await client.command('Page.navigate', { url: `${fixture.origin}/?project=${fixtureId}&lodDistanceDemand=0` });
+    await client.command('Page.navigate', { url: `${fixture.origin}/?project=${fixtureId}&view=model&lodDistanceDemand=0` });
     await waitFor(client, 'Boolean(window.__ltds?.tiles()?.root && window.__ltds.tiles().group.children.length)', 'no LOD tile attached');
     await waitFor(client, `window.__ltds.state.lodRuntimeProfile?.bootstrapPhase === 'complete'`,
       'camera-layer fixture did not finish bounded LOD prefetch');
@@ -2059,7 +2059,7 @@ test('browser hides the coarse root when every visible branch meets the active D
     await client.command('Log.enable');
     await client.command('Network.enable');
     await client.command('Emulation.setDeviceMetricsOverride', { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
-    await client.command('Page.navigate', { url: `${fixture.origin}/?project=${fixtureId}&lodDistanceDemand=0` });
+    await client.command('Page.navigate', { url: `${fixture.origin}/?project=${fixtureId}&view=model&lodDistanceDemand=0` });
     await waitFor(client, 'Boolean(window.__ltds?.tiles()?.root?.engineData?.scene)', 'coarse root did not load');
     await waitFor(client, `window.__ltds.state.lodRuntimeProfile?.bootstrapPhase === 'complete'`,
       '16-leaf fixture did not finish its initial bounded prefetch', 180_000);
@@ -3714,7 +3714,7 @@ test('browser camera photo fills the window and preserves source pixels through 
       window.__photoFullscreenCalls = 0;
       Element.prototype.requestFullscreen = function () { window.__photoFullscreenCalls++; return Promise.reject(new Error('Unexpected device fullscreen')); };
     ` });
-    await client.command('Page.navigate', { url: `${fixture.origin}/view/photo-allowed` });
+    await client.command('Page.navigate', { url: `${fixture.origin}/view/photo-allowed?view=model` });
     await waitFor(client, 'Boolean(window.__ltds?.tiles()?.root)', 'photo fixture did not initialize');
     await client.evaluate(`document.querySelector('#layer-cameras').click()`);
     await waitFor(client, 'window.__ltdsCams === 3', 'photo fixture camera positions did not load');
@@ -3816,7 +3816,7 @@ test('browser camera photo fills the window and preserves source pixels through 
       assert.equal(await client.evaluate(`getComputedStyle(document.querySelector('#photo-modal')).display`), 'none');
     }
     for (const [grant, allowed] of [['photo-staff', true], ['photo-denied', false]]) {
-      await client.command('Page.navigate', { url: `${fixture.origin}/view/${grant}` });
+      await client.command('Page.navigate', { url: `${fixture.origin}/view/${grant}?view=model` });
       await waitFor(client, `location.pathname === '/view/${grant}' && Boolean(window.__ltds?.tiles()?.root)`, 'permission fixture did not initialize');
       await client.evaluate(`document.querySelector('#layer-cameras').click()`);
       await waitFor(client, 'window.__ltdsCams === 3', 'permission fixture cameras did not load');
@@ -3915,7 +3915,7 @@ test('browser distance-demand switches at developer Detail 20 protect nearby sur
       {enabled:true,query:'&lodLoadingTiming=1'},
       {enabled:true,query:'&lodDistanceDemand=1&lodLoadingTiming=1'},
     ]) {
-      await client.command('Page.navigate',{url:`${fixture.origin}/?project=${fixtureId}${query}`});
+      await client.command('Page.navigate',{url:`${fixture.origin}/?project=${fixtureId}&view=model${query}`});
       await waitFor(client, `window.__ltds?.state?.lodRuntimeProfile?.bootstrapPhase==='complete'`, 'evaluation fixture bootstrap did not complete',20_000);
       // Maximum Detail 24 intentionally bypasses distance-demand coarsening.
       // Exercise this retained developer policy at its specified Detail 20.
@@ -4093,7 +4093,7 @@ test('browser decodes Obj2Tiles KTX2 B3DM textures under the production CSP with
       width: 1440, height: 900, deviceScaleFactor: 1, mobile: false,
       screenWidth: 1440, screenHeight: 900,
     });
-    await client.command('Page.navigate', { url: `${fixture.origin}/?project=${fixtureId}` });
+    await client.command('Page.navigate', { url: `${fixture.origin}/?project=${fixtureId}&view=model` });
     try { await waitFor(client, `(() => {
       const tiles = window.__ltds?.tiles?.();
       if (!tiles?.root || !tiles.group.children.length) return false;

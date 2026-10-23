@@ -58,3 +58,21 @@ Existing code can display registered EPT clouds and selected direct LAS/LAZ/PLY 
 - Final revocation follow-up: 87 Viewer tests, 14 Operations bridge/issuer tests, and the Operations typecheck passed.
 
 These checks use synthetic fixtures. They do not certify survey accuracy or establish that the changes are deployed to the live service.
+
+## Release checkpoint
+
+The PR is ready for review; release remains held. Full PR CI found fixture assumptions exposed by the new authenticated app shell, ortho-first startup, and measurement/slice integration. Those failures must be corrected and all checks rerun on the final commit before merging. Earlier focused passes above are not a full-CI acceptance claim.
+
+Main merges trigger all three automatic production Worker Builds and publish the Viewer image. The current production adapter deliberately refuses changed frontend assets; the retained-asset union planner is offline only. A reviewed complete historical asset inventory and an approved UI upload/activation path are required before the new Operations/Client navigation can ship. Do not change the installed fingerprint or bypass the adapter with direct deployment.
+
+Release order is Operations bridge acceptance, then the owner updates both Viewer API and worker using the verified main image, then Client/UI acceptance through the approved UI path. Preserve runtime flags, resources, storage, historical assets, and schedules. The shared domain release record v13 still has an unresolved old Viewer API image reference; verify the actual API revision before relying on new behavior. TrueNAS updates remain owner-operated.
+
+Live identification of the two attention alerts is still pending authenticated Viewer access. No processing records, grants, runtime settings, or deployed services have been changed by this work.
+
+### CI fixture corrections
+
+The deployment test now uses deterministic synthetic frontend drift; the installed production profile is unchanged. The Operations shell fixture supplies a complete authorized staff session while retaining model-identity and CSRF checks. Viewer fixtures include slice and measurement lifecycle seams, refreshed structural assertions, and explicit model selection in model-only LOD/browser scenarios. Existing view-mode tests retain explicit ortho-first coverage.
+
+Local correction evidence: five frontend guard tests and 32 workflow/source invariants passed. After command execution recovered, all six affected non-browser Viewer suites passed together (81/81). Initial browser attempts stopped before application assertions because Edge startup timed out and a generated local KTX transcoder asset was absent. Browser regressions are being rerun using the normal environment and package preparation. Full Linux CI must pass on the final commit before release.
+
+No production action has occurred. A fresh PR read confirmed the deployment-test correction reached GitHub despite an earlier command observation timeout; subsequent changes require their own exact-head check results.
