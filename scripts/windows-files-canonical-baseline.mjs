@@ -5,12 +5,12 @@ import {readFile,readdir} from "node:fs/promises";
 import {fileURLToPath} from "node:url";
 import {resolve} from "node:path";
 import {WINDOWS_SCHEMA_QUERY} from "./windows-files-schema-query.mjs";
+import {assertCanonicalFileRunner} from "./windows-files-canonical-runner.mjs";
 import {selectDiagnosticDefinitions} from "./windows-files-schema-definition-diagnostic.mjs";
 import {reviewedOperationsMigrationNames,reviewedClientMigrationNames} from "../apps/operations/test/helpers/reviewed-operations-migration-chain.ts";
 
 const root=fileURLToPath(new URL("../",import.meta.url));
 const require=createRequire(new URL("../apps/client/package.json",import.meta.url));
-const {Miniflare}=require("miniflare"),{unstable_splitSqlQuery}=require("wrangler");
 const sha=value=>createHash("sha256").update(typeof value==="string"?value:JSON.stringify(value)).digest("hex");
 export const canonicalSchemaQuery=WINDOWS_SCHEMA_QUERY;
 // Exact reviewed pinned Wrangler getCreateMigrationsTableQuery output. Do not
@@ -19,8 +19,10 @@ export const wranglerLedgerDDL='CREATE TABLE IF NOT EXISTS "d1_migrations"(\n\t\
 const profiles={operations:{directory:"operations",baseline:"0221_portal_correspondence_lifecycle_write_guards.sql",final:"0224_windows_portal_publication_chain_index.sql",count:221},
   delivery:{directory:"client",baseline:"0234_pa_principal_reenrollment.sql",final:"0236_windows_portal_successor_content_start_audit.sql",count:153}};
 export async function generateWindowsCanonicalBaseline({baselineOnly=false,includeSchemaObjectDigests=false,selectedDefinitionObserver}={}){
+  assertCanonicalFileRunner();
   if(typeof baselineOnly!=="boolean"||typeof includeSchemaObjectDigests!=="boolean")throw Error("canonical_replay_options_invalid");
   if(selectedDefinitionObserver!==undefined&&(!baselineOnly||typeof selectedDefinitionObserver!=="function"))throw Error("canonical_definition_observer_requires_baseline_only");
+  const {Miniflare}=require("miniflare"),{unstable_splitSqlQuery}=require("wrangler");
   // Existing independent immutable source contracts validate full current source
   // and successors before any local SQL executes. They do not alter old pins.
   reviewedOperationsMigrationNames(new URL("../apps/operations/migrations/",import.meta.url));

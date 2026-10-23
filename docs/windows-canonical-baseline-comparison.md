@@ -81,3 +81,22 @@ The old `name NOT LIKE 'sqlite_%'` predicate treated `_` as a wildcard and hid l
 Generator references and preflight observations now include `schemaQuerySha256` for the exact UTF-8 query string. The refreshed query digest is `8fce60a0f677bb4e8e21d04b6e64efa0b46ad4a6a982141f1b432bc0788eecd9`. Comparison never reports `matches_pinned_local_replay` unless that exact scope digest is present: absent, old or different valid digests produce `requires_review` / `query_scope_unverified`; malformed digests are refused. Even the correct field is supplied metadata, not signed remote attestation. A derived receipt must preserve its original capture and clearly record the actually executed source/tool/query provenance; merely adding a new digest to an old LIKE-query receipt cannot qualify it.
 
 The corrected query did not change any schema hashes/counts in this canonical local source, and current staging hashes remain different. A complete exact-query full replay—not a scope label alone—qualified these refreshed local artifacts. Subsequent validation-only changes did not rerun migrations. Local checks: 34/34 focused query/helper/comparison/preflight tests passed. No remote query was performed in this work.
+
+### Invoke replay from a file
+
+Use the CLI above or import the generator from an owned `.mjs` file; do not use
+`node --input-type=module -e`. Miniflare's pinned synchronous fetch helper creates
+an eval Worker containing CommonJS `require()`. Node inherits `--input-type` into
+that Worker. A minimal isolated Worker under the original module invocation
+failed with `ReferenceError: require is not defined`; Miniflare's caller can remain
+blocked in its unbounded `Atomics.wait()` after that failure. The initial diagnostic
+replay produced **no result**. The precise in-flight RPC was not instrumented.
+
+The generator now rejects both `--input-type=value` and `--input-type value`
+before loading Miniflare/Wrangler, with `canonical_replay_use_file_runner`.
+It does not remove flags, rewrite dependencies, expose an inspector, or alter
+the frozen replay/runtime/schema contracts. Bounded subprocess tests invoke the
+actual generator while trapping any engine import: module eval is rejected and
+ordinary file invocation reaches normal option validation. No replay or SQL runs
+in these guard tests. A subsequent replay must be a separately reported file-runner
+execution; this guard does not turn the stalled invocation into a successful one.
