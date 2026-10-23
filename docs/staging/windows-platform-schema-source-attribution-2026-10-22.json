@@ -1,0 +1,189 @@
+{
+  "schemaVersion": 1,
+  "scope": "Read-only retained-definition attribution against pinned upstream table constants and repository migration-ledger generator; no table contents or captured SQL execution",
+  "sourceCommit": "b505a337bda5a27d721e95606fb0d3f0251eb070",
+  "upstream": {
+    "repository": "cloudflare/workerd",
+    "tag": "v1.20260730.1",
+    "commit": "26b5461b7dcc640bb16072f1ba6f2c6df82572ba",
+    "liveCloudflareRuntimeVersionVerified": false,
+    "files": [
+      {
+        "name": "sqlite-metadata.c++",
+        "path": "src/workerd/util/sqlite-metadata.c++",
+        "blobSha": "6acdbdb25284658066e4c04dfec538017ca8b3da",
+        "sha256": "d2bb1f60b6956186f094b28452fdc7a09e8b29eff29c590f08b24139820dcd8c",
+        "url": "https://github.com/cloudflare/workerd/blob/26b5461b7dcc640bb16072f1ba6f2c6df82572ba/src/workerd/util/sqlite-metadata.c++"
+      },
+      {
+        "name": "sqlite-kv.c++",
+        "path": "src/workerd/util/sqlite-kv.c++",
+        "blobSha": "7644878de9de74925385ecc56b2dfbefc6cc124e",
+        "sha256": "f4b97e4f68510df8a63c982eacc0a9de69c1ec92e5609bfc0676611de3e33fe6",
+        "url": "https://github.com/cloudflare/workerd/blob/26b5461b7dcc640bb16072f1ba6f2c6df82572ba/src/workerd/util/sqlite-kv.c++"
+      },
+      {
+        "name": "sqlite-metadata.h",
+        "path": "src/workerd/util/sqlite-metadata.h",
+        "blobSha": "c365166a2136c3405df9d4f7ac0af10d39ad4fe7",
+        "sha256": "29a1c4ad449d09847bf6a836f2e7f0ba4a665556604ac33a2e8e0746e53eec43",
+        "url": "https://github.com/cloudflare/workerd/blob/26b5461b7dcc640bb16072f1ba6f2c6df82572ba/src/workerd/util/sqlite-metadata.h"
+      },
+      {
+        "name": "sqlite-kv.h",
+        "path": "src/workerd/util/sqlite-kv.h",
+        "blobSha": "5292c990c77dc7c473f8589a3148d12013c37be4",
+        "sha256": "a8195936989c59f05f194d95b9abdcde07eff6d95529041354015fe9521b436d",
+        "url": "https://github.com/cloudflare/workerd/blob/26b5461b7dcc640bb16072f1ba6f2c6df82572ba/src/workerd/util/sqlite-kv.h"
+      }
+    ]
+  },
+  "remoteCaptureSha256": "1e61f1c5d51cbf0efe3808cd95cb7327b058e219ed786e273e29c56e9e2087b4",
+  "localCaptureSha256": "1513c1935c9113052c780b54bc9644c40b564903a8b17ab1b59d6c65507969e7",
+  "fixedDiagnosticTablesExecuted": 3,
+  "sqliteVersion": "3.53.0",
+  "apps": [
+    {
+      "app": "operations",
+      "observedMetadataAbsent": true,
+      "localMetadata": {
+        "schemaVersion": 1,
+        "app": "operations",
+        "scope": "Lexical attribution of selected local DDL only; no semantic equivalence or readiness proof",
+        "objects": [
+          {
+            "type": "table",
+            "name": "_cf_METADATA",
+            "tbl_name": "_cf_METADATA",
+            "expectedPresent": true,
+            "observedPresent": true,
+            "expectedSqlSha256": "f197d62ec9699924d941575fe9a9fbb42ef9fde5416b7693f51ebe970c5ff160",
+            "observedSqlSha256": "f197d62ec9699924d941575fe9a9fbb42ef9fde5416b7693f51ebe970c5ff160",
+            "category": "exact_sql_bytes"
+          }
+        ],
+        "categories": {
+          "exact_sql_bytes": 1,
+          "whitespace_outside_quoted_tokens_only": 0,
+          "identifier_quoting_only_candidate": 0,
+          "unresolved_token_or_structure_difference": 0
+        },
+        "canonicalBaselineVerified": false,
+        "semanticEquivalenceEstablished": false,
+        "caveat": "Identifier quoting and word case are lexical candidates only: SQLite may interpret double-quoted tokens as literals in legacy contexts. Comment attribution never joins surrounding tokens. No SQL is executed or normalized into approval."
+      },
+      "observedExtraTables": {
+        "schemaVersion": 1,
+        "app": "operations",
+        "scope": "Lexical attribution of selected local DDL only; no semantic equivalence or readiness proof",
+        "objects": [
+          {
+            "type": "table",
+            "name": "_cf_KV",
+            "tbl_name": "_cf_KV",
+            "expectedPresent": true,
+            "observedPresent": true,
+            "expectedSqlSha256": "4043fea8b8581dfc344308300f74de5f3f0c683b4a9b0df120aff19d08d01156",
+            "observedSqlSha256": "4043fea8b8581dfc344308300f74de5f3f0c683b4a9b0df120aff19d08d01156",
+            "category": "exact_sql_bytes"
+          },
+          {
+            "type": "table",
+            "name": "staging_native_authority_migrations",
+            "tbl_name": "staging_native_authority_migrations",
+            "expectedPresent": true,
+            "observedPresent": true,
+            "expectedSqlSha256": "ac1f59f2cecef467b2a0406886eb95b6dd934d147a5bd92ed734371f98daba69",
+            "observedSqlSha256": "ac1f59f2cecef467b2a0406886eb95b6dd934d147a5bd92ed734371f98daba69",
+            "category": "exact_sql_bytes"
+          }
+        ],
+        "categories": {
+          "exact_sql_bytes": 2,
+          "whitespace_outside_quoted_tokens_only": 0,
+          "identifier_quoting_only_candidate": 0,
+          "unresolved_token_or_structure_difference": 0
+        },
+        "canonicalBaselineVerified": false,
+        "semanticEquivalenceEstablished": false,
+        "caveat": "Identifier quoting and word case are lexical candidates only: SQLite may interpret double-quoted tokens as literals in legacy contexts. Comment attribution never joins surrounding tokens. No SQL is executed or normalized into approval."
+      }
+    },
+    {
+      "app": "delivery",
+      "observedMetadataAbsent": true,
+      "localMetadata": {
+        "schemaVersion": 1,
+        "app": "delivery",
+        "scope": "Lexical attribution of selected local DDL only; no semantic equivalence or readiness proof",
+        "objects": [
+          {
+            "type": "table",
+            "name": "_cf_METADATA",
+            "tbl_name": "_cf_METADATA",
+            "expectedPresent": true,
+            "observedPresent": true,
+            "expectedSqlSha256": "f197d62ec9699924d941575fe9a9fbb42ef9fde5416b7693f51ebe970c5ff160",
+            "observedSqlSha256": "f197d62ec9699924d941575fe9a9fbb42ef9fde5416b7693f51ebe970c5ff160",
+            "category": "exact_sql_bytes"
+          }
+        ],
+        "categories": {
+          "exact_sql_bytes": 1,
+          "whitespace_outside_quoted_tokens_only": 0,
+          "identifier_quoting_only_candidate": 0,
+          "unresolved_token_or_structure_difference": 0
+        },
+        "canonicalBaselineVerified": false,
+        "semanticEquivalenceEstablished": false,
+        "caveat": "Identifier quoting and word case are lexical candidates only: SQLite may interpret double-quoted tokens as literals in legacy contexts. Comment attribution never joins surrounding tokens. No SQL is executed or normalized into approval."
+      },
+      "observedExtraTables": {
+        "schemaVersion": 1,
+        "app": "delivery",
+        "scope": "Lexical attribution of selected local DDL only; no semantic equivalence or readiness proof",
+        "objects": [
+          {
+            "type": "table",
+            "name": "_cf_KV",
+            "tbl_name": "_cf_KV",
+            "expectedPresent": true,
+            "observedPresent": true,
+            "expectedSqlSha256": "4043fea8b8581dfc344308300f74de5f3f0c683b4a9b0df120aff19d08d01156",
+            "observedSqlSha256": "4043fea8b8581dfc344308300f74de5f3f0c683b4a9b0df120aff19d08d01156",
+            "category": "exact_sql_bytes"
+          }
+        ],
+        "categories": {
+          "exact_sql_bytes": 1,
+          "whitespace_outside_quoted_tokens_only": 0,
+          "identifier_quoting_only_candidate": 0,
+          "unresolved_token_or_structure_difference": 0
+        },
+        "canonicalBaselineVerified": false,
+        "semanticEquivalenceEstablished": false,
+        "caveat": "Identifier quoting and word case are lexical candidates only: SQLite may interpret double-quoted tokens as literals in legacy contexts. Comment attribution never joins surrounding tokens. No SQL is executed or normalized into approval."
+      }
+    }
+  ],
+  "applicationRowsRead": false,
+  "rawSqlPublished": false,
+  "capturedDdlExecuted": false,
+  "remoteQueriesPerformed": false,
+  "migrationsApplied": false,
+  "canonicalBaselineVerified": false,
+  "semanticReadinessVerified": false,
+  "limitations": [
+    "Source attribution does not prove which runtime created a remote table or its contents.",
+    "_cf_METADATA and _cf_KV serve distinct purposes; their presence differences are not an equivalent table replacement.",
+    "Repository custom-ledger naming plus matching shape does not prove its migration history or any authority rows.",
+    "Every original raw schema mismatch remains visible; no metadata exclusion, normalization waiver or deployment admission is added."
+  ],
+  "diagnosticSourceSha256": "539ba934c585df1ecb795c581ec3c37f9945b8b34d4e300b00002e7850d378d4",
+  "repositorySourceSha256": {
+    "scripts/windows-files-canonical-baseline.mjs": "382b07f8a2e8f70add3f5001f51279872999ee4d58a430b73b16121d47d5af41",
+    "scripts/windows-files-ddl-lexical-attribution.mjs": "8ce0da49592db02a35a4af237d13fc59d7c4f655ece779db0cd4a8e9f63736bc",
+    "scripts/staging-native-authority-packet.mjs": "749cc8d6c4cd30fa98a1c73068404d5e357ccaf259cb0427c9b3aa11d72a8d45",
+    "scripts/staging-onboarding-authority-packet.mjs": "b08b6e7fb14fec64428de47259241a9733290c71df3253ed3196068a6bcc01cc"
+  }
+}

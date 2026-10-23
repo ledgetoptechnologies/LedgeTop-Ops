@@ -21,7 +21,12 @@ surrounding active token and error-message literal. The classifier deliberately
 keeps its original unresolved category and false historical/semantic flags;
 this is evidence for review, not automatic schema admission or permission to
 ignore a digest mismatch. The five platform/staging object presence differences
-also require explicit attribution in the actual baseline review.
+now have exact source-shape attribution in
+`staging/windows-platform-schema-source-attribution-2026-10-22.md`: local
+metadata and observed KV shapes match pinned upstream constants, and the extra
+Ops ledger matches the repository's named Wrangler ledger shape. Their actual
+history and contents remain unverified and require baseline review; none are
+excluded from the original comparison.
 
 Latest qualification: the source-only combined candidate now has real full
 Client-to-Ops Workerd RPC and full Ops-to-Python gateway transfer acceptance,

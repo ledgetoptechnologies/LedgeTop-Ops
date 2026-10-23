@@ -38,9 +38,14 @@ remain in the original unresolved category: this further attribution does not
 approve a schema, infer semantic equivalence or change the release gates.
 
 The two `_cf_METADATA` absences, two `_cf_KV` additions, and Operations
-`staging_native_authority_migrations` addition are also unresolved. No object is
-ignored, rewritten or approved by the lexical comparison. Semantic equivalence,
-canonical history and rollout readiness remain unverified.
+`staging_native_authority_migrations` addition retain their original unresolved
+presence-difference classifications. A later separate source check exactly
+matches the local metadata and observed KV shapes to fixed pinned upstream
+constants, and the custom Ops ledger to the repository's Wrangler ledger shape.
+See `windows-platform-schema-source-attribution-2026-10-22.md`. This attribution
+does not prove remote contents or history. No object is ignored, rewritten or
+approved. Semantic equivalence, canonical history and rollout readiness remain
+unverified.
 
 ## Replay invocation correction
 
