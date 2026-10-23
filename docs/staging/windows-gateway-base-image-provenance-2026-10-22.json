@@ -1,0 +1,70 @@
+{
+  "schemaVersion": 1,
+  "observedAt": "2026-10-23T01:19:50.233378+00:00",
+  "scope": "Owned local unprivileged synthetic gateway unit image; no host data, NAS, deployment or image publication",
+  "sourceCommitBeforePin": "31628f2f2baba1bc80341d7c8d816a74cddaedc1",
+  "registry": {
+    "reference": "docker.io/library/python:3.14.9-slim-trixie",
+    "indexDigest": "sha256:b347e2dcbc7f0b6f9fb7182e9da6a187fb10ae715e0692518c1aed0eec94a700",
+    "testedPlatform": "linux/amd64",
+    "childManifestDigest": "sha256:0214bda9af2652a418f2bf34373a4d3ca00a5f4784081e040049433ac9cc79d5",
+    "sourceRepository": "docker-library/python",
+    "sourceCommit": "601f8899c1bf9f94d598a9bb36bd9192bd0292d3",
+    "sourcePath": "3.14/slim-trixie",
+    "sourceCommitExistsVerified": true,
+    "otherArchitecturesTested": false
+  },
+  "dockerfiles": {
+    "Dockerfile": "220ea947589a5c14d999076ced7de7a47be3da14c0a1852b165527a51d361e91",
+    "Dockerfile.test": "a096736647eddc76d821fcc1cc7a682c8be63d33bd34bffee91e71e11ad13440",
+    "Dockerfile.transport-test": "ff80d00a6a190427417b07eaaf5d8f725779f005ce18e895f3c0d4e91e75495c"
+  },
+  "localImage": {
+    "ownedTag": "ops-employee-gateway-pin-20261023-a71e5f:test",
+    "repoDigests": [
+      "ops-employee-gateway-pin-20261023-a71e5f@sha256:209cf10e5530eb2167e860ff6000857b382f80136801d27631252d56d6d6ba24"
+    ],
+    "platform": "linux/amd64",
+    "pythonVersion": "Python 3.14.9",
+    "published": false,
+    "inspectedImageId": "sha256:209cf10e5530eb2167e860ff6000857b382f80136801d27631252d56d6d6ba24",
+    "digestInterpretation": "Docker Desktop containerd image-store inspect Id; not asserted to be the image configuration blob digest"
+  },
+  "tests": {
+    "containerName": "ops-employee-gateway-pin-20261023-a71e5f-tests",
+    "containerId": "081703c9783bb67105ac99d046c99ae6f6754febcaf4c548ebee4284085ba07e",
+    "startedAt": "2026-10-23T01:19:08.215589342Z",
+    "finishedAt": "2026-10-23T01:19:13.663901229Z",
+    "exitCode": 0,
+    "total": 67,
+    "passed": 67,
+    "logSha256": "8fd33d00aa2f1e5d7d4c54fdb2ae3259eb005b6acbc2211a97c8f266a9c95f4e",
+    "networkMode": "none",
+    "rootFilesystemReadOnly": true,
+    "privileged": false,
+    "user": "65532:65532",
+    "capabilitiesDropped": [
+      "ALL"
+    ],
+    "noNewPrivileges": true,
+    "hostBindMounts": 0,
+    "namedVolumes": 0,
+    "tmpfs": {
+      "/tmp": "rw,nosuid,nodev,size=256m"
+    },
+    "realNestedMountsQualified": false,
+    "over30GiBActualTransferQualified": false
+  },
+  "cleanup": {
+    "exactOwnedStoppedContainerRemoved": true,
+    "exactOwnedImageTagRemoved": true,
+    "buildCachePruned": false,
+    "baseImagesRemoved": false
+  },
+  "limitations": [
+    "The real nested-mount capability is unavailable in the unprivileged container; mismatch rejection is tested separately.",
+    "The over-30GiB case is sparse/mocked preflight with cancellation, not throughput qualification.",
+    "Only the test Dockerfile image was built and run; production and transport Dockerfiles share the independently verified same base pin.",
+    "Image pinning and unit tests do not constitute a vulnerability scan, hosted TLS/provisioning acceptance or production deployment approval."
+  ]
+}

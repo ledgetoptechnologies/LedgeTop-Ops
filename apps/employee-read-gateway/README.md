@@ -11,11 +11,15 @@ Viewer credentials or MCP keys. Its routes must remain unmounted until the
 joined Ops authorization tests and deployment review pass. Nothing here mounts
 or contacts the NAS automatically.
 
-The standard-library implementation uses Python 3.14.9, an official patched
-maintenance release. Both Dockerfiles use the official
-`python:3.14.9-slim-trixie` image. Refresh the supported patched image during
-release maintenance; the initial verified manifest digest was
-`sha256:a145a961ec2cf5741772d5e39773d979271132884fd778f6c3fad34e52b85402`.
+The standard-library implementation uses Python 3.14.9. All three Dockerfiles
+pin the official `python:3.14.9-slim-trixie` image to the same multi-platform OCI
+index digest, `sha256:b347e2dcbc7f0b6f9fb7182e9da6a187fb10ae715e0692518c1aed0eec94a700`.
+The index keeps architecture selection available while preventing a mutable tag
+from silently changing a build. Review and refresh the supported patched version
+and digest during release maintenance, then repeat the synthetic tests. The
+registry/source identities and local Linux amd64 test results are recorded in
+`docs/staging/windows-gateway-base-image-provenance-2026-10-22.json` at the
+repository root. This pin is not a vulnerability-scan or deployed-host approval.
 
 ## Explicit enrollment and private configuration
 
