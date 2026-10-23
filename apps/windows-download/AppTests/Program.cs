@@ -832,12 +832,17 @@ async Task PauseAllBeatsChosenStart()
         await reached.Task.WaitAsync(TimeSpan.FromSeconds(10));
         // The pump has chosen report; Pause all now holds it before it starts.
         await host.SnapshotAsync();
+        var saved = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        host.Hooks.HeldSaveSettled = () => saved.TrySetResult();
         await host.PauseAllAsync();
         gate.SetResult();
         await started.Task.WaitAsync(TimeSpan.FromSeconds(30)); // the older start has been decided
         Equal(0, backend.Writing);
         True(!host.IsBusy, "nothing started");
-        await Until(() => SavedStates(backend.StateDirectory, "paused") == 1, "report saved paused");
+        // Read the queue file only after Pause all's background save has finished writing it.
+        await saved.Task.WaitAsync(TimeSpan.FromSeconds(30));
+        Equal(1, SavedStates(backend.StateDirectory, "paused"));
+        Equal(0, SavedStates(backend.StateDirectory, "queued"));
         True(!File.Exists(Path.Combine(downloads, "report.pdf")), "nothing downloaded");
     } finally { gate.TrySetResult(); await host.DisposeAsync(); try { Directory.Delete(root, true); } catch (IOException) { } }
 }
