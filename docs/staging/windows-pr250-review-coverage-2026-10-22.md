@@ -30,6 +30,21 @@ diagnostic and literal, nonrecursive owned-file cleanup guidance. Root reviewed
 the patch and its focused diagnostic tests passed 31/31. No raw capture was
 deleted and no new remote read was needed.
 
+Later local diagnostic follow-ups retain all six coarse-unresolved objects while
+attributing three to comment tokens and three to one exact bounded RAISE syntax
+relation. Independent lexical review passed 15/15; it did not inspect private
+captures or claim historical/semantic verification. Fixed trusted test-source
+SQL separately exercised both conditional forms through 60 local D1 mutations:
+five tests passed, including explicit expected outcomes, NULL, subject/fence,
+notification predicates and rollback of both an UPDATE and its triggering
+INSERT. The root's final run also disables optional CF metadata fetching; no
+captured DDL is read or executed by those behavior tests.
+
+Current app source `6a87b077` was also reconstructed as an unsigned 522-file MSIX,
+with validated pack/exact unpack and a fresh identity-bound descriptor preview
+passing 20 refusal cases. This qualifies construction only; source runtime
+tests, signed installation and live service acceptance remain separate evidence.
+
 ## Runtime impact
 
 New Windows HTTP families are mounted only by the generated isolated staging

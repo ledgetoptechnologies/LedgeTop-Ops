@@ -7,6 +7,22 @@ or NAS paths, including NAS mounts on the staging host.
 
 ## Current boundary
 
+The current pushed app candidate is PR250 `6a87b077`, recorded on the existing
+EH task `ceff196b-0f59-420a-b21a-ec89c098ba60` at revision 4, in review and owned
+by Codex. Execution/autonomy remain disabled. Local follow-up diagnostic and
+packaging evidence does not change that task's candidate or grant execution.
+
+Completed baseline-only replay and private selected-definition comparison are
+recorded in `staging/windows-selected-schema-attribution-2026-10-22.md` and its
+safe JSON companions. All 46 changed application definitions are now attributed
+to 40 whitespace differences, three comment differences and three exact bounded
+conditional-RAISE syntax relations. The last three preserve every predicate,
+surrounding active token and error-message literal. The classifier deliberately
+keeps its original unresolved category and false historical/semantic flags;
+this is evidence for review, not automatic schema admission or permission to
+ignore a digest mismatch. The five platform/staging object presence differences
+also require explicit attribution in the actual baseline review.
+
 Latest qualification: the source-only combined candidate now has real full
 Client-to-Ops Workerd RPC and full Ops-to-Python gateway transfer acceptance,
 including native content-length framing and explicit server-rejection abort
@@ -60,13 +76,16 @@ cross-user and stale-version refusals remained effective. This does not qualify
 30 GiB files, a deployed proxy or live R2. See
 `docs/staging/windows-large-employee-transport-2026-10-22.md`.
 
-The latest unsigned construction validates 522 payload files after pack/unpack,
+The current-source unsigned construction validates 522 payload files after pack/unpack,
 including .NET, helper-module and Go runtime notices. An offline App Installer
 preview is bound to that actual package identity and SHA-256; its positive and
 20 refusal cases pass. It deliberately uses reserved `.invalid` URLs and cannot
 activate an update channel. Neither artifact is signed, installed or published.
-See `docs/staging/windows-go-notices-package-2026-10-22.md` and
-`docs/staging/windows-appinstaller-preview-2026-10-22.md`.
+It was rebuilt from exact reviewed app source `6a87b077`, including the portal
+metadata deadline fix. See
+`docs/staging/windows-current-source-package-preview-2026-10-22.md` for the
+current package and descriptor fingerprints; older construction/signing evidence
+retains its explicitly older input.
 
 Neither acceptance proves deployed staging, actual human sign-in, live R2,
 Engineering Hub execution, a signed installation or Cloud Files hydration.
@@ -190,7 +209,7 @@ client data or a remote Wrangler apply. It does not test an interrupted apply,
 restore a backup, or execute the fixture's separate post-ready public-link suite.
 
 Engineering Hub currently reports autonomous execution disabled. Its existing
-Windows task is unclaimed; there is no execution receipt. Source preparation
+Windows task is in review with the exact candidate above; there is no execution receipt. Source preparation
 and local developer acceptance do not establish the requested EH branch runner
 path. Do not bypass that gap with an unrecorded branch deployment.
 
@@ -199,8 +218,9 @@ path. Do not bypass that gap with an unrecorded branch deployment.
 Read `/home/bkoltz/AGENTS.md` and any applicable service instructions before
 host changes. SSH uses `bkoltz@192.168.50.90` with the existing trusted host key.
 Recheck realpath, filesystem type, free disk and memory for each owned context.
-On 2026-10-22 the root filesystem still had about 11 GiB free; do not create a
-30 GiB fixture or prune unrelated data to make room.
+Previously documented free-space figures are historical; record current
+capacity and reserve before fixture creation. Large fixture generation belongs
+on the approved PC lab, and does not justify pruning unrelated staging data.
 
 Create a unique owned directory on local ext4 for a small synthetic fixture.
 Enroll it inside the intended container mount namespace. Source mounts are
@@ -244,6 +264,28 @@ Keep existing PA, Viewer, exporter and message-bus services untouched.
 Retain a redacted receipt with exact source, deployment, schema, fixture and
 desktop artifact fingerprints, test outcomes and cleanup results. Never retain
 JWTs, cookies, signing keys or raw credential files in evidence.
+
+## Containment and rollback review
+
+Before execution, freeze the exact paired versions/resources/schema and ledger
+observations, prepared modules/configuration, additive migration hashes, TLS
+gateway identity, fixture ownership and forward/rollback code artifacts. The
+reviewer must address the retained schema-attribution evidence explicitly; do
+not normalize or omit objects to turn the comparison into approval.
+
+Keep Windows families disabled until both databases and generated staging
+compositions have passed their reviewed checks. On failure, stop new Windows
+admissions and restore only the reviewed preceding staging code/route settings;
+verify the original non-Windows routes and background handlers afterward. The
+first containment path leaves additive schema in place. Do not drop tables,
+delete existing records, restore an entire D1 database or revoke unrelated grants
+as an automatic rollback. Any data restore needs its own approved recovery
+window and coherent state assessment; provider recovery bookmarks alone do not
+prove a tested restore or an atomic paired snapshot.
+
+Stop on an unknown migration outcome, changed resource/version/digest or
+ambiguous gateway/container state. Reconcile the existing attempt and ownership
+before retrying; do not create a replacement test run or bypass EH through SSH.
 
 ## Later release gates
 
