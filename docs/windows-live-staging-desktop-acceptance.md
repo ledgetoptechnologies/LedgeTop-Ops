@@ -88,7 +88,9 @@ The root marker pins source, fixture digest and a digest of the selection. Queue
 state uses the production non-authorizing reference format and expected pins;
 it includes the fixed source origin, as the desktop normally does, but no token
 or byte selector. Receipts/stdout omit identities, selectors, paths and URLs.
-Errors report only exception type. All roots and ancestors reject reparse paths.
+Errors report only exception type and a fixed diagnostic stage name. All roots
+and ancestors reject reparse paths. The first phase creates a fresh empty queue
+directory; later phases require that directory and never recreate missing state.
 The normal cloudflared per-user token cache remains owned by cloudflared, and is
 not read directly, copied or included in receipts by this tool.
 

@@ -6,15 +6,17 @@ using LedgeTop.WindowsDownload;
 
 // Deliberate live read-only acceptance, not a loopback fixture or an installer.
 // Grants/revocation are performed separately through supported owner workflows.
-try { await Run(args); }
+var currentStage = AcceptanceStage.Startup;
+try { await Run(args, stage => currentStage = stage); }
 catch (Exception error) {
     // Exception messages can contain paths or selectors. Never print them or stacks.
-    Console.Error.WriteLine(JsonSerializer.Serialize(new { schemaVersion = 1, outcome = "refused-or-failed", errorType = error.GetType().Name }));
+    Console.Error.WriteLine(JsonSerializer.Serialize(new { schemaVersion = 1, outcome = "refused-or-failed", errorType = error.GetType().Name, stage = currentStage.ToString() }));
     Environment.ExitCode = 1;
 }
 
-static async Task Run(string[] args)
+static async Task Run(string[] args, Action<AcceptanceStage> stage)
 {
+    stage(AcceptanceStage.ValidateInputs);
     if (!OperatingSystem.IsWindows()) throw new InvalidOperationException();
     var input = new Dictionary<string, string>(StringComparer.Ordinal);
     for (var i = 0; i < args.Length; i += 2) {
@@ -35,12 +37,14 @@ static async Task Run(string[] args)
     var application = mode == "employee" ? profile.StaffApplicationUrl! : profile.PortalApplicationUrl;
     // Reuse the exact reviewed, source-controlled staging profile and helper hash.
     Require(application.Host is "ops-staging.ledgetopdroneservices.com" or "portal-staging.ledgetopdroneservices.com");
+    stage(AcceptanceStage.ConfigureSession);
     var session = new CloudflareAccessSession(application, input["--helper"], profile.CloudflaredSha256!);
     // This command never launches a browser or tries another identity. Sign in separately.
     using var source = mode == "employee" ? (QueuedDownloadSource)new EmployeeQueuedDownloadSource("employee", session)
         : new PortalQueuedDownloadSource("portal", session);
     using var deadline = new CancellationTokenSource(TimeSpan.FromMinutes(4));
     var token = deadline.Token;
+    stage(AcceptanceStage.PrepareLocalState);
     var home = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "LedgeTop", "Files", "live-staging-acceptance");
     PlainPath(home); Directory.CreateDirectory(home); PlainPath(home);
     var root = Path.Combine(home, runId.ToString("D"));
@@ -62,12 +66,25 @@ static async Task Run(string[] args)
     if (phase == "existing-destination" || phase == "after-revoke") Require(File.Exists(Path.Combine(root, "resume.receipt.json")));
     var output = Path.Combine(root, "download");
     Directory.CreateDirectory(output); PlainPath(output);
-    await using var queue = await TransferQueue.OpenAsync(Path.Combine(root, "queue"), source, token);
+    var queueDirectory = Path.Combine(root, "queue"); PlainPath(queueDirectory);
+    if (phase == "interrupt") {
+        Require(!Directory.Exists(queueDirectory) && !File.Exists(queueDirectory));
+        Directory.CreateDirectory(queueDirectory); PlainPath(queueDirectory);
+        Require(!Directory.EnumerateFileSystemEntries(queueDirectory).Any());
+    } else {
+        // Resume phases must preserve the existing owned queue, never recreate it.
+        Require(Directory.Exists(queueDirectory)); PlainPath(queueDirectory);
+    }
+    stage(AcceptanceStage.QueueOpen);
+    await using var queue = await TransferQueue.OpenAsync(queueDirectory, source, token);
     Guid jobId;
     if (phase == "interrupt") {
-        var reference = await Discover(mode, selection, session, source, token);
+        stage(AcceptanceStage.Discovery);
+        var reference = await Discover(mode, selection, session, source, token, stage);
+        stage(AcceptanceStage.Resolve);
         var resolved = await source.ResolveAsync(reference, token);
         Fixture(resolved.Spec, sha);
+        stage(AcceptanceStage.Enqueue);
         jobId = await queue.EnqueueAsync(reference, output, token);
         Task? pause = null;
         var delayed = false;
@@ -82,15 +99,20 @@ static async Task Run(string[] args)
                 pause = queue.PauseAsync(jobId); // Cancels synchronously; never await this transfer from its own observer.
             }
         });
+        stage(AcceptanceStage.Start);
         await queue.StartAsync(jobId, progress, token);
+        stage(AcceptanceStage.WaitForIdle);
         await queue.WaitForIdleAsync(token);
+        stage(AcceptanceStage.Pause);
         Require(pause is not null); await pause!;
+        stage(AcceptanceStage.ReadQueue);
         var jobs = await queue.GetJobsAsync(token);
         Require(jobs.Single().State == QueuedTransferState.Paused);
         var prefix = Partial(output);
         Require(prefix is > 0 and <= 65536 && !File.Exists(Path.Combine(output, "map.bin")));
         Receipt(receiptPath, phase, mode, sha, new { retainedPrefixBytes = prefix, interrupted = true, processId = Environment.ProcessId });
     } else {
+        stage(AcceptanceStage.ReadQueue);
         var jobs = await queue.GetJobsAsync(token); Require(jobs.Count == 1);
         var job = jobs.Single(); jobId = job.JobId;
         Require(job.Destination == output && job.FileName == "map.bin" && job.Length == 2 * 1024 * 1024 && job.Sha256 == sha);
@@ -98,7 +120,10 @@ static async Task Run(string[] args)
             using var prior = JsonDocument.Parse(ReadSmall(Path.Combine(root, "interrupt.receipt.json")));
             Require(prior.RootElement.GetProperty("result").GetProperty("processId").GetInt32() != Environment.ProcessId);
             Require(job.State == QueuedTransferState.Paused && Partial(output) is > 0 and <= 65536);
-            await queue.StartAsync(jobId, cancellationToken: token); await queue.WaitForIdleAsync(token);
+            stage(AcceptanceStage.Start);
+            await queue.StartAsync(jobId, cancellationToken: token);
+            stage(AcceptanceStage.WaitForIdle);
+            await queue.WaitForIdleAsync(token);
             Require((await queue.GetJobsAsync(token)).Single().State == QueuedTransferState.Completed);
             await Verified(Path.Combine(output, "map.bin"), sha, token);
             Receipt(receiptPath, phase, mode, sha, new { restarted = true, finalHashVerified = true });
@@ -107,8 +132,10 @@ static async Task Run(string[] args)
             var existing = Path.Combine(root, "existing"); Require(!Directory.Exists(existing)); Directory.CreateDirectory(existing);
             var sentinel = Path.Combine(existing, "map.bin"); WriteNew(sentinel, "owned acceptance sentinel\n");
             var before = Hash(File.ReadAllText(sentinel));
+            stage(AcceptanceStage.Resolve);
             var resolved = await source.ResolveAsync(job.ResourceReference, token); Fixture(resolved.Spec, sha);
             var refused = false;
+            stage(AcceptanceStage.ExistingDestinationDownload);
             try { await source.DownloadAsync(resolved.Spec, existing, cancellationToken: token); }
             catch (TransferException) { refused = true; }
             Require(refused && Hash(File.ReadAllText(sentinel)) == before);
@@ -116,22 +143,27 @@ static async Task Run(string[] args)
         } else {
             // Arm while the grant is still active. Keep the short byte selector only
             // in this process, then let the separate owner workflow revoke access.
+            stage(AcceptanceStage.Resolve);
             var saved = await source.ResolveAsync(job.ResourceReference, token); Fixture(saved.Spec, sha);
             Require(saved.LogicalFileId == job.LogicalFileId && saved.RemoteVersion == job.RemoteVersion && saved.Spec.ETag == job.ETag);
             Console.WriteLine(JsonSerializer.Serialize(new { schemaVersion = 1, phase, mode, eventName = "armed-awaiting-owner-revocation",
                 instruction = "Revoke only this fixture grant through its owner workflow; then enter REVOKED within 90 seconds." }));
             using var revokeDeadline = CancellationTokenSource.CreateLinkedTokenSource(token);
             revokeDeadline.CancelAfter(TimeSpan.FromSeconds(90));
+            stage(AcceptanceStage.AwaitRevocation);
             Require(await Console.In.ReadLineAsync(revokeDeadline.Token) == "REVOKED");
             var refused = false; string? resolutionDenial = null;
+            stage(AcceptanceStage.RevokedResolve);
             try { await source.ResolveAsync(job.ResourceReference, token); }
             catch (Exception e) when (e is AccessDeniedException or ResourceUnavailableException) { refused = true; resolutionDenial = Denial(e); }
             Require(refused); // Auth expiry/transport errors are NOT proof of grant revocation.
             var revokedOutput = Path.Combine(root, "revoked"); Require(!Directory.Exists(revokedOutput)); Directory.CreateDirectory(revokedOutput);
             var savedDenied = false; string? byteDenial = null;
+            stage(AcceptanceStage.RevokedDownload);
             try { await source.DownloadAsync(saved.Spec, revokedOutput, cancellationToken: token); }
             catch (Exception e) when (e is AccessDeniedException or ResourceUnavailableException) { savedDenied = true; byteDenial = Denial(e); }
             Require(savedDenied && !File.Exists(Path.Combine(revokedOutput, "map.bin")));
+            stage(AcceptanceStage.RevokedDiscovery);
             Require(await Undiscoverable(mode, selection, session, token));
             await Verified(Path.Combine(output, "map.bin"), sha, token);
             Receipt(receiptPath, phase, mode, sha, new { durableReferenceDenied = true, existingLocalCopyPreserved = true,
@@ -152,22 +184,28 @@ static async Task<bool> Undiscoverable(string mode, string selection, Cloudflare
     return page.Items.All(item => item.DisplayName != selection);
 }
 
-static async Task<string> Discover(string mode, string selection, CloudflareAccessSession session, QueuedDownloadSource source, CancellationToken token)
+static async Task<string> Discover(string mode, string selection, CloudflareAccessSession session, QueuedDownloadSource source, CancellationToken token, Action<AcceptanceStage> stage)
 {
     if (mode == "employee") {
         using var client = new EmployeeClient(session);
+        stage(AcceptanceStage.EmployeeRoots);
         var roots = await client.GetRootsAsync(token); var root = roots.Single(r => r.RootId == selection);
+        stage(AcceptanceStage.EmployeeEntries);
         var folder = await client.GetEntriesAsync(root.RootId, cancellationToken: token);
         Require(folder.NextCursor is null && folder.Entries.Count == 1 && folder.Entries.Single().Name == "map.bin" && folder.Entries.Single().Kind == "file");
+        stage(AcceptanceStage.EmployeeReference);
         return (await ((EmployeeQueuedDownloadSource)source).GetReferenceAsync(root.RootId, "map.bin", token)).ResourceReference;
     }
     using var portal = new PortalClient(session);
+    stage(AcceptanceStage.PortalDeliveries);
     var deliveries = await portal.GetDeliveriesAsync(cancellationToken: token);
     Require(deliveries.NextCursor is null);
     var delivery = deliveries.Items.Single(item => item.DisplayName == selection);
+    stage(AcceptanceStage.PortalFolder);
     var page = await portal.GetFolderAsync(delivery.Handle, cancellationToken: token);
     Require(page.NextCursor is null && page.Folders.Count == 0 && page.Files.Count == 1);
     var file = page.Files.Single(); Require(file.Name == "map.bin" && file.Size == 2 * 1024 * 1024 && file.DownloadAvailable);
+    stage(AcceptanceStage.PortalReference);
     return (await ((PortalQueuedDownloadSource)source).GetReferenceAsync(file.Handle, token)).ResourceReference;
 }
 static void Fixture(DownloadSpec spec, string sha) => Require(spec.FileName == "map.bin" && spec.Length == 2 * 1024 * 1024 && spec.Sha256 == sha);
@@ -200,3 +238,8 @@ static void WriteNew(string path, string value) { PlainPath(path); using var str
 static string ReadSmall(string path) { PlainPath(path); Require(new FileInfo(path).Length <= 16 * 1024); return File.ReadAllText(path); }
 sealed record RunMarker(int SchemaVersion, Guid RunId, string Mode, string Sha256, string SelectionSha256);
 sealed class InlineProgress(Action<DownloadProgress> action) : IProgress<DownloadProgress> { public void Report(DownloadProgress value) => action(value); }
+
+enum AcceptanceStage { Startup, ValidateInputs, ConfigureSession, PrepareLocalState, QueueOpen, Discovery,
+    EmployeeRoots, EmployeeEntries, EmployeeReference, PortalDeliveries, PortalFolder, PortalReference,
+    Resolve, Enqueue, Start, WaitForIdle, Pause, ReadQueue, ExistingDestinationDownload, AwaitRevocation,
+    RevokedResolve, RevokedDownload, RevokedDiscovery }
