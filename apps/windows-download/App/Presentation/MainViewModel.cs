@@ -31,7 +31,9 @@ public sealed class MainViewModel : Observable, IAsyncDisposable
     private Screen screen = Screen.Loading;
     private string signInStatus = "", banner = "", sessionText = "", notice = "", destination, setupText = DefaultSetupText,
         setupTitle = "Ledge Top Files isn't set up on this PC yet";
-    private bool signingIn, bannerIsError, checkingPerson;
+    private bool signingIn, bannerIsError, checkingPerson, switchingAccess;
+    private string accessLabel = "", signInDetail = DefaultSignInDetail, switchAccessText = "";
+    private Func<Task>? switchAccess;
     private NodeViewModel? selected;
     private object? moreFiles;
     private Task? closing;
@@ -44,6 +46,7 @@ public sealed class MainViewModel : Observable, IAsyncDisposable
     /// <summary>One sign-in at a time opens views, so two can never both open (and orphan) a queue.</summary>
     private readonly SemaphoreSlim entering = new(1, 1);
 
+    private const string DefaultSignInDetail = "Use your Ledge Top account in your browser. The files you're allowed to download appear here, from client deliveries and the company server.";
     private const string DefaultSetupText = "Install it from the link in Ledge Top Operations or your client portal. If you already did, ask your Ledge Top contact to check the installation.";
 
     public MainViewModel(IFilesBackend backend, IShell shell, string defaultDestination, Func<DateTimeOffset>? clock = null)
@@ -59,6 +62,32 @@ public sealed class MainViewModel : Observable, IAsyncDisposable
         LoadMoreFiles = new Command(LoadMoreFilesAsync, () => moreFiles is not null, Fail);
         ClearFinished = new Command(() => { foreach (var done in Transfers.Where(item => item.IsFinished).ToList()) Transfers.Remove(done); },
             () => Transfers.Any(item => item.IsFinished));
+        SwitchAccess = new Command(SwitchAccessAsync, () => switchAccess is not null && !switchingAccess && !closed, Fail);
+    }
+
+    /// <summary>
+    /// Which kind of files this view shows, and the offer to switch to the other kind. Switching is run by the owner,
+    /// which closes this view first (downloads stop and are saved) before anything else signs in.
+    /// </summary>
+    public void ConfigureAccess(string label, string signInText, (string Text, Func<Task> Run)? switchTo)
+    {
+        AccessLabel = label; SignInDetail = signInText;
+        switchAccess = switchTo?.Run; SwitchAccessText = switchTo?.Text ?? "";
+        Raise(nameof(CanSwitchAccess)); SwitchAccess.Refresh();
+    }
+    public string AccessLabel { get => accessLabel; private set { if (Set(ref accessLabel, value)) Raise(nameof(HasAccessLabel)); } }
+    public bool HasAccessLabel => AccessLabel.Length > 0;
+    public string SignInDetail { get => signInDetail; private set => Set(ref signInDetail, value); }
+    public string SwitchAccessText { get => switchAccessText; private set => Set(ref switchAccessText, value); }
+    public bool CanSwitchAccess => switchAccess is not null;
+    public Command SwitchAccess { get; }
+
+    private async Task SwitchAccessAsync()
+    {
+        if (switchAccess is not { } run || switchingAccess) return;
+        switchingAccess = true; SwitchAccess.Refresh();
+        Banner = "Stopping and saving your downloads before switching…"; BannerIsError = false;
+        await run();
     }
 
     public Screen Screen { get => screen; private set => Set(ref screen, value); }

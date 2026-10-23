@@ -2,8 +2,15 @@ using LedgeTop.Files.Presentation;
 
 namespace LedgeTop.Files.Backends;
 
-/// <summary>What the window should open with: a backend, or a plain reason it can't.</summary>
-public sealed record StartupPlan(IFilesBackend? Backend, string? Problem, string Downloads, string? Tag);
+/// <summary>What the window should open with: a ready backend (demo), a choice of access (real sources), or a plain
+/// reason it can't.</summary>
+public sealed record StartupPlan(IFilesBackend? Backend, string? Problem, string Downloads, string? Tag, AccessChoice? Access = null);
+
+/// <summary>
+/// Real sources open one kind of files at a time. <see cref="Create"/> builds only the chosen source from the fixed,
+/// trusted setup; nothing signs in until the person has chosen. The remembered choice is a convenience, not authority.
+/// </summary>
+public sealed record AccessChoice(Func<AccessMode, IFilesBackend> Create, IReadOnlyList<AccessMode> Modes, AccessPreference Preference);
 
 /// <summary>
 /// Chooses how this copy runs. A packaged release (channel compiled in) uses only its compiled profile and its own
@@ -34,8 +41,8 @@ public static class Startup
             var helper = ReleaseProfiles.InstalledPath(installDirectory, profile.CloudflaredRelativePath);
             if (helper is null) return new(null, UnreviewedProblem, downloads, tag);
             var settings = new LiveSettings(profile.PortalApplicationUrl, profile.StaffApplicationUrl, helper, profile.CloudflaredSha256);
-            try { return new(new LiveBackend(settings, StateRoot(localAppData, channel == ReleaseChannel.Pilot ? "pilot" : "stable")), null, downloads, tag); }
-            catch (Exception) { return new(null, HelperProblem, downloads, tag); }
+            var folder = channel == ReleaseChannel.Pilot ? "pilot" : "stable";
+            return Choice(settings, localAppData, folder, downloads, tag) ?? new(null, HelperProblem, downloads, tag);
         }
         if (arguments.Contains("--demo") || arguments.Contains("--demo-signed-in")) {
             var root = Path.Combine(Path.GetTempPath(), "LedgeTopFilesDemo");
@@ -44,7 +51,23 @@ public static class Startup
                 sessionLength: double.TryParse(minutes, out var length) ? TimeSpan.FromMinutes(length) : null),
                 null, Path.Combine(root, "Downloads"), "Demo data");
         }
-        var (live, problem) = LiveBackend.Open(LiveSettings.PathUnder(localAppData), StateRoot(localAppData, "developer"));
-        return new(live, problem, downloads, live is null ? null : "Developer");
+        LiveSettings? developer;
+        try { developer = LiveSettings.Load(LiveSettings.PathUnder(localAppData)); }
+        catch (SettingsException error) { return new(null, error.Message, downloads, null); }
+        if (developer is null) return new(null, null, downloads, null);
+        return Choice(developer, localAppData, "developer", downloads, "Developer") ?? new(null, HelperProblem, downloads, null);
+    }
+
+    /// <summary>
+    /// Offers client deliveries, plus company files when this setup includes the staff application. The pinned helper
+    /// is checked now, so a missing or changed helper is reported before anyone is asked to choose or sign in.
+    /// </summary>
+    private static StartupPlan? Choice(LiveSettings settings, string localAppData, string folder, string downloads, string? tag)
+    {
+        var root = StateRoot(localAppData, folder);
+        try { new LiveBackend(settings, root, AccessMode.Client).DisposeAsync().AsTask().GetAwaiter().GetResult(); }
+        catch (Exception) { return null; }
+        AccessMode[] modes = settings.StaffApplicationUrl is null ? [AccessMode.Client] : [AccessMode.Client, AccessMode.Employee];
+        return new(null, null, downloads, tag, new AccessChoice(mode => new LiveBackend(settings, root, mode), modes, AccessPreference.For(localAppData, folder)));
     }
 }
