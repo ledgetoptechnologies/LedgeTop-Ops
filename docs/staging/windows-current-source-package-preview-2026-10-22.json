@@ -1,0 +1,118 @@
+{
+  "schemaVersion": 1,
+  "scope": "Actual unsigned current-source construction; no installer release",
+  "constructionReceiptSha256": "b1470c69707f2f0cb5619f2b199b7bf4674d5ee4f7e3991d679928fbe2c2eec8",
+  "construction": {
+    "schemaVersion": 1,
+    "status": "unsigned_local_preview_only",
+    "sourceCommit": "6a87b077c575072c74aafb5c3f56f8998d9e582e",
+    "sourceTree": "ad7fb749b1e7a05697718ca39de1092a73034575",
+    "sourceArchiveSha256": "42552182333d63967f58274328319ee5d91e21d78a1f4c5d82cc5bb9214e3b4d",
+    "sdk": "10.0.402",
+    "rid": "win-x64",
+    "selfContained": true,
+    "channel": "pilot",
+    "applicationSha256": "f4b108999b1a015623cc7396d47d12b3c45c7727e00b0a9abcd66bcf0dd99aca",
+    "scriptSha256": "4fc2165f2f7e24e99f537f5fd1d2ecf2c48727ace83eff14024916eaa2de2337",
+    "channelCheckerSha256": "08ad25773debc1bcd599459ae382b561acdf7e9a3176d365ccd02502756584d5",
+    "makeAppxSha256": "98ddf5a4fdb38a1d32c2ca7b350a2012ed430d277baa1bf03ac91ef82365f1d3",
+    "runtimeNoticeCollectorSha256": "575328558b7718869546e8d7b70a2349c1e3ea1af53f3d26b3a4af52eaf3e71c",
+    "helperSha256": "76b2805253d0d6ffacb092a7acfbee99e7af6917835c0c5410e23f3ef5052da2",
+    "rootLicenseSha256": "58d1e17ffe5109a7ae296caafcadfdbe6a7d176f0bc4ab01e12a689b0499d8bd",
+    "completeThirdPartyAttribution": false,
+    "runtimeNotices": [
+      {
+        "path": "Notices/LICENSE.Microsoft.NETCore.App.txt",
+        "bytes": 1139,
+        "sha256": "d7a68596ab69b06f51ca278a6545148e4269a9381c26d597c13df5d88e08cf5b",
+        "packageId": "microsoft.netcore.app.runtime.win-x64",
+        "packageVersion": "10.0.13",
+        "packageSha256": "c66885d464697be75676b4d1fbca38b8806f3af01d65d27205b3f06add094444",
+        "packageEntry": "LICENSE.TXT",
+        "sourceUrl": null
+      },
+      {
+        "path": "Notices/THIRD-PARTY-NOTICES.Microsoft.NETCore.App.txt",
+        "bytes": 78041,
+        "sha256": "6d15e10a101c6bfff2ab4429ed061bf76c456fc4b23ad6b03e0d0f8377148a21",
+        "packageId": "microsoft.netcore.app.runtime.win-x64",
+        "packageVersion": "10.0.13",
+        "packageSha256": "c66885d464697be75676b4d1fbca38b8806f3af01d65d27205b3f06add094444",
+        "packageEntry": "THIRD-PARTY-NOTICES.TXT",
+        "sourceUrl": null
+      },
+      {
+        "path": "Notices/LICENSE.Microsoft.WindowsDesktop.App.txt",
+        "bytes": 1137,
+        "sha256": "a89886665765362eb77e0f8e26602c924520041d1711b2eedc136434fe4d01ab",
+        "packageId": "microsoft.windowsdesktop.app.runtime.win-x64",
+        "packageVersion": "10.0.13",
+        "packageSha256": "af044758d6bc23eca96b60c9ce13b38f211c3e736eef9458de3cadbbd3e20ff2",
+        "packageEntry": "LICENSE",
+        "sourceUrl": null
+      },
+      {
+        "path": "Notices/THIRD-PARTY-NOTICES.WPF.txt",
+        "bytes": 2703,
+        "sha256": "d23dba2fee20c6b59d8f7088ee9ed372459c952a319b7ca90f3eec370cc76eb9",
+        "packageId": null,
+        "packageVersion": "10.0.13",
+        "packageSha256": null,
+        "packageEntry": null,
+        "sourceUrl": "https://raw.githubusercontent.com/dotnet/dotnet/4099f83977f4d29604a9aeb971fb0a7bc1d5f699/src/wpf/THIRD-PARTY-NOTICES.TXT"
+      },
+      {
+        "path": "Notices/THIRD-PARTY-NOTICES.WindowsForms.txt",
+        "bytes": 1966,
+        "sha256": "5a412b38efae0b162dc0893b319023f4cd14a8985a0f9f9ae01ac052b37a36eb",
+        "packageId": null,
+        "packageVersion": "10.0.13",
+        "packageSha256": null,
+        "packageEntry": null,
+        "sourceUrl": "https://raw.githubusercontent.com/dotnet/dotnet/4099f83977f4d29604a9aeb971fb0a7bc1d5f699/src/winforms/THIRD-PARTY-NOTICES.TXT"
+      }
+    ],
+    "helperModuleNotices": {
+      "manifestSha256": "3b2a544ea71e1e6babc118a2c1888a3a3754f977f0b725526d03e7481dd63143",
+      "moduleCount": 66,
+      "noticeFiles": 99,
+      "completeThirdPartyAttribution": false
+    },
+    "goRuntimeNotices": {
+      "schemaVersion": 1,
+      "helperSha256": "76b2805253d0d6ffacb092a7acfbee99e7af6917835c0c5410e23f3ef5052da2",
+      "goVersion": "1.27.3",
+      "sourceCommit": "2aae1000ea1d4b28923b96db28acf4e3b99d6aff",
+      "noticeFiles": 10,
+      "manifestSha256": "7a30ba6b0edad3a8bd92d6c672bf365675cc9242eb4d63a4738280eb4bdcfdf4",
+      "completeThirdPartyAttribution": false
+    },
+    "goNoticeCollectorSha256": "2b3fb2ea6cccb3aa9eeab5b2deb19ffb87cfa61e8c6c985e184ffb1eb8a5f56c",
+    "payloadFiles": 522,
+    "payloadBytes": 202605380,
+    "inventorySha256": "d70777a8ae3b557d216b3c9cf218eeea0dfdfc7e796406e3b3cdc21f9821ae23",
+    "packageBytes": 83832380,
+    "packageSha256": "9046975976a9f13a127995e9326a7b8a7e92cd237acafbbe19d035d908de63ef",
+    "validatedPack": true,
+    "unpackedInventoryExact": true,
+    "sourceAcceptanceVerified": false,
+    "runtimeTestsExecuted": false,
+    "signed": false,
+    "installed": false,
+    "published": false,
+    "liveTransferTested": false,
+    "cleanMachineTested": false
+  },
+  "descriptorAcceptance": {
+    "status": "offline_descriptor_checks_passed",
+    "negativeCaseCount": 20,
+    "packageSha256": "9046975976a9f13a127995e9326a7b8a7e92cd237acafbbe19d035d908de63ef",
+    "descriptorSha256": "8f419370ec5548ba01702d7607aaddd7bf7146acc3e7d3a97d7c7ab1afd5414b",
+    "signed": false,
+    "installed": false,
+    "published": false,
+    "schemaXsdValidated": false,
+    "windowsUpdateBehaviorTested": false
+  },
+  "note": "Package reconstructed from exact reviewed6a87 Windows app tree including portal deadline fix. Constructor does not execute runtime tests. Core90/90 is separate source evidence; no installed-runtime claim."
+}
