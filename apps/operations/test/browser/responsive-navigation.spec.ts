@@ -357,6 +357,8 @@ test("account identity menu provides keyboard-safe same-origin Access logout on 
   await page.keyboard.press("Enter");
   let menu = page.getByRole("menu", { name: "Account" });
   const logout = menu.getByRole("menuitem", { name: "Logout" });
+  await expect(menu.getByRole("menuitem", { name: "Get the app" })).toBeFocused();
+  await page.keyboard.press("End");
   await expect(logout).toBeFocused();
   await expect(logout).toHaveAttribute("href", "/cdn-cgi/access/logout");
   await page.keyboard.press("Escape");

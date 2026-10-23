@@ -31,10 +31,10 @@ test("account menu shows a live server-timed session above Logout and refreshes 
   await trigger.click();
   const menu = page.getByRole("menu", { name: "Account" });
   await expect(menu.getByRole("timer")).toHaveText(/0m [34]s/);
-  await expect(menu.getByRole("menuitem", { name: "Logout" })).toBeFocused();
+  await expect(menu.getByRole("menuitem", { name: "Get the app" })).toBeFocused();
   const order = await menu.evaluate(node => {
     const status = node.querySelector(".account-session-status")!;
-    const logout = node.querySelector('[role="menuitem"]')!;
+    const logout = node.querySelector('a[role="menuitem"][href="/cdn-cgi/access/logout"]')!;
     return Boolean(status.compareDocumentPosition(logout) & Node.DOCUMENT_POSITION_FOLLOWING);
   });
   expect(order).toBe(true);
