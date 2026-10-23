@@ -78,6 +78,7 @@ import { availableViewerModes, chooseViewerMode, viewerModeFromUrl, viewerModeUr
 import { installLodResourceLifecycle } from './lod-resource-lifecycle.mjs';
 import { createUtmProjection } from './utm-conversion.mjs';
 import { homeViewForBounds, tilesetWorldBounds } from './viewer-framing.mjs';
+import { createViewerSlice } from './viewer-slice.mjs';
 import { classifyTileLoadFailure, releaseFailedTileReservations, createRenewedTileFetcher } from './lod-load-recovery.mjs';
 import {
   parseLodMemoryMode,
@@ -188,6 +189,7 @@ const state = {
 };
 
 let scene, camera, renderer, labelRenderer, controls, clock;
+let viewerSlice=null;
 let glbParent, glbOffset, tilesParent;
 let pointCloudParent, pointCloudOffset, pointCloudObject = null;
 let lodFailureHandled = false;
@@ -733,7 +735,18 @@ function applyProjectConfig(p) {
 }
 
 function init() {
+  viewerSlice?.dispose();
   initThree();
+  viewerSlice=createViewerSlice({renderer,scene,panel:document.getElementById('panel-slice'),
+    getRoots:()=>[tilesRenderer?.group,glbOffset,pointCloudObject].filter(Boolean),
+    getBounds:()=>{
+      if(state.activeMode==='model'&&tilesRenderer)return tilesetWorldBounds(tilesRenderer);
+      if(state.activeMode==='cloud'&&state.cloudMode==='direct'&&pointCloudObject){pointCloudObject.updateWorldMatrix(true,false);return new THREE.Box3().setFromObject(pointCloudObject);}
+      return null;
+    },
+    supported:()=>state.activeMode==='model'||(state.activeMode==='cloud'&&state.cloudMode==='direct'),
+    describe:(plane,axis)=>{const p=worldToUtm(plane.coplanarPoint(new THREE.Vector3())),value=axis==='elevation'?p.alt:axis==='easting'?p.e:p.n;return `${axis[0].toUpperCase()+axis.slice(1)} ${formatElevation(value,DISPLAY_UNITS)}`;},
+  });
   bindUI();
   installMeasurementWorkspace();
   const available = applyAvailability();
@@ -919,15 +932,21 @@ function pickSurface(ndc) {
   if (state.activeMode === 'cloud' && state.cloudMode === 'direct') {
     if (!pointCloudParent?.visible || !pointCloudObject) return null;
     const viewportHeight = renderer.domElement.clientHeight || renderer.domElement.getBoundingClientRect().height;
-    return pickDirectPointSurface({ raycaster, camera, points: pointCloudObject, ndc, viewportHeight });
+    return pickDirectPointSurface({ raycaster, camera, points: pointCloudObject, ndc, viewportHeight, accepts:viewerSlice?.active?point=>viewerSlice.accepts(point):undefined });
   }
   raycaster.setFromCamera(ndc, camera);
   const targets = [];
   if (tilesParent.visible && tilesRenderer) targets.push(tilesRenderer.group);
   if (glbParent.visible) targets.push(glbOffset);
   if (!targets.length) return null;
-  const hits = raycaster.intersectObjects(targets, true);
-  return hits.length ? hits[0].point : null;
+  // BVH's nearest hit can be on the discarded side. Continue through that
+  // surface to the next visible hit while slicing, then restore normal picks.
+  const firstHitOnly=raycaster.firstHitOnly;
+  try{
+    if(viewerSlice?.active)raycaster.firstHitOnly=false;
+    const hits=raycaster.intersectObjects(targets,true);
+    return hits.find(hit=>viewerSlice?.accepts(hit.point)!==false)?.point||null;
+  }finally{raycaster.firstHitOnly=firstHitOnly;}
 }
 
 // ───────────────────────────────────────────────────────────────
@@ -1114,6 +1133,8 @@ function loadTiles() {
   });
   rendererInstance.addEventListener('load-model', (ev) => {
     if (tilesRenderer !== rendererInstance) return;
+    viewerSlice?.refresh({updateMaterials:false});
+    viewerSlice?.register(ev.scene);
     if (lodPendingAdmissionTile === ev.tile) clearLodPendingAdmission();
     // External tilesets often produce a usable child before their wrapper root.
     // Enter the viewer as soon as any streamed model can be displayed.
@@ -1387,6 +1408,7 @@ function setSessionAccessState(next, reason = null) {
   const previous = sessionAccessState;
   if(next==='unavailable')measurementDraftRecovery.capture(reason,activeViewerSession,measurementWorkspace);
   sessionAccessState = next;
+  if(next==='unavailable')viewerSlice?.reset();
   sessionAccessReason = reason;
   if(next==='unavailable')measurementWorkspace?.invalidate?.('Personal measurements are hidden until access is restored.',{notify:false});
   else if(next==='active'&&measurementWorkspace&&(previous==='unavailable'||measurementWorkspace.isInvalidated?.())){
@@ -2699,10 +2721,8 @@ function syncMapVolumeAvailability() {
   else if (surface.selectedOptions[0]?.disabled) surface.value = demLayers.dsm ? 'dsm' : demLayers.dtm ? 'dtm' : 'auto';
   const volumeButton = document.getElementById('tool-volume');
   if (isMapMode()) {
-    volumeButton.disabled = false;
-    volumeButton.title = DSM_URL || DTM_URL
-      ? 'The selected DSM/DTM loads automatically when Volume is chosen.'
-      : 'Volume is unavailable because this task has no DSM or DTM elevation raster.';
+    volumeButton.disabled = measurementWorkspace?.volumeUnavailable===true;
+    volumeButton.title = volumeButton.disabled?'No permitted volume calculation source is published for this model.':'Volume uses a permitted elevation raster or registered point-cloud surface. Staff can also use available specialist methods.';
   }
 }
 
@@ -3761,6 +3781,7 @@ function loadPointCloudDirect() {
       // otherwise the fixed mesh-oriented home view can look at empty space
       // and make a successfully decoded cloud appear as a black canvas.
       pointCloudParent.updateMatrixWorld(true);
+      viewerSlice?.refresh();
       if (state.activeMode === 'cloud' && state.cloudMode === 'direct') {
         frameObjectHome(pointCloudObject, { apply: !lastShared3DView });
       }
@@ -4334,6 +4355,7 @@ function switchMode(mode, { historyMode = 'push', updateHistory = true, force = 
 
   rememberMapView(state.activeMode);   // keep the view of the tab we're leaving
   const prevMode = state.activeMode;
+  viewerSlice?.reset();
   measurementWorkspace?.modeChanged();
   // disarm any active measure tool in the tab we're leaving (measurements persist)
   if (state.activeTool !== 'none') {
@@ -4389,8 +4411,8 @@ function switchMode(mode, { historyMode = 'push', updateHistory = true, force = 
   const isPotreeCloud = isPC && state.cloudMode === 'potree';
   const isDirectCloud = isPC && state.cloudMode === 'direct';
   const volumeButton = document.getElementById('tool-volume');
-  volumeButton.disabled = false;
-  volumeButton.title = '';
+  volumeButton.disabled = measurementWorkspace?.volumeUnavailable===true;
+  volumeButton.title = volumeButton.disabled?'No permitted volume calculation source is published for this model.':'Volume uses a permitted elevation raster or registered point-cloud surface. Staff can also use available specialist methods.';
   dom.threeContainer.style.display = (is3D || isDirectCloud) ? 'block' : 'none';
   dom.labelsContainer.style.display = (is3D || isDirectCloud) ? 'block' : 'none';
   dom.cloudContainer.style.display = isPotreeCloud ? 'block' : 'none';
@@ -4413,6 +4435,8 @@ function switchMode(mode, { historyMode = 'push', updateHistory = true, force = 
   document.getElementById('panel-measure').style.display = SHARE_PERMISSIONS.measure ? 'block' : 'none';
   document.getElementById('panel-camera').style.display = is3D ? 'block' : 'none';
   document.getElementById('panel-pc').style.display = isPotreeCloud ? 'block' : 'none';
+  document.getElementById('panel-slice').style.display = (is3D||isPC)?'block':'none';
+  viewerSlice?.refresh();
   document.getElementById('panel-ortho').style.display = mode === 'ortho' ? 'block' : 'none';
   document.getElementById('panel-dem').style.display = isDem ? 'block' : 'none';
   syncMapVolumeAvailability();

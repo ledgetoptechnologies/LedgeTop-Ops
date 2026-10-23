@@ -1,0 +1,51 @@
+{
+  "schemaVersion": 1,
+  "capturedAt": "2026-10-22T23:35:26.7650186Z",
+  "sourceCommit": "2b24b747659fae61e2be092c3541f907df867cee",
+  "scope": "Read-only paired staging version, physical binding, ordered ledger, bounded schema and foreign-key observation; no route activation",
+  "toolSha256": "a071f665fe6b41e572ac70e1a70dd6e623211d05dc21813ec99528dc29a00711",
+  "workers": [
+    {
+      "app": "operations",
+      "workerName": "ledgetop-ops-staging",
+      "versionId": "231fead7-433e-4015-847e-ea9ebda35894",
+      "deploymentId": "bc47b65e-0afc-43fe-8cb2-a5d3e038b72e",
+      "schemaSha256": "90e1daff584a6f930c6e5922c24f042d9e6bda7acf12a7ca6dd31f400354825e",
+      "schemaObjectCount": 2403,
+      "ledgerSha256": "bb7c3a95c8c7dd62cf02e4223889074c930953c8962ae699d7654a6f7f1284a0",
+      "ledgerCount": 221,
+      "pending": [
+        "0222_employee_read_roots.sql",
+        "0223_employee_read_provisioning.sql",
+        "0224_windows_portal_publication_chain_index.sql"
+      ],
+      "foreignKeyViolationCount": 0,
+      "canonicalBaselineVerified": false,
+      "matchesEarlierVersion": true,
+      "matchesEarlierSchema": true,
+      "matchesEarlierLedger": true
+    },
+    {
+      "app": "delivery",
+      "workerName": "ledgetop-clients-staging",
+      "versionId": "6b9f1ff4-ce41-493e-a922-25081c2b67f4",
+      "deploymentId": "bac63dca-c160-4606-9661-79ff708dfafe",
+      "schemaSha256": "66315f85873f39a4bd8cbd9b265dd7d4ad3e216111f0cb90d979ef2096f2623a",
+      "schemaObjectCount": 1158,
+      "ledgerSha256": "f810ef13bb7b1e7cf0a464753b4e821c05557b1377ff33473e91cf5ac395f27c",
+      "ledgerCount": 153,
+      "pending": [
+        "0235_windows_portal_successor_candidates.sql",
+        "0236_windows_portal_successor_content_start_audit.sql"
+      ],
+      "foreignKeyViolationCount": 0,
+      "canonicalBaselineVerified": false,
+      "matchesEarlierVersion": true,
+      "matchesEarlierSchema": true,
+      "matchesEarlierLedger": true
+    }
+  ],
+  "activated": false,
+  "migrationsApplied": false,
+  "note": "Schema pages are not an atomic snapshot; ledger names do not attest historical SQL or data effects. The earlier complete public receipt remains unchanged."
+}

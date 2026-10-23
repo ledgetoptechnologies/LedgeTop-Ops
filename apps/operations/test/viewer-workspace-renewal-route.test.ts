@@ -182,6 +182,26 @@ describe("Viewer workspace renewal Worker routing", () => {
     expect(mocks.createGrant).not.toHaveBeenCalled();
   });
 
+  it.each(["https://ops.ledgetopdroneservices.com","https://ops.ledgetop.app"])(
+    "binds renewal grants to the actual verified staff URL %s, not the Viewer Origin header or canonical primary",async controllerOrigin=>{
+      const production=productionFixture();
+      const candidate={...production.env,EXPECTED_HOST:"ops.ledgetop.app",
+        OPERATIONS_ORIGINS:"https://ops.ledgetop.app,https://ops.ledgetopdroneservices.com"} as Env;
+      const makeRequest=(path:string,init:RequestInit={})=>new Request(controllerOrigin+path,{...init,
+        headers:{Origin:production.viewerOrigin,...init.headers as Record<string,string>}});
+      const challengeResponse=await worker.fetch(makeRequest(`${requestPath}/challenge`),candidate,context);
+      expect(challengeResponse.status).toBe(200);
+      const {challenge}=await challengeResponse.json() as {challenge:string};
+      const requestId=crypto.randomUUID(),sessionId="viewer-session-correlation-01";
+      const response=await worker.fetch(makeRequest(requestPath,{method:"POST",headers:{"Content-Type":"application/json",
+        "Idempotency-Key":requestId,"X-CSRF-Token":challenge},body:JSON.stringify({protocolVersion:1,requestId,sessionId,subject:"ops:staff-owner-1"})}),candidate,context);
+      expect(response.status).toBe(201);
+      expect(mocks.createGrant).toHaveBeenCalledWith(expect.objectContaining({controllerOrigin,targetSessionId:sessionId}));
+      const denied=await worker.fetch(new Request("https://portal.ledgetop.app"+requestPath+"/challenge",{headers:{Origin:production.viewerOrigin}}),candidate,context);
+      expect(denied.status).toBe(404);
+      expect(mocks.createGrant).toHaveBeenCalledTimes(1);
+    });
+
   it("returns authenticated production failures as exact-origin CORS JSON without minting a grant", async () => {
     const production = productionFixture();
     mocks.boundStaff.mockRejectedValue(new HTTPException(401, { message: "Invalid Cloudflare Access authentication" }));

@@ -138,7 +138,7 @@ test('v29 upgrades already-applied v28 cleanup journals without rewriting migrat
   database.close();
 
   const upgraded = openDatabase(databasePath);
-  assert.equal(upgraded.prepare('SELECT MAX(version) version FROM schema_migrations').get().version, 38);
+  assert.equal(upgraded.prepare('SELECT MAX(version) version FROM schema_migrations').get().version, 39);
   const tableSql = upgraded.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='import_cleanup_jobs'").get().sql;
   assert.match(tableSql, /cleanup_quarantine_conflict/);
   assert.match(tableSql, /status IN \('leased','quarantined'\)/);

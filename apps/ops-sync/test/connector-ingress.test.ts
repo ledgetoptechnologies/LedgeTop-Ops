@@ -367,6 +367,25 @@ describe("authenticated connector business ingress",{timeout:30_000},()=>{
     expect(await db.prepare("SELECT count(*) total FROM integration_event_receipts WHERE event_id=?").bind(item.event_id).first("total")).toBe(0);
     expect(await db.prepare("SELECT count(*) total FROM staff_users WHERE email='another@example.com'").first("total")).toBe(0);
   });
+  it("acknowledges a signed primary employee event without provisioning staff or invoking Cloudflare Access",async()=>{
+    // Even after native cohort activation, PA ingress cannot claim, enqueue or
+    // acknowledge native membership reconciliation. Only the application cron does.
+    await db.prepare("UPDATE native_staff_access_reconciliation SET enabled=1,generation=7").run();
+    const nativeControl=(await db.prepare("SELECT * FROM native_staff_access_reconciliation").all()).results;
+    const before=await Promise.all(["staff_users","staff_role_assignments","staff_divisions"].map(async table=>(await db.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all()).results));
+    const item={event_id:crypto.randomUUID(),event_type:"application_entitlement.changed",occurred_at:new Date().toISOString(),schema_version:1,
+      user:{id:"primary-new-employee",email:"pa-only@example.test",display_name:"PA-only employee",active:true},
+      entitlement:{application_key:"ltds_ops",enabled:true,role_key:"role-admin",business_unit_ids:[]}};
+    const response=await handleRequest(await request(primary,item),environment);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ok:true,event_id:item.event_id,status:"ignored"});
+    expect(await Promise.all(["staff_users","staff_role_assignments","staff_divisions"].map(async table=>(await db.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all()).results))).toEqual(before);
+    expect(await db.prepare("SELECT status FROM integration_event_receipts WHERE projection_source_id=? AND event_id=?").bind(primary,item.event_id).first("status")).toBe("ignored");
+    const network=vi.mocked(fetch).mock.calls.map(([input])=>String(input));
+    expect(network.every(url=>url===`${accessIssuer(primary)}/cdn-cgi/access/certs`)).toBe(true);
+    expect((await handleRequest(await request(primary,item),environment)).status).toBe(200);
+    expect((await db.prepare("SELECT * FROM native_staff_access_reconciliation").all()).results).toEqual(nativeControl);
+  });
   it("accepts a secondary client without invoking the primary Delivery bridge",async()=>{
     const item=event();item.projection={...item.projection,entity_type:"client",data:{name:"Secondary customer"}};
     // This fixture deliberately has no Delivery tables. A bridge call would fail.
@@ -407,9 +426,12 @@ describe("authenticated connector business ingress",{timeout:30_000},()=>{
     expect((await handleRequest(await request(secondary,item),guarded)).status).toBe(409);
     expect(await db.prepare("SELECT count(*) total FROM pa_business_units WHERE projection_source_id=? AND payload_json=?").bind(secondary,JSON.stringify(item.projection.data)).first("total")).toBe(0);
   });
-  it("does not use a suspended primary enrollment for scheduled Access synchronization",async()=>{
+  it("keeps the default-off native Access cron independent of PA connector state",async()=>{
+    const before=await Promise.all(["staff_users","staff_role_assignments","staff_divisions","integration_health"].map(async table=>(await db.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all()).results));
+    await expect(reconcileScheduledAccess(environment)).resolves.toBe(0);
     await suspended(primary);
-    await expect(reconcileScheduledAccess(environment)).rejects.toThrow("Connector configuration changed");
+    await expect(reconcileScheduledAccess(environment)).resolves.toBe(0);
+    expect(await Promise.all(["staff_users","staff_role_assignments","staff_divisions","integration_health"].map(async table=>(await db.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all()).results))).toEqual(before);
     expect(fetch).not.toHaveBeenCalled();
   });
 });

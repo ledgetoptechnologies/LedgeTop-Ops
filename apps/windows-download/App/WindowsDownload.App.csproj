@@ -1,0 +1,43 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <AssemblyName>LedgeTop.Files</AssemblyName>
+    <RootNamespace>LedgeTop.Files</RootNamespace>
+    <ApplicationIcon />
+  </PropertyGroup>
+  <!-- Packaged releases compile their channel in (-p:LedgeTopReleaseChannel=pilot|stable). A developer build must say so
+       explicitly (-p:LedgeTopDeveloperBuild=true); a build with neither refuses to connect or show demo data. -->
+  <!-- MSBuild compares text case-insensitively; the exact checks below are ordinal. The app also refuses unknown values. -->
+  <ItemGroup Condition="'$(LedgeTopReleaseChannel)' != ''">
+    <AssemblyMetadata Include="LedgeTop.ReleaseChannel" Value="$(LedgeTopReleaseChannel)" />
+  </ItemGroup>
+  <ItemGroup Condition="'$(LedgeTopDeveloperBuild)' != ''">
+    <AssemblyMetadata Include="LedgeTop.BuildMode" Value="developer" />
+  </ItemGroup>
+  <Target Name="RequireDeveloperOptIn" BeforeTargets="BeforeBuild"
+          Condition="'$(LedgeTopDeveloperBuild)' != '' And !$([System.String]::Equals('$(LedgeTopDeveloperBuild)', 'true', StringComparison.Ordinal))">
+    <Error Text="LedgeTopDeveloperBuild must be exactly 'true' (got '$(LedgeTopDeveloperBuild)')." />
+  </Target>
+  <Target Name="RejectMixedBuild" BeforeTargets="BeforeBuild"
+          Condition="'$(LedgeTopDeveloperBuild)' != '' And ('$(LedgeTopPackage)' == 'true' Or '$(LedgeTopReleaseChannel)' != '')">
+    <Error Text="A developer build can't also be a packaged release; drop LedgeTopDeveloperBuild for package builds." />
+  </Target>
+  <!-- A package build (-p:LedgeTopPackage=true) must name a known channel; it can never fall back to a developer build. -->
+  <Target Name="RequireReleaseChannel" BeforeTargets="BeforeBuild"
+          Condition="'$(LedgeTopPackage)' == 'true' And !$([System.String]::Equals('$(LedgeTopReleaseChannel)', 'pilot', StringComparison.Ordinal)) And !$([System.String]::Equals('$(LedgeTopReleaseChannel)', 'stable', StringComparison.Ordinal))">
+    <Error Text="Package builds need LedgeTopReleaseChannel=pilot or stable (got '$(LedgeTopReleaseChannel)')." />
+  </Target>
+  <ItemGroup>
+    <!-- The developer marker belongs to the app only; Core builds once with the same properties either way. -->
+    <ProjectReference Include="../Core/WindowsDownload.Core.csproj" GlobalPropertiesToRemove="LedgeTopDeveloperBuild" />
+    <InternalsVisibleTo Include="LedgeTop.Files.Tests" />
+    <!-- WPF omits these implicit usings; no code here uses WPF's Path shape. -->
+    <Using Include="System.IO" />
+    <Using Include="System.Net.Http" />
+  </ItemGroup>
+</Project>

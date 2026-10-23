@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "scope": "Read-only staging host home filesystem and memory metadata; no service execution, application data, mount access, deployment or fixture creation",
+  "recordedAt": "2026-10-23T01:15:07Z",
+  "hostname": "staging",
+  "host": "192.168.50.90",
+  "sshUser": "bkoltz",
+  "instructionsRead": "/home/bkoltz/AGENTS.md",
+  "path": "/home/bkoltz",
+  "realpath": "/home/bkoltz",
+  "statfsType": "ext2/ext3",
+  "findmntFilesystemType": "ext4",
+  "availableBytes": 8861564928,
+  "totalBytes": 105089261568,
+  "memoryAvailableBytes": 5400477696,
+  "swapFreeBytes": 17178288128,
+  "snapshotAtomic": false,
+  "nasAccessed": false,
+  "runtimeChanged": false,
+  "fixtureCreated": false,
+  "executionAuthorized": false,
+  "assessment": "Capacity observation only. Small bounded synthetic gateway preparation remains a planning candidate; large fixtures belong on the PC lab. Recheck the exact owned context, filesystem and reserve immediately before authorized creation. Do not prune unrelated data to obtain space."
+}

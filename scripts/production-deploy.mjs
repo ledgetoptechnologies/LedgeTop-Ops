@@ -4,6 +4,7 @@ import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { spawn, spawnSync } from 'node:child_process';
 import { validatePortalReleasePreflight } from '../apps/client/scripts/project-alpha-portal-receiver-preflight.mjs';
+import { readNativeStaffCutoverReadiness, NATIVE_STAFF_PRODUCTION_TARGET } from './native-staff-cutover-readiness.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 export const PROFILE = JSON.parse(fs.readFileSync(path.join(ROOT, 'scripts/production-deploy-profile.json')));
@@ -43,6 +44,7 @@ function activeId(state) {
   return rows[0].version_id;
 }
 export function validateInstallation(snapshot, { allowLatest = {}, profile = PROFILE, selectedApp } = {}) {
+  need(profile.onboardingAdminOrigin === undefined || profile.onboardingAdminOrigin === 'https://ops.ledgetop.app', 'Unreviewed canonical admin origin profile');
   need(snapshot && equal(Object.keys(snapshot).sort(), Object.keys(profile.workers).sort()), 'Existing complete production installation required');
   for (const [app, spec] of Object.entries(profile.workers)) {
     const s = snapshot[app]; const id = activeId(s);
@@ -71,7 +73,7 @@ export function validateInstallation(snapshot, { allowLatest = {}, profile = PRO
   }
   const ops = varsOf(snapshot.operations); const client = varsOf(snapshot.client);
   for (const name of ['CLIENT_ONBOARDING_ADMIN_ENABLED', 'CLIENT_ONBOARDING_RECIPIENT_BRIDGE_ENABLED', 'CLIENT_ONBOARDING_NOTIFICATIONS_ENABLED', 'PROJECT_ALPHA_DIRECTORY_CREATE_GENERATION_RECOVERY_ENABLED']) need(ops[name] === 'true', `Final normal onboarding profile missing: ${name}`);
-  need(ops.CLIENT_ONBOARDING_ADMIN_ORIGIN === 'https://ops.ledgetopdroneservices.com', 'Canonical admin origin required');
+  need(ops.CLIENT_ONBOARDING_ADMIN_ORIGIN === (profile.onboardingAdminOrigin ?? 'https://ops.ledgetopdroneservices.com'), 'Canonical admin origin required');
   need(client.CLIENT_ONBOARDING_RECIPIENT_BRIDGE_ENABLED === 'true', 'Client bridge is not the reviewed final normal profile');
   const recipients = JSON.parse(ops.CLIENT_ONBOARDING_NOTIFICATION_STAFF_IDS);
   need(Array.isArray(recipients) && recipients.length >= 1 && recipients.length <= 16 && new Set(recipients).size === recipients.length && recipients.every(x => typeof x === 'string' && /^[A-Za-z0-9][A-Za-z0-9:._-]{0,190}$/.test(x)), 'Notification recipient profile malformed');
@@ -101,11 +103,33 @@ export function compileConfig(snapshot, app, main, profile = PROFILE) {
   };
 }
 
+export function reviewedFrontendDigest(file, digest) {
+  // 730e3d18 adds only two read-only Windows staging preflight aliases and
+  // their test to the root test command. No app/build/lock inputs change.
+  // Both complete reviewed manifests are finite aliases, never script filters.
+  if (file === 'package.json' && [
+    'f8eb91b8e39b62df7d7a13b6474f96297e05110c443899c1b109fa2a0062a1d0',
+    'c2c9b2f65bf33250158efa14ee67ac20432518ce4b33f20b45c23042ca3f2ebf',
+  ].includes(digest))
+    return '3c5cf8119ffa8eb65d2216db89a583ba79b91a7ada75cbae8aec0856af59ae31';
+  // PR243 a045e30f changes worker-only grant DTO/method code. All browser
+  // runtime bytes are identical; two source maps embed the changed source.
+  // Backend mode retains the ENTIRE old opaque asset association, maps too.
+  if (file === 'packages/shared/src/viewer-service.ts' && digest === '075afdc83aee2c288a10be47441e1fd7cf141edfc8a2c9936ba7102d005024b6')
+    return 'a7f1b2160fb85c06d99213edbc4ef69c0df8f0e96de6284b7d312c2520f91b0f';
+  return digest;
+}
 export function frontendInputHash(file, raw) {
   // Git checks these text files out with CRLF on this Windows worktree and LF
   // in Linux Builds. Lock source semantics, not the checkout's line endings.
   const text = /\.(?:tsx?|jsx?|mjs|cjs|jsonc?|css|svg|html|md|txt|xml|webmanifest|ya?ml)$/i.test(file);
-  return hash(text ? raw.toString('utf8').replaceAll('\r\n', '\n') : raw);
+  const digest = hash(text ? raw.toString('utf8').replaceAll('\r\n', '\n') : raw);
+  // Reviewed 159ba842 -> 43f31609: the only root manifest changes add the
+  // viewer:check/viewer:build scripts. Exact locked per-app builds produce
+  // identical complete browser asset trees (including maps). These finite
+  // byte identity aliases (plus the exact staging-only manifest above) do not
+  // admit another script, dependency or file.
+  return reviewedFrontendDigest(file, digest);
 }
 export function frontendFingerprint(root = ROOT) {
   const files = [];
@@ -260,18 +284,69 @@ async function native(cli, args, directory, phase) {
   need(code === 0, `${phase} native command failed/uncertain; preserve journal and reconcile; do not retry`);
   return fs.readFileSync(logPath, 'utf8').replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '');
 }
-export async function executeDeployment({ app, mode, cli, main, directory, reader, runNative = native, fingerprint, profile = PROFILE }) {
+export function readStaffCutoverReview(file) {
+  need(typeof file === 'string' && path.isAbsolute(file) && !/[\x00-\x1f]/u.test(file), 'Supply an absolute private native staff review packet path');
+  let handle;
+  try {
+    need(!fs.lstatSync(file).isSymbolicLink(), 'Native staff review packet must be a regular file');
+    handle = fs.openSync(file, 'r');
+    const before = fs.fstatSync(handle);
+    need(before.isFile() && before.size > 0 && before.size <= 1024 * 1024, 'Native staff review packet is outside its size bound');
+    const text = fs.readFileSync(handle, 'utf8'), after = fs.fstatSync(handle);
+    need(before.size === after.size && before.mtimeMs === after.mtimeMs && before.ino === after.ino
+      && before.dev === after.dev && Buffer.byteLength(text) === before.size, 'Native staff review packet changed while reading');
+    return JSON.parse(text);
+  } catch { throw new Error('Native staff review packet missing, malformed or changed; no deployment permitted'); }
+  finally { if (handle !== undefined) fs.closeSync(handle); }
+}
+export function deploymentSourceCommit(root = ROOT, env = process.env) {
+  need(!Object.entries(env).some(([key, value]) => value && /^GIT_(?:DIR|WORK_TREE|INDEX_FILE|OBJECT_DIRECTORY|ALTERNATE_OBJECT_DIRECTORIES|CONFIG.*)$/u.test(key)), 'Git source overrides are unsupported for production deployment');
+  const run = args => {
+    const result = spawnSync('git', args, { cwd: root, env, encoding: 'utf8', windowsHide: true, shell: false, timeout: 10_000, maxBuffer: 1024 * 1024 });
+    need(!result.error && result.status === 0, 'Current reviewed source checkout cannot be verified');return result.stdout.trim();
+  };
+  need(fs.realpathSync(run(['rev-parse', '--show-toplevel'])) === fs.realpathSync(root), 'Deployment source checkout differs');
+  const commit = run(['rev-parse', '--verify', 'HEAD']);
+  need(/^[a-f0-9]{40}$/u.test(commit) && run(['status', '--porcelain', '--untracked-files=all']) === '', 'Deployment requires the exact clean reviewed source commit');
+  return commit;
+}
+function staffReadinessReceipt(value, sourceCommit) {
+  const keys = ['schemaVersion','sourceCommit','accountId','databaseId','reviewSha256','cohortSha256','controlPlaneSha256','observedAt','staffCount','generation'];
+  need(value && equal(Object.keys(value).sort(), keys.sort()) && value.schemaVersion === 2
+    && /^[a-f0-9]{40}$/u.test(sourceCommit ?? '') && value.sourceCommit === sourceCommit
+    && value.accountId === NATIVE_STAFF_PRODUCTION_TARGET.accountId && value.databaseId === NATIVE_STAFF_PRODUCTION_TARGET.databaseId
+    && /^[a-f0-9]{64}$/u.test(value.reviewSha256 ?? '') && /^[a-f0-9]{64}$/u.test(value.cohortSha256 ?? '')
+    && /^[a-f0-9]{64}$/u.test(value.controlPlaneSha256 ?? '')
+    && Number.isSafeInteger(value.staffCount) && value.staffCount > 0 && value.staffCount <= 1024
+    && Number.isSafeInteger(value.generation) && value.generation >= 0
+    && Number.isFinite(Date.parse(value.observedAt)) && Date.parse(value.observedAt) <= Date.now()
+    && Date.now() - Date.parse(value.observedAt) <= 60_000, 'Fresh exact native staff handoff readiness is required');
+  return structuredClone(value);
+}
+export async function executeDeployment({ app, mode, cli, main, directory, reader, runNative = native, fingerprint, profile = PROFILE,
+  staffCutoverReview, sourceCommit, readStaffCutover = readNativeStaffCutoverReadiness }) {
   checkMode(mode, fingerprint); need(Object.hasOwn(PROFILE.workers, app), 'Unknown Worker');
   need(fs.existsSync(main) && fs.existsSync(`${main}.map`), 'Build Worker index.js and genuine sibling source map before deployment');
   const js = fs.readFileSync(main);
   let sourceMap;try { sourceMap = JSON.parse(fs.readFileSync(`${main}.map`)); } catch { throw new Error('Genuine input source map invalid'); }
   verifySourceMap(sourceMap, sourceMap);
   const before = validateInstallation(await capture(reader, { selectedApp: app }), { profile, selectedApp: app });
+  let firstStaffReadiness;
+  const qualifyStaff = async () => {
+    if (app === 'client') return null;
+    need(staffCutoverReview && typeof readStaffCutover === 'function', 'Production Ops and Sync require the reviewed native staff handoff packet');
+    const receipt = staffReadinessReceipt(await readStaffCutover({ review: structuredClone(staffCutoverReview), sourceCommit }), sourceCommit);
+    if (firstStaffReadiness) need(equal(without(receipt, ['observedAt']), without(firstStaffReadiness, ['observedAt'])), 'Native staff handoff changed during deployment; reconcile without retry');
+    else firstStaffReadiness = receipt;
+    return receipt;
+  };
+  await qualifyStaff(); // Before even an unchanged-module return or inactive upload.
   const currentMain = before[app].modern.modules.find(x => x.name === 'index.js');
   if (currentMain && hash(Buffer.from(currentMain.content_base64, 'base64')) === hash(js)) return { unchanged: true, noUpload: true };
   privateDirectory(directory);
   const save = (name, value) => fs.writeFileSync(path.join(directory, name), JSON.stringify(value, null, 2), { flag: 'wx', mode: 0o600 });
   save('before.private.json', before);
+  if (firstStaffReadiness) save('native-staff-before-upload.json', firstStaffReadiness);
   const config = compileConfig(before, app, path.resolve(main), profile);
   const configPath = path.join(directory, 'wrangler.production.private.json');save('wrangler.production.private.json', config);
   const preupload = validateInstallation(await capture(reader, { selectedApp: app }), { profile, selectedApp: app });
@@ -292,32 +367,76 @@ export async function executeDeployment({ app, mode, cli, main, directory, reade
   // publication or provider POST is implemented in this adapter itself.
   const preactivation = await capture(reader, { selectedApp: app });validateInstallation(preactivation, { allowLatest: { [app]: cid }, profile, selectedApp: app });
   need(equal(stableState(preactivation, app), stableState(inactive, app)), 'Current controls changed before activation');
+  const readyToActivate = await qualifyStaff();
+  if (readyToActivate) save('native-staff-before-activate.json', readyToActivate);
   await runNative(cli, ['versions', 'deploy', `${cid}@100%`, '--yes', '--config', configPath], directory, 'activate');
   const after = validateInstallation(await capture(reader, { selectedApp: app }), { profile, selectedApp: app });
   need(activeId(after[app]) === cid, 'Activation uncertain; GET-only reconciliation required');
+  const readyAfterActivation = await qualifyStaff();
+  if (readyAfterActivation) save('native-staff-after-activate.json', readyAfterActivation);
   const finalMapsProof = verifyCandidate(before, app, after[app].version, after[app].modern, js, sourceMap);
   for (const key of Object.keys(PROFILE.workers)) if (key !== app) need(equal(stableState({ [key]: before[key] }, app), stableState({ [key]: after[key] }, app)), 'Another Worker changed protected controls');
   need(equal(settingsShape(after[app].settings), settingsShape(before[app].settings)) && equal(after[app].schedules, before[app].schedules), 'Settings or schedules changed');
   save('after.private.json', after);save('verified-active.json', { candidate: cid, runtimeSHA256: hash(js), assetsPreserved: true, resourcesPreserved: true, settingsPreserved: true, schedulesPreserved: true, ...finalMapsProof, runtimeHTTPAcceptanceStillRequired: true });
   return { candidate: cid, verifiedActive: true, journal: directory };
 }
+const DOMAIN_PHASE_NAMES = ['baseline', 'ops-alias-preparation', 'client-private-overlap', 'portal-entry-canonical', 'staff-canonical'];
+export function parseDeploymentArguments(argv) {
+  if (!argv.length || equal(argv, ['--check'])) return {kind:'check'};
+  if (equal(argv, ['--check-build-environment'])) return {kind:'environment'};
+  if (argv.length === 3 && argv[0] === '--inspect' && argv[1] === '--domain-phase') {
+    need(DOMAIN_PHASE_NAMES.includes(argv[2]), 'Unknown reviewed domain phase');
+    return {kind:'inspect',phase:argv[2]};
+  }
+  need([5,7,9].includes(argv.length) && argv[0] === '--worker' && argv[2] === '--mode' && argv[4] === '--execute',
+    'Use --worker operations|client|ops-sync --mode backend --execute [--domain-phase <reviewed-name>] [--staff-cutover-review <absolute-private-packet>], or --inspect --domain-phase <reviewed-name>');
+  need(Object.hasOwn(PROFILE.workers, argv[1]), 'Unknown Worker');
+  need(argv[3] === 'backend', 'UI deployment denied: backend is the only supported mode');
+  let phase = 'baseline', staffReviewPath;
+  const flags = new Set();
+  for (let i = 5; i < argv.length; i += 2) {
+    need(['--domain-phase','--staff-cutover-review'].includes(argv[i]) && !flags.has(argv[i]), 'Use --worker with unique supported release options');flags.add(argv[i]);
+    if (argv[i] === '--domain-phase') phase = argv[i + 1];
+    else {
+      need(argv[1] !== 'client' && typeof argv[i + 1] === 'string' && path.isAbsolute(argv[i + 1]) && !/[\x00-\x1f]/u.test(argv[i + 1]), 'Use --worker Ops or Sync with an absolute private staff review packet');
+      staffReviewPath = argv[i + 1];
+    }
+  }
+  need(DOMAIN_PHASE_NAMES.includes(phase), 'Unknown reviewed domain phase');
+  return {kind:'execute',app:argv[1],mode:'backend',phase,...(staffReviewPath ? {staffReviewPath} : {})};
+}
+export async function inspectProductionInstallation(reader, phase, profile) {
+  need(DOMAIN_PHASE_NAMES.includes(phase), 'Unknown reviewed domain phase');
+  const snapshot = validateInstallation(await capture(reader), {profile});
+  return {recognizedPhase:phase,activeVersionIds:Object.fromEntries(Object.entries(snapshot).map(([app,state]) => [app,activeId(state)])),
+    protectedProfileSHA256:hash(canonical(profile)),frontendSHA256:profile.frontendSHA256,
+    recognized:true,readOnly:true,uploadEnabled:false,activationEnabled:false,rawSnapshotPrinted:false};
+}
 export async function main(argv = process.argv.slice(2)) {
-  if (!argv.length || equal(argv, ['--check'])) { console.log(JSON.stringify({ offline: true, network: false, profile: PROFILE.profile }));return; }
-  if (equal(argv, ['--check-build-environment'])) {
+  const args = parseDeploymentArguments(argv);
+  if (args.kind === 'check') { console.log(JSON.stringify({ offline: true, network: false, profile: PROFILE.profile }));return; }
+  if (args.kind === 'environment') {
     const presence = { accountIdPresent: Object.hasOwn(process.env, 'CLOUDFLARE_ACCOUNT_ID'), apiTokenPresent: Object.hasOwn(process.env, 'CLOUDFLARE_API_TOKEN') };
     console.log(JSON.stringify({ offline: true, network: false, valuesPrinted: false, ...presence }));
     need(presence.accountIdPresent && presence.apiTokenPresent, 'Configure conventional production build environment before enabling deployments');return;
   }
-  need(argv.length === 5 && argv[0] === '--worker' && argv[2] === '--mode' && argv[4] === '--execute', 'Use --worker operations|client|ops-sync --mode backend --execute; no implicit deployment');
-  const app = argv[1];need(Object.hasOwn(PROFILE.workers, app), 'Unknown Worker');checkMode(argv[3]);
+  checkMode('backend');
   validateBuildEnvironment();
+  const {domainRecognitionProfile} = await import('./production-domain-recognition.mjs');
+  const profile = domainRecognitionProfile(args.phase);
+  const reader = new CloudflareReader(process.env.CLOUDFLARE_ACCOUNT_ID, process.env.CLOUDFLARE_API_TOKEN);
+  if (args.kind === 'inspect') {
+    console.log(JSON.stringify(await inspectProductionInstallation(reader,args.phase,profile)));return;
+  }
+  const app = args.app;
+  const staffCutoverReview = app === 'client' ? undefined : readStaffCutoverReview(args.staffReviewPath);
+  const sourceCommit = app === 'client' ? undefined : deploymentSourceCommit();
   const cli = path.join(ROOT, 'apps', app, 'node_modules/wrangler/wrangler-dist/cli.js');
   need(fs.existsSync(cli) && hash(fs.readFileSync(cli)) === PROFILE.wranglerRuntimeSHA256, 'Installed Wrangler runtime changed; qualify before deployment');
-  const reader = new CloudflareReader(process.env.CLOUDFLARE_ACCOUNT_ID, process.env.CLOUDFLARE_API_TOKEN);
   const main = buildModulePath(app);
   const parent = path.join(ROOT, '.backups/production-deploy');fs.mkdirSync(parent, { recursive: true, mode: 0o700 });
   const directory = path.join(parent, `${app}-${crypto.randomUUID()}`);
-  const result = await executeDeployment({ app, mode: argv[3], cli, main, directory, reader });
+  const result = await executeDeployment({ app, mode: args.mode, cli, main, directory, reader, profile, staffCutoverReview, sourceCommit });
   console.log(JSON.stringify(result));
 }
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) main().catch(error => {

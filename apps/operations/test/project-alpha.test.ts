@@ -221,7 +221,8 @@ describe("Project Alpha snapshot synchronization", () => {
     const result = await syncProjectAlpha(environment(db));
     const sql = db.allSql();
     expect(result.status).toBe("success");
-    expect(sql).toContain("INSERT INTO pa_application_entitlements");
+    expect(sql).not.toContain("INSERT INTO pa_application_entitlements");
+    expect(sql).not.toMatch(/(?:INSERT(?: OR IGNORE)? INTO|UPDATE|DELETE FROM) staff_(?:users|role_assignments|divisions)\b/);
     expect(sql).toContain("manager_user_id");
     expect(sql).toContain("INSERT INTO pa_operations");
     expect(sql).toContain("INSERT INTO pa_tasks");
@@ -229,9 +230,8 @@ describe("Project Alpha snapshot synchronization", () => {
     expect(sql).toContain("INSERT INTO pa_calendar_events");
     expect(sql).not.toContain("project_alpha_business_unit_id");
     expect(sql).not.toContain("INSERT INTO divisions");
-    expect(sql).toContain("s.sync_protected=0");
-    expect(sql).toContain("INSERT OR IGNORE INTO staff_role_assignments");
-    expect(sql).toContain("SET status=CASE WHEN project_alpha_user_id IN");
+    expect(sql).not.toContain("INSERT OR IGNORE INTO staff_role_assignments");
+    expect(sql).not.toContain("SET status=CASE WHEN project_alpha_user_id IN");
     expect(sql).not.toContain("INSERT OR IGNORE INTO staff_divisions");
   });
 
@@ -282,14 +282,14 @@ describe("Project Alpha snapshot synchronization", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  it("keeps an empty-scope employee authenticated without granting a business-unit scope", async () => {
+  it("does not derive an Ops employee or grant from an enabled PA entitlement", async () => {
     const db = new Database();
     vi.stubGlobal("fetch", repeatingSnapshot({
       application_entitlements: [{ id: 9, user_id: 7, application_key: "external_operations", enabled: true, role_key: "role-operator", oversight_business_unit_ids: [] }],
     }));
 
     await syncProjectAlpha(environment(db));
-    expect(db.allSql()).toContain("'role-operator','assigned'");
+    expect(db.allSql()).not.toMatch(/(?:INSERT(?: OR IGNORE)? INTO|UPDATE|DELETE FROM) staff_(?:users|role_assignments|divisions)\b/);
     expect(db.allSql()).not.toContain("INSERT OR IGNORE INTO staff_divisions");
   });
 
@@ -302,19 +302,18 @@ describe("Project Alpha snapshot synchronization", () => {
 
     await syncProjectAlpha(environment(db));
     const roleInserts = db.batches.flat().filter((statement) => statement.sql.includes("INSERT OR IGNORE INTO staff_role_assignments"));
-    expect(roleInserts).toHaveLength(2);
-    expect(roleInserts.every((statement)=>statement.sql.includes("e.enabled=1"))).toBe(true);
-    expect(db.allSql()).toContain("e.active=1 AND e.enabled=1 AND u.active=1");
+    expect(roleInserts).toHaveLength(0);
+    expect(db.allSql()).not.toMatch(/(?:INSERT(?: OR IGNORE)? INTO|UPDATE|DELETE FROM) staff_users\b/);
   });
 
-  it("maps a PA administrator to the immutable global administrator role", async () => {
+  it("never maps a PA administrator to Operations administrator authority", async () => {
     const db = new Database();
     vi.stubGlobal("fetch", repeatingSnapshot({
       application_entitlements: [{ id: 9, user_id: 7, application_key: "external_operations", enabled: true, role_key: "role-admin", oversight_business_unit_ids: [] }],
     }));
 
     await syncProjectAlpha(environment(db));
-    expect(db.allSql()).toContain("'role-admin','global'");
+    expect(db.allSql()).not.toMatch(/(?:INSERT(?: OR IGNORE)? INTO|UPDATE|DELETE FROM) staff_(?:users|role_assignments|divisions)\b/);
     expect(db.allSql()).not.toContain("INSERT OR IGNORE INTO staff_divisions");
   });
 

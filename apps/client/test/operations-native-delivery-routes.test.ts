@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { NativeOperationsDeliveryContext } from '../src/worker/client-portal/operations-native-delivery-authorization';
 import type { Env } from '../src/worker/types';
+import { NATIVE_DELIVERY_APP_PORTAL_PRODUCTION_PROFILE } from '../src/worker/operations-native-delivery-deployment';
 import { createOperationsNativeDeliveryRouter } from '../src/worker/client-portal/operations-native-delivery-routes';
 import { encodeOperationsNativeDeliveryHandle, decodeOperationsNativeDeliveryHandle, type OperationsNativeDeliveryHandle }
   from '../src/worker/client-portal/operations-native-delivery-handles';
@@ -57,6 +58,29 @@ describe('native Operations folder HTTP routes', () => {
   async function path(kind: 'folder' | 'file') {
     return `/${kind === 'folder' ? 'folders' : 'files'}/${await encodeOperationsNativeDeliveryHandle(env, handle(kind))}`;
   }
+  it.each(['https://portal.ledgetop.app','https://portal.ledgetopdroneservices.com'])(
+    'keeps exact overlap file downloads on %s while enforcing the same current grant, identity and physical key',async privateOrigin=>{
+      const production={...env,ENVIRONMENT:'production',EXPECTED_HOST:'portal.ledgetopdroneservices.com',
+        PUBLIC_BASE_URL:'https://portal.ledgetopdroneservices.com',PUBLIC_SHARE_ORIGIN:'https://portal.ledgetopdroneservices.com',
+        CLIENT_PORTAL_ORIGIN:'https://portal.ledgetop.app',
+        CLIENT_PORTAL_ORIGINS:'https://portal.ledgetop.app,https://portal.ledgetopdroneservices.com,https://portal.ledgetoptechnologies.com',
+        CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_DEPLOYMENT_PROFILE:NATIVE_DELIVERY_APP_PORTAL_PRODUCTION_PROFILE} as Env;
+      const expectedBytes=Uint8Array.from({length:42},(_,index)=>index);
+      get.mockImplementationOnce(async()=>({etag:'synthetic-etag',size:42,
+        body:new ReadableStream({start(controller){controller.enqueue(expectedBytes);controller.close();}})}));
+      const endpoint=`${privateOrigin}${await path('file')}/download`;
+      const response=await router().fetch(new Request(endpoint),production);
+      expect(response.status).toBe(200);expect(response.headers.get('Location')).toBeNull();
+      expect(response.headers.get("Content-Length")).toBe("42");
+      expect(new Uint8Array(await response.arrayBuffer())).toEqual(expectedBytes);
+      expect(get).toHaveBeenCalledWith('synthetic/photos/photo.jpg',expect.anything());
+      expect(authorization).toHaveBeenCalled();
+      for(const call of authorization.mock.calls){expect(call[1]).toEqual(principal);expect(call[2]).toBe(id(2));expect(call[3]).toBe('file.download');}
+      get.mockClear();head.mockClear();authorization.mockResolvedValue({ok:false,code:'denied'});
+      const revoked=await router().fetch(new Request(endpoint),production);
+      expect(revoked.status).toBe(404);expect(revoked.headers.get('Location')).toBeNull();
+      expect(get).not.toHaveBeenCalled();expect(head).not.toHaveBeenCalled();
+    });
   it('is default-off and production-off before identity, ledger, index or R2 lookups', async () => {
     const resolvePrincipal = vi.fn(async () => principal), instance = createOperationsNativeDeliveryRouter({ resolvePrincipal });
     for (const override of [{ ENVIRONMENT: 'production' }, { CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_READ_ENABLED: undefined }, { CLIENT_PORTAL_ENABLED: 'false' }]) {
@@ -173,6 +197,126 @@ describe('native Operations folder HTTP routes', () => {
     authorization.mockResolvedValue({ ok: false, code: 'unavailable' });
     const result = await router().fetch(request(await path('file')), env);
     expect(result.status).toBe(503); expect(prepare).not.toHaveBeenCalled();
+  });
+  const digest = 'a'.repeat(64);
+  type Manifest = { logicalFileId: string; remoteVersion: string; strongETag: string; size: number; sha256: string;
+    name: string; downloadPath: string; expiresAt: number };
+  const manifestJson = async (response: Response): Promise<Manifest> => await response.json() as Manifest;
+  const trustedHead = () => ({ etag: 'synthetic-etag', httpEtag: '"synthetic-etag"', size: 42,
+    version: 'provider-upload-one', checksums: { sha256: new Uint8Array(32).fill(0xaa).buffer } });
+  const localPath = (path: string) => path.replace(/^\/api\/client\/operations\/data/u, '');
+  async function manifest() {
+    return router().fetch(request(`${await path('file')}/download-manifest`), env);
+  }
+  it('issues a trusted manifest and encrypted version-pinned relative path without reading file bytes', async () => {
+    head.mockResolvedValue(trustedHead());
+    const selector = handle('file');
+    proof = { ...proof, command: { ...proof.command, expiresAt: new Date(Date.now() + 120_000).toISOString() } };
+    authorization.mockResolvedValue({ ok: true, context: proof });
+    const response = await router().fetch(request(`/files/${await encodeOperationsNativeDeliveryHandle(env, selector)}/download-manifest`), env);
+    expect(response.status).toBe(200); expect(response.headers.get('Cache-Control')).toBe('private, no-store');
+    const body = await manifestJson(response);
+    expect(body).toEqual({ schemaVersion: 1, logicalFileId: expect.stringMatching(/^ondf1_[a-f0-9]{64}$/u),
+      remoteVersion: 'provider-upload-one', strongETag: '"synthetic-etag"', size: 42, sha256: digest, name: 'photo.jpg',
+      downloadPath: expect.stringMatching(/^\/api\/client\/operations\/data\/files\/ond1_[\w-]+\/download$/u), expiresAt: expect.any(Number) });
+    const encoded = body.downloadPath.split('/').at(-2)!;
+    const pinned = await decodeOperationsNativeDeliveryHandle(env, encoded);
+    expect(pinned).toMatchObject({ providerVersion: 'provider-upload-one', sha256: digest, path: 'photo.jpg', expires: body.expiresAt * 1000 });
+    expect(pinned!.expires).toBeLessThanOrEqual(selector.expires);
+    expect(pinned!.expires).toBeLessThanOrEqual(Date.parse(proof.command.expiresAt!));
+    expect(JSON.stringify(body)).not.toContain('synthetic/photos/');
+    expect(get).not.toHaveBeenCalled(); expect(audit).not.toHaveBeenCalled();
+    expect(authorization).toHaveBeenCalledTimes(3);
+  });
+  it('keeps logical identity stable across fresh encrypted selectors while different paths differ', async () => {
+    head.mockResolvedValue(trustedHead());
+    const firstManifest = await manifestJson(await manifest()), secondManifest = await manifestJson(await manifest());
+    expect(firstManifest.logicalFileId).toBe(secondManifest.logicalFileId);
+    expect(firstManifest.downloadPath).not.toBe(secondManifest.downloadPath);
+    first.mockResolvedValue({ ...file, r2_key: 'synthetic/photos/other.jpg' });
+    const other = await encodeOperationsNativeDeliveryHandle(env, { ...handle('file'), path: 'other.jpg' });
+    const third = await manifestJson(await router().fetch(request(`/files/${other}/download-manifest`), env));
+    expect(third.logicalFileId).not.toBe(firstManifest.logicalFileId);
+  });
+  it.each(['CONIN$.txt', 'CONOUT$.bin', 'COM¹.txt', 'LPT².map', 'COM³.bin'])('uses a Windows-safe manifest basename for %s', async name => {
+    first.mockResolvedValue({ ...file, r2_key: `synthetic/photos/${name}` });
+    head.mockResolvedValue(trustedHead());
+    const selector = await encodeOperationsNativeDeliveryHandle(env, { ...handle('file'), path: name });
+    const response = await router().fetch(request(`/files/${selector}/download-manifest`), env);
+    expect(response.status).toBe(200);
+    expect((await manifestJson(response)).name).toBe(`_${name}`);
+  });
+  it.each([
+    ['\u2003\u2003', 'download'],
+    ['a'.repeat(149) + '😀.jpg', 'a'.repeat(149)],
+  ])('keeps Unicode manifest basenames nonempty and truncates only complete characters', async (name, expected) => {
+    first.mockResolvedValue({ ...file, r2_key: `synthetic/photos/${name}` });
+    head.mockResolvedValue(trustedHead());
+    const selector = await encodeOperationsNativeDeliveryHandle(env, { ...handle('file'), path: name });
+    const response = await router().fetch(request(`/files/${selector}/download-manifest`), env);
+    expect(response.status).toBe(200);
+    expect((await manifestJson(response)).name).toBe(expected);
+  });
+  it('rejects foreign identity and expired selectors before a manifest storage lookup', async () => {
+    const foreign = await encodeOperationsNativeDeliveryHandle(env, { ...handle('file'), subject: 'another-person' });
+    expect((await router().fetch(request(`/files/${foreign}/download-manifest`), env)).status).toBe(404);
+    vi.useFakeTimers();
+    try {
+      const expiring = await encodeOperationsNativeDeliveryHandle(env, { ...handle('file'), expires: Date.now() + 1000 });
+      vi.advanceTimersByTime(2000);
+      expect((await router().fetch(request(`/files/${expiring}/download-manifest`), env)).status).toBe(404);
+    } finally { vi.useRealTimers(); }
+    expect(head).not.toHaveBeenCalled(); expect(get).not.toHaveBeenCalled();
+  });
+  it.each([undefined, new Uint8Array(31).buffer])('fails closed on unavailable full-object checksum metadata', async sha256 => {
+    head.mockResolvedValue({ ...trustedHead(), checksums: { sha256 } });
+    const response = await manifest();
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({ code: 'download-checksum-unavailable' });
+    expect(get).not.toHaveBeenCalled(); expect(audit).not.toHaveBeenCalled();
+  });
+  it('suppresses a manifest if authority is revoked during HEAD or before final response', async () => {
+    head.mockImplementationOnce(async () => { authorization.mockResolvedValue({ ok: false, code: 'denied' }); return trustedHead(); });
+    expect((await manifest()).status).toBe(404);
+    let count = 0;
+    authorization.mockImplementation(async () => ++count === 3 ? { ok: false, code: 'denied' } : { ok: true, context: proof });
+    head.mockResolvedValue(trustedHead());
+    expect((await manifest()).status).toBe(404);
+    expect(get).not.toHaveBeenCalled();
+  });
+  it('returns metadata for a 30GB object without acquiring or hashing its body', async () => {
+    first.mockResolvedValue({ ...file, size: 30_000_000_000 });
+    head.mockResolvedValue({ ...trustedHead(), size: 30_000_000_000 });
+    const response = await manifest(); expect(response.status).toBe(200);
+    expect((await manifestJson(response)).size).toBe(30_000_000_000);
+    expect(get).not.toHaveBeenCalled();
+  });
+  it('keeps version-pinned conditional range reads behind the existing audit and authorization boundary', async () => {
+    head.mockResolvedValue(trustedHead());
+    const body = await manifestJson(await manifest());
+    get.mockImplementationOnce(async () => ({ ...trustedHead(), body: new ReadableStream({ start(controller) { controller.enqueue(new Uint8Array(5)); }, cancel }) }));
+    const response = await router().fetch(request(localPath(body.downloadPath), { Range: 'bytes=0-4', 'If-Range': body.strongETag }), env);
+    expect(response.status).toBe(206);
+    expect(get).toHaveBeenCalledWith(file.r2_key, { range: { offset: 0, length: 5 }, onlyIf: { etagMatches: 'synthetic-etag' } });
+    expect(audit).toHaveBeenCalledOnce();
+    await response.body?.cancel();
+  });
+  it.each(['version', 'checksum'])('denies same-ETag/size %s replacements before HEAD/304 metadata responses', async changed => {
+    head.mockResolvedValue(trustedHead());
+    const body = await manifestJson(await manifest());
+    head.mockResolvedValue(changed === 'version' ? { ...trustedHead(), version: 'provider-upload-two' }
+      : { ...trustedHead(), checksums: { sha256: new Uint8Array(32).fill(0xbb).buffer } });
+    expect((await router().fetch(new Request(`${origin}${localPath(body.downloadPath)}`, { method: 'HEAD' }), env)).status).toBe(404);
+    expect((await router().fetch(request(localPath(body.downloadPath), { 'If-None-Match': body.strongETag }), env)).status).toBe(404);
+    expect(get).not.toHaveBeenCalled(); expect(audit).not.toHaveBeenCalled();
+  });
+  it.each(['version', 'checksum'])('cancels an acquired same-ETag/size %s replacement before auditing or exposing bytes', async changed => {
+    head.mockResolvedValue(trustedHead());
+    const body = await manifestJson(await manifest());
+    get.mockResolvedValueOnce({ ...trustedHead(), ...(changed === 'version' ? { version: 'provider-upload-two' }
+      : { checksums: { sha256: new Uint8Array(32).fill(0xbb).buffer } }), body: new ReadableStream({ cancel }) });
+    expect((await router().fetch(request(localPath(body.downloadPath)), env)).status).toBe(404);
+    expect(cancel).toHaveBeenCalledOnce(); expect(audit).not.toHaveBeenCalled();
   });
   it('streams ranged downloads with conditional R2 acquisition and mandatory audit before final authorization', async () => {
     const result = await router().fetch(request(`${await path('file')}/download`, { Range: 'bytes=0-4' }), env);

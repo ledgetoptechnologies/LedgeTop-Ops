@@ -5,7 +5,7 @@ type OriginEnv = Pick<Env,
   "ENVIRONMENT" | "EXPECTED_HOST" | "PUBLIC_BASE_URL" | "PUBLIC_SHARE_ORIGIN" | "CLIENT_PORTAL_ORIGIN" | "CLIENT_PORTAL_ORIGINS" | "LEGACY_CLIENT_ORIGINS" | "CLIENT_PORTAL_RETIRED_ORIGINS"
 >;
 
-type RequestNamespace = "public" | "portal" | "onboarding" | "internal" | "shared" | "assets" | "unknown";
+type RequestNamespace = "public" | "portal" | "onboarding" | "internal" | "shared" | "assets" | "ui-release" | "unknown";
 
 function deployed(env: Pick<Env, "ENVIRONMENT">): boolean {
   return env.ENVIRONMENT === "production" || env.ENVIRONMENT === "staging";
@@ -26,6 +26,7 @@ function exactOrigin(value: string | undefined, requireHttps: boolean): URL | nu
 
 export function requestNamespace(path: string): RequestNamespace {
   if (path === "/" || path === "/health") return "shared";
+  if (path === "/_ui" || path.startsWith("/_ui/")) return "ui-release";
   if (path === "/assets" || path.startsWith("/assets/")) return "assets";
   if (path === "/s" || path.startsWith("/s/")
     || path === "/client-share" || path.startsWith("/client-share/")
@@ -177,12 +178,25 @@ export function legacyClientRedirectLocation(requestUrl: string, env: OriginEnv)
   try { request = new URL(requestUrl); } catch { return null; }
   if (![...legacy, ...retired].includes(request.origin)) return null;
   const namespace = requestNamespace(request.pathname);
-  if (request.pathname === "/health" || request.pathname.startsWith("/api/") || namespace === "public" || namespace === "assets" || namespace === "unknown") return null;
+  if (request.pathname === "/health" || request.pathname.startsWith("/api/") || namespace === "public" || namespace === "assets" || namespace === "ui-release" || namespace === "unknown") return null;
   const targetOrigin = configuredClientPortalOrigin(env);
   if (!targetOrigin) return null;
   if (request.origin === targetOrigin) return null;
   const target = new URL(request.pathname === "/" ? "/portal" : `${request.pathname}${request.search}`, targetOrigin);
   return target.toString();
+}
+
+/** Release bytes belong only to active authenticated portal presentation hosts.
+ * Public bearer and legacy origins never acquire the additive UI namespace. */
+export function clientUiReleaseOriginAllowed(requestUrl: string, env: OriginEnv): boolean {
+  const portal = configuredClientPortalOrigins(env);
+  const publicOrigins = configuredPublicRequestOrigins(env);
+  const retired = configuredRetiredPortalOrigins(env);
+  if (!portal || !publicOrigins || !retired) return false;
+  try {
+    const origin = new URL(requestUrl).origin;
+    return portal.includes(origin) && !publicOrigins.includes(origin) && !retired.includes(origin);
+  } catch { return false; }
 }
 
 export function requestHostAllowed(requestUrl: string, env: OriginEnv): boolean {
@@ -196,6 +210,7 @@ export function requestHostAllowed(requestUrl: string, env: OriginEnv): boolean 
   const legacyOrigins = configuredLegacyClientOrigins(env);
   if (!legacyOrigins) return false;
   if (namespace === "public") return publicRequestOrigins.includes(request.origin);
+  if (namespace === "ui-release") return clientUiReleaseOriginAllowed(requestUrl, env);
   const retired = configuredRetiredPortalOrigins(env);
   if (!retired) return false;
   // GET/HEAD portal entries redirect before admission. API bodies/cookies are

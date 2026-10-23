@@ -2,6 +2,8 @@ name: CI
 
 on:
   pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review]
   push:
     branches: [main]
 
@@ -14,6 +16,8 @@ permissions:
 
 jobs:
   source-invariants:
+    # Drafts and branches other than main are tested on staging, not on GitHub minutes.
+    if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
     runs-on: ubuntu-24.04
     steps:
       - name: Check out the exact commit
@@ -32,7 +36,15 @@ jobs:
           npm ci --prefix apps/client
 
       - name: Verify guarded production deployment tooling without credentials
-        run: node --test scripts/production-deploy.test.mjs
+        run: node --test scripts/production-deploy.test.mjs scripts/native-staff-cutover-readiness.test.mjs
+
+      - name: Verify inactive additive UI binding preparation
+        run: node --test scripts/ui-additive-release-plan.test.mjs
+
+      - name: Verify additive UI asset policy and local binding contract
+        run: |
+          node apps/operations/node_modules/typescript/bin/tsc --project apps/ui-release-assets/tsconfig.json --noEmit
+          node --test scripts/ui-release-assets.test.mjs scripts/ui-release-catalog.test.mjs scripts/ui-release-packet.test.mjs scripts/ui-release-assets-local.test.mjs
 
       - name: Verify main and PR workflow trigger policy
         run: node --test scripts/workflow-trigger-policy.test.mjs
@@ -42,6 +54,9 @@ jobs:
 
       - name: Verify credential-safe two-source staging connection profile
         run: node --test scripts/staging-ops-two-source-connection-profile-v1.test.mjs
+
+      - name: Verify Windows staging preflight without network or credentials
+        run: node --test scripts/windows-files-source-preparation.test.mjs scripts/windows-files-staging-composition.test.mjs scripts/windows-files-staging-preflight.test.mjs scripts/windows-files-schema-query.test.mjs scripts/windows-files-schema-object-digests.test.mjs scripts/windows-files-canonical-comparison.test.mjs scripts/windows-files-canonical-runner.test.mjs scripts/windows-files-schema-definition-diagnostic.test.mjs scripts/windows-files-ddl-lexical-attribution.test.mjs scripts/windows-files-conditional-raise-d1.test.mjs
 
       - name: Verify frozen203 paired staging authority and cleanup
         run: node --test scripts/staging-pa-ops-authority-v203.test.mjs
@@ -117,6 +132,8 @@ jobs:
 
   incoming-pickup:
     name: incoming-pickup-alpine
+    # Drafts and branches other than main are tested on staging, not on GitHub minutes.
+    if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
     runs-on: ubuntu-24.04
     steps:
       - name: Check out the exact commit
@@ -150,6 +167,8 @@ jobs:
 
   packages:
     name: ${{ matrix.package }}
+    # Drafts and branches other than main are tested on staging, not on GitHub minutes.
+    if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
@@ -188,6 +207,8 @@ jobs:
 
   operations-browser:
     name: operations-browser-${{ matrix.project }}
+    # Drafts and branches other than main are tested on staging, not on GitHub minutes.
+    if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     strategy:
@@ -230,6 +251,8 @@ jobs:
 
   client-browser:
     name: client-browser-${{ matrix.project }}
+    # Drafts and branches other than main are tested on staging, not on GitHub minutes.
+    if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     strategy:

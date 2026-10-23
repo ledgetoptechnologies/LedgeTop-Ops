@@ -11,6 +11,8 @@ coverage/
 playwright-report/
 test-results/
 *.tsbuildinfo
+apps/windows-download/**/bin/
+apps/windows-download/**/obj/
 .DS_Store
 .backups/
 strix_runs/
@@ -23,3 +25,5 @@ apps/*/.staging-native-authority/
 apps/*/.staging-onboarding-authority/
 apps/*/wrangler.production.native-authority.*.json
 apps/*/.production-native-authority/
+apps/*/.windows-files-staging/
+apps/*/.windows-files-source-preparation/

@@ -230,7 +230,7 @@ test("Models is an independent refresh-safe destination for Viewer-only staff", 
   await expect(page.getByRole("tablist", { name: "Delivery tools" })).toHaveCount(0);
   await page.reload();
   await expect(page).toHaveURL(/\/viewer$/);
-  await expect(page.getByRole("heading", { name: "3D models overview" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "3D Viewer", exact: true })).toBeVisible();
   if ((page.viewportSize()?.width || 0) <= 960)
     await page.getByRole("button", { name: "Open navigation" }).click();
   const navigation = page.getByRole("navigation", { name: (page.viewportSize()?.width || 0) <= 960 ? "Mobile primary navigation" : "Primary navigation", exact: true });

@@ -1,0 +1,157 @@
+{
+  "schemaVersion": 1,
+  "sourceCommit": "b66632190e7a37874ce691d6a6edc82a445b408e",
+  "status": "offline_source_composition_qualified",
+  "inputKind": "explicit synthetic public profile and simulated suffix-applied observation, not an approved live profile",
+  "preparation": {
+    "schemaVersion": 1,
+    "status": "source_composition_only",
+    "enabled": true,
+    "profileSha256": "4f9c903f3ba6f828f0ab0c078c988d5fddc774619b0e52bb0cdfff3e3d2e5a42",
+    "preflightSha256": "641eb6b740adbf3b86aac5492815fa5b36a2b4590386521e685540309bc95221",
+    "configSha256": {
+      "operations": "e907f6ca461bca0e5fdd764c72c58d4db90c3bd55e9e3c00bb604ccf595beecb",
+      "delivery": "4507d67e740f7ca48bcb337d71a068a6f08c8390e2add3990330bb1681160532"
+    },
+    "entrySha256": {
+      "operations": "05c89933a9a1cc51029eb6981888c02ac766a46f5dae32a7a9ee12f1fb868317",
+      "delivery": "66011d32cac94202c3930b635071e3eedfb6475c4310ce04afc26f2194c57471"
+    },
+    "secretSlots": {
+      "operations": [
+        "WINDOWS_EMPLOYEE_GATEWAY_SIGNING_KEY",
+        "WINDOWS_EMPLOYEE_HANDLE_KEY",
+        "WINDOWS_EMPLOYEE_QUEUE_KEY"
+      ],
+      "delivery": [
+        "WINDOWS_PORTAL_QUEUE_KEY"
+      ]
+    },
+    "physicallyVerified": false,
+    "activated": false,
+    "secretsRead": false,
+    "note": "Reviewed-input consistency only; matching hashes are not independent approval, physical ownership or deployment evidence."
+  },
+  "observations": [
+    {
+      "app": "operations",
+      "exports": [
+        "ClientDelegatedShareSigner",
+        "ClientOnboardingRecipientBridge",
+        "ClientPortalNativeFinancialReader",
+        "ClientPortalRecipientEnrollmentBridge",
+        "ClientPortalServiceMetadataReader",
+        "DropboxImportWorkflow",
+        "IncomingRclonePromotionWorkflow",
+        "IncomingUploadLifecycleWorkflow",
+        "NATIVE_DIRECTORY_OUTBOX_CRON",
+        "NATIVE_DIRECTORY_RECONCILIATION_CRON",
+        "OperationsPortalNativeDeliveryAuthorizationReader",
+        "OperationsPortalNativeRecipientEnrollmentIngress",
+        "PROJECT_ALPHA_API_V2_MONITOR_CRON",
+        "ProjectAlphaCatalogPromotionWorkflow",
+        "ProjectAlphaDeliveryIntentIngress",
+        "R2CrudWorkflow",
+        "SharedProfilePortalIngress",
+        "ThumbnailRendererContainer",
+        "ViewerSessionIssuer",
+        "default",
+        "dispatchThumbnailRendererApi",
+        "projectAlphaProjectionApiRequest",
+        "runScheduledPrimaryProjectAlphaSync"
+      ],
+      "baselineNamedExportsPreserved": true,
+      "moduleSha256": "a1c87edc31d6f8dfca714c0430994f9d9104683ec94988787cbde85ad41ff25d",
+      "moduleBytes": 7840968
+    },
+    {
+      "app": "delivery",
+      "exports": [
+        "BulkDownloadWorkflow",
+        "ClientAuthorityWorkspaceBindingIngress",
+        "ClientPortalAuthorityV2Ingress",
+        "CloudTransferWorkflow",
+        "OperationsPortalNativeDeliveryAuthorityIngress",
+        "OperationsPortalNativeRecipientAuthorityIngress",
+        "OperationsPortalWorkspacePublicationIngress",
+        "OpsInventoryCatalogPromotionCoordinator",
+        "OpsInventoryCatalogStagingIngress",
+        "OpsPortalAccessAuthorityIngress",
+        "OpsSyncPortalProjectionIngress",
+        "SharedProfilePortalAuthorityReader",
+        "VerifiedRecipientDeliveryAuthorityIngress",
+        "authenticatedPreviewFrameAllowed",
+        "bulkDownloadResumeExpiresAt",
+        "bulkJobProgress",
+        "bulkQuotaRetryAfterSeconds",
+        "classifyPublicRateLimit",
+        "cleanupTemporaryZips",
+        "cloudTransferResumeOrigin",
+        "default",
+        "deliverySecurityHeaders",
+        "ensurePublicId",
+        "framePolicyForPath",
+        "friendlyBulkFailure",
+        "markUnavailableFolder",
+        "readyBulkJobIsExpired",
+        "requestHostAllowed",
+        "requireSameOrigin",
+        "serveAppShell",
+        "sourceUrlForItem",
+        "streamItem"
+      ],
+      "baselineNamedExportsPreserved": true,
+      "moduleSha256": "0326e0e55a67b58826532663670b04357d87344f9a0131aa778cbeabd6dfe21b",
+      "moduleBytes": 2626291
+    }
+  ],
+  "checks": {
+    "nodeConstructor": 19,
+    "operationsHttpAndRpcClass": 11,
+    "clientHttp": 11,
+    "operationsTypecheck": true,
+    "clientTypecheck": true,
+    "namedExportInventoriesExact": true,
+    "productionMainsOrWranglerChanged": false
+  },
+  "actualStagingObservation": {
+    "status": "read_only_observed",
+    "canonicalBaselineVerified": false,
+    "atomicSchemaSnapshot": false,
+    "workers": [
+      {
+        "app": "operations",
+        "versionId": "231fead7-433e-4015-847e-ea9ebda35894",
+        "migrationsStatus": "suffix_pending",
+        "pending": [
+          "0222_employee_read_roots.sql",
+          "0223_employee_read_provisioning.sql",
+          "0224_windows_portal_publication_chain_index.sql"
+        ],
+        "schemaObjectCount": 2403,
+        "foreignKeyViolationCount": 0
+      },
+      {
+        "app": "delivery",
+        "versionId": "6b9f1ff4-ce41-493e-a922-25081c2b67f4",
+        "migrationsStatus": "suffix_pending",
+        "pending": [
+          "0235_windows_portal_successor_candidates.sql",
+          "0236_windows_portal_successor_content_start_audit.sql"
+        ],
+        "schemaObjectCount": 1158,
+        "foreignKeyViolationCount": 0
+      }
+    ]
+  },
+  "limits": [
+    "HTTP unit fixtures simulate native identity/database state and JWKS discovery.",
+    "Reader class methods use a platform base-class double; Workerd service-binding dispatch is not tested.",
+    "esbuild artifact only; no Wrangler upload or assets publication.",
+    "Actual staging suffix migrations remain pending; matching metadata hashes are not approval or physical ownership proof."
+  ],
+  "secretsRead": false,
+  "activated": false,
+  "published": false,
+  "nasAccessed": false
+}

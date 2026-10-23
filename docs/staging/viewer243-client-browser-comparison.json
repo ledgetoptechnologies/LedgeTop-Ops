@@ -1,0 +1,40 @@
+{
+  "app": "client",
+  "baseline": "43f31609960af14b060964b1ca53d875f4d9eac2",
+  "candidate": "a045e30fff179e015febbd920da46550a9cf96e8",
+  "oldCount": 22,
+  "newCount": 22,
+  "oldAggregate": "7eeaac3f977a85e6553a92b985ec1ca568c4e266a2200a8e4b6a41e4f79d1934",
+  "newAggregate": "224eb4dcd16ac7b86adfd18b21b625685b5a7ba2bee44e5bf2b456f0ff4ac8c2",
+  "runtimeCount": 15,
+  "runtimeIdentical": true,
+  "oldRuntimeAggregate": "ed83a373268fb4242a86f4c8bde3f9f38aa5041d88fe122aa735f6ca29a19878",
+  "newRuntimeAggregate": "ed83a373268fb4242a86f4c8bde3f9f38aa5041d88fe122aa735f6ca29a19878",
+  "differences": [
+    {
+      "path": "assets/ClientPortalApp-BP54OytM.js.map",
+      "old": [
+        "assets/ClientPortalApp-BP54OytM.js.map",
+        1143503,
+        "d5dec6cabf2d9163c1bef5e200a0ac69661e8d958cd68d7a10790c678e67fa06"
+      ],
+      "next": [
+        "assets/ClientPortalApp-BP54OytM.js.map",
+        1143707,
+        "538d8a8571256500527f1ae847ac34a5e0da1d92668aa3574437151dc3c0a457"
+      ]
+    }
+  ],
+  "mapDetails": [
+    {
+      "path": "assets/ClientPortalApp-BP54OytM.js.map",
+      "topLevelChanged": [
+        "sourcesContent"
+      ],
+      "sourcesChanged": [
+        "../../../node_modules/@ltds/shared/src/viewer-service.ts"
+      ],
+      "mappingsIdentical": true
+    }
+  ]
+}

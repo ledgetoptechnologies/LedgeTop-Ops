@@ -110,7 +110,23 @@ test('cursor preview uses its own edge lengths and finishing preserves only comm
   assert.match(f.svg().innerHTML,/10,10 100,10 100,100 10,100/);
   assert.equal((f.svg().innerHTML.match(new RegExp(geometry.measurementValue(90,1).replace(/[.*+?^${}()|[\]\\]/g,'\\$&'),'g'))||[]).length,4);
   assert.match(f.svg().innerHTML,/r="4"/);
-  f.windowRef.fire('keydown',event(0,0,{key:'Escape'}));await flush();assert.equal(f.workspace.store.records.size,1);assert.equal([...f.workspace.store.records.values()][0].vertices.length,3);f.workspace.dispose();
+  f.windowRef.fire('keydown',event(0,0,{key:'Enter'}));await flush();assert.equal(f.workspace.store.records.size,1);assert.equal([...f.workspace.store.records.values()][0].vertices.length,3);f.workspace.dispose();
+});
+
+test('Escape cancels an unsaved outline without creating a measurement',async()=>{
+  const f=fixture();f.workspace.setTool('area');f.click(10,10);f.click(100,10);f.click(100,100);
+  f.windowRef.fire('keydown',event(0,0,{key:'Escape'}));await flush();
+  assert.equal(f.workspace.isDrawing(),false);assert.equal(f.workspace.store.records.size,0);f.workspace.dispose();
+});
+
+test('saved names provide selection and rename remains an explicit action',async()=>{
+  const f=fixture(),id=crypto.randomUUID();
+  await f.workspace.store.save({id,name:'Stockpile outline',kind:'polygon',collection:'spatial3d',vertices:[[10,10,0],[20,10,0],[20,20,0]],coordinateReference:{crs:'EPSG:32616',verticalUnit:'m'}});
+  const list=f.controls.querySelector('[data-m-list]');
+  assert.match(list.innerHTML,/data-m="select" aria-pressed="false"/);
+  assert.match(list.innerHTML,/data-m="rename">Rename/);
+  await f.controls.fire('click',{target:{closest:selector=>selector==='[data-m]'?{dataset:{m:'select'}}:selector==='[data-record]'?{dataset:{record:id}}:null}});
+  assert.match(list.innerHTML,/data-m="select" aria-pressed="true"/);f.workspace.dispose();
 });
 
 test('map control buttons remain usable while measuring and never place a point',()=>{

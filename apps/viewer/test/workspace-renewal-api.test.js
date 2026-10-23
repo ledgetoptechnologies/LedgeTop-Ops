@@ -9,6 +9,7 @@ const test = require('node:test');
 const { openDatabase } = require('../server/database');
 const { ViewerRepository } = require('../server/repository');
 const { ProcessingRepository } = require('../server/processingRepository');
+const {config}=require('../server/config');
 const { createProcessingApi } = require('../server/processingApi');
 
 test('admin grant renewal reuses the same bearer and session and exposes only the exact Ops control origin', async (t) => {
@@ -23,6 +24,7 @@ test('admin grant renewal reuses the same bearer and session and exposes only th
   t.after(async () => { await new Promise((resolve) => server.close(resolve));database.close();fs.rmSync(root, { recursive: true, force: true }); });
   const base = `http://127.0.0.1:${server.address().port}`;
   const issue = (suffix) => processing.createAdminGrant({
+    controllerOrigin:config.opsBaseUrl,
     subject: 'ops:workspace-user',
     permissions: ['viewer.projects.read'],
     displayUnits: 'imperial',

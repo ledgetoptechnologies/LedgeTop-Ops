@@ -13,6 +13,9 @@ import { sendNotificationMail } from "./mailer";
 import type { Env, StaffPrincipal } from "./types";
 import { introspectClientViewerSourceAuthorization } from "./viewer-session-issuer";
 import {
+  createNativeViewerClientGrant,
+  listNativeViewerClientGrantWorkspace,
+  revokeNativeViewerClientGrant,
   createViewerClientGrant,
   listViewerClientGrantWorkspace,
   revokeViewerClientGrant,
@@ -20,6 +23,7 @@ import {
   viewerPublicSharesEnabled,
   viewerServiceClient,
 } from "./viewer-integration";
+import { requestHostAllowed } from "./host-admission";
 import { defaultViewerUnits, resolveViewerUnits } from "./viewer-units";
 
 type Variables = { principal: StaffPrincipal; administrator: boolean };
@@ -394,6 +398,7 @@ export function registerViewerProcessingRoutes(app: ViewerApp): void {
     const envelopeSchema = z.object({
       subject: z.string().regex(/^ops:[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/),
       action: z.enum(["list", "create", "revoke"]),
+      connection: z.literal("native").optional(),
       idempotencyKey: idempotencyKey.optional(),
       grant: z.unknown().optional(),
       grantId: opaqueId.optional(),
@@ -422,6 +427,18 @@ export function registerViewerProcessingRoutes(app: ViewerApp): void {
       id: row.id, email: row.email, displayName: row.display_name,
       accessSubject: row.access_subject, projectAlphaUserId: row.project_alpha_user_id,
     };
+    if (parsed.data.connection === "native") {
+      if (parsed.data.action === "list") return c.json(await listNativeViewerClientGrantWorkspace(c.env, principal));
+      const result = parsed.data.action === "create"
+        ? await createNativeViewerClientGrant({ env: c.env, principal,
+          grant: parsed.data.grant as Parameters<typeof createNativeViewerClientGrant>[0]["grant"],
+          idempotencyKey: parsed.data.idempotencyKey!, request: c.req.raw })
+        : await revokeNativeViewerClientGrant({ env: c.env, principal, grantId: parsed.data.grantId!,
+          reason: parsed.data.reason!, idempotencyKey: parsed.data.idempotencyKey!, request: c.req.raw });
+      return c.json({ ...await listNativeViewerClientGrantWorkspace(c.env, principal), replayed: result.replayed,
+        ...("existingSessionsExpireWithinSeconds" in result ? { existingSessionsExpireWithinSeconds: result.existingSessionsExpireWithinSeconds } : {}) },
+        parsed.data.action === "create" && !result.replayed ? 201 : 200);
+    }
     if (parsed.data.action === "list") return c.json(await listViewerClientGrantWorkspace(c.env, principal));
     if (parsed.data.action === "create") {
       const result = await createViewerClientGrant({ env: c.env, principal,
@@ -565,6 +582,7 @@ export function registerViewerProcessingRoutes(app: ViewerApp): void {
 
   app.post("/api/viewer/admin-grant", async c => {
     if (!viewerProcessingEnabled(c.env)) throw new HTTPException(404, { message: "Not found" });
+    if (!requestHostAllowed(c.req.url, c.env)) throw new HTTPException(403, { message: "Request host was rejected" });
     const principal = c.get("principal");
     const authorizationExpiresAt = viewerGrantAuthorizationExpiresAt(principal.accessExpiresAt);
     const key = idempotencyKey.safeParse(c.req.header("Idempotency-Key"));
@@ -575,6 +593,7 @@ export function registerViewerProcessingRoutes(app: ViewerApp): void {
     const units = await resolveViewerUnits(c.env, principal.id);
     try {
       const grant = await viewerServiceClient(c.env).createAdminGrant({
+        controllerOrigin: new URL(c.req.url).origin,
         subject: `ops:${principal.id}`.slice(0, 200), permissions,
         authorizationExpiresAt,
         displayUnits: units,

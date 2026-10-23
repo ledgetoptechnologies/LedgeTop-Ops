@@ -98,6 +98,8 @@ describe("Viewer no-opener workspace renewal transport", () => {
     expect(mocks.serviceCreate).toHaveBeenCalledOnce();
     const issued = mocks.serviceCreate.mock.calls[0]![0];
     expect(issued.subject).toBe(`ops:${principal.id}`);
+    expect(issued.controllerOrigin).toBe(opsOrigin);
+    expect(issued.targetSessionId).toBe(sessionId);
     expect(issued.idempotencyKey).toBe(requestId);
     expect(Date.parse(issued.authorizationExpiresAt)).toBeLessThanOrEqual((Math.floor(Date.now() / 1000) + 600) * 1000);
     const payload = await response.json() as Record<string, unknown>;

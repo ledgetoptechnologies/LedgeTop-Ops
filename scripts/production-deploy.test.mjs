@@ -5,11 +5,104 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
-import { PROFILE, hash, canonical, validateInstallation, compileConfig, checkMode, capture, CloudflareReader, verifyCandidate, verifySourceMap, executeDeployment, validateBuildEnvironment, frontendInputHash, buildModulePath } from './production-deploy.mjs';
+import { domainPhaseValues, domainRecognitionProfile, domainRecognitionDiff } from './production-domain-recognition.mjs';
+import { PROFILE, hash, canonical, validateInstallation, compileConfig, checkMode, capture, CloudflareReader, verifyCandidate, verifySourceMap, executeDeployment, validateBuildEnvironment, frontendInputHash, reviewedFrontendDigest, frontendFingerprint, parseDeploymentArguments, inspectProductionInstallation, buildModulePath, readStaffCutoverReview, deploymentSourceCommit } from './production-deploy.mjs';
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const ids = { operations: '11111111-1111-4111-8111-111111111111', client: '22222222-2222-4222-8222-222222222222', 'ops-sync': '33333333-3333-4333-8333-333333333333' };
 const NEW = '44444444-4444-4444-8444-444444444444';
 const clone = x => structuredClone(x);
+
+test('worker-only Viewer source compatibility admits just the reviewed exact path and SHA', () => {
+  const file = 'packages/shared/src/viewer-service.ts';
+  const candidate = '075afdc83aee2c288a10be47441e1fd7cf141edfc8a2c9936ba7102d005024b6';
+  const baseline = 'a7f1b2160fb85c06d99213edbc4ef69c0df8f0e96de6284b7d312c2520f91b0f';
+  assert.equal(reviewedFrontendDigest(file, candidate), baseline);
+  for (const other of ['package.json', 'packages/shared/src/other.ts', './' + file, file.toUpperCase()])
+    assert.equal(reviewedFrontendDigest(other, candidate), candidate);
+  const changed = hash('any additional worker or browser source change');
+  assert.equal(reviewedFrontendDigest(file, changed), changed);
+  assert.equal(frontendInputHash(file, Buffer.from('changed source')), hash('changed source'));
+});
+
+test('only the exact reviewed Viewer and Windows staging manifests alias the locked frontend baseline', () => {
+  const raw = fs.readFileSync(path.join(ROOT, 'package.json'));
+  const normalized = raw.toString('utf8').replaceAll('\r\n', '\n');
+  assert.equal(hash(normalized), 'c2c9b2f65bf33250158efa14ee67ac20432518ce4b33f20b45c23042ca3f2ebf');
+  // Undo precisely the 730e3d18 root manifest delta, preserving bytes. This
+  // must reproduce main77's reviewed manifest, including all other fields.
+  const historical = normalized
+    .replace(' scripts/windows-files-staging-preflight.test.mjs', '')
+    .replace('    "staging:windows-files:preflight": "node scripts/windows-files-staging-preflight.mjs --read-only",\n', '')
+    .replace('    "staging:windows-files:preflight:test": "node --test scripts/windows-files-staging-preflight.test.mjs",\n', '');
+  assert.equal(hash(historical), 'f8eb91b8e39b62df7d7a13b6474f96297e05110c443899c1b109fa2a0062a1d0');
+  const baseline = '3c5cf8119ffa8eb65d2216db89a583ba79b91a7ada75cbae8aec0856af59ae31';
+  for (const manifest of [normalized, historical]) {
+    assert.equal(frontendInputHash('package.json', Buffer.from(manifest)), baseline);
+    assert.equal(frontendInputHash('package.json', Buffer.from(manifest.replaceAll('\n', '\r\n'))), baseline);
+  }
+  for (const alter of [
+    value => { value.scripts['viewer:build'] += ' --changed'; },
+    value => { value.scripts.build = 'changed'; },
+    value => { value.scripts['staging:windows-files:preflight'] += ' --changed'; },
+    value => { value.scripts['staging:windows-files:preflight:test'] = 'node other.mjs'; },
+    value => { value.scripts.test += ' scripts/unreviewed.test.mjs'; },
+    value => { value.scripts.unreviewed = 'node unreviewed.mjs'; },
+    value => { value.dependencies = { 'unreviewed-package': '1.0.0' }; },
+  ]) {
+    const value = JSON.parse(normalized); alter(value);
+    for (const ending of ['\n', '\r\n']) {
+      const text = JSON.stringify(value, null, 2).replaceAll('\n', ending);
+      const bytes = Buffer.from(text);
+      assert.equal(frontendInputHash('package.json', bytes), hash(text.replaceAll('\r\n', '\n')));
+      assert.notEqual(frontendInputHash('package.json', bytes), baseline);
+    }
+  }
+  assert.equal(frontendInputHash('apps/client/package.json', raw), hash(normalized));
+  assert.equal(frontendInputHash('packages/shared/src/unreviewed.ts', raw), hash(normalized));
+  for (const other of ['./package.json', 'PACKAGE.JSON'])
+    assert.equal(frontendInputHash(other, raw), hash(normalized));
+  assert.throws(() => checkMode('ui', PROFILE.frontendSHA256), /UI deployment denied/);
+});
+
+test('Windows shared source changes remain protected: manifest compatibility does not authorize a production release', () => {
+  assert.notEqual(frontendFingerprint(ROOT), PROFILE.frontendSHA256);
+  assert.throws(() => checkMode('backend', frontendFingerprint(ROOT)), /retained asset union/);
+  // Newer Viewer UI also differs from the installed production baseline. Verify
+  // the Windows source pins without pretending that undoing only Windows can
+  // reproduce that older UI, and without adding a production compatibility alias.
+  const inputs = [
+    ['packages/shared/src/operations-portal-native-delivery-authority.ts', 'e10a371519d29333185706af6353cd701ce4553e3711b945205c860b12cc60bd'],
+    ['packages/shared/src/windows-queue-reference.ts', '55a51ea413aa2a38b444f7ce7eb618cb152e52f1f340ce8a03b5c65cc9911747'],
+  ];
+  for (const [file, expected] of inputs) {
+    const actual = hash(fs.readFileSync(path.join(ROOT, file), 'utf8').replaceAll('\r\n', '\n'));
+    assert.equal(actual, expected);
+    assert.equal(reviewedFrontendDigest(file, actual), actual);
+  }
+});
+
+test('synthetic frontend baseline fingerprints are deterministic and changed UI stays outside backend mode', t => {
+  const temporaryParent = fs.realpathSync(os.tmpdir());
+  const directory = fs.mkdtempSync(path.join(temporaryParent, 'prod-frontend-fixture-'));
+  t.after(() => {
+    assert.equal(fs.lstatSync(directory).isSymbolicLink(), false);
+    const resolved = fs.realpathSync(directory);
+    assert.equal(path.dirname(resolved), temporaryParent);
+    assert.match(path.basename(resolved), /^prod-frontend-fixture-[A-Za-z0-9]{6}$/);
+    fs.rmSync(resolved, { recursive: true, force: true });
+  });
+  for (const app of ['client', 'operations']) fs.mkdirSync(path.join(directory, 'apps', app, 'src'), { recursive: true });
+  const file = 'apps/client/src/main.tsx', original = 'export const title = "Synthetic baseline";\n';
+  fs.writeFileSync(path.join(directory, file), original);
+  const expected = hash(canonical([[file, hash(original)]]));
+  assert.equal(frontendFingerprint(directory), expected);
+  // Only the committed installed profile is an accepted deployment baseline.
+  assert.doesNotThrow(() => checkMode('backend', PROFILE.frontendSHA256));
+  fs.writeFileSync(path.join(directory, file), original + 'export const changed = true;\n');
+  assert.notEqual(frontendFingerprint(directory), expected);
+  assert.throws(() => checkMode('backend', frontendFingerprint(directory)), /retained asset union/);
+});
+
 const genuineMap = () => ({ version: 3, file: 'index.js', sources: ['fixture.ts'], sourcesContent: ['export const fixture = true;'], names: [], mappings: 'AAAA' });
 function fixture() {
   const profile = clone(PROFILE), snapshot = {};
@@ -17,6 +110,7 @@ function fixture() {
     const defaults = JSON.parse(fs.readFileSync(path.join(ROOT, 'apps', app, 'wrangler.jsonc'))).vars;
     const vars = Object.fromEntries(spec.plainNames.map(name => [name, defaults[name] ?? 'synthetic-fixture']));
     if (app === 'operations') Object.assign(vars, {
+      DELIVERY_BASE_URL: 'https://portal.ledgetopdroneservices.com',
       CLIENT_ONBOARDING_ADMIN_ENABLED: 'true', CLIENT_ONBOARDING_ADMIN_ORIGIN: 'https://ops.ledgetopdroneservices.com',
       CLIENT_ONBOARDING_RECIPIENT_BRIDGE_ENABLED: 'true', CLIENT_ONBOARDING_NOTIFICATIONS_ENABLED: 'true',
       CLIENT_ONBOARDING_NOTIFICATION_STAFF_IDS: '["synthetic-owner"]', CLIENT_ONBOARDING_NOTIFICATIONS_NOT_BEFORE: '2026-10-20T00:00:00.000Z',
@@ -52,6 +146,103 @@ function readerFor(snapshot, candidate) {
     return clone(id === NEW ? candidate.version : s.version);
   } };
 }
+
+test('finite domain recognition preserves all resources, public namespaces and protected scalar hashes', () => {
+  assert.deepEqual(domainRecognitionProfile('baseline'), PROFILE);
+  assert.deepEqual(domainRecognitionProfile('ops-alias-preparation').workers.client, PROFILE.workers.client);
+  for (const phase of ['baseline','ops-alias-preparation','client-private-overlap'])
+    assert.equal(domainRecognitionProfile(phase).workers.operations.plainValueSHA256.DELIVERY_BASE_URL,
+      PROFILE.workers.operations.plainValueSHA256.DELIVERY_BASE_URL);
+  for (const phase of ['portal-entry-canonical','staff-canonical'])
+    assert.equal(domainRecognitionProfile(phase).workers.operations.plainValueSHA256.DELIVERY_BASE_URL,
+      hash('https://portal.ledgetop.app'));
+  for (const phase of ['baseline', 'ops-alias-preparation', 'client-private-overlap', 'portal-entry-canonical', 'staff-canonical']) {
+    const { profile: base, snapshot } = fixture();
+    const values = domainPhaseValues(phase), profile = domainRecognitionProfile(phase, base);
+    for (const [app, vars] of Object.entries(values)) for (const [name, text] of Object.entries(vars)) {
+      for (const bindings of [snapshot[app].version.resources.bindings, snapshot[app].settings.bindings])
+        bindings.find(row => row.name === name).text = text;
+    }
+    assert.equal(validateInstallation(snapshot, { profile }), snapshot);
+    for (const [app, worker] of Object.entries(base.workers)) {
+      const next = profile.workers[app];
+      for (const key of Object.keys(worker).filter(key => key !== 'plainValueSHA256')) assert.deepEqual(next[key], worker[key]);
+      for (const [name, sha] of Object.entries(worker.plainValueSHA256))
+        if (!Object.hasOwn(values[app] ?? {}, name)) assert.equal(next.plainValueSHA256[name], sha);
+    }
+    for (const [app, name] of [['operations','PUBLIC_SHARE_ORIGIN'],['client','PUBLIC_BASE_URL'],['client','PUBLIC_SHARE_ORIGIN'],['client','EXPECTED_HOST'],['client','LEGACY_CLIENT_ORIGINS']])
+      assert.equal(profile.workers[app].plainValueSHA256[name], base.workers[app].plainValueSHA256[name]);
+    const wrong = clone(snapshot);
+    for (const bindings of [wrong.client.settings.bindings, wrong.client.version.resources.bindings])
+      bindings.find(row => row.name === 'PUBLIC_SHARE_ORIGIN').text = 'https://portal.ledgetop.app';
+    assert.throws(() => validateInstallation(wrong, { profile }), /scalar configuration changed/);
+    const resource = clone(snapshot); resource.client.version.resources.bindings.find(row => row.type === 'd1').id = NEW;
+    assert.throws(() => validateInstallation(resource, { profile }), /bindings differ|resource/);
+    const flag = clone(snapshot);
+    for (const bindings of [flag.operations.settings.bindings, flag.operations.version.resources.bindings])
+      bindings.find(row => row.name === 'CLIENT_ONBOARDING_ADMIN_ENABLED').text = 'false';
+    assert.throws(() => validateInstallation(flag, { profile }), /scalar configuration|normal onboarding/);
+    const secret = clone(snapshot);
+    for (const bindings of [secret.client.settings.bindings, secret.client.version.resources.bindings])
+      bindings.push({name:'UNREVIEWED_SECRET',type:'secret_text'});
+    assert.throws(() => validateInstallation(secret, { profile }), /resource or secret binding/);
+    assert.equal(domainRecognitionDiff(phase).writesPerformed, false);
+    assert.equal(domainRecognitionDiff(phase).deploymentEnabled, false);
+  }
+  assert.throws(() => domainRecognitionProfile('arbitrary'), /Unknown reviewed domain phase/);
+  const arbitrary = fixture(); arbitrary.profile.onboardingAdminOrigin = 'https://unreviewed.example';
+  assert.throws(() => validateInstallation(arbitrary.snapshot, {profile:arbitrary.profile}), /Unreviewed canonical admin origin/);
+  const changed = domainPhaseValues('client-private-overlap'); changed.client.CLIENT_PORTAL_ORIGIN = 'https://unreviewed.example';
+  assert.equal(domainPhaseValues('client-private-overlap').client.CLIENT_PORTAL_ORIGIN, 'https://portal.ledgetop.app');
+  // Two Worker updates cannot be atomic. Every permitted intermediate state
+  // above passes; generating new entry URLs before the Client update does not.
+  const {profile: base, snapshot: unsafe} = fixture();
+  base.workers.client.plainValueSHA256.CLIENT_PORTAL_ORIGIN = hash('https://portal.ledgetopdroneservices.com');
+  for (const bindings of [unsafe.client.settings.bindings, unsafe.client.version.resources.bindings])
+    bindings.find(row => row.name === 'CLIENT_PORTAL_ORIGIN').text = 'https://portal.ledgetopdroneservices.com';
+  for (const bindings of [unsafe.operations.settings.bindings, unsafe.operations.version.resources.bindings])
+    bindings.find(row => row.name === 'DELIVERY_BASE_URL').text = 'https://portal.ledgetop.app';
+  for (const phase of ['baseline','ops-alias-preparation','client-private-overlap','portal-entry-canonical','staff-canonical'])
+    assert.throws(() => validateInstallation(unsafe, {profile:domainRecognitionProfile(phase,base)}), /scalar configuration changed/);
+});
+
+test('strict CLI defaults to baseline and only admits finite explicit phase names', () => {
+  assert.deepEqual(parseDeploymentArguments([]), {kind:'check'});
+  const execute=['--worker','operations','--mode','backend','--execute'];
+  assert.deepEqual(parseDeploymentArguments(execute), {kind:'execute',app:'operations',mode:'backend',phase:'baseline'});
+  for (const phase of ['baseline','ops-alias-preparation','client-private-overlap','portal-entry-canonical','staff-canonical']) {
+    assert.equal(parseDeploymentArguments([...execute,'--domain-phase',phase]).phase,phase);
+    assert.deepEqual(parseDeploymentArguments(['--inspect','--domain-phase',phase]),{kind:'inspect',phase});
+  }
+  for (const args of [
+    ['--inspect'],['--inspect','--domain-phase','unknown'],['--inspect','--domain-phase','baseline','--execute'],
+    [...execute,'--profile','arbitrary.json'],[...execute,'--domain-phase','unknown'],
+    [...execute,'--domain-phase','baseline','--domain-phase','staff-canonical'],
+    ['--worker','operations','--mode','ui','--execute'],['--domain-phase','staff-canonical',...execute],
+  ]) assert.throws(()=>parseDeploymentArguments(args), /Use --worker|Unknown reviewed domain phase|UI deployment denied/);
+});
+
+test('inspection returns only IDs, hashes and booleans through GET-only recognition, without native commands', async()=>{
+  const {profile,snapshot}=fixture(),reader=readerFor(snapshot);
+  const receipt=await inspectProductionInstallation(reader,'baseline',profile);
+  assert.deepEqual(receipt.activeVersionIds,ids);
+  assert.equal(receipt.protectedProfileSHA256,hash(canonical(profile)));
+  assert.equal(receipt.readOnly,true);assert.equal(receipt.uploadEnabled,false);assert.equal(receipt.activationEnabled,false);
+  assert.deepEqual(Object.keys(receipt).sort(),['recognizedPhase','activeVersionIds','protectedProfileSHA256','frontendSHA256','recognized','readOnly','uploadEnabled','activationEnabled','rawSnapshotPrinted'].sort());
+  assert.ok(reader.calls.length>0);assert.ok(reader.calls.every(url=>url.startsWith('/workers/')));
+  assert.ok(!JSON.stringify(receipt).includes('synthetic-fixture'));
+  const invalid=readerFor(snapshot);
+  await assert.rejects(inspectProductionInstallation(invalid,'unknown',profile),/Unknown reviewed domain phase/);
+  assert.deepEqual(invalid.calls,[]);
+});
+
+test('unknown phase and malformed inspection refuse before credentials or network',()=>{
+  for(const args of [['--inspect','--domain-phase','unknown'],['--inspect','--domain-phase','baseline','--execute']]){
+    const child=spawnSync(process.execPath,['scripts/production-deploy.mjs',...args],{cwd:ROOT,encoding:'utf8',env:{PATH:process.env.PATH}});
+    assert.equal(child.status,1);assert.equal(child.stdout,'');
+    assert.match(JSON.parse(child.stderr).message,/Unknown reviewed domain phase|Use --worker/);
+  }
+});
 test('recognized final profile: effective original scalars,<=128, all resources and10crons', () => {
   const { profile, snapshot } = fixture();assert.equal(validateInstallation(snapshot, { profile }), snapshot);
   assert.equal(PROFILE.workers.operations.crons.length, 10);
@@ -188,10 +379,10 @@ test('returned source map semantics match genuine sibling; paths may only normal
   modern.modules[1].content_base64 = Buffer.from(JSON.stringify({ ...original, mappings: 'wrong' })).toString('base64');
   assert.throws(() => verifyCandidate(snapshot, 'operations', version, modern, Buffer.from('new'), original), /differs/);
 });
-async function flow(t, fail = null, app = 'operations') {
+async function flow(t, fail = null, app = 'operations', staffOptions = {}) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'prod-deploy-fixture-'));t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
   const main = buildModulePath(app, directory);fs.mkdirSync(path.dirname(main), { recursive: true });
-  fs.writeFileSync(main, 'new');fs.writeFileSync(main + '.map', JSON.stringify(genuineMap()));
+  fs.writeFileSync(main, staffOptions.unchanged ? 'old' : 'new');fs.writeFileSync(main + '.map', JSON.stringify(genuineMap()));
   const { profile, snapshot } = fixture();const version = clone(snapshot[app].version);version.id = NEW;version.resources.script.etag = 'b'.repeat(64);
   const modern = { id: NEW, assets: clone(snapshot[app].modern.assets), modules: [{ name: 'index.js', content_base64: Buffer.from('new').toString('base64') }, { name: 'index.js.map', content_base64: Buffer.from(JSON.stringify(genuineMap())).toString('base64') }] };
   const reader = readerFor(snapshot, { version, modern });const calls = [];
@@ -215,9 +406,147 @@ async function flow(t, fail = null, app = 'operations') {
     snapshot[app].settings.annotations['workers/message'] = 'native deployment message';
     return 'Deployed';
   };
-  const operation = executeDeployment({ app, mode: 'backend', cli: 'fixture-cli', main, directory: path.join(directory, 'journal'), reader, runNative, fingerprint: PROFILE.frontendSHA256, profile });
-  return { operation, calls, directory };
+  // This injected transport receipt tests the release phase boundary, not the
+  // independent D1 readiness verifier's cohort/bootstrap policy or live access.
+  const sourceCommit = 'e'.repeat(40), staffCalls = [];
+  const review = { syntheticTransportFixture: true };
+  const readStaffCutover = async args => {
+    assert.equal(args.sourceCommit, sourceCommit);assert.deepEqual(args.review, review);
+    staffCalls.push([...calls]);
+    if (staffCalls.length === staffOptions.failAt) throw new Error('native staff readiness unavailable');
+    const receipt = { schemaVersion: 2, sourceCommit, accountId: '846c924bf17bf4f3dd15c97a4c5d1d51',
+      databaseId: '6ebf7514-d306-4615-ae56-ad869c874dbd', reviewSha256: 'a'.repeat(64), cohortSha256: 'b'.repeat(64),
+      controlPlaneSha256: 'c'.repeat(64),
+      observedAt: new Date().toISOString(), staffCount: 2, generation: 7 };
+    if (staffCalls.length === staffOptions.changeAt) receipt.generation++;
+    if (staffCalls.length === staffOptions.adminChangeAt) receipt.controlPlaneSha256='d'.repeat(64);
+    if (staffOptions.receipt) Object.assign(receipt, staffOptions.receipt);
+    return receipt;
+  };
+  const operation = executeDeployment({ app, mode: 'backend', cli: 'fixture-cli', main, directory: path.join(directory, 'journal'), reader, runNative,
+    fingerprint: PROFILE.frontendSHA256, profile, sourceCommit,
+    staffCutoverReview: staffOptions.missing ? undefined : review, readStaffCutover });
+  return { operation, calls, directory, staffCalls };
 }
+
+test('Ops and Sync qualify staff handoff before upload, before activation and after activation', async t => {
+  for (const app of ['operations','ops-sync']) {
+    const { operation, staffCalls, directory } = await flow(t, null, app);
+    assert.equal((await operation).verifiedActive, true);
+    assert.deepEqual(staffCalls, [[], ['upload'], ['upload','activate']]);
+    for (const phase of ['before-upload','before-activate','after-activate'])
+      assert.ok(fs.existsSync(path.join(directory, `journal/native-staff-${phase}.json`)));
+  }
+});
+
+test('missing or unavailable handoff prevents the first native upload for both affected Workers', async t => {
+  for (const app of ['operations','ops-sync']) for (const staffOptions of [{missing:true},{failAt:1}]) {
+    const { operation, calls } = await flow(t, null, app, staffOptions);
+    await assert.rejects(operation, /native staff|native staff handoff/i);assert.deepEqual(calls, []);
+  }
+});
+
+test('unchanged runtime bytes still require current staff handoff readiness', async t => {
+  for (const app of ['operations','ops-sync']) {
+    for (const options of [{missing:true},{failAt:1}]) {
+      const { operation, calls } = await flow(t, null, app, {...options, unchanged:true});
+      await assert.rejects(operation, /native staff/i);assert.deepEqual(calls, []);
+    }
+    const { operation, calls, staffCalls } = await flow(t, null, app, {unchanged:true});
+    assert.deepEqual(await operation, {unchanged:true,noUpload:true});
+    assert.deepEqual(calls, []);assert.deepEqual(staffCalls, [[]]);
+  }
+});
+
+test('changed or unavailable handoff holds inactive candidate without activation or replay', async t => {
+  for (const staffOptions of [{failAt:2},{changeAt:2}]) {
+    const { operation, calls } = await flow(t, null, 'operations', staffOptions);
+    await assert.rejects(operation, /native staff/i);assert.deepEqual(calls, ['upload']);
+  }
+});
+
+test('post-activation handoff loss never returns a verified-active receipt or retries', async t => {
+  for (const options of [{failAt:3},{changeAt:3}]) {
+    const { operation, calls, directory } = await flow(t, null, 'ops-sync', options);
+    await assert.rejects(operation, /native staff/i);assert.deepEqual(calls, ['upload','activate']);
+    assert.equal(fs.existsSync(path.join(directory, 'journal/verified-active.json')), false);
+  }
+});
+
+test('admin-set drift with unchanged cohort and generation holds before promotion and refuses after promotion', async t => {
+  for (const app of ['operations','ops-sync']) for (const adminChangeAt of [2,3]) {
+    const { operation, calls, directory } = await flow(t, null, app, {adminChangeAt});
+    await assert.rejects(operation, /Native staff handoff changed/);
+    assert.deepEqual(calls, adminChangeAt===2 ? ['upload'] : ['upload','activate']);
+    assert.equal(fs.existsSync(path.join(directory, 'journal/verified-active.json')), false);
+  }
+});
+
+test('malformed, stale, wrong-source or wrong-target staff receipts fail before any upload', async t => {
+  for (const receipt of [{schemaVersion:1},{sourceCommit:'f'.repeat(40)},{accountId:'c'.repeat(32)},
+    {databaseId:NEW},{staffCount:0},{staffCount:1025},{generation:-1},{generation:0.5},
+    {reviewSha256:'wrong'},{cohortSha256:'wrong'},{controlPlaneSha256:'wrong'},{controlPlaneSha256:undefined},{observedAt:'invalid'},
+    {observedAt:new Date(Date.now()-120_000).toISOString()},{observedAt:new Date(Date.now()+120_000).toISOString()}]) {
+    const { operation, calls } = await flow(t, null, 'operations', {receipt});
+    await assert.rejects(operation, /Fresh exact native staff/);assert.deepEqual(calls, []);
+  }
+});
+
+test('Client-only deployment neither reads nor requires the unrelated staff handoff packet', async t => {
+  const { operation, calls, staffCalls } = await flow(t, null, 'client', {missing:true,failAt:1});
+  assert.equal((await operation).verifiedActive, true);assert.deepEqual(calls, ['upload','activate']);assert.deepEqual(staffCalls, []);
+});
+
+test('staff packet CLI options are explicit and packet reads are bounded with redacted failures', t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'staff-review-packet-test-'));
+  t.after(() => fs.rmSync(directory, {recursive:true,force:true}));
+  const file = path.join(directory, 'candidate.native-staff-review.json');
+  fs.writeFileSync(file, JSON.stringify({test:'private-identity-not-for-errors'}));
+  const args = ['--worker','operations','--mode','backend','--execute','--staff-cutover-review',file];
+  assert.equal(parseDeploymentArguments(args).staffReviewPath, file);
+  assert.equal(parseDeploymentArguments([...args,'--domain-phase','staff-canonical']).phase, 'staff-canonical');
+  assert.deepEqual(readStaffCutoverReview(file), {test:'private-identity-not-for-errors'});
+  for (const invalid of ['relative.json', file+'\0']) {
+    assert.throws(() => parseDeploymentArguments([...args.slice(0,6),invalid]), /absolute private/);
+    assert.throws(() => readStaffCutoverReview(invalid), /absolute private/);
+  }
+  assert.throws(() => parseDeploymentArguments([...args,'--staff-cutover-review',file]), /unique/);
+  assert.throws(() => parseDeploymentArguments([...args.slice(0,1),'client',...args.slice(2)]), /Ops or Sync/);
+  for (const body of ['private-identity-not-for-errors', 'x'.repeat(1024*1024+1)]) {
+    fs.writeFileSync(file, body);
+    assert.throws(() => readStaffCutoverReview(file), error => !error.message.includes('private-identity') && /packet/.test(error.message));
+  }
+  assert.throws(() => readStaffCutoverReview(directory), /packet/);
+});
+
+test('source qualification rejects override injection before invoking git', () => {
+  assert.throws(() => deploymentSourceCommit(ROOT, {GIT_DIR:'unreviewed'}), /Git source overrides/);
+  assert.throws(() => deploymentSourceCommit(ROOT, {GIT_CONFIG_COUNT:'1'}), /Git source overrides/);
+});
+
+test('source qualification pins a real clean checkout and rejects tracked or untracked source drift', t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'staff-source-pin-test-'));
+  t.after(() => {
+    assert.equal(fs.realpathSync(directory), directory);
+    assert.equal(path.dirname(directory), fs.realpathSync(os.tmpdir()));
+    fs.rmSync(directory, {recursive:true,force:true});
+  });
+  const git = args => {
+    const result = spawnSync('git', ['-c','commit.gpgsign=false','-c','core.hooksPath='+path.join(directory,'no-hooks'),...args],
+      {cwd:directory,encoding:'utf8',windowsHide:true,shell:false});
+    assert.equal(result.status, 0, 'Owned synthetic Git fixture failed');return result.stdout.trim();
+  };
+  git(['init']);git(['config','core.fsmonitor','false']);
+  const file = path.join(directory, 'worker.mjs');fs.writeFileSync(file, 'export default 1;\n');
+  git(['add','worker.mjs']);git(['-c','user.name=Synthetic Fixture','-c','user.email=fixture@example.invalid','commit','--no-gpg-sign','-m','synthetic']);
+  const commit = git(['rev-parse','HEAD']);
+  assert.equal(deploymentSourceCommit(directory), commit);
+  fs.writeFileSync(file, 'export default 2;\n');
+  assert.throws(() => deploymentSourceCommit(directory), /exact clean/);
+  fs.writeFileSync(file, 'export default 1;\n');
+  fs.writeFileSync(path.join(directory,'unreviewed-module.mjs'), 'export default 3;\n');
+  assert.throws(() => deploymentSourceCommit(directory), /exact clean/);
+});
 test('full injected flow: freshGET→oneinactiveupload→verify→separatenativeactivate→verify', async t => {
   const { operation, calls, directory } = await flow(t);const result = await operation;
   assert.equal(result.verifiedActive, true);assert.deepEqual(calls, ['upload', 'activate']);

@@ -1,0 +1,368 @@
+{
+  "schemaVersion": 1,
+  "scope": "Private in-memory lexical attribution of six residual application definitions; no SQL execution or readiness approval",
+  "localCaptureSha256": "1513c1935c9113052c780b54bc9644c40b564903a8b17ab1b59d6c65507969e7",
+  "remoteCaptureSha256": "1e61f1c5d51cbf0efe3808cd95cb7327b058e219ed786e273e29c56e9e2087b4",
+  "comparedApplicationDefinitions": 6,
+  "reasonCounts": {
+    "comment_tokens_only": 3,
+    "non_comment_token_difference": 3
+  },
+  "apps": [
+    {
+      "app": "operations",
+      "objects": [
+        {
+          "type": "table",
+          "name": "client_onboarding_portal_activation_proofs",
+          "tbl_name": "client_onboarding_portal_activation_proofs",
+          "expectedPresent": true,
+          "observedPresent": true,
+          "expectedSqlSha256": "1d36b042b7842c92fb13c506018055a8b3a8dd2d0e990f462b8b9101f9256320",
+          "observedSqlSha256": "9c294feff886b29c0563f901513052f247c23f88e8dd67a4f0b376fdeb316787",
+          "category": "unresolved_token_or_structure_difference",
+          "residualAttribution": {
+            "reasonCategory": "comment_tokens_only",
+            "tokenKindCounts": {
+              "word": {
+                "expected": 52,
+                "observed": 52
+              },
+              "quoted_identifier": {
+                "expected": 0,
+                "observed": 0
+              },
+              "literal": {
+                "expected": 2,
+                "observed": 2
+              },
+              "blob": {
+                "expected": 0,
+                "observed": 0
+              },
+              "number": {
+                "expected": 1,
+                "observed": 1
+              },
+              "comment": {
+                "expected": 0,
+                "observed": 1
+              },
+              "operator": {
+                "expected": 0,
+                "observed": 0
+              },
+              "punctuation": {
+                "expected": 31,
+                "observed": 31
+              }
+            },
+            "changedTokenKinds": [
+              "comment"
+            ],
+            "literalTokenSequenceChanged": false,
+            "nonCommentTokenCounts": {
+              "expected": 86,
+              "observed": 86
+            },
+            "commentTokenSequenceChanged": true
+          }
+        },
+        {
+          "type": "trigger",
+          "name": "native_directory_profile_binding_continuation_ack",
+          "tbl_name": "project_alpha_directory_outbox",
+          "expectedPresent": true,
+          "observedPresent": true,
+          "expectedSqlSha256": "c2a35a789d37b46b6d13e9dc61745cbb2157f88a4cf595239bddb5bbac4b3976",
+          "observedSqlSha256": "addfa74ad19dfba557f97e1f7a3ffb2dc8a019037c25816adcbf98e9d1c51b5f",
+          "category": "unresolved_token_or_structure_difference",
+          "residualAttribution": {
+            "reasonCategory": "comment_tokens_only",
+            "tokenKindCounts": {
+              "word": {
+                "expected": 497,
+                "observed": 497
+              },
+              "quoted_identifier": {
+                "expected": 0,
+                "observed": 0
+              },
+              "literal": {
+                "expected": 40,
+                "observed": 40
+              },
+              "blob": {
+                "expected": 0,
+                "observed": 0
+              },
+              "number": {
+                "expected": 5,
+                "observed": 5
+              },
+              "comment": {
+                "expected": 0,
+                "observed": 2
+              },
+              "operator": {
+                "expected": 2,
+                "observed": 2
+              },
+              "punctuation": {
+                "expected": 388,
+                "observed": 388
+              }
+            },
+            "changedTokenKinds": [
+              "comment"
+            ],
+            "literalTokenSequenceChanged": false,
+            "nonCommentTokenCounts": {
+              "expected": 932,
+              "observed": 932
+            },
+            "commentTokenSequenceChanged": true
+          }
+        },
+        {
+          "type": "trigger",
+          "name": "native_staff_onboarding_approve_finish",
+          "tbl_name": "native_staff_management_commands",
+          "expectedPresent": true,
+          "observedPresent": true,
+          "expectedSqlSha256": "2e6ee353b58933ae45fa688a8952e44700cd2d5afb54bfe4476c6f5afc506e2a",
+          "observedSqlSha256": "a483ec66d1ab04cb37664109f5ada366b600e7a1e31e1a4111baa5adc5b5ddfb",
+          "category": "unresolved_token_or_structure_difference",
+          "residualAttribution": {
+            "reasonCategory": "non_comment_token_difference",
+            "tokenKindCounts": {
+              "word": {
+                "expected": 48,
+                "observed": 51
+              },
+              "quoted_identifier": {
+                "expected": 0,
+                "observed": 0
+              },
+              "literal": {
+                "expected": 9,
+                "observed": 9
+              },
+              "blob": {
+                "expected": 0,
+                "observed": 0
+              },
+              "number": {
+                "expected": 3,
+                "observed": 3
+              },
+              "comment": {
+                "expected": 0,
+                "observed": 0
+              },
+              "operator": {
+                "expected": 1,
+                "observed": 1
+              },
+              "punctuation": {
+                "expected": 35,
+                "observed": 35
+              }
+            },
+            "changedTokenKinds": [
+              "word",
+              "punctuation"
+            ],
+            "literalTokenSequenceChanged": false,
+            "nonCommentTokenCounts": {
+              "expected": 96,
+              "observed": 99
+            },
+            "commentTokenSequenceChanged": false
+          }
+        },
+        {
+          "type": "trigger",
+          "name": "operations_directory_audit_original_subject_required",
+          "tbl_name": "operations_directory_audit",
+          "expectedPresent": true,
+          "observedPresent": true,
+          "expectedSqlSha256": "d29fcb4e26e0e13eae79a4c49e598ece913db630c585b89f717b676c2e7f615d",
+          "observedSqlSha256": "c8138b0ebf8fdf5154316e6f081f3cb57380e76d81df0086ffbc21575e772c05",
+          "category": "unresolved_token_or_structure_difference",
+          "residualAttribution": {
+            "reasonCategory": "non_comment_token_difference",
+            "tokenKindCounts": {
+              "word": {
+                "expected": 49,
+                "observed": 52
+              },
+              "quoted_identifier": {
+                "expected": 0,
+                "observed": 0
+              },
+              "literal": {
+                "expected": 2,
+                "observed": 2
+              },
+              "blob": {
+                "expected": 0,
+                "observed": 0
+              },
+              "number": {
+                "expected": 3,
+                "observed": 3
+              },
+              "comment": {
+                "expected": 0,
+                "observed": 0
+              },
+              "operator": {
+                "expected": 0,
+                "observed": 0
+              },
+              "punctuation": {
+                "expected": 21,
+                "observed": 21
+              }
+            },
+            "changedTokenKinds": [
+              "word",
+              "punctuation"
+            ],
+            "literalTokenSequenceChanged": false,
+            "nonCommentTokenCounts": {
+              "expected": 75,
+              "observed": 78
+            },
+            "commentTokenSequenceChanged": false
+          }
+        },
+        {
+          "type": "view",
+          "name": "native_directory_existing_import_live_reviews",
+          "tbl_name": "native_directory_existing_import_live_reviews",
+          "expectedPresent": true,
+          "observedPresent": true,
+          "expectedSqlSha256": "e33edb294a3a9d99d70d01e2b6fe286294bdea9a071c2ea73d5badfcb5667ddb",
+          "observedSqlSha256": "03529391fc022db7d5b608667c9dbc9aad24cc1e04b7f4194117029bfc6a38c8",
+          "category": "unresolved_token_or_structure_difference",
+          "residualAttribution": {
+            "reasonCategory": "comment_tokens_only",
+            "tokenKindCounts": {
+              "word": {
+                "expected": 1408,
+                "observed": 1408
+              },
+              "quoted_identifier": {
+                "expected": 0,
+                "observed": 0
+              },
+              "literal": {
+                "expected": 114,
+                "observed": 114
+              },
+              "blob": {
+                "expected": 0,
+                "observed": 0
+              },
+              "number": {
+                "expected": 37,
+                "observed": 37
+              },
+              "comment": {
+                "expected": 0,
+                "observed": 2
+              },
+              "operator": {
+                "expected": 12,
+                "observed": 12
+              },
+              "punctuation": {
+                "expected": 1155,
+                "observed": 1155
+              }
+            },
+            "changedTokenKinds": [
+              "comment"
+            ],
+            "literalTokenSequenceChanged": false,
+            "nonCommentTokenCounts": {
+              "expected": 2726,
+              "observed": 2726
+            },
+            "commentTokenSequenceChanged": true
+          }
+        }
+      ]
+    },
+    {
+      "app": "delivery",
+      "objects": [
+        {
+          "type": "trigger",
+          "name": "client_folder_notification_batch_control_result",
+          "tbl_name": "client_folder_notification_batch_controls",
+          "expectedPresent": true,
+          "observedPresent": true,
+          "expectedSqlSha256": "b68f87949254902f7a06fbc3f1a09446ca99b1c1b3a83790b1e8c2e429463364",
+          "observedSqlSha256": "d6c84f6aba62f9e89c50e5f9c76c2e497927afca0f06b3709a9b8ca627a23882",
+          "category": "unresolved_token_or_structure_difference",
+          "residualAttribution": {
+            "reasonCategory": "non_comment_token_difference",
+            "tokenKindCounts": {
+              "word": {
+                "expected": 46,
+                "observed": 49
+              },
+              "quoted_identifier": {
+                "expected": 0,
+                "observed": 0
+              },
+              "literal": {
+                "expected": 5,
+                "observed": 5
+              },
+              "blob": {
+                "expected": 0,
+                "observed": 0
+              },
+              "number": {
+                "expected": 1,
+                "observed": 1
+              },
+              "comment": {
+                "expected": 0,
+                "observed": 0
+              },
+              "operator": {
+                "expected": 0,
+                "observed": 0
+              },
+              "punctuation": {
+                "expected": 29,
+                "observed": 29
+              }
+            },
+            "changedTokenKinds": [
+              "word",
+              "literal",
+              "punctuation"
+            ],
+            "literalTokenSequenceChanged": true,
+            "nonCommentTokenCounts": {
+              "expected": 81,
+              "observed": 84
+            },
+            "commentTokenSequenceChanged": false
+          }
+        }
+      ]
+    }
+  ],
+  "rawSqlPublished": false,
+  "canonicalBaselineVerified": false,
+  "semanticEquivalenceEstablished": false,
+  "migrationsApplied": false,
+  "note": "Original coarse unresolved category remains. Additional reasons retain lexical token boundaries, exclude raw SQL/literals/comments, and do not prove migration history, data effects or semantic equivalence."
+}

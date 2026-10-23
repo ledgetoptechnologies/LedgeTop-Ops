@@ -17,6 +17,7 @@ import {
   type ServiceRequestNotificationSnapshot,
 } from "@ltds/shared";
 import { authenticateStaff } from "./auth";
+import { OPERATIONS_NATIVE_STAFF_LIFECYCLE_BASE, handleOperationsNativeStaffLifecycleHttp } from "./operations-native-staff-lifecycle-http";
 import { handleAgentRead } from "./agent-read-routes";
 import { staffSessionStatus } from "./session-status";
 import {
@@ -201,6 +202,7 @@ import { registerNotificationCenterRoutes } from "./notification-center";
 import { registerStaffInboxRequestRoutes } from "./staff-inbox-requests";
 import { registerNativeDeliveryBindingRoutes } from "./native-delivery-binding-routes";
 import { dispatchOperationsPortalNativeOwnerRequest } from "./operations-portal-native-owner-routes";
+import { dispatchOperationsUiReleaseRequest } from "./ui-release-routes";
 import { registerInvitationReviewRoutes } from "./invitation-review-routes";
 import { reconcileClientHubIndex } from "./client-hub-index";
 import {
@@ -630,6 +632,18 @@ app.use("/api/viewer/workspace/session-renewal", async c =>
   dispatchViewerWorkspaceRenewal(c.req.raw, c.env));
 app.use("/api/viewer/workspace/session-renewal/*", async c =>
   dispatchViewerWorkspaceRenewal(c.req.raw, c.env));
+// Database-default-off: 0225 requires a separately reviewed native cohort
+// transfer before activation. No extra deployment scalar or PA-role bypass.
+async function dispatchOperationsNativeStaffLifecycle(c: Context<{ Bindings: Env; Variables: Variables }>) {
+  return handleOperationsNativeStaffLifecycleHttp(c.req.raw, {
+    enabledFlag: "true", expectedHost: c.env.EXPECTED_HOST,
+    configuration: { enabled: true, issuer: c.env.TEAM_DOMAIN ?? "",
+      staffAudience: c.env.OPERATIONS_AUD, origin: c.env.PUBLIC_BASE_URL, csrfSecret: c.env.OPERATIONS_SESSION_SECRET },
+    database: c.env.OPS_DB,
+  });
+}
+app.use(OPERATIONS_NATIVE_STAFF_LIFECYCLE_BASE, dispatchOperationsNativeStaffLifecycle);
+app.use(`${OPERATIONS_NATIVE_STAFF_LIFECYCLE_BASE}/*`, dispatchOperationsNativeStaffLifecycle);
 app.use("/api/*", async (c, next) => {
   if (viewerMachineEventRequest(c.req.method, c.req.path) || projectAlphaDeliveryMachineRequest(c.req.method, c.req.path)) {
     await next();
@@ -3207,7 +3221,7 @@ app.post("/api/delivery/items/:itemRef/stream-ticket", async (c) => {
     throw new HTTPException(404, { message: "Video preview unavailable" });
   const token = await c.env.STREAM.video(row.stream_uid).generateToken();
   return c.json({
-    url: `https://customer-${c.env.STREAM_CUSTOMER_CODE}.cloudflarestream.com/${token}/iframe`,
+    url: `https://customer-${c.env.STREAM_CUSTOMER_CODE}.cloudflarestream.com/${token}/iframe?autoplay=true&muted=true`,
     expiresIn: 3600,
   });
 });
@@ -3334,8 +3348,8 @@ app.put("/api/admin/staff/:id/access-controls", async (c) => {
   await c.env.OPS_DB.batch(statements);
   return c.json({ success: true, controls: value });
 });
-app.post("/api/admin/staff", () => managedInProjectAlpha());
-app.patch("/api/admin/staff/:id", () => managedInProjectAlpha());
+app.post("/api/admin/staff", () => { throw new HTTPException(405, { message: "Staff are managed in Operations. Complete staff setup before adding people." }); });
+app.patch("/api/admin/staff/:id", () => { throw new HTTPException(405, { message: "Staff are managed in Operations. Use staff profile and access management." }); });
 app.get("/api/admin/roles", async (c) => {
   await requireGlobal(c.env, c.get("principal"), "roles.manage");
   const [roles, permissions] = await Promise.all([
@@ -3457,6 +3471,10 @@ app.post("/api/admin/integrations/project-alpha/sync", async (c) => {
   return c.json(clientPortalReconciliation ? { ...result, clientPortalReconciliation } : result);
 });
 
+app.all("*", async c => {
+  const presentation = await dispatchOperationsUiReleaseRequest(c.req.raw, c.env);
+  return presentation ?? c.notFound();
+});
 app.notFound((c) => c.json({ error: "Not found" }, 404));
 app.onError((error, c) => {
   if (error instanceof PortalSourceAuthorityError) {

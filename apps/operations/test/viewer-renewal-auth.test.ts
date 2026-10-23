@@ -7,6 +7,7 @@ const mocks = vi.hoisted(() => ({
   first: vi.fn(),
   run: vi.fn(),
   prepare: vi.fn(),
+  withSession: vi.fn(),
 }));
 
 vi.mock("jose", () => ({
@@ -26,14 +27,16 @@ type StaffRow = Omit<typeof row, "access_subject"> & { access_subject: string | 
 
 function env(user: StaffRow | null): Env {
   mocks.prepare.mockImplementation((sql: string) => ({
+    first: async () => ({ enabled: 0 }),
     bind: (..._values: unknown[]) => ({
-      first: mocks.first.mockResolvedValue(user),
+      first: sql === "SELECT enabled FROM native_staff_access_reconciliation WHERE singleton=1"
+        ? async () => ({ enabled: 0 }) : mocks.first.mockResolvedValue(user),
       run: mocks.run,
     }),
   }));
   return {
     TEAM_DOMAIN: "https://team.cloudflareaccess.com", OPERATIONS_AUD: "ops-audience",
-    OPS_DB: { prepare: mocks.prepare } as unknown as D1Database,
+    OPS_DB: { prepare: mocks.prepare, withSession: mocks.withSession.mockReturnValue({ prepare: mocks.prepare }) } as unknown as D1Database,
   } as Env;
 }
 
@@ -57,6 +60,7 @@ describe("strict Viewer renewal staff authentication", () => {
     expect(result.principal).toMatchObject({ id: row.id, accessSubject: "human-subject" });
     expect(result.expiresAt).toBe(mocks.claims.exp);
     expect(mocks.run).toHaveBeenCalledOnce();
+    expect(mocks.withSession).toHaveBeenCalledWith("first-primary");
   });
 
   it("does not first-bind an unbound account or overwrite a different binding", async () => {

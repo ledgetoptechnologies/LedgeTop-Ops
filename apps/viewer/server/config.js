@@ -5,6 +5,7 @@
 const crypto = require('crypto');
 const path = require('path');
 const { parseTrustedProxyAddresses } = require('./proxyGate');
+const { controllerOrigins } = require('./controllerOrigins');
 const { decodeKey } = require('./providerCredentials');
 const { parseProviderCidrs } = require('./providerAdmission');
 
@@ -95,6 +96,9 @@ if (!serviceAuthKeys && (previousServiceKeyId || previousServiceSecret)) {
   if (previousServiceKeyId && previousServiceSecret) serviceAuthKeys[previousServiceKeyId] = previousServiceSecret;
 }
 
+const opsBaseUrl = normalizedOrigin(process.env.OPS_BASE_URL || 'https://ops.ledgetopdroneservices.com');
+const opsControllerOrigins = controllerOrigins(opsBaseUrl, process.env.OPS_CONTROLLER_ORIGINS, !production);
+
 const config = {
   measurementCalculationsEnabled: bool(process.env.MEASUREMENT_CALCULATIONS_ENABLED, true),
   measurementMaxCells: Math.min(16_000_000, positiveInteger(process.env.MEASUREMENT_MAX_CELLS, 2_000_000)),
@@ -108,7 +112,8 @@ const config = {
   port: positiveInteger(process.env.PORT, 8080),
   expectedHost: String(process.env.EXPECTED_HOST || '').trim().toLowerCase(),
   publicBaseUrl,
-  opsBaseUrl: normalizedOrigin(process.env.OPS_BASE_URL || 'https://ops.ledgetopdroneservices.com'),
+  opsBaseUrl,
+  opsControllerOrigins,
   opsAutomationBaseUrl: normalizedOrigin(process.env.OPS_AUTOMATION_BASE_URL || ''),
   allowedEmbedOrigins: csv(process.env.ALLOWED_EMBED_ORIGINS).map(normalizedOrigin).filter(Boolean),
   trustProxyHops: Math.min(positiveInteger(process.env.TRUST_PROXY_HOPS, 1), 5),
@@ -198,6 +203,7 @@ function validate() {
     problems.push(`TRUSTED_PROXY_ADDRESSES ${config.trustedProxyAddressesError}`);
   if (config.production && !config.opsBaseUrl)
     problems.push('OPS_BASE_URL must be an exact HTTPS origin');
+  if (!config.opsControllerOrigins.length) problems.push('OPS_CONTROLLER_ORIGINS must contain only exact HTTPS origins and include OPS_BASE_URL');
   if (config.production && config.allowedEmbedOrigins.length === 0)
     problems.push('ALLOWED_EMBED_ORIGINS must include the exact Ops/client origin in production');
   if (!config.sessionSecret || config.sessionSecret.length < 32)

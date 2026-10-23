@@ -1831,6 +1831,19 @@ tbody tr:last-child td { border: 0; }
 .viewer-association-form label { display: grid; gap: .35rem; color: var(--muted); font-size: .78rem; font-weight: 800; }
 .viewer-association-form select { width: 100%; min-width: 0; padding: .7rem; border: 1px solid var(--control-border); border-radius: 8px; background: #fff; }
 .viewer-association-help { margin: .8rem 0 0; color: var(--muted); font-size: .8rem; }
+/* One Ops page for the Viewer: section navigation, native client models, import recovery. */
+.viewer-page { display: grid; grid-template-columns: minmax(0, 1fr); gap: 1rem; min-width: 0; }
+.viewer-page-sections { justify-self: start; max-width: 100%; overflow-x: auto; }
+.viewer-page-sections > button { min-height: 42px; white-space: nowrap; }
+.viewer-native-models { display: grid; gap: 1rem; min-width: 0; }
+.viewer-native-search { display: grid; gap: .3rem; max-width: 360px; margin-bottom: .75rem; color: var(--muted); font-size: .78rem; font-weight: 800; }
+.viewer-native-search input { width: 100%; min-width: 0; padding: .7rem; border: 1px solid var(--control-border); border-radius: 8px; background: #fff; }
+.viewer-native-open { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: .5rem; }
+.viewer-ingest-recovery { display: grid; gap: .4rem; margin: .6rem 0; padding: .75rem .9rem; border: 1px solid #f3c9a8; border-left: 4px solid var(--orange); border-radius: 10px; background: #fff7f1; }
+.viewer-ingest-recovery p { margin: 0; }
+.viewer-ingest-recovery small { color: var(--muted); }
+.viewer-ingest-recovery .button-orange { justify-self: start; }
+.button-link { padding: 0; min-height: 0; border: 0; background: none; color: #b33d00; font: inherit; text-decoration: underline; cursor: pointer; }
 .viewer-association-list { display: grid; gap: .75rem; }
 .viewer-association-list article { display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: 1rem; border: 1px solid var(--line); border-radius: 10px; background: #f8fafb; }
 .viewer-association-list article > div:first-child { min-width: 0; }
@@ -3036,3 +3049,4 @@ a.dashboard-alert:hover > span[aria-hidden] { transform: translateX(3px); }
   .alpha-correspondence .alpha-connection-actions > button { flex: 1 1 auto; min-height: 44px; }
   .alpha-correspondence-details dl { grid-template-columns: minmax(0, 1fr); }
 }
+.viewer-native-models .viewer-association-help { margin: 0 0 1rem; }

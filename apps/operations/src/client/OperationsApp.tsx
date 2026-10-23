@@ -5,7 +5,7 @@ import { AccountMenu, Brand, Card, EmptyState, Loading, LtMark, Skeleton, Status
 import { FinanceSummaryPanel } from "./FinanceSummaryPanel";
 import { SessionExpiry } from "./SessionExpiry";
 import { ApiError, api, setCsrf } from "./api";
-import { operationsViewerShellPath } from "./OperationsViewerShell";
+import { OperationsViewerShell, parseOperationsViewerShellRoute, operationsViewerShellPath } from "./OperationsViewerShell";
 import { generateSecureAccessCode } from "./access-code";
 import { incomingUploadStatus, type IncomingStatusFacts } from "./incoming-upload-status";
 import { IncomingArchiveBrowser, type ArchiveEntry, type ArchiveLoader } from "./IncomingArchiveBrowser";
@@ -56,6 +56,7 @@ import { constrainViewerOffset, pointerAnchoredOffset } from "./viewer-zoom";
 import { activeShareLoadError, createShareLoadDeadline } from "./share-load-deadline";
 import { ViewerProcessingPanel } from "./ViewerProcessingPanel";
 import { SignInProblem, type StartupFailure } from "./SignInProblem";
+import { NativeViewerModels } from "./NativeViewerModels";
 import {
   activateDeliveryFolderCache,
   deactivateDeliveryFolderCache,
@@ -269,6 +270,7 @@ const destinationRequest = (action: string, count: number, prefix: string): Text
 });
 
 export function OperationsApp() {
+  const [viewerRoute, setViewerRoute] = useState(() => parseOperationsViewerShellRoute(location.pathname, location.search));
   const [session, setSession] = useState<Session | null>(null),
     [error, setError] = useState<StartupFailure | null>(null),
     [page, setPage] = useState<Page>(pathPage(location.pathname)),
@@ -289,6 +291,7 @@ export function OperationsApp() {
       : null;
   };
   const normalizeLocation = (value: Session) => {
+    setViewerRoute(parseOperationsViewerShellRoute(location.pathname, location.search));
     const requested = pathPage(location.pathname);
     const feedbackEnabled = value.capabilities?.clientFeedback?.enabled === true;
     const invitationReview = value.invitationAdministration?.enabled === true && value.invitationAdministration.canReview;
@@ -386,6 +389,7 @@ export function OperationsApp() {
     };
   }, [manageOpen]);
   function navigate(next: Page, href?: string) {
+    setViewerRoute(null);
     setPage(next);
     history.pushState(null, "", href || (next === "dashboard" ? "/" : `/${next}`));
     if (next === "operations" || next === "delivery" || next === "clients" || next === "notifications")
@@ -448,8 +452,8 @@ export function OperationsApp() {
           <nav aria-label="Mobile primary navigation">{primaryNavigation.map((item) => navigationLink(item, true))}{!!manageNavigation.length && <span className="ops-mobile-nav-label">Administration</span>}{manageNavigation.map((item) => navigationLink(item, true))}</nav>
         </div>
       </div>}
-      <main className="ops-main">
-        <PageHeading page={page} displayName={session.user.displayName} />
+      <main className={`ops-main${viewerRoute && page === "viewer" ? " ops-viewer-main" : ""}`}>
+        {!(viewerRoute && page === "viewer") && <PageHeading page={page} displayName={session.user.displayName} />}
         {page === "dashboard" && <Dashboard {...props} onNavigate={navigate} />}{" "}
         {page === "operations" && <OperationsHub {...props} />}{" "}
         {page === "clients" && (allowed(session.user, "team.view") || allowed(session.user, "operations.manage") || session.capabilities?.clientFeedback?.enabled === true || invitationReview) && (
@@ -461,7 +465,7 @@ export function OperationsApp() {
           <DeliveryHub {...props} />
         )}{" "}
         {page === "viewer" && allowed(session.user, "viewer.view") && (
-          <ViewerDataOverview session={session} />
+          viewerRoute ? <OperationsViewerShell route={viewerRoute} /> : <ViewerPage session={session} />
         )}{" "}
         {page === "team" && allowed(session.user, "team.view") && (
           <Team {...props} />
@@ -512,8 +516,8 @@ function PageHeading({ page, displayName }: { page: Page; displayName: string })
       "Manage client delivery, incoming uploads, and shared links.",
     ],
     viewer: [
-      "3D models overview",
-      "Monitor Viewer storage, processing, and provider health, then open the dedicated workspace.",
+      "3D Viewer",
+      "Link models to client projects, run and recover processing, and manage sharing — or open the full Viewer workspace.",
     ],
     team: [
       "Team",
@@ -3761,6 +3765,47 @@ function exactViewerWorkspaceMessage(
     : null;
 }
 
+const VIEWER_SECTIONS = [
+  { id: "overview", label: "Overview", path: "/viewer" },
+  { id: "models", label: "Client models", path: "/viewer/models" },
+  { id: "processing", label: "Processing", path: "/viewer/processing" },
+  { id: "sharing", label: "Sharing & setup", path: "/viewer/sharing" },
+] as const;
+type ViewerSection = typeof VIEWER_SECTIONS[number]["id"];
+/** /operations/processing (processing notifications and attempt deep links) opens the Processing section. */
+export function viewerSectionFromPath(pathname: string): ViewerSection {
+  if (pathname === "/operations/processing" || pathname === "/viewer/processing") return "processing";
+  if (pathname === "/viewer/models") return "models";
+  if (pathname === "/viewer/sharing") return "sharing";
+  return "overview";
+}
+
+/** One Ops page for the Ledge Top Viewer: overview, native client models, processing and sharing. */
+function ViewerPage({ session }: { session: Session }) {
+  const [section, setSection] = useState<ViewerSection>(() => viewerSectionFromPath(location.pathname));
+  useEffect(() => {
+    const sync = () => setSection(viewerSectionFromPath(location.pathname));
+    window.addEventListener("popstate", sync);
+    return () => window.removeEventListener("popstate", sync);
+  }, []);
+  const choose = (next: ViewerSection) => {
+    if (next === section) return;
+    const target = VIEWER_SECTIONS.find(item => item.id === next)!;
+    // A section change drops attempt deep-link and reauthorization parameters.
+    window.history.pushState(null, "", target.path);
+    setSection(next);
+  };
+  return <div className="viewer-page">
+    <nav className="viewer-page-sections ltds-segmented" aria-label="3D Viewer sections">
+      {VIEWER_SECTIONS.map(item => <button type="button" key={item.id} aria-current={section === item.id ? "page" : undefined} onClick={() => choose(item.id)}>{item.label}</button>)}
+    </nav>
+    {section === "overview" && <ViewerDataOverview session={session} />}
+    {section === "models" && <NativeViewerModels canManage={allowed(session.user, "viewer.manage")} />}
+    {section === "processing" && <ViewerProcessingPanel mapToken={session.mapboxPublicToken} initialTab={new URLSearchParams(location.search).get("tab") === "tasks" ? "tasks" : undefined} />}
+    {section === "sharing" && <ViewerModels session={session} />}
+  </div>;
+}
+
 function ViewerDataOverview({session}:{session:Session}) {
   const { data, error, reload } = useLoad<ViewerOverviewResponse>(() => api("/api/viewer/overview"), []);
   const [opening, setOpening] = useState(false), [actionError, setActionError] = useState("");
@@ -3883,7 +3928,7 @@ function ViewerDataOverview({session}:{session:Session}) {
       ? <div className="notice warning viewer-popup-fallback" role="alert"><span>{actionError}</span><button type="button" className="button-orange button-small" disabled={opening} onClick={() => void openWorkspace(true)}>Open Viewer in this tab</button></div>
       : <ErrorLine error={actionError} />}
     <div className="viewer-overview-actions">
-      <div><h2>3D models</h2><p>Project management, imports, processing, review, sharing, and model interaction open on the dedicated Viewer domain.</p></div>
+      <div><h2>3D models</h2><p>Open client models, review processing, and manage sharing here. Use the Viewer workspace for imports and advanced project management.</p></div>
       <button type="button" className="button-orange" disabled={opening} onClick={() => void openWorkspace()}>{opening ? "Opening…" : "Open Viewer workspace"}</button>
     </div>
     <div className="viewer-overview-grid" aria-label="3D Viewer platform overview">
@@ -3894,7 +3939,7 @@ function ViewerDataOverview({session}:{session:Session}) {
       <Card title="Storage"><strong>{bytes(value.storage.usedBytes)}</strong><small>{value.storage.availableBytes === null ? "Available space unavailable" : `${bytes(value.storage.availableBytes)} available`}</small></Card>
       <Card title="Platform"><StatusPill tone={value.platform.ready && value.platform.workerLive && !value.platform.lifecycleBlocked ? "success" : "warning"}>{value.platform.ready ? "ready" : "attention"}</StatusPill><small>{value.platform.workerLive ? "Worker online" : "Worker offline"}{value.platform.lifecycleBlocked ? " · lifecycle blocked" : ""}</small></Card>
     </div>
-    {value.jobs.failed > 0 && <p className="notice warning">{value.jobs.failed} processing job{value.jobs.failed === 1 ? " needs" : "s need"} attention in Viewer.</p>}
+    {value.jobs.failed > 0 && <p className="notice warning">{value.jobs.failed} processing job{value.jobs.failed === 1 ? " needs" : "s need"} attention in Viewer. <a href="/viewer/processing?tab=tasks">Review failed jobs</a></p>}
     <small>Updated {date(value.generatedAt)}. This overview contains totals only; no model files or internal storage paths pass through Operations.</small>
   </div>;
 }
@@ -6268,6 +6313,8 @@ function OperationsMedia({
       <video
         src={item.sourceUrl}
         controls
+        autoPlay
+        muted
         playsInline
         preload="metadata"
         onError={() => setFailed(true)}
@@ -7197,7 +7244,6 @@ function ViewerModels({ session }: { session: Session }) {
   if (loading && !data) return <Loading />;
   return <div className="viewer-admin-layout">
     <ErrorLine error={error || actionError} />
-    <ViewerProcessingPanel mapToken={session.mapboxPublicToken} />
     {data && !data.enabled && <Card title="3D Viewer is disabled">
       <p>Enable the Viewer integration only after its URL, service key, routes, and database migration are ready.</p>
       {canManage && <button type="button" className="button-orange" disabled={connectionPreflightBusy} onClick={() => void testViewerConnection()}>
@@ -7224,13 +7270,13 @@ function ViewerModels({ session }: { session: Session }) {
         </select></label>
         <button type="submit" className="button-orange" disabled={busy || !modelId || !projectId}>{busy ? "Saving…" : "Associate model"}</button>
       </form>
-      <p className="viewer-association-help">Client access remains denied until this explicit association and the client’s live project entitlement both authorize it.</p>
+      <p className="viewer-association-help">Client access requires this model association, an explicit Viewer grant, and current client project membership.</p>
     </Card>}
-    {data?.enabled && <Card title="Project model access">
-      {!data.associations.length ? <EmptyState title="No model associations" detail="Associate a ready Viewer model with an active client project to make it available." /> :
+    {data?.enabled && <Card title="Model associations"><p>Associations connect models to projects. Client access is checked separately against current project permissions.</p>
+      {!data.associations.length ? <EmptyState title="No model associations" detail="Associate a ready Viewer model with an active client project, then grant client access." /> :
         <div className="viewer-association-list">{data.associations.map(association => <article key={association.id}>
           <div><StatusPill tone={association.state === "active" ? "success" : association.state === "source_stale" ? "warning" : "danger"}>{association.state.replace("_", " ")}</StatusPill><h3>{association.modelTitle}</h3><p>{association.clientName} · {association.projectName}</p><small>{association.modelProvider} · model version {association.viewerModelVersionId}</small></div>
-          <div>{association.state === "active" && <button type="button" className="button-orange button-small" disabled={busy} onClick={() => void open(association)}>Open model in new tab</button>}{canManage && association.state === "active" && <button type="button" className="button-danger button-small" disabled={busy} onClick={() => void revoke(association)}>Remove access</button>}</div>
+          <div>{association.state === "active" && <button type="button" className="button-orange button-small" disabled={busy} onClick={() => void open(association)}>Open model</button>}{canManage && association.state === "active" && <button type="button" className="button-danger button-small" disabled={busy} onClick={() => void revoke(association)}>Remove association</button>}</div>
         </article>)}</div>}
     </Card>}
     {data?.enabled && data.publicSharesEnabled && <section id="viewer-public-shares"><Card title="Public demo links">
