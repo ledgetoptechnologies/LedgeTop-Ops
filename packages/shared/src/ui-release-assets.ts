@@ -9,6 +9,8 @@ export type UiReleaseManifest = Readonly<{
 }>;
 // Structural subset of current Workers Fetcher; no Env or active bindings.
 export type UiAssetFetcher = { fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> };
+/** Idle bound for awaiting headers or one body read, excluding time when the
+ * downstream consumer has not requested more bytes. */
 export type UiAssetOptions = Readonly<{ timeoutMs?: number }>;
 
 const MAX_FILE_BYTES = 32 * 1024 * 1024;
@@ -82,29 +84,41 @@ async function transfer(request: Request, binding: UiAssetFetcher, file: UiRelea
   const abort = new AbortController();
   let timedOut = false, finished = false;
   let cancelBody = () => {};
-  let timeoutReject: (reason: Error) => void = () => {};
-  const timeout = new Promise<never>((_, reject) => { timeoutReject = reject; });
-  // A caller may not consume the returned stream before the deadline.
-  void timeout.catch(() => {});
-  const timer = setTimeout(() => {
-    timedOut = true; abort.abort(); timeoutReject(new Error('UI asset timeout')); cancelBody();
-  }, timeoutMs);
+  // Start a fresh timer only while actively awaiting an upstream operation.
+  // A progressing transfer may outlast timeoutMs, and downstream backpressure
+  // must not spend the next read's idle allowance.
+  const withinIdle = <T>(operation: Promise<T>): Promise<T> => new Promise((resolve, reject) => {
+    let settled = false;
+    const complete = (settle: () => void) => {
+      if (settled) return;
+      settled = true; clearTimeout(timer); abort.signal.removeEventListener('abort', onAbort); settle();
+    };
+    const onAbort = () => complete(() => reject(new Error('UI asset request cancelled')));
+    const timer = setTimeout(() => {
+      timedOut = true; complete(() => reject(new Error('UI asset timeout')));
+      abort.abort(); cancelBody();
+    }, timeoutMs);
+    abort.signal.addEventListener('abort', onAbort, { once: true });
+    operation.then(value => complete(() => resolve(value)), error => complete(() => reject(error)));
+    if (abort.signal.aborted) onAbort();
+  });
   const clientAbort = () => { abort.abort(); cancelBody(); };
   request.signal.addEventListener('abort', clientAbort, { once: true });
   if (request.signal.aborted) abort.abort();
   const cleanup = () => {
-    finished = true; clearTimeout(timer); request.signal.removeEventListener('abort', clientAbort);
+    finished = true; request.signal.removeEventListener('abort', clientAbort);
   };
   try {
+    if (abort.signal.aborted) throw new Error('UI asset request cancelled');
     // Build afresh: no incoming headers, credentials, query, referrer or body.
     const sanitized = new Request(`https://ui-release.invalid${targetPath}`, {
       method: request.method, redirect: 'manual', signal: abort.signal,
     });
     const fetching = binding.fetch(sanitized).then(response => {
-      if (finished || timedOut) { discard(response); throw new Error('Late UI asset response'); }
+      if (finished || abort.signal.aborted) { discard(response); throw new Error('Late UI asset response'); }
       return response;
     });
-    const response = await Promise.race([fetching, timeout]);
+    const response = await withinIdle(fetching);
     const mime = response.headers.get('Content-Type')?.split(';')[0]?.trim().toLowerCase();
     const encoding = response.headers.get('Content-Encoding');
     const length = response.headers.get('Content-Length');
@@ -130,7 +144,7 @@ async function transfer(request: Request, binding: UiAssetFetcher, file: UiRelea
     const stream = new ReadableStream<Uint8Array>({
       async pull(controller) {
         try {
-          const result = await Promise.race([reader.read(), timeout]);
+          const result = await withinIdle(reader.read());
           if (abort.signal.aborted) throw new Error('UI asset request cancelled');
           if (result.done) {
             if (count !== file.size) throw new Error('UI asset ended before declared size');
