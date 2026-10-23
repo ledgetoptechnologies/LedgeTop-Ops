@@ -141,7 +141,7 @@ async function retryUpload<T>(action: () => Promise<T>, signal: AbortSignal, att
   throw last;
 }
 
-export function ViewerProcessingPanel({ mapToken }: { mapToken: string | null }): ReactElement {
+export function ViewerProcessingPanel({ mapToken, initialTab }: { mapToken: string | null; initialTab?: "tasks" }): ReactElement {
   const [bootstrap, setBootstrap] = useState<Bootstrap | null>(null);
   const [projects, setProjects] = useState<ViewerProcessingProject[]>([]);
   const [datasets, setDatasets] = useState<ViewerDatasetSummary[]>([]);
@@ -159,7 +159,7 @@ export function ViewerProcessingPanel({ mapToken }: { mapToken: string | null })
   const [tab, setTab] = useState<Tab>(() => {
     const pending = readViewerOperationCheckpoints()[0];
     return pending?.type === "upload_finalize" ? "datasets" :
-      pending?.type === "import_adopt" || pending?.type === "import_preview" || pending?.type === "catalog_scan" || pending?.type === "catalog_map" ? "imports" : "projects";
+      pending?.type === "import_adopt" || pending?.type === "import_preview" || pending?.type === "catalog_scan" || pending?.type === "catalog_map" ? "imports" : initialTab ?? "projects";
   });
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");

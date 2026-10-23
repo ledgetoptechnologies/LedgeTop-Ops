@@ -80,3 +80,12 @@ unchanged. Native client model access still requires its separate, explicit
 source/workspace/project or task grant and current portal authorization. The
 association table remains project-scoped; a workspace-qualified staff request
 does not create a workspace grant or persist an inferred workspace identity.
+
+
+## Authenticated model navigation
+
+Opening a linked model from Operations Models or a Client portal project stays in the current tab and retains that application's existing navigation and account controls. Client model URLs select their exact native workspace before loading the portal; conflicting workspace query hints cannot select a different account. Projects navigation uses the existing authorized project lists. Closing a client model returns to the project's Models tab in the same workspace.
+
+These model shells retain the existing session issuance, model identity validation, renewal and server authorization. Dedicated Viewer workspace launches and processing-result reviews keep their existing isolated-window lifecycle. An unassociated processing result must still use that review flow until it has a client-project association. Public links are unchanged.
+
+Failed processing totals on the Operations overview link to the existing Processing task list so staff can identify and inspect the outstanding jobs.

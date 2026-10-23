@@ -54,6 +54,7 @@ export function ClientViewerShell({ route }: { route: ClientViewerShellRoute }) 
     return createNativeViewerSession(bootstrap, route.projectId, route.associationId, key, readClientViewerUnits());
   };
   const exit = new URL(clientProjectPath(route.projectId), window.location.origin);
+  exit.searchParams.set("tab", "models");
   if (route.mode === "native") exit.searchParams.set("workspace", route.workspaceId);
   return <RenewableViewerShell
     routeKey={`${route.mode}:${route.mode === "native" ? `${route.workspaceId}:` : ""}${route.projectId}:${route.associationId}:${route.modelId}`}

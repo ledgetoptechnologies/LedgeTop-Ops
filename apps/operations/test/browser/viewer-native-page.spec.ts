@@ -219,9 +219,8 @@ test("a linked model opens for each client account it belongs to, and view-only 
   await expect(page.getByRole("heading", { name: "Link a model to a client project" })).toHaveCount(0);
   const row = page.locator("article").filter({ has: page.getByRole("heading", { name: "Seawall orthomosaic" }) });
   await expect(row).toContainText("Coastal Engineering · Seawall survey");
-  const popup = context.waitForEvent("page");
   await row.getByRole("button", { name: "Open for Harbor Authority" }).click();
-  const opened = await popup;
+  const opened = page;
   await expect.poll(() => opened.url()).toContain("/viewer/session/native/association-7/model-seawall?");
   const query = new URL(opened.url()).searchParams;
   expect(Object.fromEntries(query)).toEqual({ sourceId: "project-alpha:primary", workspaceId: "workspace-harbor", projectPublicId: "pa-project-7",
@@ -232,7 +231,7 @@ test("the native model shell opens a session only for its exact target", async (
   const bodies: unknown[] = [];
   await page.context().route("**/api/**", async route => {
     const request = route.request(), path = new URL(request.url()).pathname;
-    if (path === "/api/session") return route.fulfill({ json: { csrfToken: "csrf-native" } });
+    if (path === "/api/session") return route.fulfill({ json: { ...session(["viewer.view"]), csrfToken: "csrf-native" } });
     if (path === "/api/viewer/native-associations/association-7/session" && request.method() === "POST") {
       bodies.push(JSON.parse(request.postData() || "null"));
       return route.fulfill({ status: 201, json: { modelId: "model-seawall", grant: "11111111-1111-4111-8111-111111111111",
@@ -259,4 +258,39 @@ for (const width of [320, 390]) test(`the Viewer page sections fit ${width}px wi
     await expect(page.locator(".viewer-association-list, .viewer-ingest-recovery").first()).toBeVisible();
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
   }
+});
+
+
+test("authenticated model routes retain Operations navigation through denied sessions and browser Back", async ({ page }) => {
+  await mockOps(page, ["viewer.view", "operations.view"], (url, method, route) =>
+    url.pathname === "/api/viewer/associations/association-one/session" && method === "POST"
+      ? route.fulfill({ status: 403, json: { error: "Model is unavailable" } })
+      : undefined);
+  await page.goto("/viewer/session/association-one/model-one");
+  await expect(page.locator(".ops-header")).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Secure 3D Viewer" })).toBeVisible();
+  const nav = page.getByRole("navigation", { name: /^(Primary navigation|Mobile primary navigation)$/ });
+  if (!(await nav.first().isVisible())) await page.getByRole("button", { name: "Open navigation" }).click();
+  await nav.locator('a[href="/operations"]:visible').click();
+  await expect(page).toHaveURL(/\/operations$/);
+  await expect(page.getByRole("heading", { name: "Secure 3D Viewer" })).toHaveCount(0);
+  await page.goBack();
+  await expect(page.getByRole("heading", { name: "Secure 3D Viewer" })).toBeVisible();
+});
+
+
+test("failed processing totals link to the real processing task list", async ({ page, context }) => {
+  await mockOps(page, ["viewer.view"], (url, method, route) => url.pathname === "/api/viewer/overview"
+    ? route.fulfill({ json: { enabled: true, overview: { generatedAt: date,
+      projects: { active: 1, total: 1 }, models: { published: 1, total: 1, bytes: 0 },
+      jobs: { queued: 0, running: 0, reviewReady: 0, failed: 2 }, providers: { enabled: 1, healthy: 1, total: 1 },
+      storage: { usedBytes: 0, availableBytes: null }, platform: { ready: true, workerLive: true, lifecycleBlocked: false } } } })
+    : processingRoutes(url, method, route));
+  await mockViewer(context, { recovery: { "attempt-ben": true } });
+  await page.goto("/viewer");
+  await expect(page.getByText("2 processing jobs need attention in Viewer.", { exact: false })).toBeVisible();
+  await page.getByRole("link", { name: "Review failed jobs" }).click();
+  await expect(page).toHaveURL(/\/viewer\/processing\?tab=tasks$/);
+  await expect(page.getByRole("navigation", { name: "3D Viewer sections" }).getByRole("button", { name: "Processing" })).toHaveAttribute("aria-current", "page");
+  await expect(page.getByText("Ben's ranch survey", { exact: true }).first()).toBeVisible();
 });
