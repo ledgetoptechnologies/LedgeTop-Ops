@@ -1,5 +1,6 @@
 // Explicit offline qualification using separately staged real build outputs.
-// No provider namespace, production date or browser acceptance is implied.
+// No provider namespace or browser acceptance is implied. A requested date is
+// exercised only with the dependency directory's matching native runtime.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -16,7 +17,8 @@ assert.match(compatibilityDate, /^\d{4}-\d{2}-\d{2}$/);
 test('real private Worker serves every registered file with exact MIME and bytes', { skip: !packetRoot }, async t => {
   const dependencyRoot = process.env.UI_RELEASE_FIXTURE_DEPENDENCY_ROOT ?? path.join(root, 'apps/operations/node_modules');
   const requireDependency = createRequire(path.join(dependencyRoot, '__fixture.cjs'));
-  const { Miniflare } = requireDependency('miniflare');
+  assert.equal(process.env.MINIFLARE_WORKERD_PATH, undefined, 'Use the matching installed runtime, not a binary override');
+  const { Miniflare, convertV4MiniflareOptions } = requireDependency('miniflare');
   const { build } = requireDependency('esbuild');
   const result = await build({ entryPoints: [path.join(root, 'apps/ui-release-assets/src/index.ts')],
     bundle: true, write: false, format: 'esm', platform: 'browser', target: 'es2022' });
@@ -26,7 +28,15 @@ test('real private Worker serves every registered file with exact MIME and bytes
       routerConfig: { has_user_worker: true, invoke_user_worker_ahead_of_assets: true },
       assetConfig: { html_handling: 'none', not_found_handling: 'none' } },
   }] };
-  const runtime = new Miniflare(options);
+  let runtimeOptions = options;
+  if (typeof convertV4MiniflareOptions === 'function') {
+    // This fixture has one private Worker only. V5 assigns its asset owner from
+    // worker.name; its explicit converter rejects the V4 workerName override.
+    delete runtimeOptions.workers[0].assets.workerName;
+    runtimeOptions = convertV4MiniflareOptions(runtimeOptions);
+    assert.equal(runtimeOptions.workers[0].config.compatibilityDate, compatibilityDate);
+  }
+  const runtime = new Miniflare(runtimeOptions);
   t.after(() => runtime.dispose());
   await runtime.ready;
   let checked = 0;
@@ -59,4 +69,9 @@ test('real private Worker serves every registered file with exact MIME and bytes
     assert.equal((await runtime.dispatchFetch(`https://ui-release.invalid${prefix}/index.html`, { headers: { cookie: 'sentinel' } })).status, 404);
   }
   assert.equal(checked, 258);
+  for (const suffix of [
+    `/_ui/foreign/${catalog.releases[0].releaseId}/index.html`,
+    `/_ui/operations/${'1'.repeat(40)}/index.html`, '/_ui',
+    `/_ui/operations/${catalog.releases[0].releaseId}/assets/%2fmissing.js`,
+  ]) assert.equal((await runtime.dispatchFetch(`https://ui-release.invalid${suffix}`)).status, 404);
 });

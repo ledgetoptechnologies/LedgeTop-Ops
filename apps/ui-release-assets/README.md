@@ -26,7 +26,7 @@ node scripts/ui-release-packet.mjs /path/to/independent-prefixed-build-proof /ne
 
 The command checks both complete build trees against pinned manifest digests and
 each other before writing. It does not deploy, authorize the inventory, qualify a
-production runtime date, or modify a primary asset collection. The local native
+production provider runtime, or modify a primary asset collection. The local native
 runtime test can then use `UI_RELEASE_PACKET_ROOT=/new/packet` and
 `UI_RELEASE_FIXTURE_DEPENDENCY_ROOT=/path/to/operations/node_modules` with
 `node --test scripts/ui-release-packet-local.test.mjs`.
@@ -39,6 +39,12 @@ CSP and deep navigation, and HTML rollback with both generations open. The curre
 production guard intentionally rejects UI-mode deployment and is unchanged here.
 Do not deploy this candidate using the backend-only release path.
 
-The full-file local test passed on the locked workerd runtime with compatibility
-date `2026-08-06`. It does not qualify the proposed `2026-10-23` production date.
+The full-file local test passed on the locked workerd runtime at compatibility
+date `2026-08-06`. It also passed on the matching Wrangler `4.152.0`, Miniflare
+`5.20261019.2-beta`, workerd `1.20261019.1` toolchain at the intended date
+`2026-10-23`, including HEAD and negative path/credential checks. Set
+`UI_RELEASE_FIXTURE_COMPATIBILITY_DATE` explicitly for that qualification.
+The newer harness uses its exported V4-options converter for this single Worker;
+mixing an older harness with a newer binary is rejected. These checks qualify the
+local private Worker only; provider and browser acceptance remain outstanding.
 Native LTDS project creation, Viewer grants, and sharing flags remain separate.
