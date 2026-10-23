@@ -32,6 +32,8 @@ The existing calculation and lifecycle tests passed before changing the interact
 
 The changes make Enter/Finish save, Escape/Cancel discard unsaved changes, names select, and Rename an explicit action. Choosing Volume saves the polygon before opening the calculation inspector; it does not guess a reference or start a calculation automatically. Editing an outline still invalidates a previously calculated volume. Closing an inspector cannot attach late results; the copy now describes that boundary accurately.
 
+Volume availability uses the scoped server capability response. A confirmed absence of permitted calculation sources disables the action with visible guidance. Pending or failed capability requests are not treated as proof that a source is absent; an orthophoto can still use an authorized point-cloud elevation source. Restoring an unfinished Volume draft after session renewal preserves its intent.
+
 The volume reference plane and the visible slicing plane are independent. Slicing changes visible mesh/direct-cloud data and picking only; it does not change source elevations or volume calculation inputs. The streamed Potree cloud renderer requires its own clipping integration and is explicitly unavailable for slicing in this change.
 
 ## LAS/LiDAR scope
@@ -41,9 +43,9 @@ Existing code can display registered EPT clouds and selected direct LAS/LAZ/PLY 
 ## Validation
 
 - Linux container: 46 overview, view-mode, processing/storage lifecycle, and workspace checks passed.
-- Measurement calculations, backend and lifecycle audit: 494 passed, two platform-specific skips before interaction changes.
+- Measurement calculations, backend and lifecycle audit: 494 passed, two optional Poisson-engine fixture skips before interaction changes.
 - Measurement browser audit: 34 passed in isolated Chromium, including profile lifecycle, CSV/PNG downloads, and queued/cancelled server inspection.
-- After interaction changes: 476 measurement checks passed, two platform-specific skips; 76 focused interaction/dialog checks passed.
+- After interaction changes: 476 measurement checks passed, two optional Poisson-engine fixture skips; 76 focused interaction/dialog checks passed.
 - Slice/header/runtime checks: 74 passed, including real WebGL framebuffer assertions for removed/retained geometry, streamed arrivals, and reset.
 
 These checks use synthetic fixtures. They do not certify survey accuracy or establish that the changes are deployed to the live service.
