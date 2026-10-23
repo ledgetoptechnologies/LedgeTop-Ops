@@ -96,7 +96,7 @@ test('saved point boundary reads one authorized attached result and never change
   const {record,job}=attachedPoint(),calls=[],f=fixture({surfaceRequest:async(op,payload)=>{calls.push([op,payload]);return{calculation:job};}});t.after(()=>f.workspace.dispose());
   f.workspace.store.records.set(record.id,record);f.watchMutations();const before=JSON.stringify(record);
   f.workspace.tick();await flush();for(let i=0;i<50;i++)f.workspace.tick();await flush();
-  assert.equal(calls.length,1);assert.equal(calls[0][0],'status');assert.equal(calls[0][1].jobId,job.id);
+  assert.equal(calls.filter(call=>call[0]==='capabilities').length,1);const statusCalls=calls.filter(call=>call[0]==='status');assert.equal(statusCalls.length,1);assert.equal(statusCalls[0][1].jobId,job.id);
   assert.ok(f.projected.length>0);assert.ok(f.projected.every(p=>p.point[2]===181));assert.equal(f.resolverCalls.length,0);
   assert.equal(JSON.stringify(record),before);assert.deepEqual(f.mutations,[]);assert.deepEqual(f.calculationCalls,[]);
 });
@@ -204,7 +204,7 @@ test('editing passes ordinary navigation through in all five modes and changes c
     const before=JSON.stringify(f.workspace.getDraft());let stopped=0;const event=(x,y,extra={})=>pointer(x,y,{stopImmediatePropagation(){stopped++;},...extra});
     assert.equal(f.canvas.style.cursor||'','');await f.canvas.fire('pointermove',event(100,100));assert.equal(f.canvas.style.cursor,'move');await f.canvas.fire('pointermove',event(650,450));assert.equal(f.canvas.style.cursor,'');
     for(const button of [0,1,2]){await f.canvas.fire('pointerdown',event(650,450,{button}));await f.canvas.fire('pointermove',event(660,460,{button,buttons:button===2?2:1}));await f.canvas.fire('pointerup',event(660,460,{button}));}
-    await f.canvas.fire('contextmenu',event(650,450,{button:2}));await f.canvas.fire('dblclick',event(650,450));assert.equal(stopped,0);assert.equal(JSON.stringify(f.workspace.getDraft()),before);assert.match(f.panel.children[1].textContent,/Enter, Esc or Finish/);
+    await f.canvas.fire('contextmenu',event(650,450,{button:2}));await f.canvas.fire('dblclick',event(650,450));assert.equal(stopped,0);assert.equal(JSON.stringify(f.workspace.getDraft()),before);assert.match(f.panel.children[1].textContent,/Enter \/ Finish saves.*Esc \/ Cancel discards/);
     await f.canvas.fire('pointerdown',event(100,100));assert.equal(stopped,1,'handle gesture stays exclusive');await f.canvas.fire('pointerup',event(100,100));await f.window.fire('keydown',event(0,0,{key:'Enter'}));await flush();assert.equal(f.workspace.getDraft(),null);
   }
 });
@@ -220,6 +220,27 @@ test('ephemeral draft recovery restores only matching mode CRS and unchanged sav
   const f=fixture();t.after(()=>f.workspace.dispose());const {map}=await seed(f);await f.switchTo('ortho');await f.action('edit-record',map.id);await f.canvas.fire('pointerdown',pointer(250,200));await f.canvas.fire('pointerup',pointer(240,200));const snapshot=f.workspace.exportDraft();
   const next=fixture();t.after(()=>next.workspace.dispose());await next.switchTo('ortho');next.workspace.store.records.set(map.id,structuredClone(map));next.watchMutations();assert.equal(await next.workspace.restoreDraft(snapshot),true);assert.equal(next.workspace.getDraft().vertices[0][0],240);assert.deepEqual(next.mutations,[]);
   for(const change of ['revision','geometry','mode','denied']){const other=fixture();t.after(()=>other.workspace.dispose());await other.switchTo(change==='mode'?'dsm':'ortho');const stored=structuredClone(map);if(change==='revision')stored.revision=88;if(change==='geometry')stored.vertices[0][0]++;other.workspace.store.records.set(map.id,stored);if(change==='denied')other.deny();assert.equal(await other.workspace.restoreDraft(snapshot),false);assert.equal(other.workspace.getDraft(),null);}
+});
+
+test('recovery retains explicit Volume intent only for new polygon drafts and describes Escape as cancellation',async t=>{
+  for(const [tool,intent,expected]of [['volume',true,true],['area',undefined,false],['area','true',false],['area',1,false],['distance',true,false]]){
+    const original=fixture(),next=fixture();t.after(()=>original.workspace.dispose());t.after(()=>next.workspace.dispose());await original.switchTo('ortho');await next.switchTo('ortho');original.workspace.setTool(tool);
+    const snapshot=original.workspace.exportDraft();assert.equal(snapshot.volumeIntent,tool==='volume');snapshot.volumeIntent=intent;
+    assert.equal(await next.workspace.restoreDraft(snapshot),true);assert.equal(next.workspace.exportDraft().volumeIntent,expected);
+    assert.match(next.panel.children[1].textContent,/Enter \/ Finish saves.*Esc \/ Cancel discards/);
+  }
+  const f=fixture(),next=fixture();t.after(()=>f.workspace.dispose());t.after(()=>next.workspace.dispose());const {map}=await seed(f);await f.switchTo('ortho');await next.switchTo('ortho');await f.action('edit-record',map.id);const snapshot=f.workspace.exportDraft();snapshot.volumeIntent=true;next.workspace.store.records.set(map.id,structuredClone(map));assert.equal(await next.workspace.restoreDraft(snapshot),true);assert.equal(next.workspace.exportDraft().volumeIntent,false);
+});
+
+test('Volume is disabled visibly only after scoped capabilities confirm no permitted source',async t=>{
+  const wait=deferred(),f=fixture({surfaceRequest:()=>wait.promise});t.after(()=>f.workspace.dispose());await f.switchTo('ortho');
+  assert.equal(f.workspace.volumeUnavailable,false);assert.match(f.controls.querySelector('[data-m-volume-availability]').textContent,/Checking/);
+  wait.resolve({capabilities:{rasterCalculations:true,pointSurfaceCalculations:true},calculationSources:[]});await flush();
+  assert.equal(f.workspace.volumeUnavailable,true);assert.match(f.controls.querySelector('[data-m-volume-availability]').textContent,/no permitted elevation surface/);assert.equal(f.panel.querySelector('[data-tool="volume"]').disabled,true);f.workspace.setTool('volume');assert.equal(f.workspace.getDraft(),null);
+  for(const [capabilities,sources]of [[{pointSurfaceCalculations:true},[{assetId:'hidden-ept',kind:'ept',methods:['point-surface-cut-fill']}]], [{rasterCalculations:true},[{assetId:'dsm',kind:'dsm',methods:['surface-cut-fill']}]], [{serverCalculations:true},[{assetId:'obj',kind:'obj',methods:['closed-mesh']}]]]){
+    const staff=capabilities.serverCalculations===true,request=async()=>({capabilities,calculationSources:sources}),other=fixture(staff?{adminRequest:request}:{surfaceRequest:request});t.after(()=>other.workspace.dispose());await other.switchTo('ortho');await flush();assert.equal(other.workspace.volumeUnavailable,false);other.workspace.setTool('volume');assert.equal(other.workspace.getDraft().kind,'polygon');
+  }
+  const failure=fixture({surfaceRequest:async()=>{throw new Error('Offline');}});t.after(()=>failure.workspace.dispose());await failure.switchTo('ortho');await flush();assert.equal(failure.workspace.volumeUnavailable,false);assert.match(failure.controls.querySelector('[data-m-volume-availability]').textContent,/could not be checked/);
 });
 test('known-expiry checkpoint remains memory-only after permit expiry but never after invalidation',async t=>{
   const f=fixture();t.after(()=>f.workspace.dispose());await f.switchTo('ortho');f.workspace.setTool('area');await f.canvas.fire('pointerdown',pointer(100,100));await f.canvas.fire('pointerup',pointer(100,100));const active=f.workspace.exportDraft();assert.equal(active.draft.vertices.length,1);f.watchMutations();f.expireBeforeTick();assert.equal(f.workspace.exportDraft(),null);const expired=f.workspace.exportDraft({recoverExpiredSession:true});assert.deepEqual(expired,active);assert.deepEqual(f.mutations,[]);f.workspace.invalidate();assert.equal(f.workspace.exportDraft({recoverExpiredSession:true}),null);

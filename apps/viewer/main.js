@@ -2721,10 +2721,8 @@ function syncMapVolumeAvailability() {
   else if (surface.selectedOptions[0]?.disabled) surface.value = demLayers.dsm ? 'dsm' : demLayers.dtm ? 'dtm' : 'auto';
   const volumeButton = document.getElementById('tool-volume');
   if (isMapMode()) {
-    volumeButton.disabled = false;
-    volumeButton.title = DSM_URL || DTM_URL
-      ? 'The selected DSM/DTM loads automatically when Volume is chosen.'
-      : 'Volume is unavailable because this task has no DSM or DTM elevation raster.';
+    volumeButton.disabled = measurementWorkspace?.volumeUnavailable===true;
+    volumeButton.title = volumeButton.disabled?'No permitted volume calculation source is published for this model.':'Volume uses a permitted elevation raster or registered point-cloud surface. Staff can also use available specialist methods.';
   }
 }
 
@@ -4413,7 +4411,7 @@ function switchMode(mode, { historyMode = 'push', updateHistory = true, force = 
   const isPotreeCloud = isPC && state.cloudMode === 'potree';
   const isDirectCloud = isPC && state.cloudMode === 'direct';
   const volumeButton = document.getElementById('tool-volume');
-  volumeButton.disabled = false;
+  volumeButton.disabled = measurementWorkspace?.volumeUnavailable===true;
   volumeButton.title = '';
   dom.threeContainer.style.display = (is3D || isDirectCloud) ? 'block' : 'none';
   dom.labelsContainer.style.display = (is3D || isDirectCloud) ? 'block' : 'none';

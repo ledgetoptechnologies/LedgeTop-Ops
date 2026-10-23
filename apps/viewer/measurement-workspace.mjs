@@ -25,6 +25,8 @@ export function createMeasurementWorkspace({ panel, context, token, permitted, t
   const displayCache=new Map();
   let displayRequests=0;
   let adminAllowed=false,specialistAllowed=false,activeDialog=null,invalidated=false,viewGeneration=0,dialogGeneration=0,capabilitiesReady=Promise.resolve();
+  const capabilitiesRequest=typeof adminRequest==='function'?adminRequest:surfaceRequest;
+  let volumeAvailability=typeof capabilitiesRequest==='function'?'pending':'unknown';
   const store=createMeasurementStore({token,accessGeneration,changed:renderPanel,beforeUnauthorized:onBeforeAccessLost});
   let pendingPick=null,lastPickAt=0,cursorOwner=null,previousCursor='';
   // A map outline remains E/N/0 while its 3D editing handles follow the visible
@@ -34,7 +36,7 @@ export function createMeasurementWorkspace({ panel, context, token, permitted, t
   const message=document.createElement('p');message.className='measurement-message';message.setAttribute('role','status');
   const controls=document.createElement('div');controls.className='measurement-workspace';
   controls.innerHTML=`<label class="measurement-units">Units <select data-m="units"><option value="imperial">Feet / inches</option><option value="feet">Decimal feet</option><option value="yards">Yards</option><option value="metric">Meters</option><option value="centimeters">Centimeters</option></select></label>
-    <div class="measurement-actions measurement-edit-actions" role="group" aria-label="Edit measurement"><button data-m="finish">Finish</button><button data-m="cancel">Cancel</button><button data-m="undo">Undo point</button><button data-m="edit">Edit selected</button><button data-m="focus">Focus selected</button></div>
+    <div class="measurement-actions measurement-edit-actions" role="group" aria-label="Edit measurement"><button data-m="finish">Finish</button><button data-m="cancel">Cancel</button><button data-m="undo">Undo point</button><button data-m="edit">Edit selected</button><button data-m="focus">Focus selected</button></div><p class="hint" data-m-volume-availability role="status" hidden></p>
     <details class="measurement-help"><summary>Controls &amp; accuracy</summary><p class="hint">Drawing: Shift to navigate; right-click to finish. Editing: drag away from handles to navigate normally. Enter / Finish saves and exits. Esc / Cancel discards unsaved changes. Delete / Backspace removes the selected point.</p><p class="hint">Finish a polygon to see its area immediately. Choose Calculate volume when you need volume and a side view relative to a reference base.</p><p class="hint">Measurements are private to you. Public-link changes reset on refresh. Display precision is not survey accuracy.</p></details>
     <div class="measurement-list-heading"><h4><span data-m-list-title>Saved measurements</span> <span data-m-count>0</span></h4><span class="hint">Newest first</span></div>
     <p class="hint measurement-list-caption" data-m-list-caption>Click a name to select. Edit changes its points. Exports include all saved measurements.</p>
@@ -222,6 +224,10 @@ export function createMeasurementWorkspace({ panel, context, token, permitted, t
     if(store.isInvalidated?.()&&!invalidated){invalidate('Personal measurements unavailable. Restore access and reload your measurements.');return;}
     const list=controls.querySelector('[data-m-list]');
     const visibleRecords=records();
+    const volumeNotice=controls.querySelector('[data-m-volume-availability]'),volumeButton=panel.querySelector('[data-tool="volume"]');
+    if(volumeButton)volumeButton.disabled=volumeAvailability==='unavailable';
+    volumeNotice.hidden=!['pending','unavailable','error'].includes(volumeAvailability);
+    volumeNotice.textContent=volumeAvailability==='unavailable'?'Volume is unavailable: no permitted elevation surface or specialist calculation source is published for this model. You can still measure distance and area.':volumeAvailability==='pending'?'Checking volume calculation availability…':volumeAvailability==='error'?'Volume availability could not be checked. You can draw an outline; calculating will verify current access and source data.':'';
     const temporary=!token()||(ready&&!store.persistent());
     const listTitle=temporary?'Temporary measurements':'Saved measurements';
     controls.querySelector('[data-m-list-title]').textContent=listTitle;
@@ -336,6 +342,7 @@ export function createMeasurementWorkspace({ panel, context, token, permitted, t
   }
   function setTool(tool){
     if(!allowed())return;
+    if(tool==='volume'&&volumeAvailability==='unavailable'){tell('Volume is unavailable for this model. Distance and polygon area remain available.');return;}
     if(!ready){tell('Wait for your saved measurements to load.');return;}
     if(tool==='clear'){tell('Select an individual measurement and use Delete.');return;}
     if(tool==='none'){void finish();return;}
@@ -355,7 +362,7 @@ export function createMeasurementWorkspace({ panel, context, token, permitted, t
     const placed=mapIn3D?displayGeometry(record):null;
     if(mapIn3D&&!placed){tell('Wait for the outline to appear on the 3D surface, then choose Edit again.');return;}
     closeDialogs();draft=structuredClone(record);draftDisplayVertices=placed?.map(p=>p.slice())||null;editing=true;selectedVertex=-1;editBaseline=JSON.stringify(record.vertices);selected=record.id;cursor=null;pendingPick=null;updateCursor();renderPanel();toolChanged('edit');
-    hoverHandle=false;updateCursor();tell('Drag a point; click + to insert. Drag elsewhere to navigate normally. Select a point then Delete or Backspace to remove it. Enter, Esc or Finish saves and exits editing.'+(mapIn3D?' This stays a horizontal outline; surface heights are used only to position its handles.':'')+(['cutM3','volumeM3','netM3'].some(key=>Number.isFinite(record.results?.[key]))?' Changing the outline makes its old volume historical until you recalculate.':''));
+    hoverHandle=false;updateCursor();tell('Drag a point; click + to insert. Drag elsewhere to navigate normally. Select a point then Delete or Backspace to remove it. Enter / Finish saves and exits editing. Esc / Cancel discards unsaved changes.'+(mapIn3D?' This stays a horizontal outline; surface heights are used only to position its handles.':'')+(['cutM3','volumeM3','netM3'].some(key=>Number.isFinite(record.results?.[key]))?' Changing the outline makes its old volume historical until you recalculate.':''));
   }
   function editHandles(){const rect=bound.element.getBoundingClientRect();return measurementEditHandles(draft,(displayGeometry(draft)||[]).map(p=>bound.project(p,rect)),selectedVertex,rect.width,rect.height);}
   function moveDraftVertex(index,point){
@@ -562,7 +569,19 @@ export function createMeasurementWorkspace({ panel, context, token, permitted, t
     }catch(error){tell(error.message);}
   });
   initialLoad=store.load().then(notice=>{ready=true;loadFailed=false;renderPanel();if(notice)tell(notice);}).catch(error=>{loadFailed=true;renderPanel();tell(`Personal measurements unavailable: ${error.message}. Retry loading measurements when access is restored.`);});
-  if(adminRequest)capabilitiesReady=adminRequest('capabilities',{}).then(result=>{if(!disposed&&allowed()){const newlyAllowed=!adminAllowed&&result.capabilities?.serverCalculations===true;adminAllowed=result.capabilities?.serverCalculations===true;if(newlyAllowed){for(const [id,entry]of displayCache)if(entry.awaitingStaff){entry.controller.abort();displayCache.delete(id);}lastOverlayFrame=null;}specialistAllowed=adminAllowed&&availableAdminSources(result).some(source=>source.methods.some(method=>method!=='surface-cut-fill'));renderPanel();}}).catch(()=>{adminAllowed=false;specialistAllowed=false;});
+  if(typeof capabilitiesRequest==='function')capabilitiesReady=capabilitiesRequest('capabilities',{}).then(result=>{if(!disposed&&allowed()){
+    const staff=typeof adminRequest==='function'&&result.capabilities?.serverCalculations===true,newlyAllowed=!adminAllowed&&staff;adminAllowed=staff;
+    if(newlyAllowed){for(const [id,entry]of displayCache)if(entry.awaitingStaff){entry.controller.abort();displayCache.delete(id);}lastOverlayFrame=null;}
+    specialistAllowed=adminAllowed&&availableAdminSources(result).some(source=>source.methods.some(method=>method!=='surface-cut-fill'));
+    // Only a successful scoped capability response with a complete source list
+    // can establish absence. Displayed assets alone never establish permission.
+    if(Array.isArray(result.calculationSources)){
+      const raster=result.capabilities?.rasterCalculations===true||adminAllowed,point=result.capabilities?.pointSurfaceCalculations===true;
+      const available=result.calculationSources.some(source=>typeof source?.assetId==='string'&&Array.isArray(source.methods)&&source.methods.some(method=>raster&&['dsm','dtm'].includes(source.kind)&&method==='surface-cut-fill'||point&&source.kind==='ept'&&method==='point-surface-cut-fill'||adminAllowed&&['closed-mesh','reconstructed-estimate'].includes(method)));
+      volumeAvailability=available?'available':'unavailable';
+    }else volumeAvailability='unknown';
+    renderPanel();
+  }}).catch(()=>{if(!disposed&&allowed()){adminAllowed=false;specialistAllowed=false;volumeAvailability='error';renderPanel();}});
   renderPanel();
   function exportDraft({recoverExpiredSession=false}={}){
     // Only the authenticated session controller may request the expiry path;
@@ -570,7 +589,7 @@ export function createMeasurementWorkspace({ panel, context, token, permitted, t
     if(!draft||disposed||invalidated||store.isInvalidated?.()||(!recoverExpiredSession&&!allowed()))return null;
     // An unfinished drag is not a completed edit. Preserve its starting point.
     const saved=store.records.get(draft.id);
-    return structuredClone({draft:{...draftRecord(),vertices:gesture?.index>=0?gesture.original:draft.vertices},editing,baseline:editBaseline,displayVertices:gesture?.index>=0?gesture.originalDisplay:draftDisplayVertices,mode:context()?.mode,coordinateReference:coordinateReference(),savedRevision:saved?.revision??null,savedVertices:saved?.vertices??null});
+    return structuredClone({draft:{...draftRecord(),vertices:gesture?.index>=0?gesture.original:draft.vertices},editing,volumeIntent:!editing&&draft.kind==='polygon'&&volumeIntent,baseline:editBaseline,displayVertices:gesture?.index>=0?gesture.originalDisplay:draftDisplayVertices,mode:context()?.mode,coordinateReference:coordinateReference(),savedRevision:saved?.revision??null,savedVertices:saved?.vertices??null});
   }
   async function restoreDraft(snapshot){
     await initialLoad;
@@ -585,7 +604,7 @@ export function createMeasurementWorkspace({ panel, context, token, permitted, t
     const display=snapshot.displayVertices;
     if(display!==null&&display!==undefined&&(!Array.isArray(display)||display.length!==points.length||!display.every(p=>Array.isArray(p)&&p.length===3&&p.every(Number.isFinite))))return false;
     if(candidate.collection==='map'&&measurementCollection(context()?.mode)==='spatial3d'&&!display)return false;
-    draft=structuredClone(candidate);editing=snapshot.editing===true;editBaseline=editing?snapshot.baseline:null;draftDisplayVertices=display?structuredClone(display):null;selected=draft.id;selectedVertex=-1;gesture=null;pendingPick=null;cursor=null;hoverHandle=false;updateCursor();renderPanel();toolChanged(editing?'edit':draft.kind==='distance'?'distance':'area');tell('Your unfinished measurement was restored after access renewed. Enter, Esc or Finish saves and exits.');return true;
+    draft=structuredClone(candidate);editing=snapshot.editing===true;volumeIntent=snapshot.volumeIntent===true&&!editing&&draft.kind==='polygon';editBaseline=editing?snapshot.baseline:null;draftDisplayVertices=display?structuredClone(display):null;selected=draft.id;selectedVertex=-1;gesture=null;pendingPick=null;cursor=null;hoverHandle=false;updateCursor();renderPanel();toolChanged(editing?'edit':draft.kind==='distance'?'distance':volumeIntent?'volume':'area');tell('Your unfinished measurement was restored after access renewed. Enter / Finish saves and exits. Esc / Cancel discards unsaved changes.');return true;
   }
-  return {setTool,store,tick:draw,invalidate,exportDraft,restoreDraft,showRecoveryNotice:retry=>{if(!disposed&&allowed())tell(retry?'Your unfinished measurement is kept in this tab, but could not be restored while saved measurements are unavailable. It will retry on the next access renewal. Keep this tab open; nothing has been saved.':'Your unfinished measurement could not be restored because the saved outline or view changed. No draft changes were saved; review the current measurement before editing again.');},captureView:()=>controls.querySelector('[data-m="screenshot"]').click(),openReport:()=>controls.querySelector('[data-m="report"]').click(),isInvalidated:()=>invalidated||store.isInvalidated?.(),modeChanged(){cancelGesture();viewGeneration++;clearDisplayRequests({all:true});void finish({openVolume:false});closeDialogs();volumeAbort?.abort();bind(null);renderPanel();},isDrawing:()=>!!draft,dispose(){disposed=true;clearDisplayRequests({all:true});listLayout.dispose();viewGeneration++;clearInterval(timer);closeDialogs();volumeAbort?.abort();bind(null);controls.remove();message.remove();store.invalidate?.();},getDraft:()=>draft&&draftRecord()};
+  return {get volumeUnavailable(){return volumeAvailability==='unavailable';},setTool,store,tick:draw,invalidate,exportDraft,restoreDraft,showRecoveryNotice:retry=>{if(!disposed&&allowed())tell(retry?'Your unfinished measurement is kept in this tab, but could not be restored while saved measurements are unavailable. It will retry on the next access renewal. Keep this tab open; nothing has been saved.':'Your unfinished measurement could not be restored because the saved outline or view changed. No draft changes were saved; review the current measurement before editing again.');},captureView:()=>controls.querySelector('[data-m="screenshot"]').click(),openReport:()=>controls.querySelector('[data-m="report"]').click(),isInvalidated:()=>invalidated||store.isInvalidated?.(),modeChanged(){cancelGesture();viewGeneration++;clearDisplayRequests({all:true});void finish({openVolume:false});closeDialogs();volumeAbort?.abort();bind(null);renderPanel();},isDrawing:()=>!!draft,dispose(){disposed=true;clearDisplayRequests({all:true});listLayout.dispose();viewGeneration++;clearInterval(timer);closeDialogs();volumeAbort?.abort();bind(null);controls.remove();message.remove();store.invalidate?.();},getDraft:()=>draft&&draftRecord()};
 }
