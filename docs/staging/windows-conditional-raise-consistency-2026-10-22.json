@@ -1,0 +1,33 @@
+{
+  "schemaVersion": 1,
+  "scope": "fixed-test-source-local-D1-conditional-raise-consistency",
+  "sourceBase": "cf8b2eead8ea451d336f89528bfff04c3b0506fc",
+  "command": "node --test scripts/windows-files-conditional-raise-d1.test.mjs",
+  "runtime": {
+    "node": "24.16.0",
+    "miniflare": "4.20260730.0",
+    "workerd": "1.20260730.1",
+    "compatibilityDate": "2026-08-06"
+  },
+  "result": {
+    "testsPassed": 5,
+    "testsFailed": 0,
+    "forms": 2,
+    "casesPerForm": 30,
+    "mutationsTested": 60,
+    "denialsPerForm": 21,
+    "allowsPerForm": 9,
+    "outboundAttempts": 0,
+    "runtimeDisposed": true
+  },
+  "canonicalBaselineVerified": false,
+  "semanticReadinessVerified": false,
+  "capturedDDLReadOrExecuted": false,
+  "fullMigrationReplay": false,
+  "remoteInvocation": false,
+  "limits": [
+    "Only fixed synthetic test-source SQL was executed in one fresh local D1 database.",
+    "Matching observations cover selected cases, not all SQLite expressions or complete production trigger behavior.",
+    "No captured schema definitions, migration history or live resource were changed or approved."
+  ]
+}

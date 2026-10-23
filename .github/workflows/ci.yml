@@ -48,7 +48,7 @@ jobs:
         run: node --test scripts/staging-ops-two-source-connection-profile-v1.test.mjs
 
       - name: Verify Windows staging preflight without network or credentials
-        run: node --test scripts/windows-files-staging-preflight.test.mjs scripts/windows-files-schema-query.test.mjs scripts/windows-files-schema-object-digests.test.mjs scripts/windows-files-canonical-comparison.test.mjs scripts/windows-files-canonical-runner.test.mjs scripts/windows-files-schema-definition-diagnostic.test.mjs scripts/windows-files-ddl-lexical-attribution.test.mjs
+        run: node --test scripts/windows-files-staging-preflight.test.mjs scripts/windows-files-schema-query.test.mjs scripts/windows-files-schema-object-digests.test.mjs scripts/windows-files-canonical-comparison.test.mjs scripts/windows-files-canonical-runner.test.mjs scripts/windows-files-schema-definition-diagnostic.test.mjs scripts/windows-files-ddl-lexical-attribution.test.mjs scripts/windows-files-conditional-raise-d1.test.mjs
 
       - name: Verify frozen203 paired staging authority and cleanup
         run: node --test scripts/staging-pa-ops-authority-v203.test.mjs

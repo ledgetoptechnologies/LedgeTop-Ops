@@ -82,6 +82,30 @@ Generator references and preflight observations now include `schemaQuerySha256` 
 
 The corrected query did not change any schema hashes/counts in this canonical local source, and current staging hashes remain different. A complete exact-query full replay—not a scope label alone—qualified these refreshed local artifacts. Subsequent validation-only changes did not rerun migrations. Local checks: 34/34 focused query/helper/comparison/preflight tests passed. No remote query was performed in this work.
 
+### Separate conditional RAISE consistency exercise
+
+`scripts/windows-files-conditional-raise-d1.test.mjs` executes only fixed synthetic
+test-source SQL in one fresh local Miniflare/D1 database, with outbound requests
+denied and the runtime disposed in `finally`. It never reads or executes captured
+DDL and does not import or replay migration SQL. Its fixed helper emits either
+`SELECT RAISE(ABORT, message) WHERE predicate` or
+`SELECT CASE WHEN predicate THEN RAISE(ABORT, message) END`, preserving each
+test's message and predicate within separate synthetic tables.
+
+The 30 cases per form cover numeric true/false and SQL NULL; Ops0066-style staff
+subject/fence and length guards; Ops0074-style `AFTER INSERT` update followed by
+`changes()<>1`, including rollback of two updated rows and the triggering insert;
+and Client0154-style notification EXISTS/action/status/revision mismatches.
+Assertions check explicit expected allow/deny results and retained rows as well
+as agreement between forms. The local run passed 5/5 tests, 60 controlled
+mutations, with zero outbound attempts. Its bounded receipt is
+`docs/staging/windows-conditional-raise-consistency-2026-10-22.json`.
+
+These observations qualify only those consistency cases. They do not prove
+general expression equivalence, complete production trigger behavior, exact
+schema identity, canonical baseline validity or staging semantic readiness.
+Both `canonicalBaselineVerified` and `semanticReadinessVerified` remain false.
+
 ### Invoke replay from a file
 
 Use the CLI above or import the generator from an owned `.mjs` file; do not use
