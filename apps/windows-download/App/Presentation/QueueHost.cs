@@ -183,7 +183,10 @@ public sealed class QueueHost : IAsyncDisposable
                 }
                 Changed?.Invoke();
             } catch (Exception) { /* an observer failure can't undo the saves */ }
-            finally { Hooks.HeldSaveSettled?.Invoke(); Settle(operation); }
+            finally {
+                // Closing waits for this operation, so it settles even if an observer throws.
+                try { Hooks.HeldSaveSettled?.Invoke(); } finally { Settle(operation); }
+            }
         });
     }
 

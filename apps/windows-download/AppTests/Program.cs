@@ -44,6 +44,7 @@ var groups = new (string Name, Func<Task> Run)[] {
     ("pause all wins over a resume still waiting its turn, and a later resume still works", PauseAllBeatsPendingResume),
     ("a repeated resume of the running download never frees its slot for a second source", RepeatedResumeKeepsOneActive),
     ("a late finish from an older start never frees a newer start's slot", StaleIdleKeepsOneActive),
+    ("a throwing save observer still lets closing finish", ThrowingSaveObserverStillCloses),
     ("closing releases the backend once, after its queues", BackendReleased),
     ("nothing signs in until a kind of files is chosen, and only that kind opens", ChooseBeforeSignIn),
     ("a remembered choice opens directly; a corrupt or unoffered one asks again", RememberedChoice),
@@ -844,12 +845,17 @@ async Task PauseAllBeatsChosenStart()
         await reached.Task.WaitAsync(TimeSpan.FromSeconds(10));
         // The pump has chosen report; Pause all now holds it before it starts.
         await host.SnapshotAsync();
+        var saved = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        host.Hooks.HeldSaveSettled = () => saved.TrySetResult();
         await host.PauseAllAsync();
         gate.SetResult();
         await started.Task.WaitAsync(TimeSpan.FromSeconds(30)); // the older start has been decided
         Equal(0, backend.Writing);
         True(!host.IsBusy, "nothing started");
-        await Until(() => SavedStates(backend.StateDirectory, "paused") == 1, "report saved paused");
+        // Read the queue file only after Pause all's background save has finished writing it.
+        await saved.Task.WaitAsync(TimeSpan.FromSeconds(30));
+        Equal(1, SavedStates(backend.StateDirectory, "paused"));
+        Equal(0, SavedStates(backend.StateDirectory, "queued"));
         True(!File.Exists(Path.Combine(downloads, "report.pdf")), "nothing downloaded");
     } finally { gate.TrySetResult(); await host.DisposeAsync(); try { Directory.Delete(root, true); } catch (IOException) { } }
 }
@@ -983,6 +989,21 @@ async Task StaleIdleKeepsOneActive()
         Equal(QueuedTransferState.Paused, StateOf(items, "ortho-full.tif"));
         Equal(1, backend.MostAtOnce);
     } finally { gate.TrySetResult(); await host.DisposeAsync(); try { Directory.Delete(root, true); } catch (IOException) { } }
+}
+
+async Task ThrowingSaveObserverStillCloses()
+{
+    var (backend, host, root, downloads, reference) = await HostFixture(rate: 300_000);
+    try {
+        Equal(EnqueueOutcome.Added, await host.EnqueueAsync("portal", await reference("ortho-full.tif"), "ortho-full.tif", downloads));
+        Equal(EnqueueOutcome.Added, await host.EnqueueAsync("portal", await reference("report.pdf"), "report.pdf", downloads));
+        await Until(() => host.IsBusy && backend.Writing == 1, "ortho running");
+        await host.SnapshotAsync();
+        host.Hooks.HeldSaveSettled = () => throw new InvalidOperationException("observer failure");
+        await host.PauseAllAsync();
+        await host.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(30));
+        Equal(2, SavedStates(backend.StateDirectory, "paused"));
+    } finally { await host.DisposeAsync(); try { Directory.Delete(root, true); } catch (IOException) { } }
 }
 
 async Task NoStartAfterClose()
