@@ -119,6 +119,21 @@ public sealed class MainViewModel : Observable, IAsyncDisposable
     public Command ClearFinished { get; }
     public Command LoadMoreFiles { get; }
 
+    /// <summary>
+    /// Shown when switching couldn't confirm this view's downloads stopped and were saved. Nothing from this view stays on
+    /// screen, switching is no longer offered, and the person is asked to restart. The queue's own records are left as they are.
+    /// </summary>
+    public void ShowRestartRequired()
+    {
+        switchAccess = null; SwitchAccessText = ""; Raise(nameof(CanSwitchAccess)); SwitchAccess.Refresh();
+        Sections.Clear(); Files.Clear(); Transfers.Clear(); selected = null; moreFiles = null;
+        Raise(nameof(Location)); Raise(nameof(FilesEmptyText)); Raise(nameof(HasMoreFiles));
+        Banner = ""; Notice = "";
+        SetupTitle = "Restart Ledge Top Files";
+        SetupText = "Your downloads couldn't be stopped and saved cleanly, so nothing else will open until you restart. Close Ledge Top Files and open it again. We'll check your saved downloads before you resume them.";
+        Screen = Screen.NotSetUp;
+    }
+
     /// <summary>Shown when this PC has no usable setup for the real sources; <paramref name="problem"/> says why.</summary>
     public void ShowNotSetUp(string? problem = null)
     {
