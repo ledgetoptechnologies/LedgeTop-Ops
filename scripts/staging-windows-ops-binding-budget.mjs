@@ -32,11 +32,15 @@ export function inspectWindowsStagingOpsBindingBudget(input) {
     reject("windows_staging_ops_binding_budget_secret_type_invalid");
   const plainText = [...bindings.values()].filter(type => type === "plain_text").length;
   const secretText = [...bindings.values()].filter(type => type === "secret_text").length;
+  const secretKey = [...bindings.values()].filter(type => type === "secret_key").length;
   const additionalSecretNames = plannedSecretNames.filter(name => !bindings.has(name));
-  const plannedTotal = plainText + secretText + additionalSecretNames.length;
+  // A CryptoKey secret still consumes environment-variable capacity even
+  // though it is not a secret-text value or one of these planned slots.
+  const plannedTotal = plainText + secretText + secretKey + additionalSecretNames.length;
   if (plannedTotal > LIMIT) reject("windows_staging_ops_text_secret_budget_exceeded");
   return Object.freeze({ schemaVersion: 1, accountId: input.accountId, workerName: input.workerName,
     limit: LIMIT, observedPlainText: plainText, observedSecretText: secretText,
+    observedSecretKey: secretKey,
     additionalSecretNames: Object.freeze([...additionalSecretNames]), plannedTotal,
     observedOnly: true, cloudChanged: false });
 }

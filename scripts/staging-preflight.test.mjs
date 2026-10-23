@@ -157,6 +157,17 @@ test("binding budget rejects other identities, unreviewed shapes and secret-slot
   ];
   for (const change of cases) { const input = budgetFixture(); change(input); assert.throws(() => inspectWindowsStagingOpsBindingBudget(input)); }
 });
+test("binding budget counts CryptoKey secrets at and beyond the 128-variable boundary", () => {
+  const full = budgetFixture(125, 0);
+  full.bindings.push({ name: "EXISTING_CRYPTO_KEY", type: "secret_key" });
+  assert.throws(() => inspectWindowsStagingOpsBindingBudget(full), /text_secret_budget_exceeded/);
+  const boundary = budgetFixture(124, 0);
+  boundary.bindings.push({ name: "EXISTING_CRYPTO_KEY", type: "secret_key" });
+  const receipt = inspectWindowsStagingOpsBindingBudget(boundary);
+  assert.equal(receipt.observedSecretKey, 1);
+  assert.equal(receipt.observedSecretText, 0);
+  assert.equal(receipt.plannedTotal, 128);
+});
 test("keeps Project Alpha Directory reconciliation modeled and default-off", () => {
   const staging = stagingConfig("operations"), production = productionFrom(staging);
   assert.equal(staging.vars.PROJECT_ALPHA_DIRECTORY_RECONCILIATION_ENABLED, "false");
