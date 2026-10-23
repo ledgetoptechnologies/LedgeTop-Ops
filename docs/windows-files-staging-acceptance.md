@@ -1,11 +1,60 @@
 # Windows files: staging activation and acceptance
 
 This packet prepares the first real desktop-to-service acceptance. It does not
-authorize production activation or claim a deployed Windows gateway. Use only
+authorize production activation or claim deployed Windows application routes. Use only
 synthetic data and explicitly reviewed staging identities. Never access TrueNAS
 or NAS paths, including NAS mounts on the staging host.
 
-## Current boundary
+## Current staging checkpoint: October 23, 2026
+
+The active PR250 candidate is `cf455027d517aee56a90537c40f365f077dca4ae`.
+It includes the four review repairs in `15c5995a` and a merge of current main;
+the App/Core tree is unchanged by that merge. The repaired App suite passed
+43/43 groups, Sync access/lifecycle tests 44/44, mounted Ops lifecycle tests
+12/12 and the combined readiness/deployment suite 99/99. These are source-test
+results, not installed-package or deployed-service acceptance.
+
+At the last observation, eleven of twelve exact-candidate hosted checks had
+passed. General CI run `39963300995` still had the Operations test job running;
+Windows run `39963301002` and gateway run `39963301052` had succeeded. Re-read
+the actual checks before using this checkpoint; an earlier green candidate is
+not evidence for this head. EH task `ceff196b-0f59-420a-b21a-ec89c098ba60` now
+has this candidate at revision 9, in review with no formal verdict. The owner
+candidate update was completed through the supported operation. Execution
+admission remains outstanding; recorded host tests are not EH execution.
+
+A distinct synthetic gateway is now running on the allowed staging server's
+local disk, with the human-approved exact HTTPS route
+`https://employee-gateway-staging.ledgetopdroneservices.com/v1/read`.
+Public HTTPS checks verified unsigned refusal, off-route refusal, a signed
+manifest, the full 2 MiB fixture and a resumed byte range with matching SHA256.
+It contains no NAS or real client data. Its gateway ID is
+`5cf305f7-57e7-49ba-b534-730997999331`, with root ID
+`4632b5cc-9564-4cda-afc8-3a053fdd7e30`. This running service is separate from
+the earlier disposable smoke container that was cleaned up. It has not been
+enrolled through an Ops file grant, and the full desktop-to-deployed-Ops/portal
+acceptance remains unverified. No gateway secret is included in this document.
+
+The five Windows suffix migrations remain pending in the last schema receipt;
+the separate 0225 staff handoff must not be silently added to that window.
+Paired staging application routes remain inactive. Preparation helpers now
+preserve captured live variables and explicitly inherit existing bindings;
+see `windows-files-staging-inherited-upload.md`. Their 61/61 focused tests and
+actual captured-input check do not prove an upload, opaque asset association,
+physical resource identity, current settings freshness or promotion approval.
+
+Recovery is still a gate. The installed Wrangler's read-only Time Travel
+command was rejected at its preliminary database-metadata GET with error
+10000, before requesting a bookmark. A fixed `SELECT 1` through the same
+identity and pinned Ops binding succeeded with zero changes. This does not
+prove global session expiry or establish a recovery checkpoint. No alternate
+identity, database write, restore or migration was attempted to bypass it.
+
+This checkpoint supersedes the candidate, task, gateway and access-state
+statements in the historical notes below. Every observation must be refreshed
+at the actual activation window. No section grants execution permission.
+
+## Historical preparation and qualification notes
 
 PR250 is the active integration review. Its older pushed head `61c8cbbf`
 passed Windows, gateway and nine general CI jobs, but Operations tests failed
