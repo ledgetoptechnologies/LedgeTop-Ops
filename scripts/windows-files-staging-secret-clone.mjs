@@ -11,7 +11,7 @@ const without = (value, removed) => Object.fromEntries(Object.entries(value).fil
 const fail = () => { throw Error("windows_staging_secret_clone_inputs_invalid"); };
 const budgetFail = () => { throw Error("windows_staging_secret_clone_environment_budget_exceeded"); };
 const VERSION_ENVELOPE = ["id", "number", "metadata", "annotations"];
-const MODERN_ENVELOPE = ["id", "number", "startup_time_ms", "annotations", "urls", "source", "created_on", "author_id"];
+const MODERN_ENVELOPE = ["id", "number", "startup_time_ms", "annotations", "urls", "source", "created_on", "author_id", "author_email"];
 const MODERN_STATE = ["compatibility_date", "compatibility_flags", "main_module", "exports", "usage_model", "containers", "limits", "modules", "bindings", "env", "assets"];
 
 function bindingMap(bindings) {
@@ -53,6 +53,7 @@ function envelope(value, expectedId, modern) {
     if (!Number.isFinite(value.startup_time_ms) || value.startup_time_ms < 0 || !object(value.annotations)
       || !Array.isArray(value.urls) || value.urls.length > 100 || JSON.stringify(value.urls).length > 65536
       || typeof value.source !== "string" || value.source.length > 128 || typeof value.author_id !== "string" || value.author_id.length > 256
+      || Object.hasOwn(value,"author_email") && (typeof value.author_email !== "string" || value.author_email.length > 320)
       || typeof value.created_on !== "string" || !Number.isFinite(Date.parse(value.created_on))) fail();
   } else if (!object(value.metadata) || !object(value.annotations)) fail();
 }
@@ -100,12 +101,25 @@ export function compareWindowsStagingSecretClone(input) {
     const baselineResource = without(input.baseline.version.resources,["bindings"]), candidateResource = without(input.candidate.version.resources,["bindings"]);
     // Deployment source is envelope provenance; etag and handler metadata remain
     // pinned with all other returned resource fields.
-    if (!same(without(baselineResource.script,["last_deployed_from"]),without(candidateResource.script,["last_deployed_from"]))
-      || !same(baselineResource.script_runtime,candidateResource.script_runtime)) fail();
+    let legacyAssetDefaultMaterialized = false;
+    if (!same(baselineResource.script_runtime,candidateResource.script_runtime)) {
+      const before = baselineResource.script_runtime.assets, after = candidateResource.script_runtime.assets;
+      const baselineModern = input.baseline.modern.assets, candidateModern = input.candidate.modern.assets;
+      if (Object.hasOwn(before,"html_handling") || !Object.hasOwn(after,"html_handling")
+        || !["auto-trailing-slash","force-trailing-slash","drop-trailing-slash","none"].includes(after.html_handling)
+        || !same(baselineModern,candidateModern) || after.html_handling !== baselineModern.config.html_handling
+        || after.html_handling !== candidateModern.config.html_handling) fail();
+      const normalized = structuredClone(baselineResource.script_runtime);
+      normalized.assets.html_handling = after.html_handling;
+      if (!same(normalized,candidateResource.script_runtime)) fail();
+      legacyAssetDefaultMaterialized = true;
+    }
+    if (!same(without(baselineResource.script,["last_deployed_from"]),without(candidateResource.script,["last_deployed_from"]))) fail();
     if (!same(without(input.baseline.modern,[...MODERN_ENVELOPE,"bindings","env"]),without(input.candidate.modern,[...MODERN_ENVELOPE,"bindings","env"]))) fail();
     return {schemaVersion:1,status:"supplied_secret_only_candidate_matches",app:input.app,workerName:input.workerName,
       baselineVersionId:input.baselineVersionId,candidateVersionId:input.candidateVersionId,addedSecretCount:planned.length,
       environmentCount:oldCount+planned.length,modulesEqual:true,returnedAssetsMetadataEqual:true,opaqueAssetAssociationVerified:false,
+      legacyAssetDefaultMaterialized,
       physicallyVerified:false,freshnessVerified:false,authorized:false,activated:false};
   } catch (error) {
     if (error?.message === "windows_staging_secret_clone_environment_budget_exceeded") budgetFail();

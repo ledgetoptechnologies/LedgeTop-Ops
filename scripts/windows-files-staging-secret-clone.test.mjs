@@ -49,6 +49,8 @@ const changes={
   "malformed old-version annotations":f=>{f.baseline.version.annotations=[];},
   "malformed candidate-version annotations":f=>{f.candidate.version.annotations=null;},
   "missing candidate-version annotations":f=>{delete f.candidate.version.annotations;},
+  "nonstring author email":f=>{f.candidate.modern.author_email=null;},
+  "unbounded author email":f=>{f.candidate.modern.author_email="x".repeat(321);},
   "object URLs instead of provider array":f=>{f.candidate.modern.urls={version:[]};},
   "unbounded URLs array":f=>{f.candidate.modern.urls=Array.from({length:101},()=>null);},
   "wrong planned secret":f=>{f.plannedSecretNames[0]="OTHER_SECRET";},"incomplete plan":f=>{f.plannedSecretNames.pop();},
@@ -88,6 +90,33 @@ test("128 environment budget refuses actual Ops126+3 shape without exposing valu
   const client=fixture("delivery");fillEnvironment(client,99);assert.equal(compare(client).environmentCount,100);
 });
 test("old secret slots must be previously absent",()=>{const input=fixture();input.baseline.version.resources.bindings.push({name:input.plannedSecretNames[0],type:"secret_text"});assert.throws(()=>compare(input),/inputs_invalid/);});
+test("secret-only comparison never admits even a consistently represented obsolete-variable retirement",()=>{
+  const input=fixture();
+  input.candidate.version.resources.bindings=input.candidate.version.resources.bindings.filter(b=>b.name!=="PRIVATE_VALUE");
+  input.candidate.modern.bindings=input.candidate.modern.bindings.filter(b=>b.name!=="PRIVATE_VALUE");
+  delete input.candidate.modern.env.PRIVATE_VALUE;
+  assert.throws(()=>compare(input),/inputs_invalid/);
+});
+test("provider author provenance and a lossless legacy asset default materialization are admitted narrowly",()=>{
+  const input=fixture();delete input.baseline.version.resources.script_runtime.assets.html_handling;
+  input.candidate.modern.author_email="synthetic-provider@example.invalid";
+  const before=structuredClone(input),result=compare(input);
+  assert.deepEqual(input,before);assert.equal(result.legacyAssetDefaultMaterialized,true);
+  assert.equal(result.returnedAssetsMetadataEqual,true);assert.equal(result.opaqueAssetAssociationVerified,false);
+  assert.doesNotMatch(JSON.stringify(result),/synthetic-provider|author_email/);
+  const unchanged=fixture();assert.equal(compare(unchanged).legacyAssetDefaultMaterialized,false);
+});
+for(const [label,change] of [
+  ["changed modern config",f=>{f.candidate.modern.assets.config.html_handling="none";}],
+  ["mismatched legacy default",f=>{f.candidate.version.resources.script_runtime.assets.html_handling="none";}],
+  ["unknown additional legacy key",f=>{f.candidate.version.resources.script_runtime.assets.unknown_default=true;}],
+  ["explicit different baseline default",f=>{f.baseline.version.resources.script_runtime.assets.html_handling="none";}],
+  ["missing baseline modern default",f=>{delete f.baseline.modern.assets.config.html_handling;}],
+  ["unsupported matching enum",f=>{f.baseline.modern.assets.config.html_handling="unknown";f.candidate.modern.assets.config.html_handling="unknown";f.candidate.version.resources.script_runtime.assets.html_handling="unknown";}],
+]) test(`legacy default exception refuses ${label}`,()=>{
+  const input=fixture();delete input.baseline.version.resources.script_runtime.assets.html_handling;change(input);
+  assert.throws(()=>compare(input),/inputs_invalid/);
+});
 for(const [label,change] of [
   ["missing modern assets",pair=>{delete pair.modern.assets;}],
   ["null modern assets",pair=>{pair.modern.assets=null;}],

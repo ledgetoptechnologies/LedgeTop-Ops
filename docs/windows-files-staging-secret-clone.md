@@ -55,6 +55,16 @@ The provider's URL envelope is a bounded array, including an empty array; its
 entries remain opaque envelope data rather than invented runtime policy.
 The script-version response's top-level annotations must be present as an object,
 just like modern annotations; a provider annotation change is not runtime drift.
+Modern `author_email` is optional bounded string provenance, never runtime policy.
+
+One observed lossless legacy representation change is allowed: a baseline legacy
+runtime assets object may omit `html_handling` while the candidate materializes
+it. This passes only when the complete modern assets object remains identical,
+the new value equals both modern `assets.config.html_handling` values, and it is
+a supported enum. The baseline must genuinely omit the legacy field; an explicit
+different value, any other added/defaulted key, or any further runtime difference
+refuses. The receipt records `legacyAssetDefaultMaterialized`; it does not imply
+that hidden asset associations were verified. No other normalization is performed.
 
 The API's modern assets response currently exposes configuration only. A match
 returns `returnedAssetsMetadataEqual:true` and explicitly
