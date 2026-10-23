@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent } from "react";
 import { createPortal } from "react-dom";
-import { projectAlphaSourceName, type DeliveryLocationCollection, type Permission, type SessionUser, type ViewerAdminSessionGrant, type ViewerModelSummary, type ViewerPlatformOverview, type ViewerPublicShareSummary } from "@ltds/shared";
+import { OPERATIONS_APP_API, projectAlphaSourceName, type DeliveryLocationCollection, type Permission, type SessionUser, type ViewerAdminSessionGrant, type ViewerModelSummary, type ViewerPlatformOverview, type ViewerPublicShareSummary } from "@ltds/shared";
 import { AccountMenu, Brand, Card, EmptyState, Loading, LtMark, Skeleton, StatusPill, openViewerShell, requestChoice, requestText, type TextRequest } from "@ltds/ui";
 import { FinanceSummaryPanel } from "./FinanceSummaryPanel";
 import { SessionExpiry } from "./SessionExpiry";
@@ -441,7 +441,7 @@ export function OperationsApp() {
           onClick={event => { if (!event.ctrlKey && !event.metaKey && !event.shiftKey && !event.altKey && event.button === 0) { event.preventDefault(); navigate("notifications", "/notifications"); } }}>
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden="true"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9Z" /><path d="M9 20h6" /></svg>
         </a>}
-        <AccountMenu className="profile" displayName={session.user.displayName}
+        <AccountMenu className="profile" displayName={session.user.displayName} appApi={OPERATIONS_APP_API}
           sessionStatus={<SessionExpiry userId={session.user.id} />}
           avatar={session.user.displayName.slice(0, 1).toUpperCase()} details={<>
             <small>

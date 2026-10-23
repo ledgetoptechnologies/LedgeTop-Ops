@@ -1,31 +1,33 @@
 import { useCallback, useEffect, useState } from "react";
 import {
-  APP_PLATFORMS, APP_PLATFORM_NAMES, APP_RELEASES_PATH, appDownloadSize, detectAppPlatform, parseAppReleases,
+  APP_PLATFORMS, APP_PLATFORM_NAMES, appDownloadSize, appLatestPath, detectAppPlatform, parseAppLatest,
   type AppPlatform, type AppRelease,
 } from "@ltds/shared";
 import { Dialog, Skeleton } from "./index";
 
 type Releases = { state: "loading" } | { state: "error" } | { state: "ready"; releases: AppRelease[] };
 
+async function latest(base: string, platform: AppPlatform, signal?: AbortSignal): Promise<AppRelease | null> {
+  const response = await fetch(appLatestPath(base, platform),
+    { credentials: "same-origin", cache: "no-store", headers: { accept: "application/json" }, signal });
+  // Not offered on this site yet: the same "coming" state as { available: false }.
+  if (response.status === 404) return null;
+  if (!response.ok) throw new Error(`${platform}: ${response.status}`);
+  return parseAppLatest(await response.json(), platform, base);
+}
+
 /**
- * "Get the app" from the account menu. Lists the signed-in desktop downloads the
- * current site offers; the app signs in with the same account used here.
+ * "Get the app" from the account menu. Lists the signed-in desktop downloads this
+ * site offers (`appApi` is its route base); the app signs in with the same account.
  */
-export function GetAppDialog({ open, onClose, releasesPath = APP_RELEASES_PATH }: {
-  open: boolean; onClose: () => void; releasesPath?: string;
-}) {
+export function GetAppDialog({ open, onClose, appApi }: { open: boolean; onClose: () => void; appApi: string }) {
   const [releases, setReleases] = useState<Releases>({ state: "loading" });
   const load = useCallback((signal?: AbortSignal) => {
     setReleases({ state: "loading" });
-    fetch(releasesPath, { credentials: "same-origin", cache: "no-store", headers: { accept: "application/json" }, signal })
-      .then(async response => {
-        // Not offered on this site yet: show the same "coming" state as an empty list.
-        if (response.status === 404) return setReleases({ state: "ready", releases: [] });
-        if (!response.ok) throw new Error(String(response.status));
-        setReleases({ state: "ready", releases: parseAppReleases(await response.json()) });
-      })
+    Promise.all(APP_PLATFORMS.map(platform => latest(appApi, platform, signal)))
+      .then(found => setReleases({ state: "ready", releases: found.filter((r): r is AppRelease => r !== null) }))
       .catch(error => { if (!signal?.aborted) { console.warn("App releases unavailable", error); setReleases({ state: "error" }); } });
-  }, [releasesPath]);
+  }, [appApi]);
   useEffect(() => {
     if (!open) return;
     const controller = new AbortController();
@@ -57,15 +59,14 @@ function PlatformRow({ platform, release, mine }: { platform: AppPlatform; relea
   if (!release) return <li className="get-app-row is-unavailable">
     <div><strong>{name}</strong><span>Coming later</span></div>
   </li>;
-  const published = new Date(release.publishedAt).toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
   return <li className={`get-app-row${mine ? " is-mine" : ""}`}>
     <div>
-      <strong>{name}{mine && <small>This computer</small>}</strong>
-      <span>Version {release.version} · {appDownloadSize(release.sizeBytes)} · {published}</span>
-      {release.requirements && <span>{release.requirements}</span>}
+      <strong>{name}{mine && <small>This computer</small>}{release.channel === "pilot" && <small className="is-pilot">Early access</small>}</strong>
+      <span>Version {release.version} · {appDownloadSize(release.sizeBytes)}</span>
+      {release.minSupported && <span>{release.minSupported}</span>}
       {release.notes && <p>{release.notes}</p>}
       <details><summary>Check the download</summary><code aria-label="SHA-256">{release.sha256}</code></details>
     </div>
-    <a className={mine ? "button-orange" : "button-ghost"} href={release.downloadPath} download>Download for {name}</a>
+    <a className={mine ? "button-orange" : "button-ghost"} href={release.downloadUrl} download>Download for {name}</a>
   </li>;
 }

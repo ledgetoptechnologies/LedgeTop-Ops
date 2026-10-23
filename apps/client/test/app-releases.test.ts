@@ -1,42 +1,49 @@
 import { describe, expect, it } from "vitest";
-import { appDownloadSize, detectAppPlatform, parseAppReleases } from "@ltds/shared";
+import { PORTAL_APP_API, appDownloadSize, appLatestPath, detectAppPlatform, parseAppLatest } from "@ltds/shared";
 
 const windows = {
+  available: true,
   platform: "windows",
+  channel: "pilot",
   version: "1.0.3",
-  publishedAt: "2026-10-23T12:00:00Z",
-  sizeBytes: 83_809_359,
+  size: 83_809_359,
   sha256: "B7C01C87461471DEF1A432B2554C2B734AEB9042A4A5E47E5FD00AB4B7B7E472",
-  downloadPath: "/api/app/download/windows/stable/1.0.3",
-  requirements: "Windows 10 and 11, 64-bit",
+  downloadUrl: "/api/client/app/download/1.0.3?platform=windows&channel=pilot",
+  minSupported: "Windows 10 and 11, 64-bit",
 };
 
 describe("Get the app releases", () => {
+  it("asks the portal's own namespace for one platform", () => {
+    expect(appLatestPath(PORTAL_APP_API, "windows")).toBe("/api/client/app/latest?platform=windows");
+  });
+
   it("keeps a well-formed release and normalizes its checksum", () => {
-    expect(parseAppReleases({ releases: [windows] })).toEqual([{ ...windows, sha256: windows.sha256.toLowerCase(), notes: undefined }]);
+    expect(parseAppLatest(windows, "windows", PORTAL_APP_API)).toEqual({
+      platform: "windows", channel: "pilot", version: "1.0.3", sizeBytes: 83_809_359,
+      sha256: windows.sha256.toLowerCase(), downloadUrl: windows.downloadUrl,
+      minSupported: "Windows 10 and 11, 64-bit", notes: undefined,
+    });
   });
 
-  it("offers only the newest release per platform, in platform order", () => {
-    const older = { ...windows, version: "1.0.2", publishedAt: "2026-10-01T00:00:00Z" };
-    const mac = { ...windows, platform: "macos", downloadPath: "/api/app/download/macos/stable/1.0.3" };
-    expect(parseAppReleases({ releases: [mac, older, windows] }).map(r => `${r.platform}@${r.version}`))
-      .toEqual(["windows@1.0.3", "macos@1.0.3"]);
+  it("treats an unavailable or mismatched answer as nothing to download", () => {
+    expect(parseAppLatest({ available: false }, "windows", PORTAL_APP_API)).toBeNull();
+    expect(parseAppLatest(windows, "macos", PORTAL_APP_API)).toBeNull();
+    expect(parseAppLatest(null, "windows", PORTAL_APP_API)).toBeNull();
   });
 
-  it("never lets a download point anywhere but the signed-in app route", () => {
-    for (const downloadPath of [
-      "https://example.com/app.msix", "//example.com/app.msix", "/api/app/download/../../admin",
-      "/api/files/raw/x", "javascript:alert(1)", "/api/app/download/a b",
-    ]) expect(parseAppReleases({ releases: [{ ...windows, downloadPath }] })).toEqual([]);
+  it("never lets a download point anywhere but this site's signed-in download route", () => {
+    for (const downloadUrl of [
+      "https://example.com/app.msix", "//example.com/app.msix", "/api/client/app/download/../../admin",
+      "/api/app/download/1.0.3?platform=windows", "/api/client/files/raw/x", "javascript:alert(1)",
+      "/api/client/app/download/a b", "/api/client/app/download/1.0.3?next=https://example.com",
+    ]) expect(parseAppLatest({ ...windows, downloadUrl }, "windows", PORTAL_APP_API)).toBeNull();
   });
 
   it("drops releases with missing or malformed fields", () => {
     for (const bad of [
-      { ...windows, platform: "android" }, { ...windows, version: "latest" }, { ...windows, sha256: "abc" },
-      { ...windows, sizeBytes: 0 }, { ...windows, sizeBytes: "83 MB" }, { ...windows, publishedAt: "soon" },
-    ]) expect(parseAppReleases({ releases: [bad] })).toEqual([]);
-    expect(parseAppReleases(null)).toEqual([]);
-    expect(parseAppReleases({ releases: "windows" })).toEqual([]);
+      { ...windows, channel: "beta" }, { ...windows, version: "latest" }, { ...windows, sha256: "abc" },
+      { ...windows, size: 0 }, { ...windows, size: "83 MB" }, { ...windows, available: "yes" },
+    ]) expect(parseAppLatest(bad, "windows", PORTAL_APP_API)).toBeNull();
   });
 
   it("recognizes desktop platforms and leaves phones alone", () => {

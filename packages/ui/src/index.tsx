@@ -127,7 +127,7 @@ export function AccountMenu({
   accountHref,
   onAccount,
   sessionStatus,
-  getApp = true,
+  appApi,
   className = "",
 }: {
   displayName: string;
@@ -136,8 +136,8 @@ export function AccountMenu({
   accountHref?: string;
   onAccount?: () => void;
   sessionStatus?: ReactNode;
-  /** Offer "Get the app"; off only where nobody is signed in. */
-  getApp?: boolean;
+  /** Route base for "Get the app" (OPERATIONS_APP_API or PORTAL_APP_API); omitted, the item is hidden. */
+  appApi?: string;
   className?: string;
 }) {
   const [open, setOpen] = useState(false), [appOpen, setAppOpen] = useState(false);
@@ -186,14 +186,14 @@ export function AccountMenu({
         if (onAccount) { event.preventDefault(); onAccount(); }
         setOpen(false);
       }}>Account</a>}
-      {getApp && <button type="button" role="menuitem" onClick={() => {
+      {appApi && <button type="button" role="menuitem" onClick={() => {
         // Focus the trigger first so the dialog returns focus there, not to this vanishing item.
         setOpen(false); trigger.current?.focus(); setAppOpen(true);
       }}>Get the app</button>}
       {sessionStatus && <div role="none">{sessionStatus}</div>}
       <a role="menuitem" href={CLOUDFLARE_ACCESS_LOGOUT_PATH}>Logout</a>
     </div>}
-    {getApp && <GetAppDialog open={appOpen} onClose={() => setAppOpen(false)} />}
+    {appApi && <GetAppDialog open={appOpen} onClose={() => setAppOpen(false)} appApi={appApi} />}
   </div>;
 }
 

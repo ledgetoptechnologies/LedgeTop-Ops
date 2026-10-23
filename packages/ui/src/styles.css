@@ -577,6 +577,7 @@ html:has(.ltds-dialog[open]) { overflow: hidden; }
 .get-app-row > div { min-width: 0; display: grid; gap: .2rem; }
 .get-app-row strong { display: flex; align-items: center; gap: .5rem; font-size: 1rem; }
 .get-app-row strong small { padding: .1rem .45rem; border-radius: 999px; background: var(--orange); color: #fff; font-size: .7rem; font-weight: 800; }
+.get-app-row strong small.is-pilot { background: #e9edf0; color: var(--ink); }
 .get-app-row span, .get-app-row p { margin: 0; color: var(--muted); font-size: .86rem; line-height: 1.4; }
 .get-app-row details { font-size: .8rem; color: var(--muted); }
 .get-app-row summary { cursor: pointer; }

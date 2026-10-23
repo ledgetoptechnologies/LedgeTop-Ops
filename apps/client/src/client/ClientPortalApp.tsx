@@ -9,7 +9,7 @@ import {
 } from "react";
 import { AccountMenu, Card, EmptyState, Loading, StatusPill, openViewerShell, requestText, Skeleton } from "@ltds/ui";
 import { PortalBoundary, PortalBrand } from "./PortalShell";
-import type { DeliveryLocationCollection } from "@ltds/shared";
+import { PORTAL_APP_API, type DeliveryLocationCollection } from "@ltds/shared";
 import type { RequestError } from "./bulk-download";
 import {
   cancelPortalServiceRequest,
@@ -3633,7 +3633,7 @@ export function ClientPortalApp({
         <button ref={mobileNavTrigger} className="portal-nav-trigger" type="button" aria-label="Open navigation" aria-expanded={mobileNavOpen} aria-controls="portal-mobile-navigation" onClick={() => setMobileNavOpen(true)}><span className="nav-hamburger" aria-hidden="true"><i /><i /><i /></span></button>
         <AccountMenu className="portal-account-menu" displayName={shellDisplayName}
           avatar={shellDisplayName.slice(0, 2).toUpperCase()} accountHref={unifiedMode ? clientPortalPath("account") : withPortalWorkspace(clientPortalPath("account"))}
-          onAccount={() => navigate("account")} />
+          onAccount={() => navigate("account")} appApi={PORTAL_APP_API} />
       </header>
       {mobileNavOpen && <div className="portal-mobile-nav-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) { setMobileNavOpen(false); mobileNavTrigger.current?.focus(); } }}>
         <div ref={mobileNavPanel} id="portal-mobile-navigation" className="portal-mobile-nav" role="dialog" aria-modal="true" aria-label="Navigation">

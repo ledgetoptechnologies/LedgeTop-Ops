@@ -2,6 +2,7 @@ import { useEffect,useState } from "react";
 import { loadOperationsFinancial,type PortalFinancialDocument,type PortalOperationsHomeResponse } from "./portal-api";
 import { OperationsNativeDataBrowser } from "./OperationsNativeDataBrowser";
 import { AccountMenu } from "@ltds/ui";
+import { PORTAL_APP_API } from "@ltds/shared";
 import { PortalBrand } from "./PortalShell";
 
 export function OperationsServiceSummary({ response, embedded = false }: {
@@ -73,7 +74,7 @@ export function OperationsHomeApp({ response, clientUnavailable = false, onRetry
   return <div className="client-portal operations-home">
     <header className="client-portal-gate-header">
       <PortalBrand product="Client portal" />
-      <AccountMenu className="portal-account-menu" displayName="Client portal" avatar="LT" />
+      <AccountMenu className="portal-account-menu" displayName="Client portal" avatar="LT" appApi={PORTAL_APP_API} />
     </header>
     <main className="portal-main">
       <section className="portal-welcome">

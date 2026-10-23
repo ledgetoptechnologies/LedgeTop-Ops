@@ -1,6 +1,7 @@
 /**
  * Desktop app releases offered from "Get the app" in Ops and the client portal.
- * Both Workers serve the same signed-in route; builds live in R2, never on GitHub.
+ * Each site serves its own signed-in route; builds live in R2, never on GitHub.
+ * The server decides which channel (pilot or stable) a person is eligible for.
  */
 export type AppPlatform = "windows" | "macos" | "linux";
 
@@ -12,56 +13,54 @@ export const APP_PLATFORM_NAMES: Record<AppPlatform, string> = {
   linux: "Linux",
 };
 
+/** Route base per site: Ops staff use /api/app, portal clients /api/client/app. */
+export const OPERATIONS_APP_API = "/api/app";
+export const PORTAL_APP_API = "/api/client/app";
+
 export type AppRelease = {
   platform: AppPlatform;
+  channel: "pilot" | "stable";
   version: string;
-  /** ISO 8601 publication time. */
-  publishedAt: string;
   sizeBytes: number;
   /** Lowercase hex SHA-256 of the downloaded file. */
   sha256: string;
-  /** Same-origin, signed-in download path under /api/app/. */
-  downloadPath: string;
+  /** Same-origin, signed-in path under `<base>/download/`, exactly as the server sent it. */
+  downloadUrl: string;
   /** e.g. "Windows 10 and 11, 64-bit". */
-  requirements?: string;
+  minSupported?: string;
   notes?: string;
 };
 
-export type AppReleasesResponse = { releases: AppRelease[] };
+/** `GET <base>/latest?platform=…` answers `{ available: false }` or an available release. */
+export function appLatestPath(base: string, platform: AppPlatform): string {
+  return `${base}/latest?platform=${platform}`;
+}
 
-export const APP_RELEASES_PATH = "/api/app/releases";
-
-const VERSION = /^\d+(\.\d+){1,3}$/, SHA256 = /^[0-9a-f]{64}$/, DOWNLOAD = /^\/api\/app\/download\/[A-Za-z0-9._~/-]+$/;
+const VERSION = /^\d+(\.\d+){1,3}$/, SHA256 = /^[0-9a-f]{64}$/, SAFE_PATH = /^[A-Za-z0-9._~/-]+(\?[A-Za-z0-9._~=&-]*)?$/;
 
 function text(value: unknown, max: number): string | undefined {
   return typeof value === "string" && value.trim() && value.length <= max ? value.trim() : undefined;
 }
 
 /**
- * Keeps only well-formed releases, at most one per platform (the newest by publishedAt).
- * A release whose download path isn't a same-origin /api/app/download/ path is dropped,
- * so a malformed response can never point the button somewhere else.
+ * The release offered for `platform`, or null when none is available or the response
+ * is malformed. A download URL that isn't a same-origin `<base>/download/` path is
+ * refused, so a bad response can never point the button somewhere else.
  */
-export function parseAppReleases(value: unknown): AppRelease[] {
-  const raw = value && typeof value === "object" ? (value as { releases?: unknown }).releases : undefined;
-  if (!Array.isArray(raw)) return [];
-  const newest = new Map<AppPlatform, AppRelease>();
-  for (const item of raw) {
-    if (!item || typeof item !== "object") continue;
-    const r = item as Record<string, unknown>;
-    const platform = APP_PLATFORMS.find(p => p === r.platform);
-    const version = text(r.version, 32), publishedAt = text(r.publishedAt, 40), downloadPath = text(r.downloadPath, 512);
-    const sha256 = typeof r.sha256 === "string" ? r.sha256.toLowerCase() : "";
-    const sizeBytes = r.sizeBytes;
-    if (!platform || !version || !VERSION.test(version) || !publishedAt || Number.isNaN(Date.parse(publishedAt))) continue;
-    if (!SHA256.test(sha256) || typeof sizeBytes !== "number" || !Number.isSafeInteger(sizeBytes) || sizeBytes <= 0) continue;
-    if (!downloadPath || !DOWNLOAD.test(downloadPath) || downloadPath.includes("..") || downloadPath.includes("//")) continue;
-    const release: AppRelease = { platform, version, publishedAt, sizeBytes, sha256, downloadPath,
-      requirements: text(r.requirements, 120), notes: text(r.notes, 600) };
-    const current = newest.get(platform);
-    if (!current || Date.parse(release.publishedAt) > Date.parse(current.publishedAt)) newest.set(platform, release);
-  }
-  return APP_PLATFORMS.flatMap(p => newest.get(p) ?? []);
+export function parseAppLatest(value: unknown, platform: AppPlatform, base: string): AppRelease | null {
+  if (!value || typeof value !== "object") return null;
+  const r = value as Record<string, unknown>;
+  if (r.available !== true || r.platform !== platform) return null;
+  const channel = r.channel === "pilot" || r.channel === "stable" ? r.channel : null;
+  const version = text(r.version, 32), downloadUrl = text(r.downloadUrl, 512);
+  const sha256 = typeof r.sha256 === "string" ? r.sha256.toLowerCase() : "";
+  const sizeBytes = r.size ?? r.sizeBytes;
+  if (!channel || !version || !VERSION.test(version) || !SHA256.test(sha256)) return null;
+  if (typeof sizeBytes !== "number" || !Number.isSafeInteger(sizeBytes) || sizeBytes <= 0) return null;
+  if (!downloadUrl || !downloadUrl.startsWith(`${base}/download/`) || !SAFE_PATH.test(downloadUrl)
+    || downloadUrl.includes("..") || downloadUrl.includes("//")) return null;
+  return { platform, channel, version, sizeBytes, sha256, downloadUrl,
+    minSupported: text(r.minSupported, 120), notes: text(r.notes, 600) };
 }
 
 /** Best guess at the viewer's desktop platform; null on phones, tablets and unknown agents. */
