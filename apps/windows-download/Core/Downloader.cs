@@ -1,5 +1,6 @@
 using System.Net;
 using System.Diagnostics;
+using System.Globalization;
 using System.Net.Http.Headers;
 using System.Runtime.CompilerServices;
 using System.Security.Cryptography;
@@ -78,8 +79,17 @@ public sealed class Downloader : IDisposable
     internal static void SafeFileName(string name)
     {
         if (string.IsNullOrWhiteSpace(name) || name.Length > 150 || name is "." or ".." or StateDirectory
-            || name.EndsWith('.') || name.EndsWith(' ') || name.Any(c => char.IsControl(c) || "<>:\"/\\|?*".Contains(c)))
+            || name.EndsWith('.') || name.EndsWith(' ') || name.Any(c => "<>:\"/\\|?*".Contains(c)))
             throw new TransferException("Choose a plain safe file basename.");
+        // Invisible direction/format controls can disguise the extension. Decode
+        // scalars explicitly so malformed UTF-16 is refused while visible
+        // supplementary characters remain valid, as in employee path validation.
+        for (var index = 0; index < name.Length;) {
+            if (!Rune.TryGetRuneAt(name, index, out var rune)
+                || Rune.GetUnicodeCategory(rune) is UnicodeCategory.Control or UnicodeCategory.Format or UnicodeCategory.Surrogate)
+                throw new TransferException("Choose a plain safe file basename.");
+            index += rune.Utf16SequenceLength;
+        }
         var stem = name.Split('.')[0].ToUpperInvariant();
         if (stem is "CON" or "PRN" or "AUX" or "NUL" or "CONIN$" or "CONOUT$"
             || Regex.IsMatch(stem, "\\A(?:COM|LPT)[1-9¹²³]\\z")) throw new TransferException("Reserved device names are not supported.");

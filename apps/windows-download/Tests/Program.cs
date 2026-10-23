@@ -17,6 +17,7 @@ var tests = new (string Name, Func<Task> Run)[] {
     ("resume rejects full 200, ETag changes and incorrect ranges", ResumeFailures),
     ("corrupt, truncated and oversized bodies never publish", InvalidBodies),
     ("unsafe basenames and unapproved origins fail before HTTP", UnsafeInputs),
+    ("visible Unicode basenames retain their exact names", UnicodeBasenames),
     ("existing output and unowned state are never overwritten", ExistingFiles),
     ("cancellation preserves no final file", Cancellation),
     ("redirects are refused rather than followed", Redirect),
@@ -127,7 +128,9 @@ static async Task InvalidBodies() {
 }
 
 static async Task UnsafeInputs() {
-    foreach (var name in new[] { "../outside.bin", "..\\outside.bin", "C:\\outside", "file:stream", "CON.txt", "LPT1", "COM¹.dat", "trailing.", "trailing ", "bad\0name", ".ltds-downloads-v1" }) {
+    foreach (var name in new[] { "../outside.bin", "..\\outside.bin", "C:\\outside", "file:stream", "CON.txt", "LPT1", "COM¹.dat", "trailing.", "trailing ", "bad\0name", ".ltds-downloads-v1",
+        "invoice\u202Efdp.exe", "zero\u200Bwidth.pdf", "isolate\u2066name.pdf", "isolate\u2067name.pdf",
+        "isolate\u2068name.pdf", "isolate\u2069name.pdf", "\uFEFFinvoice.pdf", "bad\uD800name.pdf", "bad\uDC00name.pdf" }) {
         using var root = new DirectoryFixture(); var handler = new FakeHandler((_, _) => throw new Exception("Unexpected HTTP"));
         using var engine = Engine(handler); await Reject(() => engine.DownloadAsync(Spec() with { FileName = name }, root.Path));
         Assert(handler.Calls == 0 && !Directory.EnumerateFileSystemEntries(root.Path).Any(), "Unsafe input mutated local state.");
@@ -136,6 +139,16 @@ static async Task UnsafeInputs() {
         using var root = new DirectoryFixture(); var handler = new FakeHandler((_, _) => throw new Exception("Unexpected HTTP"));
         using var engine = Engine(handler); await Reject(() => engine.DownloadAsync(Spec() with { ContentUri = new Uri(uri) }, root.Path));
         Assert(handler.Calls == 0, "Origin validation happened after HTTP.");
+    }
+}
+
+static async Task UnicodeBasenames() {
+    foreach (var name in new[] { "café.pdf", "測量図.pdf", "property-\U0001F3E1.pdf", "cafe\u0301.pdf" }) {
+        using var root = new DirectoryFixture(); var handler = new FakeHandler((_, _) => Response(Bytes()));
+        using var engine = Engine(handler);
+        var path = await engine.DownloadAsync(Spec() with { FileName = name }, root.Path);
+        Assert(path == Path.Combine(root.Path, name) && handler.Calls == 1, "Visible Unicode name was changed.");
+        Assert((await File.ReadAllBytesAsync(path)).SequenceEqual(Bytes()), "Unicode filename transfer changed content.");
     }
 }
 
