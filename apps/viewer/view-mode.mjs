@@ -14,8 +14,9 @@ export function availableViewerModes({ meshSource, cloudMode, ortho, dsm, dtm })
 
 export function chooseViewerMode(requested, available) {
   if (VIEWER_MODES.includes(requested) && available.includes(requested)) return requested;
-  if (available.includes('model')) return 'model';
   if (available.includes('ortho')) return 'ortho';
+  if (available.includes('model')) return 'model';
+  if (available.includes('cloud')) return 'cloud';
   return available[0] || null;
 }
 

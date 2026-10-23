@@ -7,13 +7,14 @@ import {
   viewerModeUrl,
 } from '../view-mode.mjs';
 
-test('verified LOD is the default while a valid requested view is preserved', () => {
+test('orthophoto is the default while a valid requested view is preserved', () => {
   const available = availableViewerModes({
     meshSource: 'tiles', cloudMode: 'potree', ortho: true, dsm: true, dtm: true,
   });
   assert.deepEqual(available, ['model', 'cloud', 'ortho', 'dsm', 'dtm']);
-  assert.equal(chooseViewerMode(null, available), 'model');
+  assert.equal(chooseViewerMode(null, available), 'ortho');
   assert.equal(chooseViewerMode('cloud', available), 'cloud');
+  assert.equal(chooseViewerMode('model', available), 'model');
 });
 
 test('original-only models never expose the interactive 3D mode', () => {
@@ -25,8 +26,11 @@ test('original-only models never expose the interactive 3D mode', () => {
 });
 
 test('fallback uses the first available view only when no orthophoto exists', () => {
+  assert.equal(chooseViewerMode(null, ['model', 'cloud', 'ortho']), 'ortho');
+  assert.equal(chooseViewerMode('model', ['cloud', 'ortho']), 'ortho');
   assert.equal(chooseViewerMode(null, ['model', 'cloud']), 'model');
   assert.equal(chooseViewerMode(null, ['cloud', 'dsm']), 'cloud');
+  assert.equal(chooseViewerMode(null, ['dsm', 'cloud']), 'cloud');
   assert.equal(chooseViewerMode(null, []), null);
 });
 
