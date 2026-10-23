@@ -53,6 +53,16 @@ test("raw Google Ads conversions are never labeled as leads", async ({ page }) =
   await expect(ads.getByRole("columnheader", { name: "Conversions" })).toBeVisible();
 });
 
+test("cost per conversion is empty only for an exact zero count", async ({ page }) => {
+  const tile = () => page.getByRole("list", { name: "Google Ads totals" }).getByRole("listitem").filter({ hasText: "Cost per conversion" });
+  for (const [mode, text] of [["zero-conversions", "No conversions yet"], ["cost-unknown", "Unavailable"], ["count-unknown", "Unavailable"]] as const) {
+    await render(page, mode);
+    await expect(tile()).toContainText(text);
+    if (mode !== "zero-conversions") await expect(tile()).not.toContainText("No conversions");
+  }
+  await expect(page.getByRole("list", { name: "Google Ads totals" }).getByRole("listitem").filter({ hasText: "Conversions" }).first()).toContainText("—");
+});
+
 test("the client never sees internal-only fields", async ({ page }) => {
   await render(page);
   const text = await page.locator("#root").innerText();

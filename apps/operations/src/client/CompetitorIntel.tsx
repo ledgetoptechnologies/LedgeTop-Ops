@@ -1,7 +1,7 @@
 import { EmptyState, StatusPill } from "@ltds/ui";
 import { CategoryTag, FreshnessTag, PercentDial, ScoreMeter, SentenceDiff, SignificanceBadge, ciDate } from "@ltds/ui/competitor-intel";
 import {
-  DAILY_INTENT_LIMITS, confidenceBand, confidenceText, decimalMicros, evidenceText, moneyText, percentText,
+  DAILY_INTENT_LIMITS, confidenceBand, costPerConversionText, confidenceText, decimalMicros, evidenceText, moneyText, percentText,
   type CompetitorIntelCommand, type CompetitorIntelTriageRow, type FetchStatus, type ObservationRef, type Significance,
   type StaffChange, type StaffCompetitor, type StaffTenantView, type WorkerIntentKind,
 } from "@ltds/shared/competitor-intel";
@@ -274,7 +274,7 @@ function AdsPanel({ view }: { view: StaffTenantView }) {
     {metrics ? <div className="ci-tiles ci-tiles-ads" role="list" aria-label="Ads totals">
       <Metric label="Spend" value={moneyText(totals.spend)} /><Metric label="Clicks" value={number(totals.clicks)} />
       <Metric label="Impressions" value={number(totals.impressions)} /><Metric label="Conversions" value={totals.conversions ? scoreNumberless(totals.conversions) : "—"} />
-      <Metric label="Cost per conversion" value={totals.costPerConversion ? moneyText(totals.costPerConversion) : "No conversions"} />
+      <Metric label="Cost per conversion" value={costPerConversionText(totals)} />
       <Metric label="Click-through rate" value={totals.ctrPercent ? `${scoreNumberless(totals.ctrPercent)}%` : "—"} />
     </div> : <p className="ci-notice ci-notice-warn">{evidenceText(totals.metricsState, totals.metricsReason)}</p>}
     <div className="ci-section-head"><h4>Checkup scores</h4><FreshnessTag freshness={ads.scoresFreshness} at={ads.checkedAt} label="Scored" /></div>

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
-  confidenceBand, confidenceText, decimalMicros, evidenceText, moneyText, percentText, scoreMeaning, scoreNumber,
+  confidenceBand, confidenceText, costPerConversionText, decimalMicros, evidenceText, moneyText, percentText, scoreMeaning, scoreNumber,
 } from "../../../packages/shared/src/competitor-intel";
 
 describe("competitor intel display rules", () => {
@@ -51,5 +51,14 @@ describe("competitor intel display rules", () => {
     expect(moneyText({ micros: "-4000", currency: "USD" })).toBe("$0.00");
     expect(moneyText(null)).toBe("—");
     expect(() => moneyText({ micros: "1.5", currency: "USD" })).toThrow();
+  });
+
+  it("says no conversions only for an exact zero count", () => {
+    expect(costPerConversionText({ conversions: "0.00", costPerConversion: null })).toBe("No conversions yet");
+    expect(costPerConversionText({ conversions: "0", costPerConversion: null })).toBe("No conversions yet");
+    expect(costPerConversionText({ conversions: "41.00", costPerConversion: null })).toBe("Unavailable");
+    expect(costPerConversionText({ conversions: "0.5", costPerConversion: null })).toBe("Unavailable");
+    expect(costPerConversionText({ conversions: null, costPerConversion: null })).toBe("Unavailable");
+    expect(costPerConversionText({ conversions: "41.00", costPerConversion: { micros: "44935975", currency: "USD" } })).toBe("$44.94");
   });
 });

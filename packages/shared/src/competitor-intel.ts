@@ -212,6 +212,15 @@ export const CATEGORY_TEXT: Record<ChangeCategory, string> = {
   new_service: "New service", new_content: "New content", pricing_update: "Pricing update", rebrand: "Rebrand", site_down: "Site down", other: "Other change",
 };
 
+/**
+ * The frozen wire only requires a null cost when conversions are exactly zero;
+ * a null cost with unknown or positive conversions is merely unavailable.
+ */
+export function costPerConversionText(totals: { conversions: Decimal | null; costPerConversion: Money }): string {
+  if (totals.costPerConversion) return moneyText(totals.costPerConversion);
+  return totals.conversions !== null && decimalMicros(totals.conversions) === 0n ? "No conversions yet" : "Unavailable";
+}
+
 const minorDigits = (currency: string) => new Intl.NumberFormat("en-US", { style: "currency", currency }).resolvedOptions().maximumFractionDigits ?? 2;
 /** Integer micros -> currency text, rounded half-up (away from zero) at the currency's minor unit. */
 export function moneyText(money: Money, locale = "en-US"): string {

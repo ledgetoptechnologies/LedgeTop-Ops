@@ -1,6 +1,6 @@
 import { EmptyState } from "@ltds/ui";
 import { CategoryTag, FreshnessTag, PercentDial, ScoreMeter, SentenceDiff, SignificanceBadge, ciDate } from "@ltds/ui/competitor-intel";
-import { decimalMicros, evidenceText, moneyText, type ClientCompetitorReport } from "@ltds/shared/competitor-intel";
+import { costPerConversionText, decimalMicros, evidenceText, moneyText, type ClientCompetitorReport } from "@ltds/shared/competitor-intel";
 import "./CompetitorReport.css";
 
 // Design-only portal view of a published Competitor Intel report (client.v1).
@@ -97,7 +97,7 @@ function OwnAds({ ads }: { ads: NonNullable<ClientCompetitorReport["ownAds"]> })
       {tile("Spent", moneyText(totals.spend))}
       {tile("Clicks", totals.clicks === null ? "—" : totals.clicks.toLocaleString())}
       {tile("Conversions", totals.conversions === null ? "—" : trimDecimal(totals.conversions))}
-      {tile("Cost per conversion", totals.costPerConversion ? moneyText(totals.costPerConversion) : "No conversions yet")}
+      {tile("Cost per conversion", costPerConversionText(totals))}
     </div> : <p className="ci-report-note">{evidenceText(totals.metricsState, totals.metricsReason)}</p>}
     <div className="ci-report-section-head ci-report-subhead"><h4>Checkup scores</h4><FreshnessTag freshness={ads.scoresFreshness} at={ads.checkedAt} label="Scored" /></div>
     <div className="ci-report-scores ci-report-scores-grid">
