@@ -139,7 +139,7 @@ test("native project Models lists only the source-qualified adapter and never ex
   });
   await page.goto("/portal/projects/project-shared?workspace=workspace-b&tab=models");
   await expect(page.getByRole("heading", {name: "Seawall model"})).toBeVisible();
-  await expect(page.getByRole("button", {name: "Open 3D model in new tab"})).toBeVisible();
+  await expect(page.getByRole("button", {name: "Open 3D model"})).toBeVisible();
   await expect(page.getByText(/Share 3D model/)).toHaveCount(0);
   expect(calls.some(call => call.path.endsWith("workspace-b/projects/project-shared/models") &&
     call.query.get("expectedContext") === "context-workspace-b")).toBe(true);
@@ -1134,4 +1134,32 @@ test.describe("client header matches Operations", () => {
     const style = await current.evaluate(element => { const computed = getComputedStyle(element); return {color: computed.color, border: computed.borderBottomColor, width: computed.borderBottomWidth}; });
     expect(style).toEqual({color: "rgb(238, 80, 7)", border: "rgb(238, 80, 7)", width: "3px"});
   });
+});
+
+test("native model routes retain client navigation and pin bootstrap to their exact workspace", async ({ page }) => {
+  const calls = await mock(page, (route, call) => {
+    if (call.path.endsWith("workspace-b/context")) {
+      const value = context();
+      return route.fulfill({ json: { ...value, features: { ...value.features, models: { state: "available", reason: "resource_authorization_required" } }, capabilities: { ...value.capabilities, viewer: true } } });
+    }
+    if (call.path.endsWith("/session") && call.method === "POST")
+      return route.fulfill({ status: 403, json: { error: "Model access ended" } });
+    return undefined;
+  });
+  // A conflicting query hint must never select a different client than the model URL.
+  await page.goto("/portal/viewer/native/workspace-b/project-one/association-one/model-one?workspace=workspace-c");
+  await expect(page.getByRole("heading", { name: "Secure 3D Viewer" })).toBeVisible();
+  await expect(page.locator(".client-portal-header")).toBeVisible();
+  expect(calls.some(call => call.path.endsWith("workspace-c/context"))).toBe(false);
+  const nav = page.getByRole("navigation", { name: "Client portal", exact: true });
+  if (!(await nav.isVisible())) {
+    await page.getByRole("button", { name: "Open navigation" }).click();
+    await page.getByRole("navigation", { name: "Mobile client portal navigation" }).getByRole("link", { name: "Projects", exact: true }).click();
+  } else await nav.getByRole("link", { name: "Projects", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "Secure 3D Viewer" })).toHaveCount(0);
+  await page.goBack();
+  await expect(page.getByRole("heading", { name: "Secure 3D Viewer" })).toBeVisible();
+  const modelSessions = calls.filter(call => call.method === "POST" && call.path.endsWith("/session"));
+  expect(modelSessions.length).toBeGreaterThan(0);
+  expect(modelSessions.every(call => call.path.includes("/workspace-b/"))).toBe(true);
 });

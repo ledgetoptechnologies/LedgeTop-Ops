@@ -43,9 +43,24 @@ test('only the exact reviewed Viewer root-script manifest aliases the locked fro
   }
   assert.equal(frontendInputHash('apps/client/package.json', raw), hash(normalized));
   assert.equal(frontendInputHash('packages/shared/src/unreviewed.ts', raw), hash(normalized));
-  assert.equal(frontendFingerprint(ROOT), PROFILE.frontendSHA256);
   assert.throws(() => checkMode('ui', PROFILE.frontendSHA256), /UI deployment denied/);
 });
+test('synthetic frontend baseline fingerprints are deterministic and changed UI stays outside backend mode', t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'prod-frontend-fixture-'));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  for (const app of ['client', 'operations']) fs.mkdirSync(path.join(directory, 'apps', app, 'src'), { recursive: true });
+  const file = 'apps/client/src/main.tsx', original = 'export const title = "Synthetic baseline";\n';
+  fs.writeFileSync(path.join(directory, file), original);
+  const expected = hash(canonical([[file, hash(original)]]));
+  assert.equal(frontendFingerprint(directory), expected);
+  // A baseline accepted by the deployment guard is the committed installed
+  // profile, never a replacement inferred from whichever UI is under test.
+  assert.doesNotThrow(() => checkMode('backend', PROFILE.frontendSHA256));
+  fs.writeFileSync(path.join(directory, file), original + 'export const changed = true;\n');
+  assert.notEqual(frontendFingerprint(directory), expected);
+  assert.throws(() => checkMode('backend', frontendFingerprint(directory)), /retained asset union/);
+});
+
 const genuineMap = () => ({ version: 3, file: 'index.js', sources: ['fixture.ts'], sourcesContent: ['export const fixture = true;'], names: [], mappings: 'AAAA' });
 function fixture() {
   const profile = clone(PROFILE), snapshot = {};

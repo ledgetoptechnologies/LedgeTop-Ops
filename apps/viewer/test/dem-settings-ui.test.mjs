@@ -43,9 +43,9 @@ test('DSM and DTM reuse the same stable camera layer as orthophoto with permissi
 test('DEM volume controls are hidden for browsing but remain available for real volume measurements',()=>{
   const fn=source.slice(source.indexOf('function syncMapVolumeAvailability()'),source.indexOf('\nfunction cancelMapMeasure',source.indexOf('function syncMapVolumeAvailability()')));
   const options={style:{}},surface={value:'auto',querySelector:()=>({disabled:false}),selectedOptions:[{disabled:false}]},button={};
-  const context={state:{activeMode:'dsm',activeTool:'none'},demLayers:{dsm:{}},DSM_URL:'/dsm',DTM_URL:'/dtm',isMapMode:()=>true,document:{getElementById:id=>({'map-volume-options':options,'map-volume-surface':surface,'tool-volume':button}[id])}};
+  const context={measurementWorkspace:{volumeUnavailable:false},state:{activeMode:'dsm',activeTool:'none'},demLayers:{dsm:{}},DSM_URL:'/dsm',DTM_URL:'/dtm',isMapMode:()=>true,document:{getElementById:id=>({'map-volume-options':options,'map-volume-surface':surface,'tool-volume':button}[id])}};
   vm.createContext(context);vm.runInContext(fn,context);context.syncMapVolumeAvailability();assert.equal(options.style.display,'none');
-  context.state.activeTool='volume';context.syncMapVolumeAvailability();assert.equal(options.style.display,'block');assert.equal(surface.value,'dsm');
+  context.state.activeTool='volume';context.syncMapVolumeAvailability();assert.equal(options.style.display,'block');assert.equal(surface.value,'dsm');assert.equal(button.disabled,false);context.measurementWorkspace.volumeUnavailable=true;context.syncMapVolumeAvailability();assert.equal(button.disabled,true);assert.match(button.title,/No permitted volume calculation source/);
   assert.match(source,/polygon, nodata: ds\.nodata, reference, customReference/,'reference-plane math is unchanged');
 });
 

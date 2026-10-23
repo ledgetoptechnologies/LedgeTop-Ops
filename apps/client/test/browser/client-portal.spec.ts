@@ -1597,7 +1597,7 @@ test("client Viewer sharing is opt-in, owner-scoped, and responsive at 390 and 3
   await page.setViewportSize({ width: 390, height: 844 });
   await page.context().route("**/api/client/**", async route => {
     const request = route.request(), path = new URL(request.url()).pathname;
-    if (path === "/api/client/session") return route.fulfill({ json: { account, viewerDisplayUnits: "imperial", capabilities: { viewer: true, viewerShares: true } } });
+    if (path === "/api/client/session") return route.fulfill({ json: { account, viewerDisplayUnits: preferenceUnits ?? "imperial", capabilities: { viewer: true, viewerShares: true } } });
     if (path === "/api/client/projects") return route.fulfill({ json: { projects } });
     if (path === "/api/client/service-requests") return route.fulfill({ json: { requests } });
     if (path === "/api/client/map-config") return route.fulfill({ json: { mapboxPublicToken: null } });
@@ -1646,14 +1646,13 @@ test("client Viewer sharing is opt-in, owner-scoped, and responsive at 390 and 3
   await page.getByRole("button", { name: "Models" }).click();
   await page.getByLabel("Measurement units").selectOption("metric");
   await expect.poll(() => preferenceUnits).toBe("metric");
-  const viewerPopupPromise = page.waitForEvent("popup");
   await page.getByRole("button", { name: "Open 3D model" }).click();
-  const viewerPopup = await viewerPopupPromise;
+  const viewerPage = page;
   await expect.poll(() => sessionUnits).toBe("metric");
-  await expect(viewerPopup).toHaveURL(/\/portal\/viewer\/project-a\/association-one\/model-one$/);
-  expect(await viewerPopup.evaluate(() => window.opener === null)).toBe(true);
-  await expect(viewerPopup.locator("iframe")).toHaveAttribute("src", "https://viewer.example.test/session/11111111-1111-4111-8111-111111111111");
-  await viewerPopup.close();
+  await expect(viewerPage).toHaveURL(/\/portal\/viewer\/project-a\/association-one\/model-one$/);
+  expect(await viewerPage.evaluate(() => window.opener === null)).toBe(true);
+  await expect(viewerPage.locator("iframe")).toHaveAttribute("src", "https://viewer.example.test/session/11111111-1111-4111-8111-111111111111");
+  await page.goBack();
   await page.getByRole("button", { name: "Share public link" }).click();
   await expect(page.getByText("Expired engineer review")).toHaveCount(0);
   await page.getByLabel("Link label").fill("Engineer review");
@@ -1734,13 +1733,12 @@ test("Viewer shell is openerless and keeps the iframe and idempotency key across
   await navigatePortal(page, "Projects");
   await page.getByRole("button", { name: /North Site/ }).click();
   await page.getByRole("button", { name: "Models" }).click();
-  const viewerPopupPromise = page.waitForEvent("popup");
   await page.getByRole("button", { name: "Open 3D model" }).click();
-  const viewerPopup = await viewerPopupPromise;
-  await expect(viewerPopup).toHaveURL(/\/portal\/viewer\/project-a\/association-one\/model-one$/);
-  expect(await viewerPopup.evaluate(() => window.opener === null)).toBe(true);
+  const viewerPage = page;
+  await expect(viewerPage).toHaveURL(/\/portal\/viewer\/project-a\/association-one\/model-one$/);
+  expect(await viewerPage.evaluate(() => window.opener === null)).toBe(true);
   await expect.poll(() => viewerLoads).toBe(1);
-  const viewerFrame = viewerPopup.frameLocator("iframe");
+  const viewerFrame = viewerPage.frameLocator("iframe");
   await expect(viewerFrame.locator("#camera-state")).toHaveText("camera-position-42");
   await expect(viewerFrame.locator("body")).toHaveAttribute("data-renewed-grant", "22222222-2222-4222-8222-222222222222", { timeout: 5_000 });
   await expect(viewerFrame.locator("#camera-state")).toHaveText("camera-position-42");
@@ -1751,7 +1749,7 @@ test("Viewer shell is openerless and keeps the iframe and idempotency key across
   expect(sessionIdempotencyKeys[0]).not.toBe(sessionIdempotencyKeys[1]);
   expect(sessionIdempotencyKeys[2]).toBe(sessionIdempotencyKeys[1]);
   expect(viewerLoads).toBe(1);
-  await viewerPopup.close();
+  await page.goBack();
 });
 
 test("disabled Operations home and unavailable legacy session stop before account data requests", async ({ page }) => {

@@ -217,29 +217,13 @@ export function isSafeViewerSessionUrl(value: string): boolean {
 
 export type ViewerShellOpenResult = "new-tab" | "same-tab";
 
-/**
- * Opens a same-origin LTDS shell without leaving an opener relationship on the
- * destination page. The temporary blank page lets us detect popup blocking;
- * it runs no application code and is detached before navigation.
- */
+/** Opens an authenticated same-origin Viewer in the current application tab. */
 export function openViewerShell(path: string): ViewerShellOpenResult {
   const destination = new URL(path, window.location.origin);
   if (destination.origin !== window.location.origin)
     throw new Error("Viewer shell must use the current application origin");
-  const viewerWindow = window.open("about:blank", "_blank");
-  if (!viewerWindow) {
-    window.location.assign(destination.href);
-    return "same-tab";
-  }
-  try {
-    viewerWindow.opener = null;
-    viewerWindow.location.replace(destination.href);
-    return "new-tab";
-  } catch {
-    viewerWindow.close();
-    window.location.assign(destination.href);
-    return "same-tab";
-  }
+  window.location.assign(destination.href);
+  return "same-tab";
 }
 
 /**
@@ -330,10 +314,10 @@ function RenewableViewerShellRoute<T extends ViewerShellSessionGrant>({
   }, [start]);
 
   if (loading && !session)
-    return <main className="viewer-shell-page"><Loading /></main>;
+    return <section className="viewer-shell-page" aria-label="3D Viewer"><Loading /></section>;
   if (!session)
-    return <main className="viewer-shell-page"><Card title="Secure 3D Viewer"><p className="viewer-session-error" role="alert">{error}</p><div className="actions"><button type="button" className="button-orange" onClick={() => void start()}>Retry secure session</button>{onExit && <button type="button" className="button-ghost" onClick={onExit}>Back</button>}</div></Card></main>;
-  return <main className="viewer-shell-page"><ViewerEmbed modelId={modelId} title={title} session={session} renew={issue} onClose={onExit} /></main>;
+    return <section className="viewer-shell-page" aria-label="3D Viewer"><Card title="Secure 3D Viewer"><p className="viewer-session-error" role="alert">{error}</p><div className="actions"><button type="button" className="button-orange" onClick={() => void start()}>Retry secure session</button>{onExit && <button type="button" className="button-ghost" onClick={onExit}>Back</button>}</div></Card></section>;
+  return <section className="viewer-shell-page" aria-label="3D Viewer"><ViewerEmbed modelId={modelId} title={title} session={session} renew={issue} onClose={onExit} /></section>;
 }
 
 /**

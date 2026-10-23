@@ -92,7 +92,7 @@ import {
   type PortalOperationsHomeResponse,
 } from "./portal-api";
 import { readClientViewerUnits, writeClientViewerUnits } from "./viewer-units-preference";
-import { clientViewerShellPath, nativeClientViewerShellPath } from "./ClientViewerShell";
+import { ClientViewerShell, parseClientViewerShellRoute, clientViewerShellPath, nativeClientViewerShellPath } from "./ClientViewerShell";
 import { OperationsHomeApp, OperationsNativeServicePanel } from "./OperationsHomeApp";
 import {
   clientPortalPath,
@@ -2025,11 +2025,11 @@ function ProjectViewerModels({ projectId, initialDisplayUnits, loadModels = load
       setDisplayUnits(next); writeClientViewerUnits(next);
       if(persistUnits)void persistUnits(next).catch(caught => setError((caught as Error).message));
     }}><option value="imperial">Imperial</option><option value="metric">Metric</option></select></label>
-    {!models.length ? <EmptyState title="No 3D models available" detail="Your Ledge Top team has not associated a 3D model with this project." /> :
+    {!models.length ? <EmptyState title="No 3D models available" detail="No published 3D models are currently shared with your account for this project." /> :
       <div className="portal-viewer-model-grid">{models.map(model => <article key={model.associationId}>
         <div><span>Interactive model</span><h3>{model.title}</h3><p>{model.provider} · secure Viewer session</p></div>
         <div className="portal-form-actions"><button type="button" className="button-orange" disabled={busy} onClick={() => void open(model)}>
-          {busy ? "Opening…" : "Open 3D model in new tab"}
+          {busy ? "Opening…" : "Open 3D model"}
         </button></div>
         {model.canShare && <PortalViewerShares projectId={projectId} model={model} displayUnits={displayUnits} />}
       </article>)}</div>}
@@ -2764,6 +2764,7 @@ export function ClientPortalApp({
   operationsHomeResponse?: PortalOperationsHomeResponse;
 }) {
   const initialRoute = parseClientPortalRoute(window.location.pathname);
+  const [viewerRoute, setViewerRoute] = useState(() => parseClientViewerShellRoute(window.location.pathname));
   const [currentOperationsHome, setCurrentOperationsHome] = useState<PortalOperationsHomeResponse | undefined>(operationsHomeResponse);
   const [operationsHomeStatus, setOperationsHomeStatus] = useState<"current" | "checking" | "unavailable">("current");
   const [gate, setGate] = useState<PortalGate>({ status: "loading" });
@@ -2771,7 +2772,7 @@ export function ClientPortalApp({
   gateRef.current = gate;
   const [page, setPage] = useState<ClientPortalPage>(initialPage);
   const [projectId, setProjectId] = useState<string | null>(
-    initialRoute.projectId,
+    viewerRoute?.projectId ?? initialRoute.projectId,
   );
   const [feedbackId, setFeedbackId] = useState<string | null>(initialRoute.feedbackId ?? null);
   // In the unified portal, list pages merge every account; a link that names an
@@ -2889,7 +2890,8 @@ export function ClientPortalApp({
   useEffect(() => {
     let active = true;
     bootstrapController.current?.abort(); const controller = new AbortController(); bootstrapController.current = controller;
-    const requestedWorkspaceId = new URLSearchParams(location.search).get("workspace");
+    const requestedViewerRoute = parseClientViewerShellRoute(location.pathname);
+    const requestedWorkspaceId = requestedViewerRoute?.mode === "native" ? requestedViewerRoute.workspaceId : new URLSearchParams(location.search).get("workspace");
     loadPortalBootstrap(undefined, requestedWorkspaceId, controller.signal)
       .then((data) => {
         if (active && !controller.signal.aborted) {
@@ -2929,10 +2931,12 @@ export function ClientPortalApp({
   }, [gate]);
   useEffect(() => {
     const onPopState = () => {
-      const route = parseClientPortalRoute(window.location.pathname);
+      const currentViewerRoute = parseClientViewerShellRoute(window.location.pathname);
+      setViewerRoute(currentViewerRoute);
+      const route = currentViewerRoute ? { isPortal: true, page: "project" as const, projectId: currentViewerRoute.projectId, feedbackId: undefined } : parseClientPortalRoute(window.location.pathname);
       if (!route.isPortal) window.location.reload();
       else {
-        const hint = new URLSearchParams(location.search).get("workspace"), current = gateRef.current;
+        const hint = currentViewerRoute?.mode === "native" ? currentViewerRoute.workspaceId : new URLSearchParams(location.search).get("workspace"), current = gateRef.current;
         if (hint !== null && (current.status !== "ready" || hint !== (current.data.selectedWorkspaceId ?? null))) {
           bootstrapController.current?.abort(); setSwitchingWorkspace(false); setGate({status: "loading"}); setBootstrapRevision(value => value + 1);
         }
@@ -2975,6 +2979,7 @@ export function ClientPortalApp({
   }, [mobileNavOpen]);
 
   function navigate(nextPage: TopPage, replace = false) {
+    setViewerRoute(null);
     const unifiedNow = gate.status === "ready" && gate.data.capabilities.workspaceHierarchyV2
       && (gate.data.workspaces ?? []).filter(unifiedAccountSupported).length > 1;
     window.history[replace ? "replaceState" : "pushState"]({}, "", unifiedNow ? clientPortalPath(nextPage) : withPortalWorkspace(clientPortalPath(nextPage)));
@@ -2988,6 +2993,7 @@ export function ClientPortalApp({
     setMobileNavOpen(false);
   }
   function openProject(id: string) {
+    setViewerRoute(null);
     window.history.pushState({ portalProjectOrigin: page }, "", withPortalWorkspace(clientProjectPath(id)));
     setProjectId(id);
     setPage("project");
@@ -3082,6 +3088,7 @@ export function ClientPortalApp({
   const notificationContextKey = native ? `${native.workspace.sourceId}:${native.workspace.id}:${native.contextVersion}` : `${account!.id}:${selectedWorkspaceId ?? "legacy"}`;
   /** Opens a page of one exact client account; the account is loaded fresh if it isn't the current one. */
   const openInAccount = (workspaceId: string, path: string) => {
+    setViewerRoute(null);
     const url = new URL(path, window.location.origin);
     url.searchParams.set("workspace", workspaceId);
     const route = parseClientPortalRoute(url.pathname);
@@ -3228,7 +3235,9 @@ export function ClientPortalApp({
   </> : null;
   let content: ReactNode;
 
-  if (unifiedView)
+  if (viewerRoute)
+    content = <ClientViewerShell route={viewerRoute} />;
+  else if (unifiedView)
     content = <UnifiedPortal page={page as UnifiedPage} workspaces={workspaces}
       openInAccount={openInAccount} navigate={navigate} supplement={page === "dashboard" ? operationsHomeSummary : undefined}
       renderStatus={request => <StatusPill tone={statusTone(request.status)}>{statusLabel(request.status, request.projectAlphaDraftCreated)}</StatusPill>} />;
@@ -3640,7 +3649,7 @@ export function ClientPortalApp({
           </nav>
         </div>
       </div>}
-      <main className="client-portal-main">{switchingWorkspace ? <Loading /> : <>
+      <main className={`client-portal-main${viewerRoute ? " client-viewer-main" : ""}`}>{switchingWorkspace ? <Loading /> : <>
         {currentAccount && !unifiedView && <p className="unified-portal-context">
           <span>{AREA_TEXT[accountArea(unifiedAccount(currentAccount))].name} · {currentAccount.displayName}</span>
           {UNIFIED_PAGES.has(page) && <button type="button" className="portal-text-action" onClick={() => navigate(page as UnifiedPage)}>Back to everything</button>}

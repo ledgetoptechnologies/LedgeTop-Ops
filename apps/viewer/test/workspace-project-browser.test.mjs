@@ -248,6 +248,7 @@ function apiResponse(url, runtime, method = 'GET', body = {}) {
   if (pathname === '/api/v1/storage/trash/trash-johnson/restore' && method === 'POST') return json({ dataset: { id: 'dataset-trash', status: 'archived' } });
   if (pathname === '/api/v1/storage/trash/trash-johnson' && method === 'DELETE') return { status: 204, body: Buffer.alloc(0), type: 'application/json' };
   if (pathname === '/api/v1/processing/ready') return json({ ok: true });
+  if (pathname === '/api/v1/workspace/native-client-grants') return json({targets:[],grants:[]});
   if (pathname === '/api/v1/workspace/client-grants') return json({ projects: [], associations: [], grants: [] });
   if (pathname === '/api/v1/operations' && method === 'GET') return json({ operations: runtime.operations, nextCursor: null });
   if (pathname === '/api/v1/processing/derivatives' && method === 'GET') return json({ derivatives: runtime.derivatives });
@@ -748,6 +749,13 @@ async function verifyViewport(devTools, origin, viewport, runtime) {
     await waitFor(client, "window.__viewerActions.some(item=>item.type==='open'&&item.url.includes('/session/99999999-8888-4777-8666-555555555555#reviewController='))", `${viewport.name}: renewable published output session did not open`);
     await client.evaluate(`document.querySelector('.task-quick-actions [data-action="share-output"]').click()`);
     await waitFor(client, "document.querySelector('#workspace-modal')?.open === true && document.querySelector('.share-form')?.dataset.outputId === 'output-johnson'", `${viewport.name}: task Share shortcut did not target the published output`);
+    await client.evaluate(`document.querySelector('[data-share-mode="internal"]').focus()`);
+    await client.command('Input.dispatchKeyEvent',{type:'keyDown',key:'Home',code:'Home',windowsVirtualKeyCode:36});
+    await client.command('Input.dispatchKeyEvent',{type:'keyUp',key:'Home',code:'Home',windowsVirtualKeyCode:36});
+    assert.deepEqual(await client.evaluate(`({focused:document.activeElement?.id,selected:document.querySelector('#share-tab-public')?.getAttribute('aria-selected'),publicVisible:!document.querySelector('#share-panel-public')?.hidden,internalHidden:document.querySelector('#share-panel-internal')?.hidden})`),{focused:'share-tab-public',selected:'true',publicVisible:true,internalHidden:true},`${viewport.name}: Public link tab must activate and receive keyboard focus`);
+    await client.command('Input.dispatchKeyEvent',{type:'keyDown',key:'ArrowRight',code:'ArrowRight',windowsVirtualKeyCode:39});
+    await client.command('Input.dispatchKeyEvent',{type:'keyUp',key:'ArrowRight',code:'ArrowRight',windowsVirtualKeyCode:39});
+    assert.deepEqual(await client.evaluate(`({focused:document.activeElement?.id,selected:document.querySelector('#share-tab-internal')?.getAttribute('aria-selected'),internalVisible:!document.querySelector('#share-panel-internal')?.hidden,publicHidden:document.querySelector('#share-panel-public')?.hidden})`),{focused:'share-tab-internal',selected:'true',internalVisible:true,publicHidden:true},`${viewport.name}: Client Workspace tab must activate and receive keyboard focus`);
     await client.evaluate(`document.querySelector('.modal-close').click()`);
 
     await client.evaluate(`document.querySelector('[data-action="task-files"]').click()`);
