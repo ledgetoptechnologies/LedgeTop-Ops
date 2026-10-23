@@ -178,7 +178,8 @@ async Task PersonSwitch()
     await env.OpenAsync("deliveries", "land-script");
     env.Check("ortho-full.tif");
     env.Model.DownloadSelected.Execute(null);
-    await Until(() => env.Model.Transfers.Any(row => row.State == QueuedTransferState.Running && row.Percent > 1), "Alice's download running");
+    await Until(() => env.Model.Transfers.Any(row => row.State == QueuedTransferState.Running && row.Percent > 1), "Alice's download running",
+        detail: env.Describe);
     True(env.Model.Files.Count > 0 && env.Model.Sections.Count == 2, "Alice's lists shown");
 
     // A folder listing for Alice is still on its way when Bob signs in.
@@ -545,7 +546,8 @@ async Task CloseDuringSwitch()
         await env.OpenAsync("deliveries", "land-script");
         env.Check("ortho-full.tif");
         env.Model.DownloadSelected.Execute(null);
-        await Until(() => env.Model.Transfers.Any(row => row.State == QueuedTransferState.Running && row.Percent > 1), "Alice's download running");
+        await Until(() => env.Model.Transfers.Any(row => row.State == QueuedTransferState.Running && row.Percent > 1), "Alice's download running",
+        detail: env.Describe);
         if (viaSignIn) {
             // The app's clock says the sign-in ended, but Alice's download is still running when Bob signs in.
             now = now.AddHours(2); env.Model.Tick();
@@ -1051,7 +1053,7 @@ static void Snap(Window window, string path)
 }
 
 static void Pump() => Wait.Pump();
-static Task Until(Func<bool> condition, string what, int seconds = 30) => Wait.Until(condition, what, seconds);
+static Task Until(Func<bool> condition, string what, int seconds = 30, Func<string>? detail = null) => Wait.Until(condition, what, seconds, detail);
 
 static void Equal<T>(T expected, T actual) { if (!EqualityComparer<T>.Default.Equals(expected, actual)) throw new Exception($"Expected {expected}, got {actual}"); }
 static void True(bool value, string what) { if (!value) throw new Exception("Expected: " + what); }
@@ -1124,6 +1126,12 @@ sealed class Env : IAsyncDisposable, IShell
 
     public void Check(string name) => Model.Files.Single(file => file.Name == name).IsChecked = true;
 
+    /// <summary>Plain test diagnostics: screen, banner, notice, transfer rows and the demo's writer counts. No file contents.</summary>
+    public string Describe() =>
+        $"screen={Model.Screen}; busy={Model.IsTransferring}; banner='{Model.Banner}'; notice='{Model.Notice}'; " +
+        $"rows=[{string.Join(", ", Model.Transfers.Select(row => $"{row.Name}:{row.State}:{row.Percent:0.0}%"))}]; " +
+        $"writing={Backend.Writing}; mostAtOnce={Backend.MostAtOnce}; sourceChecks={Backend.SourceChecks}";
+
     public void OnUi(Action action) => ui.BeginInvoke(action);
     public string? PickFolder(string current) => null;
     public void OpenFile(string path) { }
@@ -1159,11 +1167,16 @@ static class Wait
         Dispatcher.PushFrame(frame);
     }
 
-    public static async Task Until(Func<bool> condition, string what, int seconds = 30)
+    /// <param name="detail">Extra state to report on a timeout, so a slow or stuck run is diagnosable without retrying.</param>
+    public static async Task Until(Func<bool> condition, string what, int seconds = 30, Func<string>? detail = null)
     {
-        var stop = DateTime.UtcNow.AddSeconds(seconds);
+        var started = DateTime.UtcNow; var stop = started.AddSeconds(seconds);
         while (!condition()) {
-            if (DateTime.UtcNow > stop) throw new Exception("Timed out waiting: " + what);
+            if (DateTime.UtcNow > stop) {
+                string extra;
+                try { extra = detail?.Invoke() ?? ""; } catch (Exception error) { extra = "detail unavailable: " + error.GetType().Name; }
+                throw new Exception($"Timed out waiting after {(DateTime.UtcNow - started).TotalSeconds:0.0}s: {what}" + (extra.Length > 0 ? " [" + extra + "]" : ""));
+            }
             await Task.Delay(50); Pump();
         }
     }
