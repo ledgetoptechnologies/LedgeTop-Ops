@@ -3,6 +3,8 @@ import type { ViewerSessionGrant, ViewerShellSessionGrant } from "@ltds/shared";
 import { CLOUDFLARE_ACCESS_LOGOUT_PATH } from "./access";
 export { CLOUDFLARE_ACCESS_LOGOUT_PATH } from "./access";
 export { AppDialogHost, requestChoice, requestText, type ChoiceRequest, type TextRequest } from "./app-dialogs";
+import { GetAppDialog } from "./GetAppDialog";
+export { GetAppDialog } from "./GetAppDialog";
 
 /** Generic Ledge Top mark, identical on every domain and product. */
 const LT_MARK_BOX = "238.5 226 776 776", LT_MARK_WHITE = "#f5f3ef", LT_MARK_ORANGE = "#ee5007";
@@ -125,6 +127,7 @@ export function AccountMenu({
   accountHref,
   onAccount,
   sessionStatus,
+  getApp = true,
   className = "",
 }: {
   displayName: string;
@@ -133,9 +136,11 @@ export function AccountMenu({
   accountHref?: string;
   onAccount?: () => void;
   sessionStatus?: ReactNode;
+  /** Offer "Get the app"; off only where nobody is signed in. */
+  getApp?: boolean;
   className?: string;
 }) {
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useState(false), [appOpen, setAppOpen] = useState(false);
   const root = useRef<HTMLDivElement>(null), trigger = useRef<HTMLButtonElement>(null);
   const menuId = `account-menu-${useId().replace(/:/g, "")}`;
   const close = useCallback((restoreFocus = false) => {
@@ -181,9 +186,14 @@ export function AccountMenu({
         if (onAccount) { event.preventDefault(); onAccount(); }
         setOpen(false);
       }}>Account</a>}
+      {getApp && <button type="button" role="menuitem" onClick={() => {
+        // Focus the trigger first so the dialog returns focus there, not to this vanishing item.
+        setOpen(false); trigger.current?.focus(); setAppOpen(true);
+      }}>Get the app</button>}
       {sessionStatus && <div role="none">{sessionStatus}</div>}
       <a role="menuitem" href={CLOUDFLARE_ACCESS_LOGOUT_PATH}>Logout</a>
     </div>}
+    {getApp && <GetAppDialog open={appOpen} onClose={() => setAppOpen(false)} />}
   </div>;
 }
 

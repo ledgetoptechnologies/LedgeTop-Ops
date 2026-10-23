@@ -618,3 +618,4 @@ export interface ViewerSessionIssuerBinding {
   listClientViewerShares(request: ClientViewerShareListRequestV1): Promise<ClientViewerShareListResultV1>;
   revokeClientViewerShare(request: ClientViewerShareRevokeRequestV1): Promise<ClientViewerShareRevokeResultV1>;
 }
+export * from "./app-releases";
