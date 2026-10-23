@@ -41,6 +41,8 @@ var groups = new (string Name, Func<Task> Run)[] {
     ("pause all wins over a start that was already chosen", PauseAllBeatsChosenStart),
     ("pause all wins over a start already shown as active but not yet begun", PauseAllBeatsPublishedStart),
     ("pause all wins over a resume still waiting its turn, and a later resume still works", PauseAllBeatsPendingResume),
+    ("a repeated resume of the running download never frees its slot for a second source", RepeatedResumeKeepsOneActive),
+    ("a late finish from an older start never frees a newer start's slot", StaleIdleKeepsOneActive),
     ("closing releases the backend once, after its queues", BackendReleased),
     ("the window renders sign-in and files screens", Render),
 };
@@ -895,6 +897,77 @@ async Task PauseAllBeatsPendingResume()
         // A resume requested after Pause all is the newest intent and works.
         await host.ResumeAsync((await host.SnapshotAsync()).Single(item => item.Job.FileName == "report.pdf"));
         await Until(() => host.IsBusy && backend.Writing == 1, "a later resume starts");
+    } finally { gate.TrySetResult(); await host.DisposeAsync(); try { Directory.Delete(root, true); } catch (IOException) { } }
+}
+
+async Task<string> EmployeeReference(DemoBackend backend, string name)
+{
+    async Task<CatalogFile?> Find(CatalogNode node)
+    {
+        var listing = await backend.Catalog.ListAsync(node);
+        if (listing.Files.FirstOrDefault(file => file.Name == name) is { } found) return found;
+        foreach (var child in (await backend.Catalog.GetChildrenAsync(node)).Nodes) if (await Find(child) is { } deeper) return deeper;
+        return null;
+    }
+    var server = (await backend.Catalog.GetSectionsAsync()).Single(node => node.SourceAlias == "employee");
+    foreach (var child in (await backend.Catalog.GetChildrenAsync(server)).Nodes)
+        if (await Find(child) is { } file) return await backend.Catalog.GetReferenceAsync(file);
+    throw new Exception("Employee demo file not found: " + name);
+}
+
+async Task RepeatedResumeKeepsOneActive()
+{
+    var (backend, host, root, downloads, reference) = await HostFixture(rate: 300_000);
+    try {
+        Equal(EnqueueOutcome.Added, await host.EnqueueAsync("portal", await reference("ortho-full.tif"), "ortho-full.tif", downloads));
+        await Until(() => host.IsBusy && backend.Writing == 1, "ortho running");
+        var ortho = (await host.SnapshotAsync()).Single(item => item.Job.FileName == "ortho-full.tif");
+        await host.ResumeAsync(ortho); // a repeated or stale Resume of what is already running
+        await host.ResumeAsync(ortho);
+        True(host.IsBusy, "the running download still owns the slot");
+        Equal(1, backend.Writing);
+        Equal(EnqueueOutcome.Added, await host.EnqueueAsync("employee", await EmployeeReference(backend, "site-plan.dwg"), "site-plan.dwg", downloads));
+        await Task.Delay(300);
+        Equal(1, backend.Writing);
+        var site = (await host.SnapshotAsync()).Single(item => item.Job.FileName == "site-plan.dwg");
+        await host.ResumeAsync(site); // stops ortho first, then starts the other source
+        // ResumeAsync returns once the site plan's start has been admitted, so read the queues right away.
+        var items = await host.SnapshotAsync();
+        Equal(QueuedTransferState.Running, StateOf(items, "site-plan.dwg"));
+        Equal(QueuedTransferState.Paused, StateOf(items, "ortho-full.tif"));
+        Equal(1, backend.MostAtOnce);
+    } finally { await host.DisposeAsync(); try { Directory.Delete(root, true); } catch (IOException) { } }
+}
+
+async Task StaleIdleKeepsOneActive()
+{
+    var (backend, host, root, downloads, reference) = await HostFixture(rate: 300_000);
+    var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    try {
+        Equal(EnqueueOutcome.Added, await host.EnqueueAsync("portal", await reference("ortho-full.tif"), "ortho-full.tif", downloads));
+        await Until(() => host.IsBusy && backend.Writing == 1, "ortho running");
+        // The first start's finish callback is held back until after a newer start of the same item.
+        var reached = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var once = 0;
+        host.Hooks.BeforeIdleRelease = () => Interlocked.Exchange(ref once, 1) == 0 ? Held() : Task.CompletedTask;
+        Task Held() { reached.TrySetResult(); return gate.Task; }
+        var ortho = (await host.SnapshotAsync()).Single(item => item.Job.FileName == "ortho-full.tif");
+        await host.PauseAsync(ortho);
+        await reached.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        await host.ResumeAsync((await host.SnapshotAsync()).Single(item => item.Job.FileName == "ortho-full.tif"));
+        await Until(() => host.IsBusy && backend.Writing == 1, "ortho resumed");
+        var released = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        host.Changed += () => released.TrySetResult();
+        gate.SetResult();
+        await released.Task.WaitAsync(TimeSpan.FromSeconds(10)); // the old callback has run its release
+        True(host.IsBusy, "the newer start still owns the slot");
+        Equal(EnqueueOutcome.Added, await host.EnqueueAsync("employee", await EmployeeReference(backend, "site-plan.dwg"), "site-plan.dwg", downloads));
+        var site = (await host.SnapshotAsync()).Single(item => item.Job.FileName == "site-plan.dwg");
+        await host.ResumeAsync(site);
+        var items = await host.SnapshotAsync();
+        Equal(QueuedTransferState.Running, StateOf(items, "site-plan.dwg"));
+        Equal(QueuedTransferState.Paused, StateOf(items, "ortho-full.tif"));
+        Equal(1, backend.MostAtOnce);
     } finally { gate.TrySetResult(); await host.DisposeAsync(); try { Directory.Delete(root, true); } catch (IOException) { } }
 }
 

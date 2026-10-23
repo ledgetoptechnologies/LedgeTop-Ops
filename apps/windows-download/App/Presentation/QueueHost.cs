@@ -11,7 +11,7 @@ public enum EnqueueOutcome { Added, AlreadyQueued, NameTaken, UnsafeName }
 internal sealed class QueueHostHooks
 {
     internal Func<string, bool>? Exists;
-    internal Func<Task>? AfterSnapshot, BeforeRunningPause, BeforeHeldPersist, BeforeStart, AfterStartPublished;
+    internal Func<Task>? AfterSnapshot, BeforeRunningPause, BeforeHeldPersist, BeforeStart, AfterStartPublished, BeforeIdleRelease;
     internal Action<Guid>? Starting;
     /// <summary>After Pause all's background save has finished its last item.</summary>
     internal Action? HeldSaveSettled;
@@ -37,7 +37,10 @@ public sealed class QueueHost : IAsyncDisposable
     private IReadOnlyList<TransferItem> known = [];
     /// <summary>Background saves (Pause all) that closing must wait for before releasing the queues.</summary>
     private readonly HashSet<Task> background = [];
-    private (string Alias, Guid Id)? active;
+    /// <summary>One start of one transfer. Only the invocation that owns the active slot, or a stop that targeted it,
+    /// may clear it, so a stale callback or a rejected duplicate can never free the slot while bytes still flow.</summary>
+    private sealed class Invocation(string alias, Guid id) { public string Alias { get; } = alias; public Guid Id { get; } = id; }
+    private Invocation? active;
     /// <summary>Bumped by every Pause all, and per item by Pause and Cancel. A start remembers the values it was
     /// chosen or requested under and never begins once a newer stop has happened.</summary>
     private long pauseAlls;
@@ -117,16 +120,20 @@ public sealed class QueueHost : IAsyncDisposable
     /// <summary>Pauses one item. A running item is signalled at once; a waiting one stops being scheduled.</summary>
     public async Task PauseAsync(TransferItem item)
     {
-        lock (sync) { held.Add(item.Job.JobId); wanted.Remove(item.Job.JobId); Stop(item.Job.JobId); }
+        Invocation? stopped;
+        lock (sync) { held.Add(item.Job.JobId); wanted.Remove(item.Job.JobId); Stop(item.Job.JobId); stopped = active?.Id == item.Job.JobId ? active : null; }
         await Queue(item.SourceAlias).PauseAsync(item.Job.JobId);
+        lock (sync) Release(stopped);
         Changed?.Invoke();
         _ = PumpAsync();
     }
 
     public async Task CancelAsync(TransferItem item)
     {
-        lock (sync) { held.Remove(item.Job.JobId); wanted.Remove(item.Job.JobId); Stop(item.Job.JobId); }
+        Invocation? stopped;
+        lock (sync) { held.Remove(item.Job.JobId); wanted.Remove(item.Job.JobId); Stop(item.Job.JobId); stopped = active?.Id == item.Job.JobId ? active : null; }
         await Queue(item.SourceAlias).CancelAsync(item.Job.JobId);
+        lock (sync) Release(stopped);
         Changed?.Invoke();
         _ = PumpAsync();
     }
@@ -138,7 +145,7 @@ public sealed class QueueHost : IAsyncDisposable
     /// </summary>
     public async Task PauseAllAsync()
     {
-        (string Alias, Guid Id)? running; List<TransferItem> waiting;
+        Invocation? running; List<TransferItem> waiting;
         // Registered under the same lock that closing uses, before any await or event: closing either waits for this
         // whole operation (stop and save) or this Pause all never starts.
         var operation = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -154,7 +161,7 @@ public sealed class QueueHost : IAsyncDisposable
         }
         try {
             if (Hooks.BeforeRunningPause is { } before) await before();
-            if (running is { } stop) await Queue(stop.Alias).PauseAsync(stop.Id);
+            if (running is { } stop) { await Queue(stop.Alias).PauseAsync(stop.Id); lock (sync) Release(stop); }
             Changed?.Invoke();
         } catch { Settle(operation); throw; }
         // Saving the held items as paused happens afterwards and never delays the stop; the operation stays
@@ -201,10 +208,13 @@ public sealed class QueueHost : IAsyncDisposable
         lock (sync) { held.Remove(item.Job.JobId); wanted.Remove(item.Job.JobId); intent = Intent(item.Job.JobId); }
         await pump.WaitAsync();
         try {
-            (string Alias, Guid Id)? running; lock (sync) running = active;
-            if (running is { } current && current.Id != item.Job.JobId) {
+            Invocation? running; lock (sync) running = active;
+            // Already running (a repeated or stale Resume): nothing to do, and never a second start.
+            if (running?.Id == item.Job.JobId) return;
+            if (running is { } current) {
                 lock (sync) { if (!wanted.Contains(current.Id)) wanted.Insert(0, current.Id); }
                 await Queue(current.Alias).PauseAsync(current.Id);
+                lock (sync) Release(current);
             }
             await Start(item, intent);
         } finally { pump.Release(); }
@@ -250,11 +260,12 @@ public sealed class QueueHost : IAsyncDisposable
         // Under the lock that closing and every stop use: a stop or Pause all newer than this start's intent wins
         // and it never begins. Otherwise the queue's own stop order is captured before this start is published as
         // active, so a stop that sees it active still supersedes it if the queue hasn't begun yet.
-        TransferQueue.StartReservation reservation;
+        TransferQueue.StartReservation reservation; var owner = new Invocation(item.SourceAlias, id);
         lock (sync) {
-            if (disposed || held.Contains(id) || !IsCurrent(intent)) return;
+            // One transfer at a time across every source: never take over a slot another invocation owns.
+            if (disposed || active is not null || held.Contains(id) || !IsCurrent(intent)) return;
             reservation = queue.PrepareStart(id);
-            wanted.Remove(id); active = (item.SourceAlias, id);
+            wanted.Remove(id); active = owner;
         }
         Hooks.Starting?.Invoke(id);
         try {
@@ -262,7 +273,7 @@ public sealed class QueueHost : IAsyncDisposable
             await queue.StartAsync(reservation, new Relay(progress => Progress?.Invoke(id, progress)));
         } catch {
             bool superseded;
-            lock (sync) { active = null; superseded = !IsCurrent(intent); }
+            lock (sync) { Release(owner); superseded = !IsCurrent(intent); }
             // A newer stop or Pause all already decided this item; that isn't a failure to report.
             if (superseded) { Changed?.Invoke(); return; }
             throw;
@@ -270,7 +281,8 @@ public sealed class QueueHost : IAsyncDisposable
         Changed?.Invoke();
         _ = Task.Run(async () => {
             try { await queue.WaitForIdleAsync(); } catch (Exception) { /* reported through the item's state */ }
-            lock (sync) if (active?.Id == id) active = null;
+            if (Hooks.BeforeIdleRelease is { } idle) await idle();
+            lock (sync) Release(owner);
             Changed?.Invoke();
             await PumpAsync();
         });
@@ -293,6 +305,9 @@ public sealed class QueueHost : IAsyncDisposable
     }
 
     private static bool Exists(string path) => File.Exists(path) || Directory.Exists(path);
+
+    // Call under sync. Frees the slot only if this exact invocation still owns it.
+    private void Release(Invocation? owner) { if (owner is not null && ReferenceEquals(active, owner)) active = null; }
 
     // Call under sync.
     private void Stop(Guid id) => stops[id] = stops.GetValueOrDefault(id) + 1;
@@ -319,7 +334,7 @@ public sealed class QueueHost : IAsyncDisposable
         return new(disposal!);
     }
 
-    private async Task DrainAndReleaseAsync((string Alias, Guid Id)? running)
+    private async Task DrainAndReleaseAsync(Invocation? running)
     {
         await Task.Yield(); // Never run queue stops or callbacks while the caller holds sync.
         if (running is { } stop) {
