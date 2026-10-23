@@ -114,6 +114,40 @@ WHEN NOT EXISTS(SELECT 1 FROM native_staff_access_reconciliation state
       AND c.result_version=a.version AND c.capability=CASE a.active WHEN 1 THEN 'staff.admission.enable' ELSE 'staff.admission.disable' END
       AND s.email=p.login_email COLLATE BINARY AND s.access_subject=a.bound_access_subject
       AND s.status=CASE a.active WHEN 1 THEN 'active' ELSE 'inactive' END)
+  AND NOT EXISTS(SELECT 1 FROM native_staff_access_reconciliation state
+    JOIN native_staff_management_commands c ON c.command_id=NEW.command_id
+      AND c.target_kind='onboarding' AND c.capability='staff.onboarding.approve'
+      AND c.target_staff_id IS NULL AND c.target_proposed_staff_id=NEW.staff_id
+      AND c.expected_version=2 AND c.result_version=3
+    JOIN native_staff_pending_onboarding pending ON pending.onboarding_id=c.target_onboarding_id
+      AND pending.proposed_staff_id=c.target_proposed_staff_id AND pending.state='approved' AND pending.version=3
+      AND pending.approval_command_id=c.command_id AND pending.terminal_by_staff_id=c.actor_staff_id
+    JOIN native_staff_admissions a ON a.staff_id=pending.proposed_staff_id AND a.active=1 AND a.version=1
+      AND a.bound_access_subject=pending.claimed_access_subject AND a.admitted_by=c.actor_staff_id
+    JOIN native_staff_profiles p ON p.staff_id=a.staff_id AND p.version=1
+      AND p.login_email=pending.login_email COLLATE BINARY AND p.display_name=pending.display_name
+    JOIN staff_users s ON s.id=a.staff_id AND s.status='active' AND s.provisioning_source='local'
+      AND s.sync_protected=1 AND s.project_alpha_user_id IS NULL AND s.access_subject=a.bound_access_subject
+      AND s.email=p.login_email COLLATE BINARY AND s.display_name=p.display_name
+    WHERE state.singleton=1 AND state.enabled=1 AND NEW.generation=state.generation+1
+      AND NEW.admission_version=1 AND NEW.desired_active=1
+      AND json_extract(c.result_json,'$.targetOnboardingId')=pending.onboarding_id
+      AND json_extract(c.result_json,'$.proposedStaffId')=pending.proposed_staff_id
+      AND json_extract(c.result_json,'$.claimedAccessSubject')=pending.claimed_access_subject
+      AND json_extract(c.result_json,'$.proposalSha256')=pending.proposal_sha256
+      AND json_extract(c.result_json,'$.claimEvidenceSha256')=pending.claim_evidence_sha256
+      AND json_extract(c.result_json,'$.proposal')=pending.proposal_json
+      AND EXISTS(SELECT 1 FROM native_staff_management_commands created
+        WHERE created.target_kind='onboarding' AND created.capability='staff.onboarding.create'
+          AND created.target_onboarding_id=pending.onboarding_id AND created.target_proposed_staff_id=pending.proposed_staff_id
+          AND created.expected_version=0 AND created.result_version=1
+          AND json_extract(created.result_json,'$.onboardingId')=pending.onboarding_id
+          AND json_extract(created.result_json,'$.proposedStaffId')=pending.proposed_staff_id
+          AND json_extract(created.result_json,'$.loginEmail')=pending.login_email
+          AND json_extract(created.result_json,'$.displayName')=pending.display_name
+          AND json_extract(created.result_json,'$.proposalSha256')=pending.proposal_sha256
+          AND json_extract(created.result_json,'$.invitationSecretSha256')=pending.invitation_secret_sha256
+          AND json_extract(created.result_json,'$.proposal')=pending.proposal_json))
 BEGIN SELECT RAISE(ABORT,'native staff reconciliation event is invalid'); END;
 CREATE TRIGGER native_staff_access_reconciliation_event_generation AFTER INSERT ON native_staff_access_reconciliation_events
 BEGIN UPDATE native_staff_access_reconciliation SET generation=NEW.generation WHERE singleton=1; END;
@@ -121,6 +155,19 @@ CREATE TRIGGER native_staff_access_reconciliation_event_no_update BEFORE UPDATE 
 BEGIN SELECT RAISE(ABORT,'native staff reconciliation event is immutable'); END;
 CREATE TRIGGER native_staff_access_reconciliation_event_no_delete BEFORE DELETE ON native_staff_access_reconciliation_events
 BEGIN SELECT RAISE(ABORT,'native staff reconciliation event is durable'); END;
+
+-- Join the same atomic approval transition, not an assumed ordering among
+-- peer AFTER triggers. The event guard independently requires the exact
+-- immutable receipt, creation history and native/legacy materialization;
+-- existing 0074 guards must also succeed for the outer batch to commit.
+CREATE TRIGGER native_staff_onboarding_reconciliation_intent AFTER UPDATE ON native_staff_pending_onboarding
+WHEN OLD.state='claimed' AND NEW.state='approved'
+  AND EXISTS(SELECT 1 FROM native_staff_access_reconciliation WHERE singleton=1 AND enabled=1)
+BEGIN
+  INSERT INTO native_staff_access_reconciliation_events(command_id,staff_id,admission_version,desired_active,generation)
+  SELECT NEW.approval_command_id,NEW.proposed_staff_id,1,1,generation+1
+  FROM native_staff_access_reconciliation WHERE singleton=1 AND enabled=1;
+END;
 
 CREATE TRIGGER native_staff_lifecycle_fence_close BEFORE DELETE ON native_staff_lifecycle_fences
 WHEN OLD.bridge_writes<>0

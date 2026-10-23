@@ -386,7 +386,7 @@ describe("Ops-owned joined staff lifecycle against actual full-chain local D1", 
     const approvalJson = JSON.stringify(approved);
     // Actual 0074 materialization requires local + sync_protected=1. Native
     // lifecycle must respect that PA guard while managing this ordinary user.
-    await db.batch([
+    const approveBatch = () => [
       insertFence(approveId,"staff.onboarding.approve",2,approvalJson),
       db.prepare(`INSERT INTO staff_users(id,email,display_name,access_subject,project_alpha_user_id,status,provisioning_source,sync_protected)
         VALUES(?,?,?,?,NULL,'active','local',1)`).bind(target.id,target.email,target.id,target.subject),
@@ -394,9 +394,37 @@ describe("Ops-owned joined staff lifecycle against actual full-chain local D1", 
       db.prepare("INSERT INTO native_staff_profiles(staff_id,login_email,display_name) VALUES(?,?,?)").bind(target.id,target.email,target.id),
       db.prepare("UPDATE native_staff_management_fences SET mutation_writes=0 WHERE command_id=? AND mutation_writes=1").bind(approveId),
       receipt(approveId),
-    ]);
+    ];
+    // Emulate a previously reconciled local checkpoint, without claiming a real
+    // Cloudflare call. A new approval must make that generation stale.
+    await db.prepare("UPDATE native_staff_access_reconciliation SET applied_generation=generation WHERE singleton=1").run();
+    const before = await db.prepare("SELECT generation,applied_generation FROM native_staff_access_reconciliation WHERE singleton=1")
+      .first<{generation:number;applied_generation:number}>();
+    expect(before!.applied_generation).toBe(before!.generation);
+    await db.prepare(`CREATE TRIGGER synthetic_onboarding_outbox_failure BEFORE INSERT ON native_staff_access_reconciliation_events
+      WHEN NEW.command_id='${approveId}' BEGIN SELECT RAISE(ABORT,'synthetic late onboarding event failure'); END`).run();
+    await expect(db.batch(approveBatch())).rejects.toThrow("synthetic late onboarding event failure");
+    expect(await db.prepare("SELECT state,version,approval_command_id FROM native_staff_pending_onboarding WHERE onboarding_id=?").bind(onboardingId).first())
+      .toEqual({state:"claimed",version:2,approval_command_id:null});
+    for (const table of ["staff_users","native_staff_admissions","native_staff_profiles"])
+      expect(await db.prepare(`SELECT count(*) n FROM ${table} WHERE ${table==="staff_users"?"id":"staff_id"}=?`).bind(target.id).first("n")).toBe(0);
+    expect(await db.prepare("SELECT count(*) n FROM native_staff_management_commands WHERE command_id=?").bind(approveId).first("n")).toBe(0);
+    expect(await db.prepare("SELECT count(*) n FROM native_staff_management_fences WHERE command_id=?").bind(approveId).first("n")).toBe(0);
+    expect(await db.prepare("SELECT count(*) n FROM native_staff_access_reconciliation_events WHERE command_id=?").bind(approveId).first("n")).toBe(0);
+    expect(await db.prepare("SELECT generation,applied_generation FROM native_staff_access_reconciliation WHERE singleton=1").first()).toEqual(before);
+    await db.prepare("DROP TRIGGER synthetic_onboarding_outbox_failure").run();
+    await db.batch(approveBatch());
     expect(await db.prepare("SELECT state,version,approval_command_id FROM native_staff_pending_onboarding WHERE onboarding_id=?").bind(onboardingId).first())
       .toEqual({state:"approved",version:3,approval_command_id:approveId});
+    expect(await db.prepare("SELECT staff_id,admission_version,desired_active,generation FROM native_staff_access_reconciliation_events WHERE command_id=?")
+      .bind(approveId).first()).toEqual({staff_id:target.id,admission_version:1,desired_active:1,generation:before!.generation+1});
+    expect(await db.prepare("SELECT generation,applied_generation FROM native_staff_access_reconciliation WHERE singleton=1").first())
+      .toEqual({generation:before!.generation+1,applied_generation:before!.applied_generation});
+    // A raw duplicate command is refused by the existing immutable ledger;
+    // there is no invitation-approval service replay endpoint in this lane.
+    await expect(db.batch(approveBatch())).rejects.toThrow();
+    expect(await db.prepare("SELECT count(*) n FROM native_staff_access_reconciliation_events WHERE command_id=?").bind(approveId).first("n")).toBe(1);
+    expect(await db.prepare("SELECT generation FROM native_staff_access_reconciliation WHERE singleton=1").first("generation")).toBe(before!.generation+1);
     const history = (await db.prepare("SELECT command_id,result_json,result_sha256 FROM native_staff_management_commands WHERE command_id IN (?,?) ORDER BY command_id")
       .bind(createId,approveId).all()).results;
     expect(history).toHaveLength(2);
