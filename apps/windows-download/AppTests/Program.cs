@@ -55,6 +55,7 @@ var groups = new (string Name, Func<Task> Run)[] {
     ("switching stops and saves downloads, then opens the other kind with a fresh view", SwitchDrainsFirst),
     ("a refused company setup never falls back to client deliveries", NoFallbackOnRefusal),
     ("switching or closing never waits behind a stuck sign-in, and a late result opens nothing", PendingSignInSwitchAndClose),
+    ("a switch whose old view can't close cleanly opens nothing and asks for a restart", SwitchFailsClosed),
     ("the choice screen renders and returns only what was clicked", ChooserWindow),
     ("the window renders sign-in and files screens", Render),
 };
@@ -1410,6 +1411,46 @@ async Task PendingSignInSwitchAndClose()
     }
 }
 
+async Task SwitchFailsClosed()
+{
+    // Closing the client view can't confirm its downloads were saved: open nothing else, and ask for a restart.
+    var root = Path.Combine(Path.GetTempPath(), "ltfiles-switchfail-" + Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(root);
+    var created = new List<AccessMode>();
+    IFilesBackend Make(AccessMode mode)
+    {
+        created.Add(mode);
+        var demo = new DemoBackend(Path.Combine(root, "queue"), signedIn: true, mode: mode);
+        return mode == AccessMode.Client ? new ThrowOnDisposeBackend(demo) : demo;
+    }
+    var choice = new AccessChoice(Make, [AccessMode.Client, AccessMode.Employee], AccessPreference.For(root, "pilot"));
+    choice.Preference.Save(AccessMode.Client);
+    var shell = new ChooserShell();
+    var session = new FilesSession(shell, choice, Path.Combine(root, "Downloads"), null);
+    try {
+        await session.StartAsync().WaitAsync(TimeSpan.FromSeconds(30));
+        var client = shell.Attached.Single();
+        await Until(() => client.Screen == Screen.Files && client.Sections.Count > 0, "client files shown");
+
+        client.SwitchAccess.Execute(null);
+        await Until(() => client.Screen == Screen.NotSetUp, "restart asked for");
+        Equal("Restart Ledge Top Files", client.SetupTitle);
+        True(client.Sections.Count == 0 && client.Files.Count == 0 && client.Transfers.Count == 0, "no stale files stay on screen");
+        True(!client.CanSwitchAccess && !client.SwitchAccess.CanExecute(null), "switching is no longer offered");
+        True(created.SequenceEqual([AccessMode.Client]), "no company files backend was built after the uncertain close");
+        Equal((AccessMode?)AccessMode.Client, session.Mode);
+        Equal(1, shell.Attached.Count);
+
+        await session.SwitchAsync(AccessMode.Employee);
+        True(created.SequenceEqual([AccessMode.Client]) && shell.Attached.Count == 1, "a later switch request still opens nothing");
+    } finally {
+        // Closing reports the same failure; that is expected here and must not hide an assertion failure above.
+        try { await session.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(30)); }
+        catch (IOException) { }
+        try { Directory.Delete(root, true); } catch (IOException) { }
+    }
+}
+
 async Task ChooserWindow()
 {
     Directory.CreateDirectory(screenshots);
@@ -1483,6 +1524,16 @@ static Task Sta(Func<Task> test)
 }
 
 /// <summary>A fresh demo backend, view model and folders for one test.</summary>
+/// <summary>A demo backend whose release reports a failure, as if saving the queue had failed while closing.</summary>
+sealed class ThrowOnDisposeBackend(DemoBackend inner) : IFilesBackend
+{
+    public ISessionGateway Session => inner.Session;
+    public IFileCatalog Catalog => inner.Catalog;
+    public IReadOnlyList<IQueuedDownloadSource> Sources => inner.Sources;
+    public string StateDirectory => inner.StateDirectory;
+    public async ValueTask DisposeAsync() { await inner.DisposeAsync(); throw new IOException("synthetic close failure"); }
+}
+
 sealed class ChooserShell : IAccessWindow
 {
     private readonly Dispatcher ui = Dispatcher.CurrentDispatcher;

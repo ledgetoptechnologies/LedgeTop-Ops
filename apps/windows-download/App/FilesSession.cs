@@ -20,7 +20,7 @@ public sealed class FilesSession(IAccessWindow window, AccessChoice choice, stri
 {
     private readonly SemaphoreSlim changing = new(1, 1);
     private MainViewModel? current;
-    private bool closed;
+    private bool closed, stuck;
     private Task? closing;
 
     public MainViewModel? Current => current;
@@ -45,10 +45,19 @@ public sealed class FilesSession(IAccessWindow window, AccessChoice choice, stri
         MainViewModel? opened;
         await changing.WaitAsync();
         try {
-            if (closed || Mode == target) return;
+            if (closed || stuck || Mode == target) return;
             var old = current; current = null;
             // Stops and saves downloads and releases the old queues and backend, exactly as closing the window does.
-            if (old is not null) await old.DisposeAsync();
+            if (old is not null) {
+                try { await old.DisposeAsync(); }
+                catch (Exception) {
+                    // It isn't certain the old downloads stopped and were saved, so open nothing else (no new
+                    // backend, no fallback). Clear the old view and ask for a restart; closing still waits on it.
+                    stuck = true; current = old;
+                    old.ShowRestartRequired();
+                    return;
+                }
+            }
             opened = Open(target);
         } finally { changing.Release(); }
         if (opened is not null) await opened.StartAsync();
