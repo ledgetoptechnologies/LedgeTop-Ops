@@ -31,12 +31,12 @@ test("account menu shows a live server-timed session above Logout and refreshes 
   await trigger.click();
   const menu = page.getByRole("menu", { name: "Account" });
   await expect(menu.getByRole("timer")).toHaveText("Less than a minute");
-  await expect(menu.getByRole("menuitem", { name: "Logout" })).toBeFocused();
+  await expect(menu.getByRole("menuitem", { name: "Get the app" })).toBeFocused();
   // The expiry reads as a full date and time, never seconds.
   await expect(menu.locator("time")).toHaveText(/^[A-Z][a-z]{2}, [A-Z][a-z]{2} \d{1,2}, \d{1,2}:\d{2}\s?[AP]M$/);
   const order = await menu.evaluate(node => {
     const status = node.querySelector(".account-session-status")!;
-    const logout = node.querySelector('[role="menuitem"]')!;
+    const logout = node.querySelector('a[role="menuitem"][href="/cdn-cgi/access/logout"]')!;
     return Boolean(status.compareDocumentPosition(logout) & Node.DOCUMENT_POSITION_FOLLOWING);
   });
   expect(order).toBe(true);

@@ -562,3 +562,29 @@ html:has(.ltds-dialog[open]) { overflow: hidden; }
   .ops-viewer-main .viewer-shell-page > .ltds-viewer-embed,
   .client-viewer-main .viewer-shell-page > .ltds-viewer-embed { min-height: calc(100dvh - 80px); }
 }
+
+/* ---------------------------------------------------------------------------
+   Get the app (account menu)
+   --------------------------------------------------------------------------- */
+
+/* A menu action that opens a dialog looks like its sibling menu links. */
+.account-menu-popover button[role="menuitem"] { width: 100%; justify-content: flex-start; border: 0; background: transparent; font: inherit; font-weight: 760; text-align: left; }
+.get-app-message { margin: 0 0 1rem; color: var(--muted); line-height: 1.5; }
+.get-app-message p { margin: 0 0 .75rem; }
+.get-app-list { margin: 0; padding: 0; list-style: none; display: grid; gap: .65rem; }
+.get-app-row { display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: .9rem 1rem; border: 1px solid var(--line); border-radius: var(--radius-md); }
+.get-app-row.is-mine { border-color: var(--orange); background: var(--orange-soft); }
+.get-app-row > div { min-width: 0; display: grid; gap: .2rem; }
+.get-app-row strong { display: flex; align-items: center; gap: .5rem; font-size: 1rem; }
+.get-app-row strong small { padding: .1rem .45rem; border-radius: 999px; background: var(--orange); color: #fff; font-size: .7rem; font-weight: 800; }
+.get-app-row strong small.is-pilot { background: #e9edf0; color: var(--ink); }
+.get-app-row span, .get-app-row p { margin: 0; color: var(--muted); font-size: .86rem; line-height: 1.4; }
+.get-app-row details { font-size: .8rem; color: var(--muted); }
+.get-app-row summary { cursor: pointer; }
+.get-app-row code { display: block; margin-top: .3rem; overflow-wrap: anywhere; font-size: .74rem; }
+.get-app-row > a { flex: 0 0 auto; white-space: nowrap; }
+.get-app-row.is-unavailable { background: #f6f7f8; }
+@media (max-width: 560px) {
+  .get-app-row { flex-direction: column; align-items: stretch; }
+  .get-app-row > a { min-height: 44px; }
+}
