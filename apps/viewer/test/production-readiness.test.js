@@ -95,7 +95,7 @@ test('production readiness verifies the live policy and signed catalog without e
     ok: true,
     host: 'viewer.example.test',
     // Source-tree runs have no attestation file; an exact runtime image does.
-    build: { revision: readRuntimeRevision() || 'unavailable', schemaVersion: 39 },
+    build: { revision: readRuntimeRevision() || 'unavailable', schemaVersion: 40 },
     webodmMount: '',
     derivativesMount: null,
     models: 0,

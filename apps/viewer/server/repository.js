@@ -19,12 +19,12 @@ function finiteVector(value, keys) {
 }
 
 function sourceAuthorization(row) {
-  if (!row || row.source_authorization_type !== 'model_association'
+  if (!row || !['model_association', 'direct_client_grant'].includes(row.source_authorization_type)
     || typeof row.source_authorization_id !== 'string' || !row.source_authorization_id
     || !Number.isSafeInteger(row.source_authorization_version) || row.source_authorization_version < 1)
     return null;
   return {
-    type: 'model_association',
+    type: row.source_authorization_type,
     id: row.source_authorization_id,
     version: row.source_authorization_version,
   };
@@ -34,10 +34,10 @@ function sourceAuthorizationValues(value) {
   if (value === undefined || value === null) return [null, null, null];
   if (typeof value !== 'object' || Array.isArray(value)
     || Object.keys(value).sort().join(',') !== 'id,type,version'
-    || value.type !== 'model_association'
+    || !['model_association', 'direct_client_grant'].includes(value.type)
     || typeof value.id !== 'string' || !/^[A-Za-z0-9._:-]{1,200}$/.test(value.id)
     || !Number.isSafeInteger(value.version) || value.version < 1)
-    throw new TypeError('invalid model association source authorization');
+    throw new TypeError('invalid session source authorization');
   return [value.type, value.id, value.version];
 }
 
@@ -883,6 +883,9 @@ class ViewerRepository {
 
   viewerSessionLive(session, at = Date.now()) {
     if (!session || session.revokedAt || Date.parse(session.expiresAt) <= at) return false;
+    if (session.sourceAuthorization && this.database.prepare(`SELECT 1 FROM revoked_published_session_authorizations
+      WHERE source_authorization_type=? AND source_authorization_id=? AND source_authorization_version=?`)
+      .get(session.sourceAuthorization.type, session.sourceAuthorization.id, session.sourceAuthorization.version)) return false;
     if (session.sessionMode !== 'review') return true;
     const attempt = this.database.prepare(`SELECT a.status,a.result_model_id,a.result_model_version_id,o.status AS output_status,v.status AS version_status
       FROM processing_attempts a

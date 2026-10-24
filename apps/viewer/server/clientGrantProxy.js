@@ -2,6 +2,7 @@
 
 const { signViewerEvent } = require('./viewerEvents');
 const { randomUUID } = require('node:crypto');
+const { validDirectGrantInput, validDirectSnapshot, directListQuery } = require('./directClientGrantContract');
 
 const REMOTE_PATH = '/api/viewer/workspace/client-grants';
 const LOCAL_PATH = '/api/v1/workspace/client-grants';
@@ -42,16 +43,28 @@ function validNativeSnapshot(value, action) {
 }
 
 function createClientGrantProxy({ config, authorize, fetchImpl = fetch, diagnostic = record => console.warn(`[client-grant-proxy] ${JSON.stringify(record)}`) }) {
-  async function proxy(req, res, action, native = false) {
+  async function proxy(req, res, action, connection = null) {
     if (!/^ops:[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(String(req.adminPrincipal?.subject || '')))
       return res.status(403).json({ error: 'Viewer workspace authorization is invalid', code: 'invalid_workspace_subject' });
     const supplied = req.body || {};
-    const envelope = { subject: req.adminPrincipal.subject, action, ...(native ? { connection: "native" } : {}) };
+    if (connection === 'direct' && action === 'revoke') {
+      if (Object.keys(supplied).some(key => key !== 'reason')) return invalid(res);
+      supplied.grantId = req.params.grantId;
+      if (supplied.reason === undefined) supplied.reason = 'Revoked by staff';
+      if (typeof supplied.reason !== 'string' || /[\u0000-\u001f\u007f]/.test(supplied.reason)) return invalid(res);
+    }
+    const envelope = { subject: req.adminPrincipal.subject, action, ...(connection ? { connection } : {}) };
+    if (connection === 'direct' && action === 'list') {
+      const listQuery = directListQuery(req.query);
+      if (!listQuery) return invalid(res);
+      envelope.listQuery = listQuery;
+    }
     if (action === 'create') {
       const grant = supplied.grant;
       if (!grant || typeof grant !== 'object' || Array.isArray(grant)) return invalid(res);
       if (!IDEMPOTENCY_KEY.test(String(req.get('Idempotency-Key') || ''))) return invalid(res, 'valid Idempotency-Key is required');
       envelope.idempotencyKey = req.get('Idempotency-Key');
+      if (connection === 'direct' && !validDirectGrantInput(grant)) return invalid(res);
       envelope.grant = grant;
     } else if (action === 'revoke') {
       if (!ID.test(String(supplied.grantId || '')) || typeof supplied.reason !== 'string' || !supplied.reason.trim() || supplied.reason.trim().length > 240)
@@ -100,10 +113,16 @@ function createClientGrantProxy({ config, authorize, fetchImpl = fetch, diagnost
         stage = 'upstream_rejection';
         const status = response.status >= 400 && response.status < 500 ? response.status : 502;
         report(status, 'operations_request_failed');
+        if (connection === 'direct' && response.status >= 400 && response.status < 500
+          && payload && typeof payload === 'object' && !Array.isArray(payload)
+          && typeof payload.code === 'string' && /^[a-z][a-z0-9_]{0,79}$/.test(payload.code)
+          && typeof payload.error === 'string' && payload.error.length > 0 && payload.error.length <= 500
+          && !/[\u0000-\u001f\u007f]/.test(payload.error))
+          return res.status(status).json({ error: payload.error, code: payload.code });
         return res.status(status).json({ error: 'Operations rejected the client access request', code: 'operations_request_failed' });
       }
       stage = 'response_schema';
-      if (!(native ? validNativeSnapshot(payload, action) : validSnapshot(payload))) throw new Error('invalid_response');
+      if (!(connection === 'direct' ? validDirectSnapshot(payload, action) : connection === 'native' ? validNativeSnapshot(payload, action) : validSnapshot(payload))) throw new Error('invalid_response');
       return res.status(action === 'create' && !payload.replayed ? 201 : 200).json(payload);
     } catch {
       report(502, 'operations_unavailable');
@@ -117,10 +136,14 @@ function createClientGrantProxy({ config, authorize, fetchImpl = fetch, diagnost
       router.get(LOCAL_PATH, allowed, (req, res) => proxy(req, res, 'list'));
       router.post(LOCAL_PATH, allowed, (req, res) => proxy(req, res, 'create'));
       router.delete(LOCAL_PATH, allowed, (req, res) => proxy(req, res, 'revoke'));
+      const directPath = '/api/v1/workspace/direct-client-grants';
+      router.get(directPath, allowed, (req, res) => proxy(req, res, 'list', 'direct'));
+      router.post(directPath, allowed, (req, res) => proxy(req, res, 'create', 'direct'));
+      router.delete(`${directPath}/:grantId`, allowed, (req, res) => proxy(req, res, 'revoke', 'direct'));
       const nativePath = '/api/v1/workspace/native-client-grants';
-      router.get(nativePath, allowed, (req, res) => proxy(req, res, 'list', true));
-      router.post(nativePath, allowed, (req, res) => proxy(req, res, 'create', true));
-      router.delete(nativePath, allowed, (req, res) => proxy(req, res, 'revoke', true));
+      router.get(nativePath, allowed, (req, res) => proxy(req, res, 'list', 'native'));
+      router.post(nativePath, allowed, (req, res) => proxy(req, res, 'create', 'native'));
+      router.delete(nativePath, allowed, (req, res) => proxy(req, res, 'revoke', 'native'));
     },
   };
 }
