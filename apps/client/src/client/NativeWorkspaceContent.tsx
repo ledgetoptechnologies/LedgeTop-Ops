@@ -62,13 +62,15 @@ function FeatureReadiness({features}: {features: NativeWorkspaceFeatureReadiness
   </Card>;
 }
 
-export function NativeWorkspaceContent({ context, page, projectId, feedbackId, onInvalid, renderFiles, openProject, renderTeam, renderRequests, renderModels, renderDashboardSupplement }: {
+export function NativeWorkspaceContent({ context, page, projectId, feedbackId, onInvalid, renderFiles, openProject, renderTeam, renderRequests, renderModels, renderDashboardSupplement, renderSharedWork }: {
   context: NativePortalBootstrap; page: ClientPortalPage; projectId: string | null; feedbackId?: string | null;
   onInvalid: (caught: unknown) => void; renderFiles: (options: NativeFileBrowserOptions) => ReactNode; openProject: (id: string) => void;
   renderTeam?: () => ReactNode;
   renderRequests?: (projects: PortalProject[], projectId?: string) => ReactNode;
   renderModels?: (projectId: string) => ReactNode;
   renderDashboardSupplement?: () => ReactNode;
+  /** Shared 3D work, listed with delivery folders so clients find all shared work in one place. */
+  renderSharedWork?: () => ReactNode;
 }) {
   const [locationSearch, setLocationSearch] = useState(location.search);
   const [hierarchy, setHierarchy] = useState<NativeHierarchy["entries"]>([]);
@@ -181,6 +183,7 @@ export function NativeWorkspaceContent({ context, page, projectId, feedbackId, o
         {!deliveryLoading && !deliveryError && targets.length === 0 && <p>{cursor ? "No folders on this page. Continue to check the remaining shared folders." : "No delivery folders are currently shared with you."}</p>}
         {cursor && <button className="button-ghost" disabled={deliveryLoading} onClick={() => void fetchDeliveries(cursor)}>Load more delivery folders</button>}
       </Card>}
+      {!folderId && !linkedFile && renderSharedWork?.()}
     </> : null}
   </section>;
 }
