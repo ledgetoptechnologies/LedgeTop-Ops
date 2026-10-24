@@ -80,7 +80,7 @@ export function LinkLoginPage() {
     claiming: ["Linking this email…", "This takes a moment."],
     linked: ["This email is linked", "From now on you can sign in to Ledge Top Operations with either email."],
     invalid: ["This link can't be used", "It has expired, was already used or isn't complete. Create a new link from your Operations account, then open it here."],
-    conflict: ["This link is no longer current", "It has expired, or a newer link replaced it. Check your Operations account and create a new link if you still need one."],
+    conflict: ["This link is no longer current", "It has expired or a newer link replaced it. If this email was already linked, it still signs in as before; otherwise create a new link from your Operations account."],
     "sign-in": ["Sign in with the email you're adding", "To link it, sign in with the email you're adding after this link was created, then open this page again."],
     unknown: ["We couldn't confirm the result", "We could not confirm whether the email was linked. Retry verification to check safely."],
   };
@@ -102,7 +102,7 @@ export function LinkLoginPage() {
       {message && <p className="sign-in-problem-hint" role="alert">{message}</p>}
       {offerSignIn && <p className="sign-in-problem-hint">Not the email you're adding? Signing out of Cloudflare Access affects every Ledge Top app in this browser; this page comes back after you sign in.</p>}
       <div className="sign-in-problem-actions">
-        {canClaim && <button type="button" className="button-orange" disabled={signingOut} onClick={claim}>{view === "unknown" ? "Retry verification" : "Link this email"}</button>}
+        {canClaim && <button type="button" className="button-orange" disabled={signingOut} onClick={claim}>{view === "unknown" ? "Retry verification" : "Link this email to this profile"}</button>}
         {view === "claiming" && <button type="button" className="button-orange" disabled>Linking…</button>}
         {view === "check-failed" && <button type="button" className="button-orange" onClick={() => setChecks(value => value + 1)}>Try again</button>}
         {offerSignIn && <a className={`button ${view === "sign-in" ? "button-orange" : "button-ghost"}`} href={ACCESS_LOGOUT} onClick={signOut}

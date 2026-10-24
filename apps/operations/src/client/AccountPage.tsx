@@ -62,7 +62,7 @@ function SignInEmails() {
   const add = () => run(async () => {
     const email = await requestText({
       title: "Add a sign-in email", label: "Email", confirmLabel: "Create link",
-      description: "You'll confirm it by signing in with that email. The link works once and expires after 15 minutes.",
+      description: "Only add an email you control; it will use this profile’s permissions. You'll confirm it by signing in with that email. The link works once and expires after 15 minutes.",
       validate: value => EMAIL.test(value.trim()) ? null : "Enter a full email address.",
     });
     if (!email) return;
