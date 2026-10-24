@@ -176,6 +176,7 @@
 .sign-in-problem .sign-in-problem-email, .sign-in-problem .sign-in-problem-hint { color: var(--muted); font-size: .92rem; }
 .sign-in-problem-actions { display: flex; flex-wrap: wrap; gap: .6rem; margin-top: .5rem; }
 .sign-in-problem-actions > * { min-height: 44px; }
+.sign-in-problem-actions a[aria-disabled="true"] { cursor: progress; opacity: .75; }
 @media (max-width: 640px) {
   .fatal { margin: 1.5rem auto; }
   .sign-in-problem-actions > * { flex: 1 1 100%; justify-content: center; text-align: center; }
