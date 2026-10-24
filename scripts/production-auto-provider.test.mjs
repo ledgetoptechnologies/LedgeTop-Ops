@@ -104,7 +104,7 @@ test("temporary verifier creation, exact service readback, temporary-only enable
   const entry = { path: "/assets/test.js", size: 1, sha256: hash("x"), contentType: "application/javascript" };
   const state = setup(async (url, init) => {
     events.push({ url, method: init.method });
-    if (url.includes(".workers.dev")) { assert.equal(init.headers.Authorization, "Bearer " + nonce.bearer); return new Response("x"); }
+    if (url.includes(".workers.dev")) { assert.equal(init.headers.Authorization, "Bearer " + nonce.bearer); assert.equal(init.headers["Accept-Encoding"], "identity"); return new Response("x"); }
     if (init.method === "PUT") { metadata = JSON.parse(init.body.get("metadata")); return ok({ id: candidate }); }
     if (url.endsWith("/settings")) return ok({ bindings: metadata.bindings });
     if (url.endsWith("/subdomain") && init.method === "POST") { assert.deepEqual(JSON.parse(init.body), { enabled: true, previews_enabled: false }); return ok({ enabled: true, previews_enabled: false }); }

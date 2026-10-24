@@ -58,11 +58,16 @@ try{
  const headers=new Headers({'Accept':entry.contentType,'Accept-Encoding':'identity'});
  if(override)headers.set('Cloudflare-Workers-Version-Overrides',override);
  const sourcePath=entry.path==='/index.html'?indexTransportPath:entry.path;
- const response=await env.SOURCE_ASSETS.fetch(new Request(origin+sourcePath,{method:request.method,headers,redirect:'error',signal:request.signal}));
+ // Workers rejects redirect:'error' at Request construction. Manual mode
+ // returns redirects without following them; the strict200 check below holds.
+ const response=await env.SOURCE_ASSETS.fetch(new Request(origin+sourcePath,{method:request.method,headers,redirect:'manual',signal:request.signal}));
  if(response.status!==200)return deny(502,'upstream-status',response.status);
  if(response.redirected||response.headers.has('Location')||response.headers.has('Content-Range')||response.headers.get('Content-Encoding'))return deny(502,'upstream-transfer',response.status);
  if((response.headers.get('Content-Type')||'').split(';',1)[0].trim().toLowerCase()!==entry.contentType)return deny(502,'upstream-mime',response.status);
- if(response.headers.get('Content-Length')!==String(entry.size))return deny(502,'upstream-length',response.status);
+ // Content-Length is optional on native asset/service responses. A declared
+ // mismatch is rejected; GET still verifies every byte, length and SHA below.
+ const declaredLength=response.headers.get('Content-Length');
+ if(declaredLength!==null&&declaredLength!==String(entry.size))return deny(502,'upstream-length',response.status);
  const out={'Content-Type':entry.contentType,'Content-Length':String(entry.size),'Cache-Control':'no-store','X-Content-Type-Options':'nosniff'};
  if(request.method==='HEAD')return new Response(null,{status:200,headers:out});
  const reader=response.body?.getReader();if(!reader&&entry.size!==0)return deny(502);
@@ -77,7 +82,7 @@ function responseMetadata(response, entry) {
   need(response instanceof Response && response.status === 200 && !response.redirected
     && !response.headers.has("Location") && !response.headers.has("Content-Range") && !response.headers.get("Content-Encoding")
     && mime(response.headers.get("Content-Type")) === entry.contentType
-    && response.headers.get("Content-Length") === String(entry.size));
+    && (response.headers.get("Content-Length") === null || response.headers.get("Content-Length") === String(entry.size)));
 }
 function notCancelled(signal) { if (signal?.aborted) fail(); }
 /** fetchAsset(entry,{method,signal}) is injected and must address the temporary

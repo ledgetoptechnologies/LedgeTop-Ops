@@ -207,7 +207,7 @@ export class ProductionCloudflareProvider {
       && hash(bearer) === owned.nonceHash && !signal?.aborted);
     try {
       return await this.#fetch(owned.origin + path, { method, redirect: "error", cache: "no-store",
-        headers: { Authorization: "Bearer " + bearer }, signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(this.#timeout)]) : AbortSignal.timeout(this.#timeout) });
+        headers: { Authorization: "Bearer " + bearer, "Accept-Encoding": "identity" }, signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(this.#timeout)]) : AbortSignal.timeout(this.#timeout) });
     } catch { fail(); }
   }
   async removeVerifier(name) {

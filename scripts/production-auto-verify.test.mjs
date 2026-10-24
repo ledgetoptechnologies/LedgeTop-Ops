@@ -29,7 +29,7 @@ test("generated temporary Worker serves only authenticated immutable allowlisted
   assert.equal(calls.length, 1); assert.equal(calls[0].url, "https://ops.ledgetop.app" + entry.path);
   assert.equal(calls[0].headers.get("Cloudflare-Workers-Version-Overrides"), `ledgetop-ops="${versionId}"`);
   assert.equal(calls[0].headers.get("Cookie"), null); assert.equal(calls[0].headers.get("Authorization"), null);
-  assert.equal(calls[0].redirect, "error");
+  assert.equal(calls[0].redirect, "manual");
   const head = await app.fetch(request(nonce, entry.path, "HEAD"), env);
   assert.equal(head.status, 200); assert.equal(head.body, null);
 });
@@ -43,6 +43,17 @@ test("forbidden business paths, unknown assets, methods, queries and wrong token
     assert.equal((await app.fetch(req, env)).status, 404);
   }
   assert.equal(calls, 0);
+});
+
+test('upstream length may be absent but actual GET bytes still require exact size and hash',async()=>{
+ const nonce=createAssetVerificationNonce(),app=await worker(nonce);
+ for(const method of ['GET','HEAD']){
+  const result=await app.fetch(request(nonce,entry.path,method),{SOURCE_ASSETS:{fetch:async()=>new Response(method==='HEAD'?null:bytes,{headers:{'Content-Type':entry.contentType}})}});
+  assert.equal(result.status,200);assert.equal(result.headers.get('Content-Length'),String(bytes.length));
+  assert.deepEqual(Buffer.from(await result.arrayBuffer()),method==='HEAD'?Buffer.alloc(0):bytes);
+ }
+ const bad=await app.fetch(request(nonce),{SOURCE_ASSETS:{fetch:async()=>new Response(Buffer.from('wrong!'),{headers:{'Content-Type':entry.contentType}})}});
+ assert.equal(bad.status,502);
 });
 
 test("source redirects, wrong MIME/size/hash and oversized streams fail closed without leaking headers", async () => {
@@ -72,6 +83,12 @@ test("collector checks HEAD and GET and returns byte-exact copies without input 
   const entries = [entry], before = structuredClone(entries), methods = [];
   const assets = await collectVerifiedAssets({ entries, fetchAsset: async (row, { method }) => { assert.deepEqual(row, entry); methods.push(method); return response(method); } });
   assert.deepEqual(methods, ["HEAD", "GET"]); assert.deepEqual(assets.get(entry.path), bytes); assert.deepEqual(entries, before);
+});
+
+test('collector accepts optional outer length while still verifying actual bytes and hash',async()=>{
+ const fetchAsset=async(_entry,{method})=>new Response(method==='HEAD'?null:bytes,{headers:{'Content-Type':entry.contentType}});
+ const result=await collectVerifiedAssets({entries:[entry],fetchAsset});assert.deepEqual(result.get(entry.path),bytes);
+ await assert.rejects(collectVerifiedAssets({entries:[entry],fetchAsset:async(_entry,{method})=>new Response(method==='HEAD'?null:Buffer.from('wrong!'),{headers:{'Content-Type':entry.contentType}})}));
 });
 
 test("collector refuses incorrect HEAD or GET without retries or private diagnostics", async () => {
@@ -126,7 +143,7 @@ test("fixed app index transports preserve manifest paths and never follow an ent
     const app=await worker(nonce,{workerName,origin,entries:[index]}),calls=[];
     const env={SOURCE_ASSETS:{fetch:async req=>{calls.push(req);return new Response(bytes,{headers:{'Content-Type':'text/html; charset=utf-8','Content-Length':String(bytes.length),'X-Verified-Version':'untrusted-marker'}});}}};
     const result=await app.fetch(request(nonce,index.path),env);
-    assert.equal(result.status,200);assert.equal(calls[0].url,origin+transport);assert.equal(calls[0].redirect,'error');
+    assert.equal(result.status,200);assert.equal(calls[0].url,origin+transport);assert.equal(calls[0].redirect,'manual');
     assert.equal(result.headers.get('X-Verified-Version'),null);assert.deepEqual(Buffer.from(await result.arrayBuffer()),bytes);
     const redirect=await app.fetch(request(nonce,index.path),{SOURCE_ASSETS:{fetch:async()=>new Response(null,{status:307,headers:{Location:origin+transport}})}});
     assert.equal(redirect.status,502);assert.equal(redirect.headers.get('Location'),null);
