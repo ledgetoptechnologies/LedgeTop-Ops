@@ -11,9 +11,4 @@ export function readSessionTiming(value: unknown, expectedUserId: string) {
   return { serverTime, expiresAt };
 }
 
-export function formatSessionRemaining(milliseconds: number): string {
-  const seconds = Math.max(0, Math.ceil(milliseconds / 1000));
-  const hours = Math.floor(seconds / 3600);
-  const minutes = Math.floor(seconds % 3600 / 60);
-  return `${hours ? `${hours}h ` : ""}${minutes}m ${seconds % 60}s`;
-}
+export { formatSessionRemaining } from "@ltds/ui";

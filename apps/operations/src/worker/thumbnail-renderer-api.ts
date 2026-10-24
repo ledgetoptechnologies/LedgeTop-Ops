@@ -24,6 +24,15 @@ const RENDERER_VIDEO_INITIAL_LEASE_MS = 15 * 60 * 1000;
 const PROVIDER = "ltds-truenas";
 const UNIFIED_RENDERER_CONTRACT = "all-media-v1" as const;
 const UNIFIED_RENDERER_HEALTH_SOURCE = "thumbnail-renderer-queue";
+type ClaimPhase = "health_write" | "candidate_read" | "source_head" | "source_reject_write" | "lease_write" | "lease_sign";
+
+// Do not replay a claim in this request: a connection can fail after D1 has
+// committed its lease. The next ordinary poll and existing lease recovery own
+// recovery. Match only observed transient D1 transport/storage failures.
+function transientClaimDatabaseError(error: unknown, phase: ClaimPhase): boolean {
+  if (phase === "source_head" || phase === "lease_sign" || !(error instanceof Error)) return false;
+  return /^D1_ERROR: (?:Network connection lost\b|Internal error in D1 DB storage caused object to be reset\b)/.test(error.message);
+}
 
 interface ClaimResponse {
   leaseId?: string;
@@ -114,7 +123,21 @@ export async function dispatchThumbnailRendererApi(request: Request, env: Env): 
 
   // POST /claim - lease the next pending thumbnail job
   if (path === "/claim" && request.method === "POST") {
-    return handleClaim(request, env);
+    let phase: ClaimPhase = "candidate_read";
+    try {
+      return await handleClaim(request, env, value => { phase = value; });
+    } catch (error) {
+      const retryable = transientClaimDatabaseError(error, phase);
+      const correlationId = crypto.randomUUID();
+      const errorCode = retryable ? "claim_database_unavailable" : "claim_internal_error";
+      // Exception messages may contain SQL bindings or object keys. Keep the
+      // diagnostic vocabulary fixed and use this ID to join client/server logs.
+      console.error(JSON.stringify({ event: "thumbnail.renderer.claim.error", phase, errorCode, correlationId }));
+      const response = json({ error: errorCode, correlationId }, retryable ? 503 : 500);
+      response.headers.set("X-Request-Id", correlationId);
+      if (retryable) response.headers.set("Retry-After", "30");
+      return response;
+    }
   }
 
   // GET /source/:leaseId - stream the R2 source to the worker (proxy via R2 binding)
@@ -172,7 +195,7 @@ async function boundedJson(request: Request, maxBytes = 8 * 1024): Promise<Recor
  * Finds a job that's pending or has an expired lease, atomically claims it,
  * and returns the source details plus presigned URLs for download and upload.
  */
-async function handleClaim(request: Request, env: Env): Promise<Response> {
+async function handleClaim(request: Request, env: Env, setPhase: (phase: ClaimPhase) => void): Promise<Response> {
   // The external TrueNAS renderer is the primary renderer for every supported
   // media kind. `video` remains available for the previously published worker;
   // `all` is the explicit unified-worker contract. The Cloudflare queue
@@ -181,6 +204,7 @@ async function handleClaim(request: Request, env: Env): Promise<Response> {
   const includeKind = new URL(request.url).searchParams.get("includeKind") || "";
   if (includeKind && includeKind !== "video" && includeKind !== "all") return json({ error: "invalid_request" }, 400);
   if (includeKind === "all") {
+    setPhase("health_write");
     await recordUnifiedRendererHealth(env);
   }
   // Allow excluding a media kind (e.g. excludeKind=video to only claim photos)
@@ -197,6 +221,7 @@ async function handleClaim(request: Request, env: Env): Promise<Response> {
   // an idle video claim scan and sort the entire pending image backlog. CROSS
   // JOIN deliberately pins SQLite's loop order to the selective video index,
   // then performs a primary-key lookup for only those source keys.
+  setPhase("candidate_read");
   const job = await env.DELIVERY_DB.prepare(includeKind === "video"
     ? `SELECT job.source_key,job.source_etag,job.source_size,job.thumbnail_key,job.attempt_count
        FROM file_index AS source INDEXED BY idx_file_index_kind
@@ -236,9 +261,11 @@ async function handleClaim(request: Request, env: Env): Promise<Response> {
   if (!job) return json({ status: "idle" }, 200);
 
   // Verify the source still exists in R2
+  setPhase("source_head");
   const sourceHead = await env.DATA_BUCKET.head(job.source_key);
   if (!sourceHead || cleanThumbnailEtag(sourceHead.httpEtag) !== cleanThumbnailEtag(job.source_etag) || sourceHead.size !== job.source_size) {
     // Source changed or gone - mark as failed
+    setPhase("source_reject_write");
     await env.DELIVERY_DB.prepare(
       `UPDATE image_thumbnail_jobs SET status='failed', error_code='source_changed',
        error_message='Source changed before render', updated_at=datetime('now')
@@ -250,6 +277,7 @@ async function handleClaim(request: Request, env: Env): Promise<Response> {
   // Determine media kind
   const kind = thumbnailSourceKind(job.source_key, sourceHead.httpMetadata?.contentType);
   if (!kind || !thumbnailSourceWithinInputLimit(kind, job.source_size)) {
+    setPhase("source_reject_write");
     await env.DELIVERY_DB.prepare(
       `UPDATE image_thumbnail_jobs SET status='failed', error_code='unsupported_file',
        error_message='File type or size not supported', updated_at=datetime('now')
@@ -266,6 +294,7 @@ async function handleClaim(request: Request, env: Env): Promise<Response> {
   const leaseUntil = new Date(Date.now() + initialLeaseMs).toISOString();
   const attemptCount = job.attempt_count + 1;
 
+  setPhase("lease_write");
   const claimResult = await env.DELIVERY_DB.prepare(
     `UPDATE image_thumbnail_jobs SET status='processing', lease_until=?, attempt_count=?,
      error_code=NULL, error_message=NULL, updated_at=datetime('now')
@@ -282,6 +311,7 @@ async function handleClaim(request: Request, env: Env): Promise<Response> {
   // and uploads via PUT /thumbnail/{leaseId}?key=...
   // The Worker proxies R2 through its binding - no S3 credentials needed on TrueNAS.
   const thumbnailKey = job.thumbnail_key;
+  setPhase("lease_sign");
   const leaseId = await createRendererLease(env, {
     v: 1,
     sourceKey: job.source_key,

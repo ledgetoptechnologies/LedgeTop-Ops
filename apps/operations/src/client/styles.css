@@ -167,6 +167,20 @@
   border: 1px solid var(--line);
 }
 
+/* Startup problems (sign-in not set up, expired, unreachable): branded card with next steps. */
+.sign-in-problem { overflow: hidden; }
+.sign-in-problem > header { background: #080808; padding: 1rem 1.5rem; }
+.sign-in-problem-body { padding: 1.5rem; display: grid; gap: .75rem; }
+.sign-in-problem h1 { margin: 0; font-size: 1.35rem; line-height: 1.25; color: var(--ink); }
+.sign-in-problem p { margin: 0; color: var(--ink); line-height: 1.5; overflow-wrap: anywhere; }
+.sign-in-problem .sign-in-problem-email, .sign-in-problem .sign-in-problem-hint { color: var(--muted); font-size: .92rem; }
+.sign-in-problem-actions { display: flex; flex-wrap: wrap; gap: .6rem; margin-top: .5rem; }
+.sign-in-problem-actions > * { min-height: 44px; }
+@media (max-width: 640px) {
+  .fatal { margin: 1.5rem auto; }
+  .sign-in-problem-actions > * { flex: 1 1 100%; justify-content: center; text-align: center; }
+}
+
 /* ---------------------------------------------------------------------------
    Dashboard stats grid
    --------------------------------------------------------------------------- */

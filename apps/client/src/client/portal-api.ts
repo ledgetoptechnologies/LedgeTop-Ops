@@ -367,6 +367,7 @@ export async function loadPortalBootstrap(
     if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
     return {
       ...context, resourceMode: "native", workspaces, selectedWorkspaceId: selected.id,
+      identity: { email: typeof session.account?.email === "string" ? session.account.email : null },
       capabilities: {
         directoryRead: context.capabilities.directoryRead, deliveryView: context.capabilities.deliveryView,
         workspaceHierarchyV2: true, manageTeam: false, viewBilling: false,

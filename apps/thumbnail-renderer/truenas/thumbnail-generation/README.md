@@ -60,6 +60,31 @@ The worker emits bounded startup, claim-kind/size, completion, and safe error
 codes. It never logs source paths, object keys, URLs, ETags, thumbnails, or
 credentials.
 
+Claim transport failures and rejected attempts wait 30 seconds before the next
+poll. Known transient D1 connection/storage resets return `503` with
+`Retry-After: 30`, a fixed error category and a request ID; permanent or unknown
+server errors remain `500`. Neither side immediately replays an ambiguous
+claim write: its existing lease expires/reconciles normally. The container logs
+only allowlisted categories and validated request IDs, never raw response bodies.
+This follows [D1 retry guidance](https://developers.cloudflare.com/d1/best-practices/retry-queries/)
+while preserving the attempt-bound claim contract.
+
+### Troubleshooting claims
+
+For this standalone queue worker on the normal **incoming** API base, leave both
+Cloudflare Access fields empty unless that endpoint has a service-token policy.
+The renderer bearer token is still required. The alternate **Ops** API base and
+the separate prebuilt-registration broker use an Access-protected endpoint and
+require their own service-token credentials; their configuration is different.
+Do not remove or weaken an Access policy to resolve an authentication failure.
+
+Idle (`200`, `status=idle`) polls are intentionally silent. A `thumbnail completed`
+line confirms a successful claim/render/upload/completion, even if other polls
+failed. `401`/`403` indicate authentication or Access-policy investigation;
+`claim_database_unavailable` means a recognized transient database failure, not
+missing Access credentials. TLS resets and timeouts are transport failures.
+Use the logged request ID to correlate a rejected claim with Operations logs.
+
 ## Verification
 
 Run from `apps/thumbnail-renderer`:

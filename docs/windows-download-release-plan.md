@@ -7,6 +7,45 @@ a provider on a real user's folders as part of this source-only phase.
 
 ## Distribution decision
 
+### Authenticated download checkpoint, 2026-10-23
+
+The account-menu "Get the app" entry is being coordinated with Claude. The
+provisional backend contract is Ops `/api/app/latest` and
+`/api/app/download/:version`, with portal equivalents under `/api/client/app`.
+Portal root `/api/app` is currently an unknown namespace and rejected by deployed
+host policy; do not broaden unknown-path admission to make a prototype work.
+These are proposed routes, not implemented or published endpoints.
+
+Both metadata and bytes, including HEAD and Range, require current human
+identity and separate pilot eligibility. An existing public share, PA contact,
+email match or service assertion must not qualify. Keep the pilot unavailable
+by default until a signed artifact and explicit test cohort are approved. The
+existing helper login paths do not prove Access coverage for these new routes.
+
+The proposed R2 layout is `_apps/<platform>/<channel>/<version>/` plus a latest
+pointer in the existing content bucket. This is discussion input, not a storage
+change: `_apps` is not currently excluded by the content readers and indexers.
+Before publication, either reserve and test that namespace across listing,
+search, sharing, ZIP, native catalogs and reconciliation, or review an already
+reserved namespace or separate release binding. A leading underscore is not
+an authorization boundary. No artifact has been uploaded by this work.
+
+The server must select immutable artifact keys from a validated release record,
+never accept an object key from a caller. Include architecture, canonical
+four-part MSIX version, durable package identity, verified publisher, exact byte
+length and SHA256. Publish the latest pointer only after the immutable signed
+artifact is qualified. Keep authenticated responses private and avoid redirects
+that could forward a human token to another origin.
+
+For the first authenticated update candidate, let the app obtain and verify the
+package through the same eligible human session, then hand the local signed
+package to Windows' supported installation API after transfers are checkpointed.
+Do not create a privileged updater or assume App Installer background requests
+inherit browser cookies or the helper token. Automatic installation, session
+renewal, publisher verification and restart behavior still require clean-machine
+acceptance. The offline `.appinstaller` preview below remains a construction
+test, not evidence that an authenticated background feed works.
+
 ### Ownership and address checkpoint, 2026-10-22
 
 Ops and each PA manage employees independently; only client profiles synchronize
@@ -257,8 +296,9 @@ identities are settled; do not publish under the temporary identity.
 [Microsoft signing options](https://learn.microsoft.com/en-us/windows/msix/package/signing-package-overview),
 [supported signing integration](https://learn.microsoft.com/en-us/azure/artifact-signing/how-to-signing-integrations).
 
-Use App Installer's supported update mechanism rather than a custom privileged
-updater. Pilot the chosen launch/background settings. An update must pause and
+Use Windows' supported package installation mechanism rather than a custom
+privileged updater. Qualify authenticated package acquisition as described above
+before enabling an App Installer background feed. An update must pause and
 checkpoint transfers before replacing binaries, then renew human authorization
 and resume only when logical file ID, remote version, length and SHA256 match.
 Installing a newer build must never overwrite unrelated local files or restore

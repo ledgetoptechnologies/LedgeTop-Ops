@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent } from "react";
 import { createPortal } from "react-dom";
-import { projectAlphaSourceName, type DeliveryLocationCollection, type Permission, type SessionUser, type ViewerAdminSessionGrant, type ViewerModelSummary, type ViewerPlatformOverview, type ViewerPublicShareSummary } from "@ltds/shared";
+import { OPERATIONS_APP_API, projectAlphaSourceName, type DeliveryLocationCollection, type Permission, type SessionUser, type ViewerAdminSessionGrant, type ViewerModelSummary, type ViewerPlatformOverview, type ViewerPublicShareSummary } from "@ltds/shared";
 import { AccountMenu, Brand, Card, EmptyState, Loading, LtMark, Skeleton, StatusPill, openViewerShell, requestChoice, requestText, type TextRequest } from "@ltds/ui";
 import { FinanceSummaryPanel } from "./FinanceSummaryPanel";
 import { SessionExpiry } from "./SessionExpiry";
@@ -55,6 +55,7 @@ import { ImageLocationMap } from "./ImageLocationMap";
 import { constrainViewerOffset, pointerAnchoredOffset } from "./viewer-zoom";
 import { activeShareLoadError, createShareLoadDeadline } from "./share-load-deadline";
 import { ViewerProcessingPanel } from "./ViewerProcessingPanel";
+import { SignInProblem, type StartupFailure } from "./SignInProblem";
 import { NativeViewerModels } from "./NativeViewerModels";
 import {
   activateDeliveryFolderCache,
@@ -271,7 +272,7 @@ const destinationRequest = (action: string, count: number, prefix: string): Text
 export function OperationsApp() {
   const [viewerRoute, setViewerRoute] = useState(() => parseOperationsViewerShellRoute(location.pathname, location.search));
   const [session, setSession] = useState<Session | null>(null),
-    [error, setError] = useState(""),
+    [error, setError] = useState<StartupFailure | null>(null),
     [page, setPage] = useState<Page>(pathPage(location.pathname)),
     [mobileNavOpen, setMobileNavOpen] = useState(false),
     [manageOpen, setManageOpen] = useState(false);
@@ -341,7 +342,7 @@ export function OperationsApp() {
         setSession(value);
         normalizeLocation(value);
       })
-      .catch((caught) => {if (!controller.signal.aborted) setError(caught.message);});
+      .catch((caught) => {if (!controller.signal.aborted) setError({status: caught instanceof ApiError ? caught.status : null, message: caught.message});});
     return () => controller.abort();
   }, []);
   useEffect(() => {
@@ -397,12 +398,7 @@ export function OperationsApp() {
     setManageOpen(false);
     window.scrollTo(0, 0);
   }
-  if (error)
-    return (
-      <main className="fatal">
-        <EmptyState title="Operations unavailable" detail={error} />
-      </main>
-    );
+  if (error) return <SignInProblem failure={error} />;
   if (!session)
     return (
       <main className="fatal">
@@ -441,7 +437,7 @@ export function OperationsApp() {
           onClick={event => { if (!event.ctrlKey && !event.metaKey && !event.shiftKey && !event.altKey && event.button === 0) { event.preventDefault(); navigate("notifications", "/notifications"); } }}>
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden="true"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9Z" /><path d="M9 20h6" /></svg>
         </a>}
-        <AccountMenu className="profile" displayName={session.user.displayName}
+        <AccountMenu className="profile" displayName={session.user.displayName} appApi={OPERATIONS_APP_API}
           sessionStatus={<SessionExpiry userId={session.user.id} />}
           avatar={session.user.displayName.slice(0, 1).toUpperCase()} details={<>
             <small>
