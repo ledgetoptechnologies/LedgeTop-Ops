@@ -25,7 +25,7 @@ async function fixture(t, respond, allowed = true) {
     method, headers: { 'Content-Type': 'application/json', 'Idempotency-Key': key, Authorization: 'Bearer browser-private' }, ...(body ? { body: JSON.stringify(body) } : {}),
   }) };
 }
-const json = payload => new Response(JSON.stringify(payload), { status: 200 });
+const json = (payload, init = {}) => new Response(JSON.stringify(payload), { status: 200, ...init });
 
 test('direct list signs bounded recipient query, preserves schema and permission boundary', async t => {
   const { request, envelopes } = await fixture(t, () => json(list));
@@ -49,8 +49,8 @@ test('direct create validates explicit future scope and typed fields before sign
 
 test('direct revoke uses path grant id, optional bounded reason and requires a typed completion', async t => {
   const receipt = { success: true, replayed: true, sessionRevocation: { pending: true } };
-  const { request, envelopes } = await fixture(t, () => json(receipt));
-  assert.equal((await request(PATH + '/grant-one', { method: 'DELETE', body: {} })).status, 200);
+  const { request, envelopes } = await fixture(t, () => json(receipt, { status: 202 }));
+  assert.equal((await request(PATH + '/grant-one', { method: 'DELETE', body: {} })).status, 202);
   assert.deepEqual(envelopes[0], { subject: 'ops:staff-one', action: 'revoke', connection: 'direct', idempotencyKey: 'direct-proxy-idempotency-0001', grantId: 'grant-one', reason: 'Revoked by staff' });
   assert.equal((await request(PATH + '/grant-one', { method: 'DELETE', body: { reason: 'Ended access', grantId: 'forged' } })).status, 400);
   assert.equal((await request(PATH + '/grant-one', { method: 'DELETE', body: {}, key: 'short' })).status, 400);

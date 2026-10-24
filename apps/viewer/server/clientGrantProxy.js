@@ -124,7 +124,9 @@ function createClientGrantProxy({ config, authorize, fetchImpl = fetch, diagnost
       }
       stage = 'response_schema';
       if (!(connection === 'direct' ? validDirectSnapshot(payload, action) : connection === 'native' ? validNativeSnapshot(payload, action) : validSnapshot(payload))) throw new Error('invalid_response');
-      return res.status(action === 'create' && !payload.replayed ? 201 : 200).json(payload);
+      const status = connection === 'direct' && action === 'revoke' && payload.sessionRevocation.pending
+        ? 202 : action === 'create' && !payload.replayed ? 201 : 200;
+      return res.status(status).json(payload);
     } catch {
       report(502, 'operations_unavailable');
       return res.status(502).json({ error: 'Operations client access service is unavailable', code: 'operations_unavailable' });
