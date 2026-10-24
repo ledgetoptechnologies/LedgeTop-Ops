@@ -308,7 +308,7 @@ test('whole-project client scope requires current and future publications',()=>{
 test('project sharing has no public creation form or public task forms',async()=>{
   const f=fixture();f.context.shareModal('project');f.context.bindProjectShareCard('project');
   assert.doesNotMatch(f.html(),/project-share-form|class="manage-form share-form"|Create public link|Create whole-project link/);
-  assert.match(f.html(),/whole projects with authenticated Operations clients/);
+  assert.match(f.html(),/whole project or only chosen tasks with a client’s portal account/);
   assert.match(f.html(),/data-legacy-project-shares/);assert.equal(f.calls.length,0);
   await f.context.createOutputShare(f.form,'project',null);assert.equal(f.calls.length,0);
 });
