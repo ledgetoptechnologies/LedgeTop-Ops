@@ -70,6 +70,12 @@ describe("direct Viewer recipient authorization",()=>{
     mock.create.mockImplementationOnce(async()=>{mock.context.mockResolvedValue(null);return {grant:"hidden",grantExpiresAt:new Date(Date.now()+60_000).toISOString()};});
     expect(await issueDirectClientViewerSession(env(),session)).toMatchObject({ok:false,code:"denied"});expect(receipts.size).toBe(0);
   });
+  it("does not return a minted grant if publication changes during the Viewer call",async()=>{
+    mock.create.mockImplementationOnce(async()=>{mock.catalog.mockResolvedValue({schemaVersion:1,project:{id:"project-one",displayName:"Property survey"},
+      tasks:[{...task,modelVersionId:"replacement-version"}],nextCursor:null});
+      return {grant:"hidden",grantExpiresAt:new Date(Date.now()+60_000).toISOString()};});
+    expect(await issueDirectClientViewerSession(env(),session)).toMatchObject({ok:false,code:"denied"});expect(receipts.size).toBe(0);
+  });
   it("binds pagination to current recipient, grant permissions and context",async()=>{
     mock.rows.mockResolvedValue([{...row(),scope_type:"project",task_id:null}]);
     mock.catalog.mockResolvedValue({...await mock.catalog(),nextCursor:"upstream-page-two"});mock.catalog.mockClear();

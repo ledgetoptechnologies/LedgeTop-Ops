@@ -25,7 +25,7 @@ async function fixture(){const mf=new Miniflare({compatibilityDate:'2026-08-06',
  instances.push(mf);const database=await mf.getD1Database('DELIVERY_DB') as unknown as D1Database;
  const sql=[
  `CREATE TABLE portal_v2_workspaces(id TEXT PRIMARY KEY,project_alpha_source_id TEXT,legacy_account_id TEXT,status TEXT,display_name TEXT,
- root_type TEXT,pa_organization_public_id TEXT,pa_client_public_id TEXT)`,
+ root_type TEXT NOT NULL CHECK(root_type IN ('organization','standalone_client')),pa_organization_public_id TEXT,pa_client_public_id TEXT)`,
  `CREATE TABLE pa_portal_workspace_sources(workspace_id TEXT,projection_source_id TEXT)`,
  `CREATE TABLE portal_v2_directory_checkpoints(workspace_id TEXT,active_generation_id TEXT,source_sequence INTEGER)`,
  `CREATE TABLE portal_v2_directory_generations(id TEXT,workspace_id TEXT,status TEXT,complete INTEGER)`,
@@ -33,13 +33,13 @@ async function fixture(){const mf=new Miniflare({compatibilityDate:'2026-08-06',
  `CREATE TABLE portal_client_authority_workspace_claims(workspace_id TEXT,state TEXT)`,
  `CREATE TABLE pa_connectors(source_id TEXT,read_visible INTEGER,display_name TEXT)`,
  `INSERT INTO pa_connectors VALUES('project-alpha:primary',1,'Drone Services')`,
- `INSERT INTO portal_v2_workspaces VALUES('workspace-one','project-alpha:primary',NULL,'active','Client One','client',NULL,'client-one'),
- ('workspace-two','project-alpha:secondary',NULL,'active','Client Two','client',NULL,'client-two')`,
+ `INSERT INTO portal_v2_workspaces VALUES('workspace-one','project-alpha:primary',NULL,'active','Client One','standalone_client',NULL,'client-one'),
+ ('workspace-two','project-alpha:secondary',NULL,'active','Client Two','standalone_client',NULL,'client-two')`,
  `INSERT INTO pa_portal_workspace_sources VALUES('workspace-one','project-alpha:primary'),('workspace-two','project-alpha:secondary')`,
  `INSERT INTO portal_v2_directory_checkpoints VALUES('workspace-one','generation-one',1),('workspace-two','generation-two',1)`,
  `INSERT INTO portal_v2_directory_generations VALUES('generation-one','workspace-one','active',1),('generation-two','workspace-two','active',1)`,
- `INSERT INTO portal_v2_directory_entities VALUES('workspace-one','generation-one','client','client-one','v1',1,'Client One'),
- ('workspace-two','generation-two','client','client-two','v1',1,'Client Two')`,
+ `INSERT INTO portal_v2_directory_entities VALUES('workspace-one','generation-one','standalone_client','client-one','v1',1,'Client One'),
+ ('workspace-two','generation-two','standalone_client','client-two','v1',1,'Client Two')`,
  ];for(const statement of sql)await database.prepare(statement).run();
  const migration=readFileSync(new URL('../../client/migrations/0237_viewer_direct_client_grants.sql',import.meta.url),'utf8');
  // D1 exec supports complete SQL migration statements, including trigger bodies.

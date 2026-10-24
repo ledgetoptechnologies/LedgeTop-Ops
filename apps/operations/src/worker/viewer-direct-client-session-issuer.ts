@@ -148,6 +148,10 @@ export async function issueDirectClientViewerSession(env: Env, request: DirectCl
       audience:"client",idempotencyKey:key,authorizationExpiresAt:new Date(deadline).toISOString(),displayUnits:input.displayUnits,
       permissions:{view:true,measure:row.can_measure===1,cameras:row.can_view_cameras===1,download:row.can_download===1,personalMeasurements:true},
       sourceAuthorization:{type:"direct_client_grant",id:row.id,version:row.grant_version}});
+    // Publication can change in Viewer while the remote session is being minted.
+    // Do not return a capability for a task/version no longer in the allowed set.
+    const latest=await client.clientDeliveryCatalog({projectId:row.viewer_project_id,taskId:input.taskId,limit:1});
+    if(latest.tasks[0]?.modelId!==task.modelId||latest.tasks[0]?.modelVersionId!==task.modelVersionId)return failure("denied");
     if(!await recheck())return failure("denied");
     const result={...grant,modelId:task.modelId};
     await database(env).prepare(`INSERT INTO viewer_session_issuance_receipts(actor_id,audience,idempotency_key,request_fingerprint,response_json,expires_at)

@@ -61,6 +61,11 @@ expired intents are retained for a further day before bounded cleanup.
 
 ## Compatibility and activation
 
+The joined Operations sharing test imports the real Viewer Express proxy. Install
+Viewer test dependencies (`npm --prefix apps/viewer ci --ignore-scripts`) alongside
+Operations and Client dependencies before running that suite. CI does this only
+for the Operations test job; branch/PR trigger policy is unchanged.
+
 Required storage changes are Client D1 migrations `0237` and `0238`, and Viewer
 schema `40`. Viewer schema `40` transactionally preserves existing published
 session rows, indexes, triggers and foreign keys while adding a distinct
