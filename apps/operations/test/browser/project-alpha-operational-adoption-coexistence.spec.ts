@@ -114,8 +114,8 @@ test("PA-first adoption coexists with native management and transitions to canon
   await expect(adoption).toBeVisible();
   const nativeManagement = business.getByRole("region", { name: "Project creation" });
   await expect(nativeManagement).toBeVisible();
-  await expect(nativeManagement.getByLabel("Action")).toHaveValue("create");
-  await expect(nativeManagement.getByRole("button", { name: "Prepare project", exact: true })).toBeVisible();
+  await expect(nativeManagement.getByRole("button", { name: "New project", exact: true })).toBeVisible();
+  await expect(nativeManagement.getByRole("button", { name: "Prepare project", exact: true })).toBeHidden();
 
   await adoption.getByRole("button", { name: "Find unbound Projects for this customer" }).click();
   await adoption.getByLabel(/Adopted roof survey/).check();

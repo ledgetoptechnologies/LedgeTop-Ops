@@ -25,6 +25,10 @@ const featureLabels: Record<NativeWorkspaceFeatureKey, string> = {
   directory: "Projects and directory", deliveries: "Delivery files", serviceRequests: "Service requests", feedback: "Feedback",
   models: "3D models", team: "Team members", billing: "Billing",
 };
+const pageHeadings: Partial<Record<ClientPortalPage, string>> = {
+  dashboard: "Your projects", projects: "Your projects", project: "Project", deliveries: "Your files",
+  account: "Your account",
+};
 const stateLabels: Record<NativeWorkspaceFeatureState, string> = {
   available: "Ready", not_in_access: "Not in access", not_supported: "Not connected", temporarily_unavailable: "Temporarily unavailable",
 };
@@ -143,9 +147,14 @@ export function NativeWorkspaceContent({ context, page, projectId, feedbackId, o
     (page === "feedback" && !context.capabilities.feedback) || (page === "project" && projectTab === "models" && !context.capabilities.viewer);
   const unavailableFeature: NativeWorkspaceFeatureKey = page === "feedback" ? "feedback"
     : page === "project" && params.get("tab") === "models" ? "models" : "serviceRequests";
+  // The stored account name can be a long source label, so it stays secondary to a plain page heading.
+  const projectName = page === "project" && projectId ? entryLabels.get(`project:${projectId}`) : undefined;
+  const heading = projectName ?? pageHeadings[page] ?? "Your account";
+  // Requests and feedback render their own page heading.
+  const embeddedHeading = page === "requests" || page === "request-new" || page === "feedback" || (page === "project" && projectTab === "requests");
 
   return <section className="native-workspace" aria-label="Client account">
-    <header className="portal-welcome"><span className="eyebrow">Client account</span><h1>{context.workspace.displayName}</h1></header>
+    <header className="portal-welcome">{!embeddedHeading && <h1>{heading}</h1>}<p className="native-workspace-identity">{context.workspace.displayName}</p></header>
     {unsupportedRoute ? <><Card title="Feature unavailable"><p>{featureDetail(unavailableFeature, context.features)}</p></Card><FeatureReadiness features={context.features} /></> :
       ((page === "requests" || page === "request-new") || (page === "project" && projectTab === "requests")) && context.capabilities.requestV2 && renderRequests
         ? renderRequests(requestProjects, page === "project" ? projectId ?? undefined : undefined)
@@ -154,7 +163,7 @@ export function NativeWorkspaceContent({ context, page, projectId, feedbackId, o
       <Card title={page === "dashboard" ? "Directory" : page === "project" ? "Project" : "Projects"}>
         {!context.capabilities.directoryRead ? <p>The directory is not included in your current access.</p> : <>
           {hierarchyError && <div role="alert"><p>{hierarchyError}</p><button className="button-ghost" onClick={() => hierarchyCursor ? void fetchHierarchy(hierarchyCursor) : setHierarchyRetry(value => value + 1)}>Retry directory</button></div>}
-          {entries.length > 0 && <ul className="native-workspace-list">{entries.map(entry => <li key={`${entry.type}:${entry.publicId}`}><div><strong>{entry.displayName}</strong><small>{entry.type.replaceAll("_", " ")}{parentLabel(entry) ? ` · ${parentLabel(entry)}` : ""}</small></div>{entry.type === "project" && <div>{page !== "project" && <a className="button button-ghost" href={workspacePath(clientProjectPath(entry.publicId), context.workspace.id)} onClick={event => { if (!event.ctrlKey && !event.metaKey && !event.shiftKey && event.button === 0) { event.preventDefault(); openProject(entry.publicId); } }}>Open project<span className="visually-hidden">: {entry.displayName}</span></a>}{context.capabilities.feedback && <LeaveFeedback target={{kind:'project',projectId:entry.publicId}} label={entry.displayName} compact nativeWorkspaceId={context.workspace.id} />}</div>}</li>)}</ul>}
+          {entries.length > 0 && <ul className="native-workspace-list">{entries.map(entry => <li key={`${entry.type}:${entry.publicId}`}><div><strong>{entry.displayName}</strong><small>{entry.type.replaceAll("_", " ")}{parentLabel(entry) ? ` · ${parentLabel(entry)}` : ""}</small></div>{entry.type === "project" && <div>{page !== "project" && <a className="button button-ghost" href={workspacePath(clientProjectPath(entry.publicId), context.workspace.id)} onClick={event => { if (!event.ctrlKey && !event.metaKey && !event.shiftKey && event.button === 0) { event.preventDefault(); openProject(entry.publicId); } }}>Open project<span className="visually-hidden">: {entry.displayName}</span></a>}{context.capabilities.viewer && renderModels && <a className="button button-ghost" href={workspacePath(`${clientProjectPath(entry.publicId)}?tab=models`, context.workspace.id)}>3D models<span className="visually-hidden">: {entry.displayName}</span></a>}{context.capabilities.feedback && <LeaveFeedback target={{kind:'project',projectId:entry.publicId}} label={entry.displayName} compact nativeWorkspaceId={context.workspace.id} />}</div>}</li>)}</ul>}
           {hierarchyLoading && <Loading />}
           {!hierarchyLoading && !hierarchyError && entries.length === 0 && <EmptyState title={hierarchyCursor ? "No matching records loaded yet" : page === "project" ? "Project unavailable" : "No directory entries shared"} detail={hierarchyCursor ? "Continue through the accessible directory pages to check more records." : "Only records included in your current access are shown."} />}
           {hierarchyCursor && <><p>Showing loaded records only. More accessible directory pages are available.</p><button className="button-ghost" disabled={hierarchyLoading} onClick={() => void fetchHierarchy(hierarchyCursor)}>Load more directory records</button></>}

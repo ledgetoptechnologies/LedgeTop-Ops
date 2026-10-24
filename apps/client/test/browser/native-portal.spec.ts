@@ -91,7 +91,8 @@ function nativeCallsOnly(calls: Call[]) {
 
 test("native refresh discovers identity without the selected workspace header and never probes legacy resources", async ({page}) => {
   const calls = await mock(page); await page.goto("/portal?workspace=workspace-b");
-  await expect(page.getByRole("heading", {name: workspace("workspace-b").displayName})).toBeVisible();
+  await expect(page.getByRole("heading", {level: 1, name: "Your projects"})).toBeVisible();
+  await expect(page.locator(".native-workspace-identity")).toHaveText(workspace("workspace-b").displayName);
   await expect(page.getByText("Coastal seawall construction documentation", {exact: true})).toBeVisible();
   await page.reload(); await expect(page.getByText("Coastal seawall construction documentation", {exact: true})).toBeVisible();
   nativeCallsOnly(calls); expect(calls.filter(call => call.path.endsWith("/hierarchy")).every(call => call.query.get("expectedContext") === "context-workspace-b")).toBe(true);
@@ -116,7 +117,7 @@ test("same public project IDs remain source-separated and project links preserve
   const project = page.getByRole("link", {name: /^Open project\s*: Coastal seawall construction documentation$/});
   await expect(project).toHaveAttribute("href", "/portal/projects/project-shared?workspace=workspace-b");
   await project.click(); await expect(page).toHaveURL(/\/portal\/projects\/project-shared\?workspace=workspace-b$/);
-  await expect(page.getByText("Coastal seawall construction documentation", {exact: true})).toBeVisible();
+  await expect(page.getByRole("heading", {level: 1, name: "Coastal seawall construction documentation"})).toBeVisible();
   await openAccount(page, "workspace-c");
   await expect(page.getByText("Mountain bridge inspection", {exact: true})).toBeVisible();
   await expect(page.getByText("Coastal seawall construction documentation", {exact: true})).toHaveCount(0);
@@ -137,7 +138,9 @@ test("native project Models lists only the source-qualified adapter and never ex
     }});
     return undefined;
   });
-  await page.goto("/portal/projects/project-shared?workspace=workspace-b&tab=models");
+  await page.goto("/portal/projects?workspace=workspace-b");
+  await page.getByRole("link", {name: /^3D models/}).first().click();
+  await expect(page).toHaveURL(/\/portal\/projects\/project-shared\?.*tab=models/);
   await expect(page.getByRole("heading", {name: "Seawall model"})).toBeVisible();
   await expect(page.getByRole("button", {name: "Open 3D model"})).toBeVisible();
   await expect(page.getByText(/Share 3D model/)).toHaveCount(0);
@@ -206,7 +209,7 @@ test("native project browsing continues past an empty hierarchy page without dec
   await expect(page.getByText("No matching records loaded yet", {exact: true})).toBeVisible();
   await expect(page.getByText("Project unavailable", {exact: true})).toHaveCount(0);
   await page.getByRole("button", {name: "Load more directory records"}).click();
-  await expect(page.getByText("Coastal seawall construction documentation", {exact: true})).toBeVisible();
+  await expect(page.getByRole("heading", {level: 1, name: "Coastal seawall construction documentation"})).toBeVisible();
 });
 
 test("native folder file pagination preserves existing files and uses its opaque continuation", async ({page}) => {
