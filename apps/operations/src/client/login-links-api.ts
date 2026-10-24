@@ -12,6 +12,8 @@ export const LINK_LOGIN_PATH = "/auth/link-login";
 const PENDING_KEY = "ops.login-link.pending";
 const INTENT_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const TOKEN = /^[0-9a-f]{64}$/;
+const BINDING_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const isVersion = (value: unknown): value is number => typeof value === "number" && Number.isSafeInteger(value) && value > 0;
 const validPending = (intentId: unknown, token: unknown): intentId is string =>
   typeof intentId === "string" && typeof token === "string" && INTENT_ID.test(intentId) && TOKEN.test(token);
 
@@ -23,33 +25,61 @@ export const createLoginLinkIntent = (email: string) =>
 
 /** Removes a linked email at the version shown. Retrying with the same version is safe; an unclear answer throws. */
 export async function removeLoginLink(binding: LoginLinkBinding) {
-  const result = await api<{ bindingId?: unknown; status?: unknown }>(`${LOGIN_LINKS_PATH}/${encodeURIComponent(binding.id)}`,
+  const result = await api<{ bindingId?: unknown; version?: unknown; status?: unknown }>(`${LOGIN_LINKS_PATH}/${encodeURIComponent(binding.id)}`,
     { method: "DELETE", body: JSON.stringify({ expectedVersion: binding.version }) });
-  if (result.bindingId !== binding.id || result.status !== "revoked") throw new Error("unconfirmed removal");
+  if (result.bindingId !== binding.id || result.status !== "revoked" || !isVersion(result.version)) throw new Error("unconfirmed removal");
 }
 
+/** Whose profile a pending link joins, shown before anything is linked. */
+export type LoginLinkPreview = { canonicalEmail: string; ownerDisplayName: string; targetEmail: string; expiresAt: string; state: "pending" | "linked" };
+type Refusal = { kind: "invalid" | "sign-in" | "conflict"; message?: string };
 /** "unknown" means the link may or may not have been made; retrying the same link is safe and tells which. */
-export type ClaimResult = { kind: "linked" } | { kind: "invalid" | "sign-in" | "conflict" | "unknown"; message?: string };
+export type ClaimResult = { kind: "linked" } | Refusal | { kind: "unknown" };
+export type PreviewResult = { kind: "preview"; preview: LoginLinkPreview } | { kind: "linked" } | Refusal | { kind: "unknown" };
 
 /**
- * Confirms the pending link with the current Access sign-in. It runs before any Operations session exists, so it sends
- * no staff CSRF token: the server checks the origin, the single-use token and a fresh Access sign-in instead.
+ * Both link-page requests run before any Operations session exists, so they send no staff CSRF token: the server
+ * checks the origin, the single-use token and a fresh Access sign-in instead. Null means no clear answer arrived.
  */
-export async function claimLoginLink(pending: PendingLoginLink): Promise<ClaimResult> {
-  let response: Response;
+async function postPending(path: string, pending: PendingLoginLink): Promise<{ status: number; payload: Record<string, unknown> } | null> {
   try {
-    response = await fetch(`${LOGIN_LINKS_PATH}/claim`, {
+    const response = await fetch(`${LOGIN_LINKS_PATH}/${path}`, {
       method: "POST", credentials: "same-origin", cache: "no-store", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ intentId: pending.intentId, verificationToken: pending.token }), signal: AbortSignal.timeout(15000),
     });
-  } catch { return { kind: "unknown" }; }
-  const payload = await response.json().catch(() => ({})) as { error?: unknown; bindingId?: unknown; version?: unknown };
-  if (response.ok) return typeof payload.bindingId === "string" && typeof payload.version === "number" ? { kind: "linked" } : { kind: "unknown" };
+    const payload = await response.json().catch(() => ({})) as unknown;
+    return { status: response.status, payload: payload && typeof payload === "object" ? payload as Record<string, unknown> : {} };
+  } catch { return null; }
+}
+function refusal(status: number, payload: Record<string, unknown>): Refusal | null {
   const message = typeof payload.error === "string" ? payload.error : undefined;
-  if (response.status === 400) return { kind: "invalid", message };
-  if (response.status === 401 || response.status === 403) return { kind: "sign-in", message };
-  if (response.status === 409) return { kind: "conflict", message };
-  return { kind: "unknown" };
+  return status === 400 ? { kind: "invalid", message } : status === 401 || status === 403 ? { kind: "sign-in", message }
+    : status === 409 ? { kind: "conflict", message } : null;
+}
+const text = (value: unknown) => typeof value === "string" && value.trim().length > 0 && value.length <= 320;
+
+/** Reads whose profile the link joins without changing anything. */
+export async function previewLoginLink(pending: PendingLoginLink): Promise<PreviewResult> {
+  const answer = await postPending("preview-claim", pending);
+  if (!answer) return { kind: "unknown" };
+  const { status, payload } = answer;
+  if (status >= 200 && status < 300) {
+    const valid = text(payload.canonicalEmail) && text(payload.ownerDisplayName) && text(payload.targetEmail) && text(payload.expiresAt)
+      && (payload.state === "pending" || payload.state === "linked");
+    if (!valid) return { kind: "unknown" };
+    return payload.state === "linked" ? { kind: "linked" } : { kind: "preview", preview: payload as unknown as LoginLinkPreview };
+  }
+  return refusal(status, payload) ?? { kind: "unknown" };
+}
+
+/** Links the current Access email to the previewed profile. Only a well-formed answer counts as linked. */
+export async function claimLoginLink(pending: PendingLoginLink): Promise<ClaimResult> {
+  const answer = await postPending("claim", pending);
+  if (!answer) return { kind: "unknown" };
+  const { status, payload } = answer;
+  if (status >= 200 && status < 300)
+    return typeof payload.bindingId === "string" && BINDING_ID.test(payload.bindingId) && isVersion(payload.version) ? { kind: "linked" } : { kind: "unknown" };
+  return refusal(status, payload) ?? { kind: "unknown" };
 }
 
 /** Reads `#intent=…&token=…` from a verification link; null for anything else. */
@@ -67,8 +97,12 @@ export function pendingFromVerificationUrl(value: string, origin = location.orig
   } catch { return null; }
 }
 
-export function savePendingLoginLink(pending: PendingLoginLink) {
-  try { sessionStorage.setItem(PENDING_KEY, JSON.stringify(pending)); } catch { /* the page keeps it in memory */ }
+/** False when this browser won't keep the link (for example, storage is blocked), so a sign-out would lose it. */
+export function savePendingLoginLink(pending: PendingLoginLink): boolean {
+  try {
+    sessionStorage.setItem(PENDING_KEY, JSON.stringify(pending));
+    return readPendingLoginLink()?.token === pending.token;
+  } catch { return false; }
 }
 
 export function readPendingLoginLink(): PendingLoginLink | null {

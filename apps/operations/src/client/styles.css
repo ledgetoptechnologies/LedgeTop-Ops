@@ -177,6 +177,11 @@
 .sign-in-problem-actions { display: flex; flex-wrap: wrap; gap: .6rem; margin-top: .5rem; }
 .sign-in-problem-actions > * { min-height: 44px; }
 .sign-in-problem-actions a[aria-disabled="true"] { cursor: progress; opacity: .75; }
+.link-login-owner { margin: 0; display: grid; gap: .4rem; padding: .75rem; border-radius: 8px; background: #fff7f2; border-left: 3px solid #ee5007; }
+.link-login-owner > div { display: grid; grid-template-columns: minmax(7rem, 10rem) 1fr; gap: .75rem; }
+.link-login-owner dt { color: var(--muted); }
+.link-login-owner dd { margin: 0; font-weight: 700; overflow-wrap: anywhere; }
+@media (max-width: 640px) { .link-login-owner > div { grid-template-columns: 1fr; gap: .05rem; } }
 .account-page { display: grid; gap: 1rem; max-width: 760px; }
 .account-facts { margin: 0; display: grid; gap: .6rem; }
 .account-facts > div { display: grid; grid-template-columns: minmax(6rem, 9rem) 1fr; gap: .75rem; }

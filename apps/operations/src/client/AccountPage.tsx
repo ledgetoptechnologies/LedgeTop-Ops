@@ -46,7 +46,12 @@ function SignInEmails() {
     return () => controller.abort();
   }, [load]);
   const pendingLink = intent ? pendingFromVerificationUrl(intent.verificationUrl) : null;
-  const [signingOut, continueAsTarget] = useAccessSignOut(LINK_LOGIN_PATH, () => { if (pendingLink) savePendingLoginLink(pendingLink); });
+  const [signingOut, continueAsTarget] = useAccessSignOut(LINK_LOGIN_PATH, () => {
+    if (pendingLink && savePendingLoginLink(pendingLink)) return true;
+    // Signing out now would lose the link: keep this page and offer the copy instead.
+    setNotice({ tone: "error", text: `This browser can't keep the link while you sign out. Copy the link and open it after signing in as ${intent?.targetEmail ?? "the new email"}.` });
+    return false;
+  });
   const [steppingUp, signInWithMain] = useAccessSignOut("/account");
 
   const run = async (task: () => Promise<void>) => {
@@ -114,10 +119,11 @@ function SignInEmails() {
           </li>)}
         </ul>
         {onLinkedEmail && <p className="muted">You're signed in with {links.currentEmail}, a linked email.</p>}
-        {!links.canManage && <div className="account-step-up">
-          <p>To add or remove sign-in emails, sign in with your main email{onLinkedEmail ? ` (${links.canonicalEmail})` : ""}.</p>
-          {onLinkedEmail && <a className="button button-ghost" href={ACCESS_LOGOUT} onClick={signInWithMain} aria-disabled={steppingUp || undefined}>
-            {steppingUp ? "Signing out…" : "Sign in with main email"}</a>}
+        {!links.canManage && !onLinkedEmail && <p className="muted">Only the account owner can add or remove sign-in emails.</p>}
+        {!links.canManage && onLinkedEmail && <div className="account-step-up">
+          <p>To add or remove sign-in emails, sign in with your main email ({links.canonicalEmail}).</p>
+          <a className="button button-ghost" href={ACCESS_LOGOUT} onClick={signInWithMain} aria-disabled={steppingUp || undefined}>
+            {steppingUp ? "Signing out…" : "Sign in with main email"}</a>
         </div>}
         {notice && <div className={`notice${notice.tone === "error" ? " error" : ""}`} role="status">{notice.text}</div>}
         {unconfirmedRemoval && <div className="account-actions">

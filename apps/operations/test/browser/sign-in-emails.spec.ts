@@ -10,16 +10,20 @@ const revoked = { id: "binding-0", email: "old@example.test", version: 2, status
 const INTENT = "3f2b8c1e-7d4a-4e9b-a6c2-5d8e9f0a1b2c", TOKEN = "aaaaaaaa0123456789abcdef0123456789abcdef0123456789abcdefbbbbbbbb";
 const verificationUrl = (origin: string) => `${origin}/auth/link-login#intent=3f2b8c1e-7d4a-4e9b-a6c2-5d8e9f0a1b2c&token=aaaaaaaa0123456789abcdef0123456789abcdef0123456789abcdefbbbbbbbb`;
 
-type Seen = { requests: Request[]; links: unknown; intents: number; deletes: unknown[]; claims: Request[]; sessions: number; logouts: number };
+const ownerPreview = { canonicalEmail: "owner@example.test", ownerDisplayName: "Owner User", targetEmail: "new@example.test", expiresAt: "2026-10-24T18:15:00Z", state: "pending" };
+const LINKED_BINDING = { bindingId: "9a1c2e3f-4b5d-4e6f-8a7b-0c1d2e3f4a5b", staffId: "owner-a", version: 1 };
+
+type Seen = { requests: Request[]; links: unknown; intents: number; deletes: unknown[]; claims: Request[]; previews: Request[]; sessions: number; logouts: number };
 
 /** Operations signed in as the main owner, with the login-links API answered from `links` and `respond` overrides. */
 async function mockOps(page: Page, options: {
   links?: unknown; linksStatus?: number; identity?: string;
   intent?: (origin: string) => { status: number; json: unknown }; claim?: { status: number; json: unknown };
   claims?: Array<{ status: number; json: unknown }>; deletes?: Array<{ status: number; json: unknown }>;
+  preview?: { status: number; json: unknown }; previewGate?: Promise<void>;
 } = {}) {
   const seen: Seen = { requests: [], links: options.links ?? { canonicalEmail: "owner@example.test", currentEmail: "owner@example.test", canManage: true, bindings: [linked, revoked] },
-    intents: 0, deletes: [], claims: [], sessions: 0, logouts: 0 };
+    intents: 0, deletes: [], claims: [], previews: [], sessions: 0, logouts: 0 };
   await page.route("**/cdn-cgi/access/get-identity", route => route.fulfill({ json: { email: options.identity ?? "owner@example.test" } }));
   await page.route("**/cdn-cgi/access/logout", route => { seen.logouts++; return route.fulfill({ status: 302, headers: { location: "https://team.cloudflareaccess.com/cdn-cgi/access/logout" } }); });
   await page.route("**/api/**", async route => {
@@ -33,9 +37,14 @@ async function mockOps(page: Page, options: {
       const answer = options.intent?.(url.origin) ?? { status: 200, json: { intentId: "3f2b8c1e-7d4a-4e9b-a6c2-5d8e9f0a1b2c", targetEmail: "new@example.test", verificationUrl: verificationUrl(url.origin), expiresAt: "2026-10-24T18:15:00Z" } };
       return route.fulfill(answer);
     }
+    if (path === "/api/account/login-links/preview-claim") {
+      seen.previews.push(request);
+      await options.previewGate;
+      return route.fulfill(options.preview ?? { status: 200, json: ownerPreview });
+    }
     if (path === "/api/account/login-links/claim") {
       seen.claims.push(request);
-      return route.fulfill(options.claims?.[seen.claims.length - 1] ?? options.claim ?? { status: 200, json: { bindingId: "binding-2", staffId: "owner-a", version: 1 } });
+      return route.fulfill(options.claims?.[seen.claims.length - 1] ?? options.claim ?? { status: 200, json: LINKED_BINDING });
     }
     if (path.startsWith("/api/account/login-links/") && request.method() === "DELETE") {
       seen.deletes.push(request.postDataJSON());
@@ -98,7 +107,7 @@ test("adding an email creates one link, then signs out and confirms it on the li
 
   const sessionsBefore = seen.sessions;
   await card.getByRole("link", { name: "Sign out and continue as new@example.test" }).click();
-  await expect(page.getByRole("heading", { name: "Link this email to your Operations account?" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Link new@example.test to Owner User’s Operations profile?" })).toBeVisible();
   expect(new URL(page.url()).pathname).toBe("/auth/link-login");
   expect(new URL(page.url()).hash).toBe("");
   expect(seen.logouts).toBe(1);
@@ -132,6 +141,7 @@ test("signed in with a linked email, management asks for the main email instead"
   const card = await openAccount(page);
   await expect(card).toContainText("You're signed in with linked@example.test, a linked email.");
   await expect(card).toContainText("To add or remove sign-in emails, sign in with your main email (owner@example.test).");
+  await expect(card).not.toContainText("Only the account owner");
   await expect(card.getByRole("link", { name: "Sign in with main email" })).toHaveAttribute("href", "/cdn-cgi/access/logout");
   await expect(card.getByRole("button", { name: "Remove" })).toHaveCount(0);
   await expect(card.getByRole("button", { name: "Add a sign-in email" })).toHaveCount(0);
@@ -147,14 +157,14 @@ test("without the sign-in emails feature the account page shows only the profile
 test("the link page opens before Operations, hides the link and keeps it until a fresh sign-in", async ({ page }) => {
   const seen = await mockOps(page, { identity: "someone@example.test", claim: { status: 403, json: { error: "Sign in again with the email you're adding.", code: "denied" } } });
   await page.goto("/auth/link-login#intent=3f2b8c1e-7d4a-4e9b-a6c2-5d8e9f0a1b2c&token=aaaaaaaa0123456789abcdef0123456789abcdef0123456789abcdefbbbbbbbb");
-  await expect(page.getByRole("heading", { name: "Link this email to your Operations account?" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Link new@example.test to Owner User’s Operations profile?" })).toBeVisible();
   expect(new URL(page.url()).hash).toBe("");
   expect(seen.sessions).toBe(0);
   await page.getByRole("button", { name: "Link this email" }).click();
   await expect(page.getByRole("heading", { name: "Sign in with the email you're adding" })).toBeVisible();
   await expect(page.getByRole("link", { name: "Sign in with a different email" })).toBeVisible();
   await page.reload();
-  await expect(page.getByRole("heading", { name: "Link this email to your Operations account?" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Link new@example.test to Owner User’s Operations profile?" })).toBeVisible();
   await page.getByRole("button", { name: "Cancel" }).click();
   await expect(page.getByRole("button", { name: "Account menu for Owner User" })).toBeVisible();
   expect(await page.evaluate(() => sessionStorage.length)).toBe(0);
@@ -220,4 +230,110 @@ test("an unclear removal keeps the same version and retries it safely", async ({
   await expect(card.getByRole("status")).toHaveText("linked@example.test was removed.");
   await expect(card.getByRole("button", { name: "Retry removal" })).toHaveCount(0);
   expect(seen.deletes).toEqual([{ expectedVersion: 3 }, { expectedVersion: 3 }]);
+});
+
+test("the link page names the profile being joined before linking, for each owner", async ({ page }) => {
+  for (const owner of [ownerPreview, { ...ownerPreview, canonicalEmail: "second@example.test", ownerDisplayName: "Second Owner", targetEmail: "other@example.test" }]) {
+    await page.unrouteAll();
+    const seen = await mockOps(page, { preview: { status: 200, json: owner } });
+    await page.goto("about:blank");
+    await page.goto(`/auth/link-login#intent=${INTENT}&token=${TOKEN}`);
+    await expect(page.getByRole("heading", { name: `Link ${owner.targetEmail} to ${owner.ownerDisplayName}’s Operations profile?` })).toBeVisible();
+    const details = page.locator(".link-login-owner");
+    await expect(details).toContainText(owner.ownerDisplayName);
+    await expect(details).toContainText(owner.canonicalEmail);
+    await expect(details).toContainText(owner.targetEmail);
+    await expect(page.getByText(`It will sign in as ${owner.ownerDisplayName} (${owner.canonicalEmail}) and get the same Operations permissions.`)).toBeVisible();
+    expect(seen.previews.map(request => request.postDataJSON())).toEqual([{ intentId: INTENT, verificationToken: TOKEN }]);
+    expect(seen.previews[0]!.headers()["x-csrf-token"]).toBeUndefined();
+    expect(seen.claims).toHaveLength(0);
+    await page.evaluate(() => sessionStorage.clear());
+  }
+});
+
+test("linking can't start until the profile check has answered", async ({ page }) => {
+  let release!: () => void;
+  const seen = await mockOps(page, { previewGate: new Promise<void>(resolve => { release = resolve; }) });
+  await page.goto(`/auth/link-login#intent=${INTENT}&token=${TOKEN}`);
+  await expect(page.getByRole("heading", { name: "Checking this link…" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Link this email" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Cancel" })).toHaveCount(0);
+  release();
+  await expect(page.getByRole("button", { name: "Link this email" })).toBeEnabled();
+  expect(seen.claims).toHaveLength(0);
+});
+
+for (const [name, preview, heading, kept] of [
+  ["a wrong or stale sign-in", { status: 403, json: { error: "Sign in with the email you're adding.", code: "denied" } }, "Sign in with the email you're adding", true],
+  ["an expired link", { status: 409, json: { error: "This link has expired.", code: "conflict" } }, "This link is no longer current", false],
+  ["an unclear check", { status: 503, json: { error: "Unavailable", code: "unavailable" } }, "We couldn't check this link", true],
+  ["a malformed check", { status: 200, json: { ...ownerPreview, ownerDisplayName: "" } }, "We couldn't check this link", true],
+] as const) {
+  test(`${name} during the profile check is handled without linking`, async ({ page }) => {
+    const seen = await mockOps(page, { preview });
+    await page.goto(`/auth/link-login#intent=${INTENT}&token=${TOKEN}`);
+    await expect(page.getByRole("heading", { name: heading })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Link this email" })).toHaveCount(0);
+    expect(seen.claims).toHaveLength(0);
+    expect(await page.evaluate(() => sessionStorage.length)).toBe(kept ? 1 : 0);
+  });
+}
+
+test("an already linked email shows as linked without another claim", async ({ page }) => {
+  const seen = await mockOps(page, { preview: { status: 200, json: { ...ownerPreview, state: "linked" } } });
+  await page.goto(`/auth/link-login#intent=${INTENT}&token=${TOKEN}`);
+  await expect(page.getByRole("heading", { name: "This email is linked" })).toBeVisible();
+  expect(seen.claims).toHaveLength(0);
+  expect(await page.evaluate(() => sessionStorage.length)).toBe(0);
+});
+
+for (const [name, json] of [["an empty binding id", { ...LINKED_BINDING, bindingId: "" }], ["version 0", { ...LINKED_BINDING, version: 0 }]] as const) {
+  test(`a claim answer with ${name} isn't treated as linked`, async ({ page }) => {
+    await mockOps(page, { claim: { status: 200, json } });
+    await page.goto(`/auth/link-login#intent=${INTENT}&token=${TOKEN}`);
+    await page.getByRole("button", { name: "Link this email" }).click();
+    await expect(page.getByText("We could not confirm whether the email was linked. Retry verification to check safely.")).toBeVisible();
+    expect(await page.evaluate(() => sessionStorage.length)).toBe(1);
+  });
+}
+
+test("a removal answer without a version keeps the retry", async ({ page }) => {
+  const seen = await mockOps(page, { deletes: [{ status: 200, json: { bindingId: "binding-1", status: "revoked" } }] });
+  const card = await openAccount(page);
+  await card.getByRole("button", { name: "Remove" }).click();
+  await page.locator("dialog.ops-confirm-action").getByRole("button", { name: "Confirm" }).click();
+  await expect(card.getByRole("button", { name: "Retry removal" })).toBeVisible();
+  expect(seen.deletes).toEqual([{ expectedVersion: 3 }]);
+});
+
+test("when this browser can't keep the link, signing out is stopped and the link is offered to copy", async ({ page }) => {
+  const seen = await mockOps(page, { identity: "new@example.test" });
+  await page.addInitScript(() => {
+    const block = () => { throw new DOMException("blocked", "SecurityError"); };
+    Object.defineProperty(Storage.prototype, "setItem", { configurable: true, value: block });
+  });
+  const card = await openAccount(page);
+  await card.getByRole("button", { name: "Add a sign-in email" }).click();
+  const dialog = page.getByRole("dialog", { name: "Add a sign-in email" });
+  await dialog.getByLabel("Email").fill("new@example.test");
+  await dialog.getByRole("button", { name: "Create link" }).click();
+  await card.getByRole("link", { name: "Sign out and continue as new@example.test" }).click();
+  await expect(card.getByRole("status").filter({ hasText: "can't keep the link" })).toContainText("Copy the link and open it after signing in as new@example.test.");
+  await expect(card.getByRole("button", { name: "Copy link" })).toBeVisible();
+  expect(seen.logouts).toBe(0);
+  expect(new URL(page.url()).pathname).toBe("/account");
+
+  await page.goto(`/auth/link-login#intent=${INTENT}&token=${TOKEN}`);
+  await expect(page.getByRole("link", { name: "Sign in with a different email" })).toBeVisible();
+  await page.getByRole("link", { name: "Sign in with a different email" }).click();
+  await expect(page.getByRole("alert")).toContainText("This browser can't keep the link while you sign out.");
+  expect(seen.logouts).toBe(0);
+});
+
+test("an employee on their main email is told management is owner-only, with no sign-in loop", async ({ page }) => {
+  await mockOps(page, { links: { canonicalEmail: "owner@example.test", currentEmail: "owner@example.test", canManage: false, bindings: [] } });
+  const card = await openAccount(page);
+  await expect(card).toContainText("Only the account owner can add or remove sign-in emails.");
+  await expect(card.getByRole("link", { name: "Sign in with main email" })).toHaveCount(0);
+  await expect(card.getByRole("button", { name: "Add a sign-in email" })).toHaveCount(0);
 });
