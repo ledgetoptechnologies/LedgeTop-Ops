@@ -109,8 +109,8 @@ test("adding an email creates one link, then signs out and confirms it on the li
   await page.getByRole("button", { name: "Link this email" }).click();
   await expect(page.getByRole("heading", { name: "This email is linked" })).toBeVisible();
   expect(seen.claims).toHaveLength(1);
-  expect(seen.claims[0].postDataJSON()).toEqual({ intentId: "3f2b8c1e-7d4a-4e9b-a6c2-5d8e9f0a1b2c", verificationToken: "aaaaaaaa0123456789abcdef0123456789abcdef0123456789abcdefbbbbbbbb" });
-  expect(seen.claims[0].headers()["x-csrf-token"]).toBeUndefined();
+  expect(seen.claims[0]!.postDataJSON()).toEqual({ intentId: "3f2b8c1e-7d4a-4e9b-a6c2-5d8e9f0a1b2c", verificationToken: "aaaaaaaa0123456789abcdef0123456789abcdef0123456789abcdefbbbbbbbb" });
+  expect(seen.claims[0]!.headers()["x-csrf-token"]).toBeUndefined();
   expect(await page.evaluate(() => sessionStorage.length)).toBe(0);
   await expect(page.getByRole("link", { name: "Open Operations" })).toHaveAttribute("href", "/");
 });
