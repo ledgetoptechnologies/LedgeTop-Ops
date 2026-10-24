@@ -20,16 +20,21 @@ function steps(source) {
 const migratedSteps = steps(workflow);
 const originalSteps = steps(upstream);
 const { MIGRATIONS } = createRequire(import.meta.url)('../apps/viewer/server/database.js');
-// The original imported workflow is historical evidence. The controller-pin
-// migration advances only these two reviewed schema gates from 38 to 39; every
-// other byte of the upstream verification/promotion contract stays compared.
+// The original imported workflow is historical evidence. Reviewed migrations
+// 39 (controller pinning) and 40 (typed direct-client session authority) advance
+// only these two schema gates from 38 to 40. Migration 40 transactionally rebuilds
+// three leaf tables, preserving legacy rows, indexes and immutable triggers;
+// direct-client-delivery.test.js covers continuity, typed revocation isolation,
+// atomic rollback for unexpected inbound references and idempotent reapplication.
+// Every other byte of the upstream verification/promotion contract stays compared.
 function reviewedUpstreamStep(name) {
   const original = originalSteps.get(name);
   if (!['Verify exact candidate image', 'Write verified release attestation'].includes(name)) return original;
-  assert.equal(MIGRATIONS.at(-1).version, 39, 'another schema advance requires a new explicit gate review');
+  assert.equal(MIGRATIONS.at(-1).version, 40, 'another schema advance requires a new explicit gate review');
+  assert.equal(MIGRATIONS.at(-1).name, 'direct_client_session_source_authorizations');
   assert.equal(original.split('EXPECTED_SCHEMA_VERSION: "38"').length - 1, 1);
-  assert.equal(migratedSteps.get(name).split('EXPECTED_SCHEMA_VERSION: "39"').length - 1, 1);
-  return original.replace('EXPECTED_SCHEMA_VERSION: "38"', 'EXPECTED_SCHEMA_VERSION: "39"');
+  assert.equal(migratedSteps.get(name).split('EXPECTED_SCHEMA_VERSION: "40"').length - 1, 1);
+  return original.replace('EXPECTED_SCHEMA_VERSION: "38"', 'EXPECTED_SCHEMA_VERSION: "40"');
 }
 
 
@@ -75,7 +80,7 @@ test('All upstream runtime and numerical-engine verification remains intact', ()
     'if [[ "$GITHUB_EVENT_NAME" == "push" && "$GITHUB_REF" == "refs/heads/main" ]]; then',
     'if [[ "$GITHUB_EVENT_NAME" == "push" ]]; then',
   );
-  assert.equal(actual, reviewedUpstreamStep('Verify exact candidate image'), 'Only the reviewed schema-39 advance may differ from the upstream runtime gate');
+  assert.equal(actual, reviewedUpstreamStep('Verify exact candidate image'), 'Only the reviewed schema-40 advance may differ from the upstream runtime gate');
   assert.ok(workflow.indexOf('- name: Verify exact candidate image') < workflow.indexOf('- name: Promote verified digest to release tags'));
   assert.match(actual, /test "\$CANDIDATE_DIGEST" = "\$IMAGE_DIGEST"/);
   assert.match(actual, /VERIFY_IMAGE="\$IMAGE_NAME@\$IMAGE_DIGEST"/);

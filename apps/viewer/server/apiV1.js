@@ -156,10 +156,10 @@ function validSubject(value) {
   return typeof value === 'string' && value.length >= 1 && value.length <= 200;
 }
 
-function modelAssociationSourceAuthorization(value) {
+function publishedSessionSourceAuthorization(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)
     || Object.keys(value).sort().join(',') !== 'id,type,version'
-    || value.type !== 'model_association'
+    || !['model_association', 'direct_client_grant'].includes(value.type)
     || typeof value.id !== 'string' || !/^[A-Za-z0-9._:-]{1,200}$/.test(value.id)
     || !Number.isSafeInteger(value.version) || value.version < 1)
     return null;
@@ -174,6 +174,7 @@ function sameSourceAuthorization(left, right) {
 function createApiV1(repository) {
   const router = express.Router();
   const serviceOnly = requireService(repository);
+  router.use(require('./clientDeliveryCatalog').createClientDeliveryCatalog(repository));
   const idempotentService = idempotent(repository);
   router.use('/api/v1/measurements', createMeasurementApi(repository));
   if (config.publishedSessionSourceRevocationEnabled) repository.failClosedUnboundPublishedSessions({
@@ -338,7 +339,7 @@ function createApiV1(repository) {
     const body = req.body || {};
     const sourceAuthorization = body.sourceAuthorization === undefined
       ? null
-      : modelAssociationSourceAuthorization(body.sourceAuthorization);
+      : publishedSessionSourceAuthorization(body.sourceAuthorization);
     if (body.sourceAuthorization !== undefined && !sourceAuthorization)
       return res.status(400).json({ error: 'sourceAuthorization is invalid' });
     if (config.publishedSessionSourceRevocationEnabled && !sourceAuthorization)
@@ -407,8 +408,8 @@ function createApiV1(repository) {
     });
   });
 
-  function publishedSessionSourceRevocationEnabled(_req, res, next) {
-    if (!config.publishedSessionSourceRevocationEnabled) {
+  function publishedSessionSourceRevocationEnabled(req, res, next) {
+    if (!config.publishedSessionSourceRevocationEnabled && req.body?.sourceAuthorization?.type !== 'direct_client_grant') {
       res.setHeader('Cache-Control', 'no-store');
       return res.status(503).json({ error: 'published-session source revocation is disabled' });
     }
@@ -419,7 +420,7 @@ function createApiV1(repository) {
     publishedSessionSourceRevocationEnabled, idempotentService, (req, res) => {
       const body = req.body || {};
       const sourceAuthorization = Object.keys(body).join(',') === 'sourceAuthorization'
-        ? modelAssociationSourceAuthorization(body.sourceAuthorization)
+        ? publishedSessionSourceAuthorization(body.sourceAuthorization)
         : null;
       if (!sourceAuthorization)
         return res.status(400).json({ error: 'sourceAuthorization is invalid' });

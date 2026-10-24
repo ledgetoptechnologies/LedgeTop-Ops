@@ -198,6 +198,10 @@ jobs:
           npm --prefix apps/operations ci
           npm --prefix apps/ops-sync ci
 
+      - name: Install Viewer dependency for joined sharing transport tests
+        if: matrix.package == 'operations'
+        run: npm --prefix apps/viewer ci --ignore-scripts --no-audit
+
       - name: Typecheck
         working-directory: apps/${{ matrix.package }}
         run: npm run check

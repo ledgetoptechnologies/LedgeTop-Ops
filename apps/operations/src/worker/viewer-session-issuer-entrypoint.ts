@@ -1,5 +1,8 @@
 import { WorkerEntrypoint } from "cloudflare:workers";
 import type {
+  DirectClientViewerAuthorizationV1,
+  DirectClientViewerItemsResultV1,
+  DirectClientViewerSessionRequestV1,
   ClientViewerSessionRequestV1,
   ClientViewerSessionResultV1,
   NativeClientViewerAuthorizationV1,
@@ -21,8 +24,15 @@ import {
   listClientViewerShares,
   revokeClientViewerShare,
 } from "./viewer-session-issuer";
+import { listDirectClientViewerItems, issueDirectClientViewerSession } from "./viewer-direct-client-session-issuer";
 
 export class ViewerSessionIssuer extends WorkerEntrypoint<Env> {
+  listDirectClientViewerItems(request: DirectClientViewerAuthorizationV1): Promise<DirectClientViewerItemsResultV1> {
+    return listDirectClientViewerItems(this.env, request);
+  }
+  issueDirectClientViewerSession(request: DirectClientViewerSessionRequestV1): Promise<ClientViewerSessionResultV1> {
+    return issueDirectClientViewerSession(this.env, request);
+  }
   listNativeClientViewerModels(request: NativeClientViewerAuthorizationV1): Promise<NativeClientViewerModelsResultV1> {
     return listNativeClientViewerModels(this.env, request);
   }

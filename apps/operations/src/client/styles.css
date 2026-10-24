@@ -1790,6 +1790,8 @@ tbody tr:last-child td { border: 0; }
 .client-hub-detail-grid .simple-rows > a { color: inherit; text-decoration: none; }
 .client-hub-detail-grid > *, .client-hub-collection { min-width: 0; }
 .client-hub-detail-grid, .client-hub-title { overflow-wrap: anywhere; }
+/* Business projects list rows and actions need a full-width row next to the contact cards. */
+.client-hub-overview-band > #client-business-projects { grid-column: 1 / -1; }
 .client-hub-inventory-note { margin: 0 0 1rem; color: var(--muted); }
 .client-hub-subheading { margin: 1.1rem 0 .65rem; font-size: .95rem; }
 .client-hub-subheading:first-child { margin-top: 0; }
@@ -1814,6 +1816,10 @@ tbody tr:last-child td { border: 0; }
 .client-project-management dt { color: var(--muted); }
 .client-project-management dd { margin: 0; overflow-wrap: anywhere; }
 .client-project-management-actions { display: flex; flex-wrap: wrap; gap: .55rem; }
+.client-project-management-start { display: flex; flex-wrap: wrap; align-items: center; gap: .55rem; }
+.client-project-management-form { display: grid; gap: .75rem; min-width: 0; }
+.client-project-management-form label { display: grid; gap: .3rem; }
+.client-project-management-form button { min-height: 44px; justify-self: start; }
 .client-project-management button, .client-project-management a.button { min-height: 44px; }
 @media (max-width: 640px) {
   .client-hub-title { flex-wrap: wrap; }
