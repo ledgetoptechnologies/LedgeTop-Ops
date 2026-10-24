@@ -329,7 +329,7 @@ test("opening an original video starts playback without pressing Play and keeps 
   await expect(dialog.getByRole("button", { name: "Play video", exact: true })).toBeVisible();
   await expect(dialog.getByRole("button", { name: "Enter fullscreen" })).toBeVisible();
   await page.screenshot({ path: `test-results/video-controls-${test.info().project.name}.png` });
-  await page.keyboard.press("Escape");
+  await seek.focus(); await seek.press("Escape");
   await expect(page.locator("video")).toHaveCount(0);
 });
 

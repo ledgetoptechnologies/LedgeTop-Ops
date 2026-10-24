@@ -14,6 +14,7 @@ import { notifyCloudTransferOpener, parseCloudTransferCallback, type CloudTransf
 import { constrainViewerOffset, pointerAnchoredOffset } from "./viewer-zoom";
 import { ImageLocationMap, type ImageLocationMapAsset } from "./ImageLocationMap";
 import { VideoPlayer } from "./VideoPlayer";
+import { streamPreviewSource } from "./stream-preview-source";
 
 type Gate = "landing" | "loading" | "code" | "ready" | "error";
 type ErrorView = "unavailable" | "invalid-link" | "expired" | "revoked" | "inactive";
@@ -703,8 +704,8 @@ function Preview({ item, items, publicId, namespace, onSelect, onClose }: { item
   useEffect(() => { activeFilmstripItem.current?.scrollIntoView({ block: "nearest", inline: "center" }); }, [item.id]);
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") { if (!document.fullscreenElement) onClose(); return; }
       if (["INPUT", "TEXTAREA", "SELECT"].includes((event.target as HTMLElement)?.tagName)) return;
-      if (event.key === "Escape" && !document.fullscreenElement) onClose();
       if ((event.target as HTMLElement)?.closest?.("[data-video-player],video,audio,iframe")) return;
       if (event.key === "ArrowLeft" && previous) onSelect(previous);
       if (event.key === "ArrowRight" && next) onSelect(next);
@@ -802,7 +803,7 @@ function VideoPreview({ item, publicId, namespace }: { item: DeliveryItem; publi
   const [loading, setLoading] = useState(true); const [ticketLoading, setTicketLoading] = useState(item.previewStatus === "ready");
   const [streamUrl, setStreamUrl] = useState<string | null>(null);
   useEffect(() => { let cancelled = false; if (item.previewStatus !== "ready") { setTicketLoading(false); return () => { cancelled = true; }; } requestJson<{ streamUrl?: string; url?: string }>(`${deliveryApiBase(publicId, namespace)}/items/${encodeURIComponent(item.id)}/stream-ticket`, { method: "POST" }).then(result => { if (!cancelled) setStreamUrl(result.streamUrl || result.url || null); }).catch(() => { if (!cancelled) setStreamUrl(null); }).finally(() => { if (!cancelled) setTicketLoading(false); }); return () => { cancelled = true; }; }, [item.id, item.previewStatus, namespace, publicId]);
-  if (streamUrl) return <div className="video-preview">{loading && <span className="media-status">Opening video preview…</span>}<iframe src={streamUrl} title={item.name} onLoad={() => setLoading(false)} allow="accelerometer; gyroscope; autoplay; encrypted-media; picture-in-picture; fullscreen" allowFullScreen /></div>;
+  if (streamUrl) return <div className="video-preview">{loading && <span className="media-status">Opening video preview…</span>}<iframe src={streamPreviewSource(streamUrl)} title={item.name} onLoad={() => setLoading(false)} allow="accelerometer; gyroscope; autoplay; encrypted-media; picture-in-picture; fullscreen" allowFullScreen /></div>;
   if (ticketLoading) return <div className="video-preview" aria-busy="true"><SkeletonViewer /><span className="media-status">Opening video preview…</span></div>;
   return item.sourceUrl ? <OriginalVideo item={item} /> : <PreparedPlaceholder item={item} />;
 }
