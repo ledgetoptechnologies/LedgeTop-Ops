@@ -23,7 +23,7 @@ async function boundedJson(request:Request):Promise<unknown>{
   try{return JSON.parse(new TextDecoder("utf-8",{fatal:true}).decode(bytes));}catch{return null;}
 }
 export function registerDirectViewerClientRoutes(app:App):void{
-  app.use("/api/viewer/direct-client-grants*",async(c,next)=>{
+  for(const path of ["/api/viewer/direct-client-grants","/api/viewer/direct-client-grants/*"])app.use(path,async(c,next)=>{
     c.header("Cache-Control","private, no-store");
     if(!viewerIntegrationEnabled(c.env)||c.env.CLIENT_VIEWER_SESSION_ISSUER_ENABLED!=="true")throw new HTTPException(404,{message:"Not found"});
     await next();
