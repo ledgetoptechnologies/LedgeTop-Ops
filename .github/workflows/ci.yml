@@ -38,6 +38,9 @@ jobs:
       - name: Verify guarded production deployment tooling without credentials
         run: node --test scripts/production-deploy.test.mjs scripts/native-staff-cutover-readiness.test.mjs
 
+      - name: Verify retained automatic release components without credentials
+        run: node --test scripts/production-auto-assets.test.mjs scripts/production-auto-upload.test.mjs scripts/production-auto-verify.test.mjs scripts/production-auto-verify-workerd.test.mjs scripts/production-auto-coordinate.test.mjs scripts/production-auto-ci.test.mjs scripts/production-auto-provider.test.mjs
+
       - name: Verify inactive additive UI binding preparation
         run: node --test scripts/ui-additive-release-plan.test.mjs
 

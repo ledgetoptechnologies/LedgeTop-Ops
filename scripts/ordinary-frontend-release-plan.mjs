@@ -132,7 +132,8 @@ export function compileOrdinaryFrontendReleasePlan(snapshot, { app, release,
       'Exact returned native candidate main, source map when exposed, runtime and all effective bindings',
       'Complete new frontend manifest bytes through the active native asset namespace',
       'Exact previous version rollback and previous version asset-byte checks'],
-    oldTabBehavior: 'Previously open tabs may require reload after obsolete asset URLs are removed; roll back the whole prior version to restore its assets.' });
+    retentionPolicy: { minimumHours: 48, automaticPruning: false, satisfiedByThisOfflinePlan: false },
+    oldTabBehavior: 'Activation requires a retained asset union and byte verification in the active namespace for releases served within the previous48hours. This offline plan alone is insufficient.' });
 }
 
 export function validateOrdinaryFrontendReleasePlan(snapshot, plan, options) {
