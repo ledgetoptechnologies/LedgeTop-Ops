@@ -3075,7 +3075,8 @@ export function ClientPortalApp({
   const account = gate.data.resourceMode === "native" ? null : gate.data.account;
   const projects = gate.data.resourceMode === "native" ? [] : gate.data.projects;
   const mapboxPublicToken = gate.data.resourceMode === "native" ? null : gate.data.mapboxPublicToken;
-  const shellDisplayName = native ? native.workspace.displayName : account!.displayName;
+  // Stored native account names can be internal source labels; the menu names the signed-in person instead.
+  const shellDisplayName = native ? native.identity?.email ?? "Your account" : account!.displayName;
   const accountEmail = (native ? native.identity?.email : account?.email) ?? null;
   const workspaces = gate.data.workspaces ?? [];
   const selectedWorkspaceId = gate.data.selectedWorkspaceId ?? null;
@@ -3083,7 +3084,7 @@ export function ClientPortalApp({
   const unifiedView = unifiedMode && UNIFIED_PAGES.has(page) && !accountFocus;
   const currentAccount = unifiedMode ? workspaces.find(workspace => workspace.id === selectedWorkspaceId) : undefined;
   const unifiedScopes = unifiedMode ? workspaces.filter(unifiedAccountSupported).map(workspace => workspace.id) : [];
-  const unifiedLabels = new Map(workspaces.map(workspace => [workspace.id, `${unifiedAccount(workspace).business} · ${workspace.displayName}`]));
+  const unifiedLabels = new Map(workspaces.map(workspace => [workspace.id, `${unifiedAccount(workspace).business} · ${AREA_TEXT[accountArea(unifiedAccount(workspace))].name}`]));
   // Notification history doesn't depend on request support, so the bell resets on the
   // verified source/workspace/context version whether or not requests are enabled.
   const notificationContextKey = native ? `${native.workspace.sourceId}:${native.workspace.id}:${native.contextVersion}` : `${account!.id}:${selectedWorkspaceId ?? "legacy"}`;
@@ -3652,7 +3653,7 @@ export function ClientPortalApp({
       </div>}
       <main className={`client-portal-main${viewerRoute ? " client-viewer-main" : ""}`}>{switchingWorkspace ? <Loading /> : <>
         {currentAccount && !unifiedView && <p className="unified-portal-context">
-          <span>{AREA_TEXT[accountArea(unifiedAccount(currentAccount))].name} · {currentAccount.displayName}</span>
+          <span>{AREA_TEXT[accountArea(unifiedAccount(currentAccount))].name}</span>
           {UNIFIED_PAGES.has(page) && <button type="button" className="portal-text-action" onClick={() => navigate(page as UnifiedPage)}>Back to everything</button>}
         </p>}
         {content}</>}</main>

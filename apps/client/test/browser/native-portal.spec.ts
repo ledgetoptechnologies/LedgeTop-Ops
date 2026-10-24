@@ -925,7 +925,7 @@ test("the unified portal lists every account's projects without a switcher and o
   await expect(page).toHaveURL(/\/portal\/projects\/project-shared\?workspace=workspace-c$/);
   await expect(page.getByText("Mountain bridge inspection", {exact: true}).first()).toBeVisible();
   await expect(page.getByText("Coastal seawall construction documentation", {exact: true})).toHaveCount(0);
-  await expect(page.locator(".unified-portal-context")).toContainText("Mountain Engineering");
+  await expect(page.locator(".unified-portal-context")).not.toContainText("Mountain Engineering");
   const topNav = page.getByRole("navigation", {name: "Client portal"});
   if (await topNav.isVisible()) await topNav.getByRole("link", {name: "Projects"}).click();
   else { await page.getByRole("button", {name: "Open navigation"}).click(); await page.getByRole("navigation", {name: "Mobile client portal navigation"}).getByRole("link", {name: "Projects"}).click(); }
@@ -1070,7 +1070,8 @@ test.describe("unified home without business switching", () => {
     await expect(chooser).not.toContainText("Ledge Top Technologies");
     await chooser.getByRole("button", {name: /Website or marketing/}).click();
     await expect(page).toHaveURL(/\/portal\/requests\/new\?workspace=workspace-c$/);
-    await expect(page.locator(".unified-portal-context")).toContainText("Website and marketing · Rivera Web Studio");
+    await expect(page.locator(".unified-portal-context")).toHaveText(/^Website and marketing/);
+    await expect(page.locator(".unified-portal-context")).not.toContainText("Rivera Web Studio");
   });
 
   test("deliveries and feedback are described by the work, not the business", async ({page}) => {
