@@ -1,6 +1,6 @@
 import { readFileSync, readdirSync } from "node:fs";
 import { Miniflare } from "miniflare";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { createClientPortalRouter } from "../src/worker/client-portal/routes";
 import { decodeAuthenticatedDeliveryHandle } from "../src/worker/client-portal/authenticated-delivery-handles";
 import { appendAuthenticatedContentStart } from "../src/worker/client-portal/authenticated-content-audit";
@@ -124,27 +124,42 @@ describe("authenticated delivery resources — migrated effective workspace", { 
   });
 
   it("writes the exact current v2 authority audit record and fails closed when audit append cannot commit", async () => {
-    const fileHandle = await currentFileHandle();
-    env.CLIENT_PORTAL_CONTENT_AUDIT_ENABLED = "true";
-    env.CLIENT_PORTAL_CONTENT_AUDIT_HMAC_SECRET = "authenticated-delivery-resources-audit-secret-0001";
-    const etag = (await bucket.head("clients/ad1/effective/readme.txt"))!.etag;
-    await appendAuthenticatedContentStart(env, {
-      authorityMode: "native_delivery", grantSource: "authenticated_delivery", recipientEventId: "ad1-event", batchId: "ad1-batch",
-      sourceId: "project-alpha:primary", workspaceId: "ad1-workspace", identityId: "ad1-global", projectPublicId: null,
-      folderBindingId: "ad1-binding", grantId: "ad1-grant", grantVersion: 1, bindingSourceVersion: "ad1-v1",
-      ownerScopeType: "organization", ownerPublicId: "ad1-org", action: "file.download_requested",
-      storageKey: "clients/ad1/effective/readme.txt", contentVersion: etag,
-    });
-    const first = await request(`/authenticated-deliveries/download?file=${encodeURIComponent(fileHandle)}`);
-    expect(first.status, await first.clone().text()).toBe(200); await first.text();
-    expect(await db.prepare(`SELECT authority_mode,source_id,workspace_id,identity_id,folder_binding_id,grant_id,account_id
-      FROM portal_authenticated_content_events`).first()).toEqual({ authority_mode: "native_delivery", source_id: "project-alpha:primary", workspace_id: "ad1-workspace",
-      identity_id: "ad1-global", folder_binding_id: "ad1-binding", grant_id: "ad1-grant", account_id: null });
-    expect(await db.prepare("SELECT count(*) count FROM portal_authenticated_content_events WHERE action='file.download_requested'").first("count")).toBe(1);
-    await db.prepare(`CREATE TRIGGER reject_ad1_audit BEFORE INSERT ON portal_authenticated_content_events
-      WHEN NEW.action='file.preview_requested' BEGIN SELECT RAISE(ABORT,'audit unavailable'); END`).run();
-    const blocked = await request(`/authenticated-deliveries/preview?file=${encodeURIComponent(fileHandle)}`);
-    expect(blocked.status).toBe(503); expect(await blocked.text()).not.toContain("readme body");
+    // Freeze only Date: the manual append and HTTP append must share a window,
+    // regardless of whether slow D1 work crosses a real ten-minute boundary.
+    // Network and Miniflare timers remain real.
+    const boundary = Math.floor(Date.now() / 600_000) * 600_000 + 599_999;
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(boundary);
+    try {
+      const fileHandle = await currentFileHandle();
+      env.CLIENT_PORTAL_CONTENT_AUDIT_ENABLED = "true";
+      env.CLIENT_PORTAL_CONTENT_AUDIT_HMAC_SECRET = "authenticated-delivery-resources-audit-secret-0001";
+      const etag = (await bucket.head("clients/ad1/effective/readme.txt"))!.etag;
+      await appendAuthenticatedContentStart(env, {
+        authorityMode: "native_delivery", grantSource: "authenticated_delivery", recipientEventId: "ad1-event", batchId: "ad1-batch",
+        sourceId: "project-alpha:primary", workspaceId: "ad1-workspace", identityId: "ad1-global", projectPublicId: null,
+        folderBindingId: "ad1-binding", grantId: "ad1-grant", grantVersion: 1, bindingSourceVersion: "ad1-v1",
+        ownerScopeType: "organization", ownerPublicId: "ad1-org", action: "file.download_requested",
+        storageKey: "clients/ad1/effective/readme.txt", contentVersion: etag,
+      });
+      const first = await request(`/authenticated-deliveries/download?file=${encodeURIComponent(fileHandle)}`);
+      expect(first.status, await first.clone().text()).toBe(200); await first.text();
+      expect(await db.prepare(`SELECT authority_mode,source_id,workspace_id,identity_id,folder_binding_id,grant_id,account_id
+        FROM portal_authenticated_content_events`).first()).toEqual({ authority_mode: "native_delivery", source_id: "project-alpha:primary", workspace_id: "ad1-workspace",
+        identity_id: "ad1-global", folder_binding_id: "ad1-binding", grant_id: "ad1-grant", account_id: null });
+      expect(await db.prepare("SELECT count(*) count FROM portal_authenticated_content_events WHERE action='file.download_requested'").first("count")).toBe(1);
+      // The next bucket is a distinct content start, even one millisecond later.
+      vi.setSystemTime(boundary + 1);
+      const later = await request(`/authenticated-deliveries/download?file=${encodeURIComponent(fileHandle)}`);
+      expect(later.status, await later.clone().text()).toBe(200); await later.text();
+      expect(await db.prepare("SELECT count(*) count FROM portal_authenticated_content_events WHERE action='file.download_requested'").first("count")).toBe(2);
+      expect((await db.prepare("SELECT dedupe_window FROM portal_authenticated_content_events WHERE action='file.download_requested' ORDER BY dedupe_window").all<{ dedupe_window: number }>()).results)
+        .toEqual([{ dedupe_window: Math.floor(boundary / 600_000) }, { dedupe_window: Math.floor(boundary / 600_000) + 1 }]);
+      await db.prepare(`CREATE TRIGGER reject_ad1_audit BEFORE INSERT ON portal_authenticated_content_events
+        WHEN NEW.action='file.preview_requested' BEGIN SELECT RAISE(ABORT,'audit unavailable'); END`).run();
+      const blocked = await request(`/authenticated-deliveries/preview?file=${encodeURIComponent(fileHandle)}`);
+      expect(blocked.status).toBe(503); expect(await blocked.text()).not.toContain("readme body");
+    } finally { vi.useRealTimers(); }
   });
 
   it("fences a separately-issued handle after its notification policy is revised", async () => {
