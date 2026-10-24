@@ -408,6 +408,8 @@ export interface StaffPrincipal {
   projectAlphaUserId: string | null;
   /** Verified Cloudflare Access JWT expiry, when present on the assertion. */
   accessExpiresAt?: number;
+  /** Actual verified alternate login, separate from the canonical staff authorization binding. */
+  verifiedLogin?: import("./staff-login-bindings").StaffLoginProof;
 }
 
 export interface GrantRow {

@@ -1,7 +1,7 @@
 import { ViewerServiceError, viewerServiceOrigin } from "@ltds/shared";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
-import { authenticateBoundStaffForViewerRenewal } from "./auth";
+import { authenticateBoundStaffForViewerRenewal, requireCurrentStaffLogin } from "./auth";
 import { readBoundedJson } from "./bounded-json";
 import { hmac, timingSafeEqual } from "./crypto";
 import { consumeNativeStaffOnboardingRateLimit } from "./native-staff-onboarding-rate-limit";
@@ -167,6 +167,7 @@ async function handle(request: Request, env: Env): Promise<Response> {
     if (expiresAt <= now + 60)
       return json(origin, { error: "Operations authorization is too close to expiry to renew" }, 401);
     const units = await resolveViewerUnits(env, verified.principal.id);
+    if (verified.principal.verifiedLogin) await requireCurrentStaffLogin(env, verified.principal);
     const grant = await viewerServiceClient(env).createAdminGrant({
       controllerOrigin: new URL(request.url).origin,
       targetSessionId: parsed.data.sessionId,
@@ -176,6 +177,7 @@ async function handle(request: Request, env: Env): Promise<Response> {
       displayUnits: units,
       idempotencyKey: requestId,
     });
+    if (verified.principal.verifiedLogin) await requireCurrentStaffLogin(env, verified.principal);
     return json(origin, {
       protocolVersion: 1,
       requestId,

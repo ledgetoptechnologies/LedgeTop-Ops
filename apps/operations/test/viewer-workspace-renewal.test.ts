@@ -6,9 +6,17 @@ const mocks = vi.hoisted(() => ({
   permissions: vi.fn(),
   serviceCreate: vi.fn(),
   units: vi.fn(),
+  loginCurrent: vi.fn(),
 }));
 
-vi.mock("../src/worker/auth", () => ({ authenticateBoundStaffForViewerRenewal: mocks.authenticate }));
+vi.mock("../src/worker/auth", async importOriginal => ({
+  ...await importOriginal<typeof import("../src/worker/auth")>(),
+  authenticateBoundStaffForViewerRenewal: mocks.authenticate,
+}));
+vi.mock("../src/worker/staff-login-bindings", async importOriginal => ({
+  ...await importOriginal<typeof import("../src/worker/staff-login-bindings")>(),
+  assertCurrentStaffLogin: mocks.loginCurrent,
+}));
 vi.mock("../src/worker/native-staff-onboarding-rate-limit", () => ({ consumeNativeStaffOnboardingRateLimit: mocks.rate }));
 vi.mock("../src/worker/viewer-processing", () => ({
   viewerAdminPermissions: mocks.permissions,
@@ -51,6 +59,7 @@ describe("Viewer no-opener workspace renewal transport", () => {
     mocks.rate.mockResolvedValue(true);
     mocks.permissions.mockResolvedValue(["viewer.projects.read", "viewer.shares.create"]);
     mocks.units.mockResolvedValue("imperial");
+    mocks.loginCurrent.mockResolvedValue(true);
     mocks.serviceCreate.mockResolvedValue({
       grant: "one-use-grant-token-1234567890", grantExpiresAt: new Date(Date.now() + 60_000).toISOString(),
       sessionTtlSeconds: 600, redeemUrl: `${viewerOrigin}/api/v1/admin-sessions/redeem`,
@@ -155,6 +164,32 @@ describe("Viewer no-opener workspace renewal transport", () => {
     const failed = await dispatchViewerWorkspaceRenewal(request("/api/viewer/workspace/session-renewal/challenge"), env);
     expect(failed.status).toBe(503);
     expect(mocks.serviceCreate).not.toHaveBeenCalled();
+  });
+
+  it.each(["before mint", "during mint"] as const)("does not return a Viewer capability when a linked credential is revoked %s", async phase => {
+    const expiresAt = Math.floor(Date.now() / 1000) + 600;
+    const linked: StaffPrincipal = { ...principal, accessExpiresAt: expiresAt, verifiedLogin: {
+      kind: "alternate", staffId: principal.id, canonicalEmail: principal.email, canonicalSubject: principal.accessSubject,
+      issuer: "https://synthetic-team.cloudflareaccess.com", email: "linked@example.test", subject: "access|linked",
+      expiresAt, bindingId: "12345678-1234-4234-9234-123456789abc", bindingVersion: 1, generation: 1,
+    } };
+    mocks.authenticate.mockResolvedValue({ principal: linked, expiresAt });
+    const challengeResponse = await dispatchViewerWorkspaceRenewal(request("/api/viewer/workspace/session-renewal/challenge"), env);
+    const challenge = await challengeResponse.json() as { challenge: string };
+    if (phase === "before mint") mocks.loginCurrent.mockResolvedValue(false);
+    else mocks.serviceCreate.mockImplementation(async () => {
+      mocks.loginCurrent.mockResolvedValue(false);
+      return { grant: "revoked-alias-grant-not-for-browser", grantExpiresAt: new Date(Date.now() + 60_000).toISOString(),
+        sessionTtlSeconds: 600, redeemUrl: `${viewerOrigin}/api/v1/admin-sessions/redeem` };
+    });
+    const requestId = crypto.randomUUID();
+    const denied = await dispatchViewerWorkspaceRenewal(request("/api/viewer/workspace/session-renewal", {
+      method: "POST", headers: { "Content-Type": "application/json", "Idempotency-Key": requestId, "X-CSRF-Token": challenge.challenge },
+      body: JSON.stringify({ protocolVersion: 1, requestId, sessionId: "viewer-session-correlation-01", subject: `ops:${principal.id}` }),
+    }), env);
+    expect(denied.status).toBe(403);
+    expect(await denied.text()).not.toContain("revoked-alias-grant-not-for-browser");
+    expect(mocks.serviceCreate).toHaveBeenCalledTimes(phase === "before mint" ? 0 : 1);
   });
 
   it("rejects malformed Viewer session correlation handles without treating them as authority", async () => {

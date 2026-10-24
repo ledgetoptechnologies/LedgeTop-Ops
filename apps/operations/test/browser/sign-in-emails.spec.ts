@@ -277,6 +277,10 @@ for (const [name, preview, heading, kept] of [
     await expect(page.getByRole("button", { name: "Link this email to this profile" })).toHaveCount(0);
     expect(seen.claims).toHaveLength(0);
     expect(await page.evaluate(() => sessionStorage.length)).toBe(kept ? 1 : 0);
+    if (heading === "We couldn't check this link") {
+      await expect(page.getByText("We couldn't confirm whether this email is linked. Check your connection and try again.")).toBeVisible();
+      await expect(page.getByText("Nothing has been linked.", { exact: false })).toHaveCount(0);
+    }
   });
 }
 
@@ -328,6 +332,7 @@ test("when this browser can't keep the link, signing out is stopped and the link
   await expect(page.getByRole("link", { name: "Sign in with a different email" })).toBeVisible();
   await page.getByRole("link", { name: "Sign in with a different email" }).click();
   await expect(page.getByRole("alert")).toContainText("This browser can't keep the link while you sign out.");
+  await expect(page.getByRole("button", { name: "Copy link" })).toBeVisible();
   expect(seen.logouts).toBe(0);
 });
 

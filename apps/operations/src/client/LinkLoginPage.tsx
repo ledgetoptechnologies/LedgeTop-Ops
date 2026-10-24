@@ -36,10 +36,13 @@ export function LinkLoginPage() {
   const [preview, setPreview] = useState<LoginLinkPreview | null>(null);
   const [message, setMessage] = useState<string | undefined>();
   const [checks, setChecks] = useState(0);
+  const [copyRecovery, setCopyRecovery] = useState(false);
+  const [copyMessage, setCopyMessage] = useState("");
   const claiming = useRef(false);
   const email = useAccessEmail(!!pending);
   const [signingOut, signOut] = useAccessSignOut(LINK_LOGIN_PATH, () => {
     if (pending && savePendingLoginLink(pending)) return true;
+    setCopyRecovery(true);
     setMessage("This browser can't keep the link while you sign out. Open the link again after you sign in with the email you're adding.");
     return false;
   });
@@ -70,11 +73,17 @@ export function LinkLoginPage() {
     void claimLoginLink(pending).then(result => { settle(result); setView(result.kind); }).finally(() => { claiming.current = false; });
   };
   const cancel = () => { if (signingOut) return; clearPendingLoginLink(); location.replace("/"); };
+  const copyLink = async () => {
+    if (!pending) return;
+    const link = `${location.origin}${LINK_LOGIN_PATH}#intent=${pending.intentId}&token=${pending.token}`;
+    try { await navigator.clipboard.writeText(link); setCopyMessage("Link copied. Keep it private and open it after signing in."); }
+    catch { setCopyMessage("Copy isn't available. Reopen the original verification link after signing in."); }
+  };
 
   const owner = preview ? `${preview.ownerDisplayName} (${preview.canonicalEmail})` : "";
   const copy: Record<View, [string, string]> = {
-    checking: ["Checking this link…", "This takes a moment. Nothing is linked yet."],
-    "check-failed": ["We couldn't check this link", "Nothing has been linked. Check your connection and try again."],
+    checking: ["Checking this link…", "Checking the profile and current link status."],
+    "check-failed": ["We couldn't check this link", "We couldn't confirm whether this email is linked. Check your connection and try again."],
     ready: [preview ? `Link ${preview.targetEmail} to ${preview.ownerDisplayName}’s Operations profile?` : "Link this email?",
       `It will sign in as ${owner} and get the same Operations permissions. The main email doesn't change.`],
     claiming: ["Linking this email…", "This takes a moment."],
@@ -107,9 +116,11 @@ export function LinkLoginPage() {
         {view === "check-failed" && <button type="button" className="button-orange" onClick={() => setChecks(value => value + 1)}>Try again</button>}
         {offerSignIn && <a className={`button ${view === "sign-in" ? "button-orange" : "button-ghost"}`} href={ACCESS_LOGOUT} onClick={signOut}
           aria-disabled={signingOut || undefined}>{signingOut ? "Signing out…" : "Sign in with a different email"}</a>}
+        {copyRecovery && pending && <button type="button" className="button-ghost" onClick={() => void copyLink()}>Copy link</button>}
         {pending && view !== "claiming" && view !== "checking" && <button type="button" className="button-ghost" disabled={signingOut} onClick={cancel}>Cancel</button>}
         {!pending && <a className={`button ${view === "linked" ? "button-orange" : "button-ghost"}`} href="/">Open Operations</a>}
       </div>
+      {copyMessage && <p role="status">{copyMessage}</p>}
     </div>
   </main>;
 }
