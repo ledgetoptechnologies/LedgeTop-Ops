@@ -13,6 +13,7 @@ import { CloudTransferDialog } from "./CloudTransferDialog";
 import { notifyCloudTransferOpener, parseCloudTransferCallback, type CloudTransferProvider, type CloudTransferScope } from "./cloud-transfer";
 import { constrainViewerOffset, pointerAnchoredOffset } from "./viewer-zoom";
 import { ImageLocationMap, type ImageLocationMapAsset } from "./ImageLocationMap";
+import { VideoPlayer } from "./VideoPlayer";
 
 type Gate = "landing" | "loading" | "code" | "ready" | "error";
 type ErrorView = "unavailable" | "invalid-link" | "expired" | "revoked" | "inactive";
@@ -703,7 +704,8 @@ function Preview({ item, items, publicId, namespace, onSelect, onClose }: { item
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if (["INPUT", "TEXTAREA", "SELECT"].includes((event.target as HTMLElement)?.tagName)) return;
-      if (event.key === "Escape") onClose();
+      if (event.key === "Escape" && !document.fullscreenElement) onClose();
+      if ((event.target as HTMLElement)?.closest?.("[data-video-player],video,audio,iframe")) return;
       if (event.key === "ArrowLeft" && previous) onSelect(previous);
       if (event.key === "ArrowRight" && next) onSelect(next);
     };
@@ -712,7 +714,7 @@ function Preview({ item, items, publicId, namespace, onSelect, onClose }: { item
   }, [next, onClose, onSelect, previous]);
   return <div className="preview-backdrop" onPointerDown={event => { if (event.currentTarget === event.target) onClose(); }}><section ref={dialog} tabIndex={-1} className="preview-dialog" role="dialog" aria-modal="true" aria-label={`Preview ${item.name}`} onKeyDown={event => {
     if (event.key !== "Tab") return;
-    const focusable = Array.from(event.currentTarget.querySelectorAll<HTMLElement>('a[href],button:not([disabled]),audio[controls],video[controls],[tabindex]:not([tabindex="-1"])'));
+    const focusable = Array.from(event.currentTarget.querySelectorAll<HTMLElement>('a[href],button:not([disabled]),input:not([disabled]),audio[controls],video[controls],[tabindex]:not([tabindex="-1"])'));
     if (!focusable.length) { event.preventDefault(); return; }
     const first = focusable[0]!, last = focusable[focusable.length - 1]!;
     if (event.shiftKey && (document.activeElement === first || document.activeElement === event.currentTarget)) { event.preventDefault(); last.focus(); }
@@ -800,15 +802,13 @@ function VideoPreview({ item, publicId, namespace }: { item: DeliveryItem; publi
   const [loading, setLoading] = useState(true); const [ticketLoading, setTicketLoading] = useState(item.previewStatus === "ready");
   const [streamUrl, setStreamUrl] = useState<string | null>(null);
   useEffect(() => { let cancelled = false; if (item.previewStatus !== "ready") { setTicketLoading(false); return () => { cancelled = true; }; } requestJson<{ streamUrl?: string; url?: string }>(`${deliveryApiBase(publicId, namespace)}/items/${encodeURIComponent(item.id)}/stream-ticket`, { method: "POST" }).then(result => { if (!cancelled) setStreamUrl(result.streamUrl || result.url || null); }).catch(() => { if (!cancelled) setStreamUrl(null); }).finally(() => { if (!cancelled) setTicketLoading(false); }); return () => { cancelled = true; }; }, [item.id, item.previewStatus, namespace, publicId]);
-  if (streamUrl) return <div className="video-preview">{loading && <span className="media-status">Opening video preview…</span>}<iframe src={streamUrl} title={item.name} onLoad={() => setLoading(false)} allow="accelerometer; gyroscope; autoplay; encrypted-media; picture-in-picture" allowFullScreen /></div>;
+  if (streamUrl) return <div className="video-preview">{loading && <span className="media-status">Opening video preview…</span>}<iframe src={streamUrl} title={item.name} onLoad={() => setLoading(false)} allow="accelerometer; gyroscope; autoplay; encrypted-media; picture-in-picture; fullscreen" allowFullScreen /></div>;
   if (ticketLoading) return <div className="video-preview" aria-busy="true"><SkeletonViewer /><span className="media-status">Opening video preview…</span></div>;
   return item.sourceUrl ? <OriginalVideo item={item} /> : <PreparedPlaceholder item={item} />;
 }
 
 function OriginalVideo({ item }: { item: DeliveryItem }) {
-  const [loading, setLoading] = useState(true); const [failed, setFailed] = useState(false);
-  if (failed) return <PreparedPlaceholder item={item} />;
-  return <div className="video-preview" aria-busy={loading}>{loading && <><SkeletonViewer /><span className="media-status">Opening original video…</span></>}<video src={item.sourceUrl} controls autoPlay muted playsInline preload="metadata" onLoadedMetadata={() => setLoading(false)} onError={() => setFailed(true)} /></div>;
+  return <div className="video-preview"><VideoPlayer src={item.sourceUrl!} name={item.name} /></div>;
 }
 
 function Thumbnail({ item }: { item: DeliveryItem }) {
