@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import vm from 'node:vm';
 import { readFileSync } from 'node:fs';
+import * as directClientShare from '../workspace-direct-client-share.mjs';
 
 const source=readFileSync(new URL('../workspace-projects.js',import.meta.url),'utf8');
 test('public and authenticated client sharing forms constrain intrinsic input widths',()=>{
@@ -21,14 +22,14 @@ function declaration(name){
   return next?rest.slice(0,next.index):rest;
 }
 const names=['clientAccessDiagnostic','canShareOutput','openShareModal','associationModelId','associationProjectId','portalAccountId',
-  'clientProjectKey','clientProjectLabel','clientAccessSnapshot','exactClientAssociations','clientGrantBody','clientSharePanel','clientShareCard','rememberShareResult','clearShareResult','visibleShareResult','shareModal','confirmSharedVersionUpdate',
+  'clientProjectKey','clientProjectLabel','clientAccessSnapshot','exactClientAssociations','clientGrantBody','clientSharePanel','clientShareCard','directShareContext','directClientShareCard','rerenderClientSharePanel','bindDirectShare','rememberShareResult','clearShareResult','visibleShareResult','shareModal','confirmSharedVersionUpdate',
   'createOutputShare','clientGrantRevocationMessage','bindShareModal','bindProjectShareCard','shareViewLabels','availableShareViews','shareViewControls','bindShareViewControls','selectedShareViews','shareSettingsSummary','shareExpiryInput','editShareModal','retrieveShareLink'];
 function fixture(permissions=['viewer.shares.read','viewer.shares.create','viewer.shares.revoke','viewer.processing.publish','viewer.client_grants.manage']){
   const output={id:'output',modelId:'model',projectId:'project',taskId:'task',attemptId:'attempt',status:'ready',activePublished:false,assetKinds:['glb']};
   const state={token:'signed-in',projects:[{id:'project',displayName:'Site'}],tasks:[{id:'task',projectId:'project'}],outputs:[output],
     shares:{},sharePreflight:{},projectShares:{},clientAccess:{projects:[],associations:[],grants:[]},shareContext:{id:'context'},lastShareUrl:null};
   const calls=[],notices=[],rendered=[],decisions=[],copyButtons=[];
-  let nativeRespond=async()=>({targets:[],grants:[]});
+  let nativeRespond=async()=>({targets:[],grants:[]}),directRespond=async()=>{throw Object.assign(new Error('Not found'),{status:404})};
   let sequence=0,respond=async(path,options)=>options.method==='POST'
     ?{share:{id:'share',permissions:{view:true,download:false}},viewUrl:'https://viewer.test/view/capability'}
     :path.endsWith('/client-grants')?state.clientAccess:{shares:[],publicationRequired:true,existingAccessUpdateRequired:false,eligibleAssetKinds:['glb']};
@@ -37,13 +38,13 @@ function fixture(permissions=['viewer.shares.read','viewer.shares.create','viewe
     querySelectorAll:selector=>selector==='[data-action="copy-share"]'?copyButtons:[],
   };
   const esc=value=>String(value??'').replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('"','&quot;');
-  const context=vm.createContext({state,modal,modalContent,crypto:{randomUUID:()=>`request-${++sequence}`},
+  const context=vm.createContext({...directClientShare,state,modal,modalContent,crypto:{randomUUID:()=>`request-${++sequence}`},
     can:permission=>permissions.includes(permission),esc,dateTime:value=>value,card:(title,body)=>`<section><h3>${esc(title)}</h3>${body}</section>`,
     empty:text=>`<p>${esc(text)}</p>`,field:(label,name,attrs='')=>`<label>${esc(label)}<input name="${name}" ${attrs}></label>`,
     badge:value=>`<span>${esc(value)}</span>`,button:(action,id,label)=>`<button data-action="${action}" data-id="${id}">${label}</button>`,
     openModal:(title,html)=>{rendered.push({title,html});modal.open=true},injectProjectShareCard:()=>{},
     values:form=>({label:form.elements.label?.value||'',password:form.elements.password?.value||'',expiresAt:form.elements.expiresAt.value}),
-    api:async(path,options={})=>{calls.push({path,options:JSON.parse(JSON.stringify(options))});return path.endsWith('/native-client-grants')?nativeRespond(path,options):respond(path,options)},
+    api:async(path,options={})=>{calls.push({path,options:JSON.parse(JSON.stringify(options))});return path.startsWith('/api/v1/workspace/direct-client-grants')?directRespond(path,options):path.endsWith('/native-client-grants')?nativeRespond(path,options):respond(path,options)},
     mutate:async(...args)=>calls.push({mutation:args}),toast:(...args)=>notices.push(args),navigator:{clipboard:{writeText:async()=>{throw new Error('clipboard denied')}}},
     dialogs:{confirm:async()=>{decisions.push('confirm');return true},form:async()=>null},
   });
@@ -52,7 +53,7 @@ function fixture(permissions=['viewer.shares.read','viewer.shares.create','viewe
     measure:{checked:true},cameras:{checked:true},download:{checked:false}},button:{disabled:false},querySelector(){return this.button},
     querySelectorAll(selector){return selector==='input[name="allowedViews"]'?[{checked:true,value:'model'}]:[]}};
   return {context,state,output,calls,notices,rendered,decisions,modal,modalContent,clientPanel,form,copyButtons,
-    respond(fn){respond=fn},respondNative(fn){nativeRespond=fn},html:()=>rendered.at(-1)?.html||''};
+    respond(fn){respond=fn},respondNative(fn){nativeRespond=fn},respondDirect(fn){directRespond=fn},html:()=>rendered.at(-1)?.html||''};
 }
 
 test('ready share preflight and cancel execute only reads and never reopen a closed modal',async()=>{
@@ -510,4 +511,19 @@ test('native revocation reports validated open-session lifetime and preserves le
   assert.match(f.context.clientGrantRevocationMessage({existingSessionsExpireWithinSeconds:'1800'},true),/until they expire/);
   assert.match(f.context.clientGrantRevocationMessage({sessionRevocation:{pending:true}},false),/existing sessions is pending/);
   assert.equal(f.context.clientGrantRevocationMessage({sessionRevocation:{pending:false}},false),'Client access revoked');
+});
+
+test('direct client sharing leads the Share dialog and keeps Operations project sharing available',async()=>{
+  const f=fixture();f.output.status='published';f.output.activePublished=true;
+  f.respondDirect(async path=>{assert.match(path,/viewerProjectId=project/);return {clients:[{sourceId:'s',workspaceId:'w',displayName:'Acme',businessName:null}],grants:[],clientsNextCursor:null}});
+  await f.context.openShareModal('project');await new Promise(resolve=>setImmediate(resolve));
+  const html=f.html()+f.clientPanel.innerHTML;
+  assert.match(html,/Share with a client/);assert.match(html,/Share through an Operations project instead/);
+  assert.match(html,/The whole project, including tasks published later/);
+  assert.equal(f.calls.some(call=>call.options.method==='POST'),false);
+});
+test('without direct client sharing the Share dialog is unchanged',async()=>{
+  const f=fixture();await f.context.openShareModal('project');await new Promise(resolve=>setImmediate(resolve));
+  const html=f.html()+f.clientPanel.innerHTML;
+  assert.doesNotMatch(html,/Share with a client|Share through an Operations project instead/);
 });
