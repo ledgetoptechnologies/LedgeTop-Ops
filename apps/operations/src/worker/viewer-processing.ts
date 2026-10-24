@@ -12,6 +12,8 @@ import { sendAdminAlert } from "./alerts";
 import { sendNotificationMail } from "./mailer";
 import type { Env, StaffPrincipal } from "./types";
 import { introspectClientViewerSourceAuthorization } from "./viewer-session-issuer";
+import {createDirectViewerClientGrant,listDirectViewerClientGrantWorkspace,revokeDirectViewerClientGrant,
+ directViewerClientGrantListQuerySchema,DirectViewerGrantError} from './viewer-direct-client-grants';
 import {
   createNativeViewerClientGrant,
   listNativeViewerClientGrantWorkspace,
@@ -398,12 +400,15 @@ export function registerViewerProcessingRoutes(app: ViewerApp): void {
     const envelopeSchema = z.object({
       subject: z.string().regex(/^ops:[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/),
       action: z.enum(["list", "create", "revoke"]),
-      connection: z.literal("native").optional(),
+      connection: z.enum(["native","direct"]).optional(),
+      listQuery: directViewerClientGrantListQuerySchema.optional(),
       idempotencyKey: idempotencyKey.optional(),
       grant: z.unknown().optional(),
       grantId: opaqueId.optional(),
       reason: z.string().trim().min(1).max(240).optional(),
     }).strict().superRefine((value, context) => {
+      if(value.listQuery && (value.connection!=='direct'||value.action!=='list'))
+        context.addIssue({code:'custom',message:'List query is only valid for direct grant listing'});
       if (value.action === "list" && (value.idempotencyKey || value.grant || value.grantId || value.reason))
         context.addIssue({ code: "custom", message: "List does not accept mutation fields" });
       if (value.action === "create" && (!value.idempotencyKey || !value.grant || value.grantId || value.reason))
@@ -427,6 +432,20 @@ export function registerViewerProcessingRoutes(app: ViewerApp): void {
       id: row.id, email: row.email, displayName: row.display_name,
       accessSubject: row.access_subject, projectAlphaUserId: row.project_alpha_user_id,
     };
+    if (parsed.data.connection === "direct") {
+      try {
+        if(parsed.data.action==='list')return c.json(await listDirectViewerClientGrantWorkspace(c.env,principal,parsed.data.listQuery));
+        if(parsed.data.action==='create'){
+          const result=await createDirectViewerClientGrant({env:c.env,principal,grant:parsed.data.grant,
+            idempotencyKey:parsed.data.idempotencyKey!,request:c.req.raw});
+          return c.json(result,result.replayed?200:201);
+        }
+        const result=await revokeDirectViewerClientGrant({env:c.env,principal,grantId:parsed.data.grantId!,
+          reason:parsed.data.reason!,idempotencyKey:parsed.data.idempotencyKey!,request:c.req.raw});
+        return c.json(result,result.sessionRevocation.pending?202:200);
+      }catch(error){if(error instanceof DirectViewerGrantError)return c.json({error:error.message,code:error.code,
+        ...(error.grantId?{grantId:error.grantId}:{})},error.status);throw error;}
+    }
     if (parsed.data.connection === "native") {
       if (parsed.data.action === "list") return c.json(await listNativeViewerClientGrantWorkspace(c.env, principal));
       const result = parsed.data.action === "create"

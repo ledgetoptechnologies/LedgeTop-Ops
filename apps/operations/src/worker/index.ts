@@ -278,6 +278,9 @@ import {
   registerViewerIntegrationRoutes,
   viewerIntegrationEnabled,
 } from "./viewer-integration";
+import { registerDirectViewerClientRoutes } from "./viewer-direct-client-routes";
+import { drainDirectViewerClientGrantRevocations } from "./viewer-direct-client-grants";
+import { pruneDirectViewerSessionIntents } from "./viewer-direct-client-session-issuer";
 import {
   registerViewerProcessingRoutes,
   processViewerProcessingNotifications,
@@ -1814,6 +1817,7 @@ registerNativeDeliveryBindingRoutes(app);
 registerInvitationReviewRoutes(app);
 registerClientFeedbackRoutes(app);
 registerViewerIntegrationRoutes(app);
+registerDirectViewerClientRoutes(app);
 registerViewerProcessingRoutes(app);
 app.post("/api/internal/project-alpha/delivery-intents/preflight", handleProjectAlphaDeliveryPreflight);
 app.post("/api/internal/project-alpha/delivery-intents", handleProjectAlphaDeliveryIntent);
@@ -3750,6 +3754,10 @@ async function scheduled(
   ctx.waitUntil(pruneClientViewerShareReceipts(env));
   ctx.waitUntil(pruneViewerSessionIssuanceReceipts(env));
   ctx.waitUntil(drainViewerSessionRevocations(env));
+  if (env.CLIENT_VIEWER_SESSION_ISSUER_ENABLED === "true") {
+    ctx.waitUntil(drainDirectViewerClientGrantRevocations(env));
+    ctx.waitUntil(pruneDirectViewerSessionIntents(env));
+  }
 }
 async function fetch(
   request: Request,

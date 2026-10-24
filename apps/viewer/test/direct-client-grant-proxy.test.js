@@ -68,4 +68,3 @@ test('direct known bounded rejection is preserved while unstructured upstream er
   const response = await request(); assert.equal(response.status, 409);
   assert.deepEqual(await response.json(), { error: rejection.error, code: rejection.code });
 });
-

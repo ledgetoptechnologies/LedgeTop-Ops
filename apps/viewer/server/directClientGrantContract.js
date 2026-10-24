@@ -23,7 +23,7 @@ function validDirectGrant(value) {
   return exact(value, ['grantId', 'sourceId', 'workspaceId', 'viewerProjectId', 'taskId', 'scopeType', 'includeFuturePublished', 'permissions', 'expiresAt',
     'grantVersion', 'revokedAt', 'clientDisplayName', 'createdAt', 'createdBy'])
     && id(value.grantId) && grantScope(value) && Number.isSafeInteger(value.grantVersion) && value.grantVersion > 0
-    && date(value.revokedAt) && text(value.clientDisplayName) && value.createdAt !== null && date(value.createdAt)
+    && date(value.revokedAt) && (value.clientDisplayName === null || text(value.clientDisplayName)) && value.createdAt !== null && date(value.createdAt)
     && (value.createdBy === undefined || text(value.createdBy));
 }
 function validDirectSnapshot(value, action) {

@@ -118,7 +118,8 @@ function createClientGrantProxy({ config, authorize, fetchImpl = fetch, diagnost
           && typeof payload.code === 'string' && /^[a-z][a-z0-9_]{0,79}$/.test(payload.code)
           && typeof payload.error === 'string' && payload.error.length > 0 && payload.error.length <= 500
           && !/[\u0000-\u001f\u007f]/.test(payload.error))
-          return res.status(status).json({ error: payload.error, code: payload.code });
+          return res.status(status).json({ error: payload.error, code: payload.code,
+            ...(typeof payload.grantId === 'string' && ID.test(payload.grantId) ? { grantId: payload.grantId } : {}) });
         return res.status(status).json({ error: 'Operations rejected the client access request', code: 'operations_request_failed' });
       }
       stage = 'response_schema';
