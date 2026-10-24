@@ -104,8 +104,8 @@ type DirectTaskSession = PortalViewerSession & { modelId: string };
 function DirectTaskViewerShell({ route }: { route: Extract<ClientViewerShellRoute, { mode: "direct" }> }) {
   const [first, setFirst] = useState<DirectTaskSession | null>(null);
   const [error, setError] = useState("");
-  // An ambiguous failure (network, 5xx) keeps its key so a retry cannot mint a second session; a definitive
-  // rejection (4xx) can never succeed with that key, so the retry starts a fresh request.
+  // An ambiguous failure (network, 5xx, or a success response that failed verification) keeps its key so a retry
+  // cannot mint a second session; a definitive HTTP rejection (4xx) can never succeed with that key, so Retry starts fresh.
   const pendingKey = useRef<string | null>(null), inflight = useRef<Promise<void> | null>(null), handedOff = useRef<DirectTaskSession | null>(null);
   const issue = useCallback((key: string) => openNativeViewerTaskSession(route.workspaceId, route.grantId, route.taskId, readClientViewerUnits(), key), [route.workspaceId, route.grantId, route.taskId]);
   const start = useCallback(() => {
@@ -113,7 +113,8 @@ function DirectTaskViewerShell({ route }: { route: Extract<ClientViewerShellRout
     setError("");
     const key = pendingKey.current ?? crypto.randomUUID(); pendingKey.current = key;
     const request = issue(key).then(session => { pendingKey.current = null; handedOff.current = session; setFirst(session); },
-      caught => { const status = (caught as { status?: number }).status ?? 0; if (status >= 400 && status < 500) pendingKey.current = null;
+      caught => { const failure = caught as { status?: number; responseInvalid?: boolean }, status = failure.status ?? 0;
+        if (status >= 400 && status < 500 && !failure.responseInvalid) pendingKey.current = null;
         setError(caught instanceof Error ? caught.message : "3D Viewer authorization is temporarily unavailable"); })
       .finally(() => { inflight.current = null; });
     inflight.current = request;
