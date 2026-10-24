@@ -1,10 +1,12 @@
 import type { AuthenticatedNativeStaffWithAdmissionVersion } from './native-staff-auth';
 import { isNativeAccessSubject } from './native-access-subject';
+import { assertCurrentStaffLogin, snapshotStaffLoginProof, type StaffLoginProof } from './staff-login-bindings';
 
 export type EmployeeReadAuthority = Readonly<{
   gatewayId: string; rootId: string; rootGeneration: number; rootFingerprint: string;
   staffId: string; accessSubject: string; admissionVersion: number; profileVersion: number;
   grantId: string; grantGeneration: number; verifiedUntil: string;
+  verifiedLogin?: StaffLoginProof;
 }>;
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
@@ -25,12 +27,29 @@ function validUntil(value: unknown): value is string {
     && Number.isFinite(Date.parse(value)) && new Date(value).toISOString() === value && Date.parse(value) > Date.now();
 }
 function validProof(value: unknown): value is EmployeeReadAuthority {
-  return exact(value, keys) && typeof value.gatewayId === 'string' && UUID.test(value.gatewayId)
+  const fields = value && typeof value === 'object' && Object.hasOwn(value, 'verifiedLogin') ? [...keys, 'verifiedLogin'] : keys;
+  if (!exact(value, fields)) return false;
+  const login = Object.hasOwn(value, 'verifiedLogin') ? snapshotStaffLoginProof(value.verifiedLogin) : undefined;
+  return (login === undefined || !!login && login.kind === 'alternate' && login.staffId === value.staffId
+      && login.canonicalSubject === value.accessSubject && login.expiresAt * 1000 >= Date.parse(String(value.verifiedUntil)))
+    && typeof value.gatewayId === 'string' && UUID.test(value.gatewayId)
     && typeof value.rootId === 'string' && UUID.test(value.rootId) && positive(value.rootGeneration)
     && typeof value.rootFingerprint === 'string' && SHA256.test(value.rootFingerprint)
     && typeof value.staffId === 'string' && STAFF.test(value.staffId) && isNativeAccessSubject(value.accessSubject)
     && positive(value.admissionVersion) && positive(value.profileVersion) && typeof value.grantId === 'string' && UUID.test(value.grantId)
     && positive(value.grantGeneration) && validUntil(value.verifiedUntil);
+}
+
+function exactAuthenticated(value: unknown): value is AuthenticatedNativeStaffWithAdmissionVersion {
+  const fields = value && typeof value === 'object' && Object.hasOwn(value, 'verifiedLogin')
+    ? ['identity', 'verifiedUntil', 'admissionVersion', 'verifiedLogin'] : ['identity', 'verifiedUntil', 'admissionVersion'];
+  if (!exact(value, fields)
+    || !exact(value.identity, ['kind', 'staffId', 'verifiedAccessSubject', 'email', 'displayName', 'profileVersion'])) return false;
+  if (!Object.hasOwn(value, 'verifiedLogin')) return true;
+  const login = snapshotStaffLoginProof(value.verifiedLogin);
+  return !!login && login.kind === 'alternate' && login.staffId === value.identity.staffId
+    && login.canonicalEmail === value.identity.email && login.canonicalSubject === value.identity.verifiedAccessSubject
+    && login.expiresAt * 1000 >= Date.parse(String(value.verifiedUntil));
 }
 
 type Row = EmployeeReadAuthority & { email: string; expiresAt: number };
@@ -57,8 +76,7 @@ export async function resolveEmployeeReadAuthority(database: D1Database,
   authenticated: AuthenticatedNativeStaffWithAdmissionVersion, rootId: string, exactGrantId?: string): Promise<EmployeeReadAuthority | null> {
   try {
     if (typeof rootId !== 'string' || !UUID.test(rootId) || (exactGrantId !== undefined && (typeof exactGrantId !== 'string' || !UUID.test(exactGrantId)))
-      || !exact(authenticated, ['identity', 'verifiedUntil', 'admissionVersion'])
-      || !exact(authenticated.identity, ['kind', 'staffId', 'verifiedAccessSubject', 'email', 'displayName', 'profileVersion'])) return null;
+      || !exactAuthenticated(authenticated)) return null;
     const identity = authenticated.identity;
     if (identity.kind !== 'native' || typeof identity.staffId !== 'string' || !STAFF.test(identity.staffId)
       || !isNativeAccessSubject(identity.verifiedAccessSubject) || !positive(identity.profileVersion)
@@ -66,16 +84,20 @@ export async function resolveEmployeeReadAuthority(database: D1Database,
       || typeof identity.email !== 'string' || identity.email !== identity.email.trim().toLowerCase()
       || !/^[^\s@]+@[^\s@]+$/u.test(identity.email) || /\p{C}/u.test(identity.email)) return null;
     // Trusted input may be mutable test/caller data: capture it before any await.
+    const login = authenticated.verifiedLogin ? snapshotStaffLoginProof(authenticated.verifiedLogin)! : undefined;
     const input = Object.freeze({ rootId, staffId: identity.staffId, accessSubject: identity.verifiedAccessSubject,
       admissionVersion: authenticated.admissionVersion, profileVersion: identity.profileVersion, email: identity.email, verifiedUntil: authenticated.verifiedUntil });
+    if (login && !await assertCurrentStaffLogin(database, login)) return null;
     const row = await database.withSession('first-primary').prepare(query + (exactGrantId === undefined ? '' : ' AND allowed.grant_id=?') + ' ORDER BY allowed.grant_id LIMIT 1')
       .bind(input.rootId, input.staffId, input.accessSubject, input.admissionVersion, input.profileVersion, ...(exactGrantId === undefined ? [] : [exactGrantId])).first<Row>();
     if (!row || row.email !== input.email || !positive(row.expiresAt) || row.expiresAt > 253402300799) return null;
     const proof = Object.freeze({ gatewayId: row.gatewayId, rootId: row.rootId, rootGeneration: row.rootGeneration, rootFingerprint: row.rootFingerprint,
       staffId: row.staffId, accessSubject: row.accessSubject, admissionVersion: row.admissionVersion, profileVersion: row.profileVersion,
       grantId: row.grantId, grantGeneration: row.grantGeneration,
-      verifiedUntil: new Date(Math.min(Date.parse(input.verifiedUntil), row.expiresAt * 1000)).toISOString() });
-    return validProof(proof) && validUntil(input.verifiedUntil) ? proof : null;
+      verifiedUntil: new Date(Math.min(Date.parse(input.verifiedUntil), row.expiresAt * 1000)).toISOString(),
+      ...(login ? { verifiedLogin: login } : {}) });
+    return validProof(proof) && validUntil(input.verifiedUntil)
+      && (!login || await assertCurrentStaffLogin(database, login)) ? proof : null;
   } catch { return null; }
 }
 
@@ -84,11 +106,14 @@ export async function resolveEmployeeReadAuthority(database: D1Database,
 export async function recheckEmployeeReadAuthority(database: D1Database, proof: EmployeeReadAuthority): Promise<boolean> {
   try {
     if (!validProof(proof)) return false;
-    const input = Object.freeze({ ...proof });
+    const login = proof.verifiedLogin ? snapshotStaffLoginProof(proof.verifiedLogin)! : undefined;
+    const input = Object.freeze({ ...proof, ...(login ? { verifiedLogin: login } : {}) });
+    if (login && !await assertCurrentStaffLogin(database, login)) return false;
     const row = await database.withSession('first-primary').prepare(query + ' AND allowed.grant_id=? AND allowed.grant_generation=? LIMIT 1')
       .bind(input.rootId, input.staffId, input.accessSubject, input.admissionVersion, input.profileVersion, input.grantId, input.grantGeneration).first<Row>();
     return !!row && row.gatewayId === input.gatewayId && row.rootGeneration === input.rootGeneration
-      && row.rootFingerprint === input.rootFingerprint && positive(row.expiresAt) && row.expiresAt * 1000 > Date.now() && validUntil(input.verifiedUntil);
+      && row.rootFingerprint === input.rootFingerprint && positive(row.expiresAt) && row.expiresAt * 1000 > Date.now() && validUntil(input.verifiedUntil)
+      && (!login || await assertCurrentStaffLogin(database, login));
   } catch { return false; }
 }
 
@@ -98,10 +123,10 @@ export async function recheckEmployeeReadAuthority(database: D1Database, proof: 
 export async function listEmployeeReadRoots(database: D1Database,
   authenticated: AuthenticatedNativeStaffWithAdmissionVersion): Promise<readonly Readonly<{ rootId: string; gatewayId: string; displayName: string }>[] | null> {
   try {
-    if (!exact(authenticated, ['identity', 'verifiedUntil', 'admissionVersion'])
-      || !exact(authenticated.identity, ['kind', 'staffId', 'verifiedAccessSubject', 'email', 'displayName', 'profileVersion'])) return null;
+    if (!exactAuthenticated(authenticated)) return null;
     const identity = Object.freeze({ ...authenticated.identity });
-    const input = Object.freeze({ ...authenticated, identity });
+    const login = authenticated.verifiedLogin ? snapshotStaffLoginProof(authenticated.verifiedLogin)! : undefined;
+    const input = Object.freeze({ ...authenticated, identity, ...(login ? { verifiedLogin: login } : {}) });
     if (identity.kind !== 'native' || typeof identity.staffId !== 'string' || !STAFF.test(identity.staffId)
       || !isNativeAccessSubject(identity.verifiedAccessSubject) || !positive(identity.profileVersion)
       || !positive(input.admissionVersion) || !validUntil(input.verifiedUntil)
@@ -113,6 +138,7 @@ export async function listEmployeeReadRoots(database: D1Database,
       WHERE profile.staff_id=? AND profile.version=? AND profile.login_email=? AND admission.active=1
         AND admission.bound_access_subject=? AND admission.version=?`)
       .bind(identity.staffId, identity.profileVersion, identity.email, identity.verifiedAccessSubject, input.admissionVersion).first<{ id: string }>();
+    if (login && !await assertCurrentStaffLogin(database, login)) return null;
     if (!await currentIdentity() || !validUntil(input.verifiedUntil)) return null;
     const result = await database.withSession('first-primary').prepare(`SELECT DISTINCT root.root_id rootId
       FROM ops_employee_read_grants allowed JOIN ops_employee_read_roots root ON root.root_id=allowed.root_id
@@ -144,7 +170,8 @@ export async function listEmployeeReadRoots(database: D1Database,
     for (const proof of proofs) if (!await recheckEmployeeReadAuthority(database, proof)) return null;
     // Even an empty listing must distinguish no grants from a session whose
     // native admission/profile changed while the candidate read was pending.
-    if (!await currentIdentity() || !validUntil(input.verifiedUntil)) return null;
+    if (!await currentIdentity() || !validUntil(input.verifiedUntil)
+      || login && !await assertCurrentStaffLogin(database, login)) return null;
     return Object.freeze(roots);
   } catch { return null; }
 }

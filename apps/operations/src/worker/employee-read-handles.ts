@@ -2,6 +2,7 @@ import { z } from "zod";
 import { canonicalEmployeeReadPath, type EmployeeReadProof } from "./employee-read-transport";
 import { isNativeAccessSubject } from "./native-access-subject";
 import { parseDuplicateFreeJson } from "./bounded-json";
+import { snapshotStaffLoginProof } from "./staff-login-bindings";
 
 const encoder = new TextEncoder(), PREFIX = "eof1_", MAX = 16_384;
 const uuid = z.string().regex(/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u);
@@ -19,6 +20,26 @@ const schema = z.object({ v: z.literal(1), proof: proofSchema, path: z.string().
 
 export type EmployeeFileHandle = z.infer<typeof schema>;
 export type EmployeeHandleContext = Readonly<{ opsOrigin: string; issuer: string; audience: string; key: Uint8Array }>;
+
+/** Login provenance stays on the server's current authority, not inside the
+ * reusable encrypted selector. Only the known, validated alternate context may
+ * be projected away; every other unknown field retains the strict rejection. */
+function selectorProof(value: unknown): z.infer<typeof proofSchema> {
+  if (!value || typeof value !== "object" || !Object.hasOwn(value, "verifiedLogin")) return proofSchema.parse(value);
+  const canonical: Record<string, unknown> = Object.create(null);
+  let loginValue: unknown;
+  for (const key of Reflect.ownKeys(value)) {
+    if (typeof key !== "string") throw Error("employee_handle_invalid");
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (!descriptor?.enumerable || !("value" in descriptor)) throw Error("employee_handle_invalid");
+    if (key === "verifiedLogin") loginValue = descriptor.value; else canonical[key] = descriptor.value;
+  }
+  const login = snapshotStaffLoginProof(loginValue), proof = proofSchema.parse(canonical);
+  if (!login || login.kind !== "alternate" || login.staffId !== proof.staffId
+    || login.canonicalSubject !== proof.accessSubject || login.expiresAt * 1000 < Date.parse(proof.verifiedUntil))
+    throw Error("employee_handle_invalid");
+  return proof;
+}
 
 /** Snapshot deployment context before any asynchronous cryptographic operation. */
 export function employeeHandleContext(input: EmployeeHandleContext): EmployeeHandleContext {
@@ -47,7 +68,7 @@ function base64(bytes: Uint8Array): string {
 
 /** Encrypted selector only: every read still requires fresh native authority. */
 export async function encodeEmployeeFileHandle(inputContext: EmployeeHandleContext, input: EmployeeFileHandle): Promise<string> {
-  const context = employeeHandleContext(inputContext), value = schema.parse(input), bytes = encoder.encode(JSON.stringify(value));
+  const context = employeeHandleContext(inputContext), value = schema.parse({ ...input, proof: selectorProof(input.proof) }), bytes = encoder.encode(JSON.stringify(value));
   if (bytes.length > 12_000) throw Error("employee_handle_invalid");
   const iv = crypto.getRandomValues(new Uint8Array(12));
   const encrypted = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv, additionalData: aad(context) }, await subkey(context, "encryption"), bytes));
@@ -75,7 +96,7 @@ export function employeeFileProofMatches(handle: EmployeeFileHandle, current: Em
 }
 /** Stable across prepared-copy renewal and profile edits; never a storage key or grant. */
 export async function employeeLogicalFileId(inputContext: EmployeeHandleContext, proof: EmployeeReadProof, path: string): Promise<string> {
-  const context = employeeHandleContext(inputContext), p = proofSchema.parse(proof);
+  const context = employeeHandleContext(inputContext), p = selectorProof(proof);
   if (!canonicalEmployeeReadPath(path, false)) throw Error("employee_handle_invalid");
   const material = encoder.encode(JSON.stringify(["ops-employee-logical-file-v1", p.gatewayId, p.rootId, p.rootGeneration,
     p.rootFingerprint, p.staffId, p.accessSubject, p.admissionVersion, p.grantId, p.grantGeneration, path]));

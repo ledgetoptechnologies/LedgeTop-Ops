@@ -1,6 +1,7 @@
 import { projectedPrincipalIdentitySql } from '../../../../packages/shared/src/projected-principal-identity';
 import { folderOwnerEntityType,folderOwnerEntityTypeSql } from '../../../../packages/shared/src/folder-owner-entity';
 import { HTTPException } from "hono/http-exception";
+import { requireCurrentStaffLogin } from './auth';
 import { projectAccessCapacitySql } from '../../../client/src/worker/client-portal/project-access-capacity';
 import { requirePermission } from "./acl";
 import { normalizePrefix, resolveDivisionAssociation } from "./delivery";
@@ -362,20 +363,24 @@ async function readPrimaryProof(env:Env,input:string){
   return value;
 }
 async function primaryOpsProof(env:Env,principal:StaffPrincipal,context:BindingContext){
+  await requireCurrentStaffLogin(env,principal);
   await requirePermission(env,principal,'delivery.share.create',{divisionId:context.divisionId},true);
   const owner=await primaryProjectOwner(env,context);
   const actor=await env.OPS_DB.withSession('first-primary').prepare(`SELECT id,status,access_subject FROM staff_users WHERE id=? AND status='active' AND access_subject IS ?`)
     .bind(principal.id,principal.accessSubject).first();
   if(!owner||!actor)throw new HTTPException(404,{message:'Exact primary project ownership is unavailable'});
-  return {owner,json:JSON.stringify([owner,actor])};
+  await requireCurrentStaffLogin(env,principal);
+  return {owner,json:JSON.stringify(principal.verifiedLogin?[owner,actor,principal.verifiedLogin.bindingId,principal.verifiedLogin.bindingVersion,principal.verifiedLogin.generation]:[owner,actor])};
 }
 async function legacyOpsProof(env:Env,principal:StaffPrincipal,context:BindingContext){
+  await requireCurrentStaffLogin(env,principal);
   await requirePermission(env,principal,'delivery.share.create',{divisionId:context.divisionId},true);
   const current=await bindingContext(env,context.id);
   const actor=await env.OPS_DB.withSession('first-primary').prepare(`SELECT id,status,access_subject FROM staff_users WHERE id=? AND status='active' AND access_subject IS ?`)
     .bind(principal.id,principal.accessSubject).first();
   if(!actor||JSON.stringify(current)!==JSON.stringify(context))throw new HTTPException(409,{message:'Grant context changed; review again'});
-  return {json:JSON.stringify([current,actor])};
+  await requireCurrentStaffLogin(env,principal);
+  return {json:JSON.stringify(principal.verifiedLogin?[current,actor,principal.verifiedLogin.bindingId,principal.verifiedLogin.bindingVersion,principal.verifiedLogin.generation]:[current,actor])};
 }
 async function reviewOpsProof(env:Env,principal:StaffPrincipal,context:BindingContext,terms:ProjectAccessTermsInput|null){
   return terms?primaryOpsProof(env,principal,context):legacyOpsProof(env,principal,context);

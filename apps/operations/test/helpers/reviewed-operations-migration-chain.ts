@@ -45,6 +45,7 @@ const initialClientMigrations = Object.freeze([
 // enter the frozen Operations199/Client149 inventories returned by this helper.
 const operationsSuccessors = Object.freeze({
   "0225_native_staff_lifecycle_bridge.sql": "1363221a710d774fc9e4c7547f7199d2bdc6b41ca62c8078c98ac5334603c175",
+  "0226_staff_login_bindings.sql": "c25b03f4499c6de80d586a583c0e59b8c39b264248645c59733304ebe751d0c5",
   "0222_employee_read_roots.sql": "1b91e7eebe6580df7a780a8b473e3325fde2d9a8a8dc37282bc40c6f32e8edda",
   "0223_employee_read_provisioning.sql": "d55a0d5e16f37f231e0938516a1ee7248b0e3b4190e8de5e6c68e1e9a3e1810a",
   "0224_windows_portal_publication_chain_index.sql": "4252667cceb62ca9bbbb3efd8804a7dc69f58dae1396240f0109fbac6abbcd15",

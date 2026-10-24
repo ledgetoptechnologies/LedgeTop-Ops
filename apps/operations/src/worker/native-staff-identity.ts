@@ -1,4 +1,5 @@
 import { isNativeAccessSubject } from "./native-access-subject";
+import { assertCurrentStaffLogin, snapshotStaffLoginProof, type StaffLoginProof } from "./staff-login-bindings";
 
 export type NativeStaffIdentityInput = {
   verifiedEmail: string;
@@ -8,11 +9,32 @@ export type NativeStaffIdentityInput = {
 export type NativeStaffIdentity = Readonly<{
   kind: "native";
   staffId: string;
+  /** Canonical admission binding. An alternate login's actual verified JWT
+   * subject is retained separately on AuthenticatedNativeStaff.verifiedLogin. */
   verifiedAccessSubject: string;
   email: string;
   displayName: string;
   profileVersion: number;
 }>;
+
+/** Resolves a separately verified alternate login to its canonical native
+ * authorization identity. This does not relabel the alternate JWT claims as
+ * primary claims: callers retain the actual login proof on their outer context.
+ * No binding, admission or permission is created by this read. */
+export async function resolveCanonicalNativeStaffIdentityWithAdmissionVersion(
+  database: D1Database,
+  verifiedLogin: StaffLoginProof,
+): Promise<NativeStaffIdentityWithAdmissionVersion | null> {
+  const login = snapshotStaffLoginProof(verifiedLogin);
+  if (!login || login.kind !== "alternate" || !await assertCurrentStaffLogin(database, login)) return null;
+  const resolved = await resolveNativeStaffIdentityWithAdmissionVersion(database, {
+    verifiedEmail: login.canonicalEmail,
+    verifiedAccessSubject: login.canonicalSubject,
+  });
+  if (!resolved || resolved.identity.staffId !== login.staffId
+    || !await assertCurrentStaffLogin(database, login)) return null;
+  return resolved;
+}
 
 export type NativeStaffIdentityWithAdmissionVersion = Readonly<{
   identity: NativeStaffIdentity;

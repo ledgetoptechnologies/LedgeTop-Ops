@@ -17,6 +17,7 @@ import {
   type ServiceRequestNotificationSnapshot,
 } from "@ltds/shared";
 import { authenticateStaff } from "./auth";
+import { registerStaffLoginClaimRoute, registerStaffLoginOwnerRoutes } from "./staff-login-link-routes";
 import { OPERATIONS_NATIVE_STAFF_LIFECYCLE_BASE, handleOperationsNativeStaffLifecycleHttp } from "./operations-native-staff-lifecycle-http";
 import { handleAgentRead } from "./agent-read-routes";
 import { staffSessionStatus } from "./session-status";
@@ -644,6 +645,7 @@ async function dispatchOperationsNativeStaffLifecycle(c: Context<{ Bindings: Env
 }
 app.use(OPERATIONS_NATIVE_STAFF_LIFECYCLE_BASE, dispatchOperationsNativeStaffLifecycle);
 app.use(`${OPERATIONS_NATIVE_STAFF_LIFECYCLE_BASE}/*`, dispatchOperationsNativeStaffLifecycle);
+registerStaffLoginClaimRoute(app);
 app.use("/api/*", async (c, next) => {
   if (viewerMachineEventRequest(c.req.method, c.req.path) || projectAlphaDeliveryMachineRequest(c.req.method, c.req.path)) {
     await next();
@@ -680,6 +682,7 @@ app.use("/api/admin/*", async (c, next) => {
     throw new HTTPException(403, { message: "Administrator access required" });
   await next();
 });
+registerStaffLoginOwnerRoutes(app);
 
 async function body<T>(c: any, schema: z.ZodType<T>): Promise<T> {
   const value = await c.req.json().catch(() => {

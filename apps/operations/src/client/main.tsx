@@ -18,6 +18,8 @@ import { DirectoryReplayAcceptance } from "./DirectoryReplayAcceptance";
 import { isDirectoryReplayAcceptanceLocation } from "./DirectoryReplayAcceptanceRoute";
 import { ProjectReplayAcceptance } from "./ProjectReplayAcceptance";
 import { isProjectReplayAcceptanceLocation } from "./ProjectReplayAcceptanceRoute";
+import { LinkLoginPage } from "./LinkLoginPage";
+import { LINK_LOGIN_PATH } from "./login-links-api";
 
 const onboardingStaffRoute = window.location.pathname === "/administration/client-onboarding";
 const recipientEnrollmentRoute = window.location.pathname === "/administration/client-portal/recipients";
@@ -31,7 +33,11 @@ const directoryMaintenanceRoute = window.location.protocol === "https:"
 const operationsWorkspaceRoute = window.location.pathname === "/administration/client-portal/operations-workspaces";
 const directoryReplayAcceptanceRoute = isDirectoryReplayAcceptanceLocation(window.location);
 const projectReplayAcceptanceRoute = isProjectReplayAcceptanceLocation(window.location);
-createRoot(document.getElementById("root")!).render(<StrictMode>{projectReplayAcceptanceRoute
+// Confirming a linked sign-in email happens before Operations starts: the email being added has no session yet.
+const linkLoginRoute = window.location.pathname === LINK_LOGIN_PATH;
+createRoot(document.getElementById("root")!).render(<StrictMode>{linkLoginRoute
+  ? <LinkLoginPage />
+  : projectReplayAcceptanceRoute
   ? <ProjectReplayAcceptance />
   : directoryReplayAcceptanceRoute
   ? <DirectoryReplayAcceptance />

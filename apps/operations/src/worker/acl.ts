@@ -1,6 +1,15 @@
 import { PERMISSIONS, type Permission } from "@ltds/shared";
 import { HTTPException } from "hono/http-exception";
 import type { Env, GrantRow, ResourceContext, StaffPrincipal } from "./types";
+import { assertCurrentStaffLogin } from "./staff-login-bindings";
+
+async function requireAclLogin(env: Env, principal: StaffPrincipal): Promise<void> {
+  if (!principal.verifiedLogin) return;
+  let current: boolean;
+  try { current = await assertCurrentStaffLogin(env.OPS_DB, principal.verifiedLogin); }
+  catch { throw new HTTPException(503, { message: "Operations sign-in verification is temporarily unavailable" }); }
+  if (!current) throw new HTTPException(403, { message: "This linked sign-in is no longer active" });
+}
 
 export async function loadGrants(env: Env, staffId: string): Promise<GrantRow[]> {
   const result = await env.OPS_DB.withSession("first-primary").prepare(`
@@ -17,7 +26,9 @@ export async function loadGrants(env: Env, staffId: string): Promise<GrantRow[]>
 }
 
 export async function isAdministrator(env: Env, principal: StaffPrincipal): Promise<boolean> {
-  return Boolean(await env.OPS_DB.withSession("first-primary").prepare("SELECT 1 ok FROM staff_role_assignments WHERE staff_id=? AND role_id IN ('role-owner','role-admin') AND scope='global' LIMIT 1").bind(principal.id).first());
+  const administrator = Boolean(await env.OPS_DB.withSession("first-primary").prepare("SELECT 1 ok FROM staff_role_assignments WHERE staff_id=? AND role_id IN ('role-owner','role-admin') AND scope='global' LIMIT 1").bind(principal.id).first());
+  await requireAclLogin(env, principal);
+  return administrator;
 }
 
 function matches(grant: GrantRow, principal: StaffPrincipal, context?: ResourceContext): boolean {
@@ -43,7 +54,9 @@ export async function requirePermission(env: Env, principal: StaffPrincipal, per
 }
 
 export async function hasPermission(env: Env, principal: StaffPrincipal, permission: Permission, context?: ResourceContext): Promise<boolean> {
-  return evaluatePermission(await loadGrants(env, principal.id), principal, permission, context);
+  const grants = await loadGrants(env, principal.id);
+  await requireAclLogin(env, principal);
+  return evaluatePermission(grants, principal, permission, context);
 }
 
 /**
@@ -52,13 +65,16 @@ export async function hasPermission(env: Env, principal: StaffPrincipal, permiss
  * must never turn an assigned-work view into an all-work view by accident.
  */
 export async function hasLocalGlobalAllow(env: Env, principal: StaffPrincipal, permission: Permission): Promise<boolean> {
-  return Boolean(await env.OPS_DB.withSession("first-primary").prepare(
+  const allowed = Boolean(await env.OPS_DB.withSession("first-primary").prepare(
     "SELECT 1 ok FROM staff_permission_overrides WHERE staff_id=? AND permission_key=? AND effect='allow' AND scope='global' LIMIT 1",
   ).bind(principal.id, permission).first());
+  await requireAclLogin(env, principal);
+  return allowed;
 }
 
 export async function permissionKeys(env: Env, principal: StaffPrincipal): Promise<Permission[]> {
   const grants = await loadGrants(env, principal.id);
+  await requireAclLogin(env, principal);
   return PERMISSIONS.filter(permission => {
     const rows = grants.filter(grant => grant.permission === permission);
     if (rows.some(row => row.source === "override" && row.effect === "deny" && row.scope === "global")) return false;
@@ -77,6 +93,7 @@ export interface SqlScope {
 
 export async function sqlScope(env: Env, principal: StaffPrincipal, permission: Permission): Promise<SqlScope> {
   const rows = (await loadGrants(env, principal.id)).filter(row => row.permission === permission);
+  await requireAclLogin(env, principal);
   const deniedGlobal = rows.some(row => row.source === "override" && row.effect === "deny" && row.scope === "global");
   return {
     global: !deniedGlobal && rows.some(row => row.effect === "allow" && row.scope === "global"),

@@ -25,6 +25,7 @@ import {
 } from "./viewer-integration";
 import { requestHostAllowed } from "./host-admission";
 import { defaultViewerUnits, resolveViewerUnits } from "./viewer-units";
+import { requireCurrentStaffLogin } from "./auth";
 
 type Variables = { principal: StaffPrincipal; administrator: boolean };
 type ViewerApp = Hono<{ Bindings: Env; Variables: Variables }>;
@@ -592,6 +593,7 @@ export function registerViewerProcessingRoutes(app: ViewerApp): void {
       throw new HTTPException(403, { message: "Global viewer.view permission required" });
     const units = await resolveViewerUnits(c.env, principal.id);
     try {
+      if (principal.verifiedLogin) await requireCurrentStaffLogin(c.env, principal);
       const grant = await viewerServiceClient(c.env).createAdminGrant({
         controllerOrigin: new URL(c.req.url).origin,
         subject: `ops:${principal.id}`.slice(0, 200), permissions,
@@ -599,6 +601,7 @@ export function registerViewerProcessingRoutes(app: ViewerApp): void {
         displayUnits: units,
         idempotencyKey: key.data,
       });
+      if (principal.verifiedLogin) await requireCurrentStaffLogin(c.env, principal);
       const origin = new URL(c.env.VIEWER_BASE_URL!);
       const workspaceUrl = new URL(`/workspace/${encodeURIComponent(grant.grant)}`, origin);
       return c.json({

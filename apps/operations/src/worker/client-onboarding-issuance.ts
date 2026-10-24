@@ -1,6 +1,7 @@
 import { hashClientOnboardingInvitationSecret } from "./client-onboarding-submissions";
 import { isNativeAccessSubject } from "./native-access-subject";
 import type { AuthenticatedNativeStaff } from "./native-staff-auth";
+import { assertCurrentStaffLogin, snapshotStaffLoginProof } from "./staff-login-bindings";
 
 export type ClientOnboardingProposedScope = Readonly<{ businessAreaId: string; divisionId: string | null }>;
 export type ClientOnboardingIssuanceReceipt = Readonly<{
@@ -46,7 +47,10 @@ async function sha256(value: string): Promise<string> {
 }
 async function evidence(raw: unknown) {
   const envelope = record(raw, ["authenticatedNativeStaff", "request"]);
-  const auth = envelope && record(envelope.authenticatedNativeStaff, ["identity", "verifiedUntil"]);
+  const hasLogin = envelope?.authenticatedNativeStaff !== null && typeof envelope?.authenticatedNativeStaff === "object"
+    && Object.hasOwn(envelope.authenticatedNativeStaff, "verifiedLogin");
+  const auth = envelope && record(envelope.authenticatedNativeStaff,
+    hasLogin ? ["identity", "verifiedUntil", "verifiedLogin"] : ["identity", "verifiedUntil"]);
   const actor = auth && record(auth.identity,
     ["kind", "staffId", "verifiedAccessSubject", "email", "displayName", "profileVersion"]);
   const request = envelope && record(envelope.request,
@@ -62,6 +66,10 @@ async function evidence(raw: unknown) {
     || !instant(request.expiresAt) || Date.parse(request.expiresAt) <= Date.now()
     || Date.parse(request.expiresAt) > Date.now() + MAX_INVITATION_LIFETIME_MS
     || (request.targetClientRecordId !== null && (typeof request.targetClientRecordId !== "string" || !ID.test(request.targetClientRecordId)))) return denied();
+  const login = hasLogin ? snapshotStaffLoginProof(auth.verifiedLogin) : undefined;
+  if (login !== undefined && (!login || login.kind !== "alternate" || login.staffId !== actor.staffId
+    || login.canonicalEmail !== actor.email || login.canonicalSubject !== actor.verifiedAccessSubject
+    || login.expiresAt * 1000 < Date.parse(auth.verifiedUntil))) return denied();
   let scopes: ClientOnboardingProposedScope[] | null = null;
   if (request.targetClientRecordId === null) {
     const rawScopes = dense(request.scopes);
@@ -80,7 +88,8 @@ async function evidence(raw: unknown) {
   const input = { staffId: actor.staffId, subject: actor.verifiedAccessSubject, email: actor.email,
     profileVersion: actor.profileVersion, verifiedUntil: auth.verifiedUntil, commandId: request.commandId,
     invitationId: request.invitationId, invitationSecret: request.invitationSecret, expiresAt: request.expiresAt,
-    targetClientRecordId: request.targetClientRecordId, scopesJson } as const;
+    targetClientRecordId: request.targetClientRecordId, scopesJson,
+    ...(login ? { verifiedLogin: login } : {}) } as const;
   const [secretSha256, requestSha256] = await Promise.all([
     hashClientOnboardingInvitationSecret(input.invitationId, input.invitationSecret),
     sha256(`client-onboarding-issue-v1:${JSON.stringify({ commandId: input.commandId,
@@ -112,6 +121,7 @@ export async function issueClientOnboardingInvitation(database: D1Database, raw:
     const { input, secretSha256, requestSha256 } = await evidence(raw);
     const encryptedRow = encrypted === undefined ? null : handoff(encrypted);
     if (encrypted !== undefined && !encryptedRow) return denied();
+    if (input.verifiedLogin && !await assertCurrentStaffLogin(database, input.verifiedLogin)) return denied();
     const db = database.withSession("first-primary");
     const statements = [
       db.prepare(`INSERT INTO client_onboarding_invitations
@@ -149,6 +159,7 @@ export async function issueClientOnboardingInvitation(database: D1Database, raw:
     const row = results.at(-1)?.results?.[0] as Record<string, unknown> | undefined;
     if (!row || row.invitation_id !== input.invitationId || row.expires_at !== input.expiresAt
       || row.request_sha256 !== requestSha256 || (row.state !== "pending" && row.state !== "submitted")) return denied();
+    if (input.verifiedLogin && !await assertCurrentStaffLogin(database, input.verifiedLogin)) return denied();
     return Object.freeze({ invitationId: input.invitationId, expiresAt: input.expiresAt,
       requestSha256, state: row.state });
   } catch { return denied(); }

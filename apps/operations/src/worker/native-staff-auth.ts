@@ -1,6 +1,7 @@
 import { createRemoteJWKSet, jwtVerify } from "jose";
 import { isNativeAccessSubject } from "./native-access-subject";
-import { resolveNativeStaffIdentityWithAdmissionVersion, type NativeStaffIdentity } from "./native-staff-identity";
+import { resolveCanonicalNativeStaffIdentityWithAdmissionVersion, resolveNativeStaffIdentityWithAdmissionVersion, type NativeStaffIdentity } from "./native-staff-identity";
+import { assertCurrentStaffLogin, resolveVerifiedStaffLogin, type StaffLoginProof } from "./staff-login-bindings";
 
 export type NativeStaffAccessConfiguration = Readonly<{
   enabled: boolean;
@@ -11,6 +12,9 @@ export type NativeStaffAccessConfiguration = Readonly<{
 export type AuthenticatedNativeStaff = Readonly<{
   identity: NativeStaffIdentity;
   verifiedUntil: string;
+  /** Present only for alternate logins. identity remains the canonical
+   * authorization coordinate; this proof retains the actual verified login. */
+  verifiedLogin?: StaffLoginProof;
 }>;
 
 export type AuthenticatedNativeStaffWithAdmissionVersion = AuthenticatedNativeStaff & Readonly<{
@@ -54,7 +58,8 @@ export async function authenticateNativeStaff(
   configuration: NativeStaffAccessConfiguration,
 ): Promise<AuthenticatedNativeStaff> {
   const authenticated = await authenticateNativeStaffWithAdmissionVersion(request, database, configuration);
-  return Object.freeze({ identity: authenticated.identity, verifiedUntil: authenticated.verifiedUntil });
+  return Object.freeze({ identity: authenticated.identity, verifiedUntil: authenticated.verifiedUntil,
+    ...(authenticated.verifiedLogin ? { verifiedLogin: authenticated.verifiedLogin } : {}) });
 }
 
 /** Includes the admission version observed with the exact native identity.
@@ -79,6 +84,7 @@ export async function authenticateNativeStaffWithAdmissionVersion(
     if (!Array.isArray(audiences) || audiences.length !== 1
       || audiences[0] !== authority.staffAudience
       || payload.type !== "app" || !isNativeAccessSubject(payload.sub)
+      || Object.hasOwn(payload, "common_name")
       || Object.hasOwn(payload, "service_token_id")
       || (Object.hasOwn(payload, "service_token_status") && payload.service_token_status !== false)
       || typeof payload.exp !== "number" || !Number.isSafeInteger(payload.exp)
@@ -94,8 +100,20 @@ export async function authenticateNativeStaffWithAdmissionVersion(
     const resolved = await resolveNativeStaffIdentityWithAdmissionVersion(database, {
       verifiedEmail, verifiedAccessSubject,
     });
-    if (resolved === null || Date.now() >= payload.exp * 1000) throw Error();
-    return Object.freeze({ identity: resolved.identity, admissionVersion: resolved.admissionVersion, verifiedUntil });
+    if (resolved !== null) {
+      if (Date.now() >= payload.exp * 1000) throw Error();
+      return Object.freeze({ identity: resolved.identity, admissionVersion: resolved.admissionVersion, verifiedUntil });
+    }
+    // Preserve the existing native-only primary path above. Only an explicitly
+    // linked, currently active alternate credential may use canonical resolution.
+    const login = await resolveVerifiedStaffLogin(database, { issuer: authority.issuer,
+      email: verifiedEmail, subject: verifiedAccessSubject, expiresAt: payload.exp, issuedAt: payload.iat });
+    if (login?.proof.kind !== "alternate") throw Error();
+    const canonical = await resolveCanonicalNativeStaffIdentityWithAdmissionVersion(database, login.proof);
+    if (!canonical || Date.now() >= payload.exp * 1000
+      || !await assertCurrentStaffLogin(database, login.proof)) throw Error();
+    return Object.freeze({ identity: canonical.identity, admissionVersion: canonical.admissionVersion,
+      verifiedUntil, verifiedLogin: login.proof });
   } catch {
     throw Error("native_staff_access_denied");
   }

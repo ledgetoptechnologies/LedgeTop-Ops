@@ -4,7 +4,7 @@ import { authenticateNativeStaffWithAdmissionVersion, type AuthenticatedNativeSt
 import { resolveEmployeeReadAuthority, recheckEmployeeReadAuthority, type EmployeeReadAuthority } from "./employee-read-authority";
 import { canonicalEmployeeReadPath, type EmployeeGatewayConfiguration } from "./employee-read-transport";
 import { employeeReadManifest } from "./employee-read-routes";
-import { resolveNativeStaffIdentityWithAdmissionVersion } from "./native-staff-identity";
+import { resolveCanonicalNativeStaffIdentityWithAdmissionVersion, resolveNativeStaffIdentityWithAdmissionVersion } from "./native-staff-identity";
 
 type Configuration = Readonly<{ enabled: boolean; opsOrigin: string; access: NativeStaffAccessConfiguration; gateway: EmployeeGatewayConfiguration; handleKey: Uint8Array; queueKey: Uint8Array }>;
 const pins = ["gatewayId", "rootId", "rootGeneration", "rootFingerprint", "staffId", "accessSubject", "admissionVersion", "grantId", "grantGeneration"] as const;
@@ -28,7 +28,10 @@ export function createEmployeeQueueRouter(input: Configuration, dependencies: Re
   const principal = (a: AuthenticatedNativeStaffWithAdmissionVersion) => queuePrincipal(context, [a.identity.verifiedAccessSubject, a.identity.staffId, a.admissionVersion]);
   router.get("/session", async c => {
     queueQuery(c.req.url, []); const a = c.get("auth"), principalId = await principal(a);
-    const fresh = await resolveNativeStaffIdentityWithAdmissionVersion(db, { verifiedEmail: a.identity.email, verifiedAccessSubject: a.identity.verifiedAccessSubject });
+    // Retain alternate-login evidence through this fresh native re-resolution.
+    const fresh = a.verifiedLogin
+      ? await resolveCanonicalNativeStaffIdentityWithAdmissionVersion(db, a.verifiedLogin)
+      : await resolveNativeStaffIdentityWithAdmissionVersion(db, { verifiedEmail: a.identity.email, verifiedAccessSubject: a.identity.verifiedAccessSubject });
     if (!fresh || fresh.identity.staffId !== a.identity.staffId || fresh.admissionVersion !== a.admissionVersion
       || fresh.identity.profileVersion !== a.identity.profileVersion || Date.parse(a.verifiedUntil) <= Date.now()) return error(401);
     return c.json({ schemaVersion: 1, principalId, expiresAt: Math.floor(Date.parse(a.verifiedUntil) / 1000) });
