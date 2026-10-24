@@ -686,7 +686,7 @@ test("capabilities absent from native context do not produce optimistic director
   const calls = await mock(page, (route, call) => call.path.endsWith("workspace-b/context") ? route.fulfill({json: {...context(), features: {...features(), directory: {state: "not_in_access", reason: "capability_not_granted"}, deliveries: {state: "temporarily_unavailable", reason: "backend_unavailable"}}, capabilities: {...context().capabilities, directoryRead: false, deliveryView: false}}}) : undefined);
   await page.goto("/portal?workspace=workspace-b"); await expect(page.getByText("The directory is not included in your current access.")).toBeVisible();
   await expect(page.getByText("Not in access", {exact: true})).toBeVisible();
-  await page.goto("/portal/deliveries?workspace=workspace-b"); await expect(page.getByText("Delivery viewing is not included in your current access.")).toBeVisible();
+  await page.goto("/portal/deliveries?workspace=workspace-b"); await expect(page.getByText("Delivery folders are not included in your current access.")).toBeVisible();
   expect(calls.some(call => /\/(hierarchy|deliveries)$/.test(call.path))).toBe(false);
 });
 
