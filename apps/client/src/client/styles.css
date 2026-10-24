@@ -2136,3 +2136,22 @@
   .portal-account-menu .account-menu-trigger { width: 44px; height: 44px; padding: 3px; border-color: #ffffff30; background: #1c252c; }
 }
 .portal-finance-overdue { color: var(--red); }
+
+/* Shared 3D work: one flat list of Viewer tasks shared directly with the client. */
+.shared-viewer-work { min-width: 0; }
+.shared-viewer-work-list { list-style: none; margin: 0; padding: 0; display: grid; }
+.shared-viewer-work-list li { display: flex; justify-content: space-between; align-items: center; gap: 1rem; padding: .8rem 0; border-top: 1px solid var(--line, #e3e8ec); min-width: 0; }
+.shared-viewer-work-list li:first-child { border-top: 0; }
+.shared-viewer-work-list li > div { display: grid; gap: .2rem; min-width: 0; }
+.shared-viewer-work-list strong, .shared-viewer-work-list span { overflow-wrap: anywhere; }
+.shared-viewer-work-list span { color: var(--ink, #172b3a); }
+.shared-viewer-work-list small { color: var(--muted, #5d6873); overflow-wrap: anywhere; }
+.shared-viewer-work-list .button { flex: none; min-height: 44px; display: inline-flex; align-items: center; }
+.shared-viewer-work-problem, .shared-viewer-work-more { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem 1rem; margin: 0 0 .75rem; }
+.shared-viewer-work-problem p, .shared-viewer-work-more p { margin: 0; }
+.shared-viewer-work-problem button, .shared-viewer-work-more button { min-height: 44px; }
+.shared-viewer-work-more { margin: .75rem 0 0; }
+@media (max-width: 640px) {
+  .shared-viewer-work-list li { flex-direction: column; align-items: stretch; }
+  .shared-viewer-work-list .button { justify-content: center; white-space: normal; }
+}

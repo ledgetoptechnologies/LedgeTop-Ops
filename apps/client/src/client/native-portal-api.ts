@@ -114,3 +114,40 @@ export async function loadNativeFile(context: NativePortalContext, fileId: strin
   if (!validFile(value.file, context) || value.file.id !== fileId) throw invalid();
   return value.file;
 }
+
+/** One Viewer task shared directly with a client account (a project grant covers every published task in it). */
+export interface NativeViewerWorkItem {
+  grantId: string; workspaceId: string; taskId: string; scopeType: "project" | "task";
+  title: string; projectName: string | null; businessName: string | null;
+  sharedAt: string; updatedAt: string; expiresAt: string | null;
+  permissions: { measure: boolean; cameras: boolean; download: boolean };
+}
+export interface NativeViewerWorkPage { workspaceId: string; contextVersion: string; items: NativeViewerWorkItem[]; nextCursor: string | null }
+const viewerId = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
+const timestamp = (value: unknown): value is string => text(value, 64) && Number.isFinite(Date.parse(value));
+function validViewerWorkItem(item: NativeViewerWorkItem, workspaceId: string): boolean {
+  const permissions = item?.permissions;
+  return !!item && typeof item === "object" && item.workspaceId === workspaceId && typeof item.grantId === "string" && viewerId.test(item.grantId) &&
+    typeof item.taskId === "string" && viewerId.test(item.taskId) && (item.scopeType === "project" || item.scopeType === "task") &&
+    text(item.title, 400) && (item.projectName === null || text(item.projectName, 400)) && (item.businessName === null || text(item.businessName, 400)) &&
+    timestamp(item.sharedAt) && timestamp(item.updatedAt) && (item.expiresAt === null || timestamp(item.expiresAt)) &&
+    !!permissions && typeof permissions === "object" && typeof permissions.measure === "boolean" && typeof permissions.cameras === "boolean" && typeof permissions.download === "boolean";
+}
+/** Lists 3D work shared directly with one exact client account. The cursor belongs to that account only. */
+export async function loadNativeViewerWork(workspaceId: string, cursor: string | null, signal?: AbortSignal, request: PortalRequest = requestJson): Promise<NativeViewerWorkPage> {
+  const query = cursor ? `?${new URLSearchParams({ cursor })}` : "";
+  const value = await request<NativeViewerWorkPage>(`${nativeWorkspaceBase(workspaceId)}/viewer${query}`, { signal });
+  if (!value || value.workspaceId !== workspaceId || !text(value.contextVersion) || !Array.isArray(value.items) || !nullableText(value.nextCursor) ||
+      (cursor !== null && value.nextCursor === cursor) || value.items.some(item => !validViewerWorkItem(item, workspaceId))) throw invalid();
+  return value;
+}
+/** Issues (or renews, with a fresh key) a Viewer session for one task under the exact grant that listed it. */
+export async function openNativeViewerTaskSession(workspaceId: string, grantId: string, taskId: string, displayUnits: "imperial" | "metric",
+  idempotencyKey: string, signal?: AbortSignal, request: PortalRequest = requestJson): Promise<import("./portal-api").PortalViewerSession & { modelId: string }> {
+  const value = await request<import("./portal-api").PortalViewerSession & { modelId: string }>(
+    `${nativeWorkspaceBase(workspaceId)}/viewer/${encodeURIComponent(grantId)}/tasks/${encodeURIComponent(taskId)}/session`,
+    { method: "POST", headers: { "Idempotency-Key": idempotencyKey, "Content-Type": "application/json" }, body: JSON.stringify({ displayUnits }), signal });
+  if (!value || !text(value.grant) || !timestamp(value.grantExpiresAt) || !Number.isFinite(value.sessionTtlSeconds) || value.sessionTtlSeconds <= 0 ||
+      !text(value.redeemUrl) || !text(value.embedUrl) || !text(value.modelId, 128)) throw invalid();
+  return value;
+}
