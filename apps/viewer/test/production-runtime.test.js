@@ -100,7 +100,9 @@ test('published image executes a real Obj2Tiles conversion and provenance audit'
   assert.match(smoke, /KHR_texture_basisu/);
   assert.match(smoke, /compressedTextures/);
   assert.match(workflow, /docker run --rm "\$VERIFY_IMAGE" node scripts\/verify-obj2tiles-runtime\.mjs/);
-  assert.match(workflow, /EXPECTED_SCHEMA_VERSION: "39"/, 'published-image verification must match the current database schema');
+  const schemaVersion = require('../server/database').MIGRATIONS.at(-1).version;
+  const expectedVersions = [...workflow.matchAll(/EXPECTED_SCHEMA_VERSION: "(\d+)"/g)].map(match => Number(match[1]));
+  assert.deepEqual(expectedVersions, [schemaVersion, schemaVersion], 'verification and attestation must both match the current database schema');
 });
 
 test('exact-image point-cloud gate verifies installed visibility and demand bytes without source repair',()=>{
