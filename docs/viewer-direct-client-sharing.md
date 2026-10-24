@@ -14,6 +14,11 @@ association-based Viewer delivery and public links retain their contracts.
   them. A duplicate active scope returns `duplicate_active_grant` and its grant ID.
 - A client account grant applies to its currently authorized members. It does not
   create portal membership, PA project permissions, file grants or public links.
+- This release targets current source-owned native client accounts. Legacy-account
+  mappings and accounts with active Operations client-authority claims are excluded
+  by both the recipient picker and the native authorization adapter. They require
+  their own authority-specific integration; selecting a different identity or
+  manufacturing a PA project is not a supported workaround.
 
 ## Interfaces
 
