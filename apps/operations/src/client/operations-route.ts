@@ -1,4 +1,4 @@
-export type OperationsPage="dashboard"|"operations"|"clients"|"notifications"|"airspace"|"delivery"|"viewer"|"team"|"administration";
+export type OperationsPage="dashboard"|"operations"|"clients"|"notifications"|"airspace"|"delivery"|"viewer"|"team"|"administration"|"intel";
 export type OperationsSection="operations"|"projects"|"tasks"|"sops";
 export type DeliverySection="delivery"|"incoming"|"links";
 
@@ -8,7 +8,7 @@ export function canAccessDataPage(permissions:readonly string[]):boolean{
   return DATA_PAGE_PERMISSIONS.some(permission=>permissions.includes(permission));
 }
 
-const PAGES:OperationsPage[]=["dashboard","operations","clients","notifications","airspace","delivery","viewer","team","administration"];
+const PAGES:OperationsPage[]=["dashboard","operations","clients","notifications","airspace","delivery","viewer","team","administration","intel"];
 
 export function operationsLandingPath(permissions:readonly string[], _feedbackEnabled=false, _invitationReview=false):string{
   if(permissions.includes("operations.view"))return"/operations";

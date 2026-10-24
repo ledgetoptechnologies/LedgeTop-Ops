@@ -1,0 +1,30 @@
+.intel-page { display: grid; gap: 1rem; min-width: 0; }
+.intel-controls { display: flex; flex-wrap: wrap; align-items: center; gap: .75rem; }
+.intel-controls .ltds-segmented { max-width: 100%; overflow-x: auto; }
+.intel-controls .ltds-segmented > button { min-height: 44px; white-space: nowrap; }
+.intel-range { display: inline-flex; align-items: center; gap: .5rem; margin-left: auto; color: var(--muted); font-weight: 650; }
+.intel-range select { min-height: 44px; }
+.intel-freshness { margin: 0 0 .75rem; color: var(--muted); font-size: .9rem; overflow-wrap: anywhere; }
+.intel-freshness.intel-stale { color: #8a5a00; }
+.intel-metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(10rem, 1fr)); gap: .75rem; margin-bottom: 1rem; }
+.intel-metric { display: grid; gap: .25rem; padding: .85rem 1rem; border: 1px solid var(--line); border-radius: 10px; background: #fff; }
+.intel-metric > span { color: var(--muted); font-size: .85rem; font-weight: 650; }
+.intel-metric > strong { font-size: 1.5rem; font-variant-numeric: tabular-nums; color: var(--ink); }
+.intel-change { font-size: .8rem; color: var(--muted); }
+.intel-change.intel-up { color: #1d7a46; }
+.intel-change.intel-down { color: #a72d39; }
+.intel-tables { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 22rem), 1fr)); gap: 1rem; }
+.intel-table-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 10px; background: #fff; }
+.intel-table { width: 100%; border-collapse: collapse; font-size: .92rem; }
+.intel-table caption { text-align: left; padding: .75rem 1rem .25rem; font-weight: 760; color: var(--ink); }
+.intel-table th, .intel-table td { padding: .5rem 1rem; border-top: 1px solid var(--line); text-align: left; vertical-align: top; }
+.intel-table th { color: var(--muted); font-size: .8rem; font-weight: 700; }
+.intel-table .intel-num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.intel-table td:first-child { overflow-wrap: anywhere; }
+.intel-page-cell { display: grid; gap: .1rem; }
+.intel-page-cell small { color: var(--muted); }
+.intel-empty { color: var(--muted); text-align: center; }
+@media (max-width: 640px) {
+  .intel-range { margin-left: 0; width: 100%; }
+  .intel-range select { flex: 1; }
+}
