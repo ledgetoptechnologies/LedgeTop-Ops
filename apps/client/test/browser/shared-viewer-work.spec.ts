@@ -191,3 +191,22 @@ for (const [label, workspaces] of [["one account", [allWorkspaces[0]!]], ["two a
   await expect(page.locator("body")).not.toContainText("QA internal label");
   await noHorizontalOverflow(page);
 });
+
+for (const [label, status, sameKey] of [["an unclear failure retries the same request", 503, true], ["a refused request retries as a new request", 409, false]] as const) test(`opening shared work: ${label}`, async ({page}) => {
+  await page.context().route(`${viewerOrigin}/**`, route => route.fulfill({contentType: "text/html", body: "<!doctype html><body>model</body>"}));
+  let sessions = 0;
+  const calls = await mock(page, [allWorkspaces[0]!], (route, call) => {
+    if (call.method !== "POST" || !call.path.endsWith("/session")) return undefined;
+    sessions += 1;
+    if (sessions === 1) return route.fulfill({status, json: {error: "Not available right now"}});
+    const grant = "33333333-3333-4333-8333-333333333333";
+    return route.fulfill({status: 201, json: {modelId: "model-direct", grant, grantExpiresAt: new Date(Date.now() + 60_000).toISOString(), sessionTtlSeconds: 1800,
+      redeemUrl: `${viewerOrigin}/api/v1/sessions/redeem`, embedUrl: `${viewerOrigin}/session/${grant}`}});
+  });
+  await page.goto("/portal/viewer/grant-task/tasks/task-1?workspace=workspace-b");
+  await page.getByRole("button", {name: "Retry secure session"}).click();
+  await expect(page.locator("iframe")).toBeVisible();
+  const keys = calls.filter(call => call.method === "POST").map(call => call.key);
+  expect(keys).toHaveLength(2);
+  expect(keys[0] === keys[1]).toBe(sameKey);
+});
