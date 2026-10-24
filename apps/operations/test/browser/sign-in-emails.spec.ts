@@ -7,7 +7,8 @@ const session = {
 };
 const linked = { id: "binding-1", email: "linked@example.test", version: 3, status: "active", createdAt: "2026-10-20T15:00:00Z", revokedAt: null };
 const revoked = { id: "binding-0", email: "old@example.test", version: 2, status: "revoked", createdAt: "2026-10-01T15:00:00Z", revokedAt: "2026-10-02T15:00:00Z" };
-const verificationUrl = (origin: string) => `${origin}/auth/link-login#intent=intent-1&token=secret-token-1`;
+const INTENT = "3f2b8c1e-7d4a-4e9b-a6c2-5d8e9f0a1b2c", TOKEN = "aaaaaaaa0123456789abcdef0123456789abcdef0123456789abcdefbbbbbbbb";
+const verificationUrl = (origin: string) => `${origin}/auth/link-login#intent=3f2b8c1e-7d4a-4e9b-a6c2-5d8e9f0a1b2c&token=aaaaaaaa0123456789abcdef0123456789abcdef0123456789abcdefbbbbbbbb`;
 
 type Seen = { requests: Request[]; links: unknown; intents: number; deletes: unknown[]; claims: Request[]; sessions: number; logouts: number };
 
@@ -15,6 +16,7 @@ type Seen = { requests: Request[]; links: unknown; intents: number; deletes: unk
 async function mockOps(page: Page, options: {
   links?: unknown; linksStatus?: number; identity?: string;
   intent?: (origin: string) => { status: number; json: unknown }; claim?: { status: number; json: unknown };
+  claims?: Array<{ status: number; json: unknown }>; deletes?: Array<{ status: number; json: unknown }>;
 } = {}) {
   const seen: Seen = { requests: [], links: options.links ?? { canonicalEmail: "owner@example.test", currentEmail: "owner@example.test", canManage: true, bindings: [linked, revoked] },
     intents: 0, deletes: [], claims: [], sessions: 0, logouts: 0 };
@@ -28,15 +30,17 @@ async function mockOps(page: Page, options: {
       return options.linksStatus ? route.fulfill({ status: options.linksStatus, json: { error: "Not found" } }) : route.fulfill({ json: seen.links });
     if (path === "/api/account/login-links/intents") {
       seen.intents++;
-      const answer = options.intent?.(url.origin) ?? { status: 200, json: { intentId: "intent-1", targetEmail: "new@example.test", verificationUrl: verificationUrl(url.origin), expiresAt: "2026-10-24T18:15:00Z" } };
+      const answer = options.intent?.(url.origin) ?? { status: 200, json: { intentId: "3f2b8c1e-7d4a-4e9b-a6c2-5d8e9f0a1b2c", targetEmail: "new@example.test", verificationUrl: verificationUrl(url.origin), expiresAt: "2026-10-24T18:15:00Z" } };
       return route.fulfill(answer);
     }
     if (path === "/api/account/login-links/claim") {
       seen.claims.push(request);
-      return route.fulfill(options.claim ?? { status: 200, json: { bindingId: "binding-2", staffId: "owner-a", version: 1 } });
+      return route.fulfill(options.claims?.[seen.claims.length - 1] ?? options.claim ?? { status: 200, json: { bindingId: "binding-2", staffId: "owner-a", version: 1 } });
     }
     if (path.startsWith("/api/account/login-links/") && request.method() === "DELETE") {
       seen.deletes.push(request.postDataJSON());
+      const answer = options.deletes?.[seen.deletes.length - 1];
+      if (answer) return route.fulfill(answer);
       seen.links = { ...(seen.links as object), bindings: [revoked] };
       return route.fulfill({ json: { bindingId: "binding-1", version: 4, status: "revoked" } });
     }
@@ -88,7 +92,7 @@ test("adding an email creates one link, then signs out and confirms it on the li
   await dialog.getByLabel("Email").fill("new@example.test");
   await dialog.getByRole("button", { name: "Create link" }).click();
   await expect(card).toContainText("Link ready for new@example.test.");
-  await expect(card).not.toContainText("secret-token-1");
+  await expect(card).not.toContainText("aaaaaaaa0123456789abcdef0123456789abcdef0123456789abcdefbbbbbbbb");
   expect(seen.intents).toBe(1);
   expect(seen.requests.find(item => item.url().endsWith("/intents"))!.postDataJSON()).toEqual({ email: "new@example.test" });
 
@@ -105,7 +109,7 @@ test("adding an email creates one link, then signs out and confirms it on the li
   await page.getByRole("button", { name: "Link this email" }).click();
   await expect(page.getByRole("heading", { name: "This email is linked" })).toBeVisible();
   expect(seen.claims).toHaveLength(1);
-  expect(seen.claims[0].postDataJSON()).toEqual({ intentId: "intent-1", verificationToken: "secret-token-1" });
+  expect(seen.claims[0].postDataJSON()).toEqual({ intentId: "3f2b8c1e-7d4a-4e9b-a6c2-5d8e9f0a1b2c", verificationToken: "aaaaaaaa0123456789abcdef0123456789abcdef0123456789abcdefbbbbbbbb" });
   expect(seen.claims[0].headers()["x-csrf-token"]).toBeUndefined();
   expect(await page.evaluate(() => sessionStorage.length)).toBe(0);
   await expect(page.getByRole("link", { name: "Open Operations" })).toHaveAttribute("href", "/");
@@ -142,7 +146,7 @@ test("without the sign-in emails feature the account page shows only the profile
 
 test("the link page opens before Operations, hides the link and keeps it until a fresh sign-in", async ({ page }) => {
   const seen = await mockOps(page, { identity: "someone@example.test", claim: { status: 403, json: { error: "Sign in again with the email you're adding.", code: "denied" } } });
-  await page.goto("/auth/link-login#intent=intent-1&token=secret-token-1");
+  await page.goto("/auth/link-login#intent=3f2b8c1e-7d4a-4e9b-a6c2-5d8e9f0a1b2c&token=aaaaaaaa0123456789abcdef0123456789abcdef0123456789abcdefbbbbbbbb");
   await expect(page.getByRole("heading", { name: "Link this email to your Operations account?" })).toBeVisible();
   expect(new URL(page.url()).hash).toBe("");
   expect(seen.sessions).toBe(0);
@@ -159,7 +163,7 @@ test("the link page opens before Operations, hides the link and keeps it until a
 
 test("a used or expired link is cleared and points back to the account", async ({ page }) => {
   await mockOps(page, { claim: { status: 400, json: { error: "This link can't be used.", code: "staff_login_invalid" } } });
-  await page.goto("/auth/link-login#intent=intent-1&token=secret-token-1");
+  await page.goto("/auth/link-login#intent=3f2b8c1e-7d4a-4e9b-a6c2-5d8e9f0a1b2c&token=aaaaaaaa0123456789abcdef0123456789abcdef0123456789abcdefbbbbbbbb");
   await page.getByRole("button", { name: "Link this email" }).click();
   await expect(page.getByRole("heading", { name: "This link can't be used" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Link this email" })).toHaveCount(0);
@@ -179,7 +183,41 @@ test("the account and link pages fit a phone screen", async ({ page }) => {
   await mockOps(page);
   await openAccount(page);
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
-  await page.goto("/auth/link-login#intent=intent-1&token=secret-token-1");
+  await page.goto("/auth/link-login#intent=3f2b8c1e-7d4a-4e9b-a6c2-5d8e9f0a1b2c&token=aaaaaaaa0123456789abcdef0123456789abcdef0123456789abcdefbbbbbbbb");
   await expect(page.getByRole("button", { name: "Link this email" })).toBeVisible();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+});
+
+test("an unclear claim result keeps the same link and retries it safely", async ({ page }) => {
+  const seen = await mockOps(page, { claims: [{ status: 503, json: { error: "Unavailable", code: "unavailable" } }, { status: 200, json: { unexpected: true } }] });
+  await page.goto(`/auth/link-login#intent=${INTENT}&token=${TOKEN}`);
+  await page.getByRole("button", { name: "Link this email" }).click();
+  await expect(page.getByText("We could not confirm whether the email was linked. Retry verification to check safely.")).toBeVisible();
+  await expect(page.getByText("Nothing was changed")).toHaveCount(0);
+  await page.getByRole("button", { name: "Retry verification" }).click();
+  await expect(page.getByText("We could not confirm whether the email was linked. Retry verification to check safely.")).toBeVisible();
+  await page.getByRole("button", { name: "Retry verification" }).click();
+  await expect(page.getByRole("heading", { name: "This email is linked" })).toBeVisible();
+  expect(seen.claims.map(claim => claim.postDataJSON())).toEqual(Array(3).fill({ intentId: INTENT, verificationToken: TOKEN }));
+});
+
+test("a link that isn't the server's shape is refused without a claim", async ({ page }) => {
+  const seen = await mockOps(page);
+  await page.goto(`/auth/link-login#intent=intent-1&token=${TOKEN}`);
+  await expect(page.getByRole("heading", { name: "This link can't be used" })).toBeVisible();
+  expect(new URL(page.url()).hash).toBe("");
+  expect(seen.claims).toHaveLength(0);
+});
+
+test("an unclear removal keeps the same version and retries it safely", async ({ page }) => {
+  const seen = await mockOps(page, { deletes: [{ status: 502, json: { error: "Bad gateway" } }] });
+  const card = await openAccount(page);
+  await card.getByRole("button", { name: "Remove" }).click();
+  await page.locator("dialog.ops-confirm-action").getByRole("button", { name: "Confirm" }).click();
+  await expect(card.getByRole("status")).toHaveText("We couldn't confirm whether linked@example.test was removed. Retry removal to check safely.");
+  await card.getByRole("button", { name: "Retry removal" }).click();
+  await expect(page.locator("dialog.ops-confirm-action")).toHaveCount(0);
+  await expect(card.getByRole("status")).toHaveText("linked@example.test was removed.");
+  await expect(card.getByRole("button", { name: "Retry removal" })).toHaveCount(0);
+  expect(seen.deletes).toEqual([{ expectedVersion: 3 }, { expectedVersion: 3 }]);
 });

@@ -10,7 +10,10 @@ export type PendingLoginLink = { intentId: string; token: string };
 export const LOGIN_LINKS_PATH = "/api/account/login-links";
 export const LINK_LOGIN_PATH = "/auth/link-login";
 const PENDING_KEY = "ops.login-link.pending";
-const TOKEN_PART = /^[A-Za-z0-9._~-]{1,512}$/;
+const INTENT_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const TOKEN = /^[0-9a-f]{64}$/;
+const validPending = (intentId: unknown, token: unknown): intentId is string =>
+  typeof intentId === "string" && typeof token === "string" && INTENT_ID.test(intentId) && TOKEN.test(token);
 
 export const loadLoginLinks = (signal?: AbortSignal) => api<LoginLinks>(LOGIN_LINKS_PATH, { signal });
 
@@ -18,11 +21,15 @@ export const loadLoginLinks = (signal?: AbortSignal) => api<LoginLinks>(LOGIN_LI
 export const createLoginLinkIntent = (email: string) =>
   api<LoginLinkIntent>(`${LOGIN_LINKS_PATH}/intents`, { method: "POST", body: JSON.stringify({ email }) });
 
-export const removeLoginLink = (binding: LoginLinkBinding) =>
-  api<{ bindingId: string; version: number; status: "revoked" }>(`${LOGIN_LINKS_PATH}/${encodeURIComponent(binding.id)}`,
+/** Removes a linked email at the version shown. Retrying with the same version is safe; an unclear answer throws. */
+export async function removeLoginLink(binding: LoginLinkBinding) {
+  const result = await api<{ bindingId?: unknown; status?: unknown }>(`${LOGIN_LINKS_PATH}/${encodeURIComponent(binding.id)}`,
     { method: "DELETE", body: JSON.stringify({ expectedVersion: binding.version }) });
+  if (result.bindingId !== binding.id || result.status !== "revoked") throw new Error("unconfirmed removal");
+}
 
-export type ClaimResult = { kind: "linked" } | { kind: "invalid" | "sign-in" | "conflict" | "unavailable"; message?: string };
+/** "unknown" means the link may or may not have been made; retrying the same link is safe and tells which. */
+export type ClaimResult = { kind: "linked" } | { kind: "invalid" | "sign-in" | "conflict" | "unknown"; message?: string };
 
 /**
  * Confirms the pending link with the current Access sign-in. It runs before any Operations session exists, so it sends
@@ -35,21 +42,21 @@ export async function claimLoginLink(pending: PendingLoginLink): Promise<ClaimRe
       method: "POST", credentials: "same-origin", cache: "no-store", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ intentId: pending.intentId, verificationToken: pending.token }), signal: AbortSignal.timeout(15000),
     });
-  } catch { return { kind: "unavailable" }; }
-  if (response.ok) return { kind: "linked" };
-  const payload = await response.json().catch(() => ({})) as { error?: unknown };
+  } catch { return { kind: "unknown" }; }
+  const payload = await response.json().catch(() => ({})) as { error?: unknown; bindingId?: unknown; version?: unknown };
+  if (response.ok) return typeof payload.bindingId === "string" && typeof payload.version === "number" ? { kind: "linked" } : { kind: "unknown" };
   const message = typeof payload.error === "string" ? payload.error : undefined;
   if (response.status === 400) return { kind: "invalid", message };
   if (response.status === 401 || response.status === 403) return { kind: "sign-in", message };
   if (response.status === 409) return { kind: "conflict", message };
-  return { kind: "unavailable", message };
+  return { kind: "unknown" };
 }
 
 /** Reads `#intent=…&token=…` from a verification link; null for anything else. */
 export function pendingFromHash(hash: string): PendingLoginLink | null {
   const params = new URLSearchParams(hash.replace(/^#/, ""));
   const intentId = params.get("intent") ?? "", token = params.get("token") ?? "";
-  return TOKEN_PART.test(intentId) && TOKEN_PART.test(token) ? { intentId, token } : null;
+  return validPending(intentId, token) ? { intentId, token } : null;
 }
 
 /** The pending link inside a verification URL, only when it points at this host's link page. */
@@ -67,8 +74,7 @@ export function savePendingLoginLink(pending: PendingLoginLink) {
 export function readPendingLoginLink(): PendingLoginLink | null {
   try {
     const value = JSON.parse(sessionStorage.getItem(PENDING_KEY) ?? "null") as Partial<PendingLoginLink> | null;
-    return typeof value?.intentId === "string" && typeof value.token === "string" && TOKEN_PART.test(value.intentId) && TOKEN_PART.test(value.token)
-      ? { intentId: value.intentId, token: value.token } : null;
+    return validPending(value?.intentId, value?.token) ? { intentId: value.intentId, token: value.token as string } : null;
   } catch { return null; }
 }
 
