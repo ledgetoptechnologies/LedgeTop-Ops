@@ -302,7 +302,13 @@ test("opening an original video starts playback without pressing Play and keeps 
   await mockShare(page, undefined, undefined, [rootVideo]);
   await page.route("**/api/public/shares/public/items/*/stream-ticket", route => route.fulfill({ status: 404, json: { error: "Preview unavailable" } }));
   const videoBytes = readFileSync(new URL("../fixtures/client-portal-seek.mp4", import.meta.url));
-  await page.route("**/media/flight.mp4", route => route.fulfill({ contentType: "video/mp4", body: videoBytes }));
+  await page.route("**/media/flight.mp4", route => {
+    const range = /^bytes=(\d+)-(\d*)$/.exec(route.request().headers().range ?? "");
+    if (!range) return route.fulfill({ contentType: "video/mp4", headers: { "Accept-Ranges": "bytes", "Content-Length": String(videoBytes.length) }, body: videoBytes });
+    const start = Number(range[1]);
+    const end = range[2] ? Math.min(Number(range[2]), videoBytes.length - 1) : videoBytes.length - 1;
+    return route.fulfill({ status: 206, contentType: "video/mp4", headers: { "Accept-Ranges": "bytes", "Content-Range": `bytes ${start}-${end}/${videoBytes.length}`, "Content-Length": String(end - start + 1) }, body: videoBytes.subarray(start, end + 1) });
+  });
   await page.goto("/s/public?view=grid");
   await page.getByRole("button", { name: "Preview Flight.mp4" }).click();
   const video = page.getByRole("dialog", { name: "Preview Flight.mp4" }).locator("video");
@@ -310,8 +316,64 @@ test("opening an original video starts playback without pressing Play and keeps 
   await expect(video).toHaveJSProperty("muted", true);
   await expect(video).toHaveJSProperty("controls", true);
   await expect.poll(() => video.evaluate(element => (element as HTMLVideoElement).currentTime)).toBeGreaterThan(0);
-  await page.keyboard.press("Escape");
+  const dialog = page.getByRole("dialog", { name: "Preview Flight.mp4" });
+  await dialog.getByRole("button", { name: "Pause video", exact: true }).click();
+  const seek = dialog.getByRole("slider", { name: "Seek video" });
+  await seek.focus(); await seek.press("Home");
+  for (let step = 0; step < 10; step++) await seek.press("ArrowRight");
+  await expect.poll(() => video.evaluate(element => (element as HTMLVideoElement).currentTime)).toBeGreaterThan(.75);
+  await expect(dialog).toBeVisible(); // Arrow keys seek, rather than navigating to the next file.
+  await dialog.getByRole("button", { name: "Unmute video" }).click();
+  await expect(video).toHaveJSProperty("muted", false);
+  await page.mouse.move(0, 0);
+  await expect(dialog.getByRole("button", { name: "Play video", exact: true })).toBeVisible();
+  await expect(dialog.getByRole("button", { name: "Enter fullscreen" })).toBeVisible();
+  await page.screenshot({ path: `test-results/video-controls-${test.info().project.name}.png` });
+  await seek.focus(); await seek.press("Escape");
   await expect(page.locator("video")).toHaveCount(0);
+});
+
+test("a slow original video has a loading message and visible controls, then reports a media failure", async ({ page }) => {
+  await mockShare(page, undefined, undefined, [rootVideo]);
+  await page.route("**/api/public/shares/public/items/*/stream-ticket", route => route.fulfill({ status: 404, json: { error: "Preview unavailable" } }));
+  let finish!: () => void;
+  const waiting = new Promise<void>(resolve => { finish = resolve; });
+  await page.route("**/media/flight.mp4", async route => { await waiting; await route.fulfill({ status: 500, body: "Unavailable" }); });
+  await page.goto("/s/public?view=grid");
+  await page.getByRole("button", { name: "Preview Flight.mp4" }).click();
+  const dialog = page.getByRole("dialog", { name: "Preview Flight.mp4" });
+  await expect(dialog.getByText("Loading video…", { exact: true })).toBeVisible();
+  await expect(dialog.getByRole("button", { name: "Play video", exact: true })).toBeVisible();
+  await expect(dialog.getByRole("button", { name: "Enter fullscreen" })).toBeVisible();
+  finish();
+  await expect(dialog.getByText("This video could not be loaded. You can download the original file.")).toBeVisible();
+  await expect(dialog.getByRole("link", { name: "Download Flight.mp4" })).toBeVisible();
+});
+
+test("blocked autoplay gives an explicit Play action that starts the same video", async ({ page }) => {
+  await page.addInitScript(() => {
+    const originalPlay = HTMLMediaElement.prototype.play;
+    let first = true;
+    HTMLMediaElement.prototype.play = function () {
+      if (first) {
+        first = false;
+        this.autoplay = false;
+        return Promise.reject(new DOMException("Autoplay blocked", "NotAllowedError"));
+      }
+      return originalPlay.call(this);
+    };
+  });
+  await mockShare(page, undefined, undefined, [rootVideo]);
+  await page.route("**/api/public/shares/public/items/*/stream-ticket", route => route.fulfill({ status: 404, json: { error: "Preview unavailable" } }));
+  await page.route("**/media/flight.mp4", route => route.fulfill({ contentType: "video/mp4", body: readFileSync(new URL("../fixtures/client-portal-seek.mp4", import.meta.url)) }));
+  await page.goto("/s/public?view=grid");
+  await page.getByRole("button", { name: "Preview Flight.mp4" }).click();
+  const dialog = page.getByRole("dialog", { name: "Preview Flight.mp4" });
+  await expect(dialog.getByText("Playback is paused. Press Play to start the video.")).toBeVisible();
+  await expect(dialog.getByRole("button", { name: "Start video" })).toBeVisible();
+  await dialog.getByRole("button", { name: "Play video", exact: true }).click();
+  await expect.poll(() => dialog.locator("video").evaluate(element => (element as HTMLVideoElement).currentTime)).toBeGreaterThan(0);
+  await expect(dialog.getByText("Playback is paused. Press Play to start the video.")).toHaveCount(0);
 });
 
 test("image viewer supports a real two-touch pinch gesture and keeps the image bounded", async ({ page }) => {
