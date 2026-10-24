@@ -98,6 +98,7 @@ test("adding an email creates one link, then signs out and confirms it on the li
   const card = await openAccount(page);
   await card.getByRole("button", { name: "Add a sign-in email" }).click();
   const dialog = page.getByRole("dialog", { name: "Add a sign-in email" });
+  await expect(dialog).toContainText("Only add an email you control; it will use this profile’s permissions.");
   await dialog.getByLabel("Email").fill("new@example.test");
   await dialog.getByRole("button", { name: "Create link" }).click();
   await expect(card).toContainText("Link ready for new@example.test.");
@@ -115,7 +116,7 @@ test("adding an email creates one link, then signs out and confirms it on the li
   await expect(page.getByText("Signed in as new@example.test")).toBeVisible();
   expect(seen.claims).toHaveLength(0);
 
-  await page.getByRole("button", { name: "Link this email" }).click();
+  await page.getByRole("button", { name: "Link this email to this profile" }).click();
   await expect(page.getByRole("heading", { name: "This email is linked" })).toBeVisible();
   expect(seen.claims).toHaveLength(1);
   expect(seen.claims[0]!.postDataJSON()).toEqual({ intentId: "3f2b8c1e-7d4a-4e9b-a6c2-5d8e9f0a1b2c", verificationToken: "aaaaaaaa0123456789abcdef0123456789abcdef0123456789abcdefbbbbbbbb" });
@@ -160,7 +161,7 @@ test("the link page opens before Operations, hides the link and keeps it until a
   await expect(page.getByRole("heading", { name: "Link new@example.test to Owner User’s Operations profile?" })).toBeVisible();
   expect(new URL(page.url()).hash).toBe("");
   expect(seen.sessions).toBe(0);
-  await page.getByRole("button", { name: "Link this email" }).click();
+  await page.getByRole("button", { name: "Link this email to this profile" }).click();
   await expect(page.getByRole("heading", { name: "Sign in with the email you're adding" })).toBeVisible();
   await expect(page.getByRole("link", { name: "Sign in with a different email" })).toBeVisible();
   await page.reload();
@@ -174,9 +175,9 @@ test("the link page opens before Operations, hides the link and keeps it until a
 test("a used or expired link is cleared and points back to the account", async ({ page }) => {
   await mockOps(page, { claim: { status: 400, json: { error: "This link can't be used.", code: "staff_login_invalid" } } });
   await page.goto("/auth/link-login#intent=3f2b8c1e-7d4a-4e9b-a6c2-5d8e9f0a1b2c&token=aaaaaaaa0123456789abcdef0123456789abcdef0123456789abcdefbbbbbbbb");
-  await page.getByRole("button", { name: "Link this email" }).click();
+  await page.getByRole("button", { name: "Link this email to this profile" }).click();
   await expect(page.getByRole("heading", { name: "This link can't be used" })).toBeVisible();
-  await expect(page.getByRole("button", { name: "Link this email" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Link this email to this profile" })).toHaveCount(0);
   expect(await page.evaluate(() => sessionStorage.length)).toBe(0);
 });
 
@@ -194,14 +195,14 @@ test("the account and link pages fit a phone screen", async ({ page }) => {
   await openAccount(page);
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
   await page.goto("/auth/link-login#intent=3f2b8c1e-7d4a-4e9b-a6c2-5d8e9f0a1b2c&token=aaaaaaaa0123456789abcdef0123456789abcdef0123456789abcdefbbbbbbbb");
-  await expect(page.getByRole("button", { name: "Link this email" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Link this email to this profile" })).toBeVisible();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
 });
 
 test("an unclear claim result keeps the same link and retries it safely", async ({ page }) => {
   const seen = await mockOps(page, { claims: [{ status: 503, json: { error: "Unavailable", code: "unavailable" } }, { status: 200, json: { unexpected: true } }] });
   await page.goto(`/auth/link-login#intent=${INTENT}&token=${TOKEN}`);
-  await page.getByRole("button", { name: "Link this email" }).click();
+  await page.getByRole("button", { name: "Link this email to this profile" }).click();
   await expect(page.getByText("We could not confirm whether the email was linked. Retry verification to check safely.")).toBeVisible();
   await expect(page.getByText("Nothing was changed")).toHaveCount(0);
   await page.getByRole("button", { name: "Retry verification" }).click();
@@ -256,10 +257,10 @@ test("linking can't start until the profile check has answered", async ({ page }
   const seen = await mockOps(page, { previewGate: new Promise<void>(resolve => { release = resolve; }) });
   await page.goto(`/auth/link-login#intent=${INTENT}&token=${TOKEN}`);
   await expect(page.getByRole("heading", { name: "Checking this link…" })).toBeVisible();
-  await expect(page.getByRole("button", { name: "Link this email" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Link this email to this profile" })).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Cancel" })).toHaveCount(0);
   release();
-  await expect(page.getByRole("button", { name: "Link this email" })).toBeEnabled();
+  await expect(page.getByRole("button", { name: "Link this email to this profile" })).toBeEnabled();
   expect(seen.claims).toHaveLength(0);
 });
 
@@ -273,7 +274,7 @@ for (const [name, preview, heading, kept] of [
     const seen = await mockOps(page, { preview });
     await page.goto(`/auth/link-login#intent=${INTENT}&token=${TOKEN}`);
     await expect(page.getByRole("heading", { name: heading })).toBeVisible();
-    await expect(page.getByRole("button", { name: "Link this email" })).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "Link this email to this profile" })).toHaveCount(0);
     expect(seen.claims).toHaveLength(0);
     expect(await page.evaluate(() => sessionStorage.length)).toBe(kept ? 1 : 0);
   });
@@ -291,7 +292,7 @@ for (const [name, json] of [["an empty binding id", { ...LINKED_BINDING, binding
   test(`a claim answer with ${name} isn't treated as linked`, async ({ page }) => {
     await mockOps(page, { claim: { status: 200, json } });
     await page.goto(`/auth/link-login#intent=${INTENT}&token=${TOKEN}`);
-    await page.getByRole("button", { name: "Link this email" }).click();
+    await page.getByRole("button", { name: "Link this email to this profile" }).click();
     await expect(page.getByText("We could not confirm whether the email was linked. Retry verification to check safely.")).toBeVisible();
     expect(await page.evaluate(() => sessionStorage.length)).toBe(1);
   });
