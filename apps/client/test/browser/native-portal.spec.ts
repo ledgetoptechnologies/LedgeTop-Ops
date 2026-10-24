@@ -92,7 +92,8 @@ function nativeCallsOnly(calls: Call[]) {
 test("native refresh discovers identity without the selected workspace header and never probes legacy resources", async ({page}) => {
   const calls = await mock(page); await page.goto("/portal?workspace=workspace-b");
   await expect(page.getByRole("heading", {level: 1, name: "Your projects"})).toBeVisible();
-  await expect(page.locator(".native-workspace").getByText(workspace("workspace-b").displayName, {exact: true})).toHaveCount(0);
+  // Stored account names can be internal labels; none may appear anywhere on the page.
+  await expect(page.locator("body")).not.toContainText(workspace("workspace-b").displayName);
   await expect(page.getByText("Coastal seawall construction documentation", {exact: true})).toBeVisible();
   await page.reload(); await expect(page.getByText("Coastal seawall construction documentation", {exact: true})).toBeVisible();
   nativeCallsOnly(calls); expect(calls.filter(call => call.path.endsWith("/hierarchy")).every(call => call.query.get("expectedContext") === "context-workspace-b")).toBe(true);
