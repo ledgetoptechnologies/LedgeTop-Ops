@@ -911,13 +911,17 @@ function bindShareModal(projectId,onlyOutputId){
   const directForm=modalContent.querySelector('#direct-client-grant-form');
   if(directForm)bindDirectShare(directForm,projectId,onlyOutputId);
   modalContent.querySelectorAll('[data-action="revoke-direct-client-grant"]').forEach(element=>element.onclick=async()=>{
-    const input=await dialogs.form({title:'Revoke client access',submitLabel:'Revoke access',destructive:true,fields:[{name:'reason',label:'Reason for revoking this client access',required:true,maxLength:240}]});
-    if(!input||!modal.open)return;element.disabled=true;
+    // Pinned to this modal and row: a late answer must not touch a different Share dialog.
+    const shareContext=state.shareContext,access=state.clientDirectAccess,live=()=>state.shareContext===shareContext&&state.clientDirectAccess===access&&element.isConnected&&modal.open;
+    const grant=access?.grants.find(item=>item.grantId===element.dataset.id);if(!grant||element.disabled)return;
+    const what=grant.scopeType==='project'?'the whole project':`the task “${state.tasks.find(task=>task.id===grant.taskId)?.displayName||'Unavailable task'}”`;
+    const input=await dialogs.form({title:'Revoke client access',message:`${grant.clientDisplayName||'This client'} will lose access to ${what}.`,submitLabel:'Revoke access',destructive:true,fields:[{name:'reason',label:'Reason for revoking this client access',required:true,maxLength:240}]});
+    if(!input||!live())return;element.disabled=true;
     try{
-      await api(`${DIRECT_CLIENT_GRANTS_PATH}/${encodeURIComponent(element.dataset.id)}`,{method:'DELETE',body:{reason:input.reason}});
-      const grant=state.clientDirectAccess?.grants.find(item=>item.grantId===element.dataset.id);if(grant)grant.revokedAt=new Date().toISOString();
-      toast('Client access revoked');if(modal.open)rerenderClientSharePanel(projectId,onlyOutputId);
-    }catch(error){toast(directShareErrorText(error),true);element.disabled=false}
+      const result=await api(`${DIRECT_CLIENT_GRANTS_PATH}/${encodeURIComponent(grant.grantId)}`,{method:'DELETE',body:{reason:input.reason}});
+      toast(clientGrantRevocationMessage(result,false));
+      if(!live())return;grant.revokedAt=new Date().toISOString();rerenderClientSharePanel(projectId,onlyOutputId);
+    }catch(error){toast(directShareErrorText(error),true);if(element.isConnected)element.disabled=false}
   });
   const grantForm=modalContent.querySelector('#client-grant-form');
   if(grantForm){const portal=grantForm.elements.portalConnection,target=grantForm.elements.associationId||grantForm.elements.projectId;if(portal&&target){const update=()=>{for(const option of target.options){if(!option.value)continue;option.hidden=option.dataset.portal!==portal.value;option.disabled=option.hidden}target.value=''};portal.onchange=update;update()}}

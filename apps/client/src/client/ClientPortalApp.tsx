@@ -92,7 +92,8 @@ import {
   type PortalOperationsHomeResponse,
 } from "./portal-api";
 import { readClientViewerUnits, writeClientViewerUnits } from "./viewer-units-preference";
-import { ClientViewerShell, parseClientViewerShellRoute, clientViewerShellPath, nativeClientViewerShellPath } from "./ClientViewerShell";
+import { ClientViewerShell, parseClientViewerShellRoute, clientViewerShellPath, nativeClientViewerShellPath, clientViewerRouteProjectId, clientViewerRouteWorkspaceId } from "./ClientViewerShell";
+import { SharedViewerWork } from "./SharedViewerWork";
 import { OperationsHomeApp, OperationsNativeServicePanel } from "./OperationsHomeApp";
 import {
   clientPortalPath,
@@ -2764,7 +2765,7 @@ export function ClientPortalApp({
   operationsHomeResponse?: PortalOperationsHomeResponse;
 }) {
   const initialRoute = parseClientPortalRoute(window.location.pathname);
-  const [viewerRoute, setViewerRoute] = useState(() => parseClientViewerShellRoute(window.location.pathname));
+  const [viewerRoute, setViewerRoute] = useState(() => parseClientViewerShellRoute(window.location.pathname, window.location.search));
   const [currentOperationsHome, setCurrentOperationsHome] = useState<PortalOperationsHomeResponse | undefined>(operationsHomeResponse);
   const [operationsHomeStatus, setOperationsHomeStatus] = useState<"current" | "checking" | "unavailable">("current");
   const [gate, setGate] = useState<PortalGate>({ status: "loading" });
@@ -2772,7 +2773,7 @@ export function ClientPortalApp({
   gateRef.current = gate;
   const [page, setPage] = useState<ClientPortalPage>(initialPage);
   const [projectId, setProjectId] = useState<string | null>(
-    viewerRoute?.projectId ?? initialRoute.projectId,
+    viewerRoute ? clientViewerRouteProjectId(viewerRoute) : initialRoute.projectId,
   );
   const [feedbackId, setFeedbackId] = useState<string | null>(initialRoute.feedbackId ?? null);
   // In the unified portal, list pages merge every account; a link that names an
@@ -2890,8 +2891,8 @@ export function ClientPortalApp({
   useEffect(() => {
     let active = true;
     bootstrapController.current?.abort(); const controller = new AbortController(); bootstrapController.current = controller;
-    const requestedViewerRoute = parseClientViewerShellRoute(location.pathname);
-    const requestedWorkspaceId = requestedViewerRoute?.mode === "native" ? requestedViewerRoute.workspaceId : new URLSearchParams(location.search).get("workspace");
+    const requestedViewerRoute = parseClientViewerShellRoute(location.pathname, location.search);
+    const requestedWorkspaceId = clientViewerRouteWorkspaceId(requestedViewerRoute) ?? new URLSearchParams(location.search).get("workspace");
     loadPortalBootstrap(undefined, requestedWorkspaceId, controller.signal)
       .then((data) => {
         if (active && !controller.signal.aborted) {
@@ -2931,12 +2932,12 @@ export function ClientPortalApp({
   }, [gate]);
   useEffect(() => {
     const onPopState = () => {
-      const currentViewerRoute = parseClientViewerShellRoute(window.location.pathname);
+      const currentViewerRoute = parseClientViewerShellRoute(window.location.pathname, window.location.search);
       setViewerRoute(currentViewerRoute);
-      const route = currentViewerRoute ? { isPortal: true, page: "project" as const, projectId: currentViewerRoute.projectId, feedbackId: undefined } : parseClientPortalRoute(window.location.pathname);
+      const route = currentViewerRoute ? { isPortal: true, page: "project" as const, projectId: clientViewerRouteProjectId(currentViewerRoute), feedbackId: undefined } : parseClientPortalRoute(window.location.pathname);
       if (!route.isPortal) window.location.reload();
       else {
-        const hint = currentViewerRoute?.mode === "native" ? currentViewerRoute.workspaceId : new URLSearchParams(location.search).get("workspace"), current = gateRef.current;
+        const hint = clientViewerRouteWorkspaceId(currentViewerRoute) ?? new URLSearchParams(location.search).get("workspace"), current = gateRef.current;
         if (hint !== null && (current.status !== "ready" || hint !== (current.data.selectedWorkspaceId ?? null))) {
           bootstrapController.current?.abort(); setSwitchingWorkspace(false); setGate({status: "loading"}); setBootstrapRevision(value => value + 1);
         }
@@ -3239,7 +3240,7 @@ export function ClientPortalApp({
     content = <ClientViewerShell route={viewerRoute} />;
   else if (unifiedView)
     content = <UnifiedPortal page={page as UnifiedPage} workspaces={workspaces}
-      openInAccount={openInAccount} navigate={navigate} supplement={page === "dashboard" ? operationsHomeSummary : undefined}
+      openInAccount={openInAccount} navigate={navigate} supplement={page === "dashboard" ? <><SharedViewerWork workspaces={workspaces} />{operationsHomeSummary}</> : undefined}
       renderStatus={request => <StatusPill tone={statusTone(request.status)}>{statusLabel(request.status, request.projectAlphaDraftCreated)}</StatusPill>} />;
   else if (native)
     content = <NativeWorkspaceContent key={`${native.workspace.sourceId}:${native.workspace.id}:${native.contextVersion}`} context={native} page={page} projectId={projectId} feedbackId={feedbackId} openProject={openProject}
@@ -3250,7 +3251,7 @@ export function ClientPortalApp({
         loadModels={project => loadNativeViewerModels(native,project)}
         shellPath={model=>nativeClientViewerShellPath({workspaceId:native.workspace.id,projectId:id,associationId:model.associationId,modelId:model.modelId})}
         persistUnits={null} />}
-      renderDashboardSupplement={operationsHomeSummary ? () => operationsHomeSummary : undefined}
+      renderDashboardSupplement={() => <><SharedViewerWork workspaces={workspaces.length ? workspaces : [native.workspace]} />{operationsHomeSummary}</>}
       renderFiles={options => <FileBrowser key={options.folderId ?? "linked-file"} {...options} feedback={native.capabilities.feedback} nativeFeedbackWorkspaceId={native.workspace.id} workspaceId={native.workspace.id} mapToken={null} locationScopeLabel="" emptyTitle="No files shown" emptyDetail={options.folderId ? "This shared folder has no files on this page." : "Open a delivery folder to browse its files."} />} />;
   else if (page === "project")
     content = selectedProject ? (

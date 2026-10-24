@@ -1,6 +1,5 @@
 .native-workspace { display: grid; gap: 1.25rem; min-width: 0; }
 .native-workspace .portal-welcome { margin-bottom: 0; }
-.native-workspace .native-workspace-identity { margin: .35rem 0 0; font-size: .95rem; overflow-wrap: anywhere; }
 .native-workspace h1, .native-workspace-source, .native-workspace-list strong { overflow-wrap: anywhere; }
 .native-workspace .ltds-card { display: grid; gap: 1rem; min-width: 0; }
 .native-workspace .ltds-card > .button, .native-workspace .ltds-card > button { justify-self: start; }

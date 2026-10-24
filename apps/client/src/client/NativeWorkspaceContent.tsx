@@ -147,14 +147,14 @@ export function NativeWorkspaceContent({ context, page, projectId, feedbackId, o
     (page === "feedback" && !context.capabilities.feedback) || (page === "project" && projectTab === "models" && !context.capabilities.viewer);
   const unavailableFeature: NativeWorkspaceFeatureKey = page === "feedback" ? "feedback"
     : page === "project" && params.get("tab") === "models" ? "models" : "serviceRequests";
-  // The stored account name can be a long source label, so it stays secondary to a plain page heading.
+  // Stored account names can be internal source labels, so pages use plain headings instead.
   const projectName = page === "project" && projectId ? entryLabels.get(`project:${projectId}`) : undefined;
   const heading = projectName ?? pageHeadings[page] ?? "Your account";
   // Requests and feedback render their own page heading.
   const embeddedHeading = page === "requests" || page === "request-new" || page === "feedback" || (page === "project" && projectTab === "requests");
 
   return <section className="native-workspace" aria-label="Client account">
-    <header className="portal-welcome">{!embeddedHeading && <h1>{heading}</h1>}<p className="native-workspace-identity">{context.workspace.displayName}</p></header>
+    <header className="portal-welcome">{!embeddedHeading && <h1>{heading}</h1>}</header>
     {unsupportedRoute ? <><Card title="Feature unavailable"><p>{featureDetail(unavailableFeature, context.features)}</p></Card><FeatureReadiness features={context.features} /></> :
       ((page === "requests" || page === "request-new") || (page === "project" && projectTab === "requests")) && context.capabilities.requestV2 && renderRequests
         ? renderRequests(requestProjects, page === "project" ? projectId ?? undefined : undefined)
