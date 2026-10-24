@@ -11,6 +11,7 @@ import { createWorkspaceDialogs } from './workspace-dialogs.mjs';
 import { mountNewTask } from './workspace-new-task.mjs';
 import { mountTaskOptions } from './workspace-task-options.mjs';
 import { createWorkspaceRecovery, relayWorkspaceRecoveryGrant } from './workspace-recovery.mjs';
+import { DIRECT_CLIENT_GRANTS_PATH, directClientAccess, directClientsPath, directGrantRows, directShareErrorText, directShareForm, readDirectShareForm, shareableTasks } from './workspace-direct-client-share.mjs';
 
 const dialogs=createWorkspaceDialogs();
 
@@ -60,7 +61,7 @@ function canShareOutput(output) {
     &&['viewer.shares.create','viewer.shares.read','viewer.client_grants.manage'].some(can);
 }
 async function openShareModal(projectId,onlyOutputId=null){
-  state.clientNativeAccess=null;
+  state.clientNativeAccess=null;state.clientDirectAccess=null;
   const context={projectId,onlyOutputId,id:crypto.randomUUID(),mode:'internal',loading:true,clientLoading:can('viewer.client_grants.manage'),clientError:null};
   const token=state.token,subject=state.adminSession?.subject;
   const current=()=>Boolean(token)&&state.shareContext===context&&modal.open&&state.token===token&&state.adminSession?.subject===subject
@@ -83,8 +84,9 @@ async function openShareModal(projectId,onlyOutputId=null){
   // Optional Operations lookup must not hold the independent public-link form.
   // A late result updates only its own panel, preserving typed public-link fields.
   if(context.clientLoading)void(async()=>{
-    const [legacy,native]=await Promise.allSettled([api('/api/v1/workspace/client-grants'),api('/api/v1/workspace/native-client-grants')]);
+    const [legacy,native,direct]=await Promise.allSettled([api('/api/v1/workspace/client-grants'),api('/api/v1/workspace/native-client-grants'),api(directClientsPath(projectId))]);
     if(!current()||!can('viewer.client_grants.manage'))return;
+    state.clientDirectAccess=direct.status==='fulfilled'?directClientAccess(direct.value):null;context.directQuery='';
     state.clientAccess=legacy.status==='fulfilled'?legacy.value:null;
     state.clientNativeAccess=native.status==='fulfilled'&&Array.isArray(native.value?.targets)&&Array.isArray(native.value?.grants)?native.value:null;
     context.clientLoading=false;context.clientError=legacy.status==='rejected'?clientAccessDiagnostic(legacy.reason):null;context.nativeError=native.status==='rejected'?clientAccessDiagnostic(native.reason):null;
@@ -197,7 +199,7 @@ async function workspaceFetch(path,init={}){
   }
   return response;
 }
-async function api(path,{method='GET',body,headers={},signal}={}){const init={method,...(signal?{signal}:{}),headers:{Authorization:`Bearer ${state.token}`,Accept:'application/json',...headers}};if(method!=='GET'&&!init.headers['Idempotency-Key'])init.headers['Idempotency-Key']=crypto.randomUUID();if(body!==undefined){init.headers['Content-Type']='application/json';init.body=JSON.stringify(body)}const response=await workspaceFetch(path,init);let payload;try{payload=await response.json()}catch{}if(['/api/v1/workspace/client-grants','/api/v1/workspace/native-client-grants'].includes(path)&&!response.ok){if(response.status===401)clearWorkspaceAuthorization();throw Object.assign(responseError('Operations client access request failed',response.status),clientAccessDiagnostic({status:response.status,code:payload?.code,requestId:response.headers?.get('X-LTDS-Client-Access-Request')}));}if(response.status===401){clearWorkspaceAuthorization();throw responseError('authorization_required',401)}if(response.status===403)throw responseError('Your current Viewer grant does not permit this action',403);if(!response.ok)throw responseError(payload?.message||payload?.error||`Request failed (${response.status})`,response.status);return payload}
+async function api(path,{method='GET',body,headers={},signal}={}){const init={method,...(signal?{signal}:{}),headers:{Authorization:`Bearer ${state.token}`,Accept:'application/json',...headers}};if(method!=='GET'&&!init.headers['Idempotency-Key'])init.headers['Idempotency-Key']=crypto.randomUUID();if(body!==undefined){init.headers['Content-Type']='application/json';init.body=JSON.stringify(body)}const response=await workspaceFetch(path,init);let payload;try{payload=await response.json()}catch{}if(['/api/v1/workspace/client-grants','/api/v1/workspace/native-client-grants'].includes(path)&&!response.ok){if(response.status===401)clearWorkspaceAuthorization();throw Object.assign(responseError('Operations client access request failed',response.status),clientAccessDiagnostic({status:response.status,code:payload?.code,requestId:response.headers?.get('X-LTDS-Client-Access-Request')}));}if(response.status===401){clearWorkspaceAuthorization();throw responseError('authorization_required',401)}if(response.status===403)throw responseError('Your current Viewer grant does not permit this action',403);if(!response.ok)throw Object.assign(responseError(payload?.message||payload?.error||`Request failed (${response.status})`,response.status),payload?.code?{code:payload.code,grantId:payload.grantId}:{});return payload}
 async function authenticatedDownload(path,fileName){const grantPath=path.endsWith('/download-grants')?path:path.replace(/\/assets\/([^/]+)$/, '/products/$1/download-grants');if(grantPath===path&&!path.endsWith('/download-grants'))throw new Error('This product does not support a secure download');const response=await workspaceFetch(grantPath,{method:'POST',headers:{Authorization:`Bearer ${state.token}`,'Content-Type':'application/json'},body:'{}'});if(response.status===401){clearWorkspaceAuthorization();throw responseError('authorization_required',401)}if(response.status===403)throw responseError('Your current Viewer grant does not permit this download',403);if(!response.ok)throw responseError(`Download failed (${response.status})`,response.status);const grant=await response.json(),url=new URL(grant.url,location.origin);if(url.origin!==location.origin||!url.pathname.startsWith('/api/v1/processing/product-downloads/'))throw new Error('Invalid download response');const link=document.createElement('a');try{link.href=url.href;link.download=grant.fileName||fileName;link.referrerPolicy='no-referrer';document.body.append(link);link.click()}finally{link.remove()}}
 async function mutate(path,options,message){if(state.busy)return;state.busy=true;shell.setAttribute('aria-busy','true');try{const result=await api(path,options);toast(typeof message==='function'?message(result):message);await load();return result}catch(error){toast(error.message,true)}finally{state.busy=false;shell.removeAttribute('aria-busy')}}
 async function confirmedMutation(promptText,path,options,message){if(!await dialogs.confirm(promptText))return;return mutate(path,options,message)}
@@ -634,7 +636,66 @@ function clientSharePanel(output,onlyOutputId){
       +(details?`<p class="form-note">${esc(details)}</p>`:'')
       +`<p class="form-note">${diagnostic.requestId?`Reference: ${esc(diagnostic.requestId)}. Share this reference with your administrator.`:'No proxy reference was returned; this alone does not identify the failure stage.'}</p>`);
   }
+  if(state.clientDirectAccess)return directClientShareCard(onlyOutputId)
+    +`<details class="share-legacy"><summary>Share through an Operations project instead</summary>${clientShareCard(output,onlyOutputId)}</details>`;
   return clientShareCard(output,onlyOutputId);
+}
+function directShareContext(onlyOutputId){
+  const projectId=state.shareContext.projectId,project=state.projects.find(item=>item.id===projectId);
+  return {projectId,projectName:project?.displayName||'this project',tasks:shareableTasks(projectId,state.tasks,state.outputs),
+    taskId:onlyOutputId?state.outputs.find(output=>output.id===onlyOutputId)?.taskId||null:null};
+}
+function directClientShareCard(onlyOutputId){
+  const context=directShareContext(onlyOutputId),access=state.clientDirectAccess;
+  return card('Share with a client',`<p class="form-note">Choose a client and what they can see. No business project or model setup is needed.</p>${directShareForm({...context,access,query:state.shareContext.directQuery||''})}<h3 class="direct-share-heading">Clients with access</h3>${directGrantRows(access,{...context,dateTime})}`);
+}
+function rerenderClientSharePanel(projectId,onlyOutputId){
+  const panel=modalContent.querySelector('[data-client-share-panel]');
+  if(panel){panel.innerHTML=clientSharePanel(state.outputs.find(output=>output.id===onlyOutputId),onlyOutputId);bindShareModal(projectId,onlyOutputId);}
+}
+function bindDirectShare(form,projectId,onlyOutputId){
+  const context=directShareContext(onlyOutputId),read=()=>readDirectShareForm(form,{...context,clients:state.clientDirectAccess?.clients||[]});
+  const summary=form.querySelector('[data-direct-summary]'),taskInputs=[...form.querySelectorAll('input[name="taskId"]')];
+  const sync=()=>{const current=read();for(const input of taskInputs)input.disabled=current.scope!=='tasks';summary.textContent=current.summary};
+  form.onchange=sync;sync();
+  const shareContext=state.shareContext,live=()=>state.shareContext===shareContext&&form.isConnected&&modal.open;
+  const search=async more=>{
+    if(form.shareBusy)return;
+    const query=more?shareContext.directQuery||'':form.elements.clientQuery.value;
+    try{
+      const result=directClientAccess(await api(directClientsPath(projectId,{query,cursor:more?state.clientDirectAccess.clientsNextCursor:null})));
+      if(!result||!live()||form.shareBusy)return;
+      shareContext.directQuery=query;
+      state.clientDirectAccess={...result,clients:more?[...state.clientDirectAccess.clients,...result.clients]:result.clients};
+      rerenderClientSharePanel(projectId,onlyOutputId);
+    }catch(error){toast(directShareErrorText(error),true)}
+  };
+  form.querySelector('[data-action="search-direct-clients"]').onclick=()=>search(false);
+  form.elements.clientQuery.onkeydown=event=>{if(event.key==='Enter'){event.preventDefault();search(false)}};
+  const more=form.querySelector('[data-action="more-direct-clients"]');if(more)more.onclick=()=>search(true);
+  // Pinned to this modal (shareContext above): a late result must not touch a different Share dialog.
+  form.onsubmit=async event=>{
+    event.preventDefault();if(form.shareBusy)return;
+    let bodies,target;try{target=read();bodies=target.bodies()}catch(error){summary.textContent=error.message;return}
+    // Inputs stay frozen while sending so the summary always matches what is being shared.
+    const controls=[...form.querySelectorAll('input,select,button')].map(element=>[element,element.disabled]);
+    for(const [element] of controls)element.disabled=true;
+    form.shareBusy=true;form.requestKeys||=new Map();let shared=0;summary.textContent=`Sharing… ${target.summary}`;
+    try{
+      for(const body of bodies){
+        const serialized=JSON.stringify(body);if(!form.requestKeys.has(serialized))form.requestKeys.set(serialized,crypto.randomUUID());
+        await api(DIRECT_CLIENT_GRANTS_PATH,{method:'POST',body,headers:{'Idempotency-Key':form.requestKeys.get(serialized)}});shared++;
+      }
+      toast(bodies.length>1?`Shared ${shared} tasks with the client`:'Shared with the client');
+    }catch(error){
+      toast(directShareErrorText(error),true);
+      if(live())summary.textContent=(shared?`Shared ${shared} of ${bodies.length}. Share again to finish; already shared tasks are not duplicated. `:'')+directShareErrorText(error);
+    }finally{form.shareBusy=false;if(form.isConnected)for(const [element,disabled] of controls)element.disabled=disabled}
+    // A partial share keeps the form and its retry keys exactly as they were.
+    if(shared!==bodies.length||!live())return;
+    try{const result=directClientAccess(await api(directClientsPath(projectId,{query:shareContext.directQuery||''})));if(result&&live())state.clientDirectAccess=result}catch{}
+    if(live())rerenderClientSharePanel(projectId,onlyOutputId);
+  };
 }
 function clientShareCard(output,onlyOutputId){
   if(!can('viewer.client_grants.manage'))return card('Authenticated client access',empty('Client-access management requires an additional permission.'));
@@ -847,6 +908,17 @@ function bindShareModal(projectId,onlyOutputId){
   modalContent.querySelectorAll('.share-form').forEach(bindShareViewControls);
   modalContent.querySelectorAll('[data-action="copy-existing-share"],[data-action="open-existing-share"]').forEach(element=>element.onclick=()=>retrieveShareLink(element));
   modalContent.querySelectorAll('[data-action="edit-share"]').forEach(element=>element.onclick=()=>editShareModal(projectId,onlyOutputId,element.dataset.id));
+  const directForm=modalContent.querySelector('#direct-client-grant-form');
+  if(directForm)bindDirectShare(directForm,projectId,onlyOutputId);
+  modalContent.querySelectorAll('[data-action="revoke-direct-client-grant"]').forEach(element=>element.onclick=async()=>{
+    const input=await dialogs.form({title:'Revoke client access',submitLabel:'Revoke access',destructive:true,fields:[{name:'reason',label:'Reason for revoking this client access',required:true,maxLength:240}]});
+    if(!input||!modal.open)return;element.disabled=true;
+    try{
+      await api(`${DIRECT_CLIENT_GRANTS_PATH}/${encodeURIComponent(element.dataset.id)}`,{method:'DELETE',body:{reason:input.reason}});
+      const grant=state.clientDirectAccess?.grants.find(item=>item.grantId===element.dataset.id);if(grant)grant.revokedAt=new Date().toISOString();
+      toast('Client access revoked');if(modal.open)rerenderClientSharePanel(projectId,onlyOutputId);
+    }catch(error){toast(directShareErrorText(error),true);element.disabled=false}
+  });
   const grantForm=modalContent.querySelector('#client-grant-form');
   if(grantForm){const portal=grantForm.elements.portalConnection,target=grantForm.elements.associationId||grantForm.elements.projectId;if(portal&&target){const update=()=>{for(const option of target.options){if(!option.value)continue;option.hidden=option.dataset.portal!==portal.value;option.disabled=option.hidden}target.value=''};portal.onchange=update;update()}}
   if(grantForm)grantForm.onsubmit=async event=>{
