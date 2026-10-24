@@ -40,7 +40,7 @@ export function shareableTasks(projectId,tasks,outputs){
 }
 export function directScopeSummary({clientName,projectName,scope,taskNames}){
   if(!clientName)return 'Choose a client to see exactly who gets access.';
-  const who=`Everyone who signs in to ${clientName}’s portal account`;
+  const who=`Authorized members of ${clientName}’s portal account`;
   if(scope==='project')return `${who} will see every published task in ${projectName}, including tasks published later.`;
   if(!taskNames.length)return 'Choose at least one task to share.';
   const list=taskNames.length===1?`only “${taskNames[0]}”`:`only these ${taskNames.length} tasks: ${taskNames.map(name=>`“${name}”`).join(', ')}`;
@@ -60,7 +60,7 @@ export function directShareForm({projectName,tasks,access,query='',taskId=null})
 <div class="direct-share-search"><input type="search" name="clientQuery" aria-label="Search clients" placeholder="Search clients" value="${esc(query)}"><button type="button" class="secondary-button" data-action="search-direct-clients">Search</button></div>
 <label><span>Client</span><select name="client" required><option value="">${clients.length?'Choose a client':'No matching clients'}</option>${options}</select></label>
 ${access.clientsNextCursor?'<button type="button" class="secondary-button" data-action="more-direct-clients">Show more clients</button>':''}
-<p class="form-note">Access goes to the client’s portal account. Everyone they have invited to it can open what you share.</p>
+<p class="form-note">Authorized members of this client’s portal account can open what you share.</p>
 </fieldset>
 <fieldset><legend>What to share</legend>
 <label class="check"><input type="radio" name="scope" value="project" ${taskMode?'':'checked'}> The whole project, including tasks published later</label>
