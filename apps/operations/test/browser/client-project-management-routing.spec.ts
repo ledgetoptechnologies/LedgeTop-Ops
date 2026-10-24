@@ -182,6 +182,9 @@ test("native creation freezes one exact request and retries it after an uncertai
   await expect(region.getByRole("button", { name: "Retry exact request" })).toBeVisible();
   await expect(region.getByLabel("Project name")).toBeDisabled();
   await expect(region.getByRole("button", { name: "Cancel prepared request" })).toHaveCount(0);
+  // Retry appears as soon as the request is sent; the dialog stays open until the uncertain outcome returns.
+  await expect(region.getByRole("button", { name: "Retry exact request" })).toBeEnabled();
+  expect(submissions).toHaveLength(1);
   await page.keyboard.press("Escape");
   await expect(page.getByRole("dialog")).toHaveCount(0);
   await region.getByRole("button", { name: "Review project request" }).click();
