@@ -5,18 +5,19 @@ export const ACCESS_LOGOUT = "/cdn-cgi/access/logout";
 /**
  * Ends the Cloudflare Access session through its documented logout URL, then returns to `returnTo` on this host,
  * where Access shows its sign-in. Any failure falls back to opening the logout URL itself; a second click while one
- * is pending does nothing, and modified clicks keep the browser's own link handling.
+ * is pending does nothing, and modified clicks keep the browser's own link handling. `beforeSignOut` returning false
+ * stops the sign-out before it starts.
  */
-export function useAccessSignOut(returnTo = "/", beforeSignOut?: () => void) {
+export function useAccessSignOut(returnTo = "/", beforeSignOut?: () => boolean | void) {
   const [pending, setPending] = useState(false);
   const started = useRef(false);
   const signOut = (event: MouseEvent<HTMLAnchorElement>) => {
     if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
     event.preventDefault();
     if (started.current) return;
+    if (beforeSignOut?.() === false) return;
     started.current = true;
     setPending(true);
-    beforeSignOut?.();
     fetch(ACCESS_LOGOUT, { credentials: "same-origin", redirect: "manual", cache: "no-store", signal: AbortSignal.timeout(8000) })
       .then(response => response.ok || response.type === "opaqueredirect")
       .catch(() => false)
