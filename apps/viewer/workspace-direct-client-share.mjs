@@ -4,7 +4,8 @@
 export const DIRECT_CLIENT_GRANTS_PATH='/api/v1/workspace/direct-client-grants';
 
 const esc=value=>String(value??'').replace(/[&<>"']/g,character=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[character]));
-const PERMISSIONS=[['measure','Measurements',true],['cameras','Camera positions',true],['download','Downloads',false]];
+// Camera positions reveal where photos were taken, so they start off for new client shares.
+const PERMISSIONS=[['measure','Measurements',true],['cameras','Camera positions (shows where photos were taken)',false],['download','Downloads',false]];
 const ERRORS={
   relationship_missing:'This client is not connected to Ledge Top yet, so nothing was shared.',
   consent_required:'Confirm the access before sharing.',

@@ -37,6 +37,7 @@ async function mock(page: Page, workspaces: typeof allWorkspaces, viewer: (route
       const id = match[1]!, suffix = match[2]!;
       if (suffix === "context") return route.fulfill({json: context(id)});
       if (suffix === "hierarchy") return route.fulfill({json: hierarchy(id)});
+      if (suffix === "deliveries") return route.fulfill({json: {workspaceId: id, sourceId: workspace(id).sourceId, contextVersion: `context-${id}`, items: [], page: {nextCursor: null}}});
       if (suffix === "viewer" || suffix.startsWith("viewer/")) { const handled = viewer(route, call, id); if (handled) return handled; }
     }
     if (call.path === "/api/client/notification-history") return route.fulfill({json: {scope: {sourceId: "project-alpha:coastal", workspaceId: "workspace-b", rootType: "organization", rootPublicId: "org-shared"}, asOf: date,
@@ -178,4 +179,15 @@ test("opening shared work loads the direct route and posts its exact session end
   const afterOpen = calls.slice(beforeOpen);
   expect(afterOpen.some(call => call.path === "/api/client/v2/workspaces/workspace-b/context")).toBe(false);
   expect(afterOpen.some(call => call.path === "/api/client/v2/workspaces/workspace-c/context")).toBe(true);
+});
+
+for (const [label, workspaces] of [["one account", [allWorkspaces[0]!]], ["two accounts", allWorkspaces]] as const) test(`Deliveries lists shared 3D work next to delivery folders (${label})`, async ({page}) => {
+  await mock(page, [...workspaces], (route, call, id) => call.path.endsWith("/viewer") ? route.fulfill({json: viewerPage(id, [
+    {grantId: `grant-${id}`, taskId: `task-${id}`, scopeType: "task", title: `Scan ${id}`, projectName: "Harbor bridge", businessName: "Harbor Engineering", updatedAt: "2026-08-20T12:00:00Z"},
+  ])}) : undefined);
+  await page.goto("/portal/deliveries?workspace=workspace-b");
+  await expect(card(page).getByRole("heading", {name: "Shared 3D work"})).toBeVisible();
+  await expect(rows(page)).toHaveCount(workspaces.length);
+  await expect(page.locator("body")).not.toContainText("QA internal label");
+  await noHorizontalOverflow(page);
 });

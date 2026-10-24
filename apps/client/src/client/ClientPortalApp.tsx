@@ -3084,7 +3084,10 @@ export function ClientPortalApp({
   const unifiedView = unifiedMode && UNIFIED_PAGES.has(page) && !accountFocus;
   const currentAccount = unifiedMode ? workspaces.find(workspace => workspace.id === selectedWorkspaceId) : undefined;
   const unifiedScopes = unifiedMode ? workspaces.filter(unifiedAccountSupported).map(workspace => workspace.id) : [];
-  const unifiedLabels = new Map(workspaces.map(workspace => [workspace.id, `${unifiedAccount(workspace).business} · ${AREA_TEXT[accountArea(unifiedAccount(workspace))].name}`]));
+  // Bell labels name the business and kind of work, numbered when two accounts would read the same.
+  const baseLabel = (workspace: PortalWorkspace) => { const item = unifiedAccount(workspace), area = AREA_TEXT[accountArea(item)].name; return area === item.business ? item.business : `${item.business} · ${area}`; };
+  const unifiedLabels = new Map(workspaces.map(workspace => { const base = baseLabel(workspace), same = workspaces.filter(other => baseLabel(other) === base);
+    return [workspace.id, same.length > 1 ? `${base} ${same.findIndex(other => other.id === workspace.id) + 1}` : base]; }));
   // Notification history doesn't depend on request support, so the bell resets on the
   // verified source/workspace/context version whether or not requests are enabled.
   const notificationContextKey = native ? `${native.workspace.sourceId}:${native.workspace.id}:${native.contextVersion}` : `${account!.id}:${selectedWorkspaceId ?? "legacy"}`;
@@ -3241,7 +3244,7 @@ export function ClientPortalApp({
     content = <ClientViewerShell route={viewerRoute} />;
   else if (unifiedView)
     content = <UnifiedPortal page={page as UnifiedPage} workspaces={workspaces}
-      openInAccount={openInAccount} navigate={navigate} supplement={page === "dashboard" ? <><SharedViewerWork workspaces={workspaces} />{operationsHomeSummary}</> : undefined}
+      openInAccount={openInAccount} navigate={navigate} supplement={page === "dashboard" ? <><SharedViewerWork workspaces={workspaces} />{operationsHomeSummary}</> : page === "deliveries" ? <SharedViewerWork workspaces={workspaces} /> : undefined}
       renderStatus={request => <StatusPill tone={statusTone(request.status)}>{statusLabel(request.status, request.projectAlphaDraftCreated)}</StatusPill>} />;
   else if (native)
     content = <NativeWorkspaceContent key={`${native.workspace.sourceId}:${native.workspace.id}:${native.contextVersion}`} context={native} page={page} projectId={projectId} feedbackId={feedbackId} openProject={openProject}
@@ -3253,6 +3256,7 @@ export function ClientPortalApp({
         shellPath={model=>nativeClientViewerShellPath({workspaceId:native.workspace.id,projectId:id,associationId:model.associationId,modelId:model.modelId})}
         persistUnits={null} />}
       renderDashboardSupplement={() => <><SharedViewerWork workspaces={workspaces.length ? workspaces : [native.workspace]} />{operationsHomeSummary}</>}
+      renderSharedWork={() => <SharedViewerWork workspaces={workspaces.length ? workspaces : [native.workspace]} />}
       renderFiles={options => <FileBrowser key={options.folderId ?? "linked-file"} {...options} feedback={native.capabilities.feedback} nativeFeedbackWorkspaceId={native.workspace.id} workspaceId={native.workspace.id} mapToken={null} locationScopeLabel="" emptyTitle="No files shown" emptyDetail={options.folderId ? "This shared folder has no files on this page." : "Open a delivery folder to browse its files."} />} />;
   else if (page === "project")
     content = selectedProject ? (

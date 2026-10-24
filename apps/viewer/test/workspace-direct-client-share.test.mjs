@@ -85,3 +85,9 @@ test('server codes become plain explanations',()=>{
   assert.match(directShareErrorText({code:'relationship_missing',message:'x'}),/not connected/);
   assert.equal(directShareErrorText({message:'Request failed (503)'}),'Request failed (503)');
 });
+
+test('new client shares start with measurements on and camera positions and downloads off',()=>{
+  const html=directShareForm({projectName:'Site',tasks,access:{clients,grants:[]}});
+  assert.match(html,/name="measure" checked/);
+  assert.doesNotMatch(html,/name="cameras" checked/);assert.doesNotMatch(html,/name="download" checked/);
+});

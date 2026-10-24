@@ -61,7 +61,12 @@ export function SharedViewerWork({ workspaces }: { workspaces: PortalWorkspace[]
       // The cursor is only ever sent back to the account that issued it.
       const page = await loadNativeViewerWork(workspaceId, state.cursor, controller.signal);
       update(value => ({ ...value, items: [...value.items, ...page.items], cursor: page.nextCursor, loadingMore: false }));
-    } catch { update(value => ({ ...value, loadingMore: false, moreError: true })); }
+    } catch (caught) {
+      const status = (caught as RequestError).status ?? 0;
+      // A cursor goes stale when sharing changes: reload this account from the start instead of retrying it.
+      if ([400, 403, 404, 409].includes(status)) { if (!controller.signal.aborted && current === generation.current) void loadFirst(workspaceId, current); }
+      else update(value => ({ ...value, loadingMore: false, moreError: true }));
+    }
   };
 
   const states = accounts.map(account => ({ account, state: work.get(account.id) ?? { status: "loading" as const } }));
