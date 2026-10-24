@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { loadUnifiedAccount, showsClientName, unifiedAccount, unifiedAccountSupported } from "../src/client/unified-portal";
+import { loadUnifiedAccount, unifiedAccount, unifiedAccountSupported } from "../src/client/unified-portal";
 import type { PortalWorkspace } from "../src/client/portal-api";
 
 const legacy: PortalWorkspace = { id: "workspace-a", rootType: "organization", rootPublicId: "org-a", displayName: "Acme" };
@@ -15,10 +15,6 @@ describe("unified client portal", () => {
     expect(unifiedAccountSupported(legacy)).toBe(true);
     expect(unifiedAccountSupported(secondary)).toBe(true);
     expect(unifiedAccountSupported({ ...legacy, sourceId: "project-alpha:secondary" })).toBe(false);
-  });
-  it("shows client names only when a person spans several clients of a business", () => {
-    expect(showsClientName([unifiedAccount(legacy), unifiedAccount(secondary)])).toBe(false);
-    expect(showsClientName([unifiedAccount(legacy), unifiedAccount({ ...legacy, id: "workspace-c", displayName: "Beta" })])).toBe(true);
   });
   it("reads a legacy account with that account's explicit scope and tags every item with it", async () => {
     const seen: Array<{ url: string; workspaceId?: string }> = [];

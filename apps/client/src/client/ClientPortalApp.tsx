@@ -108,7 +108,7 @@ import { ServiceLibrary } from "./ServiceLibrary";
 import { canBeginRequest, RequestAvailabilityMessage, useRequestAvailability, type RequestAvailability } from "./RequestAvailability";
 import { RequestScopeBoundary } from "./RequestScopeBoundary";
 import { UNIFIED_PAGES, UnifiedPortal, type UnifiedPage } from "./UnifiedPortal";
-import { AREA_TEXT, accountArea, unifiedAccount, unifiedAccountSupported } from "./unified-portal";
+import { unifiedAccountSupported } from "./unified-portal";
 import { ClientSessionExpiry } from "./ClientSessionExpiry";
 import { LeaveFeedback, PortalFeedback } from "./PortalFeedback";
 import { PortalNotifications } from "./PortalNotifications";
@@ -3084,10 +3084,6 @@ export function ClientPortalApp({
   const unifiedView = unifiedMode && UNIFIED_PAGES.has(page) && !accountFocus;
   const currentAccount = unifiedMode ? workspaces.find(workspace => workspace.id === selectedWorkspaceId) : undefined;
   const unifiedScopes = unifiedMode ? workspaces.filter(unifiedAccountSupported).map(workspace => workspace.id) : [];
-  // Bell labels name the business and kind of work, numbered when two accounts would read the same.
-  const baseLabel = (workspace: PortalWorkspace) => { const item = unifiedAccount(workspace), area = AREA_TEXT[accountArea(item)].name; return area === item.business ? item.business : `${item.business} · ${area}`; };
-  const unifiedLabels = new Map(workspaces.map(workspace => { const base = baseLabel(workspace), same = workspaces.filter(other => baseLabel(other) === base);
-    return [workspace.id, same.length > 1 ? `${base} ${same.findIndex(other => other.id === workspace.id) + 1}` : base]; }));
   // Notification history doesn't depend on request support, so the bell resets on the
   // verified source/workspace/context version whether or not requests are enabled.
   const notificationContextKey = native ? `${native.workspace.sourceId}:${native.workspace.id}:${native.contextVersion}` : `${account!.id}:${selectedWorkspaceId ?? "legacy"}`;
@@ -3638,7 +3634,7 @@ export function ClientPortalApp({
           ))}
         </nav>
         {!switchingWorkspace && (unifiedMode
-          ? <PortalNotifications key={`unified:${notificationContextKey}:${unifiedScopes.join(",")}`} contextKey={notificationContextKey} scopes={unifiedScopes} labels={unifiedLabels} />
+          ? <PortalNotifications key={`unified:${notificationContextKey}:${unifiedScopes.join(",")}`} contextKey={notificationContextKey} scopes={unifiedScopes} />
           : <PortalNotifications key={requestContextKey} />)}
         <button ref={mobileNavTrigger} className="portal-nav-trigger" type="button" aria-label="Open navigation" aria-expanded={mobileNavOpen} aria-controls="portal-mobile-navigation" onClick={() => setMobileNavOpen(true)}><span className="nav-hamburger" aria-hidden="true"><i /><i /><i /></span></button>
         <AccountMenu className="portal-account-menu" displayName={shellDisplayName}
@@ -3656,9 +3652,8 @@ export function ClientPortalApp({
         </div>
       </div>}
       <main className={`client-portal-main${viewerRoute ? " client-viewer-main" : ""}`}>{switchingWorkspace ? <Loading /> : <>
-        {currentAccount && !unifiedView && <p className="unified-portal-context">
-          <span>{AREA_TEXT[accountArea(unifiedAccount(currentAccount))].name}</span>
-          {UNIFIED_PAGES.has(page) && <button type="button" className="portal-text-action" onClick={() => navigate(page as UnifiedPage)}>Back to everything</button>}
+        {currentAccount && !unifiedView && UNIFIED_PAGES.has(page) && <p className="unified-portal-context">
+          <button type="button" className="portal-text-action" onClick={() => navigate(page as UnifiedPage)}>Back to everything</button>
         </p>}
         {content}</>}</main>
     </div>

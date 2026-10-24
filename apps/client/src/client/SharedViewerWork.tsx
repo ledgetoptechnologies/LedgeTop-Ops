@@ -4,7 +4,6 @@ import type { RequestError } from "./bulk-download";
 import { loadNativeViewerWork, type NativeViewerWorkItem } from "./native-portal-api";
 import type { PortalWorkspace } from "./portal-api";
 import { directViewerTaskPath, sharedViewerRows, showsBusinessName, viewerWorkAccounts } from "./shared-viewer-work";
-import { AREA_TEXT, accountArea, unifiedAccount } from "./unified-portal";
 
 const ACCOUNT_CONCURRENCY = 4;
 type AccountWork =
@@ -75,15 +74,13 @@ export function SharedViewerWork({ workspaces }: { workspaces: PortalWorkspace[]
   const loading = states.some(({ state }) => state.status === "loading");
   const failed = states.filter(({ state }) => state.status === "error");
   const more = states.filter(({ state }) => state.status === "ready" && (state.cursor || state.moreError));
-  // Accounts are told apart by the kind of work only when several fail, never by their stored names.
-  const areaName = (workspace: PortalWorkspace) => failed.length > 1 ? AREA_TEXT[accountArea(unifiedAccount(workspace))].name : "";
   if (!accounts.length) return null;
 
   return <Card title="Shared 3D work" className="shared-viewer-work">
-    {failed.map(({ account }) => <div key={account.id} className="shared-viewer-work-problem" role="alert">
-      <p>Some shared 3D work{areaName(account) ? ` (${areaName(account)})` : ""} couldn’t be loaded.</p>
-      <button type="button" className="button-ghost button-small" onClick={() => void loadFirst(account.id, generation.current)}>Try again</button>
-    </div>)}
+    {failed.length > 0 && <div className="shared-viewer-work-problem" role="alert">
+      <p>Some shared 3D work couldn’t be loaded.</p>
+      <button type="button" className="button-ghost button-small" onClick={() => failed.forEach(({ account }) => void loadFirst(account.id, generation.current))}>Try again</button>
+    </div>}
     {rows.length > 0 && <ul className="shared-viewer-work-list">{rows.map(row => <li key={`${row.workspaceId}:${row.taskId}`}>
       <div><strong>{row.title}</strong>
         {(row.projectName || (withBusiness && row.businessName)) && <span>{[row.projectName, withBusiness ? row.businessName : null].filter(Boolean).join(" · ")}</span>}

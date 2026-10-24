@@ -506,11 +506,11 @@ test("the unified bell keeps every account's updates, each labelled and scoped, 
   const bell = page.getByRole("button", {name: /Notifications, 1 unread update/}); await expect(bell).toBeVisible(); await bell.click();
   const panel = page.getByRole("region", {name: "Notifications"});
   await expect(panel.getByText("Mountain current update", {exact: true})).toBeVisible();
-  await expect(panel).toContainText("Ledge Top 2");
+  await expect(panel).not.toContainText(/Ledge Top Drone Services|Ledge Top Technologies|Drone and survey|Website and marketing|Ledge Top \d/);
   await expect(panel).not.toContainText("Mountain Engineering");
   release();
   await expect(panel.getByText("Coastal late update", {exact: true})).toBeVisible();
-  await expect(panel).toContainText("Ledge Top 1");
+  await expect(panel).not.toContainText(/Ledge Top Drone Services|Ledge Top Technologies|Drone and survey|Website and marketing|Ledge Top \d/);
   await expect(page.getByRole("button", {name: /Notifications, 2 unread updates/})).toBeVisible();
   await expect(panel.getByRole("alert")).toHaveCount(0);
   expect(new Set(calls.filter(call => call.path === "/api/client/notification-history").map(call => call.workspace))).toEqual(new Set(["workspace-a", "workspace-b", "workspace-c"]));
@@ -543,7 +543,8 @@ test("the unified bell retries only the account that failed and keeps the others
   });
   const panel = await openUnifiedBell(page);
   await expect(panel.getByText("Coastal first update", {exact: true})).toBeVisible();
-  await expect(panel.getByRole("alert")).toContainText("Ledge Top 2");
+  await expect(panel.getByRole("alert")).toBeVisible();
+  await expect(panel.getByRole("alert")).not.toContainText(/Ledge Top Drone Services|Ledge Top Technologies|Drone and survey|Website and marketing|Ledge Top \d/);
   // Coverage is incomplete while an account is missing.
   await expect(panel).toContainText("Request history is currently unavailable.");
   mountainFails = false;
@@ -598,7 +599,8 @@ test("the unified bell revalidates on focus and drops an account revoked after l
   await revalidate(page);
   await expect(panel.getByText("Mountain update", {exact: true})).toHaveCount(0);
   await expect(panel.getByText("Coastal update", {exact: true})).toBeVisible();
-  await expect(panel.getByRole("alert")).toContainText("Ledge Top 2");
+  await expect(panel.getByRole("alert")).toBeVisible();
+  await expect(panel.getByRole("alert")).not.toContainText(/Ledge Top Drone Services|Ledge Top Technologies|Drone and survey|Website and marketing|Ledge Top \d/);
   expect(historyCalls(calls, "workspace-c")).toHaveLength(2);
 });
 
@@ -908,8 +910,8 @@ test("the unified portal lists every account's projects without a switcher and o
   await expect(page.getByRole("combobox", {name: "Client account"})).toHaveCount(0);
   const projects = page.locator(".portal-project-grid .portal-project-card");
   await expect(projects).toHaveCount(3);
-  // Items name the client account (several are open) but never make the client pick or read a business.
-  await expect(page.getByRole("button", {name: /Primary-only project/})).toContainText("Drone and survey");
+  // Items never name a business, division or client account, even when several accounts are open.
+  await expect(page.locator(".portal-project-grid")).not.toContainText(/Ledge Top Drone Services|Ledge Top Technologies|Drone and survey|Website and marketing|Ledge Top \d/);
   await expect(page.getByRole("button", {name: /Primary-only project/})).not.toContainText("Primary customer");
   await expect(page.locator(".portal-project-grid")).not.toContainText("Ledge Top Drone Services");
   await expect(page.getByRole("group", {name: "Show items from"})).toHaveCount(0);
@@ -928,7 +930,7 @@ test("the unified portal lists every account's projects without a switcher and o
   await expect(page).toHaveURL(/\/portal\/projects\/project-shared\?workspace=workspace-c$/);
   await expect(page.getByText("Mountain bridge inspection", {exact: true}).first()).toBeVisible();
   await expect(page.getByText("Coastal seawall construction documentation", {exact: true})).toHaveCount(0);
-  await expect(page.locator(".unified-portal-context")).not.toContainText("Mountain Engineering");
+  await expect(page.locator(".unified-portal-context")).toHaveCount(0);
   const topNav = page.getByRole("navigation", {name: "Client portal"});
   if (await topNav.isVisible()) await topNav.getByRole("link", {name: "Projects"}).click();
   else { await page.getByRole("button", {name: "Open navigation"}).click(); await page.getByRole("navigation", {name: "Mobile client portal navigation"}).getByRole("link", {name: "Projects"}).click(); }
@@ -940,7 +942,8 @@ test("one unavailable account is reported in place without hiding the others", a
   let failing = true;
   await mock(page, (route, call) => call.path.endsWith("workspace-c/context") && failing ? route.fulfill({status: 503, json: {error: "Temporarily unavailable"}}) : undefined);
   await page.goto("/portal/projects");
-  await expect(page.getByRole("alert")).toContainText("Ledge Top 2");
+  await expect(page.getByRole("alert")).toContainText("Some of your work couldn’t be loaded.");
+  await expect(page.getByRole("alert")).not.toContainText(/Ledge Top Drone Services|Ledge Top Technologies|Drone and survey|Website and marketing|Ledge Top \d/);
   await expect(page.getByRole("button", {name: /Coastal seawall construction documentation/})).toBeVisible();
   await expect(page.getByRole("button", {name: /Primary-only project/})).toBeVisible();
   failing = false; await page.getByRole("button", {name: "Try again"}).click();
@@ -1035,10 +1038,11 @@ test.describe("unified home without business switching", () => {
   async function mockBoth(page: Page) {
     return mock(page, (route, call) => {
       if (call.path === "/api/client/v2/workspaces") return route.fulfill({json: {workspaces: listed}});
-      const match = call.path.match(/^\/api\/client\/v2\/workspaces\/(workspace-[bc])\/(context|hierarchy)$/);
+      const match = call.path.match(/^\/api\/client\/v2\/workspaces\/(workspace-[bc])\/(context|hierarchy|deliveries)$/);
       if (match) {
         const id = match[1]!, ws = listed.find(item => item.id === id)!;
         if (match[2] === "context") return route.fulfill({json: {...requestContext(id), workspace: ws}});
+        if (match[2] === "deliveries") { const value = deliveries(id); return route.fulfill({json: {...value, sourceId: sources[id], items: value.items.map(item => ({...item, displayName: `${ws.displayName} — final deliverables`}))}}); }
         const value = hierarchy(id);
         return route.fulfill({json: {...value, sourceId: sources[id], entries: value.entries.map(entry => entry.type === "project"
           ? {...entry, displayName: id === "workspace-c" ? "Website refresh" : "Coastal seawall construction documentation"} : entry.type === "organization" ? {...entry, displayName: ws.displayName} : entry)}});
@@ -1073,20 +1077,30 @@ test.describe("unified home without business switching", () => {
     await expect(chooser).not.toContainText("Ledge Top Technologies");
     await chooser.getByRole("button", {name: /Website or marketing/}).click();
     await expect(page).toHaveURL(/\/portal\/requests\/new\?workspace=workspace-c$/);
-    await expect(page.locator(".unified-portal-context")).toHaveText(/^Website and marketing/);
-    await expect(page.locator(".unified-portal-context")).not.toContainText("Rivera Web Studio");
+    await expect(page.locator(".unified-portal-context")).toHaveCount(0);
+    await expect(page.locator(".client-portal-main")).not.toContainText(/Ledge Top Drone Services|Ledge Top Technologies|Drone and survey|Website and marketing|Ledge Top \d/);
   });
 
-  test("deliveries and feedback are described by the work, not the business", async ({page}) => {
-    await mockBoth(page); await page.goto("/portal/deliveries");
-    // Two accounts cover drone work, so they are numbered; neither shows a stored account name or a business.
-    await expect(page.getByText("Drone and survey deliveries", {exact: true})).toHaveCount(2);
-    await expect(page.locator(".unified-portal-area").filter({hasText: "Drone and survey 1"})).toContainText("Drone and survey deliveries");
-    await expect(page.locator(".unified-portal-area").filter({hasText: "Primary customer"})).toHaveCount(0);
-    await expect(page.getByText("Website and marketing files", {exact: true})).toBeVisible();
-    await expect(page.locator(".client-portal-main")).not.toContainText("Ledge Top Technologies");
+  test("deliveries are one flat list and feedback one neutral card, with no business or division", async ({page}) => {
+    const calls = await mockBoth(page); await page.goto("/portal/deliveries");
+    const folders = page.locator(".unified-deliveries");
+    await expect(folders.getByRole("heading", {name: "Delivery folders"})).toBeVisible();
+    await expect(folders.locator("li")).toHaveCount(2);
+    await expect(folders.getByRole("button", {name: "Open more delivered files"})).toBeVisible();
+    await expect(page.locator(".unified-portal-area")).toHaveCount(0);
+    await expect(page.locator(".client-portal-main")).not.toContainText(/Ledge Top Drone Services|Ledge Top Technologies|Drone and survey|Website and marketing|Ledge Top \d/);
+    await expect(page.locator(".client-portal-main")).not.toContainText("Primary customer");
+    // Each folder list is read with its own account, and each folder opens in exactly that account.
+    expect(calls.filter(call => call.path.endsWith("/deliveries")).map(call => call.path).sort()).toEqual(["/api/client/v2/workspaces/workspace-b/deliveries", "/api/client/v2/workspaces/workspace-c/deliveries"]);
+    await folders.locator("li").filter({hasText: "Rivera Web Studio"}).getByRole("button", {name: /Open folder/}).click();
+    await expect(page).toHaveURL(/\/portal\/deliveries\?folder=folder-workspace-c&workspace=workspace-c$/);
     await page.goto("/portal/feedback");
-    await expect(page.getByText("Website and marketing", {exact: true})).toBeVisible();
+    await expect(page.locator(".unified-portal-area")).toHaveCount(1);
+    await expect(page.locator(".unified-portal-area")).toContainText("Your feedback");
+    await expect(page.locator(".client-portal-main")).not.toContainText(/Ledge Top Drone Services|Ledge Top Technologies|Drone and survey|Website and marketing|Ledge Top \d/);
+    await page.goto("/portal/account");
+    await expect(page.locator(".unified-portal-area")).toHaveCount(1);
+    await expect(page.locator(".unified-portal-area")).toContainText("Account settings");
   });
 
   test("the redesigned home fits a phone without sideways scrolling", async ({page}) => {

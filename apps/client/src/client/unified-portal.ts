@@ -138,11 +138,6 @@ export async function loadUnifiedPortal(
   await Promise.all(Array.from({ length: Math.min(ACCOUNT_CONCURRENCY, queue.length) }, worker));
 }
 
-/** Sorted, de-duplicated client names: shown on items only when a person spans several client accounts. */
-export function showsClientName(accounts: UnifiedAccount[]): boolean {
-  return new Set(accounts.map(account => account.clientName)).size > 1 || accounts.length > new Set(accounts.map(account => account.business)).size;
-}
-
 export type AccountArea = "drone" | "web" | "general";
 
 /**
