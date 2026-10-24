@@ -35,6 +35,7 @@ function SignInEmails() {
   const [notice, setNotice] = useState<{ tone: "ok" | "error"; text: string } | null>(null);
   const [intent, setIntent] = useState<LoginLinkIntent | null>(null);
   const [busy, setBusy] = useState(false);
+  const [unconfirmedRemoval, setUnconfirmedRemoval] = useState<LoginLinkBinding | null>(null);
   const working = useRef(false);
   const load = useCallback((signal?: AbortSignal) => loadLoginLinks(signal)
     .then(links => setState({ kind: "ready", links }))
@@ -71,15 +72,22 @@ function SignInEmails() {
         ? caught.message : "The link couldn't be confirmed as created. Create a new link to try again." });
     }
   });
-  const remove = (binding: LoginLinkBinding) => run(async () => {
-    if (!await confirmAction(`Remove ${binding.email}? It will no longer open this Operations profile.`)) return;
+  const remove = (binding: LoginLinkBinding, confirmed = false) => run(async () => {
+    if (!confirmed && !await confirmAction(`Remove ${binding.email}? It will no longer open this Operations profile.`)) return;
     setNotice(null);
     try {
       await removeLoginLink(binding);
+      setUnconfirmedRemoval(null);
       setNotice({ tone: "ok", text: `${binding.email} was removed.` });
     } catch (caught) {
-      setNotice({ tone: "error", text: caught instanceof ApiError && caught.status === 409
-        ? "This email changed somewhere else. Review the list and try again." : `${binding.email} couldn't be removed. Try again.` });
+      if (!(caught instanceof ApiError) || caught.status >= 500) {
+        // The removal may have happened: keep the same version so a retry checks safely instead of guessing.
+        setUnconfirmedRemoval(binding);
+        setNotice({ tone: "error", text: `We couldn't confirm whether ${binding.email} was removed. Retry removal to check safely.` });
+        return;
+      }
+      setUnconfirmedRemoval(null);
+      setNotice({ tone: "error", text: caught.status === 409 ? "This email changed somewhere else. Review the list and try again." : caught.message });
     }
     await load();
   });
@@ -112,6 +120,9 @@ function SignInEmails() {
             {steppingUp ? "Signing out…" : "Sign in with main email"}</a>}
         </div>}
         {notice && <div className={`notice${notice.tone === "error" ? " error" : ""}`} role="status">{notice.text}</div>}
+        {unconfirmedRemoval && <div className="account-actions">
+          <button type="button" className="button-orange" disabled={busy} onClick={() => void remove(unconfirmedRemoval, true)}>Retry removal</button>
+        </div>}
         {links.canManage && intent && pendingLink && <div className="account-link-ready" role="status">
           <p><strong>Link ready for {intent.targetEmail}.</strong> It expires {when(intent.expiresAt)}.</p>
           <p className="muted">Sign out here and sign in as {intent.targetEmail} to confirm it. Signing out of Cloudflare Access affects every Ledge Top app in this browser. To confirm in another browser, copy the link instead.</p>

@@ -50,11 +50,11 @@ export function LinkLoginPage() {
     invalid: ["This link can't be used", "It has expired, was already used or isn't complete. Create a new link from your Operations account, then open it here."],
     conflict: ["This link is no longer current", "This email may already be linked, or a newer link replaced this one. Check your Operations account and create a new link if you still need one."],
     "sign-in": ["Sign in with the email you're adding", "To link it, sign in with the email you're adding after this link was created, then confirm again here."],
-    unavailable: ["Linking isn't available right now", "Nothing was changed. Check your connection and try again."],
+    unknown: ["We couldn't confirm the result", "We could not confirm whether the email was linked. Retry verification to check safely."],
   };
   const [title, detail] = copy[view];
-  const canClaim = !!pending && (view === "ready" || view === "unavailable");
-  const offerSignIn = !!pending && (view === "ready" || view === "sign-in" || view === "unavailable");
+  const canClaim = !!pending && (view === "ready" || view === "unknown");
+  const offerSignIn = !!pending && (view === "ready" || view === "sign-in");
   return <main className="fatal sign-in-problem link-login" aria-labelledby="link-login-title">
     <header><Brand product="Operations" /></header>
     <div className="sign-in-problem-body">
@@ -64,7 +64,7 @@ export function LinkLoginPage() {
       {message && view !== "ready" && <p className="sign-in-problem-hint">{message}</p>}
       {offerSignIn && <p className="sign-in-problem-hint">Not the email you're adding? Signing out of Cloudflare Access affects every Ledge Top app in this browser; this page comes back after you sign in.</p>}
       <div className="sign-in-problem-actions">
-        {canClaim && <button type="button" className="button-orange" onClick={claim}>{view === "unavailable" ? "Try again" : "Link this email"}</button>}
+        {canClaim && <button type="button" className="button-orange" onClick={claim}>{view === "unknown" ? "Retry verification" : "Link this email"}</button>}
         {view === "claiming" && <button type="button" className="button-orange" disabled>Linking…</button>}
         {offerSignIn && <a className={`button ${view === "sign-in" ? "button-orange" : "button-ghost"}`} href={ACCESS_LOGOUT} onClick={signOut}
           aria-disabled={signingOut || undefined}>{signingOut ? "Signing out…" : "Sign in with a different email"}</a>}
