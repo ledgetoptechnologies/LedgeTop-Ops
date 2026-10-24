@@ -173,7 +173,7 @@ export function NativeWorkspaceContent({ context, page, projectId, feedbackId, o
         {context.capabilities.deliveryView && <a className="button button-orange" href={workspacePath("/portal/deliveries", context.workspace.id)}>Browse deliveries</a>}
       </Card>
       {page === "dashboard" && <><FeatureReadiness features={context.features} />{renderDashboardSupplement?.()}</>}
-    </> : page === "deliveries" ? !context.capabilities.deliveryView ? <Card title="Deliveries unavailable"><p>Delivery viewing is not included in your current access.</p></Card> : <>
+    </> : page === "deliveries" ? !context.capabilities.deliveryView ? <><Card title="Delivery folders unavailable"><p>Delivery folders are not included in your current access.</p></Card>{renderSharedWork?.()}</> : <>
       {(folderId || linkedFile) && <Card title="Delivery files"><button className="button-ghost" onClick={() => navigateFolder(null)}>All delivery folders</button>{renderFiles({ folderId, load: filesLoad, loadExactFile: exactLoad, onFolderChange: navigateFolder, onLinkedFileChange: syncLinkedFile })}</Card>}
       {!folderId && !linkedFile && <Card title="Shared delivery folders">
         <p>Folders explicitly shared with you for this client.</p>

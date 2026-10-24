@@ -35,7 +35,7 @@ async function mock(page: Page, workspaces: typeof allWorkspaces, viewer: (route
     const match = call.path.match(/^\/api\/client\/v2\/workspaces\/(workspace-[bc])\/(.+)$/);
     if (match && workspaces.some(item => item.id === match[1])) {
       const id = match[1]!, suffix = match[2]!;
-      if (suffix === "context") return route.fulfill({json: context(id)});
+      if (suffix === "context") { const handled = viewer(route, call, id); if (handled) return handled; return route.fulfill({json: context(id)}); }
       if (suffix === "hierarchy") return route.fulfill({json: hierarchy(id)});
       if (suffix === "deliveries") return route.fulfill({json: {workspaceId: id, sourceId: workspace(id).sourceId, contextVersion: `context-${id}`, items: [], page: {nextCursor: null}}});
       if (suffix === "viewer" || suffix.startsWith("viewer/")) { const handled = viewer(route, call, id); if (handled) return handled; }
@@ -209,4 +209,18 @@ for (const [label, status, sameKey] of [["an unclear failure retries the same re
   const keys = calls.filter(call => call.method === "POST").map(call => call.key);
   expect(keys).toHaveLength(2);
   expect(keys[0] === keys[1]).toBe(sameKey);
+});
+
+test("Deliveries shows shared 3D work even when delivery folders are not in access, without probing folders", async ({page}) => {
+  const calls = await mock(page, [allWorkspaces[0]!], (route, call, id) => {
+    if (call.path.endsWith("/context")) return route.fulfill({json: {...context(id), features: {...features(), deliveries: {state: "temporarily_unavailable", reason: "backend_unavailable"}}, capabilities: {...context(id).capabilities, deliveryView: false}}});
+    return call.path.endsWith("/viewer") ? route.fulfill({json: viewerPage(id, [
+      {grantId: "grant-task", taskId: "task-1", scopeType: "task", title: "North elevation scan", projectName: "Harbor bridge", businessName: "Harbor Engineering", updatedAt: "2026-08-20T12:00:00Z"},
+    ])}) : undefined;
+  });
+  await page.goto("/portal/deliveries?workspace=workspace-b");
+  await expect(page.getByText("Delivery folders are not included in your current access.")).toBeVisible();
+  await expect(rows(page)).toHaveCount(1);
+  await expect(card(page)).toHaveCount(1);
+  expect(calls.some(call => /\/(deliveries|folders)/.test(call.path))).toBe(false);
 });
