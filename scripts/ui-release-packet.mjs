@@ -15,6 +15,10 @@ export const RELEASE_MANIFEST_PINS = Object.freeze({
     client: 'ffcfa84f31e7855b05895338c6f53ad4d3bc963ad115c3c1290912c7b438a4b9',
     operations: '621ddeead1c3edb4d3218b8919269f843e5a22b74b2eea42271f2b93ae7292c4',
   }),
+  '92b688f2014b92bd2bfa1972d1d653fb7921ebbd': Object.freeze({
+    client: 'e06731e689bd10ab458e049bc07fb83dfb73c6cd8972a676b12240d92f385fd8',
+    operations: '6519bfd1a360e669fb6abbd800d83ecf3b62e48d364ba3edc626a21ae3161e2d',
+  }),
 });
 export const DEFAULT_RELEASE_ID = 'cfcf5cf992084f7b3658763cdf362fbc37101665';
 const digest = bytes => crypto.createHash('sha256').update(bytes).digest('hex');

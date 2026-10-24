@@ -3,11 +3,12 @@ import assert from 'node:assert/strict';
 import catalog from '../packages/shared/src/ui-release-catalog.generated.json' with { type: 'json' };
 import { findUiReleaseManifest, uiReleaseForRequest } from '../packages/shared/src/ui-release-catalog.ts';
 
-const id = 'cfcf5cf992084f7b3658763cdf362fbc37101665';
+const ids = ['cfcf5cf992084f7b3658763cdf362fbc37101665', '92b688f2014b92bd2bfa1972d1d653fb7921ebbd'];
+const id = ids[0];
 test('catalog registers exact independently reproduced candidates with immutable policy copies', () => {
   assert.equal(catalog.schemaVersion, 1);
-  assert.equal(catalog.releases.length, 2);
-  for (const application of ['operations', 'client']) {
+  assert.equal(catalog.releases.length, 4);
+  for (const id of ids) for (const application of ['operations', 'client']) {
     const manifest = findUiReleaseManifest(application, id);
     assert.ok(manifest);
     assert.equal(manifest.files.length, application === 'operations' ? 237 : 21);
