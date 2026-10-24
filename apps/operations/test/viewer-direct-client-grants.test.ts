@@ -3,6 +3,7 @@ import {Miniflare} from 'miniflare';
 import {afterEach,beforeEach,describe,expect,it,vi} from 'vitest';
 import {splitD1MigrationStatements} from '../../client/test/helpers/d1-migrations';
 import type {Env,StaffPrincipal} from '../src/worker/types';
+import {ViewerServiceError} from '@ltds/shared';
 const mocks=vi.hoisted(()=>({catalog:vi.fn(),revoke:vi.fn(),scope:vi.fn(),proof:vi.fn(),guard:vi.fn()}));
 vi.mock('../src/worker/viewer-integration',()=>({viewerServiceClient:()=>({clientDeliveryCatalog:mocks.catalog,revokePublishedSessionSourceAuthorization:mocks.revoke})}));
 vi.mock('../src/worker/acl',()=>({sqlScope:mocks.scope}));
@@ -74,6 +75,12 @@ describe('direct Viewer grants independent of PA projects',()=>{
   for(const table of ['viewer_direct_client_grants','viewer_direct_client_grant_mutation_receipts','viewer_direct_client_grant_audit'])
    expect(await database.prepare(`SELECT count(*) n FROM ${table}`).first<number>('n')).toBe(0);
  });
+ it('returns a safe actionable error if the selected task was unpublished before sharing',async()=>{
+  const {env,database}=await fixture();mocks.catalog.mockRejectedValueOnce(new ViewerServiceError('Upstream missing','not_found',404));
+  await expect(createDirectViewerClientGrant({env,principal,grant,idempotencyKey:'direct-task-vanished-01',request}))
+   .rejects.toMatchObject({status:409,code:'task_not_published'});
+  expect(await database.prepare('SELECT count(*) n FROM viewer_direct_client_grants').first<number>('n')).toBe(0);
+ });
  it('invalidates local access before remote tombstone, persists failure, and retries idempotently',async()=>{
   const {env,database}=await fixture();const created=await createDirectViewerClientGrant({env,principal,grant,idempotencyKey:'direct-create-revoke-01',request});
   mocks.revoke.mockImplementation(async()=>{
@@ -91,6 +98,7 @@ describe('direct Viewer grants independent of PA projects',()=>{
   const result=await listDirectViewerClientGrantWorkspace(env,principal,{q:'Client',limit:1});
   expect(result.clients).toEqual([{sourceId:grant.sourceId,workspaceId:grant.workspaceId,displayName:'Client One',businessName:'Drone Services'}]);
   expect(result.clientsNextCursor).toBeNull();
+  await expect(listDirectViewerClientGrantWorkspace(env,principal,{limit:51})).rejects.toMatchObject({code:'invalid_request'});
   mocks.scope.mockResolvedValue({global:false,deniedGlobal:false});
   await expect(listDirectViewerClientGrantWorkspace(env,principal)).rejects.toMatchObject({status:403});
  });

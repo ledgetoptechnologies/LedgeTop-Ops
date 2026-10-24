@@ -1,5 +1,6 @@
 import {HTTPException} from 'hono/http-exception';
 import {z} from 'zod';
+import {ViewerServiceError} from '@ltds/shared';
 import {sqlScope} from './acl';
 import {sha256} from './crypto';
 import {portalRootAccessAllowedSql} from './client-portal-root-access';
@@ -11,7 +12,7 @@ const opaque=z.string().min(1).max(128).regex(/^[A-Za-z0-9][A-Za-z0-9_-]*$/);
 const source=z.string().min(15).max(78).regex(/^project-alpha:[a-z0-9][a-z0-9_-]*$/);
 const key=z.string().min(16).max(128).regex(/^[A-Za-z0-9][A-Za-z0-9._:-]*$/);
 export const directViewerClientGrantListQuerySchema=z.object({q:z.string().trim().max(120).optional(),cursor:opaque.optional(),
- limit:z.coerce.number().int().min(1).max(100).default(25),viewerProjectId:opaque.optional()}).strict();
+ limit:z.coerce.number().int().min(1).max(50).default(25),viewerProjectId:opaque.optional()}).strict();
 const inputSchema=z.object({sourceId:source,workspaceId:opaque,viewerProjectId:opaque,taskId:opaque.nullable(),
  scopeType:z.enum(['project','task']),includeFuturePublished:z.boolean(),confirmedScope:z.literal(true),
  expiresAt:z.iso.datetime({offset:true}).nullable(),permissions:z.object({measure:z.boolean(),cameras:z.boolean(),download:z.boolean()}).strict()}).strict()
@@ -72,8 +73,11 @@ export async function listDirectViewerClientGrantWorkspace(env:Env,principal:Sta
  if(!parsed.success)fail(400,'invalid_request','Invalid client picker query');const q=parsed.data,database=db(env);
  const rows=await database.prepare(`${recipientSql(env)} AND w.id>? AND (?='' OR instr(lower(root.display_name),lower(?))>0)
  ORDER BY w.id LIMIT ?`).bind(q.cursor??'',q.q??'',q.q??'',q.limit+1).all<Recipient>();
- const page=rows.results.slice(0,q.limit);const clients=[],businessNames=new Map<string,string>();
- for(const row of page){if(!await readPortalProjectionSourceProof(env,database,row.project_alpha_source_id))continue;
+ const page=rows.results.slice(0,q.limit);const clients=[],businessNames=new Map<string,string>(),sourceReadiness=new Map<string,boolean>();
+ for(const row of page){
+  if(!sourceReadiness.has(row.project_alpha_source_id))sourceReadiness.set(row.project_alpha_source_id,
+   !!await readPortalProjectionSourceProof(env,database,row.project_alpha_source_id));
+  if(!sourceReadiness.get(row.project_alpha_source_id))continue;
   if(!businessNames.has(row.project_alpha_source_id))businessNames.set(row.project_alpha_source_id,await readDirectViewerClientBusinessName(env,row.project_alpha_source_id));
   clients.push({sourceId:row.project_alpha_source_id,workspaceId:row.id,displayName:row.display_name,
    businessName:businessNames.get(row.project_alpha_source_id)!});}
@@ -101,7 +105,16 @@ export async function createDirectViewerClientGrant(input:{env:Env;principal:Sta
  const g=parsed.data,fingerprint=await sha256(JSON.stringify(['direct.create',g]));
  const prior=await receipt(env,principal.id,input.idempotencyKey,fingerprint);if(prior)return {grant:prior,replayed:true};
  if(g.expiresAt!==null&&Date.parse(g.expiresAt)<=Date.now())fail(400,'expired_at_invalid','Expiration must be in the future');
- const catalog=await viewerServiceClient(env).clientDeliveryCatalog({projectId:g.viewerProjectId,...(g.taskId?{taskId:g.taskId}:{})});
+ let catalog;
+ try{catalog=await viewerServiceClient(env).clientDeliveryCatalog({projectId:g.viewerProjectId,...(g.taskId?{taskId:g.taskId}:{})});}
+ catch(error){
+  if(error instanceof ViewerServiceError){
+   if(error.code==='not_found')fail(409,g.taskId?'task_not_published':'relationship_missing',g.taskId
+    ?'This task is not currently published in the selected Viewer project':'This Viewer project is unavailable');
+   fail(503,'viewer_unavailable','Viewer is temporarily unavailable. Please try again.');
+  }
+  throw error;
+ }
  if(catalog.project.id!==g.viewerProjectId)fail(409,'task_not_in_project','Viewer project does not match');
  if(g.taskId&&(catalog.tasks.length!==1||catalog.tasks[0]?.id!==g.taskId))fail(409,'task_not_published','Task is not published in this project');
  // Recheck recipient authority after the remote catalog request, then pin it in the INSERT itself.
