@@ -1,3 +1,4 @@
+import { waitForDevToolsPort } from './devtools-port.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
@@ -531,16 +532,8 @@ async function waitForRequest(runtime, start, method, pathname, timeout = 10_000
 }
 
 async function waitForDevTools(profile) {
-  const activePortFile = path.join(profile, 'DevToolsActivePort');
-  const deadline = Date.now() + 10_000;
-  while (Date.now() < deadline) {
-    if (existsSync(activePortFile)) {
-      const port = readFileSync(activePortFile, 'utf8').split(/\r?\n/, 1)[0];
-      if (port) return `http://127.0.0.1:${port}`;
-    }
-    await new Promise(resolve => setTimeout(resolve, 50));
-  }
-  throw new Error('Browser did not expose a DevTools endpoint');
+  const port = await waitForDevToolsPort(path.join(profile, 'DevToolsActivePort'), {label:'Browser did not expose a DevTools endpoint'});
+  return `http://127.0.0.1:${port}`;
 }
 
 // Drive the shipped in-app dialog in the isolated CI browser; never bypass its

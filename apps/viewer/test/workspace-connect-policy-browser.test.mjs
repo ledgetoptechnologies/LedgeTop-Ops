@@ -1,7 +1,8 @@
+import { waitForDevToolsPort } from './devtools-port.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { existsSync, mkdtempSync, rmSync, readFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -47,10 +48,8 @@ test('real browser permits background auth fetch only from workspace and blocks 
     browser = spawn(executable, ['--headless=new', '--disable-gpu', '--no-first-run', '--no-default-browser-check', '--no-sandbox',
       '--remote-debugging-address=127.0.0.1', '--remote-debugging-port=0', `--user-data-dir=${profile}`, 'about:blank'],
     { windowsHide: true, stdio: 'ignore' });
-    const deadline = Date.now() + 15_000, portFile = path.join(profile, 'DevToolsActivePort');
-    while (!existsSync(portFile) && Date.now() < deadline) await delay(50);
-    assert.ok(existsSync(portFile), 'browser DevTools endpoint must start');
-    const devtools = `http://127.0.0.1:${readFileSync(portFile, 'utf8').split(/\r?\n/)[0]}`;
+    const port = await waitForDevToolsPort(path.join(profile, 'DevToolsActivePort'), {timeoutMs:15_000,label:'browser DevTools endpoint must start'});
+    const devtools = `http://127.0.0.1:${port}`;
     for (const route of ['/workspace', '/view/token']) {
       const target = await (await fetch(`${devtools}/json/new?${encodeURIComponent(viewerOrigin + route)}`, { method: 'PUT' })).json();
       const socket = new WebSocket(target.webSocketDebuggerUrl);

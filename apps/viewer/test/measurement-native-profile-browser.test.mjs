@@ -1,3 +1,4 @@
+import { waitForDevToolsPort } from './devtools-port.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {spawn} from 'node:child_process';
@@ -54,8 +55,7 @@ test('real native-profile browser lifecycle and inspector integration',{timeout:
   try{
     const f=await fixture();server=f.server;profile=mkdtempSync(path.join(tmpdir(),'ltds-native-profile-browser-'));
     browser=spawn(binary,['--headless=new','--disable-gpu','--no-first-run','--no-default-browser-check','--no-sandbox','--remote-debugging-port=0',`--user-data-dir=${profile}`,'about:blank'],{windowsHide:true,stdio:'ignore'});
-    const active=path.join(profile,'DevToolsActivePort'),until=Date.now()+10000;while(!existsSync(active)&&Date.now()<until)await delay(50);assert.ok(existsSync(active));
-    const port=readFileSync(active,'utf8').split(/\r?\n/)[0],tabs=await(await fetch(`http://127.0.0.1:${port}/json/list`)).json();client=await Cdp.connect(tabs.find(tab=>tab.type==='page').webSocketDebuggerUrl);
+    const port=await waitForDevToolsPort(path.join(profile,'DevToolsActivePort')),tabs=await(await fetch(`http://127.0.0.1:${port}/json/list`)).json();client=await Cdp.connect(tabs.find(tab=>tab.type==='page').webSocketDebuggerUrl);
     await client.command('Runtime.enable');await client.command('Page.enable');
     let visit=0;const navigate=async(mode='panel',width=1200,source='raster')=>{await client.command('Emulation.setDeviceMetricsOverride',{width,height:900,deviceScaleFactor:1,mobile:false});const url=`${f.origin}?mode=${mode}&source=${source}&visit=${++visit}`;await client.command('Page.navigate',{url});await waitFor(client,`location.href===${JSON.stringify(url)}&&document.body?.dataset.ready==='true'&&document.querySelector('[data-update]')`);};
     const finish=async()=>{await client.evaluate('fixture.finish()');await waitFor(client,statusIncludes('Native section ready'));};

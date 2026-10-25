@@ -1,3 +1,4 @@
+import { waitForDevToolsPort } from './devtools-port.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {spawn} from 'node:child_process';
@@ -77,8 +78,7 @@ test('map outline renders on actual mesh and point geometry across all views wit
   try{
     const f=await fixture();server=f.server;profile=mkdtempSync(path.join(tmpdir(),'ltds-crossview-rendered-browser-'));
     browser=spawn(binary,['--headless=new','--disable-gpu','--no-first-run','--no-default-browser-check','--no-sandbox','--remote-debugging-port=0',`--user-data-dir=${profile}`,'about:blank'],{windowsHide:true,stdio:'ignore'});
-    const active=path.join(profile,'DevToolsActivePort'),until=Date.now()+10000;while(!existsSync(active)&&Date.now()<until)await delay(50);assert.ok(existsSync(active));
-    const port=readFileSync(active,'utf8').split(/\r?\n/)[0],tabs=await(await fetch(`http://127.0.0.1:${port}/json/list`)).json();client=await Cdp.connect(tabs.find(tab=>tab.type==='page').webSocketDebuggerUrl);
+    const port=await waitForDevToolsPort(path.join(profile,'DevToolsActivePort')),tabs=await(await fetch(`http://127.0.0.1:${port}/json/list`)).json();client=await Cdp.connect(tabs.find(tab=>tab.type==='page').webSocketDebuggerUrl);
     await client.command('Runtime.enable');await client.command('Page.enable');await client.command('Emulation.setDeviceMetricsOverride',{width:1150,height:750,deviceScaleFactor:1,mobile:false});await client.command('Page.navigate',{url:`${f.origin}?rendered=1`});
     await waitFor(client,"document.body?.dataset.ready==='true'&&document.querySelectorAll('#view .measurement-overlay circle').length===4");
     const original=await client.evaluate('renderedFixture.saved()');assert.ok(JSON.parse(original)[0].vertices.every(p=>p[2]===0));
@@ -130,8 +130,7 @@ test('real measurement overlay preserves original visible edges across close zoo
   try{
     const f=await fixture();server=f.server;profile=mkdtempSync(path.join(tmpdir(),'ltds-measurement-closezoom-browser-'));
     browser=spawn(binary,['--headless=new','--disable-gpu','--no-first-run','--no-default-browser-check','--no-sandbox','--remote-debugging-port=0',`--user-data-dir=${profile}`,'about:blank'],{windowsHide:true,stdio:'ignore'});
-    const active=path.join(profile,'DevToolsActivePort'),until=Date.now()+10000;while(!existsSync(active)&&Date.now()<until)await delay(50);assert.ok(existsSync(active));
-    const port=readFileSync(active,'utf8').split(/\r?\n/)[0],tabs=await(await fetch(`http://127.0.0.1:${port}/json/list`)).json();client=await Cdp.connect(tabs.find(tab=>tab.type==='page').webSocketDebuggerUrl);
+    const port=await waitForDevToolsPort(path.join(profile,'DevToolsActivePort')),tabs=await(await fetch(`http://127.0.0.1:${port}/json/list`)).json();client=await Cdp.connect(tabs.find(tab=>tab.type==='page').webSocketDebuggerUrl);
     await client.command('Runtime.enable');await client.command('Page.enable');await client.command('Emulation.setDeviceMetricsOverride',{width:1150,height:750,deviceScaleFactor:1,mobile:false});await client.command('Page.navigate',{url:f.origin});
     await waitFor(client,`location.href===${JSON.stringify(f.origin)}&&document.body?.dataset.ready==='true'&&document.querySelectorAll('#view .measurement-overlay line').length===4`);
     const original=await client.evaluate('fixtureSnapshot()');assert.deepEqual(JSON.parse(original),[record]);
@@ -184,8 +183,7 @@ test('real sidebar CSS supports desktop drag, keyboard and mobile collapsed layo
   try{
     const f=await fixture();server=f.server;profile=mkdtempSync(path.join(tmpdir(),'ltds-sidebar-layout-browser-'));
     browser=spawn(binary,['--headless=new','--disable-gpu','--no-first-run','--no-default-browser-check','--no-sandbox','--remote-debugging-port=0',`--user-data-dir=${profile}`,'about:blank'],{windowsHide:true,stdio:'ignore'});
-    const active=path.join(profile,'DevToolsActivePort'),until=Date.now()+10000;while(!existsSync(active)&&Date.now()<until)await delay(30);assert.ok(existsSync(active));
-    const port=readFileSync(active,'utf8').split(/\r?\n/)[0],tabs=await(await fetch(`http://127.0.0.1:${port}/json/list`)).json();client=await Cdp.connect(tabs.find(tab=>tab.type==='page').webSocketDebuggerUrl);
+    const port=await waitForDevToolsPort(path.join(profile,'DevToolsActivePort'),{pollMs:30}),tabs=await(await fetch(`http://127.0.0.1:${port}/json/list`)).json();client=await Cdp.connect(tabs.find(tab=>tab.type==='page').webSocketDebuggerUrl);
     await client.command('Runtime.enable');await client.command('Page.enable');await client.command('Emulation.setDeviceMetricsOverride',{width:1200,height:800,deviceScaleFactor:1,mobile:false});await client.command('Page.navigate',{url:`${f.origin}?sidebar=1`});await waitFor(client,"document.body?.dataset.ready==='true'");
     assert.equal((await client.evaluate('sidebarFixture.state()')).width,300);
     await client.command('Input.dispatchMouseEvent',{type:'mousePressed',x:297,y:100,button:'left',clickCount:1});await client.command('Input.dispatchMouseEvent',{type:'mouseMoved',x:497,y:100,button:'left',buttons:1});await client.command('Input.dispatchMouseEvent',{type:'mouseReleased',x:497,y:100,button:'left',clickCount:1});await waitFor(client,'sidebarFixture.state().width===500');
@@ -208,8 +206,7 @@ test('real editor inserts midpoint, moves/deletes selected vertices and retains 
   try{
     const f=await fixture();server=f.server;profile=mkdtempSync(path.join(tmpdir(),'ltds-measurement-editor-browser-'));const downloads=path.join(profile,'downloads');mkdirSync(downloads);
     browser=spawn(binary,['--headless=new','--disable-gpu','--no-first-run','--no-default-browser-check','--no-sandbox','--remote-debugging-port=0',`--user-data-dir=${profile}`,'about:blank'],{windowsHide:true,stdio:'ignore'});
-    const active=path.join(profile,'DevToolsActivePort'),until=Date.now()+10000;while(!existsSync(active)&&Date.now()<until)await delay(30);assert.ok(existsSync(active));
-    const port=readFileSync(active,'utf8').split(/\r?\n/)[0],tabs=await(await fetch(`http://127.0.0.1:${port}/json/list`)).json();client=await Cdp.connect(tabs.find(tab=>tab.type==='page').webSocketDebuggerUrl);
+    const port=await waitForDevToolsPort(path.join(profile,'DevToolsActivePort'),{pollMs:30}),tabs=await(await fetch(`http://127.0.0.1:${port}/json/list`)).json();client=await Cdp.connect(tabs.find(tab=>tab.type==='page').webSocketDebuggerUrl);
     await client.command('Runtime.enable');await client.command('Page.enable');await client.command('Browser.setDownloadBehavior',{behavior:'allow',downloadPath:downloads});await client.command('Emulation.setDeviceMetricsOverride',{width:1150,height:850,deviceScaleFactor:1,mobile:false});
     const mouse=async(type,x,y,extra={})=>client.command('Input.dispatchMouseEvent',{type,x,y,button:'left',clickCount:1,...extra});
     const click=async(x,y)=>{await mouse('mousePressed',x,y);await mouse('mouseReleased',x,y);};

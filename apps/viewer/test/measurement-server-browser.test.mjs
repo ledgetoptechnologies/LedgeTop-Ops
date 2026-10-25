@@ -1,3 +1,4 @@
+import { waitForDevToolsPort } from './devtools-port.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {spawn} from 'node:child_process';
@@ -144,10 +145,7 @@ test('normal server inspector uses real browser UI for queued completion, resume
     const f=await fixture();server=f.server;const s=f.state;
     profile=mkdtempSync(path.join(tmpdir(),'ltds-measurement-server-browser-'));
     browser=spawn(binary,['--headless=new','--disable-gpu','--no-first-run','--no-default-browser-check','--no-sandbox','--remote-debugging-port=0',`--user-data-dir=${profile}`,'about:blank'],{windowsHide:true,stdio:'ignore'});
-    const portFile=path.join(profile,'DevToolsActivePort'),until=Date.now()+10000;
-    while(!existsSync(portFile)&&Date.now()<until)await delay(50);
-    assert.ok(existsSync(portFile),'isolated browser startup');
-    const port=readFileSync(portFile,'utf8').split(/\r?\n/)[0];
+    const port=await waitForDevToolsPort(path.join(profile,'DevToolsActivePort'));
     const tabs=await(await fetch(`http://127.0.0.1:${port}/json/list`)).json();
     client=await Cdp.connect(tabs.find(tab=>tab.type==='page').webSocketDebuggerUrl);
     await client.command('Runtime.enable');await client.command('Page.enable');

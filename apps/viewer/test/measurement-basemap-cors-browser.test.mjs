@@ -1,3 +1,4 @@
+import { waitForDevToolsPort } from './devtools-port.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {spawn} from 'node:child_process';
@@ -47,8 +48,7 @@ test('shipped Leaflet basemap CORS permits approved canvas export and rejects de
     web=createServer((req,res)=>{const url=new URL(req.url,'http://fixture.invalid');if(['/leaflet.js','/leaflet.css'].includes(url.pathname)){res.setHeader('Content-Type',url.pathname.endsWith('.js')?'application/javascript':'text/css');return res.end(readFileSync(path.join(root,'node_modules/leaflet/dist',url.pathname.slice(1))));}res.setHeader('Content-Type','text/html');res.end(page(tileOrigin,url.searchParams.get('mode')||'approved'));});
     const origin=await listen(web);profile=mkdtempSync(path.join(tmpdir(),'ltds-basemap-cors-'));
     browser=spawn(executable,['--headless=new','--disable-gpu','--no-first-run','--no-default-browser-check','--no-sandbox','--remote-debugging-port=0',`--user-data-dir=${profile}`,'about:blank'],{windowsHide:true,stdio:'ignore'});
-    const active=path.join(profile,'DevToolsActivePort'),until=Date.now()+10000;while(!existsSync(active)&&Date.now()<until)await delay(50);assert.ok(existsSync(active));
-    const port=readFileSync(active,'utf8').split(/\r?\n/)[0],tabs=await(await fetch(`http://127.0.0.1:${port}/json/list`)).json();client=await Cdp.connect(tabs.find(tab=>tab.type==='page').webSocketDebuggerUrl);
+    const port=await waitForDevToolsPort(path.join(profile,'DevToolsActivePort')),tabs=await(await fetch(`http://127.0.0.1:${port}/json/list`)).json();client=await Cdp.connect(tabs.find(tab=>tab.type==='page').webSocketDebuggerUrl);
     await client.command('Runtime.enable');await client.command('Page.enable');
     const inspect=async mode=>{const url=`${origin}/?mode=${mode}`;await client.command('Page.navigate',{url});const until=Date.now()+8000;while(Date.now()<until){if(await client.evaluate(`location.href===${JSON.stringify(url)}&&document.body?.dataset.ready==='true'`))return client.evaluate('check()');await delay(25);}throw new Error(`Tiles never settled: ${mode}`);};
     await t.test('approved separate origin receives anonymous CORS and exports real loaded tiles',async()=>{const out=await inspect('approved');assert.ok(out.loaded>0);assert.equal(out.failed,0);assert.ok(out.crossOrigin.every(v=>v==='anonymous'));assert.equal(out.error,null);assert.equal(out.onlyBlankBackground,false,'approved visible basemap pixels must be included');assert.match(out.exported,/^data:image\/png;base64,/);const read=requests.filter(r=>r.url.startsWith('/approved/'));assert.ok(read.length);assert.ok(read.every(r=>r.origin===origin&&r.cookie===null));});
