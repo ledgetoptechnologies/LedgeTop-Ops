@@ -57,6 +57,7 @@ import { activeShareLoadError, createShareLoadDeadline } from "./share-load-dead
 import { ViewerProcessingPanel } from "./ViewerProcessingPanel";
 import { SignInProblem, type StartupFailure } from "./SignInProblem";
 import { AccountPage } from "./AccountPage";
+import { IntelPage } from "./IntelPage";
 import { NativeViewerModels } from "./NativeViewerModels";
 import {
   activateDeliveryFolderCache,
@@ -95,6 +96,8 @@ interface Session {
     portalIdentityDenials?: { enabled: boolean };
     authenticatedDeliveryGrants?: AuthenticatedDeliveryCapability;
     clientFeedback?: { enabled: boolean };
+    /** Internal Intel for Ledge Top's own businesses; the server grants it to the owner only. */
+    intel?: { enabled: boolean };
     financeSummary?: { enabled: boolean };
     nativeDirectoryProfileWrites?: { enabled: boolean };
     nativeDirectorySharedProfiles?: { enabled: boolean };
@@ -222,6 +225,8 @@ const MANAGE_NAV: typeof NAV = [
     label: "Administration",
     permissions: ["administration.view"],
   },
+  // Ledge Top's own businesses only: shown from the session's intel capability, never from a permission alone.
+  { page: "intel", label: "Intel", permissions: [] },
 ];
 function allowed(user: SessionUser, permission: Permission) {
   return user.permissions.includes(permission);
@@ -281,7 +286,8 @@ export function OperationsApp() {
     mobileNavPanel = useRef<HTMLDivElement>(null),
     manageMenu = useRef<HTMLDivElement>(null),
     manageTrigger = useRef<HTMLButtonElement>(null);
-  const routeForPage = (requested: Page, user: OperationsUser, feedbackEnabled=false, invitationReview=false): { page: Page; href: string } | null => {
+  const routeForPage = (requested: Page, user: OperationsUser, feedbackEnabled=false, invitationReview=false, intel=false): { page: Page; href: string } | null => {
+    if (requested === "intel") return intel ? { page: "intel", href: "/intel" } : null;
     if (requested === "notifications")
       return allowed(user, "delivery.share.audit") ? { page: "notifications", href: "/notifications" } : null;
     if (requested === "account") return { page: "account", href: "/account" };
@@ -297,7 +303,7 @@ export function OperationsApp() {
     const requested = pathPage(location.pathname);
     const feedbackEnabled = value.capabilities?.clientFeedback?.enabled === true;
     const invitationReview = value.invitationAdministration?.enabled === true && value.invitationAdministration.canReview;
-    const authorized = routeForPage(requested, value.user, feedbackEnabled, invitationReview);
+    const authorized = routeForPage(requested, value.user, feedbackEnabled, invitationReview, value.capabilities?.intel?.enabled === true);
     const fallbackItem = [...NAV, ...MANAGE_NAV].find(item => navAllowed(value.user, item, feedbackEnabled, invitationReview));
     const fallback = fallbackItem?.page === "delivery" && allowed(value.user, "delivery.share.audit") && !allowed(value.user, "delivery.browse")
       ? routeForPage("notifications", value.user, feedbackEnabled, invitationReview)
@@ -410,7 +416,7 @@ export function OperationsApp() {
   const props = { session };
   const invitationReview = session.invitationAdministration?.enabled === true && session.invitationAdministration.canReview;
   const primaryNavigation = NAV.filter((item) => navAllowed(session.user, item, session.capabilities?.clientFeedback?.enabled === true, invitationReview));
-  const manageNavigation = MANAGE_NAV.filter((item) => navAllowed(session.user, item));
+  const manageNavigation = MANAGE_NAV.filter((item) => item.page === "intel" ? session.capabilities?.intel?.enabled === true : navAllowed(session.user, item));
   const navigationLink = (item: (typeof NAV)[number], mobile = false) => {
     const href = item.page === "operations" ? operationsLandingPath(session.user.permissions, session.capabilities?.clientFeedback?.enabled === true, invitationReview)
       : item.page === "clients" ? clientLandingPath(session.user, session.capabilities?.clientFeedback?.enabled === true, invitationReview)
@@ -478,6 +484,7 @@ export function OperationsApp() {
             <Administration {...props} />
           )}
         {page === "account" && <AccountPage user={session.user} />}
+        {page === "intel" && session.capabilities?.intel?.enabled === true && <IntelPage />}
       </main>
     </div>
   );
@@ -487,7 +494,7 @@ export function OperationsApp() {
 const SECTION_GROUP: Record<Page, string> = {
   dashboard: "Overview", operations: "Field work", clients: "Clients", notifications: "Delivery",
   airspace: "Flight safety", delivery: "Files and delivery", viewer: "3D models", team: "Administration",
-  administration: "Administration", account: "Your account",
+  administration: "Administration", account: "Your account", intel: "Administration",
 };
 function greeting(displayName: string, now = new Date()): string {
   const first = displayName.trim().split(/\s+/)[0] || "there", hour = now.getHours();
@@ -534,6 +541,10 @@ function PageHeading({ page, displayName }: { page: Page; displayName: string })
     account: [
       "Account",
       "Your Operations profile and the emails you can sign in with.",
+    ],
+    intel: [
+      "Intel",
+      "Competitors, website visits and Google search results for each Ledge Top business.",
     ],
   };
   return (
