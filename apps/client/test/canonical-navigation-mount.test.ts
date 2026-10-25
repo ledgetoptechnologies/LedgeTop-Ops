@@ -28,7 +28,7 @@ describe("real Client entrypoint canonical navigation mount",()=>{
   });
   it("routes fresh mixed-host public and private entries to their distinct fixed destinations",async()=>{
     const f=fixture("true");
-    for(const [origin,path,target] of [[OLD,"/s/synthetic-id?folder=opaque%2Fref&x=1&x=2",DELIVERY],
+    for(const [origin,path,target] of [[OLD,"/s/synthetic-id?folder=opaque%2Fref&sort=name&sort=date",DELIVERY],
       [CLIENT,"/client-share/synthetic-id?folder=opaque%2Fref",DELIVERY],
       [OLD,"/portal/projects?folder=opaque%2Fref&view=list",PORTAL],
       [LTT,"/portal/account?tab=profile",PORTAL]]) for(const method of ["GET","HEAD"]) {
@@ -51,6 +51,15 @@ describe("real Client entrypoint canonical navigation mount",()=>{
       }
       expect((await f.request(`${OLD}${path}`,{headers:{Accept:"text/html"}})).headers.get("Location")).toBeNull();
     }
+    expect(f.prepare).not.toHaveBeenCalled();
+  });
+  it("keeps public callback and encoded capability queries local through the entire Worker mount",async()=>{
+    const f=fixture("true");
+    for(const origin of [OLD,CLIENT]) for(const root of ["s","client-share"]) for(const method of ["GET","HEAD"])
+      for(const key of ["cloudTransferNonce","cloudTransferAuthorization","cloudTransferJob","token","%74oken","access%5Fcode","state","next","unknown"]) {
+        const response=await f.request(`${origin}/${root}/synthetic-id?folder=opaque%2Fref&${key}=synthetic`,{method});
+        expect(response.status).toBe(200);expect(response.headers.get("Location")).toBeNull();
+      }
     expect(f.prepare).not.toHaveBeenCalled();
   });
   it("retains ordinary API/session and method validation; portal.app never gains public share admission",async()=>{
