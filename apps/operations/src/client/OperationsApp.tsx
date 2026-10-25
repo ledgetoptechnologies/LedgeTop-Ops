@@ -56,6 +56,7 @@ import { constrainViewerOffset, pointerAnchoredOffset } from "./viewer-zoom";
 import { activeShareLoadError, createShareLoadDeadline } from "./share-load-deadline";
 import { ViewerProcessingPanel } from "./ViewerProcessingPanel";
 import { SignInProblem, type StartupFailure } from "./SignInProblem";
+import { AccountPage } from "./AccountPage";
 import { NativeViewerModels } from "./NativeViewerModels";
 import {
   activateDeliveryFolderCache,
@@ -283,6 +284,7 @@ export function OperationsApp() {
   const routeForPage = (requested: Page, user: OperationsUser, feedbackEnabled=false, invitationReview=false): { page: Page; href: string } | null => {
     if (requested === "notifications")
       return allowed(user, "delivery.share.audit") ? { page: "notifications", href: "/notifications" } : null;
+    if (requested === "account") return { page: "account", href: "/account" };
     const item = [...NAV, ...MANAGE_NAV].find(candidate => candidate.page === requested);
     return item && navAllowed(user, item, feedbackEnabled, invitationReview)
       ? { page: item.page, href: item.page === "operations" ? operationsLandingPath(user.permissions, feedbackEnabled, invitationReview)
@@ -438,6 +440,7 @@ export function OperationsApp() {
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden="true"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9Z" /><path d="M9 20h6" /></svg>
         </a>}
         <AccountMenu className="profile" displayName={session.user.displayName} appApi={OPERATIONS_APP_API}
+          accountHref="/account" onAccount={() => navigate("account", "/account")}
           sessionStatus={<SessionExpiry userId={session.user.id} />}
           avatar={session.user.displayName.slice(0, 1).toUpperCase()} details={<>
             <small>
@@ -474,6 +477,7 @@ export function OperationsApp() {
           allowed(session.user, "administration.view") && (
             <Administration {...props} />
           )}
+        {page === "account" && <AccountPage user={session.user} />}
       </main>
     </div>
   );
@@ -483,7 +487,7 @@ export function OperationsApp() {
 const SECTION_GROUP: Record<Page, string> = {
   dashboard: "Overview", operations: "Field work", clients: "Clients", notifications: "Delivery",
   airspace: "Flight safety", delivery: "Files and delivery", viewer: "3D models", team: "Administration",
-  administration: "Administration",
+  administration: "Administration", account: "Your account",
 };
 function greeting(displayName: string, now = new Date()): string {
   const first = displayName.trim().split(/\s+/)[0] || "there", hour = now.getHours();
@@ -526,6 +530,10 @@ function PageHeading({ page, displayName }: { page: Page; displayName: string })
     administration: [
       "Administration",
       "Connected services, integration synchronization, security, and audit history.",
+    ],
+    account: [
+      "Account",
+      "Your Operations profile and the emails you can sign in with.",
     ],
   };
   return (
