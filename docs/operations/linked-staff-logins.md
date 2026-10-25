@@ -54,6 +54,15 @@ and /preview-claim routes are registered before staff admission; both require ex
 bounded duplicate-free JSON, signed human Access claims, an exact-target secret
 and a primary-database quota. All responses are no-store.
 
+The exact GET /api/account/login-links/availability is also registered before
+staff admission. It verifies a human Access assertion, exact admitted host and
+request origin, then reads only alias schema readiness. It returns a boolean,
+never a staff identity, approval or access grant. It accepts no query parameters
+and performs no writes or quota allocation. The verification page must receive
+exactly HTTP200 with `available: true` before sending a preview POST. Old servers,
+missing storage, errors and malformed responses show unavailable with sign-in
+recovery; the pending verification stays in sessionStorage for a later retry.
+
 Apply Operations migration0226 through the reviewed release process. Missing
 alias tables preserve primary-only login; partial/broken storage fails closed.
 No environment file or domain allowlist is introduced.

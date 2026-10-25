@@ -9,7 +9,7 @@ import { consumeNativeStaffOnboardingRateLimit } from "./native-staff-onboarding
 import {
   StaffLoginBindingError, resolveVerifiedStaffLogin, createStaffLoginBindingIntent,
   claimStaffLoginBindingIntent, previewStaffLoginBindingIntent, revokeStaffLoginBinding, listStaffLoginBindings,
-  type StaffLoginProof, type VerifiedStaffLoginClaims,
+  staffLoginLinksAvailable, type StaffLoginProof, type VerifiedStaffLoginClaims,
 } from "./staff-login-bindings";
 import type { Env, StaffPrincipal } from "./types";
 
@@ -68,12 +68,24 @@ function primary(proof: StaffLoginProof) {
   return proof;
 }
 
-/** Register BEFORE ordinary staff authentication. Only these exact POSTs can preview/prove
+/** Register BEFORE ordinary staff authentication. The availability GET is read-only.
+ * Only these exact POSTs can preview/prove
  * an approved secondary sign-in; it still requires a verified human Access JWT,
  * an exact-target one-time secret, same origin, bounded JSON and quota. */
 export function registerStaffLoginClaimRoute(app: App) {
   app.use(STAFF_LOGIN_LINKS_PATH, async (c, next) => { noStore(c); await next(); });
   app.use(`${STAFF_LOGIN_LINKS_PATH}/*`, async (c, next) => { noStore(c); await next(); });
+  app.get(`${STAFF_LOGIN_LINKS_PATH}/availability`, async c => {
+    try {
+      const url = new URL(c.req.url), origin = c.req.header("Origin");
+      if (!requestHostAllowed(c.req.url, c.env) || (origin !== undefined && origin !== url.origin)
+        || c.req.header("Sec-Fetch-Site") === "cross-site")
+        throw new HTTPException(403, { message: "Request origin was rejected" });
+      if (url.search) throw new HTTPException(400, { message: "Availability does not accept query parameters" });
+      await verifyStaffLoginClaims(c.req.raw, c.env);
+      return c.json({ available: await staffLoginLinksAvailable(c.env.OPS_DB) });
+    } catch (error) { return failure(c, error); }
+  });
   app.post(`${STAFF_LOGIN_LINKS_PATH}/preview-claim`, async c => {
     try {
       sameOrigin(c);

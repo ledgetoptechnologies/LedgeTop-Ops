@@ -59,6 +59,8 @@ async function schemaReady(db:D1Database):Promise<boolean>{
  const objects=(await db.withSession('first-primary').prepare(`SELECT name FROM sqlite_master WHERE name IN (${OBJECTS.map(()=>'?').join(',')})`).bind(...OBJECTS).all<{name:string}>()).results;
  if(state?.version!==1||objects.length!==OBJECTS.length)return fail('staff_login_unavailable',503);return true;
 }
+/** Read-only feature preflight, never evidence of staff admission or an approved link. */
+export async function staffLoginLinksAvailable(db:D1Database):Promise<boolean>{return boundary(()=>schemaReady(db));}
 type StaffRow={id:string;email:string;display_name:string;access_subject:string|null;project_alpha_user_id:string|null;status:string};
 function validStaff(s:StaffRow|undefined|null):s is StaffRow&{access_subject:string}{return !!s&&typeof s.id==='string'&&ID.test(s.id)&&email(s.email)&&isNativeAccessSubject(s.access_subject)
  &&typeof s.display_name==='string'&&s.display_name.trim().length>0&&s.display_name.length<=160&&s.status==='active'

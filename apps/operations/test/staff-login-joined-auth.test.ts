@@ -56,6 +56,31 @@ describe("same-owner sign-in: real RSA, D1 and HTTP boundaries", { timeout: 240_
   }
   const nativeConfig = () => ({ enabled: true, issuer: fixture.issuer, staffAudience: audience });
 
+  it("preflights alias support for a verified unprovisioned human without admitting or writing staff", async () => {
+    const jwt = await token(fixture.claims("preflight@example.test", "access|preflight"));
+    const before = await fixture.db.prepare("SELECT count(*) n FROM staff_users").first("n");
+    const response = await request("/api/account/login-links/availability", jwt);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ available: true });
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    expect(response.headers.get("referrer-policy")).toBe("no-referrer");
+    expect((await request("/api/session", jwt)).status).toBe(403);
+    expect(await fixture.db.prepare("SELECT count(*) n FROM staff_users").first("n")).toBe(before);
+  });
+
+  it("does not expose availability without a valid human JWT and exact admitted request origin", async () => {
+    const jwt = await token(fixture.claims("preflight-denials@example.test", "access|preflight-denials"));
+    const path = "/api/account/login-links/availability";
+    expect((await app.request(origin + path, {}, env)).status).toBe(401);
+    expect((await request(path, "invalid")).status).toBe(401);
+    expect((await request(path, jwt, { headers: { Origin: "https://outside.example.test" } })).status).toBe(403);
+    expect((await request(path, jwt, { headers: { "Sec-Fetch-Site": "cross-site" } })).status).toBe(403);
+    expect((await app.request("https://outside.example.test" + path, { headers: { "Cf-Access-Jwt-Assertion": jwt } }, env)).status).toBe(403);
+    expect((await request(path + "?token=not-accepted", jwt)).status).toBe(400);
+    expect((await request(path, await token(fixture.primaryClaims, { type: "service" }))).status).toBe(401);
+    expect((await request(path, await token(fixture.primaryClaims, {}, "wrong-audience"))).status).toBe(401);
+  });
+
   it("links both verified sign-ins to one owner, renews without rebinding, and revokes only the alternate credential", async () => {
     const primaryJwt = await token(fixture.primaryClaims);
     const primary = await authenticateStaff(new Request(origin, { headers: { "Cf-Access-Jwt-Assertion": primaryJwt } }), env);
