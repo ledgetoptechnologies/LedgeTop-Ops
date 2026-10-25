@@ -20,6 +20,7 @@ export { OperationsPortalNativeRecipientAuthorityIngress } from "./operations-po
 export { OperationsPortalNativeDeliveryAuthorityIngress } from "./operations-portal-native-delivery-authority-entrypoint";
 import { friendlyBulkFailure } from "./bulk-download-errors";
 import type { Env, ShareRow } from "./types";
+import { canonicalClientNavigationRedirect } from "./canonical-delivery-routing";
 import { selectedClientUiReleaseShell, serveClientUiReleaseAsset } from "./ui-release-routes";
 export { BulkDownloadWorkflow } from "./workflow";
 import { BULK_DOWNLOAD_RETENTION_MS } from "./workflow";
@@ -179,6 +180,8 @@ export const deliverySecurityHeaders: MiddlewareHandler = async (c, next) => {
 app.use("*", deliverySecurityHeaders);
 
 app.use("*", async (c, next) => {
+  const canonicalNavigation = canonicalClientNavigationRedirect(c.req.raw, c.env);
+  if (canonicalNavigation) return canonicalNavigation;
   const malformedLaunch = (c.req.method === "GET" || c.req.method === "HEAD")
     ? malformedPortalLaunchRedirect(c.req.url, c.env)
     : null;

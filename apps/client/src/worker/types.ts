@@ -22,6 +22,8 @@ export interface Env {
   /** Canonical public delivery/share origin. PUBLIC_BASE_URL remains a rollout-compatible mirror. */
   PUBLIC_SHARE_ORIGIN?: string;
   EXPECTED_HOST: string;
+  /** Default-off fresh browser navigation only; no API/session/asset migration. */
+  CANONICAL_BROWSER_NAVIGATION_ENABLED?: string;
   CLIENT_PORTAL_ENABLED?: string;
   /** Route-less ownership evidence writer. Default-off; does not fence PA reads or grant access. */
   CLIENT_AUTHORITY_WORKSPACE_CLAIM_WRITER_ENABLED?: string;

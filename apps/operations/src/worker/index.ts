@@ -154,6 +154,7 @@ import { servePdfSourceFile, serveSourceFile } from "./source-file";
 import { directDeliveryUploadsCapability } from "./direct-upload-policy";
 import { isFrameableOperationsPdfRequest } from "./frame-policy";
 import { requestHostAllowed } from "./host-admission";
+import { canonicalOperationsNavigationRedirect } from "./canonical-navigation";
 import {
   dropboxImportCapability,
   registerDropboxImportRoutes,
@@ -460,6 +461,8 @@ app.use("*", async (c, next) => {
   const paMachineHostAllowed=projectAlphaDeliveryMachineHostRequest(c.req.url,c.req.method,c.env);
   if (machine ? !machineHostAllowed : paMachine ? !paMachineHostAllowed : !requestHostAllowed(c.req.url, c.env))
     return c.json({ error: "Not found" }, 404);
+  const canonicalNavigation = canonicalOperationsNavigationRedirect(c.req.raw, c.env);
+  if (canonicalNavigation) return canonicalNavigation;
   await next();
   c.header("Permissions-Policy", "camera=(), microphone=(), geolocation=()");
   c.header("X-Robots-Tag", "noindex, nofollow");

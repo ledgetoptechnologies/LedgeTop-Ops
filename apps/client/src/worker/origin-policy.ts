@@ -183,6 +183,10 @@ export function legacyClientRedirectLocation(requestUrl: string, env: OriginEnv)
   let request: URL;
   try { request = new URL(requestUrl); } catch { return null; }
   if (![...legacy, ...retired].includes(request.origin)) return null;
+  // A former combined public/private host may remain an active private alias
+  // during the split-origin phase. Its existing private cookie sessions stay
+  // local; the separate opt-in fresh-browser policy handles new navigations.
+  if (configuredClientPortalOrigins(env)?.includes(request.origin)) return null;
   const namespace = requestNamespace(request.pathname);
   if (request.pathname === "/health" || request.pathname.startsWith("/api/") || namespace === "public" || namespace === "assets" || namespace === "ui-release" || namespace === "unknown") return null;
   const targetOrigin = configuredClientPortalOrigin(env);

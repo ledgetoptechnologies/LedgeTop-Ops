@@ -3,7 +3,9 @@
 Base: `origin/main` at `92b688f2014b92bd2bfa1972d1d653fb7921ebbd`.
 This source candidate changes no deployed settings, routes, Access policies,
 credentials, assets, data or Viewer configuration. The redirect helper is
-unmounted and defaults to disabled.
+mounted only by the later default-off browser navigation control. See
+`canonical-navigation-mount.md` for handler behavior and the unresolved
+Operations asset-routing gate. No redirect is enabled by this declaration.
 
 The finite new Client tuple is `EXPECTED_HOST=delivery.ledgetop.app`,
 `PUBLIC_BASE_URL=PUBLIC_SHARE_ORIGIN=https://delivery.ledgetop.app`,

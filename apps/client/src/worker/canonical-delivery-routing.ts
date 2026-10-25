@@ -1,4 +1,5 @@
-import { configuredPublicRequestOrigins, configuredPublicShareOrigin } from "./origin-policy.ts";
+import { configuredClientPortalOrigin, configuredClientPortalOrigins, configuredPublicRequestOrigins, configuredPublicShareOrigin, requestHostAllowed } from "./origin-policy.ts";
+import { canonicalDomainNavigationRedirect } from "../../../../packages/shared/src/canonical-domain-navigation.ts";
 import type { Env } from "./types";
 
 type RoutingEnv = Pick<Env, "ENVIRONMENT" | "EXPECTED_HOST" | "PUBLIC_BASE_URL" | "PUBLIC_SHARE_ORIGIN"
@@ -6,7 +7,7 @@ type RoutingEnv = Pick<Env, "ENVIRONMENT" | "EXPECTED_HOST" | "PUBLIC_BASE_URL" 
 const TARGET = "https://delivery.ledgetop.app";
 const SOURCES = new Set(["https://portal.ledgetopdroneservices.com", "https://client.ledgetopdroneservices.com"]);
 
-/** Unmounted migration policy. Enable only after new-host public acceptance.
+/** Mounted behind the default-off browser navigation control. Enable only after new-host public acceptance.
  * Redirect only a fresh browser page entry. Cookies, API calls, ranges and
  * capabilities continue at their original origin. No credentials are copied.
  * Location deliberately has no fragment: browsers inherit the original link
@@ -32,4 +33,20 @@ export function canonicalDeliveryEntryRedirect(request: Request, env: RoutingEnv
     Location: target.toString(), "Cache-Control": "no-store", "Referrer-Policy": "no-referrer",
     "X-Content-Type-Options": "nosniff",
   } });
+}
+
+/** Redirects presentation pages only after both origins pass existing host
+ * admission. Cookies, signed capabilities, APIs and bytes stay on their host. */
+export function canonicalClientNavigationRedirect(request: Request,
+  env: RoutingEnv & { CANONICAL_BROWSER_NAVIGATION_ENABLED?: string }): Response | null {
+  if (env.CANONICAL_BROWSER_NAVIGATION_ENABLED !== "true" || env.ENVIRONMENT !== "production") return null;
+  const publicEntry = canonicalDeliveryEntryRedirect(request, env, true);
+  if (publicEntry) return publicEntry;
+  if (["Cookie", "Authorization", "Range", "If-Range", "Origin"].some(name => request.headers.has(name))
+    || request.headers.get("Sec-Fetch-Dest") !== "document" || request.headers.get("Sec-Fetch-Mode") !== "navigate"
+    || configuredClientPortalOrigin(env) !== "https://portal.ledgetop.app"
+    || !configuredClientPortalOrigins(env)?.includes("https://portal.ledgetop.app")
+    || !requestHostAllowed(request.url, env)
+    || !requestHostAllowed("https://portal.ledgetop.app/portal", env)) return null;
+  return canonicalDomainNavigationRedirect(request, { enabled: true, surface: "portal" });
 }
