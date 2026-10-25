@@ -521,10 +521,22 @@ describe("exact-target service-assignment request policy", { timeout: 60_000 }, 
     expect(createdProof!.legacy).toBeNull();
     expect(JSON.parse(createdProof!.native)).toMatchObject({ version: 3, nativeProject: true, localProjectId: null,
       sourceId: secondarySourceId, workspaceId: secondarySession.workspaceId, subjectPublicId: input.projectId });
-    const saved = await saveNativeServiceRequestDraft(env, secondarySession, created.draft.id, created.draft.version,
+    let saved = await saveNativeServiceRequestDraft(env, secondarySession, created.draft.id, created.draft.version,
       { ...input, title: "Updated readable project request" }, "project-composition-save-0001");
     expect(saved?.kind).toBe("updated");
     if (!saved || saved.kind !== "updated") throw new Error("readable project draft update unavailable");
+    const general = await saveNativeServiceRequestDraft(env, secondarySession, created.draft.id, saved.draft.version,
+      { ...input, projectId: null }, "project-composition-to-general-0001");
+    expect(general?.kind).toBe("updated");
+    if (!general || general.kind !== "updated") throw new Error("general draft transition unavailable");
+    expect(await db.prepare("SELECT native_project_assignment_proof_v3_json FROM client_service_request_drafts WHERE id=?")
+      .bind(created.draft.id).first("native_project_assignment_proof_v3_json")).toBeNull();
+    saved = await saveNativeServiceRequestDraft(env, secondarySession, created.draft.id, general.draft.version,
+      input, "project-composition-to-project-0001");
+    expect(saved?.kind).toBe("updated");
+    if (!saved || saved.kind !== "updated") throw new Error("native project draft transition unavailable");
+    expect(await db.prepare("SELECT service_assignment_policy_v2_json FROM client_service_request_drafts WHERE id=?")
+      .bind(created.draft.id).first("service_assignment_policy_v2_json")).toBeNull();
     const initialized = await initializeRequestAttachment(env, secondarySession, created.draft.id, {
       clientUploadId: "project-composition-upload-0001", name: "proof.pdf", contentType: "application/pdf", size: 10,
     });
