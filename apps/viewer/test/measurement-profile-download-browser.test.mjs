@@ -1,3 +1,4 @@
+import { waitForDevToolsPort } from './devtools-port.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {spawn} from 'node:child_process';
@@ -49,8 +50,7 @@ test('native profile exports create real CSV and PNG files using browser downloa
     server=createServer((req,res)=>{const pathname=new URL(req.url,'http://fixture.invalid').pathname;if(pathname==='/'){res.setHeader('Content-Type','text/html');return res.end(page);}if(!/^\/[a-z0-9-]+\.(mjs|css)$/.test(pathname)){res.statusCode=404;return res.end();}const file=path.join(root,pathname.slice(1));if(!existsSync(file)){res.statusCode=404;return res.end();}res.setHeader('Content-Type',file.endsWith('.css')?'text/css':'application/javascript');res.end(readFileSync(file));});
     await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
     browser=spawn(binary,['--headless=new','--disable-gpu','--no-first-run','--no-default-browser-check','--no-sandbox','--remote-debugging-port=0',`--user-data-dir=${profile}`,'about:blank'],{windowsHide:true,stdio:'ignore'});
-    const active=path.join(profile,'DevToolsActivePort');await waitUntil(()=>existsSync(active),'browser startup');
-    const port=readFileSync(active,'utf8').split(/\r?\n/)[0],tabs=await(await fetch(`http://127.0.0.1:${port}/json/list`)).json();client=await Cdp.connect(tabs.find(x=>x.type==='page').webSocketDebuggerUrl);
+    const port=await waitForDevToolsPort(path.join(profile,'DevToolsActivePort'),{pollMs:30,label:'Timed out: browser startup'}),tabs=await(await fetch(`http://127.0.0.1:${port}/json/list`)).json();client=await Cdp.connect(tabs.find(x=>x.type==='page').webSocketDebuggerUrl);
     await client.command('Runtime.enable');await client.command('Page.enable');await client.command('Browser.setDownloadBehavior',{behavior:'allow',downloadPath:downloads});await client.command('Emulation.setDeviceMetricsOverride',{width:1200,height:1100,deviceScaleFactor:1,mobile:false});
     await client.command('Page.navigate',{url:`http://127.0.0.1:${server.address().port}/`});await waitUntil(()=>client.evaluate("document.body?.dataset.ready==='true'"),'fixture mount');
     await waitUntil(()=>client.evaluate("!document.querySelector('[data-profile-csv]').disabled"),'automatic profile result');

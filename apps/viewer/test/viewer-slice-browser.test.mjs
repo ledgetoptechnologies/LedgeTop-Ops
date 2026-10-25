@@ -1,3 +1,4 @@
+import { waitForDevToolsPort } from './devtools-port.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {spawn} from 'node:child_process';
@@ -36,8 +37,7 @@ test('real WebGL mesh and direct points follow slice controls, streamed arrivals
     await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
     const profile=mkdtempSync(path.join(tmpdir(),'ltds-viewer-slice-browser-'));
     browser=spawn(binary,['--headless=new','--enable-unsafe-swiftshader','--no-first-run','--no-default-browser-check','--no-sandbox','--remote-debugging-port=0',`--user-data-dir=${profile}`,'about:blank'],{windowsHide:true,stdio:'ignore'});
-    const active=path.join(profile,'DevToolsActivePort'),until=Date.now()+10000;while(!existsSync(active)&&Date.now()<until)await delay(50);assert.ok(existsSync(active));
-    const port=readFileSync(active,'utf8').split(/\r?\n/)[0],tabs=await(await fetch(`http://127.0.0.1:${port}/json/list`)).json();client=await Cdp.connect(tabs.find(tab=>tab.type==='page').webSocketDebuggerUrl);
+    const port=await waitForDevToolsPort(path.join(profile,'DevToolsActivePort')),tabs=await(await fetch(`http://127.0.0.1:${port}/json/list`)).json();client=await Cdp.connect(tabs.find(tab=>tab.type==='page').webSocketDebuggerUrl);
     await client.command('Page.enable');await client.command('Page.navigate',{url:`http://127.0.0.1:${server.address().port}/`});
     const ready=Date.now()+10000;while(Date.now()<ready&&!await client.evaluate("document.body?.dataset.ready==='true'"))await delay(50);
     assert.equal(await client.evaluate("document.body?.dataset.ready==='true'"),true);

@@ -1,3 +1,4 @@
+import { waitForDevToolsPort } from './devtools-port.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {spawn} from 'node:child_process';
@@ -20,48 +21,6 @@ const record={id,name:'Synthetic feed pile',revision:1,modelId:'fixture-model',m
 const completedResult=()=>({method:'surface-cut-fill',status:'calculated',cutM3:12345.6789,fillM3:2,netM3:12343.6789,coverage:1,source:{assetId:'fixture-dsm',kind:'dsm',modelVersionId:'fixture-version',boundaryElevationBasis:'native-raster'},reference:{type:'boundary-triangulated',offsetM:0},warnings:[],preview:{samples:Array.from({length:121},(_,index)=>{const x=index%11,y=Math.floor(index/11);return [x,y,Math.max(0,6-Math.hypot(x-5,y-5)),0];})}});
 const delay=ms=>new Promise(resolve=>setTimeout(resolve,ms));
 const executable=()=>[process.env.CHROME_PATH,process.env.EDGE_PATH,'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe','C:/Program Files/Microsoft/Edge/Application/msedge.exe','C:/Program Files/Google/Chrome/Application/chrome.exe','/usr/bin/google-chrome','/usr/bin/chromium'].filter(Boolean).find(existsSync);
-
-async function waitForDevToolsPort(file,{read=()=>readFileSync(file,'utf8'),now=Date.now,sleep=delay}={}){
-  const until=now()+10000;
-  while(now()<until){
-    let content='';
-    try{content=read();}catch(error){if(error.code!=='ENOENT')throw error;}
-    // Chromium creates this file before its write is complete. A complete port
-    // line and browser UUID prevent empty/partial content becoming URL port80.
-    const match=/^([1-9]\d{0,4})\r?\n\/devtools\/browser\/[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}\r?\n?$/i.exec(content);
-    if(match&&Number(match[1])<=65535)return Number(match[1]);
-    await sleep(50);
-  }
-  throw new Error('Isolated browser startup: no complete valid DevToolsActivePort within 10000 ms');
-}
-
-test('browser port startup waits through missing, empty, partial and invalid file contents',async()=>{
-  const endpoint='/devtools/browser/11111111-2222-4333-8444-555555555555';
-  const samples=[null,'','12','12345\n',`12345\n${endpoint.slice(0,-1)}`,`\n${endpoint}`,`0\n${endpoint}`,`65536\n${endpoint}`,`abc\n${endpoint}`,`12345junk\n${endpoint}`,`12345\n${endpoint}\nextra`,`12345\r\n${endpoint}`];
-  let clock=0,reads=0,sleeps=0;
-  const port=await waitForDevToolsPort('synthetic-only',{now:()=>clock,read:()=>{const value=samples[reads++];if(value===null)throw Object.assign(new Error('Not created yet'),{code:'ENOENT'});return value;},sleep:async ms=>{assert.equal(ms,50);sleeps++;clock+=ms;}});
-  assert.equal(port,12345);assert.equal(reads,samples.length);assert.equal(sleeps,samples.length-1);
-});
-
-test('browser port startup accepts a complete valid endpoint without retrying',async()=>{
-  let sleeps=0;
-  for(const port of [1,65535])assert.equal(await waitForDevToolsPort('synthetic-only',{read:()=>`${port}\n/devtools/browser/11111111-2222-4333-8444-555555555555\n`,sleep:async()=>{sleeps++;}}),port);
-  assert.equal(sleeps,0);
-});
-
-test('browser port startup retains its ten-second bound when the file stays empty or invalid',async()=>{
-  for(const content of ['', '12345', '70000\n/devtools/browser/11111111-2222-4333-8444-555555555555']){
-    let clock=0,reads=0;
-    await assert.rejects(waitForDevToolsPort('synthetic-only',{now:()=>clock,read:()=>{reads++;return content;},sleep:async ms=>{clock+=ms;}}),/no complete valid DevToolsActivePort within 10000 ms/);
-    assert.equal(clock,10000);assert.equal(reads,200);
-  }
-});
-
-test('browser port startup propagates actual file read failures immediately',async()=>{
-  const failure=Object.assign(new Error('Synthetic read permission failure'),{code:'EACCES'});let reads=0,sleeps=0;
-  await assert.rejects(waitForDevToolsPort('synthetic-only',{read:()=>{reads++;throw failure;},sleep:async()=>{sleeps++;}}),error=>error===failure);
-  assert.equal(reads,1);assert.equal(sleeps,0);
-});
 
 class Cdp {
   constructor(socket){this.socket=socket;this.sequence=0;this.pending=new Map();this.errors=[];socket.addEventListener('message',event=>{const m=JSON.parse(event.data);if(m.method==='Runtime.exceptionThrown')this.errors.push(m.params.exceptionDetails);const p=this.pending.get(m.id);if(p){this.pending.delete(m.id);clearTimeout(p.timer);m.error?p.reject(new Error(m.error.message)):p.resolve(m.result);}});}

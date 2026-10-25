@@ -1,3 +1,4 @@
+import { waitForDevToolsPort } from './devtools-port.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {spawn} from 'node:child_process';
@@ -33,8 +34,7 @@ test('shipped Viewer header fits phone, narrow desktop and full desktop with nam
     server=createServer((_req,res)=>{res.setHeader('Content-Type','text/html; charset=utf-8');res.end(page());});await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));const origin=`http://127.0.0.1:${server.address().port}`;
     profile=mkdtempSync(path.join(tmpdir(),'ltds-viewer-header-'));
     browser=spawn(executable,['--headless=new','--disable-gpu','--no-first-run','--no-default-browser-check','--no-sandbox','--remote-debugging-port=0',`--user-data-dir=${profile}`,'about:blank'],{windowsHide:true,stdio:'ignore'});
-    const active=path.join(profile,'DevToolsActivePort'),until=Date.now()+10000;while(!existsSync(active)&&Date.now()<until)await delay(50);assert.ok(existsSync(active));
-    const port=readFileSync(active,'utf8').split(/\r?\n/)[0],tabs=await(await fetch(`http://127.0.0.1:${port}/json/list`)).json();client=await Cdp.connect(tabs.find(tab=>tab.type==='page').webSocketDebuggerUrl);await client.command('Runtime.enable');await client.command('Page.enable');
+    const port=await waitForDevToolsPort(path.join(profile,'DevToolsActivePort')),tabs=await(await fetch(`http://127.0.0.1:${port}/json/list`)).json();client=await Cdp.connect(tabs.find(tab=>tab.type==='page').webSocketDebuggerUrl);await client.command('Runtime.enable');await client.command('Page.enable');
     for(const width of [390,692,1440])for(const admin of [false,true])await t.test(`${width}px ${admin?'staff':'client'} header`,async()=>{
       await client.command('Emulation.setDeviceMetricsOverride',{width,height:912,deviceScaleFactor:1,mobile:false});const url=`${origin}/?width=${width}&admin=${admin}`;await client.command('Page.navigate',{url});const until=Date.now()+8000;while(Date.now()<until){if(await client.evaluate(`location.href===${JSON.stringify(url)}&&document.body?.dataset.ready==='true'`))break;await delay(25);}
       await client.evaluate(`document.querySelector('#admin-controls').style.display=${JSON.stringify(admin?'flex':'none')}`);
