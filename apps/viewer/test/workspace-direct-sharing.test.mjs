@@ -22,7 +22,7 @@ function declaration(name){
   return next?rest.slice(0,next.index):rest;
 }
 const names=['clientAccessDiagnostic','canShareOutput','openShareModal','associationModelId','associationProjectId','portalAccountId',
-  'clientProjectKey','clientProjectLabel','clientAccessSnapshot','exactClientAssociations','clientGrantBody','clientSharePanel','clientShareCard','directShareContext','directClientShareCard','rerenderClientSharePanel','bindDirectShare','rememberShareResult','clearShareResult','visibleShareResult','shareModal','confirmSharedVersionUpdate',
+  'clientProjectKey','clientProjectLabel','clientAccessSnapshot','exactClientAssociations','clientGrantBody','clientSharePanel','legacyClientSharePanel','clientShareCard','directShareContext','directClientShareCard','rerenderClientSharePanel','bindDirectShare','rememberShareResult','clearShareResult','visibleShareResult','shareModal','confirmSharedVersionUpdate',
   'createOutputShare','clientGrantRevocationMessage','bindShareModal','bindProjectShareCard','shareViewLabels','availableShareViews','shareViewControls','bindShareViewControls','selectedShareViews','shareSettingsSummary','shareExpiryInput','editShareModal','retrieveShareLink'];
 function fixture(permissions=['viewer.shares.read','viewer.shares.create','viewer.shares.revoke','viewer.processing.publish','viewer.client_grants.manage']){
   const output={id:'output',modelId:'model',projectId:'project',taskId:'task',attemptId:'attempt',status:'ready',activePublished:false,assetKinds:['glb']};
@@ -526,4 +526,41 @@ test('without direct client sharing the Share dialog is unchanged',async()=>{
   const f=fixture();await f.context.openShareModal('project');await new Promise(resolve=>setImmediate(resolve));
   const html=f.html()+f.clientPanel.innerHTML;
   assert.doesNotMatch(html,/Share with a client|Share through an Operations project instead/);
+});
+
+for(const directAvailable of [false,true])for(const legacyFailed of [false,true])test(`direct availability ${directAvailable} is independent of legacy failure ${legacyFailed}`,async()=>{
+  const f=fixture();
+  f.output.status='published';f.output.activePublished=true;
+  if(directAvailable)f.respondDirect(async()=>({clients:[{sourceId:'s',workspaceId:'w',displayName:'Acme'}],grants:[]}));
+  if(legacyFailed)f.respond(path=>path.endsWith('/client-grants')?Promise.reject(Object.assign(new Error('Unavailable'),{status:503})):Promise.resolve({shares:[]}));
+  await f.context.openShareModal('project');await new Promise(resolve=>setImmediate(resolve));
+  const html=f.context.clientSharePanel(f.output,null);
+  assert.equal(html.includes('id="direct-client-grant-form"'),directAvailable);
+  assert.equal(html.includes('Operations client access could not be loaded'),legacyFailed);
+  if(directAvailable&&legacyFailed)assert.match(html,/<details[^>]*class="share-legacy"[\s\S]*Operations client access could not be loaded[\s\S]*<\/details>/);
+  assert.equal(f.calls.some(call=>call.options.method==='POST'),false);
+});
+
+test('healthy direct sharing renders while both Operations project lookups are still pending',async()=>{
+  const f=fixture();f.output.status='published';f.output.activePublished=true;
+  f.respond(path=>path.endsWith('/client-grants')?new Promise(()=>{}):Promise.resolve({shares:[]}));
+  f.respondNative(()=>new Promise(()=>{}));
+  f.respondDirect(async()=>({clients:[{sourceId:'s',workspaceId:'w',displayName:'Acme'}],grants:[]}));
+  await f.context.openShareModal('project');await new Promise(resolve=>setImmediate(resolve));
+  const html=f.context.clientSharePanel(f.output,null);
+  assert.equal(f.state.shareContext.clientLoading,true);
+  assert.match(html,/id="direct-client-grant-form"/);
+  assert.match(html,/<details[^>]*class="share-legacy"[\s\S]*Checking Operations client access[\s\S]*<\/details>/);
+});
+
+for(const change of ['closed','context','token','subject','permission'])test(`late direct result is ignored after ${change} changes`,async()=>{
+  const permissions=['viewer.shares.read','viewer.client_grants.manage'],f=fixture(permissions);let settle;
+  f.respondDirect(()=>new Promise(resolve=>{settle=resolve}));
+  await f.context.openShareModal('project');await new Promise(resolve=>setImmediate(resolve));
+  const access=f.state.clientDirectAccess,panel=f.clientPanel.innerHTML;
+  if(change==='closed')f.modal.close();if(change==='context')f.state.shareContext={id:'other'};
+  if(change==='token')f.state.token='other';if(change==='subject')f.state.adminSession={subject:'other'};
+  if(change==='permission')permissions.splice(permissions.indexOf('viewer.client_grants.manage'),1);
+  settle({clients:[{sourceId:'s',workspaceId:'w',displayName:'Late'}],grants:[]});await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(f.state.clientDirectAccess,access);assert.equal(f.clientPanel.innerHTML,panel);
 });

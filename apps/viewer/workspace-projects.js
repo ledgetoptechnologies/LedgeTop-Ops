@@ -84,12 +84,23 @@ async function openShareModal(projectId,onlyOutputId=null){
   // Optional Operations lookup must not hold the independent public-link form.
   // A late result updates only its own panel, preserving typed public-link fields.
   if(context.clientLoading)void(async()=>{
-    const [legacy,native,direct]=await Promise.allSettled([api('/api/v1/workspace/client-grants'),api('/api/v1/workspace/native-client-grants'),api(directClientsPath(projectId))]);
+    const [legacy,native]=await Promise.allSettled([api('/api/v1/workspace/client-grants'),api('/api/v1/workspace/native-client-grants')]);
     if(!current()||!can('viewer.client_grants.manage'))return;
-    state.clientDirectAccess=direct.status==='fulfilled'?directClientAccess(direct.value):null;context.directQuery='';
     state.clientAccess=legacy.status==='fulfilled'?legacy.value:null;
     state.clientNativeAccess=native.status==='fulfilled'&&Array.isArray(native.value?.targets)&&Array.isArray(native.value?.grants)?native.value:null;
     context.clientLoading=false;context.clientError=legacy.status==='rejected'?clientAccessDiagnostic(legacy.reason):null;context.nativeError=native.status==='rejected'?clientAccessDiagnostic(native.reason):null;
+    if(context.loading)return;
+    const legacyPanel=modalContent.querySelector('[data-legacy-client-share-panel]');
+    if(state.clientDirectAccess&&legacyPanel){legacyPanel.innerHTML=legacyClientSharePanel(state.outputs.find(output=>output.id===onlyOutputId),onlyOutputId);bindShareModal(projectId,onlyOutputId,{preserveDirectForm:true});return;}
+    const panel=modalContent.querySelector('[data-client-share-panel]');
+    if(panel){panel.innerHTML=clientSharePanel(state.outputs.find(output=>output.id===onlyOutputId),onlyOutputId);bindShareModal(projectId,onlyOutputId);}
+  })();
+  // Direct sharing has its own authority and must not wait for project lookups.
+  if(context.clientLoading)void(async()=>{
+    let access=null;
+    try{access=directClientAccess(await api(directClientsPath(projectId)));}catch{}
+    if(!current()||!can('viewer.client_grants.manage'))return;
+    state.clientDirectAccess=access;context.directQuery='';
     if(context.loading)return;
     const panel=modalContent.querySelector('[data-client-share-panel]');
     if(panel){panel.innerHTML=clientSharePanel(state.outputs.find(output=>output.id===onlyOutputId),onlyOutputId);bindShareModal(projectId,onlyOutputId);}
@@ -628,6 +639,12 @@ function clientGrantBody(form,onlyOutputId){
     permissions:{measure:form.elements.measure.checked,cameras:form.elements.cameras.checked,download:form.elements.download.checked}}};
 }
 function clientSharePanel(output,onlyOutputId){
+  const legacy=legacyClientSharePanel(output,onlyOutputId);
+  if(state.clientDirectAccess)return directClientShareCard(onlyOutputId)
+    +`<details class="share-legacy"><summary>Share through an Operations project instead</summary><div data-legacy-client-share-panel>${legacy}</div></details>`;
+  return legacy;
+}
+function legacyClientSharePanel(output,onlyOutputId){
   if(can('viewer.client_grants.manage')&&state.shareContext?.clientLoading)return card('Authenticated client access',empty('Checking Operations client access… Public links can be created separately.'));
   if(can('viewer.client_grants.manage')&&state.shareContext?.clientError&&!state.clientNativeAccess?.targets?.length){
     const diagnostic=clientAccessDiagnostic(state.shareContext.clientError);
@@ -636,8 +653,6 @@ function clientSharePanel(output,onlyOutputId){
       +(details?`<p class="form-note">${esc(details)}</p>`:'')
       +`<p class="form-note">${diagnostic.requestId?`Reference: ${esc(diagnostic.requestId)}. Share this reference with your administrator.`:'No proxy reference was returned; this alone does not identify the failure stage.'}</p>`);
   }
-  if(state.clientDirectAccess)return directClientShareCard(onlyOutputId)
-    +`<details class="share-legacy"><summary>Share through an Operations project instead</summary>${clientShareCard(output,onlyOutputId)}</details>`;
   return clientShareCard(output,onlyOutputId);
 }
 function directShareContext(onlyOutputId){
@@ -896,7 +911,7 @@ function clientGrantRevocationMessage(result,native){
     ?'Client access revoked. Revocation of existing sessions is pending.'
     :'Client access revoked';
 }
-function bindShareModal(projectId,onlyOutputId){
+function bindShareModal(projectId,onlyOutputId,{preserveDirectForm=false}={}){
   modalContent.querySelectorAll('[data-share-mode]').forEach(element=>element.onclick=()=>{
     if(!onlyOutputId||!state.shareContext)return;
     const mode=element.dataset.shareMode==='public'?'public':'internal';state.shareContext.mode=mode;
@@ -909,7 +924,7 @@ function bindShareModal(projectId,onlyOutputId){
   modalContent.querySelectorAll('[data-action="copy-existing-share"],[data-action="open-existing-share"]').forEach(element=>element.onclick=()=>retrieveShareLink(element));
   modalContent.querySelectorAll('[data-action="edit-share"]').forEach(element=>element.onclick=()=>editShareModal(projectId,onlyOutputId,element.dataset.id));
   const directForm=modalContent.querySelector('#direct-client-grant-form');
-  if(directForm)bindDirectShare(directForm,projectId,onlyOutputId);
+  if(directForm&&!preserveDirectForm)bindDirectShare(directForm,projectId,onlyOutputId);
   modalContent.querySelectorAll('[data-action="revoke-direct-client-grant"]').forEach(element=>element.onclick=async()=>{
     // Pinned to this modal and row: a late answer must not touch a different Share dialog.
     const shareContext=state.shareContext,access=state.clientDirectAccess,live=()=>state.shareContext===shareContext&&state.clientDirectAccess===access&&element.isConnected&&modal.open;
