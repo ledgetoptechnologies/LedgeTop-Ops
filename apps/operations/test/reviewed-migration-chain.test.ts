@@ -142,6 +142,8 @@ describe("reviewed release migration fixtures", () => {
     ["operations", "0225_native_staff_lifecycle_bridge.sql"],
     ["client", "0235_windows_portal_successor_candidates.sql"],
     ["client", "0236_windows_portal_successor_content_start_audit.sql"],
+    ["client", "0237_viewer_direct_client_grants.sql"],
+    ["client", "0238_viewer_direct_session_intents.sql"],
   ] as const)("validates exact %s successor %s without expanding historical authority", (application, name) => {
     const fixture=copyMigrations(application);
     const reviewed=()=>application==="operations"?reviewedOperationsMigrationNames(fixture.url):reviewedClientMigrationNames(fixture.url);
@@ -156,6 +158,17 @@ describe("reviewed release migration fixtures", () => {
     expect(reviewed).toThrow(`reviewed-${application==="operations"?"operations":"delivery"}-successor-content-contract-mismatch`);
     unlinkSync(join(fixture.directory,name));
     expect(reviewed).toThrow(`reviewed-${application==="operations"?"operations":"delivery"}-migration-physical-inventory-mismatch`);
+  });
+
+  it.each([
+    ["0237_viewer_direct_client_grants.sql", "0237_unreviewed_viewer_direct_client_grants.sql"],
+    ["0238_viewer_direct_session_intents.sql", "0238_unreviewed_viewer_direct_session_intents.sql"],
+  ])("rejects unknown direct-sharing successor names even with reviewed %s bytes", (name, unknown) => {
+    const fixture = copyMigrations("client");
+    const sql = readFileSync(join(fixture.directory, name), "utf8");
+    writeFileSync(join(fixture.directory, unknown), sql);
+    expect(() => reviewedClientMigrationNames(fixture.url))
+      .toThrow("reviewed-delivery-migration-physical-inventory-mismatch");
   });
 
   it("keeps reenrollment a receipt-guarded successor without rewriting the historical identity inventory", () => {

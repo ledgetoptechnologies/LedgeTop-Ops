@@ -2041,6 +2041,8 @@ const MIGRATIONS = [
       WHEN NEW.controller_origin IS NOT OLD.controller_origin
       BEGIN SELECT RAISE(ABORT,'workspace controller origin is immutable'); END;`);
   }},
+  {version:40,name:'direct_client_session_source_authorizations',sql:'SELECT 1;',
+    after(database){require('./directClientSourceMigration').migrateDirectClientSources(database);}},
 ];
 
 function applyMigrations(database) {
@@ -2103,7 +2105,8 @@ function openDatabase(databasePath) {
   // that bounded initialization transition; migration locking remains native.
   withBusyRetry(() => database.exec('PRAGMA journal_mode=WAL'));
   database.exec('PRAGMA synchronous=NORMAL');
-  applyMigrations(database);
+  try { applyMigrations(database); }
+  catch (error) { database.close(); throw error; }
   return database;
 }
 

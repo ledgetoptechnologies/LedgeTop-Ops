@@ -553,6 +553,26 @@ export interface NativeClientViewerSessionRequestV1 extends NativeClientViewerAu
   displayUnits: ViewerDisplayUnits;
 }
 
+export interface DirectClientViewerAuthorizationV1 extends Omit<NativeClientViewerAuthorizationV1, "projectPublicId"> {
+  cursor?: string;
+}
+export interface DirectClientViewerSessionRequestV1 extends Omit<DirectClientViewerAuthorizationV1, "cursor"> {
+  grantId: string;
+  taskId: string;
+  idempotencyKey: string;
+  displayUnits: ViewerDisplayUnits;
+}
+export interface DirectClientViewerItemV1 {
+  grantId: string; workspaceId: string; taskId: string;
+  scopeType: "project" | "task";
+  title: string; projectName: string; businessName: string;
+  sharedAt: string; updatedAt: string; expiresAt: string | null;
+  permissions: { measure: boolean; cameras: boolean; download: boolean };
+}
+export type DirectClientViewerItemsResultV1 =
+  | { ok: true; protocolVersion: 1; items: DirectClientViewerItemV1[]; nextCursor: string | null }
+  | { ok: false; protocolVersion: 1; code: "invalid_request" | "denied" | "not_found" | "configuration_error" | "temporarily_unavailable" };
+
 export interface NativeClientViewerModelSummaryV1 {
   associationId: string;
   title: string;
@@ -611,6 +631,8 @@ export type ClientViewerShareRevokeResultV1 =
   | { ok: false; protocolVersion: 1; code: ClientViewerShareResultCodeV1 };
 
 export interface ViewerSessionIssuerBinding {
+  listDirectClientViewerItems?(request: DirectClientViewerAuthorizationV1): Promise<DirectClientViewerItemsResultV1>;
+  issueDirectClientViewerSession?(request: DirectClientViewerSessionRequestV1): Promise<ClientViewerSessionResultV1>;
   issueClientViewerSession(request: ClientViewerSessionRequestV1): Promise<ClientViewerSessionResultV1>;
   listNativeClientViewerModels(request: NativeClientViewerAuthorizationV1): Promise<NativeClientViewerModelsResultV1>;
   issueNativeClientViewerSession(request: NativeClientViewerSessionRequestV1): Promise<ClientViewerSessionResultV1>;

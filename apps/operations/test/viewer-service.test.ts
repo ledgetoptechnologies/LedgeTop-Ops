@@ -418,3 +418,39 @@ it("signs the exact controller and renewal-session pins into the admin-grant bod
   subject:"ops:staff-one",permissions:["viewer.projects.read"],authorizationExpiresAt:new Date(Date.now()+1800000).toISOString(),displayUnits:"imperial",idempotencyKey:"test-controller-grant-001"});
  expect(fetcher).toHaveBeenCalledOnce();
 });
+
+describe("direct client delivery service boundary",()=>{
+ const projectId="00000000-0000-4000-8000-000000000001",taskId="00000000-0000-4000-8000-000000000002";
+ const catalog=()=>({schemaVersion:1,project:{id:projectId,displayName:"Property map",privatePath:"/nas/secret"},tasks:[{
+  id:taskId,displayName:"Map",modelId:"model-one",modelVersionId:"version-one",modelTitle:"Model",publishedAt:"2026-10-01T00:00:00Z",providerToken:"private"}],nextCursor:null});
+ it("signs the exact scoped query and projects away private upstream fields",async()=>{
+  const fetcher=vi.fn(async(input:RequestInfo|URL,init?:RequestInit)=>{
+   const url=new URL(String(input));expect(url.pathname).toBe("/api/v1/client-delivery-catalog");
+   expect(url.searchParams.get("projectId")).toBe(projectId);expect(url.searchParams.get("taskId")).toBe(taskId);
+   expect(init?.redirect).toBe("manual");return Response.json(catalog());});
+  const client=new ViewerServiceClient({baseUrl:"https://viewer.example.test",keyId:"ops-v1",secret},fetcher as typeof fetch);
+  const result=await client.clientDeliveryCatalog({projectId,taskId,limit:1});
+  expect(result.tasks).toHaveLength(1);expect(JSON.stringify(result)).not.toContain("private");
+ });
+ it("rejects a sibling task or mismatched parent from the upstream",async()=>{
+  const bad=catalog();bad.tasks[0]!.id="another-task";
+  const client=new ViewerServiceClient({baseUrl:"https://viewer.example.test",keyId:"ops-v1",secret},async()=>Response.json(bad));
+  await expect(client.clientDeliveryCatalog({projectId,taskId})).rejects.toMatchObject({code:"invalid_response"});
+  bad.project.id="another-project";await expect(client.clientDeliveryCatalog({projectId})).rejects.toMatchObject({code:"invalid_response"});
+ });
+ it("rejects duplicate rows, oversized pages and single-task continuation",async()=>{
+  let payload:unknown=catalog();const client=new ViewerServiceClient({baseUrl:"https://viewer.example.test",keyId:"ops-v1",secret},async()=>Response.json(payload));
+  const duplicate=catalog();duplicate.tasks.push(duplicate.tasks[0]!);payload=duplicate;
+  await expect(client.clientDeliveryCatalog({projectId})).rejects.toMatchObject({code:"invalid_response"});
+  payload={...catalog(),nextCursor:"unexpected-page"};await expect(client.clientDeliveryCatalog({projectId,taskId})).rejects.toMatchObject({code:"invalid_response"});
+  payload=duplicate;await expect(client.clientDeliveryCatalog({projectId,limit:1})).rejects.toMatchObject({code:"invalid_response"});
+ });
+ it("matches direct grant revocation by exact type as well as ID and version",async()=>{
+  let type="model_association";
+  const client=new ViewerServiceClient({baseUrl:"https://viewer.example.test",keyId:"ops-v1",secret},async()=>Response.json({
+   sourceAuthorization:{type,id:"grant-one",version:1},revokedGrants:0,revokedSessions:1}));
+  const input={sourceAuthorization:{type:"direct_client_grant" as const,id:"grant-one",version:1},idempotencyKey:"direct-revocation-test-001"};
+  await expect(client.revokePublishedSessionSourceAuthorization(input)).rejects.toMatchObject({code:"invalid_response"});
+  type="direct_client_grant";await expect(client.revokePublishedSessionSourceAuthorization(input)).resolves.toMatchObject({sourceAuthorization:{type}});
+ });
+});

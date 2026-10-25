@@ -67,6 +67,8 @@ const operationsSuccessors = Object.freeze({
 });
 
 const clientSuccessors = Object.freeze({
+  "0237_viewer_direct_client_grants.sql": "6c8527f21d7c8bc44a54c3fe66731a18e7e8b0a185a6f61c8a8af4fc02efc4cd",
+  "0238_viewer_direct_session_intents.sql": "597a058166aadbe1fe00c10158fb70467956e97f4fb99cd0a047a4022d256d18",
   "0235_windows_portal_successor_candidates.sql": "50046477dda2efe378d4b01c7de9f4ff2383d1511cf56c4c7a9633b4e41c0841",
   "0236_windows_portal_successor_content_start_audit.sql": "fcbc6f9f802dee3e2bfe592f1476f485b24d7f5414ca86143ddd9a299e82ffcf",
   "0232_shared_profile_edit_authority.sql": "3c2b3ddbdb920739c8f4ab8f437808749f5f83581b098518c5efd41c2e0b0073",
