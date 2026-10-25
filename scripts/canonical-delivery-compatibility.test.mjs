@@ -52,7 +52,7 @@ test('old deployment profile and staging behavior retain their existing contract
 
 test('fresh legacy browser entry preserves exact path/query; response never consumes the fragment',()=>{
   for(const origin of [OLD,CLIENT]) for(const root of ['s','client-share']) for(const method of ['GET','HEAD']) {
-    const path=`/${root}/synthetic-id?folder=opaque%2Fref&view=list&x=1&x=2&next=%2Fportal`;
+    const path=`/${root}/synthetic-id?folder=opaque%2Fref&view=list&sort=name&sort=date`;
     const response=redirect(`${origin}${path}`,{method});
     assert.equal(response.status,302);
     assert.equal(response.headers.get('Location'),`${NEW}${path}`);
@@ -75,4 +75,10 @@ test('redirect is opt-in and refuses sessions, media, ranges, POST, API and non-
   for(const path of ['/api/public/shares/id/session','/api/public/shares/id/items/item/download','/client-share/api/shares/id/session','/assets/client.js','/_ui/release/client.js','/portal','/s/id/more','/s/id%2Fmore','/s/id%252Fmore'])
     assert.equal(redirect(`${OLD}${path}`),null,path);
   for(const origin of [PORTAL,NEW,'https://portal.ledgetoptechnologies.com','https://unrelated.invalid']) assert.equal(redirect(`${origin}/s/id`),null);
+});
+
+test('public callback capabilities and unknown query keys remain on their original route',()=>{
+  for(const origin of [OLD,CLIENT]) for(const root of ['s','client-share']) for(const method of ['GET','HEAD'])
+    for(const key of ['cloudTransferNonce','cloudTransferAuthorization','cloudTransferJob','token','%74oken','access%5Fcode','state','next','unknown','%2574oken'])
+      assert.equal(redirect(`${origin}/${root}/synthetic-id?folder=opaque%2Fref&${key}=synthetic`,{method}),null,key);
 });

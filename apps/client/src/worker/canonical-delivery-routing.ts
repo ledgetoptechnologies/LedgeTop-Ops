@@ -6,6 +6,10 @@ type RoutingEnv = Pick<Env, "ENVIRONMENT" | "EXPECTED_HOST" | "PUBLIC_BASE_URL" 
   | "CLIENT_PORTAL_ORIGIN" | "CLIENT_PORTAL_ORIGINS" | "LEGACY_CLIENT_ORIGINS" | "CLIENT_PORTAL_RETIRED_ORIGINS">;
 const TARGET = "https://delivery.ledgetop.app";
 const SOURCES = new Set(["https://portal.ledgetopdroneservices.com", "https://client.ledgetopdroneservices.com"]);
+// Callback capabilities belong to their original route. Move only page filters.
+const PRESENTATION_QUERY_KEYS = new Set([
+  "folder", "view", "q", "search", "sort", "order", "page", "limit", "cursor", "prefix",
+]);
 
 /** Mounted behind the default-off browser navigation control. Enable only after new-host public acceptance.
  * Redirect only a fresh browser page entry. Cookies, API calls, ranges and
@@ -26,6 +30,8 @@ export function canonicalDeliveryEntryRedirect(request: Request, env: RoutingEnv
   if (source.username || source.password || !SOURCES.has(source.origin)
     || !configuredPublicRequestOrigins(env)?.includes(source.origin)
     || !/^\/(?:s|client-share)\/[A-Za-z0-9_-]{1,128}$/.test(source.pathname)) return null;
+  for (const key of source.searchParams.keys())
+    if (!PRESENTATION_QUERY_KEYS.has(key.toLowerCase())) return null;
   const target = new URL(TARGET);
   target.pathname = source.pathname;
   target.search = source.search;
