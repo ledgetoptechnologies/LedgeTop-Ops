@@ -91,7 +91,9 @@ function nativeCallsOnly(calls: Call[]) {
 
 test("native refresh discovers identity without the selected workspace header and never probes legacy resources", async ({page}) => {
   const calls = await mock(page); await page.goto("/portal?workspace=workspace-b");
-  await expect(page.getByRole("heading", {name: workspace("workspace-b").displayName})).toBeVisible();
+  await expect(page.getByRole("heading", {level: 1, name: "Your projects"})).toBeVisible();
+  // Stored account names can be internal labels; the page chrome and headings never show them (directory records keep their own names).
+  for (const chrome of [...await page.locator("header").all(), page.locator(".unified-portal-context"), page.locator(".portal-welcome")]) await expect(chrome).not.toContainText(workspace("workspace-b").displayName);
   await expect(page.getByText("Coastal seawall construction documentation", {exact: true})).toBeVisible();
   await page.reload(); await expect(page.getByText("Coastal seawall construction documentation", {exact: true})).toBeVisible();
   nativeCallsOnly(calls); expect(calls.filter(call => call.path.endsWith("/hierarchy")).every(call => call.query.get("expectedContext") === "context-workspace-b")).toBe(true);
@@ -116,7 +118,7 @@ test("same public project IDs remain source-separated and project links preserve
   const project = page.getByRole("link", {name: /^Open project\s*: Coastal seawall construction documentation$/});
   await expect(project).toHaveAttribute("href", "/portal/projects/project-shared?workspace=workspace-b");
   await project.click(); await expect(page).toHaveURL(/\/portal\/projects\/project-shared\?workspace=workspace-b$/);
-  await expect(page.getByText("Coastal seawall construction documentation", {exact: true})).toBeVisible();
+  await expect(page.getByRole("heading", {level: 1, name: "Coastal seawall construction documentation"})).toBeVisible();
   await openAccount(page, "workspace-c");
   await expect(page.getByText("Mountain bridge inspection", {exact: true})).toBeVisible();
   await expect(page.getByText("Coastal seawall construction documentation", {exact: true})).toHaveCount(0);
@@ -137,7 +139,9 @@ test("native project Models lists only the source-qualified adapter and never ex
     }});
     return undefined;
   });
-  await page.goto("/portal/projects/project-shared?workspace=workspace-b&tab=models");
+  await page.goto("/portal/projects?workspace=workspace-b");
+  await page.getByRole("link", {name: /^3D models/}).first().click();
+  await expect(page).toHaveURL(/\/portal\/projects\/project-shared\?.*tab=models/);
   await expect(page.getByRole("heading", {name: "Seawall model"})).toBeVisible();
   await expect(page.getByRole("button", {name: "Open 3D model"})).toBeVisible();
   await expect(page.getByText(/Share 3D model/)).toHaveCount(0);
@@ -206,7 +210,7 @@ test("native project browsing continues past an empty hierarchy page without dec
   await expect(page.getByText("No matching records loaded yet", {exact: true})).toBeVisible();
   await expect(page.getByText("Project unavailable", {exact: true})).toHaveCount(0);
   await page.getByRole("button", {name: "Load more directory records"}).click();
-  await expect(page.getByText("Coastal seawall construction documentation", {exact: true})).toBeVisible();
+  await expect(page.getByRole("heading", {level: 1, name: "Coastal seawall construction documentation"})).toBeVisible();
 });
 
 test("native folder file pagination preserves existing files and uses its opaque continuation", async ({page}) => {
@@ -502,10 +506,11 @@ test("the unified bell keeps every account's updates, each labelled and scoped, 
   const bell = page.getByRole("button", {name: /Notifications, 1 unread update/}); await expect(bell).toBeVisible(); await bell.click();
   const panel = page.getByRole("region", {name: "Notifications"});
   await expect(panel.getByText("Mountain current update", {exact: true})).toBeVisible();
-  await expect(panel).toContainText("Mountain Engineering");
+  await expect(panel).toContainText("Ledge Top 2");
+  await expect(panel).not.toContainText("Mountain Engineering");
   release();
   await expect(panel.getByText("Coastal late update", {exact: true})).toBeVisible();
-  await expect(panel).toContainText("Coastal Surveying and Infrastructure Development");
+  await expect(panel).toContainText("Ledge Top 1");
   await expect(page.getByRole("button", {name: /Notifications, 2 unread updates/})).toBeVisible();
   await expect(panel.getByRole("alert")).toHaveCount(0);
   expect(new Set(calls.filter(call => call.path === "/api/client/notification-history").map(call => call.workspace))).toEqual(new Set(["workspace-a", "workspace-b", "workspace-c"]));
@@ -538,7 +543,7 @@ test("the unified bell retries only the account that failed and keeps the others
   });
   const panel = await openUnifiedBell(page);
   await expect(panel.getByText("Coastal first update", {exact: true})).toBeVisible();
-  await expect(panel.getByRole("alert")).toContainText("Mountain Engineering");
+  await expect(panel.getByRole("alert")).toContainText("Ledge Top 2");
   // Coverage is incomplete while an account is missing.
   await expect(panel).toContainText("Request history is currently unavailable.");
   mountainFails = false;
@@ -593,7 +598,7 @@ test("the unified bell revalidates on focus and drops an account revoked after l
   await revalidate(page);
   await expect(panel.getByText("Mountain update", {exact: true})).toHaveCount(0);
   await expect(panel.getByText("Coastal update", {exact: true})).toBeVisible();
-  await expect(panel.getByRole("alert")).toContainText("Mountain Engineering");
+  await expect(panel.getByRole("alert")).toContainText("Ledge Top 2");
   expect(historyCalls(calls, "workspace-c")).toHaveLength(2);
 });
 
@@ -681,7 +686,7 @@ test("capabilities absent from native context do not produce optimistic director
   const calls = await mock(page, (route, call) => call.path.endsWith("workspace-b/context") ? route.fulfill({json: {...context(), features: {...features(), directory: {state: "not_in_access", reason: "capability_not_granted"}, deliveries: {state: "temporarily_unavailable", reason: "backend_unavailable"}}, capabilities: {...context().capabilities, directoryRead: false, deliveryView: false}}}) : undefined);
   await page.goto("/portal?workspace=workspace-b"); await expect(page.getByText("The directory is not included in your current access.")).toBeVisible();
   await expect(page.getByText("Not in access", {exact: true})).toBeVisible();
-  await page.goto("/portal/deliveries?workspace=workspace-b"); await expect(page.getByText("Delivery viewing is not included in your current access.")).toBeVisible();
+  await page.goto("/portal/deliveries?workspace=workspace-b"); await expect(page.getByText("Delivery folders are not included in your current access.")).toBeVisible();
   expect(calls.some(call => /\/(hierarchy|deliveries)$/.test(call.path))).toBe(false);
 });
 
@@ -904,7 +909,8 @@ test("the unified portal lists every account's projects without a switcher and o
   const projects = page.locator(".portal-project-grid .portal-project-card");
   await expect(projects).toHaveCount(3);
   // Items name the client account (several are open) but never make the client pick or read a business.
-  await expect(page.getByRole("button", {name: /Primary-only project/})).toContainText("Primary customer");
+  await expect(page.getByRole("button", {name: /Primary-only project/})).toContainText("Drone and survey");
+  await expect(page.getByRole("button", {name: /Primary-only project/})).not.toContainText("Primary customer");
   await expect(page.locator(".portal-project-grid")).not.toContainText("Ledge Top Drone Services");
   await expect(page.getByRole("group", {name: "Show items from"})).toHaveCount(0);
   // Same public project ID in two accounts stays two separate items.
@@ -922,7 +928,7 @@ test("the unified portal lists every account's projects without a switcher and o
   await expect(page).toHaveURL(/\/portal\/projects\/project-shared\?workspace=workspace-c$/);
   await expect(page.getByText("Mountain bridge inspection", {exact: true}).first()).toBeVisible();
   await expect(page.getByText("Coastal seawall construction documentation", {exact: true})).toHaveCount(0);
-  await expect(page.locator(".unified-portal-context")).toContainText("Mountain Engineering");
+  await expect(page.locator(".unified-portal-context")).not.toContainText("Mountain Engineering");
   const topNav = page.getByRole("navigation", {name: "Client portal"});
   if (await topNav.isVisible()) await topNav.getByRole("link", {name: "Projects"}).click();
   else { await page.getByRole("button", {name: "Open navigation"}).click(); await page.getByRole("navigation", {name: "Mobile client portal navigation"}).getByRole("link", {name: "Projects"}).click(); }
@@ -934,7 +940,7 @@ test("one unavailable account is reported in place without hiding the others", a
   let failing = true;
   await mock(page, (route, call) => call.path.endsWith("workspace-c/context") && failing ? route.fulfill({status: 503, json: {error: "Temporarily unavailable"}}) : undefined);
   await page.goto("/portal/projects");
-  await expect(page.getByRole("alert")).toContainText("Mountain Engineering");
+  await expect(page.getByRole("alert")).toContainText("Ledge Top 2");
   await expect(page.getByRole("button", {name: /Coastal seawall construction documentation/})).toBeVisible();
   await expect(page.getByRole("button", {name: /Primary-only project/})).toBeVisible();
   failing = false; await page.getByRole("button", {name: "Try again"}).click();
@@ -1067,14 +1073,16 @@ test.describe("unified home without business switching", () => {
     await expect(chooser).not.toContainText("Ledge Top Technologies");
     await chooser.getByRole("button", {name: /Website or marketing/}).click();
     await expect(page).toHaveURL(/\/portal\/requests\/new\?workspace=workspace-c$/);
-    await expect(page.locator(".unified-portal-context")).toContainText("Website and marketing · Rivera Web Studio");
+    await expect(page.locator(".unified-portal-context")).toHaveText(/^Website and marketing/);
+    await expect(page.locator(".unified-portal-context")).not.toContainText("Rivera Web Studio");
   });
 
   test("deliveries and feedback are described by the work, not the business", async ({page}) => {
     await mockBoth(page); await page.goto("/portal/deliveries");
-    // Two accounts cover drone work, so each is told apart by its client name; neither by a business.
+    // Two accounts cover drone work, so they are numbered; neither shows a stored account name or a business.
     await expect(page.getByText("Drone and survey deliveries", {exact: true})).toHaveCount(2);
-    await expect(page.locator(".unified-portal-area").filter({hasText: "Primary customer"})).toContainText("Drone and survey deliveries");
+    await expect(page.locator(".unified-portal-area").filter({hasText: "Drone and survey 1"})).toContainText("Drone and survey deliveries");
+    await expect(page.locator(".unified-portal-area").filter({hasText: "Primary customer"})).toHaveCount(0);
     await expect(page.getByText("Website and marketing files", {exact: true})).toBeVisible();
     await expect(page.locator(".client-portal-main")).not.toContainText("Ledge Top Technologies");
     await page.goto("/portal/feedback");

@@ -94,10 +94,16 @@ export function UnifiedPortal({ page, workspaces, openInAccount, navigate, rende
     if (requestAccounts.length === 1) openInAccount(requestAccounts[0]!.workspace.id, "/portal/requests/new");
     else setChoosingRequest(true);
   };
-  const clientOf = (account: UnifiedAccount) => withClient ? account.clientName : null;
+  // Stored account names can be internal labels, so accounts are told apart by the kind of work,
+  // numbered only when one person has several accounts for the same kind of work.
+  const placeOf = (account: UnifiedAccount) => {
+    const same = accounts.filter(other => accountArea(other) === accountArea(account));
+    return same.length > 1 ? `${areaOf(account).name} ${same.findIndex(other => other.workspace.id === account.workspace.id) + 1}` : areaOf(account).name;
+  };
+  const clientOf = (account: UnifiedAccount) => withClient ? placeOf(account) : null;
 
   const problems = failed.length > 0 && <div className="unified-portal-problems" role="alert">
-    {failed.map(result => <p key={result.account.workspace.id}><strong>{result.account.clientName}</strong> couldn’t be loaded. {result.message}</p>)}
+    {failed.map(result => <p key={result.account.workspace.id}><strong>{placeOf(result.account)}</strong> couldn’t be loaded. {result.message}</p>)}
     <button type="button" className="button-ghost" onClick={() => setRetry(value => value + 1)}>Try again</button>
   </div>;
   const loadingNote = loading && <Skeleton variant="list" rows={3} label="Loading your projects and requests…" />;
@@ -126,7 +132,7 @@ export function UnifiedPortal({ page, workspaces, openInAccount, navigate, rende
         onClick={() => openInAccount(account.workspace.id, "/portal/requests/new")}>
         <AreaIcon area={accountArea(account)} />
         <span><strong>{areaOf(account).need}</strong><small>{areaOf(account).needDetail}</small>
-          {sharedArea(requestAccounts, account) && <small className="unified-portal-need-client">For {account.clientName}</small>}</span>
+          {sharedArea(requestAccounts, account) && <small className="unified-portal-need-client">For {placeOf(account)}</small>}</span>
       </button>)}
     </div>
     <button type="button" className="portal-text-action" onClick={() => setChoosingRequest(false)}>Cancel</button>
@@ -137,15 +143,16 @@ export function UnifiedPortal({ page, workspaces, openInAccount, navigate, rende
       {accounts.map(account => <Card key={account.workspace.id} className="unified-portal-area">
         <AreaIcon area={accountArea(account)} />
         <strong>{heading(account)}</strong>
-        {sharedArea(accounts, account) && <p>{account.clientName}</p>}
+        {sharedArea(accounts, account) && <p>{placeOf(account)}</p>}
         <button type="button" className="button-orange" onClick={() => openInAccount(account.workspace.id, path)}>{action}</button>
       </Card>)}
     </div>
+    {supplement}
   </>;
 
   if (page === "deliveries") return areaDirectory("Deliveries", "Files and data we’ve delivered to you.", "/portal/deliveries", "Open deliveries", account => areaOf(account).deliveries);
   if (page === "feedback") return areaDirectory("Feedback", "Tell us what’s working and what to change.", "/portal/feedback", "Give feedback", account => areaOf(account).feedback);
-  if (page === "account") return areaDirectory("Account", "Your profile, team and sign-in.", "/portal/account", "Open account settings", account => account.clientName);
+  if (page === "account") return areaDirectory("Account", "Your profile, team and sign-in.", "/portal/account", "Open account settings", account => placeOf(account));
 
   if (page === "projects") return <>
     <section className="portal-page-heading"><span className="eyebrow">Projects</span><h1>Projects</h1>

@@ -311,7 +311,7 @@ test("independently authorized native dashboard keeps its workspace distinct fro
   });
 
   await page.goto("/portal?workspace=workspace-b");
-  await expect(page.getByRole("heading", { name: "Native Resource Workspace" })).toBeVisible();
+  await expect(page.getByRole("heading", { level: 1, name: "Your projects" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Services", exact: true })).toBeVisible();
   await expect(page.getByText("Aerial operations", { exact: true })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Client portal" })).toHaveCount(0);

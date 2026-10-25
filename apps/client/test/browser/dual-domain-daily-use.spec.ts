@@ -65,7 +65,8 @@ test("J7 daily-use navigation survives direct links, refresh, history, and keybo
   const fixture = await installFixture(page, { session: 200 });
   await page.goto("/portal?workspace=workspace-one");
   expect(new URL(page.url()).hostname).toBe(testInfo.project.name.startsWith("drone-") ? "portal.drone.test" : "portal.technology.test");
-  await expect(page.getByRole("heading", { name: "Acme Surveying" })).toBeVisible();
+  // Native pages use plain headings; the stored account name is never shown as the page title.
+  await expect(page.getByRole("heading", { level: 1, name: "Your projects" })).toBeVisible();
   await expect(page.getByText("North site survey", { exact: true })).toBeVisible();
   await page.reload();
   await expect(page.getByText("North site survey", { exact: true })).toBeVisible();
@@ -80,7 +81,7 @@ test("J7 daily-use navigation survives direct links, refresh, history, and keybo
   await page.goForward();
   await expect(page).toHaveURL(/\/portal\/deliveries\?workspace=workspace-one$/);
 
-  const account = page.getByRole("button", { name: "Account menu for Acme Surveying" });
+  const account = page.getByRole("button", { name: /^Account menu for / });
   await account.focus();
   await page.keyboard.press("Enter");
   const menu = page.getByRole("menu", { name: "Account" });

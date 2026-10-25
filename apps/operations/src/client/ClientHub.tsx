@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { Card, EmptyState, Loading, StatusPill, Skeleton } from "@ltds/ui";
+import { Card, Dialog, EmptyState, Loading, StatusPill, Skeleton } from "@ltds/ui";
 import type { Permission } from "@ltds/shared";
 import { api, ApiError } from "./api";
 import { ClientRequestWorkflow } from "./ClientRequestWorkflow";
@@ -226,10 +226,13 @@ function ProjectManagementRouting({ client, contextVersion, contextSignal, onInv
   const [nativeForm, setNativeForm] = useState({ operation: "create" as "create"|"update", externalProjectId: "",
     name: "", description: "", start: "", end: "", scope: 0 });
   const [nativeAttempt, setNativeAttempt] = useState<{ request: unknown; sent: boolean; message: string } | null>(null);
+  const [formOpen, setFormOpen] = useState(false);
+  const emptyForm = { operation: "create" as "create"|"update", externalProjectId: "", name: "", description: "", start: "", end: "", scope: 0 };
   useEffect(() => {
     if (!updateTarget || nativeAttempt) return;
     setNativeForm(value => ({ ...value, operation: "update", externalProjectId: updateTarget.id, name: updateTarget.name,
       description: updateTarget.description ?? "", start: updateTarget.start_date ?? "", end: updateTarget.end_date ?? "" }));
+    setFormOpen(true);
   }, [updateTarget, nativeAttempt]);
   const load = async (href = endpoint, refreshWorkspace = false) => {
     if (!endpoint || !exactRoot || !contextVersion || !href || contextSignal.aborted) return;
@@ -312,11 +315,22 @@ function ProjectManagementRouting({ client, contextVersion, contextSignal, onInv
         setNativeAttempt(value => value && ({ ...value, sent: true, message: "Creation is not confirmed. Retry this exact request; do not prepare another project." }));
         throw new Error(`Project creation is not confirmed (${outcome.status}).`);
       }
-      setNativeAttempt(null); setNativeForm({ operation: "create", externalProjectId: "", name: "", description: "", start: "", end: "", scope: 0 });
+      setNativeAttempt(null); setNativeForm(emptyForm); setFormOpen(false);
       onUpdateTargetConsumed(); onWorkspaceRefresh();
     } catch (caught) { setState(value => ({ ...value, error: caught instanceof Error ? caught.message : "Project creation is not confirmed." })); }
     finally { setState(value => ({ ...value, syncBusy: false })); }
   };
+  // A prepared request that was not sent is discarded on close; a sent one is kept so it can be retried exactly.
+  const openNewProject = () => {
+    if (!nativeAttempt) { setNativeForm(emptyForm); onUpdateTargetConsumed(); }
+    setFormOpen(true);
+  };
+  const closeForm = () => {
+    if (state.syncBusy) return;
+    if (!nativeAttempt?.sent) { setNativeAttempt(null); setNativeForm(emptyForm); onUpdateTargetConsumed(); }
+    setFormOpen(false);
+  };
+  const formOperation = nativeAttempt ? frozenOperation : nativeForm.operation;
   return <section className="client-project-management" aria-label="Project creation" aria-busy={state.busy || state.syncBusy}>
     {state.busy && <Skeleton variant="list" rows={3} label="Loading Project Alpha project creation…" />}
     {state.error && <div role="alert"><p>{state.error}</p><button type="button" className="button-ghost" onClick={() => void load(endpoint)}>Retry project creation status</button></div>}
@@ -324,12 +338,14 @@ function ProjectManagementRouting({ client, contextVersion, contextSignal, onInv
       <div className="client-project-management-summary"><div><strong>Project creation</strong><p>{result.availability.explanation}</p></div>
         {externalHref && result.action?.kind === "legacy_external_link" && <a className="button button-orange" href={externalHref} target="_blank" rel="noopener noreferrer">{result.action.label}<span className="visually-hidden"> (opens in a new tab)</span></a>}</div>
       {externalHref && <p>Complete the project in {result.source.displayName}. It will appear here after Project Alpha synchronizes.</p>}
-      {nativeAction && <form onSubmit={event => void prepareNative(event)}><label>Action<select value={nativeForm.operation} disabled={Boolean(nativeAttempt)}
-        onChange={event => { onUpdateTargetConsumed(); setNativeForm({ operation: event.target.value as "create"|"update", externalProjectId: "",
-          name: "", description: "", start: "", end: "", scope: 0 }); }}>
-        <option value="create">Create project</option><option value="update" disabled={!updateTarget}>Update selected project</option></select></label>
-        {nativeForm.operation === "update" && <label>Existing project ID<input required pattern="[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}"
-          value={nativeForm.externalProjectId} readOnly disabled={Boolean(nativeAttempt)} /></label>}
+      {nativeAction && <div className="client-project-management-start">
+        {nativeAttempt?.sent && !formOpen && <p role="status">A project request is waiting for confirmation.</p>}
+        <button type="button" className="button button-orange" disabled={state.syncBusy} onClick={openNewProject}>{nativeAttempt?.sent ? "Review project request" : "New project"}</button>
+      </div>}
+      {nativeAction && <Dialog open={formOpen} onClose={closeForm} dismissible={!state.syncBusy} title={formOperation === "create" ? "New project" : "Update project"}
+        description={`${result.source.displayName} keeps the project record. Ops prepares the request first and sends it only after you confirm.`}>
+        {state.error && <div role="alert"><p>{state.error}</p></div>}
+        <form className="client-project-management-form" onSubmit={event => void prepareNative(event)}>
         <label>Project name<input required maxLength={160} value={nativeForm.name}
         disabled={Boolean(nativeAttempt)} onChange={event => setNativeForm(value => ({ ...value, name: event.target.value }))} /></label>
         <label>Description<textarea maxLength={4000} value={nativeForm.description} disabled={Boolean(nativeAttempt)}
@@ -348,8 +364,8 @@ function ProjectManagementRouting({ client, contextVersion, contextSignal, onInv
           <p>Estimated dates: {String(frozenRequest?.command?.project?.estimatedStart ?? "Not set")} – {String(frozenRequest?.command?.project?.estimatedEnd ?? "Not set")}</p>
           <button type="button" className="button button-orange" disabled={state.syncBusy} onClick={() => void submitNative()}>{nativeAttempt.sent ? "Retry exact request" : frozenOperation === "create" ? "Create project" : "Update project"}</button>
           {!nativeAttempt.sent && <button type="button" className="button-ghost" onClick={() => { setNativeAttempt(null);
-            setNativeForm({ operation: "create", externalProjectId: "", name: "", description: "", start: "", end: "", scope: 0 }); onUpdateTargetConsumed(); }}>Cancel prepared request</button>}</div>}
-      </form>}
+            setNativeForm(emptyForm); onUpdateTargetConsumed(); setFormOpen(false); }}>Cancel prepared request</button>}</div>}
+      </form></Dialog>}
       <dl><dt>Synchronization</dt><dd>{syncStatusLabel(result.sync.status)}</dd><dt>Last attempt</dt><dd>{syncDate(result.sync.lastAttemptAt)}</dd><dt>Last success</dt><dd>{syncDate(result.sync.lastSuccessAt)}</dd></dl>
       <p>{result.sync.explanation}</p>
       <div className="client-project-management-actions">

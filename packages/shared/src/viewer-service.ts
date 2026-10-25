@@ -31,9 +31,18 @@ export interface ViewerShellSessionGrant extends ViewerSessionGrant {
 }
 
 export interface ViewerPublishedSessionSourceAuthorization {
-  type: "model_association";
+  type: "model_association" | "direct_client_grant";
   id: string;
   version: number;
+}
+
+/** A service-only, bounded catalog of current published Viewer tasks. */
+export interface ViewerClientDeliveryCatalog {
+  schemaVersion: 1;
+  project: { id: string; displayName: string };
+  tasks: Array<{ id: string; displayName: string; modelId: string; modelVersionId: string;
+    modelTitle: string; publishedAt: string }>;
+  nextCursor: string | null;
 }
 
 export interface ViewerPublishedSessionRevocation {
@@ -798,6 +807,43 @@ export class ViewerServiceClient {
     return models as ViewerModelSummary[];
   }
 
+  async clientDeliveryCatalog(input: {
+    projectId: string; taskId?: string; cursor?: string; limit?: number;
+  }): Promise<ViewerClientDeliveryCatalog> {
+    const id = (value: unknown): value is string => typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(value);
+    const title = (value: unknown): value is string => typeof value === "string" && value.length > 0 && value.length <= 512 && !/[\u0000-\u001f\u007f]/.test(value);
+    if (!id(input.projectId) || (input.taskId !== undefined && !id(input.taskId)) ||
+      (input.limit !== undefined && (!Number.isInteger(input.limit) || input.limit < 1 || input.limit > 50)) ||
+      (input.cursor !== undefined && (input.cursor.length < 1 || input.cursor.length > 2048)))
+      throw new ViewerServiceError("Viewer delivery catalog request is invalid", "invalid_configuration");
+    const query = new URLSearchParams({ projectId: input.projectId, limit: String(input.limit ?? 25) });
+    if (input.taskId) query.set("taskId", input.taskId);
+    if (input.cursor) query.set("cursor", input.cursor);
+    const payload = record(await this.request(`/api/v1/client-delivery-catalog?${query}`));
+    const project = record(payload?.project);
+    if (!payload || payload.schemaVersion !== 1 || !project || project.id !== input.projectId || !title(project.displayName) ||
+      !Array.isArray(payload.tasks) || payload.tasks.length > (input.limit ?? 25) ||
+      !(payload.nextCursor === null || (typeof payload.nextCursor === "string" && payload.nextCursor.length > 0 && payload.nextCursor.length <= 2048)))
+      throw new ViewerServiceError("Viewer returned an invalid delivery catalog", "invalid_response");
+    const seen = new Set<string>();
+    for (const raw of payload.tasks) {
+      const task = record(raw);
+      if (!task || !id(task.id) || seen.has(task.id) || !title(task.displayName) || !id(task.modelId) || !id(task.modelVersionId) ||
+        !title(task.modelTitle) || typeof task.publishedAt !== "string" || !Number.isFinite(Date.parse(task.publishedAt)) ||
+        (input.taskId !== undefined && task.id !== input.taskId))
+        throw new ViewerServiceError("Viewer returned an invalid delivery task", "invalid_response");
+      seen.add(task.id);
+    }
+    if (input.taskId && (payload.tasks.length !== 1 || payload.nextCursor !== null))
+      throw new ViewerServiceError("Viewer returned an invalid single-task catalog", "invalid_response");
+    // Project a narrow DTO: upstream provider paths and extra fields never cross this boundary.
+    return { schemaVersion: 1, project: { id: input.projectId, displayName: project.displayName },
+      tasks: payload.tasks.map(raw => { const task = record(raw)!; return {
+        id: task.id as string, displayName: task.displayName as string, modelId: task.modelId as string,
+        modelVersionId: task.modelVersionId as string, modelTitle: task.modelTitle as string, publishedAt: task.publishedAt as string,
+      }; }), nextCursor: payload.nextCursor as string | null };
+  }
+
   async overview(): Promise<ViewerPlatformOverview> {
     const payload = record(await this.request("/api/v1/overview"));
     const projects = record(payload?.projects), models = record(payload?.models),
@@ -909,14 +955,14 @@ export class ViewerServiceClient {
       method: "DELETE", body, idempotencyKey: input.idempotencyKey,
     }));
     const source = record(payload?.sourceAuthorization);
-    if (!payload || !source || source.type !== "model_association" || source.id !== input.sourceAuthorization.id ||
+    if (!payload || !source || source.type !== input.sourceAuthorization.type || source.id !== input.sourceAuthorization.id ||
       source.version !== input.sourceAuthorization.version ||
       !Number.isSafeInteger(payload?.revokedGrants) || (payload?.revokedGrants as number) < 0 ||
       !Number.isSafeInteger(payload?.revokedSessions) || (payload?.revokedSessions as number) < 0)
       throw new ViewerServiceError("3D Viewer returned an invalid session-revocation result", "invalid_response");
     return {
       sourceAuthorization: {
-        type: "model_association", id: source.id as string, version: source.version as number,
+        type: input.sourceAuthorization.type, id: source.id as string, version: source.version as number,
       },
       revokedGrants: payload!.revokedGrants as number,
       revokedSessions: payload!.revokedSessions as number,

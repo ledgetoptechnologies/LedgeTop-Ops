@@ -123,7 +123,7 @@ test('invalid pre-upgrade authority rolls back the entire controller migration',
  assert.equal(db.prepare('PRAGMA table_info(admin_sessions)').all().some(row=>row.name==='controller_origin'),false);
  assert.equal(db.prepare("SELECT value FROM app_state WHERE key='workspace_legacy_controller_origin'").get(),undefined);
  Object.assign(config,{opsBaseUrl:OLD,opsControllerOrigins:[OLD,NEW]});applyMigrations(db);
- assert.equal(db.prepare('SELECT MAX(version) AS version FROM schema_migrations').get().version,39);
+ assert.equal(db.prepare('SELECT MAX(version) AS version FROM schema_migrations').get().version,40);
  assert.equal(db.prepare('PRAGMA integrity_check').get().integrity_check,'ok');
 });
 

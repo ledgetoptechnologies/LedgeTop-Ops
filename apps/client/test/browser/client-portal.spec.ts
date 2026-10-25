@@ -457,7 +457,8 @@ test("the unified portal lists every account with its own scope and opens items 
 
   await page.getByRole("button", { name: /Beta Site/ }).click();
   await expect(page).toHaveURL(/\/portal\/projects\/project-b\?workspace=workspace-b$/);
-  await expect(page.locator(".unified-portal-context")).toContainText("Drone and survey · Beta");
+  await expect(page.locator(".unified-portal-context")).toContainText("Drone and survey");
+  await expect(page.locator(".unified-portal-context")).not.toContainText("Beta");
   expect(observed.filter(item => item.path === "/api/client/projects").at(-1)?.workspace).toBe("workspace-b");
 });
 
