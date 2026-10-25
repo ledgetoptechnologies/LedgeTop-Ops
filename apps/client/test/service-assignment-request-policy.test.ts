@@ -323,6 +323,79 @@ describe("exact-target service-assignment request policy", { timeout: 60_000 }, 
         'Explicit native request policy test',datetime('now'))`).bind(secondarySourceId).run();
   }
 
+  it("joins unified catalog and submission to real native D1 authority with exact-source replay and revocation", async () => {
+    const timed = async <T>(label:string, operation:()=>T|Promise<T>):Promise<T> => {
+      const started = Date.now();
+      try { return await operation(); }
+      finally { console.info(`Joined native D1 ${label}: ${Date.now()-started}ms`); }
+    };
+    await seedSecondaryPolicyContext();
+    await enableSecondaryRequestPolicy();
+    const principal = { issuer: "https://issuer.test", subject: "policy-subject", email: "policy@example.test" };
+    // Use the mounted aggregate router and its real scopedFetch re-entry into
+    // the same native router/repository. Only the external Access identity and
+    // platform rate-limit binding are supplied by this synthetic fixture.
+    const portal = createClientPortalRouter({ resolvePrincipal: async () => principal });
+    const limiterKeys: string[] = [];
+    const requestEnv = { ...env, CLIENT_PORTAL_ENABLED: "true", CLIENT_PORTAL_ORIGIN: "https://client.example",
+      PUBLIC_BULK_RATE_LIMITER: { async limit({ key }: { key: string }) { limiterKeys.push(key); return { success: true }; } },
+    } as Env;
+    const catalog = () => portal.request("https://client.example/request-services", {}, requestEnv);
+    const discovered = await timed("aggregate catalog", catalog);
+    expect(discovered.status).toBe(200);
+    expect(discovered.headers.get("Cache-Control")).toBe("private, no-store");
+    const result = await discovered.json() as { services: Array<{serviceChoiceId:string;name:string;category:string;clientName:string}>;unavailable:unknown[] };
+    expect(result.unavailable).toEqual([]);
+    expect(result.services.map(item => [item.name, item.category, item.clientName])).toEqual([
+      ["Secondary colliding service", "website", "Secondary policy client"],
+      ["Secondary-only service", "website", "Secondary policy client"],
+    ]);
+    const selected = result.services.find(item => item.name === "Secondary colliding service");
+    if (!selected) throw new Error("real native catalog did not provide the source-qualified service choice");
+    expect(selected.serviceChoiceId.startsWith("svc1_")).toBe(true);
+    const coordinate = JSON.parse(atob(selected.serviceChoiceId.slice(5).replace(/-/g, "+").replace(/_/g, "/"))) as Record<string,unknown>;
+    expect(coordinate).toMatchObject({ workspaceId: secondarySession.workspaceId, sourceId: secondarySourceId,
+      publicId: "root-service", sourceVersion: "service-v1" });
+    const input = { serviceChoiceId: selected.serviceChoiceId, title: "Unified native request", details: "Use only the selected secondary source." };
+    const submit = (body=input, key="unified-native-joined-idempotency") => portal.request("https://client.example/requests", {
+      method: "POST", headers: { Origin: "https://client.example", "Content-Type": "application/json", "Idempotency-Key": key,
+        // Ambient or caller-supplied coordinates cannot override discovery.
+        "X-LTDS-Workspace-Id": workspaceId, "X-Source-Id": sourceId }, body: JSON.stringify(body),
+    }, requestEnv);
+    const first = await timed("first native submission", () => submit());
+    expect(first.status, await first.clone().text()).toBe(201);
+    const created = await first.json() as {request:{id:string}};
+    expect(created.request.id).toBeTruthy();
+    const replay = await timed("exact native replay", () => submit());
+    expect(replay.status, await replay.clone().text()).toBe(200);
+    expect(await replay.json()).toMatchObject({ request: { id: created.request.id } });
+    expect((await timed("changed-body conflict", () => submit({...input, title:"Changed payload under the same key"}))).status).toBe(409);
+    const stored = await db.prepare(`SELECT catalog_source_id,portal_workspace_id,portal_identity_id,request_type
+      FROM client_service_requests WHERE id=?`).bind(created.request.id).first();
+    expect(stored).toMatchObject({catalog_source_id:secondarySourceId,portal_workspace_id:secondarySession.workspaceId,
+      portal_identity_id:secondarySession.nativePortalIdentityId,request_type:"service"});
+    expect(await db.prepare("SELECT count(*) count FROM client_service_requests").first<number>("count")).toBe(1);
+    expect(await db.prepare("SELECT count(*) count FROM client_service_requests WHERE catalog_source_id=?").bind(sourceId).first<number>("count")).toBe(0);
+    const submittedService = await db.prepare(`SELECT service_public_id,service_source_version,service_source_id,service_snapshot_json
+      FROM client_service_request_services WHERE request_id=?`).bind(created.request.id)
+      .first<{service_public_id:string;service_source_version:string;service_source_id:string;service_snapshot_json:string}>();
+    expect(submittedService).toMatchObject({service_public_id:"root-service",service_source_version:"service-v1",service_source_id:secondarySourceId});
+    expect(JSON.parse(submittedService!.service_snapshot_json)).toMatchObject({name:"Secondary colliding service"});
+    for (const table of ["request_revisions","client_portal_notification_outbox"])
+      expect(await db.prepare(`SELECT count(*) count FROM ${table} WHERE request_id=?`).bind(created.request.id).first<number>("count")).toBe(1);
+    expect(await db.prepare("SELECT count(*) count FROM audit_log WHERE action='client.service_request.submitted' AND entity_id=?").bind(created.request.id).first<number>("count")).toBe(1);
+    expect(limiterKeys.length).toBeGreaterThan(0);
+    expect(limiterKeys.every(key => key.includes(`native:${secondarySourceId}:${secondarySession.workspaceId}:${secondarySession.nativePortalIdentityId}`))).toBe(true);
+
+    // A real D1 entitlement change must stop creation and even idempotent
+    // disclosure. The formerly returned choice is a locator, not a grant.
+    await db.prepare("UPDATE portal_v2_workspace_memberships SET status='revoked',revoked_at=datetime('now') WHERE id='secondary-policy-membership'").run();
+    expect((await timed("revoked replay denial", () => submit())).status).toBe(404);
+    expect((await timed("revoked fresh-key denial", () => submit(input,"unified-native-after-revocation"))).status).toBe(404);
+    expect(await (await timed("revoked catalog", catalog)).json()).toEqual({services:[],unavailable:[]});
+    expect(await db.prepare("SELECT count(*) count FROM client_service_requests").first<number>("count")).toBe(1);
+  }, 180_000);
+
   it("keeps native request ownership, catalog collisions, replay, attachments, history, and cancellation source-qualified", async () => {
     await seedSecondaryPolicyContext();
     await enableSecondaryRequestPolicy();
