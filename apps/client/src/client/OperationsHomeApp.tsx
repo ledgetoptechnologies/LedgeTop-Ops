@@ -115,7 +115,7 @@ export function OperationsFinancialSummary({state,documents}:{state:"loading"|"r
             <span className="portal-finance-label">Balance due</span>
             <span className="portal-finance-total">{[...owed].map(([currency, entry]) => money(entry.amount, currency)).join(" + ")}</span>
             <span className="portal-finance-detail">{dueCount === 1 ? "1 invoice needs payment" : `${dueCount} invoices need payment`}
-              {unknownCount > 0 && <span> � Some invoice balances are unavailable.</span>}
+              {unknownCount > 0 && <span> &middot; Some invoice balances are unavailable.</span>}
               {overdue > 0 && <strong className="portal-finance-overdue">{overdue === 1 ? " · 1 overdue" : ` · ${overdue} overdue`}</strong>}</span>
           </> : unknownCount ? <>
             <span className="portal-finance-total">Balance unavailable</span>
