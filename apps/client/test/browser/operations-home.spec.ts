@@ -51,7 +51,8 @@ test("a financial service failure remains unavailable", async ({ page }) => {
 });
 
 for (const [label, fields] of [["a paid amount that isn't money", { amountPaid: "lots", balanceDue: null }], ["a missing due amount", { amountPaid: null }],
-  ["a numeric due amount", { amountPaid: null, balanceDue: 12 }]] as const)
+  ["a numeric due amount", { amountPaid: null, balanceDue: 12 }],
+  ["a numeric decimal total", { total: 125.25, amountPaid: null, balanceDue: null }]] as const)
   test(`an invoice with ${label} is refused, never shown as paid or crashing`, async ({ page }) => {
     const authorityId = response.homes[0]!.authorityId;
     await page.route("**/api/client/**", route => {
