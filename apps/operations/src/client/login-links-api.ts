@@ -17,11 +17,30 @@ const isVersion = (value: unknown): value is number => typeof value === "number"
 const validPending = (intentId: unknown, token: unknown): intentId is string =>
   typeof intentId === "string" && typeof token === "string" && INTENT_ID.test(intentId) && TOKEN.test(token);
 
-export const loadLoginLinks = (signal?: AbortSignal) => api<LoginLinks>(LOGIN_LINKS_PATH, { signal });
+const str = (value: unknown): value is string => typeof value === "string" && value.length > 0 && value.length <= 400;
+/** A reply that isn't the documented shape; shown as an error, never rendered from. */
+export class MalformedLoginLinks extends Error {}
+
+function binding(value: unknown): value is LoginLinkBinding {
+  const item = value as Partial<LoginLinkBinding> | null;
+  return !!item && typeof item === "object" && str(item.id) && str(item.email) && isVersion(item.version)
+    && (item.status === "active" || item.status === "revoked") && str(item.createdAt) && (item.revokedAt === null || str(item.revokedAt));
+}
+
+export async function loadLoginLinks(signal?: AbortSignal): Promise<LoginLinks> {
+  const value = await api<Partial<LoginLinks> | null>(LOGIN_LINKS_PATH, { signal });
+  if (!value || typeof value !== "object" || !str(value.canonicalEmail) || !str(value.currentEmail) || typeof value.canManage !== "boolean"
+    || !Array.isArray(value.bindings) || !value.bindings.every(binding)) throw new MalformedLoginLinks("Sign-in emails couldn't be read.");
+  return value as LoginLinks;
+}
 
 /** Creates a fresh single-use link. A lost response can't be recovered, so callers offer a new link instead of retrying. */
-export const createLoginLinkIntent = (email: string) =>
-  api<LoginLinkIntent>(`${LOGIN_LINKS_PATH}/intents`, { method: "POST", body: JSON.stringify({ email }) });
+export async function createLoginLinkIntent(email: string): Promise<LoginLinkIntent> {
+  const value = await api<Partial<LoginLinkIntent> | null>(`${LOGIN_LINKS_PATH}/intents`, { method: "POST", body: JSON.stringify({ email }) });
+  if (!value || typeof value !== "object" || !str(value.intentId) || !str(value.targetEmail) || typeof value.verificationUrl !== "string" || !str(value.expiresAt))
+    throw new MalformedLoginLinks("The new link couldn't be read.");
+  return value as LoginLinkIntent;
+}
 
 /** Removes a linked email at the version shown. Retrying with the same version is safe; an unclear answer throws. */
 export async function removeLoginLink(binding: LoginLinkBinding) {

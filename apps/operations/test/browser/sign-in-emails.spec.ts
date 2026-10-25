@@ -149,6 +149,16 @@ test("signed in with a linked email, management asks for the main email instead"
   await expect(card.getByRole("button", { name: "Add a sign-in email" })).toHaveCount(0);
 });
 
+for (const [name, links] of [["missing bindings", { canonicalEmail: "owner@example.test", currentEmail: "owner@example.test", canManage: true }],
+  ["a wrong-shaped binding", { canonicalEmail: "owner@example.test", currentEmail: "owner@example.test", canManage: true, bindings: [{ id: 7 }] }]] as const)
+  test(`a sign-in emails answer with ${name} shows an error and offers no changes`, async ({ page }) => {
+    const seen = await mockOps(page, { links });
+    await openAccount(page);
+    await expect(page.getByText("Sign-in emails couldn't be loaded.")).toBeVisible();
+    await expect(page.getByRole("button", { name: /Add/ })).toHaveCount(0);
+    expect(seen.requests.filter(request => request.method() !== "GET")).toEqual([]);
+  });
+
 test("without the sign-in emails feature the account page shows only the profile", async ({ page }) => {
   await mockOps(page, { linksStatus: 404 });
   await openAccount(page);

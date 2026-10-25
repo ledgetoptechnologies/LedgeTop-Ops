@@ -142,6 +142,23 @@ test("Intel is hidden unless the session grants it, even to administrators, and 
   await expect(page.getByText("No Ledge Top business is set up for Intel on your account yet.")).toBeVisible();
 });
 
+test("a wrong-shaped business list or section shows an error instead of breaking the page", async ({ page }) => {
+  await mockOps(page, { list: { json: { businesses: [{ key: 3 }] } } });
+  await page.goto("/intel");
+  await expect(page.getByText("Intel couldn't be loaded.")).toBeVisible();
+
+  await page.unrouteAll();
+  await mockOps(page, { sections: {
+    "drone-services/website": { json: { ...website, totals: "lots" } },
+    "drone-services/search-console": { json: { site: { url: "x" } } },
+    "drone-services/competitors": { json: { tenantName: "Somebody" } },
+  } });
+  for (const view of ["website", "search", "competitors"]) {
+    await page.goto(`/intel?business=drone-services&view=${view}`);
+    await expect(page.getByText("This view couldn't be loaded.")).toBeVisible();
+  }
+});
+
 test("Intel fits a phone screen", async ({ page }) => {
   await mockOps(page);
   await page.goto("/intel?business=drone-services&view=search");
