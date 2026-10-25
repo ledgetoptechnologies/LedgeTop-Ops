@@ -3,6 +3,7 @@ import { IntelIngestError, type IntelObservation } from './competitor-intel-inge
 export const INTEL_FROZEN_CONTRACT='a60a11ddd68df90da80a1e2eaf298434369653d8e8f390b814ed906e7b675b32';
 export type AcceptedIntel={observation:IntelObservation;digest:string};
 export function projectOwnerIntel(rows:AcceptedIntel[],business:{route_key:string;display_name:string}) {
+ const compare=(a:string,b:string)=>a<b?-1:a>b?1:0;
  const reference=(row:AcceptedIntel)=>({operationId:row.observation.operationId,payloadSha256:row.digest});
  const baselines=new Map(rows.filter(r=>r.observation.observationKind==='baseline_assessment').map(r=>[r.observation.subjectKey,r]));
  const ads=new Map(rows.filter(r=>r.observation.observationKind==='ad_activity').map(r=>[r.observation.subjectKey,r]));
@@ -18,9 +19,10 @@ export function projectOwnerIntel(rows:AcceptedIntel[],business:{route_key:strin
     geographicOverlap:bp.geographicOverlap,hasPricing:bp.hasPricing,marketPosition:bp.marketPosition,explanation:bp.explanation,factors:bp.factors}:null,
    adActivity:ap&&a?{...reference(a),checkedAt:ap.checkedAt,freshness:'stale' as const,status:ap.status,reason:ap.reason,adCount:ap.adCount,
     lastShownDate:ap.lastShownDate,formats:ap.formats,activityEvidence:ap.activityEvidence,adCopyConcern:ap.adCopyConcern,sourceUrl:ap.sourceUrl}:null}];
- });
+ }).sort((a,b)=>compare(a.subjectKey,b.subjectKey));
  const changes=rows.flatMap(row=>{const o=row.observation;if(o.observationKind!=='change')return [];
-  const {producerReview:_review,...p}=o.payload;return [{...reference(row),...p,verdict:null,published:false as const}];});
+  const {producerReview:_review,...p}=o.payload;return [{...reference(row),...p,verdict:null,published:false as const}];})
+  .sort((a,b)=>compare(b.detectedAt,a.detectedAt)||compare(b.operationId,a.operationId));
  const latest=(kind:'scan_run'|'self_assessment')=>rows.filter(r=>r.observation.observationKind===kind)
   .sort((a,b)=>b.observation.completedAt.localeCompare(a.observation.completedAt)||b.observation.operationId.localeCompare(a.observation.operationId))[0];
  const scan=latest('scan_run')?.observation,self=latest('self_assessment')?.observation;
