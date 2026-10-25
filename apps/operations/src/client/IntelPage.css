@@ -1,7 +1,8 @@
 .intel-page { display: grid; gap: 1rem; min-width: 0; }
 .intel-controls { display: flex; flex-wrap: wrap; align-items: center; gap: .75rem; }
-.intel-controls .ltds-segmented { max-width: 100%; overflow-x: auto; }
-.intel-controls .ltds-segmented > button { min-height: 44px; white-space: nowrap; }
+/* Long business names wrap onto another row instead of scrolling sideways, so every choice stays on screen to tap. */
+.intel-controls .ltds-segmented { flex-wrap: wrap; width: auto; min-width: 0; max-width: 100%; overflow: visible; }
+.intel-controls .ltds-segmented > button { min-height: 44px; flex: 1 1 auto; white-space: normal; text-align: center; }
 .intel-range { display: inline-flex; align-items: center; gap: .5rem; margin-left: auto; color: var(--muted); font-weight: 650; }
 .intel-range select { min-height: 44px; }
 .intel-freshness { margin: 0 0 .75rem; color: var(--muted); font-size: .9rem; overflow-wrap: anywhere; }

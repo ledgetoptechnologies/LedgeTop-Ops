@@ -159,6 +159,29 @@ test("a wrong-shaped business list or section shows an error instead of breaking
   }
 });
 
+for (const width of [320, 375]) test(`at ${width}px every business and view choice is fully on screen and tappable`, async ({ page }) => {
+  await mockOps(page);
+  await page.setViewportSize({ width, height: 800 });
+  await page.goto("/intel?business=drone-services&view=competitors");
+  await expect(page.getByRole("tab", { name: /Self-assessment/ })).toBeVisible();
+  const controls = [page.getByRole("button", { name: "Ledge Top Drone Services" }), page.getByRole("button", { name: "Ledge Top Technologies" }),
+    ...["Competitor Intel", "Website", "Search Console"].map(name => page.getByRole("navigation", { name: "Intel views" }).getByRole("button", { name })),
+    ...[/Review changes/, /^Competitors$/, /Google Ads/, /Self-assessment/].map(name => page.getByRole("tab", { name }))];
+  for (const control of controls) {
+    const box = (await control.boundingBox())!;
+    expect(box.x).toBeGreaterThanOrEqual(0);
+    expect(box.x + box.width).toBeLessThanOrEqual(width);
+    // The control itself is what a tap at its centre reaches, not a neighbour or the header.
+    expect(await control.evaluate(element => { const rect = element.getBoundingClientRect();
+      const hit = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2); return !!hit && element.contains(hit); })).toBe(true);
+  }
+  await page.getByRole("tab", { name: /Self-assessment/ }).click();
+  await expect(page.getByRole("tab", { name: /Self-assessment/ })).toHaveAttribute("aria-selected", "true");
+  await page.getByRole("button", { name: "Ledge Top Technologies" }).click();
+  await expect(page.getByRole("button", { name: "Ledge Top Technologies" })).toHaveAttribute("aria-pressed", "true");
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+});
+
 test("Intel fits a phone screen", async ({ page }) => {
   await mockOps(page);
   await page.goto("/intel?business=drone-services&view=search");
