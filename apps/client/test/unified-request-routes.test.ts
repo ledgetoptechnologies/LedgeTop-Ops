@@ -114,4 +114,43 @@ describe("workspace-free service requests", () => {
     expect((await f.post({ serviceChoiceId: "bad", title: "Help", details: "x".repeat(17 * 1024) })).status).toBe(413);
     expect(f.scopedFetch).not.toHaveBeenCalled();
   });
+  it("shares a wire-byte budget across concurrent collectors and cancels active readers on exhaustion", async () => {
+    const f = fixture(Array.from({ length: 12 }, (_, n) => workspace(`client-${n}`)));
+    const cancelled = vi.fn();
+    const signals: AbortSignal[] = [];
+    f.scopedFetch.mockImplementation(async request => {
+      signals.push(request.signal);
+      // None of these pages exceeds the per-page limit. Their combined wire
+      // size exceeds the shared limit while another source's reader is active.
+      const bytes = new TextEncoder().encode(JSON.stringify({ services: [{ ...service, summary: "x".repeat(300_000) }], nextCursor: "more" }));
+      let sent = false;
+      return new Response(new ReadableStream({
+        pull(controller) { if (!sent) { sent = true; controller.enqueue(bytes); } },
+        cancel: cancelled,
+      }));
+    });
+    const response = await f.get();
+    expect(response.status).toBe(503);
+    expect(cancelled).toHaveBeenCalled();
+    expect(f.scopedFetch.mock.calls.length).toBeLessThanOrEqual(4);
+    expect(signals.every(signal => signal.aborted)).toBe(true);
+  });
+  it("charges transformed choice/metadata bytes before retaining otherwise small catalog pages", async () => {
+    const f = fixture([{ ...workspace("client-with-a-long-name".repeat(5)), displayName: "C".repeat(500) }]);
+    let page = 0;
+    f.scopedFetch.mockImplementation(async () => Response.json({ services: Array.from({ length: 100 }, (_, n) => ({
+      ...service, publicId: `service-${page}-${n}-${"s".repeat(100)}`, sourceVersion: "v".repeat(128), questions: [],
+    })), nextCursor: ++page < 10 ? `page-${page}` : null }));
+    // Raw compact rows fit below 1 MiB, but the exact response DTOs have long
+    // client names and encoded coordinates. Capacity is a fatal 503.
+    expect((await f.get()).status).toBe(503);
+    expect(page).toBeLessThanOrEqual(10);
+  });
+  it("caps service items across sources even when their compact wire bytes fit", async () => {
+    const f = fixture(Array.from({ length: 12 }, (_, n) => workspace(`client-${n}`)));
+    f.scopedFetch.mockImplementation(async () => Response.json({ services: Array.from({ length: 100 }, (_, n) => ({
+      ...service, publicId: `s-${n}`,
+    })), nextCursor: null }));
+    expect((await f.get()).status).toBe(503);
+  });
 });

@@ -42,9 +42,16 @@ must not be presented as having no services. Legacy memberships without native
 source scope are not converted to native memberships by these endpoints.
 
 Discovery permits at most 32 native memberships, four concurrent catalog reads,
-ten pages of 100 services per membership, and a 1 MiB aggregate response. A source
+ten pages of 100 services per membership, 1,000 services total, and a 1 MiB aggregate response. A source
 that cannot be read completely appears under `unavailable`. Aggregate capacity
-exhaustion returns 503. Memberships are rediscovered after the catalog reads;
+exhaustion returns 503. One shared budget charges wire chunks before retaining
+them and transformed response rows before appending catalog items. The wire
+budget is 1 MiB across all sources/pages; response rows and envelope overhead
+have a separate 1 MiB bound. Capacity exhaustion cancels active readers, stops
+queued work, and fails the entire request rather than returning partial results.
+Strict discovery propagates the real database membership sentinel overflow as
+503; existing workspace-list callers retain their compatibility behavior.
+Memberships are rediscovered after the catalog reads;
 revoked memberships are removed before returning data.
 
 ## Submit a request
