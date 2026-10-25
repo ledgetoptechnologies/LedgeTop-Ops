@@ -1,0 +1,13 @@
+.client-video-player { display: flex; flex-direction: column; width: 100%; height: 100%; min-width: 0; min-height: 0; overflow: hidden; background: #090e12; color: #fff; }
+.client-video-picture { position: relative; flex: 1 1 0; min-height: 0; min-width: 0; }
+.client-video-picture > video { display: block; width: 100%; height: 100%; object-fit: contain; }
+.client-video-controls { flex: 0 0 auto; display: flex; align-items: center; flex-wrap: wrap; gap: .5rem; padding: .5rem .75rem; background: #17232d; border-top: 1px solid #ffffff30; }
+.client-video-controls button { min-height: 44px; flex: 0 0 auto; padding: .5rem .75rem; background: #fff; color: #10202c; border: 1px solid #b3c0ca; border-radius: 6px; font-size: .85rem; }
+.client-video-controls button:focus-visible, .client-video-controls input:focus-visible, .client-video-start:focus-visible { outline: 3px solid #ff914d; outline-offset: 2px; }
+.client-video-controls input[type=range] { flex: 1 1 120px; min-width: 70px; width: auto; min-height: 44px; padding: 0; accent-color: #ff8a45; }
+.client-video-time { color: #fff; font-size: .8rem; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.client-video-start { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); padding: .8rem 1rem; border: 1px solid #ffffff90; border-radius: 10px; background: #101b28ed; color: #fff; display: flex; gap: .5rem; align-items: center; }
+.client-video-status { position: absolute; top: .75rem; left: 50%; transform: translateX(-50%); width: max-content; max-width: calc(100% - 2rem); padding: .5rem .75rem; background: #101b28ed; color: #fff; border-radius: 6px; text-align: center; pointer-events: none; }
+.client-video-notice { flex: 0 0 auto; margin: 0; padding: .5rem .75rem; color: #fff; background: #17232d; }
+.client-video-player:fullscreen { width: 100vw; height: 100dvh; }
+@media (max-width: 520px) { .client-video-controls { gap: .35rem; padding: .35rem; } .client-video-controls input[type=range] { order: -1; flex-basis: 100%; } .client-video-controls button { padding: .5rem; } .client-video-time { margin-right: auto; } }

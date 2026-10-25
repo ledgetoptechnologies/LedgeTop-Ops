@@ -9,6 +9,7 @@ import {
 } from "react";
 import { AccountMenu, Card, EmptyState, Loading, StatusPill, openViewerShell, requestText, Skeleton } from "@ltds/ui";
 import { PortalBoundary, PortalBrand } from "./PortalShell";
+import { VideoPlayer } from "./VideoPlayer";
 import { PORTAL_APP_API, type DeliveryLocationCollection } from "@ltds/shared";
 import type { RequestError } from "./bulk-download";
 import {
@@ -419,7 +420,7 @@ function FileBrowser({
     document.body.style.overflow = "hidden";
     previewDialog.current?.focus();
     const keydown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") { event.preventDefault(); closePreview(); }
+      if (event.key === "Escape" && !document.fullscreenElement) { event.preventDefault(); closePreview(); }
       if (event.key === "Tab") {
         const focusable = [...(previewDialog.current?.querySelectorAll<HTMLElement>('a[href], button:not([disabled]), textarea, input, video[controls], audio[controls], iframe') || [])];
         const first = focusable[0], last = focusable.at(-1);
@@ -665,7 +666,7 @@ function FileBrowser({
             <div className="portal-file-preview-stage">
               {loadExactFile && previewMediaError && <div role="alert"><p>The preview could not be loaded. The file or your access may have changed.</p><button className="button-ghost" onClick={() => setFileRetry(value => value + 1)}>Retry preview</button></div>}
               {preview.file.kind === "image" && <img src={preview.file.previewPath!} alt={preview.file.name} onError={loadExactFile ? () => setPreviewMediaError(true) : undefined} />}
-              {preview.file.kind === "video" && <video src={preview.file.previewPath!} controls autoPlay muted playsInline preload="metadata" onError={loadExactFile ? () => setPreviewMediaError(true) : undefined} />}
+              {preview.file.kind === "video" && preview.file.previewPath && <VideoPlayer key={preview.file.id} src={preview.file.previewPath} name={preview.file.name} onError={loadExactFile ? () => setPreviewMediaError(true) : undefined} />}
               {preview.file.kind === "audio" && <audio src={preview.file.previewPath!} controls preload="metadata" onError={loadExactFile ? () => setPreviewMediaError(true) : undefined} />}
               {(preview.file.kind === "pdf" || preview.file.kind === "text") && (
                 <iframe src={preview.file.previewPath!} title={`Preview ${preview.file.name}`} />

@@ -675,16 +675,23 @@ test("authenticated video preview uses native controls and supports seeking with
   await expect.poll(() => video.evaluate(element => (element as HTMLVideoElement).readyState)).toBeGreaterThanOrEqual(1);
   await expect(video).toHaveJSProperty("muted", true);
   await expect.poll(() => video.evaluate(element => (element as HTMLVideoElement).currentTime)).toBeGreaterThan(0);
-  await video.evaluate(async element => {
-    const media = element as HTMLVideoElement;
-    media.pause();
-    await new Promise<void>((resolve, reject) => {
-      const timer = window.setTimeout(() => reject(new Error("seek timed out")), 3_000);
-      media.addEventListener("seeked", () => { window.clearTimeout(timer); resolve(); }, { once: true });
-      media.currentTime = 1.5;
-    });
-  });
+  await dialog.getByRole("button", { name: "Pause video", exact: true }).click();
+  const seek = dialog.getByRole("slider", { name: "Seek video" });
+  await expect(seek).toBeVisible();
+  await seek.focus(); await seek.press("Home");
+  for (let step = 0; step < 15; step++) await seek.press("ArrowRight");
   await expect.poll(() => video.evaluate(element => (element as HTMLVideoElement).currentTime)).toBeGreaterThan(1.25);
+  await dialog.getByRole("button", { name: "Unmute video" }).click();
+  await expect(video).toHaveJSProperty("muted", false);
+  const controls = await dialog.getByRole("group", { name: "Video playback controls" }).boundingBox();
+  const bounds = await dialog.boundingBox();
+  expect(controls).not.toBeNull(); expect(bounds).not.toBeNull();
+  expect(controls!.y + controls!.height).toBeLessThanOrEqual(bounds!.y + bounds!.height);
+  await dialog.getByRole("button", { name: "Enter fullscreen" }).click();
+  await expect.poll(() => page.evaluate(() => document.fullscreenElement?.classList.contains("client-video-player"))).toBe(true);
+  await page.keyboard.press("Escape");
+  await expect(dialog).toBeVisible();
+  await expect.poll(() => page.evaluate(() => document.fullscreenElement === null)).toBe(true);
   expect(observedRanges.length).toBeGreaterThan(0);
   await page.getByRole("button", { name: "Close preview" }).click();
   await expect(dialog).toHaveCount(0);
