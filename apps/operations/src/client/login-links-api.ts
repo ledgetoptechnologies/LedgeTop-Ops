@@ -59,6 +59,19 @@ function refusal(status: number, payload: Record<string, unknown>): Refusal | nu
 }
 const text = (value: unknown) => typeof value === "string" && value.trim().length > 0 && value.length <= 320;
 
+/**
+ * Whether this server can link sign-in emails at all, asked with a plain GET before any POST is sent. Only an exact
+ * `{ available: true }` counts: older servers answer 404, or their ordinary 403 for an email that isn't staff yet.
+ */
+export async function loginLinksAvailable(): Promise<boolean> {
+  try {
+    const response = await fetch(`${LOGIN_LINKS_PATH}/availability`, { credentials: "same-origin", cache: "no-store", redirect: "error", signal: AbortSignal.timeout(10000) });
+    if (response.status !== 200) return false;
+    const body = await response.json().catch(() => null) as { available?: unknown } | null;
+    return body !== null && typeof body === "object" && body.available === true;
+  } catch { return false; }
+}
+
 /** Reads whose profile the link joins without changing anything. */
 export async function previewLoginLink(pending: PendingLoginLink): Promise<PreviewResult> {
   const answer = await postPending("preview-claim", pending);

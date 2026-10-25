@@ -33,6 +33,8 @@ export function UnifiedPortal({ page, workspaces, openInAccount, navigate, rende
   mapboxPublicToken?: string | null;
 }) {
   const accounts = useMemo(() => workspaces.filter(unifiedAccountSupported).map(unifiedAccount), [workspaces]);
+  // Stable across renders so the delivery lists load once per account, not on every refresh of this page.
+  const accountWorkspaces = useMemo(() => accounts.map(account => account.workspace), [accounts]);
   const [results, setResults] = useState<Map<string, UnifiedAccountResult>>(() => new Map());
   const [retry, setRetry] = useState(0);
   const [choosingRequest, setChoosingRequest] = useState(false);
@@ -153,7 +155,7 @@ export function UnifiedPortal({ page, workspaces, openInAccount, navigate, rende
 
   if (page === "deliveries") return <>
     {heading("Deliveries", "Files and data we’ve delivered to you.")}
-    <UnifiedDeliveries workspaces={accounts.map(account => account.workspace)} openInAccount={openInAccount} />
+    <UnifiedDeliveries workspaces={accountWorkspaces} openInAccount={openInAccount} />
     {supplement}
   </>;
   if (page === "feedback") return single("Feedback", "Tell us what’s working and what to change.", "/portal/feedback", "Your feedback", "Give feedback");

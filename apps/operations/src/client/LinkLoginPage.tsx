@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState } from "react";
-import { Brand } from "@ltds/ui";
+import { Brand, SignInRecovery } from "@ltds/ui";
 import { ACCESS_LOGOUT, useAccessEmail, useAccessSignOut } from "./access-session";
 import {
-  LINK_LOGIN_PATH, claimLoginLink, clearPendingLoginLink, pendingFromHash, previewLoginLink, readPendingLoginLink, savePendingLoginLink,
+  LINK_LOGIN_PATH, claimLoginLink, clearPendingLoginLink, loginLinksAvailable, pendingFromHash, previewLoginLink, readPendingLoginLink, savePendingLoginLink,
   type ClaimResult, type LoginLinkPreview, type PendingLoginLink, type PreviewResult,
 } from "./login-links-api";
 
@@ -45,15 +45,21 @@ export function LinkLoginPage() {
   });
   const settle = (result: PreviewResult | ClaimResult) => {
     if (result.kind === "linked" || result.kind === "invalid" || result.kind === "conflict") { clearPendingLoginLink(); setPending(null); }
-    setMessage("message" in result ? result.message : undefined);
+    // Each outcome has fixed wording; server text isn't shown, since older servers name internal systems in it.
+    setMessage(undefined);
   };
 
   useEffect(() => {
     if (!pending) return;
     let active = true;
     setView("checking");
-    void previewLoginLink(pending).then(result => {
-      if (!active) return;
+    void loginLinksAvailable().then(available => {
+      if (!active) return null;
+      // Nothing is posted to a server that can't link emails; the link is kept for after it's updated.
+      if (!available) { savePendingLoginLink(pending); setView("unavailable"); return null; }
+      return previewLoginLink(pending);
+    }).then(result => {
+      if (!active || !result) return;
       settle(result);
       if (result.kind === "preview") { setPreview(result.preview); setView("ready"); }
       else setView(result.kind === "unknown" ? "check-failed" : result.kind);
@@ -74,7 +80,7 @@ export function LinkLoginPage() {
   const owner = preview ? `${preview.ownerDisplayName} (${preview.canonicalEmail})` : "";
   const copy: Record<View, [string, string]> = {
     checking: ["Checking this link…", "This takes a moment. Nothing is linked yet."],
-    "check-failed": ["We couldn't check this link", "Nothing has been linked. Check your connection and try again."],
+    "check-failed": ["We couldn't check this link", "We couldn't confirm whether this email is linked. Check your connection and try again."],
     ready: [preview ? `Link ${preview.targetEmail} to ${preview.ownerDisplayName}’s Operations profile?` : "Link this email?",
       `It will sign in as ${owner} and get the same Operations permissions. The main email doesn't change.`],
     claiming: ["Linking this email…", "This takes a moment."],
@@ -111,6 +117,7 @@ export function LinkLoginPage() {
         {pending && view !== "claiming" && view !== "checking" && <button type="button" className="button-ghost" disabled={signingOut} onClick={cancel}>Cancel</button>}
         {!pending && <a className={`button ${view === "linked" ? "button-orange" : "button-ghost"}`} href="/">Open Operations</a>}
       </div>
+      {view === "unavailable" && <SignInRecovery returnTo="/" lead="retry" />}
     </div>
   </main>;
 }

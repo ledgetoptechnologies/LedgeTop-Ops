@@ -20,7 +20,7 @@ async function mockOps(page: Page, options: {
   links?: unknown; linksStatus?: number; identity?: string;
   intent?: (origin: string) => { status: number; json: unknown }; claim?: { status: number; json: unknown };
   claims?: Array<{ status: number; json: unknown }>; deletes?: Array<{ status: number; json: unknown }>;
-  preview?: { status: number; json: unknown }; previewGate?: Promise<void>;
+  preview?: { status: number; json: unknown }; previewGate?: Promise<void>; available?: { status: number; json: unknown };
 } = {}) {
   const seen: Seen = { requests: [], links: options.links ?? { canonicalEmail: "owner@example.test", currentEmail: "owner@example.test", canManage: true, bindings: [linked, revoked] },
     intents: 0, deletes: [], claims: [], previews: [], sessions: 0, logouts: 0 };
@@ -37,6 +37,7 @@ async function mockOps(page: Page, options: {
       const answer = options.intent?.(url.origin) ?? { status: 200, json: { intentId: "3f2b8c1e-7d4a-4e9b-a6c2-5d8e9f0a1b2c", targetEmail: "new@example.test", verificationUrl: verificationUrl(url.origin), expiresAt: "2026-10-24T18:15:00Z" } };
       return route.fulfill(answer);
     }
+    if (path === "/api/account/login-links/availability") return route.fulfill(options.available ?? { status: 200, json: { available: true } });
     if (path === "/api/account/login-links/preview-claim") {
       seen.previews.push(request);
       await options.previewGate;
@@ -179,6 +180,47 @@ test("a used or expired link is cleared and points back to the account", async (
   await expect(page.getByRole("heading", { name: "This link can't be used" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Link this email to this profile" })).toHaveCount(0);
   expect(await page.evaluate(() => sessionStorage.length)).toBe(0);
+});
+
+for (const [name, available] of [
+  ["missing (404)", { status: 404, json: { error: "Not found" } }],
+  ["the live server's legacy denial (403)", { status: 403, json: { error: "Your Access identity is not provisioned for LTDS Operations" } }],
+  ["malformed", { status: 200, json: { available: "yes" } }],
+] as const) test(`an availability answer that is ${name} sends no POST and offers recovery`, async ({ page }) => {
+  const seen = await mockOps(page, { available });
+  await page.goto("/auth/link-login#intent=3f2b8c1e-7d4a-4e9b-a6c2-5d8e9f0a1b2c&token=aaaaaaaa0123456789abcdef0123456789abcdef0123456789abcdefbbbbbbbb");
+  await expect(page.getByRole("heading", { name: "Adding sign-in emails isn't available yet" })).toBeVisible();
+  await expect(page.getByRole("link", { name: "Sign in with a different email" })).toHaveAttribute("href", "/cdn-cgi/access/logout");
+  await expect(page.getByRole("button", { name: "Try again" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Link this email to this profile" })).toHaveCount(0);
+  await expect(page.locator("body")).not.toContainText("LTDS");
+  expect(seen.requests.filter(request => request.method() !== "GET")).toEqual([]);
+  // The link is kept so it still works once the server supports it.
+  expect(await page.evaluate(() => sessionStorage.getItem("ops.login-link.pending"))).not.toBeNull();
+});
+
+test("an availability check that fails on the network sends no POST and offers recovery", async ({ page }) => {
+  const seen = await mockOps(page);
+  await page.route("**/api/account/login-links/availability", route => route.abort("failed"));
+  await page.goto("/auth/link-login#intent=3f2b8c1e-7d4a-4e9b-a6c2-5d8e9f0a1b2c&token=aaaaaaaa0123456789abcdef0123456789abcdef0123456789abcdefbbbbbbbb");
+  await expect(page.getByRole("heading", { name: "Adding sign-in emails isn't available yet" })).toBeVisible();
+  await expect(page.getByRole("link", { name: "Sign in with a different email" })).toBeVisible();
+  expect(seen.requests.filter(request => request.method() !== "GET")).toEqual([]);
+});
+
+test("an available:false answer sends no POST", async ({ page }) => {
+  const seen = await mockOps(page, { available: { status: 200, json: { available: false } } });
+  await page.goto("/auth/link-login#intent=3f2b8c1e-7d4a-4e9b-a6c2-5d8e9f0a1b2c&token=aaaaaaaa0123456789abcdef0123456789abcdef0123456789abcdefbbbbbbbb");
+  await expect(page.getByRole("heading", { name: "Adding sign-in emails isn't available yet" })).toBeVisible();
+  expect(seen.requests.filter(request => request.method() !== "GET")).toEqual([]);
+});
+
+test("the live server's legacy denial on the link page is shown in Ledge Top wording only", async ({ page }) => {
+  await mockOps(page, { preview: { status: 403, json: { error: "Your Access identity is not provisioned for LTDS Operations" } } });
+  await page.goto("/auth/link-login#intent=3f2b8c1e-7d4a-4e9b-a6c2-5d8e9f0a1b2c&token=aaaaaaaa0123456789abcdef0123456789abcdef0123456789abcdefbbbbbbbb");
+  await expect(page.getByRole("heading", { name: "Sign in with the email you're adding" })).toBeVisible();
+  await expect(page.locator("body")).not.toContainText("LTDS");
+  await expect(page.locator("body")).not.toContainText("provisioned");
 });
 
 test("a server without sign-in emails says so and never offers to link", async ({ page }) => {
