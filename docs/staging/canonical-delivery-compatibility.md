@@ -46,9 +46,11 @@ admissions as part of enabling this helper. Business email policies are unrelate
    decisions; preserve the active Client video hotfix and exact retained asset
    union. The recorded retention floor is 2026-10-26 20:23:21 UTC; any later served
    release extends its own 48-hour window. No automatic pruning.
-2. Review new finite release recognition/settings transition declarations; the
-   previous domain phase ladder ends at staff-canonical with the old public
-   namespace and cannot recognize this delivery.app tuple as-is.
+2. Review the finite `delivery-public-canonical` recognition/settings draft from
+   `portal-entry-canonical`. It changes exactly five Client scalars: expected
+   public host, both public origin fields, legacy public overlap, and the exact
+   native deployment profile. Operations public-link generation changes only
+   in the separate `delivery-links-canonical` phase after Client acceptance.
 3. Add and verify delivery.app routing and public-path Access coverage without
    placing a staff/private login gate on public shares. Keep existing staff and
    client token audiences; Operations verifies `OPERATIONS_AUD`, private portal
@@ -84,3 +86,41 @@ alias qualification `55d54bf6`. These prepared compatibility/recognition tools,
 not evidence of live canonical redirects. Scalar transition notes document a
 held writer/runtime-export qualification, so do not replay those writers merely
 because an old branch contains them.
+
+## Offline finite transition drafts
+
+`scripts/production-delivery-domain-transition.mjs` supplies pure offline
+builders; importing or calling them performs no reads or writes outside the
+provided in-memory snapshots. There is no executor, credential reader or CLI
+entry point. The existing guarded CLI recognizes both phase names; recognizing
+a name does not publish its scalar values, relax frontend/asset/resource gates,
+mount a redirect or satisfy live acceptance.
+
+`compileDeliveryDomainTransition(snapshot)` requires the complete old
+`portal-entry-canonical` profile and returns a complete Client settings draft
+plus expected snapshot. It preserves every original settings field/binding,
+resource, cron, asset association, Operations and Sync state. It retains all
+three current private portal origins, including the LTT compatibility alias.
+Only the five listed Client scalars differ. Private native expected-host pins
+and original Viewer controller origins remain unchanged.
+
+`compileDeliveryPublicLinkTransition(snapshot)` is a distinct next-step builder
+requiring the complete Client delivery phase. Only Operations
+`PUBLIC_SHARE_ORIGIN` changes; private `DELIVERY_BASE_URL`, incoming/internal
+URLs, all Client settings and all Sync settings remain exact. Its returned
+`clientPublicAcceptanceRequiredBeforeApply: true` records an unresolved release
+gate, not a claim that acceptance happened. Neither builder applies settings.
+
+The fresh redacted operator observation at 2026-10-25 00:12:11 UTC agrees with
+the prior Client public tuple and the three private portal origin strings used
+by these phases. It reports active Client `4b763af4`, Operations `79621b47` and
+Sync `6f8e224c`. This does not update the historical committed profile's runtime,
+resource or asset hashes. Full actual installed baseline reconciliation must
+remain a separate reviewed operation; builders reject unexplained newer state
+instead of deriving an approved baseline from whatever happens to be installed.
+No private snapshot, credential value or client record is included here.
+
+Validation: five new offline recognition/transition tests and all 52 existing
+production deployment tests pass. Tests prove unchanged resources/assets and
+complete settings binding preservation with synthetic snapshots. No new
+production observation, update, upload or activation was performed.

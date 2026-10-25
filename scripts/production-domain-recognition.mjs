@@ -26,11 +26,33 @@ const phases = {
   'portal-entry-canonical': { operations: { ...portal.operations,
     DELIVERY_BASE_URL: 'https://portal.ledgetop.app',
   }, client: portal.client },
+  // Public delivery is a separate finite state. Preserve all private portal
+  // aliases, machine ingress pins, and Operations settings from portal entry.
+  'delivery-public-canonical': { operations: { ...portal.operations,
+    DELIVERY_BASE_URL: 'https://portal.ledgetop.app',
+  }, client: { ...portal.client,
+    EXPECTED_HOST: 'delivery.ledgetop.app',
+    PUBLIC_BASE_URL: 'https://delivery.ledgetop.app',
+    PUBLIC_SHARE_ORIGIN: 'https://delivery.ledgetop.app',
+    LEGACY_CLIENT_ORIGINS: 'https://portal.ledgetopdroneservices.com,https://client.ledgetopdroneservices.com',
+    CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_DEPLOYMENT_PROFILE: JSON.stringify({
+      ...JSON.parse(portal.client.CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_DEPLOYMENT_PROFILE),
+      publicShareOrigin: 'https://delivery.ledgetop.app',
+    }),
+  } },
   'staff-canonical': { operations: { ...portal.operations,
     DELIVERY_BASE_URL: 'https://portal.ledgetop.app',
     PUBLIC_BASE_URL: 'https://ops.ledgetop.app', EXPECTED_HOST: 'ops.ledgetop.app',
     CLIENT_ONBOARDING_ADMIN_ORIGIN: 'https://ops.ledgetop.app',
   }, client: portal.client },
+};
+// Separate Operations public-link generation state. It must not precede Client
+// public-origin acceptance; private links and all old internal URLs stay exact.
+phases['delivery-links-canonical'] = {
+  operations: { ...phases['delivery-public-canonical'].operations,
+    PUBLIC_SHARE_ORIGIN: 'https://delivery.ledgetop.app',
+  },
+  client: phases['delivery-public-canonical'].client,
 };
 export function domainPhaseValues(phase) {
   need(Object.hasOwn(phases, phase), 'Unknown reviewed domain phase');

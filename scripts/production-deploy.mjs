@@ -380,7 +380,7 @@ export async function executeDeployment({ app, mode, cli, main, directory, reade
   save('after.private.json', after);save('verified-active.json', { candidate: cid, runtimeSHA256: hash(js), assetsPreserved: true, resourcesPreserved: true, settingsPreserved: true, schedulesPreserved: true, ...finalMapsProof, runtimeHTTPAcceptanceStillRequired: true });
   return { candidate: cid, verifiedActive: true, journal: directory };
 }
-const DOMAIN_PHASE_NAMES = ['baseline', 'ops-alias-preparation', 'client-private-overlap', 'portal-entry-canonical', 'staff-canonical'];
+const DOMAIN_PHASE_NAMES = ['baseline', 'ops-alias-preparation', 'client-private-overlap', 'portal-entry-canonical', 'staff-canonical', 'delivery-public-canonical', 'delivery-links-canonical'];
 export function parseDeploymentArguments(argv) {
   if (!argv.length || equal(argv, ['--check'])) return {kind:'check'};
   if (equal(argv, ['--check-build-environment'])) return {kind:'environment'};
