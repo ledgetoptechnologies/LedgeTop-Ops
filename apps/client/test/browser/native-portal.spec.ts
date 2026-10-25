@@ -306,7 +306,7 @@ test("native feedback submits only through the selected secondary workspace endp
   await page.getByRole("button", {name: "Leave Feedback"}).click();
   await page.getByLabel("Your feedback").fill("Please verify this boundary.");
   await page.getByRole("button", {name: "Send feedback"}).click();
-  await expect(page.getByRole("status")).toContainText("Feedback sent");
+  await expect(page.getByRole("status").filter({ hasText: "Feedback sent" })).toContainText("Feedback sent");
   expect(calls.some(call => call.method === "POST" && call.path === "/api/client/v2/workspaces/workspace-b/feedback")).toBe(true);
   expect(calls.some(call => call.path === "/api/client/feedback")).toBe(false);
 });
