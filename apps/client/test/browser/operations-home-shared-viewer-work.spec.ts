@@ -6,11 +6,12 @@ const native = [
   { id: "workspace-b", rootType: "organization", rootPublicId: "org-shared", displayName: "QA internal label B", resourceMode: "native", sourceId: "project-alpha:coastal" },
   { id: "workspace-c", rootType: "organization", rootPublicId: "org-shared", displayName: "QA internal label C", resourceMode: "native", sourceId: "project-alpha:mountain" },
 ];
-const home = (workspaceId: string, authorityId: string) => ({ authorityId, workspaceId, ownershipEpoch: 1, grantRevision: 1,
-  services: [{ serviceId: `service-${workspaceId}`, providerId: "provider-a", displayLabel: "Aerial operations", revision: 1 }] });
+const aerial = { serviceId: "service-aerial", providerId: "provider-a", displayLabel: "Aerial operations", revision: 1 };
+const home = (workspaceId: string, authorityId: string, services = [aerial]) => ({ authorityId, workspaceId, ownershipEpoch: 1, grantRevision: 1, services });
 const opsHome = home("workspace-ops", "12345678-1234-4123-8123-123456789abc");
-// The same account can be both a client account and an Operations home; it is asked once.
-const duplicateHome = home("workspace-b", "12345678-1234-4123-8123-123456789abd");
+// The same account can be both a client account and an Operations home; it is asked once. Its home also
+// reaches the same service, and a different service that happens to share the label.
+const duplicateHome = home("workspace-b", "12345678-1234-4123-8123-123456789abd", [aerial, { ...aerial, serviceId: "service-aerial-west" }, { ...aerial, serviceId: "service-mapping", displayLabel: "Mapping" }]);
 const features = () => ({directory: {state: "available", reason: "authorized_capability"}, deliveries: {state: "available", reason: "resource_authorization_required"},
   serviceRequests: {state: "not_supported", reason: "source_not_supported"}, feedback: {state: "temporarily_unavailable", reason: "backend_unavailable"},
   models: {state: "not_supported", reason: "source_not_supported"}, team: {state: "not_supported", reason: "source_not_supported"},
@@ -79,6 +80,12 @@ test("client accounts and Operations homes share one flat list, each account ask
   // The Operations home is never opened as a client account.
   expect(calls.some(call => call.path.startsWith("/api/client/v2/workspaces/workspace-ops/") && !call.path.endsWith("/viewer"))).toBe(false);
   expect(new URL(page.url()).searchParams.has("workspace")).toBe(false);
+  // Shared work with something in it comes before the (empty) projects card.
+  const sharedTop = (await card(page).boundingBox())!.y, projectsTop = (await page.locator(".portal-home-projects").boundingBox())!.y;
+  expect(sharedTop).toBeLessThan(projectsTop);
+  // One service reached through two homes is listed once; a different service with the same label is not merged.
+  const services = page.getByRole("region", {name: "Independent operations service summary"}).getByRole("listitem");
+  await expect(services).toHaveText(["Aerial operations", "Aerial operations", "Mapping"]);
 });
 
 test("an Operations home that is removed on revalidation drops its shared work; client accounts stay", async ({page}) => {
