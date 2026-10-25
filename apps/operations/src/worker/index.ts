@@ -18,6 +18,7 @@ import {
 } from "@ltds/shared";
 import { authenticateStaff } from "./auth";
 import { registerStaffLoginClaimRoute, registerStaffLoginOwnerRoutes } from "./staff-login-link-routes";
+import { ownerIntelCapability, registerOwnerIntelRoutes } from "./owner-intel";
 import { OPERATIONS_NATIVE_STAFF_LIFECYCLE_BASE, handleOperationsNativeStaffLifecycleHttp } from "./operations-native-staff-lifecycle-http";
 import { handleAgentRead } from "./agent-read-routes";
 import { staffSessionStatus } from "./session-status";
@@ -683,6 +684,7 @@ app.use("/api/admin/*", async (c, next) => {
   await next();
 });
 registerStaffLoginOwnerRoutes(app);
+registerOwnerIntelRoutes(app);
 
 async function body<T>(c: any, schema: z.ZodType<T>): Promise<T> {
   const value = await c.req.json().catch(() => {
@@ -998,7 +1000,7 @@ app.get("/api/session/status", (c) => {
 app.get("/api/session", async (c) => {
   const principal = c.get("principal"),
     administrator = c.get("administrator");
-  const [permissions, globalScope, deliveryBrowseScope, integrationsManageScope, displayUnits, clientFeedbackEnabled, financeSummaryAuthority] = await Promise.all([
+  const [permissions, globalScope, deliveryBrowseScope, integrationsManageScope, displayUnits, clientFeedbackEnabled, financeSummaryAuthority, intelEnabled] = await Promise.all([
     permissionKeys(c.env, principal),
     sqlScope(c.env, principal, "dashboard.view"),
     sqlScope(c.env, principal, "delivery.browse"),
@@ -1006,6 +1008,7 @@ app.get("/api/session", async (c) => {
     resolveViewerUnits(c.env, principal.id),
     staffFeedbackEntryEnabled(c.env, principal),
     readFinanceSummaryAuthority(c.env.OPS_DB, principal),
+    ownerIntelCapability(c.env, principal),
   ]);
   const divisions =
     administrator && globalScope.global
@@ -1034,6 +1037,7 @@ app.get("/api/session", async (c) => {
     mapboxPublicToken: c.env.MAPBOX_PUBLIC_TOKEN || null,
     units: { default: defaultViewerUnits(c.env), resolved: displayUnits },
     capabilities: {
+      intel: { enabled: intelEnabled, readOnly: true },
       financeSummary: { enabled: financeSummaryAuthority !== null },
       projectAlphaPrivateAdminTransport: {
         enabled: c.env.PROJECT_ALPHA_PRIVATE_ADMIN_TRANSPORT_ENABLED === "true" && administrator
