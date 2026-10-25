@@ -151,7 +151,7 @@ test("a wrong-shaped business list or section shows an error instead of breaking
   await mockOps(page, { sections: {
     "drone-services/website": { json: { ...website, totals: "lots" } },
     "drone-services/search-console": { json: { site: { url: "x" } } },
-    "drone-services/competitors": { json: { tenantName: "Somebody" } },
+    "drone-services/competitors": { json: { ...sampleStaffTenant, competitors: [{ subjectKey: "comp:x", name: "x", baseline: {} }] } },
   } });
   for (const view of ["website", "search", "competitors"]) {
     await page.goto(`/intel?business=drone-services&view=${view}`);
