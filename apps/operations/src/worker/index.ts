@@ -1,5 +1,6 @@
 import { localDivisionJoin } from "./local-project-division";
 import { Hono, type Context } from "hono";
+import { dispatchCompetitorIntelIngest } from "./competitor-intel-ingest-routes";
 import { reservePrimaryFolderMutation,attemptPrimaryFolderMutation,completePrimaryFolderMutation,reconcilePrimaryFolderMutation,readPrimaryFolderMutationReview,retryPrimaryDivisionMutation,type DivisionMutationWitness } from './primary-folder-authority-mutations';
 import { backfillIncomingRcloneOutbox, drainIncomingRcloneOutbox } from "./incoming-rclone-outbox";
 import { reconcileIncomingRcloneDispatched } from "./incoming-rclone-reconcile";
@@ -17,6 +18,8 @@ import {
   type ServiceRequestNotificationSnapshot,
 } from "@ltds/shared";
 import { authenticateStaff } from "./auth";
+import { registerStaffLoginClaimRoute, registerStaffLoginOwnerRoutes } from "./staff-login-link-routes";
+import { ownerIntelCapability, registerOwnerIntelRoutes } from "./owner-intel";
 import { OPERATIONS_NATIVE_STAFF_LIFECYCLE_BASE, handleOperationsNativeStaffLifecycleHttp } from "./operations-native-staff-lifecycle-http";
 import { handleAgentRead } from "./agent-read-routes";
 import { staffSessionStatus } from "./session-status";
@@ -152,6 +155,7 @@ import { servePdfSourceFile, serveSourceFile } from "./source-file";
 import { directDeliveryUploadsCapability } from "./direct-upload-policy";
 import { isFrameableOperationsPdfRequest } from "./frame-policy";
 import { requestHostAllowed } from "./host-admission";
+import { canonicalOperationsNavigationRedirect } from "./canonical-navigation";
 import {
   dropboxImportCapability,
   registerDropboxImportRoutes,
@@ -278,6 +282,9 @@ import {
   registerViewerIntegrationRoutes,
   viewerIntegrationEnabled,
 } from "./viewer-integration";
+import { registerDirectViewerClientRoutes } from "./viewer-direct-client-routes";
+import { drainDirectViewerClientGrantRevocations } from "./viewer-direct-client-grants";
+import { pruneDirectViewerSessionIntents } from "./viewer-direct-client-session-issuer";
 import {
   registerViewerProcessingRoutes,
   processViewerProcessingNotifications,
@@ -455,6 +462,8 @@ app.use("*", async (c, next) => {
   const paMachineHostAllowed=projectAlphaDeliveryMachineHostRequest(c.req.url,c.req.method,c.env);
   if (machine ? !machineHostAllowed : paMachine ? !paMachineHostAllowed : !requestHostAllowed(c.req.url, c.env))
     return c.json({ error: "Not found" }, 404);
+  const canonicalNavigation = canonicalOperationsNavigationRedirect(c.req.raw, c.env);
+  if (canonicalNavigation) return canonicalNavigation;
   await next();
   c.header("Permissions-Policy", "camera=(), microphone=(), geolocation=()");
   c.header("X-Robots-Tag", "noindex, nofollow");
@@ -644,6 +653,7 @@ async function dispatchOperationsNativeStaffLifecycle(c: Context<{ Bindings: Env
 }
 app.use(OPERATIONS_NATIVE_STAFF_LIFECYCLE_BASE, dispatchOperationsNativeStaffLifecycle);
 app.use(`${OPERATIONS_NATIVE_STAFF_LIFECYCLE_BASE}/*`, dispatchOperationsNativeStaffLifecycle);
+registerStaffLoginClaimRoute(app);
 app.use("/api/*", async (c, next) => {
   if (viewerMachineEventRequest(c.req.method, c.req.path) || projectAlphaDeliveryMachineRequest(c.req.method, c.req.path)) {
     await next();
@@ -680,6 +690,8 @@ app.use("/api/admin/*", async (c, next) => {
     throw new HTTPException(403, { message: "Administrator access required" });
   await next();
 });
+registerStaffLoginOwnerRoutes(app);
+registerOwnerIntelRoutes(app);
 
 async function body<T>(c: any, schema: z.ZodType<T>): Promise<T> {
   const value = await c.req.json().catch(() => {
@@ -995,7 +1007,7 @@ app.get("/api/session/status", (c) => {
 app.get("/api/session", async (c) => {
   const principal = c.get("principal"),
     administrator = c.get("administrator");
-  const [permissions, globalScope, deliveryBrowseScope, integrationsManageScope, displayUnits, clientFeedbackEnabled, financeSummaryAuthority] = await Promise.all([
+  const [permissions, globalScope, deliveryBrowseScope, integrationsManageScope, displayUnits, clientFeedbackEnabled, financeSummaryAuthority, intelEnabled] = await Promise.all([
     permissionKeys(c.env, principal),
     sqlScope(c.env, principal, "dashboard.view"),
     sqlScope(c.env, principal, "delivery.browse"),
@@ -1003,6 +1015,7 @@ app.get("/api/session", async (c) => {
     resolveViewerUnits(c.env, principal.id),
     staffFeedbackEntryEnabled(c.env, principal),
     readFinanceSummaryAuthority(c.env.OPS_DB, principal),
+    ownerIntelCapability(c.env, principal),
   ]);
   const divisions =
     administrator && globalScope.global
@@ -1031,6 +1044,7 @@ app.get("/api/session", async (c) => {
     mapboxPublicToken: c.env.MAPBOX_PUBLIC_TOKEN || null,
     units: { default: defaultViewerUnits(c.env), resolved: displayUnits },
     capabilities: {
+      intel: { enabled: intelEnabled, readOnly: true },
       financeSummary: { enabled: financeSummaryAuthority !== null },
       projectAlphaPrivateAdminTransport: {
         enabled: c.env.PROJECT_ALPHA_PRIVATE_ADMIN_TRANSPORT_ENABLED === "true" && administrator
@@ -1814,6 +1828,7 @@ registerNativeDeliveryBindingRoutes(app);
 registerInvitationReviewRoutes(app);
 registerClientFeedbackRoutes(app);
 registerViewerIntegrationRoutes(app);
+registerDirectViewerClientRoutes(app);
 registerViewerProcessingRoutes(app);
 app.post("/api/internal/project-alpha/delivery-intents/preflight", handleProjectAlphaDeliveryPreflight);
 app.post("/api/internal/project-alpha/delivery-intents", handleProjectAlphaDeliveryIntent);
@@ -3750,12 +3765,18 @@ async function scheduled(
   ctx.waitUntil(pruneClientViewerShareReceipts(env));
   ctx.waitUntil(pruneViewerSessionIssuanceReceipts(env));
   ctx.waitUntil(drainViewerSessionRevocations(env));
+  if (env.CLIENT_VIEWER_SESSION_ISSUER_ENABLED === "true") {
+    ctx.waitUntil(drainDirectViewerClientGrantRevocations(env));
+    ctx.waitUntil(pruneDirectViewerSessionIntents(env));
+  }
 }
 async function fetch(
   request: Request,
   env: Env,
   ctx: ExecutionContext,
 ): Promise<Response> {
+  const intelIngest = dispatchCompetitorIntelIngest(request, env);
+  if (intelIngest) return await intelIngest;
   const nativeOwner = await dispatchOperationsPortalNativeOwnerRequest(request, env);
   if (nativeOwner) return nativeOwner;
   const thumbnailIngest = await dispatchThumbnailIngestRequest(request, env);

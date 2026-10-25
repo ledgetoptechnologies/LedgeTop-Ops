@@ -150,7 +150,7 @@ test("staff edits a multi-item brief and gets mobile-friendly private KML and ma
   await last.getByLabel("Operational instructions").fill("Use the west gate and keep it closed.");
   await page.getByRole("button", { name: "Save brief" }).click();
   await expect(page.getByText("Saved version 2")).toBeVisible();
-  await expect(page.getByText("LTDS brief v2")).toBeVisible();
+  await expect(page.getByText("Ledge Top brief v2")).toBeVisible();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
 });
 
@@ -207,7 +207,7 @@ test("background refresh preserves a dirty draft and explicit refresh adopts the
   await expect(instructions).toHaveValue("Local unsaved altitude change");
   await page.getByRole("button", { name: "Refresh" }).click();
   await expect(instructions).toHaveValue("Server altitude change");
-  await expect(page.getByText("LTDS brief v2")).toBeVisible();
+  await expect(page.getByText("Ledge Top brief v2")).toBeVisible();
 });
 
 test("a job brief without an authorized destination has no external navigation", async ({ page }) => {

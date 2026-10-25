@@ -3,6 +3,7 @@ import { isNativeAccessSubject } from './native-access-subject';
 import type { EmployeeReadAuthority } from './employee-read-authority';
 import { recheckEmployeeReadAuthority } from './employee-read-authority';
 import { canonicalEmployeeReadPath, type EmployeeReadSelection } from './employee-read-transport';
+import { assertCurrentStaffLogin, snapshotStaffLoginProof } from './staff-login-bindings';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 const STAFF = /^[A-Za-z0-9][A-Za-z0-9:._-]{0,190}$/u;
@@ -53,7 +54,9 @@ async function digest(value: string): Promise<string> {
   return Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value))), b => b.toString(16).padStart(2, '0')).join('');
 }
 function actorSnapshot(authenticated: AuthenticatedNativeStaffWithAdmissionVersion) {
-  if (!exact(authenticated, ['identity', 'admissionVersion', 'verifiedUntil'])
+  const fields = authenticated && typeof authenticated === 'object' && Object.hasOwn(authenticated, 'verifiedLogin')
+    ? ['identity', 'admissionVersion', 'verifiedUntil', 'verifiedLogin'] : ['identity', 'admissionVersion', 'verifiedUntil'];
+  if (!exact(authenticated, fields)
     || !exact(authenticated.identity, ['kind', 'staffId', 'verifiedAccessSubject', 'email', 'displayName', 'profileVersion'])) throw new EmployeeProvisioningError(403, 'denied');
   const identity = authenticated.identity;
   if (identity.kind !== 'native' || typeof identity.staffId !== 'string' || !STAFF.test(identity.staffId) || !isNativeAccessSubject(identity.verifiedAccessSubject)
@@ -61,13 +64,19 @@ function actorSnapshot(authenticated: AuthenticatedNativeStaffWithAdmissionVersi
     || typeof identity.email !== 'string' || identity.email !== identity.email.trim().toLowerCase() || !/^[^\s@]+@[^\s@]+$/u.test(identity.email)
     || !/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/u.test(authenticated.verifiedUntil)
     || !Number.isFinite(Date.parse(authenticated.verifiedUntil)) || Date.parse(authenticated.verifiedUntil) <= Date.now()) throw new EmployeeProvisioningError(403, 'denied');
+  const login = Object.hasOwn(authenticated, 'verifiedLogin') ? snapshotStaffLoginProof(authenticated.verifiedLogin) : undefined;
+  if (login !== undefined && (!login || login.kind !== 'alternate' || login.staffId !== identity.staffId
+    || login.canonicalEmail !== identity.email || login.canonicalSubject !== identity.verifiedAccessSubject
+    || login.expiresAt * 1000 < Date.parse(authenticated.verifiedUntil))) throw new EmployeeProvisioningError(403, 'denied');
   return Object.freeze({ staffId: identity.staffId, accessSubject: identity.verifiedAccessSubject, email: identity.email,
-    admissionVersion: authenticated.admissionVersion, profileVersion: identity.profileVersion, verifiedUntil: authenticated.verifiedUntil });
+    admissionVersion: authenticated.admissionVersion, profileVersion: identity.profileVersion, verifiedUntil: authenticated.verifiedUntil,
+    ...(login ? { verifiedLogin: login } : {}) });
 }
 
 export async function provisionEmployeeRead(database: D1Database, authenticated: AuthenticatedNativeStaffWithAdmissionVersion,
   value: unknown, options: Readonly<{ gatewayIds: readonly string[] }>): Promise<EmployeeReadCommandReceipt> {
   const actor = actorSnapshot(authenticated), command = parseEmployeeReadCommand(value);
+  if (actor.verifiedLogin && !await assertCurrentStaffLogin(database, actor.verifiedLogin)) throw new EmployeeProvisioningError(403, 'denied');
   const gateways = [...options.gatewayIds];
   if (!gateways.length || gateways.length > 100 || !gateways.every(uuid)) throw new EmployeeProvisioningError(503, 'unavailable');
   const session = database.withSession('first-primary');
@@ -95,6 +104,7 @@ export async function provisionEmployeeRead(database: D1Database, authenticated:
   const payload = JSON.stringify(command);
   const requestHash = await digest(JSON.stringify(['employee-read-command-v1', actor.staffId, actor.accessSubject, actor.admissionVersion, actor.profileVersion, gatewayId, command]));
   const generation = ['advance-root', 'revoke-grant'].includes(command.kind) ? Number(command.expectedGeneration) + 1 : 1;
+  if (actor.verifiedLogin && !await assertCurrentStaffLogin(database, actor.verifiedLogin)) throw new EmployeeProvisioningError(403, 'denied');
   try {
     const results = await session.batch([
       session.prepare(`INSERT INTO ops_employee_read_commands(command_id,request_sha256,action,actor_staff_id,actor_access_subject,actor_admission_version,actor_profile_version,

@@ -7,8 +7,9 @@ import {
   type FormEvent,
   type ReactNode,
 } from "react";
-import { AccountMenu, Card, EmptyState, Loading, StatusPill, openViewerShell, requestText, Skeleton } from "@ltds/ui";
+import { AccountMenu, Card, EmptyState, Loading, SignInRecovery, StatusPill, openViewerShell, requestText, Skeleton } from "@ltds/ui";
 import { PortalBoundary, PortalBrand } from "./PortalShell";
+import { VideoPlayer } from "./VideoPlayer";
 import { PORTAL_APP_API, type DeliveryLocationCollection } from "@ltds/shared";
 import type { RequestError } from "./bulk-download";
 import {
@@ -92,7 +93,8 @@ import {
   type PortalOperationsHomeResponse,
 } from "./portal-api";
 import { readClientViewerUnits, writeClientViewerUnits } from "./viewer-units-preference";
-import { ClientViewerShell, parseClientViewerShellRoute, clientViewerShellPath, nativeClientViewerShellPath } from "./ClientViewerShell";
+import { ClientViewerShell, parseClientViewerShellRoute, clientViewerShellPath, nativeClientViewerShellPath, clientViewerRouteProjectId, clientViewerRouteWorkspaceId } from "./ClientViewerShell";
+import { SharedViewerWork } from "./SharedViewerWork";
 import { OperationsHomeApp, OperationsNativeServicePanel } from "./OperationsHomeApp";
 import {
   clientPortalPath,
@@ -102,12 +104,13 @@ import {
   type ClientPortalPage,
 } from "./portal-route";
 import { MapAreaSelector } from "./MapAreaSelector";
+import { ServiceQuestionField, questionIsAnswered } from "./service-questions";
 import { ImageLocationMap } from "./ImageLocationMap";
 import { ServiceLibrary } from "./ServiceLibrary";
 import { canBeginRequest, RequestAvailabilityMessage, useRequestAvailability, type RequestAvailability } from "./RequestAvailability";
 import { RequestScopeBoundary } from "./RequestScopeBoundary";
 import { UNIFIED_PAGES, UnifiedPortal, type UnifiedPage } from "./UnifiedPortal";
-import { AREA_TEXT, accountArea, unifiedAccount, unifiedAccountSupported } from "./unified-portal";
+import { unifiedAccountSupported } from "./unified-portal";
 import { ClientSessionExpiry } from "./ClientSessionExpiry";
 import { LeaveFeedback, PortalFeedback } from "./PortalFeedback";
 import { PortalNotifications } from "./PortalNotifications";
@@ -127,7 +130,7 @@ type TopPage = "dashboard" | "projects" | "deliveries" | "requests" | "feedback"
 type WorkspaceTab = "overview" | "files" | "models" | "requests";
 type PortalGate =
   | { status: "loading" }
-  | { status: "blocked"; title: string; detail: string; optionalClientWorkspaceAbsent: boolean }
+  | { status: "blocked"; title: string; detail: string; optionalClientWorkspaceAbsent: boolean; lead?: "different" | "again" }
   | { status: "ready"; data: PortalBootstrap | NativePortalBootstrap };
 
 const navigation: Array<{ page: TopPage; label: string }> = [
@@ -173,6 +176,7 @@ function blockedPortal(
       status: "blocked",
       optionalClientWorkspaceAbsent,
       title: "Sign in required",
+      lead: "again",
       detail: "Your session has ended. Sign in with the email address registered with Ledge Top to continue.",
     };
   if (isNoAuthorizedClientWorkspace(caught))
@@ -180,6 +184,7 @@ function blockedPortal(
       status: "blocked",
       optionalClientWorkspaceAbsent,
       title: "No client account yet",
+      lead: "different",
       detail:
         "You're signed in, but no client account has been shared with your sign-in yet. Contact your Ledge Top representative.",
     };
@@ -188,6 +193,7 @@ function blockedPortal(
       status: "blocked",
       optionalClientWorkspaceAbsent,
       title: "Client access not set up yet",
+      lead: "different",
       detail:
         "You're signed in, but this account doesn't have access to this client account. Contact your Ledge Top representative.",
     };
@@ -419,7 +425,7 @@ function FileBrowser({
     document.body.style.overflow = "hidden";
     previewDialog.current?.focus();
     const keydown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") { event.preventDefault(); closePreview(); }
+      if (event.key === "Escape" && !document.fullscreenElement) { event.preventDefault(); closePreview(); }
       if (event.key === "Tab") {
         const focusable = [...(previewDialog.current?.querySelectorAll<HTMLElement>('a[href], button:not([disabled]), textarea, input, video[controls], audio[controls], iframe') || [])];
         const first = focusable[0], last = focusable.at(-1);
@@ -665,7 +671,7 @@ function FileBrowser({
             <div className="portal-file-preview-stage">
               {loadExactFile && previewMediaError && <div role="alert"><p>The preview could not be loaded. The file or your access may have changed.</p><button className="button-ghost" onClick={() => setFileRetry(value => value + 1)}>Retry preview</button></div>}
               {preview.file.kind === "image" && <img src={preview.file.previewPath!} alt={preview.file.name} onError={loadExactFile ? () => setPreviewMediaError(true) : undefined} />}
-              {preview.file.kind === "video" && <video src={preview.file.previewPath!} controls autoPlay muted playsInline preload="metadata" onError={loadExactFile ? () => setPreviewMediaError(true) : undefined} />}
+              {preview.file.kind === "video" && preview.file.previewPath && <VideoPlayer key={preview.file.id} src={preview.file.previewPath} name={preview.file.name} onError={loadExactFile ? () => setPreviewMediaError(true) : undefined} />}
               {preview.file.kind === "audio" && <audio src={preview.file.previewPath!} controls preload="metadata" onError={loadExactFile ? () => setPreviewMediaError(true) : undefined} />}
               {(preview.file.kind === "pdf" || preview.file.kind === "text") && (
                 <iframe src={preview.file.previewPath!} title={`Preview ${preview.file.name}`} />
@@ -959,43 +965,6 @@ function dateTimeLocalValue(value: string | null): string {
   if (!Number.isFinite(date.getTime())) return "";
   const local = new Date(date.getTime() - date.getTimezoneOffset() * 60_000);
   return local.toISOString().slice(0, 16);
-}
-
-function questionIsAnswered(question: PortalServiceQuestion, value: unknown): boolean {
-  if (!question.required) return true;
-  if (question.type === "boolean") return typeof value === "boolean";
-  if (question.type === "multi_select") return Array.isArray(value) && value.length > 0;
-  return value !== undefined && value !== null && String(value).trim().length > 0;
-}
-
-function ServiceQuestionField({
-  serviceId,
-  question,
-  value,
-  onChange,
-}: {
-  serviceId: string;
-  question: PortalServiceQuestion;
-  value: unknown;
-  onChange: (value: unknown) => void;
-}) {
-  const id = `service-${serviceId}-${question.id}`;
-  const helpId = question.helpText ? `${id}-help` : undefined;
-  const shared = { id, required: question.required, "aria-describedby": helpId };
-  let control: ReactNode;
-  if (question.type === "text") {
-    control = <input {...shared} value={typeof value === "string" ? value : ""} maxLength={question.maxLength} onChange={(event) => onChange(event.target.value)} />;
-  } else if (question.type === "number") {
-    control = <input {...shared} type="number" value={typeof value === "number" ? value : ""} min={question.minimum ?? undefined} max={question.maximum ?? undefined} onChange={(event) => onChange(event.target.value === "" ? undefined : event.target.valueAsNumber)} />;
-  } else if (question.type === "boolean") {
-    control = <select {...shared} value={typeof value === "boolean" ? String(value) : ""} onChange={(event) => onChange(event.target.value === "" ? undefined : event.target.value === "true")}><option value="">Select an answer</option><option value="true">Yes</option><option value="false">No</option></select>;
-  } else if (question.type === "select") {
-    control = <select {...shared} value={typeof value === "string" ? value : ""} onChange={(event) => onChange(event.target.value || undefined)}><option value="">Select an option</option>{question.options.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}</select>;
-  } else {
-    const selected = Array.isArray(value) ? value as string[] : [];
-    control = <div className="portal-service-options" id={id} aria-describedby={helpId}>{question.options.map(option => <label key={option.value} className="portal-check-option"><input type="checkbox" checked={selected.includes(option.value)} onChange={(event) => onChange(event.target.checked ? [...selected, option.value] : selected.filter(item => item !== option.value))} /> <span>{option.label}</span></label>)}</div>;
-  }
-  return <div className="portal-service-question"><label htmlFor={question.type === "multi_select" ? undefined : id}>{question.label}{question.required ? <span aria-hidden="true"> *</span> : <span> (optional)</span>}{control}</label>{question.helpText && <small id={helpId}>{question.helpText}</small>}</div>;
 }
 
 function formatRequestMoney(minor: number, currency: string): string {
@@ -2764,7 +2733,7 @@ export function ClientPortalApp({
   operationsHomeResponse?: PortalOperationsHomeResponse;
 }) {
   const initialRoute = parseClientPortalRoute(window.location.pathname);
-  const [viewerRoute, setViewerRoute] = useState(() => parseClientViewerShellRoute(window.location.pathname));
+  const [viewerRoute, setViewerRoute] = useState(() => parseClientViewerShellRoute(window.location.pathname, window.location.search));
   const [currentOperationsHome, setCurrentOperationsHome] = useState<PortalOperationsHomeResponse | undefined>(operationsHomeResponse);
   const [operationsHomeStatus, setOperationsHomeStatus] = useState<"current" | "checking" | "unavailable">("current");
   const [gate, setGate] = useState<PortalGate>({ status: "loading" });
@@ -2772,7 +2741,7 @@ export function ClientPortalApp({
   gateRef.current = gate;
   const [page, setPage] = useState<ClientPortalPage>(initialPage);
   const [projectId, setProjectId] = useState<string | null>(
-    viewerRoute?.projectId ?? initialRoute.projectId,
+    viewerRoute ? clientViewerRouteProjectId(viewerRoute) : initialRoute.projectId,
   );
   const [feedbackId, setFeedbackId] = useState<string | null>(initialRoute.feedbackId ?? null);
   // In the unified portal, list pages merge every account; a link that names an
@@ -2890,8 +2859,8 @@ export function ClientPortalApp({
   useEffect(() => {
     let active = true;
     bootstrapController.current?.abort(); const controller = new AbortController(); bootstrapController.current = controller;
-    const requestedViewerRoute = parseClientViewerShellRoute(location.pathname);
-    const requestedWorkspaceId = requestedViewerRoute?.mode === "native" ? requestedViewerRoute.workspaceId : new URLSearchParams(location.search).get("workspace");
+    const requestedViewerRoute = parseClientViewerShellRoute(location.pathname, location.search);
+    const requestedWorkspaceId = clientViewerRouteWorkspaceId(requestedViewerRoute) ?? new URLSearchParams(location.search).get("workspace");
     loadPortalBootstrap(undefined, requestedWorkspaceId, controller.signal)
       .then((data) => {
         if (active && !controller.signal.aborted) {
@@ -2931,12 +2900,12 @@ export function ClientPortalApp({
   }, [gate]);
   useEffect(() => {
     const onPopState = () => {
-      const currentViewerRoute = parseClientViewerShellRoute(window.location.pathname);
+      const currentViewerRoute = parseClientViewerShellRoute(window.location.pathname, window.location.search);
       setViewerRoute(currentViewerRoute);
-      const route = currentViewerRoute ? { isPortal: true, page: "project" as const, projectId: currentViewerRoute.projectId, feedbackId: undefined } : parseClientPortalRoute(window.location.pathname);
+      const route = currentViewerRoute ? { isPortal: true, page: "project" as const, projectId: clientViewerRouteProjectId(currentViewerRoute), feedbackId: undefined } : parseClientPortalRoute(window.location.pathname);
       if (!route.isPortal) window.location.reload();
       else {
-        const hint = currentViewerRoute?.mode === "native" ? currentViewerRoute.workspaceId : new URLSearchParams(location.search).get("workspace"), current = gateRef.current;
+        const hint = clientViewerRouteWorkspaceId(currentViewerRoute) ?? new URLSearchParams(location.search).get("workspace"), current = gateRef.current;
         if (hint !== null && (current.status !== "ready" || hint !== (current.data.selectedWorkspaceId ?? null))) {
           bootstrapController.current?.abort(); setSwitchingWorkspace(false); setGate({status: "loading"}); setBootstrapRevision(value => value + 1);
         }
@@ -3052,18 +3021,10 @@ export function ClientPortalApp({
       <PortalBoundary>
         <Card>
           <EmptyState title={gate.title} detail={gate.detail} />
-          <div className="portal-gate-actions">
-            <button
-              type="button"
-              className="button-orange"
-              onClick={() => {
-                setGate({ status: "loading" });
-                setBootstrapRevision(value => value + 1);
-              }}
-            >
-              Retry portal
-            </button>
-          </div>
+          <SignInRecovery returnTo="/portal" lead={gate.lead ?? "retry"} onRetry={() => {
+            setGate({ status: "loading" });
+            setBootstrapRevision(value => value + 1);
+          }} />
         </Card>
       </PortalBoundary>
     );
@@ -3074,7 +3035,8 @@ export function ClientPortalApp({
   const account = gate.data.resourceMode === "native" ? null : gate.data.account;
   const projects = gate.data.resourceMode === "native" ? [] : gate.data.projects;
   const mapboxPublicToken = gate.data.resourceMode === "native" ? null : gate.data.mapboxPublicToken;
-  const shellDisplayName = native ? native.workspace.displayName : account!.displayName;
+  // Stored native account names can be internal source labels; the menu names the signed-in person instead.
+  const shellDisplayName = native ? native.identity?.email ?? "Your account" : account!.displayName;
   const accountEmail = (native ? native.identity?.email : account?.email) ?? null;
   const workspaces = gate.data.workspaces ?? [];
   const selectedWorkspaceId = gate.data.selectedWorkspaceId ?? null;
@@ -3082,7 +3044,6 @@ export function ClientPortalApp({
   const unifiedView = unifiedMode && UNIFIED_PAGES.has(page) && !accountFocus;
   const currentAccount = unifiedMode ? workspaces.find(workspace => workspace.id === selectedWorkspaceId) : undefined;
   const unifiedScopes = unifiedMode ? workspaces.filter(unifiedAccountSupported).map(workspace => workspace.id) : [];
-  const unifiedLabels = new Map(workspaces.map(workspace => [workspace.id, `${unifiedAccount(workspace).business} · ${workspace.displayName}`]));
   // Notification history doesn't depend on request support, so the bell resets on the
   // verified source/workspace/context version whether or not requests are enabled.
   const notificationContextKey = native ? `${native.workspace.sourceId}:${native.workspace.id}:${native.contextVersion}` : `${account!.id}:${selectedWorkspaceId ?? "legacy"}`;
@@ -3238,8 +3199,8 @@ export function ClientPortalApp({
   if (viewerRoute)
     content = <ClientViewerShell route={viewerRoute} />;
   else if (unifiedView)
-    content = <UnifiedPortal page={page as UnifiedPage} workspaces={workspaces}
-      openInAccount={openInAccount} navigate={navigate} supplement={page === "dashboard" ? operationsHomeSummary : undefined}
+    content = <UnifiedPortal page={page as UnifiedPage} workspaces={workspaces} mapboxPublicToken={mapboxPublicToken}
+      openInAccount={openInAccount} navigate={navigate} supplement={page === "dashboard" ? <><SharedViewerWork workspaces={workspaces} />{operationsHomeSummary}</> : page === "deliveries" ? <SharedViewerWork workspaces={workspaces} /> : undefined}
       renderStatus={request => <StatusPill tone={statusTone(request.status)}>{statusLabel(request.status, request.projectAlphaDraftCreated)}</StatusPill>} />;
   else if (native)
     content = <NativeWorkspaceContent key={`${native.workspace.sourceId}:${native.workspace.id}:${native.contextVersion}`} context={native} page={page} projectId={projectId} feedbackId={feedbackId} openProject={openProject}
@@ -3250,7 +3211,8 @@ export function ClientPortalApp({
         loadModels={project => loadNativeViewerModels(native,project)}
         shellPath={model=>nativeClientViewerShellPath({workspaceId:native.workspace.id,projectId:id,associationId:model.associationId,modelId:model.modelId})}
         persistUnits={null} />}
-      renderDashboardSupplement={operationsHomeSummary ? () => operationsHomeSummary : undefined}
+      renderDashboardSupplement={() => <><SharedViewerWork workspaces={workspaces.length ? workspaces : [native.workspace]} />{operationsHomeSummary}</>}
+      renderSharedWork={() => <SharedViewerWork workspaces={workspaces.length ? workspaces : [native.workspace]} />}
       renderFiles={options => <FileBrowser key={options.folderId ?? "linked-file"} {...options} feedback={native.capabilities.feedback} nativeFeedbackWorkspaceId={native.workspace.id} workspaceId={native.workspace.id} mapToken={null} locationScopeLabel="" emptyTitle="No files shown" emptyDetail={options.folderId ? "This shared folder has no files on this page." : "Open a delivery folder to browse its files."} />} />;
   else if (page === "project")
     content = selectedProject ? (
@@ -3632,7 +3594,7 @@ export function ClientPortalApp({
           ))}
         </nav>
         {!switchingWorkspace && (unifiedMode
-          ? <PortalNotifications key={`unified:${notificationContextKey}:${unifiedScopes.join(",")}`} contextKey={notificationContextKey} scopes={unifiedScopes} labels={unifiedLabels} />
+          ? <PortalNotifications key={`unified:${notificationContextKey}:${unifiedScopes.join(",")}`} contextKey={notificationContextKey} scopes={unifiedScopes} />
           : <PortalNotifications key={requestContextKey} />)}
         <button ref={mobileNavTrigger} className="portal-nav-trigger" type="button" aria-label="Open navigation" aria-expanded={mobileNavOpen} aria-controls="portal-mobile-navigation" onClick={() => setMobileNavOpen(true)}><span className="nav-hamburger" aria-hidden="true"><i /><i /><i /></span></button>
         <AccountMenu className="portal-account-menu" displayName={shellDisplayName}
@@ -3650,9 +3612,8 @@ export function ClientPortalApp({
         </div>
       </div>}
       <main className={`client-portal-main${viewerRoute ? " client-viewer-main" : ""}`}>{switchingWorkspace ? <Loading /> : <>
-        {currentAccount && !unifiedView && <p className="unified-portal-context">
-          <span>{AREA_TEXT[accountArea(unifiedAccount(currentAccount))].name} · {currentAccount.displayName}</span>
-          {UNIFIED_PAGES.has(page) && <button type="button" className="portal-text-action" onClick={() => navigate(page as UnifiedPage)}>Back to everything</button>}
+        {currentAccount && !unifiedView && UNIFIED_PAGES.has(page) && <p className="unified-portal-context">
+          <button type="button" className="portal-text-action" onClick={() => navigate(page as UnifiedPage)}>Back to everything</button>
         </p>}
         {content}</>}</main>
     </div>

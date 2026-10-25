@@ -1,4 +1,5 @@
 import type {StaffPrincipal} from './types';
+import {assertCurrentStaffLogin} from './staff-login-bindings';
 
 export type FinanceSummaryAuthority=Readonly<{
   staffId:string;subject:string;accessExpiresAt:number;profileVersion:number;admissionVersion:number;
@@ -7,6 +8,7 @@ export type FinanceSummaryAuthority=Readonly<{
 /** A company aggregate cannot safely honor a partial/division grant. An
  * explicit deny at any scope blocks the aggregate, including for owners. */
 export async function readFinanceSummaryAuthority(db:D1Database,principal:StaffPrincipal,now=Date.now()):Promise<FinanceSummaryAuthority|null>{
+  if(principal.verifiedLogin&&!await assertCurrentStaffLogin(db,principal.verifiedLogin,Math.floor(now/1000)))return null;
   const staffId=principal.id,subject=principal.accessSubject,expires=principal.accessExpiresAt;
   if(typeof staffId!=='string'||typeof subject!=='string'||!subject
     ||typeof expires!=='number'||!Number.isSafeInteger(expires)||expires<=Math.floor(now/1000))return null;

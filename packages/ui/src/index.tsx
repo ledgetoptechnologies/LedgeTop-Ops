@@ -6,6 +6,9 @@ export { AppDialogHost, requestChoice, requestText, type ChoiceRequest, type Tex
 export { formatSessionExpiry, formatSessionRemaining } from "./session-time";
 import { GetAppDialog } from "./GetAppDialog";
 export { GetAppDialog } from "./GetAppDialog";
+export { ACCESS_LOGOUT, useAccessEmail, useAccessSignOut } from "./access-session";
+export { LEDGE_TOP_SUPPORT_EMAIL, SignInRecovery } from "./SignInRecovery";
+import { useAccessSignOut } from "./access-session";
 
 /** Generic Ledge Top mark, identical on every domain and product. */
 const LT_MARK_BOX = "238.5 226 776 776", LT_MARK_WHITE = "#f5f3ef", LT_MARK_ORANGE = "#ee5007";
@@ -129,6 +132,7 @@ export function AccountMenu({
   onAccount,
   sessionStatus,
   appApi,
+  signInReturnTo = "/",
   className = "",
 }: {
   displayName: string;
@@ -139,9 +143,12 @@ export function AccountMenu({
   sessionStatus?: ReactNode;
   /** Route base for "Get the app" (OPERATIONS_APP_API or PORTAL_APP_API); omitted, the item is hidden. */
   appApi?: string;
+  /** Where "Sign in with a different email" lands after signing out; Access shows its sign-in there. */
+  signInReturnTo?: string;
   className?: string;
 }) {
   const [open, setOpen] = useState(false), [appOpen, setAppOpen] = useState(false);
+  const [signingOut, signOut] = useAccessSignOut(signInReturnTo);
   const root = useRef<HTMLDivElement>(null), trigger = useRef<HTMLButtonElement>(null);
   const menuId = `account-menu-${useId().replace(/:/g, "")}`;
   const close = useCallback((restoreFocus = false) => {
@@ -192,6 +199,8 @@ export function AccountMenu({
         setOpen(false); trigger.current?.focus(); setAppOpen(true);
       }}>Get the app</button>}
       {sessionStatus && <div role="none">{sessionStatus}</div>}
+      <a role="menuitem" href={CLOUDFLARE_ACCESS_LOGOUT_PATH} onClick={signOut} aria-disabled={signingOut || undefined}>
+        {signingOut ? "Signing out…" : "Sign in with a different email"}</a>
       <a role="menuitem" href={CLOUDFLARE_ACCESS_LOGOUT_PATH}>Logout</a>
     </div>}
     {appApi && <GetAppDialog open={appOpen} onClose={() => setAppOpen(false)} appApi={appApi} />}

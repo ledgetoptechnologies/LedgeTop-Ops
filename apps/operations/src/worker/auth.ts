@@ -1,6 +1,7 @@
 import { createRemoteJWKSet, jwtVerify } from "jose";
 import { HTTPException } from "hono/http-exception";
 import type { Env, StaffPrincipal } from "./types";
+import { assertCurrentStaffLogin, resolveVerifiedStaffLogin, type VerifiedStaffLoginClaims } from "./staff-login-bindings";
 
 interface AccessClaims {
   sub?: unknown;
@@ -9,6 +10,10 @@ interface AccessClaims {
   exp?: unknown;
   common_name?: unknown;
   service_token_status?: unknown;
+  service_token_id?: unknown;
+  iss?: unknown;
+  iat?: unknown;
+  aud?: unknown;
 }
 
 export interface VerifiedStaffIdentity {
@@ -36,6 +41,54 @@ function isHumanAccessIdentity(claims: AccessClaims): claims is AccessClaims & {
     claims.common_name === undefined && claims.service_token_status !== true;
 }
 
+function staffLoginClaims(claims: AccessClaims, env: Env): VerifiedStaffLoginClaims {
+  const audiences = typeof claims.aud === "string" ? [claims.aud] : claims.aud;
+  const now = Math.floor(Date.now() / 1000);
+  if (!isHumanAccessIdentity(claims) || claims.service_token_id !== undefined
+    || claims.sub !== claims.sub.trim() || claims.exp > 253_402_300_799
+    || claims.iss !== env.TEAM_DOMAIN.replace(/\/$/, "")
+    || !Array.isArray(audiences) || audiences.length !== 1 || audiences[0] !== env.OPERATIONS_AUD
+    || typeof claims.iat !== "number" || !Number.isSafeInteger(claims.iat)
+    || claims.iat < 0 || claims.iat > now || claims.iat >= claims.exp) {
+    throw new HTTPException(401, { message: "A current human Cloudflare Access sign-in is required" });
+  }
+  return { issuer: claims.iss, email: claims.email.trim().toLowerCase(), subject: claims.sub.trim(),
+    expiresAt: claims.exp, issuedAt: claims.iat };
+}
+
+/** Used only by the exact login-link claim route; this verifies Access without inventing staff access. */
+export async function verifyStaffLoginClaims(request: Request, env: Env): Promise<VerifiedStaffLoginClaims> {
+  return staffLoginClaims(await verifyAccessClaims(request, env), env);
+}
+
+/** Canonical staff authority and the actual alternate credential are deliberately separate. */
+async function activeAlternateStaff(env: Env, claims: AccessClaims): Promise<StaffPrincipal> {
+  try {
+    const resolved = await resolveVerifiedStaffLogin(env.OPS_DB, staffLoginClaims(claims, env));
+    if (!resolved || resolved.proof.kind !== "alternate")
+      throw new HTTPException(403, { message: "This email is not set up for Ledge Top. Sign in with your Operations staff email or contact your administrator." });
+    await requireNativeAdmissionAfterCutover(env.OPS_DB.withSession("first-primary"), resolved.staff.id,
+      resolved.staff.email, resolved.staff.accessSubject);
+    if (!await assertCurrentStaffLogin(env.OPS_DB, resolved.proof))
+      throw new HTTPException(403, { message: "This linked sign-in is no longer active" });
+    await env.OPS_DB.prepare("UPDATE staff_users SET last_seen_at=datetime('now') WHERE id=? AND status='active' AND access_subject=?")
+      .bind(resolved.staff.id, resolved.staff.accessSubject).run();
+    return { ...resolved.staff, accessExpiresAt: resolved.proof.expiresAt, verifiedLogin: resolved.proof };
+  } catch (error) {
+    if (error instanceof HTTPException) throw error;
+    throw new HTTPException(503, { message: "Operations sign-in is temporarily unavailable" });
+  }
+}
+
+/** Recheck alternate credentials after upstream waits, before returning sensitive data or grants. */
+export async function requireCurrentStaffLogin(env: Pick<Env, "OPS_DB">, principal: StaffPrincipal): Promise<void> {
+  if (!principal.verifiedLogin) return;
+  let current: boolean;
+  try { current = await assertCurrentStaffLogin(env.OPS_DB, principal.verifiedLogin); }
+  catch { throw new HTTPException(503, { message: "Operations sign-in verification is temporarily unavailable" }); }
+  if (!current) throw new HTTPException(403, { message: "This linked sign-in is no longer active" });
+}
+
 /** Once the reviewed native cohort is activated, a historical active bridge is
  * insufficient admission. Missing additive schema preserves the pre-cutover
  * reader only; malformed state or database failures never become admission. */
@@ -59,7 +112,7 @@ async function activeStaffForIdentity(env: Env, claims: AccessClaims & { sub: st
   const email = claims.email.trim().toLowerCase(); const subject = claims.sub.trim();
   const db = env.OPS_DB.withSession("first-primary");
   const user = await db.prepare("SELECT id,email,display_name,access_subject,project_alpha_user_id FROM staff_users WHERE email=? AND status='active'").bind(email).first<{ id: string; email: string; display_name: string; access_subject: string | null; project_alpha_user_id: string | null }>();
-  if (!user) throw new HTTPException(403, { message: "This email is not set up for Ledge Top. Sign in with your Operations staff email or contact your administrator." });
+  if (!user) return activeAlternateStaff(env, claims);
   if (user.access_subject && user.access_subject !== subject) throw new HTTPException(403, { message: "This staff account is bound to a different Access identity" });
   await requireNativeAdmissionAfterCutover(db, user.id, email, subject);
   if (!user.access_subject) {
@@ -88,6 +141,10 @@ export async function authenticateBoundStaffForViewerRenewal(request: Request, e
   const db = env.OPS_DB.withSession("first-primary");
   const user = await db.prepare("SELECT id,email,display_name,access_subject,project_alpha_user_id FROM staff_users WHERE email=? AND status='active'")
     .bind(email).first<{ id: string; email: string; display_name: string; access_subject: string | null; project_alpha_user_id: string | null }>();
+  if (!user) {
+    const principal = await activeAlternateStaff(env, claims);
+    return { principal, expiresAt: claims.exp };
+  }
   // Renewal must never trigger authenticateStaff's normal first-login subject
   // binding behavior. Require the existing immutable binding before updating
   // last-seen metadata or issuing any Viewer grant.

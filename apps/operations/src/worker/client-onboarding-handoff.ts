@@ -5,6 +5,7 @@ import { clientOnboardingIssuanceEvidence, issueClientOnboardingInvitation,
 import { hashClientOnboardingInvitationSecret } from "./client-onboarding-submissions";
 import { isNativeAccessSubject } from "./native-access-subject";
 import type { AuthenticatedNativeStaff } from "./native-staff-auth";
+import { assertCurrentStaffLogin, snapshotStaffLoginProof } from "./staff-login-bindings";
 
 export type ClientOnboardingKeyring = Readonly<{ activeKeyId: string; keys: Readonly<Record<string, string>> }>;
 export type ClientOnboardingRevelation = Readonly<{
@@ -56,7 +57,8 @@ function same(left: string, right: string): boolean {
   return hex(left, 64) && hex(right, 64) && timingSafeEqual(Buffer.from(left, "hex"), Buffer.from(right, "hex"));
 }
 function actor(value: unknown): AuthenticatedNativeStaff | null {
-  const wrapper = record(value, ["identity", "verifiedUntil"]);
+  const hasLogin = value !== null && typeof value === "object" && Object.hasOwn(value, "verifiedLogin");
+  const wrapper = record(value, hasLogin ? ["identity", "verifiedUntil", "verifiedLogin"] : ["identity", "verifiedUntil"]);
   const identity = wrapper && record(wrapper.identity,
     ["kind", "staffId", "verifiedAccessSubject", "email", "displayName", "profileVersion"]);
   if (!wrapper || !identity || identity.kind !== "native" || typeof identity.staffId !== "string" || !ID.test(identity.staffId)
@@ -65,7 +67,12 @@ function actor(value: unknown): AuthenticatedNativeStaff | null {
     || !identity.displayName.trim() || typeof identity.profileVersion !== "number"
     || !Number.isSafeInteger(identity.profileVersion) || identity.profileVersion < 1
     || !instant(wrapper.verifiedUntil) || Date.parse(wrapper.verifiedUntil) <= Date.now()) return null;
-  return { identity: identity as AuthenticatedNativeStaff["identity"], verifiedUntil: wrapper.verifiedUntil };
+  const login = hasLogin ? snapshotStaffLoginProof(wrapper.verifiedLogin) : undefined;
+  if (login !== undefined && (!login || login.kind !== "alternate" || login.staffId !== identity.staffId
+    || login.canonicalEmail !== identity.email || login.canonicalSubject !== identity.verifiedAccessSubject
+    || login.expiresAt * 1000 < Date.parse(wrapper.verifiedUntil))) return null;
+  return { identity: identity as AuthenticatedNativeStaff["identity"], verifiedUntil: wrapper.verifiedUntil,
+    ...(login ? { verifiedLogin: login } : {}) };
 }
 function baseRequest(value: unknown) {
   const row = record(value, ["commandId", "expiresAt", "targetClientRecordId", "scopes"]);
@@ -144,6 +151,7 @@ export async function issueClientOnboardingWithHandoff(database: D1Database, raw
     const authenticated = envelope && actor(envelope.authenticatedNativeStaff);
     const base = envelope && baseRequest(envelope.request);
     if (!authenticated || !base) throw Error();
+    if (authenticated.verifiedLogin && !await assertCurrentStaffLogin(database, authenticated.verifiedLogin)) throw Error();
     const find = async () => parseRow(await database.withSession("first-primary").prepare(`SELECT command_id,invitation_id,
       actor_staff_id,actor_access_subject,request_sha256,secret_sha256,expires_at,key_id,nonce_hex,ciphertext_hex,aad_sha256
       FROM client_onboarding_handoffs WHERE command_id=? AND actor_staff_id=? AND actor_access_subject=?`)
@@ -184,6 +192,7 @@ export async function revealClientOnboardingSecret(database: D1Database, raw: un
     const envelope = record(raw, ["authenticatedNativeStaff", "commandId"]);
     const authenticated = envelope && actor(envelope.authenticatedNativeStaff);
     if (!authenticated || typeof envelope?.commandId !== "string" || !UUID.test(envelope.commandId)) throw Error();
+    if (authenticated.verifiedLogin && !await assertCurrentStaffLogin(database, authenticated.verifiedLogin)) throw Error();
     const identity = authenticated.identity;
     const db = database.withSession("first-primary");
     const row = parseRow(await db.prepare(`SELECT handoff.command_id,handoff.invitation_id,handoff.actor_staff_id,
@@ -197,6 +206,7 @@ export async function revealClientOnboardingSecret(database: D1Database, raw: un
           envelope.commandId, identity.staffId, identity.verifiedAccessSubject).first());
     if (!row || Date.parse(row.expires_at) <= Date.now()) throw Error();
     const invitationSecret = await decrypt(row, ring);
+    if (authenticated.verifiedLogin && !await assertCurrentStaffLogin(database, authenticated.verifiedLogin)) throw Error();
     const revealId = crypto.randomUUID();
     const results = await db.batch([
       db.prepare(`INSERT INTO client_onboarding_reveal_consumptions
@@ -220,6 +230,7 @@ export async function revealClientOnboardingSecret(database: D1Database, raw: un
         .bind(revealId, row.command_id, revealId, identity.staffId, identity.verifiedAccessSubject),
     ]);
     if (results[0]?.meta.changes !== 1 || results[1]?.meta.changes !== 1) throw Error();
+    if (authenticated.verifiedLogin && !await assertCurrentStaffLogin(database, authenticated.verifiedLogin)) throw Error();
     return Object.freeze({ commandId: row.command_id, invitationId: row.invitation_id,
       expiresAt: row.expires_at, invitationSecret });
   } catch { return revealDenied(); }

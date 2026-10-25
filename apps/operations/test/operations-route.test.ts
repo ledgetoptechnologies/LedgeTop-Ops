@@ -96,6 +96,8 @@ describe("consolidated Operations routes", () => {
     ["/notifications", "notifications"],
     ["/operations/notifications", "notifications"],
     ["/configurations", "administration"],
+    ["/account", "account"],
+    ["/intel", "intel"],
   ] as const)("keeps %s outside the Operations route group", (pathname, page) => {
     expect(pathPage(pathname)).toBe(page);
   });

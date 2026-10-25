@@ -1777,6 +1777,7 @@ export function effectiveWorkspaceNotificationMutationGuardSql(
 export async function listPortalWorkspaces(
   env: Env,
   principal: VerifiedClientPrincipal,
+  options: { strictCapacity?: boolean } = {},
 ): Promise<PortalWorkspaceSummary[]> {
   if (!portalHierarchyV2Enabled(env)) return [];
   const identity = await resolveGlobalIdentity(env, principal);
@@ -1792,7 +1793,10 @@ export async function listPortalWorkspaces(
     ORDER BY w.display_name COLLATE NOCASE,w.id LIMIT 101`)
     .bind(identity.id)
     .all<WorkspaceRow>();
-  if (candidates.results.length > 100) return [];
+  if (candidates.results.length > 100) {
+    if (options.strictCapacity) throw new HTTPException(503, { message: "Workspace discovery capacity exceeded" });
+    return [];
+  }
   const authorized: PortalWorkspaceSummary[] = [];
   for (const workspace of candidates.results) {
     if (await activeClientAuthorityWorkspaceClaim(env.DELIVERY_DB, workspace.id)) continue;
@@ -1819,7 +1823,10 @@ export async function listPortalWorkspaces(
         AND w.status='active' AND ${portalRootAccessAllowedSql(env.CLIENT_PORTAL_ROOT_ACCESS_POLICY_ENABLED === 'true', 'w')} AND w.legacy_account_id IS NULL
         AND ${portalSourceReadableSql('w.project_alpha_source_id')} ORDER BY w.id LIMIT 33`)
       .bind(identity.id).all<{id:string}>();
-    if (native.results.length > 32) return [];
+    if (native.results.length > 32) {
+      if (options.strictCapacity) throw new HTTPException(503, { message: "Workspace discovery capacity exceeded" });
+      return [];
+    }
     for (const row of native.results) {
       const context = await resolveNativePortalWorkspaceReadContext(env, principal, row.id);
       if (context) authorized.push({id:context.workspaceId,rootType:context.rootType,rootPublicId:context.rootPublicId,

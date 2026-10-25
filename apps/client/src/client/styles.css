@@ -2136,3 +2136,43 @@
   .portal-account-menu .account-menu-trigger { width: 44px; height: 44px; padding: 3px; border-color: #ffffff30; background: #1c252c; }
 }
 .portal-finance-overdue { color: var(--red); }
+
+/* Shared 3D work: one flat list of Viewer tasks shared directly with the client. */
+.shared-viewer-work { min-width: 0; }
+.shared-viewer-work-list { list-style: none; margin: 0; padding: 0; display: grid; }
+.shared-viewer-work-list li { display: flex; justify-content: space-between; align-items: center; gap: 1rem; padding: .8rem 0; border-top: 1px solid var(--line, #e3e8ec); min-width: 0; }
+.shared-viewer-work-list li:first-child { border-top: 0; }
+.shared-viewer-work-list li > div { display: grid; gap: .2rem; min-width: 0; }
+.shared-viewer-work-list strong, .shared-viewer-work-list span { overflow-wrap: anywhere; }
+.shared-viewer-work-list span { color: var(--ink, #172b3a); }
+.shared-viewer-work-list small { color: var(--muted, #5d6873); overflow-wrap: anywhere; }
+.shared-viewer-work-list .button { flex: none; min-height: 44px; display: inline-flex; align-items: center; }
+.shared-viewer-work-problem, .shared-viewer-work-more { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem 1rem; margin: 0 0 .75rem; }
+.shared-viewer-work-problem p, .shared-viewer-work-more p { margin: 0; }
+.shared-viewer-work-problem button, .shared-viewer-work-more button { min-height: 44px; }
+.shared-viewer-work-more { margin: .75rem 0 0; }
+@media (max-width: 640px) {
+  .shared-viewer-work-list li { flex-direction: column; align-items: stretch; }
+  .shared-viewer-work-list .button { justify-content: center; white-space: normal; }
+}
+
+/* One-step request: pick a service, say what's needed, send. */
+.portal-success-notice { margin: 0; padding: .8rem 1rem; border-radius: 8px; background: var(--orange-soft); color: var(--ink); font-weight: 700; }
+.quick-request-form { display: grid; gap: 1rem; }
+.quick-request-services { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 16rem), 1fr)); gap: .65rem; margin: 0; padding: 0; border: 0; min-width: 0; }
+.quick-request-services legend { padding: 0; margin-bottom: .6rem; font-weight: 800; font-size: 1rem; }
+.quick-request-service { display: flex; align-items: flex-start; gap: .7rem; min-height: 56px; padding: .85rem 1rem; border: 1px solid var(--line); border-radius: var(--radius-md); background: #fff; cursor: pointer; }
+.quick-request-service:hover, .quick-request-service.is-selected { border-color: var(--orange); background: var(--orange-soft); }
+.quick-request-service input { margin-top: .2rem; accent-color: var(--orange); }
+.quick-request-service > span { display: grid; gap: .2rem; min-width: 0; overflow-wrap: anywhere; }
+.quick-request-service small { color: var(--muted); line-height: 1.4; }
+.quick-request-details { display: grid; gap: .85rem; }
+.quick-request-details > label { display: grid; gap: .35rem; font-weight: 700; }
+.quick-request-map { display: grid; gap: .5rem; }
+.quick-request-map > p { margin: 0; font-weight: 700; }
+.quick-request-note { margin: 0; color: var(--muted); font-size: .88rem; }
+.quick-request-problem { display: grid; gap: .5rem; justify-items: start; padding: .8rem 1rem; border-radius: 8px; background: #fff4ef; }
+.quick-request-problem p { margin: 0; }
+.quick-request-actions { display: flex; flex-wrap: wrap; gap: .6rem; }
+.quick-request-actions > button { min-height: 44px; }
+@media (max-width: 560px) { .quick-request-actions > button { flex: 1 1 100%; } }

@@ -1,5 +1,6 @@
 import { parseDuplicateFreeJson } from "./bounded-json";
 import { isNativeAccessSubject } from "./native-access-subject";
+import { snapshotStaffLoginProof, type StaffLoginProof } from "./staff-login-bindings";
 
 /** Internal only. A caller must obtain this proof from native root authority,
  * never from a request body. No HTTP route is mounted by this module. */
@@ -7,6 +8,8 @@ export type EmployeeReadProof = Readonly<{
   gatewayId: string; rootId: string; rootGeneration: number; rootFingerprint: string;
   staffId: string; accessSubject: string; admissionVersion: number; profileVersion: number;
   grantId: string; grantGeneration: number; verifiedUntil: string;
+  /** Private request provenance; never included in the signed gateway body. */
+  verifiedLogin?: StaffLoginProof;
 }>;
 export type EmployeeReadSelection = Readonly<{
   operation: "list" | "manifest" | "content"; path: string;
@@ -40,7 +43,10 @@ export function canonicalEmployeeReadPath(value: string, allowRoot: boolean): bo
 
 function inputSnapshot(proof: EmployeeReadProof, selection: EmployeeReadSelection,
   config: EmployeeGatewayConfiguration) {
-  const p = Object.freeze({ ...proof }), r = selection.range;
+  const login = Object.hasOwn(proof, "verifiedLogin") ? snapshotStaffLoginProof(proof.verifiedLogin) : undefined;
+  const p = Object.freeze({ ...proof, ...(login ? { verifiedLogin: login } : {}) }), r = selection.range;
+  if (login !== undefined && (!login || login.kind !== "alternate" || login.staffId !== p.staffId
+    || login.canonicalSubject !== p.accessSubject || login.expiresAt * 1000 < Date.parse(p.verifiedUntil))) throw Error();
   const s = Object.freeze({ operation: selection.operation, path: selection.path,
     expectedSha256: selection.expectedSha256, range: r === null ? null : Object.freeze({ start: r.start, end: r.end }),
     cursor: selection.cursor ?? null, snapshotId: selection.snapshotId ?? null });

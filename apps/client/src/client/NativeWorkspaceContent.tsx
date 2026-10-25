@@ -25,6 +25,10 @@ const featureLabels: Record<NativeWorkspaceFeatureKey, string> = {
   directory: "Projects and directory", deliveries: "Delivery files", serviceRequests: "Service requests", feedback: "Feedback",
   models: "3D models", team: "Team members", billing: "Billing",
 };
+const pageHeadings: Partial<Record<ClientPortalPage, string>> = {
+  dashboard: "Your projects", projects: "Your projects", project: "Project", deliveries: "Your files",
+  account: "Your account",
+};
 const stateLabels: Record<NativeWorkspaceFeatureState, string> = {
   available: "Ready", not_in_access: "Not in access", not_supported: "Not connected", temporarily_unavailable: "Temporarily unavailable",
 };
@@ -58,13 +62,15 @@ function FeatureReadiness({features}: {features: NativeWorkspaceFeatureReadiness
   </Card>;
 }
 
-export function NativeWorkspaceContent({ context, page, projectId, feedbackId, onInvalid, renderFiles, openProject, renderTeam, renderRequests, renderModels, renderDashboardSupplement }: {
+export function NativeWorkspaceContent({ context, page, projectId, feedbackId, onInvalid, renderFiles, openProject, renderTeam, renderRequests, renderModels, renderDashboardSupplement, renderSharedWork }: {
   context: NativePortalBootstrap; page: ClientPortalPage; projectId: string | null; feedbackId?: string | null;
   onInvalid: (caught: unknown) => void; renderFiles: (options: NativeFileBrowserOptions) => ReactNode; openProject: (id: string) => void;
   renderTeam?: () => ReactNode;
   renderRequests?: (projects: PortalProject[], projectId?: string) => ReactNode;
   renderModels?: (projectId: string) => ReactNode;
   renderDashboardSupplement?: () => ReactNode;
+  /** Shared 3D work, listed with delivery folders so clients find all shared work in one place. */
+  renderSharedWork?: () => ReactNode;
 }) {
   const [locationSearch, setLocationSearch] = useState(location.search);
   const [hierarchy, setHierarchy] = useState<NativeHierarchy["entries"]>([]);
@@ -143,9 +149,14 @@ export function NativeWorkspaceContent({ context, page, projectId, feedbackId, o
     (page === "feedback" && !context.capabilities.feedback) || (page === "project" && projectTab === "models" && !context.capabilities.viewer);
   const unavailableFeature: NativeWorkspaceFeatureKey = page === "feedback" ? "feedback"
     : page === "project" && params.get("tab") === "models" ? "models" : "serviceRequests";
+  // Stored account names can be internal source labels, so pages use plain headings instead.
+  const projectName = page === "project" && projectId ? entryLabels.get(`project:${projectId}`) : undefined;
+  const heading = projectName ?? pageHeadings[page] ?? "Your account";
+  // Requests and feedback render their own page heading.
+  const embeddedHeading = page === "requests" || page === "request-new" || page === "feedback" || (page === "project" && projectTab === "requests");
 
   return <section className="native-workspace" aria-label="Client account">
-    <header className="portal-welcome"><span className="eyebrow">Client account</span><h1>{context.workspace.displayName}</h1></header>
+    <header className="portal-welcome">{!embeddedHeading && <h1>{heading}</h1>}</header>
     {unsupportedRoute ? <><Card title="Feature unavailable"><p>{featureDetail(unavailableFeature, context.features)}</p></Card><FeatureReadiness features={context.features} /></> :
       ((page === "requests" || page === "request-new") || (page === "project" && projectTab === "requests")) && context.capabilities.requestV2 && renderRequests
         ? renderRequests(requestProjects, page === "project" ? projectId ?? undefined : undefined)
@@ -154,7 +165,7 @@ export function NativeWorkspaceContent({ context, page, projectId, feedbackId, o
       <Card title={page === "dashboard" ? "Directory" : page === "project" ? "Project" : "Projects"}>
         {!context.capabilities.directoryRead ? <p>The directory is not included in your current access.</p> : <>
           {hierarchyError && <div role="alert"><p>{hierarchyError}</p><button className="button-ghost" onClick={() => hierarchyCursor ? void fetchHierarchy(hierarchyCursor) : setHierarchyRetry(value => value + 1)}>Retry directory</button></div>}
-          {entries.length > 0 && <ul className="native-workspace-list">{entries.map(entry => <li key={`${entry.type}:${entry.publicId}`}><div><strong>{entry.displayName}</strong><small>{entry.type.replaceAll("_", " ")}{parentLabel(entry) ? ` · ${parentLabel(entry)}` : ""}</small></div>{entry.type === "project" && <div>{page !== "project" && <a className="button button-ghost" href={workspacePath(clientProjectPath(entry.publicId), context.workspace.id)} onClick={event => { if (!event.ctrlKey && !event.metaKey && !event.shiftKey && event.button === 0) { event.preventDefault(); openProject(entry.publicId); } }}>Open project<span className="visually-hidden">: {entry.displayName}</span></a>}{context.capabilities.feedback && <LeaveFeedback target={{kind:'project',projectId:entry.publicId}} label={entry.displayName} compact nativeWorkspaceId={context.workspace.id} />}</div>}</li>)}</ul>}
+          {entries.length > 0 && <ul className="native-workspace-list">{entries.map(entry => <li key={`${entry.type}:${entry.publicId}`}><div><strong>{entry.displayName}</strong><small>{entry.type.replaceAll("_", " ")}{parentLabel(entry) ? ` · ${parentLabel(entry)}` : ""}</small></div>{entry.type === "project" && <div>{page !== "project" && <a className="button button-ghost" href={workspacePath(clientProjectPath(entry.publicId), context.workspace.id)} onClick={event => { if (!event.ctrlKey && !event.metaKey && !event.shiftKey && event.button === 0) { event.preventDefault(); openProject(entry.publicId); } }}>Open project<span className="visually-hidden">: {entry.displayName}</span></a>}{context.capabilities.viewer && renderModels && <a className="button button-ghost" href={workspacePath(`${clientProjectPath(entry.publicId)}?tab=models`, context.workspace.id)}>3D models<span className="visually-hidden">: {entry.displayName}</span></a>}{context.capabilities.feedback && <LeaveFeedback target={{kind:'project',projectId:entry.publicId}} label={entry.displayName} compact nativeWorkspaceId={context.workspace.id} />}</div>}</li>)}</ul>}
           {hierarchyLoading && <Loading />}
           {!hierarchyLoading && !hierarchyError && entries.length === 0 && <EmptyState title={hierarchyCursor ? "No matching records loaded yet" : page === "project" ? "Project unavailable" : "No directory entries shared"} detail={hierarchyCursor ? "Continue through the accessible directory pages to check more records." : "Only records included in your current access are shown."} />}
           {hierarchyCursor && <><p>Showing loaded records only. More accessible directory pages are available.</p><button className="button-ghost" disabled={hierarchyLoading} onClick={() => void fetchHierarchy(hierarchyCursor)}>Load more directory records</button></>}
@@ -162,7 +173,7 @@ export function NativeWorkspaceContent({ context, page, projectId, feedbackId, o
         {context.capabilities.deliveryView && <a className="button button-orange" href={workspacePath("/portal/deliveries", context.workspace.id)}>Browse deliveries</a>}
       </Card>
       {page === "dashboard" && <><FeatureReadiness features={context.features} />{renderDashboardSupplement?.()}</>}
-    </> : page === "deliveries" ? !context.capabilities.deliveryView ? <Card title="Deliveries unavailable"><p>Delivery viewing is not included in your current access.</p></Card> : <>
+    </> : page === "deliveries" ? !context.capabilities.deliveryView ? <><Card title="Delivery folders unavailable"><p>Delivery folders are not included in your current access.</p></Card>{renderSharedWork?.()}</> : <>
       {(folderId || linkedFile) && <Card title="Delivery files"><button className="button-ghost" onClick={() => navigateFolder(null)}>All delivery folders</button>{renderFiles({ folderId, load: filesLoad, loadExactFile: exactLoad, onFolderChange: navigateFolder, onLinkedFileChange: syncLinkedFile })}</Card>}
       {!folderId && !linkedFile && <Card title="Shared delivery folders">
         <p>Folders explicitly shared with you for this client.</p>
@@ -172,6 +183,7 @@ export function NativeWorkspaceContent({ context, page, projectId, feedbackId, o
         {!deliveryLoading && !deliveryError && targets.length === 0 && <p>{cursor ? "No folders on this page. Continue to check the remaining shared folders." : "No delivery folders are currently shared with you."}</p>}
         {cursor && <button className="button-ghost" disabled={deliveryLoading} onClick={() => void fetchDeliveries(cursor)}>Load more delivery folders</button>}
       </Card>}
+      {!folderId && !linkedFile && renderSharedWork?.()}
     </> : null}
   </section>;
 }

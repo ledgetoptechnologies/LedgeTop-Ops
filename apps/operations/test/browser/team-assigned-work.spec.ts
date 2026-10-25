@@ -142,7 +142,7 @@ test("Team lazily exposes only visible assigned work and opens its pinned-SOP br
   await page.keyboard.press("Enter");
 
   await expect(page).toHaveURL(/\/operations\?brief=operation-1$/);
-  await expect(page.getByText("LTDS brief v2")).toBeVisible();
+  await expect(page.getByText("Ledge Top brief v2")).toBeVisible();
   const quickSop = page.getByRole("link", { name: "Mapping Flight SOP Revision 3" });
   await quickSop.focus();
   await page.keyboard.press("Enter");

@@ -28,6 +28,14 @@ export const NATIVE_DELIVERY_APP_PORTAL_PRODUCTION_PROFILE = JSON.stringify({
   privateRequestOrigins: ["https://portal.ledgetop.app", "https://portal.ledgetopdroneservices.com"],
 });
 
+/** Separate public delivery origin with the same exact physical deployment.
+ * Retain the former private byte origin while existing portal sessions drain.
+ * This declaration does not publish settings or retire any host. */
+export const NATIVE_DELIVERY_APP_DELIVERY_PRODUCTION_PROFILE = JSON.stringify({
+  ...JSON.parse(NATIVE_DELIVERY_APP_PORTAL_PRODUCTION_PROFILE),
+  publicShareOrigin: "https://delivery.ledgetop.app",
+});
+
 export type NativeDeliveryDeploymentEnv = Readonly<{
   ENVIRONMENT?: string;
   EXPECTED_HOST?: string;
@@ -48,16 +56,18 @@ export function nativeDeliveryDeploymentEnabled(env: NativeDeliveryDeploymentEnv
     return surface === "rpc" || ["https://client-staging.ledgetopdroneservices.com",
       "https://portal-staging.ledgetopdroneservices.com"].includes(env.CLIENT_PORTAL_ORIGIN ?? "");
   }
+  const deliveryCanonical = env.PUBLIC_SHARE_ORIGIN === "https://delivery.ledgetop.app";
+  const publicOrigin = deliveryCanonical ? "https://delivery.ledgetop.app" : "https://portal.ledgetopdroneservices.com";
   const expectedProfile = env.CLIENT_PORTAL_ORIGIN === "https://portal.ledgetop.app"
-    ? NATIVE_DELIVERY_APP_PORTAL_PRODUCTION_PROFILE
+    ? deliveryCanonical ? NATIVE_DELIVERY_APP_DELIVERY_PRODUCTION_PROFILE : NATIVE_DELIVERY_APP_PORTAL_PRODUCTION_PROFILE
     : env.CLIENT_PORTAL_ORIGIN === "https://portal.ledgetopdroneservices.com"
-    ? NATIVE_DELIVERY_PORTAL_PRODUCTION_PROFILE
-    : env.CLIENT_PORTAL_ORIGIN === "https://client.ledgetopdroneservices.com" ? NATIVE_DELIVERY_PRODUCTION_PROFILE : null;
+    ? deliveryCanonical ? null : NATIVE_DELIVERY_PORTAL_PRODUCTION_PROFILE
+    : env.CLIENT_PORTAL_ORIGIN === "https://client.ledgetopdroneservices.com" && !deliveryCanonical ? NATIVE_DELIVERY_PRODUCTION_PROFILE : null;
   return env.ENVIRONMENT === "production"
     && expectedProfile !== null && env.CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_DEPLOYMENT_PROFILE === expectedProfile
-    && env.EXPECTED_HOST === "portal.ledgetopdroneservices.com"
-    && env.PUBLIC_BASE_URL === "https://portal.ledgetopdroneservices.com"
-    && env.PUBLIC_SHARE_ORIGIN === "https://portal.ledgetopdroneservices.com";
+    && env.EXPECTED_HOST === new URL(publicOrigin).host
+    && env.PUBLIC_BASE_URL === publicOrigin
+    && env.PUBLIC_SHARE_ORIGIN === publicOrigin;
 }
 
 /** The migration profile pins both private browser origins. Arbitrary
@@ -66,7 +76,8 @@ export function nativeDeliveryRequestOriginAllowed(env: NativeDeliveryDeployment
   if (!nativeDeliveryDeploymentEnabled(env)) return false;
   let origin: string;
   try { origin = new URL(requestUrl).origin; } catch { return false; }
-  if (env.CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_DEPLOYMENT_PROFILE === NATIVE_DELIVERY_APP_PORTAL_PRODUCTION_PROFILE) {
+  if ([NATIVE_DELIVERY_APP_PORTAL_PRODUCTION_PROFILE, NATIVE_DELIVERY_APP_DELIVERY_PRODUCTION_PROFILE]
+    .includes(env.CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_DEPLOYMENT_PROFILE ?? "")) {
     const configured = env.CLIENT_PORTAL_ORIGINS?.split(",").map(value => value.trim()) ?? [];
     if (!configured.length || configured.length > 4 || new Set(configured).size !== configured.length
       || !configured.includes(env.CLIENT_PORTAL_ORIGIN ?? "")) return false;

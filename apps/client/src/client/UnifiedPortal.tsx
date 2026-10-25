@@ -2,9 +2,11 @@ import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Card, EmptyState, Skeleton, StatusPill } from "@ltds/ui";
 import type { PortalServiceRequest, PortalWorkspace } from "./portal-api";
 import {
-  AREA_TEXT, accountArea, loadUnifiedPortal, showsClientName, unifiedAccount, unifiedAccountSupported,
-  type AccountArea, type UnifiedAccount, type UnifiedAccountResult, type UnifiedProject, type UnifiedRequest,
+  AREA_TEXT, accountArea, loadUnifiedPortal, unifiedAccount, unifiedAccountSupported,
+  type UnifiedAccountResult, type UnifiedProject, type UnifiedRequest,
 } from "./unified-portal";
+import { UnifiedDeliveries } from "./UnifiedDeliveries";
+import { QuickRequest } from "./QuickRequest";
 
 export type UnifiedPage = "dashboard" | "projects" | "requests" | "deliveries" | "feedback" | "account";
 export const UNIFIED_PAGES: ReadonlySet<string> = new Set<UnifiedPage>(["dashboard", "projects", "requests", "deliveries", "feedback", "account"]);
@@ -21,18 +23,24 @@ function byUpdated(left: UnifiedRequest, right: UnifiedRequest) {
   return right.request.updatedAt.localeCompare(left.request.updatedAt);
 }
 
-export function UnifiedPortal({ page, workspaces, openInAccount, navigate, renderStatus, supplement }: {
+export function UnifiedPortal({ page, workspaces, openInAccount, navigate, renderStatus, supplement, mapboxPublicToken = null }: {
   page: UnifiedPage;
   workspaces: PortalWorkspace[];
   openInAccount: OpenInAccount;
   navigate: (page: UnifiedPage) => void;
   renderStatus: (request: PortalServiceRequest) => ReactNode;
   supplement?: ReactNode;
+  mapboxPublicToken?: string | null;
 }) {
   const accounts = useMemo(() => workspaces.filter(unifiedAccountSupported).map(unifiedAccount), [workspaces]);
+  // Stable across renders so the delivery lists load once per account, not on every refresh of this page.
+  const accountWorkspaces = useMemo(() => accounts.map(account => account.workspace), [accounts]);
   const [results, setResults] = useState<Map<string, UnifiedAccountResult>>(() => new Map());
   const [retry, setRetry] = useState(0);
   const [choosingRequest, setChoosingRequest] = useState(false);
+  // The one-step form is tried first; only a portal without it falls back to choosing per account.
+  const [quickRequest, setQuickRequest] = useState(true);
+  const [notice, setNotice] = useState<string | null>(null);
   const generation = useRef(0);
 
   useEffect(() => {
@@ -76,7 +84,6 @@ export function UnifiedPortal({ page, workspaces, openInAccount, navigate, rende
     };
   }, [accounts, retry]);
 
-  const withClient = showsClientName(accounts);
   const ready = [...results.values()].filter(result => result.status === "ready");
   const failed = [...results.values()].filter((result): result is Extract<UnifiedAccountResult, { status: "error" }> => result.status === "error");
   const loading = results.size < accounts.length;
@@ -85,19 +92,24 @@ export function UnifiedPortal({ page, workspaces, openInAccount, navigate, rende
   const projects = ready.flatMap(result => result.projects).sort(byName);
   const requests = ready.flatMap(result => result.requests).sort(byUpdated);
   const requestAccounts = ready.filter(result => result.canRequest).map(result => result.account);
-  const areaOf = (account: UnifiedAccount) => AREA_TEXT[accountArea(account)];
-  /** Only shown when the same kind of work spans several client accounts, so the client can tell them apart. */
-  const sharedArea = (list: UnifiedAccount[], account: UnifiedAccount) =>
-    list.filter(other => accountArea(other) === accountArea(account)).length > 1;
+  // The chooser asks what kind of help is needed; one choice per kind of service, never one per business or account.
+  const requestChoices = requestAccounts.filter((account, index) => requestAccounts.findIndex(other => accountArea(other) === accountArea(account)) === index);
 
   const startRequest = () => {
-    if (requestAccounts.length === 1) openInAccount(requestAccounts[0]!.workspace.id, "/portal/requests/new");
+    setNotice(null);
+    if (!quickRequest && requestChoices.length === 1) openInAccount(requestChoices[0]!.workspace.id, "/portal/requests/new");
     else setChoosingRequest(true);
   };
-  const clientOf = (account: UnifiedAccount) => withClient ? account.clientName : null;
-
+  const requestSent = () => {
+    setChoosingRequest(false);
+    setNotice("Request sent. Ledge Top will review it shortly.");
+    setRetry(value => value + 1);
+    navigate("requests");
+  };
+  // One Ledge Top portal: no business, division or account names anywhere, even across several accounts.
   const problems = failed.length > 0 && <div className="unified-portal-problems" role="alert">
-    {failed.map(result => <p key={result.account.workspace.id}><strong>{result.account.clientName}</strong> couldn’t be loaded. {result.message}</p>)}
+    <p>Some of your work couldn’t be loaded.</p>
+    {[...new Set(failed.map(result => result.message).filter(Boolean))].map(message => <p key={message}>{message}</p>)}
     <button type="button" className="button-ghost" onClick={() => setRetry(value => value + 1)}>Try again</button>
   </div>;
   const loadingNote = loading && <Skeleton variant="list" rows={3} label="Loading your projects and requests…" />;
@@ -105,8 +117,7 @@ export function UnifiedPortal({ page, workspaces, openInAccount, navigate, rende
   const projectCards = (items: UnifiedProject[]) => <div className="portal-project-grid">
     {items.map(item => <button key={item.key} type="button" className="portal-project-card ltds-card"
       onClick={() => openInAccount(item.account.workspace.id, `/portal/projects/${encodeURIComponent(item.projectId)}`)}>
-      <div>{clientOf(item.account) && <span className="portal-project-ref unified-portal-business">{clientOf(item.account)}</span>}
-        {item.status && <StatusPill tone="success">{item.status === "active" ? "Active" : item.status}</StatusPill>}</div>
+      <div>{item.status && <StatusPill tone="success">{item.status === "active" ? "Active" : item.status}</StatusPill>}</div>
       <h2>{item.projectName}</h2>
       <span className="portal-project-link">Open project →</span>
     </button>)}
@@ -114,38 +125,41 @@ export function UnifiedPortal({ page, workspaces, openInAccount, navigate, rende
   const requestRows = (items: UnifiedRequest[]) => <ul className="unified-portal-requests">
     {items.map(item => <li key={item.key}>
       <div><strong>{item.request.title}</strong>
-        <small>{[clientOf(item.account), item.projectName, `Updated ${new Date(item.request.updatedAt).toLocaleDateString()}`].filter(Boolean).join(" · ")}</small></div>
+        <small>{[item.projectName, `Updated ${new Date(item.request.updatedAt).toLocaleDateString()}`].filter(Boolean).join(" · ")}</small></div>
       <div className="unified-portal-request-actions">{renderStatus(item.request)}
         <button type="button" className="button-ghost button-small" onClick={() => openInAccount(item.account.workspace.id, "/portal/requests")}>View</button></div>
     </li>)}
   </ul>;
   // Ask what the client needs, not which business: the choice decides where the request goes.
-  const requestChooser = choosingRequest && <Card title="What do you need help with?" className="unified-portal-chooser">
+  const requestChooser = choosingRequest && quickRequest ? <QuickRequest mapboxPublicToken={mapboxPublicToken}
+    onSubmitted={requestSent} onCancel={() => setChoosingRequest(false)} onUnavailable={() => {
+      setQuickRequest(false);
+      if (requestChoices.length === 1) { setChoosingRequest(false); openInAccount(requestChoices[0]!.workspace.id, "/portal/requests/new"); }
+    }} /> : choosingRequest && <Card title="What do you need help with?" className="unified-portal-chooser">
     <div className="unified-portal-need-list">
-      {requestAccounts.map(account => <button key={account.workspace.id} type="button" className="unified-portal-need"
+      {requestChoices.map(account => <button key={account.workspace.id} type="button" className="unified-portal-need"
         onClick={() => openInAccount(account.workspace.id, "/portal/requests/new")}>
-        <AreaIcon area={accountArea(account)} />
-        <span><strong>{areaOf(account).need}</strong><small>{areaOf(account).needDetail}</small>
-          {sharedArea(requestAccounts, account) && <small className="unified-portal-need-client">For {account.clientName}</small>}</span>
+        <span><strong>{AREA_TEXT[accountArea(account)].need}</strong><small>{AREA_TEXT[accountArea(account)].needDetail}</small></span>
       </button>)}
     </div>
     <button type="button" className="portal-text-action" onClick={() => setChoosingRequest(false)}>Cancel</button>
   </Card>;
-  const areaDirectory = (title: string, detail: string, path: string, action: string, heading: (account: UnifiedAccount) => string) => <>
-    <section className="portal-page-heading"><span className="eyebrow">Client portal</span><h1>{title}</h1><p>{detail}</p></section>
-    <div className="unified-portal-account-list">
-      {accounts.map(account => <Card key={account.workspace.id} className="unified-portal-area">
-        <AreaIcon area={accountArea(account)} />
-        <strong>{heading(account)}</strong>
-        {sharedArea(accounts, account) && <p>{account.clientName}</p>}
-        <button type="button" className="button-orange" onClick={() => openInAccount(account.workspace.id, path)}>{action}</button>
-      </Card>)}
-    </div>
+  const heading = (title: string, detail: string) => <section className="portal-page-heading"><span className="eyebrow">Client portal</span><h1>{title}</h1><p>{detail}</p></section>;
+  /** One neutral card that opens the first account's page. */
+  const single = (title: string, detail: string, path: string, card: string, action: string) => <>
+    {heading(title, detail)}
+    {accounts[0] && <Card className="unified-portal-area"><strong>{card}</strong>
+      <button type="button" className="button-orange" onClick={() => openInAccount(accounts[0]!.workspace.id, path)}>{action}</button></Card>}
+    {supplement}
   </>;
 
-  if (page === "deliveries") return areaDirectory("Deliveries", "Files and data we’ve delivered to you.", "/portal/deliveries", "Open deliveries", account => areaOf(account).deliveries);
-  if (page === "feedback") return areaDirectory("Feedback", "Tell us what’s working and what to change.", "/portal/feedback", "Give feedback", account => areaOf(account).feedback);
-  if (page === "account") return areaDirectory("Account", "Your profile, team and sign-in.", "/portal/account", "Open account settings", account => account.clientName);
+  if (page === "deliveries") return <>
+    {heading("Deliveries", "Files and data we’ve delivered to you.")}
+    <UnifiedDeliveries workspaces={accountWorkspaces} openInAccount={openInAccount} />
+    {supplement}
+  </>;
+  if (page === "feedback") return single("Feedback", "Tell us what’s working and what to change.", "/portal/feedback", "Your feedback", "Give feedback");
+  if (page === "account") return single("Account", "Your profile, team and sign-in.", "/portal/account", "Account settings", "Open account settings");
 
   if (page === "projects") return <>
     <section className="portal-page-heading"><span className="eyebrow">Projects</span><h1>Projects</h1>
@@ -159,6 +173,7 @@ export function UnifiedPortal({ page, workspaces, openInAccount, navigate, rende
       <div><span className="eyebrow">Requests</span><h1>Service requests</h1><p>Everything you’ve asked us for, and where it stands.</p></div>
       {requestAccounts.length > 0 && <button type="button" className="button-orange" onClick={startRequest}>New request</button>}
     </section>
+    {notice && <p className="portal-success-notice" role="status">{notice}</p>}
     {requestChooser}{problems}{loadingNote}
     {requests.length > 0 && <RequestProgress requests={requests} />}
     <Card title="Request history">{!loading && requests.length === 0 ? <EmptyState title="No requests yet" detail="Requests you submit will appear here." /> : requestRows(requests)}</Card>
@@ -207,14 +222,6 @@ function OverviewTile({ icon, value, label, action, onClick }: { icon: TileIcon;
   </button>;
 }
 
-const AREA_PATHS: Record<AccountArea, string> = {
-  drone: "M5 5h4M15 5h4M7 5v3M17 5v3M8 10h8l1.5 4h-11zM9 14l-1 4M15 14l1 4",
-  web: "M3 5h18v12H3zM3 9h18M8 21h8M12 17v4",
-  general: "M12 3l9 5-9 5-9-5zM3 13l9 5 9-5",
-};
-function AreaIcon({ area }: { area: AccountArea }) {
-  return <span className={`unified-portal-area-icon unified-portal-area-${area}`} aria-hidden="true"><svg viewBox="0 0 24 24"><path d={AREA_PATHS[area]} /></svg></span>;
-}
 
 const STAGES = [
   { key: "received", label: "Received", match: ["submitted"] },

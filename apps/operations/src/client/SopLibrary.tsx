@@ -167,9 +167,9 @@ function formatDate(value?: string | null): string {
 }
 
 function authorName(value?: SopAuthor | string): string {
-  if (!value) return "LTDS Operations";
+  if (!value) return "Ledge Top Operations";
   if (typeof value === "string") return value;
-  return value.displayName || value.email || "LTDS Operations";
+  return value.displayName || value.email || "Ledge Top Operations";
 }
 
 function tone(status: SopStatus): "neutral" | "success" | "warning" {

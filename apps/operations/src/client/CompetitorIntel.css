@@ -42,8 +42,9 @@
 .ci-state-failed { color: var(--red); }
 .ci-open { min-height: 44px; }
 
-.ci-tabs { overflow-x: auto; max-width: 100%; justify-self: start; }
-.ci-tabs > button { display: inline-flex; align-items: center; gap: .4rem; white-space: nowrap; }
+/* Tabs wrap onto another row on narrow screens rather than hiding behind each other in a sideways scroll. */
+.ci-tabs { flex-wrap: wrap; width: auto; min-width: 0; max-width: 100%; overflow: visible; justify-self: start; }
+.ci-tabs > button { display: inline-flex; align-items: center; justify-content: center; gap: .4rem; flex: 1 1 auto; white-space: nowrap; min-height: 44px; }
 .ci-tab-badge { min-width: 1.3rem; padding: 0 .35rem; border-radius: 999px; background: var(--orange); color: #fff; font-size: .72rem; line-height: 1.3rem; text-align: center; }
 .ci-internal-dot { width: 7px; height: 7px; border-radius: 50%; background: #7a5af5; }
 .ci-panel { min-width: 0; }

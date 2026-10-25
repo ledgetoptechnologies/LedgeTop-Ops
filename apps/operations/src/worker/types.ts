@@ -96,6 +96,10 @@ export type Env = Omit<
   SHARED_PROFILE_PORTAL_AUTHORITY?: import('../../../../packages/shared/src/shared-business-profile').SharedProfilePortalAuthorityBinding;
   /** Explicit because Operations modules are also type-checked from sibling Worker projects with narrower generated Env types. */
   ENVIRONMENT?: string;
+  /** Default-off fresh browser navigation only; existing sessions remain local. */
+  CANONICAL_BROWSER_NAVIGATION_ENABLED?: string;
+  /** Dedicated incoming-host observation ingress; default off. */
+  COMPETITOR_INTEL_INGEST_ENABLED?: string;
   /** Default-off explicit active Directory binding revision refresh; local/staging only. */
   NATIVE_DIRECTORY_BINDING_REFRESH_ENABLED?: string;
   /** Default-off one-level terminal-conflict recovery for an uncertain binding refresh. */
@@ -408,6 +412,8 @@ export interface StaffPrincipal {
   projectAlphaUserId: string | null;
   /** Verified Cloudflare Access JWT expiry, when present on the assertion. */
   accessExpiresAt?: number;
+  /** Actual verified alternate login, separate from the canonical staff authorization binding. */
+  verifiedLogin?: import("./staff-login-bindings").StaffLoginProof;
 }
 
 export interface GrantRow {

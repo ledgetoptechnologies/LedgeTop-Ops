@@ -44,7 +44,10 @@ const initialClientMigrations = Object.freeze([
 // Separately reviewed application successors are byte-validated, but never
 // enter the frozen Operations199/Client149 inventories returned by this helper.
 const operationsSuccessors = Object.freeze({
+  "0227_owner_intel_reads.sql": "7e0d5efb1fdd99020b9f49292aa3fc06231c2ebabc99828c58a8959f8b06ece9",
+  "0228_competitor_intel_ingest.sql": "8aec846b8a170ff36fcd6bd6036a3c725ced3e1c0e9b0677bdc9a9661e360b8d",
   "0225_native_staff_lifecycle_bridge.sql": "1363221a710d774fc9e4c7547f7199d2bdc6b41ca62c8078c98ac5334603c175",
+  "0226_staff_login_bindings.sql": "c25b03f4499c6de80d586a583c0e59b8c39b264248645c59733304ebe751d0c5",
   "0222_employee_read_roots.sql": "1b91e7eebe6580df7a780a8b473e3325fde2d9a8a8dc37282bc40c6f32e8edda",
   "0223_employee_read_provisioning.sql": "d55a0d5e16f37f231e0938516a1ee7248b0e3b4190e8de5e6c68e1e9a3e1810a",
   "0224_windows_portal_publication_chain_index.sql": "4252667cceb62ca9bbbb3efd8804a7dc69f58dae1396240f0109fbac6abbcd15",
@@ -67,6 +70,8 @@ const operationsSuccessors = Object.freeze({
 });
 
 const clientSuccessors = Object.freeze({
+  "0237_viewer_direct_client_grants.sql": "6c8527f21d7c8bc44a54c3fe66731a18e7e8b0a185a6f61c8a8af4fc02efc4cd",
+  "0238_viewer_direct_session_intents.sql": "597a058166aadbe1fe00c10158fb70467956e97f4fb99cd0a047a4022d256d18",
   "0235_windows_portal_successor_candidates.sql": "50046477dda2efe378d4b01c7de9f4ff2383d1511cf56c4c7a9633b4e41c0841",
   "0236_windows_portal_successor_content_start_audit.sql": "fcbc6f9f802dee3e2bfe592f1476f485b24d7f5414ca86143ddd9a299e82ffcf",
   "0232_shared_profile_edit_authority.sql": "3c2b3ddbdb920739c8f4ab8f437808749f5f83581b098518c5efd41c2e0b0073",
