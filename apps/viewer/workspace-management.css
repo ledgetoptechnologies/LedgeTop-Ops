@@ -72,3 +72,15 @@
 .share-form,#client-grant-form{min-width:0;grid-template-columns:minmax(0,1fr)}
 .share-form label,.share-form input,.share-form select,
 #client-grant-form label,#client-grant-form input,#client-grant-form select{min-width:0}
+/* Direct client sharing */
+.direct-share-form{min-width:0;grid-template-columns:minmax(0,1fr)}
+.direct-share-form fieldset{display:grid;gap:.5rem;min-width:0;margin:0;padding:.75rem;border:1px solid var(--line,#d8dee4);border-radius:8px}
+.direct-share-form legend{padding:0 .3rem;font-weight:700}
+.direct-share-form label,.direct-share-form input,.direct-share-form select{min-width:0}
+.direct-share-search{display:flex;gap:.5rem;min-width:0}
+.direct-share-search input{flex:1 1 auto}
+.direct-share-tasks{display:grid;gap:.35rem;max-height:14rem;overflow:auto;padding-left:1.4rem}
+.direct-share-summary{margin:0;padding:.65rem .75rem;border-radius:8px;background:rgba(238,80,7,.08);font-weight:600;overflow-wrap:anywhere}
+.direct-share-heading{margin:1rem 0 .25rem;font-size:1rem}
+.share-legacy{margin-top:1rem}
+.share-legacy>summary{cursor:pointer;min-height:44px;display:flex;align-items:center;font-weight:600}

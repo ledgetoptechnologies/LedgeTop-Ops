@@ -34,7 +34,7 @@ if (!handoffLegacyPublicShare(window.location, url => window.location.replace(ur
   const recipientEnrollmentRoute = consumeClientPortalRecipientEnrollmentRoute(window.location, window.history);
   const portalRoute = parseClientPortalRoute(window.location.pathname);
   const isPortalRoot = window.location.pathname === "/portal" || window.location.pathname === "/portal/";
-  const viewerShellRoute = parseClientViewerShellRoute(window.location.pathname);
+  const viewerShellRoute = parseClientViewerShellRoute(window.location.pathname, window.location.search);
   const isClientDelegatedShare = window.location.pathname.startsWith("/client-share/");
   const isInvitationAcceptance = window.location.pathname === "/portal/invitations/accept";
   const onboardingRoute = consumeClientOnboardingRecipientRoute(window.location, window.history);
