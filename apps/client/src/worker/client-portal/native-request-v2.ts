@@ -27,7 +27,6 @@ import {
 import {
   changedAssignedServices,
   readServiceAssignmentPolicy,
-  serializeServiceAssignmentPolicyProof,
   serviceAssignmentPolicyCheckpointSql,
   serviceAssignmentPolicyProofStillCurrent,
   serviceAssignmentPolicyServiceSql,
@@ -35,6 +34,7 @@ import {
   ServiceAssignmentPolicyUnavailableError,
   type ServiceAssignmentPolicyProof,
 } from "./service-assignment-policy";
+import { nativeRequestAssignmentStorage, requireNativeProjectAssignmentStorage } from "./native-project-assignment-storage";
 import { parseSubmittedServiceReview, type SubmittedServiceReviewRow } from "./submitted-service-review";
 
 const PUBLIC_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
@@ -302,6 +302,7 @@ export async function createNativeServiceRequestDraft(env: Env, session: ClientP
   input: ClientServiceRequestDraftInput, mutationKey: string): Promise<ClientServiceDraftMutationResult | null> {
   const authority = await resolveNativeRequestAuthority(env, session, input.projectId);
   if (!authority) return null;
+  await requireNativeProjectAssignmentStorage(env, input.projectId);
   const owner = await ensureNativeRequestStorage(env, authority, session.displayName);
   if (!owner) return null;
   const fingerprint = await sha256(JSON.stringify(input));
@@ -318,6 +319,7 @@ export async function createNativeServiceRequestDraft(env: Env, session: ClientP
   if (assignment.kind !== "ready") return assignment;
   const resolved = await selections(env, authority.sourceId, input);
   if (resolved.kind !== "resolved") return resolved.kind === "invalid" ? null : resolved;
+  const proofStorage = await nativeRequestAssignmentStorage(env, assignment.proof);
   const area = calculateRequestAreaSquareMeters(input.areaGeoJson);
   const id = crypto.randomUUID();
   const authorityGuard = nativeRequestMutationGuardSql(authority);
@@ -326,9 +328,9 @@ export async function createNativeServiceRequestDraft(env: Env, session: ClientP
   const db = database(env);
   const insert = db.prepare(`INSERT INTO client_service_request_drafts
     (id,account_id,project_id,created_by_identity_id,draft_json,area_geojson,area_square_meters,area_acres,
-     create_idempotency_key,create_fingerprint,last_mutation_key,catalog_source_id,service_assignment_policy_v2_json,
+     create_idempotency_key,create_fingerprint,last_mutation_key,catalog_source_id,${proofStorage.columns},
      portal_workspace_id,portal_identity_id,portal_project_public_id)
-    SELECT ?,?,NULL,?,?,?,?,?,?,?,?,?,?,?,?,? WHERE ${authorityGuard.sql}
+    SELECT ?,?,NULL,?,?,?,?,?,?,?,?,?,${proofStorage.placeholders},?,?,? WHERE ${authorityGuard.sql}
       AND NOT EXISTS(SELECT 1 FROM json_each(?) reviewed WHERE NOT EXISTS(
         SELECT 1 FROM pa_service_catalog_items catalog WHERE catalog.source_id=?
           AND catalog.public_id=json_extract(reviewed.value,'$.publicId')
@@ -336,7 +338,7 @@ export async function createNativeServiceRequestDraft(env: Env, session: ClientP
       AND ${assignedGuard.sql}`)
     .bind(id, owner.accountId, owner.storageIdentityId, JSON.stringify(requestFields(input)),
       input.areaGeoJson ? JSON.stringify(input.areaGeoJson) : null, area, area === null ? null : area / SQUARE_METERS_PER_ACRE,
-      mutationKey, fingerprint, mutationKey, authority.sourceId, serializeServiceAssignmentPolicyProof(assignment.proof),
+      mutationKey, fingerprint, mutationKey, authority.sourceId, ...proofStorage.bindings,
       authority.workspaceId, authority.identityId, authority.projectPublicId,
       ...authorityGuard.bindings, reviewed, authority.sourceId, ...assignedGuard.bindings);
   const statements = [insert, ...resolved.services.map((service, ordinal) => db.prepare(`INSERT INTO client_service_request_draft_services
@@ -373,6 +375,7 @@ export async function saveNativeServiceRequestDraft(env: Env, session: ClientPor
   const authority = await resolveNativeRequestAuthority(env, session, input.projectId);
   if (!authority || authority.sourceId !== current.proof.sourceId || authority.workspaceId !== current.proof.workspaceId
     || authority.identityId !== current.proof.identityId) return null;
+  await requireNativeProjectAssignmentStorage(env, input.projectId);
   const fingerprint = await sha256(JSON.stringify(input));
   const replay = await database(env).prepare(`SELECT mutation.mutation_fingerprint
     FROM client_service_request_draft_mutations mutation
@@ -391,12 +394,13 @@ export async function saveNativeServiceRequestDraft(env: Env, session: ClientPor
   const resolved = await selections(env, authority.sourceId, input);
   if (resolved.kind !== "resolved") return resolved.kind === "invalid" ? null : resolved;
   const area = calculateRequestAreaSquareMeters(input.areaGeoJson);
+  const proofStorage = await nativeRequestAssignmentStorage(env, assigned.proof);
   const authorityGuard = nativeRequestMutationGuardSql(authority);
   const serviceGuard = assignmentGuard(assigned.proof, resolved.services);
   const reviewed = JSON.stringify(resolved.services.map(row => ({ publicId: row.publicId, sourceVersion: row.sourceVersion })));
   const db = database(env);
   const update = db.prepare(`UPDATE client_service_request_drafts AS draft SET draft_json=?,area_geojson=?,area_square_meters=?,area_acres=?,
-      portal_project_public_id=?,service_assignment_policy_v2_json=?,version=version+1,last_mutation_key=?,updated_at=strftime('%Y-%m-%d %H:%M:%f','now')
+      portal_project_public_id=?,${proofStorage.update},version=version+1,last_mutation_key=?,updated_at=strftime('%Y-%m-%d %H:%M:%f','now')
     WHERE draft.id=? AND draft.state='draft' AND draft.version=? AND draft.portal_workspace_id=?
       AND draft.portal_identity_id=? AND draft.catalog_source_id=? AND ${authorityGuard.sql}
       AND NOT EXISTS(SELECT 1 FROM json_each(?) reviewed WHERE NOT EXISTS(
@@ -406,7 +410,7 @@ export async function saveNativeServiceRequestDraft(env: Env, session: ClientPor
       AND ${serviceGuard.sql}`)
     .bind(JSON.stringify(requestFields(input)), input.areaGeoJson ? JSON.stringify(input.areaGeoJson) : null,
       area, area === null ? null : area / SQUARE_METERS_PER_ACRE, authority.projectPublicId,
-      serializeServiceAssignmentPolicyProof(assigned.proof), mutationKey, draftId, expectedVersion,
+      ...proofStorage.bindings, mutationKey, draftId, expectedVersion,
       authority.workspaceId, authority.identityId, authority.sourceId, ...authorityGuard.bindings,
       reviewed, authority.sourceId, ...serviceGuard.bindings);
   const statements = [
@@ -494,6 +498,7 @@ export async function submitNativeServiceRequestDraft(env: Env, session: ClientP
   if (!draft) return null;
   const owner = await draftOwner(env, session, draftId);
   if (!owner) return null;
+  await requireNativeProjectAssignmentStorage(env, draft.projectId);
   const fingerprint = await sha256(JSON.stringify({ draftId, version: expectedVersion }));
   if (draft.state === "submitted") {
     const metadata = await database(env).prepare(`SELECT submit_idempotency_key,submit_fingerprint,submitted_request_id
@@ -518,6 +523,7 @@ export async function submitNativeServiceRequestDraft(env: Env, session: ClientP
   if (changed.length) return { kind: "incomplete", reason: "catalog_changed", servicePublicIds: changed };
   const assigned = await policy(env, session, draft.projectId, draft.services);
   if (assigned.kind !== "ready") return { kind: "incomplete", reason: "service_assignments_changed", servicePublicIds: assigned.servicePublicIds };
+  const proofStorage = await nativeRequestAssignmentStorage(env, assigned.proof);
   const blocked = await attachmentBlock(env, draftId, owner.proof.sourceId);
   if (blocked) return { kind: "incomplete", ...blocked };
   const authorityGuard = nativeRequestMutationGuardSql(owner.proof);
@@ -531,8 +537,8 @@ export async function submitNativeServiceRequestDraft(env: Env, session: ClientP
     (id,account_id,project_id,parent_request_id,created_by_identity_id,request_type,title,details,location_text,
      preferred_start_at,service_category,deliverables_text,site_contact_name,site_contact_email,site_contact_phone,
      desired_completion_at,latitude,longitude,area_geojson,poi_points_json,idempotency_key,request_fingerprint,
-     catalog_source_id,service_assignment_policy_v2_json,portal_workspace_id,portal_identity_id,portal_project_public_id)
-    SELECT ?,draft.account_id,NULL,NULL,draft.created_by_identity_id,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,draft.catalog_source_id,?,
+     catalog_source_id,${proofStorage.columns},portal_workspace_id,portal_identity_id,portal_project_public_id)
+    SELECT ?,draft.account_id,NULL,NULL,draft.created_by_identity_id,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,draft.catalog_source_id,${proofStorage.placeholders},
       draft.portal_workspace_id,draft.portal_identity_id,draft.portal_project_public_id
     FROM client_service_request_drafts draft WHERE draft.id=? AND draft.state='draft' AND draft.version=?
       AND draft.portal_workspace_id=? AND draft.portal_identity_id=? AND draft.catalog_source_id=?
@@ -546,7 +552,7 @@ export async function submitNativeServiceRequestDraft(env: Env, session: ClientP
       serviceCategory, draft.deliverables, draft.siteContactName, draft.siteContactEmail, draft.siteContactPhone,
       draft.desiredCompletionAt, draft.latitude, draft.longitude, draft.areaGeoJson ? JSON.stringify(draft.areaGeoJson) : null,
       draft.poiPoints.length ? JSON.stringify(draft.poiPoints) : null, mutationKey, requestFingerprint,
-      serializeServiceAssignmentPolicyProof(assigned.proof), draftId, expectedVersion, owner.proof.workspaceId,
+      ...proofStorage.bindings, draftId, expectedVersion, owner.proof.workspaceId,
       owner.proof.identityId, owner.proof.sourceId, ...authorityGuard.bindings, reviewed, owner.proof.sourceId,
       ...serviceGuard.bindings);
   const snapshot = JSON.stringify({ ...draft, status: "submitted", catalogSourceId: owner.proof.sourceId });
@@ -575,11 +581,11 @@ export async function submitNativeServiceRequestDraft(env: Env, session: ClientP
       .bind(owner.proof.identityId, requestId, owner.proof.workspaceId, owner.proof.projectPublicId, draftId,
         draft.services.length, owner.proof.sourceId, requestId),
     db.prepare(`UPDATE client_service_request_drafts SET state='submitted',submitted_request_id=?,submit_idempotency_key=?,
-      submit_fingerprint=?,service_assignment_policy_v2_json=?,submitted_at=datetime('now'),updated_at=datetime('now'),last_mutation_key=?
+      submit_fingerprint=?,${proofStorage.update},submitted_at=datetime('now'),updated_at=datetime('now'),last_mutation_key=?
       WHERE id=? AND state='draft' AND version=? AND portal_workspace_id=? AND portal_identity_id=? AND catalog_source_id=?
         AND EXISTS(SELECT 1 FROM client_service_requests WHERE id=? AND catalog_source_id=?
           AND portal_workspace_id=? AND portal_identity_id=?)`)
-      .bind(requestId, mutationKey, fingerprint, serializeServiceAssignmentPolicyProof(assigned.proof), mutationKey,
+      .bind(requestId, mutationKey, fingerprint, ...proofStorage.bindings, mutationKey,
         draftId, expectedVersion, owner.proof.workspaceId, owner.proof.identityId, owner.proof.sourceId,
         requestId, owner.proof.sourceId, owner.proof.workspaceId, owner.proof.identityId),
   ];
