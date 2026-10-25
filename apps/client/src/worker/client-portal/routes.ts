@@ -1,4 +1,5 @@
 import { Hono, type Context } from "hono";
+import { createUnifiedRequestRouter } from "./unified-request-routes";
 import { HTTPException } from "hono/http-exception";
 import { isMovedSourceMarker, notificationMigrationMaintenanceActive, notificationMigrationMaintenanceResponse } from "@ltds/shared";
 import type {
@@ -402,6 +403,11 @@ export function createClientPortalRouter(
     Bindings: Env;
     Variables: ClientPortalVariables;
   }>();
+
+  router.route("/", createUnifiedRequestRouter({
+    resolvePrincipal, checkConfiguration: !dependencies.resolvePrincipal,
+    scopedFetch: async (request, env) => router.fetch(request, env),
+  }));
 
   router.use("*", async (c, next) => {
     const sessionTimingRequest = c.req.method === "GET" && /^(?:\/api\/client)?\/session\/status$/.test(c.req.path);
