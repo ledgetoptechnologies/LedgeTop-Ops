@@ -1,4 +1,5 @@
-.intel-page { display: grid; gap: 1rem; min-width: 0; }
+/* One bounded column: a wide child can never widen the page past the screen. */
+.intel-page { display: grid; grid-template-columns: minmax(0, 1fr); gap: 1rem; min-width: 0; }
 .intel-controls { display: flex; flex-wrap: wrap; align-items: center; gap: .75rem; }
 /* Long business names wrap onto another row instead of scrolling sideways, so every choice stays on screen to tap. */
 .intel-controls .ltds-segmented { flex-wrap: wrap; width: auto; min-width: 0; max-width: 100%; overflow: visible; }

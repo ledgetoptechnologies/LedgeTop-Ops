@@ -159,10 +159,13 @@ test("a wrong-shaped business list or section shows an error instead of breaking
   }
 });
 
-for (const width of [320, 375]) test(`at ${width}px every business and view choice is fully on screen and tappable`, async ({ page }) => {
+for (const width of [320, 375, 390]) for (const font of ["default", "Arial"] as const)
+  test(`at ${width}px (${font} font) every business and view choice is fully on screen and tappable`, async ({ page }) => {
   await mockOps(page);
   await page.setViewportSize({ width, height: 800 });
   await page.goto("/intel?business=drone-services&view=competitors");
+  // Linux CI renders with wider fallback fonts; Arial reproduces that width here.
+  if (font === "Arial") await page.addStyleTag({ content: "* { font-family: Arial, sans-serif !important; }" });
   await expect(page.getByRole("tab", { name: /Self-assessment/ })).toBeVisible();
   const controls = [page.getByRole("button", { name: "Ledge Top Drone Services" }), page.getByRole("button", { name: "Ledge Top Technologies" }),
     ...["Competitor Intel", "Website", "Search Console"].map(name => page.getByRole("navigation", { name: "Intel views" }).getByRole("button", { name })),
