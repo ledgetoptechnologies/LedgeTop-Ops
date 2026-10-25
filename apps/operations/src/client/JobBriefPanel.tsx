@@ -255,7 +255,7 @@ export function JobBriefPanel({
     >
       <div className="record-badges">
         <StatusPill>{data.operation.status.replaceAll("_", " ")}</StatusPill>
-        <span className="managed-badge">LTDS brief v{version}</span>
+        <span className="managed-badge">Ledge Top brief v{version}</span>
       </div>
       {!!data.brief?.sops?.length && (
         <nav className="job-brief-quick-sops" aria-label="Quick SOPs">
@@ -285,7 +285,7 @@ export function JobBriefPanel({
         </nav>
       )}
       <p className="muted">
-        Schedule and assignment remain managed in Project Alpha. This versioned brief is the LTDS execution source of truth.
+        Schedule and assignment remain managed in Project Alpha. This versioned brief is the Ledge Top execution source of truth.
       </p>
       <NavigationActions destination={data.operation.navigation} />
       {error && <div className="notice error">{error}</div>}

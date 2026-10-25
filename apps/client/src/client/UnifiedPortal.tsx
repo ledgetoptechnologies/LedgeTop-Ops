@@ -6,6 +6,7 @@ import {
   type UnifiedAccountResult, type UnifiedProject, type UnifiedRequest,
 } from "./unified-portal";
 import { UnifiedDeliveries } from "./UnifiedDeliveries";
+import { QuickRequest } from "./QuickRequest";
 
 export type UnifiedPage = "dashboard" | "projects" | "requests" | "deliveries" | "feedback" | "account";
 export const UNIFIED_PAGES: ReadonlySet<string> = new Set<UnifiedPage>(["dashboard", "projects", "requests", "deliveries", "feedback", "account"]);
@@ -22,18 +23,22 @@ function byUpdated(left: UnifiedRequest, right: UnifiedRequest) {
   return right.request.updatedAt.localeCompare(left.request.updatedAt);
 }
 
-export function UnifiedPortal({ page, workspaces, openInAccount, navigate, renderStatus, supplement }: {
+export function UnifiedPortal({ page, workspaces, openInAccount, navigate, renderStatus, supplement, mapboxPublicToken = null }: {
   page: UnifiedPage;
   workspaces: PortalWorkspace[];
   openInAccount: OpenInAccount;
   navigate: (page: UnifiedPage) => void;
   renderStatus: (request: PortalServiceRequest) => ReactNode;
   supplement?: ReactNode;
+  mapboxPublicToken?: string | null;
 }) {
   const accounts = useMemo(() => workspaces.filter(unifiedAccountSupported).map(unifiedAccount), [workspaces]);
   const [results, setResults] = useState<Map<string, UnifiedAccountResult>>(() => new Map());
   const [retry, setRetry] = useState(0);
   const [choosingRequest, setChoosingRequest] = useState(false);
+  // The one-step form is tried first; only a portal without it falls back to choosing per account.
+  const [quickRequest, setQuickRequest] = useState(true);
+  const [notice, setNotice] = useState<string | null>(null);
   const generation = useRef(0);
 
   useEffect(() => {
@@ -89,8 +94,15 @@ export function UnifiedPortal({ page, workspaces, openInAccount, navigate, rende
   const requestChoices = requestAccounts.filter((account, index) => requestAccounts.findIndex(other => accountArea(other) === accountArea(account)) === index);
 
   const startRequest = () => {
-    if (requestChoices.length === 1) openInAccount(requestChoices[0]!.workspace.id, "/portal/requests/new");
+    setNotice(null);
+    if (!quickRequest && requestChoices.length === 1) openInAccount(requestChoices[0]!.workspace.id, "/portal/requests/new");
     else setChoosingRequest(true);
+  };
+  const requestSent = () => {
+    setChoosingRequest(false);
+    setNotice("Request sent. Ledge Top will review it shortly.");
+    setRetry(value => value + 1);
+    navigate("requests");
   };
   // One Ledge Top portal: no business, division or account names anywhere, even across several accounts.
   const problems = failed.length > 0 && <div className="unified-portal-problems" role="alert">
@@ -117,7 +129,11 @@ export function UnifiedPortal({ page, workspaces, openInAccount, navigate, rende
     </li>)}
   </ul>;
   // Ask what the client needs, not which business: the choice decides where the request goes.
-  const requestChooser = choosingRequest && <Card title="What do you need help with?" className="unified-portal-chooser">
+  const requestChooser = choosingRequest && quickRequest ? <QuickRequest mapboxPublicToken={mapboxPublicToken}
+    onSubmitted={requestSent} onCancel={() => setChoosingRequest(false)} onUnavailable={() => {
+      setQuickRequest(false);
+      if (requestChoices.length === 1) { setChoosingRequest(false); openInAccount(requestChoices[0]!.workspace.id, "/portal/requests/new"); }
+    }} /> : choosingRequest && <Card title="What do you need help with?" className="unified-portal-chooser">
     <div className="unified-portal-need-list">
       {requestChoices.map(account => <button key={account.workspace.id} type="button" className="unified-portal-need"
         onClick={() => openInAccount(account.workspace.id, "/portal/requests/new")}>
@@ -155,6 +171,7 @@ export function UnifiedPortal({ page, workspaces, openInAccount, navigate, rende
       <div><span className="eyebrow">Requests</span><h1>Service requests</h1><p>Everything you’ve asked us for, and where it stands.</p></div>
       {requestAccounts.length > 0 && <button type="button" className="button-orange" onClick={startRequest}>New request</button>}
     </section>
+    {notice && <p className="portal-success-notice" role="status">{notice}</p>}
     {requestChooser}{problems}{loadingNote}
     {requests.length > 0 && <RequestProgress requests={requests} />}
     <Card title="Request history">{!loading && requests.length === 0 ? <EmptyState title="No requests yet" detail="Requests you submit will appear here." /> : requestRows(requests)}</Card>

@@ -224,13 +224,13 @@ test("native folder file pagination preserves existing files and uses its opaque
 test("native media paths cannot point to another workspace even when the metadata envelope matches", async ({page}) => {
   await mock(page, (route, call) => call.path.endsWith("workspace-b/files/file-workspace-b") ? route.fulfill({json: {...envelope(), file: {...file(), downloadPath: file("workspace-c").downloadPath}}}) : undefined);
   await page.goto("/portal/deliveries?workspace=workspace-b&file=file-workspace-b");
-  await expect(page.getByRole("button", {name: "Retry portal"})).toBeVisible(); await expect(page.getByRole("dialog")).toHaveCount(0);
+  await expect(page.getByRole("button", {name: "Try again"})).toBeVisible(); await expect(page.getByRole("dialog")).toHaveCount(0);
 });
 
 for (const field of ["previewPath", "downloadPath"] as const) test(`native ${field} rejects a different encoded file handle in the same workspace`, async ({page}) => {
   const calls = await mock(page, (route, call) => call.path.endsWith("workspace-b/files/file-workspace-b") ? route.fulfill({json: {...envelope(), file: {...file(), [field]: file("workspace-b", "file-workspace-b/other")[field]}}}) : undefined);
   await page.goto("/portal/deliveries?workspace=workspace-b&file=file-workspace-b");
-  await expect(page.getByRole("button", {name: "Retry portal"})).toBeVisible(); await expect(page.getByRole("dialog")).toHaveCount(0);
+  await expect(page.getByRole("button", {name: "Try again"})).toBeVisible(); await expect(page.getByRole("dialog")).toHaveCount(0);
   expect(calls.some(call => call.path.includes("%2Fother"))).toBe(false);
 });
 
@@ -252,17 +252,17 @@ test("native directory and folders recover from transient errors without fabrica
 for (const status of [401, 403, 409]) test(`native continuation ${status} clears every old workspace row`, async ({page}) => {
   await mock(page, (route, call) => call.path.endsWith("workspace-b/deliveries") ? call.query.has("cursor") ? route.fulfill({status, json: {error: "Context unavailable"}}) : route.fulfill({json: deliveries("workspace-b", "next")}) : undefined);
   await page.goto("/portal/deliveries?workspace=workspace-b"); await expect(page.getByRole("button", {name: /^Open folder\s*:/})).toBeVisible();
-  await page.getByRole("button", {name: "Load more delivery folders"}).click(); await expect(page.getByRole("button", {name: "Retry portal"})).toBeVisible();
+  await page.getByRole("button", {name: "Load more delivery folders"}).click(); await expect(page.getByRole("button", {name: "Try again"})).toBeVisible();
   await expect(page.getByRole("region", {name: "Connected client workspace"})).toHaveCount(0); await expect(page.getByRole("button", {name: /^Open folder\s*:/})).toHaveCount(0);
 });
 
 test("wrong workspace context and wrong metadata source are rejected before showing protected content", async ({page}) => {
   let corruptContext = true;
   await mock(page, (route, call) => call.path.endsWith("workspace-b/context") && corruptContext ? route.fulfill({json: context("workspace-c")}) : call.path.endsWith("workspace-b/files/file-workspace-b") ? route.fulfill({json: {...envelope("workspace-c"), file: file()}}) : undefined);
-  await page.goto("/portal?workspace=workspace-b"); await expect(page.getByRole("button", {name: "Retry portal"})).toBeVisible();
+  await page.goto("/portal?workspace=workspace-b"); await expect(page.getByRole("button", {name: "Try again"})).toBeVisible();
   await expect(page.getByText("Coastal seawall construction documentation", {exact: true})).toHaveCount(0);
   corruptContext = false; await page.goto("/portal/deliveries?workspace=workspace-b&file=file-workspace-b");
-  await expect(page.getByRole("button", {name: "Retry portal"})).toBeVisible(); await expect(page.getByRole("dialog")).toHaveCount(0);
+  await expect(page.getByRole("button", {name: "Try again"})).toBeVisible(); await expect(page.getByRole("dialog")).toHaveCount(0);
 });
 
 test("late folder responses cannot repopulate a newly selected workspace", async ({page}) => {
@@ -875,7 +875,7 @@ test("secondary member management fails closed and retries without exposing reco
 test("a context capability and readiness mismatch fails closed before protected probes", async ({page}) => {
   const calls = await mock(page, (route, call) => call.path.endsWith("workspace-b/context") ? route.fulfill({json: {...context(), features: {...features(), directory: {state: "not_in_access", reason: "capability_not_granted"}}}}) : undefined);
   await page.goto("/portal?workspace=workspace-b");
-  await expect(page.getByRole("button", {name: "Retry portal"})).toBeVisible();
+  await expect(page.getByRole("button", {name: "Try again"})).toBeVisible();
   expect(calls.some(call => /\/(hierarchy|deliveries)$/.test(call.path))).toBe(false);
 });
 
@@ -1081,6 +1081,97 @@ test.describe("unified home without business switching", () => {
     await expect(page.locator(".client-portal-main")).not.toContainText(/Ledge Top Drone Services|Ledge Top Technologies|Drone and survey|Website and marketing|Ledge Top \d/);
   });
 
+  const quickServices = [
+    {serviceChoiceId: "choice:roof", name: "Roof inspection", summary: "Drone photos of your roof", category: "drone", catalogCategory: "inspection", clientName: "Primary customer",
+      questions: [{id: "stories", label: "How many stories?", type: "number", required: true, helpText: null, minimum: 1, maximum: 10}], geometryRequirement: "none"},
+    {serviceChoiceId: "choice:site-a", name: "Website update", summary: null, category: "website", catalogCategory: "web", clientName: "Rivera Web Studio", questions: [], geometryRequirement: "none"},
+    {serviceChoiceId: "choice:site-b", name: "Website update", summary: null, category: "website", catalogCategory: "web", clientName: "Coastal Builders", questions: [], geometryRequirement: "none"},
+  ];
+  type Posted = {body: Record<string, unknown>; key: string | undefined; workspace: string | undefined};
+  async function mockQuick(page: Page, answer: (posted: Posted, count: number) => {status: number; json: unknown} = () => ({status: 201, json: {request: request("req-new", "Roof inspection", "submitted", "2026-08-23T12:00:00.000Z")}}),
+    services: {status?: number; json: unknown} = {json: {services: quickServices, unavailable: []}}) {
+    const posted: Posted[] = [];
+    const calls = await mock(page, (route, call) => {
+      if (call.path === "/api/client/request-services") return route.fulfill(services);
+      if (call.path === "/api/client/requests" && call.method === "POST") {
+        const item = {body: route.request().postDataJSON() as Record<string, unknown>, key: route.request().headers()["idempotency-key"], workspace: call.workspace};
+        posted.push(item);
+        return route.fulfill(answer(item, posted.length));
+      }
+      if (call.path === "/api/client/v2/workspaces") return route.fulfill({json: {workspaces: listed}});
+      const match = call.path.match(/^\/api\/client\/v2\/workspaces\/(workspace-[bc])\/(context|hierarchy|deliveries)$/);
+      if (match) {
+        const id = match[1]!, ws = listed.find(item => item.id === id)!;
+        if (match[2] === "context") return route.fulfill({json: {...requestContext(id), workspace: ws}});
+        if (match[2] === "deliveries") return route.fulfill({json: {...deliveries(id), sourceId: sources[id]}});
+        return route.fulfill({json: {...hierarchy(id), sourceId: sources[id]}});
+      }
+      if (call.path === "/api/client/service-requests" && call.workspace && requestsFor[call.workspace]) return route.fulfill({json: {requests: requestsFor[call.workspace]}});
+      return undefined;
+    });
+    return {posted, calls};
+  }
+
+  test("a new request is one step: pick a service, describe it, send, with no business or account chosen", async ({page}) => {
+    const {posted} = await mockQuick(page); await page.goto("/portal");
+    await page.getByRole("button", {name: "New request"}).first().click();
+    const form = page.locator(".quick-request");
+    await expect(form.getByRole("group", {name: "What do you need?"})).toBeVisible();
+    await expect(page.locator(".unified-portal-chooser")).toHaveCount(0);
+    // A client name shows only to tell two identical services apart.
+    await expect(form.getByRole("radio", {name: /^Roof inspection/})).toBeVisible();
+    await expect(form.getByText("Roof inspection · Primary customer")).toHaveCount(0);
+    await expect(form.getByRole("radio", {name: "Website update · Rivera Web Studio"})).toBeVisible();
+    await expect(form.getByRole("radio", {name: "Website update · Coastal Builders"})).toBeVisible();
+    const send = form.getByRole("button", {name: "Send request"});
+    await expect(send).toBeDisabled();
+    await form.getByRole("radio", {name: /^Roof inspection/}).check();
+    await form.getByLabel("Tell us what you need").fill("Hail damage check on the north side.");
+    await expect(send).toBeDisabled();
+    await form.getByLabel(/How many stories/).fill("2");
+    await form.getByLabel("Location (optional)").fill("100 Main St");
+    await send.click();
+    await expect(page.getByRole("status")).toHaveText("Request sent. Ledge Top will review it shortly.");
+    await expect(page).toHaveURL(/\/portal\/requests$/);
+    expect(posted).toHaveLength(1);
+    expect(posted[0]!.workspace).toBeUndefined();
+    expect(posted[0]!.key).toMatch(/^[0-9a-f-]{36}$/);
+    expect(posted[0]!.body).toEqual({serviceChoiceId: "choice:roof", title: "Roof inspection", details: "Hail damage check on the north side.", projectId: null,
+      answers: {stories: 2}, location: "100 Main St", areaGeoJson: null, poiPoints: []});
+    await expect(page.locator(".client-portal-main")).not.toContainText(/Ledge Top Drone Services|Ledge Top Technologies/);
+  });
+
+  test("an unclear send retries with the same key; a changed service asks for a reload with a new key", async ({page}) => {
+    const {posted} = await mockQuick(page, (_item, count) => count === 1 ? {status: 503, json: {error: "Unavailable"}}
+      : count === 2 ? {status: 409, json: {error: "Service choice changed"}} : {status: 201, json: {request: request("req-new", "Website update", "submitted", "2026-08-23T12:00:00.000Z")}});
+    await page.goto("/portal/requests");
+    await page.getByRole("button", {name: "New request"}).click();
+    const form = page.locator(".quick-request");
+    await form.getByRole("radio", {name: "Website update · Coastal Builders"}).check();
+    await form.getByLabel("Tell us what you need").fill("New team page.");
+    await form.getByRole("button", {name: "Send request"}).click();
+    await expect(form.getByRole("alert")).toContainText("it won't create a second request");
+    await form.getByRole("button", {name: "Send request"}).click();
+    await expect(form.getByRole("alert")).toContainText("This service changed since the form opened");
+    expect(posted[1]!.key).toBe(posted[0]!.key);
+    await form.getByRole("button", {name: "Reload services"}).click();
+    await expect(form.getByRole("radio", {name: "Website update · Coastal Builders"})).toBeChecked();
+    await expect(form.getByLabel("Tell us what you need")).toHaveValue("New team page.");
+    await form.getByRole("button", {name: "Send request"}).click();
+    await expect(page.getByRole("status")).toHaveText("Request sent. Ledge Top will review it shortly.");
+    expect(posted).toHaveLength(3);
+    expect(posted[2]!.key).not.toBe(posted[0]!.key);
+  });
+
+  test("a refused service list never falls back to choosing an account", async ({page}) => {
+    await mockQuick(page, undefined, {status: 403, json: {error: "Forbidden"}});
+    await page.goto("/portal");
+    await page.getByRole("button", {name: "New request"}).first().click();
+    await expect(page.locator(".quick-request").getByRole("alert")).toContainText("Your access changed");
+    await expect(page.locator(".unified-portal-chooser")).toHaveCount(0);
+    await expect(page).toHaveURL(/\/portal$/);
+  });
+
   test("deliveries are one flat list and feedback one neutral card, with no business or division", async ({page}) => {
     const calls = await mockBoth(page); await page.goto("/portal/deliveries");
     const folders = page.locator(".unified-deliveries");
@@ -1112,7 +1203,7 @@ test.describe("unified home without business switching", () => {
 });
 
 test.describe("client header matches Operations", () => {
-  test("account shows the signed-in email and how long the session lasts, without seconds", async ({page}) => {
+  test("account shows the signed-in email and the day the session ends, without a countdown", async ({page}) => {
     await page.clock.install({time: new Date("2030-01-01T12:00:00Z")});
     await mock(page, (route, call) => {
       if (call.path === "/api/client/session") return route.fulfill({json: {account: {id: call.workspace ? "account-a" : "", displayName: "Primary customer", email: "jamie@example.test"}, capabilities: {workspaceHierarchyV2: true}}});
@@ -1125,8 +1216,8 @@ test.describe("client header matches Operations", () => {
     if (await page.getByRole("navigation", {name: "Client portal"}).isVisible()) await expect(trigger).toContainText("jamie@example.test");
     await trigger.click();
     const menu = page.getByRole("menu", {name: "Account"});
-    await expect(menu.getByRole("timer")).toHaveText("2d 4h 13m");
-    await expect(menu.locator("time")).toHaveText(/^[A-Z][a-z]{2}, [A-Z][a-z]{2} \d{1,2}, \d{1,2}:\d{2}\s?[AP]M$/);
+    await expect(menu.locator(".account-session-status strong")).toHaveText("Expires Thu, Jan 3, 2030");
+    await expect(menu.getByRole("timer")).toHaveCount(0);
     await expect(menu.getByRole("menuitem", {name: "Logout"})).toHaveAttribute("href", "/cdn-cgi/access/logout");
   });
 

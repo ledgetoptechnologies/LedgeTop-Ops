@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { ApiError, api } from "./api";
 import { formatSessionExpiry } from "@ltds/ui";
-import { formatSessionRemaining, readSessionTiming } from "./session-time";
+import { readSessionTiming } from "./session-time";
 
 type Clock = { deadline: number; expiresAt: number };
 
@@ -39,25 +39,28 @@ export function SessionExpiry({ userId }: { userId: string }) {
     };
     const foreground = () => { if (document.visibilityState !== "hidden") void refresh(); };
     void refresh();
-    const tick = setInterval(() => setNow(performance.now()), 1000);
     const recheck = setInterval(() => { void refresh(); }, 60_000);
     addEventListener("focus", foreground);
     document.addEventListener("visibilitychange", foreground);
     return () => {
       controller.abort();
-      clearInterval(tick);
       clearInterval(recheck);
       removeEventListener("focus", foreground);
       document.removeEventListener("visibilitychange", foreground);
     };
   }, [userId]);
+  // No countdown is shown, so the clock only needs to move once: when the sign-in runs out.
+  useEffect(() => {
+    if (!clock) return;
+    const timer = setTimeout(() => setNow(performance.now()), Math.max(0, clock.deadline - performance.now()) + 50);
+    return () => clearTimeout(timer);
+  }, [clock]);
   const expired = state === "expired" || state === "ready" && clock !== null && now >= clock.deadline;
   return <div className="account-session-status">
     {expired ? <><strong>Session expired</strong><small>Sign in again to continue.</small></>
       : state === "ready" && clock ? <>
-        <small>Session valid for</small>
-        <strong role="timer" aria-live="off">{formatSessionRemaining(clock.deadline - now)}</strong>
-        <small>Expires <time dateTime={new Date(clock.expiresAt).toISOString()}>{formatSessionExpiry(clock.expiresAt)}</time></small>
+        <small>Signed in</small>
+        <strong>Expires <time dateTime={new Date(clock.expiresAt).toISOString()}>{formatSessionExpiry(clock.expiresAt)}</time></strong>
       </> : <small>{state === "loading" ? "Checking session…" : "Session time unavailable"}</small>}
   </div>;
 }

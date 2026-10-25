@@ -60,15 +60,22 @@ test("an ended sign-in offers to sign in again", async ({ page }) => {
   await page.goto("/");
   const screen = page.getByRole("main", { name: "Your sign-in has ended" });
   await expect(screen.getByRole("link", { name: "Sign in again" })).toHaveAttribute("href", "/cdn-cgi/access/logout");
-  await expect(screen.getByText("Signed in as")).toHaveCount(0);
+  await expect(screen.getByRole("link", { name: "info@ledgetopdroneservices.com" })).toHaveAttribute("href", "mailto:info@ledgetopdroneservices.com");
 });
 
-test("a server problem offers only to try again", async ({ page }) => {
-  await failSession(page, 503, "Unavailable");
+for (const [name, fail] of [
+  ["a server problem", (page: Page) => failSession(page, 503, "Unavailable")],
+  ["a network failure", async (page: Page) => {
+    await page.route("**/cdn-cgi/access/get-identity", route => route.fulfill({ json: { email: "someone@example.test" } }));
+    await page.route("**/api/**", route => route.abort("failed"));
+  }],
+] as const) test(`${name} still offers the way out: retry first, another email, and support`, async ({ page }) => {
+  await fail(page);
   await page.goto("/");
   const screen = page.getByRole("main", { name: "Operations is unavailable right now" });
-  await expect(screen.getByRole("button", { name: "Try again" })).toBeVisible();
-  await expect(screen.getByRole("link")).toHaveCount(0);
+  await expect(screen.getByRole("button", { name: "Try again" })).toHaveClass(/button-orange/);
+  await expect(screen.getByRole("link", { name: "Sign in with a different email" })).toHaveAttribute("href", "/cdn-cgi/access/logout");
+  await expect(screen.getByRole("link", { name: "info@ledgetopdroneservices.com" })).toHaveAttribute("href", "mailto:info@ledgetopdroneservices.com");
 });
 
 test("the card fits the screen without sideways scrolling", async ({ page }) => {
@@ -127,7 +134,7 @@ test("one click signs out of Access and returns to Operations' sign-in", async (
 test("the Access sign-out wording is honest about the shared sign-in", async ({ page }) => {
   await failSession(page, 403, notSetUp);
   await page.goto("/");
-  await expect(page.getByText("This signs you out of Cloudflare Access in this browser, so other Ledge Top apps will ask you to sign in again too. It doesn't change any account.")).toBeVisible();
+  await expect(page.getByText("Signing out ends your Ledge Top sign-in in this browser, so other Ledge Top apps will ask you to sign in again too. It doesn't change any account.")).toBeVisible();
 });
 
 test("a pending sign-out ignores further clicks", async ({ page }) => {

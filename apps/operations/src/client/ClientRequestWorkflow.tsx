@@ -262,7 +262,7 @@ export function ClientRequestWorkflow({
       <div className="notice managed-notice">
         <strong>Operational review only</strong>
         <span>
-          LTDS estimates are non-binding. Quotes, contracts, invoices, and
+          Ledge Top estimates are non-binding. Quotes, contracts, invoices, and
           financial notices remain owned by Project Alpha.
         </span>
       </div>
@@ -886,7 +886,7 @@ function ClientRequestDetail({
         {request.status === "accepted_pending_pa_linkage" &&
           legacyPaQuoteLinkEnabled && (
           <p className="muted">
-            Manual fallback links an existing Project Alpha quote record; it does not create, approve, or price one in LTDS.
+            Manual fallback links an existing Project Alpha quote record; it does not create, approve, or price one in Ledge Top.
           </p>
         )}
         {request.quote_document_number && (

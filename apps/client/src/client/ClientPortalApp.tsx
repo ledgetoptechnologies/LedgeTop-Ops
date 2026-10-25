@@ -7,7 +7,7 @@ import {
   type FormEvent,
   type ReactNode,
 } from "react";
-import { AccountMenu, Card, EmptyState, Loading, StatusPill, openViewerShell, requestText, Skeleton } from "@ltds/ui";
+import { AccountMenu, Card, EmptyState, Loading, SignInRecovery, StatusPill, openViewerShell, requestText, Skeleton } from "@ltds/ui";
 import { PortalBoundary, PortalBrand } from "./PortalShell";
 import { VideoPlayer } from "./VideoPlayer";
 import { PORTAL_APP_API, type DeliveryLocationCollection } from "@ltds/shared";
@@ -104,6 +104,7 @@ import {
   type ClientPortalPage,
 } from "./portal-route";
 import { MapAreaSelector } from "./MapAreaSelector";
+import { ServiceQuestionField, questionIsAnswered } from "./service-questions";
 import { ImageLocationMap } from "./ImageLocationMap";
 import { ServiceLibrary } from "./ServiceLibrary";
 import { canBeginRequest, RequestAvailabilityMessage, useRequestAvailability, type RequestAvailability } from "./RequestAvailability";
@@ -129,7 +130,7 @@ type TopPage = "dashboard" | "projects" | "deliveries" | "requests" | "feedback"
 type WorkspaceTab = "overview" | "files" | "models" | "requests";
 type PortalGate =
   | { status: "loading" }
-  | { status: "blocked"; title: string; detail: string; optionalClientWorkspaceAbsent: boolean }
+  | { status: "blocked"; title: string; detail: string; optionalClientWorkspaceAbsent: boolean; lead?: "different" | "again" }
   | { status: "ready"; data: PortalBootstrap | NativePortalBootstrap };
 
 const navigation: Array<{ page: TopPage; label: string }> = [
@@ -175,6 +176,7 @@ function blockedPortal(
       status: "blocked",
       optionalClientWorkspaceAbsent,
       title: "Sign in required",
+      lead: "again",
       detail: "Your session has ended. Sign in with the email address registered with Ledge Top to continue.",
     };
   if (isNoAuthorizedClientWorkspace(caught))
@@ -182,6 +184,7 @@ function blockedPortal(
       status: "blocked",
       optionalClientWorkspaceAbsent,
       title: "No client account yet",
+      lead: "different",
       detail:
         "You're signed in, but no client account has been shared with your sign-in yet. Contact your Ledge Top representative.",
     };
@@ -190,6 +193,7 @@ function blockedPortal(
       status: "blocked",
       optionalClientWorkspaceAbsent,
       title: "Client access not set up yet",
+      lead: "different",
       detail:
         "You're signed in, but this account doesn't have access to this client account. Contact your Ledge Top representative.",
     };
@@ -961,43 +965,6 @@ function dateTimeLocalValue(value: string | null): string {
   if (!Number.isFinite(date.getTime())) return "";
   const local = new Date(date.getTime() - date.getTimezoneOffset() * 60_000);
   return local.toISOString().slice(0, 16);
-}
-
-function questionIsAnswered(question: PortalServiceQuestion, value: unknown): boolean {
-  if (!question.required) return true;
-  if (question.type === "boolean") return typeof value === "boolean";
-  if (question.type === "multi_select") return Array.isArray(value) && value.length > 0;
-  return value !== undefined && value !== null && String(value).trim().length > 0;
-}
-
-function ServiceQuestionField({
-  serviceId,
-  question,
-  value,
-  onChange,
-}: {
-  serviceId: string;
-  question: PortalServiceQuestion;
-  value: unknown;
-  onChange: (value: unknown) => void;
-}) {
-  const id = `service-${serviceId}-${question.id}`;
-  const helpId = question.helpText ? `${id}-help` : undefined;
-  const shared = { id, required: question.required, "aria-describedby": helpId };
-  let control: ReactNode;
-  if (question.type === "text") {
-    control = <input {...shared} value={typeof value === "string" ? value : ""} maxLength={question.maxLength} onChange={(event) => onChange(event.target.value)} />;
-  } else if (question.type === "number") {
-    control = <input {...shared} type="number" value={typeof value === "number" ? value : ""} min={question.minimum ?? undefined} max={question.maximum ?? undefined} onChange={(event) => onChange(event.target.value === "" ? undefined : event.target.valueAsNumber)} />;
-  } else if (question.type === "boolean") {
-    control = <select {...shared} value={typeof value === "boolean" ? String(value) : ""} onChange={(event) => onChange(event.target.value === "" ? undefined : event.target.value === "true")}><option value="">Select an answer</option><option value="true">Yes</option><option value="false">No</option></select>;
-  } else if (question.type === "select") {
-    control = <select {...shared} value={typeof value === "string" ? value : ""} onChange={(event) => onChange(event.target.value || undefined)}><option value="">Select an option</option>{question.options.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}</select>;
-  } else {
-    const selected = Array.isArray(value) ? value as string[] : [];
-    control = <div className="portal-service-options" id={id} aria-describedby={helpId}>{question.options.map(option => <label key={option.value} className="portal-check-option"><input type="checkbox" checked={selected.includes(option.value)} onChange={(event) => onChange(event.target.checked ? [...selected, option.value] : selected.filter(item => item !== option.value))} /> <span>{option.label}</span></label>)}</div>;
-  }
-  return <div className="portal-service-question"><label htmlFor={question.type === "multi_select" ? undefined : id}>{question.label}{question.required ? <span aria-hidden="true"> *</span> : <span> (optional)</span>}{control}</label>{question.helpText && <small id={helpId}>{question.helpText}</small>}</div>;
 }
 
 function formatRequestMoney(minor: number, currency: string): string {
@@ -3054,18 +3021,10 @@ export function ClientPortalApp({
       <PortalBoundary>
         <Card>
           <EmptyState title={gate.title} detail={gate.detail} />
-          <div className="portal-gate-actions">
-            <button
-              type="button"
-              className="button-orange"
-              onClick={() => {
-                setGate({ status: "loading" });
-                setBootstrapRevision(value => value + 1);
-              }}
-            >
-              Retry portal
-            </button>
-          </div>
+          <SignInRecovery returnTo="/portal" lead={gate.lead ?? "retry"} onRetry={() => {
+            setGate({ status: "loading" });
+            setBootstrapRevision(value => value + 1);
+          }} />
         </Card>
       </PortalBoundary>
     );
@@ -3240,7 +3199,7 @@ export function ClientPortalApp({
   if (viewerRoute)
     content = <ClientViewerShell route={viewerRoute} />;
   else if (unifiedView)
-    content = <UnifiedPortal page={page as UnifiedPage} workspaces={workspaces}
+    content = <UnifiedPortal page={page as UnifiedPage} workspaces={workspaces} mapboxPublicToken={mapboxPublicToken}
       openInAccount={openInAccount} navigate={navigate} supplement={page === "dashboard" ? <><SharedViewerWork workspaces={workspaces} />{operationsHomeSummary}</> : page === "deliveries" ? <SharedViewerWork workspaces={workspaces} /> : undefined}
       renderStatus={request => <StatusPill tone={statusTone(request.status)}>{statusLabel(request.status, request.projectAlphaDraftCreated)}</StatusPill>} />;
   else if (native)

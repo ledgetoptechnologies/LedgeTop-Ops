@@ -115,7 +115,7 @@ test("J7 a verified identity with no authorized workspace sees access setup, not
   await page.goto("/portal/dashboard");
   await expect(page.getByText("No client account yet", { exact: true })).toBeVisible();
   await expect(page.getByText("Portal temporarily unavailable", { exact: true })).toHaveCount(0);
-  await expect(page.getByRole("button", { name: "Retry portal" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Try again" })).toBeVisible();
   expect(fixture.calls.some(call => /\/(context|deliveries|projects)$/.test(call.path))).toBe(false);
 });
 

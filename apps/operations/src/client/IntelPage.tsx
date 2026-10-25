@@ -4,7 +4,7 @@ import type { StaffTenantView } from "@ltds/shared/competitor-intel";
 import { ApiError } from "./api";
 import { CompetitorIntelTenant } from "./CompetitorIntel";
 import {
-  INTEL_RANGES, IntelUnavailable, loadCompetitors, loadIntelBusinesses, loadSearchStats, loadWebsiteStats, sendCompetitorCommand,
+  INTEL_RANGES, IntelUnavailable, loadCompetitors, loadIntelBusinesses, loadSearchStats, loadWebsiteStats,
   type IntelBusiness, type IntelRange, type SearchRow, type SearchStats, type WebsiteStats, type WebsiteTotals,
 } from "./intel-api";
 import "./IntelPage.css";
@@ -57,7 +57,7 @@ function useSection<T>(load: (signal: AbortSignal) => Promise<T>, deps: unknown[
 
 /**
  * Internal Intel for Ledge Top's own businesses: pick Drone Services or Technologies, then competitor monitoring,
- * website analytics or Search Console. Read-only apart from Competitor Intel's existing review commands.
+ * website analytics or Search Console. Entirely read-only.
  */
 export function IntelPage() {
   const [businesses, setBusinesses] = useState<Load<IntelBusiness[]>>({ kind: "loading" });
@@ -127,7 +127,8 @@ function Status<T>({ state, retry, unavailable, children }: { state: Load<T>; re
 function Competitors({ business }: { business: IntelBusiness }) {
   const [state, retry] = useSection<StaffTenantView>(signal => loadCompetitors(business.key, signal), [business.key]);
   return <Status state={state} retry={retry} unavailable={["Competitor monitoring isn't set up", `Competitors for ${business.name} haven't been added yet.`]}>
-    {view => <CompetitorIntelTenant view={view} onCommand={command => sendCompetitorCommand(business.key, command)} />}
+    {/* Read-only until the Intel backend accepts commands: no scan, verdict or publish controls. */}
+    {view => <CompetitorIntelTenant view={view} />}
   </Status>;
 }
 

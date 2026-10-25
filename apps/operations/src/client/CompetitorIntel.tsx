@@ -92,16 +92,20 @@ function Tile({ label, value, detail, tone }: { label: string; value: number; de
 
 type Tab = "review" | "competitors" | "ads" | "self" | "publish";
 
-export function CompetitorIntelTenant({ view, onCommand, onBack }: { view: StaffTenantView; onCommand: Send; onBack?: () => void }) {
+/** Without `onCommand` the view is read-only: no scans, verdicts or client reports can be requested from it. */
+export function CompetitorIntelTenant({ view, onCommand, onBack }: { view: StaffTenantView; onCommand?: Send; onBack?: () => void }) {
   const [tab, setTab] = useState<Tab>("review");
-  const { busy, notice, run } = useCommand(onCommand);
+  const readOnly = !onCommand;
+  const { busy, notice, run } = useCommand(onCommand ?? (() => Promise.resolve()));
   const unreviewed = view.changes.filter(change => !change.verdict).length;
   const queued = (kind: WorkerIntentKind) => view.intents.find(intent => intent.kind === kind && (intent.state === "queued" || intent.state === "leased"));
   const tabs: { id: Tab; label: string; badge?: number; internal?: boolean }[] = [
     { id: "review", label: "Review changes", badge: unreviewed }, { id: "competitors", label: "Competitors" },
-    { id: "ads", label: "Google Ads" }, { id: "self", label: "Self-assessment", internal: true }, { id: "publish", label: "Client report" },
+    { id: "ads", label: "Google Ads" }, { id: "self", label: "Self-assessment", internal: true },
+    ...readOnly ? [] : [{ id: "publish" as const, label: "Client report" }],
   ];
   const worker = (kind: WorkerIntentKind, command: CompetitorIntelCommand, label: string) => {
+    if (readOnly) return null;
     const pending = queued(kind);
     return <button type="button" className="button-ghost" disabled={Boolean(busy) || Boolean(pending)}
       title={`Up to ${DAILY_INTENT_LIMITS[kind]} per client per day`}
@@ -119,10 +123,10 @@ export function CompetitorIntelTenant({ view, onCommand, onBack }: { view: Staff
           {view.latestScan ? <FreshnessTag freshness={view.latestScan.freshness} at={view.latestScan.completedAt} label="Last scan" /> : <span className="ci-muted">No scan yet</span>}
         </p>
       </div>
-      <div className="ci-actions" aria-label="Request work">
+      {!readOnly && <div className="ci-actions" aria-label="Request work">
         {worker("run_scan", { kind: "run_scan", params: { scanType: "full", competitorSubjectKeys: [] } }, "Run scan")}
         {view.providerAccountRef && worker("run_ads_review", { kind: "run_ads_review", params: { providerAccountRef: view.providerAccountRef } }, "Review Google Ads")}
-      </div>
+      </div>}
     </header>
     {notice && <p className={`ci-notice ci-notice-${notice.tone}`} role={notice.tone === "error" ? "alert" : "status"}>{notice.text}</p>}
     <nav className="ltds-segmented ci-tabs" role="tablist" aria-label="Competitor Intel views">
@@ -133,19 +137,19 @@ export function CompetitorIntelTenant({ view, onCommand, onBack }: { view: Staff
       </button>)}
     </nav>
     <div role="tabpanel" id={`ci-panel-${tab}`} aria-labelledby={`ci-tab-${tab}`} className="ci-panel">
-      {tab === "review" && <ReviewPanel view={view} busy={busy} run={run} />}
+      {tab === "review" && <ReviewPanel view={view} busy={busy} run={readOnly ? null : run} />}
       {tab === "competitors" && <CompetitorsPanel competitors={view.competitors} />}
       {tab === "ads" && <AdsPanel view={view} />}
       {tab === "self" && <SelfPanel view={view} action={view.scopeKey
         ? worker("run_self_assessment", { kind: "run_self_assessment", params: { scopeKey: view.scopeKey } }, "Run self-assessment") : null} />}
-      {tab === "publish" && <PublishPanel view={view} busy={busy} run={run} />}
+      {tab === "publish" && !readOnly && <PublishPanel view={view} busy={busy} run={run} />}
     </div>
   </section>;
 }
 
 type Run = ReturnType<typeof useCommand>["run"];
 
-function ReviewPanel({ view, busy, run }: { view: StaffTenantView; busy: string | null; run: Run }) {
+function ReviewPanel({ view, busy, run }: { view: StaffTenantView; busy: string | null; run: Run | null }) {
   const [filter, setFilter] = useState<"open" | "reviewed" | "all">("open");
   const names = new Map(view.competitors.map(competitor => [competitor.subjectKey, competitor.name]));
   const rank = (change: StaffChange) => change.significance.value ? SIGNIFICANCE_ORDER.indexOf(change.significance.value) : 4;
@@ -154,7 +158,8 @@ function ReviewPanel({ view, busy, run }: { view: StaffTenantView; busy: string 
     .sort((a, b) => (filter === "open" ? rank(a) - rank(b) : 0) || b.detectedAt.localeCompare(a.detectedAt));
   return <div className="ci-review">
     <div className="ci-review-intro">
-      <p>Your verdict checks whether Jev classified the change correctly. It never publishes anything to the client.</p>
+      <p>{run ? "Your verdict checks whether Jev classified the change correctly. It never publishes anything to the client."
+        : "Website changes Hermes found on competitor sites, newest and most significant first."}</p>
       <div className="ltds-segmented" role="group" aria-label="Show changes">
         {(["open", "reviewed", "all"] as const).map(value => <button key={value} type="button" aria-pressed={filter === value} onClick={() => setFilter(value)}>
           {value === "open" ? "Needs review" : value === "reviewed" ? "Reviewed" : "All"}</button>)}
@@ -167,11 +172,11 @@ function ReviewPanel({ view, busy, run }: { view: StaffTenantView; busy: string 
   </div>;
 }
 
-function ChangeCard({ change, competitor, busy, run }: { change: StaffChange; competitor: string; busy: string | null; run: Run }) {
+function ChangeCard({ change, competitor, busy, run }: { change: StaffChange; competitor: string; busy: string | null; run: Run | null }) {
   const [editing, setEditing] = useState(!change.verdict), [note, setNote] = useState(change.verdict?.note ?? "");
   const key = `verdict:${change.operationId}`, band = confidenceBand(change.significance.confidence);
   const decide = async (verdict: "accurate" | "inaccurate") => {
-    if (await run(key, { kind: "set_verdict", params: { changeOperationId: change.operationId, verdict, note: note.normalize("NFC").trim() } },
+    if (run && await run(key, { kind: "set_verdict", params: { changeOperationId: change.operationId, verdict, note: note.normalize("NFC").trim() } },
       `Marked ${verdict}.`)) setEditing(false);
   };
   return <article className={`ci-change ci-change-${change.significance.value ?? "none"}`} aria-label={`${competitor}: ${change.pageTitle ?? change.pageUrl.url}`}>
@@ -192,7 +197,11 @@ function ChangeCard({ change, competitor, busy, run }: { change: StaffChange; co
       </dl>
     </div>
     <SentenceDiff added={change.addedSentences} removed={change.removedSentences} />
-    {!editing && change.verdict ? <div className={`ci-verdict ci-verdict-${change.verdict.verdict}`}>
+    {!run ? change.verdict && <div className={`ci-verdict ci-verdict-${change.verdict.verdict}`}>
+      <p><strong>{change.verdict.verdict === "accurate" ? "Accurate" : "Inaccurate"}</strong> · {change.verdict.decidedBy}, {ciDate(change.verdict.decidedAt)}
+        {change.verdict.note && <span className="ci-verdict-note">“{change.verdict.note}”</span>}</p>
+    </div>
+    : !editing && change.verdict ? <div className={`ci-verdict ci-verdict-${change.verdict.verdict}`}>
       <p><strong>{change.verdict.verdict === "accurate" ? "Accurate" : "Inaccurate"}</strong> · {change.verdict.decidedBy}, {ciDate(change.verdict.decidedAt)}
         {change.verdict.note && <span className="ci-verdict-note">“{change.verdict.note}”</span>}</p>
       <button type="button" className="button-ghost" onClick={() => setEditing(true)}>Change verdict</button>

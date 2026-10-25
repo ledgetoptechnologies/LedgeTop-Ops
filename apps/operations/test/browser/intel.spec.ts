@@ -104,15 +104,26 @@ test("an unconnected source says so instead of showing zeros", async ({ page }) 
   await expect(page.getByRole("list", { name: "Website totals" })).toHaveCount(0);
 });
 
-test("competitor review commands go to the selected business with the staff CSRF token", async ({ page }) => {
+test("competitor intel is read-only: no scan, verdict or client report controls, and nothing is sent", async ({ page }) => {
   const requests = await mockOps(page);
   await page.goto("/intel?business=drone-services&view=competitors");
-  await page.getByRole("button", { name: "Run scan" }).click();
-  await expect.poll(() => requests.filter(request => request.method() === "POST").length).toBe(1);
-  const post = requests.find(request => request.method() === "POST")!;
-  expect(new URL(post.url()).pathname).toBe("/api/intel/drone-services/competitors/commands");
-  expect(post.headers()["x-csrf-token"]).toBe("csrf-test");
-  expect(post.postDataJSON()).toMatchObject({ kind: "run_scan" });
+  await expect(page.getByRole("heading", { name: sampleStaffTenant.tenantName })).toBeVisible();
+  for (const name of ["Run scan", "Review Google Ads", "Accurate", "Inaccurate", "Change verdict"])
+    await expect(page.getByRole("button", { name, exact: true })).toHaveCount(0);
+  await expect(page.getByRole("tab", { name: "Client report" })).toHaveCount(0);
+  await page.getByRole("tab", { name: /Self-assessment/ }).click();
+  await expect(page.getByRole("button", { name: "Run self-assessment" })).toHaveCount(0);
+  expect(requests.filter(request => request.method() !== "GET")).toEqual([]);
+});
+
+test("a total the source doesn't report reads as not tracked, never as zero", async ({ page }) => {
+  await mockOps(page, { sections: { "drone-services/website": { json: { ...website,
+    totals: { ...website.totals, conversions: null, engagementRate: null }, previous: null } } } });
+  await page.goto("/intel?business=drone-services&view=website");
+  const totals = page.getByRole("list", { name: "Website totals" });
+  await expect(totals.getByRole("listitem").filter({ hasText: "Conversions" })).toContainText("Not tracked");
+  await expect(totals.getByRole("listitem").filter({ hasText: "Engaged visits" })).toContainText("Not tracked");
+  await expect(totals.getByRole("listitem").filter({ hasText: "Visitors" })).toContainText("1,240");
 });
 
 test("Intel is hidden unless the session grants it, even to administrators, and a server refusal shows nothing private", async ({ page }) => {

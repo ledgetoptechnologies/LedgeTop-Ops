@@ -6,7 +6,8 @@ export function formatSessionRemaining(milliseconds: number): string {
   return [days ? `${days}d` : "", days || hours ? `${hours}h` : "", `${rest}m`].filter(Boolean).join(" ");
 }
 
-/** "Fri, Oct 24, 3:30 PM" in the viewer's own time zone. */
-export function formatSessionExpiry(epochMilliseconds: number, locale?: string | string[]): string {
-  return new Date(epochMilliseconds).toLocaleString(locale, { weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+/** "Wed, Oct 28, 2026": the calendar day a sign-in ends, in Ledge Top's own time zone (America/Chicago). */
+export function formatSessionExpiry(epochMilliseconds: number): string {
+  return new Intl.DateTimeFormat("en-US", { timeZone: "America/Chicago", weekday: "short", month: "short", day: "numeric", year: "numeric" })
+    .format(new Date(epochMilliseconds));
 }

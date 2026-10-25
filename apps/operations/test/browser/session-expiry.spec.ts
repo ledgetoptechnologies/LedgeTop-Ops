@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test";
 
-test("account menu shows a live server-timed session above Logout and refreshes on reopen", async ({ page }) => {
+test("account menu shows the server-timed expiry date above Logout and refreshes on reopen", async ({ page }) => {
   let statusRequests = 0;
   let failed = false;
   let serverError = false;
@@ -30,11 +30,12 @@ test("account menu shows a live server-timed session above Logout and refreshes 
   expect(statusRequests).toBe(0);
   await trigger.click();
   const menu = page.getByRole("menu", { name: "Account" });
-  await expect(menu.getByRole("timer")).toHaveText("Less than a minute");
+  await expect(menu.locator("time")).toHaveText("Tue, Jan 1, 2030");
   await expect(menu.getByRole("menuitem", { name: "Account" })).toBeFocused();
   await expect(menu.getByRole("menuitem", { name: "Get the app" })).toBeVisible();
-  // The expiry reads as a full date and time, never seconds.
-  await expect(menu.locator("time")).toHaveText(/^[A-Z][a-z]{2}, [A-Z][a-z]{2} \d{1,2}, \d{1,2}:\d{2}\s?[AP]M$/);
+  // The expiry is a calendar date in Ledge Top's time zone, with no countdown.
+  await expect(menu.locator(".account-session-status strong")).toHaveText("Expires Tue, Jan 1, 2030");
+  await expect(menu.getByRole("timer")).toHaveCount(0);
   const order = await menu.evaluate(node => {
     const status = node.querySelector(".account-session-status")!;
     const logout = node.querySelector('a[role="menuitem"][href="/cdn-cgi/access/logout"]')!;
@@ -42,18 +43,18 @@ test("account menu shows a live server-timed session above Logout and refreshes 
   });
   expect(order).toBe(true);
   await page.clock.fastForward(2500);
-  await expect(menu.getByRole("timer")).toHaveText("Less than a minute");
+  await expect(menu.locator("time")).toHaveText("Tue, Jan 1, 2030");
   await page.clock.fastForward(2000);
   await expect(menu.getByText("Session expired", { exact: true })).toBeVisible();
   await page.keyboard.press("Escape");
   await expect(menu).toHaveCount(0);
   seconds = 3600;
   await trigger.click();
-  await expect(menu.getByRole("timer")).toHaveText(/^(?:1h 0m|59m)$/);
+  await expect(menu.locator("time")).toHaveText("Tue, Jan 1, 2030");
   expect(statusRequests).toBe(2);
   seconds = 7200;
   await page.evaluate(() => window.dispatchEvent(new Event("focus")));
-  await expect(menu.getByRole("timer")).toHaveText(/^(?:2h 0m|1h 59m)$/);
+  await expect(menu.locator("time")).toHaveText("Tue, Jan 1, 2030");
   serverError = true;
   await page.evaluate(() => window.dispatchEvent(new Event("focus")));
   await expect(menu.getByText("Session time unavailable", { exact: true })).toBeVisible();

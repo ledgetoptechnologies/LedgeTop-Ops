@@ -1,10 +1,10 @@
 import { useEffect, useState } from "react";
-import { formatSessionExpiry, formatSessionRemaining } from "@ltds/ui";
+import { formatSessionExpiry } from "@ltds/ui";
 
 type Clock = { deadline: number; expiresAt: number };
 
 /**
- * How long this browser's sign-in lasts, like the Operations account menu. Mounted only while the menu is
+ * The day this browser's sign-in ends, like the Operations account menu. Mounted only while the menu is
  * open; reads the server's view of the verified sign-in and never inspects cookies or tokens itself.
  * Until the portal reports session timing, nothing is shown rather than a guess.
  */
@@ -34,18 +34,22 @@ export function ClientSessionExpiry() {
       } catch { if (!controller.signal.aborted) setState("unavailable"); }
     };
     void refresh();
-    const tick = setInterval(() => setNow(performance.now()), 1000);
     const recheck = setInterval(() => { void refresh(); }, 60_000);
-    return () => { controller.abort(); clearInterval(tick); clearInterval(recheck); };
+    return () => { controller.abort(); clearInterval(recheck); };
   }, []);
+  // No countdown is shown, so the clock only needs to move once: when the sign-in runs out.
+  useEffect(() => {
+    if (!clock) return;
+    const timer = setTimeout(() => setNow(performance.now()), Math.max(0, clock.deadline - performance.now()) + 50);
+    return () => clearTimeout(timer);
+  }, [clock]);
   if (state === "unsupported") return null;
   const expired = state === "expired" || state === "ready" && clock !== null && now >= clock.deadline;
   return <div className="account-session-status">
     {expired ? <><strong>Session expired</strong><small>Sign in again to continue.</small></>
       : state === "ready" && clock ? <>
-        <small>Session valid for</small>
-        <strong role="timer" aria-live="off">{formatSessionRemaining(clock.deadline - now)}</strong>
-        <small>Expires <time dateTime={new Date(clock.expiresAt).toISOString()}>{formatSessionExpiry(clock.expiresAt)}</time></small>
+        <small>Signed in</small>
+        <strong>Expires <time dateTime={new Date(clock.expiresAt).toISOString()}>{formatSessionExpiry(clock.expiresAt)}</time></strong>
       </> : <small>{state === "loading" ? "Checking session…" : "Session time unavailable"}</small>}
   </div>;
 }

@@ -346,7 +346,7 @@ test("portal identifies an unfinished schema update and retries cleanly on mobil
   await page.goto("/portal");
   await expect(page.getByText("Portal update in progress", { exact: true })).toBeVisible();
   await expect(page.getByText(/access is valid/i)).toBeVisible();
-  await page.getByRole("button", { name: "Retry portal" }).click();
+  await page.getByRole("button", { name: "Try again" }).click();
   await expect(page.getByRole("heading", { name: "Acme Surveying" })).toBeVisible();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
 });

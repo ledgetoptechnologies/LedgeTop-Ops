@@ -3864,7 +3864,7 @@ function ViewerDataOverview({session}:{session:Session}) {
     if (popup) {
       setPopupBlocked(false);
       popup.document.title = "Opening Ledge Top Viewer";
-      popup.document.body.textContent = "Opening the secure LTDS Viewer workspace…";
+      popup.document.body.textContent = "Opening the secure Ledge Top Viewer workspace…";
     }
     setOpening(true); setActionError("");
     try {
@@ -7373,7 +7373,7 @@ function Administration({ session }: { session: Session }) {
         {!canManageConnections && <section className="administration-panel administration-panel-wide"><Card title="Project Alpha"><p>Connection management requires an administrator with global integration-management permission.</p></Card></section>}
         <section className="administration-panel administration-panel-wide"><Card title="Security model">
           <p>
-            Cloudflare Access authenticates staff. LTDS roles, explicit grants,
+            Cloudflare Access authenticates staff. Ledge Top roles, explicit grants,
             resource scopes, and explicit denies authorize every API request.
           </p>
           <ul>
