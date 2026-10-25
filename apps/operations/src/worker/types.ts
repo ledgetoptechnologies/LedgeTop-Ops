@@ -98,6 +98,8 @@ export type Env = Omit<
   ENVIRONMENT?: string;
   /** Default-off fresh browser navigation only; existing sessions remain local. */
   CANONICAL_BROWSER_NAVIGATION_ENABLED?: string;
+  /** Dedicated incoming-host observation ingress; default off. */
+  COMPETITOR_INTEL_INGEST_ENABLED?: string;
   /** Default-off explicit active Directory binding revision refresh; local/staging only. */
   NATIVE_DIRECTORY_BINDING_REFRESH_ENABLED?: string;
   /** Default-off one-level terminal-conflict recovery for an uncertain binding refresh. */

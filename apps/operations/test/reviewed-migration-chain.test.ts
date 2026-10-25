@@ -142,6 +142,7 @@ describe("reviewed release migration fixtures", () => {
     ["operations", "0225_native_staff_lifecycle_bridge.sql"],
     ["operations", "0226_staff_login_bindings.sql"],
     ["operations", "0227_owner_intel_reads.sql"],
+    ["operations", "0228_competitor_intel_ingest.sql"],
     ["client", "0235_windows_portal_successor_candidates.sql"],
     ["client", "0236_windows_portal_successor_content_start_audit.sql"],
     ["client", "0237_viewer_direct_client_grants.sql"],
