@@ -2,7 +2,7 @@ import { z } from 'zod';
 import { IntelIngestError,int63,strictIntelJson,text,timestamp } from './competitor-intel-ingest-schema';
 
 // Preparation only: nothing imports this module from the deployed ingest path.
-export const OWNER_INTEL_V2_DRAFT_SHA='6e5f1525d3b391623e42e2e2e50a9e58413f74903847d781372bc282a89c4c0e';
+export const OWNER_INTEL_V2_DRAFT_SHA='ff354e29fbb8e751317db502e18b3654af42f24652a30e67eb61bb60cde0e567';
 const count=z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
 const decimal=z.string().regex(/^-?\d{1,15}(\.\d{1,6})?$/);
 const nonnegative=decimal.refine(v=>Number(v)>=0);
@@ -24,6 +24,17 @@ const search=z.object({siteUrl:text(2048).min(1),period,totals,
  topQueries:z.array(z.object({query:text(),...gscMetrics}).strict()).max(25),
  topPages:z.array(z.object({url,...gscMetrics}).strict()).max(25),
  comparison:z.object({previousPeriod:period,clicksDeltaPercent:decimal.nullable(),impressionsDeltaPercent:decimal.nullable()}).strict().nullable(),provenance}).strict();
+const gaMetrics={activeUsers:count.nullable(),newUsers:count.nullable(),sessions:count.nullable(),engagedSessions:count.nullable(),engagementRatePercent:percent.nullable(),avgEngagementSeconds:nonnegative.nullable(),keyEvents:nonnegative.nullable()};
+const analytics=z.object({propertyRef:text(120).min(1).nullable(),propertyDisplayName:text().nullable(),
+ providerLimits:z.object({thresholded:z.boolean().nullable(),sampled:z.boolean().nullable()}).strict(),period,
+ totals:z.object({...gaMetrics,state,reason:reason.nullable()}).strict().refine(v=>{
+  const metrics=[v.activeUsers,v.newUsers,v.sessions,v.engagedSessions,v.engagementRatePercent,v.avgEngagementSeconds,v.keyEvents];
+  return v.state==='observed'?metrics.some(x=>x!==null)&&v.reason===null:metrics.every(x=>x===null)&&(v.state==='none_found'?v.reason===null:v.reason!==null);
+ }),
+ daily:z.array(z.object({date,activeUsers:count.nullable(),sessions:count.nullable()}).strict()).max(93),
+ channels:z.array(z.object({channelGroup:text(60),sessions:count.nullable(),keyEvents:nonnegative.nullable()}).strict()).max(10),
+ topLandingPages:z.array(z.object({path:text(500),sessions:count.nullable(),keyEvents:nonnegative.nullable()}).strict()).max(25),
+ keyEventNames:z.array(text(100)).max(20),provenance}).strict();
 const ownSite=z.object({canonicalDomain:text(253).min(1),monitoredPages:z.array(sourceRef.extend({contentSha256:z.string().regex(/^[A-Za-z0-9_-]{43}$/),contentLength:count}).strict()).max(25),
  changesSincePrevious:z.array(z.object({pageUrl:sourceRef,changeType:z.enum(['content_changed','redirect_external','website_parked','site_unavailable']),summary:text(1000,true),addedSentences:z.array(text(500,true)).max(20),removedSentences:z.array(text(500,true)).max(20),detectedAt:timestamp}).strict()).max(20),
  technical:z.object({httpsOk:stated(z.boolean()),sitemapPageCount:stated(count),robotsAllowsIndexing:stated(z.boolean()),avgFetchMs:count.nullable()}).strict(),provenance}).strict();
@@ -31,6 +42,7 @@ const social=z.object({ownerSubjectKey:z.string().regex(/^(?:comp|own):[A-Za-z0-
 const common={schemaVersion:z.literal('ci.observation.v1'),producerId:z.string().regex(/^[a-z0-9-]{3,64}$/),operationId:z.string().regex(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/),monitoringBindingId:text(191).min(1),configurationRevision:count.min(1),subjectKey:z.string().regex(/^[A-Za-z0-9:_-]{3,120}$/),sourceSequence:z.object({epoch:int63,counter:int63}).strict(),commandBinding:z.null(),observedAt:timestamp,completedAt:timestamp,semantics:z.object({observation:z.literal('ci.obs.v2'),scoring:z.literal('concern_0_10.v1')}).strict()};
 const observation=z.discriminatedUnion('observationKind',[
  z.object({...common,observationKind:z.literal('search_console_summary'),payload:search}).strict(),
+ z.object({...common,observationKind:z.literal('ga4_summary'),payload:analytics}).strict(),
  z.object({...common,observationKind:z.literal('own_site'),payload:ownSite}).strict(),
  z.object({...common,observationKind:z.literal('social_presence'),payload:social}).strict(),
 ]);
@@ -56,11 +68,13 @@ function ctr(clicks:number,impressions:number,value:string|null){
  if(clicks>impressions)invalid();
  if(impressions===0){if(value!==null)invalid();return;}
  if(value===null)invalid();
- // Fixed-point arithmetic keeps tolerance exact even at MAX_SAFE_INTEGER.
+ // Exact HALF-UP rounding to six percentage decimal places, including at
+ // MAX_SAFE_INTEGER counts. Equivalent trailing-zero representations agree.
  const [whole,fraction='']=value.split('.');
  const micros=BigInt(whole!)*1000000n+BigInt(fraction.padEnd(6,'0'));
- const difference=micros*BigInt(impressions)-BigInt(clicks)*100000000n;
- if((difference<0n?-difference:difference)>BigInt(impressions)*10000n)invalid();
+ const numerator=BigInt(clicks)*100000000n,denominator=BigInt(impressions);
+ const rounded=numerator/denominator+(numerator%denominator*2n>=denominator?1n:0n);
+ if(micros!==rounded)invalid();
 }
 function pageWithinProperty(value:string,scope:z.infer<typeof propertyScope>){
  const page=new URL(value);
@@ -97,14 +111,36 @@ export function validateOwnerIntelV2Observation(raw:Uint8Array,reviewed:Reviewed
   for(const row of q.topPages)if(!pageWithinProperty(row.url,scope))invalid();
   if(q.comparison&&(q.comparison.previousPeriod.days!==q.period.days||day(q.comparison.previousPeriod.end)!==day(q.period.start)-86400000))invalid();
   if(p.partialReason==='provider_data_delay'||q.totals.reason==='provider_data_delay'){
-   const recent=day(p.collectedAt)-(c.providerLagDays-1)*86400000;
-   if(!p.partial||p.partialReason!=='provider_data_delay'||p.lastDataDate===null||day(p.lastDataDate)<recent||day(p.lastDataDate)>day(p.collectedAt)
+   const recent=day(p.collectedAt)-c.providerLagDays*86400000;
+   if(!p.partial||p.partialReason!=='provider_data_delay'
     ||day(q.period.end)<recent||day(q.period.start)>day(p.collectedAt)||!hasLimits(p))invalid();
+   const known=new Set(q.daily.map(row=>row.date));
+   for(let when=day(q.period.start);when<=day(q.period.end);when+=86400000){
+    if(!known.has(new Date(when).toISOString().slice(0,10))&&(when<recent||when>day(p.collectedAt)))invalid();
+   }
   }
   if(p.partialReason==='source_stale'){
    if(p.lastDataDate===null||p.lastDataDate>=q.period.end||!hasLimits(p))invalid();
    if(p.lastDataDate<q.period.start&&(q.totals.state!=='unknown'||q.totals.reason!=='source_stale'||q.daily.length||q.topQueries.length||q.topPages.length))invalid();
   }
+ }else if(o.observationKind==='ga4_summary'){
+  const q=o.payload,t=q.totals,flags=q.providerLimits;
+  if(c.source!=='google_analytics_4'||!/^ga4:[A-Za-z0-9:_-]+$/.test(o.subjectKey)||p.partialReason==='provider_data_delay'||t.reason==='provider_data_delay')invalid();
+  data=t.state==='observed'||q.daily.length>0||q.channels.length>0||q.topLandingPages.length>0||q.keyEventNames.length>0;
+  const noResponse=t.state==='not_connected'||t.state==='failed'||t.reason==='consent_missing'||t.reason==='no_property_selected';
+  const noFlags=flags.thresholded===null&&flags.sampled===null;
+  if((flags.thresholded===null)!==(flags.sampled===null))invalid();
+  if(noResponse){if(data||!noFlags||p.asOf!==null||p.lastDataDate!==null||p.dataRange!==null)invalid();}
+  if((t.state==='not_connected'||t.reason==='consent_missing'||t.reason==='no_property_selected')&&p.partial)invalid();
+  else if(data&&noFlags)invalid();
+  if(q.propertyRef===null){
+   if(t.state!=='not_connected'||!['consent_missing','no_property_selected'].includes(t.reason??'')||data||!noFlags
+    ||q.propertyDisplayName!==null||p.asOf!==null||p.lastDataDate!==null||p.dataRange!==null||p.partial)invalid();
+  }else if(!c.propertyRefs.includes(q.propertyRef))invalid();
+  if(flags.thresholded===true||flags.sampled===true){if(!p.partial||p.partialReason!=='data_limited'||!hasLimits(p))invalid();}
+  if(t.newUsers!==null&&t.activeUsers!==null&&t.newUsers>t.activeUsers||t.engagedSessions!==null&&t.sessions!==null&&t.engagedSessions>t.sessions)invalid();
+  if(data&&q.daily.length<q.period.days&&!hasLimits(p))invalid();
+  let prior='';for(const row of q.daily){if(row.date<q.period.start||row.date>q.period.end||row.date<=prior)invalid();prior=row.date;}
  }else if(o.observationKind==='own_site'){
   const q=o.payload;
   if(c.source!=='hermes_site_monitor'||!/^own:[A-Za-z0-9:_-]+$/.test(o.subjectKey)||!c.canonicalDomains.includes(q.canonicalDomain))invalid();
