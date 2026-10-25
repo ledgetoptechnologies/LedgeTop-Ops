@@ -52,8 +52,10 @@ export async function acceptIntelObservation(database:D1Database,key:ProducerKey
   const accepted:AcceptedIntel[]=heads.results.filter(row=>row.raw_body!==null).map(row=>({observation:envelopeSchema.parse(JSON.parse(row.raw_body!)),digest:row.payload_sha256}));
   for(const kind of ['scan_run','self_assessment']){
    const row=await db.prepare(`SELECT i.observation_json raw_body,i.payload_sha256 FROM ci_ingest_kind_heads h JOIN ci_ingest_inbox i ON i.operation_id=h.operation_id
-    WHERE h.binding_id=? AND h.configuration_revision=? AND h.observation_kind=? ORDER BY json_extract(i.raw_body,'$.completedAt') DESC,i.operation_id DESC LIMIT 1`)
-    .bind(...args,kind).first<{raw_body:string;payload_sha256:string}>();
+    WHERE h.binding_id=? AND h.configuration_revision=? AND h.observation_kind=?
+     AND NOT(h.observation_kind=? AND h.subject_key=?)
+    ORDER BY json_extract(i.raw_body,'$.completedAt') DESC,i.operation_id DESC LIMIT 1`)
+    .bind(...args,kind,o.observationKind,o.subjectKey).first<{raw_body:string;payload_sha256:string}>();
    if(row)accepted.push({observation:envelopeSchema.parse(JSON.parse(row.raw_body)),digest:row.payload_sha256});
   }
   const filtered=accepted.filter(row=>!(row.observation.observationKind===o.observationKind&&row.observation.subjectKey===o.subjectKey));

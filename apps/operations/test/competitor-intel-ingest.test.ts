@@ -170,6 +170,27 @@ describe('incoming-only admission and atomic inbox/projector',()=>{
   const dto=await db.prepare('SELECT dto_json FROM owner_intel_competitor_projections WHERE binding_id=? AND configuration_revision=? ORDER BY revision DESC LIMIT 1').bind(value.monitoringBindingId,value.configurationRevision).first<string>('dto_json');
   expect(JSON.parse(dto!).competitors).toHaveLength(2);
  });
+ it.each(['scan_run','self_assessment'])('keeps the other subject as latest when a higher-tuple %s replacement regresses its timestamp',async kind=>{
+  async function sample(subject:string,counter:string,second:string){
+   const value=await current(observation(kind,counter));
+   const completedAt=`2026-10-22T23:30:${second}Z`,p=value.payload as Record<string,unknown>;
+   value.subjectKey=`${kind==='scan_run'?'scan':'self'}:${subject}`;
+   value.observedAt='2026-10-22T23:29:00Z';value.completedAt=completedAt;
+   if(kind==='scan_run')Object.assign(p,{state:'completed',startedAt:'2026-10-22T23:29:00Z',completedAt});
+   else Object.assign(p,{scopeKey:subject,assessedAt:completedAt});
+   return value;
+  }
+  const a10=await sample('a','1','10'),b9=await sample('b','1','09'),a8=await sample('a','2','08');
+  await direct(a10);await direct(b9);const accepted=await direct(a8);
+  expect(accepted.receipt.outcome).toBe('accepted_head');
+  expect(accepted.receipt.headAfter).toEqual({epoch:'1',counter:'2'});
+  const json=await db.prepare('SELECT dto_json FROM owner_intel_competitor_projections WHERE binding_id=? AND configuration_revision=? ORDER BY revision DESC LIMIT 1')
+   .bind(a8.monitoringBindingId,a8.configurationRevision).first<string>('dto_json');
+  const dto=JSON.parse(json!);
+  expect(kind==='scan_run'?dto.latestScan.completedAt:dto.selfAssessment.assessedAt).toBe('2026-10-22T23:30:09Z');
+  expect(await db.prepare('SELECT counter FROM ci_ingest_subject_heads WHERE binding_id=? AND configuration_revision=? AND subject_key=?')
+   .bind(a8.monitoringBindingId,a8.configurationRevision,a8.subjectKey).first<string>('counter')).toBe('2');
+ });
  it('fails reconstruction capacity before returning oversized normalized head blobs to the Worker',async()=>{
   const statements:D1PreparedStatement[]=[];
   for(let n=0;n<35;n++){

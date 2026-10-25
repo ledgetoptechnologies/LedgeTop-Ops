@@ -122,3 +122,16 @@ migration-chain tests also passed during this candidate's focused checks.
 Operations TypeScript checking and Git whitespace checks pass. The final
 host/query and transaction changes additionally passed four targeted tests.
 These checks establish no live host, key, producer mapping or deployment state.
+
+## Scan/self head replacement repair
+
+The bounded prior scan/self query excludes the incoming kind and subject before
+selecting its latest remaining row. This preserves another subject's newer
+completion when a valid higher tuple replaces the formerly latest subject with
+an older completion timestamp. The incoming observation is then considered
+alongside that prior candidate by the existing projector. Ordering heads,
+immutable receipts and the atomic transaction fences are unchanged.
+
+Two real local-D1 regressions (one per kind) first failed on frozen `3d30e657`
+with A10/B9/A8 incorrectly selecting A8. Both pass after this query repair;
+the incoming A head still advances to counter 2 while the read DTO selects B9.
