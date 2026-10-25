@@ -224,13 +224,13 @@ test("native folder file pagination preserves existing files and uses its opaque
 test("native media paths cannot point to another workspace even when the metadata envelope matches", async ({page}) => {
   await mock(page, (route, call) => call.path.endsWith("workspace-b/files/file-workspace-b") ? route.fulfill({json: {...envelope(), file: {...file(), downloadPath: file("workspace-c").downloadPath}}}) : undefined);
   await page.goto("/portal/deliveries?workspace=workspace-b&file=file-workspace-b");
-  await expect(page.getByRole("button", {name: "Retry portal"})).toBeVisible(); await expect(page.getByRole("dialog")).toHaveCount(0);
+  await expect(page.getByRole("button", {name: "Try again"})).toBeVisible(); await expect(page.getByRole("dialog")).toHaveCount(0);
 });
 
 for (const field of ["previewPath", "downloadPath"] as const) test(`native ${field} rejects a different encoded file handle in the same workspace`, async ({page}) => {
   const calls = await mock(page, (route, call) => call.path.endsWith("workspace-b/files/file-workspace-b") ? route.fulfill({json: {...envelope(), file: {...file(), [field]: file("workspace-b", "file-workspace-b/other")[field]}}}) : undefined);
   await page.goto("/portal/deliveries?workspace=workspace-b&file=file-workspace-b");
-  await expect(page.getByRole("button", {name: "Retry portal"})).toBeVisible(); await expect(page.getByRole("dialog")).toHaveCount(0);
+  await expect(page.getByRole("button", {name: "Try again"})).toBeVisible(); await expect(page.getByRole("dialog")).toHaveCount(0);
   expect(calls.some(call => call.path.includes("%2Fother"))).toBe(false);
 });
 
@@ -252,17 +252,17 @@ test("native directory and folders recover from transient errors without fabrica
 for (const status of [401, 403, 409]) test(`native continuation ${status} clears every old workspace row`, async ({page}) => {
   await mock(page, (route, call) => call.path.endsWith("workspace-b/deliveries") ? call.query.has("cursor") ? route.fulfill({status, json: {error: "Context unavailable"}}) : route.fulfill({json: deliveries("workspace-b", "next")}) : undefined);
   await page.goto("/portal/deliveries?workspace=workspace-b"); await expect(page.getByRole("button", {name: /^Open folder\s*:/})).toBeVisible();
-  await page.getByRole("button", {name: "Load more delivery folders"}).click(); await expect(page.getByRole("button", {name: "Retry portal"})).toBeVisible();
+  await page.getByRole("button", {name: "Load more delivery folders"}).click(); await expect(page.getByRole("button", {name: "Try again"})).toBeVisible();
   await expect(page.getByRole("region", {name: "Connected client workspace"})).toHaveCount(0); await expect(page.getByRole("button", {name: /^Open folder\s*:/})).toHaveCount(0);
 });
 
 test("wrong workspace context and wrong metadata source are rejected before showing protected content", async ({page}) => {
   let corruptContext = true;
   await mock(page, (route, call) => call.path.endsWith("workspace-b/context") && corruptContext ? route.fulfill({json: context("workspace-c")}) : call.path.endsWith("workspace-b/files/file-workspace-b") ? route.fulfill({json: {...envelope("workspace-c"), file: file()}}) : undefined);
-  await page.goto("/portal?workspace=workspace-b"); await expect(page.getByRole("button", {name: "Retry portal"})).toBeVisible();
+  await page.goto("/portal?workspace=workspace-b"); await expect(page.getByRole("button", {name: "Try again"})).toBeVisible();
   await expect(page.getByText("Coastal seawall construction documentation", {exact: true})).toHaveCount(0);
   corruptContext = false; await page.goto("/portal/deliveries?workspace=workspace-b&file=file-workspace-b");
-  await expect(page.getByRole("button", {name: "Retry portal"})).toBeVisible(); await expect(page.getByRole("dialog")).toHaveCount(0);
+  await expect(page.getByRole("button", {name: "Try again"})).toBeVisible(); await expect(page.getByRole("dialog")).toHaveCount(0);
 });
 
 test("late folder responses cannot repopulate a newly selected workspace", async ({page}) => {
@@ -506,11 +506,11 @@ test("the unified bell keeps every account's updates, each labelled and scoped, 
   const bell = page.getByRole("button", {name: /Notifications, 1 unread update/}); await expect(bell).toBeVisible(); await bell.click();
   const panel = page.getByRole("region", {name: "Notifications"});
   await expect(panel.getByText("Mountain current update", {exact: true})).toBeVisible();
-  await expect(panel).toContainText("Ledge Top 2");
+  await expect(panel).not.toContainText(/Ledge Top Drone Services|Ledge Top Technologies|Drone and survey|Website and marketing|Ledge Top \d/);
   await expect(panel).not.toContainText("Mountain Engineering");
   release();
   await expect(panel.getByText("Coastal late update", {exact: true})).toBeVisible();
-  await expect(panel).toContainText("Ledge Top 1");
+  await expect(panel).not.toContainText(/Ledge Top Drone Services|Ledge Top Technologies|Drone and survey|Website and marketing|Ledge Top \d/);
   await expect(page.getByRole("button", {name: /Notifications, 2 unread updates/})).toBeVisible();
   await expect(panel.getByRole("alert")).toHaveCount(0);
   expect(new Set(calls.filter(call => call.path === "/api/client/notification-history").map(call => call.workspace))).toEqual(new Set(["workspace-a", "workspace-b", "workspace-c"]));
@@ -543,7 +543,8 @@ test("the unified bell retries only the account that failed and keeps the others
   });
   const panel = await openUnifiedBell(page);
   await expect(panel.getByText("Coastal first update", {exact: true})).toBeVisible();
-  await expect(panel.getByRole("alert")).toContainText("Ledge Top 2");
+  await expect(panel.getByRole("alert")).toBeVisible();
+  await expect(panel.getByRole("alert")).not.toContainText(/Ledge Top Drone Services|Ledge Top Technologies|Drone and survey|Website and marketing|Ledge Top \d/);
   // Coverage is incomplete while an account is missing.
   await expect(panel).toContainText("Request history is currently unavailable.");
   mountainFails = false;
@@ -598,7 +599,8 @@ test("the unified bell revalidates on focus and drops an account revoked after l
   await revalidate(page);
   await expect(panel.getByText("Mountain update", {exact: true})).toHaveCount(0);
   await expect(panel.getByText("Coastal update", {exact: true})).toBeVisible();
-  await expect(panel.getByRole("alert")).toContainText("Ledge Top 2");
+  await expect(panel.getByRole("alert")).toBeVisible();
+  await expect(panel.getByRole("alert")).not.toContainText(/Ledge Top Drone Services|Ledge Top Technologies|Drone and survey|Website and marketing|Ledge Top \d/);
   expect(historyCalls(calls, "workspace-c")).toHaveLength(2);
 });
 
@@ -873,7 +875,7 @@ test("secondary member management fails closed and retries without exposing reco
 test("a context capability and readiness mismatch fails closed before protected probes", async ({page}) => {
   const calls = await mock(page, (route, call) => call.path.endsWith("workspace-b/context") ? route.fulfill({json: {...context(), features: {...features(), directory: {state: "not_in_access", reason: "capability_not_granted"}}}}) : undefined);
   await page.goto("/portal?workspace=workspace-b");
-  await expect(page.getByRole("button", {name: "Retry portal"})).toBeVisible();
+  await expect(page.getByRole("button", {name: "Try again"})).toBeVisible();
   expect(calls.some(call => /\/(hierarchy|deliveries)$/.test(call.path))).toBe(false);
 });
 
@@ -908,8 +910,8 @@ test("the unified portal lists every account's projects without a switcher and o
   await expect(page.getByRole("combobox", {name: "Client account"})).toHaveCount(0);
   const projects = page.locator(".portal-project-grid .portal-project-card");
   await expect(projects).toHaveCount(3);
-  // Items name the client account (several are open) but never make the client pick or read a business.
-  await expect(page.getByRole("button", {name: /Primary-only project/})).toContainText("Drone and survey");
+  // Items never name a business, division or client account, even when several accounts are open.
+  await expect(page.locator(".portal-project-grid")).not.toContainText(/Ledge Top Drone Services|Ledge Top Technologies|Drone and survey|Website and marketing|Ledge Top \d/);
   await expect(page.getByRole("button", {name: /Primary-only project/})).not.toContainText("Primary customer");
   await expect(page.locator(".portal-project-grid")).not.toContainText("Ledge Top Drone Services");
   await expect(page.getByRole("group", {name: "Show items from"})).toHaveCount(0);
@@ -928,7 +930,7 @@ test("the unified portal lists every account's projects without a switcher and o
   await expect(page).toHaveURL(/\/portal\/projects\/project-shared\?workspace=workspace-c$/);
   await expect(page.getByText("Mountain bridge inspection", {exact: true}).first()).toBeVisible();
   await expect(page.getByText("Coastal seawall construction documentation", {exact: true})).toHaveCount(0);
-  await expect(page.locator(".unified-portal-context")).not.toContainText("Mountain Engineering");
+  await expect(page.locator(".unified-portal-context")).toHaveCount(0);
   const topNav = page.getByRole("navigation", {name: "Client portal"});
   if (await topNav.isVisible()) await topNav.getByRole("link", {name: "Projects"}).click();
   else { await page.getByRole("button", {name: "Open navigation"}).click(); await page.getByRole("navigation", {name: "Mobile client portal navigation"}).getByRole("link", {name: "Projects"}).click(); }
@@ -940,7 +942,8 @@ test("one unavailable account is reported in place without hiding the others", a
   let failing = true;
   await mock(page, (route, call) => call.path.endsWith("workspace-c/context") && failing ? route.fulfill({status: 503, json: {error: "Temporarily unavailable"}}) : undefined);
   await page.goto("/portal/projects");
-  await expect(page.getByRole("alert")).toContainText("Ledge Top 2");
+  await expect(page.getByRole("alert")).toContainText("Some of your work couldn’t be loaded.");
+  await expect(page.getByRole("alert")).not.toContainText(/Ledge Top Drone Services|Ledge Top Technologies|Drone and survey|Website and marketing|Ledge Top \d/);
   await expect(page.getByRole("button", {name: /Coastal seawall construction documentation/})).toBeVisible();
   await expect(page.getByRole("button", {name: /Primary-only project/})).toBeVisible();
   failing = false; await page.getByRole("button", {name: "Try again"}).click();
@@ -1035,10 +1038,11 @@ test.describe("unified home without business switching", () => {
   async function mockBoth(page: Page) {
     return mock(page, (route, call) => {
       if (call.path === "/api/client/v2/workspaces") return route.fulfill({json: {workspaces: listed}});
-      const match = call.path.match(/^\/api\/client\/v2\/workspaces\/(workspace-[bc])\/(context|hierarchy)$/);
+      const match = call.path.match(/^\/api\/client\/v2\/workspaces\/(workspace-[bc])\/(context|hierarchy|deliveries)$/);
       if (match) {
         const id = match[1]!, ws = listed.find(item => item.id === id)!;
         if (match[2] === "context") return route.fulfill({json: {...requestContext(id), workspace: ws}});
+        if (match[2] === "deliveries") { const value = deliveries(id); return route.fulfill({json: {...value, sourceId: sources[id], items: value.items.map(item => ({...item, displayName: `${ws.displayName} — final deliverables`}))}}); }
         const value = hierarchy(id);
         return route.fulfill({json: {...value, sourceId: sources[id], entries: value.entries.map(entry => entry.type === "project"
           ? {...entry, displayName: id === "workspace-c" ? "Website refresh" : "Coastal seawall construction documentation"} : entry.type === "organization" ? {...entry, displayName: ws.displayName} : entry)}});
@@ -1073,20 +1077,121 @@ test.describe("unified home without business switching", () => {
     await expect(chooser).not.toContainText("Ledge Top Technologies");
     await chooser.getByRole("button", {name: /Website or marketing/}).click();
     await expect(page).toHaveURL(/\/portal\/requests\/new\?workspace=workspace-c$/);
-    await expect(page.locator(".unified-portal-context")).toHaveText(/^Website and marketing/);
-    await expect(page.locator(".unified-portal-context")).not.toContainText("Rivera Web Studio");
+    await expect(page.locator(".unified-portal-context")).toHaveCount(0);
+    await expect(page.locator(".client-portal-main")).not.toContainText(/Ledge Top Drone Services|Ledge Top Technologies|Drone and survey|Website and marketing|Ledge Top \d/);
   });
 
-  test("deliveries and feedback are described by the work, not the business", async ({page}) => {
-    await mockBoth(page); await page.goto("/portal/deliveries");
-    // Two accounts cover drone work, so they are numbered; neither shows a stored account name or a business.
-    await expect(page.getByText("Drone and survey deliveries", {exact: true})).toHaveCount(2);
-    await expect(page.locator(".unified-portal-area").filter({hasText: "Drone and survey 1"})).toContainText("Drone and survey deliveries");
-    await expect(page.locator(".unified-portal-area").filter({hasText: "Primary customer"})).toHaveCount(0);
-    await expect(page.getByText("Website and marketing files", {exact: true})).toBeVisible();
-    await expect(page.locator(".client-portal-main")).not.toContainText("Ledge Top Technologies");
+  const quickServices = [
+    {serviceChoiceId: "choice:roof", name: "Roof inspection", summary: "Drone photos of your roof", category: "drone", catalogCategory: "inspection", clientName: "Primary customer",
+      questions: [{id: "stories", label: "How many stories?", type: "number", required: true, helpText: null, minimum: 1, maximum: 10}], geometryRequirement: "none"},
+    {serviceChoiceId: "choice:site-a", name: "Website update", summary: null, category: "website", catalogCategory: "web", clientName: "Rivera Web Studio", questions: [], geometryRequirement: "none"},
+    {serviceChoiceId: "choice:site-b", name: "Website update", summary: null, category: "website", catalogCategory: "web", clientName: "Coastal Builders", questions: [], geometryRequirement: "none"},
+  ];
+  type Posted = {body: Record<string, unknown>; key: string | undefined; workspace: string | undefined};
+  async function mockQuick(page: Page, answer: (posted: Posted, count: number) => {status: number; json: unknown} = () => ({status: 201, json: {request: request("req-new", "Roof inspection", "submitted", "2026-08-23T12:00:00.000Z")}}),
+    services: {status?: number; json: unknown} = {json: {services: quickServices, unavailable: []}}) {
+    const posted: Posted[] = [];
+    const calls = await mock(page, (route, call) => {
+      if (call.path === "/api/client/request-services") return route.fulfill(services);
+      if (call.path === "/api/client/requests" && call.method === "POST") {
+        const item = {body: route.request().postDataJSON() as Record<string, unknown>, key: route.request().headers()["idempotency-key"], workspace: call.workspace};
+        posted.push(item);
+        return route.fulfill(answer(item, posted.length));
+      }
+      if (call.path === "/api/client/v2/workspaces") return route.fulfill({json: {workspaces: listed}});
+      const match = call.path.match(/^\/api\/client\/v2\/workspaces\/(workspace-[bc])\/(context|hierarchy|deliveries)$/);
+      if (match) {
+        const id = match[1]!, ws = listed.find(item => item.id === id)!;
+        if (match[2] === "context") return route.fulfill({json: {...requestContext(id), workspace: ws}});
+        if (match[2] === "deliveries") return route.fulfill({json: {...deliveries(id), sourceId: sources[id]}});
+        return route.fulfill({json: {...hierarchy(id), sourceId: sources[id]}});
+      }
+      if (call.path === "/api/client/service-requests" && call.workspace && requestsFor[call.workspace]) return route.fulfill({json: {requests: requestsFor[call.workspace]}});
+      return undefined;
+    });
+    return {posted, calls};
+  }
+
+  test("a new request is one step: pick a service, describe it, send, with no business or account chosen", async ({page}) => {
+    const {posted} = await mockQuick(page); await page.goto("/portal");
+    await page.getByRole("button", {name: "New request"}).first().click();
+    const form = page.locator(".quick-request");
+    await expect(form.getByRole("group", {name: "What do you need?"})).toBeVisible();
+    await expect(page.locator(".unified-portal-chooser")).toHaveCount(0);
+    // A client name shows only to tell two identical services apart.
+    await expect(form.getByRole("radio", {name: /^Roof inspection/})).toBeVisible();
+    await expect(form.getByText("Roof inspection · Primary customer")).toHaveCount(0);
+    await expect(form.getByRole("radio", {name: "Website update · Rivera Web Studio"})).toBeVisible();
+    await expect(form.getByRole("radio", {name: "Website update · Coastal Builders"})).toBeVisible();
+    const send = form.getByRole("button", {name: "Send request"});
+    await expect(send).toBeDisabled();
+    await form.getByRole("radio", {name: /^Roof inspection/}).check();
+    await form.getByLabel("Tell us what you need").fill("Hail damage check on the north side.");
+    await expect(send).toBeDisabled();
+    await form.getByLabel(/How many stories/).fill("2");
+    await form.getByLabel("Location (optional)").fill("100 Main St");
+    await send.click();
+    await expect(page.locator(".portal-success-notice")).toHaveText("Request sent. Ledge Top will review it shortly.");
+    await expect(page).toHaveURL(/\/portal\/requests$/);
+    expect(posted).toHaveLength(1);
+    expect(posted[0]!.workspace).toBeUndefined();
+    expect(posted[0]!.key).toMatch(/^[0-9a-f-]{36}$/);
+    expect(posted[0]!.body).toEqual({serviceChoiceId: "choice:roof", title: "Roof inspection", details: "Hail damage check on the north side.", projectId: null,
+      answers: {stories: 2}, location: "100 Main St", areaGeoJson: null, poiPoints: []});
+    await expect(page.locator(".client-portal-main")).not.toContainText(/Ledge Top Drone Services|Ledge Top Technologies/);
+  });
+
+  test("an unclear send retries with the same key; a changed service asks for a reload with a new key", async ({page}) => {
+    const {posted} = await mockQuick(page, (_item, count) => count === 1 ? {status: 503, json: {error: "Unavailable"}}
+      : count === 2 ? {status: 409, json: {error: "Service choice changed"}} : {status: 201, json: {request: request("req-new", "Website update", "submitted", "2026-08-23T12:00:00.000Z")}});
+    await page.goto("/portal/requests");
+    await page.getByRole("button", {name: "New request"}).click();
+    const form = page.locator(".quick-request");
+    await form.getByRole("radio", {name: "Website update · Coastal Builders"}).check();
+    await form.getByLabel("Tell us what you need").fill("New team page.");
+    await form.getByRole("button", {name: "Send request"}).click();
+    await expect(form.getByRole("alert")).toContainText("it won't create a second request");
+    await form.getByRole("button", {name: "Send request"}).click();
+    await expect(form.getByRole("alert")).toContainText("This service changed since the form opened");
+    expect(posted[1]!.key).toBe(posted[0]!.key);
+    await form.getByRole("button", {name: "Reload services"}).click();
+    await expect(form.getByRole("radio", {name: "Website update · Coastal Builders"})).toBeChecked();
+    await expect(form.getByLabel("Tell us what you need")).toHaveValue("New team page.");
+    await form.getByRole("button", {name: "Send request"}).click();
+    await expect(page.locator(".portal-success-notice")).toHaveText("Request sent. Ledge Top will review it shortly.");
+    expect(posted).toHaveLength(3);
+    expect(posted[2]!.key).not.toBe(posted[0]!.key);
+  });
+
+  test("a refused service list never falls back to choosing an account", async ({page}) => {
+    await mockQuick(page, undefined, {status: 403, json: {error: "Forbidden"}});
+    await page.goto("/portal");
+    await page.getByRole("button", {name: "New request"}).first().click();
+    await expect(page.locator(".quick-request").getByRole("alert")).toContainText("Your access changed");
+    await expect(page.locator(".unified-portal-chooser")).toHaveCount(0);
+    await expect(page).toHaveURL(/\/portal$/);
+  });
+
+  test("deliveries are one flat list and feedback one neutral card, with no business or division", async ({page}) => {
+    const calls = await mockBoth(page); await page.goto("/portal/deliveries");
+    const folders = page.locator(".unified-deliveries");
+    await expect(folders.getByRole("heading", {name: "Delivery folders"})).toBeVisible();
+    await expect(folders.locator("li")).toHaveCount(2);
+    await expect(folders.getByRole("button", {name: "Open more delivered files"})).toBeVisible();
+    await expect(page.locator(".unified-portal-area")).toHaveCount(0);
+    await expect(page.locator(".client-portal-main")).not.toContainText(/Ledge Top Drone Services|Ledge Top Technologies|Drone and survey|Website and marketing|Ledge Top \d/);
+    await expect(page.locator(".client-portal-main")).not.toContainText("Primary customer");
+    // Each folder list is read with its own account, and each folder opens in exactly that account.
+    expect(calls.filter(call => call.path.endsWith("/deliveries")).map(call => call.path).sort()).toEqual(["/api/client/v2/workspaces/workspace-b/deliveries", "/api/client/v2/workspaces/workspace-c/deliveries"]);
+    await folders.locator("li").filter({hasText: "Rivera Web Studio"}).getByRole("button", {name: /Open folder/}).click();
+    await expect(page).toHaveURL(/\/portal\/deliveries\?folder=folder-workspace-c&workspace=workspace-c$/);
     await page.goto("/portal/feedback");
-    await expect(page.getByText("Website and marketing", {exact: true})).toBeVisible();
+    await expect(page.locator(".unified-portal-area")).toHaveCount(1);
+    await expect(page.locator(".unified-portal-area")).toContainText("Your feedback");
+    await expect(page.locator(".client-portal-main")).not.toContainText(/Ledge Top Drone Services|Ledge Top Technologies|Drone and survey|Website and marketing|Ledge Top \d/);
+    await page.goto("/portal/account");
+    await expect(page.locator(".unified-portal-area")).toHaveCount(1);
+    await expect(page.locator(".unified-portal-area")).toContainText("Account settings");
   });
 
   test("the redesigned home fits a phone without sideways scrolling", async ({page}) => {
@@ -1098,7 +1203,7 @@ test.describe("unified home without business switching", () => {
 });
 
 test.describe("client header matches Operations", () => {
-  test("account shows the signed-in email and how long the session lasts, without seconds", async ({page}) => {
+  test("account shows the signed-in email and the day the session ends, without a countdown", async ({page}) => {
     await page.clock.install({time: new Date("2030-01-01T12:00:00Z")});
     await mock(page, (route, call) => {
       if (call.path === "/api/client/session") return route.fulfill({json: {account: {id: call.workspace ? "account-a" : "", displayName: "Primary customer", email: "jamie@example.test"}, capabilities: {workspaceHierarchyV2: true}}});
@@ -1111,8 +1216,8 @@ test.describe("client header matches Operations", () => {
     if (await page.getByRole("navigation", {name: "Client portal"}).isVisible()) await expect(trigger).toContainText("jamie@example.test");
     await trigger.click();
     const menu = page.getByRole("menu", {name: "Account"});
-    await expect(menu.getByRole("timer")).toHaveText("2d 4h 13m");
-    await expect(menu.locator("time")).toHaveText(/^[A-Z][a-z]{2}, [A-Z][a-z]{2} \d{1,2}, \d{1,2}:\d{2}\s?[AP]M$/);
+    await expect(menu.locator(".account-session-status strong")).toHaveText("Expires Thu, Jan 3, 2030");
+    await expect(menu.getByRole("timer")).toHaveCount(0);
     await expect(menu.getByRole("menuitem", {name: "Logout"})).toHaveAttribute("href", "/cdn-cgi/access/logout");
   });
 

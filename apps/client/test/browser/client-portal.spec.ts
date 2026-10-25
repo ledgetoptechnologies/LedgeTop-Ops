@@ -346,7 +346,7 @@ test("portal identifies an unfinished schema update and retries cleanly on mobil
   await page.goto("/portal");
   await expect(page.getByText("Portal update in progress", { exact: true })).toBeVisible();
   await expect(page.getByText(/access is valid/i)).toBeVisible();
-  await page.getByRole("button", { name: "Retry portal" }).click();
+  await page.getByRole("button", { name: "Try again" }).click();
   await expect(page.getByRole("heading", { name: "Acme Surveying" })).toBeVisible();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
 });
@@ -457,8 +457,9 @@ test("the unified portal lists every account with its own scope and opens items 
 
   await page.getByRole("button", { name: /Beta Site/ }).click();
   await expect(page).toHaveURL(/\/portal\/projects\/project-b\?workspace=workspace-b$/);
-  await expect(page.locator(".unified-portal-context")).toContainText("Drone and survey");
-  await expect(page.locator(".unified-portal-context")).not.toContainText("Beta");
+  // Inside one account's project there's no division or account label at all.
+  await expect(page.locator(".unified-portal-context")).toHaveCount(0);
+  await expect(page.locator(".client-portal-header")).not.toContainText(/Ledge Top Drone Services|Ledge Top Technologies|Drone and survey|Website and marketing|Ledge Top \d/);
   expect(observed.filter(item => item.path === "/api/client/projects").at(-1)?.workspace).toBe("workspace-b");
 });
 

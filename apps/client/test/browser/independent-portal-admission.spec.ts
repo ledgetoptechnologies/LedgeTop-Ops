@@ -54,7 +54,7 @@ for (const [name, status, body] of [
 test("authenticated Operations absence does not admit an independently denied PA client", async ({ page }) => {
   const calls = await intercept(page, () => ({ status: 403, body: absence }), false);
   await page.goto("/portal");
-  await expect(page.getByRole("button", { name: "Retry portal", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Try again", exact: true })).toBeVisible();
   expect(calls.slice(0, 2)).toEqual(["/api/client/v2/operations/home", "/api/client/session"]);
   await expect(page.getByText("Independent PA client", { exact: true })).toHaveCount(0);
   expect(calls.some(path => path === "/api/client/projects")).toBe(false);

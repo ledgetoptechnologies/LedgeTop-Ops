@@ -1,6 +1,9 @@
 import { expect, test, type Page } from "@playwright/test";
 
 const notSetUp = "This email is not set up for Ledge Top. Sign in with your Operations staff email or contact your administrator.";
+/** The exact denial the current live server sends; it must never reach the page. */
+const legacyDenial = "Your Access identity is not provisioned for LTDS Operations";
+const deniedCopy = "This email isn't set up for Ledge Top Operations. Sign in with your Ledge Top staff email, or ask your administrator to add this one.";
 
 async function failSession(page: Page, status: number, error: string, identity: unknown = { email: "someone@example.test" }) {
   const calls: string[] = [];
@@ -19,7 +22,7 @@ test("an email that isn't set up shows who is signed in and offers a different s
   const screen = page.getByRole("main", { name: "This email can't open Ledge Top Operations" });
   await expect(screen).toBeVisible();
   await expect(screen.locator(".ltds-brand")).toContainText("Ledge Top");
-  await expect(screen.getByRole("alert")).toHaveText(notSetUp);
+  await expect(screen.getByRole("alert")).toHaveText(deniedCopy);
   await expect(screen).toContainText("Signed in as someone@example.test");
   await expect(screen).not.toContainText("LTDS");
   const switchAccount = screen.getByRole("link", { name: "Sign in with a different email" });
@@ -27,6 +30,18 @@ test("an email that isn't set up shows who is signed in and offers a different s
   await expect(screen.getByRole("button", { name: "Try again" })).toBeVisible();
   // Only the session and the Access identity are read: nothing is linked, granted or retried behind the scenes.
   expect(calls.filter(call => call !== "identity")).toEqual(["/api/session"]);
+});
+
+test("the live server's legacy denial is replaced by Ledge Top wording, with every way out shown", async ({ page }) => {
+  await failSession(page, 403, legacyDenial);
+  await page.goto("/");
+  const screen = page.getByRole("main", { name: "This email can't open Ledge Top Operations" });
+  await expect(screen.getByRole("alert")).toHaveText(deniedCopy);
+  await expect(page.locator("body")).not.toContainText("LTDS");
+  await expect(page.locator("body")).not.toContainText("provisioned");
+  await expect(screen.getByRole("link", { name: "Sign in with a different email" })).toHaveAttribute("href", "/cdn-cgi/access/logout");
+  await expect(screen.getByRole("button", { name: "Try again" })).toBeVisible();
+  await expect(screen.getByRole("link", { name: "info@ledgetopdroneservices.com" })).toBeVisible();
 });
 
 test("try again reloads and opens Operations once the right email is used", async ({ page }) => {
@@ -60,15 +75,22 @@ test("an ended sign-in offers to sign in again", async ({ page }) => {
   await page.goto("/");
   const screen = page.getByRole("main", { name: "Your sign-in has ended" });
   await expect(screen.getByRole("link", { name: "Sign in again" })).toHaveAttribute("href", "/cdn-cgi/access/logout");
-  await expect(screen.getByText("Signed in as")).toHaveCount(0);
+  await expect(screen.getByRole("link", { name: "info@ledgetopdroneservices.com" })).toHaveAttribute("href", "mailto:info@ledgetopdroneservices.com");
 });
 
-test("a server problem offers only to try again", async ({ page }) => {
-  await failSession(page, 503, "Unavailable");
+for (const [name, fail] of [
+  ["a server problem", (page: Page) => failSession(page, 503, "Unavailable")],
+  ["a network failure", async (page: Page) => {
+    await page.route("**/cdn-cgi/access/get-identity", route => route.fulfill({ json: { email: "someone@example.test" } }));
+    await page.route("**/api/**", route => route.abort("failed"));
+  }],
+] as const) test(`${name} still offers the way out: retry first, another email, and support`, async ({ page }) => {
+  await fail(page);
   await page.goto("/");
   const screen = page.getByRole("main", { name: "Operations is unavailable right now" });
-  await expect(screen.getByRole("button", { name: "Try again" })).toBeVisible();
-  await expect(screen.getByRole("link")).toHaveCount(0);
+  await expect(screen.getByRole("button", { name: "Try again" })).toHaveClass(/button-orange/);
+  await expect(screen.getByRole("link", { name: "Sign in with a different email" })).toHaveAttribute("href", "/cdn-cgi/access/logout");
+  await expect(screen.getByRole("link", { name: "info@ledgetopdroneservices.com" })).toHaveAttribute("href", "mailto:info@ledgetopdroneservices.com");
 });
 
 test("the card fits the screen without sideways scrolling", async ({ page }) => {
@@ -127,7 +149,7 @@ test("one click signs out of Access and returns to Operations' sign-in", async (
 test("the Access sign-out wording is honest about the shared sign-in", async ({ page }) => {
   await failSession(page, 403, notSetUp);
   await page.goto("/");
-  await expect(page.getByText("This signs you out of Cloudflare Access in this browser, so other Ledge Top apps will ask you to sign in again too. It doesn't change any account.")).toBeVisible();
+  await expect(page.getByText("Signing out ends your Ledge Top sign-in in this browser, so other Ledge Top apps will ask you to sign in again too. It doesn't change any account.")).toBeVisible();
 });
 
 test("a pending sign-out ignores further clicks", async ({ page }) => {

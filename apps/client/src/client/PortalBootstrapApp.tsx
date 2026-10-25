@@ -1,4 +1,5 @@
 import { lazy, useEffect, useState } from "react";
+import { SignInRecovery } from "@ltds/ui";
 import { loadOperationsHome, type PortalOperationsHomeResponse } from "./portal-api";
 import { PortalBoundary } from "./PortalShell";
 
@@ -72,6 +73,7 @@ export function PortalBootstrapApp() {
   if (state.kind === "operations") return <LegacyClientPortalApp initialPage="dashboard" operationsHomeResponse={state.response} />;
   if (state.kind === "loading") return <main className="portal-loading-shell" aria-busy="true" aria-label="Loading Ledge Top client portal" />;
   const copy = blockedCopy(state.status);
-  return <PortalBoundary><section className="portal-card portal-gate-card" role="alert"><h1>{copy.heading}</h1><p>{copy.detail}</p>
+  return <PortalBoundary><section className="portal-card portal-gate-card"><h1>{copy.heading}</h1><p role="alert">{copy.detail}</p>
+    <SignInRecovery returnTo="/portal" lead={state.status === 401 ? "again" : state.status === 403 ? "different" : "retry"} />
   </section></PortalBoundary>;
 }
