@@ -82,6 +82,7 @@ export function LinkLoginPage() {
     invalid: ["This link can't be used", "It has expired, was already used or isn't complete. Create a new link from your Operations account, then open it here."],
     conflict: ["This link is no longer current", "It has expired or a newer link replaced it. If this email was already linked, it still signs in as before; otherwise create a new link from your Operations account."],
     "sign-in": ["Sign in with the email you're adding", "To link it, sign in with the email you're adding after this link was created, then open this page again."],
+    unavailable: ["Adding sign-in emails isn't available yet", "Nothing has been linked. This Operations site doesn't support extra sign-in emails yet. Keep this link and open it again after the next update, or create a new one then."],
     unknown: ["We couldn't confirm the result", "We could not confirm whether the email was linked. Retry verification to check safely."],
   };
   const [title, detail] = copy[view];

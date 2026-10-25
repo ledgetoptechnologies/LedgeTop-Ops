@@ -32,7 +32,8 @@ export async function removeLoginLink(binding: LoginLinkBinding) {
 
 /** Whose profile a pending link joins, shown before anything is linked. */
 export type LoginLinkPreview = { canonicalEmail: string; ownerDisplayName: string; targetEmail: string; expiresAt: string; state: "pending" | "linked" };
-type Refusal = { kind: "invalid" | "sign-in" | "conflict"; message?: string };
+/** "unavailable": this server doesn't offer sign-in emails at all (404/405), so nothing could have been linked. */
+type Refusal = { kind: "invalid" | "sign-in" | "conflict" | "unavailable"; message?: string };
 /** "unknown" means the link may or may not have been made; retrying the same link is safe and tells which. */
 export type ClaimResult = { kind: "linked" } | Refusal | { kind: "unknown" };
 export type PreviewResult = { kind: "preview"; preview: LoginLinkPreview } | { kind: "linked" } | Refusal | { kind: "unknown" };
@@ -54,7 +55,7 @@ async function postPending(path: string, pending: PendingLoginLink): Promise<{ s
 function refusal(status: number, payload: Record<string, unknown>): Refusal | null {
   const message = typeof payload.error === "string" ? payload.error : undefined;
   return status === 400 ? { kind: "invalid", message } : status === 401 || status === 403 ? { kind: "sign-in", message }
-    : status === 409 ? { kind: "conflict", message } : null;
+    : status === 409 ? { kind: "conflict", message } : status === 404 || status === 405 ? { kind: "unavailable" } : null;
 }
 const text = (value: unknown) => typeof value === "string" && value.trim().length > 0 && value.length <= 320;
 

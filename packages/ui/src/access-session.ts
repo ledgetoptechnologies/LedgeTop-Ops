@@ -10,6 +10,8 @@ export const ACCESS_LOGOUT = CLOUDFLARE_ACCESS_LOGOUT_PATH;
  * stops the sign-out before it starts.
  */
 export function useAccessSignOut(returnTo = "/", beforeSignOut?: () => boolean | void) {
+  // Only a path on this same site; anything else (another origin, "//host", a scheme) returns home instead.
+  const destination = /^\/(?![/\\])/.test(returnTo) ? returnTo : "/";
   const [pending, setPending] = useState(false);
   const started = useRef(false);
   const signOut = (event: MouseEvent<HTMLAnchorElement>) => {
@@ -22,7 +24,7 @@ export function useAccessSignOut(returnTo = "/", beforeSignOut?: () => boolean |
     fetch(ACCESS_LOGOUT, { credentials: "same-origin", redirect: "manual", cache: "no-store", signal: AbortSignal.timeout(8000) })
       .then(response => response.ok || response.type === "opaqueredirect")
       .catch(() => false)
-      .then(signedOut => signedOut ? location.replace(returnTo) : location.assign(ACCESS_LOGOUT));
+      .then(signedOut => signedOut ? location.replace(destination) : location.assign(ACCESS_LOGOUT));
   };
   return [pending, signOut] as const;
 }

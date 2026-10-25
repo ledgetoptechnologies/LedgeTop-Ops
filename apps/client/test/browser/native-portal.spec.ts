@@ -1131,7 +1131,7 @@ test.describe("unified home without business switching", () => {
     await form.getByLabel(/How many stories/).fill("2");
     await form.getByLabel("Location (optional)").fill("100 Main St");
     await send.click();
-    await expect(page.getByRole("status")).toHaveText("Request sent. Ledge Top will review it shortly.");
+    await expect(page.locator(".portal-success-notice")).toHaveText("Request sent. Ledge Top will review it shortly.");
     await expect(page).toHaveURL(/\/portal\/requests$/);
     expect(posted).toHaveLength(1);
     expect(posted[0]!.workspace).toBeUndefined();
@@ -1158,7 +1158,7 @@ test.describe("unified home without business switching", () => {
     await expect(form.getByRole("radio", {name: "Website update · Coastal Builders"})).toBeChecked();
     await expect(form.getByLabel("Tell us what you need")).toHaveValue("New team page.");
     await form.getByRole("button", {name: "Send request"}).click();
-    await expect(page.getByRole("status")).toHaveText("Request sent. Ledge Top will review it shortly.");
+    await expect(page.locator(".portal-success-notice")).toHaveText("Request sent. Ledge Top will review it shortly.");
     expect(posted).toHaveLength(3);
     expect(posted[2]!.key).not.toBe(posted[0]!.key);
   });

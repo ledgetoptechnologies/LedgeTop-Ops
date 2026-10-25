@@ -181,6 +181,14 @@ test("a used or expired link is cleared and points back to the account", async (
   expect(await page.evaluate(() => sessionStorage.length)).toBe(0);
 });
 
+test("a server without sign-in emails says so and never offers to link", async ({ page }) => {
+  const seen = await mockOps(page, { preview: { status: 404, json: { error: "Not found" } } });
+  await page.goto("/auth/link-login#intent=3f2b8c1e-7d4a-4e9b-a6c2-5d8e9f0a1b2c&token=aaaaaaaa0123456789abcdef0123456789abcdef0123456789abcdefbbbbbbbb");
+  await expect(page.getByRole("heading", { name: "Adding sign-in emails isn't available yet" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Link this email to this profile" })).toHaveCount(0);
+  expect(seen.claims).toHaveLength(0);
+});
+
 test("the link page without a link explains what to do", async ({ page }) => {
   const seen = await mockOps(page);
   await page.goto("/auth/link-login");

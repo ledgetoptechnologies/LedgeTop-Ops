@@ -13,7 +13,8 @@ export function SignInProblem({ failure }: { failure: StartupFailure }) {
   const denied = failure.status === 403, expired = failure.status === 401;
   const title = denied ? "This email can't open Ledge Top Operations"
     : expired ? "Your sign-in has ended" : "Operations is unavailable right now";
-  const detail = denied ? failure.message
+  // Fixed wording, never the server's: older servers name internal systems in their denial text.
+  const detail = denied ? "This email isn't set up for Ledge Top Operations. Sign in with your Ledge Top staff email, or ask your administrator to add this one."
     : expired ? "Sign in again to continue." : "Check your connection and try again, or sign in with a different email.";
   return <main className="fatal sign-in-problem" aria-labelledby="sign-in-problem-title">
     <header><Brand product="Operations" /></header>
