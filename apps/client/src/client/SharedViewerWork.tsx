@@ -8,12 +8,15 @@ import { directViewerTaskPath, sharedViewerRows, showsBusinessName, viewerWorkAc
 const ACCOUNT_CONCURRENCY = 4;
 type AccountWork =
   | { status: "loading" }
-  | { status: "none" }
+  | { status: "unavailable" }
   | { status: "ready"; items: NativeViewerWorkItem[]; cursor: string | null; loadingMore: boolean; moreError: boolean }
   | { status: "error" };
 
-/** 403/404 means this account has no direct sharing; it is skipped without a message. */
-const noSharing = (caught: unknown) => [403, 404].includes((caught as RequestError).status ?? 0);
+/**
+ * 403/404 means direct sharing couldn't be checked for this account (an older portal, or no access to it). That is
+ * never read as "nothing shared": only a verified empty list says so.
+ */
+const unavailable = (caught: unknown) => [403, 404].includes((caught as RequestError).status ?? 0);
 const shortDate = (value: string) => new Date(value).toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
 
 /**
@@ -35,7 +38,7 @@ export function SharedViewerWork({ workspaces }: { workspaces: PortalWorkspace[]
     try {
       const page = await loadNativeViewerWork(workspaceId, null, controller.signal);
       settle({ status: "ready", items: page.items, cursor: page.nextCursor, loadingMore: false, moreError: false });
-    } catch (caught) { settle(noSharing(caught) ? { status: "none" } : { status: "error" }); }
+    } catch (caught) { settle(unavailable(caught) ? { status: "unavailable" } : { status: "error" }); }
   }, []);
 
   useEffect(() => {
@@ -73,6 +76,7 @@ export function SharedViewerWork({ workspaces }: { workspaces: PortalWorkspace[]
   const withBusiness = showsBusinessName(rows);
   const loading = states.some(({ state }) => state.status === "loading");
   const failed = states.filter(({ state }) => state.status === "error");
+  const unchecked = states.filter(({ state }) => state.status === "unavailable");
   const more = states.filter(({ state }) => state.status === "ready" && (state.cursor || state.moreError));
   if (!accounts.length) return null;
 
@@ -88,7 +92,9 @@ export function SharedViewerWork({ workspaces }: { workspaces: PortalWorkspace[]
       <a className="button button-orange" href={directViewerTaskPath(row)}>Open 3D model<span className="visually-hidden">: {row.title}</span></a>
     </li>)}</ul>}
     {loading && <Skeleton variant="list" rows={2} label="Loading shared 3D work…" />}
-    {!loading && rows.length === 0 && failed.length === 0 && <EmptyState title="No 3D work has been shared with you yet." detail="3D models shared with you will appear here." />}
+    {unchecked.length > 0 && <p className="shared-viewer-work-problem" role="status">{unchecked.length === states.length
+      ? "Shared 3D work isn’t available here yet." : "Some shared 3D work isn’t available here yet."}</p>}
+    {!loading && rows.length === 0 && failed.length === 0 && unchecked.length === 0 && <EmptyState title="No 3D work has been shared with you yet." detail="3D models shared with you will appear here." />}
     {more.map(({ account, state }) => state.status === "ready" && <div key={account.id} className="shared-viewer-work-more">
       {state.moreError && <p role="alert">More shared 3D work couldn’t be loaded.</p>}
       <button type="button" className="button-ghost" disabled={state.loadingMore} onClick={() => void loadMore(account.id)}>

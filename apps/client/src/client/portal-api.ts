@@ -323,6 +323,9 @@ export async function loadOperationsFinancial(authorityId:string,request:PortalR
       ||collection.documents.some(document=>!document||typeof document.publicId!=="string"
         ||!(document.kind==="invoice"||document.kind==="contract"||document.kind==="project_invoice")
         ||typeof document.status!=="string"||!/^([A-Z]{3})$/.test(document.currency)||!/^(?:0|[1-9][0-9]{0,17})\.[0-9]{2}$/.test(document.total)
+        // Paid and due amounts are required, as a decimal amount or null when unknown; anything else is refused.
+        ||!(document.amountPaid===null||typeof document.amountPaid==="string"&&/^(?:0|[1-9][0-9]{0,17})\.[0-9]{2}$/.test(document.amountPaid))
+        ||!(document.balanceDue===null||typeof document.balanceDue==="string"&&/^(?:0|[1-9][0-9]{0,17})\.[0-9]{2}$/.test(document.balanceDue))
         ||!portalFinancialLink(document.documentUrl)||!portalFinancialLink(document.actionUrl))))
     throw Object.assign(new Error("The financial response could not be verified."),{status:503});
   return value.collections.flatMap(collection=>collection.documents.map(document=>({...document,

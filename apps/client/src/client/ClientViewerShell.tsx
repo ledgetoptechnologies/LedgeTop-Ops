@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Card, Loading, RenewableViewerShell } from "@ltds/ui";
 import { createPortalViewerSession, loadPortalBootstrap, type PortalViewerSession } from "./portal-api";
-import { createNativeViewerSession, openNativeViewerTaskSession } from "./native-portal-api";
+import { createNativeViewerSession, loadNativeViewerWork, openNativeViewerTaskSession } from "./native-portal-api";
 import { clientProjectPath } from "./portal-route";
 import { readClientViewerUnits } from "./viewer-units-preference";
 
@@ -108,18 +108,29 @@ function DirectTaskViewerShell({ route }: { route: Extract<ClientViewerShellRout
   // cannot mint a second session; a definitive HTTP rejection (4xx) can never succeed with that key, so Retry starts fresh.
   const pendingKey = useRef<string | null>(null), inflight = useRef<Promise<void> | null>(null), handedOff = useRef<DirectTaskSession | null>(null);
   const issue = useCallback((key: string) => openNativeViewerTaskSession(route.workspaceId, route.grantId, route.taskId, readClientViewerUnits(), key), [route.workspaceId, route.grantId, route.taskId]);
-  const start = useCallback(() => {
-    if (inflight.current) return inflight.current;
-    setError("");
+  // A read-only check first: a portal that can't list direct sharing for this account never receives a session request.
+  // The server still authorizes the exact grant and task on the session request itself.
+  const supported = useRef<Promise<boolean> | null>(null);
+  const checkSupport = useCallback(() => supported.current ??= loadNativeViewerWork(route.workspaceId, null)
+    .then(() => true, () => { supported.current = null; return false; }), [route.workspaceId]);
+  const issueFirst = useCallback(() => {
     const key = pendingKey.current ?? crypto.randomUUID(); pendingKey.current = key;
     const request = issue(key).then(session => { pendingKey.current = null; handedOff.current = session; setFirst(session); },
       caught => { const failure = caught as { status?: number; responseInvalid?: boolean }, status = failure.status ?? 0;
         if (status >= 400 && status < 500 && !failure.responseInvalid) pendingKey.current = null;
-        setError(caught instanceof Error ? caught.message : "3D Viewer authorization is temporarily unavailable"); })
-      .finally(() => { inflight.current = null; });
-    inflight.current = request;
+        setError(caught instanceof Error ? caught.message : "3D Viewer authorization is temporarily unavailable"); });
     return request;
   }, [issue]);
+  const start = useCallback(() => {
+    if (inflight.current) return inflight.current;
+    setError("");
+    const request = checkSupport().then(ok => {
+      if (!ok) { setError("This shared 3D model isn’t available here yet. Try again later, or open it from your portal home."); return; }
+      return issueFirst();
+    }).finally(() => { inflight.current = null; });
+    inflight.current = request;
+    return request;
+  }, [checkSupport, issueFirst]);
   useEffect(() => { void start(); }, [start]);
   const exit = () => window.location.assign("/portal/dashboard");
   if (!first)

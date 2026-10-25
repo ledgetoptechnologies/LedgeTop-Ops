@@ -121,13 +121,32 @@ test("work from two accounts is one flat list with business names, and one faili
   await noHorizontalOverflow(page);
 });
 
-test("an account without direct sharing is skipped quietly", async ({page}) => {
+test("an account whose sharing can't be checked says so instead of claiming nothing is shared", async ({page}) => {
   await mock(page, allWorkspaces, (route, call, id) => !call.path.endsWith("/viewer") ? undefined
     : id === "workspace-c" ? route.fulfill({status: 404, json: {error: "Not found"}}) : route.fulfill({json: viewerPage(id, [])}));
   await page.goto("/portal/dashboard");
-  await expect(card(page).getByText("No 3D work has been shared with you yet.")).toBeVisible();
+  await expect(card(page).getByText("Some shared 3D work isn’t available here yet.")).toBeVisible();
+  await expect(card(page).getByText("No 3D work has been shared with you yet.")).toHaveCount(0);
   await expect(card(page).getByRole("alert")).toHaveCount(0);
 });
+
+test("only verified empty lists say nothing is shared; all unchecked says it isn't available", async ({page}) => {
+  await mock(page, allWorkspaces, (route, call) => call.path.endsWith("/viewer") ? route.fulfill({status: 403, json: {error: "Forbidden"}}) : undefined);
+  await page.goto("/portal/dashboard");
+  await expect(card(page).getByText("Shared 3D work isn’t available here yet.")).toBeVisible();
+  await expect(card(page).getByText("No 3D work has been shared with you yet.")).toHaveCount(0);
+});
+
+for (const [label, answer] of [["missing (404)", {status: 404, json: {error: "Not found"}}], ["refused (403)", {status: 403, json: {error: "Forbidden"}}],
+  ["malformed", {status: 200, json: {workspaceId: "workspace-b", items: "nope"}}], ["for another account", {status: 200, json: {workspaceId: "workspace-c", contextVersion: "x", items: [], nextCursor: null}}]] as const)
+  test(`a direct 3D link whose sharing list is ${label} never requests a session`, async ({page}) => {
+    const calls = await mock(page, [allWorkspaces[0]!], (route, call) => call.path.endsWith("/viewer") ? route.fulfill(answer) : undefined);
+    await page.goto("/portal/viewer/grant-task/tasks/task-1?workspace=workspace-b");
+    await expect(page.getByRole("alert")).toContainText("This shared 3D model isn’t available here yet.");
+    await page.getByRole("button", {name: "Retry secure session"}).click();
+    await expect(page.getByRole("alert")).toContainText("This shared 3D model isn’t available here yet.");
+    expect(calls.filter(call => call.method === "POST")).toEqual([]);
+  });
 
 test("opening shared work loads the direct route and posts its exact session endpoint for that account", async ({page}) => {
   let viewerLoads = 0;
@@ -195,7 +214,8 @@ for (const [label, workspaces] of [["one account", [allWorkspaces[0]!]], ["two a
 for (const [label, status, sameKey] of [["an unclear failure retries the same request", 503, true], ["a success that fails verification retries the same request", 200, true], ["a refused request retries as a new request", 409, false]] as const) test(`opening shared work: ${label}`, async ({page}) => {
   await page.context().route(`${viewerOrigin}/**`, route => route.fulfill({contentType: "text/html", body: "<!doctype html><body>model</body>"}));
   let sessions = 0;
-  const calls = await mock(page, [allWorkspaces[0]!], (route, call) => {
+  const calls = await mock(page, [allWorkspaces[0]!], (route, call, id) => {
+    if (call.method === "GET" && call.path.endsWith("/viewer")) return route.fulfill({json: viewerPage(id, [])});
     if (call.method !== "POST" || !call.path.endsWith("/session")) return undefined;
     sessions += 1;
     if (sessions === 1) return route.fulfill(status === 200 ? {status, json: {modelId: "model-direct"}} : {status, json: {error: "Not available right now"}});

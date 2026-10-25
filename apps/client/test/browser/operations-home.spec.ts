@@ -50,6 +50,25 @@ test("a financial service failure remains unavailable", async ({ page }) => {
   await expect(financial.getByRole("link")).toHaveCount(0);
 });
 
+for (const [label, fields] of [["a paid amount that isn't money", { amountPaid: "lots", balanceDue: null }], ["a missing due amount", { amountPaid: null }],
+  ["a numeric due amount", { amountPaid: null, balanceDue: 12 }]] as const)
+  test(`an invoice with ${label} is refused, never shown as paid or crashing`, async ({ page }) => {
+    const authorityId = response.homes[0]!.authorityId;
+    await page.route("**/api/client/**", route => {
+      const path = new URL(route.request().url()).pathname;
+      if (path === "/api/client/v2/operations/home") return route.fulfill({ json: response });
+      if (path === financialPath(authorityId)) return route.fulfill({ json: { resourceMode: "operations_financial", collections: [{
+        grantId: "abcdef12-1234-4123-8123-123456789abc", revision: 1, documents: [{ publicId: "inv-1", kind: "invoice", status: "sent", currency: "USD", total: "125.00",
+          documentUrl: null, actionUrl: null, ...fields }] }] } });
+      if (path === "/api/client/session") return route.fulfill({ status: 401, json: { error: "Sign in required" } });
+      return route.fulfill({ status: 404, json: { error: "not found" } });
+    });
+    await page.goto("/portal");
+    const financial = page.getByRole("region", { name: "Invoices and contracts" });
+    await expect(financial.getByText("Financial information is temporarily unavailable.")).toBeVisible();
+    await expect(financial).not.toContainText("125");
+  });
+
 test("financial panel clears the prior authority synchronously while a replacement read is deferred", async ({ page }) => {
   const authorityB="22345678-1234-4123-8123-123456789abc";
   const authorityA=response.homes[0]!.authorityId;
