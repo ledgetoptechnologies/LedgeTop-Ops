@@ -152,12 +152,21 @@ describe("Windows publication history evidence with real canonical Ops/Client pr
       expect(initial.publicationCount).toBe(1);
       expect(initial.current).toEqual(initial.first);
       const original = await readWindowsPortalSuccessorAuthorization(db, grant);
+      // Retain timing evidence when a real local D1-backed RPC misses the
+      // production deadline under CI load. Do not extend that deadline or retry.
+      const readerTimings: { kind: string; started: number; elapsedMs?: number; completed: boolean }[] = [];
+      async function timedRead<T>(kind: string, read: () => Promise<T>): Promise<T> {
+        const timing = { kind, started: performance.now(), completed: false } as typeof readerTimings[number];
+        readerTimings.push(timing);
+        try { return await read(); }
+        finally { timing.elapsedMs = Math.round(performance.now() - timing.started); timing.completed = true; }
+      }
       const opsEnv = { OPS_DB: db, ENVIRONMENT: "staging", EXPECTED_HOST: "ops-staging.ledgetopdroneservices.com",
         PUBLIC_BASE_URL: "https://ops-staging.ledgetopdroneservices.com", OPERATIONS_PORTAL_NATIVE_DELIVERY_READER_ENABLED: "true" };
       const consumerEnv = { DELIVERY_DB: client, ENVIRONMENT: "staging", CLIENT_PORTAL_ORIGIN: "https://client-staging.ledgetopdroneservices.com",
         CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_READ_ENABLED: "true", OPERATIONS_PORTAL_NATIVE_DELIVERY_AUTHORIZATION_READER: {
           readNativeDeliveryAuthorization: async () => { throw new Error("ordinary RPC must not be used as fallback"); },
-          readWindowsDeliverySuccessorAuthorization: (wire: string) => readWindowsPortalSuccessorAuthorizationEntrypoint(opsEnv, wire),
+          readWindowsDeliverySuccessorAuthorization: (wire: string) => timedRead("download", () => readWindowsPortalSuccessorAuthorizationEntrypoint(opsEnv, wire)),
         } };
       const initialCandidate = await client.prepare(WINDOWS_PORTAL_SUCCESSOR_CANDIDATE_SQL).bind(authorityId, ctx.issuer, ctx.subject).first();
       expect(initialCandidate).not.toBeNull();
@@ -187,9 +196,9 @@ describe("Windows publication history evidence with real canonical Ops/Client pr
         CLIENT_PORTAL_OPERATIONS_NATIVE_CONTENT_AUDIT_ENABLED: "true", CLIENT_PORTAL_OPERATIONS_NATIVE_CONTENT_AUDIT_HMAC_SECRET: "synthetic-successor-audit-secret-".repeat(3),
         OPERATIONS_PORTAL_NATIVE_DELIVERY_AUTHORIZATION_READER: { ...consumerEnv.OPERATIONS_PORTAL_NATIVE_DELIVERY_AUTHORIZATION_READER,
           readWindowsCatalogSuccessorAuthorization: (wire: string, feature: "folder.list" | "file.metadata") =>
-            readWindowsPortalCatalogSuccessorAuthorizationEntrypoint(opsEnv, wire, feature),
+            timedRead(feature, () => readWindowsPortalCatalogSuccessorAuthorizationEntrypoint(opsEnv, wire, feature)),
           readNativeDeliveryAuthorization: (input: Parameters<typeof readOperationsPortalNativeDeliveryAuthorizationEntrypoint>[1]) =>
-            readOperationsPortalNativeDeliveryAuthorizationEntrypoint(opsEnv, input) } } as unknown as WindowsPortalCatalogRouteEnv;
+            timedRead("native", () => readOperationsPortalNativeDeliveryAuthorizationEntrypoint(opsEnv, input)) } } as unknown as WindowsPortalCatalogRouteEnv;
       const config = { enabled: true, portalOrigin: origin, issuer: ctx.issuer, audience, queueKey: new Uint8Array(32).fill(17) };
       const queue = createOperationsNativeQueueRouter(config), downloads = createWindowsPortalSuccessorRouter(config);
       const catalog = createWindowsPortalCatalogRouter(config), catalogBase = "/api/client/operations/data/windows-catalog";
@@ -271,7 +280,9 @@ describe("Windows publication history evidence with real canonical Ops/Client pr
       expect((await catalog.fetch(request(catalogBase + "/files/" + initialCatalog.file), queueEnv)).status).toBe(404);
       const refreshedCatalog = await browse();
       const catalogSelection = await queue.fetch(request("/api/client/operations/data/queue/reference?fileHandle=" + refreshedCatalog.file), queueEnv);
-      expect(catalogSelection.status).toBe(200);
+      expect(catalogSelection.status, JSON.stringify({ body: await catalogSelection.clone().text(),
+        recentReads: readerTimings.slice(-8).map(({ kind, started, elapsedMs, completed }) => ({ kind, completed,
+          elapsedMs: elapsedMs ?? Math.round(performance.now() - started) })) })).toBe(200);
       const catalogReference = await catalogSelection.json() as { resourceRef: string };
       const catalogResolvedResponse = await queue.fetch(request("/api/client/operations/data/queue/resolve?resourceRef=" + catalogReference.resourceRef), queueEnv);
       expect(catalogResolvedResponse.status).toBe(200);
