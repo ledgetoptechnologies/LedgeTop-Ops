@@ -66,4 +66,3 @@ export const loadIntelBusinesses = (signal?: AbortSignal) => read<{ businesses: 
 export const loadCompetitors = (key: string, signal?: AbortSignal) => read<StaffTenantView>(`${base(key)}/competitors`, isTenant, signal);
 export const loadWebsiteStats = (key: string, range: IntelRange, signal?: AbortSignal) => read<WebsiteStats>(`${base(key)}/website?range=${range}`, isWebsite, signal);
 export const loadSearchStats = (key: string, range: IntelRange, signal?: AbortSignal) => read<SearchStats>(`${base(key)}/search-console?range=${range}`, isSearch, signal);
-
