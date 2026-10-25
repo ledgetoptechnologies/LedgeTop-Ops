@@ -68,7 +68,11 @@ is a fraction; conversion into this draft's percent field is the producer's
 responsibility. An unavailable average position at positive impressions needs
 a nonempty limitation. No average position is replaced by zero.
 
-An observed period with omitted daily dates needs nonempty `limits`; prose
+A period with actual data and omitted daily dates needs nonempty `limits`,
+including known daily/top rows with unknown/null aggregate totals. Empty unknown
+or no-covered-day reports do not acquire a fabricated missing-day disclosure.
+The mixed unknown-aggregate/sparse-known-row regression first failed on frozen
+`ac1685c5` before this follow-up moved the check to payload-derived data presence. Prose
 accuracy and whether it names every omitted date cannot be machine-proved from
 this unstructured field. Unknown source gaps cannot be encoded as old provider
 delay: `provider_data_delay` is structurally permitted only for a requested

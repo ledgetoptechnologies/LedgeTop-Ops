@@ -39,6 +39,15 @@ describe('unactivated owner Intel v2 preparation',()=>{
   q.provenance.lastDataDate='2026-09-30';q.provenance.dataRange={start:'2026-09-01',end:'2026-09-30'};q.provenance.asOf=null;
   q.totals={clicks:null,impressions:null,ctrPercent:null,avgPosition:null,state:'unknown',reason:'source_stale'};q.daily=[];q.topQueries=[];q.topPages=[];expect(f.validate()).toBeDefined();
  });
+ it.each(['daily','topQueries','topPages'])('requires missing-day disclosure for known %s rows even when aggregate totals are unknown',section=>{
+  const f=fixture(),q=f.value.payload;
+  const known=q[section][0];
+  q.totals={clicks:null,impressions:null,ctrPercent:null,avgPosition:null,state:'unknown',reason:'not_checked'};
+  q.daily=[];q.topQueries=[];q.topPages=[];q[section]=[known];
+  expect(f.validate).toThrow('schema_invalid');
+  q.provenance.limits=[section==='daily'?'Daily rows omit 2026-10-02 and 2026-10-03.':'Daily rows omit 2026-10-01, 2026-10-02 and 2026-10-03.'];expect(f.validate()).toBeDefined();
+  q.daily=[];q.topQueries=[];q.topPages=[];q.provenance.limits=[];q.provenance.asOf=null;expect(f.validate()).toBeDefined();
+ });
  it.each(['own_site','social_presence'] as const)('accepts partial and honest no-data %s without fabricating success',kind=>{
   const f=fixture(kind),q=f.value.payload;q.provenance.partial=true;q.provenance.partialReason='data_limited';q.provenance.limits=['Only the available public facts are reported.'];expect(f.validate()).toBeDefined();
   q.provenance.partial=false;q.provenance.partialReason=null;q.provenance.asOf=null;

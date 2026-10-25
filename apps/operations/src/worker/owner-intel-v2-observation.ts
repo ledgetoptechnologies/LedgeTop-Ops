@@ -86,10 +86,10 @@ export function validateOwnerIntelV2Observation(raw:Uint8Array,reviewed:Reviewed
   // Validate even an empty report's reviewed property configuration.
   if(scope.kind==='domain'?scope.siteUrl!==`sc-domain:${scope.domain}`:!pageWithinProperty(scope.siteUrl,scope))invalid();
   data=q.totals.state==='observed'||q.daily.length>0||q.topQueries.length>0||q.topPages.length>0;
+  if(data&&q.daily.length<q.period.days&&!hasLimits(p))invalid();
   if(q.totals.state==='observed'){
    ctr(q.totals.clicks!,q.totals.impressions!,q.totals.ctrPercent);
    if(q.totals.impressions!>0&&q.totals.avgPosition===null&&!hasLimits(p))invalid();
-   if(q.daily.length<q.period.days&&!hasLimits(p))invalid();
   }
   let prior='';
   for(const row of q.daily){if(row.date<q.period.start||row.date>q.period.end||row.date<=prior||row.clicks>row.impressions)invalid();prior=row.date;}
