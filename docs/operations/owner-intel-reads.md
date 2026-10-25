@@ -99,6 +99,12 @@ and GSC/own-site/social v2 observation kinds remain unaccepted proposals.
 
 ## Reviewed references
 
+The internal owner read projection admits up to 50 competitors, within its
+separate bounded DTO body. The ten-entry `configure_monitoring` command batch
+limit is not a total monitored-competitor limit. The existing eleven-competitor
+owner inventory therefore fits without truncation. Wire envelopes and client
+publication limits remain unchanged.
+
 Hub project `ledge-top-ops`, canonical paths read October 24:
 
 - `competitor-intel/frozen/ingest-wire-envelope-v1.md`, version 1,

@@ -120,6 +120,17 @@ describe('owner Intel: explicit internal-business read authority and durable ada
   await accept(malformed,{...projection(malformed.key),unreviewedSecret:'must not escape'});
   for(const f of [corrupt,cross,malformed]){const response=await f.request(`/${f.key}/competitors`);expect(response.status).toBe(503);expect(await response.json()).toEqual({error:'intel_projection_unavailable'});}
  });
+ it('returns all eleven owner competitors rather than applying a command-batch limit',async()=>{
+  const f=await seed(),value=projection(f.key),template=value.competitors[0]!;
+  const competitors=(length:number)=>Array.from({length},(_,i)=>({...template,operationId:`10000000-0000-4000-8000-${String(i+1).padStart(12,'0')}`,subjectKey:`comp:synthetic-${i}`,name:`Synthetic Competitor ${i}`}));
+  value.competitors=competitors(11);
+  await accept(f,value);const response=await f.request(`/${f.key}/competitors`);
+  expect(response.status).toBe(200);
+  const body=await response.json() as {competitors:Array<{subjectKey:string}>};
+  expect(body.competitors.map(c=>c.subjectKey)).toEqual(value.competitors.map(c=>c.subjectKey));
+  expect(ownerCompetitorProjection.safeParse({...value,competitors:competitors(50)}).success).toBe(true);
+  expect(ownerCompetitorProjection.safeParse({...value,competitors:competitors(51)}).success).toBe(false);
+ });
  it('has no command/ingest activation surface and accepts only defined GET query shapes',async()=>{
   const f=await seed();for(const path of [`/${f.key}/competitors?extra=1`,`/${f.key}/website?range=1d`,`/${f.key}/website?range=7d&range=28d`,'/businesses?extra=1'])expect((await f.request(path)).status).toBe(400);
   expect((await f.request(`/${f.key}/competitors/commands`,'POST')).status).toBe(404);
