@@ -50,7 +50,7 @@ jobs:
         run: node --test scripts/canonical-domain-navigation.test.mjs
 
       - name: Verify canonical delivery host compatibility
-        run: node --test scripts/canonical-delivery-compatibility.test.mjs
+        run: node --test scripts/canonical-delivery-compatibility.test.mjs scripts/production-delivery-domain-transition.test.mjs
 
       - name: Verify main and PR workflow trigger policy
         run: node --test scripts/workflow-trigger-policy.test.mjs
