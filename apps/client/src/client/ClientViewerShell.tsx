@@ -132,7 +132,8 @@ function DirectTaskViewerShell({ route }: { route: Extract<ClientViewerShellRout
     return request;
   }, [checkSupport, issueFirst]);
   useEffect(() => { void start(); }, [start]);
-  const exit = () => window.location.assign("/portal/dashboard");
+  // The portal root, so a client with only an Operations home returns to that home rather than a client-account page.
+  const exit = () => window.location.assign("/portal");
   if (!first)
     return error
       ? <section className="viewer-shell-page" aria-label="3D Viewer"><Card title="Secure 3D Viewer"><p className="viewer-session-error" role="alert">{error}</p><div className="actions"><button type="button" className="button-orange" onClick={() => void start()}>Retry secure session</button><button type="button" className="button-ghost" onClick={exit}>Back</button></div></Card></section>

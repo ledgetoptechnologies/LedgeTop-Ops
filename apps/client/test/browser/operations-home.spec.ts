@@ -16,6 +16,7 @@ const response = {
 
 const financialPath = (authorityId: string) =>
   `/api/client/v2/operations/home/${encodeURIComponent(authorityId)}/financial`;
+const viewerPath = (workspaceId: string) => `/api/client/v2/workspaces/${encodeURIComponent(workspaceId)}/viewer`;
 
 test("a missing billing grant shows an empty financial state, not a connection failure", async ({ page }) => {
   await page.route("**/api/client/**", route => {
@@ -162,11 +163,13 @@ test("operations metadata remains the only surface when the independent client b
   await accountMenu.click();
   await expect(page.getByRole("menuitem", { name: "Logout" }))
     .toHaveAttribute("href", "/cdn-cgi/access/logout");
-  expect(calls).toEqual([
+  // The home's direct 3D shares are read with its exact account, never by opening it as a client account.
+  expect([...calls].sort()).toEqual([
     "/api/client/v2/operations/home",
     "/api/client/session",
     financialPath(response.homes[0]!.authorityId),
-  ]);
+    viewerPath(response.homes[0]!.workspaceId),
+  ].sort());
 });
 
 test("native operations home does not label an absent optional Client workspace as unavailable", async ({ page }) => {
@@ -211,13 +214,14 @@ for (const [name, emptyResponse, detail] of [
     await expect(summary.getByRole("link")).toHaveCount(0);
     await expect(summary.getByRole("button")).toHaveCount(0);
     await expect(page.getByRole("navigation")).toHaveCount(0);
-    expect(calls).toEqual(emptyResponse.homes.length === 0
+    expect([...calls].sort()).toEqual((emptyResponse.homes.length === 0
       ? ["/api/client/v2/operations/home", "/api/client/session"]
       : [
           "/api/client/v2/operations/home",
           "/api/client/session",
           financialPath(emptyResponse.homes[0]!.authorityId!),
-        ]);
+          viewerPath(emptyResponse.homes[0]!.workspaceId!),
+        ]).sort());
   });
 }
 

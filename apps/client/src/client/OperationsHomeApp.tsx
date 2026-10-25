@@ -1,9 +1,13 @@
 import { useEffect,useState } from "react";
-import { loadOperationsFinancial,type PortalFinancialDocument,type PortalOperationsHomeResponse } from "./portal-api";
+import { loadOperationsFinancial,type PortalFinancialDocument,type PortalOperationsHomeResponse,type PortalWorkspace } from "./portal-api";
 import { OperationsNativeDataBrowser } from "./OperationsNativeDataBrowser";
 import { AccountMenu } from "@ltds/ui";
 import { PORTAL_APP_API } from "@ltds/shared";
 import { PortalBrand } from "./PortalShell";
+import { SharedViewerWork } from "./SharedViewerWork";
+import { operationsHomeViewerWorkspaceIds } from "./shared-viewer-work";
+
+const NO_CLIENT_ACCOUNTS: PortalWorkspace[] = [];
 
 export function OperationsServiceSummary({ response, embedded = false }: {
   response: PortalOperationsHomeResponse;
@@ -180,6 +184,7 @@ export function OperationsHomeApp({ response, clientUnavailable = false, onRetry
         <p>Your projects and requests could not be opened for the selected client. Your services, invoices and files below are still available.</p>
         {onRetryClient && <button type="button" className="button-orange" onClick={onRetryClient}>Try my other client accounts</button>}
       </section>}
+      <SharedViewerWork workspaces={NO_CLIENT_ACCOUNTS} operationsHomeWorkspaceIds={operationsHomeViewerWorkspaceIds(response)} />
       <OperationsNativeServicePanel response={response} />
     </main>
   </div>;

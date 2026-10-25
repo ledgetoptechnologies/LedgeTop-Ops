@@ -24,8 +24,14 @@ const shortDate = (value: string) => new Date(value).toLocaleDateString(undefine
  * (workspace) names are never shown: some are internal labels. Each row opens with its
  * own account and grant, so nothing is merged or switched.
  */
-export function SharedViewerWork({ workspaces }: { workspaces: PortalWorkspace[] }) {
-  const accounts = useMemo(() => viewerWorkAccounts(workspaces), [workspaces]);
+export function SharedViewerWork({ workspaces, operationsHomeWorkspaceIds = [] }: {
+  workspaces: PortalWorkspace[];
+  /** Workspaces of the currently verified Operations homes; empty while they are hidden or revalidating. */
+  operationsHomeWorkspaceIds?: readonly string[];
+}) {
+  // Keyed by content so a re-render with the same accounts doesn't reload them.
+  const accountKey = viewerWorkAccounts(workspaces, operationsHomeWorkspaceIds).join("\n");
+  const accounts = useMemo(() => accountKey ? accountKey.split("\n") : [], [accountKey]);
   const [work, setWork] = useState<Map<string, AccountWork>>(() => new Map());
   const controllers = useRef(new Map<string, AbortController>());
   const generation = useRef(0);
@@ -42,7 +48,7 @@ export function SharedViewerWork({ workspaces }: { workspaces: PortalWorkspace[]
   }, []);
 
   useEffect(() => {
-    const current = ++generation.current, queue = accounts.map(account => account.id);
+    const current = ++generation.current, queue = [...accounts];
     setWork(new Map(queue.map(id => [id, { status: "loading" }])));
     const worker = async () => { for (let next = queue.shift(); next && current === generation.current; next = queue.shift()) await loadFirst(next, current); };
     void Promise.all(Array.from({ length: Math.min(ACCOUNT_CONCURRENCY, queue.length) }, worker));
@@ -71,7 +77,7 @@ export function SharedViewerWork({ workspaces }: { workspaces: PortalWorkspace[]
     }
   };
 
-  const states = accounts.map(account => ({ account, state: work.get(account.id) ?? { status: "loading" as const } }));
+  const states = accounts.map(account => ({ account, state: work.get(account) ?? { status: "loading" as const } }));
   const rows = sharedViewerRows(states.flatMap(({ state }) => state.status === "ready" ? state.items : []));
   const withBusiness = showsBusinessName(rows);
   const loading = states.some(({ state }) => state.status === "loading");
@@ -83,7 +89,7 @@ export function SharedViewerWork({ workspaces }: { workspaces: PortalWorkspace[]
   return <Card title="Shared 3D work" className="shared-viewer-work">
     {failed.length > 0 && <div className="shared-viewer-work-problem" role="alert">
       <p>Some shared 3D work couldn’t be loaded.</p>
-      <button type="button" className="button-ghost button-small" onClick={() => failed.forEach(({ account }) => void loadFirst(account.id, generation.current))}>Try again</button>
+      <button type="button" className="button-ghost button-small" onClick={() => failed.forEach(({ account }) => void loadFirst(account, generation.current))}>Try again</button>
     </div>}
     {rows.length > 0 && <ul className="shared-viewer-work-list">{rows.map(row => <li key={`${row.workspaceId}:${row.taskId}`}>
       <div><strong>{row.title}</strong>
@@ -95,9 +101,9 @@ export function SharedViewerWork({ workspaces }: { workspaces: PortalWorkspace[]
     {unchecked.length > 0 && <p className="shared-viewer-work-problem" role="status">{unchecked.length === states.length
       ? "Shared 3D work isn’t available here yet." : "Some shared 3D work isn’t available here yet."}</p>}
     {!loading && rows.length === 0 && failed.length === 0 && unchecked.length === 0 && <EmptyState title="No 3D work has been shared with you yet." detail="3D models shared with you will appear here." />}
-    {more.map(({ account, state }) => state.status === "ready" && <div key={account.id} className="shared-viewer-work-more">
+    {more.map(({ account, state }) => state.status === "ready" && <div key={account} className="shared-viewer-work-more">
       {state.moreError && <p role="alert">More shared 3D work couldn’t be loaded.</p>}
-      <button type="button" className="button-ghost" disabled={state.loadingMore} onClick={() => void loadMore(account.id)}>
+      <button type="button" className="button-ghost" disabled={state.loadingMore} onClick={() => void loadMore(account)}>
         {state.moreError ? "Try again" : "Load more 3D work"}</button>
     </div>)}
   </Card>;
