@@ -49,6 +49,9 @@ jobs:
       - name: Verify isolated canonical navigation preparation
         run: node --test scripts/canonical-domain-navigation.test.mjs
 
+      - name: Verify canonical delivery host compatibility
+        run: node --test scripts/canonical-delivery-compatibility.test.mjs
+
       - name: Verify main and PR workflow trigger policy
         run: node --test scripts/workflow-trigger-policy.test.mjs
 
@@ -293,6 +296,12 @@ jobs:
       - name: Build Client Portal browser fixture
         working-directory: apps/client
         run: npm run build
+
+      - name: Verify canonical delivery redirect fragment compatibility
+        if: matrix.project == 'desktop-edge'
+        env:
+          CANONICAL_DELIVERY_BROWSER_CHANNEL: msedge
+        run: node --test scripts/canonical-delivery-browser.test.mjs
 
       - name: Run Client Portal browser acceptance suite
         working-directory: apps/client
