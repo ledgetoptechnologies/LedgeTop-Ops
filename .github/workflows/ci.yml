@@ -209,6 +209,11 @@ jobs:
         working-directory: apps/${{ matrix.package }}
         run: npm run check
 
+      - name: Check reviewed migration inventory before the full Operations suite
+        if: matrix.package == 'operations'
+        working-directory: apps/operations
+        run: npm exec -- vitest run test/reviewed-migration-chain.test.ts --config vitest.config.ts
+
       - name: Test
         working-directory: apps/${{ matrix.package }}
         run: npm test

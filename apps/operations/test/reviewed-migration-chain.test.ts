@@ -147,6 +147,7 @@ describe("reviewed release migration fixtures", () => {
     ["client", "0236_windows_portal_successor_content_start_audit.sql"],
     ["client", "0237_viewer_direct_client_grants.sql"],
     ["client", "0238_viewer_direct_session_intents.sql"],
+    ["client", "0239_native_project_assignment_proof_v3.sql"],
   ] as const)("validates exact %s successor %s without expanding historical authority", (application, name) => {
     const fixture=copyMigrations(application);
     const reviewed=()=>application==="operations"?reviewedOperationsMigrationNames(fixture.url):reviewedClientMigrationNames(fixture.url);
@@ -166,7 +167,8 @@ describe("reviewed release migration fixtures", () => {
   it.each([
     ["0237_viewer_direct_client_grants.sql", "0237_unreviewed_viewer_direct_client_grants.sql"],
     ["0238_viewer_direct_session_intents.sql", "0238_unreviewed_viewer_direct_session_intents.sql"],
-  ])("rejects unknown direct-sharing successor names even with reviewed %s bytes", (name, unknown) => {
+    ["0239_native_project_assignment_proof_v3.sql", "0239_unreviewed_native_project_proof.sql"],
+  ])("rejects unknown successor names even with reviewed %s bytes", (name, unknown) => {
     const fixture = copyMigrations("client");
     const sql = readFileSync(join(fixture.directory, name), "utf8");
     writeFileSync(join(fixture.directory, unknown), sql);
