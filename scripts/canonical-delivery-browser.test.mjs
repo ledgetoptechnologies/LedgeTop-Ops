@@ -30,7 +30,7 @@ test('Chromium inherits private fragments through the real HTTP redirect respons
     browser=await chromium.launch({headless:true, ...(process.env.CANONICAL_DELIVERY_BROWSER_CHANNEL === 'msedge' ? {channel:'msedge'} : {})});
     const page=await browser.newPage();
     for(const root of ['s','client-share']) {
-      const path=`/${root}/synthetic-id?folder=opaque%2Fref&x=1&x=2`;
+      const path=`/${root}/synthetic-id?folder=opaque%2Fref&sort=name&sort=date`;
       await page.goto(`${sourceOrigin}${path}#Synthetic_secret-123`);
       assert.equal(page.url(),`${targetOrigin}${path}#Synthetic_secret-123`);
       assert.ok(received.includes(path));
