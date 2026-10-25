@@ -28,7 +28,7 @@ async function capture(page, name) {
   await page.screenshot({ path: path.join(directory, name), fullPage: false });
 }
 
-async function fixture(t, { failSecondTaskOnce = false, legacyUnavailable = false, deferLegacy = false, directUnavailable = false } = {}) {
+async function fixture(t, { failSecondTaskOnce = false, legacyUnavailable = false, deferLegacy = false, directUnavailable = false, deferDirectPost = false } = {}) {
   const built = realpathSync(path.join(root, 'dist'));
   assert.ok(existsSync(path.join(built, 'workspace.html')), 'Build Viewer before opting into browser acceptance');
   const requests = [], grants = [], receipts = new Map(), forbidden = [];
@@ -37,6 +37,9 @@ async function fixture(t, { failSecondTaskOnce = false, legacyUnavailable = fals
   let finishLegacy;
   const legacyReady = deferLegacy ? new Promise(resolve => { finishLegacy = resolve; }) : Promise.resolve();
   t.after(() => finishLegacy?.());
+  let finishDirectPost;
+  const directPostReady = deferDirectPost ? new Promise(resolve => { finishDirectPost = resolve; }) : Promise.resolve();
+  t.after(() => finishDirectPost?.());
   const project = { id: PROJECT, displayName: 'Synthetic property mapping', description: 'Local synthetic browser acceptance only', status: 'active' };
   const tasks = TASKS.map((id, index) => ({ id, projectId: PROJECT, datasetId: `dataset-${index}`, displayName: index ? 'South field' : 'North field',
     status: 'published', createdAt: `2026-01-0${index + 1}T12:00:00.000Z`, metrics: { sourceImageCount: 3 }, latestAttempt: { id: `attempt-${index}`, status: 'published', attemptNumber: 1 } }));
@@ -49,6 +52,7 @@ async function fixture(t, { failSecondTaskOnce = false, legacyUnavailable = fals
     }
     if (url.pathname === DIRECT && method === 'GET') return directUnavailable ? [503, { error: 'Synthetic direct sharing unavailable' }] : [200, { clients: [CLIENT], clientsNextCursor: null, grants: grants.filter(grant => !grant.revokedAt) }];
     if (url.pathname === DIRECT && method === 'POST') {
+      await directPostReady;
       assert.deepEqual(Object.keys(body).sort(), grantKeys, 'UI must use direct client authority, without a PA/business project');
       assert.equal(body.sourceId, CLIENT.sourceId); assert.equal(body.workspaceId, CLIENT.workspaceId); assert.equal(body.viewerProjectId, PROJECT);
       assert.equal(body.confirmedScope, true); assert.match(key || '', /^[A-Za-z0-9._:-]{16,128}$/);
@@ -124,7 +128,7 @@ async function fixture(t, { failSecondTaskOnce = false, legacyUnavailable = fals
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   t.after(() => new Promise(resolve => server.close(resolve)));
   const origin = `http://127.0.0.1:${server.address().port}`;
-  return { origin, requests, grants, forbidden, errors, finishLegacy };
+  return { origin, requests, grants, forbidden, errors, finishLegacy, finishDirectPost };
 }
 
 async function openWorkspace(t, browser, state, viewport = { width: 1366, height: 1000 }) {
@@ -202,6 +206,30 @@ test('built Viewer shares directly to clients through the real Edge UI', { skip:
     assertNoUnrelatedWrites(state, pageErrors);
   });
 
+  await t.test('late legacy failure preserves direct sharing progress while its grant request is pending', async child => {
+    const state = await fixture(child, { deferLegacy: true, legacyUnavailable: true, deferDirectPost: true });
+    const { page, pageErrors } = await openWorkspace(child, browser, state), form = await openShare(page);
+    const original = await form.elementHandle();
+    await form.locator('[name="scope"][value="tasks"]').check();
+    await form.locator(`[name="taskId"][value="${TASKS[0]}"]`).check();
+    await form.locator('[name="confirmedScope"]').check();
+    await form.getByRole('button', { name: 'Share with client', exact: true }).click();
+    await page.waitForFunction(() => document.querySelector('[data-direct-summary]')?.textContent.startsWith('Sharing…'));
+    const progress = await form.locator('[data-direct-summary]').innerText();
+    state.finishLegacy();
+    await page.locator('.share-legacy').getByText('Operations client access could not be loaded. Close and reopen Share to retry. Public links are unaffected.', { exact: true }).waitFor({ state: 'attached' });
+    assert.equal(await original.evaluate(element => element.isConnected), true);
+    assert.equal(await form.locator('[data-direct-summary]').innerText(), progress, 'Legacy completion must not reset the independent pending-request summary');
+    assert.equal(await form.getByRole('button', { name: 'Share with client', exact: true }).isDisabled(), true);
+    for (const taskId of TASKS) assert.equal(await form.locator(`[name="taskId"][value="${taskId}"]`).isDisabled(), true,
+      'Late legacy completion must not re-enable frozen task controls');
+    state.finishDirectPost();
+    await page.locator('[data-action="revoke-direct-client-grant"]').waitFor();
+    assert.equal(state.grants.length, 1);
+    assert.equal(state.requests.filter(request => request.method === 'POST').length, 1);
+    assertNoUnrelatedWrites(state, pageErrors);
+  });
+
   await t.test('whole project needs explicit future-task consent; pending revoke stays honest', async child => {
     const state = await fixture(child), { page, pageErrors } = await openWorkspace(child, browser, state), form = await openShare(page);
     const consent = form.locator('[name="confirmedScope"]'); assert.equal(await consent.isChecked(), false);
@@ -246,12 +274,17 @@ test('built Viewer shares directly to clients through the real Edge UI', { skip:
   });
 
   await t.test('a partial multi-task failure retries with stable exact-scope keys', async child => {
-    const state = await fixture(child, { failSecondTaskOnce: true }), { page, pageErrors } = await openWorkspace(child, browser, state), form = await openShare(page);
+    const state = await fixture(child, { failSecondTaskOnce: true, deferLegacy: true, legacyUnavailable: true }), { page, pageErrors } = await openWorkspace(child, browser, state), form = await openShare(page);
     await form.locator('[name="scope"][value="tasks"]').check();
     for (const taskId of TASKS) await form.locator(`[name="taskId"][value="${taskId}"]`).check();
     await form.locator('[name="confirmedScope"]').check(); await form.getByRole('button', { name: 'Share with client', exact: true }).click();
     await page.waitForFunction(() => document.querySelector('[data-direct-summary]')?.textContent.includes('Shared 1 of 2'));
     assert.equal(state.grants.length, 1);
+    const partial = await form.locator('[data-direct-summary]').innerText(), original = await form.elementHandle();
+    state.finishLegacy();
+    await page.locator('.share-legacy').getByText('Operations client access could not be loaded. Close and reopen Share to retry. Public links are unaffected.', { exact: true }).waitFor({ state: 'attached' });
+    assert.equal(await original.evaluate(element => element.isConnected), true);
+    assert.equal(await form.locator('[data-direct-summary]').innerText(), partial, 'Late legacy completion preserves partial-failure guidance and retry state');
     await form.getByRole('button', { name: 'Share with client', exact: true }).click();
     await page.waitForFunction(() => document.querySelectorAll('[data-action="revoke-direct-client-grant"]').length === 2);
     assert.equal(state.grants.length, 2, 'Replaying the first successful task must not create another grant');

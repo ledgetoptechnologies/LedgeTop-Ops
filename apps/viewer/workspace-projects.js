@@ -91,7 +91,7 @@ async function openShareModal(projectId,onlyOutputId=null){
     context.clientLoading=false;context.clientError=legacy.status==='rejected'?clientAccessDiagnostic(legacy.reason):null;context.nativeError=native.status==='rejected'?clientAccessDiagnostic(native.reason):null;
     if(context.loading)return;
     const legacyPanel=modalContent.querySelector('[data-legacy-client-share-panel]');
-    if(state.clientDirectAccess&&legacyPanel){legacyPanel.innerHTML=legacyClientSharePanel(state.outputs.find(output=>output.id===onlyOutputId),onlyOutputId);bindShareModal(projectId,onlyOutputId);return;}
+    if(state.clientDirectAccess&&legacyPanel){legacyPanel.innerHTML=legacyClientSharePanel(state.outputs.find(output=>output.id===onlyOutputId),onlyOutputId);bindShareModal(projectId,onlyOutputId,{preserveDirectForm:true});return;}
     const panel=modalContent.querySelector('[data-client-share-panel]');
     if(panel){panel.innerHTML=clientSharePanel(state.outputs.find(output=>output.id===onlyOutputId),onlyOutputId);bindShareModal(projectId,onlyOutputId);}
   })();
@@ -911,7 +911,7 @@ function clientGrantRevocationMessage(result,native){
     ?'Client access revoked. Revocation of existing sessions is pending.'
     :'Client access revoked';
 }
-function bindShareModal(projectId,onlyOutputId){
+function bindShareModal(projectId,onlyOutputId,{preserveDirectForm=false}={}){
   modalContent.querySelectorAll('[data-share-mode]').forEach(element=>element.onclick=()=>{
     if(!onlyOutputId||!state.shareContext)return;
     const mode=element.dataset.shareMode==='public'?'public':'internal';state.shareContext.mode=mode;
@@ -924,7 +924,7 @@ function bindShareModal(projectId,onlyOutputId){
   modalContent.querySelectorAll('[data-action="copy-existing-share"],[data-action="open-existing-share"]').forEach(element=>element.onclick=()=>retrieveShareLink(element));
   modalContent.querySelectorAll('[data-action="edit-share"]').forEach(element=>element.onclick=()=>editShareModal(projectId,onlyOutputId,element.dataset.id));
   const directForm=modalContent.querySelector('#direct-client-grant-form');
-  if(directForm)bindDirectShare(directForm,projectId,onlyOutputId);
+  if(directForm&&!preserveDirectForm)bindDirectShare(directForm,projectId,onlyOutputId);
   modalContent.querySelectorAll('[data-action="revoke-direct-client-grant"]').forEach(element=>element.onclick=async()=>{
     // Pinned to this modal and row: a late answer must not touch a different Share dialog.
     const shareContext=state.shareContext,access=state.clientDirectAccess,live=()=>state.shareContext===shareContext&&state.clientDirectAccess===access&&element.isConnected&&modal.open;
