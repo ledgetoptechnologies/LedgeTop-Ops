@@ -30,9 +30,11 @@ import {
   listNativeServiceCatalog,
   listNativeServiceRequests,
   submitNativeServiceRequestDraft,
+  saveNativeServiceRequestDraft,
 } from "../src/worker/client-portal/native-request-v2";
 import {
   abortRequestAttachment,
+  acceptRequestAttachmentScanReceipt,
   checkpointRequestAttachment,
   completeRequestAttachment,
   getAuthorizedRequestAttachmentContext,
@@ -82,17 +84,18 @@ describe("exact-target service-assignment request policy", { timeout: 60_000 }, 
       script: "export default {fetch(){return new Response('ok')}}",
       // Each test receives an isolated D1 binding; keep capacity above the
       // current case count so new cases do not request an undeclared binding.
-      d1Databases: Object.fromEntries(Array.from({ length: 40 }, (_, index) =>
+      d1Databases: Object.fromEntries(Array.from({ length: 48 }, (_, index) =>
         [`POLICY_DB_${index}`, `service-assignment-policy-${index}`])),
     });
   });
 
   afterAll(async () => runtime.dispose());
 
-  beforeEach(async () => {
+  beforeEach(async context => {
     db = await runtime.getD1Database(`POLICY_DB_${databaseIndex++}`) as unknown as D1Database;
     const directory = new URL("../migrations/", import.meta.url);
     for (const name of readdirSync(directory).filter(name => /^\d+.*\.sql$/.test(name)).sort()) {
+      if (context.task.name.includes("old-schema native project") && name.startsWith("0239_")) continue;
       const statements = splitD1MigrationStatements(readFileSync(new URL(name, directory), "utf8"));
       if (statements.length) await db.batch(statements.map(sql => db.prepare(sql)));
     }
@@ -453,6 +456,119 @@ describe("exact-target service-assignment request policy", { timeout: 60_000 }, 
     }
     expect(await ensureNativeRequestStorage(env, proof!, "Existing readable project")).not.toBeNull();
   });
+
+  it("old-schema native project requests fail explicitly before storage while general requests remain available", async () => {
+    await seedNativeRequestProject(true);
+    const input: ClientServiceRequestDraftInput = {
+      projectId: "native-request-project", requestType: "service", title: "Not ready project", details: "Never turn a missing additive schema into a failed write",
+      location: null, preferredStartAt: null, desiredCompletionAt: null, deliverables: null,
+      siteContactName: null, siteContactEmail: null, siteContactPhone: null, latitude: null, longitude: null,
+      areaGeoJson: null, poiPoints: [], services: [{ publicId: "root-service", sourceVersion: "service-v1", answers: {} }],
+    };
+    await expect(createNativeServiceRequestDraft(env, secondarySession, input, "old-schema-project-create-0001"))
+      .rejects.toMatchObject({ status: 503, cause: { code: "NATIVE_PROJECT_REQUEST_NOT_READY" } });
+    expect(await db.prepare("SELECT count(*) n FROM portal_native_request_storage_bindings").first<number>("n")).toBe(0);
+    const portal = createClientPortalRouter({ resolvePrincipal: async () => ({
+      issuer: "https://issuer.test", subject: "policy-subject", email: "policy@example.test",
+    }) });
+    const response = await portal.request("https://client.example/service-request-drafts", {
+      method: "POST", headers: { Origin: "https://client.example", "Content-Type": "application/json",
+        "X-LTDS-Workspace-Id": secondarySession.workspaceId!, "Idempotency-Key": "old-schema-project-http-0001" },
+      body: JSON.stringify(input),
+    }, { ...env, CLIENT_PORTAL_ENABLED: "true", CLIENT_PORTAL_ORIGIN: "https://client.example" } as Env);
+    expect(response.status).toBe(503);
+    expect(await response.text()).toContain("Project-specific requests are not available yet");
+    expect((await createNativeServiceRequestDraft(env, secondarySession, { ...input, projectId: null },
+      "old-schema-general-create-0001"))?.kind).toBe("created");
+  });
+
+  it("project-readable request composition supports draft edits, multipart completion, submission and notifications", async () => {
+    await seedNativeRequestProject(true);
+    await db.batch([
+      db.prepare(`INSERT INTO pa_service_assignments
+        (source_id,assignment_public_id,source_version,subject_type,subject_public_id,service_public_id,
+          service_source_version,active,source_updated_at,source_generation,source_sequence)
+        VALUES (?,'readable-project-assignment','assignment-v1','project','native-request-project',
+          'root-service','service-v1',1,datetime('now'),'secondary-assignments-v1',1)`).bind(secondarySourceId),
+      db.prepare("UPDATE pa_service_assignment_generations SET item_count=3 WHERE id='secondary-assignment-generation'"),
+    ]);
+    const input: ClientServiceRequestDraftInput = {
+      projectId: "native-request-project", requestType: "service", title: "Readable project request", details: "Existing exact project access",
+      location: null, preferredStartAt: null, desiredCompletionAt: null, deliverables: null,
+      siteContactName: null, siteContactEmail: null, siteContactPhone: null, latitude: null, longitude: null,
+      areaGeoJson: null, poiPoints: [], services: [{ publicId: "root-service", sourceVersion: "service-v1", answers: {} }],
+    };
+    expect(await resolveNativeRequestAuthority(env, secondarySession, input.projectId)).not.toBeNull();
+    expect((await listNativeServiceCatalog(env, secondarySession, input.projectId)).map(row => row.publicId)).toContain("root-service");
+    // Keep swallowed mutation errors visible in this synthetic composition test.
+    const traced = (handle: D1Database | D1DatabaseSession): D1Database => new Proxy(handle, {
+      get(target, property) {
+        if (property === "withSession") return (...args: Parameters<D1Database["withSession"]>) => traced((target as D1Database).withSession(...args));
+        if (property === "batch") return async (statements: D1PreparedStatement[]) => {
+          try { return await target.batch(statements); }
+          catch (error) { console.error("synthetic project composition batch failed", error); throw error; }
+        };
+        const value = Reflect.get(target, property);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    }) as D1Database;
+    env.DELIVERY_DB = traced(env.DELIVERY_DB);
+    const created = await createNativeServiceRequestDraft(env, secondarySession, input, "project-composition-create-0001");
+    expect(created?.kind).toBe("created");
+    if (!created || created.kind !== "created") throw new Error("readable project draft unavailable");
+    const createdProof = await db.prepare(`SELECT service_assignment_policy_v2_json legacy,native_project_assignment_proof_v3_json native
+      FROM client_service_request_drafts WHERE id=?`).bind(created.draft.id).first<{legacy:string|null;native:string}>();
+    expect(createdProof!.legacy).toBeNull();
+    expect(JSON.parse(createdProof!.native)).toMatchObject({ version: 3, nativeProject: true, localProjectId: null,
+      sourceId: secondarySourceId, workspaceId: secondarySession.workspaceId, subjectPublicId: input.projectId });
+    const saved = await saveNativeServiceRequestDraft(env, secondarySession, created.draft.id, created.draft.version,
+      { ...input, title: "Updated readable project request" }, "project-composition-save-0001");
+    expect(saved?.kind).toBe("updated");
+    if (!saved || saved.kind !== "updated") throw new Error("readable project draft update unavailable");
+    const initialized = await initializeRequestAttachment(env, secondarySession, created.draft.id, {
+      clientUploadId: "project-composition-upload-0001", name: "proof.pdf", contentType: "application/pdf", size: 10,
+    });
+    const authorized = await getAuthorizedRequestAttachmentContext(env, secondarySession, created.draft.id, initialized.row.id);
+    if (!authorized?.nativeProof) throw new Error("readable project attachment authority unavailable");
+    const lease = await issueNativeRequestAttachmentPartLease(env, authorized.row, authorized.nativeProof, 1);
+    expect(lease).not.toBeNull();
+    const etag = "a".repeat(32);
+    expect(await checkpointRequestAttachment(env, authorized.row, 1, etag, 10,
+      { proof: authorized.nativeProof, ticketNonce: lease!.nonce })).toEqual({ partNumber: 1, etag, size: 10 });
+    const pdf = new Uint8Array([0x25, 0x50, 0x44, 0x46, 0x2d, 0, 0, 0, 0, 0]);
+    env.DATA_BUCKET = {
+      resumeMultipartUpload(key: string, uploadId: string) {
+        return { key, uploadId, async abort() {}, async uploadPart() {}, async complete() { return { size: 10, etag }; } };
+      },
+      async head() { return { size: 10, etag }; },
+      async get() { return { arrayBuffer: async () => pdf.buffer }; },
+      async delete() {},
+    } as unknown as R2Bucket;
+    expect(await completeRequestAttachment(env, authorized.row, [{ partNumber: 1, etag }], authorized.nativeProof))
+      .toEqual({ status: "quarantined", idempotent: false });
+    env.CLIENT_REQUEST_ATTACHMENT_SCANNER_SECRET = "synthetic-scanner-project-composition-0001";
+    expect(await acceptRequestAttachmentScanReceipt(env, `Bearer ${env.CLIENT_REQUEST_ATTACHMENT_SCANNER_SECRET}`,
+      authorized.row.id, { verdict: "clean", sha256: "b".repeat(64) })).toBe("accepted");
+    const submitted = await submitNativeServiceRequestDraft(env, secondarySession, created.draft.id, saved.draft.version,
+      "project-composition-submit-0001");
+    expect(submitted?.kind).toBe("submitted");
+    if (!submitted || submitted.kind !== "submitted") throw new Error("readable project submission unavailable");
+    const submittedProof = await db.prepare(`SELECT service_assignment_policy_v2_json legacy,native_project_assignment_proof_v3_json native
+      FROM client_service_requests WHERE id=?`).bind(submitted.request.id).first<{legacy:string|null;native:string}>();
+    expect(submittedProof!.legacy).toBeNull();
+    expect(JSON.parse(submittedProof!.native)).toMatchObject({ version: 3, nativeProject: true, localProjectId: null,
+      sourceId: secondarySourceId, workspaceId: secondarySession.workspaceId, subjectPublicId: input.projectId });
+    const owner = await db.prepare("SELECT account_id,created_by_identity_id FROM client_service_requests WHERE id=?")
+      .bind(submitted.request.id).first<{account_id:string;created_by_identity_id:string}>();
+    await db.prepare(`INSERT INTO client_portal_notifications
+      (id,account_id,recipient_identity_id,event_type,source_type,source_id,dedupe_key,title,body,action_path)
+      VALUES ('readable-project-notice',?,?,'request_status','service_request',?,'readable-project-notice',
+        'Project update','Project request update','/portal/requests')`)
+      .bind(owner!.account_id, owner!.created_by_identity_id, submitted.request.id).run();
+    expect(await d1ClientPortalRepository.updateNotification(env, secondarySession, "readable-project-notice", "read")).toBe(true);
+    await db.prepare("UPDATE portal_v2_entitlements SET status='revoked',revoked_at=datetime('now') WHERE id='native-project-directory-read'").run();
+    expect(await d1ClientPortalRepository.updateNotification(env, secondarySession, "readable-project-notice", "dismiss")).toBe(false);
+  }, 120_000);
 
   it.each(["read_revoked", "read_expired", "deny_added", "lineage", "principal_version", "principal_binding", "identity_block"] as const)(
     "project-readable request authority fences %s after resolution and before storage creation", async change => {

@@ -1192,6 +1192,7 @@ app.onError((error, c) => {
       : 500;
   const cause=error instanceof Error?error.cause as {code?:string;layer?:"database"|"storage"}|undefined:undefined;
   const code=cause?.code;
+  const projectRequestNotReady=status===503&&code==="NATIVE_PROJECT_REQUEST_NOT_READY";
   const publicShareRequest=c.req.path.startsWith("/api/public/shares/");
   if(publicShareRequest&&status>=400)logPublicShareOutcome(c.req.raw,{outcome:code||"UNEXPECTED_FAILURE",status,shareId:c.get("share")?.id,layer:cause?.layer});
   if (status >= 500&&!publicShareRequest) console.error(JSON.stringify({ event: "delivery.error", status, message: error instanceof Error ? error.message : "unknown" }));
@@ -1200,7 +1201,7 @@ app.onError((error, c) => {
         error: "Client portal data is temporarily unavailable while its database update finishes.",
         code: "CLIENT_PORTAL_SCHEMA_OUTDATED",
       }
-    : { error: status >= 500 ? "An unexpected error occurred" : error.message,...(code?{code}:{}) }, status);
+    : { error: projectRequestNotReady ? "Project-specific requests are not available yet. Submit a general service request instead." : status >= 500 ? "An unexpected error occurred" : error.message,...(code?{code}:{}) }, status);
 });
 
 export default { fetch: app.fetch, scheduled: (event, env, ctx) => {
