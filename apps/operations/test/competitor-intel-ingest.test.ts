@@ -30,7 +30,7 @@ function observation(kind='competitor_profile',counter='1'):Record<string,unknow
   self_assessment:{scopeKey:'synthetic',assessedAt:TS,positioning:score(),serviceCoverage:score(),geographicMessaging:score(),pricingClarity:score(),differentiation:score(),competitiveReadiness:score(),overall:score(),strengths:[],weaknesses:[],recommendedActions:[]},
  };
  return {schemaVersion:'ci.observation.v1',producerId:key.producer_id,operationId:id(),monitoringBindingId:'binding-synthetic',configurationRevision:1,
-  observationKind:kind,subjectKey:kind==='change'?'change:one':kind==='scan_run'?'scan:one':kind==='self_assessment'?'self:one':'comp:one',
+  observationKind:kind,subjectKey:kind==='change'?'change:one':kind==='scan_run'?'scan:one':kind==='self_assessment'?'self:synthetic':'comp:one',
   sourceSequence:{epoch:'1',counter},commandBinding:null,observedAt:TS,completedAt:TS,semantics:{observation:'ci.obs.v1',scoring:'concern_0_10.v1'},payload:payloads[kind]??{}};
 }
 async function signed(value:unknown,url=`${ORIGIN}${INTEL_INGEST_PATH}`){

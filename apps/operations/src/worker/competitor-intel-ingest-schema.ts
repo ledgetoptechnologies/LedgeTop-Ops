@@ -58,6 +58,7 @@ export function validateIntelObservation(value:unknown,producerId:string,now:num
  if(v.commandBinding!==null)throw new IntelIngestError('command_binding_stale',409);
  const prefix=v.observationKind==='change'?'change:':v.observationKind==='scan_run'?'scan:':v.observationKind==='self_assessment'?'self:':'comp:';
  if(!v.subjectKey.startsWith(prefix)||((v.observationKind==='baseline_assessment'||v.observationKind==='ad_activity')&&v.subjectKey!==v.payload.competitorSubjectKey)
+  ||v.observationKind==='self_assessment'&&v.subjectKey!==`self:${v.payload.scopeKey}`
   ||v.observationKind==='change'&&v.payload.detectedAt>v.completedAt)throw new IntelIngestError('schema_invalid',400);
  return v;
 }
