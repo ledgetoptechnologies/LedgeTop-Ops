@@ -2,17 +2,27 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { DirectClientViewerAuthorizationV1, DirectClientViewerSessionRequestV1 } from "@ltds/shared";
 import type { Env } from "../src/worker/types";
 
-const mock=vi.hoisted(()=>({context:vi.fn(),allowed:vi.fn(),rows:vi.fn(),catalog:vi.fn(),create:vi.fn()}));
-vi.mock("../src/worker/viewer-direct-client-grants",()=>({readDirectViewerClientGrants:mock.rows,
+const mock=vi.hoisted(()=>({context:vi.fn(),allowed:vi.fn(),rows:vi.fn(),pin:vi.fn(),catalog:vi.fn(),create:vi.fn()}));
+vi.mock("../src/worker/viewer-direct-client-grants",async original=>({...await original<typeof import("../src/worker/viewer-direct-client-grants")>(),
+  readDirectViewerClientGrants:mock.rows,readDirectViewerClientGrantAuthorityPin:mock.pin,
   readDirectViewerClientBusinessName:async()=>"Drone Services"}));
-vi.mock("../../client/src/worker/client-portal/workspace-v2",()=>({resolveNativePortalWorkspaceReadContext:mock.context,
+vi.mock("../../client/src/worker/client-portal/direct-viewer-workspace-context",()=>({resolveDirectViewerWorkspaceContext:mock.context}));
+vi.mock("../../client/src/worker/client-portal/workspace-v2",()=>({
   nativePortalScopesAllowed:mock.allowed}));
 vi.mock("../src/worker/viewer-integration",()=>({viewerServiceClient:()=>({clientDeliveryCatalog:mock.catalog,createSession:mock.create})}));
 import { issueDirectClientViewerSession, listDirectClientViewerItems } from "../src/worker/viewer-direct-client-session-issuer";
+import {directViewerGrantMatchesRecipientAuthority} from "../src/worker/viewer-direct-client-grants";
 
 const auth:DirectClientViewerAuthorizationV1={protocolVersion:1,sourceId:"project-alpha:primary",workspaceId:"workspace-one",identityId:"identity-one",
   principalIssuer:"https://access.example.test",principalSubject:"subject-one",verifiedEmail:"synthetic@example.test",contextVersion:"a".repeat(64)};
 const session:DirectClientViewerSessionRequestV1={...auth,grantId:"grant-one",taskId:"task-one",idempotencyKey:"direct-client-session-test-001",displayUnits:"imperial"};
+const nativeContext={mode:"native" as const,...auth,displayName:"Client",rootType:"standalone_client" as const,rootPublicId:"client-one",
+  sourceWorkspaceId:"source-client-one",sourceAuthorityDigest:"a".repeat(64),nativeContext:{...auth,workspace:{membership_expires_at:null},grants:[],denials:[]}};
+const operationsContext={...nativeContext,mode:"operations_native" as const,identityId:"op_identity-one",authorityId:"10000000-0000-4000-8000-000000000001",
+  ownershipEpoch:1,authorityOwnershipEpoch:4,membershipExpiresAt:null};
+const operationsPin={version:1 as const,mode:"operations_native" as const,sourceId:auth.sourceId,workspaceId:auth.workspaceId,
+  sourceWorkspaceId:"source-client-one",rootType:"standalone_client" as const,rootPublicId:"client-one",authorityId:operationsContext.authorityId,
+  ownershipEpoch:4,claimOwnershipEpoch:1};
 const row=()=>({id:"grant-one",source_id:auth.sourceId,workspace_id:auth.workspaceId,viewer_project_id:"project-one",task_id:"task-one",scope_type:"task",
   grant_version:1,authorization_expires_at:null,created_at:"2026-10-01T00:00:00Z",can_measure:0,can_view_cameras:1,can_download:0});
 const task={id:"task-one",displayName:"Property map",modelId:"model-one",modelVersionId:"version-one",modelTitle:"Private model title",publishedAt:"2026-10-01T00:00:00Z"};
@@ -26,7 +36,7 @@ function database(){return {prepare(sql:string){let values:unknown[]=[];return {
 function env():Env{return {CLIENT_VIEWER_SESSION_ISSUER_ENABLED:"true",VIEWER_SERVICE_HMAC_SECRET:"synthetic-secret-for-direct-cursor-tests-only",
   DELIVERY_DB:{withSession:()=>database()}} as unknown as Env;}
 beforeEach(()=>{vi.resetAllMocks();intents=new Map();receipts=new Map();mock.allowed.mockReturnValue(true);
-  mock.context.mockResolvedValue({...auth,workspace:{membership_expires_at:null},grants:[],denials:[]});
+  mock.context.mockResolvedValue(nativeContext);mock.pin.mockResolvedValue(null);
   mock.rows.mockResolvedValue([row()]);mock.catalog.mockResolvedValue({schemaVersion:1,project:{id:"project-one",displayName:"Property survey"},tasks:[task],nextCursor:null});
   mock.create.mockResolvedValue({grant:"00000000-0000-4000-8000-000000000001",grantExpiresAt:new Date(Date.now()+120_000).toISOString(),
     sessionTtlSeconds:1800,redeemUrl:"https://viewer.example.test/redeem",embedUrl:"https://viewer.example.test/session"});});
@@ -56,9 +66,40 @@ describe("direct Viewer recipient authorization",()=>{
     expect(mock.create).toHaveBeenCalledWith(expect.objectContaining({modelId:"model-one",modelVersionId:"version-one",audience:"client",
       sourceAuthorization:{type:"direct_client_grant",id:"grant-one",version:1},permissions:{view:true,measure:false,cameras:true,download:false,personalMeasurements:true}}));
   });
+  it("accepts a claimed workspace grant only when its immutable authority and ownership pin matches",async()=>{
+    const operationsSession={...session,identityId:operationsContext.identityId};
+    mock.context.mockResolvedValue(operationsContext);mock.pin.mockResolvedValue(operationsPin);
+    expect(await issueDirectClientViewerSession(env(),operationsSession)).toMatchObject({ok:true,modelId:"model-one"});
+    mock.context.mockResolvedValue(operationsContext);mock.pin.mockResolvedValue({...operationsPin,authorityId:"20000000-0000-4000-8000-000000000001"});
+    expect(await issueDirectClientViewerSession(env(),{...operationsSession,idempotencyKey:"direct-client-session-test-002"})).toMatchObject({ok:false,code:"denied"});
+    expect(mock.create).toHaveBeenCalledTimes(1);
+  });
+  it("requires a fresh Ops membership proof after the remote Viewer call",async()=>{
+    const operationsSession={...session,identityId:operationsContext.identityId};
+    mock.context.mockResolvedValueOnce(operationsContext).mockResolvedValueOnce({...operationsContext,contextVersion:"b".repeat(64)});
+    mock.pin.mockResolvedValue(operationsPin);
+    mock.create.mockImplementationOnce(async()=>({grant:"hidden",grantExpiresAt:new Date(Date.now()+60_000).toISOString()}));
+    expect(await issueDirectClientViewerSession(env(),operationsSession)).toMatchObject({ok:false,code:"denied"});
+    expect(receipts.size).toBe(0);
+  });
+  it("caps claimed-workspace sessions at the current Ops member expiry",async()=>{
+    const operationsSession={...session,identityId:operationsContext.identityId};
+    mock.context.mockResolvedValue({...operationsContext,membershipExpiresAt:new Date(Date.now()+30_000).toISOString()});
+    mock.pin.mockResolvedValue(operationsPin);
+    expect(await issueDirectClientViewerSession(env(),operationsSession)).toMatchObject({ok:false,code:"denied"});
+    expect(mock.create).not.toHaveBeenCalled();
+    mock.context.mockResolvedValue(operationsContext);
+    expect(await issueDirectClientViewerSession(env(),{...operationsSession,idempotencyKey:"direct-client-session-positive-01"}))
+      .toMatchObject({ok:true,modelId:"model-one"});
+  });
   it("rejects expired or imminently expiring membership",async()=>{
-    mock.context.mockResolvedValue({...auth,workspace:{membership_expires_at:new Date(Date.now()+30_000).toISOString()},grants:[],denials:[]});
+    mock.context.mockResolvedValue({...nativeContext,nativeContext:{...nativeContext.nativeContext,
+      workspace:{membership_expires_at:new Date(Date.now()+30_000).toISOString()}}});
     expect(await issueDirectClientViewerSession(env(),session)).toMatchObject({ok:false,code:"denied"});expect(mock.create).not.toHaveBeenCalled();
+    mock.context.mockResolvedValue({...nativeContext,nativeContext:{...nativeContext.nativeContext,
+      workspace:{membership_expires_at:new Date(Date.now()+5*60_000).toISOString()}}});
+    expect(await issueDirectClientViewerSession(env(),{...session,idempotencyKey:"direct-client-session-native-positive-01"}))
+      .toMatchObject({ok:true,modelId:"model-one"});
   });
   it("keeps upstream request deadline stable after a lost response and returns the saved result on replay",async()=>{
     mock.create.mockRejectedValueOnce(new Error("lost response"));expect(await issueDirectClientViewerSession(env(),session)).toMatchObject({ok:false});

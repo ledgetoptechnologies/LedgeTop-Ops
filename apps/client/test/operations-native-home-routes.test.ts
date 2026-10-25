@@ -7,7 +7,7 @@ const targetId = "22222222-2222-4222-8222-222222222222";
 const recipientId = "33333333-3333-4333-8333-333333333333";
 const principal = { issuer: "https://team.cloudflareaccess.com", subject: "verified|recipient", email: "ignored@example.invalid" };
 const row = { authority_id: authorityId, target_id: targetId, recipient_binding_id: recipientId,
-  workspace_id: "native-workspace", ownership_epoch: 1, grant_revision: 2 };
+  workspace_id: "native-workspace", ownership_epoch: 1, grant_revision: 2, expires_at: null };
 const services = [{ serviceId: "drone-data", providerId: "drone", displayLabel: "Drone services", revision: 1 }];
 
 /** HTTP-adapter coverage only. The SQL and durable grant/receipt transitions are
@@ -15,8 +15,9 @@ const services = [{ serviceId: "drone-data", providerId: "drone", displayLabel: 
  * evidence that a real recipient was enrolled. */
 function fixture() {
   let granted = true;
+  let expiresAt: unknown = null;
   const queries: string[] = [];
-  const statement = { bind: vi.fn(() => statement), all: vi.fn(async () => ({ success: true, results: granted ? [row] : [] })) };
+  const statement = { bind: vi.fn(() => statement), all: vi.fn(async () => ({ success: true, results: granted ? [{ ...row, expires_at: expiresAt }] : [] })) };
   const database = { withSession: vi.fn((constraint: string) => {
     expect(constraint).toBe("first-primary");
     return { prepare: (sql: string) => { queries.push(sql); return statement; } };
@@ -29,7 +30,8 @@ function fixture() {
     CLIENT_PORTAL_OPERATIONS_SERVICE_HOME_ENABLED: "true",
     CLIENT_PORTAL_NATIVE_RECIPIENT_SERVICE_HOME_ENABLED: "true",
     DELIVERY_DB: database, CLIENT_PORTAL_SERVICE_METADATA_READER: { readServiceMetadata: rpc } } as unknown as Env;
-  return { env, rpc, queries, statement, setGranted: (value: boolean) => { granted = value; } };
+  return { env, rpc, queries, statement, setGranted: (value: boolean) => { granted = value; },
+    setExpiresAt: (value: unknown) => { expiresAt = value; } };
 }
 const request = (path = "/home") => new Request(`https://client-staging.example.test${path}`);
 afterEach(() => vi.restoreAllMocks());
@@ -61,6 +63,14 @@ describe("native service-home HTTP protocol selection", () => {
     expect((await router.fetch(request(), unavailable.env)).status).toBe(503);
     expect(unavailable.rpc).not.toHaveBeenCalled();
     expect([...absent.queries, ...unavailable.queries].every(sql => !sql.includes("portal_operations_principal_grant_heads"))).toBe(true);
+  });
+
+  it("fails closed on a malformed native recipient expiry", async () => {
+    const test = fixture();
+    test.setExpiresAt("not-a-date");
+    const response = await createOperationsHomeRouter({ resolvePrincipal: async () => principal }).fetch(request(), test.env);
+    expect(response.status).toBe(503);
+    expect(test.rpc).not.toHaveBeenCalled();
   });
 
   it("suppresses labels when native permission disappears during the metadata request", async () => {

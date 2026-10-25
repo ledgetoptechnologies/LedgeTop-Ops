@@ -1,27 +1,41 @@
 import { useEffect,useState } from "react";
-import { loadOperationsFinancial,type PortalFinancialDocument,type PortalOperationsHomeResponse } from "./portal-api";
+import { loadOperationsFinancial,type PortalFinancialDocument,type PortalOperationsHomeResponse,type PortalWorkspace } from "./portal-api";
 import { OperationsNativeDataBrowser } from "./OperationsNativeDataBrowser";
 import { AccountMenu } from "@ltds/ui";
 import { PORTAL_APP_API } from "@ltds/shared";
 import { PortalBrand } from "./PortalShell";
+import { SharedViewerWork } from "./SharedViewerWork";
+import { operationsHomeViewerWorkspaceIds } from "./shared-viewer-work";
+
+const NO_CLIENT_ACCOUNTS: PortalWorkspace[] = [];
 
 export function OperationsServiceSummary({ response, embedded = false }: {
   response: PortalOperationsHomeResponse;
   embedded?: boolean;
 }) {
   const hasServices = response.homes.some(home => home.services.length > 0);
+  // The same service reached through more than one home is listed once. Only the stable provider and
+  // service IDs identify it; services that merely share a label stay separate.
+  const listed = new Set<string>();
   return <section className="portal-card" aria-label="Independent operations service summary">
     <h2>{embedded ? "Services" : hasServices ? "Available services" : "No services available"}</h2>
     {embedded && <p>The services you have with Ledge Top.</p>}
     {response.homes.length === 0
       ? <p>Your account has no active operations services.</p>
-      : response.homes.map(home => <div key={home.authorityId}>
-        {home.services.length === 0
-          ? <p>No services are currently listed for this access.</p>
-          : <ul className="operations-home-services">
-            {home.services.map(service => <li key={service.serviceId}><strong>{service.displayLabel}</strong></li>)}
-          </ul>}
-      </div>)}
+      : response.homes.map(home => {
+        const services = home.services.filter(service => {
+          const key = JSON.stringify([service.providerId, service.serviceId]);
+          return !listed.has(key) && !!listed.add(key);
+        });
+        if (home.services.length > 0 && services.length === 0) return null;
+        return <div key={home.authorityId}>
+          {services.length === 0
+            ? <p>No services are currently listed for this access.</p>
+            : <ul className="operations-home-services">
+              {services.map(service => <li key={service.serviceId}><strong>{service.displayLabel}</strong></li>)}
+            </ul>}
+        </div>;
+      })}
   </section>;
 }
 
@@ -180,6 +194,7 @@ export function OperationsHomeApp({ response, clientUnavailable = false, onRetry
         <p>Your projects and requests could not be opened for the selected client. Your services, invoices and files below are still available.</p>
         {onRetryClient && <button type="button" className="button-orange" onClick={onRetryClient}>Try my other client accounts</button>}
       </section>}
+      <SharedViewerWork workspaces={NO_CLIENT_ACCOUNTS} operationsHomeWorkspaceIds={operationsHomeViewerWorkspaceIds(response)} />
       <OperationsNativeServicePanel response={response} />
     </main>
   </div>;

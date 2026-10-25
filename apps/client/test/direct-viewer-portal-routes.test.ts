@@ -1,9 +1,10 @@
 import { Hono } from "hono";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Env } from "../src/worker/types";
-const mock=vi.hoisted(()=>({context:vi.fn(),list:vi.fn(),issue:vi.fn()}));
+const mock=vi.hoisted(()=>({context:vi.fn(),directContext:vi.fn(),list:vi.fn(),issue:vi.fn()}));
 vi.mock("../src/worker/client-portal/workspace-v2",async original=>({
   ...await original<typeof import("../src/worker/client-portal/workspace-v2")>(),resolveNativePortalWorkspaceReadContext:mock.context}));
+vi.mock("../src/worker/client-portal/direct-viewer-workspace-context",()=>({resolveDirectViewerWorkspaceContext:mock.directContext}));
 import { createNativePortalWorkspaceRouter } from "../src/worker/client-portal/native-portal-resources";
 
 const principal={issuer:"https://access.example.test",subject:"signed-in-one",email:"synthetic@example.test"};
@@ -18,6 +19,7 @@ function app(tableCount=2){
   return (path:string,init?:RequestInit)=>app.request(`https://portal.example.test/api/client/v2/workspaces/workspace-one${path}`,init,env);
 }
 beforeEach(()=>{vi.resetAllMocks();mock.context.mockResolvedValue(context);
+  mock.directContext.mockResolvedValue({...context,mode:"native",displayName:"Client",rootType:"standalone_client",rootPublicId:"client-one",nativeContext:context});
   mock.list.mockResolvedValue({ok:true,protocolVersion:1,items:[],nextCursor:null});
   mock.issue.mockResolvedValue({ok:true,protocolVersion:1,grant:"grant-one",grantExpiresAt:"2027-01-01T00:00:00Z",modelId:"model-one",
     sessionTtlSeconds:1800,redeemUrl:"https://viewer.example.test/redeem",embedUrl:"https://viewer.example.test/session"});});
@@ -39,7 +41,8 @@ describe("native direct Viewer portal routes",()=>{
     expect((await app()("/viewer?cursor=a&cursor=b")).status).toBe(400);expect(mock.list).not.toHaveBeenCalled();
   });
   it("never returns a list if account access changed during the RPC",async()=>{
-    mock.context.mockResolvedValueOnce(context).mockResolvedValueOnce({...context,contextVersion:"b".repeat(64)});
+    mock.directContext.mockResolvedValueOnce({...context,mode:"native",displayName:"Client",rootType:"standalone_client",rootPublicId:"client-one",nativeContext:context})
+      .mockResolvedValueOnce({...context,contextVersion:"b".repeat(64),mode:"native",displayName:"Client",rootType:"standalone_client",rootPublicId:"client-one",nativeContext:{...context,contextVersion:"b".repeat(64)}});
     expect((await app()("/viewer")).status).toBe(409);
   });
   it("issues an exact-task session and does not accept browser-supplied identity or permissions",async()=>{
@@ -47,6 +50,12 @@ describe("native direct Viewer portal routes",()=>{
     expect(mock.issue).toHaveBeenCalledWith(expect.objectContaining({grantId:"grant-one",taskId:"task-one",identityId:"identity-one"}));
     expect((await request("/viewer/grant-one/tasks/task-one/session",post({displayUnits:"imperial",download:true}))).status).toBe(404);
     expect(mock.issue).toHaveBeenCalledTimes(1);
+  });
+  it("rechecks an Operations native authority snapshot after a Viewer read",async()=>{
+    const opsContext={...context,mode:"operations_native" as const,identityId:"op_identity-one",displayName:"Client",
+      rootType:"standalone_client" as const,rootPublicId:"client-one"};
+    mock.directContext.mockResolvedValueOnce(opsContext).mockResolvedValueOnce({...opsContext,contextVersion:"b".repeat(64)});
+    expect((await app()("/viewer")).status).toBe(409);
   });
   it("rejects cross-origin requests and inaccessible task handles",async()=>{
     expect((await app()("/viewer/grant-one/tasks/task-one/session",post(undefined,"https://evil.example.test"))).status).toBe(403);

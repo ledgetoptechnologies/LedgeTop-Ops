@@ -35,7 +35,9 @@ const secret='joined-synthetic-viewer-signing-secret-32-characters';
 const publicPath='/api/v1/workspace/direct-client-grants';
 const browserPrincipal={issuer:'https://access.example.test',subject:'client-subject-one',email:'synthetic@example.test'};
 const context={sourceId:'project-alpha:primary',workspaceId:'workspace-one',identityId:'identity-one',contextVersion:'a'.repeat(64),
- displayName:'Synthetic Client One',workspace:{membership_expires_at:null},grants:[],denials:[]};
+ displayName:'Synthetic Client One',rootType:'standalone_client' as const,rootPublicId:'client-one',generationId:'generation-one',
+ membershipSourceVersion:'v1',verifiedEmail:'synthetic@example.test',authority:{sourceId:'project-alpha:primary'},
+ workspace:{membership_expires_at:null},grants:[],denials:[]};
 const task={id:'task-one',displayName:'Property map',modelId:'model-one',modelVersionId:'version-one',modelTitle:'Model one',publishedAt:'2026-10-01T00:00:00Z'};
 const taskGrant={sourceId:context.sourceId,workspaceId:context.workspaceId,viewerProjectId:'viewer-project',taskId:task.id,
  scopeType:'task',includeFuturePublished:false,confirmedScope:true,expiresAt:null,permissions:{measure:true,cameras:false,download:false}};
@@ -71,21 +73,21 @@ async function fixture(){
  await delivery.exec(`PRAGMA foreign_keys=ON;
  CREATE TABLE portal_v2_workspaces(id TEXT PRIMARY KEY,project_alpha_source_id TEXT,legacy_account_id TEXT,status TEXT,display_name TEXT,
  root_type TEXT NOT NULL CHECK(root_type IN ('organization','standalone_client')),pa_organization_public_id TEXT,pa_client_public_id TEXT);
- CREATE TABLE pa_portal_workspace_sources(workspace_id TEXT,projection_source_id TEXT);
+ CREATE TABLE pa_portal_workspace_sources(workspace_id TEXT,projection_source_id TEXT,source_workspace_id TEXT);
  CREATE TABLE portal_v2_directory_checkpoints(workspace_id TEXT,active_generation_id TEXT,source_sequence INTEGER);
  CREATE TABLE portal_v2_directory_generations(id TEXT,workspace_id TEXT,status TEXT,complete INTEGER);
  CREATE TABLE portal_v2_directory_entities(workspace_id TEXT,generation_id TEXT,entity_type TEXT,public_id TEXT,source_version TEXT,active INTEGER,display_name TEXT);
- CREATE TABLE portal_client_authority_workspace_claims(workspace_id TEXT,state TEXT);
+ CREATE TABLE portal_client_authority_workspace_claims(workspace_id TEXT,state TEXT,client_authority_id TEXT,projection_source_id TEXT,source_workspace_id TEXT,ownership_epoch INTEGER);
  CREATE TABLE viewer_session_issuance_receipts(actor_id TEXT,audience TEXT,idempotency_key TEXT,request_fingerprint TEXT,response_json TEXT,expires_at TEXT,
  PRIMARY KEY(actor_id,audience,idempotency_key));
  INSERT INTO portal_v2_workspaces VALUES('workspace-one','project-alpha:primary',NULL,'active','Synthetic Client One','standalone_client',NULL,'client-one'),
  ('workspace-two','project-alpha:secondary',NULL,'active','Synthetic Client Two','standalone_client',NULL,'client-two');
- INSERT INTO pa_portal_workspace_sources VALUES('workspace-one','project-alpha:primary'),('workspace-two','project-alpha:secondary');
+ INSERT INTO pa_portal_workspace_sources VALUES('workspace-one','project-alpha:primary','source-workspace-one'),('workspace-two','project-alpha:secondary','source-workspace-two');
  INSERT INTO portal_v2_directory_checkpoints VALUES('workspace-one','generation-one',1),('workspace-two','generation-two',1);
  INSERT INTO portal_v2_directory_generations VALUES('generation-one','workspace-one','active',1),('generation-two','workspace-two','active',1);
  INSERT INTO portal_v2_directory_entities VALUES('workspace-one','generation-one','standalone_client','client-one','v1',1,'Synthetic Client One'),
  ('workspace-two','generation-two','standalone_client','client-two','v1',1,'Synthetic Client Two');`.replace(/\s*\n\s*/g,' '));
- for(const name of ['0237_viewer_direct_client_grants.sql','0238_viewer_direct_session_intents.sql']){
+ for(const name of ['0237_viewer_direct_client_grants.sql','0238_viewer_direct_session_intents.sql','0240_viewer_direct_grant_receipt_immutability.sql']){
   const sql=readFileSync(new URL(`../../client/migrations/${name}`,import.meta.url),'utf8');
   await delivery.batch(splitD1MigrationStatements(sql).map(statement=>delivery.prepare(statement)));
  }

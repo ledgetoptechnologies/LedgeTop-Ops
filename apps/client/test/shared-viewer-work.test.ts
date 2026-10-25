@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { loadNativeViewerWork, openNativeViewerTaskSession, type NativeViewerWorkItem } from "../src/client/native-portal-api";
-import { directViewerTaskPath, sharedViewerRows, showsBusinessName, viewerWorkAccounts } from "../src/client/shared-viewer-work";
+import { directViewerTaskPath, operationsHomeViewerWorkspaceIds, sharedViewerRows, showsBusinessName, viewerWorkAccounts } from "../src/client/shared-viewer-work";
 import { parseClientViewerShellRoute, directClientViewerShellPath, clientViewerShellPath } from "../src/client/ClientViewerShell";
 import type { PortalWorkspace } from "../src/client/portal-api";
 
@@ -29,7 +29,21 @@ describe("shared 3D work rows", () => {
   it("only uses native accounts, once each", () => {
     const native: PortalWorkspace = { id: "workspace-b", rootType: "organization", rootPublicId: "org", displayName: "Internal test label", resourceMode: "native", sourceId: "project-alpha:secondary" };
     const legacy: PortalWorkspace = { id: "workspace-a", rootType: "organization", rootPublicId: "org", displayName: "Legacy" };
-    expect(viewerWorkAccounts([legacy, native, native]).map(workspace => workspace.id)).toEqual(["workspace-b"]);
+    expect(viewerWorkAccounts([legacy, native, native])).toEqual(["workspace-b"]);
+  });
+  it("adds current Operations homes as Viewer candidates once each, after native accounts", () => {
+    const native: PortalWorkspace = { id: "workspace-b", rootType: "organization", rootPublicId: "org", displayName: "Native", resourceMode: "native", sourceId: "project-alpha:secondary" };
+    const legacy: PortalWorkspace = { id: "workspace-ops", rootType: "organization", rootPublicId: "org", displayName: "Legacy" };
+    expect(viewerWorkAccounts([legacy, native], ["workspace-ops", "workspace-b", "workspace-ops"])).toEqual(["workspace-b", "workspace-ops"]);
+    expect(viewerWorkAccounts([], ["workspace-ops"])).toEqual(["workspace-ops"]);
+  });
+  it("lists Operations home accounts only while the home response is current, and only ones a Viewer link can carry", () => {
+    const home = (workspaceId: string, authorityId: string) => ({ authorityId, workspaceId, ownershipEpoch: 1, grantRevision: 1, services: [] });
+    expect(operationsHomeViewerWorkspaceIds(undefined)).toEqual([]);
+    expect(operationsHomeViewerWorkspaceIds({ resourceMode: "operations_home", homes: [] })).toEqual([]);
+    expect(operationsHomeViewerWorkspaceIds({ resourceMode: "operations_home", homes: [
+      home("workspace-ops", "12345678-1234-4123-8123-123456789abc"), home("not/openable", "12345678-1234-4123-8123-123456789abd"),
+    ] })).toEqual(["workspace-ops"]);
   });
   it("routes a direct task with its account pinned in the query, distinct from legacy model routes", () => {
     const path = directViewerTaskPath(item({ grantId: "grant-task", taskId: "task-1" }));

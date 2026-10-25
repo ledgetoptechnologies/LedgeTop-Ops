@@ -3,8 +3,10 @@ import { ViewerServiceError, type ClientViewerSessionResultV1, type DirectClient
   type DirectClientViewerItemsResultV1, type DirectClientViewerSessionRequestV1 } from "@ltds/shared";
 import type { Env } from "./types";
 import type { Env as ClientEnv } from "../../../client/src/worker/types";
-import { resolveNativePortalWorkspaceReadContext, nativePortalScopesAllowed } from "../../../client/src/worker/client-portal/workspace-v2";
-import { readDirectViewerClientGrants, readDirectViewerClientBusinessName } from "./viewer-direct-client-grants";
+import { nativePortalScopesAllowed } from "../../../client/src/worker/client-portal/workspace-v2";
+import { resolveDirectViewerWorkspaceContext } from "../../../client/src/worker/client-portal/direct-viewer-workspace-context";
+import { directViewerGrantMatchesRecipientAuthority, readDirectViewerClientGrantAuthorityPin,
+  readDirectViewerClientGrants, readDirectViewerClientBusinessName } from "./viewer-direct-client-grants";
 import { viewerServiceClient } from "./viewer-integration";
 import { base64Url, sha256 } from "./crypto";
 
@@ -34,13 +36,15 @@ function codeFor(error: unknown): FailureCode {
   return error instanceof Error && /no such table/.test(error.message) ? "configuration_error" : "temporarily_unavailable";
 }
 async function contextFor(env: Env, input: Auth) {
-  const context = await resolveNativePortalWorkspaceReadContext(env as unknown as ClientEnv,
+  const context = await resolveDirectViewerWorkspaceContext(env as unknown as ClientEnv,
     { issuer: input.principalIssuer, subject: input.principalSubject, email: input.verifiedEmail }, input.workspaceId);
   if (!context || context.identityId !== input.identityId || context.sourceId !== input.sourceId || context.contextVersion !== input.contextVersion)
     return null;
-  // An explicit direct Viewer grant supplies the resource allow. Existing global
-  // and account denials still win; it does not create PA project/file permissions.
-  if (!nativePortalScopesAllowed(context, "delivery.view", new Set([`workspace:${input.workspaceId}`]), false)) return null;
+  // Ops membership proves the same current home/recipient and its ownership
+  // epoch. The direct Viewer grant supplies only the Viewer resource allow.
+  // Native PA workspaces retain their existing entitlement and deny evaluator.
+  if (context.mode === "native" && (!context.nativeContext
+    || !nativePortalScopesAllowed(context.nativeContext, "delivery.view", new Set([`workspace:${input.workspaceId}`]), false))) return null;
   return context;
 }
 async function cursorKey(env: Env) {
@@ -71,13 +75,30 @@ async function grantScope(context: {contextVersion:string;identityId:string;work
       row.can_measure,row.can_view_cameras,row.can_download])]));
 }
 
+async function grantAuthorizedForContext(env:Env,context:Awaited<ReturnType<typeof contextFor>>,row:Row):Promise<boolean>{
+ if(!context)return false;
+ const pin=await readDirectViewerClientGrantAuthorityPin(env,row.id);
+ if(pin)return directViewerGrantMatchesRecipientAuthority(pin,context);
+ // Preserve pre-pin grants only on workspaces that have never entered the
+ // Operations ownership protocol. A claim tombstone means an old receipt has
+ // no evidence of which owner created the share, so require a re-share.
+ if(context.mode!=="native")return false;
+ const sessionDb=database(env);
+ const present=await sessionDb.prepare(`SELECT 1 present FROM sqlite_master WHERE type='table'
+   AND name='portal_client_authority_workspace_claims'`).first<number>("present");
+ if(present!==1)return true;
+ return !(await sessionDb.prepare(`SELECT 1 FROM portal_client_authority_workspace_claims WHERE workspace_id=? LIMIT 1`)
+   .bind(context.workspaceId).first());
+}
+
 export async function listDirectClientViewerItems(env: Env, request: DirectClientViewerAuthorizationV1): Promise<DirectClientViewerItemsResultV1> {
   const parsed=listRequest.safeParse(request);
   if (!parsed.success) return failure("invalid_request");
   if (env.CLIENT_VIEWER_SESSION_ISSUER_ENABLED!=="true") return failure("configuration_error");
   try {
     const input=parsed.data, context=await contextFor(env,input); if(!context)return failure("denied");
-    const rows=await readDirectViewerClientGrants(env,{sourceId:input.sourceId,workspaceId:input.workspaceId});
+    const rawRows=await readDirectViewerClientGrants(env,{sourceId:input.sourceId,workspaceId:input.workspaceId});
+    const rows=[] as Row[];for(const row of rawRows)if(await grantAuthorizedForContext(env,context,row))rows.push(row);
     const scope=await grantScope(context,rows);
     const cursor=input.cursor ? await decodeCursor(env,input.cursor,scope) : {v:1 as const,scope,index:0,after:null,expires:Date.now()+15*60_000};
     if(!cursor || cursor.index>rows.length)return failure("invalid_request");
@@ -98,7 +119,8 @@ export async function listDirectClientViewerItems(env: Env, request: DirectClien
       if(catalog.nextCursor)after=catalog.nextCursor;else{index++;after=null;}
     }
     const current=await contextFor(env,input);if(!current)return failure("denied");
-    const fresh=await readDirectViewerClientGrants(env,{sourceId:input.sourceId,workspaceId:input.workspaceId});
+    const freshRaw=await readDirectViewerClientGrants(env,{sourceId:input.sourceId,workspaceId:input.workspaceId});
+    const fresh=[] as Row[];for(const row of freshRaw)if(await grantAuthorizedForContext(env,current,row))fresh.push(row);
     if(await grantScope(current,fresh)!==scope)return failure("denied");
     return {ok:true,protocolVersion:1,items,nextCursor:index<rows.length?await encodeCursor(env,{...cursor,index,after}):null};
   }catch(error){return failure(codeFor(error));}
@@ -109,7 +131,8 @@ export async function issueDirectClientViewerSession(env: Env, request: DirectCl
   if(env.CLIENT_VIEWER_SESSION_ISSUER_ENABLED!=="true")return failure("configuration_error");
   try{
     const input=parsed.data,context=await contextFor(env,input);if(!context)return failure("denied");
-    const rows=await readDirectViewerClientGrants(env,{sourceId:input.sourceId,workspaceId:input.workspaceId,grantId:input.grantId});
+    const rawRows=await readDirectViewerClientGrants(env,{sourceId:input.sourceId,workspaceId:input.workspaceId,grantId:input.grantId});
+    const rows=[] as Row[];for(const candidate of rawRows)if(await grantAuthorizedForContext(env,context,candidate))rows.push(candidate);
     const row=rows.find(row=>row.id===input.grantId);if(!row || (row.scope_type==="task"&&row.task_id!==input.taskId))return failure("denied");
     const client=viewerServiceClient(env),catalog=await client.clientDeliveryCatalog({projectId:row.viewer_project_id,taskId:input.taskId,limit:1});
     const task=catalog.tasks[0];if(!task || task.id!==input.taskId)return failure("denied");
@@ -122,16 +145,21 @@ export async function issueDirectClientViewerSession(env: Env, request: DirectCl
     if(receipt && receipt.request_fingerprint!==fingerprint)return failure("invalid_request");
     const recheck=async()=>{
       const current=await contextFor(env,input);if(!current)return false;
-      const fresh=await readDirectViewerClientGrants(env,{sourceId:input.sourceId,workspaceId:input.workspaceId,grantId:input.grantId});
+      const freshRaw=await readDirectViewerClientGrants(env,{sourceId:input.sourceId,workspaceId:input.workspaceId,grantId:input.grantId});
+      const fresh=[] as Row[];for(const candidate of freshRaw)if(await grantAuthorizedForContext(env,current,candidate))fresh.push(candidate);
       return fresh.length===1 && await grantScope(current,fresh)===scope;
     };
     if(receipt && expiry(receipt.expires_at)>Date.now()){
       if(!await recheck())return failure("denied");
       return {ok:true,protocolVersion:1,...JSON.parse(receipt.response_json)};
     }
-    const membership=context.workspace as unknown as {membership_expires_at?:string|null};
-    const maximumDeadline=Math.min(Date.now()+30*60_000,expiry(row.authorization_expires_at),expiry(membership.membership_expires_at),
-      ...(context.grants as Array<{effect:string;expires_at?:string|null}>).filter(rule=>rule.effect==="allow").map(rule=>expiry(rule.expires_at)));
+    const membershipDeadline=context.mode==="native"
+      ?expiry((context.nativeContext!.workspace as unknown as {membership_expires_at?:string|null}).membership_expires_at)
+      :expiry(context.membershipExpiresAt);
+    const nativeAllowDeadlines=context.mode==="native"
+      ?(context.nativeContext!.grants as Array<{effect:string;expires_at?:string|null}>).filter(rule=>rule.effect==="allow").map(rule=>expiry(rule.expires_at))
+      :[];
+    const maximumDeadline=Math.min(Date.now()+30*60_000,expiry(row.authorization_expires_at),membershipDeadline,...nativeAllowDeadlines);
     if(!Number.isFinite(maximumDeadline)||maximumDeadline<=Date.now()+60_000)return failure("denied");
     await database(env).prepare(`INSERT INTO viewer_direct_client_session_intents
       (actor_identity_id,idempotency_key,grant_id,grant_version,request_fingerprint,authorization_expires_at)

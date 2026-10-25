@@ -82,7 +82,7 @@ describe("Operations-native recipient authority consumer", () => {
     expect(JSON.parse(await applyOperationsPortalNativeRecipientAuthority(env(db), grantWire)))
       .toMatchObject({ ok: true, status: "duplicate", replayed: true });
     expect(await readNativeOperationsPortalHomes(db, principal, true))
-      .toEqual([{ authorityId, workspaceId, targetId, recipientBindingId: recipientId, ownershipEpoch: 1, grantRevision: 1 }]);
+      .toEqual([{ authorityId, workspaceId, targetId, recipientBindingId: recipientId, ownershipEpoch: 1, grantRevision: 1, expiresAt: null }]);
     const revoked = JSON.parse(await applyOperationsPortalNativeRecipientAuthority(env(db), command(revoke, "recipient.revoke", 1)));
     expect(revoked).toMatchObject({ ok: true, action: "recipient.revoke", grantRevision: 2, state: "revoked" });
     expect(await readNativeOperationsPortalHomes(db, principal, true)).toEqual([]);
@@ -119,7 +119,7 @@ describe("Operations-native recipient authority consumer", () => {
       JSON.stringify({ protocolVersion: 1, operationId }))))
       .toMatchObject({ ok: true, status: "recorded", operationId, ownershipEpoch: 1, grantRevision: 1 });
     expect(await readNativeOperationsPortalHomes(db, principal, true))
-      .toEqual([{ authorityId, workspaceId, targetId, recipientBindingId: recipientId, ownershipEpoch: 1, grantRevision: 1 }]);
+      .toEqual([{ authorityId, workspaceId, targetId, recipientBindingId: recipientId, ownershipEpoch: 1, grantRevision: 1, expiresAt: null }]);
     expect(JSON.parse(await applyOperationsPortalNativeRecipientAuthority(separate, wire)))
       .toMatchObject({ ok: true, status: "duplicate", replayed: true });
     expect(await db.prepare("SELECT count(*) count FROM operations_portal_native_authority_receipts").first<number>("count")).toBe(1);

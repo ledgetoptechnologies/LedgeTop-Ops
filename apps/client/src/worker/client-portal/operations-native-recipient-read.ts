@@ -7,11 +7,13 @@ export type NativeOperationsPortalHome = Readonly<{
   recipientBindingId: string;
   ownershipEpoch: number;
   grantRevision: number;
+  expiresAt: string | null;
 }>;
 
 type Row = {
   authority_id: string; workspace_id: string; target_id: string;
   recipient_binding_id: string; ownership_epoch: number; grant_revision: number;
+  expires_at: string | null;
 };
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 const bounded = (value: unknown, maximum: number): value is string =>
@@ -32,7 +34,7 @@ export async function readNativeOperationsPortalHomes(
     const result = await database.withSession("first-primary").prepare(`
       SELECT workspace.client_authority_id authority_id,workspace.workspace_id,
         workspace.target_id,recipient.recipient_binding_id,
-        recipient.ownership_epoch,recipient.grant_revision
+        recipient.ownership_epoch,recipient.grant_revision,recipient.expires_at
       FROM operations_portal_native_recipient_authority_heads recipient
       JOIN operations_portal_native_workspace_authority_heads workspace
         ON workspace.target_id=recipient.target_id
@@ -97,10 +99,11 @@ export async function readNativeOperationsPortalHomes(
     for (const row of result.results) {
       if (!uuid.test(row.authority_id) || !uuid.test(row.target_id) || !uuid.test(row.recipient_binding_id)
         || !bounded(row.workspace_id, 200) || !Number.isSafeInteger(row.ownership_epoch) || row.ownership_epoch < 1
-        || !Number.isSafeInteger(row.grant_revision) || row.grant_revision < 1) return null;
+        || !Number.isSafeInteger(row.grant_revision) || row.grant_revision < 1
+        || (row.expires_at !== null && (!bounded(row.expires_at, 40) || !Number.isFinite(Date.parse(row.expires_at))))) return null;
       homes.push(Object.freeze({ authorityId: row.authority_id, workspaceId: row.workspace_id,
         targetId: row.target_id, recipientBindingId: row.recipient_binding_id,
-        ownershipEpoch: row.ownership_epoch, grantRevision: row.grant_revision }));
+        ownershipEpoch: row.ownership_epoch, grantRevision: row.grant_revision, expiresAt: row.expires_at }));
     }
     return new Set(homes.map(home => home.authorityId)).size === homes.length ? Object.freeze(homes) : null;
   } catch { return null; }

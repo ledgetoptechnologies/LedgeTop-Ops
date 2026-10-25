@@ -21,6 +21,7 @@ import { appendAuthenticatedContentStart,authenticatedContentAuditRequired } fro
 import { nativeFeedbackEnabledForContext,nativeFeedbackNotificationsSchemaAvailable } from './native-feedback-authority';
 import type { NativeClientViewerAuthorizationV1, NativeClientViewerSessionRequestV1, DirectClientViewerAuthorizationV1 } from '@ltds/shared';
 import { decodeFeedbackHistoryCursor,encodeFeedbackHistoryCursor,feedbackHistoryScope } from './feedback-history-cursor';
+import { resolveDirectViewerWorkspaceContext, type DirectViewerWorkspaceContext } from './direct-viewer-workspace-context';
 
 type Bindings = {Bindings:Env;Variables:{clientPrincipal:VerifiedClientPrincipal}};
 type Ctx = Context<Bindings>;
@@ -119,10 +120,22 @@ function nativeViewerAuthorization(c:Ctx,context:NativePortalReadContext,project
     identityId:context.identityId,principalIssuer:principal.issuer,principalSubject:principal.subject,verifiedEmail:principal.email,
     projectPublicId,contextVersion:context.contextVersion};
 }
-function directViewerAuthorization(c:Ctx,context:NativePortalReadContext):DirectClientViewerAuthorizationV1{
+function directViewerAuthorization(c:Ctx,context:DirectViewerWorkspaceContext):DirectClientViewerAuthorizationV1{
   const principal=c.get('clientPrincipal');return {protocolVersion:1,sourceId:context.sourceId,workspaceId:context.workspaceId,
     identityId:context.identityId,principalIssuer:principal.issuer,principalSubject:principal.subject,verifiedEmail:principal.email,
     contextVersion:context.contextVersion};
+}
+async function directViewerContextFor(c:Ctx):Promise<DirectViewerWorkspaceContext>{
+  const context=await resolveDirectViewerWorkspaceContext(c.env,c.get('clientPrincipal'),c.req.param('workspaceId')??'');
+  if(!context)return unavailable();
+  const expected=c.req.query('expectedContext');
+  if(expected!==undefined&&expected!==context.contextVersion)return changed();
+  return context;
+}
+async function recheckDirectViewerContext(c:Ctx,context:DirectViewerWorkspaceContext):Promise<void>{
+  const current=await resolveDirectViewerWorkspaceContext(c.env,c.get('clientPrincipal'),context.workspaceId);
+  if(!current||current.mode!==context.mode||current.sourceId!==context.sourceId||current.identityId!==context.identityId
+    ||current.contextVersion!==context.contextVersion)return changed();
 }
 async function directViewerReady(c:Ctx):Promise<boolean>{
   if(c.env.CLIENT_VIEWER_ENABLED!=="true" || !c.env.VIEWER_SESSION_ISSUER?.listDirectClientViewerItems ||
@@ -211,15 +224,16 @@ export function createNativePortalWorkspaceRouter():Hono<Bindings> {
     const query=c.req.queries();
     if(Object.keys(query).some(key=>!['cursor','expectedContext'].includes(key))||Object.values(query).some(values=>values.length!==1))
       throw new HTTPException(400,{message:'Invalid Viewer query'});
-    const context=await contextFor(c),cursor=c.req.query('cursor');
+    const context=await directViewerContextFor(c),cursor=c.req.query('cursor');
     if(cursor!==undefined&&(cursor.length<1||cursor.length>8192))throw new HTTPException(400,{message:'Invalid Viewer cursor'});
     const result=await c.env.VIEWER_SESSION_ISSUER!.listDirectClientViewerItems!({...directViewerAuthorization(c,context),...(cursor?{cursor}:{})});
     if(!result.ok)return nativeViewerFailure(result.code);
-    await recheck(c,context);return c.json({...envelope(context),items:result.items,nextCursor:result.nextCursor});
+    await recheckDirectViewerContext(c,context);return c.json({workspaceId:context.workspaceId,sourceId:context.sourceId,
+      contextVersion:context.contextVersion,items:result.items,nextCursor:result.nextCursor});
   });
   router.post('/:workspaceId/viewer/:grantId/tasks/:taskId/session',async c=>{
     sameOrigin(c);if(!await directViewerReady(c))throw new HTTPException(404,{message:'Not found'});
-    const context=await contextFor(c),grantId=z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/).safeParse(c.req.param('grantId')),
+    const context=await directViewerContextFor(c),grantId=z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/).safeParse(c.req.param('grantId')),
       taskId=z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/).safeParse(c.req.param('taskId'));
     const key=z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{15,127}$/).safeParse(c.req.header('Idempotency-Key'));
     const body=z.object({displayUnits:z.enum(['imperial','metric']).default('imperial')}).strict().safeParse(await boundedJson(c));
@@ -227,7 +241,7 @@ export function createNativePortalWorkspaceRouter():Hono<Bindings> {
     const result=await c.env.VIEWER_SESSION_ISSUER!.issueDirectClientViewerSession!({...directViewerAuthorization(c,context),grantId:grantId.data,
       taskId:taskId.data,idempotencyKey:key.data,displayUnits:body.data.displayUnits});
     if(!result.ok)return nativeViewerFailure(result.code);
-    await recheck(c,context);return c.json({grant:result.grant,grantExpiresAt:result.grantExpiresAt,modelId:result.modelId,
+    await recheckDirectViewerContext(c,context);return c.json({grant:result.grant,grantExpiresAt:result.grantExpiresAt,modelId:result.modelId,
       sessionTtlSeconds:result.sessionTtlSeconds,redeemUrl:result.redeemUrl,embedUrl:result.embedUrl},201);
   });
   router.post('/:workspaceId/projects/:projectId/models/:associationId/session',async c=>{

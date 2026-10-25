@@ -14,11 +14,23 @@ association-based Viewer delivery and public links retain their contracts.
   them. A duplicate active scope returns `duplicate_active_grant` and its grant ID.
 - A client account grant applies to its currently authorized members. It does not
   create portal membership, PA project permissions, file grants or public links.
-- This release targets current source-owned native client accounts. Legacy-account
-  mappings and accounts with active Operations client-authority claims are excluded
-  by both the recipient picker and the native authorization adapter. They require
-  their own authority-specific integration; selecting a different identity or
-  manufacturing a PA project is not a supported workaround.
+- Current source-owned native client accounts and claimed Operations client
+  workspaces can receive direct Viewer grants. Legacy-account mappings remain
+  excluded.
+- For a claimed workspace, recipient access is resolved through the existing
+  Operations-native service-home reader. It requires the current verified
+  principal's active home grant, current workspace ownership, and current
+  publication proof. The service-home grant establishes membership only; the
+  separate direct Viewer grant supplies access to the selected published Viewer
+  scope. It does not grant Data files, PA project access, or billing access.
+- A claimed-workspace Viewer grant is bound to the Operations authority ID and
+  ownership epoch that existed at creation. A claim or owner change requires a
+  replacement share. Old grants without an authority pin cannot be used on a
+  workspace that has entered the Operations ownership protocol; they remain
+  usable only for workspaces that have never been claimed.
+- Expiration stops a grant from authorizing new Viewer sessions but does not
+  release its active-scope uniqueness lock. Revoke an expired share before
+  creating that same scope again.
 
 ## Interfaces
 
@@ -58,7 +70,8 @@ flat list across authorized accounts. Deduplicate overlapping grants by account
 and task, retaining one complete authorized row rather than combining permissions.
 
 List cursors are opaque, expire after 15 minutes, and are bound to the verified
-identity, account context and current grant set. Each request reads at most five
+identity, account context and current grant set. Claimed-workspace requests also
+recheck the current Operations recipient-home proof and ownership epoch. Each request reads at most five
 bounded upstream pages; an empty page can still carry a continuation cursor.
 Session issuance rechecks client authority and exact task publication. Durable
 issuance intents preserve the same authorization deadline after a lost response;
@@ -71,8 +84,10 @@ Viewer test dependencies (`npm --prefix apps/viewer ci --ignore-scripts`) alongs
 Operations and Client dependencies before running that suite. CI does this only
 for the Operations test job; branch/PR trigger policy is unchanged.
 
-Required storage changes are Client D1 migrations `0237` and `0238`, and Viewer
-schema `40`. Viewer schema `40` transactionally preserves existing published
+Viewer-specific storage changes are Client D1 migrations `0237`, `0238`, and
+`0240`. Migration `0240` immutably protects the create receipts introduced by
+`0237`; it does not require unrelated schema changes. Viewer schema `40`
+transactionally preserves existing published
 session rows, indexes, triggers and foreign keys while adding a distinct
 `direct_client_grant` source type. A source tombstone is keyed by type, grant ID
 and immutable version, so it cannot revoke unrelated model associations.
@@ -96,4 +111,5 @@ Before activation:
 Direct grant revocation stops new issuance immediately in Ops and becomes live
 in existing Viewer sessions when the remote tombstone is acknowledged. Existing
 membership/root-policy changes retain the bounded session authorization lifetime
-(at most 30 minutes); they are separate from direct grant revocation.
+(at most 30 minutes); Operations-native member expiry also caps the session
+deadline. Those checks are separate from direct grant revocation.
