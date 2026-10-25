@@ -8,7 +8,10 @@ import {
   portalHierarchyV2Enabled,
   portalIdentityDenylistEnabled,
   resolveNativePortalWorkspaceReadContext,
+  authorizeNativePortalReadTarget,
 } from "./workspace-v2";
+import { readNativeRequestProjectReadWitness, nativeRequestProjectReadGuardSql,
+  type NativeRequestProjectReadWitness } from "./native-request-project-read";
 import { portalRootAccessAllowedSql } from "./workspace-access-policy";
 import { d1TablesPresent } from "../schema-readiness";
 
@@ -38,6 +41,8 @@ export interface NativeRequestAuthorityProof {
   rootAccessPolicyEnabled: boolean;
   /** 0216 was present when the proof was read; repeat its deny inside writes. */
   claimTablePresent?: boolean;
+  /** Supplied projects must remain readable under the ordinary directory rule. */
+  projectRead?: NativeRequestProjectReadWitness;
   evaluatedAt: string;
   expiresAt: string;
 }
@@ -133,6 +138,11 @@ export async function resolveNativeRequestAuthority(
   if (!context || !SOURCE_ID.test(context.sourceId)
     || (session.nativeSourceId && session.nativeSourceId !== context.sourceId)
     || (session.nativePortalIdentityId && session.nativePortalIdentityId !== context.identityId)) return null;
+  if (projectPublicId !== null && !await authorizeNativePortalReadTarget(env, context, "directory.read",
+    { scopeType: "project", publicId: projectPublicId })) return null;
+  const projectRead = projectPublicId === null ? undefined
+    : await readNativeRequestProjectReadWitness(env, context, projectPublicId);
+  if (projectPublicId !== null && !projectRead) return null;
   const target = projectPublicId
     ? { scopeType: "project" as const, publicId: projectPublicId }
     : { scopeType: context.rootType, publicId: context.rootPublicId };
@@ -160,6 +170,8 @@ export async function resolveNativeRequestAuthority(
   if (!Number.isSafeInteger(checkpoint) || checkpoint! < 0) return null;
   const current = await resolveNativePortalWorkspaceReadContext(env, principal, context.workspaceId);
   if (!current || current.contextVersion !== context.contextVersion) return null;
+  if (projectPublicId !== null && !await authorizeNativePortalReadTarget(env, current, "directory.read",
+    { scopeType: "project", publicId: projectPublicId })) return null;
   const evaluatedAt = new Date().toISOString();
   const claimTablePresent = await d1TablesPresent(env.DELIVERY_DB, ["portal_client_authority_workspace_claims"]);
   return Object.freeze({
@@ -177,6 +189,7 @@ export async function resolveNativeRequestAuthority(
     denylistEnabled: portalIdentityDenylistEnabled(env),
     rootAccessPolicyEnabled: env.CLIENT_PORTAL_ROOT_ACCESS_POLICY_ENABLED === "true",
     claimTablePresent,
+    ...(projectRead ? { projectRead } : {}),
     evaluatedAt,
     expiresAt: new Date(Date.parse(evaluatedAt) + 30_000).toISOString(),
   });
@@ -189,6 +202,7 @@ export function nativeRequestMutationGuardSql(proof: NativeRequestAuthorityProof
   const authority = portalProjectionSourceGuard(proof.authority);
   const scopes = JSON.stringify(proof.targetScopes);
   const allowed = JSON.stringify(proof.allowedEntitlementIds);
+  const projectRead = nativeRequestProjectReadGuardSql(proof);
   const targetSql = proof.projectPublicId === null ? "1=1" : `EXISTS(
     SELECT 1 FROM portal_v2_directory_entities project
     WHERE project.workspace_id=workspace.id AND project.generation_id=checkpoint.active_generation_id
@@ -208,8 +222,7 @@ export function nativeRequestMutationGuardSql(proof: NativeRequestAuthorityProof
     WHERE claim.workspace_id=workspace.id AND claim.state='active')` : "";
   // Balance the conjunctions: callers embed this guard inside attachment and
   // notification writes, which must stay within D1's expression-depth limit.
-  return {
-    sql: `EXISTS(
+  const requestSql = `EXISTS(
       SELECT 1 FROM portal_v2_workspaces workspace
       JOIN pa_portal_workspace_sources owner ON owner.workspace_id=workspace.id
         AND owner.projection_source_id=workspace.project_alpha_source_id
@@ -257,11 +270,16 @@ export function nativeRequestMutationGuardSql(proof: NativeRequestAuthorityProof
             AND datetime(entitlement.valid_from)<=datetime('now')
             AND (entitlement.expires_at IS NULL OR datetime(entitlement.expires_at)>datetime('now'))
             AND (entitlement.scope_type || ':' || entitlement.scope_public_id) IN (SELECT value FROM json_each(?))
-            AND entitlement.id IN (SELECT value FROM json_each(?))))))`,
+            AND entitlement.id IN (SELECT value FROM json_each(?))))))`;
+  return {
+    // Separate subqueries keep the recursive reader witness out of the deeper
+    // existing request guard, including when callers embed it in a mutation.
+    sql: proof.projectPublicId === null ? requestSql
+      : `(SELECT min(ok) FROM (SELECT ${requestSql} ok UNION ALL SELECT CASE WHEN ${projectRead.sql} THEN 1 ELSE 0 END))=1`,
     bindings: [
       proof.identityId, proof.generationId, proof.sourceSequence, proof.rootType, proof.rootPublicId,
       proof.workspaceId, proof.sourceId, ...authority.bindings, proof.evaluatedAt, proof.expiresAt,
-      ...targetBindings, ...(proof.denylistEnabled ? [scopes] : []), scopes, scopes, allowed,
+      ...targetBindings, ...(proof.denylistEnabled ? [scopes] : []), scopes, scopes, allowed, ...projectRead.bindings,
     ],
   };
 }

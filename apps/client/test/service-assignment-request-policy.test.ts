@@ -225,7 +225,7 @@ describe("exact-target service-assignment request policy", { timeout: 60_000 }, 
     ]);
   }
 
-  async function seedSecondaryPolicyContext() {
+  async function seedSecondaryPolicyContext(standalone = false) {
     const secondaryWorkspaceId = secondarySession.workspaceId!;
     await db.batch([
       db.prepare(`INSERT INTO pa_portal_source_authorities
@@ -246,17 +246,19 @@ describe("exact-target service-assignment request policy", { timeout: 60_000 }, 
         (workspace_id,projection_source_id,source_workspace_id)
         VALUES (?,?,'shared-source-workspace')`).bind(secondaryWorkspaceId, secondarySourceId),
       db.prepare(`INSERT INTO portal_v2_workspaces
-        (id,root_type,pa_organization_public_id,display_name,status,project_alpha_source_id)
-        VALUES (?,'organization','pa-org-policy','Secondary policy client','active',?)`)
-        .bind(secondaryWorkspaceId, secondarySourceId),
+        (id,root_type,pa_organization_public_id,pa_client_public_id,display_name,status,project_alpha_source_id)
+        VALUES (?,?,?,?,'Secondary policy client','active',?)`)
+        .bind(secondaryWorkspaceId, standalone ? "standalone_client" : "organization",
+          standalone ? null : "pa-org-policy", standalone ? "own-client" : null, secondarySourceId),
       db.prepare(`INSERT INTO portal_v2_directory_generations
         (id,workspace_id,source_generation,source_sequence,status,complete,activated_at)
         VALUES ('secondary-directory-1',?,'secondary-directory-v1',1,'active',1,datetime('now'))`)
         .bind(secondaryWorkspaceId),
       db.prepare(`INSERT INTO portal_v2_directory_entities
         (workspace_id,generation_id,entity_type,public_id,display_name,source_version,active)
-        VALUES (?,'secondary-directory-1','organization','pa-org-policy',
-          'Secondary policy client','secondary-directory-v1',1)`).bind(secondaryWorkspaceId),
+        VALUES (?,'secondary-directory-1',?,?,
+          'Secondary policy client','secondary-directory-v1',1)`).bind(secondaryWorkspaceId,
+            standalone ? 'standalone_client' : 'organization', standalone ? 'own-client' : 'pa-org-policy'),
       db.prepare(`INSERT INTO portal_v2_directory_generation_contracts
         (generation_id,workspace_id,schema_version)
         VALUES ('secondary-directory-1',?,3)`).bind(secondaryWorkspaceId),
@@ -395,6 +397,98 @@ describe("exact-target service-assignment request policy", { timeout: 60_000 }, 
     expect(await (await timed("revoked catalog", catalog)).json()).toEqual({services:[],unavailable:[]});
     expect(await db.prepare("SELECT count(*) count FROM client_service_requests").first<number>("count")).toBe(1);
   }, 180_000);
+  async function seedNativeRequestProject(readable = false) {
+    await seedSecondaryPolicyContext();
+    await enableSecondaryRequestPolicy();
+    await db.batch([
+      db.prepare(`INSERT INTO portal_v2_directory_entities
+        (workspace_id,generation_id,entity_type,public_id,parent_public_id,display_name,source_version,active)
+        VALUES (?,'secondary-directory-1','project','native-request-project','pa-org-policy','Native project','project-v1',1)`)
+        .bind(secondarySession.workspaceId),
+      db.prepare(`INSERT INTO portal_v2_directory_relations
+        (workspace_id,generation_id,public_id,relation_type,from_type,from_public_id,to_type,to_public_id,source_version,active)
+        VALUES (?,'secondary-directory-1','native-project-relation','contains','organization','pa-org-policy',
+          'project','native-request-project','relation-v1',1)`).bind(secondarySession.workspaceId),
+      db.prepare(`INSERT INTO portal_v2_project_lifecycle
+        (workspace_id,generation_id,project_public_id,lifecycle_status,source_version)
+        VALUES (?,'secondary-directory-1','native-request-project','active','project-v1')`).bind(secondarySession.workspaceId),
+    ]);
+    if (readable) await db.prepare(`INSERT INTO portal_v2_entitlements
+      (id,workspace_id,identity_id,capability,effect,scope_type,scope_public_id,source_type,source_version,status)
+      VALUES ('native-project-directory-read',?,'portal-policy-identity','directory.read','allow','project',
+        'native-request-project','project_alpha','read-v1','active')`).bind(secondarySession.workspaceId).run();
+  }
+
+  it("project-readable request authority allows a general organization request but rejects a guessed unreadable project", async () => {
+    await seedNativeRequestProject();
+    expect(await resolveNativeRequestAuthority(env, secondarySession, null)).not.toBeNull();
+    expect(await resolveNativeRequestAuthority(env, secondarySession, "native-request-project")).toBeNull();
+    const input: ClientServiceRequestDraftInput = {
+      projectId: null, requestType: "service", title: "General company request", details: "No project selection required",
+      location: null, preferredStartAt: null, desiredCompletionAt: null, deliverables: null,
+      siteContactName: null, siteContactEmail: null, siteContactPhone: null, latitude: null, longitude: null,
+      areaGeoJson: null, poiPoints: [], services: [{ publicId: "root-service", sourceVersion: "service-v1", answers: {} }],
+    };
+    expect(await createNativeServiceRequestDraft(env, secondarySession,
+      { ...input, projectId: "native-request-project" }, "unreadable-project-create-0001")).toBeNull();
+    expect(await db.prepare("SELECT count(*) n FROM portal_native_request_storage_bindings").first<number>("n")).toBe(0);
+    expect((await createNativeServiceRequestDraft(env, secondarySession, input, "general-company-create-0001"))?.kind).toBe("created");
+  });
+
+  it("project-readable request authority accepts an existing exact project read grant without crossing source or principal", async () => {
+    await seedNativeRequestProject(true);
+    const proof = await resolveNativeRequestAuthority(env, secondarySession, "native-request-project");
+    expect(proof).not.toBeNull();
+    const guard = nativeRequestMutationGuardSql(proof!);
+    expect(await db.prepare(`SELECT ${guard.sql} allowed`).bind(...guard.bindings).first<number>("allowed")).toBe(1);
+    expect(await resolveNativeRequestAuthority(env, { ...secondarySession, nativeSourceId: sourceId }, "native-request-project")).toBeNull();
+    expect(await resolveNativeRequestAuthority(env, { ...secondarySession, principalSubject: "other-person" }, "native-request-project")).toBeNull();
+    const missingWitness = { ...proof! }; delete missingWitness.projectRead;
+    const missingGuard = nativeRequestMutationGuardSql(missingWitness);
+    expect(await db.prepare(`SELECT ${missingGuard.sql} allowed`).bind(...missingGuard.bindings).first<number>("allowed")).toBe(0);
+    for (const field of ["policyJSON", "lineageJSON"] as const) {
+      const nullWitness = { ...proof!, projectRead: { ...proof!.projectRead!, [field]: null as never } };
+      const nullGuard = nativeRequestMutationGuardSql(nullWitness);
+      expect(await db.prepare(`SELECT ${nullGuard.sql} allowed`).bind(...nullGuard.bindings).first<number>("allowed")).toBe(0);
+    }
+    expect(await ensureNativeRequestStorage(env, proof!, "Existing readable project")).not.toBeNull();
+  });
+
+  it.each(["read_revoked", "read_expired", "deny_added", "lineage", "principal_version", "principal_binding", "identity_block"] as const)(
+    "project-readable request authority fences %s after resolution and before storage creation", async change => {
+      await seedNativeRequestProject(true);
+      const proof = await resolveNativeRequestAuthority(env, secondarySession, "native-request-project");
+      expect(proof).not.toBeNull();
+      if (change === "read_revoked") await db.prepare("UPDATE portal_v2_entitlements SET status='revoked',revoked_at=datetime('now') WHERE id='native-project-directory-read'").run();
+      else if (change === "read_expired") await db.prepare("UPDATE portal_v2_entitlements SET valid_from=datetime('now','-2 days'),expires_at=datetime('now','-1 day') WHERE id='native-project-directory-read'").run();
+      else if (change === "deny_added") await db.prepare(`INSERT INTO portal_v2_entitlements
+        (id,workspace_id,identity_id,capability,effect,scope_type,scope_public_id,source_type,source_version,status)
+        VALUES ('native-project-read-deny',?,'portal-policy-identity','directory.read','deny','project',
+          'native-request-project','project_alpha','deny-v1','active')`).bind(secondarySession.workspaceId).run();
+      else if (change === "lineage") await db.prepare("UPDATE portal_v2_directory_relations SET active=0 WHERE public_id='native-project-relation'").run();
+      else if (change === "principal_version") await db.prepare("UPDATE pa_portal_principals SET source_version='replaced-principal' WHERE workspace_id=?").bind(secondarySession.workspaceId).run();
+      else if (change === "principal_binding") await db.prepare("UPDATE portal_v2_identities SET subject='replacement-subject' WHERE id='portal-policy-identity'").run();
+      else await db.prepare(`INSERT INTO portal_v2_identity_eligibility_blocks
+        (id,match_type,issuer,subject,reason_code,created_by_actor_type,created_by_actor_id)
+        VALUES ('native-project-block','issuer_subject','https://issuer.test','policy-subject','fixture','staff','test')`).run();
+      const guard = nativeRequestMutationGuardSql(proof!);
+      expect(await db.prepare(`SELECT ${guard.sql} allowed`).bind(...guard.bindings).first<number>("allowed")).toBe(0);
+      expect(await ensureNativeRequestStorage(env, proof!, "Must not create storage")).toBeNull();
+      expect(await db.prepare("SELECT count(*) n FROM portal_native_request_storage_bindings").first<number>("n")).toBe(0);
+    });
+
+  it("project-readable request authority preserves standalone-client general requests and the legacy request path", async () => {
+    await seedSecondaryPolicyContext(true);
+    await db.prepare("UPDATE portal_v2_entitlements SET scope_type='client',scope_public_id='own-client' WHERE id='secondary-request-root'").run();
+    expect(await resolveNativeRequestAuthority(env, secondarySession, null)).toMatchObject({ rootType: "standalone_client", rootPublicId: "own-client" });
+    const legacy: ClientServiceRequestDraftInput = {
+      projectId: "project-a", requestType: "service", title: "Legacy request", details: "Unchanged legacy control",
+      location: null, preferredStartAt: null, desiredCompletionAt: null, deliverables: null,
+      siteContactName: null, siteContactEmail: null, siteContactPhone: null, latitude: null, longitude: null,
+      areaGeoJson: null, poiPoints: [], services: [{ publicId: "project-service", sourceVersion: "service-v1", answers: {} }],
+    };
+    expect((await createServiceRequestDraft(env, session, legacy, "legacy-project-read-control-0001"))?.kind).toBe("created");
+  });
 
   it("keeps native request ownership, catalog collisions, replay, attachments, history, and cancellation source-qualified", async () => {
     await seedSecondaryPolicyContext();
