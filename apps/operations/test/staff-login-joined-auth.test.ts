@@ -8,6 +8,7 @@ import { splitD1MigrationStatements } from "../../client/test/helpers/d1-migrati
 import { authenticateStaff, authenticateBoundStaffForViewerRenewal } from "../src/worker/auth";
 import { authenticateNativeStaffWithAdmissionVersion } from "../src/worker/native-staff-auth";
 import { csrfToken, requireMutationSecurity } from "../src/worker/request-security";
+import { hmac } from "../src/worker/crypto";
 import { isAdministrator } from "../src/worker/acl";
 import { registerStaffLoginClaimRoute, registerStaffLoginOwnerRoutes } from "../src/worker/staff-login-link-routes";
 import { resolveVerifiedStaffLogin, assertCurrentStaffLogin, type VerifiedStaffLoginClaims } from "../src/worker/staff-login-bindings";
@@ -160,15 +161,54 @@ describe("same-owner sign-in: real RSA, D1 and HTTP boundaries", { timeout: 240_
   });
 
   it("bounds invalid claim attempts with the durable per-identity quota", async () => {
-    const jwt = await token(fixture.claims("limited@example.test", "access|limited"));
-    const value = JSON.stringify({ intentId: crypto.randomUUID(), verificationToken: "c".repeat(64) });
-    for (let index = 0; index < 12; index++) {
-      const denied = await request("/api/account/login-links/claim", jwt, { method: "POST", body: value });
-      expect(denied.status).toBe(403);
-    }
-    const limited = await request("/api/account/login-links/claim", jwt, { method: "POST", body: value });
-    expect(limited.status).toBe(429); expect(limited.headers.get("Retry-After")).toBe("60");
-    expect(await fixture.db.prepare("SELECT count(*) n FROM staff_login_bindings").first("n")).toBe(1);
+    // Keep this one quota window deterministic: a real SQLite minute rollover
+    // during the HTTP loop legitimately resets the production fixed-window quota.
+    // All quota SQL, D1 writes, JWT verification and HTTP handling still run.
+    let quotaWindow = await fixture.db.prepare("SELECT CAST(unixepoch('now') / 60 AS INTEGER) bucket").first<number>("bucket");
+    expect(Number.isSafeInteger(quotaWindow)).toBe(true);
+    if (quotaWindow === null) throw new Error("missing synthetic quota clock");
+    const windowExpression = "CAST(unixepoch('now') / 60 AS INTEGER)";
+    let quotaWrites = 0;
+    const originalEnv = env;
+    const withSession = fixture.db.withSession.bind(fixture.db);
+    env = { ...env, OPS_DB: new Proxy(fixture.db, { get(database, key) {
+      if (key === "withSession") return (constraint: Parameters<D1Database["withSession"]>[0]) => {
+        const session = withSession(constraint);
+        return new Proxy(session, { get(current, property) {
+          if (property === "prepare") return (sql: string) => {
+            if (!sql.includes("INSERT INTO native_staff_onboarding_rate_limits")) return current.prepare(sql);
+            expect(sql.split(windowExpression)).toHaveLength(2);
+            quotaWrites++;
+            return current.prepare(sql.replace(windowExpression, String(quotaWindow)));
+          };
+          const value = Reflect.get(current, property, current);
+          return typeof value === "function" ? value.bind(current) : value;
+        } });
+      };
+      const value = Reflect.get(database, key, database);
+      return typeof value === "function" ? value.bind(database) : value;
+    } }) };
+    try {
+      const claims = fixture.claims("limited@example.test", "access|limited");
+      const jwt = await token(claims);
+      const rateKey = "subject:" + await hmac(env.OPERATIONS_SESSION_SECRET, `staff-login-link:v1:${claims.issuer}:${claims.subject}`);
+      const value = JSON.stringify({ intentId: crypto.randomUUID(), verificationToken: "c".repeat(64) });
+      for (let index = 0; index < 12; index++) {
+        const denied = await request("/api/account/login-links/claim", jwt, { method: "POST", body: value });
+        expect(denied.status).toBe(403);
+      }
+      const limited = await request("/api/account/login-links/claim", jwt, { method: "POST", body: value });
+      expect(limited.status).toBe(429); expect(limited.headers.get("Retry-After")).toBe("60");
+      expect(await fixture.db.prepare("SELECT request_count FROM native_staff_onboarding_rate_limits WHERE rate_key=? AND window_bucket=?")
+        .bind(rateKey, quotaWindow).first("request_count")).toBe(12);
+      // The next window admits a fresh attempt; the invalid claim still grants nothing.
+      quotaWindow++;
+      expect((await request("/api/account/login-links/claim", jwt, { method: "POST", body: value })).status).toBe(403);
+      expect(await fixture.db.prepare("SELECT request_count FROM native_staff_onboarding_rate_limits WHERE rate_key=? AND window_bucket=?")
+        .bind(rateKey, quotaWindow).first("request_count")).toBe(1);
+      expect(quotaWrites).toBe(14);
+      expect(await fixture.db.prepare("SELECT count(*) n FROM staff_login_bindings").first("n")).toBe(1);
+    } finally { env = originalEnv; }
   });
 });
 
