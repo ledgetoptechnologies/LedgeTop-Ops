@@ -1,7 +1,7 @@
 /**
  * Structural checks for the Intel replies the Ops UI renders. They follow the display shapes in
  * @ltds/shared/competitor-intel field by field, so a reply that passes can be rendered without
- * reading through a missing object. Values are checked for type and enum membership only; digests
+ * reading through a missing object. Numeric strings also require the syntax used by the display parsers; digests
  * and identifiers stay opaque strings (their encoding is the server's concern).
  */
 export type Check = (value: unknown) => boolean;
@@ -20,11 +20,15 @@ const both = (...checks: Check[]): Check => value => checks.every(check => check
 const freshness = oneOf("current", "stale");
 const evidence = oneOf("observed", "none_found", "unknown", "blocked", "failed", "not_connected");
 const reason = orNull(str);
-const decimal = orNull(text);
+const decimalValue: Check = value => typeof value === "string" && /^-?\d{1,15}(?:\.\d{1,6})?$/.test(value);
+const decimal = orNull(decimalValue);
 const score = shape({ value: decimal, scale: oneOf("concern_0_10", "overlap_0_10", "activity_evidence_0_10"), state: evidence, reason, confidence: decimal });
 const probability = shape({ value: decimal, state: evidence, reason });
 const stated = (check: Check) => shape({ value: orNull(check), state: evidence, reason });
-const money = orNull(shape({ micros: text, currency: str }));
+const micros: Check = value => typeof value === "string" && /^-?(?:0|[1-9]\d{0,18})$/.test(value)
+  && BigInt(value) >= -9223372036854775807n && BigInt(value) <= 9223372036854775807n;
+const currency: Check = value => typeof value === "string" && /^[A-Z]{3}$/.test(value);
+const money = orNull(shape({ micros, currency }));
 const sourceRef = shape({ url: str, title: orNull(text), observedAt: str, fetchStatus: oneOf("ok", "parked", "redirect", "blocked", "error", "not_checked") });
 const observationRef = shape({ operationId: str, payloadSha256: str });
 
@@ -50,8 +54,8 @@ const change = both(observationRef, shape({
   isNewService: probability, isPricingChange: probability, impact: score, summary: text, addedSentences: list(text), removedSentences: list(text),
   verdict: orNull(shape({ verdict: oneOf("accurate", "inaccurate"), note: text, decidedAt: str, decidedBy: text })), published: bool,
 }));
-const campaign = shape({ name: text, status: text, type: text, cost: money, clicks: num, impressions: num, conversions: text });
-const searchAd = shape({ campaign: text, adGroup: text, headlines: list(text), descriptions: list(text), finalUrl: text, impressions: num, clicks: num, conversions: text, cost: money });
+const campaign = shape({ name: text, status: text, type: text, cost: money, clicks: num, impressions: num, conversions: decimalValue });
+const searchAd = shape({ campaign: text, adGroup: text, headlines: list(text), descriptions: list(text), finalUrl: text, impressions: num, clicks: num, conversions: decimalValue, cost: money });
 const ownAds = both(observationRef, shape({
   period: shape({ start: str, end: str, daysWithData: num }), checkedAt: str, totalsFreshness: freshness, scoresFreshness: freshness,
   totals: shape({ spend: money, clicks: orNull(num), impressions: orNull(num), conversions: decimal, ctrPercent: decimal, costPerConversion: money, metricsState: evidence, metricsReason: reason }),

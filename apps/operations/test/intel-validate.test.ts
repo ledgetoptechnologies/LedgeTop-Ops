@@ -20,6 +20,9 @@ describe("Intel competitor view validation", () => {
     ["a malformed intent", (view: Record<string, any>) => { view.intents = [{ kind: "run_scan" }]; }],
     ["a malformed self-assessment", (view: Record<string, any>) => { view.selfAssessment = { scores: {} }; }],
     ["malformed ads totals", (view: Record<string, any>) => { if (view.ownAds) view.ownAds.totals = {}; else view.ownAds = { totals: {} }; }],
+    ["a nonnumeric score", (view: Record<string, any>) => { view.competitors[0].baseline.threat.value = "not-a-number"; }],
+    ["nonnumeric money", (view: Record<string, any>) => { view.ownAds.totals.spend.micros = "one"; }],
+    ["an invalid currency shape", (view: Record<string, any>) => { view.ownAds.totals.spend.currency = "invalid-currency"; }],
   ])("refuses %s", (_name, mutate) => {
     const view = clone();
     mutate(view);
