@@ -78,10 +78,16 @@ export function configuredLegacyClientOrigins(env: OriginEnv): string[] | null {
   // A legacy share host can become the primary authenticated portal while its
   // existing public links stay valid. Other portal aliases must not acquire
   // public-share access through an overlapping legacy configuration.
-  const promotedPrimary = primary !== configuredPublicShareOrigin(env) ? primary : null;
+  const promotedPrimary = primary !== configuredPublicShareOrigin(env)
+    && configuredPublicShareOrigin(env) !== "https://delivery.ledgetop.app" ? primary : null;
+  // The former combined portal/public host retains both existing namespaces
+  // during the exact split-origin migration. Never infer public admission for
+  // the new private portal or another presentation alias.
+  const historicalSplitOverlap = configuredPublicShareOrigin(env) === "https://delivery.ledgetop.app"
+    && primary === "https://portal.ledgetop.app" ? "https://portal.ledgetopdroneservices.com" : null;
   if (!primary || new Set(exact).size !== exact.length
     || (exact.includes(primary) && primary !== promotedPrimary)
-    || (canonical !== null && exact.some(value => canonical.includes(value) && value !== promotedPrimary))) return null;
+    || (canonical !== null && exact.some(value => canonical.includes(value) && value !== promotedPrimary && value !== historicalSplitOverlap))) return null;
   return exact;
 }
 
