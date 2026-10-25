@@ -95,6 +95,7 @@ import {
 import { readClientViewerUnits, writeClientViewerUnits } from "./viewer-units-preference";
 import { ClientViewerShell, parseClientViewerShellRoute, clientViewerShellPath, nativeClientViewerShellPath, clientViewerRouteProjectId, clientViewerRouteWorkspaceId } from "./ClientViewerShell";
 import { SharedViewerWork } from "./SharedViewerWork";
+import { operationsHomeViewerWorkspaceIds } from "./shared-viewer-work";
 import { OperationsHomeApp, OperationsNativeServicePanel } from "./OperationsHomeApp";
 import {
   clientPortalPath,
@@ -2829,6 +2830,8 @@ export function ClientPortalApp({
     };
   }, [operationsHomeResponse]);
 
+  // Direct 3D shares on Operations homes are listed only while the home is currently verified.
+  const operationsViewerWorkspaceIds = useMemo(() => operationsHomeViewerWorkspaceIds(currentOperationsHome), [currentOperationsHome]);
   const operationsHomeSummary = currentOperationsHome
     ? <OperationsNativeServicePanel response={currentOperationsHome} embedded />
     : operationsHomeResponse
@@ -3012,6 +3015,8 @@ export function ClientPortalApp({
       </PortalBoundary>
     );
   if (gate.status === "blocked") {
+    // A task shared with an Operations home has no client account to open; the server authorizes the exact account, grant and task.
+    if (viewerRoute?.mode === "direct") return <PortalBoundary><ClientViewerShell route={viewerRoute} /></PortalBoundary>;
     if (currentOperationsHome) return <OperationsHomeApp response={currentOperationsHome}
       clientUnavailable={!gate.optionalClientWorkspaceAbsent || currentOperationsHome.homes.length === 0} onRetryClient={() => {
       setPortalWorkspaceSelection(null);
@@ -3200,7 +3205,7 @@ export function ClientPortalApp({
     content = <ClientViewerShell route={viewerRoute} />;
   else if (unifiedView)
     content = <UnifiedPortal page={page as UnifiedPage} workspaces={workspaces} mapboxPublicToken={mapboxPublicToken}
-      openInAccount={openInAccount} navigate={navigate} supplement={page === "dashboard" ? <><SharedViewerWork workspaces={workspaces} />{operationsHomeSummary}</> : page === "deliveries" ? <SharedViewerWork workspaces={workspaces} /> : undefined}
+      openInAccount={openInAccount} navigate={navigate} supplement={page === "dashboard" ? <><SharedViewerWork workspaces={workspaces} operationsHomeWorkspaceIds={operationsViewerWorkspaceIds} />{operationsHomeSummary}</> : page === "deliveries" ? <SharedViewerWork workspaces={workspaces} operationsHomeWorkspaceIds={operationsViewerWorkspaceIds} /> : undefined}
       renderStatus={request => <StatusPill tone={statusTone(request.status)}>{statusLabel(request.status, request.projectAlphaDraftCreated)}</StatusPill>} />;
   else if (native)
     content = <NativeWorkspaceContent key={`${native.workspace.sourceId}:${native.workspace.id}:${native.contextVersion}`} context={native} page={page} projectId={projectId} feedbackId={feedbackId} openProject={openProject}
@@ -3211,8 +3216,8 @@ export function ClientPortalApp({
         loadModels={project => loadNativeViewerModels(native,project)}
         shellPath={model=>nativeClientViewerShellPath({workspaceId:native.workspace.id,projectId:id,associationId:model.associationId,modelId:model.modelId})}
         persistUnits={null} />}
-      renderDashboardSupplement={() => <><SharedViewerWork workspaces={workspaces.length ? workspaces : [native.workspace]} />{operationsHomeSummary}</>}
-      renderSharedWork={() => <SharedViewerWork workspaces={workspaces.length ? workspaces : [native.workspace]} />}
+      renderDashboardSupplement={() => <><SharedViewerWork workspaces={workspaces.length ? workspaces : [native.workspace]} operationsHomeWorkspaceIds={operationsViewerWorkspaceIds} />{operationsHomeSummary}</>}
+      renderSharedWork={() => <SharedViewerWork workspaces={workspaces.length ? workspaces : [native.workspace]} operationsHomeWorkspaceIds={operationsViewerWorkspaceIds} />}
       renderFiles={options => <FileBrowser key={options.folderId ?? "linked-file"} {...options} feedback={native.capabilities.feedback} nativeFeedbackWorkspaceId={native.workspace.id} workspaceId={native.workspace.id} mapToken={null} locationScopeLabel="" emptyTitle="No files shown" emptyDetail={options.folderId ? "This shared folder has no files on this page." : "Open a delivery folder to browse its files."} />} />;
   else if (page === "project")
     content = selectedProject ? (

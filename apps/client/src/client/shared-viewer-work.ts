@@ -1,16 +1,29 @@
 import type { NativeViewerWorkItem } from "./native-portal-api";
-import type { PortalWorkspace } from "./portal-api";
+import type { PortalOperationsHomeResponse, PortalWorkspace } from "./portal-api";
 
 /**
  * 3D work shared directly with a client, flattened across every native client
- * account the person can open. Each row keeps its own account and grant: a
- * task never borrows another grant's permissions or another account's cursor.
+ * account and Operations service home the person can open. Each row keeps its
+ * own account and grant: a task never borrows another grant's permissions or
+ * another account's cursor.
  */
 
-/** Only native accounts can hold direct Viewer grants. */
-export function viewerWorkAccounts(workspaces: PortalWorkspace[]): PortalWorkspace[] {
-  const seen = new Set<string>();
-  return workspaces.filter(workspace => workspace.resourceMode === "native" && !seen.has(workspace.id) && !!seen.add(workspace.id));
+/**
+ * The account IDs to ask for direct Viewer grants: native accounts, then the
+ * currently verified Operations homes, once each. Operations homes are only
+ * Viewer candidates here; they never become selectable portal accounts.
+ */
+export function viewerWorkAccounts(workspaces: PortalWorkspace[], operationsHomeWorkspaceIds: readonly string[] = []): string[] {
+  const native = workspaces.filter(workspace => workspace.resourceMode === "native").map(workspace => workspace.id);
+  return [...new Set([...native, ...operationsHomeWorkspaceIds])];
+}
+
+/** The account ID form a direct Viewer link can carry; other IDs could never open, so they are not listed. */
+const viewerAccountId = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
+
+/** Only a currently verified home response contributes; a hidden or revalidating one contributes nothing. */
+export function operationsHomeViewerWorkspaceIds(response: PortalOperationsHomeResponse | undefined): string[] {
+  return response ? response.homes.map(home => home.workspaceId).filter(id => viewerAccountId.test(id)) : [];
 }
 
 const rowKey = (item: NativeViewerWorkItem) => `${item.workspaceId}\u0000${item.taskId}`;

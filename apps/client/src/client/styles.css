@@ -2103,8 +2103,10 @@
 .portal-home > .portal-overview-tiles { order: 2; }
 .portal-home > .portal-progress-card { order: 3; }
 .portal-home > .portal-finance { order: 4; }
-.portal-home > .portal-home-projects { order: 5; }
-.portal-home > .portal-home-activity { order: 6; }
+/* Shared 3D work with something in it is a delivery: it comes before projects and activity, which are often empty. */
+.portal-home > .shared-viewer-work:has(.shared-viewer-work-list) { order: 5; }
+.portal-home > .portal-home-projects { order: 6; }
+.portal-home > .portal-home-activity { order: 7; }
 /* Area cards line up whether or not a client name is shown; choices read left to right. */
 .unified-portal-account-list .unified-portal-area { display: flex; flex-direction: column; align-items: flex-start; justify-content: flex-start; gap: .55rem; }
 .unified-portal-account-list .unified-portal-area > p { margin: 0; }
