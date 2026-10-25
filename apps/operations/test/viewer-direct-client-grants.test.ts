@@ -97,6 +97,18 @@ describe('direct Viewer grants independent of PA projects',()=>{
    .bind(JSON.stringify({version:1,grant:created.grant,recipientAuthorityPin:{mode:'native_source'}}),created.grant.grantId).run();
   await expect(readDirectViewerClientGrantAuthorityPin(env,created.grant.grantId)).rejects.toThrow('direct-viewer-grant-authority-receipt-invalid');
  });
+ it.each([
+  ['grantId','not-the-receipt-grant'],['sourceId','project-alpha:secondary'],['workspaceId','workspace-two'],
+ ] as const)('rejects an idempotent replay whose receipt grant %s is not bound to its row and authority pin',async(field,value)=>{
+  const {env,database}=await fixture({receiptImmutability:false}),input={env,principal,grant,idempotencyKey:`direct-create-replay-binding-${field}`,request};
+  const created=await createDirectViewerClientGrant(input),pin=await readDirectViewerClientGrantAuthorityPin(env,created.grant.grantId);
+  expect(pin).not.toBeNull();
+  const malformed={...created.grant,[field]:value};
+  await database.prepare(`UPDATE viewer_direct_client_grant_mutation_receipts SET response_json=? WHERE grant_id=?`)
+   .bind(JSON.stringify({version:1,grant:malformed,recipientAuthorityPin:pin}),created.grant.grantId).run();
+  await expect(createDirectViewerClientGrant(input)).rejects.toMatchObject({status:503,code:'grant_receipt_unavailable'});
+  expect(await database.prepare(`SELECT count(*) n FROM viewer_direct_client_grants`).first<number>('n')).toBe(1);
+ });
  it('keeps the authority-bearing create receipt immutable',async()=>{
   const {env,database}=await fixture();const created=await createDirectViewerClientGrant({env,principal,grant,
    idempotencyKey:'direct-create-immutable-pin-01',request});

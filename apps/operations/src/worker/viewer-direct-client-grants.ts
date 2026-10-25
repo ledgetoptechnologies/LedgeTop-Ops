@@ -145,20 +145,23 @@ export async function listDirectViewerClientGrantWorkspace(env:Env,principal:Sta
  return {clients,clientsNextCursor:rows.results.length>q.limit?page.at(-1)!.id:null,grants:grants.results.map(directViewerClientGrantView)};
 }
 async function receipt(env:Env,actor:string,idempotencyKey:string,fingerprint:string){
- const row=await db(env).prepare(`SELECT request_fingerprint,response_json FROM viewer_direct_client_grant_mutation_receipts
- WHERE actor_staff_id=? AND idempotency_key=?`).bind(actor,idempotencyKey).first<{request_fingerprint:string;response_json:string}>();
+ const row=await db(env).prepare(`SELECT request_fingerprint,grant_id,response_json FROM viewer_direct_client_grant_mutation_receipts
+ WHERE actor_staff_id=? AND idempotency_key=?`).bind(actor,idempotencyKey).first<{request_fingerprint:string;grant_id:string;response_json:string}>();
  if(row&&row.request_fingerprint!==fingerprint)fail(409,'idempotency_conflict','Idempotency key already used for another request');
- return row?JSON.parse(row.response_json):null;
+ return row?{grantId:row.grant_id,response:JSON.parse(row.response_json)}:null;
 }
-function createReceiptGrant(value:unknown):DirectViewerClientGrantPublicResult {
+function createReceiptGrant(value:unknown,expectedGrantId:string):DirectViewerClientGrantPublicResult {
  if(value&&typeof value==='object'&&!Array.isArray(value)&&('recipientAuthorityPin' in value||'version' in value)){
   const envelope=value as Record<string,unknown>,grant=envelope.grant;
   if(Object.keys(envelope).length!==3||envelope.version!==1||!('grant'in envelope)||!('recipientAuthorityPin'in envelope)
-    ||!validRecipientAuthorityPin(envelope.recipientAuthorityPin)||!validCreateReceiptGrant(grant))
+    ||!validRecipientAuthorityPin(envelope.recipientAuthorityPin)||!validCreateReceiptGrant(grant)
+    ||grant.grantId!==expectedGrantId||grant.workspaceId!==envelope.recipientAuthorityPin.workspaceId
+    ||grant.sourceId!==envelope.recipientAuthorityPin.sourceId)
    fail(503,'grant_receipt_unavailable','Viewer share receipt is unavailable; contact support');
   return grant;
  }
- if(!validCreateReceiptGrant(value))fail(503,'grant_receipt_unavailable','Viewer share receipt is unavailable; contact support');
+ if(!validCreateReceiptGrant(value)||value.grantId!==expectedGrantId)
+  fail(503,'grant_receipt_unavailable','Viewer share receipt is unavailable; contact support');
  return value;
 }
 function createReceiptAuthorityPin(value:unknown):DirectViewerClientRecipientAuthorityPin|null{
@@ -251,7 +254,7 @@ export async function createDirectViewerClientGrant(input:{env:Env;principal:Sta
  const g=parsed.data,fingerprint=await sha256(JSON.stringify(['direct.create',g]));
  const prior=await receipt(env,principal.id,input.idempotencyKey,fingerprint);
  if(prior){
-  const priorPin=createReceiptAuthorityPin(prior);
+  const priorPin=createReceiptAuthorityPin(prior.response);
   if(priorPin){
    const current=await recipient(env,g.sourceId,g.workspaceId);
    if(JSON.stringify(priorPin)!==JSON.stringify(current.pin))
@@ -263,7 +266,7 @@ export async function createDirectViewerClientGrant(input:{env:Env;principal:Sta
    if(current.pin.mode==='operations_native'||await workspaceHasClaimHistory(env,g.workspaceId))
     fail(409,'relationship_missing','Client authority changed; refresh the client connection');
   }
-  return {grant:createReceiptGrant(prior),replayed:true};
+  return {grant:createReceiptGrant(prior.response,prior.grantId),replayed:true};
  }
  if(g.expiresAt!==null&&Date.parse(g.expiresAt)<=Date.now())fail(400,'expired_at_invalid','Expiration must be in the future');
  let catalog;
@@ -319,11 +322,11 @@ export async function createDirectViewerClientGrant(input:{env:Env;principal:Sta
  ...mutationStatements(database,principal,input.idempotencyKey,fingerprint,id,'grant.create',result,now,
    {version:1,grant:result,recipientAuthorityPin:pin} satisfies CreateReceiptEnvelope)]);
  }catch(error){const replay=await receipt(env,principal.id,input.idempotencyKey,fingerprint);if(replay){
-   const current=await recipient(env,g.sourceId,g.workspaceId),priorPin=createReceiptAuthorityPin(replay);
+   const current=await recipient(env,g.sourceId,g.workspaceId),priorPin=createReceiptAuthorityPin(replay.response);
    if((priorPin&&JSON.stringify(priorPin)!==JSON.stringify(current.pin))
     ||(!priorPin&&(current.pin.mode==='operations_native'||await workspaceHasClaimHistory(env,g.workspaceId))))
     fail(409,'relationship_missing','Client authority changed; refresh the client connection');
-   return {grant:createReceiptGrant(replay),replayed:true};}
+   return {grant:createReceiptGrant(replay.response,replay.grantId),replayed:true};}
   const duplicate=await database.prepare(`SELECT id FROM viewer_direct_client_grants WHERE source_id=? AND workspace_id=? AND viewer_project_id=?
    AND scope_type=? AND task_id IS ? AND status='active'`).bind(g.sourceId,g.workspaceId,g.viewerProjectId,g.scopeType,g.taskId).first<{id:string}>();
   if(duplicate)throw new DirectViewerGrantError(409,'duplicate_active_grant','Client already has this share',duplicate.id);
