@@ -5,18 +5,22 @@ import { readBoundedJson } from "./bounded-json";
 import { hmac } from "./crypto";
 import { requestHostAllowed } from "./host-admission";
 import { requireCurrentStaffLogin, verifyStaffLoginClaims } from "./auth";
+import { requireMutationSecurity } from "./request-security";
 import { consumeNativeStaffOnboardingRateLimit } from "./native-staff-onboarding-rate-limit";
 import {
   StaffLoginBindingError, resolveVerifiedStaffLogin, createStaffLoginBindingIntent,
   claimStaffLoginBindingIntent, previewStaffLoginBindingIntent, revokeStaffLoginBinding, listStaffLoginBindings,
-  staffLoginLinksAvailable, type StaffLoginProof, type VerifiedStaffLoginClaims,
+  assertStaffLoginPrimaryOwner, staffLoginLinksAvailable, type StaffLoginProof, type VerifiedStaffLoginClaims,
 } from "./staff-login-bindings";
+import { NativeStaffCohortReviewError, prepareNativeStaffCohortReview } from "./native-staff-cohort-review";
 import type { Env, StaffPrincipal } from "./types";
 
 type Bindings = { Bindings: Env; Variables: { principal: StaffPrincipal; administrator: boolean } };
 type App = Hono<Bindings>;
 type Ctx = Context<Bindings>;
 export const STAFF_LOGIN_LINKS_PATH = "/api/account/login-links";
+export const NATIVE_STAFF_COHORT_REVIEW_PATH = "/api/staff/current-cohort-review";
+const emptyInput = z.object({}).strict();
 const emailInput = z.object({ email: z.string().trim().toLowerCase().email().max(254) }).strict();
 const claimInput = z.object({ intentId: z.string().uuid(), verificationToken: z.string().regex(/^[a-f0-9]{64}$/) }).strict();
 const revokeInput = z.object({ expectedVersion: z.number().int().min(1).max(Number.MAX_SAFE_INTEGER - 1) }).strict();
@@ -34,6 +38,8 @@ function noStore(c: Ctx) {
 function failure(c: Ctx, error: unknown) {
   if (error instanceof StaffLoginBindingError)
     return c.json({ error: messages[error.code], code: error.code }, error.status);
+  if (error instanceof NativeStaffCohortReviewError)
+    return c.json({ error: error.code === "cohort_changed" ? "Staff authority changed during review. Start a new review." : "Staff review is temporarily unavailable.", code: error.code }, error.status);
   if (error instanceof HTTPException) return c.json({ error: error.message }, error.status);
   return c.json({ error: messages.staff_login_unavailable, code: "staff_login_unavailable" }, 503);
 }
@@ -102,6 +108,31 @@ export function registerStaffLoginClaimRoute(app: App) {
       const claims = await verifyStaffLoginClaims(c.req.raw, c.env);
       await quota(c, claims);
       return c.json(await claimStaffLoginBindingIntent(c.env.OPS_DB, claims, value));
+    } catch (error) { return failure(c, error); }
+  });
+}
+
+/** This reader is intentionally mounted before ordinary staff auth middleware.
+ * It proves an existing primary Access binding without triggering that
+ * middleware's legacy first-login subject binding side effect. */
+export function registerNativeStaffCohortReviewRoute(app: App) {
+  app.post(NATIVE_STAFF_COHORT_REVIEW_PATH, async c => {
+    try {
+      noStore(c);
+      sameOrigin(c);
+      await parse(c, emptyInput);
+      const claims = await verifyStaffLoginClaims(c.req.raw, c.env);
+      const resolved = await resolveVerifiedStaffLogin(c.env.OPS_DB, claims);
+      if (!resolved || resolved.proof.kind !== "primary") throw new StaffLoginBindingError("staff_login_denied", 403);
+      const proof = await assertStaffLoginPrimaryOwner(c.env.OPS_DB, resolved.proof);
+      const principal: StaffPrincipal = { ...resolved.staff, accessExpiresAt: proof.expiresAt };
+      await requireMutationSecurity(c.req.raw, c.env, principal);
+      const review = await prepareNativeStaffCohortReview(c.env.OPS_DB, { staffId: proof.staffId });
+      const current = await verifyStaffLoginClaims(c.req.raw, c.env);
+      if (current.issuer !== claims.issuer || current.subject !== claims.subject || current.email !== claims.email)
+        throw new StaffLoginBindingError("staff_login_denied", 403);
+      await assertStaffLoginPrimaryOwner(c.env.OPS_DB, proof);
+      return c.json(review);
     } catch (error) { return failure(c, error); }
   });
 }
