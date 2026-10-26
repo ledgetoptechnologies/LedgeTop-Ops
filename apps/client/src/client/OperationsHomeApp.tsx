@@ -1,4 +1,4 @@
-import { useEffect,useState } from "react";
+import { useEffect,useState,type ReactNode } from "react";
 import { loadOperationsFinancial,type PortalFinancialDocument,type PortalOperationsHomeResponse,type PortalWorkspace } from "./portal-api";
 import { OperationsNativeDataBrowser } from "./OperationsNativeDataBrowser";
 import { AccountMenu } from "@ltds/ui";
@@ -173,29 +173,42 @@ export function OperationsFinancialSummary({state,documents}:{state:"loading"|"r
   </section>;
 }
 
+/**
+ * The frame of a client whose access comes only through Operations homes. The home itself has no navigation; pages
+ * opened from it (a shared 3D model) offer Home, the portal root, which re-checks access and lists everything currently
+ * shared. Nothing here requires a client account or business project.
+ */
+export function OperationsHomeFrame({ viewer = false, children }: {
+  viewer?: boolean;
+  children: ReactNode;
+}) {
+  return <div className="client-portal operations-home">
+    <header className="client-portal-gate-header">
+      <PortalBrand product="Client portal" />
+      {viewer && <nav className="operations-home-nav" aria-label="Client portal"><a href="/portal">Home</a></nav>}
+      <AccountMenu className="portal-account-menu" displayName="Client portal" avatar="LT" appApi={PORTAL_APP_API} />
+    </header>
+    <main className={viewer ? "client-portal-main client-viewer-main" : "portal-main"}>{children}</main>
+  </div>;
+}
+
 export function OperationsHomeApp({ response, clientUnavailable = false, onRetryClient }: {
   response: PortalOperationsHomeResponse;
   clientUnavailable?: boolean;
   onRetryClient?: () => void;
 }) {
-  return <div className="client-portal operations-home">
-    <header className="client-portal-gate-header">
-      <PortalBrand product="Client portal" />
-      <AccountMenu className="portal-account-menu" displayName="Client portal" avatar="LT" appApi={PORTAL_APP_API} />
-    </header>
-    <main className="portal-main">
-      <section className="portal-welcome">
-        <p className="portal-eyebrow">Ledge Top client portal</p>
-        <h1>Your services</h1>
-        <p>Services, invoices and files Ledge Top currently shares with you.</p>
-      </section>
-      {clientUnavailable && <section className="portal-card portal-workspace-status" role="status">
-        <h2>Project details unavailable</h2>
-        <p>Your projects and requests could not be opened for the selected client. Your services, invoices and files below are still available.</p>
-        {onRetryClient && <button type="button" className="button-orange" onClick={onRetryClient}>Try my other client accounts</button>}
-      </section>}
-      <SharedViewerWork workspaces={NO_CLIENT_ACCOUNTS} operationsHomeWorkspaceIds={operationsHomeViewerWorkspaceIds(response)} />
-      <OperationsNativeServicePanel response={response} />
-    </main>
-  </div>;
+  return <OperationsHomeFrame>
+    <section className="portal-welcome">
+      <p className="portal-eyebrow">Ledge Top client portal</p>
+      <h1>Your services</h1>
+      <p>Services, invoices and files Ledge Top currently shares with you.</p>
+    </section>
+    {clientUnavailable && <section className="portal-card portal-workspace-status" role="status">
+      <h2>Project details unavailable</h2>
+      <p>Your projects and requests could not be opened for the selected client. Your services, invoices and files below are still available.</p>
+      {onRetryClient && <button type="button" className="button-orange" onClick={onRetryClient}>Try my other client accounts</button>}
+    </section>}
+    <SharedViewerWork workspaces={NO_CLIENT_ACCOUNTS} operationsHomeWorkspaceIds={operationsHomeViewerWorkspaceIds(response)} />
+    <OperationsNativeServicePanel response={response} />
+  </OperationsHomeFrame>;
 }
