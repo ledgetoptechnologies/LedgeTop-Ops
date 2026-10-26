@@ -29,6 +29,30 @@ $inventoryPath=Join-Path $root 'inventory.json'; $receiptPath=Join-Path $root 'b
 $build = [ordered]@{status='private_connected_staging_pilot';sourceCommit=$ReviewedCommit;rid='win-x64';selfContained=$true;buildMode='packaged';compiledReleaseChannels=1;channel='pilot';applicationSha256=($inventory | Where-Object path -eq 'LedgeTop.Files.dll').sha256;helperSha256='76b2805253d0d6ffacb092a7acfbee99e7af6917835c0c5410e23f3ef5052da2';payloadFiles=$inventory.Count;payloadBytes=($inventory | Measure-Object bytes -Sum).Sum;cloudflaredIncluded=$true;signed=$false;installerMaintenanceProtocol=1;sourceArchiveSha256=('0'*64)}
 function SaveFixtures { $inventory | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $inventoryPath -Encoding utf8; $build | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $receiptPath -Encoding utf8 }
 SaveFixtures
+# Exercise the exact production snapshot guards without running the script body,
+# compiler, app or native maintenance. Reformatting valid JSON must still invalidate
+# the byte anchor; the installed sidecar is not a reserialized inventory.
+$parseErrors=$null;$tokens=$null
+$ast=[Management.Automation.Language.Parser]::ParseFile($builder,[ref]$tokens,[ref]$parseErrors)
+if($parseErrors.Count-ne0){throw 'Builder syntax errors.'}
+$snapshotCases=[Collections.Generic.List[string]]::new()
+& {
+  foreach($name in @('Hash','Leaf','LocalPath','BoundedJsonBytes','AssertInventoryUnchanged')){
+    $function=$ast.FindAll({param($node)$node-is[Management.Automation.Language.FunctionDefinitionAst]},$true)|Where-Object Name -CEQ $name
+    . ([scriptblock]::Create($function.Extent.Text))
+  }
+  $PayloadInventoryPath=$inventoryPath
+  $manifestBytes=BoundedJsonBytes $inventoryPath 8388608
+  $manifestHash=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($manifestBytes)).ToLowerInvariant()
+  AssertInventoryUnchanged
+  $savedHash=$manifestHash;$manifestHash='0'*64;$refused=$false
+  try{AssertInventoryUnchanged}catch{$refused=$_.Exception.Message.Contains('changed after verified snapshot')}
+  if(-not$refused){throw 'Snapshot wrong-hash refusal failed.'};$snapshotCases.Add('snapshot wrong hash')
+  $manifestHash=$savedHash;[IO.File]::AppendAllText($inventoryPath,' ');$refused=$false
+  try{AssertInventoryUnchanged}catch{$refused=$_.Exception.Message.Contains('changed after verified snapshot')}
+  finally{[IO.File]::WriteAllBytes($inventoryPath,$manifestBytes)}
+  if(-not$refused){throw 'Snapshot valid-JSON byte tamper refusal failed.'};$snapshotCases.Add('snapshot changed valid JSON bytes')
+}
 $base = @{PayloadDirectory=$payload;PayloadInventoryPath=$inventoryPath;BuildReceiptPath=$receiptPath;ReviewedCommit=$ReviewedCommit;AppVersion='0.0.0.5';SourceRepository=$SourceRepository;ValidateOnly=$true;CompilerRoot=(Join-Path $root 'CompilerMustNotBeRead')}
 $passed = [Collections.Generic.List[string]]::new()
 function Reject([string]$Name,[hashtable]$Changes,[string]$Expected) {
@@ -83,6 +107,10 @@ $inventory[0].path='evil$0.txt';SaveFixtures
 Reject 'NSIS variable input' @{} 'Unsafe payload relative'
 $inventory[0].path='uninstall.exe';SaveFixtures
 Reject 'installer filename collision' @{} 'installer-owned'
+foreach($reserved in @('installed-payload-inventory.json','INSTALLED-PAYLOAD-INVENTORY.JSON','installed-payload-inventory.json/nested.txt')){
+  $inventory[0].path=$reserved;SaveFixtures
+  Reject "inventory sidecar reserved $reserved" @{} 'installer-owned'
+}
 $inventory[0].path='CON.txt';SaveFixtures
 Reject 'reserved Windows name' @{} 'Unsafe Windows filename'
 $inventory[0].path=$originalPath;$hash=$inventory[0].sha256;$inventory[0].sha256='0'*64;SaveFixtures
@@ -144,6 +172,6 @@ $positive=$false;$positiveFailure=$null
 try { $result=& $builder @candidate | ConvertFrom-Json; if ($result.status -cne 'unsigned_installer_inputs_validated' -or $result.compilerInvoked -ne $false) { throw 'Wrong validation result.' };$positive=$true }
 catch { $positiveFailure=$_.Exception.Message;if ($RequirePositiveValidation -or $positiveFailure -notmatch 'exact reviewed commit') { throw } }
 if (Test-Path -LiteralPath $candidate.OutputDirectory) { throw 'ValidateOnly unexpectedly created output.' }
-$result=[ordered]@{status='unsigned_installer_refusal_checks_passed';negativeCases=@($passed);negativeCaseCount=$passed.Count;positiveValidation=$positive;positiveHeldReason=$positiveFailure;fixtureRoot=$root;compilerInvoked=$false;executedApplication=$false;installed=$false;uninstalled=$false}
+$result=[ordered]@{status='unsigned_installer_refusal_checks_passed';negativeCases=@($passed);negativeCaseCount=$passed.Count;snapshotCases=$snapshotCases.ToArray();positiveValidation=$positive;positiveHeldReason=$positiveFailure;fixtureRoot=$root;compilerInvoked=$false;executedApplication=$false;installed=$false;uninstalled=$false}
 $result | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $root 'test-receipt.json') -Encoding utf8
 $result | ConvertTo-Json -Depth 4

@@ -9,7 +9,8 @@ destination sentinel. Thirteen static guards passed. These tests do not execute
 the full installer or prove installed behavior.
 
 The packaging builder must supply canonical four-u16 `APP_VERSION`, `OUTPUT_FILE`,
-lowercase SHA-256 `PAYLOAD_MANIFEST_SHA256`, and `PAYLOAD_INCLUDE`. The latter must
+lowercase SHA-256 `PAYLOAD_MANIFEST_SHA256`, exact reviewed lowercase 40-hex
+`SOURCE_COMMIT`, and `PAYLOAD_INCLUDE`. The latter must
 be generated from the already verified immutable payload inventory and contain
 only these macros:
 
@@ -25,9 +26,31 @@ only these macros:
 
 Validate all components before NSIS generation: no traversal, absolute/UNC
 paths, aliases, wildcards, NSIS metacharacters/control characters, duplicate or
-reserved Windows names, or collisions with `installer-owned.ini`/`uninstall.exe`.
+reserved Windows names, or collisions with `installer-owned.ini`/`uninstall.exe`
+or the reserved root leaf `installed-payload-inventory.json` (including a
+case-equivalent directory with children).
 Escape NSIS literals correctly. This include is trusted executable build input,
 not a runtime data format. Inspect the actual built installer and payload hashes.
+
+The builder snapshots the exact bounded inventory JSON bytes once, parses those
+same bytes, and embeds them as the installer-owned root sidecar
+`installed-payload-inventory.json`. It is not listed recursively in itself.
+Generated install/delete macros include this one extra fixed file; generated
+validation also refuses a sidecar directory, alias or unknown inspection error
+before cleanup. Missing sidecars permit partial uninstall. Payload counts and
+lengths continue describing the original inventory; construction receipts report
+the additional sidecar separately. Original inventory bytes and the embedded
+snapshot are checked again before a build can qualify.
+
+The owner marker binds both `PayloadManifestSha256` and `SourceCommit`. The same
+values appear in the installer's standard version-resource `Comments`, exactly
+`LedgeTop.Files.Payload/1:<64-lowercase-hex-manifest-SHA256>:<40-lowercase-hex-commit>`.
+The builder reads that resource back without executing the PE. A future upgrade
+verifier must anchor marker and sidecar to its independently SHA-verified staged
+installer, then verify every inventory entry; coherently edited installed marker
+and sidecar alone do not establish authenticity. No upgrade activation is added
+by this metadata. Legacy versions can still be manually upgraded forward: the
+installer's existing-version gate does not require them to have the new sidecar.
 
 The target is fixed to `%LOCALAPPDATA%\Programs\LedgeTop Files Pilot\versions\VERSION`.
 Existing same-version directories are refused, even if they look complete;

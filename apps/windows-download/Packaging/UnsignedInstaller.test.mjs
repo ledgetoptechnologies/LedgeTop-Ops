@@ -3,6 +3,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 const source = (await readFile(new URL('./UnsignedInstaller.nsi', import.meta.url), 'utf8')).replaceAll('\r\n', '\n');
 const active = source.split('\n').filter(line => !line.trimStart().startsWith(';')).join('\n');
+const builder = (await readFile(new URL('../../../scripts/windows-unsigned-installer.ps1', import.meta.url), 'utf8')).replaceAll('\r\n', '\n');
 const install = active.slice(active.indexOf('Section "Install"'), active.indexOf('Function un.onInit'));
 const init = active.slice(active.indexOf('Function .onInit'), active.indexOf('Section "Install"'));
 const uninit = active.slice(active.indexOf('Function un.onInit'), active.indexOf('Section "Uninstall"'));
@@ -10,8 +11,39 @@ const uninstall = active.slice(active.indexOf('Section "Uninstall"'));
 const before = (text, a, b) => assert(text.indexOf(a) >= 0 && text.indexOf(a) < text.indexOf(b), `${a} must precede ${b}`);
 
 test('explicit immutable builder inputs have no installable defaults', () => {
-  for (const name of ['APP_VERSION', 'OUTPUT_FILE', 'PAYLOAD_MANIFEST_SHA256', 'PAYLOAD_INCLUDE'])
+  for (const name of ['APP_VERSION', 'OUTPUT_FILE', 'PAYLOAD_MANIFEST_SHA256', 'PAYLOAD_INCLUDE', 'SOURCE_COMMIT'])
     assert(active.includes(`!ifndef ${name}\n  !error`));
+});
+
+test('installed inventory and source commit bind marker and version-resource anchor', () => {
+  assert.match(active, /VIAddVersionKey \/LANG=1033 "Comments" "LedgeTop\.Files\.Payload\/1:\$\{PAYLOAD_MANIFEST_SHA256\}:\$\{SOURCE_COMMIT\}"/);
+  assert.match(install, /WriteINIStr "\$INSTDIR\\installer-owned\.ini" "Installer" "SourceCommit" "\$\{SOURCE_COMMIT\}"/);
+  assert.match(uninit, /ReadINIStr \$0 "\$INSTDIR\\installer-owned\.ini" "Installer" "SourceCommit"\n  StrCmp \$0 "\$\{SOURCE_COMMIT\}" 0 un_unknown/);
+  before(install, '"SourceCommit"', 'WriteRegStr HKCU');
+  // An older manually installed version needs no new sidecar/marker to move forward.
+  assert.doesNotMatch(init, /ReadINIStr|installed-payload-inventory\.json|SourceCommit/);
+});
+
+test('installer-owned sidecar leaf refuses directory aliases and unknown inspection results before deletion', () => {
+  const helper = active.slice(active.indexOf('Function un.CheckInventorySidecarPath'), active.indexOf('Function ValidateVersion'));
+  assert.match(helper, /GetFileAttributesW\(w "\$INSTDIR\\installed-payload-inventory\.json"\)i\.r10/);
+  assert.match(helper, /IntOp \$R2 \$R0 & 0x410/);
+  assert.match(helper, /IntCmp \$R1 2 inventory_sidecar_done/);
+  assert.match(helper, /IntCmp \$R1 3 inventory_sidecar_done/);
+});
+
+test('builder snapshots exact bounded bytes and generates only exact root sidecar operations', () => {
+  assert.match(builder, /\$manifestBytes = BoundedJsonBytes \$PayloadInventoryPath 8388608/);
+  assert.match(builder, /\$inventory = @\(JsonBytes \$manifestBytes\)/);
+  assert.match(builder, /\$sidecarStream\.Write\(\$manifestBytes\)/);
+  assert.match(builder, /FileMode\]::CreateNew/);
+  assert(builder.includes(`$lines.Add('  File "/oname='+$inventoryLeaf+'" "'+(NsisLiteral $sidecarPath)+'"')`));
+  assert(builder.includes(`$lines.Add('  Delete "$INSTDIR\\'+$inventoryLeaf+'"')`));
+  assert(builder.includes(`$lines.Add('  Call un.CheckInventorySidecarPath')`));
+  assert.match(builder, /\/DSOURCE_COMMIT=\$ReviewedCommit/);
+  assert.match(builder, /GetVersionInfo\(\$installer\)\.Comments -cne \$anchor/);
+  assert.match(builder, /installedInventoryBytes=\$manifestBytes.Length;installerOwnedSidecarFiles=1/);
+  assert.equal((builder.match(/^AssertInventoryUnchanged$/gm) ?? []).length, 3);
 });
 test('user-only fixed versioned pilot target; command-line directory overridden', () => {
   assert.match(active, /RequestExecutionLevel user/);

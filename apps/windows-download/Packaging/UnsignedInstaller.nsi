@@ -1,13 +1,15 @@
 ; Initial manual, unsigned per-user pilot installation. No updater, trust claim or auto-launch.
 ; Builder must provide vetted canonical APP_VERSION (four u16s), OUTPUT_FILE,
-; PAYLOAD_MANIFEST_SHA256 and PAYLOAD_INCLUDE. Generated include defines ONLY:
+; PAYLOAD_MANIFEST_SHA256, SOURCE_COMMIT and PAYLOAD_INCLUDE. Generated include defines ONLY:
 ; InstallPayload: explicit File commands into $INSTDIR, with SetOutPath for subdirs.
 ; DeletePayload: exact manifest Delete "$INSTDIR\relative-file" (no wildcards).
 ; RemovePayloadDirectories: deepest-first RMDir (NEVER /r), excluding $INSTDIR.
 ; ValidatePayloadPaths: ALL unique payload parent dirs (including $INSTDIR), each
 ; Push "$INSTDIR\relative-directory" then Call un.CheckPayloadPath.
 ; Builder must reject traversal, absolute paths, aliases, duplicate Windows names,
-; installer-owned.ini/uninstall.exe collisions, and unexpected macro instructions.
+; installer-owned.ini/uninstall.exe/installed-payload-inventory.json collisions,
+; and unexpected macro instructions. The exact inventory sidecar is installer-owned,
+; excluded from the recursive payload inventory, and included by the generated macros.
 Unicode true
 !include "MUI2.nsh"
 !include "LogicLib.nsh"
@@ -27,6 +29,9 @@ Unicode true
 !ifndef PAYLOAD_INCLUDE
   !error "PAYLOAD_INCLUDE is required"
 !endif
+!ifndef SOURCE_COMMIT
+  !error "SOURCE_COMMIT is required"
+!endif
 !include "${PAYLOAD_INCLUDE}"
 Name "LedgeTop Files Pilot (unsigned preview)"
 OutFile "${OUTPUT_FILE}"
@@ -38,6 +43,7 @@ VIAddVersionKey /LANG=1033 "ProductName" "LedgeTop Files Pilot"
 VIAddVersionKey /LANG=1033 "FileDescription" "Unsigned manual preview installer"
 VIAddVersionKey /LANG=1033 "FileVersion" "${APP_VERSION}"
 VIAddVersionKey /LANG=1033 "LegalCopyright" "Ledge Top Technologies LLC"
+VIAddVersionKey /LANG=1033 "Comments" "LedgeTop.Files.Payload/1:${PAYLOAD_MANIFEST_SHA256}:${SOURCE_COMMIT}"
 !define PRODUCT_BASE "$LOCALAPPDATA\Programs\LedgeTop Files Pilot"
 !define TARGET "${PRODUCT_BASE}\versions\${APP_VERSION}"
 !define UNINSTALL_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\LedgeTopFilesPilot"
@@ -134,6 +140,24 @@ Function un.CheckPayloadPath
     SetErrorLevel 20
     Abort
   payload_path_done:
+FunctionEnd
+
+; Parent directories are already checked by ValidatePayloadPaths. Missing sidecars
+; permit partial uninstall; any existing sidecar must be a plain file, never an alias.
+Function un.CheckInventorySidecarPath
+  System::Call 'kernel32::GetFileAttributesW(w "$INSTDIR\installed-payload-inventory.json")i.r10 ?e'
+  Pop $R1
+  IntCmp $R0 -1 inventory_sidecar_missing
+  IntOp $R2 $R0 & 0x410
+  IntCmp $R2 0 inventory_sidecar_done inventory_sidecar_bad inventory_sidecar_bad
+  inventory_sidecar_missing:
+    IntCmp $R1 2 inventory_sidecar_done
+    IntCmp $R1 3 inventory_sidecar_done
+  inventory_sidecar_bad:
+    MessageBox MB_ICONSTOP "The installed inventory sidecar changed type/alias or cannot be inspected. Nothing was deleted." /SD IDOK
+    SetErrorLevel 20
+    Abort
+  inventory_sidecar_done:
 FunctionEnd
 
 ; Canonical four-component unsigned-16 version gate for untrusted registry values.
@@ -309,6 +333,7 @@ Section "Install"
   WriteINIStr "$INSTDIR\installer-owned.ini" "Installer" "Owner" "${OWNER}"
   WriteINIStr "$INSTDIR\installer-owned.ini" "Installer" "Version" "${APP_VERSION}"
   WriteINIStr "$INSTDIR\installer-owned.ini" "Installer" "PayloadManifestSha256" "${PAYLOAD_MANIFEST_SHA256}"
+  WriteINIStr "$INSTDIR\installer-owned.ini" "Installer" "SourceCommit" "${SOURCE_COMMIT}"
   WriteUninstaller "$INSTDIR\uninstall.exe"
   IfErrors install_failed
   ; Activation occurs only after the new payload's read-only maintenance gate.
@@ -356,6 +381,8 @@ Function un.onInit
   StrCmp $0 "${APP_VERSION}" 0 un_unknown
   ReadINIStr $0 "$INSTDIR\installer-owned.ini" "Installer" "PayloadManifestSha256"
   StrCmp $0 "${PAYLOAD_MANIFEST_SHA256}" 0 un_unknown
+  ReadINIStr $0 "$INSTDIR\installer-owned.ini" "Installer" "SourceCommit"
+  StrCmp $0 "${SOURCE_COMMIT}" 0 un_unknown
   System::Call 'kernel32::CreateMutexW(p0,i0,w "Local\LedgeTopFilesPilotInstaller")p.r0 ?e'
   Pop $1
   StrCpy $MutexHandle $0

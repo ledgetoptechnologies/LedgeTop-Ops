@@ -18,6 +18,7 @@ $helperSha = '76b2805253d0d6ffacb092a7acfbee99e7af6917835c0c5410e23f3ef5052da2'
 $compilerSha = '65343c225ec88393cc4453b0963caf63f763f42f48cb55736d51893ff2e29d4a'
 $archiveSha = 'ba63dffc4410ee89193e1cb5a41989991bd77c61068da17e3156d136b7b0b3d8'
 $copyingSha = '388357c1215ff403c5ebde3a5ecd273e68f8b79a579996775245d1ee65442aba'
+$inventoryLeaf = 'installed-payload-inventory.json'
 function Hash([string]$Path) { (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant() }
 function Leaf([string]$Value) {
   if ([string]::IsNullOrWhiteSpace($Value) -or $Value.Length -gt 150 -or $Value -in @('.','..') -or
@@ -51,7 +52,7 @@ function RelativePath([string]$Path) {
   if ($Path.Length -gt 240 -or
       [IO.Path]::IsPathRooted($Path) -or $Path.IndexOfAny([char[]]@('$','"','`','!',"`r","`n")) -ge 0) { throw 'Unsafe payload relative path.' }
   foreach ($part in $Path.Split('/')) { Leaf $part }
-  if ($Path -ieq 'installer-owned.ini' -or $Path -ieq 'uninstall.exe') { throw 'Payload collides with installer-owned files.' }
+  if ($Path -ieq 'installer-owned.ini' -or $Path -ieq 'uninstall.exe' -or $Path.Split('/')[0] -ieq $inventoryLeaf) { throw 'Payload collides with installer-owned files.' }
   $Path
 }
 function UniqueJson($Element) {
@@ -65,16 +66,28 @@ function UniqueJson($Element) {
     foreach ($item in $Element.EnumerateArray()) { UniqueJson $item }
   }
 }
-function Json([string]$Path, [int]$MaximumBytes) {
-  $info = Get-Item -LiteralPath $Path
-  if ($info.PSIsContainer -or $info.Length -lt 1 -or $info.Length -gt $MaximumBytes) { throw 'JSON input size/type is invalid.' }
-  $bytes = [IO.File]::ReadAllBytes($Path)
+function JsonBytes([byte[]]$bytes) {
   $offset = if ($bytes.Length -ge 3 -and $bytes[0] -eq 239 -and $bytes[1] -eq 187 -and $bytes[2] -eq 191) { 3 } else { 0 }
   $text = [Text.UTF8Encoding]::new($false,$true).GetString($bytes,$offset,$bytes.Length-$offset)
   $options = [Text.Json.JsonDocumentOptions]::new(); $options.MaxDepth = 32
   $document = [Text.Json.JsonDocument]::Parse($text,$options)
   try { UniqueJson $document.RootElement } finally { $document.Dispose() }
   ConvertFrom-Json -InputObject $text -AsHashtable
+}
+function BoundedJsonBytes([string]$Path, [int]$MaximumBytes) {
+  $info = Get-Item -LiteralPath $Path
+  if ($info.PSIsContainer -or $info.Length -lt 1 -or $info.Length -gt $MaximumBytes) { throw 'JSON input size/type is invalid.' }
+  $stream = [IO.File]::Open($Path,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read)
+  try {
+    if ($stream.Length -lt 1 -or $stream.Length -gt $MaximumBytes) { throw 'JSON input size/type is invalid.' }
+    $bytes = [byte[]]::new([int]$stream.Length);$stream.ReadExactly($bytes)
+    return ,$bytes
+  } finally { $stream.Dispose() }
+}
+function Json([string]$Path, [int]$MaximumBytes) { JsonBytes (BoundedJsonBytes $Path $MaximumBytes) }
+function AssertInventoryUnchanged {
+  $null = LocalPath $PayloadInventoryPath
+  if ((Get-Item -LiteralPath $PayloadInventoryPath).Length -ne $manifestBytes.Length -or (Hash $PayloadInventoryPath) -cne $manifestHash) { throw 'Payload inventory changed after verified snapshot.' }
 }
 function NsisLiteral([string]$Value) { $Value.Replace('$','$$').Replace('"','$\"') }
 function ApplicationMetadata([string]$AssemblyPath) {
@@ -116,7 +129,9 @@ if (-not [IO.Directory]::Exists($PayloadDirectory) -or -not [IO.Directory]::Exis
 $OutputDirectory = LocalPath $OutputDirectory $true
 if (Test-Path -LiteralPath $OutputDirectory) { throw 'Output directory must not exist.' }
 if ($OutputDirectory.StartsWith($PayloadDirectory+'\',[StringComparison]::OrdinalIgnoreCase)) { throw 'Output cannot be inside payload.' }
-$inventory = @(Json $PayloadInventoryPath 8388608)
+$manifestBytes = BoundedJsonBytes $PayloadInventoryPath 8388608
+$manifestHash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($manifestBytes)).ToLowerInvariant()
+$inventory = @(JsonBytes $manifestBytes)
 $build = Json $BuildReceiptPath 4194304
 foreach ($key in @('status','sourceCommit','rid','selfContained','buildMode','compiledReleaseChannels','channel','applicationSha256','helperSha256','payloadFiles','payloadBytes','cloudflaredIncluded','signed','installerMaintenanceProtocol','sourceArchiveSha256')) {
   if (-not $build.ContainsKey($key)) { throw 'Build receipt lacks required construction evidence.' }
@@ -182,8 +197,17 @@ $commitType = & git -C $SourceRepository cat-file -t $ReviewedCommit
 if ($LASTEXITCODE -ne 0 -or $commitType -cne 'commit') { throw 'Reviewed commit is unavailable.' }
 $templateBlob = & git -C $SourceRepository rev-parse "${ReviewedCommit}:apps/windows-download/Packaging/UnsignedInstaller.nsi"
 if ($LASTEXITCODE -ne 0 -or $templateBlob -cnotmatch '\A[0-9a-f]{40}\z') { throw 'Installer template must exist in the exact reviewed commit.' }
+# Validate the actual executing guard against the same immutable source commit.
+$guardStart = [Diagnostics.ProcessStartInfo]::new('git');$guardStart.UseShellExecute=$false;$guardStart.CreateNoWindow=$true;$guardStart.RedirectStandardOutput=$true;$guardStart.RedirectStandardError=$true
+foreach ($arg in @('-C',$SourceRepository,'show',"${ReviewedCommit}:scripts/windows-unsigned-installer.ps1")) { $guardStart.ArgumentList.Add($arg) }
+$guardProcess=[Diagnostics.Process]::Start($guardStart);$guardMemory=[IO.MemoryStream]::new()
+try {
+  $guardError=$guardProcess.StandardError.ReadToEndAsync();$guardProcess.StandardOutput.BaseStream.CopyTo($guardMemory);$guardProcess.WaitForExit();$null=$guardError.GetAwaiter().GetResult()
+  if ($guardProcess.ExitCode -ne 0 -or [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($guardMemory.ToArray())).ToLowerInvariant() -cne (Hash $PSCommandPath)) { throw 'Builder must match the exact reviewed commit.' }
+} finally { $guardMemory.Dispose();$guardProcess.Dispose() }
+AssertInventoryUnchanged
 if ($ValidateOnly) {
-  [ordered]@{status='unsigned_installer_inputs_validated';sourceCommit=$ReviewedCommit;templateBlob=$templateBlob;payloadFiles=$observed;payloadBytes=$total;compilerInvoked=$false;installed=$false;signed=$false} | ConvertTo-Json
+  [ordered]@{status='unsigned_installer_inputs_validated';sourceCommit=$ReviewedCommit;templateBlob=$templateBlob;payloadFiles=$observed;payloadBytes=$total;installedInventoryLeaf=$inventoryLeaf;installedInventorySha256=$manifestHash;installerOwnedSidecarFiles=1;compilerInvoked=$false;installed=$false;signed=$false} | ConvertTo-Json
   return
 }
 $CompilerRoot = LocalPath $CompilerRoot
@@ -226,7 +250,10 @@ try {
   $process.WaitForExit(); $null = $errorTask.GetAwaiter().GetResult()
   if ($process.ExitCode -ne 0) { throw 'Exact-commit template extraction failed.' }
 } finally { $process.Dispose() }
-$manifestHash = Hash $PayloadInventoryPath
+AssertInventoryUnchanged
+$sidecarPath=Join-Path $OutputDirectory $inventoryLeaf
+$sidecarStream=[IO.File]::Open($sidecarPath,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)
+try { $sidecarStream.Write($manifestBytes);$sidecarStream.Flush($true) } finally { $sidecarStream.Dispose() }
 $includePath = Join-Path $OutputDirectory 'Payload.nsh'
 $lines = [Collections.Generic.List[string]]::new(); $lines.Add('; Generated only from the verified exact inventory. No runtime wildcard paths.')
 $lines.Add('!macro InstallPayload')
@@ -236,8 +263,11 @@ foreach ($item in ($inventory | Sort-Object path)) {
   $lines.Add('  SetOutPath "'+$destination+'"')
   $lines.Add('  File "/oname='+(NsisLiteral $leaf)+'" "'+(NsisLiteral (Join-Path $PayloadDirectory $relative))+'"')
 }
+$lines.Add('  SetOutPath "$INSTDIR"')
+$lines.Add('  File "/oname='+$inventoryLeaf+'" "'+(NsisLiteral $sidecarPath)+'"')
 $lines.Add('!macroend'); $lines.Add('!macro DeletePayload')
 foreach ($item in ($inventory | Sort-Object path)) { $lines.Add('  Delete "$INSTDIR\'+(NsisLiteral $item.path.Replace('/','\'))+'"') }
+$lines.Add('  Delete "$INSTDIR\'+$inventoryLeaf+'"')
 $lines.Add('!macroend'); $lines.Add('!macro RemovePayloadDirectories')
 foreach ($directory in ($directories | Sort-Object @{Expression={($_ -split '/').Count};Descending=$true},@{Expression={$_};Descending=$true})) { $lines.Add('  RMDir "$INSTDIR\'+(NsisLiteral $directory.Replace('/','\'))+'"') }
 $lines.Add('!macroend'); $lines.Add('!macro ValidatePayloadPaths')
@@ -246,22 +276,28 @@ foreach ($directory in ($directories | Sort-Object)) {
   $lines.Add('  Push "$INSTDIR\'+(NsisLiteral $directory.Replace('/','\'))+'"')
   $lines.Add('  Call un.CheckPayloadPath')
 }
+$lines.Add('  Call un.CheckInventorySidecarPath')
 $lines.Add('!macroend'); [IO.File]::WriteAllLines($includePath,$lines,[Text.UTF8Encoding]::new($true))
 Copy-Item -LiteralPath $copying -Destination (Join-Path $OutputDirectory 'COPYING.NSIS.txt')
 $installer = Join-Path $OutputDirectory "LedgeTop-Files-Pilot-$AppVersion-unsigned-setup.exe"
 $oldNsis = $env:NSISDIR; $oldConf = $env:NSISCONFDIR
 try {
   $env:NSISDIR=$CompilerRoot; $env:NSISCONFDIR=$CompilerRoot
-  & $compiler /NOCONFIG /WX /V3 "/DAPP_VERSION=$AppVersion" "/DOUTPUT_FILE=$installer" "/DPAYLOAD_MANIFEST_SHA256=$manifestHash" "/DPAYLOAD_INCLUDE=$includePath" $templatePath *> (Join-Path $OutputDirectory 'compile.log')
+  & $compiler /NOCONFIG /WX /V3 "/DAPP_VERSION=$AppVersion" "/DOUTPUT_FILE=$installer" "/DSOURCE_COMMIT=$ReviewedCommit" "/DPAYLOAD_MANIFEST_SHA256=$manifestHash" "/DPAYLOAD_INCLUDE=$includePath" $templatePath *> (Join-Path $OutputDirectory 'compile.log')
   if ($LASTEXITCODE -ne 0 -or -not [IO.File]::Exists($installer)) { throw 'Unsigned installer compilation failed; inspect retained compile.log.' }
 } finally { $env:NSISDIR=$oldNsis; $env:NSISCONFDIR=$oldConf }
 # Refuse a concurrent payload change; leave the unexecuted result as held evidence on any failure.
 foreach ($item in $inventory) { $path=LocalPath (Join-Path $PayloadDirectory $item.path); if ((Hash $path) -cne $item.sha256) { throw 'Payload changed during compilation; output is not qualified.' } }
+AssertInventoryUnchanged
+if ((Hash $sidecarPath) -cne $manifestHash -or (Get-Item $sidecarPath).Length -ne $manifestBytes.Length) { throw 'Installer inventory snapshot changed during compilation.' }
+$anchor="LedgeTop.Files.Payload/1:${manifestHash}:$ReviewedCommit"
+if ([Diagnostics.FileVersionInfo]::GetVersionInfo($installer).Comments -cne $anchor) { throw 'Compiled installer inventory/source anchor differs.' }
 $receipt = [ordered]@{
   schemaVersion=1;status='unsigned_manual_pilot_installer_constructed';sourceCommit=$ReviewedCommit;sourceArchiveSha256=$build.sourceArchiveSha256
   appVersion=$AppVersion;channel='pilot';buildMode='packaged';installerMaintenanceProtocol=1;templateBlob=$templateBlob;templateSha256=(Hash $templatePath)
   builderSha256=(Hash $PSCommandPath);payloadInventorySha256=$manifestHash;buildReceiptSha256=(Hash $BuildReceiptPath);payloadIncludeSha256=(Hash $includePath)
   payloadFiles=$observed;payloadBytes=$total;applicationSha256=$build.applicationSha256;helperSha256=$helperSha
+  installedInventoryLeaf=$inventoryLeaf;installedInventorySha256=$manifestHash;installedInventoryBytes=$manifestBytes.Length;installerOwnedSidecarFiles=1;installedPayloadFiles=($observed+1);installerPeComments=$anchor
   compilerVersion='3.13';compilerSha256=$compilerSha;compilerArchiveSha256=$archiveSha;nsisCopyingSha256=$copyingSha
   installerPath=$installer;installerBytes=(Get-Item -LiteralPath $installer).Length;installerSha256=(Hash $installer)
   signed=$false;installed=$false;uninstalled=$false;published=$false;autoUpdateEnabled=$false;forceShutdown=$false;executedApplication=$false
