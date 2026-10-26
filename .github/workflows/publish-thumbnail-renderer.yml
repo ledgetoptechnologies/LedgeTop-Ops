@@ -109,7 +109,14 @@ jobs:
           TAG: ${{ steps.names.outputs.tag }}
           EXPECTED_DIGEST: ${{ steps.build.outputs.digest }}
         run: |
-          resolved_digest="$(docker buildx imagetools inspect "${TAG}" | awk '$1 == "Digest:" { print $2; exit }')"
+          for attempt in 1 2 3; do
+            if docker buildx imagetools inspect "${TAG}" --format '{{json .Manifest}}' > commit-manifest.json; then
+              break
+            fi
+            if [[ "$attempt" == 3 ]]; then exit 1; fi
+            sleep 2
+          done
+          resolved_digest="$(node -p 'JSON.parse(require("node:fs").readFileSync("commit-manifest.json", "utf8")).digest')"
           if [[ -z "${EXPECTED_DIGEST}" || -z "${resolved_digest}" || "${resolved_digest}" != "${EXPECTED_DIGEST}" ]]; then
             echo "Published immutable tag did not resolve to the build output digest." >&2
             exit 1

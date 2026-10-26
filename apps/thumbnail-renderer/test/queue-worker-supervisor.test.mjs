@@ -86,6 +86,9 @@ test("publish is blocked on source checks and proves the exact published all-med
   assert.match(publishWorkflow, /docker buildx imagetools create --tag "\$\{IMAGE\}:stable"/);
   assert.match(publishWorkflow, /stable digest does not match canary-tested image/);
   assert.match(publishWorkflow, /docker buildx imagetools inspect "\$\{TAG\}"/);
+  assert.match(publishWorkflow, /inspect "\$\{TAG\}" --format '\{\{json \.Manifest\}\}' > commit-manifest\.json/);
+  assert.match(publishWorkflow, /readFileSync\("commit-manifest\.json", "utf8"\)/);
+  assert.doesNotMatch(publishWorkflow, /\| awk[^\n]+exit/);
   assert.match(publishWorkflow, /"\$\{resolved_digest\}" != "\$\{EXPECTED_DIGEST\}"/);
   assert.match(publishWorkflow, /LTDSTHUMB_SMOKE_IMAGE: \$\{\{ steps\.names\.outputs\.image \}\}@\$\{\{ steps\.build\.outputs\.digest \}\}/);
   assert.match(publishWorkflow, /imagetools create --prefer-index=false --tag "\$\{IMAGE\}:latest" "\$\{IMAGE\}@\$\{EXPECTED_DIGEST\}"/);
