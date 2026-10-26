@@ -432,6 +432,30 @@ describe("direct client delivery service boundary",()=>{
   const result=await client.clientDeliveryCatalog({projectId,taskId,limit:1});
   expect(result.tasks).toHaveLength(1);expect(JSON.stringify(result)).not.toContain("private");
  });
+ it("signs and bounds project-search queries and removes unrelated upstream fields",async()=>{
+  const fetcher=vi.fn(async(input:RequestInfo|URL,init?:RequestInit)=>{
+   const url=new URL(String(input));expect(url.pathname).toBe("/api/v1/client-delivery-projects");
+   expect(url.searchParams.get("q")).toBe("North site");expect(url.searchParams.get("limit")).toBe("7");
+   const body=String(init?.body??"");const headers=init?.headers as Record<string,string>;
+   const expected=await signViewerServiceRequest({secret,keyId:"ops-v1",method:"GET",pathWithQuery:url.pathname+url.search,body,
+    timestamp:Number(headers["X-LTDS-Timestamp"]),nonce:headers["X-LTDS-Nonce"]});
+   expect(headers["X-LTDS-Signature"]).toBe(expected["X-LTDS-Signature"]);
+   return Response.json({schemaVersion:1,projects:[{id:projectId,displayName:"North site",privatePath:"/private",storageUrl:"https://bucket.test/x"}],nextCursor:null});
+  });
+  const client=new ViewerServiceClient({baseUrl:"https://viewer.example.test",keyId:"ops-v1",secret},fetcher as typeof fetch);
+  const result=await client.clientDeliveryProjects({q:"North site",limit:7});
+  expect(result).toEqual({schemaVersion:1,projects:[{id:projectId,displayName:"North site"}],nextCursor:null});
+  expect(JSON.stringify(result)).not.toMatch(/private|storageUrl|bucket\.test/);
+ });
+ it("rejects invalid project queries and malformed upstream project pages",async()=>{
+  const fetcher=vi.fn(async()=>Response.json({schemaVersion:1,projects:[{id:"../escape",displayName:"Bad"}],nextCursor:null}));
+  const client=new ViewerServiceClient({baseUrl:"https://viewer.example.test",keyId:"ops-v1",secret},fetcher as typeof fetch);
+  await expect(client.clientDeliveryProjects({q:"x".repeat(121)})).rejects.toMatchObject({code:"invalid_configuration"});
+  expect(fetcher).not.toHaveBeenCalled();
+  await expect(client.clientDeliveryProjects()).rejects.toMatchObject({code:"invalid_response"});
+  fetcher.mockImplementation(async()=>Response.json({schemaVersion:1,projects:[{id:projectId,displayName:"Project"},{id:projectId,displayName:"Duplicate"}],nextCursor:null}));
+  await expect(client.clientDeliveryProjects()).rejects.toMatchObject({code:"invalid_response"});
+ });
  it("rejects a sibling task or mismatched parent from the upstream",async()=>{
   const bad=catalog();bad.tasks[0]!.id="another-task";
   const client=new ViewerServiceClient({baseUrl:"https://viewer.example.test",keyId:"ops-v1",secret},async()=>Response.json(bad));

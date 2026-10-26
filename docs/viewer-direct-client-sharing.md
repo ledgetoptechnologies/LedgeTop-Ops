@@ -34,6 +34,21 @@ association-based Viewer delivery and public links retain their contracts.
 
 ## Interfaces
 
+The staff quick-share picker uses `GET /api/viewer/direct-share-catalog?q=&cursor=&limit=`
+to search active Viewer projects that have at least one currently published task.
+The endpoint returns only `{ viewerProjectId, name }` choices and an opaque
+`nextCursor`. After a project is selected, `GET /api/viewer/direct-share-catalog/:viewerProjectId/tasks?cursor=&limit=` returns
+that project's currently published task choices (`taskId`, `title`,
+`publishedAt`, `modelId`) and the project name. Both Operations endpoints require
+global `viewer.view` and `viewer.manage`, the Viewer integration, and the direct
+session issuer gate. Operations calls the Viewer project catalog through the
+existing HMAC-authenticated service client; Viewer calls apply the existing
+`requireService` verifier and do not expose storage paths or grant data.
+
+Project browsing is discovery only. The selected task or project is revalidated
+against current publication state when the share is created. A project grant's
+future-published-task behavior remains an explicit separate confirmation.
+
 Ops staff use `/api/viewer/direct-client-grants`; the Viewer admin shell uses
 `/api/v1/workspace/direct-client-grants`, bridged by signed requests through the
 existing Ops machine endpoint with `connection: "direct"`.

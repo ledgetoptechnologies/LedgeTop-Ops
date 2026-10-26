@@ -123,6 +123,47 @@ test('signed client catalog has bounded pagination, exact-task isolation and fre
   assert.equal((await signed(url)).status, 404);
 });
 
+test('signed published-project picker filters before cursor pagination and returns no storage metadata', async t => {
+  const state = fixture(t), { database, processing } = state;
+  const first = processing.createProject({ displayName: 'Delivery North' });
+  const second = processing.createProject({ displayName: 'Delivery South' });
+  const unpublished = processing.createProject({ displayName: 'Delivery Draft' });
+  const archived = processing.createProject({ displayName: 'Delivery Archived' });
+  const purged = processing.createProject({ displayName: 'Delivery Purged' });
+  publish(state, first, 'North task'); publish(state, second, 'South task');
+  const archivedTask = publish(state, archived, 'Archived task');
+  const purgedTask = publish(state, purged, 'Purged task');
+  publish(state, unpublished, 'Unpublished task');
+  database.prepare("UPDATE processing_tasks SET status='archived' WHERE id=?").run(archivedTask.task.id);
+  database.prepare('UPDATE processing_tasks SET purged_at=? WHERE id=?').run(new Date().toISOString(), purgedTask.task.id);
+  database.prepare('UPDATE projects SET purged_at=? WHERE id=?').run(new Date().toISOString(), purged.id);
+  database.prepare("UPDATE model_outputs SET status='ready' WHERE project_id=?").run(unpublished.id);
+  const app = express(); app.use(createClientDeliveryCatalog(state.repository));
+  const { base, signed } = await listener(t, app), path = '/api/v1/client-delivery-projects?q=Delivery&limit=1';
+  assert.equal((await fetch(base + path)).status, 401, 'missing service signature is rejected');
+  const headers = signServiceRequest({ secret: process.env.SERVICE_AUTH_SECRET, keyId: process.env.SERVICE_AUTH_KEY_ID,
+    method: 'GET', path });
+  assert.equal((await fetch(base + path, { headers: { ...headers, 'X-LTDS-Signature': 'invalid' } })).status, 401,
+    'invalid service signature is rejected');
+  const replay = await fetch(base + path, { headers });
+  assert.equal(replay.status, 200);
+  assert.equal((await fetch(base + path, { headers })).status, 401, 'signed nonce replay is rejected');
+  const pageOneResponse = await signed(path), pageOne = await pageOneResponse.json();
+  assert.equal(pageOneResponse.headers.get('cache-control'), 'no-store');
+  assert.equal(pageOne.schemaVersion, 1); assert.equal(pageOne.projects.length, 1); assert.ok(pageOne.nextCursor);
+  const pageTwo = await (await signed(`/api/v1/client-delivery-projects?q=Delivery&limit=1&cursor=${pageOne.nextCursor}`)).json();
+  assert.equal(pageTwo.projects.length, 1); assert.equal(pageTwo.nextCursor, null);
+  assert.deepEqual(new Set([pageOne.projects[0].id, pageTwo.projects[0].id]), new Set([first.id, second.id]));
+  assert.equal(JSON.stringify(pageOne).includes('storage'), false);
+  const escaped = await (await signed('/api/v1/client-delivery-projects?q=Delivery%20N_rth')).json();
+  assert.deepEqual(escaped.projects, [], 'LIKE metacharacters are treated literally');
+  for (const tail of ['?limit=51', '?limit=0', '?cursor=invalid_cursor', '?unknown=x', '?q=' + 'x'.repeat(121), '?q=a&q=b'])
+    assert.equal((await signed(`/api/v1/client-delivery-projects${tail}`)).status, 400, tail);
+  assert.equal((await signed(`/api/v1/client-delivery-projects?projectId=${first.id}`)).status, 400);
+  database.prepare("UPDATE projects SET status='archived' WHERE id=?").run(first.id);
+  assert.deepEqual((await (await signed('/api/v1/client-delivery-projects?q=Delivery')).json()).projects.map(project => project.id), [second.id]);
+});
+
 test('migration40 rejects unexpected inbound references atomically and retains the old authority constraint', t => {
   const { database } = fixture(t, 39);
   database.exec('CREATE TABLE unexpected_extension(id TEXT PRIMARY KEY,grant_id TEXT REFERENCES session_grants(id))');
