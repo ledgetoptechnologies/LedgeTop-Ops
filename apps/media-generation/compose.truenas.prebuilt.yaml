@@ -17,7 +17,8 @@ x-prebuilt-service: &prebuilt-service
 services:
   decoder:
     <<: *prebuilt-service
-    image: ${LTDSTHUMB_DECODER_IMAGE:?Set the pinned decoder image in the TrueNAS UI}
+    image: ghcr.io/ledgetoptechnologies/ltds-thumbnail-decoder:latest
+    pull_policy: always
     network_mode: none
     cpus: "${LTDSTHUMB_DECODER_CPU_LIMIT:-2.0}"
     mem_limit: ${LTDSTHUMB_DECODER_MEMORY_LIMIT:-2g}
@@ -71,7 +72,8 @@ services:
 
   broker:
     <<: *prebuilt-service
-    image: ${LTDSTHUMB_BROKER_IMAGE:?Set the pinned broker image in the TrueNAS UI}
+    image: ghcr.io/ledgetoptechnologies/ltds-thumbnail-broker:latest
+    pull_policy: always
     cpus: "${LTDSTHUMB_BROKER_CPU_LIMIT:-0.5}"
     mem_limit: ${LTDSTHUMB_BROKER_MEMORY_LIMIT:-256m}
     environment:

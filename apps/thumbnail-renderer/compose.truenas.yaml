@@ -12,7 +12,8 @@ x-hardened: &hardened
 services:
   decoder:
     <<: *hardened
-    image: ${LTDSTHUMB_DECODER_IMAGE:?Set the pinned decoder image in the TrueNAS UI}
+    image: ghcr.io/ledgetoptechnologies/ltds-thumbnail-decoder:latest
+    pull_policy: always
     container_name: ltds-thumbnail-decoder
     network_mode: none
     cpus: "${LTDSTHUMB_DECODER_CPU_LIMIT:-2.0}"
@@ -57,7 +58,8 @@ services:
 
   broker:
     <<: *hardened
-    image: ${LTDSTHUMB_BROKER_IMAGE:?Set the pinned broker image in the TrueNAS UI}
+    image: ghcr.io/ledgetoptechnologies/ltds-thumbnail-broker:latest
+    pull_policy: always
     container_name: ltds-thumbnail-broker
     cpus: "${LTDSTHUMB_BROKER_CPU_LIMIT:-0.5}"
     mem_limit: ${LTDSTHUMB_BROKER_MEMORY_LIMIT:-256m}
@@ -86,7 +88,8 @@ services:
 
   queue-renderer:
     <<: *hardened
-    image: ${LTDSTHUMB_QUEUE_WORKER_IMAGE:?Set the pinned queue-worker image in the TrueNAS UI}
+    image: ghcr.io/ledgetoptechnologies/ltds-thumbnail-queue-worker:latest
+    pull_policy: always
     container_name: ltds-thumbnail-queue-renderer
     cpus: "${LTDSTHUMB_QUEUE_WORKER_CPU_LIMIT:-4.0}"
     mem_limit: ${LTDSTHUMB_QUEUE_WORKER_MEMORY_LIMIT:-5g}

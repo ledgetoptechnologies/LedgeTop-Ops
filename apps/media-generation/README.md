@@ -27,10 +27,13 @@ Custom App > Install via YAML** in the TrueNAS UI. Labels vary by SCALE version.
 This repository change prepares deployment files; it does not install an app,
 alter the Jobs dataset, or stop any existing app.
 
-1. Obtain the digest-qualified proxy image from the **Verify and publish Resolve
-   proxy generator** workflow receipt and the queue-worker image from **Publish TrueNAS
-   thumbnail renderer images**. Use `image@sha256:...` references, not `latest`.
-   Configure a private registry credential in the Apps UI if required.
+1. The supplied YAML uses each package's `:latest` tag with `pull_policy:
+   always`. Each tag advances only after that package's verified `main`
+   release passes its publication checks. Updating/redeploying the app pulls
+   the newest verified image; a plain container restart does not pull an image,
+   and this stack is not a live automatic updater. Configure a private registry
+   credential in the Apps UI if required. Commit tags and digest receipts remain
+   available for traceability; deployment requires no image substitutions.
 2. Create a private persistent proxy-state dataset and give the selected
    non-root user/group ownership. The default IDs are `568:568`. Keep that
    state when upgrading or rolling back: it contains instance locking,
@@ -94,7 +97,8 @@ on a folder-wide completion marker.
 The default proxy pool is six jobs, with two FFmpeg encoder threads per job;
 the thumbnail pool is four. They share server CPU, memory and storage, even
 though they do not depend on each other. Defaults cap the proxy container at
-12 CPUs/12 GiB and the queue at 4 CPUs/5 GiB. The queue's 4 GiB scratch tmpfs
+12 CPUs/12 GiB and the queue at 8 CPUs/10 GiB. The queue preserves the supplied
+`ltds-thumbnail-gen` name, 256 PID limit and three rotated logs. Its 4 GiB scratch tmpfs
 counts toward its memory use. Adjust pool sizes and limits together in the
 UI after checking headroom; adding local pre-generation adds more load.
 
@@ -125,7 +129,7 @@ two default services or add startup dependencies.
 For a TrueNAS editor accepting one document, use
 [compose.truenas.all.yaml](compose.truenas.all.yaml) directly. It runs all four
 services as `568:568`, including the queue scratch/cache ownership. Enter its
-required image references, host paths, token and broker credentials through
+required host paths, token and broker credentials through
 the UI. Confirm all selected datasets already exist with that user's access.
 The decoder/broker credentials and rclone proof prerequisites still apply;
 starting all four does not bypass them.
@@ -145,7 +149,7 @@ file. If inspecting an interpolated configuration locally, its output contains
 secrets: never paste it into chat, logs, or the repository. Do not run `up` or
 other deployment commands on the workstation as part of this rendering step.
 
-The overlay needs the four private thumbnail datasets, two extra pinned images,
+The overlay needs the four private thumbnail datasets, two extra `:latest` images,
 broker-only bucket-scoped Object Read credentials, the exact ingest endpoint,
 and a Cloudflare Access service-token pair. Broker Access settings use separate
 `LTDSTHUMB_BROKER_ACCESS_*` substitutions so enabling the broker does not add
