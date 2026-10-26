@@ -349,10 +349,10 @@ function RenewableViewerShellRoute<T extends ViewerShellSessionGrant>({
  * Opens the full Viewer as a separate, script-owned tab and keeps only a
  * narrow postMessage renewal channel to it. The opener relationship is
  * intentional: removing it with `noopener` would also remove silent renewal.
- * Both applications validate the exact peer Window, exact Viewer origin,
- * protocol version, and model id before accepting a message. If a browser
+ * Messages require the exact peer Window, allowed origin and protocol version;
+ * Viewer redeems renewals against the original model and identity. If a browser
  * blocks the synchronous tab, the same one-time grant opens in the current
- * tab so the model remains usable.
+ * tab so the model remains usable, without automatic session renewal.
  */
 export function openViewerWindow<T extends ViewerSessionGrant>({
   modelId,
@@ -393,7 +393,7 @@ export function openViewerWindow<T extends ViewerSessionGrant>({
     }
 
     if (!viewerWindow) {
-      onStatus?.("opening", "The new tab was blocked; opening the Viewer in this tab instead.");
+      onStatus?.("opening", "The new tab was blocked; opening the Viewer in this tab without automatic renewal. Reopen the model when this session expires.");
       window.location.assign(initialUrl.href);
       return { initialSession, openedIn: "same-tab", close: () => undefined, isClosed: () => false };
     }

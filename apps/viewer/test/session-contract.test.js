@@ -15,7 +15,9 @@ test('new-tab session contract is versioned, removes grants, and isolates its ex
   assert.match(source, /type: 'ltds-viewer:ready'/);
   assert.match(source, /new BroadcastChannel\(`ltds-viewer-review:\$\{REVIEW_CONTROLLER_ID\}`\)/);
   assert.match(source, /function sessionControllerOrigins\(\)/);
-  assert.doesNotMatch(source, /window\.opener/);
+  // Popup routing is behaviorally covered by popup-session-controller.test.js;
+  // an opener never replaces the isolated administrative channel.
+  assert.match(source, /reviewControllerCandidate !== null/);
   assert.match(source, /event\.source !== controller \|\| !sessionControllerOrigins\(\)\.includes\(event\.origin\)/);
   assert.match(source, /data\.version !== 1/);
   assert.match(source, /data\.requestId !== pendingReviewRenewalRequestId/);

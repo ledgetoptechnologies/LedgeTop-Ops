@@ -1373,7 +1373,15 @@ async function refreshLodAvailability() {
 
 function sessionControlWindow() {
   if (window.parent !== window) return window.parent;
-  return null;
+  // Older shared UI opens review sessions with an opener rather than the
+  // workspace's isolated channel. An opener is only a transport candidate:
+  // the redeemed session supplies the allowed origins, and incoming messages
+  // still require this exact Window plus an allowed origin. Never fall back
+  // from an isolated launch, even when its channel is unavailable.
+  if (VIEW_MODE !== 'session' || !activeViewerSession
+    || reviewControllerCandidate !== null || !sessionAllowedOrigins.length) return null;
+  try { return window.opener && !window.opener.closed ? window.opener : null; }
+  catch { return null; }
 }
 
 function sessionControllerOrigins() {
@@ -1445,7 +1453,8 @@ function sessionDiagnostics() {
     access: sessionAccessState,
     reason: sessionAccessReason,
     expiresInSeconds: activeViewerSession ? Math.round((Date.parse(activeViewerSession.expiresAt) - Date.now()) / 1000) : null,
-    controller: reviewSessionChannel ? 'isolated' : sessionControlWindow() ? 'embedded' : 'none',
+    controller: reviewSessionChannel ? 'isolated'
+      : sessionControlWindow() ? (window.parent !== window ? 'embedded' : 'popup') : 'none',
     renewalPending: sessionRenewalPending,
     renewalBlocked: sessionRenewalBlocked,
     tileRecoveryPending: lodTileRecoveryPending,
@@ -1564,6 +1573,8 @@ function applyViewerSession(session, { initialize = false } = {}) {
   if (session.accessToken && sessionStorageKey) sessionStorage.setItem(sessionStorageKey, session.accessToken);
   sessionAllowedOrigins = Array.isArray(session.allowedEmbedOrigins) ? session.allowedEmbedOrigins : [];
   SHARE_PERMISSIONS = session.permissions || { measure: true, cameras: true };
+  // Establish the redeemed session before init/ready can select its controller.
+  activeViewerSession = session;
   if (initialize) {
     sessionRenewalBackoffIndex = 0;
     sessionRenewalMinimumDelayMs = 1_000;

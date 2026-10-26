@@ -21,6 +21,7 @@ function fixture({ controller = true } = {}) {
     viewerSlice:{reset:()=>measurements.sliceResets++},
     window, VIEW_MODE: 'session', reviewSessionChannel: controller ? { postMessage: value => posts.push(value) } : null,
     REVIEW_CONTROLLER_ID: REQUEST,
+    reviewControllerCandidate: REQUEST,
     activeViewerSession: session, sessionAccessGeneration: 0, PROJECT: session.model, TILES_URL: '/stable/tileset.json', EPT_URL: '/stable/ept.json',
     sessionStorage: { setItem() {} }, SESSION_STORAGE_PREFIX: 'test:', sessionStorageKey: 'test:session-id',
     sessionAllowedOrigins: [], sessionAccessState: 'active', sessionAccessReason: null,
