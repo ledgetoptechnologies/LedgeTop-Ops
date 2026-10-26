@@ -244,3 +244,48 @@ test("Deliveries shows shared 3D work even when delivery folders are not in acce
   await expect(card(page)).toHaveCount(1);
   expect(calls.some(call => /\/(deliveries|folders)/.test(call.path))).toBe(false);
 });
+
+test("a Viewer that never reports ready stops waiting and retries with a freshly issued session", async ({page}) => {
+  await page.clock.install();
+  const loads: string[] = [];
+  await page.context().route(`${viewerOrigin}/**`, async route => {
+    const path = new URL(route.request().url()).pathname;
+    loads.push(path);
+    // The first session never reports ready; the retried one does.
+    const ready = path.endsWith("55555555-5555-4555-8555-555555555555");
+    await route.fulfill({contentType: "text/html", body: `<!doctype html><body><div id="loaded">${path}</div><script>
+      ${ready ? `parent.postMessage({version:1,type:"ltds-viewer:ready",modelId:"model-direct",expiresAt:new Date(Date.now()+600000).toISOString()}, "*");` : ""}
+    </script></body>`});
+  });
+  let sessions = 0;
+  const calls = await mock(page, [allWorkspaces[0]!], (route, call, id) => {
+    if (call.method === "GET" && call.path.endsWith("/viewer")) return route.fulfill({json: viewerPage(id, [])});
+    if (call.method !== "POST" || !call.path.endsWith("/session")) return undefined;
+    sessions += 1;
+    const grant = sessions === 1 ? "44444444-4444-4444-8444-444444444444" : "55555555-5555-4555-8555-555555555555";
+    return route.fulfill({status: 201, json: {modelId: "model-direct", grant, grantExpiresAt: new Date(Date.now() + 60_000).toISOString(), sessionTtlSeconds: 1800,
+      redeemUrl: `${viewerOrigin}/api/v1/sessions/redeem`, embedUrl: `${viewerOrigin}/session/${grant}`}});
+  });
+  await page.goto("/portal/viewer/grant-task/tasks/task-1?workspace=workspace-b");
+  await expect(page.getByRole("status").filter({hasText: "Opening 3D model"})).toBeVisible();
+  await page.clock.fastForward(30_000);
+  await expect(page.getByRole("alert").filter({hasText: "didn't open"})).toHaveCount(0);
+  await page.clock.fastForward(16_000);
+  const failure = page.getByRole("alert").filter({hasText: "The 3D model didn't open"});
+  await expect(failure).toBeVisible();
+  await expect(page.getByRole("status").filter({hasText: "Opening 3D model"})).toHaveCount(0);
+  await expect(failure.getByRole("button", {name: "Close viewer"})).toBeVisible();
+  // Nothing retries on its own, and no window is opened.
+  expect(calls.filter(call => call.method === "POST")).toHaveLength(1);
+  expect(page.context().pages()).toHaveLength(1);
+  await failure.getByRole("button", {name: "Try again"}).click();
+  await expect(page.locator("iframe")).toHaveAttribute("src", `${viewerOrigin}/session/55555555-5555-4555-8555-555555555555`);
+  await expect(page.getByRole("alert").filter({hasText: "didn't open"})).toHaveCount(0);
+  await expect(page.locator(".ltds-viewer-stage")).toHaveAttribute("aria-busy", "false");
+  const posts = calls.filter(call => call.method === "POST");
+  expect(posts).toHaveLength(2);
+  expect(posts[1]!.path).toBe(posts[0]!.path);
+  expect(posts[1]!.key).not.toBe(posts[0]!.key);
+  // The consumed grant is never loaded again.
+  expect(loads).toEqual(["/session/44444444-4444-4444-8444-444444444444", "/session/55555555-5555-4555-8555-555555555555"]);
+});
