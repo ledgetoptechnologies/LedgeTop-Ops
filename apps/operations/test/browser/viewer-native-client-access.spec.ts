@@ -1,6 +1,6 @@
 import {expect,test} from '@playwright/test';
 
-test('Models dashboard leaves client sharing inside the Viewer workspace',async({page})=>{
+test('Models dashboard shares through Quick share, never the legacy native client grants',async({page})=>{
   let nativeGrantRequests=0;
   await page.route('**/api/**',async route=>{const request=route.request(),path=new URL(request.url()).pathname;
     if(path==='/api/session')return route.fulfill({json:{user:{id:'staff-one',email:'admin@example.test',displayName:'Admin',status:'Active',
@@ -12,7 +12,8 @@ test('Models dashboard leaves client sharing inside the Viewer workspace',async(
     if(path.startsWith('/api/viewer/native-client-grants')){nativeGrantRequests+=1;return route.fulfill({status:500,json:{error:'This endpoint must not be called by the Models dashboard'}});}
     return route.fulfill({status:404,json:{error:'Not found'}});});
   await page.goto('/viewer');
-  await expect(page.getByRole('heading',{name:'3D models',exact:true})).toBeVisible();
+  await expect(page.getByRole('heading',{name:'Viewer workspace',exact:true})).toBeVisible();
+  await expect(page.getByRole('heading',{name:'Quick share',exact:true})).toBeVisible();
   await expect(page.getByRole('button',{name:'Open Viewer workspace'})).toBeVisible();
   await expect(page.getByRole('heading',{name:'Native client Viewer access'})).toHaveCount(0);
   await expect(page.getByRole('button',{name:'Grant portal access'})).toHaveCount(0);
