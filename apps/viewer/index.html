@@ -40,6 +40,12 @@
     #brand-info .company { font-weight: 700; font-size: 16px; color: #fff; letter-spacing: 0.3px; }
     #brand-info .project { font-weight: 400; font-size: 12px; color: var(--brand-orange); margin-top: 2px; }
 
+    #staff-navigation { display: flex; flex-shrink: 0; align-items: center; gap: 6px; }
+    #staff-navigation[hidden] { display: none; }
+    #staff-navigation a { color: #eee; font-size: 12px; font-weight: 600; text-decoration: none; padding: 7px 9px; border: 1px solid var(--panel-border); border-radius: 6px; }
+    #staff-navigation a:hover { color: var(--brand-orange); border-color: var(--brand-orange); }
+    #staff-navigation a:focus-visible { outline: 2px solid var(--brand-orange); outline-offset: 3px; }
+
     #project-switcher {
       margin-left: 6px; background: rgba(255,255,255,0.04); color: #eee;
       border: 1px solid rgba(255,255,255,0.12); border-radius: 8px;
@@ -382,6 +388,7 @@
       #topbar { display: grid; grid-template-columns: minmax(0, 1fr) auto; height: auto; padding: 8px 12px; gap: 8px 12px; }
       #brand { grid-column: 1; grid-row: 1; }
       #admin-controls { grid-column: 2; grid-row: 1; }
+      #staff-navigation { grid-column: 2; grid-row: 1; }
       #view-tabs { grid-column: 1 / -1; grid-row: 2; justify-self: center; }
       #sidebar { position: absolute; top: 0; left: 0; bottom: 0; height: 100%; width: var(--sidebar-width,300px); }
       #sidebar-toggle { display: flex; }
@@ -410,6 +417,10 @@
       </div>
       <select id="project-switcher" aria-label="Switch project"></select>
     </div>
+    <nav id="staff-navigation" aria-label="Operations navigation" hidden>
+      <a id="staff-dashboard">Dashboard</a>
+      <a id="staff-models">Models</a>
+    </nav>
     <nav id="view-tabs">
       <button class="tab-btn active" data-mode="model" id="tab-model" aria-label="3D Model">
         <svg viewBox="0 0 24 24"><path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/></svg>

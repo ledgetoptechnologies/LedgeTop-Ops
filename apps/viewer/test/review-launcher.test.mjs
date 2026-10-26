@@ -28,5 +28,9 @@ test('isolated launcher and Viewer communicate only through the random review Br
   assert.match(viewer, /new BroadcastChannel\(`ltds-viewer-review:\$\{REVIEW_CONTROLLER_ID\}`\)/);
   assert.match(viewer, /const requestId = reviewSessionChannel \? crypto\.randomUUID\(\) : null/);
   assert.match(viewer, /pendingReviewRenewalRequestId = requestId/);
-  assert.doesNotMatch(viewer, /window\.opener/);
+  // Legacy Ops popup renewal is separate from this isolated channel. A review
+  // marker must prevent opener fallback even when BroadcastChannel is missing.
+  assert.match(viewer, /reviewControllerCandidate !== null/);
+  const adminClient = viewer.slice(viewer.indexOf('const measurementAdminClient ='), viewer.indexOf('let pendingReviewRenewalRequestId'));
+  assert.doesNotMatch(adminClient, /window\.opener|window\.parent/);
 });

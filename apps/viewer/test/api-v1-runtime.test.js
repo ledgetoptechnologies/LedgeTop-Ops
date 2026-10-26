@@ -108,6 +108,7 @@ test('v1 service API redeems a stable cookie-independent scoped browser capabili
       SESSION_SECRET: 'api-v1-test-session-secret-that-is-at-least-32-characters',
       SERVICE_AUTH_KEY_ID: 'ops-v1',
       SERVICE_AUTH_SECRET: SERVICE_SECRET,
+      OPS_BASE_URL: 'https://ops.example.test',
       ALLOWED_EMBED_ORIGINS: 'https://ops.example.test,https://client.example.test',
     },
     stdio: 'ignore',
@@ -229,6 +230,7 @@ test('v1 service API redeems a stable cookie-independent scoped browser capabili
   const browserSession = await redemption.json();
   assert.equal(browserSession.model.id, model.id);
   assert.equal(browserSession.permissions.measure, false);
+  assert.equal(Object.hasOwn(browserSession, 'operationsOrigin'), false);
   assert.deepEqual(browserSession.allowedEmbedOrigins, ['https://ops.example.test', 'https://client.example.test']);
   assert.ok(!JSON.stringify(browserSession).includes(SERVICE_SECRET));
   assert.match(browserSession.accessToken, /^[A-Za-z0-9_-]{43}$/);
@@ -246,7 +248,35 @@ test('v1 service API redeems a stable cookie-independent scoped browser capabili
     headers: { Authorization: `Bearer ${browserSession.accessToken}` },
   });
   assert.equal(current.status, 200);
-  assert.equal((await current.json()).model.assets.tiles, null);
+  const currentClientSession = await current.json();
+  assert.equal(currentClientSession.model.assets.tiles, null);
+  assert.equal(Object.hasOwn(currentClientSession, 'operationsOrigin'), false);
+
+  await t.test('staff browser sessions expose only the configured Operations origin; client sessions omit it', async () => {
+    const response = await signedFetch(baseUrl, sessionPath, {
+      method: 'POST',
+      body: JSON.stringify({ ...JSON.parse(sessionRequest), subject: 'staff-navigation-user', audience: 'ops' }),
+      headers: { 'Idempotency-Key': 'staff-navigation-session-0001' },
+    });
+    assert.equal(response.status, 201);
+    const staffGrant = await response.json();
+    // Navigation metadata is returned only after authenticated redemption.
+    assert.equal(Object.hasOwn(staffGrant, 'operationsOrigin'), false);
+    const redeem = await fetch(`${baseUrl}/api/v1/sessions/redeem`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ grant: staffGrant.grant }),
+    });
+    assert.equal(redeem.status, 200);
+    const staffSession = await redeem.json();
+    assert.equal(staffSession.audience, 'ops');
+    assert.equal(staffSession.operationsOrigin, 'https://ops.example.test');
+    const refreshed = await fetch(`${baseUrl}/api/v1/sessions/current`, {
+      headers: { Authorization: `Bearer ${staffSession.accessToken}` },
+    });
+    assert.equal(refreshed.status, 200);
+    assert.equal((await refreshed.json()).operationsOrigin, 'https://ops.example.test');
+    assert.equal((await fetch(`${baseUrl}/api/v1/sessions/current`)).status, 401);
+  });
 
   await t.test('signed service issuance and redemption preserve individual measurement attestation across renewal', async () => {
     const subject = 'client:stable-portal-person-identity';

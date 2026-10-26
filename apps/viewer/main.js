@@ -8,6 +8,8 @@ import { createMeasurementWorkspace } from './measurement-workspace.mjs';
 import { createMeasurementDraftRecovery } from './measurement-draft-recovery.mjs';
 import { captureMeasurementReportOrtho } from './measurement-report-ortho.mjs';
 import { installSidebarResize } from './viewer-sidebar-resize.mjs';
+import { renderStaffNavigation } from './viewer-staff-navigation.mjs';
+import { createViewerSessionCapabilityStore, VIEWER_SESSION_STORAGE_PREFIX as SESSION_STORAGE_PREFIX } from './viewer-session-capability-store.mjs';
 import { projectMeasurementBoundary } from './measurement-projection.mjs';
 import { createMeasurementAdminClient } from './measurement-admin-client.mjs';
 import { createMeasurementSurfaceClient, measurementAssetBearer } from './measurement-surface-client.mjs';
@@ -147,6 +149,7 @@ const dom = {};
  'error-actions','error-retry','error-lod','loading-cancel',
  'dem-settings','dem-colormap','dem-shading','dem-min','dem-max','dem-min-label','dem-max-label','dem-legend-unit',
  'brand-project','project-switcher','admin-controls','btn-share','btn-logout','btn-measure-float','lod-memory-mode',
+ 'staff-navigation','staff-dashboard','staff-models',
  'share-password-overlay','share-password-input','share-password-error','share-password-submit',
  'share-modal','share-modal-close','share-new-password','share-new-expires',
  'share-new-perm-measure','share-new-perm-cameras','share-create-btn','share-create-result',
@@ -168,7 +171,7 @@ const ACTIVE_SESSION_ID = VIEW_MODE === 'session' && SESSION_PATH_PARTS[2] === '
   ? decodeURIComponent(SESSION_PATH_PARTS[3] || '') : null;
 const SESSION_GRANT = VIEW_MODE === 'session' && !ACTIVE_SESSION_ID
   ? decodeURIComponent(SESSION_PATH_PARTS[2] || '') : null;
-const SESSION_STORAGE_PREFIX = 'ltds-viewer-access-token:';
+const sessionCapabilities = createViewerSessionCapabilityStore();
 let sessionStorageKey = ACTIVE_SESSION_ID ? `${SESSION_STORAGE_PREFIX}${ACTIVE_SESSION_ID}` : null;
 let PROJECT_SHARE_CATALOG = null;
 // What the active share link allows; stays fully-open in admin mode.
@@ -1295,7 +1298,7 @@ const reviewSessionChannel = REVIEW_CONTROLLER_ID && typeof BroadcastChannel ===
   ? new BroadcastChannel(`ltds-viewer-review:${REVIEW_CONTROLLER_ID}`) : null;
 const measurementAdminClient = createMeasurementAdminClient({
   context: () => ({ modelId: PROJECT?.id, modelVersionId: PROJECT?.activeVersion?.id }),
-  token: () => VIEW_MODE === 'session' && sessionStorageKey ? sessionStorage.getItem(sessionStorageKey) : null,
+  token: () => VIEW_MODE === 'session' && sessionStorageKey ? sessionCapabilities.read(sessionStorageKey) : null,
   // Administrative requests use only the registered workspace channel, never
   // an arbitrary embedding parent. The privileged bearer stays in workspace.
   send: message => { if (!reviewSessionChannel) return false; reviewSessionChannel.postMessage(message); return true; },
@@ -1306,7 +1309,7 @@ let lodAvailabilityTimer = null;
 let lodAvailabilityRefreshInFlight = false;
 
 async function redeemViewerGrant(grant, { signal } = {}) {
-  const accessToken = sessionStorageKey ? sessionStorage.getItem(sessionStorageKey) : null;
+  const accessToken = sessionStorageKey ? sessionCapabilities.read(sessionStorageKey) : null;
   const res = await fetch('/api/v1/sessions/redeem', {
     method: 'POST',
     headers: {
@@ -1322,7 +1325,7 @@ async function redeemViewerGrant(grant, { signal } = {}) {
 }
 
 async function currentViewerSession() {
-  const accessToken = sessionStorageKey ? sessionStorage.getItem(sessionStorageKey) : null;
+  const accessToken = sessionStorageKey ? sessionCapabilities.read(sessionStorageKey) : null;
   const res = await fetch('/api/v1/sessions/current', {
     headers: accessToken ? { Authorization: `Bearer ${accessToken}` } : {},
   });
@@ -1373,7 +1376,15 @@ async function refreshLodAvailability() {
 
 function sessionControlWindow() {
   if (window.parent !== window) return window.parent;
-  return null;
+  // Older shared UI opens review sessions with an opener rather than the
+  // workspace's isolated channel. An opener is only a transport candidate:
+  // the redeemed session supplies the allowed origins, and incoming messages
+  // still require this exact Window plus an allowed origin. Never fall back
+  // from an isolated launch, even when its channel is unavailable.
+  if (VIEW_MODE !== 'session' || !activeViewerSession
+    || reviewControllerCandidate !== null || !sessionAllowedOrigins.length) return null;
+  try { return window.opener && !window.opener.closed ? window.opener : null; }
+  catch { return null; }
 }
 
 function sessionControllerOrigins() {
@@ -1445,7 +1456,8 @@ function sessionDiagnostics() {
     access: sessionAccessState,
     reason: sessionAccessReason,
     expiresInSeconds: activeViewerSession ? Math.round((Date.parse(activeViewerSession.expiresAt) - Date.now()) / 1000) : null,
-    controller: reviewSessionChannel ? 'isolated' : sessionControlWindow() ? 'embedded' : 'none',
+    controller: reviewSessionChannel ? 'isolated'
+      : sessionControlWindow() ? (window.parent !== window ? 'embedded' : 'popup') : 'none',
     renewalPending: sessionRenewalPending,
     renewalBlocked: sessionRenewalBlocked,
     tileRecoveryPending: lodTileRecoveryPending,
@@ -1502,7 +1514,10 @@ function retrySessionAccess(reason) {
 }
 
 function measurementAccessLost() {
-  if (VIEW_MODE === 'session' && !sessionRenewalBlocked) requestSessionRenewal('measurements');
+  // A disabled measurement feature may clear its private workspace without
+  // invalidating otherwise authorized model viewing. Real access loss while
+  // measurement is enabled still follows the existing authorization path.
+  if (VIEW_MODE === 'session' && SHARE_PERMISSIONS.measure !== false && !sessionRenewalBlocked) requestSessionRenewal('measurements');
 }
 
 function clearSessionRenewalPending(attempt = sessionRenewalAttempt) {
@@ -1561,9 +1576,13 @@ function applyViewerSession(session, { initialize = false } = {}) {
   const previousTilesUrl = TILES_URL;
   setDisplayUnits(session.displayUnits);
   if (session.sessionId) sessionStorageKey = `${SESSION_STORAGE_PREFIX}${session.sessionId}`;
-  if (session.accessToken && sessionStorageKey) sessionStorage.setItem(sessionStorageKey, session.accessToken);
+  if (session.accessToken && sessionStorageKey) sessionCapabilities.write(sessionStorageKey, session.accessToken);
   sessionAllowedOrigins = Array.isArray(session.allowedEmbedOrigins) ? session.allowedEmbedOrigins : [];
+  renderStaffNavigation({ container: dom.staffNavigation, dashboard: dom.staffDashboard, models: dom.staffModels },
+    session, { viewMode: VIEW_MODE, topLevel: window.parent === window });
   SHARE_PERMISSIONS = session.permissions || { measure: true, cameras: true };
+  // Establish the redeemed session before init/ready can select its controller.
+  activeViewerSession = session;
   if (initialize) {
     sessionRenewalBackoffIndex = 0;
     sessionRenewalMinimumDelayMs = 1_000;
@@ -1610,7 +1629,7 @@ async function bootstrapSession() {
     }
     applyViewerSession(session, { initialize: true });
   } catch (error) {
-    if (sessionStorageKey) sessionStorage.removeItem(sessionStorageKey);
+    if (sessionStorageKey) sessionCapabilities.clear(sessionStorageKey);
     updateLoading('Viewer session unavailable', String(error.message || error));
   }
 }
@@ -2438,7 +2457,7 @@ function installMeasurementWorkspace() {
     panel:document.getElementById('panel-measure'),context:measurementViewContext,
     reportMetadata:()=>({modelName:PROJECT?.title||PROJECT?.id||'Model'}),
     captureReportOrtho:async({records,signal})=>{if(!ORTHO_URL)return null;const dataset=await getDataset(ORTHO_URL,false,{signal});return captureMeasurementReportOrtho({dataset,records,signal,pool:geoPool,expectedCrs:measurementCoordinateReference().crs});},
-    token:()=>VIEW_MODE==='session'&&sessionStorageKey?sessionStorage.getItem(sessionStorageKey):null,
+    token:()=>VIEW_MODE==='session'&&sessionStorageKey?sessionCapabilities.read(sessionStorageKey):null,
     accessGeneration:()=>sessionAccessGeneration,
     onBeforeAccessLost:()=>{if(VIEW_MODE==='session'&&activeViewerSession&&Date.parse(activeViewerSession.expiresAt)<=Date.now())measurementDraftRecovery.capture('session-expired',activeViewerSession,measurementWorkspace);},
     permitted:()=>SHARE_PERMISSIONS.measure!==false&&sessionAccessState!=='unavailable'&&(VIEW_MODE!=='session'||!activeViewerSession||Date.parse(activeViewerSession.expiresAt)>Date.now()),coordinateReference:measurementCoordinateReference,
@@ -2448,7 +2467,7 @@ function installMeasurementWorkspace() {
     resolveDisplayVertices:resolveMeasurementDisplayVertices,
     adminRequest:reviewSessionChannel ? measurementAdminClient.request : undefined,
     surfaceRequest:createMeasurementSurfaceClient({
-      token:()=>VIEW_MODE==='session'&&sessionStorageKey?sessionStorage.getItem(sessionStorageKey):measurementAssetBearer(DSM_URL||DTM_URL||TILES_URL||EPT_URL||ORTHO_URL),
+      token:()=>VIEW_MODE==='session'&&sessionStorageKey?sessionCapabilities.read(sessionStorageKey):measurementAssetBearer(DSM_URL||DTM_URL||TILES_URL||EPT_URL||ORTHO_URL),
       context:()=>({modelId:PROJECT?.id,modelVersionId:PROJECT?.activeVersion?.id,audience:activeViewerSession?.audience,subject:activeViewerSession?.subject,temporary:VIEW_MODE!=='session'||(activeViewerSession?.audience!=='ops'&&activeViewerSession?.permissions?.personalMeasurements!==true)}),
     }),
     onAccessLost:measurementAccessLost,

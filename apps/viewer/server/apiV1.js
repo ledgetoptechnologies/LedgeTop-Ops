@@ -238,6 +238,8 @@ function createApiV1(repository) {
       displayUnits: session.displayUnits || config.defaultUnits,
       accessToken,
       allowedEmbedOrigins: config.allowedEmbedOrigins,
+      // Staff return navigation is configuration-owned, never request metadata.
+      ...(session.audience === 'ops' && config.opsBaseUrl ? { operationsOrigin: config.opsBaseUrl } : {}),
     });
   }
 

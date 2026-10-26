@@ -126,6 +126,8 @@ test('admin review sessions expose only an exact review-ready derived version an
   const redeemResponse = await fetch(`${base}/api/v1/sessions/redeem`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ grant: issued.grant }) });
   assert.equal(redeemResponse.status, 200);
   const session = await redeemResponse.json();
+  assert.equal(session.audience, 'ops');
+  assert.equal(session.operationsOrigin, config.opsBaseUrl);
   assert.equal(session.sessionMode, 'review');
   assert.equal(session.permissions.cameraPhotoDownload, true, 'staff review offers original-photo download');
   assert.equal(session.permissions.download, false, 'photo downloads do not enable general model downloads');
