@@ -46,6 +46,33 @@ function createClientDeliveryCatalog(repository) {
       return res.status(503).json({ error: 'Client delivery catalog unavailable', code: 'catalog_unavailable' });
     }
   });
+  router.get('/api/v1/client-delivery-projects', requireService(repository), (req, res) => {
+    res.set('Cache-Control', 'no-store');
+    const { q = '', cursor, limit = '50' } = req.query;
+    if (Object.keys(req.query).some(key => !['q', 'cursor', 'limit'].includes(key))
+      || typeof q !== 'string' || q.trim().length > 120 || /[\u0000-\u001f\u007f]/.test(q)
+      || typeof limit !== 'string' || !/^\d{1,2}$/.test(limit) || Number(limit) < 1 || Number(limit) > 50
+      || (cursor !== undefined && (typeof cursor !== 'string' || !/^[A-Za-z0-9_-]{8,2048}$/.test(cursor))))
+      return res.status(400).json({ error: 'Invalid client delivery project query', code: 'invalid_catalog_query' });
+    if (cursor !== undefined) {
+      let decoded;
+      try { decoded = JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8')); } catch { /* Invalid below. */ }
+      if (!decoded || Object.keys(decoded).sort().join(',') !== 'createdAt,id' || !UUID.test(decoded.id)
+        || typeof decoded.createdAt !== 'string' || decoded.createdAt.length > 40 || !Number.isFinite(Date.parse(decoded.createdAt)))
+        return res.status(400).json({ error: 'Invalid catalog cursor', code: 'invalid_catalog_query' });
+    }
+    try {
+      const result = processing.transaction(() => processing.listActivePublishedProjectsPage({
+        q: q.trim(), cursor: cursor || null, limit: Number(limit),
+      }));
+      return res.json({ schemaVersion: 1,
+        projects: result.items.map(project => ({ id: project.id, displayName: project.displayName })),
+        nextCursor: result.nextCursor });
+    } catch (error) {
+      if (error.code === 'invalid_cursor') return res.status(400).json({ error: 'Invalid catalog cursor', code: 'invalid_catalog_query' });
+      return res.status(503).json({ error: 'Client delivery catalog unavailable', code: 'catalog_unavailable' });
+    }
+  });
   return router;
 }
 

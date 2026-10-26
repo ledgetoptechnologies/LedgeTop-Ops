@@ -45,6 +45,13 @@ export interface ViewerClientDeliveryCatalog {
   nextCursor: string | null;
 }
 
+/** Minimal project choices with at least one currently published client task. */
+export interface ViewerClientDeliveryProjectCatalog {
+  schemaVersion: 1;
+  projects: Array<{ id: string; displayName: string }>;
+  nextCursor: string | null;
+}
+
 export interface ViewerPublishedSessionRevocation {
   sourceAuthorization: ViewerPublishedSessionSourceAuthorization;
   revokedGrants: number;
@@ -805,6 +812,35 @@ export class ViewerServiceClient {
     if (models.some(item => item === null))
       throw new ViewerServiceError("3D Viewer returned an invalid model catalog", "invalid_response");
     return models as ViewerModelSummary[];
+  }
+
+  async clientDeliveryProjects(input: { q?: string; cursor?: string; limit?: number } = {}): Promise<ViewerClientDeliveryProjectCatalog> {
+    const id = (value: unknown): value is string => typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(value);
+    const title = (value: unknown): value is string => typeof value === "string" && value.length > 0 && value.length <= 160 && !/[\u0000-\u001f\u007f]/.test(value);
+    const q = typeof input.q === "string" ? input.q.trim() : undefined;
+    if ((input.q !== undefined && (typeof input.q !== "string" || input.q.length > 120 || /[\u0000-\u001f\u007f]/.test(input.q))) ||
+      (input.cursor !== undefined && (input.cursor.length < 1 || input.cursor.length > 2048)) ||
+      (input.limit !== undefined && (!Number.isInteger(input.limit) || input.limit < 1 || input.limit > 50)))
+      throw new ViewerServiceError("Viewer delivery project request is invalid", "invalid_configuration");
+    const query = new URLSearchParams({ limit: String(input.limit ?? 25) });
+    if (q) query.set("q", q);
+    if (input.cursor) query.set("cursor", input.cursor);
+    const payload = record(await this.request(`/api/v1/client-delivery-projects?${query}`));
+    if (!payload || payload.schemaVersion !== 1 || !Array.isArray(payload.projects) ||
+      payload.projects.length > (input.limit ?? 25) ||
+      !(payload.nextCursor === null || (typeof payload.nextCursor === "string" && payload.nextCursor.length > 0 && payload.nextCursor.length <= 2048)))
+      throw new ViewerServiceError("Viewer returned an invalid delivery project catalog", "invalid_response");
+    const seen = new Set<string>();
+    for (const raw of payload.projects) {
+      const project = record(raw);
+      if (!project || !id(project.id) || seen.has(project.id) || !title(project.displayName))
+        throw new ViewerServiceError("Viewer returned an invalid delivery project", "invalid_response");
+      seen.add(project.id);
+    }
+    return { schemaVersion: 1, projects: payload.projects.map(raw => {
+      const project = record(raw)!;
+      return { id: project.id as string, displayName: project.displayName as string };
+    }), nextCursor: payload.nextCursor as string | null };
   }
 
   async clientDeliveryCatalog(input: {
