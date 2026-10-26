@@ -168,6 +168,7 @@ test('built Viewer shares directly to clients through the real Edge UI', { skip:
     const state = await fixture(child, { legacyUnavailable: true, deferLegacy });
     const { page, pageErrors } = await openWorkspace(child, browser, state), form = await openShare(page);
     const original = await form.elementHandle();
+    await form.locator(`[name="taskId"][value="${TASKS[0]}"]`).check();
     await form.locator('[name="confirmedScope"]').check();
     const legacy = page.locator('.share-legacy');
     assert.equal(await legacy.getAttribute('open'), null, 'Legacy details remain optional');
@@ -234,6 +235,11 @@ test('built Viewer shares directly to clients through the real Edge UI', { skip:
     const state = await fixture(child), { page, pageErrors } = await openWorkspace(child, browser, state), form = await openShare(page);
     const consent = form.locator('[name="confirmedScope"]'); assert.equal(await consent.isChecked(), false);
     assert.equal(await consent.getAttribute('required'), '');
+    assert.equal(await form.locator('[name="scope"][value="project"]').isChecked(), false);
+    assert.equal(await form.locator('[name="scope"][value="tasks"]').isChecked(), true);
+    await consent.check(); await form.getByRole('button', { name: 'Share with client', exact: true }).click();
+    assert.equal(state.requests.filter(req => req.method === 'POST').length, 0, 'General consent must not select whole-project access');
+    await consent.uncheck(); await form.locator('[name="scope"][value="project"]').check();
     assert.match(await form.locator('[data-direct-summary]').innerText(), /every published task.*including tasks published later/);
     await capture(page, 'viewer-direct-share-desktop.png');
     await form.getByRole('button', { name: 'Share with client', exact: true }).click();

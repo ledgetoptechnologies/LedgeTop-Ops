@@ -19,6 +19,18 @@ test('client grant proxy signs an exact POST envelope and never forwards browser
   const h=calls[0].init.headers,hash=crypto.createHash('sha256').update(body).digest('hex'),canonical=canonicalViewerEvent({method:'POST',path:REMOTE_PATH,timestamp:h['X-LTDS-Viewer-Timestamp'],nonce:h['X-LTDS-Viewer-Nonce'],bodySha256:hash}),expected=crypto.createHmac('sha256',secret).update(canonical).digest('base64url');assert.equal(h['X-LTDS-Viewer-Signature'],expected);
 });
 
+test('legacy client-grants create keeps its wrapped request contract',async t=>{
+  const calls=[],app=express();app.use(express.json());
+  const authorize=()=> (req,_res,next)=>{req.adminPrincipal={subject:'ops:staff-one'};next()};
+  createClientGrantProxy({config:{opsAutomationBaseUrl:'https://incoming.example.test',viewerEventSecret:'s'.repeat(32),viewerEventKeyId:'viewer-v1'},authorize,
+    diagnostic(){},fetchImpl:async(_url,init)=>{calls.push(init);return new Response(JSON.stringify({grants:[],projects:[],associations:[],replayed:false}),{status:201})}}).mount(app);
+  const server=await new Promise(resolve=>{const s=app.listen(0,'127.0.0.1',()=>resolve(s))});t.after(()=>new Promise(resolve=>server.close(resolve)));
+  const grant={accountId:'account-one',projectId:'project-one'},response=await fetch(`http://127.0.0.1:${server.address().port}${LOCAL_PATH}`,{
+    method:'POST',headers:{'Content-Type':'application/json','Idempotency-Key':'legacy-client-grant-key-0001'},body:JSON.stringify({grant})});
+  assert.equal(response.status,201);assert.equal(calls.length,1);
+  assert.deepEqual(JSON.parse(calls[0].body),{subject:'ops:staff-one',action:'create',idempotencyKey:'legacy-client-grant-key-0001',grant});
+});
+
 test('client grant proxy rejects absent permission before making an Ops request',async t=>{let called=false;const app=express();app.use(express.json());const authorize=()=> (_req,res)=>res.sendStatus(403);createClientGrantProxy({config:{},authorize,fetchImpl:async()=>{called=true}}).mount(app);const server=await new Promise(resolve=>{const s=app.listen(0,'127.0.0.1',()=>resolve(s))});t.after(()=>new Promise(resolve=>server.close(resolve)));const response=await fetch(`http://127.0.0.1:${server.address().port}${LOCAL_PATH}`);assert.equal(response.status,403);assert.equal(called,false)});
 
 for(const [name,response] of [['redirect',new Response('',{status:302,headers:{location:'https://evil.example'}})],['oversize',new Response('{}',{status:200,headers:{'content-length':String(1024*1024+1)}})],['malformed',new Response('{',{status:200})]])test(`client grant proxy fails closed on ${name} Ops responses`,async t=>{const app=express();const authorize=()=> (req,_res,next)=>{req.adminPrincipal={subject:'ops:staff-one'};next()};createClientGrantProxy({config:{opsAutomationBaseUrl:'https://incoming.ledgetopdroneservices.com',viewerEventSecret:'s'.repeat(32),viewerEventKeyId:'viewer-v1'},authorize,fetchImpl:async(_url,init)=>{if(name==='redirect'&&init.redirect==='error')throw new TypeError('redirect');return response.clone()}}).mount(app);const server=await new Promise(resolve=>{const s=app.listen(0,'127.0.0.1',()=>resolve(s))});t.after(()=>new Promise(resolve=>server.close(resolve)));const result=await fetch(`http://127.0.0.1:${server.address().port}${LOCAL_PATH}`);assert.equal(result.status,502);assert.equal((await result.json()).code,'operations_unavailable')});

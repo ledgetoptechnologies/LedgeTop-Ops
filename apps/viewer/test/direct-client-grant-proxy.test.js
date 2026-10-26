@@ -39,11 +39,13 @@ test('direct list signs bounded recipient query, preserves schema and permission
 
 test('direct create validates explicit future scope and typed fields before signing', async t => {
   const { request, envelopes } = await fixture(t, () => json({ grant, replayed: false }));
-  assert.equal((await request(PATH, { method: 'POST', body: { grant: input } })).status, 201);
+  // The actual Viewer workspace posts the grant fields directly. Only the
+  // legacy /client-grants endpoint uses a { grant } envelope.
+  assert.equal((await request(PATH, { method: 'POST', body: input })).status, 201);
   assert.deepEqual(envelopes[0].grant, input); assert.equal(envelopes[0].connection, 'direct');
   for (const invalid of [{ ...input, confirmedScope: false }, { ...input, includeFuturePublished: false }, { ...input, scopeType: 'task' },
-    { ...input, sourceId: 'other-tenant' }, { ...input, permissions: { ...input.permissions, view: true } }, { ...input, extra: true }])
-    assert.equal((await request(PATH, { method: 'POST', body: { grant: invalid } })).status, 400);
+    { ...input, sourceId: 'other-tenant' }, { ...input, permissions: { ...input.permissions, view: true } }, { ...input, extra: true }, { grant: input }])
+    assert.equal((await request(PATH, { method: 'POST', body: invalid })).status, 400);
   assert.equal(envelopes.length, 1);
 });
 

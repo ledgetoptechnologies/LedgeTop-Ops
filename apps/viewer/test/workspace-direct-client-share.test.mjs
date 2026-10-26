@@ -69,6 +69,25 @@ test('the form escapes names and preselects the task being shared',()=>{
   assert.match(html,/value="tasks" checked/);assert.match(html,/value="task-1" checked/);
 });
 
+test('project sharing defaults to selected tasks and requires an explicit choice for future publications',()=>{
+  const html=directShareForm({projectName:'Site',tasks,access:{clients,grants:[]}});
+  assert.match(html,/name="scope" value="project">/);
+  assert.match(html,/name="scope" value="tasks" checked/);
+  assert.doesNotMatch(html,/name="taskId"[^>]*(?:checked|disabled)/);
+  for(const scope of ['tasks','',undefined,'unknown']){
+    const selected=form({client:key,scope});
+    if(scope===undefined)selected.querySelector=()=>null;
+    assert.throws(()=>readDirectShareForm(selected,{projectId:'project',projectName:'Site',tasks,clients}).bodies(),/at least one task/);
+  }
+});
+
+test('a project with no published tasks does not silently select future publications',()=>{
+  const html=directShareForm({projectName:'Site',tasks:[],access:{clients,grants:[]}});
+  assert.match(html,/value="project">/);
+  assert.match(html,/value="tasks" checked disabled/);
+  assert.throws(()=>readDirectShareForm(form({client:key,scope:'tasks'}),{projectId:'project',projectName:'Site',tasks:[],clients}).bodies(),/at least one task/);
+});
+
 test('the access list shows active grants for this project, with whole-project grants on every task',()=>{
   const access={clients,grants:[
     {grantId:'g-project',viewerProjectId:'project',scopeType:'project',taskId:null,clientDisplayName:'Acme',expiresAt:null,revokedAt:null},
