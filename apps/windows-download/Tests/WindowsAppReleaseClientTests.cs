@@ -11,6 +11,7 @@ internal static class WindowsAppReleaseClientTests
     private static string Sha => Convert.ToHexStringLower(SHA256.HashData(Bytes));
     internal static IEnumerable<(string Name, Func<Task> Run)> Groups => [
         ("Windows release fixed source configuration refuses before cached auth", Configuration),
+        ("Windows release native metadata negotiation is explicit for each API and channel without legacy fallback", NativeNegotiation),
         ("Windows release explicit no-release current and newer states never permit rollback", States),
         ("Windows release authenticated exact bytes stage in owned scope without URL or credential state", Stage),
         ("Windows release fresh authorized cache reuse hashes bytes and preserves foreign or modified files", Cache),
@@ -21,6 +22,18 @@ internal static class WindowsAppReleaseClientTests
         ("Windows release cancellation and metadata deadlines never authenticate interactively", Cancellation)
     ];
     private static void Check(bool condition) { if (!condition) throw new Exception("Windows release synthetic assertion failed."); }
+    private static string ArtifactDirectory(string kind)
+    {
+        var parent = Environment.GetEnvironmentVariable("LEDGETOP_TEST_ARTIFACT_ROOT") ?? Path.GetTempPath();
+        if (!Path.IsPathFullyQualified(parent) || parent.StartsWith(@"\\", StringComparison.Ordinal))
+            throw new InvalidOperationException("An absolute local test artifact root is required.");
+        parent = Path.GetFullPath(parent);
+        for (string? part = parent; part is not null; part = Path.GetDirectoryName(part))
+            if ((File.Exists(part) || Directory.Exists(part)) &&
+                ((File.GetAttributes(part) & FileAttributes.ReparsePoint) != 0 || File.Exists(part)))
+                throw new InvalidOperationException("Test artifact ancestors must be ordinary directories.");
+        return Path.Combine(parent, "windows-release-client", kind, Guid.NewGuid().ToString("N"));
+    }
     private static async Task Refuse<T>(Func<Task> work) where T : Exception
     { try { await work(); } catch (T) { return; } throw new Exception("Expected Windows release refusal: " + typeof(T).Name); }
     private static Dictionary<string, object?> Offer(string apiBase = "/api/app", string channel = "pilot", string version = "0.6.0.0") => new() {
@@ -57,6 +70,25 @@ internal static class WindowsAppReleaseClientTests
         await Refuse<TransferException>(() => client.CheckAsync());
         await Refuse<TransferException>(() => client.StageLatestAsync(f.StageRoot));
         Check(f.FileRequests == 0 && !Directory.EnumerateFileSystemEntries(f.StageRoot).Any());
+    }
+    private static async Task NativeNegotiation()
+    {
+        foreach (var apiBase in new[] { "/api/app", "/api/client/app" })
+        foreach (var channel in new[] { "pilot", "stable" }) {
+            using var f = new Fixture(apiBase);
+            var offer = Offer(apiBase, channel); offer["downloadUrl"] += "?platform=windows&channel=" + channel;
+            f.Metadata = () => Json(offer); using var client = f.Client(channel);
+            Check((await client.StageLatestAsync(f.StageRoot)).InstallerPath is not null);
+            Check(f.LastMetadataQuery == apiBase + "/latest?platform=windows&channel=" + channel + "&schemaVersion=1" &&
+                f.LastContentQuery == apiBase + "/download/release.exe?platform=windows&channel=" + channel &&
+                f.MetadataRequests == 1 && f.FileRequests == 1 && f.Runner.Logins == 0);
+            f.Metadata = () => new HttpResponseMessage(HttpStatusCode.NotFound);
+            await Refuse<ResourceUnavailableException>(() => client.CheckAsync());
+            Check(f.MetadataRequests == 2 && f.FileRequests == 1); // Exactly one more native request; no legacy retry.
+            f.Metadata = () => Json(new { available = false });
+            await Refuse<TransferException>(() => client.CheckAsync());
+            Check(f.MetadataRequests == 3 && f.FileRequests == 1); // Legacy shape does not relax schema1.
+        }
     }
     private static async Task Stage()
     {
@@ -185,7 +217,7 @@ internal static class WindowsAppReleaseClientTests
     internal static async Task RunOfferFixtureAsync(string offerPath, string installerPath)
     {
         // Explicit offline interoperability mode: actual build bytes, fake HTTP and synthetic cached auth.
-        var directory = Path.Combine("C:/Users/fstor/.codex/artifacts/LedgeTop-Files-2026-10-25/release-client/interop", Guid.NewGuid().ToString("N"));
+        var directory = ArtifactDirectory("interop");
         Directory.CreateDirectory(directory);
         var stage = Path.Combine(directory, "Stage"); Directory.CreateDirectory(stage);
         var offerBytes = await File.ReadAllBytesAsync(offerPath);
@@ -205,7 +237,7 @@ internal static class WindowsAppReleaseClientTests
         using var client = new WindowsAppReleaseClient(session, origin, "/api/app", "pilot", "0.5.0.0",
             new Handler((request, _) => {
                 metadataRequests++; Headers(request);
-                Check(request.Method == HttpMethod.Get && request.RequestUri!.PathAndQuery == "/api/app/latest?platform=windows");
+                Check(request.Method == HttpMethod.Get && request.RequestUri!.PathAndQuery == "/api/app/latest?platform=windows&channel=pilot&schemaVersion=1");
                 return Task.FromResult(RawJson(offerBytes));
             }), new Downloader(new Handler((request, _) => {
                 contentRequests++; Headers(request);
@@ -279,12 +311,13 @@ internal static class WindowsAppReleaseClientTests
     }
     private sealed class Fixture : IDisposable
     {
-        private readonly string root = Path.Combine("C:/Users/fstor/.codex/artifacts/LedgeTop-Files-2026-10-25/release-client/fixtures", Guid.NewGuid().ToString("N"));
+        private readonly string root = ArtifactDirectory("fixtures");
         private readonly string apiBase;
         internal string StageRoot => Path.Combine(root, "Stage");
         internal Runner Runner = new();
         internal CloudflareAccessSession Session { get; }
         internal int MetadataRequests, FileRequests;
+        internal string? LastMetadataQuery, LastContentQuery;
         internal Func<HttpResponseMessage> Metadata, Content = () => Good(Bytes);
         internal Func<CancellationToken, Task<HttpResponseMessage>>? MetadataWork;
         internal Fixture(string apiBase = "/api/app")
@@ -297,10 +330,11 @@ internal static class WindowsAppReleaseClientTests
         internal WindowsAppReleaseClient Client(string channel = "pilot", TimeSpan? timeout = null, Action? boundary = null) => new(Session, Session.Origin, apiBase, channel, "0.5.0.0",
             new Handler(async (request, token) => {
                 MetadataRequests++;
-                Check(request.Method == HttpMethod.Get && request.RequestUri!.PathAndQuery == apiBase + "/latest?platform=windows");
+                LastMetadataQuery = request.RequestUri!.PathAndQuery;
+                Check(request.Method == HttpMethod.Get && LastMetadataQuery == apiBase + "/latest?platform=windows&channel=" + channel + "&schemaVersion=1");
                 Headers(request); return MetadataWork is null ? Metadata() : await MetadataWork(token);
             }), new Downloader(new Handler((request, _) => {
-                FileRequests++; Check(request.RequestUri!.AbsolutePath.StartsWith(apiBase + "/download/", StringComparison.Ordinal));
+                FileRequests++; LastContentQuery = request.RequestUri!.PathAndQuery; Check(request.RequestUri.AbsolutePath.StartsWith(apiBase + "/download/", StringComparison.Ordinal));
                 Check(request.Headers.IfMatch.Single().ToString() == "\"actual-immutable-version\""); Headers(request); return Task.FromResult(Content());
             }), [Session.Origin], 1L << 30, Session), timeout, boundary);
         private void Headers(HttpRequestMessage request)

@@ -133,7 +133,8 @@ public sealed class WindowsAppReleaseClient : IDisposable
 
     private async Task<Offer> ReadLatestAsync(CancellationToken token)
     {
-        using var request = new HttpRequestMessage(HttpMethod.Get, new Uri(origin, apiBase + "/latest?platform=windows"));
+        using var request = new HttpRequestMessage(HttpMethod.Get, new Uri(origin,
+            apiBase + "/latest?platform=windows&channel=" + channel + "&schemaVersion=1"));
         request.Headers.Accept.ParseAdd("application/json"); request.Headers.AcceptEncoding.ParseAdd("identity");
         request.Headers.Add("Cf-Access-Token", await session.GetTokenAsync(token).ConfigureAwait(false));
         using var response = await metadata.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, token).ConfigureAwait(false);
