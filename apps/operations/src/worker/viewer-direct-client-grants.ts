@@ -25,7 +25,7 @@ function db(env:Env){return env.DELIVERY_DB.withSession('first-primary');}
 /** Operations shares Client's D1 authority table but only has its own
  * APPLICATION_KEY. Default this read path to the existing private-ingress pin;
  * explicit legacy mode/HMAC configuration retains the shared helper behavior. */
-function directViewerSourceProofEnvironment(env:Env):Env{
+export function directViewerSourceProofEnvironment(env:Env):Env{
  const effective={...env};
  if(effective.PROJECT_ALPHA_PORTAL_APPLICATION_KEY===undefined)
   effective.PROJECT_ALPHA_PORTAL_APPLICATION_KEY=effective.APPLICATION_KEY;
