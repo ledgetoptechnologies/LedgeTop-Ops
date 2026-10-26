@@ -90,7 +90,15 @@ class MediaComposeTests(unittest.TestCase):
                 self.assertRegex(str(service["mem_limit"]), r"^[1-9][0-9]*(?:[bkmgBKMG])?$")
                 self.assertRegex(service["image"], r"^ghcr\.io/ledgetoptechnologies/ltds-[a-z-]+@sha256:[a-f0-9]{64}$")
                 for volume in service.get("volumes", []):
-                    self.assertFalse(volume["bind"]["create_host_path"])
+                    # Some Compose versions omit explicit false values when
+                    # serializing normalized configuration. Also inspect the
+                    # source below so omission cannot hide a removed safeguard.
+                    self.assertFalse(volume.get("bind", {}).get("create_host_path", False))
+
+        for source in (BASE, PREBUILT, ALL):
+            text = source.read_text()
+            self.assertEqual(len(re.findall(r"(?m)^\s*- type: bind\s*$", text)),
+                len(re.findall(r"(?m)^\s*create_host_path: false\s*$", text)))
 
     def test_media_and_credential_boundaries(self):
         proxy = self.full["proxy-generator"]
