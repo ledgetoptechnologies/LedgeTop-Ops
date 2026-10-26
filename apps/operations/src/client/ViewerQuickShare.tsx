@@ -22,7 +22,7 @@ export type ViewerShareTarget = { project: { viewerProjectId: string; name: stri
 const opaque = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
 const isRecord = (value: unknown): value is Record<string, unknown> => !!value && typeof value === "object" && !Array.isArray(value);
 // Cursors are opaque to the page and always sent URL-encoded.
-const cursorOf = (value: unknown) => value === null || (typeof value === "string" && value.length > 0 && value.length <= 512);
+const cursorOf = (value: unknown) => value === null || (typeof value === "string" && value.length > 0 && value.length <= 2048);
 
 export function validViewerCatalogProjects(value: unknown): value is ProjectPage {
   return isRecord(value) && Array.isArray(value.projects) && cursorOf(value.nextCursor) && value.projects.every(project =>
