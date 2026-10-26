@@ -96,7 +96,7 @@ import { readClientViewerUnits, writeClientViewerUnits } from "./viewer-units-pr
 import { ClientViewerShell, parseClientViewerShellRoute, clientViewerShellPath, nativeClientViewerShellPath, clientViewerRouteProjectId, clientViewerRouteWorkspaceId } from "./ClientViewerShell";
 import { SharedViewerWork } from "./SharedViewerWork";
 import { operationsHomeViewerWorkspaceIds } from "./shared-viewer-work";
-import { OperationsHomeApp, OperationsNativeServicePanel } from "./OperationsHomeApp";
+import { OperationsHomeApp, OperationsHomeFrame, OperationsNativeServicePanel } from "./OperationsHomeApp";
 import {
   clientPortalPath,
   clientProjectPath,
@@ -3016,7 +3016,8 @@ export function ClientPortalApp({
     );
   if (gate.status === "blocked") {
     // A task shared with an Operations home has no client account to open; the server authorizes the exact account, grant and task.
-    if (viewerRoute?.mode === "direct") return <PortalBoundary><ClientViewerShell route={viewerRoute} /></PortalBoundary>;
+    // It keeps the Operations home's own navigation, so Home returns to everything shared with this person.
+    if (viewerRoute?.mode === "direct") return <OperationsHomeFrame viewer><ClientViewerShell route={viewerRoute} /></OperationsHomeFrame>;
     if (currentOperationsHome) return <OperationsHomeApp response={currentOperationsHome}
       clientUnavailable={!gate.optionalClientWorkspaceAbsent || currentOperationsHome.homes.length === 0} onRetryClient={() => {
       setPortalWorkspaceSelection(null);
