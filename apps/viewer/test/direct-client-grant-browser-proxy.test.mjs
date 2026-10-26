@@ -17,13 +17,17 @@ const taskId = 'published-task-1';
 const idempotencyKey = 'direct-browser-transport-idempotency-0001';
 const clients = [{ sourceId, workspaceId, displayName: 'Synthetic recipient', businessName: 'Ledge Top' }];
 const tasks = [{ id: taskId, name: 'Published model' }];
+const futureLocalDateTime = (days = 14) => {
+  const instant = new Date(Date.now() + days * 24 * 60 * 60 * 1000);
+  return new Date(instant.getTime() - instant.getTimezoneOffset() * 60_000).toISOString().slice(0, 16);
+};
 
 function selectedTaskForm() {
   return {
     elements: {
       client: { value: JSON.stringify([sourceId, workspaceId]) },
       confirmedScope: { checked: true },
-      expiresAt: { value: '2027-01-15T12:00' },
+      expiresAt: { value: futureLocalDateTime() },
       measure: { checked: false }, cameras: { checked: false }, download: { checked: false },
     },
     querySelector: selector => selector === 'input[name="scope"]:checked' ? { value: 'tasks' } : null,
@@ -36,8 +40,7 @@ test('Viewer task-share form body passes the direct HTTP proxy contract without 
     projectId: viewerProjectId, projectName: 'Synthetic project', tasks, clients,
   }).bodies();
   assert.ok(body);
-  assert.ok(Number.isFinite(Date.parse(body.expiresAt)) && Date.parse(body.expiresAt) > Date.now());
-  assert.match(body.expiresAt, /^2027-01-15T/);
+  assert.ok(Number.isFinite(Date.parse(body.expiresAt)) && Date.parse(body.expiresAt) >= Date.now() + 7 * 24 * 60 * 60 * 1000);
   assert.deepEqual(body.permissions, { measure: false, cameras: false, download: false });
   assert.equal(body.scopeType, 'task');
   assert.equal(body.includeFuturePublished, false);
