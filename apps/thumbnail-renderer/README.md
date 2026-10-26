@@ -1,7 +1,7 @@
 # LTDS TrueNAS thumbnail app
 
 For one TrueNAS Custom App containing the thumbnail queue and Resolve proxy
-generation, use the [media generation stack](../media-generation/README.md).
+generation, use [LTDS Proxy Generation](../media-generation/README.md).
 Its default YAML runs those two independent services; a separate optional
 overlay adds the local decoder and broker described here.
 
@@ -49,8 +49,8 @@ SCALE version).
 
 The YAML uses three prebuilt `:latest` images. The repository's **Publish
 TrueNAS thumbnail renderer images** GitHub workflow builds the `decoder`,
-`broker`, and `queue-worker` targets for `linux/amd64` on changes to this package or an authorized
-manual dispatch from `main`. It publishes commit tags without overwriting them,
+`broker`, and `queue-worker` targets for `linux/amd64` on relevant changes pushed
+to `main`. It publishes commit tags without overwriting them,
 records digest-qualified references for traceability, and advances each
 `:latest` tag only after its required verification succeeds. The YAML sets
 `pull_policy: always`, so an app update/redeploy pulls the newest verified

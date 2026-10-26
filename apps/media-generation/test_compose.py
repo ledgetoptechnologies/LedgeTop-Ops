@@ -38,7 +38,7 @@ OPTIONAL = {
 def render(files, values, expect_success=True):
     # Do not inherit operator substitution values or .env contents.
     names = set(re.findall(r"\$\{([A-Z0-9_]+)", "".join(file.read_text() for file in (BASE, PREBUILT, ALL, THUMBNAIL, STANDALONE))))
-    env = {key: value for key, value in os.environ.items() if key not in names}
+    env = {key: value for key, value in os.environ.items() if key not in names and key != "COMPOSE_PROJECT_NAME"}
     with tempfile.TemporaryDirectory(prefix="ltds-compose-test-") as temp:
         env_file = Path(temp) / "synthetic.env"
         env_file.write_text("".join(f"{key}={value}\n" for key, value in values.items()))
@@ -175,6 +175,20 @@ class MediaComposeTests(unittest.TestCase):
             self.assertEqual(int(queue["mem_limit"]), 10 * 1024**3)
             self.assertEqual(queue["pids_limit"], 256)
             self.assertEqual(queue["logging"]["options"]["max-file"], "3")
+
+    def test_proxy_generation_name_and_image_baked_runtime(self):
+        for files, values in (([BASE], VALUES), ([ALL], VALUES | OPTIONAL)):
+            configuration = render(files, values)
+            self.assertEqual(configuration["name"], "ltds-proxy-generation")
+            proxy = configuration["services"]["proxy-generator"]
+            self.assertIsNone(proxy.get("entrypoint"))
+            self.assertIsNone(proxy.get("command"))
+            self.assertEqual({mount["target"] for mount in proxy["volumes"]}, {"/data/jobs", "/state"})
+            self.assertFalse(any("SCRIPT" in key for key in proxy["environment"]))
+            self.assertFalse(any("ffmpeg" in mount["source"].lower() or mount["source"].endswith(".sh") for mount in proxy["volumes"]))
+        dockerfile = (ROOT.parent / "proxy-generator" / "Dockerfile").read_text()
+        self.assertIn("COPY --chown=568:568 proxy_generator.py /app/proxy_generator.py", dockerfile)
+        self.assertIn('ENTRYPOINT ["/usr/bin/tini", "--", "python3", "/app/proxy_generator.py"]', dockerfile)
 
 
 if __name__ == "__main__":

@@ -1,4 +1,4 @@
-# LTDS media generation stack
+# LTDS Proxy Generation
 
 One TrueNAS SCALE Custom App can run proxy generation and Operations thumbnail
 processing as independent services. The default deployment contains two services:
@@ -7,6 +7,12 @@ processing as independent services. The default deployment contains two services
 | --- | --- | --- | --- |
 | `proxy-generator` | Resolve editing proxies from local videos | Jobs read/write; writes sibling `Proxy/` files | None |
 | `queue-renderer` | Operations image, PDF and video thumbnail jobs from R2 | None; temporary sources stay in RAM | Outbound HTTPS |
+
+Name the app **LTDS Proxy Generation** in the TrueNAS UI; the Compose project
+name is `ltds-proxy-generation`. All proxy runtime code is baked into the
+published Docker image. No host-mounted `proxy-generator.sh`, old script
+directory, or FFmpeg installation on the server is required. The only proxy
+binds are the existing Jobs dataset and its own persistent state dataset.
 
 The [single-file four-service stack](compose.truenas.all.yaml) includes proxy
 generation, the thumbnail queue, local decoder, and broker in one YAML document
@@ -34,7 +40,8 @@ alter the Jobs dataset, or stop any existing app.
    and this stack is not a live automatic updater. Configure a private registry
    credential in the Apps UI if required. Commit tags and digest receipts remain
    available for traceability; deployment requires no image substitutions.
-2. Create a private persistent proxy-state dataset and give the selected
+2. Create a private persistent proxy-state dataset under the dedicated
+   `apps/ltds-proxy-generation/` application area and give the selected
    non-root user/group ownership. The default IDs are `568:568`. Keep that
    state when upgrading or rolling back: it contains instance locking,
    per-file completion receipts, retries, and health state.

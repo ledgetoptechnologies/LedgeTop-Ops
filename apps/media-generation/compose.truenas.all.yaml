@@ -1,6 +1,6 @@
 # Single-file four-service TrueNAS Custom App. Requires all prebuilt prerequisites.
 # latest advances only after the corresponding verified main release; pull on update/redeploy.
-name: ltds-media-generation
+name: ltds-proxy-generation
 
 x-service: &service
   user: "568:568"

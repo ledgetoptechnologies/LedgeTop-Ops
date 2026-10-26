@@ -1,6 +1,6 @@
 # Default two-service TrueNAS Custom App. No decoder/broker credentials required.
 # latest advances only after the corresponding verified main release; pull on update/redeploy.
-name: ltds-media-generation
+name: ltds-proxy-generation
 
 x-service: &service
   user: "${PUID:-568}:${PGID:-568}"

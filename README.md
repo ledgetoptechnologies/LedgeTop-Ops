@@ -52,7 +52,7 @@ stay in place when switching the image name.
 
 TrueNAS proxy generation for DaVinci Resolve lives in
 [`apps/proxy-generator`](apps/proxy-generator/README.md). The
-[combined media-generation stack](apps/media-generation/README.md) runs it
+[LTDS Proxy Generation stack](apps/media-generation/README.md) runs it
 alongside the thumbnail queue worker, with an optional local thumbnail
 pre-generation overlay. The Viewer remains separately deployed.
 
@@ -64,7 +64,7 @@ apps/
   viewer/      3D Viewer browser app, Node API, worker, and Docker image
   proxy-generator/  Local Resolve ProRes Proxy generator and Docker image
   thumbnail-renderer/  Local prebuilt thumbnails and cloud-job thumbnail renderer
-  media-generation/  Combined TrueNAS proxy and thumbnail deployment
+  media-generation/  LTDS Proxy Generation: combined TrueNAS deployment
 packages/
   shared/      permission and API contracts
   ui/          LTDS branding and reusable React UI
