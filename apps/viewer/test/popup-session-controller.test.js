@@ -5,6 +5,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const test = require('node:test');
 const vm = require('node:vm');
+const { renderStaffNavigation } = require('../viewer-staff-navigation.mjs');
 
 const source = fs.readFileSync(path.join(__dirname, '..', 'main.js'), 'utf8');
 const ORIGIN = 'https://ops.example.test';
@@ -86,6 +87,7 @@ test('the first redeemed session establishes popup routing before initialization
     allowedEmbedOrigins: [ORIGIN], permissions: { view: true, measure: true }, displayUnits: 'metric',
   };
   Object.assign(f.context, {
+    renderStaffNavigation, dom: {},
     TILES_URL: null, EPT_URL: null, sessionStorageKey: null, SESSION_STORAGE_PREFIX: 'test:',
     sessionStorage: { setItem: (...args) => writes.push(args) }, SHARE_PERMISSIONS: {},
     setDisplayUnits() {}, applyProjectConfig() {},

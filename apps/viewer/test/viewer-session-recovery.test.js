@@ -5,6 +5,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 const { createMeasurementDraftRecovery } = require('../measurement-draft-recovery.mjs');
+const { renderStaffNavigation } = require('../viewer-staff-navigation.mjs');
 const source = fs.readFileSync(path.join(__dirname, '..', 'main.js'), 'utf8');
 const workspaceSource = fs.readFileSync(path.join(__dirname, '..', 'measurement-workspace.mjs'), 'utf8');
 const REQUEST = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee';
@@ -18,6 +19,7 @@ function fixture({ controller = true } = {}) {
     model: { id: 'model-one',activeVersion:{id:'version-one'} }, expiresAt: new Date(Date.now() + 60_000).toISOString() };
   const context = vm.createContext({
     createMeasurementDraftRecovery,
+    renderStaffNavigation,
     viewerSlice:{reset:()=>measurements.sliceResets++},
     window, VIEW_MODE: 'session', reviewSessionChannel: controller ? { postMessage: value => posts.push(value) } : null,
     REVIEW_CONTROLLER_ID: REQUEST,

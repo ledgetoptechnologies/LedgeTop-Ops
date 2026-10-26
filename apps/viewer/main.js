@@ -8,6 +8,7 @@ import { createMeasurementWorkspace } from './measurement-workspace.mjs';
 import { createMeasurementDraftRecovery } from './measurement-draft-recovery.mjs';
 import { captureMeasurementReportOrtho } from './measurement-report-ortho.mjs';
 import { installSidebarResize } from './viewer-sidebar-resize.mjs';
+import { renderStaffNavigation } from './viewer-staff-navigation.mjs';
 import { projectMeasurementBoundary } from './measurement-projection.mjs';
 import { createMeasurementAdminClient } from './measurement-admin-client.mjs';
 import { createMeasurementSurfaceClient, measurementAssetBearer } from './measurement-surface-client.mjs';
@@ -147,6 +148,7 @@ const dom = {};
  'error-actions','error-retry','error-lod','loading-cancel',
  'dem-settings','dem-colormap','dem-shading','dem-min','dem-max','dem-min-label','dem-max-label','dem-legend-unit',
  'brand-project','project-switcher','admin-controls','btn-share','btn-logout','btn-measure-float','lod-memory-mode',
+ 'staff-navigation','staff-dashboard','staff-models',
  'share-password-overlay','share-password-input','share-password-error','share-password-submit',
  'share-modal','share-modal-close','share-new-password','share-new-expires',
  'share-new-perm-measure','share-new-perm-cameras','share-create-btn','share-create-result',
@@ -1572,6 +1574,8 @@ function applyViewerSession(session, { initialize = false } = {}) {
   if (session.sessionId) sessionStorageKey = `${SESSION_STORAGE_PREFIX}${session.sessionId}`;
   if (session.accessToken && sessionStorageKey) sessionStorage.setItem(sessionStorageKey, session.accessToken);
   sessionAllowedOrigins = Array.isArray(session.allowedEmbedOrigins) ? session.allowedEmbedOrigins : [];
+  renderStaffNavigation({ container: dom.staffNavigation, dashboard: dom.staffDashboard, models: dom.staffModels },
+    session, { viewMode: VIEW_MODE, topLevel: window.parent === window });
   SHARE_PERMISSIONS = session.permissions || { measure: true, cameras: true };
   // Establish the redeemed session before init/ready can select its controller.
   activeViewerSession = session;
