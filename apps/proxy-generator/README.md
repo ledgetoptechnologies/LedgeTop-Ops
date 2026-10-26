@@ -5,8 +5,11 @@ replaces the loose host-mounted script with a repository-owned container image
 and a Python standard-library supervisor. It does not generate thumbnails,
 upload media, modify originals, or manage the Viewer.
 
-Use the [media generation stack](../media-generation/README.md) to run it with
+Use [LTDS Proxy Generation](../media-generation/README.md) to run it with
 the existing Operations thumbnail queue worker in one TrueNAS Custom App.
+The runtime is copied into the Docker image at build time; installation
+requires no host script bind or old proxy-script directory. Keep only the
+Jobs and private state mounts specified in the deployment YAML.
 The published package is `ghcr.io/ledgetoptechnologies/ltds-proxy-generator`.
 The **Verify and publish Resolve proxy generator** workflow tests pull
 requests, then publishes a commit tag, digest-qualified receipt and `:latest`
