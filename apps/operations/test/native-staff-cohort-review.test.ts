@@ -144,6 +144,28 @@ describe("owner current-cohort review preparation on actual Operations 0221 sche
     expect(await db.prepare("SELECT access_subject FROM staff_users WHERE id=?").bind(unboundOwner.id).first("access_subject")).toBe(unboundBefore);
   });
 
+  it("keeps exact-staff delegation targets joinable to the reviewed cohort", async () => {
+    await db.prepare(`INSERT INTO native_staff_admin_delegations
+      (id,actor_staff_id,action,effect,scope_kind,target_staff_id,granted_by)
+      VALUES('review-exact-target',?,'staff.profile.edit','allow','exact_staff',?,?)`)
+      .bind(owner.id, owner.id, owner.id).run();
+    const result = await prepareNativeStaffCohortReview(db, { staffId: owner.id });
+    expect(result.packet.tables.native_staff_admin_delegations).toContainEqual(expect.objectContaining({
+      id: "review-exact-target", target_staff_id: owner.id,
+    }));
+    expect(result.packet.cohort).toContainEqual(expect.objectContaining({ staffId: owner.id }));
+  }, 20_000);
+
+  it("fails closed when a required 0221 authority table is absent", async () => {
+    await db.prepare("ALTER TABLE native_staff_delegation_ceilings RENAME TO review_unavailable_ceilings").run();
+    try {
+      await expect(prepareNativeStaffCohortReview(db, { staffId: owner.id }))
+        .rejects.toMatchObject({ code: "review_unavailable", status: 503 });
+    } finally {
+      await db.prepare("ALTER TABLE review_unavailable_ceilings RENAME TO native_staff_delegation_ceilings").run();
+    }
+  });
+
   it("refuses a cohort that changes between the two real D1 snapshots", async () => {
     const originalBatch = db.batch.bind(db);
     let calls = 0;

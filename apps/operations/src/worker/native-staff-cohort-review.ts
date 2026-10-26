@@ -6,14 +6,13 @@ const REQUIRED_TABLES = Object.freeze([
   "native_staff_admissions", "native_staff_profiles", "native_directory_grants", "native_directory_grant_generations",
   "native_directory_grant_history", "native_project_grants", "native_project_grant_generations",
   "native_staff_management_delegations", "native_staff_bootstrap_approvals", "native_staff_bootstrap_receipts",
+  "native_directory_assignments", "native_directory_resource_scopes", "native_business_areas", "native_business_divisions",
+  "native_staff_target_memberships", "native_staff_admin_delegations", "native_staff_authority_capabilities",
+  "native_staff_delegation_ceilings", "native_staff_admin_command_fences", "native_staff_admin_commands",
 ]);
 const OPTIONAL_TABLES = Object.freeze([
   "native_staff_access_reconciliation", "native_staff_access_reconciliation_events", "native_staff_management_commands",
   "native_staff_lifecycle_fences", "native_staff_pending_onboarding",
-  // Scoped authority catalogs introduced after the oldest supported schema.
-  "native_directory_assignments", "native_directory_resource_scopes", "native_business_areas", "native_business_divisions",
-  "native_staff_target_memberships", "native_staff_admin_delegations", "native_staff_authority_capabilities",
-  "native_staff_delegation_ceilings", "native_staff_admin_command_fences",
 ]);
 const OPTIONAL_VIEWS = Object.freeze(["native_staff_control_plane_candidates", "native_staff_lifecycle_control_plane_candidates"]);
 const TABLES = Object.freeze([...REQUIRED_TABLES, ...OPTIONAL_TABLES]);
@@ -26,9 +25,9 @@ const CLIENT_REFERENCE_COLUMNS: Readonly<Record<string, Readonly<Record<string, 
   native_business_areas: Object.freeze({ id: "business_area_ref_sha256" }),
   native_business_divisions: Object.freeze({ id: "division_ref_sha256", business_area_id: "business_area_ref_sha256" }),
   native_staff_target_memberships: Object.freeze({ business_area_id: "business_area_ref_sha256", division_id: "division_ref_sha256" }),
-  native_staff_admin_delegations: Object.freeze({ business_area_id: "business_area_ref_sha256", division_id: "division_ref_sha256", target_staff_id: "target_staff_ref_sha256" }),
-  native_staff_management_delegations: Object.freeze({ business_area_id: "business_area_ref_sha256", division_id: "division_ref_sha256", target_staff_id: "target_staff_ref_sha256" }),
-  native_staff_delegation_ceilings: Object.freeze({ business_area_id: "business_area_ref_sha256", division_id: "division_ref_sha256", resource_id: "resource_ref_sha256", target_staff_id: "target_staff_ref_sha256" }),
+  native_staff_admin_delegations: Object.freeze({ business_area_id: "business_area_ref_sha256", division_id: "division_ref_sha256" }),
+  native_staff_management_delegations: Object.freeze({ business_area_id: "business_area_ref_sha256", division_id: "division_ref_sha256" }),
+  native_staff_delegation_ceilings: Object.freeze({ business_area_id: "business_area_ref_sha256", division_id: "division_ref_sha256", resource_id: "resource_ref_sha256" }),
 });
 const MAX_ROWS_PER_TABLE = 20_000;
 const MAX_PACKET_BYTES = 4 * 1024 * 1024;
