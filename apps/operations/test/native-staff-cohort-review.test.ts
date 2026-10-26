@@ -100,6 +100,10 @@ describe("owner current-cohort review preparation on actual Operations 0221 sche
     expect(result.packet.tables.native_staff_access_reconciliation).toBeNull();
     expect(result.packet.tables.native_staff_control_plane_candidates).toEqual(expect.any(Array));
     expect(result.packet.tables.native_staff_lifecycle_control_plane_candidates).toBeNull();
+    for (const table of ["native_directory_assignments", "native_directory_resource_scopes", "native_business_areas",
+      "native_business_divisions", "native_staff_target_memberships", "native_staff_admin_delegations",
+      "native_staff_authority_capabilities", "native_staff_management_delegations", "native_staff_delegation_ceilings"])
+      expect(result.packet.tables[table]).toEqual(expect.any(Array));
     expect(result.packet.tables.native_staff_admissions).toContainEqual(expect.objectContaining({ staff_id: owner.id, bound_access_subject: owner.accessSubject, active: 1 }));
     expect(result.packet.tables.native_directory_grants).toContainEqual(expect.objectContaining({ id: "review-directory-grant", staff_id: owner.id }));
     expect(result.packet.tables.native_project_grants).toContainEqual(expect.objectContaining({ id: "review-project-grant", staff_id: owner.id }));
@@ -112,7 +116,18 @@ describe("owner current-cohort review preparation on actual Operations 0221 sche
     expect(await db.prepare("SELECT email,access_subject,last_seen_at FROM staff_users WHERE id=?").bind(owner.id).first()).toEqual(ownerIdentityBefore);
     expect(result.packet.tables.native_staff_bootstrap_approvals).toHaveLength(before.native_staff_bootstrap_approvals!);
     expect(result.packet.tables.native_staff_bootstrap_receipts).toHaveLength(before.native_staff_bootstrap_receipts!);
-  });
+  }, 20_000);
+
+  it("includes scoped authority catalogs in the snapshot digest and detects their drift", async () => {
+    const before = await prepareNativeStaffCohortReview(db, { staffId: owner.id });
+    await db.prepare("INSERT INTO native_business_areas(id,name,active) VALUES('review-area','Review Area',1)").run();
+    const after = await prepareNativeStaffCohortReview(db, { staffId: owner.id });
+    expect(after.packet.snapshotSha256).not.toBe(before.packet.snapshotSha256);
+    expect(after.packet.tables.native_business_areas).toContainEqual(expect.objectContaining({
+      business_area_ref_sha256: createHash("sha256").update(JSON.stringify("review-area")).digest("hex"), active: 1,
+    }));
+    expect(after.packet.tables.native_directory_resource_scopes).toEqual(expect.any(Array));
+  }, 20_000);
 
   it("denies a non-owner, an alternate subject, and a missing CSRF proof", async () => {
     const managerAssertion = await token(manager);
