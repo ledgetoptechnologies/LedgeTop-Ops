@@ -60,7 +60,11 @@ function createClientGrantProxy({ config, authorize, fetchImpl = fetch, diagnost
       envelope.listQuery = listQuery;
     }
     if (action === 'create') {
-      const grant = supplied.grant;
+      // The direct Viewer workspace endpoint has always accepted the grant
+      // fields as its request body. Keep the legacy client-grants endpoint's
+      // `{ grant }` envelope, but validate the direct body's exact scope
+      // without requiring a second wrapper.
+      const grant = connection === 'direct' ? supplied : supplied.grant;
       if (!grant || typeof grant !== 'object' || Array.isArray(grant)) return invalid(res);
       if (!IDEMPOTENCY_KEY.test(String(req.get('Idempotency-Key') || ''))) return invalid(res, 'valid Idempotency-Key is required');
       envelope.idempotencyKey = req.get('Idempotency-Key');
