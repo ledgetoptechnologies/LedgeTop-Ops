@@ -3,7 +3,7 @@ import test from 'node:test';
 import fs from 'node:fs';
 import { PROFILE, canonical, hash, validateInstallation, varsOf, parseDeploymentArguments } from './production-deploy.mjs';
 import { domainPhaseValues, domainRecognitionProfile, domainRecognitionDiff } from './production-domain-recognition.mjs';
-import { compileDeliveryDomainTransition, compileDeliveryPublicLinkTransition } from './production-delivery-domain-transition.mjs';
+import { compileDeliveryDomainTransition, compileDeliveryPublicLinkTransition, compileOperationsCanonicalTransition } from './production-delivery-domain-transition.mjs';
 import { NATIVE_DELIVERY_APP_DELIVERY_PRODUCTION_PROFILE, nativeDeliveryDeploymentEnabled } from '../apps/client/src/worker/operations-native-delivery-deployment.ts';
 
 const FROM='portal-entry-canonical', TO='delivery-public-canonical';
@@ -13,7 +13,9 @@ function fixture() {
   for(const [app,spec] of Object.entries(base.workers)) {
     const defaults=JSON.parse(fs.readFileSync(new URL(`../apps/${app}/wrangler.jsonc`,import.meta.url))).vars;
     const vars=Object.fromEntries(spec.plainNames.map(name=>[name,defaults[name]??'synthetic-fixture']));
-    if(app==='operations') Object.assign(vars,{DELIVERY_BASE_URL:'https://portal.ledgetopdroneservices.com',
+    if(app==='operations') Object.assign(vars,{PUBLIC_BASE_URL:'https://ops.ledgetopdroneservices.com',
+      EXPECTED_HOST:'ops.ledgetopdroneservices.com',PUBLIC_SHARE_ORIGIN:'https://portal.ledgetopdroneservices.com',
+      DELIVERY_BASE_URL:'https://portal.ledgetopdroneservices.com',
       CLIENT_ONBOARDING_ADMIN_ENABLED:'true',CLIENT_ONBOARDING_ADMIN_ORIGIN:'https://ops.ledgetopdroneservices.com',
       CLIENT_ONBOARDING_RECIPIENT_BRIDGE_ENABLED:'true',CLIENT_ONBOARDING_NOTIFICATIONS_ENABLED:'true',
       CLIENT_ONBOARDING_NOTIFICATION_STAFF_IDS:'["synthetic-owner"]',CLIENT_ONBOARDING_NOTIFICATIONS_NOT_BEFORE:'2026-10-20T00:00:00.000Z',
@@ -109,4 +111,29 @@ test('public link generation is a distinct next-step draft preserving private/in
     assert.equal(newVars[name],oldVars[name]);
   assert.deepEqual(parseDeploymentArguments(['--inspect','--domain-phase','delivery-links-canonical']),{kind:'inspect',phase:'delivery-links-canonical'});
   assert.throws(()=>compileDeliveryPublicLinkTransition(linkPlan.expected,base),/scalar configuration changed/);
+});
+
+test('final staff canonical phase keeps generated public links on delivery.app and changes only existing Ops origin scalars',()=>{
+  const {base,snapshot}=fixture();
+  const clientPlan=compileDeliveryDomainTransition(snapshot,base);
+  const linkPlan=compileDeliveryPublicLinkTransition(clientPlan.expected,base);
+  const plan=compileOperationsCanonicalTransition(linkPlan.expected,base);
+  assert.equal(plan.beforeProfile.workers.operations.plainNames.length,plan.afterProfile.workers.operations.plainNames.length);
+  assert.deepEqual(plan.changes,{PUBLIC_BASE_URL:'https://ops.ledgetop.app',EXPECTED_HOST:'ops.ledgetop.app',
+    CLIENT_ONBOARDING_ADMIN_ORIGIN:'https://ops.ledgetop.app'});
+  assert.equal(domainPhaseValues('staff-canonical').operations.PUBLIC_SHARE_ORIGIN,'https://delivery.ledgetop.app');
+  assert.equal(plan.publicShareOriginPreserved,'https://delivery.ledgetop.app');
+  assert.equal(plan.operationsCanonicalWorkerCandidateRequiredBeforeApply,true);
+  assert.equal(plan.callbackPreservationWorkerMustPrecedeScalarTransition,true);
+  assert.equal(plan.preCallbackPreservationStatesMustExpireOrSettle,true);
+  assert.equal(plan.providerMustAllowCanonicalCallbackUriBeforeTransition,true);
+  assert.equal(plan.liveAcceptanceStillRequired,true);
+  assert.deepEqual(plan.expected.client,linkPlan.expected.client);
+  assert.deepEqual(plan.expected['ops-sync'],linkPlan.expected['ops-sync']);
+  assert.deepEqual(plan.settingsDraft,plan.expected.operations.settings);
+  for(const name of ['DELIVERY_BASE_URL','OPERATIONS_ORIGINS','CLIENT_PORTAL_ORIGINS','INCOMING_BASE_URL',
+    'VIEWER_BASE_URL','VIEWER_WORKSPACE_RENEWAL_CORS_ENABLED'])
+    assert.equal(varsOf(plan.expected.operations)[name],varsOf(linkPlan.expected.operations)[name],name);
+  assert.equal(validateInstallation(plan.expected,{profile:plan.afterProfile}),plan.expected);
+  assert.throws(()=>compileOperationsCanonicalTransition(plan.expected,base),/scalar configuration changed/);
 });

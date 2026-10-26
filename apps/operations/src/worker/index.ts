@@ -510,6 +510,7 @@ async function dispatchClientOnboardingStaff(c: any) {
       csrfSecret: c.env.OPERATIONS_SESSION_SECRET,
     },
     database: c.env.OPS_DB,
+    operationsOrigins: c.env.OPERATIONS_ORIGINS,
     handoffKeyringJson: c.env.CLIENT_ONBOARDING_HANDOFF_KEYRING,
     // Onboarding opens in the client portal. Public links retain their own
     // configured origin so existing delivery URLs are not changed here.

@@ -432,7 +432,7 @@ export async function activeShareForPrefix(env:Env,prefix:string,objectKey:strin
     ORDER BY s.created_at DESC LIMIT 1`).bind(prefix).first<ActiveShareRow>();
 }
 
-function shareUrl(env:Env,publicId:string,secret:string):string{return`${publicShareOrigin(env)}/s/${publicId}#${secret}`;}
+export function shareUrl(env:Env,publicId:string,secret:string):string{return`${publicShareOrigin(env)}/s/${publicId}#${secret}`;}
 
 export function resolveShareUpdateSecurity(input:{accessCodeChanged:boolean;recipientChanged:boolean;hasRecoverableSecret:boolean;publicIdChanged:boolean}):{mustRotateCredential:boolean;versionIncrement:0|1}{
   // share_version is a credential/policy generation, not a general metadata

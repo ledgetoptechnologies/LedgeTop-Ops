@@ -1,23 +1,30 @@
-# Default-off canonical browser navigation mounts
+# Canonical browser navigation mounts
 
 Source base: `a0be8882`. This candidate mounts conservative browser navigation
 policies in the real Client and Operations request handlers. It changes no
 deployment settings, asset-routing configuration, Access application or policy,
 resource, credentials, data or frozen phase hashes. Nothing has been activated.
 
-Both handlers recognize the optional string
-`CANONICAL_BROWSER_NAVIGATION_ENABLED`. Only the exact string `true` opts in;
-absent, false or malformed values preserve the prior behavior. No Wrangler var
-or generated default is added. Existing finite production profiles deliberately
-do not admit this new scalar. A reviewed versioned settings/profile plan is
-required before activation; do not bypass those guards with arbitrary overrides.
+Client retains its optional `CANONICAL_BROWSER_NAVIGATION_ENABLED` switch.
+Operations uses its existing `PUBLIC_BASE_URL` as the rollout control: fresh
+page redirects are active only when that value is exactly
+`https://ops.ledgetop.app`, `EXPECTED_HOST` is exactly `ops.ledgetop.app`, and
+both request and target origins pass the existing `OPERATIONS_ORIGINS` host
+policy. No extra Worker scalar is needed.
+The source Operations Wrangler and staging templates route only redirectable
+staff page paths through the Worker so asset-first handling cannot bypass the
+policy. `/api/*`, `/r/*`, and static assets retain their existing routing.
 
-Fresh means GET/HEAD with document/navigation Fetch Metadata and no Cookie,
-Authorization, Origin, Range or If-Range header. Any cookie conservatively keeps
-the request on its original host, including Access, delivery and bulk-resume
-cookies. API requests, bodies, assets, media and Viewer sessions retain their
-current handlers. Missing Fetch Metadata leaves the request local. The shared
-private navigation policy also excludes capability paths and unknown query keys.
+For Client redirects, fresh means GET/HEAD with document/navigation Fetch
+Metadata and no Cookie, Authorization, Origin, Range or If-Range header. Ops
+ordinary staff pages redirect even when the old host carries an Access cookie:
+no cookie or authorization header is copied, and Access on the canonical host
+performs its normal check. This makes the old-host UI redirect automatic; staff
+may need to authenticate at the canonical host because old-host cookies are
+host-scoped and are not transferable. The original cookies are not modified.
+API requests, bodies, assets, media and Viewer sessions remain local. Missing
+Fetch Metadata leaves requests local. The shared navigation policy excludes
+capability paths and unknown query keys.
 
 ## Exact targets and existing host admission
 
@@ -54,13 +61,10 @@ old private sessions and does not create a new public namespace.
 
 ## Required deployment gates
 
-**Operations page routing remains a concrete blocker.** Its current declared
-`assets.run_worker_first` covers APIs, health, `/r/*` and selected native
-administrative pages, while ordinary staff pages are assets-first. Those pages
-can bypass this source mount. The source flag alone cannot redirect them.
-Separately review actual installed routing and narrowly route the intended
-staff page paths through the Worker while preserving assets, APIs and native
-handlers. No routing change is included in this candidate.
+**Installed Operations page routing remains a deployment gate.** Capture and
+compare installed settings before activation. Confirm the deployed Worker-first
+paths include redirectable pages while API, asset, `/r/*`, native handler, and
+callback routing remain unchanged.
 
 Client already declares Worker-first root, portal and public-share entry paths,
 but actual installed settings must still be verified. Preserve both old/public
@@ -74,13 +78,13 @@ asset-byte verification remain required for 48 hours; no pruning is scheduled.
 
 ## Local verification
 
-Real `worker.fetch` tests exercise flag-off/on behavior, mixed-host public/private
-selection, GET/HEAD, exact query strings, existing cookies, Authorization,
-Range/If-Range, API authentication/invalid-session rejection, POST exclusion,
-unknown origins, target/source configuration and forged Host/forwarding headers.
+Real `worker.fetch` tests exercise the `PUBLIC_BASE_URL` activation boundary,
+deep Operations Client Hub bookmarks, GET/HEAD, exact query strings, cookie-bearing
+staff pages, Authorization, Range/If-Range, legacy public paths and signed
+callbacks, API authentication/invalid-session rejection, POST exclusion, unknown
+origins, target/source configuration and forged Host/forwarding headers.
 Client `/s` on private portal.app remains denied. These tests run source handlers
 directly; they do not prove that assets-first edge routing invokes those handlers.
 
-Client mount/origin suites: 23 passed. Operations mount/host suites: 12 passed.
-Existing pure policy/compatibility/browser suites: 26 passed. Client and
-Operations TypeScript checks passed. No live request or setting change was made.
+No live request or setting change was made. Source-level routing declarations do
+not prove what the Worker currently serves in the active namespace.
