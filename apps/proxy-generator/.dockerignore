@@ -1,0 +1,6 @@
+*
+!proxy_generator.py
+!tests/
+!tests/**
+**/__pycache__
+**/*.pyc

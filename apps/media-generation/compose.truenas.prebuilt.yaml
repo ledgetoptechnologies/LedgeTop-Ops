@@ -1,0 +1,103 @@
+# Optional overlay. Merge with compose.truenas.yaml only after the local-prebuilt prerequisites are met.
+# Its required values are intentionally absent from the default two-service file.
+x-prebuilt-service: &prebuilt-service
+  user: "${PUID:-568}:${PGID:-568}"
+  init: true
+  restart: unless-stopped
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  pids_limit: 256
+  logging:
+    driver: json-file
+    options:
+      max-size: 10m
+      max-file: "5"
+
+services:
+  decoder:
+    <<: *prebuilt-service
+    image: ${LTDSTHUMB_DECODER_IMAGE:?Set the pinned decoder image in the TrueNAS UI}
+    network_mode: none
+    cpus: "${LTDSTHUMB_DECODER_CPU_LIMIT:-2.0}"
+    mem_limit: ${LTDSTHUMB_DECODER_MEMORY_LIMIT:-2g}
+    environment:
+      LTDSTHUMB_JOBS_ROOT: /data/jobs
+      LTDSTHUMB_R2_ROOT_PREFIX: Jobs
+      LTDSTHUMB_ARTIFACTS_DIR: /artifacts
+      LTDSTHUMB_WORK_DIR: /work/jobs
+      LTDSTHUMB_CACHE_DIR: /cache
+      LTDSTHUMB_STATE_DIR: /state/decoder
+      LTDSTHUMB_RENDERER_VERSION: ${LTDSTHUMB_RENDERER_VERSION:-truenas-0.1.0}
+      LTDSTHUMB_IMAGE_MAX_BYTES: "536870912"
+      LTDSTHUMB_PDF_MAX_BYTES: "268435456"
+      LTDSTHUMB_IMAGE_MAX_PIXELS: "512000000"
+      LTDSTHUMB_RENDER_TIMEOUT_MS: "120000"
+      LTDSTHUMB_RENDER_MAX_ATTEMPTS: "3"
+      LTDSTHUMB_RENDER_RETRY_BASE_MS: "60000"
+      LTDSTHUMB_RENDER_RETRY_MAX_MS: "3600000"
+      LTDSTHUMB_SCAN_INTERVAL_MS: "60000"
+      LTDSTHUMB_PRUNE_GRACE_MS: "86400000"
+      LTDSTHUMB_HEALTH_STALE_MS: "900000"
+      NODE_OPTIONS: --max-old-space-size=768
+    volumes:
+      - type: bind
+        source: ${MEDIA_JOBS_HOST_PATH:?Select the existing Jobs dataset}
+        bind:
+          create_host_path: false
+        target: /data/jobs
+        read_only: true
+      - type: bind
+        source: ${LTDSTHUMB_ARTIFACTS_HOST_PATH:?Select the private artifact queue dataset}
+        bind:
+          create_host_path: false
+        target: /artifacts
+      - type: bind
+        source: ${LTDSTHUMB_WORK_HOST_PATH:?Select the quota-limited scratch dataset}
+        bind:
+          create_host_path: false
+        target: /work
+      - type: bind
+        source: ${LTDSTHUMB_CACHE_HOST_PATH:?Select the cache dataset}
+        bind:
+          create_host_path: false
+        target: /cache
+      - type: bind
+        source: ${LTDSTHUMB_STATE_HOST_PATH:?Select the state dataset}
+        bind:
+          create_host_path: false
+        target: /state
+    tmpfs: [/tmp:rw,nosuid,nodev,noexec,size=64m,mode=1777]
+
+  broker:
+    <<: *prebuilt-service
+    image: ${LTDSTHUMB_BROKER_IMAGE:?Set the pinned broker image in the TrueNAS UI}
+    cpus: "${LTDSTHUMB_BROKER_CPU_LIMIT:-0.5}"
+    mem_limit: ${LTDSTHUMB_BROKER_MEMORY_LIMIT:-256m}
+    environment:
+      LTDSTHUMB_ARTIFACTS_DIR: /artifacts
+      LTDSTHUMB_STATE_DIR: /state/broker
+      LTDSTHUMB_INGEST_URL: ${LTDSTHUMB_INGEST_URL:?Set the exact Operations ingest HTTPS URL}
+      THUMBNAIL_INGEST_SECRET: ${THUMBNAIL_INGEST_SECRET:?Set the dedicated Operations ingest secret}
+      CF_ACCESS_CLIENT_ID: ${LTDSTHUMB_BROKER_ACCESS_CLIENT_ID:?Set the broker Cloudflare Access service-token client ID}
+      CF_ACCESS_CLIENT_SECRET: ${LTDSTHUMB_BROKER_ACCESS_CLIENT_SECRET:?Set the broker Cloudflare Access service-token secret}
+      LTDSTHUMB_RENDERER_VERSION: ${LTDSTHUMB_RENDERER_VERSION:-truenas-0.1.0}
+      LTDSTHUMB_R2_ACCOUNT_ID: ${LTDSTHUMB_R2_ACCOUNT_ID:?Set the Cloudflare account ID}
+      LTDSTHUMB_R2_BUCKET_NAME: ${LTDSTHUMB_R2_BUCKET_NAME:?Set the original bucket name}
+      LTDSTHUMB_R2_ACCESS_KEY_ID: ${LTDSTHUMB_R2_ACCESS_KEY_ID:?Set the broker-only R2 Object Read access key}
+      LTDSTHUMB_R2_SECRET_ACCESS_KEY: ${LTDSTHUMB_R2_SECRET_ACCESS_KEY:?Set the broker-only R2 Object Read secret}
+      LTDSTHUMB_HEALTH_STALE_MS: "900000"
+      NODE_OPTIONS: --max-old-space-size=128
+    volumes:
+      - type: bind
+        source: ${LTDSTHUMB_ARTIFACTS_HOST_PATH:?Select the private artifact queue dataset}
+        bind:
+          create_host_path: false
+        target: /artifacts
+      - type: bind
+        source: ${LTDSTHUMB_STATE_HOST_PATH:?Select the state dataset}
+        bind:
+          create_host_path: false
+        target: /state
+    tmpfs: [/tmp:rw,nosuid,nodev,noexec,size=32m,mode=1777]
+

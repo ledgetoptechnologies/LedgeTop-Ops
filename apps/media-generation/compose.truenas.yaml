@@ -1,0 +1,75 @@
+# Default two-service TrueNAS Custom App. No decoder/broker credentials required.
+# Use digest-qualified images from the corresponding GitHub release receipts.
+name: ltds-media-generation
+
+x-service: &service
+  user: "${PUID:-568}:${PGID:-568}"
+  init: true
+  restart: unless-stopped
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  pids_limit: 512
+  logging:
+    driver: json-file
+    options:
+      max-size: 10m
+      max-file: "5"
+
+services:
+  proxy-generator:
+    <<: *service
+    image: ${LTDSPROXY_IMAGE:?Set the digest-qualified proxy-generator image}
+    network_mode: none
+    cpus: "${LTDSPROXY_CPU_LIMIT:-12.0}"
+    mem_limit: ${LTDSPROXY_MEMORY_LIMIT:-12g}
+    stop_grace_period: 45s
+    environment:
+      JOBS_ROOT: /data/jobs
+      STATE_DIR: /state
+      MAX_CONCURRENT: "${LTDSPROXY_MAX_CONCURRENT:-6}"
+      FFMPEG_THREADS: "${LTDSPROXY_FFMPEG_THREADS:-2}"
+      SLEEP_SECONDS: "${LTDSPROXY_SLEEP_SECONDS:-900}"
+      SOURCE_STABLE_SECONDS: "${LTDSPROXY_SOURCE_STABLE_SECONDS:-60}"
+      PROXY_SCAN_DIRS: "${LTDSPROXY_SCAN_DIRS:-Clients Recurring Extended 2024 2025 2026}"
+      PROXY_INCLUDE_SEGMENTS: "${LTDSPROXY_INCLUDE_SEGMENTS:-Dump Unedited Raw Stabilized}"
+      FORCE_PROXY_REGENERATION_VERSION: "${LTDSPROXY_REGENERATION_VERSION:-5}"
+      PROBE_TIMEOUT_SECONDS: "${LTDSPROXY_PROBE_TIMEOUT_SECONDS:-30}"
+      ENCODE_TIMEOUT_SECONDS: "${LTDSPROXY_ENCODE_TIMEOUT_SECONDS:-7200}"
+      RETRY_BASE_SECONDS: "${LTDSPROXY_RETRY_BASE_SECONDS:-60}"
+      RETRY_MAX_SECONDS: "${LTDSPROXY_RETRY_MAX_SECONDS:-3600}"
+      MAX_ATTEMPTS: "${LTDSPROXY_MAX_ATTEMPTS:-3}"
+    volumes:
+      - type: bind
+        source: ${MEDIA_JOBS_HOST_PATH:?Select the existing Jobs dataset}
+        target: /data/jobs
+        read_only: false
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${LTDSPROXY_STATE_HOST_PATH:?Select the private persistent proxy state dataset}
+        target: /state
+        bind:
+          create_host_path: false
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,noexec,size=256m,mode=1777
+
+  queue-renderer:
+    <<: *service
+    image: ${LTDSTHUMB_QUEUE_WORKER_IMAGE:?Set the digest-qualified thumbnail queue-worker image}
+    cpus: "${LTDSTHUMB_QUEUE_WORKER_CPU_LIMIT:-4.0}"
+    mem_limit: ${LTDSTHUMB_QUEUE_WORKER_MEMORY_LIMIT:-5g}
+    stop_grace_period: 5m
+    environment:
+      LTDSTHUMB_API_BASE: ${LTDSTHUMB_API_BASE:-https://incoming.ledgetopdroneservices.com/api/internal/thumbnail-renderer/v1}
+      LTDSTHUMB_API_TOKEN: ${THUMBNAIL_INGEST_SECRET:?Set the dedicated Operations renderer token}
+      CF_ACCESS_CLIENT_ID: ${CF_ACCESS_CLIENT_ID:-}
+      CF_ACCESS_CLIENT_SECRET: ${CF_ACCESS_CLIENT_SECRET:-}
+      LTDSTHUMB_WORKER_CONCURRENCY: "${LTDSTHUMB_WORKER_CONCURRENCY:-4}"
+      LTDSTHUMB_IDLE_SECONDS: "${LTDSTHUMB_IDLE_SECONDS:-5}"
+      LTDSTHUMB_RENDER_TIMEOUT_SECONDS: "${LTDSTHUMB_RENDER_TIMEOUT_SECONDS:-600}"
+      LTDSTHUMB_RENDERER_VERSION: ${LTDSTHUMB_RENDERER_VERSION:-truenas-0.2.0}
+    tmpfs:
+      - /scratch:rw,nosuid,nodev,noexec,size=${LTDSTHUMB_QUEUE_SCRATCH_SIZE:-4g},mode=0700,uid=${PUID:-568},gid=${PGID:-568}
+      - /cache:rw,nosuid,nodev,noexec,size=256m,mode=0700,uid=${PUID:-568},gid=${PGID:-568}
+      - /tmp:rw,nosuid,nodev,noexec,size=64m,mode=1777

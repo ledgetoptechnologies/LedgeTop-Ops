@@ -1,5 +1,10 @@
 # LTDS TrueNAS thumbnail app
 
+For one TrueNAS Custom App containing the thumbnail queue and Resolve proxy
+generation, use the [media generation stack](../media-generation/README.md).
+Its default YAML runs those two independent services; a separate optional
+overlay adds the local decoder and broker described here.
+
 This package generates private LTDS thumbnails on TrueNAS. It is a
 three-container Custom App:
 
